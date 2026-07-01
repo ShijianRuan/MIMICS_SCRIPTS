@@ -1,0 +1,1787 @@
+# -*- coding: utf-8 -*-
+"""Standalone nnInteractive bridge for Mimics segmentation.
+
+This script runs in the nnInteractive virtual environment (Python 3.10+ with
+PyTorch). It receives interaction data via JSON stdin, communicates with the
+nnInteractive server (auto-launched if needed), and writes the refined mask
+as a .u8 buffer.
+
+The bridge auto-manages the nnInteractive server lifecycle:
+  - On first call: starts the server as a background subprocess.
+  - Subsequent calls: reuse the running server.
+  - An owned watchdog stops the service after a configurable idle timeout.
+  - No manual server management needed by the annotator.
+
+Protocol (JSON stdin -> JSON stdout):
+    Input keys:
+        image_path          : str   — Optional NIfTI image in platform coordinates
+        image_buffer_path   : str   — Optional raw image buffer exported from MIMICS
+        image_buffer_shape  : [int, int, int] — Required with image_buffer_path
+        image_buffer_dtype  : str   — Optional NumPy dtype, default int16
+        interactions        : list  — Ordered point/scribble/box/lasso prompts
+        [initial_seg_path]  : str   — Optional starting Mask in MIMICS coordinates
+        [initial_seg_shape] : [int, int, int]
+        buffer_mapping      : dict  — { platform_to_mimics_axes, platform_to_mimics_flips }
+        output_path         : str   — Where to write the refined .u8 buffer
+        model_dir           : str   — Path to nnInteractive checkpoint folder
+        [bg_interaction_path] : str — Optional background scribble .u8 buffer
+        [server_url]        : str   — Optional existing nnInteractive server URL
+        [device]            : str   — "auto" (default), "cuda:0", or "cpu"
+
+    Output keys:
+        status              : str   — "refined" | "skipped" | "error"
+        output_path         : str
+        elapsed_seconds     : float
+        mode                : str   — "remote" | "local"
+        first_call          : bool  — True if server was just started (model loading)
+        [error]             : str   — Present only when status == "error"
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import signal
+import socket
+import subprocess
+import sys
+import time
+import traceback
+import uuid
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
+
+import nibabel as nib
+import numpy as np
+
+
+# ---------------------------------------------------------------------------
+#  Server lifecycle management
+# ---------------------------------------------------------------------------
+
+SERVER_HOST = "127.0.0.1"
+SERVER_PORT = 1527
+SERVER_URL = f"http://{SERVER_HOST}:{SERVER_PORT}"
+SERVER_STARTUP_TIMEOUT = 600  # first CPU startup can take several minutes
+HEALTHZ_RETRY_INTERVAL = 1.0   # seconds between healthz checks
+SERVER_IDLE_TIMEOUT = 1800
+
+
+def _server_state_path(model_dir: str) -> Path:
+    """Path to the owned-server state file."""
+    return Path(model_dir).parent / ".nninteractive_server.json"
+
+
+def _server_log_path(model_dir: str) -> Path:
+    """Path to the server log file."""
+    return Path(model_dir).parent / ".nninteractive_server.log"
+
+
+def _bridge_log_path(model_dir: str, log_dir: str | None = None) -> Path:
+    root = Path(log_dir) if log_dir else Path(model_dir).parent / "logs"
+    return root / "nninteractive_bridge.jsonl"
+
+
+def _append_bridge_log(path: Path, event: str, **details: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "event": event,
+        "pid": os.getpid(),
+    }
+    payload.update(details)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+
+
+def _hidden_process_kwargs(*, detached: bool = False) -> dict[str, Any]:
+    """Create subprocess options that do not open a Windows console."""
+    if os.name != "nt":
+        return {"start_new_session": True} if detached else {}
+
+    # Use hardcoded Win32 constants for reliability across Python versions.
+    STARTF_USESHOWWINDOW = 0x00000001
+    SW_HIDE = 0
+    CREATE_NO_WINDOW = 0x08000000
+    CREATE_NEW_PROCESS_GROUP = 0x00000200
+
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = SW_HIDE
+    flags = CREATE_NO_WINDOW
+    if detached:
+        flags |= CREATE_NEW_PROCESS_GROUP
+    return {"startupinfo": startupinfo, "creationflags": flags}
+
+
+def _server_address(server_url: str) -> tuple[str, int]:
+    normalized = str(server_url or "").strip()
+    # Accept common malformed forms from config/env, e.g. "http:///127.0.0.1:1527".
+    if normalized.startswith("http:///"):
+        normalized = "http://" + normalized[len("http:///"):]
+    if normalized and "://" not in normalized:
+        normalized = "http://" + normalized
+
+    parsed = urlparse(normalized)
+    if parsed.scheme == "http" and not parsed.hostname and parsed.path:
+        # Recover URLs where host:port was parsed as path due to extra slash.
+        candidate = parsed.path.lstrip("/")
+        reparsed = urlparse("http://" + candidate)
+        if reparsed.hostname:
+            parsed = reparsed
+
+    if parsed.scheme != "http" or not parsed.hostname:
+        raise RuntimeError(f"Unsupported nnInteractive server URL: {server_url}")
+    return parsed.hostname, int(parsed.port or 80)
+
+
+def _port_open(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+def _available_server_url(preferred_url: str) -> str:
+    """Return a server URL whose port is free.
+
+    If the preferred port is already in use, bind an ephemeral socket to find
+    a free local port.  This prevents port conflicts from blocking the user
+    while still avoiding the memory-exhaustion risk of launching multiple
+    model servers (the caller ensures only one owned server exists at a time
+    via ``_ensure_server``).
+    """
+    normalized = str(preferred_url or "").strip()
+    if normalized.startswith("http:///"):
+        normalized = "http://" + normalized[len("http:///"):]
+    if normalized and "://" not in normalized:
+        normalized = "http://" + normalized
+    host, port = _server_address(normalized)
+    if not _port_open(host, port):
+        return normalized
+    # Preferred port is occupied — find a free one via ephemeral socket.
+    free_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        free_sock.bind((host, 0))
+        free_port = free_sock.getsockname()[1]
+    finally:
+        free_sock.close()
+    fallback = f"http://{host}:{free_port}"
+    try:
+        _append_bridge_log(
+            _bridge_log_path("."),  # best-effort log; path may not be set yet
+            "port_conflict_fallback",
+            preferred_url=normalized,
+            fallback_url=fallback,
+        )
+    except Exception:
+        pass
+    return fallback
+
+
+def _resolve_device(requested: str, allow_cpu_fallback: bool = True) -> tuple[str, str | None]:
+    normalized = str(requested or "auto").strip().lower()
+    if normalized == "cpu":
+        return "cpu", None
+    import torch
+
+    if normalized in ("", "auto"):
+        return ("cuda:0", None) if torch.cuda.is_available() else (
+            "cpu",
+            "CUDA is unavailable; nnInteractive will run on CPU.",
+        )
+    if normalized.startswith("cuda") and not torch.cuda.is_available():
+        if not allow_cpu_fallback:
+            raise RuntimeError(
+                f"nnInteractive requested device {requested!r}, but torch.cuda.is_available() is false."
+            )
+        return (
+            "cpu",
+            f"Requested device {requested!r} is unavailable; falling back to CPU.",
+        )
+    return requested, None
+
+
+def _resolve_fold(model_dir: str, requested: Any) -> str | None:
+    folds = sorted(
+        path.name.split("_", 1)[1]
+        for path in Path(model_dir).glob("fold_*")
+        if path.is_dir() and (path / "checkpoint_final.pth").is_file()
+    )
+    if not folds:
+        raise RuntimeError(
+            f"No fold_*/checkpoint_final.pth was found under model directory: {model_dir}"
+        )
+    if requested in (None, "", "auto"):
+        return None
+    value = str(requested)
+    if value == "all":
+        if len(folds) == 1:
+            return folds[0]
+        return "all"
+    if value not in folds:
+        raise RuntimeError(
+            f"Requested fold {value!r} is unavailable. Available folds: {', '.join(folds)}"
+        )
+    return value
+
+
+def _write_server_state(path: Path, state: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+    temporary.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _write_json_atomic(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+    temporary.write_text(
+        json.dumps(value, indent=2, ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
+
+
+def _load_server_state(path: Path) -> dict[str, Any] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _process_exists(pid: int) -> bool:
+    """Check whether *pid* is still running.
+
+    On Windows, ``os.kill(pid, 0)`` can raise a cryptic SystemError inside
+    CPython instead of the expected OSError.  Use the WinAPI directly, mirroring
+    the workaround already used in ``nninteractive_mimics.py``.
+    """
+    if pid <= 0:
+        return False
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+    try:
+        import ctypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid)
+        if not handle:
+            return False
+        try:
+            exit_code = ctypes.c_ulong(0)
+            if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)) == 0:
+                return False
+            return int(exit_code.value) == STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return False
+
+
+def _process_command_line(pid: int) -> str | None:
+    try:
+        if os.name == "nt":
+            command = [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                (
+                    "(Get-CimInstance Win32_Process -Filter "
+                    "\"ProcessId = {0}\").CommandLine"
+                ).format(pid),
+            ]
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+                check=False,
+                **_hidden_process_kwargs(),
+            )
+            return result.stdout.strip() or None
+        proc_cmdline = Path(f"/proc/{pid}/cmdline")
+        if proc_cmdline.is_file():
+            return proc_cmdline.read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        return result.stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _process_matches_server(state: dict[str, Any]) -> bool:
+    try:
+        pid = int(state["pid"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if not _process_exists(pid):
+        return False
+    command_line = _process_command_line(pid)
+    if not command_line:
+        # The process exists (confirmed by _process_exists) but we could not
+        # read its command line — this can happen due to transient permission
+        # issues or PowerShell/CIM slowness.  Returning False here would cause
+        # the watchdog to abandon a still-running server, leaking GPU memory.
+        # Fall back to trusting the PID: the state file was written by us and
+        # contains a token that is extremely unlikely to collide with a
+        # recycled PID.
+        return True
+    normalized = command_line.lower() if os.name == "nt" else command_line
+    required = [
+        "nnInteractive.inference.server.main",
+        str(Path(str(state.get("model_dir", ""))).resolve()),
+        str(state.get("ownership_token", "")),
+    ]
+    if os.name == "nt":
+        required = [value.lower() for value in required]
+    return all(value and value in normalized for value in required)
+
+
+def _server_running(server_url: str, api_key: str | None = None) -> bool:
+    """Check whether the expected server answers its health endpoint."""
+    import urllib.request
+
+    try:
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        req = urllib.request.Request(f"{server_url}/healthz", headers=headers)
+        resp = urllib.request.urlopen(req, timeout=3)
+        return resp.status == 200
+    except Exception:
+        return False
+
+
+def _remove_server_state(path: Path, ownership_token: str | None = None) -> None:
+    state = _load_server_state(path)
+    if ownership_token and state and state.get("ownership_token") != ownership_token:
+        return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _terminate_owned_server(state: dict[str, Any]) -> bool:
+    """Terminate only a process whose command line matches our ownership record."""
+    if not _process_matches_server(state):
+        return False
+    pid = int(state["pid"])
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return True
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        if not _process_exists(pid):
+            return True
+        time.sleep(0.25)
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            **_hidden_process_kwargs(),
+        )
+    else:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    return True
+
+
+def _terminate_model_servers(model_dir: str) -> int:
+    """Best-effort cleanup of old nnInteractive servers for this model.
+
+    Loading several CPU model servers at once can exhaust RAM and make Mimics,
+    VS Code, and the server all fail in unrelated-looking ways. Only processes
+    whose command line explicitly names nnInteractive.inference.server.main and
+    this model directory are terminated.
+    """
+    if os.name != "nt":
+        return 0
+    model_path = str(Path(model_dir).resolve()).lower()
+    try:
+        command = [
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            (
+                "Get-CimInstance Win32_Process | "
+                "Where-Object { $_.CommandLine -like '*nnInteractive.inference.server.main*' } | "
+                "Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"
+            ),
+        ]
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=15,
+            check=False,
+            **_hidden_process_kwargs(),
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return 0
+        records = json.loads(result.stdout)
+        if isinstance(records, dict):
+            records = [records]
+        stopped = 0
+        for record in records or []:
+            try:
+                pid = int(record.get("ProcessId"))
+            except (TypeError, ValueError):
+                continue
+            command_line = str(record.get("CommandLine") or "")
+            if pid == os.getpid() or model_path not in command_line.lower():
+                continue
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=15,
+                check=False,
+                **_hidden_process_kwargs(),
+            )
+            stopped += 1
+        return stopped
+    except Exception:
+        return 0
+
+
+def _touch_server_activity(state_path: Path, ownership_token: str) -> None:
+    state = _load_server_state(state_path)
+    if not state or state.get("ownership_token") != ownership_token:
+        return
+    state["last_activity_epoch"] = time.time()
+    _write_server_state(state_path, state)
+
+
+def _expire_server_activity(state_path: Path, ownership_token: str) -> None:
+    """Set last_activity_epoch far in the past so the watchdog shuts down the server on its next check."""
+    state = _load_server_state(state_path)
+    if not state or state.get("ownership_token") != ownership_token:
+        return
+    state["last_activity_epoch"] = 0.0
+    _write_server_state(state_path, state)
+
+
+def _watchdog_main(state_path_value: str, ownership_token: str) -> int:
+    state_path = Path(state_path_value)
+    while True:
+        state = _load_server_state(state_path)
+        if not state or state.get("ownership_token") != ownership_token:
+            return 0
+        if not _process_matches_server(state):
+            _remove_server_state(state_path, ownership_token)
+            return 0
+        idle_timeout = float(state.get("service_idle_timeout_seconds", SERVER_IDLE_TIMEOUT))
+        last_activity = float(state.get("last_activity_epoch", time.time()))
+        remaining = idle_timeout - (time.time() - last_activity)
+        if remaining <= 0:
+            _terminate_owned_server(state)
+            _remove_server_state(state_path, ownership_token)
+            return 0
+        time.sleep(max(1.0, min(30.0, remaining)))
+
+
+def _start_watchdog(state_path: Path, ownership_token: str) -> None:
+    subprocess.Popen(
+        [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--watchdog",
+            str(state_path),
+            ownership_token,
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+        **_hidden_process_kwargs(detached=True),
+    )
+
+
+def _start_server(
+    model_dir: str,
+    device: str,
+    service_idle_timeout_seconds: float,
+    server_url: str,
+    fold: str | None,
+) -> tuple[subprocess.Popen, dict[str, Any]]:
+    """Start the nnInteractive server as a background subprocess.
+
+    Returns the Popen object. The server processes requests after the model
+    is loaded (~10-30 seconds on first start).
+    """
+    # Use the same Python that's running this bridge (guaranteed to have the
+    # nnInteractive package available, whether from venv or portable bundle).
+    python_exe = sys.executable
+    log_path = _server_log_path(model_dir)
+    state_path = _server_state_path(model_dir)
+    ownership_token = uuid.uuid4().hex
+    host, port = _server_address(server_url)
+
+    # Build env: ensure site-packages from the portable bundle are on PYTHONPATH.
+    env = os.environ.copy()
+    bundle_site = os.path.join(os.path.dirname(python_exe), "..", "Lib", "site-packages")
+    bundle_site = os.path.normpath(bundle_site)
+    if os.path.isdir(bundle_site):
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = bundle_site + (";" + existing if existing else "")
+
+    cmd = [
+        python_exe,
+        "-m", "nnInteractive.inference.server.main",
+        "--model-dir", str(model_dir),
+        "--host", host,
+        "--port", str(port),
+        "--device", device,
+        "--idle-timeout-seconds", str(int(service_idle_timeout_seconds)),
+        "--liveness-timeout-seconds", "120",
+        "--max-sessions", "1",
+        "--api-key", ownership_token,
+        "--no-torch-compile",
+    ]
+    if fold is not None:
+        cmd.extend(["--fold", fold])
+
+    with open(log_path, "a") as log_fh:
+        log_fh.write(f"\n{'='*60}\n")
+        log_fh.write(f"Starting nnInteractive server at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        logged_cmd = ["<redacted>" if value == ownership_token else value for value in cmd]
+        log_fh.write(f"Command: {' '.join(logged_cmd)}\n")
+        log_fh.flush()
+
+        proc = subprocess.Popen(
+            cmd,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            env=env,
+            **_hidden_process_kwargs(detached=True),
+        )
+
+    state = {
+        "schema_version": "nninteractive_owned_server.v2",
+        "pid": proc.pid,
+        "server_url": server_url,
+        "model_dir": str(Path(model_dir).resolve()),
+        "device": device,
+        "fold": fold or "auto",
+        "ownership_token": ownership_token,
+        "started_at_epoch": time.time(),
+        "last_activity_epoch": time.time(),
+        "service_idle_timeout_seconds": float(service_idle_timeout_seconds),
+    }
+    _write_server_state(state_path, state)
+    _start_watchdog(state_path, ownership_token)
+    return proc, state
+
+
+def _wait_for_server(
+    server_url: str,
+    api_key: str,
+    timeout: float = SERVER_STARTUP_TIMEOUT,
+    process: subprocess.Popen | None = None,
+) -> bool:
+    """Block until the server responds to healthz or timeout.
+
+    Returns True if the server is ready.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _server_running(server_url, api_key):
+            return True
+        if process is not None and process.poll() is not None:
+            return False
+        time.sleep(HEALTHZ_RETRY_INTERVAL)
+    return False
+
+
+def _ensure_server(
+    model_dir: str,
+    device: str,
+    service_idle_timeout_seconds: float = SERVER_IDLE_TIMEOUT,
+    startup_timeout_seconds: float = SERVER_STARTUP_TIMEOUT,
+    preferred_server_url: str = SERVER_URL,
+    fold: str | None = None,
+) -> tuple[bool, str, str]:
+    """Ensure the nnInteractive server is running; start it if needed.
+
+    Returns (first_call, server_url, api_key).
+      - first_call=True means the server was just started (model loading).
+    """
+    state_path = _server_state_path(model_dir)
+    state = _load_server_state(state_path)
+    expected_model = str(Path(model_dir).resolve())
+    fold = _resolve_fold(model_dir, fold)
+    if state and _process_matches_server(state):
+        state_url = str(state.get("server_url") or preferred_server_url)
+        matches_request = (
+            str(state.get("model_dir")) == expected_model
+            and str(state.get("device")) == str(device)
+            and str(state.get("fold") or "auto") == str(fold or "auto")
+        )
+        api_key = str(state.get("ownership_token") or "")
+        if matches_request and _server_running(state_url, api_key):
+            _touch_server_activity(state_path, api_key)
+            return False, state_url, api_key
+        _terminate_owned_server(state)
+    if state:
+        _remove_server_state(state_path, str(state.get("ownership_token") or ""))
+
+    legacy_pid = Path(model_dir).parent / ".nninteractive_server.pid"
+    try:
+        legacy_pid.unlink()
+    except FileNotFoundError:
+        pass
+
+    _terminate_model_servers(model_dir)
+    server_url = _available_server_url(preferred_server_url)
+    proc, state = _start_server(
+        model_dir,
+        device,
+        service_idle_timeout_seconds,
+        server_url,
+        fold,
+    )
+    api_key = str(state["ownership_token"])
+
+    # Wait for the server to be ready.
+    ready = _wait_for_server(
+        server_url,
+        api_key,
+        startup_timeout_seconds,
+        process=proc,
+    )
+    if not ready:
+        # Server failed to start. Clean up.
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except Exception:
+            proc.kill()
+        _remove_server_state(state_path, api_key)
+        exit_detail = (
+            f" The server process exited with code {proc.returncode}."
+            if proc.returncode is not None
+            else ""
+        )
+        raise RuntimeError(
+            "nnInteractive server did not become ready within {0}s.{1} "
+            "Check log: {2}".format(
+                startup_timeout_seconds,
+                exit_detail,
+                _server_log_path(model_dir),
+            )
+        )
+
+    return True, server_url, api_key
+
+
+# ---------------------------------------------------------------------------
+#  Buffer mapping (platform <-> MIMICS)
+# ---------------------------------------------------------------------------
+
+def _apply_mapping(array: np.ndarray, axes: list[int], flips: list[bool]) -> np.ndarray:
+    """Transpose + flip a numpy array according to the buffer mapping."""
+    result = np.transpose(array, axes)
+    for axis, flip in enumerate(flips):
+        if flip:
+            result = np.flip(result, axis=axis)
+    return result.copy()
+
+
+def _invert_mapping(mapping: dict[str, Any]) -> dict[str, Any]:
+    """Compute the inverse of a buffer mapping."""
+    axes: list[int] = list(mapping["platform_to_mimics_axes"])
+    flips: list[bool] = list(mapping["platform_to_mimics_flips"])
+    inv_axes = [0] * len(axes)
+    for i, a in enumerate(axes):
+        inv_axes[a] = i
+    inv_flips = [flips[inv_axes[i]] for i in range(len(flips))]
+    return {"platform_to_mimics_axes": inv_axes, "platform_to_mimics_flips": inv_flips}
+
+
+def mimics_to_platform(array: np.ndarray, mapping: dict[str, Any]) -> np.ndarray:
+    """Transform a MIMICS-coordinate array into platform coordinates."""
+    inv = _invert_mapping(mapping)
+    return _apply_mapping(array, inv["platform_to_mimics_axes"], inv["platform_to_mimics_flips"])
+
+
+def platform_to_mimics(array: np.ndarray, mapping: dict[str, Any]) -> np.ndarray:
+    """Transform a platform-coordinate array into MIMICS coordinates."""
+    return _apply_mapping(
+        array,
+        list(mapping["platform_to_mimics_axes"]),
+        list(mapping["platform_to_mimics_flips"]),
+    )
+
+
+# ---------------------------------------------------------------------------
+#  nnInteractive session
+# ---------------------------------------------------------------------------
+
+def _connect_remote(
+    server_url: str,
+    api_key: str | None = None,
+    *,
+    prediction_timeout_seconds: float = 1800,
+    set_image_timeout_seconds: float = 1800,
+) -> Any:
+    """Connect to a running nnInteractive server."""
+    from nnInteractive.inference.remote import nnInteractiveRemoteInferenceSession
+
+    if api_key is None:
+        api_key = os.environ.get("NN_INTERACTIVE_API_KEY")
+    return nnInteractiveRemoteInferenceSession(
+        server_url=server_url,
+        api_key=api_key,
+        read_timeout=prediction_timeout_seconds,
+        set_image_read_timeout=set_image_timeout_seconds,
+        write_timeout=max(120.0, min(set_image_timeout_seconds, 600.0)),
+    )
+
+
+def _connect_local(model_dir: str, device: str) -> Any:
+    """Load the nnInteractive model locally (in-process)."""
+    import torch
+    from nnInteractive.inference.inference_session import nnInteractiveInferenceSession
+
+    session = nnInteractiveInferenceSession(
+        device=torch.device(device),
+        use_torch_compile=False,
+        verbose=False,
+        torch_n_threads=os.cpu_count() or 4,
+        do_autozoom=True,
+    )
+    session.initialize_from_trained_model_folder(str(model_dir))
+    return session
+
+
+# ---------------------------------------------------------------------------
+#  Image loading
+# ---------------------------------------------------------------------------
+
+def load_image_nifti(path: str) -> np.ndarray:
+    """Load a NIfTI image as a float32 4D array with shape (1, X, Y, Z)."""
+    nii = nib.load(path)
+    data = np.asarray(nii.dataobj, dtype=np.float32)
+    if data.ndim == 3:
+        data = data[None]
+    elif data.ndim == 4:
+        data = data[0:1]
+    else:
+        raise RuntimeError(f"Unexpected image dimensions: {data.ndim}")
+    return data
+
+
+def load_image_raw(
+    path: str,
+    shape: list[int],
+    dtype: str,
+    *,
+    buffer_mapping: dict[str, Any],
+    coordinates: str = "mimics",
+) -> np.ndarray:
+    """Load a raw image buffer as a float32 4D platform-coordinate array."""
+    raw_dtype = np.dtype(dtype)
+    raw = Path(path).read_bytes()
+    expected = int(np.prod(shape)) * raw_dtype.itemsize
+    if len(raw) != expected:
+        raise RuntimeError(
+            f"Image buffer byte count mismatch: {len(raw)} != {expected}"
+        )
+    data = np.frombuffer(raw, dtype=raw_dtype).reshape(tuple(shape))
+    if coordinates == "mimics":
+        data = mimics_to_platform(data, buffer_mapping)
+    elif coordinates != "platform":
+        raise RuntimeError(f"Unsupported image buffer coordinates: {coordinates}")
+    return data.astype(np.float32, copy=False)[None]
+
+
+def load_interaction_u8(path: str, shape: list[int]) -> np.ndarray:
+    """Load a .u8 buffer as a bool 3D array with the given MIMICS shape."""
+    raw = Path(path).read_bytes()
+    expected = int(shape[0]) * int(shape[1]) * int(shape[2])
+    if len(raw) != expected:
+        raise RuntimeError(
+            f"Interaction buffer byte count mismatch: {len(raw)} != {expected}"
+        )
+    return np.frombuffer(raw, dtype=np.uint8).reshape(tuple(shape)).astype(bool)
+
+
+def _nonzero_bbox(mask: np.ndarray) -> list[list[int]] | None:
+    nonzero = np.argwhere(mask)
+    if len(nonzero) == 0:
+        return None
+    mins = nonzero.min(axis=0)
+    maxs = nonzero.max(axis=0) + 1
+    return [[int(mins[d]), int(maxs[d])] for d in range(3)]
+
+
+def _iter_2d_interaction_crops(mask: np.ndarray) -> list[tuple[np.ndarray, list[list[int]]]]:
+    """Split a sparse 3D edit mask into nnInteractive-compatible 2D crops."""
+    if not np.any(mask):
+        return []
+    candidates: list[tuple[int, np.ndarray]] = []
+    for axis in range(3):
+        reduce_axes = tuple(i for i in range(3) if i != axis)
+        indices = np.where(mask.any(axis=reduce_axes))[0]
+        if len(indices):
+            candidates.append((axis, indices))
+    if not candidates:
+        return []
+
+    axis, indices = min(candidates, key=lambda item: len(item[1]))
+    result: list[tuple[np.ndarray, list[list[int]]]] = []
+    for index in indices:
+        selector = [slice(None), slice(None), slice(None)]
+        selector[axis] = slice(int(index), int(index) + 1)
+        slice_mask = mask[tuple(selector)]
+        local_bbox = _nonzero_bbox(slice_mask)
+        if local_bbox is None:
+            continue
+
+        bbox = [list(item) for item in local_bbox]
+        bbox[axis] = [int(index), int(index) + 1]
+        crop = mask[
+            bbox[0][0]:bbox[0][1],
+            bbox[1][0]:bbox[1][1],
+            bbox[2][0]:bbox[2][1],
+        ].astype(np.uint8)
+        result.append((crop, bbox))
+    return result
+
+
+def _polyline_to_mask(
+    shape: list[int],
+    points: list[list[int]],
+    *,
+    closed: bool = False,
+) -> np.ndarray:
+    """Rasterize voxel-index polyline points into a sparse 3D prompt mask."""
+    result = np.zeros(tuple(shape), dtype=bool)
+    if not points:
+        return result
+    if len(points) == 1:
+        return _point_mask(shape, points[0])
+    path_points = list(points)
+    if closed and path_points[-1] != path_points[0]:
+        path_points.append(path_points[0])
+    previous = np.asarray(path_points[0], dtype=float)
+    for current_value in path_points[1:]:
+        current = np.asarray(current_value, dtype=float)
+        steps = max(int(np.max(np.abs(current - previous))), 1) + 1
+        samples = np.rint(
+            np.linspace(previous, current, num=steps, endpoint=True)
+        ).astype(int)
+        for sample in samples:
+            if all(0 <= int(sample[axis]) < int(shape[axis]) for axis in range(3)):
+                result[tuple(int(value) for value in sample)] = True
+        previous = current
+    return result
+
+
+def _filled_region_boundary(mask: np.ndarray) -> np.ndarray:
+    """Convert a filled Mimics Lasso region into per-slice closed contours."""
+    if not np.any(mask):
+        return mask.astype(bool)
+    candidates: list[tuple[int, np.ndarray]] = []
+    for axis in range(3):
+        reduce_axes = tuple(index for index in range(3) if index != axis)
+        slices = np.where(mask.any(axis=reduce_axes))[0]
+        if len(slices):
+            candidates.append((axis, slices))
+    axis, _ = min(candidates, key=lambda item: len(item[1]))
+    moved = np.moveaxis(mask.astype(bool), axis, 0)
+    boundary = np.zeros_like(moved, dtype=bool)
+    for index, plane in enumerate(moved):
+        if not np.any(plane):
+            continue
+        interior = plane.copy()
+        interior[0, :] = False
+        interior[-1, :] = False
+        interior[:, 0] = False
+        interior[:, -1] = False
+        interior[1:-1, 1:-1] &= (
+            plane[:-2, 1:-1]
+            & plane[2:, 1:-1]
+            & plane[1:-1, :-2]
+            & plane[1:-1, 2:]
+        )
+        boundary[index] = plane & ~interior
+    return np.moveaxis(boundary, 0, axis)
+
+
+def _point_mask(shape: list[int], point: list[int]) -> np.ndarray:
+    result = np.zeros(tuple(shape), dtype=bool)
+    if len(point) != 3:
+        raise RuntimeError(f"Point must have three indexes: {point}")
+    indexes = tuple(int(value) for value in point)
+    if not all(0 <= indexes[axis] < int(shape[axis]) for axis in range(3)):
+        raise RuntimeError(f"Point is outside image bounds: {point} vs {shape}")
+    result[indexes] = True
+    return result
+
+
+def _legacy_interactions(input_data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Convert the first prototype protocol to the ordered interaction form."""
+    interaction_path = input_data.get("interaction_path")
+    if not interaction_path:
+        return []
+    result = [
+        {
+            "interaction_type": input_data.get("interaction_type", "scribble"),
+            "include_interaction": input_data.get("include_interaction", True),
+            "mask_path": interaction_path,
+            "mask_shape": input_data.get("interaction_shape"),
+            "coordinates": "mimics",
+        }
+    ]
+    if input_data.get("bg_interaction_path"):
+        result.append(
+            {
+                "interaction_type": input_data.get("interaction_type", "scribble"),
+                "include_interaction": False,
+                "mask_path": input_data["bg_interaction_path"],
+                "mask_shape": input_data.get("interaction_shape"),
+                "coordinates": "mimics",
+            }
+        )
+    return result
+
+
+def _interaction_mask(
+    interaction: dict[str, Any],
+    *,
+    mimics_shape: list[int],
+    platform_shape: list[int],
+    buffer_mapping: dict[str, Any],
+) -> np.ndarray:
+    coordinates = interaction.get("coordinates", "mimics")
+    shape = mimics_shape if coordinates == "mimics" else platform_shape
+    if interaction.get("point") is not None:
+        mask = _point_mask(shape, interaction["point"])
+    elif interaction.get("polyline_points") is not None:
+        mask = _polyline_to_mask(
+            shape,
+            interaction["polyline_points"],
+            closed=bool(interaction.get("polyline_closed", False)),
+        )
+    elif interaction.get("bbox") is not None:
+        mask = np.zeros(tuple(shape), dtype=bool)
+        bbox = interaction["bbox"]
+        mask[
+            int(bbox[0][0]):int(bbox[0][1]),
+            int(bbox[1][0]):int(bbox[1][1]),
+            int(bbox[2][0]):int(bbox[2][1]),
+        ] = True
+    elif interaction.get("mask_path"):
+        mask_shape = interaction.get("mask_shape") or shape
+        loaded = load_interaction_u8(interaction["mask_path"], mask_shape)
+        bbox = interaction.get("interaction_bbox")
+        if bbox:
+            mask = np.zeros(tuple(shape), dtype=bool)
+            expected_shape = tuple(
+                int(bbox[axis][1]) - int(bbox[axis][0])
+                for axis in range(3)
+            )
+            if tuple(loaded.shape) != expected_shape:
+                raise RuntimeError(
+                    f"Interaction crop shape mismatch: {loaded.shape} != {expected_shape}"
+                )
+            mask[
+                int(bbox[0][0]):int(bbox[0][1]),
+                int(bbox[1][0]):int(bbox[1][1]),
+                int(bbox[2][0]):int(bbox[2][1]),
+            ] = loaded
+        else:
+            mask = loaded
+    else:
+        raise RuntimeError(
+            f"Interaction has no point, polyline, bbox, or mask: {interaction}"
+        )
+    if coordinates == "mimics":
+        return mimics_to_platform(mask, buffer_mapping)
+    if coordinates == "platform":
+        return mask
+    raise RuntimeError(f"Unsupported interaction coordinates: {coordinates}")
+
+
+def _apply_interaction(
+    session: Any,
+    interaction_mask: np.ndarray,
+    interaction_type: str,
+    include_interaction: bool,
+) -> bool:
+    if interaction_type == "point":
+        nonzero = np.argwhere(interaction_mask)
+        if len(nonzero):
+            session.add_point_interaction(
+                tuple(int(value) for value in nonzero[0]),
+                include_interaction=include_interaction,
+            )
+            return True
+        return False
+    if interaction_type == "box":
+        bbox = _nonzero_bbox(interaction_mask)
+        if bbox is not None:
+            session.add_bbox_interaction(bbox, include_interaction=include_interaction)
+            return True
+        return False
+    if interaction_type == "lasso":
+        interaction_mask = _filled_region_boundary(interaction_mask)
+        add_method = session.add_lasso_interaction
+    elif interaction_type == "scribble":
+        add_method = session.add_scribble_interaction
+    else:
+        raise RuntimeError(f"Unsupported interaction_type: {interaction_type}")
+    crops = _iter_2d_interaction_crops(interaction_mask)
+    for index, (crop, bbox) in enumerate(crops):
+        add_method(
+            crop,
+            include_interaction=include_interaction,
+            run_prediction=index == len(crops) - 1,
+            interaction_bbox=bbox,
+        )
+    return bool(crops)
+
+
+def _apply_point_set(
+    session: Any,
+    interaction: dict[str, Any],
+    *,
+    mimics_shape: list[int],
+    platform_shape: list[int],
+    buffer_mapping: dict[str, Any],
+) -> bool:
+    points = []
+    coordinates = interaction.get("coordinates", "mimics")
+    for item in interaction.get("points", []):
+        point_mask = _interaction_mask(
+            {
+                "point": item["point"],
+                "coordinates": item.get("coordinates", coordinates),
+            },
+            mimics_shape=mimics_shape,
+            platform_shape=platform_shape,
+            buffer_mapping=buffer_mapping,
+        )
+        nonzero = np.argwhere(point_mask)
+        if len(nonzero):
+            points.append(
+                (
+                    tuple(int(value) for value in nonzero[0]),
+                    bool(item.get("include_interaction", True)),
+                )
+            )
+
+    if not points:
+        return False
+
+    # Keep one final prediction call, but avoid using a background point as the
+    # trigger center when foreground points are available.
+    include_points = [entry for entry in points if entry[1]]
+    exclude_points = [entry for entry in points if not entry[1]]
+    submission_points = points
+    if include_points and exclude_points:
+        submission_points = exclude_points + include_points
+
+    for index, (point, include) in enumerate(submission_points):
+        session.add_point_interaction(
+            point,
+            include_interaction=include,
+            run_prediction=index == len(submission_points) - 1,
+        )
+    return bool(points)
+
+
+def _apply_scribble_set(
+    session: Any,
+    interaction: dict[str, Any],
+    *,
+    mimics_shape: list[int],
+    platform_shape: list[int],
+    buffer_mapping: dict[str, Any],
+) -> bool:
+    scribbles = interaction.get("scribbles") or []
+    accepted = 0
+    prepared: list[tuple[np.ndarray, bool]] = []
+    coordinates = interaction.get("coordinates", "mimics")
+    for item in scribbles:
+        item_value = dict(item)
+        item_value.setdefault("coordinates", item.get("coordinates", coordinates))
+        mask = _interaction_mask(
+            item_value,
+            mimics_shape=mimics_shape,
+            platform_shape=platform_shape,
+            buffer_mapping=buffer_mapping,
+        )
+        if np.any(mask):
+            prepared.append((mask, bool(item.get("include_interaction", True))))
+
+    for mask_index, (mask, include) in enumerate(prepared):
+        crops = _iter_2d_interaction_crops(mask)
+        for crop_index, (crop, bbox) in enumerate(crops):
+            is_last = mask_index == len(prepared) - 1 and crop_index == len(crops) - 1
+            session.add_scribble_interaction(
+                crop,
+                include_interaction=include,
+                run_prediction=is_last,
+                interaction_bbox=bbox,
+            )
+            accepted += 1
+    return accepted > 0
+
+
+# ---------------------------------------------------------------------------
+#  Main bridge entry point
+# ---------------------------------------------------------------------------
+
+class _BridgeSessionContext:
+    """Keep one remote session and one preprocessed image for a Mimics tool run."""
+
+    def __init__(self, input_data: dict[str, Any]):
+        self.input_data = input_data
+        self.model_dir = str(input_data["model_dir"])
+        self.requested_device = str(input_data.get("device", "auto"))
+        self.log_path = _bridge_log_path(self.model_dir, input_data.get("log_dir"))
+        self.buffer_mapping = input_data.get("buffer_mapping") or {
+            "platform_to_mimics_axes": [0, 1, 2],
+            "platform_to_mimics_flips": [False, False, False],
+        }
+        self.device, self.device_warning = _resolve_device(
+            self.requested_device,
+            bool(input_data.get("allow_cpu_fallback", True)),
+        )
+        _append_bridge_log(
+            self.log_path,
+            "session_initializing",
+            python=sys.executable,
+            requested_device=self.requested_device,
+            resolved_device=self.device,
+            device_warning=self.device_warning,
+            model_dir=self.model_dir,
+        )
+
+        if input_data.get("image_buffer_path"):
+            self.image_np = load_image_raw(
+                input_data["image_buffer_path"],
+                input_data["image_buffer_shape"],
+                input_data.get("image_buffer_dtype", "int16"),
+                buffer_mapping=self.buffer_mapping,
+                coordinates=input_data.get("image_buffer_coordinates", "mimics"),
+            )
+        elif input_data.get("image_path"):
+            self.image_np = load_image_nifti(input_data["image_path"])
+        else:
+            raise RuntimeError("Missing image_path or image_buffer_path")
+
+        self.platform_shape = [int(value) for value in self.image_np.shape[1:]]
+        if input_data.get("image_buffer_shape"):
+            self.mimics_shape = [int(value) for value in input_data["image_buffer_shape"]]
+        elif input_data.get("interaction_shape"):
+            self.mimics_shape = [int(value) for value in input_data["interaction_shape"]]
+        else:
+            self.mimics_shape = list(self.platform_shape)
+
+        self.server_url = str(input_data.get("server_url") or SERVER_URL)
+        auto_start = bool(input_data.get("auto_start_server", True))
+        server_api_key = os.environ.get("NN_INTERACTIVE_API_KEY")
+        self.owned_state_path: Path | None = None
+        self.owned_token: str | None = None
+        if auto_start and self.server_url == SERVER_URL:
+            self.first_call, self.server_url, server_api_key = _ensure_server(
+                self.model_dir,
+                self.device,
+                float(input_data.get("server_idle_timeout_seconds", SERVER_IDLE_TIMEOUT)),
+                float(
+                    input_data.get(
+                        "server_startup_timeout_seconds",
+                        SERVER_STARTUP_TIMEOUT,
+                    )
+                ),
+                self.server_url,
+                input_data.get("fold", "auto"),
+            )
+            self.owned_state_path = _server_state_path(self.model_dir)
+            self.owned_token = server_api_key
+        else:
+            self.first_call = False
+
+        if self.owned_state_path is not None and self.owned_token:
+            _touch_server_activity(self.owned_state_path, self.owned_token)
+        self.session = None
+        try:
+            self.session = _connect_remote(
+                self.server_url,
+                server_api_key,
+                prediction_timeout_seconds=float(
+                    input_data.get("prediction_timeout_seconds", 1800)
+                ),
+                set_image_timeout_seconds=float(
+                    input_data.get("set_image_timeout_seconds", 1800)
+                ),
+            )
+            self.session.set_image(self.image_np)
+            self.target = np.zeros(self.image_np.shape[1:], dtype=np.uint8)
+            self.session.set_target_buffer(self.target)
+        except Exception:
+            if self.session is not None:
+                try:
+                    self.session.close()
+                except Exception:
+                    pass
+            raise
+        self.initial_platform = self._load_initial_platform(
+            input_data.get("initial_seg_path"),
+            input_data.get("initial_seg_shape"),
+        )
+        _append_bridge_log(
+            self.log_path,
+            "session_ready",
+            device=self.device,
+            server_url=self.server_url,
+            first_call=self.first_call,
+            image_shape=self.platform_shape,
+        )
+
+    def _load_initial_platform(
+        self,
+        initial_seg_path: str | None,
+        initial_seg_shape: list[int] | None,
+    ) -> np.ndarray | None:
+        if not initial_seg_path:
+            return None
+        initial_shape = initial_seg_shape or self.mimics_shape
+        initial_mimics = load_interaction_u8(initial_seg_path, initial_shape)
+        if not np.any(initial_mimics):
+            return None
+        return mimics_to_platform(initial_mimics, self.buffer_mapping).astype(np.uint8)
+
+    def _apply_initial_segmentation(self, initial_platform: np.ndarray | None) -> None:
+        if initial_platform is None:
+            return
+        try:
+            self.session.add_initial_seg_interaction(
+                initial_platform,
+                run_prediction=False,
+            )
+        except TypeError:
+            print(
+                "nninteractive_bridge: add_initial_seg_interaction has no run_prediction "
+                "kwarg; using legacy API (may trigger an extra inference pass)",
+                file=sys.stderr,
+            )
+            self.session.add_initial_seg_interaction(self.initial_platform)
+
+    def predict(
+        self,
+        interactions: list[dict[str, Any]],
+        output_path: str,
+        *,
+        initial_seg_path: str | None = None,
+        initial_seg_shape: list[int] | None = None,
+        use_context_initial_seg: bool = True,
+    ) -> dict[str, Any]:
+        started = time.time()
+        if not interactions:
+            return {
+                "status": "skipped",
+                "output_path": output_path,
+                "elapsed_seconds": 0.0,
+                "reason": "no_interactions",
+            }
+        if initial_seg_path is not None or not use_context_initial_seg:
+            initial_platform = self._load_initial_platform(initial_seg_path, initial_seg_shape)
+        else:
+            initial_platform = self.initial_platform
+
+        def _apply_all_interactions() -> int:
+            self.session.reset_interactions()
+            self._apply_initial_segmentation(initial_platform)
+            applied_count = 0
+            for interaction in interactions:
+                interaction_type = str(interaction.get("interaction_type", "scribble"))
+                if interaction_type == "point_set":
+                    accepted = _apply_point_set(
+                        self.session,
+                        interaction,
+                        mimics_shape=self.mimics_shape,
+                        platform_shape=self.platform_shape,
+                        buffer_mapping=self.buffer_mapping,
+                    )
+                elif interaction_type == "scribble_set":
+                    accepted = _apply_scribble_set(
+                        self.session,
+                        interaction,
+                        mimics_shape=self.mimics_shape,
+                        platform_shape=self.platform_shape,
+                        buffer_mapping=self.buffer_mapping,
+                    )
+                else:
+                    interaction_platform = _interaction_mask(
+                        interaction,
+                        mimics_shape=self.mimics_shape,
+                        platform_shape=self.platform_shape,
+                        buffer_mapping=self.buffer_mapping,
+                    )
+                    if not np.any(interaction_platform):
+                        continue
+                    accepted = _apply_interaction(
+                        self.session,
+                        interaction_platform,
+                        interaction_type,
+                        bool(interaction.get("include_interaction", True)),
+                    )
+                if accepted:
+                    applied_count += 1
+            return applied_count
+
+        applied = _apply_all_interactions()
+        if applied == 0:
+            return {
+                "status": "skipped",
+                "output_path": output_path,
+                "elapsed_seconds": round(time.time() - started, 2),
+                "reason": "interactions_empty",
+            }
+
+        result_platform = np.asarray(self.target, dtype=np.uint8)
+        warmup_retry = False
+        if self.first_call and not np.any(result_platform):
+            # On a fresh server, the very first interaction can occasionally return
+            # an empty mask despite valid prompts; retry once in the same session.
+            print(
+                "nninteractive_bridge: first-call empty prediction detected; retrying once.",
+                file=sys.stderr,
+            )
+            applied = _apply_all_interactions()
+            result_platform = np.asarray(self.target, dtype=np.uint8)
+            warmup_retry = True
+
+        if not np.any(result_platform):
+            print(
+                "nninteractive_bridge: prediction output is empty (foreground_voxels=0) "
+                "after applying {0} interaction(s).".format(applied),
+                file=sys.stderr,
+            )
+        result_mimics = platform_to_mimics(result_platform, self.buffer_mapping)
+        output_dir = os.path.dirname(output_path)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+        with open(output_path, "wb") as handle:
+            handle.write(result_mimics.tobytes(order="C"))
+
+        result = {
+            "status": "refined",
+            "output_path": output_path,
+            "elapsed_seconds": round(time.time() - started, 2),
+            "mode": "remote",
+            "first_call": self.first_call,
+            "requested_device": self.requested_device,
+            "device": self.device,
+            "device_warning": self.device_warning,
+            "server_url": self.server_url,
+            "bridge_log": str(self.log_path),
+            "server_log": str(_server_log_path(self.model_dir)),
+            "interaction_count": len(interactions),
+            "model_license": getattr(self.session, "license", None),
+            "result_shape": list(result_mimics.shape),
+            "foreground_voxels": int(np.count_nonzero(result_mimics)),
+            "warmup_retry": warmup_retry,
+        }
+        _append_bridge_log(
+            self.log_path,
+            "prediction_completed",
+            elapsed_seconds=result["elapsed_seconds"],
+            interaction_count=len(interactions),
+            foreground_voxels=result["foreground_voxels"],
+            warmup_retry=warmup_retry,
+        )
+        return result
+
+    def close(self) -> None:
+        try:
+            if self.session is not None:
+                self.session.close()
+        finally:
+            if self.owned_state_path is not None and self.owned_token:
+                # Signal the watchdog to shut down the server promptly.
+                # Instead of merely touching activity (which keeps the server
+                # alive for the full idle timeout), set last_activity_epoch
+                # far enough in the past that the watchdog's idle check fires
+                # on its next iteration (≤30 s), releasing GPU memory.
+                _expire_server_activity(self.owned_state_path, self.owned_token)
+            _append_bridge_log(self.log_path, "session_closed")
+
+
+def _error_result(
+    exc: Exception,
+    *,
+    stage: str,
+    started: float,
+    model_dir: str,
+    log_path: Path,
+) -> dict[str, Any]:
+    trace = traceback.format_exc()
+    try:
+        _append_bridge_log(
+            log_path,
+            "bridge_failed",
+            stage=stage,
+            error=str(exc),
+            traceback=trace,
+            python=sys.executable,
+        )
+    except Exception:
+        pass
+    return {
+        "status": "error",
+        "error": str(exc),
+        "stage": stage,
+        "traceback": trace,
+        "bridge_log": str(log_path),
+        "server_log": str(_server_log_path(model_dir)),
+        "python": sys.executable,
+        "elapsed_seconds": round(time.time() - started, 2),
+    }
+
+
+def run_bridge(input_data: dict[str, Any]) -> dict[str, Any]:
+    """Execute one refinement while using the managed server lifecycle."""
+    started = time.time()
+    model_dir = str(input_data.get("model_dir") or "")
+    output_path = str(input_data.get("output_path") or "")
+    if not model_dir or not output_path:
+        return {
+            "status": "error",
+            "error": "Missing required keys: model_dir and output_path",
+        }
+    log_path = _bridge_log_path(model_dir, input_data.get("log_dir"))
+    interactions = input_data.get("interactions") or _legacy_interactions(input_data)
+    if not interactions:
+        return {
+            "status": "skipped",
+            "output_path": output_path,
+            "elapsed_seconds": 0.0,
+            "reason": "no_interactions",
+        }
+    context = None
+    try:
+        context = _BridgeSessionContext(input_data)
+        result = context.predict(interactions, output_path)
+        result["elapsed_seconds"] = round(time.time() - started, 2)
+        return result
+    except Exception as exc:
+        return _error_result(
+            exc,
+            stage="initialize_or_predict",
+            started=started,
+            model_dir=model_dir,
+            log_path=log_path,
+        )
+    finally:
+        if context is not None:
+            try:
+                context.close()
+            except Exception:
+                pass
+
+
+# Error messages whose substrings indicate a non-recoverable failure.
+_FATAL_ERROR_SUBSTRINGS = [
+    "out of memory",
+    "cuda error",
+    "cudnn error",
+    "runtimeerror: cuda",
+    "no kernel image is available",
+    "device-side assert triggered",
+    "model file not found",
+    "checkpoint",
+    "corrupt",
+    "connection refused",
+    "server is not running",
+    "server died",
+]
+
+
+def _is_recoverable_worker_error(exc: Exception) -> bool:
+    """Return True if *exc* is a transient error that might succeed on retry."""
+    message = str(exc).lower()
+    for fatal in _FATAL_ERROR_SUBSTRINGS:
+        if fatal in message:
+            return False
+    return True
+
+
+def _worker_main() -> int:
+    """JSON-lines worker that reuses one preprocessed image across prompts."""
+    context = None
+    model_dir = ""
+    log_path = Path("nninteractive_bridge.jsonl")
+    for raw in sys.stdin:
+        started = time.time()
+        request: dict[str, Any] = {}
+        try:
+            request = json.loads(raw)
+            action = request.get("action")
+            if action == "initialize":
+                if context is not None:
+                    context.close()
+                model_dir = str(request.get("model_dir") or "")
+                if not model_dir:
+                    raise RuntimeError("Worker initialize request is missing model_dir")
+                log_path = _bridge_log_path(model_dir, request.get("log_dir"))
+                context = _BridgeSessionContext(request)
+                result = {
+                    "status": "ready",
+                    "device": context.device,
+                    "device_warning": context.device_warning,
+                    "server_url": context.server_url,
+                    "first_call": context.first_call,
+                    "mode": "remote",
+                    "bridge_log": str(context.log_path),
+                    "server_log": str(_server_log_path(model_dir)),
+                }
+            elif action == "predict":
+                if context is None:
+                    raise RuntimeError("Worker has not been initialized")
+                result = context.predict(
+                    request.get("interactions") or [],
+                    str(request["output_path"]),
+                    initial_seg_path=request.get("initial_seg_path"),
+                    initial_seg_shape=request.get("initial_seg_shape"),
+                    use_context_initial_seg="initial_seg_path" not in request,
+                )
+            elif action == "close":
+                if context is not None:
+                    context.close()
+                    context = None
+                result = {"status": "closed"}
+                print(json.dumps(result, separators=(",", ":")), flush=True)
+                return 0
+            else:
+                raise RuntimeError(f"Unsupported worker action: {action!r}")
+        except Exception as exc:
+            result = _error_result(
+                exc,
+                stage=f"worker_{request.get('action', 'request')}",
+                started=started,
+                model_dir=model_dir,
+                log_path=log_path,
+            )
+            print(json.dumps(result, separators=(",", ":")), flush=True)
+            # Fatal errors (OOM, model corruption, server death) cannot be
+            # recovered by retrying on the same stdin loop.  Exit so the
+            # caller (Mimics side) can detect the dead worker and restart
+            # cleanly instead of looping on every subsequent request.
+            if context is None or not _is_recoverable_worker_error(exc):
+                if context is not None:
+                    try:
+                        context.close()
+                    except Exception:
+                        pass
+                    context = None
+                return 2
+        else:
+            print(json.dumps(result, separators=(",", ":")), flush=True)
+    if context is not None:
+        context.close()
+    return 0
+
+
+def _async_worker_status(
+    job_dir: Path,
+    status: str,
+    **details: Any,
+) -> None:
+    payload = {
+        "schema_version": "nninteractive_async_status.v1",
+        "status": status,
+        "pid": os.getpid(),
+        "updated_at_epoch": time.time(),
+    }
+    payload.update(details)
+    _write_json_atomic(job_dir / "worker_status.json", payload)
+
+
+def _async_worker_main(job_dir_value: str) -> int:
+    """Persistent file-queue worker used by the non-blocking Mimics mode."""
+    job_dir = Path(job_dir_value).resolve()
+    request_path = job_dir / "initialize.json"
+    context = None
+    last_sequence = 0
+    try:
+        request = json.loads(request_path.read_text(encoding="utf-8"))
+        idle_timeout = float(request.get("async_worker_idle_timeout_seconds", 600))
+        poll_seconds = max(0.1, float(request.get("async_poll_seconds", 0.5)))
+        _async_worker_status(job_dir, "initializing", stage="load_model_and_image")
+        context = _BridgeSessionContext(request)
+        _async_worker_status(
+            job_dir,
+            "ready",
+            stage="waiting_for_prompt",
+            device=context.device,
+            device_warning=context.device_warning,
+            server_url=context.server_url,
+            first_call=context.first_call,
+            bridge_log=str(context.log_path),
+            server_log=str(_server_log_path(context.model_dir)),
+        )
+        last_activity = time.time()
+        parent_pid = int(request.get("parent_pid", 0) or 0)
+
+        while True:
+            if (job_dir / "close.json").is_file():
+                _async_worker_status(job_dir, "closing", stage="close_requested")
+                return 0
+
+            # If the parent (Mimics) process has died, shut down immediately
+            # instead of holding GPU memory for the full idle timeout.
+            if parent_pid and not _process_exists(parent_pid):
+                _async_worker_status(
+                    job_dir,
+                    "expired",
+                    stage="parent_process_gone",
+                )
+                return 0
+
+            commands = sorted((job_dir / "commands").glob("command_*.json"))
+            pending = []
+            for path in commands:
+                try:
+                    sequence = int(path.stem.rsplit("_", 1)[1])
+                except (IndexError, ValueError):
+                    continue
+                if sequence > last_sequence:
+                    pending.append((sequence, path))
+
+            if pending:
+                sequence, command_path = pending[0]
+                command = json.loads(command_path.read_text(encoding="utf-8"))
+                result_path = job_dir / "results" / f"result_{sequence:06d}.json"
+                output_path = str(job_dir / "results" / f"prediction_{sequence:06d}.u8")
+                _async_worker_status(
+                    job_dir,
+                    "running",
+                    stage="prediction",
+                    sequence=sequence,
+                    command_path=str(command_path),
+                )
+                try:
+                    result = context.predict(
+                        command.get("interactions") or [],
+                        output_path,
+                        initial_seg_path=command.get("initial_seg_path"),
+                        initial_seg_shape=command.get("initial_seg_shape"),
+                        use_context_initial_seg=False,
+                    )
+                    result["sequence"] = sequence
+                    result["command_id"] = command.get("command_id")
+                    result["expected_target_sha256"] = command.get(
+                        "expected_target_sha256"
+                    )
+                except Exception as exc:
+                    result = _error_result(
+                        exc,
+                        stage="async_prediction",
+                        started=time.time(),
+                        model_dir=context.model_dir,
+                        log_path=context.log_path,
+                    )
+                    result["sequence"] = sequence
+                    result["command_id"] = command.get("command_id")
+                    result["expected_target_sha256"] = command.get(
+                        "expected_target_sha256"
+                    )
+                _write_json_atomic(result_path, result)
+                last_sequence = sequence
+                last_activity = time.time()
+                _async_worker_status(
+                    job_dir,
+                    "result_ready",
+                    stage="waiting_for_mimics",
+                    sequence=sequence,
+                    result_status=result.get("status"),
+                    result_path=str(result_path),
+                    output_path=result.get("output_path"),
+                    error=result.get("error"),
+                )
+                continue
+
+            if time.time() - last_activity >= idle_timeout:
+                _async_worker_status(
+                    job_dir,
+                    "expired",
+                    stage="idle_timeout",
+                    idle_timeout_seconds=idle_timeout,
+                )
+                return 0
+            time.sleep(poll_seconds)
+    except Exception as exc:
+        trace = traceback.format_exc()
+        try:
+            _async_worker_status(
+                job_dir,
+                "failed",
+                stage="initialize_or_poll",
+                error=str(exc),
+                traceback=trace,
+            )
+        except Exception:
+            pass
+        return 2
+    finally:
+        if context is not None:
+            try:
+                context.close()
+            except Exception:
+                pass
+        status_path = job_dir / "worker_status.json"
+        status = _load_server_state(status_path)
+        if status and status.get("status") == "closing":
+            _async_worker_status(job_dir, "closed", stage="closed")
+
+
+def main() -> int:
+    """CLI entry point: reads JSON from stdin, writes JSON to stdout."""
+    if len(sys.argv) == 4 and sys.argv[1] == "--watchdog":
+        return _watchdog_main(sys.argv[2], sys.argv[3])
+    if len(sys.argv) == 2 and sys.argv[1] == "--worker":
+        return _worker_main()
+    if len(sys.argv) == 3 and sys.argv[1] == "--async-worker":
+        return _async_worker_main(sys.argv[2])
+    try:
+        raw = sys.stdin.read()
+        input_data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        result = {"status": "error", "error": f"Invalid JSON input: {exc}"}
+        print(json.dumps(result, indent=2))
+        return 2
+
+    result = run_bridge(input_data)
+    print(json.dumps(result, indent=2))
+    return 0 if result["status"] != "error" else 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

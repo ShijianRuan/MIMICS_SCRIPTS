@@ -1,0 +1,7 @@
+### Using Mimics with Fluent
+
+You can export the volume mesh created in the Mimics Innovation Suite in the fluent *.msh format. Note that all the surfaces defined in 3-matic are already written in the mesh files, so generally there is no need to go to another pre-processor. If you prefer to perform your meshing in Fluent�s preprocessor (TGrid or Gambit) then you can either export the STL file from Mimics Innovation Suite or export the surface mesh in the Fluent format. Both can be imported in Fuent�s preprocessors. 
+
+Exporting an STL file for meshing in Fluent instead of the *.msh file has certain disadvantages. Firstly, STL files currently do not offer to preserve surface definitions. Thus, using Mimics Innovation Suite when you export the 3D surface in Fluent mesh file format, you can enter the appropriate split angles that will create surfaces on the basis of complexity of features (typically feature angles) in your geometry. You can also chose to create surfaces manually in 3-matic and not split them on the basis of geometrical complexity. Secondly, as the wireframe of STLs can be noisy, especially for scanned parts, we would end up with many noise surfaces and open wireframes. This may cause TGrid to fail as it will not be able to recognize a volume inside the surfaces. This is another reason to prepare your STL file using Mimics remeshing tools. 
+
+Thus, using the *.msh file formats for exporting volume or surface meshes is the recommended method. 
