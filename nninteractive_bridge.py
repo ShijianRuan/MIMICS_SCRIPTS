@@ -14,27 +14,27 @@ The bridge auto-manages the nnInteractive server lifecycle:
 
 Protocol (JSON stdin -> JSON stdout):
     Input keys:
-        image_path          : str   — Optional NIfTI image in platform coordinates
-        image_buffer_path   : str   — Optional raw image buffer exported from MIMICS
-        image_buffer_shape  : [int, int, int] — Required with image_buffer_path
-        image_buffer_dtype  : str   — Optional NumPy dtype, default int16
-        interactions        : list  — Ordered point/scribble/box/lasso prompts
-        [initial_seg_path]  : str   — Optional starting Mask in MIMICS coordinates
+        image_path          : str   - Optional NIfTI image in platform coordinates
+        image_buffer_path   : str   - Optional raw image buffer exported from MIMICS
+        image_buffer_shape  : [int, int, int] - Required with image_buffer_path
+        image_buffer_dtype  : str   - Optional NumPy dtype, default int16
+        interactions        : list  - Ordered point/scribble/box/lasso prompts
+        [initial_seg_path]  : str   - Optional starting Mask in MIMICS coordinates
         [initial_seg_shape] : [int, int, int]
-        buffer_mapping      : dict  — { platform_to_mimics_axes, platform_to_mimics_flips }
-        output_path         : str   — Where to write the refined .u8 buffer
-        model_dir           : str   — Path to nnInteractive checkpoint folder
-        [bg_interaction_path] : str — Optional background scribble .u8 buffer
-        [server_url]        : str   — Optional existing nnInteractive server URL
-        [device]            : str   — "auto" (default), "cuda:0", or "cpu"
+        buffer_mapping      : dict  - { platform_to_mimics_axes, platform_to_mimics_flips }
+        output_path         : str   - Where to write the refined .u8 buffer
+        model_dir           : str   - Path to nnInteractive checkpoint folder
+        [bg_interaction_path] : str - Optional background scribble .u8 buffer
+        [server_url]        : str   - Optional existing nnInteractive server URL
+        [device]            : str   - "auto" (default), "cuda:0", or "cpu"
 
     Output keys:
-        status              : str   — "refined" | "skipped" | "error"
+        status              : str   - "refined" | "skipped" | "error"
         output_path         : str
         elapsed_seconds     : float
-        mode                : str   — "remote" | "local"
-        first_call          : bool  — True if server was just started (model loading)
-        [error]             : str   — Present only when status == "error"
+        mode                : str   - "remote" | "local"
+        first_call          : bool  - True if server was just started (model loading)
+        [error]             : str   - Present only when status == "error"
 """
 
 from __future__ import annotations
@@ -66,6 +66,24 @@ SERVER_URL = f"http://{SERVER_HOST}:{SERVER_PORT}"
 SERVER_STARTUP_TIMEOUT = 600  # first CPU startup can take several minutes
 HEALTHZ_RETRY_INTERVAL = 1.0   # seconds between healthz checks
 SERVER_IDLE_TIMEOUT = 1800
+LOG_ROTATE_BYTES = 10 * 1024 * 1024
+LOG_ROTATE_BACKUPS = 3
+
+
+def _rotate_log_file(path: Path, max_bytes: int = LOG_ROTATE_BYTES, backups: int = LOG_ROTATE_BACKUPS) -> None:
+    try:
+        if not path.is_file() or path.stat().st_size < max_bytes:
+            return
+        for index in range(int(backups), 0, -1):
+            src = path.with_name(f"{path.name}.{index}")
+            dst = path.with_name(f"{path.name}.{index + 1}")
+            if dst.exists():
+                dst.unlink()
+            if src.exists():
+                src.rename(dst)
+        path.rename(path.with_name(path.name + ".1"))
+    except Exception:
+        pass
 
 
 def _server_state_path(model_dir: str) -> Path:
@@ -85,6 +103,7 @@ def _bridge_log_path(model_dir: str, log_dir: str | None = None) -> Path:
 
 def _append_bridge_log(path: Path, event: str, **details: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    _rotate_log_file(path)
     payload = {
         "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "event": event,
@@ -161,7 +180,7 @@ def _available_server_url(preferred_url: str) -> str:
     host, port = _server_address(normalized)
     if not _port_open(host, port):
         return normalized
-    # Preferred port is occupied — find a free one via ephemeral socket.
+    # Preferred port is occupied; find a free one via ephemeral socket.
     free_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         free_sock.bind((host, 0))
@@ -336,7 +355,7 @@ def _process_matches_server(state: dict[str, Any]) -> bool:
     command_line = _process_command_line(pid)
     if not command_line:
         # The process exists (confirmed by _process_exists) but we could not
-        # read its command line — this can happen due to transient permission
+        # read its command line; this can happen due to transient permission
         # issues or PowerShell/CIM slowness.  Returning False here would cause
         # the watchdog to abandon a still-running server, leaking GPU memory.
         # Fall back to trusting the PID: the state file was written by us and
@@ -562,6 +581,7 @@ def _start_server(
     if fold is not None:
         cmd.extend(["--fold", fold])
 
+    _rotate_log_file(log_path)
     with open(log_path, "a") as log_fh:
         log_fh.write(f"\n{'='*60}\n")
         log_fh.write(f"Starting nnInteractive server at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -1429,7 +1449,7 @@ class _BridgeSessionContext:
                 # Instead of merely touching activity (which keeps the server
                 # alive for the full idle timeout), set last_activity_epoch
                 # far enough in the past that the watchdog's idle check fires
-                # on its next iteration (≤30 s), releasing GPU memory.
+                # on its next iteration (<=30 s), releasing GPU memory.
                 _expire_server_activity(self.owned_state_path, self.owned_token)
             _append_bridge_log(self.log_path, "session_closed")
 

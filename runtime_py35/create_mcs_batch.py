@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""create_mcs_batch.py — Background Mimics script to create .mcs files.
+"""Background Mimics script to create .mcs files.
 
 Runs inside Mimics Python 3.5.2 in background mode (MimicsResearch.exe -b).
 Reads prepare manifests from work directories and creates .mcs files one by one.
@@ -19,8 +19,146 @@ import shutil
 import sys
 import time
 import traceback
+import uuid
 
 import mimics
+
+
+QUEUE_ACTIVE_FILE = "_mcs_queue_active.json"
+QUEUE_DONE_FILE = "_mcs_queue_done.json"
+STATUS_FILE = "_mcs_batch_status.json"
+LOCK_FILE = "_mcs_batch.lock"
+LOG_FILE = "_create_mcs_batch.log"
+LOG_ROTATE_BYTES = 5 * 1024 * 1024
+LOG_BACKUPS = 3
+
+
+def rotate_log(path, max_bytes=LOG_ROTATE_BYTES, backups=LOG_BACKUPS):
+    try:
+        if not os.path.isfile(path) or os.path.getsize(path) < max_bytes:
+            return
+        for index in range(int(backups), 0, -1):
+            src = "{0}.{1}".format(path, index)
+            dst = "{0}.{1}".format(path, index + 1)
+            if os.path.isfile(dst):
+                os.remove(dst)
+            if os.path.isfile(src):
+                os.rename(src, dst)
+        os.rename(path, path + ".1")
+    except Exception:
+        pass
+
+
+def log_message(output_dir, message):
+    text = "[{0}] {1}".format(time.strftime("%Y-%m-%d %H:%M:%S"), message)
+    print(text)
+    try:
+        log_path = os.path.join(output_dir, LOG_FILE)
+        rotate_log(log_path)
+        with open(log_path, "a") as handle:
+            handle.write(text + "\n")
+    except Exception:
+        pass
+
+
+def write_json_atomic(path, value):
+    parent = os.path.dirname(path)
+    if parent and not os.path.isdir(parent):
+        os.makedirs(parent)
+    temporary = path + "." + uuid.uuid4().hex + ".tmp"
+    with open(temporary, "w") as handle:
+        json.dump(value, handle, indent=2, sort_keys=True)
+    os.replace(temporary, path)
+
+
+def safe_case_filename(value):
+    text = str(value or "unknown")
+    safe = []
+    for char in text:
+        if char.isalnum() or char in ("-", "_", "."):
+            safe.append(char)
+        else:
+            safe.append("_")
+    return "".join(safe) or "unknown"
+
+
+def record_failed_case(output_dir, case_id, phase, error, traceback_text=None):
+    try:
+        failed_dir = os.path.join(output_dir or os.getcwd(), "_failed_cases")
+        if not os.path.isdir(failed_dir):
+            os.makedirs(failed_dir)
+        payload = {
+            "case_id": str(case_id or "unknown"),
+            "phase": str(phase or "unknown"),
+            "error": str(error or ""),
+            "failed_at_epoch": time.time(),
+        }
+        if traceback_text:
+            payload["traceback"] = traceback_text
+        filename = "{0}_{1}.json".format(
+            safe_case_filename(case_id),
+            safe_case_filename(phase),
+        )
+        write_json_atomic(os.path.join(failed_dir, filename), payload)
+    except Exception:
+        pass
+
+
+def update_status(output_dir, status, **details):
+    payload = {
+        "status": status,
+        "pid": os.getpid(),
+        "updated_at_epoch": time.time(),
+    }
+    payload.update(details)
+    try:
+        write_json_atomic(os.path.join(output_dir, STATUS_FILE), payload)
+    except Exception:
+        pass
+
+
+def acquire_lock(output_dir):
+    lock_path = os.path.join(output_dir, LOCK_FILE)
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode("ascii"))
+        os.close(fd)
+        return lock_path
+    except OSError:
+        try:
+            with open(lock_path, "r") as handle:
+                pid = int((handle.read() or "0").strip() or "0")
+            if pid and process_exists(pid):
+                return None
+        except Exception:
+            pass
+        try:
+            os.remove(lock_path)
+        except Exception:
+            return None
+        return acquire_lock(output_dir)
+
+
+def process_exists(pid):
+    if not pid:
+        return False
+    try:
+        if os.name == "nt":
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            STILL_ACTIVE = 259
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+            if not handle:
+                return False
+            exit_code = ctypes.c_ulong(0)
+            kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+            kernel32.CloseHandle(handle)
+            return int(exit_code.value) == STILL_ACTIVE
+        os.kill(int(pid), 0)
+        return True
+    except Exception:
+        return False
 
 
 def inject_buffer(mask, buffer_path, mimics_shape):
@@ -82,7 +220,7 @@ def create_mcs_from_manifest(work_dir, output_mcs):
 
     try:
         # Create masks and inject buffers.
-        # Note: mask.image is read-only — masks are automatically linked
+        # Note: mask.image is read-only; masks are automatically linked
         # to the active image at creation time.  Do NOT set mask.image.
         # Set visible=False BEFORE injecting buffer data so Mimics never
         # shows the mask even briefly during set_voxel_buffer.
@@ -114,7 +252,7 @@ def create_mcs_from_manifest(work_dir, output_mcs):
     if mcs_dir and not os.path.isdir(mcs_dir):
         os.makedirs(mcs_dir)
     mimics.file.save_project(filename=mcs_path, save_as_type="Mimics Project Files")
-    print("  已保存: {}".format(mcs_path))
+    print("  saved: {}".format(mcs_path))
 
     # Close project to free memory
     try:
@@ -151,56 +289,126 @@ def main(output_dir=None):
         print("Output dir not found: {}".format(output_dir))
         return 1
 
+    lock_path = acquire_lock(output_dir)
+    if not lock_path:
+        log_message(output_dir, "Another background Mimics batch process is already running; exiting.")
+        return 0
+
+    active_path = os.path.join(output_dir, QUEUE_ACTIVE_FILE)
+    done_path = os.path.join(output_dir, QUEUE_DONE_FILE)
+    idle_timeout = 1800
+    poll_seconds = 10
+    last_activity = time.time()
     consecutive_empty = 0
     total_completed = 0
     total_failed = 0
 
-    while True:
-        # Find all work directories with prepare manifests
-        work_dirs = []
-        for item in sorted(os.listdir(output_dir)):
-            if not item.endswith("_work"):
-                continue
-            work_dir = os.path.join(output_dir, item)
-            manifest = os.path.join(work_dir, "prepare_manifest.json")
-            if os.path.isfile(manifest):
-                case_id = item.replace("_work", "")
-                mcs_path = os.path.join(output_dir, case_id + ".mcs")
-                # Skip if .mcs already exists
-                if os.path.isfile(mcs_path):
+    try:
+        log_message(output_dir, "Background Mimics batch process started.")
+        update_status(output_dir, "running", completed=0, failed=0)
+
+        while True:
+            # Find all work directories with prepare manifests.
+            work_dirs = []
+            for item in sorted(os.listdir(output_dir)):
+                if not item.endswith("_work"):
                     continue
-                work_dirs.append((case_id, work_dir, mcs_path))
+                work_dir = os.path.join(output_dir, item)
+                manifest = os.path.join(work_dir, "prepare_manifest.json")
+                failed_marker = os.path.join(work_dir, "create_failed.json")
+                if os.path.isfile(manifest):
+                    case_id = item.replace("_work", "")
+                    try:
+                        with open(manifest, "r") as handle:
+                            manifest_data = json.load(handle)
+                    except Exception:
+                        manifest_data = {}
+                    mcs_path = manifest_data.get("output_mcs") or os.path.join(output_dir, case_id + ".mcs")
+                    if os.path.isfile(mcs_path) or os.path.isfile(failed_marker):
+                        continue
+                    work_dirs.append((case_id, work_dir, mcs_path))
 
-        total = len(work_dirs)
-        if total == 0:
-            consecutive_empty += 1
-            if consecutive_empty >= 2:
-                print("没有新的待处理数据，退出。")
-                break
-            print("暂无新数据，等待 15 秒后重试...".format(consecutive_empty))
-            time.sleep(15)
-            continue
+            total = len(work_dirs)
+            if total == 0:
+                consecutive_empty += 1
+                active = os.path.isfile(active_path)
+                done = os.path.isfile(done_path)
+                if done and not active:
+                    log_message(output_dir, "No pending manifests and producer marked the queue done; exiting.")
+                    break
+                if not active and time.time() - last_activity >= idle_timeout:
+                    log_message(output_dir, "No active producer and idle timeout reached; exiting.")
+                    break
+                log_message(output_dir, "No pending manifests; waiting for new work.")
+                update_status(
+                    output_dir,
+                    "idle",
+                    completed=total_completed,
+                    failed=total_failed,
+                    consecutive_empty=consecutive_empty,
+                )
+                time.sleep(poll_seconds)
+                continue
 
-        consecutive_empty = 0
-        print("正在创建 {} 个 .mcs 文件...".format(total))
+            consecutive_empty = 0
+            log_message(output_dir, "Creating {} .mcs file(s).".format(total))
 
-        for i, (case_id, work_dir, mcs_path) in enumerate(work_dirs):
-            print("\n[{}/{}] 正在创建: {}".format(i + 1, total, case_id))
-            try:
-                create_mcs_from_manifest(work_dir, mcs_path)
-                total_completed += 1
-            except Exception as e:
-                print("  创建失败: {}".format(e))
-                traceback.print_exc()
-                total_failed += 1
-                # Close project even on failure
+            for i, (case_id, work_dir, mcs_path) in enumerate(work_dirs):
+                log_message(output_dir, "[{}/{}] Creating: {}".format(i + 1, total, case_id))
+                update_status(
+                    output_dir,
+                    "creating",
+                    case_id=case_id,
+                    completed=total_completed,
+                    failed=total_failed,
+                )
                 try:
-                    mimics.file.close_project()
-                except Exception:
-                    pass
+                    create_mcs_from_manifest(work_dir, mcs_path)
+                    total_completed += 1
+                    last_activity = time.time()
+                    log_message(output_dir, "Created: {}".format(mcs_path))
+                except Exception as e:
+                    total_failed += 1
+                    last_activity = time.time()
+                    log_message(output_dir, "Create failed for {}: {}".format(case_id, e))
+                    traceback_text = traceback.format_exc()
+                    record_failed_case(output_dir, case_id, "create_mcs", e, traceback_text)
+                    try:
+                        write_json_atomic(
+                            os.path.join(work_dir, "create_failed.json"),
+                            {
+                                "case_id": case_id,
+                                "error": str(e),
+                                "traceback": traceback_text,
+                                "failed_at_epoch": time.time(),
+                            },
+                        )
+                    except Exception:
+                        pass
+                    print(traceback_text)
+                    try:
+                        mimics.file.close_project()
+                    except Exception:
+                        pass
+                    try:
+                        shutil.rmtree(work_dir, ignore_errors=True)
+                    except Exception:
+                        pass
 
-    print("\n后台创建完成: 成功 {} 个，失败 {} 个".format(total_completed, total_failed))
-    return 0
+        log_message(
+            output_dir,
+            "Background creation finished: {} succeeded, {} failed.".format(
+                total_completed,
+                total_failed,
+            ),
+        )
+        update_status(output_dir, "closed", completed=total_completed, failed=total_failed)
+        return 0
+    finally:
+        try:
+            os.remove(lock_path)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

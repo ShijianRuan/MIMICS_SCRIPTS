@@ -5,8 +5,8 @@ Scripting Library entry point.  The annotator clicks this script in Mimics
 to convert a dataset (or single case) into .mcs work packages.
 
 Two modes:
-  1. Batch: enter the dataset root directory → all cases become .mcs files
-  2. Single: enter a single case directory → one .mcs file
+  1. Batch: enter the dataset root directory -> all cases become .mcs files
+  2. Single: enter a single case directory -> one .mcs file
 """
 
 from __future__ import print_function

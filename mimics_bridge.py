@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
-"""mimics_bridge.py — External Python bridge for dataset ↔ Mimics conversion.
+"""External Python bridge for dataset <-> Mimics conversion.
 
 Runs in the nninteractive_env Python (3.10+ with numpy, nibabel, pydicom).
 Called by mimics_import.py / mimics_export.py inside Mimics via subprocess.
 
-Protocol: JSON stdin → JSON stdout.
+Protocol: JSON stdin -> JSON stdout.
 
 Actions:
-    "prepare" — NIfTI image → derived DICOM, NIfTI masks → .u8 buffers
-    "convert" — .u8 buffers → NIfTI files (inverse buffer mapping)
+    "prepare" - NIfTI image -> derived DICOM, NIfTI masks -> .u8 buffers
+    "convert" - .u8 buffers -> NIfTI files (inverse buffer mapping)
 """
 
 from __future__ import annotations
@@ -22,7 +22,24 @@ from pathlib import Path
 import numpy as np
 
 
-# ── Image inspection ───────────────────────────────────────────────────
+RAS_TO_LPS = np.diag([-1.0, -1.0, 1.0, 1.0])
+LPS_TO_RAS = RAS_TO_LPS
+
+
+def _voxel_spacing_from_affine(affine: np.ndarray) -> np.ndarray:
+    spacing = np.linalg.norm(affine[:3, :3], axis=0)
+    return np.maximum(spacing.astype(float), 0.001)
+
+
+def _unit_axis(affine: np.ndarray, axis: int, spacing: np.ndarray) -> np.ndarray:
+    vector = affine[:3, axis] / float(spacing[axis])
+    norm = np.linalg.norm(vector)
+    if norm <= 0:
+        raise ValueError("invalid affine axis {}: zero-length direction".format(axis))
+    return vector / norm
+
+
+# -- Image inspection ---------------------------------------------------
 
 def is_dicom_folder(path: str) -> bool:
     p = Path(path)
@@ -49,7 +66,7 @@ def is_nifti_file(path: str) -> bool:
     return p.name.endswith(".nii") or p.name.endswith(".nii.gz")
 
 
-# ── NIfTI → derived DICOM ─────────────────────────────────────────────
+# -- NIfTI -> derived DICOM --------------------------------------------
 
 def nifti_to_derived_dicom(nifti_path: str, dicom_out: str, case_id: str = "case") -> dict:
     """Convert NIfTI image to derived DICOM series for Mimics import."""
@@ -63,20 +80,18 @@ def nifti_to_derived_dicom(nifti_path: str, dicom_out: str, case_id: str = "case
     if array.ndim != 3:
         raise ValueError("NIfTI image must be 3D: {} shape={}".format(nifti_path, array.shape))
 
-    affine = img.affine
+    # nibabel exposes NIfTI world coordinates as RAS+. DICOM and Mimics use
+    # the DICOM patient coordinate system (LPS). Convert at the boundary.
+    affine_ras = img.affine
+    affine_lps = RAS_TO_LPS @ affine_ras
     shape_3d = array.shape
 
-    # Use nibabel's voxel_sizes for correct spacing (handles oblique affines)
-    # get_zooms() returns (voxel_sizes, time_step) — we only want spatial
-    zooms = img.header.get_zooms()
-    spacing = np.abs(np.array(zooms[:3]))
-    # Safety: ensure all spacing values are > 0 (Mimics requires >0)
-    min_spacing = 0.001
-    spacing = np.maximum(spacing, min_spacing)
+    # Use affine column norms so spacing and direction cosines share exactly
+    # the same source geometry, including oblique acquisitions.
+    spacing = _voxel_spacing_from_affine(affine_lps)
 
-    origin = affine[:3, 3]
-    # Compute direction matrix from affine, using corrected spacing
-    direction_matrix = affine[:3, :3] / spacing
+    origin = affine_lps[:3, 3]
+    direction_matrix = affine_lps[:3, :3] / spacing
 
     if array.dtype == np.uint8:
         pixel_array = array.astype(np.uint16)
@@ -99,32 +114,28 @@ def nifti_to_derived_dicom(nifti_path: str, dicom_out: str, case_id: str = "case
         if child.is_file():
             child.unlink()
 
-    # ── DICOM dimension mapping ──────────────────────────────────────
+    # -- DICOM dimension mapping --------------------------------------
     # NIfTI array shape: (i, j, k) where i=first axis, j=second axis, k=slices
     # DICOM pixel data layout: pixel[row, col] stored row-by-row
-    #   Rows = number of rows (vertical)   → corresponds to NIfTI j axis
-    #   Columns = number of columns (horizontal) → corresponds to NIfTI i axis
+    #   Rows = number of rows (vertical) -> corresponds to NIfTI j axis
+    #   Columns = number of columns (horizontal) -> corresponds to NIfTI i axis
     #
-    # Direction cosines (DICOM ImageOrientationPatient):
-    #   row direction = direction of increasing column index = nibabel j direction
-    #   column direction = direction of increasing row index = nibabel i direction
+    # DICOM ImageOrientationPatient stores:
+    #   first triplet  = direction of the first row, i.e. increasing column
+    #                    index -> NIfTI i axis in this layout
+    #   second triplet = direction of the first column, i.e. increasing row
+    #                    index -> NIfTI j axis in this layout
     #
     # PixelSpacing: [row_spacing, col_spacing] = [spacing_j, spacing_i]
     #
     # Pixel data must be transposed from NIfTI (i,j) to DICOM (row=j, col=i)
 
     num_slices = shape_3d[2]
-    dicom_rows = shape_3d[1]      # NIfTI j axis → DICOM Rows
-    dicom_columns = shape_3d[0]   # NIfTI i axis → DICOM Columns
+    dicom_rows = shape_3d[1]      # NIfTI j axis -> DICOM Rows
+    dicom_columns = shape_3d[0]   # NIfTI i axis -> DICOM Columns
 
-    # Direction cosines for DICOM
-    # row_cosine = nibabel j direction (affine[:,1] normalized)
-    # col_cosine = nibabel i direction (affine[:,0] normalized)
-    row_cosine = affine[:3, 1] / spacing[1]   # direction of increasing j
-    col_cosine = affine[:3, 0] / spacing[0]   # direction of increasing i
-    # Ensure they are unit vectors (normalize)
-    row_cosine = row_cosine / np.linalg.norm(row_cosine)
-    col_cosine = col_cosine / np.linalg.norm(col_cosine)
+    row_cosine = _unit_axis(affine_lps, 0, spacing)
+    column_cosine = _unit_axis(affine_lps, 1, spacing)
 
     for slice_idx in range(num_slices):
         file_meta = FileMetaDataset()
@@ -154,19 +165,19 @@ def nifti_to_derived_dicom(nifti_path: str, dicom_out: str, case_id: str = "case
         # PixelSpacing = [row_spacing, col_spacing] = [spacing_j, spacing_i]
         ds.PixelSpacing = [float(spacing[1]), float(spacing[0])]
         ds.SliceThickness = float(spacing[2])
-        # Compute slice position using the full affine (not direction_matrix*spacing)
-        # This handles oblique/non-standard orientations correctly
-        slice_origin = affine @ np.array([0, 0, slice_idx, 1])
+        ds.SpacingBetweenSlices = float(spacing[2])
+        ds.InstanceNumber = int(slice_idx + 1)
+        # Compute slice position using the full LPS affine. This handles
+        # oblique and non-standard orientations correctly.
+        slice_origin = affine_lps @ np.array([0, 0, slice_idx, 1])
         ds.ImagePositionPatient = [
             float(slice_origin[0]),
             float(slice_origin[1]),
             float(slice_origin[2]),
         ]
-        # ImageOrientationPatient = [row_x, row_y, row_z, col_x, col_y, col_z]
-        # row direction = nibabel j direction, col direction = nibabel i direction
         ds.ImageOrientationPatient = [
             float(row_cosine[0]), float(row_cosine[1]), float(row_cosine[2]),
-            float(col_cosine[0]), float(col_cosine[1]), float(col_cosine[2]),
+            float(column_cosine[0]), float(column_cosine[1]), float(column_cosine[2]),
         ]
         ds.SamplesPerPixel = 1
         ds.PhotometricInterpretation = "MONOCHROME2"
@@ -189,7 +200,7 @@ def nifti_to_derived_dicom(nifti_path: str, dicom_out: str, case_id: str = "case
     }
 
 
-# ── NIfTI mask → .u8 buffer ───────────────────────────────────────────
+# -- NIfTI mask -> .u8 buffer -----------------------------------------
 
 def read_nifti_mask(path: str) -> np.ndarray:
     import nibabel as nib
@@ -208,7 +219,7 @@ def apply_buffer_mapping(array: np.ndarray, axes: list[int], flips: list[bool]) 
     return np.ascontiguousarray(transformed)
 
 
-# ── .u8 buffer → NIfTI (inverse) ──────────────────────────────────────
+# -- .u8 buffer -> NIfTI (inverse) -------------------------------------
 
 def inverse_buffer_mapping(array: np.ndarray, axes: list[int], flips: list[bool]) -> np.ndarray:
     for axis, flip in enumerate(flips):
@@ -227,7 +238,7 @@ def write_mask_nifti(array: np.ndarray, affine: np.ndarray, output_path: str) ->
     nib.save(nii, output_path)
 
 
-# ── Affine from NIfTI or DICOM ────────────────────────────────────────
+# -- Affine from NIfTI or DICOM ----------------------------------------
 
 def get_image_affine(image_path: str) -> np.ndarray:
     import nibabel as nib
@@ -253,34 +264,52 @@ def get_image_affine_from_dicom(dicom_folder: str) -> np.ndarray:
     if not headers:
         raise ValueError("no readable DICOM slices in: {}".format(dicom_folder))
 
+    def _image_position(ds):
+        if hasattr(ds, "ImagePositionPatient"):
+            try:
+                return np.array([float(v) for v in ds.ImagePositionPatient], dtype=float)
+            except Exception:
+                return None
+        return None
+
     first = headers[0]
     pixel_spacing = [float(v) for v in first.PixelSpacing] if hasattr(first, "PixelSpacing") else [1.0, 1.0]
     slice_thickness = float(first.SliceThickness) if hasattr(first, "SliceThickness") else pixel_spacing[0]
-    origin = [0.0, 0.0, 0.0]
-    if hasattr(first, "ImagePositionPatient"):
-        origin = [float(v) for v in first.ImagePositionPatient]
     iop = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
     if hasattr(first, "ImageOrientationPatient"):
         iop = [float(v) for v in first.ImageOrientationPatient]
 
-    row_dir = np.array(iop[3:6])
-    col_dir = np.array(iop[0:3])
-    slice_dir = np.cross(row_dir, col_dir)
+    # DICOM IOP first triplet is the direction of increasing column index;
+    # the second triplet is the direction of increasing row index.
+    row_cosine = np.array(iop[0:3], dtype=float)
+    column_cosine = np.array(iop[3:6], dtype=float)
+    row_cosine = row_cosine / np.linalg.norm(row_cosine)
+    column_cosine = column_cosine / np.linalg.norm(column_cosine)
+    slice_dir = np.cross(row_cosine, column_cosine)
+    slice_dir = slice_dir / np.linalg.norm(slice_dir)
 
-    affine = np.eye(4)
-    affine[0, 0] = col_dir[0] * pixel_spacing[0]
-    affine[1, 0] = col_dir[1] * pixel_spacing[0]
-    affine[2, 0] = col_dir[2] * pixel_spacing[0]
-    affine[0, 1] = row_dir[0] * pixel_spacing[1]
-    affine[1, 1] = row_dir[1] * pixel_spacing[1]
-    affine[2, 1] = row_dir[2] * pixel_spacing[1]
-    affine[0, 2] = slice_dir[0] * slice_thickness
-    affine[1, 2] = slice_dir[1] * slice_thickness
-    affine[2, 2] = slice_dir[2] * slice_thickness
-    affine[0, 3] = origin[0]
-    affine[1, 3] = origin[1]
-    affine[2, 3] = origin[2]
-    return affine
+    positions = [(ds, _image_position(ds)) for ds in headers]
+    positions = [(ds, pos) for ds, pos in positions if pos is not None]
+    if positions:
+        positions.sort(key=lambda item: float(np.dot(item[1], slice_dir)))
+        origin_lps = positions[0][1]
+        if len(positions) > 1:
+            distances = [
+                abs(float(np.dot(positions[i][1] - positions[i - 1][1], slice_dir)))
+                for i in range(1, len(positions))
+            ]
+            distances = [value for value in distances if value > 1e-6]
+            if distances:
+                slice_thickness = float(np.median(distances))
+    else:
+        origin_lps = np.array([0.0, 0.0, 0.0], dtype=float)
+
+    affine_lps = np.eye(4)
+    affine_lps[:3, 0] = row_cosine * float(pixel_spacing[1])
+    affine_lps[:3, 1] = column_cosine * float(pixel_spacing[0])
+    affine_lps[:3, 2] = slice_dir * float(slice_thickness)
+    affine_lps[:3, 3] = origin_lps
+    return LPS_TO_RAS @ affine_lps
 
 
 def find_affine_in_case_dir(case_dir: str) -> np.ndarray | None:
@@ -299,10 +328,10 @@ def find_affine_in_case_dir(case_dir: str) -> np.ndarray | None:
     return None
 
 
-# ── Actions ───────────────────────────────────────────────────────────
+# -- Actions ------------------------------------------------------------
 
 def do_prepare(params: dict) -> dict:
-    """Prepare a single case: NIfTI→DICOM + masks→.u8 buffers."""
+    """Prepare a single case: NIfTI -> DICOM + masks -> .u8 buffers."""
     image_path = params["image_path"]
     masks = params.get("masks", [])
     dicom_out = params.get("dicom_out", "")
@@ -323,7 +352,7 @@ def do_prepare(params: dict) -> dict:
     else:
         return {"status": "error", "error": "image path is neither DICOM folder nor NIfTI file: {}".format(image_path)}
 
-    # Convert masks → .u8
+    # Convert masks -> .u8
     mask_results = []
     for m in masks:
         name = m["name"]
@@ -351,7 +380,7 @@ def do_prepare(params: dict) -> dict:
 
 
 def do_convert(params: dict) -> dict:
-    """Convert .u8 buffers → NIfTI files (inverse buffer mapping)."""
+    """Convert .u8 buffers -> NIfTI files (inverse buffer mapping)."""
     buffers_dir = params["buffers_dir"]
     manifest_path = params["manifest_path"]
     case_dir = params["case_dir"]
@@ -409,7 +438,7 @@ def do_convert(params: dict) -> dict:
         array = np.frombuffer(raw, dtype=np.uint8).reshape(tuple(mimics_shape))
         nifti_array = inverse_buffer_mapping(array, axes, flips)
 
-        # If file already exists, compare content — skip write if unchanged
+        # If file already exists, compare content; skip write if unchanged.
         if os.path.isfile(nifti_path):
             import nibabel as nib
             existing = np.asanyarray(nib.load(nifti_path).dataobj)
@@ -438,7 +467,26 @@ def do_convert(params: dict) -> dict:
     }
 
 
-# ── Discover cases (for batch import) ────────────────────────────────
+# -- Discover cases (for batch import) --------------------------------
+
+def do_discover_case_dirs(params: dict) -> dict:
+    """Discover candidate case directories without inspecting image files."""
+    ts_root = params["ts_root"]
+    cases_filter = params.get("cases_filter")
+
+    if not os.path.isdir(ts_root):
+        return {"status": "error", "error": "ts_root is not a directory: {}".format(ts_root)}
+
+    cases = []
+    for name in sorted(os.listdir(ts_root)):
+        if name in ("mcs_output", "segmentations"):
+            continue
+        if cases_filter and name not in cases_filter:
+            continue
+        case_dir = os.path.join(ts_root, name)
+        if os.path.isdir(case_dir):
+            cases.append({"case_id": name, "case_dir": case_dir})
+    return {"status": "ok", "cases": cases, "count": len(cases)}
 
 def do_discover(params: dict) -> dict:
     """Discover TS-like cases in a dataset root directory.
@@ -506,7 +554,7 @@ def do_discover(params: dict) -> dict:
     return {"status": "ok", "cases": cases, "count": len(cases)}
 
 
-# ── Main ──────────────────────────────────────────────────────────────
+# -- Main ---------------------------------------------------------------
 
 def main():
     try:
@@ -523,6 +571,8 @@ def main():
             result = do_convert(params)
         elif action == "discover":
             result = do_discover(params)
+        elif action == "discover_case_dirs":
+            result = do_discover_case_dirs(params)
         else:
             result = {"status": "error", "error": "unknown action: {}".format(action)}
     except Exception as e:

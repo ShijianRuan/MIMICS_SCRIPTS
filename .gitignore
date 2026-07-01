@@ -1,1 +1,33 @@
+# Environments
 nninteractive_env/
+
+# Images and assets
+docs/images/
+docs/MimicsHelp_MD/Data/
+docs/MimicsHelp_MD/Resources/
+docs/MimicsHelp_MD/Resources_backup/
+docs/MimicsHelp_MD/result/
+docs/MimicsHelp_MD/SkinSupport/
+docs/MimicsHelp_MD/Mimics Reference Guide/
+
+# Binary files
+*.pdf
+*.html
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.ico
+*.svg
+*.css
+*.js
+
+# Logs
+logs/
+
+# System files
+.DS_Store
+__pycache__/
+*.pyc
+*.pyo

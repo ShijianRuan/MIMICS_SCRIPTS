@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""mimics_export.py — Mimics-internal driver for .mcs mask → dataset export.
+"""Mimics-internal driver for .mcs mask -> dataset export.
 
 Runs inside Mimics Python 3.5.2. Only uses stdlib + mimics API.
 Calls mimics_bridge.py (in nninteractive_env) via subprocess for NIfTI writing.
 
 Uses Win32 SetTimer / PyQt5 QTimer for non-blocking async polling,
-matching nnInteractive's pattern — no manual second click needed.
+matching nnInteractive's pattern; no manual second click needed.
 
 Flow:
     1. Export all masks from current Mimics project as .u8 buffers
@@ -25,15 +25,86 @@ import sys
 import threading
 import time
 import traceback
+import uuid
 
 import mimics
 
 
-# ── Global async monitor state ───────────────────────────────────────
+# -- Global async monitor state ----------------------------------------
 _EXPORT_MONITORS = {}
+_LOG_ROTATE_BYTES = 5 * 1024 * 1024
+_LOG_ROTATE_BACKUPS = 3
 
 
-# ── Path helpers (shared with mimics_import.py) ──────────────────────
+def _write_json_atomic(path, value):
+    parent = os.path.dirname(path)
+    if parent and not os.path.isdir(parent):
+        os.makedirs(parent)
+    temporary = path + "." + uuid.uuid4().hex + ".tmp"
+    with open(temporary, "w") as f:
+        json.dump(value, f, indent=2, sort_keys=True)
+    os.replace(temporary, path)
+
+
+def _rotate_log_file(path, max_bytes=_LOG_ROTATE_BYTES, backups=_LOG_ROTATE_BACKUPS):
+    try:
+        if not os.path.isfile(path) or os.path.getsize(path) < max_bytes:
+            return
+        for index in range(int(backups), 0, -1):
+            src = "{0}.{1}".format(path, index)
+            dst = "{0}.{1}".format(path, index + 1)
+            if os.path.isfile(dst):
+                os.remove(dst)
+            if os.path.isfile(src):
+                os.rename(src, dst)
+        os.rename(path, path + ".1")
+    except Exception:
+        pass
+
+
+def _append_export_log(root_dir, message):
+    text = "[{0}] {1}".format(time.strftime("%Y-%m-%d %H:%M:%S"), message)
+    print(text)
+    try:
+        if root_dir and not os.path.isdir(root_dir):
+            os.makedirs(root_dir)
+        path = os.path.join(root_dir or os.getcwd(), "mimics_export.log")
+        _rotate_log_file(path)
+        with open(path, "a") as f:
+            f.write(text + "\n")
+    except Exception:
+        pass
+
+
+def _safe_case_filename(value):
+    text = str(value or "unknown")
+    safe = []
+    for char in text:
+        if char.isalnum() or char in ("-", "_", "."):
+            safe.append(char)
+        else:
+            safe.append("_")
+    return "".join(safe) or "unknown"
+
+
+def _record_failed_case(output_dir, case_id, phase, error):
+    try:
+        failed_dir = os.path.join(output_dir or os.getcwd(), "_failed_exports")
+        if not os.path.isdir(failed_dir):
+            os.makedirs(failed_dir)
+        payload = {
+            "case_id": str(case_id or "unknown"),
+            "phase": str(phase or "unknown"),
+            "error": str(error or ""),
+            "failed_at_epoch": time.time(),
+        }
+        filename = "{0}_{1}.json".format(_safe_case_filename(case_id), _safe_case_filename(phase))
+        _write_json_atomic(os.path.join(failed_dir, filename), payload)
+    except Exception:
+        pass
+
+
+# -- Path helpers (shared with mimics_import.py) ------------------------
 
 def _find_root(start_dir, sentinel_files, max_depth=6):
     current = os.path.abspath(start_dir)
@@ -112,6 +183,79 @@ def _python_exe():
     return candidates[0]
 
 
+def _find_mimics_exe():
+    """Find MimicsResearch.exe installation path."""
+    candidates = [
+        os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), "Materialise", "Mimics Research 21.0", "MimicsResearch.exe"),
+        os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), "Mimics Research 21.0", "MimicsResearch.exe"),
+        "D:\\Mimics Research 21.0\\MimicsResearch.exe",
+        "C:\\Mimics Research 21.0\\MimicsResearch.exe",
+    ]
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    for drive in ["C:", "D:", "E:"]:
+        for name in ["Mimics Research 21.0", "MimicsResearch 21.0"]:
+            path = os.path.join(drive + "\\", name, "MimicsResearch.exe")
+            if os.path.isfile(path):
+                return path
+    return None
+
+
+def _launch_background_batch_export(ts_root, cases_filter, axes, flips):
+    """Launch batch export in a separate background Mimics process."""
+    output_dir = os.path.join(ts_root, "mcs_output")
+    if not os.path.isdir(output_dir):
+        os.makedirs(output_dir)
+    mimics_exe = _find_mimics_exe()
+    if not mimics_exe:
+        _append_export_log(output_dir, "MimicsResearch.exe was not found; background export cannot start.")
+        return None
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(output_dir, "_export_batch_config.json")
+    runner_path = os.path.join(output_dir, "_run_export_batch.py")
+    _write_json_atomic(
+        config_path,
+        {
+            "ts_root": os.path.abspath(ts_root),
+            "cases": sorted(list(cases_filter)) if cases_filter else None,
+            "axes": axes,
+            "flips": flips,
+        },
+    )
+    with open(runner_path, "w") as f:
+        f.write("# Auto-generated runner for background Mimics batch export\n")
+        f.write("import sys, os\n")
+        f.write("sys.path.insert(0, r'{0}')\n".format(here))
+        f.write("import mimics_export\n")
+        f.write("mimics_export.run_background_batch_export(r'{0}')\n".format(config_path))
+
+    log_path = os.path.join(output_dir, "_background_export_mimics.log")
+    _rotate_log_file(log_path)
+    log_handle = None
+    try:
+        log_handle = open(log_path, "ab")
+        process = subprocess.Popen(
+            [mimics_exe, "-b", "-run_script", runner_path],
+            stdin=subprocess.DEVNULL,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            **_hidden_process_kwargs()
+        )
+        _append_export_log(output_dir, "Background Mimics started (PID={0}) for batch export.".format(process.pid))
+        return process
+    except Exception as exc:
+        _append_export_log(output_dir, "Could not start background batch export: {0}".format(exc))
+        return None
+    finally:
+        if log_handle is not None:
+            try:
+                log_handle.close()
+            except Exception:
+                pass
+
+
 def call_bridge(params):
     """Call mimics_bridge.py via subprocess, return parsed JSON result."""
     python_exe = _python_exe()
@@ -146,7 +290,7 @@ def call_bridge(params):
         )
 
 
-# ── Async bridge helpers ─────────────────────────────────────────────
+# -- Async bridge helpers ----------------------------------------------
 
 def _launch_bridge_background(bridge_params, job_dir):
     """Launch mimics_bridge.py in background. Don't wait for completion."""
@@ -163,13 +307,21 @@ def _launch_bridge_background(bridge_params, job_dir):
     python_exe = _python_exe()
     bridge = _bridge_script()
 
-    process = subprocess.Popen(
-        [python_exe, bridge],
-        stdin=open(input_file, "r"),
-        stdout=open(result_file, "w"),
-        stderr=open(error_file, "w"),
-        **_hidden_process_kwargs()
-    )
+    stdin_handle = open(input_file, "r")
+    stdout_handle = open(result_file, "w")
+    stderr_handle = open(error_file, "w")
+    try:
+        process = subprocess.Popen(
+            [python_exe, bridge],
+            stdin=stdin_handle,
+            stdout=stdout_handle,
+            stderr=stderr_handle,
+            **_hidden_process_kwargs()
+        )
+    finally:
+        stdin_handle.close()
+        stdout_handle.close()
+        stderr_handle.close()
     return process
 
 
@@ -252,7 +404,7 @@ def _cleanup_job_dir(job_dir):
         pass
 
 
-# ── Timer-based async monitor (same pattern as nnInteractive) ────────
+# -- Timer-based async monitor (same pattern as nnInteractive) ----------
 
 def _stop_export_monitor(monitor_key):
     """Stop and clean up a running export monitor."""
@@ -287,8 +439,8 @@ def _export_monitor_tick(monitor):
         monitor["done"] = True
         _stop_export_monitor(monitor_key)
         mimics.dialogs.message_box(
-            title="导出超时",
-            message="数据导出超时，请重试。",
+            title="Export Timeout",
+            message="Data export timed out. Please retry.",
         )
         return
 
@@ -301,7 +453,7 @@ def _export_monitor_tick(monitor):
     _stop_export_monitor(monitor_key)
 
     if status == "error":
-        mimics.dialogs.message_box(title="导出错误", message="导出出错: {0}".format(result))
+        mimics.dialogs.message_box(title="Export Error", message="Export failed: {0}".format(result))
         _cleanup_job_dir(job_dir)
         if monitor.get("batch_queue"):
             _start_next_batch_export(monitor)
@@ -312,11 +464,11 @@ def _export_monitor_tick(monitor):
         work_dir = monitor.get("work_dir")
         total_new, total_overwritten, total_unchanged = _apply_export_result(result, work_dir)
         _cleanup_job_dir(job_dir)
-        print("  导出完成")
+        print("  export complete")
     except Exception as e:
-        print("  导出失败: {0}".format(e))
+        print("  export failed: {0}".format(e))
         traceback.print_exc()
-        mimics.dialogs.message_box(title="导出错误", message="导出失败: {0}".format(e))
+        mimics.dialogs.message_box(title="Export Error", message="Export failed: {0}".format(e))
         _cleanup_job_dir(job_dir)
         if monitor.get("batch_queue"):
             _start_next_batch_export(monitor)
@@ -326,8 +478,8 @@ def _export_monitor_tick(monitor):
     if not monitor.get("batch_queue"):
         case_dir = monitor.get("case_dir")
         mimics.dialogs.message_box(
-            title="导出完成",
-            message="已导出到: {0}\n新建: {1}, 覆盖: {2}, 未变: {3}".format(
+            title="Export Complete",
+            message="Exported to: {0}\nNew: {1}, overwritten: {2}, unchanged: {3}".format(
                 os.path.join(case_dir, "segmentations"),
                 total_new, total_overwritten, total_unchanged
             ),
@@ -347,78 +499,21 @@ def _start_next_batch_export(monitor):
         failed = monitor.get("failed", 0)
         total = monitor.get("total", 0)
         mimics.dialogs.message_box(
-            title="批量导出完成",
-            message="成功导出 {0}/{1} 个病例，{2} 个失败。".format(completed, total, failed),
+            title="Batch Export Complete",
+            message="Exported {0}/{1} case(s); {2} failed.".format(completed, total, failed),
         )
         return
 
-    case_info = queue.pop(0)
-    case_id = case_info["case_id"]
-    c_dir = case_info["case_dir"]
-    ts_root = monitor.get("ts_root")
-    axes = monitor.get("axes")
-    flips = monitor.get("flips")
-    jobs_dir = monitor.get("jobs_dir")
-
-    mcs_path = os.path.join(ts_root, "mcs_output", case_id + ".mcs")
-    if not os.path.isfile(mcs_path):
-        print("  跳过: .mcs 文件不存在: {0}".format(mcs_path))
-        monitor["failed"] = monitor.get("failed", 0) + 1
-        _start_next_batch_export(monitor)
-        return
-
-    work_dir = os.path.join(ts_root, "mcs_output", case_id + "_work")
-    job_dir = os.path.join(jobs_dir, case_id)
-
-    print("\n[{0}/{1}] 正在导出: {2}".format(
-        monitor.get("completed", 0) + monitor.get("failed", 0) + 1,
-        monitor.get("total", 0),
-        case_id))
-
-    # Open .mcs, export masks, close .mcs
-    try:
-        print("  正在打开: {0}".format(mcs_path))
-        mimics.file.open_project(mcs_path)
-        built = _export_masks_and_build_params(c_dir, axes, flips, work_dir)
-        mimics.file.close_project()
-    except Exception as e:
-        print("  准备失败 {0}: {1}".format(case_id, e))
-        traceback.print_exc()
-        monitor["failed"] = monitor.get("failed", 0) + 1
-        try:
-            mimics.file.close_project()
-        except Exception:
-            pass
-        _start_next_batch_export(monitor)
-        return
-
-    if built is None:
-        print("  {0} 无可导出的 mask".format(case_id))
-        _start_next_batch_export(monitor)
-        return
-
-    bridge_params, manifest = built
-    process = _launch_bridge_background(bridge_params, job_dir)
-
-    # Update monitor for next case
-    monitor["job_dir"] = job_dir
-    monitor["work_dir"] = work_dir
-    monitor["case_dir"] = c_dir
-    monitor["monitor_key"] = job_dir
-    monitor["deadline"] = time.time() + monitor.get("timeout_seconds", 600)
-    monitor["done"] = False
-
-    state = {
-        "phase": "converting",
-        "case_id": case_id,
-        "pid": process.pid,
-        "started_at": time.time(),
-    }
-    with open(os.path.join(job_dir, "job_state.json"), "w") as f:
-        json.dump(state, f)
-
-    _EXPORT_MONITORS[job_dir] = monitor
-
+    monitor["done"] = True
+    mimics.dialogs.message_box(
+        title="Batch Export Disabled",
+        message=(
+            "Foreground batch export is disabled because opening .mcs files "
+            "in the current Mimics process can block the GUI. Start batch "
+            "export again to run it in a background Mimics process."
+        ),
+    )
+    return
 
 def _start_win32_export_monitor(monitor, poll_seconds, timeout_seconds):
     """Start a Win32 timer for export result polling."""
@@ -484,8 +579,8 @@ def _start_export_monitor(job_dir, work_dir, case_dir=None, timeout_seconds=600,
         if _start_win32_export_monitor(monitor, poll_seconds, timeout_seconds):
             return True
         mimics.dialogs.message_box(
-            title="导出进行中",
-            message="数据导出已开始，但无法自动应用结果。\n请稍后再次运行导出查看结果。",
+            title="Export Running",
+            message="Data export has started, but progress cannot be applied automatically. Run export again later to check progress.",
         )
         return False
 
@@ -494,8 +589,8 @@ def _start_export_monitor(job_dir, work_dir, case_dir=None, timeout_seconds=600,
         if _start_win32_export_monitor(monitor, poll_seconds, timeout_seconds):
             return True
         mimics.dialogs.message_box(
-            title="导出进行中",
-            message="数据导出已开始，但无法自动应用结果。\n请稍后再次运行导出查看结果。",
+            title="Export Running",
+            message="Data export has started, but progress cannot be applied automatically. Run export again later to check progress.",
         )
         return False
 
@@ -512,7 +607,7 @@ def _start_export_monitor(job_dir, work_dir, case_dir=None, timeout_seconds=600,
     return True
 
 
-# ── Export masks from current Mimics project ──────────────────────────
+# -- Export masks from current Mimics project ---------------------------
 
 def _sanitize_name(name):
     safe = name
@@ -554,7 +649,7 @@ def export_masks_to_buffers(buffers_dir):
             os.unlink(fpath)
 
     masks = mimics.data.masks
-    print("发现 {0} 个 mask".format(len(masks)))
+    print("found {0} mask(s)".format(len(masks)))
 
     manifest = {"masks": [], "mimics_shape": None}
 
@@ -564,18 +659,18 @@ def export_masks_to_buffers(buffers_dir):
             img = masks[0].image
             dims = [int(v) for v in img.logical_dimensions]
             manifest["mimics_shape"] = dims
-            print("图像尺寸: {0}".format(dims))
+            print("image dimensions: {0}".format(dims))
         except Exception as e:
-            print("无法获取图像尺寸: {0}".format(e))
+            print("could not read image dimensions: {0}".format(e))
 
     for a_mask in masks:
         name = str(a_mask.name)
-        print("正在导出 mask: {0}".format(name))
+        print("exporting mask: {0}".format(name))
 
         try:
             raw = _get_voxel_buffer_bytes(a_mask)
         except Exception as e:
-            print("  获取 {0} 数据出错: {1}".format(name, e))
+            print("  could not read data for {0}: {1}".format(name, e))
             continue
 
         safe_name = _sanitize_name(name)
@@ -600,7 +695,7 @@ def export_masks_to_buffers(buffers_dir):
     return manifest
 
 
-# ── Disk space helpers ────────────────────────────────────────────────
+# -- Disk space helpers -------------------------------------------------
 
 def _cleanup_work_dir(work_dir):
     """Remove intermediate work directory (.u8 buffers)."""
@@ -640,7 +735,7 @@ def _pick_directory(title):
     Uses PyQt5 QFileDialog when available (shares Mimics' Qt event loop,
     no GUI freeze). Falls back to Tkinter only if PyQt5 is unavailable.
     """
-    # Try PyQt5 first — Mimics is a Qt app, so QFileDialog integrates
+    # Try PyQt5 first; Mimics is a Qt app, so QFileDialog integrates
     # with Mimics' event loop and won't cause GUI freeze.
     # Note: we don't check QApplication.instance() because Mimics may
     # not expose it to Python, but QFileDialog can still work if PyQt5
@@ -670,7 +765,7 @@ def _pick_directory(title):
     return path if path else None
 
 
-# ── Single case export ────────────────────────────────────────────────
+# -- Single case export -------------------------------------------------
 
 def _export_masks_and_build_params(case_dir, axes, flips, work_dir):
     """Export masks to .u8 buffers and build bridge params. Returns (bridge_params, manifest) or None."""
@@ -716,7 +811,7 @@ def _apply_export_result(result, work_dir):
     return total_new, total_overwritten, total_unchanged
 
 
-# ── TS case discovery (for batch mode) ────────────────────────────────
+# -- TS case discovery (for batch mode) --------------------------------
 
 def discover_ts_cases(ts_root, case_filter=None):
     """Find all cases in a TS-like dataset."""
@@ -750,7 +845,144 @@ def discover_ts_cases(ts_root, case_filter=None):
     return cases
 
 
-# ── Main entry ────────────────────────────────────────────────────────
+def _acquire_export_lock(output_dir):
+    lock_path = os.path.join(output_dir, "_export_batch.lock")
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode("ascii"))
+        os.close(fd)
+        return lock_path
+    except OSError:
+        try:
+            with open(lock_path, "r") as handle:
+                pid = int((handle.read() or "0").strip() or "0")
+            if pid and _is_pid_alive(pid):
+                return None
+        except Exception:
+            pass
+        try:
+            os.remove(lock_path)
+        except Exception:
+            return None
+        return _acquire_export_lock(output_dir)
+
+
+def run_background_batch_export(config_path):
+    """Run batch export inside a background Mimics process."""
+    try:
+        with open(config_path, "r") as handle:
+            config = json.load(handle)
+    except Exception as exc:
+        print("Could not read export batch config: {0}".format(exc))
+        return 1
+
+    ts_root = config.get("ts_root")
+    cases_filter = config.get("cases")
+    cases_filter = set(cases_filter) if cases_filter else None
+    axes = config.get("axes") or [0, 1, 2]
+    flips = config.get("flips") or [False, False, False]
+    output_dir = os.path.join(ts_root, "mcs_output")
+    if not os.path.isdir(output_dir):
+        os.makedirs(output_dir)
+
+    lock_path = _acquire_export_lock(output_dir)
+    if not lock_path:
+        _append_export_log(output_dir, "Another background export process is already running; exiting.")
+        return 0
+
+    completed = 0
+    failed = 0
+    try:
+        _append_export_log(output_dir, "Background batch export started.")
+        _write_json_atomic(
+            os.path.join(output_dir, "_export_batch_status.json"),
+            {"status": "discovering", "pid": os.getpid(), "updated_at_epoch": time.time()},
+        )
+        cases = discover_ts_cases(ts_root, cases_filter)
+        total = len(cases)
+        _append_export_log(output_dir, "Discovered {0} case(s) for export.".format(total))
+        for index, case_info in enumerate(cases):
+            case_id = case_info["case_id"]
+            case_dir = case_info["case_dir"]
+            mcs_path = os.path.join(output_dir, case_id + ".mcs")
+            work_dir = os.path.join(output_dir, case_id + "_export_work")
+            _write_json_atomic(
+                os.path.join(output_dir, "_export_batch_status.json"),
+                {
+                    "status": "exporting",
+                    "pid": os.getpid(),
+                    "case_id": case_id,
+                    "index": index + 1,
+                    "total": total,
+                    "completed": completed,
+                    "failed": failed,
+                    "updated_at_epoch": time.time(),
+                },
+            )
+            if not os.path.isfile(mcs_path):
+                failed += 1
+                _record_failed_case(output_dir, case_id, "open_project", ".mcs file not found: {0}".format(mcs_path))
+                _append_export_log(output_dir, "[{0}/{1}] Missing .mcs: {2}".format(index + 1, total, mcs_path))
+                continue
+            try:
+                _append_export_log(output_dir, "[{0}/{1}] Exporting: {2}".format(index + 1, total, case_id))
+                mimics.file.open_project(mcs_path)
+                built = _export_masks_and_build_params(case_dir, axes, flips, work_dir)
+                try:
+                    mimics.file.close_project()
+                except Exception:
+                    pass
+                if built is None:
+                    _cleanup_work_dir(work_dir)
+                    _append_export_log(output_dir, "No masks to export: {0}".format(case_id))
+                    completed += 1
+                    continue
+                bridge_params, manifest = built
+                result = call_bridge(bridge_params)
+                if result.get("status") != "ok":
+                    raise RuntimeError(result.get("error", "bridge returned non-ok status"))
+                total_new, total_overwritten, total_unchanged = _apply_export_result(result, work_dir)
+                completed += 1
+                _append_export_log(
+                    output_dir,
+                    "Exported {0}: new={1}, overwritten={2}, unchanged={3}".format(
+                        case_id,
+                        total_new,
+                        total_overwritten,
+                        total_unchanged,
+                    ),
+                )
+            except Exception as exc:
+                failed += 1
+                _append_export_log(output_dir, "Export failed for {0}: {1}".format(case_id, exc))
+                _record_failed_case(output_dir, case_id, "export", exc)
+                traceback.print_exc()
+                try:
+                    mimics.file.close_project()
+                except Exception:
+                    pass
+                _cleanup_work_dir(work_dir)
+
+        _write_json_atomic(
+            os.path.join(output_dir, "_export_batch_status.json"),
+            {
+                "status": "closed",
+                "pid": os.getpid(),
+                "completed": completed,
+                "failed": failed,
+                "updated_at_epoch": time.time(),
+            },
+        )
+        _append_export_log(output_dir, "Background batch export finished: {0} succeeded, {1} failed.".format(completed, failed))
+        return 0
+    finally:
+        try:
+            os.remove(lock_path)
+        except Exception:
+            pass
+
+
+# -- Main entry ---------------------------------------------------------
 
 def main():
     """Entry point.
@@ -811,138 +1043,54 @@ def main():
             )
             return 1
 
-    # ── Single case mode ──────────────────────────────────────────────
+    # -- Single case mode ----------------------------------------------
 
     if case_dir:
-        work_dir = os.path.join(case_dir, "mcs_work")
-        jobs_dir = os.path.join(case_dir, "_export_jobs")
-        job_dir = os.path.join(jobs_dir, os.path.basename(case_dir))
-
-        # Export masks to buffers, then launch bridge + start timer
-        try:
-            built = _export_masks_and_build_params(case_dir, axes, flips, work_dir)
-        except Exception as e:
-            mimics.dialogs.message_box(title="Export Error", message=str(e))
-            raise
-
-        if built is None:
-            mimics.dialogs.message_box(title="Export", message="No masks to export.")
-            return 0
-
-        bridge_params, manifest = built
-        process = _launch_bridge_background(bridge_params, job_dir)
-
-        state = {
-            "phase": "converting",
-            "case_id": os.path.basename(case_dir),
-            "pid": process.pid,
-            "started_at": time.time(),
-        }
-        with open(os.path.join(job_dir, "job_state.json"), "w") as f:
-            json.dump(state, f)
-
-        print("  launched bridge (pid={0}), starting auto-poll timer...".format(process.pid))
-        _start_export_monitor(job_dir, work_dir, case_dir=case_dir)
-        return 0
-
-    # ── Batch mode ────────────────────────────────────────────────────
-    cases = discover_ts_cases(ts_root, cases_filter)
-    if not cases:
+        case_id = os.path.basename(os.path.abspath(case_dir))
+        ts_root = os.path.dirname(os.path.abspath(case_dir))
+        mcs_path = os.path.join(ts_root, "mcs_output", case_id + ".mcs")
+        if not os.path.isfile(mcs_path):
+            mimics.dialogs.message_box(
+                title="Export Error",
+                message=(
+                    "Foreground mask export is disabled to keep Mimics responsive.\n"
+                    "Save the project first, then run export again.\n\n"
+                    "Expected .mcs path:\n{0}"
+                ).format(mcs_path),
+            )
+            return 1
+        process = _launch_background_batch_export(ts_root, set([case_id]), axes, flips)
+        if process is None:
+            mimics.dialogs.message_box(
+                title="Export Error",
+                message="Could not start background export. See mimics_export.log in mcs_output.",
+            )
+            return 1
         mimics.dialogs.message_box(
-            title="Error",
-            message="No cases found in: {0}".format(ts_root),
-        )
-        return 1
-
-    print("Found {0} cases".format(len(cases)))
-
-    # Disk space pre-check: estimate ~200 MB per case (.u8 buffers + NIfTI)
-    estimated_mb = len(cases) * 200
-    ok, free_mb = _check_disk_space(ts_root, estimated_mb)
-    if not ok:
-        mimics.dialogs.message_box(
-            title="Disk Space Warning",
+            title="Export Started",
             message=(
-                "Insufficient disk space on {0}.\n"
-                "Estimated: {1} MB, Available: {2} MB\n"
-                "Aborting to avoid partial failure."
-            ).format(os.path.splitdrive(ts_root)[0], estimated_mb, int(free_mb)),
+                "Export for {0} is running in a background Mimics process.\n"
+                "The current Mimics window remains available.\n\n"
+                "Status/logs: {1}"
+            ).format(case_id, os.path.join(ts_root, "mcs_output")),
         )
-        return 1
-    if free_mb >= 0:
-        print("Disk space: {0} MB free (estimated {1} MB needed)".format(int(free_mb), estimated_mb))
-
-    # Confirm
-    try:
-        proceed = mimics.dialogs.question_box(
-            title="Confirm Export",
-            message="Export masks for {0} cases?\nCases will be processed one-by-one automatically.".format(len(cases)),
-        )
-        if not proceed:
-            print("Cancelled")
-            return 0
-    except Exception:
-        pass
-
-    jobs_dir = os.path.join(ts_root, "mcs_output", "_export_jobs")
-
-    # Start first case, timer will auto-chain to next cases
-    first_case = cases[0]
-    first_case_id = first_case["case_id"]
-    first_c_dir = first_case["case_dir"]
-    first_mcs_path = os.path.join(ts_root, "mcs_output", first_case_id + ".mcs")
-
-    if not os.path.isfile(first_mcs_path):
-        mimics.dialogs.message_box(title="Error", message=".mcs not found: {0}".format(first_mcs_path))
-        return 1
-
-    first_work_dir = os.path.join(ts_root, "mcs_output", first_case_id + "_work")
-    first_job_dir = os.path.join(jobs_dir, first_case_id)
-
-    # Open .mcs, export masks, close .mcs
-    try:
-        print("[1/{0}] {1}".format(len(cases), first_case_id))
-        print("  opening: {0}".format(first_mcs_path))
-        mimics.file.open_project(first_mcs_path)
-        built = _export_masks_and_build_params(first_c_dir, axes, flips, first_work_dir)
-        mimics.file.close_project()
-    except Exception as e:
-        mimics.dialogs.message_box(title="Export Error", message=str(e))
-        try:
-            mimics.file.close_project()
-        except Exception:
-            pass
-        raise
-
-    if built is None:
-        mimics.dialogs.message_box(title="Export", message="No masks to export for first case.")
         return 0
 
-    bridge_params, manifest = built
-    process = _launch_bridge_background(bridge_params, first_job_dir)
-
-    state = {
-        "phase": "converting",
-        "case_id": first_case_id,
-        "pid": process.pid,
-        "started_at": time.time(),
-    }
-    with open(os.path.join(first_job_dir, "job_state.json"), "w") as f:
-        json.dump(state, f)
-
-    print("  launched bridge (pid={0}), starting auto-poll timer...".format(process.pid))
-
-    batch_info = {
-        "total": len(cases),
-        "ts_root": ts_root,
-        "axes": axes,
-        "flips": flips,
-        "jobs_dir": jobs_dir,
-    }
-    _start_export_monitor(
-        first_job_dir, first_work_dir, case_dir=first_c_dir,
-        batch_queue=cases[1:],  # remaining cases
-        batch_info=batch_info,
+    # -- Batch mode -----------------------------------------------------
+    process = _launch_background_batch_export(ts_root, cases_filter, axes, flips)
+    if process is None:
+        mimics.dialogs.message_box(
+            title="Export Error",
+            message="Could not start background batch export. See mimics_export.log in mcs_output.",
+        )
+        return 1
+    mimics.dialogs.message_box(
+        title="Export Started",
+        message=(
+            "Batch export is running in a background Mimics process.\n"
+            "The current Mimics window remains available.\n\n"
+            "Status/logs: {0}"
+        ).format(os.path.join(ts_root, "mcs_output")),
     )
     return 0
 

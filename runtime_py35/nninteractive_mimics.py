@@ -59,6 +59,8 @@ _ASYNC_VISUAL_OBJECTS = {}  # job_dir -> list of Mimics objects to delete after 
 _RUNTIME_PROBE_CACHE = {}
 _ASYNC_MONITORS = {}
 _ASYNC_IMAGE_WORKERS = {}  # image guid -> shared worker state
+LOG_ROTATE_BYTES = 10 * 1024 * 1024
+LOG_ROTATE_BACKUPS = 3
 
 
 def _find_root(start_dir, sentinel_files, max_depth=6):
@@ -192,7 +194,24 @@ def _runtime_log_path(model_dir):
     return os.path.join(log_dir, "nninteractive_mimics.log")
 
 
+def _rotate_log_file(path, max_bytes=LOG_ROTATE_BYTES, backups=LOG_ROTATE_BACKUPS):
+    try:
+        if not os.path.isfile(path) or os.path.getsize(path) < max_bytes:
+            return
+        for index in range(int(backups), 0, -1):
+            src = "{0}.{1}".format(path, index)
+            dst = "{0}.{1}".format(path, index + 1)
+            if os.path.isfile(dst):
+                os.remove(dst)
+            if os.path.isfile(src):
+                os.rename(src, dst)
+        os.rename(path, path + ".1")
+    except Exception:
+        pass
+
+
 def _append_runtime_log(path, event, details=None):
+    _rotate_log_file(path)
     payload = {
         "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "event": event,
@@ -327,16 +346,16 @@ def _mimics_log(level, message):
 def _probe_python(python_exe, timeout):
     """Check that the external Python has the required packages.
 
-    Runs synchronously but with a short timeout.  The result is cached so
-    subsequent calls are instant.  If the probe fails, the error is logged
-    but **not raised** — the bridge process itself will surface real
-    environment problems when it starts, and we don't want to block the
-    Mimics UI for a lengthy subprocess call.
+    The probe must not block the Mimics GUI.  Start it on a daemon thread and
+    return an "unknown/pending" result immediately; the bridge process itself
+    will surface real environment problems when it starts.
     """
     cache_key = (os.path.abspath(python_exe), int(timeout))
     cached = _RUNTIME_PROBE_CACHE.get(cache_key)
     if cached is not None:
         return cached
+    result = {"python": python_exe, "version": [], "missing": [], "pending": True}
+    _RUNTIME_PROBE_CACHE[cache_key] = result
     probe = (
         "import importlib.util,json,sys;"
         "mods=['numpy','nibabel','torch','nnInteractive'];"
@@ -347,51 +366,53 @@ def _probe_python(python_exe, timeout):
         "'missing':missing"
         "}))"
     )
-    try:
-        process = subprocess.Popen(
-            [python_exe, "-c", probe],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            **_hidden_process_kwargs()
-        )
-    except (OSError, ValueError):
-        _mimics_log(
-            logging.WARNING,
-            "Could not launch environment check for {0}. "
-            "Proceeding — the bridge will report any real issues.".format(python_exe),
-        )
-        result = {"python": python_exe, "version": [], "missing": [], "failed": True}
-        _RUNTIME_PROBE_CACHE[cache_key] = result
-        return result
-    try:
-        stdout, stderr = process.communicate(timeout=min(timeout, 30))
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.communicate()
-        _mimics_log(
-            logging.WARNING,
-            "Environment check timed out after 30s for {0}. "
-            "Proceeding — the bridge will report any real issues.".format(python_exe),
-        )
-        result = {"python": python_exe, "version": [], "missing": [], "timed_out": True}
-        _RUNTIME_PROBE_CACHE[cache_key] = result
-        return result
-    if process.returncode != 0:
-        detail = stderr.decode("utf-8", "replace").strip()
-        _mimics_log(
-            logging.WARNING,
-            "Environment check failed for {0}: {1}. "
-            "Proceeding — the bridge will report any real issues.".format(python_exe, detail),
-        )
-        result = {"python": python_exe, "version": [], "missing": [], "failed": True}
-        _RUNTIME_PROBE_CACHE[cache_key] = result
-        return result
-    try:
-        result = json.loads(stdout.decode("utf-8"))
-    except ValueError:
-        result = {"python": python_exe, "version": [], "missing": []}
-    _RUNTIME_PROBE_CACHE[cache_key] = result
+
+    def _run_probe():
+        try:
+            process = subprocess.Popen(
+                [python_exe, "-c", probe],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                **_hidden_process_kwargs()
+            )
+            try:
+                stdout, stderr = process.communicate(timeout=min(timeout, 30))
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate()
+                _RUNTIME_PROBE_CACHE[cache_key] = {
+                    "python": python_exe,
+                    "version": [],
+                    "missing": [],
+                    "timed_out": True,
+                }
+                return
+            if process.returncode != 0:
+                _RUNTIME_PROBE_CACHE[cache_key] = {
+                    "python": python_exe,
+                    "version": [],
+                    "missing": [],
+                    "failed": True,
+                    "stderr": stderr.decode("utf-8", "replace").strip()[:500],
+                }
+                return
+            try:
+                _RUNTIME_PROBE_CACHE[cache_key] = json.loads(stdout.decode("utf-8"))
+            except ValueError:
+                _RUNTIME_PROBE_CACHE[cache_key] = {"python": python_exe, "version": [], "missing": []}
+        except Exception as exc:
+            _RUNTIME_PROBE_CACHE[cache_key] = {
+                "python": python_exe,
+                "version": [],
+                "missing": [],
+                "failed": True,
+                "error": str(exc),
+            }
+
+    thread = threading.Thread(target=_run_probe)
+    thread.daemon = True
+    thread.start()
     return result
 
 
@@ -1088,19 +1109,20 @@ def _capture_mask_prompt(image, include, interaction_type, edit_type, temp_dir, 
         except ImportError:
             pass
 
-        path = os.path.join(
-            temp_dir,
-            "prompt_{0}_{1}.u8".format(interaction_type, uuid.uuid4().hex),
-        )
-        exported = _export_mask(prompt_mask, path)
-        result = {
-            "interaction_type": interaction_type,
-            "include_interaction": bool(include),
-            "mask_path": path,
-            "mask_shape": exported["shape"],
-            "full_shape": exported["shape"],
-            "coordinates": "mimics",
-        }
+        if result is None:
+            path = os.path.join(
+                temp_dir,
+                "prompt_{0}_{1}.u8".format(interaction_type, uuid.uuid4().hex),
+            )
+            exported = _export_mask(prompt_mask, path)
+            result = {
+                "interaction_type": interaction_type,
+                "include_interaction": bool(include),
+                "mask_path": path,
+                "mask_shape": exported["shape"],
+                "full_shape": exported["shape"],
+                "coordinates": "mimics",
+            }
     except mimics.UserInterrupted:
         # User cancelled: clean up the mask immediately.
         try:
@@ -1359,6 +1381,7 @@ class _BridgeWorker(object):
             os.path.dirname(self.runtime_log),
             "nninteractive_worker.stderr.log",
         )
+        _rotate_log_file(self.stderr_path)
         self.stderr_handle = open(self.stderr_path, "ab")
         self.process = subprocess.Popen(
             [
@@ -1480,7 +1503,7 @@ class _BridgeWorker(object):
             "nnInteractive session ready on {0} (server: {1}).{2}".format(
                 result.get("device", "?"),
                 result.get("server_url", "?"),
-                " First call — model was loaded." if result.get("first_call") else "",
+                " First call; model was loaded." if result.get("first_call") else "",
             ),
         )
 
@@ -1680,6 +1703,7 @@ def _cleanup_async_jobs(root, retention_days):
 
 def _start_async_worker(python_exe, bridge_script, worker_dir):
     worker_log_path = os.path.join(worker_dir, "async_worker.log")
+    _rotate_log_file(worker_log_path)
     worker_log = open(worker_log_path, "ab")
     try:
         process = subprocess.Popen(
@@ -2664,10 +2688,15 @@ def run():
     config = _config()
     if str(config.get("execution_mode", "async")).lower() == "async":
         result = _run_async(image, target, config)
-        # Async mode returns 0 after submitting a prompt — the background
+        # Async mode returns 0 after submitting a prompt; the background
         # worker and QTimer monitor are still running.  Don't log "ended".
         return result
-    return _run_sync(image, target, config)
+    _mimics_log(
+        logging.WARNING,
+        "Synchronous nnInteractive mode is disabled because it can block the Mimics GUI. "
+        "Running in async mode instead.",
+    )
+    return _run_async(image, target, config)
 
 
 def _cleanup_stale_processes():

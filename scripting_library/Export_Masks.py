@@ -6,10 +6,10 @@ after finishing annotation to write masks back as NIfTI files into the
 original dataset's segmentations/ directory.
 
 Two modes:
-  1. Single: with a .mcs open in Mimics, enter the case directory → masks
-     are exported to segmentations/
-  2. Batch: enter the dataset root → each .mcs in mcs_output/ is opened and
-     exported back
+  1. Single: enter the case directory. The saved
+     <dataset>/mcs_output/<case>.mcs is exported in a background Mimics process.
+  2. Batch: enter the dataset root. Each saved .mcs in mcs_output/ is exported
+     in a background Mimics process.
 """
 
 from __future__ import print_function
