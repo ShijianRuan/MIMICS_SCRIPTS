@@ -26,6 +26,8 @@ import uuid
 
 import mimics
 
+import runtime_common
+
 
 TITLE = "nnInteractive Segmentation"
 BUTTON_POINT = "Add Points"
@@ -63,29 +65,10 @@ LOG_ROTATE_BYTES = 10 * 1024 * 1024
 LOG_ROTATE_BACKUPS = 3
 
 
-def _find_root(start_dir, sentinel_files, max_depth=6):
-    """Walk upward from *start_dir* until a directory containing one of the
-    *sentinel_files* is found.
-
-    In the repo layout the root contains ``nninteractive_config.json``.  In an
-    exported worklist the root contains ``worklist_manifest.json``.  A bundle
-    is detected by the presence of ``nninteractive_env``.
-    """
-    current = os.path.abspath(start_dir)
-    for _ in range(max_depth):
-        for sentinel in sentinel_files:
-            if os.path.isfile(os.path.join(current, sentinel)):
-                return current
-            if os.path.isdir(os.path.join(current, sentinel)):
-                return current
-        parent = os.path.dirname(current)
-        if parent == current:
-            break
-        current = parent
-    # Fallback: nninteractive_mimics.py is at <root>/runtime_py35/ so two dirname
-    # hops reach the parent of runtime_py35, which is the root in both the worklist
-    # and bundle layouts.
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_find_root = runtime_common.find_root
+_hidden_process_kwargs = runtime_common.hidden_process_kwargs
+_write_json_atomic = runtime_common.write_json_atomic
+_read_json = runtime_common.read_json
 
 
 def _project_root():
@@ -151,33 +134,6 @@ def _first_existing_dir(candidates, description):
     raise RuntimeError("{0} not found. Checked:\n{1}".format(description, "\n".join(checked)))
 
 
-def _hidden_process_kwargs():
-    """Return subprocess kwargs that suppress console windows on Windows.
-
-    Mimics embeds Python 3.5.2 where ``subprocess.CREATE_NO_WINDOW`` may not
-    exist.  We use ``ctypes`` to build the ``STARTUPINFO`` manually so the
-    flag is always applied regardless of the Python version.
-    """
-    if os.name != "nt":
-        return {}
-    import ctypes
-
-    STARTF_USESHOWWINDOW = 0x00000001
-    SW_HIDE = 0
-
-    startupinfo = subprocess.STARTUPINFO()
-    startupinfo.dwFlags |= STARTF_USESHOWWINDOW
-    startupinfo.wShowWindow = SW_HIDE
-
-    # CREATE_NO_WINDOW (0x08000000) | CREATE_NEW_PROCESS_GROUP (0x00000200)
-    creationflags = 0x08000000 | 0x00000200
-
-    return {
-        "startupinfo": startupinfo,
-        "creationflags": creationflags,
-    }
-
-
 def _model_folds(model_dir):
     result = []
     for name in sorted(os.listdir(model_dir)):
@@ -220,23 +176,6 @@ def _append_runtime_log(path, event, details=None):
         payload.update(details)
     with open(path, "a") as handle:
         handle.write(json.dumps(payload, sort_keys=True) + "\n")
-
-
-def _write_json_atomic(path, value):
-    parent = os.path.dirname(path)
-    if parent and not os.path.isdir(parent):
-        os.makedirs(parent)
-    temporary = path + "." + uuid.uuid4().hex + ".tmp"
-    with open(temporary, "w") as handle:
-        json.dump(value, handle, indent=2, sort_keys=True)
-    os.replace(temporary, path)
-
-
-def _read_json(path, default=None):
-    try:
-        return _load_json(path)
-    except (IOError, OSError, ValueError):
-        return default
 
 
 def _sha256_bytes(value):
@@ -2479,7 +2418,7 @@ def _run_async(image, target, config):
             _save_async_job(state)
             return 0
 
-        if state is None and bool(config.get("async_start_worker_before_prompt", True)):
+        if state is None and bool(config.get("async_start_worker_before_prompt", False)):
             _mimics_log(
                 logging.INFO,
                 "nnInteractive is preparing the AI session before prompt capture.",
@@ -2778,9 +2717,10 @@ def main():
     try:
         # Run cleanup in a background thread so Mimics UI does not freeze
         # while PowerShell queries process list.
-        cleanup_thread = threading.Thread(target=_cleanup_stale_processes)
-        cleanup_thread.daemon = True
-        cleanup_thread.start()
+        if os.environ.get("MIMICS_AUTO_CLEANUP_ON_START", "").strip().lower() in ("1", "true", "yes"):
+            cleanup_thread = threading.Thread(target=_cleanup_stale_processes)
+            cleanup_thread.daemon = True
+            cleanup_thread.start()
         result = run()
         # Only log "ended" for sync mode (result 0 from _run_sync means the
         # user finished).  Async mode returns 0 after submitting a prompt

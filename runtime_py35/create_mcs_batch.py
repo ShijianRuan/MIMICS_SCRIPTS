@@ -19,9 +19,10 @@ import shutil
 import sys
 import time
 import traceback
-import uuid
 
 import mimics
+
+import runtime_common
 
 
 QUEUE_ACTIVE_FILE = "_mcs_queue_active.json"
@@ -31,6 +32,8 @@ LOCK_FILE = "_mcs_batch.lock"
 LOG_FILE = "_create_mcs_batch.log"
 LOG_ROTATE_BYTES = 5 * 1024 * 1024
 LOG_BACKUPS = 3
+write_json_atomic = runtime_common.write_json_atomic
+safe_case_filename = runtime_common.safe_filename
 
 
 def rotate_log(path, max_bytes=LOG_ROTATE_BYTES, backups=LOG_BACKUPS):
@@ -59,27 +62,6 @@ def log_message(output_dir, message):
             handle.write(text + "\n")
     except Exception:
         pass
-
-
-def write_json_atomic(path, value):
-    parent = os.path.dirname(path)
-    if parent and not os.path.isdir(parent):
-        os.makedirs(parent)
-    temporary = path + "." + uuid.uuid4().hex + ".tmp"
-    with open(temporary, "w") as handle:
-        json.dump(value, handle, indent=2, sort_keys=True)
-    os.replace(temporary, path)
-
-
-def safe_case_filename(value):
-    text = str(value or "unknown")
-    safe = []
-    for char in text:
-        if char.isalnum() or char in ("-", "_", "."):
-            safe.append(char)
-        else:
-            safe.append("_")
-    return "".join(safe) or "unknown"
 
 
 def record_failed_case(output_dir, case_id, phase, error, traceback_text=None):

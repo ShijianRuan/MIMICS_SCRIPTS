@@ -1,0 +1,13 @@
+{
+  "base_config": "config/synthstrip_lora_segformer3d.yaml",
+  "default_batch_size": 1,
+  "default_epochs": 10,
+  "default_grad_accumulation": 1,
+  "default_img_size": "224,224",
+  "default_lr": 0.001,
+  "default_max_samples": 0,
+  "default_min_samples": 1,
+  "default_modality": "ct",
+  "dinov3_project": "external/dinov3-medical-seg",
+  "python": ""
+}

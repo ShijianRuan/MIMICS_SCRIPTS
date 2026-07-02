@@ -29,6 +29,8 @@ import uuid
 
 import mimics
 
+import runtime_common
+
 
 # -- Global async monitor state ----------------------------------------
 _EXPORT_MONITORS = {}
@@ -36,14 +38,11 @@ _LOG_ROTATE_BYTES = 5 * 1024 * 1024
 _LOG_ROTATE_BACKUPS = 3
 
 
-def _write_json_atomic(path, value):
-    parent = os.path.dirname(path)
-    if parent and not os.path.isdir(parent):
-        os.makedirs(parent)
-    temporary = path + "." + uuid.uuid4().hex + ".tmp"
-    with open(temporary, "w") as f:
-        json.dump(value, f, indent=2, sort_keys=True)
-    os.replace(temporary, path)
+_write_json_atomic = runtime_common.write_json_atomic
+_safe_case_filename = runtime_common.safe_filename
+_find_root = runtime_common.find_root
+_hidden_process_kwargs = runtime_common.hidden_process_kwargs
+_background_process_kwargs = runtime_common.background_process_kwargs
 
 
 def _rotate_log_file(path, max_bytes=_LOG_ROTATE_BYTES, backups=_LOG_ROTATE_BACKUPS):
@@ -76,17 +75,6 @@ def _append_export_log(root_dir, message):
         pass
 
 
-def _safe_case_filename(value):
-    text = str(value or "unknown")
-    safe = []
-    for char in text:
-        if char.isalnum() or char in ("-", "_", "."):
-            safe.append(char)
-        else:
-            safe.append("_")
-    return "".join(safe) or "unknown"
-
-
 def _record_failed_case(output_dir, case_id, phase, error):
     try:
         failed_dir = os.path.join(output_dir or os.getcwd(), "_failed_exports")
@@ -105,20 +93,6 @@ def _record_failed_case(output_dir, case_id, phase, error):
 
 
 # -- Path helpers (shared with mimics_import.py) ------------------------
-
-def _find_root(start_dir, sentinel_files, max_depth=6):
-    current = os.path.abspath(start_dir)
-    for _ in range(max_depth):
-        for sentinel in sentinel_files:
-            if os.path.isfile(os.path.join(current, sentinel)):
-                return current
-            if os.path.isdir(os.path.join(current, sentinel)):
-                return current
-        parent = os.path.dirname(current)
-        if parent == current:
-            break
-        current = parent
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _project_root():
@@ -157,18 +131,8 @@ def _bridge_script():
     return os.path.abspath(candidates[0])
 
 
-def _hidden_process_kwargs():
-    if os.name != "nt":
-        return {}
-    startupinfo = subprocess.STARTUPINFO()
-    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    result = {"startupinfo": startupinfo}
-    if flags:
-        result["creationflags"] = flags
-    return result
+def _background_env(extra=None):
+    return runtime_common.background_env(extra, include_itk=True)
 
 
 def _python_exe():
@@ -241,7 +205,8 @@ def _launch_background_batch_export(ts_root, cases_filter, axes, flips):
             stdin=subprocess.DEVNULL,
             stdout=log_handle,
             stderr=subprocess.STDOUT,
-            **_hidden_process_kwargs()
+            env=_background_env(),
+            **_background_process_kwargs()
         )
         _append_export_log(output_dir, "Background Mimics started (PID={0}) for batch export.".format(process.pid))
         return process
@@ -266,7 +231,8 @@ def call_bridge(params):
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        **_hidden_process_kwargs()
+        env=_background_env(),
+        **_background_process_kwargs()
     )
     stdin_data = json.dumps(params).encode("utf-8")
     try:
@@ -316,7 +282,8 @@ def _launch_bridge_background(bridge_params, job_dir):
             stdin=stdin_handle,
             stdout=stdout_handle,
             stderr=stderr_handle,
-            **_hidden_process_kwargs()
+            env=_background_env(),
+            **_background_process_kwargs()
         )
     finally:
         stdin_handle.close()
@@ -879,7 +846,7 @@ def run_background_batch_export(config_path):
     ts_root = config.get("ts_root")
     cases_filter = config.get("cases")
     cases_filter = set(cases_filter) if cases_filter else None
-    axes = config.get("axes") or [0, 1, 2]
+    axes = config.get("axes") or [1, 0, 2]
     flips = config.get("flips") or [False, False, False]
     output_dir = os.path.join(ts_root, "mcs_output")
     if not os.path.isdir(output_dir):
@@ -988,25 +955,25 @@ def main():
     """Entry point.
 
     Usage:
-        mimics_export.py --case-dir <dir> [--axes 0,1,2] [--flips false,false,false]
-        mimics_export.py --ts-root <dir> [--cases s0000,s0001] [--axes 0,1,2] [--flips false,false,false]
+        mimics_export.py --case-dir <dir> [--axes 1,0,2] [--flips false,false,false]
+        mimics_export.py --ts-root <dir> [--cases s0000,s0001] [--axes 1,0,2] [--flips false,false,false]
     """
-    # Clean up any leftover processes / lock files from a previous crashed session.
-    # Run in background so Mimics UI does not freeze during PowerShell queries.
+    # Cleanup is opt-in. Use Stop_Background_Services.py for manual cleanup.
     try:
         here = os.path.dirname(os.path.abspath(__file__))
         sys.path.insert(0, here)
         from mimics_import import _cleanup_stale_processes
-        cleanup_thread = threading.Thread(target=_cleanup_stale_processes)
-        cleanup_thread.daemon = True
-        cleanup_thread.start()
+        if os.environ.get("MIMICS_AUTO_CLEANUP_ON_START", "").strip().lower() in ("1", "true", "yes"):
+            cleanup_thread = threading.Thread(target=_cleanup_stale_processes)
+            cleanup_thread.daemon = True
+            cleanup_thread.start()
     except Exception:
         pass
 
     ts_root = None
     case_dir = None
     cases_filter = None
-    axes = [0, 1, 2]
+    axes = [1, 0, 2]
     flips = [False, False, False]
 
     args = sys.argv[1:]

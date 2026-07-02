@@ -29,6 +29,8 @@ import uuid
 
 import mimics
 
+import runtime_common
+
 
 # -- Global async monitor state ----------------------------------------
 _IMPORT_MONITORS = {}
@@ -45,14 +47,11 @@ def _auto_open_mcs_enabled():
     return os.environ.get("MIMICS_IMPORT_AUTO_OPEN_MCS", "").strip().lower() in ("1", "true", "yes")
 
 
-def _write_json_atomic(path, value):
-    parent = os.path.dirname(path)
-    if parent and not os.path.isdir(parent):
-        os.makedirs(parent)
-    temporary = path + "." + uuid.uuid4().hex + ".tmp"
-    with open(temporary, "w") as f:
-        json.dump(value, f, indent=2, sort_keys=True)
-    os.replace(temporary, path)
+_write_json_atomic = runtime_common.write_json_atomic
+_safe_case_filename = runtime_common.safe_filename
+_find_root = runtime_common.find_root
+_hidden_process_kwargs = runtime_common.hidden_process_kwargs
+_background_process_kwargs = runtime_common.background_process_kwargs
 
 
 def _rotate_log_file(path, max_bytes=_LOG_ROTATE_BYTES, backups=_LOG_ROTATE_BACKUPS):
@@ -143,17 +142,6 @@ def _save_prepare_manifest(work_dir, result, output_mcs=None):
     return path
 
 
-def _safe_case_filename(value):
-    text = str(value or "unknown")
-    safe = []
-    for char in text:
-        if char.isalnum() or char in ("-", "_", "."):
-            safe.append(char)
-        else:
-            safe.append("_")
-    return "".join(safe) or "unknown"
-
-
 def _record_failed_case(output_dir, case_id, phase, error):
     try:
         failed_dir = os.path.join(output_dir or os.getcwd(), "_failed_cases")
@@ -175,20 +163,6 @@ def _record_failed_case(output_dir, case_id, phase, error):
 
 
 # -- Path helpers (same pattern as nninteractive_mimics.py) -------------
-
-def _find_root(start_dir, sentinel_files, max_depth=6):
-    current = os.path.abspath(start_dir)
-    for _ in range(max_depth):
-        for sentinel in sentinel_files:
-            if os.path.isfile(os.path.join(current, sentinel)):
-                return current
-            if os.path.isdir(os.path.join(current, sentinel)):
-                return current
-        parent = os.path.dirname(current)
-        if parent == current:
-            break
-        current = parent
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _project_root():
@@ -228,30 +202,8 @@ def _bridge_script():
     return os.path.abspath(candidates[0])
 
 
-def _hidden_process_kwargs():
-    """Return subprocess kwargs that suppress console windows on Windows.
-
-    Mimics embeds Python 3.5.2 where ``subprocess.CREATE_NO_WINDOW`` may not
-    exist.  We use hardcoded Win32 constants so the flag is always applied.
-    """
-    if os.name != "nt":
-        return {}
-    import ctypes
-
-    STARTF_USESHOWWINDOW = 0x00000001
-    SW_HIDE = 0
-
-    startupinfo = subprocess.STARTUPINFO()
-    startupinfo.dwFlags |= STARTF_USESHOWWINDOW
-    startupinfo.wShowWindow = SW_HIDE
-
-    # CREATE_NO_WINDOW (0x08000000) | CREATE_NEW_PROCESS_GROUP (0x00000200)
-    creationflags = 0x08000000 | 0x00000200
-
-    return {
-        "startupinfo": startupinfo,
-        "creationflags": creationflags,
-    }
+def _background_env(extra=None):
+    return runtime_common.background_env(extra, include_itk=True)
 
 
 def _python_exe():
@@ -556,13 +508,55 @@ def _launch_bridge_background(bridge_params, job_dir):
             stdin=stdin_handle,
             stdout=stdout_handle,
             stderr=stderr_handle,
-            **_hidden_process_kwargs()
+            env=_background_env(),
+            **_background_process_kwargs()
         )
     finally:
         stdin_handle.close()
         stdout_handle.close()
         stderr_handle.close()
     return process
+
+
+def _launch_bridge_job_thread(bridge_params, job_dir, output_dir, phase, case_id=None):
+    """Start bridge from a worker thread so Mimics GUI can repaint first."""
+    def _run():
+        try:
+            process = _launch_bridge_background(bridge_params, job_dir)
+            state = {
+                "phase": phase,
+                "pid": process.pid,
+                "started_at": time.time(),
+            }
+            if case_id:
+                state["case_id"] = case_id
+            _write_json_atomic(os.path.join(job_dir, "job_state.json"), state)
+            _append_import_log(output_dir, "Bridge process started (PID={0}) for {1}.".format(process.pid, phase))
+        except Exception as exc:
+            _append_import_log(output_dir, "Could not start bridge process for {0}: {1}".format(phase, exc))
+            try:
+                _write_json_atomic(
+                    os.path.join(job_dir, "bridge_result.json"),
+                    {"status": "error", "error": str(exc)},
+                )
+            except Exception:
+                pass
+
+    if not os.path.isdir(job_dir):
+        os.makedirs(job_dir)
+    _write_json_atomic(
+        os.path.join(job_dir, "job_state.json"),
+        {
+            "phase": "launching",
+            "requested_phase": phase,
+            "case_id": case_id or "",
+            "started_at": time.time(),
+        },
+    )
+    thread = threading.Thread(target=_run)
+    thread.daemon = True
+    thread.start()
+    return thread
 
 
 def _is_pid_alive(pid):
@@ -612,13 +606,17 @@ def _check_job_status(job_dir):
 
     # No valid result - check if process is alive
     pid = None
+    phase = ""
     if os.path.isfile(state_file):
         try:
             with open(state_file, "r") as f:
                 state = json.load(f)
             pid = state.get("pid")
+            phase = state.get("phase", "")
         except (ValueError, IOError):
             pass
+    if phase == "launching":
+        return ("running", None)
 
     if pid and _is_pid_alive(pid):
         return ("running", None)
@@ -1226,7 +1224,8 @@ def _launch_background_mimics(output_dir, total_count=0):
             stdin=subprocess.DEVNULL,
             stdout=log_handle,
             stderr=subprocess.STDOUT,
-            **_hidden_process_kwargs()
+            env=_background_env(),
+            **_background_process_kwargs()
         )
         _BG_MIMICS_PID = process.pid
         _append_import_log(
@@ -1773,14 +1772,15 @@ def main():
     """Entry point. Reads config from argv or interactive dialog.
 
     Usage:
-        mimics_import.py --ts-root <dir> [--cases s0000,s0001] [--output-dir <dir>] [--axes 0,1,2] [--flips false,false,false]
-        mimics_import.py --case-dir <dir> --output <file.mcs> [--axes 0,1,2] [--flips false,false,false]
+        mimics_import.py --ts-root <dir> [--cases s0000,s0001] [--output-dir <dir>] [--axes 1,0,2] [--flips false,false,false]
+        mimics_import.py --case-dir <dir> --output <file.mcs> [--axes 1,0,2] [--flips false,false,false]
     """
-    # Clean up any leftover processes / lock files from a previous crashed session.
-    # Run in background so Mimics UI does not freeze during PowerShell queries.
-    cleanup_thread = threading.Thread(target=_cleanup_stale_processes)
-    cleanup_thread.daemon = True
-    cleanup_thread.start()
+    # Cleanup is intentionally opt-in. Process enumeration can briefly contend
+    # with Mimics UI; use Stop_Background_Services.py for manual cleanup.
+    if os.environ.get("MIMICS_AUTO_CLEANUP_ON_START", "").strip().lower() in ("1", "true", "yes"):
+        cleanup_thread = threading.Thread(target=_cleanup_stale_processes)
+        cleanup_thread.daemon = True
+        cleanup_thread.start()
 
     # Parse args (simple, Python 3.5 compatible)
     ts_root = None
@@ -1788,7 +1788,7 @@ def main():
     output = None
     output_dir = None
     cases_filter = None
-    axes = [0, 1, 2]
+    axes = [1, 0, 2]
     flips = [False, False, False]
 
     args = sys.argv[1:]
@@ -1911,14 +1911,7 @@ def main():
         "ts_root": ts_root,
         "cases_filter": list(cases_filter) if cases_filter else None,
     }
-    process = _launch_bridge_background(bridge_params, discover_job_dir)
-
-    state = {
-        "phase": "discovering",
-        "pid": process.pid,
-        "started_at": time.time(),
-    }
-    _write_json_atomic(os.path.join(discover_job_dir, "job_state.json"), state)
+    _launch_bridge_job_thread(bridge_params, discover_job_dir, output_dir, "discovering")
     _start_import_discover_monitor(
         discover_job_dir,
         ts_root,

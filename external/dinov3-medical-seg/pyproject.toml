@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dinov3-medical-seg"
+version = "0.1.0"
+description = "DINOv3 few-shot fine-tuning for 3D medical image segmentation"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0",
+    "torchvision>=0.15",
+    "transformers>=4.56.0",
+    "numpy>=1.24",
+    "pyyaml>=6.0",
+    "nibabel>=5.2",
+    "tqdm>=4.65",
+    "tensorboard>=2.14",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

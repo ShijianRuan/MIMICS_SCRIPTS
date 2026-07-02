@@ -24,6 +24,8 @@ import numpy as np
 
 RAS_TO_LPS = np.diag([-1.0, -1.0, 1.0, 1.0])
 LPS_TO_RAS = RAS_TO_LPS
+DEFAULT_MIMICS_BUFFER_AXES = [1, 0, 2]
+DEFAULT_MIMICS_BUFFER_FLIPS = [False, False, False]
 
 
 def _voxel_spacing_from_affine(affine: np.ndarray) -> np.ndarray:
@@ -32,9 +34,16 @@ def _voxel_spacing_from_affine(affine: np.ndarray) -> np.ndarray:
 
 
 def _unit_axis(affine: np.ndarray, axis: int, spacing: np.ndarray) -> np.ndarray:
-    vector = affine[:3, axis] / float(spacing[axis])
+    spacing_value = float(spacing[axis])
+    if not np.isfinite(spacing_value) or spacing_value <= 0:
+        raise ValueError(
+            "invalid affine axis {}: non-positive spacing {}".format(axis, spacing_value)
+        )
+    vector = affine[:3, axis].astype(float) / spacing_value
+    if not np.all(np.isfinite(vector)):
+        raise ValueError("invalid affine axis {}: non-finite direction".format(axis))
     norm = np.linalg.norm(vector)
-    if norm <= 0:
+    if not np.isfinite(norm) or norm <= 0:
         raise ValueError("invalid affine axis {}: zero-length direction".format(axis))
     return vector / norm
 
@@ -211,6 +220,59 @@ def read_nifti_mask(path: str) -> np.ndarray:
     return (array != 0).astype(np.uint8)
 
 
+def read_nifti_mask_with_affine(path: str) -> tuple[np.ndarray, np.ndarray]:
+    import nibabel as nib
+    img = nib.load(path)
+    array = np.asanyarray(img.dataobj)
+    if array.ndim != 3:
+        raise ValueError("mask must be 3D: {} shape={}".format(path, array.shape))
+    return (array != 0).astype(np.uint8), img.affine.copy()
+
+
+def _affine_close(left: np.ndarray, right: np.ndarray, atol: float = 1e-4) -> bool:
+    return bool(np.allclose(left, right, atol=atol, rtol=0.0))
+
+
+def resample_mask_to_image_grid(
+    mask: np.ndarray,
+    mask_affine: np.ndarray,
+    image_shape: tuple[int, int, int],
+    image_affine: np.ndarray,
+) -> np.ndarray:
+    """Nearest-neighbor resample of a mask into image voxel index space."""
+    if tuple(mask.shape) == tuple(image_shape) and _affine_close(mask_affine, image_affine):
+        return np.ascontiguousarray(mask.astype(np.uint8))
+
+    inv_mask_affine = np.linalg.inv(mask_affine)
+    out = np.zeros(tuple(int(v) for v in image_shape), dtype=np.uint8)
+    x_count, y_count, z_count = [int(v) for v in image_shape]
+    yy_template = np.arange(y_count, dtype=float)
+    xx_template = np.arange(x_count, dtype=float)
+
+    # Work slice-by-slice to avoid allocating a full 4D coordinate grid for
+    # large CT volumes.
+    for z_index in range(z_count):
+        xx, yy = np.meshgrid(xx_template, yy_template, indexing="ij")
+        coords = np.vstack([
+            xx.reshape(1, -1),
+            yy.reshape(1, -1),
+            np.full((1, x_count * y_count), float(z_index)),
+            np.ones((1, x_count * y_count), dtype=float),
+        ])
+        src = inv_mask_affine @ (image_affine @ coords)
+        src_idx = np.rint(src[:3]).astype(np.int64)
+        valid = (
+            (src_idx[0] >= 0) & (src_idx[0] < mask.shape[0]) &
+            (src_idx[1] >= 0) & (src_idx[1] < mask.shape[1]) &
+            (src_idx[2] >= 0) & (src_idx[2] < mask.shape[2])
+        )
+        if np.any(valid):
+            values = np.zeros(x_count * y_count, dtype=np.uint8)
+            values[valid] = mask[src_idx[0, valid], src_idx[1, valid], src_idx[2, valid]]
+            out[:, :, z_index] = values.reshape((x_count, y_count))
+    return np.ascontiguousarray(out)
+
+
 def apply_buffer_mapping(array: np.ndarray, axes: list[int], flips: list[bool]) -> np.ndarray:
     transformed = np.transpose(array, axes)
     for axis, flip in enumerate(flips):
@@ -246,6 +308,17 @@ def get_image_affine(image_path: str) -> np.ndarray:
         raise ValueError("image file not found: {}".format(image_path))
     img = nib.load(image_path)
     return img.affine.copy()
+
+
+def get_image_shape(image_path: str) -> tuple[int, int, int]:
+    import nibabel as nib
+    if not Path(image_path).is_file():
+        raise ValueError("image file not found: {}".format(image_path))
+    img = nib.load(image_path)
+    shape = tuple(int(value) for value in img.shape[:3])
+    if len(shape) != 3:
+        raise ValueError("image must be 3D: {} shape={}".format(image_path, img.shape))
+    return shape
 
 
 def get_image_affine_from_dicom(dicom_folder: str) -> np.ndarray:
@@ -336,21 +409,40 @@ def do_prepare(params: dict) -> dict:
     masks = params.get("masks", [])
     dicom_out = params.get("dicom_out", "")
     buffers_out = params["buffers_out"]
-    axes = params.get("axes", [0, 1, 2])
-    flips = params.get("flips", [False, False, False])
+    axes = params.get("axes", DEFAULT_MIMICS_BUFFER_AXES)
+    flips = params.get("flips", DEFAULT_MIMICS_BUFFER_FLIPS)
 
     os.makedirs(buffers_out, exist_ok=True)
 
     # Determine image source
     if is_dicom_folder(image_path):
         dicom_folder = image_path
+        image_affine = get_image_affine_from_dicom(image_path)
+        image_shape = None
     elif is_nifti_file(image_path):
         if not dicom_out:
             return {"status": "error", "error": "dicom_out required for NIfTI images"}
         info = nifti_to_derived_dicom(image_path, dicom_out, case_id=params.get("case_id", "case"))
         dicom_folder = info["dicom_folder"]
+        image_affine = get_image_affine(image_path)
+        image_shape = tuple(int(v) for v in info["shape"])
     else:
         return {"status": "error", "error": "image path is neither DICOM folder nor NIfTI file: {}".format(image_path)}
+    if image_shape is None:
+        import pydicom
+        headers = []
+        for p in sorted(Path(dicom_folder).rglob("*")):
+            if not p.is_file():
+                continue
+            try:
+                ds = pydicom.dcmread(str(p), stop_before_pixels=True, force=False)
+            except Exception:
+                continue
+            if hasattr(ds, "Rows") and hasattr(ds, "Columns"):
+                headers.append(ds)
+        if not headers:
+            return {"status": "error", "error": "no readable DICOM slices in: {}".format(dicom_folder)}
+        image_shape = (int(headers[0].Columns), int(headers[0].Rows), int(len(headers)))
 
     # Convert masks -> .u8
     mask_results = []
@@ -359,8 +451,9 @@ def do_prepare(params: dict) -> dict:
         mask_path = m["path"]
         if not Path(mask_path).is_file():
             return {"status": "error", "error": "mask file not found: {}".format(mask_path)}
-        array = read_nifti_mask(mask_path)
-        transformed = apply_buffer_mapping(array, axes, flips)
+        array, mask_affine = read_nifti_mask_with_affine(mask_path)
+        image_grid_mask = resample_mask_to_image_grid(array, mask_affine, image_shape, image_affine)
+        transformed = apply_buffer_mapping(image_grid_mask, axes, flips)
         u8_path = os.path.join(buffers_out, name + ".u8")
         with open(u8_path, "wb") as f:
             f.write(transformed.tobytes(order="C"))
@@ -369,6 +462,9 @@ def do_prepare(params: dict) -> dict:
             "u8_path": u8_path,
             "mimics_shape": list(transformed.shape),
             "nifti_shape": list(array.shape),
+            "image_shape": list(image_shape),
+            "buffer_axes": list(axes),
+            "buffer_flips": list(flips),
         })
 
     return {
@@ -384,8 +480,8 @@ def do_convert(params: dict) -> dict:
     buffers_dir = params["buffers_dir"]
     manifest_path = params["manifest_path"]
     case_dir = params["case_dir"]
-    axes = params.get("axes", [0, 1, 2])
-    flips = params.get("flips", [False, False, False])
+    axes = params.get("axes", DEFAULT_MIMICS_BUFFER_AXES)
+    flips = params.get("flips", DEFAULT_MIMICS_BUFFER_FLIPS)
 
     # Read manifest
     with open(manifest_path, "r", encoding="utf-8") as f:
@@ -464,6 +560,54 @@ def do_convert(params: dict) -> dict:
         "total_new": total_new,
         "total_overwritten": total_overwritten,
         "total_unchanged": total_unchanged,
+    }
+
+
+def do_mask_to_buffer(params: dict) -> dict:
+    """Convert a NIfTI mask into a Mimics-shaped .u8 buffer for foreground apply."""
+    image_path = params["image_path"]
+    mask_path = params["mask_path"]
+    output_path = params["output_path"]
+    axes = params.get("axes", DEFAULT_MIMICS_BUFFER_AXES)
+    flips = params.get("flips", DEFAULT_MIMICS_BUFFER_FLIPS)
+
+    if is_dicom_folder(image_path):
+        image_affine = get_image_affine_from_dicom(image_path)
+        import pydicom
+        headers = []
+        for p in sorted(Path(image_path).rglob("*")):
+            if not p.is_file():
+                continue
+            try:
+                ds = pydicom.dcmread(str(p), stop_before_pixels=True, force=False)
+            except Exception:
+                continue
+            if hasattr(ds, "Rows") and hasattr(ds, "Columns"):
+                headers.append(ds)
+        if not headers:
+            return {"status": "error", "error": "no readable DICOM slices in: {}".format(image_path)}
+        image_shape = (int(headers[0].Columns), int(headers[0].Rows), int(len(headers)))
+    elif is_nifti_file(image_path):
+        image_affine = get_image_affine(image_path)
+        image_shape = get_image_shape(image_path)
+    else:
+        return {"status": "error", "error": "image path is neither DICOM folder nor NIfTI file: {}".format(image_path)}
+
+    mask, mask_affine = read_nifti_mask_with_affine(mask_path)
+    image_grid_mask = resample_mask_to_image_grid(mask, mask_affine, image_shape, image_affine)
+    transformed = apply_buffer_mapping(image_grid_mask, axes, flips)
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with open(str(output), "wb") as handle:
+        handle.write(transformed.tobytes(order="C"))
+    return {
+        "status": "ok",
+        "output_path": str(output),
+        "mimics_shape": [int(value) for value in transformed.shape],
+        "image_shape": [int(value) for value in image_shape],
+        "foreground_voxels": int(np.count_nonzero(image_grid_mask)),
+        "buffer_axes": list(axes),
+        "buffer_flips": list(flips),
     }
 
 
@@ -569,6 +713,8 @@ def main():
             result = do_prepare(params)
         elif action == "convert":
             result = do_convert(params)
+        elif action == "mask_to_buffer":
+            result = do_mask_to_buffer(params)
         elif action == "discover":
             result = do_discover(params)
         elif action == "discover_case_dirs":

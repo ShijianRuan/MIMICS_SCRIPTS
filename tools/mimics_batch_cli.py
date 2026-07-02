@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+"""External batch utilities for Mimics-Script.
+
+This script runs outside the foreground Mimics GUI.
+
+Commands:
+  prepare-import  Convert dataset cases to prepare manifests and optionally
+                  launch background Mimics to create .mcs files.
+  export-labels   Launch background Mimics to export labels from saved .mcs.
+  kill-background Stop integration-created bridge, background Mimics, and
+                  nnInteractive service processes.
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+import uuid
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+BRIDGE = ROOT / "mimics_bridge.py"
+RUNTIME = ROOT / "runtime_py35"
+
+
+def write_json_atomic(path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    os.replace(str(tmp), str(path))
+
+
+def run_bridge(python_exe, params):
+    env = os.environ.copy()
+    env.setdefault("OMP_NUM_THREADS", "1")
+    env.setdefault("MKL_NUM_THREADS", "1")
+    env.setdefault("OPENBLAS_NUM_THREADS", "1")
+    env.setdefault("ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS", "1")
+    proc = subprocess.run(
+        [python_exe, str(BRIDGE)],
+        input=json.dumps(params).encode("utf-8"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.decode("utf-8", "replace")[:2000])
+    try:
+        result = json.loads(proc.stdout.decode("utf-8"))
+    except Exception as exc:
+        raise RuntimeError("bridge returned invalid JSON: {}".format(exc))
+    if result.get("status") != "ok":
+        raise RuntimeError(result.get("error", "bridge returned non-ok status"))
+    return result
+
+
+def find_mimics_exe(explicit=None):
+    if explicit and Path(explicit).is_file():
+        return explicit
+    candidates = [
+        Path(os.environ.get("MIMICS_EXE", "")),
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Materialise" / "Mimics Research 21.0" / "MimicsResearch.exe",
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Mimics Research 21.0" / "MimicsResearch.exe",
+        Path(r"D:\Mimics Research 21.0\MimicsResearch.exe"),
+        Path(r"C:\Mimics Research 21.0\MimicsResearch.exe"),
+    ]
+    for candidate in candidates:
+        if str(candidate) and candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def discover_cases(ts_root, cases, python_exe):
+    result = run_bridge(
+        python_exe,
+        {
+            "action": "discover",
+            "ts_root": str(ts_root),
+            "cases_filter": sorted(cases) if cases else None,
+        },
+    )
+    return list(result.get("cases", []))
+
+
+def launch_create_mcs(output_dir, mimics_exe):
+    runner = output_dir / "_run_create_mcs.py"
+    runner.write_text(
+        "\n".join([
+            "# Auto-generated runner for background Mimics .mcs creation",
+            "import sys, os",
+            "sys.path.insert(0, r'{}')".format(str(RUNTIME)),
+            "import create_mcs_batch",
+            "create_mcs_batch.main(r'{}')".format(str(output_dir)),
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    log = open(str(output_dir / "_background_mimics.log"), "ab")
+    try:
+        return subprocess.Popen(
+            [mimics_exe, "-b", "-run_script", str(runner)],
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+    finally:
+        log.close()
+
+
+def launch_export_labels(ts_root, cases, mimics_exe, axes, flips):
+    output_dir = ts_root / "mcs_output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    config = output_dir / "_export_batch_config.json"
+    runner = output_dir / "_run_export_batch.py"
+    write_json_atomic(
+        config,
+        {
+            "ts_root": str(ts_root),
+            "cases": sorted(cases) if cases else None,
+            "axes": axes,
+            "flips": flips,
+        },
+    )
+    runner.write_text(
+        "\n".join([
+            "# Auto-generated runner for background Mimics batch export",
+            "import sys, os",
+            "sys.path.insert(0, r'{}')".format(str(RUNTIME)),
+            "import mimics_export",
+            "mimics_export.run_background_batch_export(r'{}')".format(str(config)),
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    log = open(str(output_dir / "_background_export_mimics.log"), "ab")
+    try:
+        return subprocess.Popen(
+            [mimics_exe, "-b", "-run_script", str(runner)],
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+    finally:
+        log.close()
+
+
+def cmd_prepare_import(args):
+    ts_root = Path(args.ts_root).resolve()
+    output_dir = Path(args.output_dir).resolve() if args.output_dir else ts_root / "mcs_output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    cases_filter = set(args.cases.split(",")) if args.cases else None
+    cases = discover_cases(ts_root, cases_filter, args.python)
+    print("Discovered {} case(s).".format(len(cases)))
+    write_json_atomic(output_dir / "_mcs_queue_active.json", {"total": len(cases), "created_at_epoch": time.time()})
+    completed = 0
+    failed = 0
+    for index, case in enumerate(cases, 1):
+        case_id = case["case_id"]
+        work_dir = output_dir / (case_id + "_work")
+        print("[{}/{}] Preparing {}".format(index, len(cases), case_id))
+        params = {
+            "action": "prepare",
+            "image_path": case["image"],
+            "masks": case.get("masks", []),
+            "dicom_out": str(work_dir / "derived_dicom"),
+            "buffers_out": str(work_dir / "buffers"),
+            "axes": args.axes,
+            "flips": args.flips,
+            "case_id": case_id,
+        }
+        try:
+            result = run_bridge(args.python, params)
+            result["output_mcs"] = str(output_dir / (case_id + ".mcs"))
+            write_json_atomic(work_dir / "prepare_manifest.json", result)
+            completed += 1
+        except Exception as exc:
+            failed += 1
+            fail_dir = output_dir / "_failed_cases"
+            write_json_atomic(fail_dir / (case_id + "_prepare.json"), {"case_id": case_id, "error": str(exc)})
+            print("  failed: {}".format(exc))
+    active = output_dir / "_mcs_queue_active.json"
+    if active.exists():
+        active.unlink()
+    write_json_atomic(output_dir / "_mcs_queue_done.json", {"completed": completed, "failed": failed, "updated_at_epoch": time.time()})
+    if args.no_create_mcs:
+        return 0
+    mimics_exe = find_mimics_exe(args.mimics_exe)
+    if not mimics_exe:
+        print("MimicsResearch.exe was not found. Manifests are ready; run .mcs creation later.", file=sys.stderr)
+        return 2
+    proc = launch_create_mcs(output_dir, mimics_exe)
+    print("Background Mimics started for .mcs creation, PID={}".format(proc.pid))
+    return 0
+
+
+def cmd_export_labels(args):
+    mimics_exe = find_mimics_exe(args.mimics_exe)
+    if not mimics_exe:
+        print("MimicsResearch.exe was not found.", file=sys.stderr)
+        return 2
+    cases = set(args.cases.split(",")) if args.cases else None
+    proc = launch_export_labels(Path(args.ts_root).resolve(), cases, mimics_exe, args.axes, args.flips)
+    print("Background Mimics started for label export, PID={}".format(proc.pid))
+    return 0
+
+
+def cmd_kill_background(args):
+    if os.name != "nt":
+        print("Process cleanup is implemented for Windows Mimics workstations.")
+        return 0
+    markers = [
+        "mimics_bridge.py",
+        "nninteractive_bridge.py",
+        "--async-worker",
+        "_run_create_mcs.py",
+        "_run_export_batch.py",
+        "fewshot_pipeline.py",
+        "nninteractive.inference.server.main",
+        "--watchdog",
+    ]
+    ps_markers = "@(" + ",".join("'{}'".format(m.replace("'", "''")) for m in markers) + ")"
+    command = (
+        "$markers={};"
+        "Get-CimInstance Win32_Process | Where-Object {{"
+        "$cmd=$_.CommandLine; $cmd -and ($markers | Where-Object {{ $cmd -like ('*' + $_ + '*') }})"
+        "}} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}"
+    ).format(ps_markers)
+    subprocess.Popen(["powershell", "-NoProfile", "-Command", command], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print("Stop request submitted for integration background processes.")
+    return 0
+
+
+def parse_axes(value):
+    result = [int(part.strip()) for part in value.split(",")]
+    if sorted(result) != [0, 1, 2]:
+        raise argparse.ArgumentTypeError("axes must be a permutation like 1,0,2")
+    return result
+
+
+def parse_flips(value):
+    parts = [part.strip().lower() for part in value.split(",")]
+    if len(parts) != 3:
+        raise argparse.ArgumentTypeError("flips must have three values")
+    return [part in ("1", "true", "yes") for part in parts]
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command")
+
+    p = sub.add_parser("prepare-import", help="Prepare dataset import and optionally create .mcs in background Mimics")
+    p.add_argument("--ts-root", required=True)
+    p.add_argument("--output-dir")
+    p.add_argument("--cases")
+    p.add_argument("--python", default=sys.executable)
+    p.add_argument("--mimics-exe")
+    p.add_argument("--axes", type=parse_axes, default=[1, 0, 2])
+    p.add_argument("--flips", type=parse_flips, default=[False, False, False])
+    p.add_argument("--no-create-mcs", action="store_true")
+    p.set_defaults(func=cmd_prepare_import)
+
+    p = sub.add_parser("export-labels", help="Export labels from saved .mcs files in background Mimics")
+    p.add_argument("--ts-root", required=True)
+    p.add_argument("--cases")
+    p.add_argument("--mimics-exe")
+    p.add_argument("--axes", type=parse_axes, default=[1, 0, 2])
+    p.add_argument("--flips", type=parse_flips, default=[False, False, False])
+    p.set_defaults(func=cmd_export_labels)
+
+    p = sub.add_parser("kill-background", help="Stop integration-created background processes")
+    p.set_defaults(func=cmd_kill_background)
+
+    args = parser.parse_args(argv)
+    if not hasattr(args, "func"):
+        parser.print_help()
+        return 2
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

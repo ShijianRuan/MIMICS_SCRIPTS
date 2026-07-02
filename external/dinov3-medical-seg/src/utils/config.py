@@ -1,0 +1,76 @@
+"""YAML configuration loading with deep merge support."""
+
+import yaml
+import os
+from typing import Dict, Any
+
+
+def load_config(config_path: str, overrides: dict = None) -> Dict[str, Any]:
+    """Load a YAML config file with optional override dict.
+
+    Supports _base_ inheritance: if config has a _base_ key pointing to
+    another YAML file, that base config is loaded first and overridden
+    by the current config.
+
+    Args:
+        config_path: path to YAML config file
+        overrides: dict of dotted keys to override (e.g. {'training.lr': 1e-4})
+
+    Returns:
+        merged config dict
+    """
+    config = _load_yaml(config_path)
+
+    # Handle _base_ inheritance
+    if "_base_" in config:
+        base_path = config.pop("_base_")
+        if not os.path.isabs(base_path[0]) if isinstance(base_path, list) else False:
+            # Resolve relative to current config
+            config_dir = os.path.dirname(os.path.abspath(config_path))
+            if isinstance(base_path, list):
+                base_paths = [os.path.join(config_dir, bp) for bp in base_path]
+            else:
+                base_paths = [os.path.join(config_dir, base_path)]
+        else:
+            base_paths = base_path if isinstance(base_path, list) else [base_path]
+
+        # Load and merge bases (later bases override earlier)
+        base_config = {}
+        for bp in base_paths:
+            base_config = deep_merge(base_config, load_config(bp))
+        config = deep_merge(base_config, config)
+
+    # Apply CLI overrides
+    if overrides:
+        for key, value in overrides.items():
+            _set_nested(config, key, value)
+
+    return config
+
+
+def _load_yaml(path: str) -> dict:
+    with open(path, "r") as f:
+        return yaml.safe_load(f) or {}
+
+
+def deep_merge(base: dict, override: dict) -> dict:
+    """Recursively merge override into base."""
+    result = base.copy()
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def _set_nested(d: dict, key: str, value: Any):
+    """Set a nested dict value by dotted key: 'training.lr' → d['training']['lr']."""
+    keys = key.split(".")
+    for k in keys[:-1]:
+        d = d.setdefault(k, {})
+    # Auto-convert types
+    existing = d.get(keys[-1])
+    if existing is not None and not isinstance(value, type(existing)):
+        value = type(existing)(value)
+    d[keys[-1]] = value
