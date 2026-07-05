@@ -4,6 +4,10 @@ nninteractive_env/
 # Logs
 logs/
 
+# State files (per-user/machine)
+.fewshot_mimics_state.json
+.mimics_window_level_state.json
+
 # System files
 .DS_Store
 __pycache__/

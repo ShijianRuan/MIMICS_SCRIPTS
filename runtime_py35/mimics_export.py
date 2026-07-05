@@ -49,11 +49,16 @@ def _rotate_log_file(path, max_bytes=_LOG_ROTATE_BYTES, backups=_LOG_ROTATE_BACK
     try:
         if not os.path.isfile(path) or os.path.getsize(path) < max_bytes:
             return
-        for index in range(int(backups), 0, -1):
+        backups = int(backups)
+        if backups <= 0:
+            os.remove(path)
+            return
+        oldest = "{0}.{1}".format(path, backups)
+        if os.path.isfile(oldest):
+            os.remove(oldest)
+        for index in range(backups - 1, 0, -1):
             src = "{0}.{1}".format(path, index)
             dst = "{0}.{1}".format(path, index + 1)
-            if os.path.isfile(dst):
-                os.remove(dst)
             if os.path.isfile(src):
                 os.rename(src, dst)
         os.rename(path, path + ".1")
@@ -100,6 +105,10 @@ def _project_root():
         os.path.dirname(os.path.abspath(__file__)),
         ("nninteractive_config.json", "nninteractive_env", ".git"),
     )
+
+
+def _resource_lock_path(name):
+    return runtime_common.resource_lock_path(_project_root(), name)
 
 
 def _environment_root():
@@ -197,6 +206,19 @@ def _launch_background_batch_export(ts_root, cases_filter, axes, flips):
 
     log_path = os.path.join(output_dir, "_background_export_mimics.log")
     _rotate_log_file(log_path)
+    lock_path = _resource_lock_path("background_mimics.lock")
+    lock_token = runtime_common.acquire_resource_lock(
+        lock_path,
+        "background_mimics",
+        "batch label export",
+        wait_seconds=0.0,
+    )
+    if not lock_token:
+        _append_export_log(
+            output_dir,
+            "Background Mimics is already running for another Mimics-Script task; batch export was not started.",
+        )
+        return None
     log_handle = None
     try:
         log_handle = open(log_path, "ab")
@@ -208,9 +230,16 @@ def _launch_background_batch_export(ts_root, cases_filter, axes, flips):
             env=_background_env(),
             **_background_process_kwargs()
         )
+        runtime_common.update_resource_lock_pid(
+            lock_path,
+            lock_token,
+            process.pid,
+            {"kind": "export_labels", "ts_root": os.path.abspath(ts_root)},
+        )
         _append_export_log(output_dir, "Background Mimics started (PID={0}) for batch export.".format(process.pid))
         return process
     except Exception as exc:
+        runtime_common.release_resource_lock(lock_path, lock_token)
         _append_export_log(output_dir, "Could not start background batch export: {0}".format(exc))
         return None
     finally:
@@ -846,7 +875,7 @@ def run_background_batch_export(config_path):
     ts_root = config.get("ts_root")
     cases_filter = config.get("cases")
     cases_filter = set(cases_filter) if cases_filter else None
-    axes = config.get("axes") or [1, 0, 2]
+    axes = config.get("axes") or [0, 1, 2]
     flips = config.get("flips") or [False, False, False]
     output_dir = os.path.join(ts_root, "mcs_output")
     if not os.path.isdir(output_dir):
@@ -955,15 +984,15 @@ def main():
     """Entry point.
 
     Usage:
-        mimics_export.py --case-dir <dir> [--axes 1,0,2] [--flips false,false,false]
-        mimics_export.py --ts-root <dir> [--cases s0000,s0001] [--axes 1,0,2] [--flips false,false,false]
+        mimics_export.py --case-dir <dir> [--axes 0,1,2] [--flips false,false,false]
+        mimics_export.py --ts-root <dir> [--cases s0000,s0001] [--axes 0,1,2] [--flips false,false,false]
     """
     # Cleanup is opt-in. Use Stop_Background_Services.py for manual cleanup.
     try:
         here = os.path.dirname(os.path.abspath(__file__))
         sys.path.insert(0, here)
         from mimics_import import _cleanup_stale_processes
-        if os.environ.get("MIMICS_AUTO_CLEANUP_ON_START", "").strip().lower() in ("1", "true", "yes"):
+        if runtime_common.auto_cleanup_enabled():
             cleanup_thread = threading.Thread(target=_cleanup_stale_processes)
             cleanup_thread.daemon = True
             cleanup_thread.start()
@@ -973,7 +1002,7 @@ def main():
     ts_root = None
     case_dir = None
     cases_filter = None
-    axes = [1, 0, 2]
+    axes = [0, 1, 2]
     flips = [False, False, False]
 
     args = sys.argv[1:]

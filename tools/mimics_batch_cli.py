@@ -22,8 +22,15 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from resource_locks import FileResourceLock, ResourceLockTimeout
+
 BRIDGE = ROOT / "mimics_bridge.py"
 RUNTIME = ROOT / "runtime_py35"
+RESOURCE_LOCK_DIR = ROOT / ".mimics_runtime" / "locks"
+BACKGROUND_MIMICS_LOCK_PATH = RESOURCE_LOCK_DIR / "background_mimics.lock"
 
 
 def write_json_atomic(path, payload):
@@ -86,7 +93,13 @@ def discover_cases(ts_root, cases, python_exe):
     return list(result.get("cases", []))
 
 
-def launch_create_mcs(output_dir, mimics_exe):
+def _acquire_background_mimics_lock(owner, wait_seconds=0.0):
+    lock = FileResourceLock(BACKGROUND_MIMICS_LOCK_PATH, "background_mimics", owner)
+    lock.acquire(wait_seconds=float(wait_seconds), poll_seconds=5.0)
+    return lock
+
+
+def launch_create_mcs(output_dir, mimics_exe, lock_timeout_seconds=0.0):
     runner = output_dir / "_run_create_mcs.py"
     runner.write_text(
         "\n".join([
@@ -99,19 +112,25 @@ def launch_create_mcs(output_dir, mimics_exe):
         ]),
         encoding="utf-8",
     )
+    lock = _acquire_background_mimics_lock("batch .mcs creation", lock_timeout_seconds)
     log = open(str(output_dir / "_background_mimics.log"), "ab")
     try:
-        return subprocess.Popen(
+        proc = subprocess.Popen(
             [mimics_exe, "-b", "-run_script", str(runner)],
             stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=subprocess.STDOUT,
         )
+        lock.update_pid(proc.pid, kind="create_mcs", output_dir=str(output_dir.resolve()))
+        return proc
+    except Exception:
+        lock.release()
+        raise
     finally:
         log.close()
 
 
-def launch_export_labels(ts_root, cases, mimics_exe, axes, flips):
+def launch_export_labels(ts_root, cases, mimics_exe, axes, flips, lock_timeout_seconds=0.0):
     output_dir = ts_root / "mcs_output"
     output_dir.mkdir(parents=True, exist_ok=True)
     config = output_dir / "_export_batch_config.json"
@@ -136,14 +155,20 @@ def launch_export_labels(ts_root, cases, mimics_exe, axes, flips):
         ]),
         encoding="utf-8",
     )
+    lock = _acquire_background_mimics_lock("batch label export", lock_timeout_seconds)
     log = open(str(output_dir / "_background_export_mimics.log"), "ab")
     try:
-        return subprocess.Popen(
+        proc = subprocess.Popen(
             [mimics_exe, "-b", "-run_script", str(runner)],
             stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=subprocess.STDOUT,
         )
+        lock.update_pid(proc.pid, kind="export_labels", ts_root=str(ts_root.resolve()))
+        return proc
+    except Exception:
+        lock.release()
+        raise
     finally:
         log.close()
 
@@ -192,7 +217,11 @@ def cmd_prepare_import(args):
     if not mimics_exe:
         print("MimicsResearch.exe was not found. Manifests are ready; run .mcs creation later.", file=sys.stderr)
         return 2
-    proc = launch_create_mcs(output_dir, mimics_exe)
+    try:
+        proc = launch_create_mcs(output_dir, mimics_exe, args.background_mimics_lock_timeout_seconds)
+    except ResourceLockTimeout as exc:
+        print("Background Mimics is busy: {}".format(exc), file=sys.stderr)
+        return 75
     print("Background Mimics started for .mcs creation, PID={}".format(proc.pid))
     return 0
 
@@ -203,7 +232,18 @@ def cmd_export_labels(args):
         print("MimicsResearch.exe was not found.", file=sys.stderr)
         return 2
     cases = set(args.cases.split(",")) if args.cases else None
-    proc = launch_export_labels(Path(args.ts_root).resolve(), cases, mimics_exe, args.axes, args.flips)
+    try:
+        proc = launch_export_labels(
+            Path(args.ts_root).resolve(),
+            cases,
+            mimics_exe,
+            args.axes,
+            args.flips,
+            args.background_mimics_lock_timeout_seconds,
+        )
+    except ResourceLockTimeout as exc:
+        print("Background Mimics is busy: {}".format(exc), file=sys.stderr)
+        return 75
     print("Background Mimics started for label export, PID={}".format(proc.pid))
     return 0
 
@@ -223,13 +263,32 @@ def cmd_kill_background(args):
         "--watchdog",
     ]
     ps_markers = "@(" + ",".join("'{}'".format(m.replace("'", "''")) for m in markers) + ")"
+    owned_roots = [
+        str(ROOT),
+        str(ROOT / "nninteractive_env"),
+        str(ROOT / "external"),
+        str(ROOT / "tools"),
+        str(ROOT / "runtime_py35"),
+    ]
+    ps_roots = "@(" + ",".join("'{}'".format(str(r).replace("'", "''")) for r in owned_roots) + ")"
     command = (
         "$markers={};"
+        "$roots={};"
         "Get-CimInstance Win32_Process | Where-Object {{"
-        "$cmd=$_.CommandLine; $cmd -and ($markers | Where-Object {{ $cmd -like ('*' + $_ + '*') }})"
+        "$cmd=$_.CommandLine; "
+        "$cmd -and "
+        "($roots | Where-Object {{ $cmd -like ('*' + $_ + '*') }}) -and "
+        "($markers | Where-Object {{ $cmd -like ('*' + $_ + '*') }})"
         "}} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}"
-    ).format(ps_markers)
+    ).format(ps_markers, ps_roots)
     subprocess.Popen(["powershell", "-NoProfile", "-Command", command], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for lock_path in (BACKGROUND_MIMICS_LOCK_PATH, RESOURCE_LOCK_DIR / "gpu.lock"):
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
     print("Stop request submitted for integration background processes.")
     return 0
 
@@ -237,7 +296,7 @@ def cmd_kill_background(args):
 def parse_axes(value):
     result = [int(part.strip()) for part in value.split(",")]
     if sorted(result) != [0, 1, 2]:
-        raise argparse.ArgumentTypeError("axes must be a permutation like 1,0,2")
+        raise argparse.ArgumentTypeError("axes must be a permutation like 0,1,2")
     return result
 
 
@@ -258,17 +317,19 @@ def main(argv=None):
     p.add_argument("--cases")
     p.add_argument("--python", default=sys.executable)
     p.add_argument("--mimics-exe")
-    p.add_argument("--axes", type=parse_axes, default=[1, 0, 2])
+    p.add_argument("--axes", type=parse_axes, default=[0, 1, 2])
     p.add_argument("--flips", type=parse_flips, default=[False, False, False])
     p.add_argument("--no-create-mcs", action="store_true")
+    p.add_argument("--background-mimics-lock-timeout-seconds", type=float, default=0.0)
     p.set_defaults(func=cmd_prepare_import)
 
     p = sub.add_parser("export-labels", help="Export labels from saved .mcs files in background Mimics")
     p.add_argument("--ts-root", required=True)
     p.add_argument("--cases")
     p.add_argument("--mimics-exe")
-    p.add_argument("--axes", type=parse_axes, default=[1, 0, 2])
+    p.add_argument("--axes", type=parse_axes, default=[0, 1, 2])
     p.add_argument("--flips", type=parse_flips, default=[False, False, False])
+    p.add_argument("--background-mimics-lock-timeout-seconds", type=float, default=0.0)
     p.set_defaults(func=cmd_export_labels)
 
     p = sub.add_parser("kill-background", help="Stop integration-created background processes")

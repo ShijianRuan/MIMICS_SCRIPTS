@@ -14,6 +14,7 @@ from src.utils.config import load_config
 from src.utils.device import get_device
 from src.models.segmentor import DINOv33DSegmentor
 from src.utils.checkpoint import load_checkpoint
+from src.data.dataset_3d import normalize_volume
 
 
 def main():
@@ -36,12 +37,10 @@ def main():
 
     print(f"Loading: {args.input}")
     img = nib.load(args.input)
-    data = img.get_fdata().astype(np.float32)
-
-    # Normalize
-    vmin, vmax = data.min(), data.max()
-    if vmax > vmin:
-        data = (data - vmin) / (vmax - vmin)
+    data = normalize_volume(
+        img.get_fdata(dtype=np.float32),
+        config.get("data", {}).get("modality", "other"),
+    )
 
     # Resize slices
     img_size = tuple(config["data"].get("img_size", [512, 512]))

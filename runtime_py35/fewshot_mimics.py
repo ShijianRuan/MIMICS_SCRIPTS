@@ -24,7 +24,9 @@ import runtime_common
 
 TITLE = "DINOv3 Few-Shot"
 BUTTON_TRAIN = "Train/Update Model"
+BUTTON_TRAIN_ADVANCED = "Train Advanced..."
 BUTTON_PREDICT = "Predict Current Case"
+BUTTON_PREDICT_MODEL = "Predict With Model..."
 BUTTON_STATUS = "Show Status"
 BUTTON_STOP = "Stop Latest Job"
 BUTTON_CANCEL = "Cancel"
@@ -38,6 +40,34 @@ _safe_slug = runtime_common.safe_slug
 _find_root = runtime_common.find_root
 _hidden_process_kwargs = runtime_common.hidden_process_kwargs
 _background_env = runtime_common.background_env
+
+
+def _update_gui():
+    try:
+        mimics.update_gui()
+    except Exception:
+        pass
+
+
+def _with_gui_updates_disabled(fn, *args, **kwargs):
+    gui_was_enabled = True
+    try:
+        try:
+            gui_was_enabled = bool(mimics.is_update_gui_enabled())
+        except Exception:
+            gui_was_enabled = True
+        try:
+            mimics.disable_update_gui()
+        except Exception:
+            gui_was_enabled = False
+        return fn(*args, **kwargs)
+    finally:
+        if gui_was_enabled:
+            try:
+                mimics.enable_update_gui()
+            except Exception:
+                pass
+        _update_gui()
 
 
 def _settings_path():
@@ -198,8 +228,144 @@ def _workspace(ts_root):
     return os.path.join(os.path.abspath(ts_root), "fewshot_models")
 
 
+def _global_model_registry_path():
+    return os.path.join(os.path.expanduser("~"), ".mimics_script", "fewshot_model_index.json")
+
+
 def _status_path(ts_root, job_id):
     return os.path.join(_workspace(ts_root), "jobs", job_id + ".json")
+
+
+def _case_ids_from_dataset(ts_root):
+    rows = set()
+    mcs_dir = os.path.join(ts_root, "mcs_output")
+    if os.path.isdir(mcs_dir):
+        try:
+            for name in os.listdir(mcs_dir):
+                if name.lower().endswith(".mcs"):
+                    rows.add(name[:-4])
+        except Exception:
+            pass
+    try:
+        for name in os.listdir(ts_root):
+            path = os.path.join(ts_root, name)
+            if os.path.isdir(path) and name not in ("mcs_output", "segmentations", "fewshot_models"):
+                rows.add(name)
+    except Exception:
+        pass
+    return sorted(rows)
+
+
+def _default_training_options(config, profile_name=None):
+    profiles = config.get("training_profiles") or {}
+    default_profile = profile_name or config.get("default_training_profile") or config.get("default_profile")
+    values = {}
+    if default_profile and isinstance(profiles, dict):
+        values.update(profiles.get(default_profile, {}) or {})
+    values.setdefault("base_config", config.get("base_config", "config/synthstrip_lora_segformer3d.yaml"))
+    values.setdefault("epochs", config.get("default_epochs", 10))
+    values.setdefault("batch_size", config.get("default_batch_size", 1))
+    values.setdefault("grad_accumulation", config.get("default_grad_accumulation", 1))
+    values.setdefault("lr", config.get("default_lr", 0.001))
+    values.setdefault("weight_decay", config.get("default_weight_decay", 0.01))
+    values.setdefault("img_size", config.get("default_img_size", "224,224"))
+    values.setdefault("modality", config.get("default_modality", "ct"))
+    values.setdefault("min_samples", config.get("default_min_samples", 1))
+    values.setdefault("max_samples", config.get("default_max_samples", 0))
+    values.setdefault("sample_mode", config.get("default_sample_mode", "all"))
+    values.setdefault("val_fraction", config.get("default_val_fraction", 0.2))
+    values.setdefault("min_val_samples", config.get("default_min_val_samples", 1))
+    values.setdefault("finetune_method", config.get("default_finetune_method", "lora"))
+    values.setdefault("decoder", config.get("default_decoder", "segformer3d"))
+    values.setdefault("model_scale", config.get("default_model_scale", "vitb16"))
+    values.setdefault("model_path", config.get("default_model_path", ""))
+    values.setdefault("lora_rank", config.get("default_lora_rank", 8))
+    values.setdefault("lora_alpha", config.get("default_lora_alpha", 16))
+    values.setdefault("adapter_bottleneck", config.get("default_adapter_bottleneck", 64))
+    values.setdefault("mixed_precision", config.get("default_mixed_precision", False))
+    values.setdefault("sub_volume", config.get("default_sub_volume", False))
+    values.setdefault("sub_volume_size", config.get("default_sub_volume_size", "32,256,256"))
+    values.setdefault("keep_last_checkpoints", config.get("default_keep_last_checkpoints", 2))
+    values.setdefault("keep_materialized_dataset", config.get("default_keep_materialized_dataset", False))
+    values.setdefault("gpu_lock_timeout_seconds", config.get("gpu_lock_timeout_seconds", 86400))
+    values.setdefault(
+        "background_mimics_lock_timeout_seconds",
+        config.get("background_mimics_lock_timeout_seconds", 21600),
+    )
+    return values
+
+
+def _split_csv(values):
+    if not values:
+        return []
+    if isinstance(values, (list, tuple)):
+        return [str(item).strip() for item in values if str(item).strip()]
+    return [item.strip() for item in str(values).replace(";", ",").split(",") if item.strip()]
+
+
+def _append_training_args(cmd, config, options):
+    cmd.extend([
+        "--base-config",
+        str(options.get("base_config", config.get("base_config", "config/synthstrip_lora_segformer3d.yaml"))),
+        "--epochs",
+        str(int(options.get("epochs", config.get("default_epochs", 10)))),
+        "--batch-size",
+        str(int(options.get("batch_size", config.get("default_batch_size", 1)))),
+        "--grad-accumulation",
+        str(int(options.get("grad_accumulation", config.get("default_grad_accumulation", 1)))),
+        "--lr",
+        str(float(options.get("lr", config.get("default_lr", 0.001)))),
+        "--weight-decay",
+        str(float(options.get("weight_decay", config.get("default_weight_decay", 0.01)))),
+        "--img-size",
+        str(options.get("img_size", config.get("default_img_size", "224,224"))),
+        "--modality",
+        str(options.get("modality", config.get("default_modality", "ct"))),
+        "--min-samples",
+        str(int(options.get("min_samples", config.get("default_min_samples", 1)))),
+        "--max-samples",
+        str(int(options.get("max_samples", config.get("default_max_samples", 0)))),
+        "--sample-mode",
+        str(options.get("sample_mode", config.get("default_sample_mode", "all"))),
+        "--val-fraction",
+        str(float(options.get("val_fraction", config.get("default_val_fraction", 0.2)))),
+        "--min-val-samples",
+        str(int(options.get("min_val_samples", config.get("default_min_val_samples", 1)))),
+        "--finetune-method",
+        str(options.get("finetune_method", config.get("default_finetune_method", "lora"))),
+        "--decoder",
+        str(options.get("decoder", config.get("default_decoder", "segformer3d"))),
+        "--model-scale",
+        str(options.get("model_scale", config.get("default_model_scale", "vitb16"))),
+        "--lora-rank",
+        str(int(options.get("lora_rank", config.get("default_lora_rank", 8)))),
+        "--lora-alpha",
+        str(int(options.get("lora_alpha", config.get("default_lora_alpha", 16)))),
+        "--adapter-bottleneck",
+        str(int(options.get("adapter_bottleneck", config.get("default_adapter_bottleneck", 64)))),
+        "--gpu-lock-timeout-seconds",
+        str(float(options.get("gpu_lock_timeout_seconds", config.get("gpu_lock_timeout_seconds", 86400)))),
+        "--background-mimics-lock-timeout-seconds",
+        str(float(options.get("background_mimics_lock_timeout_seconds", config.get("background_mimics_lock_timeout_seconds", 21600)))),
+        "--keep-last-checkpoints",
+        str(int(options.get("keep_last_checkpoints", config.get("default_keep_last_checkpoints", 2)))),
+    ])
+    model_path = str(options.get("model_path", config.get("default_model_path", "")) or "")
+    if model_path:
+        cmd.extend(["--model-path", model_path])
+    val_cases = _split_csv(options.get("val_cases", ""))
+    if val_cases:
+        cmd.extend(["--val-cases", ",".join(val_cases)])
+    cases = _split_csv(options.get("cases", ""))
+    if cases:
+        cmd.extend(["--cases", ",".join(cases)])
+    if bool(options.get("mixed_precision", config.get("default_mixed_precision", False))):
+        cmd.append("--mixed-precision")
+    if bool(options.get("sub_volume", config.get("default_sub_volume", False))):
+        cmd.append("--sub-volume")
+    cmd.extend(["--sub-volume-size", str(options.get("sub_volume_size", config.get("default_sub_volume_size", "32,256,256")))])
+    if bool(options.get("keep_materialized_dataset", config.get("default_keep_materialized_dataset", False))):
+        cmd.append("--keep-materialized-dataset")
 
 
 def _current_project_path():
@@ -329,7 +495,16 @@ def _latest_active_job(ts_root):
     jobs_dir = os.path.join(_workspace(ts_root), "jobs")
     if not os.path.isdir(jobs_dir):
         return None, None
-    active = set(["launching", "preparing", "exporting_labels", "training", "running", "cancelling"])
+    active = set([
+        "launching",
+        "preparing",
+        "exporting_labels",
+        "waiting_for_background_mimics",
+        "waiting_for_gpu",
+        "training",
+        "running",
+        "cancelling",
+    ])
     rows = []
     for name in os.listdir(jobs_dir):
         if not name.endswith(".json"):
@@ -352,23 +527,279 @@ def _latest_active_job(ts_root):
     return rows[0][1], rows[0][2]
 
 
+def _display_status(value):
+    labels = {
+        "launching": "Launching",
+        "preparing": "Preparing data",
+        "exporting_labels": "Exporting labels",
+        "waiting_for_background_mimics": "Waiting for background Mimics",
+        "waiting_for_gpu": "Waiting for GPU",
+        "training": "Training",
+        "running": "Running inference",
+        "cancelling": "Cancelling",
+        "cancelled": "Cancelled",
+        "failed": "Failed",
+        "completed": "Completed",
+    }
+    return labels.get(str(value or ""), str(value or "Unknown").replace("_", " "))
+
+
+def _display_resource(value):
+    labels = {
+        "gpu": "GPU",
+        "background_mimics": "background Mimics",
+    }
+    return labels.get(str(value or ""), str(value or "resource").replace("_", " "))
+
+
+def _resource_wait_text(job):
+    resource_wait = job.get("resource_wait") or {}
+    if not resource_wait:
+        return ""
+    resource = _display_resource(resource_wait.get("resource", "resource"))
+    holder = resource_wait.get("owner", "unknown")
+    pid = resource_wait.get("pid", "")
+    if pid:
+        return "Waiting for {0}: {1} (PID {2})".format(resource, holder, pid)
+    return "Waiting for {0}".format(resource)
+
+
 def _guard_no_active_job(ts_root):
     path, job = _latest_active_job(ts_root)
     if not job:
         return True
+    wait_text = _resource_wait_text(job)
+    detail = "\n{0}".format(wait_text) if wait_text else ""
     mimics.dialogs.message_box(
         "A few-shot job is already running for this dataset.\n\n"
-        "Job: {0}\nType: {1}\nOrgan: {2}\nStatus: {3}\n\n"
+        "Job: {0}\nType: {1}\nOrgan: {2}\nStatus: {3}{4}\n\n"
         "Use Show Status or Stop Latest Job before starting another GPU job.".format(
             job.get("job_id", os.path.basename(path or "")),
             job.get("kind", "?"),
             job.get("organ", "?"),
-            job.get("status", "?"),
+            _display_status(job.get("status", "?")),
+            detail,
         ),
         title=TITLE,
         ui_blocking=False,
     )
     return False
+
+
+def _advanced_training_options(config, ts_root):
+    try:
+        from PyQt5.QtWidgets import (
+            QAbstractItemView,
+            QCheckBox,
+            QComboBox,
+            QDialog,
+            QDialogButtonBox,
+            QDoubleSpinBox,
+            QFormLayout,
+            QLabel,
+            QLineEdit,
+            QListWidget,
+            QListWidgetItem,
+            QSpinBox,
+            QTabWidget,
+            QVBoxLayout,
+            QWidget,
+        )
+    except Exception:
+        mimics.dialogs.message_box(
+            "Advanced training settings need PyQt5. The default training profile will be used.",
+            title=TITLE,
+            ui_blocking=False,
+        )
+        return _default_training_options(config)
+
+    profiles = config.get("training_profiles") or {}
+    profile_names = sorted(profiles.keys()) if isinstance(profiles, dict) else []
+    default_name = config.get("default_training_profile") or (profile_names[0] if profile_names else "")
+    values = _default_training_options(config, default_name)
+
+    dialog = QDialog()
+    dialog.setWindowTitle("DINOv3 Few-Shot Training")
+    dialog.resize(720, 620)
+    root = QVBoxLayout(dialog)
+    root.addWidget(QLabel("Choose training samples and key parameters. Empty case selection means all eligible cases."))
+
+    tabs = QTabWidget(dialog)
+    root.addWidget(tabs)
+
+    sample_tab = QWidget()
+    sample_layout = QVBoxLayout(sample_tab)
+    profile_combo = QComboBox()
+    if profile_names:
+        profile_combo.addItems(profile_names)
+        if default_name in profile_names:
+            profile_combo.setCurrentIndex(profile_names.index(default_name))
+    case_list = QListWidget()
+    case_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+    for case_id in _case_ids_from_dataset(ts_root):
+        item = QListWidgetItem(case_id)
+        case_list.addItem(item)
+    sample_mode = QComboBox()
+    sample_mode.addItems(["all", "latest"])
+    if values.get("sample_mode") in ("all", "latest"):
+        sample_mode.setCurrentIndex(["all", "latest"].index(values.get("sample_mode")))
+    max_samples = QSpinBox()
+    max_samples.setRange(0, 100000)
+    max_samples.setValue(int(values.get("max_samples", 0)))
+    min_samples = QSpinBox()
+    min_samples.setRange(1, 100000)
+    min_samples.setValue(int(values.get("min_samples", 1)))
+    val_fraction = QDoubleSpinBox()
+    val_fraction.setRange(0.0, 0.9)
+    val_fraction.setSingleStep(0.05)
+    val_fraction.setDecimals(2)
+    val_fraction.setValue(float(values.get("val_fraction", 0.2)))
+
+    sample_form = QFormLayout()
+    sample_form.addRow("Profile", profile_combo)
+    sample_form.addRow("Sample order", sample_mode)
+    sample_form.addRow("Max samples (0 = all)", max_samples)
+    sample_form.addRow("Min train samples", min_samples)
+    sample_form.addRow("Validation fraction", val_fraction)
+    sample_layout.addLayout(sample_form)
+    sample_layout.addWidget(QLabel("Cases"))
+    sample_layout.addWidget(case_list)
+    tabs.addTab(sample_tab, "Samples")
+
+    train_tab = QWidget()
+    train_form = QFormLayout(train_tab)
+    finetune = QComboBox()
+    finetune.addItems(["lora", "frozen", "adapter", "full"])
+    decoder = QComboBox()
+    decoder.addItems(["segformer3d", "mlp_probe", "linear3d", "dpt3d"])
+    model_scale = QComboBox()
+    model_scale.addItems(["vitb16", "vitl16", "vith16plus"])
+    modality = QComboBox()
+    modality.addItems(["ct", "mri", "other"])
+    epochs = QSpinBox()
+    epochs.setRange(1, 10000)
+    batch_size = QSpinBox()
+    batch_size.setRange(1, 128)
+    grad_accum = QSpinBox()
+    grad_accum.setRange(1, 1024)
+    lr = QLineEdit()
+    weight_decay = QLineEdit()
+    img_size = QLineEdit()
+    base_config = QLineEdit()
+    model_path = QLineEdit()
+    mixed_precision = QCheckBox()
+    sub_volume = QCheckBox()
+    sub_volume_size = QLineEdit()
+    keep_last_checkpoints = QSpinBox()
+    keep_last_checkpoints.setRange(0, 1000)
+    keep_materialized_dataset = QCheckBox()
+
+    widgets = {
+        "finetune_method": finetune,
+        "decoder": decoder,
+        "model_scale": model_scale,
+        "modality": modality,
+        "epochs": epochs,
+        "batch_size": batch_size,
+        "grad_accumulation": grad_accum,
+        "lr": lr,
+        "weight_decay": weight_decay,
+        "img_size": img_size,
+        "base_config": base_config,
+        "model_path": model_path,
+        "mixed_precision": mixed_precision,
+        "sub_volume": sub_volume,
+        "sub_volume_size": sub_volume_size,
+        "keep_last_checkpoints": keep_last_checkpoints,
+        "keep_materialized_dataset": keep_materialized_dataset,
+    }
+
+    def apply_values(new_values):
+        def combo_set(combo, value):
+            idx = combo.findText(str(value))
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+        combo_set(finetune, new_values.get("finetune_method", "lora"))
+        combo_set(decoder, new_values.get("decoder", "segformer3d"))
+        combo_set(model_scale, new_values.get("model_scale", "vitb16"))
+        combo_set(modality, new_values.get("modality", "ct"))
+        epochs.setValue(int(new_values.get("epochs", 10)))
+        batch_size.setValue(int(new_values.get("batch_size", 1)))
+        grad_accum.setValue(int(new_values.get("grad_accumulation", 1)))
+        lr.setText(str(new_values.get("lr", 0.001)))
+        weight_decay.setText(str(new_values.get("weight_decay", 0.01)))
+        img_size.setText(str(new_values.get("img_size", "224,224")))
+        base_config.setText(str(new_values.get("base_config", config.get("base_config", ""))))
+        model_path.setText(str(new_values.get("model_path", "")))
+        mixed_precision.setChecked(bool(new_values.get("mixed_precision", False)))
+        sub_volume.setChecked(bool(new_values.get("sub_volume", False)))
+        sub_volume_size.setText(str(new_values.get("sub_volume_size", "32,256,256")))
+        keep_last_checkpoints.setValue(int(new_values.get("keep_last_checkpoints", 2)))
+        keep_materialized_dataset.setChecked(bool(new_values.get("keep_materialized_dataset", False)))
+
+    def profile_changed(index):
+        if profile_names and 0 <= index < len(profile_names):
+            apply_values(_default_training_options(config, profile_names[index]))
+
+    profile_combo.currentIndexChanged.connect(profile_changed)
+    apply_values(values)
+
+    train_form.addRow("Fine-tuning", finetune)
+    train_form.addRow("Decoder", decoder)
+    train_form.addRow("Pretrained scale", model_scale)
+    train_form.addRow("Modality", modality)
+    train_form.addRow("Epochs", epochs)
+    train_form.addRow("Batch size", batch_size)
+    train_form.addRow("Grad accumulation", grad_accum)
+    train_form.addRow("Learning rate", lr)
+    train_form.addRow("Weight decay", weight_decay)
+    train_form.addRow("Image size", img_size)
+    train_form.addRow("Base config", base_config)
+    train_form.addRow("Model path override", model_path)
+    train_form.addRow("Mixed precision", mixed_precision)
+    train_form.addRow("Sub-volume", sub_volume)
+    train_form.addRow("Sub-volume size", sub_volume_size)
+    train_form.addRow("Keep last checkpoints", keep_last_checkpoints)
+    train_form.addRow("Keep materialized dataset", keep_materialized_dataset)
+    tabs.addTab(train_tab, "Training")
+
+    buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+    root.addWidget(buttons)
+    buttons.accepted.connect(dialog.accept)
+    buttons.rejected.connect(dialog.reject)
+
+    if dialog.exec_() != QDialog.Accepted:
+        return None
+
+    selected_cases = [str(item.text()) for item in case_list.selectedItems()]
+    result = {
+        "profile": str(profile_combo.currentText()),
+        "sample_mode": str(sample_mode.currentText()),
+        "max_samples": int(max_samples.value()),
+        "min_samples": int(min_samples.value()),
+        "val_fraction": float(val_fraction.value()),
+        "cases": selected_cases,
+        "finetune_method": str(finetune.currentText()),
+        "decoder": str(decoder.currentText()),
+        "model_scale": str(model_scale.currentText()),
+        "modality": str(modality.currentText()),
+        "epochs": int(epochs.value()),
+        "batch_size": int(batch_size.value()),
+        "grad_accumulation": int(grad_accum.value()),
+        "lr": str(lr.text()).strip(),
+        "weight_decay": str(weight_decay.text()).strip(),
+        "img_size": str(img_size.text()).strip(),
+        "base_config": str(base_config.text()).strip(),
+        "model_path": str(model_path.text()).strip(),
+        "mixed_precision": bool(mixed_precision.isChecked()),
+        "sub_volume": bool(sub_volume.isChecked()),
+        "sub_volume_size": str(sub_volume_size.text()).strip(),
+        "keep_last_checkpoints": int(keep_last_checkpoints.value()),
+        "keep_materialized_dataset": bool(keep_materialized_dataset.isChecked()),
+    }
+    if selected_cases:
+        result["sample_mode"] = "all"
+    return result
 
 
 def _launch_process(cmd, cwd=None):
@@ -383,7 +814,7 @@ def _launch_process(cmd, cwd=None):
     )
 
 
-def _train_model():
+def _train_model(advanced=False):
     organ = _selected_organ()
     if not organ:
         mimics.dialogs.message_box(
@@ -398,6 +829,13 @@ def _train_model():
         return 1
     if not _guard_no_active_job(ts_root):
         return 1
+    config = _config()
+    if advanced:
+        options = _advanced_training_options(config, ts_root)
+        if options is None:
+            return 0
+    else:
+        options = _default_training_options(config)
     answer = mimics.dialogs.question_box(
         message=(
             "Training uses saved .mcs files.\n\n"
@@ -411,10 +849,8 @@ def _train_model():
     if answer != "Start Training":
         return 0
 
-    config = _config()
     dinov3_root = _dinov3_root(config)
     python_exe = _fewshot_python(config, dinov3_root)
-    base_config = config.get("base_config", "config/synthstrip_lora_segformer3d.yaml")
     run_id = "train_{0}_{1}".format(time.strftime("%Y%m%dT%H%M%S"), uuid.uuid4().hex[:8])
     cmd = [
         python_exe,
@@ -428,28 +864,11 @@ def _train_model():
         dinov3_root,
         "--python",
         python_exe,
-        "--base-config",
-        base_config,
-        "--epochs",
-        str(config.get("default_epochs", 10)),
-        "--batch-size",
-        str(config.get("default_batch_size", 1)),
-        "--grad-accumulation",
-        str(config.get("default_grad_accumulation", 1)),
-        "--lr",
-        str(config.get("default_lr", 0.001)),
-        "--img-size",
-        str(config.get("default_img_size", "224,224")),
-        "--modality",
-        str(config.get("default_modality", "ct")),
-        "--min-samples",
-        str(config.get("default_min_samples", 1)),
-        "--max-samples",
-        str(config.get("default_max_samples", 0)),
         "--export-labels",
         "--run-id",
         run_id,
     ]
+    _append_training_args(cmd, config, options)
     mimics_exe = _find_mimics_exe()
     if mimics_exe:
         cmd.extend(["--mimics-exe", mimics_exe])
@@ -469,6 +888,7 @@ def _train_model():
             "workspace": _workspace(ts_root),
             "launcher_pid": process.pid,
             "cancel_path": cancel_path,
+            "training_options": options,
             "created_at_epoch": time.time(),
             "updated_at_epoch": time.time(),
         },
@@ -489,7 +909,7 @@ def _train_model():
     return 0
 
 
-def _start_inference():
+def _start_inference(choose_model=False):
     organ = _selected_organ()
     if not organ:
         mimics.dialogs.message_box(
@@ -518,6 +938,11 @@ def _start_inference():
     config = _config()
     dinov3_root = _dinov3_root(config)
     python_exe = _fewshot_python(config, dinov3_root)
+    selected_model = None
+    if choose_model:
+        selected_model = _choose_model_manifest(ts_root, organ)
+        if selected_model is None:
+            return 0
     job_id = "infer_{0}_{1}_{2}".format(_safe_slug(case_id), _safe_slug(organ), uuid.uuid4().hex[:8])
     cmd = [
         python_exe,
@@ -533,9 +958,18 @@ def _start_inference():
         dinov3_root,
         "--python",
         python_exe,
+        "--gpu-lock-timeout-seconds",
+        str(float(config.get("inference_gpu_lock_timeout_seconds", config.get("gpu_lock_timeout_seconds", 3600)))),
         "--job-id",
         job_id,
     ]
+    if selected_model:
+        cmd.extend([
+            "--model-manifest",
+            selected_model["manifest_path"],
+            "--model-id",
+            selected_model.get("model_id", "latest") or "latest",
+        ])
     process = _launch_process(cmd, cwd=_project_root())
     status_path = _status_path(ts_root, job_id)
     cancel_path = os.path.join(
@@ -558,6 +992,7 @@ def _start_inference():
             "workspace": _workspace(ts_root),
             "launcher_pid": process.pid,
             "cancel_path": cancel_path,
+            "selected_model": selected_model,
             "created_at_epoch": time.time(),
             "updated_at_epoch": time.time(),
         },
@@ -605,7 +1040,7 @@ def _launch_bridge_mask_to_buffer(monitor, status):
         "image_path": status["image_path"],
         "mask_path": status["output_path"],
         "output_path": output_path,
-        "axes": [1, 0, 2],
+        "axes": [0, 1, 2],
         "flips": [False, False, False],
     }
     input_path = os.path.join(job_dir, "bridge_input.json")
@@ -650,6 +1085,8 @@ def _launch_bridge_mask_to_buffer(monitor, status):
 
 def _find_or_create_mask(name):
     active_image = mimics.data.images.get_active()
+    if active_image is None:
+        raise RuntimeError("No active Mimics image is available for mask import.")
     for mask in mimics.data.masks:
         if str(getattr(mask, "name", "")) != name:
             continue
@@ -663,8 +1100,17 @@ def _find_or_create_mask(name):
     mask.name = name
     try:
         mask.image = active_image
-    except Exception:
-        pass
+    except Exception as exc:
+        try:
+            bound_image = getattr(mask, "image", None)
+        except Exception:
+            bound_image = None
+        try:
+            is_bound_to_active = bound_image == active_image
+        except Exception:
+            is_bound_to_active = bound_image is active_image
+        if bound_image is None or not is_bound_to_active:
+            raise RuntimeError("Failed to bind prediction mask to the active Mimics image: {0}".format(exc))
     return mask
 
 
@@ -673,13 +1119,15 @@ def _set_mask_from_u8(mask, path, shape):
     expected = int(shape[0]) * int(shape[1]) * int(shape[2])
     if len(raw) != expected:
         raise RuntimeError("Prediction byte count mismatch: {0} != {1}".format(len(raw), expected))
-    try:
-        import numpy as np
-        pixels = np.frombuffer(raw, dtype=np.uint8).reshape(tuple(shape)).astype(np.bool_)
-        mask.set_voxel_buffer(pixels)
-    except ImportError:
-        pixels = memoryview(bytearray(raw)).cast("?", shape=list(shape))
-        mask.set_voxel_buffer(pixels)
+    def _apply():
+        try:
+            import numpy as np
+            pixels = np.frombuffer(raw, dtype=np.uint8).reshape(tuple(shape)).astype(np.bool_)
+            mask.set_voxel_buffer(pixels)
+        except ImportError:
+            pixels = memoryview(bytearray(raw)).cast("?", shape=list(shape))
+            mask.set_voxel_buffer(pixels)
+    _with_gui_updates_disabled(_apply)
     try:
         mask.visible = True
         mask.selected = True
@@ -714,7 +1162,7 @@ def _monitor_tick(monitor):
         return
     status = _read_json(monitor["status_path"], {}) or {}
     state = status.get("status")
-    if state in ("", None, "launching", "running"):
+    if state in ("", None, "launching", "running", "waiting_for_gpu", "waiting_for_background_mimics"):
         return
     if state in ("cancelled", "cancelling"):
         _stop_monitor(key)
@@ -837,40 +1285,187 @@ def _format_job_line(job):
                 pieces.append("best_dsc {0:.4f}".format(float(best)))
             except Exception:
                 pieces.append("best_dsc {0}".format(best))
+        metrics = progress.get("metrics") or {}
+        if metrics.get("loss") is not None:
+            try:
+                pieces.append("loss {0:.4f}".format(float(metrics.get("loss"))))
+            except Exception:
+                pass
+        if metrics.get("mean_dsc") is not None:
+            try:
+                pieces.append("val_dsc {0:.4f}".format(float(metrics.get("mean_dsc"))))
+            except Exception:
+                pass
         if pieces:
             extra = " | " + ", ".join(pieces)
     if job.get("sample_count") is not None:
         extra += " | samples {0}".format(job.get("sample_count"))
+    if job.get("train_sample_count") is not None or job.get("validation_sample_count") is not None:
+        extra += " | train {0}, val {1}".format(
+            job.get("train_sample_count", "?"),
+            job.get("validation_sample_count", "?"),
+        )
+    resource_wait = job.get("resource_wait") or {}
+    if resource_wait:
+        extra += " | " + _resource_wait_text(job)
     return "{0} | {1} | {2} | {3}{4}".format(
         job.get("job_id", "?"),
         job.get("kind", "?"),
         job.get("organ", "?"),
-        job.get("status", "?"),
+        _display_status(job.get("status", "?")),
         extra,
     )
 
 
 def _latest_model_lines(ts_root, selected_organ=None):
     models_dir = os.path.join(_workspace(ts_root), "models")
-    if not os.path.isdir(models_dir):
-        return []
     rows = []
-    for organ_slug in sorted(os.listdir(models_dir)):
-        latest = os.path.join(models_dir, organ_slug, "latest.json")
-        if not os.path.isfile(latest):
+    if os.path.isdir(models_dir):
+        for organ_slug in sorted(os.listdir(models_dir)):
+            latest = os.path.join(models_dir, organ_slug, "latest.json")
+            if not os.path.isfile(latest):
+                continue
+            manifest = _read_json(latest, {}) or {}
+            organ = manifest.get("organ", organ_slug)
+            if selected_organ and _safe_slug(organ) != _safe_slug(selected_organ):
+                continue
+            rows.append(
+                "Local model {0}: {1}, samples {2}".format(
+                    organ,
+                    manifest.get("model_id", "?"),
+                    manifest.get("sample_count", "?"),
+                )
+            )
+    global_payload = _read_json(_global_model_registry_path(), {}) or {}
+    for row in global_payload.get("models", []) or []:
+        organ = row.get("organ", row.get("organ_slug", ""))
+        if selected_organ and _safe_slug(organ) != _safe_slug(selected_organ):
             continue
-        manifest = _read_json(latest, {}) or {}
-        organ = manifest.get("organ", organ_slug)
-        if selected_organ and organ != selected_organ:
+        manifest_path = row.get("manifest_path", "")
+        if not manifest_path or not os.path.isfile(manifest_path):
             continue
         rows.append(
-            "Model {0}: {1}, samples {2}".format(
+            "Reusable model {0}: {1}, samples {2}".format(
                 organ,
-                manifest.get("model_id", "?"),
-                manifest.get("sample_count", "?"),
+                row.get("model_id", "?"),
+                row.get("sample_count", "?"),
             )
         )
+        if len(rows) >= 10:
+            break
     return rows
+
+
+def _model_candidates(ts_root, organ):
+    candidates = []
+    organ_slug = _safe_slug(organ)
+    models_dir = os.path.join(_workspace(ts_root), "models", organ_slug)
+    seen_manifests = set()
+    if os.path.isdir(models_dir):
+        latest_path = os.path.join(models_dir, "latest.json")
+        for manifest_path in [latest_path]:
+            manifest = _read_json(manifest_path, {}) or {}
+            if manifest:
+                seen_manifests.add(os.path.abspath(manifest_path))
+                candidates.append({
+                    "scope": "dataset latest",
+                    "manifest_path": os.path.abspath(manifest_path),
+                    "model_id": manifest.get("model_id", ""),
+                    "organ": manifest.get("organ", organ),
+                    "sample_count": manifest.get("sample_count", 0),
+                    "created_at_epoch": manifest.get("created_at_epoch", 0.0),
+                    "manifest": manifest,
+                })
+        try:
+            for run_id in sorted(os.listdir(models_dir), reverse=True):
+                manifest_path = os.path.join(models_dir, run_id, "manifest.json")
+                manifest = _read_json(manifest_path, {}) or {}
+                if not manifest:
+                    continue
+                abs_manifest = os.path.abspath(manifest_path)
+                if abs_manifest in seen_manifests:
+                    continue
+                seen_manifests.add(abs_manifest)
+                candidates.append({
+                    "scope": "dataset",
+                    "manifest_path": abs_manifest,
+                    "model_id": manifest.get("model_id", run_id),
+                    "organ": manifest.get("organ", organ),
+                    "sample_count": manifest.get("sample_count", 0),
+                    "created_at_epoch": manifest.get("created_at_epoch", 0.0),
+                    "manifest": manifest,
+                })
+        except Exception:
+            pass
+    global_payload = _read_json(_global_model_registry_path(), {}) or {}
+    for row in global_payload.get("models", []) or []:
+        if row.get("organ_slug") != organ_slug:
+            continue
+        manifest_path = row.get("manifest_path")
+        if not manifest_path or not os.path.isfile(manifest_path):
+            continue
+        abs_manifest = os.path.abspath(manifest_path)
+        if abs_manifest in seen_manifests:
+            continue
+        seen_manifests.add(abs_manifest)
+        candidates.append({
+            "scope": "global",
+            "manifest_path": abs_manifest,
+            "model_id": row.get("model_id", ""),
+            "organ": row.get("organ", organ),
+            "sample_count": row.get("sample_count", 0),
+            "created_at_epoch": row.get("created_at_epoch", 0.0),
+            "manifest": _read_json(abs_manifest, {}) or {},
+        })
+    candidates.sort(key=lambda item: float(item.get("created_at_epoch", 0.0) or 0.0), reverse=True)
+    return candidates
+
+
+def _choose_model_manifest(ts_root, organ):
+    candidates = _model_candidates(ts_root, organ)
+    if not candidates:
+        mimics.dialogs.message_box(
+            "No trained model was found for organ: {0}".format(organ),
+            title=TITLE,
+            ui_blocking=False,
+        )
+        return None
+    try:
+        from PyQt5.QtWidgets import QDialog, QDialogButtonBox, QLabel, QListWidget, QListWidgetItem, QVBoxLayout
+    except Exception:
+        return candidates[0]
+
+    dialog = QDialog()
+    dialog.setWindowTitle("Select DINOv3 Model")
+    dialog.resize(760, 420)
+    layout = QVBoxLayout(dialog)
+    layout.addWidget(QLabel("Select a model for organ: {0}".format(organ)))
+    list_widget = QListWidget()
+    for candidate in candidates:
+        created = candidate.get("created_at_epoch", 0.0)
+        try:
+            created_text = time.strftime("%Y-%m-%d %H:%M", time.localtime(float(created)))
+        except Exception:
+            created_text = "unknown time"
+        label = "{0} | {1} | samples {2} | {3}".format(
+            candidate.get("scope", "?"),
+            candidate.get("model_id", "?"),
+            candidate.get("sample_count", "?"),
+            created_text,
+        )
+        item = QListWidgetItem(label)
+        item.setData(32, candidate)
+        list_widget.addItem(item)
+    list_widget.setCurrentRow(0)
+    layout.addWidget(list_widget)
+    buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+    layout.addWidget(buttons)
+    buttons.accepted.connect(dialog.accept)
+    buttons.rejected.connect(dialog.reject)
+    if dialog.exec_() != QDialog.Accepted:
+        return None
+    item = list_widget.currentItem()
+    return item.data(32) if item is not None else None
 
 
 def _show_status():
@@ -975,20 +1570,25 @@ def _stop_latest_job():
     return 0
 
 
-def main():
-    action = mimics.dialogs.question_box(
-        message=(
-            "Select one organ Mask before training or prediction.\n\n"
-            "Training uses saved .mcs files and runs fully in the background."
-        ),
-        buttons=";".join([BUTTON_TRAIN, BUTTON_PREDICT, BUTTON_STATUS, BUTTON_STOP, BUTTON_CANCEL]),
-        title=TITLE,
-        ui_blocking=True,
-    )
+def main(action=None):
+    if action is None:
+        action = mimics.dialogs.question_box(
+            message=(
+                "Select one organ Mask before training or prediction.\n\n"
+                "Training uses saved .mcs files and runs fully in the background."
+            ),
+            buttons=";".join([BUTTON_TRAIN, BUTTON_TRAIN_ADVANCED, BUTTON_PREDICT, BUTTON_PREDICT_MODEL, BUTTON_STATUS, BUTTON_STOP, BUTTON_CANCEL]),
+            title=TITLE,
+            ui_blocking=True,
+        )
     if action == BUTTON_TRAIN:
-        return _train_model()
+        return _train_model(False)
+    if action == BUTTON_TRAIN_ADVANCED:
+        return _train_model(True)
     if action == BUTTON_PREDICT:
-        return _start_inference()
+        return _start_inference(False)
+    if action == BUTTON_PREDICT_MODEL:
+        return _start_inference(True)
     if action == BUTTON_STATUS:
         return _show_status()
     if action == BUTTON_STOP:

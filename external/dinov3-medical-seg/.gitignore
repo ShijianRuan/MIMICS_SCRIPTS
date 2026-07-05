@@ -5,11 +5,11 @@ dist/
 build/
 .venv/
 venv/
-experiments/
+/experiments/
 *.pth
 *.pt
 .DS_Store
 .pytest_cache/
-wandb/
-data/
-models/
+/wandb/
+/data/
+/models/

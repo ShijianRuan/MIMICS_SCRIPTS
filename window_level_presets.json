@@ -1,0 +1,71 @@
+[
+  {
+    "name": "Lung",
+    "width": 1500,
+    "level": -600,
+    "keywords": [
+      "lung", "lung_upper", "lung_lower", "lung_middle", "lobe", "trachea", "bronch", "airway", "pulmonary"
+    ],
+    "source": "Radiopaedia 'Windowing (CT)' (https://doi.org/10.53347/rID-52108). Lungs: W:1500 L:-600. [Verified 2026-07-04]."
+  },
+  {
+    "name": "Abdomen / Soft Tissue",
+    "width": 400,
+    "level": 50,
+    "keywords": [
+      "spleen", "kidney", "gallbladder", "stomach", "pancreas", "adrenal", "suprarenal",
+      "duodenum", "small_bowel", "small_intestine", "colon", "urinary_bladder", "bladder",
+      "prostate", "esophagus", "ureter", "uterus", "ovary", "seminal", "rectum",
+      "soft", "muscle", "organ", "peritoneum", "mesentery", "omentum", "lymph",
+      "gluteus", "iliopsoas", "autochthon", "psoas",
+      "liver", "hepatic", "bile", "biliary",
+      "thyroid", "thyroid_gland", "parathyroid", "goiter",
+      "spinal_cord", "spinal", "cord", "thecal", "neuroforam", "nerve_root", "cauda_equina", "conus", "epidural",
+      "brain", "cerebr", "cerebell", "thalamus", "ventricle", "caudate", "putamen",
+      "lentiform", "insula", "cortex", "white_matter", "gray_matter",
+      "cyst", "fluid", "effusion", "abscess", "collection", "hematoma",
+      "seroma", "oedema", "edema", "ascites", "pleural"
+    ],
+    "source": "Radiopaedia 'Windowing (CT)' (https://doi.org/10.53347/rID-52108). Abdomen soft tissues: W:400 L:50. Covers all soft-tissue organs, muscles, parenchyma, cysts, spinal canal, thyroid, and brain for segmentation purposes. [Verified 2026-07-04]."
+  },
+  {
+    "name": "Bone",
+    "width": 1800,
+    "level": 400,
+    "keywords": [
+      "bone", "vertebra", "sacrum", "coccyx", "rib", "sternum", "clavicle", "scapula",
+      "humerus", "radius", "ulna", "carpal", "metacarpal", "phalanx",
+      "femur", "tibia", "fibula", "patella", "tarsal", "metatarsal", "calcaneus",
+      "pelvis", "ilium", "ischium", "pubic", "hip",
+      "clavicula",
+      "costal_cartilage", "cartilage", "intervertebral_disc", "disc",
+      "spine", "cervical", "thoracic", "lumbar", "odontoid", "dens"
+    ],
+    "source": "Radiopaedia 'Windowing (CT)' (https://doi.org/10.53347/rID-52108). Spine bone: W:1800 L:400. Applies to all bones except skull/calvarium. [Verified 2026-07-04]."
+  },
+  {
+    "name": "Skull / Cranium",
+    "width": 2800,
+    "level": 600,
+    "keywords": [
+      "skull", "mandible", "maxilla", "zygomatic", "cranium", "calvarium",
+      "orbital_wall", "temporal_bone", "occipital", "frontal_bone", "parietal",
+      "sphenoid", "ethmoid", "cranial_vault"
+    ],
+    "source": "Radiopaedia 'Windowing (CT)' (https://doi.org/10.53347/rID-52108). Temporal bones: W:2800 L:600 (or W:4000 L:700). [Verified 2026-07-04]."
+  },
+  {
+    "name": "Vessel / Heart",
+    "width": 600,
+    "level": 200,
+    "keywords": [
+      "aorta", "artery", "arterial", "vein", "venous", "vena_cava", "cava",
+      "coronary", "carotid", "subclavian", "iliac", "femoral", "brachiocephalic",
+      "pulmonary_vein", "atrial_appendage", "vessel", "vascular", "angiography",
+      "portal", "splenic",
+      "heart", "myocardium", "ventricle", "atrium", "atrial", "pericardium",
+      "mediastinum", "cardiac", "epicardial"
+    ],
+    "source": "Radiopaedia 'Windowing (CT)' (https://doi.org/10.53347/rID-52108). Vascular/heart: W:600 L:200. For contrast-enhanced CT studies. [Verified 2026-07-04]."
+  }
+]

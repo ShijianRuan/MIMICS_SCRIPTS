@@ -6,7 +6,11 @@ from __future__ import print_function
 import json
 import os
 import subprocess
+import time
 import uuid
+
+
+INVALID_LOCK_GRACE_SECONDS = 5.0
 
 
 def write_json_atomic(path, value):
@@ -94,3 +98,149 @@ def background_env(extra=None, include_itk=False):
     if extra:
         env.update(extra)
     return env
+
+
+def auto_cleanup_enabled():
+    value = os.environ.get("MIMICS_AUTO_CLEANUP_ON_START", "1").strip().lower()
+    return value not in ("0", "false", "no", "off")
+
+
+def aggressive_auto_cleanup_enabled():
+    value = os.environ.get("MIMICS_AGGRESSIVE_AUTO_CLEANUP_ON_START", "").strip().lower()
+    return value in ("1", "true", "yes", "on")
+
+
+def resource_lock_dir(project_root):
+    return os.path.join(project_root, ".mimics_runtime", "locks")
+
+
+def resource_lock_path(project_root, name):
+    return os.path.join(resource_lock_dir(project_root), name)
+
+
+def process_exists(pid):
+    try:
+        value = int(pid)
+    except Exception:
+        return False
+    if value <= 0:
+        return False
+    if os.name != "nt":
+        try:
+            os.kill(value, 0)
+            return True
+        except Exception:
+            return False
+    try:
+        import ctypes
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, value)
+        if not handle:
+            return False
+        try:
+            exit_code = ctypes.c_ulong(0)
+            if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)) == 0:
+                return False
+            return int(exit_code.value) == STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return False
+
+
+def _resource_lock_payload(resource, owner, pid, token):
+    return {
+        "schema_version": "mimics_script_resource_lock.v1",
+        "resource": resource,
+        "owner": owner,
+        "pid": int(pid),
+        "token": token,
+        "created_at_epoch": time.time(),
+    }
+
+
+def acquire_resource_lock(path, resource, owner, wait_seconds=0.0, poll_seconds=2.0):
+    token = uuid.uuid4().hex
+    deadline = time.time() + max(0.0, float(wait_seconds))
+    while True:
+        parent = os.path.dirname(path)
+        if parent and not os.path.isdir(parent):
+            os.makedirs(parent)
+        payload = _resource_lock_payload(resource, owner, os.getpid(), token)
+        payload["path"] = path
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            try:
+                os.write(fd, json.dumps(payload, indent=2, sort_keys=True).encode("utf-8"))
+            finally:
+                os.close(fd)
+            return token
+        except OSError:
+            current = read_json(path, {}) or {}
+            if (not current and _invalid_lock_file_is_old(path)) or (current and not process_exists(current.get("pid"))):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+                continue
+            if time.time() >= deadline:
+                return None
+            time.sleep(max(0.25, float(poll_seconds)))
+
+
+def update_resource_lock_pid(path, token, pid, extra=None):
+    current = read_json(path, {}) or {}
+    if current.get("token") != token:
+        return False
+    current["pid"] = int(pid)
+    current["updated_at_epoch"] = time.time()
+    if extra:
+        current.update(extra)
+    write_json_atomic(path, current)
+    return True
+
+
+def release_resource_lock(path, token):
+    current = read_json(path, {}) or {}
+    if token and current.get("token") != token:
+        return False
+    try:
+        os.remove(path)
+        return True
+    except OSError:
+        return True
+
+
+def cleanup_stale_resource_locks(lock_dir):
+    removed = 0
+    if not lock_dir or not os.path.isdir(lock_dir):
+        return removed
+    try:
+        names = os.listdir(lock_dir)
+    except Exception:
+        return removed
+    for name in names:
+        if not name.endswith(".lock"):
+            continue
+        path = os.path.join(lock_dir, name)
+        payload = read_json(path, {}) or {}
+        if not payload and not _invalid_lock_file_is_old(path):
+            continue
+        if payload and process_exists(payload.get("pid")):
+            continue
+        try:
+            os.remove(path)
+            removed += 1
+        except OSError:
+            pass
+    return removed
+
+
+def _invalid_lock_file_is_old(path):
+    try:
+        age = time.time() - os.path.getmtime(path)
+    except Exception:
+        return False
+    return age >= INVALID_LOCK_GRACE_SECONDS

@@ -5,6 +5,32 @@ import torch
 from typing import Dict
 
 
+def _cleanup_old_epoch_checkpoints(save_dir: str, keep_last: int):
+    """Keep best_model.pth plus the latest N epoch checkpoints."""
+    try:
+        keep_last = int(keep_last)
+    except Exception:
+        keep_last = 0
+    if keep_last < 0:
+        return
+    try:
+        if not os.path.isfile(os.path.join(save_dir, "best_model.pth")):
+            keep_last = max(keep_last, 1)
+        candidates = [
+            os.path.join(save_dir, name)
+            for name in os.listdir(save_dir)
+            if name.startswith("epoch_") and name.endswith(".pth")
+        ]
+        candidates.sort(key=lambda path: os.path.getmtime(path), reverse=True)
+        for path in candidates[keep_last:]:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
 def save_checkpoint(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
@@ -45,6 +71,9 @@ def save_checkpoint(
     if is_best:
         best_path = os.path.join(save_dir, "best_model.pth")
         torch.save(state, best_path)
+
+    keep_last = config.get("training", {}).get("keep_last_checkpoints", 2)
+    _cleanup_old_epoch_checkpoints(save_dir, keep_last)
 
 
 def load_checkpoint(

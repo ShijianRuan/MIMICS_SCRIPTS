@@ -128,10 +128,10 @@ class Trainer3D:
         raise ValueError(f"Unknown optimizer: {opt_name}")
 
     def _build_scheduler(self, cfg: Dict):
-        total_steps = self.epochs * len(self.train_loader) // self.grad_accumulation
-        warmup = cfg.get("warmup_epochs", 5) * len(self.train_loader) // self.grad_accumulation
+        total_steps = max(1, self.epochs * max(1, len(self.train_loader)) // max(1, self.grad_accumulation))
+        warmup = cfg.get("warmup_epochs", 5) * max(1, len(self.train_loader)) // max(1, self.grad_accumulation)
 
-        if cfg.get("scheduler") == "cosine":
+        if cfg.get("scheduler") == "cosine" and total_steps > warmup:
             return torch.optim.lr_scheduler.CosineAnnealingLR(
                 self.optimizer, T_max=total_steps - warmup
             )

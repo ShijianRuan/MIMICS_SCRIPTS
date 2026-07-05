@@ -32,6 +32,17 @@ LOCK_FILE = "_mcs_batch.lock"
 LOG_FILE = "_create_mcs_batch.log"
 LOG_ROTATE_BYTES = 5 * 1024 * 1024
 LOG_BACKUPS = 3
+SOURCE_IMAGE_PATH_METADATA = "mimics_script.source_image_path"
+SOURCE_IMAGE_KIND_METADATA = "mimics_script.source_image_kind"
+SOURCE_IMAGE_SHAPE_METADATA = "mimics_script.source_image_shape"
+SOURCE_IMAGE_INDEX_SPACE_METADATA = "mimics_script.source_image_index_space"
+SOURCE_WORLD_COORDINATE_SYSTEM_METADATA = "mimics_script.source_world_coordinate_system"
+MIMICS_WORLD_COORDINATE_SYSTEM_METADATA = "mimics_script.mimics_world_coordinate_system"
+SOURCE_TO_MIMICS_WORLD_MATRIX_METADATA = "mimics_script.source_to_mimics_world_matrix"
+SOURCE_VOXEL_TO_RAS_MATRIX_METADATA = "mimics_script.source_voxel_to_ras_matrix"
+MIMICS_VOXEL_TO_RAS_MATRIX_METADATA = "mimics_script.mimics_voxel_to_ras_matrix"
+MIMICS_TO_SOURCE_INDEX_MATRIX_METADATA = "mimics_script.mimics_to_source_index_matrix"
+SOURCE_CASE_DIR_METADATA = "mimics_script.source_case_dir"
 write_json_atomic = runtime_common.write_json_atomic
 safe_case_filename = runtime_common.safe_filename
 
@@ -40,11 +51,16 @@ def rotate_log(path, max_bytes=LOG_ROTATE_BYTES, backups=LOG_BACKUPS):
     try:
         if not os.path.isfile(path) or os.path.getsize(path) < max_bytes:
             return
-        for index in range(int(backups), 0, -1):
+        backups = int(backups)
+        if backups <= 0:
+            os.remove(path)
+            return
+        oldest = "{0}.{1}".format(path, backups)
+        if os.path.isfile(oldest):
+            os.remove(oldest)
+        for index in range(backups - 1, 0, -1):
             src = "{0}.{1}".format(path, index)
             dst = "{0}.{1}".format(path, index + 1)
-            if os.path.isfile(dst):
-                os.remove(dst)
             if os.path.isfile(src):
                 os.rename(src, dst)
         os.rename(path, path + ".1")
@@ -143,6 +159,21 @@ def process_exists(pid):
         return False
 
 
+def metadata_set(obj, name, value):
+    text = "" if value is None else str(value)
+    try:
+        item = obj.metadata.find(name)
+    except Exception:
+        item = None
+    try:
+        if item is None:
+            obj.metadata.create(name=name, value=text)
+        else:
+            item.value = text
+    except Exception:
+        pass
+
+
 def inject_buffer(mask, buffer_path, mimics_shape):
     """Inject a .u8 buffer into a Mimics mask."""
     with open(buffer_path, "rb") as f:
@@ -191,6 +222,33 @@ def create_mcs_from_manifest(work_dir, output_mcs):
 
     image = mimics.data.images[0]
     mimics.data.images.set_active(image)
+    metadata_set(image, SOURCE_IMAGE_PATH_METADATA, result.get("source_image_path", ""))
+    metadata_set(image, SOURCE_IMAGE_KIND_METADATA, result.get("source_image_kind", ""))
+    metadata_set(image, SOURCE_IMAGE_SHAPE_METADATA, json.dumps(result.get("source_image_shape", [])))
+    metadata_set(image, SOURCE_IMAGE_INDEX_SPACE_METADATA, result.get("source_image_index_space", ""))
+    metadata_set(image, SOURCE_WORLD_COORDINATE_SYSTEM_METADATA, result.get("source_world_coordinate_system", ""))
+    metadata_set(image, MIMICS_WORLD_COORDINATE_SYSTEM_METADATA, result.get("mimics_world_coordinate_system", ""))
+    metadata_set(
+        image,
+        SOURCE_TO_MIMICS_WORLD_MATRIX_METADATA,
+        json.dumps(result.get("source_to_mimics_world_matrix", [])),
+    )
+    metadata_set(
+        image,
+        SOURCE_VOXEL_TO_RAS_MATRIX_METADATA,
+        json.dumps(result.get("source_voxel_to_ras_matrix", [])),
+    )
+    metadata_set(
+        image,
+        MIMICS_VOXEL_TO_RAS_MATRIX_METADATA,
+        json.dumps(result.get("mimics_voxel_to_ras_matrix", [])),
+    )
+    metadata_set(
+        image,
+        MIMICS_TO_SOURCE_INDEX_MATRIX_METADATA,
+        json.dumps(result.get("mimics_to_source_index_matrix", [])),
+    )
+    metadata_set(image, SOURCE_CASE_DIR_METADATA, result.get("source_case_dir", ""))
 
     # Disable GUI updates during mask creation to prevent progressive
     # display and crashes from rapid UI refreshes.

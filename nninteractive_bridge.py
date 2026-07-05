@@ -14,7 +14,9 @@ The bridge auto-manages the nnInteractive server lifecycle:
 
 Protocol (JSON stdin -> JSON stdout):
     Input keys:
-        image_path          : str   - Optional NIfTI image in platform coordinates
+        image_path          : str   - Optional NIfTI image or DICOM folder in platform coordinates
+        image_source_kind   : str   - Optional "nifti" or "dicom_folder"
+        image_expected_shape: [int, int, int] - Optional source-vs-Mimics shape guard
         image_buffer_path   : str   - Optional raw image buffer exported from MIMICS
         image_buffer_shape  : [int, int, int] - Required with image_buffer_path
         image_buffer_dtype  : str   - Optional NumPy dtype, default int16
@@ -55,6 +57,8 @@ from urllib.parse import urlparse
 import nibabel as nib
 import numpy as np
 
+from resource_locks import FileResourceLock, ResourceLockTimeout, release_lock
+
 
 # ---------------------------------------------------------------------------
 #  Server lifecycle management
@@ -64,26 +68,49 @@ SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 1527
 SERVER_URL = f"http://{SERVER_HOST}:{SERVER_PORT}"
 SERVER_STARTUP_TIMEOUT = 600  # first CPU startup can take several minutes
-HEALTHZ_RETRY_INTERVAL = 1.0   # seconds between healthz checks
+HEALTHZ_RETRY_INTERVAL = 0.5   # seconds between healthz checks
 SERVER_IDLE_TIMEOUT = 1800
 LOG_ROTATE_BYTES = 10 * 1024 * 1024
 LOG_ROTATE_BACKUPS = 3
+PROJECT_ROOT = Path(__file__).resolve().parent
+RESOURCE_LOCK_DIR = PROJECT_ROOT / ".mimics_runtime" / "locks"
+GPU_LOCK_PATH = RESOURCE_LOCK_DIR / "gpu.lock"
 
 
 def _rotate_log_file(path: Path, max_bytes: int = LOG_ROTATE_BYTES, backups: int = LOG_ROTATE_BACKUPS) -> None:
     try:
         if not path.is_file() or path.stat().st_size < max_bytes:
             return
-        for index in range(int(backups), 0, -1):
+        backups = int(backups)
+        if backups <= 0:
+            path.unlink()
+            return
+        oldest = path.with_name(f"{path.name}.{backups}")
+        if oldest.exists():
+            oldest.unlink()
+        for index in range(backups - 1, 0, -1):
             src = path.with_name(f"{path.name}.{index}")
             dst = path.with_name(f"{path.name}.{index + 1}")
-            if dst.exists():
-                dst.unlink()
             if src.exists():
                 src.rename(dst)
         path.rename(path.with_name(path.name + ".1"))
     except Exception:
         pass
+
+
+def _gpu_lock_enabled(device: str) -> bool:
+    if os.environ.get("MIMICS_DISABLE_GPU_LOCK", "").strip().lower() in ("1", "true", "yes"):
+        return False
+    return str(device or "").lower().startswith("cuda")
+
+
+def _release_gpu_lock_from_state(state: dict[str, Any] | None) -> None:
+    if not state:
+        return
+    lock_path = state.get("gpu_lock_path")
+    token = state.get("gpu_lock_token")
+    if lock_path and token:
+        release_lock(lock_path, str(token))
 
 
 def _server_state_path(model_dir: str) -> Path:
@@ -390,6 +417,7 @@ def _remove_server_state(path: Path, ownership_token: str | None = None) -> None
     state = _load_server_state(path)
     if ownership_token and state and state.get("ownership_token") != ownership_token:
         return
+    _release_gpu_lock_from_state(state)
     try:
         path.unlink()
     except FileNotFoundError:
@@ -521,8 +549,8 @@ def _watchdog_main(state_path_value: str, ownership_token: str) -> int:
         time.sleep(max(1.0, min(30.0, remaining)))
 
 
-def _start_watchdog(state_path: Path, ownership_token: str) -> None:
-    subprocess.Popen(
+def _start_watchdog(state_path: Path, ownership_token: str) -> subprocess.Popen:
+    return subprocess.Popen(
         [
             sys.executable,
             str(Path(__file__).resolve()),
@@ -543,6 +571,7 @@ def _start_server(
     service_idle_timeout_seconds: float,
     server_url: str,
     fold: str | None,
+    gpu_lock_timeout_seconds: float = 30.0,
 ) -> tuple[subprocess.Popen, dict[str, Any]]:
     """Start the nnInteractive server as a background subprocess.
 
@@ -581,21 +610,48 @@ def _start_server(
     if fold is not None:
         cmd.extend(["--fold", fold])
 
-    _rotate_log_file(log_path)
-    with open(log_path, "a") as log_fh:
-        log_fh.write(f"\n{'='*60}\n")
-        log_fh.write(f"Starting nnInteractive server at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-        logged_cmd = ["<redacted>" if value == ownership_token else value for value in cmd]
-        log_fh.write(f"Command: {' '.join(logged_cmd)}\n")
-        log_fh.flush()
+    gpu_lock = None
+    if _gpu_lock_enabled(device):
+        gpu_lock = FileResourceLock(
+            GPU_LOCK_PATH,
+            "gpu",
+            "nnInteractive server ({0})".format(Path(model_dir).name),
+        )
+        try:
+            gpu_lock.acquire(wait_seconds=float(gpu_lock_timeout_seconds), poll_seconds=2.0)
+        except ResourceLockTimeout as exc:
+            raise RuntimeError(
+                "GPU is already in use by another Mimics-Script AI job. "
+                "Stop the running job or wait for it to finish. {0}".format(exc)
+            ) from exc
 
-        proc = subprocess.Popen(
-            cmd,
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            env=env,
-            **_hidden_process_kwargs(detached=True),
+    _rotate_log_file(log_path)
+    try:
+        with open(log_path, "a") as log_fh:
+            log_fh.write(f"\n{'='*60}\n")
+            log_fh.write(f"Starting nnInteractive server at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            logged_cmd = ["<redacted>" if value == ownership_token else value for value in cmd]
+            log_fh.write(f"Command: {' '.join(logged_cmd)}\n")
+            log_fh.flush()
+
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                env=env,
+                **_hidden_process_kwargs(detached=True),
+            )
+    except Exception:
+        if gpu_lock is not None:
+            gpu_lock.release()
+        raise
+    if gpu_lock is not None:
+        gpu_lock.update_pid(
+            proc.pid,
+            server_url=server_url,
+            model_dir=str(Path(model_dir).resolve()),
+            state_path=str(state_path),
         )
 
     state = {
@@ -610,8 +666,13 @@ def _start_server(
         "last_activity_epoch": time.time(),
         "service_idle_timeout_seconds": float(service_idle_timeout_seconds),
     }
+    if gpu_lock is not None:
+        state["gpu_lock_path"] = str(GPU_LOCK_PATH)
+        state["gpu_lock_token"] = gpu_lock.token
     _write_server_state(state_path, state)
-    _start_watchdog(state_path, ownership_token)
+    watchdog = _start_watchdog(state_path, ownership_token)
+    state["watchdog_pid"] = watchdog.pid
+    _write_server_state(state_path, state)
     return proc, state
 
 
@@ -642,6 +703,7 @@ def _ensure_server(
     startup_timeout_seconds: float = SERVER_STARTUP_TIMEOUT,
     preferred_server_url: str = SERVER_URL,
     fold: str | None = None,
+    gpu_lock_timeout_seconds: float = 30.0,
 ) -> tuple[bool, str, str]:
     """Ensure the nnInteractive server is running; start it if needed.
 
@@ -681,6 +743,7 @@ def _ensure_server(
         service_idle_timeout_seconds,
         server_url,
         fold,
+        gpu_lock_timeout_seconds,
     )
     api_key = str(state["ownership_token"])
 
@@ -744,6 +807,12 @@ def mimics_to_platform(array: np.ndarray, mapping: dict[str, Any]) -> np.ndarray
     """Transform a MIMICS-coordinate array into platform coordinates."""
     inv = _invert_mapping(mapping)
     return _apply_mapping(array, inv["platform_to_mimics_axes"], inv["platform_to_mimics_flips"])
+
+
+def mimics_shape_to_platform_shape(shape: list[int], mapping: dict[str, Any]) -> list[int]:
+    inv = _invert_mapping(mapping)
+    mimics_shape = [int(value) for value in shape]
+    return [mimics_shape[int(axis)] for axis in inv["platform_to_mimics_axes"]]
 
 
 def platform_to_mimics(array: np.ndarray, mapping: dict[str, Any]) -> np.ndarray:
@@ -811,6 +880,243 @@ def load_image_nifti(path: str) -> np.ndarray:
     else:
         raise RuntimeError(f"Unexpected image dimensions: {data.ndim}")
     return data
+
+
+def _parse_matrix(value: Any) -> np.ndarray | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if not value.strip():
+            return None
+        value = json.loads(value)
+    matrix = np.asarray(value, dtype=np.float64)
+    if matrix.shape != (4, 4):
+        return None
+    if not np.all(np.isfinite(matrix)):
+        return None
+    return matrix
+
+
+def _affine_close(left: np.ndarray, right: np.ndarray, tolerance: float = 1.0e-5) -> bool:
+    return bool(np.allclose(left, right, rtol=0.0, atol=tolerance))
+
+
+def _resample_image_to_mimics_grid(
+    data: np.ndarray,
+    source_voxel_to_ras: np.ndarray,
+    mimics_voxel_to_ras: np.ndarray,
+    expected_shape: list[int],
+) -> np.ndarray:
+    source_to_mimics = np.linalg.inv(source_voxel_to_ras) @ mimics_voxel_to_ras
+    expected = [int(value) for value in expected_shape]
+    if list(data.shape) == expected and _affine_close(source_to_mimics, np.eye(4)):
+        return data.astype(np.float32, copy=False)
+
+    try:
+        from scipy import ndimage
+    except Exception as exc:
+        raise RuntimeError(
+            "Source image orientation differs from the open Mimics image, but scipy "
+            "is not available in the external nnInteractive environment for "
+            "background resampling."
+        ) from exc
+
+    output = np.empty(tuple(expected), dtype=np.float32)
+    max_slab_voxels = 4_000_000
+    slab_depth = max(1, min(expected[2], max_slab_voxels // max(1, expected[0] * expected[1])))
+    data = data.astype(np.float32, copy=False)
+
+    for z0 in range(0, expected[2], slab_depth):
+        z1 = min(expected[2], z0 + slab_depth)
+        grid = np.indices((expected[0], expected[1], z1 - z0), dtype=np.float64)
+        grid[2] += float(z0)
+        flat = grid.reshape(3, -1)
+        homogeneous = np.vstack([flat, np.ones((1, flat.shape[1]), dtype=np.float64)])
+        source_coords = (source_to_mimics @ homogeneous)[:3]
+        sampled = ndimage.map_coordinates(
+            data,
+            source_coords,
+            order=1,
+            mode="nearest",
+            prefilter=False,
+        )
+        output[:, :, z0:z1] = sampled.reshape((expected[0], expected[1], z1 - z0))
+    return output
+
+
+def _align_source_image_to_mimics_grid(data: np.ndarray, input_data: dict[str, Any]) -> np.ndarray:
+    expected_shape = input_data.get("image_expected_shape") or input_data.get("interaction_shape")
+    if not expected_shape:
+        return data
+    expected = [int(value) for value in expected_shape]
+    source_affine = _parse_matrix(input_data.get("image_source_voxel_to_ras_matrix"))
+    mimics_affine = _parse_matrix(input_data.get("image_mimics_voxel_to_ras_matrix"))
+    if source_affine is not None and mimics_affine is not None:
+        return _resample_image_to_mimics_grid(data, source_affine, mimics_affine, expected)
+    loaded_shape = [int(value) for value in data.shape]
+    if loaded_shape != expected:
+        raise RuntimeError(
+            f"Loaded source image shape does not match the open Mimics image and no affine resampling metadata was provided: {loaded_shape} != {expected}"
+        )
+    return data.astype(np.float32, copy=False)
+
+
+def _dicom_sort_key(record: tuple[Path, Any], normal: np.ndarray | None) -> tuple[float, float, str]:
+    path, ds = record
+    if normal is not None and hasattr(ds, "ImagePositionPatient"):
+        try:
+            ipp = np.array([float(value) for value in ds.ImagePositionPatient], dtype=float)
+            return (float(np.dot(ipp, normal)), float(getattr(ds, "InstanceNumber", 0) or 0), str(path))
+        except Exception:
+            pass
+    try:
+        return (float(getattr(ds, "InstanceNumber", 0) or 0), 0.0, str(path))
+    except Exception:
+        return (0.0, 0.0, str(path))
+
+
+def _dicom_normal(records: list[tuple[Path, Any]]) -> np.ndarray | None:
+    for _path, ds in records:
+        if not hasattr(ds, "ImageOrientationPatient"):
+            continue
+        try:
+            iop = [float(value) for value in ds.ImageOrientationPatient]
+            row = np.array(iop[:3], dtype=float)
+            column = np.array(iop[3:], dtype=float)
+            normal = np.cross(row, column)
+            norm = float(np.linalg.norm(normal))
+            if np.isfinite(norm) and norm > 0:
+                return normal / norm
+        except Exception:
+            continue
+    return None
+
+
+def _dicom_group_key(ds: Any) -> str:
+    return str(getattr(ds, "SeriesInstanceUID", "") or "__missing_series_uid__")
+
+
+def _select_dicom_records(
+    records: list[tuple[Path, Any]],
+    expected_shape: list[int] | None,
+    allow_shape_mismatch: bool = False,
+) -> list[tuple[Path, Any]]:
+    if not records:
+        raise RuntimeError("No readable DICOM image slices were found")
+
+    groups: dict[str, list[tuple[Path, Any]]] = {}
+    for record in records:
+        groups.setdefault(_dicom_group_key(record[1]), []).append(record)
+
+    def group_shape(group: list[tuple[Path, Any]]) -> list[int] | None:
+        if not group:
+            return None
+        first = group[0][1]
+        return [int(first.Columns), int(first.Rows), int(len(group))]
+
+    if expected_shape:
+        expected = [int(value) for value in expected_shape]
+        matches = [group for group in groups.values() if group_shape(group) == expected]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise RuntimeError(
+                "Multiple DICOM series match the open Mimics image shape. "
+                "Use a source folder that contains only the intended series."
+            )
+        all_shape = group_shape(records)
+        if len(groups) == 1 and all_shape == expected:
+            return records
+        if allow_shape_mismatch and len(groups) == 1:
+            return next(iter(groups.values()))
+        if allow_shape_mismatch:
+            raise RuntimeError(
+                "No DICOM series shape matches the open Mimics image, and the source folder contains multiple series. "
+                "Use a source folder that contains only the intended series."
+            )
+
+    return max(groups.values(), key=len)
+
+
+def load_image_dicom_folder(
+    path: str,
+    expected_shape: list[int] | None = None,
+    allow_shape_mismatch: bool = False,
+) -> np.ndarray:
+    """Load a DICOM folder as a float32 4D array with shape (1, Columns, Rows, Slices).
+
+    Mimics voxel indexes are exposed as (x, y, z). For a DICOM slice, x maps to
+    Columns and y maps to Rows, so each pixel_array (Rows, Columns) is
+    transposed before stacking.
+    """
+    try:
+        import pydicom
+    except Exception as exc:
+        raise RuntimeError(
+            "DICOM source fast path requires pydicom in the external nnInteractive environment"
+        ) from exc
+
+    root = Path(path)
+    if not root.is_dir():
+        raise RuntimeError(f"DICOM source path is not a folder: {path}")
+
+    records: list[tuple[Path, Any]] = []
+    for child in sorted(root.rglob("*")):
+        if not child.is_file():
+            continue
+        try:
+            ds = pydicom.dcmread(str(child), stop_before_pixels=True, force=False)
+        except Exception:
+            continue
+        if hasattr(ds, "Rows") and hasattr(ds, "Columns"):
+            records.append((child, ds))
+
+    selected = _select_dicom_records(records, expected_shape, allow_shape_mismatch)
+    normal = _dicom_normal(selected)
+    selected = sorted(selected, key=lambda record: _dicom_sort_key(record, normal))
+
+    slices: list[np.ndarray] = []
+    for path_obj, _meta in selected:
+        ds = pydicom.dcmread(str(path_obj), force=False)
+        array = ds.pixel_array.astype(np.float32, copy=False)
+        slope = float(getattr(ds, "RescaleSlope", 1.0) or 1.0)
+        intercept = float(getattr(ds, "RescaleIntercept", 0.0) or 0.0)
+        if slope != 1.0 or intercept != 0.0:
+            array = array * slope + intercept
+        slices.append(array.T)
+
+    if not slices:
+        raise RuntimeError(f"No readable DICOM pixel data was found: {path}")
+
+    data = np.stack(slices, axis=2).astype(np.float32, copy=False)
+    if expected_shape and not allow_shape_mismatch:
+        expected = [int(value) for value in expected_shape]
+        loaded_shape = [int(value) for value in data.shape]
+        if loaded_shape != expected:
+            raise RuntimeError(
+                f"DICOM source shape does not match the open Mimics image: {loaded_shape} != {expected}"
+            )
+    return data[None]
+
+
+def load_image_source(input_data: dict[str, Any]) -> np.ndarray:
+    path = str(input_data["image_path"])
+    source_kind = str(input_data.get("image_source_kind") or "").lower()
+    expected_shape = input_data.get("image_expected_shape") or input_data.get("interaction_shape")
+    has_affine_resample_metadata = (
+        _parse_matrix(input_data.get("image_source_voxel_to_ras_matrix")) is not None
+        and _parse_matrix(input_data.get("image_mimics_voxel_to_ras_matrix")) is not None
+    )
+    if source_kind == "dicom_folder" or Path(path).is_dir():
+        image = load_image_dicom_folder(
+            path,
+            expected_shape,
+            allow_shape_mismatch=has_affine_resample_metadata,
+        )
+    else:
+        image = load_image_nifti(path)
+    aligned = _align_source_image_to_mimics_grid(image[0], input_data)
+    return aligned[None]
 
 
 def load_image_raw(
@@ -1085,6 +1391,14 @@ def _apply_interaction(
     return bool(crops)
 
 
+def _interaction_fingerprint(interaction: dict[str, Any]) -> str:
+    """Stable fingerprint used to detect append-only prompt updates."""
+    try:
+        return json.dumps(interaction, sort_keys=True, separators=(",", ":"), default=str)
+    except Exception:
+        return repr(interaction)
+
+
 def _apply_point_set(
     session: Any,
     interaction: dict[str, Any],
@@ -1180,6 +1494,7 @@ class _BridgeSessionContext:
     """Keep one remote session and one preprocessed image for a Mimics tool run."""
 
     def __init__(self, input_data: dict[str, Any]):
+        context_started = time.time()
         self.input_data = input_data
         self.model_dir = str(input_data["model_dir"])
         self.requested_device = str(input_data.get("device", "auto"))
@@ -1200,7 +1515,26 @@ class _BridgeSessionContext:
             resolved_device=self.device,
             device_warning=self.device_warning,
             model_dir=self.model_dir,
+            image_source=input_data.get("image_source"),
+            image_source_kind=input_data.get("image_source_kind"),
+            image_source_index_space=input_data.get("image_source_index_space"),
+            image_source_world_coordinate_system=input_data.get("image_source_world_coordinate_system"),
+            image_mimics_world_coordinate_system=input_data.get("image_mimics_world_coordinate_system"),
+            image_source_to_mimics_world_matrix=input_data.get("image_source_to_mimics_world_matrix"),
+            image_source_voxel_to_ras_matrix=input_data.get("image_source_voxel_to_ras_matrix"),
+            image_mimics_voxel_to_ras_matrix=input_data.get("image_mimics_voxel_to_ras_matrix"),
+            image_mimics_to_source_index_matrix=input_data.get("image_mimics_to_source_index_matrix"),
+            image_expected_shape=input_data.get("image_expected_shape"),
         )
+
+        if input_data.get("image_buffer_shape"):
+            self.mimics_shape = [int(value) for value in input_data["image_buffer_shape"]]
+        elif input_data.get("interaction_shape"):
+            self.mimics_shape = [int(value) for value in input_data["interaction_shape"]]
+        elif input_data.get("image_expected_shape"):
+            self.mimics_shape = [int(value) for value in input_data["image_expected_shape"]]
+        else:
+            self.mimics_shape = []
 
         if input_data.get("image_buffer_path"):
             self.image_np = load_image_raw(
@@ -1211,23 +1545,29 @@ class _BridgeSessionContext:
                 coordinates=input_data.get("image_buffer_coordinates", "mimics"),
             )
         elif input_data.get("image_path"):
-            self.image_np = load_image_nifti(input_data["image_path"])
+            image_mimics = load_image_source(input_data)
+            self.image_np = mimics_to_platform(image_mimics[0], self.buffer_mapping)[None]
         else:
             raise RuntimeError("Missing image_path or image_buffer_path")
+        self.image_load_seconds = round(time.time() - context_started, 2)
 
         self.platform_shape = [int(value) for value in self.image_np.shape[1:]]
-        if input_data.get("image_buffer_shape"):
-            self.mimics_shape = [int(value) for value in input_data["image_buffer_shape"]]
-        elif input_data.get("interaction_shape"):
-            self.mimics_shape = [int(value) for value in input_data["interaction_shape"]]
-        else:
-            self.mimics_shape = list(self.platform_shape)
+        if not self.mimics_shape:
+            self.mimics_shape = platform_to_mimics(self.image_np[0], self.buffer_mapping).shape
+            self.mimics_shape = [int(value) for value in self.mimics_shape]
+        expected_platform_shape = mimics_shape_to_platform_shape(self.mimics_shape, self.buffer_mapping)
+        if expected_platform_shape and self.platform_shape != expected_platform_shape:
+            raise RuntimeError(
+                "Loaded source image shape does not match the open Mimics image: "
+                f"{self.platform_shape} != {expected_platform_shape}"
+            )
 
         self.server_url = str(input_data.get("server_url") or SERVER_URL)
         auto_start = bool(input_data.get("auto_start_server", True))
         server_api_key = os.environ.get("NN_INTERACTIVE_API_KEY")
         self.owned_state_path: Path | None = None
         self.owned_token: str | None = None
+        server_started = time.time()
         if auto_start and self.server_url == SERVER_URL:
             self.first_call, self.server_url, server_api_key = _ensure_server(
                 self.model_dir,
@@ -1241,16 +1581,19 @@ class _BridgeSessionContext:
                 ),
                 self.server_url,
                 input_data.get("fold", "auto"),
+                float(input_data.get("gpu_lock_timeout_seconds", 30)),
             )
             self.owned_state_path = _server_state_path(self.model_dir)
             self.owned_token = server_api_key
         else:
             self.first_call = False
+        self.server_ready_seconds = round(time.time() - server_started, 2)
 
         if self.owned_state_path is not None and self.owned_token:
             _touch_server_activity(self.owned_state_path, self.owned_token)
         self.session = None
         try:
+            upload_started = time.time()
             self.session = _connect_remote(
                 self.server_url,
                 server_api_key,
@@ -1262,8 +1605,11 @@ class _BridgeSessionContext:
                 ),
             )
             self.session.set_image(self.image_np)
+            self.set_image_seconds = round(time.time() - upload_started, 2)
+            target_started = time.time()
             self.target = np.zeros(self.image_np.shape[1:], dtype=np.uint8)
             self.session.set_target_buffer(self.target)
+            self.set_target_seconds = round(time.time() - target_started, 2)
         except Exception:
             if self.session is not None:
                 try:
@@ -1275,6 +1621,11 @@ class _BridgeSessionContext:
             input_data.get("initial_seg_path"),
             input_data.get("initial_seg_shape"),
         )
+        self.incremental_interaction_replay = bool(
+            input_data.get("incremental_interaction_replay", True)
+        )
+        self._applied_initial_key: str | None = None
+        self._applied_interaction_fingerprints: list[str] = []
         _append_bridge_log(
             self.log_path,
             "session_ready",
@@ -1282,6 +1633,10 @@ class _BridgeSessionContext:
             server_url=self.server_url,
             first_call=self.first_call,
             image_shape=self.platform_shape,
+            image_load_seconds=self.image_load_seconds,
+            server_ready_seconds=self.server_ready_seconds,
+            set_image_seconds=self.set_image_seconds,
+            set_target_seconds=self.set_target_seconds,
         )
 
     def _load_initial_platform(
@@ -1335,48 +1690,82 @@ class _BridgeSessionContext:
         else:
             initial_platform = self.initial_platform
 
-        def _apply_all_interactions() -> int:
-            self.session.reset_interactions()
-            self._apply_initial_segmentation(initial_platform)
+        interaction_fingerprints = [
+            _interaction_fingerprint(interaction) for interaction in interactions
+        ]
+        initial_key = json.dumps(
+            {
+                "initial_seg_path": initial_seg_path if not use_context_initial_seg else "__context__",
+                "initial_seg_shape": initial_seg_shape or self.mimics_shape,
+                "use_context_initial_seg": bool(use_context_initial_seg),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+
+        def _apply_one_interaction(interaction: dict[str, Any]) -> bool:
+            interaction_type = str(interaction.get("interaction_type", "scribble"))
+            if interaction_type == "point_set":
+                return _apply_point_set(
+                    self.session,
+                    interaction,
+                    mimics_shape=self.mimics_shape,
+                    platform_shape=self.platform_shape,
+                    buffer_mapping=self.buffer_mapping,
+                )
+            if interaction_type == "scribble_set":
+                return _apply_scribble_set(
+                    self.session,
+                    interaction,
+                    mimics_shape=self.mimics_shape,
+                    platform_shape=self.platform_shape,
+                    buffer_mapping=self.buffer_mapping,
+                )
+            interaction_platform = _interaction_mask(
+                interaction,
+                mimics_shape=self.mimics_shape,
+                platform_shape=self.platform_shape,
+                buffer_mapping=self.buffer_mapping,
+            )
+            if not np.any(interaction_platform):
+                return False
+            return _apply_interaction(
+                self.session,
+                interaction_platform,
+                interaction_type,
+                bool(interaction.get("include_interaction", True)),
+            )
+
+        def _incremental_start_index(force_reset: bool) -> int:
+            if force_reset or not self.incremental_interaction_replay:
+                return 0
+            previous = self._applied_interaction_fingerprints
+            if not previous:
+                return 0
+            if self._applied_initial_key != initial_key:
+                return 0
+            if len(interaction_fingerprints) <= len(previous):
+                return 0
+            if interaction_fingerprints[:len(previous)] != previous:
+                return 0
+            return len(previous)
+
+        def _apply_interactions(force_reset: bool = False) -> tuple[int, int, float]:
+            apply_started = time.time()
+            start_index = _incremental_start_index(force_reset)
+            if start_index <= 0:
+                self.session.reset_interactions()
+                self._apply_initial_segmentation(initial_platform)
+                start_index = 0
             applied_count = 0
-            for interaction in interactions:
-                interaction_type = str(interaction.get("interaction_type", "scribble"))
-                if interaction_type == "point_set":
-                    accepted = _apply_point_set(
-                        self.session,
-                        interaction,
-                        mimics_shape=self.mimics_shape,
-                        platform_shape=self.platform_shape,
-                        buffer_mapping=self.buffer_mapping,
-                    )
-                elif interaction_type == "scribble_set":
-                    accepted = _apply_scribble_set(
-                        self.session,
-                        interaction,
-                        mimics_shape=self.mimics_shape,
-                        platform_shape=self.platform_shape,
-                        buffer_mapping=self.buffer_mapping,
-                    )
-                else:
-                    interaction_platform = _interaction_mask(
-                        interaction,
-                        mimics_shape=self.mimics_shape,
-                        platform_shape=self.platform_shape,
-                        buffer_mapping=self.buffer_mapping,
-                    )
-                    if not np.any(interaction_platform):
-                        continue
-                    accepted = _apply_interaction(
-                        self.session,
-                        interaction_platform,
-                        interaction_type,
-                        bool(interaction.get("include_interaction", True)),
-                    )
+            for interaction in interactions[start_index:]:
+                accepted = _apply_one_interaction(interaction)
                 if accepted:
                     applied_count += 1
-            return applied_count
+            return applied_count, start_index, round(time.time() - apply_started, 2)
 
-        applied = _apply_all_interactions()
+        applied, replay_start_index, prompt_apply_seconds = _apply_interactions()
         if applied == 0:
             return {
                 "status": "skipped",
@@ -1394,7 +1783,7 @@ class _BridgeSessionContext:
                 "nninteractive_bridge: first-call empty prediction detected; retrying once.",
                 file=sys.stderr,
             )
-            applied = _apply_all_interactions()
+            applied, replay_start_index, prompt_apply_seconds = _apply_interactions(force_reset=True)
             result_platform = np.asarray(self.target, dtype=np.uint8)
             warmup_retry = True
 
@@ -1410,6 +1799,9 @@ class _BridgeSessionContext:
             os.makedirs(output_dir, exist_ok=True)
         with open(output_path, "wb") as handle:
             handle.write(result_mimics.tobytes(order="C"))
+
+        self._applied_initial_key = initial_key
+        self._applied_interaction_fingerprints = interaction_fingerprints
 
         result = {
             "status": "refined",
@@ -1428,6 +1820,14 @@ class _BridgeSessionContext:
             "result_shape": list(result_mimics.shape),
             "foreground_voxels": int(np.count_nonzero(result_mimics)),
             "warmup_retry": warmup_retry,
+            "incremental_replay": replay_start_index > 0,
+            "replayed_interactions": len(interactions) - replay_start_index,
+            "skipped_replay_interactions": replay_start_index,
+            "prompt_apply_seconds": prompt_apply_seconds,
+            "image_load_seconds": self.image_load_seconds,
+            "server_ready_seconds": self.server_ready_seconds,
+            "set_image_seconds": self.set_image_seconds,
+            "set_target_seconds": self.set_target_seconds,
         }
         _append_bridge_log(
             self.log_path,
@@ -1436,6 +1836,10 @@ class _BridgeSessionContext:
             interaction_count=len(interactions),
             foreground_voxels=result["foreground_voxels"],
             warmup_retry=warmup_retry,
+            incremental_replay=result["incremental_replay"],
+            replayed_interactions=result["replayed_interactions"],
+            skipped_replay_interactions=result["skipped_replay_interactions"],
+            prompt_apply_seconds=prompt_apply_seconds,
         )
         return result
 

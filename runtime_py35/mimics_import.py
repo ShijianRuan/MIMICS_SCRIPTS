@@ -18,6 +18,7 @@ Flow:
 from __future__ import print_function
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -37,6 +38,8 @@ _IMPORT_MONITORS = {}
 
 # Track background Mimics process for .mcs creation
 _BG_MIMICS_PID = None
+_BG_MIMICS_BUSY_NOTICE_AT = 0.0
+_BG_MIMICS_RETRY_ACTIVE = False
 _MCS_QUEUE_ACTIVE = "_mcs_queue_active.json"
 _MCS_QUEUE_DONE = "_mcs_queue_done.json"
 _LOG_ROTATE_BYTES = 5 * 1024 * 1024
@@ -54,15 +57,27 @@ _hidden_process_kwargs = runtime_common.hidden_process_kwargs
 _background_process_kwargs = runtime_common.background_process_kwargs
 
 
+def _mimics_log(level, message):
+    try:
+        mimics.logging.log_user_message(level=level, message=message)
+    except Exception:
+        pass
+
+
 def _rotate_log_file(path, max_bytes=_LOG_ROTATE_BYTES, backups=_LOG_ROTATE_BACKUPS):
     try:
         if not os.path.isfile(path) or os.path.getsize(path) < max_bytes:
             return
-        for index in range(int(backups), 0, -1):
+        backups = int(backups)
+        if backups <= 0:
+            os.remove(path)
+            return
+        oldest = "{0}.{1}".format(path, backups)
+        if os.path.isfile(oldest):
+            os.remove(oldest)
+        for index in range(backups - 1, 0, -1):
             src = "{0}.{1}".format(path, index)
             dst = "{0}.{1}".format(path, index + 1)
-            if os.path.isfile(dst):
-                os.remove(dst)
             if os.path.isfile(src):
                 os.rename(src, dst)
         os.rename(path, path + ".1")
@@ -73,6 +88,7 @@ def _rotate_log_file(path, max_bytes=_LOG_ROTATE_BYTES, backups=_LOG_ROTATE_BACK
 def _append_import_log(root_dir, message):
     text = "[{0}] {1}".format(time.strftime("%Y-%m-%d %H:%M:%S"), message)
     print(text)
+    _mimics_log(logging.INFO, text)
     try:
         if root_dir and not os.path.isdir(root_dir):
             os.makedirs(root_dir)
@@ -172,6 +188,18 @@ def _project_root():
     )
 
 
+def _resource_lock_path(name):
+    return runtime_common.resource_lock_path(_project_root(), name)
+
+
+def _resource_lock_dir():
+    return runtime_common.resource_lock_dir(_project_root())
+
+
+def _aggressive_auto_cleanup_enabled():
+    return runtime_common.aggressive_auto_cleanup_enabled()
+
+
 def _environment_root():
     root = _project_root()
     candidates = [
@@ -221,19 +249,23 @@ def _python_exe():
 # -- Stale process / temp cleanup --------------------------------------
 
 def _cleanup_stale_processes():
-    """Kill leftover bridge python and background Mimics processes from a
-    previous crashed session.  Also removes Mimics temp lock files.
+    """Clean safe stale runtime state from a previous crashed session.
 
-    Called at the start of main() so every import begins with a clean slate.
-
-    .. note::
-        nnInteractive server and watchdog processes are **excluded** from
-        killing so that a running inference server is not disrupted.
+    By default this only removes Mimics-Script resource lock files whose PID
+    no longer exists. Process termination is deliberately opt-in via
+    MIMICS_AGGRESSIVE_AUTO_CLEANUP_ON_START=1 or the explicit Stop Background
+    Services entry, because killing live bridge/background Mimics processes
+    can interrupt a valid async workflow.
 
     Uses a single hidden batch PowerShell call instead of per-process calls
     to avoid popping up visible console windows that freeze Mimics.
     """
     killed = []
+    locks_removed = runtime_common.cleanup_stale_resource_locks(_resource_lock_dir())
+    if not _aggressive_auto_cleanup_enabled():
+        if locks_removed:
+            print("Startup cleanup: removed {0} stale resource lock file(s)".format(locks_removed))
+        return
 
     # Substrings that identify nnInteractive server / watchdog processes
     # which must NOT be killed during cleanup.
@@ -303,7 +335,6 @@ def _cleanup_stale_processes():
         pass  # Best-effort; don't crash if cleanup fails
 
     # 2. Remove stale Mimics temp lock files
-    locks_removed = 0
     try:
         temp_dir = os.environ.get("TEMP", "")
         if temp_dir and os.path.isdir(temp_dir):
@@ -764,7 +795,10 @@ def _import_monitor_tick(monitor):
             target_mcs=output_mcs,
             notify_only=not _auto_open_mcs_enabled(),
         )
-        _append_import_log(output_dir, "Queued background .mcs creation: {0}".format(output_mcs))
+        _append_import_log(
+            output_dir,
+            "Data preparation finished; background Mimics is creating the .mcs file: {0}".format(output_mcs),
+        )
     except Exception as e:
         output_mcs = monitor.get("output_mcs")
         output_dir = os.path.dirname(os.path.abspath(output_mcs)) if output_mcs else ""
@@ -829,7 +863,6 @@ def _start_next_batch_case(monitor):
         case_id))
 
     bridge_params = _build_bridge_params(case_info, axes, flips, work_dir)
-    process = _launch_bridge_background(bridge_params, job_dir)
 
     # Update monitor for next case
     monitor["job_dir"] = job_dir
@@ -839,13 +872,16 @@ def _start_next_batch_case(monitor):
     monitor["deadline"] = time.time() + monitor.get("timeout_seconds", 1800)
     monitor["done"] = False
 
-    state = {
-        "phase": "preparing",
-        "case_id": case_id,
-        "pid": process.pid,
-        "started_at": time.time(),
-    }
-    _write_json_atomic(os.path.join(job_dir, "job_state.json"), state)
+    _write_json_atomic(
+        os.path.join(job_dir, "job_state.json"),
+        {
+            "phase": "launching",
+            "requested_phase": "preparing",
+            "case_id": case_id,
+            "started_at": time.time(),
+        },
+    )
+    _launch_bridge_job_thread(bridge_params, job_dir, output_dir, "preparing", case_id=case_id)
 
     _IMPORT_MONITORS[job_dir] = monitor
 
@@ -917,7 +953,7 @@ def _batch_prepare_tick(monitor):
         queued = True
         _append_import_log(
             output_dir,
-            "[{0}/{1}] Prepared {2}; queued .mcs creation.".format(
+            "[{0}/{1}] Prepared {2}; background Mimics will create the .mcs file.".format(
                 completed_count,
                 total,
                 case_id,
@@ -969,7 +1005,7 @@ def _start_next_batch_prepare(monitor):
         output_dir = monitor.get("output_dir")
         _append_import_log(
             output_dir,
-            "All {0} case(s) prepared; {1} failed. Background .mcs creation continues.".format(
+            "All {0} case(s) prepared; {1} failed. Background Mimics is still creating .mcs files from prepared data.".format(
                 completed,
                 failed,
             ),
@@ -1019,7 +1055,6 @@ def _start_next_batch_prepare(monitor):
     )
 
     bridge_params = _build_bridge_params(case_info, axes, flips, work_dir)
-    process = _launch_bridge_background(bridge_params, job_dir)
 
     # Update monitor for next case
     old_monitor_key = monitor.get("monitor_key")
@@ -1030,14 +1065,16 @@ def _start_next_batch_prepare(monitor):
     monitor["deadline"] = time.time() + monitor.get("timeout_seconds", 1800)
     monitor["done"] = False
 
-    # Write job state so _check_job_status can find the pid
-    state = {
-        "phase": "preparing",
-        "case_id": case_id,
-        "pid": process.pid,
-        "started_at": time.time(),
-    }
-    _write_json_atomic(os.path.join(job_dir, "job_state.json"), state)
+    _write_json_atomic(
+        os.path.join(job_dir, "job_state.json"),
+        {
+            "phase": "launching",
+            "requested_phase": "preparing",
+            "case_id": case_id,
+            "started_at": time.time(),
+        },
+    )
+    _launch_bridge_job_thread(bridge_params, job_dir, output_dir, "preparing", case_id=case_id)
 
     # Re-register monitor under new key (timer keeps running)
     _IMPORT_MONITORS.pop(old_monitor_key, None)
@@ -1173,7 +1210,36 @@ def _ensure_bg_mimics_running(output_dir, total_count=0, mark_active=True):
     _launch_background_mimics(output_dir, total_count=total_count)
 
 
-def _launch_background_mimics(output_dir, total_count=0):
+def _schedule_bg_mimics_retry(output_dir, total_count=0):
+    global _BG_MIMICS_RETRY_ACTIVE
+    if _BG_MIMICS_RETRY_ACTIVE:
+        return
+    _BG_MIMICS_RETRY_ACTIVE = True
+
+    def _retry():
+        global _BG_MIMICS_RETRY_ACTIVE
+        deadline = time.time() + 21600.0
+        try:
+            while time.time() < deadline:
+                time.sleep(30.0)
+                if _BG_MIMICS_PID and _is_pid_alive(_BG_MIMICS_PID):
+                    return
+                process = _launch_background_mimics(
+                    output_dir,
+                    total_count=total_count,
+                    schedule_retry=False,
+                )
+                if process is not None:
+                    return
+        finally:
+            _BG_MIMICS_RETRY_ACTIVE = False
+
+    thread = threading.Thread(target=_retry)
+    thread.daemon = True
+    thread.start()
+
+
+def _launch_background_mimics(output_dir, total_count=0, schedule_retry=True):
     """Launch Mimics in background mode to create .mcs files from prepared data.
 
     Mimics runs without GUI (-b flag), executing create_mcs_batch.py which
@@ -1181,6 +1247,7 @@ def _launch_background_mimics(output_dir, total_count=0):
     Returns the Popen object, or None on failure.
     """
     global _BG_MIMICS_PID
+    global _BG_MIMICS_BUSY_NOTICE_AT
     mimics_exe = _find_mimics_exe()
     if not mimics_exe:
         _append_import_log(output_dir, "MimicsResearch.exe was not found; background .mcs creation cannot start.")
@@ -1216,6 +1283,24 @@ def _launch_background_mimics(output_dir, total_count=0):
     cmd = [mimics_exe, "-b", "-run_script", runner_path]
     log_path = os.path.join(output_dir, "_background_mimics.log")
     _rotate_log_file(log_path)
+    lock_path = _resource_lock_path("background_mimics.lock")
+    lock_token = runtime_common.acquire_resource_lock(
+        lock_path,
+        "background_mimics",
+        "import .mcs creation",
+        wait_seconds=0.0,
+    )
+    if not lock_token:
+        now = time.time()
+        if now - _BG_MIMICS_BUSY_NOTICE_AT >= 60.0:
+            _BG_MIMICS_BUSY_NOTICE_AT = now
+            _append_import_log(
+                output_dir,
+                "Background Mimics is already running for another Mimics-Script task; .mcs creation will continue when that process exits.",
+            )
+        if schedule_retry:
+            _schedule_bg_mimics_retry(output_dir, total_count=total_count)
+        return None
     log_handle = None
     try:
         log_handle = open(log_path, "ab")
@@ -1228,12 +1313,19 @@ def _launch_background_mimics(output_dir, total_count=0):
             **_background_process_kwargs()
         )
         _BG_MIMICS_PID = process.pid
+        runtime_common.update_resource_lock_pid(
+            lock_path,
+            lock_token,
+            process.pid,
+            {"kind": "create_mcs", "output_dir": os.path.abspath(output_dir)},
+        )
         _append_import_log(
             output_dir,
             "Background Mimics started (PID={0}) for .mcs creation.".format(process.pid),
         )
         return process
     except Exception as e:
+        runtime_common.release_resource_lock(lock_path, lock_token)
         _append_import_log(output_dir, "Could not start background Mimics: {0}".format(e))
         return None
     finally:
@@ -1629,15 +1721,16 @@ def _discover_monitor_tick(monitor):
 
     _append_import_log(output_dir, "[1/{0}] Preparing: {1}".format(count, first_case_id))
     bridge_params = _build_bridge_params(first_case, axes, flips, first_work_dir)
-    process = _launch_bridge_background(bridge_params, first_job_dir)
-
-    state = {
-        "phase": "preparing",
-        "case_id": first_case_id,
-        "pid": process.pid,
-        "started_at": time.time(),
-    }
-    _write_json_atomic(os.path.join(first_job_dir, "job_state.json"), state)
+    _write_json_atomic(
+        os.path.join(first_job_dir, "job_state.json"),
+        {
+            "phase": "launching",
+            "requested_phase": "preparing",
+            "case_id": first_case_id,
+            "started_at": time.time(),
+        },
+    )
+    _launch_bridge_job_thread(bridge_params, first_job_dir, output_dir, "preparing", case_id=first_case_id)
 
     # Bridge launched, timer will auto-chain remaining cases
 
@@ -1763,6 +1856,7 @@ def _build_bridge_params(case_info, axes, flips, work_dir):
         "axes": axes,
         "flips": flips,
         "case_id": case_info["case_id"],
+        "case_dir": case_info.get("case_dir", ""),
     }
 
 
@@ -1772,12 +1866,12 @@ def main():
     """Entry point. Reads config from argv or interactive dialog.
 
     Usage:
-        mimics_import.py --ts-root <dir> [--cases s0000,s0001] [--output-dir <dir>] [--axes 1,0,2] [--flips false,false,false]
-        mimics_import.py --case-dir <dir> --output <file.mcs> [--axes 1,0,2] [--flips false,false,false]
+        mimics_import.py --ts-root <dir> [--cases s0000,s0001] [--output-dir <dir>] [--axes 0,1,2] [--flips false,false,false]
+        mimics_import.py --case-dir <dir> --output <file.mcs> [--axes 0,1,2] [--flips false,false,false]
     """
-    # Cleanup is intentionally opt-in. Process enumeration can briefly contend
-    # with Mimics UI; use Stop_Background_Services.py for manual cleanup.
-    if os.environ.get("MIMICS_AUTO_CLEANUP_ON_START", "").strip().lower() in ("1", "true", "yes"):
+    # Safe cleanup runs in a daemon thread. By default it only removes stale
+    # resource locks; process killing is explicit or aggressive opt-in.
+    if runtime_common.auto_cleanup_enabled():
         cleanup_thread = threading.Thread(target=_cleanup_stale_processes)
         cleanup_thread.daemon = True
         cleanup_thread.start()
@@ -1788,7 +1882,7 @@ def main():
     output = None
     output_dir = None
     cases_filter = None
-    axes = [1, 0, 2]
+    axes = [0, 1, 2]
     flips = [False, False, False]
 
     args = sys.argv[1:]
@@ -1880,15 +1974,16 @@ def main():
         _mark_mcs_queue_active(os.path.dirname(os.path.abspath(output)), 1)
         _append_import_log(os.path.dirname(os.path.abspath(output)), "Preparing: {0}".format(case_info["case_id"]))
         bridge_params = _build_bridge_params(case_info, axes, flips, work_dir)
-        process = _launch_bridge_background(bridge_params, job_dir)
-
-        state = {
-            "phase": "preparing",
-            "case_id": case_info["case_id"],
-            "pid": process.pid,
-            "started_at": time.time(),
-        }
-        _write_json_atomic(os.path.join(job_dir, "job_state.json"), state)
+        _write_json_atomic(
+            os.path.join(job_dir, "job_state.json"),
+            {
+                "phase": "launching",
+                "requested_phase": "preparing",
+                "case_id": case_info["case_id"],
+                "started_at": time.time(),
+            },
+        )
+        _launch_bridge_job_thread(bridge_params, job_dir, os.path.dirname(os.path.abspath(output)), "preparing", case_id=case_info["case_id"])
 
         # Bridge launched, timer will queue the result for background Mimics.
         _start_import_monitor(job_dir, output, work_dir)

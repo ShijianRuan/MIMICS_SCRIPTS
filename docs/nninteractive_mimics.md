@@ -149,13 +149,13 @@ Point Set 是一个提示事件：多个正负点以 `run_prediction=False` 写�
 
 第一次推理需要启动模型服务，通常比后续提示慢。脚本会复用正在运行的本机服务。
 
-服务由 bridge 创建并记录所有权，不会根据一个来源不明的 PID 直接终止进程。每次提示都会刷新活动时间；默认连续 30 分钟没有推理请求后，独立 watchdog 会核对 PID、启动命令、模型路径和所有权 token，再关闭自己启动的服务并释放 GPU。nnInteractive 官方的 `idle-timeout` 只回收 client session，本集成没有把它误当作服务退出机制。
+服务由 bridge 创建并记录所有权，不会根据一个来源不明的 PID 直接终止进程。每次提示都会刷新活动时间；默认连续 30 分钟没有推理请求后，独立 watchdog 会核对 PID、启动命令、模型路径和所有权 token，再关闭自己启动的服务并释放 GPU。受管服务持有 `<repo>/.mimics_runtime/locks/gpu.lock`，DINOv3 训练和推理会等待这把锁而不是同时争抢 CUDA 显存。如果 watchdog 自己崩溃，默认启动清理和 DINOv3 的 GPU 等待逻辑都只会在 state 文件、ownership token 和 idle timeout 同时满足时清理该受管 server。nnInteractive 官方的 `idle-timeout` 只回收 client session，本集成没有把它误当作服务退出机制。
 
 `start_server.bat` 只用于人工诊断。默认自动管理模式下，诊断结束后应按 Ctrl+C 停止它再运行 Mimics；若确实要长期连接手工启动的服务，需要在 `nninteractive_config.json` 中显式设置 `auto_start_server: false`。自动模式不会接管或结束来源不明的进程；默认端口 `1527` 已被占用时，会为本次受管服务选择另一个空闲本地端口，并把实际地址写入状态和日志。
 
 ### 7.1 启动、等待与日志
 
-Mimics 侧不再直接相信“某个 `python.exe` 文件存在”。第一次使用时会先检查外部解释器版本，并确认 `numpy`、`nibabel`、`torch` 和 `nnInteractive` 都能被发现。环境变量和配置文件仍可覆盖默认位置，但指向一个错误或不完整环境时会立即给出解释器路径和缺失包，不会继续走到 `ConnectionRefusedError` 才暴露问题。
+Mimics 侧不再直接相信“某个 `python.exe` 文件存在”。第一次使用时会先检查外部解释器版本，并确认 `numpy`、`nibabel`、`torch` 和 `nnInteractive` 都能被发现。DICOM source-image fast path 还需要外部环境安装 `pydicom`。环境变量和配置文件仍可覆盖默认位置，但指向一个错误或不完整环境时会立即给出解释器路径和缺失包，不会继续走到 `ConnectionRefusedError` 才暴露问题。
 
 设备默认值是 `auto`：
 
@@ -196,7 +196,7 @@ Mimics 会自动打开 Log Panel，并在推理开始、CPU 回退和完成时�
 
 | 文件 | 职责 |
 | --- | --- |
-| `adapters/mimics/scripting_library/nnInteractive.py` | Mimics Scripting Library 独立入口 |
+| `adapters/mimics/scripting_library/02_AI/nnInteractive.py` | Mimics Scripting Library 独立入口 |
 | `adapters/mimics/runtime_py35/nninteractive_mimics.py` | 目标选择、提示采集、临时文件和结果写回 |
 | `adapters/mimics/nninteractive_bridge.py` | 外部 Python 中加载图像、重放提示并调用 nnInteractive |
 | `scripts/setup_nninteractive_env.py` | 在 Windows 上联网安装独立环境 |
@@ -403,7 +403,153 @@ nnInteractive 2.4.2 的默认输出路径包括：
 
 默认推理代码没有执行通用的最大连通域、孔洞填充、器官拓扑约束或解剖学冲突处理。若具体任务需要这些规则，应作为明确、可关闭的后处理层单独设计，不能假设 nnInteractive 已经处理。
 
-## 13. 依据
+## 13. Current Mimics Integration Behavior
+
+### 13.1 Prompt-Time Responsiveness
+
+The Mimics foreground process must still call Mimics APIs such as
+`get_voxel_buffer()` and `set_voxel_buffer()` on the Mimics side. These calls
+cannot be made fully asynchronous without risking Mimics object lifetime and
+thread-safety issues.
+
+The integration therefore moves the expensive nnInteractive work out of Mimics
+and starts image-session preparation before prompt capture. The foreground
+Mimics process only performs the unavoidable buffer export/import operations,
+then external Python loads the model, uploads the image, preprocesses it and
+runs inference.
+
+`mimics.update_gui()` is used only to let Mimics process pending UI messages
+before or after a short foreground operation. It does not make a long Mimics API
+operation asynchronous. `disable_update_gui()` is used only around short
+`set_voxel_buffer()` writes so partial mask refreshes do not cause flicker or
+black-screen style redraw stalls. It must always be paired with
+`enable_update_gui()` in `finally`.
+
+### 13.2 First Prediction Latency
+
+The first prediction can still be slower than later predictions because the
+external worker may need to start the nnInteractive server, load the model,
+upload the full Mimics image buffer and let nnInteractive run its native
+`set_image()` preprocessing. Later prompts reuse the same image worker when
+possible, so they should not repeat full image upload/preprocessing.
+
+The default async worker idle timeout is now 3600 seconds. `idle_timeout` means
+that the prepared AI worker waited too long without producing a prompt result
+and exited to release resources; it is not itself a prediction failure reason.
+If a ready worker expires before the next prompt, the next session starts again
+from the current Mask.
+
+### 13.3 Existing Mask Semantics
+
+If an existing Mask is selected, that Mask is exported as the initial
+segmentation. Each prediction resets the nnInteractive session interactions,
+applies the initial segmentation, then replays all prompts for the current
+session. This matches the original nnInteractive interaction model more closely
+than treating Mimics prompts as independent one-off segmentations.
+
+The bridge passes Mimics Gray Value voxels as a raw float32 image array to
+nnInteractive. It does not apply an extra HU normalization, fixed-spacing
+resampling or patch crop on the Mimics side. Those operations belong to
+nnInteractive's native `set_image()` and inference pipeline; duplicating them in
+the integration would change model behavior.
+
+### 13.4 Scripting Library Layout
+
+The Scripting Library entries are organized by workflow:
+
+- `01_Data`: dataset import and mask export.
+- `02_AI`: nnInteractive and DINOv3 few-shot actions.
+- `03_Display`: window/level presets, undo and full-range reset.
+- `99_Admin`: background-service cleanup.
+
+Visible entries are intentionally thin wrappers. They all go through
+`scripting_library/_mimics_entrypoint.py`, which performs runtime path setup and
+loads the target runtime module. The wrappers do not call `importlib.reload()`
+on every click, because reload can discard in-memory monitors for background
+inference or training jobs while those jobs are still expected to report back to
+Mimics.
+
+DINOv3 actions are exposed as separate entries for Train/Update, Predict,
+Show Status and Stop Latest Job so annotators do not need to step through a
+large action menu for common operations.
+
+### 13.5 Source-Image Fast Path For Prewarming
+
+Prewarming must not simply move a long Mimics GUI stall from after the prompt
+to before the prompt. The expensive image load, model load, image upload and
+nnInteractive preprocessing should happen in the external Python worker.
+
+For `.mcs` files created by the batch import pipeline, the background Mimics
+creator stores source image metadata on the imported ImageData:
+
+- `mimics_script.source_image_path`
+- `mimics_script.source_image_kind`
+- `mimics_script.source_image_shape`
+- `mimics_script.source_image_index_space`
+- `mimics_script.source_world_coordinate_system`
+- `mimics_script.mimics_world_coordinate_system`
+- `mimics_script.source_to_mimics_world_matrix`
+- `mimics_script.source_voxel_to_ras_matrix`
+- `mimics_script.mimics_voxel_to_ras_matrix`
+- `mimics_script.mimics_to_source_index_matrix`
+
+When this metadata points to a valid source NIfTI or DICOM folder, and its
+recorded shape, index-space contract and world-coordinate contract match the
+open Mimics image, `nnInteractive` sends `image_path`, `image_source_kind`,
+`image_expected_shape`, `interaction_shape` and the RAS/LPS metadata to the
+external bridge. Mimics then skips `ImageData.get_voxel_buffer()` and does not
+write a full raw image buffer on the foreground GUI thread.
+
+The fast path is based on Mimics voxel index space, not only patient view labels.
+Prompts collected through `image.get_voxel_indexes()` are `(x, y, z)` indexes.
+For NIfTI imported through this pipeline, `(i, j, k)` is preserved when the
+derived DICOM is created. The NIfTI affine is converted from RAS world
+coordinates to LPS world coordinates for Mimics/DICOM, but the voxel array is
+not flipped or canonicalized. For DICOM source folders, source and Mimics world
+coordinates are both LPS; the external worker reads the selected series, sorts
+slices by `ImagePositionPatient` along the slice normal, transposes each pixel
+plane from `(Rows, Columns)` to `(Columns, Rows)`, and stacks the result as
+`(Columns, Rows, Slices)`. The loaded shape must match the open Mimics image
+before the worker accepts prompts. Internally, the bridge first aligns source
+data to the Mimics grid, then applies the configured Mimics-to-platform axis
+mapping before calling nnInteractive. Shape checks compare platform shape to the
+mapped Mimics shape, so non-identity axis mappings are not rejected by comparing
+two different coordinate systems.
+
+If the source image voxel grid differs from the Mimics voxel grid but both
+`source_voxel_to_ras_matrix` and `mimics_voxel_to_ras_matrix` are present, the
+external worker computes `source_index = inv(source_voxel_to_RAS) *
+mimics_voxel_to_RAS * mimics_index` and resamples the source image into the
+Mimics voxel grid in the background. In that case the tool does not fall back to
+foreground Mimics buffer export merely because the source orientation differs.
+It falls back or fails only when the required geometry is missing or ambiguous
+for example a DICOM folder containing multiple possible series.
+
+Mask-to-image resampling inside the conversion bridge uses RAS affines
+internally. NIfTI mask affines from nibabel are already RAS, and DICOM image
+geometry is converted from LPS to RAS before resampling. The bridge therefore
+does not convert mask affines to LPS during resampling; doing so would mix
+coordinate systems and can create left-right/anterior-posterior mirroring.
+
+If the metadata is missing, points to a missing file, is not a supported source
+type, or lacks enough geometry to compute the source-to-Mimics index transform,
+the integration falls back to the Mimics image buffer export and writes a warning
+to Mimics logging. If the source index-space or RAS/LPS world-coordinate contract
+is missing or unsupported, the fast path is skipped instead of guessing. This
+fallback preserves old projects, but it can still cause a foreground pause on
+very large volumes.
+
+The before-prompt prewarm step is stricter: it only runs when the source-image
+fast path is available. It does not use the raw Mimics buffer fallback, so an old
+project cannot move a full image-buffer export from after prompt capture to
+before prompt capture.
+
+Empty initial Masks use an empty-mask state marker instead of exporting a full
+zero-valued mask buffer. Undo and reset restore such sessions with `mask.clear()`.
+Existing non-empty Masks are still exported as the initial segmentation because
+nnInteractive needs that current user-edited state.
+
+## 14. References
 
 - [nnInteractive 官方仓库](https://github.com/MIC-DKFZ/nnInteractive)
 - [nnInteractive server-client 文档](https://github.com/MIC-DKFZ/nnInteractive/blob/master/SERVER_CLIENT.md)

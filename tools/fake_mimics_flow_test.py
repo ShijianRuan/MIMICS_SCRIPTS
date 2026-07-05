@@ -1,0 +1,665 @@
+#!/usr/bin/env python3
+"""Fake-Mimics flow tests for Mimics-Script runtime modules.
+
+This suite injects a small in-memory ``mimics`` module so the Mimics-side
+runtime code can be exercised on machines without Mimics installed.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import importlib
+import io
+import json
+import os
+import shutil
+import sys
+import tempfile
+import time
+import traceback
+import types
+import uuid
+from pathlib import Path
+from types import SimpleNamespace
+
+
+ROOT = Path(__file__).resolve().parents[1]
+RUNTIME_DIR = ROOT / "runtime_py35"
+LIBRARY_DIR = ROOT / "scripting_library"
+for path in (str(RUNTIME_DIR), str(LIBRARY_DIR), str(ROOT)):
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+
+class TestFailure(RuntimeError):
+    pass
+
+
+def assert_true(condition, message):
+    if not condition:
+        raise TestFailure(message)
+
+
+def assert_equal(left, right, message):
+    if left != right:
+        raise TestFailure("{}: {!r} != {!r}".format(message, left, right))
+
+
+class TestRunner:
+    def __init__(self):
+        self.results = []
+
+    def run(self, name, func):
+        started = time.time()
+        try:
+            detail = func()
+        except Exception:
+            self.results.append((name, "FAIL", traceback.format_exc()))
+            return
+        self.results.append((name, "PASS", "{} ({:.2f}s)".format(detail or "ok", time.time() - started)))
+
+    def report(self):
+        failed = 0
+        print("\nFake Mimics flow test summary")
+        print("=" * 72)
+        for name, status, detail in self.results:
+            print("[{}] {}".format(status, name))
+            if status == "FAIL":
+                failed += 1
+                print(detail.rstrip())
+            elif detail:
+                print("  " + detail)
+        print("=" * 72)
+        print("{} passed, {} failed".format(len(self.results) - failed, failed))
+        return 1 if failed else 0
+
+
+class FakeMetadataItem:
+    def __init__(self, name, value):
+        self.name = name
+        self.value = value
+
+
+class FakeMetadata:
+    def __init__(self):
+        self._items = {}
+
+    def find(self, name):
+        return self._items.get(name)
+
+    def create(self, name, value):
+        item = FakeMetadataItem(name, value)
+        self._items[name] = item
+        return item
+
+    def delete(self, name):
+        self._items.pop(name, None)
+
+    def __getitem__(self, name):
+        return self._items[name]
+
+    def set(self, name, value):
+        item = self.find(name)
+        if item is None:
+            self.create(name, value)
+        else:
+            item.value = value
+
+
+class FakeCollection(list):
+    def __init__(self, values=None):
+        super().__init__(values or [])
+        self._active = self[0] if self else None
+        self.deleted = []
+
+    def get_active(self):
+        return self._active
+
+    def set_active(self, value):
+        if value not in self:
+            self.append(value)
+        self._active = value
+
+    def delete(self, value):
+        self.deleted.append(value)
+        try:
+            self.remove(value)
+        except ValueError:
+            pass
+        if self._active is value:
+            self._active = self[0] if self else None
+
+
+def _voxel_count(shape):
+    count = 1
+    for value in shape:
+        count *= int(value)
+    return count
+
+
+class FakeVoxelBuffer:
+    def __init__(self, shape, data=None, fmt="B"):
+        self.shape = tuple(int(value) for value in shape)
+        self.format = fmt
+        item_size = 2 if fmt in ("h", "H") else 1
+        expected = _voxel_count(self.shape) * item_size
+        if data is None:
+            data = bytes(expected)
+        raw = bytes(data)
+        if len(raw) != expected:
+            raise ValueError("fake voxel buffer size mismatch: {} != {}".format(len(raw), expected))
+        self._data = bytearray(raw)
+
+    def tobytes(self):
+        return bytes(self._data)
+
+    def tostring(self):
+        return self.tobytes()
+
+    def zero(self):
+        self._data[:] = bytes(len(self._data))
+
+
+def _u8_buffer(shape, fill=0):
+    return FakeVoxelBuffer(shape, bytes([int(fill) & 0xFF]) * _voxel_count(shape), "B")
+
+
+def _u8_pattern_buffer(shape, predicate):
+    data = bytearray()
+    x_dim, y_dim, z_dim = [int(value) for value in shape]
+    for x in range(x_dim):
+        for y in range(y_dim):
+            for z in range(z_dim):
+                data.append(1 if predicate(x, y, z) else 0)
+    return FakeVoxelBuffer(shape, data, "B")
+
+
+class FakeImage:
+    def __init__(self, buffer, minimum_value=0, maximum_value=4095, name="Image"):
+        self._buffer = buffer
+        self.logical_dimensions = list(self._buffer.shape)
+        self.minimum_value = minimum_value
+        self.maximum_value = maximum_value
+        self.name = name
+        self.guid = uuid.uuid4().hex
+        self.metadata = FakeMetadata()
+
+    def get_voxel_buffer(self):
+        return self._buffer
+
+
+class FakeMask:
+    def __init__(self, name, image=None, array=None, selected=False):
+        if array is None and image is not None:
+            array = _u8_buffer(tuple(image.logical_dimensions), 0)
+        elif array is None:
+            array = _u8_buffer((1, 1, 1), 0)
+        self.name = name
+        self.image = image
+        if isinstance(array, FakeVoxelBuffer):
+            self._buffer = array
+        elif isinstance(array, (bytes, bytearray)):
+            shape = tuple(getattr(image, "logical_dimensions", (len(array), 1, 1)))
+            self._buffer = FakeVoxelBuffer(shape, array, "B")
+        else:
+            try:
+                import numpy as np
+                arr = np.asarray(array).astype(np.uint8)
+                self._buffer = FakeVoxelBuffer(arr.shape, arr.tobytes(), "B")
+            except Exception:
+                raise TypeError("FakeMask array must be FakeVoxelBuffer, bytes, or array-like")
+        self.selected = selected
+        self.visible = True
+        self.guid = uuid.uuid4().hex
+        self.metadata = FakeMetadata()
+        self._refresh_pixels()
+
+    def _refresh_pixels(self):
+        self.number_of_pixels = sum(1 for value in self._buffer.tobytes() if value)
+
+    def get_voxel_buffer(self):
+        return self._buffer
+
+    def set_voxel_buffer(self, pixels):
+        if hasattr(pixels, "tobytes"):
+            raw = pixels.tobytes()
+            shape = tuple(getattr(pixels, "shape", self._buffer.shape))
+        else:
+            raw = bytes(pixels)
+            shape = self._buffer.shape
+        raw = bytes(1 if value else 0 for value in raw)
+        self._buffer = FakeVoxelBuffer(shape, raw, "B")
+        self._refresh_pixels()
+
+    def clear(self):
+        self._buffer.zero()
+        self._refresh_pixels()
+
+
+class FakeDialogs:
+    def __init__(self):
+        self.messages = []
+        self.questions = []
+        self.question_answers = []
+
+    def message_box(self, message=None, title="", ui_blocking=None, **kwargs):
+        if message is None:
+            message = kwargs.get("message", "")
+        self.messages.append({
+            "title": title or kwargs.get("title", ""),
+            "message": message,
+            "ui_blocking": ui_blocking,
+        })
+        return None
+
+    def question_box(self, message="", buttons="", title="", ui_blocking=None, **kwargs):
+        record = {
+            "title": title or kwargs.get("title", ""),
+            "message": message or kwargs.get("message", ""),
+            "buttons": buttons or kwargs.get("buttons", ""),
+            "ui_blocking": ui_blocking,
+        }
+        self.questions.append(record)
+        if self.question_answers:
+            return self.question_answers.pop(0)
+        choices = [item for item in record["buttons"].split(";") if item]
+        return choices[0] if choices else "OK"
+
+
+class FakeLogging:
+    def __init__(self):
+        self.messages = []
+
+    def log_user_message(self, level, message):
+        self.messages.append((level, message))
+
+
+class FakeView:
+    def __init__(self, fake):
+        self.fake = fake
+        self.contrast = ((0.0, 0.0), (4095.0, 1.0))
+        self.log_panel_shown = 0
+
+    def set_contrast(self, low, high):
+        image = self.fake.data.images.get_active()
+        if image is not None:
+            minimum = float(getattr(image, "minimum_value", -1e9))
+            maximum = float(getattr(image, "maximum_value", 1e9))
+            if float(low[0]) < minimum or float(high[0]) > maximum:
+                raise ValueError("contrast point outside fake image range")
+            if float(high[0]) <= float(low[0]):
+                raise ValueError("upper contrast point must be greater than lower")
+        self.contrast = (tuple(low), tuple(high))
+
+    def get_contrast(self):
+        return self.contrast
+
+    def show_log_panel(self):
+        self.log_panel_shown += 1
+
+
+class FakeSegment:
+    def __init__(self, fake):
+        self.fake = fake
+
+    def HU2GV(self, value):
+        return float(value)
+
+    def create_mask(self):
+        image = self.fake.data.images.get_active()
+        mask = FakeMask("New Mask", image=image)
+        self.fake.data.masks.append(mask)
+        return mask
+
+    def activate_edit_mask(self, *args, **kwargs):
+        self.fake.segment_edit_calls.append((args, kwargs))
+
+
+class FakeFile:
+    def __init__(self, fake):
+        self.fake = fake
+        self.project_path = ""
+        self.opened = []
+        self.saved = []
+        self.closed = 0
+
+    def get_project_information(self):
+        return SimpleNamespace(filename=self.project_path)
+
+    def open_project(self, filename=None, **kwargs):
+        value = filename or kwargs.get("filename")
+        self.opened.append(value)
+        self.project_path = value or self.project_path
+
+    def close_project(self):
+        self.closed += 1
+
+    def save_project(self, filename=None, save_as_type=None, **kwargs):
+        self.saved.append((filename or kwargs.get("filename"), save_as_type))
+
+    def import_dicom_images(self, source_folder=None, **kwargs):
+        self.fake.imported_dicom.append(source_folder or kwargs.get("source_folder"))
+
+
+class FakeMimics(types.ModuleType):
+    def __init__(self):
+        super().__init__("mimics")
+        self.UserInterrupted = type("UserInterrupted", (Exception,), {})
+        self.logging = FakeLogging()
+        self.dialogs = FakeDialogs()
+        self.data = SimpleNamespace(
+            images=FakeCollection(),
+            masks=FakeCollection(),
+            points=FakeCollection(),
+            distance_measurements=FakeCollection(),
+            measurements=FakeCollection(),
+            splines=FakeCollection(),
+        )
+        self.view = FakeView(self)
+        self.segment = FakeSegment(self)
+        self.file = FakeFile(self)
+        self.segment_edit_calls = []
+        self.imported_dicom = []
+        self.gui_enabled = True
+        self.update_gui_calls = 0
+        self.disable_gui_calls = 0
+        self.enable_gui_calls = 0
+        self.analyze = SimpleNamespace(
+            create_point=lambda *args, **kwargs: SimpleNamespace(name="point"),
+            indicate_spline=lambda *args, **kwargs: SimpleNamespace(points=[]),
+        )
+        self.measure = SimpleNamespace(indicate_distance_measurement=lambda *args, **kwargs: None)
+
+    def update_gui(self):
+        self.update_gui_calls += 1
+
+    def is_update_gui_enabled(self):
+        return self.gui_enabled
+
+    def disable_update_gui(self):
+        self.disable_gui_calls += 1
+        self.gui_enabled = False
+
+    def enable_update_gui(self):
+        self.enable_gui_calls += 1
+        self.gui_enabled = True
+
+    def reset_scene(self, image_shape=(2, 3, 4), minimum_value=0, maximum_value=4095):
+        image = FakeImage(
+            FakeVoxelBuffer(tuple(image_shape), bytes(_voxel_count(image_shape) * 2), "h"),
+            minimum_value=minimum_value,
+            maximum_value=maximum_value,
+        )
+        self.data.images = FakeCollection([image])
+        self.data.images.set_active(image)
+        self.data.masks = FakeCollection()
+        self.view.contrast = ((float(minimum_value), 0.0), (float(maximum_value), 1.0))
+        return image
+
+
+def install_fake_mimics():
+    fake = FakeMimics()
+    sys.modules["mimics"] = fake
+    return fake
+
+
+def import_runtime_module(name):
+    if name in sys.modules:
+        return importlib.reload(sys.modules[name])
+    return importlib.import_module(name)
+
+
+def test_runtime_imports(fake, tmp):
+    modules = [
+        "window_level_mimics",
+        "mimics_export",
+        "mimics_import",
+        "mimics_stop_background",
+        "fewshot_mimics",
+        "nninteractive_mimics",
+        "create_mcs_batch",
+    ]
+    loaded = []
+    for name in modules:
+        import_runtime_module(name)
+        loaded.append(name)
+    return "imported {}".format(", ".join(loaded))
+
+
+def test_scripting_entrypoint(fake, tmp):
+    fake.reset_scene(image_shape=(2, 2, 2), minimum_value=0, maximum_value=100)
+    entry = import_runtime_module("_mimics_entrypoint")
+    result = entry.run_runtime_entry(
+        {"__name__": "scripting_library.03_Display.Window_Reset_Full_Range"},
+        str(LIBRARY_DIR / "03_Display" / "Window_Reset_Full_Range.py"),
+        "window_level_mimics",
+        action_value="reset",
+    )
+    assert_equal(result, 0, "entrypoint result")
+    assert_equal(fake.view.get_contrast(), ((0, 0.0), (100, 1.0)), "reset contrast via entrypoint")
+    assert_true(fake.update_gui_calls >= 1, "entrypoint did not trigger GUI update")
+    return "shared Scripting Library entrypoint executed inside fake Mimics"
+
+
+def test_window_level_from_selected_mask(fake, tmp):
+    image = fake.reset_scene(image_shape=(3, 4, 5), minimum_value=0, maximum_value=2026)
+    mask = FakeMask("liver_portal_region", image=image, array=_u8_buffer((3, 4, 5), 1), selected=True)
+    fake.data.masks.append(mask)
+    module = import_runtime_module("window_level_mimics")
+    state_path = tmp / "window_state.json"
+    module._state_path = lambda: str(state_path)
+    result = module.apply_from_selected_mask()
+    assert_equal(result, 0, "apply_from_selected_mask result")
+    assert_equal(fake.view.get_contrast(), ((0, 0.0), (250, 1.0)), "liver preset clamped contrast")
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert_equal(state.get("last_preset"), "Abdomen / Soft Tissue", "selected mask preset")
+    module.undo_last()
+    assert_equal(fake.view.get_contrast(), ((0.0, 0.0), (2026.0, 1.0)), "undo restored previous contrast")
+    return "mask-name preset, image-range clamp, state save, and undo passed"
+
+
+def test_export_masks_to_buffers(fake, tmp):
+    image = fake.reset_scene(image_shape=(2, 3, 4), minimum_value=0, maximum_value=100)
+    liver = FakeMask("liver mask", image=image, array=_u8_buffer((2, 3, 4), 1), selected=True)
+    kidney = FakeMask("kidney/right", image=image, array=_u8_pattern_buffer((2, 3, 4), lambda x, y, _z: x == y))
+    fake.data.masks = FakeCollection([liver, kidney])
+    module = import_runtime_module("mimics_export")
+    buffers_dir = tmp / "buffers"
+    with contextlib.redirect_stdout(io.StringIO()):
+        manifest = module.export_masks_to_buffers(str(buffers_dir))
+    assert_equal(manifest.get("mimics_shape"), [2, 3, 4], "manifest shape")
+    assert_equal(len(manifest.get("masks", [])), 2, "manifest mask count")
+    for row in manifest["masks"]:
+        path = buffers_dir / row["u8_filename"]
+        assert_true(path.is_file(), "missing exported mask buffer: {}".format(path))
+        assert_equal(path.stat().st_size, 24, "mask buffer byte count")
+    assert_true((buffers_dir / "manifest.json").is_file(), "manifest file missing")
+    return "exported 2 mask buffers with manifest and expected byte counts"
+
+
+def test_nninteractive_fast_path_and_mask_buffer(fake, tmp):
+    tmp.mkdir(parents=True, exist_ok=True)
+    image = fake.reset_scene(image_shape=(2, 3, 4), minimum_value=0, maximum_value=100)
+    source_path = tmp / "source.nii.gz"
+    source_path.write_bytes(b"fake nifti")
+    module = import_runtime_module("nninteractive_mimics")
+    ras_to_lps = [[-1.0, 0.0, 0.0, 0.0], [0.0, -1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+    identity = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+    image.metadata.set(module.SOURCE_IMAGE_PATH_METADATA, str(source_path))
+    image.metadata.set(module.SOURCE_IMAGE_KIND_METADATA, "nifti")
+    image.metadata.set(module.SOURCE_IMAGE_SHAPE_METADATA, json.dumps([2, 3, 4]))
+    image.metadata.set(module.SOURCE_IMAGE_INDEX_SPACE_METADATA, "nifti_ijk_matches_derived_dicom_columns_rows_slices_v1")
+    image.metadata.set(module.SOURCE_WORLD_COORDINATE_SYSTEM_METADATA, "ras")
+    image.metadata.set(module.MIMICS_WORLD_COORDINATE_SYSTEM_METADATA, "lps")
+    image.metadata.set(module.SOURCE_TO_MIMICS_WORLD_MATRIX_METADATA, json.dumps(ras_to_lps))
+    image.metadata.set(module.SOURCE_VOXEL_TO_RAS_MATRIX_METADATA, json.dumps(identity))
+    image.metadata.set(module.MIMICS_VOXEL_TO_RAS_MATRIX_METADATA, json.dumps(identity))
+    image.metadata.set(module.MIMICS_TO_SOURCE_INDEX_MATRIX_METADATA, json.dumps(identity))
+    exported = module._source_image_export(image, {})
+    assert_true(exported is not None, "source-image fast path was not selected")
+    assert_equal(exported["kind"], "source_image", "source export kind")
+    assert_equal(exported["path"], "", "source fast path should not export a Mimics buffer")
+    assert_equal(exported["image_path"], str(source_path), "source image path")
+
+    empty = FakeMask("empty", image=image, array=_u8_buffer((2, 3, 4), 0))
+    empty_export = module._export_mask(empty, str(tmp / "empty.u8"), shape_hint=[2, 3, 4])
+    assert_equal(empty_export["path"], "", "empty mask export path")
+    assert_true(not (tmp / "empty.u8").exists(), "empty mask should skip full buffer export")
+
+    raw_path = tmp / "prediction.u8"
+    raw_path.write_bytes(bytes([0, 1] * 12))
+    target = FakeMask("target", image=image, array=_u8_buffer((2, 3, 4), 0))
+    module._set_mask_from_u8(target, str(raw_path), [2, 3, 4])
+    assert_equal(target.number_of_pixels, 12, "applied nnInteractive foreground count")
+    assert_true(fake.disable_gui_calls >= 1 and fake.enable_gui_calls >= 1, "mask apply did not bracket GUI updates")
+
+    class CountingMask(FakeMask):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.buffer_reads = 0
+
+        def get_voxel_buffer(self):
+            self.buffer_reads += 1
+            return super().get_voxel_buffer()
+
+    job_dir = tmp / "async_job"
+    (job_dir / "commands").mkdir(parents=True, exist_ok=True)
+    counting = CountingMask("counting", image=image, array=_u8_pattern_buffer((2, 3, 4), lambda x, y, z: x == 0))
+    state = {
+        "_job_dir": str(job_dir),
+        "shape": [2, 3, 4],
+        "base_path": "",
+        "interactions": [],
+        "target_guid": counting.guid,
+        "target_name": counting.name,
+    }
+    module._enqueue_async_prediction(state, counting, expected_hash="already-validated")
+    assert_equal(counting.buffer_reads, 0, "enqueue should reuse already validated target hash")
+    command_path = job_dir / "commands" / "command_000001.json"
+    command = json.loads(command_path.read_text(encoding="utf-8"))
+    assert_equal(command["expected_target_sha256"], "already-validated", "queued expected hash")
+
+    module._enqueue_async_prediction(state, counting)
+    assert_equal(counting.buffer_reads, 1, "enqueue without supplied hash should read target once")
+    return "source fast path, empty-mask optimization, u8 apply, and hash reuse passed"
+
+
+def test_fewshot_apply_prediction_and_stop(fake, tmp):
+    tmp.mkdir(parents=True, exist_ok=True)
+    image = fake.reset_scene(image_shape=(2, 2, 2), minimum_value=0, maximum_value=100)
+    module = import_runtime_module("fewshot_mimics")
+
+    status_path = tmp / "infer_status.json"
+    status_path.write_text(json.dumps({"status": "completed"}), encoding="utf-8")
+    output_path = tmp / "prediction_source.nii.gz"
+    output_path.write_bytes(b"fake")
+    bridge_output_path = tmp / "prediction.u8"
+    bridge_output_path.write_bytes(bytes([1, 0, 0, 1, 0, 0, 0, 0]))
+    bridge_result_path = tmp / "bridge_result.json"
+    bridge_result_path.write_text(json.dumps({
+        "status": "ok",
+        "output_path": str(bridge_output_path),
+        "mimics_shape": [2, 2, 2],
+        "foreground_voxels": 2,
+    }), encoding="utf-8")
+    monitor = {
+        "monitor_key": "fake-monitor",
+        "deadline": time.time() + 60,
+        "status_path": str(status_path),
+        "bridge_started": True,
+        "bridge_result_path": str(bridge_result_path),
+        "mask_name": "liver",
+    }
+    module._MONITORS["fake-monitor"] = monitor
+    module._monitor_tick(monitor)
+    applied = [mask for mask in fake.data.masks if mask.name == "liver"]
+    assert_equal(len(applied), 1, "few-shot result mask count")
+    assert_equal(applied[0].number_of_pixels, 2, "few-shot result foreground count")
+    assert_true("fake-monitor" not in module._MONITORS, "few-shot monitor was not stopped")
+    assert_true(fake.dialogs.messages and fake.dialogs.messages[-1]["ui_blocking"] is False, "few-shot completion message should be non-blocking")
+
+    ts_root = tmp / "dataset"
+    (ts_root / "mcs_output").mkdir(parents=True, exist_ok=True)
+    fake.file.project_path = str(ts_root / "mcs_output" / "s0001.mcs")
+    jobs_dir = ts_root / "fewshot_models" / "jobs"
+    jobs_dir.mkdir(parents=True, exist_ok=True)
+    cancel_path = tmp / "cancel.request"
+    job_path = jobs_dir / "job1.json"
+    job_path.write_text(json.dumps({
+        "job_id": "job1",
+        "kind": "train",
+        "organ": "liver",
+        "status": "waiting_for_gpu",
+        "cancel_path": str(cancel_path),
+    }), encoding="utf-8")
+    fake.dialogs.question_answers.append(module.BUTTON_STOP)
+    result = module._stop_latest_job()
+    assert_equal(result, 0, "stop latest job result")
+    stopped = json.loads(job_path.read_text(encoding="utf-8"))
+    assert_equal(stopped.get("status"), "cancelled", "stopped job status")
+    assert_true(cancel_path.is_file(), "cancel request file missing")
+    assert_true(fake.dialogs.messages[-1]["ui_blocking"] is False, "stop confirmation should be non-blocking")
+    return "prediction apply and stop-latest-job flow passed"
+
+
+def test_stop_background_locks(fake, tmp):
+    module = import_runtime_module("mimics_stop_background")
+    module._project_root = lambda: str(tmp)
+    lock_dir = tmp / ".mimics_runtime" / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("gpu.lock", "background_mimics.lock"):
+        (lock_dir / name).write_text("{}", encoding="utf-8")
+    module._clear_resource_locks()
+    assert_true(not (lock_dir / "gpu.lock").exists(), "gpu lock was not cleared")
+    assert_true(not (lock_dir / "background_mimics.lock").exists(), "background Mimics lock was not cleared")
+    result = module.main()
+    assert_equal(result, 0, "stop background main result")
+    assert_true(fake.dialogs.messages[-1]["ui_blocking"] is False, "stop background message should be non-blocking")
+    return "owned resource locks cleared and user notification stayed non-blocking"
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--keep-temp", action="store_true", help="Keep the temporary test directory.")
+    parser.add_argument(
+        "--only",
+        choices=("imports", "entrypoint", "window", "export", "nninteractive", "fewshot", "stop", "all"),
+        default="all",
+    )
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    fake = install_fake_mimics()
+    temp = tempfile.TemporaryDirectory(prefix="mimics_script_fake_mimics_")
+    tmp = Path(temp.name)
+    runner = TestRunner()
+    tests = []
+    if args.only in ("imports", "all"):
+        tests.append(("runtime modules import with fake mimics", lambda: test_runtime_imports(fake, tmp / "imports")))
+    if args.only in ("entrypoint", "all"):
+        tests.append(("Scripting Library shared entrypoint", lambda: test_scripting_entrypoint(fake, tmp / "entrypoint")))
+    if args.only in ("window", "all"):
+        tests.append(("window/level selected-mask flow", lambda: test_window_level_from_selected_mask(fake, tmp / "window")))
+    if args.only in ("export", "all"):
+        tests.append(("mask export buffer flow", lambda: test_export_masks_to_buffers(fake, tmp / "export")))
+    if args.only in ("nninteractive", "all"):
+        tests.append(("nnInteractive Mimics-side buffer flow", lambda: test_nninteractive_fast_path_and_mask_buffer(fake, tmp / "nninteractive")))
+    if args.only in ("fewshot", "all"):
+        tests.append(("DINOv3 few-shot Mimics-side flow", lambda: test_fewshot_apply_prediction_and_stop(fake, tmp / "fewshot")))
+    if args.only in ("stop", "all"):
+        tests.append(("Stop Background Services lock cleanup", lambda: test_stop_background_locks(fake, tmp / "stop")))
+    for name, func in tests:
+        runner.run(name, func)
+    code = runner.report()
+    if args.keep_temp:
+        print("Temporary directory kept: {}".format(tmp))
+    else:
+        temp.cleanup()
+    return code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -57,6 +57,16 @@ BUTTON_START_CURRENT = "Start From Current Mask"
 PROMPT_MASK_PREFIX = "nnInteractive Prompt"
 DEFAULT_RESULT_NAME = "nnInteractive Result"
 ASYNC_JOB_METADATA = "nninteractive.async_job_path"
+SOURCE_IMAGE_PATH_METADATA = "mimics_script.source_image_path"
+SOURCE_IMAGE_KIND_METADATA = "mimics_script.source_image_kind"
+SOURCE_IMAGE_SHAPE_METADATA = "mimics_script.source_image_shape"
+SOURCE_IMAGE_INDEX_SPACE_METADATA = "mimics_script.source_image_index_space"
+SOURCE_WORLD_COORDINATE_SYSTEM_METADATA = "mimics_script.source_world_coordinate_system"
+MIMICS_WORLD_COORDINATE_SYSTEM_METADATA = "mimics_script.mimics_world_coordinate_system"
+SOURCE_TO_MIMICS_WORLD_MATRIX_METADATA = "mimics_script.source_to_mimics_world_matrix"
+SOURCE_VOXEL_TO_RAS_MATRIX_METADATA = "mimics_script.source_voxel_to_ras_matrix"
+MIMICS_VOXEL_TO_RAS_MATRIX_METADATA = "mimics_script.mimics_voxel_to_ras_matrix"
+MIMICS_TO_SOURCE_INDEX_MATRIX_METADATA = "mimics_script.mimics_to_source_index_matrix"
 _ASYNC_VISUAL_OBJECTS = {}  # job_dir -> list of Mimics objects to delete after inference
 _RUNTIME_PROBE_CACHE = {}
 _ASYNC_MONITORS = {}
@@ -69,6 +79,34 @@ _find_root = runtime_common.find_root
 _hidden_process_kwargs = runtime_common.hidden_process_kwargs
 _write_json_atomic = runtime_common.write_json_atomic
 _read_json = runtime_common.read_json
+
+
+def _update_gui():
+    try:
+        mimics.update_gui()
+    except Exception:
+        pass
+
+
+def _with_gui_updates_disabled(fn, *args, **kwargs):
+    gui_was_enabled = True
+    try:
+        try:
+            gui_was_enabled = bool(mimics.is_update_gui_enabled())
+        except Exception:
+            gui_was_enabled = True
+        try:
+            mimics.disable_update_gui()
+        except Exception:
+            gui_was_enabled = False
+        return fn(*args, **kwargs)
+    finally:
+        if gui_was_enabled:
+            try:
+                mimics.enable_update_gui()
+            except Exception:
+                pass
+        _update_gui()
 
 
 def _project_root():
@@ -98,6 +136,14 @@ def _environment_root():
         ):
             return candidate
     return candidates[0]
+
+
+def _resource_lock_dir():
+    return runtime_common.resource_lock_dir(_project_root())
+
+
+def _aggressive_auto_cleanup_enabled():
+    return runtime_common.aggressive_auto_cleanup_enabled()
 
 
 def _load_json(path):
@@ -154,11 +200,16 @@ def _rotate_log_file(path, max_bytes=LOG_ROTATE_BYTES, backups=LOG_ROTATE_BACKUP
     try:
         if not os.path.isfile(path) or os.path.getsize(path) < max_bytes:
             return
-        for index in range(int(backups), 0, -1):
+        backups = int(backups)
+        if backups <= 0:
+            os.remove(path)
+            return
+        oldest = "{0}.{1}".format(path, backups)
+        if os.path.isfile(oldest):
+            os.remove(oldest)
+        for index in range(backups - 1, 0, -1):
             src = "{0}.{1}".format(path, index)
             dst = "{0}.{1}".format(path, index + 1)
-            if os.path.isfile(dst):
-                os.remove(dst)
             if os.path.isfile(src):
                 os.rename(src, dst)
         os.rename(path, path + ".1")
@@ -273,6 +324,118 @@ def _process_exists(pid):
             kernel32.CloseHandle(handle)
     except Exception:
         return False
+
+
+def _server_state_candidates():
+    candidates = []
+    try:
+        config = _config()
+    except Exception:
+        config = {}
+    root = _project_root()
+    environment_root = _environment_root()
+    model_dirs = [
+        os.environ.get("NNINTERACTIVE_MODEL_DIR", ""),
+        config.get("model_dir", ""),
+        os.path.join(environment_root, "models", "nnInteractive_v1.0"),
+        os.path.join(root, "nninteractive_env", "models", "nnInteractive_v1.0"),
+    ]
+    seen = set()
+    for model_dir in model_dirs:
+        if not model_dir:
+            continue
+        state_path = os.path.join(os.path.dirname(os.path.abspath(model_dir)), ".nninteractive_server.json")
+        if state_path not in seen:
+            seen.add(state_path)
+            candidates.append(state_path)
+    return candidates
+
+
+def _release_state_lock(state):
+    try:
+        lock_path = state.get("gpu_lock_path")
+        token = state.get("gpu_lock_token")
+        if lock_path and token:
+            runtime_common.release_resource_lock(lock_path, token)
+    except Exception:
+        pass
+
+
+def _remove_state_file(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _cleanup_stale_owned_servers(records):
+    if os.name != "nt":
+        return []
+    by_pid = {}
+    for record in records or []:
+        try:
+            pid = int(record.get("ProcessId", 0))
+        except (TypeError, ValueError):
+            continue
+        by_pid[pid] = str(record.get("CommandLine") or "")
+
+    killed = []
+    now = time.time()
+    for state_path in _server_state_candidates():
+        state = runtime_common.read_json(state_path, {}) or {}
+        if state.get("schema_version") != "nninteractive_owned_server.v2":
+            continue
+        try:
+            pid = int(state.get("pid", 0))
+        except (TypeError, ValueError):
+            pid = 0
+        if not pid or not _process_exists(pid):
+            _release_state_lock(state)
+            _remove_state_file(state_path)
+            continue
+
+        command_line = by_pid.get(pid, "").lower()
+        model_dir = str(state.get("model_dir", "")).lower()
+        ownership = str(state.get("ownership_token", "")).lower()
+        if (
+            "nninteractive.inference.server.main" not in command_line
+            or (model_dir and model_dir not in command_line)
+            or (ownership and ownership not in command_line)
+        ):
+            continue
+
+        try:
+            watchdog_pid = int(state.get("watchdog_pid", 0) or 0)
+        except (TypeError, ValueError):
+            watchdog_pid = 0
+        watchdog_command = by_pid.get(watchdog_pid, "").lower() if watchdog_pid else ""
+        watchdog_alive = watchdog_pid and _process_exists(watchdog_pid) and "--watchdog" in watchdog_command
+        if watchdog_alive:
+            continue
+
+        try:
+            idle_timeout = float(state.get("service_idle_timeout_seconds", 1800))
+            last_activity = float(state.get("last_activity_epoch", now))
+        except Exception:
+            idle_timeout = 1800.0
+            last_activity = now
+        if now - last_activity < idle_timeout + 60.0:
+            continue
+
+        try:
+            subprocess.Popen(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                **_hidden_process_kwargs()
+            )
+            killed.append(pid)
+        except Exception:
+            pass
+        _release_state_lock(state)
+        _remove_state_file(state_path)
+    return killed
 
 
 def _mimics_log(level, message):
@@ -512,33 +675,251 @@ def _buffer_dtype(view):
     )
 
 
+def _image_shape(image):
+    dims = getattr(image, "logical_dimensions", None)
+    if dims is not None:
+        try:
+            shape = [int(dims[0]), int(dims[1]), int(dims[2])]
+            if shape[0] > 0 and shape[1] > 0 and shape[2] > 0:
+                return shape
+        except Exception:
+            pass
+    view = image.get_voxel_buffer()
+    return [int(value) for value in view.shape]
+
+
+def _parse_shape_metadata(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        loaded = json.loads(text)
+        shape = [int(loaded[0]), int(loaded[1]), int(loaded[2])]
+        if shape[0] > 0 and shape[1] > 0 and shape[2] > 0:
+            return shape
+    except Exception:
+        pass
+    for sep in ("x", ",", ";", " "):
+        if sep in text:
+            parts = [part for part in text.replace("[", "").replace("]", "").split(sep) if part]
+            if len(parts) == 3:
+                try:
+                    shape = [int(parts[0]), int(parts[1]), int(parts[2])]
+                    if shape[0] > 0 and shape[1] > 0 and shape[2] > 0:
+                        return shape
+                except Exception:
+                    pass
+    return None
+
+
+def _parse_matrix_metadata(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        matrix = json.loads(text)
+        if len(matrix) != 4:
+            return None
+        parsed = []
+        for row in matrix:
+            if len(row) != 4:
+                return None
+            parsed.append([float(item) for item in row])
+        return parsed
+    except Exception:
+        return None
+
+
+def _matrix_close(value, expected, tolerance=1.0e-6):
+    matrix = _parse_matrix_metadata(value)
+    if matrix is None:
+        return False
+    for row_index in range(4):
+        for col_index in range(4):
+            if abs(float(matrix[row_index][col_index]) - float(expected[row_index][col_index])) > tolerance:
+                return False
+    return True
+
+
+def _source_image_export(image, config):
+    if not bool(config.get("prefer_source_image_for_nninteractive", True)):
+        return None
+    path = _metadata_get(image, SOURCE_IMAGE_PATH_METADATA, "")
+    kind = str(_metadata_get(image, SOURCE_IMAGE_KIND_METADATA, "") or "").lower()
+    index_space = str(_metadata_get(image, SOURCE_IMAGE_INDEX_SPACE_METADATA, "") or "")
+    source_world = str(_metadata_get(image, SOURCE_WORLD_COORDINATE_SYSTEM_METADATA, "") or "").lower()
+    mimics_world = str(_metadata_get(image, MIMICS_WORLD_COORDINATE_SYSTEM_METADATA, "") or "").lower()
+    source_to_mimics_world = str(_metadata_get(image, SOURCE_TO_MIMICS_WORLD_MATRIX_METADATA, "") or "")
+    source_voxel_to_ras = str(_metadata_get(image, SOURCE_VOXEL_TO_RAS_MATRIX_METADATA, "") or "")
+    mimics_voxel_to_ras = str(_metadata_get(image, MIMICS_VOXEL_TO_RAS_MATRIX_METADATA, "") or "")
+    mimics_to_source_index = str(_metadata_get(image, MIMICS_TO_SOURCE_INDEX_MATRIX_METADATA, "") or "")
+    ras_to_lps = [[-1.0, 0.0, 0.0, 0.0], [0.0, -1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+    identity = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+    has_ras_affines = (
+        _parse_matrix_metadata(source_voxel_to_ras) is not None
+        and _parse_matrix_metadata(mimics_voxel_to_ras) is not None
+    )
+    if not path:
+        return None
+    path = os.path.abspath(os.path.expandvars(os.path.expanduser(str(path))))
+    lower_path = path.lower()
+    is_nifti = kind == "nifti" and (
+        index_space == "nifti_ijk_matches_derived_dicom_columns_rows_slices_v1"
+        and source_world == "ras"
+        and mimics_world == "lps"
+        and _matrix_close(source_to_mimics_world, ras_to_lps)
+        and has_ras_affines
+    )
+    is_dicom = kind == "dicom_folder" and (
+        index_space == "dicom_columns_rows_slices_sorted_by_position_v1"
+        and source_world == "lps"
+        and mimics_world == "lps"
+        and _matrix_close(source_to_mimics_world, identity)
+        and has_ras_affines
+    )
+    if not is_nifti and not is_dicom:
+        _mimics_log(
+            logging.INFO,
+            "nnInteractive source-image fast path skipped because the stored source geometry is not supported: kind={0}, index_space={1}, source_world={2}, mimics_world={3}.".format(
+                kind or "?",
+                index_space or "?",
+                source_world or "?",
+                mimics_world or "?",
+            ),
+        )
+        return None
+    if is_nifti and not os.path.isfile(path):
+        _mimics_log(
+            logging.WARNING,
+            "nnInteractive source image metadata points to a missing file; falling back to Mimics image buffer export: {0}".format(path),
+        )
+        return None
+    if is_dicom and not os.path.isdir(path):
+        _mimics_log(
+            logging.WARNING,
+            "nnInteractive source DICOM metadata points to a missing folder; falling back to Mimics image buffer export: {0}".format(path),
+        )
+        return None
+    shape = _image_shape(image)
+    recorded_shape = _parse_shape_metadata(_metadata_get(image, SOURCE_IMAGE_SHAPE_METADATA, ""))
+    if recorded_shape is not None and recorded_shape != shape:
+        _mimics_log(
+            logging.WARNING,
+            "nnInteractive source image shape does not match the open Mimics image; falling back to Mimics image buffer export. Source: {0}, Mimics: {1}.".format(
+                recorded_shape,
+                shape,
+            ),
+        )
+        return None
+    source_name = "source_nifti_metadata" if is_nifti else "source_dicom_metadata"
+    _mimics_log(
+        logging.INFO,
+        "nnInteractive will read the source image in the external Python worker; Mimics image buffer export is skipped. Source: {0}.".format(
+            "NIfTI" if is_nifti else "DICOM"
+        ),
+    )
+    return {
+        "kind": "source_image",
+        "path": "",
+        "shape": shape,
+        "dtype": "",
+        "sha256": "",
+        "image_path": path,
+        "source": source_name,
+        "source_kind": "nifti" if is_nifti else "dicom_folder",
+        "source_index_space": index_space,
+        "source_world_coordinate_system": source_world,
+        "mimics_world_coordinate_system": mimics_world,
+        "source_to_mimics_world_matrix": source_to_mimics_world,
+        "source_voxel_to_ras_matrix": source_voxel_to_ras,
+        "mimics_voxel_to_ras_matrix": mimics_voxel_to_ras,
+        "mimics_to_source_index_matrix": mimics_to_source_index,
+    }
+
+
+def _export_image_for_nninteractive(config, image, path, allow_buffer_export=True):
+    source_export = _source_image_export(image, config)
+    if source_export is not None:
+        return source_export
+    if not allow_buffer_export:
+        return None
+    return _export_image(image, path)
+
+
 def _export_image(image, path):
+    started = time.time()
     view = image.get_voxel_buffer()
     with open(path, "wb") as handle:
         handle.write(view.tobytes())
-    return {
+    result = {
+        "kind": "mimics_buffer",
         "path": path,
         "shape": [int(value) for value in view.shape],
         "dtype": _buffer_dtype(view),
         "sha256": _sha256_file(path),
     }
+    _mimics_log(
+        logging.INFO,
+        "nnInteractive image buffer exported in {0}s. Shape: {1}.".format(
+            round(time.time() - started, 2),
+            result["shape"],
+        ),
+    )
+    return result
 
 
-def _export_mask(mask, path):
+def _empty_mask_sha256(shape):
+    return "empty-mask:" + "x".join(str(int(value)) for value in shape)
+
+
+def _empty_mask_export(shape):
+    return {
+        "path": "",
+        "shape": [int(value) for value in shape],
+        "pixel_count": 0,
+        "byte_count": 0,
+        "sha256": _empty_mask_sha256(shape),
+    }
+
+
+def _export_mask(mask, path, shape_hint=None):
+    pixel_count = int(getattr(mask, "number_of_pixels", 0))
+    if shape_hint is not None and pixel_count <= 0:
+        result = _empty_mask_export(shape_hint)
+        _mimics_log(
+            logging.INFO,
+            "nnInteractive target Mask is empty; full empty Mask buffer export is skipped.",
+        )
+        return result
+    started = time.time()
     view = mask.get_voxel_buffer()
     raw = view.tobytes()
     with open(path, "wb") as handle:
         handle.write(raw)
-    return {
+    result = {
         "path": path,
         "shape": [int(value) for value in view.shape],
-        "pixel_count": int(getattr(mask, "number_of_pixels", 0)),
+        "pixel_count": pixel_count,
         "byte_count": len(raw),
         "sha256": _sha256_bytes(raw),
     }
+    _mimics_log(
+        logging.INFO,
+        "nnInteractive target Mask exported in {0}s. Foreground voxels: {1}.".format(
+            round(time.time() - started, 2),
+            result["pixel_count"],
+        ),
+    )
+    return result
 
 
-def _mask_sha256(mask):
+def _mask_sha256(mask, shape_hint=None):
+    if shape_hint is not None and int(getattr(mask, "number_of_pixels", 0)) <= 0:
+        return _empty_mask_sha256(shape_hint)
     return _sha256_bytes(mask.get_voxel_buffer().tobytes())
 
 
@@ -547,17 +928,22 @@ def _set_mask_from_u8(mask, path, shape):
     expected = int(shape[0]) * int(shape[1]) * int(shape[2])
     if len(raw) != expected:
         raise RuntimeError("Prediction byte count mismatch: {0} != {1}".format(len(raw), expected))
-    try:
-        import numpy as np
+    def _apply():
+        try:
+            import numpy as np
 
-        pixels = np.frombuffer(raw, dtype=np.uint8).reshape(tuple(shape)).astype(np.bool_)
-        mask.set_voxel_buffer(pixels)
-    except ImportError:
-        pixels = memoryview(bytearray(raw)).cast("?", shape=list(shape))
-        mask.set_voxel_buffer(pixels)
+            pixels = np.frombuffer(raw, dtype=np.uint8).reshape(tuple(shape)).astype(np.bool_)
+            mask.set_voxel_buffer(pixels)
+        except ImportError:
+            pixels = memoryview(bytearray(raw)).cast("?", shape=list(shape))
+            mask.set_voxel_buffer(pixels)
+    _with_gui_updates_disabled(_apply)
 
 
 def _restore_base(mask, base_path, base_shape):
+    if not base_path:
+        _with_gui_updates_disabled(mask.clear)
+        return
     _set_mask_from_u8(mask, base_path, base_shape)
 
 
@@ -1127,10 +1513,6 @@ def _bridge_parameters(config, image_export, base_export):
         )
     )
     request = {
-        "image_buffer_path": image_export["path"],
-        "image_buffer_shape": image_export["shape"],
-        "image_buffer_dtype": image_export["dtype"],
-        "image_buffer_coordinates": "mimics",
         "buffer_mapping": {
             "platform_to_mimics_axes": [0, 1, 2],
             "platform_to_mimics_flips": [False, False, False],
@@ -1156,8 +1538,42 @@ def _bridge_parameters(config, image_export, base_export):
                 config.get("server_idle_timeout_seconds", 1800),
             )
         ),
+        "gpu_lock_timeout_seconds": float(
+            os.environ.get(
+                "NNINTERACTIVE_GPU_LOCK_TIMEOUT",
+                config.get("gpu_lock_timeout_seconds", 30),
+            )
+        ),
+        "incremental_interaction_replay": bool(
+            config.get("incremental_interaction_replay", True)
+        ),
     }
-    configured_timeout = config.get("bridge_timeout_seconds", config.get("timeout_seconds"))
+    if image_export.get("image_path"):
+        request["image_path"] = image_export["image_path"]
+        request["interaction_shape"] = image_export["shape"]
+        request["image_expected_shape"] = image_export["shape"]
+        request["image_source"] = image_export.get("source", "source_image")
+        request["image_source_kind"] = image_export.get("source_kind", "")
+        request["image_source_index_space"] = image_export.get("source_index_space", "")
+        request["image_source_world_coordinate_system"] = image_export.get("source_world_coordinate_system", "")
+        request["image_mimics_world_coordinate_system"] = image_export.get("mimics_world_coordinate_system", "")
+        request["image_source_to_mimics_world_matrix"] = image_export.get("source_to_mimics_world_matrix", "")
+        request["image_source_voxel_to_ras_matrix"] = image_export.get("source_voxel_to_ras_matrix", "")
+        request["image_mimics_voxel_to_ras_matrix"] = image_export.get("mimics_voxel_to_ras_matrix", "")
+        request["image_mimics_to_source_index_matrix"] = image_export.get("mimics_to_source_index_matrix", "")
+    else:
+        request["image_buffer_path"] = image_export["path"]
+        request["image_buffer_shape"] = image_export["shape"]
+        request["image_buffer_dtype"] = image_export["dtype"]
+        request["image_buffer_coordinates"] = "mimics"
+    configured_timeout = config.get("bridge_timeout_seconds")
+    if configured_timeout is None:
+        configured_timeout = config.get("timeout_seconds")
+        if configured_timeout is not None:
+            _mimics_log(
+                logging.WARNING,
+                "nnInteractive config key 'timeout_seconds' is deprecated; use 'bridge_timeout_seconds' for the end-to-end bridge subprocess timeout.",
+            )
     timeout = int(
         os.environ.get(
             "NNINTERACTIVE_TIMEOUT",
@@ -1657,6 +2073,15 @@ def _start_async_worker(python_exe, bridge_script, worker_dir):
     return process, worker_log_path
 
 
+def _async_worker_idle_timeout(config):
+    return int(
+        os.environ.get(
+            "NNINTERACTIVE_ASYNC_WORKER_IDLE_TIMEOUT",
+            config.get("async_worker_idle_timeout_seconds", 3600),
+        )
+    )
+
+
 def _shared_image_worker_alive(worker):
     if not worker:
         return False
@@ -1666,6 +2091,17 @@ def _shared_image_worker_alive(worker):
         return False
     status = _async_worker_status(worker_dir).get("status")
     return status not in ("closing", "closed", "failed", "expired")
+
+
+def _state_worker_alive(state):
+    if not state:
+        return False
+    pid = state.get("pid")
+    worker_dir = _async_state_worker_dir(state)
+    if not pid or not _process_exists(pid):
+        return False
+    worker_status = _async_worker_status(worker_dir).get("status")
+    return worker_status not in ("closing", "closed", "failed", "expired")
 
 
 def _request_async_worker_close(worker, reason):
@@ -1693,12 +2129,12 @@ def _close_all_async_image_workers():
 atexit.register(_close_all_async_image_workers)
 
 
-def _get_or_start_image_worker(config, image, jobs_root):
-    python_exe, bridge_script, model_dir, probe, folds = _runtime_paths(config)
+def _get_or_start_image_worker(config, image, jobs_root, allow_buffer_export=True):
     image_key = _object_id(image)
     cached = _ASYNC_IMAGE_WORKERS.get(image_key)
     if _shared_image_worker_alive(cached):
         return cached
+    python_exe, bridge_script, model_dir, probe, folds = _runtime_paths(config)
 
     worker_id = "image_worker_" + time.strftime("%Y%m%dT%H%M%S") + "_" + uuid.uuid4().hex[:10]
     worker_dir = os.path.join(jobs_root, worker_id)
@@ -1711,19 +2147,29 @@ def _get_or_start_image_worker(config, image, jobs_root):
     ):
         os.makedirs(path)
 
-    image_export = _export_image(image, os.path.join(inputs_dir, "image.raw"))
+    image_export = _export_image_for_nninteractive(
+        config,
+        image,
+        os.path.join(inputs_dir, "image.raw"),
+        allow_buffer_export=allow_buffer_export,
+    )
+    if image_export is None:
+        shutil.rmtree(worker_dir, ignore_errors=True)
+        _mimics_log(
+            logging.INFO,
+            "nnInteractive source-image prewarm was skipped because no valid source image metadata is available. No Mimics image buffer export was performed before prompt capture.",
+        )
+        return None
     empty_base_export = {
         "path": "",
         "shape": image_export["shape"],
         "pixel_count": 0,
         "byte_count": 0,
-        "sha256": "",
+        "sha256": _empty_mask_sha256(image_export["shape"]),
     }
     parameters = _bridge_parameters(config, image_export, empty_base_export)
     initialize = dict(parameters["request"])
-    initialize["async_worker_idle_timeout_seconds"] = int(
-        config.get("async_worker_idle_timeout_seconds", 600)
-    )
+    initialize["async_worker_idle_timeout_seconds"] = _async_worker_idle_timeout(config)
     initialize["async_poll_seconds"] = float(config.get("async_poll_seconds", 0.25))
     initialize["initial_seg_path"] = None
     initialize["parent_pid"] = os.getpid()
@@ -1736,6 +2182,12 @@ def _get_or_start_image_worker(config, image, jobs_root):
         "image_guid": image_key,
         "image_name": str(getattr(image, "name", "")),
         "shape": image_export["shape"],
+        "image_source": image_export.get("source", "mimics_buffer"),
+        "image_source_kind": image_export.get("source_kind", ""),
+        "image_source_index_space": image_export.get("source_index_space", ""),
+        "image_source_world_coordinate_system": image_export.get("source_world_coordinate_system", ""),
+        "image_mimics_world_coordinate_system": image_export.get("mimics_world_coordinate_system", ""),
+        "image_mimics_to_source_index_matrix": image_export.get("mimics_to_source_index_matrix", ""),
         "python": python_exe,
         "python_version": probe.get("version"),
         "folds": folds,
@@ -1752,20 +2204,57 @@ def _get_or_start_image_worker(config, image, jobs_root):
             "pid": process.pid,
             "image_guid": image_key,
             "image_name": worker["image_name"],
+            "image_source": worker.get("image_source", "mimics_buffer"),
+            "image_source_kind": worker.get("image_source_kind", ""),
+            "image_source_index_space": worker.get("image_source_index_space", ""),
+            "image_source_world_coordinate_system": worker.get("image_source_world_coordinate_system", ""),
+            "image_mimics_world_coordinate_system": worker.get("image_mimics_world_coordinate_system", ""),
+            "image_mimics_to_source_index_matrix": worker.get("image_mimics_to_source_index_matrix", ""),
+            "idle_timeout_seconds": initialize["async_worker_idle_timeout_seconds"],
         },
+    )
+    _mimics_log(
+        logging.INFO,
+        "nnInteractive AI session is preparing in the background. PID: {0}, idle timeout: {1}s.".format(
+            process.pid,
+            initialize["async_worker_idle_timeout_seconds"],
+        ),
     )
     return worker
 
 
-def _start_async_job(config, image, target):
+def _prewarm_async_image_worker(config, image):
+    if not bool(config.get("async_reuse_image_worker", True)):
+        return None
     python_exe, bridge_script, model_dir, probe, folds = _runtime_paths(config)
     jobs_root = os.path.join(os.path.dirname(model_dir), "async_jobs")
     if not os.path.isdir(jobs_root):
         os.makedirs(jobs_root)
     _cleanup_async_jobs(jobs_root, config.get("async_job_retention_days", 7))
+    return _get_or_start_image_worker(config, image, jobs_root, allow_buffer_export=False)
 
+
+def _start_async_job(config, image, target):
     shared_worker = None
     if bool(config.get("async_reuse_image_worker", True)):
+        cached = _ASYNC_IMAGE_WORKERS.get(_object_id(image))
+        if _shared_image_worker_alive(cached):
+            shared_worker = cached
+
+    if shared_worker is not None:
+        jobs_root = os.path.dirname(shared_worker["worker_dir"])
+        python_exe = shared_worker.get("python", "")
+        bridge_script = ""
+        probe = {"version": shared_worker.get("python_version")}
+        folds = shared_worker.get("folds")
+    else:
+        python_exe, bridge_script, model_dir, probe, folds = _runtime_paths(config)
+        jobs_root = os.path.join(os.path.dirname(model_dir), "async_jobs")
+    if not os.path.isdir(jobs_root):
+        os.makedirs(jobs_root)
+    _cleanup_async_jobs(jobs_root, config.get("async_job_retention_days", 7))
+
+    if shared_worker is None and bool(config.get("async_reuse_image_worker", True)):
         shared_worker = _get_or_start_image_worker(config, image, jobs_root)
 
     job_id = "job_" + time.strftime("%Y%m%dT%H%M%S") + "_" + uuid.uuid4().hex[:10]
@@ -1780,15 +2269,22 @@ def _start_async_job(config, image, target):
         os.makedirs(path)
 
     if shared_worker is None:
-        image_export = _export_image(image, os.path.join(inputs_dir, "image.raw"))
+        image_export = _export_image_for_nninteractive(config, image, os.path.join(inputs_dir, "image.raw"))
     else:
         image_export = {
+            "kind": "shared_image_worker",
             "path": "",
             "shape": shared_worker["shape"],
             "dtype": "",
             "sha256": "",
+            "source": shared_worker.get("image_source", "shared_image_worker"),
+            "source_kind": shared_worker.get("image_source_kind", ""),
+            "source_index_space": shared_worker.get("image_source_index_space", ""),
+            "source_world_coordinate_system": shared_worker.get("image_source_world_coordinate_system", ""),
+            "mimics_world_coordinate_system": shared_worker.get("image_mimics_world_coordinate_system", ""),
+            "mimics_to_source_index_matrix": shared_worker.get("image_mimics_to_source_index_matrix", ""),
         }
-    base_export = _export_mask(target, os.path.join(inputs_dir, "target_at_start.u8"))
+    base_export = _export_mask(target, os.path.join(inputs_dir, "target_at_start.u8"), image_export["shape"])
     if image_export["shape"] != base_export["shape"]:
         shutil.rmtree(job_dir, ignore_errors=True)
         raise RuntimeError(
@@ -1801,9 +2297,7 @@ def _start_async_job(config, image, target):
     if shared_worker is None:
         parameters = _bridge_parameters(config, image_export, base_export)
         initialize = dict(parameters["request"])
-        initialize["async_worker_idle_timeout_seconds"] = int(
-            config.get("async_worker_idle_timeout_seconds", 600)
-        )
+        initialize["async_worker_idle_timeout_seconds"] = _async_worker_idle_timeout(config)
         initialize["async_poll_seconds"] = float(config.get("async_poll_seconds", 0.25))
         initialize["parent_pid"] = os.getpid()
         _write_json_atomic(os.path.join(job_dir, "initialize.json"), initialize)
@@ -1826,6 +2320,12 @@ def _start_async_job(config, image, target):
         "worker_dir": worker_dir,
         "image_guid": _object_id(image),
         "image_name": str(getattr(image, "name", "")),
+        "image_source": image_export.get("source", "mimics_buffer"),
+        "image_source_kind": image_export.get("source_kind", ""),
+        "image_source_index_space": image_export.get("source_index_space", ""),
+        "image_source_world_coordinate_system": image_export.get("source_world_coordinate_system", ""),
+        "image_mimics_world_coordinate_system": image_export.get("mimics_world_coordinate_system", ""),
+        "image_mimics_to_source_index_matrix": image_export.get("mimics_to_source_index_matrix", ""),
         "target_guid": _object_id(target),
         "target_name": str(getattr(target, "name", "")),
         "shape": base_export["shape"],
@@ -1860,6 +2360,12 @@ def _start_async_job(config, image, target):
             "pid": worker_pid,
             "target_guid": state["target_guid"],
             "shared_image_worker": shared_worker is not None,
+            "image_source": image_export.get("source", "mimics_buffer"),
+            "image_source_kind": image_export.get("source_kind", ""),
+            "image_source_index_space": image_export.get("source_index_space", ""),
+            "image_source_world_coordinate_system": image_export.get("source_world_coordinate_system", ""),
+            "image_mimics_world_coordinate_system": image_export.get("mimics_world_coordinate_system", ""),
+            "image_mimics_to_source_index_matrix": image_export.get("mimics_to_source_index_matrix", ""),
         },
     )
     return state
@@ -1885,10 +2391,11 @@ def _persist_interaction(job_dir, interaction):
     return result
 
 
-def _enqueue_async_prediction(state, target):
+def _enqueue_async_prediction(state, target, expected_hash=None):
     worker_dir = _async_state_worker_dir(state)
     sequence = _next_async_sequence(worker_dir)
-    expected_hash = _mask_sha256(target)
+    if expected_hash is None:
+        expected_hash = _mask_sha256(target, state.get("shape"))
     command = {
         "schema_version": "nninteractive_async_command.v1",
         "command_id": uuid.uuid4().hex,
@@ -1914,6 +2421,10 @@ def _enqueue_async_prediction(state, target):
         "command_{0:06d}.json".format(sequence),
     )
     _write_json_atomic(command_path, command)
+    _mimics_log(
+        logging.INFO,
+        "nnInteractive prompt queued for background inference. Sequence: {0}.".format(sequence),
+    )
     return sequence
 
 
@@ -1940,15 +2451,17 @@ def _describe_async_worker_failure(worker, worker_status):
         timeout_seconds = worker.get("idle_timeout_seconds")
         if timeout_seconds is None:
             error = (
-                "No result file was produced before the async worker idle timeout. "
-                "Increase async_worker_idle_timeout_seconds in nninteractive_config.json "
-                "if long-running sessions are expected."
+                "The AI session was prepared, but no prompt result was produced before "
+                "the worker idle timeout. This usually means the worker expired while "
+                "waiting for a prompt, or the prompt command was submitted after the "
+                "worker had already exited."
             )
         else:
             error = (
-                "No result file was produced before the async worker idle timeout "
-                "({0}s). Increase async_worker_idle_timeout_seconds in "
-                "nninteractive_config.json if long-running sessions are expected."
+                "The AI session was prepared, but no prompt result was produced before "
+                "the worker idle timeout ({0}s). This usually means the worker expired "
+                "while waiting for a prompt, or the prompt command was submitted after "
+                "the worker had already exited."
             ).format(int(timeout_seconds))
     if not error:
         error = "No result file was produced."
@@ -2102,7 +2615,7 @@ def _start_win32_async_result_monitor(image, target, state, config, poll_seconds
 
 def _start_async_result_monitor(image, target, state, config):
     """Start a non-blocking Mimics-side timer that applies async results."""
-    poll_seconds = float(config.get("async_result_poll_seconds", config.get("async_poll_seconds", 0.5)))
+    poll_seconds = float(config.get("async_result_poll_seconds", config.get("async_poll_seconds", 0.25)))
     timeout_seconds = float(
         config.get(
             "async_result_wait_timeout_seconds",
@@ -2267,7 +2780,7 @@ def _handle_async_result(image, target, state):
             "The active image or target Mask no longer matches the background job. "
             "The result was not applied."
         )
-    current_hash = _mask_sha256(target)
+    current_hash = _mask_sha256(target, state.get("shape"))
     expected_hash = result.get("expected_target_sha256")
     if current_hash != expected_hash:
         answer = mimics.dialogs.question_box(
@@ -2350,6 +2863,7 @@ def _async_prompt_menu(target, state):
 
 def _run_async(image, target, config):
     state = _load_async_job(target)
+    validated_target_hash = None
     if state is not None:
         if _object_id(image) != state.get("image_guid") or _object_id(target) != state.get(
             "target_guid"
@@ -2362,12 +2876,29 @@ def _run_async(image, target, config):
                 return 0
             if outcome == "restart":
                 state = None
+            elif outcome == "applied":
+                validated_target_hash = state.get("expected_target_sha256")
 
     if state is not None:
-        current_hash = _mask_sha256(target)
+        if state.get("pending_sequence") is None and not _state_worker_alive(state):
+            _mimics_log(
+                logging.INFO,
+                "nnInteractive previous AI session is no longer running; a new session will start from the current Mask.",
+            )
+            _close_async_job(target, state, "ready_worker_not_alive")
+            state = None
+
+    if state is not None:
+        if validated_target_hash is not None and validated_target_hash == state.get("expected_target_sha256"):
+            current_hash = validated_target_hash
+        else:
+            current_hash = _mask_sha256(target, state.get("shape"))
         if current_hash != state.get("expected_target_sha256"):
             _close_async_job(target, state, "manual_mask_change")
             state = None
+            validated_target_hash = None
+        else:
+            validated_target_hash = current_hash
 
     temp_dir = tempfile.mkdtemp(prefix="mimics_nninteractive_prompt_")
     pending_visual_objects = []
@@ -2394,7 +2925,7 @@ def _run_async(image, target, config):
                 for obj in _ASYNC_VISUAL_OBJECTS.pop(job_dir):
                     _delete_mimics_object(obj)
             if interactions:
-                _enqueue_async_prediction(state, target)
+                _enqueue_async_prediction(state, target, expected_hash=validated_target_hash)
                 _start_async_result_monitor(image, target, state, config)
             else:
                 _restore_base(target, state["base_path"], state["shape"])
@@ -2418,12 +2949,15 @@ def _run_async(image, target, config):
             _save_async_job(state)
             return 0
 
-        if state is None and bool(config.get("async_start_worker_before_prompt", False)):
-            _mimics_log(
-                logging.INFO,
-                "nnInteractive is preparing the AI session before prompt capture.",
-            )
-            state = _start_async_job(config, image, target)
+        if state is None and bool(config.get("async_start_worker_before_prompt", True)):
+            _update_gui()
+            prewarmed = _prewarm_async_image_worker(config, image)
+            if prewarmed is not None:
+                _mimics_log(
+                    logging.INFO,
+                    "nnInteractive is preparing the image AI session before prompt capture. Model loading and image preprocessing will continue while you draw.",
+                )
+            _update_gui()
 
         include = None
         visual_objects = []
@@ -2439,13 +2973,14 @@ def _run_async(image, target, config):
             return 0
         if state is None:
             state = _start_async_job(config, image, target)
+            validated_target_hash = state.get("expected_target_sha256")
         prompt = _persist_interaction(state["_job_dir"], prompt)
         # Store visual objects for deferred deletion after async result is applied.
         if visual_objects:
             _ASYNC_VISUAL_OBJECTS.setdefault(state["_job_dir"], []).extend(visual_objects)
             visual_objects_registered = True
         state.setdefault("interactions", []).append(prompt)
-        sequence = _enqueue_async_prediction(state, target)
+        sequence = _enqueue_async_prediction(state, target, expected_hash=validated_target_hash)
         _mimics_log(
             logging.INFO,
             "nnInteractive background inference started. Prompt: {0}, sequence: {1}. "
@@ -2489,8 +3024,8 @@ def _run_sync(image, target, config):
     worker = None
     visual_objects = []
     try:
-        image_export = _export_image(image, os.path.join(temp_dir, "image.raw"))
-        base_export = _export_mask(target, os.path.join(temp_dir, "target_at_start.u8"))
+        image_export = _export_image_for_nninteractive(config, image, os.path.join(temp_dir, "image.raw"))
+        base_export = _export_mask(target, os.path.join(temp_dir, "target_at_start.u8"), image_export["shape"])
         if image_export["shape"] != base_export["shape"]:
             raise RuntimeError(
                 "Image and target Mask buffer shapes differ: {0} vs {1}".format(
@@ -2639,10 +3174,13 @@ def run():
 
 
 def _cleanup_stale_processes():
-    """Kill leftover bridge python processes from a previous crashed session.
+    """Clean safe stale runtime state from a previous crashed session.
 
-    nnInteractive server and watchdog processes are **excluded** so that a
-    running inference server is not disrupted.
+    Default cleanup removes dead resource locks and only terminates owned
+    nnInteractive servers whose watchdog is gone and whose idle timeout has
+    elapsed. Killing live bridge/worker processes is opt-in via
+    MIMICS_AGGRESSIVE_AUTO_CLEANUP_ON_START=1 or the explicit Stop Background
+    Services entry.
 
     Uses a single hidden batch PowerShell call instead of per-process calls
     to avoid popping up visible console windows that freeze Mimics.
@@ -2650,6 +3188,7 @@ def _cleanup_stale_processes():
     if os.name != "nt":
         return
     killed = []
+    locks_removed = runtime_common.cleanup_stale_resource_locks(_resource_lock_dir())
     _SERVER_PROTECT_MARKERS = (
         "nninteractive.inference.server.main",
         "--watchdog",
@@ -2685,31 +3224,39 @@ def _cleanup_stale_processes():
         if isinstance(records, dict):
             records = [records]
 
-        env_root = _environment_root().lower()
-        for record in records or []:
-            try:
-                pid = int(record.get("ProcessId", 0))
-            except (TypeError, ValueError):
-                continue
-            if not pid:
-                continue
-            cmdline = str(record.get("CommandLine") or "").lower()
-            is_protected = any(
-                marker in cmdline
-                for marker in _SERVER_PROTECT_MARKERS
-            )
-            if not is_protected and env_root in cmdline:
-                handle = kernel32.OpenProcess(PROCESS_TERMINATE, False, pid)
-                if handle:
-                    kernel32.TerminateProcess(handle, 1)
-                    kernel32.CloseHandle(handle)
-                    killed.append(pid)
+        killed.extend(_cleanup_stale_owned_servers(records))
+
+        if _aggressive_auto_cleanup_enabled():
+            env_root = _environment_root().lower()
+            for record in records or []:
+                try:
+                    pid = int(record.get("ProcessId", 0))
+                except (TypeError, ValueError):
+                    continue
+                if not pid:
+                    continue
+                cmdline = str(record.get("CommandLine") or "").lower()
+                is_protected = any(
+                    marker in cmdline
+                    for marker in _SERVER_PROTECT_MARKERS
+                )
+                if not is_protected and env_root in cmdline:
+                    handle = kernel32.OpenProcess(PROCESS_TERMINATE, False, pid)
+                    if handle:
+                        kernel32.TerminateProcess(handle, 1)
+                        kernel32.CloseHandle(handle)
+                        killed.append(pid)
     except Exception:
         pass
-    if killed:
+    if killed or locks_removed:
+        pieces = []
+        if killed:
+            pieces.append("terminated {0} stale integration process(es)".format(len(killed)))
+        if locks_removed:
+            pieces.append("removed {0} stale resource lock file(s)".format(locks_removed))
         _mimics_log(
             logging.INFO,
-            "Startup cleanup: terminated {0} stale bridge process(es).".format(len(killed)),
+            "Startup cleanup: {0}.".format(", ".join(pieces)),
         )
 
 
@@ -2717,7 +3264,7 @@ def main():
     try:
         # Run cleanup in a background thread so Mimics UI does not freeze
         # while PowerShell queries process list.
-        if os.environ.get("MIMICS_AUTO_CLEANUP_ON_START", "").strip().lower() in ("1", "true", "yes"):
+        if runtime_common.auto_cleanup_enabled():
             cleanup_thread = threading.Thread(target=_cleanup_stale_processes)
             cleanup_thread.daemon = True
             cleanup_thread.start()

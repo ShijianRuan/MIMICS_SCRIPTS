@@ -24,7 +24,7 @@ import numpy as np
 
 RAS_TO_LPS = np.diag([-1.0, -1.0, 1.0, 1.0])
 LPS_TO_RAS = RAS_TO_LPS
-DEFAULT_MIMICS_BUFFER_AXES = [1, 0, 2]
+DEFAULT_MIMICS_BUFFER_AXES = [0, 1, 2]
 DEFAULT_MIMICS_BUFFER_FLIPS = [False, False, False]
 
 
@@ -190,8 +190,8 @@ def nifti_to_derived_dicom(nifti_path: str, dicom_out: str, case_id: str = "case
         ]
         ds.SamplesPerPixel = 1
         ds.PhotometricInterpretation = "MONOCHROME2"
-        ds.RescaleIntercept = "0"
-        ds.RescaleSlope = "1"
+        ds.RescaleIntercept = 0.0
+        ds.RescaleSlope = 1.0
 
         # Transpose slice data from NIfTI (i,j) to DICOM (row=j, col=i)
         slice_data_nifti = pixel_array[:, :, slice_idx]
@@ -417,7 +417,14 @@ def do_prepare(params: dict) -> dict:
     # Determine image source
     if is_dicom_folder(image_path):
         dicom_folder = image_path
+        # Internal resampling uses RAS affines. get_image_affine_from_dicom()
+        # converts the DICOM LPS geometry to RAS, matching nibabel NIfTI masks.
         image_affine = get_image_affine_from_dicom(image_path)
+        source_image_kind = "dicom_folder"
+        source_image_index_space = "dicom_columns_rows_slices_sorted_by_position_v1"
+        source_world_coordinate_system = "lps"
+        mimics_world_coordinate_system = "lps"
+        source_to_mimics_world_matrix = np.eye(4)
         image_shape = None
     elif is_nifti_file(image_path):
         if not dicom_out:
@@ -425,6 +432,11 @@ def do_prepare(params: dict) -> dict:
         info = nifti_to_derived_dicom(image_path, dicom_out, case_id=params.get("case_id", "case"))
         dicom_folder = info["dicom_folder"]
         image_affine = get_image_affine(image_path)
+        source_image_kind = "nifti"
+        source_image_index_space = "nifti_ijk_matches_derived_dicom_columns_rows_slices_v1"
+        source_world_coordinate_system = "ras"
+        mimics_world_coordinate_system = "lps"
+        source_to_mimics_world_matrix = RAS_TO_LPS
         image_shape = tuple(int(v) for v in info["shape"])
     else:
         return {"status": "error", "error": "image path is neither DICOM folder nor NIfTI file: {}".format(image_path)}
@@ -443,6 +455,16 @@ def do_prepare(params: dict) -> dict:
         if not headers:
             return {"status": "error", "error": "no readable DICOM slices in: {}".format(dicom_folder)}
         image_shape = (int(headers[0].Columns), int(headers[0].Rows), int(len(headers)))
+
+    # Both matrices are expressed in RAS world coordinates. The current import
+    # path preserves voxel index order, but persisting both affines lets external
+    # workers resample a source image into the exact Mimics voxel grid if a
+    # future import path changes orientation, spacing or origin.
+    source_voxel_to_ras_matrix = image_affine.astype(float)
+    mimics_voxel_to_ras_matrix = image_affine.astype(float)
+    mimics_to_source_index_matrix = (
+        np.linalg.inv(source_voxel_to_ras_matrix) @ mimics_voxel_to_ras_matrix
+    )
 
     # Convert masks -> .u8
     mask_results = []
@@ -471,6 +493,17 @@ def do_prepare(params: dict) -> dict:
         "status": "ok",
         "case_id": params.get("case_id", ""),
         "dicom_folder": dicom_folder,
+        "source_image_path": str(Path(image_path).resolve()),
+        "source_image_kind": source_image_kind,
+        "source_image_shape": list(image_shape),
+        "source_image_index_space": source_image_index_space,
+        "source_world_coordinate_system": source_world_coordinate_system,
+        "mimics_world_coordinate_system": mimics_world_coordinate_system,
+        "source_to_mimics_world_matrix": source_to_mimics_world_matrix.astype(float).tolist(),
+        "source_voxel_to_ras_matrix": source_voxel_to_ras_matrix.tolist(),
+        "mimics_voxel_to_ras_matrix": mimics_voxel_to_ras_matrix.tolist(),
+        "mimics_to_source_index_matrix": mimics_to_source_index_matrix.astype(float).tolist(),
+        "source_case_dir": params.get("case_dir", ""),
         "masks": mask_results,
     }
 
@@ -572,6 +605,8 @@ def do_mask_to_buffer(params: dict) -> dict:
     flips = params.get("flips", DEFAULT_MIMICS_BUFFER_FLIPS)
 
     if is_dicom_folder(image_path):
+        # Internal resampling uses RAS affines. get_image_affine_from_dicom()
+        # converts the DICOM LPS geometry to RAS, matching nibabel NIfTI masks.
         image_affine = get_image_affine_from_dicom(image_path)
         import pydicom
         headers = []

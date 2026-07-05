@@ -18,9 +18,17 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from resource_locks import FileResourceLock, ResourceLockCancelled, ResourceLockTimeout, release_lock
+
 DEFAULT_WORKSPACE = "fewshot_models"
 LOG_ROTATE_BYTES = 5 * 1024 * 1024
 LOG_ROTATE_BACKUPS = 3
+RESOURCE_LOCK_DIR = ROOT / ".mimics_runtime" / "locks"
+GPU_LOCK_PATH = RESOURCE_LOCK_DIR / "gpu.lock"
+BACKGROUND_MIMICS_LOCK_PATH = RESOURCE_LOCK_DIR / "background_mimics.lock"
 
 
 def write_json_atomic(path, payload):
@@ -43,11 +51,16 @@ def rotate_log(path):
     try:
         if not path.is_file() or path.stat().st_size < LOG_ROTATE_BYTES:
             return
-        for index in range(LOG_ROTATE_BACKUPS, 0, -1):
+        backups = int(LOG_ROTATE_BACKUPS)
+        if backups <= 0:
+            path.unlink()
+            return
+        oldest = path.with_name(path.name + "." + str(backups))
+        if oldest.is_file():
+            oldest.unlink()
+        for index in range(backups - 1, 0, -1):
             src = path.with_name(path.name + "." + str(index))
             dst = path.with_name(path.name + "." + str(index + 1))
-            if dst.is_file():
-                dst.unlink()
             if src.is_file():
                 src.rename(dst)
         path.rename(path.with_name(path.name + ".1"))
@@ -75,6 +88,16 @@ def safe_slug(value):
         else:
             out.append("_")
     return "".join(out).strip("._") or "unknown"
+
+
+def global_registry_path():
+    return Path.home() / ".mimics_script" / "fewshot_model_index.json"
+
+
+def parse_case_list(value):
+    if not value:
+        return None
+    return [item.strip() for item in str(value).replace(";", ",").split(",") if item.strip()]
 
 
 def load_repo_config():
@@ -208,6 +231,144 @@ def process_exists(pid):
         return False
 
 
+def _env_flag_disabled(name):
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def gpu_lock_enabled():
+    if _env_flag_disabled("MIMICS_DISABLE_GPU_LOCK"):
+        return False
+    try:
+        import torch
+        return bool(torch.cuda.is_available())
+    except Exception:
+        # If torch cannot be imported here, the child training process will
+        # fail soon anyway. Keep the lock conservative so a broken environment
+        # does not start competing with nnInteractive.
+        return True
+
+
+def _lock_wait_payload(resource, current):
+    if not isinstance(current, dict):
+        current = {}
+    return {
+        "resource": resource,
+        "owner": current.get("owner", "unknown"),
+        "pid": current.get("pid", ""),
+        "created_at_epoch": current.get("created_at_epoch"),
+    }
+
+
+def cleanup_idle_nninteractive_server_lock(current):
+    if not isinstance(current, dict):
+        return False
+    if current.get("resource") != "gpu":
+        return False
+    state_path = current.get("state_path")
+    if not state_path:
+        return False
+    state = read_json(state_path, {}) or {}
+    if state.get("schema_version") != "nninteractive_owned_server.v2":
+        return False
+    if state.get("gpu_lock_token") != current.get("token"):
+        return False
+    try:
+        pid = int(state.get("pid", 0))
+    except Exception:
+        pid = 0
+    if not pid:
+        return False
+    try:
+        watchdog_pid = int(state.get("watchdog_pid", 0) or 0)
+    except Exception:
+        watchdog_pid = 0
+    if watchdog_pid and process_exists(watchdog_pid):
+        return False
+    try:
+        idle_timeout = float(state.get("service_idle_timeout_seconds", 1800))
+        last_activity = float(state.get("last_activity_epoch", time.time()))
+    except Exception:
+        idle_timeout = 1800.0
+        last_activity = time.time()
+    if time.time() - last_activity < idle_timeout + 60.0:
+        return False
+    if process_exists(pid):
+        terminate_process_tree(pid)
+    release_lock(current.get("path") or GPU_LOCK_PATH, current.get("token"))
+    try:
+        Path(state_path).unlink()
+    except Exception:
+        pass
+    return True
+
+
+def acquire_gpu_lock_for_job(workspace, status_path, cancel_path, owner, timeout_seconds):
+    if not gpu_lock_enabled():
+        return None
+    lock = FileResourceLock(GPU_LOCK_PATH, "gpu", owner)
+    cleanup_idle_nninteractive_server_lock(lock.read())
+    last_log = {"epoch": 0.0}
+
+    def on_wait(current):
+        if cleanup_idle_nninteractive_server_lock(current):
+            append_log(workspace, "Cleaned an idle nnInteractive server whose watchdog was no longer running.")
+            return
+        update_status(status_path, {
+            "status": "waiting_for_gpu",
+            "resource_wait": _lock_wait_payload("gpu", current),
+        })
+        now = time.time()
+        if now - last_log["epoch"] >= 60:
+            holder = current.get("owner", "unknown") if isinstance(current, dict) else "unknown"
+            pid = current.get("pid", "?") if isinstance(current, dict) else "?"
+            append_log(workspace, "Waiting for GPU resource held by {} (pid {}).".format(holder, pid))
+            last_log["epoch"] = now
+
+    update_status(status_path, {
+        "status": "waiting_for_gpu",
+        "resource_wait": {"resource": "gpu"},
+    })
+    lock.acquire(
+        wait_seconds=float(timeout_seconds),
+        poll_seconds=2.0,
+        on_wait=on_wait,
+        should_cancel=lambda: Path(cancel_path).is_file(),
+    )
+    update_status(status_path, {"resource_wait": None})
+    append_log(workspace, "GPU resource acquired for {}.".format(owner))
+    return lock
+
+
+def acquire_background_mimics_lock(workspace, status_path, cancel_path, owner, timeout_seconds):
+    lock = FileResourceLock(BACKGROUND_MIMICS_LOCK_PATH, "background_mimics", owner)
+    last_log = {"epoch": 0.0}
+
+    def on_wait(current):
+        update_status(status_path, {
+            "status": "waiting_for_background_mimics",
+            "resource_wait": _lock_wait_payload("background_mimics", current),
+        })
+        now = time.time()
+        if now - last_log["epoch"] >= 60:
+            holder = current.get("owner", "unknown") if isinstance(current, dict) else "unknown"
+            pid = current.get("pid", "?") if isinstance(current, dict) else "?"
+            append_log(workspace, "Waiting for background Mimics held by {} (pid {}).".format(holder, pid))
+            last_log["epoch"] = now
+
+    update_status(status_path, {
+        "status": "waiting_for_background_mimics",
+        "resource_wait": {"resource": "background_mimics"},
+    })
+    lock.acquire(
+        wait_seconds=float(timeout_seconds),
+        poll_seconds=5.0,
+        on_wait=on_wait,
+        should_cancel=lambda: Path(cancel_path).is_file(),
+    )
+    update_status(status_path, {"resource_wait": None})
+    return lock
+
+
 def terminate_process_tree(pid):
     try:
         pid = int(pid)
@@ -235,7 +396,16 @@ def latest_running_job(workspace):
     jobs_dir = Path(workspace) / "jobs"
     if not jobs_dir.is_dir():
         return None, None
-    active_statuses = set(["launching", "preparing", "exporting_labels", "training", "running", "cancelling"])
+    active_statuses = set([
+        "launching",
+        "preparing",
+        "exporting_labels",
+        "waiting_for_background_mimics",
+        "waiting_for_gpu",
+        "training",
+        "running",
+        "cancelling",
+    ])
     rows = []
     for path in jobs_dir.glob("*.json"):
         payload = read_json(path, {}) or {}
@@ -334,6 +504,37 @@ def select_samples(samples, mode, max_samples):
     return selected
 
 
+def split_train_validation(samples, val_fraction=0.0, val_cases=None, min_train_samples=1, min_val_samples=1):
+    selected = list(samples)
+    selected.sort(key=lambda item: item["case_id"])
+    val_case_set = set(val_cases or [])
+    if val_case_set:
+        train_samples = [item for item in selected if item["case_id"] not in val_case_set]
+        val_samples = [item for item in selected if item["case_id"] in val_case_set]
+        if len(train_samples) < int(min_train_samples):
+            raise RuntimeError(
+                "validation case selection leaves only {} training samples; at least {} required".format(
+                    len(train_samples),
+                    int(min_train_samples),
+                )
+            )
+        return train_samples, val_samples
+
+    fraction = float(val_fraction or 0.0)
+    if fraction <= 0.0:
+        return selected, []
+    if len(selected) <= int(min_train_samples):
+        return selected, []
+
+    val_count = int(round(len(selected) * fraction))
+    if val_count <= 0 and len(selected) >= int(min_train_samples) + int(min_val_samples):
+        val_count = int(min_val_samples)
+    val_count = max(0, min(val_count, len(selected) - int(min_train_samples)))
+    if val_count <= 0:
+        return selected, []
+    return selected[:-val_count], selected[-val_count:]
+
+
 def copy_or_link(src, dst):
     src = Path(src)
     dst = Path(dst)
@@ -348,12 +549,7 @@ def copy_or_link(src, dst):
         return "copy"
 
 
-def materialize_dataset(samples, dataset_dir):
-    dataset_dir = Path(dataset_dir)
-    if dataset_dir.exists():
-        shutil.rmtree(str(dataset_dir))
-    image_dir = dataset_dir / "imagesTr"
-    label_dir = dataset_dir / "labelsTr"
+def _materialize_split(samples, image_dir, label_dir, split_name):
     image_dir.mkdir(parents=True, exist_ok=True)
     label_dir.mkdir(parents=True, exist_ok=True)
     materialized = []
@@ -369,6 +565,7 @@ def materialize_dataset(samples, dataset_dir):
         label_method = copy_or_link(label_src, label_dst)
         row = dict(sample)
         row.update({
+            "split": split_name,
             "dataset_image": str(image_dst),
             "dataset_label": str(label_dst),
             "image_materialization": image_method,
@@ -376,6 +573,25 @@ def materialize_dataset(samples, dataset_dir):
         })
         materialized.append(row)
     return materialized
+
+
+def materialize_dataset(train_samples, dataset_dir, val_samples=None):
+    dataset_dir = Path(dataset_dir)
+    if dataset_dir.exists():
+        shutil.rmtree(str(dataset_dir))
+    train_rows = _materialize_split(
+        train_samples,
+        dataset_dir / "imagesTr",
+        dataset_dir / "labelsTr",
+        "train",
+    )
+    val_rows = _materialize_split(
+        val_samples or [],
+        dataset_dir / "imagesVal",
+        dataset_dir / "labelsVal",
+        "validation",
+    )
+    return train_rows, val_rows
 
 
 def yaml_scalar(value):
@@ -392,6 +608,19 @@ def yaml_scalar(value):
 def write_training_config(path, base_config, dataset_dir, exp_name, args, status_path=None, cancel_path=None):
     path = Path(path)
     img_size = [int(part.strip()) for part in str(args.img_size).split(",")]
+    model_path = args.model_path
+    if not model_path:
+        model_scale = str(args.model_scale or "vitb16").lower()
+        if model_scale in ("vitl16", "vit_l", "large"):
+            model_path = "./models/dinov3-vitl16"
+        elif model_scale in ("vith16plus", "vit_h", "huge"):
+            model_path = "./models/dinov3-vith16plus"
+        else:
+            model_path = "./models/dinov3-vitb16"
+    finetune_method = str(args.finetune_method or "lora").lower()
+    if finetune_method in ("decoder_only", "decode_only", "decoder-only", "decode-only"):
+        finetune_method = "frozen"
+    decoder_type = str(args.decoder or "segformer3d")
     lines = [
         "_base_:",
         "  - " + yaml_scalar(str(base_config)),
@@ -399,7 +628,17 @@ def write_training_config(path, base_config, dataset_dir, exp_name, args, status
         "exp_name: " + yaml_scalar(exp_name),
         "",
         "model:",
+        "  model_path: " + yaml_scalar(model_path),
         "  num_classes: 2",
+        "",
+        "finetune:",
+        "  method: " + yaml_scalar(finetune_method),
+        "  lora_rank: " + yaml_scalar(int(args.lora_rank)),
+        "  lora_alpha: " + yaml_scalar(int(args.lora_alpha)),
+        "  adapter_bottleneck: " + yaml_scalar(int(args.adapter_bottleneck)),
+        "",
+        "decoder:",
+        "  type: " + yaml_scalar(decoder_type),
         "",
         "data:",
         "  name: " + yaml_scalar("mimics_fewshot_" + safe_slug(args.organ)),
@@ -415,6 +654,8 @@ def write_training_config(path, base_config, dataset_dir, exp_name, args, status
         "  grad_accumulation: " + yaml_scalar(int(args.grad_accumulation)),
         "  mixed_precision: " + yaml_scalar(bool(args.mixed_precision)),
         "  lr: " + yaml_scalar(float(args.lr)),
+        "  weight_decay: " + yaml_scalar(float(args.weight_decay)),
+        "  keep_last_checkpoints: " + yaml_scalar(int(args.keep_last_checkpoints)),
         "  sub_volume:",
         "    enabled: " + yaml_scalar(bool(args.sub_volume)),
         "    size: " + yaml_scalar([int(part.strip()) for part in str(args.sub_volume_size).split(",")]),
@@ -431,7 +672,16 @@ def write_training_config(path, base_config, dataset_dir, exp_name, args, status
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def launch_mimics_export(ts_root, cases, mimics_exe, workspace, timeout_seconds):
+def launch_mimics_export(
+    ts_root,
+    cases,
+    mimics_exe,
+    workspace,
+    timeout_seconds,
+    status_path=None,
+    cancel_path=None,
+    lock_timeout_seconds=None,
+):
     mimics_exe = find_mimics_exe(mimics_exe)
     if not mimics_exe:
         append_log(workspace, "MimicsResearch.exe was not found; using existing exported labels only.")
@@ -443,7 +693,7 @@ def launch_mimics_export(ts_root, cases, mimics_exe, workspace, timeout_seconds)
     write_json_atomic(config, {
         "ts_root": str(Path(ts_root).resolve()),
         "cases": sorted(cases) if cases else None,
-        "axes": [1, 0, 2],
+        "axes": [0, 1, 2],
         "flips": [False, False, False],
     })
     runner.write_text(
@@ -457,19 +707,37 @@ def launch_mimics_export(ts_root, cases, mimics_exe, workspace, timeout_seconds)
         ]),
         encoding="utf-8",
     )
-    log_path = output_dir / "_fewshot_export_mimics.log"
-    with log_path.open("ab") as log:
-        proc = subprocess.Popen(
-            [mimics_exe, "-b", "-run_script", str(runner)],
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            **hidden_process_kwargs()
+    lock = None
+    if status_path and cancel_path:
+        lock = acquire_background_mimics_lock(
+            workspace,
+            status_path,
+            cancel_path,
+            "DINOv3 label export",
+            lock_timeout_seconds if lock_timeout_seconds is not None else timeout_seconds,
         )
+    log_path = output_dir / "_fewshot_export_mimics.log"
+    try:
+        with log_path.open("ab") as log:
+            proc = subprocess.Popen(
+                [mimics_exe, "-b", "-run_script", str(runner)],
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                **hidden_process_kwargs()
+            )
+        if lock is not None:
+            lock.update_pid(proc.pid, kind="fewshot_label_export", ts_root=str(Path(ts_root).resolve()))
+    except Exception:
+        if lock is not None:
+            lock.release()
+        raise
     append_log(workspace, "Background Mimics export started, pid={}.".format(proc.pid))
     deadline = time.time() + float(timeout_seconds)
     while time.time() < deadline:
         if proc.poll() is not None:
+            if lock is not None:
+                lock.release()
             return {"launched": True, "returncode": proc.returncode, "log": str(log_path)}
         time.sleep(2.0)
     return {"launched": True, "timed_out": True, "pid": proc.pid, "log": str(log_path)}
@@ -489,6 +757,53 @@ def update_status(path, payload):
     existing.update(payload)
     existing["updated_at_epoch"] = time.time()
     write_json_atomic(path, existing)
+
+
+def register_global_model(manifest):
+    path = global_registry_path()
+    payload = read_json(path, {}) or {}
+    models = payload.get("models") or []
+    manifest_path = str(Path(manifest["checkpoint"]).parent / "manifest.json")
+    row = {
+        "organ": manifest.get("organ", ""),
+        "organ_slug": manifest.get("organ_slug", safe_slug(manifest.get("organ", ""))),
+        "model_id": manifest.get("model_id", ""),
+        "manifest_path": manifest_path,
+        "checkpoint": manifest.get("checkpoint", ""),
+        "config": manifest.get("config", ""),
+        "sample_count": manifest.get("sample_count", 0),
+        "train_sample_count": manifest.get("train_sample_count", 0),
+        "validation_sample_count": manifest.get("validation_sample_count", 0),
+        "created_at_epoch": manifest.get("created_at_epoch", time.time()),
+        "ts_root": manifest.get("ts_root", ""),
+        "workspace": manifest.get("workspace", ""),
+    }
+    models = [
+        item for item in models
+        if not (
+            item.get("organ_slug") == row["organ_slug"]
+            and item.get("model_id") == row["model_id"]
+            and item.get("manifest_path") == row["manifest_path"]
+        )
+    ]
+    models.append(row)
+    models.sort(key=lambda item: float(item.get("created_at_epoch", 0.0) or 0.0), reverse=True)
+    write_json_atomic(path, {"schema_version": "mimics_fewshot_global_models.v1", "models": models[:200]})
+
+
+def global_model_rows(organ=None):
+    payload = read_json(global_registry_path(), {}) or {}
+    rows = []
+    wanted = safe_slug(organ) if organ else None
+    for row in payload.get("models") or []:
+        if wanted and row.get("organ_slug") != wanted:
+            continue
+        manifest_path = Path(row.get("manifest_path", ""))
+        if not manifest_path.is_file():
+            continue
+        rows.append(row)
+    rows.sort(key=lambda item: float(item.get("created_at_epoch", 0.0) or 0.0), reverse=True)
+    return rows
 
 
 def cmd_train(args):
@@ -525,10 +840,28 @@ def cmd_train(args):
     })
     append_log(workspace, "Training job {} started for organ {}.".format(run_id, args.organ))
 
-    cases = set(args.cases.split(",")) if args.cases else None
+    cases = set(parse_case_list(args.cases) or [])
+    if not cases:
+        cases = None
     if args.export_labels:
         update_status(status_path, {"status": "exporting_labels"})
-        export_result = launch_mimics_export(ts_root, cases, args.mimics_exe, workspace, args.export_timeout_seconds)
+        try:
+            export_result = launch_mimics_export(
+                ts_root,
+                cases,
+                args.mimics_exe,
+                workspace,
+                args.export_timeout_seconds,
+                status_path=status_path,
+                cancel_path=cancel_path,
+                lock_timeout_seconds=args.background_mimics_lock_timeout_seconds,
+            )
+        except ResourceLockCancelled:
+            update_status(status_path, {"status": "cancelled", "error": "cancelled while waiting for background Mimics"})
+            return 130
+        except ResourceLockTimeout as exc:
+            update_status(status_path, {"status": "failed", "error": str(exc)})
+            return 75
         update_status(status_path, {"label_export": export_result})
 
     samples, skipped = discover_samples(ts_root, args.organ, cases)
@@ -546,7 +879,14 @@ def cmd_train(args):
         })
         return 2
 
-    materialized = materialize_dataset(selected, dataset_dir)
+    train_samples, val_samples = split_train_validation(
+        selected,
+        val_fraction=args.val_fraction,
+        val_cases=parse_case_list(args.val_cases),
+        min_train_samples=args.min_samples,
+        min_val_samples=args.min_val_samples,
+    )
+    materialized_train, materialized_val = materialize_dataset(train_samples, dataset_dir, val_samples)
     write_training_config(
         config_path,
         base_config,
@@ -556,10 +896,29 @@ def cmd_train(args):
         status_path=train_status,
         cancel_path=cancel_path,
     )
-    write_json_atomic(run_dir / "samples.json", {"samples": materialized, "skipped": skipped})
+    write_json_atomic(
+        run_dir / "samples.json",
+        {
+            "samples": materialized_train + materialized_val,
+            "train_samples": materialized_train,
+            "validation_samples": materialized_val,
+            "skipped": skipped,
+            "selection": {
+                "cases": sorted(cases) if cases else None,
+                "sample_mode": args.sample_mode,
+                "max_samples": int(args.max_samples or 0),
+                "val_fraction": float(args.val_fraction or 0.0),
+                "val_cases": parse_case_list(args.val_cases),
+            },
+        },
+    )
     update_status(status_path, {
-        "status": "training",
-        "sample_count": len(materialized),
+        "status": "waiting_for_gpu" if gpu_lock_enabled() else "training",
+        "sample_count": len(materialized_train) + len(materialized_val),
+        "train_sample_count": len(materialized_train),
+        "validation_sample_count": len(materialized_val),
+        "train_cases": [item["case_id"] for item in materialized_train],
+        "validation_cases": [item["case_id"] for item in materialized_val],
         "dataset_dir": str(dataset_dir),
         "config_path": str(config_path),
         "train_log": str(train_log),
@@ -569,30 +928,60 @@ def cmd_train(args):
 
     cmd = [python_exe, str(dinov3_root / "scripts" / "train.py"), "--config", str(config_path)]
     append_log(workspace, "Launching DINOv3 training: {}".format(" ".join(cmd)))
-    with train_log.open("ab") as log:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(dinov3_root),
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            env=background_env(),
+    proc = None
+    gpu_lock = None
+    try:
+        gpu_lock = acquire_gpu_lock_for_job(
+            workspace,
+            status_path,
+            cancel_path,
+            "DINOv3 training {}".format(run_id),
+            args.gpu_lock_timeout_seconds,
         )
-        update_status(status_path, {"pid": proc.pid, "command": cmd})
-        cancel_started = None
-        while proc.poll() is None:
-            progress = read_json(train_status, {}) or {}
-            payload = {"status": "training", "pid": proc.pid}
-            if progress:
-                payload["training_progress"] = progress
-            if cancel_path.is_file():
-                payload["status"] = "cancelling"
-                if cancel_started is None:
-                    cancel_started = time.time()
-                elif time.time() - cancel_started > 30:
-                    terminate_process_tree(proc.pid)
-            update_status(status_path, payload)
-            time.sleep(5.0)
+        update_status(status_path, {"status": "training"})
+        with train_log.open("ab") as log:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(dinov3_root),
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                env=background_env(),
+            )
+            if gpu_lock is not None:
+                gpu_lock.update_pid(proc.pid, kind="fewshot_train", job_id=run_id)
+            update_status(status_path, {"pid": proc.pid, "command": cmd})
+            cancel_started = None
+            while proc.poll() is None:
+                progress = read_json(train_status, {}) or {}
+                payload = {"status": "training", "pid": proc.pid}
+                if progress:
+                    payload["training_progress"] = progress
+                if cancel_path.is_file():
+                    payload["status"] = "cancelling"
+                    if cancel_started is None:
+                        cancel_started = time.time()
+                    elif time.time() - cancel_started > 30:
+                        terminate_process_tree(proc.pid)
+                update_status(status_path, payload)
+                time.sleep(1.0)
+    except ResourceLockCancelled:
+        update_status(status_path, {"status": "cancelled", "error": "cancelled while waiting for GPU"})
+        append_log(workspace, "Training job {} cancelled while waiting for GPU.".format(run_id))
+        return 130
+    except ResourceLockTimeout as exc:
+        update_status(status_path, {"status": "failed", "error": str(exc)})
+        append_log(workspace, "Training job {} could not acquire GPU: {}.".format(run_id, exc))
+        return 75
+    except Exception as exc:
+        if proc is not None and proc.poll() is None:
+            terminate_process_tree(proc.pid)
+        update_status(status_path, {"status": "failed", "error": str(exc)})
+        append_log(workspace, "Training job {} failed before completion: {}.".format(run_id, exc))
+        return 1
+    finally:
+        if gpu_lock is not None:
+            gpu_lock.release()
 
     final_progress = read_json(train_status, {}) or {}
     if cancel_path.is_file() or final_progress.get("status") == "cancelled":
@@ -632,14 +1021,56 @@ def cmd_train(args):
         "config": str(model_dir / "config.yaml"),
         "source_checkpoint": str(ckpt),
         "experiment_dir": str(exp_dir),
-        "sample_count": len(materialized),
-        "samples": materialized,
+        "sample_count": len(materialized_train) + len(materialized_val),
+        "train_sample_count": len(materialized_train),
+        "validation_sample_count": len(materialized_val),
+        "samples": materialized_train + materialized_val,
+        "train_samples": materialized_train,
+        "validation_samples": materialized_val,
+        "dataset_dir": str(dataset_dir),
+        "dataset_retained": bool(args.keep_materialized_dataset),
+        "training_progress": final_progress,
+        "training_parameters": {
+            "base_config": str(base_config),
+            "finetune_method": str(args.finetune_method),
+            "decoder": str(args.decoder),
+            "model_scale": str(args.model_scale),
+            "model_path": str(args.model_path or ""),
+            "epochs": int(args.epochs),
+            "batch_size": int(args.batch_size),
+            "grad_accumulation": int(args.grad_accumulation),
+            "lr": float(args.lr),
+            "weight_decay": float(args.weight_decay),
+            "img_size": str(args.img_size),
+            "modality": str(args.modality),
+            "mixed_precision": bool(args.mixed_precision),
+            "sub_volume": bool(args.sub_volume),
+            "sub_volume_size": str(args.sub_volume_size),
+            "keep_last_checkpoints": int(args.keep_last_checkpoints),
+            "keep_materialized_dataset": bool(args.keep_materialized_dataset),
+        },
         "created_at_epoch": time.time(),
+        "ts_root": str(ts_root),
+        "workspace": str(workspace),
         "dinov3_root": str(dinov3_root),
         "base_config": str(base_config),
     }
     write_json_atomic(model_dir / "manifest.json", manifest)
     write_json_atomic(workspace / "models" / organ_slug / "latest.json", manifest)
+    register_global_model(manifest)
+    if not args.keep_materialized_dataset:
+        try:
+            shutil.rmtree(str(dataset_dir))
+            manifest["dataset_retained"] = False
+            manifest["dataset_cleanup_at_epoch"] = time.time()
+            write_json_atomic(model_dir / "manifest.json", manifest)
+            write_json_atomic(workspace / "models" / organ_slug / "latest.json", manifest)
+        except Exception as exc:
+            manifest["dataset_retained"] = True
+            manifest["dataset_cleanup_error"] = str(exc)
+            write_json_atomic(model_dir / "manifest.json", manifest)
+            write_json_atomic(workspace / "models" / organ_slug / "latest.json", manifest)
+            append_log(workspace, "Could not clean materialized dataset {}: {}".format(dataset_dir, exc))
     update_status(status_path, {
         "status": "completed",
         "model": manifest,
@@ -649,7 +1080,12 @@ def cmd_train(args):
     return 0
 
 
-def load_model_manifest(workspace, organ, model_id=None):
+def load_model_manifest(workspace, organ, model_id=None, model_manifest=None):
+    if model_manifest:
+        manifest = read_json(model_manifest)
+        if not manifest:
+            raise RuntimeError("model manifest could not be read: {}".format(model_manifest))
+        return manifest
     organ_slug = safe_slug(organ)
     if model_id and model_id != "latest":
         path = Path(workspace) / "models" / organ_slug / model_id / "manifest.json"
@@ -674,7 +1110,7 @@ def cmd_infer(args):
     python_exe = python_from_args(args, dinov3_root)
     workspace = workspace_for(ts_root, args.workspace)
     organ_slug = safe_slug(args.organ)
-    model = load_model_manifest(workspace, args.organ, args.model_id)
+    model = load_model_manifest(workspace, args.organ, args.model_id, args.model_manifest)
     job_id = args.job_id or "infer_{}_{}_{}".format(
         safe_slug(args.case_id),
         organ_slug,
@@ -683,7 +1119,10 @@ def cmd_infer(args):
     status_path = workspace / "jobs" / (job_id + ".json")
     output_dir = workspace / "predictions" / safe_slug(args.case_id) / organ_slug
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / ((args.model_id or model.get("model_id", "latest")) + ".nii.gz")
+    output_model_id = args.model_id or model.get("model_id", "latest")
+    if args.model_manifest and output_model_id == "latest":
+        output_model_id = model.get("model_id", "external_model")
+    output_path = output_dir / (safe_slug(output_model_id) + ".nii.gz")
     log_path = output_dir / (job_id + ".log")
     cancel_path = output_dir / (job_id + ".cancel")
 
@@ -691,13 +1130,15 @@ def cmd_infer(args):
         "schema_version": "mimics_fewshot_job.v1",
         "job_id": job_id,
         "kind": "infer",
-        "status": "running",
+        "status": "waiting_for_gpu" if gpu_lock_enabled() else "running",
         "organ": args.organ,
         "case_id": args.case_id,
         "ts_root": str(ts_root),
         "workspace": str(workspace),
         "image_path": str(image),
         "output_path": str(output_path),
+        "model_id": model.get("model_id", args.model_id or "latest"),
+        "model_manifest": args.model_manifest or "",
         "model": model,
         "controller_pid": os.getpid(),
         "cancel_path": str(cancel_path),
@@ -716,23 +1157,53 @@ def cmd_infer(args):
         str(output_path),
     ]
     append_log(workspace, "Launching DINOv3 inference: {}".format(" ".join(cmd)))
-    with log_path.open("ab") as log:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(dinov3_root),
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            env=background_env(),
+    proc = None
+    gpu_lock = None
+    try:
+        gpu_lock = acquire_gpu_lock_for_job(
+            workspace,
+            status_path,
+            cancel_path,
+            "DINOv3 inference {}".format(job_id),
+            args.gpu_lock_timeout_seconds,
         )
-        update_status(status_path, {"pid": proc.pid, "command": cmd, "log": str(log_path)})
-        while proc.poll() is None:
-            if cancel_path.is_file():
-                update_status(status_path, {"status": "cancelling", "pid": proc.pid})
-                terminate_process_tree(proc.pid)
-            else:
-                update_status(status_path, {"status": "running", "pid": proc.pid})
-            time.sleep(2.0)
+        update_status(status_path, {"status": "running"})
+        with log_path.open("ab") as log:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(dinov3_root),
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                env=background_env(),
+            )
+            if gpu_lock is not None:
+                gpu_lock.update_pid(proc.pid, kind="fewshot_infer", job_id=job_id)
+            update_status(status_path, {"pid": proc.pid, "command": cmd, "log": str(log_path)})
+            while proc.poll() is None:
+                if cancel_path.is_file():
+                    update_status(status_path, {"status": "cancelling", "pid": proc.pid})
+                    terminate_process_tree(proc.pid)
+                else:
+                    update_status(status_path, {"status": "running", "pid": proc.pid})
+                time.sleep(2.0)
+    except ResourceLockCancelled:
+        update_status(status_path, {"status": "cancelled", "error": "cancelled while waiting for GPU"})
+        append_log(workspace, "Inference job {} cancelled while waiting for GPU.".format(job_id))
+        return 130
+    except ResourceLockTimeout as exc:
+        update_status(status_path, {"status": "failed", "error": str(exc)})
+        append_log(workspace, "Inference job {} could not acquire GPU: {}.".format(job_id, exc))
+        return 75
+    except Exception as exc:
+        if proc is not None and proc.poll() is None:
+            terminate_process_tree(proc.pid)
+        update_status(status_path, {"status": "failed", "error": str(exc)})
+        append_log(workspace, "Inference job {} failed before completion: {}.".format(job_id, exc))
+        return 1
+    finally:
+        if gpu_lock is not None:
+            gpu_lock.release()
     if cancel_path.is_file():
         update_status(status_path, {
             "status": "cancelled",
@@ -762,15 +1233,47 @@ def cmd_list_models(args):
     root = workspace / "models"
     rows = []
     if root.is_dir():
-        for latest in sorted(root.glob("*/latest.json")):
-            manifest = read_json(latest, {})
+        if args.all:
+            manifests = sorted(root.glob("*/*/manifest.json"))
+        else:
+            manifests = sorted(root.glob("*/latest.json"))
+        for manifest_path in manifests:
+            manifest = read_json(manifest_path, {})
+            organ = manifest.get("organ", manifest_path.parent.name)
+            if args.organ and safe_slug(organ) != safe_slug(args.organ):
+                continue
             rows.append({
-                "organ": manifest.get("organ", latest.parent.name),
+                "scope": "dataset",
+                "organ": organ,
                 "model_id": manifest.get("model_id", ""),
                 "sample_count": manifest.get("sample_count", 0),
+                "train_sample_count": manifest.get("train_sample_count", 0),
+                "validation_sample_count": manifest.get("validation_sample_count", 0),
                 "checkpoint": manifest.get("checkpoint", ""),
+                "manifest_path": str(manifest_path),
+                "created_at_epoch": manifest.get("created_at_epoch", 0.0),
             })
+    if args.include_global:
+        for row in global_model_rows(args.organ):
+            global_row = dict(row)
+            global_row["scope"] = "global"
+            rows.append(global_row)
+    rows.sort(key=lambda item: float(item.get("created_at_epoch", 0.0) or 0.0), reverse=True)
     print(json.dumps({"models": rows}, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_discover(args):
+    cases = set(parse_case_list(args.cases) or [])
+    samples, skipped = discover_samples(Path(args.ts_root).resolve(), args.organ, cases or None)
+    selected = select_samples(samples, args.sample_mode, int(args.max_samples or 0))
+    print(json.dumps({
+        "organ": args.organ,
+        "sample_count": len(samples),
+        "selected_count": len(selected),
+        "samples": selected,
+        "skipped": skipped,
+    }, indent=2, sort_keys=True))
     return 0
 
 
@@ -824,14 +1327,29 @@ def build_parser():
     train.add_argument("--batch-size", type=int, default=1)
     train.add_argument("--grad-accumulation", type=int, default=1)
     train.add_argument("--lr", type=float, default=1e-3)
+    train.add_argument("--weight-decay", type=float, default=0.01)
     train.add_argument("--img-size", default="224,224")
     train.add_argument("--modality", default="ct")
+    train.add_argument("--val-fraction", type=float, default=0.0)
+    train.add_argument("--val-cases")
+    train.add_argument("--min-val-samples", type=int, default=1)
+    train.add_argument("--finetune-method", choices=("frozen", "decoder_only", "decode_only", "lora", "adapter", "full"), default="lora")
+    train.add_argument("--decoder", choices=("linear3d", "mlp_probe", "segformer3d", "dpt3d"), default="segformer3d")
+    train.add_argument("--model-scale", choices=("vitb16", "vitl16", "vith16plus"), default="vitb16")
+    train.add_argument("--model-path")
+    train.add_argument("--lora-rank", type=int, default=8)
+    train.add_argument("--lora-alpha", type=int, default=16)
+    train.add_argument("--adapter-bottleneck", type=int, default=64)
     train.add_argument("--mixed-precision", action="store_true")
     train.add_argument("--sub-volume", action="store_true")
     train.add_argument("--sub-volume-size", default="32,256,256")
     train.add_argument("--export-labels", action="store_true")
     train.add_argument("--mimics-exe")
     train.add_argument("--export-timeout-seconds", type=float, default=21600)
+    train.add_argument("--background-mimics-lock-timeout-seconds", type=float, default=21600)
+    train.add_argument("--gpu-lock-timeout-seconds", type=float, default=86400)
+    train.add_argument("--keep-last-checkpoints", type=int, default=2)
+    train.add_argument("--keep-materialized-dataset", action="store_true")
     train.add_argument("--run-id")
     train.set_defaults(func=cmd_train)
 
@@ -843,13 +1361,26 @@ def build_parser():
     infer.add_argument("--dinov3-root")
     infer.add_argument("--python")
     infer.add_argument("--model-id", default="latest")
+    infer.add_argument("--model-manifest")
+    infer.add_argument("--gpu-lock-timeout-seconds", type=float, default=3600)
     infer.add_argument("--job-id")
     infer.set_defaults(func=cmd_infer)
 
     models = sub.add_parser("list-models", help="List latest registered models")
     models.add_argument("--ts-root", required=True)
     models.add_argument("--workspace")
+    models.add_argument("--organ")
+    models.add_argument("--all", action="store_true")
+    models.add_argument("--include-global", action="store_true")
     models.set_defaults(func=cmd_list_models)
+
+    discover = sub.add_parser("discover", help="Discover exported image/label pairs for one organ")
+    discover.add_argument("--ts-root", required=True)
+    discover.add_argument("--organ", required=True)
+    discover.add_argument("--cases")
+    discover.add_argument("--sample-mode", choices=("all", "latest"), default="all")
+    discover.add_argument("--max-samples", type=int, default=0)
+    discover.set_defaults(func=cmd_discover)
 
     cancel = sub.add_parser("cancel", help="Cancel the latest running job or a selected job")
     cancel.add_argument("--ts-root", required=True)
