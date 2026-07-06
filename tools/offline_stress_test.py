@@ -279,13 +279,27 @@ if timeline:
         handle.write(json.dumps({"event": "start", "pid": os.getpid(), "time": time.time(), "config": str(config_path)}) + "\n")
 if status_path:
     status_path.parent.mkdir(parents=True, exist_ok=True)
-    status_path.write_text(json.dumps({"status": "running", "epoch": 1, "loss": 0.5, "dice": 0.4}), encoding="utf-8")
+    status_path.write_text(json.dumps({
+        "status": "training",
+        "epoch": 1,
+        "epochs": 1,
+        "phase": "train",
+        "best_dsc": 0.0,
+        "metrics": {"loss": 0.5},
+    }), encoding="utf-8")
 time.sleep(float(os.environ.get("FAKE_TRAIN_SLEEP", "0.4")))
 ckpt = Path.cwd() / "experiments" / exp_name / "checkpoints" / "epoch_0001.pth"
 ckpt.parent.mkdir(parents=True, exist_ok=True)
 ckpt.write_text("fake checkpoint\n", encoding="utf-8")
 if status_path:
-    status_path.write_text(json.dumps({"status": "completed", "epoch": 1, "loss": 0.1, "dice": 0.9}), encoding="utf-8")
+    status_path.write_text(json.dumps({
+        "status": "completed",
+        "epoch": 1,
+        "epochs": 1,
+        "phase": "epoch_complete",
+        "best_dsc": 0.9,
+        "metrics": {"loss": 0.1, "mean_dsc": 0.9},
+    }), encoding="utf-8")
 if timeline:
     with open(timeline, "a", encoding="utf-8") as handle:
         handle.write(json.dumps({"event": "end", "pid": os.getpid(), "time": time.time(), "config": str(config_path)}) + "\n")
@@ -519,7 +533,15 @@ def test_nninteractive_mapping_and_resampling(tmp: Path) -> str:
         return "mapping passed; resampling skipped ({})".format(exc)
     expected = data[::-1, ::-1, :]
     assert_true(np.array_equal(aligned, expected), "affine mirror resampling did not match expected Mimics grid")
-    return "all axis permutations/flips roundtrip; affine mirror resampling matches expected grid"
+    transformed = bridge._apply_source_intensity_transform(
+        data,
+        {
+            "image_source_to_mimics_gv_slope": 1.0,
+            "image_source_to_mimics_gv_intercept": 1024.0,
+        },
+    )
+    assert_true(np.array_equal(transformed, data + 1024.0), "source HU-to-GV transform was not applied")
+    return "all axis permutations/flips roundtrip; affine mirror resampling and source intensity transform match expected grid"
 
 
 def test_nninteractive_incremental_replay(tmp: Path) -> str:

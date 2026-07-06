@@ -10,6 +10,7 @@ from __future__ import print_function
 import os
 import logging
 import subprocess
+import time
 
 import mimics
 
@@ -57,6 +58,71 @@ def _clear_resource_locks():
             pass
 
 
+def _runtime_dir():
+    path = os.path.join(_project_root(), ".mimics_runtime")
+    if not os.path.isdir(path):
+        os.makedirs(path)
+    return path
+
+
+def _queue_registry_dir():
+    return os.path.join(_runtime_dir(), "mcs_queues")
+
+
+def _queue_dirs_from_runtime_state():
+    result = []
+    lock_path = os.path.join(runtime_common.resource_lock_dir(_project_root()), "background_mimics.lock")
+    for path in (lock_path,):
+        payload = runtime_common.read_json(path, {}) or {}
+        details = payload.get("details") or {}
+        output_dir = details.get("output_dir")
+        if output_dir:
+            result.append(output_dir)
+        ts_root = details.get("ts_root")
+        if ts_root:
+            result.append(ts_root)
+            result.append(os.path.join(ts_root, "mcs_output"))
+    registry = _queue_registry_dir()
+    if os.path.isdir(registry):
+        for name in os.listdir(registry):
+            if not name.endswith(".json"):
+                continue
+            payload = runtime_common.read_json(os.path.join(registry, name), {}) or {}
+            output_dir = payload.get("output_dir")
+            if output_dir:
+                result.append(output_dir)
+    unique = []
+    seen = set()
+    for path in result:
+        normalized = os.path.abspath(path)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        unique.append(normalized)
+    return unique
+
+
+def _request_queue_stop():
+    stopped = []
+    payload = {
+        "status": "stop_requested",
+        "requested_at_epoch": time.time(),
+        "reason": "Stop Background Services",
+    }
+    for output_dir in _queue_dirs_from_runtime_state():
+        if not os.path.isdir(output_dir):
+            continue
+        try:
+            runtime_common.write_json_atomic(os.path.join(output_dir, "_mcs_queue_stop.json"), payload)
+            active = os.path.join(output_dir, "_mcs_queue_active.json")
+            if os.path.isfile(active):
+                os.remove(active)
+            stopped.append(output_dir)
+        except Exception:
+            pass
+    return stopped
+
+
 def _mimics_log(level, message):
     try:
         mimics.logging.log_user_message(level=level, message=message)
@@ -67,18 +133,33 @@ def _mimics_log(level, message):
 def stop_background_processes():
     if os.name != "nt":
         return False
+    stopped_queues = _request_queue_stop()
+    stop_log = os.path.join(_runtime_dir(), "stop_background_last.json")
     markers = "@(" + ",".join("'{}'".format(marker.replace("'", "''")) for marker in MARKERS) + ")"
-    roots = "@(" + ",".join("'{}'".format(root.replace("'", "''")) for root in _owned_roots()) + ")"
+    owned_roots = _owned_roots() + _queue_dirs_from_runtime_state()
+    roots = "@(" + ",".join("'{}'".format(root.replace("'", "''")) for root in owned_roots) + ")"
+    lock_paths = [
+        os.path.join(runtime_common.resource_lock_dir(_project_root()), "gpu.lock"),
+        os.path.join(runtime_common.resource_lock_dir(_project_root()), "background_mimics.lock"),
+    ]
+    locks = "@(" + ",".join("'{}'".format(path.replace("'", "''")) for path in lock_paths) + ")"
     command = (
         "$markers={};"
         "$roots={};"
-        "Get-CimInstance Win32_Process | Where-Object {{"
+        "$locks={};"
+        "$out='{}';"
+        "$matched=Get-CimInstance Win32_Process | Where-Object {{"
         "$cmd=$_.CommandLine; "
         "$cmd -and "
         "($roots | Where-Object {{ $cmd -like ('*' + $_ + '*') }}) -and "
         "($markers | Where-Object {{ $cmd -like ('*' + $_ + '*') }})"
-        "}} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}"
-    ).format(markers, roots)
+        "}};"
+        "$records=@($matched | Select-Object ProcessId,Name,CommandLine);"
+        "$records | ConvertTo-Json -Depth 3 -Compress | Set-Content -Path $out -Encoding UTF8;"
+        "$matched | ForEach-Object {{ taskkill /PID $_.ProcessId /T /F 2>$null }};"
+        "Start-Sleep -Milliseconds 500;"
+        "$locks | ForEach-Object {{ Remove-Item -Path $_ -Force -ErrorAction SilentlyContinue }}"
+    ).format(markers, roots, locks, stop_log.replace("'", "''"))
     subprocess.Popen(
         ["powershell", "-NoProfile", "-Command", command],
         stdin=subprocess.DEVNULL,
@@ -86,8 +167,14 @@ def stop_background_processes():
         stderr=subprocess.DEVNULL,
         **_hidden_process_kwargs()
     )
-    _clear_resource_locks()
-    _mimics_log(logging.INFO, "Stop request submitted for Mimics-Script owned background processes only.")
+    _mimics_log(
+        logging.INFO,
+        "Stop request submitted for Mimics-Script owned background processes only. Queue stop markers: {0}. Owned roots checked: {1}. Details: {2}".format(
+            len(stopped_queues),
+            len(owned_roots),
+            stop_log,
+        ),
+    )
     return True
 
 

@@ -355,14 +355,16 @@ Mimics 21 API 文档明确说明：
 
 因此该 buffer 既不能简单称为原始 DICOM stored value，也不是直接的 HU 数组。
 
-当前集成原样传递 Mimics Gray Value，不主动转换成 HU。原因是 nnInteractive 2.4.2 在 `set_image()` 后会：
+Mimics-buffer 路径原样传递 Mimics Gray Value，不主动转换成 HU。原因是 nnInteractive 2.4.2 在 `set_image()` 后会：
 
 1. 把图像转换为 float；
 2. 查找非零区域；
 3. 用非零区域的均值和标准差对整幅图像做 z-score；
 4. 不在这一阶段按 spacing 对整幅图像重采样。
 
-若 Gray Value 与 HU 是正向线性关系，z-score 后的值理论上相同。直接转换 HU 通常不会改变模型输入，反而可能改变“哪些体素等于零”的判定。
+若 Gray Value 与 HU 是正向线性关系，z-score 后的值理论上相同。对已经来自 Mimics 的 buffer 再转 HU 通常不会改变模型输入，反而可能改变“哪些体素等于零”的判定。
+
+Source-image fast path 不读 Mimics buffer，而是由外部 Python 读取原始 NIfTI 或 DICOM。该路径会把 source 图像重采样到 Mimics voxel grid 后，再按 ImageData metadata 选择强度空间：当前 NIfTI 导入流程会写成 CT 派生 DICOM，因此使用 Mimics 侧传入的 `HU2GV(0)` 与 `HU2GV(1)` 推导出的线性 HU-to-GV 转换；原始 CT DICOM 也使用该转换；明确的非 CT DICOM 默认保留 source values，避免把 MR 等数据的背景零值错误转换为非零。这样 source path 与 Mimics-buffer path 尽量保持同一 Gray Value 语义，同时避免对非 CT 数据做错误 HU 假设。
 
 仍需实机验证：
 
@@ -372,7 +374,7 @@ Mimics 21 API 文档明确说明：
 4. 比较 Mimics buffer 与外部 NIfTI 在 z-score 后的数值分布；
 5. 检查 Pixel Padding、截断、饱和或导入转换是否造成非线性差异。
 
-只有发现非线性差异或零值区域明显不一致时，才应在 bridge 中增加显式强度转换。现在直接假设“必须转 HU”并不严谨。
+只有发现非线性差异或零值区域明显不一致时，才应在 bridge 中增加更复杂的项目级强度校正。直接假设“必须把 Mimics buffer 转 HU”并不严谨；但 source-image fast path 必须转换到 Mimics GV，才能和 Mimics API 返回的 buffer 保持一致。
 
 ### 12.2 nnInteractive 原生预处理
 
@@ -486,6 +488,7 @@ creator stores source image metadata on the imported ImageData:
 - `mimics_script.source_image_kind`
 - `mimics_script.source_image_shape`
 - `mimics_script.source_image_index_space`
+- `mimics_script.source_image_modality`
 - `mimics_script.source_world_coordinate_system`
 - `mimics_script.mimics_world_coordinate_system`
 - `mimics_script.source_to_mimics_world_matrix`
@@ -496,9 +499,11 @@ creator stores source image metadata on the imported ImageData:
 When this metadata points to a valid source NIfTI or DICOM folder, and its
 recorded shape, index-space contract and world-coordinate contract match the
 open Mimics image, `nnInteractive` sends `image_path`, `image_source_kind`,
-`image_expected_shape`, `interaction_shape` and the RAS/LPS metadata to the
-external bridge. Mimics then skips `ImageData.get_voxel_buffer()` and does not
-write a full raw image buffer on the foreground GUI thread.
+`image_expected_shape`, `interaction_shape`, the RAS/LPS metadata, source
+modality and the selected source-to-Mimics intensity transform to the external
+bridge. Mimics then skips
+`ImageData.get_voxel_buffer()` and does not write a full raw image buffer on the
+foreground GUI thread.
 
 The fast path is based on Mimics voxel index space, not only patient view labels.
 Prompts collected through `image.get_voxel_indexes()` are `(x, y, z)` indexes.
@@ -511,7 +516,8 @@ slices by `ImagePositionPatient` along the slice normal, transposes each pixel
 plane from `(Rows, Columns)` to `(Columns, Rows)`, and stacks the result as
 `(Columns, Rows, Slices)`. The loaded shape must match the open Mimics image
 before the worker accepts prompts. Internally, the bridge first aligns source
-data to the Mimics grid, then applies the configured Mimics-to-platform axis
+data to the Mimics grid, applies the selected source-to-Mimics intensity
+transform, then applies the configured Mimics-to-platform axis
 mapping before calling nnInteractive. Shape checks compare platform shape to the
 mapped Mimics shape, so non-identity axis mappings are not rejected by comparing
 two different coordinate systems.

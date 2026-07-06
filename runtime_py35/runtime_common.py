@@ -15,12 +15,31 @@ INVALID_LOCK_GRACE_SECONDS = 5.0
 
 def write_json_atomic(path, value):
     parent = os.path.dirname(path)
-    if parent and not os.path.isdir(parent):
-        os.makedirs(parent)
-    temporary = path + "." + uuid.uuid4().hex + ".tmp"
-    with open(temporary, "w") as handle:
-        json.dump(value, handle, indent=2, sort_keys=True)
-    os.replace(temporary, path)
+    last_error = None
+    for _attempt in range(3):
+        if parent and not os.path.isdir(parent):
+            os.makedirs(parent)
+        temporary = path + "." + uuid.uuid4().hex + ".tmp"
+        try:
+            with open(temporary, "w") as handle:
+                json.dump(value, handle, indent=2, sort_keys=True)
+                try:
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                except Exception:
+                    pass
+            os.replace(temporary, path)
+            return
+        except OSError as exc:
+            last_error = exc
+            try:
+                if os.path.isfile(temporary):
+                    os.remove(temporary)
+            except Exception:
+                pass
+            time.sleep(0.05)
+    if last_error is not None:
+        raise last_error
 
 
 def read_json(path, default=None):

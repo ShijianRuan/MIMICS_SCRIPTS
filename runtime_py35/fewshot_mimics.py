@@ -147,19 +147,95 @@ def _bridge_script():
 
 
 def _mimics_log(level, message):
+    logged = False
     try:
         mimics.logging.log_user_message(level=level, message=message)
+        logged = True
     except Exception:
         pass
+    if not logged:
+        print("[fewshot {0}] {1}".format(
+            {logging.INFO: "INFO", logging.WARNING: "WARN", logging.ERROR: "ERROR"}.get(level, "?"),
+            message,
+        ))
+
+
+def _ensure_pyqt5():
+    """Try to make PyQt5 importable by searching Mimics installation paths.
+
+    Mimics GUI is built on Qt.  The Python bindings (PyQt5 or PySide2/6)
+    may live in a non-standard directory that is not on sys.path.
+
+    Returns True if Qt Python bindings are now importable.
+    """
+    try:
+        import PyQt5  # noqa: F401
+        return True
+    except ImportError:
+        pass
+
+    # Known locations for Qt Python bindings inside Mimics installations
+    search_roots = []
+    for env_var in ("MIMICS_HOME", "MIMICS_EXE"):
+        val = os.environ.get(env_var, "")
+        if val and os.path.exists(val):
+            search_roots.append(os.path.dirname(val) if os.path.isfile(val) else val)
+
+    pf = os.environ.get("ProgramFiles", "C:\\Program Files")
+    for base_dir in (
+        os.path.join(pf, "Materialise"),
+        os.path.join(pf, "Common Files", "Materialise"),
+        "C:\\Program Files\\Materialise",
+        "C:\\Program Files\\Common Files\\Materialise",
+        "D:\\Program Files\\Materialise",
+    ):
+        if os.path.isdir(base_dir) and base_dir not in search_roots:
+            search_roots.append(base_dir)
+
+    for root in search_roots:
+        for dirpath, _dirnames, _filenames in os.walk(root):
+            # Stop walking too deep
+            depth = dirpath.replace(root, "").count(os.sep)
+            if depth > 5:
+                continue
+            lower = os.path.basename(dirpath).lower()
+            if lower in ("site-packages", "pyqt5", "pyside2", "pyside6", "pyside"):
+                if dirpath not in sys.path:
+                    sys.path.insert(0, dirpath)
+                try:
+                    import PyQt5  # noqa: F401
+                    return True
+                except ImportError:
+                    pass
+
+    # Try alternatives that ship with some Mimics builds
+    for mod_name in ("PySide2", "PySide6", "PySide"):
+        try:
+            mod = __import__(mod_name)
+            sys.modules["PyQt5"] = mod
+            try:
+                sys.modules["PyQt5.QtWidgets"] = getattr(mod, "QtWidgets")
+            except AttributeError:
+                pass
+            try:
+                sys.modules["PyQt5.QtCore"] = getattr(mod, "QtCore")
+            except AttributeError:
+                pass
+            return True
+        except ImportError:
+            pass
+
+    return False
 
 
 def _pick_directory(title, initial_dir=""):
-    try:
-        from PyQt5.QtWidgets import QFileDialog
-        path = QFileDialog.getExistingDirectory(None, title, initial_dir or "")
-        return str(path) if path else None
-    except Exception:
-        pass
+    if _ensure_pyqt5():
+        try:
+            from PyQt5.QtWidgets import QFileDialog
+            path = QFileDialog.getExistingDirectory(None, title, initial_dir or "")
+            return str(path) if path else None
+        except Exception:
+            pass
     try:
         import Tkinter as tk
         import tkFileDialog
@@ -586,7 +662,122 @@ def _guard_no_active_job(ts_root):
     return False
 
 
+def _native_training_param_picker(config):
+    """Collect key training parameters via Mimics native dialogs.
+
+    No PyQt5 required.  Each parameter is chosen from a short list of
+    sensible presets so the user still has meaningful control.
+    """
+    values = _default_training_options(config)
+
+    # -- Epochs --
+    epoch_choices = [("5 epochs (fast test)", 5), ("10 epochs (quick)", 10),
+                     ("20 epochs (standard)", 20), ("50 epochs (deep)", 50)]
+    epoch_labels = [label for label, _ in epoch_choices]
+    epoch_labels.append("Keep default ({0})".format(values.get("epochs", "?")))
+    answer = mimics.dialogs.question_box(
+        message="Training epochs:\n(more = longer training, potentially better results)",
+        buttons=";".join(epoch_labels),
+        title=TITLE,
+        ui_blocking=True,
+    )
+    for label, val in epoch_choices:
+        if answer == label:
+            values["epochs"] = val
+            break
+
+    # -- Fine-tuning method --
+    method_choices = [("LoRA (fast, low VRAM)", "lora"),
+                      ("Adapter (balanced)", "adapter")]
+    method_labels = [label for label, _ in method_choices]
+    method_labels.append("Keep default ({0})".format(values.get("finetune_method", "lora")))
+    answer = mimics.dialogs.question_box(
+        message="Fine-tuning method:",
+        buttons=";".join(method_labels),
+        title=TITLE,
+        ui_blocking=True,
+    )
+    for label, val in method_choices:
+        if answer == label:
+            values["finetune_method"] = val
+            break
+
+    # -- Batch size --
+    batch_choices = [("Batch size 1 (minimum VRAM)", 1), ("Batch size 2", 2)]
+    batch_labels = [label for label, _ in batch_choices]
+    batch_labels.append("Keep default ({0})".format(values.get("batch_size", "?")))
+    answer = mimics.dialogs.question_box(
+        message="Batch size:\n(bigger = faster training but needs more GPU memory)",
+        buttons=";".join(batch_labels),
+        title=TITLE,
+        ui_blocking=True,
+    )
+    for label, val in batch_choices:
+        if answer == label:
+            values["batch_size"] = val
+            break
+
+    return values
+
+
+def _profile_training_options(config):
+    profiles = config.get("training_profiles") or {}
+    profile_names = sorted(profiles.keys()) if isinstance(profiles, dict) else []
+    default_name = config.get("default_training_profile") or config.get("default_profile") or ""
+
+    if profile_names:
+        lines = [
+            "PyQt5 / PySide is not available in this session.",
+            "",
+            "Choose a training profile from fewshot_config.json,",
+            "or pick 'Configure manually' to set parameters interactively.",
+            "",
+        ]
+        for name in profile_names:
+            vals = _default_training_options(config, name)
+            lines.append("{0}: {1}, {2} epoch(s), batch {3}".format(
+                name, vals.get("finetune_method", "?"), vals.get("epochs", "?"), vals.get("batch_size", "?")))
+        buttons = list(profile_names)
+        buttons.append("Configure manually")
+        buttons.append(BUTTON_CANCEL)
+        answer = mimics.dialogs.question_box(
+            message="\n".join(lines), buttons=";".join(buttons), title=TITLE, ui_blocking=True)
+        if answer == BUTTON_CANCEL or not answer:
+            return None
+        if answer == "Configure manually":
+            return _native_training_param_picker(config)
+        if answer in profile_names:
+            return _default_training_options(config, answer)
+        return _default_training_options(config, default_name)
+
+    # No profiles at all — let user configure or use defaults
+    answer = mimics.dialogs.question_box(
+        message=(
+            "PyQt5 / PySide is not available and no training_profiles\n"
+            "were found in fewshot_config.json.\n\n"
+            "You can configure key parameters interactively, or use\n"
+            "the defaults from fewshot_config.json.\n\n"
+            "Tip: add training_profiles to fewshot_config.json to\n"
+            "save and reuse your settings."
+        ),
+        buttons="Configure interactively;Use defaults;" + BUTTON_CANCEL,
+        title=TITLE,
+        ui_blocking=True,
+    )
+    if answer == BUTTON_CANCEL or not answer:
+        return None
+    if answer == "Use defaults":
+        return _default_training_options(config)
+    return _native_training_param_picker(config)
+
+
 def _advanced_training_options(config, ts_root):
+    if not _ensure_pyqt5():
+        _mimics_log(
+            logging.WARNING,
+            "DINOv3 PyQt5 / PySide2 / PySide6 is not available. Using fewshot_config.json profiles instead.",
+        )
+        return _profile_training_options(config)
     try:
         from PyQt5.QtWidgets import (
             QAbstractItemView,
@@ -605,13 +796,12 @@ def _advanced_training_options(config, ts_root):
             QVBoxLayout,
             QWidget,
         )
-    except Exception:
-        mimics.dialogs.message_box(
-            "Advanced training settings need PyQt5. The default training profile will be used.",
-            title=TITLE,
-            ui_blocking=False,
+    except ImportError:
+        _mimics_log(
+            logging.WARNING,
+            "DINOv3 PyQt5 widgets not importable; using profile selector.",
         )
-        return _default_training_options(config)
+        return _profile_training_options(config)
 
     profiles = config.get("training_profiles") or {}
     profile_names = sorted(profiles.keys()) if isinstance(profiles, dict) else []
@@ -893,15 +1083,43 @@ def _train_model(advanced=False):
             "updated_at_epoch": time.time(),
         },
     )
+    status_path = _status_path(ts_root, run_id)
     _mimics_log(
         logging.INFO,
-        "DINOv3 few-shot training started. Organ: {0}, PID: {1}, job: {2}.".format(organ, process.pid, run_id),
+        "DINOv3 few-shot training started. Organ: {0}, PID: {1}, job: {2}. Status: {3}".format(
+            organ,
+            process.pid,
+            run_id,
+            status_path,
+        ),
     )
+    monitor_started = _start_monitor(
+        {
+            "monitor_key": "train_" + run_id,
+            "kind": "train",
+            "deadline": time.time() + float(config.get("training_monitor_timeout_seconds", 7 * 86400)),
+            "status_path": status_path,
+            "last_line": "",
+        },
+        poll_seconds=float(config.get("training_monitor_poll_seconds", 5.0)),
+    )
+    if monitor_started:
+        _mimics_log(
+            logging.INFO,
+            "DINOv3 training monitor enabled; epoch loss and validation Dice will be reported in this log.",
+        )
+    else:
+        _mimics_log(
+            logging.WARNING,
+            "DINOv3 training monitor could not start in this Mimics session. Training continues in the background; use Show Status to check progress, or open the pipeline log:\n{0}".format(
+                os.path.join(_workspace(ts_root), "fewshot_pipeline.log"),
+            ),
+        )
     mimics.dialogs.message_box(
-        "Few-shot training started in the background.\n\nOrgan: {0}\nJob: {1}\nStatus folder:\n{2}".format(
+        "Few-shot training started in the background.\n\nOrgan: {0}\nJob: {1}\n\nPipeline log (full details):\n{2}\n\nUse Show Status for progress.".format(
             organ,
             run_id,
-            os.path.join(_workspace(ts_root), "jobs"),
+            os.path.join(_workspace(ts_root), "fewshot_pipeline.log"),
         ),
         title=TITLE,
         ui_blocking=False,
@@ -1158,9 +1376,31 @@ def _monitor_tick(monitor):
     key = monitor.get("monitor_key")
     if time.time() > monitor.get("deadline", 0):
         _stop_monitor(key)
-        mimics.dialogs.message_box("Few-shot inference timed out.", title=TITLE, ui_blocking=False)
+        if monitor.get("kind") == "train":
+            mimics.dialogs.message_box("Few-shot training monitor timed out. The background job may still be running; use Show Status.", title=TITLE, ui_blocking=False)
+        else:
+            mimics.dialogs.message_box("Few-shot inference timed out.", title=TITLE, ui_blocking=False)
         return
     status = _read_json(monitor["status_path"], {}) or {}
+    if monitor.get("kind") == "train":
+        line = _format_job_line(status)
+        if line and line != monitor.get("last_line"):
+            monitor["last_line"] = line
+            _mimics_log(logging.INFO, "DINOv3 training status: {0}".format(line))
+        state = status.get("status")
+        if state in ("completed", "failed", "cancelled", "cancelling"):
+            _stop_monitor(key)
+            if state == "completed":
+                message = "Few-shot training completed.\n\n{0}".format(line)
+            elif state in ("cancelled", "cancelling"):
+                message = "Few-shot training was cancelled.\n\n{0}".format(line)
+            else:
+                message = "Few-shot training failed.\n\n{0}\n\n{1}".format(
+                    status.get("error", "Unknown error"),
+                    line,
+                )
+            mimics.dialogs.message_box(message, title=TITLE, ui_blocking=False)
+        return
     state = status.get("status")
     if state in ("", None, "launching", "running", "waiting_for_gpu", "waiting_for_background_mimics"):
         return
@@ -1241,10 +1481,14 @@ def _start_win32_monitor(monitor, poll_seconds):
 
 
 def _start_monitor(monitor, poll_seconds=1.0):
+    if not _ensure_pyqt5():
+        if _start_win32_monitor(monitor, poll_seconds):
+            return True
+        return False
     try:
         from PyQt5.QtCore import QTimer
         from PyQt5.QtWidgets import QApplication
-    except Exception:
+    except ImportError:
         if _start_win32_monitor(monitor, poll_seconds):
             return True
         return False
@@ -1282,18 +1526,18 @@ def _format_job_line(job):
             pieces.append(str(phase))
         if best is not None:
             try:
-                pieces.append("best_dsc {0:.4f}".format(float(best)))
+                pieces.append("best_val_dice {0:.4f}".format(float(best)))
             except Exception:
-                pieces.append("best_dsc {0}".format(best))
+                pieces.append("best_val_dice {0}".format(best))
         metrics = progress.get("metrics") or {}
         if metrics.get("loss") is not None:
             try:
-                pieces.append("loss {0:.4f}".format(float(metrics.get("loss"))))
+                pieces.append("train_loss {0:.4f}".format(float(metrics.get("loss"))))
             except Exception:
                 pass
         if metrics.get("mean_dsc") is not None:
             try:
-                pieces.append("val_dsc {0:.4f}".format(float(metrics.get("mean_dsc"))))
+                pieces.append("val_dice {0:.4f}".format(float(metrics.get("mean_dsc"))))
             except Exception:
                 pass
         if pieces:
@@ -1430,9 +1674,11 @@ def _choose_model_manifest(ts_root, organ):
             ui_blocking=False,
         )
         return None
+    if not _ensure_pyqt5():
+        return candidates[0]
     try:
         from PyQt5.QtWidgets import QDialog, QDialogButtonBox, QLabel, QListWidget, QListWidgetItem, QVBoxLayout
-    except Exception:
+    except ImportError:
         return candidates[0]
 
     dialog = QDialog()

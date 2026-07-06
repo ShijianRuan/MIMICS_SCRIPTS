@@ -27,15 +27,17 @@ import runtime_common
 
 QUEUE_ACTIVE_FILE = "_mcs_queue_active.json"
 QUEUE_DONE_FILE = "_mcs_queue_done.json"
+QUEUE_STOP_FILE = "_mcs_queue_stop.json"
 STATUS_FILE = "_mcs_batch_status.json"
 LOCK_FILE = "_mcs_batch.lock"
-LOG_FILE = "_create_mcs_batch.log"
+LOG_FILE = os.path.join("logs", "_create_mcs_batch.log")
 LOG_ROTATE_BYTES = 5 * 1024 * 1024
 LOG_BACKUPS = 3
 SOURCE_IMAGE_PATH_METADATA = "mimics_script.source_image_path"
 SOURCE_IMAGE_KIND_METADATA = "mimics_script.source_image_kind"
 SOURCE_IMAGE_SHAPE_METADATA = "mimics_script.source_image_shape"
 SOURCE_IMAGE_INDEX_SPACE_METADATA = "mimics_script.source_image_index_space"
+SOURCE_IMAGE_MODALITY_METADATA = "mimics_script.source_image_modality"
 SOURCE_WORLD_COORDINATE_SYSTEM_METADATA = "mimics_script.source_world_coordinate_system"
 MIMICS_WORLD_COORDINATE_SYSTEM_METADATA = "mimics_script.mimics_world_coordinate_system"
 SOURCE_TO_MIMICS_WORLD_MATRIX_METADATA = "mimics_script.source_to_mimics_world_matrix"
@@ -73,6 +75,9 @@ def log_message(output_dir, message):
     print(text)
     try:
         log_path = os.path.join(output_dir, LOG_FILE)
+        log_dir = os.path.dirname(log_path)
+        if not os.path.isdir(log_dir):
+            os.makedirs(log_dir)
         rotate_log(log_path)
         with open(log_path, "a") as handle:
             handle.write(text + "\n")
@@ -196,6 +201,32 @@ def inject_buffer(mask, buffer_path, mimics_shape):
         return "memoryview"
 
 
+def _shape_product(shape):
+    result = 1
+    for dim in shape:
+        result *= int(dim)
+    return result
+
+
+def _active_image_shape(image):
+    try:
+        dims = getattr(image, "logical_dimensions", None)
+        if dims is not None:
+            shape = [int(dims[0]), int(dims[1]), int(dims[2])]
+            if all(value > 0 for value in shape):
+                return shape
+    except Exception:
+        pass
+    try:
+        view = image.get_voxel_buffer()
+        shape = [int(value) for value in view.shape]
+        if all(value > 0 for value in shape):
+            return shape
+    except Exception:
+        pass
+    return None
+
+
 def create_mcs_from_manifest(work_dir, output_mcs):
     """Create a .mcs file from a prepare manifest.
 
@@ -222,10 +253,12 @@ def create_mcs_from_manifest(work_dir, output_mcs):
 
     image = mimics.data.images[0]
     mimics.data.images.set_active(image)
+    active_image_shape = _active_image_shape(image)
     metadata_set(image, SOURCE_IMAGE_PATH_METADATA, result.get("source_image_path", ""))
     metadata_set(image, SOURCE_IMAGE_KIND_METADATA, result.get("source_image_kind", ""))
     metadata_set(image, SOURCE_IMAGE_SHAPE_METADATA, json.dumps(result.get("source_image_shape", [])))
     metadata_set(image, SOURCE_IMAGE_INDEX_SPACE_METADATA, result.get("source_image_index_space", ""))
+    metadata_set(image, SOURCE_IMAGE_MODALITY_METADATA, result.get("source_image_modality", ""))
     metadata_set(image, SOURCE_WORLD_COORDINATE_SYSTEM_METADATA, result.get("source_world_coordinate_system", ""))
     metadata_set(image, MIMICS_WORLD_COORDINATE_SYSTEM_METADATA, result.get("mimics_world_coordinate_system", ""))
     metadata_set(
@@ -268,6 +301,23 @@ def create_mcs_from_manifest(work_dir, output_mcs):
             name = mr["name"]
             u8_path = mr["u8_path"]
             buf_shape = mr["mimics_shape"]
+            if active_image_shape and [int(value) for value in buf_shape] != active_image_shape:
+                if _shape_product(buf_shape) != _shape_product(active_image_shape):
+                    raise RuntimeError(
+                        "mask buffer shape does not match imported Mimics image for {0}: buffer={1}, image={2}".format(
+                            name,
+                            buf_shape,
+                            active_image_shape,
+                        )
+                    )
+                print(
+                    "    shape adjusted to imported Mimics image for {0}: {1} -> {2}".format(
+                        name,
+                        buf_shape,
+                        active_image_shape,
+                    )
+                )
+                buf_shape = active_image_shape
 
             mask = mimics.segment.create_mask()
             mask.name = name
@@ -364,7 +414,23 @@ def main(output_dir=None):
                     except Exception:
                         manifest_data = {}
                     mcs_path = manifest_data.get("output_mcs") or os.path.join(output_dir, case_id + ".mcs")
-                    if os.path.isfile(mcs_path) or os.path.isfile(failed_marker):
+                    fingerprint_path = os.path.join(output_dir, case_id + ".fingerprint")
+                    current_fp = manifest_data.get("source_fingerprint", "")
+                    if os.path.isfile(mcs_path):
+                        stored_fp = ""
+                        if os.path.isfile(fingerprint_path):
+                            try:
+                                with open(fingerprint_path, "r") as fp_handle:
+                                    stored_fp = fp_handle.read().strip()
+                            except Exception:
+                                pass
+                        if current_fp and stored_fp == current_fp:
+                            # Source unchanged — skip
+                            continue
+                        # Fingerprint changed or missing — reprocess
+                        if current_fp:
+                            log_message(output_dir, "Source fingerprint changed for {0}; reprocessing.".format(case_id))
+                    if os.path.isfile(failed_marker) and not current_fp:
                         continue
                     work_dirs.append((case_id, work_dir, mcs_path))
 
@@ -373,6 +439,10 @@ def main(output_dir=None):
                 consecutive_empty += 1
                 active = os.path.isfile(active_path)
                 done = os.path.isfile(done_path)
+                stop = os.path.isfile(os.path.join(output_dir, QUEUE_STOP_FILE))
+                if stop:
+                    log_message(output_dir, "Stop marker found; exiting.")
+                    break
                 if done and not active:
                     log_message(output_dir, "No pending manifests and producer marked the queue done; exiting.")
                     break
@@ -393,6 +463,11 @@ def main(output_dir=None):
             consecutive_empty = 0
             log_message(output_dir, "Creating {} .mcs file(s).".format(total))
 
+            # Re-check stop marker before starting work
+            if os.path.isfile(os.path.join(output_dir, QUEUE_STOP_FILE)):
+                log_message(output_dir, "Stop marker found; exiting.")
+                break
+
             for i, (case_id, work_dir, mcs_path) in enumerate(work_dirs):
                 log_message(output_dir, "[{}/{}] Creating: {}".format(i + 1, total, case_id))
                 update_status(
@@ -407,6 +482,21 @@ def main(output_dir=None):
                     total_completed += 1
                     last_activity = time.time()
                     log_message(output_dir, "Created: {}".format(mcs_path))
+                    # Persist source fingerprint for incremental rebuild detection
+                    manifest_data = {}
+                    try:
+                        with open(os.path.join(work_dir, "prepare_manifest.json"), "r") as mf:
+                            manifest_data = json.load(mf)
+                    except Exception:
+                        pass
+                    fingerprint = manifest_data.get("source_fingerprint", "")
+                    if fingerprint:
+                        fingerprint_path = os.path.join(output_dir, case_id + ".fingerprint")
+                        try:
+                            with open(fingerprint_path, "w") as fp:
+                                fp.write(fingerprint)
+                        except Exception:
+                            pass
                 except Exception as e:
                     total_failed += 1
                     last_activity = time.time()

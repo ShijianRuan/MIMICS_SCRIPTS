@@ -6,6 +6,7 @@ from __future__ import print_function
 import json
 import logging
 import os
+import re
 import sys
 import time
 
@@ -67,8 +68,9 @@ def _script_root():
 def _mimics_log(level, message):
     try:
         mimics.logging.log_user_message(level=level, message=message)
+        return True
     except Exception:
-        pass
+        return False
 
 
 def _state_path():
@@ -126,8 +128,32 @@ def _active_image():
 
 def _image_min_max():
     image = _active_image()
-    minimum = getattr(image, "minimum_value", None)
-    maximum = getattr(image, "maximum_value", None)
+    minimum = None
+    maximum = None
+    if image is not None:
+        info_getter = getattr(image, "get_image_information", None)
+        if callable(info_getter):
+            try:
+                info = info_getter()
+                minimum = getattr(info, "minimum_value", None)
+                maximum = getattr(info, "maximum_value", None)
+            except Exception:
+                minimum = None
+                maximum = None
+        if minimum is None or maximum is None:
+            minimum = getattr(image, "minimum_value", None)
+            maximum = getattr(image, "maximum_value", None)
+        if minimum is None or maximum is None:
+            try:
+                import numpy as np
+
+                view = image.get_voxel_buffer()
+                array = np.asarray(view)
+                minimum = array.min()
+                maximum = array.max()
+            except Exception:
+                minimum = None
+                maximum = None
     if minimum is None or maximum is None:
         minimum, maximum = 0, 4095
     minimum = int(round(float(minimum)))
@@ -139,9 +165,9 @@ def _image_min_max():
 
 def _hu_to_gv(value):
     try:
-        return float(mimics.segment.HU2GV(float(value)))
+        return int(mimics.segment.HU2GV(int(round(float(value)))))
     except Exception:
-        return float(value)
+        return int(round(float(value)))
 
 
 def _current_contrast():
@@ -168,8 +194,21 @@ def _json_contrast(value):
         return None
 
 
-def _set_contrast_points(low_gv, high_gv):
-    minimum, maximum = _image_min_max()
+def _parse_valid_range(error):
+    match = re.search(r"range\s+from\s+(-?\d+(?:\.\d+)?)\s+to\s+(-?\d+(?:\.\d+)?)", str(error), re.I)
+    if not match:
+        return None
+    try:
+        low = int(round(float(match.group(1))))
+        high = int(round(float(match.group(2))))
+        if high > low:
+            return low, high
+    except Exception:
+        pass
+    return None
+
+
+def _clamp_contrast_points(low_gv, high_gv, minimum, maximum):
     low = max(minimum, min(maximum, int(round(float(low_gv)))))
     high = max(minimum, min(maximum, int(round(float(high_gv)))))
     if high <= low:
@@ -177,7 +216,28 @@ def _set_contrast_points(low_gv, high_gv):
             high = min(maximum, low + 1)
         else:
             low = max(minimum, high - 1)
-    mimics.view.set_contrast((low, 0.0), (high, 1.0))
+    return low, high
+
+
+def _set_contrast_points(low_gv, high_gv):
+    minimum, maximum = _image_min_max()
+    low, high = _clamp_contrast_points(low_gv, high_gv, minimum, maximum)
+    try:
+        mimics.view.set_contrast((low, 0.0), (high, 1.0))
+    except ValueError as exc:
+        valid_range = _parse_valid_range(exc)
+        if not valid_range:
+            raise
+        minimum, maximum = valid_range
+        low, high = _clamp_contrast_points(low_gv, high_gv, minimum, maximum)
+        mimics.view.set_contrast((low, 0.0), (high, 1.0))
+        _mimics_log(
+            logging.WARNING,
+            "Mimics reported a narrower image GV range; window/level was clamped to GV={0}-{1}.".format(
+                low,
+                high,
+            ),
+        )
     try:
         mimics.update_gui()
     except Exception:

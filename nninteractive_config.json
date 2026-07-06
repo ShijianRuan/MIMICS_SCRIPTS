@@ -1,6 +1,7 @@
 {
   "device": "auto",
   "auto_start_server": true,
+  "image_input_mode": "auto",
   "prefer_source_image_for_nninteractive": true,
   "async_reuse_image_worker": true,
   "async_start_worker_before_prompt": true,

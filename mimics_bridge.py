@@ -68,6 +68,24 @@ def is_dicom_folder(path: str) -> bool:
     return count > 0
 
 
+def infer_dicom_modality(path: str) -> str:
+    p = Path(path)
+    if not p.is_dir():
+        return ""
+    import pydicom
+    for child in sorted(p.rglob("*")):
+        if not child.is_file():
+            continue
+        try:
+            ds = pydicom.dcmread(str(child), stop_before_pixels=True, force=False)
+        except Exception:
+            continue
+        modality = str(getattr(ds, "Modality", "") or "").strip()
+        if modality:
+            return modality
+    return ""
+
+
 def is_nifti_file(path: str) -> bool:
     p = Path(path)
     if not p.is_file():
@@ -89,9 +107,9 @@ def nifti_to_derived_dicom(nifti_path: str, dicom_out: str, case_id: str = "case
     if array.ndim != 3:
         raise ValueError("NIfTI image must be 3D: {} shape={}".format(nifti_path, array.shape))
 
-    # nibabel exposes NIfTI world coordinates as RAS+. DICOM and Mimics use
-    # the DICOM patient coordinate system (LPS). Convert at the boundary.
-    affine_ras = img.affine
+    # Normalize qform/sform codes before reading the affine so the DICOM
+    # geometry is derived from a consistent header.  See _normalize_nifti_affine.
+    affine_ras = _normalize_nifti_affine(img)
     affine_lps = RAS_TO_LPS @ affine_ras
     shape_3d = array.shape
 
@@ -209,6 +227,97 @@ def nifti_to_derived_dicom(nifti_path: str, dicom_out: str, case_id: str = "case
     }
 
 
+# -- NIfTI header normalization ----------------------------------------
+
+def _normalize_nifti_affine(nifti_img) -> np.ndarray:
+    """Return a normalized affine, fixing ambiguous qform/sform codes.
+
+    Some NIfTI files have qform_code=0 or sform_code=0, which causes
+    tools like ITK-Snap, SimpleITK and 3D Slicer to interpret the
+    spatial mapping differently.  Re-setting both codes forces a
+    consistent sform_code=2 / qform_code=2 header so every downstream
+    reader sees the same affine.
+
+    Falls back to pixdim-derived affine when either qform or sform is
+    corrupt (NaN, all-zero, or otherwise unable to be decomposed by
+    nibabel).
+
+    The file on disk is NOT modified; only the in-memory image object
+    header is normalized.
+    """
+    import nibabel as nib
+
+    def _safe_get_qform(img):
+        try:
+            return img.get_qform()
+        except Exception:
+            return None
+
+    def _safe_get_sform(img):
+        try:
+            return img.get_sform()
+        except Exception:
+            return None
+
+    def _usable_affine(mat):
+        """True when affine has a non-trivial finite linear component."""
+        if mat is None:
+            return False
+        return (
+            np.all(np.isfinite(mat))
+            and mat.shape == (4, 4)
+            and bool(np.linalg.norm(mat[:3, :3]) > 1e-8)
+        )
+
+    def _try_set_qform(img, affine):
+        try:
+            img.set_qform(affine, code=2)
+        except Exception:
+            pass
+
+    def _try_set_sform(img, affine):
+        try:
+            img.set_sform(affine, code=2)
+        except Exception:
+            pass
+
+    qform = _safe_get_qform(nifti_img)
+    sform = _safe_get_sform(nifti_img)
+
+    if _usable_affine(qform):
+        _try_set_qform(nifti_img, qform)
+    if _usable_affine(sform):
+        _try_set_sform(nifti_img, sform)
+    # If neither was usable, force-set at least sform from pixdim so the
+    # image has a valid spatial mapping.
+    if not _usable_affine(qform) and not _usable_affine(sform):
+        pixdim = nifti_img.header.get_zooms()[:3]
+        fallback = np.eye(4)
+        for i, p in enumerate(pixdim):
+            pp = float(p)
+            if np.isfinite(pp) and pp >= 0.001:
+                fallback[i, i] = pp
+            else:
+                fallback[i, i] = 1.0
+        _try_set_sform(nifti_img, fallback)
+        _try_set_qform(nifti_img, fallback)
+        return fallback
+
+    result = nifti_img.affine.copy()
+    if not np.all(np.isfinite(result)):
+        # Defensive: pixdim fallback for any remaining NaN in the affine
+        pixdim = nifti_img.header.get_zooms()[:3]
+        result = np.eye(4)
+        for i, p in enumerate(pixdim):
+            pp = float(p)
+            if np.isfinite(pp) and pp >= 0.001:
+                result[i, i] = pp
+            else:
+                result[i, i] = 1.0
+
+    return result
+
+
 # -- NIfTI mask -> .u8 buffer -----------------------------------------
 
 def read_nifti_mask(path: str) -> np.ndarray:
@@ -226,7 +335,19 @@ def read_nifti_mask_with_affine(path: str) -> tuple[np.ndarray, np.ndarray]:
     array = np.asanyarray(img.dataobj)
     if array.ndim != 3:
         raise ValueError("mask must be 3D: {} shape={}".format(path, array.shape))
-    return (array != 0).astype(np.uint8), img.affine.copy()
+    affine = _normalize_nifti_affine(img)
+    return (array != 0).astype(np.uint8), affine
+
+
+def _affine_is_usable(affine: np.ndarray) -> bool:
+    affine = np.asarray(affine, dtype=float)
+    if affine.shape != (4, 4) or not np.all(np.isfinite(affine)):
+        return False
+    linear = affine[:3, :3]
+    if abs(float(np.linalg.det(linear))) < 1e-8:
+        return False
+    spacing = np.linalg.norm(linear, axis=0)
+    return bool(np.all(np.isfinite(spacing)) and np.all(spacing > 1e-8))
 
 
 def _affine_close(left: np.ndarray, right: np.ndarray, atol: float = 1e-4) -> bool:
@@ -241,6 +362,8 @@ def resample_mask_to_image_grid(
 ) -> np.ndarray:
     """Nearest-neighbor resample of a mask into image voxel index space."""
     if tuple(mask.shape) == tuple(image_shape) and _affine_close(mask_affine, image_affine):
+        return np.ascontiguousarray(mask.astype(np.uint8))
+    if tuple(mask.shape) == tuple(image_shape) and not _affine_is_usable(mask_affine):
         return np.ascontiguousarray(mask.astype(np.uint8))
 
     inv_mask_affine = np.linalg.inv(mask_affine)
@@ -307,7 +430,7 @@ def get_image_affine(image_path: str) -> np.ndarray:
     if not Path(image_path).is_file():
         raise ValueError("image file not found: {}".format(image_path))
     img = nib.load(image_path)
-    return img.affine.copy()
+    return _normalize_nifti_affine(img)
 
 
 def get_image_shape(image_path: str) -> tuple[int, int, int]:
@@ -425,6 +548,7 @@ def do_prepare(params: dict) -> dict:
         source_world_coordinate_system = "lps"
         mimics_world_coordinate_system = "lps"
         source_to_mimics_world_matrix = np.eye(4)
+        source_image_modality = infer_dicom_modality(image_path)
         image_shape = None
     elif is_nifti_file(image_path):
         if not dicom_out:
@@ -437,6 +561,7 @@ def do_prepare(params: dict) -> dict:
         source_world_coordinate_system = "ras"
         mimics_world_coordinate_system = "lps"
         source_to_mimics_world_matrix = RAS_TO_LPS
+        source_image_modality = "CT"
         image_shape = tuple(int(v) for v in info["shape"])
     else:
         return {"status": "error", "error": "image path is neither DICOM folder nor NIfTI file: {}".format(image_path)}
@@ -485,9 +610,23 @@ def do_prepare(params: dict) -> dict:
             "mimics_shape": list(transformed.shape),
             "nifti_shape": list(array.shape),
             "image_shape": list(image_shape),
+            "mask_affine_usable": bool(_affine_is_usable(mask_affine)),
+            "mask_affine_matches_image": bool(_affine_close(mask_affine, image_affine)),
+            "mask_voxel_to_ras_matrix": mask_affine.astype(float).tolist(),
             "buffer_axes": list(axes),
             "buffer_flips": list(flips),
         })
+
+    # Build a content fingerprint for incremental rebuild detection
+    image_ident = str(Path(image_path).resolve())
+    mask_fingerprints = ["{0}:{1}".format(
+        m["name"], m["u8_hash"] if "u8_hash" in m else hashlib.sha256(
+            open(m["u8_path"], "rb").read()
+        ).hexdigest()
+    ) for m in mask_results]
+    source_fingerprint = "sha256:" + hashlib.sha256(
+        (image_ident + "|" + "|".join(sorted(mask_fingerprints))).encode("utf-8")
+    ).hexdigest()
 
     return {
         "status": "ok",
@@ -497,10 +636,12 @@ def do_prepare(params: dict) -> dict:
         "source_image_kind": source_image_kind,
         "source_image_shape": list(image_shape),
         "source_image_index_space": source_image_index_space,
+        "source_image_modality": source_image_modality,
         "source_world_coordinate_system": source_world_coordinate_system,
         "mimics_world_coordinate_system": mimics_world_coordinate_system,
         "source_to_mimics_world_matrix": source_to_mimics_world_matrix.astype(float).tolist(),
         "source_voxel_to_ras_matrix": source_voxel_to_ras_matrix.tolist(),
+        "source_fingerprint": source_fingerprint,
         "mimics_voxel_to_ras_matrix": mimics_voxel_to_ras_matrix.tolist(),
         "mimics_to_source_index_matrix": mimics_to_source_index_matrix.astype(float).tolist(),
         "source_case_dir": params.get("case_dir", ""),

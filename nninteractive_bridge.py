@@ -113,14 +113,23 @@ def _release_gpu_lock_from_state(state: dict[str, Any] | None) -> None:
         release_lock(lock_path, str(token))
 
 
-def _server_state_path(model_dir: str) -> Path:
+def _runtime_work_dir(model_dir: str, runtime_work_dir: str | None = None) -> Path:
+    if runtime_work_dir:
+        root = Path(runtime_work_dir)
+    else:
+        root = Path(model_dir).parent
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _server_state_path(model_dir: str, runtime_work_dir: str | None = None) -> Path:
     """Path to the owned-server state file."""
-    return Path(model_dir).parent / ".nninteractive_server.json"
+    return _runtime_work_dir(model_dir, runtime_work_dir) / ".nninteractive_server.json"
 
 
-def _server_log_path(model_dir: str) -> Path:
+def _server_log_path(model_dir: str, runtime_work_dir: str | None = None) -> Path:
     """Path to the server log file."""
-    return Path(model_dir).parent / ".nninteractive_server.log"
+    return _runtime_work_dir(model_dir, runtime_work_dir) / ".nninteractive_server.log"
 
 
 def _bridge_log_path(model_dir: str, log_dir: str | None = None) -> Path:
@@ -572,6 +581,7 @@ def _start_server(
     server_url: str,
     fold: str | None,
     gpu_lock_timeout_seconds: float = 30.0,
+    runtime_work_dir: str | None = None,
 ) -> tuple[subprocess.Popen, dict[str, Any]]:
     """Start the nnInteractive server as a background subprocess.
 
@@ -581,8 +591,8 @@ def _start_server(
     # Use the same Python that's running this bridge (guaranteed to have the
     # nnInteractive package available, whether from venv or portable bundle).
     python_exe = sys.executable
-    log_path = _server_log_path(model_dir)
-    state_path = _server_state_path(model_dir)
+    log_path = _server_log_path(model_dir, runtime_work_dir)
+    state_path = _server_state_path(model_dir, runtime_work_dir)
     ownership_token = uuid.uuid4().hex
     host, port = _server_address(server_url)
 
@@ -704,13 +714,14 @@ def _ensure_server(
     preferred_server_url: str = SERVER_URL,
     fold: str | None = None,
     gpu_lock_timeout_seconds: float = 30.0,
+    runtime_work_dir: str | None = None,
 ) -> tuple[bool, str, str]:
     """Ensure the nnInteractive server is running; start it if needed.
 
     Returns (first_call, server_url, api_key).
       - first_call=True means the server was just started (model loading).
     """
-    state_path = _server_state_path(model_dir)
+    state_path = _server_state_path(model_dir, runtime_work_dir)
     state = _load_server_state(state_path)
     expected_model = str(Path(model_dir).resolve())
     fold = _resolve_fold(model_dir, fold)
@@ -744,6 +755,7 @@ def _ensure_server(
         server_url,
         fold,
         gpu_lock_timeout_seconds,
+        runtime_work_dir,
     )
     api_key = str(state["ownership_token"])
 
@@ -772,7 +784,7 @@ def _ensure_server(
             "Check log: {2}".format(
                 startup_timeout_seconds,
                 exit_detail,
-                _server_log_path(model_dir),
+                _server_log_path(model_dir, runtime_work_dir),
             )
         )
 
@@ -961,6 +973,21 @@ def _align_source_image_to_mimics_grid(data: np.ndarray, input_data: dict[str, A
     return data.astype(np.float32, copy=False)
 
 
+def _apply_source_intensity_transform(data: np.ndarray, input_data: dict[str, Any]) -> np.ndarray:
+    slope = input_data.get("image_source_to_mimics_gv_slope")
+    intercept = input_data.get("image_source_to_mimics_gv_intercept")
+    if slope is None or intercept is None:
+        return data.astype(np.float32, copy=False)
+    try:
+        slope_f = float(slope)
+        intercept_f = float(intercept)
+    except (TypeError, ValueError):
+        return data.astype(np.float32, copy=False)
+    if slope_f == 1.0 and intercept_f == 0.0:
+        return data.astype(np.float32, copy=False)
+    return data.astype(np.float32, copy=False) * slope_f + intercept_f
+
+
 def _dicom_sort_key(record: tuple[Path, Any], normal: np.ndarray | None) -> tuple[float, float, str]:
     path, ds = record
     if normal is not None and hasattr(ds, "ImagePositionPatient"):
@@ -1107,15 +1134,25 @@ def load_image_source(input_data: dict[str, Any]) -> np.ndarray:
         _parse_matrix(input_data.get("image_source_voxel_to_ras_matrix")) is not None
         and _parse_matrix(input_data.get("image_mimics_voxel_to_ras_matrix")) is not None
     )
-    if source_kind == "dicom_folder" or Path(path).is_dir():
-        image = load_image_dicom_folder(
-            path,
-            expected_shape,
-            allow_shape_mismatch=has_affine_resample_metadata,
-        )
-    else:
-        image = load_image_nifti(path)
+    try:
+        if source_kind == "dicom_folder" or Path(path).is_dir():
+            image = load_image_dicom_folder(
+                path,
+                expected_shape,
+                allow_shape_mismatch=has_affine_resample_metadata,
+            )
+        else:
+            image = load_image_nifti(path)
+    except PermissionError as exc:
+        raise RuntimeError(
+            "Cannot read the source image file (access denied). The file may be "
+            "locked by antivirus software, another process, or restricted "
+            "permissions.\n\nPath: {0}\nError: {1}\n\n"
+            "Workaround: set image_input_mode to \"mimics\" in nninteractive_config.json "
+            "to use the Mimics image buffer instead.".format(path, exc)
+        ) from exc
     aligned = _align_source_image_to_mimics_grid(image[0], input_data)
+    aligned = _apply_source_intensity_transform(aligned, input_data)
     return aligned[None]
 
 
@@ -1486,6 +1523,11 @@ def _apply_scribble_set(
     return accepted > 0
 
 
+def _is_capacity_error(exc: BaseException) -> bool:
+    text = str(exc).lower().replace(" ", "")
+    return "serverisatcapacity" in text or "atcapacity" in text
+
+
 # ---------------------------------------------------------------------------
 #  Main bridge entry point
 # ---------------------------------------------------------------------------
@@ -1497,6 +1539,7 @@ class _BridgeSessionContext:
         context_started = time.time()
         self.input_data = input_data
         self.model_dir = str(input_data["model_dir"])
+        self.runtime_work_dir = input_data.get("runtime_work_dir")
         self.requested_device = str(input_data.get("device", "auto"))
         self.log_path = _bridge_log_path(self.model_dir, input_data.get("log_dir"))
         self.buffer_mapping = input_data.get("buffer_mapping") or {
@@ -1518,6 +1561,7 @@ class _BridgeSessionContext:
             image_source=input_data.get("image_source"),
             image_source_kind=input_data.get("image_source_kind"),
             image_source_index_space=input_data.get("image_source_index_space"),
+            image_source_modality=input_data.get("image_source_modality"),
             image_source_world_coordinate_system=input_data.get("image_source_world_coordinate_system"),
             image_mimics_world_coordinate_system=input_data.get("image_mimics_world_coordinate_system"),
             image_source_to_mimics_world_matrix=input_data.get("image_source_to_mimics_world_matrix"),
@@ -1525,6 +1569,9 @@ class _BridgeSessionContext:
             image_mimics_voxel_to_ras_matrix=input_data.get("image_mimics_voxel_to_ras_matrix"),
             image_mimics_to_source_index_matrix=input_data.get("image_mimics_to_source_index_matrix"),
             image_expected_shape=input_data.get("image_expected_shape"),
+            image_source_intensity_space=input_data.get("image_source_intensity_space"),
+            image_source_to_mimics_gv_slope=input_data.get("image_source_to_mimics_gv_slope"),
+            image_source_to_mimics_gv_intercept=input_data.get("image_source_to_mimics_gv_intercept"),
         )
 
         if input_data.get("image_buffer_shape"):
@@ -1582,8 +1629,9 @@ class _BridgeSessionContext:
                 self.server_url,
                 input_data.get("fold", "auto"),
                 float(input_data.get("gpu_lock_timeout_seconds", 30)),
+                self.runtime_work_dir,
             )
-            self.owned_state_path = _server_state_path(self.model_dir)
+            self.owned_state_path = _server_state_path(self.model_dir, self.runtime_work_dir)
             self.owned_token = server_api_key
         else:
             self.first_call = False
@@ -1592,7 +1640,8 @@ class _BridgeSessionContext:
         if self.owned_state_path is not None and self.owned_token:
             _touch_server_activity(self.owned_state_path, self.owned_token)
         self.session = None
-        try:
+
+        def _connect_and_upload() -> None:
             upload_started = time.time()
             self.session = _connect_remote(
                 self.server_url,
@@ -1610,13 +1659,52 @@ class _BridgeSessionContext:
             self.target = np.zeros(self.image_np.shape[1:], dtype=np.uint8)
             self.session.set_target_buffer(self.target)
             self.set_target_seconds = round(time.time() - target_started, 2)
-        except Exception:
+
+        try:
+            _connect_and_upload()
+        except Exception as exc:
             if self.session is not None:
                 try:
                     self.session.close()
                 except Exception:
                     pass
-            raise
+                self.session = None
+            can_restart_owned_server = (
+                auto_start
+                and self.server_url.startswith("http://127.0.0.1:")
+                and self.owned_state_path is not None
+                and _is_capacity_error(exc)
+            )
+            if not can_restart_owned_server:
+                raise
+            state = _load_server_state(self.owned_state_path)
+            if state:
+                _terminate_owned_server(state)
+                _remove_server_state(self.owned_state_path, str(state.get("ownership_token") or ""))
+            _append_bridge_log(
+                self.log_path,
+                "server_capacity_restart",
+                server_url=self.server_url,
+                error=str(exc),
+            )
+            self.first_call, self.server_url, server_api_key = _ensure_server(
+                self.model_dir,
+                self.device,
+                float(input_data.get("server_idle_timeout_seconds", SERVER_IDLE_TIMEOUT)),
+                float(
+                    input_data.get(
+                        "server_startup_timeout_seconds",
+                        SERVER_STARTUP_TIMEOUT,
+                    )
+                ),
+                SERVER_URL,
+                input_data.get("fold", "auto"),
+                float(input_data.get("gpu_lock_timeout_seconds", 30)),
+                self.runtime_work_dir,
+            )
+            self.owned_state_path = _server_state_path(self.model_dir, self.runtime_work_dir)
+            self.owned_token = server_api_key
+            _connect_and_upload()
         self.initial_platform = self._load_initial_platform(
             input_data.get("initial_seg_path"),
             input_data.get("initial_seg_shape"),
@@ -1637,6 +1725,7 @@ class _BridgeSessionContext:
             server_ready_seconds=self.server_ready_seconds,
             set_image_seconds=self.set_image_seconds,
             set_target_seconds=self.set_target_seconds,
+            image_source_intensity_space=input_data.get("image_source_intensity_space"),
         )
 
     def _load_initial_platform(
@@ -1814,7 +1903,7 @@ class _BridgeSessionContext:
             "device_warning": self.device_warning,
             "server_url": self.server_url,
             "bridge_log": str(self.log_path),
-            "server_log": str(_server_log_path(self.model_dir)),
+            "server_log": str(_server_log_path(self.model_dir, getattr(self, "runtime_work_dir", None))),
             "interaction_count": len(interactions),
             "model_license": getattr(self.session, "license", None),
             "result_shape": list(result_mimics.shape),
@@ -1865,6 +1954,7 @@ def _error_result(
     started: float,
     model_dir: str,
     log_path: Path,
+    runtime_work_dir: str | None = None,
 ) -> dict[str, Any]:
     trace = traceback.format_exc()
     try:
@@ -1884,7 +1974,7 @@ def _error_result(
         "stage": stage,
         "traceback": trace,
         "bridge_log": str(log_path),
-        "server_log": str(_server_log_path(model_dir)),
+        "server_log": str(_server_log_path(model_dir, runtime_work_dir)),
         "python": sys.executable,
         "elapsed_seconds": round(time.time() - started, 2),
     }
@@ -1922,6 +2012,7 @@ def run_bridge(input_data: dict[str, Any]) -> dict[str, Any]:
             started=started,
             model_dir=model_dir,
             log_path=log_path,
+            runtime_work_dir=input_data.get("runtime_work_dir"),
         )
     finally:
         if context is not None:
@@ -1984,7 +2075,7 @@ def _worker_main() -> int:
                     "first_call": context.first_call,
                     "mode": "remote",
                     "bridge_log": str(context.log_path),
-                    "server_log": str(_server_log_path(model_dir)),
+                    "server_log": str(_server_log_path(model_dir, request.get("runtime_work_dir"))),
                 }
             elif action == "predict":
                 if context is None:
@@ -2012,6 +2103,7 @@ def _worker_main() -> int:
                 started=started,
                 model_dir=model_dir,
                 log_path=log_path,
+                runtime_work_dir=request.get("runtime_work_dir"),
             )
             print(json.dumps(result, separators=(",", ":")), flush=True)
             # Fatal errors (OOM, model corruption, server death) cannot be
@@ -2069,7 +2161,7 @@ def _async_worker_main(job_dir_value: str) -> int:
             server_url=context.server_url,
             first_call=context.first_call,
             bridge_log=str(context.log_path),
-            server_log=str(_server_log_path(context.model_dir)),
+            server_log=str(_server_log_path(context.model_dir, context.runtime_work_dir)),
         )
         last_activity = time.time()
         parent_pid = int(request.get("parent_pid", 0) or 0)
@@ -2131,6 +2223,7 @@ def _async_worker_main(job_dir_value: str) -> int:
                         started=time.time(),
                         model_dir=context.model_dir,
                         log_path=context.log_path,
+                        runtime_work_dir=context.runtime_work_dir,
                     )
                     result["sequence"] = sequence
                     result["command_id"] = command.get("command_id")

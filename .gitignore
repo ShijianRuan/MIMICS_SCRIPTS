@@ -13,3 +13,6 @@ logs/
 __pycache__/
 *.pyc
 *.pyo
+
+# PyQt5 wheels (platform-specific, downloaded separately)
+tools/pyqt5_wheels/

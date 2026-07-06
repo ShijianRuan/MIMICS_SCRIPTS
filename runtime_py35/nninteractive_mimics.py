@@ -61,6 +61,7 @@ SOURCE_IMAGE_PATH_METADATA = "mimics_script.source_image_path"
 SOURCE_IMAGE_KIND_METADATA = "mimics_script.source_image_kind"
 SOURCE_IMAGE_SHAPE_METADATA = "mimics_script.source_image_shape"
 SOURCE_IMAGE_INDEX_SPACE_METADATA = "mimics_script.source_image_index_space"
+SOURCE_IMAGE_MODALITY_METADATA = "mimics_script.source_image_modality"
 SOURCE_WORLD_COORDINATE_SYSTEM_METADATA = "mimics_script.source_world_coordinate_system"
 MIMICS_WORLD_COORDINATE_SYSTEM_METADATA = "mimics_script.mimics_world_coordinate_system"
 SOURCE_TO_MIMICS_WORLD_MATRIX_METADATA = "mimics_script.source_to_mimics_world_matrix"
@@ -189,8 +190,24 @@ def _model_folds(model_dir):
     return result
 
 
-def _runtime_log_path(model_dir):
-    log_dir = os.path.join(os.path.dirname(model_dir), "logs")
+def _runtime_work_dir(config=None, model_dir=None):
+    config = config or {}
+    configured = (
+        os.environ.get("NNINTERACTIVE_RUNTIME_DIR", "")
+        or config.get("runtime_work_dir", "")
+        or config.get("work_dir", "")
+    )
+    if configured:
+        root = os.path.abspath(os.path.expandvars(os.path.expanduser(str(configured))))
+    else:
+        root = os.path.join(_project_root(), ".mimics_runtime", "nninteractive")
+    if not os.path.isdir(root):
+        os.makedirs(root)
+    return root
+
+
+def _runtime_log_path(model_dir, config=None):
+    log_dir = os.path.join(_runtime_work_dir(config, model_dir), "logs")
     if not os.path.isdir(log_dir):
         os.makedirs(log_dir)
     return os.path.join(log_dir, "nninteractive_mimics.log")
@@ -334,6 +351,9 @@ def _server_state_candidates():
         config = {}
     root = _project_root()
     environment_root = _environment_root()
+    runtime_dir = _runtime_work_dir(config)
+    runtime_state = os.path.join(runtime_dir, ".nninteractive_server.json")
+    candidates.append(runtime_state)
     model_dirs = [
         os.environ.get("NNINTERACTIVE_MODEL_DIR", ""),
         config.get("model_dir", ""),
@@ -745,11 +765,42 @@ def _matrix_close(value, expected, tolerance=1.0e-6):
     return True
 
 
+def _hu_to_mimics_gv_transform():
+    try:
+        gv0 = float(mimics.segment.HU2GV(0))
+        gv1 = float(mimics.segment.HU2GV(1))
+        slope = gv1 - gv0
+        if abs(slope) <= 1.0e-12:
+            return None
+        return slope, gv0
+    except Exception:
+        return None
+
+
+def _source_uses_hu_to_gv(kind, modality):
+    modality_text = str(modality or "").strip().upper()
+    if str(kind or "").lower() == "nifti":
+        # The current NIfTI import path writes a derived CT DICOM series for Mimics.
+        return True
+    if not modality_text:
+        # Backward compatibility for projects created before source modality was stored.
+        return True
+    return modality_text == "CT"
+
+
 def _source_image_export(image, config):
-    if not bool(config.get("prefer_source_image_for_nninteractive", True)):
+    image_input_mode = str(config.get("image_input_mode", "") or "").strip().lower()
+    force_source = image_input_mode in ("source", "source_image", "original", "original_image")
+    force_mimics_buffer = image_input_mode in ("mimics", "mimics_buffer", "buffer")
+    if force_mimics_buffer or (not force_source and not bool(config.get("prefer_source_image_for_nninteractive", False))):
+        _mimics_log(
+            logging.INFO,
+            "nnInteractive image input mode: Mimics buffer. Source-image fast path is disabled by configuration.",
+        )
         return None
     path = _metadata_get(image, SOURCE_IMAGE_PATH_METADATA, "")
     kind = str(_metadata_get(image, SOURCE_IMAGE_KIND_METADATA, "") or "").lower()
+    modality = str(_metadata_get(image, SOURCE_IMAGE_MODALITY_METADATA, "") or "").upper()
     index_space = str(_metadata_get(image, SOURCE_IMAGE_INDEX_SPACE_METADATA, "") or "")
     source_world = str(_metadata_get(image, SOURCE_WORLD_COORDINATE_SYSTEM_METADATA, "") or "").lower()
     mimics_world = str(_metadata_get(image, MIMICS_WORLD_COORDINATE_SYSTEM_METADATA, "") or "").lower()
@@ -804,6 +855,42 @@ def _source_image_export(image, config):
             "nnInteractive source DICOM metadata points to a missing folder; falling back to Mimics image buffer export: {0}".format(path),
         )
         return None
+    if is_nifti:
+        try:
+            with open(path, "rb") as _test:
+                pass
+        except (IOError, OSError) as exc:
+            _mimics_log(
+                logging.WARNING,
+                "nnInteractive source image file cannot be read (may be locked by antivirus or another process); falling back to Mimics image buffer export: {0}. Error: {1}".format(
+                    path,
+                    exc,
+                ),
+            )
+            return None
+    if _source_uses_hu_to_gv(kind, modality):
+        intensity_transform = _hu_to_mimics_gv_transform()
+        if intensity_transform is None and not force_source:
+            _mimics_log(
+                logging.WARNING,
+                "nnInteractive source-image fast path skipped because Mimics HU2GV conversion is unavailable. Falling back to Mimics image buffer export.",
+            )
+            return None
+        if intensity_transform is None and force_source:
+            intensity_slope = 1.0
+            intensity_intercept = 0.0
+            intensity_space = "source_values"
+            _mimics_log(
+                logging.WARNING,
+                "nnInteractive source image was forced, but Mimics HU2GV conversion is unavailable. Source intensity values will be used unchanged.",
+            )
+        else:
+            intensity_slope, intensity_intercept = intensity_transform
+            intensity_space = "hu_to_mimics_gv"
+    else:
+        intensity_slope = 1.0
+        intensity_intercept = 0.0
+        intensity_space = "source_values"
     shape = _image_shape(image)
     recorded_shape = _parse_shape_metadata(_metadata_get(image, SOURCE_IMAGE_SHAPE_METADATA, ""))
     if recorded_shape is not None and recorded_shape != shape:
@@ -818,8 +905,11 @@ def _source_image_export(image, config):
     source_name = "source_nifti_metadata" if is_nifti else "source_dicom_metadata"
     _mimics_log(
         logging.INFO,
-        "nnInteractive will read the source image in the external Python worker; Mimics image buffer export is skipped. Source: {0}.".format(
-            "NIfTI" if is_nifti else "DICOM"
+        "nnInteractive image input mode: source image. Mimics image buffer export is skipped. Source: {0}; modality: {1}; intensity: {2}; path: {3}.".format(
+            "NIfTI" if is_nifti else "DICOM",
+            modality or "?",
+            intensity_space,
+            path,
         ),
     )
     return {
@@ -832,12 +922,16 @@ def _source_image_export(image, config):
         "source": source_name,
         "source_kind": "nifti" if is_nifti else "dicom_folder",
         "source_index_space": index_space,
+        "source_modality": modality,
         "source_world_coordinate_system": source_world,
         "mimics_world_coordinate_system": mimics_world,
         "source_to_mimics_world_matrix": source_to_mimics_world,
         "source_voxel_to_ras_matrix": source_voxel_to_ras,
         "mimics_voxel_to_ras_matrix": mimics_voxel_to_ras,
         "mimics_to_source_index_matrix": mimics_to_source_index,
+        "source_intensity_space": intensity_space,
+        "source_to_mimics_gv_slope": float(intensity_slope),
+        "source_to_mimics_gv_intercept": float(intensity_intercept),
     }
 
 
@@ -1489,7 +1583,8 @@ def _capture_prompt(kind, image, include, temp_dir, _visual_objects=None):
 
 def _bridge_parameters(config, image_export, base_export):
     python_exe, bridge_script, model_dir, probe, folds = _runtime_paths(config)
-    runtime_log = _runtime_log_path(model_dir)
+    runtime_dir = _runtime_work_dir(config, model_dir)
+    runtime_log = _runtime_log_path(model_dir, config)
     requested_device = os.environ.get(
         "NNINTERACTIVE_DEVICE",
         config.get("device", "auto"),
@@ -1532,6 +1627,7 @@ def _bridge_parameters(config, image_export, base_export):
         "prediction_timeout_seconds": prediction_timeout,
         "set_image_timeout_seconds": set_image_timeout,
         "log_dir": os.path.dirname(runtime_log),
+        "runtime_work_dir": runtime_dir,
         "server_idle_timeout_seconds": int(
             os.environ.get(
                 "NNINTERACTIVE_SERVER_IDLE_TIMEOUT",
@@ -1555,12 +1651,16 @@ def _bridge_parameters(config, image_export, base_export):
         request["image_source"] = image_export.get("source", "source_image")
         request["image_source_kind"] = image_export.get("source_kind", "")
         request["image_source_index_space"] = image_export.get("source_index_space", "")
+        request["image_source_modality"] = image_export.get("source_modality", "")
         request["image_source_world_coordinate_system"] = image_export.get("source_world_coordinate_system", "")
         request["image_mimics_world_coordinate_system"] = image_export.get("mimics_world_coordinate_system", "")
         request["image_source_to_mimics_world_matrix"] = image_export.get("source_to_mimics_world_matrix", "")
         request["image_source_voxel_to_ras_matrix"] = image_export.get("source_voxel_to_ras_matrix", "")
         request["image_mimics_voxel_to_ras_matrix"] = image_export.get("mimics_voxel_to_ras_matrix", "")
         request["image_mimics_to_source_index_matrix"] = image_export.get("mimics_to_source_index_matrix", "")
+        request["image_source_intensity_space"] = image_export.get("source_intensity_space", "")
+        request["image_source_to_mimics_gv_slope"] = image_export.get("source_to_mimics_gv_slope")
+        request["image_source_to_mimics_gv_intercept"] = image_export.get("source_to_mimics_gv_intercept")
     else:
         request["image_buffer_path"] = image_export["path"]
         request["image_buffer_shape"] = image_export["shape"]
@@ -2185,9 +2285,13 @@ def _get_or_start_image_worker(config, image, jobs_root, allow_buffer_export=Tru
         "image_source": image_export.get("source", "mimics_buffer"),
         "image_source_kind": image_export.get("source_kind", ""),
         "image_source_index_space": image_export.get("source_index_space", ""),
+        "image_source_modality": image_export.get("source_modality", ""),
         "image_source_world_coordinate_system": image_export.get("source_world_coordinate_system", ""),
         "image_mimics_world_coordinate_system": image_export.get("mimics_world_coordinate_system", ""),
         "image_mimics_to_source_index_matrix": image_export.get("mimics_to_source_index_matrix", ""),
+        "image_source_intensity_space": image_export.get("source_intensity_space", ""),
+        "image_source_to_mimics_gv_slope": image_export.get("source_to_mimics_gv_slope"),
+        "image_source_to_mimics_gv_intercept": image_export.get("source_to_mimics_gv_intercept"),
         "python": python_exe,
         "python_version": probe.get("version"),
         "folds": folds,
@@ -2207,9 +2311,13 @@ def _get_or_start_image_worker(config, image, jobs_root, allow_buffer_export=Tru
             "image_source": worker.get("image_source", "mimics_buffer"),
             "image_source_kind": worker.get("image_source_kind", ""),
             "image_source_index_space": worker.get("image_source_index_space", ""),
+            "image_source_modality": worker.get("image_source_modality", ""),
             "image_source_world_coordinate_system": worker.get("image_source_world_coordinate_system", ""),
             "image_mimics_world_coordinate_system": worker.get("image_mimics_world_coordinate_system", ""),
             "image_mimics_to_source_index_matrix": worker.get("image_mimics_to_source_index_matrix", ""),
+            "image_source_intensity_space": worker.get("image_source_intensity_space", ""),
+            "image_source_to_mimics_gv_slope": worker.get("image_source_to_mimics_gv_slope"),
+            "image_source_to_mimics_gv_intercept": worker.get("image_source_to_mimics_gv_intercept"),
             "idle_timeout_seconds": initialize["async_worker_idle_timeout_seconds"],
         },
     )
@@ -2227,7 +2335,7 @@ def _prewarm_async_image_worker(config, image):
     if not bool(config.get("async_reuse_image_worker", True)):
         return None
     python_exe, bridge_script, model_dir, probe, folds = _runtime_paths(config)
-    jobs_root = os.path.join(os.path.dirname(model_dir), "async_jobs")
+    jobs_root = os.path.join(_runtime_work_dir(config, model_dir), "async_jobs")
     if not os.path.isdir(jobs_root):
         os.makedirs(jobs_root)
     _cleanup_async_jobs(jobs_root, config.get("async_job_retention_days", 7))
@@ -2249,7 +2357,7 @@ def _start_async_job(config, image, target):
         folds = shared_worker.get("folds")
     else:
         python_exe, bridge_script, model_dir, probe, folds = _runtime_paths(config)
-        jobs_root = os.path.join(os.path.dirname(model_dir), "async_jobs")
+        jobs_root = os.path.join(_runtime_work_dir(config, model_dir), "async_jobs")
     if not os.path.isdir(jobs_root):
         os.makedirs(jobs_root)
     _cleanup_async_jobs(jobs_root, config.get("async_job_retention_days", 7))

@@ -248,6 +248,46 @@ def cmd_export_labels(args):
     return 0
 
 
+def _runtime_owned_roots():
+    result = []
+    payload = {}
+    try:
+        payload = json.loads(BACKGROUND_MIMICS_LOCK_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        payload = {}
+    details = payload.get("details") or {}
+    output_dir = details.get("output_dir")
+    if output_dir:
+        result.append(Path(output_dir))
+    ts_root = details.get("ts_root")
+    if ts_root:
+        ts_root_path = Path(ts_root)
+        result.append(ts_root_path)
+        result.append(ts_root_path / "mcs_output")
+    registry = ROOT / ".mimics_runtime" / "mcs_queues"
+    if registry.is_dir():
+        for path in registry.glob("*.json"):
+            try:
+                row = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            output_dir = row.get("output_dir")
+            if output_dir:
+                result.append(Path(output_dir))
+    unique = []
+    seen = set()
+    for path in result:
+        try:
+            normalized = str(path.resolve())
+        except Exception:
+            normalized = str(path)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        unique.append(normalized)
+    return unique
+
+
 def cmd_kill_background(args):
     if os.name != "nt":
         print("Process cleanup is implemented for Windows Mimics workstations.")
@@ -270,26 +310,31 @@ def cmd_kill_background(args):
         str(ROOT / "tools"),
         str(ROOT / "runtime_py35"),
     ]
+    owned_roots.extend(_runtime_owned_roots())
     ps_roots = "@(" + ",".join("'{}'".format(str(r).replace("'", "''")) for r in owned_roots) + ")"
+    lock_paths = [str(BACKGROUND_MIMICS_LOCK_PATH), str(RESOURCE_LOCK_DIR / "gpu.lock")]
+    ps_locks = "@(" + ",".join("'{}'".format(str(r).replace("'", "''")) for r in lock_paths) + ")"
+    stop_log = ROOT / ".mimics_runtime" / "stop_background_last.json"
+    stop_log.parent.mkdir(parents=True, exist_ok=True)
     command = (
         "$markers={};"
         "$roots={};"
-        "Get-CimInstance Win32_Process | Where-Object {{"
+        "$locks={};"
+        "$out='{}';"
+        "$matched=Get-CimInstance Win32_Process | Where-Object {{"
         "$cmd=$_.CommandLine; "
         "$cmd -and "
         "($roots | Where-Object {{ $cmd -like ('*' + $_ + '*') }}) -and "
         "($markers | Where-Object {{ $cmd -like ('*' + $_ + '*') }})"
-        "}} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}"
-    ).format(ps_markers, ps_roots)
+        "}};"
+        "$records=@($matched | Select-Object ProcessId,Name,CommandLine);"
+        "$records | ConvertTo-Json -Depth 3 -Compress | Set-Content -Path $out -Encoding UTF8;"
+        "$matched | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }};"
+        "Start-Sleep -Milliseconds 500;"
+        "$locks | ForEach-Object {{ Remove-Item -Path $_ -Force -ErrorAction SilentlyContinue }}"
+    ).format(ps_markers, ps_roots, ps_locks, str(stop_log).replace("'", "''"))
     subprocess.Popen(["powershell", "-NoProfile", "-Command", command], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    for lock_path in (BACKGROUND_MIMICS_LOCK_PATH, RESOURCE_LOCK_DIR / "gpu.lock"):
-        try:
-            lock_path.unlink()
-        except FileNotFoundError:
-            pass
-        except Exception:
-            pass
-    print("Stop request submitted for integration background processes.")
+    print("Stop request submitted for integration background processes. Details: {}".format(stop_log))
     return 0
 
 

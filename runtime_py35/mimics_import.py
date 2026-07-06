@@ -20,6 +20,7 @@ from __future__ import print_function
 import json
 import logging
 import os
+import hashlib
 import shutil
 import subprocess
 import sys
@@ -42,6 +43,7 @@ _BG_MIMICS_BUSY_NOTICE_AT = 0.0
 _BG_MIMICS_RETRY_ACTIVE = False
 _MCS_QUEUE_ACTIVE = "_mcs_queue_active.json"
 _MCS_QUEUE_DONE = "_mcs_queue_done.json"
+_MCS_QUEUE_STOP = "_mcs_queue_stop.json"
 _LOG_ROTATE_BYTES = 5 * 1024 * 1024
 _LOG_ROTATE_BACKUPS = 3
 
@@ -60,8 +62,9 @@ _background_process_kwargs = runtime_common.background_process_kwargs
 def _mimics_log(level, message):
     try:
         mimics.logging.log_user_message(level=level, message=message)
+        return True
     except Exception:
-        pass
+        return False
 
 
 def _rotate_log_file(path, max_bytes=_LOG_ROTATE_BYTES, backups=_LOG_ROTATE_BACKUPS):
@@ -87,12 +90,13 @@ def _rotate_log_file(path, max_bytes=_LOG_ROTATE_BYTES, backups=_LOG_ROTATE_BACK
 
 def _append_import_log(root_dir, message):
     text = "[{0}] {1}".format(time.strftime("%Y-%m-%d %H:%M:%S"), message)
-    print(text)
-    _mimics_log(logging.INFO, text)
+    logged_to_mimics = _mimics_log(logging.INFO, text)
+    if not logged_to_mimics:
+        print(text)
     try:
         if root_dir and not os.path.isdir(root_dir):
             os.makedirs(root_dir)
-        path = os.path.join(root_dir or os.getcwd(), "mimics_import.log")
+        path = os.path.join(root_dir or os.getcwd(), "logs", "mimics_import.log")
         _rotate_log_file(path)
         with open(path, "a") as f:
             f.write(text + "\n")
@@ -108,13 +112,48 @@ def _queue_done_path(output_dir):
     return os.path.join(output_dir, _MCS_QUEUE_DONE)
 
 
+def _queue_stop_path(output_dir):
+    return os.path.join(output_dir, _MCS_QUEUE_STOP)
+
+
+def _mcs_queue_registry_dir():
+    return os.path.join(_project_root(), ".mimics_runtime", "mcs_queues")
+
+
+def _register_mcs_queue(output_dir, total_count=0):
+    try:
+        registry_dir = _mcs_queue_registry_dir()
+        if not os.path.isdir(registry_dir):
+            os.makedirs(registry_dir)
+        digest = hashlib.sha1(os.path.abspath(output_dir).encode("utf-8", "replace")).hexdigest()[:16]
+        base = _safe_case_filename(os.path.basename(os.path.abspath(output_dir))).strip("._") or "queue"
+        name = "{0}_{1}".format(base, digest)
+        path = os.path.join(registry_dir, name + ".json")
+        _write_json_atomic(
+            path,
+            {
+                "output_dir": os.path.abspath(output_dir),
+                "total_count": int(total_count or 0),
+                "updated_at_epoch": time.time(),
+            },
+        )
+    except Exception:
+        pass
+
+
 def _mark_mcs_queue_active(output_dir, total_count=0):
     if not os.path.isdir(output_dir):
         os.makedirs(output_dir)
     done_path = _queue_done_path(output_dir)
+    stop_path = _queue_stop_path(output_dir)
     try:
         if os.path.isfile(done_path):
             os.remove(done_path)
+    except Exception:
+        pass
+    try:
+        if os.path.isfile(stop_path):
+            os.remove(stop_path)
     except Exception:
         pass
     _write_json_atomic(
@@ -125,6 +164,7 @@ def _mark_mcs_queue_active(output_dir, total_count=0):
             "updated_at_epoch": time.time(),
         },
     )
+    _register_mcs_queue(output_dir, total_count)
 
 
 def _mark_mcs_queue_done(output_dir, completed=0, failed=0):
@@ -145,6 +185,19 @@ def _mark_mcs_queue_done(output_dir, completed=0, failed=0):
             os.remove(active)
     except Exception:
         pass
+    _register_mcs_queue(output_dir, completed + failed)
+
+
+def _background_stop_requested(output_dir, since_epoch=0.0):
+    try:
+        stop_path = _queue_stop_path(output_dir)
+        if not os.path.isfile(stop_path):
+            return False
+        if since_epoch and os.path.getmtime(stop_path) < float(since_epoch):
+            return False
+        return True
+    except Exception:
+        return False
 
 
 def _save_prepare_manifest(work_dir, result, output_mcs=None):
@@ -1202,6 +1255,9 @@ def _ensure_bg_mimics_running(output_dir, total_count=0, mark_active=True):
     global _BG_MIMICS_PID
     if mark_active:
         _mark_mcs_queue_active(output_dir, total_count)
+    if _background_stop_requested(output_dir):
+        _append_import_log(output_dir, "Background .mcs creation is stopped by user request.")
+        return
     # Check if existing background Mimics is still alive
     if _BG_MIMICS_PID and _is_pid_alive(_BG_MIMICS_PID):
         return  # still running, it will pick up new manifests
@@ -1218,10 +1274,14 @@ def _schedule_bg_mimics_retry(output_dir, total_count=0):
 
     def _retry():
         global _BG_MIMICS_RETRY_ACTIVE
+        retry_started = time.time()
         deadline = time.time() + 21600.0
         try:
             while time.time() < deadline:
                 time.sleep(30.0)
+                if _background_stop_requested(output_dir, retry_started):
+                    _append_import_log(output_dir, "Background Mimics retry stopped by user request.")
+                    return
                 if _BG_MIMICS_PID and _is_pid_alive(_BG_MIMICS_PID):
                     return
                 process = _launch_background_mimics(
@@ -1248,6 +1308,9 @@ def _launch_background_mimics(output_dir, total_count=0, schedule_retry=True):
     """
     global _BG_MIMICS_PID
     global _BG_MIMICS_BUSY_NOTICE_AT
+    if _background_stop_requested(output_dir):
+        _append_import_log(output_dir, "Background .mcs creation was not started because stop was requested.")
+        return None
     mimics_exe = _find_mimics_exe()
     if not mimics_exe:
         _append_import_log(output_dir, "MimicsResearch.exe was not found; background .mcs creation cannot start.")

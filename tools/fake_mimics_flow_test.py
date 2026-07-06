@@ -181,12 +181,20 @@ class FakeImage:
         self.logical_dimensions = list(self._buffer.shape)
         self.minimum_value = minimum_value
         self.maximum_value = maximum_value
+        self._contrast_minimum_value = minimum_value
+        self._contrast_maximum_value = maximum_value
         self.name = name
         self.guid = uuid.uuid4().hex
         self.metadata = FakeMetadata()
 
     def get_voxel_buffer(self):
         return self._buffer
+
+    def get_image_information(self):
+        return SimpleNamespace(
+            minimum_value=getattr(self, "minimum_value", None),
+            maximum_value=getattr(self, "maximum_value", None),
+        )
 
 
 class FakeMask:
@@ -284,10 +292,12 @@ class FakeView:
     def set_contrast(self, low, high):
         image = self.fake.data.images.get_active()
         if image is not None:
-            minimum = float(getattr(image, "minimum_value", -1e9))
-            maximum = float(getattr(image, "maximum_value", 1e9))
+            minimum = float(getattr(image, "_contrast_minimum_value", getattr(image, "minimum_value", -1e9)))
+            maximum = float(getattr(image, "_contrast_maximum_value", getattr(image, "maximum_value", 1e9)))
             if float(low[0]) < minimum or float(high[0]) > maximum:
-                raise ValueError("contrast point outside fake image range")
+                if float(high[0]) > maximum:
+                    raise ValueError("Upper contrast point should be in range from {0} to {1}".format(int(minimum), int(maximum)))
+                raise ValueError("Lower contrast point should be in range from {0} to {1}".format(int(minimum), int(maximum)))
             if float(high[0]) <= float(low[0]):
                 raise ValueError("upper contrast point must be greater than lower")
         self.contrast = (tuple(low), tuple(high))
@@ -456,7 +466,12 @@ def test_window_level_from_selected_mask(fake, tmp):
     assert_equal(state.get("last_preset"), "Abdomen / Soft Tissue", "selected mask preset")
     module.undo_last()
     assert_equal(fake.view.get_contrast(), ((0.0, 0.0), (2026.0, 1.0)), "undo restored previous contrast")
-    return "mask-name preset, image-range clamp, state save, and undo passed"
+
+    image = fake.reset_scene(image_shape=(3, 4, 5), minimum_value=0, maximum_value=4095)
+    image._contrast_maximum_value = 3625
+    module.reset_full_range()
+    assert_equal(fake.view.get_contrast(), ((0, 0.0), (3625, 1.0)), "reset should clamp to Mimics reported range")
+    return "mask-name preset, image-range clamp, reset retry, state save, and undo passed"
 
 
 def test_export_masks_to_buffers(fake, tmp):
@@ -490,17 +505,36 @@ def test_nninteractive_fast_path_and_mask_buffer(fake, tmp):
     image.metadata.set(module.SOURCE_IMAGE_KIND_METADATA, "nifti")
     image.metadata.set(module.SOURCE_IMAGE_SHAPE_METADATA, json.dumps([2, 3, 4]))
     image.metadata.set(module.SOURCE_IMAGE_INDEX_SPACE_METADATA, "nifti_ijk_matches_derived_dicom_columns_rows_slices_v1")
+    image.metadata.set(module.SOURCE_IMAGE_MODALITY_METADATA, "CT")
     image.metadata.set(module.SOURCE_WORLD_COORDINATE_SYSTEM_METADATA, "ras")
     image.metadata.set(module.MIMICS_WORLD_COORDINATE_SYSTEM_METADATA, "lps")
     image.metadata.set(module.SOURCE_TO_MIMICS_WORLD_MATRIX_METADATA, json.dumps(ras_to_lps))
     image.metadata.set(module.SOURCE_VOXEL_TO_RAS_MATRIX_METADATA, json.dumps(identity))
     image.metadata.set(module.MIMICS_VOXEL_TO_RAS_MATRIX_METADATA, json.dumps(identity))
     image.metadata.set(module.MIMICS_TO_SOURCE_INDEX_MATRIX_METADATA, json.dumps(identity))
-    exported = module._source_image_export(image, {})
+    exported = module._source_image_export(image, {"image_input_mode": "source_image"})
     assert_true(exported is not None, "source-image fast path was not selected")
     assert_equal(exported["kind"], "source_image", "source export kind")
     assert_equal(exported["path"], "", "source fast path should not export a Mimics buffer")
     assert_equal(exported["image_path"], str(source_path), "source image path")
+    assert_equal(exported["source_intensity_space"], "hu_to_mimics_gv", "source intensity conversion")
+    assert_equal(exported["source_to_mimics_gv_slope"], 1.0, "source intensity slope")
+    assert_equal(exported["source_to_mimics_gv_intercept"], 0.0, "source intensity intercept")
+
+    dicom_dir = tmp / "dicom_source"
+    dicom_dir.mkdir()
+    image.metadata.set(module.SOURCE_IMAGE_PATH_METADATA, str(dicom_dir))
+    image.metadata.set(module.SOURCE_IMAGE_KIND_METADATA, "dicom_folder")
+    image.metadata.set(module.SOURCE_IMAGE_INDEX_SPACE_METADATA, "dicom_columns_rows_slices_sorted_by_position_v1")
+    image.metadata.set(module.SOURCE_IMAGE_MODALITY_METADATA, "MR")
+    image.metadata.set(module.SOURCE_WORLD_COORDINATE_SYSTEM_METADATA, "lps")
+    image.metadata.set(module.MIMICS_WORLD_COORDINATE_SYSTEM_METADATA, "lps")
+    image.metadata.set(module.SOURCE_TO_MIMICS_WORLD_MATRIX_METADATA, json.dumps(identity))
+    image.metadata.set(module.SOURCE_VOXEL_TO_RAS_MATRIX_METADATA, json.dumps(identity))
+    image.metadata.set(module.MIMICS_VOXEL_TO_RAS_MATRIX_METADATA, json.dumps(identity))
+    exported_mr = module._source_image_export(image, {"image_input_mode": "source_image"})
+    assert_equal(exported_mr["source_modality"], "MR", "source modality metadata")
+    assert_equal(exported_mr["source_intensity_space"], "source_values", "MR source should not use HU-to-GV")
 
     empty = FakeMask("empty", image=image, array=_u8_buffer((2, 3, 4), 0))
     empty_export = module._export_mask(empty, str(tmp / "empty.u8"), shape_hint=[2, 3, 4])
@@ -603,6 +637,37 @@ def test_fewshot_apply_prediction_and_stop(fake, tmp):
     return "prediction apply and stop-latest-job flow passed"
 
 
+def test_fewshot_profile_selector(fake, tmp):
+    fake.reset_scene(image_shape=(2, 2, 2), minimum_value=0, maximum_value=100)
+    module = import_runtime_module("fewshot_mimics")
+    config = {
+        "default_training_profile": "balanced",
+        "training_profiles": {
+            "balanced": {
+                "epochs": 10,
+                "finetune_method": "lora",
+                "batch_size": 1,
+                "img_size": "224,224",
+                "val_fraction": 0.2,
+            },
+            "quality_lora": {
+                "epochs": 20,
+                "finetune_method": "lora",
+                "batch_size": 1,
+                "img_size": "256,256",
+                "val_fraction": 0.25,
+            },
+        },
+    }
+    fake.dialogs.question_answers.append("quality_lora")
+    options = module._profile_training_options(config)
+    assert_equal(options.get("epochs"), 20, "selected profile epochs")
+    assert_equal(options.get("img_size"), "256,256", "selected profile image size")
+    assert_true(fake.dialogs.questions, "profile selector did not ask the user")
+    assert_true("quality_lora" in fake.dialogs.questions[-1]["buttons"], "profile button missing")
+    return "DINOv3 profile selector returned the chosen training profile without PyQt5"
+
+
 def test_stop_background_locks(fake, tmp):
     module = import_runtime_module("mimics_stop_background")
     module._project_root = lambda: str(tmp)
@@ -610,6 +675,16 @@ def test_stop_background_locks(fake, tmp):
     lock_dir.mkdir(parents=True, exist_ok=True)
     for name in ("gpu.lock", "background_mimics.lock"):
         (lock_dir / name).write_text("{}", encoding="utf-8")
+    output_dir = tmp / "mcs_output"
+    output_dir.mkdir()
+    (output_dir / "_mcs_queue_active.json").write_text("{}", encoding="utf-8")
+    registry = tmp / ".mimics_runtime" / "mcs_queues"
+    registry.mkdir(parents=True, exist_ok=True)
+    (registry / "queue.json").write_text(json.dumps({"output_dir": str(output_dir)}), encoding="utf-8")
+    stopped = module._request_queue_stop()
+    assert_true(str(output_dir) in stopped, "queue stop marker did not report output dir")
+    assert_true((output_dir / "_mcs_queue_stop.json").is_file(), "queue stop marker missing")
+    assert_true(not (output_dir / "_mcs_queue_active.json").exists(), "queue active marker was not cleared")
     module._clear_resource_locks()
     assert_true(not (lock_dir / "gpu.lock").exists(), "gpu lock was not cleared")
     assert_true(not (lock_dir / "background_mimics.lock").exists(), "background Mimics lock was not cleared")
@@ -649,6 +724,7 @@ def main(argv=None):
         tests.append(("nnInteractive Mimics-side buffer flow", lambda: test_nninteractive_fast_path_and_mask_buffer(fake, tmp / "nninteractive")))
     if args.only in ("fewshot", "all"):
         tests.append(("DINOv3 few-shot Mimics-side flow", lambda: test_fewshot_apply_prediction_and_stop(fake, tmp / "fewshot")))
+        tests.append(("DINOv3 few-shot profile selector", lambda: test_fewshot_profile_selector(fake, tmp / "fewshot_profile")))
     if args.only in ("stop", "all"):
         tests.append(("Stop Background Services lock cleanup", lambda: test_stop_background_locks(fake, tmp / "stop")))
     for name, func in tests:
