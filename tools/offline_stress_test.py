@@ -541,7 +541,14 @@ def test_nninteractive_mapping_and_resampling(tmp: Path) -> str:
         },
     )
     assert_true(np.array_equal(transformed, data + 1024.0), "source HU-to-GV transform was not applied")
-    return "all axis permutations/flips roundtrip; affine mirror resampling and source intensity transform match expected grid"
+
+    import mimics_bridge
+    mask = np.zeros((3, 4, 2), dtype=np.uint8)
+    mask[2, 3, 0] = 1
+    target_grid = mimics_bridge.resample_mask_to_image_grid(mask, source, (3, 4, 2), mimics)
+    assert_equal(int(target_grid[0, 0, 0]), 1, "mask affine mirror did not land on target Mimics grid")
+    assert_equal(int(target_grid.sum()), 1, "mask resampling changed foreground voxel count")
+    return "all axis permutations/flips roundtrip; image and mask affine mirror resampling match expected Mimics grid"
 
 
 def test_nninteractive_incremental_replay(tmp: Path) -> str:

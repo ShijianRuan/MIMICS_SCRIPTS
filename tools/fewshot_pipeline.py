@@ -666,6 +666,7 @@ def write_training_config(path, base_config, dataset_dir, exp_name, args, status
             "runtime:",
             "  status_path: " + yaml_scalar(str(status_path or "")),
             "  cancel_path: " + yaml_scalar(str(cancel_path or "")),
+            "  status_interval_seconds: 2.0",
             "",
         ])
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -804,6 +805,37 @@ def global_model_rows(organ=None):
         rows.append(row)
     rows.sort(key=lambda item: float(item.get("created_at_epoch", 0.0) or 0.0), reverse=True)
     return rows
+
+
+def training_progress_line(progress):
+    if not isinstance(progress, dict):
+        return ""
+    if progress.get("latest_epoch_line"):
+        return str(progress.get("latest_epoch_line"))
+    parts = []
+    if progress.get("epoch") is not None and progress.get("epochs") is not None:
+        parts.append("epoch {}/{}".format(progress.get("epoch"), progress.get("epochs")))
+    if progress.get("phase"):
+        parts.append(str(progress.get("phase")))
+    if progress.get("batch") is not None and progress.get("batches") is not None:
+        parts.append("batch {}/{}".format(progress.get("batch"), progress.get("batches")))
+    metrics = progress.get("metrics") or {}
+    if metrics.get("loss") is not None:
+        try:
+            parts.append("loss {:.4f}".format(float(metrics.get("loss"))))
+        except Exception:
+            parts.append("loss {}".format(metrics.get("loss")))
+    if metrics.get("mean_dsc") is not None:
+        try:
+            parts.append("val_dice {:.4f}".format(float(metrics.get("mean_dsc"))))
+        except Exception:
+            parts.append("val_dice {}".format(metrics.get("mean_dsc")))
+    if progress.get("lr") is not None:
+        try:
+            parts.append("lr {:.2e}".format(float(progress.get("lr"))))
+        except Exception:
+            pass
+    return ", ".join(parts)
 
 
 def cmd_train(args):
@@ -952,11 +984,16 @@ def cmd_train(args):
                 gpu_lock.update_pid(proc.pid, kind="fewshot_train", job_id=run_id)
             update_status(status_path, {"pid": proc.pid, "command": cmd})
             cancel_started = None
+            last_progress_line = ""
             while proc.poll() is None:
                 progress = read_json(train_status, {}) or {}
                 payload = {"status": "training", "pid": proc.pid}
                 if progress:
                     payload["training_progress"] = progress
+                    progress_line = training_progress_line(progress)
+                    if progress_line and progress_line != last_progress_line:
+                        append_log(workspace, "Training progress: {}".format(progress_line))
+                        last_progress_line = progress_line
                 if cancel_path.is_file():
                     payload["status"] = "cancelling"
                     if cancel_started is None:

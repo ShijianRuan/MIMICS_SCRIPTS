@@ -46,6 +46,8 @@ class Trainer3D:
         runtime_cfg = config.get("runtime", {})
         self.status_path = runtime_cfg.get("status_path")
         self.cancel_path = runtime_cfg.get("cancel_path")
+        self.status_interval_seconds = float(runtime_cfg.get("status_interval_seconds", 2.0))
+        self._last_status_write = 0.0
 
         # Experiment dir
         exp_name = config.get("exp_name", f"exp_{int(time.time())}")
@@ -105,13 +107,28 @@ class Trainer3D:
         directory = os.path.dirname(self.status_path)
         if directory:
             os.makedirs(directory, exist_ok=True)
-        tmp = self.status_path + ".tmp"
+        tmp = "{}.{}.tmp".format(self.status_path, os.getpid())
         with open(tmp, "w") as handle:
             json.dump(data, handle, indent=2, sort_keys=True)
         os.replace(tmp, self.status_path)
 
     def _cancel_requested(self) -> bool:
         return bool(self.cancel_path and os.path.isfile(self.cancel_path))
+
+    def _maybe_write_training_status(self, status: str, *, force: bool = False, **payload):
+        now = time.time()
+        if force or now - self._last_status_write >= self.status_interval_seconds:
+            self._write_training_status(status, **payload)
+            self._last_status_write = now
+
+    @staticmethod
+    def _to_float(value, default=0.0):
+        try:
+            if hasattr(value, "item"):
+                value = value.item()
+            return float(value)
+        except Exception:
+            return default
 
     def _build_optimizer(self, cfg: Dict) -> torch.optim.Optimizer:
         opt_name = cfg.get("optimizer", "adamw")
@@ -179,6 +196,13 @@ class Trainer3D:
 
                 # Log
                 self._log_epoch(epoch, train_metrics, val_metrics)
+                latest_epoch_line = "Epoch {}/{}: train_loss={:.4f}".format(
+                    epoch,
+                    self.epochs,
+                    float(train_metrics.get("loss", 0.0)),
+                )
+                if val_metrics:
+                    latest_epoch_line += ", val_dice={:.4f}".format(float(val_metrics.get("mean_dsc", 0.0)))
 
                 # Save
                 val_dsc = val_metrics.get("mean_dsc", train_metrics.get("mean_dsc", 0.0))
@@ -201,6 +225,7 @@ class Trainer3D:
                     best_dsc=best_dsc,
                     metrics=metrics,
                     phase="epoch_complete",
+                    latest_epoch_line=latest_epoch_line,
                 )
 
             self._write_training_status(
@@ -254,14 +279,30 @@ class Trainer3D:
                     self.scheduler.step()
 
             # Stats
-            total_loss += loss_dict["loss"].item()
-            total_dice += loss_dict.get("dice_loss", 0)
-            total_ce += loss_dict.get("ce_loss", 0)
+            total_loss += self._to_float(loss_dict["loss"])
+            total_dice += self._to_float(loss_dict.get("dice_loss", 0))
+            total_ce += self._to_float(loss_dict.get("ce_loss", 0))
+            current = batch_idx + 1
+            avg_loss = total_loss / current
+            avg_dice = total_dice / current
+            avg_ce = total_ce / current
+            lr = self.optimizer.param_groups[0]["lr"]
 
             pbar.set_postfix({
-                "loss": f"{total_loss / (batch_idx + 1):.4f}",
-                "lr": f"{self.optimizer.param_groups[0]['lr']:.2e}",
+                "loss": f"{avg_loss:.4f}",
+                "lr": f"{lr:.2e}",
             })
+            self._maybe_write_training_status(
+                "training",
+                epoch=epoch,
+                epochs=self.epochs,
+                phase="train",
+                batch=current,
+                batches=len(self.train_loader),
+                lr=lr,
+                metrics={"loss": avg_loss, "dice_loss": avg_dice, "ce_loss": avg_ce},
+                force=current == len(self.train_loader),
+            )
 
         n = len(self.train_loader)
         return {"loss": total_loss / n, "dice_loss": total_dice / n, "ce_loss": total_ce / n}
@@ -313,7 +354,9 @@ class Trainer3D:
 
         pbar = tqdm(self.val_loader, desc=f"Epoch {epoch}/{self.epochs} [Val]")
         with torch.no_grad():
-            for batch in pbar:
+            for batch_idx, batch in enumerate(pbar):
+                if self._cancel_requested():
+                    raise TrainingCancelled()
                 images = batch["image"].to(self.device, dtype=torch.float32)
                 labels = batch["label"].to(self.device)
 
@@ -325,6 +368,16 @@ class Trainer3D:
                 all_dsc.append(metrics["mean"])
 
                 pbar.set_postfix({"dsc": f"{np.mean(all_dsc):.4f}"})
+                self._maybe_write_training_status(
+                    "training",
+                    epoch=epoch,
+                    epochs=self.epochs,
+                    phase="val",
+                    batch=batch_idx + 1,
+                    batches=len(self.val_loader),
+                    metrics={"mean_dsc": float(np.mean(all_dsc))},
+                    force=(batch_idx + 1) == len(self.val_loader),
+                )
 
         mean_dsc = float(np.mean(all_dsc)) if all_dsc else 0.0
         return {"mean_dsc": mean_dsc, "per_class_dsc": [float(a) for a in all_dsc]}
@@ -339,6 +392,15 @@ class Trainer3D:
 
         lr = self.optimizer.param_groups[0]["lr"]
         self.writer.add_scalar("train/lr", lr, epoch)
+        line = "Epoch {}/{}: train_loss={:.4f}, lr={:.2e}".format(
+            epoch,
+            self.epochs,
+            float(train_m.get("loss", 0.0)),
+            lr,
+        )
+        if val_m:
+            line += ", val_dice={:.4f}".format(float(val_m.get("mean_dsc", 0.0)))
+        print(line, flush=True)
 
     def resume(self, checkpoint_path: str):
         state = load_checkpoint(self.model, checkpoint_path, self.optimizer, self.device)

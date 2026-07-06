@@ -444,6 +444,22 @@ def get_image_shape(image_path: str) -> tuple[int, int, int]:
     return shape
 
 
+def _shape_from_params(value) -> tuple[int, int, int]:
+    shape = tuple(int(v) for v in value)
+    if len(shape) != 3 or any(v <= 0 for v in shape):
+        raise ValueError("target_shape must contain three positive integers: {}".format(value))
+    return shape
+
+
+def _matrix_from_params(value) -> np.ndarray:
+    matrix = np.asarray(value, dtype=float)
+    if matrix.shape != (4, 4) or not np.all(np.isfinite(matrix)):
+        raise ValueError("target_voxel_to_ras_matrix must be a finite 4x4 matrix")
+    if not _affine_is_usable(matrix):
+        raise ValueError("target_voxel_to_ras_matrix is not invertible")
+    return matrix
+
+
 def get_image_affine_from_dicom(dicom_folder: str) -> np.ndarray:
     import pydicom
     folder = Path(dicom_folder)
@@ -606,6 +622,7 @@ def do_prepare(params: dict) -> dict:
             f.write(transformed.tobytes(order="C"))
         mask_results.append({
             "name": name,
+            "mask_path": str(Path(mask_path).resolve()),
             "u8_path": u8_path,
             "mimics_shape": list(transformed.shape),
             "nifti_shape": list(array.shape),
@@ -646,6 +663,82 @@ def do_prepare(params: dict) -> dict:
         "mimics_to_source_index_matrix": mimics_to_source_index_matrix.astype(float).tolist(),
         "source_case_dir": params.get("case_dir", ""),
         "masks": mask_results,
+    }
+
+
+def _mask_buffer_for_target_grid(mask_path: str, target_shape, target_voxel_to_ras, axes, flips, output_path: str):
+    mask, mask_affine = read_nifti_mask_with_affine(mask_path)
+    target_shape = _shape_from_params(target_shape)
+    target_voxel_to_ras = _matrix_from_params(target_voxel_to_ras)
+    target_grid_mask = resample_mask_to_image_grid(
+        mask,
+        mask_affine,
+        target_shape,
+        target_voxel_to_ras,
+    )
+    transformed = apply_buffer_mapping(target_grid_mask, axes, flips)
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with open(str(output), "wb") as handle:
+        handle.write(transformed.tobytes(order="C"))
+    return {
+        "output_path": str(output),
+        "u8_path": str(output),
+        "mimics_shape": [int(value) for value in transformed.shape],
+        "image_shape": [int(value) for value in target_shape],
+        "foreground_voxels": int(np.count_nonzero(target_grid_mask)),
+        "mask_affine_usable": bool(_affine_is_usable(mask_affine)),
+        "mask_affine_matches_target": bool(_affine_close(mask_affine, target_voxel_to_ras)),
+        "mask_voxel_to_ras_matrix": mask_affine.astype(float).tolist(),
+        "target_voxel_to_ras_matrix": target_voxel_to_ras.astype(float).tolist(),
+        "buffer_axes": list(axes),
+        "buffer_flips": list(flips),
+    }
+
+
+def do_prepare_masks_for_grid(params: dict) -> dict:
+    """Resample source NIfTI masks into an actual Mimics voxel grid."""
+    masks = params.get("masks") or []
+    buffers_out = params["buffers_out"]
+    target_shape = params["target_shape"]
+    target_voxel_to_ras = params["target_voxel_to_ras_matrix"]
+    axes = params.get("axes", DEFAULT_MIMICS_BUFFER_AXES)
+    flips = params.get("flips", DEFAULT_MIMICS_BUFFER_FLIPS)
+    target_matrix = _matrix_from_params(target_voxel_to_ras)
+    os.makedirs(buffers_out, exist_ok=True)
+    results = []
+    for item in masks:
+        name = item["name"]
+        mask_path = item.get("mask_path") or item.get("path")
+        if not mask_path or not Path(mask_path).is_file():
+            return {"status": "error", "error": "mask file not found for {}: {}".format(name, mask_path)}
+        output_path = os.path.join(buffers_out, name + ".u8")
+        row = _mask_buffer_for_target_grid(
+            mask_path,
+            target_shape,
+            target_voxel_to_ras,
+            axes,
+            flips,
+            output_path,
+        )
+        row["name"] = name
+        row["mask_path"] = str(Path(mask_path).resolve())
+        results.append(row)
+    source_matrix = None
+    if params.get("source_voxel_to_ras_matrix"):
+        try:
+            source_matrix = _matrix_from_params(params.get("source_voxel_to_ras_matrix"))
+        except Exception:
+            source_matrix = None
+    mimics_to_source = None
+    if source_matrix is not None:
+        mimics_to_source = (np.linalg.inv(source_matrix) @ target_matrix).astype(float).tolist()
+    return {
+        "status": "ok",
+        "target_shape": [int(value) for value in _shape_from_params(target_shape)],
+        "target_voxel_to_ras_matrix": target_matrix.tolist(),
+        "mimics_to_source_index_matrix": mimics_to_source,
+        "masks": results,
     }
 
 
@@ -739,11 +832,23 @@ def do_convert(params: dict) -> dict:
 
 def do_mask_to_buffer(params: dict) -> dict:
     """Convert a NIfTI mask into a Mimics-shaped .u8 buffer for foreground apply."""
-    image_path = params["image_path"]
+    image_path = params.get("image_path", "")
     mask_path = params["mask_path"]
     output_path = params["output_path"]
     axes = params.get("axes", DEFAULT_MIMICS_BUFFER_AXES)
     flips = params.get("flips", DEFAULT_MIMICS_BUFFER_FLIPS)
+
+    if params.get("target_shape") and params.get("target_voxel_to_ras_matrix"):
+        result = _mask_buffer_for_target_grid(
+            mask_path,
+            params["target_shape"],
+            params["target_voxel_to_ras_matrix"],
+            axes,
+            flips,
+            output_path,
+        )
+        result["status"] = "ok"
+        return result
 
     if is_dicom_folder(image_path):
         # Internal resampling uses RAS affines. get_image_affine_from_dicom()
@@ -782,6 +887,7 @@ def do_mask_to_buffer(params: dict) -> dict:
         "mimics_shape": [int(value) for value in transformed.shape],
         "image_shape": [int(value) for value in image_shape],
         "foreground_voxels": int(np.count_nonzero(image_grid_mask)),
+        "target_voxel_to_ras_matrix": image_affine.astype(float).tolist(),
         "buffer_axes": list(axes),
         "buffer_flips": list(flips),
     }
@@ -891,6 +997,8 @@ def main():
             result = do_convert(params)
         elif action == "mask_to_buffer":
             result = do_mask_to_buffer(params)
+        elif action == "prepare_masks_for_grid":
+            result = do_prepare_masks_for_grid(params)
         elif action == "discover":
             result = do_discover(params)
         elif action == "discover_case_dirs":

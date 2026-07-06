@@ -196,6 +196,16 @@ class FakeImage:
             maximum_value=getattr(self, "maximum_value", None),
         )
 
+    def get_voxel_center(self, *args):
+        if len(args) == 1:
+            index = args[0]
+        else:
+            index = args
+        x, y, z = [float(value) for value in index]
+        # Mimics/DICOM patient coordinates are LPS. The default fake image is
+        # equivalent to an identity RAS voxel grid, so LPS negates x and y.
+        return [-x, -y, z]
+
 
 class FakeMask:
     def __init__(self, name, image=None, array=None, selected=False):
@@ -236,6 +246,10 @@ class FakeMask:
         else:
             raw = bytes(pixels)
             shape = self._buffer.shape
+        if self.image is not None:
+            expected_shape = tuple(int(value) for value in getattr(self.image, "logical_dimensions", ()))
+            if expected_shape and tuple(int(value) for value in shape) != expected_shape:
+                raise ValueError("Dimensions of input pixels do not coincide with mask region dimensions")
         raw = bytes(1 if value else 0 for value in raw)
         self._buffer = FakeVoxelBuffer(shape, raw, "B")
         self._refresh_pixels()

@@ -30,8 +30,11 @@ BUTTON_PREDICT_MODEL = "Predict With Model..."
 BUTTON_STATUS = "Show Status"
 BUTTON_STOP = "Stop Latest Job"
 BUTTON_CANCEL = "Cancel"
+MIMICS_VOXEL_TO_RAS_MATRIX_METADATA = "mimics_script.mimics_voxel_to_ras_matrix"
 
 _MONITORS = {}
+_QT_CHECK_DONE = False
+_QT_CHECK_RESULT = False
 
 
 _write_json_atomic = runtime_common.write_json_atomic
@@ -161,52 +164,33 @@ def _mimics_log(level, message):
 
 
 def _ensure_pyqt5():
-    """Try to make PyQt5 importable by searching Mimics installation paths.
-
-    Mimics GUI is built on Qt.  The Python bindings (PyQt5 or PySide2/6)
-    may live in a non-standard directory that is not on sys.path.
-
-    Returns True if Qt Python bindings are now importable.
-    """
+    """Try to make PyQt5/PySide importable without blocking the Mimics GUI."""
+    global _QT_CHECK_DONE
+    global _QT_CHECK_RESULT
+    if _QT_CHECK_DONE:
+        return _QT_CHECK_RESULT
     try:
         import PyQt5  # noqa: F401
+        _QT_CHECK_DONE = True
+        _QT_CHECK_RESULT = True
         return True
     except ImportError:
         pass
 
-    # Known locations for Qt Python bindings inside Mimics installations
-    search_roots = []
-    for env_var in ("MIMICS_HOME", "MIMICS_EXE"):
-        val = os.environ.get(env_var, "")
-        if val and os.path.exists(val):
-            search_roots.append(os.path.dirname(val) if os.path.isfile(val) else val)
-
-    pf = os.environ.get("ProgramFiles", "C:\\Program Files")
-    for base_dir in (
-        os.path.join(pf, "Materialise"),
-        os.path.join(pf, "Common Files", "Materialise"),
-        "C:\\Program Files\\Materialise",
-        "C:\\Program Files\\Common Files\\Materialise",
-        "D:\\Program Files\\Materialise",
-    ):
-        if os.path.isdir(base_dir) and base_dir not in search_roots:
-            search_roots.append(base_dir)
-
-    for root in search_roots:
-        for dirpath, _dirnames, _filenames in os.walk(root):
-            # Stop walking too deep
-            depth = dirpath.replace(root, "").count(os.sep)
-            if depth > 5:
-                continue
-            lower = os.path.basename(dirpath).lower()
-            if lower in ("site-packages", "pyqt5", "pyside2", "pyside6", "pyside"):
-                if dirpath not in sys.path:
-                    sys.path.insert(0, dirpath)
-                try:
-                    import PyQt5  # noqa: F401
-                    return True
-                except ImportError:
-                    pass
+    for env_var in ("MIMICS_QT_PYTHONPATH", "MIMICS_PYQT_PATH"):
+        value = os.environ.get(env_var, "")
+        if not value:
+            continue
+        for path in value.split(os.pathsep):
+            if path and os.path.isdir(path) and path not in sys.path:
+                sys.path.insert(0, path)
+        try:
+            import PyQt5  # noqa: F401
+            _QT_CHECK_DONE = True
+            _QT_CHECK_RESULT = True
+            return True
+        except ImportError:
+            pass
 
     # Try alternatives that ship with some Mimics builds
     for mod_name in ("PySide2", "PySide6", "PySide"):
@@ -221,10 +205,14 @@ def _ensure_pyqt5():
                 sys.modules["PyQt5.QtCore"] = getattr(mod, "QtCore")
             except AttributeError:
                 pass
+            _QT_CHECK_DONE = True
+            _QT_CHECK_RESULT = True
             return True
         except ImportError:
             pass
 
+    _QT_CHECK_DONE = True
+    _QT_CHECK_RESULT = False
     return False
 
 
@@ -281,6 +269,61 @@ def _selected_organ():
     if mask is None:
         return None
     return str(getattr(mask, "name", "") or "").strip()
+
+
+def _metadata_get(obj, name, default=""):
+    try:
+        item = obj.metadata.find(name)
+        if item is not None:
+            return item.value
+    except Exception:
+        pass
+    try:
+        return obj.metadata[name].value
+    except Exception:
+        return default
+
+
+def _active_image_shape(image):
+    try:
+        dims = getattr(image, "logical_dimensions", None)
+        if dims is not None:
+            shape = [int(dims[0]), int(dims[1]), int(dims[2])]
+            if all(value > 0 for value in shape):
+                return shape
+    except Exception:
+        pass
+    try:
+        view = image.get_voxel_buffer()
+        shape = [int(value) for value in view.shape]
+        if all(value > 0 for value in shape):
+            return shape
+    except Exception:
+        pass
+    return None
+
+
+def _active_mimics_grid_payload():
+    try:
+        image = mimics.data.images.get_active()
+    except Exception:
+        image = None
+    if image is None:
+        return None
+    shape = _active_image_shape(image)
+    matrix_text = _metadata_get(image, MIMICS_VOXEL_TO_RAS_MATRIX_METADATA, "")
+    if not shape or not matrix_text:
+        return None
+    try:
+        matrix = json.loads(matrix_text)
+        if len(matrix) != 4:
+            return None
+        for row in matrix:
+            if len(row) != 4:
+                return None
+        return {"target_shape": shape, "target_voxel_to_ras_matrix": matrix}
+    except Exception:
+        return None
 
 
 def _find_mimics_exe():
@@ -727,10 +770,12 @@ def _profile_training_options(config):
 
     if profile_names:
         lines = [
-            "PyQt5 / PySide is not available in this session.",
+            "Advanced Qt widgets are not available in this Mimics Python session.",
             "",
             "Choose a training profile from fewshot_config.json,",
             "or pick 'Configure manually' to set parameters interactively.",
+            "For the full Qt dialog, set MIMICS_QT_PYTHONPATH or MIMICS_PYQT_PATH",
+            "to a Python-3.5-compatible PyQt5/PySide site-packages directory.",
             "",
         ]
         for name in profile_names:
@@ -758,7 +803,9 @@ def _profile_training_options(config):
             "You can configure key parameters interactively, or use\n"
             "the defaults from fewshot_config.json.\n\n"
             "Tip: add training_profiles to fewshot_config.json to\n"
-            "save and reuse your settings."
+            "save and reuse your settings. Do not install a modern PyQt5\n"
+            "wheel into Mimics Python 3.5; point MIMICS_QT_PYTHONPATH\n"
+            "to a compatible binding if a Qt dialog is required."
         ),
         buttons="Configure interactively;Use defaults;" + BUTTON_CANCEL,
         title=TITLE,
@@ -775,7 +822,7 @@ def _advanced_training_options(config, ts_root):
     if not _ensure_pyqt5():
         _mimics_log(
             logging.WARNING,
-            "DINOv3 PyQt5 / PySide2 / PySide6 is not available. Using fewshot_config.json profiles instead.",
+            "DINOv3 Advanced Qt dialog is not available in this Mimics Python session. Using fewshot_config.json profiles/native parameter dialogs. For a Qt dialog, set MIMICS_QT_PYTHONPATH or MIMICS_PYQT_PATH to a Python-3.5-compatible PyQt5/PySide path.",
         )
         return _profile_training_options(config)
     try:
@@ -1261,6 +1308,20 @@ def _launch_bridge_mask_to_buffer(monitor, status):
         "axes": [0, 1, 2],
         "flips": [False, False, False],
     }
+    grid_payload = _active_mimics_grid_payload()
+    if grid_payload:
+        params.update(grid_payload)
+        _mimics_log(
+            logging.INFO,
+            "DINOv3 prediction conversion will use the active Mimics image grid (shape={0}).".format(
+                grid_payload.get("target_shape")
+            ),
+        )
+    else:
+        _mimics_log(
+            logging.WARNING,
+            "DINOv3 prediction conversion could not read active Mimics grid metadata; falling back to source image geometry.",
+        )
     input_path = os.path.join(job_dir, "bridge_input.json")
     result_path = os.path.join(job_dir, "bridge_result.json")
     _write_json_atomic(input_path, params)
@@ -1515,31 +1576,41 @@ def _format_job_line(job):
     progress = job.get("training_progress") or {}
     extra = ""
     if progress:
-        epoch = progress.get("epoch")
-        epochs = progress.get("epochs")
-        phase = progress.get("phase")
-        best = progress.get("best_dsc")
-        pieces = []
-        if epoch is not None and epochs is not None:
-            pieces.append("epoch {0}/{1}".format(epoch, epochs))
-        if phase:
-            pieces.append(str(phase))
-        if best is not None:
-            try:
-                pieces.append("best_val_dice {0:.4f}".format(float(best)))
-            except Exception:
-                pieces.append("best_val_dice {0}".format(best))
-        metrics = progress.get("metrics") or {}
-        if metrics.get("loss") is not None:
-            try:
-                pieces.append("train_loss {0:.4f}".format(float(metrics.get("loss"))))
-            except Exception:
-                pass
-        if metrics.get("mean_dsc") is not None:
-            try:
-                pieces.append("val_dice {0:.4f}".format(float(metrics.get("mean_dsc"))))
-            except Exception:
-                pass
+        if progress.get("latest_epoch_line"):
+            pieces = [str(progress.get("latest_epoch_line"))]
+        else:
+            pieces = []
+            epoch = progress.get("epoch")
+            epochs = progress.get("epochs")
+            phase = progress.get("phase")
+            best = progress.get("best_dsc")
+            if epoch is not None and epochs is not None:
+                pieces.append("epoch {0}/{1}".format(epoch, epochs))
+            if phase:
+                pieces.append(str(phase))
+            if progress.get("batch") is not None and progress.get("batches") is not None:
+                pieces.append("batch {0}/{1}".format(progress.get("batch"), progress.get("batches")))
+            if best is not None:
+                try:
+                    pieces.append("best_val_dice {0:.4f}".format(float(best)))
+                except Exception:
+                    pieces.append("best_val_dice {0}".format(best))
+            metrics = progress.get("metrics") or {}
+            if metrics.get("loss") is not None:
+                try:
+                    pieces.append("train_loss {0:.4f}".format(float(metrics.get("loss"))))
+                except Exception:
+                    pass
+            if metrics.get("mean_dsc") is not None:
+                try:
+                    pieces.append("val_dice {0:.4f}".format(float(metrics.get("mean_dsc"))))
+                except Exception:
+                    pass
+            if progress.get("lr") is not None:
+                try:
+                    pieces.append("lr {0:.2e}".format(float(progress.get("lr"))))
+                except Exception:
+                    pass
         if pieces:
             extra = " | " + ", ".join(pieces)
     if job.get("sample_count") is not None:

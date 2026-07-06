@@ -1542,6 +1542,9 @@ class _BridgeSessionContext:
         self.runtime_work_dir = input_data.get("runtime_work_dir")
         self.requested_device = str(input_data.get("device", "auto"))
         self.log_path = _bridge_log_path(self.model_dir, input_data.get("log_dir"))
+        self.keep_server_warm_after_session = bool(
+            input_data.get("keep_server_warm_after_session", True)
+        )
         self.buffer_mapping = input_data.get("buffer_mapping") or {
             "platform_to_mimics_axes": [0, 1, 2],
             "platform_to_mimics_flips": [False, False, False],
@@ -1938,13 +1941,15 @@ class _BridgeSessionContext:
                 self.session.close()
         finally:
             if self.owned_state_path is not None and self.owned_token:
-                # Signal the watchdog to shut down the server promptly.
-                # Instead of merely touching activity (which keeps the server
-                # alive for the full idle timeout), set last_activity_epoch
-                # far enough in the past that the watchdog's idle check fires
-                # on its next iteration (<=30 s), releasing GPU memory.
-                _expire_server_activity(self.owned_state_path, self.owned_token)
-            _append_bridge_log(self.log_path, "session_closed")
+                if self.keep_server_warm_after_session:
+                    _touch_server_activity(self.owned_state_path, self.owned_token)
+                else:
+                    _expire_server_activity(self.owned_state_path, self.owned_token)
+            _append_bridge_log(
+                self.log_path,
+                "session_closed",
+                keep_server_warm_after_session=self.keep_server_warm_after_session,
+            )
 
 
 def _error_result(
@@ -2076,6 +2081,10 @@ def _worker_main() -> int:
                     "mode": "remote",
                     "bridge_log": str(context.log_path),
                     "server_log": str(_server_log_path(model_dir, request.get("runtime_work_dir"))),
+                    "image_load_seconds": context.image_load_seconds,
+                    "server_ready_seconds": context.server_ready_seconds,
+                    "set_image_seconds": context.set_image_seconds,
+                    "set_target_seconds": context.set_target_seconds,
                 }
             elif action == "predict":
                 if context is None:
@@ -2160,6 +2169,10 @@ def _async_worker_main(job_dir_value: str) -> int:
             device_warning=context.device_warning,
             server_url=context.server_url,
             first_call=context.first_call,
+            image_load_seconds=context.image_load_seconds,
+            server_ready_seconds=context.server_ready_seconds,
+            set_image_seconds=context.set_image_seconds,
+            set_target_seconds=context.set_target_seconds,
             bridge_log=str(context.log_path),
             server_log=str(_server_log_path(context.model_dir, context.runtime_work_dir)),
         )

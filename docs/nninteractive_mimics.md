@@ -497,11 +497,13 @@ creator stores source image metadata on the imported ImageData:
 - `mimics_script.mimics_to_source_index_matrix`
 
 When this metadata points to a valid source NIfTI or DICOM folder, and its
-recorded shape, index-space contract and world-coordinate contract match the
-open Mimics image, `nnInteractive` sends `image_path`, `image_source_kind`,
+index-space contract plus world-coordinate contract are complete,
+`nnInteractive` sends `image_path`, `image_source_kind`,
 `image_expected_shape`, `interaction_shape`, the RAS/LPS metadata, source
 modality and the selected source-to-Mimics intensity transform to the external
-bridge. Mimics then skips
+bridge. The recorded source shape may differ from the open Mimics image shape:
+the bridge uses the stored source and Mimics voxel-to-RAS matrices to resample
+the source image into the actual Mimics grid before inference. Mimics then skips
 `ImageData.get_voxel_buffer()` and does not write a full raw image buffer on the
 foreground GUI thread.
 
@@ -514,13 +516,24 @@ not flipped or canonicalized. For DICOM source folders, source and Mimics world
 coordinates are both LPS; the external worker reads the selected series, sorts
 slices by `ImagePositionPatient` along the slice normal, transposes each pixel
 plane from `(Rows, Columns)` to `(Columns, Rows)`, and stacks the result as
-`(Columns, Rows, Slices)`. The loaded shape must match the open Mimics image
-before the worker accepts prompts. Internally, the bridge first aligns source
+`(Columns, Rows, Slices)`. If the source shape differs and affine metadata is
+available, the worker resamples into the open Mimics image shape; if multiple
+DICOM series are present and no shape match can identify the intended series,
+the worker fails instead of guessing. Internally, the bridge first aligns source
 data to the Mimics grid, applies the selected source-to-Mimics intensity
 transform, then applies the configured Mimics-to-platform axis
 mapping before calling nnInteractive. Shape checks compare platform shape to the
 mapped Mimics shape, so non-identity axis mappings are not rejected by comparing
 two different coordinate systems.
+
+For imported `.mcs` projects, the background `.mcs` creator derives the actual
+Mimics voxel grid after DICOM import by calling `ImageData.get_voxel_center()`.
+Mimics/DICOM patient coordinates are LPS, so the stored matrix is converted to
+RAS for consistent math with nibabel NIfTI affines. If this actual grid differs
+from the prepared source grid, masks are resampled again into the open Mimics
+grid in the background before `Mask.set_voxel_buffer()` is called. The creator
+does not blindly reshape equal-size buffers because that can create diagonal
+mirrors or swapped axial/coronal/sagittal views.
 
 If the source image voxel grid differs from the Mimics voxel grid but both
 `source_voxel_to_ras_matrix` and `mimics_voxel_to_ras_matrix` are present, the
@@ -541,9 +554,18 @@ If the metadata is missing, points to a missing file, is not a supported source
 type, or lacks enough geometry to compute the source-to-Mimics index transform,
 the integration falls back to the Mimics image buffer export and writes a warning
 to Mimics logging. If the source index-space or RAS/LPS world-coordinate contract
-is missing or unsupported, the fast path is skipped instead of guessing. This
-fallback preserves old projects, but it can still cause a foreground pause on
-very large volumes.
+is missing or unsupported, the fast path is skipped instead of guessing. Source
+file read errors are reported by the external worker; the foreground Mimics
+process does not open the source image just to probe readability. This fallback
+preserves old projects, but it can still cause a foreground pause on very large
+volumes.
+
+The managed nnInteractive server is kept warm until its configured idle timeout
+or until `Stop Background Services` is run. This avoids turning every prompt
+sequence into a cold model-load path. Mimics logging reports timing breakdowns
+for image load/resampling, server readiness, `set_image`, `set_target`, prompt
+application and total elapsed time so slow runs can be diagnosed without opening
+raw JSON logs.
 
 The before-prompt prewarm step is stricter: it only runs when the source-image
 fast path is available. It does not use the raw Mimics buffer fallback, so an old

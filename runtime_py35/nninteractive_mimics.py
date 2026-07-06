@@ -849,12 +849,6 @@ def _source_image_export(image, config):
             "nnInteractive source image metadata points to a missing file; falling back to Mimics image buffer export: {0}".format(path),
         )
         return None
-    if is_dicom and not os.path.isdir(path):
-        _mimics_log(
-            logging.WARNING,
-            "nnInteractive source DICOM metadata points to a missing folder; falling back to Mimics image buffer export: {0}".format(path),
-        )
-        return None
     if is_nifti:
         try:
             with open(path, "rb") as _test:
@@ -863,11 +857,16 @@ def _source_image_export(image, config):
             _mimics_log(
                 logging.WARNING,
                 "nnInteractive source image file cannot be read (may be locked by antivirus or another process); falling back to Mimics image buffer export: {0}. Error: {1}".format(
-                    path,
-                    exc,
+                    path, exc,
                 ),
             )
             return None
+    if is_dicom and not os.path.isdir(path):
+        _mimics_log(
+            logging.WARNING,
+            "nnInteractive source DICOM metadata points to a missing folder; falling back to Mimics image buffer export: {0}".format(path),
+        )
+        return None
     if _source_uses_hu_to_gv(kind, modality):
         intensity_transform = _hu_to_mimics_gv_transform()
         if intensity_transform is None and not force_source:
@@ -895,13 +894,12 @@ def _source_image_export(image, config):
     recorded_shape = _parse_shape_metadata(_metadata_get(image, SOURCE_IMAGE_SHAPE_METADATA, ""))
     if recorded_shape is not None and recorded_shape != shape:
         _mimics_log(
-            logging.WARNING,
-            "nnInteractive source image shape does not match the open Mimics image; falling back to Mimics image buffer export. Source: {0}, Mimics: {1}.".format(
+            logging.INFO,
+            "nnInteractive source image shape differs from the open Mimics image. The bridge will resample source data into the Mimics voxel grid. Source: {0}, Mimics: {1}.".format(
                 recorded_shape,
                 shape,
             ),
         )
-        return None
     source_name = "source_nifti_metadata" if is_nifti else "source_dicom_metadata"
     _mimics_log(
         logging.INFO,
@@ -1643,6 +1641,9 @@ def _bridge_parameters(config, image_export, base_export):
         "incremental_interaction_replay": bool(
             config.get("incremental_interaction_replay", True)
         ),
+        "keep_server_warm_after_session": bool(
+            config.get("keep_server_warm_after_session", True)
+        ),
     }
     if image_export.get("image_path"):
         request["image_path"] = image_export["image_path"]
@@ -1818,12 +1819,29 @@ def _bridge_call(config, image_export, base_export, interactions, output_path):
         _mimics_log(logging.WARNING, str(result["device_warning"]))
     _mimics_log(
         logging.INFO,
-        "nnInteractive inference completed in {0}s on {1}.".format(
+        "nnInteractive inference completed in {0}s on {1}. Timing: {2}.".format(
             result.get("elapsed_seconds", "?"),
             result.get("device", requested_device),
+            _timing_summary(result) or "not available",
         ),
     )
     return result
+
+
+def _timing_summary(result):
+    pieces = []
+    for key, label in (
+        ("image_load_seconds", "image_load"),
+        ("server_ready_seconds", "server_ready"),
+        ("set_image_seconds", "set_image"),
+        ("set_target_seconds", "set_target"),
+        ("prompt_apply_seconds", "prompt_apply"),
+        ("elapsed_seconds", "total"),
+    ):
+        value = result.get(key)
+        if value is not None:
+            pieces.append("{0}={1}s".format(label, value))
+    return ", ".join(pieces)
 
 
 class _BridgeWorker(object):
@@ -1949,16 +1967,21 @@ class _BridgeWorker(object):
                 "device_warning": result.get("device_warning"),
                 "server_url": result.get("server_url"),
                 "first_call": result.get("first_call"),
+                "image_load_seconds": result.get("image_load_seconds"),
+                "server_ready_seconds": result.get("server_ready_seconds"),
+                "set_image_seconds": result.get("set_image_seconds"),
+                "set_target_seconds": result.get("set_target_seconds"),
             },
         )
         if result.get("device_warning"):
             _mimics_log(logging.WARNING, str(result["device_warning"]))
         _mimics_log(
             logging.INFO,
-            "nnInteractive session ready on {0} (server: {1}).{2}".format(
+            "nnInteractive session ready on {0} (server: {1}).{2} Timing: {3}.".format(
                 result.get("device", "?"),
                 result.get("server_url", "?"),
                 " First call; model was loaded." if result.get("first_call") else "",
+                _timing_summary(result) or "not available",
             ),
         )
 
@@ -1991,9 +2014,10 @@ class _BridgeWorker(object):
         )
         _mimics_log(
             logging.INFO,
-            "nnInteractive prediction completed in {0}s on {1}.".format(
+            "nnInteractive prediction completed in {0}s on {1}. Timing: {2}.".format(
                 result.get("elapsed_seconds", "?"),
                 result.get("device", "?"),
+                _timing_summary(result) or "not available",
             ),
         )
         return result
@@ -2928,11 +2952,12 @@ def _handle_async_result(image, target, state):
     _save_async_job(state)
     _mimics_log(
         logging.INFO,
-        "nnInteractive result applied to Mask {0}. Foreground voxels: {1}, elapsed: {2}s, device: {3}.".format(
+        "nnInteractive result applied to Mask {0}. Foreground voxels: {1}, elapsed: {2}s, device: {3}. Timing: {4}.".format(
             getattr(target, "name", ""),
             result.get("foreground_voxels", "?"),
             result.get("elapsed_seconds", "?"),
             result.get("device", "?"),
+            _timing_summary(result) or "not available",
         ),
     )
     if int(result.get("foreground_voxels", -1)) == 0:

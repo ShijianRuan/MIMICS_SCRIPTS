@@ -16,6 +16,7 @@ from __future__ import print_function
 import json
 import os
 import shutil
+import subprocess
 import sys
 import time
 import traceback
@@ -179,6 +180,154 @@ def metadata_set(obj, name, value):
         pass
 
 
+def _matrix_close(left, right, tol=1e-4):
+    try:
+        if not left or not right:
+            return False
+        if len(left) != 4 or len(right) != 4:
+            return False
+        for row_index in range(4):
+            if len(left[row_index]) != 4 or len(right[row_index]) != 4:
+                return False
+            for col_index in range(4):
+                if abs(float(left[row_index][col_index]) - float(right[row_index][col_index])) > tol:
+                    return False
+        return True
+    except Exception:
+        return False
+
+
+def _lps_point_to_ras(point):
+    return [-float(point[0]), -float(point[1]), float(point[2])]
+
+
+def _point_values(point):
+    if point is None:
+        raise RuntimeError("Mimics returned an empty voxel center.")
+    for names in (("x", "y", "z"), ("X", "Y", "Z")):
+        try:
+            return [float(getattr(point, names[0])), float(getattr(point, names[1])), float(getattr(point, names[2]))]
+        except Exception:
+            pass
+    return [float(point[0]), float(point[1]), float(point[2])]
+
+
+def _voxel_center(image, index):
+    getter = getattr(image, "get_voxel_center", None)
+    if not callable(getter):
+        raise RuntimeError("Mimics image does not expose get_voxel_center().")
+    values = [int(value) for value in index]
+    try:
+        return _point_values(getter(values))
+    except TypeError:
+        pass
+    try:
+        return _point_values(getter(tuple(values)))
+    except TypeError:
+        pass
+    return _point_values(getter(values[0], values[1], values[2]))
+
+
+def _derive_mimics_voxel_to_ras_matrix(image, image_shape, fallback):
+    """Derive the actual open Mimics image voxel grid in RAS coordinates."""
+    if not image_shape:
+        return None
+    try:
+        origin = _lps_point_to_ras(_voxel_center(image, [0, 0, 0]))
+        matrix = [[0.0, 0.0, 0.0, 0.0] for _ in range(4)]
+        for axis in range(3):
+            if int(image_shape[axis]) > 1:
+                index = [0, 0, 0]
+                index[axis] = 1
+                point = _lps_point_to_ras(_voxel_center(image, index))
+                vector = [point[i] - origin[i] for i in range(3)]
+            elif fallback and len(fallback) == 4 and len(fallback[axis]) == 4:
+                vector = [float(fallback[row][axis]) for row in range(3)]
+            else:
+                vector = [0.0, 0.0, 0.0]
+                vector[axis] = 1.0
+            for row in range(3):
+                matrix[row][axis] = vector[row]
+        for row in range(3):
+            matrix[row][3] = origin[row]
+        matrix[3] = [0.0, 0.0, 0.0, 1.0]
+        return matrix
+    except Exception:
+        return None
+
+
+def _bridge_python():
+    return os.environ.get("MIMICS_BRIDGE_PYTHON", "")
+
+
+def _bridge_script():
+    return os.environ.get("MIMICS_BRIDGE_SCRIPT", "")
+
+
+def _resample_masks_to_actual_grid(result, active_image_shape, actual_mimics_voxel_to_ras, work_dir):
+    expected_matrix = result.get("mimics_voxel_to_ras_matrix") or []
+    masks = result.get("masks") or []
+    if not active_image_shape or not actual_mimics_voxel_to_ras or not masks:
+        return result
+    expected_shapes = []
+    for row in masks:
+        if row.get("mimics_shape"):
+            expected_shapes.append([int(value) for value in row.get("mimics_shape")])
+    shape_matches = all(shape == active_image_shape for shape in expected_shapes) if expected_shapes else False
+    matrix_matches = _matrix_close(expected_matrix, actual_mimics_voxel_to_ras)
+    if shape_matches and matrix_matches:
+        return result
+
+    python_exe = _bridge_python()
+    bridge_script = _bridge_script()
+    if not python_exe or not bridge_script or not os.path.isfile(bridge_script):
+        raise RuntimeError(
+            "Imported Mimics image grid differs from prepared mask grid, but the external bridge "
+            "is not configured. Refusing to inject reshaped masks because that would corrupt orientation."
+        )
+
+    actual_buffers_dir = os.path.join(work_dir, "buffers_mimics_actual")
+    params = {
+        "action": "prepare_masks_for_grid",
+        "masks": [{"name": row.get("name"), "mask_path": row.get("mask_path")} for row in masks],
+        "target_shape": active_image_shape,
+        "target_voxel_to_ras_matrix": actual_mimics_voxel_to_ras,
+        "source_voxel_to_ras_matrix": result.get("source_voxel_to_ras_matrix") or [],
+        "buffers_out": actual_buffers_dir,
+        "axes": [0, 1, 2],
+        "flips": [False, False, False],
+    }
+    process = subprocess.Popen(
+        [python_exe, bridge_script],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        **runtime_common.background_process_kwargs()
+    )
+    stdout, stderr = process.communicate(input=json.dumps(params).encode("utf-8"))
+    if process.returncode != 0:
+        raise RuntimeError(
+            "External mask resampling failed with exit code {0}: {1}".format(
+                process.returncode,
+                stderr.decode("utf-8", "replace")[:1000],
+            )
+        )
+    try:
+        bridge_result = json.loads(stdout.decode("utf-8"))
+    except Exception as exc:
+        raise RuntimeError("External mask resampling returned invalid JSON: {0}".format(exc))
+    if bridge_result.get("status") != "ok":
+        raise RuntimeError("External mask resampling failed: {0}".format(bridge_result.get("error", "unknown error")))
+
+    updated = dict(result)
+    updated["masks"] = bridge_result.get("masks") or []
+    updated["mimics_voxel_to_ras_matrix"] = actual_mimics_voxel_to_ras
+    if bridge_result.get("mimics_to_source_index_matrix"):
+        updated["mimics_to_source_index_matrix"] = bridge_result.get("mimics_to_source_index_matrix")
+    updated["actual_mimics_grid_resampled"] = True
+    return updated
+
+
 def inject_buffer(mask, buffer_path, mimics_shape):
     """Inject a .u8 buffer into a Mimics mask."""
     with open(buffer_path, "rb") as f:
@@ -244,7 +393,6 @@ def create_mcs_from_manifest(work_dir, output_mcs):
         result = json.load(f)
 
     dicom_folder = result["dicom_folder"]
-    mask_results = result["masks"]
 
     # Import DICOM
     mimics.file.import_dicom_images(source_folder=dicom_folder)
@@ -254,6 +402,20 @@ def create_mcs_from_manifest(work_dir, output_mcs):
     image = mimics.data.images[0]
     mimics.data.images.set_active(image)
     active_image_shape = _active_image_shape(image)
+    actual_mimics_voxel_to_ras = _derive_mimics_voxel_to_ras_matrix(
+        image,
+        active_image_shape,
+        result.get("mimics_voxel_to_ras_matrix") or [],
+    )
+    result = _resample_masks_to_actual_grid(
+        result,
+        active_image_shape,
+        actual_mimics_voxel_to_ras,
+        work_dir,
+    )
+    if result.get("actual_mimics_grid_resampled"):
+        print("  actual Mimics image grid differs from prepared grid; masks were resampled to the open Mimics grid.")
+    mask_results = result["masks"]
     metadata_set(image, SOURCE_IMAGE_PATH_METADATA, result.get("source_image_path", ""))
     metadata_set(image, SOURCE_IMAGE_KIND_METADATA, result.get("source_image_kind", ""))
     metadata_set(image, SOURCE_IMAGE_SHAPE_METADATA, json.dumps(result.get("source_image_shape", [])))
@@ -302,22 +464,14 @@ def create_mcs_from_manifest(work_dir, output_mcs):
             u8_path = mr["u8_path"]
             buf_shape = mr["mimics_shape"]
             if active_image_shape and [int(value) for value in buf_shape] != active_image_shape:
-                if _shape_product(buf_shape) != _shape_product(active_image_shape):
-                    raise RuntimeError(
-                        "mask buffer shape does not match imported Mimics image for {0}: buffer={1}, image={2}".format(
-                            name,
-                            buf_shape,
-                            active_image_shape,
-                        )
-                    )
-                print(
-                    "    shape adjusted to imported Mimics image for {0}: {1} -> {2}".format(
+                raise RuntimeError(
+                    "mask buffer shape does not match imported Mimics image for {0}: buffer={1}, image={2}. "
+                    "The buffer was not reshaped because blind reshape corrupts orientation.".format(
                         name,
                         buf_shape,
                         active_image_shape,
                     )
                 )
-                buf_shape = active_image_shape
 
             mask = mimics.segment.create_mask()
             mask.name = name

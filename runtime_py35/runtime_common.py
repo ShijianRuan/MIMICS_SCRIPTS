@@ -16,7 +16,7 @@ INVALID_LOCK_GRACE_SECONDS = 5.0
 def write_json_atomic(path, value):
     parent = os.path.dirname(path)
     last_error = None
-    for _attempt in range(3):
+    for attempt in range(10):
         if parent and not os.path.isdir(parent):
             os.makedirs(parent)
         temporary = path + "." + uuid.uuid4().hex + ".tmp"
@@ -37,7 +37,7 @@ def write_json_atomic(path, value):
                     os.remove(temporary)
             except Exception:
                 pass
-            time.sleep(0.05)
+            time.sleep(min(0.5, 0.05 * (attempt + 1)))
     if last_error is not None:
         raise last_error
 

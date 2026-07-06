@@ -24,7 +24,7 @@ The Mimics entry exposes four actions:
 
 The annotator should not need to remember paths or training parameters during ordinary use. When a project is opened from `<dataset>/mcs_output/<case>.mcs`, the integration infers both the dataset root and current case from that path. If that inference fails, the user is asked to select the dataset folder.
 
-The ordinary training entry uses the active Mask name as the organ/task and runs the configured default training profile. The advanced training entry opens one lightweight settings window where the annotator can choose cases, validation split, fine-tuning method, decoder, model scale, image size, epochs, batch size, gradient accumulation and learning rate. If PyQt5 is not available in the embedded Mimics Python session, the entry falls back to a profile selector backed by `fewshot_config.json` instead of silently using defaults. No dataset export, image loading, training or inference runs in the Mimics foreground process.
+The ordinary training entry uses the active Mask name as the organ/task and runs the configured default training profile. The advanced training entry opens one lightweight settings window where the annotator can choose cases, validation split, fine-tuning method, decoder, model scale, image size, epochs, batch size, gradient accumulation and learning rate. If Qt bindings are not available in the embedded Mimics Python session, the entry falls back to a profile selector backed by `fewshot_config.json` and a small native Mimics parameter picker instead of silently using defaults. The Mimics process does not recursively scan Program Files for Qt bindings. If a Qt dialog is required, set `MIMICS_QT_PYTHONPATH` or `MIMICS_PYQT_PATH` to a Python-3.5-compatible PyQt5/PySide site-packages path. Do not install a modern PyQt5 wheel into Mimics Python 3.5. No dataset export, image loading, training or inference runs in the Mimics foreground process.
 
 Training starts only after a reminder that saved `.mcs` files are used. This prevents a common failure mode where the annotator has edited the current case but has not saved it yet, so the background export would train from old labels.
 
@@ -54,7 +54,7 @@ Every job writes a JSON status file under:
 - completed model checkpoint path;
 - prediction output path.
 
-The DINOv3 trainer writes structured training progress after initialization and after each epoch. The Mimics monitor reads this JSON status and logs visible training milestones with epoch, phase, train loss, validation Dice and best validation Dice. Text logs still exist, but the Mimics UI does not depend on parsing text logs.
+The DINOv3 trainer writes structured training progress after initialization, during train/validation batches, and after each epoch. The Mimics monitor reads this JSON status and logs visible training milestones with epoch, batch, phase, train loss, validation Dice, learning rate and best validation Dice. Text logs still exist, but the Mimics UI does not depend on parsing text logs.
 
 The job JSON keeps stable machine-readable states such as `waiting_for_gpu` and
 `waiting_for_background_mimics`. Mimics renders those as user-facing phrases
@@ -229,12 +229,19 @@ Prediction flow:
 3. Mimics starts `fewshot_pipeline.py infer`.
 4. External Python writes a prediction NIfTI.
 5. Mimics detects completion through a timer.
-6. `mimics_bridge.py mask_to_buffer` converts the NIfTI result to Mimics buffer order.
+6. `mimics_bridge.py mask_to_buffer` converts the NIfTI result to the current active Mimics image grid and buffer order.
 7. Mimics creates or updates `AI_<organ>`.
 
 `Predict Current Case` uses the latest local model for the active Mask name. `Predict With Model...` lets the annotator select a specific run or reusable model before inference.
 
 The current case is inferred from the open project path. If the project is not under `<dataset>/mcs_output/<case>.mcs`, prediction is not started because the workflow cannot safely match the open image to the dataset case.
+
+When applying a prediction to an open `.mcs`, the conversion bridge first tries
+to use `mimics_script.mimics_voxel_to_ras_matrix` stored on the active image.
+That matrix is derived from the actual imported Mimics image grid, so prediction
+masks are resampled into the same grid that `Mask.set_voxel_buffer()` expects.
+If that metadata is unavailable, the bridge falls back to the source image
+geometry and logs a warning.
 
 ## Failure Handling
 

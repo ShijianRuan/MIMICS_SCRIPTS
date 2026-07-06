@@ -106,6 +106,8 @@ def launch_create_mcs(output_dir, mimics_exe, lock_timeout_seconds=0.0):
             "# Auto-generated runner for background Mimics .mcs creation",
             "import sys, os",
             "sys.path.insert(0, r'{}')".format(str(RUNTIME)),
+            "os.environ['MIMICS_BRIDGE_PYTHON'] = r'{}'".format(str(sys.executable)),
+            "os.environ['MIMICS_BRIDGE_SCRIPT'] = r'{}'".format(str(ROOT / "mimics_bridge.py")),
             "import create_mcs_batch",
             "create_mcs_batch.main(r'{}')".format(str(output_dir)),
             "",
@@ -292,6 +294,23 @@ def cmd_kill_background(args):
     if os.name != "nt":
         print("Process cleanup is implemented for Windows Mimics workstations.")
         return 0
+    stopped_queues = []
+    stop_payload = {
+        "status": "stop_requested",
+        "requested_at_epoch": time.time(),
+        "reason": "tools/mimics_batch_cli.py kill-background",
+    }
+    for queue_dir in _runtime_owned_roots():
+        if not queue_dir.is_dir():
+            continue
+        try:
+            (queue_dir / "_mcs_queue_stop.json").write_text(json.dumps(stop_payload, indent=2, sort_keys=True), encoding="utf-8")
+            active = queue_dir / "_mcs_queue_active.json"
+            if active.is_file():
+                active.unlink()
+            stopped_queues.append(str(queue_dir))
+        except Exception:
+            pass
     markers = [
         "mimics_bridge.py",
         "nninteractive_bridge.py",
@@ -312,6 +331,7 @@ def cmd_kill_background(args):
     ]
     owned_roots.extend(_runtime_owned_roots())
     ps_roots = "@(" + ",".join("'{}'".format(str(r).replace("'", "''")) for r in owned_roots) + ")"
+    ps_queues = "@(" + ",".join("'{}'".format(str(r).replace("'", "''")) for r in stopped_queues) + ")"
     lock_paths = [str(BACKGROUND_MIMICS_LOCK_PATH), str(RESOURCE_LOCK_DIR / "gpu.lock")]
     ps_locks = "@(" + ",".join("'{}'".format(str(r).replace("'", "''")) for r in lock_paths) + ")"
     stop_log = ROOT / ".mimics_runtime" / "stop_background_last.json"
@@ -319,6 +339,7 @@ def cmd_kill_background(args):
     command = (
         "$markers={};"
         "$roots={};"
+        "$queues={};"
         "$locks={};"
         "$out='{}';"
         "$matched=Get-CimInstance Win32_Process | Where-Object {{"
@@ -328,13 +349,19 @@ def cmd_kill_background(args):
         "($markers | Where-Object {{ $cmd -like ('*' + $_ + '*') }})"
         "}};"
         "$records=@($matched | Select-Object ProcessId,Name,CommandLine);"
-        "$records | ConvertTo-Json -Depth 3 -Compress | Set-Content -Path $out -Encoding UTF8;"
-        "$matched | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }};"
+        "$killed=@();"
+        "$matched | ForEach-Object {{"
+        "  $procId=$_.ProcessId;"
+        "  Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue;"
+        "  $killed += [PSCustomObject]@{{ProcessId=$procId;Name=$_.Name;ExitCode=0;CommandLine=$_.CommandLine}};"
+        "}};"
         "Start-Sleep -Milliseconds 500;"
-        "$locks | ForEach-Object {{ Remove-Item -Path $_ -Force -ErrorAction SilentlyContinue }}"
-    ).format(ps_markers, ps_roots, ps_locks, str(stop_log).replace("'", "''"))
+        "$locks | ForEach-Object {{ Remove-Item -Path $_ -Force -ErrorAction SilentlyContinue }};"
+        "$report=[PSCustomObject]@{{RequestedAt=(Get-Date).ToString('s');QueueStopDirs=$queues;OwnedRoots=$roots;Matched=$records;Killed=$killed}};"
+        "$report | ConvertTo-Json -Depth 5 -Compress | Set-Content -Path $out -Encoding UTF8"
+    ).format(ps_markers, ps_roots, ps_queues, ps_locks, str(stop_log).replace("'", "''"))
     subprocess.Popen(["powershell", "-NoProfile", "-Command", command], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print("Stop request submitted for integration background processes. Details: {}".format(stop_log))
+    print("Stop request submitted for integration background processes. Queue stop markers: {}. Details: {}".format(len(stopped_queues), stop_log))
     return 0
 
 

@@ -138,6 +138,7 @@ def stop_background_processes():
     markers = "@(" + ",".join("'{}'".format(marker.replace("'", "''")) for marker in MARKERS) + ")"
     owned_roots = _owned_roots() + _queue_dirs_from_runtime_state()
     roots = "@(" + ",".join("'{}'".format(root.replace("'", "''")) for root in owned_roots) + ")"
+    queues = "@(" + ",".join("'{}'".format(path.replace("'", "''")) for path in stopped_queues) + ")"
     lock_paths = [
         os.path.join(runtime_common.resource_lock_dir(_project_root()), "gpu.lock"),
         os.path.join(runtime_common.resource_lock_dir(_project_root()), "background_mimics.lock"),
@@ -146,6 +147,7 @@ def stop_background_processes():
     command = (
         "$markers={};"
         "$roots={};"
+        "$queues={};"
         "$locks={};"
         "$out='{}';"
         "$matched=Get-CimInstance Win32_Process | Where-Object {{"
@@ -155,11 +157,17 @@ def stop_background_processes():
         "($markers | Where-Object {{ $cmd -like ('*' + $_ + '*') }})"
         "}};"
         "$records=@($matched | Select-Object ProcessId,Name,CommandLine);"
-        "$records | ConvertTo-Json -Depth 3 -Compress | Set-Content -Path $out -Encoding UTF8;"
-        "$matched | ForEach-Object {{ taskkill /PID $_.ProcessId /T /F 2>$null }};"
+        "$killed=@();"
+        "$matched | ForEach-Object {{"
+        "  $procId=$_.ProcessId;"
+        "  taskkill /PID $procId /T /F 2>$null 1>$null;"
+        "  $killed += [PSCustomObject]@{{ProcessId=$procId;Name=$_.Name;ExitCode=$LASTEXITCODE;CommandLine=$_.CommandLine}};"
+        "}};"
         "Start-Sleep -Milliseconds 500;"
-        "$locks | ForEach-Object {{ Remove-Item -Path $_ -Force -ErrorAction SilentlyContinue }}"
-    ).format(markers, roots, locks, stop_log.replace("'", "''"))
+        "$locks | ForEach-Object {{ Remove-Item -Path $_ -Force -ErrorAction SilentlyContinue }};"
+        "$report=[PSCustomObject]@{{RequestedAt=(Get-Date).ToString('s');QueueStopDirs=$queues;OwnedRoots=$roots;Matched=$records;Killed=$killed}};"
+        "$report | ConvertTo-Json -Depth 5 -Compress | Set-Content -Path $out -Encoding UTF8"
+    ).format(markers, roots, queues, locks, stop_log.replace("'", "''"))
     subprocess.Popen(
         ["powershell", "-NoProfile", "-Command", command],
         stdin=subprocess.DEVNULL,
@@ -169,7 +177,7 @@ def stop_background_processes():
     )
     _mimics_log(
         logging.INFO,
-        "Stop request submitted for Mimics-Script owned background processes only. Queue stop markers: {0}. Owned roots checked: {1}. Details: {2}".format(
+        "Stop request submitted for Mimics-Script owned background processes only. Queue stop markers: {0}. Owned roots checked: {1}. The stop report will list matched/killed PIDs: {2}".format(
             len(stopped_queues),
             len(owned_roots),
             stop_log,

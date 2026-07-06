@@ -925,15 +925,6 @@ def _start_next_batch_case(monitor):
     monitor["deadline"] = time.time() + monitor.get("timeout_seconds", 1800)
     monitor["done"] = False
 
-    _write_json_atomic(
-        os.path.join(job_dir, "job_state.json"),
-        {
-            "phase": "launching",
-            "requested_phase": "preparing",
-            "case_id": case_id,
-            "started_at": time.time(),
-        },
-    )
     _launch_bridge_job_thread(bridge_params, job_dir, output_dir, "preparing", case_id=case_id)
 
     _IMPORT_MONITORS[job_dir] = monitor
@@ -1118,15 +1109,6 @@ def _start_next_batch_prepare(monitor):
     monitor["deadline"] = time.time() + monitor.get("timeout_seconds", 1800)
     monitor["done"] = False
 
-    _write_json_atomic(
-        os.path.join(job_dir, "job_state.json"),
-        {
-            "phase": "launching",
-            "requested_phase": "preparing",
-            "case_id": case_id,
-            "started_at": time.time(),
-        },
-    )
     _launch_bridge_job_thread(bridge_params, job_dir, output_dir, "preparing", case_id=case_id)
 
     # Re-register monitor under new key (timer keeps running)
@@ -1339,6 +1321,8 @@ def _launch_background_mimics(output_dir, total_count=0, schedule_retry=True):
         f.write("# Auto-generated runner for background Mimics .mcs creation\n")
         f.write("import sys, os\n")
         f.write("sys.path.insert(0, r'{0}')\n".format(script_dir))
+        f.write("os.environ['MIMICS_BRIDGE_PYTHON'] = r'{0}'\n".format(_python_exe()))
+        f.write("os.environ['MIMICS_BRIDGE_SCRIPT'] = r'{0}'\n".format(_bridge_script()))
         f.write("import create_mcs_batch\n")
         f.write("create_mcs_batch.main(r'{0}')\n".format(output_dir))
 
@@ -1784,15 +1768,6 @@ def _discover_monitor_tick(monitor):
 
     _append_import_log(output_dir, "[1/{0}] Preparing: {1}".format(count, first_case_id))
     bridge_params = _build_bridge_params(first_case, axes, flips, first_work_dir)
-    _write_json_atomic(
-        os.path.join(first_job_dir, "job_state.json"),
-        {
-            "phase": "launching",
-            "requested_phase": "preparing",
-            "case_id": first_case_id,
-            "started_at": time.time(),
-        },
-    )
     _launch_bridge_job_thread(bridge_params, first_job_dir, output_dir, "preparing", case_id=first_case_id)
 
     # Bridge launched, timer will auto-chain remaining cases
@@ -2037,15 +2012,6 @@ def main():
         _mark_mcs_queue_active(os.path.dirname(os.path.abspath(output)), 1)
         _append_import_log(os.path.dirname(os.path.abspath(output)), "Preparing: {0}".format(case_info["case_id"]))
         bridge_params = _build_bridge_params(case_info, axes, flips, work_dir)
-        _write_json_atomic(
-            os.path.join(job_dir, "job_state.json"),
-            {
-                "phase": "launching",
-                "requested_phase": "preparing",
-                "case_id": case_info["case_id"],
-                "started_at": time.time(),
-            },
-        )
         _launch_bridge_job_thread(bridge_params, job_dir, os.path.dirname(os.path.abspath(output)), "preparing", case_id=case_info["case_id"])
 
         # Bridge launched, timer will queue the result for background Mimics.

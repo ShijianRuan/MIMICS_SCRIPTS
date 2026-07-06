@@ -324,7 +324,7 @@ def choose_preset():
 def reset_full_range():
     previous = _json_contrast(_current_contrast())
     low, high = _image_min_max()
-    _set_contrast_points(low, high)
+    low, high = _set_contrast_points(low, high)
     _save_state(
         {
             "previous_contrast": previous,
