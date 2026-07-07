@@ -550,15 +550,15 @@ geometry is converted from LPS to RAS before resampling. The bridge therefore
 does not convert mask affines to LPS during resampling; doing so would mix
 coordinate systems and can create left-right/anterior-posterior mirroring.
 
-If the metadata is missing, points to a missing file, is not a supported source
-type, or lacks enough geometry to compute the source-to-Mimics index transform,
-the integration falls back to the Mimics image buffer export and writes a warning
-to Mimics logging. If the source index-space or RAS/LPS world-coordinate contract
-is missing or unsupported, the fast path is skipped instead of guessing. Source
-file read errors are reported by the external worker; the foreground Mimics
-process does not open the source image just to probe readability. This fallback
-preserves old projects, but it can still cause a foreground pause on very large
-volumes.
+If source metadata is absent or uses an unsupported legacy geometry contract, the
+fast path is skipped and the normal Mimics buffer path may still be used for
+backward compatibility. If source metadata is present but points to a missing
+file/folder, the default behavior is to fail with an explicit error instead of
+silently switching to the Mimics buffer. A buffer fallback is allowed only when
+`fallback_to_mimics_buffer_when_source_unavailable` is set to `true` or
+`image_input_mode` is explicitly set to `mimics`. Source file read errors are
+reported by the external worker; the foreground Mimics process does not open the
+source image just to probe readability.
 
 The managed nnInteractive server is kept warm until its configured idle timeout
 or until `Stop Background Services` is run. This avoids turning every prompt

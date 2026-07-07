@@ -846,7 +846,8 @@ class TestCreateMcsBatch(unittest.TestCase):
             f.write(current_fp)
 
         self.assertTrue(os.path.isfile(mcs_path))
-        stored_fp = open(fp_path).read().strip()
+        with open(fp_path, "r") as f:
+            stored_fp = f.read().strip()
         self.assertEqual(current_fp, stored_fp)
         # Matching fingerprint → skip
 
@@ -854,7 +855,8 @@ class TestCreateMcsBatch(unittest.TestCase):
         new_fp = "sha256:def456"
         with open(fp_path, "w") as f:
             f.write(new_fp)
-        stored_fp2 = open(fp_path).read().strip()
+        with open(fp_path, "r") as f:
+            stored_fp2 = f.read().strip()
         self.assertNotEqual(current_fp, stored_fp2)
         # Different fingerprint → reprocess
 
@@ -1609,29 +1611,58 @@ class TestSourceImagePathEquivalence(unittest.TestCase):
         # Values should match within int16 truncation
         np.testing.assert_array_equal(data.astype(np.int16), stacked.astype(np.int16))
 
-    def test_source_image_skipped_when_file_unreadable(self):
-        """_source_image_export returns None when source file is inaccessible."""
-        from nninteractive_mimics import _source_image_export
-        import mimics as _mock_mimics
+    def test_source_image_missing_file_is_not_silent_fallback(self):
+        """Valid source metadata with a missing file should fail unless fallback is explicit."""
+        from nninteractive_mimics import (
+            _source_image_export,
+            SOURCE_IMAGE_PATH_METADATA,
+            SOURCE_IMAGE_KIND_METADATA,
+            SOURCE_IMAGE_INDEX_SPACE_METADATA,
+            SOURCE_IMAGE_MODALITY_METADATA,
+            SOURCE_WORLD_COORDINATE_SYSTEM_METADATA,
+            MIMICS_WORLD_COORDINATE_SYSTEM_METADATA,
+            SOURCE_TO_MIMICS_WORLD_MATRIX_METADATA,
+            SOURCE_VOXEL_TO_RAS_MATRIX_METADATA,
+            MIMICS_VOXEL_TO_RAS_MATRIX_METADATA,
+        )
 
-        # Simulate a missing source file
-        # _source_image_export depends on mimics.data.images.get_active()
-        # and image metadata. With mock mimics, get_active returns None,
-        # so the function should return None (early return).
-        config = {"prefer_source_image_for_nninteractive": True}
-        result = _source_image_export(None, config)
-        self.assertIsNone(result)
+        class _Meta:
+            def __init__(self):
+                self._values = {}
+            def set(self, name, value):
+                self._values[name] = value
+            def get(self, name):
+                return self._values.get(name, "")
+            def __getitem__(self, name):
+                class _Item:
+                    pass
+                item = _Item()
+                item.value = self._values[name]
+                return item
+        class _Image:
+            logical_dimensions = [2, 3, 4]
+            def __init__(self):
+                self.metadata = _Meta()
 
-    def test_source_image_file_accessibility_pre_check(self):
-        """_source_image_export pre-checks file readability before committing."""
-        from nninteractive_mimics import _source_image_export
-        import mimics as _mm
+        image = _Image()
+        identity = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+        ras_to_lps = [[-1.0, 0.0, 0.0, 0.0], [0.0, -1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+        image.metadata.set(SOURCE_IMAGE_PATH_METADATA, os.path.join(self.tmp, "missing.nii.gz"))
+        image.metadata.set(SOURCE_IMAGE_KIND_METADATA, "nifti")
+        image.metadata.set(SOURCE_IMAGE_INDEX_SPACE_METADATA, "nifti_ijk_matches_derived_dicom_columns_rows_slices_v1")
+        image.metadata.set(SOURCE_IMAGE_MODALITY_METADATA, "MR")
+        image.metadata.set(SOURCE_WORLD_COORDINATE_SYSTEM_METADATA, "ras")
+        image.metadata.set(MIMICS_WORLD_COORDINATE_SYSTEM_METADATA, "lps")
+        image.metadata.set(SOURCE_TO_MIMICS_WORLD_MATRIX_METADATA, json.dumps(ras_to_lps))
+        image.metadata.set(SOURCE_VOXEL_TO_RAS_MATRIX_METADATA, json.dumps(identity))
+        image.metadata.set(MIMICS_VOXEL_TO_RAS_MATRIX_METADATA, json.dumps(identity))
 
-        # Create a temp NIfTI and verify the pre-check logic exists.
-        # The function returns None when active image is None (mock Mimics),
-        # but the file accessibility check at lines 858-870 is structurally verified.
-        config = {"prefer_source_image_for_nninteractive": True}
-        result = _source_image_export(None, config)
+        with self.assertRaises(RuntimeError):
+            _source_image_export(image, {"prefer_source_image_for_nninteractive": True})
+        result = _source_image_export(image, {
+            "prefer_source_image_for_nninteractive": True,
+            "fallback_to_mimics_buffer_when_source_unavailable": True,
+        })
         self.assertIsNone(result)
 
 

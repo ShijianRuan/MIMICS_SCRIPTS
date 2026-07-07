@@ -792,6 +792,7 @@ def _source_image_export(image, config):
     image_input_mode = str(config.get("image_input_mode", "") or "").strip().lower()
     force_source = image_input_mode in ("source", "source_image", "original", "original_image")
     force_mimics_buffer = image_input_mode in ("mimics", "mimics_buffer", "buffer")
+    allow_source_fallback = bool(config.get("fallback_to_mimics_buffer_when_source_unavailable", False))
     if force_mimics_buffer or (not force_source and not bool(config.get("prefer_source_image_for_nninteractive", False))):
         _mimics_log(
             logging.INFO,
@@ -844,37 +845,34 @@ def _source_image_export(image, config):
         )
         return None
     if is_nifti and not os.path.isfile(path):
-        _mimics_log(
-            logging.WARNING,
-            "nnInteractive source image metadata points to a missing file; falling back to Mimics image buffer export: {0}".format(path),
-        )
-        return None
-    if is_nifti:
-        try:
-            with open(path, "rb") as _test:
-                pass
-        except (IOError, OSError) as exc:
+        message = "nnInteractive source image metadata points to a missing file: {0}".format(path)
+        if allow_source_fallback and not force_source:
             _mimics_log(
                 logging.WARNING,
-                "nnInteractive source image file cannot be read (may be locked by antivirus or another process); falling back to Mimics image buffer export: {0}. Error: {1}".format(
-                    path, exc,
-                ),
+                message + ". Falling back to Mimics image buffer export because fallback_to_mimics_buffer_when_source_unavailable is enabled.",
             )
             return None
+        raise RuntimeError(message + ". Fix the stored source path or set image_input_mode to \"mimics\" for an explicit buffer-based run.")
     if is_dicom and not os.path.isdir(path):
-        _mimics_log(
-            logging.WARNING,
-            "nnInteractive source DICOM metadata points to a missing folder; falling back to Mimics image buffer export: {0}".format(path),
-        )
-        return None
+        message = "nnInteractive source DICOM metadata points to a missing folder: {0}".format(path)
+        if allow_source_fallback and not force_source:
+            _mimics_log(
+                logging.WARNING,
+                message + ". Falling back to Mimics image buffer export because fallback_to_mimics_buffer_when_source_unavailable is enabled.",
+            )
+            return None
+        raise RuntimeError(message + ". Fix the stored source path or set image_input_mode to \"mimics\" for an explicit buffer-based run.")
     if _source_uses_hu_to_gv(kind, modality):
         intensity_transform = _hu_to_mimics_gv_transform()
         if intensity_transform is None and not force_source:
-            _mimics_log(
-                logging.WARNING,
-                "nnInteractive source-image fast path skipped because Mimics HU2GV conversion is unavailable. Falling back to Mimics image buffer export.",
-            )
-            return None
+            message = "nnInteractive source-image fast path cannot match Mimics CT intensity because Mimics HU2GV conversion is unavailable."
+            if allow_source_fallback:
+                _mimics_log(
+                    logging.WARNING,
+                    message + " Falling back to Mimics image buffer export because fallback_to_mimics_buffer_when_source_unavailable is enabled.",
+                )
+                return None
+            raise RuntimeError(message + " Set image_input_mode to \"mimics\" for an explicit buffer-based run or run from a Mimics environment that exposes HU2GV.")
         if intensity_transform is None and force_source:
             intensity_slope = 1.0
             intensity_intercept = 0.0
