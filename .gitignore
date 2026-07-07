@@ -1,12 +1,9 @@
 # Environments
 nninteractive_env/
 
-# Logs
+# Runtime state and caches (per-user/machine, auto-generated)
+.mimics_runtime/
 logs/
-
-# State files (per-user/machine)
-.fewshot_mimics_state.json
-.mimics_window_level_state.json
 
 # System files
 .DS_Store

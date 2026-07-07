@@ -465,7 +465,7 @@ The Scripting Library entries are organized by workflow:
 - `99_Admin`: background-service cleanup.
 
 Visible entries are intentionally thin wrappers. They all go through
-`scripting_library/_mimics_entrypoint.py`, which performs runtime path setup and
+`runtime_py35/_mimics_entrypoint.py`, which performs runtime path setup and
 loads the target runtime module. The wrappers do not call `importlib.reload()`
 on every click, because reload can discard in-memory monitors for background
 inference or training jobs while those jobs are still expected to report back to

@@ -66,9 +66,8 @@ def main():
         split="train", augmentation=aug, **data_kwargs
     )
 
-    val_dataset = MedicalVolumeDataset(
-        split="test", **data_kwargs
-    )
+    validation_enabled = bool(config.get("training", {}).get("validation_enabled", True))
+    val_dataset = MedicalVolumeDataset(split="test", **data_kwargs) if validation_enabled else None
 
     # Few-shot sampling
     k_shot = data_cfg.get("k_shot", -1)
@@ -82,12 +81,14 @@ def main():
         shuffle=True,
         num_workers=2,
     )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=1,
-        shuffle=False,
-        num_workers=1,
-    )
+    val_loader = None
+    if val_dataset is not None:
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=1,
+            shuffle=False,
+            num_workers=1,
+        )
 
     # Model
     model = DINOv33DSegmentor(config)

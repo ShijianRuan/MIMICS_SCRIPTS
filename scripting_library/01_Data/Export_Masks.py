@@ -7,10 +7,15 @@ import os
 import sys
 
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-LIBRARY_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
-if LIBRARY_DIR not in sys.path:
-    sys.path.insert(0, LIBRARY_DIR)
+_here = os.path.dirname(os.path.abspath(__file__))
+_root = _here
+for _ in range(5):
+    _rt = os.path.join(_root, "runtime_py35")
+    if os.path.isdir(_rt):
+        if _rt not in sys.path:
+            sys.path.insert(0, _rt)
+        break
+    _root = os.path.dirname(_root)
 
 from _mimics_entrypoint import run_runtime_entry
 

@@ -605,7 +605,16 @@ def yaml_scalar(value):
     return '"' + text + '"'
 
 
-def write_training_config(path, base_config, dataset_dir, exp_name, args, status_path=None, cancel_path=None):
+def write_training_config(
+    path,
+    base_config,
+    dataset_dir,
+    exp_name,
+    args,
+    status_path=None,
+    cancel_path=None,
+    validation_enabled=True,
+):
     path = Path(path)
     img_size = [int(part.strip()) for part in str(args.img_size).split(",")]
     model_path = args.model_path
@@ -656,6 +665,7 @@ def write_training_config(path, base_config, dataset_dir, exp_name, args, status
         "  lr: " + yaml_scalar(float(args.lr)),
         "  weight_decay: " + yaml_scalar(float(args.weight_decay)),
         "  keep_last_checkpoints: " + yaml_scalar(int(args.keep_last_checkpoints)),
+        "  validation_enabled: " + yaml_scalar(bool(validation_enabled)),
         "  sub_volume:",
         "    enabled: " + yaml_scalar(bool(args.sub_volume)),
         "    size: " + yaml_scalar([int(part.strip()) for part in str(args.sub_volume_size).split(",")]),
@@ -919,6 +929,7 @@ def cmd_train(args):
         min_val_samples=args.min_val_samples,
     )
     materialized_train, materialized_val = materialize_dataset(train_samples, dataset_dir, val_samples)
+    validation_enabled = bool(materialized_val)
     write_training_config(
         config_path,
         base_config,
@@ -927,6 +938,7 @@ def cmd_train(args):
         args,
         status_path=train_status,
         cancel_path=cancel_path,
+        validation_enabled=validation_enabled,
     )
     write_json_atomic(
         run_dir / "samples.json",

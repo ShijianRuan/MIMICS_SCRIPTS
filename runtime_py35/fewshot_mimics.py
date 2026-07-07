@@ -74,10 +74,25 @@ def _with_gui_updates_disabled(fn, *args, **kwargs):
 
 
 def _settings_path():
-    return os.path.join(_project_root(), ".fewshot_mimics_state.json")
+    return os.path.join(_project_root(), ".mimics_runtime", "fewshot_mimics_state.json")
+
+
+def _migrate_old_settings():
+    """Move legacy state file from project root into .mimics_runtime/."""
+    old_path = os.path.join(_project_root(), ".fewshot_mimics_state.json")
+    new_path = _settings_path()
+    if os.path.isfile(old_path) and not os.path.isfile(new_path):
+        try:
+            new_dir = os.path.dirname(new_path)
+            if not os.path.isdir(new_dir):
+                os.makedirs(new_dir)
+            os.rename(old_path, new_path)
+        except Exception:
+            pass
 
 
 def _load_settings():
+    _migrate_old_settings()
     return _read_json(_settings_path(), {}) or {}
 
 
@@ -143,6 +158,10 @@ def _fewshot_python(config, dinov3_root):
 
 def _pipeline_script():
     return os.path.join(_project_root(), "tools", "fewshot_pipeline.py")
+
+
+def _training_setup_ui_script():
+    return os.path.join(_project_root(), "tools", "fewshot_training_setup_ui.py")
 
 
 def _bridge_script():
@@ -623,6 +642,7 @@ def _latest_active_job(ts_root):
         "training",
         "running",
         "cancelling",
+        "configuring",
     ])
     rows = []
     for name in os.listdir(jobs_dir):
@@ -656,6 +676,9 @@ def _display_status(value):
         "training": "Training",
         "running": "Running inference",
         "cancelling": "Cancelling",
+        "configuring": "Configuring training",
+        "training_started": "Training started",
+        "closed": "Closed",
         "cancelled": "Cancelled",
         "failed": "Failed",
         "completed": "Completed",
@@ -1051,6 +1074,96 @@ def _launch_process(cmd, cwd=None):
     )
 
 
+def _launch_external_advanced_training(config, organ, ts_root):
+    """Open the advanced training setup outside the Mimics process.
+
+    This function must stay lightweight: it writes small JSON files, starts the
+    external UI, and returns.  Dataset export and training are launched later by
+    the external UI.
+    """
+    script = _training_setup_ui_script()
+    if not os.path.isfile(script):
+        raise RuntimeError("External training setup UI was not found: {0}".format(script))
+    dinov3_root = _dinov3_root(config)
+    python_exe = _fewshot_python(config, dinov3_root)
+    setup_id = "setup_{0}_{1}".format(time.strftime("%Y%m%dT%H%M%S"), uuid.uuid4().hex[:8])
+    workspace = _workspace(ts_root)
+    jobs_dir = os.path.join(workspace, "jobs")
+    if not os.path.isdir(jobs_dir):
+        os.makedirs(jobs_dir)
+    status_path = _status_path(ts_root, setup_id)
+    context_path = os.path.join(jobs_dir, setup_id + "_context.json")
+    context = {
+        "schema_version": "mimics_fewshot_setup_context.v1",
+        "setup_id": setup_id,
+        "organ": organ,
+        "ts_root": os.path.abspath(ts_root),
+        "workspace": workspace,
+        "project_root": _project_root(),
+        "pipeline_script": _pipeline_script(),
+        "dinov3_root": dinov3_root,
+        "python_exe": python_exe,
+        "mimics_exe": _find_mimics_exe() or "",
+        "config": config,
+        "case_ids": _case_ids_from_dataset(ts_root),
+        "current_project_path": _current_project_path() or "",
+        "current_case_id": _infer_case_id(ts_root) or "",
+        "setup_status_path": status_path,
+        "created_at_epoch": time.time(),
+    }
+    status = {
+        "schema_version": "mimics_fewshot_setup.v1",
+        "job_id": setup_id,
+        "kind": "train_setup",
+        "status": "configuring",
+        "organ": organ,
+        "ts_root": os.path.abspath(ts_root),
+        "workspace": workspace,
+        "context_path": context_path,
+        "created_at_epoch": time.time(),
+        "updated_at_epoch": time.time(),
+    }
+    _write_json_atomic(status_path, status)
+    _write_json_atomic(context_path, context)
+    process = _launch_process([python_exe, script, "--context", context_path], cwd=_project_root())
+    current_status = _read_json(status_path, status) or status
+    current_status["controller_pid"] = process.pid
+    current_status["updated_at_epoch"] = time.time()
+    _write_json_atomic(status_path, current_status)
+    monitor_started = _start_monitor(
+        {
+            "monitor_key": "setup_" + setup_id,
+            "kind": "train_setup",
+            "deadline": time.time() + float(config.get("training_setup_timeout_seconds", 12 * 60 * 60)),
+            "status_path": status_path,
+            "controller_pid": process.pid,
+            "last_line": "",
+        },
+        poll_seconds=float(config.get("training_monitor_poll_seconds", 5.0)),
+    )
+    _mimics_log(
+        logging.INFO,
+        "DINOv3 advanced training setup opened in an external process. Organ: {0}, PID: {1}, setup: {2}".format(
+            organ,
+            process.pid,
+            setup_id,
+        ),
+    )
+    if not monitor_started:
+        _mimics_log(
+            logging.WARNING,
+            "DINOv3 setup monitor could not start in this Mimics session. Use Show Status after starting training from the external setup window.",
+        )
+    mimics.dialogs.message_box(
+        "Advanced training setup opened outside Mimics.\n\n"
+        "Mimics is free to use while you choose samples and parameters. "
+        "After you click Start Training, use Show Status for progress.",
+        title=TITLE,
+        ui_blocking=False,
+    )
+    return 0
+
+
 def _train_model(advanced=False):
     organ = _selected_organ()
     if not organ:
@@ -1068,6 +1181,26 @@ def _train_model(advanced=False):
         return 1
     config = _config()
     if advanced:
+        mode = str(config.get("advanced_ui_mode", "external")).strip().lower()
+        if mode != "internal":
+            try:
+                return _launch_external_advanced_training(config, organ, ts_root)
+            except Exception as exc:
+                _mimics_log(
+                    logging.ERROR,
+                    "DINOv3 external advanced setup could not start: {0}".format(exc),
+                )
+                if not bool(config.get("advanced_ui_fallback_to_internal", True)):
+                    mimics.dialogs.message_box(
+                        "Could not open the external Advanced setup UI.\n\n{0}".format(exc),
+                        title=TITLE,
+                        ui_blocking=False,
+                    )
+                    return 1
+                _mimics_log(
+                    logging.WARNING,
+                    "Falling back to Mimics internal Advanced dialogs.",
+                )
         options = _advanced_training_options(config, ts_root)
         if options is None:
             return 0
@@ -1433,16 +1566,77 @@ def _stop_monitor(key):
             pass
 
 
+def _monitor_setup_tick(monitor, status):
+    key = monitor.get("monitor_key")
+    state = status.get("status")
+    line = _format_job_line(status)
+    if line and line != monitor.get("last_line"):
+        monitor["last_line"] = line
+        _mimics_log(logging.INFO, "DINOv3 advanced setup status: {0}".format(line))
+    if state == "training_started":
+        training_status_path = status.get("training_status_path")
+        training_job_id = status.get("training_job_id", "?")
+        if training_status_path and os.path.isfile(training_status_path):
+            monitor["kind"] = "train"
+            monitor["status_path"] = training_status_path
+            monitor["last_line"] = ""
+            _mimics_log(
+                logging.INFO,
+                "DINOv3 training started from external Advanced setup. Job: {0}. Status: {1}".format(
+                    training_job_id,
+                    training_status_path,
+                ),
+            )
+            return
+        _stop_monitor(key)
+        mimics.dialogs.message_box(
+            "Advanced setup reported training started, but the training status file was not found.\n\n"
+            "{0}".format(training_status_path or "(missing path)"),
+            title=TITLE,
+            ui_blocking=False,
+        )
+        return
+    if state in ("closed", "cancelled"):
+        _stop_monitor(key)
+        _mimics_log(logging.INFO, "DINOv3 advanced setup closed before launching training.")
+        return
+    if state == "failed":
+        _stop_monitor(key)
+        mimics.dialogs.message_box(
+            "DINOv3 Advanced setup failed.\n\n{0}".format(status.get("error", "Unknown error")),
+            title=TITLE,
+            ui_blocking=False,
+        )
+        return
+    if state == "configuring":
+        pid = status.get("controller_pid") or monitor.get("controller_pid")
+        if pid and not _process_exists(pid):
+            status["status"] = "closed"
+            status["updated_at_epoch"] = time.time()
+            try:
+                _write_json_atomic(monitor["status_path"], status)
+            except Exception:
+                pass
+            _stop_monitor(key)
+            _mimics_log(logging.INFO, "DINOv3 advanced setup process ended before launching training.")
+        return
+
+
 def _monitor_tick(monitor):
     key = monitor.get("monitor_key")
     if time.time() > monitor.get("deadline", 0):
         _stop_monitor(key)
         if monitor.get("kind") == "train":
             mimics.dialogs.message_box("Few-shot training monitor timed out. The background job may still be running; use Show Status.", title=TITLE, ui_blocking=False)
+        elif monitor.get("kind") == "train_setup":
+            mimics.dialogs.message_box("Few-shot advanced setup monitor timed out. The setup window or background job may still be running; use Show Status.", title=TITLE, ui_blocking=False)
         else:
             mimics.dialogs.message_box("Few-shot inference timed out.", title=TITLE, ui_blocking=False)
         return
     status = _read_json(monitor["status_path"], {}) or {}
+    if monitor.get("kind") == "train_setup":
+        _monitor_setup_tick(monitor, status)
+        return
     if monitor.get("kind") == "train":
         line = _format_job_line(status)
         if line and line != monitor.get("last_line"):

@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Import dataset cases into Mimics .mcs work packages."""
+"""Clear all Mimics-Script caches, temporary files, and intermediate data."""
 
 from __future__ import print_function
 
 import os
 import sys
-
 
 _here = os.path.dirname(os.path.abspath(__file__))
 _root = _here
@@ -19,5 +18,4 @@ for _ in range(5):
 
 from _mimics_entrypoint import run_runtime_entry
 
-
-run_runtime_entry(globals(), __file__, "mimics_import")
+run_runtime_entry(globals(), __file__, "mimics_stop_background", function_name="clear_cache_main")

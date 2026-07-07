@@ -24,7 +24,9 @@ The Mimics entry exposes four actions:
 
 The annotator should not need to remember paths or training parameters during ordinary use. When a project is opened from `<dataset>/mcs_output/<case>.mcs`, the integration infers both the dataset root and current case from that path. If that inference fails, the user is asked to select the dataset folder.
 
-The ordinary training entry uses the active Mask name as the organ/task and runs the configured default training profile. The advanced training entry opens one lightweight settings window where the annotator can choose cases, validation split, fine-tuning method, decoder, model scale, image size, epochs, batch size, gradient accumulation and learning rate. If Qt bindings are not available in the embedded Mimics Python session, the entry falls back to a profile selector backed by `fewshot_config.json` and a small native Mimics parameter picker instead of silently using defaults. The Mimics process does not recursively scan Program Files for Qt bindings. If a Qt dialog is required, set `MIMICS_QT_PYTHONPATH` or `MIMICS_PYQT_PATH` to a Python-3.5-compatible PyQt5/PySide site-packages path. Do not install a modern PyQt5 wheel into Mimics Python 3.5. No dataset export, image loading, training or inference runs in the Mimics foreground process.
+The ordinary training entry uses the active Mask name as the organ/task and runs the configured default training profile. The advanced training entry now opens an external setup window by default. Mimics writes a small context JSON, starts `tools/fewshot_training_setup_ui.py` with `Popen`, and returns immediately; it does not wait for parameter input. The external setup window keeps the default view intentionally small: profile, sample selection, training length, validation split and resource preset. Fine-tuning method, decoder, model scale, image size, learning rate, checkpoint retention and other expert controls stay available on the Expert tab, but annotators do not need to touch them for routine work. When the user clicks Start Training, the external process starts `tools/fewshot_pipeline.py train` and writes the normal training job status file. Mimics only polls status files and logs progress.
+
+The external setup UI uses standard Tkinter in the external DINOv3 Python environment, not the embedded Mimics Python session. It is not topmost, does not call back into Mimics, and does not wait on Mimics APIs. This avoids requiring PyQt inside Mimics and avoids Mimics GUI black screens caused by in-process widget imports or long modal parameter collection. If Tkinter is missing in the external Python environment, the setup status is marked failed with a user-facing message and training is not started. If `advanced_ui_mode` is set to `internal`, or if the external setup process itself cannot start and `advanced_ui_fallback_to_internal` is enabled, the older Mimics-internal Qt/profile dialog path is still available as a fallback. The Mimics process does not recursively scan Program Files for Qt bindings. If an in-process Qt dialog is explicitly required, set `MIMICS_QT_PYTHONPATH` or `MIMICS_PYQT_PATH` to a Python-3.5-compatible PyQt5/PySide site-packages path. Do not install a modern PyQt5 wheel into Mimics Python 3.5. No dataset export, image loading, training or inference runs in the Mimics foreground process.
 
 Training starts only after a reminder that saved `.mcs` files are used. This prevents a common failure mode where the annotator has edited the current case but has not saved it yet, so the background export would train from old labels.
 
@@ -44,6 +46,7 @@ Every job writes a JSON status file under:
 - job type;
 - organ;
 - current state;
+- setup state such as `Configuring training` while the external Advanced window is open;
 - resource wait reason when the job is waiting for GPU or background Mimics;
 - epoch progress when training has started;
 - train/validation sample counts and selected case IDs;
@@ -55,6 +58,8 @@ Every job writes a JSON status file under:
 - prediction output path.
 
 The DINOv3 trainer writes structured training progress after initialization, during train/validation batches, and after each epoch. The Mimics monitor reads this JSON status and logs visible training milestones with epoch, batch, phase, train loss, validation Dice, learning rate and best validation Dice. Text logs still exist, but the Mimics UI does not depend on parsing text logs.
+
+The external Advanced setup window also keeps a Status panel open after training starts. It polls the same job JSON approximately every 1.5 seconds and shows the current stage, sample counts, epoch, loss, validation Dice when validation is enabled, best Dice, errors and completion state. Closing the external setup window does not stop training; `Stop Latest Job` remains the cancellation path from Mimics.
 
 The job JSON keeps stable machine-readable states such as `waiting_for_gpu` and
 `waiting_for_background_mimics`. Mimics renders those as user-facing phrases
@@ -187,10 +192,33 @@ Materialized training datasets under `fewshot_models/datasets/<organ>/<run_id>/`
 The Mimics UI exposes two levels:
 
 - `DINOv3_Train_Update_Model.py`: default profile, minimal prompts.
-- `DINOv3_Train_Advanced.py`: one settings window for sample and parameter selection when PyQt5 is available; otherwise a non-PyQt profile selector for the profiles in `fewshot_config.json`.
+- `DINOv3_Train_Advanced.py`: external setup window for sample and parameter selection; Mimics only starts the setup process and monitors JSON status.
+
+The external Advanced UI previews are stored at:
+
+- `docs/images/dinov3_advanced_training_ui_preview.png`: default Setup tab;
+- `docs/images/dinov3_advanced_training_expert_preview.png`: optional Expert tab.
+
+Parameter controls are intentionally split by risk:
+
+- routine controls use selections: profile, training length, validation split, resource preset, sample order;
+- expert architecture controls use selections: fine-tuning method, decoder, installed pretrained model scale, modality, base config, learning rate, weight decay, image size and sub-volume depth;
+- numeric expert controls use spin boxes: epochs, batch size, gradient accumulation, LoRA rank/alpha, adapter bottleneck, checkpoint retention and validation fraction;
+- only the optional model path override remains a free-form text input in the external UI.
+
+The Expert tab only exposes parameters that are wired into the current pipeline and DINOv3 trainer:
+
+- fine-tuning method, LoRA rank/alpha, adapter bottleneck, decoder, model path, image size, modality, learning rate, weight decay, epoch count, batch size, gradient accumulation, mixed precision, checkpoint retention, and materialized dataset retention are written into the generated DINOv3 YAML;
+- pretrained model scale maps to an installed local model directory under `external/dinov3-medical-seg/models`; unavailable scales are not advertised in the external UI;
+- sub-volume depth is the only sub-volume dimension exposed because the current trainer splits by depth; it still writes the three-value config expected by the trainer;
+- `No validation` writes `training.validation_enabled: false`, so the DINOv3 trainer does not reuse training data as validation.
+
+Setup presets are applied only when the user explicitly selects them. Expert edits are not re-applied or overwritten at Start Training. If an Expert value no longer matches a setup preset, the Setup tab shows `Custom (...)` or `Custom` rather than falling back to the first preset.
+
+The static preview PNG generator uses Pillow only when `tools/fewshot_training_setup_ui.py --preview ...` is invoked for documentation. Runtime Advanced UI startup does not import or require Pillow.
 
 All DINOv3 Scripting Library entries are thin wrappers through
-`scripting_library/_mimics_entrypoint.py`. They do not reload
+`runtime_py35/_mimics_entrypoint.py`. They do not reload
 `fewshot_mimics.py` on every click, so active prediction monitors are not reset
 when the annotator opens status, starts another allowed action, or stops a job.
 
@@ -200,9 +228,11 @@ Defaults and profiles live in `fewshot_config.json`:
 - external Python path;
 - base config;
 - training profiles such as `balanced`, `fast_check`, `low_memory`, and `quality_lora`;
+- advanced UI mode: `advanced_ui_mode` defaults to `external`; use `internal` only when an in-process Mimics dialog is explicitly desired;
+- fallback behavior: `advanced_ui_fallback_to_internal` defaults to enabled so a missing external UI does not silently use defaults;
 - fine-tuning method: `frozen`/decoder-only, `lora`, `adapter`, or `full`;
 - decoder: `linear3d`, `mlp_probe`, `segformer3d`, or `dpt3d`;
-- pretrained model scale: `vitb16`, `vitl16`, or `vith16plus`;
+- pretrained model scale: `vitb16`, `vitl16`, or `vith16plus` when the corresponding local model directory exists;
 - epochs;
 - batch size;
 - gradient accumulation;

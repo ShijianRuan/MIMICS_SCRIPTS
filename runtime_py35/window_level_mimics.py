@@ -16,7 +16,7 @@ import runtime_common
 
 
 TITLE = "Window/Level Presets"
-STATE_FILE = ".mimics_window_level_state.json"
+STATE_FILE = os.path.join(".mimics_runtime", "window_level_state.json")
 
 DEFAULT_PRESETS = [
     {"name": "Lung", "width": 1500, "level": -600, "keywords": [
@@ -77,7 +77,22 @@ def _state_path():
     return os.path.join(_script_root(), STATE_FILE)
 
 
+def _migrate_old_state():
+    """Move legacy state file from project root into .mimics_runtime/."""
+    old_path = os.path.join(_script_root(), ".mimics_window_level_state.json")
+    new_path = _state_path()
+    if os.path.isfile(old_path) and not os.path.isfile(new_path):
+        try:
+            new_dir = os.path.dirname(new_path)
+            if not os.path.isdir(new_dir):
+                os.makedirs(new_dir)
+            os.rename(old_path, new_path)
+        except Exception:
+            pass
+
+
 def _load_state():
+    _migrate_old_state()
     return runtime_common.read_json(_state_path(), {}) or {}
 
 

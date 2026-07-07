@@ -682,6 +682,53 @@ def test_fewshot_profile_selector(fake, tmp):
     return "DINOv3 profile selector returned the chosen training profile without PyQt5"
 
 
+def test_fewshot_external_advanced_setup(fake, tmp):
+    fake.reset_scene(image_shape=(2, 2, 2), minimum_value=0, maximum_value=100)
+    module = import_runtime_module("fewshot_mimics")
+    ts_root = tmp / "dataset"
+    (ts_root / "mcs_output").mkdir(parents=True, exist_ok=True)
+    (ts_root / "mcs_output" / "s0001.mcs").write_text("", encoding="utf-8")
+    fake.file.project_path = str(ts_root / "mcs_output" / "s0001.mcs")
+    launched = []
+
+    class Proc:
+        pid = 76543
+
+    old_launch = module._launch_process
+    old_monitor = module._start_monitor
+    old_project = module._project_root
+    old_script = module._training_setup_ui_script
+    try:
+        module._launch_process = lambda cmd, cwd=None: launched.append((cmd, cwd)) or Proc()
+        module._start_monitor = lambda monitor, poll_seconds=1.0: True
+        module._project_root = lambda: str(ROOT)
+        module._training_setup_ui_script = lambda: str(ROOT / "tools" / "fewshot_training_setup_ui.py")
+        result = module._launch_external_advanced_training(
+            {"python": sys.executable, "dinov3_project": "external/dinov3-medical-seg"},
+            "liver",
+            str(ts_root),
+        )
+    finally:
+        module._launch_process = old_launch
+        module._start_monitor = old_monitor
+        module._project_root = old_project
+        module._training_setup_ui_script = old_script
+    assert_equal(result, 0, "external setup launch result")
+    assert_equal(len(launched), 1, "external setup Popen call count")
+    cmd, _cwd = launched[0]
+    assert_true("fewshot_training_setup_ui.py" in cmd[1], "external setup script not launched")
+    assert_true("--context" in cmd, "external setup context argument missing")
+    context_path = Path(cmd[cmd.index("--context") + 1])
+    assert_true(context_path.is_file(), "external setup context file missing")
+    context = json.loads(context_path.read_text(encoding="utf-8"))
+    assert_equal(context["organ"], "liver", "external setup organ")
+    status = json.loads(Path(context["setup_status_path"]).read_text(encoding="utf-8"))
+    assert_equal(status["status"], "configuring", "external setup status")
+    assert_equal(status["controller_pid"], 76543, "external setup controller pid")
+    assert_true(fake.dialogs.messages[-1]["ui_blocking"] is False, "external setup message should be non-blocking")
+    return "DINOv3 Advanced setup launches externally and returns immediately"
+
+
 def test_stop_background_locks(fake, tmp):
     module = import_runtime_module("mimics_stop_background")
     module._project_root = lambda: str(tmp)
@@ -739,6 +786,7 @@ def main(argv=None):
     if args.only in ("fewshot", "all"):
         tests.append(("DINOv3 few-shot Mimics-side flow", lambda: test_fewshot_apply_prediction_and_stop(fake, tmp / "fewshot")))
         tests.append(("DINOv3 few-shot profile selector", lambda: test_fewshot_profile_selector(fake, tmp / "fewshot_profile")))
+        tests.append(("DINOv3 external Advanced setup", lambda: test_fewshot_external_advanced_setup(fake, tmp / "fewshot_external_setup")))
     if args.only in ("stop", "all"):
         tests.append(("Stop Background Services lock cleanup", lambda: test_stop_background_locks(fake, tmp / "stop")))
     for name, func in tests:

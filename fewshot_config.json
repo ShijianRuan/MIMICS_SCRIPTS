@@ -23,6 +23,8 @@
   "default_sub_volume_size": "32,256,256",
   "default_val_fraction": 0.2,
   "default_weight_decay": 0.01,
+  "advanced_ui_fallback_to_internal": true,
+  "advanced_ui_mode": "external",
   "gpu_lock_timeout_seconds": 86400,
   "inference_gpu_lock_timeout_seconds": 3600,
   "background_mimics_lock_timeout_seconds": 21600,

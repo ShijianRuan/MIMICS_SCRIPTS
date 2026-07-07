@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Small shared launcher for Mimics Scripting Library entries.
+"""Shared launcher for Mimics Scripting Library entries.
 
-Each visible entry should only declare the runtime module/action it wants.
+Each visible entry declares the runtime module/action it wants.
 This keeps path setup and module loading behavior identical across folders.
+
+This file lives in runtime_py35/ so it does NOT appear as an entry in the
+Mimics Scripting Library menu.
 """
 
 from __future__ import print_function
@@ -12,34 +15,33 @@ import os
 import sys
 
 
-def _library_root(caller_file):
+def _project_root():
+    """Return the project root (parent of runtime_py35/)."""
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _runtime_dir():
+    """Return the runtime_py35/ directory."""
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _find_runtime_dir(caller_file):
+    """Walk up from caller_file to find the project root's runtime_py35/."""
     current = os.path.abspath(os.path.dirname(caller_file))
-    for _ in range(4):
-        if os.path.isfile(os.path.join(current, "_mimics_entrypoint.py")):
-            return current
+    for _ in range(6):
+        candidate = os.path.join(current, "runtime_py35")
+        if os.path.isdir(candidate):
+            return os.path.abspath(candidate)
         parent = os.path.dirname(current)
         if parent == current:
             break
         current = parent
-    return os.path.abspath(os.path.join(os.path.dirname(caller_file), ".."))
-
-
-def _runtime_dir(caller_file):
-    script_dir = os.path.abspath(os.path.dirname(caller_file))
-    library_root = _library_root(caller_file)
-    candidates = (
-        os.path.join(script_dir, "runtime_py35"),
-        os.path.join(library_root, "runtime_py35"),
-        os.path.join(os.path.dirname(library_root), "runtime_py35"),
-    )
-    for candidate in candidates:
-        if os.path.isdir(candidate):
-            return os.path.abspath(candidate)
-    return os.path.abspath(os.path.join(os.path.dirname(library_root), "runtime_py35"))
+    # Fallback: use our own location
+    return _runtime_dir()
 
 
 def load_runtime_module(caller_file, module_name):
-    runtime_dir = _runtime_dir(caller_file)
+    runtime_dir = _find_runtime_dir(caller_file)
     if runtime_dir not in sys.path:
         sys.path.insert(0, runtime_dir)
     return importlib.import_module(module_name)
