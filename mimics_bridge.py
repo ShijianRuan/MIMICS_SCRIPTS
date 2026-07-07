@@ -95,22 +95,94 @@ def is_nifti_file(path: str) -> bool:
 
 # -- NIfTI -> derived DICOM --------------------------------------------
 
-def nifti_to_derived_dicom(nifti_path: str, dicom_out: str, case_id: str = "case") -> dict:
+def _sitk_is_axial(sitk_img, threshold: float = 0.001) -> bool:
+    """Return True if the SimpleITK image has no Z-tilt in row/column cosines.
+
+    A purely axial (or XY-plane-rotated) image has near-zero Z components in
+    both the row direction (column 0 of the direction matrix) and the column
+    direction (column 1).  Oblique acquisitions with gantry-tilt have non-zero
+    Z components and must be resampled before DICOM export so that Mimics
+    background import_dicom_images can group all slices into a single series.
+    """
+    direction = np.array(sitk_img.GetDirection()).reshape(3, 3)
+    spacing = np.array(sitk_img.GetSpacing())
+    row_cos = direction[:, 0] / max(np.linalg.norm(direction[:, 0]), 1e-12)
+    col_cos = direction[:, 1] / max(np.linalg.norm(direction[:, 1]), 1e-12)
+    return abs(float(row_cos[2])) < threshold and abs(float(col_cos[2])) < threshold
+
+
+def _resample_to_axial(sitk_img):
+    """Resample an oblique image to an axis-aligned LPS grid with the same spacing.
+
+    The output grid covers the full bounding box of the original image so that
+    no data is lost.  Linear interpolation is used; out-of-bounds voxels are
+    filled with -1024 (air HU, safe for CT resampling).
+    """
+    import SimpleITK as sitk
+
+    spacing = np.array(sitk_img.GetSpacing())
+    direction = np.array(sitk_img.GetDirection()).reshape(3, 3)
+    origin = np.array(sitk_img.GetOrigin())
+    size = np.array(sitk_img.GetSize(), dtype=float)
+
+    # 8 corners of the original image in world (LPS) coordinates
+    corners = []
+    for ix in [0.0, size[0] - 1]:
+        for iy in [0.0, size[1] - 1]:
+            for iz in [0.0, size[2] - 1]:
+                idx = np.array([ix, iy, iz])
+                corners.append(origin + direction @ (spacing * idx))
+    corners = np.array(corners)
+
+    new_origin = corners.min(axis=0)
+    new_size = np.ceil((corners.max(axis=0) - new_origin) / spacing + 1).astype(int)
+
+    ref = sitk.Image(int(new_size[0]), int(new_size[1]), int(new_size[2]),
+                     sitk_img.GetPixelID())
+    ref.SetOrigin(new_origin.tolist())
+    ref.SetSpacing(spacing.tolist())
+    ref.SetDirection([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0])
+
+    resampler = sitk.ResampleImageFilter()
+    resampler.SetReferenceImage(ref)
+    resampler.SetInterpolator(sitk.sitkLinear)
+    resampler.SetDefaultPixelValue(-1024.0)
+    return resampler.Execute(sitk_img)
+
+
+def nifti_to_derived_dicom(
+    nifti_path: str,
+    dicom_out: str,
+    case_id: str = "case",
+    source_nifti_out: str | None = None,
+) -> dict:
     """Convert NIfTI image to derived DICOM series for Mimics import."""
-    import nibabel as nib
     import pydicom
     from pydicom.dataset import FileDataset, FileMetaDataset
     from pydicom.uid import ExplicitVRLittleEndian, generate_uid, CTImageStorage
 
-    img = nib.load(nifti_path)
-    array = np.asanyarray(img.dataobj)
+    sitk_img = _read_image_sitk_lps(nifti_path)
+
+    # Resample oblique (3D-tilted) images to axis-aligned LPS so that Mimics
+    # background import_dicom_images groups all slices into one series.
+    resampled_to_axial = False
+    if not _sitk_is_axial(sitk_img):
+        sitk_img = _resample_to_axial(sitk_img)
+        resampled_to_axial = True
+
+    if source_nifti_out and resampled_to_axial:
+        import SimpleITK as sitk
+
+        out_path = Path(source_nifti_out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        sitk.WriteImage(sitk_img, str(out_path), useCompression=True)
+
+    array = _sitk_to_xyz_array(sitk_img)
     if array.ndim != 3:
         raise ValueError("NIfTI image must be 3D: {} shape={}".format(nifti_path, array.shape))
 
-    # Normalize qform/sform codes before reading the affine so the DICOM
-    # geometry is derived from a consistent header.  See _normalize_nifti_affine.
-    affine_ras = _normalize_nifti_affine(img)
-    affine_lps = RAS_TO_LPS @ affine_ras
+    # SimpleITK image is already LPS-oriented; extract the LPS affine directly.
+    affine_lps = _sitk_to_lps_affine(sitk_img)
     shape_3d = array.shape
 
     # Use affine column norms so spacing and direction cosines share exactly
@@ -134,6 +206,7 @@ def nifti_to_derived_dicom(nifti_path: str, dicom_out: str, case_id: str = "case
     source_hash = "sha256:" + hashlib.sha256(str(Path(nifti_path).resolve()).encode("utf-8")).hexdigest()
     study_uid = generate_uid(entropy_srcs=[source_hash, "study"])
     series_uid = generate_uid(entropy_srcs=[source_hash, "series"])
+    frame_of_reference_uid = generate_uid(entropy_srcs=[source_hash, "frame_of_reference"])
 
     out_dir = Path(dicom_out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -181,8 +254,16 @@ def nifti_to_derived_dicom(nifti_path: str, dicom_out: str, case_id: str = "case
         ds.PatientID = case_id
         ds.Modality = "CT"
         ds.StudyInstanceUID = study_uid
+        ds.StudyID = "1"
+        ds.StudyDate = "19000101"
+        ds.StudyTime = "000000"
         ds.SeriesInstanceUID = series_uid
+        ds.SeriesNumber = 1
+        ds.SeriesDate = "19000101"
+        ds.SeriesTime = "000000"
         ds.SeriesDescription = "Derived from NIfTI"
+        ds.FrameOfReferenceUID = frame_of_reference_uid
+        ds.AcquisitionNumber = 1
         ds.Rows = dicom_rows
         ds.Columns = dicom_columns
         ds.BitsAllocated = bits_allocated
@@ -202,6 +283,10 @@ def nifti_to_derived_dicom(nifti_path: str, dicom_out: str, case_id: str = "case
             float(slice_origin[1]),
             float(slice_origin[2]),
         ]
+        # SliceLocation: signed distance of the slice from the origin along
+        # the normal direction (cross product of row/column cosines).
+        normal = np.cross(row_cosine, column_cosine)
+        ds.SliceLocation = float(np.dot(normal, slice_origin[:3]))
         ds.ImageOrientationPatient = [
             float(row_cosine[0]), float(row_cosine[1]), float(row_cosine[2]),
             float(column_cosine[0]), float(column_cosine[1]), float(column_cosine[2]),
@@ -217,14 +302,107 @@ def nifti_to_derived_dicom(nifti_path: str, dicom_out: str, case_id: str = "case
         ds.PixelData = slice_data_dicom.tobytes()
         ds.save_as(dcm_path)
 
+    _validate_derived_dicom_series(out_dir, num_slices, str(series_uid), str(study_uid))
+
     return {
         "shape": [int(dicom_columns), int(dicom_rows), int(num_slices)],
         "spacing": [float(spacing[0]), float(spacing[1]), float(spacing[2])],
         "origin": [float(v) for v in origin],
         "direction": [float(v) for v in direction_matrix.flatten()],
+        "affine_lps": affine_lps.tolist(),
+        "resampled_to_axial": resampled_to_axial,
+        "source_nifti_path": str(Path(source_nifti_out).resolve()) if (source_nifti_out and resampled_to_axial) else "",
         "series_uid": str(series_uid),
         "dicom_folder": str(out_dir),
     }
+
+
+def prepare_source_fastpath_nifti(nifti_path: str, source_nifti_out: str) -> dict:
+    """Prepare an on-demand source NIfTI aligned with Mimics-imported grid.
+
+    This is a lightweight helper for nnInteractive fast path. It performs the
+    same oblique->axial resampling rule as :func:`nifti_to_derived_dicom`, but
+    does not emit DICOM slices.
+    """
+    import SimpleITK as sitk
+
+    sitk_img = _read_image_sitk_lps(nifti_path)
+    resampled_to_axial = False
+    if not _sitk_is_axial(sitk_img):
+        sitk_img = _resample_to_axial(sitk_img)
+        resampled_to_axial = True
+
+    out_path = Path(source_nifti_out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    sitk.WriteImage(sitk_img, str(out_path), useCompression=True)
+
+    array = _sitk_to_xyz_array(sitk_img)
+    affine_lps = _sitk_to_lps_affine(sitk_img)
+    shape_3d = array.shape
+    spacing = _voxel_spacing_from_affine(affine_lps)
+    return {
+        "shape": [int(shape_3d[0]), int(shape_3d[1]), int(shape_3d[2])],
+        "spacing": [float(spacing[0]), float(spacing[1]), float(spacing[2])],
+        "affine_lps": affine_lps.tolist(),
+        "resampled_to_axial": resampled_to_axial,
+        "source_nifti_path": str(out_path.resolve()),
+    }
+
+
+def _validate_derived_dicom_series(out_dir: Path, expected_slices: int, series_uid: str, study_uid: str) -> None:
+    """Validate generated DICOM slices are complete and internally consistent.
+
+    This catches truncated/empty or partially-written files that can make
+    Mimics split one volume into many pseudo-series.
+    """
+    import pydicom
+
+    files = sorted([p for p in out_dir.iterdir() if p.is_file() and p.suffix.lower() == ".dcm"])
+    if len(files) != int(expected_slices):
+        raise RuntimeError(
+            "derived DICOM slice count mismatch: expected={}, got={} in {}".format(
+                int(expected_slices), len(files), str(out_dir)
+            )
+        )
+
+    required_tags = (
+        "SeriesInstanceUID",
+        "StudyInstanceUID",
+        "ImageOrientationPatient",
+        "ImagePositionPatient",
+        "PixelSpacing",
+        "InstanceNumber",
+    )
+
+    for path in files:
+        try:
+            size = path.stat().st_size
+        except Exception:
+            size = 0
+        if size <= 0:
+            raise RuntimeError("derived DICOM contains empty file: {}".format(str(path)))
+
+        try:
+            ds = pydicom.dcmread(str(path), stop_before_pixels=True, force=False)
+        except Exception as exc:
+            raise RuntimeError("failed to read generated DICOM header {}: {}".format(str(path), exc))
+
+        for tag in required_tags:
+            if not hasattr(ds, tag):
+                raise RuntimeError("generated DICOM missing required tag {}: {}".format(tag, str(path)))
+
+        if str(ds.SeriesInstanceUID) != series_uid:
+            raise RuntimeError(
+                "generated DICOM series UID mismatch in {}: expected {}, got {}".format(
+                    str(path), series_uid, str(ds.SeriesInstanceUID)
+                )
+            )
+        if str(ds.StudyInstanceUID) != study_uid:
+            raise RuntimeError(
+                "generated DICOM study UID mismatch in {}: expected {}, got {}".format(
+                    str(path), study_uid, str(ds.StudyInstanceUID)
+                )
+            )
 
 
 # -- NIfTI header normalization ----------------------------------------
@@ -318,25 +496,93 @@ def _normalize_nifti_affine(nifti_img) -> np.ndarray:
     return result
 
 
+# -- SimpleITK-based image reading with header correction and LPS orient
+
+def _correct_nifti_header(path: str) -> None:
+    """Fix qform/sform codes in a NIfTI file in-place (disk modification).
+
+    Re-sets both qform and sform with code=2 so that SimpleITK can read
+    the file.  This addresses cases where the original header has
+    ambiguous or corrupt qform/sform codes.
+    """
+    import nibabel as nib
+    img = nib.load(path)
+    qform = img.get_qform()
+    if qform is not None:
+        img.set_qform(qform, code=2)
+    sform = img.get_sform()
+    if sform is not None:
+        img.set_sform(sform, code=2)
+    nib.save(img, path)
+
+
+def _read_image_sitk_lps(path: str):
+    """Read an image via SimpleITK, correcting NIfTI header if needed, then orient to LPS.
+
+    Tries ``sitk.ReadImage`` first.  If it fails and the file is NIfTI,
+    calls :func:`_correct_nifti_header` to fix qform/sform in-place and
+    retries.  Finally applies ``DICOMOrient("LPS")`` so the returned
+    image is always in LPS orientation.
+
+    Works with both NIfTI files and DICOM folders.
+    """
+    import SimpleITK as sitk
+
+    is_nifti = is_nifti_file(path)
+
+    try:
+        sitk_img = sitk.ReadImage(path)
+    except Exception:
+        if not is_nifti:
+            raise
+        _correct_nifti_header(path)
+        sitk_img = sitk.ReadImage(path)
+
+    sitk_img = sitk.DICOMOrient(sitk_img, "LPS")
+    return sitk_img
+
+
+def _sitk_to_lps_affine(sitk_img) -> np.ndarray:
+    """Extract a 4×4 LPS affine matrix from a SimpleITK image."""
+    spacing = np.array(sitk_img.GetSpacing(), dtype=float)
+    origin = np.array(sitk_img.GetOrigin(), dtype=float)
+    direction = np.array(sitk_img.GetDirection(), dtype=float).reshape(3, 3)
+    affine = np.eye(4)
+    affine[:3, :3] = direction * spacing
+    affine[:3, 3] = origin
+    return affine
+
+
+def _sitk_to_xyz_array(sitk_img) -> np.ndarray:
+    """Extract a numpy array in (x, y, z) axis order from a SimpleITK image.
+
+    SimpleITK ``GetArrayFromImage`` returns data in (z, y, x) order;
+    this helper transposes to (x, y, z) to match the existing NIfTI-based
+    convention used throughout the bridge.
+    """
+    import SimpleITK as sitk
+    arr = sitk.GetArrayFromImage(sitk_img)  # (z, y, x)
+    return np.transpose(arr, (2, 1, 0))     # (x, y, z)
+
+
 # -- NIfTI mask -> .u8 buffer -----------------------------------------
 
 def read_nifti_mask(path: str) -> np.ndarray:
-    import nibabel as nib
-    img = nib.load(path)
-    array = np.asanyarray(img.dataobj)
+    sitk_img = _read_image_sitk_lps(path)
+    array = _sitk_to_xyz_array(sitk_img)
     if array.ndim != 3:
         raise ValueError("mask must be 3D: {} shape={}".format(path, array.shape))
     return (array != 0).astype(np.uint8)
 
 
 def read_nifti_mask_with_affine(path: str) -> tuple[np.ndarray, np.ndarray]:
-    import nibabel as nib
-    img = nib.load(path)
-    array = np.asanyarray(img.dataobj)
+    sitk_img = _read_image_sitk_lps(path)
+    array = _sitk_to_xyz_array(sitk_img)
     if array.ndim != 3:
         raise ValueError("mask must be 3D: {} shape={}".format(path, array.shape))
-    affine = _normalize_nifti_affine(img)
-    return (array != 0).astype(np.uint8), affine
+    affine_lps = _sitk_to_lps_affine(sitk_img)
+    affine_ras = LPS_TO_RAS @ affine_lps  # Convert to RAS for internal consistency
+    return (array != 0).astype(np.uint8), affine_ras
 
 
 def _affine_is_usable(affine: np.ndarray) -> bool:
@@ -426,21 +672,21 @@ def write_mask_nifti(array: np.ndarray, affine: np.ndarray, output_path: str) ->
 # -- Affine from NIfTI or DICOM ----------------------------------------
 
 def get_image_affine(image_path: str) -> np.ndarray:
-    import nibabel as nib
     if not Path(image_path).is_file():
         raise ValueError("image file not found: {}".format(image_path))
-    img = nib.load(image_path)
-    return _normalize_nifti_affine(img)
+    sitk_img = _read_image_sitk_lps(image_path)
+    affine_lps = _sitk_to_lps_affine(sitk_img)
+    return LPS_TO_RAS @ affine_lps  # Convert to RAS for internal consistency
 
 
 def get_image_shape(image_path: str) -> tuple[int, int, int]:
-    import nibabel as nib
     if not Path(image_path).is_file():
         raise ValueError("image file not found: {}".format(image_path))
-    img = nib.load(image_path)
-    shape = tuple(int(value) for value in img.shape[:3])
+    sitk_img = _read_image_sitk_lps(image_path)
+    size = sitk_img.GetSize()  # (x, y, z)
+    shape = tuple(int(value) for value in size[:3])
     if len(shape) != 3:
-        raise ValueError("image must be 3D: {} shape={}".format(image_path, img.shape))
+        raise ValueError("image must be 3D: {} shape={}".format(image_path, size))
     return shape
 
 
@@ -569,11 +815,26 @@ def do_prepare(params: dict) -> dict:
     elif is_nifti_file(image_path):
         if not dicom_out:
             return {"status": "error", "error": "dicom_out required for NIfTI images"}
-        info = nifti_to_derived_dicom(image_path, dicom_out, case_id=params.get("case_id", "case"))
+        case_id = params.get("case_id", "case")
+        info = nifti_to_derived_dicom(
+            image_path,
+            dicom_out,
+            case_id=case_id,
+        )
         dicom_folder = info["dicom_folder"]
-        image_affine = get_image_affine(image_path)
+        # Use the actual DICOM grid affine for mask resampling and Mimics coordinate
+        # metadata.  For oblique NIfTI files that were resampled to axis-aligned,
+        # this differs from the original NIfTI affine.
+        dicom_affine_lps = np.array(info["affine_lps"]).reshape(4, 4)
+        image_affine = LPS_TO_RAS @ dicom_affine_lps
+        source_nifti_affine = get_image_affine(image_path)  # original NIfTI affine (RAS)
+        source_image_path_for_fastpath = str(Path(image_path).resolve())
         source_image_kind = "nifti"
-        source_image_index_space = "nifti_ijk_matches_derived_dicom_columns_rows_slices_v1"
+        source_image_index_space = (
+            "nifti_ijk_matches_derived_dicom_columns_rows_slices_v1"
+            if not info.get("resampled_to_axial")
+            else "derived_dicom_axial_lps_resampled_from_nifti_v1"
+        )
         source_world_coordinate_system = "ras"
         mimics_world_coordinate_system = "lps"
         source_to_mimics_world_matrix = RAS_TO_LPS
@@ -597,12 +858,16 @@ def do_prepare(params: dict) -> dict:
             return {"status": "error", "error": "no readable DICOM slices in: {}".format(dicom_folder)}
         image_shape = (int(headers[0].Columns), int(headers[0].Rows), int(len(headers)))
 
-    # Both matrices are expressed in RAS world coordinates. The current import
-    # path preserves voxel index order, but persisting both affines lets external
-    # workers resample a source image into the exact Mimics voxel grid if a
-    # future import path changes orientation, spacing or origin.
-    source_voxel_to_ras_matrix = image_affine.astype(float)
-    mimics_voxel_to_ras_matrix = image_affine.astype(float)
+    # Both matrices are expressed in RAS world coordinates.
+    # source_voxel_to_ras_matrix: source_image_path geometry.
+    # mimics_voxel_to_ras_matrix: the grid that Mimics actually imports
+    #   (may differ from source when oblique NIfTI is resampled to axial).
+    if is_nifti_file(image_path) and info.get("resampled_to_axial"):
+        source_voxel_to_ras_matrix = source_nifti_affine.astype(float)
+        mimics_voxel_to_ras_matrix = image_affine.astype(float)  # DICOM axial affine
+    else:
+        source_voxel_to_ras_matrix = image_affine.astype(float)
+        mimics_voxel_to_ras_matrix = image_affine.astype(float)
     mimics_to_source_index_matrix = (
         np.linalg.inv(source_voxel_to_ras_matrix) @ mimics_voxel_to_ras_matrix
     )
@@ -649,7 +914,7 @@ def do_prepare(params: dict) -> dict:
         "status": "ok",
         "case_id": params.get("case_id", ""),
         "dicom_folder": dicom_folder,
-        "source_image_path": str(Path(image_path).resolve()),
+        "source_image_path": source_image_path_for_fastpath if is_nifti_file(image_path) else str(Path(image_path).resolve()),
         "source_image_kind": source_image_kind,
         "source_image_shape": list(image_shape),
         "source_image_index_space": source_image_index_space,
@@ -982,6 +1247,22 @@ def do_discover(params: dict) -> dict:
 
 # -- Main ---------------------------------------------------------------
 
+def do_prepare_source_fastpath(params: dict) -> dict:
+    """Build source NIfTI cache on-demand for nnInteractive fast path."""
+    image_path = params.get("image_path", "")
+    source_nifti_out = params.get("source_nifti_out", "")
+    if not image_path or not is_nifti_file(image_path):
+        return {"status": "error", "error": "image_path must be a NIfTI file"}
+    if not source_nifti_out:
+        return {"status": "error", "error": "source_nifti_out is required"}
+    info = prepare_source_fastpath_nifti(image_path, source_nifti_out)
+    return {
+        "status": "ok",
+        "image_path": str(Path(image_path).resolve()),
+        **info,
+    }
+
+
 def main():
     try:
         params = json.load(sys.stdin)
@@ -999,6 +1280,8 @@ def main():
             result = do_mask_to_buffer(params)
         elif action == "prepare_masks_for_grid":
             result = do_prepare_masks_for_grid(params)
+        elif action == "prepare_source_fastpath":
+            result = do_prepare_source_fastpath(params)
         elif action == "discover":
             result = do_discover(params)
         elif action == "discover_case_dirs":

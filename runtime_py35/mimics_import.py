@@ -59,7 +59,27 @@ _hidden_process_kwargs = runtime_common.hidden_process_kwargs
 _background_process_kwargs = runtime_common.background_process_kwargs
 
 
+def _write_json_quick(path, value):
+    """Best-effort lightweight JSON write.
+
+    Uses direct write (no temp file + replace + fsync loop) to avoid possible
+    native instability in host callbacks while still recording state.
+    """
+    parent = os.path.dirname(path)
+    if parent and not os.path.isdir(parent):
+        os.makedirs(parent)
+    with open(path, "w") as handle:
+        json.dump(value, handle, indent=2, sort_keys=True)
+
+
 def _mimics_log(level, message):
+    # Some Mimics builds are unstable when log_user_message is called during
+    # import workflows. Keep it disabled by default and allow explicit opt-in.
+    enabled = os.environ.get("MIMICS_IMPORT_USE_MIMICS_LOG", "").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+    if not enabled:
+        return False
     try:
         mimics.logging.log_user_message(level=level, message=message)
         return True
@@ -89,8 +109,24 @@ def _rotate_log_file(path, max_bytes=_LOG_ROTATE_BYTES, backups=_LOG_ROTATE_BACK
 
 
 def _append_import_log(root_dir, message):
-    text = "[{0}] {1}".format(time.strftime("%Y-%m-%d %H:%M:%S"), message)
-    logged_to_mimics = _mimics_log(logging.INFO, text)
+    try:
+        thread_name = threading.current_thread().name
+    except Exception:
+        thread_name = "unknown"
+    text = "[{0}] [pid={1}] [thread={2}] {3}".format(
+        time.strftime("%Y-%m-%d %H:%M:%S"),
+        os.getpid(),
+        thread_name,
+        message,
+    )
+    # Mimics API calls are not thread-safe. Only attempt Mimics logging on the
+    # main thread and only when explicitly enabled by environment variable.
+    logged_to_mimics = False
+    try:
+        if threading.current_thread() is threading.main_thread():
+            logged_to_mimics = _mimics_log(logging.INFO, text)
+    except Exception:
+        logged_to_mimics = False
     if not logged_to_mimics:
         print(text)
     try:
@@ -102,6 +138,35 @@ def _append_import_log(root_dir, message):
             f.write(text + "\n")
     except Exception:
         pass
+
+
+def _append_import_exception(root_dir, context, exc=None):
+    try:
+        if exc is None:
+            detail = traceback.format_exc()
+        else:
+            detail = "{0}\n{1}".format(repr(exc), traceback.format_exc())
+        _append_import_log(root_dir, "{0} | exception={1}".format(context, detail))
+    except Exception:
+        pass
+
+
+def _summarize_bridge_params(params):
+    try:
+        action = params.get("action", "")
+        summary = {
+            "action": action,
+            "case_id": params.get("case_id", ""),
+            "ts_root": params.get("ts_root", ""),
+            "case_dir": params.get("case_dir", ""),
+            "image_path": params.get("image_path", ""),
+            "mask_count": len(params.get("masks", []) or []),
+            "axes": params.get("axes", []),
+            "flips": params.get("flips", []),
+        }
+        return json.dumps(summary, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        return "<bridge-param-summary-unavailable>"
 
 
 def _queue_active_path(output_dir):
@@ -121,6 +186,13 @@ def _mcs_queue_registry_dir():
 
 
 def _register_mcs_queue(output_dir, total_count=0):
+    # Queue registry is optional metadata only. It is not required for import.
+    # Keep it disabled by default because some environments crash in this path.
+    enabled = os.environ.get("MIMICS_IMPORT_ENABLE_QUEUE_REGISTRY", "").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+    if not enabled:
+        return
     try:
         registry_dir = _mcs_queue_registry_dir()
         if not os.path.isdir(registry_dir):
@@ -129,7 +201,7 @@ def _register_mcs_queue(output_dir, total_count=0):
         base = _safe_case_filename(os.path.basename(os.path.abspath(output_dir))).strip("._") or "queue"
         name = "{0}_{1}".format(base, digest)
         path = os.path.join(registry_dir, name + ".json")
-        _write_json_atomic(
+        _write_json_quick(
             path,
             {
                 "output_dir": os.path.abspath(output_dir),
@@ -138,10 +210,12 @@ def _register_mcs_queue(output_dir, total_count=0):
             },
         )
     except Exception:
+        # Registry failures must never affect import flow.
         pass
 
 
 def _mark_mcs_queue_active(output_dir, total_count=0):
+    _append_import_log(output_dir, "Queue active marker start | output_dir={0} | total_count={1}".format(output_dir, int(total_count or 0)))
     if not os.path.isdir(output_dir):
         os.makedirs(output_dir)
     done_path = _queue_done_path(output_dir)
@@ -156,7 +230,7 @@ def _mark_mcs_queue_active(output_dir, total_count=0):
             os.remove(stop_path)
     except Exception:
         pass
-    _write_json_atomic(
+    _write_json_quick(
         _queue_active_path(output_dir),
         {
             "status": "active",
@@ -164,13 +238,16 @@ def _mark_mcs_queue_active(output_dir, total_count=0):
             "updated_at_epoch": time.time(),
         },
     )
+    _append_import_log(output_dir, "Queue active marker written | path={0}".format(_queue_active_path(output_dir)))
     _register_mcs_queue(output_dir, total_count)
+    _append_import_log(output_dir, "Queue active marker complete")
 
 
 def _mark_mcs_queue_done(output_dir, completed=0, failed=0):
+    _append_import_log(output_dir, "Queue done marker start | output_dir={0} | completed={1} | failed={2}".format(output_dir, int(completed or 0), int(failed or 0)))
     if not os.path.isdir(output_dir):
         os.makedirs(output_dir)
-    _write_json_atomic(
+    _write_json_quick(
         _queue_done_path(output_dir),
         {
             "status": "done",
@@ -179,6 +256,7 @@ def _mark_mcs_queue_done(output_dir, completed=0, failed=0):
             "updated_at_epoch": time.time(),
         },
     )
+    _append_import_log(output_dir, "Queue done marker written | path={0}".format(_queue_done_path(output_dir)))
     try:
         active = _queue_active_path(output_dir)
         if os.path.isfile(active):
@@ -186,6 +264,7 @@ def _mark_mcs_queue_done(output_dir, completed=0, failed=0):
     except Exception:
         pass
     _register_mcs_queue(output_dir, completed + failed)
+    _append_import_log(output_dir, "Queue done marker complete")
 
 
 def _background_stop_requested(output_dir, since_epoch=0.0):
@@ -578,10 +657,21 @@ def _launch_bridge_background(bridge_params, job_dir):
     result_file = os.path.join(job_dir, "bridge_result.json")
     error_file = os.path.join(job_dir, "bridge_error.log")
 
+    _append_import_log(
+        os.path.dirname(job_dir),
+        "Bridge launch requested | job_dir={0} | result_file={1} | error_file={2} | params={3}".format(
+            job_dir, result_file, error_file, _summarize_bridge_params(bridge_params)
+        ),
+    )
     _write_json_atomic(input_file, bridge_params)
+    _append_import_log(os.path.dirname(job_dir), "Bridge input file written: {0}".format(input_file))
 
     python_exe = _python_exe()
     bridge = _bridge_script()
+    _append_import_log(
+        os.path.dirname(job_dir),
+        "Bridge executable resolved | python={0} | bridge={1}".format(python_exe, bridge),
+    )
 
     stdin_handle = open(input_file, "r")
     stdout_handle = open(result_file, "w")
@@ -595,6 +685,10 @@ def _launch_bridge_background(bridge_params, job_dir):
             env=_background_env(),
             **_background_process_kwargs()
         )
+        _append_import_log(
+            os.path.dirname(job_dir),
+            "Bridge subprocess started | pid={0} | cmd=[{1}, {2}]".format(process.pid, python_exe, bridge),
+        )
     finally:
         stdin_handle.close()
         stdout_handle.close()
@@ -605,6 +699,12 @@ def _launch_bridge_background(bridge_params, job_dir):
 def _launch_bridge_job_thread(bridge_params, job_dir, output_dir, phase, case_id=None):
     """Start bridge from a worker thread so Mimics GUI can repaint first."""
     def _run():
+        _append_import_log(
+            output_dir,
+            "Bridge worker thread started | phase={0} | case_id={1} | job_dir={2}".format(
+                phase, case_id or "", job_dir
+            ),
+        )
         try:
             process = _launch_bridge_background(bridge_params, job_dir)
             state = {
@@ -618,6 +718,7 @@ def _launch_bridge_job_thread(bridge_params, job_dir, output_dir, phase, case_id
             _append_import_log(output_dir, "Bridge process started (PID={0}) for {1}.".format(process.pid, phase))
         except Exception as exc:
             _append_import_log(output_dir, "Could not start bridge process for {0}: {1}".format(phase, exc))
+            _append_import_exception(output_dir, "Bridge worker thread failed", exc)
             try:
                 _write_json_atomic(
                     os.path.join(job_dir, "bridge_result.json"),
@@ -636,6 +737,15 @@ def _launch_bridge_job_thread(bridge_params, job_dir, output_dir, phase, case_id
             "case_id": case_id or "",
             "started_at": time.time(),
         },
+    )
+    _append_import_log(
+        output_dir,
+        "Bridge job_state initialized | phase={0} | case_id={1} | job_dir={2} | params={3}".format(
+            phase,
+            case_id or "",
+            job_dir,
+            _summarize_bridge_params(bridge_params),
+        ),
     )
     thread = threading.Thread(target=_run)
     thread.daemon = True
@@ -682,8 +792,28 @@ def _check_job_status(job_dir):
             with open(result_file, "r") as f:
                 result = json.load(f)
             if result.get("status") == "ok":
+                try:
+                    _append_import_log(
+                        os.path.dirname(job_dir),
+                        "Job status=done from result file | job_dir={0} | keys={1}".format(
+                            job_dir,
+                            sorted(result.keys()),
+                        ),
+                    )
+                except Exception:
+                    pass
                 return ("done", result)
             else:
+                try:
+                    _append_import_log(
+                        os.path.dirname(job_dir),
+                        "Job status=error from result file | job_dir={0} | error={1}".format(
+                            job_dir,
+                            result.get("error", "bridge returned non-ok status"),
+                        ),
+                    )
+                except Exception:
+                    pass
                 return ("error", result.get("error", "bridge returned non-ok status"))
         except (ValueError, IOError):
             pass  # File incomplete - process may still be writing
@@ -1162,7 +1292,10 @@ def _start_batch_prepare_monitor(job_dir, work_dir, timeout_seconds=1800,
     _IMPORT_MONITORS[job_dir] = monitor
 
     def _tick():
-        _batch_prepare_tick(monitor)
+        try:
+            _batch_prepare_tick(monitor)
+        except Exception as exc:
+            _append_import_exception(monitor.get("output_dir", ""), "_start_batch_prepare_monitor qtimer callback failed", exc)
 
     timer.timeout.connect(_tick)
     timer.start(max(100, int(max(0.1, poll_seconds) * 1000)))
@@ -1191,7 +1324,10 @@ def _start_win32_batch_prepare_monitor(monitor, poll_seconds, timeout_seconds):
     )
 
     def _timer_proc(hwnd, message, timer_id, tick_count):
-        _batch_prepare_tick(monitor)
+        try:
+            _batch_prepare_tick(monitor)
+        except Exception as exc:
+            _append_import_exception(monitor.get("output_dir", ""), "_start_win32_batch_prepare_monitor timer callback failed", exc)
 
     callback = TIMERPROC(_timer_proc)
     user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint, TIMERPROC]
@@ -1485,7 +1621,10 @@ def _start_first_mcs_monitor(output_dir, target_mcs=None, timeout_seconds=900, p
         _IMPORT_MONITORS[monitor["monitor_key"]] = monitor
 
         def _tick():
-            _first_mcs_monitor_tick(monitor)
+            try:
+                _first_mcs_monitor_tick(monitor)
+            except Exception as exc:
+                _append_import_exception(monitor.get("output_dir", ""), "_start_first_mcs_monitor qtimer callback failed", exc)
 
         timer.timeout.connect(_tick)
         timer.start(int(poll_seconds * 1000))
@@ -1511,7 +1650,10 @@ def _start_first_mcs_monitor(output_dir, target_mcs=None, timeout_seconds=900, p
         )
 
         def _timer_proc(hwnd, message, timer_id, tick_count):
-            _first_mcs_monitor_tick(monitor)
+            try:
+                _first_mcs_monitor_tick(monitor)
+            except Exception as exc:
+                _append_import_exception(monitor.get("output_dir", ""), "_start_first_mcs_monitor win32 timer callback failed", exc)
 
         callback = TIMERPROC(_timer_proc)
         user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint, TIMERPROC]
@@ -1550,7 +1692,15 @@ def _start_win32_import_monitor(monitor, poll_seconds, timeout_seconds):
     )
 
     def _timer_proc(hwnd, message, timer_id, tick_count):
-        _import_monitor_tick(monitor)
+        try:
+            _import_monitor_tick(monitor)
+        except Exception as exc:
+            out = ""
+            try:
+                out = os.path.dirname(os.path.abspath(monitor.get("output_mcs") or ""))
+            except Exception:
+                out = ""
+            _append_import_exception(out, "_start_win32_import_monitor timer callback failed", exc)
 
     callback = TIMERPROC(_timer_proc)
     user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint, TIMERPROC]
@@ -1620,7 +1770,15 @@ def _start_import_monitor(job_dir, output_mcs, work_dir, timeout_seconds=1800,
     _IMPORT_MONITORS[job_dir] = monitor
 
     def _tick():
-        _import_monitor_tick(monitor)
+        try:
+            _import_monitor_tick(monitor)
+        except Exception as exc:
+            out = ""
+            try:
+                out = os.path.dirname(os.path.abspath(monitor.get("output_mcs") or ""))
+            except Exception:
+                out = ""
+            _append_import_exception(out, "_start_import_monitor qtimer callback failed", exc)
 
     timer.timeout.connect(_tick)
     timer.start(max(100, int(max(0.1, poll_seconds) * 1000)))
@@ -1695,96 +1853,147 @@ def _pick_directory(title):
 
 def _discover_monitor_tick(monitor):
     """Timer callback for discover phase: check if bridge discover finished."""
-    if monitor.get("done"):
-        return
+    try:
+        if monitor.get("done"):
+            return
 
-    job_dir = monitor.get("job_dir")
-    monitor_key = monitor.get("monitor_key")
+        job_dir = monitor.get("job_dir")
+        monitor_key = monitor.get("monitor_key")
 
-    # Timeout check
-    if time.time() > monitor.get("deadline", 0):
+        # Timeout check
+        if time.time() > monitor.get("deadline", 0):
+            monitor["done"] = True
+            _stop_import_monitor(monitor_key)
+            mimics.dialogs.message_box(
+                title="Scan Timeout",
+                message="Dataset scan timed out. Please retry.",
+            )
+            return
+
+        status, result = _check_job_status(job_dir)
+        previous_status = monitor.get("_last_discover_status", "")
+        if status != previous_status:
+            monitor["_last_discover_status"] = status
+            _append_import_log(
+                monitor.get("output_dir", ""),
+                "Discover monitor status changed | job_dir={0} | {1} -> {2}".format(
+                    job_dir,
+                    previous_status or "<none>",
+                    status,
+                ),
+            )
+
+        if status == "running":
+            return  # still discovering
+
         monitor["done"] = True
         _stop_import_monitor(monitor_key)
-        mimics.dialogs.message_box(
-            title="Scan Timeout",
-            message="Dataset scan timed out. Please retry.",
+
+        if status == "error":
+            _append_import_log(
+                monitor.get("output_dir", ""),
+                "Discover monitor failed | job_dir={0} | detail={1}".format(job_dir, result),
+            )
+            mimics.dialogs.message_box(title="Scan Error", message="Dataset scan failed: {0}".format(result))
+            _cleanup_job_dir(job_dir)
+            return
+
+        # Discover done; result contains cases list.
+        cases = result.get("cases", [])
+        count = result.get("count", len(cases))
+        _append_import_log(
+            monitor.get("output_dir", ""),
+            "Discover monitor done | job_dir={0} | case_count={1}".format(job_dir, count),
         )
-        return
-
-    status, result = _check_job_status(job_dir)
-
-    if status == "running":
-        return  # still discovering
-
-    monitor["done"] = True
-    _stop_import_monitor(monitor_key)
-
-    if status == "error":
-        mimics.dialogs.message_box(title="Scan Error", message="Dataset scan failed: {0}".format(result))
         _cleanup_job_dir(job_dir)
-        return
 
-    # Discover done; result contains cases list.
-    cases = result.get("cases", [])
-    count = result.get("count", len(cases))
-    _cleanup_job_dir(job_dir)
+        if not cases:
+            mimics.dialogs.message_box(
+                title="Import",
+                message="No case data was found in the selected folder.",
+            )
+            return
 
-    if not cases:
-        mimics.dialogs.message_box(
-            title="Import",
-            message="No case data was found in the selected folder.",
+        output_dir = monitor.get("output_dir")
+        _append_import_log(output_dir, "Discovered {0} case(s); starting preparation.".format(count))
+
+        # Disk space check (quick, non-blocking)
+        estimated_mb = count * 500
+        ok, free_mb = _check_disk_space(output_dir, estimated_mb)
+        _append_import_log(
+            output_dir,
+            "Disk space check | estimated_mb={0} | ok={1} | free_mb={2}".format(
+                estimated_mb,
+                ok,
+                int(free_mb) if free_mb is not None else "unknown",
+            ),
         )
-        return
+        if not ok:
+            mimics.dialogs.message_box(
+                title="Insufficient Disk Space",
+                message=(
+                    "Insufficient disk space. Estimated requirement: {0} MB; "
+                    "available: {1} MB. Please free disk space and retry."
+                ).format(estimated_mb, int(free_mb)),
+            )
+            return
 
-    output_dir = monitor.get("output_dir")
-    _append_import_log(output_dir, "Discovered {0} case(s); starting preparation.".format(count))
+        _append_import_log(output_dir, "Mark mcs queue active (before call) | total_count={0}".format(count))
+        _mark_mcs_queue_active(output_dir, count)
+        _append_import_log(output_dir, "Mark mcs queue active (after call) | total_count={0}".format(count))
 
-    # Disk space check (quick, non-blocking)
-    estimated_mb = count * 500
-    ok, free_mb = _check_disk_space(output_dir, estimated_mb)
-    if not ok:
-        mimics.dialogs.message_box(
-            title="Insufficient Disk Space",
-            message=(
-                "Insufficient disk space. Estimated requirement: {0} MB; "
-                "available: {1} MB. Please free disk space and retry."
-            ).format(estimated_mb, int(free_mb)),
+        # Start batch prepare-only flow (no Mimics API calls, GUI stays responsive)
+        axes = monitor.get("axes")
+        flips = monitor.get("flips")
+        jobs_dir = monitor.get("jobs_dir")
+
+        first_case = cases[0]
+        first_case_id = first_case["case_id"]
+        first_work_dir = os.path.join(output_dir, first_case_id + "_work")
+        first_job_dir = os.path.join(jobs_dir, first_case_id)
+
+        _append_import_log(
+            output_dir,
+            "First prepare target resolved | first_case_id={0} | first_work_dir={1} | first_job_dir={2}".format(
+                first_case_id,
+                first_work_dir,
+                first_job_dir,
+            ),
         )
-        return
+        _append_import_log(output_dir, "[1/{0}] Preparing: {1}".format(count, first_case_id))
+        bridge_params = _build_bridge_params(first_case, axes, flips, first_work_dir)
+        _append_import_log(output_dir, "Launching first prepare bridge | params={0}".format(_summarize_bridge_params(bridge_params)))
+        _launch_bridge_job_thread(bridge_params, first_job_dir, output_dir, "preparing", case_id=first_case_id)
 
-    _mark_mcs_queue_active(output_dir, count)
-
-    # Auto-start prepare; user already chose the folder.
-
-    # Start batch prepare-only flow (no Mimics API calls, GUI stays responsive)
-    axes = monitor.get("axes")
-    flips = monitor.get("flips")
-    jobs_dir = monitor.get("jobs_dir")
-
-    first_case = cases[0]
-    first_case_id = first_case["case_id"]
-    first_work_dir = os.path.join(output_dir, first_case_id + "_work")
-    first_job_dir = os.path.join(jobs_dir, first_case_id)
-
-    _append_import_log(output_dir, "[1/{0}] Preparing: {1}".format(count, first_case_id))
-    bridge_params = _build_bridge_params(first_case, axes, flips, first_work_dir)
-    _launch_bridge_job_thread(bridge_params, first_job_dir, output_dir, "preparing", case_id=first_case_id)
-
-    # Bridge launched, timer will auto-chain remaining cases
-
-    batch_info = {
-        "total": count,
-        "output_dir": output_dir,
-        "axes": axes,
-        "flips": flips,
-        "jobs_dir": jobs_dir,
-        "batch_started_epoch": time.time(),
-    }
-    _start_batch_prepare_monitor(
-        first_job_dir, first_work_dir,
-        batch_queue=cases[1:],
-        batch_info=batch_info,
-    )
+        batch_info = {
+            "total": count,
+            "output_dir": output_dir,
+            "axes": axes,
+            "flips": flips,
+            "jobs_dir": jobs_dir,
+            "batch_started_epoch": time.time(),
+        }
+        _append_import_log(output_dir, "Starting batch prepare monitor | remaining_cases={0}".format(max(0, len(cases) - 1)))
+        _start_batch_prepare_monitor(
+            first_job_dir, first_work_dir,
+            batch_queue=cases[1:],
+            batch_info=batch_info,
+        )
+    except Exception as exc:
+        output_dir = monitor.get("output_dir", "")
+        _append_import_exception(output_dir, "_discover_monitor_tick fatal", exc)
+        monitor["done"] = True
+        try:
+            _stop_import_monitor(monitor.get("monitor_key"))
+        except Exception:
+            pass
+        try:
+            mimics.dialogs.message_box(
+                title="Import Error",
+                message="Discover callback failed. Please check mimics_import.log for details.",
+            )
+        except Exception:
+            pass
 
 
 def _start_win32_discover_monitor(monitor, poll_seconds, timeout_seconds):
@@ -1809,7 +2018,10 @@ def _start_win32_discover_monitor(monitor, poll_seconds, timeout_seconds):
     )
 
     def _timer_proc(hwnd, message, timer_id, tick_count):
-        _discover_monitor_tick(monitor)
+        try:
+            _discover_monitor_tick(monitor)
+        except Exception as exc:
+            _append_import_exception(monitor.get("output_dir", ""), "_start_win32_discover_monitor timer callback failed", exc)
 
     callback = TIMERPROC(_timer_proc)
     user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint, TIMERPROC]
@@ -1839,6 +2051,18 @@ def _start_import_discover_monitor(job_dir, ts_root, output_dir, axes, flips, jo
         "flips": flips,
         "jobs_dir": jobs_dir,
     }
+    _append_import_log(
+        output_dir,
+        "Start discover monitor | job_dir={0} | ts_root={1} | output_dir={2} | poll={3}s | timeout={4}s | axes={5} | flips={6}".format(
+            job_dir,
+            ts_root,
+            output_dir,
+            poll_seconds,
+            timeout_seconds,
+            axes,
+            flips,
+        ),
+    )
 
     # Try PyQt5 QTimer first
     try:
@@ -1869,7 +2093,10 @@ def _start_import_discover_monitor(job_dir, ts_root, output_dir, axes, flips, jo
     _IMPORT_MONITORS[job_dir] = monitor
 
     def _tick():
-        _discover_monitor_tick(monitor)
+        try:
+            _discover_monitor_tick(monitor)
+        except Exception as exc:
+            _append_import_exception(monitor.get("output_dir", ""), "_start_import_discover_monitor qtimer callback failed", exc)
 
     timer.timeout.connect(_tick)
     timer.start(max(100, int(max(0.1, poll_seconds) * 1000)))
@@ -1924,6 +2151,7 @@ def main():
     flips = [False, False, False]
 
     args = sys.argv[1:]
+    _append_import_log("", "mimics_import main() entered | argv={0}".format(sys.argv))
     i = 0
     while i < len(args):
         arg = args[i]
@@ -1952,6 +2180,19 @@ def main():
         else:
             i += 1
 
+    _append_import_log(
+        "",
+        "Parsed arguments | ts_root={0} | case_dir={1} | output={2} | output_dir={3} | cases_filter={4} | axes={5} | flips={6}".format(
+            ts_root,
+            case_dir,
+            output,
+            output_dir,
+            sorted(list(cases_filter)) if cases_filter else None,
+            axes,
+            flips,
+        ),
+    )
+
     # Interactive: if no args, ask for TS root or case dir
     if not ts_root and not case_dir:
         ts_root = _pick_directory("Select dataset folder")
@@ -1966,6 +2207,7 @@ def main():
     # -- Single case mode ----------------------------------------------
 
     if case_dir:
+        _append_import_log("", "Import mode selected: single-case | case_dir={0}".format(case_dir))
         if not output:
             output = os.path.join(case_dir, os.path.basename(case_dir) + ".mcs")
         case_info = {
@@ -2004,15 +2246,16 @@ def main():
                     organ = fname.replace(".nii.gz", "")
                     case_info["masks"].append({"name": organ, "path": os.path.join(seg_dir, fname)})
 
-        work_dir = os.path.dirname(os.path.abspath(output))
-        jobs_dir = os.path.join(work_dir, "_import_jobs")
+        output_dir_abs = os.path.dirname(os.path.abspath(output))
+        work_dir = os.path.join(output_dir_abs, case_info["case_id"] + "_work")
+        jobs_dir = os.path.join(output_dir_abs, "_import_jobs")
         job_dir = os.path.join(jobs_dir, case_info["case_id"])
 
         # Launch bridge in background + start timer to queue .mcs creation.
-        _mark_mcs_queue_active(os.path.dirname(os.path.abspath(output)), 1)
-        _append_import_log(os.path.dirname(os.path.abspath(output)), "Preparing: {0}".format(case_info["case_id"]))
+        _mark_mcs_queue_active(output_dir_abs, 1)
+        _append_import_log(output_dir_abs, "Preparing: {0}".format(case_info["case_id"]))
         bridge_params = _build_bridge_params(case_info, axes, flips, work_dir)
-        _launch_bridge_job_thread(bridge_params, job_dir, os.path.dirname(os.path.abspath(output)), "preparing", case_id=case_info["case_id"])
+        _launch_bridge_job_thread(bridge_params, job_dir, output_dir_abs, "preparing", case_id=case_info["case_id"])
 
         # Bridge launched, timer will queue the result for background Mimics.
         _start_import_monitor(job_dir, output, work_dir)
@@ -2026,6 +2269,11 @@ def main():
     if not os.path.isdir(output_dir):
         os.makedirs(output_dir)
 
+    _append_import_log(
+        output_dir,
+        "Import mode selected: batch-discover | ts_root={0} | output_dir={1}".format(ts_root, output_dir),
+    )
+
     jobs_dir = os.path.join(output_dir, "_import_jobs")
 
     _append_import_log(output_dir, "Starting dataset discovery in the bridge process.")
@@ -2035,6 +2283,13 @@ def main():
         "ts_root": ts_root,
         "cases_filter": list(cases_filter) if cases_filter else None,
     }
+    _append_import_log(
+        output_dir,
+        "Discover bridge parameters prepared | discover_job_dir={0} | params={1}".format(
+            discover_job_dir,
+            _summarize_bridge_params(bridge_params),
+        ),
+    )
     _launch_bridge_job_thread(bridge_params, discover_job_dir, output_dir, "discovering")
     _start_import_discover_monitor(
         discover_job_dir,

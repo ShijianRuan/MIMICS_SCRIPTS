@@ -275,7 +275,16 @@ def _resample_masks_to_actual_grid(result, active_image_shape, actual_mimics_vox
             expected_shapes.append([int(value) for value in row.get("mimics_shape")])
     shape_matches = all(shape == active_image_shape for shape in expected_shapes) if expected_shapes else False
     matrix_matches = _matrix_close(expected_matrix, actual_mimics_voxel_to_ras)
-    if shape_matches and matrix_matches:
+    # In practice, shape mismatch is the reliable signal that prepared buffers
+    # cannot be injected as-is. Matrix-only mismatch can be caused by
+    # coordinate-convention differences (e.g. LPS/RAS reporting) and forcing
+    # resampling in that case can corrupt orientation and explode disk usage.
+    # Keep matrix-only resampling opt-in.
+    resample_on_matrix_mismatch = os.environ.get(
+        "MIMICS_IMPORT_RESAMPLE_ON_MATRIX_MISMATCH", ""
+    ).strip().lower() in ("1", "true", "yes", "on")
+    need_resample = (not shape_matches) or (resample_on_matrix_mismatch and not matrix_matches)
+    if not need_resample:
         return result
 
     python_exe = _bridge_python()
@@ -415,6 +424,8 @@ def create_mcs_from_manifest(work_dir, output_mcs):
     )
     if result.get("actual_mimics_grid_resampled"):
         print("  actual Mimics image grid differs from prepared grid; masks were resampled to the open Mimics grid.")
+    else:
+        print("  prepared mask grid accepted without external resampling.")
     mask_results = result["masks"]
     metadata_set(image, SOURCE_IMAGE_PATH_METADATA, result.get("source_image_path", ""))
     metadata_set(image, SOURCE_IMAGE_KIND_METADATA, result.get("source_image_kind", ""))

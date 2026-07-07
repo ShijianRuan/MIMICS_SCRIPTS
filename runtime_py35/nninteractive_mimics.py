@@ -68,6 +68,7 @@ SOURCE_TO_MIMICS_WORLD_MATRIX_METADATA = "mimics_script.source_to_mimics_world_m
 SOURCE_VOXEL_TO_RAS_MATRIX_METADATA = "mimics_script.source_voxel_to_ras_matrix"
 MIMICS_VOXEL_TO_RAS_MATRIX_METADATA = "mimics_script.mimics_voxel_to_ras_matrix"
 MIMICS_TO_SOURCE_INDEX_MATRIX_METADATA = "mimics_script.mimics_to_source_index_matrix"
+SOURCE_CASE_DIR_METADATA = "mimics_script.source_case_dir"
 _ASYNC_VISUAL_OBJECTS = {}  # job_dir -> list of Mimics objects to delete after inference
 _RUNTIME_PROBE_CACHE = {}
 _ASYNC_MONITORS = {}
@@ -788,6 +789,59 @@ def _source_uses_hu_to_gv(kind, modality):
     return modality_text == "CT"
 
 
+def _mimics_bridge_paths(config):
+    integration_root = _integration_root()
+    python_exe = _first_existing_file(
+        [
+            os.environ.get("MIMICS_BRIDGE_PYTHON", ""),
+            os.environ.get("NNINTERACTIVE_PYTHON", ""),
+            config.get("python", ""),
+            os.path.join(_environment_root(), "python", "python.exe"),
+            os.path.join(_environment_root(), "Scripts", "python.exe"),
+        ],
+        "Mimics bridge Python",
+    )
+    bridge_script = _first_existing_file(
+        [
+            os.environ.get("MIMICS_BRIDGE_SCRIPT", ""),
+            os.path.join(integration_root, "mimics_bridge.py"),
+            os.path.join(_project_root(), "mimics_bridge.py"),
+        ],
+        "mimics_bridge.py",
+    )
+    return python_exe, bridge_script
+
+
+def _call_mimics_bridge(config, payload, timeout_seconds=1800):
+    python_exe, bridge_script = _mimics_bridge_paths(config)
+    process = subprocess.Popen(
+        [python_exe, bridge_script],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        **_hidden_process_kwargs()
+    )
+    try:
+        stdout, stderr = process.communicate(
+            input=json.dumps(payload).encode("utf-8"),
+            timeout=int(timeout_seconds),
+        )
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
+        raise RuntimeError("mimics_bridge.py timed out")
+    if process.returncode != 0:
+        err = stderr.decode("utf-8", "replace") if stderr else ""
+        raise RuntimeError("mimics_bridge.py failed (exit {}): {}".format(process.returncode, err))
+    try:
+        result = json.loads((stdout or b"{}").decode("utf-8", "replace"))
+    except Exception:
+        raise RuntimeError("mimics_bridge.py returned invalid JSON")
+    if result.get("status") != "ok":
+        raise RuntimeError(result.get("error", "mimics_bridge.py returned non-ok status"))
+    return result
+
+
 def _source_image_export(image, config):
     image_input_mode = str(config.get("image_input_mode", "") or "").strip().lower()
     force_source = image_input_mode in ("source", "source_image", "original", "original_image")
@@ -809,6 +863,7 @@ def _source_image_export(image, config):
     source_voxel_to_ras = str(_metadata_get(image, SOURCE_VOXEL_TO_RAS_MATRIX_METADATA, "") or "")
     mimics_voxel_to_ras = str(_metadata_get(image, MIMICS_VOXEL_TO_RAS_MATRIX_METADATA, "") or "")
     mimics_to_source_index = str(_metadata_get(image, MIMICS_TO_SOURCE_INDEX_MATRIX_METADATA, "") or "")
+    source_case_dir = str(_metadata_get(image, SOURCE_CASE_DIR_METADATA, "") or "")
     ras_to_lps = [[-1.0, 0.0, 0.0, 0.0], [0.0, -1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
     identity = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
     has_ras_affines = (
@@ -819,8 +874,12 @@ def _source_image_export(image, config):
         return None
     path = os.path.abspath(os.path.expandvars(os.path.expanduser(str(path))))
     lower_path = path.lower()
+    supported_nifti_index_spaces = (
+        "nifti_ijk_matches_derived_dicom_columns_rows_slices_v1",
+        "derived_dicom_axial_lps_resampled_from_nifti_v1",
+    )
     is_nifti = kind == "nifti" and (
-        index_space == "nifti_ijk_matches_derived_dicom_columns_rows_slices_v1"
+        index_space in supported_nifti_index_spaces
         and source_world == "ras"
         and mimics_world == "lps"
         and _matrix_close(source_to_mimics_world, ras_to_lps)
@@ -844,6 +903,45 @@ def _source_image_export(image, config):
             ),
         )
         return None
+
+    # On-demand mode for derived oblique-NIfTI imports:
+    # build a cached axial NIfTI only when nnInteractive is actually used.
+    if is_nifti and index_space == "derived_dicom_axial_lps_resampled_from_nifti_v1":
+        case_id = "case"
+        if source_case_dir:
+            case_id = os.path.basename(os.path.normpath(source_case_dir)) or case_id
+        cache_root = os.path.join(_runtime_work_dir(config), "source_fastpath_cache")
+        if not os.path.isdir(cache_root):
+            os.makedirs(cache_root)
+        cache_path = os.path.join(cache_root, "{0}_axial_source.nii.gz".format(case_id))
+        if not os.path.isfile(cache_path):
+            try:
+                _mimics_log(
+                    logging.INFO,
+                    "nnInteractive source-image fast path (on-demand) is preparing axial source cache: {0}".format(cache_path),
+                )
+                _call_mimics_bridge(
+                    config,
+                    {
+                        "action": "prepare_source_fastpath",
+                        "image_path": path,
+                        "source_nifti_out": cache_path,
+                    },
+                    timeout_seconds=float(config.get("bridge_timeout_seconds", 1800)),
+                )
+            except Exception as exc:
+                message = "nnInteractive on-demand source cache generation failed: {}".format(exc)
+                if allow_source_fallback and not force_source:
+                    _mimics_log(
+                        logging.WARNING,
+                        message + ". Falling back to Mimics image buffer export.",
+                    )
+                    return None
+                raise RuntimeError(message)
+        path = os.path.abspath(cache_path)
+        # The on-demand cache is generated on the Mimics target grid.
+        source_voxel_to_ras = mimics_voxel_to_ras
+        index_space = "nifti_ijk_matches_derived_dicom_columns_rows_slices_v1"
     if is_nifti and not os.path.isfile(path):
         message = "nnInteractive source image metadata points to a missing file: {0}".format(path)
         if allow_source_fallback and not force_source:

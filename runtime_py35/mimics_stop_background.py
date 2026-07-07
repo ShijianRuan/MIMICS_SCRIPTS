@@ -74,11 +74,13 @@ def _queue_dirs_from_runtime_state():
     lock_path = os.path.join(runtime_common.resource_lock_dir(_project_root()), "background_mimics.lock")
     for path in (lock_path,):
         payload = runtime_common.read_json(path, {}) or {}
+        # output_dir / ts_root may be at top level (resource lock schema) or
+        # nested under "details" (older background_mimics.lock schema).
         details = payload.get("details") or {}
-        output_dir = details.get("output_dir")
+        output_dir = payload.get("output_dir") or details.get("output_dir")
         if output_dir:
             result.append(output_dir)
-        ts_root = details.get("ts_root")
+        ts_root = payload.get("ts_root") or details.get("ts_root")
         if ts_root:
             result.append(ts_root)
             result.append(os.path.join(ts_root, "mcs_output"))
@@ -152,6 +154,7 @@ def stop_background_processes():
         "$out='{}';"
         "$matched=Get-CimInstance Win32_Process | Where-Object {{"
         "$cmd=$_.CommandLine; "
+        "if ($cmd) {{ $cmd = $cmd -replace '/', '\\' }}; "
         "$cmd -and "
         "($roots | Where-Object {{ $cmd -like ('*' + $_ + '*') }}) -and "
         "($markers | Where-Object {{ $cmd -like ('*' + $_ + '*') }})"
