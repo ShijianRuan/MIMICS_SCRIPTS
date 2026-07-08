@@ -25,6 +25,7 @@ import tempfile
 import time
 import unittest
 import uuid
+from pathlib import Path
 
 import numpy as np
 
@@ -568,6 +569,202 @@ class TestMimicsBridgeBufferMapping(unittest.TestCase):
         # ValueError fires. Both indicate the 4D image is rejected.
         with self.assertRaises((ValueError, RuntimeError)):
             read_nifti_mask(path)
+
+    def test_convert_uses_mimics_grid_affine_from_manifest(self):
+        from mimics_bridge import do_convert
+        import nibabel as nib
+
+        case_dir = os.path.join(self.tmp, "case")
+        buffers_dir = os.path.join(self.tmp, "buffers")
+        os.makedirs(case_dir)
+        os.makedirs(buffers_dir)
+
+        data = np.zeros((2, 3, 4), dtype=np.uint8)
+        data[1, 2, 3] = 1
+        with open(os.path.join(buffers_dir, "liver.u8"), "wb") as handle:
+            handle.write(data.tobytes())
+
+        mimics_affine = np.array([
+            [2.0, 0.0, 0.0, -100.0],
+            [0.0, 3.0, 0.0, -50.0],
+            [0.0, 0.0, 4.0, 20.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ])
+        manifest_path = os.path.join(buffers_dir, "manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as handle:
+            json.dump({
+                "mimics_shape": [2, 3, 4],
+                "mimics_voxel_to_ras_matrix": mimics_affine.tolist(),
+                "masks": [{
+                    "original_name": "liver",
+                    "safe_name": "liver",
+                    "u8_filename": "liver.u8",
+                }],
+            }, handle)
+
+        result = do_convert({
+            "buffers_dir": buffers_dir,
+            "manifest_path": manifest_path,
+            "case_dir": case_dir,
+            "axes": [0, 1, 2],
+            "flips": [False, False, False],
+        })
+        self.assertEqual("ok", result["status"])
+        self.assertEqual("manifest.mimics_voxel_to_ras_matrix", result["export_voxel_to_ras_matrix_source"])
+        out = nib.load(os.path.join(case_dir, "segmentations", "liver.nii.gz"))
+        self.assertEqual((2, 3, 4), out.shape)
+        np.testing.assert_allclose(mimics_affine, out.affine, atol=1e-6)
+        np.testing.assert_array_equal(data, np.asanyarray(out.dataobj).astype(np.uint8))
+
+    def test_convert_resamples_mimics_mask_back_to_source_image_grid(self):
+        from mimics_bridge import do_convert
+        import nibabel as nib
+
+        case_dir = os.path.join(self.tmp, "case_source")
+        buffers_dir = os.path.join(self.tmp, "buffers_source")
+        os.makedirs(case_dir)
+        os.makedirs(buffers_dir)
+        source_affine = np.eye(4)
+        nib.save(nib.Nifti1Image(np.zeros((3, 1, 1), dtype=np.int16), source_affine), os.path.join(case_dir, "ct.nii.gz"))
+
+        mimics_data = np.zeros((3, 1, 1), dtype=np.uint8)
+        mimics_data[0, 0, 0] = 1
+        with open(os.path.join(buffers_dir, "organ.u8"), "wb") as handle:
+            handle.write(mimics_data.tobytes())
+
+        mimics_affine = np.eye(4)
+        mimics_affine[0, 3] = 1.0
+        manifest_path = os.path.join(buffers_dir, "manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as handle:
+            json.dump({
+                "mimics_shape": [3, 1, 1],
+                "mimics_voxel_to_ras_matrix": mimics_affine.tolist(),
+                "masks": [{
+                    "original_name": "organ",
+                    "safe_name": "organ",
+                    "u8_filename": "organ.u8",
+                }],
+            }, handle)
+
+        result = do_convert({
+            "buffers_dir": buffers_dir,
+            "manifest_path": manifest_path,
+            "case_dir": case_dir,
+            "axes": [0, 1, 2],
+            "flips": [False, False, False],
+        })
+        self.assertEqual("ok", result["status"])
+        self.assertEqual("source_image", result["export_space"])
+        out = nib.load(os.path.join(case_dir, "segmentations", "organ.nii.gz"))
+        self.assertEqual((3, 1, 1), out.shape)
+        np.testing.assert_allclose(source_affine, out.affine, atol=1e-6)
+        exported = np.asanyarray(out.dataobj).astype(np.uint8)
+        self.assertEqual(0, int(exported[0, 0, 0]))
+        self.assertEqual(1, int(exported[1, 0, 0]))
+
+    def test_resample_image_to_grid_matches_target_shape(self):
+        from mimics_bridge import resample_image_to_grid
+        import nibabel as nib
+
+        source = os.path.join(self.tmp, "source.nii.gz")
+        output = os.path.join(self.tmp, "aligned.nii.gz")
+        data = np.arange(8, dtype=np.int16).reshape((2, 2, 2))
+        nib.save(nib.Nifti1Image(data, np.eye(4)), source)
+
+        target_affine = np.array([
+            [1.0, 0.0, 0.0, -10.0],
+            [0.0, 1.0, 0.0, -20.0],
+            [0.0, 0.0, 1.0, 30.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ])
+        result = resample_image_to_grid(source, [3, 2, 2], target_affine.tolist(), output)
+        self.assertEqual("ok", result["status"])
+        out = nib.load(output)
+        self.assertEqual((3, 2, 2), out.shape)
+        np.testing.assert_allclose(target_affine, out.affine, atol=1e-6)
+
+    def test_fewshot_materialize_resamples_image_to_label_grid(self):
+        pipeline = __import__("tools.fewshot_pipeline", fromlist=["dummy"])
+        import nibabel as nib
+
+        image_src = os.path.join(self.tmp, "ct.nii.gz")
+        label_src = os.path.join(self.tmp, "mask.nii.gz")
+        nib.save(nib.Nifti1Image(np.ones((2, 2, 2), dtype=np.int16), np.eye(4)), image_src)
+        label_affine = np.array([
+            [1.0, 0.0, 0.0, -5.0],
+            [0.0, 1.0, 0.0, -6.0],
+            [0.0, 0.0, 1.0, 7.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ])
+        nib.save(nib.Nifti1Image(np.ones((3, 2, 2), dtype=np.uint8), label_affine), label_src)
+
+        rows = pipeline._materialize_split(
+            [{"case_id": "s0001", "image": image_src, "label": label_src}],
+            Path(self.tmp) / "dataset" / "imagesTr",
+            Path(self.tmp) / "dataset" / "labelsTr",
+            "train",
+        )
+        self.assertEqual(1, len(rows))
+        self.assertEqual("resampled_to_label_grid", rows[0]["image_materialization"])
+        self.assertFalse(rows[0]["image_label_geometry_matched"])
+        out = nib.load(rows[0]["dataset_image"])
+        self.assertEqual((3, 2, 2), out.shape)
+        np.testing.assert_allclose(label_affine, out.affine, atol=1e-6)
+
+    def test_fewshot_resolves_configured_mimics_output_dir(self):
+        pipeline = __import__("tools.fewshot_pipeline", fromlist=["dummy"])
+        ts_root = os.path.join(self.tmp, "ts")
+        output = pipeline.resolve_mimics_output_dir(ts_root, {"mimics_output_dir": "custom_mcs"})
+        self.assertEqual(Path(ts_root).resolve() / "custom_mcs", output)
+        self.assertTrue(output.is_dir())
+
+    def test_fewshot_resolves_configured_buffer_mapping(self):
+        pipeline = __import__("tools.fewshot_pipeline", fromlist=["dummy"])
+        axes, flips = pipeline.resolve_mimics_buffer_mapping({
+            "mimics_buffer_axes": "1,0,2",
+            "mimics_buffer_flips": "true,false,1",
+        })
+        self.assertEqual([1, 0, 2], axes)
+        self.assertEqual([True, False, True], flips)
+
+    def test_fewshot_find_image_is_case_insensitive(self):
+        pipeline = __import__("tools.fewshot_pipeline", fromlist=["dummy"])
+        import nibabel as nib
+
+        case_dir = Path(self.tmp) / "case_upper"
+        case_dir.mkdir()
+        path = case_dir / "CT.NII.GZ"
+        nib.save(nib.Nifti1Image(np.zeros((1, 1, 1), dtype=np.int16), np.eye(4)), str(path))
+        self.assertEqual(path, pipeline.find_image(case_dir))
+
+    def test_fewshot_corrupt_label_is_skipped(self):
+        pipeline = __import__("tools.fewshot_pipeline", fromlist=["dummy"])
+        import nibabel as nib
+
+        ts_root = Path(self.tmp) / "ts_corrupt"
+        case_dir = ts_root / "s0001"
+        seg_dir = case_dir / "segmentations"
+        seg_dir.mkdir(parents=True)
+        nib.save(nib.Nifti1Image(np.zeros((1, 1, 1), dtype=np.int16), np.eye(4)), str(case_dir / "ct.nii.gz"))
+        (seg_dir / "liver.nii.gz").write_text("not a nifti", encoding="utf-8")
+        samples, skipped = pipeline.discover_samples(ts_root, "liver")
+        self.assertEqual([], samples)
+        self.assertEqual(1, len(skipped))
+        self.assertIn("could not be read", skipped[0]["reason"])
+
+    def test_fewshot_stale_model_manifest_fails_before_inference(self):
+        pipeline = __import__("tools.fewshot_pipeline", fromlist=["dummy"])
+        workspace = Path(self.tmp) / "fewshot_models"
+        latest = workspace / "models" / "liver" / "latest.json"
+        latest.parent.mkdir(parents=True)
+        latest.write_text(json.dumps({
+            "organ": "liver",
+            "model_id": "missing",
+            "checkpoint": str(workspace / "missing.pth"),
+            "config": str(workspace / "missing.yaml"),
+        }), encoding="utf-8")
+        with self.assertRaises(RuntimeError):
+            pipeline.load_model_manifest(workspace, "liver")
 
 
 # ============================================================================
@@ -1939,6 +2136,32 @@ class TestNewFeatures(unittest.TestCase):
         self.assertEqual("Custom (37)", ui._option_label("37", ui.TrainingSetupApp.EPOCH_CHOICES))
         self.assertEqual("Custom (0.5)", ui._option_label("0.5", ui.TrainingSetupApp.VAL_CHOICES))
 
+    def test_fewshot_external_setup_accepts_custom_image_size(self):
+        """Expert UI can pass through a manually typed image size."""
+        ui = __import__("tools.fewshot_training_setup_ui", fromlist=["dummy"])
+
+        class Var(object):
+            def __init__(self, value):
+                self.value = value
+            def get(self):
+                return self.value
+            def set(self, value):
+                self.value = value
+
+        app = object.__new__(ui.TrainingSetupApp)
+        app.vars = {
+            "img_size_choice": Var(ui.TrainingSetupApp.IMG_SIZE_CUSTOM_LABEL),
+            "img_size_custom": Var("288,288"),
+            "img_size": Var("224,224"),
+            "sub_volume_depth": Var("32"),
+            "sub_volume_size": Var("32,224,224"),
+        }
+        app.img_size_custom_widget = None
+        ui.TrainingSetupApp._sync_image_size_choice(app)
+        self.assertEqual("288,288", app.vars["img_size"].get())
+        ui.TrainingSetupApp._sync_sub_volume_size(app)
+        self.assertEqual("32,288,288", app.vars["sub_volume_size"].get())
+
     def test_fewshot_external_setup_collect_keeps_expert_values(self):
         """Starting training should not reapply Setup presets over Expert edits."""
         ui = __import__("tools.fewshot_training_setup_ui", fromlist=["dummy"])
@@ -2065,6 +2288,40 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn("loss 0.3457", line)
         self.assertIn("val_dice 0.8123", line)
 
+    def test_fewshot_status_viewer_parses_epoch_metrics(self):
+        """External status viewer extracts loss/Dice curves from training logs."""
+        viewer = __import__("tools.fewshot_status_viewer", fromlist=["dummy"])
+        log_path = os.path.join(self.tmp, "train.log")
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write("Epoch 1/3: train_loss=0.5000, lr=1.00e-03, val_dice=0.6000\n")
+            handle.write("Epoch 2/3: train_loss=0.4000, lr=1.00e-03, val_dice=0.7000\n")
+            handle.write("Epoch 3/3: train_loss=0.3000, lr=1.00e-03, val_dice=0.8000\n")
+        rows = viewer.parse_epoch_metrics(log_path)
+        self.assertEqual(3, len(rows))
+        self.assertEqual(2, rows[1]["epoch"])
+        self.assertAlmostEqual(0.4, rows[1]["train_loss"])
+        self.assertAlmostEqual(0.7, rows[1]["val_dice"])
+
+    def test_fewshot_status_viewer_formats_status(self):
+        """External status viewer shows active progress and resource waits."""
+        viewer = __import__("tools.fewshot_status_viewer", fromlist=["dummy"])
+        line = viewer.format_job_line({
+            "job_id": "train_liver",
+            "kind": "train",
+            "organ": "liver",
+            "status": "waiting_for_gpu",
+            "resource_wait": {"resource": "gpu", "owner": "nnInteractive", "pid": 123},
+            "training_progress": {
+                "epoch": 1,
+                "epochs": 5,
+                "metrics": {"loss": 0.45678},
+            },
+        })
+        self.assertIn("Waiting for GPU", line)
+        self.assertIn("nnInteractive", line)
+        self.assertIn("epoch 1/5", line)
+        self.assertIn("loss 0.4568", line)
+
     def test_fewshot_external_launch_preserves_worker_status(self):
         """External setup should not overwrite a worker status update with launching."""
         ui = __import__("tools.fewshot_training_setup_ui", fromlist=["dummy"])
@@ -2154,6 +2411,42 @@ class TestNewFeatures(unittest.TestCase):
             status = json.load(handle)
         self.assertEqual("configuring", status["status"])
         self.assertEqual(43210, status["controller_pid"])
+
+    def test_fewshot_mimics_launches_external_status_viewer_nonblocking(self):
+        """Mimics Show Status starts an external viewer process without waiting."""
+        import fewshot_mimics
+        ts_root = os.path.join(self.tmp, "dataset")
+        os.makedirs(ts_root)
+        launched = []
+
+        class Proc(object):
+            pid = 54321
+
+        old_launch = fewshot_mimics._launch_process
+        old_script = fewshot_mimics._status_viewer_script
+        old_project = fewshot_mimics._project_root
+        try:
+            fewshot_mimics._launch_process = lambda cmd, cwd=None: launched.append((cmd, cwd)) or Proc()
+            fewshot_mimics._project_root = lambda: PROJECT_ROOT
+            fewshot_mimics._status_viewer_script = lambda: os.path.join(PROJECT_ROOT, "tools", "fewshot_status_viewer.py")
+            pid = fewshot_mimics._launch_external_status_viewer(
+                {"python": sys.executable, "dinov3_project": "external/dinov3-medical-seg"},
+                ts_root,
+            )
+        finally:
+            fewshot_mimics._launch_process = old_launch
+            fewshot_mimics._status_viewer_script = old_script
+            fewshot_mimics._project_root = old_project
+        self.assertEqual(54321, pid)
+        self.assertEqual(1, len(launched))
+        cmd, _cwd = launched[0]
+        self.assertIn("fewshot_status_viewer.py", cmd[1])
+        self.assertIn("--context", cmd)
+        context_path = cmd[cmd.index("--context") + 1]
+        self.assertTrue(context_path.endswith("_context.json"))
+        with open(context_path, "r") as handle:
+            payload = json.load(handle)
+        self.assertEqual(os.path.abspath(ts_root), payload["ts_root"])
 
 
 # ============================================================================

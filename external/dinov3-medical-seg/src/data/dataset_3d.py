@@ -125,8 +125,16 @@ class MedicalVolumeDataset(Dataset):
 
     def __getitem__(self, index: int) -> dict:
         sample = self.samples[index]
-        image = nib.load(str(sample["image"]))
-        label = nib.load(str(sample["label"]))
+        image = nib.as_closest_canonical(nib.load(str(sample["image"])))
+        label = nib.as_closest_canonical(nib.load(str(sample["label"])))
+        if not np.allclose(image.affine, label.affine, atol=1e-4, rtol=0.0):
+            raise RuntimeError(
+                "Image/label affine mismatch for {} after canonical orientation: {} vs {}".format(
+                    sample["case_id"],
+                    sample["image"],
+                    sample["label"],
+                )
+            )
         image_data = normalize_volume(image.get_fdata(dtype=np.float32), self.modality)
         label_data = (label.get_fdata(dtype=np.float32) > 0).astype(np.int64)
 

@@ -15,16 +15,29 @@ The annotator workflow is:
 
 ## Annotator Experience
 
-The Mimics entry exposes four actions:
+The Mimics Scripting Library exposes six routine actions:
 
 - `Train/Update Model`
+- `Train Advanced...`
 - `Predict Current Case`
+- `Predict With Model...`
 - `Show Status`
 - `Stop Latest Job`
 
 The annotator should not need to remember paths or training parameters during ordinary use. When a project is opened from `<dataset>/mcs_output/<case>.mcs`, the integration infers both the dataset root and current case from that path. If that inference fails, the user is asked to select the dataset folder.
 
 The ordinary training entry uses the active Mask name as the organ/task and runs the configured default training profile. The advanced training entry now opens an external setup window by default. Mimics writes a small context JSON, starts `tools/fewshot_training_setup_ui.py` with `Popen`, and returns immediately; it does not wait for parameter input. The external setup window keeps the default view intentionally small: profile, sample selection, training length, validation split and resource preset. Fine-tuning method, decoder, model scale, image size, learning rate, checkpoint retention and other expert controls stay available on the Expert tab, but annotators do not need to touch them for routine work. When the user clicks Start Training, the external process starts `tools/fewshot_pipeline.py train` and writes the normal training job status file. Mimics only polls status files and logs progress.
+
+Entry behavior:
+
+| Entry | Main use | Foreground Mimics work |
+| --- | --- | --- |
+| `Train/Update Model` | Train the selected organ using the default profile and all eligible saved labels. | Select organ Mask, choose/infer dataset root, start external pipeline. |
+| `Train Advanced...` | Choose samples and a small set of training settings before starting training. | Start external setup UI and monitor its status JSON. |
+| `Predict Current Case` | Apply the latest model for the selected organ to the currently open case. | Start external inference, poll status, apply final mask buffer. |
+| `Predict With Model...` | Choose a specific local/global model version before inference. | Show model chooser only when available, then same as prediction. |
+| `Show Status` | Inspect jobs, logs, training curve, resource waits and results. | Start external status viewer; text dialog only as fallback. |
+| `Stop Latest Job` | Cancel the active DINOv3 job for the selected dataset. | Write cancel marker and terminate recorded job PIDs. |
 
 The external setup UI uses standard Tkinter in the external DINOv3 Python environment, not the embedded Mimics Python session. It is not topmost, does not call back into Mimics, and does not wait on Mimics APIs. This avoids requiring PyQt inside Mimics and avoids Mimics GUI black screens caused by in-process widget imports or long modal parameter collection. If Tkinter is missing in the external Python environment, the setup status is marked failed with a user-facing message and training is not started. If `advanced_ui_mode` is set to `internal`, or if the external setup process itself cannot start and `advanced_ui_fallback_to_internal` is enabled, the older Mimics-internal Qt/profile dialog path is still available as a fallback. The Mimics process does not recursively scan Program Files for Qt bindings. If an in-process Qt dialog is explicitly required, set `MIMICS_QT_PYTHONPATH` or `MIMICS_PYQT_PATH` to a Python-3.5-compatible PyQt5/PySide site-packages path. Do not install a modern PyQt5 wheel into Mimics Python 3.5. No dataset export, image loading, training or inference runs in the Mimics foreground process.
 
@@ -40,7 +53,27 @@ Every job writes a JSON status file under:
 <dataset>/fewshot_models/jobs/
 ```
 
-`Show Status` displays the latest jobs with:
+`Show Status` opens an external read-only status window by default. Mimics only
+starts `tools/fewshot_status_viewer.py` and returns; the status window polls
+JSON/log files outside the Mimics GUI process. If the external status viewer
+cannot be launched and `status_ui_fallback_to_text` is enabled, Mimics falls
+back to the previous non-blocking text status dialog.
+
+The status window shows:
+
+- latest jobs in the selected dataset workspace;
+- selected job details: type, organ, case, status, sample counts, resource wait,
+  latest progress, error, model path, output path and log path;
+- a lightweight training curve parsed from epoch logs: train loss and
+  validation Dice;
+- log tail from the training/inference log and the shared pipeline log;
+- `Open Workspace`, `Open Log Folder`, and `Request Stop`.
+
+`Request Stop` uses only the cancel marker and PIDs recorded in the selected job
+JSON. It does not scan by broad process names and does not terminate the
+foreground Mimics process.
+
+The text fallback displays the latest jobs with:
 
 - job id;
 - job type;
@@ -59,7 +92,7 @@ Every job writes a JSON status file under:
 
 The DINOv3 trainer writes structured training progress after initialization, during train/validation batches, and after each epoch. The Mimics monitor reads this JSON status and logs visible training milestones with epoch, batch, phase, train loss, validation Dice, learning rate and best validation Dice. Text logs still exist, but the Mimics UI does not depend on parsing text logs.
 
-The external Advanced setup window also keeps a Status panel open after training starts. It polls the same job JSON approximately every 1.5 seconds and shows the current stage, sample counts, epoch, loss, validation Dice when validation is enabled, best Dice, errors and completion state. Closing the external setup window does not stop training; `Stop Latest Job` remains the cancellation path from Mimics.
+The external Advanced setup window also keeps a Status panel open after training starts. It polls the same job JSON approximately every 1.5 seconds and shows the current stage, sample counts, epoch, loss, validation Dice when validation is enabled, best Dice, errors and completion state. Closing the external setup window does not stop training; `Stop Latest Job` or the status viewer `Request Stop` remain the cancellation paths.
 
 The job JSON keeps stable machine-readable states such as `waiting_for_gpu` and
 `waiting_for_background_mimics`. Mimics renders those as user-facing phrases
@@ -198,20 +231,40 @@ The external Advanced UI previews are stored at:
 
 - `docs/images/dinov3_advanced_training_ui_preview.png`: default Setup tab;
 - `docs/images/dinov3_advanced_training_expert_preview.png`: optional Expert tab.
+- `docs/images/dinov3_status_viewer_preview.png`: external Status viewer.
 
 Parameter controls are intentionally split by risk:
 
 - routine controls use selections: profile, training length, validation split, resource preset, sample order;
-- expert architecture controls use selections: fine-tuning method, decoder, installed pretrained model scale, modality, base config, learning rate, weight decay, image size and sub-volume depth;
+- expert architecture controls use selections: fine-tuning method, decoder,
+  installed pretrained model scale, learning rate, weight decay, image detail
+  and sub-volume depth;
 - numeric expert controls use spin boxes: epochs, batch size, gradient accumulation, LoRA rank/alpha, adapter bottleneck, checkpoint retention and validation fraction;
-- only the optional model path override remains a free-form text input in the external UI.
+- backend template, modality, and custom weight path are controlled centrally in
+  `fewshot_config.json` and are intentionally hidden from the annotator UI.
 
 The Expert tab only exposes parameters that are wired into the current pipeline and DINOv3 trainer:
 
-- fine-tuning method, LoRA rank/alpha, adapter bottleneck, decoder, model path, image size, modality, learning rate, weight decay, epoch count, batch size, gradient accumulation, mixed precision, checkpoint retention, and materialized dataset retention are written into the generated DINOv3 YAML;
+- fine-tuning method, LoRA rank/alpha, adapter bottleneck, decoder, image
+  detail, learning rate, weight decay, epoch count, batch size, gradient
+  accumulation, mixed precision, and checkpoint retention are written into the
+  generated DINOv3 YAML;
 - pretrained model scale maps to an installed local model directory under `external/dinov3-medical-seg/models`; unavailable scales are not advertised in the external UI;
+- image detail is a labeled preset over common `data.img_size` values
+  (`192,192`, `224,224`, `256,256`, `320,320`). The Expert tab also has a
+  `Custom size` field that is enabled only when `Image detail` is set to
+  `Custom`, so project owners can use any valid `width,height` value without
+  forcing routine annotators to type dimensions;
 - sub-volume depth is the only sub-volume dimension exposed because the current trainer splits by depth; it still writes the three-value config expected by the trainer;
 - `No validation` writes `training.validation_enabled: false`, so the DINOv3 trainer does not reuse training data as validation.
+
+`Modality` is still written from `fewshot_config.json` into the generated YAML,
+but the current pipeline does not use it to change image normalization or data
+loading behavior. For that reason it is not an annotator-facing setting. `Base
+config` is a backend template that controls many low-level DINOv3 defaults at
+once, so exposing it in routine UI would make accidental misconfiguration easy.
+`keep_materialized_dataset` is also config/CLI-only because enabling it can
+quickly grow disk usage and is mostly useful for debugging failed runs.
 
 Setup presets are applied only when the user explicitly selects them. Expert edits are not re-applied or overwritten at Start Training. If an Expert value no longer matches a setup preset, the Setup tab shows `Custom (...)` or `Custom` rather than falling back to the first preset.
 

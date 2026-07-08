@@ -415,7 +415,13 @@ class TrainingSetupApp(object):
     ]
     LR_CHOICES = ["0.001", "0.0005", "0.0002", "0.0001"]
     WEIGHT_DECAY_CHOICES = ["0.01", "0.001", "0.0001", "0.0"]
-    IMG_SIZE_CHOICES = ["192,192", "224,224", "256,256", "320,320"]
+    IMG_SIZE_CHOICES = [
+        ("Fast (192 x 192)", "192,192"),
+        ("Balanced (224 x 224)", "224,224"),
+        ("Detailed (256 x 256)", "256,256"),
+        ("High detail (320 x 320)", "320,320"),
+    ]
+    IMG_SIZE_CUSTOM_LABEL = "Custom"
     SUB_VOLUME_DEPTH_CHOICES = ["16", "24", "32", "48", "64"]
 
     def __init__(self, root, context):
@@ -441,6 +447,8 @@ class TrainingSetupApp(object):
         self.epochs_choice_widget = None
         self.val_choice_widget = None
         self.memory_mode_widget = None
+        self.img_size_choice_widget = None
+        self.img_size_custom_widget = None
         self._syncing_quick = False
         self._build()
 
@@ -612,6 +620,10 @@ class TrainingSetupApp(object):
                     self.vars[key] = tk.StringVar(value=str(value))
         self.vars["val_fraction"] = tk.StringVar(value=str(self.values.get("val_fraction", 0.2)))
         self.vars["sub_volume_depth"] = tk.StringVar(value=self._sub_volume_depth_from_values(self.values))
+        self.vars["img_size_choice"] = tk.StringVar(
+            value=self._img_size_choice_from_value(self.values.get("img_size", "224,224"))
+        )
+        self.vars["img_size_custom"] = tk.StringVar(value=str(self.values.get("img_size", "224,224")))
         grid = ttk.Frame(parent)
         grid.pack(fill="both", expand=True)
         left = ttk.LabelFrame(grid, text="Model and task", padding=12)
@@ -625,12 +637,15 @@ class TrainingSetupApp(object):
         self._labeled_combo(left, "Fine-tuning", "finetune_method", ["lora", "frozen", "adapter", "full"], width=24)
         self._labeled_combo(left, "Decoder", "decoder", ["segformer3d", "mlp_probe", "linear3d", "dpt3d"], width=24)
         self._labeled_combo(left, "Pretrained scale", "model_scale", self._available_model_scales(), width=24)
-        self._labeled_combo(left, "Modality", "modality", ["ct", "mri", "other"], width=24)
-        self._labeled_combo(left, "Base config", "base_config", self._base_config_choices(), width=34)
-        self._labeled_entry(left, "Model path override", "model_path", 34)
         self._labeled_spinbox(left, "LoRA rank", "lora_rank", 1, 128, 1, 10)
         self._labeled_spinbox(left, "LoRA alpha", "lora_alpha", 1, 512, 1, 10)
         self._labeled_spinbox(left, "Adapter bottleneck", "adapter_bottleneck", 1, 512, 1, 10)
+        ttk.Label(
+            left,
+            text="Backend template, modality, and custom weight path are controlled by fewshot_config.json.",
+            foreground="#6b7280",
+            wraplength=420,
+        ).pack(anchor="w", pady=(12, 0))
 
         ttk.Label(right, text="These affect runtime, memory use, validation, and disk retention.").pack(anchor="w", pady=(0, 8))
         self._labeled_spinbox(right, "Epochs", "epochs", 1, 10000, 1, 10)
@@ -638,13 +653,27 @@ class TrainingSetupApp(object):
         self._labeled_spinbox(right, "Grad accumulation", "grad_accumulation", 1, 1024, 1, 10)
         self._labeled_combo(right, "Learning rate", "lr", self.LR_CHOICES, width=14)
         self._labeled_combo(right, "Weight decay", "weight_decay", self.WEIGHT_DECAY_CHOICES, width=14)
-        self._labeled_combo(right, "Image size", "img_size", self.IMG_SIZE_CHOICES, width=14)
+        self.img_size_choice_widget = self._labeled_combo(
+            right,
+            "Image detail",
+            "img_size_choice",
+            [label for label, _value in self.IMG_SIZE_CHOICES] + [self.IMG_SIZE_CUSTOM_LABEL],
+            width=22,
+        )
+        self.img_size_choice_widget.bind("<<ComboboxSelected>>", self._sync_image_size_choice)
+        self.img_size_custom_widget = self._labeled_entry(right, "Custom size", "img_size_custom", 14)
+        try:
+            self.img_size_custom_widget.bind("<KeyRelease>", self._sync_custom_image_size)
+            self.img_size_custom_widget.bind("<FocusOut>", self._sync_custom_image_size)
+        except Exception:
+            pass
         self._labeled_combo(right, "Sub-volume depth", "sub_volume_depth", self.SUB_VOLUME_DEPTH_CHOICES, width=14)
         self._labeled_spinbox(right, "Keep checkpoints", "keep_last_checkpoints", 0, 1000, 1, 10)
         self._labeled_spinbox(right, "Validation fraction", "val_fraction", 0.0, 0.9, 0.05, 10)
-        ttk.Checkbutton(right, text="Mixed precision", variable=self.vars["mixed_precision"]).pack(anchor="w", pady=(6, 0))
-        ttk.Checkbutton(right, text="Sub-volume training", variable=self.vars["sub_volume"]).pack(anchor="w", pady=(6, 0))
-        ttk.Checkbutton(right, text="Keep materialized dataset", variable=self.vars["keep_materialized_dataset"]).pack(anchor="w", pady=(6, 0))
+        check_row = ttk.Frame(right)
+        check_row.pack(fill="x", pady=(6, 0))
+        ttk.Checkbutton(check_row, text="Mixed precision", variable=self.vars["mixed_precision"]).pack(side="left")
+        ttk.Checkbutton(check_row, text="Sub-volume training", variable=self.vars["sub_volume"]).pack(side="left", padx=(18, 0))
         self._install_quick_refresh_traces()
 
     def _labeled_entry(self, parent, label, key, width):
@@ -652,7 +681,9 @@ class TrainingSetupApp(object):
         row = ttk.Frame(parent)
         row.pack(fill="x", pady=3)
         ttk.Label(row, text=label, width=20).pack(side="left")
-        ttk.Entry(row, textvariable=self.vars[key], width=width).pack(side="left", fill="x", expand=True)
+        entry = ttk.Entry(row, textvariable=self.vars[key], width=width)
+        entry.pack(side="left", fill="x", expand=True)
+        return entry
 
     def _labeled_spinbox(self, parent, label, key, from_, to, increment, width):
         from tkinter import ttk
@@ -723,6 +754,46 @@ class TrainingSetupApp(object):
         parts = [part.strip() for part in str(img_size).split(",")]
         if len(parts) == 2:
             self.vars["sub_volume_size"].set("{0},{1},{2}".format(depth, parts[0], parts[1]))
+
+    def _img_size_choice_from_value(self, value):
+        for label, item in self.IMG_SIZE_CHOICES:
+            if str(item) == str(value):
+                return label
+        return self.IMG_SIZE_CUSTOM_LABEL
+
+    def _set_custom_size_entry_state(self):
+        if getattr(self, "img_size_custom_widget", None) is None or "img_size_choice" not in self.vars:
+            return
+        state = "normal" if self.vars["img_size_choice"].get() == self.IMG_SIZE_CUSTOM_LABEL else "disabled"
+        try:
+            self.img_size_custom_widget.configure(state=state)
+        except Exception:
+            pass
+
+    def _sync_image_size_choice(self, _event=None):
+        choice = self.vars.get("img_size_choice")
+        target = self.vars.get("img_size")
+        if choice is None or target is None:
+            return
+        if choice.get() == self.IMG_SIZE_CUSTOM_LABEL:
+            custom = self.vars.get("img_size_custom")
+            value = custom.get().strip() if custom is not None else target.get()
+        else:
+            value = _choice_value(choice.get(), self.IMG_SIZE_CHOICES)
+        if value is not None:
+            target.set(str(value))
+            custom = self.vars.get("img_size_custom")
+            if custom is not None and choice.get() != self.IMG_SIZE_CUSTOM_LABEL:
+                custom.set(str(value))
+        self._set_custom_size_entry_state()
+
+    def _sync_custom_image_size(self, _event=None):
+        if "img_size_choice" not in self.vars or "img_size_custom" not in self.vars:
+            return
+        if self.vars["img_size_choice"].get() != self.IMG_SIZE_CUSTOM_LABEL:
+            return
+        self.vars["img_size"].set(self.vars["img_size_custom"].get().strip())
+        self._sync_sub_volume_size()
 
     def _memory_mode_from_values(self, values):
         sub_volume = _bool(values.get("sub_volume", False))
@@ -805,6 +876,16 @@ class TrainingSetupApp(object):
                 except Exception:
                     pass
             self._set_combo_value(self.memory_mode_widget, "memory_mode", self._memory_mode_from_values(values))
+        if "img_size" in self.vars and "img_size_choice" in self.vars:
+            label = self._img_size_choice_from_value(self.vars["img_size"].get())
+            self._set_combo_value(
+                self.img_size_choice_widget,
+                "img_size_choice",
+                label,
+            )
+            if "img_size_custom" in self.vars:
+                self.vars["img_size_custom"].set(self.vars["img_size"].get())
+            self._set_custom_size_entry_state()
 
     def _sync_quick_settings(self, _event=None):
         self._syncing_quick = True
@@ -866,15 +947,20 @@ class TrainingSetupApp(object):
             self.vars["memory_mode"].set(self._memory_mode_from_values(values))
         if "sub_volume_depth" in self.vars:
             self.vars["sub_volume_depth"].set(self._sub_volume_depth_from_values(values))
+        if "img_size_choice" in self.vars:
+            self.vars["img_size_choice"].set(self._img_size_choice_from_value(values.get("img_size", "224,224")))
+        if "img_size_custom" in self.vars:
+            self.vars["img_size_custom"].set(str(values.get("img_size", "224,224")))
         self._refresh_quick_labels()
         self.status_var.set("Applied profile: {0}".format(profile_name or "default"))
         self._append_log("Applied profile: {0}".format(profile_name or "default"))
 
     def collect_options(self):
+        self._sync_image_size_choice()
         self._sync_sub_volume_size()
         options = {}
         for key, var in self.vars.items():
-            if key in ("epochs_choice", "val_fraction_choice", "memory_mode", "sub_volume_depth"):
+            if key in ("epochs_choice", "val_fraction_choice", "memory_mode", "sub_volume_depth", "img_size_choice", "img_size_custom"):
                 continue
             value = var.get()
             options[key] = value
@@ -1083,9 +1169,6 @@ def generate_preview(path, tab="setup"):
             ("Fine-tuning", "lora", "select"),
             ("Decoder", "segformer3d", "select"),
             ("Pretrained scale", "vitb16", "select"),
-            ("Modality", "ct", "select"),
-            ("Base config", "config/synthstrip_lora_segformer3d.yaml", "text"),
-            ("Model path override", "(optional)", "text"),
             ("LoRA rank", "8", "spin"),
             ("LoRA alpha", "16", "spin"),
             ("Adapter bottleneck", "64", "spin"),
@@ -1094,6 +1177,8 @@ def generate_preview(path, tab="setup"):
         for label, value, kind in model_rows:
             draw_row(left_x + 22, y, label, value, kind, w=330, label_w=170)
             y += 36
+        draw.text((left_x + 22, y + 12), "Backend template, modality, and custom weights are", fill="#6b7280", font=small)
+        draw.text((left_x + 22, y + 34), "controlled centrally in fewshot_config.json.", fill="#6b7280", font=small)
 
         draw.rectangle((right_x, card_y, right_x + card_w, card_bottom), outline="#d1d5db", fill="#f9fafb")
         draw.text((right_x + 22, card_y + 22), "Training and resources", fill="#111827", font=head_font)
@@ -1104,7 +1189,8 @@ def generate_preview(path, tab="setup"):
             ("Grad accumulation", "1", "spin"),
             ("Learning rate", "0.001", "select"),
             ("Weight decay", "0.01", "select"),
-            ("Image size", "224,224", "select"),
+            ("Image detail", "Balanced (224 x 224)", "select"),
+            ("Custom size", "224,224", "text"),
             ("Sub-volume depth", "32", "select"),
             ("Keep checkpoints", "2", "spin"),
             ("Validation fraction", "0.2", "spin"),
@@ -1114,13 +1200,14 @@ def generate_preview(path, tab="setup"):
             draw_row(right_x + 22, y, label, value, kind, w=250, label_w=172)
             y += 36
         y += 10
-        for label, checked in (("Mixed precision", False), ("Sub-volume training", False), ("Keep materialized dataset", False)):
-            draw.rectangle((right_x + 22, y, right_x + 38, y + 16), outline="#6b7280", fill="#ffffff")
+        check_x = right_x + 22
+        for label, checked in (("Mixed precision", False), ("Sub-volume training", False)):
+            draw.rectangle((check_x, y, check_x + 16, y + 16), outline="#6b7280", fill="#ffffff")
             if checked:
-                draw.line((right_x + 25, y + 8, right_x + 30, y + 13), fill="#2563eb", width=2)
-                draw.line((right_x + 30, y + 13, right_x + 38, y + 3), fill="#2563eb", width=2)
-            draw.text((right_x + 50, y - 2), label, fill="#374151", font=small)
-            y += 28
+                draw.line((check_x + 3, y + 8, check_x + 8, y + 13), fill="#2563eb", width=2)
+                draw.line((check_x + 8, y + 13, check_x + 16, y + 3), fill="#2563eb", width=2)
+            draw.text((check_x + 28, y - 2), label, fill="#374151", font=small)
+            check_x += 190
     else:
         draw.rectangle((60, 238, width - 60, 300), outline="#d1d5db", fill="#f9fafb")
         draw.text((80, 256), "Profile", fill="#374151", font=font)

@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import torch
 import numpy as np
 import nibabel as nib
+from nibabel.orientations import apply_orientation, io_orientation, ornt_transform
 
 from src.utils.config import load_config
 from src.utils.device import get_device
@@ -36,7 +37,8 @@ def main():
     model.eval()
 
     print(f"Loading: {args.input}")
-    img = nib.load(args.input)
+    original_img = nib.load(args.input)
+    img = nib.as_closest_canonical(original_img)
     data = normalize_volume(
         img.get_fdata(dtype=np.float32),
         config.get("data", {}).get("modality", "other"),
@@ -69,9 +71,22 @@ def main():
         )
         pred_resized[d] = slc.numpy()
 
+    # Map prediction from canonical model space back to the input image grid.
+    original_ornt = io_orientation(original_img.affine)
+    canonical_ornt = io_orientation(img.affine)
+    back_to_original = ornt_transform(canonical_ornt, original_ornt)
+    pred_original = apply_orientation(pred_resized, back_to_original).astype(np.int32, copy=False)
+    if pred_original.shape != original_img.shape[:3]:
+        raise RuntimeError(
+            "prediction orientation restore failed: {} != {}".format(
+                pred_original.shape,
+                original_img.shape[:3],
+            )
+        )
+
     # Save
     print(f"Saving: {args.output}")
-    out_img = nib.Nifti1Image(pred_resized, img.affine, img.header)
+    out_img = nib.Nifti1Image(pred_original, original_img.affine, original_img.header)
     nib.save(out_img, args.output)
     print("Done.")
 

@@ -116,6 +116,37 @@ def _config():
     return cfg
 
 
+def _parse_axes_value(value):
+    if value is None or value == "":
+        return [0, 1, 2]
+    if isinstance(value, str):
+        value = [part.strip() for part in value.replace(";", ",").split(",") if part.strip()]
+    axes = [int(part) for part in value]
+    if sorted(axes) != [0, 1, 2]:
+        raise ValueError("mimics buffer axes must be a permutation of 0,1,2: {0}".format(value))
+    return axes
+
+
+def _parse_flips_value(value):
+    if value is None or value == "":
+        return [False, False, False]
+    if isinstance(value, str):
+        value = [part.strip() for part in value.replace(";", ",").split(",") if part.strip()]
+    if len(value) != 3:
+        raise ValueError("mimics buffer flips must contain three values: {0}".format(value))
+    return [
+        bool(part) if isinstance(part, bool) else str(part).strip().lower() in ("1", "true", "yes", "y", "on")
+        for part in value
+    ]
+
+
+def _buffer_mapping_from_config(config):
+    config = config or {}
+    axes_value = config.get("mimics_buffer_axes", config.get("platform_to_mimics_axes", config.get("axes", [0, 1, 2])))
+    flips_value = config.get("mimics_buffer_flips", config.get("platform_to_mimics_flips", config.get("flips", [False, False, False])))
+    return _parse_axes_value(axes_value), _parse_flips_value(flips_value)
+
+
 def _resolve_path(value, base):
     if not value:
         return None
@@ -162,6 +193,10 @@ def _pipeline_script():
 
 def _training_setup_ui_script():
     return os.path.join(_project_root(), "tools", "fewshot_training_setup_ui.py")
+
+
+def _status_viewer_script():
+    return os.path.join(_project_root(), "tools", "fewshot_status_viewer.py")
 
 
 def _bridge_script():
@@ -560,17 +595,67 @@ def _choose_dataset_root(title):
     return None
 
 
+def _count_available_labels(ts_root, organ):
+    """Count how many cases under ts_root have saved .mcs files with labels."""
+    mcs_dir = os.path.join(ts_root, "mcs_output")
+    if not os.path.isdir(mcs_dir):
+        return 0
+    count = 0
+    for fname in sorted(os.listdir(mcs_dir)):
+        if not fname.lower().endswith(".mcs"):
+            continue
+        dir_name = fname[:-4]
+        seg_dir = os.path.join(ts_root, dir_name, "segmentations")
+        if not os.path.isdir(seg_dir):
+            continue
+        for seg_name in os.listdir(seg_dir):
+            stem = seg_name.replace(".nii.gz", "").replace(".nii", "")
+            if stem.lower() == organ.lower() or stem.lower() == _safe_slug(organ).lower():
+                count += 1
+                break
+    return count
+
+
 def _infer_case_id(ts_root):
+    """Match the open .mcs project to a dataset case.
+
+    First tries the canonical path <ts_root>/mcs_output/<case>.mcs.
+    If that fails, also checks <ts_root>/<case>.mcs and case-directory
+    pattern so the annotator is not forced to use a single layout.
+    """
     project_path = _current_project_path()
     if not project_path:
         return None
-    output_dir = os.path.abspath(os.path.join(ts_root, "mcs_output"))
-    project_dir = os.path.abspath(os.path.dirname(project_path))
-    if os.path.normcase(project_dir) != os.path.normcase(output_dir):
-        return None
     name = os.path.basename(project_path)
     if name.lower().endswith(".mcs"):
-        return name[:-4]
+        case_id = name[:-4]
+    else:
+        case_id = name
+
+    # Canonical: <ts_root>/mcs_output/<case>.mcs
+    output_dir = os.path.abspath(os.path.join(ts_root, "mcs_output"))
+    project_dir = os.path.abspath(os.path.dirname(project_path))
+    if os.path.normcase(project_dir) == os.path.normcase(output_dir):
+        return case_id
+
+    # Fallback 1: <ts_root>/<case>.mcs
+    alt_dir = os.path.abspath(ts_root)
+    if os.path.normcase(project_dir) == os.path.normcase(alt_dir):
+        return case_id
+
+    # Fallback 2: <ts_root>/<case_dir>/<case>.mcs (case dir matches case id)
+    for item in sorted(os.listdir(ts_root)):
+        item_path = os.path.join(ts_root, item)
+        if not os.path.isdir(item_path):
+            continue
+        if item in ("mcs_output", "segmentations", "fewshot_models", "labels"):
+            continue
+        candidate_dir = os.path.abspath(os.path.join(item_path, "mcs_output"))
+        if os.path.normcase(project_dir) == os.path.normcase(candidate_dir):
+            return case_id
+        if os.path.normcase(project_dir) == os.path.normcase(item_path):
+            return item
+
     return None
 
 
@@ -1007,20 +1092,20 @@ def _advanced_training_options(config, ts_root):
     train_form.addRow("Fine-tuning", finetune)
     train_form.addRow("Decoder", decoder)
     train_form.addRow("Pretrained scale", model_scale)
-    train_form.addRow("Modality", modality)
     train_form.addRow("Epochs", epochs)
     train_form.addRow("Batch size", batch_size)
     train_form.addRow("Grad accumulation", grad_accum)
     train_form.addRow("Learning rate", lr)
     train_form.addRow("Weight decay", weight_decay)
     train_form.addRow("Image size", img_size)
-    train_form.addRow("Base config", base_config)
-    train_form.addRow("Model path override", model_path)
     train_form.addRow("Mixed precision", mixed_precision)
     train_form.addRow("Sub-volume", sub_volume)
     train_form.addRow("Sub-volume size", sub_volume_size)
     train_form.addRow("Keep last checkpoints", keep_last_checkpoints)
-    train_form.addRow("Keep materialized dataset", keep_materialized_dataset)
+    train_form.addRow(
+        "Backend config",
+        QLabel("Base config, modality, and custom weight path are controlled by fewshot_config.json."),
+    )
     tabs.addTab(train_tab, "Training")
 
     buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -1213,11 +1298,29 @@ def _train_model(advanced=False):
             return 0
     else:
         options = _default_training_options(config)
+
+    # Pre-flight: count how many saved .mcs files have labels for this organ
+    label_count = _count_available_labels(ts_root, organ)
+    min_samples = int(options.get("min_samples", config.get("default_min_samples", 1)))
+    label_info = ""
+    if label_count < min_samples:
+        msg = (
+            "Training needs at least {0} saved .mcs with annotated labels for \"{1}\", "
+            "but only {2} were found.\n\n"
+            "Open cases from {3}, annotate the \"{1}\" mask, save them, and retry."
+        ).format(min_samples, organ, label_count,
+                 os.path.join(ts_root, "mcs_output"))
+        mimics.dialogs.message_box(msg, title=TITLE, ui_blocking=False)
+        return 1
+    if label_count < 5:
+        label_info = "\n\n{0} labeled case(s) found for \"{1}\" (minimum {2}).".format(
+            label_count, organ, min_samples)
+
     answer = mimics.dialogs.question_box(
         message=(
             "Training uses saved .mcs files.\n\n"
             "Save the current project before starting so the latest manual edits "
-            "are included in the exported labels."
+            "are included in the exported labels." + label_info
         ),
         buttons="Start Training;" + BUTTON_CANCEL,
         title=TITLE,
@@ -1440,13 +1543,14 @@ def _launch_bridge_mask_to_buffer(monitor, status):
     if not os.path.isdir(job_dir):
         os.makedirs(job_dir)
     output_path = os.path.join(job_dir, "prediction.u8")
+    axes, flips = _buffer_mapping_from_config(_config())
     params = {
         "action": "mask_to_buffer",
         "image_path": status["image_path"],
         "mask_path": status["output_path"],
         "output_path": output_path,
-        "axes": [0, 1, 2],
-        "flips": [False, False, False],
+        "axes": axes,
+        "flips": flips,
     }
     grid_payload = _active_mimics_grid_payload()
     if grid_payload:
@@ -1883,11 +1987,17 @@ def _model_candidates(ts_root, organ):
     organ_slug = _safe_slug(organ)
     models_dir = os.path.join(_workspace(ts_root), "models", organ_slug)
     seen_manifests = set()
+    def usable_manifest(manifest):
+        if not manifest:
+            return False
+        checkpoint = manifest.get("checkpoint", "")
+        config_path = manifest.get("config", "")
+        return bool(checkpoint and config_path and os.path.isfile(checkpoint) and os.path.isfile(config_path))
     if os.path.isdir(models_dir):
         latest_path = os.path.join(models_dir, "latest.json")
         for manifest_path in [latest_path]:
             manifest = _read_json(manifest_path, {}) or {}
-            if manifest:
+            if usable_manifest(manifest):
                 seen_manifests.add(os.path.abspath(manifest_path))
                 candidates.append({
                     "scope": "dataset latest",
@@ -1902,7 +2012,7 @@ def _model_candidates(ts_root, organ):
             for run_id in sorted(os.listdir(models_dir), reverse=True):
                 manifest_path = os.path.join(models_dir, run_id, "manifest.json")
                 manifest = _read_json(manifest_path, {}) or {}
-                if not manifest:
+                if not usable_manifest(manifest):
                     continue
                 abs_manifest = os.path.abspath(manifest_path)
                 if abs_manifest in seen_manifests:
@@ -1930,6 +2040,9 @@ def _model_candidates(ts_root, organ):
         if abs_manifest in seen_manifests:
             continue
         seen_manifests.add(abs_manifest)
+        manifest = _read_json(abs_manifest, {}) or {}
+        if not usable_manifest(manifest):
+            continue
         candidates.append({
             "scope": "global",
             "manifest_path": abs_manifest,
@@ -1937,7 +2050,7 @@ def _model_candidates(ts_root, organ):
             "organ": row.get("organ", organ),
             "sample_count": row.get("sample_count", 0),
             "created_at_epoch": row.get("created_at_epoch", 0.0),
-            "manifest": _read_json(abs_manifest, {}) or {},
+            "manifest": manifest,
         })
     candidates.sort(key=lambda item: float(item.get("created_at_epoch", 0.0) or 0.0), reverse=True)
     return candidates
@@ -1992,10 +2105,42 @@ def _choose_model_manifest(ts_root, organ):
     return item.data(32) if item is not None else None
 
 
-def _show_status():
-    ts_root = _choose_dataset_root("Select dataset folder")
-    if not ts_root or not os.path.isdir(ts_root):
-        return 1
+def _launch_external_status_viewer(config, ts_root):
+    script = _status_viewer_script()
+    if not os.path.isfile(script):
+        raise RuntimeError("External status viewer was not found: {0}".format(script))
+    dinov3_root = _dinov3_root(config)
+    python_exe = _fewshot_python(config, dinov3_root)
+    workspace = _workspace(ts_root)
+    jobs_dir = os.path.join(workspace, "jobs")
+    if not os.path.isdir(jobs_dir):
+        os.makedirs(jobs_dir)
+    try:
+        selected_organ = _selected_organ() or ""
+    except Exception:
+        selected_organ = ""
+    context_path = os.path.join(
+        jobs_dir,
+        "status_viewer_{0}_{1}_context.json".format(time.strftime("%Y%m%dT%H%M%S"), uuid.uuid4().hex[:8]),
+    )
+    context = {
+        "schema_version": "mimics_fewshot_status_viewer_context.v1",
+        "ts_root": os.path.abspath(ts_root),
+        "workspace": workspace,
+        "selected_organ": selected_organ,
+        "project_root": _project_root(),
+        "created_at_epoch": time.time(),
+    }
+    _write_json_atomic(context_path, context)
+    process = _launch_process([python_exe, script, "--context", context_path], cwd=_project_root())
+    _mimics_log(
+        logging.INFO,
+        "DINOv3 status viewer opened in an external process. PID: {0}".format(process.pid),
+    )
+    return process.pid
+
+
+def _show_status_text(ts_root):
     jobs_dir = os.path.join(_workspace(ts_root), "jobs")
     if not os.path.isdir(jobs_dir):
         mimics.dialogs.message_box("No few-shot jobs were found.", title=TITLE, ui_blocking=False)
@@ -2039,6 +2184,31 @@ def _show_status():
         ui_blocking=False,
     )
     return 0
+
+
+def _show_status():
+    ts_root = _choose_dataset_root("Select dataset folder")
+    if not ts_root or not os.path.isdir(ts_root):
+        return 1
+    config = _config()
+    mode = str(config.get("status_ui_mode", "external")).strip().lower()
+    if mode != "text":
+        try:
+            _launch_external_status_viewer(config, ts_root)
+            return 0
+        except Exception as exc:
+            _mimics_log(
+                logging.WARNING,
+                "DINOv3 external status viewer could not start: {0}".format(exc),
+            )
+            if not bool(config.get("status_ui_fallback_to_text", True)):
+                mimics.dialogs.message_box(
+                    "Could not open the external DINOv3 status viewer.\n\n{0}".format(exc),
+                    title=TITLE,
+                    ui_blocking=False,
+                )
+                return 1
+    return _show_status_text(ts_root)
 
 
 def _stop_latest_job():

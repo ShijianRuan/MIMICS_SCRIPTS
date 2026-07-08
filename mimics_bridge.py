@@ -9,6 +9,7 @@ Protocol: JSON stdin -> JSON stdout.
 Actions:
     "prepare" - NIfTI image -> derived DICOM, NIfTI masks -> .u8 buffers
     "convert" - .u8 buffers -> NIfTI files (inverse buffer mapping)
+    "resample_image_to_grid" - resample an image to a supplied target grid
 """
 
 from __future__ import annotations
@@ -90,7 +91,8 @@ def is_nifti_file(path: str) -> bool:
     p = Path(path)
     if not p.is_file():
         return False
-    return p.name.endswith(".nii") or p.name.endswith(".nii.gz")
+    name = p.name.lower()
+    return name.endswith(".nii") or name.endswith(".nii.gz")
 
 
 # -- NIfTI -> derived DICOM --------------------------------------------
@@ -669,6 +671,62 @@ def write_mask_nifti(array: np.ndarray, affine: np.ndarray, output_path: str) ->
     nib.save(nii, output_path)
 
 
+def resample_image_to_grid(
+    image_path: str,
+    target_shape,
+    target_voxel_to_ras_matrix,
+    output_path: str,
+    default_value: float = -1024.0,
+) -> dict:
+    """Linearly resample an image to a target RAS voxel grid.
+
+    This is used by few-shot training materialization when labels come from a
+    Mimics project that was imported on a resampled Mimics grid. In that case
+    the exported labels are correct in Mimics space, so the image must be
+    resampled to the label grid before training.
+    """
+    import SimpleITK as sitk
+
+    target_shape = _shape_from_params(target_shape)
+    target_affine_ras = _matrix_from_params(target_voxel_to_ras_matrix)
+    source = _read_image_sitk_lps(image_path)
+
+    target_affine_lps = RAS_TO_LPS @ target_affine_ras
+    spacing = _voxel_spacing_from_affine(target_affine_lps)
+    direction = target_affine_lps[:3, :3] / spacing
+    if not np.all(np.isfinite(direction)):
+        raise ValueError("target_voxel_to_ras_matrix has invalid direction columns")
+
+    reference = sitk.Image(
+        int(target_shape[0]),
+        int(target_shape[1]),
+        int(target_shape[2]),
+        source.GetPixelID(),
+    )
+    reference.SetOrigin([float(value) for value in target_affine_lps[:3, 3]])
+    reference.SetSpacing([float(value) for value in spacing])
+    reference.SetDirection([float(value) for value in direction.reshape(-1)])
+
+    resampler = sitk.ResampleImageFilter()
+    resampler.SetReferenceImage(reference)
+    resampler.SetInterpolator(sitk.sitkLinear)
+    resampler.SetDefaultPixelValue(float(default_value))
+    resampled = resampler.Execute(source)
+
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if out.exists():
+        out.unlink()
+    sitk.WriteImage(resampled, str(out), useCompression=out.name.endswith(".gz"))
+    return {
+        "status": "ok",
+        "image_path": str(Path(image_path).resolve()),
+        "output_path": str(out.resolve()),
+        "target_shape": [int(value) for value in target_shape],
+        "target_voxel_to_ras_matrix": target_affine_ras.tolist(),
+    }
+
+
 # -- Affine from NIfTI or DICOM ----------------------------------------
 
 def get_image_affine(image_path: str) -> np.ndarray:
@@ -688,6 +746,18 @@ def get_image_shape(image_path: str) -> tuple[int, int, int]:
     if len(shape) != 3:
         raise ValueError("image must be 3D: {} shape={}".format(image_path, size))
     return shape
+
+
+def get_nifti_disk_geometry(image_path: str) -> tuple[tuple[int, int, int], np.ndarray]:
+    """Return the on-disk NIfTI shape and RAS affine exactly as nibabel sees it."""
+    if not Path(image_path).is_file():
+        raise ValueError("image file not found: {}".format(image_path))
+    import nibabel as nib
+    img = nib.load(str(image_path))
+    shape = tuple(int(value) for value in img.shape[:3])
+    if len(shape) != 3 or any(value <= 0 for value in shape):
+        raise ValueError("image must be 3D: {} shape={}".format(image_path, img.shape))
+    return shape, np.asarray(img.affine, dtype=float)
 
 
 def _shape_from_params(value) -> tuple[int, int, int]:
@@ -770,20 +840,81 @@ def get_image_affine_from_dicom(dicom_folder: str) -> np.ndarray:
     return LPS_TO_RAS @ affine_lps
 
 
-def find_affine_in_case_dir(case_dir: str) -> np.ndarray | None:
-    """Find affine from image in a TS-like case directory."""
+def get_image_shape_from_dicom(dicom_folder: str) -> tuple[int, int, int]:
+    import pydicom
+    folder = Path(dicom_folder)
+    headers = []
+    for p in sorted(folder.rglob("*")):
+        if not p.is_file():
+            continue
+        try:
+            ds = pydicom.dcmread(str(p), stop_before_pixels=True, force=False)
+        except Exception:
+            continue
+        if hasattr(ds, "Rows") and hasattr(ds, "Columns"):
+            headers.append(ds)
+    if not headers:
+        raise ValueError("no readable DICOM slices in: {}".format(dicom_folder))
+    first = headers[0]
+    return (int(first.Columns), int(first.Rows), int(len(headers)))
+
+
+def _nifti_candidates(case_dir: Path):
+    preferred = ("ct.nii.gz", "mri.nii.gz", "ct.nii", "mri.nii")
+    files = []
+    for child in case_dir.iterdir():
+        if not child.is_file():
+            continue
+        name = child.name.lower()
+        if name.endswith(".nii") or name.endswith(".nii.gz"):
+            files.append(child)
+    preferred_rows = []
+    other_rows = []
+    for path in files:
+        lower_name = path.name.lower()
+        if lower_name in preferred:
+            preferred_rows.append(path)
+        else:
+            other_rows.append(path)
+    return sorted(preferred_rows, key=lambda p: preferred.index(p.name.lower())) + sorted(other_rows)
+
+
+def find_image_geometry_in_case_dir(case_dir: str) -> dict | None:
+    """Find source image geometry in a TS-like case directory.
+
+    For NIfTI input this deliberately uses nibabel's on-disk RAS affine, because
+    exported labels in case_dir/segmentations are expected to align with the
+    source image file that external tools will open.
+    """
     d = Path(case_dir)
-    for img_name in ["ct.nii.gz", "mri.nii.gz"]:
-        candidate = d / img_name
-        if candidate.is_file():
-            return get_image_affine(str(candidate))
+    for candidate in _nifti_candidates(d):
+        try:
+            shape, affine = get_nifti_disk_geometry(str(candidate))
+            return {
+                "path": str(candidate),
+                "kind": "nifti",
+                "shape": shape,
+                "affine": affine,
+            }
+        except Exception:
+            continue
     dicom_dir = d / "dicom"
     if dicom_dir.is_dir():
-        return get_image_affine_from_dicom(str(dicom_dir))
-    for nii_file in sorted(d.glob("*.nii.gz")):
-        if "segmentations" not in str(nii_file.parent):
-            return get_image_affine(str(nii_file))
+        return {
+            "path": str(dicom_dir),
+            "kind": "dicom_folder",
+            "shape": get_image_shape_from_dicom(str(dicom_dir)),
+            "affine": get_image_affine_from_dicom(str(dicom_dir)),
+        }
     return None
+
+
+def find_affine_in_case_dir(case_dir: str) -> np.ndarray | None:
+    """Find affine from image in a TS-like case directory."""
+    geometry = find_image_geometry_in_case_dir(case_dir)
+    if not geometry:
+        return None
+    return geometry["affine"]
 
 
 # -- Actions ------------------------------------------------------------
@@ -1023,10 +1154,45 @@ def do_convert(params: dict) -> dict:
     if not mimics_shape:
         return {"status": "error", "error": "manifest has no mimics_shape"}
 
-    # Get affine
-    affine = find_affine_in_case_dir(case_dir)
-    if affine is None:
-        return {"status": "error", "error": "no image found in case_dir for affine: {}".format(case_dir)}
+    # First recover the mask into the Mimics image grid. The mask buffer may use
+    # a platform-specific buffer order, so inverse_buffer_mapping restores the
+    # image voxel index space before any world-space resampling happens.
+    mimics_affine_source = ""
+    mimics_affine_value = (
+        params.get("target_voxel_to_ras_matrix")
+        or params.get("mimics_voxel_to_ras_matrix")
+        or manifest.get("mimics_voxel_to_ras_matrix")
+    )
+    if mimics_affine_value:
+        mimics_affine = _matrix_from_params(mimics_affine_value)
+        if params.get("target_voxel_to_ras_matrix"):
+            mimics_affine_source = "params.target_voxel_to_ras_matrix"
+        elif params.get("mimics_voxel_to_ras_matrix"):
+            mimics_affine_source = "params.mimics_voxel_to_ras_matrix"
+        else:
+            mimics_affine_source = "manifest.mimics_voxel_to_ras_matrix"
+    else:
+        mimics_affine = find_affine_in_case_dir(case_dir)
+        mimics_affine_source = "case_image_fallback"
+        if mimics_affine is None:
+            return {"status": "error", "error": "no image found in case_dir for affine: {}".format(case_dir)}
+
+    source_geometry = None
+    try:
+        source_geometry = find_image_geometry_in_case_dir(case_dir)
+    except Exception:
+        source_geometry = None
+    export_space = str(params.get("export_space") or manifest.get("export_space") or "source_image").lower()
+    if export_space in ("source", "source_image", "source_grid") and source_geometry:
+        export_shape = tuple(int(value) for value in source_geometry["shape"])
+        export_affine = np.asarray(source_geometry["affine"], dtype=float)
+        export_affine_source = "source_image:{}".format(source_geometry.get("kind", "unknown"))
+        export_space = "source_image"
+    else:
+        export_shape = None
+        export_affine = mimics_affine
+        export_affine_source = mimics_affine_source
+        export_space = "mimics_grid"
 
     # Create segmentations dir
     seg_dir = os.path.join(case_dir, "segmentations")
@@ -1064,13 +1230,24 @@ def do_convert(params: dict) -> dict:
             continue
 
         array = np.frombuffer(raw, dtype=np.uint8).reshape(tuple(mimics_shape))
-        nifti_array = inverse_buffer_mapping(array, axes, flips)
+        mimics_grid_array = inverse_buffer_mapping(array, axes, flips)
+        if export_shape is not None:
+            nifti_array = resample_mask_to_image_grid(
+                mimics_grid_array,
+                mimics_affine,
+                export_shape,
+                export_affine,
+            )
+        else:
+            nifti_array = mimics_grid_array
 
         # If file already exists, compare content; skip write if unchanged.
         if os.path.isfile(nifti_path):
             import nibabel as nib
-            existing = np.asanyarray(nib.load(nifti_path).dataobj)
-            if existing.shape == nifti_array.shape and np.array_equal(existing, nifti_array):
+            existing_img = nib.load(nifti_path)
+            existing = np.asanyarray(existing_img.dataobj)
+            same_affine = _affine_close(existing_img.affine, export_affine)
+            if existing.shape == nifti_array.shape and np.array_equal(existing, nifti_array) and same_affine:
                 total_unchanged += 1
                 exported.append({"name": name, "action": "unchanged", "path": nifti_path})
                 continue
@@ -1078,7 +1255,7 @@ def do_convert(params: dict) -> dict:
         else:
             action = "new"
 
-        write_mask_nifti(nifti_array, affine, nifti_path)
+        write_mask_nifti(nifti_array, export_affine, nifti_path)
 
         if action == "new":
             total_new += 1
@@ -1092,7 +1269,22 @@ def do_convert(params: dict) -> dict:
         "total_new": total_new,
         "total_overwritten": total_overwritten,
         "total_unchanged": total_unchanged,
+        "export_space": export_space,
+        "mimics_voxel_to_ras_matrix_source": mimics_affine_source,
+        "mimics_voxel_to_ras_matrix": mimics_affine.tolist(),
+        "export_voxel_to_ras_matrix_source": export_affine_source,
+        "export_voxel_to_ras_matrix": export_affine.tolist(),
     }
+
+
+def do_resample_image_to_grid(params: dict) -> dict:
+    return resample_image_to_grid(
+        params["image_path"],
+        params["target_shape"],
+        params["target_voxel_to_ras_matrix"],
+        params["output_path"],
+        float(params.get("default_value", -1024.0)),
+    )
 
 
 def do_mask_to_buffer(params: dict) -> dict:
@@ -1276,6 +1468,8 @@ def main():
             result = do_prepare(params)
         elif action == "convert":
             result = do_convert(params)
+        elif action == "resample_image_to_grid":
+            result = do_resample_image_to_grid(params)
         elif action == "mask_to_buffer":
             result = do_mask_to_buffer(params)
         elif action == "prepare_masks_for_grid":

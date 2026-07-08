@@ -107,6 +107,79 @@ def load_repo_config():
     return {}
 
 
+def load_mimics_io_config():
+    merged = {}
+    for path in (ROOT / "mimics_io_config.json", ROOT / "nninteractive_config.json"):
+        if path.is_file():
+            loaded = read_json(path, {}) or {}
+            if isinstance(loaded, dict):
+                merged.update(loaded)
+    return merged
+
+
+def resolve_mimics_output_dir(ts_root, config=None):
+    default_dir = Path(ts_root).resolve() / "mcs_output"
+    config = load_mimics_io_config() if config is None else (config or {})
+    configured = config.get("mimics_output_dir", "")
+    if not configured:
+        configured = config.get("mimics_export_output_dir", config.get("mimics_data_output_dir", ""))
+    configured = str(configured or "").strip()
+    if not configured:
+        return default_dir
+    configured = os.path.expandvars(os.path.expanduser(configured))
+    if not os.path.isabs(configured):
+        path = Path(ts_root).resolve() / configured
+    else:
+        path = Path(configured)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        return path.resolve()
+    except Exception:
+        default_dir.mkdir(parents=True, exist_ok=True)
+        return default_dir
+
+
+def _parse_axes_value(value, default=None):
+    if default is None:
+        default = [0, 1, 2]
+    if value is None or value == "":
+        return list(default)
+    if isinstance(value, str):
+        value = [part.strip() for part in value.replace(";", ",").split(",") if part.strip()]
+    axes = [int(part) for part in value]
+    if sorted(axes) != [0, 1, 2]:
+        raise ValueError("mimics buffer axes must be a permutation of 0,1,2: {}".format(value))
+    return axes
+
+
+def _parse_flips_value(value, default=None):
+    if default is None:
+        default = [False, False, False]
+    if value is None or value == "":
+        return list(default)
+    if isinstance(value, str):
+        value = [part.strip() for part in value.replace(";", ",").split(",") if part.strip()]
+    if len(value) != 3:
+        raise ValueError("mimics buffer flips must contain three values: {}".format(value))
+    truthy = ("1", "true", "yes", "y", "on")
+    return [bool(part) if isinstance(part, bool) else str(part).strip().lower() in truthy for part in value]
+
+
+def resolve_mimics_buffer_mapping(config=None):
+    config = load_mimics_io_config() if config is None else (config or {})
+    axes_value = (
+        config.get("mimics_buffer_axes")
+        if "mimics_buffer_axes" in config
+        else config.get("platform_to_mimics_axes", config.get("axes", [0, 1, 2]))
+    )
+    flips_value = (
+        config.get("mimics_buffer_flips")
+        if "mimics_buffer_flips" in config
+        else config.get("platform_to_mimics_flips", config.get("flips", [False, False, False]))
+    )
+    return _parse_axes_value(axes_value), _parse_flips_value(flips_value)
+
+
 def resolve_path(value, base):
     if not value:
         return None
@@ -437,11 +510,20 @@ def case_dirs(ts_root, cases=None):
 
 
 def find_image(case_dir):
-    for name in ("ct.nii.gz", "mri.nii.gz", "ct.nii", "mri.nii"):
-        path = Path(case_dir) / name
-        if path.is_file():
-            return path
-    for path in sorted(Path(case_dir).glob("*.nii.gz")) + sorted(Path(case_dir).glob("*.nii")):
+    root = Path(case_dir)
+    preferred = ("ct.nii.gz", "mri.nii.gz", "ct.nii", "mri.nii")
+    candidates = []
+    for path in root.iterdir():
+        if not path.is_file():
+            continue
+        lower = path.name.lower()
+        if lower.endswith(".nii") or lower.endswith(".nii.gz"):
+            candidates.append(path)
+    for wanted in preferred:
+        for path in sorted(candidates):
+            if path.name.lower() == wanted:
+                return path
+    for path in sorted(candidates):
         if "segmentations" not in [part.lower() for part in path.parts]:
             return path
     return None
@@ -469,6 +551,22 @@ def find_label(case_dir, organ):
     return None
 
 
+def _label_skip_reason(label_path):
+    """Return a skip reason for unusable labels, otherwise an empty string."""
+    try:
+        import nibabel as nib
+        import numpy as np
+        img = nib.load(str(label_path))
+        if len(img.shape) < 3 or any(int(value) <= 0 for value in img.shape[:3]):
+            return "label is not a valid 3D NIfTI"
+        data = np.asanyarray(img.dataobj)
+        if not np.any(data):
+            return "label is empty (all zeros)"
+        return ""
+    except Exception as exc:
+        return "label could not be read: {}".format(exc)
+
+
 def discover_samples(ts_root, organ, cases=None):
     samples = []
     skipped = []
@@ -476,6 +574,15 @@ def discover_samples(ts_root, organ, cases=None):
         image = find_image(case_dir)
         label = find_label(case_dir, organ)
         if image and label:
+            label_skip_reason = _label_skip_reason(label)
+            if label_skip_reason:
+                skipped.append({
+                    "case_id": case_dir.name,
+                    "has_image": True,
+                    "has_label": True,
+                    "reason": label_skip_reason,
+                })
+                continue
             samples.append({
                 "case_id": case_dir.name,
                 "case_dir": str(case_dir),
@@ -549,6 +656,26 @@ def copy_or_link(src, dst):
         return "copy"
 
 
+def _materialize_image_aligned_to_label(image_src, label_src, image_dst):
+    """Materialize image so it shares the label/Mimics grid."""
+    import nibabel as nib
+    from mimics_bridge import _affine_close, resample_image_to_grid
+
+    image_img = nib.load(str(image_src))
+    label_img = nib.load(str(label_src))
+    image_shape = tuple(int(value) for value in image_img.shape[:3])
+    label_shape = tuple(int(value) for value in label_img.shape[:3])
+    image_affine = image_img.affine
+    label_affine = label_img.affine
+    if image_shape == label_shape and _affine_close(image_affine, label_affine):
+        return copy_or_link(image_src, image_dst), True
+
+    image_dst = Path(image_dst)
+    image_dst.parent.mkdir(parents=True, exist_ok=True)
+    resample_image_to_grid(str(image_src), label_shape, label_affine, str(image_dst))
+    return "resampled_to_label_grid", False
+
+
 def _materialize_split(samples, image_dir, label_dir, split_name):
     image_dir.mkdir(parents=True, exist_ok=True)
     label_dir.mkdir(parents=True, exist_ok=True)
@@ -561,7 +688,7 @@ def _materialize_split(samples, image_dir, label_dir, split_name):
         label_ext = ".nii.gz" if label_src.name.endswith(".nii.gz") else ".nii"
         image_dst = image_dir / (case_id + image_ext)
         label_dst = label_dir / (case_id + label_ext)
-        image_method = copy_or_link(image_src, image_dst)
+        image_method, geometry_matched = _materialize_image_aligned_to_label(image_src, label_src, image_dst)
         label_method = copy_or_link(label_src, label_dst)
         row = dict(sample)
         row.update({
@@ -570,13 +697,53 @@ def _materialize_split(samples, image_dir, label_dir, split_name):
             "dataset_label": str(label_dst),
             "image_materialization": image_method,
             "label_materialization": label_method,
+            "image_label_geometry_matched": bool(geometry_matched),
         })
         materialized.append(row)
     return materialized
 
 
+def _estimate_materialize_bytes(samples):
+    total = 0
+    seen = set()
+    for sample in samples or []:
+        for key in ("image", "label"):
+            try:
+                path = Path(sample[key]).resolve()
+            except Exception:
+                continue
+            if path in seen:
+                continue
+            seen.add(path)
+            try:
+                total += int(path.stat().st_size)
+            except Exception:
+                pass
+    return total
+
+
+def _check_materialize_disk_space(train_samples, val_samples, dataset_dir):
+    required = int(_estimate_materialize_bytes(list(train_samples or []) + list(val_samples or [])) * 1.5)
+    required = max(required, 50 * 1024 * 1024)
+    target = Path(dataset_dir)
+    probe = target
+    while not probe.exists() and probe.parent != probe:
+        probe = probe.parent
+    usage = shutil.disk_usage(str(probe))
+    if usage.free < required:
+        raise RuntimeError(
+            "not enough free disk space to materialize the few-shot dataset: "
+            "required about {:.1f} MB, free {:.1f} MB at {}".format(
+                required / (1024.0 * 1024.0),
+                usage.free / (1024.0 * 1024.0),
+                probe,
+            )
+        )
+
+
 def materialize_dataset(train_samples, dataset_dir, val_samples=None):
     dataset_dir = Path(dataset_dir)
+    _check_materialize_disk_space(train_samples, val_samples or [], dataset_dir)
     if dataset_dir.exists():
         shutil.rmtree(str(dataset_dir))
     train_rows = _materialize_split(
@@ -697,15 +864,18 @@ def launch_mimics_export(
     if not mimics_exe:
         append_log(workspace, "MimicsResearch.exe was not found; using existing exported labels only.")
         return {"launched": False, "reason": "mimics_not_found"}
-    output_dir = Path(ts_root) / "mcs_output"
+    output_dir = resolve_mimics_output_dir(ts_root)
+    axes, flips = resolve_mimics_buffer_mapping()
     output_dir.mkdir(parents=True, exist_ok=True)
     config = output_dir / "_export_batch_config.json"
     runner = output_dir / "_run_export_batch.py"
     write_json_atomic(config, {
         "ts_root": str(Path(ts_root).resolve()),
         "cases": sorted(cases) if cases else None,
-        "axes": [0, 1, 2],
-        "flips": [False, False, False],
+        "axes": axes,
+        "flips": flips,
+        "export_space": "source_image",
+        "output_dir": str(output_dir),
     })
     runner.write_text(
         "\n".join([
@@ -845,6 +1015,11 @@ def training_progress_line(progress):
             parts.append("lr {:.2e}".format(float(progress.get("lr"))))
         except Exception:
             pass
+    if progress.get("best_dsc") is not None:
+        try:
+            parts.append("best {:.4f}".format(float(progress.get("best_dsc"))))
+        except Exception:
+            pass
     return ", ".join(parts)
 
 
@@ -907,6 +1082,23 @@ def cmd_train(args):
         update_status(status_path, {"label_export": export_result})
 
     samples, skipped = discover_samples(ts_root, args.organ, cases)
+    empty_labels = [s for s in skipped if s.get("reason") == "label is empty (all zeros)"]
+    if empty_labels:
+        append_log(
+            workspace,
+            "Skipped {} case(s) with empty labels for {}: {}".format(
+                len(empty_labels), args.organ,
+                ", ".join(s["case_id"] for s in empty_labels),
+            ),
+        )
+    no_labels = [s for s in skipped if not s.get("has_label")]
+    if no_labels:
+        append_log(
+            workspace,
+            "{} case(s) have no {} label and will not be used.".format(
+                len(no_labels), args.organ,
+            ),
+        )
     selected = select_samples(samples, args.sample_mode, int(args.max_samples or 0))
     if len(selected) < int(args.min_samples):
         update_status(status_path, {
@@ -1061,11 +1253,13 @@ def cmd_train(args):
     registry_ckpt = model_dir / "model.pth"
     shutil.copy2(str(ckpt), str(registry_ckpt))
     shutil.copy2(str(config_path), str(model_dir / "config.yaml"))
+    best_dsc_value = final_progress.get("best_dsc")
     manifest = {
         "schema_version": "mimics_fewshot_model.v1",
         "model_id": run_id,
         "organ": args.organ,
         "organ_slug": organ_slug,
+        "best_dsc": best_dsc_value,
         "checkpoint": str(registry_ckpt),
         "config": str(model_dir / "config.yaml"),
         "source_checkpoint": str(ckpt),
@@ -1124,25 +1318,46 @@ def cmd_train(args):
         "status": "completed",
         "model": manifest,
         "returncode": 0,
+        "training_progress": final_progress,
     })
-    append_log(workspace, "Training job {} completed. Model: {}".format(run_id, registry_ckpt))
+    best = final_progress.get("best_dsc")
+    if best is not None:
+        append_log(workspace, "Training job {} completed. Best DSC: {:.4f}. Model: {}".format(
+            run_id, float(best), registry_ckpt))
+    else:
+        append_log(workspace, "Training job {} completed. Model: {}".format(run_id, registry_ckpt))
     return 0
 
 
 def load_model_manifest(workspace, organ, model_id=None, model_manifest=None):
+    manifest_source = model_manifest
     if model_manifest:
         manifest = read_json(model_manifest)
         if not manifest:
             raise RuntimeError("model manifest could not be read: {}".format(model_manifest))
-        return manifest
+        return validate_model_manifest(manifest, model_manifest)
     organ_slug = safe_slug(organ)
     if model_id and model_id != "latest":
         path = Path(workspace) / "models" / organ_slug / model_id / "manifest.json"
     else:
         path = Path(workspace) / "models" / organ_slug / "latest.json"
+    manifest_source = path
     manifest = read_json(path)
     if not manifest:
         raise RuntimeError("no model manifest found for organ {} at {}".format(organ, path))
+    return validate_model_manifest(manifest, manifest_source)
+
+
+def validate_model_manifest(manifest, source=""):
+    if not isinstance(manifest, dict):
+        raise RuntimeError("model manifest is invalid: {}".format(source))
+    for key in ("checkpoint", "config"):
+        value = manifest.get(key, "")
+        if not value:
+            raise RuntimeError("model manifest is missing '{}': {}".format(key, source))
+        path = Path(value)
+        if not path.is_file():
+            raise RuntimeError("model manifest points to a missing {}: {} ({})".format(key, path, source))
     return manifest
 
 
@@ -1295,6 +1510,7 @@ def cmd_list_models(args):
                 "scope": "dataset",
                 "organ": organ,
                 "model_id": manifest.get("model_id", ""),
+                "best_dsc": manifest.get("best_dsc"),
                 "sample_count": manifest.get("sample_count", 0),
                 "train_sample_count": manifest.get("train_sample_count", 0),
                 "validation_sample_count": manifest.get("validation_sample_count", 0),
@@ -1343,10 +1559,29 @@ def cmd_cancel(args):
     if cancel_path:
         Path(cancel_path).parent.mkdir(parents=True, exist_ok=True)
         Path(cancel_path).write_text("cancel requested at {}\n".format(time.strftime("%Y-%m-%d %H:%M:%S")), encoding="utf-8")
-    killed = []
+    grace_seconds = max(0.0, float(getattr(args, "grace_seconds", 30.0)))
+    pids = []
     for key in ("pid", "controller_pid", "launcher_pid"):
         pid = status.get(key)
-        if pid and terminate_process_tree(pid):
+        try:
+            pid = int(pid)
+        except Exception:
+            pid = 0
+        if pid > 0 and pid not in pids:
+            pids.append(pid)
+    deadline = time.time() + grace_seconds
+    while pids and time.time() < deadline:
+        if all(not process_exists(pid) for pid in pids):
+            break
+        update_status(status_path, {
+            "status": "cancelling",
+            "cancel_requested_at_epoch": time.time(),
+            "grace_seconds": grace_seconds,
+        })
+        time.sleep(0.5)
+    killed = []
+    for pid in pids:
+        if process_exists(pid) and terminate_process_tree(pid):
             killed.append(int(pid))
     update_status(status_path, {
         "status": "cancelled",
@@ -1435,6 +1670,7 @@ def build_parser():
     cancel.add_argument("--ts-root", required=True)
     cancel.add_argument("--workspace")
     cancel.add_argument("--job-id")
+    cancel.add_argument("--grace-seconds", type=float, default=30.0)
     cancel.set_defaults(func=cmd_cancel)
     return parser
 

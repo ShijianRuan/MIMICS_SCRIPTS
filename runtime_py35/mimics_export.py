@@ -37,6 +37,7 @@ _EXPORT_MONITORS = {}
 _LOG_ROTATE_BYTES = 5 * 1024 * 1024
 _LOG_ROTATE_BACKUPS = 3
 _CONFIG_CACHE = None
+MIMICS_VOXEL_TO_RAS_MATRIX_METADATA = "mimics_script.mimics_voxel_to_ras_matrix"
 
 
 _write_json_atomic = runtime_common.write_json_atomic
@@ -676,6 +677,88 @@ def _get_voxel_buffer_bytes(mask):
             return bytes(buf)
 
 
+def _metadata_get(obj, name, default=""):
+    try:
+        item = obj.metadata.find(name)
+        if item is not None:
+            return str(getattr(item, "value", default))
+    except Exception:
+        pass
+    return default
+
+
+def _parse_matrix_metadata(value):
+    try:
+        matrix = json.loads(value) if isinstance(value, str) else value
+        if not matrix or len(matrix) != 4:
+            return None
+        parsed = []
+        for row in matrix:
+            if len(row) != 4:
+                return None
+            parsed.append([float(item) for item in row])
+        return parsed
+    except Exception:
+        return None
+
+
+def _lps_point_to_ras(point):
+    return [-float(point[0]), -float(point[1]), float(point[2])]
+
+
+def _point_values(point):
+    if point is None:
+        raise RuntimeError("Mimics returned an empty voxel center.")
+    for names in (("x", "y", "z"), ("X", "Y", "Z")):
+        try:
+            return [float(getattr(point, names[0])), float(getattr(point, names[1])), float(getattr(point, names[2]))]
+        except Exception:
+            pass
+    return [float(point[0]), float(point[1]), float(point[2])]
+
+
+def _voxel_center(image, index):
+    getter = getattr(image, "get_voxel_center", None)
+    if not callable(getter):
+        raise RuntimeError("Mimics image does not expose get_voxel_center().")
+    values = [int(value) for value in index]
+    try:
+        return _point_values(getter(values))
+    except TypeError:
+        pass
+    try:
+        return _point_values(getter(tuple(values)))
+    except TypeError:
+        pass
+    return _point_values(getter(values[0], values[1], values[2]))
+
+
+def _derive_mimics_voxel_to_ras_matrix(image, image_shape):
+    """Derive the open Mimics image voxel grid in RAS coordinates."""
+    if not image_shape:
+        return None
+    try:
+        origin = _lps_point_to_ras(_voxel_center(image, [0, 0, 0]))
+        matrix = [[0.0, 0.0, 0.0, 0.0] for _ in range(4)]
+        for axis in range(3):
+            if int(image_shape[axis]) > 1:
+                index = [0, 0, 0]
+                index[axis] = 1
+                point = _lps_point_to_ras(_voxel_center(image, index))
+                vector = [point[i] - origin[i] for i in range(3)]
+            else:
+                vector = [0.0, 0.0, 0.0]
+                vector[axis] = 1.0
+            for row in range(3):
+                matrix[row][axis] = vector[row]
+        for row in range(3):
+            matrix[row][3] = origin[row]
+        matrix[3] = [0.0, 0.0, 0.0, 1.0]
+        return matrix
+    except Exception:
+        return None
+
+
 def export_masks_to_buffers(buffers_dir):
     """Export all masks from current Mimics project as .u8 files.
 
@@ -693,7 +776,12 @@ def export_masks_to_buffers(buffers_dir):
     masks = mimics.data.masks
     print("found {0} mask(s)".format(len(masks)))
 
-    manifest = {"masks": [], "mimics_shape": None}
+    manifest = {
+        "masks": [],
+        "mimics_shape": None,
+        "mimics_voxel_to_ras_matrix": None,
+        "mimics_voxel_to_ras_matrix_source": "",
+    }
 
     # Get image shape from first mask's image
     if len(masks) > 0:
@@ -701,6 +789,17 @@ def export_masks_to_buffers(buffers_dir):
             img = masks[0].image
             dims = [int(v) for v in img.logical_dimensions]
             manifest["mimics_shape"] = dims
+            matrix = _parse_matrix_metadata(
+                _metadata_get(img, MIMICS_VOXEL_TO_RAS_MATRIX_METADATA, "")
+            )
+            if matrix is not None:
+                manifest["mimics_voxel_to_ras_matrix"] = matrix
+                manifest["mimics_voxel_to_ras_matrix_source"] = "image_metadata"
+            else:
+                matrix = _derive_mimics_voxel_to_ras_matrix(img, dims)
+                if matrix is not None:
+                    manifest["mimics_voxel_to_ras_matrix"] = matrix
+                    manifest["mimics_voxel_to_ras_matrix_source"] = "voxel_centers"
             print("image dimensions: {0}".format(dims))
         except Exception as e:
             print("could not read image dimensions: {0}".format(e))
@@ -835,7 +934,10 @@ def _export_masks_and_build_params(case_dir, axes, flips, work_dir):
         "case_dir": case_dir,
         "axes": axes,
         "flips": flips,
+        "export_space": "source_image",
     }
+    if manifest.get("mimics_voxel_to_ras_matrix"):
+        bridge_params["mimics_voxel_to_ras_matrix"] = manifest.get("mimics_voxel_to_ras_matrix")
     return (bridge_params, manifest)
 
 
