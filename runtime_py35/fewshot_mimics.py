@@ -1130,17 +1130,24 @@ def _launch_external_advanced_training(config, organ, ts_root):
     current_status["controller_pid"] = process.pid
     current_status["updated_at_epoch"] = time.time()
     _write_json_atomic(status_path, current_status)
-    monitor_started = _start_monitor(
-        {
-            "monitor_key": "setup_" + setup_id,
-            "kind": "train_setup",
-            "deadline": time.time() + float(config.get("training_setup_timeout_seconds", 12 * 60 * 60)),
-            "status_path": status_path,
-            "controller_pid": process.pid,
-            "last_line": "",
-        },
-        poll_seconds=float(config.get("training_monitor_poll_seconds", 5.0)),
-    )
+    monitor_started = False
+    try:
+        monitor_started = _start_monitor(
+            {
+                "monitor_key": "setup_" + setup_id,
+                "kind": "train_setup",
+                "deadline": time.time() + float(config.get("training_setup_timeout_seconds", 12 * 60 * 60)),
+                "status_path": status_path,
+                "controller_pid": process.pid,
+                "last_line": "",
+            },
+            poll_seconds=float(config.get("training_monitor_poll_seconds", 5.0)),
+        )
+    except Exception as exc:
+        _mimics_log(
+            logging.WARNING,
+            "DINOv3 setup monitor could not start: {0}".format(exc),
+        )
     _mimics_log(
         logging.INFO,
         "DINOv3 advanced training setup opened in an external process. Organ: {0}, PID: {1}, setup: {2}".format(
@@ -1719,6 +1726,12 @@ def _start_win32_monitor(monitor, poll_seconds):
     key = monitor["monitor_key"]
     _stop_monitor(key)
     user32 = ctypes.windll.user32
+    # Make SetTimer/KillTimer signatures explicit to avoid callback type
+    # identity mismatches when other modules configure argtypes separately.
+    user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint, ctypes.c_void_p]
+    user32.SetTimer.restype = ctypes.c_size_t
+    user32.KillTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    user32.KillTimer.restype = ctypes.c_int
     interval = max(250, int(max(0.25, poll_seconds) * 1000))
     TIMERPROC = ctypes.WINFUNCTYPE(None, ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_uint)
 
@@ -1726,7 +1739,7 @@ def _start_win32_monitor(monitor, poll_seconds):
         _monitor_tick(monitor)
 
     callback = TIMERPROC(_timer_proc)
-    timer_id = user32.SetTimer(None, 0, interval, callback)
+    timer_id = user32.SetTimer(None, 0, interval, ctypes.cast(callback, ctypes.c_void_p))
     if not timer_id:
         return False
     monitor["callback"] = callback

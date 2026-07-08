@@ -133,11 +133,50 @@ def _environment_root():
     ]
     for candidate in candidates:
         if (
-            os.path.isfile(os.path.join(candidate, "python", "python.exe"))
+            os.path.isfile(os.path.join(candidate, "python.exe"))
             or os.path.isfile(os.path.join(candidate, "Scripts", "python.exe"))
+            or os.path.isfile(os.path.join(candidate, "python", "python.exe"))
         ):
             return candidate
     return candidates[0]
+
+
+def _environment_python_candidates(env_root):
+    return [
+        os.path.join(env_root, "python.exe"),
+        os.path.join(env_root, "Scripts", "python.exe"),
+        os.path.join(env_root, "python", "python.exe"),
+    ]
+
+
+def _existing_environment_python(env_root):
+    for candidate in _environment_python_candidates(env_root):
+        if os.path.isfile(candidate):
+            return candidate
+    return _environment_python_candidates(env_root)[0]
+
+
+def _mimics_bridge_paths(config):
+    integration_root = _integration_root()
+    env_root = _environment_root()
+    python_exe = _first_existing_file(
+        [
+            os.environ.get("MIMICS_BRIDGE_PYTHON", ""),
+            os.environ.get("NNINTERACTIVE_PYTHON", ""),
+            config.get("python", ""),
+            _existing_environment_python(env_root),
+        ],
+        "Mimics bridge Python",
+    )
+    bridge_script = _first_existing_file(
+        [
+            os.environ.get("MIMICS_BRIDGE_SCRIPT", ""),
+            os.path.join(integration_root, "mimics_bridge.py"),
+            os.path.join(_project_root(), "mimics_bridge.py"),
+        ],
+        "mimics_bridge.py",
+    )
+    return python_exe, bridge_script
 
 
 def _resource_lock_dir():
@@ -546,8 +585,8 @@ def _runtime_paths(config):
     python_candidates = [
         os.environ.get("NNINTERACTIVE_PYTHON", ""),
         config.get("python", ""),
-        os.path.join(environment_root, "python", "python.exe"),
-        os.path.join(environment_root, "Scripts", "python.exe"),
+    ] + _environment_python_candidates(environment_root) + [
+        os.path.join(root, "nninteractive_env", "python.exe"),
         os.path.join(root, "nninteractive_env", "Scripts", "python.exe"),
         os.path.join(root, "nninteractive_env", "python", "python.exe"),
     ]
@@ -789,27 +828,6 @@ def _source_uses_hu_to_gv(kind, modality):
     return modality_text == "CT"
 
 
-def _mimics_bridge_paths(config):
-    integration_root = _integration_root()
-    python_exe = _first_existing_file(
-        [
-            os.environ.get("MIMICS_BRIDGE_PYTHON", ""),
-            os.environ.get("NNINTERACTIVE_PYTHON", ""),
-            config.get("python", ""),
-            os.path.join(_environment_root(), "python", "python.exe"),
-            os.path.join(_environment_root(), "Scripts", "python.exe"),
-        ],
-        "Mimics bridge Python",
-    )
-    bridge_script = _first_existing_file(
-        [
-            os.environ.get("MIMICS_BRIDGE_SCRIPT", ""),
-            os.path.join(integration_root, "mimics_bridge.py"),
-            os.path.join(_project_root(), "mimics_bridge.py"),
-        ],
-        "mimics_bridge.py",
-    )
-    return python_exe, bridge_script
 
 
 def _call_mimics_bridge(config, payload, timeout_seconds=1800):
@@ -1030,12 +1048,47 @@ def _source_image_export(image, config):
 
 
 def _export_image_for_nninteractive(config, image, path, allow_buffer_export=True):
-    source_export = _source_image_export(image, config)
+    image_input_mode = str(config.get("image_input_mode", "") or "").strip().lower()
+    force_source = image_input_mode in ("source", "source_image", "original", "original_image")
+    buffer_error = None
+
+    if allow_buffer_export and not force_source:
+        try:
+            return _export_image(image, path)
+        except Exception as exc:
+            buffer_error = exc
+            _mimics_log(
+                logging.WARNING,
+                "nnInteractive Mimics image buffer export failed: {0}. Falling back to source image metadata mode.".format(exc),
+            )
+
+    source_config = config
+    if not force_source:
+        source_config = dict(config)
+        source_config["image_input_mode"] = "source"
+        source_config["prefer_source_image_for_nninteractive"] = True
+
+    source_export = _source_image_export(image, source_config)
     if source_export is not None:
         return source_export
-    if not allow_buffer_export:
-        return None
-    return _export_image(image, path)
+
+    if allow_buffer_export and force_source:
+        try:
+            _mimics_log(
+                logging.INFO,
+                "nnInteractive source image mode is unavailable. Falling back to Mimics image buffer export.",
+            )
+            return _export_image(image, path)
+        except Exception as exc:
+            buffer_error = exc
+
+    if buffer_error is not None:
+        raise RuntimeError(
+            "nnInteractive could not prepare image input. Mimics buffer export failed and source image metadata mode was unavailable: {0}".format(
+                buffer_error
+            )
+        )
+    return None
 
 
 def _export_image(image, path):

@@ -11,6 +11,7 @@ import glob
 import os
 import logging
 import subprocess
+import threading
 import time
 
 import mimics
@@ -50,6 +51,10 @@ MARKERS = (
 
 
 _hidden_process_kwargs = runtime_common.hidden_process_kwargs
+
+# Keep async timer/callback references alive until a monitor finishes.
+_CACHE_CLEAR_MONITORS = []
+_STOP_MONITORS = {}
 
 
 def _project_root():
@@ -365,6 +370,15 @@ def _clear_cache_tick(monitor):
         return
     thread = monitor.get("thread")
     if thread is None or thread.is_alive():
+        now = time.time()
+        last = float(monitor.get("last_progress_log_epoch", 0.0) or 0.0)
+        if now - last >= 5.0:
+            started = float(monitor.get("started_at_epoch", now) or now)
+            _mimics_log(
+                logging.INFO,
+                "Cache clearing is still running... elapsed {0:.1f}s".format(max(0.0, now - started)),
+            )
+            monitor["last_progress_log_epoch"] = now
         return  # still working
 
     monitor["done"] = True
@@ -389,6 +403,7 @@ def _clear_cache_tick(monitor):
     except TypeError:
         mimics.dialogs.message_box(title="Clear Cache", message=message)
     _mimics_log(logging.INFO, message)
+    _dispose_cache_monitor(monitor)
 
 
 def clear_cache_main():
@@ -397,7 +412,13 @@ def clear_cache_main():
     All heavy disk I/O runs in a daemon thread. Mimics GUI stays responsive.
     A timer polls the thread every 0.5s and shows results when done.
     """
-    monitor = {"thread": None, "result": None, "done": False}
+    monitor = {
+        "thread": None,
+        "result": None,
+        "done": False,
+        "started_at_epoch": time.time(),
+        "last_progress_log_epoch": 0.0,
+    }
 
     def _run():
         try:
@@ -418,7 +439,34 @@ def clear_cache_main():
 
     # Timer to poll for completion (non-blocking)
     _start_timer(_clear_cache_tick, monitor, poll_seconds=0.5)
+    _CACHE_CLEAR_MONITORS.append(monitor)
     return 0
+
+
+def _dispose_cache_monitor(monitor):
+    """Stop timer handles and release monitor references after completion."""
+    _stop_timer_handles(monitor)
+    try:
+        _CACHE_CLEAR_MONITORS.remove(monitor)
+    except ValueError:
+        pass
+
+
+def _stop_timer_handles(monitor):
+    """Stop any Qt/Win32 timer handles stored in monitor."""
+    timer = monitor.get("qt_timer")
+    if timer is not None:
+        try:
+            timer.stop()
+        except Exception:
+            pass
+    win32_timer = monitor.get("win32_timer")
+    if win32_timer:
+        try:
+            user32, timer_id = win32_timer
+            user32.KillTimer(None, timer_id)
+        except Exception:
+            pass
 
 
 def _start_timer(tick_fn, monitor, poll_seconds=0.5):
@@ -440,6 +488,7 @@ def _start_timer(tick_fn, monitor, poll_seconds=0.5):
 
         timer.timeout.connect(_tick)
         timer.start(max(100, int(poll_seconds * 1000)))
+        monitor["qt_timer"] = timer
         return
     except Exception:
         pass
@@ -460,8 +509,14 @@ def _start_timer(tick_fn, monitor, poll_seconds=0.5):
 
             callback = TIMERPROC(_timer_proc)
             user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
-                                         ctypes.c_uint, TIMERPROC]
-            user32.SetTimer(None, 0, int(poll_seconds * 1000), callback)
+                                         ctypes.c_uint, ctypes.c_void_p]
+            user32.SetTimer.restype = ctypes.c_size_t
+            user32.KillTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+            user32.KillTimer.restype = ctypes.c_int
+            timer_id = user32.SetTimer(None, 0, int(poll_seconds * 1000), ctypes.cast(callback, ctypes.c_void_p))
+            if timer_id:
+                monitor["win32_timer"] = (user32, timer_id)
+                monitor["win32_callback"] = callback
             return
         except Exception:
             pass
@@ -559,6 +614,7 @@ def stop_background_processes():
         "$report | ConvertTo-Json -Depth 5 -Compress | Set-Content -Path $out -Encoding UTF8"
     ).format(markers, roots, queues, locks, stop_log.replace("'", "''"))
 
+    process = None
     try:
         subprocess.Popen(
             ["powershell", "-NoProfile", "-Command", command],
@@ -567,6 +623,7 @@ def stop_background_processes():
             stderr=subprocess.DEVNULL,
             **_hidden_process_kwargs()
         )
+        process = True
     except Exception as exc:
         _mimics_log(logging.WARNING, "Could not launch PowerShell stop command: {0}".format(exc))
         # Queue stop markers were already written — the background processes
@@ -580,18 +637,87 @@ def stop_background_processes():
             stop_log,
         ),
     )
+    return {
+        "ok": True,
+        "stop_log": stop_log,
+        "stopped_queues": stopped_queues,
+        "owned_roots": owned_roots,
+        "launched": bool(process),
+    }
+
+
+def _stop_background_tick(monitor):
+    if monitor.get("done"):
+        return
+    report_path = monitor.get("stop_log")
+    if report_path and os.path.isfile(report_path):
+        report = runtime_common.read_json(report_path, {}) or {}
+        killed = report.get("Killed") or []
+        matched = report.get("Matched") or []
+        queue_dirs = report.get("QueueStopDirs") or []
+        monitor["done"] = True
+        _stop_timer_handles(monitor)
+        key = monitor.get("monitor_key")
+        if key in _STOP_MONITORS:
+            del _STOP_MONITORS[key]
+        lines = ["Stop Background Services completed."]
+        lines.append("Matched process(es): {0}".format(len(matched)))
+        lines.append("Kill request(s): {0}".format(len(killed)))
+        lines.append("Queue stop marker dir(s): {0}".format(len(queue_dirs)))
+        lines.append("Report: {0}".format(report_path))
+        msg = "\n".join(lines)
+        _mimics_log(logging.INFO, msg)
+        try:
+            mimics.dialogs.message_box(title="Stop Background Services", message=msg, ui_blocking=False)
+        except TypeError:
+            mimics.dialogs.message_box(title="Stop Background Services", message=msg)
+        return
+    if time.time() > monitor.get("deadline", 0):
+        monitor["done"] = True
+        _stop_timer_handles(monitor)
+        key = monitor.get("monitor_key")
+        if key in _STOP_MONITORS:
+            del _STOP_MONITORS[key]
+        msg = (
+            "Stop Background Services is still running or did not produce a report yet.\n\n"
+            "Check: {0}"
+        ).format(monitor.get("stop_log", "(unknown)"))
+        _mimics_log(logging.WARNING, msg)
+        try:
+            mimics.dialogs.message_box(title="Stop Background Services", message=msg, ui_blocking=False)
+        except TypeError:
+            mimics.dialogs.message_box(title="Stop Background Services", message=msg)
+
+
+def _start_stop_monitor(monitor, poll_seconds=0.5, timeout_seconds=90.0):
+    monitor["done"] = False
+    monitor["deadline"] = time.time() + float(timeout_seconds)
+    key = monitor.get("monitor_key")
+    _STOP_MONITORS[key] = monitor
+    _start_timer(_stop_background_tick, monitor, poll_seconds=float(poll_seconds))
     return True
 
 
 # -- Main entry points --------------------------------------------------
 
 def main():
-    ok = stop_background_processes()
+    result = stop_background_processes()
+    ok = bool(result.get("ok")) if isinstance(result, dict) else bool(result)
+    if isinstance(result, dict) and result.get("stop_log"):
+        _start_stop_monitor(
+            {
+                "monitor_key": "stop_bg_{0}".format(int(time.time() * 1000)),
+                "stop_log": result.get("stop_log"),
+            },
+            poll_seconds=0.5,
+            timeout_seconds=90.0,
+        )
     try:
         mimics.dialogs.message_box(
             title="Stop Background Services",
             message=(
-                "Stop request submitted for Mimics-Script background processes."
+                "Stop request submitted for Mimics-Script background processes.\n"
+                "A completion message will appear when finished."
                 if ok else
                 "Background cleanup is only implemented for Windows Mimics workstations."
             ),

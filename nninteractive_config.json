@@ -1,9 +1,9 @@
 {
   "device": "auto",
   "auto_start_server": true,
-  "image_input_mode": "auto",
-  "prefer_source_image_for_nninteractive": true,
-  "fallback_to_mimics_buffer_when_source_unavailable": false,
+  "image_input_mode": "mimics",
+  "prefer_source_image_for_nninteractive": false,
+  "fallback_to_mimics_buffer_when_source_unavailable": true,
   "async_reuse_image_worker": true,
   "async_start_worker_before_prompt": true,
   "incremental_interaction_replay": true,

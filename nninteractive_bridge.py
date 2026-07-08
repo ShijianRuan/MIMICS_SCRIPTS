@@ -57,6 +57,11 @@ from urllib.parse import urlparse
 import nibabel as nib
 import numpy as np
 
+# Embeddable Python may not include script directory on sys.path.
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _THIS_DIR and _THIS_DIR not in sys.path:
+    sys.path.insert(0, _THIS_DIR)
+
 from resource_locks import FileResourceLock, ResourceLockTimeout, release_lock
 
 

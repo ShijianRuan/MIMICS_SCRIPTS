@@ -46,16 +46,28 @@ def _project_root():
 def _find_external_python():
     root = _project_root()
     for rel in (
+        "nninteractive_env/python.exe",
         "nninteractive_env/Scripts/python.exe",
         "nninteractive_env/python/python.exe",
+        "python/python.exe",
         "nninteractive_env/bin/python3",
         "nninteractive_env/bin/python",
     ):
         path = os.path.join(root, rel)
         if os.path.isfile(path):
             return path
-    # Fallback to system Python
-    return sys.executable
+    # Try system Python before giving up.
+    try:
+        import shutil
+        for cmd in ("python3", "python"):
+            found = shutil.which(cmd)
+            if found:
+                return found
+    except Exception:
+        pass
+    # Do NOT fall back to sys.executable here. Inside Mimics this may point to
+    # MimicsResearch.exe, which would start a new Mimics instance.
+    return ""
 
 
 def _state_file():
@@ -100,11 +112,24 @@ def _find_portable_archive():
     return None
 
 
+def _is_offline_bundle():
+    """Return True if this looks like an offline bundle directory."""
+    root = _project_root()
+    return (
+        os.path.isdir(os.path.join(root, "wheels"))
+        and os.path.isdir(os.path.join(root, "python"))
+    )
+
+
 def _launch_setup_worker(action, extra_arg=None):
     """Launch the external setup_env.py in the background."""
     python_exe = _find_external_python()
     script = _setup_script()
     state_path = _state_file()
+
+    if not python_exe:
+        _mimics_log(logging.ERROR, "No external Python interpreter was found for setup worker.")
+        return None
 
     # Write initial state so the timer has something to read
     try:
@@ -150,6 +175,19 @@ def _poll_setup_state(monitor):
     if monitor.get("done"):
         return
 
+    state_path = monitor.get("state_path")
+    state = _read_json(state_path, {}) or {}
+    status = state.get("status", "")
+    terminal = ("ok", "error", "incomplete", "extracted")
+
+    # If the worker already wrote a terminal state, handle it first.
+    # This avoids false "worker stopped" warnings for short-lived jobs.
+    if status in terminal:
+        monitor["done"] = True
+        _stop_monitor(monitor)
+        _show_result(monitor, state)
+        return
+
     # If the subprocess was killed (e.g. by Stop_Background_Services),
     # detect it and clean up rather than polling forever.
     pid = monitor.get("pid")
@@ -176,28 +214,28 @@ def _poll_setup_state(monitor):
             except Exception:
                 pass
             return
+    message = state.get("message", "")
 
-    state_path = monitor.get("state_path")
-    state = _read_json(state_path, {}) or {}
-    status = state.get("status", "")
+    # Show progress whenever message changes, even if status stays the same.
+    if message and message != monitor.get("_last_message", ""):
+        monitor["_last_message"] = message
+        _mimics_log(logging.INFO, "[Setup] {0}".format(message))
 
-    if status == monitor.get("_last_status", "") and monitor.get("_last_check_time", 0) > 0:
-        # Also check timeout
-        if time.time() - monitor.get("_last_check_time", 0) > monitor.get("timeout_seconds", 1800):
-            monitor["done"] = True
-            _stop_monitor(monitor)
-            _mimics_log(logging.WARNING, "[Setup] Worker timed out.")
-            try:
-                mimics.dialogs.message_box(
-                    title=TITLE,
-                    message="Setup timed out after {0}s.\n\n"
-                            "The worker may still be running. Check the log:\n{1}".format(
-                                int(monitor.get("timeout_seconds", 1800)), _log_file()),
-                    ui_blocking=False,
-                )
-            except Exception:
-                pass
-            return
+    if time.time() > monitor.get("deadline", 0):
+        monitor["done"] = True
+        _stop_monitor(monitor)
+        _mimics_log(logging.WARNING, "[Setup] Worker timed out.")
+        try:
+            mimics.dialogs.message_box(
+                title=TITLE,
+                message="Setup timed out after {0}s.\n\n"
+                        "The worker may still be running. Check the log:\n{1}".format(
+                            int(monitor.get("timeout_seconds", 1800)), _log_file()),
+                ui_blocking=False,
+            )
+        except Exception:
+            pass
+        return
 
     monitor["_last_check_time"] = time.time()
 
@@ -205,15 +243,10 @@ def _poll_setup_state(monitor):
         return
     monitor["_last_status"] = status
 
-    if status in ("ok", "error", "incomplete", "extracted"):
+    if status in terminal:
         monitor["done"] = True
         _stop_monitor(monitor)
         _show_result(monitor, state)
-    elif status in ("checking", "installing", "setting_up", "extracting"):
-        # Still working — update progress in log panel
-        msg = state.get("message", "")
-        if msg:
-            _mimics_log(logging.INFO, "[Setup] {0}".format(msg))
 
 
 def _show_result(monitor, state):
@@ -225,6 +258,7 @@ def _show_result(monitor, state):
     missing = state.get("missing_packages", [])
     error = state.get("error", "")
     action = monitor.get("action", "check")
+    _mimics_log(logging.INFO, "[Setup] Completed action={0}, status={1}.".format(action, status))
 
     lines = []
     if status == "ok":
@@ -262,7 +296,7 @@ def _show_result(monitor, state):
         mimics.dialogs.message_box(
             title=TITLE,
             message=msg,
-            ui_blocking=False,
+            ui_blocking=True if action == "check" else False,
         )
     except TypeError:
         mimics.dialogs.message_box(
@@ -277,12 +311,26 @@ def _stop_monitor(monitor):
     key = monitor.get("monitor_key")
     if key and key in _MONITORS:
         del _MONITORS[key]
+    timer = monitor.get("qt_timer")
+    if timer is not None:
+        try:
+            timer.stop()
+        except Exception:
+            pass
+    win32_timer = monitor.get("win32_timer")
+    if win32_timer:
+        try:
+            user32, timer_id = win32_timer
+            user32.KillTimer(None, timer_id)
+        except Exception:
+            pass
 
 
 def _start_monitor(monitor, poll_seconds=2.0, timeout_seconds=1800):
     """Start a timer to poll the external worker."""
     monitor.setdefault("deadline", time.time() + timeout_seconds)
     monitor.setdefault("_last_status", "")
+    monitor.setdefault("_last_message", "")
     monitor.setdefault("timeout_seconds", timeout_seconds)
     monitor["done"] = False
     key = monitor.get("monitor_key")
@@ -297,11 +345,12 @@ def _start_monitor(monitor, poll_seconds=2.0, timeout_seconds=1800):
         def _tick():
             try:
                 _poll_setup_state(monitor)
-            except Exception:
-                pass
+            except Exception as exc:
+                _mimics_log(logging.WARNING, "[Setup] Monitor tick failed: {0}".format(exc))
 
         timer.timeout.connect(_tick)
         timer.start(max(100, int(poll_seconds * 1000)))
+        monitor["qt_timer"] = timer
         return True
     except Exception:
         pass
@@ -322,9 +371,14 @@ def _start_monitor(monitor, poll_seconds=2.0, timeout_seconds=1800):
 
             callback = TIMERPROC(_timer_proc)
             user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
-                                         ctypes.c_uint, TIMERPROC]
-            timer_id = user32.SetTimer(None, 0, int(poll_seconds * 1000), callback)
-            monitor["_win32_timer_id"] = timer_id
+                                         ctypes.c_uint, ctypes.c_void_p]
+            user32.SetTimer.restype = ctypes.c_size_t
+            user32.KillTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+            user32.KillTimer.restype = ctypes.c_int
+            timer_id = user32.SetTimer(None, 0, int(poll_seconds * 1000), ctypes.cast(callback, ctypes.c_void_p))
+            if timer_id:
+                monitor["win32_timer"] = (user32, timer_id)
+                monitor["win32_callback"] = callback
             return True
         except Exception:
             pass
@@ -352,19 +406,33 @@ def main(action=None):
     action: "check" / "install" / "extract" / "setup-from-scratch" / None (ask user)
     """
     if not action:
-        answer = mimics.dialogs.question_box(
-            title=TITLE,
-            message=(
+        # Build the menu dynamically — show Offline Install only if bundle is detected
+        if _is_offline_bundle():
+            buttons = "Offline Install;Check;Repair (Install Missing);Setup From Scratch;Cancel"
+            message = (
+                "Offline Install — install everything from the offline bundle (no internet needed).\n"
+                "Check — validate Python, CUDA, packages and models.\n"
+                "Repair — check and install missing packages.\n"
+                "Setup From Scratch — create a new environment from scratch."
+            )
+        else:
+            buttons = "Extract Archive;Check;Repair (Install Missing);Setup From Scratch;Cancel"
+            message = (
                 "Extract Archive — extract a portable .zip archive.\n"
                 "Check — validate Python, CUDA, packages and models.\n"
                 "Repair — check and install missing packages.\n"
                 "Setup From Scratch — create a new environment from scratch."
-            ),
-            buttons="Extract Archive;Check;Repair (Install Missing);Setup From Scratch;Cancel",
+            )
+        answer = mimics.dialogs.question_box(
+            title=TITLE,
+            message=message,
+            buttons=buttons,
             ui_blocking=True,
         )
         if answer == "Extract Archive":
             action = "extract"
+        elif answer == "Offline Install":
+            action = "offline-install"
         elif answer == "Check":
             action = "check"
         elif answer == "Repair (Install Missing)":
@@ -374,7 +442,7 @@ def main(action=None):
         else:
             return 1
 
-    if action not in ("check", "install", "extract", "setup-from-scratch"):
+    if action not in ("check", "install", "extract", "setup-from-scratch", "offline-install"):
         _mimics_log(logging.WARNING, "Unknown action: {0}".format(action))
         return 1
 
@@ -399,6 +467,21 @@ def main(action=None):
             )
             return 1
         extra_args = archive_path
+
+    # For offline-install, check that the bundle is present
+    if action == "offline-install":
+        if not _is_offline_bundle():
+            mimics.dialogs.message_box(
+                title=TITLE,
+                message=(
+                    "Offline bundle not found.\n\n"
+                    "This requires the offline bundle with python/ and wheels/ directories.\n"
+                    "Run: python tools/package_portable.py offline-bundle\n"
+                    "to create the bundle first."
+                ),
+                ui_blocking=True,
+            )
+            return 1
 
     _mimics_log(logging.INFO, "Starting environment setup: {0}".format(action))
     process = _launch_setup_worker(action, extra_args)

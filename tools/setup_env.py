@@ -34,7 +34,6 @@ REQUIRED_IMPORTS = [
     "pydicom",
     "SimpleITK",
     "scipy",
-    "monai",
     "nnInteractive",
     "torchvision",
     "transformers",
@@ -51,7 +50,6 @@ REQUIRED_PACKAGES = [
     "pydicom",
     "SimpleITK",
     "scipy",
-    "monai",
     "nnInteractive",
     "torchvision",
     "transformers",
@@ -66,20 +64,27 @@ _PIP_TO_IMPORT = {
 }
 
 # Extra index URL for PyTorch CUDA builds
-TORCH_INDEX_URL = "https://download.pytorch.org/whl/cu121"
+TORCH_INDEX_URL = "https://download.pytorch.org/whl/cu124"
 
-# PyPI mirrors (tried in order; useful for Chinese mainland users)
+# PyPI mirrors — Chinese mirrors first (much faster from mainland China)
 PYPI_MIRRORS = [
-    "",  # default PyPI
     "https://pypi.tuna.tsinghua.edu.cn/simple",
     "https://mirrors.aliyun.com/pypi/simple",
+    "",  # default PyPI (fallback, slow from China)
 ]
 
 
 def _find_python():
-    """Find the nninteractive_env Python."""
+    """Find the nninteractive_env Python.
+
+    Supports three layouts:
+    1. venv-style:     nninteractive_env/Scripts/python.exe
+    2. embeddable:     nninteractive_env/python.exe  (offline bundle copies python/* here)
+    3. standalone dir: nninteractive_env/python/python.exe
+    """
     for rel in (
         "nninteractive_env/Scripts/python.exe",
+        "nninteractive_env/python.exe",
         "nninteractive_env/python/python.exe",
         "nninteractive_env/bin/python3",
         "nninteractive_env/bin/python",
@@ -87,7 +92,7 @@ def _find_python():
         p = PROJECT_ROOT / rel
         if p.is_file():
             return str(p)
-    # Check for bundled Python (from offline bundle)
+    # Check for bundled Python (from offline bundle, before env is set up)
     bundled = _find_bundled_python()
     if bundled:
         return bundled
@@ -266,23 +271,57 @@ def check():
             pass
 
     # 4. CUDA
-    ret, output = _run_python([
-        "-c",
-        "import torch;"
-        "print('CUDA=' + str(torch.cuda.is_available()));"
-        "print('Devices=' + str(torch.cuda.device_count()));"
-        "print('Version=' + str(getattr(torch.version, 'cuda', 'unknown')))",
+    ret, output = _run_python_script([
+        "import json, os, traceback",
+        "r = {}",
+        "try:",
+        "    import torch",
+        "    r['torch_version'] = str(getattr(torch, '__version__', '?'))",
+        "    r['cuda_compiled_version'] = str(getattr(torch.version, 'cuda', 'unknown'))",
+        "    r['cuda_visible_devices'] = os.environ.get('CUDA_VISIBLE_DEVICES')",
+        "    r['nvidia_visible_devices'] = os.environ.get('NVIDIA_VISIBLE_DEVICES')",
+        "    r['is_available'] = bool(torch.cuda.is_available())",
+        "    try:",
+        "        r['device_count'] = int(torch.cuda.device_count())",
+        "    except Exception as e:",
+        "        r['device_count'] = 0",
+        "        r['device_count_error'] = repr(e)",
+        "    if r.get('device_count', 0) > 0:",
+        "        try:",
+        "            r['device0_name'] = str(torch.cuda.get_device_name(0))",
+        "        except Exception as e:",
+        "            r['device0_name_error'] = repr(e)",
+        "    try:",
+        "        torch.cuda.init()",
+        "        r['init_ok'] = True",
+        "    except Exception as e:",
+        "        r['init_ok'] = False",
+        "        r['init_error'] = repr(e)",
+        "except Exception as e:",
+        "    r['probe_error'] = repr(e)",
+        "    r['traceback'] = traceback.format_exc()",
+        "print(json.dumps(r))",
     ])
     if ret == 0:
-        for line in output.strip().split("\n"):
-            if line.startswith("CUDA="):
-                result["cuda_available"] = line.split("=")[1] == "True"
-            elif line.startswith("Devices="):
-                result["cuda_device_count"] = int(line.split("=")[1])
-            elif line.startswith("Version="):
-                result["cuda_version"] = line.split("=")[1]
-        _log("CUDA: available={0}, devices={1}".format(
-            result["cuda_available"], result["cuda_device_count"]))
+        try:
+            cuda_probe = json.loads(output.strip().split("\n")[-1])
+            result["cuda_probe"] = cuda_probe
+            result["cuda_available"] = bool(cuda_probe.get("is_available", False))
+            result["cuda_device_count"] = int(cuda_probe.get("device_count", 0) or 0)
+            result["cuda_version"] = str(cuda_probe.get("cuda_compiled_version", "unknown"))
+            _log("CUDA: available={0}, devices={1}, version={2}".format(
+                result["cuda_available"], result["cuda_device_count"], result["cuda_version"]))
+            if cuda_probe.get("device0_name"):
+                _log("CUDA device0: {0}".format(cuda_probe.get("device0_name")))
+            if not result["cuda_available"]:
+                reason = cuda_probe.get("init_error") or cuda_probe.get("probe_error") or cuda_probe.get("device0_name_error") or "unknown"
+                _log("CUDA unavailable reason: {0}".format(reason))
+                _log("CUDA env: CUDA_VISIBLE_DEVICES={0}, NVIDIA_VISIBLE_DEVICES={1}".format(
+                    cuda_probe.get("cuda_visible_devices"), cuda_probe.get("nvidia_visible_devices")))
+        except Exception:
+            _log("CUDA probe parse failed: {0}".format(output[:200]))
+    else:
+        _log("CUDA probe failed: {0}".format(output[:200]))
 
     # 5. Model weights
     model_roots = [
@@ -594,6 +633,195 @@ def _get_missing_packages():
 
 
 # ---------------------------------------------------------------------------
+# Offline install (from offline bundle)
+# ---------------------------------------------------------------------------
+
+def _is_offline_bundle():
+    """Return True if this looks like an offline bundle directory."""
+    return (PROJECT_ROOT / "wheels").is_dir() and (PROJECT_ROOT / "python").is_dir()
+
+
+def offline_install():
+    """Install everything from the offline bundle (no internet needed).
+
+    This does the same thing as setup_offline.bat, but can be triggered
+    from within Mimics via Setup_Environment > Offline Install.
+
+    Steps:
+    1. Copy python/ embeddable into nninteractive_env/ (if not already done)
+    2. Configure python313._pth
+    3. Install pip (ensurepip → get-pip.py fallback)
+    4. Install all wheels from wheels/ directory (--no-index)
+    5. Verify key imports
+    """
+    import shutil
+
+    _log("=== Offline Install ===")
+    _write_state("setting_up", step="starting",
+                 message="Starting offline installation...")
+
+    env_dir = PROJECT_ROOT / "nninteractive_env"
+    python_src = PROJECT_ROOT / "python"
+    wheels_dir = PROJECT_ROOT / "wheels"
+    get_pip = PROJECT_ROOT / "get-pip.py"
+
+    # 1. Check offline bundle structure
+    if not python_src.is_dir() or not wheels_dir.is_dir():
+        _write_state("error",
+                     message="Offline bundle not found. Need python/ and wheels/ directories.",
+                     error="Missing offline bundle components")
+        _log("ERROR: python/ or wheels/ not found — not an offline bundle?")
+        return 1
+
+    # 2. Copy Python embeddable into nninteractive_env/ (if not already done)
+    env_python = env_dir / "python.exe"
+    if not env_python.is_file():
+        _write_state("setting_up", step="copying_python",
+                     message="Copying Python embeddable...")
+        _log("Copying python/ → nninteractive_env/")
+        if env_dir.exists():
+            shutil.rmtree(str(env_dir), ignore_errors=True)
+        shutil.copytree(str(python_src), str(env_dir))
+        _log("Python embeddable copied.")
+    else:
+        _log("nninteractive_env/python.exe already exists — skipping copy.")
+
+    # 3. Configure python313._pth (enable site-packages + import site)
+    _write_state("setting_up", step="configuring_python",
+                 message="Configuring Python path...")
+    pth_file = env_dir / "python313._pth"
+    if not pth_file.exists():
+        # Find the actual _pth file (version may differ)
+        pth_files = list(env_dir.glob("python*._pth"))
+        if pth_files:
+            pth_file = pth_files[0]
+    pth_content = (
+        "python313.zip\n"
+        ".\n"
+        "Lib\\site-packages\n"
+        "import site\n"
+    )
+    pth_file.write_text(pth_content, encoding="ascii")
+    _log("Configured {0}".format(pth_file.name))
+
+    # 4. Install pip
+    _write_state("setting_up", step="installing_pip",
+                 message="Installing pip...")
+    pip_exe = env_dir / "Scripts" / "pip.exe"
+    if not pip_exe.is_file():
+        _log("Trying ensurepip...")
+        ret, output = _run_python(["-m", "ensurepip", "--upgrade"], timeout=120)
+        if ret != 0 or not pip_exe.is_file():
+            _log("ensurepip failed. Trying get-pip.py...")
+            if get_pip.is_file():
+                ret, output = _run_python([str(get_pip), "--no-wheel", "--no-index"], timeout=120)
+                if ret != 0 and not pip_exe.is_file():
+                    # Last resort: try with network (get-pip.py may need it)
+                    _log("get-pip.py offline failed. Trying with network...")
+                    ret, output = _run_python([str(get_pip)], timeout=120)
+                if not pip_exe.is_file():
+                    _write_state("error",
+                                 message="pip installation failed.",
+                                 error=output[-500:] if output else "unknown")
+                    _log("ERROR: pip install failed: {0}".format(output[-200:] if output else ""))
+                    return 1
+            else:
+                _write_state("error",
+                             message="get-pip.py not found and ensurepip failed.",
+                             error="No pip installation method available")
+                _log("ERROR: no pip installation method available")
+                return 1
+    _log("pip is ready.")
+
+    # 5. Install all wheels offline
+    _write_state("setting_up", step="installing_packages",
+                 message="Installing packages from local wheels (no internet)...")
+    wheel_files = sorted(wheels_dir.glob("*.whl"))
+    total = len(wheel_files)
+    _log("Found {0} wheel files".format(total))
+
+    fail_count = 0
+    failed_names = []
+    for i, whl in enumerate(wheel_files):
+        if i % 10 == 0:
+            pct = int(100.0 * i / max(total, 1))
+            _write_state("setting_up", step="installing_packages",
+                         message="Installing packages... {0}% ({1}/{2})".format(pct, i, total))
+        ret, output = _run_python(
+            ["-m", "pip", "install", str(whl), "--no-deps", "--no-index", "--quiet"],
+            timeout=300,
+        )
+        if ret != 0:
+            fail_count += 1
+            failed_names.append(whl.name)
+            _log("WARNING: Failed to install {0}".format(whl.name))
+
+    _log("Installation complete. {0}/{1} packages installed, {2} failed.".format(
+        total - fail_count, total, fail_count))
+
+    if fail_count > 0:
+        _log("Failed packages: {0}".format(", ".join(failed_names[:20])))
+
+    # 6. Verify key imports
+    _write_state("setting_up", step="verifying",
+                 message="Verifying installation...")
+    ret, output = _run_python_script([
+        "import json",
+        "pkgs = {0}".format(REQUIRED_IMPORTS),
+        "r = {}",
+        "for p in pkgs:",
+        "    try:",
+        "        __import__(p)",
+        "        r[p] = True",
+        "    except Exception:",
+        "        r[p] = False",
+        "print(json.dumps(r))",
+    ], timeout=120)
+
+    all_ok = False
+    if ret == 0:
+        try:
+            pkg_status = json.loads(output.strip().split("\n")[-1])
+            missing = [p for p, ok in pkg_status.items() if not ok]
+            if not missing:
+                all_ok = True
+                _log("All key packages verified.")
+            else:
+                _log("Missing after install: {0}".format(", ".join(missing)))
+        except Exception:
+            _log("Could not parse verification output.")
+    else:
+        _log("Verification script failed: {0}".format(output[-200:] if output else ""))
+
+    # Check CUDA
+    cuda_ok = False
+    ret, output = _run_python([
+        "-c",
+        "import torch; print(torch.cuda.is_available())",
+    ], timeout=60)
+    if ret == 0:
+        cuda_ok = "True" in output
+        _log("CUDA available: {0}".format(cuda_ok))
+
+    if all_ok:
+        _write_state("ok",
+                     message="Offline installation complete. {0} packages installed, CUDA: {1}.".format(
+                         total - fail_count, "available" if cuda_ok else "not available"),
+                     all_ok=True,
+                     cuda_available=cuda_ok,
+                     failed_packages=failed_names)
+        _log("=== Offline install complete: OK ===")
+        return 0
+    else:
+        _write_state("incomplete",
+                     message="Installation finished but some packages failed. {0} failed.".format(fail_count),
+                     all_ok=False,
+                     failed_packages=failed_names)
+        _log("=== Offline install: INCOMPLETE ===")
+        return 1
+
+
+# ---------------------------------------------------------------------------
 # Setup from scratch
 # ---------------------------------------------------------------------------
 
@@ -602,6 +830,9 @@ def setup_from_scratch():
 
     Uses the bundled Python embeddable if available, otherwise searches for
     a system Python 3.10+. Supports fully offline installation.
+
+    If an offline bundle is detected (python/ + wheels/ directories present),
+    delegates to offline_install() which is faster and needs no internet.
     """
     import shutil
 
@@ -610,6 +841,11 @@ def setup_from_scratch():
                  message="Setting up environment from scratch...")
 
     env_dir = PROJECT_ROOT / "nninteractive_env"
+
+    # 0. If offline bundle is present, use it (much simpler, no internet needed)
+    if _is_offline_bundle():
+        _log("Offline bundle detected (python/ + wheels/). Using offline install.")
+        return offline_install()
 
     # 1. Check for bundled Python (from offline bundle)
     bundled_python = _find_bundled_python()
@@ -743,7 +979,7 @@ def _run_shell(command, timeout=600):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python tools/setup_env.py <check|install|extract|setup-from-scratch> [archive]")
+        print("Usage: python tools/setup_env.py <check|install|extract|setup-from-scratch|offline-install> [archive]")
         return 1
 
     cmd = sys.argv[1].lower()
@@ -759,6 +995,8 @@ def main():
         return extract_archive(archive)
     elif cmd == "setup-from-scratch":
         return setup_from_scratch()
+    elif cmd == "offline-install":
+        return offline_install()
     else:
         print("Unknown command: {0}".format(cmd))
         return 1

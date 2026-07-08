@@ -36,6 +36,7 @@ import runtime_common
 _EXPORT_MONITORS = {}
 _LOG_ROTATE_BYTES = 5 * 1024 * 1024
 _LOG_ROTATE_BACKUPS = 3
+_CONFIG_CACHE = None
 
 
 _write_json_atomic = runtime_common.write_json_atomic
@@ -107,6 +108,47 @@ def _project_root():
     )
 
 
+def _load_data_io_config():
+    global _CONFIG_CACHE
+    if _CONFIG_CACHE is not None:
+        return _CONFIG_CACHE
+    merged = {}
+    io_path = os.path.join(_project_root(), "mimics_io_config.json")
+    nn_path = os.path.join(_project_root(), "nninteractive_config.json")
+    for path in (io_path, nn_path):
+        try:
+            with open(path, "r") as handle:
+                loaded = json.load(handle)
+            if isinstance(loaded, dict):
+                merged.update(loaded)
+        except Exception:
+            pass
+    _CONFIG_CACHE = merged
+    return _CONFIG_CACHE
+
+
+def _resolve_export_output_dir(ts_root):
+    default_dir = os.path.join(ts_root, "mcs_output")
+    config = _load_data_io_config()
+    configured = config.get("mimics_output_dir", "")
+    if not configured:
+        configured = config.get("mimics_export_output_dir", config.get("mimics_data_output_dir", ""))
+    configured = str(configured or "").strip()
+    if not configured:
+        return default_dir
+    configured = os.path.expandvars(os.path.expanduser(configured))
+    if not os.path.isabs(configured):
+        configured = os.path.abspath(os.path.join(ts_root, configured))
+    else:
+        configured = os.path.abspath(configured)
+    try:
+        if not os.path.isdir(configured):
+            os.makedirs(configured)
+        return configured
+    except Exception:
+        return default_dir
+
+
 def _resource_lock_path(name):
     return runtime_common.resource_lock_path(_project_root(), name)
 
@@ -119,6 +161,8 @@ def _environment_root():
         root,
     ]
     for candidate in candidates:
+        if os.path.isfile(os.path.join(candidate, "python.exe")):
+            return candidate
         if os.path.isfile(os.path.join(candidate, "Scripts", "python.exe")):
             return candidate
         if os.path.isfile(os.path.join(candidate, "python", "python.exe")):
@@ -148,6 +192,7 @@ def _python_exe():
     env_root = _environment_root()
     candidates = [
         os.path.join(env_root, "Scripts", "python.exe"),
+        os.path.join(env_root, "python.exe"),
         os.path.join(env_root, "python", "python.exe"),
     ]
     for c in candidates:
@@ -177,7 +222,7 @@ def _find_mimics_exe():
 
 def _launch_background_batch_export(ts_root, cases_filter, axes, flips):
     """Launch batch export in a separate background Mimics process."""
-    output_dir = os.path.join(ts_root, "mcs_output")
+    output_dir = _resolve_export_output_dir(ts_root)
     if not os.path.isdir(output_dir):
         os.makedirs(output_dir)
     mimics_exe = _find_mimics_exe()
@@ -192,6 +237,7 @@ def _launch_background_batch_export(ts_root, cases_filter, axes, flips):
         config_path,
         {
             "ts_root": os.path.abspath(ts_root),
+            "output_dir": os.path.abspath(output_dir),
             "cases": sorted(list(cases_filter)) if cases_filter else None,
             "axes": axes,
             "flips": flips,
@@ -873,11 +919,12 @@ def run_background_batch_export(config_path):
         return 1
 
     ts_root = config.get("ts_root")
+    output_dir = config.get("output_dir")
+    output_dir = os.path.abspath(output_dir) if output_dir else _resolve_export_output_dir(ts_root)
     cases_filter = config.get("cases")
     cases_filter = set(cases_filter) if cases_filter else None
     axes = config.get("axes") or [0, 1, 2]
     flips = config.get("flips") or [False, False, False]
-    output_dir = os.path.join(ts_root, "mcs_output")
     if not os.path.isdir(output_dir):
         os.makedirs(output_dir)
 
@@ -1044,7 +1091,8 @@ def main():
     if case_dir:
         case_id = os.path.basename(os.path.abspath(case_dir))
         ts_root = os.path.dirname(os.path.abspath(case_dir))
-        mcs_path = os.path.join(ts_root, "mcs_output", case_id + ".mcs")
+        output_dir = _resolve_export_output_dir(ts_root)
+        mcs_path = os.path.join(output_dir, case_id + ".mcs")
         if not os.path.isfile(mcs_path):
             mimics.dialogs.message_box(
                 title="Export Error",
@@ -1059,7 +1107,7 @@ def main():
         if process is None:
             mimics.dialogs.message_box(
                 title="Export Error",
-                message="Could not start background export. See mimics_export.log in mcs_output.",
+                message="Could not start background export. See mimics_export.log in output directory.",
             )
             return 1
         mimics.dialogs.message_box(
@@ -1068,25 +1116,27 @@ def main():
                 "Export for {0} is running in a background Mimics process.\n"
                 "The current Mimics window remains available.\n\n"
                 "Status/logs: {1}"
-            ).format(case_id, os.path.join(ts_root, "mcs_output")),
+            ).format(case_id, output_dir),
         )
         return 0
 
     # -- Batch mode -----------------------------------------------------
     process = _launch_background_batch_export(ts_root, cases_filter, axes, flips)
     if process is None:
+        output_dir = _resolve_export_output_dir(ts_root)
         mimics.dialogs.message_box(
             title="Export Error",
-            message="Could not start background batch export. See mimics_export.log in mcs_output.",
+            message="Could not start background batch export. See mimics_export.log in {0}.".format(output_dir),
         )
         return 1
+    output_dir = _resolve_export_output_dir(ts_root)
     mimics.dialogs.message_box(
         title="Export Started",
         message=(
             "Batch export is running in a background Mimics process.\n"
             "The current Mimics window remains available.\n\n"
             "Status/logs: {0}"
-        ).format(os.path.join(ts_root, "mcs_output")),
+        ).format(output_dir),
     )
     return 0
 

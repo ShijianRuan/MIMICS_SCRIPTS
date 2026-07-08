@@ -46,6 +46,7 @@ _MCS_QUEUE_DONE = "_mcs_queue_done.json"
 _MCS_QUEUE_STOP = "_mcs_queue_stop.json"
 _LOG_ROTATE_BYTES = 5 * 1024 * 1024
 _LOG_ROTATE_BACKUPS = 3
+_CONFIG_CACHE = None
 
 
 def _auto_open_mcs_enabled():
@@ -345,6 +346,47 @@ def _project_root():
     )
 
 
+def _load_data_io_config():
+    global _CONFIG_CACHE
+    if _CONFIG_CACHE is not None:
+        return _CONFIG_CACHE
+    merged = {}
+    io_path = os.path.join(_project_root(), "mimics_io_config.json")
+    nn_path = os.path.join(_project_root(), "nninteractive_config.json")
+    for path in (io_path, nn_path):
+        try:
+            with open(path, "r") as handle:
+                loaded = json.load(handle)
+            if isinstance(loaded, dict):
+                merged.update(loaded)
+        except Exception:
+            pass
+    _CONFIG_CACHE = merged
+    return _CONFIG_CACHE
+
+
+def _resolve_import_output_dir(base_dir):
+    default_dir = os.path.join(base_dir, "mcs_output")
+    config = _load_data_io_config()
+    configured = config.get("mimics_output_dir", "")
+    if not configured:
+        configured = config.get("mimics_import_output_dir", config.get("mimics_data_output_dir", ""))
+    configured = str(configured or "").strip()
+    if not configured:
+        return default_dir
+    configured = os.path.expandvars(os.path.expanduser(configured))
+    if not os.path.isabs(configured):
+        configured = os.path.abspath(os.path.join(base_dir, configured))
+    else:
+        configured = os.path.abspath(configured)
+    try:
+        if not os.path.isdir(configured):
+            os.makedirs(configured)
+        return configured
+    except Exception:
+        return default_dir
+
+
 def _resource_lock_path(name):
     return runtime_common.resource_lock_path(_project_root(), name)
 
@@ -365,6 +407,8 @@ def _environment_root():
         root,
     ]
     for candidate in candidates:
+        if os.path.isfile(os.path.join(candidate, "python.exe")):
+            return candidate
         if os.path.isfile(os.path.join(candidate, "Scripts", "python.exe")):
             return candidate
         if os.path.isfile(os.path.join(candidate, "python", "python.exe")):
@@ -395,6 +439,7 @@ def _python_exe():
     env_root = _environment_root()
     candidates = [
         os.path.join(env_root, "Scripts", "python.exe"),
+        os.path.join(env_root, "python.exe"),
         os.path.join(env_root, "python", "python.exe"),
     ]
     for c in candidates:
@@ -973,7 +1018,6 @@ def _import_monitor_tick(monitor):
         output_dir = os.path.dirname(os.path.abspath(output_mcs))
         _mark_mcs_queue_active(output_dir, monitor.get("total", 1))
         _ensure_bg_mimics_running(output_dir, monitor.get("total", 1), mark_active=False)
-        _mark_mcs_queue_done(output_dir, completed=1, failed=0)
         _start_first_mcs_monitor(
             output_dir,
             target_mcs=output_mcs,
@@ -1457,11 +1501,11 @@ def _launch_background_mimics(output_dir, total_count=0, schedule_retry=True):
     with open(runner_path, "w") as f:
         f.write("# Auto-generated runner for background Mimics .mcs creation\n")
         f.write("import sys, os\n")
-        f.write("sys.path.insert(0, r'{0}')\n".format(script_dir))
-        f.write("os.environ['MIMICS_BRIDGE_PYTHON'] = r'{0}'\n".format(_python_exe()))
-        f.write("os.environ['MIMICS_BRIDGE_SCRIPT'] = r'{0}'\n".format(_bridge_script()))
+        f.write("sys.path.insert(0, {0})\n".format(json.dumps(script_dir)))
+        f.write("os.environ['MIMICS_BRIDGE_PYTHON'] = {0}\n".format(json.dumps(_python_exe())))
+        f.write("os.environ['MIMICS_BRIDGE_SCRIPT'] = {0}\n".format(json.dumps(_bridge_script())))
         f.write("import create_mcs_batch\n")
-        f.write("create_mcs_batch.main(r'{0}')\n".format(output_dir))
+        f.write("create_mcs_batch.main({0})\n".format(json.dumps(output_dir)))
 
     # Launch Mimics in background mode
     cmd = [mimics_exe, "-b", "-run_script", runner_path]
@@ -2213,7 +2257,9 @@ def main(import_mode=None):
     if case_dir:
         _verbose_log("", "Mode: single-case | case_dir={0}".format(case_dir))
         if not output:
-            output = os.path.join(case_dir, os.path.basename(case_dir) + ".mcs")
+            dataset_root = os.path.dirname(os.path.abspath(case_dir))
+            output_dir_default = _resolve_import_output_dir(dataset_root)
+            output = os.path.join(output_dir_default, os.path.basename(case_dir) + ".mcs")
         case_info = {
             "case_id": os.path.basename(case_dir),
             "image": None,
@@ -2269,7 +2315,7 @@ def main(import_mode=None):
 
     # No confirmation dialog; user already chose the folder, just start.
     if not output_dir:
-        output_dir = os.path.join(ts_root, "mcs_output")
+        output_dir = _resolve_import_output_dir(ts_root)
     if not os.path.isdir(output_dir):
         os.makedirs(output_dir)
 

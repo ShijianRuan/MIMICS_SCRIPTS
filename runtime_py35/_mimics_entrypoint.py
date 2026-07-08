@@ -11,7 +11,6 @@ Mimics Scripting Library menu.
 from __future__ import print_function
 
 import importlib
-import inspect
 import os
 import sys
 
@@ -64,24 +63,8 @@ def run_runtime_entry(caller_globals, caller_file, module_name, function_name="m
         return None
     module = load_runtime_module(caller_file, module_name)
     function = getattr(module, function_name)
-    action_provided = False
-    action = None
     if action_attr:
-        action = getattr(module, action_attr)
-        action_provided = True
-    elif action_value is not None:
-        action = action_value
-        action_provided = True
-    if action_provided:
-        setattr(module, "MIMICS_ENTRY_ACTION", action)
-        if _accepts_positional_arg(function):
-            return function(action)
+        return function(getattr(module, action_attr))
+    if action_value is not None:
+        return function(action_value)
     return function()
-
-
-def _accepts_positional_arg(function):
-    try:
-        spec = inspect.getfullargspec(function)
-        return bool(spec.varargs or spec.args)
-    except Exception:
-        return True
