@@ -955,6 +955,56 @@ class TestScriptingLibraryEntries(unittest.TestCase):
         self.assertGreater(len(entries), 0, "No entries found in scripting_library")
         self.assertEqual([], errors)
 
+    def test_entrypoint_passes_action_only_when_supported(self):
+        """Action entries should support both new action-aware and old no-arg mains."""
+        import types
+        import _mimics_entrypoint as entry
+
+        calls = []
+        action_module = types.ModuleType("fake_action_module")
+        def main_with_action(action=None):
+            calls.append(("with_action", action))
+            return action
+        action_module.main = main_with_action
+        sys.modules["fake_action_module"] = action_module
+
+        noarg_module = types.ModuleType("fake_noarg_module")
+        def main_noarg():
+            calls.append(("noarg", getattr(noarg_module, "MIMICS_ENTRY_ACTION", None)))
+            return "ok"
+        noarg_module.main = main_noarg
+        sys.modules["fake_noarg_module"] = noarg_module
+        try:
+            result = entry.run_runtime_entry(
+                {"__name__": "__main__"},
+                os.path.join(PROJECT_ROOT, "scripting_library", "01_Data", "Import_Single_Case.py"),
+                "fake_action_module",
+                action_value="single_case",
+            )
+            self.assertEqual("single_case", result)
+            result = entry.run_runtime_entry(
+                {"__name__": "__main__"},
+                os.path.join(PROJECT_ROOT, "scripting_library", "01_Data", "Import_Single_Case.py"),
+                "fake_noarg_module",
+                action_value="single_case",
+            )
+            self.assertEqual("ok", result)
+            self.assertIn(("with_action", "single_case"), calls)
+            self.assertIn(("noarg", "single_case"), calls)
+        finally:
+            sys.modules.pop("fake_action_module", None)
+            sys.modules.pop("fake_noarg_module", None)
+
+    def test_legacy_scripting_entrypoint_shim(self):
+        """The legacy scripting_library/_mimics_entrypoint.py should forward to runtime."""
+        import importlib.util
+        shim_path = os.path.join(PROJECT_ROOT, "scripting_library", "_mimics_entrypoint.py")
+        spec = importlib.util.spec_from_file_location("_mimics_entrypoint_legacy_test", shim_path)
+        shim = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(shim)
+        self.assertTrue(hasattr(shim, "run_runtime_entry"))
+        self.assertTrue(hasattr(shim, "load_runtime_module"))
+
     def test_nninteractive_entry_routes_correctly(self):
         """nnInteractive.py routes to nninteractive_mimics module."""
         entry = os.path.join(PROJECT_ROOT, "scripting_library", "02_AI", "nnInteractive.py")
