@@ -404,6 +404,20 @@ def _choice_value(label, labels):
     return None
 
 
+def window_layout_for_screen(screen_width, screen_height):
+    """Return geometry/minsize values that keep the action footer visible."""
+    try:
+        screen_width = int(screen_width)
+        screen_height = int(screen_height)
+    except Exception:
+        screen_width, screen_height = 1280, 900
+    width = min(1040, max(860, screen_width - 80))
+    height = min(760, max(560, screen_height - 120))
+    min_width = min(860, width)
+    min_height = min(560, height)
+    return width, height, min_width, min_height
+
+
 class TrainingSetupApp(object):
     EPOCH_CHOICES = [("Fast check (3)", 3), ("Quick (5)", 5), ("Standard (10)", 10), ("More training (20)", 20)]
     VAL_CHOICES = [("No validation", 0.0), ("Small validation (10%)", 0.1), ("Standard validation (20%)", 0.2), ("Larger validation (30%)", 0.3)]
@@ -441,6 +455,8 @@ class TrainingSetupApp(object):
         self.status_text = None
         self.start_button = None
         self.open_log_button = None
+        self.close_button = None
+        self.footer_frame = None
         self.training_status_path = None
         self.last_status_line = ""
         self.training_log_dir = ""
@@ -457,18 +473,28 @@ class TrainingSetupApp(object):
         from tkinter import ttk
 
         self.root.title(TITLE)
-        self.root.geometry("1040x780")
-        self.root.minsize(960, 700)
+        try:
+            screen_width = self.root.winfo_screenwidth()
+            screen_height = self.root.winfo_screenheight()
+        except Exception:
+            screen_width, screen_height = 1280, 900
+        width, height, min_width, min_height = window_layout_for_screen(screen_width, screen_height)
+        self.root.geometry("{0}x{1}".format(width, height))
+        self.root.minsize(min_width, min_height)
         try:
             self.root.attributes("-topmost", False)
         except Exception:
             pass
         self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=1)
 
-        outer = ttk.Frame(self.root, padding=14)
-        outer.pack(fill="both", expand=True)
+        outer = ttk.Frame(self.root, padding=(14, 14, 14, 8))
+        outer.grid(row=0, column=0, sticky="nsew")
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(2, weight=1)
         heading = ttk.Frame(outer)
-        heading.pack(fill="x")
+        heading.grid(row=0, column=0, sticky="ew")
         title = ttk.Label(heading, text="DINOv3 Few-Shot Training", font=("Segoe UI", 15, "bold"))
         title.pack(anchor="w")
         sub = ttk.Label(
@@ -481,10 +507,10 @@ class TrainingSetupApp(object):
             text="Save edited .mcs projects before starting. Training exports labels from saved projects in the background.",
             foreground="#9a5b00",
         )
-        remind.pack(anchor="w", pady=(8, 8))
+        remind.grid(row=1, column=0, sticky="w", pady=(8, 8))
 
         notebook = ttk.Notebook(outer)
-        notebook.pack(fill="both", expand=True)
+        notebook.grid(row=2, column=0, sticky="nsew")
         setup_tab = ttk.Frame(notebook, padding=10)
         expert_tab = ttk.Frame(notebook, padding=10)
         notebook.add(setup_tab, text="Setup")
@@ -493,27 +519,36 @@ class TrainingSetupApp(object):
         self._build_expert(expert_tab)
 
         status_box = ttk.LabelFrame(outer, text="Status", padding=8)
-        status_box.pack(fill="both", expand=False, pady=(10, 0))
-        self.status_text = tk.Text(status_box, height=6, wrap="word", state="disabled")
+        status_box.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        status_box.columnconfigure(0, weight=1)
+        self.status_text = tk.Text(status_box, height=4, wrap="word", state="disabled")
         status_scroll = ttk.Scrollbar(status_box, orient="vertical", command=self.status_text.yview)
         self.status_text.configure(yscrollcommand=status_scroll.set)
-        self.status_text.pack(side="left", fill="both", expand=True)
-        status_scroll.pack(side="left", fill="y")
+        self.status_text.grid(row=0, column=0, sticky="ew")
+        status_scroll.grid(row=0, column=1, sticky="ns")
         self._append_log("Ready. Choose a profile and samples, then start background training.")
 
-        footer = ttk.Frame(outer)
-        footer.pack(fill="x", pady=(12, 0))
+        footer = ttk.Frame(self.root, padding=(14, 8, 14, 12))
+        footer.grid(row=1, column=0, sticky="ew")
+        footer.columnconfigure(0, weight=1)
+        self.footer_frame = footer
         self.status_var = tk.StringVar(value="Configure samples and parameters, then start background training.")
-        ttk.Label(footer, textvariable=self.status_var).pack(side="left", fill="x", expand=True)
+        ttk.Label(footer, textvariable=self.status_var).grid(row=0, column=0, sticky="ew")
         self.start_button = ttk.Button(footer, text="Start Training", command=self.start_training)
-        self.start_button.pack(side="right", padx=(8, 0))
+        self.start_button.grid(row=0, column=3, sticky="e", padx=(8, 0))
         self.open_log_button = ttk.Button(footer, text="Open Log Folder", command=self.open_log_folder)
-        self.open_log_button.pack(side="right", padx=(8, 0))
+        self.open_log_button.grid(row=0, column=2, sticky="e", padx=(8, 0))
         try:
             self.open_log_button.state(["disabled"])
         except Exception:
             pass
-        ttk.Button(footer, text="Close", command=self.close).pack(side="right")
+        self.close_button = ttk.Button(footer, text="Cancel", command=self.close)
+        self.close_button.grid(row=0, column=1, sticky="e")
+        try:
+            self.root.bind("<Return>", lambda _event: self.start_training())
+            self.root.bind("<Escape>", lambda _event: self.close())
+        except Exception:
+            pass
 
     def _build_setup(self, parent):
         import tkinter as tk
@@ -581,7 +616,7 @@ class TrainingSetupApp(object):
 
         mid = ttk.Frame(samples)
         mid.pack(fill="both", expand=True, pady=(12, 8))
-        self.case_list = tk.Listbox(mid, selectmode="extended", exportselection=False, height=20)
+        self.case_list = tk.Listbox(mid, selectmode="extended", exportselection=False, height=12)
         scrollbar = ttk.Scrollbar(mid, orient="vertical", command=self.case_list.yview)
         self.case_list.configure(yscrollcommand=scrollbar.set)
         self.case_list.pack(side="left", fill="both", expand=True)
@@ -1000,6 +1035,8 @@ class TrainingSetupApp(object):
         try:
             self.start_button.state(["disabled"])
             self.open_log_button.state(["!disabled"])
+            if self.close_button is not None:
+                self.close_button.configure(text="Close")
         except Exception:
             pass
         self.root.after(500, self.poll_training_status)
@@ -1256,8 +1293,8 @@ def generate_preview(path, tab="setup"):
     draw.rectangle((30, status_top, width - 30, height - 75), outline="#d1d5db", fill="#ffffff")
     draw.text((50, status_top + 8), "Status", fill="#111827", font=head_font)
     log_lines = [
-        "[14:20:03] Training started in the background: train_liver_001",
-        "[14:20:29] train_liver_001 | training | train 8, val 2 | Epoch 2/10: train_loss=0.4215, val_dice=0.7132",
+        "[14:20:03] Ready. Choose a profile and samples, then start background training.",
+        "[14:20:29] Training progress will appear here after Start Training.",
     ]
     y = status_top + 35
     for line in log_lines:
@@ -1268,7 +1305,7 @@ def generate_preview(path, tab="setup"):
     draw.rectangle((width - 450, height - 55, width - 300, height - 14), fill="#ffffff", outline="#9ca3af")
     draw.text((width - 424, height - 44), "Open Log Folder", fill="#111827", font=font)
     draw.rectangle((width - 285, height - 55, width - 175, height - 14), fill="#ffffff", outline="#9ca3af")
-    draw.text((width - 251, height - 44), "Close", fill="#111827", font=font)
+    draw.text((width - 248, height - 44), "Cancel", fill="#111827", font=font)
     draw.rectangle((width - 160, height - 55, width - 32, height - 14), fill="#2563eb", outline="#1d4ed8")
     draw.text((width - 145, height - 44), "Start Training", fill="#ffffff", font=font)
 

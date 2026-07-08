@@ -2110,6 +2110,18 @@ class TestNewFeatures(unittest.TestCase):
         self.assertEqual("launching", launch["job_payload"]["status"])
         self.assertEqual("external_advanced_ui", launch["job_payload"]["launched_by"])
 
+    def test_fewshot_external_setup_window_keeps_action_footer_visible(self):
+        """Setup UI window sizing should reserve space for Start Training controls."""
+        ui = __import__("tools.fewshot_training_setup_ui", fromlist=["dummy"])
+        width, height, min_width, min_height = ui.window_layout_for_screen(1024, 720)
+        self.assertLessEqual(height, 600)
+        self.assertLessEqual(min_height, height)
+        self.assertGreaterEqual(width, min_width)
+        self.assertGreaterEqual(min_height, 560)
+        source = ui.TrainingSetupApp._build.__code__.co_names
+        self.assertIn("start_button", source)
+        self.assertIn("footer_frame", source)
+
     def test_fewshot_external_setup_validates_parameters(self):
         """External setup rejects invalid values before launching training."""
         ui = __import__("tools.fewshot_training_setup_ui", fromlist=["dummy"])
