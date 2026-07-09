@@ -1274,6 +1274,7 @@ class TestStopBackgroundServices(unittest.TestCase):
             "mimics_import.py",
             "fewshot_pipeline.py",
             "fewshot_mimics.py",
+            "fewshot_model_chooser.py",
             "nninteractive.inference.server.main",
             "setup_env.py",
         ]
@@ -2141,9 +2142,28 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn("s0001,s0002", cmd)
         self.assertIn("--mixed-precision", cmd)
         self.assertIn("--sub-volume", cmd)
+        self.assertIn("--export-labels", cmd)
         self.assertEqual("train_test", launch["run_id"])
         self.assertEqual("launching", launch["job_payload"]["status"])
         self.assertEqual("external_advanced_ui", launch["job_payload"]["launched_by"])
+
+    def test_fewshot_external_setup_can_skip_label_export_wait(self):
+        """Users can train from already exported labels without waiting for background Mimics."""
+        ui = __import__("tools.fewshot_training_setup_ui", fromlist=["dummy"])
+        context = {
+            "organ": "liver",
+            "ts_root": os.path.join(self.tmp, "dataset"),
+            "workspace": os.path.join(self.tmp, "fewshot_models"),
+            "python_exe": sys.executable,
+            "pipeline_script": os.path.join(PROJECT_ROOT, "tools", "fewshot_pipeline.py"),
+            "dinov3_root": os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg"),
+            "config": {},
+        }
+        options = ui.default_training_options({})
+        options["export_labels_before_training"] = False
+        launch = ui.prepare_training_launch(context, options, run_id="train_no_export")
+        self.assertNotIn("--export-labels", launch["cmd"])
+        self.assertFalse(launch["options"]["export_labels_before_training"])
 
     def test_fewshot_external_setup_window_keeps_action_footer_visible(self):
         """Setup UI window sizing should reserve space for Start Training controls."""
@@ -3037,6 +3057,71 @@ class TestNewFeatures(unittest.TestCase):
         with open(context_path, "r") as handle:
             payload = json.load(handle)
         self.assertEqual(os.path.abspath(ts_root), payload["ts_root"])
+
+    def test_fewshot_mimics_launches_external_model_chooser_nonblocking(self):
+        """Predict Choose Model should use an external PySide6 chooser process."""
+        import fewshot_mimics
+        ts_root = os.path.join(self.tmp, "dataset")
+        model_root = os.path.join(ts_root, "fewshot_models", "models", "liver")
+        os.makedirs(model_root)
+        launched = []
+        monitors = []
+
+        def write_model(run_id, created):
+            run_dir = os.path.join(model_root, run_id)
+            os.makedirs(run_dir)
+            checkpoint = os.path.join(run_dir, "model.pth")
+            config = os.path.join(run_dir, "config.yaml")
+            open(checkpoint, "w").close()
+            open(config, "w").close()
+            manifest = {
+                "model_id": run_id,
+                "organ": "liver",
+                "organ_slug": "liver",
+                "checkpoint": checkpoint,
+                "config": config,
+                "sample_count": 3,
+                "created_at_epoch": created,
+            }
+            with open(os.path.join(run_dir, "manifest.json"), "w", encoding="utf-8") as handle:
+                json.dump(manifest, handle)
+            return manifest
+
+        latest = write_model("train_a", 10)
+        write_model("train_b", 20)
+        with open(os.path.join(model_root, "latest.json"), "w", encoding="utf-8") as handle:
+            json.dump(latest, handle)
+
+        class Proc(object):
+            pid = 65432
+            def poll(self):
+                return None
+
+        old_launch = fewshot_mimics._launch_gui_process
+        old_monitor = fewshot_mimics._start_monitor
+        old_script = fewshot_mimics._model_chooser_script
+        old_project = fewshot_mimics._project_root
+        try:
+            fewshot_mimics._launch_gui_process = lambda cmd, cwd=None: launched.append((cmd, cwd)) or Proc()
+            fewshot_mimics._start_monitor = lambda monitor, poll_seconds=1.0: monitors.append(monitor) or True
+            fewshot_mimics._model_chooser_script = lambda: os.path.join(PROJECT_ROOT, "tools", "fewshot_model_chooser.py")
+            fewshot_mimics._project_root = lambda: PROJECT_ROOT
+            result = fewshot_mimics._launch_external_model_chooser(
+                {"python": sys.executable, "dinov3_project": "external/dinov3-medical-seg"},
+                ts_root,
+                "s0001",
+                "liver",
+            )
+        finally:
+            fewshot_mimics._launch_gui_process = old_launch
+            fewshot_mimics._start_monitor = old_monitor
+            fewshot_mimics._model_chooser_script = old_script
+            fewshot_mimics._project_root = old_project
+        self.assertEqual(0, result)
+        self.assertEqual(1, len(launched))
+        self.assertIn("fewshot_model_chooser.py", launched[0][0][1])
+        self.assertEqual(1, len(monitors))
+        self.assertEqual("model_choice", monitors[0]["kind"])
 
     def test_fewshot_status_viewer_context_write_error_is_diagnostic(self):
         """Show Status should say when context JSON creation is the failing stage."""

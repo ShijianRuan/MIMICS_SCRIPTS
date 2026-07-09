@@ -369,8 +369,6 @@ def _resolve_import_output_dir(base_dir):
     default_dir = os.path.join(base_dir, "mcs_output")
     config = _load_data_io_config()
     configured = config.get("mimics_output_dir", "")
-    if not configured:
-        configured = config.get("mimics_import_output_dir", config.get("mimics_data_output_dir", ""))
     configured = str(configured or "").strip()
     if not configured:
         return default_dir

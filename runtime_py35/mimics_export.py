@@ -132,8 +132,6 @@ def _resolve_export_output_dir(ts_root):
     default_dir = os.path.join(ts_root, "mcs_output")
     config = _load_data_io_config()
     configured = config.get("mimics_output_dir", "")
-    if not configured:
-        configured = config.get("mimics_export_output_dir", config.get("mimics_data_output_dir", ""))
     configured = str(configured or "").strip()
     if not configured:
         return default_dir

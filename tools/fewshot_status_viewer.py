@@ -31,6 +31,7 @@ ACTIVE_STATUSES = set([
     "running",
     "cancelling",
     "configuring",
+    "selecting_model",
     "training_started",
 ])
 
@@ -119,6 +120,7 @@ def display_status(value):
         "running": "Running inference",
         "cancelling": "Cancelling",
         "configuring": "Configuring training",
+        "selecting_model": "Selecting model",
         "training_started": "Training started",
         "closed": "Closed",
         "cancelled": "Cancelled",
@@ -134,6 +136,16 @@ def display_resource(value):
         "background_mimics": "background Mimics",
     }
     return labels.get(str(value or ""), str(value or "resource").replace("_", " "))
+
+
+def display_kind(value):
+    labels = {
+        "train": "training",
+        "infer": "prediction",
+        "model_choice": "model selection",
+        "train_setup": "training setup",
+    }
+    return labels.get(str(value or ""), str(value or "?").replace("_", " "))
 
 
 def resource_wait_text(job):
@@ -187,7 +199,7 @@ def progress_line(progress):
 def format_job_line(job):
     pieces = [
         job.get("job_id", "?"),
-        job.get("kind", "?"),
+        display_kind(job.get("kind")),
         job.get("organ", "?"),
         display_status(job.get("status", "?")),
     ]
@@ -213,6 +225,29 @@ def format_job_line(job):
     if job.get("cancel_marker_error"):
         pieces.append("cancel marker warning: {0}".format(job.get("cancel_marker_error")))
     return " | ".join([str(part) for part in pieces if str(part)])
+
+
+def filter_jobs(rows, filter_text, limit=80):
+    filtered = []
+    now = time.time()
+    for mtime, payload in rows:
+        status = payload.get("status")
+        kind = payload.get("kind")
+        is_active = status in ACTIVE_STATUSES
+        if filter_text == "Training" and kind != "train":
+            continue
+        if filter_text == "Inference" and kind != "infer":
+            continue
+        if filter_text == "Failed / cancelled" and status not in ("failed", "cancelled", "cancelling"):
+            continue
+        if filter_text == "Active + recent":
+            age_days = (now - float(payload.get("updated_at_epoch", mtime) or mtime)) / 86400.0
+            if not is_active and status in ("failed", "cancelled") and age_days > 7.0:
+                continue
+            if not is_active and len(filtered) >= 25:
+                continue
+        filtered.append((mtime, payload))
+    return [item[1] for item in filtered[:limit]]
 
 
 def process_exists(pid):
@@ -452,6 +487,7 @@ class StatusViewerApp(object):
         self.chart = None
         self.stop_button = None
         self.open_log_button = None
+        self.filter_var = None
         self._refresh_after_id = None
         self._build()
         self.refresh()
@@ -479,6 +515,17 @@ class StatusViewerApp(object):
 
         toolbar = ttk.Frame(outer)
         toolbar.pack(fill="x", pady=(10, 8))
+        ttk.Label(toolbar, text="Show").pack(side="left")
+        self.filter_var = tk.StringVar(value="Active + recent")
+        filter_combo = ttk.Combobox(
+            toolbar,
+            textvariable=self.filter_var,
+            values=("Active + recent", "Training", "Inference", "Failed / cancelled", "All"),
+            state="readonly",
+            width=18,
+        )
+        filter_combo.pack(side="left", padx=(6, 10))
+        filter_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
         ttk.Button(toolbar, text="Refresh", command=self.refresh).pack(side="left")
         ttk.Button(toolbar, text="Open Workspace", command=lambda: open_path(self.workspace)).pack(side="left", padx=(8, 0))
         self.open_log_button = ttk.Button(toolbar, text="Open Log Folder", command=self.open_log_folder)
@@ -495,7 +542,7 @@ class StatusViewerApp(object):
 
         left = ttk.Frame(body, padding=(0, 0, 8, 0))
         body.add(left, weight=1)
-        ttk.Label(left, text="Jobs").pack(anchor="w")
+        ttk.Label(left, text="Recent activity").pack(anchor="w")
         self.listbox = tk.Listbox(left, exportselection=False, height=28)
         job_scroll = ttk.Scrollbar(left, orient="vertical", command=self.listbox.yview)
         self.listbox.configure(yscrollcommand=job_scroll.set)
@@ -506,7 +553,7 @@ class StatusViewerApp(object):
         right = ttk.Frame(body)
         body.add(right, weight=3)
 
-        detail = ttk.LabelFrame(right, text="Selected job", padding=8)
+        detail = ttk.LabelFrame(right, text="Selected activity", padding=8)
         detail.pack(fill="x")
         self.detail_text = tk.Text(detail, height=9, wrap="word", state="disabled")
         self.detail_text.pack(fill="x", expand=False)
@@ -516,7 +563,7 @@ class StatusViewerApp(object):
         self.chart = tk.Canvas(chart_box, height=240, background="#f8fafc", highlightthickness=1, highlightbackground="#d1d5db")
         self.chart.pack(fill="x", expand=False)
 
-        log_box = ttk.LabelFrame(right, text="Log tail", padding=8)
+        log_box = ttk.LabelFrame(right, text="Recent log", padding=8)
         log_box.pack(fill="both", expand=True, pady=(8, 0))
         self.log_text = tk.Text(log_box, height=14, wrap="none", state="disabled")
         log_scroll = ttk.Scrollbar(log_box, orient="vertical", command=self.log_text.yview)
@@ -532,7 +579,7 @@ class StatusViewerApp(object):
         for index, job in enumerate(self.jobs):
             label = "{0}   {1}   {2}   {3}".format(
                 display_status(job.get("status")),
-                job.get("kind", "?"),
+                display_kind(job.get("kind")),
                 job.get("organ", "?"),
                 job.get("job_id", "?"),
             )
@@ -545,7 +592,7 @@ class StatusViewerApp(object):
             self.selected_job_id = self.jobs[selected_index].get("job_id", "")
             self.show_job(self.jobs[selected_index])
             active = sum(1 for job in self.jobs if job.get("status") in ACTIVE_STATUSES)
-            self.summary_var.set("{0} job(s), {1} active. Auto-refresh every 2 seconds.".format(len(self.jobs), active))
+            self.summary_var.set("{0} item(s), {1} active. Auto-refresh every 2 seconds.".format(len(self.jobs), active))
         else:
             self.selected_job_id = ""
             self.summary_var.set("No DINOv3 few-shot jobs were found.")
@@ -579,7 +626,8 @@ class StatusViewerApp(object):
             if payload.get("job_id"):
                 paths[payload.get("job_id")] = str(path)
         rows.sort(key=lambda item: item[0], reverse=True)
-        return [item[1] for item in rows[:80]], paths
+        filter_text = self.filter_var.get() if self.filter_var is not None else "Active + recent"
+        return filter_jobs(rows, filter_text), paths
 
     def on_select(self, _event=None):
         selection = self.listbox.curselection()
@@ -594,8 +642,8 @@ class StatusViewerApp(object):
 
     def show_job(self, job):
         lines = [
-            "Job: {0}".format(job.get("job_id", "?")),
-            "Type: {0}".format(job.get("kind", "?")),
+            "ID: {0}".format(job.get("job_id", "?")),
+            "Type: {0}".format(display_kind(job.get("kind"))),
             "Organ: {0}".format(job.get("organ", "?")),
             "Status: {0}".format(display_status(job.get("status"))),
             "Created: {0}".format(format_time(job.get("created_at_epoch"))),
@@ -649,7 +697,7 @@ class StatusViewerApp(object):
             pipeline_tail = tail_text_from_text(pipeline_text, 60)
             if pipeline_tail:
                 log_tail = (log_tail + "\n" if log_tail else "") + "---- pipeline log ----\n" + pipeline_tail
-        self._set_text(self.log_text, log_tail)
+        self._set_text(self.log_text, log_tail, preserve_scroll=True)
         rows = training_curve_rows(job, log_text, pipeline_text)
         self.draw_chart(rows)
         try:
@@ -658,20 +706,36 @@ class StatusViewerApp(object):
         except Exception:
             pass
 
-    def _set_text(self, widget, text):
+    def _set_text(self, widget, text, preserve_scroll=False):
+        old_position = None
+        at_bottom = True
+        if preserve_scroll:
+            try:
+                old_position = widget.yview()
+                at_bottom = old_position[1] >= 0.995
+            except Exception:
+                old_position = None
         widget.configure(state="normal")
         widget.delete("1.0", "end")
         widget.insert("1.0", text or "")
         widget.configure(state="disabled")
+        if preserve_scroll:
+            try:
+                if at_bottom:
+                    widget.yview_moveto(1.0)
+                elif old_position is not None:
+                    widget.yview_moveto(old_position[0])
+            except Exception:
+                pass
 
     def draw_chart(self, rows):
         canvas = self.chart
         canvas.delete("all")
-        width = max(560, int(canvas.winfo_width() or 900))
+        width = max(320, int(canvas.winfo_width() or 900))
         height = 240
         canvas.create_rectangle(0, 0, width, height, fill="#f8fafc", outline="")
 
-        margin_l, margin_r, margin_t, margin_b = 76, 68, 54, 44
+        margin_l, margin_r, margin_t, margin_b = 64, 54, 52, 40
         x0, y0 = margin_l, height - margin_b
         x1, y1 = width - margin_r, margin_t
         plot_w = max(1, x1 - x0)
@@ -756,7 +820,7 @@ class StatusViewerApp(object):
 
         canvas.create_text(x0, height - 12, anchor="w", text="Epoch", fill="#4b5563", font=("Segoe UI", 8))
         canvas.create_text(x0 - 42, y1 - 18, anchor="w", text="Loss", fill="#991b1b", font=("Segoe UI", 8, "bold"))
-        canvas.create_text(x1 + 18, y1 - 18, anchor="w", text="Dice", fill="#1d4ed8", font=("Segoe UI", 8, "bold"))
+        canvas.create_text(max(x0 + 40, x1 - 28), y1 - 18, anchor="w", text="Dice", fill="#1d4ed8", font=("Segoe UI", 8, "bold"))
 
         latest_loss = None
         latest_dice = None
@@ -774,14 +838,14 @@ class StatusViewerApp(object):
         if latest_dice is not None:
             badges.append(("val dice {0:.4f}".format(float(latest_dice)), "#1d4ed8", "#dbeafe"))
 
-        bx = 150
+        bx = min(150, max(16, width // 4))
         for text, color, fill in badges:
-            tw = max(76, len(text) * 7 + 20)
+            tw = min(max(76, len(text) * 7 + 20), max(80, width - bx - 16))
             canvas.create_rectangle(bx, 12, bx + tw, 36, fill=fill, outline="#e5e7eb")
             canvas.create_text(bx + 10, 24, anchor="w", text=text, fill=color, font=("Segoe UI", 9))
             bx += tw + 8
 
-        legend_x = x1 - 178
+        legend_x = max(x0 + 120, x1 - 178)
         canvas.create_line(legend_x, 24, legend_x + 24, 24, fill="#dc2626", width=2)
         canvas.create_text(legend_x + 32, 24, anchor="w", text="train loss", fill="#374151", font=("Segoe UI", 8))
         canvas.create_line(legend_x + 104, 24, legend_x + 128, 24, fill="#2563eb", width=2)
@@ -981,7 +1045,7 @@ class QtStatusViewerApp(object):
         for index, job in enumerate(self.jobs):
             label = "{0}   {1}   {2}   {3}".format(
                 display_status(job.get("status")),
-                "training" if job.get("kind") == "train" else ("prediction" if job.get("kind") == "infer" else job.get("kind", "?")),
+                display_kind(job.get("kind")),
                 job.get("organ", "?"),
                 job.get("job_id", "?"),
             )
@@ -1023,26 +1087,7 @@ class QtStatusViewerApp(object):
                 paths[payload.get("job_id")] = str(path)
         rows.sort(key=lambda item: item[0], reverse=True)
         filter_text = self.filter_combo.currentText() if self.filter_combo is not None else "Active + recent"
-        filtered = []
-        now = time.time()
-        for mtime, payload in rows:
-            status = payload.get("status")
-            kind = payload.get("kind")
-            is_active = status in ACTIVE_STATUSES
-            if filter_text == "Training" and kind != "train":
-                continue
-            if filter_text == "Inference" and kind != "infer":
-                continue
-            if filter_text == "Failed / cancelled" and status not in ("failed", "cancelled", "cancelling"):
-                continue
-            if filter_text == "Active + recent":
-                age_days = (now - float(payload.get("updated_at_epoch", mtime) or mtime)) / 86400.0
-                if not is_active and status in ("failed", "cancelled") and age_days > 7.0:
-                    continue
-                if not is_active and len(filtered) >= 25:
-                    continue
-            filtered.append((mtime, payload))
-        return [item[1] for item in filtered[:80]], paths
+        return filter_jobs(rows, filter_text), paths
 
     def on_select(self, row):
         if row < 0 or row >= len(self.jobs):
@@ -1062,7 +1107,7 @@ class QtStatusViewerApp(object):
     def show_job(self, job):
         lines = [
             "ID: {0}".format(job.get("job_id", "?")),
-            "Type: {0}".format("training" if job.get("kind") == "train" else ("prediction" if job.get("kind") == "infer" else job.get("kind", "?"))),
+            "Type: {0}".format(display_kind(job.get("kind"))),
             "Organ: {0}".format(job.get("organ", "?")),
             "Status: {0}".format(display_status(job.get("status"))),
             "Created: {0}".format(format_time(job.get("created_at_epoch"))),
@@ -1363,19 +1408,23 @@ def generate_preview(path):
     draw.rectangle((0, 0, width, 70), fill="#1f2937")
     draw.text((32, 20), "DINOv3 Few-Shot Status", fill="white", font=title_font)
     draw.text((32, 92), "Dataset: D:\\Dataset\\TotalSegmentator    Organ filter: liver", fill="#1f2937", font=head_font)
+    draw.text((32, 143), "Show", fill="#374151", font=font)
+    draw.rectangle((82, 132, 250, 170), outline="#9ca3af", fill="#ffffff")
+    draw.text((98, 143), "Active + recent", fill="#111827", font=font)
     for idx, label in enumerate(["Refresh", "Open Workspace", "Open Log Folder", "Request Stop"]):
-        x = 32 + idx * 155
+        x = 270 + idx * 155
         draw.rectangle((x, 132, x + 140, 170), outline="#9ca3af", fill="#ffffff")
         draw.text((x + 16, 143), label, fill="#111827", font=font)
 
-    draw.text((32, 194), "12 job(s), 1 active. Auto-refresh every 2 seconds.", fill="#374151", font=font)
+    draw.text((32, 194), "12 item(s), 1 active. Auto-refresh every 2 seconds.", fill="#374151", font=font)
     draw.rectangle((32, 225, 420, height - 35), outline="#d1d5db", fill="#ffffff")
-    draw.text((50, 244), "Jobs", fill="#111827", font=head_font)
+    draw.text((50, 244), "Recent activity", fill="#111827", font=head_font)
     rows = [
-        ("Training", "train", "liver", "train_20260708_01", True),
-        ("Completed", "train", "spleen", "train_20260707_03", False),
-        ("Completed", "infer", "liver", "infer_s0401_liver", False),
-        ("Failed", "train", "kidney_left", "train_20260706_02", False),
+        ("Training", "training", "liver", "train_20260708_01", True),
+        ("Selecting model", "model selection", "liver", "choose_model_s0401", False),
+        ("Completed", "training", "spleen", "train_20260707_03", False),
+        ("Completed", "prediction", "liver", "infer_s0401_liver", False),
+        ("Failed", "training", "kidney_left", "train_20260706_02", False),
     ]
     y = 282
     for status, kind, organ, job_id, selected in rows:
@@ -1387,10 +1436,10 @@ def generate_preview(path):
 
     right_x = 450
     draw.rectangle((right_x, 225, width - 32, 392), outline="#d1d5db", fill="#ffffff")
-    draw.text((right_x + 18, 244), "Selected job", fill="#111827", font=head_font)
+    draw.text((right_x + 18, 244), "Selected activity", fill="#111827", font=head_font)
     details = [
-        "Job: train_20260708_01",
-        "Type: train",
+        "ID: train_20260708_01",
+        "Type: training",
         "Organ: liver",
         "Status: Training",
         "Samples: train 8, validation 2",
@@ -1441,7 +1490,7 @@ def generate_preview(path):
 
     log_y = 690
     draw.rectangle((right_x, log_y, width - 32, height - 35), outline="#d1d5db", fill="#ffffff")
-    draw.text((right_x + 18, log_y + 16), "Log tail", fill="#111827", font=head_font)
+    draw.text((right_x + 18, log_y + 16), "Recent log", fill="#111827", font=head_font)
     logs = [
         "[2026-07-08 14:20:03] Training job train_20260708_01 started for organ liver.",
         "[2026-07-08 14:22:11] Training progress: Epoch 4/10: train_loss=0.3921, val_dice=0.7015",

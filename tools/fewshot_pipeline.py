@@ -295,8 +295,6 @@ def resolve_mimics_output_dir(ts_root, config=None):
     default_dir = Path(ts_root).resolve() / "mcs_output"
     config = load_mimics_io_config() if config is None else (config or {})
     configured = config.get("mimics_output_dir", "")
-    if not configured:
-        configured = config.get("mimics_export_output_dir", config.get("mimics_data_output_dir", ""))
     configured = str(configured or "").strip()
     if not configured:
         return default_dir
@@ -2019,8 +2017,8 @@ def build_parser():
     train.add_argument("--sub-volume-size", default="32,256,256")
     train.add_argument("--export-labels", action="store_true")
     train.add_argument("--mimics-exe")
-    train.add_argument("--export-timeout-seconds", type=float, default=21600)
-    train.add_argument("--background-mimics-lock-timeout-seconds", type=float, default=21600)
+    train.add_argument("--export-timeout-seconds", type=float, default=1800)
+    train.add_argument("--background-mimics-lock-timeout-seconds", type=float, default=1800)
     train.add_argument("--gpu-lock-timeout-seconds", type=float, default=86400)
     train.add_argument("--keep-last-checkpoints", type=int, default=2)
     train.add_argument("--keep-materialized-dataset", action="store_true")

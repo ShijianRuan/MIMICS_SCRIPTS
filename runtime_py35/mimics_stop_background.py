@@ -40,6 +40,7 @@ MARKERS = (
     # DINOv3 few-shot training/inference
     "fewshot_pipeline.py",
     "fewshot_mimics.py",
+    "fewshot_model_chooser.py",
 
     # nnInteractive inference server
     "nninteractive.inference.server.main",

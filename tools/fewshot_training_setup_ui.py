@@ -133,10 +133,11 @@ def default_training_options(config, profile_name=None):
     values.setdefault("sub_volume_size", config.get("default_sub_volume_size", "32,256,256"))
     values.setdefault("keep_last_checkpoints", config.get("default_keep_last_checkpoints", 2))
     values.setdefault("keep_materialized_dataset", config.get("default_keep_materialized_dataset", False))
+    values.setdefault("export_labels_before_training", config.get("default_export_labels_before_training", True))
     values.setdefault("gpu_lock_timeout_seconds", config.get("gpu_lock_timeout_seconds", 86400))
     values.setdefault(
         "background_mimics_lock_timeout_seconds",
-        config.get("background_mimics_lock_timeout_seconds", 21600),
+        config.get("background_mimics_lock_timeout_seconds", 1800),
     )
     return values
 
@@ -181,6 +182,7 @@ def validate_options(options):
     normalized["mixed_precision"] = _bool(normalized.get("mixed_precision", False))
     normalized["sub_volume"] = _bool(normalized.get("sub_volume", False))
     normalized["keep_materialized_dataset"] = _bool(normalized.get("keep_materialized_dataset", False))
+    normalized["export_labels_before_training"] = _bool(normalized.get("export_labels_before_training", True))
     if normalized["val_fraction"] < 0.0 or normalized["val_fraction"] > 0.9:
         raise ValueError("Validation fraction must be between 0.0 and 0.9.")
     parts = [part.strip() for part in str(normalized.get("img_size", "224,224")).split(",")]
@@ -239,7 +241,7 @@ def append_training_args(cmd, config, options):
         "--background-mimics-lock-timeout-seconds",
         str(float(options.get(
             "background_mimics_lock_timeout_seconds",
-            config.get("background_mimics_lock_timeout_seconds", 21600),
+            config.get("background_mimics_lock_timeout_seconds", 1800),
         ))),
         "--keep-last-checkpoints",
         str(int(options.get("keep_last_checkpoints", config.get("default_keep_last_checkpoints", 2)))),
@@ -288,10 +290,11 @@ def prepare_training_launch(context, options, run_id=None):
         context["dinov3_root"],
         "--python",
         python_exe,
-        "--export-labels",
         "--run-id",
         run_id,
     ]
+    if bool(options.get("export_labels_before_training", True)):
+        cmd.append("--export-labels")
     append_training_args(cmd, config, options)
     mimics_exe = context.get("mimics_exe")
     if mimics_exe:
@@ -463,8 +466,6 @@ def resolve_mimics_output_dir_for_ui(ts_root, project_root):
         if isinstance(loaded, dict):
             merged.update(loaded)
     configured = merged.get("mimics_output_dir", "")
-    if not configured:
-        configured = merged.get("mimics_export_output_dir", merged.get("mimics_data_output_dir", ""))
     configured = str(configured or "").strip()
     if not configured:
         return default_dir
@@ -713,6 +714,14 @@ class TrainingSetupApp(object):
         self.vars["min_val_samples"] = tk.StringVar(value=str(self.values.get("min_val_samples", 1)))
         self._labeled_entry(vals, "Min train", "min_samples", 8)
         self._labeled_entry(vals, "Min val", "min_val_samples", 8)
+        self.vars["export_labels_before_training"] = tk.BooleanVar(
+            value=_bool(self.values.get("export_labels_before_training", True))
+        )
+        ttk.Checkbutton(
+            samples,
+            text="Refresh labels from saved .mcs before training",
+            variable=self.vars["export_labels_before_training"],
+        ).pack(anchor="w", pady=(8, 0))
 
     def _build_expert(self, parent):
         import tkinter as tk
@@ -755,7 +764,7 @@ class TrainingSetupApp(object):
 
         ttk.Label(right, text="These affect runtime, memory use, validation, and disk retention.").pack(anchor="w", pady=(0, 8))
         self._labeled_spinbox(right, "Epochs", "epochs", 1, 10000, 1, 10)
-        self._labeled_spinbox(right, "Batch size", "batch_size", 1, 128, 1, 10)
+        self._labeled_spinbox(right, "Batch size (fixed)", "batch_size", 1, 1, 1, 10)
         self._labeled_spinbox(right, "Grad accumulation", "grad_accumulation", 1, 1024, 1, 10)
         self._labeled_combo(right, "Learning rate", "lr", self.LR_CHOICES, width=14)
         self._labeled_combo(right, "Weight decay", "weight_decay", self.WEIGHT_DECAY_CHOICES, width=14)
@@ -1418,6 +1427,16 @@ class QtTrainingSetupApp(object):
         mins.addWidget(self.widgets["min_val_samples"])
         mins.addStretch(1)
         sample_layout.addLayout(mins)
+        self.widgets["export_labels_before_training"] = QtWidgets.QCheckBox(
+            "Refresh labels from saved .mcs before training"
+        )
+        self.widgets["export_labels_before_training"].setChecked(
+            _bool(self.values.get("export_labels_before_training", True))
+        )
+        self.widgets["export_labels_before_training"].setToolTip(
+            "Turn this off only when labels have already been exported and a background import/export Mimics process is still busy."
+        )
+        sample_layout.addWidget(self.widgets["export_labels_before_training"])
         layout.addWidget(sample_group, 1)
         return tab
 
@@ -2066,7 +2085,7 @@ def generate_preview(path, tab="setup"):
         draw.text((right_x + 22, card_y + 54), "Runtime, memory, validation, and retention.", fill="#6b7280", font=small)
         opt_rows = [
             ("Epochs", "10", "spin"),
-            ("Batch size", "1", "spin"),
+            ("Batch size (fixed)", "1", "spin"),
             ("Grad accumulation", "1", "spin"),
             ("Learning rate", "0.001", "select"),
             ("Weight decay", "0.01", "select"),
@@ -2090,13 +2109,18 @@ def generate_preview(path, tab="setup"):
             draw.text((check_x + 28, y - 2), label, fill="#374151", font=small)
             check_x += 190
     else:
-        draw.rectangle((60, 238, width - 60, 300), outline="#d1d5db", fill="#f9fafb")
+        draw.rectangle((60, 238, width - 60, 320), outline="#d1d5db", fill="#f9fafb")
         draw.text((80, 256), "Profile", fill="#374151", font=font)
         draw.rectangle((155, 248, 360, 282), outline="#9ca3af", fill="#ffffff")
         draw.text((168, 256), "balanced", fill="#111827", font=font)
         draw.text((390, 256), "Use profiles for routine work; Expert is optional.", fill="#374151", font=small)
+        draw.text((80, 292), "Dataset", fill="#374151", font=small)
+        draw.rectangle((155, 286, 1030, 314), outline="#9ca3af", fill="#ffffff")
+        draw.text((168, 292), "D:\\Dataset\\TotalSegmentator", fill="#111827", font=small)
+        draw.rectangle((1045, 286, 1145, 314), outline="#9ca3af", fill="#ffffff")
+        draw.text((1066, 292), "Browse", fill="#111827", font=small)
 
-        draw.rectangle((60, 318, width - 60, 392), outline="#d1d5db", fill="#f9fafb")
+        draw.rectangle((60, 338, width - 60, 412), outline="#d1d5db", fill="#f9fafb")
         quick = [
             ("Training length", "Standard (10)"),
             ("Validation", "Standard validation (20%)"),
@@ -2104,34 +2128,38 @@ def generate_preview(path, tab="setup"):
         ]
         x = 80
         for label, value in quick:
-            draw_field(x, 336, label, value, "select", w=245)
+            draw_field(x, 356, label, value, "select", w=245)
             x += 300
 
-        draw.text((60, 420), "Samples", fill="#111827", font=head_font)
-        draw.text((170, 424), "Sample order", fill="#374151", font=small)
-        draw.rectangle((270, 416, 380, 446), outline="#9ca3af", fill="#ffffff")
-        draw.text((282, 422), "all", fill="#111827", font=small)
-        draw.text((410, 424), "Max samples", fill="#374151", font=small)
-        draw.rectangle((510, 416, 610, 446), outline="#9ca3af", fill="#ffffff")
-        draw.text((522, 422), "0", fill="#111827", font=small)
+        draw.text((60, 440), "Samples", fill="#111827", font=head_font)
+        draw.text((170, 444), "Sample order", fill="#374151", font=small)
+        draw.rectangle((270, 436, 380, 466), outline="#9ca3af", fill="#ffffff")
+        draw.text((282, 442), "all", fill="#111827", font=small)
+        draw.text((410, 444), "Max samples", fill="#374151", font=small)
+        draw.rectangle((510, 436, 610, 466), outline="#9ca3af", fill="#ffffff")
+        draw.text((522, 442), "0", fill="#111827", font=small)
 
-        draw.rectangle((60, 462, 835, 625), outline="#9ca3af", fill="#fbfdff")
+        draw.rectangle((60, 482, 835, 625), outline="#9ca3af", fill="#fbfdff")
         cases = ["s0001", "s0002", "s0003", "s0004", "s0005", "s0006"]
-        y = 478
+        y = 498
         for idx, case in enumerate(cases):
             if idx in (0, 1, 3, 6, 7):
                 draw.rectangle((68, y - 4, 820, y + 22), fill="#dbeafe")
             draw.text((82, y), case, fill="#111827", font=font)
             y += 24
-        draw.rectangle((870, 462, 990, 498), outline="#9ca3af", fill="#ffffff")
-        draw.text((892, 471), "Select All", fill="#111827", font=font)
-        draw.rectangle((870, 510, 990, 546), outline="#9ca3af", fill="#ffffff")
-        draw.text((910, 519), "Clear", fill="#111827", font=font)
+        draw.rectangle((870, 482, 990, 518), outline="#9ca3af", fill="#ffffff")
+        draw.text((892, 491), "Select All", fill="#111827", font=font)
+        draw.rectangle((870, 530, 990, 566), outline="#9ca3af", fill="#ffffff")
+        draw.text((910, 539), "Clear", fill="#111827", font=font)
         draw.text((870, 575), "616 case(s) found", fill="#374151", font=small)
         draw.text((870, 607), "Selected cases override sample order.", fill="#374151", font=small)
         draw.text((60, 642), "Manual cases", fill="#374151", font=font)
         draw.rectangle((180, 634, 920, 670), outline="#9ca3af", fill="#ffffff")
         draw.text((194, 642), "s0012,s0016", fill="#111827", font=font)
+        draw.rectangle((60, 682, 76, 698), outline="#6b7280", fill="#ffffff")
+        draw.line((63, 690, 68, 695), fill="#2563eb", width=2)
+        draw.line((68, 695, 76, 684), fill="#2563eb", width=2)
+        draw.text((88, 679), "Refresh labels from saved .mcs before training", fill="#374151", font=small)
 
     status_top = height - 155
     draw.rectangle((30, status_top, width - 30, height - 75), outline="#d1d5db", fill="#ffffff")

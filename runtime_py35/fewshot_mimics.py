@@ -131,8 +131,6 @@ def _resolve_mimics_output_dir(ts_root):
     default_dir = os.path.abspath(os.path.join(ts_root, "mcs_output"))
     config = _load_mimics_io_config()
     configured = config.get("mimics_output_dir", "")
-    if not configured:
-        configured = config.get("mimics_export_output_dir", config.get("mimics_data_output_dir", ""))
     configured = str(configured or "").strip()
     if not configured:
         return default_dir
@@ -244,6 +242,10 @@ def _training_setup_ui_script():
 
 def _status_viewer_script():
     return os.path.join(_project_root(), "tools", "fewshot_status_viewer.py")
+
+
+def _model_chooser_script():
+    return os.path.join(_project_root(), "tools", "fewshot_model_chooser.py")
 
 
 def _bridge_script():
@@ -507,10 +509,11 @@ def _default_training_options(config, profile_name=None):
     values.setdefault("sub_volume_size", config.get("default_sub_volume_size", "32,256,256"))
     values.setdefault("keep_last_checkpoints", config.get("default_keep_last_checkpoints", 2))
     values.setdefault("keep_materialized_dataset", config.get("default_keep_materialized_dataset", False))
+    values.setdefault("export_labels_before_training", config.get("default_export_labels_before_training", True))
     values.setdefault("gpu_lock_timeout_seconds", config.get("gpu_lock_timeout_seconds", 86400))
     values.setdefault(
         "background_mimics_lock_timeout_seconds",
-        config.get("background_mimics_lock_timeout_seconds", 21600),
+        config.get("background_mimics_lock_timeout_seconds", 1800),
     )
     return values
 
@@ -566,7 +569,7 @@ def _append_training_args(cmd, config, options):
         "--gpu-lock-timeout-seconds",
         str(float(options.get("gpu_lock_timeout_seconds", config.get("gpu_lock_timeout_seconds", 86400)))),
         "--background-mimics-lock-timeout-seconds",
-        str(float(options.get("background_mimics_lock_timeout_seconds", config.get("background_mimics_lock_timeout_seconds", 21600)))),
+        str(float(options.get("background_mimics_lock_timeout_seconds", config.get("background_mimics_lock_timeout_seconds", 1800)))),
         "--keep-last-checkpoints",
         str(int(options.get("keep_last_checkpoints", config.get("default_keep_last_checkpoints", 2)))),
     ])
@@ -788,6 +791,7 @@ def _latest_active_job(ts_root):
         "running",
         "cancelling",
         "configuring",
+        "selecting_model",
     ])
     rows = []
     for name in os.listdir(jobs_dir):
@@ -822,6 +826,7 @@ def _display_status(value):
         "running": "Running inference",
         "cancelling": "Cancelling",
         "configuring": "Configuring training",
+        "selecting_model": "Selecting model",
         "training_started": "Training started",
         "closed": "Closed",
         "cancelled": "Cancelled",
@@ -837,6 +842,16 @@ def _display_resource(value):
         "background_mimics": "background Mimics",
     }
     return labels.get(str(value or ""), str(value or "resource").replace("_", " "))
+
+
+def _display_kind(value):
+    labels = {
+        "train": "training",
+        "infer": "prediction",
+        "model_choice": "model selection",
+        "train_setup": "training setup",
+    }
+    return labels.get(str(value or ""), str(value or "?").replace("_", " "))
 
 
 def _resource_wait_text(job):
@@ -913,20 +928,7 @@ def _native_training_param_picker(config):
             values["finetune_method"] = val
             break
 
-    # -- Batch size --
-    batch_choices = [("Batch size 1 (minimum VRAM)", 1), ("Batch size 2", 2)]
-    batch_labels = [label for label, _ in batch_choices]
-    batch_labels.append("Keep default ({0})".format(values.get("batch_size", "?")))
-    answer = mimics.dialogs.question_box(
-        message="Batch size:\n(bigger = faster training but needs more GPU memory)",
-        buttons=";".join(batch_labels),
-        title=TITLE,
-        ui_blocking=True,
-    )
-    for label, val in batch_choices:
-        if answer == label:
-            values["batch_size"] = val
-            break
+    values["batch_size"] = 1
 
     return values
 
@@ -1101,6 +1103,7 @@ def _advanced_training_options(config, ts_root):
     keep_last_checkpoints = QSpinBox()
     keep_last_checkpoints.setRange(0, 1000)
     keep_materialized_dataset = QCheckBox()
+    export_labels_before_training = QCheckBox()
 
     widgets = {
         "finetune_method": finetune,
@@ -1120,6 +1123,7 @@ def _advanced_training_options(config, ts_root):
         "sub_volume_size": sub_volume_size,
         "keep_last_checkpoints": keep_last_checkpoints,
         "keep_materialized_dataset": keep_materialized_dataset,
+        "export_labels_before_training": export_labels_before_training,
     }
 
     def apply_values(new_values):
@@ -1144,6 +1148,7 @@ def _advanced_training_options(config, ts_root):
         sub_volume_size.setText(str(new_values.get("sub_volume_size", "32,256,256")))
         keep_last_checkpoints.setValue(int(new_values.get("keep_last_checkpoints", 2)))
         keep_materialized_dataset.setChecked(bool(new_values.get("keep_materialized_dataset", False)))
+        export_labels_before_training.setChecked(bool(new_values.get("export_labels_before_training", True)))
 
     def profile_changed(index):
         if profile_names and 0 <= index < len(profile_names):
@@ -1167,6 +1172,7 @@ def _advanced_training_options(config, ts_root):
     train_form.addRow("Sub-volume", sub_volume)
     train_form.addRow("Sub-volume size", sub_volume_size)
     train_form.addRow("Keep last checkpoints", keep_last_checkpoints)
+    train_form.addRow("Refresh labels from saved .mcs", export_labels_before_training)
     train_form.addRow(
         "Backend config",
         QLabel("Base config, modality, and custom weight path are controlled by fewshot_config.json."),
@@ -1206,6 +1212,7 @@ def _advanced_training_options(config, ts_root):
         "sub_volume_size": str(sub_volume_size.text()).strip(),
         "keep_last_checkpoints": int(keep_last_checkpoints.value()),
         "keep_materialized_dataset": bool(keep_materialized_dataset.isChecked()),
+        "export_labels_before_training": bool(export_labels_before_training.isChecked()),
     }
     if selected_cases:
         result["sample_mode"] = "all"
@@ -1471,10 +1478,11 @@ def _train_model(advanced=False):
         dinov3_root,
         "--python",
         python_exe,
-        "--export-labels",
         "--run-id",
         run_id,
     ]
+    if bool(options.get("export_labels_before_training", True)):
+        cmd.append("--export-labels")
     _append_training_args(cmd, config, options)
     mimics_exe = _find_mimics_exe()
     if mimics_exe:
@@ -1535,40 +1543,9 @@ def _train_model(advanced=False):
     return 0
 
 
-def _start_inference(choose_model=False):
-    organ = _selected_organ()
-    if not organ:
-        mimics.dialogs.message_box(
-            "Select one Mask whose name is the organ/model to use, then run this entry again.",
-            title=TITLE,
-            ui_blocking=False,
-        )
-        return 1
-    ts_root = _choose_dataset_root("Select dataset folder")
-    if not ts_root or not os.path.isdir(ts_root):
-        mimics.dialogs.message_box("No valid dataset folder was selected.", title=TITLE, ui_blocking=False)
-        return 1
-    if not _guard_no_active_job(ts_root):
-        return 1
-    case_id = _infer_case_id(ts_root)
-    if not case_id:
-        mimics.dialogs.message_box(
-            "Could not infer the current case.\n\nOpen a saved project from:\n{0}".format(
-                os.path.join(_resolve_mimics_output_dir(ts_root), "<case>.mcs")
-            ),
-            title=TITLE,
-            ui_blocking=False,
-        )
-        return 1
-
-    config = _config()
+def _launch_inference_job(config, ts_root, case_id, organ, selected_model=None):
     dinov3_root = _dinov3_root(config)
     python_exe = _fewshot_python(config, dinov3_root)
-    selected_model = None
-    if choose_model:
-        selected_model = _choose_model_manifest(ts_root, organ)
-        if selected_model is None:
-            return 0
     job_id = "infer_{0}_{1}_{2}".format(_safe_slug(case_id), _safe_slug(organ), uuid.uuid4().hex[:8])
     cmd = [
         python_exe,
@@ -1646,6 +1623,153 @@ def _start_inference(choose_model=False):
         ),
     )
     return 0
+
+
+def _launch_external_model_chooser(config, ts_root, case_id, organ):
+    candidates = _model_candidates(ts_root, organ)
+    if not candidates:
+        mimics.dialogs.message_box(
+            "No trained model was found for organ: {0}".format(organ),
+            title=TITLE,
+            ui_blocking=False,
+        )
+        return 1
+    if len(candidates) == 1:
+        return _launch_inference_job(config, ts_root, case_id, organ, candidates[0])
+
+    script = _model_chooser_script()
+    if not os.path.isfile(script):
+        raise RuntimeError("External model chooser was not found: {0}".format(script))
+    dinov3_root = _dinov3_root(config)
+    python_exe = _fewshot_python(config, dinov3_root)
+    choice_id = "choose_model_{0}_{1}_{2}".format(_safe_slug(case_id), _safe_slug(organ), uuid.uuid4().hex[:8])
+    workspace = _workspace(ts_root)
+    jobs_dir = os.path.join(workspace, "jobs")
+    if not os.path.isdir(jobs_dir):
+        os.makedirs(jobs_dir)
+    status_path = _status_path(ts_root, choice_id)
+    context_path = os.path.join(jobs_dir, choice_id + "_context.json")
+    status = {
+        "schema_version": "mimics_fewshot_job.v1",
+        "job_id": choice_id,
+        "kind": "model_choice",
+        "status": "selecting_model",
+        "organ": organ,
+        "case_id": case_id,
+        "ts_root": os.path.abspath(ts_root),
+        "workspace": workspace,
+        "created_at_epoch": time.time(),
+        "updated_at_epoch": time.time(),
+    }
+    context = {
+        "schema_version": "mimics_fewshot_model_choice_context.v1",
+        "status_path": status_path,
+        "ts_root": os.path.abspath(ts_root),
+        "workspace": workspace,
+        "organ": organ,
+        "case_id": case_id,
+        "candidates": candidates,
+        "created_at_epoch": time.time(),
+    }
+    _write_json_atomic(status_path, status)
+    _write_json_atomic(context_path, context)
+    try:
+        process = _launch_gui_process([python_exe, script, "--context", context_path], cwd=_project_root())
+    except Exception as exc:
+        status["status"] = "failed"
+        status["error"] = "Could not start the external model chooser. Python: {0}. Script: {1}. Error: {2}".format(
+            python_exe,
+            script,
+            exc,
+        )
+        status["updated_at_epoch"] = time.time()
+        _write_json_atomic(status_path, status)
+        raise RuntimeError(status["error"])
+    current = _read_json(status_path, status) or status
+    current["controller_pid"] = process.pid
+    current["context_path"] = context_path
+    current["updated_at_epoch"] = time.time()
+    _write_json_atomic(status_path, current)
+    for _ in range(8):
+        if process.poll() is not None:
+            break
+        time.sleep(0.1)
+    if process.poll() is not None:
+        failed = _read_json(status_path, current) or current
+        if failed.get("status") not in ("selected", "cancelled"):
+            failed["status"] = "failed"
+            failed["error"] = "The external model chooser exited immediately."
+            failed["updated_at_epoch"] = time.time()
+            _write_json_atomic(status_path, failed)
+            mimics.dialogs.message_box(
+                "Could not open the external DINOv3 model chooser.\n\n{0}".format(failed.get("error", "")),
+                title=TITLE,
+                ui_blocking=False,
+            )
+            return 1
+    _start_monitor(
+        {
+            "monitor_key": choice_id,
+            "kind": "model_choice",
+            "status_path": status_path,
+            "ts_root": ts_root,
+            "case_id": case_id,
+            "organ": organ,
+            "deadline": time.time() + float(config.get("model_choice_timeout_seconds", 30 * 60)),
+            "last_line": "",
+        },
+        poll_seconds=float(config.get("training_monitor_poll_seconds", 5.0)),
+    )
+    _mimics_log(
+        logging.INFO,
+        "DINOv3 model chooser opened in an external PySide6 process. Organ: {0}, case: {1}, PID: {2}.".format(
+            organ,
+            case_id,
+            process.pid,
+        ),
+    )
+    return 0
+
+
+def _start_inference(choose_model=False):
+    organ = _selected_organ()
+    if not organ:
+        mimics.dialogs.message_box(
+            "Select one Mask whose name is the organ/model to use, then run this entry again.",
+            title=TITLE,
+            ui_blocking=False,
+        )
+        return 1
+    ts_root = _choose_dataset_root("Select dataset folder")
+    if not ts_root or not os.path.isdir(ts_root):
+        mimics.dialogs.message_box("No valid dataset folder was selected.", title=TITLE, ui_blocking=False)
+        return 1
+    if not _guard_no_active_job(ts_root):
+        return 1
+    case_id = _infer_case_id(ts_root)
+    if not case_id:
+        mimics.dialogs.message_box(
+            "Could not infer the current case.\n\nOpen a saved project from:\n{0}".format(
+                os.path.join(_resolve_mimics_output_dir(ts_root), "<case>.mcs")
+            ),
+            title=TITLE,
+            ui_blocking=False,
+        )
+        return 1
+
+    config = _config()
+    if choose_model:
+        try:
+            return _launch_external_model_chooser(config, ts_root, case_id, organ)
+        except Exception as exc:
+            _mimics_log(logging.ERROR, "DINOv3 external model chooser could not start: {0}".format(exc))
+            mimics.dialogs.message_box(
+                "Could not open the external DINOv3 model chooser.\n\n{0}".format(exc),
+                title=TITLE,
+                ui_blocking=False,
+            )
+            return 1
+    return _launch_inference_job(config, ts_root, case_id, organ, None)
 
 
 def _launch_bridge_mask_to_buffer(monitor, status):
@@ -1843,6 +1967,52 @@ def _monitor_setup_tick(monitor, status):
         return
 
 
+def _monitor_model_choice_tick(monitor, status):
+    key = monitor.get("monitor_key")
+    state = status.get("status")
+    if state == "selected":
+        selected_model = status.get("selected_model")
+        _stop_monitor(key)
+        if not selected_model:
+            mimics.dialogs.message_box(
+                "DINOv3 model chooser did not return a model.",
+                title=TITLE,
+                ui_blocking=False,
+            )
+            return
+        config = _config()
+        _launch_inference_job(
+            config,
+            monitor.get("ts_root"),
+            monitor.get("case_id"),
+            monitor.get("organ"),
+            selected_model,
+        )
+        return
+    if state in ("cancelled", "closed"):
+        _stop_monitor(key)
+        _mimics_log(logging.INFO, "DINOv3 model selection cancelled.")
+        return
+    if state == "failed":
+        _stop_monitor(key)
+        mimics.dialogs.message_box(
+            "DINOv3 model chooser failed.\n\n{0}".format(status.get("error", "Unknown error")),
+            title=TITLE,
+            ui_blocking=False,
+        )
+        return
+    pid = status.get("controller_pid") or monitor.get("controller_pid")
+    if pid and state in ("selecting_model", "configuring") and not _process_exists(pid):
+        status["status"] = "closed"
+        status["updated_at_epoch"] = time.time()
+        try:
+            _write_json_atomic(monitor["status_path"], status)
+        except Exception:
+            pass
+        _stop_monitor(key)
+        _mimics_log(logging.INFO, "DINOv3 model chooser closed before selecting a model.")
+
+
 def _monitor_tick(monitor):
     key = monitor.get("monitor_key")
     if time.time() > monitor.get("deadline", 0):
@@ -1851,12 +2021,17 @@ def _monitor_tick(monitor):
             mimics.dialogs.message_box("Few-shot training monitor timed out. The background job may still be running; use Show Status.", title=TITLE, ui_blocking=False)
         elif monitor.get("kind") == "train_setup":
             mimics.dialogs.message_box("Few-shot advanced setup monitor timed out. The setup window or background job may still be running; use Show Status.", title=TITLE, ui_blocking=False)
+        elif monitor.get("kind") == "model_choice":
+            mimics.dialogs.message_box("Few-shot model selection timed out. Open Predict Current Case (Choose Model) again if needed.", title=TITLE, ui_blocking=False)
         else:
             mimics.dialogs.message_box("Few-shot inference timed out.", title=TITLE, ui_blocking=False)
         return
     status = _read_json(monitor["status_path"], {}) or {}
     if monitor.get("kind") == "train_setup":
         _monitor_setup_tick(monitor, status)
+        return
+    if monitor.get("kind") == "model_choice":
+        _monitor_model_choice_tick(monitor, status)
         return
     if monitor.get("kind") == "train":
         line = _format_job_line(status)
@@ -2046,7 +2221,7 @@ def _format_job_line(job):
         extra += " | " + _resource_wait_text(job)
     return "{0} | {1} | {2} | {3}{4}".format(
         job.get("job_id", "?"),
-        job.get("kind", "?"),
+        _display_kind(job.get("kind", "?")),
         job.get("organ", "?"),
         _display_status(job.get("status", "?")),
         extra,
@@ -2164,97 +2339,6 @@ def _model_candidates(ts_root, organ):
         })
     candidates.sort(key=lambda item: float(item.get("created_at_epoch", 0.0) or 0.0), reverse=True)
     return candidates
-
-
-def _choose_model_manifest(ts_root, organ):
-    candidates = _model_candidates(ts_root, organ)
-    if not candidates:
-        mimics.dialogs.message_box(
-            "No trained model was found for organ: {0}".format(organ),
-            title=TITLE,
-            ui_blocking=False,
-        )
-        return None
-    if len(candidates) == 1:
-        return candidates[0]
-    if not _ensure_pyqt5():
-        lines = ["Select a model for organ: {0}".format(organ), ""]
-        buttons = []
-        for index, candidate in enumerate(candidates[:6], 1):
-            created = candidate.get("created_at_epoch", 0.0)
-            try:
-                created_text = time.strftime("%Y-%m-%d %H:%M", time.localtime(float(created)))
-            except Exception:
-                created_text = "unknown time"
-            best = candidate.get("manifest", {}).get("best_dsc")
-            best_text = ""
-            if best is not None:
-                try:
-                    best_text = ", best Dice {0:.4f}".format(float(best))
-                except Exception:
-                    best_text = ", best Dice {0}".format(best)
-            lines.append(
-                "{0}. {1} | samples {2}{3} | {4}".format(
-                    index,
-                    candidate.get("model_id", "?"),
-                    candidate.get("sample_count", "?"),
-                    best_text,
-                    created_text,
-                )
-            )
-            buttons.append("Use {0}".format(index))
-        buttons.append(BUTTON_CANCEL)
-        answer = mimics.dialogs.question_box(
-            message="\n".join(lines),
-            buttons=";".join(buttons),
-            title="Select DINOv3 Model",
-            ui_blocking=True,
-        )
-        if not answer or answer == BUTTON_CANCEL:
-            return None
-        if answer.startswith("Use "):
-            try:
-                idx = int(answer.split(" ", 1)[1]) - 1
-                return candidates[idx]
-            except Exception:
-                return None
-        return None
-    try:
-        from PyQt5.QtWidgets import QDialog, QDialogButtonBox, QLabel, QListWidget, QListWidgetItem, QVBoxLayout
-    except ImportError:
-        return candidates[0]
-
-    dialog = QDialog()
-    dialog.setWindowTitle("Select DINOv3 Model")
-    dialog.resize(760, 420)
-    layout = QVBoxLayout(dialog)
-    layout.addWidget(QLabel("Select a model for organ: {0}".format(organ)))
-    list_widget = QListWidget()
-    for candidate in candidates:
-        created = candidate.get("created_at_epoch", 0.0)
-        try:
-            created_text = time.strftime("%Y-%m-%d %H:%M", time.localtime(float(created)))
-        except Exception:
-            created_text = "unknown time"
-        label = "{0} | {1} | samples {2} | {3}".format(
-            candidate.get("scope", "?"),
-            candidate.get("model_id", "?"),
-            candidate.get("sample_count", "?"),
-            created_text,
-        )
-        item = QListWidgetItem(label)
-        item.setData(32, candidate)
-        list_widget.addItem(item)
-    list_widget.setCurrentRow(0)
-    layout.addWidget(list_widget)
-    buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-    layout.addWidget(buttons)
-    buttons.accepted.connect(dialog.accept)
-    buttons.rejected.connect(dialog.reject)
-    if dialog.exec_() != QDialog.Accepted:
-        return None
-    item = list_widget.currentItem()
-    return item.data(32) if item is not None else None
 
 
 def _launch_external_status_viewer(config, ts_root):

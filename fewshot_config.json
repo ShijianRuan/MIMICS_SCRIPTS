@@ -9,6 +9,7 @@
   "default_img_size": "224,224",
   "default_keep_last_checkpoints": 2,
   "default_keep_materialized_dataset": false,
+  "default_export_labels_before_training": true,
   "default_lora_alpha": 16,
   "default_lora_rank": 8,
   "default_lr": 0.001,
@@ -29,7 +30,7 @@
   "status_ui_mode": "external",
   "gpu_lock_timeout_seconds": 900,
   "inference_gpu_lock_timeout_seconds": 3600,
-  "background_mimics_lock_timeout_seconds": 21600,
+  "background_mimics_lock_timeout_seconds": 1800,
   "dinov3_project": "external/dinov3-medical-seg",
   "python": "",
   "training_profiles": {
