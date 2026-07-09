@@ -1051,7 +1051,7 @@ def write_training_config(
         "    size: " + yaml_scalar([int(part.strip()) for part in str(args.sub_volume_size).split(",")]),
         "",
     ]
-    if status_path or cancel_path:
+    if status_path or cancel_path or metrics_history_path:
         lines.extend([
             "runtime:",
             "  status_path: " + yaml_scalar(str(status_path or "")),

@@ -2460,6 +2460,21 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn("metrics_history_path:", text)
         self.assertIn(metrics_history.replace("\\", "/"), text)
 
+        history_only_config = os.path.join(self.tmp, "generated_config_history_only.yaml")
+        pipeline.write_training_config(
+            history_only_config,
+            os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg", "config", "synthstrip_lora_segformer3d.yaml"),
+            os.path.join(self.tmp, "dataset"),
+            "exp_test",
+            Args(),
+            metrics_history_path=metrics_history,
+            validation_enabled=True,
+        )
+        with open(history_only_config, "r", encoding="utf-8") as handle:
+            history_only_text = handle.read()
+        self.assertIn("runtime:", history_only_text)
+        self.assertIn("metrics_history_path:", history_only_text)
+
     def test_fewshot_external_setup_formats_progress(self):
         """External setup UI exposes epoch/loss/Dice in user-visible status text."""
         ui = __import__("tools.fewshot_training_setup_ui", fromlist=["dummy"])
