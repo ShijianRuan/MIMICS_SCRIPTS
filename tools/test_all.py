@@ -686,6 +686,46 @@ class TestMimicsBridgeBufferMapping(unittest.TestCase):
         self.assertEqual(0, int(exported[0, 0, 0]))
         self.assertEqual(1, int(exported[1, 0, 0]))
 
+    def test_convert_can_write_to_job_scoped_segmentations(self):
+        from mimics_bridge import do_convert
+        import nibabel as nib
+
+        case_dir = os.path.join(self.tmp, "case_staged_export")
+        buffers_dir = os.path.join(self.tmp, "buffers_staged_export")
+        staged_dir = os.path.join(self.tmp, "fresh_labels", "case_staged_export", "segmentations")
+        os.makedirs(case_dir)
+        os.makedirs(buffers_dir)
+
+        data = np.zeros((2, 2, 1), dtype=np.uint8)
+        data[1, 1, 0] = 1
+        with open(os.path.join(buffers_dir, "organ.u8"), "wb") as handle:
+            handle.write(data.tobytes())
+        manifest_path = os.path.join(buffers_dir, "manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as handle:
+            json.dump({
+                "mimics_shape": [2, 2, 1],
+                "mimics_voxel_to_ras_matrix": np.eye(4).tolist(),
+                "masks": [{
+                    "original_name": "organ",
+                    "safe_name": "organ",
+                    "u8_filename": "organ.u8",
+                }],
+            }, handle)
+
+        result = do_convert({
+            "buffers_dir": buffers_dir,
+            "manifest_path": manifest_path,
+            "case_dir": case_dir,
+            "output_seg_dir": staged_dir,
+            "axes": [0, 1, 2],
+            "flips": [False, False, False],
+        })
+        self.assertEqual("ok", result["status"])
+        self.assertEqual(os.path.abspath(staged_dir), result["output_seg_dir"])
+        self.assertFalse(os.path.exists(os.path.join(case_dir, "segmentations", "organ.nii.gz")))
+        out = nib.load(os.path.join(staged_dir, "organ.nii.gz"))
+        np.testing.assert_array_equal(data, np.asanyarray(out.dataobj).astype(np.uint8))
+
     def test_resample_image_to_grid_matches_target_shape(self):
         from mimics_bridge import resample_image_to_grid
         import nibabel as nib
@@ -734,6 +774,25 @@ class TestMimicsBridgeBufferMapping(unittest.TestCase):
         out = nib.load(rows[0]["dataset_image"])
         self.assertEqual((3, 2, 2), out.shape)
         np.testing.assert_allclose(label_affine, out.affine, atol=1e-6)
+        validation = pipeline.validate_materialized_dataset(rows)
+        self.assertEqual(1, validation["checked_pairs"])
+        self.assertEqual([], validation["issues"])
+
+    def test_fewshot_dataset_validation_rejects_empty_label(self):
+        pipeline = __import__("tools.fewshot_pipeline", fromlist=["dummy"])
+        import nibabel as nib
+
+        image_path = os.path.join(self.tmp, "image_empty_check.nii.gz")
+        label_path = os.path.join(self.tmp, "label_empty_check.nii.gz")
+        nib.save(nib.Nifti1Image(np.ones((2, 2, 1), dtype=np.int16), np.eye(4)), image_path)
+        nib.save(nib.Nifti1Image(np.zeros((2, 2, 1), dtype=np.uint8), np.eye(4)), label_path)
+        rows = [{
+            "case_id": "s_empty",
+            "dataset_image": image_path,
+            "dataset_label": label_path,
+        }]
+        with self.assertRaises(RuntimeError):
+            pipeline.validate_materialized_dataset(rows)
 
     def test_fewshot_resolves_configured_mimics_output_dir(self):
         pipeline = __import__("tools.fewshot_pipeline", fromlist=["dummy"])
@@ -775,6 +834,46 @@ class TestMimicsBridgeBufferMapping(unittest.TestCase):
         self.assertEqual([], samples)
         self.assertEqual(1, len(skipped))
         self.assertIn("could not be read", skipped[0]["reason"])
+
+    def test_fewshot_discover_uses_fresh_label_root_without_stale_fallback(self):
+        pipeline = __import__("tools.fewshot_pipeline", fromlist=["dummy"])
+        import nibabel as nib
+
+        ts_root = Path(self.tmp) / "ts_fresh_labels"
+        case_dir = ts_root / "s0001"
+        stale_seg_dir = case_dir / "segmentations"
+        fresh_seg_dir = Path(self.tmp) / "fresh_labels" / "s0001" / "segmentations"
+        stale_seg_dir.mkdir(parents=True)
+        fresh_seg_dir.mkdir(parents=True)
+        nib.save(nib.Nifti1Image(np.zeros((2, 2, 1), dtype=np.int16), np.eye(4)), str(case_dir / "ct.nii.gz"))
+        stale = np.zeros((2, 2, 1), dtype=np.uint8)
+        stale[0, 0, 0] = 1
+        fresh = np.zeros((2, 2, 1), dtype=np.uint8)
+        fresh[1, 1, 0] = 1
+        nib.save(nib.Nifti1Image(stale, np.eye(4)), str(stale_seg_dir / "liver.nii.gz"))
+        nib.save(nib.Nifti1Image(fresh, np.eye(4)), str(fresh_seg_dir / "liver.nii.gz"))
+
+        samples, skipped = pipeline.discover_samples(
+            ts_root,
+            "liver",
+            label_root=fresh_seg_dir.parent.parent,
+            fallback_to_case_labels=False,
+        )
+        self.assertEqual([], skipped)
+        self.assertEqual(1, len(samples))
+        self.assertEqual(str(fresh_seg_dir / "liver.nii.gz"), samples[0]["label"])
+        self.assertEqual("fresh_export", samples[0]["label_source"])
+
+        (fresh_seg_dir / "liver.nii.gz").unlink()
+        samples, skipped = pipeline.discover_samples(
+            ts_root,
+            "liver",
+            label_root=fresh_seg_dir.parent.parent,
+            fallback_to_case_labels=False,
+        )
+        self.assertEqual([], samples)
+        self.assertEqual(1, len(skipped))
+        self.assertFalse(skipped[0]["has_label"])
 
     def test_fewshot_stale_model_manifest_fails_before_inference(self):
         pipeline = __import__("tools.fewshot_pipeline", fromlist=["dummy"])
@@ -1306,6 +1405,29 @@ class TestStopBackgroundServices(unittest.TestCase):
         # Without valid lock files, it returns empty. Test that it doesn't crash.
         result = _request_queue_stop()
         self.assertIsInstance(result, list)
+
+    def test_stop_import_entry_is_narrower_than_stop_all(self):
+        import mimics_stop_background as msb
+
+        self.assertTrue(msb._lock_is_import_creation({
+            "kind": "create_mcs",
+            "owner": "import .mcs creation",
+        }))
+        self.assertFalse(msb._lock_is_import_creation({
+            "kind": "fewshot_label_export",
+            "owner": "DINOv3 label export",
+        }))
+        self.assertFalse(msb._lock_is_import_creation({
+            "kind": "fewshot_train",
+            "owner": "DINOv3 training",
+        }))
+        entry = os.path.join(
+            PROJECT_ROOT,
+            "scripting_library",
+            "01_Data",
+            "03_Stop_Background_Import.py",
+        )
+        self.assertTrue(os.path.isfile(entry))
 
 
 # ============================================================================
@@ -2799,6 +2921,7 @@ class TestNewFeatures(unittest.TestCase):
                 5.0,
                 status_path=status_path,
                 cancel_path=None,
+                label_staging_dir=workspace / "runs" / "train_unique" / "fresh_labels",
             )
         finally:
             pipeline.find_mimics_exe = old_find
@@ -2814,6 +2937,11 @@ class TestNewFeatures(unittest.TestCase):
         config_path = workspace / "_export" / "train_unique_export_config.json"
         config = json.loads(config_path.read_text(encoding="utf-8"))
         self.assertEqual(str(configured_mcs), config["output_dir"])
+        self.assertEqual(
+            str(workspace / "runs" / "train_unique" / "fresh_labels"),
+            config["label_staging_dir"],
+        )
+        self.assertEqual(config["label_staging_dir"], result["label_staging_dir"])
         self.assertFalse((ts_root / "mcs_output" / "_run_export_batch.py").exists())
         self.assertFalse((ts_root / "mcs_output" / "_fewshot_export_mimics.log").exists())
 

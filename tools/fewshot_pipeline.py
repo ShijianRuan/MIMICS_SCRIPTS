@@ -796,8 +796,8 @@ def find_image(case_dir):
     return None
 
 
-def find_label(case_dir, organ):
-    seg_dir = Path(case_dir) / "segmentations"
+def _find_label_in_seg_dir(seg_dir, organ):
+    seg_dir = Path(seg_dir)
     if not seg_dir.is_dir():
         return None
     names = [
@@ -818,6 +818,29 @@ def find_label(case_dir, organ):
     return None
 
 
+def find_label(case_dir, organ, label_root=None, fallback_to_case_labels=True):
+    case_dir = Path(case_dir)
+    search_dirs = []
+    if label_root:
+        root = Path(label_root)
+        search_dirs.extend([
+            root / case_dir.name / "segmentations",
+            root / case_dir.name,
+        ])
+    if fallback_to_case_labels:
+        search_dirs.append(case_dir / "segmentations")
+    seen = set()
+    for seg_dir in search_dirs:
+        resolved = str(Path(seg_dir))
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        label = _find_label_in_seg_dir(seg_dir, organ)
+        if label:
+            return label
+    return None
+
+
 def _label_skip_reason(label_path):
     """Return a skip reason for unusable labels, otherwise an empty string."""
     try:
@@ -834,12 +857,17 @@ def _label_skip_reason(label_path):
         return "label could not be read: {}".format(exc)
 
 
-def discover_samples(ts_root, organ, cases=None):
+def discover_samples(ts_root, organ, cases=None, label_root=None, fallback_to_case_labels=True):
     samples = []
     skipped = []
     for case_dir in case_dirs(ts_root, cases):
         image = find_image(case_dir)
-        label = find_label(case_dir, organ)
+        label = find_label(
+            case_dir,
+            organ,
+            label_root=label_root,
+            fallback_to_case_labels=fallback_to_case_labels,
+        )
         if image and label:
             label_skip_reason = _label_skip_reason(label)
             if label_skip_reason:
@@ -855,6 +883,8 @@ def discover_samples(ts_root, organ, cases=None):
                 "case_dir": str(case_dir),
                 "image": str(image),
                 "label": str(label),
+                "label_root": str(label_root) if label_root else "",
+                "label_source": "fresh_export" if label_root else "case_segmentations",
                 "label_mtime": float(label.stat().st_mtime),
             })
         else:
@@ -960,6 +990,8 @@ def _materialize_split(samples, image_dir, label_dir, split_name):
         row = dict(sample)
         row.update({
             "split": split_name,
+            "source_image": str(image_src),
+            "source_label": str(label_src),
             "dataset_image": str(image_dst),
             "dataset_label": str(label_dst),
             "image_materialization": image_method,
@@ -1026,6 +1058,54 @@ def materialize_dataset(train_samples, dataset_dir, val_samples=None):
         "validation",
     )
     return train_rows, val_rows
+
+
+def validate_materialized_dataset(rows):
+    """Validate image/label pairs that will be passed to DINOv3 training."""
+    import nibabel as nib
+    import numpy as np
+    from mimics_bridge import _affine_close
+
+    issues = []
+    checked = []
+    for row in rows or []:
+        case_id = row.get("case_id", "")
+        image_path = row.get("dataset_image")
+        label_path = row.get("dataset_label")
+        try:
+            image_img = nib.load(str(image_path))
+            label_img = nib.load(str(label_path))
+            image_shape = tuple(int(value) for value in image_img.shape[:3])
+            label_shape = tuple(int(value) for value in label_img.shape[:3])
+            label_data = np.asanyarray(label_img.dataobj)
+            foreground_voxels = int(np.count_nonzero(label_data))
+            affine_close = bool(_affine_close(image_img.affine, label_img.affine))
+            affine_max_abs_diff = float(np.max(np.abs(image_img.affine - label_img.affine)))
+            row["dataset_validation"] = {
+                "image_shape": list(image_shape),
+                "label_shape": list(label_shape),
+                "affine_close": affine_close,
+                "affine_max_abs_diff": affine_max_abs_diff,
+                "foreground_voxels": foreground_voxels,
+            }
+            if image_shape != label_shape:
+                issues.append("{}: image shape {} != label shape {}".format(case_id, image_shape, label_shape))
+            if not affine_close:
+                issues.append("{}: image/label affine mismatch (max abs diff {:.6g})".format(
+                    case_id,
+                    affine_max_abs_diff,
+                ))
+            if foreground_voxels <= 0:
+                issues.append("{}: label is empty after materialization".format(case_id))
+            checked.append(row["dataset_validation"])
+        except Exception as exc:
+            issues.append("{}: could not validate materialized image/label pair: {}".format(case_id, exc))
+    if issues:
+        raise RuntimeError("few-shot dataset validation failed: " + "; ".join(issues[:10]))
+    return {
+        "checked_pairs": len(checked),
+        "issues": [],
+    }
 
 
 def yaml_scalar(value):
@@ -1132,6 +1212,7 @@ def launch_mimics_export(
     status_path=None,
     cancel_path=None,
     lock_timeout_seconds=None,
+    label_staging_dir=None,
 ):
     mimics_exe = find_mimics_exe(mimics_exe)
     if not mimics_exe:
@@ -1148,9 +1229,14 @@ def launch_mimics_export(
     ))
     export_root = Path(workspace) / "_export"
     export_root.mkdir(parents=True, exist_ok=True)
+    if label_staging_dir:
+        label_staging_dir = Path(label_staging_dir)
+        if label_staging_dir.exists():
+            rmtree_with_retry(label_staging_dir)
+        label_staging_dir.mkdir(parents=True, exist_ok=True)
     log_path = export_root / (export_job_id + "_mimics_export.log")
     config_path_write = export_root / (export_job_id + "_export_config.json")
-    write_json_atomic(config_path_write, {
+    export_config = {
         "ts_root": str(Path(ts_root).resolve()),
         "cases": sorted(cases) if cases else None,
         "axes": axes,
@@ -1158,7 +1244,10 @@ def launch_mimics_export(
         "export_space": "source_image",
         "output_dir": str(output_dir),
         "export_root": str(export_root),
-    })
+    }
+    if label_staging_dir:
+        export_config["label_staging_dir"] = str(label_staging_dir)
+    write_json_atomic(config_path_write, export_config)
     runner = export_root / (export_job_id + "_run_export_batch.py")
     write_text_atomic(
         runner,
@@ -1203,6 +1292,8 @@ def launch_mimics_export(
             if lock is not None:
                 lock.release()
             result = {"launched": True, "returncode": proc.returncode}
+            if label_staging_dir:
+                result["label_staging_dir"] = str(label_staging_dir)
             if actual_log_path is not None:
                 result["log"] = str(actual_log_path)
             else:
@@ -1212,6 +1303,8 @@ def launch_mimics_export(
             return result
         time.sleep(2.0)
     result = {"launched": True, "timed_out": True, "pid": proc.pid}
+    if label_staging_dir:
+        result["label_staging_dir"] = str(label_staging_dir)
     if actual_log_path is not None:
         result["log"] = str(actual_log_path)
     else:
@@ -1382,8 +1475,11 @@ def cmd_train(args):
     cases = set(parse_case_list(args.cases) or [])
     if not cases:
         cases = None
+    fresh_label_root = None
+    fresh_label_cleanup = {"enabled": False}
     if args.export_labels:
         update_status(status_path, {"status": "exporting_labels"})
+        fresh_label_root = run_dir / "fresh_labels"
         try:
             export_result = launch_mimics_export(
                 ts_root,
@@ -1394,6 +1490,7 @@ def cmd_train(args):
                 status_path=status_path,
                 cancel_path=cancel_path,
                 lock_timeout_seconds=args.background_mimics_lock_timeout_seconds,
+                label_staging_dir=fresh_label_root,
             )
         except ResourceLockCancelled:
             update_status(status_path, {"status": "cancelled", "error": "cancelled while waiting for background Mimics"})
@@ -1401,9 +1498,29 @@ def cmd_train(args):
         except ResourceLockTimeout as exc:
             update_status(status_path, {"status": "failed", "error": str(exc)})
             return 75
+        if not export_result.get("launched"):
+            update_status(status_path, {
+                "status": "failed",
+                "label_export": export_result,
+                "error": "fresh label export was requested but background Mimics export could not be started",
+            })
+            return 75
+        if export_result.get("timed_out") or int(export_result.get("returncode", 0) or 0) != 0:
+            update_status(status_path, {
+                "status": "failed",
+                "label_export": export_result,
+                "error": "fresh label export did not finish successfully; training was not started with stale labels",
+            })
+            return 75
         update_status(status_path, {"label_export": export_result})
 
-    samples, skipped = discover_samples(ts_root, args.organ, cases)
+    samples, skipped = discover_samples(
+        ts_root,
+        args.organ,
+        cases,
+        label_root=fresh_label_root,
+        fallback_to_case_labels=not bool(fresh_label_root),
+    )
     empty_labels = [s for s in skipped if s.get("reason") == "label is empty (all zeros)"]
     if empty_labels:
         append_log(
@@ -1443,6 +1560,20 @@ def cmd_train(args):
         min_val_samples=args.min_val_samples,
     )
     materialized_train, materialized_val = materialize_dataset(train_samples, dataset_dir, val_samples)
+    dataset_validation = validate_materialized_dataset(materialized_train + materialized_val)
+    if fresh_label_root:
+        fresh_label_cleanup = {
+            "enabled": True,
+            "path": str(fresh_label_root),
+            "cleaned": False,
+        }
+        try:
+            rmtree_with_retry(fresh_label_root)
+            fresh_label_cleanup["cleaned"] = True
+            fresh_label_cleanup["cleaned_at_epoch"] = time.time()
+        except Exception as exc:
+            fresh_label_cleanup["error"] = str(exc)
+            append_log(workspace, "Could not clean fresh label staging {}: {}".format(fresh_label_root, exc))
     validation_enabled = bool(materialized_val)
     write_training_config(
         config_path,
@@ -1462,6 +1593,8 @@ def cmd_train(args):
             "train_samples": materialized_train,
             "validation_samples": materialized_val,
             "skipped": skipped,
+            "dataset_validation": dataset_validation,
+            "fresh_label_cleanup": fresh_label_cleanup,
             "selection": {
                 "cases": sorted(cases) if cases else None,
                 "sample_mode": args.sample_mode,
@@ -1484,6 +1617,8 @@ def cmd_train(args):
         "training_status": str(train_status),
         "metrics_history": str(metrics_history),
         "cancel_path": str(cancel_path),
+        "dataset_validation": dataset_validation,
+        "fresh_label_cleanup": fresh_label_cleanup,
     })
 
     cmd = [python_exe, str(dinov3_root / "scripts" / "train.py"), "--config", str(config_path)]
@@ -1619,6 +1754,8 @@ def cmd_train(args):
         "validation_samples": materialized_val,
         "dataset_dir": str(dataset_dir),
         "dataset_retained": bool(args.keep_materialized_dataset),
+        "dataset_validation": dataset_validation,
+        "fresh_label_cleanup": fresh_label_cleanup,
         "training_progress": final_progress,
         "metrics_history": str(metrics_history),
         "training_parameters": {

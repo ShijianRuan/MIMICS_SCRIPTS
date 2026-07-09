@@ -906,7 +906,7 @@ def _pick_directory(title):
 
 # -- Single case export -------------------------------------------------
 
-def _export_masks_and_build_params(case_dir, axes, flips, work_dir):
+def _export_masks_and_build_params(case_dir, axes, flips, work_dir, output_seg_dir=None):
     """Export masks to .u8 buffers and build bridge params. Returns (bridge_params, manifest) or None."""
     print("Exporting masks to: {0}".format(case_dir))
 
@@ -934,6 +934,8 @@ def _export_masks_and_build_params(case_dir, axes, flips, work_dir):
         "flips": flips,
         "export_space": "source_image",
     }
+    if output_seg_dir:
+        bridge_params["output_seg_dir"] = output_seg_dir
     if manifest.get("mimics_voxel_to_ras_matrix"):
         bridge_params["mimics_voxel_to_ras_matrix"] = manifest.get("mimics_voxel_to_ras_matrix")
     return (bridge_params, manifest)
@@ -1024,6 +1026,7 @@ def run_background_batch_export(config_path):
     # Logs and failed-records go into the dedicated export_root (under workspace),
     # not under mcs_output where .mcs files live.
     export_root = config.get("export_root") or output_dir
+    label_staging_dir = config.get("label_staging_dir") or ""
     cases_filter = config.get("cases")
     cases_filter = set(cases_filter) if cases_filter else None
     axes = config.get("axes") or [0, 1, 2]
@@ -1073,7 +1076,16 @@ def run_background_batch_export(config_path):
             try:
                 _append_export_log(export_root, "[{0}/{1}] Exporting: {2}".format(index + 1, total, case_id))
                 mimics.file.open_project(mcs_path)
-                built = _export_masks_and_build_params(case_dir, axes, flips, work_dir)
+                output_seg_dir = None
+                if label_staging_dir:
+                    output_seg_dir = os.path.join(label_staging_dir, case_id, "segmentations")
+                built = _export_masks_and_build_params(
+                    case_dir,
+                    axes,
+                    flips,
+                    work_dir,
+                    output_seg_dir=output_seg_dir,
+                )
                 try:
                     mimics.file.close_project()
                 except Exception:

@@ -1194,8 +1194,11 @@ def do_convert(params: dict) -> dict:
         export_affine_source = mimics_affine_source
         export_space = "mimics_grid"
 
-    # Create segmentations dir
-    seg_dir = os.path.join(case_dir, "segmentations")
+    # Create segmentations dir. Normal user exports keep the historical
+    # case_dir/segmentations destination; few-shot training may pass a
+    # job-scoped destination so refreshed labels do not overwrite source data.
+    seg_dir = params.get("output_seg_dir") or os.path.join(case_dir, "segmentations")
+    seg_dir = os.path.abspath(seg_dir)
     os.makedirs(seg_dir, exist_ok=True)
 
     # Convert each mask
@@ -1274,6 +1277,7 @@ def do_convert(params: dict) -> dict:
         "mimics_voxel_to_ras_matrix": mimics_affine.tolist(),
         "export_voxel_to_ras_matrix_source": export_affine_source,
         "export_voxel_to_ras_matrix": export_affine.tolist(),
+        "output_seg_dir": seg_dir,
     }
 
 

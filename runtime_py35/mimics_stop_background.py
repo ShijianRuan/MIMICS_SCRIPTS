@@ -182,13 +182,13 @@ def _queue_dirs_from_runtime_state():
     return unique
 
 
-def _request_queue_stop():
+def _request_queue_stop(reason="Stop Background Services"):
     """Write stop markers to every discovered queue directory."""
     stopped = []
     payload = {
         "status": "stop_requested",
         "requested_at_epoch": time.time(),
-        "reason": "Stop Background Services",
+        "reason": reason,
     }
     for output_dir in _queue_dirs_from_runtime_state():
         if not os.path.isdir(output_dir):
@@ -206,6 +206,143 @@ def _request_queue_stop():
         except Exception:
             pass
     return stopped
+
+
+def _background_mimics_lock_path():
+    return os.path.join(runtime_common.resource_lock_dir(_project_root()), "background_mimics.lock")
+
+
+def _lock_is_import_creation(payload):
+    if not isinstance(payload, dict):
+        return False
+    owner = str(payload.get("owner") or "").lower()
+    kind = str(payload.get("kind") or "").lower()
+    return kind == "create_mcs" or "import .mcs creation" in owner
+
+
+def stop_background_import():
+    """Request only the import/.mcs creation queue to stop.
+
+    This is intentionally narrower than Stop_Background_Services: it writes
+    import queue stop markers and only targets the background Mimics process
+    whose resource lock says it is doing import .mcs creation.
+    """
+    stopped_queues = _request_queue_stop(reason="Stop Background Import")
+    lock_path = _background_mimics_lock_path()
+    lock_payload = runtime_common.read_json(lock_path, {}) or {}
+    target_pid = None
+    if _lock_is_import_creation(lock_payload):
+        try:
+            target_pid = int(lock_payload.get("pid") or 0)
+        except Exception:
+            target_pid = None
+    stop_log = os.path.join(_runtime_dir(), "stop_import_last.json")
+    report = {
+        "RequestedAt": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "QueueStopDirs": stopped_queues,
+        "TargetPid": target_pid,
+        "TargetKind": lock_payload.get("kind", ""),
+        "TargetOwner": lock_payload.get("owner", ""),
+        "LockPath": lock_path,
+        "Killed": [],
+        "Message": "",
+    }
+    if not target_pid:
+        report["Message"] = (
+            "Import stop markers were written. No active background Mimics import process was found."
+        )
+        try:
+            runtime_common.write_json_atomic(stop_log, report)
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "stop_log": stop_log,
+            "stopped_queues": stopped_queues,
+            "target_pid": None,
+            "launched": False,
+        }
+
+    if os.name != "nt":
+        report["Message"] = (
+            "Import stop markers were written. Process termination is only implemented for Windows Mimics workstations."
+        )
+        try:
+            runtime_common.write_json_atomic(stop_log, report)
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "stop_log": stop_log,
+            "stopped_queues": stopped_queues,
+            "target_pid": target_pid,
+            "launched": False,
+        }
+
+    command = (
+        "$pidToStop={0};"
+        "$lock='{1}';"
+        "$out='{2}';"
+        "$markers=@('_run_create_mcs.py','create_mcs_batch.py');"
+        "$record = Get-CimInstance Win32_Process -Filter \"ProcessId=$pidToStop\";"
+        "$killed = @();"
+        "$matched = $false;"
+        "if ($record -and $record.CommandLine) {{"
+        "  $cmd = $record.CommandLine -replace '/', '\\';"
+        "  $matched = [bool]($markers | Where-Object {{ $cmd -like ('*' + $_ + '*') }} | Select-Object -First 1);"
+        "}};"
+        "if ($record -and $matched) {{"
+        "  taskkill /PID $pidToStop /T /F 2>$null 1>$null;"
+        "  $killed += [PSCustomObject]@{{"
+        "    ProcessId = $pidToStop;"
+        "    Name = $record.Name;"
+        "    ExitCode = $LASTEXITCODE;"
+        "    CommandLine = $record.CommandLine"
+        "  }};"
+        "  Start-Sleep -Milliseconds 500;"
+        "  Remove-Item -Path $lock -Force -ErrorAction SilentlyContinue;"
+        "}};"
+        "$message = if ($matched) {{ 'Background import stop was requested.' }} else {{ 'Import lock PID did not match an import command line; no process was killed.' }};"
+        "$report = [PSCustomObject]@{{"
+        "  RequestedAt = (Get-Date).ToString('s');"
+        "  QueueStopDirs = @({3});"
+        "  TargetPid = $pidToStop;"
+        "  CommandLineMatched = $matched;"
+        "  Killed = $killed;"
+        "  LockPath = $lock;"
+        "  Message = $message"
+        "}};"
+        "$report | ConvertTo-Json -Depth 5 -Compress | Set-Content -Path $out -Encoding UTF8"
+    ).format(
+        int(target_pid),
+        lock_path.replace("'", "''"),
+        stop_log.replace("'", "''"),
+        ",".join("'{}'".format(path.replace("'", "''")) for path in stopped_queues),
+    )
+    launched = False
+    try:
+        subprocess.Popen(
+            ["powershell", "-NoProfile", "-Command", command],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **_hidden_process_kwargs()
+        )
+        launched = True
+    except Exception as exc:
+        report["Message"] = "Could not launch PowerShell import stop command: {0}".format(exc)
+        try:
+            runtime_common.write_json_atomic(stop_log, report)
+        except Exception:
+            pass
+        _mimics_log(logging.WARNING, report["Message"])
+    return {
+        "ok": True,
+        "stop_log": stop_log,
+        "stopped_queues": stopped_queues,
+        "target_pid": target_pid,
+        "launched": launched,
+    }
 
 
 def _mimics_log(level, message):
@@ -732,6 +869,40 @@ def main():
                 if ok else
                 "Background cleanup is only implemented for Windows Mimics workstations."
             ),
+        )
+    return 0
+
+
+def main_stop_import():
+    result = stop_background_import()
+    target = result.get("target_pid") if isinstance(result, dict) else None
+    queues = result.get("stopped_queues", []) if isinstance(result, dict) else []
+    report = result.get("stop_log", "") if isinstance(result, dict) else ""
+    if target:
+        message = (
+            "Background import stop requested.\n"
+            "Target background Mimics PID: {0}\n"
+            "Queue stop marker dir(s): {1}\n"
+            "Report: {2}"
+        ).format(target, len(queues), report)
+    else:
+        message = (
+            "Background import stop markers were written.\n"
+            "No active background Mimics import process was found.\n"
+            "Queue stop marker dir(s): {0}\n"
+            "Report: {1}"
+        ).format(len(queues), report)
+    _mimics_log(logging.INFO, message)
+    try:
+        mimics.dialogs.message_box(
+            title="Stop Background Import",
+            message=message,
+            ui_blocking=False,
+        )
+    except TypeError:
+        mimics.dialogs.message_box(
+            title="Stop Background Import",
+            message=message,
         )
     return 0
 

@@ -309,12 +309,18 @@ if timeline:
 
 
 def make_ts_root(tmp: Path) -> Path:
+    import nibabel as nib
+    import numpy as np
+
     ts_root = tmp / "dataset"
     for idx in range(1, 4):
         case = ts_root / "s{:04d}".format(idx)
         (case / "segmentations").mkdir(parents=True, exist_ok=True)
-        (case / "ct.nii.gz").write_text("fake image {}".format(idx), encoding="utf-8")
-        (case / "segmentations" / "liver.nii.gz").write_text("fake label {}".format(idx), encoding="utf-8")
+        image = np.full((4, 4, 2), idx, dtype=np.int16)
+        label = np.zeros((4, 4, 2), dtype=np.uint8)
+        label[1:3, 1:3, :] = 1
+        nib.save(nib.Nifti1Image(image, np.eye(4)), str(case / "ct.nii.gz"))
+        nib.save(nib.Nifti1Image(label, np.eye(4)), str(case / "segmentations" / "liver.nii.gz"))
     return ts_root
 
 
