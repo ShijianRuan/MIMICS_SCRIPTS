@@ -889,6 +889,95 @@ class TestMimicsBridgeBufferMapping(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             pipeline.load_model_manifest(workspace, "liver")
 
+    def test_fewshot_corrupt_checkpoint_fails_inference_preflight_status(self):
+        pipeline = __import__("tools.fewshot_pipeline", fromlist=["dummy"])
+        import nibabel as nib
+
+        ts_root = Path(self.tmp) / "ts_corrupt_model"
+        case_dir = ts_root / "s0001"
+        case_dir.mkdir(parents=True)
+        nib.save(nib.Nifti1Image(np.zeros((2, 2, 1), dtype=np.int16), np.eye(4)), str(case_dir / "ct.nii.gz"))
+        workspace = ts_root / "fewshot_models"
+        model_dir = workspace / "models" / "liver" / "train_bad"
+        model_dir.mkdir(parents=True)
+        checkpoint = model_dir / "model.pth"
+        checkpoint.write_text("not a torch checkpoint", encoding="utf-8")
+        config_path = model_dir / "config.yaml"
+        config_path.write_text("model: {}\n", encoding="utf-8")
+        (workspace / "models" / "liver").mkdir(parents=True, exist_ok=True)
+        (workspace / "models" / "liver" / "latest.json").write_text(json.dumps({
+            "model_id": "train_bad",
+            "organ": "liver",
+            "organ_slug": "liver",
+            "checkpoint": str(checkpoint),
+            "config": str(config_path),
+        }), encoding="utf-8")
+
+        args = type("Args", (object,), {})()
+        args.ts_root = str(ts_root)
+        args.case_id = "s0001"
+        args.organ = "liver"
+        args.workspace = None
+        args.dinov3_root = str(Path(PROJECT_ROOT) / "external" / "dinov3-medical-seg")
+        args.python = sys.executable
+        args.model_id = "latest"
+        args.model_manifest = None
+        args.expected_source_shape = None
+        args.expected_source_voxel_to_ras_matrix = None
+        args.gpu_lock_timeout_seconds = 0
+        args.job_id = "infer_corrupt"
+
+        result = pipeline.cmd_infer(args)
+        self.assertEqual(1, result)
+        status = json.loads((workspace / "jobs" / "infer_corrupt.json").read_text(encoding="utf-8"))
+        self.assertEqual("failed", status["status"])
+        self.assertIn("torch checkpoint", status["error"])
+
+    def test_fewshot_inference_source_geometry_mismatch_fails_preflight(self):
+        pipeline = __import__("tools.fewshot_pipeline", fromlist=["dummy"])
+        import nibabel as nib
+
+        ts_root = Path(self.tmp) / "ts_geometry_mismatch"
+        case_dir = ts_root / "s0001"
+        case_dir.mkdir(parents=True)
+        nib.save(nib.Nifti1Image(np.zeros((2, 2, 1), dtype=np.int16), np.eye(4)), str(case_dir / "ct.nii.gz"))
+        workspace = ts_root / "fewshot_models"
+        model_dir = workspace / "models" / "liver" / "train_ok"
+        model_dir.mkdir(parents=True)
+        checkpoint = model_dir / "model.pth"
+        checkpoint.write_bytes(b"PK\x03\x04")
+        config_path = model_dir / "config.yaml"
+        config_path.write_text("model: {}\n", encoding="utf-8")
+        latest = workspace / "models" / "liver" / "latest.json"
+        latest.parent.mkdir(parents=True, exist_ok=True)
+        latest.write_text(json.dumps({
+            "model_id": "train_ok",
+            "organ": "liver",
+            "organ_slug": "liver",
+            "checkpoint": str(checkpoint),
+            "config": str(config_path),
+        }), encoding="utf-8")
+
+        args = type("Args", (object,), {})()
+        args.ts_root = str(ts_root)
+        args.case_id = "s0001"
+        args.organ = "liver"
+        args.workspace = None
+        args.dinov3_root = str(Path(PROJECT_ROOT) / "external" / "dinov3-medical-seg")
+        args.python = sys.executable
+        args.model_id = "latest"
+        args.model_manifest = None
+        args.expected_source_shape = json.dumps([3, 2, 1])
+        args.expected_source_voxel_to_ras_matrix = json.dumps(np.eye(4).tolist())
+        args.gpu_lock_timeout_seconds = 0
+        args.job_id = "infer_geometry"
+
+        result = pipeline.cmd_infer(args)
+        self.assertEqual(1, result)
+        status = json.loads((workspace / "jobs" / "infer_geometry.json").read_text(encoding="utf-8"))
+        self.assertEqual("failed", status["status"])
+        self.assertIn("source image shape", status["error"])
+
 
 # ============================================================================
 # L4: nninteractive_bridge.py
@@ -2689,6 +2778,49 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn("runtime:", history_only_text)
         self.assertIn("metrics_history_path:", history_only_text)
 
+    def test_fewshot_training_config_quotes_paths_with_spaces(self):
+        """Generated YAML should preserve base/config paths that contain spaces."""
+        pipeline = __import__("tools.fewshot_pipeline", fromlist=["dummy"])
+        import yaml
+
+        class Args(object):
+            img_size = "224,224"
+            model_path = None
+            model_scale = "vitb16"
+            finetune_method = "lora"
+            decoder = "segformer3d"
+            organ = "liver"
+            lora_rank = 8
+            lora_alpha = 16
+            adapter_bottleneck = 64
+            modality = "ct"
+            epochs = 3
+            batch_size = 1
+            grad_accumulation = 1
+            mixed_precision = False
+            lr = 0.001
+            weight_decay = 0.01
+            keep_last_checkpoints = 2
+            sub_volume = False
+            sub_volume_size = "32,224,224"
+
+        spaced_dir = Path(self.tmp) / "Mimics Script Config"
+        spaced_dir.mkdir()
+        base_config = spaced_dir / "base config.yaml"
+        base_config.write_text("model: {}\ndata: {}\ntraining: {}\n", encoding="utf-8")
+        output_config = Path(self.tmp) / "generated spaced config.yaml"
+        pipeline.write_training_config(
+            output_config,
+            base_config,
+            Path(self.tmp) / "dataset with spaces",
+            "exp_test",
+            Args(),
+            validation_enabled=False,
+        )
+        payload = yaml.safe_load(output_config.read_text(encoding="utf-8"))
+        self.assertEqual([str(base_config)], payload["_base_"])
+        self.assertEqual(str(Path(self.tmp) / "dataset with spaces"), payload["data"]["data_root"])
+
     def test_fewshot_external_setup_formats_progress(self):
         """External setup UI exposes epoch/loss/Dice in user-visible status text."""
         ui = __import__("tools.fewshot_training_setup_ui", fromlist=["dummy"])
@@ -3200,8 +3332,10 @@ class TestNewFeatures(unittest.TestCase):
             os.makedirs(run_dir)
             checkpoint = os.path.join(run_dir, "model.pth")
             config = os.path.join(run_dir, "config.yaml")
-            open(checkpoint, "w").close()
-            open(config, "w").close()
+            with open(checkpoint, "wb") as handle:
+                handle.write(b"PK\x03\x04")
+            with open(config, "w", encoding="utf-8") as handle:
+                handle.write("model: {}\n")
             manifest = {
                 "model_id": run_id,
                 "organ": "liver",
@@ -3250,6 +3384,71 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn("fewshot_model_chooser.py", launched[0][0][1])
         self.assertEqual(1, len(monitors))
         self.assertEqual("model_choice", monitors[0]["kind"])
+
+    def test_fewshot_latest_prediction_resolves_explicit_model(self):
+        """Latest Model entry should resolve latest.json before launching inference."""
+        import fewshot_mimics
+        ts_root = os.path.join(self.tmp, "dataset_latest_predict")
+        model_root = os.path.join(ts_root, "fewshot_models", "models", "liver")
+        os.makedirs(model_root)
+        run_dir = os.path.join(model_root, "train_latest")
+        os.makedirs(run_dir)
+        checkpoint = os.path.join(run_dir, "model.pth")
+        config = os.path.join(run_dir, "config.yaml")
+        with open(checkpoint, "wb") as handle:
+            handle.write(b"PK\x03\x04")
+        with open(config, "w", encoding="utf-8") as handle:
+            handle.write("model: {}\n")
+        manifest = {
+            "model_id": "train_latest",
+            "organ": "liver",
+            "organ_slug": "liver",
+            "checkpoint": checkpoint,
+            "config": config,
+            "created_at_epoch": 1.0,
+        }
+        with open(os.path.join(model_root, "latest.json"), "w", encoding="utf-8") as handle:
+            json.dump(manifest, handle)
+        launched = []
+
+        old_selected = fewshot_mimics._selected_organ
+        old_choose = fewshot_mimics._choose_dataset_root
+        old_guard = fewshot_mimics._guard_no_active_job
+        old_case = fewshot_mimics._infer_case_id
+        old_launch = fewshot_mimics._launch_inference_job
+        try:
+            fewshot_mimics._selected_organ = lambda: "liver"
+            fewshot_mimics._choose_dataset_root = lambda _title: ts_root
+            fewshot_mimics._guard_no_active_job = lambda root, requested_kind="train": True
+            fewshot_mimics._infer_case_id = lambda root: "s0001"
+            fewshot_mimics._launch_inference_job = lambda config_arg, root, case_id, organ, selected_model=None: launched.append(selected_model) or 0
+            result = fewshot_mimics._start_inference(choose_model=False)
+        finally:
+            fewshot_mimics._selected_organ = old_selected
+            fewshot_mimics._choose_dataset_root = old_choose
+            fewshot_mimics._guard_no_active_job = old_guard
+            fewshot_mimics._infer_case_id = old_case
+            fewshot_mimics._launch_inference_job = old_launch
+        self.assertEqual(0, result)
+        self.assertEqual("train_latest", launched[0]["model_id"])
+        self.assertTrue(launched[0]["manifest_path"].endswith("latest.json"))
+
+    def test_fewshot_inference_guard_allows_training_queue(self):
+        """Prediction should not be blocked by a queued/waiting training job."""
+        import fewshot_mimics
+        ts_root = os.path.join(self.tmp, "dataset_guard")
+        jobs_dir = os.path.join(ts_root, "fewshot_models", "jobs")
+        os.makedirs(jobs_dir)
+        with open(os.path.join(jobs_dir, "train_waiting.json"), "w", encoding="utf-8") as handle:
+            json.dump({
+                "job_id": "train_waiting",
+                "kind": "train",
+                "status": "waiting_for_gpu",
+                "organ": "liver",
+                "controller_pid": os.getpid(),
+            }, handle)
+        self.assertTrue(fewshot_mimics._guard_no_active_job(ts_root, requested_kind="infer"))
+        self.assertFalse(fewshot_mimics._guard_no_active_job(ts_root, requested_kind="train"))
 
     def test_fewshot_status_viewer_context_write_error_is_diagnostic(self):
         """Show Status should say when context JSON creation is the failing stage."""

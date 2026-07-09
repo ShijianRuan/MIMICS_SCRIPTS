@@ -1292,6 +1292,9 @@ def launch_mimics_export(
             if lock is not None:
                 lock.release()
             result = {"launched": True, "returncode": proc.returncode}
+            batch_status = read_json(export_root / "_export_batch_status.json", {}) or {}
+            if batch_status:
+                result["batch_status"] = batch_status
             if label_staging_dir:
                 result["label_staging_dir"] = str(label_staging_dir)
             if actual_log_path is not None:
@@ -1540,13 +1543,21 @@ def cmd_train(args):
         )
     selected = select_samples(samples, args.sample_mode, int(args.max_samples or 0))
     if len(selected) < int(args.min_samples):
-        update_status(status_path, {
-            "status": "failed",
-            "error": "not enough labeled samples for organ {}; found {}, required {}".format(
+        if args.export_labels:
+            error = (
+                "not enough freshly exported labels for organ {0}; found {1}, required {2}. "
+                "Check that the selected cases have saved .mcs files and that each .mcs contains a Mask named {0}. "
+                "If you want to use existing NIfTI labels instead of refreshing from .mcs, disable label export before training."
+            ).format(args.organ, len(selected), args.min_samples)
+        else:
+            error = "not enough labeled samples for organ {}; found {}, required {}".format(
                 args.organ,
                 len(selected),
                 args.min_samples,
-            ),
+            )
+        update_status(status_path, {
+            "status": "failed",
+            "error": error,
             "samples_found": len(samples),
             "skipped": skipped[:100],
         })
@@ -1843,6 +1854,9 @@ def load_model_manifest(workspace, organ, model_id=None, model_manifest=None):
 def validate_model_manifest(manifest, source=""):
     if not isinstance(manifest, dict):
         raise RuntimeError("model manifest is invalid: {}".format(source))
+    checked = dict(manifest)
+    if source:
+        checked["_manifest_path"] = str(source)
     for key in ("checkpoint", "config"):
         value = manifest.get(key, "")
         if not value:
@@ -1850,23 +1864,105 @@ def validate_model_manifest(manifest, source=""):
         path = Path(value)
         if not path.is_file():
             raise RuntimeError("model manifest points to a missing {}: {} ({})".format(key, path, source))
-    return manifest
+        try:
+            size = int(path.stat().st_size)
+            checked[key + "_size_bytes"] = size
+        except Exception:
+            size = None
+            checked[key + "_size_bytes"] = None
+        if size is not None and size <= 0:
+            raise RuntimeError("model manifest points to an empty {}: {} ({})".format(key, path, source))
+    checkpoint_path = Path(manifest.get("checkpoint", ""))
+    try:
+        with open(str(checkpoint_path), "rb") as handle:
+            header = handle.read(4)
+        if not (header.startswith(b"PK") or header.startswith(b"\x80")):
+            raise RuntimeError(
+                "model checkpoint does not look like a torch checkpoint: {} ({})".format(
+                    checkpoint_path,
+                    source,
+                )
+            )
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError("model checkpoint could not be inspected: {} ({})".format(exc, source))
+    return checked
+
+
+def _parse_json_shape(value):
+    if not value:
+        return None
+    try:
+        shape = json.loads(value)
+        shape = [int(shape[0]), int(shape[1]), int(shape[2])]
+    except Exception:
+        raise RuntimeError("invalid expected source shape: {}".format(value))
+    if not all(item > 0 for item in shape):
+        raise RuntimeError("invalid expected source shape: {}".format(value))
+    return shape
+
+
+def _parse_json_matrix(value):
+    if not value:
+        return None
+    try:
+        matrix = json.loads(value)
+        if len(matrix) != 4:
+            raise ValueError("not 4x4")
+        parsed = []
+        for row in matrix:
+            if len(row) != 4:
+                raise ValueError("not 4x4")
+            parsed.append([float(item) for item in row])
+        return parsed
+    except Exception:
+        raise RuntimeError("invalid expected source voxel-to-RAS matrix")
+
+
+def validate_inference_source_geometry(image_path, expected_shape=None, expected_affine=None):
+    result = {
+        "image_path": str(image_path),
+        "checked": False,
+    }
+    if not expected_shape and not expected_affine:
+        result["reason"] = "no expected source geometry was provided"
+        return result
+    import nibabel as nib
+    import numpy as np
+    from mimics_bridge import _affine_close
+
+    img = nib.load(str(image_path))
+    actual_shape = [int(value) for value in img.shape[:3]]
+    result["checked"] = True
+    result["actual_shape"] = actual_shape
+    if expected_shape:
+        result["expected_shape"] = [int(value) for value in expected_shape]
+        if actual_shape != result["expected_shape"]:
+            raise RuntimeError(
+                "source image shape does not match the open Mimics project: {} != {}".format(
+                    actual_shape,
+                    result["expected_shape"],
+                )
+            )
+    if expected_affine:
+        expected_affine_np = np.asarray(expected_affine, dtype=float)
+        result["expected_voxel_to_ras_matrix"] = expected_affine_np.tolist()
+        result["actual_voxel_to_ras_matrix"] = np.asarray(img.affine, dtype=float).tolist()
+        result["affine_max_abs_diff"] = float(np.max(np.abs(np.asarray(img.affine, dtype=float) - expected_affine_np)))
+        if not _affine_close(img.affine, expected_affine_np):
+            raise RuntimeError(
+                "source image affine does not match the open Mimics project (max abs diff {:.6g})".format(
+                    result["affine_max_abs_diff"],
+                )
+            )
+    return result
 
 
 def cmd_infer(args):
     ts_root = Path(args.ts_root).resolve()
-    case_dir = ts_root / args.case_id
-    if not case_dir.is_dir():
-        raise RuntimeError("case directory was not found: {}".format(case_dir))
-    image = find_image(case_dir)
-    if not image:
-        raise RuntimeError("no NIfTI image found for case: {}".format(args.case_id))
-
-    dinov3_root = dinov3_root_from_args(args)
-    python_exe = python_from_args(args, dinov3_root)
     workspace = workspace_for(ts_root, args.workspace)
     organ_slug = safe_slug(args.organ)
-    model = load_model_manifest(workspace, args.organ, args.model_id, args.model_manifest)
     job_id = args.job_id or "infer_{}_{}_{}".format(
         safe_slug(args.case_id),
         organ_slug,
@@ -1875,31 +1971,66 @@ def cmd_infer(args):
     status_path = workspace / "jobs" / (job_id + ".json")
     output_dir = workspace / "predictions" / safe_slug(args.case_id) / organ_slug
     output_dir.mkdir(parents=True, exist_ok=True)
+    cancel_path = output_dir / (job_id + ".cancel")
+    status_base = {
+        "schema_version": "mimics_fewshot_job.v1",
+        "job_id": job_id,
+        "kind": "infer",
+        "status": "preparing",
+        "organ": args.organ,
+        "case_id": args.case_id,
+        "ts_root": str(ts_root),
+        "workspace": str(workspace),
+        "controller_pid": os.getpid(),
+        "cancel_path": str(cancel_path),
+        "created_at_epoch": time.time(),
+    }
+    write_json_atomic(status_path, status_base)
+    case_dir = ts_root / args.case_id
+    try:
+        if not case_dir.is_dir():
+            raise RuntimeError("case directory was not found: {}".format(case_dir))
+        image = find_image(case_dir)
+        if not image:
+            raise RuntimeError("no NIfTI image found for case: {}".format(args.case_id))
+        dinov3_root = dinov3_root_from_args(args)
+        python_exe = python_from_args(args, dinov3_root)
+        model = load_model_manifest(workspace, args.organ, args.model_id, args.model_manifest)
+        expected_shape = _parse_json_shape(getattr(args, "expected_source_shape", ""))
+        expected_affine = _parse_json_matrix(getattr(args, "expected_source_voxel_to_ras_matrix", ""))
+        source_validation = validate_inference_source_geometry(
+            image,
+            expected_shape=expected_shape,
+            expected_affine=expected_affine,
+        )
+    except Exception as exc:
+        update_status(status_path, {
+            "status": "failed",
+            "error": str(exc),
+            "model_id": getattr(args, "model_id", "latest"),
+            "model_manifest": getattr(args, "model_manifest", "") or "",
+        })
+        append_log(workspace, "Inference job {} failed during preflight: {}.".format(job_id, exc))
+        return 1
+
     output_model_id = args.model_id or model.get("model_id", "latest")
     if args.model_manifest and output_model_id == "latest":
         output_model_id = model.get("model_id", "external_model")
     output_path = output_dir / (safe_slug(output_model_id) + ".nii.gz")
     log_path = output_dir / (job_id + ".log")
-    cancel_path = output_dir / (job_id + ".cancel")
 
-    write_json_atomic(status_path, {
-        "schema_version": "mimics_fewshot_job.v1",
-        "job_id": job_id,
-        "kind": "infer",
+    status_running = dict(status_base)
+    status_running.update({
         "status": "waiting_for_gpu" if gpu_lock_enabled() else "running",
-        "organ": args.organ,
-        "case_id": args.case_id,
-        "ts_root": str(ts_root),
-        "workspace": str(workspace),
         "image_path": str(image),
         "output_path": str(output_path),
         "model_id": model.get("model_id", args.model_id or "latest"),
-        "model_manifest": args.model_manifest or "",
+        "model_manifest": model.get("_manifest_path", args.model_manifest or ""),
         "model": model,
-        "controller_pid": os.getpid(),
-        "cancel_path": str(cancel_path),
-        "created_at_epoch": time.time(),
+        "source_validation": source_validation,
+        "updated_at_epoch": time.time(),
     })
+    write_json_atomic(status_path, status_running)
     cmd = [
         python_exe,
         str(dinov3_root / "scripts" / "infer.py"),
@@ -2171,6 +2302,8 @@ def build_parser():
     infer.add_argument("--python")
     infer.add_argument("--model-id", default="latest")
     infer.add_argument("--model-manifest")
+    infer.add_argument("--expected-source-shape")
+    infer.add_argument("--expected-source-voxel-to-ras-matrix")
     infer.add_argument("--gpu-lock-timeout-seconds", type=float, default=3600)
     infer.add_argument("--job-id")
     infer.set_defaults(func=cmd_infer)

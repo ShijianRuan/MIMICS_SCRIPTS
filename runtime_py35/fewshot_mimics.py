@@ -30,6 +30,9 @@ BUTTON_PREDICT_MODEL = "Predict Current Case (Choose Model)..."
 BUTTON_STATUS = "Show Status"
 BUTTON_STOP = "Stop Running Job"
 BUTTON_CANCEL = "Cancel"
+SOURCE_IMAGE_PATH_METADATA = "mimics_script.source_image_path"
+SOURCE_IMAGE_SHAPE_METADATA = "mimics_script.source_image_shape"
+SOURCE_VOXEL_TO_RAS_MATRIX_METADATA = "mimics_script.source_voxel_to_ras_matrix"
 MIMICS_VOXEL_TO_RAS_MATRIX_METADATA = "mimics_script.mimics_voxel_to_ras_matrix"
 
 _MONITORS = {}
@@ -427,6 +430,56 @@ def _active_mimics_grid_payload():
         return {"target_shape": shape, "target_voxel_to_ras_matrix": matrix}
     except Exception:
         return None
+
+
+def _parse_shape_metadata(value):
+    try:
+        shape = json.loads(value)
+    except Exception:
+        return None
+    try:
+        shape = [int(shape[0]), int(shape[1]), int(shape[2])]
+    except Exception:
+        return None
+    if all(item > 0 for item in shape):
+        return shape
+    return None
+
+
+def _parse_matrix_metadata(value):
+    try:
+        matrix = json.loads(value)
+    except Exception:
+        return None
+    try:
+        if len(matrix) != 4:
+            return None
+        rows = []
+        for row in matrix:
+            if len(row) != 4:
+                return None
+            rows.append([float(item) for item in row])
+        return rows
+    except Exception:
+        return None
+
+
+def _active_source_geometry_payload():
+    try:
+        image = mimics.data.images.get_active()
+    except Exception:
+        image = None
+    if image is None:
+        return None
+    shape = _parse_shape_metadata(_metadata_get(image, SOURCE_IMAGE_SHAPE_METADATA, ""))
+    matrix = _parse_matrix_metadata(_metadata_get(image, SOURCE_VOXEL_TO_RAS_MATRIX_METADATA, ""))
+    if not shape or not matrix:
+        return None
+    return {
+        "source_image_path": _metadata_get(image, SOURCE_IMAGE_PATH_METADATA, ""),
+        "source_shape": shape,
+        "source_voxel_to_ras_matrix": matrix,
+    }
 
 
 def _find_mimics_exe():
@@ -866,10 +919,22 @@ def _resource_wait_text(job):
     return "Waiting for {0}".format(resource)
 
 
-def _guard_no_active_job(ts_root):
+def _guard_no_active_job(ts_root, requested_kind="train"):
     path, job = _latest_active_job(ts_root)
     if not job:
         return True
+    if requested_kind == "infer":
+        active_kind = str(job.get("kind", ""))
+        if active_kind in ("train", "train_setup"):
+            _mimics_log(
+                logging.INFO,
+                "DINOv3 inference will start while {0} job {1} is {2}; GPU access is still serialized by the global lock.".format(
+                    _display_kind(active_kind),
+                    job.get("job_id", os.path.basename(path or "")),
+                    _display_status(job.get("status", "?")),
+                ),
+            )
+            return True
     wait_text = _resource_wait_text(job)
     detail = "\n{0}".format(wait_text) if wait_text else ""
     mimics.dialogs.message_box(
@@ -1403,7 +1468,7 @@ def _train_model(advanced=False):
     if not ts_root or not os.path.isdir(ts_root):
         mimics.dialogs.message_box("No valid dataset folder was selected.", title=TITLE, ui_blocking=False)
         return 1
-    if not _guard_no_active_job(ts_root):
+    if not _guard_no_active_job(ts_root, requested_kind="train"):
         return 1
     config = _config()
     if advanced:
@@ -1566,6 +1631,14 @@ def _launch_inference_job(config, ts_root, case_id, organ, selected_model=None):
         "--job-id",
         job_id,
     ]
+    source_geometry = _active_source_geometry_payload()
+    if source_geometry:
+        cmd.extend([
+            "--expected-source-shape",
+            json.dumps(source_geometry["source_shape"]),
+            "--expected-source-voxel-to-ras-matrix",
+            json.dumps(source_geometry["source_voxel_to_ras_matrix"]),
+        ])
     if selected_model:
         cmd.extend([
             "--model-manifest",
@@ -1596,6 +1669,7 @@ def _launch_inference_job(config, ts_root, case_id, organ, selected_model=None):
             "launcher_pid": process.pid,
             "cancel_path": cancel_path,
             "selected_model": selected_model,
+            "source_geometry_expected": source_geometry,
             "created_at_epoch": time.time(),
             "updated_at_epoch": time.time(),
         },
@@ -1616,9 +1690,10 @@ def _launch_inference_job(config, ts_root, case_id, organ, selected_model=None):
     _start_monitor(monitor)
     _mimics_log(
         logging.INFO,
-        "DINOv3 few-shot inference started. Organ: {0}, case: {1}, PID: {2}.".format(
+        "DINOv3 few-shot inference started. Organ: {0}, case: {1}, model: {2}, PID: {3}.".format(
             organ,
             case_id,
+            (selected_model or {}).get("model_id", "latest"),
             process.pid,
         ),
     )
@@ -1744,7 +1819,7 @@ def _start_inference(choose_model=False):
     if not ts_root or not os.path.isdir(ts_root):
         mimics.dialogs.message_box("No valid dataset folder was selected.", title=TITLE, ui_blocking=False)
         return 1
-    if not _guard_no_active_job(ts_root):
+    if not _guard_no_active_job(ts_root, requested_kind="infer"):
         return 1
     case_id = _infer_case_id(ts_root)
     if not case_id:
@@ -1769,7 +1844,16 @@ def _start_inference(choose_model=False):
                 ui_blocking=False,
             )
             return 1
-    return _launch_inference_job(config, ts_root, case_id, organ, None)
+    selected_model, reason = _dataset_latest_model_candidate(ts_root, organ)
+    if not selected_model:
+        mimics.dialogs.message_box(
+            "{0}\n\nUse Predict Current Case (Choose Model) to select another valid model, or train a new model for this organ.".format(reason),
+            title=TITLE,
+            ui_blocking=False,
+        )
+        _mimics_log(logging.WARNING, "DINOv3 latest-model prediction was not started: {0}".format(reason))
+        return 1
+    return _launch_inference_job(config, ts_root, case_id, organ, selected_model)
 
 
 def _launch_bridge_mask_to_buffer(monitor, status):
@@ -2272,12 +2356,28 @@ def _model_candidates(ts_root, organ):
     organ_slug = _safe_slug(organ)
     models_dir = os.path.join(_workspace(ts_root), "models", organ_slug)
     seen_manifests = set()
+    def checkpoint_header_looks_valid(path):
+        try:
+            with open(path, "rb") as handle:
+                header = handle.read(4)
+            return header.startswith(b"PK") or header.startswith(b"\x80")
+        except Exception:
+            return False
     def usable_manifest(manifest):
         if not manifest:
             return False
         checkpoint = manifest.get("checkpoint", "")
         config_path = manifest.get("config", "")
-        return bool(checkpoint and config_path and os.path.isfile(checkpoint) and os.path.isfile(config_path))
+        if not (checkpoint and config_path and os.path.isfile(checkpoint) and os.path.isfile(config_path)):
+            return False
+        try:
+            if os.path.getsize(checkpoint) <= 0 or os.path.getsize(config_path) <= 0:
+                return False
+        except Exception:
+            return False
+        if not checkpoint_header_looks_valid(checkpoint):
+            return False
+        return True
     if os.path.isdir(models_dir):
         latest_path = os.path.join(models_dir, "latest.json")
         for manifest_path in [latest_path]:
@@ -2339,6 +2439,43 @@ def _model_candidates(ts_root, organ):
         })
     candidates.sort(key=lambda item: float(item.get("created_at_epoch", 0.0) or 0.0), reverse=True)
     return candidates
+
+
+def _dataset_latest_model_candidate(ts_root, organ):
+    organ_slug = _safe_slug(organ)
+    manifest_path = os.path.join(_workspace(ts_root), "models", organ_slug, "latest.json")
+    if not os.path.isfile(manifest_path):
+        return None, "No latest model was found for organ: {0}".format(organ)
+    manifest = _read_json(manifest_path, {}) or {}
+    checkpoint = manifest.get("checkpoint", "")
+    config_path = manifest.get("config", "")
+    if not checkpoint or not os.path.isfile(checkpoint):
+        return None, "The latest model points to a missing checkpoint: {0}".format(checkpoint or "(empty)")
+    if not config_path or not os.path.isfile(config_path):
+        return None, "The latest model points to a missing config: {0}".format(config_path or "(empty)")
+    try:
+        if os.path.getsize(checkpoint) <= 0:
+            return None, "The latest model checkpoint is empty: {0}".format(checkpoint)
+        if os.path.getsize(config_path) <= 0:
+            return None, "The latest model config is empty: {0}".format(config_path)
+    except Exception as exc:
+        return None, "Could not inspect the latest model files: {0}".format(exc)
+    try:
+        with open(checkpoint, "rb") as handle:
+            header = handle.read(4)
+        if not (header.startswith(b"PK") or header.startswith(b"\x80")):
+            return None, "The latest model checkpoint does not look like a torch checkpoint: {0}".format(checkpoint)
+    except Exception as exc:
+        return None, "Could not inspect the latest model checkpoint: {0}".format(exc)
+    return {
+        "scope": "dataset latest",
+        "manifest_path": os.path.abspath(manifest_path),
+        "model_id": manifest.get("model_id", "latest") or "latest",
+        "organ": manifest.get("organ", organ),
+        "sample_count": manifest.get("sample_count", 0),
+        "created_at_epoch": manifest.get("created_at_epoch", 0.0),
+        "manifest": manifest,
+    }, ""
 
 
 def _launch_external_status_viewer(config, ts_root):
