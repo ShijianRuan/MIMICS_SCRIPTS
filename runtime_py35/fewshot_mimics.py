@@ -1181,6 +1181,26 @@ def _launch_process(cmd, cwd=None):
     )
 
 
+def _launch_gui_process(cmd, cwd=None):
+    # Launch GUI apps without CREATE_NO_WINDOW so Tk/PySide windows are visible.
+    # On Windows, prefer pythonw.exe (same environment, no console flash).
+    launch_cmd = list(cmd)
+    if os.name == "nt" and launch_cmd:
+        exe = os.path.abspath(str(launch_cmd[0]))
+        if os.path.basename(exe).lower() == "python.exe":
+            pythonw = os.path.join(os.path.dirname(exe), "pythonw.exe")
+            if os.path.isfile(pythonw):
+                launch_cmd[0] = pythonw
+    return subprocess.Popen(
+        launch_cmd,
+        cwd=cwd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=_background_env(),
+    )
+
+
 def _launch_external_advanced_training(config, organ, ts_root):
     """Open the advanced training setup outside the Mimics process.
 
@@ -1232,11 +1252,40 @@ def _launch_external_advanced_training(config, organ, ts_root):
     }
     _write_json_atomic(status_path, status)
     _write_json_atomic(context_path, context)
-    process = _launch_process([python_exe, script, "--context", context_path], cwd=_project_root())
+    process = _launch_gui_process([python_exe, script, "--context", context_path], cwd=_project_root())
     current_status = _read_json(status_path, status) or status
     current_status["controller_pid"] = process.pid
     current_status["updated_at_epoch"] = time.time()
     _write_json_atomic(status_path, current_status)
+
+    # Detect immediate launcher failures and surface them to the user instead of
+    # silently returning while the external window never appears.
+    for _ in range(8):
+        if process.poll() is not None:
+            break
+        time.sleep(0.1)
+    if process.poll() is not None:
+        failed = _read_json(status_path, current_status) or current_status
+        if failed.get("status") != "failed":
+            failed["status"] = "failed"
+            failed["error"] = (
+                "Could not open the external Advanced setup window. "
+                "The process exited immediately."
+            )
+            failed["updated_at_epoch"] = time.time()
+            try:
+                _write_json_atomic(status_path, failed)
+            except Exception:
+                pass
+        mimics.dialogs.message_box(
+            "Could not open the external Advanced setup UI.\n\n{0}".format(
+                failed.get("error", "Unknown startup error")
+            ),
+            title=TITLE,
+            ui_blocking=False,
+        )
+        return 1
+
     monitor_started = False
     try:
         monitor_started = _start_monitor(
@@ -2162,7 +2211,7 @@ def _launch_external_status_viewer(config, ts_root):
         )
     command = [python_exe, script, "--context", context_path]
     try:
-        process = _launch_process(command, cwd=_project_root())
+        process = _launch_gui_process(command, cwd=_project_root())
     except Exception as exc:
         raise RuntimeError(
             "Could not start the DINOv3 status viewer process. "
@@ -2173,6 +2222,23 @@ def _launch_external_status_viewer(config, ts_root):
                 exc,
             )
         )
+
+    # Catch immediate startup failures that otherwise look like "opened" but
+    # no window appears.
+    for _ in range(8):
+        if process.poll() is not None:
+            break
+        time.sleep(0.1)
+    if process.poll() is not None:
+        raise RuntimeError(
+            "DINOv3 status viewer process exited immediately. "
+            "Python: {0}. Script: {1}. Context: {2}".format(
+                python_exe,
+                script,
+                context_path,
+            )
+        )
+
     _mimics_log(
         logging.INFO,
         "DINOv3 status viewer opened in an external process. PID: {0}".format(process.pid),

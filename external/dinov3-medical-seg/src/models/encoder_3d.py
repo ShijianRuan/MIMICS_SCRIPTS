@@ -55,10 +55,11 @@ class SliceWiseEncoder3D(nn.Module):
         with torch.no_grad():
             first_feats = self.backbone(processed[0])
         num_layers = len(first_feats)
-        fshape = [(B, D) + tuple(f.shape[1:]) for f in first_feats]
 
-        # Process in mini-batches, offload to CPU
-        all_features = [torch.zeros(s, device='cpu') for s in fshape]
+        # Process in mini-batches, preserving gradient flow through the backbone
+        # (LoRA weights etc.).  We accumulate outputs in a list and torch.cat
+        # at the end — in-place slice assignment would break the autograd graph.
+        layer_buffers = [[] for _ in range(num_layers)]
         for start in range(0, D, slice_batch_size):
             end = min(start + slice_batch_size, D)
             chunk = end - start
@@ -66,14 +67,12 @@ class SliceWiseEncoder3D(nn.Module):
             feats = self.backbone(batch)
             for l in range(num_layers):
                 _, channels, height, width = feats[l].shape
-                reshaped = feats[l].detach().cpu().reshape(chunk, B, channels, height, width)
-                all_features[l][:, start:end] = reshaped.permute(1, 0, 2, 3, 4)
-            if hasattr(torch, 'mps') and torch.backends.mps.is_available():
-                torch.mps.empty_cache()
+                reshaped = feats[l].reshape(chunk, B, channels, height, width)
+                layer_buffers[l].append(reshaped.permute(1, 0, 2, 3, 4))
 
-        device = volume_3d.device
-        # (B, D, C, h, w) -> (B, C, D, h, w)
-        return [f.permute(0, 2, 1, 3, 4).to(device) for f in all_features]
+        # Concatenate along depth, then convert to (B, C, D, h, w)
+        result = [torch.cat(buf, dim=1) for buf in layer_buffers]
+        return [f.permute(0, 2, 1, 3, 4) for f in result]
 
     def forward_sub_volume(
         self, volume_3d: torch.Tensor, sub_volume_size: tuple

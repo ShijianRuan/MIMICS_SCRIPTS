@@ -41,11 +41,11 @@ def main():
     img = nib.as_closest_canonical(original_img)
     data = normalize_volume(
         img.get_fdata(dtype=np.float32),
-        config.get("data", {}).get("modality", "other"),
+        config["data"]["modality"],
     )
 
     # Resize slices
-    img_size = tuple(config["data"].get("img_size", [512, 512]))
+    img_size = tuple(config["data"]["img_size"])
     data_resized = np.zeros((data.shape[0], *img_size), dtype=np.float32)
     for d in range(data.shape[0]):
         slc = torch.from_numpy(data[d]).unsqueeze(0).unsqueeze(0)

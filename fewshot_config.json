@@ -27,7 +27,7 @@
   "advanced_ui_mode": "external",
   "status_ui_fallback_to_text": true,
   "status_ui_mode": "external",
-  "gpu_lock_timeout_seconds": 86400,
+  "gpu_lock_timeout_seconds": 900,
   "inference_gpu_lock_timeout_seconds": 3600,
   "background_mimics_lock_timeout_seconds": 21600,
   "dinov3_project": "external/dinov3-medical-seg",

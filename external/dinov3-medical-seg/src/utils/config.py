@@ -40,6 +40,14 @@ def load_config(config_path: str, overrides: dict = None) -> Dict[str, Any]:
             base_config = deep_merge(base_config, load_config(bp))
         config = deep_merge(base_config, config)
 
+    # Resolve relative model_path against the project root directory so that
+    # training and inference work regardless of the current working directory.
+    model_path = config.get("model", {}).get("model_path")
+    if model_path and not os.path.isabs(model_path):
+        # config.py lives at <project_root>/src/utils/config.py → go up 2 levels
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        config["model"]["model_path"] = os.path.normpath(os.path.join(project_root, model_path))
+
     # Apply CLI overrides
     if overrides:
         for key, value in overrides.items():
@@ -49,7 +57,7 @@ def load_config(config_path: str, overrides: dict = None) -> Dict[str, Any]:
 
 
 def _load_yaml(path: str) -> dict:
-    with open(path, "r") as f:
+    with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
 

@@ -82,9 +82,9 @@ def _append_export_log(root_dir, message):
         pass
 
 
-def _record_failed_case(output_dir, case_id, phase, error):
+def _record_failed_case(output_dir_or_export_root, case_id, phase, error):
     try:
-        failed_dir = os.path.join(output_dir or os.getcwd(), "_failed_exports")
+        failed_dir = os.path.join(output_dir_or_export_root or os.getcwd(), "_failed_exports")
         if not os.path.isdir(failed_dir):
             os.makedirs(failed_dir)
         payload = {
@@ -1023,6 +1023,9 @@ def run_background_batch_export(config_path):
     ts_root = config.get("ts_root")
     output_dir = config.get("output_dir")
     output_dir = os.path.abspath(output_dir) if output_dir else _resolve_export_output_dir(ts_root)
+    # Logs and failed-records go into the dedicated export_root (under workspace),
+    # not under mcs_output where .mcs files live.
+    export_root = config.get("export_root") or output_dir
     cases_filter = config.get("cases")
     cases_filter = set(cases_filter) if cases_filter else None
     axes = config.get("axes") or [0, 1, 2]
@@ -1030,29 +1033,29 @@ def run_background_batch_export(config_path):
     if not os.path.isdir(output_dir):
         os.makedirs(output_dir)
 
-    lock_path = _acquire_export_lock(output_dir)
+    lock_path = _acquire_export_lock(export_root)
     if not lock_path:
-        _append_export_log(output_dir, "Another background export process is already running; exiting.")
+        _append_export_log(export_root, "Another background export process is already running; exiting.")
         return 0
 
     completed = 0
     failed = 0
     try:
-        _append_export_log(output_dir, "Background batch export started.")
+        _append_export_log(export_root, "Background batch export started.")
         _write_json_atomic(
-            os.path.join(output_dir, "_export_batch_status.json"),
+            os.path.join(export_root, "_export_batch_status.json"),
             {"status": "discovering", "pid": os.getpid(), "updated_at_epoch": time.time()},
         )
         cases = discover_ts_cases(ts_root, cases_filter)
         total = len(cases)
-        _append_export_log(output_dir, "Discovered {0} case(s) for export.".format(total))
+        _append_export_log(export_root, "Discovered {0} case(s) for export.".format(total))
         for index, case_info in enumerate(cases):
             case_id = case_info["case_id"]
             case_dir = case_info["case_dir"]
             mcs_path = os.path.join(output_dir, case_id + ".mcs")
             work_dir = os.path.join(output_dir, case_id + "_export_work")
             _write_json_atomic(
-                os.path.join(output_dir, "_export_batch_status.json"),
+                os.path.join(export_root, "_export_batch_status.json"),
                 {
                     "status": "exporting",
                     "pid": os.getpid(),
@@ -1066,11 +1069,11 @@ def run_background_batch_export(config_path):
             )
             if not os.path.isfile(mcs_path):
                 failed += 1
-                _record_failed_case(output_dir, case_id, "open_project", ".mcs file not found: {0}".format(mcs_path))
-                _append_export_log(output_dir, "[{0}/{1}] Missing .mcs: {2}".format(index + 1, total, mcs_path))
+                _record_failed_case(export_root, case_id, "open_project", ".mcs file not found: {0}".format(mcs_path))
+                _append_export_log(export_root, "[{0}/{1}] Missing .mcs: {2}".format(index + 1, total, mcs_path))
                 continue
             try:
-                _append_export_log(output_dir, "[{0}/{1}] Exporting: {2}".format(index + 1, total, case_id))
+                _append_export_log(export_root, "[{0}/{1}] Exporting: {2}".format(index + 1, total, case_id))
                 mimics.file.open_project(mcs_path)
                 built = _export_masks_and_build_params(case_dir, axes, flips, work_dir)
                 try:
@@ -1079,7 +1082,7 @@ def run_background_batch_export(config_path):
                     pass
                 if built is None:
                     _cleanup_work_dir(work_dir)
-                    _append_export_log(output_dir, "No masks to export: {0}".format(case_id))
+                    _append_export_log(export_root, "No masks to export: {0}".format(case_id))
                     completed += 1
                     continue
                 bridge_params, manifest = built
@@ -1089,7 +1092,7 @@ def run_background_batch_export(config_path):
                 total_new, total_overwritten, total_unchanged = _apply_export_result(result, work_dir)
                 completed += 1
                 _append_export_log(
-                    output_dir,
+                    export_root,
                     "Exported {0}: new={1}, overwritten={2}, unchanged={3}".format(
                         case_id,
                         total_new,
@@ -1099,8 +1102,8 @@ def run_background_batch_export(config_path):
                 )
             except Exception as exc:
                 failed += 1
-                _append_export_log(output_dir, "Export failed for {0}: {1}".format(case_id, exc))
-                _record_failed_case(output_dir, case_id, "export", exc)
+                _append_export_log(export_root, "Export failed for {0}: {1}".format(case_id, exc))
+                _record_failed_case(export_root, case_id, "export", exc)
                 traceback.print_exc()
                 try:
                     mimics.file.close_project()
@@ -1109,7 +1112,7 @@ def run_background_batch_export(config_path):
                 _cleanup_work_dir(work_dir)
 
         _write_json_atomic(
-            os.path.join(output_dir, "_export_batch_status.json"),
+            os.path.join(export_root, "_export_batch_status.json"),
             {
                 "status": "closed",
                 "pid": os.getpid(),
@@ -1118,7 +1121,7 @@ def run_background_batch_export(config_path):
                 "updated_at_epoch": time.time(),
             },
         )
-        _append_export_log(output_dir, "Background batch export finished: {0} succeeded, {1} failed.".format(completed, failed))
+        _append_export_log(export_root, "Background batch export finished: {0} succeeded, {1} failed.".format(completed, failed))
         return 0
     finally:
         try:

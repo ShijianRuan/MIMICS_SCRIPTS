@@ -2,6 +2,7 @@
 DINOv3 backbone via HuggingFace transformers (local weights).
 """
 
+import os
 import torch
 import torch.nn as nn
 from transformers import DINOv3ViTBackbone, AutoImageProcessor
@@ -26,7 +27,9 @@ class DINOv3Backbone(nn.Module):
         if out_indices is None:
             out_indices = [2, 5, 8, 11]
 
-        self.model_path = model_path
+        # Resolve relative path to absolute so transformers doesn't
+        # misinterpret it as a HuggingFace Hub repo ID.
+        self.model_path = os.path.abspath(model_path)
         self.out_indices = out_indices
 
         # DINOv3 stage names: stem, stage1, stage2, ..., stage12 (1-indexed)
@@ -34,11 +37,11 @@ class DINOv3Backbone(nn.Module):
         out_features = [f"stage{i+1}" for i in out_indices]
 
         self.backbone = DINOv3ViTBackbone.from_pretrained(
-            model_path,
+            self.model_path,
             out_features=out_features,
             reshape_hidden_states=True,
         )
-        self.processor = AutoImageProcessor.from_pretrained(model_path)
+        self.processor = AutoImageProcessor.from_pretrained(self.model_path)
 
         cfg = self.backbone.config
         self.patch_size = cfg.patch_size

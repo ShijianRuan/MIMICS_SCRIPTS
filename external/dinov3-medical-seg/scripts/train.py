@@ -75,11 +75,12 @@ def main():
         train_dataset = FewShotSubset(train_dataset, k=k_shot, seed=42 + data_cfg.get("fold", 0))
         print(f"Few-shot training: {k_shot} volumes selected")
 
+    num_workers = config["training"].get("num_workers", 0)
     train_loader = DataLoader(
         train_dataset,
         batch_size=config["training"]["batch_size"],
         shuffle=True,
-        num_workers=2,
+        num_workers=num_workers,
     )
     val_loader = None
     if val_dataset is not None:
@@ -87,7 +88,7 @@ def main():
             val_dataset,
             batch_size=1,
             shuffle=False,
-            num_workers=1,
+            num_workers=num_workers,
         )
 
     # Model

@@ -20,7 +20,7 @@ cd /d %~dp0
 
 :: 1. Setup Python embeddable (self-contained, no system Python needed)
 
-echo [1/6] Setting up Python 3.13.7...
+echo [1/5] Setting up Python 3.13.7...
 
 if not exist "nninteractive_env\python.exe" (
 
@@ -48,25 +48,11 @@ if not exist "nninteractive_env\python.exe" (
 
     echo . >> nninteractive_env\python313._pth
 
-    echo Lib >> nninteractive_env\python313._pth
-
     echo Lib\site-packages >> nninteractive_env\python313._pth
 
     echo import site >> nninteractive_env\python313._pth
 
 )
-
-:: Ensure Lib is on the path (idempotent; also covers upgraded installs)
-
-echo python313.zip > nninteractive_env\python313._pth
-
-echo . >> nninteractive_env\python313._pth
-
-echo Lib >> nninteractive_env\python313._pth
-
-echo Lib\site-packages >> nninteractive_env\python313._pth
-
-echo import site >> nninteractive_env\python313._pth
 
 if not exist "nninteractive_env\Lib\site-packages" mkdir nninteractive_env\Lib\site-packages
 
@@ -74,7 +60,7 @@ if not exist "nninteractive_env\Lib\site-packages" mkdir nninteractive_env\Lib\s
 
 :: 2. Install pip (try ensurepip, fallback to get-pip.py)
 
-echo [2/6] Installing pip...
+echo [2/5] Installing pip...
 
 nninteractive_env\python.exe -m pip --version >nul 2>&1
 
@@ -130,7 +116,7 @@ echo   pip is ready.
 
 :: 3. Check package directory
 
-echo [3/6] Checking wheels...
+echo [3/5] Checking wheels...
 
 if not exist "wheels\*.whl" if not exist "wheels\*.tar.gz" (
 
@@ -152,7 +138,7 @@ echo   Wheels directory OK.
 
 :: 4. Install all packages offline (no internet, no system Python)
 
-echo [4/6] Installing packages from local wheels (no internet)...
+echo [4/5] Installing packages from local wheels (no internet)...
 
 set FAIL_COUNT=0
 
@@ -190,38 +176,52 @@ for %%f in (wheels\*.tar.gz) do (
 
 echo   Installation complete. !FAIL_COUNT! package(s) failed.
 
-echo   Ensuring PySide6 advanced UI wheels are installed consistently...
-nninteractive_env\python.exe -m pip install PySide6 shiboken6 --no-index --find-links="wheels" --upgrade --quiet
-if !errorlevel! neq 0 (
 
-    echo   ERROR: PySide6 installation failed.
 
-    echo   Make sure wheels\ contains matching PySide6, PySide6_Essentials, PySide6_Addons, and shiboken6 Windows wheels.
+:: 5. Install tkinter (embedded Python does not ship with it)
 
-    pause
+echo [5/6] Installing tkinter support...
 
-    exit /b 1
+if exist "tkinter_support\DLLs\_tkinter.pyd" (
+
+    copy /Y "tkinter_support\DLLs\_tkinter.pyd" "nninteractive_env\" >nul
+
+    copy /Y "tkinter_support\DLLs\tcl86t.dll" "nninteractive_env\" >nul
+
+    copy /Y "tkinter_support\DLLs\tk86t.dll" "nninteractive_env\" >nul
+
+    copy /Y "tkinter_support\DLLs\zlib1.dll" "nninteractive_env\" >nul
+
+    if not exist "nninteractive_env\Lib\tkinter" (
+
+        xcopy /E /Q /Y "tkinter_support\Lib\tkinter" "nninteractive_env\Lib\tkinter\" >nul
+
+    )
+
+    if not exist "nninteractive_env\tcl\tk8.6" (
+
+        xcopy /E /Q /Y "tkinter_support\tcl" "nninteractive_env\tcl\" >nul
+
+    )
+
+    nninteractive_env\python.exe -c "import tkinter; print('  tkinter OK')" 2>nul
+
+    if !errorlevel! neq 0 (
+
+        echo   WARNING: tkinter installation failed. External UI will fall back to profile selector.
+
+    ) else (
+
+        echo   tkinter is ready.
+
+    )
+
+) else (
+
+    echo   tkinter_support not found. External UI will fall back to profile selector.
 
 )
 
-
-:: 5. Verify external GUI backend
-
-echo [5/6] Verifying PySide6 external UI backend...
-
-nninteractive_env\python.exe -c "import PySide6, shiboken6; from PySide6 import QtCore, QtWidgets; print('  PySide6', QtCore.__version__)"
-
-if !errorlevel! neq 0 (
-
-    echo   ERROR: PySide6 import failed.
-
-    echo   Advanced DINOv3 Setup and Status windows require PySide6 in nninteractive_env.
-
-    pause
-
-    exit /b 1
-
-)
 
 
 :: 6. Verify
@@ -240,7 +240,7 @@ if !errorlevel! neq 0 (
 
 )
 
-nninteractive_env\python.exe -c "import numpy, nibabel, pydicom, SimpleITK, scipy, nnInteractive, torchvision, transformers, yaml, tqdm, acvl_utils, PySide6, shiboken6; print('  All packages OK')"
+nninteractive_env\python.exe -c "import numpy, nibabel, pydicom, SimpleITK, scipy, nnInteractive, torchvision, transformers, yaml, tqdm, acvl_utils; print('  All packages OK')"
 
 if !errorlevel! neq 0 (
 

@@ -13,6 +13,48 @@ import uuid
 INVALID_LOCK_GRACE_SECONDS = 5.0
 
 
+def _install_subprocess_cleanup_guard():
+    """Guard Python 3.5 Windows subprocess cleanup against stale bad handles.
+
+    In long-lived Mimics sessions, subprocess._cleanup() can crash with
+    WinError 5/6 when subprocess._active contains broken process handles.
+    If that happens, every later Popen() may fail before process creation.
+    """
+    if os.name != "nt":
+        return
+    original = getattr(subprocess, "_cleanup", None)
+    if original is None:
+        return
+    if getattr(subprocess, "_mimics_cleanup_guard_installed", False):
+        return
+
+    def _safe_cleanup():
+        try:
+            return original()
+        except Exception as exc:
+            winerror = getattr(exc, "winerror", None)
+            if winerror not in (5, 6):
+                raise
+            active = getattr(subprocess, "_active", None)
+            if isinstance(active, list):
+                survivors = []
+                for proc in list(active):
+                    try:
+                        if proc.poll() is None:
+                            survivors.append(proc)
+                    except Exception:
+                        # Drop stale/broken entries that trigger WinError 5/6.
+                        continue
+                active[:] = survivors
+            return None
+
+    subprocess._cleanup = _safe_cleanup
+    subprocess._mimics_cleanup_guard_installed = True
+
+
+_install_subprocess_cleanup_guard()
+
+
 def write_json_atomic(path, value):
     text = json.dumps(value, indent=2, sort_keys=True) + "\n"
     write_text_atomic(path, text)

@@ -583,6 +583,60 @@ def cleanup_idle_nninteractive_server_lock(current):
     return True
 
 
+def request_nninteractive_server_release_on_contention(current):
+    """Ask an idle nnInteractive server to release GPU when another job is waiting.
+
+    Instead of killing the server immediately, this marks its activity as expired
+    so the owned watchdog shuts it down and releases the GPU lock.
+    """
+    if not isinstance(current, dict):
+        return False
+    if current.get("resource") != "gpu":
+        return False
+    state_path = current.get("state_path")
+    if not state_path:
+        return False
+    state = read_json(state_path, {}) or {}
+    if state.get("schema_version") != "nninteractive_owned_server.v2":
+        return False
+    if state.get("gpu_lock_token") != current.get("token"):
+        return False
+    try:
+        pid = int(state.get("pid", 0))
+    except Exception:
+        pid = 0
+    if not pid or not process_exists(pid):
+        return False
+    try:
+        watchdog_pid = int(state.get("watchdog_pid", 0) or 0)
+    except Exception:
+        watchdog_pid = 0
+    if not watchdog_pid or not process_exists(watchdog_pid):
+        return False
+
+    now = time.time()
+    min_idle_seconds = 15.0
+    try:
+        last_activity = float(state.get("last_activity_epoch", now))
+    except Exception:
+        last_activity = now
+    if now - last_activity < min_idle_seconds:
+        return False
+
+    try:
+        requested_at = float(state.get("contention_release_requested_epoch", 0.0) or 0.0)
+    except Exception:
+        requested_at = 0.0
+    if requested_at and now - requested_at < 10.0:
+        return False
+
+    state["contention_release_requested_epoch"] = now
+    state["contention_release_requested_by"] = "fewshot_pipeline"
+    state["last_activity_epoch"] = 0.0
+    write_json_atomic(state_path, state)
+    return True
+
+
 def acquire_gpu_lock_for_job(workspace, status_path, cancel_path, owner, timeout_seconds):
     if not gpu_lock_enabled():
         return None
@@ -593,6 +647,9 @@ def acquire_gpu_lock_for_job(workspace, status_path, cancel_path, owner, timeout
     def on_wait(current):
         if cleanup_idle_nninteractive_server_lock(current):
             append_log(workspace, "Cleaned an idle nnInteractive server whose watchdog was no longer running.")
+            return
+        if request_nninteractive_server_release_on_contention(current):
+            append_log(workspace, "Requested nnInteractive server to release GPU due to lock contention.")
             return
         update_status(status_path, {
             "status": "waiting_for_gpu",
@@ -1077,25 +1134,29 @@ def launch_mimics_export(
     if not mimics_exe:
         append_log(workspace, "MimicsResearch.exe was not found; using existing exported labels only.")
         return {"launched": False, "reason": "mimics_not_found"}
-    output_dir = resolve_mimics_output_dir(ts_root)
+    # Export artifacts (job configs, logs, failed records) go under workspace
+    # (ts_root/fewshot_models/_export), not in mcs_output where .mcs files live.
+    output_dir = Path(ts_root).resolve() / "mcs_output"
     axes, flips = resolve_mimics_buffer_mapping()
     output_dir.mkdir(parents=True, exist_ok=True)
     export_job_id = safe_slug(Path(status_path).stem if status_path else "export_{}_{}".format(
         time.strftime("%Y%m%dT%H%M%S"),
         uuid.uuid4().hex[:8],
     ))
-    export_job_dir = output_dir / "_fewshot_export_jobs" / export_job_id
-    export_job_dir.mkdir(parents=True, exist_ok=True)
-    config = export_job_dir / "export_config.json"
-    runner = export_job_dir / "run_export_batch.py"
-    write_json_atomic(config, {
+    export_root = workspace / "_export"
+    export_root.mkdir(parents=True, exist_ok=True)
+    log_path = export_root / (export_job_id + "_mimics_export.log")
+    config_path_write = export_root / (export_job_id + "_export_config.json")
+    write_json_atomic(config_path_write, {
         "ts_root": str(Path(ts_root).resolve()),
         "cases": sorted(cases) if cases else None,
         "axes": axes,
         "flips": flips,
         "export_space": "source_image",
         "output_dir": str(output_dir),
+        "export_root": str(export_root),
     })
+    runner = export_root / (export_job_id + "_run_export_batch.py")
     write_text_atomic(
         runner,
         "\n".join([
@@ -1103,7 +1164,7 @@ def launch_mimics_export(
             "import sys, os",
             "sys.path.insert(0, r'{}')".format(str(ROOT / "runtime_py35")),
             "import mimics_export",
-            "mimics_export.run_background_batch_export(r'{}')".format(str(config)),
+            "mimics_export.run_background_batch_export(r'{}')".format(str(config_path_write)),
             "",
         ]),
     )
@@ -1116,7 +1177,6 @@ def launch_mimics_export(
             "DINOv3 label export",
             lock_timeout_seconds if lock_timeout_seconds is not None else timeout_seconds,
         )
-    log_path = output_dir / "_fewshot_export_logs" / (export_job_id + "_mimics_export.log")
     try:
         log_handle, actual_log_path, log_warning = open_subprocess_log(log_path, workspace, "Background Mimics export log")
         with log_handle as log:

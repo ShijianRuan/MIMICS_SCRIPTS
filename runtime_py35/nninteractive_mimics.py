@@ -1049,6 +1049,7 @@ def _source_image_export(image, config):
 def _export_image_for_nninteractive(config, image, path, allow_buffer_export=True):
     image_input_mode = str(config.get("image_input_mode", "") or "").strip().lower()
     force_source = image_input_mode in ("source", "source_image", "original", "original_image")
+    force_mimics_buffer = image_input_mode in ("mimics", "mimics_buffer", "buffer")
     buffer_error = None
 
     if allow_buffer_export and not force_source:
@@ -1056,6 +1057,13 @@ def _export_image_for_nninteractive(config, image, path, allow_buffer_export=Tru
             return _export_image(image, path)
         except Exception as exc:
             buffer_error = exc
+            if force_mimics_buffer and not bool(config.get("fallback_to_source_when_mimics_export_fails", False)):
+                raise RuntimeError(
+                    "nnInteractive Mimics image buffer export failed while image_input_mode is explicitly set to \"mimics\": {0}. "
+                    "Source-image fallback is disabled. "
+                    "Fix the buffer export issue, or set fallback_to_source_when_mimics_export_fails=true for temporary fallback."
+                    .format(exc)
+                )
             _mimics_log(
                 logging.WARNING,
                 "nnInteractive Mimics image buffer export failed: {0}. Falling back to source image metadata mode.".format(exc),
@@ -1088,6 +1096,22 @@ def _export_image_for_nninteractive(config, image, path, allow_buffer_export=Tru
             )
         )
     return None
+
+
+def _log_effective_image_input_config(config):
+    try:
+        _mimics_log(
+            logging.INFO,
+            "nnInteractive effective config: path={0}; image_input_mode={1}; prefer_source_image_for_nninteractive={2}; fallback_to_mimics_buffer_when_source_unavailable={3}; fallback_to_source_when_mimics_export_fails={4}.".format(
+                config.get("_config_path", "?"),
+                config.get("image_input_mode", ""),
+                bool(config.get("prefer_source_image_for_nninteractive", False)),
+                bool(config.get("fallback_to_mimics_buffer_when_source_unavailable", False)),
+                bool(config.get("fallback_to_source_when_mimics_export_fails", False)),
+            ),
+        )
+    except Exception:
+        pass
 
 
 def _export_image(image, path):
@@ -2405,7 +2429,26 @@ def _get_or_start_image_worker(config, image, jobs_root, allow_buffer_export=Tru
     image_key = _object_id(image)
     cached = _ASYNC_IMAGE_WORKERS.get(image_key)
     if _shared_image_worker_alive(cached):
-        return cached
+        image_input_mode = str(config.get("image_input_mode", "") or "").strip().lower()
+        force_source = image_input_mode in ("source", "source_image", "original", "original_image")
+        force_mimics_buffer = image_input_mode in ("mimics", "mimics_buffer", "buffer")
+        cached_source = str(cached.get("image_source", "") or "").strip().lower()
+        if force_mimics_buffer and cached_source != "mimics_buffer":
+            _mimics_log(
+                logging.INFO,
+                "nnInteractive explicit mimics image mode requires a Mimics-buffer worker; replacing prewarmed source-image worker.",
+            )
+            _request_async_worker_close(cached, "image_mode_changed_to_mimics")
+            _ASYNC_IMAGE_WORKERS.pop(image_key, None)
+        elif force_source and cached_source == "mimics_buffer":
+            _mimics_log(
+                logging.INFO,
+                "nnInteractive explicit source image mode requires a source-image worker; replacing prewarmed Mimics-buffer worker.",
+            )
+            _request_async_worker_close(cached, "image_mode_changed_to_source")
+            _ASYNC_IMAGE_WORKERS.pop(image_key, None)
+        else:
+            return cached
     python_exe, bridge_script, model_dir, probe, folds = _runtime_paths(config)
 
     worker_id = "image_worker_" + time.strftime("%Y%m%dT%H%M%S") + "_" + uuid.uuid4().hex[:10]
@@ -2511,7 +2554,16 @@ def _prewarm_async_image_worker(config, image):
     if not os.path.isdir(jobs_root):
         os.makedirs(jobs_root)
     _cleanup_async_jobs(jobs_root, config.get("async_job_retention_days", 7))
-    return _get_or_start_image_worker(config, image, jobs_root, allow_buffer_export=False)
+    image_input_mode = str(config.get("image_input_mode", "") or "").strip().lower()
+    force_mimics_buffer = image_input_mode in ("mimics", "mimics_buffer", "buffer")
+    # In explicit Mimics mode, prewarm must use buffer export; otherwise the
+    # prewarmed source-image worker can be reused by later prompts.
+    return _get_or_start_image_worker(
+        config,
+        image,
+        jobs_root,
+        allow_buffer_export=bool(force_mimics_buffer),
+    )
 
 
 def _start_async_job(config, image, target):
@@ -3143,6 +3195,7 @@ def _async_prompt_menu(target, state):
 
 
 def _run_async(image, target, config):
+    _log_effective_image_input_config(config)
     state = _load_async_job(target)
     validated_target_hash = None
     if state is not None:
@@ -3301,6 +3354,7 @@ def _prompt_menu(target, interaction_count):
 
 def _run_sync(image, target, config):
     _mimics_log(logging.INFO, "Preparing nnInteractive session...")
+    _log_effective_image_input_config(config)
     temp_dir = tempfile.mkdtemp(prefix="mimics_nninteractive_")
     worker = None
     visual_objects = []
