@@ -160,7 +160,7 @@ def _mimics_bridge_paths(config):
     integration_root = _integration_root()
     env_root = _environment_root()
     python_exe = _first_existing_file(
-        [
+        _environment_python_candidates(env_root) + [
             os.environ.get("MIMICS_BRIDGE_PYTHON", ""),
             os.environ.get("NNINTERACTIVE_PYTHON", ""),
             config.get("python", ""),
@@ -582,13 +582,12 @@ def _runtime_paths(config):
     root = _project_root()
     integration_root = _integration_root()
     environment_root = _environment_root()
-    python_candidates = [
-        os.environ.get("NNINTERACTIVE_PYTHON", ""),
-        config.get("python", ""),
-    ] + _environment_python_candidates(environment_root) + [
+    python_candidates = _environment_python_candidates(environment_root) + [
         os.path.join(root, "nninteractive_env", "python.exe"),
         os.path.join(root, "nninteractive_env", "Scripts", "python.exe"),
         os.path.join(root, "nninteractive_env", "python", "python.exe"),
+        os.environ.get("NNINTERACTIVE_PYTHON", ""),
+        config.get("python", ""),
     ]
     python_exe = _first_existing_file(python_candidates, "nnInteractive Python")
     bridge_script = _first_existing_file(

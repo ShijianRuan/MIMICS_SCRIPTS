@@ -38,6 +38,7 @@ _QT_CHECK_RESULT = False
 
 
 _write_json_atomic = runtime_common.write_json_atomic
+_write_text_atomic = runtime_common.write_text_atomic
 _read_json = runtime_common.read_json
 _safe_slug = runtime_common.safe_slug
 _find_root = runtime_common.find_root
@@ -161,30 +162,51 @@ def _dinov3_root(config):
     return _resolve_path(value, _project_root())
 
 
+def _project_python_candidates():
+    root = _project_root()
+    return [
+        os.path.join(root, "nninteractive_env", "python.exe"),
+        os.path.join(root, "nninteractive_env", "Scripts", "python.exe"),
+        os.path.join(root, "nninteractive_env", "python", "python.exe"),
+        os.path.join(root, "nninteractive_env", "bin", "python3"),
+        os.path.join(root, "nninteractive_env", "bin", "python"),
+    ]
+
+
+def _append_python_candidate(candidates, value, base=None):
+    if not value:
+        return
+    if value in ("python", "python3"):
+        return
+    if os.path.isabs(value):
+        candidates.append(value)
+    else:
+        candidates.append(os.path.abspath(os.path.join(base or _project_root(), value)))
+
+
 def _fewshot_python(config, dinov3_root):
-    candidates = []
-    for value in (
-        os.environ.get("MIMICS_FEWSHOT_PYTHON", ""),
-        config.get("python", ""),
-    ):
-        if value:
-            candidates.append(value)
+    candidates = list(_project_python_candidates())
+    _append_python_candidate(candidates, os.environ.get("MIMICS_FEWSHOT_PYTHON", ""))
+    _append_python_candidate(candidates, config.get("python", ""))
     candidates.extend([
         os.path.join(dinov3_root, ".venv", "Scripts", "python.exe"),
         os.path.join(dinov3_root, ".venv", "bin", "python"),
         os.path.join(dinov3_root, "venv", "Scripts", "python.exe"),
         os.path.join(dinov3_root, "venv", "bin", "python"),
-        "python",
-        "python3",
     ])
-    if sys.version_info[:2] >= (3, 10):
+    env_root = os.path.abspath(os.path.join(_project_root(), "nninteractive_env"))
+    try:
+        current = os.path.abspath(sys.executable)
+    except Exception:
+        current = ""
+    if current and current.startswith(env_root + os.sep):
         candidates.append(sys.executable)
     for candidate in candidates:
-        if candidate in ("python", "python3"):
-            return candidate
         if os.path.isfile(candidate):
             return os.path.abspath(candidate)
-    return candidates[-1]
+    raise RuntimeError(
+        "The nninteractive_env Python was not found. Run Setup Environment or setup_offline.bat before using DINOv3."
+    )
 
 
 def _pipeline_script():
@@ -2131,8 +2153,26 @@ def _launch_external_status_viewer(config, ts_root):
         "project_root": _project_root(),
         "created_at_epoch": time.time(),
     }
-    _write_json_atomic(context_path, context)
-    process = _launch_process([python_exe, script, "--context", context_path], cwd=_project_root())
+    try:
+        _write_json_atomic(context_path, context)
+    except Exception as exc:
+        raise RuntimeError(
+            "Could not write the DINOv3 status viewer launch context. "
+            "Path: {0}. Error: {1}".format(context_path, exc)
+        )
+    command = [python_exe, script, "--context", context_path]
+    try:
+        process = _launch_process(command, cwd=_project_root())
+    except Exception as exc:
+        raise RuntimeError(
+            "Could not start the DINOv3 status viewer process. "
+            "Python: {0}. Script: {1}. Context: {2}. Error: {3}".format(
+                python_exe,
+                script,
+                context_path,
+                exc,
+            )
+        )
     _mimics_log(
         logging.INFO,
         "DINOv3 status viewer opened in an external process. PID: {0}".format(process.pid),
@@ -2238,13 +2278,13 @@ def _stop_latest_job():
     cancel_path = job.get("cancel_path")
     if cancel_path:
         try:
-            parent = os.path.dirname(cancel_path)
-            if parent and not os.path.isdir(parent):
-                os.makedirs(parent)
-            with open(cancel_path, "w") as handle:
-                handle.write("cancel requested at {0}\n".format(time.strftime("%Y-%m-%d %H:%M:%S")))
-        except Exception:
-            pass
+            _write_text_atomic(
+                cancel_path,
+                "cancel requested at {0}\n".format(time.strftime("%Y-%m-%d %H:%M:%S")),
+            )
+        except Exception as exc:
+            job["cancel_marker_error"] = str(exc)
+            _mimics_log(logging.WARNING, "Could not write DINOv3 cancel marker: {0}".format(exc))
     killed = []
     for key in ("pid", "controller_pid", "launcher_pid"):
         pid = job.get(key)
@@ -2255,7 +2295,10 @@ def _stop_latest_job():
     job["cancelled_pids"] = killed
     job["updated_at_epoch"] = time.time()
     if status_path:
-        _write_json_atomic(status_path, job)
+        try:
+            _write_json_atomic(status_path, job)
+        except Exception as exc:
+            _mimics_log(logging.WARNING, "Could not update DINOv3 job status after stop: {0}".format(exc))
     mimics.dialogs.message_box(
         "Stop request submitted for job:\n{0}".format(job.get("job_id", "?")),
         title=TITLE,

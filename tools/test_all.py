@@ -220,6 +220,30 @@ class TestRuntimeCommon(unittest.TestCase):
         loaded = runtime_common.read_json(path)
         self.assertEqual({"b": 2}, loaded)
 
+    def test_write_json_atomic_retries_transient_replace_failure(self):
+        import runtime_common
+
+        path = os.path.join(self.tmp, "retry_replace.json")
+        old_replace = runtime_common.os.replace
+        old_sleep = runtime_common.time.sleep
+        calls = []
+
+        def flaky_replace(src, dst):
+            calls.append((src, dst))
+            if len(calls) < 3:
+                raise OSError(5, "access denied")
+            return old_replace(src, dst)
+
+        try:
+            runtime_common.os.replace = flaky_replace
+            runtime_common.time.sleep = lambda _seconds: None
+            runtime_common.write_json_atomic(path, {"ok": True})
+        finally:
+            runtime_common.os.replace = old_replace
+            runtime_common.time.sleep = old_sleep
+        self.assertGreaterEqual(len(calls), 3)
+        self.assertEqual({"ok": True}, runtime_common.read_json(path))
+
     def test_safe_filename(self):
         import runtime_common
 
@@ -2122,6 +2146,120 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn("start_button", source)
         self.assertIn("footer_frame", source)
 
+    def test_offline_setup_tracks_pyside6_external_ui_dependency(self):
+        """Offline setup must install the PySide6 backend used by Advanced DINOv3 windows."""
+        setup_env = __import__("tools.setup_env", fromlist=["dummy"])
+        package_portable = __import__("tools.package_portable", fromlist=["dummy"])
+        self.assertIn("PySide6", setup_env.GUI_IMPORTS)
+        self.assertIn("PySide6", setup_env.GUI_PACKAGES)
+        bat = package_portable._generate_offline_bat("3.13.7", "python313")
+        self.assertIn("pip install PySide6 shiboken6", bat)
+        self.assertIn("echo Lib >> nninteractive_env\\python313._pth", bat)
+        self.assertIn("Verifying PySide6 external UI backend", bat)
+        # Duplicate _pth "Configuring" echo should only appear inside the if block
+        self.assertEqual(1, bat.count("echo   Configuring python313._pth"))
+
+    def test_wheel_files_for_package_disambiguates_prefixes(self):
+        """_wheel_files_for_package must not confuse torch with torchvision."""
+        package_portable = __import__("tools.package_portable", fromlist=["dummy"])
+        _wffp = package_portable._wheel_files_for_package
+
+        class _P:
+            def __init__(self, name):
+                self.name = name
+
+        class _D:
+            def __init__(self, files):
+                self._files = files
+            def glob(self, _pattern):
+                return [_P(f) for f in self._files]
+            def is_dir(self):
+                return True
+
+        wheels = _D([
+            "torch-2.5.1+cu124-cp313-cp313-win_amd64.whl",
+            "torchvision-0.20.1+cu124-cp313-cp313-win_amd64.whl",
+            "numpy-2.1.3-cp313-cp313-win_amd64.whl",
+            "pyside6-6.11.1-cp310-abi3-win_amd64.whl",
+            "pyside6_essentials-6.11.1-cp310-abi3-win_amd64.whl",
+            "shiboken6-6.11.1-cp310-abi3-win_amd64.whl",
+        ])
+        self.assertEqual(1, len(_wffp(wheels, "torch")))
+        self.assertEqual("torch-2.5.1+cu124-cp313-cp313-win_amd64.whl",
+                         _wffp(wheels, "torch")[0].name)
+        self.assertEqual(1, len(_wffp(wheels, "torchvision")))
+        self.assertEqual("torchvision-0.20.1+cu124-cp313-cp313-win_amd64.whl",
+                         _wffp(wheels, "torchvision")[0].name)
+        self.assertEqual(0, len(_wffp(wheels, "nonexistent")))
+        # PySide6 with underscore in name
+        self.assertEqual(1, len(_wffp(wheels, "PySide6_Essentials")))
+        self.assertEqual("pyside6_essentials-6.11.1-cp310-abi3-win_amd64.whl",
+                         _wffp(wheels, "PySide6_Essentials")[0].name)
+
+    def test_fewshot_python_prefers_nninteractive_env_over_config_python(self):
+        """Mimics-side DINOv3 launchers should prefer project nninteractive_env."""
+        import fewshot_mimics
+        root = os.path.join(self.tmp, "project")
+        env_python = os.path.join(root, "nninteractive_env", "python.exe")
+        os.makedirs(os.path.dirname(env_python))
+        Path(env_python).write_text("", encoding="utf-8")
+        dinov3_root = os.path.join(root, "external", "dinov3-medical-seg")
+        old_project = fewshot_mimics._project_root
+        try:
+            fewshot_mimics._project_root = lambda: root
+            result = fewshot_mimics._fewshot_python({"python": sys.executable}, dinov3_root)
+        finally:
+            fewshot_mimics._project_root = old_project
+        self.assertEqual(os.path.abspath(env_python), result)
+
+    def test_fewshot_pipeline_prefers_nninteractive_env_by_default(self):
+        """External DINOv3 pipeline should not fall back to system Python by default."""
+        pipeline = __import__("tools.fewshot_pipeline", fromlist=["dummy"])
+        root = Path(self.tmp) / "project"
+        env_python = root / "nninteractive_env" / "python.exe"
+        env_python.parent.mkdir(parents=True)
+        env_python.write_text("", encoding="utf-8")
+
+        class Args(object):
+            python = None
+
+        old_root = pipeline.ROOT
+        try:
+            pipeline.ROOT = root
+            result = pipeline.python_from_args(Args(), root / "external" / "dinov3-medical-seg")
+        finally:
+            pipeline.ROOT = old_root
+        self.assertEqual(str(env_python), result)
+
+    def test_mimics_batch_cli_runner_uses_resolved_bridge_python(self):
+        """Batch-created background Mimics runners should not record sys.executable."""
+        cli = __import__("tools.mimics_batch_cli", fromlist=["dummy"])
+        output_dir = Path(self.tmp) / "mcs_output"
+        output_dir.mkdir()
+        bridge_python = str(Path(self.tmp) / "nninteractive_env" / "python.exe")
+
+        class Lock(object):
+            def update_pid(self, *_args, **_kwargs):
+                pass
+            def release(self):
+                pass
+
+        class Proc(object):
+            pid = 101
+
+        old_lock = cli._acquire_background_mimics_lock
+        old_popen = cli.subprocess.Popen
+        try:
+            cli._acquire_background_mimics_lock = lambda *_args, **_kwargs: Lock()
+            cli.subprocess.Popen = lambda *_args, **_kwargs: Proc()
+            cli.launch_create_mcs(output_dir, r"C:\MimicsResearch.exe", bridge_python, 0.0)
+        finally:
+            cli._acquire_background_mimics_lock = old_lock
+            cli.subprocess.Popen = old_popen
+        runner = (output_dir / "_run_create_mcs.py").read_text(encoding="utf-8")
+        self.assertIn(bridge_python, runner)
+        self.assertNotIn(sys.executable, runner)
+
     def test_fewshot_external_setup_validates_parameters(self):
         """External setup rejects invalid values before launching training."""
         ui = __import__("tools.fewshot_training_setup_ui", fromlist=["dummy"])
@@ -2279,6 +2417,49 @@ class TestNewFeatures(unittest.TestCase):
             text = handle.read()
         self.assertIn("validation_enabled: false", text)
 
+    def test_fewshot_pipeline_writes_metrics_history_runtime_path(self):
+        """Training config should point the DINO trainer at the structured metrics history file."""
+        pipeline = __import__("tools.fewshot_pipeline", fromlist=["dummy"])
+
+        class Args(object):
+            img_size = "224,224"
+            model_path = None
+            model_scale = "vitb16"
+            finetune_method = "lora"
+            decoder = "segformer3d"
+            organ = "liver"
+            lora_rank = 8
+            lora_alpha = 16
+            adapter_bottleneck = 64
+            modality = "ct"
+            epochs = 3
+            batch_size = 1
+            grad_accumulation = 1
+            mixed_precision = False
+            lr = 0.001
+            weight_decay = 0.01
+            keep_last_checkpoints = 2
+            sub_volume = False
+            sub_volume_size = "32,224,224"
+
+        config_path = os.path.join(self.tmp, "generated_config_with_runtime.yaml")
+        metrics_history = os.path.join(self.tmp, "metrics_history.json")
+        pipeline.write_training_config(
+            config_path,
+            os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg", "config", "synthstrip_lora_segformer3d.yaml"),
+            os.path.join(self.tmp, "dataset"),
+            "exp_test",
+            Args(),
+            status_path=os.path.join(self.tmp, "train_status.json"),
+            cancel_path=os.path.join(self.tmp, "cancel.request"),
+            metrics_history_path=metrics_history,
+            validation_enabled=True,
+        )
+        with open(config_path, "r", encoding="utf-8") as handle:
+            text = handle.read()
+        self.assertIn("metrics_history_path:", text)
+        self.assertIn(metrics_history.replace("\\", "/"), text)
+
     def test_fewshot_external_setup_formats_progress(self):
         """External setup UI exposes epoch/loss/Dice in user-visible status text."""
         ui = __import__("tools.fewshot_training_setup_ui", fromlist=["dummy"])
@@ -2314,6 +2495,41 @@ class TestNewFeatures(unittest.TestCase):
         self.assertAlmostEqual(0.4, rows[1]["train_loss"])
         self.assertAlmostEqual(0.7, rows[1]["val_dice"])
 
+    def test_fewshot_status_viewer_reads_bounded_log_tail(self):
+        """Status viewer should not read full growing train logs on every refresh."""
+        viewer = __import__("tools.fewshot_status_viewer", fromlist=["dummy"])
+        log_path = os.path.join(self.tmp, "large_train.log")
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write("early-line\n" * 100)
+            handle.write("Epoch 3/3: train_loss=0.3000, lr=1.00e-03, val_dice=0.8000\n")
+        text = viewer.read_log_text(log_path, max_bytes=120)
+        self.assertLessEqual(len(text.encode("utf-8")), 120)
+        self.assertLess(len(text), os.path.getsize(log_path))
+        self.assertIn("Epoch 3/3", text)
+        rows = viewer.parse_epoch_metrics_from_texts(text)
+        self.assertEqual(1, len(rows))
+        self.assertEqual(3, rows[0]["epoch"])
+
+    def test_fewshot_status_viewer_prefers_metrics_history_over_tail_log(self):
+        """Curve data should stay complete even when the log preview only contains the newest tail."""
+        viewer = __import__("tools.fewshot_status_viewer", fromlist=["dummy"])
+        history_path = os.path.join(self.tmp, "metrics_history.json")
+        with open(history_path, "w", encoding="utf-8") as handle:
+            json.dump({
+                "schema_version": "mimics_fewshot_metrics_history.v1",
+                "epoch_count": 3,
+                "history": [
+                    {"epoch": 1, "epochs": 3, "train_loss": 0.5, "val_dice": 0.6},
+                    {"epoch": 2, "epochs": 3, "train_loss": 0.4, "val_dice": 0.7},
+                    {"epoch": 3, "epochs": 3, "train_loss": 0.3, "val_dice": 0.8},
+                ],
+            }, handle)
+        tail_only = "Epoch 3/3: train_loss=0.3000, lr=1.00e-03, val_dice=0.8000\n"
+        rows = viewer.training_curve_rows({"metrics_history": history_path}, tail_only, "")
+        self.assertEqual(3, len(rows))
+        self.assertEqual(1, rows[0]["epoch"])
+        self.assertAlmostEqual(0.8, rows[-1]["val_dice"])
+
     def test_fewshot_status_viewer_formats_status(self):
         """External status viewer shows active progress and resource waits."""
         viewer = __import__("tools.fewshot_status_viewer", fromlist=["dummy"])
@@ -2333,6 +2549,202 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn("nnInteractive", line)
         self.assertIn("epoch 1/5", line)
         self.assertIn("loss 0.4568", line)
+
+        warning_line = viewer.format_job_line({
+            "job_id": "train_liver",
+            "kind": "train",
+            "organ": "liver",
+            "status": "cancelled",
+            "cancel_marker_error": "[WinError 5] Access is denied",
+        })
+        self.assertIn("cancel marker warning", warning_line)
+        log_warning_line = viewer.format_job_line({
+            "job_id": "train_liver",
+            "kind": "train",
+            "organ": "liver",
+            "status": "training",
+            "train_log_warning": "fallback log",
+        })
+        self.assertIn("log warning", log_warning_line)
+
+    def test_fewshot_pipeline_status_update_failure_is_nonfatal(self):
+        """Locked job status JSON should not fail a running DINOv3 job."""
+        pipeline = __import__("tools.fewshot_pipeline", fromlist=["dummy"])
+        workspace = Path(self.tmp) / "fewshot_models"
+        status_path = workspace / "jobs" / "train_locked.json"
+        pipeline.write_json_atomic(status_path, {
+            "job_id": "train_locked",
+            "status": "training",
+            "workspace": str(workspace),
+        })
+
+        old_write = pipeline.write_json_atomic
+        try:
+            def locked_write(_path, _payload, **_kwargs):
+                raise PermissionError("[WinError 5] Access is denied")
+            pipeline.write_json_atomic = locked_write
+            result = pipeline.update_status(status_path, {"training_progress": {"epoch": 1}})
+        finally:
+            pipeline.write_json_atomic = old_write
+
+        self.assertFalse(result)
+        log_path = workspace / "fewshot_pipeline.log"
+        self.assertTrue(log_path.is_file())
+        self.assertIn("could not update job status file", log_path.read_text(encoding="utf-8"))
+
+    def test_fewshot_pipeline_append_log_failure_is_nonfatal(self):
+        """A locked pipeline log should not crash DINOv3 control flow."""
+        pipeline = __import__("tools.fewshot_pipeline", fromlist=["dummy"])
+        old_append_text = pipeline.append_text
+        try:
+            pipeline.append_text = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                PermissionError("[WinError 5] Access is denied")
+            )
+            pipeline.append_log(Path(self.tmp) / "fewshot_models", "still running")
+        finally:
+            pipeline.append_text = old_append_text
+
+    def test_fewshot_pipeline_subprocess_log_uses_fallback_path(self):
+        """Subprocess logs should move to a visible fallback path instead of disappearing."""
+        pipeline = __import__("tools.fewshot_pipeline", fromlist=["dummy"])
+        workspace = Path(self.tmp) / "fewshot_models"
+        blocker = Path(self.tmp) / "blocked_parent"
+        blocker.write_text("not a directory", encoding="utf-8")
+        primary = blocker / "train.log"
+        handle, actual_path, warning = pipeline.open_subprocess_log(
+            primary,
+            workspace,
+            "DINOv3 training log",
+        )
+        try:
+            handle.write(b"hello\n")
+        finally:
+            handle.close()
+        self.assertIsNotNone(actual_path)
+        self.assertTrue(actual_path.is_file())
+        self.assertIn("logs", str(actual_path))
+        self.assertIn("fallback log", warning)
+
+    def test_fewshot_pipeline_subprocess_log_reports_unavailable(self):
+        """If all log destinations are denied, status can mark the log unavailable."""
+        pipeline = __import__("tools.fewshot_pipeline", fromlist=["dummy"])
+        old_path_open = Path.open
+        try:
+            Path.open = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                PermissionError("[WinError 5] Access is denied")
+            )
+            handle, actual_path, warning = pipeline.open_subprocess_log(
+                Path(self.tmp) / "train.log",
+                Path(self.tmp) / "fewshot_models",
+                "DINOv3 training log",
+            )
+            handle.close()
+        finally:
+            Path.open = old_path_open
+        self.assertIsNone(actual_path)
+        self.assertIn("unavailable", warning)
+
+    def test_fewshot_pipeline_status_heartbeat_avoids_redundant_writes(self):
+        """Unchanged training status should not rewrite the same job JSON every loop."""
+        pipeline = __import__("tools.fewshot_pipeline", fromlist=["dummy"])
+        calls = []
+        old_update = pipeline.update_status
+        try:
+            pipeline.update_status = lambda path, payload: calls.append((path, dict(payload))) or True
+            state = {}
+            path = Path(self.tmp) / "fewshot_models" / "jobs" / "train.json"
+            payload = {"status": "training", "pid": 123}
+            self.assertTrue(pipeline.maybe_update_status(path, payload, state, heartbeat_seconds=60.0))
+            self.assertFalse(pipeline.maybe_update_status(path, payload, state, heartbeat_seconds=60.0))
+            self.assertTrue(pipeline.maybe_update_status(path, {"status": "cancelling", "pid": 123}, state, heartbeat_seconds=60.0))
+        finally:
+            pipeline.update_status = old_update
+        self.assertEqual(2, len(calls))
+
+    def test_fewshot_pipeline_export_uses_job_scoped_log_and_runner(self):
+        """Background Mimics export should not reuse shared config/runner/log names across jobs."""
+        pipeline = __import__("tools.fewshot_pipeline", fromlist=["dummy"])
+        ts_root = Path(self.tmp) / "dataset"
+        workspace = Path(self.tmp) / "fewshot_models"
+        status_path = workspace / "jobs" / "train_unique.json"
+        ts_root.mkdir()
+        launched = []
+
+        class Proc(object):
+            pid = 13579
+            returncode = 0
+            def poll(self):
+                return 0
+
+        old_find = pipeline.find_mimics_exe
+        old_popen = pipeline.subprocess.Popen
+        try:
+            pipeline.find_mimics_exe = lambda _value=None: r"C:\MimicsResearch.exe"
+            pipeline.subprocess.Popen = lambda cmd, **kwargs: launched.append((cmd, kwargs)) or Proc()
+            result = pipeline.launch_mimics_export(
+                ts_root,
+                {"case001"},
+                None,
+                workspace,
+                5.0,
+                status_path=status_path,
+                cancel_path=None,
+            )
+        finally:
+            pipeline.find_mimics_exe = old_find
+            pipeline.subprocess.Popen = old_popen
+
+        self.assertTrue(result["launched"])
+        self.assertIn("_fewshot_export_logs", result["log"])
+        self.assertIn("train_unique_mimics_export.log", result["log"])
+        runner = Path(launched[0][0][-1])
+        self.assertIn("_fewshot_export_jobs", str(runner))
+        self.assertEqual("run_export_batch.py", runner.name)
+        self.assertFalse((ts_root / "mcs_output" / "_run_export_batch.py").exists())
+        self.assertFalse((ts_root / "mcs_output" / "_fewshot_export_mimics.log").exists())
+
+    def test_fewshot_pipeline_cancel_marker_failure_still_cancels(self):
+        """Cancel should continue to process termination even if cancel marker write is denied."""
+        pipeline = __import__("tools.fewshot_pipeline", fromlist=["dummy"])
+        workspace = Path(self.tmp) / "fewshot_models"
+        status_path = workspace / "jobs" / "train_cancel.json"
+        pipeline.write_json_atomic(status_path, {
+            "job_id": "train_cancel",
+            "kind": "train",
+            "status": "training",
+            "pid": 12345,
+            "cancel_path": str(workspace / "runs" / "train_cancel" / "cancel.request"),
+        })
+
+        class Args(object):
+            pass
+        args = Args()
+        args.ts_root = self.tmp
+        args.workspace = str(workspace)
+        args.job_id = "train_cancel"
+        args.grace_seconds = 0.0
+
+        old_workspace_for = pipeline.workspace_for
+        old_marker = pipeline.write_cancel_marker
+        old_exists = pipeline.process_exists
+        old_kill = pipeline.terminate_process_tree
+        try:
+            pipeline.workspace_for = lambda _ts_root, _workspace=None: workspace
+            pipeline.write_cancel_marker = lambda _path: "[WinError 5] Access is denied"
+            pipeline.process_exists = lambda _pid: True
+            pipeline.terminate_process_tree = lambda _pid: True
+            result = pipeline.cmd_cancel(args)
+        finally:
+            pipeline.workspace_for = old_workspace_for
+            pipeline.write_cancel_marker = old_marker
+            pipeline.process_exists = old_exists
+            pipeline.terminate_process_tree = old_kill
+
+        self.assertEqual(0, result)
+        updated = pipeline.read_json(status_path, {})
+        self.assertEqual("cancelled", updated["status"])
+        self.assertEqual("[WinError 5] Access is denied", updated["cancel_marker_error"])
+        self.assertEqual([12345], updated["cancelled_pids"])
 
     def test_fewshot_external_launch_preserves_worker_status(self):
         """External setup should not overwrite a worker status update with launching."""
@@ -2378,6 +2790,52 @@ class TestNewFeatures(unittest.TestCase):
         self.assertEqual("training", status["status"])
         self.assertEqual(98765, status["launcher_pid"])
         self.assertEqual(1, status["training_progress"]["epoch"])
+
+    def test_fewshot_external_launch_post_start_status_write_is_nonfatal(self):
+        """After Popen succeeds, status JSON write contention should not report launch failure."""
+        ui = __import__("tools.fewshot_training_setup_ui", fromlist=["dummy"])
+        ts_root = os.path.join(self.tmp, "dataset")
+        workspace = os.path.join(self.tmp, "fewshot_models")
+        context = {
+            "organ": "liver",
+            "ts_root": ts_root,
+            "workspace": workspace,
+            "python_exe": sys.executable,
+            "pipeline_script": os.path.join(PROJECT_ROOT, "tools", "fewshot_pipeline.py"),
+            "dinov3_root": os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg"),
+            "project_root": PROJECT_ROOT,
+            "config": {},
+        }
+        options = ui.default_training_options({})
+        launch = ui.prepare_training_launch(context, options, run_id="train_started")
+
+        class Proc(object):
+            pid = 24680
+
+        old_popen = ui.subprocess.Popen
+        old_prepare = ui.prepare_training_launch
+        old_write = ui.write_json_atomic
+        calls = []
+        try:
+            ui.prepare_training_launch = lambda _context, _options: launch
+            ui.subprocess.Popen = lambda *_args, **_kwargs: Proc()
+
+            def write_once_then_locked(path, payload, **kwargs):
+                calls.append(path)
+                if len(calls) == 1:
+                    return old_write(path, payload, **kwargs)
+                raise PermissionError("[WinError 5] Access is denied")
+
+            ui.write_json_atomic = write_once_then_locked
+            run_id, returned_status_path, pid = ui.launch_training(context, dict(options, run_id="ignored"))
+        finally:
+            ui.subprocess.Popen = old_popen
+            ui.prepare_training_launch = old_prepare
+            ui.write_json_atomic = old_write
+
+        self.assertEqual("train_started", run_id)
+        self.assertEqual(launch["status_path"], returned_status_path)
+        self.assertEqual(24680, pid)
 
     def test_fewshot_mimics_launches_external_setup_nonblocking(self):
         """Mimics Advanced entry starts the external setup process without waiting."""
@@ -2459,6 +2917,61 @@ class TestNewFeatures(unittest.TestCase):
         with open(context_path, "r") as handle:
             payload = json.load(handle)
         self.assertEqual(os.path.abspath(ts_root), payload["ts_root"])
+
+    def test_fewshot_status_viewer_context_write_error_is_diagnostic(self):
+        """Show Status should say when context JSON creation is the failing stage."""
+        import fewshot_mimics
+        ts_root = os.path.join(self.tmp, "dataset")
+        os.makedirs(ts_root)
+
+        old_write = fewshot_mimics._write_json_atomic
+        old_script = fewshot_mimics._status_viewer_script
+        old_project = fewshot_mimics._project_root
+        try:
+            fewshot_mimics._write_json_atomic = lambda _path, _payload: (_ for _ in ()).throw(
+                PermissionError("[WinError 5] Access is denied")
+            )
+            fewshot_mimics._project_root = lambda: PROJECT_ROOT
+            fewshot_mimics._status_viewer_script = lambda: os.path.join(PROJECT_ROOT, "tools", "fewshot_status_viewer.py")
+            with self.assertRaises(RuntimeError) as raised:
+                fewshot_mimics._launch_external_status_viewer(
+                    {"python": sys.executable, "dinov3_project": "external/dinov3-medical-seg"},
+                    ts_root,
+                )
+        finally:
+            fewshot_mimics._write_json_atomic = old_write
+            fewshot_mimics._status_viewer_script = old_script
+            fewshot_mimics._project_root = old_project
+        self.assertIn("launch context", str(raised.exception))
+        self.assertIn("_context.json", str(raised.exception))
+
+    def test_fewshot_status_viewer_process_start_error_is_diagnostic(self):
+        """Show Status should say when Popen is the failing stage."""
+        import fewshot_mimics
+        ts_root = os.path.join(self.tmp, "dataset")
+        os.makedirs(ts_root)
+
+        old_launch = fewshot_mimics._launch_process
+        old_script = fewshot_mimics._status_viewer_script
+        old_project = fewshot_mimics._project_root
+        try:
+            def denied_launch(_cmd, cwd=None):
+                raise PermissionError("[WinError 5] Access is denied")
+            fewshot_mimics._launch_process = denied_launch
+            fewshot_mimics._project_root = lambda: PROJECT_ROOT
+            fewshot_mimics._status_viewer_script = lambda: os.path.join(PROJECT_ROOT, "tools", "fewshot_status_viewer.py")
+            with self.assertRaises(RuntimeError) as raised:
+                fewshot_mimics._launch_external_status_viewer(
+                    {"python": sys.executable, "dinov3_project": "external/dinov3-medical-seg"},
+                    ts_root,
+                )
+        finally:
+            fewshot_mimics._launch_process = old_launch
+            fewshot_mimics._status_viewer_script = old_script
+            fewshot_mimics._project_root = old_project
+        self.assertIn("start the DINOv3 status viewer process", str(raised.exception))
+        self.assertIn("Python:", str(raised.exception))
+        self.assertIn("Script:", str(raised.exception))
 
 
 # ============================================================================

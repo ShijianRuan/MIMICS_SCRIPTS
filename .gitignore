@@ -13,3 +13,6 @@ __pycache__/
 
 # PyQt5 wheels (platform-specific, downloaded separately)
 tools/pyqt5_wheels/
+
+# Offline wheels (platform-specific, downloaded separately)
+wheels/

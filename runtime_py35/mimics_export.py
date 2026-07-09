@@ -192,8 +192,8 @@ def _background_env(extra=None):
 def _python_exe():
     env_root = _environment_root()
     candidates = [
-        os.path.join(env_root, "Scripts", "python.exe"),
         os.path.join(env_root, "python.exe"),
+        os.path.join(env_root, "Scripts", "python.exe"),
         os.path.join(env_root, "python", "python.exe"),
     ]
     for c in candidates:

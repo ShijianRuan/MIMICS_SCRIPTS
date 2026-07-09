@@ -56,7 +56,7 @@ def _yellow(t): return "\033[33m{}\033[0m".format(t)
 
 def _find_python():
     """Find the nninteractive_env Python executable."""
-    for rel in ("Scripts/python.exe", "python/python.exe", "bin/python3", "bin/python"):
+    for rel in ("python.exe", "Scripts/python.exe", "python/python.exe", "bin/python3", "bin/python"):
         p = PROJECT_ROOT / "nninteractive_env" / rel
         if p.is_file():
             return str(p)
@@ -107,7 +107,7 @@ def check():
     required_imports = [
         "torch", "numpy", "nibabel", "pydicom", "SimpleITK", "scipy",
         "nnInteractive", "torchvision", "transformers",
-        "yaml", "tqdm", "tensorboard",
+        "yaml", "tqdm", "tensorboard", "PySide6", "shiboken6",
     ]
     try:
         result = subprocess.run(
@@ -435,6 +435,10 @@ OFFLINE_WHEEL_PACKAGES_FALLBACK = [
     "pyyaml",
     "tqdm",
     "tensorboard",
+    "PySide6",
+    "PySide6_Essentials",
+    "PySide6_Addons",
+    "shiboken6",
 ]
 
 
@@ -499,6 +503,19 @@ def _download_torch_wheels(python_exe, wheels_dir, cuda_index):
     return True
 
 
+def _wheel_files_for_package(wheels_dir, pkg_name):
+    """Return wheel files matching *pkg_name* (case-insensitive, exact name match).
+
+    Uses ``pkg_name + "-"`` as the prefix so ``torch`` matches ``torch-2.5.1…``
+    but not ``torchvision-0.20.1…``.
+    """
+    prefix = pkg_name.lower() + "-"
+    return [
+        path for path in wheels_dir.glob("*.whl")
+        if path.name.lower().startswith(prefix)
+    ]
+
+
 def _download_one_wheel(python_exe, wheels_dir, pkg_spec, quiet=False):
     """Download a single package as a wheel, trying each mirror in order.
 
@@ -506,7 +523,7 @@ def _download_one_wheel(python_exe, wheels_dir, pkg_spec, quiet=False):
     """
     pkg_name = pkg_spec.split("==")[0].split(">=")[0].split("<=")[0].strip()
     # Check if already downloaded (glob with normalized name)
-    existing = list(wheels_dir.glob(pkg_name.replace("-", "_") + "*"))
+    existing = _wheel_files_for_package(wheels_dir, pkg_name)
     if existing:
         return True
 
@@ -556,7 +573,7 @@ def _batch_download_wheels(python_exe, wheels_dir, packages, cuda_index, quiet=F
     for i, pkg_spec in enumerate(normal_pkgs):
         pkg_name = pkg_spec.split("==")[0].strip()
         # Skip if already downloaded
-        existing = list(wheels_dir.glob(pkg_name.replace("-", "_") + "*"))
+        existing = _wheel_files_for_package(wheels_dir, pkg_name)
         if existing:
             success_count += 1
             if not quiet:
@@ -590,7 +607,7 @@ def _ensure_bootstrap_wheels(python_exe, wheels_dir):
     present = []
     missing = []
     for spec in bootstrap_specs:
-        if list(wheels_dir.glob(spec.replace("-", "_") + "-*")):
+        if _wheel_files_for_package(wheels_dir, spec):
             present.append(spec)
         else:
             missing.append(spec)
@@ -633,6 +650,10 @@ def offline_bundle():
     print("  CUDA index: {}".format(cuda_index))
     print("  Python exe: {}".format(python_exe or "NOT FOUND"))
     print()
+    if not python_exe:
+        print("  {} nninteractive_env Python was not found.".format(_red("[!!]")))
+        print("    Build/check nninteractive_env first; offline-bundle must download wheels from that environment.")
+        return 1
 
     bundle_dir = PROJECT_ROOT.parent / "mimics_script_offline"
     if bundle_dir.exists():
@@ -690,7 +711,7 @@ def offline_bundle():
 
     # Use the nninteractive_env Python (not sys.executable) so pip downloads
     # wheels matching the correct Python version and platform.
-    download_python = python_exe or sys.executable
+    download_python = python_exe
 
     # 2a. Download torch + torchvision from PyTorch CUDA index FIRST.
     #     This is critical: PyPI mirrors do NOT host CUDA torch wheels.
@@ -737,8 +758,8 @@ def offline_bundle():
     # Verify key packages
     print()
     print("  Verifying key packages in wheels/:")
-    for pkg in ["torch", "numpy", "nibabel", "nnInteractive", "scipy"]:
-        found = list(wheels_dir.glob(pkg.replace("-", "_") + "*"))
+    for pkg in ["torch", "numpy", "nibabel", "nnInteractive", "scipy", "PySide6", "shiboken6"]:
+        found = _wheel_files_for_package(wheels_dir, pkg)
         if found:
             print("    {} {}: {} file(s)".format(_green("[OK]"), pkg, len(found)))
         else:
@@ -821,7 +842,7 @@ def _generate_offline_bat(python_version, python_short):
     lines.append("cd /d %~dp0")
     lines.append("")
     lines.append(":: 1. Setup Python embeddable (self-contained, no system Python needed)")
-    lines.append('echo [1/5] Setting up Python {}...'.format(python_version))
+    lines.append('echo [1/6] Setting up Python {}...'.format(python_version))
     lines.append('if not exist "nninteractive_env\\python.exe" (')
     lines.append('    echo   Extracting Python embeddable...')
     lines.append('    if not exist "python\\python.exe" (')
@@ -835,13 +856,20 @@ def _generate_offline_bat(python_version, python_short):
     lines.append('    echo   Configuring {}...'.format(pth_name))
     lines.append('    echo {} > nninteractive_env\\{}'.format(zip_name, pth_name))
     lines.append('    echo . >> nninteractive_env\\{}'.format(pth_name))
+    lines.append('    echo Lib >> nninteractive_env\\{}'.format(pth_name))
     lines.append('    echo Lib\\site-packages >> nninteractive_env\\{}'.format(pth_name))
     lines.append('    echo import site >> nninteractive_env\\{}'.format(pth_name))
     lines.append(")")
+    lines.append(':: Ensure Lib is on the path (idempotent; also covers upgraded installs)')
+    lines.append('echo {} > nninteractive_env\\{}'.format(zip_name, pth_name))
+    lines.append('echo . >> nninteractive_env\\{}'.format(pth_name))
+    lines.append('echo Lib >> nninteractive_env\\{}'.format(pth_name))
+    lines.append('echo Lib\\site-packages >> nninteractive_env\\{}'.format(pth_name))
+    lines.append('echo import site >> nninteractive_env\\{}'.format(pth_name))
     lines.append('if not exist "nninteractive_env\\Lib\\site-packages" mkdir nninteractive_env\\Lib\\site-packages')
     lines.append("")
     lines.append(":: 2. Install pip (try ensurepip, fallback to get-pip.py)")
-    lines.append('echo [2/5] Installing pip...')
+    lines.append('echo [2/6] Installing pip...')
     lines.append('nninteractive_env\\python.exe -m pip --version >nul 2>&1')
     lines.append('if !errorlevel! neq 0 (')
     lines.append('    echo   Trying ensurepip...')
@@ -869,7 +897,7 @@ def _generate_offline_bat(python_version, python_short):
     lines.append('echo   pip is ready.')
     lines.append("")
     lines.append(":: 3. Check wheels directory")
-    lines.append('echo [3/5] Checking wheels...')
+    lines.append('echo [3/6] Checking wheels...')
     lines.append('if not exist "wheels\\*.whl" (')
     lines.append('    echo   ERROR: No .whl files found in wheels\\ directory.')
     lines.append('    echo   The wheels/ directory must contain all required packages.')
@@ -880,7 +908,7 @@ def _generate_offline_bat(python_version, python_short):
     lines.append('echo   Wheels directory OK.')
     lines.append("")
     lines.append(":: 4. Install all wheels offline (no internet, no system Python)")
-    lines.append('echo [4/5] Installing packages from local wheels (no internet)...')
+    lines.append('echo [4/6] Installing packages from local wheels (no internet)...')
     lines.append('set FAIL_COUNT=0')
     lines.append('for %%f in (wheels\\*.whl) do (')
     lines.append('    echo   Installing %%~nxf...')
@@ -891,16 +919,34 @@ def _generate_offline_bat(python_version, python_short):
     lines.append("    )")
     lines.append(")")
     lines.append('echo   Installation complete. !FAIL_COUNT! package(s) failed.')
+    lines.append('echo   Ensuring PySide6 advanced UI wheels are installed consistently...')
+    lines.append('nninteractive_env\\python.exe -m pip install PySide6 shiboken6 --no-index --find-links="wheels" --upgrade --quiet')
+    lines.append('if !errorlevel! neq 0 (')
+    lines.append('    echo   ERROR: PySide6 installation failed.')
+    lines.append('    echo   Make sure wheels\\ contains matching PySide6, PySide6_Essentials, PySide6_Addons, and shiboken6 Windows wheels.')
+    lines.append("    pause")
+    lines.append("    exit /b 1")
+    lines.append(")")
     lines.append("")
-    lines.append(":: 5. Verify")
-    lines.append('echo [5/5] Verifying installation...')
+    lines.append(":: 5. Verify external GUI backend")
+    lines.append('echo [5/6] Verifying PySide6 external UI backend...')
+    lines.append("nninteractive_env\\python.exe -c \"import PySide6, shiboken6; from PySide6 import QtCore, QtWidgets; print('  PySide6', QtCore.__version__)\"")
+    lines.append('if !errorlevel! neq 0 (')
+    lines.append("    echo   ERROR: PySide6 import failed.")
+    lines.append("    echo   Advanced DINOv3 Setup and Status windows require PySide6 in nninteractive_env.")
+    lines.append("    pause")
+    lines.append("    exit /b 1")
+    lines.append(")")
+    lines.append("")
+    lines.append(":: 6. Verify")
+    lines.append('echo [6/6] Verifying installation...')
     lines.append("nninteractive_env\\python.exe -c \"import torch; print('  torch', torch.__version__); print('  CUDA available:', torch.cuda.is_available())\"")
     lines.append('if !errorlevel! neq 0 (')
     lines.append("    echo   ERROR: torch import failed.")
     lines.append("    pause")
     lines.append("    exit /b 1")
     lines.append(")")
-    lines.append("nninteractive_env\\python.exe -c \"import numpy, nibabel, pydicom, SimpleITK, scipy, nnInteractive, torchvision, transformers, yaml, tqdm; print('  All packages OK')\"")
+    lines.append("nninteractive_env\\python.exe -c \"import numpy, nibabel, pydicom, SimpleITK, scipy, nnInteractive, torchvision, transformers, yaml, tqdm, PySide6, shiboken6; print('  All packages OK')\"")
     lines.append('if !errorlevel! neq 0 (')
     lines.append("    echo   Some packages failed to import.")
     lines.append('    echo   Try: nninteractive_env\\python.exe -m pip install wheels\\*.whl --no-deps --no-index')

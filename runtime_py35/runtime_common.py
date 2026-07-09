@@ -14,15 +14,20 @@ INVALID_LOCK_GRACE_SECONDS = 5.0
 
 
 def write_json_atomic(path, value):
+    text = json.dumps(value, indent=2, sort_keys=True) + "\n"
+    write_text_atomic(path, text)
+
+
+def write_text_atomic(path, text):
     parent = os.path.dirname(path)
     last_error = None
-    for attempt in range(10):
-        if parent and not os.path.isdir(parent):
-            os.makedirs(parent)
+    if parent and not os.path.isdir(parent):
+        os.makedirs(parent)
+    for attempt in range(12):
         temporary = path + "." + uuid.uuid4().hex + ".tmp"
         try:
             with open(temporary, "w") as handle:
-                json.dump(value, handle, indent=2, sort_keys=True)
+                handle.write(str(text))
                 try:
                     handle.flush()
                     os.fsync(handle.fileno())
@@ -37,7 +42,7 @@ def write_json_atomic(path, value):
                     os.remove(temporary)
             except Exception:
                 pass
-            time.sleep(min(0.5, 0.05 * (attempt + 1)))
+            time.sleep(min(0.15, 0.02 * (attempt + 1)))
     if last_error is not None:
         raise last_error
 
@@ -225,11 +230,15 @@ def release_resource_lock(path, token):
     current = read_json(path, {}) or {}
     if token and current.get("token") != token:
         return False
-    try:
-        os.remove(path)
-        return True
-    except OSError:
-        return True
+    for attempt in range(8):
+        try:
+            os.remove(path)
+            return True
+        except OSError:
+            if not os.path.exists(path):
+                return True
+            time.sleep(min(0.15, 0.03 * (attempt + 1)))
+    return False
 
 
 def cleanup_stale_resource_locks(lock_dir):

@@ -33,11 +33,64 @@ RESOURCE_LOCK_DIR = ROOT / ".mimics_runtime" / "locks"
 BACKGROUND_MIMICS_LOCK_PATH = RESOURCE_LOCK_DIR / "background_mimics.lock"
 
 
-def write_json_atomic(path, payload):
+def project_python_candidates():
+    return [
+        ROOT / "nninteractive_env" / "python.exe",
+        ROOT / "nninteractive_env" / "Scripts" / "python.exe",
+        ROOT / "nninteractive_env" / "python" / "python.exe",
+        ROOT / "nninteractive_env" / "bin" / "python3",
+        ROOT / "nninteractive_env" / "bin" / "python",
+    ]
+
+
+def resolve_bridge_python(explicit=None):
+    candidates = []
+    if explicit:
+        path = Path(explicit)
+        if not path.is_absolute():
+            path = ROOT / path
+        candidates.append(path)
+    candidates.extend(project_python_candidates())
+    env_value = os.environ.get("MIMICS_BRIDGE_PYTHON") or os.environ.get("MIMICS_FEWSHOT_PYTHON")
+    if env_value:
+        path = Path(env_value)
+        if not path.is_absolute():
+            path = ROOT / path
+        candidates.append(path)
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    raise RuntimeError(
+        "The nninteractive_env Python was not found. Run setup_offline.bat or pass --python explicitly."
+    )
+
+
+def write_json_atomic(path, payload, retries=20, max_sleep=0.25):
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    os.replace(str(tmp), str(path))
+    text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    last_error = None
+    for attempt in range(max(1, int(retries))):
+        tmp = path.with_name(path.name + "." + str(os.getpid()) + "." + uuid.uuid4().hex + ".tmp")
+        try:
+            with tmp.open("w", encoding="utf-8") as handle:
+                handle.write(text)
+                try:
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                except Exception:
+                    pass
+            os.replace(str(tmp), str(path))
+            return
+        except OSError as exc:
+            last_error = exc
+            try:
+                if tmp.is_file():
+                    tmp.unlink()
+            except Exception:
+                pass
+            time.sleep(min(float(max_sleep), 0.05 * (attempt + 1)))
+    if last_error is not None:
+        raise last_error
 
 
 def run_bridge(python_exe, params):
@@ -99,14 +152,14 @@ def _acquire_background_mimics_lock(owner, wait_seconds=0.0):
     return lock
 
 
-def launch_create_mcs(output_dir, mimics_exe, lock_timeout_seconds=0.0):
+def launch_create_mcs(output_dir, mimics_exe, bridge_python, lock_timeout_seconds=0.0):
     runner = output_dir / "_run_create_mcs.py"
     runner.write_text(
         "\n".join([
             "# Auto-generated runner for background Mimics .mcs creation",
             "import sys, os",
             "sys.path.insert(0, r'{}')".format(str(RUNTIME)),
-            "os.environ['MIMICS_BRIDGE_PYTHON'] = r'{}'".format(str(sys.executable)),
+            "os.environ['MIMICS_BRIDGE_PYTHON'] = r'{}'".format(str(bridge_python)),
             "os.environ['MIMICS_BRIDGE_SCRIPT'] = r'{}'".format(str(ROOT / "mimics_bridge.py")),
             "import create_mcs_batch",
             "create_mcs_batch.main(r'{}')".format(str(output_dir)),
@@ -177,10 +230,11 @@ def launch_export_labels(ts_root, cases, mimics_exe, axes, flips, lock_timeout_s
 
 def cmd_prepare_import(args):
     ts_root = Path(args.ts_root).resolve()
+    bridge_python = resolve_bridge_python(args.python)
     output_dir = Path(args.output_dir).resolve() if args.output_dir else ts_root / "mcs_output"
     output_dir.mkdir(parents=True, exist_ok=True)
     cases_filter = set(args.cases.split(",")) if args.cases else None
-    cases = discover_cases(ts_root, cases_filter, args.python)
+    cases = discover_cases(ts_root, cases_filter, bridge_python)
     print("Discovered {} case(s).".format(len(cases)))
     write_json_atomic(output_dir / "_mcs_queue_active.json", {"total": len(cases), "created_at_epoch": time.time()})
     completed = 0
@@ -200,7 +254,7 @@ def cmd_prepare_import(args):
             "case_id": case_id,
         }
         try:
-            result = run_bridge(args.python, params)
+            result = run_bridge(bridge_python, params)
             result["output_mcs"] = str(output_dir / (case_id + ".mcs"))
             write_json_atomic(work_dir / "prepare_manifest.json", result)
             completed += 1
@@ -220,7 +274,7 @@ def cmd_prepare_import(args):
         print("MimicsResearch.exe was not found. Manifests are ready; run .mcs creation later.", file=sys.stderr)
         return 2
     try:
-        proc = launch_create_mcs(output_dir, mimics_exe, args.background_mimics_lock_timeout_seconds)
+        proc = launch_create_mcs(output_dir, mimics_exe, bridge_python, args.background_mimics_lock_timeout_seconds)
     except ResourceLockTimeout as exc:
         print("Background Mimics is busy: {}".format(exc), file=sys.stderr)
         return 75
@@ -387,7 +441,7 @@ def main(argv=None):
     p.add_argument("--ts-root", required=True)
     p.add_argument("--output-dir")
     p.add_argument("--cases")
-    p.add_argument("--python", default=sys.executable)
+    p.add_argument("--python")
     p.add_argument("--mimics-exe")
     p.add_argument("--axes", type=parse_axes, default=[0, 1, 2])
     p.add_argument("--flips", type=parse_flips, default=[False, False, False])

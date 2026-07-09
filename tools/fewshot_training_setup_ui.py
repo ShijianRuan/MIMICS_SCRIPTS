@@ -30,14 +30,42 @@ def read_json(path, default=None):
         return default
 
 
-def write_json_atomic(path, payload):
+def write_json_atomic(path, payload, retries=20, max_sleep=0.25):
     parent = os.path.dirname(os.path.abspath(path))
     if parent and not os.path.isdir(parent):
         os.makedirs(parent)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, sort_keys=True)
-    os.replace(tmp, path)
+    text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    last_error = None
+    for attempt in range(max(1, int(retries))):
+        tmp = path + "." + str(os.getpid()) + "." + uuid.uuid4().hex + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as handle:
+                handle.write(text)
+                try:
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                except Exception:
+                    pass
+            os.replace(tmp, path)
+            return
+        except OSError as exc:
+            last_error = exc
+            try:
+                if os.path.isfile(tmp):
+                    os.remove(tmp)
+            except Exception:
+                pass
+            time.sleep(min(float(max_sleep), 0.05 * (attempt + 1)))
+    if last_error is not None:
+        raise last_error
+
+
+def write_json_best_effort(path, payload):
+    try:
+        write_json_atomic(path, payload, retries=8, max_sleep=0.15)
+        return True
+    except Exception:
+        return False
 
 
 def safe_slug(value):
@@ -305,15 +333,15 @@ def launch_training(context, options):
         payload["error"] = "Could not start DINOv3 training process."
         payload["traceback"] = traceback.format_exc()
         payload["updated_at_epoch"] = time.time()
-        write_json_atomic(launch["status_path"], payload)
+        write_json_best_effort(launch["status_path"], payload)
         raise
     payload = read_json(launch["status_path"], launch["job_payload"]) or launch["job_payload"]
     payload["launcher_pid"] = process.pid
     payload["updated_at_epoch"] = time.time()
-    write_json_atomic(launch["status_path"], payload)
+    write_json_best_effort(launch["status_path"], payload)
     setup_status_path = context.get("setup_status_path")
     if setup_status_path:
-        write_json_atomic(setup_status_path, {
+        write_json_best_effort(setup_status_path, {
             "schema_version": "mimics_fewshot_setup.v1",
             "job_id": context.get("setup_id"),
             "kind": "train_setup",
@@ -1084,7 +1112,7 @@ class TrainingSetupApp(object):
         path = self.context.get("setup_status_path")
         if not path:
             return
-        write_json_atomic(path, {
+        write_json_best_effort(path, {
             "schema_version": "mimics_fewshot_setup.v1",
             "job_id": self.context.get("setup_id"),
             "kind": "train_setup",
@@ -1105,23 +1133,716 @@ class TrainingSetupApp(object):
                     "status": "closed",
                     "updated_at_epoch": time.time(),
                 })
-                write_json_atomic(path, payload)
+                write_json_best_effort(path, payload)
         self.root.destroy()
 
 
+def _load_pyside6():
+    from PySide6 import QtCore, QtGui, QtWidgets
+    return QtCore, QtGui, QtWidgets
+
+
+class QtTrainingSetupApp(object):
+    """PySide6 implementation of the external training setup window."""
+
+    EPOCH_CHOICES = TrainingSetupApp.EPOCH_CHOICES
+    VAL_CHOICES = TrainingSetupApp.VAL_CHOICES
+    MEMORY_CHOICES = TrainingSetupApp.MEMORY_CHOICES
+    LR_CHOICES = TrainingSetupApp.LR_CHOICES
+    WEIGHT_DECAY_CHOICES = TrainingSetupApp.WEIGHT_DECAY_CHOICES
+    IMG_SIZE_CHOICES = TrainingSetupApp.IMG_SIZE_CHOICES
+    IMG_SIZE_CUSTOM_LABEL = TrainingSetupApp.IMG_SIZE_CUSTOM_LABEL
+    SUB_VOLUME_DEPTH_CHOICES = TrainingSetupApp.SUB_VOLUME_DEPTH_CHOICES
+
+    def __init__(self, window, context, qt_modules):
+        self.window = window
+        self.context = context
+        self.QtCore, self.QtGui, self.QtWidgets = qt_modules
+        self.config = context.get("config") or {}
+        self.profiles = self.config.get("training_profiles") or {}
+        self.profile_names = sorted(self.profiles.keys()) if isinstance(self.profiles, dict) else []
+        default_profile = self.config.get("default_training_profile") or (self.profile_names[0] if self.profile_names else "")
+        self.values = default_training_options(self.config, default_profile)
+        self.widgets = {}
+        self.quick_widgets = {}
+        self.case_list = None
+        self.manual_cases = None
+        self.status_label = None
+        self.status_text = None
+        self.start_button = None
+        self.open_log_button = None
+        self.close_button = None
+        self.training_status_path = None
+        self.training_log_dir = ""
+        self.last_status_line = ""
+        self.started = False
+        self._closing = False
+        self._syncing_quick = False
+        self._build()
+
+    def _build(self):
+        QtCore, QtGui, QtWidgets = self.QtCore, self.QtGui, self.QtWidgets
+        self.window.setWindowTitle(TITLE)
+        width, height, min_width, min_height = window_layout_for_screen(1280, 900)
+        screen = QtWidgets.QApplication.primaryScreen()
+        if screen is not None:
+            size = screen.availableGeometry().size()
+            width, height, min_width, min_height = window_layout_for_screen(size.width(), size.height())
+        self.window.resize(width, height)
+        self.window.setMinimumSize(min_width, min_height)
+        self.window.setStyleSheet(self._stylesheet())
+
+        central = QtWidgets.QWidget()
+        outer = QtWidgets.QVBoxLayout(central)
+        outer.setContentsMargins(16, 14, 16, 12)
+        outer.setSpacing(10)
+
+        title = QtWidgets.QLabel("DINOv3 Few-Shot Training")
+        title.setObjectName("titleLabel")
+        subtitle = QtWidgets.QLabel("Organ: {0}    Dataset: {1}".format(
+            self.context.get("organ", "?"),
+            self.context.get("ts_root", "?"),
+        ))
+        subtitle.setObjectName("subtitleLabel")
+        warning = QtWidgets.QLabel(
+            "Save edited .mcs projects before starting. Training exports labels from saved projects in the background."
+        )
+        warning.setObjectName("warningLabel")
+        warning.setWordWrap(True)
+        outer.addWidget(title)
+        outer.addWidget(subtitle)
+        outer.addWidget(warning)
+
+        tabs = QtWidgets.QTabWidget()
+        tabs.addTab(self._build_setup_tab(), "Setup")
+        tabs.addTab(self._build_expert_tab(), "Expert")
+        outer.addWidget(tabs, 1)
+
+        status_group = QtWidgets.QGroupBox("Status")
+        status_layout = QtWidgets.QVBoxLayout(status_group)
+        self.status_text = QtWidgets.QTextEdit()
+        self.status_text.setReadOnly(True)
+        self.status_text.setFixedHeight(94)
+        status_layout.addWidget(self.status_text)
+        outer.addWidget(status_group)
+        self._append_log("Ready. Choose a profile and samples, then start background training.")
+
+        footer = QtWidgets.QHBoxLayout()
+        self.status_label = QtWidgets.QLabel("Configure samples and parameters, then start background training.")
+        self.status_label.setWordWrap(True)
+        footer.addWidget(self.status_label, 1)
+        self.close_button = QtWidgets.QPushButton("Cancel")
+        self.close_button.clicked.connect(self.close)
+        footer.addWidget(self.close_button)
+        self.open_log_button = QtWidgets.QPushButton("Open Log Folder")
+        self.open_log_button.setEnabled(False)
+        self.open_log_button.clicked.connect(self.open_log_folder)
+        footer.addWidget(self.open_log_button)
+        self.start_button = QtWidgets.QPushButton("Start Training")
+        self.start_button.setObjectName("primaryButton")
+        self.start_button.clicked.connect(self.start_training)
+        footer.addWidget(self.start_button)
+        outer.addLayout(footer)
+        self.window.setCentralWidget(central)
+
+        shortcut_start = QtGuiShortcut(QtGui, "Return", self.window)
+        shortcut_start.activated.connect(self.start_training)
+        shortcut_close = QtGuiShortcut(QtGui, "Escape", self.window)
+        shortcut_close.activated.connect(self.close)
+        self.shortcuts = [shortcut_start, shortcut_close]
+        self._refresh_quick_labels()
+
+    def _stylesheet(self):
+        return """
+        QMainWindow, QWidget { background: #f4f5f7; color: #111827; font-family: Segoe UI, Arial; font-size: 10pt; }
+        QLabel#titleLabel { font-size: 17pt; font-weight: 700; color: #111827; }
+        QLabel#subtitleLabel { color: #374151; }
+        QLabel#warningLabel { color: #9a5b00; }
+        QGroupBox { background: #ffffff; border: 1px solid #d1d5db; border-radius: 6px; margin-top: 10px; padding-top: 12px; }
+        QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 4px; color: #111827; font-weight: 600; }
+        QTabWidget::pane { border: 1px solid #d1d5db; background: #ffffff; border-radius: 6px; }
+        QTabBar::tab { padding: 8px 18px; background: #f9fafb; border: 1px solid #d1d5db; border-bottom: none; }
+        QTabBar::tab:selected { background: #ffffff; color: #111827; font-weight: 600; }
+        QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QListWidget, QTextEdit {
+            background: #ffffff; border: 1px solid #cbd5e1; border-radius: 4px; padding: 4px;
+        }
+        QPushButton { background: #ffffff; border: 1px solid #9ca3af; border-radius: 4px; padding: 7px 13px; }
+        QPushButton:hover { background: #f3f4f6; }
+        QPushButton:disabled { color: #9ca3af; background: #f3f4f6; }
+        QPushButton#primaryButton { background: #1f2937; color: #ffffff; border-color: #1f2937; font-weight: 600; }
+        QPushButton#primaryButton:hover { background: #111827; }
+        QListWidget::item:selected { background: #dbeafe; color: #111827; }
+        """
+
+    def _build_setup_tab(self):
+        QtWidgets = self.QtWidgets
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        profile_group = QtWidgets.QGroupBox("Training profile")
+        profile_layout = QtWidgets.QHBoxLayout(profile_group)
+        profile_layout.addWidget(QtWidgets.QLabel("Profile"))
+        profile = self._combo(self.profile_names, self.config.get("default_training_profile") or (self.profile_names[0] if self.profile_names else ""))
+        profile.currentTextChanged.connect(lambda _text: self.apply_profile())
+        self.quick_widgets["profile"] = profile
+        profile_layout.addWidget(profile)
+        profile_layout.addWidget(QtWidgets.QLabel("Use profiles for routine work; Expert is optional."), 1)
+        layout.addWidget(profile_group)
+
+        quick_group = QtWidgets.QGroupBox("Key settings")
+        quick_layout = QtWidgets.QGridLayout(quick_group)
+        quick_layout.setColumnStretch(0, 1)
+        quick_layout.setColumnStretch(1, 1)
+        quick_layout.setColumnStretch(2, 1)
+        epoch_label = _option_label(self.values.get("epochs", 10), self.EPOCH_CHOICES)
+        val_label = _option_label(self.values.get("val_fraction", 0.2), self.VAL_CHOICES)
+        memory_label = self._memory_mode_from_values(self.values)
+        self.quick_widgets["epochs_choice"] = self._combo(_labels_with_current(self.EPOCH_CHOICES, epoch_label), epoch_label)
+        self.quick_widgets["val_fraction_choice"] = self._combo(_labels_with_current(self.VAL_CHOICES, val_label), val_label)
+        self.quick_widgets["memory_mode"] = self._combo([label for label, _ in self.MEMORY_CHOICES], memory_label)
+        for col, (label, widget) in enumerate([
+            ("Training length", self.quick_widgets["epochs_choice"]),
+            ("Validation", self.quick_widgets["val_fraction_choice"]),
+            ("Resource preset", self.quick_widgets["memory_mode"]),
+        ]):
+            quick_layout.addWidget(QtWidgets.QLabel(label), 0, col)
+            quick_layout.addWidget(widget, 1, col)
+            widget.currentTextChanged.connect(self._sync_quick_settings)
+        layout.addWidget(quick_group)
+
+        sample_group = QtWidgets.QGroupBox("Samples")
+        sample_layout = QtWidgets.QVBoxLayout(sample_group)
+        sample_controls = QtWidgets.QHBoxLayout()
+        sample_controls.addWidget(QtWidgets.QLabel("Sample order"))
+        self.widgets["sample_mode"] = self._combo(["all", "latest"], self.values.get("sample_mode", "all"))
+        sample_controls.addWidget(self.widgets["sample_mode"])
+        sample_controls.addSpacing(16)
+        sample_controls.addWidget(QtWidgets.QLabel("Max samples"))
+        self.widgets["max_samples"] = self._spin(0, 100000, self.values.get("max_samples", 0))
+        sample_controls.addWidget(self.widgets["max_samples"])
+        sample_controls.addStretch(1)
+        sample_layout.addLayout(sample_controls)
+
+        middle = QtWidgets.QHBoxLayout()
+        self.case_list = QtWidgets.QListWidget()
+        self.case_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        for case_id in self.context.get("case_ids", []) or []:
+            self.case_list.addItem(str(case_id))
+        middle.addWidget(self.case_list, 1)
+        side = QtWidgets.QVBoxLayout()
+        select_all = QtWidgets.QPushButton("Select All")
+        select_all.clicked.connect(self._select_all_cases)
+        clear = QtWidgets.QPushButton("Clear")
+        clear.clicked.connect(self.case_list.clearSelection)
+        side.addWidget(select_all)
+        side.addWidget(clear)
+        side.addSpacing(12)
+        side.addWidget(QtWidgets.QLabel("{0} case(s) found".format(len(self.context.get("case_ids", []) or []))))
+        hint = QtWidgets.QLabel("Selected cases override sample order.")
+        hint.setWordWrap(True)
+        side.addWidget(hint)
+        side.addStretch(1)
+        middle.addLayout(side)
+        sample_layout.addLayout(middle, 1)
+
+        manual = QtWidgets.QHBoxLayout()
+        manual.addWidget(QtWidgets.QLabel("Manual cases"))
+        self.manual_cases = QtWidgets.QLineEdit()
+        manual.addWidget(self.manual_cases, 1)
+        sample_layout.addLayout(manual)
+
+        mins = QtWidgets.QHBoxLayout()
+        mins.addWidget(QtWidgets.QLabel("Min train"))
+        self.widgets["min_samples"] = self._spin(1, 100000, self.values.get("min_samples", 1))
+        mins.addWidget(self.widgets["min_samples"])
+        mins.addWidget(QtWidgets.QLabel("Min val"))
+        self.widgets["min_val_samples"] = self._spin(0, 100000, self.values.get("min_val_samples", 1))
+        mins.addWidget(self.widgets["min_val_samples"])
+        mins.addStretch(1)
+        sample_layout.addLayout(mins)
+        layout.addWidget(sample_group, 1)
+        return tab
+
+    def _build_expert_tab(self):
+        QtWidgets = self.QtWidgets
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QHBoxLayout(tab)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(12)
+        left = QtWidgets.QGroupBox("Model and task")
+        right = QtWidgets.QGroupBox("Training and resources")
+        left_form = QtWidgets.QFormLayout(left)
+        right_form = QtWidgets.QFormLayout(right)
+        left_form.setLabelAlignment(self.QtCore.Qt.AlignRight)
+        right_form.setLabelAlignment(self.QtCore.Qt.AlignRight)
+
+        model_hint = QtWidgets.QLabel("These change the model family used for this organ. Keep defaults unless comparing strategies.")
+        model_hint.setWordWrap(True)
+        left_form.addRow(model_hint)
+        self.widgets["finetune_method"] = self._combo(["lora", "frozen", "adapter", "full"], self.values.get("finetune_method", "lora"))
+        self.widgets["decoder"] = self._combo(["segformer3d", "mlp_probe", "linear3d", "dpt3d"], self.values.get("decoder", "segformer3d"))
+        self.widgets["model_scale"] = self._combo(self._available_model_scales(), self.values.get("model_scale", "vitb16"))
+        self.widgets["lora_rank"] = self._spin(1, 128, self.values.get("lora_rank", 8))
+        self.widgets["lora_alpha"] = self._spin(1, 512, self.values.get("lora_alpha", 16))
+        self.widgets["adapter_bottleneck"] = self._spin(1, 512, self.values.get("adapter_bottleneck", 64))
+        for label, key in [
+            ("Fine-tuning", "finetune_method"),
+            ("Decoder", "decoder"),
+            ("Pretrained scale", "model_scale"),
+            ("LoRA rank", "lora_rank"),
+            ("LoRA alpha", "lora_alpha"),
+            ("Adapter bottleneck", "adapter_bottleneck"),
+        ]:
+            left_form.addRow(label, self.widgets[key])
+        backend_hint = QtWidgets.QLabel("Backend template, modality, and custom weight path are controlled by fewshot_config.json.")
+        backend_hint.setWordWrap(True)
+        left_form.addRow(backend_hint)
+
+        resource_hint = QtWidgets.QLabel("These affect runtime, memory use, validation, and disk retention.")
+        resource_hint.setWordWrap(True)
+        right_form.addRow(resource_hint)
+        self.widgets["epochs"] = self._spin(1, 10000, self.values.get("epochs", 10))
+        self.widgets["batch_size"] = self._spin(1, 128, self.values.get("batch_size", 1))
+        self.widgets["grad_accumulation"] = self._spin(1, 1024, self.values.get("grad_accumulation", 1))
+        self.widgets["lr"] = self._combo(self.LR_CHOICES, self.values.get("lr", "0.001"), editable=True)
+        self.widgets["weight_decay"] = self._combo(self.WEIGHT_DECAY_CHOICES, self.values.get("weight_decay", "0.01"), editable=True)
+        img_label = self._img_size_choice_from_value(self.values.get("img_size", "224,224"))
+        self.quick_widgets["img_size_choice"] = self._combo([label for label, _ in self.IMG_SIZE_CHOICES] + [self.IMG_SIZE_CUSTOM_LABEL], img_label)
+        self.widgets["img_size"] = QtWidgets.QLineEdit(str(self.values.get("img_size", "224,224")))
+        self.widgets["sub_volume_depth"] = self._combo(self.SUB_VOLUME_DEPTH_CHOICES, self._sub_volume_depth_from_values(self.values))
+        self.widgets["keep_last_checkpoints"] = self._spin(0, 1000, self.values.get("keep_last_checkpoints", 2))
+        self.widgets["val_fraction"] = self._double_spin(0.0, 0.9, self.values.get("val_fraction", 0.2), 0.05)
+        self.widgets["mixed_precision"] = QtWidgets.QCheckBox("Mixed precision")
+        self.widgets["mixed_precision"].setChecked(_bool(self.values.get("mixed_precision", False)))
+        self.widgets["sub_volume"] = QtWidgets.QCheckBox("Sub-volume training")
+        self.widgets["sub_volume"].setChecked(_bool(self.values.get("sub_volume", False)))
+
+        for label, key in [
+            ("Epochs", "epochs"),
+            ("Batch size", "batch_size"),
+            ("Grad accumulation", "grad_accumulation"),
+            ("Learning rate", "lr"),
+            ("Weight decay", "weight_decay"),
+        ]:
+            right_form.addRow(label, self.widgets[key])
+        right_form.addRow("Image detail", self.quick_widgets["img_size_choice"])
+        right_form.addRow("Custom size", self.widgets["img_size"])
+        right_form.addRow("Sub-volume depth", self.widgets["sub_volume_depth"])
+        right_form.addRow("Keep checkpoints", self.widgets["keep_last_checkpoints"])
+        right_form.addRow("Validation fraction", self.widgets["val_fraction"])
+        check_row = QtWidgets.QHBoxLayout()
+        check_row.addWidget(self.widgets["mixed_precision"])
+        check_row.addWidget(self.widgets["sub_volume"])
+        check_row.addStretch(1)
+        right_form.addRow(check_row)
+
+        self.quick_widgets["img_size_choice"].currentTextChanged.connect(self._sync_image_size_choice)
+        self.widgets["img_size"].textChanged.connect(self._sync_custom_image_size)
+        for key in ("epochs", "batch_size", "grad_accumulation", "val_fraction", "sub_volume_depth"):
+            self._connect_change(key, self._refresh_quick_labels)
+        self.widgets["sub_volume"].stateChanged.connect(self._refresh_quick_labels)
+        self._set_custom_size_entry_state()
+        layout.addWidget(left, 1)
+        layout.addWidget(right, 1)
+        return tab
+
+    def _combo(self, values, current="", editable=False):
+        combo = self.QtWidgets.QComboBox()
+        combo.setEditable(bool(editable))
+        text_values = [str(value) for value in values if str(value)]
+        combo.addItems(text_values)
+        current = str(current or "")
+        if current and combo.findText(current) < 0:
+            combo.addItem(current)
+        if current:
+            combo.setCurrentText(current)
+        return combo
+
+    def _spin(self, minimum, maximum, value, step=1):
+        widget = self.QtWidgets.QSpinBox()
+        widget.setRange(int(minimum), int(maximum))
+        widget.setSingleStep(int(step))
+        try:
+            widget.setValue(int(value))
+        except Exception:
+            widget.setValue(int(minimum))
+        return widget
+
+    def _double_spin(self, minimum, maximum, value, step):
+        widget = self.QtWidgets.QDoubleSpinBox()
+        widget.setRange(float(minimum), float(maximum))
+        widget.setSingleStep(float(step))
+        widget.setDecimals(4)
+        try:
+            widget.setValue(float(value))
+        except Exception:
+            widget.setValue(float(minimum))
+        return widget
+
+    def _connect_change(self, key, callback):
+        widget = self.widgets.get(key)
+        if widget is None:
+            return
+        if hasattr(widget, "valueChanged"):
+            widget.valueChanged.connect(callback)
+        elif hasattr(widget, "currentTextChanged"):
+            widget.currentTextChanged.connect(callback)
+        elif hasattr(widget, "textChanged"):
+            widget.textChanged.connect(callback)
+
+    def _select_all_cases(self):
+        for idx in range(self.case_list.count()):
+            self.case_list.item(idx).setSelected(True)
+
+    def _available_model_scales(self):
+        app = object.__new__(TrainingSetupApp)
+        app.context = self.context
+        app.values = self.values
+        return TrainingSetupApp._available_model_scales(app)
+
+    def _sub_volume_depth_from_values(self, values):
+        parts = str(values.get("sub_volume_size", "32,256,256")).split(",")
+        depth = parts[0].strip() if parts else "32"
+        return depth if depth in self.SUB_VOLUME_DEPTH_CHOICES else "32"
+
+    def _img_size_choice_from_value(self, value):
+        for label, item in self.IMG_SIZE_CHOICES:
+            if str(item) == str(value):
+                return label
+        return self.IMG_SIZE_CUSTOM_LABEL
+
+    def _memory_mode_from_values(self, values):
+        sub_volume = _bool(values.get("sub_volume", False))
+        try:
+            grad_accumulation = int(values.get("grad_accumulation", 1) or 1)
+            batch_size = int(values.get("batch_size", 1) or 1)
+        except Exception:
+            return "Custom"
+        img_size = str(values.get("img_size", "") or "")
+        depth = self._sub_volume_depth_from_values(values)
+        if sub_volume and batch_size == 1 and grad_accumulation == 2 and img_size == "192,192" and depth == "24":
+            return "Low GPU memory"
+        if (not sub_volume) and batch_size == 1 and grad_accumulation == 2 and img_size == "256,256":
+            return "Higher quality"
+        if (not sub_volume) and batch_size == 1 and grad_accumulation == 1 and img_size == "224,224":
+            return "Balanced"
+        return "Custom"
+
+    def _widget_value(self, key):
+        widget = self.widgets.get(key)
+        if widget is None:
+            return self.values.get(key)
+        if isinstance(widget, self.QtWidgets.QCheckBox):
+            return bool(widget.isChecked())
+        if isinstance(widget, self.QtWidgets.QSpinBox):
+            return int(widget.value())
+        if isinstance(widget, self.QtWidgets.QDoubleSpinBox):
+            return float(widget.value())
+        if isinstance(widget, self.QtWidgets.QComboBox):
+            return str(widget.currentText())
+        if isinstance(widget, self.QtWidgets.QLineEdit):
+            return str(widget.text()).strip()
+        return self.values.get(key)
+
+    def _set_widget_value(self, key, value):
+        widget = self.widgets.get(key)
+        if widget is None:
+            self.values[key] = value
+            return
+        if isinstance(widget, self.QtWidgets.QCheckBox):
+            widget.setChecked(_bool(value))
+        elif isinstance(widget, self.QtWidgets.QSpinBox):
+            try:
+                widget.setValue(int(value))
+            except Exception:
+                pass
+        elif isinstance(widget, self.QtWidgets.QDoubleSpinBox):
+            try:
+                widget.setValue(float(value))
+            except Exception:
+                pass
+        elif isinstance(widget, self.QtWidgets.QComboBox):
+            text = str(value)
+            if widget.findText(text) < 0:
+                widget.addItem(text)
+            widget.setCurrentText(text)
+        elif isinstance(widget, self.QtWidgets.QLineEdit):
+            widget.setText(str(value))
+        self.values[key] = value
+
+    def _set_combo_value(self, widget, value):
+        text = str(value)
+        if widget.findText(text) < 0:
+            widget.addItem(text)
+        widget.setCurrentText(text)
+
+    def _current_values(self):
+        values = dict(self.values)
+        for key in list(self.widgets.keys()):
+            if key == "sub_volume_depth":
+                continue
+            values[key] = self._widget_value(key)
+        depth = self._widget_value("sub_volume_depth") or self._sub_volume_depth_from_values(values)
+        img_size = str(values.get("img_size", "224,224"))
+        parts = [part.strip() for part in img_size.split(",")]
+        if len(parts) == 2:
+            values["sub_volume_size"] = "{0},{1},{2}".format(depth, parts[0], parts[1])
+        return values
+
+    def _sync_image_size_choice(self):
+        choice = self.quick_widgets["img_size_choice"].currentText()
+        if choice == self.IMG_SIZE_CUSTOM_LABEL:
+            value = self.widgets["img_size"].text().strip()
+        else:
+            value = _choice_value(choice, self.IMG_SIZE_CHOICES)
+        if value:
+            self.widgets["img_size"].setText(str(value))
+        self._set_custom_size_entry_state()
+        self._refresh_quick_labels()
+
+    def _sync_custom_image_size(self):
+        if self.quick_widgets.get("img_size_choice") and self.quick_widgets["img_size_choice"].currentText() == self.IMG_SIZE_CUSTOM_LABEL:
+            self._refresh_quick_labels()
+
+    def _set_custom_size_entry_state(self):
+        widget = self.widgets.get("img_size")
+        choice = self.quick_widgets.get("img_size_choice")
+        if widget is not None and choice is not None:
+            widget.setEnabled(choice.currentText() == self.IMG_SIZE_CUSTOM_LABEL)
+
+    def _sync_quick_settings(self):
+        if self._syncing_quick:
+            return
+        self._syncing_quick = True
+        try:
+            epoch_value = _choice_value(self.quick_widgets["epochs_choice"].currentText(), self.EPOCH_CHOICES)
+            if epoch_value is not None:
+                self._set_widget_value("epochs", epoch_value)
+            val_value = _choice_value(self.quick_widgets["val_fraction_choice"].currentText(), self.VAL_CHOICES)
+            if val_value is not None:
+                self._set_widget_value("val_fraction", val_value)
+            mode = _choice_value(self.quick_widgets["memory_mode"].currentText(), self.MEMORY_CHOICES)
+            if mode == "low_memory":
+                self._set_widget_value("batch_size", 1)
+                self._set_widget_value("grad_accumulation", 2)
+                self.widgets["img_size"].setText("192,192")
+                self.widgets["sub_volume"].setChecked(True)
+                self._set_combo_value(self.widgets["sub_volume_depth"], "24")
+                self.widgets["mixed_precision"].setChecked(False)
+            elif mode == "quality":
+                self._set_widget_value("batch_size", 1)
+                self._set_widget_value("grad_accumulation", 2)
+                self.widgets["img_size"].setText("256,256")
+                self.widgets["sub_volume"].setChecked(False)
+                self._set_combo_value(self.widgets["sub_volume_depth"], "32")
+            elif mode == "balanced":
+                self._set_widget_value("batch_size", 1)
+                self._set_widget_value("grad_accumulation", 1)
+                self.widgets["img_size"].setText("224,224")
+                self.widgets["sub_volume"].setChecked(False)
+                self._set_combo_value(self.widgets["sub_volume_depth"], "32")
+        finally:
+            self._syncing_quick = False
+        self._refresh_quick_labels()
+
+    def _refresh_quick_labels(self):
+        if self._syncing_quick:
+            return
+        self._syncing_quick = True
+        try:
+            values = self._current_values()
+            self._set_combo_value(self.quick_widgets["epochs_choice"], _option_label(values.get("epochs", 10), self.EPOCH_CHOICES))
+            self._set_combo_value(self.quick_widgets["val_fraction_choice"], _option_label(values.get("val_fraction", 0.2), self.VAL_CHOICES))
+            self._set_combo_value(self.quick_widgets["memory_mode"], self._memory_mode_from_values(values))
+            img_label = self._img_size_choice_from_value(values.get("img_size", "224,224"))
+            self._set_combo_value(self.quick_widgets["img_size_choice"], img_label)
+            self._set_custom_size_entry_state()
+        finally:
+            self._syncing_quick = False
+
+    def apply_profile(self):
+        profile_widget = self.quick_widgets.get("profile")
+        profile_name = profile_widget.currentText() if profile_widget is not None else ""
+        values = default_training_options(self.config, profile_name)
+        for key, value in values.items():
+            self._set_widget_value(key, value)
+        self._set_combo_value(self.widgets["sub_volume_depth"], self._sub_volume_depth_from_values(values))
+        self._refresh_quick_labels()
+        self._set_status("Applied profile: {0}".format(profile_name or "default"))
+        self._append_log("Applied profile: {0}".format(profile_name or "default"))
+
+    def collect_options(self):
+        self._sync_image_size_choice()
+        options = self._current_values()
+        selected = []
+        if self.case_list is not None:
+            for item in self.case_list.selectedItems():
+                selected.append(str(item.text()))
+        manual = split_csv(self.manual_cases.text() if self.manual_cases is not None else "")
+        cases = selected + [case for case in manual if case not in selected]
+        if cases:
+            options["cases"] = cases
+            options["sample_mode"] = "all"
+        return validate_options(options)
+
+    def start_training(self):
+        if self.started:
+            return
+        try:
+            options = self.collect_options()
+        except Exception as exc:
+            self._set_status("Cannot start training: {0}".format(exc))
+            self._append_log("Cannot start training: {0}".format(exc))
+            return
+        try:
+            run_id, status_path, pid = launch_training(self.context, options)
+        except Exception as exc:
+            self._write_setup_failure(exc)
+            self._set_status("Could not start training: {0}".format(exc))
+            self._append_log("Could not start training: {0}".format(exc))
+            return
+        self.started = True
+        self.training_status_path = status_path
+        self.training_log_dir = os.path.dirname(os.path.dirname(status_path))
+        self.start_button.setEnabled(False)
+        self.open_log_button.setEnabled(True)
+        self.close_button.setText("Close")
+        self._set_status("Training started: {0} (PID {1})".format(run_id, pid))
+        self._append_log("Training started in the background: {0} (PID {1})".format(run_id, pid))
+        self._append_log("Status file: {0}".format(status_path))
+        self.QtCore.QTimer.singleShot(500, self.poll_training_status)
+
+    def poll_training_status(self):
+        if not self.training_status_path:
+            return
+        status = read_json(self.training_status_path, {}) or {}
+        line = format_status_line(status)
+        if line and line != self.last_status_line:
+            self.last_status_line = line
+            self._set_status(line)
+            self._append_log(line)
+        if status.get("train_log"):
+            self.training_log_dir = os.path.dirname(status.get("train_log"))
+        if status.get("status") in ("completed", "failed", "cancelled", "cancelling"):
+            return
+        self.QtCore.QTimer.singleShot(1500, self.poll_training_status)
+
+    def _append_log(self, text):
+        if self.status_text is None:
+            return
+        stamp = time.strftime("%H:%M:%S")
+        self.status_text.append("[{0}] {1}".format(stamp, text))
+
+    def _set_status(self, text):
+        if self.status_label is not None:
+            self.status_label.setText(str(text))
+
+    def open_log_folder(self):
+        folder = self.training_log_dir or os.path.join(self.context.get("workspace", ""), "jobs")
+        if not folder or not os.path.isdir(folder):
+            self._append_log("Log folder is not available yet.")
+            return
+        try:
+            if os.name == "nt":
+                os.startfile(folder)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", folder])
+            else:
+                subprocess.Popen(["xdg-open", folder])
+        except Exception as exc:
+            self._append_log("Could not open log folder: {0}".format(exc))
+
+    def _write_setup_failure(self, exc):
+        path = self.context.get("setup_status_path")
+        if not path:
+            return
+        write_json_best_effort(path, {
+            "schema_version": "mimics_fewshot_setup.v1",
+            "job_id": self.context.get("setup_id"),
+            "kind": "train_setup",
+            "status": "failed",
+            "organ": self.context.get("organ"),
+            "ts_root": os.path.abspath(self.context.get("ts_root", "")),
+            "error": str(exc),
+            "traceback": traceback.format_exc(),
+            "updated_at_epoch": time.time(),
+        })
+
+    def mark_closed_if_needed(self):
+        if self.started or self._closing:
+            return
+        self._closing = True
+        path = self.context.get("setup_status_path")
+        if path:
+            payload = read_json(path, {}) or {}
+            payload.update({
+                "status": "closed",
+                "updated_at_epoch": time.time(),
+            })
+            write_json_best_effort(path, payload)
+
+    def close(self):
+        self.mark_closed_if_needed()
+        self.window.close()
+
+
+def QtGuiShortcut(QtGui, key, parent):
+    return QtGui.QShortcut(QtGui.QKeySequence(key), parent)
+
+
+def run_pyside6_ui(context):
+    qt_modules = _load_pyside6()
+    QtCore, _QtGui, QtWidgets = qt_modules
+
+    class CloseAwareMainWindow(QtWidgets.QMainWindow):
+        def __init__(self):
+            QtWidgets.QMainWindow.__init__(self)
+            self.controller = None
+
+        def closeEvent(self, event):
+            if self.controller is not None:
+                self.controller.mark_closed_if_needed()
+            QtWidgets.QMainWindow.closeEvent(self, event)
+
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication(sys.argv[:1])
+    app.setApplicationName(TITLE)
+    try:
+        app.setStyle("Fusion")
+    except Exception:
+        pass
+    window = CloseAwareMainWindow()
+    controller = QtTrainingSetupApp(window, context, qt_modules)
+    window.controller = controller
+    window.show()
+    return app.exec()
+
+
 def run_ui(context):
+    errors = []
+    backend = os.environ.get("MIMICS_DINOV3_GUI_BACKEND", "auto").strip().lower()
+    if backend in ("", "auto", "pyside6", "qt"):
+        try:
+            return run_pyside6_ui(context)
+        except Exception as exc:
+            errors.append("PySide6: {0}".format(exc))
+            if backend in ("pyside6", "qt"):
+                raise
     try:
         import tkinter as tk
         from tkinter import messagebox  # noqa: F401
     except Exception as exc:
         message = (
-            "The external DINOv3 training setup window could not open because Tkinter is not available "
-            "in the configured external Python environment. Training was not started. Install Tkinter "
-            "for that Python environment or use the default Train/Update Model entry."
+            "The external DINOv3 training setup window could not open because neither PySide6 nor Tkinter "
+            "is available in the configured external Python environment. Training was not started. "
+            "Install the PySide6 Windows wheels in nninteractive_env, or use the default Train/Update Model entry."
         )
         setup_path = context.get("setup_status_path")
         if setup_path:
-            write_json_atomic(setup_path, {
+            write_json_best_effort(setup_path, {
                 "schema_version": "mimics_fewshot_setup.v1",
                 "job_id": context.get("setup_id"),
                 "kind": "train_setup",
@@ -1129,7 +1850,7 @@ def run_ui(context):
                 "organ": context.get("organ"),
                 "ts_root": os.path.abspath(context.get("ts_root", "")),
                 "error": message,
-                "details": str(exc),
+                "details": "; ".join(errors + ["Tkinter: {0}".format(exc)]),
                 "updated_at_epoch": time.time(),
             })
         raise RuntimeError(message)

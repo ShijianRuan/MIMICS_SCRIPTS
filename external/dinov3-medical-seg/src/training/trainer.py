@@ -3,6 +3,7 @@
 import os
 import time
 import json
+import uuid
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -46,8 +47,12 @@ class Trainer3D:
         runtime_cfg = config.get("runtime", {})
         self.status_path = runtime_cfg.get("status_path")
         self.cancel_path = runtime_cfg.get("cancel_path")
+        self.metrics_history_path = runtime_cfg.get("metrics_history_path")
         self.status_interval_seconds = float(runtime_cfg.get("status_interval_seconds", 2.0))
         self._last_status_write = 0.0
+        self._metrics_history_rows = []
+        self._last_runtime_write_error = ""
+        self._last_runtime_write_error_time = 0.0
 
         # Experiment dir
         exp_name = config.get("exp_name", f"exp_{int(time.time())}")
@@ -95,6 +100,70 @@ class Trainer3D:
             trainable=info.get("trainable"),
             trainable_pct=info.get("trainable_pct"),
         )
+        self._write_metrics_history("initialized")
+
+    def _report_runtime_write_error(self, label, path, exc):
+        now = time.time()
+        key = "{}:{}:{}".format(label, path, exc)
+        if key == self._last_runtime_write_error and now - self._last_runtime_write_error_time < 30.0:
+            return
+        self._last_runtime_write_error = key
+        self._last_runtime_write_error_time = now
+        print("Warning: could not update {} {}: {}".format(label, path, exc), flush=True)
+
+    @classmethod
+    def _json_safe(cls, value):
+        if isinstance(value, dict):
+            return {str(k): cls._json_safe(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [cls._json_safe(v) for v in value]
+        if hasattr(value, "item"):
+            try:
+                return value.item()
+            except Exception:
+                pass
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        return value
+
+    def _write_json_atomic(self, path, payload, label, retries=12, max_sleep=0.20):
+        if not path:
+            return False
+        try:
+            text = json.dumps(self._json_safe(payload), indent=2, sort_keys=True) + "\n"
+        except Exception as exc:
+            self._report_runtime_write_error(label, path, exc)
+            return False
+        directory = os.path.dirname(path)
+        if directory:
+            try:
+                os.makedirs(directory, exist_ok=True)
+            except Exception as exc:
+                self._report_runtime_write_error(label, path, exc)
+                return False
+        last_error = None
+        for attempt in range(max(1, int(retries))):
+            tmp = "{}.{}.{}.tmp".format(path, os.getpid(), uuid.uuid4().hex)
+            try:
+                with open(tmp, "w") as handle:
+                    handle.write(text)
+                    try:
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    except Exception:
+                        pass
+                os.replace(tmp, path)
+                return True
+            except Exception as exc:
+                last_error = exc
+                try:
+                    if os.path.isfile(tmp):
+                        os.unlink(tmp)
+                except Exception:
+                    pass
+                time.sleep(min(float(max_sleep), 0.03 * (attempt + 1)))
+        self._report_runtime_write_error(label, path, last_error)
+        return False
 
     def _write_training_status(self, status: str, **payload):
         if not self.status_path:
@@ -103,14 +172,27 @@ class Trainer3D:
             "status": status,
             "updated_at_epoch": time.time(),
         }
+        if self.metrics_history_path:
+            data["metrics_history"] = self.metrics_history_path
         data.update(payload)
-        directory = os.path.dirname(self.status_path)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-        tmp = "{}.{}.tmp".format(self.status_path, os.getpid())
-        with open(tmp, "w") as handle:
-            json.dump(data, handle, indent=2, sort_keys=True)
-        os.replace(tmp, self.status_path)
+        self._write_json_atomic(self.status_path, data, "training status")
+
+    def _write_metrics_history(self, status, **payload):
+        if not self.metrics_history_path:
+            return
+        data = {
+            "schema_version": "mimics_fewshot_metrics_history.v1",
+            "status": status,
+            "epoch_count": self.epochs,
+            "updated_at_epoch": time.time(),
+            "history": self._metrics_history_rows,
+        }
+        data.update(payload)
+        self._write_json_atomic(self.metrics_history_path, data, "metrics history")
+
+    def _append_metrics_history(self, row):
+        self._metrics_history_rows.append(self._json_safe(row))
+        self._write_metrics_history("training")
 
     def _cancel_requested(self) -> bool:
         return bool(self.cancel_path and os.path.isfile(self.cancel_path))
@@ -211,6 +293,19 @@ class Trainer3D:
                     best_dsc = val_dsc
 
                 metrics = {**train_metrics, **val_metrics}
+                lr = self.optimizer.param_groups[0]["lr"]
+                self._append_metrics_history({
+                    "epoch": epoch,
+                    "epochs": self.epochs,
+                    "train_loss": float(train_metrics.get("loss", 0.0)),
+                    "val_dice": float(val_metrics.get("mean_dsc")) if val_metrics else None,
+                    "lr": float(lr),
+                    "best_dsc": float(best_dsc),
+                    "is_best": bool(is_best),
+                    "latest_epoch_line": latest_epoch_line,
+                    "metrics": metrics,
+                    "updated_at_epoch": time.time(),
+                })
                 save_checkpoint(
                     self.model, self.optimizer, epoch,
                     metrics,
@@ -234,6 +329,7 @@ class Trainer3D:
                 epochs=self.epochs,
                 best_dsc=best_dsc,
             )
+            self._write_metrics_history("completed", best_dsc=best_dsc)
             print(f"\nTraining complete. Best DSC: {best_dsc:.4f}")
         except TrainingCancelled:
             self._write_training_status(
@@ -242,6 +338,7 @@ class Trainer3D:
                 epochs=self.epochs,
                 best_dsc=best_dsc,
             )
+            self._write_metrics_history("cancelled", best_dsc=best_dsc)
             print("\nTraining cancelled by external request.")
         finally:
             self.writer.close()

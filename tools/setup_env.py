@@ -58,6 +58,19 @@ REQUIRED_PACKAGES = [
     "tensorboard",
 ]
 
+# Preferred external GUI backend for DINOv3 advanced setup/status windows.
+# PySide6 is intentionally kept separate from the core AI packages so checks can
+# report UI readiness clearly, while the runtime can still fall back if needed.
+GUI_IMPORTS = [
+    "PySide6",
+    "shiboken6",
+]
+
+GUI_PACKAGES = [
+    "PySide6",
+    "shiboken6",
+]
+
 # Mapping for __import__: pip name → import name
 _PIP_TO_IMPORT = {
     "pyyaml": "yaml",
@@ -83,8 +96,8 @@ def _find_python():
     3. standalone dir: nninteractive_env/python/python.exe
     """
     for rel in (
-        "nninteractive_env/Scripts/python.exe",
         "nninteractive_env/python.exe",
+        "nninteractive_env/Scripts/python.exe",
         "nninteractive_env/python/python.exe",
         "nninteractive_env/bin/python3",
         "nninteractive_env/bin/python",
@@ -201,6 +214,49 @@ def _run_python_script(script_lines, timeout=600):
             pass
 
 
+def _probe_gui_backends():
+    """Return GUI backend availability inside nninteractive_env."""
+    ret, output = _run_python_script([
+        "import json, traceback",
+        "r = {'pyside6': False, 'tkinter': False, 'errors': {}}",
+        "try:",
+        "    import PySide6, shiboken6",
+        "    from PySide6 import QtCore, QtWidgets",
+        "    r['pyside6'] = True",
+        "    r['pyside6_version'] = str(getattr(QtCore, '__version__', 'unknown'))",
+        "except Exception as e:",
+        "    r['errors']['pyside6'] = repr(e)",
+        "try:",
+        "    import tkinter",
+        "    r['tkinter'] = True",
+        "    r['tkinter_version'] = str(getattr(tkinter, 'TkVersion', 'unknown'))",
+        "except Exception as e:",
+        "    r['errors']['tkinter'] = repr(e)",
+        "print(json.dumps(r))",
+    ], timeout=60)
+    if ret != 0:
+        return {
+            "pyside6": False,
+            "tkinter": False,
+            "errors": {"probe": output[-500:] if output else "GUI probe failed"},
+        }
+    try:
+        return json.loads(output.strip().split("\n")[-1])
+    except Exception:
+        return {
+            "pyside6": False,
+            "tkinter": False,
+            "errors": {"probe": output[-500:] if output else "Could not parse GUI probe"},
+        }
+
+
+def _gui_wheels_available():
+    wheels_dir = PROJECT_ROOT / "wheels"
+    if not wheels_dir.is_dir():
+        return False
+    return any(wheels_dir.glob("pyside6-*.whl")) and any(wheels_dir.glob("shiboken6-*.whl"))
+
+
 # ---------------------------------------------------------------------------
 # Check
 # ---------------------------------------------------------------------------
@@ -218,6 +274,8 @@ def check():
         "cuda_device_count": 0,
         "cuda_version": None,
         "model_files": [],
+        "gui_backends": {},
+        "preferred_gui_backend": None,
     }
 
     # 1. Python version
@@ -251,7 +309,22 @@ def check():
     else:
         _log("Package probe failed: {0}".format(output[:200]))
 
-    # 3. Package versions
+    # 3. Preferred external GUI backend
+    gui_backends = _probe_gui_backends()
+    result["gui_backends"] = gui_backends
+    if gui_backends.get("pyside6"):
+        result["preferred_gui_backend"] = "PySide6"
+        _log("External GUI: PySide6 OK ({0})".format(gui_backends.get("pyside6_version", "unknown")))
+    elif gui_backends.get("tkinter"):
+        result["preferred_gui_backend"] = "Tkinter fallback"
+        _log("External GUI: Tkinter fallback OK; PySide6 is missing.")
+    else:
+        result["preferred_gui_backend"] = "none"
+        _log("External GUI: no usable backend found.")
+        for name, error in sorted((gui_backends.get("errors") or {}).items()):
+            _log("GUI {0} error: {1}".format(name, error))
+
+    # 4. Package versions
     ret, output = _run_python_script([
         "import json",
         "pkgs = {0}".format(REQUIRED_IMPORTS),
@@ -270,7 +343,7 @@ def check():
         except Exception:
             pass
 
-    # 4. CUDA
+    # 5. CUDA
     ret, output = _run_python_script([
         "import json, os, traceback",
         "r = {}",
@@ -323,7 +396,7 @@ def check():
     else:
         _log("CUDA probe failed: {0}".format(output[:200]))
 
-    # 5. Model weights
+    # 6. Model weights
     model_roots = [
         PROJECT_ROOT / "nninteractive_env" / "models",
         PROJECT_ROOT / "external" / "dinov3-medical-seg" / "models",
@@ -339,16 +412,24 @@ def check():
 
     # Summary
     missing_pkgs = [p for p, ok in result["packages"].items() if not ok]
+    gui_ready = bool(result["gui_backends"].get("pyside6"))
     all_ok = (
         result["python_version"] is not None
         and len(missing_pkgs) == 0
+        and gui_ready
     )
 
     _write_state(
         "ok" if all_ok else "incomplete",
-        message="All checks passed." if all_ok else "{0} package(s) missing.".format(len(missing_pkgs)),
+        message=(
+            "All checks passed."
+            if all_ok else
+            "{0} package(s) missing; PySide6 GUI ready: {1}.".format(len(missing_pkgs), gui_ready)
+        ),
         detail=result,
         missing_packages=missing_pkgs,
+        gui_ready=gui_ready,
+        preferred_gui_backend=result["preferred_gui_backend"],
         all_ok=all_ok,
     )
     _log("=== Check complete: {0} ===".format("OK" if all_ok else "INCOMPLETE"))
@@ -428,9 +509,16 @@ def install():
     # First check
     check_result = check_result_dict()
     missing = [p for p, ok in check_result.get("packages", {}).items() if not ok]
+    gui_backends = check_result.get("gui_backends") or {}
+    missing_gui = []
+    if not gui_backends.get("pyside6"):
+        missing_gui = list(GUI_PACKAGES)
+        missing.extend(missing_gui)
+    seen = set()
+    missing = [p for p in missing if not (p in seen or seen.add(p))]
 
     if not missing:
-        _write_state("ok", message="All packages are already installed.", all_ok=True)
+        _write_state("ok", message="All packages and the PySide6 GUI backend are already installed.", all_ok=True)
         _log("Nothing to install.")
         return 0
 
@@ -449,7 +537,7 @@ def install():
     _write_state("installing", step="verifying", message="Verifying installation...")
     ret, output = _run_python_script([
         "import json, importlib.util as U",
-        "pkgs = {0}".format(REQUIRED_IMPORTS),
+        "pkgs = {0}".format(REQUIRED_IMPORTS + GUI_IMPORTS),
         "r = {}",
         "for p in pkgs:",
         "    r[p] = U.find_spec(p) is not None",
@@ -481,6 +569,7 @@ def check_result_dict():
     result = {
         "python_version": None,
         "packages": {},
+        "gui_backends": {},
     }
     ret, output = _run_python(["-c", "import sys; print(sys.version)"])
     if ret == 0:
@@ -498,6 +587,7 @@ def check_result_dict():
             result["packages"] = json.loads(output.strip().split("\n")[-1])
         except Exception:
             pass
+    result["gui_backends"] = _probe_gui_backends()
     return result
 
 
@@ -571,6 +661,9 @@ def extract_archive(archive_path):
         _write_state("extracted", step="verifying_packages",
                      message="Verifying Python packages...")
         missing = _get_missing_packages()
+        if not _probe_gui_backends().get("pyside6"):
+            missing.extend(GUI_PACKAGES)
+            missing = list(dict.fromkeys(missing))
         if missing:
             _log("Missing packages: {0}. Repairing...".format(", ".join(missing)))
             _write_state("extracted", step="repairing",
@@ -698,6 +791,7 @@ def offline_install():
     pth_content = (
         "python313.zip\n"
         ".\n"
+        "Lib\n"
         "Lib\\site-packages\n"
         "import site\n"
     )
@@ -762,12 +856,31 @@ def offline_install():
     if fail_count > 0:
         _log("Failed packages: {0}".format(", ".join(failed_names[:20])))
 
-    # 6. Verify key imports
+    _write_state("setting_up", step="installing_gui",
+                 message="Ensuring PySide6 advanced UI wheels are installed consistently...")
+    ret, output = _run_python(
+        [
+            "-m", "pip", "install",
+            "PySide6", "shiboken6",
+            "--no-index", "--find-links", str(wheels_dir),
+            "--upgrade", "--quiet",
+        ],
+        timeout=900,
+    )
+    if ret != 0:
+        _write_state("error",
+                     message="PySide6 advanced UI installation failed.",
+                     error=output[-1000:] if output else "unknown")
+        _log("ERROR: PySide6 install failed: {0}".format(output[-300:] if output else ""))
+        return 1
+    _log("PySide6 advanced UI wheels installed.")
+
+    # 6. Verify key imports and external GUI
     _write_state("setting_up", step="verifying",
                  message="Verifying installation...")
     ret, output = _run_python_script([
         "import json",
-        "pkgs = {0}".format(REQUIRED_IMPORTS),
+        "pkgs = {0}".format(REQUIRED_IMPORTS + GUI_IMPORTS),
         "r = {}",
         "for p in pkgs:",
         "    try:",
@@ -939,7 +1052,7 @@ def setup_from_scratch():
     _write_state("setting_up", step="installing_packages",
                  message="Installing required packages (this will take several minutes)...")
 
-    ok, error = _pip_install(REQUIRED_PACKAGES)
+    ok, error = _pip_install(REQUIRED_PACKAGES + GUI_PACKAGES)
     if not ok:
         _write_state("error", message="Package installation failed.", error=error)
         _log("Install failed: {0}".format(error))

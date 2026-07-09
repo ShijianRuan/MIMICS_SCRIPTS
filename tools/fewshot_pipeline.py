@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -31,12 +32,60 @@ GPU_LOCK_PATH = RESOURCE_LOCK_DIR / "gpu.lock"
 BACKGROUND_MIMICS_LOCK_PATH = RESOURCE_LOCK_DIR / "background_mimics.lock"
 
 
-def write_json_atomic(path, payload):
+def write_json_atomic(path, payload, retries=20, max_sleep=0.25):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    os.replace(str(tmp), str(path))
+    text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    write_text_atomic(path, text, retries=retries, max_sleep=max_sleep)
+
+
+def write_text_atomic(path, text, retries=20, max_sleep=0.25):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = str(text)
+    last_error = None
+    for attempt in range(max(1, int(retries))):
+        tmp = path.with_name(path.name + "." + str(os.getpid()) + "." + uuid.uuid4().hex + ".tmp")
+        try:
+            with tmp.open("w", encoding="utf-8") as handle:
+                handle.write(text)
+                try:
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                except Exception:
+                    pass
+            os.replace(str(tmp), str(path))
+            return
+        except OSError as exc:
+            last_error = exc
+            try:
+                if tmp.is_file():
+                    tmp.unlink()
+            except Exception:
+                pass
+            time.sleep(min(float(max_sleep), 0.05 * (attempt + 1)))
+    if last_error is not None:
+        raise last_error
+
+
+def append_text(path, text, retries=8, max_sleep=0.15):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    last_error = None
+    for attempt in range(max(1, int(retries))):
+        try:
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(str(text))
+                try:
+                    handle.flush()
+                except Exception:
+                    pass
+            return True
+        except OSError as exc:
+            last_error = exc
+            time.sleep(min(float(max_sleep), 0.03 * (attempt + 1)))
+    if last_error is not None:
+        raise last_error
 
 
 def read_json(path, default=None):
@@ -69,14 +118,121 @@ def rotate_log(path):
 
 
 def append_log(workspace, message):
-    workspace = Path(workspace)
-    workspace.mkdir(parents=True, exist_ok=True)
-    path = workspace / "fewshot_pipeline.log"
-    rotate_log(path)
     text = "[{}] {}".format(time.strftime("%Y-%m-%d %H:%M:%S"), message)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(text + "\n")
     print(text, flush=True)
+    try:
+        workspace = Path(workspace)
+        workspace.mkdir(parents=True, exist_ok=True)
+        path = workspace / "fewshot_pipeline.log"
+        rotate_log(path)
+        append_text(path, text + "\n")
+    except Exception as exc:
+        print(
+            "[{}] Warning: could not write DINOv3 pipeline log: {}".format(
+                time.strftime("%Y-%m-%d %H:%M:%S"),
+                exc,
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+def unlink_with_retry(path, retries=8, max_sleep=0.15):
+    path = Path(path)
+    last_error = None
+    for attempt in range(max(1, int(retries))):
+        try:
+            path.unlink()
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError as exc:
+            last_error = exc
+            time.sleep(min(float(max_sleep), 0.03 * (attempt + 1)))
+    if last_error is not None:
+        raise last_error
+    return True
+
+
+def rmtree_with_retry(path, retries=8, max_sleep=0.25):
+    path = Path(path)
+    last_error = None
+    for attempt in range(max(1, int(retries))):
+        try:
+            shutil.rmtree(str(path))
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError as exc:
+            last_error = exc
+            time.sleep(min(float(max_sleep), 0.05 * (attempt + 1)))
+    if last_error is not None:
+        raise last_error
+    return True
+
+
+def write_cancel_marker(cancel_path):
+    if not cancel_path:
+        return None
+    try:
+        write_text_atomic(
+            cancel_path,
+            "cancel requested at {}\n".format(time.strftime("%Y-%m-%d %H:%M:%S")),
+            retries=8,
+            max_sleep=0.15,
+        )
+        return None
+    except Exception as exc:
+        return str(exc)
+
+
+def open_subprocess_log(path, workspace, label):
+    path = Path(path)
+    workspace = Path(workspace)
+    temp_root = Path(tempfile.gettempdir()) / "mimics_script_fewshot_logs"
+    candidates = [
+        path,
+        path.with_name(path.stem + "_" + uuid.uuid4().hex[:8] + path.suffix),
+        workspace / "logs" / "subprocess" / (path.stem + "_" + uuid.uuid4().hex[:8] + path.suffix),
+        temp_root / (path.stem + "_" + uuid.uuid4().hex[:8] + path.suffix),
+    ]
+    errors = []
+    primary_error = None
+    for index, candidate in enumerate(candidates):
+        attempts = 30 if index == 0 else 8
+        max_sleep = 0.20 if index == 0 else 0.15
+        for attempt in range(attempts):
+            try:
+                candidate.parent.mkdir(parents=True, exist_ok=True)
+                handle = candidate.open("ab")
+                warning = None
+                if candidate != path:
+                    warning = (
+                        "{} primary log was not writable. Using fallback log: {}.".format(
+                            label,
+                            candidate,
+                        )
+                    )
+                    if primary_error:
+                        warning += " Primary error: {}".format(primary_error)
+                    append_log(workspace, warning)
+                return handle, candidate, warning
+            except OSError as exc:
+                if candidate == path and primary_error is None:
+                    primary_error = str(exc)
+                errors.append("{}: {}".format(candidate, exc))
+                time.sleep(min(max_sleep, 0.03 * (attempt + 1)))
+    append_log(
+        workspace,
+        "{} could not be opened in any fallback location; subprocess output will be discarded. {}".format(
+            label,
+            " | ".join(errors[-3:]),
+        ),
+    )
+    return open(os.devnull, "ab"), None, "{} unavailable; subprocess output was discarded. {}".format(
+        label,
+        " | ".join(errors[-3:]),
+    )
 
 
 def safe_slug(value):
@@ -88,6 +244,24 @@ def safe_slug(value):
         else:
             out.append("_")
     return "".join(out).strip("._") or "unknown"
+
+
+def _status_signature(payload):
+    try:
+        return json.dumps(payload, sort_keys=True, default=str)
+    except Exception:
+        return repr(payload)
+
+
+def maybe_update_status(path, payload, state, heartbeat_seconds=5.0):
+    now = time.time()
+    signature = _status_signature(payload)
+    if signature == state.get("signature") and now - float(state.get("epoch", 0.0) or 0.0) < float(heartbeat_seconds):
+        return False
+    update_status(path, payload)
+    state["signature"] = signature
+    state["epoch"] = now
+    return True
 
 
 def global_registry_path():
@@ -207,23 +381,57 @@ def dinov3_root_from_args(args):
     return path
 
 
+def project_python_candidates():
+    return [
+        ROOT / "nninteractive_env" / "python.exe",
+        ROOT / "nninteractive_env" / "Scripts" / "python.exe",
+        ROOT / "nninteractive_env" / "python" / "python.exe",
+        ROOT / "nninteractive_env" / "bin" / "python3",
+        ROOT / "nninteractive_env" / "bin" / "python",
+    ]
+
+
+def append_python_candidate(candidates, value, base=ROOT):
+    if not value:
+        return
+    text = str(value)
+    if text in ("python", "python3"):
+        return
+    path = Path(text)
+    if not path.is_absolute():
+        path = Path(base) / path
+    candidates.append(path)
+
+
 def python_from_args(args, dinov3_root):
     repo_cfg = load_repo_config()
-    explicit = args.python or os.environ.get("MIMICS_FEWSHOT_PYTHON") or repo_cfg.get("python")
     candidates = []
-    if explicit:
-        candidates.append(Path(explicit))
+    if args.python:
+        append_python_candidate(candidates, args.python)
+    candidates.extend(project_python_candidates())
+    if not args.python:
+        append_python_candidate(candidates, os.environ.get("MIMICS_FEWSHOT_PYTHON"))
+        append_python_candidate(candidates, repo_cfg.get("python"))
     candidates.extend([
         dinov3_root / ".venv" / "Scripts" / "python.exe",
         dinov3_root / ".venv" / "bin" / "python",
         dinov3_root / "venv" / "Scripts" / "python.exe",
         dinov3_root / "venv" / "bin" / "python",
-        Path(sys.executable),
     ])
+    current = Path(sys.executable)
+    try:
+        current_resolved = current.resolve()
+        env_root = (ROOT / "nninteractive_env").resolve()
+        if str(current_resolved).startswith(str(env_root)):
+            candidates.append(current)
+    except Exception:
+        pass
     for candidate in candidates:
         if candidate and candidate.is_file():
             return str(candidate)
-    return str(candidates[-1])
+    raise RuntimeError(
+        "The nninteractive_env Python was not found. Run Setup Environment or setup_offline.bat before using DINOv3."
+    )
 
 
 def base_config_from_args(args, dinov3_root):
@@ -487,7 +695,11 @@ def latest_running_job(workspace):
         pid = payload.get("pid") or payload.get("launcher_pid") or payload.get("controller_pid")
         if pid and not process_exists(pid):
             continue
-        rows.append((path.stat().st_mtime, path, payload))
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        rows.append((mtime, path, payload))
     if not rows:
         return None, None
     rows.sort(reverse=True)
@@ -647,7 +859,7 @@ def copy_or_link(src, dst):
     dst = Path(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists():
-        dst.unlink()
+        unlink_with_retry(dst)
     try:
         os.link(str(src), str(dst))
         return "hardlink"
@@ -745,7 +957,7 @@ def materialize_dataset(train_samples, dataset_dir, val_samples=None):
     dataset_dir = Path(dataset_dir)
     _check_materialize_disk_space(train_samples, val_samples or [], dataset_dir)
     if dataset_dir.exists():
-        shutil.rmtree(str(dataset_dir))
+        rmtree_with_retry(dataset_dir)
     train_rows = _materialize_split(
         train_samples,
         dataset_dir / "imagesTr",
@@ -780,6 +992,7 @@ def write_training_config(
     args,
     status_path=None,
     cancel_path=None,
+    metrics_history_path=None,
     validation_enabled=True,
 ):
     path = Path(path)
@@ -843,11 +1056,11 @@ def write_training_config(
             "runtime:",
             "  status_path: " + yaml_scalar(str(status_path or "")),
             "  cancel_path: " + yaml_scalar(str(cancel_path or "")),
+            "  metrics_history_path: " + yaml_scalar(str(metrics_history_path or "")),
             "  status_interval_seconds: 2.0",
             "",
         ])
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines), encoding="utf-8")
+    write_text_atomic(path, "\n".join(lines) + "\n")
 
 
 def launch_mimics_export(
@@ -867,8 +1080,14 @@ def launch_mimics_export(
     output_dir = resolve_mimics_output_dir(ts_root)
     axes, flips = resolve_mimics_buffer_mapping()
     output_dir.mkdir(parents=True, exist_ok=True)
-    config = output_dir / "_export_batch_config.json"
-    runner = output_dir / "_run_export_batch.py"
+    export_job_id = safe_slug(Path(status_path).stem if status_path else "export_{}_{}".format(
+        time.strftime("%Y%m%dT%H%M%S"),
+        uuid.uuid4().hex[:8],
+    ))
+    export_job_dir = output_dir / "_fewshot_export_jobs" / export_job_id
+    export_job_dir.mkdir(parents=True, exist_ok=True)
+    config = export_job_dir / "export_config.json"
+    runner = export_job_dir / "run_export_batch.py"
     write_json_atomic(config, {
         "ts_root": str(Path(ts_root).resolve()),
         "cases": sorted(cases) if cases else None,
@@ -877,7 +1096,8 @@ def launch_mimics_export(
         "export_space": "source_image",
         "output_dir": str(output_dir),
     })
-    runner.write_text(
+    write_text_atomic(
+        runner,
         "\n".join([
             "# Auto-generated runner for Mimics few-shot label export",
             "import sys, os",
@@ -886,7 +1106,6 @@ def launch_mimics_export(
             "mimics_export.run_background_batch_export(r'{}')".format(str(config)),
             "",
         ]),
-        encoding="utf-8",
     )
     lock = None
     if status_path and cancel_path:
@@ -897,9 +1116,10 @@ def launch_mimics_export(
             "DINOv3 label export",
             lock_timeout_seconds if lock_timeout_seconds is not None else timeout_seconds,
         )
-    log_path = output_dir / "_fewshot_export_mimics.log"
+    log_path = output_dir / "_fewshot_export_logs" / (export_job_id + "_mimics_export.log")
     try:
-        with log_path.open("ab") as log:
+        log_handle, actual_log_path, log_warning = open_subprocess_log(log_path, workspace, "Background Mimics export log")
+        with log_handle as log:
             proc = subprocess.Popen(
                 [mimics_exe, "-b", "-run_script", str(runner)],
                 stdin=subprocess.DEVNULL,
@@ -919,9 +1139,23 @@ def launch_mimics_export(
         if proc.poll() is not None:
             if lock is not None:
                 lock.release()
-            return {"launched": True, "returncode": proc.returncode, "log": str(log_path)}
+            result = {"launched": True, "returncode": proc.returncode}
+            if actual_log_path is not None:
+                result["log"] = str(actual_log_path)
+            else:
+                result["log_unavailable"] = True
+            if log_warning:
+                result["log_warning"] = log_warning
+            return result
         time.sleep(2.0)
-    return {"launched": True, "timed_out": True, "pid": proc.pid, "log": str(log_path)}
+    result = {"launched": True, "timed_out": True, "pid": proc.pid}
+    if actual_log_path is not None:
+        result["log"] = str(actual_log_path)
+    else:
+        result["log_unavailable"] = True
+    if log_warning:
+        result["log_warning"] = log_warning
+    return result
 
 
 def latest_epoch_checkpoint(ckpt_dir):
@@ -933,11 +1167,34 @@ def latest_epoch_checkpoint(ckpt_dir):
     return candidates[-1] if candidates else None
 
 
-def update_status(path, payload):
+def _status_workspace(path):
+    path = Path(path)
+    if path.parent.name == "jobs":
+        return path.parent.parent
+    return path.parent
+
+
+def update_status(path, payload, raise_on_failure=False):
     existing = read_json(path, {}) or {}
     existing.update(payload)
     existing["updated_at_epoch"] = time.time()
-    write_json_atomic(path, existing)
+    try:
+        write_json_atomic(path, existing, retries=8, max_sleep=0.15)
+        return True
+    except Exception as exc:
+        try:
+            append_log(
+                _status_workspace(path),
+                "Warning: could not update job status file {}: {}. The background job continues.".format(
+                    Path(path),
+                    exc,
+                ),
+            )
+        except Exception:
+            pass
+        if raise_on_failure:
+            raise
+        return False
 
 
 def register_global_model(manifest):
@@ -1038,6 +1295,7 @@ def cmd_train(args):
     config_path = run_dir / "config.yaml"
     train_log = run_dir / "train.log"
     train_status = run_dir / "train_status.json"
+    metrics_history = run_dir / "metrics_history.json"
     cancel_path = run_dir / "cancel.request"
     exp_name = "mimics_fewshot_{}_{}".format(organ_slug, run_id)
 
@@ -1053,6 +1311,7 @@ def cmd_train(args):
         "workspace": str(workspace),
         "controller_pid": os.getpid(),
         "cancel_path": str(cancel_path),
+        "metrics_history": str(metrics_history),
         "created_at_epoch": time.time(),
     })
     append_log(workspace, "Training job {} started for organ {}.".format(run_id, args.organ))
@@ -1130,6 +1389,7 @@ def cmd_train(args):
         args,
         status_path=train_status,
         cancel_path=cancel_path,
+        metrics_history_path=metrics_history,
         validation_enabled=validation_enabled,
     )
     write_json_atomic(
@@ -1159,6 +1419,7 @@ def cmd_train(args):
         "config_path": str(config_path),
         "train_log": str(train_log),
         "training_status": str(train_status),
+        "metrics_history": str(metrics_history),
         "cancel_path": str(cancel_path),
     })
 
@@ -1175,7 +1436,12 @@ def cmd_train(args):
             args.gpu_lock_timeout_seconds,
         )
         update_status(status_path, {"status": "training"})
-        with train_log.open("ab") as log:
+        log_handle, actual_train_log, train_log_warning = open_subprocess_log(
+            train_log,
+            workspace,
+            "DINOv3 training log",
+        )
+        with log_handle as log:
             proc = subprocess.Popen(
                 cmd,
                 cwd=str(dinov3_root),
@@ -1186,9 +1452,19 @@ def cmd_train(args):
             )
             if gpu_lock is not None:
                 gpu_lock.update_pid(proc.pid, kind="fewshot_train", job_id=run_id)
-            update_status(status_path, {"pid": proc.pid, "command": cmd})
+            status_payload = {"pid": proc.pid, "command": cmd}
+            if actual_train_log is not None and actual_train_log != train_log:
+                train_log = actual_train_log
+            if actual_train_log is not None:
+                status_payload["train_log"] = str(train_log)
+            else:
+                status_payload["train_log_unavailable"] = True
+            if train_log_warning:
+                status_payload["train_log_warning"] = train_log_warning
+            update_status(status_path, status_payload)
             cancel_started = None
             last_progress_line = ""
+            loop_status_state = {"signature": _status_signature(status_payload), "epoch": time.time()}
             while proc.poll() is None:
                 progress = read_json(train_status, {}) or {}
                 payload = {"status": "training", "pid": proc.pid}
@@ -1204,7 +1480,7 @@ def cmd_train(args):
                         cancel_started = time.time()
                     elif time.time() - cancel_started > 30:
                         terminate_process_tree(proc.pid)
-                update_status(status_path, payload)
+                maybe_update_status(status_path, payload, loop_status_state, heartbeat_seconds=5.0)
                 time.sleep(1.0)
     except ResourceLockCancelled:
         update_status(status_path, {"status": "cancelled", "error": "cancelled while waiting for GPU"})
@@ -1230,15 +1506,23 @@ def cmd_train(args):
             "status": "cancelled",
             "returncode": proc.returncode,
             "training_progress": final_progress,
+            "metrics_history": str(metrics_history),
         })
         append_log(workspace, "Training job {} cancelled.".format(run_id))
         return 130
 
     if proc.returncode != 0:
+        error = "training process failed; see train_log"
+        try:
+            if actual_train_log is None:
+                error = "training process failed; training log is unavailable"
+        except Exception:
+            pass
         update_status(status_path, {
             "status": "failed",
             "returncode": proc.returncode,
-            "error": "training process failed; see train_log",
+            "error": error,
+            "metrics_history": str(metrics_history),
         })
         return proc.returncode or 1
 
@@ -1273,6 +1557,7 @@ def cmd_train(args):
         "dataset_dir": str(dataset_dir),
         "dataset_retained": bool(args.keep_materialized_dataset),
         "training_progress": final_progress,
+        "metrics_history": str(metrics_history),
         "training_parameters": {
             "base_config": str(base_config),
             "finetune_method": str(args.finetune_method),
@@ -1300,10 +1585,16 @@ def cmd_train(args):
     }
     write_json_atomic(model_dir / "manifest.json", manifest)
     write_json_atomic(workspace / "models" / organ_slug / "latest.json", manifest)
-    register_global_model(manifest)
+    try:
+        register_global_model(manifest)
+    except Exception as exc:
+        manifest["global_registry_error"] = str(exc)
+        write_json_atomic(model_dir / "manifest.json", manifest)
+        write_json_atomic(workspace / "models" / organ_slug / "latest.json", manifest)
+        append_log(workspace, "Could not update global DINOv3 model registry: {}.".format(exc))
     if not args.keep_materialized_dataset:
         try:
-            shutil.rmtree(str(dataset_dir))
+            rmtree_with_retry(dataset_dir)
             manifest["dataset_retained"] = False
             manifest["dataset_cleanup_at_epoch"] = time.time()
             write_json_atomic(model_dir / "manifest.json", manifest)
@@ -1319,6 +1610,7 @@ def cmd_train(args):
         "model": manifest,
         "returncode": 0,
         "training_progress": final_progress,
+        "metrics_history": str(metrics_history),
     })
     best = final_progress.get("best_dsc")
     if best is not None:
@@ -1432,7 +1724,12 @@ def cmd_infer(args):
             args.gpu_lock_timeout_seconds,
         )
         update_status(status_path, {"status": "running"})
-        with log_path.open("ab") as log:
+        log_handle, actual_log_path, inference_log_warning = open_subprocess_log(
+            log_path,
+            workspace,
+            "DINOv3 inference log",
+        )
+        with log_handle as log:
             proc = subprocess.Popen(
                 cmd,
                 cwd=str(dinov3_root),
@@ -1443,13 +1740,33 @@ def cmd_infer(args):
             )
             if gpu_lock is not None:
                 gpu_lock.update_pid(proc.pid, kind="fewshot_infer", job_id=job_id)
-            update_status(status_path, {"pid": proc.pid, "command": cmd, "log": str(log_path)})
+            status_payload = {"pid": proc.pid, "command": cmd}
+            if actual_log_path is not None and actual_log_path != log_path:
+                log_path = actual_log_path
+            if actual_log_path is not None:
+                status_payload["log"] = str(log_path)
+            else:
+                status_payload["log_unavailable"] = True
+            if inference_log_warning:
+                status_payload["log_warning"] = inference_log_warning
+            update_status(status_path, status_payload)
+            loop_status_state = {"signature": _status_signature(status_payload), "epoch": time.time()}
             while proc.poll() is None:
                 if cancel_path.is_file():
-                    update_status(status_path, {"status": "cancelling", "pid": proc.pid})
+                    maybe_update_status(
+                        status_path,
+                        {"status": "cancelling", "pid": proc.pid},
+                        loop_status_state,
+                        heartbeat_seconds=5.0,
+                    )
                     terminate_process_tree(proc.pid)
                 else:
-                    update_status(status_path, {"status": "running", "pid": proc.pid})
+                    maybe_update_status(
+                        status_path,
+                        {"status": "running", "pid": proc.pid},
+                        loop_status_state,
+                        heartbeat_seconds=5.0,
+                    )
                 time.sleep(2.0)
     except ResourceLockCancelled:
         update_status(status_path, {"status": "cancelled", "error": "cancelled while waiting for GPU"})
@@ -1476,10 +1793,16 @@ def cmd_infer(args):
         append_log(workspace, "Inference job {} cancelled.".format(job_id))
         return 130
     if proc.returncode != 0:
+        error = "inference process failed; see log"
+        try:
+            if actual_log_path is None:
+                error = "inference process failed; inference log is unavailable"
+        except Exception:
+            pass
         update_status(status_path, {
             "status": "failed",
             "returncode": proc.returncode,
-            "error": "inference process failed; see log",
+            "error": error,
         })
         return proc.returncode or 1
     update_status(status_path, {
@@ -1557,8 +1880,10 @@ def cmd_cancel(args):
             return 0
     cancel_path = status.get("cancel_path")
     if cancel_path:
-        Path(cancel_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(cancel_path).write_text("cancel requested at {}\n".format(time.strftime("%Y-%m-%d %H:%M:%S")), encoding="utf-8")
+        cancel_error = write_cancel_marker(cancel_path)
+        if cancel_error:
+            print("Warning: could not write cancel marker {}: {}".format(cancel_path, cancel_error), file=sys.stderr)
+            update_status(status_path, {"cancel_marker_error": cancel_error})
     grace_seconds = max(0.0, float(getattr(args, "grace_seconds", 30.0)))
     pids = []
     for key in ("pid", "controller_pid", "launcher_pid"):

@@ -21,6 +21,34 @@ class ResourceLockCancelled(RuntimeError):
     pass
 
 
+def _write_json_atomic(path: Path, payload: dict, retries: int = 20, max_sleep: float = 0.25) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    last_error = None
+    for attempt in range(max(1, int(retries))):
+        tmp = path.with_name(path.name + "." + str(os.getpid()) + "." + uuid.uuid4().hex + ".tmp")
+        try:
+            with tmp.open("w", encoding="utf-8") as handle:
+                handle.write(text)
+                try:
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                except Exception:
+                    pass
+            os.replace(str(tmp), str(path))
+            return
+        except OSError as exc:
+            last_error = exc
+            try:
+                if tmp.is_file():
+                    tmp.unlink()
+            except Exception:
+                pass
+            time.sleep(min(float(max_sleep), 0.05 * (attempt + 1)))
+    if last_error is not None:
+        raise last_error
+
+
 def process_exists(pid: object) -> bool:
     try:
         value = int(pid)
@@ -112,9 +140,7 @@ class FileResourceLock:
             return
         payload = self._payload(pid)
         payload.update(extra)
-        tmp = self.path.with_name(self.path.name + "." + uuid.uuid4().hex + ".tmp")
-        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        os.replace(str(tmp), str(self.path))
+        _write_json_atomic(self.path, payload)
 
     def release(self) -> None:
         release_lock(self.path, self.token)
@@ -137,10 +163,14 @@ class FileResourceLock:
         return not process_exists(payload.get("pid"))
 
     def _unlink_any(self) -> None:
-        try:
-            self.path.unlink()
-        except FileNotFoundError:
-            pass
+        for attempt in range(8):
+            try:
+                self.path.unlink()
+                return
+            except FileNotFoundError:
+                return
+            except OSError:
+                time.sleep(min(0.15, 0.03 * (attempt + 1)))
 
     def _invalid_lock_file_is_old(self) -> bool:
         try:
@@ -177,10 +207,12 @@ def release_lock(path: os.PathLike[str] | str, token: str | None = None) -> bool
         payload = {}
     if token and payload.get("token") != token:
         return False
-    try:
-        lock_path.unlink()
-        return True
-    except FileNotFoundError:
-        return True
-    except Exception:
-        return False
+    for attempt in range(8):
+        try:
+            lock_path.unlink()
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            time.sleep(min(0.15, 0.03 * (attempt + 1)))
+    return False
