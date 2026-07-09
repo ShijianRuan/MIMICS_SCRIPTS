@@ -23,12 +23,12 @@ import runtime_common
 
 
 TITLE = "DINOv3 Few-Shot"
-BUTTON_TRAIN = "Train/Update Model"
-BUTTON_TRAIN_ADVANCED = "Train Advanced..."
-BUTTON_PREDICT = "Predict Current Case"
-BUTTON_PREDICT_MODEL = "Predict With Model..."
+BUTTON_TRAIN = "Train Quick Model"
+BUTTON_TRAIN_ADVANCED = "Train Advanced Setup..."
+BUTTON_PREDICT = "Predict Current Case (Latest Model)"
+BUTTON_PREDICT_MODEL = "Predict Current Case (Choose Model)..."
 BUTTON_STATUS = "Show Status"
-BUTTON_STOP = "Stop Latest Job"
+BUTTON_STOP = "Stop Running Job"
 BUTTON_CANCEL = "Cancel"
 MIMICS_VOXEL_TO_RAS_MATRIX_METADATA = "mimics_script.mimics_voxel_to_ras_matrix"
 
@@ -115,6 +115,31 @@ def _config():
     path = os.path.join(_project_root(), "fewshot_config.json")
     cfg = _read_json(path, {}) or {}
     return cfg
+
+
+def _load_mimics_io_config():
+    merged = {}
+    for name in ("mimics_io_config.json", "nninteractive_config.json"):
+        path = os.path.join(_project_root(), name)
+        loaded = _read_json(path, {}) or {}
+        if isinstance(loaded, dict):
+            merged.update(loaded)
+    return merged
+
+
+def _resolve_mimics_output_dir(ts_root):
+    default_dir = os.path.abspath(os.path.join(ts_root, "mcs_output"))
+    config = _load_mimics_io_config()
+    configured = config.get("mimics_output_dir", "")
+    if not configured:
+        configured = config.get("mimics_export_output_dir", config.get("mimics_data_output_dir", ""))
+    configured = str(configured or "").strip()
+    if not configured:
+        return default_dir
+    configured = os.path.expandvars(os.path.expanduser(configured))
+    if os.path.isabs(configured):
+        return os.path.abspath(configured)
+    return os.path.abspath(os.path.join(ts_root, configured))
 
 
 def _parse_axes_value(value):
@@ -433,7 +458,7 @@ def _status_path(ts_root, job_id):
 
 def _case_ids_from_dataset(ts_root):
     rows = set()
-    mcs_dir = os.path.join(ts_root, "mcs_output")
+    mcs_dir = _resolve_mimics_output_dir(ts_root)
     if os.path.isdir(mcs_dir):
         try:
             for name in os.listdir(mcs_dir):
@@ -459,7 +484,7 @@ def _default_training_options(config, profile_name=None):
         values.update(profiles.get(default_profile, {}) or {})
     values.setdefault("base_config", config.get("base_config", "config/synthstrip_lora_segformer3d.yaml"))
     values.setdefault("epochs", config.get("default_epochs", 10))
-    values.setdefault("batch_size", config.get("default_batch_size", 1))
+    values["batch_size"] = 1
     values.setdefault("grad_accumulation", config.get("default_grad_accumulation", 1))
     values.setdefault("lr", config.get("default_lr", 0.001))
     values.setdefault("weight_decay", config.get("default_weight_decay", 0.01))
@@ -592,11 +617,24 @@ def _infer_dataset_root_from_project():
     if not project_path:
         return None
     project_dir = os.path.dirname(project_path)
-    if os.path.basename(project_dir).lower() != "mcs_output":
-        return None
-    dataset_root = os.path.dirname(project_dir)
-    if os.path.isdir(dataset_root):
-        return dataset_root
+    settings = _load_settings()
+    candidates = []
+    last_root = settings.get("last_dataset_root", "")
+    if last_root:
+        candidates.append(last_root)
+    parent = os.path.dirname(project_dir)
+    if parent:
+        candidates.append(parent)
+    for dataset_root in candidates:
+        if not dataset_root or not os.path.isdir(dataset_root):
+            continue
+        output_dir = _resolve_mimics_output_dir(dataset_root)
+        if os.path.normcase(os.path.abspath(project_dir)) == os.path.normcase(os.path.abspath(output_dir)):
+            return os.path.abspath(dataset_root)
+    if os.path.basename(project_dir).lower() == "mcs_output":
+        dataset_root = os.path.dirname(project_dir)
+        if os.path.isdir(dataset_root):
+            return dataset_root
     return None
 
 
@@ -619,7 +657,7 @@ def _choose_dataset_root(title):
 
 def _count_available_labels(ts_root, organ):
     """Count how many cases under ts_root have saved .mcs files with labels."""
-    mcs_dir = os.path.join(ts_root, "mcs_output")
+    mcs_dir = _resolve_mimics_output_dir(ts_root)
     if not os.path.isdir(mcs_dir):
         return 0
     count = 0
@@ -654,8 +692,8 @@ def _infer_case_id(ts_root):
     else:
         case_id = name
 
-    # Canonical: <ts_root>/mcs_output/<case>.mcs
-    output_dir = os.path.abspath(os.path.join(ts_root, "mcs_output"))
+    # Canonical: configured .mcs output directory.
+    output_dir = os.path.abspath(_resolve_mimics_output_dir(ts_root))
     project_dir = os.path.abspath(os.path.dirname(project_path))
     if os.path.normcase(project_dir) == os.path.normcase(output_dir):
         return case_id
@@ -1046,7 +1084,10 @@ def _advanced_training_options(config, ts_root):
     epochs = QSpinBox()
     epochs.setRange(1, 10000)
     batch_size = QSpinBox()
-    batch_size.setRange(1, 128)
+    batch_size.setRange(1, 1)
+    batch_size.setToolTip(
+        "Fixed at 1 because Mimics cases can have different z-depth. Use Grad accumulation for a larger effective batch."
+    )
     grad_accum = QSpinBox()
     grad_accum.setRange(1, 1024)
     lr = QLineEdit()
@@ -1109,13 +1150,15 @@ def _advanced_training_options(config, ts_root):
             apply_values(_default_training_options(config, profile_names[index]))
 
     profile_combo.currentIndexChanged.connect(profile_changed)
+    sub_volume.stateChanged.connect(lambda _state: sub_volume_size.setEnabled(bool(sub_volume.isChecked())))
     apply_values(values)
+    sub_volume_size.setEnabled(bool(sub_volume.isChecked()))
 
     train_form.addRow("Fine-tuning", finetune)
     train_form.addRow("Decoder", decoder)
     train_form.addRow("Pretrained scale", model_scale)
     train_form.addRow("Epochs", epochs)
-    train_form.addRow("Batch size", batch_size)
+    train_form.addRow("Batch size (fixed)", batch_size)
     train_form.addRow("Grad accumulation", grad_accum)
     train_form.addRow("Learning rate", lr)
     train_form.addRow("Weight decay", weight_decay)
@@ -1252,7 +1295,27 @@ def _launch_external_advanced_training(config, organ, ts_root):
     }
     _write_json_atomic(status_path, status)
     _write_json_atomic(context_path, context)
-    process = _launch_gui_process([python_exe, script, "--context", context_path], cwd=_project_root())
+    command = [python_exe, script, "--context", context_path]
+    try:
+        process = _launch_gui_process(command, cwd=_project_root())
+    except Exception as exc:
+        failed = _read_json(status_path, status) or status
+        failed["status"] = "failed"
+        failed["error"] = (
+            "Could not start the external Advanced setup process. "
+            "Python: {0}. Script: {1}. Context: {2}. Error: {3}".format(
+                python_exe,
+                script,
+                context_path,
+                exc,
+            )
+        )
+        failed["updated_at_epoch"] = time.time()
+        try:
+            _write_json_atomic(status_path, failed)
+        except Exception:
+            pass
+        raise RuntimeError(failed["error"])
     current_status = _read_json(status_path, status) or status
     current_status["controller_pid"] = process.pid
     current_status["updated_at_epoch"] = time.time()
@@ -1317,13 +1380,6 @@ def _launch_external_advanced_training(config, organ, ts_root):
             logging.WARNING,
             "DINOv3 setup monitor could not start in this Mimics session. Use Show Status after starting training from the external setup window.",
         )
-    mimics.dialogs.message_box(
-        "Advanced training setup opened outside Mimics.\n\n"
-        "Mimics is free to use while you choose samples and parameters. "
-        "After you click Start Training, use Show Status for progress.",
-        title=TITLE,
-        ui_blocking=False,
-    )
     return 0
 
 
@@ -1380,7 +1436,7 @@ def _train_model(advanced=False):
             "but only {2} were found.\n\n"
             "Open cases from {3}, annotate the \"{1}\" mask, save them, and retry."
         ).format(min_samples, organ, label_count,
-                 os.path.join(ts_root, "mcs_output"))
+                 _resolve_mimics_output_dir(ts_root))
         mimics.dialogs.message_box(msg, title=TITLE, ui_blocking=False)
         return 1
     if label_count < 5:
@@ -1476,15 +1532,6 @@ def _train_model(advanced=False):
                 os.path.join(_workspace(ts_root), "fewshot_pipeline.log"),
             ),
         )
-    mimics.dialogs.message_box(
-        "Few-shot training started in the background.\n\nOrgan: {0}\nJob: {1}\n\nPipeline log (full details):\n{2}\n\nUse Show Status for progress.".format(
-            organ,
-            run_id,
-            os.path.join(_workspace(ts_root), "fewshot_pipeline.log"),
-        ),
-        title=TITLE,
-        ui_blocking=False,
-    )
     return 0
 
 
@@ -1507,7 +1554,7 @@ def _start_inference(choose_model=False):
     if not case_id:
         mimics.dialogs.message_box(
             "Could not infer the current case.\n\nOpen a saved project from:\n{0}".format(
-                os.path.join(ts_root, "mcs_output", "<case>.mcs")
+                os.path.join(_resolve_mimics_output_dir(ts_root), "<case>.mcs")
             ),
             title=TITLE,
             ui_blocking=False,
@@ -1597,14 +1644,6 @@ def _start_inference(choose_model=False):
             case_id,
             process.pid,
         ),
-    )
-    mimics.dialogs.message_box(
-        "Few-shot inference started in the background.\n\nOrgan: {0}\nCase: {1}\nThe result will be applied automatically when ready.".format(
-            organ,
-            case_id,
-        ),
-        title=TITLE,
-        ui_blocking=False,
     )
     return 0
 
@@ -2136,8 +2175,50 @@ def _choose_model_manifest(ts_root, organ):
             ui_blocking=False,
         )
         return None
-    if not _ensure_pyqt5():
+    if len(candidates) == 1:
         return candidates[0]
+    if not _ensure_pyqt5():
+        lines = ["Select a model for organ: {0}".format(organ), ""]
+        buttons = []
+        for index, candidate in enumerate(candidates[:6], 1):
+            created = candidate.get("created_at_epoch", 0.0)
+            try:
+                created_text = time.strftime("%Y-%m-%d %H:%M", time.localtime(float(created)))
+            except Exception:
+                created_text = "unknown time"
+            best = candidate.get("manifest", {}).get("best_dsc")
+            best_text = ""
+            if best is not None:
+                try:
+                    best_text = ", best Dice {0:.4f}".format(float(best))
+                except Exception:
+                    best_text = ", best Dice {0}".format(best)
+            lines.append(
+                "{0}. {1} | samples {2}{3} | {4}".format(
+                    index,
+                    candidate.get("model_id", "?"),
+                    candidate.get("sample_count", "?"),
+                    best_text,
+                    created_text,
+                )
+            )
+            buttons.append("Use {0}".format(index))
+        buttons.append(BUTTON_CANCEL)
+        answer = mimics.dialogs.question_box(
+            message="\n".join(lines),
+            buttons=";".join(buttons),
+            title="Select DINOv3 Model",
+            ui_blocking=True,
+        )
+        if not answer or answer == BUTTON_CANCEL:
+            return None
+        if answer.startswith("Use "):
+            try:
+                idx = int(answer.split(" ", 1)[1]) - 1
+                return candidates[idx]
+            except Exception:
+                return None
+        return None
     try:
         from PyQt5.QtWidgets import QDialog, QDialogButtonBox, QLabel, QListWidget, QListWidgetItem, QVBoxLayout
     except ImportError:

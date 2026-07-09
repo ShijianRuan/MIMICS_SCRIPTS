@@ -1053,6 +1053,11 @@ def write_training_config(
     validation_enabled=True,
 ):
     path = Path(path)
+    if int(args.batch_size) != 1:
+        raise RuntimeError(
+            "Batch size must stay 1 for variable-depth 3D Mimics cases. "
+            "Use Grad accumulation to increase the effective batch size."
+        )
     img_size = [int(part.strip()) for part in str(args.img_size).split(",")]
     model_path = args.model_path
     if not model_path:
@@ -1134,16 +1139,16 @@ def launch_mimics_export(
     if not mimics_exe:
         append_log(workspace, "MimicsResearch.exe was not found; using existing exported labels only.")
         return {"launched": False, "reason": "mimics_not_found"}
-    # Export artifacts (job configs, logs, failed records) go under workspace
-    # (ts_root/fewshot_models/_export), not in mcs_output where .mcs files live.
-    output_dir = Path(ts_root).resolve() / "mcs_output"
+    # The .mcs files live in the configured Mimics output directory, while
+    # few-shot control artifacts stay in the fewshot workspace.
+    output_dir = resolve_mimics_output_dir(ts_root)
     axes, flips = resolve_mimics_buffer_mapping()
     output_dir.mkdir(parents=True, exist_ok=True)
     export_job_id = safe_slug(Path(status_path).stem if status_path else "export_{}_{}".format(
         time.strftime("%Y%m%dT%H%M%S"),
         uuid.uuid4().hex[:8],
     ))
-    export_root = workspace / "_export"
+    export_root = Path(workspace) / "_export"
     export_root.mkdir(parents=True, exist_ok=True)
     log_path = export_root / (export_job_id + "_mimics_export.log")
     config_path_write = export_root / (export_job_id + "_export_config.json")

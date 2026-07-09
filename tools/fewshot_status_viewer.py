@@ -299,6 +299,11 @@ def read_log_text(path, max_bytes=2 * 1024 * 1024, retries=3):
                 except Exception:
                     pass
                 data = handle.read(int(max_bytes))
+            for encoding in ("utf-8-sig", "utf-8", "mbcs", "cp936", "gbk"):
+                try:
+                    return data.decode(encoding)
+                except Exception:
+                    pass
             return data.decode("utf-8", "replace")
         except Exception:
             time.sleep(min(0.10, 0.03 * (attempt + 1)))
@@ -849,6 +854,7 @@ class QtStatusViewerApp(object):
         self.chart = None
         self.stop_button = None
         self.open_log_button = None
+        self.filter_combo = None
         self.timer = self.QtCore.QTimer(self.window)
         self.timer.timeout.connect(self.refresh)
         self._build()
@@ -875,6 +881,17 @@ class QtStatusViewerApp(object):
         outer.addWidget(subtitle)
 
         toolbar = QtWidgets.QHBoxLayout()
+        toolbar.addWidget(QtWidgets.QLabel("Show"))
+        self.filter_combo = QtWidgets.QComboBox()
+        self.filter_combo.addItems([
+            "Active + recent",
+            "Training",
+            "Inference",
+            "Failed / cancelled",
+            "All",
+        ])
+        self.filter_combo.currentTextChanged.connect(lambda _text: self.refresh())
+        toolbar.addWidget(self.filter_combo)
         refresh = QtWidgets.QPushButton("Refresh")
         refresh.clicked.connect(self.refresh)
         toolbar.addWidget(refresh)
@@ -900,7 +917,7 @@ class QtStatusViewerApp(object):
         left = QtWidgets.QWidget()
         left_layout = QtWidgets.QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 8, 0)
-        left_layout.addWidget(QtWidgets.QLabel("Jobs"))
+        left_layout.addWidget(QtWidgets.QLabel("Recent activity"))
         self.jobs_list = QtWidgets.QListWidget()
         self.jobs_list.currentRowChanged.connect(self.on_select)
         left_layout.addWidget(self.jobs_list)
@@ -908,7 +925,7 @@ class QtStatusViewerApp(object):
 
         right = QtWidgets.QWidget()
         right_layout = QtWidgets.QVBoxLayout(right)
-        detail_group = QtWidgets.QGroupBox("Selected job")
+        detail_group = QtWidgets.QGroupBox("Selected activity")
         detail_layout = QtWidgets.QVBoxLayout(detail_group)
         self.detail_text = QtWidgets.QTextEdit()
         self.detail_text.setReadOnly(True)
@@ -923,7 +940,7 @@ class QtStatusViewerApp(object):
         chart_layout.addWidget(self.chart)
         right_layout.addWidget(chart_group)
 
-        log_group = QtWidgets.QGroupBox("Log tail")
+        log_group = QtWidgets.QGroupBox("Recent log")
         log_layout = QtWidgets.QVBoxLayout(log_group)
         self.log_text = QtWidgets.QTextEdit()
         self.log_text.setReadOnly(True)
@@ -942,16 +959,16 @@ class QtStatusViewerApp(object):
 
     def _stylesheet(self):
         return """
-        QMainWindow, QWidget { background: #f4f5f7; color: #111827; font-family: Segoe UI, Arial; font-size: 10pt; }
-        QLabel#titleLabel { font-size: 17pt; font-weight: 700; color: #111827; }
-        QLabel#subtitleLabel { color: #374151; }
-        QGroupBox { background: #ffffff; border: 1px solid #d1d5db; border-radius: 6px; margin-top: 10px; padding-top: 12px; }
-        QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 4px; color: #111827; font-weight: 600; }
-        QListWidget, QTextEdit { background: #ffffff; border: 1px solid #cbd5e1; border-radius: 4px; padding: 4px; }
-        QPushButton { background: #ffffff; border: 1px solid #9ca3af; border-radius: 4px; padding: 7px 13px; }
-        QPushButton:hover { background: #f3f4f6; }
-        QPushButton:disabled { color: #9ca3af; background: #f3f4f6; }
-        QListWidget::item { padding: 6px; }
+        QMainWindow, QWidget { background: #f7f8fb; color: #172033; font-family: "Segoe UI", "Microsoft YaHei", "Helvetica Neue", sans-serif; font-size: 10pt; }
+        QLabel#titleLabel { font-size: 18pt; font-weight: 650; color: #101827; }
+        QLabel#subtitleLabel { color: #4b5565; }
+        QGroupBox { background: #ffffff; border: 1px solid #d8dee9; border-radius: 8px; margin-top: 12px; padding-top: 14px; }
+        QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; color: #1f2937; font-weight: 600; }
+        QListWidget, QTextEdit, QComboBox { background: #ffffff; border: 1px solid #cfd7e3; border-radius: 6px; padding: 5px 7px; }
+        QPushButton { background: #ffffff; border: 1px solid #aeb7c5; border-radius: 6px; padding: 7px 14px; }
+        QPushButton:hover { background: #f1f5fb; }
+        QPushButton:disabled { color: #9aa4b2; background: #f1f3f6; border-color: #d8dee9; }
+        QListWidget::item { padding: 7px; }
         QListWidget::item:selected { background: #dbeafe; color: #111827; }
         """
 
@@ -964,7 +981,7 @@ class QtStatusViewerApp(object):
         for index, job in enumerate(self.jobs):
             label = "{0}   {1}   {2}   {3}".format(
                 display_status(job.get("status")),
-                job.get("kind", "?"),
+                "training" if job.get("kind") == "train" else ("prediction" if job.get("kind") == "infer" else job.get("kind", "?")),
                 job.get("organ", "?"),
                 job.get("job_id", "?"),
             )
@@ -977,7 +994,7 @@ class QtStatusViewerApp(object):
             self.selected_job_id = self.jobs[selected_index].get("job_id", "")
             self.show_job(self.jobs[selected_index])
             active = sum(1 for job in self.jobs if job.get("status") in ACTIVE_STATUSES)
-            self.summary_label.setText("{0} job(s), {1} active. Auto-refresh every 2 seconds.".format(len(self.jobs), active))
+            self.summary_label.setText("{0} item(s), {1} active. Auto-refresh every 2 seconds.".format(len(self.jobs), active))
         else:
             self.selected_job_id = ""
             self.summary_label.setText("No DINOv3 few-shot jobs were found.")
@@ -1005,7 +1022,27 @@ class QtStatusViewerApp(object):
             if payload.get("job_id"):
                 paths[payload.get("job_id")] = str(path)
         rows.sort(key=lambda item: item[0], reverse=True)
-        return [item[1] for item in rows[:80]], paths
+        filter_text = self.filter_combo.currentText() if self.filter_combo is not None else "Active + recent"
+        filtered = []
+        now = time.time()
+        for mtime, payload in rows:
+            status = payload.get("status")
+            kind = payload.get("kind")
+            is_active = status in ACTIVE_STATUSES
+            if filter_text == "Training" and kind != "train":
+                continue
+            if filter_text == "Inference" and kind != "infer":
+                continue
+            if filter_text == "Failed / cancelled" and status not in ("failed", "cancelled", "cancelling"):
+                continue
+            if filter_text == "Active + recent":
+                age_days = (now - float(payload.get("updated_at_epoch", mtime) or mtime)) / 86400.0
+                if not is_active and status in ("failed", "cancelled") and age_days > 7.0:
+                    continue
+                if not is_active and len(filtered) >= 25:
+                    continue
+            filtered.append((mtime, payload))
+        return [item[1] for item in filtered[:80]], paths
 
     def on_select(self, row):
         if row < 0 or row >= len(self.jobs):
@@ -1024,8 +1061,8 @@ class QtStatusViewerApp(object):
 
     def show_job(self, job):
         lines = [
-            "Job: {0}".format(job.get("job_id", "?")),
-            "Type: {0}".format(job.get("kind", "?")),
+            "ID: {0}".format(job.get("job_id", "?")),
+            "Type: {0}".format("training" if job.get("kind") == "train" else ("prediction" if job.get("kind") == "infer" else job.get("kind", "?"))),
             "Organ: {0}".format(job.get("organ", "?")),
             "Status: {0}".format(display_status(job.get("status"))),
             "Created: {0}".format(format_time(job.get("created_at_epoch"))),
@@ -1079,10 +1116,22 @@ class QtStatusViewerApp(object):
             pipeline_tail = tail_text_from_text(pipeline_text, 60)
             if pipeline_tail:
                 log_tail = (log_tail + "\n" if log_tail else "") + "---- pipeline log ----\n" + pipeline_tail
-        self.log_text.setPlainText(log_tail)
+        self._set_log_text(log_tail)
         rows = training_curve_rows(job, log_text, pipeline_text)
         self.chart.set_rows(rows)
         self.stop_button.setEnabled(job.get("status") in ACTIVE_STATUSES)
+
+    def _set_log_text(self, text):
+        if self.log_text.toPlainText() == (text or ""):
+            return
+        scrollbar = self.log_text.verticalScrollBar()
+        old_value = scrollbar.value()
+        at_bottom = old_value >= scrollbar.maximum() - 3
+        self.log_text.setPlainText(text or "")
+        if at_bottom:
+            scrollbar.setValue(scrollbar.maximum())
+        else:
+            scrollbar.setValue(min(old_value, scrollbar.maximum()))
 
     def open_log_folder(self):
         job = self.selected_job()
@@ -1126,6 +1175,12 @@ def run_pyside6_ui(context):
             QtWidgets.QWidget.__init__(self)
             self.rows = []
 
+        def sizeHint(self):
+            return QtCore.QSize(620, 260)
+
+        def minimumSizeHint(self):
+            return QtCore.QSize(420, 220)
+
         def set_rows(self, rows):
             self.rows = list(rows or [])
             self.update()
@@ -1134,10 +1189,11 @@ def run_pyside6_ui(context):
             painter = QtGui.QPainter(self)
             painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
             rect = self.rect()
-            width = max(560, rect.width())
-            height = max(240, rect.height())
+            painter.setClipRect(rect)
+            width = max(320, rect.width())
+            height = max(190, rect.height())
             painter.fillRect(rect, QtGui.QColor("#f8fafc"))
-            margin_l, margin_r, margin_t, margin_b = 76, 70, 54, 44
+            margin_l, margin_r, margin_t, margin_b = 64, 54, 52, 40
             x0, y0 = margin_l, height - margin_b
             x1, y1 = width - margin_r, margin_t
             plot_w = max(1, x1 - x0)
@@ -1190,7 +1246,7 @@ def run_pyside6_ui(context):
                 painter.setPen(QtGui.QColor("#991b1b"))
                 painter.drawText(8, int(y + 4), "{0:.3g}".format(min_loss + frac * (max_loss - min_loss)))
                 painter.setPen(QtGui.QColor("#1d4ed8"))
-                painter.drawText(int(x1 + 10), int(y + 4), "{0:.2f}".format(frac))
+                painter.drawText(int(x1 + 8), int(y + 4), "{0:.2f}".format(frac))
 
             epoch_ticks = sorted(set([min(epochs), max(epochs)] + [row["epoch"] for row in self.rows]))
             if len(epoch_ticks) > 6:
@@ -1207,7 +1263,7 @@ def run_pyside6_ui(context):
             painter.setPen(QtGui.QColor("#991b1b"))
             painter.drawText(x0 - 48, y1 - 18, "Loss")
             painter.setPen(QtGui.QColor("#1d4ed8"))
-            painter.drawText(int(x1 + 18), y1 - 18, "Dice")
+            painter.drawText(int(max(x0 + 40, x1 - 28)), y1 - 18, "Dice")
 
             loss_points = []
             dice_points = []
@@ -1230,21 +1286,21 @@ def run_pyside6_ui(context):
                     painter.drawEllipse(p, 4, 4)
             latest_loss = next((row.get("train_loss") for row in reversed(self.rows) if row.get("train_loss") is not None), None)
             latest_dice = next((row.get("val_dice") for row in reversed(self.rows) if row.get("val_dice") is not None), None)
-            badge_x = 150
+            badge_x = min(150, max(16, width // 4))
             badges = [("Epoch {0}/{1}".format(epochs[-1], max(epochs)), "#374151", "#f3f4f6")]
             if latest_loss is not None:
                 badges.append(("loss {0:.4f}".format(float(latest_loss)), "#991b1b", "#fee2e2"))
             if latest_dice is not None:
                 badges.append(("val dice {0:.4f}".format(float(latest_dice)), "#1d4ed8", "#dbeafe"))
             for text, color, fill in badges:
-                badge_w = max(78, len(text) * 7 + 22)
+                badge_w = min(max(78, len(text) * 7 + 22), max(80, width - badge_x - 16))
                 painter.setPen(QtGui.QColor("#e5e7eb"))
                 painter.setBrush(QtGui.QColor(fill))
                 painter.drawRect(int(badge_x), 12, int(badge_w), 25)
                 painter.setPen(QtGui.QColor(color))
                 painter.drawText(int(badge_x + 10), 29, text)
                 badge_x += badge_w + 8
-            legend_x = int(x1 - 178)
+            legend_x = int(max(x0 + 120, x1 - 178))
             painter.setPen(QtGui.QPen(QtGui.QColor("#dc2626"), 2))
             painter.drawLine(legend_x, 24, legend_x + 24, 24)
             painter.setPen(QtGui.QColor("#374151"))
@@ -1258,10 +1314,6 @@ def run_pyside6_ui(context):
     if app is None:
         app = QtWidgets.QApplication(sys.argv[:1])
     app.setApplicationName(TITLE)
-    try:
-        app.setStyle("Fusion")
-    except Exception:
-        pass
     window = QtWidgets.QMainWindow()
     QtStatusViewerApp(window, context, qt_modules, CurveWidget)
     window.show()

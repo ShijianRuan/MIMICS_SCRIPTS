@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Run DINOv3 few-shot inference after choosing a model version."""
+"""Open the DINOv3 few-shot status window."""
 
 from __future__ import print_function
 
@@ -20,4 +20,4 @@ for _ in range(5):
 from _mimics_entrypoint import run_runtime_entry
 
 
-run_runtime_entry(globals(), __file__, "fewshot_mimics", action_attr="BUTTON_PREDICT_MODEL")
+run_runtime_entry(globals(), __file__, "fewshot_mimics", action_attr="BUTTON_STATUS")

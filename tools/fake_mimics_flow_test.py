@@ -690,16 +690,19 @@ def test_fewshot_external_advanced_setup(fake, tmp):
     (ts_root / "mcs_output" / "s0001.mcs").write_text("", encoding="utf-8")
     fake.file.project_path = str(ts_root / "mcs_output" / "s0001.mcs")
     launched = []
+    baseline_messages = len(fake.dialogs.messages)
 
     class Proc:
         pid = 76543
+        def poll(self):
+            return None
 
-    old_launch = module._launch_process
+    old_launch = module._launch_gui_process
     old_monitor = module._start_monitor
     old_project = module._project_root
     old_script = module._training_setup_ui_script
     try:
-        module._launch_process = lambda cmd, cwd=None: launched.append((cmd, cwd)) or Proc()
+        module._launch_gui_process = lambda cmd, cwd=None: launched.append((cmd, cwd)) or Proc()
         module._start_monitor = lambda monitor, poll_seconds=1.0: True
         module._project_root = lambda: str(ROOT)
         module._training_setup_ui_script = lambda: str(ROOT / "tools" / "fewshot_training_setup_ui.py")
@@ -709,7 +712,7 @@ def test_fewshot_external_advanced_setup(fake, tmp):
             str(ts_root),
         )
     finally:
-        module._launch_process = old_launch
+        module._launch_gui_process = old_launch
         module._start_monitor = old_monitor
         module._project_root = old_project
         module._training_setup_ui_script = old_script
@@ -725,7 +728,7 @@ def test_fewshot_external_advanced_setup(fake, tmp):
     status = json.loads(Path(context["setup_status_path"]).read_text(encoding="utf-8"))
     assert_equal(status["status"], "configuring", "external setup status")
     assert_equal(status["controller_pid"], 76543, "external setup controller pid")
-    assert_true(fake.dialogs.messages[-1]["ui_blocking"] is False, "external setup message should be non-blocking")
+    assert_equal(len(fake.dialogs.messages), baseline_messages, "external setup should not show a Mimics popup")
     return "DINOv3 Advanced setup launches externally and returns immediately"
 
 

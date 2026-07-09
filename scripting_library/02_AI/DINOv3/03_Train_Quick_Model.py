@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Start DINOv3 few-shot training for the selected organ Mask."""
+"""Start DINOv3 few-shot training with the default profile."""
 
 from __future__ import print_function
 

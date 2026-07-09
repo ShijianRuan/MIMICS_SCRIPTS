@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Run DINOv3 few-shot inference for the current case."""
+"""Predict the current case with the latest model for the selected organ."""
 
 from __future__ import print_function
 

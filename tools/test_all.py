@@ -1191,6 +1191,17 @@ class TestScriptingLibraryEntries(unittest.TestCase):
         # DINOv3 entries in DINOv3/ subdirectory, all route to fewshot_mimics
         dino_entries = [f for f in os.listdir(dino_dir) if f.endswith(".py")]
         self.assertGreater(len(dino_entries), 0, "No DINOv3 entries found")
+        self.assertEqual(
+            [
+                "01_Show_Status.py",
+                "02_Train_Advanced_Setup.py",
+                "03_Train_Quick_Model.py",
+                "04_Predict_Current_Case_Latest_Model.py",
+                "05_Predict_Choose_Model.py",
+                "06_Stop_Running_Job.py",
+            ],
+            sorted(dino_entries),
+        )
         for fname in dino_entries:
             path = os.path.join(dino_dir, fname)
             with open(path, "r") as f:
@@ -2331,7 +2342,7 @@ class TestNewFeatures(unittest.TestCase):
             "memory_mode": Var("Balanced"),
             "base_config": Var("config/train.yaml"),
             "epochs": Var("37"),
-            "batch_size": Var("2"),
+            "batch_size": Var("1"),
             "grad_accumulation": Var("4"),
             "lr": Var("0.0002"),
             "weight_decay": Var("0.001"),
@@ -2362,11 +2373,36 @@ class TestNewFeatures(unittest.TestCase):
         app.manual_cases_var = None
         options = ui.TrainingSetupApp.collect_options(app)
         self.assertEqual(37, options["epochs"])
-        self.assertEqual(2, options["batch_size"])
+        self.assertEqual(1, options["batch_size"])
         self.assertEqual(4, options["grad_accumulation"])
         self.assertEqual(0.5, options["val_fraction"])
         self.assertTrue(options["sub_volume"])
         self.assertEqual("48,256,256", options["sub_volume_size"])
+
+    def test_fewshot_external_setup_rejects_batch_size_above_one(self):
+        """Variable-depth 3D Mimics cases should use grad accumulation, not batch_size > 1."""
+        ui = __import__("tools.fewshot_training_setup_ui", fromlist=["dummy"])
+        with self.assertRaises(ValueError):
+            ui.validate_options({
+                "epochs": 3,
+                "batch_size": 2,
+                "grad_accumulation": 1,
+                "min_samples": 1,
+                "max_samples": 0,
+                "min_val_samples": 0,
+                "lora_rank": 8,
+                "lora_alpha": 16,
+                "adapter_bottleneck": 64,
+                "keep_last_checkpoints": 2,
+                "lr": 0.001,
+                "weight_decay": 0.01,
+                "val_fraction": 0.0,
+                "mixed_precision": False,
+                "sub_volume": False,
+                "keep_materialized_dataset": False,
+                "img_size": "224,224",
+                "sub_volume_size": "32,224,224",
+            })
 
     def test_fewshot_external_setup_lists_only_available_model_scales(self):
         """Expert UI should not advertise pretrained scales that are not installed."""
@@ -2416,6 +2452,42 @@ class TestNewFeatures(unittest.TestCase):
         with open(config_path, "r", encoding="utf-8") as handle:
             text = handle.read()
         self.assertIn("validation_enabled: false", text)
+
+    def test_fewshot_pipeline_rejects_batch_size_above_one(self):
+        """Pipeline config generation should reject variable-depth unsafe batch sizes."""
+        pipeline = __import__("tools.fewshot_pipeline", fromlist=["dummy"])
+
+        class Args(object):
+            img_size = "224,224"
+            model_path = None
+            model_scale = "vitb16"
+            finetune_method = "lora"
+            decoder = "segformer3d"
+            organ = "liver"
+            lora_rank = 8
+            lora_alpha = 16
+            adapter_bottleneck = 64
+            modality = "ct"
+            epochs = 3
+            batch_size = 2
+            grad_accumulation = 1
+            mixed_precision = False
+            lr = 0.001
+            weight_decay = 0.01
+            keep_last_checkpoints = 2
+            sub_volume = False
+            sub_volume_size = "32,224,224"
+
+        with self.assertRaises(RuntimeError) as raised:
+            pipeline.write_training_config(
+                os.path.join(self.tmp, "bad_batch_config.yaml"),
+                os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg", "config", "synthstrip_lora_segformer3d.yaml"),
+                os.path.join(self.tmp, "dataset"),
+                "exp_test",
+                Args(),
+                validation_enabled=False,
+            )
+        self.assertIn("Batch size must stay 1", str(raised.exception))
 
     def test_fewshot_pipeline_writes_metrics_history_runtime_path(self):
         """Training config should point the DINO trainer at the structured metrics history file."""
@@ -2683,6 +2755,7 @@ class TestNewFeatures(unittest.TestCase):
         workspace = Path(self.tmp) / "fewshot_models"
         status_path = workspace / "jobs" / "train_unique.json"
         ts_root.mkdir()
+        configured_mcs = ts_root / "configured_mcs"
         launched = []
 
         class Proc(object):
@@ -2693,9 +2766,11 @@ class TestNewFeatures(unittest.TestCase):
 
         old_find = pipeline.find_mimics_exe
         old_popen = pipeline.subprocess.Popen
+        old_resolve = pipeline.resolve_mimics_output_dir
         try:
             pipeline.find_mimics_exe = lambda _value=None: r"C:\MimicsResearch.exe"
             pipeline.subprocess.Popen = lambda cmd, **kwargs: launched.append((cmd, kwargs)) or Proc()
+            pipeline.resolve_mimics_output_dir = lambda _ts_root: configured_mcs
             result = pipeline.launch_mimics_export(
                 ts_root,
                 {"case001"},
@@ -2708,13 +2783,17 @@ class TestNewFeatures(unittest.TestCase):
         finally:
             pipeline.find_mimics_exe = old_find
             pipeline.subprocess.Popen = old_popen
+            pipeline.resolve_mimics_output_dir = old_resolve
 
         self.assertTrue(result["launched"])
-        self.assertIn("_fewshot_export_logs", result["log"])
+        self.assertIn("_export", result["log"])
         self.assertIn("train_unique_mimics_export.log", result["log"])
         runner = Path(launched[0][0][-1])
-        self.assertIn("_fewshot_export_jobs", str(runner))
-        self.assertEqual("run_export_batch.py", runner.name)
+        self.assertIn("_export", str(runner))
+        self.assertEqual("train_unique_run_export_batch.py", runner.name)
+        config_path = workspace / "_export" / "train_unique_export_config.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        self.assertEqual(str(configured_mcs), config["output_dir"])
         self.assertFalse((ts_root / "mcs_output" / "_run_export_batch.py").exists())
         self.assertFalse((ts_root / "mcs_output" / "_fewshot_export_mimics.log").exists())
 
@@ -2861,13 +2940,15 @@ class TestNewFeatures(unittest.TestCase):
 
         class Proc(object):
             pid = 43210
+            def poll(self):
+                return None
 
-        old_launch = fewshot_mimics._launch_process
+        old_launch = fewshot_mimics._launch_gui_process
         old_start_monitor = fewshot_mimics._start_monitor
         old_script = fewshot_mimics._training_setup_ui_script
         old_project = fewshot_mimics._project_root
         try:
-            fewshot_mimics._launch_process = lambda cmd, cwd=None: launched.append((cmd, cwd)) or Proc()
+            fewshot_mimics._launch_gui_process = lambda cmd, cwd=None: launched.append((cmd, cwd)) or Proc()
             fewshot_mimics._start_monitor = lambda monitor, poll_seconds=1.0: True
             fewshot_mimics._project_root = lambda: PROJECT_ROOT
             fewshot_mimics._training_setup_ui_script = lambda: os.path.join(PROJECT_ROOT, "tools", "fewshot_training_setup_ui.py")
@@ -2877,7 +2958,7 @@ class TestNewFeatures(unittest.TestCase):
                 ts_root,
             )
         finally:
-            fewshot_mimics._launch_process = old_launch
+            fewshot_mimics._launch_gui_process = old_launch
             fewshot_mimics._start_monitor = old_start_monitor
             fewshot_mimics._training_setup_ui_script = old_script
             fewshot_mimics._project_root = old_project
@@ -2897,6 +2978,28 @@ class TestNewFeatures(unittest.TestCase):
         self.assertEqual("configuring", status["status"])
         self.assertEqual(43210, status["controller_pid"])
 
+    def test_fewshot_mimics_case_ids_use_configured_mcs_output_dir(self):
+        """Mimics-side DINOv3 helpers should honor mimics_output_dir for saved .mcs files."""
+        import fewshot_mimics
+        ts_root = os.path.join(self.tmp, "dataset")
+        custom_mcs = os.path.join(ts_root, "custom_mcs")
+        os.makedirs(custom_mcs)
+        with open(os.path.join(custom_mcs, "case_from_custom.mcs"), "w", encoding="utf-8") as handle:
+            handle.write("")
+        old_read = fewshot_mimics._read_json
+        old_project = fewshot_mimics._project_root
+        try:
+            fewshot_mimics._project_root = lambda: PROJECT_ROOT
+            def fake_read(path, default=None):
+                if str(path).endswith("mimics_io_config.json"):
+                    return {"mimics_output_dir": "custom_mcs"}
+                return old_read(path, default)
+            fewshot_mimics._read_json = fake_read
+            self.assertIn("case_from_custom", fewshot_mimics._case_ids_from_dataset(ts_root))
+        finally:
+            fewshot_mimics._read_json = old_read
+            fewshot_mimics._project_root = old_project
+
     def test_fewshot_mimics_launches_external_status_viewer_nonblocking(self):
         """Mimics Show Status starts an external viewer process without waiting."""
         import fewshot_mimics
@@ -2906,12 +3009,14 @@ class TestNewFeatures(unittest.TestCase):
 
         class Proc(object):
             pid = 54321
+            def poll(self):
+                return None
 
-        old_launch = fewshot_mimics._launch_process
+        old_launch = fewshot_mimics._launch_gui_process
         old_script = fewshot_mimics._status_viewer_script
         old_project = fewshot_mimics._project_root
         try:
-            fewshot_mimics._launch_process = lambda cmd, cwd=None: launched.append((cmd, cwd)) or Proc()
+            fewshot_mimics._launch_gui_process = lambda cmd, cwd=None: launched.append((cmd, cwd)) or Proc()
             fewshot_mimics._project_root = lambda: PROJECT_ROOT
             fewshot_mimics._status_viewer_script = lambda: os.path.join(PROJECT_ROOT, "tools", "fewshot_status_viewer.py")
             pid = fewshot_mimics._launch_external_status_viewer(
@@ -2919,7 +3024,7 @@ class TestNewFeatures(unittest.TestCase):
                 ts_root,
             )
         finally:
-            fewshot_mimics._launch_process = old_launch
+            fewshot_mimics._launch_gui_process = old_launch
             fewshot_mimics._status_viewer_script = old_script
             fewshot_mimics._project_root = old_project
         self.assertEqual(54321, pid)
@@ -2966,13 +3071,13 @@ class TestNewFeatures(unittest.TestCase):
         ts_root = os.path.join(self.tmp, "dataset")
         os.makedirs(ts_root)
 
-        old_launch = fewshot_mimics._launch_process
+        old_launch = fewshot_mimics._launch_gui_process
         old_script = fewshot_mimics._status_viewer_script
         old_project = fewshot_mimics._project_root
         try:
             def denied_launch(_cmd, cwd=None):
                 raise PermissionError("[WinError 5] Access is denied")
-            fewshot_mimics._launch_process = denied_launch
+            fewshot_mimics._launch_gui_process = denied_launch
             fewshot_mimics._project_root = lambda: PROJECT_ROOT
             fewshot_mimics._status_viewer_script = lambda: os.path.join(PROJECT_ROOT, "tools", "fewshot_status_viewer.py")
             with self.assertRaises(RuntimeError) as raised:
@@ -2981,7 +3086,7 @@ class TestNewFeatures(unittest.TestCase):
                     ts_root,
                 )
         finally:
-            fewshot_mimics._launch_process = old_launch
+            fewshot_mimics._launch_gui_process = old_launch
             fewshot_mimics._status_viewer_script = old_script
             fewshot_mimics._project_root = old_project
         self.assertIn("start the DINOv3 status viewer process", str(raised.exception))
