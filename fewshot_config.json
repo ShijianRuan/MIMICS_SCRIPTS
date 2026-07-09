@@ -1,5 +1,5 @@
 {
-  "base_config": "config/synthstrip_lora_segformer3d.yaml",
+  "base_config": "config/mimics_lora_segformer3d.yaml",
   "default_training_profile": "balanced",
   "default_batch_size": 1,
   "default_decoder": "segformer3d",

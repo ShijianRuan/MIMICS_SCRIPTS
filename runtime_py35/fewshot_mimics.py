@@ -537,7 +537,7 @@ def _default_training_options(config, profile_name=None):
     values = {}
     if default_profile and isinstance(profiles, dict):
         values.update(profiles.get(default_profile, {}) or {})
-    values.setdefault("base_config", config.get("base_config", "config/synthstrip_lora_segformer3d.yaml"))
+    values.setdefault("base_config", config.get("base_config", "config/mimics_lora_segformer3d.yaml"))
     values.setdefault("epochs", config.get("default_epochs", 10))
     values["batch_size"] = 1
     values.setdefault("grad_accumulation", config.get("default_grad_accumulation", 1))
@@ -582,7 +582,7 @@ def _split_csv(values):
 def _append_training_args(cmd, config, options):
     cmd.extend([
         "--base-config",
-        str(options.get("base_config", config.get("base_config", "config/synthstrip_lora_segformer3d.yaml"))),
+        str(options.get("base_config", config.get("base_config", "config/mimics_lora_segformer3d.yaml"))),
         "--epochs",
         str(int(options.get("epochs", config.get("default_epochs", 10)))),
         "--batch-size",

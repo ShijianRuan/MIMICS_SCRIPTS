@@ -434,7 +434,7 @@ def python_from_args(args, dinov3_root):
 
 def base_config_from_args(args, dinov3_root):
     repo_cfg = load_repo_config()
-    value = args.base_config or repo_cfg.get("base_config") or "config/synthstrip_lora_segformer3d.yaml"
+    value = args.base_config or repo_cfg.get("base_config") or "config/mimics_lora_segformer3d.yaml"
     path = resolve_path(value, dinov3_root)
     if not path.is_file():
         raise RuntimeError("base config was not found: {}".format(path))

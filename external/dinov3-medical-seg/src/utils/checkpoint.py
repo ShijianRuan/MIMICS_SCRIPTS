@@ -62,6 +62,13 @@ def save_checkpoint(
     }
     state["save_mode"] = "trainable_only"
 
+    # BatchNorm running statistics are buffers (requires_grad=False) and are
+    # not captured above.  Without them the eval-mode forward pass uses stale
+    # zero-initialised statistics, producing wrong predictions.
+    for n, b in model.named_buffers():
+        if "running_mean" in n or "running_var" in n or "num_batches_tracked" in n:
+            state["model_state_dict"][n] = b.clone()
+
     if optimizer is not None:
         state["optimizer_state_dict"] = optimizer.state_dict()
 

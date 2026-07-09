@@ -20,7 +20,7 @@ cd /d %~dp0
 
 :: 1. Setup Python embeddable (self-contained, no system Python needed)
 
-echo [1/5] Setting up Python 3.13.7...
+echo [1/6] Setting up Python 3.13.7...
 
 if not exist "nninteractive_env\python.exe" (
 
@@ -60,7 +60,7 @@ if not exist "nninteractive_env\Lib\site-packages" mkdir nninteractive_env\Lib\s
 
 :: 2. Install pip (try ensurepip, fallback to get-pip.py)
 
-echo [2/5] Installing pip...
+echo [2/6] Installing pip...
 
 nninteractive_env\python.exe -m pip --version >nul 2>&1
 
@@ -116,7 +116,7 @@ echo   pip is ready.
 
 :: 3. Check package directory
 
-echo [3/5] Checking wheels...
+echo [3/6] Checking wheels...
 
 if not exist "wheels\*.whl" if not exist "wheels\*.tar.gz" (
 
@@ -138,7 +138,7 @@ echo   Wheels directory OK.
 
 :: 4. Install all packages offline (no internet, no system Python)
 
-echo [4/5] Installing packages from local wheels (no internet)...
+echo [4/6] Installing packages from local wheels (no internet)...
 
 set FAIL_COUNT=0
 

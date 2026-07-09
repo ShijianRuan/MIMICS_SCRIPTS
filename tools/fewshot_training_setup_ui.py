@@ -108,7 +108,7 @@ def default_training_options(config, profile_name=None):
     values = {}
     if default_profile and isinstance(profiles, dict):
         values.update(profiles.get(default_profile, {}) or {})
-    values.setdefault("base_config", config.get("base_config", "config/synthstrip_lora_segformer3d.yaml"))
+    values.setdefault("base_config", config.get("base_config", "config/mimics_lora_segformer3d.yaml"))
     values.setdefault("epochs", config.get("default_epochs", 10))
     values["batch_size"] = 1
     values.setdefault("grad_accumulation", config.get("default_grad_accumulation", 1))
@@ -199,7 +199,7 @@ def validate_options(options):
 def append_training_args(cmd, config, options):
     cmd.extend([
         "--base-config",
-        str(options.get("base_config", config.get("base_config", "config/synthstrip_lora_segformer3d.yaml"))),
+        str(options.get("base_config", config.get("base_config", "config/mimics_lora_segformer3d.yaml"))),
         "--epochs",
         str(int(options.get("epochs", config.get("default_epochs", 10)))),
         "--batch-size",
@@ -853,7 +853,7 @@ class TrainingSetupApp(object):
             for name in sorted(os.listdir(config_dir)):
                 if name.endswith((".yaml", ".yml")):
                     choices.append("config/" + name)
-        current = str(self.values.get("base_config", "config/synthstrip_lora_segformer3d.yaml"))
+        current = str(self.values.get("base_config", "config/mimics_lora_segformer3d.yaml"))
         if current not in choices:
             choices.insert(0, current)
         return choices or [current]

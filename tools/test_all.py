@@ -2674,7 +2674,7 @@ class TestNewFeatures(unittest.TestCase):
         config_path = os.path.join(self.tmp, "generated_config.yaml")
         pipeline.write_training_config(
             config_path,
-            os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg", "config", "synthstrip_lora_segformer3d.yaml"),
+            os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg", "config", "mimics_lora_segformer3d.yaml"),
             os.path.join(self.tmp, "dataset"),
             "exp_test",
             Args(),
@@ -2712,7 +2712,7 @@ class TestNewFeatures(unittest.TestCase):
         with self.assertRaises(RuntimeError) as raised:
             pipeline.write_training_config(
                 os.path.join(self.tmp, "bad_batch_config.yaml"),
-                os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg", "config", "synthstrip_lora_segformer3d.yaml"),
+                os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg", "config", "mimics_lora_segformer3d.yaml"),
                 os.path.join(self.tmp, "dataset"),
                 "exp_test",
                 Args(),
@@ -2749,7 +2749,7 @@ class TestNewFeatures(unittest.TestCase):
         metrics_history = os.path.join(self.tmp, "metrics_history.json")
         pipeline.write_training_config(
             config_path,
-            os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg", "config", "synthstrip_lora_segformer3d.yaml"),
+            os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg", "config", "mimics_lora_segformer3d.yaml"),
             os.path.join(self.tmp, "dataset"),
             "exp_test",
             Args(),
@@ -2766,7 +2766,7 @@ class TestNewFeatures(unittest.TestCase):
         history_only_config = os.path.join(self.tmp, "generated_config_history_only.yaml")
         pipeline.write_training_config(
             history_only_config,
-            os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg", "config", "synthstrip_lora_segformer3d.yaml"),
+            os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg", "config", "mimics_lora_segformer3d.yaml"),
             os.path.join(self.tmp, "dataset"),
             "exp_test",
             Args(),
@@ -3505,10 +3505,255 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn("Python:", str(raised.exception))
         self.assertIn("Script:", str(raised.exception))
 
+    # ================================================================
+    # BatchNorm checkpoint roundtrip
+    # ================================================================
 
-# ============================================================================
-# Main
-# ============================================================================
+    def test_checkpoint_saves_and_restores_batchnorm_running_stats(self):
+        """Checkpoint save must include BN running_mean/var for correct inference."""
+        checkpoint = __import__("external.dinov3-medical-seg.src.utils.checkpoint",
+                                fromlist=["save_checkpoint", "load_checkpoint"])
+        import torch, tempfile, shutil
+        from pathlib import Path
+
+        tmp = Path(tempfile.mkdtemp(prefix="ckpt_bn_test_"))
+        try:
+            # Build a tiny model with BatchNorm
+            model = torch.nn.Sequential(
+                torch.nn.Conv3d(1, 8, 3, padding=1),
+                torch.nn.BatchNorm3d(8),
+                torch.nn.ReLU(),
+                torch.nn.Conv3d(8, 2, 1),
+            )
+            opt = torch.optim.SGD(model.parameters(), lr=0.01)
+            x = torch.randn(1, 1, 16, 32, 32)
+            for _ in range(5):
+                model.train()
+                opt.zero_grad()
+                model(x).sum().backward()
+                opt.step()
+            model.eval()
+            ref_output = model(x)
+
+            checkpoint.save_checkpoint(model, opt, epoch=1, metrics={}, config={},
+                                       save_dir=str(tmp), filename="test.pth")
+
+            state = torch.load(str(tmp / "test.pth"), weights_only=False)
+            bn_keys = [k for k in state["model_state_dict"] if "running" in k]
+            self.assertGreater(len(bn_keys), 0, "BN running stats must be in checkpoint")
+
+            model2 = torch.nn.Sequential(
+                torch.nn.Conv3d(1, 8, 3, padding=1),
+                torch.nn.BatchNorm3d(8),
+                torch.nn.ReLU(),
+                torch.nn.Conv3d(8, 2, 1),
+            )
+            checkpoint.load_checkpoint(model2, str(tmp / "test.pth"), device="cpu")
+            model2.eval()
+            with torch.no_grad():
+                restored = model2(x)
+            self.assertLess(float(torch.max(torch.abs(ref_output - restored))), 1e-5,
+                            "BN-restored model must produce identical output")
+        finally:
+            shutil.rmtree(str(tmp))
+
+    def test_lora_checkpoint_roundtrip_preserves_trainable_params(self):
+        """LoRA training → checkpoint → inference must produce identical logits."""
+        import torch, tempfile, shutil, sys, os
+        from pathlib import Path
+        sys.path.insert(0, os.path.join(os.getcwd(), "external", "dinov3-medical-seg"))
+        from src.utils.config import load_config
+        from src.utils.checkpoint import save_checkpoint, load_checkpoint
+        from src.models.segmentor import DINOv33DSegmentor
+
+        tmp = Path(tempfile.mkdtemp(prefix="lora_roundtrip_"))
+        try:
+            cfg_path = os.path.join(os.getcwd(), "external", "dinov3-medical-seg",
+                                    "config", "mimics_lora_segformer3d.yaml")
+            cfg = load_config(cfg_path)
+            cfg["finetune"]["method"] = "lora"
+
+            model = DINOv33DSegmentor(cfg)
+            opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=1e-3)
+            x = torch.randn(1, 1, 16, 224, 224)
+            for _ in range(3):
+                model.train(); opt.zero_grad()
+                model(x).sum().backward(); opt.step()
+
+            save_checkpoint(model, opt, epoch=3, metrics={"loss": 0.5}, config=cfg,
+                            save_dir=str(tmp), filename="lora.pth")
+
+            model2 = DINOv33DSegmentor(cfg)
+            load_checkpoint(model2, str(tmp / "lora.pth"), device="cpu")
+            model.eval(); model2.eval()
+            with torch.no_grad():
+                o1 = model(x); o2 = model2(x)
+            max_diff = float(torch.max(torch.abs(o1 - o2)))
+            self.assertLess(max_diff, 1e-5,
+                            f"LoRA checkpoint roundtrip logit diff {max_diff:.2e} must be < 1e-5")
+        finally:
+            shutil.rmtree(str(tmp))
+
+    # ================================================================
+    # mimcs_lora_segformer3d config template
+    # ================================================================
+
+    def test_mimics_lora_segformer3d_template_exists_and_has_no_k_shot(self):
+        """Default template must use k_shot=-1 (use all data) not 5."""
+        import yaml, os
+        path = os.path.join(os.getcwd(), "external", "dinov3-medical-seg",
+                            "config", "mimics_lora_segformer3d.yaml")
+        self.assertTrue(os.path.isfile(path), "mimics_lora_segformer3d.yaml must exist")
+        with open(path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        self.assertIsNotNone(cfg.get("_base_"), "must inherit from train.yaml")
+        self.assertEqual("mimics", cfg.get("data", {}).get("name", ""),
+                         "data.name must be mimics")
+        self.assertEqual("lora", cfg.get("finetune", {}).get("method", ""),
+                         "finetune method must be lora")
+
+    def test_config_defaults_point_to_mimics_template(self):
+        """All hardcoded defaults must reference mimcs_lora_segformer3d."""
+        files_and_patterns = [
+            ("fewshot_config.json", '"base_config": "config/mimics_lora_segformer3d.yaml"'),
+            ("tools/fewshot_pipeline.py", "config/mimics_lora_segformer3d.yaml"),
+            ("tools/fewshot_training_setup_ui.py", "config/mimics_lora_segformer3d.yaml"),
+            ("runtime_py35/fewshot_mimics.py", "config/mimics_lora_segformer3d.yaml"),
+        ]
+        for filepath, pattern in files_and_patterns:
+            content = open(filepath, "r", encoding="utf-8").read()
+            self.assertIn(pattern, content,
+                          f"{filepath} must default to mimcs_lora_segformer3d.yaml")
+
+    # ================================================================
+    # Export validation + label staging
+    # ================================================================
+
+    def test_validate_materialized_dataset_rejects_shape_mismatch(self):
+        """Materialized pairs with different image/label shapes must fail."""
+        pipeline = __import__("tools.fewshot_pipeline", fromlist=["validate_materialized_dataset"])
+        rows = [{"case_id": "test", "dataset_image": "/a/img.nii.gz", "dataset_label": "/a/lbl.nii.gz"}]
+        import nibabel as nib, numpy as np, tempfile, shutil
+        from pathlib import Path
+        tmp = Path(tempfile.mkdtemp(prefix="mat_val_"))
+        try:
+            img_p = tmp / "img.nii.gz"; lbl_p = tmp / "lbl.nii.gz"
+            # Different shapes
+            nib.save(nib.Nifti1Image(np.zeros((16,128,128), dtype=np.float32), np.eye(4)), str(img_p))
+            nib.save(nib.Nifti1Image(np.zeros((16,64,64), dtype=np.int32), np.eye(4)), str(lbl_p))
+            rows[0]["dataset_image"] = str(img_p); rows[0]["dataset_label"] = str(lbl_p)
+            with self.assertRaises(RuntimeError):
+                pipeline.validate_materialized_dataset(rows)
+        finally:
+            shutil.rmtree(str(tmp))
+
+    def test_validate_materialized_dataset_rejects_empty_label(self):
+        """Materialized pairs with all-zero labels must fail."""
+        pipeline = __import__("tools.fewshot_pipeline", fromlist=["validate_materialized_dataset"])
+        import nibabel as nib, numpy as np, tempfile, shutil
+        from pathlib import Path
+        tmp = Path(tempfile.mkdtemp(prefix="mat_val_empty_"))
+        try:
+            img_p = tmp / "img.nii.gz"; lbl_p = tmp / "lbl.nii.gz"
+            nib.save(nib.Nifti1Image(np.zeros((16,128,128), dtype=np.float32), np.eye(4)), str(img_p))
+            # All-zero label
+            nib.save(nib.Nifti1Image(np.zeros((16,128,128), dtype=np.int32), np.eye(4)), str(lbl_p))
+            rows = [{"case_id": "zero", "dataset_image": str(img_p), "dataset_label": str(lbl_p)}]
+            with self.assertRaises(RuntimeError):
+                pipeline.validate_materialized_dataset(rows)
+        finally:
+            shutil.rmtree(str(tmp))
+
+    def test_launch_mimics_export_passes_label_staging_dir(self):
+        """Export must support label_staging_dir for fresh-label isolation."""
+        pipeline = __import__("tools.fewshot_pipeline", fromlist=["launch_mimics_export"])
+        import inspect
+        sig = inspect.signature(pipeline.launch_mimics_export)
+        self.assertIn("label_staging_dir", sig.parameters,
+                      "launch_mimics_export must accept label_staging_dir")
+
+    # ================================================================
+    # Stop Background Import
+    # ================================================================
+
+    def test_stop_background_import_entry_exists(self):
+        """03_Stop_Background_Import entry must route to the correct function."""
+        entry = os.path.join(
+            os.getcwd(), "scripting_library", "01_Data", "03_Stop_Background_Import.py"
+        )
+        self.assertTrue(os.path.isfile(entry), "Stop_Background_Import entry must exist")
+        content = open(entry, "r", encoding="utf-8").read()
+        self.assertIn("main_stop_import", content,
+                      "must route to main_stop_import function")
+
+    def test_stop_background_import_targets_only_create_mcs(self):
+        """stop_background_import must identify import lock by kind=create_mcs."""
+        sys.path.insert(0, os.path.join(os.getcwd(), "runtime_py35"))
+        import mimics_stop_background
+        self.assertTrue(callable(mimics_stop_background.stop_background_import),
+                        "stop_background_import must be callable")
+        # Verify lock identification
+        self.assertTrue(mimics_stop_background._lock_is_import_creation(
+            {"kind": "create_mcs", "owner": "import .mcs creation for dataset X"}))
+        self.assertFalse(mimics_stop_background._lock_is_import_creation(
+            {"kind": "train", "owner": "DINOv3 training"}))
+
+    # ================================================================
+    # Preprocessing consistency
+    # ================================================================
+
+    def test_training_vs_inference_preprocessing_identical(self):
+        """Trilinear (training) vs bilinear per-slice (inference) must be identical."""
+        import numpy as np, torch
+        np.random.seed(42)
+        D, H, W = 16, 128, 128
+        data = np.random.randn(D, H, W).astype(np.float32)
+        SZ = (224, 224)
+        # Training: trilinear 3D
+        it = torch.from_numpy(data).unsqueeze(0).unsqueeze(0)
+        tr = torch.nn.functional.interpolate(it, size=(D, *SZ), mode="trilinear",
+                                             align_corners=False).squeeze().numpy()
+        # Inference: bilinear per-slice
+        inf = np.zeros((D, *SZ), dtype=np.float32)
+        for d in range(D):
+            s = torch.from_numpy(data[d]).unsqueeze(0).unsqueeze(0)
+            inf[d] = torch.nn.functional.interpolate(s, size=SZ, mode="bilinear").numpy()
+        self.assertLess(float(np.max(np.abs(tr - inf))), 1e-6,
+                        "Training and inference preprocessing must produce identical data")
+
+    # ================================================================
+    # Inference source geometry validation
+    # ================================================================
+
+    def test_validate_inference_source_geometry_shape_mismatch(self):
+        """Inference must reject source images with wrong shape vs Mimics project."""
+        pipeline = __import__("tools.fewshot_pipeline",
+                              fromlist=["validate_inference_source_geometry"])
+        import nibabel as nib, numpy as np, tempfile, shutil
+        from pathlib import Path
+        tmp = Path(tempfile.mkdtemp(prefix="src_geo_"))
+        try:
+            img_p = tmp / "ct.nii.gz"
+            nib.save(nib.Nifti1Image(np.zeros((16,128,128), dtype=np.float32), np.eye(4)), str(img_p))
+            with self.assertRaises(RuntimeError):
+                pipeline.validate_inference_source_geometry(
+                    str(img_p), expected_shape=[32, 256, 256])
+        finally:
+            shutil.rmtree(str(tmp))
+
+    # ================================================================
+    # Centralized mimcs_output_dir
+    # ================================================================
+
+    def test_resolve_mimics_output_dir_uses_single_config_key(self):
+        """mimcs_output_dir must only use mimcs_output_dir (no deprecated aliases)."""
+        pipeline = __import__("tools.fewshot_pipeline", fromlist=["resolve_mimics_output_dir"])
+        import inspect
+        src = inspect.getsource(pipeline.resolve_mimics_output_dir)
+        # Must NOT reference deprecated keys
+        self.assertNotIn("mimics_export_output_dir", src)
+        self.assertNotIn("mimics_data_output_dir", src)
+        self.assertNotIn("mimics_import_output_dir", src)
 
 
 if __name__ == "__main__":
