@@ -252,7 +252,8 @@ def make_fake_dinov3_root(tmp: Path) -> Path:
     root = tmp / "fake_dinov3"
     (root / "scripts").mkdir(parents=True, exist_ok=True)
     (root / "config").mkdir(parents=True, exist_ok=True)
-    (root / "config" / "synthstrip_lora_segformer3d.yaml").write_text("training:\n  epochs: 1\n", encoding="utf-8")
+    for name in ("mimics_lora_segformer3d.yaml", "synthstrip_lora_segformer3d.yaml"):
+        (root / "config" / name).write_text("training:\n  epochs: 1\n", encoding="utf-8")
     train_script = r'''
 import json
 import os

@@ -8,6 +8,23 @@ import torch.nn as nn
 from transformers import DINOv3ViTBackbone, AutoImageProcessor
 
 
+IMAGENET_DEFAULT_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_DEFAULT_STD = (0.229, 0.224, 0.225)
+
+
+def normalize_imagenet(images_2d: torch.Tensor, mean, std) -> torch.Tensor:
+    """Normalize 3-channel [0, 1] tensors with ImageNet/processor stats."""
+    if images_2d.dim() != 4 or images_2d.shape[1] != 3:
+        raise RuntimeError(
+            "ImageNet normalization expects a 4D tensor with 3 channels; got {}".format(
+                tuple(images_2d.shape)
+            )
+        )
+    mean_tensor = torch.as_tensor(mean, dtype=images_2d.dtype, device=images_2d.device).view(1, 3, 1, 1)
+    std_tensor = torch.as_tensor(std, dtype=images_2d.dtype, device=images_2d.device).view(1, 3, 1, 1)
+    return (images_2d - mean_tensor) / std_tensor
+
+
 class DINOv3Backbone(nn.Module):
     """DINOv3 ViT backbone loaded from local HuggingFace-format weights.
 
@@ -22,6 +39,9 @@ class DINOv3Backbone(nn.Module):
         model_path: str,
         out_indices: list = None,
         freeze: bool = True,
+        input_normalization: str = "none",
+        image_mean=None,
+        image_std=None,
     ):
         super().__init__()
         if out_indices is None:
@@ -42,6 +62,11 @@ class DINOv3Backbone(nn.Module):
             reshape_hidden_states=True,
         )
         self.processor = AutoImageProcessor.from_pretrained(self.model_path)
+        self.input_normalization = str(input_normalization or "none").lower()
+        processor_mean = getattr(self.processor, "image_mean", None) or IMAGENET_DEFAULT_MEAN
+        processor_std = getattr(self.processor, "image_std", None) or IMAGENET_DEFAULT_STD
+        self.image_mean = tuple(float(v) for v in (image_mean or processor_mean))
+        self.image_std = tuple(float(v) for v in (image_std or processor_std))
 
         cfg = self.backbone.config
         self.patch_size = cfg.patch_size
@@ -76,6 +101,8 @@ class DINOv3Backbone(nn.Module):
         Returns:
             list of (B, C, H/p, W/p) feature maps
         """
+        if self.input_normalization in ("imagenet", "processor", "dinov3"):
+            images_2d = normalize_imagenet(images_2d, self.image_mean, self.image_std)
         outputs = self.backbone(images_2d)
         return list(outputs.feature_maps)
 

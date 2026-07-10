@@ -18,6 +18,7 @@ Run from the project root:
 from __future__ import print_function
 
 import json
+import importlib.util
 import os
 import shutil
 import sys
@@ -2683,6 +2684,43 @@ class TestNewFeatures(unittest.TestCase):
         with open(config_path, "r", encoding="utf-8") as handle:
             text = handle.read()
         self.assertIn("validation_enabled: false", text)
+        self.assertIn("input_normalization: \"imagenet\"", text)
+        self.assertIn("image_mean: [0.485, 0.456, 0.406]", text)
+        self.assertIn("image_std: [0.229, 0.224, 0.225]", text)
+
+    def test_dinov3_imagenet_normalization_helper(self):
+        """Backbone helper should apply processor/ImageNet mean and std to [0, 1] RGB tensors."""
+        import types
+        import torch
+
+        old_transformers = sys.modules.get("transformers")
+        fake_transformers = types.ModuleType("transformers")
+        fake_transformers.DINOv3ViTBackbone = object
+        fake_transformers.AutoImageProcessor = object
+        sys.modules["transformers"] = fake_transformers
+        try:
+            module_path = os.path.join(
+                PROJECT_ROOT,
+                "external",
+                "dinov3-medical-seg",
+                "src",
+                "models",
+                "backbone.py",
+            )
+            spec = importlib.util.spec_from_file_location("dinov3_backbone_test", module_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        finally:
+            if old_transformers is None:
+                sys.modules.pop("transformers", None)
+            else:
+                sys.modules["transformers"] = old_transformers
+
+        image = torch.ones((1, 3, 2, 2), dtype=torch.float32) * 0.5
+        out = module.normalize_imagenet(image, (0.5, 0.25, 0.0), (0.5, 0.25, 0.5))
+        self.assertTrue(torch.allclose(out[:, 0], torch.zeros_like(out[:, 0])))
+        self.assertTrue(torch.allclose(out[:, 1], torch.ones_like(out[:, 1])))
+        self.assertTrue(torch.allclose(out[:, 2], torch.ones_like(out[:, 2])))
 
     def test_fewshot_pipeline_rejects_batch_size_above_one(self):
         """Pipeline config generation should reject variable-depth unsafe batch sizes."""

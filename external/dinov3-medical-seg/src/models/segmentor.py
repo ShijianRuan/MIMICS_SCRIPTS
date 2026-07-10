@@ -44,6 +44,9 @@ class DINOv33DSegmentor(nn.Module):
             model_path=cfg["model_path"],
             out_indices=cfg.get("out_indices", [2, 5, 8, 11]),
             freeze=freeze_backbone,
+            input_normalization=cfg.get("input_normalization", "none"),
+            image_mean=cfg.get("image_mean"),
+            image_std=cfg.get("image_std"),
         )
         self.embed_dim = self.backbone.embed_dim
         self.patch_size = self.backbone.patch_size
