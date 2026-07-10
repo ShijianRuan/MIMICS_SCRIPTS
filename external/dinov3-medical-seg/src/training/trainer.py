@@ -32,6 +32,23 @@ class Trainer3D:
         train_loader: DataLoader,
         val_loader: DataLoader = None,
     ):
+        # ── Determinism: seed everything so runs are reproducible. ──
+        # Without this, batch_size=1 + shuffle=True gave non-reproducible runs
+        # (two identical kidney_left configs diverged: 0.47 vs 0.41 best DSC).
+        # A seed of 0 is used unless training.seed is set in the config.
+        seed = int(config.get("training", {}).get("seed", 0))
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+        np.random.seed(seed)
+        import random as _random
+        _random.seed(seed)
+        # Prefer deterministic algorithms when available; this trades a little
+        # speed for reproducibility and is the right default for ablations.
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        self.seed = seed
+
         self.model = model
         self.config = config
         self.train_loader = train_loader
@@ -228,12 +245,21 @@ class Trainer3D:
 
     def _build_scheduler(self, cfg: Dict):
         total_steps = max(1, self.epochs * max(1, len(self.train_loader)) // max(1, self.grad_accumulation))
-        warmup = cfg.get("warmup_epochs", 5) * max(1, len(self.train_loader)) // max(1, self.grad_accumulation)
+        warmup_epochs = min(cfg.get("warmup_epochs", 5), max(0, self.epochs // 2))
+        warmup = warmup_epochs * max(1, len(self.train_loader)) // max(1, self.grad_accumulation)
 
         if cfg.get("scheduler") == "cosine" and total_steps > warmup:
-            return torch.optim.lr_scheduler.CosineAnnealingLR(
-                self.optimizer, T_max=total_steps - warmup
-            )
+            # LambdaLR: linear warmup → cosine decay
+            decay_steps = total_steps - warmup
+            base_lr = self.optimizer.param_groups[0]["lr"]
+
+            def lr_lambda(step):
+                if step < warmup:
+                    return (step + 1) / max(1, warmup)
+                progress = (step - warmup) / max(1, decay_steps)
+                return 0.5 * (1.0 + __import__("math").cos(__import__("math").pi * progress))
+
+            return torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
         return None
 
     def train(self):

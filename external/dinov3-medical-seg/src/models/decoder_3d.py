@@ -19,7 +19,7 @@ class DecoderFactory:
     @staticmethod
     def create(decoder_type: str, feature_dims: List[int], num_classes: int) -> nn.Module:
         if decoder_type == "linear3d":
-            return LinearDecoder3D(feature_dims[0], num_classes)
+            return LinearDecoder3D(feature_dims[0], num_classes, num_levels=len(feature_dims))
         elif decoder_type == "mlp_probe":
             return MLPProbeDecoder3D(feature_dims[-3:], num_classes)
         elif decoder_type == "segformer3d":
@@ -38,28 +38,68 @@ class DecoderFactory:
 # ──────────────────────────────────────────────
 
 class LinearDecoder3D(nn.Module):
-    """1x1x1 Conv → trilinear upsample → output.
+    """Multi-scale linear probe with feature fusion → trilinear upsample → output.
 
-    ~0.05M parameters. Reference: DINOv3 Benchmark lightweight head.
+    Uses all backbone feature levels (shallow + deep), fuses them via
+    1x1x1 conv projections + 3D conv refinement, then upsamples to full
+    resolution.  The original single-conv design could not learn organ
+    boundaries from frozen DINOv3 features because a single linear
+    projection of the deepest layer lacks the spatial detail needed for
+    segmentation.
+
+    ~0.3M parameters (4 feature levels × proj + fusion).
     """
 
-    def __init__(self, feature_dim: int, num_classes: int):
+    def __init__(self, feature_dim: int, num_classes: int, num_levels: int = 4):
         super().__init__()
-        self.proj = nn.Conv3d(feature_dim, num_classes, kernel_size=1)
+        self.num_levels = num_levels
+
+        # Per-level 1x1x1 projection to a common channel dimension
+        proj_dim = max(64, feature_dim // 4)
+        self.projections = nn.ModuleList([
+            nn.Conv3d(feature_dim, proj_dim, kernel_size=1)
+            for _ in range(num_levels)
+        ])
+
+        # Feature fusion: concatenate projected features → 3D conv refinement
+        self.fuse = nn.Sequential(
+            nn.Conv3d(proj_dim * num_levels, proj_dim * 2, kernel_size=3, padding=1),
+            nn.BatchNorm3d(proj_dim * 2),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(proj_dim * 2, proj_dim, kernel_size=1),
+            nn.BatchNorm3d(proj_dim),
+            nn.ReLU(inplace=True),
+        )
+
+        # Output head
+        self.head = nn.Conv3d(proj_dim, num_classes, kernel_size=1)
 
     def forward(self, features_3d: List[torch.Tensor], original_shape: tuple) -> torch.Tensor:
         """
         Args:
-            features_3d: from encoder, use deepest layer
+            features_3d: list of (B, C, D, h, w) from encoder, one per level
             original_shape: (B, C_in, D, H, W) of input volume
 
         Returns:
             (B, num_classes, D, H, W)
         """
-        x = features_3d[-1]  # use deepest features
-        x = self.proj(x)
-        x = F.interpolate(x, size=original_shape[2:], mode="trilinear", align_corners=False)
-        return x
+        # Use up to num_levels feature maps
+        feats = features_3d[:self.num_levels]
+
+        # Project each level to common dim, upsample to shallowest spatial size
+        target_shape = feats[0].shape[-3:]
+        projected = []
+        for proj, feat in zip(self.projections, feats):
+            p = proj(feat)
+            if p.shape[-3:] != target_shape:
+                p = F.interpolate(p, size=target_shape, mode="trilinear", align_corners=False)
+            projected.append(p)
+
+        # Fuse and predict
+        fused = self.fuse(torch.cat(projected, dim=1))
+        out = self.head(fused)
+        out = F.interpolate(out, size=original_shape[2:], mode="trilinear", align_corners=False)
+        return out
 
 
 # ──────────────────────────────────────────────

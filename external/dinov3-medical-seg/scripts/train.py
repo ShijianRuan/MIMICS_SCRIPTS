@@ -12,6 +12,7 @@ from src.models.segmentor import DINOv33DSegmentor
 from src.data.dataset_3d import MedicalVolumeDataset, FewShotSubset
 from src.data.augmentation import VolumeAugmentation
 from src.training.trainer import Trainer3D
+import torch
 from torch.utils.data import DataLoader
 
 
@@ -76,11 +77,17 @@ def main():
         print(f"Few-shot training: {k_shot} volumes selected")
 
     num_workers = config["training"].get("num_workers", 0)
+    # Deterministic shuffle: a seeded generator makes the per-epoch sample order
+    # reproducible across runs (Trainer3D also seeds torch/numpy/cuda).
+    seed = int(config.get("training", {}).get("seed", 0))
+    g = torch.Generator()
+    g.manual_seed(seed)
     train_loader = DataLoader(
         train_dataset,
         batch_size=config["training"]["batch_size"],
         shuffle=True,
         num_workers=num_workers,
+        generator=g,
     )
     val_loader = None
     if val_dataset is not None:

@@ -1514,8 +1514,8 @@ class TestStopBackgroundServices(unittest.TestCase):
         entry = os.path.join(
             PROJECT_ROOT,
             "scripting_library",
-            "01_Data",
-            "03_Stop_Background_Import.py",
+            "99_Admin",
+            "Stop_Background_Import.py",
         )
         self.assertTrue(os.path.isfile(entry))
 
@@ -3715,9 +3715,9 @@ class TestNewFeatures(unittest.TestCase):
     # ================================================================
 
     def test_stop_background_import_entry_exists(self):
-        """03_Stop_Background_Import entry must route to the correct function."""
+        """Stop_Background_Import entry must route to the correct function."""
         entry = os.path.join(
-            os.getcwd(), "scripting_library", "01_Data", "03_Stop_Background_Import.py"
+            os.getcwd(), "scripting_library", "99_Admin", "Stop_Background_Import.py"
         )
         self.assertTrue(os.path.isfile(entry), "Stop_Background_Import entry must exist")
         content = open(entry, "r", encoding="utf-8").read()

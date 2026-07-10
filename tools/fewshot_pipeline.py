@@ -1119,6 +1119,38 @@ def yaml_scalar(value):
     return '"' + text + '"'
 
 
+def compute_class_weights(materialized_rows, max_weight=20.0):
+    """Compute [bg_weight, fg_weight] from materialized label files.
+
+    Scans every training label, counts background vs foreground voxels,
+    and returns inverse-frequency weights normalised so that bg=1.0.
+    The foreground weight is clamped to *max_weight* to avoid instability
+    when the organ occupies a tiny fraction of the volume.
+    """
+    import nibabel as nib
+    import numpy as np
+
+    bg_total = 0
+    fg_total = 0
+    for row in materialized_rows or []:
+        label_path = row.get("dataset_label")
+        if not label_path:
+            continue
+        try:
+            data = np.asanyarray(nib.load(str(label_path)).dataobj)
+            fg = int(np.count_nonzero(data))
+            bg = int(data.size - fg)
+            bg_total += bg
+            fg_total += fg
+        except Exception:
+            continue
+    if fg_total <= 0:
+        return [1.0, 1.0]
+    ratio = bg_total / fg_total
+    fg_weight = min(float(ratio), float(max_weight))
+    return [1.0, round(fg_weight, 2)]
+
+
 def write_training_config(
     path,
     base_config,
@@ -1129,6 +1161,7 @@ def write_training_config(
     cancel_path=None,
     metrics_history_path=None,
     validation_enabled=True,
+    class_weights=None,
 ):
     path = Path(path)
     if int(args.batch_size) != 1:
@@ -1193,6 +1226,12 @@ def write_training_config(
         "    enabled: " + yaml_scalar(bool(args.sub_volume)),
         "    size: " + yaml_scalar([int(part.strip()) for part in str(args.sub_volume_size).split(",")]),
         "",
+        "loss:",
+        "  type: " + yaml_scalar("dice_ce"),
+        "  dice_weight: " + yaml_scalar(0.5),
+        "  ce_weight: " + yaml_scalar(0.5),
+        "  class_weights: " + yaml_scalar(class_weights if class_weights else [1.0, 1.0]),
+        "",
     ]
     if status_path or cancel_path or metrics_history_path:
         lines.extend([
@@ -1216,6 +1255,8 @@ def launch_mimics_export(
     cancel_path=None,
     lock_timeout_seconds=None,
     label_staging_dir=None,
+    export_space="source_image",
+    mask_names=None,
 ):
     mimics_exe = find_mimics_exe(mimics_exe)
     if not mimics_exe:
@@ -1244,10 +1285,12 @@ def launch_mimics_export(
         "cases": sorted(cases) if cases else None,
         "axes": axes,
         "flips": flips,
-        "export_space": "source_image",
+        "export_space": str(export_space or "source_image"),
         "output_dir": str(output_dir),
         "export_root": str(export_root),
     }
+    if mask_names:
+        export_config["mask_names"] = [str(name) for name in mask_names if str(name).strip()]
     if label_staging_dir:
         export_config["label_staging_dir"] = str(label_staging_dir)
     write_json_atomic(config_path_write, export_config)
@@ -1497,6 +1540,8 @@ def cmd_train(args):
                 cancel_path=cancel_path,
                 lock_timeout_seconds=args.background_mimics_lock_timeout_seconds,
                 label_staging_dir=fresh_label_root,
+                export_space="mimics_grid",
+                mask_names=[args.organ],
             )
         except ResourceLockCancelled:
             update_status(status_path, {"status": "cancelled", "error": "cancelled while waiting for background Mimics"})
@@ -1589,6 +1634,10 @@ def cmd_train(args):
             fresh_label_cleanup["error"] = str(exc)
             append_log(workspace, "Could not clean fresh label staging {}: {}".format(fresh_label_root, exc))
     validation_enabled = bool(materialized_val)
+    repo_config = load_repo_config()
+    class_weight_cap = float(repo_config.get("default_class_weight_cap", 5.0))
+    class_weights = compute_class_weights(materialized_train, max_weight=class_weight_cap)
+    append_log(workspace, "Auto class weights for {}: {}".format(args.organ, class_weights))
     write_training_config(
         config_path,
         base_config,
@@ -1599,6 +1648,7 @@ def cmd_train(args):
         cancel_path=cancel_path,
         metrics_history_path=metrics_history,
         validation_enabled=validation_enabled,
+        class_weights=class_weights,
     )
     write_json_atomic(
         run_dir / "samples.json",
@@ -1923,12 +1973,27 @@ def _parse_json_matrix(value):
         raise RuntimeError("invalid expected source voxel-to-RAS matrix")
 
 
-def validate_inference_source_geometry(image_path, expected_shape=None, expected_affine=None):
+def _normalize_path_text(path):
+    text = str(path or "").strip()
+    if not text:
+        return ""
+    try:
+        return os.path.normcase(str(Path(text).resolve()))
+    except Exception:
+        return os.path.normcase(os.path.abspath(text))
+
+
+def validate_inference_source_geometry(
+    image_path,
+    expected_shape=None,
+    expected_affine=None,
+    expected_image_path="",
+):
     result = {
         "image_path": str(image_path),
         "checked": False,
     }
-    if not expected_shape and not expected_affine:
+    if not expected_shape and not expected_affine and not expected_image_path:
         result["reason"] = "no expected source geometry was provided"
         return result
     import nibabel as nib
@@ -1939,6 +2004,22 @@ def validate_inference_source_geometry(image_path, expected_shape=None, expected
     actual_shape = [int(value) for value in img.shape[:3]]
     result["checked"] = True
     result["actual_shape"] = actual_shape
+    if expected_image_path:
+        expected_image_path = str(expected_image_path).strip()
+        result["expected_image_path"] = expected_image_path
+        normalized_expected = _normalize_path_text(expected_image_path)
+        normalized_actual = _normalize_path_text(image_path)
+        result["actual_image_path"] = str(Path(image_path).resolve())
+        result["expected_image_path_matched"] = bool(
+            normalized_expected and normalized_actual and normalized_expected == normalized_actual
+        )
+        if normalized_expected and normalized_actual and normalized_expected != normalized_actual:
+            raise RuntimeError(
+                "source image path does not match the open Mimics project: {} != {}".format(
+                    result["actual_image_path"],
+                    expected_image_path,
+                )
+            )
     if expected_shape:
         result["expected_shape"] = [int(value) for value in expected_shape]
         if actual_shape != result["expected_shape"]:
@@ -1954,9 +2035,21 @@ def validate_inference_source_geometry(image_path, expected_shape=None, expected
         result["actual_voxel_to_ras_matrix"] = np.asarray(img.affine, dtype=float).tolist()
         result["affine_max_abs_diff"] = float(np.max(np.abs(np.asarray(img.affine, dtype=float) - expected_affine_np)))
         if not _affine_close(img.affine, expected_affine_np):
+            # When source image paths match, allow inference to proceed even if
+            # metadata affine conventions differ (e.g. stale/open-project affine
+            # metadata or RAS/LPS convention drift). Prediction will still be
+            # mapped to active Mimics grid during apply.
+            if result.get("expected_image_path_matched"):
+                result["affine_check_skipped"] = True
+                result["affine_warning"] = (
+                    "source image path matches active project but affine differs "
+                    "(max abs diff {:.6g}); continuing".format(result["affine_max_abs_diff"])
+                )
+                return result
             raise RuntimeError(
-                "source image affine does not match the open Mimics project (max abs diff {:.6g})".format(
+                "source image affine does not match the open Mimics project (max abs diff {:.6g}): {}".format(
                     result["affine_max_abs_diff"],
+                    result.get("actual_image_path", str(Path(image_path).resolve())),
                 )
             )
     return result
@@ -2001,10 +2094,12 @@ def cmd_infer(args):
         model = load_model_manifest(workspace, args.organ, args.model_id, args.model_manifest)
         expected_shape = _parse_json_shape(getattr(args, "expected_source_shape", ""))
         expected_affine = _parse_json_matrix(getattr(args, "expected_source_voxel_to_ras_matrix", ""))
+        expected_image_path = str(getattr(args, "expected_source_image_path", "") or "").strip()
         source_validation = validate_inference_source_geometry(
             image,
             expected_shape=expected_shape,
             expected_affine=expected_affine,
+            expected_image_path=expected_image_path,
         )
     except Exception as exc:
         update_status(status_path, {
@@ -2012,6 +2107,11 @@ def cmd_infer(args):
             "error": str(exc),
             "model_id": getattr(args, "model_id", "latest"),
             "model_manifest": getattr(args, "model_manifest", "") or "",
+            "expected_source_shape": _parse_json_shape(getattr(args, "expected_source_shape", "")),
+            "expected_source_voxel_to_ras_matrix": _parse_json_matrix(
+                getattr(args, "expected_source_voxel_to_ras_matrix", "")
+            ),
+            "expected_source_image_path": str(getattr(args, "expected_source_image_path", "") or ""),
         })
         append_log(workspace, "Inference job {} failed during preflight: {}.".format(job_id, exc))
         return 1
@@ -2307,6 +2407,7 @@ def build_parser():
     infer.add_argument("--model-manifest")
     infer.add_argument("--expected-source-shape")
     infer.add_argument("--expected-source-voxel-to-ras-matrix")
+    infer.add_argument("--expected-source-image-path")
     infer.add_argument("--gpu-lock-timeout-seconds", type=float, default=3600)
     infer.add_argument("--job-id")
     infer.set_defaults(func=cmd_infer)

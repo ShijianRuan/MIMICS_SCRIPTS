@@ -1639,6 +1639,12 @@ def _launch_inference_job(config, ts_root, case_id, organ, selected_model=None):
             "--expected-source-voxel-to-ras-matrix",
             json.dumps(source_geometry["source_voxel_to_ras_matrix"]),
         ])
+        source_image_path = str(source_geometry.get("source_image_path", "") or "").strip()
+        if source_image_path:
+            cmd.extend([
+                "--expected-source-image-path",
+                source_image_path,
+            ])
     if selected_model:
         cmd.extend([
             "--model-manifest",

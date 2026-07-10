@@ -657,6 +657,15 @@ def _sanitize_name(name):
     return safe
 
 
+def _canonical_mask_name(name):
+    text = str(name or "").strip().lower()
+    for ch in (" ", "-", "/", "\\", "."):
+        text = text.replace(ch, "_")
+    while "__" in text:
+        text = text.replace("__", "_")
+    return text.strip("_")
+
+
 def _get_voxel_buffer_bytes(mask):
     """Get mask voxel buffer as raw bytes, handling various return types."""
     buf = mask.get_voxel_buffer()
@@ -757,7 +766,7 @@ def _derive_mimics_voxel_to_ras_matrix(image, image_shape):
         return None
 
 
-def export_masks_to_buffers(buffers_dir):
+def export_masks_to_buffers(buffers_dir, mask_names=None):
     """Export all masks from current Mimics project as .u8 files.
 
     Returns manifest dict.
@@ -773,6 +782,25 @@ def export_masks_to_buffers(buffers_dir):
 
     masks = mimics.data.masks
     print("found {0} mask(s)".format(len(masks)))
+    wanted = None
+    if mask_names:
+        wanted = set()
+        for raw in mask_names:
+            name = str(raw or "").strip()
+            if not name:
+                continue
+            wanted.add(_canonical_mask_name(name))
+
+    selected = []
+    for a_mask in masks:
+        if wanted:
+            original = str(getattr(a_mask, "name", "") or "")
+            if _canonical_mask_name(original) not in wanted and _canonical_mask_name(_sanitize_name(original)) not in wanted:
+                continue
+        selected.append(a_mask)
+
+    if wanted:
+        print("selected {0} mask(s) by filter".format(len(selected)))
 
     manifest = {
         "masks": [],
@@ -802,7 +830,7 @@ def export_masks_to_buffers(buffers_dir):
         except Exception as e:
             print("could not read image dimensions: {0}".format(e))
 
-    for a_mask in masks:
+    for a_mask in selected:
         name = str(a_mask.name)
         print("exporting mask: {0}".format(name))
 
@@ -906,14 +934,14 @@ def _pick_directory(title):
 
 # -- Single case export -------------------------------------------------
 
-def _export_masks_and_build_params(case_dir, axes, flips, work_dir, output_seg_dir=None):
+def _export_masks_and_build_params(case_dir, axes, flips, work_dir, output_seg_dir=None, export_space="source_image", mask_names=None):
     """Export masks to .u8 buffers and build bridge params. Returns (bridge_params, manifest) or None."""
     print("Exporting masks to: {0}".format(case_dir))
 
     buffers_dir = os.path.join(work_dir, "export_buffers")
 
     # Step 1: Export masks to .u8 buffers
-    manifest = export_masks_to_buffers(buffers_dir)
+    manifest = export_masks_to_buffers(buffers_dir, mask_names=mask_names)
 
     if not manifest["masks"]:
         print("No masks to export")
@@ -932,7 +960,7 @@ def _export_masks_and_build_params(case_dir, axes, flips, work_dir, output_seg_d
         "case_dir": case_dir,
         "axes": axes,
         "flips": flips,
-        "export_space": "source_image",
+        "export_space": str(export_space or "source_image"),
     }
     if output_seg_dir:
         bridge_params["output_seg_dir"] = output_seg_dir
@@ -1027,6 +1055,10 @@ def run_background_batch_export(config_path):
     # not under mcs_output where .mcs files live.
     export_root = config.get("export_root") or output_dir
     label_staging_dir = config.get("label_staging_dir") or ""
+    export_space = str(config.get("export_space") or "source_image")
+    mask_names = config.get("mask_names") or []
+    if not isinstance(mask_names, list):
+        mask_names = [mask_names]
     cases_filter = config.get("cases")
     cases_filter = set(cases_filter) if cases_filter else None
     axes = config.get("axes") or [0, 1, 2]
@@ -1085,6 +1117,8 @@ def run_background_batch_export(config_path):
                     flips,
                     work_dir,
                     output_seg_dir=output_seg_dir,
+                    export_space=export_space,
+                    mask_names=mask_names,
                 )
                 try:
                     mimics.file.close_project()

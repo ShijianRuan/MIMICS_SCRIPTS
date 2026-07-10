@@ -49,9 +49,12 @@ class DiceLoss(nn.Module):
         # Exclude background class
         if num_classes > 1:
             dice = dice[:, 1:]
-            # Apply class weights (foreground classes only)
-            if self.class_weights is not None:
-                dice = dice * self.class_weights[1:] if len(self.class_weights) > 1 else dice
+            # NOTE: class_weights are intentionally NOT applied to the Dice term.
+            # Dice is already a region-overlap metric that is invariant to class
+            # frequency; multiplying it by a large foreground weight (e.g. 20x)
+            # turns the loss into 1 - w*dice, which goes negative and explodes in
+            # scale as soon as dice > 1/w, destabilising small decoders. Class
+            # balancing is handled by the cross-entropy term only (see DiceCELoss).
 
         loss = 1.0 - dice
         if self.reduction == "mean":

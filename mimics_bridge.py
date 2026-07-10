@@ -671,6 +671,18 @@ def write_mask_nifti(array: np.ndarray, affine: np.ndarray, output_path: str) ->
     nib.save(nii, output_path)
 
 
+def _force_nifti_affine(path: Path, target_affine: np.ndarray) -> None:
+    """Rewrite a NIfTI so qform/sform exactly match target_affine."""
+    import nibabel as nib
+
+    img = nib.load(str(path))
+    data = np.asanyarray(img.dataobj)
+    out = nib.Nifti1Image(data, np.asarray(target_affine, dtype=float), header=img.header)
+    out.set_qform(np.asarray(target_affine, dtype=float), code=1)
+    out.set_sform(np.asarray(target_affine, dtype=float), code=1)
+    nib.save(out, str(path))
+
+
 def resample_image_to_grid(
     image_path: str,
     target_shape,
@@ -718,6 +730,9 @@ def resample_image_to_grid(
     if out.exists():
         out.unlink()
     sitk.WriteImage(resampled, str(out), useCompression=out.name.endswith(".gz"))
+    # SimpleITK may introduce tiny direction/origin float drift.  Downstream
+    # training compares image/label affines strictly, so enforce exact target.
+    _force_nifti_affine(out, target_affine_ras)
     return {
         "status": "ok",
         "image_path": str(Path(image_path).resolve()),

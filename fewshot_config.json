@@ -10,6 +10,7 @@
   "default_keep_last_checkpoints": 2,
   "default_keep_materialized_dataset": false,
   "default_export_labels_before_training": true,
+  "default_class_weight_cap": 5.0,
   "default_lora_alpha": 16,
   "default_lora_rank": 8,
   "default_lr": 0.001,
