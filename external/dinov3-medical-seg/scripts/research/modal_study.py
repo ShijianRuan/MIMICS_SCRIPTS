@@ -551,6 +551,7 @@ if modal is not None:
         selection_subpath: str = "selected_candidates.json",
         max_runs: int = 0,
         max_concurrency: int = 4,
+        cascade_task: str = "adrenal_gland_right",
     ):
         # Bounded async fan-out: .spawn() is non-blocking; _bounded_spawn keeps at
         # most max_concurrency jobs in flight so the local driver is not pinned
@@ -587,6 +588,22 @@ if modal is not None:
             print("selected regime: {}".format(json.dumps(payload.get("selected_by_task", {}))))
             if payload.get("degenerate_tasks"):
                 print("WARNING degenerate tasks (do NOT proceed to screen): {}".format(payload["degenerate_tasks"]))
+        elif action == "cascade":
+            # Diagnostic / ablation: run the coarse-to-fine cascade for one tiny
+            # task on the screening fold. Reports coarse_detection_rate so a
+            # degenerate single-stage target (e.g. adrenal) can be assessed
+            # before designing a dedicated localizer.
+            import yaml
+
+            plan = yaml.safe_load(
+                (PROJECT_ROOT / "config/research/multi_organ_study.yaml").read_text(encoding="utf-8")
+            )
+            study = plan["study"]
+            task = cascade_task
+            fold = int(study["screening_fold"])
+            seed = int((study.get("screening_training_seeds") or [0])[0])
+            print("Running cascade diagnostic: {} fold_{:02d} k5 seed_{}".format(task, fold, seed))
+            run_two_stage_single.remote(task, fold, 5, seed, benchmark_subdir, result_subdir)
         elif action == "verify-image":
             info = verify_image.remote()
             print("image verification: {}".format(json.dumps(info)))
@@ -693,7 +710,7 @@ if modal is not None:
                 _poll, max_concurrency=max_concurrency,
             )
         else:
-            raise ValueError("action must be prepare, regime, select-regime, verify-image, preflight, screen, select, confirm, or full")
+            raise ValueError("action must be prepare, regime, select-regime, cascade, verify-image, preflight, screen, select, confirm, or full")
 else:
     app = None
 
