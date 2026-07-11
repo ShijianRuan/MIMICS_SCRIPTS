@@ -1025,3 +1025,37 @@ def test_regime_skip_guard_reruns_on_config_change(tmp_path):
     new_manifest = json.loads((run_root / "run_manifest.json").read_text())
     assert new_manifest["config_hash"] != "STALEHASH"
     assert len(new_manifest["config_hash"]) == 64
+
+
+def test_select_regime_hd95_actually_breaks_near_ties(tmp_path):
+    """The reviewer's A/B case: Dice 0.8001/HD95 300 vs Dice 0.8000/HD95 8.
+
+    Lexicographic (dice,-hd95) wrongly picks A. A true tolerance-band rule treats
+    the two as Dice-equivalent (within 0.02) and picks B for its far better HD95.
+    """
+    m = _load_select_regime_module()
+    root = tmp_path / "res"
+    _regime_dir(root, "brain", "full_dice_ce", dice=0.8001, hd95=300.0, recall=0.8, empty_rate=0.0)
+    _regime_dir(root, "brain", "full_dice_focal", dice=0.8000, hd95=8.0, recall=0.8, empty_rate=0.0)
+    _regime_dir(root, "brain", "patch_dice_ce", dice=0.4, hd95=120.0, recall=0.5, empty_rate=0.0)
+    _regime_dir(root, "brain", "patch_dice_focal", dice=0.5, hd95=60.0, recall=0.6, empty_rate=0.0)
+    payload = m.select_regime(root, tmp_path / "out.json",
+                              expected_tasks=["brain"], expected_cells=ALL_CELLS)
+    sel = payload["selected_by_task"]["brain"]
+    assert sel["cell_id"] == "full_dice_focal"     # lower HD95 wins the Dice-tie band
+    assert sel["needs_more_seeds"] is True          # two cells in the band => not Dice-separable
+
+
+def test_select_regime_clear_dice_winner_not_flagged(tmp_path):
+    """When the top Dice leads by more than the margin, no HD95 override, no flag."""
+    m = _load_select_regime_module()
+    root = tmp_path / "res"
+    _regime_dir(root, "brain", "full_dice_ce", dice=0.0, hd95=455.0, recall=0.0, empty_rate=1.0)
+    _regime_dir(root, "brain", "full_dice_focal", dice=0.835, hd95=9.4, recall=0.84, empty_rate=0.0)
+    _regime_dir(root, "brain", "patch_dice_ce", dice=0.769, hd95=202.0, recall=0.82, empty_rate=0.0)
+    _regime_dir(root, "brain", "patch_dice_focal", dice=0.675, hd95=320.0, recall=0.87, empty_rate=0.0)
+    payload = m.select_regime(root, tmp_path / "out.json",
+                              expected_tasks=["brain"], expected_cells=ALL_CELLS)
+    sel = payload["selected_by_task"]["brain"]
+    assert sel["cell_id"] == "full_dice_focal"      # leads by 0.066 > 0.02
+    assert sel["needs_more_seeds"] is False          # sole member of the band

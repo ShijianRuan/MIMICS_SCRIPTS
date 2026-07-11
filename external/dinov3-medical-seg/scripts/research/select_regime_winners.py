@@ -55,29 +55,68 @@ def _load_cell(cell_dir: Path) -> dict:
     }
 
 
-def _rank_key(rule: str):
-    """Return a sort key (higher is better) for one task's rule."""
-    if rule == "detection":
-        # Tiny structures: penalise empty predictions, then reward recall, then Dice.
+def _secondary_key(rule: str):
+    """Return a within-band tie-breaker key (higher is better) for one rule.
+
+    Used only among Dice-equivalent candidates, so Dice itself is NOT in the key
+    (that is what makes the earlier lexicographic ``(dice, -hd95)`` degenerate:
+    any Dice difference dominated HD95). Here HD95 / surface Dice genuinely
+    decide when Dice cannot separate the candidates.
+    """
+    if rule == "boundary":
         def key(cell):
+            sd = cell["surface_dice"] if _finite(cell["surface_dice"]) else 0.0
+            hd = cell["hd95_mm"] if _finite(cell["hd95_mm"]) else float("inf")
+            return (sd, -hd)
+        return key
+
+    # hd95_gate (large compact): prefer the lower HD95 within the Dice band.
+    def key(cell):
+        hd = cell["hd95_mm"] if _finite(cell["hd95_mm"]) else float("inf")
+        return (-hd,)
+    return key
+
+
+def _select_task(rule: str, cells: dict) -> tuple:
+    """Pick one cell for a task and report whether the Dice band was decisive.
+
+    Returns (best_id, ranking, needs_more_seeds). Detection tasks (tiny targets)
+    are dominated by empty-rate + recall directly, since raw Dice overstates a
+    cell that fires far-field or misses the organ entirely.
+    """
+    if rule == "detection":
+        def det_key(item):
+            cell = item[1]
             empty = cell["empty_prediction_rate"]
             empty = 1.0 if not _finite(empty) else float(empty)
             recall = cell["recall"] if _finite(cell["recall"]) else 0.0
             return (-empty, recall, cell["dice"])
-        return key
-    if rule == "boundary":
-        # Elongated/thin structures: Dice, then surface Dice, then lower HD95.
-        def key(cell):
-            sd = cell["surface_dice"] if _finite(cell["surface_dice"]) else 0.0
-            hd = cell["hd95_mm"] if _finite(cell["hd95_mm"]) else float("inf")
-            return (cell["dice"], sd, -hd)
-        return key
+        ranked = sorted(cells.items(), key=det_key, reverse=True)
+        best_id = ranked[0][0]
+        # Near-tie on the composite detection score of the top two.
+        needs = False
+        if len(ranked) > 1:
+            a, b = ranked[0][1], ranked[1][1]
+            if abs((a["recall"] or 0.0) - (b["recall"] or 0.0)) < _DICE_TIE_MARGIN:
+                needs = True
+        return best_id, [cid for cid, _ in ranked], needs
 
-    # hd95_gate (large compact): Dice, then lower HD95.
-    def key(cell):
-        hd = cell["hd95_mm"] if _finite(cell["hd95_mm"]) else float("inf")
-        return (cell["dice"], -hd)
-    return key
+    # Dice-primary tasks: max Dice, then a tolerance band, then secondary metric.
+    top_dice = max(c["dice"] for c in cells.values())
+    band = {cid: c for cid, c in cells.items() if top_dice - c["dice"] <= _DICE_TIE_MARGIN}
+    secondary = _secondary_key(rule)
+    band_ranked = sorted(band.items(), key=lambda kv: secondary(kv[1]), reverse=True)
+    best_id = band_ranked[0][0]
+    # Full ranking for the record: band members (by secondary) then the rest (by Dice).
+    outside = sorted(
+        ((cid, c) for cid, c in cells.items() if cid not in band),
+        key=lambda kv: kv[1]["dice"], reverse=True,
+    )
+    ranking = [cid for cid, _ in band_ranked] + [cid for cid, _ in outside]
+    # More than one Dice-equivalent candidate => the secondary metric decided it,
+    # so the result is not Dice-separable and needs more seeds to confirm.
+    needs = len(band) > 1
+    return best_id, ranking, needs
 
 
 def select_regime(results_root: Path, output: Path, degenerate_threshold: float = 0.05,
@@ -110,19 +149,12 @@ def select_regime(results_root: Path, output: Path, degenerate_threshold: float 
     needs_more_seeds_tasks = []
     for task in tasks:
         rule = _TASK_RULE.get(task, "hd95_gate")
-        key = _rank_key(rule)
         cells = {cell: _load_cell(present[task][cell]) for cell in expected_cells}
-        ranked = sorted(cells.items(), key=lambda kv: key(kv[1]), reverse=True)
-        (best_id, best), *rest = ranked
+        best_id, ranking_ids, needs_more_seeds = _select_task(rule, cells)
+        best = cells[best_id]
         is_degenerate = best["dice"] < float(degenerate_threshold)
         if is_degenerate:
             degenerate_tasks.append(task)
-        # Near-tie on Dice among the top two -> not statistically separable yet.
-        needs_more_seeds = False
-        if rest:
-            second = rest[0][1]
-            if abs(best["dice"] - second["dice"]) < _DICE_TIE_MARGIN:
-                needs_more_seeds = True
         if needs_more_seeds:
             needs_more_seeds_tasks.append(task)
         selected[task] = {
@@ -134,7 +166,10 @@ def select_regime(results_root: Path, output: Path, degenerate_threshold: float 
             "empty_prediction_rate": best["empty_prediction_rate"],
             "degenerate": is_degenerate,
             "needs_more_seeds": needs_more_seeds,
-            "ranking": [{"cell_id": cid, "mean_dice": c["dice"], "mean_hd95_mm": c["hd95_mm"]} for cid, c in ranked],
+            "ranking": [
+                {"cell_id": cid, "mean_dice": cells[cid]["dice"], "mean_hd95_mm": cells[cid]["hd95_mm"]}
+                for cid in ranking_ids
+            ],
         }
     payload = {
         "schema_version": "dinov3_medical_regime_selection.v2",
