@@ -721,3 +721,59 @@ def test_apply_regime_full_cell_disables_patch():
     out = apply_regime(base, regime)
     assert out["data"]["patch"]["enabled"] is False
     assert out["loss"] == {"type": "dice_ce", "dice_weight": 0.5, "ce_weight": 0.5}
+
+
+def test_regime_run_ids_cover_every_task_and_cell():
+    import yaml
+    run_ablations = _load_run_ablations_module()
+    plan = yaml.safe_load((PROJECT_ROOT / "config/research/multi_organ_study.yaml").read_text())
+    pairs = run_ablations._regime_run_ids(plan)
+    tasks = {c["task"] for c in plan["candidates"]}
+    from src.research.regime import REGIME_CELL_IDS
+    assert len(pairs) == len(tasks) * len(REGIME_CELL_IDS)
+    assert {t for t, _ in pairs} == tasks
+    assert {cell for _, cell in pairs} == set(REGIME_CELL_IDS)
+
+
+def test_regime_phase_dry_run_writes_regime_config_with_patch(tmp_path):
+    import subprocess, sys as _sys, yaml
+    prepare = _load_prepare_module()
+    source = tmp_path / "source"; source.mkdir()
+    for i in range(6):
+        _write_source_case(source, "s{:04d}".format(i + 1), {"brain": (3, 8, 9)})
+    bench = tmp_path / "bench"
+    prepare.build_benchmark(source=source, output=bench, tasks=["brain"], support_pool_size=5, folds=1, seed=5)
+    results = tmp_path / "results"
+    plan = {
+        "study": {"id": "t", "base_config": str(PROJECT_ROOT / "config/research/ct_fewshot_base.yaml"),
+                  "benchmark_root": str(bench), "results_root": str(results),
+                  "screening_fold": 0, "confirmation_folds": [0], "shot_counts": [5],
+                  "screening_training_seeds": [1], "confirmation_training_seeds": [1],
+                  "screen_epochs": 1, "confirmation_epochs": 1},
+        "candidates": [{"id": "brain_base_frozen_segformer_256", "task": "brain", "is_reference": True,
+                        "changed_factor": "x", "overrides": {}}],
+    }
+    plan_path = tmp_path / "plan.yaml"; plan_path.write_text(yaml.safe_dump(plan))
+    subprocess.run([_sys.executable, "scripts/research/run_ablations.py", "--plan", str(plan_path),
+                    "--phase", "regime", "--cell", "patch_dice_focal", "--dry-run"],
+                   cwd=str(PROJECT_ROOT), check=True)
+    cfg_path = results / "regime" / "brain" / "patch_dice_focal" / "fold_00" / "k5" / "seed_1" / "config.yaml"
+    assert cfg_path.is_file()
+    cfg = yaml.safe_load(cfg_path.read_text())
+    assert cfg["data"]["patch"]["enabled"] is True
+    assert cfg["data"]["patch"]["inference_sliding_window"] is True
+    assert cfg["loss"]["type"] == "dice_focal"
+
+
+def test_regime_override_for_returns_selected_cell():
+    run_ablations = _load_run_ablations_module()
+    fingerprint = {"summary": {"median_spacing_zyx":[3,1.5,1.5],"spacing_iqr_zyx":[0.1,0.05,0.05],
+        "median_shape_zyx":[80,256,256],"median_foreground_fraction":0.0085,
+        "median_foreground_extent_zyx":[40,120,120],
+        "target_patch_coverage":{"256":{"minimum_inplane_patches":7.0}}}}
+    selected = {"selected_by_task": {"brain": {"cell_id": "patch_dice_ce"}}}
+    ov = run_ablations._regime_override_for(selected, "brain", fingerprint)
+    assert ov["loss"]["type"] == "dice_ce"
+    assert ov["data"]["patch"]["enabled"] is True
+    ov2 = run_ablations._regime_override_for(selected, "liver", fingerprint)
+    assert ov2["data"]["patch"]["enabled"] is True
