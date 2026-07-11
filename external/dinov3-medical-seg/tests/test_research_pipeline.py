@@ -777,3 +777,29 @@ def test_regime_override_for_returns_selected_cell():
     assert ov["data"]["patch"]["enabled"] is True
     ov2 = run_ablations._regime_override_for(selected, "liver", fingerprint)
     assert ov2["data"]["patch"]["enabled"] is True
+
+
+def _load_select_regime_module():
+    import importlib.util
+    p = PROJECT_ROOT / "scripts" / "research" / "select_regime_winners.py"
+    spec = importlib.util.spec_from_file_location("select_regime_winners", p)
+    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return m
+
+
+def test_select_regime_picks_max_dice_and_flags_degenerate(tmp_path):
+    m = _load_select_regime_module()
+    root = tmp_path / "res"
+    def _write(task, cell, dice):
+        d = root / "regime" / task / cell / "fold_00" / "k5" / "seed_1"
+        d.mkdir(parents=True)
+        (d / "evaluation.json").write_text(json.dumps({"mean_dice": dice, "mean_hd95_mm": 5.0}))
+        (d / "run_manifest.json").write_text(json.dumps({"task": task, "cell_id": cell}))
+    _write("brain", "full_dice_ce", 0.0); _write("brain", "patch_dice_focal", 0.72)
+    _write("liver", "full_dice_ce", 0.0); _write("liver", "patch_dice_ce", 0.01)
+    out = tmp_path / "selected_regime.json"
+    payload = m.select_regime(root, out, degenerate_threshold=0.05)
+    assert payload["selected_by_task"]["brain"]["cell_id"] == "patch_dice_focal"
+    assert payload["selected_by_task"]["brain"]["degenerate"] is False
+    assert payload["selected_by_task"]["liver"]["degenerate"] is True
+    assert "liver" in payload["degenerate_tasks"]
+    assert out.is_file()
