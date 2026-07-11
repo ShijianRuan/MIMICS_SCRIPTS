@@ -2,10 +2,15 @@
 # Confirmation sees only the winner selected on fold_00 and never reuses it for
 # the reported folds.  Seeds model/data-loader stochasticity, not case splits.
 study:
-  id: totalseg_multi_organ_v3
+  # v4 is the FORMAL run after the review-driven hardening (fail-closed gates,
+  # complete-matrix selector, async fan-out, provenance/hashes). The v3 brain
+  # Tier-0 cells are a PILOT only and must not be mixed into v4 statistics.
+  # Reuse the validated v3 benchmark folds via the Modal --benchmark-subdir arg
+  # (benchmark is unchanged); results land under a fresh v4 subdir.
+  id: totalseg_multi_organ_v4
   base_config: config/research/ct_fewshot_base.yaml
   benchmark_root: data/research/totalseg_multi_organ_v3
-  results_root: research_results/totalseg_multi_organ_v3
+  results_root: research_results/totalseg_multi_organ_v4
   screening_fold: 0
   confirmation_folds: [1, 2, 3]
   shot_counts: [1, 3, 5]

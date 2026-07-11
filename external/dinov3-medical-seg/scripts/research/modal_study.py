@@ -526,8 +526,9 @@ if modal is not None:
     def main(
         action: str = "screen",
         source_subdir: str = "totalsegmentator/source",
+        # Reuse the validated v3 benchmark folds; write formal results under v4.
         benchmark_subdir: str = "totalseg_multi_organ_v3",
-        result_subdir: str = "totalseg_multi_organ_v3",
+        result_subdir: str = "totalseg_multi_organ_v4",
         selection_subpath: str = "selected_candidates.json",
         max_runs: int = 0,
         max_concurrency: int = 4,
