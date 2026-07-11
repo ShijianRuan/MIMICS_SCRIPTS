@@ -1083,3 +1083,78 @@ def test_poll_handle_semantics():
     # Remote failure must NOT crash the driver: the cell wrote failed.json and the
     # selector's completeness gate will catch it. Treat as done (slot freed).
     assert modal_study._poll_handle(Failed()) is True
+
+
+def test_screen_skips_degenerate_task_candidates_not_whole_run(tmp_path):
+    """A degenerate task must be excluded from screening, but must NOT block the
+    healthy organs (the old guard failed the whole run)."""
+    import subprocess, sys as _sys, yaml
+    prepare = _load_prepare_module()
+    source = tmp_path / "source"; source.mkdir()
+    for i in range(6):
+        _write_source_case(source, "s{:04d}".format(i + 1), {"brain": (3, 8, 9), "liver": (5, 6, 7)})
+    bench = tmp_path / "bench"
+    prepare.build_benchmark(source=source, output=bench, tasks=["brain", "liver"], support_pool_size=5, folds=1, seed=5)
+    results = tmp_path / "results"
+    # selected_regime: brain healthy, liver degenerate.
+    (results).mkdir(parents=True, exist_ok=True)
+    regime = {
+        "degenerate_tasks": ["liver"],
+        "selected_by_task": {
+            "brain": {"cell_id": "full_dice_focal"},
+            "liver": {"cell_id": "full_dice_ce", "degenerate": True},
+        },
+    }
+    regime_path = results / "selected_regime.json"; regime_path.write_text(json.dumps(regime))
+    plan = {
+        "study": {"id": "t", "base_config": str(PROJECT_ROOT / "config/research/ct_fewshot_base.yaml"),
+                  "benchmark_root": str(bench), "results_root": str(results),
+                  "screening_fold": 0, "confirmation_folds": [0], "shot_counts": [5],
+                  "screening_training_seeds": [1], "confirmation_training_seeds": [1],
+                  "screen_epochs": 1, "confirmation_epochs": 1},
+        "candidates": [
+            {"id": "brain_base_frozen_segformer_256", "task": "brain", "is_reference": True, "changed_factor": "x", "overrides": {}},
+            {"id": "liver_base_frozen_segformer_256", "task": "liver", "is_reference": True, "changed_factor": "x", "overrides": {}},
+        ],
+    }
+    plan_path = tmp_path / "plan.yaml"; plan_path.write_text(yaml.safe_dump(plan))
+    r = subprocess.run([_sys.executable, "scripts/research/run_ablations.py", "--plan", str(plan_path),
+                        "--phase", "screen", "--regime", str(regime_path), "--dry-run"],
+                       cwd=str(PROJECT_ROOT), capture_output=True, text=True)
+    out = r.stdout + r.stderr
+    # Must NOT crash: brain screens, liver is skipped with a clear note.
+    assert r.returncode == 0, out
+    assert "liver" in out.lower() and ("degenerate" in out.lower() or "skip" in out.lower())
+    # brain's screen config was written; liver's was not.
+    assert (results / "screen" / "brain_base_frozen_segformer_256").exists()
+    assert not (results / "screen" / "liver_base_frozen_segformer_256").exists()
+
+
+def test_screen_refuses_when_all_requested_tasks_degenerate(tmp_path):
+    """If every candidate belongs to a degenerate task, there is nothing valid to
+    screen and the run must fail closed rather than produce an empty result."""
+    import subprocess, sys as _sys, yaml
+    prepare = _load_prepare_module()
+    source = tmp_path / "source"; source.mkdir()
+    for i in range(6):
+        _write_source_case(source, "s{:04d}".format(i + 1), {"liver": (5, 6, 7)})
+    bench = tmp_path / "bench"
+    prepare.build_benchmark(source=source, output=bench, tasks=["liver"], support_pool_size=5, folds=1, seed=5)
+    results = tmp_path / "results"; results.mkdir(parents=True, exist_ok=True)
+    regime = {"degenerate_tasks": ["liver"],
+              "selected_by_task": {"liver": {"cell_id": "full_dice_ce", "degenerate": True}}}
+    regime_path = results / "selected_regime.json"; regime_path.write_text(json.dumps(regime))
+    plan = {
+        "study": {"id": "t", "base_config": str(PROJECT_ROOT / "config/research/ct_fewshot_base.yaml"),
+                  "benchmark_root": str(bench), "results_root": str(results),
+                  "screening_fold": 0, "confirmation_folds": [0], "shot_counts": [5],
+                  "screening_training_seeds": [1], "confirmation_training_seeds": [1],
+                  "screen_epochs": 1, "confirmation_epochs": 1},
+        "candidates": [{"id": "liver_base_frozen_segformer_256", "task": "liver", "is_reference": True, "changed_factor": "x", "overrides": {}}],
+    }
+    plan_path = tmp_path / "plan.yaml"; plan_path.write_text(yaml.safe_dump(plan))
+    r = subprocess.run([_sys.executable, "scripts/research/run_ablations.py", "--plan", str(plan_path),
+                        "--phase", "screen", "--regime", str(regime_path), "--dry-run"],
+                       cwd=str(PROJECT_ROOT), capture_output=True, text=True)
+    assert r.returncode != 0
+    assert "no " in (r.stdout + r.stderr).lower() or "degenerate" in (r.stdout + r.stderr).lower()

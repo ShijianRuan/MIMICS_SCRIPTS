@@ -306,18 +306,34 @@ def main():
         raise SystemExit(
             "--regime selected_regime.json is required for {}; run Tier-0 + select-regime first".format(args.phase)
         )
-    if selected_regime is not None and selected_regime.get("degenerate_tasks"):
-        raise SystemExit(
-            "Refusing to {}: degenerate regime tasks present: {}".format(
-                args.phase, selected_regime["degenerate_tasks"])
-        )
+    degenerate_tasks = set()
+    if selected_regime is not None:
+        degenerate_tasks = set(selected_regime.get("degenerate_tasks", []))
     candidates = list(plan.get("candidates", []))
     if args.tasks:
         requested = set(args.tasks)
+        # Explicitly requesting a degenerate task is an error: the caller asked
+        # to screen something with no valid regime.
+        requested_degenerate = requested & degenerate_tasks
+        if requested_degenerate:
+            raise SystemExit(
+                "Refusing to {}: explicitly requested degenerate task(s): {}".format(
+                    args.phase, sorted(requested_degenerate))
+            )
         candidates = [candidate for candidate in candidates if candidate["task"] in requested]
     if args.candidate_id:
         requested_ids = set(args.candidate_id)
         candidates = [candidate for candidate in candidates if candidate["id"] in requested_ids]
+    # Skip candidates whose task collapsed in Tier-0. A degenerate task must not
+    # block the healthy organs (that is a reserved item), but it must never be
+    # silently screened on an invalid baseline.
+    if degenerate_tasks and args.phase in ("screen", "confirm"):
+        before = len(candidates)
+        candidates = [candidate for candidate in candidates if candidate["task"] not in degenerate_tasks]
+        skipped = before - len(candidates)
+        if skipped:
+            print("Skipping {} candidate(s) for degenerate task(s) {} (reserved, not screened)".format(
+                skipped, sorted(degenerate_tasks)))
     if selected is not None:
         # Confirmation must include the fixed frozen reference even when a
         # different candidate wins screening. Otherwise no independent effect
