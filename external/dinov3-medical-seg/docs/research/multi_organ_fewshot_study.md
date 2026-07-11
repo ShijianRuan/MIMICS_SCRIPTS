@@ -38,9 +38,24 @@
 
 ## Tier-0 采样+损失 regime 预筛
 
-在因子筛选之前，先为每个器官选定训练 regime（采样×损失）。原因：本实现是 slice-wise pseudo-3D，整卷 CT 中目标只占极少切片/体素（brain 0.85% 体素/15% Z 切片，adrenal 低至 0.005%），全卷 `dice_ce` 会塌陷到全背景（首个 brain frozen 基线实测逐例 Dice=0）。这不是 bug——在含前景切片上过拟合即达 Dice≈0.79，启用已有 patch 采样器后整卷验证 Dice≈0.73。
+在因子筛选之前，先为每个器官选定训练 regime（采样×损失）。原因：本实现是 **pseudo-3D**——DINOv3 对每张 2D 切片单独编码，切片特征沿深度堆叠后由 3D decoder 卷积融合空间与层间信息；编码器本身不是原生 3D Transformer。整卷 CT 中目标只占极少切片/体素（brain 0.85% 体素/15% Z 切片，adrenal 低至 0.005%），全卷 `dice_ce` 会发生**优化/泛化塌陷**：预测并非全空，而是产生大量错误定位与远端假阳性，与真值几乎无重叠（首个 brain frozen 基线逐例 Dice≈0，HD95≈455mm）。这不是代码崩溃或全背景输出。在含前景切片上过拟合即达 Dice≈0.79，改用 focal 损失或前景 patch 采样后整卷验证 Dice≈0.73–0.84，证明模型/管线可学。
 
-Tier-0 对每器官在 `fold_00`、K=5 上比较 4 个 cell：`full_dice_ce`（塌陷对照）、`full_dice_focal`、`patch_dice_ce`、`patch_dice_focal`。patch 尺寸由 train-only 指纹（`src/research/regime.py` + `derive_policy`）给出，且 patch cell 无条件启用前景偏置采样与推理滑窗（不受 `small_target` 门控）。`select_regime_winners.py` 按 mean Dice 选胜者写 `selected_regime.json`；若某器官 4 个 cell 最高 Dice 仍 < 0.05，标记为 `degenerate` 并显式报警，不得进入因子筛选。这对应生态报告 §5.2 的指纹驱动采样与实验 I5（full vs patch）、I6（损失）。选定 regime 成为该器官新的 reference 基线，随后的 27 个因子候选在其之上"只改一个因子"。
+**full/patch 是 3D 采样与推理策略，不是 2D/3D 之分**：`full` 输入整卷三维 CT；`patch` 沿 `(Z,Y,X)` 裁三维子体积训练、推理时在整卷做三维 Gaussian 加权滑窗。patch 会同时减少 DINOv3 看到的切片数和 decoder 可用的全局上下文。
+
+Tier-0 对每器官在 `fold_00`、K=5 上比较 4 个 cell：`full_dice_ce`（塌陷对照）、`full_dice_focal`、`patch_dice_ce`、`patch_dice_focal`。patch 尺寸由 train-only 指纹（`src/research/regime.py` + `derive_policy`）给出，且 patch cell 无条件启用前景偏置采样与推理滑窗（不受 `small_target` 门控）。注意 patch cell **同时改变训练采样与推理滑窗**，其收益/损害不能全部归因于采样；训练-vs-推理的解耦通过 `evaluate_inference_modes.py` 对固定 checkpoint 做后验证（见下文 patch 待办），不额外增加 Tier-0 训练格。`select_regime_winners.py` 采用**容差带选择**：先取最高 Dice，再把与之相差 ≤0.02 的方案视为 Dice-等价候选，在带内按 HD95（大器官）或 surface Dice+HD95（细长/薄骨）选择；小器官（adrenal）直接以空预测率+recall 为主，因裸 Dice 会高估远端误报或漏检的方案。带内多于一个候选时标 `needs_more_seeds`。要求完整 5×4 矩阵、拒绝 failed/NaN/缺失；任一器官最高 Dice<0.05 标 `degenerate` 并禁止进入因子筛选。对应生态报告 §5.2 指纹驱动采样与实验 I5（full vs patch）、I6（损失）。
+
+### brain pilot 的明确结论（仅限当前 fold/support/seed）
+
+`full_dice_focal` 本轮最佳（Dice 0.835，HD95 9.4mm）；patch 对 brain 非必需；**损失影响大于 patch**。但这只适用于当前 fold、样本与单 seed，不能推广为"所有大器官都用 full focal"。`patch_dice_ce` Dice 0.769 但 HD95 202mm——体积重叠尚可却有很远的孤立假阳性，仅看 Dice 会严重高估其可用性。正式验证需多 seed。
+
+### patch 策略待办（正式化前的独立消融，优先用于 adrenal/aorta/scapula 等小/细目标，brain 作 patch 未必有益的负对照）
+
+1. `patches_per_case_per_epoch`（试 1/4/8，并按 optimizer steps 而非 epoch 做公平比较）——当前每例每 epoch 仅 1 个 patch，K=1/5 时方差极大。
+2. 分层采样：器官内部 / 边界 / 近器官困难负样本 / 全图背景，替代单一"前景中心 vs 全图随机"。
+3. 训练 patch 与推理滑窗解耦：**不新增训练格**，而是用 `evaluate_inference_modes.py` 对已训 checkpoint 增测 full-volume 推理，得到 {full训练+full推理、full训练+滑窗、patch训练+滑窗、patch训练+full推理} 交叉表，定位 HD95 恶化来自训练还是推理。
+4. 假阳性后处理消融（最大连通域、去小体积、验证集校准阈值替代固定 0.5、overlap 0.5 vs 0.67）——单独记录，不默认开启后把收益归给模型。
+5. 避免 patch+focal 双重前景偏置：小修复矩阵 focal_alpha {0.5,0.6,0.75} × foreground_probability {0.4,0.6,0.75}，固定一变量、只在 patch 确优于 full 的器官上跑。
+6. 保存每 cell HD95 最差 1–2 例预测，区分孤立假阳性 / 滑窗接缝 / 重复识别 / 边界整体偏移 / 方向元数据错误。
 
 ## 两阶段实验协议
 
