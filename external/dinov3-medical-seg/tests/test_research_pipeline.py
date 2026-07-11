@@ -1059,3 +1059,27 @@ def test_select_regime_clear_dice_winner_not_flagged(tmp_path):
     sel = payload["selected_by_task"]["brain"]
     assert sel["cell_id"] == "full_dice_focal"      # leads by 0.066 > 0.02
     assert sel["needs_more_seeds"] is False          # sole member of the band
+
+
+def test_poll_handle_semantics():
+    modal_study = _load_modal_study_module()
+
+    class NotReady:
+        def get(self, timeout=0):
+            raise TimeoutError()
+
+    class Done:
+        def get(self, timeout=0):
+            return {"ok": True}
+
+    class Failed:
+        def get(self, timeout=0):
+            raise RuntimeError("remote job crashed")
+
+    # Still running -> not done (keep polling).
+    assert modal_study._poll_handle(NotReady()) is False
+    # Finished successfully -> done.
+    assert modal_study._poll_handle(Done()) is True
+    # Remote failure must NOT crash the driver: the cell wrote failed.json and the
+    # selector's completeness gate will catch it. Treat as done (slot freed).
+    assert modal_study._poll_handle(Failed()) is True

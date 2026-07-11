@@ -50,6 +50,25 @@ def _prepare_tasks_with_checkpoint(tasks, run_task, commit) -> None:
         commit()
 
 
+def _poll_handle(handle) -> bool:
+    """Return True when a spawned job has settled (succeeded OR failed).
+
+    ``FunctionCall.get(timeout=0)`` polls immediately: it raises ``TimeoutError``
+    while the job is still running, returns the value on success, and re-raises
+    the remote exception on failure. A failed job must free its concurrency slot
+    rather than crash the local driver — the job already wrote ``failed.json``
+    remotely and the selector's completeness gate will refuse to proceed on it.
+    """
+    try:
+        handle.get(timeout=0)
+        return True
+    except TimeoutError:
+        return False
+    except Exception as exc:  # remote job failed; slot is done, keep the batch alive
+        print("WARNING: spawned job failed (continuing batch): {}".format(exc))
+        return True
+
+
 def _bounded_spawn(specs, launch, poll, max_concurrency=4, poll_interval=5.0) -> int:
     """Spawn jobs for each spec, keeping at most ``max_concurrency`` in flight.
 
@@ -548,11 +567,7 @@ if modal is not None:
             return launch
 
         def _poll(handle):
-            try:
-                handle.get(timeout=0)
-                return True
-            except TimeoutError:
-                return False
+            return _poll_handle(handle)
 
         if action == "prepare":
             prepare_benchmark.remote(source_subdir, benchmark_subdir)
