@@ -775,8 +775,10 @@ def test_regime_override_for_returns_selected_cell():
     ov = run_ablations._regime_override_for(selected, "brain", fingerprint)
     assert ov["loss"]["type"] == "dice_ce"
     assert ov["data"]["patch"]["enabled"] is True
-    ov2 = run_ablations._regime_override_for(selected, "liver", fingerprint)
-    assert ov2["data"]["patch"]["enabled"] is True
+    # Fail closed: a task with no selected regime must raise, never silently
+    # default to an arbitrary cell that could contaminate the formal screen.
+    with pytest.raises((SystemExit, ValueError, KeyError)):
+        run_ablations._regime_override_for(selected, "liver", fingerprint)
 
 
 def _load_select_regime_module():
@@ -829,3 +831,29 @@ def test_epoch_budget_regime_phase_checks_screen_epochs():
     run_ablations._validate_epoch_budget({"screen_epochs": 25}, "regime")
     # A bad confirmation_epochs must NOT block the regime phase.
     run_ablations._validate_epoch_budget({"screen_epochs": 25, "confirmation_epochs": 0}, "regime")
+
+
+def test_screen_requires_regime_fails_closed(tmp_path):
+    import subprocess, sys as _sys, yaml
+    prepare = _load_prepare_module()
+    source = tmp_path / "source"; source.mkdir()
+    for i in range(6):
+        _write_source_case(source, "s{:04d}".format(i + 1), {"brain": (3, 8, 9)})
+    bench = tmp_path / "bench"
+    prepare.build_benchmark(source=source, output=bench, tasks=["brain"], support_pool_size=5, folds=1, seed=5)
+    plan = {
+        "study": {"id": "t", "base_config": str(PROJECT_ROOT / "config/research/ct_fewshot_base.yaml"),
+                  "benchmark_root": str(bench), "results_root": str(tmp_path / "results"),
+                  "screening_fold": 0, "confirmation_folds": [0], "shot_counts": [5],
+                  "screening_training_seeds": [1], "confirmation_training_seeds": [1],
+                  "screen_epochs": 1, "confirmation_epochs": 1},
+        "candidates": [{"id": "brain_base_frozen_segformer_256", "task": "brain", "is_reference": True,
+                        "changed_factor": "x", "overrides": {}}],
+    }
+    plan_path = tmp_path / "plan.yaml"; plan_path.write_text(yaml.safe_dump(plan))
+    # No --regime: must fail closed, not silently run on the raw baseline.
+    r = subprocess.run([_sys.executable, "scripts/research/run_ablations.py", "--plan", str(plan_path),
+                        "--phase", "screen", "--dry-run"], cwd=str(PROJECT_ROOT),
+                       capture_output=True, text=True)
+    assert r.returncode != 0
+    assert "regime" in (r.stdout + r.stderr).lower()

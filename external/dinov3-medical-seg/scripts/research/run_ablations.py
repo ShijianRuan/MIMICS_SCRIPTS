@@ -64,14 +64,22 @@ def _regime_run_ids(plan: dict) -> list:
 
 
 def _regime_override_for(selected_regime: dict, task: str, fingerprint: dict) -> dict:
-    """Return the regime override for a task, defaulting to patch+focal safely."""
+    """Return the regime override for a task. Fail closed on any gap.
+
+    A missing selection, an unknown cell id, or a task flagged degenerate must
+    raise rather than silently substitute a default regime — otherwise the
+    formal screen would build on an unvalidated baseline.
+    """
     cells = regime_cells(fingerprint)
     by_task = (selected_regime or {}).get("selected_by_task", {})
-    cell_id = by_task.get(task, {}).get("cell_id")
-    if cell_id not in cells:
-        print("WARNING: no selected regime for {}, defaulting to patch_dice_focal".format(task))
-        cell_id = "patch_dice_focal"
-    return cells[cell_id]
+    if task in (selected_regime or {}).get("degenerate_tasks", []):
+        raise SystemExit("Task {} has a degenerate regime; refuse to screen on it".format(task))
+    entry = by_task.get(task)
+    if not entry or entry.get("cell_id") not in cells:
+        raise SystemExit(
+            "No valid selected regime for task {}; run --action select-regime and resolve gaps first".format(task)
+        )
+    return cells[entry["cell_id"]]
 
 
 def _run_command(command: list[str], cwd: Path, log_path: Path, dry_run: bool) -> int:
@@ -247,6 +255,17 @@ def main():
     selected_regime = None
     if args.regime:
         selected_regime = json.loads(Path(args.regime).resolve().read_text(encoding="utf-8"))
+    elif args.phase in ("screen", "confirm"):
+        # Fail closed: the factor screen/confirmation must build on a validated
+        # Tier-0 regime, never silently fall back to the collapse-prone baseline.
+        raise SystemExit(
+            "--regime selected_regime.json is required for {}; run Tier-0 + select-regime first".format(args.phase)
+        )
+    if selected_regime is not None and selected_regime.get("degenerate_tasks"):
+        raise SystemExit(
+            "Refusing to {}: degenerate regime tasks present: {}".format(
+                args.phase, selected_regime["degenerate_tasks"])
+        )
     candidates = list(plan.get("candidates", []))
     if args.tasks:
         requested = set(args.tasks)
