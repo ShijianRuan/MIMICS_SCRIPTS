@@ -455,13 +455,30 @@ if modal is not None:
 
     @app.function(image=image, cpu=1, volumes={"/vol/results": result_volume})
     def select_regime(result_subdir: str, regime_subpath: str = "selected_regime.json"):
-        """Pick one sampling+loss regime per task from the Tier-0 pre-screen."""
-        _run([
+        """Pick one sampling+loss regime per task from the Tier-0 pre-screen.
+
+        Passes the full expected task set so the selector fails closed unless the
+        complete task x cell matrix is present with finite metrics.
+        """
+        import yaml
+
+        plan = yaml.safe_load(
+            Path("/opt/dinov3-medical-seg/config/research/multi_organ_study.yaml").read_text(encoding="utf-8")
+        )
+        tasks, seen = [], set()
+        for candidate in plan["candidates"]:
+            if candidate["task"] not in seen:
+                seen.add(candidate["task"])
+                tasks.append(candidate["task"])
+        command = [
             sys.executable,
             "scripts/research/select_regime_winners.py",
             "--results-root", "/vol/results/{}".format(result_subdir),
             "--output", "/vol/results/{}/{}".format(result_subdir, regime_subpath),
-        ])
+        ]
+        for task in tasks:
+            command.extend(["--expected-task", task])
+        _run(command)
         result_volume.commit()
         return json.loads((Path("/vol/results") / result_subdir / regime_subpath).read_text(encoding="utf-8"))
 
@@ -564,7 +581,14 @@ if modal is not None:
             # screen, so every screen candidate builds on a trainable baseline.
             for spec in _phase_job_specs(plan, "regime"):
                 regime_run.remote(spec["task"], spec["cell_id"], benchmark_subdir, result_subdir)
-            select_regime.remote(result_subdir)
+            regime_payload = select_regime.remote(result_subdir)
+            if regime_payload.get("degenerate_tasks"):
+                raise SystemExit(
+                    "Refusing to screen: degenerate regime tasks {}; inspect Tier-0 before continuing".format(
+                        regime_payload["degenerate_tasks"]))
+            if regime_payload.get("needs_more_seeds_tasks"):
+                print("NOTE: near-tie regimes need more seeds before final claims: {}".format(
+                    regime_payload["needs_more_seeds_tasks"]))
             # Screen: one run_single per (candidate, screen seed) via the shared
             # spec builder, so the full path and the standalone screen action
             # cannot drift apart.

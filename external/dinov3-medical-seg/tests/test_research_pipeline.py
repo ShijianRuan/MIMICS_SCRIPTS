@@ -791,16 +791,17 @@ def _load_select_regime_module():
 def test_select_regime_picks_max_dice_and_flags_degenerate(tmp_path):
     m = _load_select_regime_module()
     root = tmp_path / "res"
-    def _write(task, cell, dice):
-        d = root / "regime" / task / cell / "fold_00" / "k5" / "seed_1"
-        d.mkdir(parents=True)
-        (d / "evaluation.json").write_text(json.dumps({"mean_dice": dice, "mean_hd95_mm": 5.0}))
-        (d / "run_manifest.json").write_text(json.dumps({"task": task, "cell_id": cell}))
-    _write("brain", "full_dice_ce", 0.0); _write("brain", "patch_dice_focal", 0.72)
-    _write("liver", "full_dice_ce", 0.0); _write("liver", "patch_dice_ce", 0.01)
+    # Complete 4-cell matrix for brain (a clear winner) and liver (all degenerate).
+    _regime_dir(root, "brain", "full_dice_ce", dice=0.0, hd95=455.0, recall=0.0, empty_rate=1.0)
+    _regime_dir(root, "brain", "full_dice_focal", dice=0.72, hd95=9.0, recall=0.75, empty_rate=0.0)
+    _regime_dir(root, "brain", "patch_dice_ce", dice=0.40, hd95=120.0, recall=0.5, empty_rate=0.0)
+    _regime_dir(root, "brain", "patch_dice_focal", dice=0.55, hd95=60.0, recall=0.6, empty_rate=0.0)
+    for c in ALL_CELLS:
+        _regime_dir(root, "liver", c, dice=0.01, hd95=300.0, recall=0.01, empty_rate=0.5)
     out = tmp_path / "selected_regime.json"
-    payload = m.select_regime(root, out, degenerate_threshold=0.05)
-    assert payload["selected_by_task"]["brain"]["cell_id"] == "patch_dice_focal"
+    payload = m.select_regime(root, out, degenerate_threshold=0.05,
+                              expected_tasks=["brain", "liver"], expected_cells=ALL_CELLS)
+    assert payload["selected_by_task"]["brain"]["cell_id"] == "full_dice_focal"
     assert payload["selected_by_task"]["brain"]["degenerate"] is False
     assert payload["selected_by_task"]["liver"]["degenerate"] is True
     assert "liver" in payload["degenerate_tasks"]
@@ -857,3 +858,77 @@ def test_screen_requires_regime_fails_closed(tmp_path):
                        capture_output=True, text=True)
     assert r.returncode != 0
     assert "regime" in (r.stdout + r.stderr).lower()
+
+
+def _regime_dir(root, task, cell, dice=None, hd95=None, recall=None, empty_rate=None, failed=False):
+    d = root / "regime" / task / cell / "fold_00" / "k5" / "seed_1"
+    d.mkdir(parents=True)
+    (d / "run_manifest.json").write_text(json.dumps({"task": task, "cell_id": cell}))
+    if failed:
+        (d / "failed.json").write_text(json.dumps({"stage": "train", "returncode": 1}))
+        return
+    payload = {"mean_dice": dice, "mean_hd95_mm": hd95,
+               "mean_recall": recall, "empty_prediction_rate": empty_rate,
+               "mean_surface_dice": 0.5}
+    (d / "evaluation.json").write_text(json.dumps(payload))
+
+
+ALL_CELLS = ("full_dice_ce", "full_dice_focal", "patch_dice_ce", "patch_dice_focal")
+
+
+def test_select_regime_rejects_incomplete_matrix(tmp_path):
+    m = _load_select_regime_module()
+    root = tmp_path / "res"
+    # Only brain present, and only 2 of 4 cells -> incomplete.
+    _regime_dir(root, "brain", "full_dice_ce", dice=0.0, hd95=455.0, recall=0.0, empty_rate=1.0)
+    _regime_dir(root, "brain", "full_dice_focal", dice=0.83, hd95=9.4, recall=0.84, empty_rate=0.0)
+    with pytest.raises((SystemExit, ValueError), match="(?i)incomplete|missing|expected"):
+        m.select_regime(root, tmp_path / "out.json",
+                        expected_tasks=["brain", "liver"], expected_cells=ALL_CELLS)
+
+
+def test_select_regime_rejects_failed_or_nonfinite(tmp_path):
+    m = _load_select_regime_module()
+    root = tmp_path / "res"
+    for c in ALL_CELLS:
+        _regime_dir(root, "brain", c, dice=0.8, hd95=10.0, recall=0.8, empty_rate=0.0)
+    # one cell failed
+    import shutil
+    shutil.rmtree(root / "regime" / "brain" / "patch_dice_focal")
+    _regime_dir(root, "brain", "patch_dice_focal", failed=True)
+    with pytest.raises((SystemExit, ValueError), match="(?i)fail|missing|incomplete"):
+        m.select_regime(root, tmp_path / "out.json",
+                        expected_tasks=["brain"], expected_cells=ALL_CELLS)
+
+
+def test_select_regime_brain_prefers_lower_hd95_when_dice_close(tmp_path):
+    m = _load_select_regime_module()
+    root = tmp_path / "res"
+    # two cells with near-equal Dice but very different HD95: the low-HD95 wins,
+    # AND the near-tie must be flagged for more seeds.
+    _regime_dir(root, "brain", "full_dice_ce", dice=0.0, hd95=455.0, recall=0.0, empty_rate=1.0)
+    _regime_dir(root, "brain", "full_dice_focal", dice=0.835, hd95=9.4, recall=0.84, empty_rate=0.0)
+    _regime_dir(root, "brain", "patch_dice_ce", dice=0.83, hd95=202.0, recall=0.82, empty_rate=0.0)
+    _regime_dir(root, "brain", "patch_dice_focal", dice=0.67, hd95=320.0, recall=0.87, empty_rate=0.0)
+    payload = m.select_regime(root, tmp_path / "out.json",
+                              expected_tasks=["brain"], expected_cells=ALL_CELLS)
+    sel = payload["selected_by_task"]["brain"]
+    assert sel["cell_id"] == "full_dice_focal"          # lower HD95 breaks the near-tie
+    assert sel["needs_more_seeds"] is True               # 0.835 vs 0.83 within 0.02
+
+
+def test_select_regime_adrenal_uses_empty_rate_and_recall(tmp_path):
+    m = _load_select_regime_module()
+    root = tmp_path / "res"
+    # adrenal: a higher-Dice cell that predicts empty on half the cases must lose
+    # to a slightly lower-Dice cell that actually detects the organ.
+    _regime_dir(root, "adrenal_gland_right", "full_dice_ce", dice=0.10, hd95=None, recall=0.05, empty_rate=0.9)
+    _regime_dir(root, "adrenal_gland_right", "full_dice_focal", dice=0.32, hd95=15.0, recall=0.20, empty_rate=0.5)
+    _regime_dir(root, "adrenal_gland_right", "patch_dice_ce", dice=0.30, hd95=12.0, recall=0.55, empty_rate=0.0)
+    _regime_dir(root, "adrenal_gland_right", "patch_dice_focal", dice=0.31, hd95=11.0, recall=0.60, empty_rate=0.0)
+    payload = m.select_regime(root, tmp_path / "out.json",
+                              expected_tasks=["adrenal_gland_right"], expected_cells=ALL_CELLS)
+    sel = payload["selected_by_task"]["adrenal_gland_right"]
+    # winner must have low empty-rate and decent recall, not the empty-prone 0.32 cell
+    assert sel["cell_id"] in ("patch_dice_ce", "patch_dice_focal")
+    assert payload["selected_by_task"]["adrenal_gland_right"]["empty_prediction_rate"] == 0.0
