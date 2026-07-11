@@ -50,6 +50,38 @@ def _prepare_tasks_with_checkpoint(tasks, run_task, commit) -> None:
         commit()
 
 
+def _bounded_spawn(specs, launch, poll, max_concurrency=4, poll_interval=5.0) -> int:
+    """Spawn jobs for each spec, keeping at most ``max_concurrency`` in flight.
+
+    ``.remote()`` is a BLOCKING call, so a naive loop over specs runs them
+    serially and pins the local driver for the whole matrix. This scheduler uses
+    a non-blocking ``launch`` (e.g. Modal ``.spawn()`` returning a handle) plus a
+    ``poll(handle) -> done`` check, bounding concurrency so Volume v1 never sees
+    more than a few concurrent committers (recommended < ~5). Returns the number
+    of completed jobs. ``launch``/``poll`` are injected for testability.
+    """
+    if int(max_concurrency) < 1:
+        raise ValueError("max_concurrency must be >= 1, got {}".format(max_concurrency))
+    import time
+
+    pending = list(specs)
+    in_flight = []
+    completed = 0
+    while pending or in_flight:
+        while pending and len(in_flight) < int(max_concurrency):
+            in_flight.append(launch(pending.pop(0)))
+        still = []
+        for handle in in_flight:
+            if poll(handle):
+                completed += 1
+            else:
+                still.append(handle)
+        in_flight = still
+        if in_flight and float(poll_interval) > 0:
+            time.sleep(float(poll_interval))
+    return completed
+
+
 def _phase_job_specs(plan, phase: str, confirmation_ids=None) -> list:
     """Return the per-job spec list for a study phase, one dict per GPU job.
 
@@ -498,7 +530,29 @@ if modal is not None:
         result_subdir: str = "totalseg_multi_organ_v3",
         selection_subpath: str = "selected_candidates.json",
         max_runs: int = 0,
+        max_concurrency: int = 4,
     ):
+        # Bounded async fan-out: .spawn() is non-blocking; _bounded_spawn keeps at
+        # most max_concurrency jobs in flight so the local driver is not pinned
+        # serialising the matrix and Volume v1 stays under ~5 concurrent commits.
+        def _spawn_regime(spec):
+            return regime_run.spawn(spec["task"], spec["cell_id"], benchmark_subdir, result_subdir)
+
+        def _spawn_run_single(phase):
+            def launch(spec):
+                return run_single.spawn(
+                    phase, spec["candidate_id"], spec["fold"], spec["support_count"],
+                    spec["training_seed"], benchmark_subdir, result_subdir, selection_subpath,
+                )
+            return launch
+
+        def _poll(handle):
+            try:
+                handle.get(timeout=0)
+                return True
+            except TimeoutError:
+                return False
+
         if action == "prepare":
             prepare_benchmark.remote(source_subdir, benchmark_subdir)
         elif action == "regime":
@@ -510,9 +564,8 @@ if modal is not None:
             specs = _phase_job_specs(plan, "regime")
             if max_runs:
                 specs = specs[:max_runs]
-            print("Dispatching {} regime job(s) as independent regime_run functions".format(len(specs)))
-            for spec in specs:
-                regime_run.remote(spec["task"], spec["cell_id"], benchmark_subdir, result_subdir)
+            print("Dispatching {} regime job(s) at concurrency {}".format(len(specs), max_concurrency))
+            _bounded_spawn(specs, _spawn_regime, _poll, max_concurrency=max_concurrency)
         elif action == "select-regime":
             payload = select_regime.remote(result_subdir)
             print("selected regime: {}".format(json.dumps(payload.get("selected_by_task", {}))))
@@ -536,12 +589,8 @@ if modal is not None:
             specs = _phase_job_specs(plan, "screen")
             if max_runs:
                 specs = specs[:max_runs]
-            print("Dispatching {} screen job(s) as independent run_single functions".format(len(specs)))
-            for spec in specs:
-                run_single.remote(
-                    "screen", spec["candidate_id"], spec["fold"], spec["support_count"],
-                    spec["training_seed"], benchmark_subdir, result_subdir, selection_subpath,
-                )
+            print("Dispatching {} screen job(s) at concurrency {}".format(len(specs), max_concurrency))
+            _bounded_spawn(specs, _spawn_run_single("screen"), _poll, max_concurrency=max_concurrency)
         elif action == "confirm":
             import yaml
 
@@ -557,12 +606,9 @@ if modal is not None:
             specs = _phase_job_specs(plan, "confirm", confirmation_ids)
             if max_runs:
                 specs = specs[:max_runs]
-            print("Dispatching {} confirm job(s) for ids {}".format(len(specs), confirmation_ids))
-            for spec in specs:
-                run_single.remote(
-                    "confirm", spec["candidate_id"], spec["fold"], spec["support_count"],
-                    spec["training_seed"], benchmark_subdir, result_subdir, selection_subpath,
-                )
+            print("Dispatching {} confirm job(s) for ids {} at concurrency {}".format(
+                len(specs), confirmation_ids, max_concurrency))
+            _bounded_spawn(specs, _spawn_run_single("confirm"), _poll, max_concurrency=max_concurrency)
         elif action == "select":
             select_screening.remote(result_subdir, selection_subpath)
         elif action == "full":
@@ -579,8 +625,7 @@ if modal is not None:
             study = plan["study"]
             # Tier-0: choose each organ's sampling+loss regime before the factor
             # screen, so every screen candidate builds on a trainable baseline.
-            for spec in _phase_job_specs(plan, "regime"):
-                regime_run.remote(spec["task"], spec["cell_id"], benchmark_subdir, result_subdir)
+            _bounded_spawn(_phase_job_specs(plan, "regime"), _spawn_regime, _poll, max_concurrency=max_concurrency)
             regime_payload = select_regime.remote(result_subdir)
             if regime_payload.get("degenerate_tasks"):
                 raise SystemExit(
@@ -592,45 +637,45 @@ if modal is not None:
             # Screen: one run_single per (candidate, screen seed) via the shared
             # spec builder, so the full path and the standalone screen action
             # cannot drift apart.
-            for spec in _phase_job_specs(plan, "screen"):
-                run_single.remote(
-                    "screen", spec["candidate_id"], spec["fold"], spec["support_count"],
-                    spec["training_seed"], benchmark_subdir, result_subdir, selection_subpath,
-                )
+            _bounded_spawn(_phase_job_specs(plan, "screen"), _spawn_run_single("screen"), _poll, max_concurrency=max_concurrency)
             selected_ids = select_screening.remote(result_subdir, selection_subpath)
             task_by_candidate = {candidate["id"]: candidate["task"] for candidate in plan["candidates"]}
             reference_ids = [candidate["id"] for candidate in plan["candidates"] if candidate.get("is_reference", False)]
             confirmation_ids = sorted(set(selected_ids) | set(reference_ids))
-            for spec in _phase_job_specs(plan, "confirm", confirmation_ids):
-                run_single.remote(
-                    "confirm", spec["candidate_id"], spec["fold"], spec["support_count"],
-                    spec["training_seed"], benchmark_subdir, result_subdir, selection_subpath,
-                )
+            _bounded_spawn(
+                _phase_job_specs(plan, "confirm", confirmation_ids),
+                _spawn_run_single("confirm"), _poll, max_concurrency=max_concurrency,
+            )
             # Inference-mode selection is intentionally evaluated only on the
             # screen winner; the frozen reference is already confirmed for
             # effect-size comparison and does not multiply this post-hoc grid.
-            for candidate_id in selected_ids:
-                for fold in study["confirmation_folds"]:
-                    evaluate_inference_modes_single.remote(
-                        candidate_id,
-                        task_by_candidate[candidate_id],
-                        int(fold),
-                        5,
-                        int(study["inference_seed"]),
-                        study["id"],
-                        benchmark_subdir,
-                        result_subdir,
-                    )
+            inference_specs = [
+                {"candidate_id": candidate_id, "fold": int(fold)}
+                for candidate_id in selected_ids for fold in study["confirmation_folds"]
+            ]
+            _bounded_spawn(
+                inference_specs,
+                lambda s: evaluate_inference_modes_single.spawn(
+                    s["candidate_id"], task_by_candidate[s["candidate_id"]], s["fold"], 5,
+                    int(study["inference_seed"]), study["id"], benchmark_subdir, result_subdir),
+                _poll, max_concurrency=max_concurrency,
+            )
             # Two-stage inference is tested independently for the tiny adrenal
             # task. It never receives label-derived inference crops.
             confirm_seeds = [int(value) for value in study.get("confirmation_training_seeds", [])]
-            for fold in study["confirmation_folds"]:
-                for support_count in study["shot_counts"]:
-                    for training_seed in confirm_seeds:
-                        run_two_stage_single.remote(
-                            "adrenal_gland_right", int(fold), int(support_count), training_seed,
-                            benchmark_subdir, result_subdir,
-                        )
+            two_stage_specs = [
+                {"fold": int(fold), "support_count": int(support_count), "training_seed": training_seed}
+                for fold in study["confirmation_folds"]
+                for support_count in study["shot_counts"]
+                for training_seed in confirm_seeds
+            ]
+            _bounded_spawn(
+                two_stage_specs,
+                lambda s: run_two_stage_single.spawn(
+                    "adrenal_gland_right", s["fold"], s["support_count"], s["training_seed"],
+                    benchmark_subdir, result_subdir),
+                _poll, max_concurrency=max_concurrency,
+            )
         else:
             raise ValueError("action must be prepare, regime, select-regime, verify-image, preflight, screen, select, confirm, or full")
 else:

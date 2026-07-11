@@ -932,3 +932,35 @@ def test_select_regime_adrenal_uses_empty_rate_and_recall(tmp_path):
     # winner must have low empty-rate and decent recall, not the empty-prone 0.32 cell
     assert sel["cell_id"] in ("patch_dice_ce", "patch_dice_focal")
     assert payload["selected_by_task"]["adrenal_gland_right"]["empty_prediction_rate"] == 0.0
+
+
+def test_bounded_spawn_never_exceeds_concurrency_and_runs_all():
+    modal_study = _load_modal_study_module()
+    specs = list(range(10))
+    launched = []
+    # Simulated handles: each becomes "done" after being polled twice.
+    class H:
+        def __init__(self, spec): self.spec = spec; self.polls = 0
+    inflight_peak = {"v": 0}
+    state = {"handles": []}
+    def launch(spec):
+        launched.append(spec)
+        h = H(spec)
+        state["handles"].append(h)
+        # peak concurrency = handles not yet done
+        live = sum(1 for x in state["handles"] if x.polls < 2)
+        inflight_peak["v"] = max(inflight_peak["v"], live)
+        return h
+    def poll(h):
+        h.polls += 1
+        return h.polls >= 2
+    done = modal_study._bounded_spawn(specs, launch, poll, max_concurrency=4, poll_interval=0)
+    assert sorted(launched) == specs           # every spec launched exactly once
+    assert done == len(specs)
+    assert inflight_peak["v"] <= 4             # concurrency bound respected
+
+
+def test_bounded_spawn_rejects_bad_concurrency():
+    modal_study = _load_modal_study_module()
+    with pytest.raises((ValueError, AssertionError)):
+        modal_study._bounded_spawn([1], lambda s: s, lambda h: True, max_concurrency=0, poll_interval=0)
