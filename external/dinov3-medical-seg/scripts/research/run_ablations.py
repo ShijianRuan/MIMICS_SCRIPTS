@@ -43,7 +43,7 @@ def _validate_epoch_budget(study: dict, phase: str) -> None:
     no checkpoint is ever written yet the process exits 0 — which the run loop
     would misreport as a training failure. Surfacing it here gives a clear cause.
     """
-    key = "screen_epochs" if phase == "screen" else "confirmation_epochs"
+    key = "screen_epochs" if phase in ("screen", "regime") else "confirmation_epochs"
     if key not in study:
         return
     epochs = int(study[key])

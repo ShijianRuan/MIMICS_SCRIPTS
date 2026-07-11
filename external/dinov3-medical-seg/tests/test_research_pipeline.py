@@ -817,3 +817,15 @@ def test_phase_job_specs_regime_covers_task_cell_grid():
     assert {s["task"] for s in specs} == tasks
     assert {s["cell_id"] for s in specs} == set(REGIME_CELL_IDS)
     assert all(s["fold"] == plan["study"]["screening_fold"] for s in specs)
+
+
+def test_epoch_budget_regime_phase_checks_screen_epochs():
+    run_ablations = _load_run_ablations_module()
+    # regime uses screen_epochs (Tier-0 runs on the screening fold), so a bad
+    # screen_epochs must be rejected and confirmation_epochs must be irrelevant.
+    with pytest.raises(ValueError, match="screen_epochs"):
+        run_ablations._validate_epoch_budget({"screen_epochs": 0, "confirmation_epochs": 80}, "regime")
+    # A valid screen_epochs passes even if confirmation_epochs is absent.
+    run_ablations._validate_epoch_budget({"screen_epochs": 25}, "regime")
+    # A bad confirmation_epochs must NOT block the regime phase.
+    run_ablations._validate_epoch_budget({"screen_epochs": 25, "confirmation_epochs": 0}, "regime")
