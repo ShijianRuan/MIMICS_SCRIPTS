@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import platform
 import subprocess
 import sys
@@ -92,17 +94,49 @@ def _run_command(command: list[str], cwd: Path, log_path: Path, dry_run: bool) -
     return int(result.returncode)
 
 
+def _config_hash(config) -> str:
+    """Stable SHA-256 of a config, invariant to key order."""
+    text = json.dumps(config, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _package_versions() -> dict:
+    import importlib.metadata as md
+
+    versions = {}
+    for pkg in ("torch", "torchvision", "transformers", "numpy", "nibabel", "scipy"):
+        try:
+            versions[pkg] = md.version(pkg)
+        except Exception:
+            versions[pkg] = None
+    return versions
+
+
 def _provenance() -> dict:
     def git(*args):
         try:
-            return subprocess.check_output(["git", *args], cwd=str(PROJECT_ROOT), text=True).strip()
+            return subprocess.check_output(
+                ["git", *args], cwd=str(PROJECT_ROOT), text=True, stderr=subprocess.DEVNULL
+            ).strip()
         except Exception:
             return None
+    commit = git("rev-parse", "HEAD")
+    # Tri-state: only trust the dirty flag when git actually produced a commit.
+    # In the container there is no repo, so record None instead of a false clean.
+    if commit is None:
+        dirty = None
+    else:
+        status = git("status", "--porcelain")
+        dirty = None if status is None else bool(status)
     return {
         "python": sys.version,
         "platform": platform.platform(),
-        "git_commit": git("rev-parse", "HEAD"),
-        "git_dirty": bool(git("status", "--porcelain")),
+        "git_commit": commit,
+        "git_dirty": dirty,
+        "package_versions": _package_versions(),
+        # Modal injects these in the container; absent locally.
+        "modal_image_id": os.environ.get("MODAL_IMAGE_ID"),
+        "modal_task_id": os.environ.get("MODAL_TASK_ID"),
     }
 
 
@@ -192,9 +226,6 @@ def main():
                 / "fold_{:02d}".format(screen_fold) / "k5" / "seed_{}".format(screen_seed)
             )
             evaluation_path = run_root / "evaluation.json"
-            if evaluation_path.is_file() and not args.force:
-                print("Skipping completed regime: {}/{}".format(task, cell_id))
-                continue
             config = deep_merge(base_config, {})
             config.setdefault("data", {})["data_root"] = str(fold_root)
             config["data"]["task"] = task
@@ -210,6 +241,19 @@ def main():
             if args.model_path:
                 config.setdefault("model", {})["model_path"] = str(Path(args.model_path).resolve())
             config["training"]["experiment_root"] = str(results_root / "artifacts")
+            current_hash = _config_hash(config)
+            # Resume only when a completed result exists AND was produced by the
+            # SAME config; a config/code change invalidates the stale result.
+            if evaluation_path.is_file() and not args.force:
+                prior = run_root / "run_manifest.json"
+                prior_hash = None
+                if prior.is_file():
+                    prior_hash = json.loads(prior.read_text(encoding="utf-8")).get("config_hash")
+                if prior_hash == current_hash:
+                    print("Skipping completed regime: {}/{}".format(task, cell_id))
+                    continue
+                print("Config changed for regime {}/{}; re-running (stale hash {} != {})".format(
+                    task, cell_id, prior_hash, current_hash))
             run_root.mkdir(parents=True, exist_ok=True)
             config_path = run_root / "config.yaml"
             with config_path.open("w", encoding="utf-8") as handle:
@@ -218,6 +262,7 @@ def main():
                 "study": study["id"], "phase": "regime", "task": task, "cell_id": cell_id,
                 "fold": screen_fold, "support_count": 5, "training_seed": screen_seed,
                 "data_root": str(fold_root), "config_path": str(config_path),
+                "config_hash": current_hash,
                 "training_fingerprint": fingerprint["fingerprint_sha256"], "provenance": _provenance(),
             })
             train_rc = _run_command(
@@ -316,9 +361,6 @@ def main():
                         / "k{}".format(support_count) / "seed_{}".format(training_seed)
                     )
                     evaluation_path = run_root / "evaluation.json"
-                    if evaluation_path.is_file() and not args.force:
-                        print("Skipping completed: {}".format(run_id))
-                        continue
                     manifest = json.loads((fold_root / "manifest.json").read_text(encoding="utf-8"))
                     support_case_ids = manifest["selection"]["support_case_ids_ordered"][:support_count]
                     fingerprint_path = (
@@ -351,6 +393,17 @@ def main():
                     if args.model_path:
                         config.setdefault("model", {})["model_path"] = str(Path(args.model_path).resolve())
                     config.setdefault("training", {})["experiment_root"] = str(results_root / "artifacts")
+                    current_hash = _config_hash(config)
+                    # Resume only when a completed result was produced by the same
+                    # config; a config/code change re-runs instead of mixing.
+                    if evaluation_path.is_file() and not args.force:
+                        prior = run_root / "run_manifest.json"
+                        prior_hash = json.loads(prior.read_text(encoding="utf-8")).get("config_hash") if prior.is_file() else None
+                        if prior_hash == current_hash:
+                            print("Skipping completed: {}".format(run_id))
+                            continue
+                        print("Config changed for {}; re-running (stale hash {} != {})".format(
+                            run_id, prior_hash, current_hash))
                     run_root.mkdir(parents=True, exist_ok=True)
                     config_path = run_root / "config.yaml"
                     with config_path.open("w", encoding="utf-8") as handle:
@@ -373,6 +426,7 @@ def main():
                             "training_seed": int(training_seed),
                             "data_root": str(fold_root),
                             "config_path": str(config_path),
+                            "config_hash": current_hash,
                             "training_fingerprint": fingerprint["fingerprint_sha256"],
                             "data_policy": candidate.get("data_policy", "explicit"),
                             "derived_policy": policy["policy_sha256"],

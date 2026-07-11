@@ -964,3 +964,64 @@ def test_bounded_spawn_rejects_bad_concurrency():
     modal_study = _load_modal_study_module()
     with pytest.raises((ValueError, AssertionError)):
         modal_study._bounded_spawn([1], lambda s: s, lambda h: True, max_concurrency=0, poll_interval=0)
+
+
+def test_provenance_records_versions_and_no_false_git_dirty():
+    run_ablations = _load_run_ablations_module()
+    prov = run_ablations._provenance()
+    # Package versions are pinned for reproducibility.
+    assert "package_versions" in prov
+    for pkg in ("torch", "transformers"):
+        assert pkg in prov["package_versions"]
+    # git_dirty must be a tri-state: True/False when git works, None when absent —
+    # never a misleading False when git is simply unavailable (the container case).
+    assert prov["git_dirty"] in (True, False, None)
+    # When git_commit is None (no repo), git_dirty must NOT be False.
+    if prov["git_commit"] is None:
+        assert prov["git_dirty"] is None
+
+
+def test_config_hash_is_stable_and_order_independent():
+    run_ablations = _load_run_ablations_module()
+    a = {"data": {"img_size": [256, 256]}, "loss": {"type": "dice_ce"}}
+    b = {"loss": {"type": "dice_ce"}, "data": {"img_size": [256, 256]}}
+    c = {"data": {"img_size": [320, 320]}, "loss": {"type": "dice_ce"}}
+    ha, hb, hc = run_ablations._config_hash(a), run_ablations._config_hash(b), run_ablations._config_hash(c)
+    assert ha == hb          # key order does not change the hash
+    assert ha != hc          # a real config change does
+    assert len(ha) == 64     # sha256 hex
+
+
+def test_regime_skip_guard_reruns_on_config_change(tmp_path):
+    import subprocess, sys as _sys, yaml
+    prepare = _load_prepare_module()
+    source = tmp_path / "source"; source.mkdir()
+    for i in range(6):
+        _write_source_case(source, "s{:04d}".format(i + 1), {"brain": (3, 8, 9)})
+    bench = tmp_path / "bench"
+    prepare.build_benchmark(source=source, output=bench, tasks=["brain"], support_pool_size=5, folds=1, seed=5)
+    results = tmp_path / "results"
+    run_root = results / "regime" / "brain" / "patch_dice_focal" / "fold_00" / "k5" / "seed_1"
+    run_root.mkdir(parents=True)
+    # Simulate a completed run from a DIFFERENT config (stale hash).
+    (run_root / "evaluation.json").write_text(json.dumps({"mean_dice": 0.9}))
+    (run_root / "run_manifest.json").write_text(json.dumps({"config_hash": "STALEHASH"}))
+    plan = {
+        "study": {"id": "t", "base_config": str(PROJECT_ROOT / "config/research/ct_fewshot_base.yaml"),
+                  "benchmark_root": str(bench), "results_root": str(results),
+                  "screening_fold": 0, "confirmation_folds": [0], "shot_counts": [5],
+                  "screening_training_seeds": [1], "confirmation_training_seeds": [1],
+                  "screen_epochs": 1, "confirmation_epochs": 1},
+        "candidates": [{"id": "brain_base_frozen_segformer_256", "task": "brain", "is_reference": True,
+                        "changed_factor": "x", "overrides": {}}],
+    }
+    plan_path = tmp_path / "plan.yaml"; plan_path.write_text(yaml.safe_dump(plan))
+    r = subprocess.run([_sys.executable, "scripts/research/run_ablations.py", "--plan", str(plan_path),
+                        "--phase", "regime", "--cell", "patch_dice_focal", "--dry-run"],
+                       cwd=str(PROJECT_ROOT), capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    # A stale hash must trigger a re-run (not a silent skip), refreshing the manifest.
+    assert "Config changed" in (r.stdout + r.stderr)
+    new_manifest = json.loads((run_root / "run_manifest.json").read_text())
+    assert new_manifest["config_hash"] != "STALEHASH"
+    assert len(new_manifest["config_hash"]) == 64
