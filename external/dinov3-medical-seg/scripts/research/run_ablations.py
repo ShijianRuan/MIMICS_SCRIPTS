@@ -100,6 +100,22 @@ def _config_hash(config) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _memory_safe_slice_batch(config: dict) -> None:
+    """Force slice_batch_size=1 when the backbone is trainable.
+
+    LoRA/adapter/full retain the full backbone activation graph across every
+    slice of a full-volume forward. At slice_batch_size=2 on a 24GB A10 this
+    OOMs (observed: brain full-volume LoRA/adapter). Frozen keeps its value —
+    no backbone gradients to store. Matches the study's documented OOM protocol
+    (drop slice_batch_size to 1, keep batch_size 1, use grad accumulation).
+    """
+    method = str(config.get("finetune", {}).get("method", "frozen"))
+    if method in ("lora", "adapter", "full"):
+        model = config.setdefault("model", {})
+        if int(model.get("slice_batch_size", 2)) > 1:
+            model["slice_batch_size"] = 1
+
+
 def _package_versions() -> dict:
     import importlib.metadata as md
 
@@ -241,6 +257,7 @@ def main():
             if args.model_path:
                 config.setdefault("model", {})["model_path"] = str(Path(args.model_path).resolve())
             config["training"]["experiment_root"] = str(results_root / "artifacts")
+            _memory_safe_slice_batch(config)
             current_hash = _config_hash(config)
             # Resume only when a completed result exists AND was produced by the
             # SAME config; a config/code change invalidates the stale result.
@@ -409,6 +426,7 @@ def main():
                     if args.model_path:
                         config.setdefault("model", {})["model_path"] = str(Path(args.model_path).resolve())
                     config.setdefault("training", {})["experiment_root"] = str(results_root / "artifacts")
+                    _memory_safe_slice_batch(config)
                     current_hash = _config_hash(config)
                     # Resume only when a completed result was produced by the same
                     # config; a config/code change re-runs instead of mixing.

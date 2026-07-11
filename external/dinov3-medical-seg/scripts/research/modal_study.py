@@ -195,6 +195,9 @@ if modal is not None:
         modal.Image.debian_slim(python_version="3.11")
         .apt_install("git")
         .uv_pip_install(*IMAGE_PIP_PACKAGES)
+        # Reduce CUDA fragmentation for trainable-backbone (LoRA/adapter/full)
+        # full-volume forwards on the 24GB A10; pairs with slice_batch_size=1.
+        .env({"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
         .add_local_dir(str(PROJECT_ROOT / "src"), remote_path="/opt/dinov3-medical-seg/src", copy=True)
         .add_local_dir(str(PROJECT_ROOT / "scripts"), remote_path="/opt/dinov3-medical-seg/scripts", copy=True)
         .add_local_dir(str(PROJECT_ROOT / "config"), remote_path="/opt/dinov3-medical-seg/config", copy=True)

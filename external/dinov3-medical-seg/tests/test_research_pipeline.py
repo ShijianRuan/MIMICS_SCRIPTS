@@ -1158,3 +1158,21 @@ def test_screen_refuses_when_all_requested_tasks_degenerate(tmp_path):
                        cwd=str(PROJECT_ROOT), capture_output=True, text=True)
     assert r.returncode != 0
     assert "no " in (r.stdout + r.stderr).lower() or "degenerate" in (r.stdout + r.stderr).lower()
+
+
+def test_memory_safe_slice_batch_forces_one_for_trainable_backbone():
+    run_ablations = _load_run_ablations_module()
+    # PEFT / full make the backbone trainable → full-volume activations OOM at
+    # slice_batch_size=2 on a 24GB A10; force 1.
+    for method in ("lora", "adapter", "full"):
+        cfg = {"finetune": {"method": method}, "model": {"slice_batch_size": 2}}
+        run_ablations._memory_safe_slice_batch(cfg)
+        assert cfg["model"]["slice_batch_size"] == 1, method
+    # Frozen backbone keeps whatever was set (no backbone grad to store).
+    cfg = {"finetune": {"method": "frozen"}, "model": {"slice_batch_size": 2}}
+    run_ablations._memory_safe_slice_batch(cfg)
+    assert cfg["model"]["slice_batch_size"] == 2
+    # Already-1 stays 1.
+    cfg = {"finetune": {"method": "lora"}, "model": {"slice_batch_size": 1}}
+    run_ablations._memory_safe_slice_batch(cfg)
+    assert cfg["model"]["slice_batch_size"] == 1
