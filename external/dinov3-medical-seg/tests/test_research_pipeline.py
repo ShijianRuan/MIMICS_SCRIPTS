@@ -803,3 +803,17 @@ def test_select_regime_picks_max_dice_and_flags_degenerate(tmp_path):
     assert payload["selected_by_task"]["liver"]["degenerate"] is True
     assert "liver" in payload["degenerate_tasks"]
     assert out.is_file()
+
+
+def test_phase_job_specs_regime_covers_task_cell_grid():
+    import yaml
+    modal_study = _load_modal_study_module()
+    plan = yaml.safe_load((PROJECT_ROOT / "config/research/multi_organ_study.yaml").read_text())
+    specs = modal_study._phase_job_specs(plan, "regime")
+    from src.research.regime import REGIME_CELL_IDS
+    tasks = {c["task"] for c in plan["candidates"]}
+    assert len(specs) == len(tasks) * len(REGIME_CELL_IDS)
+    assert all(s["phase"] == "regime" for s in specs)
+    assert {s["task"] for s in specs} == tasks
+    assert {s["cell_id"] for s in specs} == set(REGIME_CELL_IDS)
+    assert all(s["fold"] == plan["study"]["screening_fold"] for s in specs)
