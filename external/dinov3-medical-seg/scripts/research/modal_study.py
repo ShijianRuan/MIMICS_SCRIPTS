@@ -619,7 +619,14 @@ if modal is not None:
             plan = yaml.safe_load(
                 (PROJECT_ROOT / "config/research/multi_organ_study.yaml").read_text(encoding="utf-8")
             )
-            specs = _phase_job_specs(plan, "screen")
+            # Drop candidates whose task collapsed in Tier-0 (reserved, not blocked).
+            regime = read_selected_regime.remote(result_subdir)
+            degenerate = set(regime.get("degenerate_tasks", []))
+            task_by_candidate = {c["id"]: c["task"] for c in plan["candidates"]}
+            specs = [s for s in _phase_job_specs(plan, "screen")
+                     if task_by_candidate.get(s["candidate_id"]) not in degenerate]
+            if degenerate:
+                print("Excluding degenerate task(s) from screen (reserved): {}".format(sorted(degenerate)))
             if max_runs:
                 specs = specs[:max_runs]
             print("Dispatching {} screen job(s) at concurrency {}".format(len(specs), max_concurrency))
@@ -634,8 +641,16 @@ if modal is not None:
                 raise ValueError("confirm requires selection_subpath pointing at selected_candidates.json")
             # The selection file lives on the results Volume; read it remotely.
             selected_ids = read_selected_ids.remote(result_subdir, selection_subpath)
+            regime = read_selected_regime.remote(result_subdir)
+            degenerate = set(regime.get("degenerate_tasks", []))
+            task_by_candidate = {c["id"]: c["task"] for c in plan["candidates"]}
             reference_ids = [c["id"] for c in plan["candidates"] if c.get("is_reference", False)]
-            confirmation_ids = sorted(set(selected_ids) | set(reference_ids))
+            confirmation_ids = sorted(
+                cid for cid in (set(selected_ids) | set(reference_ids))
+                if task_by_candidate.get(cid) not in degenerate
+            )
+            if degenerate:
+                print("Excluding degenerate task(s) from confirm (reserved): {}".format(sorted(degenerate)))
             specs = _phase_job_specs(plan, "confirm", confirmation_ids)
             if max_runs:
                 specs = specs[:max_runs]
