@@ -1176,3 +1176,21 @@ def test_memory_safe_slice_batch_forces_one_for_trainable_backbone():
     cfg = {"finetune": {"method": "lora"}, "model": {"slice_batch_size": 1}}
     run_ablations._memory_safe_slice_batch(cfg)
     assert cfg["model"]["slice_batch_size"] == 1
+
+
+def test_spatial_augmentation_handles_multichannel_images():
+    """ct_windows / 2.5d produce C=3 images; spatial aug must not assume C=1."""
+    from src.data.augmentation import VolumeAugmentation
+    aug = VolumeAugmentation({"enabled": True, "spatial": {"rotation_deg": 7.0,
+                              "scale_range": [0.95, 1.05], "translation_px": 4}}, seed=0)
+    D, H, W = 5, 16, 16
+    for C in (1, 3):
+        item = {
+            "image": torch.randn(C, D, H, W),
+            "label": torch.zeros(D, H, W, dtype=torch.long),
+            "case_id": "c", "image_path": "i", "label_path": "l",
+            "spacing_zyx": torch.ones(3),
+        }
+        out = aug(item)
+        assert out["image"].shape == (C, D, H, W), "C={} broke".format(C)
+        assert out["label"].shape == (D, H, W)
