@@ -22,6 +22,30 @@ class TrainingCancelled(Exception):
     """Raised when an external cancellation request is detected."""
 
 
+def is_better_checkpoint(val_dsc, best_dsc, *, train_loss, best_train_loss,
+                         min_delta, epoch, should_validate) -> bool:
+    """Decide whether the current epoch should become the saved best checkpoint.
+
+    Validation Dice is the primary signal. But for needle-like targets (e.g.
+    adrenal) whole-volume validation Dice stays exactly 0 for many epochs while
+    training loss keeps descending; a pure val-Dice rule then freezes the best
+    checkpoint at epoch 1 and the fine model is evaluated essentially untrained.
+    As a tie-breaker, when validation Dice does not improve, a strictly lower
+    training loss makes this the better checkpoint. A positive val-Dice
+    regression is never overridden by a train-loss drop.
+    """
+    if epoch == 1:
+        return True
+    if not should_validate:
+        return False
+    if val_dsc > best_dsc + min_delta:
+        return True
+    if val_dsc < best_dsc - min_delta:
+        return False
+    # Validation Dice is tied (commonly 0 early on): prefer lower training loss.
+    return train_loss < best_train_loss
+
+
 class Trainer3D:
     """Training loop for 3D medical image segmentation."""
 
@@ -58,6 +82,11 @@ class Trainer3D:
         self.device = get_device()
         self.dtype = get_dtype(self.device) if cfg.get("mixed_precision", True) else torch.float32
         self.epochs = cfg.get("epochs", 200)
+        self.validation_interval = max(1, int(cfg.get("validation_interval", 1)))
+        early_cfg = cfg.get("early_stopping", {}) or {}
+        self.early_stopping_patience = int(early_cfg.get("patience", 0) or 0)
+        self.early_stopping_min_epochs = int(early_cfg.get("min_epochs", 0) or 0)
+        self.early_stopping_min_delta = float(early_cfg.get("min_delta", 0.0) or 0.0)
         self.grad_accumulation = cfg.get("grad_accumulation", 1)
         self.sub_volume_cfg = cfg.get("sub_volume", {})
         self.use_sub_volume = self.sub_volume_cfg.get("enabled", False)
@@ -73,7 +102,8 @@ class Trainer3D:
 
         # Experiment dir
         exp_name = config.get("exp_name", f"exp_{int(time.time())}")
-        self.exp_dir = os.path.join("experiments", exp_name)
+        experiment_root = config.get("training", {}).get("experiment_root", "experiments")
+        self.exp_dir = os.path.join(str(experiment_root), exp_name)
         self.ckpt_dir = os.path.join(self.exp_dir, "checkpoints")
         self.log_dir = os.path.join(self.exp_dir, "logs")
         os.makedirs(self.ckpt_dir, exist_ok=True)
@@ -248,23 +278,31 @@ class Trainer3D:
         warmup_epochs = min(cfg.get("warmup_epochs", 5), max(0, self.epochs // 2))
         warmup = warmup_epochs * max(1, len(self.train_loader)) // max(1, self.grad_accumulation)
 
-        if cfg.get("scheduler") == "cosine" and total_steps > warmup:
-            # LambdaLR: linear warmup → cosine decay
-            decay_steps = total_steps - warmup
+        scheduler = cfg.get("scheduler")
+        if scheduler in ("cosine", "constant_warmup") and warmup > 0:
+            # LambdaLR: linear warmup, followed by cosine decay or a constant LR.
+            decay_steps = max(1, total_steps - warmup)
             base_lr = self.optimizer.param_groups[0]["lr"]
 
             def lr_lambda(step):
                 if step < warmup:
                     return (step + 1) / max(1, warmup)
-                progress = (step - warmup) / max(1, decay_steps)
+                if scheduler == "constant_warmup":
+                    return 1.0
+                progress = (step - warmup) / decay_steps
                 return 0.5 * (1.0 + __import__("math").cos(__import__("math").pi * progress))
 
             return torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
+        if scheduler == "cosine":
+            return torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=total_steps)
         return None
 
     def train(self):
         """Full training loop."""
         best_dsc = 0.0
+        best_train_loss = float("inf")
+        epochs_without_improvement = 0
+        early_stopped = False
         global_step = 0
         current_epoch = 0
         self._write_training_status(
@@ -292,7 +330,10 @@ class Trainer3D:
 
                 # Validate
                 val_metrics = {}
-                if self.val_loader is not None:
+                should_validate = self.val_loader is not None and (
+                    epoch == 1 or epoch == self.epochs or epoch % self.validation_interval == 0
+                )
+                if should_validate:
                     self._write_training_status(
                         "training",
                         epoch=epoch,
@@ -314,9 +355,22 @@ class Trainer3D:
 
                 # Save
                 val_dsc = val_metrics.get("mean_dsc", train_metrics.get("mean_dsc", 0.0))
-                is_best = val_dsc > best_dsc
+                train_loss = float(train_metrics.get("loss", float("inf")))
+                # Validation Dice is primary; a lower training loss breaks ties
+                # when val Dice is stuck at 0 (needle target), so the best
+                # checkpoint tracks real learning instead of freezing at epoch 1.
+                is_best = is_better_checkpoint(
+                    val_dsc, best_dsc,
+                    train_loss=train_loss, best_train_loss=best_train_loss,
+                    min_delta=self.early_stopping_min_delta,
+                    epoch=epoch, should_validate=should_validate,
+                )
                 if is_best:
-                    best_dsc = val_dsc
+                    best_dsc = max(best_dsc, val_dsc)
+                    best_train_loss = min(best_train_loss, train_loss)
+                    epochs_without_improvement = 0
+                elif should_validate:
+                    epochs_without_improvement += 1
 
                 metrics = {**train_metrics, **val_metrics}
                 lr = self.optimizer.param_groups[0]["lr"]
@@ -348,14 +402,37 @@ class Trainer3D:
                     phase="epoch_complete",
                     latest_epoch_line=latest_epoch_line,
                 )
+                if (
+                    should_validate
+                    and self.early_stopping_patience > 0
+                    and epoch >= self.early_stopping_min_epochs
+                    and epochs_without_improvement >= self.early_stopping_patience
+                ):
+                    message = (
+                        "Early stopping at epoch {}/{} after {} epochs without validation Dice improvement.".format(
+                            epoch, self.epochs, epochs_without_improvement
+                        )
+                    )
+                    print(message, flush=True)
+                    self._write_training_status(
+                        "completed",
+                        epoch=epoch,
+                        epochs=self.epochs,
+                        best_dsc=best_dsc,
+                        early_stopped=True,
+                        latest_epoch_line=message,
+                    )
+                    early_stopped = True
+                    break
 
             self._write_training_status(
                 "completed",
-                epoch=self.epochs,
+                epoch=current_epoch,
                 epochs=self.epochs,
                 best_dsc=best_dsc,
+                early_stopped=early_stopped,
             )
-            self._write_metrics_history("completed", best_dsc=best_dsc)
+            self._write_metrics_history("completed", best_dsc=best_dsc, early_stopped=early_stopped)
             print(f"\nTraining complete. Best DSC: {best_dsc:.4f}")
         except TrainingCancelled:
             self._write_training_status(
@@ -383,12 +460,15 @@ class Trainer3D:
                 raise TrainingCancelled()
             images = batch["image"].to(self.device, dtype=torch.float32)
             labels = batch["label"].to(self.device)
+            spacing_zyx = batch.get("spacing_zyx")
+            if spacing_zyx is not None:
+                spacing_zyx = spacing_zyx.to(self.device, dtype=torch.float32)
 
             # Sub-volume training
             if self.use_sub_volume:
-                loss_dict = self._train_step_sub_volume(images, labels)
+                loss_dict = self._train_step_sub_volume(images, labels, spacing_zyx)
             else:
-                loss_dict = self._train_step(images, labels)
+                loss_dict = self._train_step(images, labels, spacing_zyx)
 
             loss = loss_dict["loss"] / self.grad_accumulation
             loss.backward()
@@ -427,28 +507,43 @@ class Trainer3D:
                 force=current == len(self.train_loader),
             )
 
+        # Do not silently discard gradients when the number of cases is not a
+        # multiple of grad_accumulation (common in five-shot experiments).
+        if len(self.train_loader) % self.grad_accumulation != 0:
+            remainder = len(self.train_loader) % self.grad_accumulation
+            # Losses were divided by grad_accumulation above. Restore the
+            # correct effective average for this shorter final accumulation.
+            correction = float(self.grad_accumulation) / float(remainder)
+            for parameter in self.model.parameters():
+                if parameter.grad is not None:
+                    parameter.grad.mul_(correction)
+            self.optimizer.step()
+            self.optimizer.zero_grad()
+            if self.scheduler is not None:
+                self.scheduler.step()
+
         n = len(self.train_loader)
         return {"loss": total_loss / n, "dice_loss": total_dice / n, "ce_loss": total_ce / n}
 
-    def _train_step(self, images: torch.Tensor, labels: torch.Tensor) -> Dict:
+    def _train_step(self, images: torch.Tensor, labels: torch.Tensor, spacing_zyx=None) -> Dict:
         with torch.autocast(
             device_type=self.device.type if self.device.type != "mps" else "cpu",
             dtype=self.dtype,
             enabled=self.dtype != torch.float32,
         ):
-            pred = self.model(images)
+            pred = self.model(images, spacing_zyx=spacing_zyx)
             return self.criterion(pred, labels)
 
-    def _train_step_sub_volume(self, images: torch.Tensor, labels: torch.Tensor) -> Dict:
+    def _train_step_sub_volume(self, images: torch.Tensor, labels: torch.Tensor, spacing_zyx=None) -> Dict:
         """Sub-volume training: split volume, encode/decode per sub-volume, compute global loss."""
         if self.device.type == "mps":
-            return self._train_step(images, labels)
+            return self._train_step(images, labels, spacing_zyx)
 
         d_sub = self.sub_volume_cfg.get("size", [32, 256, 256])[0]
         B, C, D, H, W = images.shape
 
         if D <= d_sub:
-            return self._train_step(images, labels)
+            return self._train_step(images, labels, spacing_zyx)
 
         n_parts = (D + d_sub - 1) // d_sub
         all_preds = []
@@ -464,7 +559,7 @@ class Trainer3D:
                 dtype=self.dtype,
                 enabled=self.dtype != torch.float32,
             ):
-                sub_pred = self.model(sub_img)
+                sub_pred = self.model(sub_img, spacing_zyx=spacing_zyx)
             all_preds.append(sub_pred)
 
         # Concatenate predictions along depth
@@ -482,8 +577,11 @@ class Trainer3D:
                     raise TrainingCancelled()
                 images = batch["image"].to(self.device, dtype=torch.float32)
                 labels = batch["label"].to(self.device)
+                spacing_zyx = batch.get("spacing_zyx")
+                if spacing_zyx is not None:
+                    spacing_zyx = spacing_zyx.to(self.device, dtype=torch.float32)
 
-                pred = self.model(images)
+                pred = self.model(images, spacing_zyx=spacing_zyx)
                 metrics = dice_score(
                     pred, labels,
                     num_classes=self.config["model"]["num_classes"],

@@ -7,6 +7,8 @@ in child Python/Mimics background processes.
 """
 
 import argparse
+import atexit
+import hashlib
 import json
 import os
 import shutil
@@ -23,6 +25,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from resource_locks import FileResourceLock, ResourceLockCancelled, ResourceLockTimeout, release_lock
+from tools.fewshot_strategies import compile_strategy, normalize_strategy_options, strategy_ids
 
 DEFAULT_WORKSPACE = "fewshot_models"
 LOG_ROTATE_BYTES = 5 * 1024 * 1024
@@ -281,6 +284,115 @@ def load_repo_config():
     return {}
 
 
+TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled"}
+ACTIVE_JOB_STATUSES = {
+    "launching", "preparing", "exporting_labels", "waiting_for_background_mimics",
+    "waiting_for_gpu", "training", "running", "cancelling",
+}
+
+
+def _remove_tree_quietly(path):
+    try:
+        path = Path(path)
+        if path.is_dir():
+            rmtree_with_retry(path)
+        elif path.exists():
+            path.unlink()
+        return True
+    except Exception:
+        return False
+
+
+def _register_transient_cleanup(path):
+    path = str(Path(path))
+    atexit.register(lambda: _remove_tree_quietly(path))
+
+
+def cleanup_workspace_artifacts(workspace, dinov3_root=None, config=None):
+    """Bound disposable few-shot history without deleting registered models."""
+    workspace = Path(workspace)
+    config = load_repo_config() if config is None else (config or {})
+    now = time.time()
+    job_days = max(1, int(config.get("terminal_job_retention_days", 30)))
+    max_jobs = max(1, int(config.get("max_terminal_job_records", 100)))
+    failed_days = max(1, int(config.get("failed_run_retention_days", 7)))
+    run_log_days = max(1, int(config.get("completed_run_log_retention_days", 30)))
+    setup_days = max(1, int(config.get("setup_context_retention_days", 7)))
+    report = {"job_records": 0, "datasets": 0, "failed_runs": 0, "run_logs": 0, "contexts": 0, "experiments": 0}
+
+    jobs_dir = workspace / "jobs"
+    terminal = []
+    statuses = {}
+    if jobs_dir.is_dir():
+        for path in jobs_dir.glob("*.json"):
+            payload = read_json(path, {}) or {}
+            status = str(payload.get("status", "")).lower()
+            job_id = str(payload.get("job_id") or path.stem)
+            pid = payload.get("pid") or payload.get("controller_pid") or payload.get("launcher_pid")
+            try:
+                pid = int(pid or 0)
+            except Exception:
+                pid = 0
+            if status in ACTIVE_JOB_STATUSES and pid and not process_exists(pid):
+                status = "failed"
+                payload.update({
+                    "status": "failed",
+                    "error": "background controller exited before recording a terminal state",
+                    "orphaned": True,
+                    "updated_at_epoch": min(
+                        float(payload.get("updated_at_epoch") or payload.get("created_at_epoch") or path.stat().st_mtime),
+                        path.stat().st_mtime,
+                    ),
+                })
+                try:
+                    write_json_atomic(path, payload)
+                except Exception:
+                    pass
+            if status in TERMINAL_JOB_STATUSES:
+                updated = float(payload.get("updated_at_epoch") or payload.get("created_at_epoch") or path.stat().st_mtime)
+                terminal.append((updated, path, payload))
+                statuses[job_id] = payload
+            elif path.name.endswith("_context.json") and now - path.stat().st_mtime > setup_days * 86400:
+                if _remove_tree_quietly(path):
+                    report["contexts"] += 1
+        terminal.sort(key=lambda item: item[0], reverse=True)
+        for index, (updated, path, _payload) in enumerate(terminal):
+            if index < max_jobs and now - updated <= job_days * 86400:
+                continue
+            if _remove_tree_quietly(path):
+                report["job_records"] += 1
+
+    for job_id, payload in statuses.items():
+        status = str(payload.get("status", "")).lower()
+        updated = float(payload.get("updated_at_epoch") or payload.get("created_at_epoch") or now)
+        dataset_path = payload.get("dataset_dir")
+        retained = bool((payload.get("model") or {}).get("dataset_retained", False))
+        if dataset_path and not retained and _remove_tree_quietly(dataset_path):
+            report["datasets"] += 1
+        if str(payload.get("kind", "")) == "infer" and now - updated > run_log_days * 86400:
+            for key in ("log", "cancel_path"):
+                path = payload.get(key)
+                if path and _remove_tree_quietly(path):
+                    report["run_logs"] += 1
+        run_dir = workspace / "runs" / safe_slug(payload.get("organ", "")) / job_id
+        if status in ("failed", "cancelled") and now - updated > failed_days * 86400:
+            if _remove_tree_quietly(run_dir):
+                report["failed_runs"] += 1
+        elif status == "completed" and now - updated > run_log_days * 86400:
+            for name in ("train.log", "train.log.1", "train.log.2", "train.log.3"):
+                path = run_dir / name
+                if path.is_file() and _remove_tree_quietly(path):
+                    report["run_logs"] += 1
+
+        if dinov3_root and status in TERMINAL_JOB_STATUSES and not bool(config.get("keep_training_experiment_artifacts", False)):
+            experiment = Path(dinov3_root) / "experiments" / "mimics_fewshot_{}_{}".format(
+                safe_slug(payload.get("organ", "")), job_id
+            )
+            if _remove_tree_quietly(experiment):
+                report["experiments"] += 1
+    return report
+
+
 def load_mimics_io_config():
     merged = {}
     for path in (ROOT / "mimics_io_config.json", ROOT / "nninteractive_config.json"):
@@ -434,7 +546,7 @@ def python_from_args(args, dinov3_root):
 
 def base_config_from_args(args, dinov3_root):
     repo_cfg = load_repo_config()
-    value = args.base_config or repo_cfg.get("base_config") or "config/mimics_lora_segformer3d.yaml"
+    value = args.base_config or repo_cfg.get("base_config") or "config/research/ct_fewshot_fast.yaml"
     path = resolve_path(value, dinov3_root)
     if not path.is_file():
         raise RuntimeError("base config was not found: {}".format(path))
@@ -530,12 +642,39 @@ def gpu_lock_enabled():
 def _lock_wait_payload(resource, current):
     if not isinstance(current, dict):
         current = {}
-    return {
+    payload = {
         "resource": resource,
         "owner": current.get("owner", "unknown"),
         "pid": current.get("pid", ""),
         "created_at_epoch": current.get("created_at_epoch"),
     }
+    owner = str(payload["owner"] or "").lower()
+    if resource == "background_mimics" and "import" in owner:
+        payload["user_action"] = (
+            "Import and label export share one background Mimics license. "
+            "Wait for import to finish, or use 01 Data > 04 Stop Import Queue if training is more urgent."
+        )
+    elif resource == "gpu":
+        payload["user_action"] = (
+            "The job will start automatically when the active AI operation releases the GPU. "
+            "Use 02 AI > DINOv3 > 05 Stop AI Task only when the running task should be cancelled."
+        )
+    return payload
+
+
+def _nninteractive_operation_is_active(state):
+    try:
+        operation_pid = int(state.get("active_operation_pid", 0) or 0)
+    except Exception:
+        operation_pid = 0
+    if not state.get("active_operation") or not operation_pid or not process_exists(operation_pid):
+        return False
+    try:
+        started = float(state.get("active_operation_started_at_epoch", time.time()) or time.time())
+        timeout = max(60.0, float(state.get("active_operation_timeout_seconds", 3600) or 3600))
+    except Exception:
+        return True
+    return time.time() - started <= timeout
 
 
 def cleanup_idle_nninteractive_server_lock(current):
@@ -556,6 +695,8 @@ def cleanup_idle_nninteractive_server_lock(current):
     except Exception:
         pid = 0
     if not pid:
+        return False
+    if _nninteractive_operation_is_active(state):
         return False
     try:
         watchdog_pid = int(state.get("watchdog_pid", 0) or 0)
@@ -605,6 +746,8 @@ def request_nninteractive_server_release_on_contention(current):
         pid = 0
     if not pid or not process_exists(pid):
         return False
+    if _nninteractive_operation_is_active(state):
+        return False
     try:
         watchdog_pid = int(state.get("watchdog_pid", 0) or 0)
     except Exception:
@@ -630,8 +773,23 @@ def request_nninteractive_server_release_on_contention(current):
 
     state["contention_release_requested_epoch"] = now
     state["contention_release_requested_by"] = "fewshot_pipeline"
-    state["last_activity_epoch"] = 0.0
-    write_json_atomic(state_path, state)
+    control_dir = str(state.get("client_control_dir") or "").strip()
+    try:
+        client_pid = int(state.get("client_pid", 0) or 0)
+    except Exception:
+        client_pid = 0
+    if control_dir and client_pid and process_exists(client_pid):
+        write_json_atomic(state_path, state)
+        write_json_atomic(Path(control_dir) / "close.json", {
+            "reason": "gpu_contention",
+            "requested_at_epoch": now,
+            "requested_by": "fewshot_pipeline",
+        })
+    else:
+        # Legacy one-shot bridges have no worker control channel. Expire the
+        # server directly; the watchdog owns termination and lock release.
+        state["last_activity_epoch"] = 0.0
+        write_json_atomic(state_path, state)
     return True
 
 
@@ -973,6 +1131,31 @@ def _materialize_image_aligned_to_label(image_src, label_src, image_dst):
     return "resampled_to_label_grid", False
 
 
+def validate_fresh_export_geometry(samples):
+    """Fail closed when a fresh Mimics export is not on its source-image grid."""
+    import nibabel as nib
+    from mimics_bridge import _affine_close
+
+    checked = []
+    for sample in samples:
+        if sample.get("label_source") != "fresh_export":
+            continue
+        image = nib.load(str(sample["image"]))
+        label = nib.load(str(sample["label"]))
+        image_shape = tuple(int(value) for value in image.shape[:3])
+        label_shape = tuple(int(value) for value in label.shape[:3])
+        if image_shape != label_shape or not _affine_close(image.affine, label.affine):
+            raise RuntimeError(
+                "fresh Mimics label export is not aligned to the source image for case {0}; "
+                "image shape {1}, label shape {2}. Training was stopped instead of silently "
+                "resampling the image onto a different grid.".format(
+                    sample.get("case_id", "?"), image_shape, label_shape,
+                )
+            )
+        checked.append(sample.get("case_id"))
+    return checked
+
+
 def _materialize_split(samples, image_dir, label_dir, split_name):
     image_dir.mkdir(parents=True, exist_ok=True)
     label_dir.mkdir(parents=True, exist_ok=True)
@@ -1162,6 +1345,7 @@ def write_training_config(
     metrics_history_path=None,
     validation_enabled=True,
     class_weights=None,
+    strategy_overrides=None,
 ):
     path = Path(path)
     if int(args.batch_size) != 1:
@@ -1183,66 +1367,55 @@ def write_training_config(
     if finetune_method in ("decoder_only", "decode_only", "decoder-only", "decode-only"):
         finetune_method = "frozen"
     decoder_type = str(args.decoder or "segformer3d")
-    lines = [
-        "_base_:",
-        "  - " + yaml_scalar(str(base_config)),
-        "",
-        "exp_name: " + yaml_scalar(exp_name),
-        "",
-        "model:",
-        "  model_path: " + yaml_scalar(model_path),
-        "  num_classes: 2",
-        "  input_normalization: " + yaml_scalar("imagenet"),
-        "  image_mean: " + yaml_scalar([0.485, 0.456, 0.406]),
-        "  image_std: " + yaml_scalar([0.229, 0.224, 0.225]),
-        "",
-        "finetune:",
-        "  method: " + yaml_scalar(finetune_method),
-        "  lora_rank: " + yaml_scalar(int(args.lora_rank)),
-        "  lora_alpha: " + yaml_scalar(int(args.lora_alpha)),
-        "  adapter_bottleneck: " + yaml_scalar(int(args.adapter_bottleneck)),
-        "",
-        "decoder:",
-        "  type: " + yaml_scalar(decoder_type),
-        "",
-        "data:",
-        "  name: " + yaml_scalar("mimics_fewshot_" + safe_slug(args.organ)),
-        "  data_root: " + yaml_scalar(str(dataset_dir)),
-        "  img_size: " + yaml_scalar(img_size),
-        "  k_shot: -1",
-        "  fold: 0",
-        "  modality: " + yaml_scalar(args.modality),
-        "",
-        "training:",
-        "  epochs: " + yaml_scalar(int(args.epochs)),
-        "  batch_size: " + yaml_scalar(int(args.batch_size)),
-        "  grad_accumulation: " + yaml_scalar(int(args.grad_accumulation)),
-        "  mixed_precision: " + yaml_scalar(bool(args.mixed_precision)),
-        "  lr: " + yaml_scalar(float(args.lr)),
-        "  weight_decay: " + yaml_scalar(float(args.weight_decay)),
-        "  keep_last_checkpoints: " + yaml_scalar(int(args.keep_last_checkpoints)),
-        "  validation_enabled: " + yaml_scalar(bool(validation_enabled)),
-        "  sub_volume:",
-        "    enabled: " + yaml_scalar(bool(args.sub_volume)),
-        "    size: " + yaml_scalar([int(part.strip()) for part in str(args.sub_volume_size).split(",")]),
-        "",
-        "loss:",
-        "  type: " + yaml_scalar("dice_ce"),
-        "  dice_weight: " + yaml_scalar(0.5),
-        "  ce_weight: " + yaml_scalar(0.5),
-        "  class_weights: " + yaml_scalar(class_weights if class_weights else [1.0, 1.0]),
-        "",
-    ]
+    config = {
+        "_base_": [str(base_config)],
+        "exp_name": exp_name,
+        "model": {
+            "model_path": model_path, "num_classes": 2, "input_normalization": "imagenet",
+            "image_mean": [0.485, 0.456, 0.406], "image_std": [0.229, 0.224, 0.225],
+        },
+        "finetune": {
+            "method": finetune_method, "lora_rank": int(args.lora_rank),
+            "lora_alpha": int(args.lora_alpha), "adapter_bottleneck": int(args.adapter_bottleneck),
+        },
+        "decoder": {"type": decoder_type},
+        "data": {
+            "name": "mimics_fewshot_" + safe_slug(args.organ), "data_root": str(dataset_dir),
+            "img_size": img_size, "k_shot": -1, "fold": 0, "modality": args.modality,
+        },
+        "training": {
+            "epochs": int(args.epochs), "batch_size": int(args.batch_size),
+            "grad_accumulation": int(args.grad_accumulation), "mixed_precision": bool(args.mixed_precision),
+            "lr": float(args.lr), "weight_decay": float(args.weight_decay),
+            "scheduler": None if getattr(args, "lr_scheduler", "cosine") == "constant" else getattr(args, "lr_scheduler", "cosine"),
+            "warmup_epochs": int(getattr(args, "warmup_epochs", 3)),
+            "keep_last_checkpoints": int(args.keep_last_checkpoints),
+            "validation_enabled": bool(validation_enabled),
+            "sub_volume": {"enabled": bool(args.sub_volume),
+                           "size": [int(part.strip()) for part in str(args.sub_volume_size).split(",")]},
+        },
+        "loss": {"type": "dice_focal", "dice_weight": 0.7, "focal_weight": 0.3,
+                 "focal_alpha": 0.75, "focal_gamma": 2.0,
+                 "class_weights": class_weights if class_weights else [1.0, 1.0]},
+    }
+
+    def merge(target, update):
+        for key, value in (update or {}).items():
+            if isinstance(value, dict) and isinstance(target.get(key), dict):
+                merge(target[key], value)
+            else:
+                target[key] = value
+        return target
+
+    merge(config, strategy_overrides or {})
     if status_path or cancel_path or metrics_history_path:
-        lines.extend([
-            "runtime:",
-            "  status_path: " + yaml_scalar(str(status_path or "")),
-            "  cancel_path: " + yaml_scalar(str(cancel_path or "")),
-            "  metrics_history_path: " + yaml_scalar(str(metrics_history_path or "")),
-            "  status_interval_seconds: 2.0",
-            "",
-        ])
-    write_text_atomic(path, "\n".join(lines) + "\n")
+        config["runtime"] = {
+            "status_path": str(status_path or ""), "cancel_path": str(cancel_path or ""),
+            "metrics_history_path": str(metrics_history_path or ""), "status_interval_seconds": 2.0,
+        }
+    import yaml
+    write_text_atomic(path, yaml.safe_dump(config, sort_keys=False, allow_unicode=False))
+    return config
 
 
 def launch_mimics_export(
@@ -1257,6 +1430,7 @@ def launch_mimics_export(
     label_staging_dir=None,
     export_space="source_image",
     mask_names=None,
+    mcs_output_dir=None,
 ):
     mimics_exe = find_mimics_exe(mimics_exe)
     if not mimics_exe:
@@ -1264,7 +1438,7 @@ def launch_mimics_export(
         return {"launched": False, "reason": "mimics_not_found"}
     # The .mcs files live in the configured Mimics output directory, while
     # few-shot control artifacts stay in the fewshot workspace.
-    output_dir = resolve_mimics_output_dir(ts_root)
+    output_dir = Path(mcs_output_dir).expanduser().resolve() if mcs_output_dir else resolve_mimics_output_dir(ts_root)
     axes, flips = resolve_mimics_buffer_mapping()
     output_dir.mkdir(parents=True, exist_ok=True)
     export_job_id = safe_slug(Path(status_path).stem if status_path else "export_{}_{}".format(
@@ -1486,6 +1660,16 @@ def training_progress_line(progress):
 
 
 def cmd_train(args):
+    strategy_id = str(getattr(args, "strategy", "adaptive") or "adaptive")
+    try:
+        strategy_options = json.loads(str(getattr(args, "strategy_options_json", "") or "{}"))
+    except Exception as exc:
+        raise RuntimeError("invalid strategy options JSON: {}".format(exc))
+    if not isinstance(strategy_options, dict):
+        raise RuntimeError("strategy options JSON must contain an object")
+    # Validate all combinations that do not depend on the materialized-data
+    # fingerprint before launching background Mimics or allocating a GPU.
+    normalize_strategy_options(strategy_options, preset=strategy_id)
     ts_root = Path(args.ts_root).resolve()
     dinov3_root = dinov3_root_from_args(args)
     python_exe = python_from_args(args, dinov3_root)
@@ -1505,6 +1689,10 @@ def cmd_train(args):
     exp_name = "mimics_fewshot_{}_{}".format(organ_slug, run_id)
 
     workspace.mkdir(parents=True, exist_ok=True)
+    repo_config = load_repo_config()
+    maintenance = cleanup_workspace_artifacts(workspace, dinov3_root, repo_config)
+    if any(maintenance.values()):
+        append_log(workspace, "Automatic storage maintenance removed disposable artifacts: {}.".format(maintenance))
     run_dir.mkdir(parents=True, exist_ok=True)
     write_json_atomic(status_path, {
         "schema_version": "mimics_fewshot_job.v1",
@@ -1529,6 +1717,7 @@ def cmd_train(args):
     if args.export_labels:
         update_status(status_path, {"status": "exporting_labels"})
         fresh_label_root = run_dir / "fresh_labels"
+        _register_transient_cleanup(fresh_label_root)
         try:
             export_result = launch_mimics_export(
                 ts_root,
@@ -1540,8 +1729,9 @@ def cmd_train(args):
                 cancel_path=cancel_path,
                 lock_timeout_seconds=args.background_mimics_lock_timeout_seconds,
                 label_staging_dir=fresh_label_root,
-                export_space="mimics_grid",
+                export_space="source_image",
                 mask_names=[args.organ],
+                mcs_output_dir=args.mcs_output_dir,
             )
         except ResourceLockCancelled:
             update_status(status_path, {"status": "cancelled", "error": "cancelled while waiting for background Mimics"})
@@ -1618,6 +1808,9 @@ def cmd_train(args):
         min_train_samples=args.min_samples,
         min_val_samples=args.min_val_samples,
     )
+    fresh_geometry_checked = validate_fresh_export_geometry(train_samples + val_samples)
+    if not args.keep_materialized_dataset:
+        _register_transient_cleanup(dataset_dir)
     materialized_train, materialized_val = materialize_dataset(train_samples, dataset_dir, val_samples)
     dataset_validation = validate_materialized_dataset(materialized_train + materialized_val)
     if fresh_label_root:
@@ -1634,10 +1827,18 @@ def cmd_train(args):
             fresh_label_cleanup["error"] = str(exc)
             append_log(workspace, "Could not clean fresh label staging {}: {}".format(fresh_label_root, exc))
     validation_enabled = bool(materialized_val)
-    repo_config = load_repo_config()
     class_weight_cap = float(repo_config.get("default_class_weight_cap", 5.0))
     class_weights = compute_class_weights(materialized_train, max_weight=class_weight_cap)
     append_log(workspace, "Auto class weights for {}: {}".format(args.organ, class_weights))
+    if str(dinov3_root) not in sys.path:
+        sys.path.insert(0, str(dinov3_root))
+    from src.research.fingerprint import build_training_fingerprint, derive_policy
+    support_case_ids = [item["case_id"] for item in materialized_train]
+    training_fingerprint = build_training_fingerprint(dataset_dir, support_case_ids, args.organ)
+    derived_policy = derive_policy(training_fingerprint, gpu_memory_gb=12.0)
+    strategy_overrides = compile_strategy(
+        strategy_id, training_fingerprint, derived_policy, strategy_options,
+    )
     write_training_config(
         config_path,
         base_config,
@@ -1649,7 +1850,11 @@ def cmd_train(args):
         metrics_history_path=metrics_history,
         validation_enabled=validation_enabled,
         class_weights=class_weights,
+        strategy_overrides=strategy_overrides,
     )
+    from src.utils.config import load_config as load_dinov3_config
+    effective_config = load_dinov3_config(str(config_path))
+    config_sha256 = hashlib.sha256(config_path.read_bytes()).hexdigest()
     write_json_atomic(
         run_dir / "samples.json",
         {
@@ -1659,6 +1864,10 @@ def cmd_train(args):
             "skipped": skipped,
             "dataset_validation": dataset_validation,
             "fresh_label_cleanup": fresh_label_cleanup,
+            "fresh_source_geometry_checked_cases": fresh_geometry_checked,
+            "training_fingerprint": training_fingerprint,
+            "derived_policy": derived_policy,
+            "strategy": strategy_overrides.get("strategy", {}),
             "selection": {
                 "cases": sorted(cases) if cases else None,
                 "sample_mode": args.sample_mode,
@@ -1677,12 +1886,15 @@ def cmd_train(args):
         "validation_cases": [item["case_id"] for item in materialized_val],
         "dataset_dir": str(dataset_dir),
         "config_path": str(config_path),
+        "config_sha256": config_sha256,
+        "strategy": strategy_overrides.get("strategy", {}),
         "train_log": str(train_log),
         "training_status": str(train_status),
         "metrics_history": str(metrics_history),
         "cancel_path": str(cancel_path),
         "dataset_validation": dataset_validation,
         "fresh_label_cleanup": fresh_label_cleanup,
+        "fresh_source_geometry_checked_cases": fresh_geometry_checked,
     })
 
     cmd = [python_exe, str(dinov3_root / "scripts" / "train.py"), "--config", str(config_path)]
@@ -1789,6 +2001,8 @@ def cmd_train(args):
         return proc.returncode or 1
 
     exp_dir = dinov3_root / "experiments" / exp_name
+    if not bool(repo_config.get("keep_training_experiment_artifacts", False)):
+        _register_transient_cleanup(exp_dir)
     ckpt = latest_epoch_checkpoint(exp_dir / "checkpoints")
     if not ckpt:
         update_status(status_path, {"status": "failed", "error": "no checkpoint was produced"})
@@ -1801,15 +2015,21 @@ def cmd_train(args):
     shutil.copy2(str(config_path), str(model_dir / "config.yaml"))
     best_dsc_value = final_progress.get("best_dsc")
     manifest = {
-        "schema_version": "mimics_fewshot_model.v1",
+        "schema_version": "mimics_fewshot_model.v2",
         "model_id": run_id,
         "organ": args.organ,
         "organ_slug": organ_slug,
         "best_dsc": best_dsc_value,
         "checkpoint": str(registry_ckpt),
         "config": str(model_dir / "config.yaml"),
-        "source_checkpoint": str(ckpt),
+        "config_sha256": config_sha256,
+        "strategy": strategy_overrides.get("strategy", {}),
+        "effective_config": effective_config,
+        "spatial_convention": "canonical_ras_array_xyz__model_tensor_zyx",
+        "source_checkpoint": str(registry_ckpt),
+        "training_source_checkpoint": str(ckpt),
         "experiment_dir": str(exp_dir),
+        "experiment_artifacts_retained": bool(repo_config.get("keep_training_experiment_artifacts", False)),
         "sample_count": len(materialized_train) + len(materialized_val),
         "train_sample_count": len(materialized_train),
         "validation_sample_count": len(materialized_val),
@@ -1820,10 +2040,12 @@ def cmd_train(args):
         "dataset_retained": bool(args.keep_materialized_dataset),
         "dataset_validation": dataset_validation,
         "fresh_label_cleanup": fresh_label_cleanup,
+        "fresh_source_geometry_checked_cases": fresh_geometry_checked,
         "training_progress": final_progress,
         "metrics_history": str(metrics_history),
         "training_parameters": {
             "base_config": str(base_config),
+            "strategy": strategy_id,
             "finetune_method": str(args.finetune_method),
             "decoder": str(args.decoder),
             "model_scale": str(args.model_scale),
@@ -1925,6 +2147,16 @@ def validate_model_manifest(manifest, source=""):
             checked[key + "_size_bytes"] = None
         if size is not None and size <= 0:
             raise RuntimeError("model manifest points to an empty {}: {} ({})".format(key, path, source))
+    expected_config_sha256 = str(manifest.get("config_sha256") or "").strip().lower()
+    if expected_config_sha256:
+        actual_config_sha256 = hashlib.sha256(Path(manifest["config"]).read_bytes()).hexdigest()
+        checked["config_sha256_verified"] = actual_config_sha256 == expected_config_sha256
+        if actual_config_sha256 != expected_config_sha256:
+            raise RuntimeError(
+                "model configuration was changed after training; refusing inconsistent inference: {} ({})".format(
+                    manifest["config"], source,
+                )
+            )
     checkpoint_path = Path(manifest.get("checkpoint", ""))
     try:
         with open(str(checkpoint_path), "rb") as handle:
@@ -2035,17 +2267,6 @@ def validate_inference_source_geometry(
         result["actual_voxel_to_ras_matrix"] = np.asarray(img.affine, dtype=float).tolist()
         result["affine_max_abs_diff"] = float(np.max(np.abs(np.asarray(img.affine, dtype=float) - expected_affine_np)))
         if not _affine_close(img.affine, expected_affine_np):
-            # When source image paths match, allow inference to proceed even if
-            # metadata affine conventions differ (e.g. stale/open-project affine
-            # metadata or RAS/LPS convention drift). Prediction will still be
-            # mapped to active Mimics grid during apply.
-            if result.get("expected_image_path_matched"):
-                result["affine_check_skipped"] = True
-                result["affine_warning"] = (
-                    "source image path matches active project but affine differs "
-                    "(max abs diff {:.6g}); continuing".format(result["affine_max_abs_diff"])
-                )
-                return result
             raise RuntimeError(
                 "source image affine does not match the open Mimics project (max abs diff {:.6g}): {}".format(
                     result["affine_max_abs_diff"],
@@ -2058,6 +2279,13 @@ def validate_inference_source_geometry(
 def cmd_infer(args):
     ts_root = Path(args.ts_root).resolve()
     workspace = workspace_for(ts_root, args.workspace)
+    try:
+        maintenance_root = dinov3_root_from_args(args)
+    except Exception:
+        maintenance_root = None
+    maintenance = cleanup_workspace_artifacts(workspace, maintenance_root)
+    if any(maintenance.values()):
+        append_log(workspace, "Automatic storage maintenance removed disposable artifacts: {}.".format(maintenance))
     organ_slug = safe_slug(args.organ)
     job_id = args.job_id or "infer_{}_{}_{}".format(
         safe_slug(args.case_id),
@@ -2362,11 +2590,13 @@ def build_parser():
     train.add_argument("--dinov3-root")
     train.add_argument("--python")
     train.add_argument("--base-config")
+    train.add_argument("--strategy", choices=tuple(strategy_ids()), default="adaptive")
+    train.add_argument("--strategy-options-json", default="{}")
     train.add_argument("--cases")
     train.add_argument("--sample-mode", choices=("all", "latest"), default="all")
     train.add_argument("--min-samples", type=int, default=1)
     train.add_argument("--max-samples", type=int, default=0)
-    train.add_argument("--epochs", type=int, default=10)
+    train.add_argument("--epochs", type=int, default=20)
     train.add_argument("--batch-size", type=int, default=1)
     train.add_argument("--grad-accumulation", type=int, default=1)
     train.add_argument("--lr", type=float, default=1e-3)
@@ -2377,7 +2607,12 @@ def build_parser():
     train.add_argument("--val-cases")
     train.add_argument("--min-val-samples", type=int, default=1)
     train.add_argument("--finetune-method", choices=("frozen", "decoder_only", "decode_only", "lora", "adapter", "full"), default="lora")
-    train.add_argument("--decoder", choices=("linear3d", "mlp_probe", "segformer3d", "dpt3d"), default="segformer3d")
+    train.add_argument("--decoder", choices=(
+        "linear3d", "mlp_probe", "segformer3d", "token_pyramid3d", "dpt3d",
+        "conv2d", "conv2d_unet", "conv2d_deeplab", "conv2d_2_5d",
+    ), default="segformer3d")
+    train.add_argument("--lr-scheduler", choices=("constant", "constant_warmup", "cosine"), default="cosine")
+    train.add_argument("--warmup-epochs", type=int, default=3)
     train.add_argument("--model-scale", choices=("vitb16", "vitl16", "vith16plus"), default="vitb16")
     train.add_argument("--model-path")
     train.add_argument("--lora-rank", type=int, default=8)
@@ -2388,6 +2623,7 @@ def build_parser():
     train.add_argument("--sub-volume-size", default="32,256,256")
     train.add_argument("--export-labels", action="store_true")
     train.add_argument("--mimics-exe")
+    train.add_argument("--mcs-output-dir", help="Folder containing saved .mcs projects for this training run")
     train.add_argument("--export-timeout-seconds", type=float, default=1800)
     train.add_argument("--background-mimics-lock-timeout-seconds", type=float, default=1800)
     train.add_argument("--gpu-lock-timeout-seconds", type=float, default=86400)

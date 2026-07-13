@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Stop Mimics-Script background processes and services."""
+"""Stop only background processes and services owned by Mimics-Script."""
 
 from __future__ import print_function
 

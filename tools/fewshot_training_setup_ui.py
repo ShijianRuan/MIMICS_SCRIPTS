@@ -18,8 +18,18 @@ import time
 import traceback
 import uuid
 
+try:
+    from fewshot_strategies import DEFAULT_OPTIONS, STRATEGIES, normalize_strategy_options, strategy_defaults, strategy_ids, strategy_label, strategy_summary, suggested_strategy
+except ImportError:
+    from tools.fewshot_strategies import DEFAULT_OPTIONS, STRATEGIES, normalize_strategy_options, strategy_defaults, strategy_ids, strategy_label, strategy_summary, suggested_strategy
+
 
 TITLE = "DINOv3 Few-Shot Training"
+STRATEGY_DATA_KEYS = set(DEFAULT_OPTIONS.keys())
+DECODER_CHOICES = (
+    "segformer3d", "token_pyramid3d", "dpt3d", "linear3d", "mlp_probe",
+    "conv2d",
+)
 
 
 def read_json(path, default=None):
@@ -108,12 +118,15 @@ def default_training_options(config, profile_name=None):
     values = {}
     if default_profile and isinstance(profiles, dict):
         values.update(profiles.get(default_profile, {}) or {})
-    values.setdefault("base_config", config.get("base_config", "config/mimics_lora_segformer3d.yaml"))
-    values.setdefault("epochs", config.get("default_epochs", 10))
+    values.setdefault("base_config", config.get("base_config", "config/research/ct_fewshot_fast.yaml"))
+    values.setdefault("strategy", config.get("default_strategy", "adaptive"))
+    values.setdefault("epochs", config.get("default_epochs", 20))
     values["batch_size"] = 1
     values.setdefault("grad_accumulation", config.get("default_grad_accumulation", 1))
     values.setdefault("lr", config.get("default_lr", 0.001))
     values.setdefault("weight_decay", config.get("default_weight_decay", 0.01))
+    values.setdefault("lr_scheduler", config.get("default_lr_scheduler", "cosine"))
+    values.setdefault("warmup_epochs", config.get("default_warmup_epochs", 3))
     values.setdefault("img_size", config.get("default_img_size", "224,224"))
     values.setdefault("modality", config.get("default_modality", "ct"))
     values.setdefault("min_samples", config.get("default_min_samples", 1))
@@ -142,6 +155,15 @@ def default_training_options(config, profile_name=None):
     return values
 
 
+def training_options_for_organ(config, organ, profile_name=None):
+    """Resolve one coherent initial strategy instead of mixing it with a legacy profile."""
+    values = default_training_options(config, profile_name)
+    if not config.get("default_strategy"):
+        values["strategy"] = suggested_strategy(organ)
+    values.update(strategy_defaults(values.get("strategy")))
+    return values
+
+
 def _float(value, name):
     try:
         return float(value)
@@ -161,7 +183,9 @@ def _int(value, name, minimum=None):
 
 def validate_options(options):
     normalized = dict(options)
-    normalized["epochs"] = _int(normalized.get("epochs", 10), "Epochs", 1)
+    if str(normalized.get("strategy", "adaptive")) not in strategy_ids():
+        raise ValueError("Unknown DINOv3 training strategy.")
+    normalized["epochs"] = _int(normalized.get("epochs", 20), "Epochs", 1)
     normalized["batch_size"] = _int(normalized.get("batch_size", 1), "Batch size", 1)
     if normalized["batch_size"] != 1:
         raise ValueError(
@@ -178,11 +202,22 @@ def validate_options(options):
     normalized["keep_last_checkpoints"] = _int(normalized.get("keep_last_checkpoints", 2), "Keep last checkpoints", 0)
     normalized["lr"] = _float(normalized.get("lr", 0.001), "Learning rate")
     normalized["weight_decay"] = _float(normalized.get("weight_decay", 0.01), "Weight decay")
+    normalized["lr_scheduler"] = str(normalized.get("lr_scheduler", "cosine")).strip().lower()
+    if normalized["lr_scheduler"] not in ("constant", "constant_warmup", "cosine"):
+        raise ValueError("Learning-rate schedule must be constant, constant with warmup, or cosine.")
+    normalized["warmup_epochs"] = _int(normalized.get("warmup_epochs", 3), "Warmup epochs", 0)
+    if str(normalized.get("decoder", "segformer3d")) not in DECODER_CHOICES:
+        raise ValueError("Unsupported decoder: {0}".format(normalized.get("decoder")))
     normalized["val_fraction"] = _float(normalized.get("val_fraction", 0.2), "Validation fraction")
     normalized["mixed_precision"] = _bool(normalized.get("mixed_precision", False))
     normalized["sub_volume"] = _bool(normalized.get("sub_volume", False))
     normalized["keep_materialized_dataset"] = _bool(normalized.get("keep_materialized_dataset", False))
     normalized["export_labels_before_training"] = _bool(normalized.get("export_labels_before_training", True))
+    normalized["mcs_output_dir"] = os.path.abspath(os.path.expanduser(
+        str(normalized.get("mcs_output_dir", "") or "")
+    )) if str(normalized.get("mcs_output_dir", "") or "").strip() else ""
+    strategy_values = {key: normalized.get(key, value) for key, value in DEFAULT_OPTIONS.items()}
+    normalized.update(normalize_strategy_options(strategy_values, preset=str(normalized.get("strategy", "adaptive"))))
     if normalized["val_fraction"] < 0.0 or normalized["val_fraction"] > 0.9:
         raise ValueError("Validation fraction must be between 0.0 and 0.9.")
     parts = [part.strip() for part in str(normalized.get("img_size", "224,224")).split(",")]
@@ -197,11 +232,16 @@ def validate_options(options):
 
 
 def append_training_args(cmd, config, options):
+    strategy_options = {key: options.get(key, value) for key, value in DEFAULT_OPTIONS.items()}
     cmd.extend([
+        "--strategy",
+        str(options.get("strategy", config.get("default_strategy", "adaptive"))),
+        "--strategy-options-json",
+        json.dumps(strategy_options, sort_keys=True),
         "--base-config",
-        str(options.get("base_config", config.get("base_config", "config/mimics_lora_segformer3d.yaml"))),
+        str(options.get("base_config", config.get("base_config", "config/research/ct_fewshot_fast.yaml"))),
         "--epochs",
-        str(int(options.get("epochs", config.get("default_epochs", 10)))),
+        str(int(options.get("epochs", config.get("default_epochs", 20)))),
         "--batch-size",
         str(int(options.get("batch_size", config.get("default_batch_size", 1)))),
         "--grad-accumulation",
@@ -210,6 +250,10 @@ def append_training_args(cmd, config, options):
         str(float(options.get("lr", config.get("default_lr", 0.001)))),
         "--weight-decay",
         str(float(options.get("weight_decay", config.get("default_weight_decay", 0.01)))),
+        "--lr-scheduler",
+        str(options.get("lr_scheduler", config.get("default_lr_scheduler", "cosine"))),
+        "--warmup-epochs",
+        str(int(options.get("warmup_epochs", config.get("default_warmup_epochs", 3)))),
         "--img-size",
         str(options.get("img_size", config.get("default_img_size", "224,224"))),
         "--modality",
@@ -295,6 +339,9 @@ def prepare_training_launch(context, options, run_id=None):
     ]
     if bool(options.get("export_labels_before_training", True)):
         cmd.append("--export-labels")
+        mcs_output_dir = str(options.get("mcs_output_dir") or context.get("mcs_output_dir") or "").strip()
+        if mcs_output_dir:
+            cmd.extend(["--mcs-output-dir", os.path.abspath(mcs_output_dir)])
     append_training_args(cmd, config, options)
     mimics_exe = context.get("mimics_exe")
     if mimics_exe:
@@ -517,7 +564,9 @@ class TrainingSetupApp(object):
         self.profiles = self.config.get("training_profiles") or {}
         self.profile_names = sorted(self.profiles.keys()) if isinstance(self.profiles, dict) else []
         default_profile = self.config.get("default_training_profile") or (self.profile_names[0] if self.profile_names else "")
-        self.values = default_training_options(self.config, default_profile)
+        self.values = training_options_for_organ(
+            self.config, self.context.get("organ"), default_profile,
+        )
         self.started = False
         self.status_var = None
         self.vars = {}
@@ -538,6 +587,7 @@ class TrainingSetupApp(object):
         self.img_size_choice_widget = None
         self.img_size_custom_widget = None
         self._syncing_quick = False
+        self._applying_strategy = False
         self._build()
 
     def _build(self):
@@ -750,7 +800,7 @@ class TrainingSetupApp(object):
 
         ttk.Label(left, text="These change the model family used for this organ. Keep defaults unless comparing strategies.").pack(anchor="w", pady=(0, 8))
         self._labeled_combo(left, "Fine-tuning", "finetune_method", ["lora", "frozen", "adapter", "full"], width=24)
-        self._labeled_combo(left, "Decoder", "decoder", ["segformer3d", "mlp_probe", "linear3d", "dpt3d"], width=24)
+        self._labeled_combo(left, "Decoder", "decoder", list(DECODER_CHOICES), width=24)
         self._labeled_combo(left, "Pretrained scale", "model_scale", self._available_model_scales(), width=24)
         self._labeled_spinbox(left, "LoRA rank", "lora_rank", 1, 128, 1, 10)
         self._labeled_spinbox(left, "LoRA alpha", "lora_alpha", 1, 512, 1, 10)
@@ -768,6 +818,8 @@ class TrainingSetupApp(object):
         self._labeled_spinbox(right, "Grad accumulation", "grad_accumulation", 1, 1024, 1, 10)
         self._labeled_combo(right, "Learning rate", "lr", self.LR_CHOICES, width=14)
         self._labeled_combo(right, "Weight decay", "weight_decay", self.WEIGHT_DECAY_CHOICES, width=14)
+        self._labeled_combo(right, "LR schedule", "lr_scheduler", ["cosine", "constant_warmup", "constant"], width=18)
+        self._labeled_spinbox(right, "Warmup epochs", "warmup_epochs", 0, 1000, 1, 10)
         self.img_size_choice_widget = self._labeled_combo(
             right,
             "Image detail",
@@ -853,7 +905,7 @@ class TrainingSetupApp(object):
             for name in sorted(os.listdir(config_dir)):
                 if name.endswith((".yaml", ".yml")):
                     choices.append("config/" + name)
-        current = str(self.values.get("base_config", "config/mimics_lora_segformer3d.yaml"))
+        current = str(self.values.get("base_config", "config/research/ct_fewshot_fast.yaml"))
         if current not in choices:
             choices.insert(0, current)
         return choices or [current]
@@ -1214,12 +1266,15 @@ class QtTrainingSetupApp(object):
         self.profiles = self.config.get("training_profiles") or {}
         self.profile_names = sorted(self.profiles.keys()) if isinstance(self.profiles, dict) else []
         default_profile = self.config.get("default_training_profile") or (self.profile_names[0] if self.profile_names else "")
-        self.values = default_training_options(self.config, default_profile)
+        self.values = training_options_for_organ(
+            self.config, self.context.get("organ"), default_profile,
+        )
         self.widgets = {}
         self.quick_widgets = {}
         self.case_list = None
         self.manual_cases = None
         self.dataset_edit = None
+        self.mcs_folder_edit = None
         self.status_label = None
         self.status_text = None
         self.start_button = None
@@ -1264,15 +1319,15 @@ class QtTrainingSetupApp(object):
         outer.addWidget(warning)
 
         tabs = QtWidgets.QTabWidget()
-        tabs.addTab(self._build_setup_tab(), "Setup")
-        tabs.addTab(self._build_expert_tab(), "Expert")
+        tabs.addTab(self._build_setup_tab(), "Data and samples")
+        tabs.addTab(self._build_expert_tab(), "Model and policy")
         outer.addWidget(tabs, 1)
 
         status_group = QtWidgets.QGroupBox("Status")
         status_layout = QtWidgets.QVBoxLayout(status_group)
         self.status_text = QtWidgets.QTextEdit()
         self.status_text.setReadOnly(True)
-        self.status_text.setFixedHeight(94)
+        self.status_text.setMaximumHeight(78)
         status_layout.addWidget(self.status_text)
         outer.addWidget(status_group)
         self._append_log("Ready. Choose a profile and samples, then start background training.")
@@ -1334,47 +1389,24 @@ class QtTrainingSetupApp(object):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
-        profile_group = QtWidgets.QGroupBox("Training profile")
+        profile_group = QtWidgets.QGroupBox("Dataset")
         profile_layout = QtWidgets.QGridLayout(profile_group)
         profile_layout.setColumnStretch(1, 1)
-        profile_layout.addWidget(QtWidgets.QLabel("Profile"), 0, 0)
-        profile = self._combo(self.profile_names, self.config.get("default_training_profile") or (self.profile_names[0] if self.profile_names else ""))
-        profile.currentTextChanged.connect(lambda _text: self.apply_profile())
-        self.quick_widgets["profile"] = profile
-        profile_layout.addWidget(profile, 0, 1)
-        profile_hint = QtWidgets.QLabel("Use profiles for routine work; Expert is optional.")
-        profile_hint.setWordWrap(True)
-        profile_layout.addWidget(profile_hint, 0, 2)
-        profile_layout.addWidget(QtWidgets.QLabel("Dataset"), 1, 0)
+        profile_layout.addWidget(QtWidgets.QLabel("Source image root"), 0, 0)
         self.dataset_edit = QtWidgets.QLineEdit(os.path.abspath(self.context.get("ts_root", "")))
-        self.dataset_edit.setMinimumWidth(420)
         self.dataset_edit.editingFinished.connect(self.apply_dataset_from_field)
-        profile_layout.addWidget(self.dataset_edit, 1, 1)
+        profile_layout.addWidget(self.dataset_edit, 0, 1)
         browse = QtWidgets.QPushButton("Browse")
         browse.clicked.connect(self.browse_dataset)
-        profile_layout.addWidget(browse, 1, 2)
+        profile_layout.addWidget(browse, 0, 2)
+        profile_layout.addWidget(QtWidgets.QLabel("Saved .mcs folder"), 1, 0)
+        self.mcs_folder_edit = QtWidgets.QLineEdit(str(self.context.get("mcs_output_dir", "")))
+        self.mcs_folder_edit.setToolTip("Defaults to mimics_io_config.json. You may override it for this training run.")
+        profile_layout.addWidget(self.mcs_folder_edit, 1, 1)
+        browse_mcs = QtWidgets.QPushButton("Browse")
+        browse_mcs.clicked.connect(self.browse_mcs_folder)
+        profile_layout.addWidget(browse_mcs, 1, 2)
         layout.addWidget(profile_group)
-
-        quick_group = QtWidgets.QGroupBox("Key settings")
-        quick_layout = QtWidgets.QGridLayout(quick_group)
-        quick_layout.setColumnStretch(0, 1)
-        quick_layout.setColumnStretch(1, 1)
-        quick_layout.setColumnStretch(2, 1)
-        epoch_label = _option_label(self.values.get("epochs", 10), self.EPOCH_CHOICES)
-        val_label = _option_label(self.values.get("val_fraction", 0.2), self.VAL_CHOICES)
-        memory_label = self._memory_mode_from_values(self.values)
-        self.quick_widgets["epochs_choice"] = self._combo(_labels_with_current(self.EPOCH_CHOICES, epoch_label), epoch_label)
-        self.quick_widgets["val_fraction_choice"] = self._combo(_labels_with_current(self.VAL_CHOICES, val_label), val_label)
-        self.quick_widgets["memory_mode"] = self._combo([label for label, _ in self.MEMORY_CHOICES], memory_label)
-        for col, (label, widget) in enumerate([
-            ("Training length", self.quick_widgets["epochs_choice"]),
-            ("Validation", self.quick_widgets["val_fraction_choice"]),
-            ("Resource preset", self.quick_widgets["memory_mode"]),
-        ]):
-            quick_layout.addWidget(QtWidgets.QLabel(label), 0, col)
-            quick_layout.addWidget(widget, 1, col)
-            widget.currentTextChanged.connect(self._sync_quick_settings)
-        layout.addWidget(quick_group)
 
         sample_group = QtWidgets.QGroupBox("Samples")
         sample_layout = QtWidgets.QVBoxLayout(sample_group)
@@ -1392,7 +1424,7 @@ class QtTrainingSetupApp(object):
         middle = QtWidgets.QHBoxLayout()
         self.case_list = QtWidgets.QListWidget()
         self.case_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
-        self.case_list.setMinimumHeight(260)
+        self.case_list.setMinimumHeight(160)
         for case_id in self.context.get("case_ids", []) or []:
             self.case_list.addItem(str(case_id))
         middle.addWidget(self.case_list, 1)
@@ -1443,9 +1475,92 @@ class QtTrainingSetupApp(object):
     def _build_expert_tab(self):
         QtWidgets = self.QtWidgets
         tab = QtWidgets.QWidget()
-        layout = QtWidgets.QHBoxLayout(tab)
-        layout.setContentsMargins(12, 12, 12, 12)
+        tab_layout = QtWidgets.QVBoxLayout(tab)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        body = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(body)
+        layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(12)
+        scroll.setWidget(body)
+        tab_layout.addWidget(scroll)
+
+        strategy_group = QtWidgets.QGroupBox("Training strategy")
+        strategy_layout = QtWidgets.QGridLayout(strategy_group)
+        strategy_layout.setColumnStretch(1, 1)
+        self.widgets["strategy"] = QtWidgets.QComboBox()
+        for strategy_id in strategy_ids():
+            self.widgets["strategy"].addItem(strategy_label(strategy_id), strategy_id)
+        initial_strategy = str(self.values.get("strategy", "adaptive"))
+        initial_index = self.widgets["strategy"].findData(initial_strategy)
+        self.widgets["strategy"].setCurrentIndex(max(0, initial_index))
+        strategy_layout.addWidget(QtWidgets.QLabel("Strategy"), 0, 0)
+        strategy_layout.addWidget(self.widgets["strategy"], 0, 1)
+        self.strategy_summary = QtWidgets.QLabel()
+        self.strategy_summary.setWordWrap(True)
+        self.strategy_summary.setObjectName("strategySummary")
+        strategy_layout.addWidget(self.strategy_summary, 1, 0, 1, 2)
+        self.widgets["strategy"].currentTextChanged.connect(self._apply_strategy_defaults)
+        layout.addWidget(strategy_group)
+
+        data_group = QtWidgets.QGroupBox("Data policy")
+        prediction_group = QtWidgets.QGroupBox("Objective and prediction")
+        data_form = QtWidgets.QFormLayout(data_group)
+        prediction_form = QtWidgets.QFormLayout(prediction_group)
+        data_form.setLabelAlignment(self.QtCore.Qt.AlignRight)
+        prediction_form.setLabelAlignment(self.QtCore.Qt.AlignRight)
+
+        self.widgets["sampling_mode"] = self._data_combo([
+            ("Adaptive", "adaptive"), ("Full volume", "full"), ("Patch", "patch"),
+        ], self.values.get("sampling_mode"))
+        self.widgets["patch_size_mode"] = self._data_combo([
+            ("From data fingerprint", "fingerprint"), ("Custom Z,Y,X", "custom"),
+        ], self.values.get("patch_size_mode"))
+        self.widgets["patch_size_zyx"] = QtWidgets.QLineEdit(str(self.values.get("patch_size_zyx")))
+        self.widgets["patch_focus"] = self._data_combo([
+            ("Foreground", "foreground"), ("Boundary", "boundary"),
+            ("Foreground + nearby negatives", "negative_balanced"),
+        ], self.values.get("patch_focus"))
+        self.widgets["patches_per_case"] = self._spin(1, 32, self.values.get("patches_per_case", 2))
+        self.widgets["channel_policy"] = self._data_combo([
+            ("Single slice (repeat grayscale)", "repeat"), ("2.5D neighboring slices", "2_5d"),
+        ], self.values.get("channel_policy"))
+        self.widgets["slice_axis"] = self._data_combo([
+            ("Axial", "axial"), ("Coronal", "coronal"), ("Sagittal", "sagittal"),
+        ], self.values.get("slice_axis"))
+        self.widgets["neighbor_distance_mm"] = self._double_spin(
+            0.1, 20.0, self.values.get("neighbor_distance_mm", 3.0), 0.5,
+        )
+        for label, key in (
+            ("Sampling", "sampling_mode"), ("Patch size", "patch_size_mode"),
+            ("Custom patch", "patch_size_zyx"), ("Patch focus", "patch_focus"),
+            ("Patches / case", "patches_per_case"),
+            ("Slice input", "channel_policy"), ("View plane", "slice_axis"),
+            ("Neighbor distance (mm)", "neighbor_distance_mm"),
+        ):
+            data_form.addRow(label, self.widgets[key])
+
+        self.widgets["loss_type"] = self._data_combo([
+            ("Automatic (Dice + Focal)", "auto"), ("Dice + Focal", "dice_focal"),
+            ("Dice + Cross Entropy", "dice_ce"),
+        ], self.values.get("loss_type"))
+        self.widgets["keep_largest_component"] = QtWidgets.QCheckBox("Keep largest connected component")
+        self.widgets["keep_largest_component"].setChecked(_bool(self.values.get("keep_largest_component", False)))
+        for label, key in (("Loss", "loss_type"),):
+            prediction_form.addRow(label, self.widgets[key])
+        inference_note = QtWidgets.QLabel("Inference is automatic: full-volume training uses whole-volume inference; patch training uses sliding windows.")
+        inference_note.setWordWrap(True)
+        prediction_form.addRow(inference_note)
+        prediction_form.addRow(self.widgets["keep_largest_component"])
+        policy_row = QtWidgets.QWidget()
+        policy_layout = QtWidgets.QHBoxLayout(policy_row)
+        policy_layout.setContentsMargins(0, 0, 0, 0)
+        policy_layout.setSpacing(12)
+        policy_layout.addWidget(data_group, 1)
+        policy_layout.addWidget(prediction_group, 1)
+        layout.addWidget(policy_row)
+
         left = QtWidgets.QGroupBox("Model and task")
         right = QtWidgets.QGroupBox("Training and resources")
         left_form = QtWidgets.QFormLayout(left)
@@ -1453,12 +1568,13 @@ class QtTrainingSetupApp(object):
         left_form.setLabelAlignment(self.QtCore.Qt.AlignRight)
         right_form.setLabelAlignment(self.QtCore.Qt.AlignRight)
 
-        model_hint = QtWidgets.QLabel("These change the model family used for this organ. Keep defaults unless comparing strategies.")
+        model_hint = QtWidgets.QLabel("Model controls remain available, but the selected strategy supplies the validated data, loss, and inference policy.")
         model_hint.setWordWrap(True)
         left_form.addRow(model_hint)
-        self.widgets["finetune_method"] = self._combo(["lora", "frozen", "adapter", "full"], self.values.get("finetune_method", "lora"))
+        self.widgets["finetune_method"] = self._combo(["frozen", "lora", "adapter"], self.values.get("finetune_method", "frozen"))
         self.widgets["finetune_method"].currentTextChanged.connect(self._refresh_method_enabled)
-        self.widgets["decoder"] = self._combo(["segformer3d", "mlp_probe", "linear3d", "dpt3d"], self.values.get("decoder", "segformer3d"))
+        self.widgets["decoder"] = self._combo(DECODER_CHOICES, self.values.get("decoder", "segformer3d"))
+        self.widgets["decoder"].setToolTip("3D heads fuse slices volumetrically. conv2d heads decode slices independently and stack them back into a 3D mask.")
         self.widgets["model_scale"] = self._combo(self._available_model_scales(), self.values.get("model_scale", "vitb16"))
         self.widgets["lora_rank"] = self._spin(1, 128, self.values.get("lora_rank", 8))
         self.widgets["lora_alpha"] = self._spin(1, 512, self.values.get("lora_alpha", 16))
@@ -1472,21 +1588,28 @@ class QtTrainingSetupApp(object):
             ("Adapter bottleneck", "adapter_bottleneck"),
         ]:
             left_form.addRow(label, self.widgets[key])
+        self.dimensionality_summary = QtWidgets.QLabel()
+        self.dimensionality_summary.setWordWrap(True)
+        self.dimensionality_summary.setObjectName("strategySummary")
+        left_form.addRow(self.dimensionality_summary)
         backend_hint = QtWidgets.QLabel("Backend template, modality, and custom weight path are controlled by fewshot_config.json.")
         backend_hint.setWordWrap(True)
         left_form.addRow(backend_hint)
 
-        resource_hint = QtWidgets.QLabel("These affect runtime, memory use, validation, and disk retention.")
+        resource_hint = QtWidgets.QLabel("Batch size is fixed at 1 for variable-depth volumes. Grad accumulation controls the effective batch.")
         resource_hint.setWordWrap(True)
         right_form.addRow(resource_hint)
-        self.widgets["epochs"] = self._spin(1, 10000, self.values.get("epochs", 10))
+        self.widgets["epochs"] = self._spin(1, 10000, self.values.get("epochs", 20))
         self.widgets["batch_size"] = self._spin(1, 1, 1)
+        self.widgets["batch_size"].setVisible(False)
         self.widgets["batch_size"].setToolTip(
             "Fixed at 1 because Mimics cases can have different z-depth. Use Grad accumulation for a larger effective batch."
         )
         self.widgets["grad_accumulation"] = self._spin(1, 1024, self.values.get("grad_accumulation", 1))
         self.widgets["lr"] = self._combo(self.LR_CHOICES, self.values.get("lr", "0.001"), editable=True)
         self.widgets["weight_decay"] = self._combo(self.WEIGHT_DECAY_CHOICES, self.values.get("weight_decay", "0.01"), editable=True)
+        self.widgets["lr_scheduler"] = self._combo(["cosine", "constant_warmup", "constant"], self.values.get("lr_scheduler", "cosine"))
+        self.widgets["warmup_epochs"] = self._spin(0, 1000, self.values.get("warmup_epochs", 3))
         img_label = self._img_size_choice_from_value(self.values.get("img_size", "224,224"))
         self.quick_widgets["img_size_choice"] = self._combo([label for label, _ in self.IMG_SIZE_CHOICES] + [self.IMG_SIZE_CUSTOM_LABEL], img_label)
         self.widgets["img_size"] = QtWidgets.QLineEdit(str(self.values.get("img_size", "224,224")))
@@ -1504,20 +1627,18 @@ class QtTrainingSetupApp(object):
 
         for label, key in [
             ("Epochs", "epochs"),
-            ("Batch size (fixed)", "batch_size"),
             ("Grad accumulation", "grad_accumulation"),
             ("Learning rate", "lr"),
             ("Weight decay", "weight_decay"),
+            ("LR schedule", "lr_scheduler"),
+            ("Warmup epochs", "warmup_epochs"),
         ]:
             right_form.addRow(label, self.widgets[key])
         right_form.addRow("Image detail", self.quick_widgets["img_size_choice"])
         right_form.addRow("Custom size", self.widgets["img_size"])
-        right_form.addRow("Depth chunks", self.widgets["sub_volume_depth"])
-        right_form.addRow("Keep checkpoints", self.widgets["keep_last_checkpoints"])
         right_form.addRow("Validation fraction", self.widgets["val_fraction"])
         check_row = QtWidgets.QHBoxLayout()
         check_row.addWidget(self.widgets["mixed_precision"])
-        check_row.addWidget(self.widgets["sub_volume"])
         check_row.addStretch(1)
         right_form.addRow(check_row)
 
@@ -1527,10 +1648,32 @@ class QtTrainingSetupApp(object):
             self._connect_change(key, self._refresh_quick_labels)
         self.widgets["sub_volume"].stateChanged.connect(self._refresh_quick_labels)
         self.widgets["sub_volume"].stateChanged.connect(self._refresh_method_enabled)
+        self.widgets["lr_scheduler"].currentTextChanged.connect(self._refresh_method_enabled)
+        self.widgets["decoder"].currentTextChanged.connect(self._update_dimensionality_summary)
+        self.widgets["sampling_mode"].currentTextChanged.connect(self._update_dimensionality_summary)
+        self.widgets["channel_policy"].currentTextChanged.connect(self._update_dimensionality_summary)
         self._set_custom_size_entry_state()
         self._refresh_method_enabled()
-        layout.addWidget(left, 1)
-        layout.addWidget(right, 1)
+        self._update_dimensionality_summary()
+        epoch_label = _option_label(self.values.get("epochs", 10), self.EPOCH_CHOICES)
+        val_label = _option_label(self.values.get("val_fraction", 0.2), self.VAL_CHOICES)
+        memory_label = self._memory_mode_from_values(self.values)
+        self.quick_widgets["epochs_choice"] = self._combo(_labels_with_current(self.EPOCH_CHOICES, epoch_label), epoch_label)
+        self.quick_widgets["val_fraction_choice"] = self._combo(_labels_with_current(self.VAL_CHOICES, val_label), val_label)
+        self.quick_widgets["memory_mode"] = self._combo([label for label, _ in self.MEMORY_CHOICES], memory_label)
+        self.quick_widgets["img_size_choice"].setToolTip("Choose a preset or enter any positive width,height. Values should be multiples of 16.")
+        parameter_row = QtWidgets.QWidget()
+        parameter_layout = QtWidgets.QHBoxLayout(parameter_row)
+        parameter_layout.setContentsMargins(0, 0, 0, 0)
+        parameter_layout.setSpacing(12)
+        parameter_layout.addWidget(left, 1)
+        parameter_layout.addWidget(right, 1)
+        layout.addWidget(parameter_row)
+        layout.addStretch(1)
+        self._update_strategy_summary()
+        for key in STRATEGY_DATA_KEYS:
+            self._connect_change(key, self._strategy_option_changed)
+        self._refresh_strategy_enabled()
         return tab
 
     def _combo(self, values, current="", editable=False):
@@ -1543,6 +1686,14 @@ class QtTrainingSetupApp(object):
             combo.addItem(current)
         if current:
             combo.setCurrentText(current)
+        return combo
+
+    def _data_combo(self, items, current=None):
+        combo = self.QtWidgets.QComboBox()
+        for label, value in items:
+            combo.addItem(str(label), str(value))
+        index = combo.findData(str(current))
+        combo.setCurrentIndex(index if index >= 0 else 0)
         return combo
 
     def _spin(self, minimum, maximum, value, step=1):
@@ -1590,6 +1741,15 @@ class QtTrainingSetupApp(object):
         if path:
             self.apply_dataset_root(path)
 
+    def browse_mcs_folder(self):
+        current = str(self.mcs_folder_edit.text()).strip() if self.mcs_folder_edit is not None else ""
+        path = self.QtWidgets.QFileDialog.getExistingDirectory(
+            self.window, "Select folder containing saved .mcs projects", current,
+        )
+        if path and self.mcs_folder_edit is not None:
+            self.mcs_folder_edit.setText(os.path.abspath(path))
+            self.context["mcs_output_dir"] = os.path.abspath(path)
+
     def apply_dataset_from_field(self):
         if self.dataset_edit is None:
             return
@@ -1607,6 +1767,9 @@ class QtTrainingSetupApp(object):
             return
         self.context["ts_root"] = path
         self.context["workspace"] = os.path.join(path, "fewshot_models")
+        self.context["mcs_output_dir"] = resolve_mimics_output_dir_for_ui(path, self.context.get("project_root", ""))
+        if self.mcs_folder_edit is not None:
+            self.mcs_folder_edit.setText(self.context["mcs_output_dir"])
         cases = case_ids_from_dataset_for_ui(path, self.context.get("project_root", ""))
         self.context["case_ids"] = cases
         if self.case_list is not None:
@@ -1661,6 +1824,8 @@ class QtTrainingSetupApp(object):
         if isinstance(widget, self.QtWidgets.QDoubleSpinBox):
             return float(widget.value())
         if isinstance(widget, self.QtWidgets.QComboBox):
+            if key == "strategy" or key in STRATEGY_DATA_KEYS:
+                return str(widget.currentData() or "adaptive")
             return str(widget.currentText())
         if isinstance(widget, self.QtWidgets.QLineEdit):
             return str(widget.text()).strip()
@@ -1684,6 +1849,12 @@ class QtTrainingSetupApp(object):
             except Exception:
                 pass
         elif isinstance(widget, self.QtWidgets.QComboBox):
+            if key == "strategy" or key in STRATEGY_DATA_KEYS:
+                index = widget.findData(str(value))
+                if index >= 0:
+                    widget.setCurrentIndex(index)
+                self.values[key] = value
+                return
             text = str(value)
             if widget.findText(text) < 0:
                 widget.addItem(text)
@@ -1700,6 +1871,8 @@ class QtTrainingSetupApp(object):
 
     def _current_values(self):
         values = dict(self.values)
+        if self.mcs_folder_edit is not None:
+            values["mcs_output_dir"] = str(self.mcs_folder_edit.text()).strip()
         for key in list(self.widgets.keys()):
             if key == "sub_volume_depth":
                 continue
@@ -1755,6 +1928,65 @@ class QtTrainingSetupApp(object):
         depth = self.widgets.get("sub_volume_depth")
         if sub_volume is not None and depth is not None:
             depth.setEnabled(bool(sub_volume.isChecked()))
+        scheduler = self.widgets.get("lr_scheduler")
+        warmup = self.widgets.get("warmup_epochs")
+        if scheduler is not None and warmup is not None:
+            warmup.setEnabled(str(scheduler.currentText()) in ("cosine", "constant_warmup"))
+
+    def _update_strategy_summary(self):
+        widget = self.widgets.get("strategy")
+        if widget is None or not hasattr(self, "strategy_summary"):
+            return
+        strategy_id = str(widget.currentData() or "adaptive")
+        self.strategy_summary.setText(strategy_summary(strategy_id))
+
+    def _apply_strategy_defaults(self, _text=None):
+        widget = self.widgets.get("strategy")
+        if widget is None:
+            return
+        strategy_id = str(widget.currentData() or "adaptive")
+        self._applying_strategy = True
+        try:
+            self.values["strategy"] = strategy_id
+            for key, value in strategy_defaults(strategy_id).items():
+                self._set_widget_value(key, value)
+            self._update_strategy_summary()
+            self._refresh_method_enabled()
+            self._refresh_strategy_enabled()
+            self._set_status("Preset applied: {0}".format(strategy_label(strategy_id)))
+        finally:
+            self._applying_strategy = False
+
+    def _strategy_option_changed(self, *_args):
+        if self._applying_strategy:
+            return
+        self.strategy_summary.setText(strategy_summary(str(self.widgets["strategy"].currentData())) + " Manual overrides are applied below.")
+        self._refresh_strategy_enabled()
+
+    def _refresh_strategy_enabled(self):
+        sampling = str(self._widget_value("sampling_mode") or "full")
+        patch_enabled = sampling in ("adaptive", "patch")
+        for key in ("patch_size_mode", "patch_focus", "patches_per_case"):
+            if self.widgets.get(key) is not None:
+                self.widgets[key].setEnabled(patch_enabled)
+        custom_patch = patch_enabled and self._widget_value("patch_size_mode") == "custom"
+        self.widgets["patch_size_zyx"].setEnabled(custom_patch)
+        self.widgets["neighbor_distance_mm"].setEnabled(self._widget_value("channel_policy") == "2_5d")
+        self._update_dimensionality_summary()
+
+    def _update_dimensionality_summary(self, *_args):
+        if not hasattr(self, "dimensionality_summary"):
+            return
+        decoder = str(self._widget_value("decoder") or "segformer3d")
+        sampling = str(self._widget_value("sampling_mode") or "adaptive")
+        channels = str(self._widget_value("channel_policy") or "repeat")
+        region = "a 3D sub-volume" if sampling == "patch" else ("a fingerprint-selected 3D region" if sampling == "adaptive" else "the full 3D volume")
+        context = "neighboring-slice (2.5D) encoder context" if channels == "2_5d" else "single-slice encoder context"
+        if decoder.startswith("conv2d"):
+            decoding = "slice-wise 2D decoding followed by ordered 3D stacking"
+        else:
+            decoding = "volumetric 3D feature decoding"
+        self.dimensionality_summary.setText("Uses {0}, {1}, and {2}.".format(region, context, decoding))
 
     def _sync_quick_settings(self):
         if self._syncing_quick:

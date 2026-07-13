@@ -275,15 +275,10 @@ def _resample_masks_to_actual_grid(result, active_image_shape, actual_mimics_vox
             expected_shapes.append([int(value) for value in row.get("mimics_shape")])
     shape_matches = all(shape == active_image_shape for shape in expected_shapes) if expected_shapes else False
     matrix_matches = _matrix_close(expected_matrix, actual_mimics_voxel_to_ras)
-    # In practice, shape mismatch is the reliable signal that prepared buffers
-    # cannot be injected as-is. Matrix-only mismatch can be caused by
-    # coordinate-convention differences (e.g. LPS/RAS reporting) and forcing
-    # resampling in that case can corrupt orientation and explode disk usage.
-    # Keep matrix-only resampling opt-in.
-    resample_on_matrix_mismatch = os.environ.get(
-        "MIMICS_IMPORT_RESAMPLE_ON_MATRIX_MISMATCH", ""
-    ).strip().lower() in ("1", "true", "yes", "on")
-    need_resample = (not shape_matches) or (resample_on_matrix_mismatch and not matrix_matches)
+    # Shape equality does not imply physical-grid equality. A same-shaped image
+    # may still be translated, mirrored, oblique, or use a different spacing.
+    # Always resample source masks when the live Mimics matrix differs.
+    need_resample = (not shape_matches) or (not matrix_matches)
     if not need_resample:
         return result
 
@@ -416,6 +411,10 @@ def create_mcs_from_manifest(work_dir, output_mcs):
         active_image_shape,
         result.get("mimics_voxel_to_ras_matrix") or [],
     )
+    if not active_image_shape or not actual_mimics_voxel_to_ras:
+        raise RuntimeError(
+            "Could not derive the live Mimics image grid. Refusing to import masks without a verified voxel-to-world transform."
+        )
     result = _resample_masks_to_actual_grid(
         result,
         active_image_shape,

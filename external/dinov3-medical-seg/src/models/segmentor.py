@@ -11,6 +11,7 @@ from .encoder_3d import SliceWiseEncoder3D
 from .decoder_3d import DecoderFactory
 from .lora import apply_lora_to_dinov3, get_lora_params
 from .adapter import apply_adapter_to_dinov3
+from .feature_augmentation import build_feature_augmentation
 
 
 class DINOv33DSegmentor(nn.Module):
@@ -65,9 +66,14 @@ class DINOv33DSegmentor(nn.Module):
             self.backbone.unfreeze()
 
         # ── 3. 3D Encoder ──
+        self.slice_axis = cfg.get("slice_axis", 2)
+        self.slice_batch_size = int(cfg.get("slice_batch_size", 4))
+        if self.slice_batch_size < 1:
+            raise ValueError("model.slice_batch_size must be at least one")
         self.encoder_3d = SliceWiseEncoder3D(
             self.backbone,
-            slice_axis=cfg.get("slice_axis", 2),
+            channel_policy=cfg.get("channel_policy", "repeat"),
+            neighbor_distance_mm=cfg.get("neighbor_distance_mm"),
         )
 
         # ── 4. 3D Decoder ──
@@ -78,11 +84,61 @@ class DINOv33DSegmentor(nn.Module):
             feature_dims,
             num_classes=cfg["num_classes"],
         )
+        self.feature_augmentation = build_feature_augmentation(config.get("feature_augmentation"))
 
         # Store original_shape for decoder upsampling
         self._original_shape = None
 
-    def forward(self, volume_3d: torch.Tensor) -> torch.Tensor:
+    def _slice_axis_name(self) -> str:
+        value = self.slice_axis
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            aliases = {"z": "axial", "y": "coronal", "x": "sagittal"}
+            normalized = aliases.get(normalized, normalized)
+            if normalized in ("axial", "coronal", "sagittal"):
+                return normalized
+        try:
+            numeric = int(value)
+        except (TypeError, ValueError):
+            numeric = -1
+        mapping = {2: "axial", 1: "coronal", 0: "sagittal"}
+        if numeric in mapping:
+            return mapping[numeric]
+        raise ValueError("slice_axis must be axial/coronal/sagittal or 2/1/0")
+
+    def _to_slice_space(self, volume_3d: torch.Tensor) -> torch.Tensor:
+        # Input/output convention is (B, C, Z, Y, X).  The encoder always
+        # processes dimension 2 as depth; reordering here keeps all three views
+        # correct without spreading axis assumptions across the pipeline.
+        axis = self._slice_axis_name()
+        if axis == "axial":
+            return volume_3d
+        if axis == "coronal":
+            return volume_3d.permute(0, 1, 3, 2, 4)
+        return volume_3d.permute(0, 1, 4, 2, 3)
+
+    def _from_slice_space(self, output: torch.Tensor) -> torch.Tensor:
+        axis = self._slice_axis_name()
+        if axis == "axial":
+            return output
+        if axis == "coronal":
+            return output.permute(0, 1, 3, 2, 4)
+        return output.permute(0, 1, 3, 4, 2)
+
+    def _to_slice_space_spacing(self, spacing_zyx: torch.Tensor | None):
+        if spacing_zyx is None:
+            return None
+        spacing = torch.as_tensor(spacing_zyx)
+        if spacing.shape[-1] != 3:
+            raise ValueError("spacing_zyx must end with three values")
+        axis = self._slice_axis_name()
+        if axis == "axial":
+            return spacing
+        if axis == "coronal":
+            return spacing[..., [1, 0, 2]]
+        return spacing[..., [2, 0, 1]]
+
+    def forward(self, volume_3d: torch.Tensor, spacing_zyx: torch.Tensor | None = None) -> torch.Tensor:
         """
         Args:
             volume_3d: (B, 1, D, H, W) input volume
@@ -90,15 +146,20 @@ class DINOv33DSegmentor(nn.Module):
         Returns:
             (B, num_classes, D, H, W) segmentation logits
         """
-        self._original_shape = volume_3d.shape
+        slice_space_volume = self._to_slice_space(volume_3d)
+        self._original_shape = slice_space_volume.shape
 
         # Slice-wise encoding → pseudo-3D features
-        features_3d = self.encoder_3d(volume_3d)
+        features_3d = self.encoder_3d(
+            slice_space_volume,
+            slice_batch_size=self.slice_batch_size,
+            spacing_zyx=self._to_slice_space_spacing(spacing_zyx),
+        )
+        features_3d = self.feature_augmentation(features_3d)
 
         # 3D decoding → segmentation
         output = self.decoder_3d(features_3d, self._original_shape)
-
-        return output
+        return self._from_slice_space(output)
 
     def get_trainable_info(self) -> Dict[str, int]:
         """Return trainable parameter counts by component."""

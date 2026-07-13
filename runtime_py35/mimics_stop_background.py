@@ -355,7 +355,6 @@ def _mimics_log(level, message):
 # -- Cache directories --------------------------------------------------
 
 _CACHE_DIRS = (
-    ".mimics_runtime",
     "logs",
     "__pycache__",
 )
@@ -395,6 +394,22 @@ def _find_cache_paths():
         if os.path.basename(dirpath) == "__pycache__":
             paths.append(dirpath)
 
+    # Runtime control state is not a cache. Only include explicitly
+    # regenerable nnInteractive data, and only terminal async job folders.
+    nn_runtime = os.path.join(root, ".mimics_runtime", "nninteractive")
+    source_cache = os.path.join(nn_runtime, "source_fastpath_cache")
+    if os.path.isdir(source_cache):
+        paths.append(source_cache)
+    async_root = os.path.join(nn_runtime, "async_jobs")
+    if os.path.isdir(async_root):
+        for name in os.listdir(async_root):
+            job_dir = os.path.join(async_root, name)
+            if not os.path.isdir(job_dir):
+                continue
+            status = runtime_common.read_json(os.path.join(job_dir, "worker_status.json"), {}) or {}
+            if str(status.get("status", "")) in ("closed", "failed", "expired"):
+                paths.append(job_dir)
+
     return sorted(set(os.path.abspath(p) for p in paths if os.path.exists(p)))
 
 
@@ -431,12 +446,6 @@ def clear_all_caches():
                 failed.append((p, str(e)))
         except Exception as e:
             failed.append((p, str(e)))
-
-    # Also clear stale state files in .mimics_runtime (but keep the dir itself,
-    # active locks, and queue registries).
-    runtime_dir = os.path.join(_project_root(), ".mimics_runtime")
-    if os.path.isdir(runtime_dir):
-        _clear_stale_runtime_files(runtime_dir, removed, failed, skipped_in_use)
 
     # Only clear resource locks when no background process is holding them.
     _clear_resource_locks_safe()
@@ -710,24 +719,19 @@ def stop_background_processes():
         "$queues={2};"
         "$locks={3};"
         "$out='{4}';"
+        "$foregroundPid={5};"
         # Find processes whose command line references both a root and a marker
         "$matched=Get-CimInstance Win32_Process | Where-Object {{"
         "  $cmd = $_.CommandLine;"
-        "  if (-not $cmd) {{ return $false }};"
+        "  if (-not $cmd -or $_.ProcessId -eq $PID -or $_.ProcessId -eq $foregroundPid) {{ return $false }};"
         "  $cmd = $cmd -replace '/', '\\';"
         "  $inRoot = ($roots | Where-Object {{ $cmd -like ('*' + $_ + '*') }} | Select-Object -First 1);"
         "  $hasMarker = ($markers | Where-Object {{ $cmd -like ('*' + $_ + '*') }} | Select-Object -First 1);"
         "  $inRoot -and $hasMarker"
         "}};"
-        # Also find ANY process with markers regardless of root (broad sweep)
-        "$broad=Get-CimInstance Win32_Process | Where-Object {{"
-        "  $cmd = $_.CommandLine;"
-        "  if (-not $cmd) {{ return $false }};"
-        "  $cmd = $cmd -replace '/', '\\';"
-        "  ($markers | Where-Object {{ $cmd -like ('*' + $_ + '*') }} | Select-Object -First 1);"
-        "}};"
-        # Merge and deduplicate by ProcessId
-        "$all = @($matched) + @($broad) | Sort-Object ProcessId -Unique;"
+        # Require both an owned root and a dedicated marker. A broad marker-only
+        # sweep can terminate unrelated installations that use the same filenames.
+        "$all = @($matched) | Sort-Object ProcessId -Unique;"
         "$records = @($all | Select-Object ProcessId, Name, CommandLine);"
         "$killed = @();"
         "$all | ForEach-Object {{"
@@ -750,7 +754,7 @@ def stop_background_processes():
         "  Killed = $killed"
         "}};"
         "$report | ConvertTo-Json -Depth 5 -Compress | Set-Content -Path $out -Encoding UTF8"
-    ).format(markers, roots, queues, locks, stop_log.replace("'", "''"))
+    ).format(markers, roots, queues, locks, stop_log.replace("'", "''"), int(os.getpid()))
 
     process = None
     try:

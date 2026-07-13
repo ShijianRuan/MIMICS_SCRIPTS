@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Start DINOv3 few-shot training with the default profile."""
+"""Configure and start DINOv3 few-shot training."""
 
 from __future__ import print_function
 
@@ -20,4 +20,4 @@ for _ in range(5):
 from _mimics_entrypoint import run_runtime_entry
 
 
-run_runtime_entry(globals(), __file__, "fewshot_mimics", action_attr="BUTTON_TRAIN")
+run_runtime_entry(globals(), __file__, "fewshot_mimics", action_attr="BUTTON_TRAIN_MODEL")

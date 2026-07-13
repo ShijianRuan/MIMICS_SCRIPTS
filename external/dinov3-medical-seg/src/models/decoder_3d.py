@@ -9,27 +9,64 @@ import torch.nn.functional as F
 from typing import List
 
 
+def norm3d(channels: int) -> nn.GroupNorm:
+    """Batch-size-independent normalization for few-shot full volumes."""
+    groups = min(8, int(channels))
+    while groups > 1 and channels % groups:
+        groups -= 1
+    return nn.GroupNorm(groups, channels)
+
+
 # ──────────────────────────────────────────────
 # Factory
 # ──────────────────────────────────────────────
 
 class DecoderFactory:
-    """Create decoder by name."""
+    """Create decoder by name.
+
+    Supports both 3D decoders (linear3d, mlp_probe, segformer3d,
+    token_pyramid3d, dpt3d)
+    and 2D decoders (conv2d, conv2d_unet, conv2d_deeplab, conv2d_2_5d).
+    2D decoders are imported lazily to avoid hard dependency.
+    """
+
+    _2D_DECODERS = {"conv2d", "conv2d_unet", "conv2d_deeplab", "conv2d_2_5d"}
 
     @staticmethod
     def create(decoder_type: str, feature_dims: List[int], num_classes: int) -> nn.Module:
+        # ── 3D decoders ──
         if decoder_type == "linear3d":
             return LinearDecoder3D(feature_dims[0], num_classes, num_levels=len(feature_dims))
         elif decoder_type == "mlp_probe":
             return MLPProbeDecoder3D(feature_dims[-3:], num_classes)
         elif decoder_type == "segformer3d":
             return SegFormer3DDecoder(feature_dims, num_classes)
+        elif decoder_type == "token_pyramid3d":
+            return TokenPyramid3DDecoder(feature_dims, num_classes)
         elif decoder_type == "dpt3d":
             return DPT3DDecoder(feature_dims, num_classes)
+
+        # ── 2D decoders (lazy import) ──
+        elif decoder_type in DecoderFactory._2D_DECODERS:
+            from .decoder_2d import (
+                Conv2DDecoder,
+                Conv2DUNetDecoder,
+                Conv2DDeepLabDecoder,
+                Conv2D_2_5D_Decoder,
+            )
+            _map = {
+                "conv2d": Conv2DDecoder,
+                "conv2d_unet": Conv2DUNetDecoder,
+                "conv2d_deeplab": Conv2DDeepLabDecoder,
+                "conv2d_2_5d": Conv2D_2_5D_Decoder,
+            }
+            return _map[decoder_type](feature_dims, num_classes)
+
         else:
             raise ValueError(
                 f"Unknown decoder_type: {decoder_type}. "
-                f"Choose from: linear3d, mlp_probe, segformer3d, dpt3d"
+                f"Choose from: linear3d, mlp_probe, segformer3d, token_pyramid3d, dpt3d, "
+                f"conv2d, conv2d_unet, conv2d_deeplab, conv2d_2_5d"
             )
 
 
@@ -64,10 +101,10 @@ class LinearDecoder3D(nn.Module):
         # Feature fusion: concatenate projected features → 3D conv refinement
         self.fuse = nn.Sequential(
             nn.Conv3d(proj_dim * num_levels, proj_dim * 2, kernel_size=3, padding=1),
-            nn.BatchNorm3d(proj_dim * 2),
+            norm3d(proj_dim * 2),
             nn.ReLU(inplace=True),
             nn.Conv3d(proj_dim * 2, proj_dim, kernel_size=1),
-            nn.BatchNorm3d(proj_dim),
+            norm3d(proj_dim),
             nn.ReLU(inplace=True),
         )
 
@@ -185,7 +222,7 @@ class SegFormer3DDecoder(nn.Module):
         self.projections = nn.ModuleList([
             nn.Sequential(
                 nn.Conv3d(dim, proj_dim, 1),
-                nn.BatchNorm3d(proj_dim),
+                norm3d(proj_dim),
                 nn.ReLU(inplace=True),
             )
             for dim in feature_dims
@@ -195,17 +232,17 @@ class SegFormer3DDecoder(nn.Module):
         total_dim = proj_dim * len(feature_dims)
         self.fuse = nn.Sequential(
             nn.Conv3d(total_dim, proj_dim * 2, 1),
-            nn.BatchNorm3d(proj_dim * 2),
+            norm3d(proj_dim * 2),
             nn.ReLU(inplace=True),
             nn.Conv3d(proj_dim * 2, proj_dim, 1),
-            nn.BatchNorm3d(proj_dim),
+            norm3d(proj_dim),
             nn.ReLU(inplace=True),
         )
 
         # Output head
         self.head = nn.Sequential(
             nn.Conv3d(proj_dim, proj_dim // 2, 3, padding=1),
-            nn.BatchNorm3d(proj_dim // 2),
+            norm3d(proj_dim // 2),
             nn.ReLU(inplace=True),
             nn.Conv3d(proj_dim // 2, num_classes, 1),
         )
@@ -227,7 +264,74 @@ class SegFormer3DDecoder(nn.Module):
 
 
 # ──────────────────────────────────────────────
-# 4. DPT3DDecoder — Dense Prediction Transformer style
+# 4. TokenPyramid3DDecoder — scale-aware ViT readout
+# ──────────────────────────────────────────────
+
+class TokenPyramid3DDecoder(nn.Module):
+    """Create a learned in-plane pyramid from equal-resolution ViT tokens.
+
+    DINOv3 blocks expose different semantic depths but retain one patch grid;
+    treating those blocks as a CNN feature pyramid is therefore inaccurate.
+    This decoder makes the scale operation explicit: shallow tokens remain at
+    their native resolution while progressively deeper tokens are pooled in
+    plane, projected, then reassembled on the shallow grid.  It is a compact
+    3D testable analogue of token-pyramid readouts, not a claim to reproduce a
+    particular paper's TPA implementation.
+    """
+
+    def __init__(self, feature_dims: List[int], num_classes: int, proj_dim: int = 128):
+        super().__init__()
+        if not feature_dims:
+            raise ValueError("TokenPyramid3DDecoder requires at least one feature level")
+        self.pool_factors = tuple(2 ** index for index in range(len(feature_dims)))
+        self.projections = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv3d(dim, proj_dim, kernel_size=1),
+                norm3d(proj_dim),
+                nn.GELU(),
+            )
+            for dim in feature_dims
+        ])
+        self.fuse = nn.Sequential(
+            nn.Conv3d(proj_dim * len(feature_dims), proj_dim * 2, kernel_size=3, padding=1),
+            norm3d(proj_dim * 2),
+            nn.GELU(),
+            nn.Conv3d(proj_dim * 2, proj_dim, kernel_size=3, padding=1),
+            norm3d(proj_dim),
+            nn.GELU(),
+        )
+        self.head = nn.Conv3d(proj_dim, num_classes, kernel_size=1)
+
+    @staticmethod
+    def _pool_inplane(feature: torch.Tensor, factor: int) -> torch.Tensor:
+        if factor <= 1:
+            return feature
+        _, _, _, height, width = feature.shape
+        kernel_h = min(int(factor), int(height))
+        kernel_w = min(int(factor), int(width))
+        if kernel_h == 1 and kernel_w == 1:
+            return feature
+        return F.avg_pool3d(
+            feature,
+            kernel_size=(1, kernel_h, kernel_w),
+            stride=(1, kernel_h, kernel_w),
+            ceil_mode=True,
+        )
+
+    def forward(self, features_3d: List[torch.Tensor], original_shape: tuple) -> torch.Tensor:
+        target_shape = features_3d[0].shape[-3:]
+        assembled = []
+        for projection, feature, factor in zip(self.projections, features_3d, self.pool_factors):
+            current = projection(self._pool_inplane(feature, factor))
+            if current.shape[-3:] != target_shape:
+                current = F.interpolate(current, size=target_shape, mode="trilinear", align_corners=False)
+            assembled.append(current)
+        logits = self.head(self.fuse(torch.cat(assembled, dim=1)))
+        return F.interpolate(logits, size=original_shape[2:], mode="trilinear", align_corners=False)
+
+
+# ──────────────────────────────────────────────
+# 5. DPT3DDecoder — Dense Prediction Transformer style
 # ──────────────────────────────────────────────
 
 class Reassemble3D(nn.Module):
@@ -238,7 +342,7 @@ class Reassemble3D(nn.Module):
         self.proj = nn.Conv3d(in_dim, out_dim, 1)
         self.refine = nn.Sequential(
             nn.Conv3d(out_dim, out_dim, 3, padding=1),
-            nn.BatchNorm3d(out_dim),
+            norm3d(out_dim),
             nn.ReLU(inplace=True),
         )
 
@@ -268,10 +372,10 @@ class DPT3DDecoder(nn.Module):
         self.fusions = nn.ModuleList([
             nn.Sequential(
                 nn.Conv3d(out_dim, out_dim, 3, padding=1),
-                nn.BatchNorm3d(out_dim),
+                norm3d(out_dim),
                 nn.ReLU(inplace=True),
                 nn.Conv3d(out_dim, out_dim, 3, padding=1),
-                nn.BatchNorm3d(out_dim),
+                norm3d(out_dim),
                 nn.ReLU(inplace=True),
             )
             for _ in range(3)  # 3 fusion stages
@@ -280,7 +384,7 @@ class DPT3DDecoder(nn.Module):
         # Output
         self.head = nn.Sequential(
             nn.Conv3d(out_dim, 128, 3, padding=1),
-            nn.BatchNorm3d(128),
+            norm3d(128),
             nn.ReLU(inplace=True),
             nn.Conv3d(128, num_classes, 1),
         )

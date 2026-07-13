@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Predict the current case with the latest model for the selected organ."""
+"""Open DINOv3 task status, progress, logs, and results."""
 
 from __future__ import print_function
 
@@ -20,4 +20,4 @@ for _ in range(5):
 from _mimics_entrypoint import run_runtime_entry
 
 
-run_runtime_entry(globals(), __file__, "fewshot_mimics", action_attr="BUTTON_PREDICT")
+run_runtime_entry(globals(), __file__, "fewshot_mimics", action_attr="BUTTON_STATUS")

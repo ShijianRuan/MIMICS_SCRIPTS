@@ -11,6 +11,7 @@ from __future__ import print_function
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -25,6 +26,7 @@ import runtime_common
 TITLE = "DINOv3 Few-Shot"
 BUTTON_TRAIN = "Train Quick Model"
 BUTTON_TRAIN_ADVANCED = "Train Advanced Setup..."
+BUTTON_TRAIN_MODEL = "Train Model..."
 BUTTON_PREDICT = "Predict Current Case (Latest Model)"
 BUTTON_PREDICT_MODEL = "Predict Current Case (Choose Model)..."
 BUTTON_STATUS = "Show Status"
@@ -409,6 +411,113 @@ def _active_image_shape(image):
     return None
 
 
+def _point_values(point):
+    if point is None:
+        raise RuntimeError("Mimics returned an empty voxel center.")
+    for names in (("x", "y", "z"), ("X", "Y", "Z")):
+        try:
+            return [float(getattr(point, names[0])), float(getattr(point, names[1])), float(getattr(point, names[2]))]
+        except Exception:
+            pass
+    return [float(point[0]), float(point[1]), float(point[2])]
+
+
+def _voxel_center(image, index):
+    getter = getattr(image, "get_voxel_center", None)
+    if not callable(getter):
+        raise RuntimeError("Mimics image does not expose get_voxel_center().")
+    values = [int(value) for value in index]
+    try:
+        return _point_values(getter(values))
+    except TypeError:
+        pass
+    try:
+        return _point_values(getter(tuple(values)))
+    except TypeError:
+        return _point_values(getter(values[0], values[1], values[2]))
+
+
+def _active_live_grid_payload():
+    """Measure the current open Mimics grid instead of trusting stale metadata."""
+    try:
+        image = mimics.data.images.get_active()
+    except Exception:
+        image = None
+    if image is None:
+        return None
+    shape = _active_image_shape(image)
+    if not shape:
+        return None
+    try:
+        origin_lps = _voxel_center(image, [0, 0, 0])
+        origin = [-origin_lps[0], -origin_lps[1], origin_lps[2]]
+        metadata_matrix = _parse_matrix_metadata(
+            _metadata_get(image, MIMICS_VOXEL_TO_RAS_MATRIX_METADATA, "")
+        )
+        matrix = [[0.0, 0.0, 0.0, 0.0] for _ in range(4)]
+        for axis in range(3):
+            if int(shape[axis]) <= 1:
+                if metadata_matrix is None:
+                    return None
+                for row in range(3):
+                    matrix[row][axis] = float(metadata_matrix[row][axis])
+            else:
+                index = [0, 0, 0]
+                index[axis] = 1
+                point_lps = _voxel_center(image, index)
+                point = [-point_lps[0], -point_lps[1], point_lps[2]]
+                for row in range(3):
+                    matrix[row][axis] = point[row] - origin[row]
+        for row in range(3):
+            matrix[row][3] = origin[row]
+        matrix[3] = [0.0, 0.0, 0.0, 1.0]
+        return {"target_shape": shape, "target_voxel_to_ras_matrix": matrix, "source": "live_mimics"}
+    except Exception:
+        return None
+
+
+def _matrix_close(left, right, tolerance=1e-4):
+    try:
+        if len(left) != 4 or len(right) != 4:
+            return False
+        for row in range(4):
+            if len(left[row]) != 4 or len(right[row]) != 4:
+                return False
+            for column in range(4):
+                if abs(float(left[row][column]) - float(right[row][column])) > float(tolerance):
+                    return False
+        return True
+    except Exception:
+        return False
+
+
+def _same_path(left, right):
+    try:
+        return os.path.normcase(os.path.abspath(str(left or ""))) == os.path.normcase(os.path.abspath(str(right or "")))
+    except Exception:
+        return False
+
+
+def _monitor_target_is_open(monitor):
+    if _infer_case_id(monitor.get("ts_root")) != monitor.get("case_id"):
+        return False, "Open the source case {0} to apply this result.".format(monitor.get("case_id"))
+    launch_project = monitor.get("launch_project_path")
+    if launch_project and not _same_path(_current_project_path(), launch_project):
+        return False, "Open the original project to apply this result: {0}".format(launch_project)
+    expected = monitor.get("target_grid") or {}
+    live = _active_live_grid_payload()
+    if not live:
+        return False, "The live Mimics image grid could not be measured."
+    if list(live.get("target_shape") or []) != list(expected.get("target_shape") or []):
+        return False, "The active image shape differs from the inference target."
+    if not _matrix_close(
+        live.get("target_voxel_to_ras_matrix") or [],
+        expected.get("target_voxel_to_ras_matrix") or [],
+    ):
+        return False, "The active image physical grid differs from the inference target."
+    return True, ""
+
+
 def _active_mimics_grid_payload():
     try:
         image = mimics.data.images.get_active()
@@ -537,8 +646,9 @@ def _default_training_options(config, profile_name=None):
     values = {}
     if default_profile and isinstance(profiles, dict):
         values.update(profiles.get(default_profile, {}) or {})
-    values.setdefault("base_config", config.get("base_config", "config/mimics_lora_segformer3d.yaml"))
-    values.setdefault("epochs", config.get("default_epochs", 10))
+    values.setdefault("base_config", config.get("base_config", "config/research/ct_fewshot_fast.yaml"))
+    values.setdefault("strategy", config.get("default_strategy", "adaptive"))
+    values.setdefault("epochs", config.get("default_epochs", 20))
     values["batch_size"] = 1
     values.setdefault("grad_accumulation", config.get("default_grad_accumulation", 1))
     values.setdefault("lr", config.get("default_lr", 0.001))
@@ -581,10 +691,14 @@ def _split_csv(values):
 
 def _append_training_args(cmd, config, options):
     cmd.extend([
+        "--strategy",
+        str(options.get("strategy", config.get("default_strategy", "adaptive"))),
+        "--strategy-options-json",
+        str(options.get("strategy_options_json", "{}")),
         "--base-config",
-        str(options.get("base_config", config.get("base_config", "config/mimics_lora_segformer3d.yaml"))),
+        str(options.get("base_config", config.get("base_config", "config/research/ct_fewshot_fast.yaml"))),
         "--epochs",
-        str(int(options.get("epochs", config.get("default_epochs", 10)))),
+        str(int(options.get("epochs", config.get("default_epochs", 20)))),
         "--batch-size",
         str(int(options.get("batch_size", config.get("default_batch_size", 1)))),
         "--grad-accumulation",
@@ -915,8 +1029,11 @@ def _resource_wait_text(job):
     holder = resource_wait.get("owner", "unknown")
     pid = resource_wait.get("pid", "")
     if pid:
-        return "Waiting for {0}: {1} (PID {2})".format(resource, holder, pid)
-    return "Waiting for {0}".format(resource)
+        text = "Waiting for {0}: {1} (PID {2})".format(resource, holder, pid)
+    else:
+        text = "Waiting for {0}".format(resource)
+    action = str(resource_wait.get("user_action") or "").strip()
+    return text + ("\n" + action if action else "")
 
 
 def _guard_no_active_job(ts_root, requested_kind="train"):
@@ -1341,6 +1458,7 @@ def _launch_external_advanced_training(config, organ, ts_root):
         "organ": organ,
         "ts_root": os.path.abspath(ts_root),
         "workspace": workspace,
+        "mcs_output_dir": _resolve_mimics_output_dir(ts_root),
         "project_root": _project_root(),
         "pipeline_script": _pipeline_script(),
         "dinov3_root": dinov3_root,
@@ -1466,7 +1584,7 @@ def _train_model(advanced=False):
         return 1
     ts_root = _choose_dataset_root("Select dataset folder")
     if not ts_root or not os.path.isdir(ts_root):
-        mimics.dialogs.message_box("No valid dataset folder was selected.", title=TITLE, ui_blocking=False)
+        _mimics_log(logging.INFO, "DINOv3 training cancelled: no dataset folder was selected.")
         return 1
     if not _guard_no_active_job(ts_root, requested_kind="train"):
         return 1
@@ -1652,6 +1770,12 @@ def _launch_inference_job(config, ts_root, case_id, organ, selected_model=None):
             "--model-id",
             selected_model.get("model_id", "latest") or "latest",
         ])
+    target_grid = _active_live_grid_payload()
+    if not target_grid:
+        raise RuntimeError(
+            "Could not measure the active Mimics image grid. Inference was not started because the result could not be applied safely."
+        )
+    launch_project_path = _current_project_path() or ""
     process = _launch_process(cmd, cwd=_project_root())
     status_path = _status_path(ts_root, job_id)
     cancel_path = os.path.join(
@@ -1692,6 +1816,9 @@ def _launch_inference_job(config, ts_root, case_id, organ, selected_model=None):
         "bridge_started": False,
         "bridge_job_dir": os.path.join(_workspace(ts_root), "jobs", job_id + "_apply"),
         "mask_name": "AI_" + organ,
+        "launch_project_path": launch_project_path,
+        "target_grid": target_grid,
+        "waiting_to_apply_logged": False,
     }
     _start_monitor(monitor)
     _mimics_log(
@@ -1823,7 +1950,7 @@ def _start_inference(choose_model=False):
         return 1
     ts_root = _choose_dataset_root("Select dataset folder")
     if not ts_root or not os.path.isdir(ts_root):
-        mimics.dialogs.message_box("No valid dataset folder was selected.", title=TITLE, ui_blocking=False)
+        _mimics_log(logging.INFO, "DINOv3 prediction cancelled: no dataset folder was selected.")
         return 1
     if not _guard_no_active_job(ts_root, requested_kind="infer"):
         return 1
@@ -1876,7 +2003,7 @@ def _launch_bridge_mask_to_buffer(monitor, status):
         "axes": axes,
         "flips": flips,
     }
-    grid_payload = _active_mimics_grid_payload()
+    grid_payload = monitor.get("target_grid")
     if grid_payload:
         params.update(grid_payload)
         _mimics_log(
@@ -1888,8 +2015,9 @@ def _launch_bridge_mask_to_buffer(monitor, status):
     else:
         _mimics_log(
             logging.WARNING,
-            "DINOv3 prediction conversion could not read active Mimics grid metadata; falling back to source image geometry.",
+            "DINOv3 prediction conversion has no verified launch-time Mimics grid. The result will not be applied.",
         )
+        raise RuntimeError("No verified launch-time Mimics grid was recorded for this inference job.")
     input_path = os.path.join(job_dir, "bridge_input.json")
     result_path = os.path.join(job_dir, "bridge_result.json")
     _write_json_atomic(input_path, params)
@@ -2160,6 +2288,26 @@ def _monitor_tick(monitor):
     if state != "completed":
         return
     if not monitor.get("bridge_started"):
+        target_open, reason = _monitor_target_is_open(monitor)
+        if not target_open:
+            if not monitor.get("waiting_to_apply_logged"):
+                monitor["waiting_to_apply_logged"] = True
+                _mimics_log(logging.INFO, "DINOv3 prediction is ready but was not applied: {0}".format(reason))
+            status["application_state"] = "waiting_for_source_case"
+            status["application_message"] = reason
+            status["updated_at_epoch"] = time.time()
+            try:
+                _write_json_atomic(monitor["status_path"], status)
+            except Exception:
+                pass
+            return
+        monitor["waiting_to_apply_logged"] = False
+        status.pop("application_state", None)
+        status.pop("application_message", None)
+        try:
+            _write_json_atomic(monitor["status_path"], status)
+        except Exception:
+            pass
         _launch_bridge_mask_to_buffer(monitor, status)
         return
     bridge_result = _read_json(monitor.get("bridge_result_path"), None)
@@ -2173,6 +2321,15 @@ def _monitor_tick(monitor):
             ui_blocking=False,
         )
         return
+    target_open, reason = _monitor_target_is_open(monitor)
+    if not target_open:
+        status["application_state"] = "waiting_for_source_case"
+        status["application_message"] = reason
+        try:
+            _write_json_atomic(monitor["status_path"], status)
+        except Exception:
+            pass
+        return
     try:
         mask = _find_or_create_mask(monitor["mask_name"])
         _set_mask_from_u8(mask, bridge_result["output_path"], bridge_result["mimics_shape"])
@@ -2180,6 +2337,25 @@ def _monitor_tick(monitor):
         _stop_monitor(key)
         mimics.dialogs.message_box("Could not apply prediction:\n\n{0}".format(exc), title=TITLE, ui_blocking=False)
         return
+    cleaned = []
+    for path in (status.get("output_path"), monitor.get("bridge_job_dir")):
+        if not path:
+            continue
+        try:
+            if os.path.isdir(path):
+                shutil.rmtree(path)
+            elif os.path.isfile(path):
+                os.remove(path)
+            cleaned.append(path)
+        except Exception as error:
+            _mimics_log(logging.WARNING, "Could not clean DINOv3 inference artifact {0}: {1}".format(path, error))
+    status["applied_to_mimics"] = True
+    status["applied_mask_name"] = monitor["mask_name"]
+    status["artifact_cleanup"] = {"removed": cleaned, "completed_at_epoch": time.time()}
+    try:
+        _write_json_atomic(monitor["status_path"], status)
+    except Exception as error:
+        _mimics_log(logging.WARNING, "Could not record DINOv3 inference cleanup: {0}".format(error))
     _stop_monitor(key)
     _mimics_log(
         logging.INFO,
@@ -2567,8 +2743,21 @@ def _show_status_text(ts_root):
         payload = _read_json(path, {}) or {}
         jobs.append((os.path.getmtime(path), payload))
     jobs.sort(reverse=True)
+    try:
+        selected_organ = _selected_organ()
+    except Exception:
+        selected_organ = None
+    if selected_organ:
+        jobs = [item for item in jobs if _safe_slug(item[1].get("organ", "")) == _safe_slug(selected_organ)]
+    active_states = set([
+        "launching", "preparing", "exporting_labels", "waiting_for_background_mimics",
+        "waiting_for_gpu", "training", "running", "cancelling", "configuring",
+        "selecting_model", "training_started",
+    ])
+    active_jobs = [item for item in jobs if item[1].get("status") in active_states]
+    jobs = (active_jobs or jobs)[:1]
     lines = []
-    for index, item in enumerate(jobs[:8]):
+    for index, item in enumerate(jobs):
         _, job = item
         lines.append(_format_job_line(job))
         if index == 0:
@@ -2580,10 +2769,6 @@ def _show_status_text(ts_root):
                 lines.append("  Model: {0}".format(model.get("checkpoint")))
             if job.get("output_path"):
                 lines.append("  Output: {0}".format(job.get("output_path")))
-    try:
-        selected_organ = _selected_organ()
-    except Exception:
-        selected_organ = None
     model_lines = _latest_model_lines(ts_root, selected_organ)
     if model_lines:
         lines.append("")
@@ -2601,6 +2786,13 @@ def _show_status_text(ts_root):
 
 
 def _show_status():
+    if not _selected_organ():
+        mimics.dialogs.message_box(
+            "Select one organ Mask to view its current DINOv3 task.",
+            title=TITLE,
+            ui_blocking=False,
+        )
+        return 1
     ts_root = _choose_dataset_root("Select dataset folder")
     if not ts_root or not os.path.isdir(ts_root):
         return 1
@@ -2688,13 +2880,15 @@ def main(action=None):
                 "Select one organ Mask before training or prediction.\n\n"
                 "Training uses saved .mcs files and runs fully in the background."
             ),
-            buttons=";".join([BUTTON_TRAIN, BUTTON_TRAIN_ADVANCED, BUTTON_PREDICT, BUTTON_PREDICT_MODEL, BUTTON_STATUS, BUTTON_STOP, BUTTON_CANCEL]),
+            buttons=";".join([BUTTON_TRAIN_MODEL, BUTTON_PREDICT, BUTTON_PREDICT_MODEL, BUTTON_STATUS, BUTTON_STOP, BUTTON_CANCEL]),
             title=TITLE,
             ui_blocking=True,
         )
     if action == BUTTON_TRAIN:
         return _train_model(False)
     if action == BUTTON_TRAIN_ADVANCED:
+        return _train_model(True)
+    if action == BUTTON_TRAIN_MODEL:
         return _train_model(True)
     if action == BUTTON_PREDICT:
         return _start_inference(False)

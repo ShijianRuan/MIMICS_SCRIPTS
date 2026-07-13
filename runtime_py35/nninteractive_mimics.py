@@ -48,7 +48,6 @@ BUTTON_ADD_FOREGROUND_SCRIBBLE = "Add Foreground Scribble"
 BUTTON_ADD_BACKGROUND_SCRIBBLE = "Add Background Scribble"
 BUTTON_RUN_SCRIBBLES = "Run Scribbles"
 BUTTON_DISCARD_SCRIBBLES = "Discard Scribbles"
-BUTTON_CREATE = "Create New Result Mask"
 BUTTON_CANCEL = "Cancel"
 BUTTON_DISCARD_SESSION = "Discard AI Session"
 BUTTON_RETRY = "Retry Prediction"
@@ -57,6 +56,12 @@ BUTTON_START_CURRENT = "Start From Current Mask"
 PROMPT_MASK_PREFIX = "nnInteractive Prompt"
 DEFAULT_RESULT_NAME = "nnInteractive Result"
 ASYNC_JOB_METADATA = "nninteractive.async_job_path"
+DRAFT_ROLE_METADATA = "nninteractive.role"
+DRAFT_SOURCE_GUID_METADATA = "nninteractive.source_mask_guid"
+DRAFT_SOURCE_NAME_METADATA = "nninteractive.source_mask_name"
+DRAFT_SOURCE_SHA256_METADATA = "nninteractive.source_mask_sha256"
+DRAFT_WRITE_MODE_METADATA = "nninteractive.write_mode"
+DRAFT_ROLE_VALUE = "ai_draft"
 SOURCE_IMAGE_PATH_METADATA = "mimics_script.source_image_path"
 SOURCE_IMAGE_KIND_METADATA = "mimics_script.source_image_kind"
 SOURCE_IMAGE_SHAPE_METADATA = "mimics_script.source_image_shape"
@@ -299,6 +304,35 @@ def _sha256_file(path):
                 break
             digest.update(chunk)
     return "sha256:" + digest.hexdigest()
+
+
+def _cleanup_cache_entries(root, retention_days, max_entries):
+    if not os.path.isdir(root):
+        return 0
+    now = time.time()
+    cutoff = now - max(1, int(retention_days)) * 86400
+    entries = []
+    for name in os.listdir(root):
+        path = os.path.join(root, name)
+        try:
+            modified = os.path.getmtime(path)
+        except OSError:
+            modified = 0.0
+        entries.append((modified, path))
+    entries.sort(reverse=True)
+    removed = 0
+    for index, (modified, path) in enumerate(entries):
+        if modified >= cutoff and index < max(1, int(max_entries)):
+            continue
+        try:
+            if os.path.isdir(path):
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
+            removed += 1
+        except Exception:
+            pass
+    return removed
 
 
 def _object_id(obj):
@@ -650,19 +684,23 @@ def _masks_for_image(image):
     return result
 
 
-def _unique_result_name():
+def _unique_mask_name(base_name):
     existing = set(str(getattr(mask, "name", "")) for mask in mimics.data.masks)
-    if DEFAULT_RESULT_NAME not in existing:
-        return DEFAULT_RESULT_NAME
+    if base_name not in existing:
+        return base_name
     index = 2
-    while "{0} {1}".format(DEFAULT_RESULT_NAME, index) in existing:
+    while "{0} {1}".format(base_name, index) in existing:
         index += 1
-    return "{0} {1}".format(DEFAULT_RESULT_NAME, index)
+    return "{0} {1}".format(base_name, index)
 
 
-def _create_result_mask(image):
+def _unique_result_name():
+    return _unique_mask_name(DEFAULT_RESULT_NAME)
+
+
+def _create_result_mask(image, name=None):
     mask = mimics.segment.create_mask()
-    mask.name = _unique_result_name()
+    mask.name = _unique_mask_name(name) if name else _unique_result_name()
     try:
         mask.image = image
     except Exception as error:
@@ -676,40 +714,99 @@ def _create_result_mask(image):
     return mask
 
 
-def _select_target_mask(image):
-    selected = [mask for mask in _masks_for_image(image) if bool(getattr(mask, "selected", False))]
-    if len(selected) == 1:
-        target = selected[0]
-    elif len(selected) > 1:
-        raise RuntimeError(
-            "Select exactly one target Mask in the Project Tree, then run nnInteractive again."
-        )
-    else:
-        answer = mimics.dialogs.question_box(
-            message=(
-                "No target Mask is selected.\n\n"
-                "Select an existing Mask in the Project Tree, or create a new empty result Mask."
-            ),
-            buttons=BUTTON_CREATE + ";" + BUTTON_CANCEL,
-            title=TITLE,
-            ui_blocking=True,
-        )
-        if answer != BUTTON_CREATE:
-            return None
-        target = _create_result_mask(image)
+def _mask_is_empty(mask):
+    return int(getattr(mask, "number_of_pixels", 0) or 0) <= 0
 
-    target_image = getattr(target, "image", None)
-    if target_image is None:
+
+def _is_ai_draft(mask):
+    return str(_metadata_get(mask, DRAFT_ROLE_METADATA, "") or "") == DRAFT_ROLE_VALUE
+
+
+def _mark_ai_draft(target, source=None):
+    _metadata_set(target, DRAFT_ROLE_METADATA, DRAFT_ROLE_VALUE)
+    _metadata_set(target, DRAFT_WRITE_MODE_METADATA, "derived_copy" if source is not None else "new_empty")
+    if source is not None:
+        _metadata_set(target, DRAFT_SOURCE_GUID_METADATA, _object_id(source))
+        _metadata_set(target, DRAFT_SOURCE_NAME_METADATA, str(getattr(source, "name", "")))
+
+
+def _delete_unused_auto_draft(target, auto_created, source=None):
+    if not auto_created or target is None or not _mask_is_empty(target):
+        return
+    if _metadata_get(target, ASYNC_JOB_METADATA, ""):
+        return
+    try:
+        mimics.data.masks.delete(target)
+    except Exception as error:
+        _mimics_log(
+            logging.WARNING,
+            "Could not remove unused nnInteractive Draft {0}: {1}".format(
+                getattr(target, "name", ""), error
+            ),
+        )
+        return
+    if source is not None and source is not target:
         try:
-            target.image = image
+            source.selected = True
+        except Exception:
+            pass
+
+
+def _select_session_masks(image, config):
+    """Resolve immutable session source and mutable result target.
+
+    Non-empty manual masks create a Draft by default. Empty masks, existing
+    Drafts, and masks with an active legacy session continue in place.
+    """
+    selected = [mask for mask in _masks_for_image(image) if bool(getattr(mask, "selected", False))]
+    if len(selected) > 1:
+        raise RuntimeError("Select exactly one source or AI Draft Mask, then run nnInteractive again.")
+    if not selected:
+        target = _create_result_mask(image)
+        _mark_ai_draft(target)
+        return {
+            "source": target,
+            "target": target,
+            "auto_created": True,
+            "write_mode": "new_empty",
+        }
+
+    source = selected[0]
+    source_image = getattr(source, "image", None)
+    if source_image is None:
+        try:
+            source.image = image
         except Exception as error:
-            raise RuntimeError("The target Mask is not bound to the active image: {0}".format(error))
-    elif not _same_object(target_image, image):
+            raise RuntimeError("The selected Mask is not bound to the active image: {0}".format(error))
+    elif not _same_object(source_image, image):
         raise RuntimeError(
             "The selected Mask belongs to a different image set. "
             "Activate its image set or select another Mask."
         )
-    return target
+
+    mode = str(config.get("existing_mask_result_mode", "derived_copy") or "derived_copy").strip().lower()
+    has_active_session = bool(_metadata_get(source, ASYNC_JOB_METADATA, ""))
+    if mode in ("in_place", "inplace", "overwrite") or _mask_is_empty(source) or _is_ai_draft(source) or has_active_session:
+        return {
+            "source": source,
+            "target": source,
+            "auto_created": False,
+            "write_mode": "in_place",
+        }
+
+    draft_name = "{0} - AI Draft".format(str(getattr(source, "name", "") or "nnInteractive"))
+    target = _create_result_mask(image, draft_name)
+    _mark_ai_draft(target, source)
+    try:
+        source.selected = False
+    except Exception:
+        pass
+    return {
+        "source": source,
+        "target": target,
+        "auto_created": True,
+        "write_mode": "derived_copy",
+    }
 
 
 def _buffer_dtype(view):
@@ -930,7 +1027,30 @@ def _source_image_export(image, config):
         cache_root = os.path.join(_runtime_work_dir(config), "source_fastpath_cache")
         if not os.path.isdir(cache_root):
             os.makedirs(cache_root)
-        cache_path = os.path.join(cache_root, "{0}_axial_source.nii.gz".format(case_id))
+        _cleanup_cache_entries(
+            cache_root,
+            config.get("source_cache_retention_days", 7),
+            config.get("source_cache_max_entries", 12),
+        )
+        try:
+            source_stat = os.stat(path)
+            source_signature = "{0}|{1}|{2}|{3}".format(
+                path,
+                int(source_stat.st_size),
+                int(source_stat.st_mtime),
+                json.dumps(mimics_voxel_to_ras, sort_keys=True),
+            )
+        except OSError:
+            source_signature = "{0}|{1}".format(path, json.dumps(mimics_voxel_to_ras, sort_keys=True))
+        cache_key = hashlib.sha256(source_signature.encode("utf-8")).hexdigest()[:16]
+        safe_case_id = "".join(
+            character if character.isalnum() or character in ("-", "_") else "_"
+            for character in case_id
+        )[:48] or "case"
+        cache_path = os.path.join(
+            cache_root,
+            "{0}_{1}_axial_source.nii.gz".format(safe_case_id, cache_key),
+        )
         if not os.path.isfile(cache_path):
             try:
                 _mimics_log(
@@ -2329,10 +2449,11 @@ def _close_async_job(target, state, reason):
     _metadata_delete(target, ASYNC_JOB_METADATA)
 
 
-def _cleanup_async_jobs(root, retention_days):
+def _cleanup_async_jobs(root, retention_days, max_terminal_jobs=20):
     if not os.path.isdir(root):
         return
     cutoff = time.time() - max(1, int(retention_days)) * 86400
+    terminal_jobs = []
     for name in os.listdir(root):
         job_dir = os.path.join(root, name)
         if not os.path.isdir(job_dir):
@@ -2348,8 +2469,17 @@ def _cleanup_async_jobs(root, retention_days):
             "failed",
             "expired",
         ) or worker_status in ("closed", "failed", "expired")
-        if terminal and updated < cutoff:
-            shutil.rmtree(job_dir, ignore_errors=True)
+        if terminal:
+            try:
+                modified = max(updated, os.path.getmtime(job_dir))
+            except OSError:
+                modified = updated
+            terminal_jobs.append((modified, job_dir))
+    terminal_jobs.sort(reverse=True)
+    for index, (modified, job_dir) in enumerate(terminal_jobs):
+        if modified >= cutoff and index < max(1, int(max_terminal_jobs)):
+            continue
+        shutil.rmtree(job_dir, ignore_errors=True)
 
 
 def _start_async_worker(python_exe, bridge_script, worker_dir):
@@ -2486,6 +2616,7 @@ def _get_or_start_image_worker(config, image, jobs_root, allow_buffer_export=Tru
     initialize = dict(parameters["request"])
     initialize["async_worker_idle_timeout_seconds"] = _async_worker_idle_timeout(config)
     initialize["async_poll_seconds"] = float(config.get("async_poll_seconds", 0.25))
+    initialize["async_worker_control_dir"] = worker_dir
     initialize["initial_seg_path"] = None
     initialize["parent_pid"] = os.getpid()
     _write_json_atomic(os.path.join(worker_dir, "initialize.json"), initialize)
@@ -2553,7 +2684,11 @@ def _prewarm_async_image_worker(config, image):
     jobs_root = os.path.join(_runtime_work_dir(config, model_dir), "async_jobs")
     if not os.path.isdir(jobs_root):
         os.makedirs(jobs_root)
-    _cleanup_async_jobs(jobs_root, config.get("async_job_retention_days", 7))
+    _cleanup_async_jobs(
+        jobs_root,
+        config.get("async_job_retention_days", 3),
+        config.get("async_job_max_terminal", 20),
+    )
     image_input_mode = str(config.get("image_input_mode", "") or "").strip().lower()
     force_mimics_buffer = image_input_mode in ("mimics", "mimics_buffer", "buffer")
     # In explicit Mimics mode, prewarm must use buffer export; otherwise the
@@ -2566,7 +2701,8 @@ def _prewarm_async_image_worker(config, image):
     )
 
 
-def _start_async_job(config, image, target):
+def _start_async_job(config, image, target, source=None, write_mode="in_place"):
+    source = target if source is None else source
     shared_worker = None
     if bool(config.get("async_reuse_image_worker", True)):
         cached = _ASYNC_IMAGE_WORKERS.get(_object_id(image))
@@ -2584,7 +2720,11 @@ def _start_async_job(config, image, target):
         jobs_root = os.path.join(_runtime_work_dir(config, model_dir), "async_jobs")
     if not os.path.isdir(jobs_root):
         os.makedirs(jobs_root)
-    _cleanup_async_jobs(jobs_root, config.get("async_job_retention_days", 7))
+    _cleanup_async_jobs(
+        jobs_root,
+        config.get("async_job_retention_days", 3),
+        config.get("async_job_max_terminal", 20),
+    )
 
     if shared_worker is None and bool(config.get("async_reuse_image_worker", True)):
         shared_worker = _get_or_start_image_worker(config, image, jobs_root)
@@ -2616,7 +2756,7 @@ def _start_async_job(config, image, target):
             "mimics_world_coordinate_system": shared_worker.get("image_mimics_world_coordinate_system", ""),
             "mimics_to_source_index_matrix": shared_worker.get("image_mimics_to_source_index_matrix", ""),
         }
-    base_export = _export_mask(target, os.path.join(inputs_dir, "target_at_start.u8"), image_export["shape"])
+    base_export = _export_mask(source, os.path.join(inputs_dir, "target_at_start.u8"), image_export["shape"])
     if image_export["shape"] != base_export["shape"]:
         shutil.rmtree(job_dir, ignore_errors=True)
         raise RuntimeError(
@@ -2643,6 +2783,11 @@ def _start_async_job(config, image, target):
         worker_log_path = shared_worker["worker_log"]
         runtime_log = shared_worker["runtime_log"]
 
+    target_sha256 = (
+        base_export["sha256"]
+        if target is source
+        else _mask_sha256(target, image_export["shape"])
+    )
     state = {
         "_job_dir": job_dir,
         "_worker_dir": worker_dir,
@@ -2660,10 +2805,13 @@ def _start_async_job(config, image, target):
         "image_mimics_to_source_index_matrix": image_export.get("mimics_to_source_index_matrix", ""),
         "target_guid": _object_id(target),
         "target_name": str(getattr(target, "name", "")),
+        "source_guid": _object_id(source),
+        "source_name": str(getattr(source, "name", "")),
+        "write_mode": str(write_mode or "in_place"),
         "shape": base_export["shape"],
         "base_path": base_export["path"],
         "base_sha256": base_export["sha256"],
-        "expected_target_sha256": base_export["sha256"],
+        "expected_target_sha256": target_sha256,
         "interactions": [],
         "next_sequence": 1,
         "pending_sequence": None,
@@ -2676,6 +2824,8 @@ def _start_async_job(config, image, target):
         "runtime_log": runtime_log,
     }
     _save_async_job(state)
+    if source is not target and _is_ai_draft(target):
+        _metadata_set(target, DRAFT_SOURCE_SHA256_METADATA, base_export["sha256"])
 
     state["pid"] = worker_pid
     state["worker_log"] = worker_log_path
@@ -2885,7 +3035,9 @@ def _async_monitor_tick(monitor):
             _stop_async_monitor(job_dir)
             if outcome == "applied":
                 mimics.dialogs.message_box(
-                    "nnInteractive result has been applied automatically.",
+                    "nnInteractive result has been applied automatically to:\n{0}".format(
+                        getattr(monitor.get("target"), "name", "")
+                    ),
                     title=TITLE,
                     ui_blocking=False,
                 )
@@ -3170,8 +3322,11 @@ def _handle_async_result(image, target, state):
     return "applied"
 
 
-def _async_prompt_menu(target, state):
+def _async_prompt_menu(target, state, source=None):
     count = len(state.get("interactions", [])) if state else 0
+    menu_source = target if source is None else source
+    source_name = state.get("source_name") if state else str(getattr(menu_source, "name", ""))
+    target_name = state.get("target_name") if state else str(getattr(target, "name", ""))
     buttons = [
         BUTTON_POINT,
         BUTTON_SCRIBBLE,
@@ -3183,18 +3338,20 @@ def _async_prompt_menu(target, state):
     buttons.append(BUTTON_FINISH)
     return mimics.dialogs.question_box(
         message=(
-            "Target Mask: {0}\n"
-            "Prompts in this AI session: {1}\n\n"
+            "Source snapshot: {0}\n"
+            "AI result Mask: {1}\n"
+            "Prompts in this AI session: {2}\n\n"
             "Submitting a prompt starts background inference and immediately "
             "returns control to Mimics. The result is applied automatically when ready."
-        ).format(getattr(target, "name", ""), count),
+        ).format(source_name, target_name, count),
         buttons=";".join(buttons),
         title=TITLE,
         ui_blocking=True,
     )
 
 
-def _run_async(image, target, config):
+def _run_async(image, target, config, source=None, auto_created=False, write_mode="in_place"):
+    source = target if source is None else source
     _log_effective_image_input_config(config)
     state = _load_async_job(target)
     validated_target_hash = None
@@ -3238,7 +3395,7 @@ def _run_async(image, target, config):
     pending_visual_objects = []
     visual_objects_registered = False
     try:
-        action = _async_prompt_menu(target, state)
+        action = _async_prompt_menu(target, state, source)
         if action == BUTTON_FINISH or not action:
             if state is not None:
                 _close_async_job(target, state, "user_finished")
@@ -3306,7 +3463,13 @@ def _run_async(image, target, config):
             )
             return 0
         if state is None:
-            state = _start_async_job(config, image, target)
+            state = _start_async_job(
+                config,
+                image,
+                target,
+                source=source,
+                write_mode=write_mode,
+            )
             validated_target_hash = state.get("expected_target_sha256")
         prompt = _persist_interaction(state["_job_dir"], prompt)
         # Store visual objects for deferred deletion after async result is applied.
@@ -3326,6 +3489,8 @@ def _run_async(image, target, config):
         if pending_visual_objects and not visual_objects_registered:
             for obj in pending_visual_objects:
                 _delete_mimics_object(obj)
+        if state is None:
+            _delete_unused_auto_draft(target, auto_created, source)
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -3490,13 +3655,27 @@ def run():
     image = mimics.data.images.get_active()
     if image is None:
         raise RuntimeError("Open a project and activate an image set before running nnInteractive.")
-    target = _select_target_mask(image)
-    if target is None:
-        _mimics_log(logging.INFO, "nnInteractive cancelled: no target Mask selected.")
-        return 0
     config = _config()
+    session = _select_session_masks(image, config)
+    source = session["source"]
+    target = session["target"]
+    if source is not target:
+        _mimics_log(
+            logging.INFO,
+            "nnInteractive created AI Draft {0} from source Mask {1}; the source will not be modified.".format(
+                getattr(target, "name", ""),
+                getattr(source, "name", ""),
+            ),
+        )
     if str(config.get("execution_mode", "async")).lower() == "async":
-        result = _run_async(image, target, config)
+        result = _run_async(
+            image,
+            target,
+            config,
+            source=source,
+            auto_created=session.get("auto_created", False),
+            write_mode=session.get("write_mode", "in_place"),
+        )
         # Async mode returns 0 after submitting a prompt; the background
         # worker and QTimer monitor are still running.  Don't log "ended".
         return result
@@ -3505,7 +3684,14 @@ def run():
         "Synchronous nnInteractive mode is disabled because it can block the Mimics GUI. "
         "Running in async mode instead.",
     )
-    return _run_async(image, target, config)
+    return _run_async(
+        image,
+        target,
+        config,
+        source=source,
+        auto_created=session.get("auto_created", False),
+        write_mode=session.get("write_mode", "in_place"),
+    )
 
 
 def _cleanup_stale_processes():

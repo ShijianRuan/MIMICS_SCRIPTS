@@ -157,6 +157,11 @@ class FakeVoxelBuffer:
     def tostring(self):
         return self.tobytes()
 
+    def __getitem__(self, index):
+        x, y, z = [int(value) for value in index]
+        offset = (x * self.shape[1] * self.shape[2]) + (y * self.shape[2]) + z
+        return self._data[offset]
+
     def zero(self):
         self._data[:] = bytes(len(self._data))
 
@@ -205,6 +210,14 @@ class FakeImage:
         # Mimics/DICOM patient coordinates are LPS. The default fake image is
         # equivalent to an identity RAS voxel grid, so LPS negates x and y.
         return [-x, -y, z]
+
+    def get_voxel_indexes(self, point):
+        x, y, z = [float(value) for value in point]
+        idx = [int(round(-x)), int(round(-y)), int(round(z))]
+        for axis, value in enumerate(idx):
+            if value < 0 or value >= int(self.logical_dimensions[axis]):
+                raise ValueError("point outside image")
+        return idx
 
 
 class FakeMask:
@@ -385,6 +398,7 @@ class FakeMimics(types.ModuleType):
         self.file = FakeFile(self)
         self.segment_edit_calls = []
         self.imported_dicom = []
+        self.indicated_coordinates = []
         self.gui_enabled = True
         self.update_gui_calls = 0
         self.disable_gui_calls = 0
@@ -393,10 +407,51 @@ class FakeMimics(types.ModuleType):
             create_point=lambda *args, **kwargs: SimpleNamespace(name="point"),
             indicate_spline=lambda *args, **kwargs: SimpleNamespace(points=[]),
         )
-        self.measure = SimpleNamespace(indicate_distance_measurement=lambda *args, **kwargs: None)
+        self.measure = SimpleNamespace(
+            indicate_distance_measurement=lambda *args, **kwargs: None,
+            get_bounding_box=self._get_bounding_box,
+        )
+
+    def _get_bounding_box(self, obj, *args, **kwargs):
+        masks = list(obj) if isinstance(obj, (list, tuple, FakeCollection)) else [obj]
+        points = []
+        for mask in masks:
+            buffer = getattr(mask, "_buffer", None)
+            if buffer is None:
+                continue
+            sx, sy, sz = [int(value) for value in buffer.shape]
+            raw = buffer.tobytes()
+            for x in range(sx):
+                for y in range(sy):
+                    for z in range(sz):
+                        offset = (x * sy * sz) + (y * sz) + z
+                        if raw[offset]:
+                            points.append((x, y, z))
+        if not points:
+            raise ValueError("empty object")
+        xs = [item[0] for item in points]
+        ys = [item[1] for item in points]
+        zs = [item[2] for item in points]
+        min_x = -max(xs) - 0.5
+        max_x = -min(xs) + 0.5
+        min_y = -max(ys) - 0.5
+        max_y = -min(ys) + 0.5
+        min_z = min(zs) - 0.5
+        max_z = max(zs) + 0.5
+        return SimpleNamespace(
+            origin=(min_x, min_y, min_z),
+            first_vector=(max_x - min_x, 0.0, 0.0),
+            second_vector=(0.0, max_y - min_y, 0.0),
+            third_vector=(0.0, 0.0, max_z - min_z),
+        )
 
     def update_gui(self):
         self.update_gui_calls += 1
+
+    def indicate_coordinate(self, *args, **kwargs):
+        if self.indicated_coordinates:
+            return self.indicated_coordinates.pop(0)
+        raise self.UserInterrupted()
 
     def is_update_gui_enabled(self):
         return self.gui_enabled
@@ -443,6 +498,7 @@ def test_runtime_imports(fake, tmp):
         "fewshot_mimics",
         "nninteractive_mimics",
         "create_mcs_batch",
+        "mask_identifier",
     ]
     loaded = []
     for name in modules:
@@ -455,8 +511,8 @@ def test_scripting_entrypoint(fake, tmp):
     fake.reset_scene(image_shape=(2, 2, 2), minimum_value=0, maximum_value=100)
     entry = import_runtime_module("_mimics_entrypoint")
     result = entry.run_runtime_entry(
-        {"__name__": "scripting_library.03_Display.Window_Reset_Full_Range"},
-        str(LIBRARY_DIR / "03_Display" / "Window_Reset_Full_Range.py"),
+        {"__name__": "scripting_library.03_Review.05_Window_Reset_Full_Range"},
+        str(LIBRARY_DIR / "03_Review" / "05_Window_Reset_Full_Range.py"),
         "window_level_mimics",
         action_value="reset",
     )
@@ -486,6 +542,40 @@ def test_window_level_from_selected_mask(fake, tmp):
     module.reset_full_range()
     assert_equal(fake.view.get_contrast(), ((0, 0.0), (3625, 1.0)), "reset should clamp to Mimics reported range")
     return "mask-name preset, image-range clamp, reset retry, state save, and undo passed"
+
+
+def test_mask_identifier_all_mask_bbox_scan(fake, tmp):
+    image = fake.reset_scene(image_shape=(3, 3, 3), minimum_value=0, maximum_value=100)
+    fake.dialogs.messages = []
+    fake.logging.messages = []
+    fake.update_gui_calls = 0
+
+    class CountingMask(FakeMask):
+        def __init__(self, *args, **kwargs):
+            super(CountingMask, self).__init__(*args, **kwargs)
+            self.reads = 0
+
+        def get_voxel_buffer(self):
+            self.reads += 1
+            return super(CountingMask, self).get_voxel_buffer()
+
+    miss = CountingMask("kidney", image=image, array=_u8_pattern_buffer((3, 3, 3), lambda x, y, z: (x, y, z) == (2, 2, 2)))
+    hit = CountingMask("liver", image=image, array=_u8_pattern_buffer((3, 3, 3), lambda x, y, z: (x, y, z) == (1, 1, 1)))
+    hidden = CountingMask("hidden_liver", image=image, array=_u8_buffer((3, 3, 3), 1))
+    hidden.visible = False
+    fake.data.masks = FakeCollection([miss, hit, hidden])
+    fake.indicated_coordinates = [image.get_voxel_center(1, 1, 1)]
+
+    module = import_runtime_module("mask_identifier")
+    module.main()
+
+    assert_equal(miss.reads, 0, "far mask should be skipped by bounding-box filtering")
+    assert_equal(hit.reads, 1, "visible hit mask should be read on demand")
+    assert_equal(hidden.reads, 1, "hidden mask should be scanned by default")
+    assert_true(fake.update_gui_calls >= 2, "mask identifier should yield GUI updates between buffer reads")
+    message = fake.dialogs.messages[-1]["message"] if fake.dialogs.messages else ""
+    assert_true("liver" in message and "hidden_liver" in message, "identifier result should include visible and hidden hits")
+    return "mask identifier scans hidden masks and skips distant masks before reading voxel buffers"
 
 
 def test_export_masks_to_buffers(fake, tmp):
@@ -593,10 +683,129 @@ def test_nninteractive_fast_path_and_mask_buffer(fake, tmp):
     return "source fast path, empty-mask optimization, u8 apply, and hash reuse passed"
 
 
+def test_nninteractive_derived_draft_session(fake, tmp):
+    tmp.mkdir(parents=True, exist_ok=True)
+    image = fake.reset_scene(image_shape=(2, 3, 4), minimum_value=0, maximum_value=100)
+    source = FakeMask(
+        "liver",
+        image=image,
+        array=_u8_pattern_buffer((2, 3, 4), lambda x, _y, _z: x == 0),
+        selected=True,
+    )
+    fake.data.masks.append(source)
+    module = import_runtime_module("nninteractive_mimics")
+
+    session = module._select_session_masks(image, {})
+    target = session["target"]
+    assert_true(session["source"] is source, "selected manual mask should be the source")
+    assert_true(target is not source, "non-empty manual mask should create a separate Draft")
+    assert_equal(target.name, "liver - AI Draft", "derived Draft name")
+    assert_equal(target.number_of_pixels, 0, "Draft must stay empty until AI produces a result")
+    assert_equal(source.number_of_pixels, 12, "source Mask changed while creating Draft")
+    assert_equal(
+        target.metadata.find(module.DRAFT_ROLE_METADATA).value,
+        module.DRAFT_ROLE_VALUE,
+        "Draft metadata role",
+    )
+    assert_equal(
+        target.metadata.find(module.DRAFT_SOURCE_GUID_METADATA).value,
+        source.guid,
+        "Draft source GUID",
+    )
+
+    worker_dir = tmp / "shared_worker"
+    worker_dir.mkdir()
+    worker_log = tmp / "worker.log"
+    runtime_log = tmp / "runtime.log"
+    cached = {
+        "worker_dir": str(worker_dir),
+        "pid": 12345,
+        "python": sys.executable,
+        "python_version": "3",
+        "folds": ["0"],
+        "worker_log": str(worker_log),
+        "runtime_log": str(runtime_log),
+        "shape": [2, 3, 4],
+        "image_source": "fake",
+    }
+    old_alive = module._shared_image_worker_alive
+    old_cache = dict(module._ASYNC_IMAGE_WORKERS)
+    try:
+        module._shared_image_worker_alive = lambda _worker: True
+        module._ASYNC_IMAGE_WORKERS.clear()
+        module._ASYNC_IMAGE_WORKERS[module._object_id(image)] = cached
+        state = module._start_async_job(
+            {}, image, target, source=source, write_mode="derived_copy"
+        )
+    finally:
+        module._shared_image_worker_alive = old_alive
+        module._ASYNC_IMAGE_WORKERS.clear()
+        module._ASYNC_IMAGE_WORKERS.update(old_cache)
+
+    assert_equal(state["source_guid"], source.guid, "async source GUID")
+    assert_equal(state["target_guid"], target.guid, "async target GUID")
+    assert_equal(state["write_mode"], "derived_copy", "async write mode")
+    assert_true(state["base_path"], "non-empty source snapshot was not exported")
+    assert_true(state["base_sha256"].startswith("sha256:"), "source snapshot hash")
+    assert_true(
+        state["expected_target_sha256"].startswith("empty-mask:"),
+        "target stale guard must describe the empty Draft, not the source",
+    )
+    assert_equal(source.number_of_pixels, 12, "source changed while starting async job")
+    assert_equal(target.number_of_pixels, 0, "starting async job copied source into Draft synchronously")
+
+    source.selected = False
+    target.selected = True
+    continued = module._select_session_masks(image, {})
+    assert_true(continued["source"] is target, "existing AI Draft should be its own session source")
+    assert_true(continued["target"] is target, "continuing an AI Draft created another Draft")
+    assert_equal(continued["write_mode"], "in_place", "existing AI Draft continuation mode")
+    assert_equal(
+        len([mask for mask in fake.data.masks if "AI Draft" in mask.name]),
+        1,
+        "continuing an AI Draft should not create a Draft of a Draft",
+    )
+
+    unused = module._create_result_mask(image, "Unused Draft")
+    module._mark_ai_draft(unused)
+    module._delete_unused_auto_draft(unused, True)
+    assert_true(unused not in fake.data.masks, "unused empty auto-Draft was not removed")
+    module._delete_unused_auto_draft(target, True)
+    assert_true(target in fake.data.masks, "active Draft with async metadata was deleted")
+
+    old_check = module._check_async_result_nonblocking
+    old_stop = module._stop_async_monitor
+    baseline_messages = len(fake.dialogs.messages)
+    try:
+        module._check_async_result_nonblocking = lambda _image, _target, _state: "applied"
+        module._stop_async_monitor = lambda _job_dir: None
+        monitor = {
+            "done": False,
+            "deadline": time.time() + 60,
+            "timeout_seconds": 60,
+            "image": image,
+            "target": target,
+            "state": {"_job_dir": state["_job_dir"]},
+        }
+        module._async_monitor_tick(monitor)
+    finally:
+        module._check_async_result_nonblocking = old_check
+        module._stop_async_monitor = old_stop
+    assert_equal(len(fake.dialogs.messages), baseline_messages + 1, "automatic apply success notice count")
+    notice = fake.dialogs.messages[-1]
+    assert_true(target.name in notice["message"], "success notice does not identify the result Draft")
+    assert_true(notice["ui_blocking"] is False, "automatic apply success notice should be non-blocking")
+    return "source snapshot and target Draft remain separate across async startup"
+
+
 def test_fewshot_apply_prediction_and_stop(fake, tmp):
     tmp.mkdir(parents=True, exist_ok=True)
     image = fake.reset_scene(image_shape=(2, 2, 2), minimum_value=0, maximum_value=100)
     module = import_runtime_module("fewshot_mimics")
+    ts_root = tmp / "dataset"
+    (ts_root / "mcs_output").mkdir(parents=True, exist_ok=True)
+    source_project = ts_root / "mcs_output" / "s0001.mcs"
+    fake.file.project_path = str(source_project)
 
     status_path = tmp / "infer_status.json"
     status_path.write_text(json.dumps({"status": "completed"}), encoding="utf-8")
@@ -618,8 +827,20 @@ def test_fewshot_apply_prediction_and_stop(fake, tmp):
         "bridge_started": True,
         "bridge_result_path": str(bridge_result_path),
         "mask_name": "liver",
+        "ts_root": str(ts_root),
+        "case_id": "s0001",
+        "launch_project_path": str(source_project),
+        "target_grid": module._active_live_grid_payload(),
     }
     module._MONITORS["fake-monitor"] = monitor
+    fake.file.project_path = str(ts_root / "mcs_output" / "different_case.mcs")
+    module._monitor_tick(monitor)
+    assert_equal(len([mask for mask in fake.data.masks if mask.name == "liver"]), 0,
+                 "prediction must not be applied to a different open project")
+    waiting_status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert_equal(waiting_status.get("application_state"), "waiting_for_source_case",
+                 "switched-case prediction state")
+    fake.file.project_path = str(source_project)
     module._monitor_tick(monitor)
     applied = [mask for mask in fake.data.masks if mask.name == "liver"]
     assert_equal(len(applied), 1, "few-shot result mask count")
@@ -627,9 +848,7 @@ def test_fewshot_apply_prediction_and_stop(fake, tmp):
     assert_true("fake-monitor" not in module._MONITORS, "few-shot monitor was not stopped")
     assert_true(fake.dialogs.messages and fake.dialogs.messages[-1]["ui_blocking"] is False, "few-shot completion message should be non-blocking")
 
-    ts_root = tmp / "dataset"
-    (ts_root / "mcs_output").mkdir(parents=True, exist_ok=True)
-    fake.file.project_path = str(ts_root / "mcs_output" / "s0001.mcs")
+    fake.file.project_path = str(source_project)
     jobs_dir = ts_root / "fewshot_models" / "jobs"
     jobs_dir.mkdir(parents=True, exist_ok=True)
     cancel_path = tmp / "cancel.request"
@@ -782,10 +1001,12 @@ def main(argv=None):
         tests.append(("Scripting Library shared entrypoint", lambda: test_scripting_entrypoint(fake, tmp / "entrypoint")))
     if args.only in ("window", "all"):
         tests.append(("window/level selected-mask flow", lambda: test_window_level_from_selected_mask(fake, tmp / "window")))
+        tests.append(("mask identifier all-mask bounding-box scan", lambda: test_mask_identifier_all_mask_bbox_scan(fake, tmp / "mask_identifier")))
     if args.only in ("export", "all"):
         tests.append(("mask export buffer flow", lambda: test_export_masks_to_buffers(fake, tmp / "export")))
     if args.only in ("nninteractive", "all"):
         tests.append(("nnInteractive Mimics-side buffer flow", lambda: test_nninteractive_fast_path_and_mask_buffer(fake, tmp / "nninteractive")))
+        tests.append(("nnInteractive derived Draft flow", lambda: test_nninteractive_derived_draft_session(fake, tmp / "nninteractive_draft")))
     if args.only in ("fewshot", "all"):
         tests.append(("DINOv3 few-shot Mimics-side flow", lambda: test_fewshot_apply_prediction_and_stop(fake, tmp / "fewshot")))
         tests.append(("DINOv3 few-shot profile selector", lambda: test_fewshot_profile_selector(fake, tmp / "fewshot_profile")))

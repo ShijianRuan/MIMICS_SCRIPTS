@@ -25,7 +25,7 @@ python tools\mimics_batch_cli.py kill-background
 Inside Mimics, the equivalent entry is:
 
 ```text
-Scripting Library > 99_Admin > Stop_Background_Services
+Scripting Library > 99_Admin > 03_Stop_All_Owned_Services
 ```
 
 Useful log locations:
@@ -52,6 +52,7 @@ Prepare a small but representative validation set:
   physically overlap after resampling.
 - 1 original DICOM folder case, preferably with non-trivial orientation or slice
   ordering.
+- 1 MHD/MHA case with non-identity spacing, origin, and direction.
 - Optional but valuable: MR DICOM or MR NIfTI, oblique CT, and one case on a
   network drive if that is part of normal use.
 - At least one already annotated `.mcs` with several named masks for DINOv3 and
@@ -68,7 +69,7 @@ source orientations.
 Run from inside Mimics:
 
 ```text
-Scripting Library > 01_Data > Import_Dataset
+Scripting Library > 01_Data > 01_Import_Dataset
 ```
 
 Select the dataset root. For each converted `.mcs`:
@@ -80,6 +81,24 @@ Select the dataset root. For each converted `.mcs`:
 - Confirm there is no left-right, anterior-posterior, superior-inferior, or
   diagonal mirror mismatch.
 - Check both a mask whose affine matches the image and one whose affine differs.
+- Run `02_Import_Single_Case` once by selecting an image file directly and once
+  by selecting a flat DICOM directory.
+
+## 1A. Export Destination Safety
+
+1. Save one project containing at least two visible or hidden Masks.
+2. Run `03_Export_Masks`, choose `Safe Copy`, and select an empty directory.
+3. Confirm every Mask appears under `<chosen>/<case>/segmentations`.
+4. Modify one exported file and run Safe Copy again. Confirm it is reported as
+   `skipped_existing` and is not replaced.
+5. Run again with `Overwrite Original` and confirm only then that source
+   `<case>/segmentations` files are updated.
+
+External safe batch export:
+
+```powershell
+python tools\mimics_batch_cli.py export-labels --ts-root "D:\Dataset" --mcs-dir "D:\MCS" --output-dir "D:\ExportedLabels" --mimics-exe "C:\Program Files\Materialise\Mimics Research 21.0\MimicsResearch.exe"
+```
 
 External preparation path:
 
@@ -138,7 +157,7 @@ or freeze the foreground Mimics GUI.
 Test:
 
 1. Open Mimics normally.
-2. Run `Scripting Library > 01_Data > Import_Dataset`.
+2. Run `Scripting Library > 01_Data > 01_Import_Dataset`.
 3. Select a dataset folder with many cases.
 4. Immediately pan/zoom or interact with the existing open project.
 5. Note the time between closing the folder dialog and seeing this log:
@@ -169,7 +188,7 @@ Test:
 3. Run:
 
 ```text
-Scripting Library > 02_AI > nnInteractive
+Scripting Library > 02_AI > 01_nnInteractive
 ```
 
 4. Watch Mimics logging for:
@@ -211,17 +230,20 @@ fail explicitly, and repeated prompts avoid unnecessary image reload work.
 Goal: confirm the integrated prompt behavior is usable and matches expected
 nnInteractive workflow semantics.
 
-Test the following on the same target mask:
+Test the following from the same non-empty manual source mask:
 
-- Existing non-empty mask as initial segmentation.
+- Confirm `<source> - AI Draft` is created and the source voxel hash is unchanged.
+- Confirm the Draft stays empty until the first AI result is applied.
 - Include and exclude point set.
 - Foreground scribble and background scribble set.
 - Box prompt.
 - Lasso prompt on a single slice.
 - Undo last prompt.
 - Reset session.
-- Edit the target mask while background inference is still running and confirm
+- Edit the Draft while background inference is still running and confirm
   the stale result warning appears instead of overwriting newer manual work.
+- Select the AI Draft again and confirm the next session refines it in place
+  without creating a Draft of a Draft.
 
 Report:
 
@@ -236,8 +258,9 @@ nnInteractive background inference started.
 - Any empty prediction message and foreground voxel count.
 - Worker status JSON if a worker stops before producing a result.
 
-Pass condition: prompt capture may use Mimics dialogs/tools, but inference and
-result waiting do not block the foreground GUI.
+Pass condition: prompt capture may use Mimics dialogs/tools, inference and
+result waiting do not block the foreground GUI, the source Mask remains
+unchanged, and successful automatic application shows a non-blocking notice.
 
 ## 6. DINOv3 Few-Shot Training
 
@@ -247,10 +270,9 @@ Mimics and exposes enough progress to users.
 Inside Mimics:
 
 ```text
-Scripting Library > 02_AI > DINOv3 > Train_Update_Model
-Scripting Library > 02_AI > DINOv3 > Train_Advanced
-Scripting Library > 02_AI > DINOv3 > Show_Status
-Scripting Library > 02_AI > DINOv3 > Stop_Latest_Job
+Scripting Library > 02_AI > DINOv3 > 01_Train_Model
+Scripting Library > 02_AI > DINOv3 > 04_Show_Status_Results
+Scripting Library > 02_AI > DINOv3 > 05_Stop_AI_Task
 ```
 
 External smoke test with few samples:
@@ -260,6 +282,18 @@ python tools\fewshot_pipeline.py discover --ts-root "D:\Dataset" --organ liver -
 python tools\fewshot_pipeline.py train --ts-root "D:\Dataset" --organ liver --cases s0001,s0002 --epochs 3 --val-fraction 0.5 --run-id validation_liver
 python tools\fewshot_pipeline.py list-models --ts-root "D:\Dataset" --organ liver --all
 ```
+
+In the external setup window, verify the two pages are `Data and samples` and
+`Model and policy`. Confirm that presets are starting points rather than organ
+lookups and that selecting `Custom` allows supported combinations. Exercise the
+dependency rules: full volume must disable sliding inference; 2.5D must enable
+neighbor distance; custom patch/window inputs must enable only in custom mode;
+and LoRA/adapter/clDice fields must follow their parent selection.
+
+After fresh Mask export, inspect the materialized sample record. Every
+`fresh_export` must report matching source image/label shape and affine, and
+`fresh_source_geometry_checked_cases` must list the selected cases. A mismatch
+must fail before GPU training starts.
 
 During training, verify `Show_Status` and `fewshot_pipeline.log` show epoch,
 loss, learning rate, validation dice when validation is enabled, and best dice.
@@ -290,8 +324,8 @@ being applied to masks.
 Inside Mimics:
 
 ```text
-Scripting Library > 02_AI > DINOv3 > Predict_Current_Case
-Scripting Library > 02_AI > DINOv3 > Predict_Choose_Model
+Scripting Library > 02_AI > DINOv3 > 02_Predict_Current_Case
+Scripting Library > 02_AI > DINOv3 > 03_Predict_Choose_Model
 ```
 
 External inference:
@@ -309,11 +343,18 @@ Report:
 DINOv3 prediction conversion will use the active Mimics image grid
 ```
 
-- If it falls back to source image geometry, include the active project metadata
-  situation and logs.
+- Start prediction on `s0003`, then open another `.mcs` before it finishes. The
+  status must become `waiting_for_source_case`; no Mask may be written to the
+  second project. Reopen `s0003` and confirm application resumes.
+- Modify a copied registered `config.yaml` and confirm inference fails during
+  preflight with a configuration-integrity error instead of using changed
+  preprocessing.
+- Include the launch-time and application-time grid shape/matrix from the job
+  status if grid validation fails. There must be no fallback to source geometry.
 
 Pass condition: DINOv3 output mask aligns with the current `.mcs` image and does
-not require manual flip/rotate fixes.
+not require manual flip/rotate fixes; switching projects cannot apply the result
+to the wrong patient.
 
 ## 8. GPU And Background Mimics Resource Contention
 
@@ -345,7 +386,7 @@ foreground Mimics or unrelated processes.
 Run inside Mimics:
 
 ```text
-Scripting Library > 99_Admin > Stop_Background_Services
+Scripting Library > 99_Admin > 03_Stop_All_Owned_Services
 ```
 
 Or from PowerShell:
@@ -372,10 +413,10 @@ not crash.
 Inside Mimics:
 
 ```text
-Scripting Library > 03_Display > Window_From_Selected_Mask
-Scripting Library > 03_Display > Window_Choose_Preset
-Scripting Library > 03_Display > Window_Reset_Full_Range
-Scripting Library > 03_Display > Window_Undo_Last
+Scripting Library > 03_Review > 02_Window_From_Selected_Mask
+Scripting Library > 03_Review > 03_Window_Choose_Preset
+Scripting Library > 03_Review > 05_Window_Reset_Full_Range
+Scripting Library > 03_Review > 04_Window_Undo_Last
 ```
 
 Test:
@@ -414,6 +455,26 @@ Report:
 
 Pass condition: export runs in background Mimics, foreground Mimics remains
 usable, and exported label orientation matches the original image/mask geometry.
+
+## 12. Draft Continuation, Resource Handoff, And Storage
+
+- Select an existing `<source> - AI Draft`, add another prompt, and confirm no `AI Draft 2` or `AI Draft - AI Draft` is created.
+- Start batch import, then start DINOv3 training with fresh label export enabled. Confirm status reports that label export is waiting for background Mimics, names the import owner, and offers `01 Data > 04 Stop Import Queue` as the optional action.
+- Let import finish and confirm label export and training start automatically without restarting setup.
+- Start an nnInteractive prompt and immediately queue DINOv3 training. Confirm the active prediction completes before the GPU is released.
+- Leave nnInteractive idle for more than 15 seconds, then queue DINOv3 training. Confirm the image worker closes gracefully and training starts without the legacy one-hour wait.
+- After training finishes, run nnInteractive again and confirm a new image worker starts instead of reusing a dead server session.
+- Complete one DINOv3 prediction and confirm its result is applied before the prediction NIfTI and bridge directory are removed.
+- Cancel training after materialization and confirm the run-specific dataset and fresh-label staging are removed when the controller exits.
+- Complete training and confirm the registered model remains while duplicate experiment checkpoints are removed.
+- Run `99 Admin > 02 Clear Cache` while an AI task is active. Confirm active worker, lock, and status files remain intact.
+- Run `03 Stop All Owned Services` in a disposable test. Confirm foreground Mimics and unrelated Python/Mimics processes remain running.
+
+### Remaining synchronous Mimics API boundaries
+
+`get_voxel_buffer()` and `set_voxel_buffer()` cannot safely run in an external Python process. Duplicate reads have been removed and GUI updates are yielded between Masks, but one large Mask read or final result application can still have a short synchronous interval.
+
+Measure manual Mask export, first nnInteractive use of a non-empty in-place Mask, large AI result application, and cursor identification with many overlapping Masks. Record wall time, black-screen duration, image dimensions, Mask count, and Mimics version. A long delay entirely inside one API call requires a Mimics-version-specific API alternative; moving that call to a background thread would violate Mimics thread affinity.
 
 ## Report Template
 

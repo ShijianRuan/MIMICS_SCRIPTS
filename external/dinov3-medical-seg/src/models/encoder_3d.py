@@ -19,42 +19,79 @@ class SliceWiseEncoder3D(nn.Module):
     stacked along the depth dimension to form pseudo-3D feature volumes.
     """
 
-    def __init__(self, backbone_2d: nn.Module, slice_axis: int = 2):
+    def __init__(
+        self,
+        backbone_2d: nn.Module,
+        channel_policy: str = "repeat",
+        neighbor_distance_mm: float | None = None,
+    ):
         """
         Args:
             backbone_2d: DINOv3Backbone instance
-            slice_axis: axis to slice along (0=sagittal, 1=coronal, 2=axial)
+            channel_policy: ``repeat``/``single`` or ``2_5d``. ``ct_windows``
+                is already three-channel before it reaches this module.
+            neighbor_distance_mm: physical offset for 2.5D neighbour slices.
+                The caller supplies ``spacing_zyx`` at forward time.
         """
         super().__init__()
         self.backbone = backbone_2d
-        self.slice_axis = slice_axis
+        self.channel_policy = str(channel_policy or "repeat").lower()
+        self.neighbor_distance_mm = (
+            None if neighbor_distance_mm is None else float(neighbor_distance_mm)
+        )
 
-    def forward(self, volume_3d: torch.Tensor, slice_batch_size: int = 8) -> List[torch.Tensor]:
+    def forward(
+        self,
+        volume_3d: torch.Tensor,
+        slice_batch_size: int = 8,
+        spacing_zyx: torch.Tensor | None = None,
+    ) -> List[torch.Tensor]:
         B, C_in, D, H, W = volume_3d.shape
+        if C_in not in (1, 3):
+            raise RuntimeError("Expected one or three input channels, got {}".format(C_in))
+        if D < 1:
+            raise RuntimeError("Cannot encode an empty depth axis")
 
-        # Extract slices
-        if self.slice_axis == 2:
-            slices_2d = [volume_3d[:, :, d, :, :] for d in range(D)]
-        elif self.slice_axis == 1:
-            slices_2d = [volume_3d[:, :, :, c, :] for c in range(H)]
-            D = H
-        elif self.slice_axis == 0:
-            slices_2d = [volume_3d[:, :, s, :, :] for s in range(W)]
-            D = W
+        neighbour_offset = 1
+        if self.neighbor_distance_mm is not None:
+            if spacing_zyx is None:
+                raise RuntimeError("2.5D physical neighbour distance requires spacing_zyx")
+            spacing = float(torch.as_tensor(spacing_zyx).reshape(-1, 3)[0, 0].item())
+            if spacing <= 0:
+                raise RuntimeError("Invalid Z spacing for 2.5D input: {}".format(spacing))
+            neighbour_offset = max(1, int(round(self.neighbor_distance_mm / spacing)))
 
-        # Preprocess all slices → list of (1, 3, H', W')
+        # Prepare all axial model-space slices as (B, 3, H, W).
         processed = []
-        for slc in slices_2d:
-            if slc.shape[1] == 1:
-                slc = slc.repeat(1, 3, 1, 1)
-            slc = F.interpolate(slc, size=(self.backbone.img_size, self.backbone.img_size),
-                                mode="bilinear", align_corners=False)
+        for depth_index in range(D):
+            if C_in == 3:
+                slc = volume_3d[:, :, depth_index, :, :]
+            elif self.channel_policy in ("2_5d", "2.5d"):
+                before = max(0, depth_index - neighbour_offset)
+                after = min(D - 1, depth_index + neighbour_offset)
+                slc = torch.cat(
+                    [
+                        volume_3d[:, :, before, :, :],
+                        volume_3d[:, :, depth_index, :, :],
+                        volume_3d[:, :, after, :, :],
+                    ],
+                    dim=1,
+                )
+            else:
+                slc = volume_3d[:, :, depth_index, :, :].repeat(1, 3, 1, 1)
+            # DINOv3 uses dynamic RoPE coordinates and supports variable input
+            # sizes. Resizing every candidate back to config.image_size here
+            # would make a 224-vs-320 experiment a meaningless double-resize.
+            patch_size = int(getattr(self.backbone, "patch_size", 1))
+            if slc.shape[-2] % patch_size or slc.shape[-1] % patch_size:
+                raise RuntimeError(
+                    "DINO input size {} must be divisible by patch size {}".format(
+                        tuple(slc.shape[-2:]), patch_size
+                    )
+                )
             processed.append(slc)
 
-        # First slice to determine feature shapes
-        with torch.no_grad():
-            first_feats = self.backbone(processed[0])
-        num_layers = len(first_feats)
+        num_layers = len(self.backbone.out_indices)
 
         # Process in mini-batches, preserving gradient flow through the backbone
         # (LoRA weights etc.).  We accumulate outputs in a list and torch.cat
@@ -101,15 +138,15 @@ class SliceWiseEncoder3D(nn.Module):
             d_end = min(d_start + d_sub, D)
 
             sub_vol = volume_3d[:, :, d_start:d_end, :, :]
-            sub_features = self.forward(sub_vol)  # List[(B, d_sub, C, h, w)]
+            sub_features = self.forward(sub_vol)  # List[(B, C, d_sub, h, w)]
 
             if all_stacked is None:
                 all_stacked = [[] for _ in range(len(sub_features))]
             for layer_idx, feat in enumerate(sub_features):
                 # Pad if needed
-                if feat.shape[1] < d_sub:
+                if feat.shape[2] < d_sub:
                     pad = torch.zeros(
-                        B, d_sub - feat.shape[1], *feat.shape[2:],
+                        B, feat.shape[1], d_sub - feat.shape[2], *feat.shape[3:],
                         device=feat.device, dtype=feat.dtype,
                     )
                     feat = torch.cat([feat, pad], dim=2)

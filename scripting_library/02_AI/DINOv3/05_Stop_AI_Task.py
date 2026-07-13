@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Stop the current DINOv3 training or prediction job."""
+"""Stop the current DINOv3 training or prediction task."""
 
 from __future__ import print_function
 

@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Request only the background import/.mcs creation queue to stop."""
+"""Identify which mask(s) contain the voxel under the cursor.
+
+Click on any 2D/3D view to see which masks contain that voxel,
+together with the mask name, visibility status, and color.
+"""
 
 from __future__ import print_function
 
@@ -20,4 +24,4 @@ for _ in range(5):
 from _mimics_entrypoint import run_runtime_entry
 
 
-run_runtime_entry(globals(), __file__, "mimics_stop_background", function_name="main_stop_import")
+run_runtime_entry(globals(), __file__, "mask_identifier")

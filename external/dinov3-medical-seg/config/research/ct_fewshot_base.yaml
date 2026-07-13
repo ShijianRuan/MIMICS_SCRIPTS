@@ -1,0 +1,80 @@
+# Conservative base for a 12 GB RTX 3060-class GPU. Individual experiments
+# override only the factor they are intended to test.
+model:
+  model_path: ./models/dinov3-vitb16
+  num_classes: 2
+  out_indices: [2, 5, 8, 11]
+  slice_axis: axial
+  slice_batch_size: 2
+  channel_policy: repeat
+  input_normalization: imagenet
+  image_mean: [0.485, 0.456, 0.406]
+  image_std: [0.229, 0.224, 0.225]
+
+finetune:
+  method: frozen
+  lora_rank: 4
+  lora_alpha: 8
+  adapter_bottleneck: 32
+  adapter_position: after_attn
+
+decoder:
+  type: segformer3d
+
+data:
+  modality: ct
+  img_size: [256, 256]
+  target_spacing: null
+  intensity:
+    window: [-1024.0, 1024.0]
+  k_shot: 5
+
+evaluation:
+  surface_tolerance_mm: 2.0
+
+# Off by default. The experimental Haar feature augmentation is only enabled
+# by the named candidate in the study matrix.
+feature_augmentation:
+  enabled: false
+
+augmentation:
+  enabled: true
+  # Left/right mirroring is not a default because right adrenal and left
+  # scapula are laterality-specific tasks. Mirror augmentation is tested only
+  # as an explicit candidate for non-lateralized structures.
+  flip_probability: 0.0
+  flip_axes: []
+  intensity:
+    gamma_range: [0.9, 1.1]
+    brightness_range: [0.95, 1.05]
+    contrast_range: [0.9, 1.1]
+    noise_std: 0.02
+  spatial:
+    rotation_deg: 7.0
+    scale_range: [0.95, 1.05]
+    translation_px: 6
+
+loss:
+  type: dice_ce
+  dice_weight: 0.5
+  ce_weight: 0.5
+
+training:
+  device: auto
+  optimizer: adamw
+  lr: 0.0003
+  weight_decay: 0.01
+  scheduler: cosine
+  warmup_epochs: 5
+  epochs: 80
+  batch_size: 1
+  grad_accumulation: 2
+  mixed_precision: true
+  num_workers: 0
+  validation_enabled: true
+  keep_last_checkpoints: 1
+  seed: 20260711
+  early_stopping:
+    min_epochs: 20
+    patience: 15
+    min_delta: 0.001

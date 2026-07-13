@@ -152,7 +152,7 @@ class TestSyntax(unittest.TestCase):
 
     def test_scripting_library_structure(self):
         lib = os.path.join(PROJECT_ROOT, "scripting_library")
-        for sub in ["01_Data", "02_AI", "03_Display", "99_Admin"]:
+        for sub in ["01_Data", "02_AI", "03_Review", "99_Admin"]:
             self.assertTrue(os.path.isdir(os.path.join(lib, sub)), "Missing dir: {}".format(sub))
 
     def test_no_old_flat_entries(self):
@@ -449,6 +449,86 @@ class TestMimicsBridgeNiftiNormalization(unittest.TestCase):
         self.assertTrue(_affine_is_usable(result),
                         "Returned affine should be a valid 4x4 matrix")
 
+    def test_prepare_preserves_original_oblique_source_shape_metadata(self):
+        """Source metadata must not be replaced by the axial Mimics import grid."""
+        from mimics_bridge import do_prepare
+
+        shape = (4, 5, 6)
+        angle = np.deg2rad(12.0)
+        affine = np.array([
+            [np.cos(angle), 0.0, np.sin(angle), -20.0],
+            [0.0, 1.2, 0.0, -30.0],
+            [-np.sin(angle), 0.0, np.cos(angle), 15.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ])
+        path = self._make_nifti(
+            "oblique_source.nii.gz",
+            np.zeros(shape, dtype=np.int16),
+            affine,
+            sform_code=2,
+            qform_code=1,
+        )
+        result = do_prepare({
+            "image_path": path,
+            "masks": [],
+            "dicom_out": os.path.join(self.tmp, "dicom"),
+            "buffers_out": os.path.join(self.tmp, "buffers"),
+            "case_id": "oblique",
+        })
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["source_image_shape"], list(shape))
+        self.assertEqual(np.asarray(result["source_voxel_to_ras_matrix"]).shape, (4, 4))
+
+    def test_oblique_prediction_buffer_matches_import_buffer_with_axis_mapping(self):
+        """Import and inference must produce the same Mimics buffer for one physical mask."""
+        from mimics_bridge import do_prepare, _mask_buffer_for_target_grid
+        import nibabel as nib
+
+        shape = (12, 10, 8)
+        angle = np.deg2rad(11.0)
+        affine = np.array([
+            [1.1 * np.cos(angle), 0.0, 1.4 * np.sin(angle), -42.0],
+            [0.0, 1.3, 0.0, 17.0],
+            [-1.1 * np.sin(angle), 0.0, 1.4 * np.cos(angle), 8.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ])
+        image_path = os.path.join(self.tmp, "oblique_ct.nii.gz")
+        mask_path = os.path.join(self.tmp, "asymmetric_mask.nii.gz")
+        image = np.zeros(shape, dtype=np.int16)
+        mask = np.zeros(shape, dtype=np.uint8)
+        mask[1:5, 2:8, 1:4] = 1
+        mask[8:11, 1:3, 5:7] = 1
+        nib.save(nib.Nifti1Image(image, affine), image_path)
+        nib.save(nib.Nifti1Image(mask, affine), mask_path)
+        axes = [1, 0, 2]
+        flips = [True, False, True]
+        prepared = do_prepare({
+            "image_path": image_path,
+            "masks": [{"name": "organ", "path": mask_path}],
+            "dicom_out": os.path.join(self.tmp, "mapped_dicom"),
+            "buffers_out": os.path.join(self.tmp, "import_buffers"),
+            "case_id": "mapped_oblique",
+            "axes": axes,
+            "flips": flips,
+        })
+        self.assertEqual(prepared["status"], "ok")
+        imported = prepared["masks"][0]
+        prediction_buffer = os.path.join(self.tmp, "prediction.u8")
+        converted = _mask_buffer_for_target_grid(
+            mask_path,
+            imported["image_shape"],
+            prepared["mimics_voxel_to_ras_matrix"],
+            axes,
+            flips,
+            prediction_buffer,
+        )
+        with open(imported["u8_path"], "rb") as handle:
+            imported_bytes = handle.read()
+        with open(converted["output_path"], "rb") as handle:
+            prediction_bytes = handle.read()
+        self.assertEqual(converted["mimics_shape"], imported["mimics_shape"])
+        self.assertEqual(prediction_bytes, imported_bytes)
+
 
 class TestMimicsBridgeBufferMapping(unittest.TestCase):
     def setUp(self):
@@ -726,6 +806,71 @@ class TestMimicsBridgeBufferMapping(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(case_dir, "segmentations", "organ.nii.gz")))
         out = nib.load(os.path.join(staged_dir, "organ.nii.gz"))
         np.testing.assert_array_equal(data, np.asanyarray(out.dataobj).astype(np.uint8))
+
+    def test_custom_export_does_not_overwrite_existing_mask(self):
+        from mimics_bridge import do_convert
+        import nibabel as nib
+
+        case_dir = os.path.join(self.tmp, "case_safe_export")
+        buffers_dir = os.path.join(self.tmp, "buffers_safe_export")
+        custom_dir = os.path.join(self.tmp, "chosen_output", "case_safe_export", "segmentations")
+        os.makedirs(case_dir)
+        os.makedirs(buffers_dir)
+        os.makedirs(custom_dir)
+        original = np.zeros((2, 2, 1), dtype=np.uint8)
+        nib.save(nib.Nifti1Image(original, np.eye(4)), os.path.join(custom_dir, "organ.nii.gz"))
+        changed = np.ones((2, 2, 1), dtype=np.uint8)
+        with open(os.path.join(buffers_dir, "organ.u8"), "wb") as handle:
+            handle.write(changed.tobytes())
+        manifest_path = os.path.join(buffers_dir, "manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as handle:
+            json.dump({"mimics_shape": [2, 2, 1], "mimics_voxel_to_ras_matrix": np.eye(4).tolist(),
+                       "masks": [{"original_name": "organ", "u8_filename": "organ.u8"}]}, handle)
+        result = do_convert({
+            "buffers_dir": buffers_dir, "manifest_path": manifest_path, "case_dir": case_dir,
+            "output_seg_dir": custom_dir, "overwrite_existing": False,
+            "axes": [0, 1, 2], "flips": [False, False, False],
+        })
+        self.assertEqual("skipped_existing", result["exported"][0]["action"])
+        np.testing.assert_array_equal(original, np.asanyarray(nib.load(os.path.join(custom_dir, "organ.nii.gz")).dataobj))
+
+    def test_prepare_supports_mhd_and_preserves_source_geometry(self):
+        import SimpleITK as sitk
+        from mimics_bridge import do_prepare
+
+        image_path = os.path.join(self.tmp, "volume.mhd")
+        image = sitk.GetImageFromArray(np.arange(24, dtype=np.int16).reshape((2, 3, 4)))
+        image.SetSpacing((0.7, 0.8, 2.5))
+        image.SetOrigin((12.0, -8.0, 30.0))
+        sitk.WriteImage(image, image_path)
+        result = do_prepare({
+            "image_path": image_path, "masks": [], "case_id": "mhd_case",
+            "dicom_out": os.path.join(self.tmp, "mhd_dicom"),
+            "buffers_out": os.path.join(self.tmp, "mhd_buffers"),
+            "axes": [0, 1, 2], "flips": [False, False, False],
+        })
+        self.assertEqual("ok", result["status"])
+        self.assertEqual("medical_image", result["source_image_kind"])
+        self.assertEqual([4, 3, 2], result["source_image_shape"])
+        self.assertTrue(os.path.isdir(result["dicom_folder"]))
+
+    def test_mr_mhd_float_intensity_survives_derived_dicom_scaling(self):
+        import SimpleITK as sitk
+        import pydicom
+        from mimics_bridge import do_prepare
+
+        source_values = np.linspace(-2.5, 7.25, 24, dtype=np.float32).reshape((2, 3, 4))
+        image_path = os.path.join(self.tmp, "mri_volume.mhd")
+        sitk.WriteImage(sitk.GetImageFromArray(source_values), image_path)
+        result = do_prepare({
+            "image_path": image_path, "masks": [], "case_id": "mr_case", "modality": "MR",
+            "dicom_out": os.path.join(self.tmp, "mr_dicom"),
+            "buffers_out": os.path.join(self.tmp, "mr_buffers"),
+        })
+        first = pydicom.dcmread(os.path.join(result["dicom_folder"], "slice_0001.dcm"))
+        reconstructed = first.pixel_array.astype(np.float64) * float(first.RescaleSlope) + float(first.RescaleIntercept)
+        np.testing.assert_allclose(reconstructed, source_values[0].astype(np.float64), atol=float(first.RescaleSlope) + 1e-5)
+        self.assertEqual("MR", first.Modality)
 
     def test_resample_image_to_grid_matches_target_shape(self):
         from mimics_bridge import resample_image_to_grid
@@ -1331,7 +1476,7 @@ class TestScriptingLibraryEntries(unittest.TestCase):
         """Each scripting_library entry should be importable without Mimics."""
         lib = os.path.join(PROJECT_ROOT, "scripting_library")
         entries = []
-        for sub in ["01_Data", "02_AI", "03_Display", "99_Admin"]:
+        for sub in ["01_Data", "02_AI", "03_Review", "99_Admin"]:
             sub_dir = os.path.join(lib, sub)
             if not os.path.isdir(sub_dir):
                 continue
@@ -1367,7 +1512,7 @@ class TestScriptingLibraryEntries(unittest.TestCase):
 
     def test_nninteractive_entry_routes_correctly(self):
         """nnInteractive.py routes to nninteractive_mimics module."""
-        entry = os.path.join(PROJECT_ROOT, "scripting_library", "02_AI", "nnInteractive.py")
+        entry = os.path.join(PROJECT_ROOT, "scripting_library", "02_AI", "01_nnInteractive.py")
         with open(entry, "r") as f:
             source = f.read()
         self.assertIn("nninteractive_mimics", source)
@@ -1382,12 +1527,11 @@ class TestScriptingLibraryEntries(unittest.TestCase):
         self.assertGreater(len(dino_entries), 0, "No DINOv3 entries found")
         self.assertEqual(
             [
-                "01_Show_Status.py",
-                "02_Train_Advanced_Setup.py",
-                "03_Train_Quick_Model.py",
-                "04_Predict_Current_Case_Latest_Model.py",
-                "05_Predict_Choose_Model.py",
-                "06_Stop_Running_Job.py",
+                "01_Train_Model.py",
+                "02_Predict_Current_Case.py",
+                "03_Predict_Choose_Model.py",
+                "04_Show_Status_Results.py",
+                "05_Stop_AI_Task.py",
             ],
             sorted(dino_entries),
         )
@@ -1399,8 +1543,12 @@ class TestScriptingLibraryEntries(unittest.TestCase):
                 "DINOv3/{} should route to fewshot_mimics".format(fname))
             self.assertNotIn("nninteractive_mimics", source)
 
+        train_entry = os.path.join(dino_dir, "01_Train_Model.py")
+        with open(train_entry, "r") as f:
+            self.assertIn('action_attr="BUTTON_TRAIN_MODEL"', f.read())
+
         # nnInteractive.py is flat in 02_AI/
-        nn_entry = os.path.join(PROJECT_ROOT, "scripting_library", "02_AI", "nnInteractive.py")
+        nn_entry = os.path.join(PROJECT_ROOT, "scripting_library", "02_AI", "01_nnInteractive.py")
         self.assertTrue(os.path.isfile(nn_entry), "nnInteractive.py should be in 02_AI/")
         with open(nn_entry, "r") as f:
             self.assertIn("nninteractive_mimics", f.read())
@@ -1411,20 +1559,24 @@ class TestScriptingLibraryEntries(unittest.TestCase):
         flat_dino = [f for f in os.listdir(ai_root) if f.startswith("DINOv3") and f.endswith(".py")]
         self.assertEqual([], flat_dino,
             "DINOv3 entries should be in DINOv3/ subdirectory, not flat in 02_AI/")
+        self.assertFalse(
+            os.path.isdir(os.path.join(PROJECT_ROOT, "scripting_library", "03_Display")),
+            "The retired 03_Display directory should not remain visible in Mimics",
+        )
 
     def test_stop_background_services_entry(self):
-        entry = os.path.join(PROJECT_ROOT, "scripting_library", "99_Admin", "Stop_Background_Services.py")
+        entry = os.path.join(PROJECT_ROOT, "scripting_library", "99_Admin", "03_Stop_All_Owned_Services.py")
         with open(entry, "r") as f:
             source = f.read()
         self.assertIn("mimics_stop_background", source)
 
     def test_window_entries_routes(self):
-        lib = os.path.join(PROJECT_ROOT, "scripting_library", "03_Display")
+        lib = os.path.join(PROJECT_ROOT, "scripting_library", "03_Review")
         expected_routes = {
-            "Window_Choose_Preset.py": "choose",
-            "Window_From_Selected_Mask.py": "auto",
-            "Window_Reset_Full_Range.py": "reset",
-            "Window_Undo_Last.py": "undo",
+            "03_Window_Choose_Preset.py": "choose",
+            "02_Window_From_Selected_Mask.py": "auto",
+            "05_Window_Reset_Full_Range.py": "reset",
+            "04_Window_Undo_Last.py": "undo",
         }
         for fname, action in expected_routes.items():
             path = os.path.join(lib, fname)
@@ -1514,8 +1666,8 @@ class TestStopBackgroundServices(unittest.TestCase):
         entry = os.path.join(
             PROJECT_ROOT,
             "scripting_library",
-            "99_Admin",
-            "Stop_Background_Import.py",
+            "01_Data",
+            "04_Stop_Import_Queue.py",
         )
         self.assertTrue(os.path.isfile(entry))
 
@@ -2325,6 +2477,8 @@ class TestNewFeatures(unittest.TestCase):
             "grad_accumulation": 2,
             "lr": 0.0005,
             "weight_decay": 0.01,
+            "lr_scheduler": "constant_warmup",
+            "warmup_epochs": 2,
             "img_size": "224,224",
             "modality": "ct",
             "min_samples": 1,
@@ -2346,6 +2500,7 @@ class TestNewFeatures(unittest.TestCase):
             "sub_volume": True,
             "sub_volume_size": "24,192,192",
             "keep_materialized_dataset": False,
+            "mcs_output_dir": os.path.join(self.tmp, "saved_projects"),
         }
         launch = ui.prepare_training_launch(context, options, run_id="train_test")
         cmd = launch["cmd"]
@@ -2355,6 +2510,13 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn("--mixed-precision", cmd)
         self.assertIn("--sub-volume", cmd)
         self.assertIn("--export-labels", cmd)
+        self.assertEqual(cmd[cmd.index("--mcs-output-dir") + 1], options["mcs_output_dir"])
+        self.assertIn("--strategy-options-json", cmd)
+        self.assertEqual("constant_warmup", cmd[cmd.index("--lr-scheduler") + 1])
+        self.assertEqual("2", cmd[cmd.index("--warmup-epochs") + 1])
+        strategy_payload = json.loads(cmd[cmd.index("--strategy-options-json") + 1])
+        self.assertEqual(strategy_payload["sampling_mode"], "adaptive")
+        self.assertEqual(strategy_payload["loss_type"], "auto")
         self.assertEqual("train_test", launch["run_id"])
         self.assertEqual("launching", launch["job_payload"]["status"])
         self.assertEqual("external_advanced_ui", launch["job_payload"]["launched_by"])
@@ -2681,12 +2843,13 @@ class TestNewFeatures(unittest.TestCase):
             Args(),
             validation_enabled=False,
         )
+        import yaml
         with open(config_path, "r", encoding="utf-8") as handle:
-            text = handle.read()
-        self.assertIn("validation_enabled: false", text)
-        self.assertIn("input_normalization: \"imagenet\"", text)
-        self.assertIn("image_mean: [0.485, 0.456, 0.406]", text)
-        self.assertIn("image_std: [0.229, 0.224, 0.225]", text)
+            generated = yaml.safe_load(handle)
+        self.assertFalse(generated["training"]["validation_enabled"])
+        self.assertEqual(generated["model"]["input_normalization"], "imagenet")
+        self.assertEqual(generated["model"]["image_mean"], [0.485, 0.456, 0.406])
+        self.assertEqual(generated["model"]["image_std"], [0.229, 0.224, 0.225])
 
     def test_dinov3_imagenet_normalization_helper(self):
         """Backbone helper should apply processor/ImageNet mean and std to [0, 1] RGB tensors."""
@@ -3610,6 +3773,11 @@ class TestNewFeatures(unittest.TestCase):
                                     "config", "mimics_lora_segformer3d.yaml")
             cfg = load_config(cfg_path)
             cfg["finetune"]["method"] = "lora"
+            model_path = Path(cfg["model"]["model_path"])
+            if not model_path.is_absolute():
+                model_path = Path(os.getcwd()) / "external" / "dinov3-medical-seg" / model_path
+            if not model_path.is_dir():
+                self.skipTest("bundled DINOv3 weights are not present in this checkout")
 
             model = DINOv33DSegmentor(cfg)
             opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=1e-3)
@@ -3650,18 +3818,19 @@ class TestNewFeatures(unittest.TestCase):
         self.assertEqual("lora", cfg.get("finetune", {}).get("method", ""),
                          "finetune method must be lora")
 
-    def test_config_defaults_point_to_mimics_template(self):
-        """All hardcoded defaults must reference mimcs_lora_segformer3d."""
+    def test_config_defaults_point_to_validated_fewshot_template(self):
+        """Every launcher must use the same validated 12 GB few-shot base."""
         files_and_patterns = [
-            ("fewshot_config.json", '"base_config": "config/mimics_lora_segformer3d.yaml"'),
-            ("tools/fewshot_pipeline.py", "config/mimics_lora_segformer3d.yaml"),
-            ("tools/fewshot_training_setup_ui.py", "config/mimics_lora_segformer3d.yaml"),
-            ("runtime_py35/fewshot_mimics.py", "config/mimics_lora_segformer3d.yaml"),
+            ("fewshot_config.json", '"base_config": "config/research/ct_fewshot_fast.yaml"'),
+            ("tools/fewshot_pipeline.py", "config/research/ct_fewshot_fast.yaml"),
+            ("tools/fewshot_training_setup_ui.py", "config/research/ct_fewshot_fast.yaml"),
+            ("runtime_py35/fewshot_mimics.py", "config/research/ct_fewshot_fast.yaml"),
         ]
         for filepath, pattern in files_and_patterns:
-            content = open(filepath, "r", encoding="utf-8").read()
+            with open(filepath, "r", encoding="utf-8") as handle:
+                content = handle.read()
             self.assertIn(pattern, content,
-                          f"{filepath} must default to mimcs_lora_segformer3d.yaml")
+                          f"{filepath} must default to ct_fewshot_fast.yaml")
 
     # ================================================================
     # Export validation + label staging
@@ -3682,6 +3851,29 @@ class TestNewFeatures(unittest.TestCase):
             rows[0]["dataset_image"] = str(img_p); rows[0]["dataset_label"] = str(lbl_p)
             with self.assertRaises(RuntimeError):
                 pipeline.validate_materialized_dataset(rows)
+        finally:
+            shutil.rmtree(str(tmp))
+
+    def test_fresh_mimics_export_must_match_source_grid(self):
+        """Fresh labels may not silently move source images onto a Mimics grid."""
+        pipeline = __import__("tools.fewshot_pipeline", fromlist=["validate_fresh_export_geometry"])
+        import nibabel as nib, numpy as np, tempfile, shutil
+        from pathlib import Path
+        tmp = Path(tempfile.mkdtemp(prefix="fresh_grid_"))
+        try:
+            image = tmp / "ct.nii.gz"
+            label = tmp / "liver.nii.gz"
+            nib.save(nib.Nifti1Image(np.zeros((8, 9, 10), dtype=np.float32), np.eye(4)), str(image))
+            shifted = np.eye(4)
+            shifted[1, 3] = 5.0
+            nib.save(nib.Nifti1Image(np.ones((8, 9, 10), dtype=np.uint8), shifted), str(label))
+            with self.assertRaises(RuntimeError):
+                pipeline.validate_fresh_export_geometry([{
+                    "case_id": "case1",
+                    "image": str(image),
+                    "label": str(label),
+                    "label_source": "fresh_export",
+                }])
         finally:
             shutil.rmtree(str(tmp))
 
@@ -3717,7 +3909,7 @@ class TestNewFeatures(unittest.TestCase):
     def test_stop_background_import_entry_exists(self):
         """Stop_Background_Import entry must route to the correct function."""
         entry = os.path.join(
-            os.getcwd(), "scripting_library", "99_Admin", "Stop_Background_Import.py"
+            os.getcwd(), "scripting_library", "01_Data", "04_Stop_Import_Queue.py"
         )
         self.assertTrue(os.path.isfile(entry), "Stop_Background_Import entry must exist")
         content = open(entry, "r", encoding="utf-8").read()
@@ -3779,6 +3971,168 @@ class TestNewFeatures(unittest.TestCase):
         finally:
             shutil.rmtree(str(tmp))
 
+    def test_validate_inference_source_geometry_rejects_same_path_affine_mismatch(self):
+        """A matching path must not bypass physical-grid validation."""
+        pipeline = __import__("tools.fewshot_pipeline",
+                              fromlist=["validate_inference_source_geometry"])
+        import nibabel as nib, numpy as np, tempfile, shutil
+        from pathlib import Path
+        tmp = Path(tempfile.mkdtemp(prefix="src_affine_"))
+        try:
+            img_p = tmp / "ct.nii.gz"
+            nib.save(nib.Nifti1Image(np.zeros((8, 9, 10), dtype=np.float32), np.eye(4)), str(img_p))
+            shifted = np.eye(4)
+            shifted[0, 3] = 25.0
+            with self.assertRaises(RuntimeError):
+                pipeline.validate_inference_source_geometry(
+                    str(img_p),
+                    expected_shape=[8, 9, 10],
+                    expected_affine=shifted.tolist(),
+                    expected_image_path=str(img_p),
+                )
+        finally:
+            shutil.rmtree(str(tmp))
+
+    def test_validated_fewshot_strategies_compile_training_and_inference_policy(self):
+        """Mimics strategies must retain the factors supported by local experiments."""
+        strategies = __import__("tools.fewshot_strategies", fromlist=["compile_strategy"])
+        fingerprint = {
+            "summary": {
+                "support_bbox_union_normalized_zyx": [[0.1, 0.2, 0.3], [0.7, 0.8, 0.9]],
+            },
+        }
+        policy = {
+            "patch": {
+                "enabled": True,
+                "size_zyx": [64, 192, 192],
+                "inference_sliding_window": True,
+            },
+        }
+        patch = strategies.compile_strategy("patch_focused", fingerprint, policy, {
+            "channel_policy": "2_5d", "slice_axis": "coronal",
+        })
+        self.assertEqual(patch["model"]["slice_axis"], "coronal")
+        self.assertEqual(patch["model"]["channel_policy"], "2_5d")
+        self.assertEqual(patch["loss"]["type"], "dice_focal")
+        self.assertEqual(patch["data"]["patch"]["size_zyx"], [64, 192, 192])
+        self.assertTrue(patch["data"]["patch"]["inference_sliding_window"])
+
+        full = strategies.compile_strategy("full_volume", fingerprint, policy)
+        self.assertFalse(full["data"]["patch"]["enabled"])
+
+    def test_mimics_training_option_matrix_reaches_backend_config(self):
+        """Every public dimensionality combination must survive Mimics UI command/config generation."""
+        import tools.fewshot_training_setup_ui as ui
+        import tools.fewshot_pipeline as pipeline
+        import tools.fewshot_strategies as strategies
+
+        context = {
+            "organ": "organ", "ts_root": self.tmp,
+            "workspace": os.path.join(self.tmp, "fewshot_models"),
+            "python_exe": sys.executable, "pipeline_script": os.path.join(PROJECT_ROOT, "tools", "fewshot_pipeline.py"),
+            "dinov3_root": os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg"),
+            "project_root": PROJECT_ROOT, "config": {"base_config": "config/research/ct_fewshot_fast.yaml"},
+        }
+        fingerprint = {"summary": {}}
+        policy = {"patch": {"enabled": True, "size_zyx": [8, 32, 32]}}
+        count = 0
+        for preset in strategies.strategy_ids():
+            for decoder in ui.DECODER_CHOICES:
+                for channel_policy in ("repeat", "2_5d"):
+                    for method in ("frozen", "lora", "adapter"):
+                        options = ui.default_training_options(context["config"])
+                        options.update(strategies.strategy_defaults(preset))
+                        options.update({
+                            "strategy": preset, "decoder": decoder, "channel_policy": channel_policy,
+                            "finetune_method": method, "cases": ["case1"], "val_fraction": 0.0,
+                            "export_labels_before_training": False,
+                        })
+                        options = ui.validate_options(options)
+                        launch = ui.prepare_training_launch(context, options, run_id="matrix_{}".format(count))
+                        args = pipeline.build_parser().parse_args(launch["cmd"][2:])
+                        compiled = strategies.compile_strategy(
+                            preset, fingerprint=fingerprint, policy=policy,
+                            user_options=json.loads(args.strategy_options_json),
+                        )
+                        config_path = os.path.join(self.tmp, "matrix_{}.yaml".format(count))
+                        generated = pipeline.write_training_config(
+                            config_path, args.base_config, self.tmp, "matrix", args,
+                            validation_enabled=False, strategy_overrides=compiled,
+                        )
+                        self.assertEqual(decoder, generated["decoder"]["type"])
+                        self.assertEqual(channel_policy, generated["model"]["channel_policy"])
+                        self.assertEqual(method, generated["finetune"]["method"])
+                        count += 1
+        self.assertEqual(len(strategies.strategy_ids()) * len(ui.DECODER_CHOICES) * 2 * 3, count)
+
+    def test_every_public_policy_choice_compiles(self):
+        import tools.fewshot_strategies as strategies
+        fingerprint = {"summary": {}}
+        policy = {"patch": {"enabled": True, "size_zyx": [8, 32, 32]}}
+        choices = {
+            "sampling_mode": ("adaptive", "full", "patch"),
+            "patch_size_mode": ("fingerprint", "custom"),
+            "patch_focus": ("foreground", "boundary", "negative_balanced"),
+            "channel_policy": ("repeat", "2_5d"),
+            "slice_axis": ("axial", "coronal", "sagittal"),
+            "loss_type": ("auto", "dice_focal", "dice_ce"),
+            "keep_largest_component": (False, True),
+        }
+        for key, values in choices.items():
+            for value in values:
+                options = {key: value}
+                if key == "patch_size_mode" and value == "custom":
+                    options.update({"sampling_mode": "patch", "patch_size_zyx": "8,32,32"})
+                compiled = strategies.compile_strategy(
+                    "adaptive", fingerprint=fingerprint, policy=policy, user_options=options,
+                )
+                self.assertIn("inference", compiled)
+
+    def test_training_ui_applies_organ_strategy_on_first_open(self):
+        """The recommended strategy must take effect without requiring a combo-box toggle."""
+        setup = __import__("tools.fewshot_training_setup_ui",
+                           fromlist=["training_options_for_organ"])
+        legacy_profile = {
+            "default_training_profile": "balanced",
+            "training_profiles": {
+                "balanced": {
+                    "epochs": 10,
+                    "finetune_method": "lora",
+                    "img_size": "224,224",
+                },
+            },
+        }
+        options = setup.training_options_for_organ(legacy_profile, "aorta", "balanced")
+        self.assertEqual(options["strategy"], "adaptive")
+        self.assertEqual(options["sampling_mode"], "adaptive")
+        self.assertEqual(options["finetune_method"], "lora")
+        self.assertEqual(options["img_size"], "224,224")
+
+    def test_strategy_compiler_rejects_removed_sampling_policy(self):
+        """Unvalidated public sampling modes must fail before training starts."""
+        strategies = __import__("tools.fewshot_strategies", fromlist=["compile_strategy"])
+        with self.assertRaises(ValueError):
+            strategies.compile_strategy("adaptive", {}, {}, {"sampling_mode": "roi_patch"})
+
+    def test_status_viewer_selects_only_current_organ_task(self):
+        """Status UI must not mix historical or other-organ jobs into the selected task."""
+        viewer = __import__("tools.fewshot_status_viewer", fromlist=["select_current_task"])
+        rows = [
+            (30.0, {"job_id": "old_liver", "organ": "liver", "status": "completed"}),
+            (40.0, {"job_id": "spleen", "organ": "spleen", "status": "training"}),
+            (20.0, {"job_id": "active_liver", "organ": "liver", "kind": "train", "status": "training"}),
+            (50.0, {"job_id": "setup_liver", "organ": "liver", "kind": "train_setup", "status": "training_started"}),
+        ]
+        selected = viewer.select_current_task(rows, organ="liver")
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0]["job_id"], "active_liver")
+        filtered = viewer.filter_log_for_job(
+            "active_liver started\nspleen started\nactive_liver epoch 2\n",
+            selected[0],
+        )
+        self.assertIn("active_liver epoch 2", filtered)
+        self.assertNotIn("spleen", filtered)
+
     # ================================================================
     # Centralized mimcs_output_dir
     # ================================================================
@@ -3792,6 +4146,337 @@ class TestNewFeatures(unittest.TestCase):
         self.assertNotIn("mimics_export_output_dir", src)
         self.assertNotIn("mimics_data_output_dir", src)
         self.assertNotIn("mimics_import_output_dir", src)
+
+    def test_single_case_discovery_accepts_mhd_file_and_flat_dicom_folder(self):
+        import mimics_import
+        image_path = os.path.join(self.tmp, "patient_scan.mhd")
+        with open(image_path, "w", encoding="ascii") as handle:
+            handle.write("ObjectType = Image\nNDims = 3\n")
+        image_case = mimics_import._discover_single_case(image_path)
+        self.assertEqual("patient_scan", image_case["case_id"])
+        self.assertEqual(os.path.abspath(image_path), image_case["image"])
+
+        dicom_dir = os.path.join(self.tmp, "flat_dicom")
+        os.makedirs(dicom_dir)
+        with open(os.path.join(dicom_dir, "slice001.dcm"), "wb") as handle:
+            handle.write(b"candidate")
+        dicom_case = mimics_import._discover_single_case(dicom_dir)
+        self.assertEqual(dicom_dir, dicom_case["image"])
+        self.assertEqual("dicom_candidate", dicom_case["image_type"])
+
+    def test_external_batch_export_requires_explicit_safe_or_overwrite_destination(self):
+        import tools.mimics_batch_cli as cli
+        parser = cli.build_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["export-labels", "--ts-root", self.tmp])
+        safe = parser.parse_args(["export-labels", "--ts-root", self.tmp, "--output-dir", os.path.join(self.tmp, "labels")])
+        self.assertFalse(safe.overwrite_source)
+        overwrite = parser.parse_args(["export-labels", "--ts-root", self.tmp, "--overwrite-source"])
+        self.assertTrue(overwrite.overwrite_source)
+
+
+    # ================================================================
+    # L8: 2D decoder integration (NEW — DINOv3 few-shot optimization)
+    # ================================================================
+
+    def test_2d_decoder_conv2d_output_shape(self):
+        """conv2d decoder produces correct output shape."""
+        import torch
+        sys.path.insert(0, os.path.join(os.getcwd(), "external", "dinov3-medical-seg"))
+        from src.models.decoder_2d import Conv2DDecoder
+        decoder = Conv2DDecoder([768, 768, 768, 768], num_classes=2)
+        feats = [torch.randn(1, 768, 16, 14, 14) for _ in range(4)]
+        out = decoder(feats, (1, 1, 16, 224, 224))
+        self.assertEqual(out.shape, (1, 2, 16, 224, 224))
+
+    def test_every_public_decoder_produces_a_stacked_3d_prediction(self):
+        import torch
+        import tools.fewshot_training_setup_ui as ui
+        sys.path.insert(0, os.path.join(os.getcwd(), "external", "dinov3-medical-seg"))
+        from src.models.decoder_3d import DecoderFactory
+        features = [torch.randn(1, 8, 3, 2, 2) for _ in range(4)]
+        for decoder_name in ui.DECODER_CHOICES:
+            decoder = DecoderFactory.create(decoder_name, [8, 8, 8, 8], 2)
+            with torch.no_grad():
+                output = decoder(features, (1, 1, 3, 16, 16))
+            self.assertEqual((1, 2, 3, 16, 16), tuple(output.shape), decoder_name)
+            restored = DecoderFactory.create(decoder_name, [8, 8, 8, 8], 2)
+            restored.load_state_dict(decoder.state_dict(), strict=True)
+            restored.eval()
+            decoder.eval()
+            with torch.no_grad():
+                expected = decoder(features, (1, 1, 3, 16, 16))
+                actual = restored(features, (1, 1, 3, 16, 16))
+            torch.testing.assert_close(expected, actual, rtol=0.0, atol=0.0, msg=decoder_name)
+
+    def test_2d_decoder_all_variants_in_factory(self):
+        """All 2D decoder types must be creatable via DecoderFactory."""
+        import torch
+        sys.path.insert(0, os.path.join(os.getcwd(), "external", "dinov3-medical-seg"))
+        from src.models.decoder_3d import DecoderFactory
+        feats = [torch.randn(1, 768, 8, 14, 14) for _ in range(4)]
+        for dec_type in ["conv2d", "conv2d_unet", "conv2d_deeplab", "conv2d_2_5d"]:
+            decoder = DecoderFactory.create(dec_type, [768, 768, 768, 768], num_classes=2)
+            out = decoder(feats, (1, 1, 8, 224, 224))
+            self.assertEqual(out.shape, (1, 2, 8, 224, 224),
+                             f"{dec_type} output shape mismatch")
+
+    def test_2d_decoder_fewer_params_than_3d(self):
+        """2D decoders must have fewer parameters than equivalent 3D decoders."""
+        sys.path.insert(0, os.path.join(os.getcwd(), "external", "dinov3-medical-seg"))
+        from src.models.decoder_2d import Conv2DDecoder, Conv2DUNetDecoder
+        from src.models.decoder_3d import DPT3DDecoder, SegFormer3DDecoder
+        dims = [768, 768, 768, 768]
+
+        dpt_params = sum(p.numel() for p in DPT3DDecoder(dims, 2).parameters())
+        seg_params = sum(p.numel() for p in SegFormer3DDecoder(dims, 2).parameters())
+        conv2d_params = sum(p.numel() for p in Conv2DDecoder(dims, 2).parameters())
+        conv_unet_params = sum(p.numel() for p in Conv2DUNetDecoder(dims, 2).parameters())
+
+        self.assertLess(conv2d_params, dpt_params,
+                        f"conv2d ({conv2d_params}) must be < dpt3d ({dpt_params})")
+        self.assertLess(conv2d_params, seg_params,
+                        f"conv2d ({conv2d_params}) must be < segformer3d ({seg_params})")
+
+    def test_2d_decoder_single_slice(self):
+        """2D decoders must handle D=1 (single slice) edge case."""
+        import torch
+        sys.path.insert(0, os.path.join(os.getcwd(), "external", "dinov3-medical-seg"))
+        from src.models.decoder_2d import Conv2DDecoder, Conv2DUNetDecoder, Conv2DDeepLabDecoder, Conv2D_2_5D_Decoder
+        dims = [768, 768, 768, 768]
+        feat_1 = [torch.randn(1, 768, 1, 14, 14) for _ in range(4)]
+        for cls in [Conv2DDecoder, Conv2DUNetDecoder, Conv2DDeepLabDecoder, Conv2D_2_5D_Decoder]:
+            dec = cls(dims, num_classes=2)
+            out = dec(feat_1, (1, 1, 1, 224, 224))
+            self.assertEqual(out.shape, (1, 2, 1, 224, 224),
+                             f"{cls.__name__} single-slice shape mismatch")
+
+    def test_2d_decoder_25d_neighbour_stacking(self):
+        """2.5D decoder _stack_neighbours must correctly replicate edge slices."""
+        import torch
+        sys.path.insert(0, os.path.join(os.getcwd(), "external", "dinov3-medical-seg"))
+        from src.models.decoder_2d import Conv2D_2_5D_Decoder
+        B, C, D, h, w = 1, 4, 5, 2, 2
+        feat = torch.zeros(B, C, D, h, w)
+        for d in range(D):
+            feat[:, :, d, :, :] = float(d)
+        dec = Conv2D_2_5D_Decoder([C], num_classes=2)
+        stacked = dec._stack_neighbours(feat)
+        self.assertEqual(stacked.shape, (B * D, 3 * C, h, w))
+        # First slice: neighbours = [0, 0, 1] (edge replicate)
+        s0 = stacked[0].reshape(3, C, h, w)
+        self.assertTrue(torch.allclose(s0[0], feat[:, :, 0]))
+        self.assertTrue(torch.allclose(s0[1], feat[:, :, 0]))
+        self.assertTrue(torch.allclose(s0[2], feat[:, :, 1]))
+        # Last slice: neighbours = [3, 4, 4]
+        s4 = stacked[4].reshape(3, C, h, w)
+        self.assertTrue(torch.allclose(s4[0], feat[:, :, 3]))
+        self.assertTrue(torch.allclose(s4[1], feat[:, :, 4]))
+        self.assertTrue(torch.allclose(s4[2], feat[:, :, 4]))
+
+    def test_2d_decoder_batch_experiments_script_exists(self):
+        """Batch experiment runner must be importable."""
+        exp_script = os.path.join(os.getcwd(), "external", "dinov3-medical-seg",
+                                   "scripts", "batch_experiments.py")
+        self.assertTrue(os.path.isfile(exp_script),
+                        f"batch_experiments.py not found at {exp_script}")
+
+    def test_2d_decoder_materialize_all_script_exists(self):
+        """Multi-organ materialization script must exist."""
+        mat_script = os.path.join(os.getcwd(), "external", "dinov3-medical-seg",
+                                   "scripts", "materialize_all_organs.py")
+        self.assertTrue(os.path.isfile(mat_script),
+                        f"materialize_all_organs.py not found at {mat_script}")
+
+    def test_2d_decoder_evaluate_script_exists(self):
+        """Model evaluation script must exist."""
+        eval_script = os.path.join(os.getcwd(), "external", "dinov3-medical-seg",
+                                    "scripts", "evaluate_model.py")
+        self.assertTrue(os.path.isfile(eval_script),
+                        f"evaluate_model.py not found at {eval_script}")
+
+    def test_2d_decoder_analyze_script_exists(self):
+        """Results analysis script must exist."""
+        anal_script = os.path.join(os.getcwd(), "external", "dinov3-medical-seg",
+                                    "scripts", "analyze_results.py")
+        self.assertTrue(os.path.isfile(anal_script),
+                        f"analyze_results.py not found at {anal_script}")
+
+
+class TestLifecycleAndRetention(unittest.TestCase):
+    def setUp(self):
+        self.tmp = _make_temp_dir()
+
+    def tearDown(self):
+        _cleanup(self.tmp)
+
+    def test_active_nninteractive_operation_cannot_be_released_for_training(self):
+        import tools.fewshot_pipeline as pipeline
+
+        state_path = os.path.join(self.tmp, "server.json")
+        pipeline.write_json_atomic(state_path, {
+            "schema_version": "nninteractive_owned_server.v2",
+            "pid": 1001,
+            "watchdog_pid": 1002,
+            "gpu_lock_token": "token",
+            "last_activity_epoch": 0,
+            "active_operation": "prediction",
+            "active_operation_pid": 1003,
+        })
+        current = {
+            "resource": "gpu",
+            "token": "token",
+            "state_path": state_path,
+        }
+        original = pipeline.process_exists
+        try:
+            pipeline.process_exists = lambda _pid: True
+            self.assertFalse(pipeline.request_nninteractive_server_release_on_contention(current))
+            self.assertFalse(pipeline.cleanup_idle_nninteractive_server_lock(current))
+        finally:
+            pipeline.process_exists = original
+
+    def test_idle_nninteractive_worker_receives_graceful_gpu_contention_close(self):
+        import tools.fewshot_pipeline as pipeline
+
+        control_dir = Path(self.tmp) / "worker"
+        control_dir.mkdir()
+        state_path = Path(self.tmp) / "server.json"
+        pipeline.write_json_atomic(state_path, {
+            "schema_version": "nninteractive_owned_server.v2",
+            "pid": 1001,
+            "watchdog_pid": 1002,
+            "client_pid": 1003,
+            "client_control_dir": str(control_dir),
+            "gpu_lock_token": "token",
+            "last_activity_epoch": time.time() - 60,
+        })
+        current = {"resource": "gpu", "token": "token", "state_path": str(state_path)}
+        original = pipeline.process_exists
+        try:
+            pipeline.process_exists = lambda _pid: True
+            self.assertTrue(pipeline.request_nninteractive_server_release_on_contention(current))
+        finally:
+            pipeline.process_exists = original
+        close = pipeline.read_json(control_dir / "close.json", {}) or {}
+        self.assertEqual(close.get("reason"), "gpu_contention")
+        state = pipeline.read_json(state_path, {}) or {}
+        self.assertNotEqual(state.get("last_activity_epoch"), 0.0)
+
+    def test_fewshot_storage_maintenance_preserves_models_and_active_jobs(self):
+        import tools.fewshot_pipeline as pipeline
+
+        workspace = Path(self.tmp) / "fewshot_models"
+        jobs = workspace / "jobs"
+        jobs.mkdir(parents=True)
+        old = time.time() - 40 * 86400
+        failed_old = time.time() - 8 * 86400
+
+        completed_dataset = workspace / "datasets" / "liver" / "done"
+        completed_dataset.mkdir(parents=True)
+        completed_run = workspace / "runs" / "liver" / "done"
+        completed_run.mkdir(parents=True)
+        (completed_run / "train.log").write_text("large log", encoding="utf-8")
+        pipeline.write_json_atomic(jobs / "done.json", {
+            "job_id": "done", "status": "completed", "organ": "liver",
+            "updated_at_epoch": old, "dataset_dir": str(completed_dataset),
+            "model": {"dataset_retained": False},
+        })
+
+        failed_run = workspace / "runs" / "liver" / "failed"
+        failed_run.mkdir(parents=True)
+        (failed_run / "train.log").write_text("failure", encoding="utf-8")
+        pipeline.write_json_atomic(jobs / "failed.json", {
+            "job_id": "failed", "status": "failed", "organ": "liver",
+            "updated_at_epoch": failed_old,
+        })
+
+        active_dataset = workspace / "datasets" / "liver" / "active"
+        active_dataset.mkdir(parents=True)
+        pipeline.write_json_atomic(jobs / "active.json", {
+            "job_id": "active", "status": "training", "organ": "liver",
+            "updated_at_epoch": time.time(), "dataset_dir": str(active_dataset),
+        })
+        orphan_dataset = workspace / "datasets" / "liver" / "orphan"
+        orphan_dataset.mkdir(parents=True)
+        pipeline.write_json_atomic(jobs / "orphan.json", {
+            "job_id": "orphan", "status": "training", "organ": "liver",
+            "controller_pid": 987654321, "updated_at_epoch": failed_old,
+            "dataset_dir": str(orphan_dataset),
+        })
+        model = workspace / "models" / "liver" / "done" / "model.pth"
+        model.parent.mkdir(parents=True)
+        model.write_bytes(b"model")
+
+        dinov3 = Path(self.tmp) / "dinov3"
+        experiment = dinov3 / "experiments" / "mimics_fewshot_liver_done"
+        experiment.mkdir(parents=True)
+        (experiment / "checkpoint.pth").write_bytes(b"checkpoint")
+
+        context = jobs / "setup_old_context.json"
+        context.write_text("{}", encoding="utf-8")
+        os.utime(str(context), (old, old))
+
+        report = pipeline.cleanup_workspace_artifacts(workspace, dinov3, {
+            "terminal_job_retention_days": 30,
+            "max_terminal_job_records": 100,
+            "failed_run_retention_days": 7,
+            "completed_run_log_retention_days": 30,
+            "setup_context_retention_days": 7,
+            "keep_training_experiment_artifacts": False,
+        })
+        self.assertFalse(completed_dataset.exists())
+        self.assertFalse((completed_run / "train.log").exists())
+        self.assertFalse(failed_run.exists())
+        self.assertFalse(experiment.exists())
+        self.assertFalse(context.exists())
+        self.assertFalse((jobs / "done.json").exists())
+        self.assertTrue((jobs / "active.json").exists())
+        self.assertTrue(active_dataset.exists())
+        orphan_status = pipeline.read_json(jobs / "orphan.json", {}) or {}
+        self.assertEqual(orphan_status.get("status"), "failed")
+        self.assertTrue(orphan_status.get("orphaned"))
+        self.assertFalse(orphan_dataset.exists())
+        self.assertTrue(model.exists(), "automatic maintenance must never delete registered models")
+        self.assertGreater(sum(report.values()), 0)
+
+    def test_clear_cache_does_not_include_runtime_control_state_or_active_jobs(self):
+        import mimics_stop_background as stop
+
+        root = Path(self.tmp)
+        runtime = root / ".mimics_runtime"
+        runtime.mkdir()
+        control = runtime / "fewshot_mimics_state.json"
+        control.write_text("{}", encoding="utf-8")
+        nn_runtime = runtime / "nninteractive"
+        source_cache = nn_runtime / "source_fastpath_cache"
+        source_cache.mkdir(parents=True)
+        async_root = nn_runtime / "async_jobs"
+        terminal = async_root / "terminal"
+        active = async_root / "active"
+        terminal.mkdir(parents=True)
+        active.mkdir(parents=True)
+        (terminal / "worker_status.json").write_text('{"status":"closed"}', encoding="utf-8")
+        (active / "worker_status.json").write_text('{"status":"running"}', encoding="utf-8")
+        original = stop._project_root
+        try:
+            stop._project_root = lambda: str(root)
+            paths = set(stop._find_cache_paths())
+        finally:
+            stop._project_root = original
+        self.assertNotIn(str(runtime), paths)
+        self.assertNotIn(str(control), paths)
+        self.assertIn(str(source_cache), paths)
+        self.assertIn(str(terminal), paths)
+        self.assertNotIn(str(active), paths)
+
+    def test_stop_all_requires_owned_root_and_excludes_foreground(self):
+        path = os.path.join(PROJECT_ROOT, "runtime_py35", "mimics_stop_background.py")
+        with open(path, "r") as handle:
+            source = handle.read()
+        self.assertNotIn("$broad=Get-CimInstance", source)
+        self.assertIn("$foregroundPid", source)
+        self.assertIn("$inRoot -and $hasMarker", source)
 
 
 if __name__ == "__main__":

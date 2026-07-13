@@ -19,7 +19,7 @@ Mimics Research 21 的脚本环境基于 Python 3.5。nnInteractive 当前要求
 Mimics 侧只做轻量工作：
 
 1. 读取当前 active image 的灰度 buffer；
-2. 读取或创建目标 Mask；
+2. 读取 source Mask，并创建或恢复结果 AI Draft；
 3. 通过 Mimics 原生 API 采集交互；
 4. 调用外部 bridge；
 5. 把预测结果写回目标 Mask。
@@ -35,21 +35,25 @@ Mimics 21 官方脚本 API 支持：
 现有公开 API 没有提供向 `Segment` 或 `Advanced Segment` 工具栏注册自定义图标、按钮或 Ribbon 命令的接口。因此当前可靠入口是：
 
 ```text
-Script -> Scripting Library -> nnInteractive
+Script -> Scripting Library -> 02_AI -> 01_nnInteractive
 ```
 
 这已经是单击启动，不需要打开 Editor、Console 或命令行。若以后要进入 Mimics 原生分割工具栏，需要单独向 Materialise 确认扩展 SDK 或厂商支持，不能把它当作 Python API 已有能力。
 
 ## 4. 目标 Mask 的选择
 
-运行前，用户在 Project Tree 中选择一个目标 Mask：
+运行前，用户在 Project Tree 中选择一个 source Mask 或已有 AI Draft：
 
-- 恰好选择一个 Mask：在该 Mask 上继续分割或修正；
-- 没有选择 Mask：脚本可创建新的 `nnInteractive Result`；
+- 选择普通非空 Mask：自动创建 `<Mask name> - AI Draft`，原 Mask 不被修改；
+- 选择空 Mask：直接把这个空 Mask 作为结果 Mask；
+- 选择带 `nninteractive.role=ai_draft` 的 Mask：继续原地修正该 Draft；
+- 没有选择 Mask：自动创建新的空 `nnInteractive Result` Draft；
 - 选择多个 Mask：脚本停止并要求只选一个，避免把结果写错对象；
-- 目标 Mask 不属于 active image：脚本停止，不做隐式跨图像绑定。
+- source/target Mask 不属于 active image：脚本停止，不做隐式跨图像绑定。
 
-已有 Mask 会作为 nnInteractive 的 initial segmentation。空 Mask 则从提示开始生成新分割。
+普通非空 Mask 只导出一次作为 immutable initial segmentation snapshot。AI
+结果只写入 Draft，因此人工原始结果与 AI 派生结果可以并列比较。实现不会
+先把大 Mask 同步复制进 Draft；Draft 在首次 AI 结果返回前保持为空。
 
 ## 5. Mimics 交互与 nnInteractive 提示的映射
 
@@ -129,21 +133,22 @@ Point Set 是一个提示事件：多个正负点以 `run_prediction=False` 写�
 - 支持 **Undo Last Prompt**；
 - 支持 **Reset To Start**；
 - 工具退出时删除图像、初始 Mask 和 prompt 临时文件；
-- 最终结果只保留在用户选中的 Mimics Mask 中。
+- 最终结果保留在 AI Draft/空目标 Mask 中，普通 source Mask 保持不变。
 
-重新启动 nnInteractive 时，当前 Mask 成为新的 initial segmentation。上一会话的提示历史不会继续保留，但分割结果不会丢失。
+重新选择 AI Draft 启动 nnInteractive 时，当前 Draft 成为新的 initial
+segmentation。上一会话的提示历史不会继续保留，但分割结果不会丢失。
 
 ## 7. 用户工作流
 
 1. 在 Mimics 中打开任意项目。
 2. 激活要处理的 image set。
-3. 在 Project Tree 选择一个目标 Mask；也可以不选，由脚本创建新 Mask。
-4. 运行 `Script -> Scripting Library -> nnInteractive`。
+3. 在 Project Tree 选择原始 Mask 或已有 AI Draft；也可以不选，由脚本创建新 Draft。
+4. 运行 `Script -> Scripting Library -> 02_AI -> 01_nnInteractive`。
 5. 选择 **Add Points**、**Paint Scribble**、**Draw Box** 或 **Draw Lasso**。
 6. Add Points 中可连续加入 Include/Exclude 点，绿色/红色标记会保留到 Run/Discard；必要时使用 Remove Last Point。
 7. Paint Scribble 只需选择一次 Include 或 Exclude，然后在临时 Mask 中绘制。
 8. Box 和 Lasso 默认为前景，不再显示正负选择。
-9. 脚本调用外部 nnInteractive，结果自动写回目标 Mask。
+9. 脚本调用外部 nnInteractive，结果自动写回 AI Draft，并显示非阻塞成功提示。
 10. 继续增加提示，或使用 **Undo Last Prompt** / **Reset To Start**。
 11. 选择 **Finish**，按正常 Mimics 方式保存项目。
 
@@ -196,8 +201,8 @@ Mimics 会自动打开 Log Panel，并在推理开始、CPU 回退和完成时�
 
 | 文件 | 职责 |
 | --- | --- |
-| `adapters/mimics/scripting_library/02_AI/nnInteractive.py` | Mimics Scripting Library 独立入口 |
-| `adapters/mimics/runtime_py35/nninteractive_mimics.py` | 目标选择、提示采集、临时文件和结果写回 |
+| `scripting_library/02_AI/01_nnInteractive.py` | Mimics Scripting Library 独立入口 |
+| `runtime_py35/nninteractive_mimics.py` | source/Draft 选择、提示采集、临时文件和结果写回 |
 | `adapters/mimics/nninteractive_bridge.py` | 外部 Python 中加载图像、重放提示并调用 nnInteractive |
 | `scripts/setup_nninteractive_env.py` | 在 Windows 上联网安装独立环境 |
 | `scripts/build_nninteractive_bundle.py` | 在 Windows 上构建含环境、权重、bridge 和 Mimics 脚本的离线包 |
@@ -443,11 +448,11 @@ from the current Mask.
 
 ### 13.3 Existing Mask Semantics
 
-If an existing Mask is selected, that Mask is exported as the initial
-segmentation. Each prediction resets the nnInteractive session interactions,
-applies the initial segmentation, then replays all prompts for the current
-session. This matches the original nnInteractive interaction model more closely
-than treating Mimics prompts as independent one-off segmentations.
+If a non-empty manual Mask is selected, it is exported as the initial
+segmentation snapshot and a separate `<name> - AI Draft` receives predictions.
+The source Mask is never overwritten. Selecting an existing AI Draft or an
+empty Mask continues in place. Each prediction resets the nnInteractive
+interactions, applies the immutable initial snapshot, then replays all prompts.
 
 The bridge passes Mimics Gray Value voxels as a raw float32 image array to
 nnInteractive. It does not apply an extra HU normalization, fixed-spacing
@@ -461,7 +466,7 @@ The Scripting Library entries are organized by workflow:
 
 - `01_Data`: dataset import and mask export.
 - `02_AI`: nnInteractive and DINOv3 few-shot actions.
-- `03_Display`: window/level presets, undo and full-range reset.
+- `03_Review`: mask identification, window/level presets, undo and reset.
 - `99_Admin`: background-service cleanup.
 
 Visible entries are intentionally thin wrappers. They all go through
@@ -471,9 +476,9 @@ on every click, because reload can discard in-memory monitors for background
 inference or training jobs while those jobs are still expected to report back to
 Mimics.
 
-DINOv3 actions are exposed as separate entries for Train/Update, Predict,
-Show Status and Stop Latest Job so annotators do not need to step through a
-large action menu for common operations.
+DINOv3 exposes one external `Train Model` setup entry, separate recommended
+and explicit-model prediction intents, `Show Status Results`, and `Stop AI
+Task`. This preserves one-click common prediction without a mode popup.
 
 ### 13.5 Source-Image Fast Path For Prewarming
 

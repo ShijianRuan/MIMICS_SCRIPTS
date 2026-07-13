@@ -24,15 +24,12 @@ def load_config(config_path: str, overrides: dict = None) -> Dict[str, Any]:
     # Handle _base_ inheritance
     if "_base_" in config:
         base_path = config.pop("_base_")
-        if not os.path.isabs(base_path[0]) if isinstance(base_path, list) else False:
-            # Resolve relative to current config
-            config_dir = os.path.dirname(os.path.abspath(config_path))
-            if isinstance(base_path, list):
-                base_paths = [os.path.join(config_dir, bp) for bp in base_path]
-            else:
-                base_paths = [os.path.join(config_dir, base_path)]
-        else:
-            base_paths = base_path if isinstance(base_path, list) else [base_path]
+        raw_paths = base_path if isinstance(base_path, list) else [base_path]
+        config_dir = os.path.dirname(os.path.abspath(config_path))
+        base_paths = [
+            path if os.path.isabs(path) else os.path.normpath(os.path.join(config_dir, path))
+            for path in raw_paths
+        ]
 
         # Load and merge bases (later bases override earlier)
         base_config = {}

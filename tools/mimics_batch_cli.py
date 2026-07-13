@@ -185,8 +185,9 @@ def launch_create_mcs(output_dir, mimics_exe, bridge_python, lock_timeout_second
         log.close()
 
 
-def launch_export_labels(ts_root, cases, mimics_exe, axes, flips, lock_timeout_seconds=0.0):
-    output_dir = ts_root / "mcs_output"
+def launch_export_labels(ts_root, cases, mimics_exe, axes, flips, lock_timeout_seconds=0.0,
+                         mcs_dir=None, label_output_root=None, overwrite_source=False):
+    output_dir = Path(mcs_dir).resolve() if mcs_dir else ts_root / "mcs_output"
     output_dir.mkdir(parents=True, exist_ok=True)
     config = output_dir / "_export_batch_config.json"
     runner = output_dir / "_run_export_batch.py"
@@ -197,6 +198,9 @@ def launch_export_labels(ts_root, cases, mimics_exe, axes, flips, lock_timeout_s
             "cases": sorted(cases) if cases else None,
             "axes": axes,
             "flips": flips,
+            "output_dir": str(output_dir),
+            "label_output_root": str(Path(label_output_root).resolve()) if label_output_root else "",
+            "overwrite_existing": bool(overwrite_source),
         },
     )
     runner.write_text(
@@ -296,6 +300,9 @@ def cmd_export_labels(args):
             args.axes,
             args.flips,
             args.background_mimics_lock_timeout_seconds,
+            mcs_dir=args.mcs_dir,
+            label_output_root=args.output_dir,
+            overwrite_source=args.overwrite_source,
         )
     except ResourceLockTimeout as exc:
         print("Background Mimics is busy: {}".format(exc), file=sys.stderr)
@@ -433,7 +440,7 @@ def parse_flips(value):
     return [part in ("1", "true", "yes") for part in parts]
 
 
-def main(argv=None):
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command")
 
@@ -453,6 +460,10 @@ def main(argv=None):
     p.add_argument("--ts-root", required=True)
     p.add_argument("--cases")
     p.add_argument("--mimics-exe")
+    p.add_argument("--mcs-dir", help="Folder containing the saved .mcs projects")
+    destination = p.add_mutually_exclusive_group(required=True)
+    destination.add_argument("--output-dir", help="Safe export root; writes <root>/<case>/segmentations without overwriting")
+    destination.add_argument("--overwrite-source", action="store_true", help="Explicitly overwrite <case>/segmentations")
     p.add_argument("--axes", type=parse_axes, default=[0, 1, 2])
     p.add_argument("--flips", type=parse_flips, default=[False, False, False])
     p.add_argument("--background-mimics-lock-timeout-seconds", type=float, default=0.0)
@@ -461,6 +472,11 @@ def main(argv=None):
     p = sub.add_parser("kill-background", help="Stop integration-created background processes")
     p.set_defaults(func=cmd_kill_background)
 
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
     args = parser.parse_args(argv)
     if not hasattr(args, "func"):
         parser.print_help()

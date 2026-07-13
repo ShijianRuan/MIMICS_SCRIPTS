@@ -95,6 +95,25 @@ def is_nifti_file(path: str) -> bool:
     return name.endswith(".nii") or name.endswith(".nii.gz")
 
 
+def is_medical_image_file(path: str) -> bool:
+    """Return whether SimpleITK can represent this supported 3D image file."""
+    p = Path(path)
+    if not p.is_file():
+        return False
+    name = p.name.lower()
+    return name.endswith((".nii", ".nii.gz", ".mha", ".mhd", ".nrrd"))
+
+
+def get_medical_image_disk_geometry(path: str) -> tuple[tuple[int, int, int], np.ndarray]:
+    import SimpleITK as sitk
+    image = sitk.ReadImage(path)
+    if image.GetDimension() != 3:
+        raise ValueError("medical image must be 3D: {}".format(path))
+    shape = tuple(int(value) for value in image.GetSize())
+    affine_ras = LPS_TO_RAS @ _sitk_to_lps_affine(image)
+    return shape, affine_ras
+
+
 # -- NIfTI -> derived DICOM --------------------------------------------
 
 def _sitk_is_axial(sitk_img, threshold: float = 0.001) -> bool:
@@ -157,11 +176,17 @@ def nifti_to_derived_dicom(
     dicom_out: str,
     case_id: str = "case",
     source_nifti_out: str | None = None,
+    modality: str = "CT",
 ) -> dict:
     """Convert NIfTI image to derived DICOM series for Mimics import."""
     import pydicom
     from pydicom.dataset import FileDataset, FileMetaDataset
-    from pydicom.uid import ExplicitVRLittleEndian, generate_uid, CTImageStorage
+    from pydicom.uid import ExplicitVRLittleEndian, generate_uid, CTImageStorage, MRImageStorage
+
+    modality = str(modality or "CT").upper()
+    if modality not in ("CT", "MR"):
+        modality = "CT"
+    storage_class = MRImageStorage if modality == "MR" else CTImageStorage
 
     sitk_img = _read_image_sitk_lps(nifti_path)
 
@@ -172,7 +197,7 @@ def nifti_to_derived_dicom(
         sitk_img = _resample_to_axial(sitk_img)
         resampled_to_axial = True
 
-    if source_nifti_out and resampled_to_axial:
+    if source_nifti_out and (resampled_to_axial or not is_nifti_file(nifti_path)):
         import SimpleITK as sitk
 
         out_path = Path(source_nifti_out)
@@ -194,7 +219,24 @@ def nifti_to_derived_dicom(
     origin = affine_lps[:3, 3]
     direction_matrix = affine_lps[:3, :3] / spacing
 
-    if array.dtype == np.uint8:
+    rescale_slope = 1.0
+    rescale_intercept = 0.0
+    finite = array[np.isfinite(array)] if np.issubdtype(array.dtype, np.floating) else array.reshape(-1)
+    value_min = float(np.min(finite)) if finite.size else 0.0
+    value_max = float(np.max(finite)) if finite.size else 0.0
+    requires_scaling = (
+        (np.issubdtype(array.dtype, np.floating) and modality == "MR")
+        or value_min < -32768.0 or value_max > 32767.0
+    )
+    if requires_scaling and value_max > value_min:
+        rescale_intercept = value_min
+        rescale_slope = (value_max - value_min) / 65535.0
+        clean = np.nan_to_num(array.astype(np.float64), nan=value_min, posinf=value_max, neginf=value_min)
+        pixel_array = np.rint((clean - rescale_intercept) / rescale_slope).clip(0, 65535).astype(np.uint16)
+        bits_allocated = 16
+        bits_stored = 16
+        pixel_representation = 0
+    elif array.dtype == np.uint8:
         pixel_array = array.astype(np.uint16)
         bits_allocated = 16
         bits_stored = 16
@@ -242,7 +284,7 @@ def nifti_to_derived_dicom(
     for slice_idx in range(num_slices):
         file_meta = FileMetaDataset()
         file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
-        file_meta.MediaStorageSOPClassUID = CTImageStorage
+        file_meta.MediaStorageSOPClassUID = storage_class
         file_meta.MediaStorageSOPInstanceUID = generate_uid(
             entropy_srcs=[source_hash, "sop", str(slice_idx)]
         )
@@ -250,11 +292,11 @@ def nifti_to_derived_dicom(
         dcm_path = str(out_dir / "slice_{:04d}.dcm".format(slice_idx + 1))
         ds = FileDataset(dcm_path, {}, file_meta=file_meta, preamble=b"\0" * 128)
 
-        ds.SOPClassUID = CTImageStorage
+        ds.SOPClassUID = storage_class
         ds.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
         ds.PatientName = "ANON"
         ds.PatientID = case_id
-        ds.Modality = "CT"
+        ds.Modality = modality
         ds.StudyInstanceUID = study_uid
         ds.StudyID = "1"
         ds.StudyDate = "19000101"
@@ -295,8 +337,8 @@ def nifti_to_derived_dicom(
         ]
         ds.SamplesPerPixel = 1
         ds.PhotometricInterpretation = "MONOCHROME2"
-        ds.RescaleIntercept = 0.0
-        ds.RescaleSlope = 1.0
+        ds.RescaleIntercept = float(rescale_intercept)
+        ds.RescaleSlope = float(rescale_slope)
 
         # Transpose slice data from NIfTI (i,j) to DICOM (row=j, col=i)
         slice_data_nifti = pixel_array[:, :, slice_idx]
@@ -894,6 +936,12 @@ def _nifti_candidates(case_dir: Path):
     return sorted(preferred_rows, key=lambda p: preferred.index(p.name.lower())) + sorted(other_rows)
 
 
+def _other_medical_image_candidates(case_dir: Path):
+    preferred = ("ct.mhd", "mri.mhd", "ct.mha", "mri.mha", "ct.nrrd", "mri.nrrd")
+    files = [child for child in case_dir.iterdir() if child.is_file() and is_medical_image_file(str(child)) and not is_nifti_file(str(child))]
+    return sorted(files, key=lambda path: (preferred.index(path.name.lower()) if path.name.lower() in preferred else len(preferred), path.name.lower()))
+
+
 def find_image_geometry_in_case_dir(case_dir: str) -> dict | None:
     """Find source image geometry in a TS-like case directory.
 
@@ -913,6 +961,12 @@ def find_image_geometry_in_case_dir(case_dir: str) -> dict | None:
             }
         except Exception:
             continue
+    for candidate in _other_medical_image_candidates(d):
+        try:
+            shape, affine = get_medical_image_disk_geometry(str(candidate))
+            return {"path": str(candidate), "kind": "medical_image", "shape": shape, "affine": affine}
+        except Exception:
+            continue
     dicom_dir = d / "dicom"
     if dicom_dir.is_dir():
         return {
@@ -921,6 +975,25 @@ def find_image_geometry_in_case_dir(case_dir: str) -> dict | None:
             "shape": get_image_shape_from_dicom(str(dicom_dir)),
             "affine": get_image_affine_from_dicom(str(dicom_dir)),
         }
+    if d.is_dir() and is_dicom_folder(str(d)):
+        return {
+            "path": str(d), "kind": "dicom_folder",
+            "shape": get_image_shape_from_dicom(str(d)),
+            "affine": get_image_affine_from_dicom(str(d)),
+        }
+    return None
+
+
+def get_source_image_geometry(path: str) -> dict | None:
+    if is_nifti_file(path):
+        shape, affine = get_nifti_disk_geometry(path)
+        return {"path": str(Path(path).resolve()), "kind": "nifti", "shape": shape, "affine": affine}
+    if is_medical_image_file(path):
+        shape, affine = get_medical_image_disk_geometry(path)
+        return {"path": str(Path(path).resolve()), "kind": "medical_image", "shape": shape, "affine": affine}
+    if is_dicom_folder(path):
+        return {"path": str(Path(path).resolve()), "kind": "dicom_folder",
+                "shape": get_image_shape_from_dicom(path), "affine": get_image_affine_from_dicom(path)}
     return None
 
 
@@ -946,6 +1019,7 @@ def do_prepare(params: dict) -> dict:
     os.makedirs(buffers_out, exist_ok=True)
 
     # Determine image source
+    source_image_shape = None
     if is_dicom_folder(image_path):
         dicom_folder = image_path
         # Internal resampling uses RAS affines. get_image_affine_from_dicom()
@@ -958,14 +1032,21 @@ def do_prepare(params: dict) -> dict:
         source_to_mimics_world_matrix = np.eye(4)
         source_image_modality = infer_dicom_modality(image_path)
         image_shape = None
-    elif is_nifti_file(image_path):
+    elif is_medical_image_file(image_path):
         if not dicom_out:
-            return {"status": "error", "error": "dicom_out required for NIfTI images"}
+            return {"status": "error", "error": "dicom_out required for medical image files"}
         case_id = params.get("case_id", "case")
+        requested_modality = str(params.get("modality") or "").upper()
+        if not requested_modality:
+            lower_name = Path(image_path).name.lower()
+            requested_modality = "MR" if ("mri" in lower_name or lower_name.startswith("mr")) else "CT"
+        source_cache = ""
         info = nifti_to_derived_dicom(
             image_path,
             dicom_out,
             case_id=case_id,
+            source_nifti_out=source_cache or None,
+            modality=requested_modality,
         )
         dicom_folder = info["dicom_folder"]
         # Use the actual DICOM grid affine for mask resampling and Mimics coordinate
@@ -973,21 +1054,31 @@ def do_prepare(params: dict) -> dict:
         # this differs from the original NIfTI affine.
         dicom_affine_lps = np.array(info["affine_lps"]).reshape(4, 4)
         image_affine = LPS_TO_RAS @ dicom_affine_lps
-        source_nifti_affine = get_image_affine(image_path)  # original NIfTI affine (RAS)
-        source_image_path_for_fastpath = str(Path(image_path).resolve())
-        source_image_kind = "nifti"
+        source_path = image_path
+        if is_nifti_file(source_path):
+            source_image_shape, source_nifti_affine = get_nifti_disk_geometry(source_path)
+        else:
+            source_image_shape, source_nifti_affine = get_medical_image_disk_geometry(source_path)
+        source_image_shape = tuple(int(value) for value in source_image_shape)
+        source_image_path_for_fastpath = str(Path(source_path).resolve())
+        source_image_kind = "nifti" if is_nifti_file(image_path) else "medical_image"
+        source_grid_matches_mimics = (
+            tuple(source_image_shape) == tuple(int(v) for v in info["shape"])
+            and _affine_close(source_nifti_affine, image_affine)
+        )
         source_image_index_space = (
-            "nifti_ijk_matches_derived_dicom_columns_rows_slices_v1"
-            if not info.get("resampled_to_axial")
-            else "derived_dicom_axial_lps_resampled_from_nifti_v1"
+            ("nifti_ijk_matches_derived_dicom_columns_rows_slices_v1" if is_nifti_file(image_path)
+             else "medical_image_ijk_matches_derived_dicom_columns_rows_slices_v1")
+            if source_grid_matches_mimics
+            else "derived_dicom_axial_lps_resampled_from_source_image_v1"
         )
         source_world_coordinate_system = "ras"
         mimics_world_coordinate_system = "lps"
         source_to_mimics_world_matrix = RAS_TO_LPS
-        source_image_modality = "CT"
+        source_image_modality = requested_modality
         image_shape = tuple(int(v) for v in info["shape"])
     else:
-        return {"status": "error", "error": "image path is neither DICOM folder nor NIfTI file: {}".format(image_path)}
+        return {"status": "error", "error": "image path is neither a DICOM folder nor a supported 3D image file: {}".format(image_path)}
     if image_shape is None:
         import pydicom
         headers = []
@@ -1003,12 +1094,14 @@ def do_prepare(params: dict) -> dict:
         if not headers:
             return {"status": "error", "error": "no readable DICOM slices in: {}".format(dicom_folder)}
         image_shape = (int(headers[0].Columns), int(headers[0].Rows), int(len(headers)))
+    if source_image_shape is None:
+        source_image_shape = tuple(int(value) for value in image_shape)
 
     # Both matrices are expressed in RAS world coordinates.
     # source_voxel_to_ras_matrix: source_image_path geometry.
     # mimics_voxel_to_ras_matrix: the grid that Mimics actually imports
     #   (may differ from source when oblique NIfTI is resampled to axial).
-    if is_nifti_file(image_path) and info.get("resampled_to_axial"):
+    if is_medical_image_file(image_path):
         source_voxel_to_ras_matrix = source_nifti_affine.astype(float)
         mimics_voxel_to_ras_matrix = image_affine.astype(float)  # DICOM axial affine
     else:
@@ -1047,11 +1140,13 @@ def do_prepare(params: dict) -> dict:
 
     # Build a content fingerprint for incremental rebuild detection
     image_ident = str(Path(image_path).resolve())
-    mask_fingerprints = ["{0}:{1}".format(
-        m["name"], m["u8_hash"] if "u8_hash" in m else hashlib.sha256(
-            open(m["u8_path"], "rb").read()
-        ).hexdigest()
-    ) for m in mask_results]
+    mask_fingerprints = []
+    for mask_result in mask_results:
+        digest = mask_result.get("u8_hash")
+        if not digest:
+            with open(mask_result["u8_path"], "rb") as handle:
+                digest = hashlib.sha256(handle.read()).hexdigest()
+        mask_fingerprints.append("{0}:{1}".format(mask_result["name"], digest))
     source_fingerprint = "sha256:" + hashlib.sha256(
         (image_ident + "|" + "|".join(sorted(mask_fingerprints))).encode("utf-8")
     ).hexdigest()
@@ -1062,7 +1157,7 @@ def do_prepare(params: dict) -> dict:
         "dicom_folder": dicom_folder,
         "source_image_path": source_image_path_for_fastpath if is_nifti_file(image_path) else str(Path(image_path).resolve()),
         "source_image_kind": source_image_kind,
-        "source_image_shape": list(image_shape),
+        "source_image_shape": list(source_image_shape),
         "source_image_index_space": source_image_index_space,
         "source_image_modality": source_image_modality,
         "source_world_coordinate_system": source_world_coordinate_system,
@@ -1194,7 +1289,9 @@ def do_convert(params: dict) -> dict:
 
     source_geometry = None
     try:
-        source_geometry = find_image_geometry_in_case_dir(case_dir)
+        source_geometry = get_source_image_geometry(str(params.get("source_image_path") or ""))
+        if source_geometry is None:
+            source_geometry = find_image_geometry_in_case_dir(case_dir)
     except Exception:
         source_geometry = None
     export_space = str(params.get("export_space") or manifest.get("export_space") or "source_image").lower()
@@ -1215,12 +1312,14 @@ def do_convert(params: dict) -> dict:
     seg_dir = params.get("output_seg_dir") or os.path.join(case_dir, "segmentations")
     seg_dir = os.path.abspath(seg_dir)
     os.makedirs(seg_dir, exist_ok=True)
+    overwrite_existing = bool(params.get("overwrite_existing", params.get("output_seg_dir") is None))
 
     # Convert each mask
     exported = []
     total_new = 0
     total_overwritten = 0
     total_unchanged = 0
+    total_skipped_existing = 0
 
     for mask_info in manifest["masks"]:
         name = mask_info["original_name"]
@@ -1269,6 +1368,15 @@ def do_convert(params: dict) -> dict:
                 total_unchanged += 1
                 exported.append({"name": name, "action": "unchanged", "path": nifti_path})
                 continue
+            if not overwrite_existing:
+                total_skipped_existing += 1
+                exported.append({
+                    "name": name,
+                    "action": "skipped_existing",
+                    "path": nifti_path,
+                    "reason": "custom export destinations do not overwrite existing files",
+                })
+                continue
             action = "overwritten"
         else:
             action = "new"
@@ -1287,6 +1395,7 @@ def do_convert(params: dict) -> dict:
         "total_new": total_new,
         "total_overwritten": total_overwritten,
         "total_unchanged": total_unchanged,
+        "total_skipped_existing": total_skipped_existing,
         "export_space": export_space,
         "mimics_voxel_to_ras_matrix_source": mimics_affine_source,
         "mimics_voxel_to_ras_matrix": mimics_affine.tolist(),
@@ -1344,7 +1453,7 @@ def do_mask_to_buffer(params: dict) -> dict:
         if not headers:
             return {"status": "error", "error": "no readable DICOM slices in: {}".format(image_path)}
         image_shape = (int(headers[0].Columns), int(headers[0].Rows), int(len(headers)))
-    elif is_nifti_file(image_path):
+    elif is_medical_image_file(image_path):
         image_affine = get_image_affine(image_path)
         image_shape = get_image_shape(image_path)
     else:

@@ -156,8 +156,11 @@ def resource_wait_text(job):
     holder = resource_wait.get("owner", "unknown")
     pid = resource_wait.get("pid", "")
     if pid:
-        return "Waiting for {0}: {1} (PID {2})".format(resource, holder, pid)
-    return "Waiting for {0}".format(resource)
+        text = "Waiting for {0}: {1} (PID {2})".format(resource, holder, pid)
+    else:
+        text = "Waiting for {0}".format(resource)
+    action = str(resource_wait.get("user_action") or "").strip()
+    return text + ("\n" + action if action else "")
 
 
 def progress_line(progress):
@@ -194,6 +197,74 @@ def progress_line(progress):
         except Exception:
             pass
     return ", ".join(parts)
+
+
+def user_status_lines(job):
+    """Build the concise status summary shown to annotators."""
+    lines = [
+        "{0} - {1}".format(display_status(job.get("status")), display_kind(job.get("kind"))),
+        "Organ: {0}".format(job.get("organ", "?")),
+    ]
+    if job.get("case_id"):
+        lines.append("Case: {0}".format(job.get("case_id")))
+    strategy = job.get("strategy") or (job.get("training_options") or {}).get("strategy") or {}
+    strategy_id = (strategy.get("preset") or strategy.get("id")) if isinstance(strategy, dict) else strategy
+    if strategy_id:
+        lines.append("Strategy: {0}".format(str(strategy_id).replace("_", " ")))
+    if job.get("train_sample_count") is not None or job.get("validation_sample_count") is not None:
+        lines.append("Samples: {0} training, {1} validation".format(
+            job.get("train_sample_count", "?"),
+            job.get("validation_sample_count", "?"),
+        ))
+    wait = resource_wait_text(job)
+    if wait:
+        lines.append(wait)
+    progress = progress_line(job.get("training_progress") or {})
+    if progress:
+        lines.append("Progress: {0}".format(progress))
+    application_message = str(job.get("application_message") or "").strip()
+    if application_message:
+        lines.append("Result: {0}".format(application_message))
+    if job.get("error"):
+        lines.append("Error: {0}".format(job.get("error")))
+    elif job.get("status") == "completed":
+        lines.append("Finished successfully.")
+    return lines
+
+
+def technical_status_lines(job):
+    """Return diagnostics that are useful for support but noisy in the main view."""
+    lines = [
+        "Job ID: {0}".format(job.get("job_id", "?")),
+        "Created: {0}".format(format_time(job.get("created_at_epoch"))),
+        "Updated: {0}".format(format_time(job.get("updated_at_epoch"))),
+    ]
+    for label, key in (
+        ("Training log", "train_log"),
+        ("Metrics history", "metrics_history"),
+        ("Inference log", "log"),
+        ("Prediction", "output_path"),
+    ):
+        if job.get(key):
+            lines.append("{0}: {1}".format(label, job.get(key)))
+    model = job.get("model") or job.get("selected_model") or {}
+    if isinstance(model, dict):
+        if model.get("model_id"):
+            lines.append("Model ID: {0}".format(model.get("model_id")))
+        if model.get("checkpoint"):
+            lines.append("Checkpoint: {0}".format(model.get("checkpoint")))
+    for label, key in (
+        ("Training log warning", "train_log_warning"),
+        ("Inference log warning", "log_warning"),
+        ("Cancel marker warning", "cancel_marker_error"),
+    ):
+        if job.get(key):
+            lines.append("{0}: {1}".format(label, job.get(key)))
+    if job.get("train_log_unavailable"):
+        lines.append("Training log is unavailable.")
+    if job.get("log_unavailable"):
+        lines.append("Inference log is unavailable.")
+    return lines
 
 
 def format_job_line(job):
@@ -248,6 +319,25 @@ def filter_jobs(rows, filter_text, limit=80):
                 continue
         filtered.append((mtime, payload))
     return [item[1] for item in filtered[:limit]]
+
+
+def select_current_task(rows, organ="", job_id=""):
+    """Return only the explicitly selected or current task for one organ."""
+    organ = str(organ or "").strip().lower()
+    job_id = str(job_id or "").strip()
+    candidates = []
+    for mtime, payload in rows:
+        if job_id and str(payload.get("job_id") or "") != job_id:
+            continue
+        if organ and str(payload.get("organ") or "").strip().lower() != organ:
+            continue
+        candidates.append((mtime, payload))
+    if not candidates:
+        return []
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    active = [item for item in candidates if item[1].get("status") in ACTIVE_STATUSES]
+    active_work = [item for item in active if item[1].get("kind") in ("train", "infer")]
+    return [(active_work or active or candidates)[0][1]]
 
 
 def process_exists(pid):
@@ -354,6 +444,13 @@ def tail_text_from_text(text, max_lines=80):
 
 def tail_text(path, max_lines=80):
     return tail_text_from_text(read_log_text(path), max_lines=max_lines)
+
+
+def filter_log_for_job(text, job):
+    job_id = str((job or {}).get("job_id") or "").strip()
+    if not text or not job_id:
+        return ""
+    return "".join(line for line in str(text).splitlines(True) if job_id in line)
 
 
 EPOCH_RE = re.compile(
@@ -484,6 +581,7 @@ class StatusViewerApp(object):
         self.summary_var = None
         self.detail_text = None
         self.log_text = None
+        self.technical_text = None
         self.chart = None
         self.stop_button = None
         self.open_log_button = None
@@ -510,22 +608,11 @@ class StatusViewerApp(object):
         header = ttk.Frame(outer)
         header.pack(fill="x")
         ttk.Label(header, text="DINOv3 Few-Shot Status", font=("Segoe UI", 15, "bold")).pack(anchor="w")
-        organ = self.context.get("selected_organ") or "all organs"
-        ttk.Label(header, text="Dataset: {0}    Organ filter: {1}".format(self.ts_root, organ)).pack(anchor="w", pady=(4, 0))
+        organ = self.context.get("selected_organ") or "selected organ"
+        ttk.Label(header, text="Dataset: {0}    Task: {1}".format(self.ts_root, organ)).pack(anchor="w", pady=(4, 0))
 
         toolbar = ttk.Frame(outer)
         toolbar.pack(fill="x", pady=(10, 8))
-        ttk.Label(toolbar, text="Show").pack(side="left")
-        self.filter_var = tk.StringVar(value="Active + recent")
-        filter_combo = ttk.Combobox(
-            toolbar,
-            textvariable=self.filter_var,
-            values=("Active + recent", "Training", "Inference", "Failed / cancelled", "All"),
-            state="readonly",
-            width=18,
-        )
-        filter_combo.pack(side="left", padx=(6, 10))
-        filter_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
         ttk.Button(toolbar, text="Refresh", command=self.refresh).pack(side="left")
         ttk.Button(toolbar, text="Open Workspace", command=lambda: open_path(self.workspace)).pack(side="left", padx=(8, 0))
         self.open_log_button = ttk.Button(toolbar, text="Open Log Folder", command=self.open_log_folder)
@@ -542,7 +629,7 @@ class StatusViewerApp(object):
 
         left = ttk.Frame(body, padding=(0, 0, 8, 0))
         body.add(left, weight=1)
-        ttk.Label(left, text="Recent activity").pack(anchor="w")
+        ttk.Label(left, text="Current task").pack(anchor="w")
         self.listbox = tk.Listbox(left, exportselection=False, height=28)
         job_scroll = ttk.Scrollbar(left, orient="vertical", command=self.listbox.yview)
         self.listbox.configure(yscrollcommand=job_scroll.set)
@@ -577,11 +664,12 @@ class StatusViewerApp(object):
         self.listbox.delete(0, "end")
         selected_index = 0
         for index, job in enumerate(self.jobs):
-            label = "{0}   {1}   {2}   {3}".format(
+            progress = progress_line(job.get("training_progress") or {})
+            secondary = progress or job.get("application_message") or display_kind(job.get("kind"))
+            label = "{0}   {1}\n{2}".format(
                 display_status(job.get("status")),
-                display_kind(job.get("kind")),
                 job.get("organ", "?"),
-                job.get("job_id", "?"),
+                secondary,
             )
             self.listbox.insert("end", label)
             if job.get("job_id") == old_selected:
@@ -591,8 +679,9 @@ class StatusViewerApp(object):
             self.listbox.activate(selected_index)
             self.selected_job_id = self.jobs[selected_index].get("job_id", "")
             self.show_job(self.jobs[selected_index])
-            active = sum(1 for job in self.jobs if job.get("status") in ACTIVE_STATUSES)
-            self.summary_var.set("{0} item(s), {1} active. Auto-refresh every 2 seconds.".format(len(self.jobs), active))
+            self.summary_var.set("Current task for {0}. Auto-refresh every 2 seconds.".format(
+                self.context.get("selected_organ") or self.jobs[selected_index].get("organ", "selected organ")
+            ))
         else:
             self.selected_job_id = ""
             self.summary_var.set("No DINOv3 few-shot jobs were found.")
@@ -626,8 +715,11 @@ class StatusViewerApp(object):
             if payload.get("job_id"):
                 paths[payload.get("job_id")] = str(path)
         rows.sort(key=lambda item: item[0], reverse=True)
-        filter_text = self.filter_var.get() if self.filter_var is not None else "Active + recent"
-        return filter_jobs(rows, filter_text), paths
+        return select_current_task(
+            rows,
+            self.context.get("selected_organ"),
+            self.context.get("selected_job_id"),
+        ), paths
 
     def on_select(self, _event=None):
         selection = self.listbox.curselection()
@@ -641,59 +733,20 @@ class StatusViewerApp(object):
         self.show_job(job)
 
     def show_job(self, job):
-        lines = [
-            "ID: {0}".format(job.get("job_id", "?")),
-            "Type: {0}".format(display_kind(job.get("kind"))),
-            "Organ: {0}".format(job.get("organ", "?")),
-            "Status: {0}".format(display_status(job.get("status"))),
-            "Created: {0}".format(format_time(job.get("created_at_epoch"))),
-            "Updated: {0}".format(format_time(job.get("updated_at_epoch"))),
-        ]
-        if job.get("case_id"):
-            lines.append("Case: {0}".format(job.get("case_id")))
-        if job.get("train_sample_count") is not None or job.get("validation_sample_count") is not None:
-            lines.append("Samples: train {0}, validation {1}".format(
-                job.get("train_sample_count", "?"),
-                job.get("validation_sample_count", "?"),
-            ))
-        wait = resource_wait_text(job)
-        if wait:
-            lines.append(wait)
-        progress = progress_line(job.get("training_progress") or {})
-        if progress:
-            lines.append("Progress: {0}".format(progress))
-        if job.get("error"):
-            lines.append("Error: {0}".format(job.get("error")))
-        if job.get("train_log_warning"):
-            lines.append("Training log warning: {0}".format(job.get("train_log_warning")))
-        if job.get("log_warning"):
-            lines.append("Log warning: {0}".format(job.get("log_warning")))
-        if job.get("train_log_unavailable"):
-            lines.append("Training log unavailable.")
-        if job.get("log_unavailable"):
-            lines.append("Inference log unavailable.")
-        if job.get("cancel_marker_error"):
-            lines.append("Cancel marker warning: {0}".format(job.get("cancel_marker_error")))
-        if job.get("train_log"):
-            lines.append("Train log: {0}".format(job.get("train_log")))
-        if job.get("metrics_history"):
-            lines.append("Metrics history: {0}".format(job.get("metrics_history")))
-        if job.get("log"):
-            lines.append("Inference log: {0}".format(job.get("log")))
-        model = job.get("model") or {}
-        if model.get("checkpoint"):
-            lines.append("Model: {0}".format(model.get("checkpoint")))
-        if job.get("output_path"):
-            lines.append("Prediction: {0}".format(job.get("output_path")))
-        self._set_text(self.detail_text, "\n".join(lines))
+        self._set_text(self.detail_text, "\n".join(user_status_lines(job)))
 
         log_path = job.get("train_log") or job.get("log")
         pipeline_log = os.path.join(self.workspace, "fewshot_pipeline.log")
         log_text = read_log_text(log_path, max_bytes=2 * 1024 * 1024)
         pipeline_text = ""
-        log_tail = tail_text_from_text(log_text, 80)
+        log_tail = "\n".join(technical_status_lines(job))
+        recent_log = tail_text_from_text(log_text, 80)
+        if recent_log:
+            log_tail += "\n\n---- recent task log ----\n" + recent_log
         if pipeline_log and pipeline_log != log_path:
-            pipeline_text = read_log_text(pipeline_log, max_bytes=1024 * 1024)
+            pipeline_text = filter_log_for_job(
+                read_log_text(pipeline_log, max_bytes=1024 * 1024), job,
+            )
             pipeline_tail = tail_text_from_text(pipeline_text, 60)
             if pipeline_tail:
                 log_tail = (log_tail + "\n" if log_tail else "") + "---- pipeline log ----\n" + pipeline_tail
@@ -928,8 +981,8 @@ class QtStatusViewerApp(object):
     def _build(self):
         QtWidgets = self.QtWidgets
         self.window.setWindowTitle(TITLE)
-        self.window.resize(1120, 780)
-        self.window.setMinimumSize(980, 680)
+        self.window.resize(1060, 720)
+        self.window.setMinimumSize(840, 600)
         self.window.setStyleSheet(self._stylesheet())
         central = QtWidgets.QWidget()
         outer = QtWidgets.QVBoxLayout(central)
@@ -938,24 +991,13 @@ class QtStatusViewerApp(object):
 
         title = QtWidgets.QLabel("DINOv3 Few-Shot Status")
         title.setObjectName("titleLabel")
-        organ = self.context.get("selected_organ") or "all organs"
-        subtitle = QtWidgets.QLabel("Dataset: {0}    Organ filter: {1}".format(self.ts_root, organ))
+        organ = self.context.get("selected_organ") or "selected organ"
+        subtitle = QtWidgets.QLabel("Dataset: {0}    Task: {1}".format(self.ts_root, organ))
         subtitle.setObjectName("subtitleLabel")
         outer.addWidget(title)
         outer.addWidget(subtitle)
 
         toolbar = QtWidgets.QHBoxLayout()
-        toolbar.addWidget(QtWidgets.QLabel("Show"))
-        self.filter_combo = QtWidgets.QComboBox()
-        self.filter_combo.addItems([
-            "Active + recent",
-            "Training",
-            "Inference",
-            "Failed / cancelled",
-            "All",
-        ])
-        self.filter_combo.currentTextChanged.connect(lambda _text: self.refresh())
-        toolbar.addWidget(self.filter_combo)
         refresh = QtWidgets.QPushButton("Refresh")
         refresh.clicked.connect(self.refresh)
         toolbar.addWidget(refresh)
@@ -977,35 +1019,30 @@ class QtStatusViewerApp(object):
         self.summary_label = QtWidgets.QLabel("Loading jobs...")
         outer.addWidget(self.summary_label)
 
-        splitter = QtWidgets.QSplitter(self.QtCore.Qt.Horizontal)
-        left = QtWidgets.QWidget()
-        left_layout = QtWidgets.QVBoxLayout(left)
-        left_layout.setContentsMargins(0, 0, 8, 0)
-        left_layout.addWidget(QtWidgets.QLabel("Recent activity"))
         self.jobs_list = QtWidgets.QListWidget()
         self.jobs_list.currentRowChanged.connect(self.on_select)
-        left_layout.addWidget(self.jobs_list)
-        splitter.addWidget(left)
+        self.jobs_list.setVisible(False)
 
         right = QtWidgets.QWidget()
         right_layout = QtWidgets.QVBoxLayout(right)
-        detail_group = QtWidgets.QGroupBox("Selected activity")
+        detail_group = QtWidgets.QGroupBox("Current status")
         detail_layout = QtWidgets.QVBoxLayout(detail_group)
         self.detail_text = QtWidgets.QTextEdit()
         self.detail_text.setReadOnly(True)
-        self.detail_text.setFixedHeight(150)
+        self.detail_text.setMaximumHeight(150)
         detail_layout.addWidget(self.detail_text)
         right_layout.addWidget(detail_group)
 
-        chart_group = QtWidgets.QGroupBox("Training curve")
-        chart_layout = QtWidgets.QVBoxLayout(chart_group)
+        detail_tabs = QtWidgets.QTabWidget()
+        progress_tab = QtWidgets.QWidget()
+        chart_layout = QtWidgets.QVBoxLayout(progress_tab)
         self.chart = self.curve_widget_cls()
-        self.chart.setMinimumHeight(250)
+        self.chart.setMinimumHeight(230)
         chart_layout.addWidget(self.chart)
-        right_layout.addWidget(chart_group)
+        detail_tabs.addTab(progress_tab, "Progress")
 
-        log_group = QtWidgets.QGroupBox("Recent log")
-        log_layout = QtWidgets.QVBoxLayout(log_group)
+        log_tab = QtWidgets.QWidget()
+        log_layout = QtWidgets.QVBoxLayout(log_tab)
         self.log_text = QtWidgets.QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setLineWrapMode(QtWidgets.QTextEdit.NoWrap)
@@ -1014,11 +1051,17 @@ class QtStatusViewerApp(object):
         except Exception:
             pass
         log_layout.addWidget(self.log_text)
-        right_layout.addWidget(log_group, 1)
-        splitter.addWidget(right)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 3)
-        outer.addWidget(splitter, 1)
+        detail_tabs.addTab(log_tab, "Activity log")
+
+        technical_tab = QtWidgets.QWidget()
+        technical_layout = QtWidgets.QVBoxLayout(technical_tab)
+        self.technical_text = QtWidgets.QTextEdit()
+        self.technical_text.setReadOnly(True)
+        self.technical_text.setLineWrapMode(QtWidgets.QTextEdit.NoWrap)
+        technical_layout.addWidget(self.technical_text)
+        detail_tabs.addTab(technical_tab, "Technical details")
+        right_layout.addWidget(detail_tabs, 1)
+        outer.addWidget(right, 1)
         self.window.setCentralWidget(central)
 
     def _stylesheet(self):
@@ -1043,11 +1086,12 @@ class QtStatusViewerApp(object):
         self.jobs_list.clear()
         selected_index = 0
         for index, job in enumerate(self.jobs):
-            label = "{0}   {1}   {2}   {3}".format(
+            progress = progress_line(job.get("training_progress") or {})
+            secondary = progress or job.get("application_message") or display_kind(job.get("kind"))
+            label = "{0}   {1}\n{2}".format(
                 display_status(job.get("status")),
-                display_kind(job.get("kind")),
                 job.get("organ", "?"),
-                job.get("job_id", "?"),
+                secondary,
             )
             self.jobs_list.addItem(label)
             if job.get("job_id") == old_selected:
@@ -1057,13 +1101,15 @@ class QtStatusViewerApp(object):
             self.jobs_list.setCurrentRow(selected_index)
             self.selected_job_id = self.jobs[selected_index].get("job_id", "")
             self.show_job(self.jobs[selected_index])
-            active = sum(1 for job in self.jobs if job.get("status") in ACTIVE_STATUSES)
-            self.summary_label.setText("{0} item(s), {1} active. Auto-refresh every 2 seconds.".format(len(self.jobs), active))
+            self.summary_label.setText("Current task for {0}. Auto-refresh every 2 seconds.".format(
+                self.context.get("selected_organ") or self.jobs[selected_index].get("organ", "selected organ")
+            ))
         else:
             self.selected_job_id = ""
             self.summary_label.setText("No DINOv3 few-shot jobs were found.")
             self.detail_text.setPlainText("No jobs were found under:\n{0}".format(self.jobs_dir))
             self.log_text.setPlainText("")
+            self.technical_text.setPlainText("")
             self.chart.set_rows([])
 
     def _load_jobs(self):
@@ -1086,8 +1132,12 @@ class QtStatusViewerApp(object):
             if payload.get("job_id"):
                 paths[payload.get("job_id")] = str(path)
         rows.sort(key=lambda item: item[0], reverse=True)
-        filter_text = self.filter_combo.currentText() if self.filter_combo is not None else "Active + recent"
-        return filter_jobs(rows, filter_text), paths
+        selected = select_current_task(
+            rows,
+            self.context.get("selected_organ"),
+            self.context.get("selected_job_id"),
+        )
+        return selected, paths
 
     def on_select(self, row):
         if row < 0 or row >= len(self.jobs):
@@ -1105,63 +1155,23 @@ class QtStatusViewerApp(object):
         return None
 
     def show_job(self, job):
-        lines = [
-            "ID: {0}".format(job.get("job_id", "?")),
-            "Type: {0}".format(display_kind(job.get("kind"))),
-            "Organ: {0}".format(job.get("organ", "?")),
-            "Status: {0}".format(display_status(job.get("status"))),
-            "Created: {0}".format(format_time(job.get("created_at_epoch"))),
-            "Updated: {0}".format(format_time(job.get("updated_at_epoch"))),
-        ]
-        if job.get("case_id"):
-            lines.append("Case: {0}".format(job.get("case_id")))
-        if job.get("train_sample_count") is not None or job.get("validation_sample_count") is not None:
-            lines.append("Samples: train {0}, validation {1}".format(
-                job.get("train_sample_count", "?"),
-                job.get("validation_sample_count", "?"),
-            ))
-        wait = resource_wait_text(job)
-        if wait:
-            lines.append(wait)
-        progress = progress_line(job.get("training_progress") or {})
-        if progress:
-            lines.append("Progress: {0}".format(progress))
-        if job.get("error"):
-            lines.append("Error: {0}".format(job.get("error")))
-        if job.get("train_log_warning"):
-            lines.append("Training log warning: {0}".format(job.get("train_log_warning")))
-        if job.get("log_warning"):
-            lines.append("Log warning: {0}".format(job.get("log_warning")))
-        if job.get("train_log_unavailable"):
-            lines.append("Training log unavailable.")
-        if job.get("log_unavailable"):
-            lines.append("Inference log unavailable.")
-        if job.get("cancel_marker_error"):
-            lines.append("Cancel marker warning: {0}".format(job.get("cancel_marker_error")))
-        if job.get("train_log"):
-            lines.append("Train log: {0}".format(job.get("train_log")))
-        if job.get("metrics_history"):
-            lines.append("Metrics history: {0}".format(job.get("metrics_history")))
-        if job.get("log"):
-            lines.append("Inference log: {0}".format(job.get("log")))
-        model = job.get("model") or {}
-        if model.get("checkpoint"):
-            lines.append("Model: {0}".format(model.get("checkpoint")))
-        if job.get("output_path"):
-            lines.append("Prediction: {0}".format(job.get("output_path")))
-        self.detail_text.setPlainText("\n".join(lines))
+        self.detail_text.setPlainText("\n".join(user_status_lines(job)))
 
         log_path = job.get("train_log") or job.get("log")
         pipeline_log = os.path.join(self.workspace, "fewshot_pipeline.log")
         log_text = read_log_text(log_path, max_bytes=2 * 1024 * 1024)
         pipeline_text = ""
-        log_tail = tail_text_from_text(log_text, 80)
+        log_tail = tail_text_from_text(log_text, 120)
+        technical = "\n".join(technical_status_lines(job))
         if pipeline_log and pipeline_log != log_path:
-            pipeline_text = read_log_text(pipeline_log, max_bytes=1024 * 1024)
+            pipeline_text = filter_log_for_job(
+                read_log_text(pipeline_log, max_bytes=1024 * 1024), job,
+            )
             pipeline_tail = tail_text_from_text(pipeline_text, 60)
             if pipeline_tail:
-                log_tail = (log_tail + "\n" if log_tail else "") + "---- pipeline log ----\n" + pipeline_tail
+                technical += ("\n\n" if technical else "") + "---- pipeline log ----\n" + pipeline_tail
         self._set_log_text(log_tail)
+        self.technical_text.setPlainText(technical)
         rows = training_curve_rows(job, log_text, pipeline_text)
         self.chart.set_rows(rows)
         self.stop_button.setEnabled(job.get("status") in ACTIVE_STATUSES)
@@ -1238,7 +1248,7 @@ def run_pyside6_ui(context):
             width = max(320, rect.width())
             height = max(190, rect.height())
             painter.fillRect(rect, QtGui.QColor("#f8fafc"))
-            margin_l, margin_r, margin_t, margin_b = 64, 54, 52, 40
+            margin_l, margin_r, margin_t, margin_b = 64, 54, 82, 40
             x0, y0 = margin_l, height - margin_b
             x1, y1 = width - margin_r, margin_t
             plot_w = max(1, x1 - x0)
@@ -1306,9 +1316,9 @@ def run_pyside6_ui(context):
                 painter.drawText(int(x - 8), y0 + 22, str(epoch))
             painter.drawText(x0, height - 12, "Epoch")
             painter.setPen(QtGui.QColor("#991b1b"))
-            painter.drawText(x0 - 48, y1 - 18, "Loss")
+            painter.drawText(x0 - 48, y1 - 8, "Loss")
             painter.setPen(QtGui.QColor("#1d4ed8"))
-            painter.drawText(int(max(x0 + 40, x1 - 28)), y1 - 18, "Dice")
+            painter.drawText(int(max(x0 + 40, x1 - 28)), y1 - 8, "Dice")
 
             loss_points = []
             dice_points = []
@@ -1347,13 +1357,13 @@ def run_pyside6_ui(context):
                 badge_x += badge_w + 8
             legend_x = int(max(x0 + 120, x1 - 178))
             painter.setPen(QtGui.QPen(QtGui.QColor("#dc2626"), 2))
-            painter.drawLine(legend_x, 24, legend_x + 24, 24)
+            painter.drawLine(legend_x, 58, legend_x + 24, 58)
             painter.setPen(QtGui.QColor("#374151"))
-            painter.drawText(legend_x + 32, 29, "train loss")
+            painter.drawText(legend_x + 32, 63, "train loss")
             painter.setPen(QtGui.QPen(QtGui.QColor("#2563eb"), 2))
-            painter.drawLine(legend_x + 104, 24, legend_x + 128, 24)
+            painter.drawLine(legend_x + 104, 58, legend_x + 128, 58)
             painter.setPen(QtGui.QColor("#374151"))
-            painter.drawText(legend_x + 136, 29, "val dice")
+            painter.drawText(legend_x + 136, 63, "val dice")
 
     app = QtWidgets.QApplication.instance()
     if app is None:

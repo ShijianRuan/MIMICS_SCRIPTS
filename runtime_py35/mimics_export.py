@@ -38,6 +38,7 @@ _LOG_ROTATE_BYTES = 5 * 1024 * 1024
 _LOG_ROTATE_BACKUPS = 3
 _CONFIG_CACHE = None
 MIMICS_VOXEL_TO_RAS_MATRIX_METADATA = "mimics_script.mimics_voxel_to_ras_matrix"
+SOURCE_IMAGE_PATH_METADATA = "mimics_script.source_image_path"
 
 
 _write_json_atomic = runtime_common.write_json_atomic
@@ -219,7 +220,7 @@ def _find_mimics_exe():
     return None
 
 
-def _launch_background_batch_export(ts_root, cases_filter, axes, flips):
+def _launch_background_batch_export(ts_root, cases_filter, axes, flips, label_output_root=None, overwrite_existing=False, case_dirs=None):
     """Launch batch export in a separate background Mimics process."""
     output_dir = _resolve_export_output_dir(ts_root)
     if not os.path.isdir(output_dir):
@@ -240,6 +241,9 @@ def _launch_background_batch_export(ts_root, cases_filter, axes, flips):
             "cases": sorted(list(cases_filter)) if cases_filter else None,
             "axes": axes,
             "flips": flips,
+            "label_output_root": os.path.abspath(label_output_root) if label_output_root else "",
+            "overwrite_existing": bool(overwrite_existing),
+            "case_dirs": dict(case_dirs or {}),
         },
     )
     with open(runner_path, "w") as f:
@@ -835,7 +839,15 @@ def export_masks_to_buffers(buffers_dir, mask_names=None):
         print("exporting mask: {0}".format(name))
 
         try:
+            try:
+                mimics.update_gui()
+            except Exception:
+                pass
             raw = _get_voxel_buffer_bytes(a_mask)
+            try:
+                mimics.update_gui()
+            except Exception:
+                pass
         except Exception as e:
             print("  could not read data for {0}: {1}".format(name, e))
             continue
@@ -932,9 +944,25 @@ def _pick_directory(title):
     return path if path else None
 
 
+def _current_project_case_id():
+    try:
+        info = mimics.file.get_project_information()
+    except Exception:
+        return None
+    for attr in ("filename", "file_name", "path", "project_path", "project_file"):
+        try:
+            value = getattr(info, attr, None)
+        except Exception:
+            value = None
+        if value:
+            name = os.path.basename(str(value))
+            return name[:-4] if name.lower().endswith(".mcs") else name
+    return None
+
+
 # -- Single case export -------------------------------------------------
 
-def _export_masks_and_build_params(case_dir, axes, flips, work_dir, output_seg_dir=None, export_space="source_image", mask_names=None):
+def _export_masks_and_build_params(case_dir, axes, flips, work_dir, output_seg_dir=None, export_space="source_image", mask_names=None, overwrite_existing=None):
     """Export masks to .u8 buffers and build bridge params. Returns (bridge_params, manifest) or None."""
     print("Exporting masks to: {0}".format(case_dir))
 
@@ -962,8 +990,22 @@ def _export_masks_and_build_params(case_dir, axes, flips, work_dir, output_seg_d
         "flips": flips,
         "export_space": str(export_space or "source_image"),
     }
+    try:
+        active_image = mimics.data.images.get_active()
+    except Exception:
+        active_image = None
+    if active_image is None:
+        try:
+            active_image = mimics.data.masks[0].image if len(mimics.data.masks) else None
+        except Exception:
+            active_image = None
+    source_image_path = _metadata_get(active_image, SOURCE_IMAGE_PATH_METADATA, "") if active_image is not None else ""
+    if source_image_path:
+        bridge_params["source_image_path"] = str(source_image_path)
     if output_seg_dir:
         bridge_params["output_seg_dir"] = output_seg_dir
+    if overwrite_existing is not None:
+        bridge_params["overwrite_existing"] = bool(overwrite_existing)
     if manifest.get("mimics_voxel_to_ras_matrix"):
         bridge_params["mimics_voxel_to_ras_matrix"] = manifest.get("mimics_voxel_to_ras_matrix")
     return (bridge_params, manifest)
@@ -974,8 +1016,9 @@ def _apply_export_result(result, work_dir):
     total_new = result.get("total_new", 0)
     total_overwritten = result.get("total_overwritten", 0)
     total_unchanged = result.get("total_unchanged", 0)
-    print("Export complete: {0} new, {1} overwritten, {2} unchanged".format(
-        total_new, total_overwritten, total_unchanged))
+    total_skipped = result.get("total_skipped_existing", 0)
+    print("Export complete: {0} new, {1} overwritten, {2} unchanged, {3} existing preserved".format(
+        total_new, total_overwritten, total_unchanged, total_skipped))
 
     # Clean up intermediate .u8 buffers
     _cleanup_work_dir(work_dir)
@@ -998,7 +1041,7 @@ def discover_ts_cases(ts_root, case_filter=None):
             continue
 
         has_image = False
-        for img_name in ("ct.nii.gz", "mri.nii.gz"):
+        for img_name in ("ct.nii.gz", "mri.nii.gz", "ct.nii", "mri.nii", "ct.mhd", "mri.mhd", "ct.mha", "mri.mha", "ct.nrrd", "mri.nrrd"):
             if os.path.isfile(os.path.join(case_dir, img_name)):
                 has_image = True
                 break
@@ -1008,9 +1051,13 @@ def discover_ts_cases(ts_root, case_filter=None):
                 has_image = True
         if not has_image:
             for fname in sorted(os.listdir(case_dir)):
-                if fname.endswith(".nii.gz"):
+                if fname.lower().endswith((".nii", ".nii.gz", ".mha", ".mhd", ".nrrd")):
                     has_image = True
                     break
+        if not has_image and case_filter and name in case_filter and os.listdir(case_dir):
+            # A specifically requested case may be a flat DICOM directory.
+            # The bridge validates headers outside the foreground Mimics GUI.
+            has_image = True
 
         if has_image:
             cases.append({"case_id": name, "case_dir": case_dir})
@@ -1055,6 +1102,8 @@ def run_background_batch_export(config_path):
     # not under mcs_output where .mcs files live.
     export_root = config.get("export_root") or output_dir
     label_staging_dir = config.get("label_staging_dir") or ""
+    label_output_root = config.get("label_output_root") or ""
+    overwrite_existing = bool(config.get("overwrite_existing", False))
     export_space = str(config.get("export_space") or "source_image")
     mask_names = config.get("mask_names") or []
     if not isinstance(mask_names, list):
@@ -1080,6 +1129,11 @@ def run_background_batch_export(config_path):
             {"status": "discovering", "pid": os.getpid(), "updated_at_epoch": time.time()},
         )
         cases = discover_ts_cases(ts_root, cases_filter)
+        known = set(row.get("case_id") for row in cases)
+        for mapped_id, mapped_dir in (config.get("case_dirs") or {}).items():
+            if mapped_id not in known and os.path.isdir(mapped_dir):
+                cases.append({"case_id": str(mapped_id), "case_dir": os.path.abspath(mapped_dir)})
+        cases.sort(key=lambda row: row.get("case_id", ""))
         total = len(cases)
         _append_export_log(export_root, "Discovered {0} case(s) for export.".format(total))
         for index, case_info in enumerate(cases):
@@ -1111,6 +1165,8 @@ def run_background_batch_export(config_path):
                 output_seg_dir = None
                 if label_staging_dir:
                     output_seg_dir = os.path.join(label_staging_dir, case_id, "segmentations")
+                elif label_output_root:
+                    output_seg_dir = os.path.join(label_output_root, case_id, "segmentations")
                 built = _export_masks_and_build_params(
                     case_dir,
                     axes,
@@ -1119,6 +1175,7 @@ def run_background_batch_export(config_path):
                     output_seg_dir=output_seg_dir,
                     export_space=export_space,
                     mask_names=mask_names,
+                    overwrite_existing=(True if label_staging_dir else overwrite_existing),
                 )
                 try:
                     mimics.file.close_project()
@@ -1137,11 +1194,12 @@ def run_background_batch_export(config_path):
                 completed += 1
                 _append_export_log(
                     export_root,
-                    "Exported {0}: new={1}, overwritten={2}, unchanged={3}".format(
+                    "Exported {0}: new={1}, overwritten={2}, unchanged={3}, existing_preserved={4}".format(
                         case_id,
                         total_new,
                         total_overwritten,
                         total_unchanged,
+                        result.get("total_skipped_existing", 0),
                     ),
                 )
             except Exception as exc:
@@ -1200,6 +1258,8 @@ def main():
     cases_filter = None
     axes = [0, 1, 2]
     flips = [False, False, False]
+    label_output_root = None
+    overwrite_existing = False
 
     args = sys.argv[1:]
     i = 0
@@ -1221,12 +1281,20 @@ def main():
             parts = [v.strip().lower() for v in args[i + 1].split(",")]
             flips = [p in ("true", "1", "yes") for p in parts]
             i += 2
+        elif arg == "--label-output-root" and i + 1 < len(args):
+            label_output_root = args[i + 1]
+            i += 2
+        elif arg == "--overwrite-source":
+            overwrite_existing = True
+            i += 1
         else:
             i += 1
 
     # Interactive: if no args, ask for case dir or TS root
     if not ts_root and not case_dir:
-        case_dir = _pick_directory("Select case directory")
+        # Always let the annotator confirm the source case directory. Project
+        # metadata may point to an old location after a dataset/project copy.
+        case_dir = _pick_directory("Select source case directory")
         if not case_dir or not os.path.isdir(case_dir):
             mimics.dialogs.message_box(
                 "No valid directory selected.",
@@ -1238,7 +1306,7 @@ def main():
     # -- Single case mode ----------------------------------------------
 
     if case_dir:
-        case_id = os.path.basename(os.path.abspath(case_dir))
+        case_id = _current_project_case_id() or os.path.basename(os.path.abspath(case_dir))
         ts_root = os.path.dirname(os.path.abspath(case_dir))
         output_dir = _resolve_export_output_dir(ts_root)
         mcs_path = os.path.join(output_dir, case_id + ".mcs")
@@ -1252,7 +1320,31 @@ def main():
                 ).format(mcs_path),
             )
             return 1
-        process = _launch_background_batch_export(ts_root, set([case_id]), axes, flips)
+        if not label_output_root and not overwrite_existing:
+            destination = mimics.dialogs.question_box(
+                title="Export Masks",
+                message=(
+                    "Export all masks from the saved project.\n\n"
+                    "Safe Copy writes to a folder you select and preserves existing files.\n"
+                    "Overwrite Original updates <case>/segmentations in place."
+                ),
+                buttons="Safe Copy;Overwrite Original;Cancel",
+                ui_blocking=True,
+            )
+            if destination == "Safe Copy":
+                label_output_root = _pick_directory("Select mask export destination")
+                if not label_output_root:
+                    return 1
+            elif destination == "Overwrite Original":
+                overwrite_existing = True
+            else:
+                return 1
+        process = _launch_background_batch_export(
+            ts_root, set([case_id]), axes, flips,
+            label_output_root=label_output_root,
+            overwrite_existing=overwrite_existing,
+            case_dirs={case_id: os.path.abspath(case_dir)},
+        )
         if process is None:
             mimics.dialogs.message_box(
                 title="Export Error",
@@ -1270,7 +1362,11 @@ def main():
         return 0
 
     # -- Batch mode -----------------------------------------------------
-    process = _launch_background_batch_export(ts_root, cases_filter, axes, flips)
+    process = _launch_background_batch_export(
+        ts_root, cases_filter, axes, flips,
+        label_output_root=label_output_root,
+        overwrite_existing=overwrite_existing,
+    )
     if process is None:
         output_dir = _resolve_export_output_dir(ts_root)
         mimics.dialogs.message_box(

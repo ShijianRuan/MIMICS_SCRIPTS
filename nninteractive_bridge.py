@@ -535,6 +535,27 @@ def _touch_server_activity(state_path: Path, ownership_token: str) -> None:
     _write_server_state(state_path, state)
 
 
+def _set_server_operation_active(
+    state_path: Path,
+    ownership_token: str,
+    active: bool,
+) -> None:
+    """Publish whether an owned server is serving an inference operation."""
+    state = _load_server_state(state_path)
+    if not state or state.get("ownership_token") != ownership_token:
+        return
+    state["last_activity_epoch"] = time.time()
+    if active:
+        state["active_operation"] = "prediction"
+        state["active_operation_pid"] = os.getpid()
+        state["active_operation_started_at_epoch"] = time.time()
+    else:
+        state.pop("active_operation", None)
+        state.pop("active_operation_pid", None)
+        state.pop("active_operation_started_at_epoch", None)
+    _write_server_state(state_path, state)
+
+
 def _expire_server_activity(state_path: Path, ownership_token: str) -> None:
     """Set last_activity_epoch far in the past so the watchdog shuts down the server on its next check."""
     state = _load_server_state(state_path)
@@ -553,6 +574,16 @@ def _watchdog_main(state_path_value: str, ownership_token: str) -> int:
         if not _process_matches_server(state):
             _remove_server_state(state_path, ownership_token)
             return 0
+        try:
+            operation_pid = int(state.get("active_operation_pid", 0) or 0)
+        except (TypeError, ValueError):
+            operation_pid = 0
+        if state.get("active_operation") and operation_pid and _process_exists(operation_pid):
+            started = float(state.get("active_operation_started_at_epoch", time.time()) or time.time())
+            timeout = max(60.0, float(state.get("active_operation_timeout_seconds", 3600) or 3600))
+            if time.time() - started <= timeout:
+                time.sleep(5.0)
+                continue
         idle_timeout = float(state.get("service_idle_timeout_seconds", SERVER_IDLE_TIMEOUT))
         last_activity = float(state.get("last_activity_epoch", time.time()))
         remaining = idle_timeout - (time.time() - last_activity)
@@ -1647,6 +1678,17 @@ class _BridgeSessionContext:
 
         if self.owned_state_path is not None and self.owned_token:
             _touch_server_activity(self.owned_state_path, self.owned_token)
+            state = _load_server_state(self.owned_state_path)
+            if state and state.get("ownership_token") == self.owned_token:
+                state["client_pid"] = os.getpid()
+                state["active_operation_timeout_seconds"] = max(
+                    60.0,
+                    float(input_data.get("prediction_timeout_seconds", 1800)) + 60.0,
+                )
+                control_dir = str(input_data.get("async_worker_control_dir") or "").strip()
+                if control_dir:
+                    state["client_control_dir"] = control_dir
+                _write_server_state(self.owned_state_path, state)
         self.session = None
 
         def _connect_and_upload() -> None:
@@ -1766,6 +1808,31 @@ class _BridgeSessionContext:
             self.session.add_initial_seg_interaction(self.initial_platform)
 
     def predict(
+        self,
+        interactions: list[dict[str, Any]],
+        output_path: str,
+        *,
+        initial_seg_path: str | None = None,
+        initial_seg_shape: list[int] | None = None,
+        use_context_initial_seg: bool = True,
+    ) -> dict[str, Any]:
+        owned_state_path = getattr(self, "owned_state_path", None)
+        owned_token = getattr(self, "owned_token", None)
+        if owned_state_path is not None and owned_token:
+            _set_server_operation_active(owned_state_path, owned_token, True)
+        try:
+            return self._predict_impl(
+                interactions,
+                output_path,
+                initial_seg_path=initial_seg_path,
+                initial_seg_shape=initial_seg_shape,
+                use_context_initial_seg=use_context_initial_seg,
+            )
+        finally:
+            if owned_state_path is not None and owned_token:
+                _set_server_operation_active(owned_state_path, owned_token, False)
+
+    def _predict_impl(
         self,
         interactions: list[dict[str, Any]],
         output_path: str,
@@ -2185,7 +2252,11 @@ def _async_worker_main(job_dir_value: str) -> int:
         parent_pid = int(request.get("parent_pid", 0) or 0)
 
         while True:
-            if (job_dir / "close.json").is_file():
+            close_path = job_dir / "close.json"
+            if close_path.is_file():
+                close_request = _load_server_state(close_path)
+                if str(close_request.get("reason", "")) == "gpu_contention":
+                    context.keep_server_warm_after_session = False
                 _async_worker_status(job_dir, "closing", stage="close_requested")
                 return 0
 

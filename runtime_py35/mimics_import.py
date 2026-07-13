@@ -562,6 +562,41 @@ def _cleanup_stale_processes():
 
 # -- TS case discovery (runs in Mimics Python 3.5, stdlib only) ---------
 
+_MEDICAL_IMAGE_SUFFIXES = (".nii", ".nii.gz", ".mha", ".mhd", ".nrrd")
+
+
+def _is_medical_image_file(path):
+    name = os.path.basename(path).lower()
+    return os.path.isfile(path) and any(name.endswith(suffix) for suffix in _MEDICAL_IMAGE_SUFFIXES)
+
+
+def _image_stem(path):
+    name = os.path.basename(path)
+    lower = name.lower()
+    for suffix in _MEDICAL_IMAGE_SUFFIXES:
+        if lower.endswith(suffix):
+            return name[:-len(suffix)] or "case"
+    return os.path.splitext(name)[0] or "case"
+
+
+def _find_case_image(case_dir, allow_direct_dicom=False):
+    for img_name in ("ct.nii.gz", "mri.nii.gz", "ct.nii", "mri.nii", "ct.mhd", "mri.mhd", "ct.mha", "mri.mha"):
+        candidate = os.path.join(case_dir, img_name)
+        if _is_medical_image_file(candidate):
+            return candidate, "medical_image"
+    for fname in sorted(os.listdir(case_dir)):
+        candidate = os.path.join(case_dir, fname)
+        if _is_medical_image_file(candidate):
+            return candidate, "medical_image"
+    dicom_dir = os.path.join(case_dir, "dicom")
+    if os.path.isdir(dicom_dir):
+        return dicom_dir, "dicom"
+    # A directly selected folder may itself be a flat DICOM series. Validation
+    # happens in the external bridge so Mimics never parses all DICOM headers.
+    if allow_direct_dicom and os.path.isdir(case_dir) and os.listdir(case_dir):
+        return case_dir, "dicom_candidate"
+    return None, None
+
 def discover_ts_cases(ts_root, case_filter=None):
     """Find all cases in a TS-like dataset. Returns list of dicts."""
     cases = []
@@ -577,27 +612,7 @@ def discover_ts_cases(ts_root, case_filter=None):
         image_path = None
         image_type = None
 
-        for img_name in ("ct.nii.gz", "mri.nii.gz"):
-            candidate = os.path.join(case_dir, img_name)
-            if os.path.isfile(candidate):
-                image_path = candidate
-                image_type = "nifti"
-                break
-
-        if image_path is None:
-            for fname in sorted(os.listdir(case_dir)):
-                if fname.endswith(".nii.gz") and fname not in ("ct.nii.gz", "mri.nii.gz"):
-                    candidate = os.path.join(case_dir, fname)
-                    if os.path.isfile(candidate):
-                        image_path = candidate
-                        image_type = "nifti"
-                        break
-
-        if image_path is None:
-            dicom_dir = os.path.join(case_dir, "dicom")
-            if os.path.isdir(dicom_dir):
-                image_path = dicom_dir
-                image_type = "dicom"
+        image_path, image_type = _find_case_image(case_dir)
 
         if image_path is None:
             continue
@@ -627,43 +642,33 @@ def _discover_single_case(case_dir):
     Used for lazy discovery; each case is scanned only when it's
     about to be converted, avoiding a blocking full-dataset scan.
     """
-    name = os.path.basename(case_dir)
+    if _is_medical_image_file(case_dir):
+        image_file = os.path.abspath(case_dir)
+        case_dir = os.path.dirname(image_file)
+        name = _image_stem(image_file)
+    else:
+        image_file = None
+        name = os.path.basename(case_dir)
     if not os.path.isdir(case_dir):
         return None
     if name in ("mcs_output", "segmentations"):
         return None
 
-    image_path = None
-    image_type = None
-
-    for img_name in ("ct.nii.gz", "mri.nii.gz"):
-        candidate = os.path.join(case_dir, img_name)
-        if os.path.isfile(candidate):
-            image_path = candidate
-            image_type = "nifti"
-            break
-
-    if image_path is None:
-        for fname in sorted(os.listdir(case_dir)):
-            if fname.endswith(".nii.gz") and fname not in ("ct.nii.gz", "mri.nii.gz"):
-                candidate = os.path.join(case_dir, fname)
-                if os.path.isfile(candidate):
-                    image_path = candidate
-                    image_type = "nifti"
-                    break
-
-    if image_path is None:
-        dicom_dir = os.path.join(case_dir, "dicom")
-        if os.path.isdir(dicom_dir):
-            image_path = dicom_dir
-            image_type = "dicom"
+    if image_file:
+        image_path, image_type = image_file, "medical_image"
+    else:
+        image_path, image_type = _find_case_image(case_dir, allow_direct_dicom=True)
 
     if image_path is None:
         return None
 
     masks = []
     seg_dir = os.path.join(case_dir, "segmentations")
-    if os.path.isdir(seg_dir):
+    allow_masks = True
+    if image_file:
+        sibling_images = [name for name in os.listdir(case_dir) if _is_medical_image_file(os.path.join(case_dir, name))]
+        allow_masks = len(sibling_images) <= 1
+    if allow_masks and os.path.isdir(seg_dir):
         for fname in sorted(os.listdir(seg_dir)):
             if fname.endswith(".nii.gz"):
                 organ = fname.replace(".nii.gz", "")
@@ -1892,6 +1897,36 @@ def _pick_directory(title):
     return path if path else None
 
 
+def _pick_image_file(title):
+    """Pick one supported volume without reading it in the Mimics process."""
+    file_filter = "Medical volumes (*.nii *.nii.gz *.mha *.mhd *.nrrd)"
+    try:
+        from PyQt5.QtWidgets import QFileDialog
+        path, _selected = QFileDialog.getOpenFileName(None, title, "", file_filter)
+        return str(path) if path else None
+    except Exception:
+        pass
+    try:
+        import Tkinter as tk
+        import tkFileDialog
+    except ImportError:
+        try:
+            import tkinter as tk
+            from tkinter import filedialog as tkFileDialog
+        except ImportError:
+            return None
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    path = tkFileDialog.askopenfilename(
+        parent=root,
+        title=title,
+        filetypes=[("Medical volumes", "*.nii *.nii.gz *.mha *.mhd *.nrrd"), ("All files", "*.*")],
+    )
+    root.destroy()
+    return path if path else None
+
+
 # -- Discover monitor (batch mode: discover -> import chain) ------------
 
 def _discover_monitor_tick(monitor):
@@ -2146,6 +2181,7 @@ def main(import_mode=None):
     Usage:
         mimics_import.py --ts-root <dir> [--cases s0000,s0001] [--output-dir <dir>] [--axes 0,1,2] [--flips false,false,false]
         mimics_import.py --case-dir <dir> --output <file.mcs> [--axes 0,1,2] [--flips false,false,false]
+        mimics_import.py --image-file <volume.mhd> --output <file.mcs> [--axes 0,1,2] [--flips false,false,false]
 
     import_mode:
         None         — interactive (ask)
@@ -2161,6 +2197,7 @@ def main(import_mode=None):
     # Parse args (simple, Python 3.5 compatible)
     ts_root = None
     case_dir = None
+    image_file = None
     output = None
     output_dir = None
     cases_filter = None
@@ -2177,6 +2214,10 @@ def main(import_mode=None):
             i += 2
         elif arg == "--case-dir" and i + 1 < len(args):
             case_dir = args[i + 1]
+            i += 2
+        elif arg == "--image-file" and i + 1 < len(args):
+            image_file = args[i + 1]
+            case_dir = image_file
             i += 2
         elif arg == "--output" and i + 1 < len(args):
             output = args[i + 1]
@@ -2212,10 +2253,21 @@ def main(import_mode=None):
     # Interactive: if no args, ask user to choose mode
     if not ts_root and not case_dir:
         if import_mode == "single_case":
-            case_dir = _pick_directory("Select single case folder")
-            if not case_dir or not os.path.isdir(case_dir):
+            choice = mimics.dialogs.question_box(
+                title="Import Single Case",
+                message="Select one 3D image file, or a case/DICOM folder.",
+                buttons="Image File;Case or DICOM Folder;Cancel",
+                ui_blocking=True,
+            )
+            if choice == "Image File":
+                case_dir = _pick_image_file("Select 3D image file")
+            elif choice == "Case or DICOM Folder":
+                case_dir = _pick_directory("Select case or DICOM folder")
+            else:
+                return 1
+            if not case_dir or not os.path.exists(case_dir):
                 mimics.dialogs.message_box(
-                    "No valid folder was selected.",
+                    "No valid image or folder was selected.",
                     title="Import Single Case",
                     ui_blocking=True,
                 )
@@ -2253,46 +2305,19 @@ def main(import_mode=None):
     # -- Single case mode ----------------------------------------------
 
     if case_dir:
-        _verbose_log("", "Mode: single-case | case_dir={0}".format(case_dir))
+        _verbose_log("", "Mode: single-case | source={0}".format(case_dir))
+        selected_source = os.path.abspath(case_dir)
+        source_is_file = _is_medical_image_file(selected_source)
+        source_case_dir = os.path.dirname(selected_source) if source_is_file else selected_source
+        source_case_id = _image_stem(selected_source) if source_is_file else os.path.basename(selected_source)
         if not output:
-            dataset_root = os.path.dirname(os.path.abspath(case_dir))
+            dataset_root = source_case_dir if source_is_file else os.path.dirname(source_case_dir)
             output_dir_default = _resolve_import_output_dir(dataset_root)
-            output = os.path.join(output_dir_default, os.path.basename(case_dir) + ".mcs")
-        case_info = {
-            "case_id": os.path.basename(case_dir),
-            "image": None,
-            "image_type": None,
-            "masks": [],
-            "case_dir": case_dir,
-        }
-        # Find image
-        for img_name in ("ct.nii.gz", "mri.nii.gz"):
-            candidate = os.path.join(case_dir, img_name)
-            if os.path.isfile(candidate):
-                case_info["image"] = candidate
-                case_info["image_type"] = "nifti"
-                break
-        if case_info["image"] is None:
-            dicom_dir = os.path.join(case_dir, "dicom")
-            if os.path.isdir(dicom_dir):
-                case_info["image"] = dicom_dir
-                case_info["image_type"] = "dicom"
-        if case_info["image"] is None:
-            for fname in sorted(os.listdir(case_dir)):
-                if fname.endswith(".nii.gz"):
-                    case_info["image"] = os.path.join(case_dir, fname)
-                    case_info["image_type"] = "nifti"
-                    break
-        if case_info["image"] is None:
-            mimics.dialogs.message_box(title="Error", message="No image data found: {0}".format(case_dir))
+            output = os.path.join(output_dir_default, source_case_id + ".mcs")
+        case_info = _discover_single_case(selected_source)
+        if case_info is None:
+            mimics.dialogs.message_box(title="Error", message="No supported image data found: {0}".format(selected_source))
             return 1
-        # Find masks
-        seg_dir = os.path.join(case_dir, "segmentations")
-        if os.path.isdir(seg_dir):
-            for fname in sorted(os.listdir(seg_dir)):
-                if fname.endswith(".nii.gz"):
-                    organ = fname.replace(".nii.gz", "")
-                    case_info["masks"].append({"name": organ, "path": os.path.join(seg_dir, fname)})
 
         output_dir_abs = os.path.dirname(os.path.abspath(output))
         work_dir = os.path.join(output_dir_abs, case_info["case_id"] + "_work")

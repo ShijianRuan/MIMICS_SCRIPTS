@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Run nnInteractive segmentation."""
+"""Predict the current case with the recommended model for the selected organ."""
 
 from __future__ import print_function
 
@@ -20,4 +20,4 @@ for _ in range(5):
 from _mimics_entrypoint import run_runtime_entry
 
 
-run_runtime_entry(globals(), __file__, "nninteractive_mimics")
+run_runtime_entry(globals(), __file__, "fewshot_mimics", action_attr="BUTTON_PREDICT")

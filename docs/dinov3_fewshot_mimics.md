@@ -15,31 +15,29 @@ The annotator workflow is:
 
 ## Annotator Experience
 
-The Mimics Scripting Library exposes six routine actions:
+The Mimics Scripting Library exposes five ordered actions:
 
-- `Train/Update Model`
-- `Train Advanced...`
+- `01 Train Model`
 - `Predict Current Case`
-- `Predict With Model...`
-- `Show Status`
-- `Stop Latest Job`
+- `Predict Choose Model`
+- `Show Status Results`
+- `Stop AI Task`
 
 The annotator should not need to remember paths or training parameters during ordinary use. When a project is opened from `<dataset>/mcs_output/<case>.mcs`, the integration infers both the dataset root and current case from that path. If that inference fails, the user is asked to select the dataset folder.
 
-The ordinary training entry uses the active Mask name as the organ/task and runs the configured default training profile. The advanced training entry now opens an external setup window by default. Mimics writes a small context JSON, starts `tools/fewshot_training_setup_ui.py` with `Popen`, and returns immediately; it does not wait for parameter input. The external setup window keeps the default view intentionally small: profile, sample selection, training length, validation split and resource preset. Fine-tuning method, decoder, model scale, image size, learning rate, checkpoint retention and other expert controls stay available on the Expert tab, but annotators do not need to touch them for routine work. When the user clicks Start Training, the external process starts `tools/fewshot_pipeline.py train` and writes the normal training job status file. Mimics only polls status files and logs progress.
+The training entry uses the active Mask name as the organ/task and opens one external setup window. Mimics writes a small context JSON, starts `tools/fewshot_training_setup_ui.py` with `Popen`, and returns immediately; it does not wait for parameter input. The window has two task-oriented pages: `Data and samples` and `Model and policy`. There is no separate basic/advanced workflow. When the user clicks Start Training, the external process starts `tools/fewshot_pipeline.py train` and writes the normal training job status file. Mimics only polls status files and logs progress.
 
 Entry behavior:
 
 | Entry | Main use | Foreground Mimics work |
 | --- | --- | --- |
-| `Train/Update Model` | Train the selected organ using the default profile and all eligible saved labels. | Select organ Mask, choose/infer dataset root, start external pipeline. |
-| `Train Advanced...` | Choose samples and a small set of training settings before starting training. | Start external setup UI and monitor its status JSON. |
+| `Train Model` | Choose samples and strategy, then train the selected organ. | Start external setup UI and monitor its status JSON. |
 | `Predict Current Case` | Apply the latest model for the selected organ to the currently open case. | Start external inference, poll status, apply final mask buffer. |
 | `Predict With Model...` | Choose a specific local/global model version before inference. | Show model chooser only when available, then same as prediction. |
 | `Show Status` | Inspect jobs, logs, training curve, resource waits and results. | Start external status viewer; text dialog only as fallback. |
-| `Stop Latest Job` | Cancel the active DINOv3 job for the selected dataset. | Write cancel marker and terminate recorded job PIDs. |
+| `Stop AI Task` | Cancel the active DINOv3 job for the selected dataset. | Write cancel marker and terminate recorded job PIDs. |
 
-The external setup UI uses standard Tkinter in the external DINOv3 Python environment, not the embedded Mimics Python session. It is not topmost, does not call back into Mimics, and does not wait on Mimics APIs. This avoids requiring PyQt inside Mimics and avoids Mimics GUI black screens caused by in-process widget imports or long modal parameter collection. If Tkinter is missing in the external Python environment, the setup status is marked failed with a user-facing message and training is not started. If `advanced_ui_mode` is set to `internal`, or if the external setup process itself cannot start and `advanced_ui_fallback_to_internal` is enabled, the older Mimics-internal Qt/profile dialog path is still available as a fallback. The Mimics process does not recursively scan Program Files for Qt bindings. If an in-process Qt dialog is explicitly required, set `MIMICS_QT_PYTHONPATH` or `MIMICS_PYQT_PATH` to a Python-3.5-compatible PyQt5/PySide site-packages path. Do not install a modern PyQt5 wheel into Mimics Python 3.5. No dataset export, image loading, training or inference runs in the Mimics foreground process.
+The external setup and status windows use PySide6 from `nninteractive_env`, not the embedded Mimics Python session. They are not topmost, do not call back into Mimics, and do not wait on Mimics APIs. Tkinter remains only a functional fallback when PySide6 cannot load. If neither external backend is available, the setup status records a clear dependency error. No dataset export, image loading, training, or inference runs in the foreground Mimics process.
 
 Training starts only after a reminder that saved `.mcs` files are used. This prevents a common failure mode where the annotator has edited the current case but has not saved it yet, so the background export would train from old labels.
 
@@ -61,19 +59,19 @@ back to the previous non-blocking text status dialog.
 
 The status window shows:
 
-- latest jobs in the selected dataset workspace;
-- selected job details: type, organ, case, status, sample counts, resource wait,
-  latest progress, error, model path, output path and log path;
+- only the active task for the selected organ Mask, or its most recent task when none is active;
+- current activity details: organ, case, status, strategy, sample counts,
+  resource wait, latest progress, result state, and actionable error;
 - a lightweight training curve parsed from epoch logs: train loss and
   validation Dice;
-- log tail from the training/inference log and the shared pipeline log;
+- a separate Technical details page containing IDs, paths, warnings, and bounded log tails;
 - `Open Workspace`, `Open Log Folder`, and `Request Stop`.
 
 `Request Stop` uses only the cancel marker and PIDs recorded in the selected job
 JSON. It does not scan by broad process names and does not terminate the
 foreground Mimics process.
 
-The text fallback displays the latest jobs with:
+The text fallback displays the same single selected task with:
 
 - job id;
 - job type;
@@ -109,11 +107,11 @@ The latest registered model is used by default for prediction. Older model versi
 
 ## Stopping Work
 
-`Stop Latest Job` writes the job cancel marker and requests termination of the active pipeline/training/inference process tree. The job status is changed to `cancelled`.
+`05_Stop_AI_Task` writes the job cancel marker and requests termination of the active pipeline/training/inference process tree. The job status is changed to `cancelled`.
 
 The trainer also checks the cancel marker during training. If it sees the marker before the forced termination arrives, it exits cleanly and reports `cancelled`.
 
-Global cleanup through `Stop_Background_Services.py` remains available for exceptional cases, but normal stopping should use `Stop Latest Job` first because it updates the job state.
+Global cleanup through `03_Stop_All_Owned_Services.py` remains available for exceptional cases, but normal stopping should use `05_Stop_AI_Task` first because it updates the job state.
 
 ## Non-Blocking Rule
 
@@ -181,6 +179,13 @@ python tools/fewshot_pipeline.py train --ts-root /path/to/dataset --organ liver 
 
 Saved `.mcs` files are exported first through a background Mimics process, so new annotations become available as NIfTI labels without freezing the open Mimics GUI.
 
+For training, each Mask is transformed from the actual Mimics image grid back
+to the original source-image NIfTI grid using physical coordinates and
+nearest-neighbor resampling. A fresh export must match the source image in both
+shape and affine. The pipeline stops if it does not; it no longer hides an
+export error by resampling the source image onto the Mask grid. Consequently,
+training and inference both start from the same original image orientation.
+
 ## Model Workspace
 
 Each dataset root gets an isolated workspace:
@@ -202,6 +207,7 @@ Model registration stores:
 - organ name;
 - copied checkpoint path;
 - copied config path;
+- config SHA-256 and the effective strategy/configuration;
 - source DINOv3 experiment path;
 - sample list;
 - sample count;
@@ -222,79 +228,102 @@ Materialized training datasets under `fewshot_models/datasets/<organ>/<run_id>/`
 
 ## Training Parameters
 
-The Mimics UI exposes two levels:
+The Mimics UI exposes one `01_Train_Model.py` entry. The external setup window
+contains two pages in the same workflow:
 
-- `DINOv3_Train_Update_Model.py`: default profile, minimal prompts.
-- `DINOv3_Train_Advanced.py`: external setup window for sample and parameter selection; Mimics only starts the setup process and monitors JSON status.
+- `Data and samples`: dataset root, explicit case selection, sample cap, and
+  validation split;
+- `Model and policy`: data policy, model adaptation,
+  decoder, installed model scale, image size, epochs, gradient accumulation,
+  learning rate and schedule, warmup, weight decay, validation fraction, and mixed precision.
 
-The external Advanced UI previews are stored at:
+Batch size is fixed at one because case depth varies. Gradient accumulation is
+the supported effective-batch control. Sub-volume depth, checkpoint retention,
+modality, base config, and custom weight paths are backend settings and are not
+shown in the normal annotator window.
 
-- `docs/images/dinov3_advanced_training_ui_preview.png`: default Setup tab;
-- `docs/images/dinov3_advanced_training_expert_preview.png`: optional Expert tab.
-- `docs/images/dinov3_status_viewer_preview.png`: external Status viewer.
+The interactive UI prototype is stored at
+`docs/previews/dinov3_fewshot_interactive.html`. It can be opened directly and
+demonstrates setup, dependency rules, current-task status, progress, and logs.
 
-Parameter controls are intentionally split by risk:
-
-- routine controls use selections: profile, training length, validation split, resource preset, sample order;
-- expert architecture controls use selections: fine-tuning method, decoder,
-  installed pretrained model scale, learning rate, weight decay, image detail
-  and sub-volume depth;
-- numeric expert controls use spin boxes: epochs, batch size, gradient accumulation, LoRA rank/alpha, adapter bottleneck, checkpoint retention and validation fraction;
-- backend template, modality, and custom weight path are controlled centrally in
-  `fewshot_config.json` and are intentionally hidden from the annotator UI.
-
-The Expert tab only exposes parameters that are wired into the current pipeline and DINOv3 trainer:
+Only parameters wired into the current pipeline and trainer are exposed:
 
 - fine-tuning method, LoRA rank/alpha, adapter bottleneck, decoder, image
-  detail, learning rate, weight decay, epoch count, batch size, gradient
-  accumulation, mixed precision, and checkpoint retention are written into the
-  generated DINOv3 YAML;
+  detail, learning rate, weight decay, epoch count, gradient accumulation, and
+  mixed precision are written into the generated DINOv3 YAML;
 - pretrained model scale maps to an installed local model directory under `external/dinov3-medical-seg/models`; unavailable scales are not advertised in the external UI;
 - image detail is a labeled preset over common `data.img_size` values
-  (`192,192`, `224,224`, `256,256`, `320,320`). The Expert tab also has a
-  `Custom size` field that is enabled only when `Image detail` is set to
-  `Custom`, so project owners can use any valid `width,height` value without
-  forcing routine annotators to type dimensions;
-- sub-volume depth is the only sub-volume dimension exposed because the current trainer splits by depth; it still writes the three-value config expected by the trainer;
+  (`192,192`, `224,224`, `256,256`, `320,320`) plus an editable `Custom size`;
 - `No validation` writes `training.validation_enabled: false`, so the DINOv3 trainer does not reuse training data as validation.
 
-`Modality` is still written from `fewshot_config.json` into the generated YAML,
-but the current pipeline does not use it to change image normalization or data
-loading behavior. For that reason it is not an annotator-facing setting. `Base
-config` is a backend template that controls many low-level DINOv3 defaults at
-once, so exposing it in routine UI would make accidental misconfiguration easy.
-`keep_materialized_dataset` is also config/CLI-only because enabling it can
-quickly grow disk usage and is mostly useful for debugging failed runs.
+The preset selector provides three conservative starting points and is not an
+organ lookup table. Users may change the supported fields after applying a
+preset; the complete resolved policy is stored with the model.
 
-Setup presets are applied only when the user explicitly selects them. Expert edits are not re-applied or overwritten at Start Training. If an Expert value no longer matches a setup preset, the Setup tab shows `Custom (...)` or `Custom` rather than falling back to the first preset.
+| Starting preset | Purpose | Initial configuration |
+| --- | --- | --- |
+| Adaptive | Conservative default for a new task | Fingerprint chooses full-volume or patch sampling |
+| Full-volume baseline | Targets sufficiently represented in the field of view | Full sampling, Dice-Focal, whole inference |
+| Patch | Small or sparse targets | Fingerprint-sized patches and sliding-window inference |
 
-The static preview PNG generator uses Pillow only when `tools/fewshot_training_setup_ui.py --preview ...` is invoked for documentation. Runtime Advanced UI startup does not import or require Pillow.
+Exposed policy controls include sampling mode, patch sizing/focus, slice plane,
+single-slice versus 2.5D input, neighbor distance, loss family, and optional
+largest-component post-processing. Focal coefficients remain at the values used
+by the controlled experiments; per-class weights are computed from training
+labels. CT uses the configured modality-aware CT normalization, while MRI uses
+robust percentile normalization, so a CT window is not shown as a generic user
+control.
+
+Dependencies are enforced twice, in the UI and in the background compiler:
+
+- full-volume sampling forces whole-volume inference and disables patch fields;
+- patch sampling automatically uses sliding-window inference;
+- custom patch size is enabled only in custom patch-size mode;
+- neighbor distance is enabled only for 2.5D input;
+- LoRA and adapter controls are mutually enabled by the selected adaptation method.
+
+Sampling dimensionality, encoder context, and decoder dimensionality are
+independent controls. Full and patch sampling always select a 3D volume or 3D
+sub-volume. A 2D decoder processes every selected slice and stacks predictions
+back into a 3D mask; a 3D decoder fuses the feature volume. The 2.5D channel
+policy supplies neighboring-slice context to the encoder and is valid with
+either decoder family. The normal UI exposes `conv2d` as the only 2D decoder
+with a completed pilot result; unconfirmed 2D variants remain research-only.
+
+Invalid combinations passed through the CLI are rejected before label export,
+GPU allocation, or training. The same generated YAML is copied into the model
+registry, verified by SHA-256, and reused by inference, so custom preprocessing
+and prediction policy cannot be lost between training and Mimics application.
+
+Runtime UI startup does not import or require Pillow or a browser. The
+interactive HTML is documentation only; the deployed external window remains
+PySide6 and uses the same policy field names and dependency rules.
 
 All DINOv3 Scripting Library entries are thin wrappers through
 `runtime_py35/_mimics_entrypoint.py`. They do not reload
 `fewshot_mimics.py` on every click, so active prediction monitors are not reset
 when the annotator opens status, starts another allowed action, or stops a job.
 
-Defaults and profiles live in `fewshot_config.json`:
+Defaults live in `fewshot_config.json`:
 
 - bundled DINOv3 project path, normally `external/dinov3-medical-seg`;
 - external Python path;
 - base config;
-- training profiles such as `balanced`, `fast_check`, `low_memory`, and `quality_lora`;
-- advanced UI mode: `advanced_ui_mode` defaults to `external`; use `internal` only when an in-process Mimics dialog is explicitly desired;
+- validated base config `config/research/ct_fewshot_fast.yaml` for a 12 GB GPU;
+- UI mode: `advanced_ui_mode` defaults to `external`;
 - fallback behavior: `advanced_ui_fallback_to_internal` defaults to enabled so a missing external UI does not silently use defaults;
 - fine-tuning method: `frozen`/decoder-only, `lora`, `adapter`, or `full`;
 - decoder: `linear3d`, `mlp_probe`, `segformer3d`, or `dpt3d`;
 - pretrained model scale: `vitb16`, `vitl16`, or `vith16plus` when the corresponding local model directory exists;
 - epochs;
-- batch size;
+- batch size, fixed to one in the annotator workflow;
 - gradient accumulation;
 - learning rate and weight decay;
 - image size;
 - modality;
 - validation fraction;
 - minimum and maximum samples;
-- mixed precision and sub-volume options.
+- mixed precision and backend-only sub-volume options;
 - checkpoint retention: `best_model.pth` plus the last N epoch checkpoints.
 
 Rationale:
@@ -312,19 +341,26 @@ Prediction flow:
 3. Mimics starts `fewshot_pipeline.py infer`.
 4. External Python writes a prediction NIfTI.
 5. Mimics detects completion through a timer.
-6. `mimics_bridge.py mask_to_buffer` converts the NIfTI result to the current active Mimics image grid and buffer order.
+6. `mimics_bridge.py mask_to_buffer` converts the NIfTI result to the launch-time Mimics image grid and buffer order.
 7. Mimics creates or updates `AI_<organ>`.
 
 `Predict Current Case` uses the latest local model for the active Mask name. `Predict With Model...` lets the annotator select a specific run or reusable model before inference.
 
 The current case is inferred from the open project path. If the project is not under `<dataset>/mcs_output/<case>.mcs`, prediction is not started because the workflow cannot safely match the open image to the dataset case.
 
-When applying a prediction to an open `.mcs`, the conversion bridge first tries
-to use `mimics_script.mimics_voxel_to_ras_matrix` stored on the active image.
-That matrix is derived from the actual imported Mimics image grid, so prediction
-masks are resampled into the same grid that `Mask.set_voxel_buffer()` expects.
-If that metadata is unavailable, the bridge falls back to the source image
-geometry and logs a warning.
+Before launch, Mimics measures the active image grid from
+`get_voxel_center()` and records its shape and voxel-to-RAS matrix. The source
+NIfTI path, shape, and affine must also match the imported project metadata.
+Inference uses the exact copied training YAML; its SHA-256 is verified before
+the GPU starts. Training and inference both canonicalize to RAS internally,
+apply the same intensity/channel/image-size pipeline, and restore the result to
+the original input NIfTI grid.
+
+If the annotator opens another `.mcs` while inference runs, the completed
+prediction remains in `waiting_for_source_case`. It is not applied to the new
+case. Application resumes only after the original project and the same physical
+image grid are open again. There is no source-geometry fallback when the live
+Mimics grid cannot be verified.
 
 ## Failure Handling
 
@@ -338,12 +374,15 @@ Common failure cases:
 - external Python or DINOv3 project not found;
 - DINOv3 training or inference exits non-zero;
 - prediction conversion fails because geometry does not match the case image.
+- a fresh exported label does not match the source-image grid;
+- the registered training config changed after model registration;
+- the original project is not open when a completed prediction is ready.
 
 The foreground Mimics process reports failures through non-blocking dialogs and leaves detailed logs in the workspace.
 
 ## Background Cleanup
 
-`Stop_Background_Services.py` and `tools/mimics_batch_cli.py kill-background` include `fewshot_pipeline.py` in their process markers.
+`03_Stop_All_Owned_Services.py` and `tools/mimics_batch_cli.py kill-background` include `fewshot_pipeline.py` in their process markers.
 
 The cleanup intentionally does not match generic `scripts/train.py` or `scripts/infer.py`, because those names may also be used by unrelated experiments. If a child training process survives after a forced kill, use the PID in the job JSON for precise cleanup.
 
@@ -352,7 +391,7 @@ The cleanup intentionally does not match generic `scripts/train.py` or `scripts/
 - DICOM-only cases are not used for DINOv3 training or inference unless a NIfTI image is also present.
 - Validation uses an explicit held-out split when enough selected samples are available. If the selected sample count is too small, validation is skipped or falls back to available materialized data, so Dice should still be interpreted as workflow feedback rather than an unbiased benchmark.
 - Applying a prediction still calls `set_voxel_buffer` in the foreground Mimics process. This is much smaller than training/inference but can still take a short moment for very large volumes.
-- The default Mimics UI stays simple; advanced controls are available from a separate entry to avoid adding setup burden to routine annotation.
+- Real Mimics validation is still required for vendor/version-specific behavior of `get_voxel_center()` and the final foreground `set_voxel_buffer()` call.
 
 ## External CLI Examples
 
