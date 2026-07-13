@@ -2215,9 +2215,48 @@ def _build_bridge_params(case_info, axes, flips, work_dir):
     }
 
 
+def _run_main_with_args(args, import_mode=None, case_info_override=None):
+    previous = list(sys.argv)
+    try:
+        sys.argv = [previous[0]] + list(args)
+        return main(import_mode=import_mode, case_info_override=case_info_override)
+    finally:
+        sys.argv = previous
+
+
+def _launch_external_import_setup(import_mode):
+    import io_setup_mimics
+
+    mode = "import_single" if import_mode == "single_case" else "import_batch"
+    configured = str(_load_data_io_config().get("mimics_output_dir", "") or "")
+
+    def submitted(selection):
+        source = str(selection.get("source_path", "") or "")
+        output_dir = str(selection.get("output_path", "") or "")
+        if not source or not output_dir:
+            raise RuntimeError("The source and output paths were not returned by the path window.")
+        if mode == "import_single":
+            source_arg = "--image-file" if os.path.isfile(source) else "--case-dir"
+            args = [source_arg, source, "--output-dir", output_dir]
+        else:
+            args = ["--ts-root", source, "--output-dir", output_dir]
+        _run_main_with_args(
+            args,
+            import_mode=import_mode,
+            case_info_override=selection.get("case_info"),
+        )
+
+    return io_setup_mimics.launch(
+        mode,
+        _python_exe(),
+        {"configured_output": configured},
+        submitted,
+    )
+
+
 # -- Main entry ---------------------------------------------------------
 
-def main(import_mode=None):
+def main(import_mode=None, case_info_override=None):
     """Entry point. Reads config from argv or interactive dialog.
 
     Usage:
@@ -2297,57 +2336,10 @@ def main(import_mode=None):
         ),
     )
 
-    # Interactive: if no args, ask user to choose mode
+    # Interactive path selection is hosted in external PySide6. Mimics only
+    # launches it and polls a tiny status JSON through a GUI timer.
     if not ts_root and not case_dir:
-        if import_mode == "single_case":
-            choice = mimics.dialogs.question_box(
-                title="Import Single Case",
-                message="Select one 3D image file, or a case/DICOM folder.",
-                buttons="Image File;Case or DICOM Folder;Cancel",
-                ui_blocking=True,
-            )
-            if choice == "Image File":
-                case_dir = _pick_image_file("Select 3D image file")
-            elif choice == "Case or DICOM Folder":
-                case_dir = _pick_directory("Select case or DICOM folder")
-            else:
-                return 1
-            if not case_dir or not os.path.exists(case_dir):
-                mimics.dialogs.message_box(
-                    "No valid image or folder was selected.",
-                    title="Import Single Case",
-                    ui_blocking=True,
-                )
-                return 1
-        else:
-            answer = mimics.dialogs.question_box(
-                title="Import Dataset",
-                message="Choose import mode:\n\n"
-                        "Batch Import — scan a dataset folder and import all cases.\n"
-                        "Single Case — pick one case folder and convert it to .mcs.",
-                buttons="Batch Import (Dataset Folder);Single Case;Cancel",
-                ui_blocking=True,
-            )
-            if answer == "Single Case":
-                case_dir = _pick_directory("Select single case folder")
-                if not case_dir or not os.path.isdir(case_dir):
-                    mimics.dialogs.message_box(
-                        "No valid folder was selected.",
-                        title="Import Dataset",
-                        ui_blocking=True,
-                    )
-                    return 1
-            elif answer == "Batch Import (Dataset Folder)":
-                ts_root = _pick_directory("Select dataset folder")
-                if not ts_root or not os.path.isdir(ts_root):
-                    mimics.dialogs.message_box(
-                        "No valid folder was selected.",
-                        title="Import Dataset",
-                        ui_blocking=True,
-                    )
-                    return 1
-            else:
-                return 1
+        return _launch_external_import_setup(import_mode)
 
     # -- Single case mode ----------------------------------------------
 
@@ -2357,14 +2349,14 @@ def main(import_mode=None):
         source_is_file = _is_medical_image_file(selected_source)
         source_case_dir = os.path.dirname(selected_source) if source_is_file else selected_source
         source_case_id = _image_stem(selected_source) if source_is_file else os.path.basename(selected_source)
-        if not output:
-            dataset_root = source_case_dir if source_is_file else os.path.dirname(source_case_dir)
-            output_dir_default = _resolve_import_output_dir(dataset_root)
-            output = os.path.join(output_dir_default, source_case_id + ".mcs")
-        case_info = _discover_single_case(selected_source)
+        case_info = case_info_override or _discover_single_case(selected_source)
         if case_info is None:
             mimics.dialogs.message_box(title="Error", message="No supported image data found: {0}".format(selected_source))
             return 1
+        if not output:
+            dataset_root = source_case_dir if source_is_file else os.path.dirname(source_case_dir)
+            output_dir_default = output_dir or _resolve_import_output_dir(dataset_root)
+            output = os.path.join(output_dir_default, case_info["case_id"] + ".mcs")
 
         # Merge --mask-files from command line into case_info.
         # For interactive mask import, use the dedicated "Import Masks" entry.
@@ -2388,8 +2380,6 @@ def main(import_mode=None):
         job_dir = os.path.join(jobs_dir, case_info["case_id"])
 
         # Launch bridge in background + start timer to queue .mcs creation.
-        _mark_mcs_queue_active(output_dir_abs, 1)
-        _append_import_log(output_dir_abs, "Preparing: {0}".format(case_info["case_id"]))
         bridge_params = _build_bridge_params(case_info, axes, flips, work_dir)
         _launch_bridge_job_thread(bridge_params, job_dir, output_dir_abs, "preparing", case_id=case_info["case_id"])
 

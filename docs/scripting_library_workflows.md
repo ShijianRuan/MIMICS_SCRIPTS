@@ -22,6 +22,15 @@
 or a folder containing a DICOM series directly. Header inspection and
 conversion run in the external bridge process.
 
+`01 Import Dataset`, `02 Import Single Case`, and `03 Export Masks` open one
+shared external PySide6 path window. Mimics starts that process and returns
+immediately; file browsing never runs in the Mimics GUI process. Import always
+requires a source and shows the resolved `.mcs` output folder, while keeping the
+output optional to change. `mimics_io_config.json:mimics_output_dir` is only an
+administrator/default value and is overridden by the current window selection.
+Paths are remembered only when the annotator explicitly enables the workstation
+remember option.
+
 `05 Import Masks` adds binary or multi-label NIfTI, MHA/MHD, or NRRD
 segmentations to the active image. File reading, label splitting, and spatial
 resampling run in external Python. Mimics applies one prepared Mask per GUI
@@ -29,9 +38,11 @@ timer tick; empty results are rejected with a spatial-alignment warning.
 
 `03 Export Masks` exports every Mask in the saved project, including hidden
 Masks. Select the source case directory and then the destination root. Output
-is written to `<chosen root>/<case>/segmentations/*.nii.gz`. Export starts
-immediately when there are no filename conflicts; otherwise Mimics asks whether
-to overwrite, skip existing files, or cancel. External batch export uses
+is written to `<chosen root>/<case>/segmentations/*.nii.gz`. Choose `Skip
+existing` or `Overwrite existing` in the same external setup window. The
+window also shows the folder containing the saved `.mcs`; this defaults to the
+current project location and is independent from the label destination.
+`mimics_output_dir` never redirects exported labels. External batch export uses
 `tools/mimics_batch_cli.py export-labels` and requires an explicit destination
 policy through either `--output-dir` or `--overwrite-source`.
 

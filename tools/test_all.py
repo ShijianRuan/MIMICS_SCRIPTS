@@ -2331,7 +2331,7 @@ class TestNewFeatures(unittest.TestCase):
         _cleanup(self.tmp)
 
     def test_mask_export_checks_only_actual_destination_conflicts(self):
-        """Interactive export should prompt only for files that already exist."""
+        """Conflict detection remains exact and policy is selected externally."""
         from mimics_export import _existing_mask_exports
 
         target = os.path.join(self.tmp, "s0001", "segmentations")
@@ -2348,7 +2348,10 @@ class TestNewFeatures(unittest.TestCase):
 
         source = Path(RUNTIME_DIR, "mimics_export.py").read_text(encoding="utf-8")
         self.assertNotIn('buttons="Safe Copy;Overwrite Original;Cancel"', source)
-        self.assertIn('buttons="Overwrite;Skip Existing;Cancel"', source)
+        self.assertNotIn('buttons="Overwrite;Skip Existing;Cancel"', source)
+        ui_source = Path(PROJECT_ROOT, "tools", "io_path_setup_ui.py").read_text(encoding="utf-8")
+        self.assertIn('QRadioButton("Skip existing")', ui_source)
+        self.assertIn('QRadioButton("Overwrite existing")', ui_source)
 
     def test_mask_import_uses_correct_lps_to_ras_world_conversion(self):
         from mask_import import _derive_mimics_voxel_to_ras_matrix
@@ -2381,6 +2384,47 @@ class TestNewFeatures(unittest.TestCase):
             discover_monitor.index("_start_win32_discover_monitor"),
             discover_monitor.index("from PyQt5.QtCore import QTimer"),
         )
+
+    def test_external_io_setup_defaults_and_nonblocking_entry(self):
+        import inspect
+        import mimics_import
+        import mimics_export
+        io_ui = __import__("tools.io_path_setup_ui", fromlist=["source_default_output"])
+
+        dataset = os.path.join(self.tmp, "dataset")
+        case_dir = os.path.join(dataset, "s0001")
+        os.makedirs(case_dir)
+        image_path = os.path.join(case_dir, "ct.mhd")
+        with open(image_path, "w", encoding="utf-8") as handle:
+            handle.write("ObjectType = Image\n")
+        self.assertEqual(
+            os.path.join(dataset, "mcs_output"),
+            io_ui.source_default_output("import_batch", dataset),
+        )
+        self.assertEqual(
+            os.path.join(case_dir, "mcs_output"),
+            io_ui.source_default_output("import_single", image_path),
+        )
+        self.assertEqual(
+            os.path.join(dataset, "mask_exports"),
+            io_ui.source_default_output("export_masks", case_dir),
+        )
+        discovered = io_ui.discover_single_source(image_path)
+        self.assertEqual("ct", discovered["case_id"])
+        self.assertEqual(os.path.abspath(image_path), discovered["image"])
+        import_source = inspect.getsource(mimics_import.main)
+        export_source = inspect.getsource(mimics_export.main)
+        self.assertIn("_launch_external_import_setup", import_source)
+        self.assertIn("_launch_external_export_setup", export_source)
+        self.assertNotIn("_pick_directory(\"Select dataset folder\")", import_source)
+        self.assertNotIn("_pick_directory(\"Select source case directory\")", export_source)
+        single_branch = inspect.getsource(mimics_import.main)
+        self.assertIn("case_info_override or _discover_single_case", single_branch)
+        export_setup = inspect.getsource(mimics_export._launch_external_export_setup)
+        self.assertIn('"configured_output": ""', export_setup)
+        self.assertIn('"--external-setup"', export_setup)
+        async_launch = inspect.getsource(mimics_export._launch_background_batch_export_async)
+        self.assertIn("thread.start()", async_launch)
 
     def test_ai_prediction_output_modes_are_explicit(self):
         import inspect

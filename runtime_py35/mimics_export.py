@@ -34,6 +34,7 @@ import runtime_common
 
 # -- Global async monitor state ----------------------------------------
 _EXPORT_MONITORS = {}
+_EXPORT_LAUNCH_THREADS = []
 _LOG_ROTATE_BYTES = 5 * 1024 * 1024
 _LOG_ROTATE_BACKUPS = 3
 _CONFIG_CACHE = None
@@ -220,9 +221,9 @@ def _find_mimics_exe():
     return None
 
 
-def _launch_background_batch_export(ts_root, cases_filter, axes, flips, label_output_root=None, overwrite_existing=False, case_dirs=None):
+def _launch_background_batch_export(ts_root, cases_filter, axes, flips, label_output_root=None, overwrite_existing=False, case_dirs=None, mcs_output_dir=None):
     """Launch batch export in a separate background Mimics process."""
-    output_dir = _resolve_export_output_dir(ts_root)
+    output_dir = os.path.abspath(mcs_output_dir) if mcs_output_dir else _resolve_export_output_dir(ts_root)
     if not os.path.isdir(output_dir):
         os.makedirs(output_dir)
     mimics_exe = _find_mimics_exe()
@@ -987,6 +988,103 @@ def _current_project_case_id():
     return None
 
 
+def _launch_background_batch_export_async(*args, **kwargs):
+    """Move output-path I/O and background Mimics startup off the GUI thread."""
+    def worker():
+        try:
+            _launch_background_batch_export(*args, **kwargs)
+        except Exception as exc:
+            root = kwargs.get("mcs_output_dir") or kwargs.get("label_output_root") or ""
+            _append_export_log(root, "Could not start background mask export: {0}".format(exc))
+        finally:
+            try:
+                _EXPORT_LAUNCH_THREADS.remove(thread)
+            except Exception:
+                pass
+
+    thread = threading.Thread(target=worker, name="MimicsMaskExportLaunch")
+    thread.daemon = True
+    _EXPORT_LAUNCH_THREADS.append(thread)
+    thread.start()
+    return thread
+
+
+def _current_project_path():
+    try:
+        info = mimics.file.get_project_information()
+    except Exception:
+        return ""
+    for attr in ("filename", "file_name", "path", "project_path", "project_file"):
+        try:
+            value = getattr(info, attr, None)
+        except Exception:
+            value = None
+        if value:
+            return os.path.abspath(str(value))
+    return ""
+
+
+def _active_source_case_dir():
+    try:
+        image = mimics.data.images.get_active()
+    except Exception:
+        image = None
+    source = _metadata_get(image, SOURCE_IMAGE_PATH_METADATA, "") if image is not None else ""
+    if not source:
+        return ""
+    source = os.path.abspath(str(source))
+    return os.path.dirname(source) if os.path.isfile(source) else source
+
+
+def _run_main_with_args(args):
+    previous = list(sys.argv)
+    try:
+        sys.argv = [previous[0]] + list(args)
+        return main()
+    finally:
+        sys.argv = previous
+
+
+def _launch_external_export_setup():
+    import io_setup_mimics
+
+    project_path = _current_project_path()
+    if not project_path or not project_path.lower().endswith(".mcs"):
+        raise RuntimeError("Save the current Mimics project before exporting masks.")
+    case_id = _current_project_case_id() or os.path.splitext(os.path.basename(project_path))[0]
+    source_initial = _active_source_case_dir()
+
+    def submitted(selection):
+        source = str(selection.get("source_path", "") or "")
+        export_root = str(selection.get("output_path", "") or "")
+        mcs_dir = str(selection.get("mcs_dir", "") or "")
+        if not source or not export_root or not mcs_dir:
+            raise RuntimeError("The source, saved project, and export paths are required.")
+        args = [
+            "--case-dir", source,
+            "--mcs-dir", mcs_dir,
+            "--label-output-root", export_root,
+            "--external-setup",
+        ]
+        if selection.get("conflict_policy") == "overwrite":
+            args.append("--overwrite-source")
+        _run_main_with_args(args)
+
+    return io_setup_mimics.launch(
+        "export_masks",
+        _python_exe(),
+        {
+            "case_id": case_id,
+            "source_initial": source_initial,
+            "mcs_dir_initial": os.path.dirname(project_path),
+            # mimics_output_dir controls .mcs storage only. It must never
+            # silently redirect exported label files.
+            "configured_output": "",
+        },
+        submitted,
+    )
+
+
 # -- Single case export -------------------------------------------------
 
 def _export_masks_and_build_params(case_dir, axes, flips, work_dir, output_seg_dir=None, export_space="source_image", mask_names=None, overwrite_existing=None):
@@ -1287,6 +1385,8 @@ def main():
     flips = [False, False, False]
     label_output_root = None
     overwrite_existing = False
+    mcs_dir = None
+    external_setup = False
 
     args = sys.argv[1:]
     i = 0
@@ -1311,31 +1411,28 @@ def main():
         elif arg == "--label-output-root" and i + 1 < len(args):
             label_output_root = args[i + 1]
             i += 2
+        elif arg == "--mcs-dir" and i + 1 < len(args):
+            mcs_dir = args[i + 1]
+            i += 2
         elif arg == "--overwrite-source":
             overwrite_existing = True
+            i += 1
+        elif arg == "--external-setup":
+            external_setup = True
             i += 1
         else:
             i += 1
 
-    # Interactive: if no args, ask for case dir or TS root
+    # Interactive setup runs in external PySide6; Mimics remains responsive.
     if not ts_root and not case_dir:
-        # Always let the annotator confirm the source case directory. Project
-        # metadata may point to an old location after a dataset/project copy.
-        case_dir = _pick_directory("Select source case directory")
-        if not case_dir or not os.path.isdir(case_dir):
-            mimics.dialogs.message_box(
-                "No valid directory selected.",
-                title="Export Masks",
-                ui_blocking=True,
-            )
-            return 1
+        return _launch_external_export_setup()
 
     # -- Single case mode ----------------------------------------------
 
     if case_dir:
         case_id = _current_project_case_id() or os.path.basename(os.path.abspath(case_dir))
         ts_root = os.path.dirname(os.path.abspath(case_dir))
-        output_dir = _resolve_export_output_dir(ts_root)
+        output_dir = os.path.abspath(mcs_dir) if mcs_dir else _resolve_export_output_dir(ts_root)
         mcs_path = os.path.join(output_dir, case_id + ".mcs")
         if not os.path.isfile(mcs_path):
             mimics.dialogs.message_box(
@@ -1348,36 +1445,16 @@ def main():
             )
             return 1
         if not label_output_root and not overwrite_existing:
-            label_output_root = _pick_directory("Select mask export destination root")
-            if not label_output_root:
-                return 1
-            segmentations_dir, collisions = _existing_mask_exports(
-                label_output_root, case_id, _current_mask_names()
-            )
-            if collisions:
-                preview = "\n".join(os.path.basename(path) for path in collisions[:8])
-                if len(collisions) > 8:
-                    preview += "\n... and {0} more".format(len(collisions) - 8)
-                decision = mimics.dialogs.question_box(
-                    title="Existing Mask Files",
-                    message=(
-                        "{0} mask file(s) already exist in:\n{1}\n\n{2}\n\n"
-                        "Overwrite replaces conflicting files. Skip Existing preserves them."
-                    ).format(len(collisions), segmentations_dir, preview),
-                    buttons="Overwrite;Skip Existing;Cancel",
-                    ui_blocking=True,
-                )
-                if decision == "Overwrite":
-                    overwrite_existing = True
-                elif decision == "Skip Existing":
-                    overwrite_existing = False
-                else:
-                    return 1
-        process = _launch_background_batch_export(
+            # Non-interactive callers that omit a destination get the same
+            # safe, non-overwriting default as the external path window.
+            label_output_root = os.path.join(ts_root, "mask_exports")
+        launch = _launch_background_batch_export_async if external_setup else _launch_background_batch_export
+        process = launch(
             ts_root, set([case_id]), axes, flips,
             label_output_root=label_output_root,
             overwrite_existing=overwrite_existing,
             case_dirs={case_id: os.path.abspath(case_dir)},
+            mcs_output_dir=output_dir,
         )
         if process is None:
             mimics.dialogs.message_box(
@@ -1385,14 +1462,6 @@ def main():
                 message="Could not start background export. See mimics_export.log in output directory.",
             )
             return 1
-        mimics.dialogs.message_box(
-            title="Export Started",
-            message=(
-                "Export for {0} is running in a background Mimics process.\n"
-                "The current Mimics window remains available.\n\n"
-                "Status/logs: {1}"
-            ).format(case_id, output_dir),
-        )
         return 0
 
     # -- Batch mode -----------------------------------------------------
@@ -1400,6 +1469,7 @@ def main():
         ts_root, cases_filter, axes, flips,
         label_output_root=label_output_root,
         overwrite_existing=overwrite_existing,
+        mcs_output_dir=mcs_dir,
     )
     if process is None:
         output_dir = _resolve_export_output_dir(ts_root)
