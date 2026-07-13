@@ -38,6 +38,7 @@ def _case_stem(path: Path) -> str:
 
 
 def evaluate_case(model, image_path: Path, label_path: Path, config, device, save_dir: Path | None = None) -> dict:
+    stage_started = time.time()
     original_image = nib.load(str(image_path))
     canonical_image = canonicalize(original_image)
     canonical_label = canonicalize(nib.load(str(label_path)))
@@ -54,7 +55,11 @@ def evaluate_case(model, image_path: Path, label_path: Path, config, device, sav
         canonical_image,
         config.get("data", {}).get("target_spacing"),
     )
+    load_seconds = time.time() - stage_started
+    stage_started = time.time()
     prediction_zyx = predict_array(model, model_grid, config, device)
+    inference_seconds = time.time() - stage_started
+    stage_started = time.time()
     prediction_grid = nib.Nifti1Image(zyx_to_xyz(prediction_zyx), model_grid.affine, header=model_grid.header)
     if (
         model_grid.shape[:3] != canonical_image.shape[:3]
@@ -67,6 +72,8 @@ def evaluate_case(model, image_path: Path, label_path: Path, config, device, sav
         )
     prediction_native_zyx = xyz_to_zyx(prediction_grid.get_fdata(dtype=np.float32)) > 0
     target_zyx = xyz_to_zyx(canonical_label.get_fdata(dtype=np.float32)) > 0
+    restore_seconds = time.time() - stage_started
+    stage_started = time.time()
     tolerance_mm = float(config.get("evaluation", {}).get("surface_tolerance_mm", 2.0))
     result = binary_metrics(
         prediction_native_zyx,
@@ -74,6 +81,7 @@ def evaluate_case(model, image_path: Path, label_path: Path, config, device, sav
         spacing_zyx(canonical_image),
         surface_tolerance_mm=tolerance_mm,
     )
+    metrics_seconds = time.time() - stage_started
     result.update(
         {
             "case_id": _case_stem(image_path),
@@ -82,6 +90,12 @@ def evaluate_case(model, image_path: Path, label_path: Path, config, device, sav
             "spacing_zyx": list(spacing_zyx(canonical_image)),
             "native_shape_zyx": list(prediction_native_zyx.shape),
             "model_grid_shape_xyz": list(model_grid.shape[:3]),
+            "timing_seconds": {
+                "load_and_resample": load_seconds,
+                "inference": inference_seconds,
+                "restore": restore_seconds,
+                "metrics": metrics_seconds,
+            },
         }
     )
     if save_dir is not None:
@@ -106,15 +120,18 @@ def evaluate_dataset(model, data_root: Path, split: str, config, device, save_di
         case_id = _case_stem(image_path)
         if case_id not in labels:
             raise RuntimeError("Missing label for {}".format(image_path))
+        print("Evaluating {}...".format(case_id), flush=True)
         started = time.time()
         row = evaluate_case(model, image_path, labels[case_id], config, device, save_dir)
         row["elapsed_seconds"] = time.time() - started
         rows.append(row)
-        print("{}: Dice={:.4f}, HD95={}".format(
+        print("{}: Dice={:.4f}, HD95={}, time={:.1f}s {}".format(
             case_id,
             row["dice"],
             "NA" if row["hd95_mm"] is None else "{:.2f} mm".format(row["hd95_mm"]),
-        ))
+            row["elapsed_seconds"],
+            row["timing_seconds"],
+        ), flush=True)
     if not rows:
         raise RuntimeError("No NIfTI cases found under {}".format(image_dir))
     def aggregate(key):
