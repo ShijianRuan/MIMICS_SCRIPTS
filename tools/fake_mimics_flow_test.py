@@ -573,8 +573,16 @@ def test_mask_identifier_all_mask_bbox_scan(fake, tmp):
     assert_equal(hit.reads, 1, "visible hit mask should be read on demand")
     assert_equal(hidden.reads, 1, "hidden mask should be scanned by default")
     assert_true(fake.update_gui_calls >= 2, "mask identifier should yield GUI updates between buffer reads")
-    message = fake.dialogs.messages[-1]["message"] if fake.dialogs.messages else ""
-    assert_true("liver" in message and "hidden_liver" in message, "identifier result should include visible and hidden hits")
+    # Results are shown via a non-blocking question_box (so tools can be switched
+    # safely between clicks). Find the result record by its signature content:
+    # the concise result body lists hit mask names.
+    result_message = ""
+    for record in fake.dialogs.questions:
+        text = record.get("message", "")
+        if "liver" in text or "No mask at this point" in text:
+            result_message = text
+            break
+    assert_true("liver" in result_message and "hidden_liver" in result_message, "identifier result should include visible and hidden hits")
     return "mask identifier scans hidden masks and skips distant masks before reading voxel buffers"
 
 
@@ -921,7 +929,7 @@ def test_fewshot_external_advanced_setup(fake, tmp):
     old_project = module._project_root
     old_script = module._training_setup_ui_script
     try:
-        module._launch_gui_process = lambda cmd, cwd=None: launched.append((cmd, cwd)) or Proc()
+        module._launch_gui_process = lambda cmd, cwd=None, stderr_log=None: launched.append((cmd, cwd)) or Proc()
         module._start_monitor = lambda monitor, poll_seconds=1.0: True
         module._project_root = lambda: str(ROOT)
         module._training_setup_ui_script = lambda: str(ROOT / "tools" / "fewshot_training_setup_ui.py")

@@ -4144,8 +4144,13 @@ class TestNewFeatures(unittest.TestCase):
             (50.0, {"job_id": "setup_liver", "organ": "liver", "kind": "train_setup", "status": "training_started"}),
         ]
         selected = viewer.select_current_task(rows, organ="liver")
-        self.assertEqual(len(selected), 1)
+        # The active training job must be first; completed jobs for the same
+        # organ are also returned so the user can inspect their progress/log.
+        self.assertGreaterEqual(len(selected), 1)
         self.assertEqual(selected[0]["job_id"], "active_liver")
+        # All returned jobs must be for the requested organ.
+        for job in selected:
+            self.assertEqual(job["organ"], "liver")
         filtered = viewer.filter_log_for_job(
             "active_liver started\nspleen started\nactive_liver epoch 2\n",
             selected[0],

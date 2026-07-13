@@ -1413,7 +1413,7 @@ def _launch_process(cmd, cwd=None):
     )
 
 
-def _launch_gui_process(cmd, cwd=None):
+def _launch_gui_process(cmd, cwd=None, stderr_log=None):
     # Launch GUI apps without CREATE_NO_WINDOW so Tk/PySide windows are visible.
     # On Windows, prefer pythonw.exe (same environment, no console flash).
     launch_cmd = list(cmd)
@@ -1423,14 +1423,44 @@ def _launch_gui_process(cmd, cwd=None):
             pythonw = os.path.join(os.path.dirname(exe), "pythonw.exe")
             if os.path.isfile(pythonw):
                 launch_cmd[0] = pythonw
-    return subprocess.Popen(
-        launch_cmd,
-        cwd=cwd,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        env=_background_env(),
-    )
+    env = _background_env()
+    # Ensure the project root is on PYTHONPATH so external scripts can import
+    # project-local modules (e.g. fewshot_strategies, tools.*).
+    project_root = os.path.abspath(cwd or _project_root())
+    existing = env.get("PYTHONPATH", "")
+    paths = [p for p in existing.split(os.pathsep) if p] if existing else []
+    if project_root not in paths:
+        paths.insert(0, project_root)
+    env["PYTHONPATH"] = os.pathsep.join(paths)
+    # Optionally capture stderr to a file for diagnostics on immediate exit.
+    stderr_dest = subprocess.DEVNULL
+    stderr_file_handle = None
+    if stderr_log:
+        try:
+            parent = os.path.dirname(os.path.abspath(stderr_log))
+            if parent and not os.path.isdir(parent):
+                os.makedirs(parent)
+            stderr_file_handle = open(stderr_log, "w", encoding="utf-8")
+            stderr_dest = stderr_file_handle
+        except Exception:
+            stderr_dest = subprocess.DEVNULL
+    try:
+        proc = subprocess.Popen(
+            launch_cmd,
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=stderr_dest,
+            env=env,
+        )
+    finally:
+        # Close our handle; the child process has inherited the fd.
+        if stderr_file_handle is not None:
+            try:
+                stderr_file_handle.close()
+            except Exception:
+                pass
+    return proc
 
 
 def _launch_external_advanced_training(config, organ, ts_root):
@@ -1486,8 +1516,10 @@ def _launch_external_advanced_training(config, organ, ts_root):
     _write_json_atomic(status_path, status)
     _write_json_atomic(context_path, context)
     command = [python_exe, script, "--context", context_path]
+    # Capture stderr to a temp file so immediate-exit diagnostics are not lost.
+    stderr_log = os.path.join(jobs_dir, setup_id + "_stderr.log")
     try:
-        process = _launch_gui_process(command, cwd=_project_root())
+        process = _launch_gui_process(command, cwd=_project_root(), stderr_log=stderr_log)
     except Exception as exc:
         failed = _read_json(status_path, status) or status
         failed["status"] = "failed"
@@ -1518,13 +1550,24 @@ def _launch_external_advanced_training(config, organ, ts_root):
             break
         time.sleep(0.1)
     if process.poll() is not None:
+        # Read captured stderr for a more informative error message.
+        stderr_detail = ""
+        try:
+            if os.path.isfile(stderr_log):
+                stderr_detail = open(stderr_log, "r", encoding="utf-8", errors="replace").read(4096).strip()
+        except Exception:
+            stderr_detail = ""
         failed = _read_json(status_path, current_status) or current_status
         if failed.get("status") != "failed":
             failed["status"] = "failed"
-            failed["error"] = (
+            base_msg = (
                 "Could not open the external Advanced setup window. "
                 "The process exited immediately."
             )
+            if stderr_detail:
+                failed["error"] = "{0}\n\nStderr:\n{1}".format(base_msg, stderr_detail)
+            else:
+                failed["error"] = base_msg
             failed["updated_at_epoch"] = time.time()
             try:
                 _write_json_atomic(status_path, failed)

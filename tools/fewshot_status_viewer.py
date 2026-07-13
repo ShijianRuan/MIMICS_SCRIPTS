@@ -321,8 +321,15 @@ def filter_jobs(rows, filter_text, limit=80):
     return [item[1] for item in filtered[:limit]]
 
 
-def select_current_task(rows, organ="", job_id=""):
-    """Return only the explicitly selected or current task for one organ."""
+def select_current_task(rows, organ="", job_id="", limit=25):
+    """Return jobs for the selected organ, with the current task first.
+
+    Previously this returned only a single job, which caused completed training
+    progress and logs to disappear from the GUI as soon as a newer job (e.g.
+    inference) became active.  Now all matching jobs are returned so the user
+    can select any job in the list and inspect its progress, log, and curve.
+    The most relevant job (active work > active > newest) is placed first.
+    """
     organ = str(organ or "").strip().lower()
     job_id = str(job_id or "").strip()
     candidates = []
@@ -335,9 +342,22 @@ def select_current_task(rows, organ="", job_id=""):
     if not candidates:
         return []
     candidates.sort(key=lambda item: item[0], reverse=True)
+    # Identify the "current" job to pin at the top of the list.
     active = [item for item in candidates if item[1].get("status") in ACTIVE_STATUSES]
     active_work = [item for item in active if item[1].get("kind") in ("train", "infer")]
-    return [(active_work or active or candidates)[0][1]]
+    primary = (active_work or active or candidates)[0]
+    # Return primary first, then the rest in mtime order, deduplicating.
+    seen_ids = set()
+    result = []
+    for item in [primary] + candidates:
+        jid = item[1].get("job_id")
+        if jid in seen_ids:
+            continue
+        seen_ids.add(jid)
+        result.append(item[1])
+        if len(result) >= limit:
+            break
+    return result
 
 
 def process_exists(pid):
@@ -964,7 +984,7 @@ class QtStatusViewerApp(object):
         self.selected_job_id = ""
         self.jobs = []
         self.job_paths = {}
-        self.jobs_list = None
+        self.job_combo = None
         self.summary_label = None
         self.detail_text = None
         self.log_text = None
@@ -1019,9 +1039,15 @@ class QtStatusViewerApp(object):
         self.summary_label = QtWidgets.QLabel("Loading jobs...")
         outer.addWidget(self.summary_label)
 
-        self.jobs_list = QtWidgets.QListWidget()
-        self.jobs_list.currentRowChanged.connect(self.on_select)
-        self.jobs_list.setVisible(False)
+        # Job selector combo so the user can switch between completed and
+        # active jobs (e.g. review training progress after inference starts).
+        selector_row = QtWidgets.QHBoxLayout()
+        selector_label = QtWidgets.QLabel("Job:")
+        selector_row.addWidget(selector_label)
+        self.job_combo = QtWidgets.QComboBox()
+        self.job_combo.currentIndexChanged.connect(self.on_combo_select)
+        selector_row.addWidget(self.job_combo, 1)
+        outer.addLayout(selector_row)
 
         right = QtWidgets.QWidget()
         right_layout = QtWidgets.QVBoxLayout(right)
@@ -1072,6 +1098,7 @@ class QtStatusViewerApp(object):
         QGroupBox { background: #ffffff; border: 1px solid #d8dee9; border-radius: 8px; margin-top: 12px; padding-top: 14px; }
         QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; color: #1f2937; font-weight: 600; }
         QListWidget, QTextEdit, QComboBox { background: #ffffff; border: 1px solid #cfd7e3; border-radius: 6px; padding: 5px 7px; }
+        QComboBox QAbstractItemView { background: #ffffff; border: 1px solid #cfd7e3; selection-background-color: #dbeafe; selection-color: #111827; }
         QPushButton { background: #ffffff; border: 1px solid #aeb7c5; border-radius: 6px; padding: 7px 14px; }
         QPushButton:hover { background: #f1f5fb; }
         QPushButton:disabled { color: #9aa4b2; background: #f1f3f6; border-color: #d8dee9; }
@@ -1082,23 +1109,23 @@ class QtStatusViewerApp(object):
     def refresh(self):
         old_selected = self.selected_job_id
         self.jobs, self.job_paths = self._load_jobs()
-        self.jobs_list.blockSignals(True)
-        self.jobs_list.clear()
+        self.job_combo.blockSignals(True)
+        self.job_combo.clear()
         selected_index = 0
         for index, job in enumerate(self.jobs):
             progress = progress_line(job.get("training_progress") or {})
             secondary = progress or job.get("application_message") or display_kind(job.get("kind"))
-            label = "{0}   {1}\n{2}".format(
+            label = "{0}  {1}  {2}".format(
                 display_status(job.get("status")),
                 job.get("organ", "?"),
                 secondary,
             )
-            self.jobs_list.addItem(label)
+            self.job_combo.addItem(label)
             if job.get("job_id") == old_selected:
                 selected_index = index
-        self.jobs_list.blockSignals(False)
+        self.job_combo.blockSignals(False)
         if self.jobs:
-            self.jobs_list.setCurrentRow(selected_index)
+            self.job_combo.setCurrentIndex(selected_index)
             self.selected_job_id = self.jobs[selected_index].get("job_id", "")
             self.show_job(self.jobs[selected_index])
             self.summary_label.setText("Current task for {0}. Auto-refresh every 2 seconds.".format(
@@ -1143,6 +1170,13 @@ class QtStatusViewerApp(object):
         if row < 0 or row >= len(self.jobs):
             return
         job = self.jobs[row]
+        self.selected_job_id = job.get("job_id", "")
+        self.show_job(job)
+
+    def on_combo_select(self, index):
+        if index < 0 or index >= len(self.jobs):
+            return
+        job = self.jobs[index]
         self.selected_job_id = job.get("job_id", "")
         self.show_job(job)
 

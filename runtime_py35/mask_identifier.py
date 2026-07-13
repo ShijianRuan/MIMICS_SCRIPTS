@@ -325,10 +325,37 @@ def main():
     )
 
     # ── 4. Interactive loop ──
+    # IMPORTANT: mimics.indicate_coordinate() is a modal, blocking call. While it
+    # is waiting for a click, switching to another Mimics tool (zoom, pan,
+    # measure, ...) corrupts Mimics' tool state machine and can crash the
+    # application. To shrink that dangerous waiting window, we never stay inside
+    # indicate_coordinate between clicks: each click result is shown via a
+    # NON-blocking question_box, during which the user is free to switch tools
+    # or adjust views. Only when the user explicitly chooses "Click again" do we
+    # re-enter indicate_coordinate for the brief click window.
+    BUTTON_CLICK = "Click again"
+    BUTTON_FINISH = "Finish"
+
+    # Pre-flight confirmation: let the user prepare the view (and switch tools)
+    # before entering the first modal click.
+    preflight = mimics.dialogs.question_box(
+        title="Mask Identifier",
+        message=(
+            "Ready to identify masks.\n\n"
+            "Click '{0}' then click a point in any view.\n\n"
+            "Switch tools / adjust views only while this dialog is shown, "
+            "not while the cursor is waiting for a click.".format(BUTTON_CLICK)
+        ),
+        buttons="{0};{1}".format(BUTTON_CLICK, BUTTON_FINISH),
+        ui_blocking=False,
+    )
+    if preflight != BUTTON_CLICK:
+        return
+
     while True:
         try:
             point = mimics.indicate_coordinate(
-                message="Click to identify mask(s) at this point (Esc to exit)",
+                message="Click to identify mask(s) at this point (Esc to finish)",
                 show_message_box=False,
                 confirm=False,
             )
@@ -341,60 +368,50 @@ def main():
         try:
             idx = active_image.get_voxel_indexes(point)
         except ValueError:
-            mimics.dialogs.message_box(
-                "Point ({:.1f}, {:.1f}, {:.1f}) mm\n"
-                "is outside the image bounds.\nTry again.".format(*point)
+            answer = mimics.dialogs.question_box(
+                title="Mask Identifier",
+                message=(
+                    "Point ({:.1f}, {:.1f}, {:.1f}) mm is outside the image bounds.\n\n"
+                    "Try another point?".format(*point)
+                ),
+                buttons="{0};{1}".format(BUTTON_CLICK, BUTTON_FINISH),
+                ui_blocking=False,
             )
-            continue
+            if answer == BUTTON_CLICK:
+                continue
+            break
         except Exception:
-            mimics.dialogs.message_box("Could not compute voxel index for this point.")
-            continue
+            answer = mimics.dialogs.question_box(
+                title="Mask Identifier",
+                message="Could not compute voxel index for this point.\n\nTry another point?",
+                buttons="{0};{1}".format(BUTTON_CLICK, BUTTON_FINISH),
+                ui_blocking=False,
+            )
+            if answer == BUTTON_CLICK:
+                continue
+            break
 
         ix, iy, iz = int(idx[0]), int(idx[1]), int(idx[2])
 
         result = _scan_point(candidates, point, ix, iy, iz, bbox_cache, cache, cache_order)
         found = result["found"]
 
-        # ── 5. Build result message ──
-        parts = [
-            "Position: ({:.1f}, {:.1f}, {:.1f}) mm".format(*point),
-            "Voxel index: ({}, {}, {})".format(ix, iy, iz),
-            "Voxel buffers read: {}/{} mask(s) in {:.2f}s".format(
-                result["checked"],
-                len(candidates),
-                result["elapsed"],
-            ),
-            "",
-        ]
-
+        # ── 5. Build a concise result message ──
         if found:
-            parts.append("Masks containing this voxel ({} found):\n".format(len(found)))
+            lines = []
             for info in found:
-                vis = "visible" if info["visible"] else "hidden"
-                r, g, b = info["color"]
-                parts.append("  {}  {}  (R={:.0f}  G={:.0f}  B={:.0f})".format(
-                    vis, info["name"], r, g, b))
+                state = "hidden" if not info["visible"] else "visible"
+                lines.append("{0}  ({1})".format(info["name"], state))
+            message_body = "\n".join(lines)
         else:
-            parts.append("This voxel was not found inside the scanned masks.")
-        if result["bbox_checked"]:
-            parts.extend([
-                "",
-                "Bounding-box filter skipped {} mask(s) before reading voxel data.".format(result["bbox_skipped"]),
-            ])
-        if result["bbox_unavailable"]:
-            parts.append("Bounding box unavailable for {} mask(s); voxel data was checked directly.".format(result["bbox_unavailable"]))
-        if result["unread"]:
-            parts.extend([
-                "",
-                "Stopped before scanning {} mask(s) to keep Mimics responsive.".format(result["unread"]),
-                "Increase limits or disable MIMICS_MASK_IDENTIFIER_ALLOW_PARTIAL if exact full results are needed.",
-            ])
-        if result["skipped"]:
-            parts.extend([
-                "",
-                "Could not read: " + ", ".join(result["skipped"][:5]),
-            ])
-        if mode_note:
-            parts.extend(["", mode_note.strip()])
+            message_body = "No mask at this point."
 
-        mimics.dialogs.message_box("\n".join(parts))
+        answer = mimics.dialogs.question_box(
+            title="Mask Identifier",
+            message=message_body,
+            buttons="{0};{1}".format(BUTTON_CLICK, BUTTON_FINISH),
+            ui_blocking=False,
+        )
+        if answer != BUTTON_CLICK:
+            break
+

@@ -1203,7 +1203,11 @@ def _mask_buffer_for_target_grid(mask_path: str, target_shape, target_voxel_to_r
 
 
 def do_prepare_masks_for_grid(params: dict) -> dict:
-    """Resample source NIfTI masks into an actual Mimics voxel grid."""
+    """Resample source NIfTI masks into an actual Mimics voxel grid.
+
+    Multi-label masks are automatically split into one binary mask per
+    non-zero label value, named {name}_label{value}.
+    """
     masks = params.get("masks") or []
     buffers_out = params["buffers_out"]
     target_shape = params["target_shape"]
@@ -1218,18 +1222,56 @@ def do_prepare_masks_for_grid(params: dict) -> dict:
         mask_path = item.get("mask_path") or item.get("path")
         if not mask_path or not Path(mask_path).is_file():
             return {"status": "error", "error": "mask file not found for {}: {}".format(name, mask_path)}
-        output_path = os.path.join(buffers_out, name + ".u8")
-        row = _mask_buffer_for_target_grid(
-            mask_path,
-            target_shape,
-            target_voxel_to_ras,
-            axes,
-            flips,
-            output_path,
-        )
-        row["name"] = name
-        row["mask_path"] = str(Path(mask_path).resolve())
-        results.append(row)
+
+        # Read mask preserving label values to detect multi-label masks.
+        label_array, mask_affine, labels = read_mask_labels_with_affine(mask_path)
+        is_multi_label = len(labels) > 2  # more than just background + one label
+
+        if is_multi_label:
+            for label_val in labels:
+                if label_val == 0:
+                    continue
+                binary = (label_array == label_val).astype(np.uint8)
+                label_name = "{0}_label{1}".format(name, label_val)
+                output_path = os.path.join(buffers_out, label_name + ".u8")
+                target_grid_mask = resample_mask_to_image_grid(
+                    binary, mask_affine, _shape_from_params(target_shape), target_voxel_to_ras,
+                )
+                transformed = apply_buffer_mapping(target_grid_mask, axes, flips)
+                Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+                with open(str(output_path), "wb") as handle:
+                    handle.write(transformed.tobytes(order="C"))
+                row = {
+                    "name": label_name,
+                    "original_name": name,
+                    "label_value": label_val,
+                    "output_path": str(output_path),
+                    "u8_path": str(output_path),
+                    "mimics_shape": [int(value) for value in transformed.shape],
+                    "image_shape": [int(value) for value in _shape_from_params(target_shape)],
+                    "foreground_voxels": int(np.count_nonzero(target_grid_mask)),
+                    "mask_affine_usable": bool(_affine_is_usable(mask_affine)),
+                    "mask_affine_matches_target": bool(_affine_close(mask_affine, target_voxel_to_ras)),
+                    "mask_voxel_to_ras_matrix": mask_affine.astype(float).tolist(),
+                    "target_voxel_to_ras_matrix": target_voxel_to_ras.astype(float).tolist(),
+                    "buffer_axes": list(axes),
+                    "buffer_flips": list(flips),
+                }
+                row["mask_path"] = str(Path(mask_path).resolve())
+                results.append(row)
+        else:
+            output_path = os.path.join(buffers_out, name + ".u8")
+            row = _mask_buffer_for_target_grid(
+                mask_path,
+                target_shape,
+                target_voxel_to_ras,
+                axes,
+                flips,
+                output_path,
+            )
+            row["name"] = name
+            row["mask_path"] = str(Path(mask_path).resolve())
+            results.append(row)
     source_matrix = None
     if params.get("source_voxel_to_ras_matrix"):
         try:
@@ -1480,6 +1522,30 @@ def do_mask_to_buffer(params: dict) -> dict:
 
 # -- Discover cases (for batch import) --------------------------------
 
+def do_read_nifti_ras_affine(params: dict) -> dict:
+    """Return the on-disk NIfTI shape and nibabel RAS affine for a file path.
+
+    Used by the Mimics-side metadata repair entry so that the nibabel read
+    happens in the external Python (which has nibabel/numpy), not in Mimics'
+    embedded interpreter.
+    """
+    image_path = params.get("image_path", "")
+    if not image_path:
+        return {"status": "error", "error": "image_path is required"}
+    if not os.path.isfile(image_path):
+        return {"status": "error", "error": "image file not found: {}".format(image_path)}
+    try:
+        shape, affine = get_nifti_disk_geometry(image_path)
+    except Exception as exc:
+        return {"status": "error", "error": "could not read NIfTI geometry: {}".format(exc)}
+    return {
+        "status": "ok",
+        "image_path": str(Path(image_path).resolve()),
+        "shape": [int(v) for v in shape],
+        "voxel_to_ras_matrix": np.asarray(affine, dtype=float).tolist(),
+    }
+
+
 def do_discover_case_dirs(params: dict) -> dict:
     """Discover candidate case directories without inspecting image files."""
     ts_root = params["ts_root"]
@@ -1608,6 +1674,8 @@ def main():
             result = do_discover(params)
         elif action == "discover_case_dirs":
             result = do_discover_case_dirs(params)
+        elif action == "read_nifti_ras_affine":
+            result = do_read_nifti_ras_affine(params)
         else:
             result = {"status": "error", "error": "unknown action: {}".format(action)}
     except Exception as e:

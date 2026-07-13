@@ -18,6 +18,16 @@ import time
 import traceback
 import uuid
 
+# Ensure the project root and tools/ directory are importable.
+# The embeddable Python (nninteractive_env) uses a ._pth file that
+# ignores PYTHONPATH, so we must inject paths directly into sys.path.
+_here = os.path.dirname(os.path.abspath(__file__))
+_tools_dir = _here
+_project_root = os.path.dirname(_tools_dir)
+for _candidate in (_tools_dir, _project_root):
+    if _candidate not in sys.path:
+        sys.path.insert(0, _candidate)
+
 try:
     from fewshot_strategies import DEFAULT_OPTIONS, STRATEGIES, normalize_strategy_options, strategy_defaults, strategy_ids, strategy_label, strategy_summary, suggested_strategy
 except ImportError:

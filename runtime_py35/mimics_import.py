@@ -563,6 +563,7 @@ def _cleanup_stale_processes():
 # -- TS case discovery (runs in Mimics Python 3.5, stdlib only) ---------
 
 _MEDICAL_IMAGE_SUFFIXES = (".nii", ".nii.gz", ".mha", ".mhd", ".nrrd")
+_MASK_SUFFIXES = (".nii", ".nii.gz", ".mha", ".mhd", ".nrrd", ".nrrd.gz", ".seg.nii", ".seg.nii.gz")
 
 
 def _is_medical_image_file(path):
@@ -621,8 +622,15 @@ def discover_ts_cases(ts_root, case_filter=None):
         seg_dir = os.path.join(case_dir, "segmentations")
         if os.path.isdir(seg_dir):
             for fname in sorted(os.listdir(seg_dir)):
-                if fname.endswith(".nii.gz"):
-                    organ = fname.replace(".nii.gz", "")
+                lower = fname.lower()
+                if any(lower.endswith(s) for s in _MASK_SUFFIXES):
+                    organ = fname
+                    for s in _MASK_SUFFIXES:
+                        if organ.lower().endswith(s):
+                            organ = organ[:-len(s)]
+                            break
+                    if not organ:
+                        organ = "mask"
                     masks.append({"name": organ, "path": os.path.join(seg_dir, fname)})
 
         cases.append({
@@ -670,8 +678,16 @@ def _discover_single_case(case_dir):
         allow_masks = len(sibling_images) <= 1
     if allow_masks and os.path.isdir(seg_dir):
         for fname in sorted(os.listdir(seg_dir)):
-            if fname.endswith(".nii.gz"):
-                organ = fname.replace(".nii.gz", "")
+            lower = fname.lower()
+            if any(lower.endswith(s) for s in _MASK_SUFFIXES):
+                organ = fname
+                # Strip all known suffixes to get the organ name
+                for s in _MASK_SUFFIXES:
+                    if organ.lower().endswith(s):
+                        organ = organ[:-len(s)]
+                        break
+                if not organ:
+                    organ = "mask"
                 masks.append({"name": organ, "path": os.path.join(seg_dir, fname)})
 
     return {
@@ -1927,6 +1943,22 @@ def _pick_image_file(title):
     return path if path else None
 
 
+def _mask_name_from_path(path):
+    """Derive a mask name from a file path, stripping common suffixes."""
+    name = os.path.basename(path)
+    lower = name.lower()
+    # Strip compression suffix first
+    if lower.endswith(".gz"):
+        name = name[:-3]
+        lower = name.lower()
+    # Strip format suffix
+    for suffix in (".nii", ".mha", ".mhd", ".nrrd", ".seg"):
+        if lower.endswith(suffix):
+            name = name[:-len(suffix)]
+            break
+    return name or "mask"
+
+
 # -- Discover monitor (batch mode: discover -> import chain) ------------
 
 def _discover_monitor_tick(monitor):
@@ -2182,6 +2214,7 @@ def main(import_mode=None):
         mimics_import.py --ts-root <dir> [--cases s0000,s0001] [--output-dir <dir>] [--axes 0,1,2] [--flips false,false,false]
         mimics_import.py --case-dir <dir> --output <file.mcs> [--axes 0,1,2] [--flips false,false,false]
         mimics_import.py --image-file <volume.mhd> --output <file.mcs> [--axes 0,1,2] [--flips false,false,false]
+        mimics_import.py --image-file <volume.mhd> --mask-files mask1.nii.gz,mask2.nii.gz --output <file.mcs>
 
     import_mode:
         None         — interactive (ask)
@@ -2201,6 +2234,7 @@ def main(import_mode=None):
     output = None
     output_dir = None
     cases_filter = None
+    mask_files = None
     axes = [0, 1, 2]
     flips = [False, False, False]
 
@@ -2227,6 +2261,9 @@ def main(import_mode=None):
             i += 2
         elif arg == "--cases" and i + 1 < len(args):
             cases_filter = set(c.strip() for c in args[i + 1].split(","))
+            i += 2
+        elif arg == "--mask-files" and i + 1 < len(args):
+            mask_files = [p.strip() for p in args[i + 1].split(",") if p.strip()]
             i += 2
         elif arg == "--axes" and i + 1 < len(args):
             axes = [int(v.strip()) for v in args[i + 1].split(",")]
@@ -2318,6 +2355,22 @@ def main(import_mode=None):
         if case_info is None:
             mimics.dialogs.message_box(title="Error", message="No supported image data found: {0}".format(selected_source))
             return 1
+
+        # Merge --mask-files from command line into case_info.
+        # For interactive mask import, use the dedicated "Import Masks" entry.
+        if mask_files:
+            extra_masks = []
+            for p in mask_files:
+                if os.path.isfile(p):
+                    extra_masks.append({
+                        "name": _mask_name_from_path(p),
+                        "path": os.path.abspath(p),
+                    })
+            existing_names = {m["name"] for m in case_info.get("masks", [])}
+            for em in extra_masks:
+                if em["name"] in existing_names:
+                    case_info["masks"] = [m for m in case_info["masks"] if m["name"] != em["name"]]
+                case_info["masks"].append(em)
 
         output_dir_abs = os.path.dirname(os.path.abspath(output))
         work_dir = os.path.join(output_dir_abs, case_info["case_id"] + "_work")

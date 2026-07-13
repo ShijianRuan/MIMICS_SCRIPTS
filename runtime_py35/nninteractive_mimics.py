@@ -704,11 +704,23 @@ def _create_result_mask(image, name=None):
     try:
         mask.image = image
     except Exception as error:
+        # Some Mimics versions expose Mask.image as read-only and bind the new
+        # mask to the active image automatically inside create_mask(). If the
+        # mask is already bound to the requested image, the assignment is
+        # unnecessary and we can continue. Only fail when it is genuinely
+        # unbound or bound to a different image.
+        bound_image = None
         try:
-            mimics.data.masks.delete(mask)
+            bound_image = getattr(mask, "image", None)
         except Exception:
-            pass
-        raise RuntimeError("Could not bind the new result Mask to the active image: {0}".format(error))
+            bound_image = None
+        already_bound = bound_image is not None and _same_object(bound_image, image)
+        if not already_bound:
+            try:
+                mimics.data.masks.delete(mask)
+            except Exception:
+                pass
+            raise RuntimeError("Could not bind the new result Mask to the active image: {0}".format(error))
     mask.visible = True
     mask.selected = True
     return mask
@@ -772,12 +784,23 @@ def _select_session_masks(image, config):
         }
 
     source = selected[0]
-    source_image = getattr(source, "image", None)
+    try:
+        source_image = getattr(source, "image", None)
+    except Exception:
+        source_image = None
     if source_image is None:
         try:
             source.image = image
         except Exception as error:
-            raise RuntimeError("The selected Mask is not bound to the active image: {0}".format(error))
+            # If the assignment is rejected because .image is read-only but the
+            # mask is in fact already bound to the requested image, treat it as
+            # success instead of failing the whole run.
+            try:
+                bound_image = getattr(source, "image", None)
+            except Exception:
+                bound_image = None
+            if bound_image is None or not _same_object(bound_image, image):
+                raise RuntimeError("The selected Mask is not bound to the active image: {0}".format(error))
     elif not _same_object(source_image, image):
         raise RuntimeError(
             "The selected Mask belongs to a different image set. "
