@@ -743,6 +743,19 @@ def test_nninteractive_derived_draft_session(fake, tmp):
     fake.data.masks.append(source)
     module = import_runtime_module("nninteractive_mimics")
 
+    baseline_questions = len(fake.dialogs.questions)
+    deferred = module._select_session_masks(image, {})
+    assert_true(deferred["target"] is source, "default policy should not create an early Draft")
+    assert_equal(deferred["write_mode"], "choose_on_first_result", "default result destination should be deferred")
+    assert_equal(len(fake.dialogs.questions), baseline_questions, "starting nnInteractive should not ask for a result destination")
+    fake.dialogs.question_answers.append("Create Editable Copy")
+    deferred_state = {"_job_dir": str(tmp / "deferred-job"), "write_mode": "choose_on_first_result"}
+    deferred_target = module._choose_completed_result_target(image, source, deferred_state, {"elapsed_seconds": 1.25})
+    assert_true(deferred_target is not source, "completion choice should create a new Draft")
+    assert_equal(source.number_of_pixels, 12, "completion copy choice changed source Mask")
+    fake.data.masks.delete(deferred_target)
+    source.selected = True
+
     session = module._select_session_masks(
         image, {"existing_mask_result_mode": "derived_copy"}
     )
@@ -841,10 +854,7 @@ def test_nninteractive_derived_draft_session(fake, tmp):
     finally:
         module._check_async_result_nonblocking = old_check
         module._stop_async_monitor = old_stop
-    assert_equal(len(fake.dialogs.messages), baseline_messages + 1, "automatic apply success notice count")
-    notice = fake.dialogs.messages[-1]
-    assert_true(target.name in notice["message"], "success notice does not identify the result Draft")
-    assert_true(notice["ui_blocking"] is False, "automatic apply success notice should be non-blocking")
+    assert_equal(len(fake.dialogs.messages), baseline_messages, "result application should not add a second completion notice")
     return "source snapshot and target Draft remain separate across async startup"
 
 
@@ -870,6 +880,9 @@ def test_fewshot_apply_prediction_and_stop(fake, tmp):
         "mimics_shape": [2, 2, 2],
         "foreground_voxels": 2,
     }), encoding="utf-8")
+    source_mask = FakeMask("liver", image=image, array=_u8_buffer((2, 2, 2), 1), selected=True)
+    fake.data.masks.append(source_mask)
+    fake.dialogs.question_answers.append(module.BUTTON_UPDATE_SELECTED)
     monitor = {
         "monitor_key": "fake-monitor",
         "deadline": time.time() + 60,
@@ -881,22 +894,24 @@ def test_fewshot_apply_prediction_and_stop(fake, tmp):
         "case_id": "s0001",
         "launch_project_path": str(source_project),
         "target_grid": module._active_live_grid_payload(),
+        "prediction_target": module._deferred_prediction_target(source_mask),
     }
     module._MONITORS["fake-monitor"] = monitor
     fake.file.project_path = str(ts_root / "mcs_output" / "different_case.mcs")
     module._monitor_tick(monitor)
-    assert_equal(len([mask for mask in fake.data.masks if mask.name == "liver"]), 0,
-                 "prediction must not be applied to a different open project")
+    assert_equal(source_mask.number_of_pixels, 8,
+                 "prediction must not alter the target in a different open project")
     waiting_status = json.loads(status_path.read_text(encoding="utf-8"))
     assert_equal(waiting_status.get("application_state"), "waiting_for_source_case",
                  "switched-case prediction state")
     fake.file.project_path = str(source_project)
     module._monitor_tick(monitor)
-    applied = [mask for mask in fake.data.masks if mask.name == "liver"]
+    applied = [mask for mask in fake.data.masks if mask is source_mask]
     assert_equal(len(applied), 1, "few-shot result mask count")
     assert_equal(applied[0].number_of_pixels, 2, "few-shot result foreground count")
     assert_true("fake-monitor" not in module._MONITORS, "few-shot monitor was not stopped")
-    assert_true(fake.dialogs.messages and fake.dialogs.messages[-1]["ui_blocking"] is False, "few-shot completion message should be non-blocking")
+    completion_choices = [item for item in fake.dialogs.questions if item.get("title") == "DINOv3 Prediction Ready"]
+    assert_equal(len(completion_choices), 1, "few-shot completion choice count")
 
     fake.file.project_path = str(source_project)
     jobs_dir = ts_root / "fewshot_models" / "jobs"

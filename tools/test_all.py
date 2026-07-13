@@ -2387,14 +2387,18 @@ class TestNewFeatures(unittest.TestCase):
         import fewshot_mimics
         import nninteractive_mimics
 
-        chooser = inspect.getsource(fewshot_mimics._choose_prediction_target)
-        self.assertIn("Update Selected Mask", chooser)
-        self.assertIn("Create New Editable Mask", chooser)
+        deferred = inspect.getsource(fewshot_mimics._deferred_prediction_target)
+        self.assertIn("choose_on_completion", deferred)
         resolver = inspect.getsource(fewshot_mimics._prediction_target_mask)
+        self.assertIn("DINOv3 Prediction Ready", resolver)
+        self.assertIn("Update Selected Mask", resolver)
+        self.assertIn("Create Editable Copy", resolver)
         self.assertIn("update_selected", resolver)
         session_selector = inspect.getsource(nninteractive_mimics._select_session_masks)
-        self.assertIn("Update Selected Mask", session_selector)
-        self.assertIn("Create Editable Copy", session_selector)
+        self.assertIn("choose_on_first_result", session_selector)
+        nn_completion = inspect.getsource(nninteractive_mimics._choose_completed_result_target)
+        self.assertIn("Update Selected Mask", nn_completion)
+        self.assertIn("Create Editable Copy", nn_completion)
 
     # -- mimics_bridge: _mask_buffer_for_target_grid --
     def test_mask_buffer_for_target_grid(self):
@@ -3706,7 +3710,6 @@ class TestNewFeatures(unittest.TestCase):
         launched = []
 
         old_selected = fewshot_mimics._selected_mask
-        old_target = fewshot_mimics._choose_prediction_target
         old_choose = fewshot_mimics._choose_dataset_root
         old_guard = fewshot_mimics._guard_no_active_job
         old_case = fewshot_mimics._infer_case_id
@@ -3714,9 +3717,6 @@ class TestNewFeatures(unittest.TestCase):
         try:
             selected = type("Mask", (object,), {"name": "liver"})()
             fewshot_mimics._selected_mask = lambda: selected
-            fewshot_mimics._choose_prediction_target = lambda _mask: {
-                "mode": "create_new", "target_name": "AI_liver"
-            }
             fewshot_mimics._choose_dataset_root = lambda _title: ts_root
             fewshot_mimics._guard_no_active_job = lambda root, requested_kind="train": True
             fewshot_mimics._infer_case_id = lambda root: "s0001"
@@ -3724,7 +3724,6 @@ class TestNewFeatures(unittest.TestCase):
             result = fewshot_mimics._start_inference(choose_model=False)
         finally:
             fewshot_mimics._selected_mask = old_selected
-            fewshot_mimics._choose_prediction_target = old_target
             fewshot_mimics._choose_dataset_root = old_choose
             fewshot_mimics._guard_no_active_job = old_guard
             fewshot_mimics._infer_case_id = old_case

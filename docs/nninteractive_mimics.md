@@ -51,10 +51,11 @@ Script -> Scripting Library -> 02_AI -> 01_nnInteractive
 - 选择多个 Mask：脚本停止并要求只选一个，避免把结果写错对象；
 - source/target Mask 不属于 active image：脚本停止，不做隐式跨图像绑定。
 
-普通非空 Mask 会先询问输出方式。`Update Selected Mask` 在所选 Mask 上继续
-修正；`Create Editable Copy` 保留原 Mask，并把同一个初始分割作为 AI 会话
-输入，结果写入新的 Draft。两种方式都支持继续追加提示、Undo 和 Reset。
-创建 Copy 时不会先同步复制大 Mask；Draft 在首次 AI 结果返回前保持为空。
+普通非空 Mask 启动推理时不再询问输出方式。首个 AI 结果完成后只显示一次
+`Prediction Ready` 选择：`Update Selected Mask` 在所选 Mask 上继续修正；
+`Create Editable Copy` 保留原 Mask，并把结果写入新的 Draft。这个选择同时承担
+完成通知，不会在应用后再弹成功提示。两种方式都支持继续追加提示、Undo 和
+Reset；选择 Copy 前也不会同步复制大 Mask。
 
 ## 5. Mimics 交互与 nnInteractive 提示的映射
 

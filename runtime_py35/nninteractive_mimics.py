@@ -818,27 +818,12 @@ def _select_session_masks(image, config):
 
     mode = str(config.get("existing_mask_result_mode", "ask") or "ask").strip().lower()
     if mode in ("ask", "choose", "prompt"):
-        decision = mimics.dialogs.question_box(
-            title=TITLE,
-            message=(
-                "Use the selected Mask as the starting segmentation.\n\n"
-                "Update Selected Mask applies AI corrections in place.\n"
-                "Create Editable Copy keeps the original and writes corrections to a new Mask."
-            ),
-            buttons="Update Selected Mask;Create Editable Copy;Cancel",
-            ui_blocking=True,
-        )
-        if decision == "Update Selected Mask":
-            mode = "in_place"
-        elif decision == "Create Editable Copy":
-            mode = "derived_copy"
-        else:
-            return {
-                "source": source,
-                "target": source,
-                "auto_created": False,
-                "write_mode": "cancelled",
-            }
+        return {
+            "source": source,
+            "target": source,
+            "auto_created": False,
+            "write_mode": "choose_on_first_result",
+        }
 
     if mode in ("in_place", "inplace", "overwrite"):
         return {
@@ -1376,6 +1361,39 @@ def _set_mask_from_u8(mask, path, shape):
             pixels = memoryview(bytearray(raw)).cast("?", shape=list(shape))
             mask.set_voxel_buffer(pixels)
     _with_gui_updates_disabled(_apply)
+
+
+def _choose_completed_result_target(image, target, state, result):
+    if state.get("write_mode") != "choose_on_first_result":
+        return target
+    decision = mimics.dialogs.question_box(
+        title="nnInteractive Prediction Ready",
+        message=(
+            "nnInteractive prediction completed in {0}s.\n\n"
+            "Update Selected Mask applies the result to {1}.\n"
+            "Create Editable Copy keeps it unchanged and starts an editable AI Draft."
+        ).format(result.get("elapsed_seconds", "?"), str(getattr(target, "name", "") or "the selected Mask")),
+        buttons="Update Selected Mask;Create Editable Copy",
+        ui_blocking=True,
+    )
+    if decision == "Update Selected Mask":
+        state["write_mode"] = "in_place"
+        return target
+    if decision != "Create Editable Copy":
+        _mimics_log(logging.INFO, "nnInteractive result destination was closed; using a new editable copy to preserve the selected Mask.")
+    source = target
+    target = _create_result_mask(image, "{0} - AI Draft".format(str(getattr(source, "name", "") or "nnInteractive")))
+    _mark_ai_draft(target, source)
+    try:
+        source.selected = False
+    except Exception:
+        pass
+    _metadata_delete(source, ASYNC_JOB_METADATA)
+    _metadata_set(target, ASYNC_JOB_METADATA, state.get("_job_dir", ""))
+    state["target_guid"] = _object_id(target)
+    state["target_name"] = str(getattr(target, "name", ""))
+    state["write_mode"] = "derived_copy"
+    return target
 
 
 def _restore_base(mask, base_path, base_shape):
@@ -3087,14 +3105,6 @@ def _async_monitor_tick(monitor):
         if outcome != "waiting":
             monitor["done"] = True
             _stop_async_monitor(job_dir)
-            if outcome == "applied":
-                mimics.dialogs.message_box(
-                    "nnInteractive result has been applied automatically to:\n{0}".format(
-                        getattr(monitor.get("target"), "name", "")
-                    ),
-                    title=TITLE,
-                    ui_blocking=False,
-                )
     except Exception as error:
         monitor["done"] = True
         _stop_async_monitor(job_dir)
@@ -3343,6 +3353,7 @@ def _handle_async_result(image, target, state):
                 output_path
             )
         )
+    target = _choose_completed_result_target(image, target, state, result)
     _set_mask_from_u8(target, output_path, state["shape"])
     _make_mask_visible(target)
     # Clean up visual objects that were kept visible during inference.

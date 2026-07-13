@@ -386,34 +386,14 @@ def _mask_identity(mask):
     return str(value) if value else str(getattr(mask, "name", "") or "")
 
 
-def _choose_prediction_target(mask):
+def _deferred_prediction_target(mask):
     name = str(getattr(mask, "name", "") or "").strip()
-    decision = mimics.dialogs.question_box(
-        message=(
-            "Prediction task: {0}\n\n"
-            "Update Selected Mask replaces this Mask when prediction completes.\n"
-            "Create New Editable Mask keeps it unchanged and creates a separate result.\n\n"
-            "Both results remain editable and can be refined with nnInteractive."
-        ).format(name),
-        buttons=";".join([BUTTON_UPDATE_SELECTED, BUTTON_CREATE_NEW, BUTTON_CANCEL]),
-        title=TITLE,
-        ui_blocking=True,
-    )
-    if decision == BUTTON_UPDATE_SELECTED:
-        return {
-            "mode": "update_selected",
-            "target_name": name,
-            "target_guid": _mask_identity(mask),
-            "initial_pixel_count": int(getattr(mask, "number_of_pixels", 0) or 0),
-        }
-    if decision == BUTTON_CREATE_NEW:
-        return {
-            "mode": "create_new",
-            "target_name": "AI_" + name,
-            "source_name": name,
-            "source_guid": _mask_identity(mask),
-        }
-    return None
+    return {
+        "mode": "choose_on_completion",
+        "target_name": name,
+        "target_guid": _mask_identity(mask),
+        "initial_pixel_count": int(getattr(mask, "number_of_pixels", 0) or 0),
+    }
 
 
 def _metadata_get(obj, name, default=""):
@@ -2035,10 +2015,7 @@ def _start_inference(choose_model=False):
             ui_blocking=False,
         )
         return 1
-    target_spec = _choose_prediction_target(selected_mask)
-    if target_spec is None:
-        _mimics_log(logging.INFO, "DINOv3 prediction cancelled before launch.")
-        return 0
+    target_spec = _deferred_prediction_target(selected_mask)
     ts_root = _choose_dataset_root("Select dataset folder")
     if not ts_root or not os.path.isdir(ts_root):
         _mimics_log(logging.INFO, "DINOv3 prediction cancelled: no dataset folder was selected.")
@@ -2211,6 +2188,26 @@ def _new_prediction_mask(name):
 
 def _prediction_target_mask(monitor):
     spec = monitor.get("prediction_target") or {}
+    if spec.get("mode") == "choose_on_completion":
+        decision = mimics.dialogs.question_box(
+            message=(
+                "Few-shot prediction is complete and ready to apply.\n\n"
+                "Update Selected Mask replaces {0}.\n"
+                "Create Editable Copy keeps it unchanged and creates a separate Mask.\n\n"
+                "Either result remains editable and can be refined with nnInteractive."
+            ).format(spec.get("target_name") or monitor.get("organ", "the selected Mask")),
+            buttons=";".join([BUTTON_UPDATE_SELECTED, "Create Editable Copy"]),
+            title="DINOv3 Prediction Ready",
+            ui_blocking=True,
+        )
+        if decision == BUTTON_UPDATE_SELECTED:
+            spec["mode"] = "update_selected"
+        else:
+            if decision != "Create Editable Copy":
+                _mimics_log(logging.INFO, "DINOv3 result destination was closed; using a new editable Mask to preserve the selected Mask.")
+            spec["mode"] = "create_new"
+            spec["target_name"] = "AI_" + (spec.get("target_name") or monitor.get("organ", "Result"))
+        monitor["prediction_target"] = spec
     if spec.get("mode") != "update_selected":
         return _new_prediction_mask(
             spec.get("target_name") or monitor.get("mask_name") or "AI_Result"
@@ -2524,11 +2521,6 @@ def _monitor_tick(monitor):
             monitor["mask_name"],
             bridge_result.get("foreground_voxels", "?"),
         ),
-    )
-    mimics.dialogs.message_box(
-        "Few-shot prediction applied to Mask:\n{0}".format(monitor["mask_name"]),
-        title=TITLE,
-        ui_blocking=False,
     )
 
 

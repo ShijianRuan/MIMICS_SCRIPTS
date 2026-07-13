@@ -64,20 +64,20 @@ The administrative stop entry only targets processes created and registered by t
 
 ## nnInteractive result policy
 
-When a selected Mask already contains segmentation, nnInteractive uses it as an immutable source snapshot and creates a new `<source> - AI Draft` Mask. Prompts and automatic results are written to the Draft, so the original Mask remains available for comparison or rollback.
+When a selected Mask already contains segmentation, nnInteractive uses it as an immutable source snapshot. The first prediction runs without an output-target prompt. When that result is ready, one dialog lets the annotator update the selected Mask or create a new `<source> - AI Draft`; the same dialog is the completion notification.
 
 An empty selected Mask and an existing AI Draft are refined in place. If no Mask is selected, an empty `nnInteractive Result` Draft is created automatically. An unused automatically created Draft is removed when prompt collection is cancelled.
 
-The source Mask is exported once for the initial AI session. The target Draft stays empty until the first result arrives, avoiding a synchronous full-volume Mask copy in Mimics. Session metadata records the source identity, source hash, target identity, and expected target hash to prevent applying a stale result to the wrong Mask.
+The source Mask is exported once for the initial AI session. A Draft is created only after the user chooses `Create Editable Copy`, avoiding a synchronous full-volume Mask copy in Mimics. Session metadata records the source identity, source hash, target identity, and expected target hash to prevent applying a stale result to the wrong Mask.
 
-Set `existing_mask_result_mode` to `in_place` in `nninteractive_config.json` only when deliberate overwrite behavior is required. The default is `derived_copy`.
+Set `existing_mask_result_mode` to `in_place` or `derived_copy` only when a fixed non-interactive policy is required. The default is `ask`, with the choice deferred until the first result is ready.
 
 ## Notification policy
 
 | Event | User feedback |
 | --- | --- |
-| nnInteractive result applied automatically | Non-blocking Mimics success dialog naming the target Mask |
-| Training or prediction completed | Non-blocking completion dialog and persistent job log |
+| nnInteractive or few-shot prediction ready | One target-choice dialog that also reports completion; no follow-up success dialog |
+| Training completed | Non-blocking completion dialog and persistent job log |
 | Background task accepted or external window opened | Mimics log only |
 | User cancels a picker or setup window | Mimics log only |
 | Stop request accepted | Non-blocking confirmation |
