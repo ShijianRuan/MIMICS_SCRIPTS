@@ -81,6 +81,11 @@ def discover_single_source(source):
             if _medical_file(os.path.join(case_dir, name))
         ]
         allow_masks = len(sibling_images) <= 1
+    elif os.path.isfile(selected) and selected.lower().endswith(".dcm"):
+        case_dir = os.path.dirname(selected)
+        case_id = os.path.basename(case_dir.rstrip("\\/")) or _image_stem(selected)
+        image = case_dir
+        allow_masks = True
     elif os.path.isdir(selected):
         case_dir = selected
         case_id = os.path.basename(case_dir.rstrip("\\/")) or "case"
@@ -136,7 +141,7 @@ def run_ui(context, preview_path=""):
     window.setObjectName("ioWindow")
     window.setModal(False)
     window.setMinimumWidth(680)
-    window.resize(720, 510 if mode == "export_masks" else 440)
+    window.resize(720, 455 if mode == "export_masks" else 440)
     window.setWindowTitle({
         "import_batch": "Import Dataset",
         "import_single": "Import Single Case",
@@ -208,7 +213,7 @@ def run_ui(context, preview_path=""):
                 choose_folder = menu.addAction("Choose case or DICOM folder")
                 action = menu.exec(button.mapToGlobal(QtCore.QPoint(0, button.height())))
                 if action == choose_file:
-                    value, _ = QtWidgets.QFileDialog.getOpenFileName(window, "Choose 3D image", current, "Medical volumes (*.nii *.nii.gz *.mha *.mhd *.nrrd);;All files (*)")
+                    value, _ = QtWidgets.QFileDialog.getOpenFileName(window, "Choose 3D image", current, "Medical volumes (*.nii *.nii.gz *.mha *.mhd *.nrrd *.dcm);;All files (*)")
                 elif action == choose_folder:
                     value = QtWidgets.QFileDialog.getExistingDirectory(window, "Choose case or DICOM folder", current)
                 else:
@@ -224,14 +229,10 @@ def run_ui(context, preview_path=""):
         return edit
 
     source_initial = context.get("source_initial") or remembered_mode.get("source_path", "")
-    if mode == "import_single":
-        source_edit = path_row("SOURCE IMAGE OR CASE", source_initial, file_or_folder=True, hint="Supported: NIfTI, MHA/MHD, NRRD, a case folder, or a DICOM series folder.")
+    if mode in ("import_single", "export_masks"):
+        source_edit = path_row("SOURCE IMAGE OR CASE", source_initial, file_or_folder=True, hint="Supported: NIfTI, MHA/MHD, NRRD, a DICOM file, case folder, or DICOM series folder.")
     else:
-        source_edit = path_row("SOURCE DATASET" if mode == "import_batch" else "SOURCE CASE", source_initial, hint="Required. This path is never modified by import." if mode.startswith("import") else "Used to recover the original image geometry for exported masks.")
-
-    mcs_edit = None
-    if mode == "export_masks":
-        mcs_edit = path_row("SAVED MCS FOLDER", context.get("mcs_dir_initial") or remembered_mode.get("mcs_dir", ""), hint="The currently open .mcs is used by the background export process.")
+        source_edit = path_row("SOURCE DATASET", source_initial, hint="Required. This path is never modified by import.")
 
     output_initial = context.get("output_initial") or remembered_mode.get("output_path", "")
     output_edit = path_row("MCS OUTPUT FOLDER" if mode.startswith("import") else "EXPORT ROOT", output_initial, hint="Optional to change. A safe default is filled automatically from the source path.")
@@ -266,7 +267,7 @@ def run_ui(context, preview_path=""):
             output_preview.setText("Final folder: {0}".format(os.path.join(output, case_id, "segmentations")) if output else "")
         else:
             output_preview.setText("Mimics projects: {0}".format(output) if output else "")
-        submit.setEnabled(bool(source and output and (mcs_edit is None or mcs_edit.text().strip())))
+        submit.setEnabled(bool(source and output))
 
     def output_edited(_text):
         if output_edit.hasFocus() or bool(output_edit.property("chosenByBrowse")):
@@ -276,9 +277,6 @@ def run_ui(context, preview_path=""):
 
     source_edit.textChanged.connect(lambda _text: refresh_default())
     output_edit.textChanged.connect(output_edited)
-    if mcs_edit is not None:
-        mcs_edit.textChanged.connect(lambda _text: refresh_default())
-
     footer = QtWidgets.QHBoxLayout()
     remember = QtWidgets.QCheckBox("Remember these folders on this workstation")
     remember.setChecked(bool(remembered_mode))
@@ -302,18 +300,14 @@ def run_ui(context, preview_path=""):
         if not os.path.exists(source):
             QtWidgets.QMessageBox.warning(window, "Source Not Found", "Choose an existing source file or folder.")
             return
-        if mcs_edit is not None and not os.path.isdir(os.path.abspath(os.path.expanduser(mcs_edit.text().strip()))):
-            QtWidgets.QMessageBox.warning(window, "MCS Folder Not Found", "Choose the folder containing the saved .mcs project.")
-            return
         selection = {"source_path": source, "output_path": output, "remember": bool(remember.isChecked())}
-        if mode == "import_single":
+        if mode in ("import_single", "export_masks"):
             case_info = discover_single_source(source)
             if not case_info:
                 QtWidgets.QMessageBox.warning(window, "Unsupported Source", "No supported 3D image or DICOM folder was found.")
                 return
             selection["case_info"] = case_info
-        if mcs_edit is not None:
-            selection["mcs_dir"] = os.path.abspath(os.path.expanduser(mcs_edit.text().strip()))
+        if mode == "export_masks":
             selection["conflict_policy"] = "overwrite" if overwrite_radio.isChecked() else "skip"
         if remember.isChecked() and state_path:
             state = read_json(state_path, {}) or {}

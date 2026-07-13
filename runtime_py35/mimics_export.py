@@ -221,7 +221,7 @@ def _find_mimics_exe():
     return None
 
 
-def _launch_background_batch_export(ts_root, cases_filter, axes, flips, label_output_root=None, overwrite_existing=False, case_dirs=None, mcs_output_dir=None):
+def _launch_background_batch_export(ts_root, cases_filter, axes, flips, label_output_root=None, overwrite_existing=False, case_dirs=None, mcs_output_dir=None, mcs_paths=None, source_image_paths=None):
     """Launch batch export in a separate background Mimics process."""
     output_dir = os.path.abspath(mcs_output_dir) if mcs_output_dir else _resolve_export_output_dir(ts_root)
     if not os.path.isdir(output_dir):
@@ -245,6 +245,8 @@ def _launch_background_batch_export(ts_root, cases_filter, axes, flips, label_ou
             "label_output_root": os.path.abspath(label_output_root) if label_output_root else "",
             "overwrite_existing": bool(overwrite_existing),
             "case_dirs": dict(case_dirs or {}),
+            "mcs_paths": dict(mcs_paths or {}),
+            "source_image_paths": dict(source_image_paths or {}),
         },
     )
     with open(runner_path, "w") as f:
@@ -1024,7 +1026,7 @@ def _current_project_path():
     return ""
 
 
-def _active_source_case_dir():
+def _active_source_path():
     try:
         image = mimics.data.images.get_active()
     except Exception:
@@ -1032,15 +1034,14 @@ def _active_source_case_dir():
     source = _metadata_get(image, SOURCE_IMAGE_PATH_METADATA, "") if image is not None else ""
     if not source:
         return ""
-    source = os.path.abspath(str(source))
-    return os.path.dirname(source) if os.path.isfile(source) else source
+    return os.path.abspath(str(source))
 
 
-def _run_main_with_args(args):
+def _run_main_with_args(args, source_info_override=None):
     previous = list(sys.argv)
     try:
         sys.argv = [previous[0]] + list(args)
-        return main()
+        return main(source_info_override=source_info_override)
     finally:
         sys.argv = previous
 
@@ -1052,23 +1053,23 @@ def _launch_external_export_setup():
     if not project_path or not project_path.lower().endswith(".mcs"):
         raise RuntimeError("Save the current Mimics project before exporting masks.")
     case_id = _current_project_case_id() or os.path.splitext(os.path.basename(project_path))[0]
-    source_initial = _active_source_case_dir()
+    source_initial = _active_source_path()
 
     def submitted(selection):
         source = str(selection.get("source_path", "") or "")
         export_root = str(selection.get("output_path", "") or "")
-        mcs_dir = str(selection.get("mcs_dir", "") or "")
-        if not source or not export_root or not mcs_dir:
-            raise RuntimeError("The source, saved project, and export paths are required.")
+        source_info = selection.get("case_info") or {}
+        if not source or not export_root or not source_info.get("image"):
+            raise RuntimeError("The source image and export destination are required.")
         args = [
-            "--case-dir", source,
-            "--mcs-dir", mcs_dir,
+            "--case-dir", str(source_info.get("case_dir") or source),
+            "--mcs-path", project_path,
             "--label-output-root", export_root,
             "--external-setup",
         ]
         if selection.get("conflict_policy") == "overwrite":
             args.append("--overwrite-source")
-        _run_main_with_args(args)
+        _run_main_with_args(args, source_info_override=source_info)
 
     return io_setup_mimics.launch(
         "export_masks",
@@ -1076,7 +1077,6 @@ def _launch_external_export_setup():
         {
             "case_id": case_id,
             "source_initial": source_initial,
-            "mcs_dir_initial": os.path.dirname(project_path),
             # mimics_output_dir controls .mcs storage only. It must never
             # silently redirect exported label files.
             "configured_output": "",
@@ -1087,7 +1087,7 @@ def _launch_external_export_setup():
 
 # -- Single case export -------------------------------------------------
 
-def _export_masks_and_build_params(case_dir, axes, flips, work_dir, output_seg_dir=None, export_space="source_image", mask_names=None, overwrite_existing=None):
+def _export_masks_and_build_params(case_dir, axes, flips, work_dir, output_seg_dir=None, export_space="source_image", mask_names=None, overwrite_existing=None, source_image_path=None):
     """Export masks to .u8 buffers and build bridge params. Returns (bridge_params, manifest) or None."""
     print("Exporting masks to: {0}".format(case_dir))
 
@@ -1124,7 +1124,9 @@ def _export_masks_and_build_params(case_dir, axes, flips, work_dir, output_seg_d
             active_image = mimics.data.masks[0].image if len(mimics.data.masks) else None
         except Exception:
             active_image = None
-    source_image_path = _metadata_get(active_image, SOURCE_IMAGE_PATH_METADATA, "") if active_image is not None else ""
+    source_image_path = str(source_image_path or "")
+    if not source_image_path and active_image is not None:
+        source_image_path = _metadata_get(active_image, SOURCE_IMAGE_PATH_METADATA, "")
     if source_image_path:
         bridge_params["source_image_path"] = str(source_image_path)
     if output_seg_dir:
@@ -1264,7 +1266,7 @@ def run_background_batch_export(config_path):
         for index, case_info in enumerate(cases):
             case_id = case_info["case_id"]
             case_dir = case_info["case_dir"]
-            mcs_path = os.path.join(output_dir, case_id + ".mcs")
+            mcs_path = str((config.get("mcs_paths") or {}).get(case_id) or os.path.join(output_dir, case_id + ".mcs"))
             work_dir = os.path.join(output_dir, case_id + "_export_work")
             _write_json_atomic(
                 os.path.join(export_root, "_export_batch_status.json"),
@@ -1301,6 +1303,7 @@ def run_background_batch_export(config_path):
                     export_space=export_space,
                     mask_names=mask_names,
                     overwrite_existing=(True if label_staging_dir else overwrite_existing),
+                    source_image_path=(config.get("source_image_paths") or {}).get(case_id),
                 )
                 try:
                     mimics.file.close_project()
@@ -1359,7 +1362,7 @@ def run_background_batch_export(config_path):
 
 # -- Main entry ---------------------------------------------------------
 
-def main():
+def main(source_info_override=None):
     """Entry point.
 
     Usage:
@@ -1386,6 +1389,7 @@ def main():
     label_output_root = None
     overwrite_existing = False
     mcs_dir = None
+    mcs_path_override = None
     external_setup = False
 
     args = sys.argv[1:]
@@ -1414,6 +1418,9 @@ def main():
         elif arg == "--mcs-dir" and i + 1 < len(args):
             mcs_dir = args[i + 1]
             i += 2
+        elif arg == "--mcs-path" and i + 1 < len(args):
+            mcs_path_override = args[i + 1]
+            i += 2
         elif arg == "--overwrite-source":
             overwrite_existing = True
             i += 1
@@ -1432,8 +1439,12 @@ def main():
     if case_dir:
         case_id = _current_project_case_id() or os.path.basename(os.path.abspath(case_dir))
         ts_root = os.path.dirname(os.path.abspath(case_dir))
-        output_dir = os.path.abspath(mcs_dir) if mcs_dir else _resolve_export_output_dir(ts_root)
-        mcs_path = os.path.join(output_dir, case_id + ".mcs")
+        if mcs_path_override:
+            mcs_path = os.path.abspath(mcs_path_override)
+            output_dir = os.path.dirname(mcs_path)
+        else:
+            output_dir = os.path.abspath(mcs_dir) if mcs_dir else _resolve_export_output_dir(ts_root)
+            mcs_path = os.path.join(output_dir, case_id + ".mcs")
         if not os.path.isfile(mcs_path):
             mimics.dialogs.message_box(
                 title="Export Error",
@@ -1455,6 +1466,8 @@ def main():
             overwrite_existing=overwrite_existing,
             case_dirs={case_id: os.path.abspath(case_dir)},
             mcs_output_dir=output_dir,
+            mcs_paths={case_id: mcs_path},
+            source_image_paths={case_id: str((source_info_override or {}).get("image") or "")},
         )
         if process is None:
             mimics.dialogs.message_box(

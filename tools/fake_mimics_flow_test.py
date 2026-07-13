@@ -624,9 +624,15 @@ def test_external_io_setup_routing(fake, tmp):
                 callback({"source_path": str(tmp / "dataset"), "output_path": str(tmp / "chosen_mcs")})
             elif mode == "export_masks":
                 callback({
-                    "source_path": str(tmp / "dataset" / "s0001"),
+                    "source_path": str(tmp / "dataset" / "s0001" / "ct.nii.gz"),
                     "output_path": str(tmp / "chosen_labels"),
-                    "mcs_dir": str(tmp / "saved_projects"),
+                    "case_info": {
+                        "case_id": "s0001",
+                        "image": str(tmp / "dataset" / "s0001" / "ct.nii.gz"),
+                        "case_dir": str(tmp / "dataset" / "s0001"),
+                        "image_type": "medical_image",
+                        "masks": [],
+                    },
                     "conflict_policy": "skip",
                 })
             return 0
@@ -635,7 +641,7 @@ def test_external_io_setup_routing(fake, tmp):
         import_module._python_exe = lambda: "external-python"
         export_module._python_exe = lambda: "external-python"
         import_module._run_main_with_args = lambda args, import_mode=None, case_info_override=None: launched.append(("import", list(args))) or 0
-        export_module._run_main_with_args = lambda args: launched.append(("export", list(args))) or 0
+        export_module._run_main_with_args = lambda args, source_info_override=None: launched.append(("export", list(args), source_info_override)) or 0
         import_module._launch_external_import_setup(None)
 
         project = tmp / "saved_projects" / "s0001.mcs"
@@ -653,9 +659,11 @@ def test_external_io_setup_routing(fake, tmp):
     assert_true("--output-dir" in launched[0][1], "chosen import output was not routed")
     assert_true(str(tmp / "chosen_mcs") in launched[0][1], "chosen import output path missing")
     assert_equal(captured[1][0], "export_masks", "mask export setup mode")
-    assert_true("--mcs-dir" in launched[1][1], "saved project folder was not routed")
+    assert_true("--mcs-path" in launched[1][1], "current project path was not routed")
+    assert_true(str(project) in launched[1][1], "current project path is incorrect")
     assert_true(str(tmp / "chosen_labels") in launched[1][1], "chosen label destination missing")
     assert_true("--overwrite-source" not in launched[1][1], "skip policy became overwrite")
+    assert_equal(launched[1][2]["image"], str(tmp / "dataset" / "s0001" / "ct.nii.gz"), "explicit source image was not routed")
     return "external PySide6 selections route explicit import/export paths"
 
 

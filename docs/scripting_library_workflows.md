@@ -37,11 +37,13 @@ resampling run in external Python. Mimics applies one prepared Mask per GUI
 timer tick; empty results are rejected with a spatial-alignment warning.
 
 `03 Export Masks` exports every Mask in the saved project, including hidden
-Masks. Select the source case directory and then the destination root. Output
-is written to `<chosen root>/<case>/segmentations/*.nii.gz`. Choose `Skip
-existing` or `Overwrite existing` in the same external setup window. The
-window also shows the folder containing the saved `.mcs`; this defaults to the
-current project location and is independent from the label destination.
+Masks. Select the source image or case and then the destination root. The source
+may be NIfTI, MHA/MHD, NRRD, one DICOM file, a DICOM series folder, or a case
+folder containing one of those forms. Output is written to `<chosen
+root>/<case>/segmentations/*.nii.gz`. Choose `Skip existing` or `Overwrite
+existing` in the same external setup window. The currently open `.mcs` path is
+read from Mimics and passed to the background process automatically; it is not
+a user-configurable data path.
 `mimics_output_dir` never redirects exported labels. External batch export uses
 `tools/mimics_batch_cli.py export-labels` and requires an explicit destination
 policy through either `--output-dir` or `--overwrite-source`.

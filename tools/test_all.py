@@ -2412,6 +2412,12 @@ class TestNewFeatures(unittest.TestCase):
         discovered = io_ui.discover_single_source(image_path)
         self.assertEqual("ct", discovered["case_id"])
         self.assertEqual(os.path.abspath(image_path), discovered["image"])
+        dcm_path = os.path.join(case_dir, "slice001.dcm")
+        with open(dcm_path, "wb") as handle:
+            handle.write(b"candidate")
+        dicom_source = io_ui.discover_single_source(dcm_path)
+        self.assertEqual(os.path.abspath(case_dir), dicom_source["image"])
+        self.assertEqual("dicom_candidate", dicom_source["image_type"])
         import_source = inspect.getsource(mimics_import.main)
         export_source = inspect.getsource(mimics_export.main)
         self.assertIn("_launch_external_import_setup", import_source)
@@ -2423,6 +2429,8 @@ class TestNewFeatures(unittest.TestCase):
         export_setup = inspect.getsource(mimics_export._launch_external_export_setup)
         self.assertIn('"configured_output": ""', export_setup)
         self.assertIn('"--external-setup"', export_setup)
+        self.assertIn('"--mcs-path"', export_setup)
+        self.assertNotIn('"--mcs-dir"', export_setup)
         async_launch = inspect.getsource(mimics_export._launch_background_batch_export_async)
         self.assertIn("thread.start()", async_launch)
 
