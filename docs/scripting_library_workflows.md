@@ -15,11 +15,17 @@
 2. `02 Import Single Case`
 3. `03 Export Masks`
 4. `04 Stop Import Queue`
+5. `05 Import Masks`
 
 `02 Import Single Case` accepts a single `.nii`, `.nii.gz`, `.mha`, `.mhd`, or
 `.nrrd` volume, a TotalSegmentator-style case folder, a `dicom/` case folder,
 or a folder containing a DICOM series directly. Header inspection and
 conversion run in the external bridge process.
+
+`05 Import Masks` adds binary or multi-label NIfTI, MHA/MHD, or NRRD
+segmentations to the active image. File reading, label splitting, and spatial
+resampling run in external Python. Mimics applies one prepared Mask per GUI
+timer tick; empty results are rejected with a spatial-alignment warning.
 
 `03 Export Masks` exports every Mask in the saved project, including hidden
 Masks. Select the source case directory and then the destination root. Output

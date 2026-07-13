@@ -32,6 +32,8 @@ BUTTON_PREDICT_MODEL = "Predict Current Case (Choose Model)..."
 BUTTON_STATUS = "Show Status"
 BUTTON_STOP = "Stop Running Job"
 BUTTON_CANCEL = "Cancel"
+BUTTON_UPDATE_SELECTED = "Update Selected Mask"
+BUTTON_CREATE_NEW = "Create New Editable Mask"
 SOURCE_IMAGE_PATH_METADATA = "mimics_script.source_image_path"
 SOURCE_IMAGE_SHAPE_METADATA = "mimics_script.source_image_shape"
 SOURCE_VOXEL_TO_RAS_MATRIX_METADATA = "mimics_script.source_voxel_to_ras_matrix"
@@ -377,6 +379,41 @@ def _selected_organ():
     if mask is None:
         return None
     return str(getattr(mask, "name", "") or "").strip()
+
+
+def _mask_identity(mask):
+    value = getattr(mask, "guid", None)
+    return str(value) if value else str(getattr(mask, "name", "") or "")
+
+
+def _choose_prediction_target(mask):
+    name = str(getattr(mask, "name", "") or "").strip()
+    decision = mimics.dialogs.question_box(
+        message=(
+            "Prediction task: {0}\n\n"
+            "Update Selected Mask replaces this Mask when prediction completes.\n"
+            "Create New Editable Mask keeps it unchanged and creates a separate result.\n\n"
+            "Both results remain editable and can be refined with nnInteractive."
+        ).format(name),
+        buttons=";".join([BUTTON_UPDATE_SELECTED, BUTTON_CREATE_NEW, BUTTON_CANCEL]),
+        title=TITLE,
+        ui_blocking=True,
+    )
+    if decision == BUTTON_UPDATE_SELECTED:
+        return {
+            "mode": "update_selected",
+            "target_name": name,
+            "target_guid": _mask_identity(mask),
+            "initial_pixel_count": int(getattr(mask, "number_of_pixels", 0) or 0),
+        }
+    if decision == BUTTON_CREATE_NEW:
+        return {
+            "mode": "create_new",
+            "target_name": "AI_" + name,
+            "source_name": name,
+            "source_guid": _mask_identity(mask),
+        }
+    return None
 
 
 def _metadata_get(obj, name, default=""):
@@ -1769,7 +1806,7 @@ def _train_model(advanced=False):
     return 0
 
 
-def _launch_inference_job(config, ts_root, case_id, organ, selected_model=None):
+def _launch_inference_job(config, ts_root, case_id, organ, selected_model=None, target_spec=None):
     dinov3_root = _dinov3_root(config)
     python_exe = _fewshot_python(config, dinov3_root)
     job_id = "infer_{0}_{1}_{2}".format(_safe_slug(case_id), _safe_slug(organ), uuid.uuid4().hex[:8])
@@ -1842,6 +1879,7 @@ def _launch_inference_job(config, ts_root, case_id, organ, selected_model=None):
             "launcher_pid": process.pid,
             "cancel_path": cancel_path,
             "selected_model": selected_model,
+            "prediction_target": target_spec or {},
             "source_geometry_expected": source_geometry,
             "created_at_epoch": time.time(),
             "updated_at_epoch": time.time(),
@@ -1858,7 +1896,8 @@ def _launch_inference_job(config, ts_root, case_id, organ, selected_model=None):
         "deadline": time.time() + 12 * 60 * 60,
         "bridge_started": False,
         "bridge_job_dir": os.path.join(_workspace(ts_root), "jobs", job_id + "_apply"),
-        "mask_name": "AI_" + organ,
+        "mask_name": (target_spec or {}).get("target_name", "AI_" + organ),
+        "prediction_target": target_spec or {"mode": "create_new", "target_name": "AI_" + organ},
         "launch_project_path": launch_project_path,
         "target_grid": target_grid,
         "waiting_to_apply_logged": False,
@@ -1876,7 +1915,7 @@ def _launch_inference_job(config, ts_root, case_id, organ, selected_model=None):
     return 0
 
 
-def _launch_external_model_chooser(config, ts_root, case_id, organ):
+def _launch_external_model_chooser(config, ts_root, case_id, organ, target_spec=None):
     candidates = _model_candidates(ts_root, organ)
     if not candidates:
         mimics.dialogs.message_box(
@@ -1886,7 +1925,9 @@ def _launch_external_model_chooser(config, ts_root, case_id, organ):
         )
         return 1
     if len(candidates) == 1:
-        return _launch_inference_job(config, ts_root, case_id, organ, candidates[0])
+        return _launch_inference_job(
+            config, ts_root, case_id, organ, candidates[0], target_spec=target_spec
+        )
 
     script = _model_chooser_script()
     if not os.path.isfile(script):
@@ -1906,6 +1947,7 @@ def _launch_external_model_chooser(config, ts_root, case_id, organ):
         "kind": "model_choice",
         "status": "selecting_model",
         "organ": organ,
+        "prediction_target": target_spec or {},
         "case_id": case_id,
         "ts_root": os.path.abspath(ts_root),
         "workspace": workspace,
@@ -1966,6 +2008,7 @@ def _launch_external_model_chooser(config, ts_root, case_id, organ):
             "ts_root": ts_root,
             "case_id": case_id,
             "organ": organ,
+            "prediction_target": target_spec or {},
             "deadline": time.time() + float(config.get("model_choice_timeout_seconds", 30 * 60)),
             "last_line": "",
         },
@@ -1983,7 +2026,8 @@ def _launch_external_model_chooser(config, ts_root, case_id, organ):
 
 
 def _start_inference(choose_model=False):
-    organ = _selected_organ()
+    selected_mask = _selected_mask()
+    organ = str(getattr(selected_mask, "name", "") or "").strip() if selected_mask is not None else ""
     if not organ:
         mimics.dialogs.message_box(
             "Select one Mask whose name is the organ/model to use, then run this entry again.",
@@ -1991,6 +2035,10 @@ def _start_inference(choose_model=False):
             ui_blocking=False,
         )
         return 1
+    target_spec = _choose_prediction_target(selected_mask)
+    if target_spec is None:
+        _mimics_log(logging.INFO, "DINOv3 prediction cancelled before launch.")
+        return 0
     ts_root = _choose_dataset_root("Select dataset folder")
     if not ts_root or not os.path.isdir(ts_root):
         _mimics_log(logging.INFO, "DINOv3 prediction cancelled: no dataset folder was selected.")
@@ -2011,7 +2059,9 @@ def _start_inference(choose_model=False):
     config = _config()
     if choose_model:
         try:
-            return _launch_external_model_chooser(config, ts_root, case_id, organ)
+            return _launch_external_model_chooser(
+                config, ts_root, case_id, organ, target_spec=target_spec
+            )
         except Exception as exc:
             _mimics_log(logging.ERROR, "DINOv3 external model chooser could not start: {0}".format(exc))
             mimics.dialogs.message_box(
@@ -2029,7 +2079,9 @@ def _start_inference(choose_model=False):
         )
         _mimics_log(logging.WARNING, "DINOv3 latest-model prediction was not started: {0}".format(reason))
         return 1
-    return _launch_inference_job(config, ts_root, case_id, organ, selected_model)
+    return _launch_inference_job(
+        config, ts_root, case_id, organ, selected_model, target_spec=target_spec
+    )
 
 
 def _launch_bridge_mask_to_buffer(monitor, status):
@@ -2132,6 +2184,66 @@ def _find_or_create_mask(name):
     return mask
 
 
+def _unique_mask_name(base_name):
+    names = set(str(getattr(mask, "name", "") or "") for mask in mimics.data.masks)
+    if base_name not in names:
+        return base_name
+    index = 2
+    while "{0} {1}".format(base_name, index) in names:
+        index += 1
+    return "{0} {1}".format(base_name, index)
+
+
+def _new_prediction_mask(name):
+    active_image = mimics.data.images.get_active()
+    if active_image is None:
+        raise RuntimeError("No active Mimics image is available for prediction import.")
+    mask = mimics.segment.create_mask()
+    mask.name = _unique_mask_name(name)
+    try:
+        mask.image = active_image
+    except Exception:
+        bound = getattr(mask, "image", None)
+        if bound is None or bound != active_image:
+            raise
+    return mask
+
+
+def _prediction_target_mask(monitor):
+    spec = monitor.get("prediction_target") or {}
+    if spec.get("mode") != "update_selected":
+        return _new_prediction_mask(
+            spec.get("target_name") or monitor.get("mask_name") or "AI_Result"
+        )
+
+    target_guid = str(spec.get("target_guid", "") or "")
+    target_name = str(spec.get("target_name", "") or "")
+    target = None
+    for mask in mimics.data.masks:
+        identity = _mask_identity(mask)
+        if (target_guid and identity == target_guid) or (
+            not target_guid and str(getattr(mask, "name", "") or "") == target_name
+        ):
+            target = mask
+            break
+    if target is None:
+        _mimics_log(
+            logging.WARNING,
+            "The selected prediction target no longer exists; creating a new editable Mask instead.",
+        )
+        return _new_prediction_mask("AI_" + (target_name or monitor.get("organ", "Result")))
+
+    initial_count = spec.get("initial_pixel_count")
+    current_count = int(getattr(target, "number_of_pixels", 0) or 0)
+    if initial_count is not None and current_count != int(initial_count):
+        _mimics_log(
+            logging.WARNING,
+            "The selected Mask changed while prediction was running. Manual edits were preserved and the prediction will be applied to a new Mask.",
+        )
+        return _new_prediction_mask("AI_" + (target_name or monitor.get("organ", "Result")))
+    return target
+
+
 def _set_mask_from_u8(mask, path, shape):
     raw = open(path, "rb").read()
     expected = int(shape[0]) * int(shape[1]) * int(shape[2])
@@ -2145,7 +2257,9 @@ def _set_mask_from_u8(mask, path, shape):
         except ImportError:
             pixels = memoryview(bytearray(raw)).cast("?", shape=list(shape))
             mask.set_voxel_buffer(pixels)
-    _with_gui_updates_disabled(_apply)
+    _update_gui()
+    _apply()
+    _update_gui()
     try:
         mask.visible = True
         mask.selected = True
@@ -2248,6 +2362,7 @@ def _monitor_model_choice_tick(monitor, status):
             monitor.get("case_id"),
             monitor.get("organ"),
             selected_model,
+            target_spec=monitor.get("prediction_target") or {},
         )
         return
     if state in ("cancelled", "closed"):
@@ -2374,8 +2489,11 @@ def _monitor_tick(monitor):
             pass
         return
     try:
-        mask = _find_or_create_mask(monitor["mask_name"])
+        mask = _prediction_target_mask(monitor)
         _set_mask_from_u8(mask, bridge_result["output_path"], bridge_result["mimics_shape"])
+        monitor["mask_name"] = str(
+            getattr(mask, "name", monitor.get("mask_name", "")) or ""
+        )
     except Exception as exc:
         _stop_monitor(key)
         mimics.dialogs.message_box("Could not apply prediction:\n\n{0}".format(exc), title=TITLE, ui_blocking=False)

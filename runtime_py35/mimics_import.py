@@ -101,6 +101,13 @@ def _safe_message_box(title, message, ui_blocking=True):
         pass
 
 
+def _update_gui():
+    try:
+        mimics.update_gui()
+    except Exception:
+        pass
+
+
 def _rotate_log_file(path, max_bytes=_LOG_ROTATE_BYTES, backups=_LOG_ROTATE_BACKUPS):
     try:
         if not os.path.isfile(path) or os.path.getsize(path) < max_bytes:
@@ -365,7 +372,7 @@ def _load_data_io_config():
     return _CONFIG_CACHE
 
 
-def _resolve_import_output_dir(base_dir):
+def _resolve_import_output_dir(base_dir, create=True):
     default_dir = os.path.join(base_dir, "mcs_output")
     config = _load_data_io_config()
     configured = config.get("mimics_output_dir", "")
@@ -377,6 +384,8 @@ def _resolve_import_output_dir(base_dir):
         configured = os.path.abspath(os.path.join(base_dir, configured))
     else:
         configured = os.path.abspath(configured)
+    if not create:
+        return configured
     try:
         if not os.path.isdir(configured):
             os.makedirs(configured)
@@ -781,6 +790,23 @@ def _launch_bridge_background(bridge_params, job_dir):
 def _launch_bridge_job_thread(bridge_params, job_dir, output_dir, phase, case_id=None):
     """Start bridge from a worker thread so Mimics GUI can repaint first."""
     def _run():
+        if not os.path.isdir(job_dir):
+            os.makedirs(job_dir)
+        _write_json_atomic(
+            os.path.join(job_dir, "job_state.json"),
+            {
+                "phase": "launching",
+                "requested_phase": phase,
+                "case_id": case_id or "",
+                "started_at": time.time(),
+            },
+        )
+        _verbose_log(
+            output_dir,
+            "Job state | phase={0} | case_id={1} | params={2}".format(
+                phase, case_id or "", _summarize_bridge_params(bridge_params),
+            ),
+        )
         _verbose_log(
             output_dir,
             "Worker thread | phase={0} | case_id={1}".format(phase, case_id or ""),
@@ -807,23 +833,6 @@ def _launch_bridge_job_thread(bridge_params, job_dir, output_dir, phase, case_id
             except Exception:
                 pass
 
-    if not os.path.isdir(job_dir):
-        os.makedirs(job_dir)
-    _write_json_atomic(
-        os.path.join(job_dir, "job_state.json"),
-        {
-            "phase": "launching",
-            "requested_phase": phase,
-            "case_id": case_id or "",
-            "started_at": time.time(),
-        },
-    )
-    _verbose_log(
-        output_dir,
-        "Job state | phase={0} | case_id={1} | params={2}".format(
-            phase, case_id or "", _summarize_bridge_params(bridge_params),
-        ),
-    )
     thread = threading.Thread(target=_run)
     thread.daemon = True
     thread.start()
@@ -1798,14 +1807,16 @@ def _start_import_monitor(job_dir, output_mcs, work_dir, timeout_seconds=1800,
     if batch_info:
         monitor.update(batch_info)
 
-    # Try PyQt5 QTimer first (works inside Mimics GUI event loop)
+    # Prefer the native Windows message-loop timer. Importing PyQt5 after a
+    # folder dialog closes can stall Mimics while Qt scans plugins and paths.
+    if _start_win32_import_monitor(monitor, poll_seconds, timeout_seconds):
+        return True
+
+    # Non-Windows fallback: use the existing Mimics Qt event loop.
     try:
         from PyQt5.QtCore import QTimer
         from PyQt5.QtWidgets import QApplication
     except Exception:
-        # Fall back to Win32 SetTimer
-        if _start_win32_import_monitor(monitor, poll_seconds, timeout_seconds):
-            return True
         mimics.dialogs.message_box(
             title="Import Running",
             message=(
@@ -1817,8 +1828,6 @@ def _start_import_monitor(job_dir, output_mcs, work_dir, timeout_seconds=1800,
 
     qapp = QApplication.instance()
     if qapp is None:
-        if _start_win32_import_monitor(monitor, poll_seconds, timeout_seconds):
-            return True
         mimics.dialogs.message_box(
             title="Import Running",
             message=(
@@ -2144,13 +2153,16 @@ def _start_import_discover_monitor(job_dir, ts_root, output_dir, axes, flips, jo
         ),
     )
 
-    # Try PyQt5 QTimer first
+    # Prefer Win32 SetTimer so returning from the native folder picker does not
+    # immediately trigger a potentially slow PyQt5/plugin import in Mimics.
+    if _start_win32_discover_monitor(monitor, poll_seconds, timeout_seconds):
+        return True
+
+    # Non-Windows fallback: use the existing Qt event loop.
     try:
         from PyQt5.QtCore import QTimer
         from PyQt5.QtWidgets import QApplication
     except Exception:
-        if _start_win32_discover_monitor(monitor, poll_seconds, timeout_seconds):
-            return True
         mimics.dialogs.message_box(
             title="Scan Running",
             message="Dataset scan has started, but progress cannot be monitored automatically.",
@@ -2159,8 +2171,6 @@ def _start_import_discover_monitor(job_dir, ts_root, output_dir, axes, flips, jo
 
     qapp = QApplication.instance()
     if qapp is None:
-        if _start_win32_discover_monitor(monitor, poll_seconds, timeout_seconds):
-            return True
         mimics.dialogs.message_box(
             title="Scan Running",
             message="Dataset scan has started, but progress cannot be monitored automatically.",
@@ -2391,28 +2401,20 @@ def main(import_mode=None):
 
     # No confirmation dialog; user already chose the folder, just start.
     if not output_dir:
-        output_dir = _resolve_import_output_dir(ts_root)
-    if not os.path.isdir(output_dir):
-        os.makedirs(output_dir)
-
-    _verbose_log(
-        output_dir,
-        "Mode: batch-discover | ts_root={0}".format(ts_root),
-    )
+        # Resolve only the path on the GUI thread. Directory creation and all
+        # logging happen in the launch worker to avoid slow/network-drive I/O
+        # immediately after the folder picker closes.
+        output_dir = _resolve_import_output_dir(ts_root, create=False)
 
     jobs_dir = os.path.join(output_dir, "_import_jobs")
 
-    _append_import_log(output_dir, "Starting dataset discovery.")
     discover_job_dir = os.path.join(jobs_dir, "_discover")
     bridge_params = {
         "action": "discover",
         "ts_root": ts_root,
         "cases_filter": list(cases_filter) if cases_filter else None,
     }
-    _verbose_log(
-        output_dir,
-        "Discover params={0}".format(_summarize_bridge_params(bridge_params)),
-    )
+    _update_gui()
     _launch_bridge_job_thread(bridge_params, discover_job_dir, output_dir, "discovering")
     _start_import_discover_monitor(
         discover_job_dir,

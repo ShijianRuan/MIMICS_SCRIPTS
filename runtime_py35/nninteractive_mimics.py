@@ -807,9 +807,40 @@ def _select_session_masks(image, config):
             "Activate its image set or select another Mask."
         )
 
-    mode = str(config.get("existing_mask_result_mode", "derived_copy") or "derived_copy").strip().lower()
     has_active_session = bool(_metadata_get(source, ASYNC_JOB_METADATA, ""))
-    if mode in ("in_place", "inplace", "overwrite") or _mask_is_empty(source) or _is_ai_draft(source) or has_active_session:
+    if _mask_is_empty(source) or _is_ai_draft(source) or has_active_session:
+        return {
+            "source": source,
+            "target": source,
+            "auto_created": False,
+            "write_mode": "in_place",
+        }
+
+    mode = str(config.get("existing_mask_result_mode", "ask") or "ask").strip().lower()
+    if mode in ("ask", "choose", "prompt"):
+        decision = mimics.dialogs.question_box(
+            title=TITLE,
+            message=(
+                "Use the selected Mask as the starting segmentation.\n\n"
+                "Update Selected Mask applies AI corrections in place.\n"
+                "Create Editable Copy keeps the original and writes corrections to a new Mask."
+            ),
+            buttons="Update Selected Mask;Create Editable Copy;Cancel",
+            ui_blocking=True,
+        )
+        if decision == "Update Selected Mask":
+            mode = "in_place"
+        elif decision == "Create Editable Copy":
+            mode = "derived_copy"
+        else:
+            return {
+                "source": source,
+                "target": source,
+                "auto_created": False,
+                "write_mode": "cancelled",
+            }
+
+    if mode in ("in_place", "inplace", "overwrite"):
         return {
             "source": source,
             "target": source,
@@ -3680,6 +3711,9 @@ def run():
         raise RuntimeError("Open a project and activate an image set before running nnInteractive.")
     config = _config()
     session = _select_session_masks(image, config)
+    if session.get("write_mode") == "cancelled":
+        _mimics_log(logging.INFO, "nnInteractive cancelled before creating an AI session.")
+        return 0
     source = session["source"]
     target = session["target"]
     if source is not target:

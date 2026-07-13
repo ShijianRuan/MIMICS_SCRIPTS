@@ -605,6 +605,46 @@ def test_export_masks_to_buffers(fake, tmp):
     return "exported 2 mask buffers with manifest and expected byte counts"
 
 
+def test_async_mask_import_apply(fake, tmp):
+    image = fake.reset_scene(image_shape=(2, 3, 4), minimum_value=0, maximum_value=100)
+    fake.disable_gui_calls = 0
+    fake.update_gui_calls = 0
+    module = import_runtime_module("mask_import")
+    tmp.mkdir(parents=True, exist_ok=True)
+    buffer_path = tmp / "liver.u8"
+    buffer_path.write_bytes(_u8_pattern_buffer((2, 3, 4), lambda x, y, z: x == 0 and y == z % 3).tobytes())
+    result_path = tmp / "bridge_result.json"
+    result_path.write_text(json.dumps({
+        "status": "ok",
+        "masks": [{
+            "name": "liver",
+            "u8_path": str(buffer_path),
+            "mimics_shape": [2, 3, 4],
+            "foreground_voxels": 4,
+        }],
+    }), encoding="utf-8")
+    monitor = {
+        "monitor_key": str(tmp),
+        "result_path": str(result_path),
+        "work_dir": str(tmp),
+        "active_image": image,
+        "image_shape": [2, 3, 4],
+        "pending": None,
+        "created_names": [],
+        "errors": [],
+        "deadline": time.time() + 10,
+    }
+    module._MASK_IMPORT_MONITORS[str(tmp)] = monitor
+    module._mask_import_monitor_tick(monitor)
+    imported = [mask for mask in fake.data.masks if mask.name == "liver"]
+    assert_equal(len(imported), 1, "prepared mask should be created once")
+    assert_true(imported[0].visible, "imported mask should be visible")
+    assert_equal(imported[0].number_of_pixels, 4, "imported foreground voxel count")
+    assert_equal(fake.disable_gui_calls, 0, "mask import must not disable Mimics GUI updates")
+    assert_true(fake.update_gui_calls >= 2, "mask import should repaint around buffer apply")
+    return "prepared buffer applied visibly without disabling GUI updates"
+
+
 def test_nninteractive_fast_path_and_mask_buffer(fake, tmp):
     tmp.mkdir(parents=True, exist_ok=True)
     image = fake.reset_scene(image_shape=(2, 3, 4), minimum_value=0, maximum_value=100)
@@ -703,7 +743,9 @@ def test_nninteractive_derived_draft_session(fake, tmp):
     fake.data.masks.append(source)
     module = import_runtime_module("nninteractive_mimics")
 
-    session = module._select_session_masks(image, {})
+    session = module._select_session_masks(
+        image, {"existing_mask_result_mode": "derived_copy"}
+    )
     target = session["target"]
     assert_true(session["source"] is source, "selected manual mask should be the source")
     assert_true(target is not source, "non-empty manual mask should create a separate Draft")
@@ -1012,6 +1054,7 @@ def main(argv=None):
         tests.append(("mask identifier all-mask bounding-box scan", lambda: test_mask_identifier_all_mask_bbox_scan(fake, tmp / "mask_identifier")))
     if args.only in ("export", "all"):
         tests.append(("mask export buffer flow", lambda: test_export_masks_to_buffers(fake, tmp / "export")))
+        tests.append(("asynchronous mask import apply", lambda: test_async_mask_import_apply(fake, tmp / "mask_import")))
     if args.only in ("nninteractive", "all"):
         tests.append(("nnInteractive Mimics-side buffer flow", lambda: test_nninteractive_fast_path_and_mask_buffer(fake, tmp / "nninteractive")))
         tests.append(("nnInteractive derived Draft flow", lambda: test_nninteractive_derived_draft_session(fake, tmp / "nninteractive_draft")))

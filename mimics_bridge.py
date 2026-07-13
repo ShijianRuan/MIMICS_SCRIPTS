@@ -629,6 +629,28 @@ def read_nifti_mask_with_affine(path: str) -> tuple[np.ndarray, np.ndarray]:
     return (array != 0).astype(np.uint8), affine_ras
 
 
+def read_mask_labels_with_affine(path: str) -> tuple[np.ndarray, np.ndarray, list]:
+    """Read a medical mask while preserving integer label values and RAS geometry."""
+    sitk_img = _read_image_sitk_lps(path)
+    array = _sitk_to_xyz_array(sitk_img)
+    if array.ndim != 3:
+        raise ValueError("mask must be 3D: {} shape={}".format(path, array.shape))
+    if not np.all(np.isfinite(array)):
+        raise ValueError("mask contains NaN or infinite label values: {}".format(path))
+
+    if np.issubdtype(array.dtype, np.floating):
+        rounded = np.rint(array)
+        if np.allclose(array, rounded, atol=1e-5, rtol=0.0):
+            array = rounded.astype(np.int64)
+        else:
+            # Probability-like masks are binary segmentations, not thousands
+            # of separate floating-point labels.
+            array = (array != 0).astype(np.uint8)
+    affine_ras = LPS_TO_RAS @ _sitk_to_lps_affine(sitk_img)
+    labels = [value.item() if hasattr(value, "item") else value for value in np.unique(array)]
+    return np.ascontiguousarray(array), affine_ras, labels
+
+
 def _affine_is_usable(affine: np.ndarray) -> bool:
     affine = np.asarray(affine, dtype=float)
     if affine.shape != (4, 4) or not np.all(np.isfinite(affine)):
@@ -1225,7 +1247,8 @@ def do_prepare_masks_for_grid(params: dict) -> dict:
 
         # Read mask preserving label values to detect multi-label masks.
         label_array, mask_affine, labels = read_mask_labels_with_affine(mask_path)
-        is_multi_label = len(labels) > 2  # more than just background + one label
+        nonzero_labels = [value for value in labels if value != 0]
+        is_multi_label = len(nonzero_labels) > 1
 
         if is_multi_label:
             for label_val in labels:
@@ -1235,7 +1258,7 @@ def do_prepare_masks_for_grid(params: dict) -> dict:
                 label_name = "{0}_label{1}".format(name, label_val)
                 output_path = os.path.join(buffers_out, label_name + ".u8")
                 target_grid_mask = resample_mask_to_image_grid(
-                    binary, mask_affine, _shape_from_params(target_shape), target_voxel_to_ras,
+                    binary, mask_affine, _shape_from_params(target_shape), target_matrix,
                 )
                 transformed = apply_buffer_mapping(target_grid_mask, axes, flips)
                 Path(output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -1253,7 +1276,7 @@ def do_prepare_masks_for_grid(params: dict) -> dict:
                     "mask_affine_usable": bool(_affine_is_usable(mask_affine)),
                     "mask_affine_matches_target": bool(_affine_close(mask_affine, target_voxel_to_ras)),
                     "mask_voxel_to_ras_matrix": mask_affine.astype(float).tolist(),
-                    "target_voxel_to_ras_matrix": target_voxel_to_ras.astype(float).tolist(),
+                    "target_voxel_to_ras_matrix": target_matrix.astype(float).tolist(),
                     "buffer_axes": list(axes),
                     "buffer_flips": list(flips),
                 }

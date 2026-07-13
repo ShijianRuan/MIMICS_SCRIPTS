@@ -18,6 +18,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 
@@ -27,6 +28,8 @@ import runtime_common
 
 
 TITLE = "Import Masks"
+
+_MASK_IMPORT_MONITORS = {}
 
 _write_json_atomic = runtime_common.write_json_atomic
 _read_json = runtime_common.read_json
@@ -265,15 +268,15 @@ def _derive_mimics_voxel_to_ras_matrix(image, shape):
 
     try:
         # Mimics uses LPS internally; get_voxel_center returns LPS.
-        # Convert to RAS: x_R = x_L, y_R = -y_P, z_R = -z_S
+        # Convert LPS to RAS by negating the first two world axes.
         origin_lps = _voxel_center(image, [0, 0, 0])
-        origin = [origin_lps[0], -origin_lps[1], -origin_lps[2]]
+        origin = [-origin_lps[0], -origin_lps[1], origin_lps[2]]
 
         for axis in range(3):
             step = [0, 0, 0]
             step[axis] = 1
             step_lps = _voxel_center(image, step)
-            step_ras = [step_lps[0], -step_lps[1], -step_lps[2]]
+            step_ras = [-step_lps[0], -step_lps[1], step_lps[2]]
             for row in range(3):
                 matrix[row][axis] = step_ras[row] - origin[row]
             matrix[axis][3] = origin[axis]
@@ -358,6 +361,212 @@ def _find_or_create_mask(name, active_image):
     return mask
 
 
+def _update_gui():
+    try:
+        mimics.update_gui()
+    except Exception:
+        pass
+
+
+def _safe_message(message, title=TITLE):
+    try:
+        mimics.dialogs.message_box(message, title=title, ui_blocking=False)
+    except TypeError:
+        try:
+            mimics.dialogs.message_box(message, title=title)
+        except Exception:
+            print("{0}: {1}".format(title, message))
+    except Exception:
+        print("{0}: {1}".format(title, message))
+
+
+def _stop_mask_import_monitor(key):
+    monitor = _MASK_IMPORT_MONITORS.pop(key, None)
+    if not monitor:
+        return
+    timer = monitor.get("timer")
+    if timer is not None:
+        try:
+            timer.stop()
+        except Exception:
+            pass
+    win32_timer = monitor.get("win32_timer")
+    if win32_timer:
+        try:
+            user32, timer_id = win32_timer
+            user32.KillTimer(None, timer_id)
+        except Exception:
+            pass
+
+
+def _finish_mask_import(monitor):
+    key = monitor.get("monitor_key")
+    created_names = monitor.get("created_names", [])
+    errors = monitor.get("errors", [])
+    _stop_mask_import_monitor(key)
+    _cleanup_work_dir(monitor.get("work_dir"))
+    if created_names:
+        message = "Imported {0} mask(s):\n\n{1}".format(
+            len(created_names), "\n".join("- " + name for name in created_names)
+        )
+        if errors:
+            message += "\n\nWarnings:\n" + "\n".join("- " + error for error in errors)
+        _safe_message(message)
+    else:
+        _safe_message(
+            "No visible masks were imported.\n\n{0}".format(
+                "\n".join(errors) if errors else "The selected files produced no foreground labels."
+            )
+        )
+
+
+def _mask_import_monitor_tick(monitor):
+    if monitor.get("busy"):
+        return
+    monitor["busy"] = True
+    try:
+        _mask_import_monitor_tick_locked(monitor)
+    finally:
+        monitor["busy"] = False
+
+
+def _mask_import_monitor_tick_locked(monitor):
+    if time.time() > monitor.get("deadline", 0):
+        monitor.setdefault("errors", []).append("Background mask preparation timed out.")
+        _finish_mask_import(monitor)
+        return
+
+    if monitor.get("pending") is None:
+        result = _read_json(monitor.get("result_path"), None)
+        if result is None or result.get("status") == "running":
+            return
+        if result.get("status") != "ok":
+            monitor.setdefault("errors", []).append(
+                "Mask preparation failed: {0}".format(result.get("error", "unknown error"))
+            )
+            _finish_mask_import(monitor)
+            return
+        monitor["pending"] = list(result.get("masks", []))
+        if not monitor["pending"]:
+            monitor.setdefault("errors", []).append("The selected files produced no labels.")
+            _finish_mask_import(monitor)
+            return
+
+    pending = monitor.get("pending") or []
+    if not pending:
+        _finish_mask_import(monitor)
+        return
+
+    # Apply one mask per GUI timer tick. Reading/resampling stays external and
+    # Mimics can repaint between unavoidable set_voxel_buffer API calls.
+    item = pending.pop(0)
+    monitor["pending"] = pending
+    name = str(item.get("name", "mask") or "mask")
+    foreground = int(item.get("foreground_voxels", 0) or 0)
+    if foreground <= 0:
+        monitor.setdefault("errors", []).append(
+            "Mask '{0}' was empty after spatial alignment and was not created.".format(name)
+        )
+    else:
+        path = item.get("u8_path", "")
+        shape = item.get("mimics_shape") or monitor.get("image_shape")
+        try:
+            _update_gui()
+            mask = _find_or_create_mask(name, monitor.get("active_image"))
+            _inject_buffer(mask, path, shape)
+            mask.visible = True
+            mask.selected = True
+            monitor.setdefault("created_names", []).append(name)
+        except Exception as exc:
+            monitor.setdefault("errors", []).append("Mask '{0}': {1}".format(name, exc))
+        _update_gui()
+
+    if not pending:
+        _finish_mask_import(monitor)
+
+
+def _start_win32_mask_import_monitor(monitor, poll_seconds):
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        TIMERPROC = ctypes.WINFUNCTYPE(
+            None, ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_uint
+        )
+
+        def _timer_proc(hwnd, message, timer_id, tick_count):
+            try:
+                _mask_import_monitor_tick(monitor)
+            except Exception as exc:
+                monitor.setdefault("errors", []).append(
+                    "Mask apply monitor failed: {0}".format(exc)
+                )
+                _finish_mask_import(monitor)
+
+        callback = TIMERPROC(_timer_proc)
+        user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint, TIMERPROC]
+        user32.SetTimer.restype = ctypes.c_size_t
+        user32.KillTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+        timer_id = user32.SetTimer(None, 0, max(100, int(poll_seconds * 1000)), callback)
+        if not timer_id:
+            return False
+        monitor["callback"] = callback
+        monitor["win32_timer"] = (user32, timer_id)
+        _MASK_IMPORT_MONITORS[monitor["monitor_key"]] = monitor
+        return True
+    except Exception:
+        return False
+
+
+def _start_mask_import_monitor(monitor, poll_seconds=0.25):
+    # On Windows, use the native message-loop timer first. Importing a second
+    # Qt binding inside Mimics can itself create a noticeable frozen interval.
+    if _start_win32_mask_import_monitor(monitor, poll_seconds):
+        return True
+    try:
+        from PyQt5.QtCore import QTimer
+        from PyQt5.QtWidgets import QApplication
+        if QApplication.instance() is None:
+            return False
+        timer = QTimer()
+        monitor["timer"] = timer
+        _MASK_IMPORT_MONITORS[monitor["monitor_key"]] = monitor
+        def _tick():
+            try:
+                _mask_import_monitor_tick(monitor)
+            except Exception as exc:
+                monitor.setdefault("errors", []).append(
+                    "Mask apply monitor failed: {0}".format(exc)
+                )
+                _finish_mask_import(monitor)
+        timer.timeout.connect(_tick)
+        monitor["callback"] = _tick
+        timer.start(max(100, int(poll_seconds * 1000)))
+        return True
+    except Exception:
+        return False
+
+
+def _launch_mask_prepare(bridge_params, result_path):
+    _write_json_atomic(result_path, {"status": "running"})
+
+    def _run():
+        try:
+            result = _call_bridge(bridge_params)
+        except Exception as exc:
+            result = {"status": "error", "error": str(exc), "traceback": traceback.format_exc()}
+        try:
+            _write_json_atomic(result_path, result)
+        except Exception:
+            pass
+
+    thread = threading.Thread(target=_run)
+    thread.daemon = True
+    thread.start()
+    return thread
+
+
 def main():
     """Entry point: import mask files into the current Mimics project."""
     # 1. Check that an image is open
@@ -430,99 +639,31 @@ def main():
         "flips": [False, False, False],
     }
 
-    try:
-        bridge_result = _call_bridge(bridge_params)
-    except Exception as exc:
-        mimics.dialogs.message_box(
-            "Mask resampling failed:\n\n{0}".format(exc),
-            title=TITLE,
-            ui_blocking=True,
-        )
+    result_path = os.path.join(work_dir, "bridge_result.json")
+    monitor = {
+        "monitor_key": work_dir,
+        "result_path": result_path,
+        "work_dir": work_dir,
+        "active_image": active_image,
+        "image_shape": image_shape,
+        "pending": None,
+        "created_names": [],
+        "errors": [],
+        "deadline": time.time() + 1800,
+    }
+    if not _start_mask_import_monitor(monitor):
         _cleanup_work_dir(work_dir)
+        _safe_message("This Mimics session cannot monitor background mask preparation.")
         return 1
-
-    mask_results = bridge_result.get("masks", [])
-    if not mask_results:
-        mimics.dialogs.message_box(
-            "No masks were produced from the selected files.",
-            title=TITLE,
-            ui_blocking=True,
-        )
-        _cleanup_work_dir(work_dir)
-        return 1
-
-    # 4. Inject masks into Mimics
-    gui_was_enabled = True
+    _update_gui()
+    _launch_mask_prepare(bridge_params, result_path)
     try:
-        mimics.disable_update_gui()
+        mimics.logging.log_user_message(
+            mimics.logging.Level.INFO,
+            "Mask preparation started in external Python. Mimics remains available.",
+        )
     except Exception:
-        gui_was_enabled = False
-
-    created_names = []
-    errors = []
-    try:
-        for mr in mask_results:
-            name = mr["name"]
-            u8_path = mr.get("u8_path", "")
-            buf_shape = mr.get("mimics_shape", [])
-            if not u8_path or not os.path.isfile(u8_path):
-                errors.append("Mask '{0}': buffer file not found".format(name))
-                continue
-            if buf_shape and image_shape:
-                if [int(v) for v in buf_shape] != image_shape:
-                    errors.append(
-                        "Mask '{0}': shape mismatch (buffer={1}, image={2})".format(
-                            name, buf_shape, image_shape
-                        )
-                    )
-                    continue
-            try:
-                mask = _find_or_create_mask(name, active_image)
-                try:
-                    mask.visible = False
-                except Exception:
-                    pass
-                _inject_buffer(mask, u8_path, buf_shape or image_shape)
-                try:
-                    mask.visible = True
-                    mask.selected = True
-                except Exception:
-                    pass
-                created_names.append(name)
-            except Exception as exc:
-                errors.append("Mask '{0}': {1}".format(name, exc))
-    finally:
-        if gui_was_enabled:
-            try:
-                mimics.enable_update_gui()
-            except Exception:
-                pass
-        try:
-            mimics.update_gui()
-        except Exception:
-            pass
-
-    # 5. Report results
-    _cleanup_work_dir(work_dir)
-
-    if created_names:
-        msg = "Imported {0} mask(s):\n\n{1}".format(
-            len(created_names),
-            "\n".join("  \u2022 " + n for n in created_names),
-        )
-        if errors:
-            msg += "\n\nWarnings:\n" + "\n".join("  \u26A0 " + e for e in errors)
-        mimics.dialogs.message_box(msg, title=TITLE, ui_blocking=True)
-    else:
-        mimics.dialogs.message_box(
-            "No masks were imported.\n\n{0}".format(
-                "\n".join(errors) if errors else "Unknown error."
-            ),
-            title=TITLE,
-            ui_blocking=True,
-        )
-        return 1
-
+        print("Mask preparation started in external Python. Mimics remains available.")
     return 0
 
 

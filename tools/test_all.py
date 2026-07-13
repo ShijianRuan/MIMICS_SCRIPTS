@@ -854,6 +854,33 @@ class TestMimicsBridgeBufferMapping(unittest.TestCase):
         self.assertEqual([4, 3, 2], result["source_image_shape"])
         self.assertTrue(os.path.isdir(result["dicom_folder"]))
 
+    def test_multilabel_mhd_mask_splits_into_visible_nonempty_buffers(self):
+        import SimpleITK as sitk
+        from mimics_bridge import do_prepare_masks_for_grid, get_image_affine, get_image_shape
+
+        mask_path = os.path.join(self.tmp, "organs.mhd")
+        values = np.zeros((2, 3, 4), dtype=np.uint16)
+        values[0, 0:2, 0:2] = 1
+        values[1, 1:3, 2:4] = 2
+        image = sitk.GetImageFromArray(values)
+        image.SetSpacing((0.8, 0.9, 2.5))
+        image.SetOrigin((12.0, -8.0, 30.0))
+        sitk.WriteImage(image, mask_path)
+
+        buffers = os.path.join(self.tmp, "label_buffers")
+        result = do_prepare_masks_for_grid({
+            "masks": [{"name": "organs", "mask_path": mask_path}],
+            "buffers_out": buffers,
+            "target_shape": list(get_image_shape(mask_path)),
+            "target_voxel_to_ras_matrix": get_image_affine(mask_path).tolist(),
+            "axes": [0, 1, 2],
+            "flips": [False, False, False],
+        })
+        self.assertEqual("ok", result["status"])
+        self.assertEqual(["organs_label1", "organs_label2"], [row["name"] for row in result["masks"]])
+        self.assertTrue(all(int(row["foreground_voxels"]) > 0 for row in result["masks"]))
+        self.assertTrue(all(os.path.getsize(row["u8_path"]) == values.size for row in result["masks"]))
+
     def test_mr_mhd_float_intensity_survives_derived_dicom_scaling(self):
         import SimpleITK as sitk
         import pydicom
@@ -2323,6 +2350,52 @@ class TestNewFeatures(unittest.TestCase):
         self.assertNotIn('buttons="Safe Copy;Overwrite Original;Cancel"', source)
         self.assertIn('buttons="Overwrite;Skip Existing;Cancel"', source)
 
+    def test_mask_import_uses_correct_lps_to_ras_world_conversion(self):
+        from mask_import import _derive_mimics_voxel_to_ras_matrix
+
+        class Image:
+            def get_voxel_center(self, index):
+                return [10.0 + index[0], 20.0 + index[1], 30.0 + index[2]]
+
+        matrix = np.asarray(_derive_mimics_voxel_to_ras_matrix(Image(), [2, 2, 2]))
+        expected = np.asarray([
+            [-1.0, 0.0, 0.0, -10.0],
+            [0.0, -1.0, 0.0, -20.0],
+            [0.0, 0.0, 1.0, 30.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ])
+        np.testing.assert_allclose(expected, matrix)
+
+    def test_mask_and_batch_import_defer_expensive_work(self):
+        import inspect
+        import mask_import
+        import mimics_import
+
+        mask_main = inspect.getsource(mask_import.main)
+        self.assertNotIn("_call_bridge(bridge_params)", mask_main)
+        self.assertIn("_launch_mask_prepare(bridge_params, result_path)", mask_main)
+        batch_main = inspect.getsource(mimics_import.main)
+        self.assertIn("_resolve_import_output_dir(ts_root, create=False)", batch_main)
+        discover_monitor = inspect.getsource(mimics_import._start_import_discover_monitor)
+        self.assertLess(
+            discover_monitor.index("_start_win32_discover_monitor"),
+            discover_monitor.index("from PyQt5.QtCore import QTimer"),
+        )
+
+    def test_ai_prediction_output_modes_are_explicit(self):
+        import inspect
+        import fewshot_mimics
+        import nninteractive_mimics
+
+        chooser = inspect.getsource(fewshot_mimics._choose_prediction_target)
+        self.assertIn("Update Selected Mask", chooser)
+        self.assertIn("Create New Editable Mask", chooser)
+        resolver = inspect.getsource(fewshot_mimics._prediction_target_mask)
+        self.assertIn("update_selected", resolver)
+        session_selector = inspect.getsource(nninteractive_mimics._select_session_masks)
+        self.assertIn("Update Selected Mask", session_selector)
+        self.assertIn("Create Editable Copy", session_selector)
+
     # -- mimics_bridge: _mask_buffer_for_target_grid --
     def test_mask_buffer_for_target_grid(self):
         """_mask_buffer_for_target_grid resamples mask to explicit grid."""
@@ -3449,7 +3522,7 @@ class TestNewFeatures(unittest.TestCase):
         old_script = fewshot_mimics._training_setup_ui_script
         old_project = fewshot_mimics._project_root
         try:
-            fewshot_mimics._launch_gui_process = lambda cmd, cwd=None: launched.append((cmd, cwd)) or Proc()
+            fewshot_mimics._launch_gui_process = lambda cmd, cwd=None, **kwargs: launched.append((cmd, cwd)) or Proc()
             fewshot_mimics._start_monitor = lambda monitor, poll_seconds=1.0: True
             fewshot_mimics._project_root = lambda: PROJECT_ROOT
             fewshot_mimics._training_setup_ui_script = lambda: os.path.join(PROJECT_ROOT, "tools", "fewshot_training_setup_ui.py")
@@ -3632,20 +3705,26 @@ class TestNewFeatures(unittest.TestCase):
             json.dump(manifest, handle)
         launched = []
 
-        old_selected = fewshot_mimics._selected_organ
+        old_selected = fewshot_mimics._selected_mask
+        old_target = fewshot_mimics._choose_prediction_target
         old_choose = fewshot_mimics._choose_dataset_root
         old_guard = fewshot_mimics._guard_no_active_job
         old_case = fewshot_mimics._infer_case_id
         old_launch = fewshot_mimics._launch_inference_job
         try:
-            fewshot_mimics._selected_organ = lambda: "liver"
+            selected = type("Mask", (object,), {"name": "liver"})()
+            fewshot_mimics._selected_mask = lambda: selected
+            fewshot_mimics._choose_prediction_target = lambda _mask: {
+                "mode": "create_new", "target_name": "AI_liver"
+            }
             fewshot_mimics._choose_dataset_root = lambda _title: ts_root
             fewshot_mimics._guard_no_active_job = lambda root, requested_kind="train": True
             fewshot_mimics._infer_case_id = lambda root: "s0001"
-            fewshot_mimics._launch_inference_job = lambda config_arg, root, case_id, organ, selected_model=None: launched.append(selected_model) or 0
+            fewshot_mimics._launch_inference_job = lambda config_arg, root, case_id, organ, selected_model=None, target_spec=None: launched.append(selected_model) or 0
             result = fewshot_mimics._start_inference(choose_model=False)
         finally:
-            fewshot_mimics._selected_organ = old_selected
+            fewshot_mimics._selected_mask = old_selected
+            fewshot_mimics._choose_prediction_target = old_target
             fewshot_mimics._choose_dataset_root = old_choose
             fewshot_mimics._guard_no_active_job = old_guard
             fewshot_mimics._infer_case_id = old_case

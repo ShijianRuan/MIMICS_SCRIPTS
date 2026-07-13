@@ -11,7 +11,8 @@ The annotator workflow is:
 3. Select a Mask named as the target organ.
 4. Start background training.
 5. Open another saved `.mcs`, select the same organ Mask, and run prediction.
-6. Review the generated `AI_<organ>` Mask and edit it as needed.
+6. Choose whether to update the selected Mask or create a new editable result,
+   then review and refine it manually or with nnInteractive.
 
 ## Annotator Experience
 
@@ -155,9 +156,12 @@ The Mimics entry reads the currently selected Mask name and uses it as the organ
 Recommended convention:
 
 - manual annotation Mask: `liver`, `kidney_left`, `tumor`, etc.;
-- AI result Mask: `AI_liver`, `AI_kidney_left`, `AI_tumor`.
+- optional new AI result Mask: `AI_liver`, `AI_kidney_left`, `AI_tumor`.
 
-Training and inference use the selected manual organ name. The prediction result is written to `AI_<organ>` so manual labels are not overwritten.
+Training and inference use the selected manual organ name. Before prediction,
+the annotator chooses whether the result updates that Mask or creates a unique
+`AI_<organ>` Mask. If the selected Mask changes while inference is running, the
+manual edits are preserved and the result is redirected to a new Mask.
 
 ## Sample Selection
 
@@ -342,7 +346,8 @@ Prediction flow:
 4. External Python writes a prediction NIfTI.
 5. Mimics detects completion through a timer.
 6. `mimics_bridge.py mask_to_buffer` converts the NIfTI result to the launch-time Mimics image grid and buffer order.
-7. Mimics creates or updates `AI_<organ>`.
+7. Mimics updates the launch-time selected Mask or creates a unique
+   `AI_<organ>`, according to the choice made before inference.
 
 `Predict Current Case` uses the latest local model for the active Mask name. `Predict With Model...` lets the annotator select a specific run or reusable model before inference.
 
