@@ -87,12 +87,13 @@ Select the dataset root. For each converted `.mcs`:
 ## 1A. Export Destination Safety
 
 1. Save one project containing at least two visible or hidden Masks.
-2. Run `03_Export_Masks`, choose `Safe Copy`, and select an empty directory.
+2. Run `03_Export_Masks`, select the source case directory, and select an empty
+   destination root.
 3. Confirm every Mask appears under `<chosen>/<case>/segmentations`.
-4. Modify one exported file and run Safe Copy again. Confirm it is reported as
-   `skipped_existing` and is not replaced.
-5. Run again with `Overwrite Original` and confirm only then that source
-   `<case>/segmentations` files are updated.
+4. Modify one exported file and run export to the same destination again.
+   Confirm the conflict prompt appears. Choose `Skip Existing` and verify the
+   modified file is reported as `skipped_existing` and is not replaced.
+5. Run again, choose `Overwrite`, and confirm the conflicting file is updated.
 
 External safe batch export:
 

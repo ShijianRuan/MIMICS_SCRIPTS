@@ -670,6 +670,33 @@ def _canonical_mask_name(name):
     return text.strip("_")
 
 
+def _current_mask_names():
+    """Return mask names without reading their potentially large voxel buffers."""
+    names = []
+    try:
+        masks = mimics.data.masks
+    except Exception:
+        return names
+    for a_mask in masks:
+        name = str(getattr(a_mask, "name", "") or "").strip()
+        if name:
+            names.append(name)
+    return names
+
+
+def _existing_mask_exports(label_output_root, case_id, mask_names):
+    """Return output files that would collide with masks in the open project."""
+    segmentations_dir = os.path.join(
+        os.path.abspath(label_output_root), str(case_id), "segmentations"
+    )
+    collisions = []
+    for name in mask_names or []:
+        path = os.path.join(segmentations_dir, str(name) + ".nii.gz")
+        if os.path.isfile(path):
+            collisions.append(path)
+    return segmentations_dir, collisions
+
+
 def _get_voxel_buffer_bytes(mask):
     """Get mask voxel buffer as raw bytes, handling various return types."""
     buf = mask.get_voxel_buffer()
@@ -1321,24 +1348,31 @@ def main():
             )
             return 1
         if not label_output_root and not overwrite_existing:
-            destination = mimics.dialogs.question_box(
-                title="Export Masks",
-                message=(
-                    "Export all masks from the saved project.\n\n"
-                    "Safe Copy writes to a folder you select and preserves existing files.\n"
-                    "Overwrite Original updates <case>/segmentations in place."
-                ),
-                buttons="Safe Copy;Overwrite Original;Cancel",
-                ui_blocking=True,
-            )
-            if destination == "Safe Copy":
-                label_output_root = _pick_directory("Select mask export destination")
-                if not label_output_root:
-                    return 1
-            elif destination == "Overwrite Original":
-                overwrite_existing = True
-            else:
+            label_output_root = _pick_directory("Select mask export destination root")
+            if not label_output_root:
                 return 1
+            segmentations_dir, collisions = _existing_mask_exports(
+                label_output_root, case_id, _current_mask_names()
+            )
+            if collisions:
+                preview = "\n".join(os.path.basename(path) for path in collisions[:8])
+                if len(collisions) > 8:
+                    preview += "\n... and {0} more".format(len(collisions) - 8)
+                decision = mimics.dialogs.question_box(
+                    title="Existing Mask Files",
+                    message=(
+                        "{0} mask file(s) already exist in:\n{1}\n\n{2}\n\n"
+                        "Overwrite replaces conflicting files. Skip Existing preserves them."
+                    ).format(len(collisions), segmentations_dir, preview),
+                    buttons="Overwrite;Skip Existing;Cancel",
+                    ui_blocking=True,
+                )
+                if decision == "Overwrite":
+                    overwrite_existing = True
+                elif decision == "Skip Existing":
+                    overwrite_existing = False
+                else:
+                    return 1
         process = _launch_background_batch_export(
             ts_root, set([case_id]), axes, flips,
             label_output_root=label_output_root,

@@ -2303,6 +2303,26 @@ class TestNewFeatures(unittest.TestCase):
     def tearDown(self):
         _cleanup(self.tmp)
 
+    def test_mask_export_checks_only_actual_destination_conflicts(self):
+        """Interactive export should prompt only for files that already exist."""
+        from mimics_export import _existing_mask_exports
+
+        target = os.path.join(self.tmp, "s0001", "segmentations")
+        os.makedirs(target)
+        existing = os.path.join(target, "liver.nii.gz")
+        with open(existing, "wb") as stream:
+            stream.write(b"existing")
+
+        segmentations_dir, collisions = _existing_mask_exports(
+            self.tmp, "s0001", ["liver", "spleen"]
+        )
+        self.assertEqual(target, segmentations_dir)
+        self.assertEqual([existing], collisions)
+
+        source = Path(RUNTIME_DIR, "mimics_export.py").read_text(encoding="utf-8")
+        self.assertNotIn('buttons="Safe Copy;Overwrite Original;Cancel"', source)
+        self.assertIn('buttons="Overwrite;Skip Existing;Cancel"', source)
+
     # -- mimics_bridge: _mask_buffer_for_target_grid --
     def test_mask_buffer_for_target_grid(self):
         """_mask_buffer_for_target_grid resamples mask to explicit grid."""

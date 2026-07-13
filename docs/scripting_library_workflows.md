@@ -22,11 +22,12 @@ or a folder containing a DICOM series directly. Header inspection and
 conversion run in the external bridge process.
 
 `03 Export Masks` exports every Mask in the saved project, including hidden
-Masks. `Safe Copy` writes `<chosen root>/<case>/segmentations/*.nii.gz` and
-does not replace existing files. `Overwrite Original` is the explicit action
-that updates `<dataset>/<case>/segmentations`. External batch export uses
-`tools/mimics_batch_cli.py export-labels` and requires the same explicit choice
-through either `--output-dir` or `--overwrite-source`.
+Masks. Select the source case directory and then the destination root. Output
+is written to `<chosen root>/<case>/segmentations/*.nii.gz`. Export starts
+immediately when there are no filename conflicts; otherwise Mimics asks whether
+to overwrite, skip existing files, or cancel. External batch export uses
+`tools/mimics_batch_cli.py export-labels` and requires an explicit destination
+policy through either `--output-dir` or `--overwrite-source`.
 
 ### 02 AI
 
