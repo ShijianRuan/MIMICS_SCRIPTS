@@ -4,6 +4,7 @@
 - **状态**: 设计待评审
 - **作者**: Claude (与 ShijianRuan 协作 brainstorming)
 - **目标**: 在 Mimics 脚本库中集成一个"识别疑难/苦难/不确定病例"的主动学习模块，按难度对一批 case 排序，让人优先复查/标注最难的例，从而减少标注工作量。
+- **参考**: 调研与最佳实践见 `docs/active_learning_research_and_best_practices.md`
 
 ---
 
@@ -59,6 +60,8 @@ POST /activelearning/{strategy} → 同步读分 → 降序取 Top-N → 盖 ser
 3. `external/dinov3-medical-seg/src/models/decoder_3d.py` 的四个解码器（Linear/MLPProbe/SegFormer3D/TokenPyramid3D）**均无 `nn.Dropout` 层**（只有 GroupNorm/ReLU/GELU）；`dropout` 仅出现在 LoRA/adapter 且默认 0.0，backbone 在 frozen/lora 下冻结。**→ MC-Dropout 在 DINOv3 上开箱不可用**。
 4. `src/inference.py` 的 `_predict_with_tta`（line 69-80）**已经在跑 TTA**，但 `torch.stack(...).mean(dim=0)` 后把方差丢弃了 → TTA-VVC 几乎零成本可得。
 5. 现有三层架构 + 文件通信 + 外部 UI + JSON 轮询范式（见 §2）。
+
+> **⚠️ 效能边界与先决验证实验**：主动学习并非在所有条件下都有效。在编写任何 pipeline/UI 代码前，**必须**先完成 Phase 1 的最小可行验证实验（对 20–50 例有 GT 的 case 测量 Spearman ρ 和 failure-detection AUROC）。如果 ρ < 0.2 或模型 Dice < 0.4，不确定性信号就是噪声——此时应退化到纯几何启发式或放弃 AL 路径。详见详解见 §3.4–§3.5、完整文献依据见 `docs/active_learning_research_and_best_practices.md`。
 
 ---
 
@@ -369,12 +372,42 @@ PySide6 外部进程（Tkinter 回退），仿 `fewshot_status_viewer.py`：
 
 | 风险 | 缓解 |
 |---|---|
-| `monai` core 离线打包体积大（拖 torch 生态） | 只进 Tier2/3 的 py3.10 env，不进 Mimics Py3.5；Phase 1-2 不依赖 monai，可先交付 DINOv3 TTA 路径 |
-| Model Zoo bundle 的类别/解剖与用户数据不匹配 | bundle 起步仅用于跑通链路 + 演示；Phase 5 自训接口对齐用户器官 |
-| MC-Dropout 在无 dropout 训练的网上失校准 | 硬门控 `supports_dropout`；DINOv3 后端直接禁用 Epistemic，返回 `unavailable` 而非假分数 |
-| OOD/不确定性分数与真实退化不相关（Vasiliuk 2023） | 多信号 RRF 融合而非单信号；Phase 5 用 AUROC/Spearman 在验证集上校验 |
-| GPU 批量打分耗时长 | 复用 `acquire_gpu_lock_for_job` 串行 + 进度条；单 case 打分 = N passes，可配置 `tta_samples` |
-| 与现有 `fewshot_strategies.py` 命名混淆 | 新模块统一 `hardcase_*` 前缀 |
+| **模型太弱 → 不确定性 = 噪声**（AL 文献一致发现：Dice < ~0.4-0.5 时不确定性无信息量 [Ma 2024; COLosSAL 2023]） | **硬门控**：若模型 Dice < 0.4 或 Spearman ρ < 0.2 → `ScoringMethod` 返回 `"unavailable_model_weak"`，系统自动退化到纯几何启发式。门控必须在 Phase 1 实验中校验 |
+| **随机选样是极难击败的基线**（5+ 独立论文同意：大多数 AL 方法未一致优于 random） | 本模块是 **Failure Detection**（排名）而非经典 AL loop（选样→重训），对"比 random 好"的要求相对宽松；但 Phase 1 仍必须有 ρ > 0.2 |
+| **纯不确定性导致冗余选择**（连续切片内不确定性高度相关） | 批量分诊场景：整池排序，不去重——单 case 复查队列天然化解切片冗余（每个 case 一条） |
+| `monai` core 离线打包体积大（拖 torch 生态） | 只进 Tier2/3 的 py3.10 env，不进 Mimics Py3.5；Phase 1-3 不依赖 monai，nnU-Net 后端用已有环境 |
+| MC-Dropout 在无 dropout 训练的网上失校准 | 硬门控 `supports_dropout`；DINOv3 后端禁用 Epistemic，返回 `"unavailable_no_dropout"` |
+| OOD/不确定性分数与真实退化不相关（Vasiliuk 2023） | Phase 1 强制验证 Spearman ρ / AUROC；ρ < 0.2 → 弃用该信号 |
+| 单模型不确定性不如集成强壮（文献一致结论） | TTA-VVC 是单模型下最强信号；如有 5 折 → 优先用集成熵/MI |
+| GPU 批量打分耗时长 | 复用 `acquire_gpu_lock_for_job` 串行 + 进度条；`tta_samples` 可配置 |
+| 与现有 `fewshot_strategies.py`（训练预设）命名混淆 | 新模块统一 `hardcase_*` 前缀 |
+
+### 8.1 最小质量门槛与退化路径
+
+系统强制实现三级退化路径（`ScoringMethod.__call__` 返回值中的 `status` 字段驱动）：
+
+```
+Level 0（✅ 全信号可用）：模型 Dice > 0.5 或 Spearman ρ > 0.3
+  → TTA-VVC + 边界熵 + 几何启发式 → RRF 融合
+
+Level 1（◐ 退化 — TTA 关或不确定无信息量）：ρ < 0.2 或 TTA 不可用
+  → 仅单次前向熵（如果有） + 几何启发式 → RRF 融合
+  → status: "degraded_uncertainty_noisy"
+
+Level 2（❌ 不可用 — 模型太弱）：Dice < 0.4 且无改善前景
+  → 仅几何启发式
+  → status: "unavailable_model_weak"
+
+Level 3（❌❌ AL 完全不可用）：候选池 < 20 例或无模型
+  → 不启动模块。返回明确错误信息。
+  → status: "unavailable_insufficient_data"
+```
+
+**关于"AL 不可用时应考虑的其他方法"**：当不确定性信号无信息量时，以下替代方案可作为备选：
+- 纯几何启发式（已在所有 Level 默认运行）
+- RCA（Reverse Classification Accuracy）预测 per-case Dice——需要小 GT 参考库，但更可靠
+- 学习式 QA 网预测分割质量——需要一次性训练，但对新 case 推理极快
+- 放弃自动化 → 人力全 review——在数据/模型条件不足时，这是负责任的工程判断
 
 ---
 
