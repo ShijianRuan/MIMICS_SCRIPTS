@@ -108,13 +108,43 @@ POST /activelearning/{strategy} → 同步读分 → 降序取 Top-N → 盖 ser
 | 决策 | 选择 | 理由 |
 |---|---|---|
 | 架构 | **A：Scoring/Strategy 双抽象跨三层** | 最忠实 MONAI；重算(Tier3)/可测排序(Tier2)/轮询 UI 干净解耦；可重排序而不重打分 |
-| 与 MONAI 一致的层次 | **移植 AL 契约（接口签名+语义+数据流），不引 `monailabel` 整包** | `monailabel` 是 FastAPI server app，会拖 fastapi/uvicorn/pydantic/pynetdicom 全家桶，离线打包沉重、CI 无法测。契约就那几十行，移植后语义收益全拿到，且能进现有测试。逃生舱：接口同名，将来可平滑迁到整包 |
+| 与 MONAI 一致的层次 | **Vendor MONAI 的 AL ABC 文件（①b），不依赖 `monailabel` 整包** | 详见 §3.3 的数据支撑取舍。逐字拷入 `scoring.py`/`strategy.py`（Apache-2.0，保留 license 头），Datastore 只留需要的 3 方法 → 安装零负担 + 字面同一份类定义（忠实度最高） |
 | 打分算法库 | **引入 `monai` core**（DynUNet/UNETR/sliding_window_inference/transforms） | 相对独立的算法依赖，只进 Tier 2/3 的 py3.10 打分 env，不进 Mimics Py3.5 |
 | 主打分后端 | **带 dropout 的 MONAI 网络** | 让 MONAI 旗舰 Epistemic MC-Dropout 开箱即用；不绑 DINOv3 |
 | DINOv3 地位 | **降为可选的 TTA-only 后端** | 其解码器无 dropout（已验证），MC-Dropout 不可用；但 TTA-VVC 可复用 `_predict_with_tta` |
 | 网络来源 | **MONAI Model Zoo 预训练 bundle 起步 + 预留自训接口** | 最快跑通全链路，无需自己训练；两条路走同一可插拔后端接口 |
 | 融合 | **RRF rank fusion 默认** | 免调、抗重尾；攒够 30-50 标签后可切 logistic 加权 |
 | 几何启发式 | **纳入为默认信号之一** | 零概率成本，抓"自信但全错"的粗失败（概率分数盲区） |
+
+### 3.3 "是否引入 monailabel 整包"的数据支撑裁决
+
+用户明确要求权衡**整包安装难度**与**不引整包的开发难度**两端。以下基于对 `Project-MONAI/MONAILabel@main` 真实源码的核实（非推测）。
+
+**先纠正一个此前的错误论断**：之前称"import monailabel 的接口会连带拖入 fastapi"——**这是错的，已核实并收回**。真实 import 链是干净的：`monailabel/__init__.py` 只 import `os,sys,._version`；`interfaces/__init__.py` 与 `interfaces/tasks/__init__.py` 是**空文件**（仅 license）；`scoring.py`/`strategy.py` 只 `from abc import ...` + `from monailabel.interfaces.datastore import Datastore`；`datastore.py` 只依赖 `abc,enum,typing`（纯标准库）。运行时导入这几个 ABC **不会**引入 server 世界。
+
+真正的成本在两处，各有硬数据：
+
+**① 安装难度**（`monailabel/requirements.txt` 实测）：`pip install monailabel` 会拉入 `fastapi==0.110.2`、`uvicorn`、`pydantic`、`pynetdicom==2.0.2`、`dicomweb-client[gcp]`、`highdicom`、`girder-client`、`google-auth`、`passlib/pyjwt/bcrypt`，以及两个离线杀手：`SAM-2 @ git+https://github.com/facebookresearch/sam2.git@...`（**直接从 GitHub 装**，离线不可得）和 `numpymaxflow==0.0.7`/`ninja==1.11.1.1`（**需现场 C++ 编译**）。对本项目的离线 win/py3.10 可移植部署（`setup_offline.bat`+`wheels/`）是真实重障碍。
+
+**② 开发难度**（真实 ABC 体量）：
+
+| ABC | 抽象方法数 | 继承成本 |
+|---|---|---|
+| `ScoringMethod` | 1（`__call__`）+ `__init__`/`info` | 极低（~20 行） |
+| `Strategy` | 1（`__call__`）+ `__init__`/`info` | 极低（~20 行） |
+| **`Datastore`** | **20 个**（name/datalist/get_image/add_image/save_label/remove_label/status/json/refresh/get_dataset_archive…） | **很高**——继承即须实现全部 20 个（或遍地 `NotImplementedError`），而本模块只需 `get_unlabeled_images`/`get_image_info`/`update_image_info` 三个 |
+
+反直觉结论：**继承 monailabel 的 `Datastore` ABC 反而比自写 3 方法的文件版 store 更费事更丑**；整包能省的只是 `ScoringMethod`/`Strategy` 那 ~40 行 trivial 样板。且**三个 scoring 实现（Epistemic/TTA/Heuristic）无论哪条路都得自己写**——monailabel 的 `EpistemicScoring` 深度绑其 `InferTask`/`network`/`model_ts`，无法整段复用，"引整包省开发量"的收益极小。
+
+**三方对比**：
+
+| 路径 | 安装难度 | 开发难度 | MONAI 忠实度 |
+|---|---|---|---|
+| ① 自定义同签 ABC | ✅ 零新增（只需 `monai` core） | ✅ 低：ABC 样板 ~40 行 | 语义/签名/info-tag 一致 |
+| **①b Vendor 那几个文件（选定）** | ✅ 零新增 | ✅ 最低：类定义逐字相同，datastore 只留 3 方法 | **最高**（字面同一份类定义） |
+| ② 依赖 monailabel 整包 | ❌ 高：SAM-2 走 git、numpymaxflow/ninja 需编译 | ◐ 省 40 行样板，却被迫实现 20 方法 Datastore ABC + 绑其版本 | 最高但代价失衡 |
+
+**裁决：①b**。在 `external/dinov3-medical-seg/src/active_learning/_monai_contract.py`（或分 `scoring.py`/`strategy.py`）中**逐字 vendor** MONAI 的 `ScoringMethod`/`Strategy` 类定义（Apache-2.0，保留原始 license 头 + 来源 URL 注释）；`FileScoreStore` 实现精简版 `Datastore` 契约的 3 个方法。安装侧只依赖 `monai` core（网络本就需要），离线打包零新增负担；忠实度上就是 MONAI 的同一份类定义。逃生舱：类同名同签，将来若要迁到整包，实现类几乎可直接搬。
 
 ---
 
@@ -150,20 +180,32 @@ class ScoringBackend(Protocol):
 
 后端选择由打分请求的 `backend` 字段决定，工厂在 `backend.py::create_backend(spec)`。
 
-#### 4.1.2 `scoring.py` — 镜像 MONAI 的 ScoringMethod
+#### 4.1.2 `_monai_contract.py` — Vendor 的 MONAI ABC（逐字拷贝）
+
+**逐字 vendor** MONAI 的两个基类（Apache-2.0，保留原 license 头 + 来源 URL 注释）——签名与 MONAI **完全一致**（`__call__(self, request, datastore)`）：
 
 ```python
-class ScoringMethod(ABC):
-    """镜像 monailabel.interfaces.tasks.scoring.ScoringMethod 的契约。"""
+# Vendored verbatim from Project-MONAI/MONAILabel@main (Apache-2.0):
+#   monailabel/interfaces/tasks/scoring.py, .../strategy.py
+class ScoringMethod(metaclass=ABCMeta):
     def __init__(self, description): self.description = description
     def info(self): return {"description": self.description}
     @abstractmethod
-    def __call__(self, request: dict, backend: ScoringBackend) -> dict:
-        """返回 {info_tag_key: value, ...}，供 Datastore 写回。"""
+    def __call__(self, request, datastore):  # datastore = FileScoreStore
+        pass
+
+class Strategy(metaclass=ABCMeta):
+    def __init__(self, description): self.description = description
+    def info(self): return {"description": self.description}
+    @abstractmethod
+    def __call__(self, request, datastore):
+        pass
 ```
 
-三个具体 scoring（info-tag 键与 MONAI 一致）：
-- `EpistemicScoring` → `{"epistemic_entropy": float}`。N 次 dropout 前向，逐体素 `H[\bar p]`，`nanmean`。仅当 `backend.supports_dropout`；否则返回 `{"epistemic_entropy": None, "epistemic_status": "unavailable_no_dropout"}`。
+**后端如何进入 scoring**（保持签名忠实的同时接入可插拔后端）：`ScoringBackend` 通过 `request["backend"]`（工厂在 scoring 内部 `create_backend(request["backend"])`）传入，**不改 `__call__` 签名**。这与 MONAI 一致——MONAI 的 scoring 也是从 `request` 取 `model`/`network` 名再自行加载。
+
+三个具体 scoring（继承上面 vendored `ScoringMethod`，info-tag 键与 MONAI 一致）：
+- `EpistemicScoring` → `{"epistemic_entropy": float}`。N 次 dropout 前向，逐体素 `H[\bar p]`，`nanmean`。仅当后端 `supports_dropout`；否则返回 `{"epistemic_entropy": None, "epistemic_status": "unavailable_no_dropout"}`。
 - `TTAScoring` → `{"tta_vvc": float}`。复用 TTA 整叠，Welford 在线累加算 $\sigma/\mu$（VVC 标量）+ 前景/边界 `H(\bar p)`（`tta_boundary_entropy`）。
 - `HeuristicScoring` → `{"n_components": int, "frag_ratio": float, "border_frac": float, "vol_zscore": float, "empty_flag": bool}`。纯 numpy/scipy，从二值掩码算，**无需概率、无需 torch**（可无 GPU 单测）。
 
@@ -193,32 +235,31 @@ class ScoringMethod(ABC):
 
 #### 4.2.2 Datastore 抽象（轻量文件版）
 
-**新文件** `tools/hardcase_datastore.py`：镜像 MONAI `Datastore` 的相关方法子集，但落地为文件：
+**新文件** `tools/hardcase_datastore.py`：实现 §4.1.2 vendored `Datastore` 契约中本模块**实际用到的 3 个方法**（其余 17 个抽象方法不继承 vendored `Datastore` ABC，而是自定义一个精简协议 `ScoreStore`，避免被迫实现 add_image/save_label/json 等无关方法——这正是 §3.3 裁决"不继承 20 方法 ABC"的落地）：
 ```python
-class FileScoreStore:
+class FileScoreStore:  # 实现精简 ScoreStore 协议（get_unlabeled_images/get_image_info/update_image_info）
     def get_unlabeled_images(self) -> list[str]      # discover 出、无 final 掩码的 case
     def get_image_info(self, case_id) -> dict         # 读 scores/<organ>/<case>.json
     def update_image_info(self, case_id, info: dict)  # 原子合并写回（write_json_atomic）
 ```
-标注状态：case 目录下是否存在人工核准掩码（`final` tag 语义）→ 决定是否在未标注池。**复用** `runtime_common.write_json_atomic` 语义（Tier2 版）。
+方法名与 MONAI `Datastore` **逐字一致**（`get_unlabeled_images`/`get_image_info`/`update_image_info`），语义一致。标注状态：case 目录下是否存在人工核准掩码（`final` tag 语义）→ 决定是否在未标注池。**复用** `runtime_common.write_json_atomic` 语义（Tier2 版）。
 
-#### 4.2.3 `tools/hardcase_ranking.py` — 镜像 MONAI 的 Strategy（纯 Python，核心可测层）
+#### 4.2.3 `tools/hardcase_ranking.py` — 具体 Strategy（纯 Python，核心可测层）
+
+继承 §4.1.2 vendored `Strategy`（**不重新定义 ABC**），签名与 MONAI 一致 `__call__(self, request, datastore)`（`datastore` 传 `FileScoreStore`）：
 
 ```python
-class Strategy(ABC):
-    def __init__(self, description): ...
-    def info(self): ...
-    @abstractmethod
-    def __call__(self, request: dict, store: FileScoreStore) -> dict | None:
-        """返回 {"id": case_id, ...额外分数字段}，无候选返回 None。"""
+from active_learning._monai_contract import Strategy  # vendored MONAI ABC
 
 class RankFusionStrategy(Strategy):
     """读所有 case 的 info-tag 分数 → robust z-score/RRF 融合 → 降序。
+    返回 {"id": case_id, ...}，无候选返回 None（MONAI 契约）。
     去优先化近期已 serve（serve 时间戳，仿 MONAI）。"""
 
 class SingleSignalStrategy(Strategy):
     """key='epistemic_entropy' 或 'tta_vvc'，降序取 Top-N。等价 MONAI Epistemic/TTA 策略。"""
 ```
+（注：批量分诊场景下，队列 = 对候选池按分数排序的**完整有序列表**；MONAI 的 `__call__` 返回单个 `{"id":...}` 是"取下一例"语义，本模块额外提供 `rank_all(request, store) -> list` 产出整条队列供面板展示，二者共用同一融合逻辑。）
 
 **融合算法**（可脱离 torch/mimics 单测）：
 - **RRF**（默认）：$\text{RRF}(c)=\sum_j w_j/(k+r_j(c))$，$k\approx60$，$r_j$=信号 $j$ 上的排名。
@@ -340,13 +381,15 @@ PySide6 外部进程（Tkinter 回退），仿 `fewshot_status_viewer.py`：
 ## 9. 交付物清单
 
 **新增文件**：
+- `external/dinov3-medical-seg/src/active_learning/_monai_contract.py`（**vendored** MONAI `ScoringMethod`/`Strategy` ABC，Apache-2.0 license 头 + 来源 URL）
 - `external/dinov3-medical-seg/src/active_learning/{__init__,backend,scoring}.py`
 - `external/dinov3-medical-seg/src/active_learning/backends/{monai_bundle_backend,dinov3_backend}.py`
 - `external/dinov3-medical-seg/scripts/score_case.py`
 - `external/dinov3-medical-seg/tests/test_active_learning.py`
-- `tools/hardcase_datastore.py`、`tools/hardcase_ranking.py`、`tools/hardcase_review_panel.py`
+- `tools/hardcase_datastore.py`（`FileScoreStore` + 精简 `ScoreStore` 协议）、`tools/hardcase_ranking.py`、`tools/hardcase_review_panel.py`
 - `hardcase_config.json`
 - `docs/hardcase_active_learning.md`（用户文档）
+- `NOTICE` / 第三方许可声明更新（记录 vendored MONAI 文件的 Apache-2.0 归属）
 
 **修改文件**：
 - `tools/fewshot_pipeline.py`（+`cmd_score_batch` + subparser）
