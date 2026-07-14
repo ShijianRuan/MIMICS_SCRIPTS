@@ -16,6 +16,7 @@
 3. `03 Export Masks`
 4. `04 Stop Import Queue`
 5. `05 Import Masks`
+6. `06 Stop Mask Export`
 
 `02 Import Single Case` accepts a single `.nii`, `.nii.gz`, `.mha`, `.mhd`, or
 `.nrrd` volume, a TotalSegmentator-style case folder, a `dicom/` case folder,
@@ -47,6 +48,12 @@ a user-configurable data path.
 `mimics_output_dir` never redirects exported labels. External batch export uses
 `tools/mimics_batch_cli.py export-labels` and requires an explicit destination
 policy through either `--output-dir` or `--overwrite-source`.
+
+`06 Stop Mask Export` targets only a Mimics-Script background process whose
+resource lock identifies it as label export. It first writes an export stop
+marker so no additional case is opened, then terminates the recorded process
+tree only when its command line matches the export runner. It does not stop an
+import queue, DINOv3, nnInteractive, foreground Mimics, or unrelated processes.
 
 ### 02 AI
 
@@ -115,7 +122,7 @@ Import does not block DINOv3 computation by design. Only the label-export stage 
 | --- | --- | --- | --- | --- |
 | Dataset scan or image preparation | Review, window controls, nnInteractive, DINOv3 inference on prepared data | Another import of the same queue | `01 Data/04 Stop Import Queue` | `99 Admin/03 Stop All Owned Services` |
 | Background `.mcs` creation | Review and GPU AI work | Mask export or fresh DINOv3 label export | `01 Data/04 Stop Import Queue` | `99 Admin/03 Stop All Owned Services` |
-| Mask export | Review and GPU AI work | Import `.mcs` creation or another label export | `99 Admin/03 Stop All Owned Services` | Same entry; it targets project-owned processes only |
+| Mask export | Review and GPU AI work | Import `.mcs` creation or another label export | `01 Data/06 Stop Mask Export` | `99 Admin/03 Stop All Owned Services` |
 | nnInteractive active prediction | Review and data preparation | DINOv3 GPU execution | Finish or cancel the current nnInteractive session | `99 Admin/03 Stop All Owned Services` |
 | nnInteractive idle image worker | All review and data work | Nothing; DINOv3 requests a graceful GPU release | Worker exits on idle timeout | `99 Admin/03 Stop All Owned Services` |
 | DINOv3 training or prediction | Review, import preparation, status viewer | Another DINOv3 task for the same dataset; nnInteractive GPU execution | `02 AI/DINOv3/05 Stop AI Task` | `99 Admin/03 Stop All Owned Services` |

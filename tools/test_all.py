@@ -1684,6 +1684,58 @@ class TestStopBackgroundServices(unittest.TestCase):
         for marker in required:
             self.assertIn(marker, MARKERS, "{0} must be in MARKERS".format(marker))
 
+    def test_mask_export_has_a_scoped_stop_entry_and_marker(self):
+        import mimics_stop_background as msb
+        import runtime_common
+
+        export_root = os.path.join(self.tmp, "exports")
+        runtime_dir = os.path.join(self.tmp, "runtime")
+        os.makedirs(export_root)
+        os.makedirs(runtime_dir)
+        lock_path = os.path.join(self.tmp, "background_mimics.lock")
+        runtime_common.write_json_atomic(lock_path, {
+            "pid": os.getpid(),
+            "kind": "export_labels",
+            "owner": "batch label export",
+            "export_root": export_root,
+        })
+        old_lock = msb._background_mimics_lock_path
+        old_runtime = msb._runtime_dir
+        old_stop = msb._stop_export_inprocess_monitors
+        try:
+            msb._background_mimics_lock_path = lambda: lock_path
+            msb._runtime_dir = lambda: runtime_dir
+            msb._stop_export_inprocess_monitors = lambda: 0
+            result = msb.stop_background_export()
+        finally:
+            msb._background_mimics_lock_path = old_lock
+            msb._runtime_dir = old_runtime
+            msb._stop_export_inprocess_monitors = old_stop
+        self.assertEqual(os.getpid(), result.get("target_pid"))
+        self.assertTrue(os.path.isfile(os.path.join(export_root, "_export_stop.json")))
+        entry = os.path.join(PROJECT_ROOT, "scripting_library", "01_Data", "06_Stop_Mask_Export.py")
+        self.assertTrue(os.path.isfile(entry))
+        self.assertIn("main_stop_export", Path(entry).read_text(encoding="utf-8"))
+
+    def test_import_launch_directory_failure_is_reported_without_timeout(self):
+        import mimics_import
+
+        job_dir = os.path.join(self.tmp, "unwritable", "job")
+        old_makedirs = mimics_import.os.makedirs
+        try:
+            def fail_makedirs(_path):
+                raise OSError("access denied")
+            mimics_import.os.makedirs = fail_makedirs
+            thread = mimics_import._launch_bridge_job_thread(
+                {"action": "discover"}, job_dir, os.path.dirname(job_dir), "discovering"
+            )
+            thread.join(2.0)
+        finally:
+            mimics_import.os.makedirs = old_makedirs
+        status, error = mimics_import._check_job_status(job_dir)
+        self.assertEqual("error", status)
+        self.assertIn("access denied", error)
+
     def test_stop_all_detaches_mimics_monitors_before_process_cleanup(self):
         import inspect
         import mimics_stop_background
@@ -2395,28 +2447,35 @@ class TestNewFeatures(unittest.TestCase):
     def tearDown(self):
         _cleanup(self.tmp)
 
-    def test_mask_export_checks_only_actual_destination_conflicts(self):
-        """Conflict detection remains exact and policy is selected externally."""
-        from mimics_export import _existing_mask_exports
-
-        target = os.path.join(self.tmp, "s0001", "segmentations")
-        os.makedirs(target)
-        existing = os.path.join(target, "liver.nii.gz")
-        with open(existing, "wb") as stream:
-            stream.write(b"existing")
-
-        segmentations_dir, collisions = _existing_mask_exports(
-            self.tmp, "s0001", ["liver", "spleen"]
-        )
-        self.assertEqual(target, segmentations_dir)
-        self.assertEqual([existing], collisions)
-
+    def test_mask_export_conflict_policy_is_external_and_reaches_bridge(self):
+        """The external choice, not a dead preflight helper, controls writes."""
         source = Path(RUNTIME_DIR, "mimics_export.py").read_text(encoding="utf-8")
         self.assertNotIn('buttons="Safe Copy;Overwrite Original;Cancel"', source)
         self.assertNotIn('buttons="Overwrite;Skip Existing;Cancel"', source)
+        self.assertIn('bridge_params["overwrite_existing"] = bool(overwrite_existing)', source)
         ui_source = Path(PROJECT_ROOT, "tools", "io_path_setup_ui.py").read_text(encoding="utf-8")
         self.assertIn('QRadioButton("Skip existing")', ui_source)
         self.assertIn('QRadioButton("Overwrite existing")', ui_source)
+        self.assertIn("tempfile.mkstemp", ui_source)
+
+    def test_export_launcher_thread_registry_is_pruned(self):
+        import mimics_export
+
+        class ThreadStub(object):
+            def __init__(self, alive):
+                self.alive = alive
+            def is_alive(self):
+                return self.alive
+
+        live = ThreadStub(True)
+        done = ThreadStub(False)
+        previous = list(mimics_export._EXPORT_LAUNCH_THREADS)
+        try:
+            mimics_export._EXPORT_LAUNCH_THREADS[:] = [done, live]
+            mimics_export._prune_export_launch_threads()
+            self.assertEqual([live], mimics_export._EXPORT_LAUNCH_THREADS)
+        finally:
+            mimics_export._EXPORT_LAUNCH_THREADS[:] = previous
 
     def test_mask_import_uses_correct_lps_to_ras_world_conversion(self):
         from mask_import import _derive_mimics_voxel_to_ras_matrix

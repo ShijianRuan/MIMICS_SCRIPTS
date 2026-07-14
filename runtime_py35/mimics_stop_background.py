@@ -275,6 +275,36 @@ def _lock_is_import_creation(payload):
     return kind == "create_mcs" or "import .mcs creation" in owner
 
 
+def _lock_is_mask_export(payload):
+    if not isinstance(payload, dict):
+        return False
+    owner = str(payload.get("owner") or "").lower()
+    kind = str(payload.get("kind") or "").lower()
+    return kind == "export_labels" or "label export" in owner
+
+
+def _stop_export_inprocess_monitors():
+    """Detach export callbacks and cancel a launcher that is still racing."""
+    module = sys.modules.get("mimics_export")
+    if module is None:
+        return 0
+    stopped = 0
+    monitors = getattr(module, "_EXPORT_MONITORS", {}) or {}
+    stopper = getattr(module, "_stop_export_monitor", None)
+    for key, monitor in list(monitors.items()):
+        try:
+            monitor["cancel_requested"] = True
+            process = monitor.get("process")
+            if process is not None and process.poll() is None:
+                runtime_common.terminate_process_async(process=process, graceful_seconds=2.0)
+            if stopper is not None:
+                stopper(key)
+            stopped += 1
+        except Exception:
+            pass
+    return stopped
+
+
 def stop_background_import():
     """Request only the import/.mcs creation queue to stop.
 
@@ -398,6 +428,99 @@ def stop_background_import():
         "target_pid": target_pid,
         "launched": launched,
     }
+
+
+def stop_background_export():
+    """Stop only the Mimics-Script mask-export worker."""
+    _stop_export_inprocess_monitors()
+    lock_path = _background_mimics_lock_path()
+    lock_payload = runtime_common.read_json(lock_path, {}) or {}
+    target_pid = None
+    export_root = str(lock_payload.get("export_root") or "")
+    if _lock_is_mask_export(lock_payload):
+        try:
+            target_pid = int(lock_payload.get("pid") or 0)
+        except Exception:
+            target_pid = None
+    stop_path = os.path.join(export_root, "_export_stop.json") if export_root else ""
+    if stop_path:
+        try:
+            runtime_common.write_json_atomic(
+                stop_path,
+                {
+                    "status": "stop_requested",
+                    "requested_at_epoch": time.time(),
+                    "reason": "Stop Mask Export",
+                },
+            )
+        except Exception:
+            pass
+    stop_log = os.path.join(_runtime_dir(), "stop_export_last.json")
+    try:
+        if os.path.isfile(stop_log):
+            os.remove(stop_log)
+    except OSError:
+        pass
+    report = {
+        "RequestedAt": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "TargetPid": target_pid,
+        "TargetKind": lock_payload.get("kind", ""),
+        "TargetOwner": lock_payload.get("owner", ""),
+        "ExportRoot": export_root,
+        "StopMarker": stop_path,
+        "Matched": [],
+        "Killed": [],
+        "Message": "",
+    }
+    if not target_pid:
+        report["Message"] = "No active Mimics-Script mask export process was found."
+        runtime_common.write_json_atomic(stop_log, report)
+        return {"ok": True, "stop_log": stop_log, "target_pid": None, "launched": False}
+    if os.name != "nt":
+        report["Message"] = "Export stop marker written; process termination is only available on Windows."
+        runtime_common.write_json_atomic(stop_log, report)
+        return {"ok": True, "stop_log": stop_log, "target_pid": target_pid, "launched": False}
+
+    command = (
+        "$pidToStop={0};"
+        "$lock='{1}';"
+        "$out='{2}';"
+        "$markers=@('_run_export_batch.py','mimics_export.py');"
+        "Start-Sleep -Seconds 2;"
+        "$record=Get-CimInstance Win32_Process -Filter \"ProcessId=$pidToStop\";"
+        "$matched=$false;$killed=@();$records=@();"
+        "if ($record -and $record.CommandLine) {{"
+        " $matched=[bool]($markers | Where-Object {{ $record.CommandLine -like ('*' + $_ + '*') }} | Select-Object -First 1);"
+        "}};"
+        "if ($record -and $matched) {{"
+        " $records=@($record | Select-Object ProcessId,Name,CommandLine);"
+        " taskkill /PID $pidToStop /T /F 2>$null 1>$null;"
+        " $killed+=@([PSCustomObject]@{{ProcessId=$pidToStop;Name=$record.Name;ExitCode=$LASTEXITCODE;CommandLine=$record.CommandLine}});"
+        " Start-Sleep -Milliseconds 500;Remove-Item -Path $lock -Force -ErrorAction SilentlyContinue;"
+        "}};"
+        "if (-not $record) {{Remove-Item -Path $lock -Force -ErrorAction SilentlyContinue;}};"
+        "$message=if (-not $record) {{'Mask export stopped gracefully.'}} elseif ($matched) {{'Mask export process was stopped.'}} else {{'Lock PID did not match a mask-export command; no process was killed.'}};"
+        "$report=[PSCustomObject]@{{RequestedAt=(Get-Date).ToString('s');TargetPid=$pidToStop;Matched=$records;Killed=$killed;Message=$message}};"
+        "$report | ConvertTo-Json -Depth 5 -Compress | Set-Content -Path $out -Encoding UTF8"
+    ).format(
+        int(target_pid),
+        lock_path.replace("'", "''"),
+        stop_log.replace("'", "''"),
+    )
+    launched = False
+    try:
+        subprocess.Popen(
+            ["powershell", "-NoProfile", "-Command", command],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **_hidden_process_kwargs()
+        )
+        launched = True
+    except Exception as exc:
+        report["Message"] = "Could not launch mask-export stop command: {0}".format(exc)
+        runtime_common.write_json_atomic(stop_log, report)
+    return {"ok": True, "stop_log": stop_log, "target_pid": target_pid, "launched": launched}
 
 
 def _mimics_log(level, message):
@@ -674,28 +797,10 @@ def _stop_timer_handles(monitor):
 def _start_timer(tick_fn, monitor, poll_seconds=0.5):
     """Start a non-blocking timer that calls tick_fn(monitor) every poll_seconds.
 
-    Tries PyQt5 QTimer → Win32 SetTimer → daemon thread (in that order).
+    Uses Win32 SetTimer inside Mimics, then Qt or a daemon-thread fallback.
     """
-    # 1. PyQt5 QTimer (best — integrates with Mimics Qt event loop)
-    try:
-        from PyQt5.QtCore import QTimer
-        timer = QTimer()
-        timer.setSingleShot(False)
-
-        def _tick():
-            try:
-                tick_fn(monitor)
-            except Exception:
-                pass
-
-        timer.timeout.connect(_tick)
-        timer.start(max(100, int(poll_seconds * 1000)))
-        monitor["qt_timer"] = timer
-        return
-    except Exception:
-        pass
-
-    # 2. Win32 SetTimer (runs on the message pump thread)
+    # 1. Use Mimics' existing Windows message pump without importing a second
+    # Qt binding into the host process.
     if os.name == "nt":
         try:
             import ctypes
@@ -723,7 +828,26 @@ def _start_timer(tick_fn, monitor, poll_seconds=0.5):
         except Exception:
             pass
 
-    # 3. Daemon thread (last resort — always works, slightly more CPU)
+    # 2. Qt fallback for non-Windows hosts or a failed native timer.
+    try:
+        from PyQt5.QtCore import QTimer
+        timer = QTimer()
+        timer.setSingleShot(False)
+
+        def _tick():
+            try:
+                tick_fn(monitor)
+            except Exception:
+                pass
+
+        timer.timeout.connect(_tick)
+        timer.start(max(100, int(poll_seconds * 1000)))
+        monitor["qt_timer"] = timer
+        return
+    except Exception:
+        pass
+
+    # 3. Daemon thread (last resort).
     def _thread_poll():
         while not monitor.get("done"):
             try:
@@ -853,22 +977,32 @@ def _stop_background_tick(monitor):
         killed = report.get("Killed") or []
         matched = report.get("Matched") or []
         queue_dirs = report.get("QueueStopDirs") or []
+        if isinstance(killed, dict):
+            killed = [killed]
+        if isinstance(matched, dict):
+            matched = [matched]
+        if isinstance(queue_dirs, (str, bytes)):
+            queue_dirs = [queue_dirs]
         monitor["done"] = True
         _stop_timer_handles(monitor)
         key = monitor.get("monitor_key")
         if key in _STOP_MONITORS:
             del _STOP_MONITORS[key]
-        lines = ["Stop Background Services completed."]
+        title = monitor.get("title", "Stop Background Services")
+        lines = [monitor.get("completion_text", title + " completed.")]
         lines.append("Matched process(es): {0}".format(len(matched)))
         lines.append("Kill request(s): {0}".format(len(killed)))
-        lines.append("Queue stop marker dir(s): {0}".format(len(queue_dirs)))
+        if queue_dirs:
+            lines.append("Queue stop marker dir(s): {0}".format(len(queue_dirs)))
+        if report.get("Message"):
+            lines.append(str(report.get("Message")))
         lines.append("Report: {0}".format(report_path))
         msg = "\n".join(lines)
         _mimics_log(logging.INFO, msg)
         try:
-            mimics.dialogs.message_box(title="Stop Background Services", message=msg, ui_blocking=False)
+            mimics.dialogs.message_box(title=title, message=msg, ui_blocking=False)
         except TypeError:
-            mimics.dialogs.message_box(title="Stop Background Services", message=msg)
+            mimics.dialogs.message_box(title=title, message=msg)
         return
     if time.time() > monitor.get("deadline", 0):
         monitor["done"] = True
@@ -876,15 +1010,16 @@ def _stop_background_tick(monitor):
         key = monitor.get("monitor_key")
         if key in _STOP_MONITORS:
             del _STOP_MONITORS[key]
+        title = monitor.get("title", "Stop Background Services")
         msg = (
-            "Stop Background Services is still running or did not produce a report yet.\n\n"
-            "Check: {0}"
-        ).format(monitor.get("stop_log", "(unknown)"))
+            "{0} is still running or did not produce a report yet.\n\n"
+            "Check: {1}"
+        ).format(title, monitor.get("stop_log", "(unknown)"))
         _mimics_log(logging.WARNING, msg)
         try:
-            mimics.dialogs.message_box(title="Stop Background Services", message=msg, ui_blocking=False)
+            mimics.dialogs.message_box(title=title, message=msg, ui_blocking=False)
         except TypeError:
-            mimics.dialogs.message_box(title="Stop Background Services", message=msg)
+            mimics.dialogs.message_box(title=title, message=msg)
 
 
 def _start_stop_monitor(monitor, poll_seconds=0.5, timeout_seconds=90.0):
@@ -956,6 +1091,24 @@ def main_stop_import():
             title="Stop Background Import",
             message=message,
         )
+    return 0
+
+
+def main_stop_export():
+    result = stop_background_export()
+    report = result.get("stop_log", "") if isinstance(result, dict) else ""
+    if report:
+        _start_stop_monitor(
+            {
+                "monitor_key": "stop_export_{0}".format(int(time.time() * 1000)),
+                "stop_log": report,
+                "title": "Stop Mask Export",
+                "completion_text": "Mask export stop completed.",
+            },
+            poll_seconds=0.5,
+            timeout_seconds=30.0,
+        )
+    _mimics_log(logging.INFO, "Mask export stop requested. Completion will be reported when resources are released.")
     return 0
 
 

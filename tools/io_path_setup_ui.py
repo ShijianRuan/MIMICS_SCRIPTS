@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -310,6 +311,19 @@ def run_ui(context, preview_path=""):
         output = os.path.abspath(os.path.expanduser(output_edit.text().strip()))
         if not os.path.exists(source):
             QtWidgets.QMessageBox.warning(window, "Source Not Found", "Choose an existing source file or folder.")
+            return
+        try:
+            if not os.path.isdir(output):
+                os.makedirs(output)
+            fd, probe_path = tempfile.mkstemp(prefix=".mimics_write_test_", dir=output)
+            os.close(fd)
+            os.remove(probe_path)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                window,
+                "Output Not Writable",
+                "The output folder could not be created or written.\n\n{0}\n\n{1}".format(output, exc),
+            )
             return
         selection = {"source_path": source, "output_path": output, "remember": bool(remember.isChecked())}
         if mode in ("import_single", "export_masks"):

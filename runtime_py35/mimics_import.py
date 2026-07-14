@@ -36,6 +36,7 @@ import runtime_common
 
 # -- Global async monitor state ----------------------------------------
 _IMPORT_MONITORS = {}
+_BRIDGE_LAUNCH_ERRORS = {}
 
 # Track background Mimics process for .mcs creation
 _BG_MIMICS_PID = None
@@ -799,27 +800,33 @@ def _launch_bridge_background(bridge_params, job_dir):
 def _launch_bridge_job_thread(bridge_params, job_dir, output_dir, phase, case_id=None):
     """Start bridge from a worker thread so Mimics GUI can repaint first."""
     def _run():
-        if not os.path.isdir(job_dir):
-            os.makedirs(job_dir)
-        _write_json_atomic(
-            os.path.join(job_dir, "job_state.json"),
-            {
-                "phase": "launching",
-                "requested_phase": phase,
-                "case_id": case_id or "",
-                "started_at": time.time(),
-            },
-        )
-        _verbose_log(
-            output_dir,
-            "Job state | phase={0} | case_id={1} | params={2}".format(
-                phase, case_id or "", _summarize_bridge_params(bridge_params),
-            ),
-        )
-        _verbose_log(
-            output_dir,
-            "Worker thread | phase={0} | case_id={1}".format(phase, case_id or ""),
-        )
+        try:
+            if not os.path.isdir(job_dir):
+                os.makedirs(job_dir)
+            _write_json_atomic(
+                os.path.join(job_dir, "job_state.json"),
+                {
+                    "phase": "launching",
+                    "requested_phase": phase,
+                    "case_id": case_id or "",
+                    "started_at": time.time(),
+                },
+            )
+            _verbose_log(
+                output_dir,
+                "Job state | phase={0} | case_id={1} | params={2}".format(
+                    phase, case_id or "", _summarize_bridge_params(bridge_params),
+                ),
+            )
+        except Exception as exc:
+            _BRIDGE_LAUNCH_ERRORS[job_dir] = (
+                "Could not create or write the import output directory {0}: {1}".format(
+                    os.path.abspath(output_dir), exc,
+                )
+            )
+            _append_import_log(output_dir, "Could not initialize bridge job for {0}: {1}".format(phase, exc))
+            _append_import_exception(output_dir, "Bridge job initialization failed", exc)
+            return
         try:
             process = _launch_bridge_background(bridge_params, job_dir)
             state = {
@@ -832,6 +839,7 @@ def _launch_bridge_job_thread(bridge_params, job_dir, output_dir, phase, case_id
             _write_json_atomic(os.path.join(job_dir, "job_state.json"), state)
             _append_import_log(output_dir, "Bridge PID={0} | phase={1}".format(process.pid, phase))
         except Exception as exc:
+            _BRIDGE_LAUNCH_ERRORS[job_dir] = "Could not start the import bridge process: {0}".format(exc)
             _append_import_log(output_dir, "Could not start bridge process for {0}: {1}".format(phase, exc))
             _append_import_exception(output_dir, "Bridge worker thread failed", exc)
             try:
@@ -877,6 +885,9 @@ def _check_job_status(job_dir):
 
     Returns ("running", None) | ("done", result_dict) | ("error", error_msg).
     """
+    launch_error = _BRIDGE_LAUNCH_ERRORS.pop(job_dir, None)
+    if launch_error:
+        return ("error", launch_error)
     result_file = os.path.join(job_dir, "bridge_result.json")
     state_file = os.path.join(job_dir, "job_state.json")
     error_file = os.path.join(job_dir, "bridge_error.log")
