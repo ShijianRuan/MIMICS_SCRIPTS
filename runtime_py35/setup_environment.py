@@ -224,6 +224,11 @@ def _poll_setup_state(monitor):
     if time.time() > monitor.get("deadline", 0):
         monitor["done"] = True
         _stop_monitor(monitor)
+        runtime_common.terminate_process_async(
+            process=monitor.get("process"),
+            pid=monitor.get("pid"),
+            graceful_seconds=5.0,
+        )
         _mimics_log(logging.WARNING, "[Setup] Worker timed out.")
         try:
             mimics.dialogs.message_box(
@@ -405,6 +410,29 @@ def main(action=None):
 
     action: "check" / "install" / "extract" / "setup-from-scratch" / None (ask user)
     """
+    active = [item for item in _MONITORS.values() if item and not item.get("done")]
+    if active:
+        current = active[0]
+        answer = mimics.dialogs.question_box(
+            title=TITLE,
+            message=(
+                "Environment setup is already running.\n\n"
+                "Action: {0}\nPID: {1}\n\nKeep it running, or stop this setup process."
+            ).format(current.get("action", "setup"), current.get("pid", "?")),
+            buttons="Keep Running;Stop Current Setup",
+            ui_blocking=True,
+        )
+        if answer == "Stop Current Setup":
+            current["done"] = True
+            _stop_monitor(current)
+            runtime_common.terminate_process_async(
+                process=current.get("process"),
+                pid=current.get("pid"),
+                graceful_seconds=5.0,
+            )
+            _mimics_log(logging.INFO, "[Setup] Stop requested; environment worker is shutting down.")
+        return 0
+
     if not action:
         # Build the menu dynamically — show Offline Install only if bundle is detected
         if _is_offline_bundle():
@@ -502,6 +530,7 @@ def main(action=None):
         "monitor_key": "setup_env_" + action,
         "state_path": _state_file(),
         "pid": process.pid,
+        "process": process,
         "action": action,
         "started_at": time.time(),
     }

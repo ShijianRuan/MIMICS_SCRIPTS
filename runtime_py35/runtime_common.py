@@ -6,6 +6,7 @@ from __future__ import print_function
 import json
 import os
 import subprocess
+import threading
 import time
 import uuid
 
@@ -214,6 +215,86 @@ def process_exists(pid):
             kernel32.CloseHandle(handle)
     except Exception:
         return False
+
+
+def active_resource_lock(project_root, name):
+    """Return a live resource lock, removing a stale lock when safe."""
+    path = resource_lock_path(project_root, name)
+    payload = read_json(path, {}) or {}
+    if not payload:
+        if os.path.isfile(path) and _invalid_lock_file_is_old(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        return None
+    if process_exists(payload.get("pid")):
+        return payload
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    return None
+
+
+def resource_lock_summary(payload):
+    if not isinstance(payload, dict) or not payload:
+        return "available"
+    owner = str(payload.get("owner") or payload.get("resource") or "another task")
+    kind = str(payload.get("kind") or "").strip()
+    pid = payload.get("pid", "?")
+    return "{0}{1} (PID {2})".format(owner, " / " + kind if kind else "", pid)
+
+
+def terminate_process_async(process=None, pid=None, graceful_seconds=2.0, on_complete=None):
+    """Terminate an owned child without waiting on the Mimics GUI thread."""
+    try:
+        target_pid = int(pid or getattr(process, "pid", 0) or 0)
+    except Exception:
+        target_pid = 0
+    if target_pid <= 0:
+        return False
+
+    def _reap():
+        try:
+            if process is not None and process.poll() is None:
+                try:
+                    process.terminate()
+                except Exception:
+                    pass
+            deadline = time.time() + max(0.0, float(graceful_seconds))
+            while process_exists(target_pid) and time.time() < deadline:
+                time.sleep(0.1)
+            if process_exists(target_pid):
+                if os.name == "nt":
+                    subprocess.Popen(
+                        ["taskkill", "/PID", str(target_pid), "/T", "/F"],
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        **hidden_process_kwargs()
+                    ).wait()
+                else:
+                    try:
+                        os.kill(target_pid, 9)
+                    except Exception:
+                        pass
+            if process is not None:
+                try:
+                    process.wait()
+                except Exception:
+                    pass
+        finally:
+            if on_complete is not None:
+                try:
+                    on_complete()
+                except Exception:
+                    pass
+
+    thread = threading.Thread(target=_reap, name="MimicsOwnedProcessReaper")
+    thread.daemon = True
+    thread.start()
+    return True
 
 
 def _resource_lock_payload(resource, owner, pid, token):

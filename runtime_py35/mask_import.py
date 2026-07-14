@@ -286,8 +286,10 @@ def _derive_mimics_voxel_to_ras_matrix(image, shape):
         return None
 
 
-def _call_bridge(params):
+def _call_bridge(params, monitor=None):
     """Call mimics_bridge.py and return the parsed JSON result."""
+    if monitor is not None and monitor.get("done"):
+        raise RuntimeError("Mask import was cancelled before bridge startup.")
     python_exe = _python_exe()
     bridge = _bridge_script()
     process = subprocess.Popen(
@@ -298,6 +300,11 @@ def _call_bridge(params):
         env=_background_env(),
         **_hidden_process_kwargs()
     )
+    if monitor is not None:
+        monitor["process"] = process
+        if monitor.get("done"):
+            runtime_common.terminate_process_async(process=process, graceful_seconds=0.0)
+            raise RuntimeError("Mask import was cancelled during bridge startup.")
     stdout, stderr = process.communicate(
         input=json.dumps(params).encode("utf-8")
     )
@@ -432,6 +439,10 @@ def _mask_import_monitor_tick(monitor):
 
 def _mask_import_monitor_tick_locked(monitor):
     if time.time() > monitor.get("deadline", 0):
+        runtime_common.terminate_process_async(
+            process=monitor.get("process"),
+            graceful_seconds=2.0,
+        )
         monitor.setdefault("errors", []).append("Background mask preparation timed out.")
         _finish_mask_import(monitor)
         return
@@ -548,12 +559,12 @@ def _start_mask_import_monitor(monitor, poll_seconds=0.25):
         return False
 
 
-def _launch_mask_prepare(bridge_params, result_path):
+def _launch_mask_prepare(bridge_params, result_path, monitor):
     _write_json_atomic(result_path, {"status": "running"})
 
     def _run():
         try:
-            result = _call_bridge(bridge_params)
+            result = _call_bridge(bridge_params, monitor=monitor)
         except Exception as exc:
             result = {"status": "error", "error": str(exc), "traceback": traceback.format_exc()}
         try:
@@ -569,6 +580,28 @@ def _launch_mask_prepare(bridge_params, result_path):
 
 def main():
     """Entry point: import mask files into the current Mimics project."""
+    active_monitors = [item for item in _MASK_IMPORT_MONITORS.values() if item and not item.get("done")]
+    if active_monitors:
+        answer = mimics.dialogs.question_box(
+            message=(
+                "A Mask import is already preparing or applying labels.\n\n"
+                "Keep it running, or stop it before starting a different import."
+            ),
+            buttons="Keep Running;Stop Current Import",
+            title=TITLE,
+            ui_blocking=True,
+        )
+        if answer == "Stop Current Import":
+            for active in active_monitors:
+                active["done"] = True
+                _stop_mask_import_monitor(active.get("monitor_key"))
+                runtime_common.terminate_process_async(
+                    process=active.get("process"),
+                    graceful_seconds=2.0,
+                    on_complete=lambda path=active.get("work_dir"): _cleanup_work_dir(path),
+                )
+            _safe_message("Mask import stop requested. No additional Masks will be applied.")
+        return 0
     # 1. Check that an image is open
     active_image, image_shape, voxel_to_ras = _active_image_info()
     if active_image is None:
@@ -656,7 +689,7 @@ def main():
         _safe_message("This Mimics session cannot monitor background mask preparation.")
         return 1
     _update_gui()
-    _launch_mask_prepare(bridge_params, result_path)
+    _launch_mask_prepare(bridge_params, result_path, monitor)
     try:
         mimics.logging.log_user_message(
             mimics.logging.Level.INFO,

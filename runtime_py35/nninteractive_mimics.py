@@ -3759,6 +3759,21 @@ def run():
     image = mimics.data.images.get_active()
     if image is None:
         raise RuntimeError("Open a project and activate an image set before running nnInteractive.")
+    gpu_holder = runtime_common.active_resource_lock(_project_root(), "gpu.lock")
+    if gpu_holder:
+        owner = str(gpu_holder.get("owner") or "").lower()
+        kind = str(gpu_holder.get("kind") or "").lower()
+        if "dinov3" in owner or kind in ("fewshot_train", "fewshot_infer"):
+            mimics.dialogs.message_box(
+                message=(
+                    "The GPU is currently used by {0}.\n\n"
+                    "nnInteractive was not started, so no prompt or Mask state was changed. "
+                    "Wait for that task to finish or stop it from DINOv3 > 05 Stop AI Task."
+                ).format(runtime_common.resource_lock_summary(gpu_holder)),
+                title=TITLE,
+                ui_blocking=False,
+            )
+            return 1
     config = _config()
     session = _select_session_masks(image, config)
     if session.get("write_mode") == "cancelled":

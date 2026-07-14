@@ -252,8 +252,16 @@ def make_fake_dinov3_root(tmp: Path) -> Path:
     root = tmp / "fake_dinov3"
     (root / "scripts").mkdir(parents=True, exist_ok=True)
     (root / "config").mkdir(parents=True, exist_ok=True)
+    # The pipeline now derives a data fingerprint and loads the generated YAML
+    # through the real DINOv3 package before launching train.py. Keep those
+    # lightweight modules in the fake project so this stress test exercises the
+    # current orchestration contract instead of failing before lock contention.
+    shutil.copytree(ROOT / "external" / "dinov3-medical-seg" / "src", root / "src")
     for name in ("mimics_lora_segformer3d.yaml", "synthstrip_lora_segformer3d.yaml"):
         (root / "config" / name).write_text("training:\n  epochs: 1\n", encoding="utf-8")
+    research = root / "config" / "research"
+    research.mkdir(parents=True, exist_ok=True)
+    (research / "ct_fewshot_fast.yaml").write_text("training:\n  epochs: 1\n", encoding="utf-8")
     train_script = r'''
 import json
 import os

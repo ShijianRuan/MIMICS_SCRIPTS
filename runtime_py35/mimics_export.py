@@ -18,6 +18,7 @@ Flow:
 from __future__ import print_function
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -243,6 +244,7 @@ def _launch_background_batch_export(ts_root, cases_filter, axes, flips, label_ou
             "axes": axes,
             "flips": flips,
             "label_output_root": os.path.abspath(label_output_root) if label_output_root else "",
+            "export_root": os.path.abspath(label_output_root) if label_output_root else os.path.abspath(output_dir),
             "overwrite_existing": bool(overwrite_existing),
             "case_dirs": dict(case_dirs or {}),
             "mcs_paths": dict(mcs_paths or {}),
@@ -992,13 +994,45 @@ def _current_project_case_id():
 
 def _launch_background_batch_export_async(*args, **kwargs):
     """Move output-path I/O and background Mimics startup off the GUI thread."""
+    holder = runtime_common.active_resource_lock(_project_root(), "background_mimics.lock")
+    if holder:
+        try:
+            mimics.dialogs.message_box(
+                title="Export Waiting",
+                message=(
+                    "Mask export was not started because the background Mimics license is in use.\n\n"
+                    "Current task: {0}\n\n"
+                    "Wait for that task to finish, or stop it from its own Stop entry before retrying export."
+                ).format(runtime_common.resource_lock_summary(holder)),
+                ui_blocking=False,
+            )
+        except TypeError:
+            mimics.dialogs.message_box(title="Export Waiting", message="Background Mimics is currently busy.")
+        return None
+    export_root = kwargs.get("label_output_root") or kwargs.get("mcs_output_dir") or ""
+    launch_state = {
+        "monitor_key": "background_export_" + uuid.uuid4().hex,
+        "export_root": os.path.abspath(export_root) if export_root else "",
+        "launch_finished": False,
+        "launch_error": "",
+        "process": None,
+        "started_at_epoch": time.time(),
+        "deadline": time.time() + 7 * 86400,
+        "done": False,
+    }
+
     def worker():
         try:
-            _launch_background_batch_export(*args, **kwargs)
+            process = _launch_background_batch_export(*args, **kwargs)
+            launch_state["process"] = process
+            if process is None:
+                launch_state["launch_error"] = "Background Mimics could not be started."
         except Exception as exc:
             root = kwargs.get("mcs_output_dir") or kwargs.get("label_output_root") or ""
             _append_export_log(root, "Could not start background mask export: {0}".format(exc))
+            launch_state["launch_error"] = str(exc)
         finally:
+            launch_state["launch_finished"] = True
             try:
                 _EXPORT_LAUNCH_THREADS.remove(thread)
             except Exception:
@@ -1008,7 +1042,113 @@ def _launch_background_batch_export_async(*args, **kwargs):
     thread.daemon = True
     _EXPORT_LAUNCH_THREADS.append(thread)
     thread.start()
+    _start_background_export_status_monitor(launch_state)
     return thread
+
+
+def _background_export_status_tick(monitor):
+    if monitor.get("done") or monitor.get("busy"):
+        return
+    monitor["busy"] = True
+    try:
+        key = monitor.get("monitor_key")
+        if monitor.get("launch_finished") and monitor.get("launch_error"):
+            monitor["done"] = True
+            _stop_export_monitor(key)
+            mimics.dialogs.message_box(
+                title="Export Could Not Start",
+                message=str(monitor.get("launch_error")),
+                ui_blocking=False,
+            )
+            return
+        root = monitor.get("export_root")
+        status = runtime_common.read_json(os.path.join(root, "_export_batch_status.json"), {}) if root else {}
+        status = status or {}
+        try:
+            if float(status.get("updated_at_epoch", 0.0) or 0.0) < float(monitor.get("started_at_epoch", 0.0) or 0.0):
+                status = {}
+        except Exception:
+            status = {}
+        signature = (status.get("status"), status.get("case_id"), status.get("completed"), status.get("failed"))
+        if status and signature != monitor.get("last_signature"):
+            monitor["last_signature"] = signature
+            try:
+                mimics.logging.log_user_message(
+                    level=logging.INFO,
+                    message="Mask export: {0}; completed {1}, failed {2}{3}.".format(
+                        status.get("status", "running"),
+                        int(status.get("completed", 0) or 0),
+                        int(status.get("failed", 0) or 0),
+                        "; current " + str(status.get("case_id")) if status.get("case_id") else "",
+                    ),
+                )
+            except Exception:
+                pass
+        if status.get("status") == "closed":
+            monitor["done"] = True
+            _stop_export_monitor(key)
+            failed = int(status.get("failed", 0) or 0)
+            mimics.dialogs.message_box(
+                title="Export Completed with Errors" if failed else "Export Complete",
+                message="Mask export finished.\n\nExported: {0}\nFailed: {1}\nOutput: {2}{3}".format(
+                    int(status.get("completed", 0) or 0),
+                    failed,
+                    root,
+                    "\n\nReview mimics_export.log before retrying failed cases." if failed else "",
+                ),
+                ui_blocking=False,
+            )
+            return
+        process = monitor.get("process")
+        if monitor.get("launch_finished") and process is not None and process.poll() is not None and not status:
+            monitor["done"] = True
+            _stop_export_monitor(key)
+            mimics.dialogs.message_box(
+                title="Export Failed",
+                message="Background Mimics exited before writing export status. Check mimics_export.log in:\n{0}".format(root),
+                ui_blocking=False,
+            )
+    finally:
+        monitor["busy"] = False
+
+
+def _start_background_export_status_monitor(monitor, poll_seconds=2.0):
+    key = monitor["monitor_key"]
+    _stop_export_monitor(key)
+    if os.name == "nt":
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            TIMERPROC = ctypes.WINFUNCTYPE(None, ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_uint)
+
+            def _timer_proc(hwnd, message, timer_id, tick_count):
+                try:
+                    _background_export_status_tick(monitor)
+                except Exception:
+                    pass
+
+            callback = TIMERPROC(_timer_proc)
+            user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint, TIMERPROC]
+            user32.SetTimer.restype = ctypes.c_size_t
+            user32.KillTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+            timer_id = user32.SetTimer(None, 0, int(poll_seconds * 1000), callback)
+            if timer_id:
+                monitor["callback"] = callback
+                monitor["win32_timer"] = (user32, timer_id)
+                _EXPORT_MONITORS[key] = monitor
+                return True
+        except Exception:
+            pass
+    try:
+        from PyQt5.QtCore import QTimer
+        timer = QTimer()
+        timer.timeout.connect(lambda: _background_export_status_tick(monitor))
+        timer.start(max(500, int(poll_seconds * 1000)))
+        monitor["timer"] = timer
+        _EXPORT_MONITORS[key] = monitor
+        return True
+    except Exception:
+        return False
 
 
 def _current_project_path():
@@ -1470,6 +1610,8 @@ def main(source_info_override=None):
             source_image_paths={case_id: str((source_info_override or {}).get("image") or "")},
         )
         if process is None:
+            if external_setup:
+                return 1
             mimics.dialogs.message_box(
                 title="Export Error",
                 message="Could not start background export. See mimics_export.log in output directory.",

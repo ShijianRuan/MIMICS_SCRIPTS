@@ -4,6 +4,7 @@
 from __future__ import print_function
 
 import json
+import logging
 import os
 import subprocess
 import time
@@ -95,10 +96,7 @@ def _stop_all_monitors():
             continue
         process = monitor.get("process")
         if process is not None and process.poll() is None:
-            try:
-                process.terminate()
-            except Exception:
-                pass
+            runtime_common.terminate_process_async(process=process, graceful_seconds=2.0)
         _stop_monitor(key)
     _ALERTED.clear()
 
@@ -124,7 +122,13 @@ def _tick(monitor):
                 _stop_monitor(key)
                 # Distinguish "user closed the window" (exit 0) from a crash.
                 if exit_code == 0:
-                    _alert_once(key, "Path Setup", "The path window was closed before any task was started.")
+                    try:
+                        mimics.logging.log_user_message(
+                            level=logging.INFO,
+                            message="Path selection was cancelled; no task was started.",
+                        )
+                    except Exception:
+                        pass
                 else:
                     _alert_once(key, "Path Setup",
                                 "The external path window exited unexpectedly (code {0}). No task was started.".format(exit_code))

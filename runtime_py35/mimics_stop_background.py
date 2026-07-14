@@ -11,6 +11,7 @@ import glob
 import os
 import logging
 import subprocess
+import sys
 import threading
 import time
 
@@ -41,6 +42,9 @@ MARKERS = (
     "fewshot_pipeline.py",
     "fewshot_mimics.py",
     "fewshot_model_chooser.py",
+    "fewshot_training_setup_ui.py",
+    "fewshot_status_viewer.py",
+    "io_path_setup_ui.py",
 
     # nnInteractive inference server
     "nninteractive.inference.server.main",
@@ -83,6 +87,57 @@ def _clear_resource_locks():
             os.remove(os.path.join(lock_dir, name))
         except OSError:
             pass
+
+
+def _stop_inprocess_monitors():
+    """Detach Mimics timers before their owned children are terminated."""
+    stopped = 0
+    module = sys.modules.get("io_setup_mimics")
+    if module is not None:
+        try:
+            module._stop_all_monitors()
+            stopped += 1
+        except Exception:
+            pass
+    for module_name, collection_name, stop_name in (
+        ("mimics_import", "_IMPORT_MONITORS", "_stop_import_monitor"),
+        ("mimics_export", "_EXPORT_MONITORS", "_stop_export_monitor"),
+        ("mask_import", "_MASK_IMPORT_MONITORS", "_stop_mask_import_monitor"),
+        ("fix_source_affine_metadata", "_MONITORS", "_stop_monitor"),
+        ("fewshot_mimics", "_MONITORS", "_stop_monitor"),
+        ("nninteractive_mimics", "_ASYNC_MONITORS", "_stop_async_monitor"),
+    ):
+        module = sys.modules.get(module_name)
+        if module is None:
+            continue
+        collection = getattr(module, collection_name, {}) or {}
+        stopper = getattr(module, stop_name, None)
+        if stopper is None:
+            continue
+        for key in list(collection.keys()):
+            try:
+                stopper(key)
+                stopped += 1
+            except Exception:
+                pass
+    fewshot = sys.modules.get("fewshot_mimics")
+    if fewshot is not None:
+        for process in list(getattr(fewshot, "_GUI_PROCESSES", {}).values()):
+            try:
+                runtime_common.terminate_process_async(process=process, graceful_seconds=2.0)
+            except Exception:
+                pass
+        try:
+            fewshot._GUI_PROCESSES.clear()
+        except Exception:
+            pass
+    nninteractive = sys.modules.get("nninteractive_mimics")
+    if nninteractive is not None:
+        try:
+            nninteractive._close_all_async_image_workers()
+        except Exception:
+            pass
+    return stopped
 
 
 def _runtime_dir():
@@ -688,7 +743,8 @@ def stop_background_processes():
     if os.name != "nt":
         return False
 
-    # 1. Write queue stop markers first (graceful shutdown signal)
+    # 1. Detach in-process timers and write graceful stop signals first.
+    _stop_inprocess_monitors()
     stopped_queues = _request_queue_stop()
 
     stop_log = os.path.join(_runtime_dir(), "stop_background_last.json")
@@ -854,26 +910,18 @@ def main():
             poll_seconds=0.5,
             timeout_seconds=90.0,
         )
-    try:
-        mimics.dialogs.message_box(
-            title="Stop Background Services",
-            message=(
-                "Stop request submitted for Mimics-Script background processes.\n"
-                "A completion message will appear when finished."
-                if ok else
-                "Background cleanup is only implemented for Windows Mimics workstations."
-            ),
-            ui_blocking=False,
-        )
-    except TypeError:
-        mimics.dialogs.message_box(
-            title="Stop Background Services",
-            message=(
-                "Stop request submitted for Mimics-Script background processes."
-                if ok else
-                "Background cleanup is only implemented for Windows Mimics workstations."
-            ),
-        )
+    if not ok:
+        try:
+            mimics.dialogs.message_box(
+                title="Stop Background Services",
+                message="Background cleanup is only implemented for Windows Mimics workstations.",
+                ui_blocking=False,
+            )
+        except TypeError:
+            mimics.dialogs.message_box(
+                title="Stop Background Services",
+                message="Background cleanup is only implemented for Windows Mimics workstations.",
+            )
     return 0
 
 

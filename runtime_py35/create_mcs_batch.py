@@ -514,12 +514,6 @@ def create_mcs_from_manifest(work_dir, output_mcs):
     except Exception:
         pass
 
-    # Clean up work dir (DICOM + buffers, manifest no longer needed)
-    try:
-        shutil.rmtree(work_dir, ignore_errors=True)
-    except Exception:
-        pass
-
     return mcs_path
 
 
@@ -550,7 +544,11 @@ def main(output_dir=None):
 
     active_path = os.path.join(output_dir, QUEUE_ACTIVE_FILE)
     done_path = os.path.join(output_dir, QUEUE_DONE_FILE)
-    idle_timeout = 1800
+    # A stale producer marker must not hold a Mimics license forever after the
+    # foreground process crashes. If preparation is merely slow, it will
+    # relaunch this worker when the next manifest is committed.
+    idle_timeout = 120
+    producer_heartbeat_timeout = 180
     poll_seconds = 10
     last_activity = time.time()
     consecutive_empty = 0
@@ -602,6 +600,19 @@ def main(output_dir=None):
             if total == 0:
                 consecutive_empty += 1
                 active = os.path.isfile(active_path)
+                if active:
+                    active_state = runtime_common.read_json(active_path, {}) or {}
+                    try:
+                        heartbeat = float(active_state.get("updated_at_epoch", os.path.getmtime(active_path)))
+                    except Exception:
+                        heartbeat = time.time()
+                    if time.time() - heartbeat > producer_heartbeat_timeout:
+                        active = False
+                        log_message(output_dir, "Producer heartbeat is stale; releasing background Mimics.")
+                        try:
+                            os.remove(active_path)
+                        except OSError:
+                            pass
                 done = os.path.isfile(done_path)
                 stop = os.path.isfile(os.path.join(output_dir, QUEUE_STOP_FILE))
                 if stop:
@@ -661,6 +672,13 @@ def main(output_dir=None):
                                 fp.write(fingerprint)
                         except Exception:
                             pass
+                    # Keep the manifest until its fingerprint is persisted.
+                    # Deleting the work directory inside create_mcs_from_manifest
+                    # made every later import look changed and reconvert the case.
+                    try:
+                        shutil.rmtree(work_dir, ignore_errors=True)
+                    except Exception:
+                        pass
                 except Exception as e:
                     total_failed += 1
                     last_activity = time.time()

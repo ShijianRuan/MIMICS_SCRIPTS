@@ -622,6 +622,38 @@ class TestMimicsBridgeBufferMapping(unittest.TestCase):
         self.assertFalse(_affine_close(a, c, atol=1e-4))
         self.assertTrue(_affine_close(a, c, atol=2e-3))
 
+    def test_mask_header_geometry_fallback_is_explicit(self):
+        from mimics_bridge import _mask_file_declares_spatial_geometry
+
+        missing = os.path.join(self.tmp, "missing_geometry.mhd")
+        with open(missing, "w", encoding="ascii") as handle:
+            handle.write("NDims = 3\nDimSize = 4 5 6\nElementSpacing = 1 1 1\n")
+        explicit = os.path.join(self.tmp, "explicit_geometry.mhd")
+        with open(explicit, "w", encoding="ascii") as handle:
+            handle.write(
+                "NDims = 3\nDimSize = 4 5 6\nElementSpacing = 1 1 1\n"
+                "Offset = 0 0 0\nTransformMatrix = 1 0 0 0 1 0 0 0 1\n"
+            )
+        self.assertFalse(_mask_file_declares_spatial_geometry(missing))
+        self.assertTrue(_mask_file_declares_spatial_geometry(explicit))
+
+    def test_valid_identity_affine_is_not_silently_voxel_aligned(self):
+        from mimics_bridge import resample_mask_to_image_grid
+
+        mask = np.zeros((4, 4, 4), dtype=np.uint8)
+        mask[1, 1, 1] = 1
+        source_affine = np.eye(4)
+        target_affine = np.eye(4)
+        target_affine[0, 3] = 100.0
+        result = resample_mask_to_image_grid(
+            mask,
+            source_affine,
+            mask.shape,
+            target_affine,
+            allow_voxel_aligned_fallback=False,
+        )
+        self.assertEqual(0, int(result.sum()))
+
     def test_unit_axis(self):
         from mimics_bridge import _unit_axis
 
@@ -1643,11 +1675,44 @@ class TestStopBackgroundServices(unittest.TestCase):
             "fewshot_pipeline.py",
             "fewshot_mimics.py",
             "fewshot_model_chooser.py",
+            "fewshot_training_setup_ui.py",
+            "fewshot_status_viewer.py",
+            "io_path_setup_ui.py",
             "nninteractive.inference.server.main",
             "setup_env.py",
         ]
         for marker in required:
             self.assertIn(marker, MARKERS, "{0} must be in MARKERS".format(marker))
+
+    def test_stop_all_detaches_mimics_monitors_before_process_cleanup(self):
+        import inspect
+        import mimics_stop_background
+
+        source = inspect.getsource(mimics_stop_background.stop_background_processes)
+        self.assertLess(source.index("_stop_inprocess_monitors()"), source.index("_request_queue_stop()"))
+        monitor_source = inspect.getsource(mimics_stop_background._stop_inprocess_monitors)
+        for module_name in (
+            "mimics_import", "mimics_export", "mask_import",
+            "fix_source_affine_metadata", "fewshot_mimics", "nninteractive_mimics",
+        ):
+            self.assertIn(module_name, monitor_source)
+
+    def test_environment_setup_has_a_scoped_stop_path(self):
+        import inspect
+        import setup_environment
+
+        source = inspect.getsource(setup_environment.main)
+        self.assertIn("Stop Current Setup", source)
+        self.assertIn("terminate_process_async", source)
+
+    def test_mcs_fingerprint_is_persisted_before_work_cleanup(self):
+        import inspect
+        import create_mcs_batch
+
+        source = inspect.getsource(create_mcs_batch.main)
+        persist_index = source.index("fp.write(fingerprint)")
+        cleanup_index = source.index("shutil.rmtree(work_dir", persist_index)
+        self.assertLess(persist_index, cleanup_index)
 
     def test_stop_uses_taskkill_tree(self):
         """Verify stop command uses taskkill with /T (tree kill)."""
@@ -2376,7 +2441,7 @@ class TestNewFeatures(unittest.TestCase):
 
         mask_main = inspect.getsource(mask_import.main)
         self.assertNotIn("_call_bridge(bridge_params)", mask_main)
-        self.assertIn("_launch_mask_prepare(bridge_params, result_path)", mask_main)
+        self.assertIn("_launch_mask_prepare(bridge_params, result_path, monitor)", mask_main)
         batch_main = inspect.getsource(mimics_import.main)
         self.assertIn("_resolve_import_output_dir(ts_root, create=False)", batch_main)
         discover_monitor = inspect.getsource(mimics_import._start_import_discover_monitor)

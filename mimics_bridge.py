@@ -666,42 +666,35 @@ def _affine_close(left: np.ndarray, right: np.ndarray, atol: float = 1e-4) -> bo
     return bool(np.allclose(left, right, atol=atol, rtol=0.0))
 
 
-def _affine_is_default_identity(affine: np.ndarray) -> bool:
-    """Detect an affine that carries no real spatial information.
+def _mask_file_declares_spatial_geometry(path: str) -> bool:
+    """Return False only when a supported text header actually omits geometry.
 
-    Some exporters write .mhd/.mha files with ElementSpacing but omit Offset and
-    Orientation, so SimpleITK returns an origin of (0,0,0) and an axis-aligned
-    direction. Such a mask has no world-space anchor: resampling it against an
-    image whose voxel origin is far from world-zero maps every voxel out of the
-    mask grid and yields an all-empty result. Treat it as "no geometry" instead
-    of "geometry at the world origin".
-
-    The direction may be axis-aligned with sign flips: SimpleITK reports LPS
-    geometry, which this module converts to RAS (LPS_TO_RAS negates the first
-    two axes), so a default-no-header mask shows up as diag(-s, -s, s). Accept
-    any axis-aligned direction (each column a single +/- unit axis) with origin
-    at the world origin.
+    Origin zero and identity direction are valid physical geometry. They must
+    never be guessed to mean "missing" from the numeric affine alone. MHD/MHA
+    and NRRD expose whether the corresponding header fields were present, so
+    voxel-aligned fallback is limited to those demonstrably incomplete files.
     """
-    affine = np.asarray(affine, dtype=float)
-    if affine.shape != (4, 4) or not np.all(np.isfinite(affine)):
-        return False
-    linear = affine[:3, :3]
-    spacing = np.linalg.norm(linear, axis=0)
-    if not (np.all(np.isfinite(spacing)) and np.all(spacing > 1e-8)):
-        return False
-    # Direction is axis-aligned (each column is a single +/- unit axis): every
-    # row and column of the normalized direction has exactly one nonzero entry.
-    normalized = linear / spacing
-    col_nonzero = np.sum(np.abs(normalized) > 1e-6, axis=0)
-    row_nonzero = np.sum(np.abs(normalized) > 1e-6, axis=1)
-    if not (np.all(col_nonzero == 1) and np.all(row_nonzero == 1)):
-        return False
-    if not np.allclose(np.abs(normalized), np.eye(3), atol=1e-6, rtol=0.0):
-        return False
-    # Origin is at the world origin, i.e. not set.
-    if not np.allclose(affine[:3, 3], np.zeros(3), atol=1e-6, rtol=0.0):
-        return False
-    return True
+    name = str(path or "").lower()
+    if not name.endswith((".mhd", ".mha", ".nrrd")):
+        return True
+    try:
+        with open(path, "rb") as handle:
+            header = handle.read(262144).decode("latin-1", "ignore").lower()
+    except Exception:
+        return True
+    if name.endswith((".mhd", ".mha")):
+        origin_keys = ("offset", "position", "origin")
+        direction_keys = ("transformmatrix", "orientation")
+        keys = set()
+        for line in header.splitlines():
+            if "=" not in line:
+                continue
+            key = line.split("=", 1)[0].strip().replace(" ", "")
+            keys.add(key)
+            if key == "elementdatafile" and "local" in line:
+                break
+        return bool(keys.intersection(origin_keys) or keys.intersection(direction_keys))
+    return "space origin:" in header or "space directions:" in header
 
 
 def resample_mask_to_image_grid(
@@ -709,18 +702,20 @@ def resample_mask_to_image_grid(
     mask_affine: np.ndarray,
     image_shape: tuple[int, int, int],
     image_affine: np.ndarray,
+    allow_voxel_aligned_fallback: bool = False,
 ) -> np.ndarray:
     """Nearest-neighbor resample of a mask into image voxel index space."""
     if tuple(mask.shape) == tuple(image_shape) and _affine_close(mask_affine, image_affine):
         return np.ascontiguousarray(mask.astype(np.uint8))
     if tuple(mask.shape) == tuple(image_shape) and not _affine_is_usable(mask_affine):
         return np.ascontiguousarray(mask.astype(np.uint8))
-    # The mask file had no spatial header (origin (0,0,0), axis-aligned), so its
-    # world affine is the exporter default rather than real geometry. When the
-    # voxel grid matches the image, treat it as voxel-aligned and pass through —
-    # otherwise resampling against world-zero leaves every label empty.
-    if tuple(mask.shape) == tuple(image_shape) and _affine_is_default_identity(mask_affine):
-        return np.ascontiguousarray(mask.astype(np.uint8))
+    if allow_voxel_aligned_fallback:
+        if tuple(mask.shape) == tuple(image_shape):
+            return np.ascontiguousarray(mask.astype(np.uint8))
+        raise ValueError(
+            "mask header has no origin/direction and its shape does not match the target grid: "
+            "{} != {}".format(tuple(mask.shape), tuple(image_shape))
+        )
 
     inv_mask_affine = np.linalg.inv(mask_affine)
     out = np.zeros(tuple(int(v) for v in image_shape), dtype=np.uint8)
@@ -1185,7 +1180,10 @@ def do_prepare(params: dict) -> dict:
         if not Path(mask_path).is_file():
             return {"status": "error", "error": "mask file not found: {}".format(mask_path)}
         array, mask_affine = read_nifti_mask_with_affine(mask_path)
-        image_grid_mask = resample_mask_to_image_grid(array, mask_affine, image_shape, image_affine)
+        image_grid_mask = resample_mask_to_image_grid(
+            array, mask_affine, image_shape, image_affine,
+            allow_voxel_aligned_fallback=not _mask_file_declares_spatial_geometry(mask_path),
+        )
         transformed = apply_buffer_mapping(image_grid_mask, axes, flips)
         u8_path = os.path.join(buffers_out, name + ".u8")
         with open(u8_path, "wb") as f:
@@ -1247,6 +1245,7 @@ def _mask_buffer_for_target_grid(mask_path: str, target_shape, target_voxel_to_r
         mask_affine,
         target_shape,
         target_voxel_to_ras,
+        allow_voxel_aligned_fallback=not _mask_file_declares_spatial_geometry(mask_path),
     )
     transformed = apply_buffer_mapping(target_grid_mask, axes, flips)
     output = Path(output_path)
@@ -1303,6 +1302,7 @@ def do_prepare_masks_for_grid(params: dict) -> dict:
                 output_path = os.path.join(buffers_out, label_name + ".u8")
                 target_grid_mask = resample_mask_to_image_grid(
                     binary, mask_affine, _shape_from_params(target_shape), target_matrix,
+                    allow_voxel_aligned_fallback=not _mask_file_declares_spatial_geometry(mask_path),
                 )
                 transformed = apply_buffer_mapping(target_grid_mask, axes, flips)
                 Path(output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -1569,7 +1569,10 @@ def do_mask_to_buffer(params: dict) -> dict:
         return {"status": "error", "error": "image path is neither DICOM folder nor NIfTI file: {}".format(image_path)}
 
     mask, mask_affine = read_nifti_mask_with_affine(mask_path)
-    image_grid_mask = resample_mask_to_image_grid(mask, mask_affine, image_shape, image_affine)
+    image_grid_mask = resample_mask_to_image_grid(
+        mask, mask_affine, image_shape, image_affine,
+        allow_voxel_aligned_fallback=not _mask_file_declares_spatial_geometry(mask_path),
+    )
     transformed = apply_buffer_mapping(image_grid_mask, axes, flips)
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
