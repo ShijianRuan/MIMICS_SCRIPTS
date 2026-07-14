@@ -666,6 +666,44 @@ def _affine_close(left: np.ndarray, right: np.ndarray, atol: float = 1e-4) -> bo
     return bool(np.allclose(left, right, atol=atol, rtol=0.0))
 
 
+def _affine_is_default_identity(affine: np.ndarray) -> bool:
+    """Detect an affine that carries no real spatial information.
+
+    Some exporters write .mhd/.mha files with ElementSpacing but omit Offset and
+    Orientation, so SimpleITK returns an origin of (0,0,0) and an axis-aligned
+    direction. Such a mask has no world-space anchor: resampling it against an
+    image whose voxel origin is far from world-zero maps every voxel out of the
+    mask grid and yields an all-empty result. Treat it as "no geometry" instead
+    of "geometry at the world origin".
+
+    The direction may be axis-aligned with sign flips: SimpleITK reports LPS
+    geometry, which this module converts to RAS (LPS_TO_RAS negates the first
+    two axes), so a default-no-header mask shows up as diag(-s, -s, s). Accept
+    any axis-aligned direction (each column a single +/- unit axis) with origin
+    at the world origin.
+    """
+    affine = np.asarray(affine, dtype=float)
+    if affine.shape != (4, 4) or not np.all(np.isfinite(affine)):
+        return False
+    linear = affine[:3, :3]
+    spacing = np.linalg.norm(linear, axis=0)
+    if not (np.all(np.isfinite(spacing)) and np.all(spacing > 1e-8)):
+        return False
+    # Direction is axis-aligned (each column is a single +/- unit axis): every
+    # row and column of the normalized direction has exactly one nonzero entry.
+    normalized = linear / spacing
+    col_nonzero = np.sum(np.abs(normalized) > 1e-6, axis=0)
+    row_nonzero = np.sum(np.abs(normalized) > 1e-6, axis=1)
+    if not (np.all(col_nonzero == 1) and np.all(row_nonzero == 1)):
+        return False
+    if not np.allclose(np.abs(normalized), np.eye(3), atol=1e-6, rtol=0.0):
+        return False
+    # Origin is at the world origin, i.e. not set.
+    if not np.allclose(affine[:3, 3], np.zeros(3), atol=1e-6, rtol=0.0):
+        return False
+    return True
+
+
 def resample_mask_to_image_grid(
     mask: np.ndarray,
     mask_affine: np.ndarray,
@@ -676,6 +714,12 @@ def resample_mask_to_image_grid(
     if tuple(mask.shape) == tuple(image_shape) and _affine_close(mask_affine, image_affine):
         return np.ascontiguousarray(mask.astype(np.uint8))
     if tuple(mask.shape) == tuple(image_shape) and not _affine_is_usable(mask_affine):
+        return np.ascontiguousarray(mask.astype(np.uint8))
+    # The mask file had no spatial header (origin (0,0,0), axis-aligned), so its
+    # world affine is the exporter default rather than real geometry. When the
+    # voxel grid matches the image, treat it as voxel-aligned and pass through —
+    # otherwise resampling against world-zero leaves every label empty.
+    if tuple(mask.shape) == tuple(image_shape) and _affine_is_default_identity(mask_affine):
         return np.ascontiguousarray(mask.astype(np.uint8))
 
     inv_mask_affine = np.linalg.inv(mask_affine)

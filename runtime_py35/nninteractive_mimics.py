@@ -2855,11 +2855,13 @@ def _start_async_job(config, image, target, source=None, write_mode="in_place"):
         worker_log_path = shared_worker["worker_log"]
         runtime_log = shared_worker["runtime_log"]
 
-    target_sha256 = (
-        base_export["sha256"]
-        if target is source
-        else _mask_sha256(target, image_export["shape"])
-    )
+    # Hash the target mask itself (not the exported .u8 file) so the post-
+    # inference stale check compares like with like: both expected and current
+    # come from _mask_sha256(target, ...) on the same object. Using the exported
+    # file hash here made the check fire whenever get_voxel_buffer().tobytes()
+    # marshalled differently across two calls, falsely flagging every result as
+    # stale and blocking the overwrite/new-mask choice.
+    target_sha256 = _mask_sha256(target, image_export["shape"])
     state = {
         "_job_dir": job_dir,
         "_worker_dir": worker_dir,
@@ -3090,6 +3092,14 @@ def _stop_async_monitor(job_dir):
 def _async_monitor_tick(monitor):
     if monitor.get("done"):
         return
+    # _check_async_result_nonblocking may show a ui_blocking dialog (stale
+    # target, worker error, ...). That dialog pumps the Mimics message loop,
+    # so this Win32 timer fires again while the dialog is still open and
+    # re-enters _handle_async_result, producing the "result dialog pops twice"
+    # symptom. Guard re-entry for the whole tick.
+    if monitor.get("busy"):
+        return
+    monitor["busy"] = True
     job_dir = monitor["state"]["_job_dir"]
     try:
         if time.time() > monitor["deadline"]:
@@ -3113,6 +3123,8 @@ def _async_monitor_tick(monitor):
             title="nnInteractive Failed",
             ui_blocking=True,
         )
+    finally:
+        monitor["busy"] = False
 
 
 def _start_win32_async_result_monitor(image, target, state, config, poll_seconds, timeout_seconds):
@@ -3331,6 +3343,21 @@ def _handle_async_result(image, target, state):
     current_hash = _mask_sha256(target, state.get("shape"))
     expected_hash = result.get("expected_target_sha256")
     if current_hash != expected_hash:
+        _mimics_log(
+            logging.WARNING,
+            "nnInteractive result treated as stale: target hash changed during inference. "
+            "expected={0} current={1} target_pixels={2} state_shape={3} result_shape={4} "
+            "state_expected={5} target_guid={6} state_target_guid={7}.".format(
+                expected_hash,
+                current_hash,
+                int(getattr(target, "number_of_pixels", -1)),
+                state.get("shape"),
+                result.get("shape"),
+                state.get("expected_target_sha256"),
+                _object_id(target),
+                state.get("target_guid"),
+            ),
+        )
         answer = mimics.dialogs.question_box(
             message=(
                 "The target Mask changed while nnInteractive was running.\n\n"
@@ -3344,7 +3371,12 @@ def _handle_async_result(image, target, state):
         if answer == BUTTON_START_CURRENT:
             _close_async_job(target, state, "target_changed")
             return "restart"
-        return "waiting"
+        # Cancel: the stale result is unusable, so close the session instead of
+        # leaving it active. A lingering session would make _select_session_masks
+        # force in_place next time, hiding the "overwrite / new mask" choice, and
+        # "waiting" would keep re-reading the same result file and re-prompting.
+        _close_async_job(target, state, "target_changed_cancelled")
+        return "ready"
 
     output_path = result.get("output_path")
     if not output_path or not os.path.isfile(output_path):
@@ -3363,7 +3395,11 @@ def _handle_async_result(image, target, state):
             _delete_mimics_object(obj)
     state["pending_sequence"] = None
     state["applied_sequence"] = int(sequence)
-    state["expected_target_sha256"] = _sha256_file(output_path)
+    # Re-anchor the stale check on the mask buffer we just wrote, not on the
+    # output file: the next prompt compares _mask_sha256(target, ...) against
+    # this value, so they must use the same source. _sha256_file(output_path)
+    # here made every subsequent prompt flag a "manual mask change" and restart.
+    state["expected_target_sha256"] = _mask_sha256(target, state.get("shape"))
     state["status"] = "ready"
     state["updated_at_epoch"] = time.time()
     _save_async_job(state)
@@ -3485,7 +3521,9 @@ def _run_async(image, target, config, source=None, auto_created=False, write_mod
                 _start_async_result_monitor(image, target, state, config)
             else:
                 _restore_base(target, state["base_path"], state["shape"])
-                state["expected_target_sha256"] = state["base_sha256"]
+                # Re-anchor on the restored mask buffer (see apply path): the
+                # next prompt compares _mask_sha256(target) to this value.
+                state["expected_target_sha256"] = _mask_sha256(target, state.get("shape"))
                 state["pending_sequence"] = None
                 state["status"] = "ready"
                 _save_async_job(state)
@@ -3496,7 +3534,8 @@ def _run_async(image, target, config, source=None, auto_created=False, write_mod
             state["status"] = "ready"
             _mimics_log(logging.INFO, "nnInteractive session reset to initial mask.")
             _restore_base(target, state["base_path"], state["shape"])
-            state["expected_target_sha256"] = state["base_sha256"]
+            # Re-anchor on the restored mask buffer (see apply path).
+            state["expected_target_sha256"] = _mask_sha256(target, state.get("shape"))
             # Clean up visual objects from previous prompts.
             job_dir = state.get("_job_dir")
             if job_dir and job_dir in _ASYNC_VISUAL_OBJECTS:
