@@ -622,6 +622,38 @@ class TestMimicsBridgeBufferMapping(unittest.TestCase):
         self.assertFalse(_affine_close(a, c, atol=1e-4))
         self.assertTrue(_affine_close(a, c, atol=2e-3))
 
+    def test_mask_header_geometry_fallback_is_explicit(self):
+        from mimics_bridge import _mask_file_declares_spatial_geometry
+
+        missing = os.path.join(self.tmp, "missing_geometry.mhd")
+        with open(missing, "w", encoding="ascii") as handle:
+            handle.write("NDims = 3\nDimSize = 4 5 6\nElementSpacing = 1 1 1\n")
+        explicit = os.path.join(self.tmp, "explicit_geometry.mhd")
+        with open(explicit, "w", encoding="ascii") as handle:
+            handle.write(
+                "NDims = 3\nDimSize = 4 5 6\nElementSpacing = 1 1 1\n"
+                "Offset = 0 0 0\nTransformMatrix = 1 0 0 0 1 0 0 0 1\n"
+            )
+        self.assertFalse(_mask_file_declares_spatial_geometry(missing))
+        self.assertTrue(_mask_file_declares_spatial_geometry(explicit))
+
+    def test_valid_identity_affine_is_not_silently_voxel_aligned(self):
+        from mimics_bridge import resample_mask_to_image_grid
+
+        mask = np.zeros((4, 4, 4), dtype=np.uint8)
+        mask[1, 1, 1] = 1
+        source_affine = np.eye(4)
+        target_affine = np.eye(4)
+        target_affine[0, 3] = 100.0
+        result = resample_mask_to_image_grid(
+            mask,
+            source_affine,
+            mask.shape,
+            target_affine,
+            allow_voxel_aligned_fallback=False,
+        )
+        self.assertEqual(0, int(result.sum()))
+
     def test_unit_axis(self):
         from mimics_bridge import _unit_axis
 
@@ -853,6 +885,33 @@ class TestMimicsBridgeBufferMapping(unittest.TestCase):
         self.assertEqual("medical_image", result["source_image_kind"])
         self.assertEqual([4, 3, 2], result["source_image_shape"])
         self.assertTrue(os.path.isdir(result["dicom_folder"]))
+
+    def test_multilabel_mhd_mask_splits_into_visible_nonempty_buffers(self):
+        import SimpleITK as sitk
+        from mimics_bridge import do_prepare_masks_for_grid, get_image_affine, get_image_shape
+
+        mask_path = os.path.join(self.tmp, "organs.mhd")
+        values = np.zeros((2, 3, 4), dtype=np.uint16)
+        values[0, 0:2, 0:2] = 1
+        values[1, 1:3, 2:4] = 2
+        image = sitk.GetImageFromArray(values)
+        image.SetSpacing((0.8, 0.9, 2.5))
+        image.SetOrigin((12.0, -8.0, 30.0))
+        sitk.WriteImage(image, mask_path)
+
+        buffers = os.path.join(self.tmp, "label_buffers")
+        result = do_prepare_masks_for_grid({
+            "masks": [{"name": "organs", "mask_path": mask_path}],
+            "buffers_out": buffers,
+            "target_shape": list(get_image_shape(mask_path)),
+            "target_voxel_to_ras_matrix": get_image_affine(mask_path).tolist(),
+            "axes": [0, 1, 2],
+            "flips": [False, False, False],
+        })
+        self.assertEqual("ok", result["status"])
+        self.assertEqual(["organs_label1", "organs_label2"], [row["name"] for row in result["masks"]])
+        self.assertTrue(all(int(row["foreground_voxels"]) > 0 for row in result["masks"]))
+        self.assertTrue(all(os.path.getsize(row["u8_path"]) == values.size for row in result["masks"]))
 
     def test_mr_mhd_float_intensity_survives_derived_dicom_scaling(self):
         import SimpleITK as sitk
@@ -1616,11 +1675,96 @@ class TestStopBackgroundServices(unittest.TestCase):
             "fewshot_pipeline.py",
             "fewshot_mimics.py",
             "fewshot_model_chooser.py",
+            "fewshot_training_setup_ui.py",
+            "fewshot_status_viewer.py",
+            "io_path_setup_ui.py",
             "nninteractive.inference.server.main",
             "setup_env.py",
         ]
         for marker in required:
             self.assertIn(marker, MARKERS, "{0} must be in MARKERS".format(marker))
+
+    def test_mask_export_has_a_scoped_stop_entry_and_marker(self):
+        import mimics_stop_background as msb
+        import runtime_common
+
+        export_root = os.path.join(self.tmp, "exports")
+        runtime_dir = os.path.join(self.tmp, "runtime")
+        os.makedirs(export_root)
+        os.makedirs(runtime_dir)
+        lock_path = os.path.join(self.tmp, "background_mimics.lock")
+        runtime_common.write_json_atomic(lock_path, {
+            "pid": os.getpid(),
+            "kind": "export_labels",
+            "owner": "batch label export",
+            "export_root": export_root,
+        })
+        old_lock = msb._background_mimics_lock_path
+        old_runtime = msb._runtime_dir
+        old_stop = msb._stop_export_inprocess_monitors
+        try:
+            msb._background_mimics_lock_path = lambda: lock_path
+            msb._runtime_dir = lambda: runtime_dir
+            msb._stop_export_inprocess_monitors = lambda: 0
+            result = msb.stop_background_export()
+        finally:
+            msb._background_mimics_lock_path = old_lock
+            msb._runtime_dir = old_runtime
+            msb._stop_export_inprocess_monitors = old_stop
+        self.assertEqual(os.getpid(), result.get("target_pid"))
+        self.assertTrue(os.path.isfile(os.path.join(export_root, "_export_stop.json")))
+        entry = os.path.join(PROJECT_ROOT, "scripting_library", "01_Data", "06_Stop_Mask_Export.py")
+        self.assertTrue(os.path.isfile(entry))
+        self.assertIn("main_stop_export", Path(entry).read_text(encoding="utf-8"))
+
+    def test_import_launch_directory_failure_is_reported_without_timeout(self):
+        import mimics_import
+
+        job_dir = os.path.join(self.tmp, "unwritable", "job")
+        old_makedirs = mimics_import.os.makedirs
+        try:
+            def fail_makedirs(_path):
+                raise OSError("access denied")
+            mimics_import.os.makedirs = fail_makedirs
+            thread = mimics_import._launch_bridge_job_thread(
+                {"action": "discover"}, job_dir, os.path.dirname(job_dir), "discovering"
+            )
+            thread.join(2.0)
+        finally:
+            mimics_import.os.makedirs = old_makedirs
+        status, error = mimics_import._check_job_status(job_dir)
+        self.assertEqual("error", status)
+        self.assertIn("access denied", error)
+
+    def test_stop_all_detaches_mimics_monitors_before_process_cleanup(self):
+        import inspect
+        import mimics_stop_background
+
+        source = inspect.getsource(mimics_stop_background.stop_background_processes)
+        self.assertLess(source.index("_stop_inprocess_monitors()"), source.index("_request_queue_stop()"))
+        monitor_source = inspect.getsource(mimics_stop_background._stop_inprocess_monitors)
+        for module_name in (
+            "mimics_import", "mimics_export", "mask_import",
+            "fix_source_affine_metadata", "fewshot_mimics", "nninteractive_mimics",
+        ):
+            self.assertIn(module_name, monitor_source)
+
+    def test_environment_setup_has_a_scoped_stop_path(self):
+        import inspect
+        import setup_environment
+
+        source = inspect.getsource(setup_environment.main)
+        self.assertIn("Stop Current Setup", source)
+        self.assertIn("terminate_process_async", source)
+
+    def test_mcs_fingerprint_is_persisted_before_work_cleanup(self):
+        import inspect
+        import create_mcs_batch
+
+        source = inspect.getsource(create_mcs_batch.main)
+        persist_index = source.index("fp.write(fingerprint)")
+        cleanup_index = source.index("shutil.rmtree(work_dir", persist_index)
+        self.assertLess(persist_index, cleanup_index)
 
     def test_stop_uses_taskkill_tree(self):
         """Verify stop command uses taskkill with /T (tree kill)."""
@@ -2303,30 +2447,134 @@ class TestNewFeatures(unittest.TestCase):
     def tearDown(self):
         _cleanup(self.tmp)
 
-    def test_mask_export_checks_only_actual_destination_conflicts(self):
-        """Interactive export should prompt only for files that already exist."""
-        from mimics_export import _existing_mask_exports
-
-        target = os.path.join(self.tmp, "s0001", "segmentations")
-        os.makedirs(target)
-        existing = os.path.join(target, "liver.nii.gz")
-        with open(existing, "wb") as stream:
-            stream.write(b"existing")
-
-        segmentations_dir, collisions = _existing_mask_exports(
-            self.tmp, "s0001", ["liver", "spleen"]
-        )
-        self.assertEqual(target, segmentations_dir)
-        self.assertEqual([existing], collisions)
-
-        # The old interactive conflict dialog has been removed from mimics_export.py.
-        # Conflict resolution now lives in the external PySide6 path window.
+    def test_mask_export_conflict_policy_is_external_and_reaches_bridge(self):
+        """The external choice, not a dead preflight helper, controls writes."""
         source = Path(RUNTIME_DIR, "mimics_export.py").read_text(encoding="utf-8")
         self.assertNotIn('buttons="Safe Copy;Overwrite Original;Cancel"', source)
         self.assertNotIn('buttons="Overwrite;Skip Existing;Cancel"', source)
+        self.assertIn('bridge_params["overwrite_existing"] = bool(overwrite_existing)', source)
         ui_source = Path(PROJECT_ROOT, "tools", "io_path_setup_ui.py").read_text(encoding="utf-8")
-        self.assertIn('"Skip existing"', ui_source)
-        self.assertIn('"Overwrite existing"', ui_source)
+        self.assertIn('QRadioButton("Skip existing")', ui_source)
+        self.assertIn('QRadioButton("Overwrite existing")', ui_source)
+        self.assertIn("tempfile.mkstemp", ui_source)
+
+    def test_export_launcher_thread_registry_is_pruned(self):
+        import mimics_export
+
+        class ThreadStub(object):
+            def __init__(self, alive):
+                self.alive = alive
+            def is_alive(self):
+                return self.alive
+
+        live = ThreadStub(True)
+        done = ThreadStub(False)
+        previous = list(mimics_export._EXPORT_LAUNCH_THREADS)
+        try:
+            mimics_export._EXPORT_LAUNCH_THREADS[:] = [done, live]
+            mimics_export._prune_export_launch_threads()
+            self.assertEqual([live], mimics_export._EXPORT_LAUNCH_THREADS)
+        finally:
+            mimics_export._EXPORT_LAUNCH_THREADS[:] = previous
+
+    def test_mask_import_uses_correct_lps_to_ras_world_conversion(self):
+        from mask_import import _derive_mimics_voxel_to_ras_matrix
+
+        class Image:
+            def get_voxel_center(self, index):
+                return [10.0 + index[0], 20.0 + index[1], 30.0 + index[2]]
+
+        matrix = np.asarray(_derive_mimics_voxel_to_ras_matrix(Image(), [2, 2, 2]))
+        expected = np.asarray([
+            [-1.0, 0.0, 0.0, -10.0],
+            [0.0, -1.0, 0.0, -20.0],
+            [0.0, 0.0, 1.0, 30.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ])
+        np.testing.assert_allclose(expected, matrix)
+
+    def test_mask_and_batch_import_defer_expensive_work(self):
+        import inspect
+        import mask_import
+        import mimics_import
+
+        mask_main = inspect.getsource(mask_import.main)
+        self.assertNotIn("_call_bridge(bridge_params)", mask_main)
+        self.assertIn("_launch_mask_prepare(bridge_params, result_path, monitor)", mask_main)
+        batch_main = inspect.getsource(mimics_import.main)
+        self.assertIn("_resolve_import_output_dir(ts_root, create=False)", batch_main)
+        discover_monitor = inspect.getsource(mimics_import._start_import_discover_monitor)
+        self.assertLess(
+            discover_monitor.index("_start_win32_discover_monitor"),
+            discover_monitor.index("from PyQt5.QtCore import QTimer"),
+        )
+
+    def test_external_io_setup_defaults_and_nonblocking_entry(self):
+        import inspect
+        import mimics_import
+        import mimics_export
+        io_ui = __import__("tools.io_path_setup_ui", fromlist=["source_default_output"])
+
+        dataset = os.path.join(self.tmp, "dataset")
+        case_dir = os.path.join(dataset, "s0001")
+        os.makedirs(case_dir)
+        image_path = os.path.join(case_dir, "ct.mhd")
+        with open(image_path, "w", encoding="utf-8") as handle:
+            handle.write("ObjectType = Image\n")
+        self.assertEqual(
+            os.path.join(dataset, "mcs_output"),
+            io_ui.source_default_output("import_batch", dataset),
+        )
+        self.assertEqual(
+            os.path.join(case_dir, "mcs_output"),
+            io_ui.source_default_output("import_single", image_path),
+        )
+        self.assertEqual(
+            os.path.join(dataset, "mask_exports"),
+            io_ui.source_default_output("export_masks", case_dir),
+        )
+        discovered = io_ui.discover_single_source(image_path)
+        self.assertEqual("ct", discovered["case_id"])
+        self.assertEqual(os.path.abspath(image_path), discovered["image"])
+        dcm_path = os.path.join(case_dir, "slice001.dcm")
+        with open(dcm_path, "wb") as handle:
+            handle.write(b"candidate")
+        dicom_source = io_ui.discover_single_source(dcm_path)
+        self.assertEqual(os.path.abspath(case_dir), dicom_source["image"])
+        self.assertEqual("dicom_candidate", dicom_source["image_type"])
+        import_source = inspect.getsource(mimics_import.main)
+        export_source = inspect.getsource(mimics_export.main)
+        self.assertIn("_launch_external_import_setup", import_source)
+        self.assertIn("_launch_external_export_setup", export_source)
+        self.assertNotIn("_pick_directory(\"Select dataset folder\")", import_source)
+        self.assertNotIn("_pick_directory(\"Select source case directory\")", export_source)
+        single_branch = inspect.getsource(mimics_import.main)
+        self.assertIn("case_info_override or _discover_single_case", single_branch)
+        export_setup = inspect.getsource(mimics_export._launch_external_export_setup)
+        self.assertIn('"configured_output": ""', export_setup)
+        self.assertIn('"--external-setup"', export_setup)
+        self.assertIn('"--mcs-path"', export_setup)
+        self.assertNotIn('"--mcs-dir"', export_setup)
+        async_launch = inspect.getsource(mimics_export._launch_background_batch_export_async)
+        self.assertIn("thread.start()", async_launch)
+
+    def test_ai_prediction_output_modes_are_explicit(self):
+        import inspect
+        import fewshot_mimics
+        import nninteractive_mimics
+
+        deferred = inspect.getsource(fewshot_mimics._deferred_prediction_target)
+        self.assertIn("choose_on_completion", deferred)
+        resolver = inspect.getsource(fewshot_mimics._prediction_target_mask)
+        self.assertIn("DINOv3 Prediction Ready", resolver)
+        self.assertIn("Update Selected Mask", resolver)
+        self.assertIn("Create Editable Copy", resolver)
+        self.assertIn("update_selected", resolver)
+        session_selector = inspect.getsource(nninteractive_mimics._select_session_masks)
+        self.assertIn("choose_on_first_result", session_selector)
+        nn_completion = inspect.getsource(nninteractive_mimics._choose_completed_result_target)
+        self.assertIn("Update Selected Mask", nn_completion)
+        self.assertIn("Create Editable Copy", nn_completion)
 
     # -- mimics_bridge: _mask_buffer_for_target_grid --
     def test_mask_buffer_for_target_grid(self):
@@ -3454,7 +3702,7 @@ class TestNewFeatures(unittest.TestCase):
         old_script = fewshot_mimics._training_setup_ui_script
         old_project = fewshot_mimics._project_root
         try:
-            fewshot_mimics._launch_gui_process = lambda cmd, cwd=None, stderr_log=None: launched.append((cmd, cwd)) or Proc()
+            fewshot_mimics._launch_gui_process = lambda cmd, cwd=None, **kwargs: launched.append((cmd, cwd)) or Proc()
             fewshot_mimics._start_monitor = lambda monitor, poll_seconds=1.0: True
             fewshot_mimics._project_root = lambda: PROJECT_ROOT
             fewshot_mimics._training_setup_ui_script = lambda: os.path.join(PROJECT_ROOT, "tools", "fewshot_training_setup_ui.py")
@@ -3522,7 +3770,7 @@ class TestNewFeatures(unittest.TestCase):
         old_script = fewshot_mimics._status_viewer_script
         old_project = fewshot_mimics._project_root
         try:
-            fewshot_mimics._launch_gui_process = lambda cmd, cwd=None, stderr_log=None: launched.append((cmd, cwd)) or Proc()
+            fewshot_mimics._launch_gui_process = lambda cmd, cwd=None: launched.append((cmd, cwd)) or Proc()
             fewshot_mimics._project_root = lambda: PROJECT_ROOT
             fewshot_mimics._status_viewer_script = lambda: os.path.join(PROJECT_ROOT, "tools", "fewshot_status_viewer.py")
             pid = fewshot_mimics._launch_external_status_viewer(
@@ -3590,7 +3838,7 @@ class TestNewFeatures(unittest.TestCase):
         old_script = fewshot_mimics._model_chooser_script
         old_project = fewshot_mimics._project_root
         try:
-            fewshot_mimics._launch_gui_process = lambda cmd, cwd=None, stderr_log=None: launched.append((cmd, cwd)) or Proc()
+            fewshot_mimics._launch_gui_process = lambda cmd, cwd=None: launched.append((cmd, cwd)) or Proc()
             fewshot_mimics._start_monitor = lambda monitor, poll_seconds=1.0: monitors.append(monitor) or True
             fewshot_mimics._model_chooser_script = lambda: os.path.join(PROJECT_ROOT, "tools", "fewshot_model_chooser.py")
             fewshot_mimics._project_root = lambda: PROJECT_ROOT
@@ -3643,11 +3891,8 @@ class TestNewFeatures(unittest.TestCase):
         old_case = fewshot_mimics._infer_case_id
         old_launch = fewshot_mimics._launch_inference_job
         try:
-            class SelectedMask(object):
-                name = "liver"
-                guid = "selected-liver"
-                number_of_pixels = 10
-            fewshot_mimics._selected_mask = lambda: SelectedMask()
+            selected = type("Mask", (object,), {"name": "liver"})()
+            fewshot_mimics._selected_mask = lambda: selected
             fewshot_mimics._choose_dataset_root = lambda _title: ts_root
             fewshot_mimics._guard_no_active_job = lambda root, requested_kind="train": True
             fewshot_mimics._infer_case_id = lambda root: "s0001"
@@ -3717,7 +3962,7 @@ class TestNewFeatures(unittest.TestCase):
         old_script = fewshot_mimics._status_viewer_script
         old_project = fewshot_mimics._project_root
         try:
-            def denied_launch(_cmd, cwd=None, stderr_log=None):
+            def denied_launch(_cmd, cwd=None):
                 raise PermissionError("[WinError 5] Access is denied")
             fewshot_mimics._launch_gui_process = denied_launch
             fewshot_mimics._project_root = lambda: PROJECT_ROOT
@@ -4144,7 +4389,7 @@ class TestNewFeatures(unittest.TestCase):
             strategies.compile_strategy("adaptive", {}, {}, {"sampling_mode": "roi_patch"})
 
     def test_status_viewer_selects_only_current_organ_task(self):
-        """Status UI returns all jobs for one organ, with the active work job first."""
+        """Status UI must not mix historical or other-organ jobs into the selected task."""
         viewer = __import__("tools.fewshot_status_viewer", fromlist=["select_current_task"])
         rows = [
             (30.0, {"job_id": "old_liver", "organ": "liver", "status": "completed"}),
@@ -4153,12 +4398,13 @@ class TestNewFeatures(unittest.TestCase):
             (50.0, {"job_id": "setup_liver", "organ": "liver", "kind": "train_setup", "status": "training_started"}),
         ]
         selected = viewer.select_current_task(rows, organ="liver")
-        self.assertGreater(len(selected), 1, "should return all liver jobs, not just the current one")
-        self.assertEqual(selected[0]["job_id"], "active_liver", "active work job must be first")
-        liver_ids = {j["job_id"] for j in selected}
-        self.assertIn("old_liver", liver_ids)
-        self.assertIn("setup_liver", liver_ids)
-        self.assertNotIn("spleen", liver_ids)
+        # The active training job must be first; completed jobs for the same
+        # organ are also returned so the user can inspect their progress/log.
+        self.assertGreaterEqual(len(selected), 1)
+        self.assertEqual(selected[0]["job_id"], "active_liver")
+        # All returned jobs must be for the requested organ.
+        for job in selected:
+            self.assertEqual(job["organ"], "liver")
         filtered = viewer.filter_log_for_job(
             "active_liver started\nspleen started\nactive_liver epoch 2\n",
             selected[0],

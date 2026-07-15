@@ -9,6 +9,7 @@
 | Import Masks | 外部掩码文件注入当前项目 | **项目已打开** + 已激活图像 + 掩码文件（.nii.gz/.mha/.nrrd） |
 | Export Masks | 当前项目掩码导出为 .nii.gz | **项目已保存为 .mcs** + 已激活图像 + 有掩码 |
 | Stop Import Queue | 停止正在运行的批量导入 | 有批量导入正在运行 |
+| Stop Mask Export | 停止当前 Mimics-Script 掩码导出 | 有掩码导出正在运行 |
 
 ## AI 分割
 
@@ -43,5 +44,5 @@
 ## 快速参考
 
 - **遇锁资源**：先点「Stop All Owned Services」，再开新功能
-- **导出无法取消**：导出在独立 Mimics 进程中运行，任务管理器终止
+- **停止导出**：使用「Stop Mask Export」，它只停止本项目创建的掩码导出进程
 - **掩码识别时**：仅在结果对话框显示时切换工具，光标等待点击时不要切

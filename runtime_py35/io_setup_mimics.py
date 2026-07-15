@@ -4,6 +4,7 @@
 from __future__ import print_function
 
 import json
+import logging
 import os
 import subprocess
 import time
@@ -15,6 +16,9 @@ import runtime_common
 
 
 _IO_SETUP_MONITORS = {}
+# Track which monitors have already shown an alert, so a dying process does
+# not trigger a stack of non-blocking message boxes ("endless popups").
+_ALERTED = set()
 
 
 def _project_root():
@@ -36,6 +40,19 @@ def _message(title, message):
         mimics.dialogs.message_box(title=title, message=message, ui_blocking=False)
     except Exception:
         pass
+
+
+def _alert_once(key, title, message):
+    """Show a non-blocking message at most once per monitor key.
+
+    The external window is polled on a timer; if the child process dies while
+    the user keeps clicking around Mimics, every tick would otherwise spawn
+    another message box, producing the "endless popups" symptom.
+    """
+    if key in _ALERTED:
+        return
+    _ALERTED.add(key)
+    _message(title, message)
 
 
 def _read_json(path):
@@ -65,7 +82,29 @@ def _stop_monitor(key):
             pass
 
 
+def _stop_all_monitors():
+    """Tear down every active monitor and kill its child process.
+
+    Without this, each call to launch() stacks another Win32 timer on Mimics'
+    UI thread and another pythonw process; a few clicks in and there are half
+    a dozen QApplication instances fighting for the message loop, which is the
+    real cause of the "freezes, crashes, endless popups" symptom.
+    """
+    for key in list(_IO_SETUP_MONITORS.keys()):
+        monitor = _IO_SETUP_MONITORS.get(key)
+        if not monitor:
+            continue
+        process = monitor.get("process")
+        if process is not None and process.poll() is None:
+            runtime_common.terminate_process_async(process=process, graceful_seconds=2.0)
+        _stop_monitor(key)
+    _ALERTED.clear()
+
+
 def _tick(monitor):
+    # Guard against re-entry. _start_win32_monitor runs this on Mimics' UI
+    # thread via a Win32 timer callback; a bare exception here would unwind
+    # through ctypes and crash Mimics, so the whole body is guarded.
     if monitor.get("busy"):
         return
     monitor["busy"] = True
@@ -73,14 +112,26 @@ def _tick(monitor):
         key = monitor["key"]
         if time.time() > monitor["deadline"]:
             _stop_monitor(key)
-            _message("Path Setup", "The external path window timed out. No task was started.")
+            _alert_once(key, "Path Setup", "The external path window timed out. No task was started.")
             return
         status = _read_json(monitor["status_path"])
         if not status or status.get("status") in ("opening", "configuring"):
             process = monitor.get("process")
             if process is not None and process.poll() is not None:
+                exit_code = process.poll()
                 _stop_monitor(key)
-                _message("Path Setup", "The external path window closed unexpectedly. No task was started.")
+                # Distinguish "user closed the window" (exit 0) from a crash.
+                if exit_code == 0:
+                    try:
+                        mimics.logging.log_user_message(
+                            level=logging.INFO,
+                            message="Path selection was cancelled; no task was started.",
+                        )
+                    except Exception:
+                        pass
+                else:
+                    _alert_once(key, "Path Setup",
+                                "The external path window exited unexpectedly (code {0}). No task was started.".format(exit_code))
             return
         state = status.get("status")
         if state in ("cancelled", "closed"):
@@ -88,15 +139,22 @@ def _tick(monitor):
             return
         if state == "failed":
             _stop_monitor(key)
-            _message("Path Setup", status.get("error", "The external path window failed."))
+            _alert_once(key, "Path Setup", status.get("error", "The external path window failed."))
             return
         if state != "submitted":
             return
         _stop_monitor(key)
+        _ALERTED.discard(key)  # submitted cleanly; clear so a later error can still alert
         try:
             monitor["on_submit"](status.get("selection") or {})
         except Exception as exc:
-            _message("Could Not Start", str(exc))
+            _alert_once(key, "Could Not Start", str(exc))
+    except Exception:
+        # Never let an exception escape into the Win32 timer callback.
+        try:
+            _stop_monitor(monitor.get("key"))
+        except Exception:
+            pass
     finally:
         monitor["busy"] = False
 
@@ -127,7 +185,7 @@ def _start_win32_monitor(monitor, poll_seconds):
         return False
 
 
-def _start_monitor(monitor, poll_seconds=0.5):
+def _start_monitor(monitor, poll_seconds=2.0):
     _IO_SETUP_MONITORS[monitor["key"]] = monitor
     if _start_win32_monitor(monitor, poll_seconds):
         return True
@@ -135,7 +193,7 @@ def _start_monitor(monitor, poll_seconds=0.5):
         from PyQt5.QtCore import QTimer
         timer = QTimer()
         timer.timeout.connect(lambda: _tick(monitor))
-        timer.start(max(250, int(poll_seconds * 1000)))
+        timer.start(max(1000, int(poll_seconds * 1000)))
         monitor["timer"] = timer
         return True
     except Exception:
@@ -144,6 +202,9 @@ def _start_monitor(monitor, poll_seconds=0.5):
 
 
 def launch(mode, python_exe, context, on_submit, timeout_seconds=3600):
+    # Reuse is single-window: tear down any previous path window (and its
+    # pythonw + Win32 timer) before starting a new one so they never pile up.
+    _stop_all_monitors()
     root = _project_root()
     runtime_dir = os.path.join(root, ".mimics_runtime", "io_setup")
     if not os.path.isdir(runtime_dir):
@@ -167,15 +228,30 @@ def launch(mode, python_exe, context, on_submit, timeout_seconds=3600):
         pythonw = os.path.join(os.path.dirname(command[0]), "pythonw.exe")
         if os.path.isfile(pythonw):
             command[0] = pythonw
-    process = subprocess.Popen(
-        command,
-        cwd=root,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        env=runtime_common.background_env(include_itk=False),
-        **runtime_common.background_process_kwargs()
-    )
+    # Launch as a visible GUI process. background_process_kwargs() sets
+    # CREATE_NO_WINDOW + SW_HIDE, which is meant for hidden background scripts
+    # and would suppress the PySide window, leaving status stuck on "opening".
+    env = runtime_common.background_env(include_itk=False)
+    stderr_log = os.path.join(runtime_dir, setup_id + "_stderr.log")
+    try:
+        stderr_handle = open(stderr_log, "w", encoding="utf-8")
+    except Exception:
+        stderr_handle = None
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=root,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=stderr_handle if stderr_handle is not None else subprocess.DEVNULL,
+            env=env,
+        )
+    finally:
+        if stderr_handle is not None:
+            try:
+                stderr_handle.close()
+            except Exception:
+                pass
     monitor = {
         "key": setup_id,
         "status_path": status_path,
