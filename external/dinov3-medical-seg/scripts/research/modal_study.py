@@ -166,6 +166,25 @@ def _phase_job_specs(plan, phase: str, confirmation_ids=None) -> list:
     raise ValueError("phase must be 'screen' or 'confirm', got {}".format(phase))
 
 
+def _confirmation_ids(plan, selected_ids, weak_tasks=None, degenerate_tasks=None) -> list:
+    """Confirmation candidate ids: selected winners plus references, minus reserved tasks.
+
+    A reserved task is either degenerate (Tier-0 collapse) or weak (screen winner
+    below a guardrail). Both are excluded per-task rather than blocking the whole
+    confirm run, so a clearly passing task (e.g. aorta) still advances to the
+    confirmation folds even when a sibling task (e.g. scapula) is reserved for a
+    rescue study. Pure and side-effect free so the exclusion is unit-testable.
+    """
+    reserved = set(weak_tasks or []) | set(degenerate_tasks or [])
+    task_by_candidate = {candidate["id"]: candidate["task"] for candidate in plan["candidates"]}
+    reference_ids = [candidate["id"] for candidate in plan["candidates"] if candidate.get("is_reference", False)]
+    return sorted(
+        candidate_id
+        for candidate_id in (set(selected_ids) | set(reference_ids))
+        if task_by_candidate.get(candidate_id) not in reserved
+    )
+
+
 # Pinned to the versions verified locally against the uploaded ViT-B weights.
 # The weights are ``model_type: dinov3_vit`` / ``DINOv3ViTModel``; the
 # ``DINOv3ViTBackbone`` class that ``src/models/backbone.py`` imports at module
@@ -190,7 +209,9 @@ if modal is not None:
     source_volume = modal.Volume.from_name("dinov3-medical-source", create_if_missing=True)
     benchmark_volume = modal.Volume.from_name("dinov3-medical-benchmark", create_if_missing=True)
     model_volume = modal.Volume.from_name("dinov3-medical-models", create_if_missing=True)
-    result_volume = modal.Volume.from_name("dinov3-medical-results", create_if_missing=True)
+    # Focused studies write to a v2 Volume so distinct jobs can commit safely
+    # at higher concurrency. The original v1 result Volume is left untouched.
+    result_volume = modal.Volume.from_name("dinov3-medical-results-v2", create_if_missing=True, version=2)
     image = (
         modal.Image.debian_slim(python_version="3.11")
         .apt_install("git")
@@ -206,13 +227,16 @@ if modal is not None:
     def _run(command: list[str]) -> None:
         subprocess.run(command, cwd="/opt/dinov3-medical-seg", check=True)
 
-    def _runtime_plan(benchmark_subdir: str, result_subdir: str) -> Path:
+    def _runtime_plan(benchmark_subdir: str, result_subdir: str, plan_name: str) -> Path:
         import yaml
 
-        plan_path = Path("/opt/dinov3-medical-seg/config/research/multi_organ_study.yaml")
+        plan_path = Path("/opt/dinov3-medical-seg/config/research") / plan_name
         plan = yaml.safe_load(plan_path.read_text(encoding="utf-8"))
         study = plan["study"]
-        study["base_config"] = "/opt/dinov3-medical-seg/config/research/ct_fewshot_base.yaml"
+        base_config = Path(str(study["base_config"]))
+        if not base_config.is_absolute():
+            base_config = Path("/opt/dinov3-medical-seg") / base_config
+        study["base_config"] = str(base_config)
         study["benchmark_root"] = "/vol/benchmark/{}".format(benchmark_subdir)
         study["results_root"] = "/vol/results/{}".format(result_subdir)
         runtime_plan = Path("/tmp/runtime_study.yaml")
@@ -339,9 +363,10 @@ if modal is not None:
         benchmark_subdir: str,
         result_subdir: str,
         selection_subpath: str = "selected_candidates.json",
+        plan_name: str = "multi_organ_study.yaml",
     ):
         """Run one resumable GPU experiment, including train and evaluation."""
-        runtime_plan = _runtime_plan(benchmark_subdir, result_subdir)
+        runtime_plan = _runtime_plan(benchmark_subdir, result_subdir, plan_name)
         command = [
             sys.executable,
             "scripts/research/run_ablations.py",
@@ -375,9 +400,10 @@ if modal is not None:
             "/vol/results": result_volume,
         },
     )
-    def regime_run(task: str, cell_id: str, benchmark_subdir: str, result_subdir: str):
+    def regime_run(task: str, cell_id: str, benchmark_subdir: str, result_subdir: str,
+                   plan_name: str = "multi_organ_study.yaml"):
         """Run one Tier-0 regime cell (train+eval) with a per-job commit."""
-        runtime_plan = _runtime_plan(benchmark_subdir, result_subdir)
+        runtime_plan = _runtime_plan(benchmark_subdir, result_subdir, plan_name)
         _run([
             sys.executable,
             "scripts/research/run_ablations.py",
@@ -408,13 +434,15 @@ if modal is not None:
         training_seed: int,
         benchmark_subdir: str,
         result_subdir: str,
+        plan_name: str = "multi_organ_study.yaml",
     ):
         """Run the explicit coarse-to-fine ablation for a tiny-structure task."""
         import yaml
 
-        base = yaml.safe_load(
-            Path("/opt/dinov3-medical-seg/config/research/ct_fewshot_base.yaml").read_text(encoding="utf-8")
-        )
+        plan = yaml.safe_load((Path("/opt/dinov3-medical-seg/config/research") / plan_name).read_text(encoding="utf-8"))
+        base_path_config = Path("/opt/dinov3-medical-seg") / plan["study"]["base_config"]
+        from src.utils.config import load_config
+        base = load_config(str(base_path_config), {})
         base["model"]["model_path"] = "/vol/models/dinov3-vitb16"
         base.setdefault("training", {})["seed"] = int(training_seed)
         base_path = Path("/tmp/two_stage_base.yaml")
@@ -484,28 +512,109 @@ if modal is not None:
         ])
         result_volume.commit()
 
-    @app.function(image=image, cpu=1, volumes={"/vol/results": result_volume})
-    def select_screening(result_subdir: str, selection_subpath: str = "selected_candidates.json"):
-        """Persist screen-fold choices before any confirmation function starts."""
+    @app.function(
+        image=image,
+        gpu="A10",
+        cpu=8,
+        memory=32768,
+        timeout=3 * 60 * 60,
+        volumes={
+            "/vol/benchmark": benchmark_volume,
+            "/vol/models": model_volume,
+            "/vol/results": result_volume,
+        },
+    )
+    def diagnose_inference_gap_single(
+        candidate_id: str,
+        task: str,
+        fold: int,
+        study_id: str,
+        result_subdir: str,
+        benchmark_subdir: str,
+        thresholds: str = "0.3,0.4,0.5,0.6,0.7,0.8,0.9",
+    ):
+        """Isolate the screen train-val vs deploy inference gap on one checkpoint.
+
+        Reuses the retained screen checkpoint (no retraining) to compare whole-ROI
+        inference against a sliding-window threshold sweep, answering whether the
+        deployable path can recover the train-val Dice by tuning the decision rule.
+        """
+        run_root = (
+            Path("/vol/results") / result_subdir / "screen" / candidate_id
+            / "fold_{:02d}".format(fold) / "k5" / "seed_{}".format(20260711)
+        )
+        checkpoint = (
+            Path("/vol/results") / result_subdir / "artifacts" / "research_runs" /
+            study_id / "screen" / candidate_id /
+            "fold_{:02d}".format(fold) / "k5" / "seed_{}".format(20260711)
+            / "checkpoints" / "best_model.pth"
+        )
+        output_path = run_root / "inference_gap.json"
+        if output_path.is_file():
+            print("Skipping completed inference-gap diagnosis: {}".format(output_path))
+            return
+        if not checkpoint.is_file():
+            raise SystemExit("Screen checkpoint missing: {}".format(checkpoint))
         _run([
+            sys.executable,
+            "scripts/research/diagnose_inference_gap.py",
+            "--config", str(run_root / "config.yaml"),
+            "--checkpoint", str(checkpoint),
+            "--data-root", "/vol/benchmark/{}/{}/fold_{:02d}".format(benchmark_subdir, task, fold),
+            "--output", str(output_path),
+            "--split", "Val",
+            "--thresholds", thresholds,
+        ])
+        result_volume.commit()
+
+    @app.function(image=image, cpu=1, volumes={"/vol/results": result_volume})
+    def select_screening(result_subdir: str, selection_subpath: str = "selected_candidates.json",
+                         plan_name: str = "multi_organ_study.yaml"):
+        """Persist screen-fold choices before any confirmation function starts."""
+        command = [
             sys.executable,
             "scripts/research/select_screening_winners.py",
             "--results-root", "/vol/results/{}".format(result_subdir),
             "--output", "/vol/results/{}/{}".format(result_subdir, selection_subpath),
-        ])
+            "--plan", "/opt/dinov3-medical-seg/config/research/{}".format(plan_name),
+        ]
+        regime_path = Path("/vol/results") / result_subdir / "selected_regime.json"
+        if regime_path.is_file():
+            command.extend(["--regime", str(regime_path)])
+        _run(command)
         result_volume.commit()
         payload = json.loads((Path("/vol/results") / result_subdir / selection_subpath).read_text(encoding="utf-8"))
-        return payload["selected_candidate_ids"]
+        # Weak tasks are reserved per-task (excluded from confirmation like a
+        # degenerate task), NOT a whole-run block: a passing task must still
+        # confirm even when a sibling task's screen winner is below guardrail.
+        if payload.get("weak_tasks"):
+            print("Weak screen task(s) reserved for a rescue study (excluded from confirm): {}".format(
+                payload["weak_tasks"]))
+        return {
+            "selected_candidate_ids": payload["selected_candidate_ids"],
+            "weak_tasks": payload.get("weak_tasks", []),
+        }
 
     @app.function(image=image, cpu=1, volumes={"/vol/results": result_volume})
     def read_selected_ids(result_subdir: str, selection_subpath: str = "selected_candidates.json"):
-        """Read selected_candidate_ids from the results Volume for confirm fan-out."""
+        """Read the screen selection from the Volume for confirm fan-out.
+
+        Returns both the selected candidate ids and the weak-task list so the
+        driver can reserve weak tasks per-task rather than blocking the whole
+        confirmation run.
+        """
         path = Path("/vol/results") / result_subdir / selection_subpath
         if not path.is_file():
             raise SystemExit(
                 "Selection file missing: {}. Run --action select after screening.".format(path)
             )
-        return json.loads(path.read_text(encoding="utf-8"))["selected_candidate_ids"]
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("schema_version") != "dinov3_medical_screen_selection.v2":
+            raise SystemExit("Selection is stale or predates complete-matrix validation: {}".format(path))
+        return {
+            "selected_candidate_ids": payload["selected_candidate_ids"],
+            "weak_tasks": payload.get("weak_tasks", []),
+        }
 
     @app.function(image=image, cpu=1, volumes={"/vol/results": result_volume})
     def select_regime(result_subdir: str, regime_subpath: str = "selected_regime.json"):
@@ -548,25 +657,27 @@ if modal is not None:
     def main(
         action: str = "screen",
         source_subdir: str = "totalsegmentator/source",
-        # Reuse the validated v3 benchmark folds; write formal results under v4.
+        # Reuse validated benchmark folds; focused results use a new v2 Volume.
         benchmark_subdir: str = "totalseg_multi_organ_v3",
-        result_subdir: str = "totalseg_multi_organ_v4",
+        result_subdir: str = "focused_5shot_v1",
         selection_subpath: str = "selected_candidates.json",
         max_runs: int = 0,
-        max_concurrency: int = 4,
+        max_concurrency: int = 8,
         cascade_task: str = "adrenal_gland_right",
+        plan_name: str = "focused_5shot_study.yaml",
+        candidate_id: str = "",
     ):
         # Bounded async fan-out: .spawn() is non-blocking; _bounded_spawn keeps at
-        # most max_concurrency jobs in flight so the local driver is not pinned
-        # serialising the matrix and Volume v1 stays under ~5 concurrent commits.
+        # most max_concurrency jobs in flight. Results live on Volume v2 and
+        # every job owns a disjoint directory, so eight writers are safe.
         def _spawn_regime(spec):
-            return regime_run.spawn(spec["task"], spec["cell_id"], benchmark_subdir, result_subdir)
+            return regime_run.spawn(spec["task"], spec["cell_id"], benchmark_subdir, result_subdir, plan_name)
 
         def _spawn_run_single(phase):
             def launch(spec):
                 return run_single.spawn(
                     phase, spec["candidate_id"], spec["fold"], spec["support_count"],
-                    spec["training_seed"], benchmark_subdir, result_subdir, selection_subpath,
+                    spec["training_seed"], benchmark_subdir, result_subdir, selection_subpath, plan_name,
                 )
             return launch
 
@@ -578,9 +689,7 @@ if modal is not None:
         elif action == "regime":
             import yaml
 
-            plan = yaml.safe_load(
-                (PROJECT_ROOT / "config/research/multi_organ_study.yaml").read_text(encoding="utf-8")
-            )
+            plan = yaml.safe_load((PROJECT_ROOT / "config/research" / plan_name).read_text(encoding="utf-8"))
             specs = _phase_job_specs(plan, "regime")
             if max_runs:
                 specs = specs[:max_runs]
@@ -598,15 +707,32 @@ if modal is not None:
             # before designing a dedicated localizer.
             import yaml
 
-            plan = yaml.safe_load(
-                (PROJECT_ROOT / "config/research/multi_organ_study.yaml").read_text(encoding="utf-8")
-            )
+            plan = yaml.safe_load((PROJECT_ROOT / "config/research" / plan_name).read_text(encoding="utf-8"))
             study = plan["study"]
             task = cascade_task
             fold = int(study["screening_fold"])
             seed = int((study.get("screening_training_seeds") or [0])[0])
             print("Running cascade diagnostic: {} fold_{:02d} k5 seed_{}".format(task, fold, seed))
-            run_two_stage_single.remote(task, fold, 5, seed, benchmark_subdir, result_subdir)
+            run_two_stage_single.remote(task, fold, 5, seed, benchmark_subdir, result_subdir, plan_name)
+        elif action == "diagnose-inference":
+            # Isolate the screen train-val vs deploy inference gap for one
+            # candidate (whole-ROI vs sliding-window threshold sweep) on the
+            # retained checkpoint. Requires --candidate-id.
+            import yaml
+
+            if not candidate_id:
+                raise ValueError("diagnose-inference requires --candidate-id")
+            plan = yaml.safe_load((PROJECT_ROOT / "config/research" / plan_name).read_text(encoding="utf-8"))
+            study = plan["study"]
+            task_by_candidate = {c["id"]: c["task"] for c in plan["candidates"]}
+            if candidate_id not in task_by_candidate:
+                raise ValueError("Unknown candidate: {}".format(candidate_id))
+            fold = int(study["screening_fold"])
+            print("Diagnosing inference gap: {} fold_{:02d}".format(candidate_id, fold))
+            diagnose_inference_gap_single.remote(
+                candidate_id, task_by_candidate[candidate_id], fold,
+                study["id"], result_subdir, benchmark_subdir,
+            )
         elif action == "verify-image":
             info = verify_image.remote()
             print("image verification: {}".format(json.dumps(info)))
@@ -619,15 +745,17 @@ if modal is not None:
             # with --max-runs / max_runs to measure one job before the matrix.
             import yaml
 
-            plan = yaml.safe_load(
-                (PROJECT_ROOT / "config/research/multi_organ_study.yaml").read_text(encoding="utf-8")
-            )
+            plan = yaml.safe_load((PROJECT_ROOT / "config/research" / plan_name).read_text(encoding="utf-8"))
             # Drop candidates whose task collapsed in Tier-0 (reserved, not blocked).
-            regime = read_selected_regime.remote(result_subdir)
+            regime = read_selected_regime.remote(result_subdir) if plan["study"].get("require_regime", True) else {}
             degenerate = set(regime.get("degenerate_tasks", []))
             task_by_candidate = {c["id"]: c["task"] for c in plan["candidates"]}
             specs = [s for s in _phase_job_specs(plan, "screen")
                      if task_by_candidate.get(s["candidate_id"]) not in degenerate]
+            if candidate_id:
+                specs = [spec for spec in specs if spec["candidate_id"] == candidate_id]
+                if not specs:
+                    raise ValueError("Unknown or excluded screen candidate: {}".format(candidate_id))
             if degenerate:
                 print("Excluding degenerate task(s) from screen (reserved): {}".format(sorted(degenerate)))
             if max_runs:
@@ -637,31 +765,33 @@ if modal is not None:
         elif action == "confirm":
             import yaml
 
-            plan = yaml.safe_load(
-                (PROJECT_ROOT / "config/research/multi_organ_study.yaml").read_text(encoding="utf-8")
-            )
+            plan = yaml.safe_load((PROJECT_ROOT / "config/research" / plan_name).read_text(encoding="utf-8"))
             if not selection_subpath:
                 raise ValueError("confirm requires selection_subpath pointing at selected_candidates.json")
             # The selection file lives on the results Volume; read it remotely.
-            selected_ids = read_selected_ids.remote(result_subdir, selection_subpath)
-            regime = read_selected_regime.remote(result_subdir)
-            degenerate = set(regime.get("degenerate_tasks", []))
-            task_by_candidate = {c["id"]: c["task"] for c in plan["candidates"]}
-            reference_ids = [c["id"] for c in plan["candidates"] if c.get("is_reference", False)]
-            confirmation_ids = sorted(
-                cid for cid in (set(selected_ids) | set(reference_ids))
-                if task_by_candidate.get(cid) not in degenerate
-            )
-            if degenerate:
-                print("Excluding degenerate task(s) from confirm (reserved): {}".format(sorted(degenerate)))
+            selection = read_selected_ids.remote(result_subdir, selection_subpath)
+            selected_ids = selection["selected_candidate_ids"]
+            weak_tasks = selection.get("weak_tasks", [])
+            regime = read_selected_regime.remote(result_subdir) if plan["study"].get("require_regime", True) else {}
+            degenerate = sorted(set(regime.get("degenerate_tasks", [])))
+            confirmation_ids = _confirmation_ids(
+                plan, selected_ids, weak_tasks=weak_tasks, degenerate_tasks=degenerate)
+            reserved = sorted(set(weak_tasks) | set(degenerate))
+            if reserved:
+                print("Excluding reserved task(s) from confirm (degenerate {} / weak {}): {}".format(
+                    degenerate, sorted(weak_tasks), reserved))
             specs = _phase_job_specs(plan, "confirm", confirmation_ids)
+            if candidate_id:
+                specs = [spec for spec in specs if spec["candidate_id"] == candidate_id]
+                if not specs:
+                    raise ValueError("Unknown or excluded confirm candidate: {}".format(candidate_id))
             if max_runs:
                 specs = specs[:max_runs]
             print("Dispatching {} confirm job(s) for ids {} at concurrency {}".format(
                 len(specs), confirmation_ids, max_concurrency))
             _bounded_spawn(specs, _spawn_run_single("confirm"), _poll, max_concurrency=max_concurrency)
         elif action == "select":
-            select_screening.remote(result_subdir, selection_subpath)
+            select_screening.remote(result_subdir, selection_subpath, plan_name)
         elif action == "full":
             # A single command drives the dependency graph. Jobs are separate
             # Modal functions so each checkpoint is committed and the command
@@ -670,29 +800,33 @@ if modal is not None:
 
             prepare_benchmark.remote(source_subdir, benchmark_subdir)
             preflight_trainability.remote(result_subdir)
-            plan = yaml.safe_load(
-                (PROJECT_ROOT / "config/research/multi_organ_study.yaml").read_text(encoding="utf-8")
-            )
+            plan = yaml.safe_load((PROJECT_ROOT / "config/research" / plan_name).read_text(encoding="utf-8"))
             study = plan["study"]
             # Tier-0: choose each organ's sampling+loss regime before the factor
             # screen, so every screen candidate builds on a trainable baseline.
             _bounded_spawn(_phase_job_specs(plan, "regime"), _spawn_regime, _poll, max_concurrency=max_concurrency)
             regime_payload = select_regime.remote(result_subdir)
-            if regime_payload.get("degenerate_tasks"):
-                raise SystemExit(
-                    "Refusing to screen: degenerate regime tasks {}; inspect Tier-0 before continuing".format(
-                        regime_payload["degenerate_tasks"]))
+            degenerate = set(regime_payload.get("degenerate_tasks", []))
+            if degenerate:
+                print("Excluding degenerate task(s) from screen/confirm; rescue study required: {}".format(
+                    sorted(degenerate)))
             if regime_payload.get("needs_more_seeds_tasks"):
                 print("NOTE: near-tie regimes need more seeds before final claims: {}".format(
                     regime_payload["needs_more_seeds_tasks"]))
             # Screen: one run_single per (candidate, screen seed) via the shared
             # spec builder, so the full path and the standalone screen action
             # cannot drift apart.
-            _bounded_spawn(_phase_job_specs(plan, "screen"), _spawn_run_single("screen"), _poll, max_concurrency=max_concurrency)
-            selected_ids = select_screening.remote(result_subdir, selection_subpath)
             task_by_candidate = {candidate["id"]: candidate["task"] for candidate in plan["candidates"]}
-            reference_ids = [candidate["id"] for candidate in plan["candidates"] if candidate.get("is_reference", False)]
-            confirmation_ids = sorted(set(selected_ids) | set(reference_ids))
+            screen_specs = [
+                spec for spec in _phase_job_specs(plan, "screen")
+                if task_by_candidate.get(spec["candidate_id"]) not in degenerate
+            ]
+            _bounded_spawn(screen_specs, _spawn_run_single("screen"), _poll, max_concurrency=max_concurrency)
+            selection = select_screening.remote(result_subdir, selection_subpath, plan_name)
+            selected_ids = selection["selected_candidate_ids"]
+            weak_tasks = selection.get("weak_tasks", [])
+            confirmation_ids = _confirmation_ids(
+                plan, selected_ids, weak_tasks=weak_tasks, degenerate_tasks=sorted(degenerate))
             _bounded_spawn(
                 _phase_job_specs(plan, "confirm", confirmation_ids),
                 _spawn_run_single("confirm"), _poll, max_concurrency=max_concurrency,
@@ -700,9 +834,15 @@ if modal is not None:
             # Inference-mode selection is intentionally evaluated only on the
             # screen winner; the frozen reference is already confirmed for
             # effect-size comparison and does not multiply this post-hoc grid.
+            # Weak/degenerate winners are reserved, so post-hoc inference tuning
+            # only runs for confirmed winners.
+            reserved_tasks = set(weak_tasks) | set(degenerate)
+            task_by_candidate = {candidate["id"]: candidate["task"] for candidate in plan["candidates"]}
             inference_specs = [
                 {"candidate_id": candidate_id, "fold": int(fold)}
-                for candidate_id in selected_ids for fold in study["confirmation_folds"]
+                for candidate_id in selected_ids
+                if task_by_candidate.get(candidate_id) not in reserved_tasks
+                for fold in study["confirmation_folds"]
             ]
             _bounded_spawn(
                 inference_specs,
@@ -724,7 +864,7 @@ if modal is not None:
                 two_stage_specs,
                 lambda s: run_two_stage_single.spawn(
                     "adrenal_gland_right", s["fold"], s["support_count"], s["training_seed"],
-                    benchmark_subdir, result_subdir),
+                    benchmark_subdir, result_subdir, plan_name),
                 _poll, max_concurrency=max_concurrency,
             )
         else:

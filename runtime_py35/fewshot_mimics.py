@@ -33,13 +33,13 @@ BUTTON_STATUS = "Show Status"
 BUTTON_STOP = "Stop Running Job"
 BUTTON_CANCEL = "Cancel"
 BUTTON_UPDATE_SELECTED = "Update Selected Mask"
+BUTTON_CREATE_NEW = "Create New Editable Mask"
 SOURCE_IMAGE_PATH_METADATA = "mimics_script.source_image_path"
 SOURCE_IMAGE_SHAPE_METADATA = "mimics_script.source_image_shape"
 SOURCE_VOXEL_TO_RAS_MATRIX_METADATA = "mimics_script.source_voxel_to_ras_matrix"
 MIMICS_VOXEL_TO_RAS_MATRIX_METADATA = "mimics_script.mimics_voxel_to_ras_matrix"
 
 _MONITORS = {}
-_GUI_PROCESSES = {}
 _QT_CHECK_DONE = False
 _QT_CHECK_RESULT = False
 
@@ -1072,9 +1072,9 @@ def _guard_no_active_job(ts_root, requested_kind="train"):
     wait_text = _resource_wait_text(job)
     detail = "\n{0}".format(wait_text) if wait_text else ""
     mimics.dialogs.message_box(
-        "A DINOv3 task is already running for this dataset.\n\n"
-        "Task: {0}\nType: {1}\nOrgan: {2}\nStatus: {3}{4}\n\n"
-        "Use 04 Show Status Results or 05 Stop AI Task before starting another GPU task.".format(
+        "A few-shot job is already running for this dataset.\n\n"
+        "Job: {0}\nType: {1}\nOrgan: {2}\nStatus: {3}{4}\n\n"
+        "Use Show Status or Stop Latest Job before starting another GPU job.".format(
             job.get("job_id", os.path.basename(path or "")),
             job.get("kind", "?"),
             job.get("organ", "?"),
@@ -1480,26 +1480,6 @@ def _launch_gui_process(cmd, cwd=None, stderr_log=None):
     return proc
 
 
-def _existing_gui_process(key):
-    process = _GUI_PROCESSES.get(key)
-    if process is None:
-        return None
-    try:
-        if process.poll() is None:
-            return process
-    except Exception:
-        pass
-    _GUI_PROCESSES.pop(key, None)
-    return None
-
-
-def _ai_draft_name(value):
-    name = str(value or "Result").strip() or "Result"
-    if name.lower().endswith(" - ai draft"):
-        return name
-    return name + " - AI Draft"
-
-
 def _launch_external_advanced_training(config, organ, ts_root):
     """Open the advanced training setup outside the Mimics process.
 
@@ -1561,7 +1541,7 @@ def _launch_external_advanced_training(config, organ, ts_root):
         failed = _read_json(status_path, status) or status
         failed["status"] = "failed"
         failed["error"] = (
-            "Could not start the external training setup process. "
+            "Could not start the external Advanced setup process. "
             "Python: {0}. Script: {1}. Context: {2}. Error: {3}".format(
                 python_exe,
                 script,
@@ -1598,7 +1578,7 @@ def _launch_external_advanced_training(config, organ, ts_root):
         if failed.get("status") != "failed":
             failed["status"] = "failed"
             base_msg = (
-                "Could not open the external training setup window. "
+                "Could not open the external Advanced setup window. "
                 "The process exited immediately."
             )
             if stderr_detail:
@@ -1611,7 +1591,7 @@ def _launch_external_advanced_training(config, organ, ts_root):
             except Exception:
                 pass
         mimics.dialogs.message_box(
-            "Could not open the external training setup UI.\n\n{0}".format(
+            "Could not open the external Advanced setup UI.\n\n{0}".format(
                 failed.get("error", "Unknown startup error")
             ),
             title=TITLE,
@@ -1681,7 +1661,7 @@ def _train_model(advanced=False):
                 )
                 if not bool(config.get("advanced_ui_fallback_to_internal", True)):
                     mimics.dialogs.message_box(
-                        "Could not open the external training setup UI.\n\n{0}".format(exc),
+                        "Could not open the external Advanced setup UI.\n\n{0}".format(exc),
                         title=TITLE,
                         ui_blocking=False,
                     )
@@ -1896,8 +1876,8 @@ def _launch_inference_job(config, ts_root, case_id, organ, selected_model=None, 
         "deadline": time.time() + 12 * 60 * 60,
         "bridge_started": False,
         "bridge_job_dir": os.path.join(_workspace(ts_root), "jobs", job_id + "_apply"),
-        "mask_name": (target_spec or {}).get("target_name", _ai_draft_name(organ)),
-        "prediction_target": target_spec or {"mode": "create_new", "target_name": _ai_draft_name(organ)},
+        "mask_name": (target_spec or {}).get("target_name", "AI_" + organ),
+        "prediction_target": target_spec or {"mode": "create_new", "target_name": "AI_" + organ},
         "launch_project_path": launch_project_path,
         "target_grid": target_grid,
         "waiting_to_apply_logged": False,
@@ -2222,15 +2202,24 @@ def _prediction_target_mask(monitor):
         )
         if decision == BUTTON_UPDATE_SELECTED:
             spec["mode"] = "update_selected"
-        else:
-            if decision != "Create Editable Copy":
-                _mimics_log(logging.INFO, "DINOv3 result destination was closed; using a new editable Mask to preserve the selected Mask.")
+        elif decision == "Create Editable Copy":
             spec["mode"] = "create_new"
-            spec["target_name"] = _ai_draft_name(spec.get("target_name") or monitor.get("organ", "Result"))
+            spec["target_name"] = "AI_" + (
+                spec.get("target_name") or monitor.get("organ", "Result")
+            )
+        else:
+            _mimics_log(
+                logging.INFO,
+                "DINOv3 result destination was closed; using a new editable Mask to preserve the selected Mask.",
+            )
+            spec["mode"] = "create_new"
+            spec["target_name"] = "AI_" + (
+                spec.get("target_name") or monitor.get("organ", "Result")
+            )
         monitor["prediction_target"] = spec
     if spec.get("mode") != "update_selected":
         return _new_prediction_mask(
-            spec.get("target_name") or monitor.get("mask_name") or _ai_draft_name("Result")
+            spec.get("target_name") or monitor.get("mask_name") or "AI_Result"
         )
 
     target_guid = str(spec.get("target_guid", "") or "")
@@ -2248,7 +2237,7 @@ def _prediction_target_mask(monitor):
             logging.WARNING,
             "The selected prediction target no longer exists; creating a new editable Mask instead.",
         )
-        return _new_prediction_mask(_ai_draft_name(target_name or monitor.get("organ", "Result")))
+        return _new_prediction_mask("AI_" + (target_name or monitor.get("organ", "Result")))
 
     initial_count = spec.get("initial_pixel_count")
     current_count = int(getattr(target, "number_of_pixels", 0) or 0)
@@ -2257,7 +2246,7 @@ def _prediction_target_mask(monitor):
             logging.WARNING,
             "The selected Mask changed while prediction was running. Manual edits were preserved and the prediction will be applied to a new Mask.",
         )
-        return _new_prediction_mask(_ai_draft_name(target_name or monitor.get("organ", "Result")))
+        return _new_prediction_mask("AI_" + (target_name or monitor.get("organ", "Result")))
     return target
 
 
@@ -2309,7 +2298,7 @@ def _monitor_setup_tick(monitor, status):
     line = _format_job_line(status)
     if line and line != monitor.get("last_line"):
         monitor["last_line"] = line
-        _mimics_log(logging.INFO, "DINOv3 training setup status: {0}".format(line))
+        _mimics_log(logging.INFO, "DINOv3 advanced setup status: {0}".format(line))
     if state == "training_started":
         training_status_path = status.get("training_status_path")
         training_job_id = status.get("training_job_id", "?")
@@ -2319,7 +2308,7 @@ def _monitor_setup_tick(monitor, status):
             monitor["last_line"] = ""
             _mimics_log(
                 logging.INFO,
-                "DINOv3 training started from the external setup. Task: {0}. Status: {1}".format(
+                "DINOv3 training started from external Advanced setup. Job: {0}. Status: {1}".format(
                     training_job_id,
                     training_status_path,
                 ),
@@ -2327,7 +2316,7 @@ def _monitor_setup_tick(monitor, status):
             return
         _stop_monitor(key)
         mimics.dialogs.message_box(
-            "Training setup reported that training started, but its status file was not found.\n\n"
+            "Advanced setup reported training started, but the training status file was not found.\n\n"
             "{0}".format(training_status_path or "(missing path)"),
             title=TITLE,
             ui_blocking=False,
@@ -2335,12 +2324,12 @@ def _monitor_setup_tick(monitor, status):
         return
     if state in ("closed", "cancelled"):
         _stop_monitor(key)
-        _mimics_log(logging.INFO, "DINOv3 training setup closed before launching training.")
+        _mimics_log(logging.INFO, "DINOv3 advanced setup closed before launching training.")
         return
     if state == "failed":
         _stop_monitor(key)
         mimics.dialogs.message_box(
-            "DINOv3 training setup failed.\n\n{0}".format(status.get("error", "Unknown error")),
+            "DINOv3 Advanced setup failed.\n\n{0}".format(status.get("error", "Unknown error")),
             title=TITLE,
             ui_blocking=False,
         )
@@ -2411,7 +2400,7 @@ def _monitor_tick(monitor):
     if time.time() > monitor.get("deadline", 0):
         _stop_monitor(key)
         if monitor.get("kind") == "train":
-            mimics.dialogs.message_box("Training status monitoring timed out. The background task may still be running; use 04 Show Status Results.", title=TITLE, ui_blocking=False)
+            mimics.dialogs.message_box("Few-shot training monitor timed out. The background job may still be running; use Show Status.", title=TITLE, ui_blocking=False)
         elif monitor.get("kind") == "train_setup":
             mimics.dialogs.message_box("Few-shot advanced setup monitor timed out. The setup window or background job may still be running; use Show Status.", title=TITLE, ui_blocking=False)
         elif monitor.get("kind") == "model_choice":
@@ -2847,14 +2836,6 @@ def _launch_external_status_viewer(config, ts_root):
         selected_organ = _selected_organ() or ""
     except Exception:
         selected_organ = ""
-    gui_key = "status:{0}:{1}".format(os.path.abspath(workspace), _safe_slug(selected_organ))
-    existing = _existing_gui_process(gui_key)
-    if existing is not None:
-        _mimics_log(
-            logging.INFO,
-            "DINOv3 status viewer is already open for this task (PID {0}).".format(existing.pid),
-        )
-        return existing.pid
     context_path = os.path.join(
         jobs_dir,
         "status_viewer_{0}_{1}_context.json".format(time.strftime("%Y%m%dT%H%M%S"), uuid.uuid4().hex[:8]),
@@ -2888,7 +2869,21 @@ def _launch_external_status_viewer(config, ts_root):
             )
         )
 
-    _GUI_PROCESSES[gui_key] = process
+    # Catch immediate startup failures that otherwise look like "opened" but
+    # no window appears.
+    for _ in range(8):
+        if process.poll() is not None:
+            break
+        time.sleep(0.1)
+    if process.poll() is not None:
+        raise RuntimeError(
+            "DINOv3 status viewer process exited immediately. "
+            "Python: {0}. Script: {1}. Context: {2}".format(
+                python_exe,
+                script,
+                context_path,
+            )
+        )
 
     _mimics_log(
         logging.INFO,
@@ -2900,7 +2895,7 @@ def _launch_external_status_viewer(config, ts_root):
 def _show_status_text(ts_root):
     jobs_dir = os.path.join(_workspace(ts_root), "jobs")
     if not os.path.isdir(jobs_dir):
-        mimics.dialogs.message_box("No DINOv3 task history was found.", title=TITLE, ui_blocking=False)
+        mimics.dialogs.message_box("No few-shot jobs were found.", title=TITLE, ui_blocking=False)
         return 0
     jobs = []
     for name in os.listdir(jobs_dir):
@@ -2943,9 +2938,9 @@ def _show_status_text(ts_root):
     active_path, active_job = _latest_active_job(ts_root)
     if active_job:
         lines.append("")
-        lines.append("The active task can be stopped with 05 Stop AI Task.")
+        lines.append("Active job can be stopped with Stop Latest Job.")
     mimics.dialogs.message_box(
-        "\n".join(lines) if lines else "No DINOv3 task history was found.",
+        "\n".join(lines) if lines else "No few-shot jobs were found.",
         title=TITLE,
         ui_blocking=False,
     )
@@ -2990,12 +2985,12 @@ def _stop_latest_job():
         return 1
     status_path, job = _latest_active_job(ts_root)
     if not job:
-        mimics.dialogs.message_box("No running DINOv3 task was found.", title=TITLE, ui_blocking=False)
+        mimics.dialogs.message_box("No running few-shot job was found.", title=TITLE, ui_blocking=False)
         return 0
     answer = mimics.dialogs.question_box(
         message=(
-            "Stop the active DINOv3 task?\n\n"
-            "Task: {0}\nType: {1}\nOrgan: {2}\nStatus: {3}"
+            "Stop the latest few-shot job?\n\n"
+            "Job: {0}\nType: {1}\nOrgan: {2}\nStatus: {3}"
         ).format(
             job.get("job_id", "?"),
             job.get("kind", "?"),
@@ -3018,18 +3013,12 @@ def _stop_latest_job():
         except Exception as exc:
             job["cancel_marker_error"] = str(exc)
             _mimics_log(logging.WARNING, "Could not write DINOv3 cancel marker: {0}".format(exc))
-    # The controller already implements cooperative cancellation: training
-    # gets a 30-second checkpoint/cleanup window and inference exits promptly.
-    # Killing every PID here bypassed that cleanup and could leave checkpoints,
-    # logs, CUDA contexts, and resource locks in inconsistent states.
-    controller_pid = job.get("controller_pid") or job.get("launcher_pid")
-    controller_alive = bool(controller_pid and _process_exists(controller_pid))
     killed = []
-    if not controller_alive:
-        worker_pid = job.get("pid")
-        if worker_pid and _terminate_process_tree(worker_pid):
-            killed.append(str(worker_pid))
-    job["status"] = "cancelling" if controller_alive else "cancelled"
+    for key in ("pid", "controller_pid", "launcher_pid"):
+        pid = job.get(key)
+        if pid and _terminate_process_tree(pid):
+            killed.append(str(pid))
+    job["status"] = "cancelled"
     job["cancel_requested_at_epoch"] = time.time()
     job["cancelled_pids"] = killed
     job["updated_at_epoch"] = time.time()
@@ -3039,11 +3028,7 @@ def _stop_latest_job():
         except Exception as exc:
             _mimics_log(logging.WARNING, "Could not update DINOv3 job status after stop: {0}".format(exc))
     mimics.dialogs.message_box(
-        (
-            "Stop requested for {0}.\n\n"
-            "The task is releasing its model, files, and GPU lock. "
-            "Show Status will report Cancelled when cleanup is complete."
-        ).format(job.get("job_id", "?")),
+        "Stop request submitted for job:\n{0}".format(job.get("job_id", "?")),
         title=TITLE,
         ui_blocking=False,
     )

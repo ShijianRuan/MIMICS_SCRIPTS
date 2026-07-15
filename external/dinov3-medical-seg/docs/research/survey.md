@@ -3,6 +3,8 @@
 > **文档版本**: v1.0 (2026-06-26)
 > **适用读者**: 从事医学图像分割研究、计划基于 DINOv3 实现微调框架的研究者与工程师
 > **核心问题**: 如何利用 DINOv3 预训练视觉基础模型的稠密视觉特征，通过高效微调方法实现高精度的医学图像分割
+>
+> **实现状态说明（2026-07-11）**：本文的文献综述仍可作为研究背景，但第 6 节中的旧代码路径和历史配置不再是当前实现说明。当前代码、验证状态和可执行实验以 `../dinov3_medical_ecosystem_report.md`、`multi_organ_fewshot_study.md` 与 `verification_coverage.md` 为准。
 
 ---
 
@@ -863,11 +865,11 @@ data_strategy:
 | 阶段 | 实现位置 | 当前行为 |
 |------|----------|----------|
 | 文件读取 | `src/data/dataset_3d.py` | 读取 NIfTI `.nii` / `.nii.gz`；当前未实现 DICOM、NRRD、MHA 直接读取 |
-| 强度归一化 | `MedicalVolumeDataset._load_pair` + `src/data/preprocessing.py` | 若 `data.modality` 为 `ct` 或 `mri`，调用 modality-aware normalization；否则使用 dataset 默认 `minmax` |
-| CT 归一化 | `normalize_by_modality(..., modality="ct")` | 0.5/99.5 percentile clipping；若 label foreground 存在，用 foreground mean/std 做 z-score |
-| MRI 归一化 | `normalize_by_modality(..., modality="mri")` | 全 volume z-score |
-| spacing 重采样 | `resample_to_target_spacing` | 仅当配置里设置 `data.target_spacing` 时启用；当前主要消融配置未设置 |
-| 平面 resize | `MedicalVolumeDataset._resize_slices` | 将每张 slice resize 到 `data.img_size`；多数消融为 `[224,224]`，早期 `synthstrip_frozen.yaml` 为 `[64,64]` |
+| 强度归一化 | `src/data/dataset_3d.py::normalize_volume` / `build_input_channels` | 当前 CT 采用显式 fixed window 或 3-window 映射到 `[0,1]`；不读取 label。非 CT 使用 image-only robust percentile mapping。 |
+| CT 归一化 | `normalize_volume(..., modality="ct")` | 固定临床窗后映射 `[0,1]`；不使用 foreground label 统计量。 |
+| MRI 归一化 | `normalize_volume(..., modality!="ct")` | image-only robust percentile mapping；MRI 结论仍需相应数据验证。 |
+| spacing 重采样 | `src/data/spatial.py::resample_pair_to_spacing` | 仅当配置 `data.target_spacing` 时启用；图像线性、标签 nearest 且重采样到同一 image grid。 |
+| 平面 resize | `prepare_model_input` | 将模型输入 resize 到显式 `data.img_size`；实际 DINO patch grid 不再强制回退到 backbone 的历史 `image_size=224`。 |
 | 训练增强 | `src/data/augmentation.py` | 仅当 `augmentation.enabled=true` 时启用 gamma、brightness、Gaussian noise、flip、affine；elastic 默认关闭 |
 | DINOv3 输入构造 | `src/models/encoder_3d.py` | 单通道 slice `repeat(1,3,1,1)` 复制成 3 通道，再 resize 到 backbone `image_size=224` |
 | 3D 特征组织 | `SliceWiseEncoder3D.forward` | 每张 slice 独立过 DINOv3，提取 `out_indices=[2,5,8,11]`，沿 z 轴堆叠成 pseudo-3D features |

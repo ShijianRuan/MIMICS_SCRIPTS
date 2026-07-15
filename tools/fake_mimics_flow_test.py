@@ -605,68 +605,6 @@ def test_export_masks_to_buffers(fake, tmp):
     return "exported 2 mask buffers with manifest and expected byte counts"
 
 
-def test_external_io_setup_routing(fake, tmp):
-    image = fake.reset_scene(image_shape=(2, 2, 2), minimum_value=0, maximum_value=100)
-    import_module = import_runtime_module("mimics_import")
-    export_module = import_runtime_module("mimics_export")
-    setup_module = import_runtime_module("io_setup_mimics")
-    captured = []
-    launched = []
-    old_launch = setup_module.launch
-    old_import_run = import_module._run_main_with_args
-    old_export_run = export_module._run_main_with_args
-    old_import_python = import_module._python_exe
-    old_export_python = export_module._python_exe
-    try:
-        def launch(mode, python_exe, context, callback, timeout_seconds=3600):
-            captured.append((mode, context))
-            if mode == "import_batch":
-                callback({"source_path": str(tmp / "dataset"), "output_path": str(tmp / "chosen_mcs")})
-            elif mode == "export_masks":
-                callback({
-                    "source_path": str(tmp / "dataset" / "s0001" / "ct.nii.gz"),
-                    "output_path": str(tmp / "chosen_labels"),
-                    "case_info": {
-                        "case_id": "s0001",
-                        "image": str(tmp / "dataset" / "s0001" / "ct.nii.gz"),
-                        "case_dir": str(tmp / "dataset" / "s0001"),
-                        "image_type": "medical_image",
-                        "masks": [],
-                    },
-                    "conflict_policy": "skip",
-                })
-            return 0
-
-        setup_module.launch = launch
-        import_module._python_exe = lambda: "external-python"
-        export_module._python_exe = lambda: "external-python"
-        import_module._run_main_with_args = lambda args, import_mode=None, case_info_override=None: launched.append(("import", list(args))) or 0
-        export_module._run_main_with_args = lambda args, source_info_override=None: launched.append(("export", list(args), source_info_override)) or 0
-        import_module._launch_external_import_setup(None)
-
-        project = tmp / "saved_projects" / "s0001.mcs"
-        fake.file.project_path = str(project)
-        image.metadata.create(export_module.SOURCE_IMAGE_PATH_METADATA, str(tmp / "dataset" / "s0001" / "ct.nii.gz"))
-        export_module._launch_external_export_setup()
-    finally:
-        setup_module.launch = old_launch
-        import_module._run_main_with_args = old_import_run
-        export_module._run_main_with_args = old_export_run
-        import_module._python_exe = old_import_python
-        export_module._python_exe = old_export_python
-
-    assert_equal(captured[0][0], "import_batch", "batch import setup mode")
-    assert_true("--output-dir" in launched[0][1], "chosen import output was not routed")
-    assert_true(str(tmp / "chosen_mcs") in launched[0][1], "chosen import output path missing")
-    assert_equal(captured[1][0], "export_masks", "mask export setup mode")
-    assert_true("--mcs-path" in launched[1][1], "current project path was not routed")
-    assert_true(str(project) in launched[1][1], "current project path is incorrect")
-    assert_true(str(tmp / "chosen_labels") in launched[1][1], "chosen label destination missing")
-    assert_true("--overwrite-source" not in launched[1][1], "skip policy became overwrite")
-    assert_equal(launched[1][2]["image"], str(tmp / "dataset" / "s0001" / "ct.nii.gz"), "explicit source image was not routed")
-    return "external PySide6 selections route explicit import/export paths"
-
-
 def test_async_mask_import_apply(fake, tmp):
     image = fake.reset_scene(image_shape=(2, 3, 4), minimum_value=0, maximum_value=100)
     fake.disable_gui_calls = 0
@@ -808,13 +746,28 @@ def test_nninteractive_derived_draft_session(fake, tmp):
     baseline_questions = len(fake.dialogs.questions)
     deferred = module._select_session_masks(image, {})
     assert_true(deferred["target"] is source, "default policy should not create an early Draft")
-    assert_equal(deferred["write_mode"], "choose_on_first_result", "default result destination should be deferred")
-    assert_equal(len(fake.dialogs.questions), baseline_questions, "starting nnInteractive should not ask for a result destination")
+    assert_equal(
+        deferred["write_mode"], "choose_on_first_result",
+        "default result destination should be deferred",
+    )
+    assert_equal(
+        len(fake.dialogs.questions), baseline_questions,
+        "starting nnInteractive should not ask for a result destination",
+    )
     fake.dialogs.question_answers.append("Create Editable Copy")
-    deferred_state = {"_job_dir": str(tmp / "deferred-job"), "write_mode": "choose_on_first_result"}
-    deferred_target = module._choose_completed_result_target(image, source, deferred_state, {"elapsed_seconds": 1.25})
+    deferred_state = {
+        "_job_dir": str(tmp / "deferred-job"),
+        "write_mode": "choose_on_first_result",
+    }
+    deferred_target = module._choose_completed_result_target(
+        image, source, deferred_state, {"elapsed_seconds": 1.25}
+    )
     assert_true(deferred_target is not source, "completion choice should create a new Draft")
     assert_equal(source.number_of_pixels, 12, "completion copy choice changed source Mask")
+    assert_equal(
+        deferred_state["target_guid"], deferred_target.guid,
+        "deferred session was not migrated to its Draft",
+    )
     fake.data.masks.delete(deferred_target)
     source.selected = True
 
@@ -916,7 +869,10 @@ def test_nninteractive_derived_draft_session(fake, tmp):
     finally:
         module._check_async_result_nonblocking = old_check
         module._stop_async_monitor = old_stop
-    assert_equal(len(fake.dialogs.messages), baseline_messages, "result application should not add a second completion notice")
+    assert_equal(
+        len(fake.dialogs.messages), baseline_messages,
+        "result application should not add a second completion notice",
+    )
     return "source snapshot and target Draft remain separate across async startup"
 
 
@@ -942,7 +898,9 @@ def test_fewshot_apply_prediction_and_stop(fake, tmp):
         "mimics_shape": [2, 2, 2],
         "foreground_voxels": 2,
     }), encoding="utf-8")
-    source_mask = FakeMask("liver", image=image, array=_u8_buffer((2, 2, 2), 1), selected=True)
+    source_mask = FakeMask(
+        "liver", image=image, array=_u8_buffer((2, 2, 2), 1), selected=True
+    )
     fake.data.masks.append(source_mask)
     fake.dialogs.question_answers.append(module.BUTTON_UPDATE_SELECTED)
     monitor = {
@@ -972,8 +930,16 @@ def test_fewshot_apply_prediction_and_stop(fake, tmp):
     assert_equal(len(applied), 1, "few-shot result mask count")
     assert_equal(applied[0].number_of_pixels, 2, "few-shot result foreground count")
     assert_true("fake-monitor" not in module._MONITORS, "few-shot monitor was not stopped")
-    completion_choices = [item for item in fake.dialogs.questions if item.get("title") == "DINOv3 Prediction Ready"]
+    completion_choices = [
+        item for item in fake.dialogs.questions
+        if item.get("title") == "DINOv3 Prediction Ready"
+    ]
     assert_equal(len(completion_choices), 1, "few-shot completion choice count")
+    assert_true(
+        "Update Selected Mask" in completion_choices[0]["buttons"]
+        and "Create Editable Copy" in completion_choices[0]["buttons"],
+        "few-shot completion destination buttons",
+    )
 
     fake.file.project_path = str(source_project)
     jobs_dir = ts_root / "fewshot_models" / "jobs"
@@ -1131,7 +1097,6 @@ def main(argv=None):
         tests.append(("mask identifier all-mask bounding-box scan", lambda: test_mask_identifier_all_mask_bbox_scan(fake, tmp / "mask_identifier")))
     if args.only in ("export", "all"):
         tests.append(("mask export buffer flow", lambda: test_export_masks_to_buffers(fake, tmp / "export")))
-        tests.append(("external I/O setup routing", lambda: test_external_io_setup_routing(fake, tmp / "io_setup")))
         tests.append(("asynchronous mask import apply", lambda: test_async_mask_import_apply(fake, tmp / "mask_import")))
     if args.only in ("nninteractive", "all"):
         tests.append(("nnInteractive Mimics-side buffer flow", lambda: test_nninteractive_fast_path_and_mask_buffer(fake, tmp / "nninteractive")))

@@ -79,10 +79,33 @@ class DINOv33DSegmentor(nn.Module):
         # ── 4. 3D Decoder ──
         feature_dims = [self.embed_dim] * len(cfg.get("out_indices", [2, 5, 8, 11]))
         self.decoder_type = dec_cfg.get("type", "segformer3d")
+
+        # z_smooth_sigma is configured in physical mm.  Convert to voxel
+        # units using the dataset's Z spacing so the same 6 mm value
+        # applies a comparable amount of smoothing regardless of whether
+        # the scan is thin-slice (0.5 mm) or thick-slice (5.0 mm).
+        z_smooth_sigma_mm = float(dec_cfg.get("z_smooth_sigma", 0.0))
+        z_smooth_sigma = 0.0
+        if z_smooth_sigma_mm > 0:
+            data_cfg = config.get("data", {})
+            target_spacing = data_cfg.get("target_spacing", [1.5, 1.0, 1.0])
+            z_spacing_mm = float(
+                target_spacing[0] if isinstance(target_spacing, (list, tuple)) else target_spacing
+            )
+            if z_spacing_mm <= 0:
+                raise ValueError("data.target_spacing Z must be positive for z_smooth_sigma")
+            sigma_voxels = z_smooth_sigma_mm / z_spacing_mm
+            # Clamp to a sensible voxel range: at least 1 voxel (don't
+            # undersmooth thin slices) and at most 8 voxels (don't
+            # obliterate small targets on thick slices with a 48 mm kernel).
+            sigma_voxels = max(1.0, min(8.0, sigma_voxels))
+            z_smooth_sigma = float(sigma_voxels)
+
         self.decoder_3d = DecoderFactory.create(
             self.decoder_type,
             feature_dims,
             num_classes=cfg["num_classes"],
+            z_smooth_sigma=z_smooth_sigma,
         )
         self.feature_augmentation = build_feature_augmentation(config.get("feature_augmentation"))
 

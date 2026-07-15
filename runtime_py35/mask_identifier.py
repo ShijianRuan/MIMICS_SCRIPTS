@@ -331,9 +331,9 @@ def main():
     # application. To shrink that dangerous waiting window, we never stay inside
     # indicate_coordinate between clicks: each click result is shown via a
     # NON-blocking question_box, during which the user is free to switch tools
-    # or adjust views. Only when the user explicitly chooses "Click Again" do we
+    # or adjust views. Only when the user explicitly chooses "Click again" do we
     # re-enter indicate_coordinate for the brief click window.
-    BUTTON_CLICK = "Click Again"
+    BUTTON_CLICK = "Click again"
     BUTTON_FINISH = "Finish"
 
     # Pre-flight confirmation: let the user prepare the view (and switch tools)
@@ -406,22 +406,6 @@ def main():
         else:
             message_body = "No mask at this point."
 
-        processed = int(result.get("checked", 0)) + int(result.get("bbox_skipped", 0))
-        summary = "Checked {0}/{1} masks in {2:.2f}s; read {3} voxel buffer(s).".format(
-            processed,
-            len(candidates),
-            float(result.get("elapsed", 0.0)),
-            int(result.get("checked", 0)),
-        )
-        notes = []
-        if result.get("unread"):
-            notes.append("{0} not scanned due to response limits".format(result.get("unread")))
-        if result.get("skipped"):
-            notes.append("{0} could not be read".format(len(result.get("skipped"))))
-        if notes:
-            summary += " " + "; ".join(notes) + "."
-        message_body += "\n\n" + summary
-
         answer = mimics.dialogs.question_box(
             title="Mask Identifier",
             message=message_body,
@@ -430,3 +414,4 @@ def main():
         )
         if answer != BUTTON_CLICK:
             break
+

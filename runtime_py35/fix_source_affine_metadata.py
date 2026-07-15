@@ -33,8 +33,6 @@ import json
 import os
 import subprocess
 import sys
-import threading
-import time
 
 import mimics
 import runtime_common
@@ -44,7 +42,6 @@ SOURCE_IMAGE_SHAPE_METADATA = "mimics_script.source_image_shape"
 SOURCE_VOXEL_TO_RAS_MATRIX_METADATA = "mimics_script.source_voxel_to_ras_matrix"
 
 TITLE = "Fix Source Affine Metadata"
-_MONITORS = {}
 
 
 def _project_root():
@@ -157,7 +154,7 @@ def _parse_shape(text):
         return None
 
 
-def _read_nifti_ras_affine(image_path, monitor=None):
+def _read_nifti_ras_affine(image_path):
     """Call the bridge subprocess to read the nibabel RAS affine + shape."""
     python_exe = _find_external_python()
     script = _bridge_script()
@@ -176,11 +173,6 @@ def _read_nifti_ras_affine(image_path, monitor=None):
         stderr=subprocess.PIPE,
         **runtime_common.hidden_process_kwargs()
     )
-    if monitor is not None:
-        monitor["process"] = process
-        if monitor.get("done"):
-            runtime_common.terminate_process_async(process=process, graceful_seconds=0.0)
-            raise RuntimeError("Affine repair was cancelled during bridge startup.")
     stdout, stderr = process.communicate(input=json.dumps(params).encode("utf-8"))
     if process.returncode != 0:
         raise RuntimeError(
@@ -197,147 +189,7 @@ def _read_nifti_ras_affine(image_path, monitor=None):
     return result
 
 
-def _stop_monitor(key):
-    monitor = _MONITORS.pop(key, None)
-    if not monitor:
-        return
-    timer = monitor.get("timer")
-    if timer is not None:
-        try:
-            timer.stop()
-        except Exception:
-            pass
-    win32 = monitor.get("win32_timer")
-    if win32:
-        try:
-            win32[0].KillTimer(None, win32[1])
-        except Exception:
-            pass
-
-
-def _finish_repair(monitor):
-    image = monitor["image"]
-    stored = monitor["stored"]
-    stored_shape = monitor.get("stored_shape")
-    info = monitor.get("result") or {}
-    true_ras = info.get("voxel_to_ras_matrix")
-    true_shape = [int(v) for v in (info.get("shape") or [])]
-    if not true_ras or len(true_shape) != 3:
-        raise RuntimeError("Bridge returned incomplete affine geometry.")
-    if _matrices_equal(stored, true_ras):
-        mimics.dialogs.message_box(
-            title=TITLE,
-            message="Metadata already matches the source image affine. Nothing was changed.",
-            ui_blocking=False,
-        )
-        return
-    if stored_shape and list(stored_shape) != list(true_shape):
-        raise RuntimeError(
-            "Stored source image shape {0} does not match the on-disk shape {1}. "
-            "The source file changed; re-import this case instead.".format(stored_shape, true_shape)
-        )
-    _metadata_set(image, SOURCE_VOXEL_TO_RAS_MATRIX_METADATA, json.dumps(true_ras))
-    written = _parse_matrix(_metadata_get(image, SOURCE_VOXEL_TO_RAS_MATRIX_METADATA, ""))
-    if not _matrices_equal(written, true_ras):
-        raise RuntimeError("Metadata write did not round-trip correctly; the project was not saved.")
-    mimics.file.save_project()
-    diff = _max_abs_diff(stored, true_ras)
-    mimics.dialogs.message_box(
-        title=TITLE,
-        message=(
-            "Source affine metadata was repaired and the project was saved.\n\n"
-            "Maximum matrix correction: {0:.6g}"
-        ).format(diff),
-        ui_blocking=False,
-    )
-
-
-def _monitor_tick(monitor):
-    if monitor.get("done") or monitor.get("busy"):
-        return
-    monitor["busy"] = True
-    try:
-        if time.time() > monitor.get("deadline", 0):
-            monitor["done"] = True
-            _stop_monitor(monitor["key"])
-            runtime_common.terminate_process_async(process=monitor.get("process"), graceful_seconds=2.0)
-            mimics.dialogs.message_box(
-                title=TITLE,
-                message="Affine inspection timed out and its external process was stopped. No metadata was changed.",
-                ui_blocking=False,
-            )
-            return
-        if not monitor.get("worker_done"):
-            return
-        monitor["done"] = True
-        _stop_monitor(monitor["key"])
-        if monitor.get("error"):
-            raise RuntimeError(monitor.get("error"))
-        _finish_repair(monitor)
-    except Exception as exc:
-        monitor["done"] = True
-        _stop_monitor(monitor.get("key"))
-        mimics.dialogs.message_box(
-            title=TITLE,
-            message="Source affine metadata was not changed.\n\n{0}".format(exc),
-            ui_blocking=False,
-        )
-    finally:
-        monitor["busy"] = False
-
-
-def _start_monitor(monitor, poll_seconds=0.5):
-    key = monitor["key"]
-    _stop_monitor(key)
-    if os.name == "nt":
-        try:
-            import ctypes
-            user32 = ctypes.windll.user32
-            TIMERPROC = ctypes.WINFUNCTYPE(None, ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_uint)
-
-            def _timer_proc(hwnd, message, timer_id, tick_count):
-                _monitor_tick(monitor)
-
-            callback = TIMERPROC(_timer_proc)
-            user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint, TIMERPROC]
-            user32.SetTimer.restype = ctypes.c_size_t
-            user32.KillTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-            timer_id = user32.SetTimer(None, 0, max(250, int(poll_seconds * 1000)), callback)
-            if timer_id:
-                monitor["callback"] = callback
-                monitor["win32_timer"] = (user32, timer_id)
-                _MONITORS[key] = monitor
-                return True
-        except Exception:
-            pass
-    try:
-        from PyQt5.QtCore import QTimer
-        timer = QTimer()
-        timer.timeout.connect(lambda: _monitor_tick(monitor))
-        timer.start(max(250, int(poll_seconds * 1000)))
-        monitor["timer"] = timer
-        _MONITORS[key] = monitor
-        return True
-    except Exception:
-        return False
-
-
 def main():
-    active = [item for item in _MONITORS.values() if item and not item.get("done")]
-    if active:
-        answer = mimics.dialogs.question_box(
-            title=TITLE,
-            message="Source affine inspection is already running.",
-            buttons="Keep Running;Stop Inspection",
-            ui_blocking=True,
-        )
-        if answer == "Stop Inspection":
-            for monitor in active:
-                monitor["done"] = True
-                _stop_monitor(monitor.get("key"))
-                runtime_common.terminate_process_async(process=monitor.get("process"), graceful_seconds=2.0)
-        return 0
-
     image = mimics.data.images.get_active()
     if image is None:
         mimics.dialogs.message_box(
@@ -363,45 +215,65 @@ def main():
         )
         return 1
 
-    monitor = {
-        "key": "source_affine_" + str(int(time.time() * 1000)),
-        "image": image,
-        "source_path": source_path,
-        "stored": stored,
-        "stored_shape": stored_shape,
-        "result": None,
-        "error": "",
-        "worker_done": False,
-        "done": False,
-        "deadline": time.time() + 120.0,
-    }
-    if not _start_monitor(monitor):
+    print("source_image_path : {0}".format(source_path))
+    print("stored shape      : {0}".format(stored_shape))
+    print("stored matrix     : {0}".format(stored))
+
+    try:
+        info = _read_nifti_ras_affine(source_path)
+    except Exception as exc:
+        mimics.dialogs.message_box(title=TITLE, message="Failed to read source NIfTI affine:\n\n{0}".format(exc))
+        return 1
+
+    true_ras = info["voxel_to_ras_matrix"]
+    true_shape = [int(v) for v in info["shape"]]
+    print("true RAS affine   : {0}".format(true_ras))
+    print("true nibabel shape: {0}".format(true_shape))
+
+    if _matrices_equal(stored, true_ras):
         mimics.dialogs.message_box(
             title=TITLE,
-            message="This Mimics session cannot monitor the external affine inspection. No metadata was changed.",
-            ui_blocking=False,
+            message="Metadata already matches the true nibabel RAS affine. Nothing to do.",
+        )
+        return 0
+
+    if stored_shape and list(stored_shape) != list(true_shape):
+        mimics.dialogs.message_box(
+            title=TITLE,
+            message=(
+                "REFUSING: stored source_image_shape {0} does not match the on-disk NIfTI shape {1}.\n\n"
+                "The source file has changed since preparation. Re-prepare this case instead."
+            ).format(stored_shape, true_shape),
         )
         return 1
 
-    def _worker():
-        try:
-            monitor["result"] = _read_nifti_ras_affine(source_path, monitor=monitor)
-        except Exception as exc:
-            monitor["error"] = str(exc)
-        finally:
-            monitor["worker_done"] = True
-
-    thread = threading.Thread(target=_worker, name="SourceAffineInspector")
-    thread.daemon = True
-    monitor["thread"] = thread
-    thread.start()
-    try:
-        mimics.logging.log_user_message(
-            level=mimics.logging.Level.INFO,
-            message="Source affine inspection started in external Python. Mimics remains available.",
+    _metadata_set(image, SOURCE_VOXEL_TO_RAS_MATRIX_METADATA, json.dumps(true_ras))
+    written = _parse_matrix(_metadata_get(image, SOURCE_VOXEL_TO_RAS_MATRIX_METADATA, ""))
+    if not _matrices_equal(written, true_ras):
+        mimics.dialogs.message_box(
+            title=TITLE,
+            message="Metadata write did not round-trip correctly. Aborting without saving.",
         )
-    except Exception:
-        pass
+        return 1
+
+    try:
+        mimics.file.save_project()
+    except Exception as exc:
+        mimics.dialogs.message_box(
+            title=TITLE,
+            message="Metadata rewritten, but save_project failed:\n\n{0}".format(exc),
+        )
+        return 1
+
+    diff = _max_abs_diff(stored, true_ras)
+    mimics.dialogs.message_box(
+        title=TITLE,
+        message=(
+            "OK: source_voxel_to_ras_matrix rewritten to the true nibabel RAS affine.\n"
+            "(was off by {0:.6g})\n\n"
+            "Project saved. You can now re-run few-shot inference on this case."
+        ).format(diff),
+    )
     return 0
 
 

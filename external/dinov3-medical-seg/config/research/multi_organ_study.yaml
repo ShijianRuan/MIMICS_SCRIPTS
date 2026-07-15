@@ -36,6 +36,21 @@ regimes:
   screening_fold_only: true
   degenerate_dice_threshold: 0.05
 
+# Screen candidates must be clinically/geometrically plausible, not merely the
+# largest Dice among several poor runs. These are research progression gates,
+# not deployment acceptance thresholds.
+screen_guardrails:
+  minimum_dice_by_task:
+    brain: 0.70
+    liver: 0.70
+    aorta: 0.35
+    scapula_left: 0.40
+  maximum_hd95_mm_by_task:
+    brain: 50.0
+    liver: 100.0
+    aorta: 100.0
+    scapula_left: 100.0
+
 
 candidates:
   # Brain: large compact target. Each row differs from brain_base only by the

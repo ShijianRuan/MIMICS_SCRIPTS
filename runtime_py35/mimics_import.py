@@ -36,7 +36,6 @@ import runtime_common
 
 # -- Global async monitor state ----------------------------------------
 _IMPORT_MONITORS = {}
-_BRIDGE_LAUNCH_ERRORS = {}
 
 # Track background Mimics process for .mcs creation
 _BG_MIMICS_PID = None
@@ -100,15 +99,6 @@ def _safe_message_box(title, message, ui_blocking=True):
             pass
     except Exception:
         pass
-
-
-def _user_progress(level, message):
-    """Publish concise lifecycle transitions to the Mimics log panel."""
-    try:
-        mimics.logging.log_user_message(level=level, message=message)
-        return
-    except Exception:
-        print(message)
 
 
 def _update_gui():
@@ -800,33 +790,27 @@ def _launch_bridge_background(bridge_params, job_dir):
 def _launch_bridge_job_thread(bridge_params, job_dir, output_dir, phase, case_id=None):
     """Start bridge from a worker thread so Mimics GUI can repaint first."""
     def _run():
-        try:
-            if not os.path.isdir(job_dir):
-                os.makedirs(job_dir)
-            _write_json_atomic(
-                os.path.join(job_dir, "job_state.json"),
-                {
-                    "phase": "launching",
-                    "requested_phase": phase,
-                    "case_id": case_id or "",
-                    "started_at": time.time(),
-                },
-            )
-            _verbose_log(
-                output_dir,
-                "Job state | phase={0} | case_id={1} | params={2}".format(
-                    phase, case_id or "", _summarize_bridge_params(bridge_params),
-                ),
-            )
-        except Exception as exc:
-            _BRIDGE_LAUNCH_ERRORS[job_dir] = (
-                "Could not create or write the import output directory {0}: {1}".format(
-                    os.path.abspath(output_dir), exc,
-                )
-            )
-            _append_import_log(output_dir, "Could not initialize bridge job for {0}: {1}".format(phase, exc))
-            _append_import_exception(output_dir, "Bridge job initialization failed", exc)
-            return
+        if not os.path.isdir(job_dir):
+            os.makedirs(job_dir)
+        _write_json_atomic(
+            os.path.join(job_dir, "job_state.json"),
+            {
+                "phase": "launching",
+                "requested_phase": phase,
+                "case_id": case_id or "",
+                "started_at": time.time(),
+            },
+        )
+        _verbose_log(
+            output_dir,
+            "Job state | phase={0} | case_id={1} | params={2}".format(
+                phase, case_id or "", _summarize_bridge_params(bridge_params),
+            ),
+        )
+        _verbose_log(
+            output_dir,
+            "Worker thread | phase={0} | case_id={1}".format(phase, case_id or ""),
+        )
         try:
             process = _launch_bridge_background(bridge_params, job_dir)
             state = {
@@ -839,7 +823,6 @@ def _launch_bridge_job_thread(bridge_params, job_dir, output_dir, phase, case_id
             _write_json_atomic(os.path.join(job_dir, "job_state.json"), state)
             _append_import_log(output_dir, "Bridge PID={0} | phase={1}".format(process.pid, phase))
         except Exception as exc:
-            _BRIDGE_LAUNCH_ERRORS[job_dir] = "Could not start the import bridge process: {0}".format(exc)
             _append_import_log(output_dir, "Could not start bridge process for {0}: {1}".format(phase, exc))
             _append_import_exception(output_dir, "Bridge worker thread failed", exc)
             try:
@@ -885,9 +868,6 @@ def _check_job_status(job_dir):
 
     Returns ("running", None) | ("done", result_dict) | ("error", error_msg).
     """
-    launch_error = _BRIDGE_LAUNCH_ERRORS.pop(job_dir, None)
-    if launch_error:
-        return ("error", launch_error)
     result_file = os.path.join(job_dir, "bridge_result.json")
     state_file = os.path.join(job_dir, "job_state.json")
     error_file = os.path.join(job_dir, "bridge_error.log")
@@ -1091,13 +1071,15 @@ def _import_monitor_tick(monitor):
             _mark_mcs_queue_done(output_dir, completed=0, failed=1)
         return
 
-    # Single case: completion is reported by the .mcs status monitor. Avoid an
-    # intermediate dialog that makes the user acknowledge the same operation
-    # twice; the Mimics log remains available for progress inspection.
+    # Single case: show queued status.
     if not monitor.get("batch_queue"):
-        _user_progress(
-            logging.INFO,
-            "Import preparation finished. Background Mimics is creating: {0}".format(output_mcs),
+        mimics.dialogs.message_box(
+            title="Import Queued",
+            message=(
+                "Data preparation is complete.\n"
+                "A background Mimics process is creating:\n{0}\n\n"
+                "Mimics will notify you when it is ready."
+            ).format(output_mcs),
         )
         return
 
@@ -1568,20 +1550,9 @@ def _launch_background_mimics(output_dir, total_count=0, schedule_retry=True):
         now = time.time()
         if now - _BG_MIMICS_BUSY_NOTICE_AT >= 60.0:
             _BG_MIMICS_BUSY_NOTICE_AT = now
-            holder = runtime_common.active_resource_lock(_project_root(), "background_mimics.lock")
             _append_import_log(
                 output_dir,
                 "Background Mimics is already running for another Mimics-Script task; .mcs creation will continue when that process exits.",
-            )
-            _safe_message_box(
-                "Import Waiting",
-                (
-                    "Prepared data is waiting for the background Mimics license.\n\n"
-                    "Current task: {0}\n\n"
-                    "This import will continue automatically. Use 04 Stop Import Queue "
-                    "to cancel this import, or wait for the current task to finish."
-                ).format(runtime_common.resource_lock_summary(holder)),
-                ui_blocking=False,
             )
         if schedule_retry:
             _schedule_bg_mimics_retry(output_dir, total_count=total_count)
@@ -1631,55 +1602,6 @@ def _first_mcs_monitor_tick(monitor):
     output_dir = monitor.get("output_dir")
     monitor_key = monitor.get("monitor_key")
 
-    if monitor.get("first_notified"):
-        status = runtime_common.read_json(os.path.join(output_dir, "_mcs_batch_status.json"), {}) or {}
-        signature = (status.get("status"), status.get("case_id"), status.get("completed"), status.get("failed"))
-        if signature != monitor.get("last_batch_signature"):
-            monitor["last_batch_signature"] = signature
-            state = str(status.get("status") or "waiting")
-            _user_progress(
-                logging.INFO,
-                "Import .mcs creation: {0}; completed {1}, failed {2}{3}.".format(
-                    state,
-                    int(status.get("completed", 0) or 0),
-                    int(status.get("failed", 0) or 0),
-                    "; current " + str(status.get("case_id")) if status.get("case_id") else "",
-                ),
-            )
-        if status.get("status") == "closed":
-            monitor["done"] = True
-            _stop_import_monitor(monitor_key)
-            completed = int(status.get("completed", 0) or 0)
-            failed = int(status.get("failed", 0) or 0)
-            _safe_message_box(
-                "Import Completed with Errors" if failed else "Import Complete",
-                "Background .mcs creation finished.\n\nCreated: {0}\nFailed: {1}\nOutput: {2}{3}".format(
-                    completed,
-                    failed,
-                    output_dir,
-                    "\n\nReview mimics_import.log and _failed_cases.json before retrying failed cases." if failed else "",
-                ),
-                ui_blocking=False,
-            )
-        elif status:
-            try:
-                stale_seconds = time.time() - float(status.get("updated_at_epoch", 0.0) or 0.0)
-            except Exception:
-                stale_seconds = 0.0
-            holder = runtime_common.active_resource_lock(_project_root(), "background_mimics.lock")
-            if stale_seconds > 90.0 and not holder:
-                monitor["done"] = True
-                _stop_import_monitor(monitor_key)
-                _safe_message_box(
-                    "Import Stopped Unexpectedly",
-                    (
-                        "Background .mcs creation stopped before reporting completion.\n\n"
-                        "Prepared files were kept for retry. Run Import again or inspect:\n{0}"
-                    ).format(os.path.join(output_dir, "logs", "_create_mcs_batch.log")),
-                    ui_blocking=False,
-                )
-        return
-
     # Timeout check
     if time.time() > monitor.get("deadline", 0):
         monitor["done"] = True
@@ -1718,10 +1640,8 @@ def _first_mcs_monitor_tick(monitor):
             monitor["last_file"] = stable_key
             monitor["last_size"] = size
             return
-        keep_for_batch = not bool(target_mcs)
-        if not keep_for_batch:
-            monitor["done"] = True
-            _stop_import_monitor(monitor_key)
+        monitor["done"] = True
+        _stop_import_monitor(monitor_key)
         try:
             if monitor.get("notify_only"):
                 _append_import_log(output_dir, ".mcs is ready: {0}".format(mcs_path))
@@ -1736,9 +1656,6 @@ def _first_mcs_monitor_tick(monitor):
                         title="MCS Ready",
                         message="A converted .mcs file is ready:\n{0}".format(mcs_path),
                     )
-                if keep_for_batch:
-                    monitor["first_notified"] = True
-                    monitor["deadline"] = time.time() + 7 * 86400
                 return
             if monitor.get("skip_if_project_open"):
                 try:
@@ -1749,9 +1666,6 @@ def _first_mcs_monitor_tick(monitor):
                     pass
             mimics.file.open_project(filename=mcs_path)
             _append_import_log(output_dir, "Automatically opened .mcs: {0}".format(mcs_path))
-            if keep_for_batch:
-                monitor["first_notified"] = True
-                monitor["deadline"] = time.time() + 7 * 86400
         except Exception as exc:
             _append_import_log(output_dir, "Could not automatically open .mcs {0}: {1}".format(mcs_path, exc))
         return
@@ -1768,7 +1682,7 @@ def _start_first_mcs_monitor(output_dir, target_mcs=None, timeout_seconds=900, p
         "skip_if_project_open": skip_if_project_open,
         "notify_only": notify_only,
         "done": False,
-        "deadline": time.time() + (timeout_seconds if target_mcs else max(timeout_seconds, 7 * 86400)),
+        "deadline": time.time() + timeout_seconds,
     }
 
     # Try PyQt5 QTimer first

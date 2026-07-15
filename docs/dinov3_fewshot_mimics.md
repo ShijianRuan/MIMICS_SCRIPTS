@@ -36,13 +36,13 @@ Entry behavior:
 | `Predict Current Case` | Apply the latest model for the selected organ to the currently open case. | Start external inference, poll status, apply final mask buffer. |
 | `Predict With Model...` | Choose a specific local/global model version before inference. | Show model chooser only when available, then same as prediction. |
 | `Show Status` | Inspect jobs, logs, training curve, resource waits and results. | Start external status viewer; text dialog only as fallback. |
-| `Stop AI Task` | Cancel the active DINOv3 task for the selected dataset. | Write a cancel marker; let the controller release checkpoints and GPU, with targeted termination only if its controller is already gone. |
+| `Stop AI Task` | Cancel the active DINOv3 job for the selected dataset. | Write cancel marker and terminate recorded job PIDs. |
 
 The external setup and status windows use PySide6 from `nninteractive_env`, not the embedded Mimics Python session. They are not topmost, do not call back into Mimics, and do not wait on Mimics APIs. Tkinter remains only a functional fallback when PySide6 cannot load. If neither external backend is available, the setup status records a clear dependency error. No dataset export, image loading, training, or inference runs in the foreground Mimics process.
 
 Training starts only after a reminder that saved `.mcs` files are used. This prevents a common failure mode where the annotator has edited the current case but has not saved it yet, so the background export would train from old labels.
 
-To avoid GPU and memory contention, the Mimics entry does not start a second few-shot task while another training or inference task is still active for the same dataset. A cross-subsystem GPU lock also prevents DINOv3 training/inference from running at the same time as the managed nnInteractive server. The user can inspect waiting/running work with `04 Show Status Results` or stop it with `05 Stop AI Task`.
+To avoid GPU and memory contention, the Mimics entry does not start a second few-shot job while another training or inference job is still active for the same dataset. A cross-subsystem GPU lock also prevents DINOv3 training/inference from running at the same time as the managed nnInteractive server. The user can inspect waiting/running work with `Show Status` or stop it with `Stop Latest Job`.
 
 ## Progress And Results
 
@@ -78,7 +78,7 @@ The text fallback displays the same single selected task with:
 - job type;
 - organ;
 - current state;
-- setup state such as `Configuring training` while the external training window is open;
+- setup state such as `Configuring training` while the external Advanced window is open;
 - resource wait reason when the job is waiting for GPU or background Mimics;
 - epoch progress when training has started;
 - train/validation sample counts and selected case IDs;
@@ -91,7 +91,7 @@ The text fallback displays the same single selected task with:
 
 The DINOv3 trainer writes structured training progress after initialization, during train/validation batches, and after each epoch. The Mimics monitor reads this JSON status and logs visible training milestones with epoch, batch, phase, train loss, validation Dice, learning rate and best validation Dice. Text logs still exist, but the Mimics UI does not depend on parsing text logs.
 
-The external training setup window also keeps a Status panel open after training starts. It polls the same task JSON approximately every 1.5 seconds and shows the current stage, sample counts, epoch, loss, validation Dice when validation is enabled, best Dice, errors and completion state. Closing the external setup window does not stop training; `05 Stop AI Task` or the status viewer `Request Stop` remain the cancellation paths.
+The external Advanced setup window also keeps a Status panel open after training starts. It polls the same job JSON approximately every 1.5 seconds and shows the current stage, sample counts, epoch, loss, validation Dice when validation is enabled, best Dice, errors and completion state. Closing the external setup window does not stop training; `Stop Latest Job` or the status viewer `Request Stop` remain the cancellation paths.
 
 The job JSON keeps stable machine-readable states such as `waiting_for_gpu` and
 `waiting_for_background_mimics`. Mimics renders those as user-facing phrases
@@ -108,11 +108,7 @@ The latest registered model is used by default for prediction. Older model versi
 
 ## Stopping Work
 
-`05_Stop_AI_Task` writes the task cancel marker and changes the state to
-`cancelling`. The controller gives training up to 30 seconds to finish the
-current step, flush status/checkpoints, release CUDA memory, and remove the GPU
-lock. If the controller is already gone, only the recorded worker PID is
-terminated. The final controller state is `cancelled`.
+`05_Stop_AI_Task` writes the job cancel marker and requests termination of the active pipeline/training/inference process tree. The job status is changed to `cancelled`.
 
 The trainer also checks the cancel marker during training. If it sees the marker before the forced termination arrives, it exits cleanly and reports `cancelled`.
 
@@ -160,13 +156,13 @@ The Mimics entry reads the currently selected Mask name and uses it as the organ
 Recommended convention:
 
 - manual annotation Mask: `liver`, `kidney_left`, `tumor`, etc.;
-- optional editable AI result Mask: `<source name> - AI Draft`.
+- optional new AI result Mask: `AI_liver`, `AI_kidney_left`, `AI_tumor`.
 
 Training and inference use the selected manual organ name. Inference starts
 without an output-target dialog. When the converted result is ready and the
 original Mimics case/grid has been verified, one `Prediction Ready` dialog lets
 the annotator update the originally selected Mask or create a unique
-`<source name> - AI Draft` Mask. That choice is also the completion notification, so no second
+`AI_<organ>` Mask. That choice is also the completion notification, so no second
 success dialog is shown. If the selected Mask changes while inference is
 running, manual edits are preserved and the result is redirected to a new Mask.
 
@@ -354,7 +350,7 @@ Prediction flow:
 5. Mimics detects completion through a timer.
 6. `mimics_bridge.py mask_to_buffer` converts the NIfTI result to the launch-time Mimics image grid and buffer order.
 7. Mimics updates the launch-time selected Mask or creates a unique
-   `<source name> - AI Draft`, according to the choice made when the result is ready.
+   `AI_<organ>`, according to the choice made when the result is ready.
 
 `Predict Current Case` uses the latest local model for the active Mask name. `Predict With Model...` lets the annotator select a specific run or reusable model before inference.
 

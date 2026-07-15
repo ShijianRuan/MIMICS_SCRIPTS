@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 import yaml
+import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -184,6 +185,12 @@ def _build_run_config(
             config["model"]["neighbor_distance_mm"] = 3.0
     if data_policy in ("fingerprint_spacing", "fingerprint_patch_spacing"):
         config["data"]["target_spacing"] = policy["target_spacing_xyz"]
+    if data_policy == "fingerprint_roi":
+        bounds = np.asarray(fingerprint["summary"]["support_bbox_union_normalized_zyx"], dtype=float)
+        margin = float(candidate.get("roi_margin_fraction", 0.15))
+        bounds[0] = np.maximum(0.0, bounds[0] - margin)
+        bounds[1] = np.minimum(1.0, bounds[1] + margin)
+        config["data"]["roi"] = {"enabled": True, "normalized_zyx": bounds.tolist()}
     return config, policy
 
 
@@ -259,13 +266,14 @@ def main():
             config["training"]["experiment_root"] = str(results_root / "artifacts")
             _memory_safe_slice_batch(config)
             current_hash = _config_hash(config)
+            prior = run_root / "run_manifest.json"
+            prior_hash = None
+            if prior.is_file():
+                prior_hash = json.loads(prior.read_text(encoding="utf-8")).get("config_hash")
+            checkpoint_path = Path(config["training"]["experiment_root"]) / config["exp_name"] / "checkpoints" / "best_model.pth"
             # Resume only when a completed result exists AND was produced by the
             # SAME config; a config/code change invalidates the stale result.
             if evaluation_path.is_file() and not args.force:
-                prior = run_root / "run_manifest.json"
-                prior_hash = None
-                if prior.is_file():
-                    prior_hash = json.loads(prior.read_text(encoding="utf-8")).get("config_hash")
                 if prior_hash == current_hash:
                     print("Skipping completed regime: {}/{}".format(task, cell_id))
                     continue
@@ -282,10 +290,14 @@ def main():
                 "config_hash": current_hash,
                 "training_fingerprint": fingerprint["fingerprint_sha256"], "provenance": _provenance(),
             })
-            train_rc = _run_command(
-                [sys.executable, "scripts/train.py", "--config", str(config_path)],
-                PROJECT_ROOT, run_root / "training.log", args.dry_run)
-            checkpoint_path = Path(config["training"]["experiment_root"]) / config["exp_name"] / "checkpoints" / "best_model.pth"
+            resume_checkpoint = prior_hash == current_hash and checkpoint_path.is_file() and not args.force
+            if resume_checkpoint:
+                print("Reusing completed checkpoint for regime evaluation: {}/{}".format(task, cell_id))
+                train_rc = 0
+            else:
+                train_rc = _run_command(
+                    [sys.executable, "scripts/train.py", "--config", str(config_path)],
+                    PROJECT_ROOT, run_root / "training.log", args.dry_run)
             if train_rc or (not checkpoint_path.is_file() and not args.dry_run):
                 atomic_json(run_root / "failed.json", {"stage": "train", "returncode": train_rc})
                 failures += 1
@@ -302,6 +314,8 @@ def main():
                 failures += 1
                 if not args.keep_going:
                     raise SystemExit("Regime evaluation failed: {}/{}".format(task, cell_id))
+            elif not args.dry_run:
+                (run_root / "failed.json").unlink(missing_ok=True)
             completed += 1
             if args.max_runs and completed >= args.max_runs:
                 return
@@ -317,7 +331,7 @@ def main():
     selected_regime = None
     if args.regime:
         selected_regime = json.loads(Path(args.regime).resolve().read_text(encoding="utf-8"))
-    elif args.phase in ("screen", "confirm"):
+    elif args.phase in ("screen", "confirm") and bool(study.get("require_regime", True)):
         # Fail closed: the factor screen/confirmation must build on a validated
         # Tier-0 regime, never silently fall back to the collapse-prone baseline.
         raise SystemExit(
@@ -428,11 +442,18 @@ def main():
                     config.setdefault("training", {})["experiment_root"] = str(results_root / "artifacts")
                     _memory_safe_slice_batch(config)
                     current_hash = _config_hash(config)
+                    prior = run_root / "run_manifest.json"
+                    prior_hash = (
+                        json.loads(prior.read_text(encoding="utf-8")).get("config_hash")
+                        if prior.is_file() else None
+                    )
+                    checkpoint_path = (
+                        Path(config["training"]["experiment_root"])
+                        / config["exp_name"] / "checkpoints" / "best_model.pth"
+                    )
                     # Resume only when a completed result was produced by the same
                     # config; a config/code change re-runs instead of mixing.
                     if evaluation_path.is_file() and not args.force:
-                        prior = run_root / "run_manifest.json"
-                        prior_hash = json.loads(prior.read_text(encoding="utf-8")).get("config_hash") if prior.is_file() else None
                         if prior_hash == current_hash:
                             print("Skipping completed: {}".format(run_id))
                             continue
@@ -467,13 +488,19 @@ def main():
                             "provenance": _provenance(),
                         },
                     )
-                    train_returncode = _run_command(
-                        [sys.executable, "scripts/train.py", "--config", str(config_path)],
-                        PROJECT_ROOT,
-                        run_root / "training.log",
-                        args.dry_run,
+                    resume_checkpoint = (
+                        prior_hash == current_hash and checkpoint_path.is_file() and not args.force
                     )
-                    checkpoint_path = Path(config["training"]["experiment_root"]) / config["exp_name"] / "checkpoints" / "best_model.pth"
+                    if resume_checkpoint:
+                        print("Reusing completed checkpoint for evaluation: {}".format(run_id))
+                        train_returncode = 0
+                    else:
+                        train_returncode = _run_command(
+                            [sys.executable, "scripts/train.py", "--config", str(config_path)],
+                            PROJECT_ROOT,
+                            run_root / "training.log",
+                            args.dry_run,
+                        )
                     if train_returncode or (not checkpoint_path.is_file() and not args.dry_run):
                         atomic_json(run_root / "failed.json", {"stage": "train", "returncode": train_returncode})
                         print("Training failed: {}".format(run_id))
@@ -500,6 +527,8 @@ def main():
                         failures += 1
                         if not args.keep_going:
                             raise SystemExit("Evaluation failed: {}".format(run_id))
+                    elif not args.dry_run:
+                        (run_root / "failed.json").unlink(missing_ok=True)
                     completed += 1
                     if args.max_runs and completed >= args.max_runs:
                         return

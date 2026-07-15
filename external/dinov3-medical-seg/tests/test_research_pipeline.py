@@ -23,10 +23,15 @@ from src.data.spatial import (
     xyz_to_zyx,
 )
 from src.evaluation import binary_metrics
-from src.models.decoder_3d import SegFormer3DDecoder, TokenPyramid3DDecoder
+from src.models.decoder_3d import (
+    LearnableZSmooth,
+    MLPProbeDecoder3D,
+    SegFormer3DDecoder,
+    TokenPyramid3DDecoder,
+)
 from src.models.encoder_3d import SliceWiseEncoder3D
 from src.models.feature_augmentation import WaveletDetailAttenuation
-from src.inference import predict_array
+from src.inference import predict_array, postprocess_foreground, prediction_bbox_zyx, expand_bbox
 from src.research import protocol
 from src.research.fingerprint import build_training_fingerprint, derive_policy
 from src.research.protocol import (
@@ -59,6 +64,22 @@ def test_orientation_round_trip_preserves_original_grid(tmp_path):
     )
     assert np.array_equal(restored.get_fdata().astype(np.int16), original_data)
     assert np.allclose(restored.affine, loaded_original.affine)
+
+
+def test_postprocess_foreground_threshold_and_largest_component():
+    # A high-probability blob of 8 voxels and a smaller 1-voxel speck. At
+    # threshold 0.5 both survive; keep_largest_component must drop the speck.
+    prob = np.zeros((6, 6, 6), dtype=np.float32)
+    prob[1:3, 1:3, 1:3] = 0.9  # 8-voxel component
+    prob[5, 5, 5] = 0.8        # 1-voxel speck
+    mask = postprocess_foreground(prob, threshold=0.5, keep_largest_component=False)
+    assert int(mask.sum()) == 9
+    largest = postprocess_foreground(prob, threshold=0.5, keep_largest_component=True)
+    assert int(largest.sum()) == 8
+    assert largest[5, 5, 5] == 0
+    # A stricter threshold prunes the 0.8 speck even without component filtering.
+    strict = postprocess_foreground(prob, threshold=0.85, keep_largest_component=False)
+    assert int(strict.sum()) == 8
 
 
 def test_pair_loader_rejects_mismatched_grid(tmp_path):
@@ -98,6 +119,153 @@ def test_dataset_uses_zyx_and_nearest_labels(tmp_path):
     assert item["image"].shape == (1, 6, 10, 12)
     assert item["label"].shape == (6, 10, 12)
     assert set(item["label"].unique().tolist()) <= {0, 1}
+
+
+def test_localization_ball_and_virtual_patch_sampling(tmp_path):
+    root = tmp_path / "dataset"
+    (root / "imagesTr").mkdir(parents=True)
+    (root / "labelsTr").mkdir()
+    image = np.zeros((20, 24, 28), dtype=np.float32)
+    label = np.zeros_like(image, dtype=np.uint8)
+    label[9:11, 11:13, 13:15] = 1
+    _save(root / "imagesTr" / "case.nii.gz", image, np.eye(4))
+    _save(root / "labelsTr" / "case.nii.gz", label, np.eye(4))
+    dataset = MedicalVolumeDataset(
+        str(root), split="train", img_size=(16, 16),
+        target={"mode": "localization_ball", "radius_mm_zyx": [4, 5, 6]},
+        patch={"enabled": True, "size_zyx": [16, 16, 16],
+               "patches_per_case_per_epoch": 4,
+               "sampling": {"interior": 0.25, "boundary": 0.25,
+                            "near_negative": 0.25, "random": 0.25}},
+    )
+    assert len(dataset) == 4
+    item = dataset[3]
+    assert item["label"].sum().item() > label.sum()
+    assert item["label"].shape == (16, 16, 16)
+
+
+def test_normalized_roi_rejects_bad_bounds_and_crops():
+    slices = MedicalVolumeDataset._normalized_roi_slices(
+        (100, 200, 300), [[0.1, 0.2, 0.3], [0.5, 0.6, 0.7]]
+    )
+    assert [(s.start, s.stop) for s in slices] == [(10, 50), (40, 120), (90, 210)]
+    with pytest.raises(ValueError, match="normalized_zyx"):
+        MedicalVolumeDataset._normalized_roi_slices((10, 10, 10), [[0, 0, 0], [1.1, 1, 1]])
+
+
+def test_dice_focal_cldice_has_finite_gradient():
+    criterion = get_loss({"loss": {"type": "dice_focal_cldice", "skeleton_iterations": 2}})
+    logits = torch.randn(1, 2, 8, 12, 12, requires_grad=True)
+    target = torch.zeros(1, 8, 12, 12, dtype=torch.long)
+    target[:, 1:7, 5:7, 5:7] = 1
+    result = criterion(logits, target)
+    assert torch.isfinite(result["loss"])
+    result["loss"].backward()
+    assert logits.grad is not None and torch.isfinite(logits.grad).all()
+
+
+def test_focused_plan_is_k5_only_and_small_matrix():
+    import yaml
+    modal_study = _load_modal_study_module()
+    plan = yaml.safe_load((PROJECT_ROOT / "config/research/focused_5shot_study.yaml").read_text())
+    assert plan["study"]["shot_counts"] == [5]
+    # 2 aorta + 2 scapula + 1 scapula rescue candidate.
+    assert len(plan["candidates"]) == 5
+    screen = modal_study._phase_job_specs(plan, "screen")
+    assert len(screen) == 5
+    confirmation = modal_study._phase_job_specs(
+        plan, "confirm", ["aorta_2p5d_reference", "aorta_2p5d_cldice"]
+    )
+    assert len(confirmation) == 2 * 3 * 1 * 2
+    assert {item["support_count"] for item in confirmation} == {5}
+
+
+def test_scapula_rescue_uses_whole_roi_inference_and_more_negatives():
+    # The inference-gap diagnostic showed sliding-window @0.5 floods the thin
+    # bone (P 0.05) while whole-ROI inference recovers Dice 0.34. The rescue
+    # candidate must therefore deploy whole-ROI (no sliding window) and sample
+    # more true/random negatives with a lower positive focal push.
+    import yaml
+    plan = yaml.safe_load((PROJECT_ROOT / "config/research/focused_5shot_study.yaml").read_text())
+    rescue = next(c for c in plan["candidates"] if c["id"] == "scapula_roi_coronal3d_rescue")
+    assert rescue["task"] == "scapula_left"
+    patch = rescue["overrides"]["data"]["patch"]
+    assert patch["inference_sliding_window"] is False
+    sampling = patch["sampling"]
+    # More negatives than the original 0.25/0.15 split.
+    assert sampling["near_negative"] + sampling["random"] > 0.40
+    assert rescue["overrides"]["model"]["slice_axis"] == "coronal"
+    # Lower positive focal push than the original 0.30 weight / 0.65 alpha.
+    assert rescue["overrides"]["loss"]["focal_weight"] < 0.30
+    assert rescue["overrides"]["loss"]["focal_alpha"] < 0.65
+
+
+def test_two_stage_roi_coverage_is_explicit_and_bounded():
+    from scripts.research.evaluate_two_stage import _roi_target_coverage
+    target = np.zeros((20, 20, 20), dtype=np.uint8)
+    target[8:12, 8:12, 8:12] = 1
+    assert _roi_target_coverage((10, 10, 10), target, (8, 8, 8)) == 1.0
+    partial = _roi_target_coverage((5, 5, 5), target, (8, 8, 8))
+    assert 0.0 < partial < 1.0
+    assert _roi_target_coverage(None, target, (8, 8, 8)) == 0.0
+
+
+def test_two_stage_localization_gate_stops_weak_coarse_model():
+    from scripts.research.run_two_stage import _localization_gate
+
+    passing = _localization_gate({
+        "coarse_detection_rate": 1.0,
+        "roi_localization_success_rate": 0.78,
+        "mean_roi_target_coverage": 0.91,
+    })
+    failing = _localization_gate({
+        "coarse_detection_rate": 1.0,
+        "roi_localization_success_rate": 0.44,
+        "mean_roi_target_coverage": 0.72,
+    })
+
+    assert passing["passed"] is True
+    assert failing["passed"] is False
+    assert any("roi_localization_success_rate" in item for item in failing["failures"])
+    assert any("mean_roi_target_coverage" in item for item in failing["failures"])
+
+
+def test_surface_metrics_ignore_empty_volume_padding():
+    prediction = np.zeros((80, 90, 100), dtype=np.uint8)
+    target = np.zeros_like(prediction)
+    prediction[30:38, 40:48, 50:58] = 1
+    target[31:39, 42:50, 50:58] = 1
+    compact_prediction = prediction[20:50, 30:60, 40:70]
+    compact_target = target[20:50, 30:60, 40:70]
+
+    padded = binary_metrics(prediction, target, spacing=(2.0, 1.0, 1.0))
+    compact = binary_metrics(compact_prediction, compact_target, spacing=(2.0, 1.0, 1.0))
+
+    for key in ("dice", "hd95_mm", "assd_mm", "surface_dice", "lesion_f1"):
+        assert padded[key] == pytest.approx(compact[key])
+
+
+@pytest.mark.parametrize(
+    ("slice_axis", "expected_shape"),
+    [
+        ("axial", (1, 5, 16, 32)),
+        ("coronal", (1, 16, 7, 32)),
+        ("sagittal", (1, 16, 32, 9)),
+    ],
+)
+def test_prepare_model_input_resizes_selected_slice_plane(slice_axis, expected_shape):
+    from src.data.dataset_3d import prepare_model_input
+
+    volume = np.arange(5 * 7 * 9, dtype=np.float32).reshape(5, 7, 9)
+    tensor = prepare_model_input(volume, (16, 32), slice_axis=slice_axis)
+
+    assert tuple(tensor.shape) == expected_shape
+    plane_shape = {
+        "axial": tensor.shape[-2:],
+        "coronal": (tensor.shape[1], tensor.shape[3]),
+        "sagittal": (tensor.shape[1], tensor.shape[2]),
+    }[slice_axis]
+    assert all(int(value) % 16 == 0 for value in plane_shape)
 
 
 def test_dataset_pairs_msd_image_suffix_with_label_case_id(tmp_path):
@@ -384,6 +552,141 @@ def test_train_only_fingerprint_derives_a_bounded_patch_policy(tmp_path):
     assert coverage["minimum_inplane_patches"] > 0.0
 
 
+def _tiny_fingerprint(extent_zyx, shape_zyx=(229.0, 193.0, 194.0),
+                      spacing_zyx=(1.5, 1.5, 1.5), foreground_fraction=9.2e-5,
+                      min_patches_256=1.0):
+    # A fingerprint summary shaped like the adrenal support set: a needle-like
+    # target whose extent must drive the patch window.
+    return {
+        "summary": {
+            "median_spacing_zyx": list(spacing_zyx),
+            "spacing_iqr_zyx": [0.0, 0.0, 0.0],
+            "median_shape_zyx": list(shape_zyx),
+            "median_foreground_fraction": foreground_fraction,
+            "median_foreground_extent_zyx": list(extent_zyx),
+            "target_patch_coverage": {"256": {"minimum_inplane_patches": min_patches_256}},
+        }
+    }
+
+
+def test_derive_policy_tiny_target_window_tracks_extent_times_margin():
+    fingerprint = _tiny_fingerprint([18.0, 20.0, 13.0])
+    policy = derive_policy(fingerprint)
+    assert policy["rationale"]["tiny_target"] is True
+    # Window ~ round(extent * 2.0), far smaller than the old hard 171 floor.
+    assert policy["patch"]["size_zyx"] == [36, 40, 26]
+    assert all(v < 100 for v in policy["patch"]["size_zyx"])
+
+
+def test_derive_policy_tiny_target_respects_lower_bound():
+    # A sub-voxel-thin target must not collapse the window below the DINO grid.
+    fingerprint = _tiny_fingerprint([3.0, 4.0, 4.0])
+    policy = derive_policy(fingerprint)
+    z, y, x = policy["patch"]["size_zyx"]
+    assert z >= 16 and y >= 24 and x >= 24
+
+
+def test_derive_policy_tiny_target_clamped_to_shape():
+    # extent * margin exceeding the volume must clamp to the median shape.
+    fingerprint = _tiny_fingerprint([200.0, 300.0, 300.0], shape_zyx=(60.0, 80.0, 80.0))
+    policy = derive_policy(fingerprint)
+    z, y, x = policy["patch"]["size_zyx"]
+    assert z <= 60 and y <= 80 and x <= 80
+
+
+def test_derive_policy_non_tiny_target_keeps_legacy_window():
+    # A small-but-not-tiny target (aorta-like: small_target True, tiny_target
+    # False) must keep the legacy spacing formula so the confirmed aorta result
+    # is never contaminated. min_patches in [3, 6) gives small=True, tiny=False.
+    fingerprint = _tiny_fingerprint(
+        [30.0, 60.0, 60.0], foreground_fraction=0.0046, min_patches_256=4.0,
+    )
+    policy = derive_policy(fingerprint)
+    assert policy["rationale"]["small_target"] is True
+    assert policy["rationale"]["tiny_target"] is False
+    # Legacy formula: face-plane floored at 160, Z from 80/spacing.
+    assert policy["patch"]["size_zyx"] == [53, 171, 171]
+
+
+def test_prediction_bbox_zyx_returns_half_open_box():
+    mask = np.zeros((20, 20, 20), dtype=np.int16)
+    mask[5:9, 6:10, 7:12] = 1  # z in [5,9), y in [6,10), x in [7,12)
+    bbox = prediction_bbox_zyx(mask)
+    assert bbox == (5, 9, 6, 10, 7, 12)
+
+
+def test_prediction_bbox_zyx_none_when_empty():
+    assert prediction_bbox_zyx(np.zeros((8, 8, 8), dtype=np.int16)) is None
+
+
+def test_expand_bbox_adds_margin_and_clamps_to_shape():
+    # Box near both edges: low margin clamps to 0, high margin clamps to shape.
+    bbox = (1, 5, 0, 4, 16, 20)
+    expanded = expand_bbox(bbox, (3, 3, 3), (20, 20, 20))
+    # z: 1-3 -> 0, 5+3 -> 8 ; y: 0-3 -> 0, 4+3 -> 7 ; x: 16-3 -> 13, 20+3 -> 20
+    assert expanded == (0, 8, 0, 7, 13, 20)
+
+
+def test_search_roi_size_from_coarse_bbox_plus_margin():
+    from scripts.research.evaluate_two_stage import _search_roi_size
+    coarse = np.zeros((60, 60, 60), dtype=np.int16)
+    coarse[20:32, 18:34, 22:30] = 1  # bbox extent 12 x 16 x 8
+    patch = (10, 10, 10)  # margin = patch // 2 = 5 per axis
+    size = _search_roi_size(coarse, patch, coarse.shape)
+    # bbox + 5 both sides: z 12+10=22, y 16+10=26, x 8+10=18, all >= patch.
+    assert size == (22, 26, 18)
+
+
+def test_search_roi_size_falls_back_to_window_when_coarse_empty():
+    from scripts.research.evaluate_two_stage import _search_roi_size
+    empty = np.zeros((40, 40, 40), dtype=np.int16)
+    patch = (12, 20, 20)
+    assert _search_roi_size(empty, patch, empty.shape) == patch
+
+
+def test_refinement_search_roi_covers_offset_target():
+    # A small window centered on an OFFSET coarse center misses a target that a
+    # search-ROI tiling covers. This is the adrenal failure mode in miniature.
+    from src.inference import predict_refinement_array
+
+    data_xyz = np.zeros((24, 24, 24), dtype=np.float32)
+    # Target foreground sits away from the volume centre.
+    data_xyz[4:8, 4:8, 4:8] = 1.0
+    grid = nib.Nifti1Image(data_xyz, np.eye(4))
+    config = {
+        "model": {"channel_policy": "repeat"},
+        "data": {"img_size": [8, 8], "modality": "other",
+                 "patch": {"size_zyx": [6, 6, 6], "inference_overlap": 0.5}},
+        "inference": {},
+    }
+    # Coarse center is offset from the true target centroid (~5,5,5) to (9,9,9).
+    center = (9, 9, 9)
+    # Single window (search_size None) centered at (9,9,9) size 6 covers z,y,x
+    # in [6,12) -> misses the [4,8) target substantially.
+    single = predict_refinement_array(_DummyPredictionModel(), grid, config,
+                                      torch.device("cpu"), center)
+    # Search ROI large enough to reach the target from the offset center.
+    searched = predict_refinement_array(_DummyPredictionModel(), grid, config,
+                                        torch.device("cpu"), center,
+                                        search_size_zyx=(16, 16, 16))
+    target = np.zeros((24, 24, 24), dtype=bool)
+    target[4:8, 4:8, 4:8] = True
+    single_hit = int(np.logical_and(single > 0, target).sum())
+    searched_hit = int(np.logical_and(searched > 0, target).sum())
+    assert searched_hit > single_hit
+    assert searched.shape == (24, 24, 24)
+
+
+def test_derive_policy_tiny_window_lifts_foreground_fraction():
+    # The new window must raise the achievable foreground fraction by orders of
+    # magnitude versus the legacy window for the same ~928-voxel target.
+    fg_voxels = 928
+    tiny = derive_policy(_tiny_fingerprint([18.0, 20.0, 13.0]))
+    new_vol = np.prod(tiny["patch"]["size_zyx"])
+    legacy_vol = 53 * 171 * 171
+    assert fg_voxels / new_vol > 20 * (fg_voxels / legacy_vol)
+
+
 def test_surface_and_component_metrics_are_reported_in_physical_space():
     target = np.zeros((5, 7, 9), dtype=np.uint8)
     target[2, 3:5, 4:6] = 1
@@ -421,6 +724,26 @@ def test_sliding_window_tta_and_multiscale_return_native_grid():
     prediction = predict_array(_DummyPredictionModel(), grid, config, torch.device("cpu"))
     assert prediction.shape == (4, 8, 8)
     assert set(np.unique(prediction)) <= {0, 1}
+
+
+def test_roi_inference_restores_full_grid_and_keeps_largest_component():
+    image_xyz = np.zeros((12, 12, 6), dtype=np.float32)
+    image_xyz[6:10, 6:10, 2:5] = 10.0
+    image_xyz[5:6, 5:6, 2:3] = 10.0
+    grid = nib.Nifti1Image(image_xyz, np.eye(4))
+    config = {
+        "model": {"channel_policy": "repeat"},
+        "data": {
+            "img_size": [8, 8], "modality": "other", "patch": {},
+            "roi": {"enabled": True, "normalized_zyx": [[0.0, 0.25, 0.25], [1.0, 1.0, 1.0]]},
+        },
+        "inference": {"keep_largest_component": True},
+    }
+    prediction = predict_array(_DummyPredictionModel(), grid, config, torch.device("cpu"))
+    assert prediction.shape == (6, 12, 12)
+    from scipy import ndimage
+    _, count = ndimage.label(prediction)
+    assert count <= 1
 
 
 def test_study_candidates_are_explicit_and_confirmation_uses_three_seeds():
@@ -632,6 +955,44 @@ def test_confirm_job_specs_requires_ids():
         modal_study._phase_job_specs(plan, "confirm", None)
 
 
+def test_confirmation_ids_excludes_weak_and_degenerate_but_keeps_passing():
+    # A weak task (screen winner below guardrail) is reserved like a degenerate
+    # one: its winner and reference are dropped from confirmation, yet a clearly
+    # passing task still confirms. This is what lets aorta advance to folds
+    # 1/2/3 without being blocked by scapula's weak screen.
+    modal_study = _load_modal_study_module()
+    plan = {
+        "candidates": [
+            {"id": "aorta_ref", "task": "aorta", "is_reference": True},
+            {"id": "aorta_cldice", "task": "aorta"},
+            {"id": "scap_ref", "task": "scapula_left", "is_reference": True},
+            {"id": "scap_coronal", "task": "scapula_left"},
+            {"id": "adrenal_base", "task": "adrenal_gland_right"},
+        ],
+    }
+    selected_ids = ["aorta_cldice", "scap_coronal"]
+    ids = modal_study._confirmation_ids(
+        plan,
+        selected_ids,
+        weak_tasks=["scapula_left"],
+        degenerate_tasks=["adrenal_gland_right"],
+    )
+    assert set(ids) == {"aorta_ref", "aorta_cldice"}
+    assert ids == sorted(ids)
+
+
+def test_confirmation_ids_without_exclusions_matches_select_union_references():
+    modal_study = _load_modal_study_module()
+    plan = {
+        "candidates": [
+            {"id": "aorta_ref", "task": "aorta", "is_reference": True},
+            {"id": "aorta_cldice", "task": "aorta"},
+        ],
+    }
+    ids = modal_study._confirmation_ids(plan, ["aorta_cldice"], weak_tasks=[], degenerate_tasks=[])
+    assert set(ids) == {"aorta_ref", "aorta_cldice"}
+
+
 def _load_run_ablations_module():
     import importlib.util
 
@@ -786,6 +1147,85 @@ def _load_select_regime_module():
     p = PROJECT_ROOT / "scripts" / "research" / "select_regime_winners.py"
     spec = importlib.util.spec_from_file_location("select_regime_winners", p)
     m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return m
+
+
+def _load_select_screen_module():
+    import importlib.util
+    p = PROJECT_ROOT / "scripts" / "research" / "select_screening_winners.py"
+    spec = importlib.util.spec_from_file_location("select_screening_winners", p)
+    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return m
+
+
+def _screen_result(root, candidate, task, dice, hd95, surface=0.2, seed=1, failed=False):
+    d = root / "screen" / candidate / "fold_00" / "k5" / "seed_{}".format(seed)
+    d.mkdir(parents=True)
+    (d / "run_manifest.json").write_text(json.dumps({"candidate_id": candidate, "task": task}))
+    (d / "evaluation.json").write_text(json.dumps({
+        "mean_dice": dice, "mean_hd95_mm": hd95, "mean_surface_dice": surface,
+        "mean_recall": 0.8, "empty_prediction_rate": 0.0,
+    }))
+    if failed:
+        (d / "failed.json").write_text(json.dumps({"stage": "train", "returncode": 1}))
+
+
+def test_screen_selector_requires_complete_clean_matrix(tmp_path):
+    m = _load_select_screen_module()
+    plan = {
+        "study": {"screening_fold": 0, "screening_training_seeds": [1]},
+        "candidates": [
+            {"id": "brain_base", "task": "brain"},
+            {"id": "brain_320", "task": "brain"},
+        ],
+    }
+    _screen_result(tmp_path, "brain_base", "brain", 0.83, 9.0)
+    with pytest.raises(SystemExit, match="(?i)incomplete"):
+        m.select_screening(tmp_path, tmp_path / "out.json", plan)
+    _screen_result(tmp_path, "brain_320", "brain", 0.85, 60.0, failed=True)
+    with pytest.raises(SystemExit, match="failed.json"):
+        m.select_screening(tmp_path, tmp_path / "out.json", plan)
+
+
+def test_screen_selector_uses_tolerance_band_and_flags_weak(tmp_path):
+    m = _load_select_screen_module()
+    plan = {
+        "study": {"screening_fold": 0, "screening_training_seeds": [1]},
+        "screen_guardrails": {
+            "minimum_dice_by_task": {"brain": 0.7, "scapula_left": 0.4},
+            "maximum_hd95_mm_by_task": {"brain": 50.0, "scapula_left": 100.0},
+        },
+        "candidates": [
+            {"id": "brain_base", "task": "brain"},
+            {"id": "brain_320", "task": "brain"},
+            {"id": "scapula_base", "task": "scapula_left"},
+        ],
+    }
+    # 0.85 and 0.83 are within the registered 0.02 practical tie: HD95 wins.
+    _screen_result(tmp_path, "brain_base", "brain", 0.83, 9.0)
+    _screen_result(tmp_path, "brain_320", "brain", 0.85, 60.0)
+    _screen_result(tmp_path, "scapula_base", "scapula_left", 0.33, 220.0, surface=0.15)
+    payload = m.select_screening(tmp_path, tmp_path / "out.json", plan)
+    assert payload["selected_by_task"]["brain"]["candidate_id"] == "brain_base"
+    assert payload["selected_by_task"]["brain"]["weak"] is False
+    assert payload["selected_by_task"]["scapula_left"]["weak"] is True
+    assert payload["weak_tasks"] == ["scapula_left"]
+
+
+def test_screen_selector_excludes_regime_degenerate_task(tmp_path):
+    m = _load_select_screen_module()
+    plan = {
+        "study": {"screening_fold": 0, "screening_training_seeds": [1]},
+        "candidates": [
+            {"id": "brain_base", "task": "brain"},
+            {"id": "adrenal_base", "task": "adrenal_gland_right"},
+        ],
+    }
+    _screen_result(tmp_path, "brain_base", "brain", 0.8, 10.0)
+    payload = m.select_screening(
+        tmp_path, tmp_path / "out.json", plan,
+        {"degenerate_tasks": ["adrenal_gland_right"]},
+    )
+    assert payload["selected_candidate_ids"] == ["brain_base"]
+    assert payload["excluded_degenerate_tasks"] == ["adrenal_gland_right"]
 
 
 def test_select_regime_picks_max_dice_and_flags_degenerate(tmp_path):
@@ -1194,3 +1634,135 @@ def test_spatial_augmentation_handles_multichannel_images():
         out = aug(item)
         assert out["image"].shape == (C, D, H, W), "C={} broke".format(C)
         assert out["label"].shape == (D, H, W)
+
+
+def test_is_better_checkpoint_uses_train_loss_when_val_dice_tied():
+    from src.training.trainer import is_better_checkpoint
+    # Epoch 1 is always the initial best (a valid inference checkpoint must exist).
+    assert is_better_checkpoint(0.0, 0.0, train_loss=0.70, best_train_loss=float("inf"),
+                                min_delta=0.0, epoch=1, should_validate=True) is True
+    # A genuine val-Dice improvement wins outright.
+    assert is_better_checkpoint(0.30, 0.10, train_loss=0.50, best_train_loss=0.40,
+                                min_delta=0.001, epoch=8, should_validate=True) is True
+    # THE FIX: val Dice tied at 0 (needle target), but train loss dropped ->
+    # this later checkpoint is better than the epoch-1 one.
+    assert is_better_checkpoint(0.0, 0.0, train_loss=0.598, best_train_loss=0.705,
+                                min_delta=0.001, epoch=10, should_validate=True) is True
+    # Val tied and train loss did NOT improve -> not better.
+    assert is_better_checkpoint(0.0, 0.0, train_loss=0.71, best_train_loss=0.70,
+                                min_delta=0.001, epoch=12, should_validate=True) is False
+    # Val Dice already positive; a train-loss drop must NOT override a val regression.
+    assert is_better_checkpoint(0.05, 0.30, train_loss=0.10, best_train_loss=0.40,
+                                min_delta=0.001, epoch=20, should_validate=True) is False
+
+
+# ── LearnableZSmooth ─────────────────────────────────────────────────
+
+
+class TestLearnableZSmooth:
+    """Tests for the learnable z-axis Gaussian smoothing module."""
+
+    def test_gaussian_initialisation(self):
+        """Weights should be initialised as a normalised 1D Gaussian kernel."""
+        smooth = LearnableZSmooth(num_channels=2, sigma=4.0, learnable=True)
+        weight = smooth.conv.weight.data  # (2, 1, kZ, 1, 1)
+        assert weight.shape[2] == 25  # int(4*3)*2 + 1
+        # Each channel's kernel should sum to ≈ 1 (normalised).
+        for c in range(2):
+            kernel = weight[c, 0, :, 0, 0]
+            assert abs(float(kernel.sum()) - 1.0) < 1e-6
+            # Centre value should be the largest (Gaussian peak).
+            assert torch.argmax(kernel) == weight.shape[2] // 2
+
+    def test_learnable_flag_frozen(self):
+        smooth = LearnableZSmooth(num_channels=1, sigma=3.0, learnable=False)
+        assert not smooth.conv.weight.requires_grad
+
+    def test_learnable_flag_trainable(self):
+        smooth = LearnableZSmooth(num_channels=1, sigma=3.0, learnable=True)
+        assert smooth.conv.weight.requires_grad
+
+    def test_forward_preserves_shape(self):
+        smooth = LearnableZSmooth(num_channels=3, sigma=4.0)
+        x = torch.randn(1, 3, 32, 64, 64)
+        out = smooth(x)
+        assert out.shape == x.shape
+
+    def test_forward_is_depth_only_convolution(self):
+        """The smoothing should only mix along the depth axis (Z)."""
+        smooth = LearnableZSmooth(num_channels=1, sigma=4.0, learnable=False)
+        # Create a volume with a sharp step along Z: all zeros except slice 16 = 1
+        x = torch.zeros(1, 1, 32, 8, 8)
+        x[:, :, 16, :, :] = 1.0
+        out = smooth(x)
+        # The centre slice should still have the largest value after smoothing.
+        assert out[0, 0, 16, 0, 0] > out[0, 0, 0, 0, 0]
+        assert out[0, 0, 16, 0, 0] > out[0, 0, 31, 0, 0]
+        # In-plane spatial dims should NOT be affected (groups=C independent along Z only).
+        # All (H,W) positions in the same Z-slice should have identical values after smoothing
+        # because the input was spatially uniform.
+        for h in range(8):
+            for w in range(8):
+                assert abs(out[0, 0, 16, h, w] - out[0, 0, 16, 0, 0]) < 1e-6
+
+    def test_gradient_flows_when_learnable(self):
+        smooth = LearnableZSmooth(num_channels=1, sigma=4.0, learnable=True)
+        x = torch.randn(1, 1, 16, 32, 32)
+        out = smooth(x)
+        loss = out.sum()
+        loss.backward()
+        assert smooth.conv.weight.grad is not None
+        assert not torch.allclose(smooth.conv.weight.grad, torch.zeros_like(smooth.conv.weight.grad))
+
+    def test_gradient_blocked_when_frozen(self):
+        smooth = LearnableZSmooth(num_channels=1, sigma=4.0, learnable=False)
+        x = torch.randn(1, 1, 16, 32, 32)
+        out = smooth(x)
+        # When the convolution weights are frozen, the output tensor has no
+        # grad_fn and loss.backward() would fail.  Gradients still reach *x*
+        # because the conv forward is a deterministic op, but the weight
+        # gradient is never computed.
+        assert smooth.conv.weight.grad is None  # never computed
+        # Verify the output is still a valid float tensor.
+        assert out.dtype == torch.float32
+
+
+def test_mlp_probe_decoder_learnable_zsmooth_overrides_fixed():
+    """When z_smooth_sigma > 0, MLPProbeDecoder3D should use LearnableZSmooth
+    instead of the fixed non-parametric z-axis kernel."""
+    import torch.nn.functional as F
+    dec_learnable = MLPProbeDecoder3D([768], num_classes=2, z_smooth_sigma=4.0)
+    dec_fixed = MLPProbeDecoder3D([768], num_classes=2, z_smooth_sigma=0.0)
+
+    # Learnable version has the module; fixed version does not.
+    assert dec_learnable._learnable_z_smooth is not None
+    assert dec_fixed._learnable_z_smooth is None
+
+    # Forward: both should produce same-shaped output.
+    feat = torch.randn(1, 768, 8, 16, 16)
+    shape = (1, 1, 16, 128, 128)
+    out_learnable = dec_learnable([feat], shape)
+    out_fixed = dec_fixed([feat], shape)
+    assert out_learnable.shape == out_fixed.shape
+
+    # With learnable=True and the kernel initialised as Gaussian, the learnable
+    # output should be close (but not identical due to fixed vs parameterised)
+    # to the fixed output on the same input.
+    assert not torch.allclose(out_learnable, out_fixed)
+
+
+def test_segformer_decoder_zsmooth_config():
+    """SegFormer3DDecoder(z_smooth_sigma=0) should have z_smooth=None."""
+    dec_no_smooth = SegFormer3DDecoder([768] * 4, num_classes=2, z_smooth_sigma=0.0)
+    assert dec_no_smooth.z_smooth is None
+
+    dec_smooth = SegFormer3DDecoder([768] * 4, num_classes=2, z_smooth_sigma=4.0)
+    assert dec_smooth.z_smooth is not None
+    assert isinstance(dec_smooth.z_smooth, LearnableZSmooth)
+
+    # Forward both should work.
+    feats = [torch.randn(1, 768, 8, 16, 16) for _ in range(4)]
+    shape = (1, 1, 16, 128, 128)
+    out_plain = dec_no_smooth(feats, shape)
+    out_smooth = dec_smooth(feats, shape)
+    assert out_plain.shape == out_smooth.shape

@@ -3,6 +3,9 @@
 Four options: linear3d, mlp_probe, segformer3d, dpt3d.
 """
 
+from __future__ import annotations
+
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -15,6 +18,74 @@ def norm3d(channels: int) -> nn.GroupNorm:
     while groups > 1 and channels % groups:
         groups -= 1
     return nn.GroupNorm(groups, channels)
+
+
+# ──────────────────────────────────────────────
+# Shared utilities
+# ──────────────────────────────────────────────
+
+class LearnableZSmooth(nn.Module):
+    """Learnable depth-wise Gaussian smoothing along the Z axis.
+
+    Applied after the decoder head to improve inter-slice consistency in
+    pseudo-3D segmentation. The kernel is initialised as a 1D Gaussian so
+    the smoothing starts from a reasonable prior, then the per-class
+    weights are free to adapt during training (each class learns its own
+    optimal smoothing strength independently via grouped convolution).
+
+    Reference: DINO-MVR (arXiv:2605.07221) uses a fixed z-axis Gaussian
+    kernel as non-parametric post-processing. This module makes the same
+    operation learnable so gradients flow through it during training.
+
+    .. note::
+
+       *sigma* is in **voxel units**.  The caller (:class:`DINOv33DSegmentor`)
+       converts the user-facing ``decoder.z_smooth_sigma`` (physical mm) to
+       voxel units using ``data.target_spacing[0]`` (Z spacing), clamped to
+       [1.0, 8.0] voxels so the same mm value behaves consistently across
+       thin-slice and thick-slice acquisitions.
+
+    Parameters
+    ----------
+    num_channels : int
+        Number of classes (one independent kernel per class).
+    sigma : float
+        Standard deviation of the initial Gaussian kernel in **voxel units**
+        (already converted from physical mm by the segmentor).
+    learnable : bool
+        If False the kernel is frozen (non-parametric DINO-MVR behaviour).
+    """
+
+    def __init__(self, num_channels: int, sigma: float = 4.0, learnable: bool = True):
+        super().__init__()
+        kernel_size = int(sigma * 3.0) * 2 + 1
+        # Build 1D Gaussian: exp(-0.5 * (t / sigma)^2)
+        t = torch.arange(kernel_size, dtype=torch.float32) - kernel_size // 2
+        gaussian = torch.exp(-0.5 * (t / sigma) ** 2)
+        gaussian = gaussian / gaussian.sum()
+        # Conv3d weight shape: (out_ch, in_ch/groups, kD, kH, kW)
+        weight = gaussian.view(1, 1, kernel_size, 1, 1).repeat(num_channels, 1, 1, 1, 1)
+        self.conv = nn.Conv3d(
+            num_channels,
+            num_channels,
+            kernel_size=(kernel_size, 1, 1),
+            padding=(kernel_size // 2, 0, 0),
+            groups=num_channels,
+            bias=False,
+        )
+        with torch.no_grad():
+            self.conv.weight.copy_(weight)
+        self.conv.weight.requires_grad = bool(learnable)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply per-class 1D depth convolution.
+
+        Args:
+            x: (B, C, D, H, W) logits or probabilities.
+        Returns:
+            (B, C, D, H, W) smoothed output.
+        """
+        return self.conv(x)
 
 
 # ──────────────────────────────────────────────
@@ -33,18 +104,28 @@ class DecoderFactory:
     _2D_DECODERS = {"conv2d", "conv2d_unet", "conv2d_deeplab", "conv2d_2_5d"}
 
     @staticmethod
-    def create(decoder_type: str, feature_dims: List[int], num_classes: int) -> nn.Module:
+    def create(
+        decoder_type: str,
+        feature_dims: List[int],
+        num_classes: int,
+        z_smooth_sigma: float = 0.0,
+    ) -> nn.Module:
         # ── 3D decoders ──
         if decoder_type == "linear3d":
-            return LinearDecoder3D(feature_dims[0], num_classes, num_levels=len(feature_dims))
+            return LinearDecoder3D(feature_dims[0], num_classes, num_levels=len(feature_dims),
+                                   z_smooth_sigma=z_smooth_sigma)
         elif decoder_type == "mlp_probe":
-            return MLPProbeDecoder3D(feature_dims[-3:], num_classes)
+            return MLPProbeDecoder3D(feature_dims[-3:], num_classes,
+                                     z_smooth_sigma=z_smooth_sigma)
         elif decoder_type == "segformer3d":
-            return SegFormer3DDecoder(feature_dims, num_classes)
+            return SegFormer3DDecoder(feature_dims, num_classes,
+                                      z_smooth_sigma=z_smooth_sigma)
         elif decoder_type == "token_pyramid3d":
-            return TokenPyramid3DDecoder(feature_dims, num_classes)
+            return TokenPyramid3DDecoder(feature_dims, num_classes,
+                                         z_smooth_sigma=z_smooth_sigma)
         elif decoder_type == "dpt3d":
-            return DPT3DDecoder(feature_dims, num_classes)
+            return DPT3DDecoder(feature_dims, num_classes,
+                                z_smooth_sigma=z_smooth_sigma)
 
         # ── 2D decoders (lazy import) ──
         elif decoder_type in DecoderFactory._2D_DECODERS:
@@ -87,7 +168,8 @@ class LinearDecoder3D(nn.Module):
     ~0.3M parameters (4 feature levels × proj + fusion).
     """
 
-    def __init__(self, feature_dim: int, num_classes: int, num_levels: int = 4):
+    def __init__(self, feature_dim: int, num_classes: int, num_levels: int = 4,
+                 z_smooth_sigma: float = 0.0):
         super().__init__()
         self.num_levels = num_levels
 
@@ -110,6 +192,12 @@ class LinearDecoder3D(nn.Module):
 
         # Output head
         self.head = nn.Conv3d(proj_dim, num_classes, kernel_size=1)
+
+        self.z_smooth = (
+            LearnableZSmooth(num_classes, sigma=float(z_smooth_sigma))
+            if z_smooth_sigma > 0
+            else None
+        )
 
     def forward(self, features_3d: List[torch.Tensor], original_shape: tuple) -> torch.Tensor:
         """
@@ -135,6 +223,8 @@ class LinearDecoder3D(nn.Module):
         # Fuse and predict
         fused = self.fuse(torch.cat(projected, dim=1))
         out = self.head(fused)
+        if self.z_smooth is not None:
+            out = self.z_smooth(out)
         out = F.interpolate(out, size=original_shape[2:], mode="trilinear", align_corners=False)
         return out
 
@@ -165,14 +255,26 @@ class MLPProbeDecoder3D(nn.Module):
     """DINO-MVR style: MLP probes on last 3 blocks + z-axis Gaussian smoothing.
 
     ~0.3M parameters. Reference: DINO-MVR (arXiv:2605.07221), BraTS 0.908 DSC.
+
+    When *z_smooth_sigma* > 0 a :class:`LearnableZSmooth` module replaces the
+    fixed non-parametric z-axis kernel so the smoothing strength is optimised
+    during training. Pass 0 to keep the original fixed-DINO-MVR behaviour.
     """
 
-    def __init__(self, feature_dims: List[int], num_classes: int, probe_hidden: int = 256):
+    def __init__(self, feature_dims: List[int], num_classes: int, probe_hidden: int = 256,
+                 z_smooth_sigma: float = 0.0):
         super().__init__()
         # One probe per feature layer (last 3 blocks)
         self.probes = nn.ModuleList([
             MLPProbe(dim, probe_hidden, num_classes) for dim in feature_dims
         ])
+        # Use learnable z-smooth when explicitly requested, otherwise keep the
+        # original fixed-DINO-MVR kernel for backward compatibility.
+        self._learnable_z_smooth = (
+            LearnableZSmooth(num_classes, sigma=float(z_smooth_sigma))
+            if z_smooth_sigma > 0
+            else None
+        )
         self.z_smooth_sigma = 4.0
 
     def forward(self, features_3d: List[torch.Tensor], original_shape: tuple) -> torch.Tensor:
@@ -186,8 +288,10 @@ class MLPProbeDecoder3D(nn.Module):
         # Average fusion
         pred = torch.stack(preds).mean(dim=0)
 
-        # Z-axis Gaussian smoothing (non-parametric)
-        if pred.shape[2] > 1:
+        # Z-axis smoothing: learnable when configured, otherwise fixed DINO-MVR kernel.
+        if self._learnable_z_smooth is not None:
+            pred = self._learnable_z_smooth(pred)
+        elif pred.shape[2] > 1:
             kernel_size = int(self.z_smooth_sigma * 3) * 2 + 1
             kernel = torch.exp(-0.5 * (torch.arange(kernel_size, device=pred.device).float()
                                         - kernel_size // 2) ** 2 / self.z_smooth_sigma ** 2)
@@ -212,9 +316,13 @@ class SegFormer3DDecoder(nn.Module):
     """SegFormer3D-inspired: project → upsample → concat → MLP fusion → output.
 
     ~4M parameters. Reference: an-mistral compact SegFormer3D design.
+
+    Set *z_smooth_sigma* > 0 to append a learnable 1D depth Gaussian after the
+    output head for improved inter-slice consistency.
     """
 
-    def __init__(self, feature_dims: List[int], num_classes: int, proj_dim: int = 128):
+    def __init__(self, feature_dims: List[int], num_classes: int, proj_dim: int = 128,
+                 z_smooth_sigma: float = 0.0):
         super().__init__()
         self.proj_dim = proj_dim
 
@@ -247,6 +355,12 @@ class SegFormer3DDecoder(nn.Module):
             nn.Conv3d(proj_dim // 2, num_classes, 1),
         )
 
+        self.z_smooth = (
+            LearnableZSmooth(num_classes, sigma=float(z_smooth_sigma))
+            if z_smooth_sigma > 0
+            else None
+        )
+
     def forward(self, features_3d: List[torch.Tensor], original_shape: tuple) -> torch.Tensor:
         target_shape = features_3d[0].shape[-3:]  # spatial shape of shallowest layer
 
@@ -259,6 +373,8 @@ class SegFormer3DDecoder(nn.Module):
 
         fused = self.fuse(torch.cat(projected, dim=1))
         out = self.head(fused)
+        if self.z_smooth is not None:
+            out = self.z_smooth(out)
         out = F.interpolate(out, size=original_shape[2:], mode="trilinear", align_corners=False)
         return out
 
@@ -279,7 +395,8 @@ class TokenPyramid3DDecoder(nn.Module):
     particular paper's TPA implementation.
     """
 
-    def __init__(self, feature_dims: List[int], num_classes: int, proj_dim: int = 128):
+    def __init__(self, feature_dims: List[int], num_classes: int, proj_dim: int = 128,
+                 z_smooth_sigma: float = 0.0):
         super().__init__()
         if not feature_dims:
             raise ValueError("TokenPyramid3DDecoder requires at least one feature level")
@@ -301,6 +418,12 @@ class TokenPyramid3DDecoder(nn.Module):
             nn.GELU(),
         )
         self.head = nn.Conv3d(proj_dim, num_classes, kernel_size=1)
+
+        self.z_smooth = (
+            LearnableZSmooth(num_classes, sigma=float(z_smooth_sigma))
+            if z_smooth_sigma > 0
+            else None
+        )
 
     @staticmethod
     def _pool_inplane(feature: torch.Tensor, factor: int) -> torch.Tensor:
@@ -327,6 +450,8 @@ class TokenPyramid3DDecoder(nn.Module):
                 current = F.interpolate(current, size=target_shape, mode="trilinear", align_corners=False)
             assembled.append(current)
         logits = self.head(self.fuse(torch.cat(assembled, dim=1)))
+        if self.z_smooth is not None:
+            logits = self.z_smooth(logits)
         return F.interpolate(logits, size=original_shape[2:], mode="trilinear", align_corners=False)
 
 
@@ -359,7 +484,8 @@ class DPT3DDecoder(nn.Module):
     ~8M parameters. Reference: Neonatal Brain MR (arXiv:2602.23962).
     """
 
-    def __init__(self, feature_dims: List[int], num_classes: int, out_dim: int = 256):
+    def __init__(self, feature_dims: List[int], num_classes: int, out_dim: int = 256,
+                 z_smooth_sigma: float = 0.0):
         super().__init__()
         assert len(feature_dims) == 4, "DPT3D expects exactly 4 feature levels"
 
@@ -389,6 +515,12 @@ class DPT3DDecoder(nn.Module):
             nn.Conv3d(128, num_classes, 1),
         )
 
+        self.z_smooth = (
+            LearnableZSmooth(num_classes, sigma=float(z_smooth_sigma))
+            if z_smooth_sigma > 0
+            else None
+        )
+
     def forward(self, features_3d: List[torch.Tensor], original_shape: tuple) -> torch.Tensor:
         # Reassemble from deepest to shallowest
         reassembled = []
@@ -402,5 +534,7 @@ class DPT3DDecoder(nn.Module):
             x = fusion(x + residual)
 
         out = self.head(x)
+        if self.z_smooth is not None:
+            out = self.z_smooth(out)
         out = F.interpolate(out, size=original_shape[2:], mode="trilinear", align_corners=False)
         return out

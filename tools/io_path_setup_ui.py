@@ -7,7 +7,6 @@ import argparse
 import json
 import os
 import sys
-import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -207,12 +206,7 @@ def run_ui(context, preview_path=""):
             form.addWidget(_label(QtWidgets, hint, "hint"))
 
         def browse():
-            current = edit.text().strip()
-            # Fall back to home if the field is empty or points somewhere that
-            # no longer exists, so the native dialog never opens on a huge or
-            # stale root that makes it hang.
-            if not current or not os.path.exists(current):
-                current = str(Path.home())
+            current = edit.text().strip() or str(Path.home())
             if file_or_folder:
                 menu = QtWidgets.QMenu(button)
                 choose_file = menu.addAction("Choose image file")
@@ -266,19 +260,13 @@ def run_ui(context, preview_path=""):
     def refresh_default():
         source = source_edit.text().strip()
         if not output_user_edited["value"]:
-            new_output = resolve_configured_output(configured_default, source, mode)
-            # Avoid re-setting (and re-emitting textChanged) when nothing changed;
-            # this keeps typing in the source field from churning the signal chain.
-            if new_output != output_edit.text():
-                output_edit.setText(new_output)
+            output_edit.setText(resolve_configured_output(configured_default, source, mode))
         output = output_edit.text().strip()
         if mode == "export_masks":
             case_id = str(context.get("case_id") or "case")
-            preview_text = "Final folder: {0}".format(os.path.join(output, case_id, "segmentations")) if output else ""
+            output_preview.setText("Final folder: {0}".format(os.path.join(output, case_id, "segmentations")) if output else "")
         else:
-            preview_text = "Mimics projects: {0}".format(output) if output else ""
-        if output_preview.text() != preview_text:
-            output_preview.setText(preview_text)
+            output_preview.setText("Mimics projects: {0}".format(output) if output else "")
         submit.setEnabled(bool(source and output))
 
     def output_edited(_text):
@@ -311,19 +299,6 @@ def run_ui(context, preview_path=""):
         output = os.path.abspath(os.path.expanduser(output_edit.text().strip()))
         if not os.path.exists(source):
             QtWidgets.QMessageBox.warning(window, "Source Not Found", "Choose an existing source file or folder.")
-            return
-        try:
-            if not os.path.isdir(output):
-                os.makedirs(output)
-            fd, probe_path = tempfile.mkstemp(prefix=".mimics_write_test_", dir=output)
-            os.close(fd)
-            os.remove(probe_path)
-        except Exception as exc:
-            QtWidgets.QMessageBox.warning(
-                window,
-                "Output Not Writable",
-                "The output folder could not be created or written.\n\n{0}\n\n{1}".format(output, exc),
-            )
             return
         selection = {"source_path": source, "output_path": output, "remember": bool(remember.isChecked())}
         if mode in ("import_single", "export_masks"):
