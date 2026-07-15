@@ -50,6 +50,7 @@ _read_json = runtime_common.read_json
 _safe_slug = runtime_common.safe_slug
 _find_root = runtime_common.find_root
 _hidden_process_kwargs = runtime_common.hidden_process_kwargs
+_background_process_kwargs = runtime_common.background_process_kwargs
 _background_env = runtime_common.background_env
 
 
@@ -1414,7 +1415,7 @@ def _launch_process(cmd, cwd=None):
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         env=_background_env(),
-        **_hidden_process_kwargs()
+        **_background_process_kwargs()
     )
 
 
@@ -1466,6 +1467,18 @@ def _launch_gui_process(cmd, cwd=None, stderr_log=None):
             except Exception:
                 pass
     return proc
+
+
+def _startup_stderr(path):
+    if not path:
+        return ""
+    try:
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                return handle.read(4096).strip()
+    except Exception:
+        pass
+    return ""
 
 
 def _existing_gui_process(key):
@@ -1568,45 +1581,6 @@ def _launch_external_advanced_training(config, organ, ts_root):
     current_status["updated_at_epoch"] = time.time()
     _write_json_atomic(status_path, current_status)
 
-    # Detect immediate launcher failures and surface them to the user instead of
-    # silently returning while the external window never appears.
-    for _ in range(8):
-        if process.poll() is not None:
-            break
-        time.sleep(0.1)
-    if process.poll() is not None:
-        # Read captured stderr for a more informative error message.
-        stderr_detail = ""
-        try:
-            if os.path.isfile(stderr_log):
-                stderr_detail = open(stderr_log, "r", encoding="utf-8", errors="replace").read(4096).strip()
-        except Exception:
-            stderr_detail = ""
-        failed = _read_json(status_path, current_status) or current_status
-        if failed.get("status") != "failed":
-            failed["status"] = "failed"
-            base_msg = (
-                "Could not open the external training setup window. "
-                "The process exited immediately."
-            )
-            if stderr_detail:
-                failed["error"] = "{0}\n\nStderr:\n{1}".format(base_msg, stderr_detail)
-            else:
-                failed["error"] = base_msg
-            failed["updated_at_epoch"] = time.time()
-            try:
-                _write_json_atomic(status_path, failed)
-            except Exception:
-                pass
-        mimics.dialogs.message_box(
-            "Could not open the external training setup UI.\n\n{0}".format(
-                failed.get("error", "Unknown startup error")
-            ),
-            title=TITLE,
-            ui_blocking=False,
-        )
-        return 1
-
     monitor_started = False
     try:
         monitor_started = _start_monitor(
@@ -1616,6 +1590,7 @@ def _launch_external_advanced_training(config, organ, ts_root):
                 "deadline": time.time() + float(config.get("training_setup_timeout_seconds", 12 * 60 * 60)),
                 "status_path": status_path,
                 "controller_pid": process.pid,
+                "startup_stderr_path": stderr_log,
                 "last_line": "",
             },
             poll_seconds=float(config.get("training_monitor_poll_seconds", 5.0)),
@@ -1954,8 +1929,13 @@ def _launch_external_model_chooser(config, ts_root, case_id, organ, target_spec=
     }
     _write_json_atomic(status_path, status)
     _write_json_atomic(context_path, context)
+    stderr_log = os.path.join(jobs_dir, choice_id + "_stderr.log")
     try:
-        process = _launch_gui_process([python_exe, script, "--context", context_path], cwd=_project_root())
+        process = _launch_gui_process(
+            [python_exe, script, "--context", context_path],
+            cwd=_project_root(),
+            stderr_log=stderr_log,
+        )
     except Exception as exc:
         status["status"] = "failed"
         status["error"] = "Could not start the external model chooser. Python: {0}. Script: {1}. Error: {2}".format(
@@ -1971,23 +1951,6 @@ def _launch_external_model_chooser(config, ts_root, case_id, organ, target_spec=
     current["context_path"] = context_path
     current["updated_at_epoch"] = time.time()
     _write_json_atomic(status_path, current)
-    for _ in range(8):
-        if process.poll() is not None:
-            break
-        time.sleep(0.1)
-    if process.poll() is not None:
-        failed = _read_json(status_path, current) or current
-        if failed.get("status") not in ("selected", "cancelled"):
-            failed["status"] = "failed"
-            failed["error"] = "The external model chooser exited immediately."
-            failed["updated_at_epoch"] = time.time()
-            _write_json_atomic(status_path, failed)
-            mimics.dialogs.message_box(
-                "Could not open the external DINOv3 model chooser.\n\n{0}".format(failed.get("error", "")),
-                title=TITLE,
-                ui_blocking=False,
-            )
-            return 1
     _start_monitor(
         {
             "monitor_key": choice_id,
@@ -1997,6 +1960,8 @@ def _launch_external_model_chooser(config, ts_root, case_id, organ, target_spec=
             "case_id": case_id,
             "organ": organ,
             "prediction_target": target_spec or {},
+            "controller_pid": process.pid,
+            "startup_stderr_path": stderr_log,
             "deadline": time.time() + float(config.get("model_choice_timeout_seconds", 30 * 60)),
             "last_line": "",
         },
@@ -2108,7 +2073,7 @@ def _launch_bridge_mask_to_buffer(monitor, status):
             stdin=stdin_handle,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            **_hidden_process_kwargs()
+            **_background_process_kwargs()
         )
     monitor["bridge_started"] = True
     monitor["bridge_pid"] = process.pid
@@ -2336,14 +2301,24 @@ def _monitor_setup_tick(monitor, status):
     if state == "configuring":
         pid = status.get("controller_pid") or monitor.get("controller_pid")
         if pid and not _process_exists(pid):
-            status["status"] = "closed"
+            stderr_detail = _startup_stderr(monitor.get("startup_stderr_path"))
+            status["status"] = "failed" if stderr_detail else "closed"
+            if stderr_detail:
+                status["error"] = "The external training setup exited before opening.\n\n{0}".format(stderr_detail)
             status["updated_at_epoch"] = time.time()
             try:
                 _write_json_atomic(monitor["status_path"], status)
             except Exception:
                 pass
             _stop_monitor(key)
-            _mimics_log(logging.INFO, "DINOv3 advanced setup process ended before launching training.")
+            if stderr_detail:
+                mimics.dialogs.message_box(
+                    "DINOv3 training setup could not open.\n\n{0}".format(stderr_detail),
+                    title=TITLE,
+                    ui_blocking=False,
+                )
+            else:
+                _mimics_log(logging.INFO, "DINOv3 advanced setup process ended before launching training.")
         return
 
 
@@ -2384,17 +2359,27 @@ def _monitor_model_choice_tick(monitor, status):
         return
     pid = status.get("controller_pid") or monitor.get("controller_pid")
     if pid and state in ("selecting_model", "configuring") and not _process_exists(pid):
-        status["status"] = "closed"
+        stderr_detail = _startup_stderr(monitor.get("startup_stderr_path"))
+        status["status"] = "failed" if stderr_detail else "closed"
+        if stderr_detail:
+            status["error"] = "The external model chooser exited before opening.\n\n{0}".format(stderr_detail)
         status["updated_at_epoch"] = time.time()
         try:
             _write_json_atomic(monitor["status_path"], status)
         except Exception:
             pass
         _stop_monitor(key)
-        _mimics_log(logging.INFO, "DINOv3 model chooser closed before selecting a model.")
+        if stderr_detail:
+            mimics.dialogs.message_box(
+                "DINOv3 model chooser could not open.\n\n{0}".format(stderr_detail),
+                title=TITLE,
+                ui_blocking=False,
+            )
+        else:
+            _mimics_log(logging.INFO, "DINOv3 model chooser closed before selecting a model.")
 
 
-def _monitor_tick(monitor):
+def _monitor_tick_locked(monitor):
     key = monitor.get("monitor_key")
     if time.time() > monitor.get("deadline", 0):
         _stop_monitor(key)
@@ -2530,6 +2515,22 @@ def _monitor_tick(monitor):
             bridge_result.get("foreground_voxels", "?"),
         ),
     )
+
+
+def _monitor_tick(monitor):
+    if monitor.get("busy"):
+        return
+    operation_token = runtime_common.try_acquire_local_operation(
+        "mask_buffer_access", "DINOv3 result monitor"
+    )
+    if not operation_token:
+        return
+    monitor["busy"] = True
+    try:
+        _monitor_tick_locked(monitor)
+    finally:
+        monitor["busy"] = False
+        runtime_common.release_local_operation("mask_buffer_access", operation_token)
 
 
 def _start_win32_monitor(monitor, poll_seconds):

@@ -318,6 +318,20 @@ class TestRuntimeCommon(unittest.TestCase):
         # Negative PID
         self.assertFalse(runtime_common.process_exists(-1))
 
+    def test_local_operation_lease_prevents_nested_timer_reentry(self):
+        import runtime_common
+
+        resource = "test_mask_buffer_access"
+        first = runtime_common.try_acquire_local_operation(resource, "first")
+        self.assertTrue(first)
+        self.assertIsNone(runtime_common.try_acquire_local_operation(resource, "second"))
+        self.assertEqual("first", runtime_common.active_local_operation(resource)["owner"])
+        self.assertFalse(runtime_common.release_local_operation(resource, "wrong-token"))
+        self.assertTrue(runtime_common.release_local_operation(resource, first))
+        second = runtime_common.try_acquire_local_operation(resource, "second")
+        self.assertTrue(second)
+        self.assertTrue(runtime_common.release_local_operation(resource, second))
+
     def test_cleanup_stale_resource_locks(self):
         import runtime_common
 
@@ -1788,6 +1802,70 @@ class TestStopBackgroundServices(unittest.TestCase):
         self.assertTrue(os.path.isfile(entry))
         self.assertIn("main_stop_export", Path(entry).read_text(encoding="utf-8"))
 
+    def test_mask_export_stop_does_not_target_background_import(self):
+        import mimics_stop_background as msb
+        import runtime_common
+
+        runtime_dir = os.path.join(self.tmp, "runtime")
+        os.makedirs(runtime_dir)
+        lock_path = os.path.join(self.tmp, "background_mimics.lock")
+        runtime_common.write_json_atomic(lock_path, {
+            "pid": os.getpid(),
+            "kind": "create_mcs",
+            "owner": "import .mcs creation",
+        })
+        old_lock = msb._background_mimics_lock_path
+        old_runtime = msb._runtime_dir
+        old_stop = msb._stop_export_inprocess_monitors
+        try:
+            msb._background_mimics_lock_path = lambda: lock_path
+            msb._runtime_dir = lambda: runtime_dir
+            msb._stop_export_inprocess_monitors = lambda: 0
+            result = msb.stop_background_export()
+        finally:
+            msb._background_mimics_lock_path = old_lock
+            msb._runtime_dir = old_runtime
+            msb._stop_export_inprocess_monitors = old_stop
+        self.assertIsNone(result.get("target_pid"))
+        report = runtime_common.read_json(result.get("stop_log"), {}) or {}
+        self.assertIn("No active Mimics-Script mask export", report.get("Message", ""))
+
+    def test_external_io_failure_reports_bounded_stderr_and_log_path(self):
+        import io_setup_mimics
+
+        status_path = os.path.join(self.tmp, "io_status.json")
+        stderr_path = os.path.join(self.tmp, "io_stderr.log")
+        Path(status_path).write_text(json.dumps({"status": "opening"}), encoding="utf-8")
+        Path(stderr_path).write_text("Traceback\nImportError: PySide6 DLL load failed\n", encoding="utf-8")
+
+        class Process(object):
+            def poll(self):
+                return 1
+
+        messages = []
+        monitor = {
+            "key": "io_failure_test",
+            "status_path": status_path,
+            "stderr_log": stderr_path,
+            "process": Process(),
+            "deadline": time.time() + 60.0,
+            "busy": False,
+        }
+        old_message = io_setup_mimics._message
+        try:
+            io_setup_mimics._IO_SETUP_MONITORS[monitor["key"]] = monitor
+            io_setup_mimics._ALERTED.discard(monitor["key"])
+            io_setup_mimics._message = lambda title, message: messages.append((title, message))
+            io_setup_mimics._tick(monitor)
+        finally:
+            io_setup_mimics._message = old_message
+            io_setup_mimics._IO_SETUP_MONITORS.pop(monitor["key"], None)
+            io_setup_mimics._ALERTED.discard(monitor["key"])
+        self.assertEqual(1, len(messages))
+        self.assertIn("ImportError: PySide6 DLL load failed", messages[0][1])
+        self.assertIn(stderr_path, messages[0][1])
+        self.assertLessEqual(len(io_setup_mimics._read_stderr_tail(stderr_path, 16).encode("utf-8")), 32)
+
     def test_import_launch_directory_failure_is_reported_without_timeout(self):
         import mimics_import
 
@@ -2571,7 +2649,12 @@ class TestNewFeatures(unittest.TestCase):
 
         mask_main = inspect.getsource(mask_import.main)
         self.assertNotIn("_call_bridge(bridge_params)", mask_main)
-        self.assertIn("_launch_mask_prepare(bridge_params, result_path, monitor)", mask_main)
+        self.assertIn("io_setup_mimics.launch", mask_main)
+        self.assertIn("mask_file_picker_ui.py", mask_main)
+        mask_submit = inspect.getsource(mask_import._start_import_for_paths)
+        self.assertIn("_launch_mask_prepare(bridge_params, result_path, monitor)", mask_submit)
+        self.assertNotIn("QFileDialog", inspect.getsource(mask_import))
+        self.assertNotIn("tkFileDialog", inspect.getsource(mask_import))
         batch_main = inspect.getsource(mimics_import.main)
         self.assertIn("_resolve_import_output_dir(ts_root, create=False)", batch_main)
         discover_monitor = inspect.getsource(mimics_import._start_import_discover_monitor)
@@ -2628,6 +2711,29 @@ class TestNewFeatures(unittest.TestCase):
         self.assertNotIn('"--mcs-dir"', export_setup)
         async_launch = inspect.getsource(mimics_export._launch_background_batch_export_async)
         self.assertIn("thread.start()", async_launch)
+
+    def test_external_pyside_path_browsers_do_not_use_windows_shell_or_sync_network_stats(self):
+        import inspect
+        import mask_import
+        import tools.fewshot_training_setup_ui as training_ui
+        import tools.io_path_setup_ui as path_ui
+        import tools.mask_file_picker_ui as mask_picker
+
+        browser_source = inspect.getsource(path_ui.choose_path_without_shell)
+        self.assertIn("threading.Thread", browser_source)
+        self.assertIn("os.scandir", browser_source)
+        self.assertNotIn("QFileDialog", browser_source)
+        self.assertNotIn("os.path.isfile(typed)", browser_source)
+        self.assertNotIn("os.path.isdir(typed)", browser_source)
+        self.assertNotIn("QFileDialog", inspect.getsource(training_ui.QtTrainingSetupApp.browse_dataset))
+        self.assertIn("threading.Thread", inspect.getsource(training_ui.QtTrainingSetupApp.apply_dataset_root))
+        self.assertNotIn("QFileDialog", inspect.getsource(mask_picker.main))
+        self.assertNotIn("os.path.isfile(p)", inspect.getsource(mask_import._start_import_for_paths))
+
+        import tools.fewshot_status_viewer as status_viewer
+        status_refresh = inspect.getsource(status_viewer.QtStatusViewerApp.refresh)
+        self.assertIn("threading.Thread", status_refresh)
+        self.assertNotIn("self._load_jobs()\n        self.job_combo", status_refresh)
 
     def test_ai_prediction_output_modes_are_explicit(self):
         import inspect
@@ -3843,7 +3949,7 @@ class TestNewFeatures(unittest.TestCase):
         old_script = fewshot_mimics._status_viewer_script
         old_project = fewshot_mimics._project_root
         try:
-            fewshot_mimics._launch_gui_process = lambda cmd, cwd=None: launched.append((cmd, cwd)) or Proc()
+            fewshot_mimics._launch_gui_process = lambda cmd, cwd=None, stderr_log=None: launched.append((cmd, cwd)) or Proc()
             fewshot_mimics._project_root = lambda: PROJECT_ROOT
             fewshot_mimics._status_viewer_script = lambda: os.path.join(PROJECT_ROOT, "tools", "fewshot_status_viewer.py")
             pid = fewshot_mimics._launch_external_status_viewer(
@@ -3911,7 +4017,7 @@ class TestNewFeatures(unittest.TestCase):
         old_script = fewshot_mimics._model_chooser_script
         old_project = fewshot_mimics._project_root
         try:
-            fewshot_mimics._launch_gui_process = lambda cmd, cwd=None: launched.append((cmd, cwd)) or Proc()
+            fewshot_mimics._launch_gui_process = lambda cmd, cwd=None, stderr_log=None: launched.append((cmd, cwd)) or Proc()
             fewshot_mimics._start_monitor = lambda monitor, poll_seconds=1.0: monitors.append(monitor) or True
             fewshot_mimics._model_chooser_script = lambda: os.path.join(PROJECT_ROOT, "tools", "fewshot_model_chooser.py")
             fewshot_mimics._project_root = lambda: PROJECT_ROOT
@@ -4593,6 +4699,68 @@ class TestNewFeatures(unittest.TestCase):
             mimics_import._launch_background_mimics = old_launch
             mimics_import._BG_MIMICS_PID = old_pid
             mimics_import._BG_MIMICS_LAUNCH_ACTIVE = old_active
+
+    def test_external_ai_windows_do_not_sleep_on_mimics_gui_thread(self):
+        import inspect
+        import fewshot_mimics
+
+        self.assertNotIn("time.sleep", inspect.getsource(fewshot_mimics._launch_external_advanced_training))
+        self.assertNotIn("time.sleep", inspect.getsource(fewshot_mimics._launch_external_model_chooser))
+
+    def test_import_worker_exit_grace_is_nonblocking(self):
+        import mimics_import
+
+        job_dir = os.path.join(self.tmp, "dead_bridge")
+        os.makedirs(job_dir)
+        Path(job_dir, "job_state.json").write_text(
+            json.dumps({"pid": 99999999, "phase": "preparing"}),
+            encoding="utf-8",
+        )
+        old_alive = mimics_import._is_pid_alive
+        try:
+            mimics_import._is_pid_alive = lambda _pid: False
+            started = time.time()
+            status, _result = mimics_import._check_job_status(job_dir)
+            self.assertLess(time.time() - started, 0.1)
+            self.assertEqual("running", status)
+            mimics_import._BRIDGE_EXIT_SEEN[job_dir] = time.time() - 1.0
+            status, message = mimics_import._check_job_status(job_dir)
+            self.assertEqual("error", status)
+            self.assertIn("exited unexpectedly", message)
+        finally:
+            mimics_import._is_pid_alive = old_alive
+            mimics_import._BRIDGE_EXIT_SEEN.pop(job_dir, None)
+
+    def test_single_import_never_replaces_an_open_project_automatically(self):
+        import inspect
+        import mimics_import
+
+        source = inspect.getsource(mimics_import._import_monitor_tick)
+        self.assertIn("skip_if_project_open=True", source)
+
+    def test_ai_compute_children_use_background_priority(self):
+        import inspect
+        import fewshot_mimics
+        import nninteractive_mimics
+
+        self.assertIn("_background_process_kwargs", inspect.getsource(fewshot_mimics._launch_process))
+        self.assertIn("_background_process_kwargs", inspect.getsource(fewshot_mimics._launch_bridge_mask_to_buffer))
+        self.assertIn("_background_process_kwargs", inspect.getsource(nninteractive_mimics._start_async_worker))
+
+    def test_mask_writers_share_a_nested_callback_lease(self):
+        import inspect
+        import fewshot_mimics
+        import mask_import
+        import nninteractive_mimics
+
+        for callback in (
+            fewshot_mimics._monitor_tick,
+            mask_import._mask_import_monitor_tick,
+            nninteractive_mimics._async_monitor_tick,
+        ):
+            source = inspect.getsource(callback)
+            self.assertIn("mask_buffer_access", source)
+            self.assertIn("release_local_operation", source)
 
     def test_external_batch_export_requires_explicit_safe_or_overwrite_destination(self):
         import tools.mimics_batch_cli as cli

@@ -45,6 +45,7 @@ MARKERS = (
     "fewshot_training_setup_ui.py",
     "fewshot_status_viewer.py",
     "io_path_setup_ui.py",
+    "mask_file_picker_ui.py",
 
     # nnInteractive inference server
     "nninteractive.inference.server.main",

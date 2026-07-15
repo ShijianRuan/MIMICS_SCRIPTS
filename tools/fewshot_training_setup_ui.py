@@ -14,9 +14,14 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import traceback
 import uuid
+try:
+    from queue import Empty, Queue
+except ImportError:
+    from Queue import Empty, Queue
 
 # Ensure the project root and tools/ directory are importable.
 # The embeddable Python (nninteractive_env) uses a ._pth file that
@@ -32,6 +37,10 @@ try:
     from fewshot_strategies import DEFAULT_OPTIONS, STRATEGIES, normalize_strategy_options, strategy_defaults, strategy_ids, strategy_label, strategy_summary, suggested_strategy
 except ImportError:
     from tools.fewshot_strategies import DEFAULT_OPTIONS, STRATEGIES, normalize_strategy_options, strategy_defaults, strategy_ids, strategy_label, strategy_summary, suggested_strategy
+try:
+    from io_path_setup_ui import choose_path_without_shell
+except ImportError:
+    from tools.io_path_setup_ui import choose_path_without_shell
 
 
 TITLE = "DINOv3 Few-Shot Training"
@@ -1296,6 +1305,11 @@ class QtTrainingSetupApp(object):
         self.started = False
         self._closing = False
         self._syncing_quick = False
+        self._dataset_scan_generation = 0
+        self._dataset_scan_results = Queue()
+        self._dataset_scan_timer = self.QtCore.QTimer(self.window)
+        self._dataset_scan_timer.timeout.connect(self._poll_dataset_scan)
+        self._dataset_scan_timer.start(80)
         self._build()
 
     def _build(self):
@@ -1743,18 +1757,20 @@ class QtTrainingSetupApp(object):
             self.case_list.item(idx).setSelected(True)
 
     def browse_dataset(self):
-        path = self.QtWidgets.QFileDialog.getExistingDirectory(
-            self.window,
-            "Select dataset folder",
-            self.context.get("ts_root", ""),
+        path = choose_path_without_shell(
+            self.QtCore, self.QtWidgets, self.window,
+            "Select dataset folder", self.context.get("ts_root", ""),
+            allow_file=False,
         )
         if path:
             self.apply_dataset_root(path)
 
     def browse_mcs_folder(self):
         current = str(self.mcs_folder_edit.text()).strip() if self.mcs_folder_edit is not None else ""
-        path = self.QtWidgets.QFileDialog.getExistingDirectory(
-            self.window, "Select folder containing saved .mcs projects", current,
+        path = choose_path_without_shell(
+            self.QtCore, self.QtWidgets, self.window,
+            "Select folder containing saved .mcs projects", current,
+            allow_file=False,
         )
         if path and self.mcs_folder_edit is not None:
             self.mcs_folder_edit.setText(os.path.abspath(path))
@@ -1771,23 +1787,50 @@ class QtTrainingSetupApp(object):
         path = os.path.abspath(os.path.expanduser(os.path.expandvars(str(path))))
         if self.dataset_edit is not None and self.dataset_edit.text() != path:
             self.dataset_edit.setText(path)
-        if not os.path.isdir(path):
-            self._set_status("Dataset folder does not exist: {0}".format(path))
-            self._append_log("Dataset folder does not exist: {0}".format(path))
-            return
-        self.context["ts_root"] = path
-        self.context["workspace"] = os.path.join(path, "fewshot_models")
-        self.context["mcs_output_dir"] = resolve_mimics_output_dir_for_ui(path, self.context.get("project_root", ""))
-        if self.mcs_folder_edit is not None:
-            self.mcs_folder_edit.setText(self.context["mcs_output_dir"])
-        cases = case_ids_from_dataset_for_ui(path, self.context.get("project_root", ""))
-        self.context["case_ids"] = cases
-        if self.case_list is not None:
-            self.case_list.clear()
-            for case_id in cases:
-                self.case_list.addItem(str(case_id))
-        self._set_status("Dataset changed: {0} ({1} cases found)".format(path, len(cases)))
-        self._append_log("Dataset changed: {0} ({1} cases found)".format(path, len(cases)))
+        self._dataset_scan_generation += 1
+        generation = self._dataset_scan_generation
+        project_root = self.context.get("project_root", "")
+        self._set_status("Checking dataset in the background...")
+
+        def scan_dataset():
+            try:
+                if not os.path.isdir(path):
+                    raise RuntimeError("Dataset folder does not exist: {0}".format(path))
+                output_dir = resolve_mimics_output_dir_for_ui(path, project_root)
+                cases = case_ids_from_dataset_for_ui(path, project_root)
+                self._dataset_scan_results.put((generation, path, output_dir, cases, ""))
+            except Exception as exc:
+                self._dataset_scan_results.put((generation, path, "", [], str(exc)))
+
+        worker = threading.Thread(target=scan_dataset, name="fewshot-dataset-scan")
+        worker.daemon = True
+        worker.start()
+
+    def _poll_dataset_scan(self):
+        while True:
+            try:
+                generation, path, output_dir, cases, error = self._dataset_scan_results.get_nowait()
+            except Empty:
+                return
+            if generation != self._dataset_scan_generation:
+                continue
+            if error:
+                self._set_status(error)
+                self._append_log(error)
+                continue
+            self.context["ts_root"] = path
+            self.context["workspace"] = os.path.join(path, "fewshot_models")
+            self.context["mcs_output_dir"] = output_dir
+            if self.mcs_folder_edit is not None:
+                self.mcs_folder_edit.setText(output_dir)
+            self.context["case_ids"] = cases
+            if self.case_list is not None:
+                self.case_list.clear()
+                for case_id in cases:
+                    self.case_list.addItem(str(case_id))
+            message = "Dataset changed: {0} ({1} cases found)".format(path, len(cases))
+            self._set_status(message)
+            self._append_log(message)
 
     def _available_model_scales(self):
         app = object.__new__(TrainingSetupApp)

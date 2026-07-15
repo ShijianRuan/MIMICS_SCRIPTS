@@ -24,6 +24,40 @@ HARDCODED_MIMICS_EXE = r""
 _MIMICS_EXE_CACHE = {"value": None, "checked_at": 0.0}
 _ATOMIC_WRITE_LOCKS = {}
 _ATOMIC_WRITE_LOCKS_GUARD = threading.Lock()
+_LOCAL_OPERATION_GUARD = threading.RLock()
+_LOCAL_OPERATIONS = {}
+
+
+def try_acquire_local_operation(resource, owner):
+    """Claim a Mimics-host operation that must not be re-entered by timers."""
+    token = uuid.uuid4().hex
+    with _LOCAL_OPERATION_GUARD:
+        if resource in _LOCAL_OPERATIONS:
+            return None
+        _LOCAL_OPERATIONS[resource] = {
+            "resource": str(resource),
+            "owner": str(owner),
+            "token": token,
+            "started_at_epoch": time.time(),
+        }
+    return token
+
+
+def release_local_operation(resource, token):
+    with _LOCAL_OPERATION_GUARD:
+        current = _LOCAL_OPERATIONS.get(resource)
+        if not current:
+            return True
+        if token and current.get("token") != token:
+            return False
+        _LOCAL_OPERATIONS.pop(resource, None)
+    return True
+
+
+def active_local_operation(resource):
+    with _LOCAL_OPERATION_GUARD:
+        current = _LOCAL_OPERATIONS.get(resource)
+        return dict(current) if current else None
 
 
 def _install_subprocess_cleanup_guard():

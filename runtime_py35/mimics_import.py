@@ -38,6 +38,7 @@ import runtime_common
 _IMPORT_MONITORS = {}
 _BRIDGE_LAUNCH_ERRORS = {}
 _BRIDGE_PROCESSES = {}
+_BRIDGE_EXIT_SEEN = {}
 
 # Track background Mimics process for .mcs creation
 _BG_MIMICS_PID = None
@@ -966,6 +967,7 @@ def _check_job_status(job_dir):
     launch_error = _BRIDGE_LAUNCH_ERRORS.pop(job_dir, None)
     if launch_error:
         _BRIDGE_PROCESSES.pop(job_dir, None)
+        _BRIDGE_EXIT_SEEN.pop(job_dir, None)
         return ("error", launch_error)
     result_file = os.path.join(job_dir, "bridge_result.json")
     state_file = os.path.join(job_dir, "job_state.json")
@@ -982,6 +984,7 @@ def _check_job_status(job_dir):
                     "Job done | keys={0}".format(sorted(result.keys())),
                 )
                 _BRIDGE_PROCESSES.pop(job_dir, None)
+                _BRIDGE_EXIT_SEEN.pop(job_dir, None)
                 return ("done", result)
             else:
                 _verbose_log(
@@ -989,6 +992,7 @@ def _check_job_status(job_dir):
                     "Job error | {0}".format(result.get("error", "non-ok status")),
                 )
                 _BRIDGE_PROCESSES.pop(job_dir, None)
+                _BRIDGE_EXIT_SEEN.pop(job_dir, None)
                 return ("error", result.get("error", "bridge returned non-ok status"))
         except (ValueError, IOError):
             pass  # File incomplete - process may still be writing
@@ -999,6 +1003,7 @@ def _check_job_status(job_dir):
     if process is not None:
         try:
             if process.poll() is None:
+                _BRIDGE_EXIT_SEEN.pop(job_dir, None)
                 return ("running", None)
         except Exception:
             pass
@@ -1018,31 +1023,16 @@ def _check_job_status(job_dir):
         return ("running", None)
 
     if pid and _is_pid_alive(pid):
+        _BRIDGE_EXIT_SEEN.pop(job_dir, None)
         return ("running", None)
 
-    # Process dead but no valid result.
-    # Before declaring failure, retry reading the result file one more time
-    # with a short sleep — the bridge may have just finished writing and
-    # the OS file cache may not have flushed yet.  This fixes the common
-    # race where a fast bridge on a small image exits between two monitor
-    # ticks and the result file is valid but was missed by the first read.
-    time.sleep(0.3)
-    if os.path.isfile(result_file):
-        try:
-            with open(result_file, "r") as f:
-                result = json.load(f)
-            if result.get("status") == "ok":
-                _verbose_log(
-                    os.path.dirname(job_dir),
-                    "Job done (delayed read) | keys={0}".format(sorted(result.keys())),
-                )
-                _BRIDGE_PROCESSES.pop(job_dir, None)
-                return ("done", result)
-            else:
-                _BRIDGE_PROCESSES.pop(job_dir, None)
-                return ("error", result.get("error", "bridge returned non-ok status"))
-        except (ValueError, IOError):
-            pass
+    # The child can exit just before its atomic result becomes visible. Give
+    # the next timer tick a chance to read it instead of sleeping on Mimics'
+    # GUI thread. The function starts by reading the result on every tick.
+    first_exit_seen = _BRIDGE_EXIT_SEEN.setdefault(job_dir, time.time())
+    if time.time() - first_exit_seen < 0.5:
+        return ("running", None)
+    _BRIDGE_EXIT_SEEN.pop(job_dir, None)
 
     err_msg = "bridge process exited unexpectedly"
     if os.path.isfile(error_file):
@@ -1268,6 +1258,7 @@ def _import_monitor_tick(monitor):
         _start_first_mcs_monitor(
             output_dir,
             target_mcs=output_mcs,
+            skip_if_project_open=True,
             notify_only=not _auto_open_mcs_enabled(),
         )
         _append_import_log(

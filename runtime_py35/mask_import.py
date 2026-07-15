@@ -111,35 +111,8 @@ def _mask_name_from_path(path):
     return name or "mask"
 
 
-def _pick_mask_files(title):
-    """Pick one or more mask/segmentation files (multi-select)."""
-    file_filter = "Masks (*.nii *.nii.gz *.mha *.mhd *.nrrd *.nrrd.gz);;All files (*.*)"
-    try:
-        from PyQt5.QtWidgets import QFileDialog
-        paths, _selected = QFileDialog.getOpenFileNames(None, title, "", file_filter)
-        return [str(p) for p in paths if p]
-    except Exception:
-        pass
-    try:
-        import tkinter as tk
-        from tkinter import filedialog as tkFileDialog
-    except ImportError:
-        return []
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    paths = tkFileDialog.askopenfilenames(
-        parent=root,
-        title=title,
-        filetypes=[("Masks", "*.nii *.nii.gz *.mha *.mhd *.nrrd *.nrrd.gz"),
-                    ("All files", "*.*")],
-    )
-    root.destroy()
-    return list(paths) if paths else []
-
-
-def _active_image_info():
-    """Get the active Mimics image shape and voxel-to-RAS matrix."""
+def _active_image_reference():
+    """Return an active image without reading its potentially large buffer."""
     image = None
     try:
         image = mimics.data.images.get_active()
@@ -156,6 +129,12 @@ def _active_image_info():
                     pass
         except Exception:
             pass
+    return image
+
+
+def _active_image_info():
+    """Get the active Mimics image shape and voxel-to-RAS matrix."""
+    image = _active_image_reference()
     if image is None:
         return None, None, None
     # Get shape using the same approach as fewshot_mimics.py
@@ -430,11 +409,17 @@ def _finish_mask_import(monitor):
 def _mask_import_monitor_tick(monitor):
     if monitor.get("busy"):
         return
+    operation_token = runtime_common.try_acquire_local_operation(
+        "mask_buffer_access", "Mask import"
+    )
+    if not operation_token:
+        return
     monitor["busy"] = True
     try:
         _mask_import_monitor_tick_locked(monitor)
     finally:
         monitor["busy"] = False
+        runtime_common.release_local_operation("mask_buffer_access", operation_token)
 
 
 def _mask_import_monitor_tick_locked(monitor):
@@ -578,31 +563,8 @@ def _launch_mask_prepare(bridge_params, result_path, monitor):
     return thread
 
 
-def main():
-    """Entry point: import mask files into the current Mimics project."""
-    active_monitors = [item for item in _MASK_IMPORT_MONITORS.values() if item and not item.get("done")]
-    if active_monitors:
-        answer = mimics.dialogs.question_box(
-            message=(
-                "A Mask import is already preparing or applying labels.\n\n"
-                "Keep it running, or stop it before starting a different import."
-            ),
-            buttons="Keep Running;Stop Current Import",
-            title=TITLE,
-            ui_blocking=True,
-        )
-        if answer == "Stop Current Import":
-            for active in active_monitors:
-                active["done"] = True
-                _stop_mask_import_monitor(active.get("monitor_key"))
-                runtime_common.terminate_process_async(
-                    process=active.get("process"),
-                    graceful_seconds=2.0,
-                    on_complete=lambda path=active.get("work_dir"): _cleanup_work_dir(path),
-                )
-            _safe_message("Mask import stop requested. No additional Masks will be applied.")
-        return 0
-    # 1. Check that an image is open
+def _start_import_for_paths(mask_paths):
+    """Validate an external selection and start preparation for the active image."""
     active_image, image_shape, voxel_to_ras = _active_image_info()
     if active_image is None:
         # Provide a more specific diagnostic
@@ -627,28 +589,12 @@ def main():
         mimics.dialogs.message_box(msg, title=TITLE, ui_blocking=True)
         return 1
 
-    # 2. Pick mask files
-    mask_paths = _pick_mask_files(
-        "Select mask / segmentation files to import"
-    )
-    if not mask_paths:
-        return 0
-
-    # Validate files exist
-    valid_paths = []
-    for p in mask_paths:
-        if os.path.isfile(p):
-            valid_paths.append(p)
-        else:
-            mimics.dialogs.message_box(
-                "File not found: {0}".format(p),
-                title=TITLE,
-                ui_blocking=True,
-            )
+    # Do not stat network paths on Mimics' GUI thread. The external bridge
+    # validates and opens each file; failures return through the monitor.
+    valid_paths = [str(p) for p in mask_paths if str(p).strip()]
     if not valid_paths:
         return 1
 
-    # 3. Build bridge params and call resample
     work_dir = tempfile.mkdtemp(prefix="mask_import_")
     buffers_dir = os.path.join(work_dir, "buffers")
     os.makedirs(buffers_dir, exist_ok=True)
@@ -698,6 +644,52 @@ def main():
     except Exception:
         print("Mask preparation started in external Python. Mimics remains available.")
     return 0
+
+
+def main():
+    """Entry point: choose Masks externally, then import them asynchronously."""
+    active_monitors = [item for item in _MASK_IMPORT_MONITORS.values() if item and not item.get("done")]
+    if active_monitors:
+        answer = mimics.dialogs.question_box(
+            message=(
+                "A Mask import is already preparing or applying labels.\n\n"
+                "Keep it running, or stop it before starting a different import."
+            ),
+            buttons="Keep Running;Stop Current Import",
+            title=TITLE,
+            ui_blocking=True,
+        )
+        if answer == "Stop Current Import":
+            for active in active_monitors:
+                active["done"] = True
+                _stop_mask_import_monitor(active.get("monitor_key"))
+                runtime_common.terminate_process_async(
+                    process=active.get("process"),
+                    graceful_seconds=2.0,
+                    on_complete=lambda path=active.get("work_dir"): _cleanup_work_dir(path),
+                )
+            _safe_message("Mask import stop requested. No additional Masks will be applied.")
+        return 0
+
+    active_image = _active_image_reference()
+    if active_image is None:
+        return _start_import_for_paths([])
+
+    import io_setup_mimics
+
+    def submitted(selection):
+        paths = selection.get("mask_paths") or []
+        if not isinstance(paths, list):
+            raise RuntimeError("The external Mask selector returned an invalid file list.")
+        _start_import_for_paths(paths)
+
+    return io_setup_mimics.launch(
+        "import_masks",
+        _python_exe(),
+        {},
+        submitted,
+        ui_script=os.path.join("tools", "mask_file_picker_ui.py"),
+    )
 
 
 def _cleanup_work_dir(work_dir):

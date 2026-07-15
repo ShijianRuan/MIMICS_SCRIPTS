@@ -154,8 +154,11 @@ def discover_single_source(source):
     }
 
 
-def choose_path_without_shell(QtCore, QtWidgets, parent, title, initial, allow_file=False):
+def choose_path_without_shell(
+    QtCore, QtWidgets, parent, title, initial, allow_file=False, multi_file=False
+):
     """Browse paths without Windows Shell enumeration on the GUI thread."""
+    allow_file = bool(allow_file or multi_file)
     dialog = QtWidgets.QDialog(parent)
     dialog.setWindowTitle(title)
     dialog.resize(760, 520)
@@ -191,6 +194,8 @@ def choose_path_without_shell(QtCore, QtWidgets, parent, title, initial, allow_f
     entries = QtWidgets.QListWidget()
     entries.setAlternatingRowColors(True)
     entries.setUniformItemSizes(True)
+    if multi_file:
+        entries.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
     layout.addWidget(entries, 1)
     status = QtWidgets.QLabel("")
     status.setObjectName("hint")
@@ -199,14 +204,18 @@ def choose_path_without_shell(QtCore, QtWidgets, parent, title, initial, allow_f
     footer = QtWidgets.QHBoxLayout()
     footer.addStretch(1)
     cancel = QtWidgets.QPushButton("Cancel")
-    choose = QtWidgets.QPushButton("Use Selected File" if allow_file else "Use This Folder")
+    if multi_file:
+        choose_text = "Use Selected Files"
+    else:
+        choose_text = "Use Selected File" if allow_file else "Use This Folder"
+    choose = QtWidgets.QPushButton(choose_text)
     choose.setObjectName("primary")
     footer.addWidget(cancel)
     footer.addWidget(choose)
     layout.addLayout(footer)
 
     results = Queue()
-    state = {"generation": 0, "path": "", "selected": ""}
+    state = {"generation": 0, "path": "", "selected": [] if multi_file else ""}
     try:
         user_role = QtCore.Qt.ItemDataRole.UserRole
     except AttributeError:
@@ -288,31 +297,48 @@ def choose_path_without_shell(QtCore, QtWidgets, parent, title, initial, allow_f
         item = entries.currentItem()
         return item.data(user_role) if item else None
 
+    def selected_files():
+        rows = []
+        for item in entries.selectedItems():
+            data = item.data(user_role)
+            if data and data[0]:
+                rows.append(data[1])
+        return rows
+
     def activate_item(item):
         is_file, full_path = item.data(user_role)
         if is_file:
-            if allow_file:
+            if allow_file and not multi_file:
                 state["selected"] = full_path
                 dialog.accept()
         else:
             scan(full_path)
 
     def accept_value():
+        if multi_file:
+            selected = selected_files()
+            if selected:
+                state["selected"] = selected
+                dialog.accept()
+                return
+            typed = normalize(path_edit.text())
+            if typed:
+                state["selected"] = [typed]
+                dialog.accept()
+                return
+            QtWidgets.QMessageBox.warning(dialog, "Files Required", "Select one or more Mask files.")
+            return
         data = selected_data()
         if allow_file and data and data[0]:
             state["selected"] = data[1]
             dialog.accept()
             return
         typed = normalize(path_edit.text())
-        if allow_file and os.path.isfile(typed):
+        if typed:
             state["selected"] = typed
             dialog.accept()
             return
-        if os.path.isdir(typed):
-            state["selected"] = typed
-            dialog.accept()
-            return
-        QtWidgets.QMessageBox.warning(dialog, "Path Not Found", "Paste or select an existing file or folder.")
+        QtWidgets.QMessageBox.warning(dialog, "Path Required", "Paste or select a file or folder.")
 
     paste.clicked.connect(paste_path)
     go.clicked.connect(lambda: scan(path_edit.text()))
@@ -330,7 +356,9 @@ def choose_path_without_shell(QtCore, QtWidgets, parent, title, initial, allow_f
     else:
         initial_folder = str(Path.home())
     scan(initial_folder)
-    return state["selected"] if dialog.exec() == QtWidgets.QDialog.Accepted else ""
+    if dialog.exec() == QtWidgets.QDialog.Accepted:
+        return state["selected"]
+    return [] if multi_file else ""
 
 
 def run_ui(context, preview_path=""):

@@ -84,6 +84,7 @@ LOG_ROTATE_BACKUPS = 3
 
 _find_root = runtime_common.find_root
 _hidden_process_kwargs = runtime_common.hidden_process_kwargs
+_background_process_kwargs = runtime_common.background_process_kwargs
 _write_json_atomic = runtime_common.write_json_atomic
 _read_json = runtime_common.read_json
 
@@ -2541,7 +2542,7 @@ def _start_async_worker(python_exe, bridge_script, worker_dir):
             stdin=subprocess.DEVNULL,
             stdout=worker_log,
             stderr=subprocess.STDOUT,
-            **_hidden_process_kwargs()
+            **_background_process_kwargs()
         )
     finally:
         worker_log.close()
@@ -3076,6 +3077,11 @@ def _async_monitor_tick(monitor):
     # symptom. Guard re-entry for the whole tick.
     if monitor.get("busy"):
         return
+    operation_token = runtime_common.try_acquire_local_operation(
+        "mask_buffer_access", "nnInteractive result monitor"
+    )
+    if not operation_token:
+        return
     monitor["busy"] = True
     job_dir = monitor["state"]["_job_dir"]
     try:
@@ -3102,6 +3108,7 @@ def _async_monitor_tick(monitor):
         )
     finally:
         monitor["busy"] = False
+        runtime_common.release_local_operation("mask_buffer_access", operation_token)
 
 
 def _start_win32_async_result_monitor(image, target, state, config, poll_seconds, timeout_seconds):

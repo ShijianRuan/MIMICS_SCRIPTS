@@ -64,6 +64,43 @@ def _read_json(path):
         return None
 
 
+def _read_stderr_tail(path, max_bytes=8192):
+    """Read a bounded diagnostic tail without allowing logs to fill a dialog."""
+    if not path or not os.path.isfile(path):
+        return ""
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - int(max_bytes)), os.SEEK_SET)
+            data = handle.read(int(max_bytes))
+        return data.decode("utf-8", "replace").strip()
+    except Exception:
+        return ""
+
+
+def _external_failure_message(base_message, monitor, reported_error=""):
+    parts = [str(base_message).strip()]
+    if reported_error:
+        parts.append("Reported error:\n{0}".format(str(reported_error).strip()))
+    stderr_log = monitor.get("stderr_log", "")
+    stderr_tail = _read_stderr_tail(stderr_log)
+    if stderr_tail:
+        parts.append("Diagnostic output:\n{0}".format(stderr_tail))
+    if stderr_log:
+        parts.append("Diagnostic log: {0}".format(stderr_log))
+    return "\n\n".join(item for item in parts if item)
+
+
+def _report_external_failure(key, monitor, base_message, reported_error=""):
+    message = _external_failure_message(base_message, monitor, reported_error)
+    try:
+        mimics.logging.log_user_message(level=logging.ERROR, message=message)
+    except Exception:
+        pass
+    _alert_once(key, "Path Setup", message)
+
+
 def _stop_monitor(key):
     monitor = _IO_SETUP_MONITORS.pop(key, None)
     if not monitor:
@@ -112,7 +149,11 @@ def _tick(monitor):
         key = monitor["key"]
         if time.time() > monitor["deadline"]:
             _stop_monitor(key)
-            _alert_once(key, "Path Setup", "The external path window timed out. No task was started.")
+            _report_external_failure(
+                key,
+                monitor,
+                "The external path window timed out. No task was started.",
+            )
             return
         status = _read_json(monitor["status_path"])
         if not status or status.get("status") in ("opening", "configuring"):
@@ -130,8 +171,11 @@ def _tick(monitor):
                     except Exception:
                         pass
                 else:
-                    _alert_once(key, "Path Setup",
-                                "The external path window exited unexpectedly (code {0}). No task was started.".format(exit_code))
+                    _report_external_failure(
+                        key,
+                        monitor,
+                        "The external path window exited unexpectedly (code {0}). No task was started.".format(exit_code),
+                    )
             return
         state = status.get("status")
         if state in ("cancelled", "closed"):
@@ -139,7 +183,12 @@ def _tick(monitor):
             return
         if state == "failed":
             _stop_monitor(key)
-            _alert_once(key, "Path Setup", status.get("error", "The external path window failed."))
+            _report_external_failure(
+                key,
+                monitor,
+                "The external path window failed. No task was started.",
+                status.get("error", ""),
+            )
             return
         if state != "submitted":
             return
@@ -149,10 +198,19 @@ def _tick(monitor):
             monitor["on_submit"](status.get("selection") or {})
         except Exception as exc:
             _alert_once(key, "Could Not Start", str(exc))
-    except Exception:
+    except Exception as exc:
         # Never let an exception escape into the Win32 timer callback.
         try:
             _stop_monitor(monitor.get("key"))
+        except Exception:
+            pass
+        try:
+            _report_external_failure(
+                monitor.get("key", "io_setup"),
+                monitor,
+                "The external path-window monitor failed. No task was started.",
+                str(exc),
+            )
         except Exception:
             pass
     finally:
@@ -201,7 +259,7 @@ def _start_monitor(monitor, poll_seconds=2.0):
         return False
 
 
-def launch(mode, python_exe, context, on_submit, timeout_seconds=3600):
+def launch(mode, python_exe, context, on_submit, timeout_seconds=3600, ui_script=None):
     # Reuse is single-window: tear down any previous path window (and its
     # pythonw + Win32 timer) before starting a new one so they never pile up.
     _stop_all_monitors()
@@ -223,7 +281,12 @@ def launch(mode, python_exe, context, on_submit, timeout_seconds=3600):
     runtime_common.write_json_atomic(status_path, {
         "status": "opening", "mode": mode, "created_at_epoch": time.time()
     })
-    command = [python_exe, os.path.join(root, "tools", "io_path_setup_ui.py"), "--context", context_path]
+    script = ui_script or os.path.join(root, "tools", "io_path_setup_ui.py")
+    if not os.path.isabs(script):
+        script = os.path.join(root, script)
+    if not os.path.isfile(script):
+        raise RuntimeError("External path UI was not found: {0}".format(script))
+    command = [python_exe, script, "--context", context_path]
     if os.name == "nt" and os.path.basename(str(command[0])).lower() == "python.exe":
         pythonw = os.path.join(os.path.dirname(command[0]), "pythonw.exe")
         if os.path.isfile(pythonw):
@@ -256,6 +319,7 @@ def launch(mode, python_exe, context, on_submit, timeout_seconds=3600):
         "key": setup_id,
         "status_path": status_path,
         "process": process,
+        "stderr_log": stderr_log,
         "on_submit": on_submit,
         "deadline": time.time() + float(timeout_seconds),
         "busy": False,

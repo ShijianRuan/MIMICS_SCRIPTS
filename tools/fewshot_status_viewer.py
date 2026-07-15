@@ -15,9 +15,14 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
+try:
+    from queue import Empty, Queue
+except ImportError:
+    from Queue import Empty, Queue
 
 
 TITLE = "DINOv3 Few-Shot Status"
@@ -992,11 +997,16 @@ class QtStatusViewerApp(object):
         self.stop_button = None
         self.open_log_button = None
         self.filter_combo = None
+        self._refresh_running = False
+        self._refresh_results = Queue()
         self.timer = self.QtCore.QTimer(self.window)
         self.timer.timeout.connect(self.refresh)
+        self.result_timer = self.QtCore.QTimer(self.window)
+        self.result_timer.timeout.connect(self._poll_refresh_result)
         self._build()
         self.refresh()
         self.timer.start(2000)
+        self.result_timer.start(80)
 
     def _build(self):
         QtWidgets = self.QtWidgets
@@ -1107,8 +1117,35 @@ class QtStatusViewerApp(object):
         """
 
     def refresh(self):
+        if self._refresh_running:
+            return
+        self._refresh_running = True
+
+        def load_jobs():
+            try:
+                jobs, paths = self._load_jobs()
+                self._refresh_results.put((jobs, paths, ""))
+            except Exception as exc:
+                self._refresh_results.put(([], {}, str(exc)))
+
+        worker = threading.Thread(target=load_jobs, name="fewshot-status-refresh")
+        worker.daemon = True
+        worker.start()
+
+    def _poll_refresh_result(self):
+        try:
+            jobs, paths, error = self._refresh_results.get_nowait()
+        except Empty:
+            return
+        self._refresh_running = False
+        if error:
+            self.summary_label.setText("Could not refresh status: {0}".format(error))
+            return
+        self._apply_loaded_jobs(jobs, paths)
+
+    def _apply_loaded_jobs(self, jobs, paths):
         old_selected = self.selected_job_id
-        self.jobs, self.job_paths = self._load_jobs()
+        self.jobs, self.job_paths = jobs, paths
         self.job_combo.blockSignals(True)
         self.job_combo.clear()
         selected_index = 0
