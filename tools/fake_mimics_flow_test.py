@@ -1087,14 +1087,18 @@ def test_stop_background_locks(fake, tmp):
         (lock_dir / name).write_text("{}", encoding="utf-8")
     output_dir = tmp / "mcs_output"
     output_dir.mkdir()
-    (output_dir / "_mcs_queue_active.json").write_text("{}", encoding="utf-8")
+    output_runtime = Path(module.runtime_common.import_queue_runtime_dir(str(tmp), str(output_dir)))
+    output_runtime.mkdir(parents=True)
+    (output_runtime / "_mcs_queue_active.json").write_text(
+        json.dumps({"output_dir": str(output_dir)}), encoding="utf-8"
+    )
     registry = tmp / ".mimics_runtime" / "mcs_queues"
     registry.mkdir(parents=True, exist_ok=True)
     (registry / "queue.json").write_text(json.dumps({"output_dir": str(output_dir)}), encoding="utf-8")
     stopped = module._request_queue_stop()
     assert_true(str(output_dir) in stopped, "queue stop marker did not report output dir")
-    assert_true((output_dir / "_mcs_queue_stop.json").is_file(), "queue stop marker missing")
-    assert_true(not (output_dir / "_mcs_queue_active.json").exists(), "queue active marker was not cleared")
+    assert_true((output_runtime / "_mcs_queue_stop.json").is_file(), "queue stop marker missing")
+    assert_true(not (output_runtime / "_mcs_queue_active.json").exists(), "queue active marker was not cleared")
     module._clear_resource_locks()
     assert_true(not (lock_dir / "gpu.lock").exists(), "gpu lock was not cleared")
     assert_true(not (lock_dir / "background_mimics.lock").exists(), "background Mimics lock was not cleared")

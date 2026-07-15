@@ -1635,6 +1635,34 @@ def do_discover_case_dirs(params: dict) -> dict:
             cases.append({"case_id": name, "case_dir": case_dir})
     return {"status": "ok", "cases": cases, "count": len(cases)}
 
+
+_DISCOVER_VOLUME_SUFFIXES = (".nii.gz", ".nii", ".mha", ".mhd", ".nrrd", ".nrrd.gz")
+_DISCOVER_MASK_SUFFIXES = (".seg.nii.gz", ".seg.nii", ".nii.gz", ".nrrd.gz", ".nii", ".mha", ".mhd", ".nrrd")
+
+
+def _mask_selection_names(value):
+    """Return None for all, an empty set for none, or normalized mask names."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text.lower() == "all":
+            return None
+        if text.lower() in ("none", "no", "off"):
+            return set()
+        values = text.split(",")
+    else:
+        values = list(value)
+    return {str(item).strip().casefold() for item in values if str(item).strip()}
+
+
+def _volume_stem(filename: str) -> str:
+    lower = filename.lower()
+    for suffix in _DISCOVER_MASK_SUFFIXES:
+        if lower.endswith(suffix):
+            return filename[:-len(suffix)] or "mask"
+    return Path(filename).stem or "mask"
+
 def do_discover(params: dict) -> dict:
     """Discover TS-like cases in a dataset root directory.
 
@@ -1643,6 +1671,14 @@ def do_discover(params: dict) -> dict:
     """
     ts_root = params["ts_root"]
     cases_filter = params.get("cases_filter")
+    raw_mask_selection = params.get("mask_selection", "all")
+    selected_masks = _mask_selection_names(raw_mask_selection)
+    if selected_masks is None:
+        mask_mode = "all"
+    elif selected_masks:
+        mask_mode = "named"
+    else:
+        mask_mode = "none"
 
     if not os.path.isdir(ts_root):
         return {"status": "error", "error": "ts_root is not a directory: {}".format(ts_root)}
@@ -1660,7 +1696,7 @@ def do_discover(params: dict) -> dict:
         # Find image
         image_path = None
         image_type = None
-        for img_name in ("ct.nii.gz", "mri.nii.gz"):
+        for img_name in ("ct.nii.gz", "mri.nii.gz", "ct.nii", "mri.nii", "ct.mhd", "mri.mhd", "ct.mha", "mri.mha"):
             candidate = os.path.join(case_dir, img_name)
             if os.path.isfile(candidate):
                 image_path = candidate
@@ -1673,9 +1709,9 @@ def do_discover(params: dict) -> dict:
                 image_type = "dicom"
         if image_path is None:
             for fname in sorted(os.listdir(case_dir)):
-                if fname.endswith(".nii.gz"):
+                if fname.lower().endswith(_DISCOVER_MASK_SUFFIXES):
                     image_path = os.path.join(case_dir, fname)
-                    image_type = "nifti"
+                    image_type = "medical_image"
                     break
 
         if image_path is None:
@@ -1684,10 +1720,12 @@ def do_discover(params: dict) -> dict:
         # Find masks
         masks = []
         seg_dir = os.path.join(case_dir, "segmentations")
-        if os.path.isdir(seg_dir):
+        if selected_masks != set() and os.path.isdir(seg_dir):
             for fname in sorted(os.listdir(seg_dir)):
-                if fname.endswith(".nii.gz"):
-                    organ = fname.replace(".nii.gz", "")
+                if fname.lower().endswith(_DISCOVER_VOLUME_SUFFIXES):
+                    organ = _volume_stem(fname)
+                    if selected_masks is not None and organ.casefold() not in selected_masks:
+                        continue
                     masks.append({"name": organ, "path": os.path.join(seg_dir, fname)})
 
         cases.append({
@@ -1698,7 +1736,16 @@ def do_discover(params: dict) -> dict:
             "case_dir": case_dir,
         })
 
-    return {"status": "ok", "cases": cases, "count": len(cases)}
+    mask_count = sum(len(case.get("masks", [])) for case in cases)
+    return {
+        "status": "ok",
+        "cases": cases,
+        "count": len(cases),
+        "mask_selection": "all" if selected_masks is None else sorted(selected_masks),
+        "mask_mode": mask_mode,
+        "mask_count": mask_count,
+        "cases_without_selected_masks": sum(1 for case in cases if not case.get("masks")),
+    }
 
 
 # -- Main ---------------------------------------------------------------

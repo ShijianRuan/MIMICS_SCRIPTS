@@ -29,6 +29,9 @@ from resource_locks import FileResourceLock, ResourceLockTimeout
 
 BRIDGE = ROOT / "mimics_bridge.py"
 RUNTIME = ROOT / "runtime_py35"
+if str(RUNTIME) not in sys.path:
+    sys.path.insert(0, str(RUNTIME))
+import runtime_common
 RESOURCE_LOCK_DIR = ROOT / ".mimics_runtime" / "locks"
 BACKGROUND_MIMICS_LOCK_PATH = RESOURCE_LOCK_DIR / "background_mimics.lock"
 
@@ -89,6 +92,20 @@ def write_json_atomic(path, payload, retries=20, max_sleep=0.25):
             except Exception:
                 pass
             time.sleep(min(float(max_sleep), 0.05 * (attempt + 1)))
+    # SMB servers can allow create/write but deny rename/replace. Control JSON
+    # readers tolerate a short incomplete interval, so direct overwrite is a
+    # better final fallback than aborting a long import.
+    try:
+        with path.open("w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            try:
+                os.fsync(handle.fileno())
+            except Exception:
+                pass
+        return
+    except OSError as exc:
+        last_error = exc
     if last_error is not None:
         raise last_error
 
@@ -123,20 +140,28 @@ def find_mimics_exe(explicit=None):
     if explicit and Path(explicit).is_file():
         return explicit
     # Delegate to runtime_common which has the full search logic
-    sys.path.insert(0, str(RUNTIME))
-    import runtime_common
     return runtime_common.find_mimics_exe()
 
 
-def discover_cases(ts_root, cases, python_exe):
+def discover_cases(ts_root, cases, python_exe, mask_selection="all"):
     result = run_bridge(
         python_exe,
         {
             "action": "discover",
             "ts_root": str(ts_root),
             "cases_filter": sorted(cases) if cases else None,
+            "mask_selection": mask_selection,
         },
     )
+    if result.get("mask_mode") == "named" and int(result.get("mask_count", 0) or 0) == 0:
+        raise RuntimeError("No segmentation files matched --masks={0}".format(mask_selection))
+    if result.get("mask_mode") == "named":
+        print(
+            "Mask filter matched {} file(s); {} case(s) have no matching mask.".format(
+                int(result.get("mask_count", 0) or 0),
+                int(result.get("cases_without_selected_masks", 0) or 0),
+            )
+        )
     return list(result.get("cases", []))
 
 
@@ -147,7 +172,9 @@ def _acquire_background_mimics_lock(owner, wait_seconds=0.0):
 
 
 def launch_create_mcs(output_dir, mimics_exe, bridge_python, lock_timeout_seconds=0.0):
-    runner = output_dir / "_run_create_mcs.py"
+    runtime_dir = Path(runtime_common.import_queue_runtime_dir(str(ROOT), str(output_dir)))
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    runner = runtime_dir / "_run_create_mcs.py"
     runner.write_text(
         "\n".join([
             "# Auto-generated runner for background Mimics .mcs creation",
@@ -156,13 +183,13 @@ def launch_create_mcs(output_dir, mimics_exe, bridge_python, lock_timeout_second
             "os.environ['MIMICS_BRIDGE_PYTHON'] = r'{}'".format(str(bridge_python)),
             "os.environ['MIMICS_BRIDGE_SCRIPT'] = r'{}'".format(str(ROOT / "mimics_bridge.py")),
             "import create_mcs_batch",
-            "create_mcs_batch.main(r'{}')".format(str(output_dir)),
+            "create_mcs_batch.main(r'{}', runtime_dir=r'{}')".format(str(output_dir), str(runtime_dir)),
             "",
         ]),
         encoding="utf-8",
     )
     lock = _acquire_background_mimics_lock("batch .mcs creation", lock_timeout_seconds)
-    log = open(str(output_dir / "_background_mimics.log"), "ab")
+    log = open(str(runtime_dir / "_background_mimics.log"), "ab")
     try:
         proc = subprocess.Popen(
             [mimics_exe, "-b", "-run_script", str(runner)],
@@ -232,14 +259,19 @@ def cmd_prepare_import(args):
     output_dir = Path(args.output_dir).resolve() if args.output_dir else ts_root / "mcs_output"
     output_dir.mkdir(parents=True, exist_ok=True)
     cases_filter = set(args.cases.split(",")) if args.cases else None
-    cases = discover_cases(ts_root, cases_filter, bridge_python)
+    cases = discover_cases(ts_root, cases_filter, bridge_python, args.masks)
     print("Discovered {} case(s).".format(len(cases)))
-    write_json_atomic(output_dir / "_mcs_queue_active.json", {"total": len(cases), "created_at_epoch": time.time()})
+    runtime_dir = Path(runtime_common.import_queue_runtime_dir(str(ROOT), str(output_dir)))
+    run_root = Path(runtime_common.import_runtime_base(str(ROOT))) / "import_runs" / (
+        time.strftime("%Y%m%dT%H%M%S") + "_cli_" + uuid.uuid4().hex[:10]
+    )
+    queue_dir = runtime_dir / "prepared_queue"
+    write_json_atomic(runtime_dir / "_mcs_queue_active.json", {"total": len(cases), "created_at_epoch": time.time()})
     completed = 0
     failed = 0
     for index, case in enumerate(cases, 1):
         case_id = case["case_id"]
-        work_dir = output_dir / (case_id + "_work")
+        work_dir = run_root / "work" / case_id
         print("[{}/{}] Preparing {}".format(index, len(cases), case_id))
         params = {
             "action": "prepare",
@@ -255,16 +287,25 @@ def cmd_prepare_import(args):
             result = run_bridge(bridge_python, params)
             result["output_mcs"] = str(output_dir / (case_id + ".mcs"))
             write_json_atomic(work_dir / "prepare_manifest.json", result)
+            write_json_atomic(
+                queue_dir / (case_id + "_" + uuid.uuid4().hex + ".json"),
+                {
+                    "case_id": case_id,
+                    "work_dir": str(work_dir.resolve()),
+                    "output_mcs": result["output_mcs"],
+                    "created_at_epoch": time.time(),
+                },
+            )
             completed += 1
         except Exception as exc:
             failed += 1
-            fail_dir = output_dir / "_failed_cases"
+            fail_dir = runtime_dir / "_failed_cases"
             write_json_atomic(fail_dir / (case_id + "_prepare.json"), {"case_id": case_id, "error": str(exc)})
             print("  failed: {}".format(exc))
-    active = output_dir / "_mcs_queue_active.json"
+    active = runtime_dir / "_mcs_queue_active.json"
     if active.exists():
         active.unlink()
-    write_json_atomic(output_dir / "_mcs_queue_done.json", {"completed": completed, "failed": failed, "updated_at_epoch": time.time()})
+    write_json_atomic(runtime_dir / "_mcs_queue_done.json", {"completed": completed, "failed": failed, "updated_at_epoch": time.time()})
     if args.no_create_mcs:
         return 0
     mimics_exe = find_mimics_exe(args.mimics_exe)
@@ -321,7 +362,7 @@ def _runtime_owned_roots():
         ts_root_path = Path(ts_root)
         result.append(ts_root_path)
         result.append(ts_root_path / "mcs_output")
-    registry = ROOT / ".mimics_runtime" / "mcs_queues"
+    registry = Path(runtime_common.import_runtime_base(str(ROOT))) / "mcs_queues"
     if registry.is_dir():
         for path in registry.glob("*.json"):
             try:
@@ -359,8 +400,10 @@ def cmd_kill_background(args):
         if not queue_dir.is_dir():
             continue
         try:
-            (queue_dir / "_mcs_queue_stop.json").write_text(json.dumps(stop_payload, indent=2, sort_keys=True), encoding="utf-8")
-            active = queue_dir / "_mcs_queue_active.json"
+            runtime_dir = Path(runtime_common.import_queue_runtime_dir(str(ROOT), str(queue_dir)))
+            runtime_dir.mkdir(parents=True, exist_ok=True)
+            (runtime_dir / "_mcs_queue_stop.json").write_text(json.dumps(stop_payload, indent=2, sort_keys=True), encoding="utf-8")
+            active = runtime_dir / "_mcs_queue_active.json"
             if active.is_file():
                 active.unlink()
             stopped_queues.append(str(queue_dir))
@@ -442,6 +485,7 @@ def build_parser():
     p.add_argument("--ts-root", required=True)
     p.add_argument("--output-dir")
     p.add_argument("--cases")
+    p.add_argument("--masks", default="all", help="all, none, or comma-separated mask names")
     p.add_argument("--python")
     p.add_argument("--mimics-exe")
     p.add_argument("--axes", type=parse_axes, default=[0, 1, 2])

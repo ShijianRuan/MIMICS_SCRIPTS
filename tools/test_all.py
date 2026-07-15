@@ -23,6 +23,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import uuid
@@ -244,6 +245,40 @@ class TestRuntimeCommon(unittest.TestCase):
             runtime_common.time.sleep = old_sleep
         self.assertGreaterEqual(len(calls), 3)
         self.assertEqual({"ok": True}, runtime_common.read_json(path))
+
+    def test_write_json_atomic_falls_back_when_smb_replace_is_always_denied(self):
+        import runtime_common
+
+        path = os.path.join(self.tmp, "smb_replace_denied.json")
+        old_replace = runtime_common.os.replace
+        old_sleep = runtime_common.time.sleep
+        try:
+            runtime_common.os.replace = lambda _src, _dst: (_ for _ in ()).throw(OSError(5, "access denied"))
+            runtime_common.time.sleep = lambda _seconds: None
+            runtime_common.write_json_atomic(path, {"fallback": True})
+        finally:
+            runtime_common.os.replace = old_replace
+            runtime_common.time.sleep = old_sleep
+        self.assertEqual({"fallback": True}, runtime_common.read_json(path))
+
+    def test_mimics_exe_override_bypasses_negative_lookup_cache(self):
+        import runtime_common
+
+        exe = os.path.join(self.tmp, "MimicsResearch.exe")
+        Path(exe).write_bytes(b"test")
+        old_cache = dict(runtime_common._MIMICS_EXE_CACHE)
+        old_env = os.environ.get("MIMICS_EXE")
+        try:
+            runtime_common._MIMICS_EXE_CACHE.update({"value": None, "checked_at": time.time()})
+            os.environ["MIMICS_EXE"] = exe
+            self.assertEqual(os.path.abspath(exe), runtime_common.find_mimics_exe())
+        finally:
+            runtime_common._MIMICS_EXE_CACHE.clear()
+            runtime_common._MIMICS_EXE_CACHE.update(old_cache)
+            if old_env is None:
+                os.environ.pop("MIMICS_EXE", None)
+            else:
+                os.environ["MIMICS_EXE"] = old_env
 
     def test_safe_filename(self):
         import runtime_common
@@ -1402,11 +1437,12 @@ class TestCreateMcsBatch(unittest.TestCase):
 
     def test_stop_marker_detected(self):
         """Simulate that the stop marker file is detected."""
-        stop_path = os.path.join(self.tmp, "_mcs_queue_stop.json")
+        stop_path = os.path.join(self.tmp, ".mimics_runtime", "_mcs_queue_stop.json")
+        os.makedirs(os.path.dirname(stop_path))
         with open(stop_path, "w") as f:
             json.dump({"status": "stop_requested"}, f)
         self.assertTrue(os.path.isfile(stop_path))
-        # The main loop would check: os.path.isfile(os.path.join(output_dir, QUEUE_STOP_FILE))
+        # The main loop checks the runtime-scoped marker and exits when true.
         # and exit when True. Confirmed marker file exists and is readable.
 
     def test_inject_buffer_shape_mismatch_error(self):
@@ -1446,7 +1482,7 @@ class TestCreateMcsBatch(unittest.TestCase):
         from create_mcs_batch import log_message
 
         log_message(self.tmp, "test message")
-        log_path = os.path.join(self.tmp, "logs", "_create_mcs_batch.log")
+        log_path = os.path.join(self.tmp, ".mimics_runtime", "logs", "_create_mcs_batch.log")
         self.assertTrue(os.path.isfile(log_path))
         with open(log_path, "r") as f:
             content = f.read()
@@ -1486,7 +1522,7 @@ class TestCreateMcsBatch(unittest.TestCase):
         from create_mcs_batch import log_message
 
         # log_message should create logs/ dir automatically
-        logs_dir = os.path.join(self.tmp, "logs")
+        logs_dir = os.path.join(self.tmp, ".mimics_runtime", "logs")
         self.assertFalse(os.path.isdir(logs_dir))
         log_message(self.tmp, "first message")
         self.assertTrue(os.path.isdir(logs_dir))
@@ -1495,7 +1531,7 @@ class TestCreateMcsBatch(unittest.TestCase):
         from create_mcs_batch import record_failed_case
 
         record_failed_case(self.tmp, "s0001", "prepare", "Test error", "traceback text")
-        failed_dir = os.path.join(self.tmp, "_failed_cases")
+        failed_dir = os.path.join(self.tmp, ".mimics_runtime", "_failed_cases")
         self.assertTrue(os.path.isdir(failed_dir))
         files = os.listdir(failed_dir)
         self.assertEqual(1, len(files))
@@ -1504,6 +1540,41 @@ class TestCreateMcsBatch(unittest.TestCase):
         self.assertEqual("s0001", data["case_id"])
         self.assertEqual("prepare", data["phase"])
         self.assertEqual("Test error", data["error"])
+
+    def test_local_queue_descriptor_is_consumed_by_background_creator(self):
+        import create_mcs_batch
+
+        output_dir = os.path.join(self.tmp, "output")
+        runtime_dir = os.path.join(self.tmp, "local_queue")
+        work_dir = os.path.join(self.tmp, "local_work", "case001")
+        queue_dir = os.path.join(runtime_dir, "prepared_queue")
+        os.makedirs(output_dir)
+        os.makedirs(work_dir)
+        os.makedirs(queue_dir)
+        output_mcs = os.path.join(output_dir, "case001.mcs")
+        with open(os.path.join(work_dir, "prepare_manifest.json"), "w") as handle:
+            json.dump({"output_mcs": output_mcs, "source_fingerprint": "fp1"}, handle)
+        descriptor = os.path.join(queue_dir, "case001.json")
+        with open(descriptor, "w") as handle:
+            json.dump({"case_id": "case001", "work_dir": work_dir, "output_mcs": output_mcs}, handle)
+        with open(os.path.join(runtime_dir, create_mcs_batch.QUEUE_DONE_FILE), "w") as handle:
+            json.dump({"status": "done"}, handle)
+
+        old_create = create_mcs_batch.create_mcs_from_manifest
+        old_runtime = create_mcs_batch._ACTIVE_RUNTIME_DIR
+        try:
+            def fake_create(_work_dir, path):
+                with open(path, "w") as handle:
+                    handle.write("mcs")
+                return path
+            create_mcs_batch.create_mcs_from_manifest = fake_create
+            self.assertEqual(0, create_mcs_batch.main(output_dir, runtime_dir=runtime_dir))
+        finally:
+            create_mcs_batch.create_mcs_from_manifest = old_create
+            create_mcs_batch._ACTIVE_RUNTIME_DIR = old_runtime
+        self.assertTrue(os.path.isfile(output_mcs))
+        self.assertFalse(os.path.exists(descriptor))
+        self.assertFalse(os.path.exists(work_dir))
 
     def test_shape_product(self):
         from create_mcs_batch import _shape_product
@@ -1712,7 +1783,7 @@ class TestStopBackgroundServices(unittest.TestCase):
             msb._runtime_dir = old_runtime
             msb._stop_export_inprocess_monitors = old_stop
         self.assertEqual(os.getpid(), result.get("target_pid"))
-        self.assertTrue(os.path.isfile(os.path.join(export_root, "_export_stop.json")))
+        self.assertTrue(os.path.isfile(os.path.join(export_root, ".mimics_runtime", "_export_stop.json")))
         entry = os.path.join(PROJECT_ROOT, "scripting_library", "01_Data", "06_Stop_Mask_Export.py")
         self.assertTrue(os.path.isfile(entry))
         self.assertIn("main_stop_export", Path(entry).read_text(encoding="utf-8"))
@@ -2934,7 +3005,9 @@ class TestNewFeatures(unittest.TestCase):
         finally:
             cli._acquire_background_mimics_lock = old_lock
             cli.subprocess.Popen = old_popen
-        runner = (output_dir / "_run_create_mcs.py").read_text(encoding="utf-8")
+        import runtime_common
+        queue_runtime = Path(runtime_common.import_queue_runtime_dir(PROJECT_ROOT, str(output_dir)))
+        runner = (queue_runtime / "_run_create_mcs.py").read_text(encoding="utf-8")
         self.assertIn(bridge_python, runner)
         self.assertNotIn(sys.executable, runner)
 
@@ -4442,6 +4515,84 @@ class TestNewFeatures(unittest.TestCase):
         dicom_case = mimics_import._discover_single_case(dicom_dir)
         self.assertEqual(dicom_dir, dicom_case["image"])
         self.assertEqual("dicom_candidate", dicom_case["image_type"])
+
+    def test_batch_discovery_supports_all_named_and_no_masks(self):
+        import mimics_bridge
+
+        root = os.path.join(self.tmp, "dataset")
+        case = os.path.join(root, "case001")
+        seg = os.path.join(case, "segmentations")
+        os.makedirs(seg)
+        for path in (
+            os.path.join(case, "ct.nii.gz"),
+            os.path.join(seg, "liver.seg.nii.gz"),
+            os.path.join(seg, "spleen.nii.gz"),
+        ):
+            with open(path, "wb") as handle:
+                handle.write(b"discovery-only")
+
+        all_result = mimics_bridge.do_discover({"ts_root": root, "mask_selection": "all"})
+        self.assertEqual(["liver", "spleen"], [row["name"] for row in all_result["cases"][0]["masks"]])
+        named_result = mimics_bridge.do_discover({"ts_root": root, "mask_selection": "spleen"})
+        self.assertEqual(["spleen"], [row["name"] for row in named_result["cases"][0]["masks"]])
+        none_result = mimics_bridge.do_discover({"ts_root": root, "mask_selection": "none"})
+        self.assertEqual([], none_result["cases"][0]["masks"])
+
+    def test_import_runtime_is_local_and_queue_descriptor_is_output_scoped(self):
+        import mimics_import
+
+        run_root = mimics_import._new_import_run_root()
+        output_dir = os.path.join(self.tmp, "network_output")
+        work_dir = os.path.join(run_root, "work", "case001")
+        os.makedirs(work_dir)
+        descriptor = mimics_import._publish_prepared_work(
+            output_dir,
+            "case001",
+            work_dir,
+            os.path.join(output_dir, "case001.mcs"),
+        )
+        self.assertTrue(run_root.startswith(os.path.join(PROJECT_ROOT, ".mimics_runtime", "import_runs")))
+        self.assertTrue(descriptor.startswith(os.path.join(PROJECT_ROOT, ".mimics_runtime", "import_queues")))
+        payload = json.loads(Path(descriptor).read_text(encoding="utf-8"))
+        self.assertEqual(os.path.abspath(work_dir), payload["work_dir"])
+        shutil.rmtree(run_root, ignore_errors=True)
+        shutil.rmtree(os.path.dirname(os.path.dirname(descriptor)), ignore_errors=True)
+
+    def test_external_path_browser_avoids_qfiledialog_and_supports_paste(self):
+        import inspect
+        import tools.io_path_setup_ui as ui
+
+        source = inspect.getsource(ui.choose_path_without_shell)
+        self.assertNotIn("QFileDialog", source)
+        self.assertIn("os.scandir", source)
+        self.assertIn("clipboard", source)
+
+    def test_background_mimics_launch_is_off_the_gui_callback(self):
+        import mimics_import
+
+        started = threading.Event()
+        release = threading.Event()
+        old_launch = mimics_import._launch_background_mimics
+        old_pid = mimics_import._BG_MIMICS_PID
+        old_active = mimics_import._BG_MIMICS_LAUNCH_ACTIVE
+        try:
+            def slow_launch(_output_dir, total_count=0, schedule_retry=True):
+                started.set()
+                release.wait(2.0)
+                return None
+            mimics_import._launch_background_mimics = slow_launch
+            mimics_import._BG_MIMICS_PID = None
+            mimics_import._BG_MIMICS_LAUNCH_ACTIVE = False
+            before = time.time()
+            mimics_import._ensure_bg_mimics_running(self.tmp, mark_active=False)
+            elapsed = time.time() - before
+            self.assertLess(elapsed, 0.2)
+            self.assertTrue(started.wait(1.0))
+        finally:
+            release.set()
+            mimics_import._launch_background_mimics = old_launch
+            mimics_import._BG_MIMICS_PID = old_pid
+            mimics_import._BG_MIMICS_LAUNCH_ACTIVE = old_active
 
     def test_external_batch_export_requires_explicit_safe_or_overwrite_destination(self):
         import tools.mimics_batch_cli as cli

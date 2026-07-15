@@ -8,9 +8,11 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
+from queue import Empty, Queue
 
 
 def read_json(path, default=None):
@@ -37,8 +39,7 @@ def source_default_output(mode, source):
     if mode == "import_batch":
         return str(source_path / "mcs_output")
     if mode == "import_single":
-        base = source_path.parent if source_path.is_file() else source_path.parent
-        return str(base / "mcs_output")
+        return str(source_path.parent / "mcs_output")
     case_parent = source_path.parent if source_path.name else source_path
     return str(case_parent / "mask_exports")
 
@@ -54,7 +55,8 @@ def resolve_configured_output(configured, source, mode):
     return os.path.abspath(str(base / text))
 
 
-MASK_SUFFIXES = (".nii.gz", ".nii", ".mha", ".mhd", ".nrrd")
+MASK_SUFFIXES = (".seg.nii.gz", ".seg.nii", ".nii.gz", ".nrrd.gz", ".nii", ".mha", ".mhd", ".nrrd")
+BROWSER_FILE_SUFFIXES = MASK_SUFFIXES + (".dcm",)
 
 
 def _medical_file(path):
@@ -152,6 +154,185 @@ def discover_single_source(source):
     }
 
 
+def choose_path_without_shell(QtCore, QtWidgets, parent, title, initial, allow_file=False):
+    """Browse paths without Windows Shell enumeration on the GUI thread."""
+    dialog = QtWidgets.QDialog(parent)
+    dialog.setWindowTitle(title)
+    dialog.resize(760, 520)
+    layout = QtWidgets.QVBoxLayout(dialog)
+    layout.setContentsMargins(18, 18, 18, 16)
+    layout.setSpacing(10)
+
+    path_row = QtWidgets.QHBoxLayout()
+    path_edit = QtWidgets.QLineEdit(str(initial or Path.home()))
+    path_edit.setClearButtonEnabled(True)
+    paste = QtWidgets.QPushButton("Paste")
+    go = QtWidgets.QPushButton("Go")
+    path_row.addWidget(path_edit, 1)
+    path_row.addWidget(paste)
+    path_row.addWidget(go)
+    layout.addLayout(path_row)
+
+    nav = QtWidgets.QHBoxLayout()
+    locations = QtWidgets.QComboBox()
+    if os.name == "nt":
+        # Listing all letters is instantaneous; unavailable drives fail only
+        # when explicitly opened instead of delaying the whole dialog.
+        locations.addItems(["{0}:\\".format(chr(code)) for code in range(ord("A"), ord("Z") + 1)])
+    else:
+        locations.addItems([str(Path.home()), os.path.abspath(os.sep)])
+    up = QtWidgets.QPushButton("Up")
+    refresh = QtWidgets.QPushButton("Refresh")
+    nav.addWidget(locations, 1)
+    nav.addWidget(up)
+    nav.addWidget(refresh)
+    layout.addLayout(nav)
+
+    entries = QtWidgets.QListWidget()
+    entries.setAlternatingRowColors(True)
+    entries.setUniformItemSizes(True)
+    layout.addWidget(entries, 1)
+    status = QtWidgets.QLabel("")
+    status.setObjectName("hint")
+    layout.addWidget(status)
+
+    footer = QtWidgets.QHBoxLayout()
+    footer.addStretch(1)
+    cancel = QtWidgets.QPushButton("Cancel")
+    choose = QtWidgets.QPushButton("Use Selected File" if allow_file else "Use This Folder")
+    choose.setObjectName("primary")
+    footer.addWidget(cancel)
+    footer.addWidget(choose)
+    layout.addLayout(footer)
+
+    results = Queue()
+    state = {"generation": 0, "path": "", "selected": ""}
+    try:
+        user_role = QtCore.Qt.ItemDataRole.UserRole
+    except AttributeError:
+        user_role = QtCore.Qt.UserRole
+
+    def normalize(value):
+        return os.path.abspath(os.path.expandvars(os.path.expanduser(str(value or "").strip())))
+
+    def scan(value):
+        target = normalize(value)
+        state["generation"] += 1
+        generation = state["generation"]
+        state["path"] = target
+        path_edit.setText(target)
+        entries.clear()
+        entries.setEnabled(False)
+        status.setText("Loading folder in the background...")
+
+        def worker():
+            rows = []
+            error = ""
+            truncated = False
+            try:
+                with os.scandir(target) as iterator:
+                    for index, entry in enumerate(iterator):
+                        if index >= 2000:
+                            truncated = True
+                            break
+                        try:
+                            is_dir = entry.is_dir(follow_symlinks=False)
+                        except OSError:
+                            is_dir = False
+                        if is_dir or (allow_file and entry.name.lower().endswith(BROWSER_FILE_SUFFIXES)):
+                            rows.append((not is_dir, entry.name, entry.path))
+                rows.sort(key=lambda item: (item[0], item[1].lower()))
+            except Exception as exc:
+                error = str(exc)
+            results.put((generation, target, rows, truncated, error))
+
+        thread = threading.Thread(target=worker, name="path-browser-scan")
+        thread.daemon = True
+        thread.start()
+
+    poller = QtCore.QTimer(dialog)
+
+    def poll_results():
+        while True:
+            try:
+                generation, target, rows, truncated, error = results.get_nowait()
+            except Empty:
+                return
+            if generation != state["generation"]:
+                continue
+            entries.setEnabled(True)
+            if error:
+                status.setText("Cannot read this location. Paste an exact path or choose another drive. {0}".format(error))
+                continue
+            for is_file, name, full_path in rows:
+                item = QtWidgets.QListWidgetItem(("[File] " if is_file else "[Folder] ") + name)
+                item.setData(user_role, (is_file, full_path))
+                entries.addItem(item)
+            suffix = " Showing the first 2,000 entries; paste an exact path for items not shown." if truncated else ""
+            status.setText("{0} item(s).{1}".format(len(rows), suffix))
+
+    poller.timeout.connect(poll_results)
+    poller.start(80)
+
+    def paste_path():
+        text = QtWidgets.QApplication.clipboard().text().strip()
+        if text:
+            path_edit.setText(text)
+            normalized = normalize(text)
+            if allow_file and normalized.lower().endswith(BROWSER_FILE_SUFFIXES):
+                scan(os.path.dirname(normalized))
+            else:
+                scan(normalized)
+
+    def selected_data():
+        item = entries.currentItem()
+        return item.data(user_role) if item else None
+
+    def activate_item(item):
+        is_file, full_path = item.data(user_role)
+        if is_file:
+            if allow_file:
+                state["selected"] = full_path
+                dialog.accept()
+        else:
+            scan(full_path)
+
+    def accept_value():
+        data = selected_data()
+        if allow_file and data and data[0]:
+            state["selected"] = data[1]
+            dialog.accept()
+            return
+        typed = normalize(path_edit.text())
+        if allow_file and os.path.isfile(typed):
+            state["selected"] = typed
+            dialog.accept()
+            return
+        if os.path.isdir(typed):
+            state["selected"] = typed
+            dialog.accept()
+            return
+        QtWidgets.QMessageBox.warning(dialog, "Path Not Found", "Paste or select an existing file or folder.")
+
+    paste.clicked.connect(paste_path)
+    go.clicked.connect(lambda: scan(path_edit.text()))
+    path_edit.returnPressed.connect(lambda: scan(path_edit.text()))
+    locations.activated.connect(lambda _index: scan(locations.currentText()))
+    up.clicked.connect(lambda: scan(os.path.dirname(state["path"].rstrip("\\/")) or state["path"]))
+    refresh.clicked.connect(lambda: scan(state["path"]))
+    entries.itemDoubleClicked.connect(activate_item)
+    cancel.clicked.connect(dialog.reject)
+    choose.clicked.connect(accept_value)
+    if allow_file and initial and str(initial).lower().endswith(BROWSER_FILE_SUFFIXES):
+        initial_folder = os.path.dirname(os.path.abspath(str(initial)))
+    elif initial:
+        initial_folder = str(initial)
+    else:
+        initial_folder = str(Path.home())
+    scan(initial_folder)
+    return state["selected"] if dialog.exec() == QtWidgets.QDialog.Accepted else ""
+
+
 def run_ui(context, preview_path=""):
     from PySide6 import QtCore, QtGui, QtWidgets
 
@@ -168,7 +349,7 @@ def run_ui(context, preview_path=""):
     window.setObjectName("ioWindow")
     window.setModal(False)
     window.setMinimumWidth(680)
-    window.resize(720, 455 if mode == "export_masks" else 440)
+    window.resize(760, 455 if mode == "export_masks" else 560)
     window.setWindowTitle({
         "import_batch": "Import Dataset",
         "import_single": "Import Single Case",
@@ -225,8 +406,10 @@ def run_ui(context, preview_path=""):
         row = QtWidgets.QHBoxLayout()
         edit = QtWidgets.QLineEdit(str(initial or ""))
         edit.setClearButtonEnabled(True)
+        paste_button = QtWidgets.QPushButton("Paste")
         button = QtWidgets.QPushButton("Browse...")
         row.addWidget(edit, 1)
+        row.addWidget(paste_button)
         row.addWidget(button)
         form.addLayout(row)
         if hint:
@@ -234,41 +417,27 @@ def run_ui(context, preview_path=""):
 
         def browse():
             current = edit.text().strip()
-            # Fall back to home if the field is empty or points somewhere that
-            # no longer exists, so the native dialog never opens on a huge or
-            # stale root that makes it hang.
-            if not current or not os.path.exists(current):
+            if not current:
                 current = str(Path.home())
-            # Avoid opening the dialog on a drive root (e.g. E:\) which can
-            # cause the native Shell folder dialog to enumerate the entire
-            # drive and freeze.  Fall back to the user home directory instead.
-            try:
-                if os.path.isdir(current) and os.path.dirname(current.rstrip("\\/")) == current.rstrip("\\/"):
-                    current = str(Path.home())
-            except Exception:
-                pass
-            # Use Qt's own dialog instead of the Windows native Shell dialog.
-            # The native IFileDialog can hang on large/root directories because
-            # the Shell tries to enumerate every child for icons/thumbnails.
-            dont_use_native = QtWidgets.QFileDialog.DontUseNativeDialog
-            if file_or_folder:
-                menu = QtWidgets.QMenu(button)
-                choose_file = menu.addAction("Choose image file")
-                choose_folder = menu.addAction("Choose case or DICOM folder")
-                action = menu.exec(button.mapToGlobal(QtCore.QPoint(0, button.height())))
-                if action == choose_file:
-                    value, _ = QtWidgets.QFileDialog.getOpenFileName(window, "Choose 3D image", current, "Medical volumes (*.nii *.nii.gz *.mha *.mhd *.nrrd *.dcm);;All files (*)", "", dont_use_native)
-                elif action == choose_folder:
-                    value = QtWidgets.QFileDialog.getExistingDirectory(window, "Choose case or DICOM folder", current, dont_use_native)
-                else:
-                    value = ""
-            elif browse_folder:
-                value = QtWidgets.QFileDialog.getExistingDirectory(window, label, current, dont_use_native)
-            else:
-                value, _ = QtWidgets.QFileDialog.getOpenFileName(window, label, current, "", "", dont_use_native)
+            value = choose_path_without_shell(
+                QtCore,
+                QtWidgets,
+                window,
+                label,
+                current,
+                allow_file=bool(file_or_folder or not browse_folder),
+            )
             if value:
                 edit.setProperty("chosenByBrowse", True)
                 edit.setText(str(value))
+
+        def paste_value():
+            value = QtWidgets.QApplication.clipboard().text().strip()
+            if value:
+                edit.setProperty("chosenByBrowse", True)
+                edit.setText(value)
+
+        paste_button.clicked.connect(paste_value)
         button.clicked.connect(browse)
         return edit
 
@@ -286,6 +455,27 @@ def run_ui(context, preview_path=""):
 
     policy_row = None
     skip_radio = overwrite_radio = None
+    mask_all = mask_none = mask_named = mask_names = None
+    if mode.startswith("import"):
+        form.addWidget(_label(QtWidgets, "MASKS TO IMPORT", "section"))
+        mask_row = QtWidgets.QHBoxLayout()
+        mask_all = QtWidgets.QRadioButton("All masks")
+        mask_none = QtWidgets.QRadioButton("Images only")
+        mask_named = QtWidgets.QRadioButton("Named masks")
+        remembered_selection = str(remembered_mode.get("mask_selection", "all") or "all")
+        mask_none.setChecked(remembered_selection.lower() == "none")
+        mask_named.setChecked(remembered_selection.lower() not in ("all", "none"))
+        mask_all.setChecked(not mask_none.isChecked() and not mask_named.isChecked())
+        mask_row.addWidget(mask_all)
+        mask_row.addWidget(mask_none)
+        mask_row.addWidget(mask_named)
+        mask_row.addStretch(1)
+        form.addLayout(mask_row)
+        mask_names = QtWidgets.QLineEdit(remembered_selection if mask_named.isChecked() else "")
+        mask_names.setPlaceholderText("Example: liver, spleen, aorta")
+        mask_names.setEnabled(mask_named.isChecked())
+        form.addWidget(mask_names)
+        mask_named.toggled.connect(mask_names.setEnabled)
     if mode == "export_masks":
         policy_row = QtWidgets.QHBoxLayout()
         policy_row.addWidget(_label(QtWidgets, "IF FILES ALREADY EXIST", "section"))
@@ -344,40 +534,86 @@ def run_ui(context, preview_path=""):
             write_json(status_path, {"status": "cancelled", "updated_at_epoch": time.time()})
         window.accept()
 
-    def submit_window():
-        source = os.path.abspath(os.path.expanduser(source_edit.text().strip()))
-        output = os.path.abspath(os.path.expanduser(output_edit.text().strip()))
-        if not os.path.exists(source):
-            QtWidgets.QMessageBox.warning(window, "Source Not Found", "Choose an existing source file or folder.")
-            return
+    submission_results = Queue()
+    submission_state = {"running": False}
+    submission_timer = QtCore.QTimer(window)
+
+    def poll_submission():
         try:
-            if not os.path.isdir(output):
-                os.makedirs(output)
-            fd, probe_path = tempfile.mkstemp(prefix=".mimics_write_test_", dir=output)
-            os.close(fd)
-            os.remove(probe_path)
-        except Exception as exc:
-            QtWidgets.QMessageBox.warning(
-                window,
-                "Output Not Writable",
-                "The output folder could not be created or written.\n\n{0}\n\n{1}".format(output, exc),
-            )
+            result = submission_results.get_nowait()
+        except Empty:
             return
-        selection = {"source_path": source, "output_path": output, "remember": bool(remember.isChecked())}
-        if mode in ("import_single", "export_masks"):
-            case_info = discover_single_source(source)
-            if not case_info:
-                QtWidgets.QMessageBox.warning(window, "Unsupported Source", "No supported 3D image or DICOM folder was found.")
-                return
-            selection["case_info"] = case_info
-        if mode == "export_masks":
-            selection["conflict_policy"] = "overwrite" if overwrite_radio.isChecked() else "skip"
-        if remember.isChecked() and state_path:
+        submission_state["running"] = False
+        submit.setEnabled(True)
+        if result.get("error"):
+            output_preview.setText("")
+            QtWidgets.QMessageBox.warning(window, result.get("title", "Path Error"), result["error"])
+            refresh_default()
+            return
+        selection = result["selection"]
+        if selection.get("remember") and state_path:
             state = read_json(state_path, {}) or {}
             state[mode] = selection
             write_json(state_path, state)
         write_json(status_path, {"status": "submitted", "selection": selection, "updated_at_epoch": time.time()})
         window.accept()
+
+    submission_timer.timeout.connect(poll_submission)
+    submission_timer.start(80)
+
+    def submit_window():
+        if submission_state["running"]:
+            return
+        source = os.path.abspath(os.path.expanduser(source_edit.text().strip()))
+        output = os.path.abspath(os.path.expanduser(output_edit.text().strip()))
+        selection = {"source_path": source, "output_path": output, "remember": bool(remember.isChecked())}
+        if mode.startswith("import"):
+            if mask_none.isChecked():
+                selection["mask_selection"] = "none"
+            elif mask_named.isChecked():
+                names = ",".join(item.strip() for item in mask_names.text().split(",") if item.strip())
+                if not names:
+                    QtWidgets.QMessageBox.warning(window, "Mask Names Required", "Enter one or more mask names separated by commas.")
+                    return
+                selection["mask_selection"] = names
+            else:
+                selection["mask_selection"] = "all"
+        if mode == "export_masks":
+            selection["conflict_policy"] = "overwrite" if overwrite_radio.isChecked() else "skip"
+
+        submission_state["running"] = True
+        submit.setEnabled(False)
+        output_preview.setText("Checking paths in the background...")
+
+        def validate_paths():
+            try:
+                if not os.path.exists(source):
+                    submission_results.put({"title": "Source Not Found", "error": "Choose an existing source file or folder."})
+                    return
+                if not os.path.isdir(output):
+                    os.makedirs(output)
+                fd, probe_path = tempfile.mkstemp(prefix=".mimics_write_test_", dir=output)
+                os.close(fd)
+                os.remove(probe_path)
+                if mode in ("import_single", "export_masks"):
+                    case_info = discover_single_source(source)
+                    if not case_info:
+                        submission_results.put({
+                            "title": "Unsupported Source",
+                            "error": "No supported 3D image or DICOM folder was found.",
+                        })
+                        return
+                    selection["case_info"] = case_info
+                submission_results.put({"selection": selection})
+            except Exception as exc:
+                submission_results.put({
+                    "title": "Path Validation Failed",
+                    "error": "The selected paths could not be validated.\n\n{0}".format(exc),
+                })
+
+        thread = threading.Thread(target=validate_paths, name="io-path-validation")
+        thread.daemon = True
+        thread.start()
 
     cancel.clicked.connect(cancel_window)
     submit.clicked.connect(submit_window)

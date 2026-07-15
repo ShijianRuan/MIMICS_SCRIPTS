@@ -140,6 +140,39 @@ def _stop_inprocess_monitors():
     return stopped
 
 
+def _stop_import_inprocess_monitors():
+    """Stop import bridge work and detach its callbacks before queue cleanup."""
+    module = sys.modules.get("mimics_import")
+    if module is None:
+        return []
+    output_dirs = []
+    monitors = getattr(module, "_IMPORT_MONITORS", {}) or {}
+    stopper = getattr(module, "_stop_import_monitor", None)
+    terminator = getattr(module, "_terminate_job_process", None)
+    cleanup_work = getattr(module, "_cleanup_work_dir", None)
+    for key, monitor in list(monitors.items()):
+        try:
+            monitor["done"] = True
+            output_dir = monitor.get("output_dir")
+            if not output_dir and monitor.get("output_mcs"):
+                output_dir = os.path.dirname(os.path.abspath(monitor.get("output_mcs")))
+            if output_dir:
+                output_dirs.append(output_dir)
+            work_dir = monitor.get("work_dir")
+            if terminator is not None and monitor.get("job_dir"):
+                terminator(
+                    monitor.get("job_dir"),
+                    on_complete=(lambda path=work_dir: cleanup_work(path)) if cleanup_work is not None else None,
+                )
+            if stopper is not None:
+                stopper(key)
+            if cleanup_work is not None and terminator is None:
+                cleanup_work(monitor.get("work_dir"))
+        except Exception:
+            pass
+    return output_dirs
+
+
 def _runtime_dir():
     path = os.path.join(_project_root(), ".mimics_runtime")
     if not os.path.isdir(path):
@@ -167,7 +200,13 @@ def _scan_filesystem_for_queue_dirs():
         )):
             continue
         if "_mcs_queue_active.json" in filenames:
-            result.append(dirpath)
+            state = runtime_common.read_json(os.path.join(dirpath, "_mcs_queue_active.json"), {}) or {}
+            if state.get("output_dir"):
+                result.append(state.get("output_dir"))
+            elif os.path.basename(dirpath) == ".mimics_runtime":
+                result.append(os.path.dirname(dirpath))
+            else:
+                result.append(dirpath)
         # Limit depth to avoid scanning huge model directories
         depth = dirpath.replace(root, "").count(os.sep)
         if depth > 6:
@@ -212,7 +251,7 @@ def _queue_dirs_from_runtime_state():
                 result.append(os.path.join(ts_root, "mcs_output"))
 
     # Queue registry (may be disabled by env var, but check anyway)
-    registry_dir = os.path.join(_runtime_dir(), "mcs_queues")
+    registry_dir = os.path.join(runtime_common.import_runtime_base(_project_root()), "mcs_queues")
     if os.path.isdir(registry_dir):
         for name in os.listdir(registry_dir):
             if not name.endswith(".json"):
@@ -249,12 +288,13 @@ def _request_queue_stop(reason="Stop Background Services"):
         if not os.path.isdir(output_dir):
             continue
         try:
+            queue_runtime = runtime_common.import_queue_runtime_dir(_project_root(), output_dir)
             runtime_common.write_json_atomic(
-                os.path.join(output_dir, "_mcs_queue_stop.json"), payload
+                os.path.join(queue_runtime, "_mcs_queue_stop.json"), payload
             )
             # Also remove the active marker so the background process
             # doesn't think a producer is still sending work.
-            active = os.path.join(output_dir, "_mcs_queue_active.json")
+            active = os.path.join(queue_runtime, "_mcs_queue_active.json")
             if os.path.isfile(active):
                 os.remove(active)
             stopped.append(output_dir)
@@ -312,7 +352,23 @@ def stop_background_import():
     import queue stop markers and only targets the background Mimics process
     whose resource lock says it is doing import .mcs creation.
     """
+    inprocess_outputs = _stop_import_inprocess_monitors()
     stopped_queues = _request_queue_stop(reason="Stop Background Import")
+    payload = {
+        "status": "stop_requested",
+        "requested_at_epoch": time.time(),
+        "reason": "Stop Background Import",
+    }
+    for output_dir in inprocess_outputs:
+        try:
+            queue_runtime = runtime_common.import_queue_runtime_dir(_project_root(), output_dir)
+            runtime_common.write_json_atomic(
+                os.path.join(queue_runtime, "_mcs_queue_stop.json"), payload
+            )
+            if output_dir not in stopped_queues:
+                stopped_queues.append(output_dir)
+        except Exception:
+            pass
     lock_path = _background_mimics_lock_path()
     lock_payload = runtime_common.read_json(lock_path, {}) or {}
     target_pid = None
@@ -442,7 +498,7 @@ def stop_background_export():
             target_pid = int(lock_payload.get("pid") or 0)
         except Exception:
             target_pid = None
-    stop_path = os.path.join(export_root, "_export_stop.json") if export_root else ""
+    stop_path = os.path.join(export_root, ".mimics_runtime", "_export_stop.json") if export_root else ""
     if stop_path:
         try:
             runtime_common.write_json_atomic(

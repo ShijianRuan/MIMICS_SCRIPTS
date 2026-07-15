@@ -4,8 +4,10 @@
 from __future__ import print_function
 
 import json
+import hashlib
 import os
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -19,6 +21,9 @@ INVALID_LOCK_GRACE_SECONDS = 5.0
 #   r"C:\Program Files\Materialise\Mimics Research 25\MimicsResearch.exe"
 # Leave empty to rely on auto-detection.
 HARDCODED_MIMICS_EXE = r""
+_MIMICS_EXE_CACHE = {"value": None, "checked_at": 0.0}
+_ATOMIC_WRITE_LOCKS = {}
+_ATOMIC_WRITE_LOCKS_GUARD = threading.Lock()
 
 
 def _install_subprocess_cleanup_guard():
@@ -70,6 +75,31 @@ def write_json_atomic(path, value):
 
 def write_text_atomic(path, text):
     parent = os.path.dirname(path)
+    normalized = os.path.abspath(path)
+    with _ATOMIC_WRITE_LOCKS_GUARD:
+        entry = _ATOMIC_WRITE_LOCKS.get(normalized)
+        if entry is None:
+            entry = {"lock": threading.Lock(), "users": 0}
+            _ATOMIC_WRITE_LOCKS[normalized] = entry
+        entry["users"] += 1
+    try:
+        with entry["lock"]:
+            return _write_text_atomic_locked(path, text, parent)
+    finally:
+        with _ATOMIC_WRITE_LOCKS_GUARD:
+            entry["users"] -= 1
+            if entry["users"] <= 0 and _ATOMIC_WRITE_LOCKS.get(normalized) is entry:
+                _ATOMIC_WRITE_LOCKS.pop(normalized, None)
+
+
+def _write_text_atomic_locked(path, text, parent):
+    """Write text reliably on local disks and SMB shares.
+
+    Some Windows SMB servers allow create/write but intermittently reject an
+    atomic replace with WinError 5. Readers in this project already tolerate a
+    temporarily incomplete JSON document, so after bounded replace retries a
+    direct, flushed write is safer than failing the entire import.
+    """
     last_error = None
     for attempt in range(12):
         # Re-check the parent each attempt: a concurrent cleanup
@@ -104,6 +134,19 @@ def write_text_atomic(path, text):
             except Exception:
                 pass
             time.sleep(min(0.15, 0.02 * (attempt + 1)))
+    try:
+        if parent and not os.path.isdir(parent):
+            os.makedirs(parent)
+        with open(path, "w") as handle:
+            handle.write(str(text))
+            try:
+                handle.flush()
+                os.fsync(handle.fileno())
+            except Exception:
+                pass
+        return
+    except OSError as exc:
+        last_error = exc
     if last_error is not None:
         raise last_error
 
@@ -131,6 +174,28 @@ def safe_slug(value):
     return safe_filename(value).strip("._") or "unknown"
 
 
+def import_queue_runtime_dir(project_root, output_dir):
+    """Return a stable local control directory for one .mcs output folder."""
+    normalized = os.path.normcase(os.path.abspath(output_dir))
+    digest = hashlib.sha1(normalized.encode("utf-8", "replace")).hexdigest()[:16]
+    base = safe_slug(os.path.basename(os.path.abspath(output_dir))) or "mcs_output"
+    return os.path.join(import_runtime_base(project_root), "import_queues", base + "_" + digest)
+
+
+def import_runtime_base(project_root):
+    """Choose a local import runtime root, with an explicit override."""
+    configured = os.environ.get("MIMICS_IMPORT_RUNTIME_DIR", "").strip()
+    if configured:
+        return os.path.abspath(os.path.expandvars(os.path.expanduser(configured)))
+    project = os.path.abspath(project_root)
+    if os.name == "nt" and project.startswith("\\\\"):
+        local_base = os.environ.get("LOCALAPPDATA") or os.environ.get("TEMP")
+        if local_base:
+            digest = hashlib.sha1(os.path.normcase(project).encode("utf-8", "replace")).hexdigest()[:16]
+            return os.path.join(local_base, "Mimics-Script", digest)
+    return os.path.join(project, ".mimics_runtime")
+
+
 def find_root(start_dir, sentinel_files, max_depth=6):
     current = os.path.abspath(start_dir)
     for _ in range(max_depth):
@@ -146,7 +211,25 @@ def find_root(start_dir, sentinel_files, max_depth=6):
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def find_mimics_exe():
+def _current_process_executable():
+    """Return the host executable without relying on embedded sys.executable."""
+    if os.name == "nt":
+        try:
+            import ctypes
+            buffer_size = 32768
+            buffer_value = ctypes.create_unicode_buffer(buffer_size)
+            length = ctypes.windll.kernel32.GetModuleFileNameW(None, buffer_value, buffer_size)
+            if length:
+                return os.path.abspath(buffer_value.value)
+        except Exception:
+            pass
+    try:
+        return os.path.abspath(sys.executable)
+    except Exception:
+        return ""
+
+
+def find_mimics_exe(force_refresh=False):
     """Find MimicsResearch.exe using the most reliable methods first.
 
     Search order:
@@ -161,39 +244,55 @@ def find_mimics_exe():
       5. Program Files sub-directories (any Mimics version)
       6. Drive-root scan on C/D/E/F for common folder names
     """
+    now = time.time()
+    cached = _MIMICS_EXE_CACHE.get("value")
+    if not force_refresh and cached and os.path.isfile(cached):
+        return cached
+
     # 1. Explicit override
     env_exe = os.environ.get("MIMICS_EXE", "").strip()
     if env_exe and os.path.isfile(env_exe):
-        return os.path.abspath(env_exe)
+        value = os.path.abspath(env_exe)
+        _MIMICS_EXE_CACHE.update({"value": value, "checked_at": now})
+        return value
 
     # 2. Hardcoded fallback for machines where auto-detection fails.
     if HARDCODED_MIMICS_EXE and os.path.isfile(HARDCODED_MIMICS_EXE):
-        return os.path.abspath(HARDCODED_MIMICS_EXE)
+        value = os.path.abspath(HARDCODED_MIMICS_EXE)
+        _MIMICS_EXE_CACHE.update({"value": value, "checked_at": now})
+        return value
 
     # 2. sys.executable — inside Mimics this is the Mimics process itself
     #    or a Python DLL host beside MimicsResearch.exe.
-    try:
-        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
-    except Exception:
-        exe_dir = ""
+    current_exe = _current_process_executable()
+    exe_dir = os.path.dirname(current_exe) if current_exe else ""
     if exe_dir:
         # The executable itself might be MimicsResearch.exe
         try:
-            exe_name = os.path.basename(os.path.abspath(sys.executable)).lower()
+            exe_name = os.path.basename(current_exe).lower()
         except Exception:
             exe_name = ""
         if exe_name == "mimicsresearch.exe":
-            return os.path.abspath(sys.executable)
+            _MIMICS_EXE_CACHE.update({"value": current_exe, "checked_at": now})
+            return current_exe
         # Walk up from exe_dir looking for MimicsResearch.exe
         walk = exe_dir
         for _ in range(5):
             candidate = os.path.join(walk, "MimicsResearch.exe")
             if os.path.isfile(candidate):
-                return os.path.abspath(candidate)
+                value = os.path.abspath(candidate)
+                _MIMICS_EXE_CACHE.update({"value": value, "checked_at": now})
+                return value
             parent = os.path.dirname(walk)
             if parent == walk:
                 break
             walk = parent
+
+    # Cache only the expensive registry/Program Files/drive scan. Explicit
+    # overrides and the current Mimics executable above must take effect
+    # immediately even after an earlier failed lookup.
+    if not force_refresh and not cached and now - float(_MIMICS_EXE_CACHE.get("checked_at") or 0.0) < 30.0:
+        return None
 
     # 3. Windows registry — check Uninstall keys for any Mimics version
     if os.name == "nt":
@@ -230,8 +329,9 @@ def find_mimics_exe():
                             if loc and os.path.isdir(loc):
                                 candidate = os.path.join(loc, "MimicsResearch.exe")
                                 if os.path.isfile(candidate):
-                                    winreg.CloseKey(base)
-                                    return os.path.abspath(candidate)
+                                    value = os.path.abspath(candidate)
+                                    _MIMICS_EXE_CACHE.update({"value": value, "checked_at": now})
+                                    return value
                     finally:
                         winreg.CloseKey(base)
 
@@ -249,7 +349,24 @@ def find_mimics_exe():
                 continue
             candidate = os.path.join(pf, name, "MimicsResearch.exe")
             if os.path.isfile(candidate):
-                return os.path.abspath(candidate)
+                value = os.path.abspath(candidate)
+                _MIMICS_EXE_CACHE.update({"value": value, "checked_at": now})
+                return value
+
+        materialise = os.path.join(pf, "Materialise")
+        if os.path.isdir(materialise):
+            try:
+                materialise_entries = os.listdir(materialise)
+            except Exception:
+                materialise_entries = []
+            for name in sorted(materialise_entries, reverse=True):
+                if "mimics" not in name.lower():
+                    continue
+                candidate = os.path.join(materialise, name, "MimicsResearch.exe")
+                if os.path.isfile(candidate):
+                    value = os.path.abspath(candidate)
+                    _MIMICS_EXE_CACHE.update({"value": value, "checked_at": now})
+                    return value
 
     # 5. Drive-root scan for common folder patterns
     for drive in ("C:", "D:", "E:", "F:"):
@@ -263,8 +380,11 @@ def find_mimics_exe():
                 continue
             candidate = os.path.join(drive + "\\", name, "MimicsResearch.exe")
             if os.path.isfile(candidate):
-                return os.path.abspath(candidate)
+                value = os.path.abspath(candidate)
+                _MIMICS_EXE_CACHE.update({"value": value, "checked_at": now})
+                return value
 
+    _MIMICS_EXE_CACHE.update({"value": None, "checked_at": now})
     return None
 
 

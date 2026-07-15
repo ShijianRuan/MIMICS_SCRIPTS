@@ -34,6 +34,8 @@ LOCK_FILE = "_mcs_batch.lock"
 LOG_FILE = os.path.join("logs", "_create_mcs_batch.log")
 LOG_ROTATE_BYTES = 5 * 1024 * 1024
 LOG_BACKUPS = 3
+RUNTIME_SUBDIR = ".mimics_runtime"
+_ACTIVE_RUNTIME_DIR = None
 SOURCE_IMAGE_PATH_METADATA = "mimics_script.source_image_path"
 SOURCE_IMAGE_KIND_METADATA = "mimics_script.source_image_kind"
 SOURCE_IMAGE_SHAPE_METADATA = "mimics_script.source_image_shape"
@@ -48,6 +50,23 @@ MIMICS_TO_SOURCE_INDEX_MATRIX_METADATA = "mimics_script.mimics_to_source_index_m
 SOURCE_CASE_DIR_METADATA = "mimics_script.source_case_dir"
 write_json_atomic = runtime_common.write_json_atomic
 safe_case_filename = runtime_common.safe_filename
+
+
+def runtime_path(output_dir, *parts):
+    base = _ACTIVE_RUNTIME_DIR or os.path.join(output_dir, RUNTIME_SUBDIR)
+    return os.path.join(base, *parts)
+
+
+def prune_empty_work_parents(work_dir):
+    current = os.path.dirname(work_dir or "")
+    for _ in range(2):
+        if not current or not os.path.isdir(current):
+            return
+        try:
+            os.rmdir(current)
+        except OSError:
+            return
+        current = os.path.dirname(current)
 
 
 def rotate_log(path, max_bytes=LOG_ROTATE_BYTES, backups=LOG_BACKUPS):
@@ -75,7 +94,7 @@ def log_message(output_dir, message):
     text = "[{0}] {1}".format(time.strftime("%Y-%m-%d %H:%M:%S"), message)
     print(text)
     try:
-        log_path = os.path.join(output_dir, LOG_FILE)
+        log_path = runtime_path(output_dir, LOG_FILE)
         log_dir = os.path.dirname(log_path)
         if not os.path.isdir(log_dir):
             os.makedirs(log_dir)
@@ -88,7 +107,7 @@ def log_message(output_dir, message):
 
 def record_failed_case(output_dir, case_id, phase, error, traceback_text=None):
     try:
-        failed_dir = os.path.join(output_dir or os.getcwd(), "_failed_cases")
+        failed_dir = runtime_path(output_dir or os.getcwd(), "_failed_cases")
         if not os.path.isdir(failed_dir):
             os.makedirs(failed_dir)
         payload = {
@@ -116,13 +135,16 @@ def update_status(output_dir, status, **details):
     }
     payload.update(details)
     try:
-        write_json_atomic(os.path.join(output_dir, STATUS_FILE), payload)
+        write_json_atomic(runtime_path(output_dir, STATUS_FILE), payload)
     except Exception:
         pass
 
 
 def acquire_lock(output_dir):
-    lock_path = os.path.join(output_dir, LOCK_FILE)
+    lock_path = runtime_path(output_dir, LOCK_FILE)
+    lock_parent = os.path.dirname(lock_path)
+    if not os.path.isdir(lock_parent):
+        os.makedirs(lock_parent)
     try:
         fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         os.write(fd, str(os.getpid()).encode("ascii"))
@@ -144,25 +166,7 @@ def acquire_lock(output_dir):
 
 
 def process_exists(pid):
-    if not pid:
-        return False
-    try:
-        if os.name == "nt":
-            import ctypes
-            kernel32 = ctypes.windll.kernel32
-            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-            STILL_ACTIVE = 259
-            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
-            if not handle:
-                return False
-            exit_code = ctypes.c_ulong(0)
-            kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
-            kernel32.CloseHandle(handle)
-            return int(exit_code.value) == STILL_ACTIVE
-        os.kill(int(pid), 0)
-        return True
-    except Exception:
-        return False
+    return runtime_common.process_exists(pid)
 
 
 def metadata_set(obj, name, value):
@@ -517,7 +521,7 @@ def create_mcs_from_manifest(work_dir, output_mcs):
     return mcs_path
 
 
-def main(output_dir=None):
+def main(output_dir=None, runtime_dir=None):
     """Entry point. Find all prepare manifests and create .mcs files.
 
     Stays alive in a loop, periodically scanning for new manifests.
@@ -525,6 +529,7 @@ def main(output_dir=None):
     one-by-one by the conversion process.  Exits after two consecutive
     scans find no new work (meaning conversion is likely done).
     """
+    global _ACTIVE_RUNTIME_DIR
     if output_dir is None:
         # Read from sys.argv
         if len(sys.argv) > 1:
@@ -537,13 +542,18 @@ def main(output_dir=None):
         print("Output dir not found: {}".format(output_dir))
         return 1
 
+    _ACTIVE_RUNTIME_DIR = os.path.abspath(runtime_dir) if runtime_dir else os.path.join(output_dir, RUNTIME_SUBDIR)
+    if not os.path.isdir(_ACTIVE_RUNTIME_DIR):
+        os.makedirs(_ACTIVE_RUNTIME_DIR)
+
     lock_path = acquire_lock(output_dir)
     if not lock_path:
         log_message(output_dir, "Another background Mimics batch process is already running; exiting.")
         return 0
 
-    active_path = os.path.join(output_dir, QUEUE_ACTIVE_FILE)
-    done_path = os.path.join(output_dir, QUEUE_DONE_FILE)
+    active_path = runtime_path(output_dir, QUEUE_ACTIVE_FILE)
+    done_path = runtime_path(output_dir, QUEUE_DONE_FILE)
+    stop_path = runtime_path(output_dir, QUEUE_STOP_FILE)
     # A stale producer marker must not hold a Mimics license forever after the
     # foreground process crashes. If preparation is merely slow, it will
     # relaunch this worker when the next manifest is committed.
@@ -560,23 +570,62 @@ def main(output_dir=None):
         update_status(output_dir, "running", completed=0, failed=0)
 
         while True:
-            # Find all work directories with prepare manifests.
+            # Find local work referenced by lightweight queue descriptors.
+            # The large derived DICOM/buffer data intentionally stays on the
+            # workstation, not on a potentially unreliable SMB output share.
             work_dirs = []
-            for item in sorted(os.listdir(output_dir)):
-                if not item.endswith("_work"):
+            queue_dir = runtime_path(output_dir, "prepared_queue")
+            if os.path.isdir(queue_dir):
+                for descriptor_path in sorted(
+                    os.path.join(queue_dir, name) for name in os.listdir(queue_dir) if name.lower().endswith(".json")
+                ):
+                    descriptor = runtime_common.read_json(descriptor_path, {}) or {}
+                    work_dir = descriptor.get("work_dir", "")
+                    manifest = os.path.join(work_dir, "prepare_manifest.json")
+                    if not work_dir or not os.path.isfile(manifest):
+                        try:
+                            if time.time() - os.path.getmtime(descriptor_path) > 5.0:
+                                log_message(output_dir, "Discarding stale prepared-work descriptor: {0}".format(descriptor_path))
+                                os.remove(descriptor_path)
+                        except OSError:
+                            pass
+                        continue
+                    case_id = str(descriptor.get("case_id") or os.path.basename(work_dir).replace("_work", ""))
+                    mcs_path = descriptor.get("output_mcs") or os.path.join(output_dir, case_id + ".mcs")
+                    work_dirs.append((case_id, work_dir, mcs_path, descriptor_path))
+
+            # Backward compatibility for manifests prepared by older tools.
+            legacy_roots = [output_dir, runtime_path(output_dir)]
+            queued_work = set(item[1] for item in work_dirs)
+            for scan_root in legacy_roots:
+                if not os.path.isdir(scan_root):
                     continue
-                work_dir = os.path.join(output_dir, item)
+                for item in sorted(os.listdir(scan_root)):
+                    if not item.endswith("_work"):
+                        continue
+                    work_dir = os.path.join(scan_root, item)
+                    if work_dir in queued_work:
+                        continue
+                    manifest = os.path.join(work_dir, "prepare_manifest.json")
+                    if not os.path.isfile(manifest):
+                        continue
+                    case_id = item.replace("_work", "")
+                    manifest_data = runtime_common.read_json(manifest, {}) or {}
+                    mcs_path = manifest_data.get("output_mcs") or os.path.join(output_dir, case_id + ".mcs")
+                    work_dirs.append((case_id, work_dir, mcs_path, ""))
+
+            filtered_work_dirs = []
+            for case_id, work_dir, mcs_path, descriptor_path in work_dirs:
                 manifest = os.path.join(work_dir, "prepare_manifest.json")
                 failed_marker = os.path.join(work_dir, "create_failed.json")
                 if os.path.isfile(manifest):
-                    case_id = item.replace("_work", "")
                     try:
                         with open(manifest, "r") as handle:
                             manifest_data = json.load(handle)
                     except Exception:
                         manifest_data = {}
                     mcs_path = manifest_data.get("output_mcs") or os.path.join(output_dir, case_id + ".mcs")
-                    fingerprint_path = os.path.join(output_dir, case_id + ".fingerprint")
+                    fingerprint_path = runtime_path(output_dir, "fingerprints", safe_case_filename(case_id) + ".fingerprint")
                     current_fp = manifest_data.get("source_fingerprint", "")
                     if os.path.isfile(mcs_path):
                         stored_fp = ""
@@ -588,13 +637,30 @@ def main(output_dir=None):
                                 pass
                         if current_fp and stored_fp == current_fp:
                             # Source unchanged — skip
+                            try:
+                                shutil.rmtree(work_dir, ignore_errors=True)
+                            except Exception:
+                                pass
+                            prune_empty_work_parents(work_dir)
+                            if descriptor_path:
+                                try:
+                                    os.remove(descriptor_path)
+                                except OSError:
+                                    pass
                             continue
                         # Fingerprint changed or missing — reprocess
                         if current_fp:
                             log_message(output_dir, "Source fingerprint changed for {0}; reprocessing.".format(case_id))
                     if os.path.isfile(failed_marker) and not current_fp:
+                        if descriptor_path:
+                            try:
+                                os.remove(descriptor_path)
+                            except OSError:
+                                pass
                         continue
-                    work_dirs.append((case_id, work_dir, mcs_path))
+                    filtered_work_dirs.append((case_id, work_dir, mcs_path, descriptor_path))
+
+            work_dirs = filtered_work_dirs
 
             total = len(work_dirs)
             if total == 0:
@@ -614,7 +680,7 @@ def main(output_dir=None):
                         except OSError:
                             pass
                 done = os.path.isfile(done_path)
-                stop = os.path.isfile(os.path.join(output_dir, QUEUE_STOP_FILE))
+                stop = os.path.isfile(stop_path)
                 if stop:
                     log_message(output_dir, "Stop marker found; exiting.")
                     break
@@ -639,11 +705,11 @@ def main(output_dir=None):
             log_message(output_dir, "Creating {} .mcs file(s).".format(total))
 
             # Re-check stop marker before starting work
-            if os.path.isfile(os.path.join(output_dir, QUEUE_STOP_FILE)):
+            if os.path.isfile(stop_path):
                 log_message(output_dir, "Stop marker found; exiting.")
                 break
 
-            for i, (case_id, work_dir, mcs_path) in enumerate(work_dirs):
+            for i, (case_id, work_dir, mcs_path, descriptor_path) in enumerate(work_dirs):
                 log_message(output_dir, "[{}/{}] Creating: {}".format(i + 1, total, case_id))
                 update_status(
                     output_dir,
@@ -666,8 +732,11 @@ def main(output_dir=None):
                         pass
                     fingerprint = manifest_data.get("source_fingerprint", "")
                     if fingerprint:
-                        fingerprint_path = os.path.join(output_dir, case_id + ".fingerprint")
+                        fingerprint_path = runtime_path(output_dir, "fingerprints", safe_case_filename(case_id) + ".fingerprint")
                         try:
+                            fingerprint_dir = os.path.dirname(fingerprint_path)
+                            if not os.path.isdir(fingerprint_dir):
+                                os.makedirs(fingerprint_dir)
                             with open(fingerprint_path, "w") as fp:
                                 fp.write(fingerprint)
                         except Exception:
@@ -679,6 +748,12 @@ def main(output_dir=None):
                         shutil.rmtree(work_dir, ignore_errors=True)
                     except Exception:
                         pass
+                    prune_empty_work_parents(work_dir)
+                    if descriptor_path:
+                        try:
+                            os.remove(descriptor_path)
+                        except OSError:
+                            pass
                 except Exception as e:
                     total_failed += 1
                     last_activity = time.time()
@@ -706,6 +781,12 @@ def main(output_dir=None):
                         shutil.rmtree(work_dir, ignore_errors=True)
                     except Exception:
                         pass
+                    prune_empty_work_parents(work_dir)
+                    if descriptor_path:
+                        try:
+                            os.remove(descriptor_path)
+                        except OSError:
+                            pass
 
         log_message(
             output_dir,

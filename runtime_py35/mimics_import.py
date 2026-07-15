@@ -37,11 +37,14 @@ import runtime_common
 # -- Global async monitor state ----------------------------------------
 _IMPORT_MONITORS = {}
 _BRIDGE_LAUNCH_ERRORS = {}
+_BRIDGE_PROCESSES = {}
 
 # Track background Mimics process for .mcs creation
 _BG_MIMICS_PID = None
+_BG_MIMICS_OUTPUT_DIR = None
 _BG_MIMICS_BUSY_NOTICE_AT = 0.0
-_BG_MIMICS_RETRY_ACTIVE = False
+_BG_MIMICS_RETRY_OUTPUTS = set()
+_BG_MIMICS_LAUNCH_ACTIVE = False
 _MCS_QUEUE_ACTIVE = "_mcs_queue_active.json"
 _MCS_QUEUE_DONE = "_mcs_queue_done.json"
 _MCS_QUEUE_STOP = "_mcs_queue_stop.json"
@@ -49,18 +52,58 @@ _LOG_ROTATE_BYTES = 5 * 1024 * 1024
 _LOG_ROTATE_BACKUPS = 3
 _CONFIG_CACHE = None
 
-# All intermediate / scratch files are placed under this subdirectory inside
-# the user-visible output folder so they do not clutter the .mcs results.
-_RUNTIME_SUBDIR = ".mimics_runtime"
-
-
 def _rt(output_dir, *parts):
-    """Return output_dir/.mimics_runtime/<joined parts>.
+    """Return the local control directory for an output queue.
 
-    Keeps work dirs, job state, logs, and failure records out of the
-    user-visible output folder that only contains .mcs files.
+    No queue/status JSON is written to the selected output share. This avoids
+    SMB rename failures and prevents network latency from stalling Mimics timer
+    callbacks. The output folder contains only final .mcs files.
     """
-    return os.path.join(output_dir, _RUNTIME_SUBDIR, *parts)
+    return os.path.join(
+        runtime_common.import_queue_runtime_dir(_project_root(), output_dir),
+        *parts
+    )
+
+
+def _new_import_run_root():
+    """Create an isolated local directory for one import invocation.
+
+    Bridge control JSON and large derived DICOM/buffer files must not live on
+    the selected output share. SMB rename semantics and reused case names made
+    separate imports interfere with each other there.
+    """
+    root = os.path.join(
+        runtime_common.import_runtime_base(_project_root()),
+        "import_runs",
+        "{0}_{1}_{2}".format(time.strftime("%Y%m%dT%H%M%S"), os.getpid(), uuid.uuid4().hex[:10]),
+    )
+    os.makedirs(root)
+    return root
+
+
+def _prepared_queue_dir(output_dir):
+    return _rt(output_dir, "prepared_queue")
+
+
+def _publish_prepared_work(output_dir, case_id, work_dir, output_mcs):
+    """Publish a small queue descriptor after the local manifest is durable."""
+    queue_dir = _prepared_queue_dir(output_dir)
+    if not os.path.isdir(queue_dir):
+        os.makedirs(queue_dir)
+    descriptor = os.path.join(
+        queue_dir,
+        "{0}_{1}.json".format(_safe_case_filename(case_id), uuid.uuid4().hex),
+    )
+    _write_json_atomic(
+        descriptor,
+        {
+            "case_id": str(case_id or "case"),
+            "work_dir": os.path.abspath(work_dir),
+            "output_mcs": os.path.abspath(output_mcs),
+            "created_at_epoch": time.time(),
+        },
+    )
+    return descriptor
 
 
 def _auto_open_mcs_enabled():
@@ -176,7 +219,7 @@ def _append_import_log(root_dir, message):
     try:
         if root_dir and not os.path.isdir(root_dir):
             os.makedirs(root_dir)
-        path = os.path.join(root_dir or os.getcwd(), _RUNTIME_SUBDIR, "logs", "mimics_import.log")
+        path = _rt(root_dir or os.getcwd(), "logs", "mimics_import.log")
         _rotate_log_file(path)
         with open(path, "a") as f:
             f.write(text + "\n")
@@ -238,17 +281,12 @@ def _queue_stop_path(output_dir):
 
 
 def _mcs_queue_registry_dir():
-    return os.path.join(_project_root(), ".mimics_runtime", "mcs_queues")
+    return os.path.join(runtime_common.import_runtime_base(_project_root()), "mcs_queues")
 
 
 def _register_mcs_queue(output_dir, total_count=0):
-    # Queue registry is optional metadata only. It is not required for import.
-    # Keep it disabled by default because some environments crash in this path.
-    enabled = os.environ.get("MIMICS_IMPORT_ENABLE_QUEUE_REGISTRY", "").strip().lower() in (
-        "1", "true", "yes", "on"
-    )
-    if not enabled:
-        return
+    # This small local registry makes Stop Import Queue work even while a
+    # prepared queue is waiting for the background Mimics license.
     try:
         registry_dir = _mcs_queue_registry_dir()
         if not os.path.isdir(registry_dir):
@@ -261,6 +299,7 @@ def _register_mcs_queue(output_dir, total_count=0):
             path,
             {
                 "output_dir": os.path.abspath(output_dir),
+                "runtime_dir": _rt(output_dir),
                 "total_count": int(total_count or 0),
                 "updated_at_epoch": time.time(),
             },
@@ -291,6 +330,7 @@ def _mark_mcs_queue_active(output_dir, total_count=0):
         _queue_active_path(output_dir),
         {
             "status": "active",
+            "output_dir": os.path.abspath(output_dir),
             "total_count": int(total_count or 0),
             "updated_at_epoch": time.time(),
         },
@@ -309,6 +349,7 @@ def _mark_mcs_queue_done(output_dir, completed=0, failed=0):
         _queue_done_path(output_dir),
         {
             "status": "done",
+            "output_dir": os.path.abspath(output_dir),
             "completed": int(completed or 0),
             "failed": int(failed or 0),
             "updated_at_epoch": time.time(),
@@ -596,8 +637,8 @@ def _cleanup_stale_processes():
 
 # -- TS case discovery (runs in Mimics Python 3.5, stdlib only) ---------
 
-_MEDICAL_IMAGE_SUFFIXES = (".nii", ".nii.gz", ".mha", ".mhd", ".nrrd")
-_MASK_SUFFIXES = (".nii", ".nii.gz", ".mha", ".mhd", ".nrrd", ".nrrd.gz", ".seg.nii", ".seg.nii.gz")
+_MEDICAL_IMAGE_SUFFIXES = (".nii.gz", ".nrrd.gz", ".nii", ".mha", ".mhd", ".nrrd")
+_MASK_SUFFIXES = (".seg.nii.gz", ".seg.nii", ".nii.gz", ".nrrd.gz", ".nii", ".mha", ".mhd", ".nrrd")
 
 
 def _is_medical_image_file(path):
@@ -717,8 +758,8 @@ def _discover_single_case(case_dir):
             entries = os.listdir(case_dir)
         except OSError:
             entries = []
-        for name in entries:
-            lower = name.lower()
+        for entry_name in entries:
+            lower = entry_name.lower()
             if any(lower.endswith(suffix) for suffix in _MEDICAL_IMAGE_SUFFIXES):
                 sibling_images += 1
                 if sibling_images > 1:
@@ -870,6 +911,7 @@ def _launch_bridge_job_thread(bridge_params, job_dir, output_dir, phase, case_id
         for _attempt in range(3):
             try:
                 process = _launch_bridge_background(bridge_params, job_dir)
+                _BRIDGE_PROCESSES[job_dir] = process
                 state = {
                     "phase": phase,
                     "pid": process.pid,
@@ -923,6 +965,7 @@ def _check_job_status(job_dir):
     """
     launch_error = _BRIDGE_LAUNCH_ERRORS.pop(job_dir, None)
     if launch_error:
+        _BRIDGE_PROCESSES.pop(job_dir, None)
         return ("error", launch_error)
     result_file = os.path.join(job_dir, "bridge_result.json")
     state_file = os.path.join(job_dir, "job_state.json")
@@ -938,15 +981,27 @@ def _check_job_status(job_dir):
                     os.path.dirname(job_dir),
                     "Job done | keys={0}".format(sorted(result.keys())),
                 )
+                _BRIDGE_PROCESSES.pop(job_dir, None)
                 return ("done", result)
             else:
                 _verbose_log(
                     os.path.dirname(job_dir),
                     "Job error | {0}".format(result.get("error", "non-ok status")),
                 )
+                _BRIDGE_PROCESSES.pop(job_dir, None)
                 return ("error", result.get("error", "bridge returned non-ok status"))
         except (ValueError, IOError):
             pass  # File incomplete - process may still be writing
+
+    # Prefer the Popen object retained by this Mimics session. This avoids a
+    # cross-integrity OpenProcess denial being mistaken for process exit.
+    process = _BRIDGE_PROCESSES.get(job_dir)
+    if process is not None:
+        try:
+            if process.poll() is None:
+                return ("running", None)
+        except Exception:
+            pass
 
     # No valid result - check if process is alive
     pid = None
@@ -981,8 +1036,10 @@ def _check_job_status(job_dir):
                     os.path.dirname(job_dir),
                     "Job done (delayed read) | keys={0}".format(sorted(result.keys())),
                 )
+                _BRIDGE_PROCESSES.pop(job_dir, None)
                 return ("done", result)
             else:
+                _BRIDGE_PROCESSES.pop(job_dir, None)
                 return ("error", result.get("error", "bridge returned non-ok status"))
         except (ValueError, IOError):
             pass
@@ -1020,17 +1077,20 @@ def _check_job_status(job_dir):
         _diag_parts.append("no_error_file")
     if _diag_parts:
         err_msg = "{0} [{1}]".format(err_msg, ", ".join(_diag_parts))
+    _BRIDGE_PROCESSES.pop(job_dir, None)
     return ("error", err_msg)
 
 
 def _cleanup_job_dir(job_dir):
     """Remove a job directory after processing."""
+    _BRIDGE_PROCESSES.pop(job_dir, None)
     if not job_dir or not os.path.isdir(job_dir):
         return
     try:
         shutil.rmtree(job_dir, ignore_errors=True)
     except Exception:
         pass
+    _prune_empty_parents(job_dir, 2)
 
 
 def _cleanup_work_dir(work_dir):
@@ -1041,10 +1101,49 @@ def _cleanup_work_dir(work_dir):
         shutil.rmtree(work_dir, ignore_errors=True)
     except Exception:
         pass
+    _prune_empty_parents(work_dir, 2)
 
 
-def _terminate_job_process(job_dir):
+def _prune_empty_parents(path, levels):
+    current = os.path.dirname(path or "")
+    for _ in range(max(0, int(levels))):
+        if not current or not os.path.isdir(current):
+            return
+        try:
+            os.rmdir(current)
+        except OSError:
+            return
+        current = os.path.dirname(current)
+
+
+def _terminate_job_process(job_dir, on_complete=None):
     """Best-effort termination for a timed-out bridge process."""
+    def _complete_later(delay=0.0):
+        if on_complete is None:
+            return
+        def _run_complete():
+            if delay:
+                time.sleep(delay)
+            try:
+                on_complete()
+            except Exception:
+                pass
+        thread = threading.Thread(target=_run_complete)
+        thread.daemon = True
+        thread.start()
+
+    process = _BRIDGE_PROCESSES.pop(job_dir, None)
+    if process is not None:
+        try:
+            if process.poll() is None:
+                runtime_common.terminate_process_async(
+                    process=process,
+                    graceful_seconds=2.0,
+                    on_complete=on_complete,
+                )
+                return
+        except Exception:
+            pass
     state_file = os.path.join(job_dir or "", "job_state.json")
     pid = None
     try:
@@ -1054,6 +1153,7 @@ def _terminate_job_process(job_dir):
     except Exception:
         pid = None
     if not pid or not _is_pid_alive(pid):
+        _complete_later()
         return
     try:
         if os.name == "nt":
@@ -1068,6 +1168,7 @@ def _terminate_job_process(job_dir):
             os.kill(pid, signal.SIGTERM)
     except Exception:
         pass
+    _complete_later(3.0)
 
 
 # -- Timer-based async monitor (same pattern as nnInteractive) ----------
@@ -1106,10 +1207,13 @@ def _import_monitor_tick(monitor):
         _stop_import_monitor(monitor_key)
         output_mcs = monitor.get("output_mcs")
         output_dir = os.path.dirname(os.path.abspath(output_mcs)) if output_mcs else ""
-        _terminate_job_process(job_dir)
+        _terminate_job_process(
+            job_dir,
+            on_complete=lambda job=job_dir, work=monitor.get("work_dir"): (
+                _cleanup_job_dir(job), _cleanup_work_dir(work)
+            ),
+        )
         _record_failed_case(output_dir, monitor.get("case_id"), "prepare_timeout", "Dataset preparation timed out.")
-        _cleanup_job_dir(job_dir)
-        _cleanup_work_dir(monitor.get("work_dir"))
         if not monitor.get("batch_queue") and output_dir:
             _mark_mcs_queue_done(output_dir, completed=0, failed=1)
         mimics.dialogs.message_box(
@@ -1155,9 +1259,10 @@ def _import_monitor_tick(monitor):
     try:
         output_mcs = monitor.get("output_mcs")
         work_dir = monitor.get("work_dir")
-        _save_prepare_manifest(work_dir, result, output_mcs=output_mcs)
-        _cleanup_job_dir(job_dir)
         output_dir = os.path.dirname(os.path.abspath(output_mcs))
+        _save_prepare_manifest(work_dir, result, output_mcs=output_mcs)
+        _publish_prepared_work(output_dir, monitor.get("case_id"), work_dir, output_mcs)
+        _cleanup_job_dir(job_dir)
         _mark_mcs_queue_active(output_dir, monitor.get("total", 1))
         _ensure_bg_mimics_running(output_dir, monitor.get("total", 1), mark_active=False)
         _start_first_mcs_monitor(
@@ -1222,7 +1327,7 @@ def _start_next_batch_case(monitor):
     jobs_dir = monitor.get("jobs_dir")
 
     output_mcs = os.path.join(output_dir, case_id + ".mcs")
-    work_dir = _rt(output_dir, case_id + "_work")
+    work_dir = os.path.join(monitor.get("work_root"), case_id)
     job_dir = os.path.join(jobs_dir, case_id)
 
     _append_import_log(monitor.get("output_dir", ""), "\n[{0}/{1}] Preparing: {2}".format(
@@ -1267,11 +1372,14 @@ def _batch_prepare_tick(monitor):
         output_dir = monitor.get("output_dir")
         case_id = monitor.get("case_id", "")
         _append_import_log(output_dir, "Conversion timed out: {0}".format(case_id))
-        _terminate_job_process(job_dir)
+        _terminate_job_process(
+            job_dir,
+            on_complete=lambda job=job_dir, work=monitor.get("work_dir"): (
+                _cleanup_job_dir(job), _cleanup_work_dir(work)
+            ),
+        )
         _record_failed_case(output_dir, case_id, "prepare_timeout", "Dataset conversion timed out.")
         monitor["failed"] = monitor.get("failed", 0) + 1
-        _cleanup_job_dir(job_dir)
-        _cleanup_work_dir(monitor.get("work_dir"))
         monitor["busy"] = False
         _start_next_batch_prepare(monitor)
         return
@@ -1308,6 +1416,7 @@ def _batch_prepare_tick(monitor):
     queued = False
     try:
         _save_prepare_manifest(work_dir, result, output_mcs=output_mcs)
+        _publish_prepared_work(output_dir, case_id, work_dir, output_mcs)
         monitor["completed"] = completed_count
         queued = True
         _append_import_log(
@@ -1402,7 +1511,7 @@ def _start_next_batch_prepare(monitor):
     flips = monitor.get("flips")
     jobs_dir = monitor.get("jobs_dir")
 
-    work_dir = _rt(output_dir, case_id + "_work")
+    work_dir = os.path.join(monitor.get("work_root"), case_id)
     job_dir = os.path.join(jobs_dir, case_id)
 
     completed = monitor.get("completed", 0)
@@ -1548,20 +1657,38 @@ def _ensure_bg_mimics_running(output_dir, total_count=0, mark_active=True):
         return
     # Check if existing background Mimics is still alive
     if _BG_MIMICS_PID and _is_pid_alive(_BG_MIMICS_PID):
-        return  # still running, it will pick up new manifests
+        if os.path.abspath(_BG_MIMICS_OUTPUT_DIR or "") == os.path.abspath(output_dir):
+            return  # same queue; the worker will pick up the new descriptor
+        _schedule_bg_mimics_retry(output_dir, total_count=total_count)
+        return
 
-    # Launch a new one
-    _launch_background_mimics(output_dir, total_count=total_count)
+    # Executable discovery, lock acquisition, and Popen can touch slow disks.
+    # Keep all of it off the Mimics GUI timer callback.
+    global _BG_MIMICS_LAUNCH_ACTIVE
+    if _BG_MIMICS_LAUNCH_ACTIVE:
+        _schedule_bg_mimics_retry(output_dir, total_count=total_count)
+        return
+    _BG_MIMICS_LAUNCH_ACTIVE = True
+
+    def _launch():
+        global _BG_MIMICS_LAUNCH_ACTIVE
+        try:
+            _launch_background_mimics(output_dir, total_count=total_count)
+        finally:
+            _BG_MIMICS_LAUNCH_ACTIVE = False
+
+    thread = threading.Thread(target=_launch, name="MimicsBackgroundLauncher")
+    thread.daemon = True
+    thread.start()
 
 
 def _schedule_bg_mimics_retry(output_dir, total_count=0):
-    global _BG_MIMICS_RETRY_ACTIVE
-    if _BG_MIMICS_RETRY_ACTIVE:
+    key = os.path.normcase(os.path.abspath(output_dir))
+    if key in _BG_MIMICS_RETRY_OUTPUTS:
         return
-    _BG_MIMICS_RETRY_ACTIVE = True
+    _BG_MIMICS_RETRY_OUTPUTS.add(key)
 
     def _retry():
-        global _BG_MIMICS_RETRY_ACTIVE
         retry_started = time.time()
         deadline = time.time() + 21600.0
         try:
@@ -1571,7 +1698,9 @@ def _schedule_bg_mimics_retry(output_dir, total_count=0):
                     _append_import_log(output_dir, "Background Mimics retry stopped by user request.")
                     return
                 if _BG_MIMICS_PID and _is_pid_alive(_BG_MIMICS_PID):
-                    return
+                    if os.path.abspath(_BG_MIMICS_OUTPUT_DIR or "") == os.path.abspath(output_dir):
+                        return
+                    continue
                 process = _launch_background_mimics(
                     output_dir,
                     total_count=total_count,
@@ -1580,7 +1709,7 @@ def _schedule_bg_mimics_retry(output_dir, total_count=0):
                 if process is not None:
                     return
         finally:
-            _BG_MIMICS_RETRY_ACTIVE = False
+            _BG_MIMICS_RETRY_OUTPUTS.discard(key)
 
     thread = threading.Thread(target=_retry)
     thread.daemon = True
@@ -1595,6 +1724,7 @@ def _launch_background_mimics(output_dir, total_count=0, schedule_retry=True):
     Returns the Popen object, or None on failure.
     """
     global _BG_MIMICS_PID
+    global _BG_MIMICS_OUTPUT_DIR
     global _BG_MIMICS_BUSY_NOTICE_AT
     if _background_stop_requested(output_dir):
         _append_import_log(output_dir, "Background .mcs creation was not started because stop was requested.")
@@ -1602,6 +1732,8 @@ def _launch_background_mimics(output_dir, total_count=0, schedule_retry=True):
     mimics_exe = _find_mimics_exe()
     if not mimics_exe:
         _append_import_log(output_dir, "MimicsResearch.exe was not found; background .mcs creation cannot start.")
+        if schedule_retry:
+            _schedule_bg_mimics_retry(output_dir, total_count=total_count)
         return None
 
     # Find the create_mcs_batch.py script
@@ -1621,7 +1753,10 @@ def _launch_background_mimics(output_dir, total_count=0, schedule_retry=True):
         script_path = os.path.abspath(script_candidates[0])
 
     # Write a runner script that Mimics can execute
-    runner_path = os.path.join(output_dir, "_run_create_mcs.py")
+    runner_path = _rt(output_dir, "_run_create_mcs.py")
+    runner_parent = os.path.dirname(runner_path)
+    if not os.path.isdir(runner_parent):
+        os.makedirs(runner_parent)
     script_dir = os.path.dirname(script_path)
     with open(runner_path, "w") as f:
         f.write("# Auto-generated runner for background Mimics .mcs creation\n")
@@ -1630,11 +1765,15 @@ def _launch_background_mimics(output_dir, total_count=0, schedule_retry=True):
         f.write("os.environ['MIMICS_BRIDGE_PYTHON'] = {0}\n".format(json.dumps(_python_exe())))
         f.write("os.environ['MIMICS_BRIDGE_SCRIPT'] = {0}\n".format(json.dumps(_bridge_script())))
         f.write("import create_mcs_batch\n")
-        f.write("create_mcs_batch.main({0})\n".format(json.dumps(output_dir)))
+        f.write(
+            "create_mcs_batch.main({0}, runtime_dir={1})\n".format(
+                json.dumps(output_dir), json.dumps(_rt(output_dir))
+            )
+        )
 
     # Launch Mimics in background mode
     cmd = [mimics_exe, "-b", "-run_script", runner_path]
-    log_path = os.path.join(output_dir, "_background_mimics.log")
+    log_path = _rt(output_dir, "_background_mimics.log")
     _rotate_log_file(log_path)
     lock_path = _resource_lock_path("background_mimics.lock")
     lock_token = runtime_common.acquire_resource_lock(
@@ -1652,15 +1791,11 @@ def _launch_background_mimics(output_dir, total_count=0, schedule_retry=True):
                 output_dir,
                 "Background Mimics is already running for another Mimics-Script task; .mcs creation will continue when that process exits.",
             )
-            _safe_message_box(
-                "Import Waiting",
-                (
-                    "Prepared data is waiting for the background Mimics license.\n\n"
-                    "Current task: {0}\n\n"
-                    "This import will continue automatically. Use 04 Stop Import Queue "
-                    "to cancel this import, or wait for the current task to finish."
-                ).format(runtime_common.resource_lock_summary(holder)),
-                ui_blocking=False,
+            _append_import_log(
+                output_dir,
+                "Waiting task: {0}. Use 04 Stop Import Queue to cancel.".format(
+                    runtime_common.resource_lock_summary(holder)
+                ),
             )
         if schedule_retry:
             _schedule_bg_mimics_retry(output_dir, total_count=total_count)
@@ -1677,11 +1812,16 @@ def _launch_background_mimics(output_dir, total_count=0, schedule_retry=True):
             **_background_process_kwargs()
         )
         _BG_MIMICS_PID = process.pid
+        _BG_MIMICS_OUTPUT_DIR = os.path.abspath(output_dir)
         runtime_common.update_resource_lock_pid(
             lock_path,
             lock_token,
             process.pid,
-            {"kind": "create_mcs", "output_dir": os.path.abspath(output_dir)},
+            {
+                "kind": "create_mcs",
+                "output_dir": os.path.abspath(output_dir),
+                "runtime_dir": _rt(output_dir),
+            },
         )
         _append_import_log(
             output_dir,
@@ -1711,7 +1851,7 @@ def _first_mcs_monitor_tick(monitor):
     monitor_key = monitor.get("monitor_key")
 
     if monitor.get("first_notified"):
-        status = runtime_common.read_json(os.path.join(output_dir, "_mcs_batch_status.json"), {}) or {}
+        status = runtime_common.read_json(_rt(output_dir, "_mcs_batch_status.json"), {}) or {}
         signature = (status.get("status"), status.get("case_id"), status.get("completed"), status.get("failed"))
         if signature != monitor.get("last_batch_signature"):
             monitor["last_batch_signature"] = signature
@@ -2051,72 +2191,6 @@ def _check_disk_space(path, required_mb):
         return (True, -1)
 
 
-def _pick_directory(title):
-    """Show a native folder-picker dialog. Returns path or None.
-
-    Uses PyQt5 QFileDialog when available (shares Mimics' Qt event loop,
-    no GUI freeze). Falls back to Tkinter only if PyQt5 is unavailable.
-    """
-    # Try PyQt5 first; Mimics is a Qt app, so QFileDialog integrates
-    # with Mimics' event loop and won't cause GUI freeze.
-    # Note: we don't check QApplication.instance() because Mimics may
-    # not expose it to Python, but QFileDialog can still work if PyQt5
-    # is importable (Mimics' Qt runtime is already running).
-    try:
-        from PyQt5.QtWidgets import QFileDialog
-        path = QFileDialog.getExistingDirectory(None, title, "")
-        return str(path) if path else None
-    except Exception:
-        pass
-
-    # Fallback: Tkinter (may cause GUI freeze in Mimics)
-    try:
-        import Tkinter as tk
-        import tkFileDialog
-    except ImportError:
-        try:
-            import tkinter as tk
-            from tkinter import filedialog as tkFileDialog
-        except ImportError:
-            return None
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    path = tkFileDialog.askdirectory(parent=root, title=title)
-    root.destroy()
-    return path if path else None
-
-
-def _pick_image_file(title):
-    """Pick one supported volume without reading it in the Mimics process."""
-    file_filter = "Medical volumes (*.nii *.nii.gz *.mha *.mhd *.nrrd)"
-    try:
-        from PyQt5.QtWidgets import QFileDialog
-        path, _selected = QFileDialog.getOpenFileName(None, title, "", file_filter)
-        return str(path) if path else None
-    except Exception:
-        pass
-    try:
-        import Tkinter as tk
-        import tkFileDialog
-    except ImportError:
-        try:
-            import tkinter as tk
-            from tkinter import filedialog as tkFileDialog
-        except ImportError:
-            return None
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    path = tkFileDialog.askopenfilename(
-        parent=root,
-        title=title,
-        filetypes=[("Medical volumes", "*.nii *.nii.gz *.mha *.mhd *.nrrd"), ("All files", "*.*")],
-    )
-    root.destroy()
-    return path if path else None
-
-
 def _mask_name_from_path(path):
     """Derive a mask name from a file path, stripping common suffixes."""
     name = os.path.basename(path)
@@ -2131,6 +2205,25 @@ def _mask_name_from_path(path):
             name = name[:-len(suffix)]
             break
     return name or "mask"
+
+
+def _filter_case_masks(case_info, selection):
+    """Apply all/none/comma-separated mask selection to case metadata."""
+    if not case_info:
+        return case_info
+    text = str(selection or "all").strip()
+    if not text or text.lower() == "all":
+        return case_info
+    result = dict(case_info)
+    if text.lower() in ("none", "no", "off"):
+        result["masks"] = []
+        return result
+    wanted = set(item.strip().lower() for item in text.split(",") if item.strip())
+    result["masks"] = [
+        item for item in case_info.get("masks", [])
+        if str(item.get("name", "")).strip().lower() in wanted
+    ]
+    return result
 
 
 # -- Discover monitor (batch mode: discover -> import chain) ------------
@@ -2188,12 +2281,32 @@ def _discover_monitor_tick(monitor):
             _safe_message_box("Import", "No case data was found in the selected folder.")
             return
 
+        if result.get("mask_mode") == "named" and int(result.get("mask_count", 0) or 0) == 0:
+            _safe_message_box(
+                "No Matching Masks",
+                "No segmentation files matched the requested mask names. Check spelling or choose All masks / Images only.",
+                ui_blocking=False,
+            )
+            return
+
         output_dir = monitor.get("output_dir")
         _append_import_log(output_dir, "Discovered {0} case(s); starting preparation.".format(count))
+        if result.get("mask_mode") == "named":
+            _append_import_log(
+                output_dir,
+                "Mask filter matched {0} file(s); {1} case(s) have no matching mask and will be imported as images only.".format(
+                    int(result.get("mask_count", 0) or 0),
+                    int(result.get("cases_without_selected_masks", 0) or 0),
+                ),
+            )
 
-        # Disk space check (quick, non-blocking)
+        # Derived DICOM and buffers now live in the local run directory, so
+        # capacity must be checked there rather than on the .mcs output share.
+        work_root = monitor.get("work_root")
+        if not os.path.isdir(work_root):
+            os.makedirs(work_root)
         estimated_mb = count * 500
-        ok, free_mb = _check_disk_space(output_dir, estimated_mb)
+        ok, free_mb = _check_disk_space(work_root, estimated_mb)
         _verbose_log(
             output_dir,
             "Disk space | mb_est={0} ok={1} free={2}".format(
@@ -2204,7 +2317,7 @@ def _discover_monitor_tick(monitor):
         if not ok:
             _safe_message_box(
                 "Insufficient Disk Space",
-                "Insufficient disk space. Estimated requirement: {0} MB; "
+                "Insufficient local workspace disk space. Estimated requirement: {0} MB; "
                 "available: {1} MB. Please free disk space and retry.".format(
                     estimated_mb, int(free_mb)),
             )
@@ -2219,7 +2332,7 @@ def _discover_monitor_tick(monitor):
 
         first_case = cases[0]
         first_case_id = first_case["case_id"]
-        first_work_dir = _rt(output_dir, first_case_id + "_work")
+        first_work_dir = os.path.join(monitor.get("work_root"), first_case_id)
         first_job_dir = os.path.join(jobs_dir, first_case_id)
 
         _verbose_log(
@@ -2234,6 +2347,7 @@ def _discover_monitor_tick(monitor):
         batch_info = {
             "total": count,
             "output_dir": output_dir,
+            "work_root": monitor.get("work_root"),
             "axes": axes,
             "flips": flips,
             "jobs_dir": jobs_dir,
@@ -2296,7 +2410,7 @@ def _start_win32_discover_monitor(monitor, poll_seconds, timeout_seconds):
     return True
 
 
-def _start_import_discover_monitor(job_dir, ts_root, output_dir, axes, flips, jobs_dir,
+def _start_import_discover_monitor(job_dir, ts_root, output_dir, axes, flips, jobs_dir, work_root,
                                     poll_seconds=0.5, timeout_seconds=900):
     """Start a non-blocking timer that polls for discover completion, then auto-starts import."""
     monitor = {
@@ -2310,6 +2424,7 @@ def _start_import_discover_monitor(job_dir, ts_root, output_dir, axes, flips, jo
         "axes": axes,
         "flips": flips,
         "jobs_dir": jobs_dir,
+        "work_root": work_root,
     }
     _verbose_log(
         output_dir,
@@ -2405,6 +2520,7 @@ def _launch_external_import_setup(import_mode):
             args = [source_arg, source, "--output-dir", output_dir]
         else:
             args = ["--ts-root", source, "--output-dir", output_dir]
+        args.extend(["--masks", str(selection.get("mask_selection", "all") or "all")])
         _run_main_with_args(
             args,
             import_mode=import_mode,
@@ -2425,7 +2541,7 @@ def main(import_mode=None, case_info_override=None):
     """Entry point. Reads config from argv or interactive dialog.
 
     Usage:
-        mimics_import.py --ts-root <dir> [--cases s0000,s0001] [--output-dir <dir>] [--axes 0,1,2] [--flips false,false,false]
+        mimics_import.py --ts-root <dir> [--cases s0000,s0001] [--masks all|none|name1,name2] [--output-dir <dir>] [--axes 0,1,2] [--flips false,false,false]
         mimics_import.py --case-dir <dir> --output <file.mcs> [--axes 0,1,2] [--flips false,false,false]
         mimics_import.py --image-file <volume.mhd> --output <file.mcs> [--axes 0,1,2] [--flips false,false,false]
         mimics_import.py --image-file <volume.mhd> --mask-files mask1.nii.gz,mask2.nii.gz --output <file.mcs>
@@ -2434,6 +2550,23 @@ def main(import_mode=None, case_info_override=None):
         None         — interactive (ask)
         "single_case" — skip dialog, single-case mode directly
     """
+    live_bridge_jobs = []
+    for job_path, process in list(_BRIDGE_PROCESSES.items()):
+        try:
+            if process.poll() is None:
+                live_bridge_jobs.append(job_path)
+            else:
+                _BRIDGE_PROCESSES.pop(job_path, None)
+        except Exception:
+            _BRIDGE_PROCESSES.pop(job_path, None)
+    if live_bridge_jobs:
+        _safe_message_box(
+            "Import Already Running",
+            "Another image import is still preparing data. Wait for it to finish or use Stop Import Queue before starting another import.",
+            ui_blocking=False,
+        )
+        return 2
+
     # Safe cleanup runs in a daemon thread. By default it only removes stale
     # resource locks; process killing is explicit or aggressive opt-in.
     if runtime_common.auto_cleanup_enabled():
@@ -2449,6 +2582,7 @@ def main(import_mode=None, case_info_override=None):
     output_dir = None
     cases_filter = None
     mask_files = None
+    mask_selection = "all"
     axes = [0, 1, 2]
     flips = [False, False, False]
 
@@ -2478,6 +2612,9 @@ def main(import_mode=None, case_info_override=None):
             i += 2
         elif arg == "--mask-files" and i + 1 < len(args):
             mask_files = [p.strip() for p in args[i + 1].split(",") if p.strip()]
+            i += 2
+        elif arg == "--masks" and i + 1 < len(args):
+            mask_selection = args[i + 1].strip() or "all"
             i += 2
         elif arg == "--axes" and i + 1 < len(args):
             axes = [int(v.strip()) for v in args[i + 1].split(",")]
@@ -2515,6 +2652,7 @@ def main(import_mode=None, case_info_override=None):
         source_case_dir = os.path.dirname(selected_source) if source_is_file else selected_source
         source_case_id = _image_stem(selected_source) if source_is_file else os.path.basename(selected_source)
         case_info = case_info_override or _discover_single_case(selected_source)
+        case_info = _filter_case_masks(case_info, mask_selection)
         if case_info is None:
             mimics.dialogs.message_box(title="Error", message="No supported image data found: {0}".format(selected_source))
             return 1
@@ -2539,9 +2677,18 @@ def main(import_mode=None, case_info_override=None):
                     case_info["masks"] = [m for m in case_info["masks"] if m["name"] != em["name"]]
                 case_info["masks"].append(em)
 
+        if mask_selection.lower() not in ("all", "none", "no", "off") and not case_info.get("masks"):
+            _safe_message_box(
+                "No Matching Masks",
+                "No segmentation file matched: {0}. Check the mask name or choose All masks / Images only.".format(mask_selection),
+                ui_blocking=False,
+            )
+            return 2
+
         output_dir_abs = os.path.dirname(os.path.abspath(output))
-        work_dir = os.path.join(output_dir_abs, case_info["case_id"] + "_work")
-        jobs_dir = _rt(output_dir_abs, "_import_jobs")
+        run_root = _new_import_run_root()
+        work_dir = os.path.join(run_root, "work", case_info["case_id"])
+        jobs_dir = os.path.join(run_root, "jobs")
         job_dir = os.path.join(jobs_dir, case_info["case_id"])
 
         # Launch bridge in background + start timer to queue .mcs creation.
@@ -2561,13 +2708,16 @@ def main(import_mode=None, case_info_override=None):
         # immediately after the folder picker closes.
         output_dir = _resolve_import_output_dir(ts_root, create=False)
 
-    jobs_dir = _rt(output_dir, "_import_jobs")
+    run_root = _new_import_run_root()
+    jobs_dir = os.path.join(run_root, "jobs")
+    work_root = os.path.join(run_root, "work")
 
     discover_job_dir = os.path.join(jobs_dir, "_discover")
     bridge_params = {
         "action": "discover",
         "ts_root": ts_root,
         "cases_filter": list(cases_filter) if cases_filter else None,
+        "mask_selection": mask_selection,
     }
     _update_gui()
     _launch_bridge_job_thread(bridge_params, discover_job_dir, output_dir, "discovering")
@@ -2578,6 +2728,7 @@ def main(import_mode=None, case_info_override=None):
         axes,
         flips,
         jobs_dir,
+        work_root,
     )
     return 0
 
