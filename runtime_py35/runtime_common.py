@@ -13,6 +13,13 @@ import uuid
 
 INVALID_LOCK_GRACE_SECONDS = 5.0
 
+# Hardcoded MimicsResearch.exe path for machines where find_mimics_exe()'s
+# auto-detection (sys.executable, registry, Program Files, drive scan) fails.
+# Set this to the full path on the target machine, e.g.
+#   r"C:\Program Files\Materialise\Mimics Research 25\MimicsResearch.exe"
+# Leave empty to rely on auto-detection.
+HARDCODED_MIMICS_EXE = r""
+
 
 def _install_subprocess_cleanup_guard():
     """Guard Python 3.5 Windows subprocess cleanup against stale bad handles.
@@ -64,9 +71,20 @@ def write_json_atomic(path, value):
 def write_text_atomic(path, text):
     parent = os.path.dirname(path)
     last_error = None
-    if parent and not os.path.isdir(parent):
-        os.makedirs(parent)
     for attempt in range(12):
+        # Re-check the parent each attempt: a concurrent cleanup
+        # (_cleanup_job_dir on another monitor tick) can remove the job
+        # directory between attempts, and the original code only created it
+        # once before the loop, leaving the remaining retries to fail with
+        # FileNotFoundError on open().
+        if parent and not os.path.isdir(parent):
+            try:
+                os.makedirs(parent)
+            except OSError:
+                # Race with another process creating/removing it; if it now
+                # exists, continue. If not, open() below will fail and retry.
+                if not os.path.isdir(parent):
+                    pass
         temporary = path + "." + uuid.uuid4().hex + ".tmp"
         try:
             with open(temporary, "w") as handle:
@@ -128,6 +146,128 @@ def find_root(start_dir, sentinel_files, max_depth=6):
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def find_mimics_exe():
+    """Find MimicsResearch.exe using the most reliable methods first.
+
+    Search order:
+      1. MIMICS_EXE environment variable (explicit override)
+      2. Hardcoded path constant (HARDCODED_MIMICS_EXE) — for machines where
+         the auto-detection below fails; set it to the full path of
+         MimicsResearch.exe on that machine.
+      3. sys.executable — when running inside Mimics, this IS
+         MimicsResearch.exe (or its Python wrapper).  Walk up from
+         the executable's directory to find MimicsResearch.exe.
+      4. Windows registry (Uninstall keys for Materialise Mimics)
+      5. Program Files sub-directories (any Mimics version)
+      6. Drive-root scan on C/D/E/F for common folder names
+    """
+    # 1. Explicit override
+    env_exe = os.environ.get("MIMICS_EXE", "").strip()
+    if env_exe and os.path.isfile(env_exe):
+        return os.path.abspath(env_exe)
+
+    # 2. Hardcoded fallback for machines where auto-detection fails.
+    if HARDCODED_MIMICS_EXE and os.path.isfile(HARDCODED_MIMICS_EXE):
+        return os.path.abspath(HARDCODED_MIMICS_EXE)
+
+    # 2. sys.executable — inside Mimics this is the Mimics process itself
+    #    or a Python DLL host beside MimicsResearch.exe.
+    try:
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    except Exception:
+        exe_dir = ""
+    if exe_dir:
+        # The executable itself might be MimicsResearch.exe
+        try:
+            exe_name = os.path.basename(os.path.abspath(sys.executable)).lower()
+        except Exception:
+            exe_name = ""
+        if exe_name == "mimicsresearch.exe":
+            return os.path.abspath(sys.executable)
+        # Walk up from exe_dir looking for MimicsResearch.exe
+        walk = exe_dir
+        for _ in range(5):
+            candidate = os.path.join(walk, "MimicsResearch.exe")
+            if os.path.isfile(candidate):
+                return os.path.abspath(candidate)
+            parent = os.path.dirname(walk)
+            if parent == walk:
+                break
+            walk = parent
+
+    # 3. Windows registry — check Uninstall keys for any Mimics version
+    if os.name == "nt":
+        try:
+            import _winreg as winreg
+        except ImportError:
+            try:
+                import winreg
+            except ImportError:
+                winreg = None
+        if winreg is not None:
+            for hive_key, hive_name in [(winreg.HKEY_LOCAL_MACHINE, "HKLM"), (winreg.HKEY_CURRENT_USER, "HKCU")]:
+                for wow64 in (0, winreg.KEY_WOW64_64KEY):
+                    try:
+                        base = winreg.OpenKey(hive_key, r"Software\Microsoft\Windows\CurrentVersion\Uninstall", 0, winreg.KEY_READ | wow64)
+                    except Exception:
+                        continue
+                    try:
+                        idx = 0
+                        while True:
+                            try:
+                                sub_name = winreg.EnumKey(base, idx)
+                                idx += 1
+                            except Exception:
+                                break
+                            if "mimics" not in sub_name.lower():
+                                continue
+                            try:
+                                sub_key = winreg.OpenKey(base, sub_name, 0, winreg.KEY_READ)
+                                loc, _ = winreg.QueryValueEx(sub_key, "InstallLocation")
+                                winreg.CloseKey(sub_key)
+                            except Exception:
+                                continue
+                            if loc and os.path.isdir(loc):
+                                candidate = os.path.join(loc, "MimicsResearch.exe")
+                                if os.path.isfile(candidate):
+                                    winreg.CloseKey(base)
+                                    return os.path.abspath(candidate)
+                    finally:
+                        winreg.CloseKey(base)
+
+    # 4. Program Files sub-directories — scan for any Mimics* folder
+    for env_var in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"):
+        pf = os.environ.get(env_var, "")
+        if not pf or not os.path.isdir(pf):
+            continue
+        try:
+            entries = os.listdir(pf)
+        except Exception:
+            continue
+        for name in sorted(entries, reverse=True):
+            if "mimics" not in name.lower():
+                continue
+            candidate = os.path.join(pf, name, "MimicsResearch.exe")
+            if os.path.isfile(candidate):
+                return os.path.abspath(candidate)
+
+    # 5. Drive-root scan for common folder patterns
+    for drive in ("C:", "D:", "E:", "F:"):
+        try:
+            entries = os.listdir(drive + "\\")
+        except Exception:
+            continue
+        for name in sorted(entries, reverse=True):
+            lower = name.lower()
+            if "mimics" not in lower:
+                continue
+            candidate = os.path.join(drive + "\\", name, "MimicsResearch.exe")
+            if os.path.isfile(candidate):
+                return os.path.abspath(candidate)
+
+    return None
+
+
 def hidden_process_kwargs():
     if os.name != "nt":
         return {}
@@ -157,6 +297,13 @@ def background_process_kwargs(low_priority=True):
 
 def background_env(extra=None, include_itk=False):
     env = os.environ.copy()
+    # Remove variables that can hijack the child Python's import system.
+    # The bridge runs under nninteractive_env/python.exe (3.13) whose
+    # python313._pth controls sys.path.  If PYTHONPATH / PYTHONHOME from
+    # the Mimics host (Python 3.5) leak through, the child tries to import
+    # from the wrong stdlib and crashes immediately.
+    for _var in ("PYTHONPATH", "PYTHONHOME", "PYTHONDONTWRITEBYTECODE"):
+        env.pop(_var, None)
     env.setdefault("OMP_NUM_THREADS", "1")
     env.setdefault("MKL_NUM_THREADS", "1")
     env.setdefault("OPENBLAS_NUM_THREADS", "1")
@@ -203,11 +350,21 @@ def process_exists(pid):
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
         STILL_ACTIVE = 259
         kernel32 = ctypes.windll.kernel32
+        # Declare pointer-sized HANDLE signatures. Without restype = c_void_p,
+        # ctypes defaults OpenProcess to c_int and truncates the 64-bit handle,
+        # which intermittently returns a zero handle for a live process and
+        # makes stale-lock / pid-alive checks wrongly report the process dead.
+        kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+        kernel32.GetExitCodeProcess.restype = ctypes.c_int
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_int
         handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, value)
         if not handle:
             return False
         try:
-            exit_code = ctypes.c_ulong(0)
+            exit_code = ctypes.c_uint32(0)
             if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)) == 0:
                 return False
             return int(exit_code.value) == STILL_ACTIVE

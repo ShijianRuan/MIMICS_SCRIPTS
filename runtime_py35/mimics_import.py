@@ -49,6 +49,19 @@ _LOG_ROTATE_BYTES = 5 * 1024 * 1024
 _LOG_ROTATE_BACKUPS = 3
 _CONFIG_CACHE = None
 
+# All intermediate / scratch files are placed under this subdirectory inside
+# the user-visible output folder so they do not clutter the .mcs results.
+_RUNTIME_SUBDIR = ".mimics_runtime"
+
+
+def _rt(output_dir, *parts):
+    """Return output_dir/.mimics_runtime/<joined parts>.
+
+    Keeps work dirs, job state, logs, and failure records out of the
+    user-visible output folder that only contains .mcs files.
+    """
+    return os.path.join(output_dir, _RUNTIME_SUBDIR, *parts)
+
 
 def _auto_open_mcs_enabled():
     return os.environ.get("MIMICS_IMPORT_AUTO_OPEN_MCS", "").strip().lower() in ("1", "true", "yes")
@@ -163,7 +176,7 @@ def _append_import_log(root_dir, message):
     try:
         if root_dir and not os.path.isdir(root_dir):
             os.makedirs(root_dir)
-        path = os.path.join(root_dir or os.getcwd(), "logs", "mimics_import.log")
+        path = os.path.join(root_dir or os.getcwd(), _RUNTIME_SUBDIR, "logs", "mimics_import.log")
         _rotate_log_file(path)
         with open(path, "a") as f:
             f.write(text + "\n")
@@ -213,15 +226,15 @@ def _summarize_bridge_params(params):
 
 
 def _queue_active_path(output_dir):
-    return os.path.join(output_dir, _MCS_QUEUE_ACTIVE)
+    return _rt(output_dir, _MCS_QUEUE_ACTIVE)
 
 
 def _queue_done_path(output_dir):
-    return os.path.join(output_dir, _MCS_QUEUE_DONE)
+    return _rt(output_dir, _MCS_QUEUE_DONE)
 
 
 def _queue_stop_path(output_dir):
-    return os.path.join(output_dir, _MCS_QUEUE_STOP)
+    return _rt(output_dir, _MCS_QUEUE_STOP)
 
 
 def _mcs_queue_registry_dir():
@@ -259,8 +272,9 @@ def _register_mcs_queue(output_dir, total_count=0):
 
 def _mark_mcs_queue_active(output_dir, total_count=0):
     _verbose_log(output_dir, "Queue active | output_dir={0} | total_count={1}".format(output_dir, int(total_count or 0)))
-    if not os.path.isdir(output_dir):
-        os.makedirs(output_dir)
+    rt_dir = _rt(output_dir)
+    if not os.path.isdir(rt_dir):
+        os.makedirs(rt_dir)
     done_path = _queue_done_path(output_dir)
     stop_path = _queue_stop_path(output_dir)
     try:
@@ -288,8 +302,9 @@ def _mark_mcs_queue_active(output_dir, total_count=0):
 
 def _mark_mcs_queue_done(output_dir, completed=0, failed=0):
     _verbose_log(output_dir, "Queue done | output_dir={0} | completed={1} | failed={2}".format(output_dir, int(completed or 0), int(failed or 0)))
-    if not os.path.isdir(output_dir):
-        os.makedirs(output_dir)
+    rt_dir = _rt(output_dir)
+    if not os.path.isdir(rt_dir):
+        os.makedirs(rt_dir)
     _write_json_quick(
         _queue_done_path(output_dir),
         {
@@ -335,7 +350,7 @@ def _save_prepare_manifest(work_dir, result, output_mcs=None):
 
 def _record_failed_case(output_dir, case_id, phase, error):
     try:
-        failed_dir = os.path.join(output_dir or os.getcwd(), "_failed_cases")
+        failed_dir = _rt(output_dir or os.getcwd(), "_failed_cases")
         if not os.path.isdir(failed_dir):
             os.makedirs(failed_dir)
         payload = {
@@ -693,8 +708,22 @@ def _discover_single_case(case_dir):
     seg_dir = os.path.join(case_dir, "segmentations")
     allow_masks = True
     if image_file:
-        sibling_images = [name for name in os.listdir(case_dir) if _is_medical_image_file(os.path.join(case_dir, name))]
-        allow_masks = len(sibling_images) <= 1
+        # Count sibling medical images with an early stop: a case directory
+        # can hold tens of thousands of DICOM slices, and os.path.isfile on
+        # every entry hangs the import. We only need to know if >1 volume is
+        # present, so stop as soon as a second candidate appears.
+        sibling_images = 0
+        try:
+            entries = os.listdir(case_dir)
+        except OSError:
+            entries = []
+        for name in entries:
+            lower = name.lower()
+            if any(lower.endswith(suffix) for suffix in _MEDICAL_IMAGE_SUFFIXES):
+                sibling_images += 1
+                if sibling_images > 1:
+                    break
+        allow_masks = sibling_images <= 1
     if allow_masks and os.path.isdir(seg_dir):
         for fname in sorted(os.listdir(seg_dir)):
             lower = fname.lower()
@@ -774,10 +803,15 @@ def _launch_bridge_background(bridge_params, job_dir):
     python_exe = _python_exe()
     bridge = _bridge_script()
 
+    # Open result/error files ONLY after Popen succeeds, so a launch
+    # failure does not leave a stale empty bridge_result.json that
+    # confuses _check_job_status into thinking the bridge ran and failed.
     stdin_handle = open(input_file, "r")
-    stdout_handle = open(result_file, "w")
-    stderr_handle = open(error_file, "w")
+    stdout_handle = None
+    stderr_handle = None
     try:
+        stdout_handle = open(result_file, "w")
+        stderr_handle = open(error_file, "w")
         process = subprocess.Popen(
             [python_exe, bridge],
             stdin=stdin_handle,
@@ -792,8 +826,10 @@ def _launch_bridge_background(bridge_params, job_dir):
         )
     finally:
         stdin_handle.close()
-        stdout_handle.close()
-        stderr_handle.close()
+        if stdout_handle is not None:
+            stdout_handle.close()
+        if stderr_handle is not None:
+            stderr_handle.close()
     return process
 
 
@@ -827,25 +863,37 @@ def _launch_bridge_job_thread(bridge_params, job_dir, output_dir, phase, case_id
             _append_import_log(output_dir, "Could not initialize bridge job for {0}: {1}".format(phase, exc))
             _append_import_exception(output_dir, "Bridge job initialization failed", exc)
             return
-        try:
-            process = _launch_bridge_background(bridge_params, job_dir)
-            state = {
-                "phase": phase,
-                "pid": process.pid,
-                "started_at": time.time(),
-            }
-            if case_id:
-                state["case_id"] = case_id
-            _write_json_atomic(os.path.join(job_dir, "job_state.json"), state)
-            _append_import_log(output_dir, "Bridge PID={0} | phase={1}".format(process.pid, phase))
-        except Exception as exc:
-            _BRIDGE_LAUNCH_ERRORS[job_dir] = "Could not start the import bridge process: {0}".format(exc)
-            _append_import_log(output_dir, "Could not start bridge process for {0}: {1}".format(phase, exc))
-            _append_import_exception(output_dir, "Bridge worker thread failed", exc)
+        # Retry bridge launch up to 3 times with a short delay.
+        # subprocess.Popen can fail intermittently inside Mimics due to
+        # GIL contention, handle inheritance races, or transient OS errors.
+        last_exc = None
+        for _attempt in range(3):
+            try:
+                process = _launch_bridge_background(bridge_params, job_dir)
+                state = {
+                    "phase": phase,
+                    "pid": process.pid,
+                    "started_at": time.time(),
+                }
+                if case_id:
+                    state["case_id"] = case_id
+                _write_json_atomic(os.path.join(job_dir, "job_state.json"), state)
+                _append_import_log(output_dir, "Bridge PID={0} | phase={1}".format(process.pid, phase))
+                last_exc = None
+                break
+            except Exception as exc:
+                last_exc = exc
+                _append_import_log(output_dir, "Bridge launch attempt {0} failed for {1}: {2}".format(_attempt + 1, phase, exc))
+                if _attempt < 2:
+                    time.sleep(1.0)
+        if last_exc is not None:
+            _BRIDGE_LAUNCH_ERRORS[job_dir] = "Could not start the import bridge process: {0}".format(last_exc)
+            _append_import_log(output_dir, "Could not start bridge process for {0}: {1}".format(phase, last_exc))
+            _append_import_exception(output_dir, "Bridge worker thread failed", last_exc)
             try:
                 _write_json_atomic(
                     os.path.join(job_dir, "bridge_result.json"),
-                    {"status": "error", "error": str(exc)},
+                    {"status": "error", "error": str(last_exc)},
                 )
             except Exception:
                 pass
@@ -857,27 +905,15 @@ def _launch_bridge_job_thread(bridge_params, job_dir, output_dir, phase, case_id
 
 
 def _is_pid_alive(pid):
-    """Check if a process with given PID is still running."""
-    if not pid:
-        return False
-    try:
-        if os.name == "nt":
-            import ctypes
-            kernel32 = ctypes.windll.kernel32
-            PROCESS_QUERY_INFORMATION = 0x0400
-            STILL_ACTIVE = 259
-            handle = kernel32.OpenProcess(PROCESS_QUERY_INFORMATION, False, int(pid))
-            if not handle:
-                return False
-            exit_code = ctypes.c_ulong(0)
-            kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
-            kernel32.CloseHandle(handle)
-            return exit_code.value == STILL_ACTIVE
-        else:
-            os.kill(int(pid), 0)
-            return True
-    except Exception:
-        return False
+    """Check if a process with given PID is still running.
+
+    Delegates to runtime_common.process_exists, which uses
+    PROCESS_QUERY_LIMITED_INFORMATION (lower privilege, works across users /
+    integrity levels where PROCESS_QUERY_INFORMATION is denied) with correct
+    pointer-sized HANDLE ctypes signatures. A denied OpenProcess returns a
+    zero handle and makes a running bridge process look dead, producing the
+    "exited unexpectedly [no_result_file, no_error_file]" error."""
+    return runtime_common.process_exists(pid)
 
 
 def _check_job_status(job_dir):
@@ -929,14 +965,61 @@ def _check_job_status(job_dir):
     if pid and _is_pid_alive(pid):
         return ("running", None)
 
-    # Process dead but no valid result
+    # Process dead but no valid result.
+    # Before declaring failure, retry reading the result file one more time
+    # with a short sleep — the bridge may have just finished writing and
+    # the OS file cache may not have flushed yet.  This fixes the common
+    # race where a fast bridge on a small image exits between two monitor
+    # ticks and the result file is valid but was missed by the first read.
+    time.sleep(0.3)
+    if os.path.isfile(result_file):
+        try:
+            with open(result_file, "r") as f:
+                result = json.load(f)
+            if result.get("status") == "ok":
+                _verbose_log(
+                    os.path.dirname(job_dir),
+                    "Job done (delayed read) | keys={0}".format(sorted(result.keys())),
+                )
+                return ("done", result)
+            else:
+                return ("error", result.get("error", "bridge returned non-ok status"))
+        except (ValueError, IOError):
+            pass
+
     err_msg = "bridge process exited unexpectedly"
     if os.path.isfile(error_file):
         try:
             with open(error_file, "r") as f:
-                err_msg = f.read()[:500]
+                err_text = f.read().strip()
+            if err_text:
+                err_msg = err_text[:500]
         except Exception:
             pass
+    # Append diagnostics so the user-visible error is actionable.
+    _diag_parts = []
+    if pid:
+        _diag_parts.append("pid={0}".format(pid))
+    if phase:
+        _diag_parts.append("phase={0}".format(phase))
+    if os.path.isfile(result_file):
+        try:
+            _rs = os.path.getsize(result_file)
+            _diag_parts.append("result_file_size={0}".format(_rs))
+        except Exception:
+            pass
+    else:
+        _diag_parts.append("no_result_file")
+    if os.path.isfile(error_file):
+        try:
+            _es = os.path.getsize(error_file)
+            _diag_parts.append("error_file_size={0}".format(_es))
+        except Exception:
+            pass
+    else:
+        _diag_parts.append("no_error_file")
+    if _diag_parts:
+        err_msg = "{0} [{1}]".format(err_msg, ", ".join(_diag_parts))
     return ("error", err_msg)
 
 
@@ -1047,8 +1130,19 @@ def _import_monitor_tick(monitor):
         output_mcs = monitor.get("output_mcs")
         output_dir = os.path.dirname(os.path.abspath(output_mcs)) if output_mcs else ""
         _record_failed_case(output_dir, monitor.get("case_id"), "prepare", result)
-        mimics.dialogs.message_box(title="Import Error", message="Preparation failed: {0}".format(result))
-        _cleanup_job_dir(job_dir)
+        # Keep the job directory on failure so bridge_error.log / job_state.json
+        # survive for diagnosis. The "bridge process exited unexpectedly
+        # [no_result_file, no_error_file]" symptom leaves no trace otherwise.
+        _append_import_log(
+            output_dir,
+            "Preparation failed for {0}: {1}. Job dir preserved at {2}.".format(
+                monitor.get("case_id"), result, job_dir,
+            ),
+        )
+        mimics.dialogs.message_box(
+            title="Import Error",
+            message="Preparation failed: {0}\n\nDiagnostic files kept at:\n{1}".format(result, job_dir),
+        )
         _cleanup_work_dir(monitor.get("work_dir"))
         # In batch mode, continue to next case
         if monitor.get("batch_queue"):
@@ -1128,7 +1222,7 @@ def _start_next_batch_case(monitor):
     jobs_dir = monitor.get("jobs_dir")
 
     output_mcs = os.path.join(output_dir, case_id + ".mcs")
-    work_dir = os.path.join(output_dir, case_id + "_work")
+    work_dir = _rt(output_dir, case_id + "_work")
     job_dir = os.path.join(jobs_dir, case_id)
 
     _append_import_log(monitor.get("output_dir", ""), "\n[{0}/{1}] Preparing: {2}".format(
@@ -1308,7 +1402,7 @@ def _start_next_batch_prepare(monitor):
     flips = monitor.get("flips")
     jobs_dir = monitor.get("jobs_dir")
 
-    work_dir = os.path.join(output_dir, case_id + "_work")
+    work_dir = _rt(output_dir, case_id + "_work")
     job_dir = os.path.join(jobs_dir, case_id)
 
     completed = monitor.get("completed", 0)
@@ -1435,22 +1529,7 @@ def _start_win32_batch_prepare_monitor(monitor, poll_seconds, timeout_seconds):
 
 def _find_mimics_exe():
     """Find MimicsResearch.exe installation path."""
-    candidates = [
-        os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), "Materialise", "Mimics Research 21.0", "MimicsResearch.exe"),
-        os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), "Mimics Research 21.0", "MimicsResearch.exe"),
-        "D:\\Mimics Research 21.0\\MimicsResearch.exe",
-        "C:\\Mimics Research 21.0\\MimicsResearch.exe",
-    ]
-    for c in candidates:
-        if os.path.isfile(c):
-            return c
-    # Try to find via registry or common locations
-    for drive in ["C:", "D:", "E:"]:
-        for name in ["Mimics Research 21.0", "MimicsResearch 21.0"]:
-            path = os.path.join(drive + "\\", name, "MimicsResearch.exe")
-            if os.path.isfile(path):
-                return path
-    return None
+    return runtime_common.find_mimics_exe()
 
 
 def _ensure_bg_mimics_running(output_dir, total_count=0, mark_active=True):
@@ -2140,7 +2219,7 @@ def _discover_monitor_tick(monitor):
 
         first_case = cases[0]
         first_case_id = first_case["case_id"]
-        first_work_dir = os.path.join(output_dir, first_case_id + "_work")
+        first_work_dir = _rt(output_dir, first_case_id + "_work")
         first_job_dir = os.path.join(jobs_dir, first_case_id)
 
         _verbose_log(
@@ -2462,7 +2541,7 @@ def main(import_mode=None, case_info_override=None):
 
         output_dir_abs = os.path.dirname(os.path.abspath(output))
         work_dir = os.path.join(output_dir_abs, case_info["case_id"] + "_work")
-        jobs_dir = os.path.join(output_dir_abs, "_import_jobs")
+        jobs_dir = _rt(output_dir_abs, "_import_jobs")
         job_dir = os.path.join(jobs_dir, case_info["case_id"])
 
         # Launch bridge in background + start timer to queue .mcs creation.
@@ -2482,7 +2561,7 @@ def main(import_mode=None, case_info_override=None):
         # immediately after the folder picker closes.
         output_dir = _resolve_import_output_dir(ts_root, create=False)
 
-    jobs_dir = os.path.join(output_dir, "_import_jobs")
+    jobs_dir = _rt(output_dir, "_import_jobs")
 
     discover_job_dir = os.path.join(jobs_dir, "_discover")
     bridge_params = {

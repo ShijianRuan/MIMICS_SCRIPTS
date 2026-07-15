@@ -386,35 +386,12 @@ def _process_exists(pid):
     if pid <= 0:
         return False
 
-    if os.name != "nt":
-        try:
-            os.kill(pid, 0)
-            return True
-        except Exception:
-            return False
-
-    # Windows (Mimics embedded Python): os.kill(pid, 0) may raise
-    # "<built-in function kill> returned a result with an error set".
-    # Use WinAPI instead to avoid that CPython-level SystemError.
-    try:
-        import ctypes
-
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        STILL_ACTIVE = 259
-
-        kernel32 = ctypes.windll.kernel32
-        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid)
-        if not handle:
-            return False
-        try:
-            exit_code = ctypes.c_ulong(0)
-            if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)) == 0:
-                return False
-            return int(exit_code.value) == STILL_ACTIVE
-        finally:
-            kernel32.CloseHandle(handle)
-    except Exception:
-        return False
+    # Delegate to runtime_common.process_exists, which declares pointer-sized
+    # HANDLE ctypes signatures so the 64-bit process handle is not truncated to
+    # c_int (which intermittently reports a live process as dead). It uses the
+    # WinAPI path on Windows, avoiding the Mimics-embedded-CPython os.kill
+    # SystemError noted historically.
+    return runtime_common.process_exists(pid)
 
 
 def _server_state_candidates():

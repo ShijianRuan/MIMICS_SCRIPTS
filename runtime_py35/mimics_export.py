@@ -43,6 +43,19 @@ _CONFIG_CACHE = None
 MIMICS_VOXEL_TO_RAS_MATRIX_METADATA = "mimics_script.mimics_voxel_to_ras_matrix"
 SOURCE_IMAGE_PATH_METADATA = "mimics_script.source_image_path"
 
+# All intermediate / scratch files are placed under this subdirectory inside
+# the user-visible output folder so they do not clutter exported segmentations.
+_RUNTIME_SUBDIR = ".mimics_runtime"
+
+
+def _rt(output_dir, *parts):
+    """Return output_dir/.mimics_runtime/<joined parts>.
+
+    Keeps work dirs, job state, logs, and failure records out of the
+    user-visible output folder that only contains segmentation files.
+    """
+    return os.path.join(output_dir, _RUNTIME_SUBDIR, *parts)
+
 
 _write_json_atomic = runtime_common.write_json_atomic
 _safe_case_filename = runtime_common.safe_filename
@@ -90,7 +103,7 @@ def _append_export_log(root_dir, message):
     try:
         if root_dir and not os.path.isdir(root_dir):
             os.makedirs(root_dir)
-        path = os.path.join(root_dir or os.getcwd(), "mimics_export.log")
+        path = os.path.join(root_dir or os.getcwd(), _RUNTIME_SUBDIR, "mimics_export.log")
         _rotate_log_file(path)
         with open(path, "a") as f:
             f.write(text + "\n")
@@ -100,7 +113,7 @@ def _append_export_log(root_dir, message):
 
 def _record_failed_case(output_dir_or_export_root, case_id, phase, error):
     try:
-        failed_dir = os.path.join(output_dir_or_export_root or os.getcwd(), "_failed_exports")
+        failed_dir = _rt(output_dir_or_export_root or os.getcwd(), "_failed_exports")
         if not os.path.isdir(failed_dir):
             os.makedirs(failed_dir)
         payload = {
@@ -218,21 +231,7 @@ def _python_exe():
 
 def _find_mimics_exe():
     """Find MimicsResearch.exe installation path."""
-    candidates = [
-        os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), "Materialise", "Mimics Research 21.0", "MimicsResearch.exe"),
-        os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), "Mimics Research 21.0", "MimicsResearch.exe"),
-        "D:\\Mimics Research 21.0\\MimicsResearch.exe",
-        "C:\\Mimics Research 21.0\\MimicsResearch.exe",
-    ]
-    for candidate in candidates:
-        if os.path.isfile(candidate):
-            return candidate
-    for drive in ["C:", "D:", "E:"]:
-        for name in ["Mimics Research 21.0", "MimicsResearch 21.0"]:
-            path = os.path.join(drive + "\\", name, "MimicsResearch.exe")
-            if os.path.isfile(path):
-                return path
-    return None
+    return runtime_common.find_mimics_exe()
 
 
 def _launch_background_batch_export(ts_root, cases_filter, axes, flips, label_output_root=None, overwrite_existing=False, case_dirs=None, mcs_output_dir=None, mcs_paths=None, source_image_paths=None):
@@ -247,8 +246,8 @@ def _launch_background_batch_export(ts_root, cases_filter, axes, flips, label_ou
         return None
 
     here = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(output_dir, "_export_batch_config.json")
-    runner_path = os.path.join(output_dir, "_run_export_batch.py")
+    config_path = _rt(output_dir, "_export_batch_config.json")
+    runner_path = _rt(output_dir, "_run_export_batch.py")
     _write_json_atomic(
         config_path,
         {
@@ -272,7 +271,7 @@ def _launch_background_batch_export(ts_root, cases_filter, axes, flips, label_ou
         f.write("import mimics_export\n")
         f.write("mimics_export.run_background_batch_export(r'{0}')\n".format(config_path))
 
-    log_path = os.path.join(output_dir, "_background_export_mimics.log")
+    log_path = _rt(output_dir, "_background_export_mimics.log")
     _rotate_log_file(log_path)
     lock_path = _resource_lock_path("background_mimics.lock")
     lock_token = runtime_common.acquire_resource_lock(
@@ -287,7 +286,7 @@ def _launch_background_batch_export(ts_root, cases_filter, axes, flips, label_ou
             "Background Mimics is already running for another Mimics-Script task; batch export was not started.",
         )
         return None
-    stop_path = os.path.join(export_root, EXPORT_STOP_FILE)
+    stop_path = _rt(export_root, EXPORT_STOP_FILE)
     try:
         if os.path.isfile(stop_path):
             os.remove(stop_path)
@@ -400,27 +399,12 @@ def _launch_bridge_background(bridge_params, job_dir):
 
 
 def _is_pid_alive(pid):
-    """Check if a process with given PID is still running."""
-    if not pid:
-        return False
-    try:
-        if os.name == "nt":
-            import ctypes
-            kernel32 = ctypes.windll.kernel32
-            PROCESS_QUERY_INFORMATION = 0x0400
-            STILL_ACTIVE = 259
-            handle = kernel32.OpenProcess(PROCESS_QUERY_INFORMATION, False, int(pid))
-            if not handle:
-                return False
-            exit_code = ctypes.c_ulong(0)
-            kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
-            kernel32.CloseHandle(handle)
-            return exit_code.value == STILL_ACTIVE
-        else:
-            os.kill(int(pid), 0)
-            return True
-    except Exception:
-        return False
+    """Check if a process with given PID is still running.
+
+    Delegates to runtime_common.process_exists, which declares pointer-sized
+    HANDLE ctypes signatures so the 64-bit process handle is not truncated to
+    c_int (which intermittently reports a live process as dead)."""
+    return runtime_common.process_exists(pid)
 
 
 def _check_job_status(job_dir):
@@ -1098,7 +1082,7 @@ def _background_export_status_tick(monitor):
             )
             return
         root = monitor.get("export_root")
-        status = runtime_common.read_json(os.path.join(root, "_export_batch_status.json"), {}) if root else {}
+        status = runtime_common.read_json(_rt(root, "_export_batch_status.json"), {}) if root else {}
         status = status or {}
         try:
             if float(status.get("updated_at_epoch", 0.0) or 0.0) < float(monitor.get("started_at_epoch", 0.0) or 0.0):
@@ -1377,7 +1361,7 @@ def discover_ts_cases(ts_root, case_filter=None):
 
 
 def _acquire_export_lock(output_dir):
-    lock_path = os.path.join(output_dir, "_export_batch.lock")
+    lock_path = _rt(output_dir, "_export_batch.lock")
     try:
         fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         os.write(fd, str(os.getpid()).encode("ascii"))
@@ -1435,11 +1419,11 @@ def run_background_batch_export(config_path):
     completed = 0
     failed = 0
     cancelled = False
-    stop_path = os.path.join(export_root, EXPORT_STOP_FILE)
+    stop_path = _rt(export_root, EXPORT_STOP_FILE)
     try:
         _append_export_log(export_root, "Background batch export started.")
         _write_json_atomic(
-            os.path.join(export_root, "_export_batch_status.json"),
+            _rt(export_root, "_export_batch_status.json"),
             {"status": "discovering", "pid": os.getpid(), "updated_at_epoch": time.time()},
         )
         cases = discover_ts_cases(ts_root, cases_filter)
@@ -1458,9 +1442,9 @@ def run_background_batch_export(config_path):
             case_id = case_info["case_id"]
             case_dir = case_info["case_dir"]
             mcs_path = str((config.get("mcs_paths") or {}).get(case_id) or os.path.join(output_dir, case_id + ".mcs"))
-            work_dir = os.path.join(output_dir, case_id + "_export_work")
+            work_dir = _rt(output_dir, case_id + "_export_work")
             _write_json_atomic(
-                os.path.join(export_root, "_export_batch_status.json"),
+                _rt(export_root, "_export_batch_status.json"),
                 {
                     "status": "exporting",
                     "pid": os.getpid(),
@@ -1537,7 +1521,7 @@ def run_background_batch_export(config_path):
                 _cleanup_work_dir(work_dir)
 
         _write_json_atomic(
-            os.path.join(export_root, "_export_batch_status.json"),
+            _rt(export_root, "_export_batch_status.json"),
             {
                 "status": "cancelled" if cancelled else "closed",
                 "pid": os.getpid(),
@@ -1596,6 +1580,11 @@ def main(source_info_override=None):
     mcs_dir = None
     mcs_path_override = None
     external_setup = False
+    # Batch export of an explicit list of .mcs files, bypassing the TS-style
+    # directory/image discovery in discover_ts_cases. Either a comma-separated
+    # list or a text file with one path per line.
+    mcs_list_arg = None
+    mcs_list_file = None
 
     args = sys.argv[1:]
     i = 0
@@ -1632,6 +1621,12 @@ def main(source_info_override=None):
         elif arg == "--external-setup":
             external_setup = True
             i += 1
+        elif arg == "--mcs-list" and i + 1 < len(args):
+            mcs_list_arg = args[i + 1]
+            i += 2
+        elif arg == "--mcs-list-file" and i + 1 < len(args):
+            mcs_list_file = args[i + 1]
+            i += 2
         else:
             i += 1
 

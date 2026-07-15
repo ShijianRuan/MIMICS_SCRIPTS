@@ -62,6 +62,16 @@ def _medical_file(path):
     return os.path.isfile(path) and any(text.endswith(suffix) for suffix in MASK_SUFFIXES)
 
 
+def _has_medical_suffix(name):
+    """Cheap suffix check without touching the filesystem (no isfile call).
+
+    Used when scanning large directories where per-entry os.path.isfile would
+    make the path picker hang on directories with tens of thousands of files.
+    """
+    lower = str(name).lower()
+    return any(lower.endswith(suffix) for suffix in MASK_SUFFIXES)
+
+
 def _image_stem(path):
     name = os.path.basename(str(path))
     for suffix in MASK_SUFFIXES:
@@ -77,11 +87,22 @@ def discover_single_source(source):
         image = selected
         case_dir = os.path.dirname(selected)
         case_id = _image_stem(selected)
-        sibling_images = [
-            name for name in os.listdir(case_dir)
-            if _medical_file(os.path.join(case_dir, name))
-        ]
-        allow_masks = len(sibling_images) <= 1
+        # Count sibling medical images, but cap the scan: a case directory can
+        # hold tens of thousands of DICOM slices, and calling os.path.isfile on
+        # every entry makes the path picker hang for a long time. Sampling the
+        # first few hundred entries is enough to tell whether >1 volume lives
+        # here, which is all this flag is used for.
+        sibling_images = 0
+        try:
+            entries = os.listdir(case_dir)
+        except OSError:
+            entries = []
+        for name in entries:
+            if _has_medical_suffix(name):
+                sibling_images += 1
+                if sibling_images > 1:
+                    break
+        allow_masks = sibling_images <= 1
     elif os.path.isfile(selected) and selected.lower().endswith(".dcm"):
         case_dir = os.path.dirname(selected)
         case_id = os.path.basename(case_dir.rstrip("\\/")) or _image_stem(selected)
@@ -98,10 +119,15 @@ def discover_single_source(source):
                 image = candidate
                 break
         if not image:
-            for name in sorted(os.listdir(case_dir)):
-                candidate = os.path.join(case_dir, name)
-                if _medical_file(candidate):
-                    image = candidate
+            # Walk without sorting and stop at the first medical file: sorting
+            # a huge directory listing is what makes this hang.
+            try:
+                entries = os.listdir(case_dir)
+            except OSError:
+                entries = []
+            for name in entries:
+                if _has_medical_suffix(name) and _medical_file(os.path.join(case_dir, name)):
+                    image = os.path.join(case_dir, name)
                     break
         if not image:
             dicom_dir = os.path.join(case_dir, "dicom")
@@ -213,21 +239,33 @@ def run_ui(context, preview_path=""):
             # stale root that makes it hang.
             if not current or not os.path.exists(current):
                 current = str(Path.home())
+            # Avoid opening the dialog on a drive root (e.g. E:\) which can
+            # cause the native Shell folder dialog to enumerate the entire
+            # drive and freeze.  Fall back to the user home directory instead.
+            try:
+                if os.path.isdir(current) and os.path.dirname(current.rstrip("\\/")) == current.rstrip("\\/"):
+                    current = str(Path.home())
+            except Exception:
+                pass
+            # Use Qt's own dialog instead of the Windows native Shell dialog.
+            # The native IFileDialog can hang on large/root directories because
+            # the Shell tries to enumerate every child for icons/thumbnails.
+            dont_use_native = QtWidgets.QFileDialog.DontUseNativeDialog
             if file_or_folder:
                 menu = QtWidgets.QMenu(button)
                 choose_file = menu.addAction("Choose image file")
                 choose_folder = menu.addAction("Choose case or DICOM folder")
                 action = menu.exec(button.mapToGlobal(QtCore.QPoint(0, button.height())))
                 if action == choose_file:
-                    value, _ = QtWidgets.QFileDialog.getOpenFileName(window, "Choose 3D image", current, "Medical volumes (*.nii *.nii.gz *.mha *.mhd *.nrrd *.dcm);;All files (*)")
+                    value, _ = QtWidgets.QFileDialog.getOpenFileName(window, "Choose 3D image", current, "Medical volumes (*.nii *.nii.gz *.mha *.mhd *.nrrd *.dcm);;All files (*)", "", dont_use_native)
                 elif action == choose_folder:
-                    value = QtWidgets.QFileDialog.getExistingDirectory(window, "Choose case or DICOM folder", current)
+                    value = QtWidgets.QFileDialog.getExistingDirectory(window, "Choose case or DICOM folder", current, dont_use_native)
                 else:
                     value = ""
             elif browse_folder:
-                value = QtWidgets.QFileDialog.getExistingDirectory(window, label, current)
+                value = QtWidgets.QFileDialog.getExistingDirectory(window, label, current, dont_use_native)
             else:
-                value, _ = QtWidgets.QFileDialog.getOpenFileName(window, label, current)
+                value, _ = QtWidgets.QFileDialog.getOpenFileName(window, label, current, "", "", dont_use_native)
             if value:
                 edit.setProperty("chosenByBrowse", True)
                 edit.setText(str(value))

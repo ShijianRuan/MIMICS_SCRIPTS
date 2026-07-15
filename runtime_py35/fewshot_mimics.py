@@ -609,20 +609,8 @@ def _active_source_geometry_payload():
 
 
 def _find_mimics_exe():
-    env = os.environ.get("MIMICS_EXE", "")
-    candidates = []
-    if env:
-        candidates.append(env)
-    candidates.extend([
-        os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), "Materialise", "Mimics Research 21.0", "MimicsResearch.exe"),
-        os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), "Mimics Research 21.0", "MimicsResearch.exe"),
-        "D:\\Mimics Research 21.0\\MimicsResearch.exe",
-        "C:\\Mimics Research 21.0\\MimicsResearch.exe",
-    ])
-    for candidate in candidates:
-        if os.path.isfile(candidate):
-            return candidate
-    return None
+    """Find MimicsResearch.exe installation path."""
+    return runtime_common.find_mimics_exe()
 
 
 def _workspace(ts_root):

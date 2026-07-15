@@ -119,19 +119,13 @@ def run_bridge(python_exe, params):
 
 
 def find_mimics_exe(explicit=None):
+    """Find MimicsResearch.exe, with optional explicit override."""
     if explicit and Path(explicit).is_file():
         return explicit
-    candidates = [
-        Path(os.environ.get("MIMICS_EXE", "")),
-        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Materialise" / "Mimics Research 21.0" / "MimicsResearch.exe",
-        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Mimics Research 21.0" / "MimicsResearch.exe",
-        Path(r"D:\Mimics Research 21.0\MimicsResearch.exe"),
-        Path(r"C:\Mimics Research 21.0\MimicsResearch.exe"),
-    ]
-    for candidate in candidates:
-        if str(candidate) and candidate.is_file():
-            return str(candidate)
-    return None
+    # Delegate to runtime_common which has the full search logic
+    sys.path.insert(0, str(RUNTIME))
+    import runtime_common
+    return runtime_common.find_mimics_exe()
 
 
 def discover_cases(ts_root, cases, python_exe):
