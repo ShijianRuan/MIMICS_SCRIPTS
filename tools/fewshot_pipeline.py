@@ -1747,6 +1747,38 @@ def cmd_train(args):
             return 75
         update_status(status_path, {"label_export": export_result})
 
+        # Guard against the background Mimics export exiting with code 0 without
+        # actually running the script (e.g. MimicsResearch -b -run_script started
+        # but never executed the runner). In that case fresh_labels is empty and
+        # the generic "found 0 labels" error below is misleading. Detect it here
+        # and point at the real cause.
+        if fresh_label_root is not None and not any(fresh_label_root.rglob("*")):
+            export_log = export_result.get("log")
+            log_size = -1
+            if export_log and Path(export_log).is_file():
+                log_size = Path(export_log).stat().st_size
+            batch_status = export_result.get("batch_status") or {}
+            error = (
+                "Label export reported success (returncode={0}) but produced no files in {1}. "
+                "The background Mimics process likely exited without running the export script "
+                "(export log size={2} bytes; batch_status pid={3}). "
+                "Restart Mimics, ensure only one Mimics instance is running, then retry training. "
+                "If you want to use existing NIfTI labels instead of exporting from .mcs, "
+                "disable label export before training."
+            ).format(
+                export_result.get("returncode"),
+                fresh_label_root,
+                log_size,
+                batch_status.get("pid"),
+            )
+            update_status(status_path, {
+                "status": "failed",
+                "error": error,
+                "samples_found": 0,
+                "label_export": export_result,
+            })
+            return 2
+
     samples, skipped = discover_samples(
         ts_root,
         args.organ,

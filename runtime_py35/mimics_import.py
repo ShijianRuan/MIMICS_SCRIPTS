@@ -1011,19 +1011,31 @@ def _check_job_status(job_dir):
     # No valid result - check if process is alive
     pid = None
     phase = ""
+    started_at = 0.0
     if os.path.isfile(state_file):
         try:
             with open(state_file, "r") as f:
                 state = json.load(f)
             pid = state.get("pid")
             phase = state.get("phase", "")
-        except (ValueError, IOError):
+            started_at = float(state.get("started_at") or 0.0)
+        except (ValueError, IOError, TypeError):
             pass
     if phase == "launching":
         return ("running", None)
 
     if pid and _is_pid_alive(pid):
         _BRIDGE_EXIT_SEEN.pop(job_dir, None)
+        return ("running", None)
+
+    # Startup grace period: the bridge Python imports numpy/SimpleITK etc.
+    # before writing any output, and process-alive checks (OpenProcess /
+    # GetExitCodeProcess) can intermittently report a freshly-started child as
+    # dead on Mimics' embedded Python. For the first ~10s after launch, treat
+    # a "dead" reading as "still starting" unless an error/result file already
+    # proves otherwise (those are checked above). This stops the false
+    # "exited unexpectedly [result_file_size=0]" during the import warm-up.
+    if started_at and (time.time() - started_at) < 10.0:
         return ("running", None)
 
     # The child can exit just before its atomic result becomes visible. Give

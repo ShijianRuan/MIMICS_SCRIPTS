@@ -42,6 +42,38 @@ _LOG_ROTATE_BACKUPS = 3
 _CONFIG_CACHE = None
 MIMICS_VOXEL_TO_RAS_MATRIX_METADATA = "mimics_script.mimics_voxel_to_ras_matrix"
 SOURCE_IMAGE_PATH_METADATA = "mimics_script.source_image_path"
+# Track the background_mimics lock taken by the launcher so the status monitor
+# can release it when the child Mimics crashes without writing a status (which
+# otherwise leaves a zombie lock that blocks all later exports).
+_ACTIVE_BG_MIMICS_LOCK = {"path": None, "token": None}
+
+
+def _release_background_export_lock():
+    """Release the background_mimics lock if its holder process is dead.
+
+    Called when the background Mimics child exits without writing a status.
+    A crash (common with Mimics 21 when a -b instance loses the license to the
+    interactive window) leaves the lock file behind with a dead PID, blocking
+    every subsequent export with "already running". Only remove the lock when
+    the recorded PID is gone, so a genuinely running export is never disturbed.
+    """
+    lock_path = _ACTIVE_BG_MIMICS_LOCK.get("path")
+    token = _ACTIVE_BG_MIMICS_LOCK.get("token")
+    if not lock_path or not token:
+        return
+    payload = runtime_common.read_json(lock_path, {}) or {}
+    pid = payload.get("pid")
+    if pid and runtime_common.process_exists(pid):
+        return  # holder still alive — leave it alone
+    try:
+        runtime_common.release_resource_lock(lock_path, token)
+    except Exception:
+        try:
+            os.remove(lock_path)
+        except Exception:
+            pass
+    _ACTIVE_BG_MIMICS_LOCK["path"] = None
+    _ACTIVE_BG_MIMICS_LOCK["token"] = None
 
 # All intermediate / scratch files are placed under this subdirectory inside
 # the user-visible output folder so they do not clutter exported segmentations.
@@ -286,6 +318,8 @@ def _launch_background_batch_export(ts_root, cases_filter, axes, flips, label_ou
             "Background Mimics is already running for another Mimics-Script task; batch export was not started.",
         )
         return None
+    _ACTIVE_BG_MIMICS_LOCK["path"] = lock_path
+    _ACTIVE_BG_MIMICS_LOCK["token"] = lock_token
     stop_path = _rt(export_root, EXPORT_STOP_FILE)
     try:
         if os.path.isfile(stop_path):
@@ -317,6 +351,8 @@ def _launch_background_batch_export(ts_root, cases_filter, axes, flips, label_ou
         return process
     except Exception as exc:
         runtime_common.release_resource_lock(lock_path, lock_token)
+        _ACTIVE_BG_MIMICS_LOCK["path"] = None
+        _ACTIVE_BG_MIMICS_LOCK["token"] = None
         _append_export_log(output_dir, "Could not start background batch export: {0}".format(exc))
         return None
     finally:
@@ -1132,9 +1168,25 @@ def _background_export_status_tick(monitor):
         if monitor.get("launch_finished") and process is not None and process.poll() is not None and not status:
             monitor["done"] = True
             _stop_export_monitor(key)
+            exit_code = process.poll()
+            # Release the background_mimics lock the launcher took on this
+            # process's behalf; a crash here (common with Mimics 21 when a
+            # background -b instance loses the license to the interactive one)
+            # otherwise leaves a zombie lock that blocks every later export.
+            try:
+                _release_background_export_lock()
+            except Exception:
+                pass
             mimics.dialogs.message_box(
                 title="Export Failed",
-                message="Background Mimics exited before writing export status. Check mimics_export.log in:\n{0}".format(root),
+                message=(
+                    "Background Mimics exited before writing export status (exit code {0}).\n\n"
+                    "This usually means the background Mimics instance could not start — commonly "
+                    "a license/single-instance conflict with the open Mimics window, or a crash "
+                    "in the export script.\n\n"
+                    "Try: close other Mimics windows, then retry. If it persists, restart Mimics.\n"
+                    "Output/log dir: {1}"
+                ).format(exit_code, root),
                 ui_blocking=False,
             )
     finally:
@@ -1324,14 +1376,20 @@ def _apply_export_result(result, work_dir):
 
 # -- TS case discovery (for batch mode) --------------------------------
 
-def discover_ts_cases(ts_root, case_filter=None):
+def discover_ts_cases(ts_root, case_filter=None, exclude_dirs=None):
     """Find all cases in a TS-like dataset."""
     cases = []
+    excluded = set(os.path.abspath(d) for d in (exclude_dirs or []) if d)
     for name in sorted(os.listdir(ts_root)):
         case_dir = os.path.join(ts_root, name)
         if not os.path.isdir(case_dir):
             continue
         if name in ("mcs_output", "segmentations"):
+            continue
+        # Skip output/work directories that happen to live under ts_root and
+        # contain stray image files (e.g. mask_exports with a leftover .nii.gz),
+        # otherwise they get treated as a case and produce "Missing .mcs".
+        if os.path.abspath(case_dir) in excluded:
             continue
         if case_filter and name not in case_filter:
             continue
@@ -1394,6 +1452,12 @@ def run_background_batch_export(config_path):
     ts_root = config.get("ts_root")
     output_dir = config.get("output_dir")
     output_dir = os.path.abspath(output_dir) if output_dir else _resolve_export_output_dir(ts_root)
+    # Emit a startup marker as early as possible. If the per-job Mimics export
+    # log is empty, this function never executed — meaning the MimicsResearch
+    # -b -run_script child process exited without running the script, which is
+    # the real cause of empty fresh_labels / "found 0 labels" in training.
+    export_root_early = config.get("export_root") or output_dir
+    _append_export_log(export_root_early, "run_background_batch_export entered (pid={0}).".format(os.getpid()))
     # Logs and failed-records go into the dedicated export_root (under workspace),
     # not under mcs_output where .mcs files live.
     export_root = config.get("export_root") or output_dir
@@ -1414,7 +1478,11 @@ def run_background_batch_export(config_path):
     lock_path = _acquire_export_lock(export_root)
     if not lock_path:
         _append_export_log(export_root, "Another background export process is already running; exiting.")
-        return 0
+        # Return non-zero so the caller (fewshot training) does not mistake a
+        # skipped export for a successful one and then fail with a misleading
+        # "found 0 labels". A return code of 0 here previously let training
+        # proceed on an empty fresh_labels directory.
+        return 1
 
     completed = 0
     failed = 0
@@ -1426,7 +1494,11 @@ def run_background_batch_export(config_path):
             _rt(export_root, "_export_batch_status.json"),
             {"status": "discovering", "pid": os.getpid(), "updated_at_epoch": time.time()},
         )
-        cases = discover_ts_cases(ts_root, cases_filter)
+        # Exclude output/work directories under ts_root so they are not mistaken
+        # for cases (mask_exports with a stray .nii.gz would otherwise show up
+        # as a "Missing .mcs" case).
+        exclude_dirs = [export_root, output_dir, label_staging_dir, label_output_root]
+        cases = discover_ts_cases(ts_root, cases_filter, exclude_dirs=exclude_dirs)
         known = set(row.get("case_id") for row in cases)
         for mapped_id, mapped_dir in (config.get("case_dirs") or {}).items():
             if mapped_id not in known and os.path.isdir(mapped_dir):
@@ -1703,6 +1775,96 @@ def main(source_info_override=None):
         ).format(output_dir),
     )
     return 0
+
+
+# -- Quick export (in-Mimics, no external UI) --------------------------
+
+def quick_export_main():
+    """In-Mimics entry: pick a folder, then export all masks to NIfTI.
+
+    This bypasses the external PySide6 path window — everything runs
+    inside Mimics using the existing export_masks_to_buffers + bridge
+    pipeline.  Useful when the external window fails or feels too heavy.
+    """
+    # 1. Pick output folder via a simple dialog
+    folder = _pick_directory("Choose export output folder")
+    if not folder:
+        return 1
+
+    output_root = folder
+    case_id = _current_project_case_id() or "case"
+    seg_dir = os.path.join(output_root, case_id, "segmentations")
+
+    # 2. Create temp work dir inside .mimics_runtime
+    runtime_dir = os.path.join(_project_root(), ".mimics_runtime", "quick_export")
+    if not os.path.isdir(runtime_dir):
+        os.makedirs(runtime_dir)
+    work_dir = os.path.join(runtime_dir, case_id + "_export_" + uuid.uuid4().hex[:8])
+
+    try:
+        # 3. Export masks to .u8 buffers
+        buffers_dir = os.path.join(work_dir, "buffers")
+        manifest = export_masks_to_buffers(buffers_dir)
+        if not manifest["masks"]:
+            mimics.dialogs.message_box(
+                title="Export",
+                message="No masks found in the current project.",
+            )
+            return 1
+
+        # 4. Build bridge params
+        bridge_params = {
+            "action": "convert",
+            "buffers_dir": buffers_dir,
+            "manifest_path": os.path.join(buffers_dir, "manifest.json"),
+            "case_dir": output_root,
+            "axes": [0, 1, 2],
+            "flips": [False, False, False],
+            "export_space": "source_image",
+            "output_seg_dir": seg_dir,
+            "overwrite_existing": True,
+        }
+        # Attach source_image_path if available
+        source_path = _active_source_path()
+        if source_path:
+            bridge_params["source_image_path"] = source_path
+        # Attach mimics_voxel_to_ras_matrix if available
+        if manifest.get("mimics_voxel_to_ras_matrix"):
+            bridge_params["mimics_voxel_to_ras_matrix"] = manifest["mimics_voxel_to_ras_matrix"]
+
+        # 5. Call bridge
+        result = call_bridge(bridge_params)
+
+        if result.get("status") != "ok":
+            raise RuntimeError(result.get("error", "bridge returned non-ok status"))
+
+        # 6. Done
+        total_new = int(result.get("total_new", 0))
+        total_overwritten = int(result.get("total_overwritten", 0))
+        total_unchanged = int(result.get("total_unchanged", 0))
+        mimics.dialogs.message_box(
+            title="Export Complete",
+            message=(
+                "Masks exported to:\n{0}\n\n"
+                "New: {1}, Overwritten: {2}, Unchanged: {3}"
+            ).format(seg_dir, total_new, total_overwritten, total_unchanged),
+        )
+        return 0
+
+    except Exception as exc:
+        traceback.print_exc()
+        mimics.dialogs.message_box(
+            title="Export Error",
+            message="Export failed:\n\n{0}".format(exc),
+        )
+        return 1
+    finally:
+        # 7. Clean up temp work dir
+        try:
+            if os.path.isdir(work_dir):
+                shutil.rmtree(work_dir, ignore_errors=True)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
