@@ -499,7 +499,9 @@ def stop_background_export():
             target_pid = int(lock_payload.get("pid") or 0)
         except Exception:
             target_pid = None
-    stop_path = os.path.join(export_root, ".mimics_runtime", "_export_stop.json") if export_root else ""
+    stop_path = str(lock_payload.get("stop_path") or "")
+    if not stop_path and export_root:
+        stop_path = os.path.join(export_root, ".mimics_runtime", "_export_stop.json")
     if stop_path:
         try:
             runtime_common.write_json_atomic(
@@ -1152,6 +1154,12 @@ def main_stop_import():
 
 
 def main_stop_export():
+    foreground_count = 0
+    try:
+        import mimics_export
+        foreground_count = mimics_export.cancel_current_project_exports()
+    except Exception:
+        foreground_count = 0
     result = stop_background_export()
     report = result.get("stop_log", "") if isinstance(result, dict) else ""
     if report:
@@ -1165,7 +1173,11 @@ def main_stop_export():
             poll_seconds=0.5,
             timeout_seconds=30.0,
         )
-    _mimics_log(logging.INFO, "Mask export stop requested. Completion will be reported when resources are released.")
+    _mimics_log(
+        logging.INFO,
+        "Mask export stop requested. Foreground exports signalled: {0}. "
+        "Completion will be reported when resources are released.".format(foreground_count),
+    )
     return 0
 
 

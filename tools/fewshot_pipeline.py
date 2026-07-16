@@ -35,6 +35,29 @@ GPU_LOCK_PATH = RESOURCE_LOCK_DIR / "gpu.lock"
 BACKGROUND_MIMICS_LOCK_PATH = RESOURCE_LOCK_DIR / "background_mimics.lock"
 
 
+def cleanup_local_export_jobs(max_age_days=14, max_jobs=100):
+    root = ROOT / ".mimics_runtime" / "export_jobs"
+    if not root.is_dir():
+        return 0
+    now = time.time()
+    rows = []
+    for path in root.iterdir():
+        if not path.is_dir():
+            continue
+        try:
+            rows.append((path.stat().st_mtime, path))
+        except OSError:
+            continue
+    rows.sort(key=lambda item: item[0], reverse=True)
+    removed = 0
+    for index, (modified, path) in enumerate(rows):
+        if index < int(max_jobs) and now - modified <= float(max_age_days) * 86400.0:
+            continue
+        if _remove_tree_quietly(path):
+            removed += 1
+    return removed
+
+
 def write_json_atomic(path, payload, retries=20, max_sleep=0.25):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1426,7 +1449,7 @@ def launch_mimics_export(
 ):
     mimics_exe = find_mimics_exe(mimics_exe)
     if not mimics_exe:
-        append_log(workspace, "MimicsResearch.exe was not found; using existing exported labels only.")
+        append_log(workspace, "A separate background Mimics executable was not found; using existing exported labels only.")
         return {"launched": False, "reason": "mimics_not_found"}
     # The .mcs files live in the configured Mimics output directory, while
     # few-shot control artifacts stay in the fewshot workspace.
@@ -1437,15 +1460,19 @@ def launch_mimics_export(
         time.strftime("%Y%m%dT%H%M%S"),
         uuid.uuid4().hex[:8],
     ))
-    export_root = Path(workspace) / "_export"
+    cleanup_local_export_jobs()
+    export_root = ROOT / ".mimics_runtime" / "export_jobs" / ("fewshot_" + export_job_id)
     export_root.mkdir(parents=True, exist_ok=True)
     if label_staging_dir:
         label_staging_dir = Path(label_staging_dir)
         if label_staging_dir.exists():
             rmtree_with_retry(label_staging_dir)
         label_staging_dir.mkdir(parents=True, exist_ok=True)
-    log_path = export_root / (export_job_id + "_mimics_export.log")
-    config_path_write = export_root / (export_job_id + "_export_config.json")
+    log_path = export_root / "process.log"
+    mimics_log_path = export_root / "mimics_application.log"
+    batch_status_path = export_root / "status.json"
+    handshake_path = export_root / "runner_started.json"
+    config_path_write = export_root / "export_config.json"
     export_config = {
         "ts_root": str(Path(ts_root).resolve()),
         "cases": sorted(cases) if cases else None,
@@ -1454,18 +1481,23 @@ def launch_mimics_export(
         "export_space": str(export_space or "source_image"),
         "output_dir": str(output_dir),
         "export_root": str(export_root),
+        "status_path": str(batch_status_path),
+        "job_runtime": str(export_root),
     }
     if mask_names:
         export_config["mask_names"] = [str(name) for name in mask_names if str(name).strip()]
     if label_staging_dir:
         export_config["label_staging_dir"] = str(label_staging_dir)
     write_json_atomic(config_path_write, export_config)
-    runner = export_root / (export_job_id + "_run_export_batch.py")
+    runner = export_root / "run_export_batch.py"
     write_text_atomic(
         runner,
         "\n".join([
             "# Auto-generated runner for Mimics few-shot label export",
-            "import sys, os",
+            "import sys, os, json, time",
+            "open(r'{}', 'w').write(json.dumps({{'pid': os.getpid(), 'started_at_epoch': time.time()}}))".format(
+                str(handshake_path)
+            ),
             "sys.path.insert(0, r'{}')".format(str(ROOT / "runtime_py35")),
             "import mimics_export",
             "mimics_export.run_background_batch_export(r'{}')".format(str(config_path_write)),
@@ -1485,7 +1517,14 @@ def launch_mimics_export(
         log_handle, actual_log_path, log_warning = open_subprocess_log(log_path, workspace, "Background Mimics export log")
         with log_handle as log:
             proc = subprocess.Popen(
-                [mimics_exe, "-b", "-run_script", str(runner)],
+                [
+                    mimics_exe,
+                    "-background_mode",
+                    "-save_log",
+                    str(mimics_log_path),
+                    "-run_script",
+                    str(runner),
+                ],
                 stdin=subprocess.DEVNULL,
                 stdout=log,
                 stderr=subprocess.STDOUT,
@@ -1504,9 +1543,12 @@ def launch_mimics_export(
             if lock is not None:
                 lock.release()
             result = {"launched": True, "returncode": proc.returncode}
-            batch_status = read_json(export_root / "_export_batch_status.json", {}) or {}
+            batch_status = read_json(batch_status_path, {}) or {}
             if batch_status:
                 result["batch_status"] = batch_status
+            result["runner_started"] = handshake_path.is_file()
+            result["job_runtime"] = str(export_root)
+            result["mimics_log"] = str(mimics_log_path)
             if label_staging_dir:
                 result["label_staging_dir"] = str(label_staging_dir)
             if actual_log_path is not None:
@@ -1517,7 +1559,24 @@ def launch_mimics_export(
                 result["log_warning"] = log_warning
             return result
         time.sleep(2.0)
-    result = {"launched": True, "timed_out": True, "pid": proc.pid}
+    try:
+        proc.terminate()
+        proc.wait(timeout=10)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    if lock is not None:
+        lock.release()
+    result = {
+        "launched": True,
+        "timed_out": True,
+        "pid": proc.pid,
+        "runner_started": handshake_path.is_file(),
+        "job_runtime": str(export_root),
+        "mimics_log": str(mimics_log_path),
+    }
     if label_staging_dir:
         result["label_staging_dir"] = str(label_staging_dir)
     if actual_log_path is not None:
@@ -1745,6 +1804,23 @@ def cmd_train(args):
                 "error": "fresh label export did not finish successfully; training was not started with stale labels",
             })
             return 75
+        batch_status = export_result.get("batch_status") or {}
+        if (
+            str(batch_status.get("status") or "").lower() == "failed"
+            or int(batch_status.get("failed", 0) or 0) > 0
+        ):
+            update_status(status_path, {
+                "status": "failed",
+                "label_export": export_result,
+                "error": (
+                    "Fresh label export failed for {0} selected case(s). Training was not started "
+                    "with an incomplete dataset. Review the job-scoped export diagnostics: {1}"
+                ).format(
+                    int(batch_status.get("failed", 0) or 0),
+                    export_result.get("job_runtime") or export_result.get("log") or workspace,
+                ),
+            })
+            return 75
         update_status(status_path, {"label_export": export_result})
 
         # Guard against the background Mimics export exiting with code 0 without
@@ -1758,18 +1834,32 @@ def cmd_train(args):
             if export_log and Path(export_log).is_file():
                 log_size = Path(export_log).stat().st_size
             batch_status = export_result.get("batch_status") or {}
+            runner_started = bool(export_result.get("runner_started"))
+            if not runner_started:
+                diagnosis = (
+                    "Mimics did not execute the job runner. Check the dedicated Mimics application "
+                    "log for license, startup, or single-instance redirection details."
+                )
+            elif not batch_status:
+                diagnosis = (
+                    "The runner started, but the export script stopped before writing its first status."
+                )
+            else:
+                diagnosis = (
+                    "The export script finished without producing the requested mask. Check whether "
+                    "the selected .mcs projects contain a mask whose name matches the training organ."
+                )
             error = (
-                "Label export reported success (returncode={0}) but produced no files in {1}. "
-                "The background Mimics process likely exited without running the export script "
-                "(export log size={2} bytes; batch_status pid={3}). "
-                "Restart Mimics, ensure only one Mimics instance is running, then retry training. "
-                "If you want to use existing NIfTI labels instead of exporting from .mcs, "
-                "disable label export before training."
+                "Label export produced no files in {1}. {4} "
+                "(returncode={0}; process log size={2} bytes; export status={3}). "
+                "Diagnostics: {5}. Training was not started with missing or stale labels."
             ).format(
                 export_result.get("returncode"),
                 fresh_label_root,
                 log_size,
-                batch_status.get("pid"),
+                batch_status.get("status") or "missing",
+                diagnosis,
+                export_result.get("job_runtime") or export_result.get("log") or workspace,
             )
             update_status(status_path, {
                 "status": "failed",

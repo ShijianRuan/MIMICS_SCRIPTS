@@ -377,7 +377,7 @@ def run_ui(context, preview_path=""):
     window.setObjectName("ioWindow")
     window.setModal(False)
     window.setMinimumWidth(680)
-    window.resize(760, 455 if mode == "export_masks" else 560)
+    window.resize(820, 610 if mode == "export_masks" else 590)
     window.setWindowTitle({
         "import_batch": "Import Dataset",
         "import_single": "Import Single Case",
@@ -435,25 +435,43 @@ def run_ui(context, preview_path=""):
         edit = QtWidgets.QLineEdit(str(initial or ""))
         edit.setClearButtonEnabled(True)
         paste_button = QtWidgets.QPushButton("Paste")
-        button = QtWidgets.QPushButton("Browse...")
         row.addWidget(edit, 1)
         row.addWidget(paste_button)
+        file_button = None
+        if file_or_folder:
+            file_button = QtWidgets.QPushButton("Choose File...")
+            row.addWidget(file_button)
+        button = QtWidgets.QPushButton("Choose Folder...")
         row.addWidget(button)
         form.addLayout(row)
         if hint:
             form.addWidget(_label(QtWidgets, hint, "hint"))
 
-        def browse():
+        def browse_folder_path():
             current = edit.text().strip()
             if not current:
                 current = str(Path.home())
-            value = choose_path_without_shell(
-                QtCore,
-                QtWidgets,
+            if os.path.isfile(current):
+                current = os.path.dirname(current)
+            value = QtWidgets.QFileDialog.getExistingDirectory(
                 window,
                 label,
                 current,
-                allow_file=bool(file_or_folder or not browse_folder),
+                QtWidgets.QFileDialog.ShowDirsOnly,
+            )
+            if value:
+                edit.setProperty("chosenByBrowse", True)
+                edit.setText(str(value))
+
+        def browse_file_path():
+            current = edit.text().strip()
+            if not current:
+                current = str(Path.home())
+            value, _selected_filter = QtWidgets.QFileDialog.getOpenFileName(
+                window,
+                label,
+                current,
+                "Medical images (*.nii *.nii.gz *.mha *.mhd *.nrrd *.dcm);;All files (*)",
             )
             if value:
                 edit.setProperty("chosenByBrowse", True)
@@ -466,7 +484,9 @@ def run_ui(context, preview_path=""):
                 edit.setText(value)
 
         paste_button.clicked.connect(paste_value)
-        button.clicked.connect(browse)
+        button.clicked.connect(browse_folder_path)
+        if file_button is not None:
+            file_button.clicked.connect(browse_file_path)
         return edit
 
     source_initial = context.get("source_initial") or remembered_mode.get("source_path", "")
@@ -505,6 +525,23 @@ def run_ui(context, preview_path=""):
         form.addWidget(mask_names)
         mask_named.toggled.connect(mask_names.setEnabled)
     if mode == "export_masks":
+        form.addWidget(_label(QtWidgets, "MASKS TO EXPORT", "section"))
+        export_mask_row = QtWidgets.QHBoxLayout()
+        mask_all = QtWidgets.QRadioButton("All masks")
+        mask_named = QtWidgets.QRadioButton("Selected names")
+        mask_all.setChecked(True)
+        export_mask_row.addWidget(mask_all)
+        export_mask_row.addWidget(mask_named)
+        export_mask_row.addStretch(1)
+        form.addLayout(export_mask_row)
+        mask_names = QtWidgets.QListWidget()
+        mask_names.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        mask_names.setMaximumHeight(110)
+        available_masks = [str(name) for name in (context.get("mask_names") or []) if str(name).strip()]
+        mask_names.addItems(available_masks)
+        mask_names.setEnabled(False)
+        form.addWidget(mask_names)
+        mask_named.toggled.connect(mask_names.setEnabled)
         policy_row = QtWidgets.QHBoxLayout()
         policy_row.addWidget(_label(QtWidgets, "IF FILES ALREADY EXIST", "section"))
         policy_row.addStretch(1)
@@ -608,6 +645,18 @@ def run_ui(context, preview_path=""):
                 selection["mask_selection"] = "all"
         if mode == "export_masks":
             selection["conflict_policy"] = "overwrite" if overwrite_radio.isChecked() else "skip"
+            if mask_named.isChecked():
+                names = ",".join(item.text().strip() for item in mask_names.selectedItems())
+                if not names:
+                    QtWidgets.QMessageBox.warning(
+                        window,
+                        "Mask Names Required",
+                        "Select one or more masks from the list.",
+                    )
+                    return
+                selection["mask_selection"] = names
+            else:
+                selection["mask_selection"] = "all"
 
         submission_state["running"] = True
         submit.setEnabled(False)

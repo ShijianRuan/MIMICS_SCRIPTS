@@ -46,6 +46,7 @@ _BG_MIMICS_OUTPUT_DIR = None
 _BG_MIMICS_BUSY_NOTICE_AT = 0.0
 _BG_MIMICS_RETRY_OUTPUTS = set()
 _BG_MIMICS_LAUNCH_ACTIVE = False
+_BG_MIMICS_FAILED_OUTPUTS = set()
 _MCS_QUEUE_ACTIVE = "_mcs_queue_active.json"
 _MCS_QUEUE_DONE = "_mcs_queue_done.json"
 _MCS_QUEUE_STOP = "_mcs_queue_stop.json"
@@ -1658,6 +1659,9 @@ def _ensure_bg_mimics_running(output_dir, total_count=0, mark_active=True):
     if _background_stop_requested(output_dir):
         _append_import_log(output_dir, "Background .mcs creation is stopped by user request.")
         return
+    output_key = os.path.normcase(os.path.abspath(output_dir))
+    if output_key in _BG_MIMICS_FAILED_OUTPUTS:
+        return
     # Check if existing background Mimics is still alive
     if _BG_MIMICS_PID and _is_pid_alive(_BG_MIMICS_PID):
         if os.path.abspath(_BG_MIMICS_OUTPUT_DIR or "") == os.path.abspath(output_dir):
@@ -1687,6 +1691,8 @@ def _ensure_bg_mimics_running(output_dir, total_count=0, mark_active=True):
 
 def _schedule_bg_mimics_retry(output_dir, total_count=0):
     key = os.path.normcase(os.path.abspath(output_dir))
+    if key in _BG_MIMICS_FAILED_OUTPUTS:
+        return
     if key in _BG_MIMICS_RETRY_OUTPUTS:
         return
     _BG_MIMICS_RETRY_OUTPUTS.add(key)
@@ -1699,6 +1705,8 @@ def _schedule_bg_mimics_retry(output_dir, total_count=0):
                 time.sleep(30.0)
                 if _background_stop_requested(output_dir, retry_started):
                     _append_import_log(output_dir, "Background Mimics retry stopped by user request.")
+                    return
+                if key in _BG_MIMICS_FAILED_OUTPUTS:
                     return
                 if _BG_MIMICS_PID and _is_pid_alive(_BG_MIMICS_PID):
                     if os.path.abspath(_BG_MIMICS_OUTPUT_DIR or "") == os.path.abspath(output_dir):
@@ -1719,6 +1727,79 @@ def _schedule_bg_mimics_retry(output_dir, total_count=0):
     thread.start()
 
 
+def _watch_background_mimics(process, output_dir, handshake_path, mimics_log_path,
+                              process_log_path, lock_path, lock_token):
+    """Release the shared lock and classify startup/script failures."""
+    global _BG_MIMICS_PID
+    global _BG_MIMICS_OUTPUT_DIR
+    exit_code = None
+    try:
+        exit_code = process.wait()
+    except Exception:
+        try:
+            exit_code = process.poll()
+        except Exception:
+            exit_code = None
+    if _BG_MIMICS_PID == getattr(process, "pid", None):
+        _BG_MIMICS_PID = None
+        _BG_MIMICS_OUTPUT_DIR = None
+    try:
+        runtime_common.release_resource_lock(lock_path, lock_token)
+    except Exception:
+        pass
+
+    status_path = _rt(output_dir, "_mcs_batch_status.json")
+    status = runtime_common.read_json(status_path, {}) or {}
+    handshake_exists = os.path.isfile(handshake_path)
+    if handshake_exists and status.get("status") in ("closed", "cancelled"):
+        return
+
+    if not handshake_exists or status.get("status") not in ("closed", "cancelled"):
+        output_key = os.path.normcase(os.path.abspath(output_dir))
+        _BG_MIMICS_FAILED_OUTPUTS.add(output_key)
+        mimics_tail = runtime_common.read_text_tail(mimics_log_path, 12000)
+        process_tail = runtime_common.read_text_tail(process_log_path, 12000)
+        if not handshake_exists:
+            reason = (
+                "Background Mimics exited before executing the import runner "
+                "(exit code {0})."
+            ).format(exit_code)
+        else:
+            reason = (
+                "Background Mimics executed the import runner but stopped before "
+                "reporting completion (exit code {0})."
+            ).format(exit_code)
+        details = []
+        if mimics_tail:
+            details.append("Mimics log tail:\n" + mimics_tail)
+        if process_tail:
+            details.append("Process log tail:\n" + process_tail)
+        message = reason
+        if details:
+            message += "\n\n" + "\n\n".join(details)
+        message += (
+            "\n\nPrepared import data was kept for retry. "
+            "Mimics log: {0}\nProcess log: {1}"
+        ).format(mimics_log_path, process_log_path)
+        _append_import_log(output_dir, message)
+        try:
+            runtime_common.write_json_atomic(
+                status_path,
+                {
+                    "status": "failed",
+                    "pid": getattr(process, "pid", 0),
+                    "exit_code": exit_code,
+                    "error": reason,
+                    "mimics_log": mimics_log_path,
+                    "process_log": process_log_path,
+                    "runner_started": bool(handshake_exists),
+                    "updated_at_epoch": time.time(),
+                },
+            )
+        except Exception:
+            pass
+
+
 def _launch_background_mimics(output_dir, total_count=0, schedule_retry=True):
     """Launch Mimics in background mode to create .mcs files from prepared data.
 
@@ -1729,14 +1810,30 @@ def _launch_background_mimics(output_dir, total_count=0, schedule_retry=True):
     global _BG_MIMICS_PID
     global _BG_MIMICS_OUTPUT_DIR
     global _BG_MIMICS_BUSY_NOTICE_AT
+    output_key = os.path.normcase(os.path.abspath(output_dir))
+    if output_key in _BG_MIMICS_FAILED_OUTPUTS:
+        return None
     if _background_stop_requested(output_dir):
         _append_import_log(output_dir, "Background .mcs creation was not started because stop was requested.")
         return None
     mimics_exe = _find_mimics_exe()
     if not mimics_exe:
-        _append_import_log(output_dir, "MimicsResearch.exe was not found; background .mcs creation cannot start.")
-        if schedule_retry:
-            _schedule_bg_mimics_retry(output_dir, total_count=total_count)
+        message = (
+            "A separate background Mimics executable was not found. The open MimicsMedical.exe "
+            "is not reused automatically because single-instance redirection can close or reconfigure "
+            "the annotation window. Configure MIMICS_BACKGROUND_EXE if needed."
+        )
+        _append_import_log(output_dir, message)
+        _BG_MIMICS_FAILED_OUTPUTS.add(output_key)
+        runtime_common.write_json_atomic(
+            _rt(output_dir, "_mcs_batch_status.json"),
+            {
+                "status": "failed",
+                "error": message,
+                "runner_started": False,
+                "updated_at_epoch": time.time(),
+            },
+        )
         return None
 
     # Find the create_mcs_batch.py script
@@ -1757,13 +1854,18 @@ def _launch_background_mimics(output_dir, total_count=0, schedule_retry=True):
 
     # Write a runner script that Mimics can execute
     runner_path = _rt(output_dir, "_run_create_mcs.py")
+    handshake_path = _rt(output_dir, "_background_import_runner_started.json")
     runner_parent = os.path.dirname(runner_path)
     if not os.path.isdir(runner_parent):
         os.makedirs(runner_parent)
     script_dir = os.path.dirname(script_path)
     with open(runner_path, "w") as f:
         f.write("# Auto-generated runner for background Mimics .mcs creation\n")
-        f.write("import sys, os\n")
+        f.write("import sys, os, json, time\n")
+        f.write(
+            "open({0}, 'w').write(json.dumps({{'pid': os.getpid(), "
+            "'started_at_epoch': time.time()}}))\n".format(json.dumps(handshake_path))
+        )
         f.write("sys.path.insert(0, {0})\n".format(json.dumps(script_dir)))
         f.write("os.environ['MIMICS_BRIDGE_PYTHON'] = {0}\n".format(json.dumps(_python_exe())))
         f.write("os.environ['MIMICS_BRIDGE_SCRIPT'] = {0}\n".format(json.dumps(_bridge_script())))
@@ -1775,8 +1877,19 @@ def _launch_background_mimics(output_dir, total_count=0, schedule_retry=True):
         )
 
     # Launch Mimics in background mode
-    cmd = [mimics_exe, "-b", "-run_script", runner_path]
     log_path = _rt(output_dir, "_background_mimics.log")
+    mimics_log_path = _rt(output_dir, "_background_mimics_application.log")
+    for stale_path in (handshake_path, mimics_log_path):
+        try:
+            if os.path.isfile(stale_path):
+                os.remove(stale_path)
+        except OSError:
+            pass
+    cmd = runtime_common.background_mimics_command(
+        mimics_exe,
+        runner_path,
+        mimics_log_path=mimics_log_path,
+    )
     _rotate_log_file(log_path)
     lock_path = _resource_lock_path("background_mimics.lock")
     lock_token = runtime_common.acquire_resource_lock(
@@ -1828,8 +1941,24 @@ def _launch_background_mimics(output_dir, total_count=0, schedule_retry=True):
         )
         _append_import_log(
             output_dir,
-            "Background Mimics started (PID={0}) for .mcs creation.".format(process.pid),
+            "Background Mimics launch requested (PID={0}) for .mcs creation. "
+            "Waiting for runner handshake.".format(process.pid),
         )
+        watcher = threading.Thread(
+            target=_watch_background_mimics,
+            args=(
+                process,
+                output_dir,
+                handshake_path,
+                mimics_log_path,
+                log_path,
+                lock_path,
+                lock_token,
+            ),
+            name="MimicsBackgroundImportWatcher",
+        )
+        watcher.daemon = True
+        watcher.start()
         return process
     except Exception as e:
         runtime_common.release_resource_lock(lock_path, lock_token)
@@ -1880,6 +2009,21 @@ def _first_mcs_monitor_tick(monitor):
                     failed,
                     output_dir,
                     "\n\nReview mimics_import.log and _failed_cases.json before retrying failed cases." if failed else "",
+                ),
+                ui_blocking=False,
+            )
+        elif status.get("status") == "failed":
+            monitor["done"] = True
+            _stop_import_monitor(monitor_key)
+            _safe_message_box(
+                "Import Background Worker Failed",
+                (
+                    "{0}\n\nPrepared data was kept and the open Mimics project "
+                    "was not modified.\n\nMimics log: {1}\nProcess log: {2}"
+                ).format(
+                    status.get("error", "Background Mimics could not complete .mcs creation."),
+                    status.get("mimics_log", ""),
+                    status.get("process_log", ""),
                 ),
                 ui_blocking=False,
             )
@@ -2553,6 +2697,7 @@ def main(import_mode=None, case_info_override=None):
         None         — interactive (ask)
         "single_case" — skip dialog, single-case mode directly
     """
+    _BG_MIMICS_FAILED_OUTPUTS.clear()
     live_bridge_jobs = []
     for job_path, process in list(_BRIDGE_PROCESSES.items()):
         try:

@@ -848,6 +848,33 @@ class TestMimicsBridgeBufferMapping(unittest.TestCase):
         self.assertEqual(0, int(exported[0, 0, 0]))
         self.assertEqual(1, int(exported[1, 0, 0]))
 
+    def test_convert_strict_source_export_refuses_missing_source_geometry(self):
+        from mimics_bridge import do_convert
+
+        case_dir = os.path.join(self.tmp, "case_missing_source")
+        buffers_dir = os.path.join(self.tmp, "buffers_missing_source")
+        os.makedirs(case_dir)
+        os.makedirs(buffers_dir)
+        data = np.zeros((2, 2, 1), dtype=np.uint8)
+        with open(os.path.join(buffers_dir, "organ.u8"), "wb") as handle:
+            handle.write(data.tobytes())
+        manifest_path = os.path.join(buffers_dir, "manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as handle:
+            json.dump({
+                "mimics_shape": [2, 2, 1],
+                "mimics_voxel_to_ras_matrix": np.eye(4).tolist(),
+                "masks": [{"original_name": "organ", "u8_filename": "organ.u8"}],
+            }, handle)
+        result = do_convert({
+            "buffers_dir": buffers_dir,
+            "manifest_path": manifest_path,
+            "case_dir": case_dir,
+            "export_space": "source_image",
+            "require_source_geometry": True,
+        })
+        self.assertEqual("error", result["status"])
+        self.assertIn("original image geometry", result["error"])
+
     def test_convert_can_write_to_job_scoped_segmentations(self):
         from mimics_bridge import do_convert
         import nibabel as nib
@@ -2626,6 +2653,32 @@ class TestNewFeatures(unittest.TestCase):
         finally:
             mimics_export._EXPORT_LAUNCH_THREADS[:] = previous
 
+    def test_current_project_export_does_not_launch_background_mimics(self):
+        import inspect
+        import mimics_export
+
+        source = inspect.getsource(mimics_export._start_current_project_export)
+        self.assertNotIn("_launch_background_batch_export", source)
+        self.assertIn("try_acquire_local_operation", source)
+        self.assertIn("_start_foreground_export_monitor", source)
+        tick = inspect.getsource(mimics_export._foreground_export_tick)
+        self.assertIn("_launch_bridge_background", tick)
+        self.assertNotIn("MimicsResearch", tick)
+
+    def test_mimics_export_resolves_configured_mcs_output_dir(self):
+        import mimics_export
+
+        configured = os.path.join(self.tmp, "configured_mcs")
+        old_cache = mimics_export._CONFIG_CACHE
+        try:
+            mimics_export._CONFIG_CACHE = {"mimics_output_dir": configured}
+            self.assertEqual(
+                os.path.abspath(configured),
+                mimics_export._resolve_export_output_dir(os.path.join(self.tmp, "dataset")),
+            )
+        finally:
+            mimics_export._CONFIG_CACHE = old_cache
+
     def test_mask_import_uses_correct_lps_to_ras_world_conversion(self):
         from mask_import import _derive_mimics_voxel_to_ras_matrix
 
@@ -2706,28 +2759,26 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn("case_info_override or _discover_single_case", single_branch)
         export_setup = inspect.getsource(mimics_export._launch_external_export_setup)
         self.assertIn('"configured_output": ""', export_setup)
-        self.assertIn('"--external-setup"', export_setup)
-        self.assertIn('"--mcs-path"', export_setup)
-        self.assertNotIn('"--mcs-dir"', export_setup)
+        self.assertIn("_start_current_project_export", export_setup)
+        self.assertIn('"mask_names": _current_mask_names()', export_setup)
+        self.assertNotIn("_launch_background_batch_export", export_setup)
         async_launch = inspect.getsource(mimics_export._launch_background_batch_export_async)
         self.assertIn("thread.start()", async_launch)
 
-    def test_external_pyside_path_browsers_do_not_use_windows_shell_or_sync_network_stats(self):
+    def test_external_pyside_path_browsers_use_native_dialogs_outside_mimics(self):
         import inspect
         import mask_import
         import tools.fewshot_training_setup_ui as training_ui
         import tools.io_path_setup_ui as path_ui
         import tools.mask_file_picker_ui as mask_picker
 
-        browser_source = inspect.getsource(path_ui.choose_path_without_shell)
-        self.assertIn("threading.Thread", browser_source)
-        self.assertIn("os.scandir", browser_source)
-        self.assertNotIn("QFileDialog", browser_source)
-        self.assertNotIn("os.path.isfile(typed)", browser_source)
-        self.assertNotIn("os.path.isdir(typed)", browser_source)
-        self.assertNotIn("QFileDialog", inspect.getsource(training_ui.QtTrainingSetupApp.browse_dataset))
+        ui_source = inspect.getsource(path_ui.run_ui)
+        self.assertIn("QFileDialog.getExistingDirectory", ui_source)
+        self.assertIn("QFileDialog.getOpenFileName", ui_source)
+        self.assertIn('QPushButton("Paste")', ui_source)
+        self.assertIn("QFileDialog", inspect.getsource(training_ui.QtTrainingSetupApp.browse_dataset))
         self.assertIn("threading.Thread", inspect.getsource(training_ui.QtTrainingSetupApp.apply_dataset_root))
-        self.assertNotIn("QFileDialog", inspect.getsource(mask_picker.main))
+        self.assertIn("QFileDialog.getOpenFileNames", inspect.getsource(mask_picker.main))
         self.assertNotIn("os.path.isfile(p)", inspect.getsource(mask_import._start_import_for_paths))
 
         import tools.fewshot_status_viewer as status_viewer
@@ -3714,13 +3765,17 @@ class TestNewFeatures(unittest.TestCase):
             pipeline.resolve_mimics_output_dir = old_resolve
 
         self.assertTrue(result["launched"])
-        self.assertIn("_export", result["log"])
-        self.assertIn("train_unique_mimics_export.log", result["log"])
+        self.assertIn(os.path.join(".mimics_runtime", "export_jobs"), result["log"])
+        self.assertIn(os.path.join("train_unique", "process.log"), result["log"])
         runner = Path(launched[0][0][-1])
-        self.assertIn("_export", str(runner))
-        self.assertEqual("train_unique_run_export_batch.py", runner.name)
-        config_path = workspace / "_export" / "train_unique_export_config.json"
+        self.assertIn(os.path.join(".mimics_runtime", "export_jobs"), str(runner))
+        self.assertEqual("run_export_batch.py", runner.name)
+        config_path = Path(PROJECT_ROOT) / ".mimics_runtime" / "export_jobs" / "fewshot_train_unique" / "export_config.json"
         config = json.loads(config_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            str(Path(PROJECT_ROOT) / ".mimics_runtime" / "export_jobs" / "fewshot_train_unique" / "status.json"),
+            config["status_path"],
+        )
         self.assertEqual(str(configured_mcs), config["output_dir"])
         self.assertEqual(
             str(workspace / "runs" / "train_unique" / "fresh_labels"),
@@ -4664,13 +4719,13 @@ class TestNewFeatures(unittest.TestCase):
         shutil.rmtree(run_root, ignore_errors=True)
         shutil.rmtree(os.path.dirname(os.path.dirname(descriptor)), ignore_errors=True)
 
-    def test_external_path_browser_avoids_qfiledialog_and_supports_paste(self):
+    def test_external_path_browser_uses_native_dialog_and_supports_paste(self):
         import inspect
         import tools.io_path_setup_ui as ui
 
-        source = inspect.getsource(ui.choose_path_without_shell)
-        self.assertNotIn("QFileDialog", source)
-        self.assertIn("os.scandir", source)
+        source = inspect.getsource(ui.run_ui)
+        self.assertIn("QFileDialog.getExistingDirectory", source)
+        self.assertIn("QFileDialog.getOpenFileName", source)
         self.assertIn("clipboard", source)
 
     def test_background_mimics_launch_is_off_the_gui_callback(self):

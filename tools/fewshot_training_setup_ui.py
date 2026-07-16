@@ -18,6 +18,7 @@ import threading
 import time
 import traceback
 import uuid
+from pathlib import Path
 try:
     from queue import Empty, Queue
 except ImportError:
@@ -37,12 +38,6 @@ try:
     from fewshot_strategies import DEFAULT_OPTIONS, STRATEGIES, normalize_strategy_options, strategy_defaults, strategy_ids, strategy_label, strategy_summary, suggested_strategy
 except ImportError:
     from tools.fewshot_strategies import DEFAULT_OPTIONS, STRATEGIES, normalize_strategy_options, strategy_defaults, strategy_ids, strategy_label, strategy_summary, suggested_strategy
-try:
-    from io_path_setup_ui import choose_path_without_shell
-except ImportError:
-    from tools.io_path_setup_ui import choose_path_without_shell
-
-
 TITLE = "DINOv3 Few-Shot Training"
 STRATEGY_DATA_KEYS = set(DEFAULT_OPTIONS.keys())
 DECODER_CHOICES = (
@@ -1757,20 +1752,22 @@ class QtTrainingSetupApp(object):
             self.case_list.item(idx).setSelected(True)
 
     def browse_dataset(self):
-        path = choose_path_without_shell(
-            self.QtCore, self.QtWidgets, self.window,
-            "Select dataset folder", self.context.get("ts_root", ""),
-            allow_file=False,
+        path = self.QtWidgets.QFileDialog.getExistingDirectory(
+            self.window,
+            "Select dataset folder",
+            self.context.get("ts_root", "") or str(Path.home()),
+            self.QtWidgets.QFileDialog.ShowDirsOnly,
         )
         if path:
             self.apply_dataset_root(path)
 
     def browse_mcs_folder(self):
         current = str(self.mcs_folder_edit.text()).strip() if self.mcs_folder_edit is not None else ""
-        path = choose_path_without_shell(
-            self.QtCore, self.QtWidgets, self.window,
-            "Select folder containing saved .mcs projects", current,
-            allow_file=False,
+        path = self.QtWidgets.QFileDialog.getExistingDirectory(
+            self.window,
+            "Select folder containing saved .mcs projects",
+            current or str(Path.home()),
+            self.QtWidgets.QFileDialog.ShowDirsOnly,
         )
         if path and self.mcs_folder_edit is not None:
             self.mcs_folder_edit.setText(os.path.abspath(path))
@@ -1791,6 +1788,8 @@ class QtTrainingSetupApp(object):
         generation = self._dataset_scan_generation
         project_root = self.context.get("project_root", "")
         self._set_status("Checking dataset in the background...")
+        if self.case_list is not None:
+            self.case_list.setEnabled(False)
 
         def scan_dataset():
             try:
@@ -1817,6 +1816,8 @@ class QtTrainingSetupApp(object):
             if error:
                 self._set_status(error)
                 self._append_log(error)
+                if self.case_list is not None:
+                    self.case_list.setEnabled(True)
                 continue
             self.context["ts_root"] = path
             self.context["workspace"] = os.path.join(path, "fewshot_models")
@@ -1826,8 +1827,8 @@ class QtTrainingSetupApp(object):
             self.context["case_ids"] = cases
             if self.case_list is not None:
                 self.case_list.clear()
-                for case_id in cases:
-                    self.case_list.addItem(str(case_id))
+                self.case_list.addItems([str(case_id) for case_id in cases])
+                self.case_list.setEnabled(True)
             message = "Dataset changed: {0} ({1} cases found)".format(path, len(cases))
             self._set_status(message)
             self._append_log(message)

@@ -190,9 +190,12 @@ def launch_create_mcs(output_dir, mimics_exe, bridge_python, lock_timeout_second
     )
     lock = _acquire_background_mimics_lock("batch .mcs creation", lock_timeout_seconds)
     log = open(str(runtime_dir / "_background_mimics.log"), "ab")
+    mimics_log = runtime_dir / "_background_mimics_application.log"
     try:
         proc = subprocess.Popen(
-            [mimics_exe, "-b", "-run_script", str(runner)],
+            runtime_common.background_mimics_command(
+                mimics_exe, str(runner), mimics_log_path=str(mimics_log)
+            ),
             stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=subprocess.STDOUT,
@@ -207,11 +210,17 @@ def launch_create_mcs(output_dir, mimics_exe, bridge_python, lock_timeout_second
 
 
 def launch_export_labels(ts_root, cases, mimics_exe, axes, flips, lock_timeout_seconds=0.0,
-                         mcs_dir=None, label_output_root=None, overwrite_source=False):
+                         mcs_dir=None, label_output_root=None, overwrite_source=False,
+                         mask_names=None):
     output_dir = Path(mcs_dir).resolve() if mcs_dir else ts_root / "mcs_output"
     output_dir.mkdir(parents=True, exist_ok=True)
-    config = output_dir / "_export_batch_config.json"
-    runner = output_dir / "_run_export_batch.py"
+    job_id = "export_{}_{}".format(time.strftime("%Y%m%dT%H%M%S"), uuid.uuid4().hex[:8])
+    job_dir = Path(ROOT) / ".mimics_runtime" / "export_jobs" / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    config = job_dir / "export_config.json"
+    runner = job_dir / "run_export_batch.py"
+    status_path = job_dir / "status.json"
+    stop_path = job_dir / "_export_stop.json"
     write_json_atomic(
         config,
         {
@@ -220,8 +229,14 @@ def launch_export_labels(ts_root, cases, mimics_exe, axes, flips, lock_timeout_s
             "axes": axes,
             "flips": flips,
             "output_dir": str(output_dir),
+            "export_root": str(job_dir),
+            "display_output_root": str(Path(label_output_root).resolve()) if label_output_root else str(ts_root),
             "label_output_root": str(Path(label_output_root).resolve()) if label_output_root else "",
             "overwrite_existing": bool(overwrite_source),
+            "mask_names": list(mask_names or []),
+            "status_path": str(status_path),
+            "stop_path": str(stop_path),
+            "job_runtime": str(job_dir),
         },
     )
     runner.write_text(
@@ -236,15 +251,24 @@ def launch_export_labels(ts_root, cases, mimics_exe, axes, flips, lock_timeout_s
         encoding="utf-8",
     )
     lock = _acquire_background_mimics_lock("batch label export", lock_timeout_seconds)
-    log = open(str(output_dir / "_background_export_mimics.log"), "ab")
+    log = open(str(job_dir / "process.log"), "ab")
+    mimics_log = job_dir / "mimics_application.log"
     try:
         proc = subprocess.Popen(
-            [mimics_exe, "-b", "-run_script", str(runner)],
+            runtime_common.background_mimics_command(
+                mimics_exe, str(runner), mimics_log_path=str(mimics_log)
+            ),
             stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=subprocess.STDOUT,
         )
-        lock.update_pid(proc.pid, kind="export_labels", ts_root=str(ts_root.resolve()))
+        lock.update_pid(
+            proc.pid,
+            kind="export_labels",
+            ts_root=str(ts_root.resolve()),
+            export_root=str(Path(label_output_root).resolve()) if label_output_root else str(ts_root),
+            stop_path=str(stop_path),
+        )
         return proc
     except Exception:
         lock.release()
@@ -310,7 +334,7 @@ def cmd_prepare_import(args):
         return 0
     mimics_exe = find_mimics_exe(args.mimics_exe)
     if not mimics_exe:
-        print("MimicsResearch.exe was not found. Manifests are ready; run .mcs creation later.", file=sys.stderr)
+        print("A background Mimics executable was not found. Manifests are ready; run .mcs creation later.", file=sys.stderr)
         return 2
     try:
         proc = launch_create_mcs(output_dir, mimics_exe, bridge_python, args.background_mimics_lock_timeout_seconds)
@@ -324,7 +348,7 @@ def cmd_prepare_import(args):
 def cmd_export_labels(args):
     mimics_exe = find_mimics_exe(args.mimics_exe)
     if not mimics_exe:
-        print("MimicsResearch.exe was not found.", file=sys.stderr)
+        print("A background Mimics executable was not found.", file=sys.stderr)
         return 2
     cases = set(args.cases.split(",")) if args.cases else None
     try:
@@ -338,6 +362,10 @@ def cmd_export_labels(args):
             mcs_dir=args.mcs_dir,
             label_output_root=args.output_dir,
             overwrite_source=args.overwrite_source,
+            mask_names=[
+                value.strip() for value in str(args.masks or "all").split(",")
+                if value.strip() and value.strip().lower() != "all"
+            ],
         )
     except ResourceLockTimeout as exc:
         print("Background Mimics is busy: {}".format(exc), file=sys.stderr)
@@ -499,6 +527,7 @@ def build_parser():
     p.add_argument("--cases")
     p.add_argument("--mimics-exe")
     p.add_argument("--mcs-dir", help="Folder containing the saved .mcs projects")
+    p.add_argument("--masks", default="all", help="all or comma-separated mask names")
     destination = p.add_mutually_exclusive_group(required=True)
     destination.add_argument("--output-dir", help="Safe export root; writes <root>/<case>/segmentations without overwriting")
     destination.add_argument("--overwrite-source", action="store_true", help="Explicitly overwrite <case>/segmentations")

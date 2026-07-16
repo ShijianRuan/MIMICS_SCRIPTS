@@ -11,12 +11,6 @@ import time
 import uuid
 from pathlib import Path
 
-try:
-    from io_path_setup_ui import choose_path_without_shell
-except ImportError:
-    from tools.io_path_setup_ui import choose_path_without_shell
-
-
 def read_json(path):
     with open(path, "r", encoding="utf-8") as handle:
         return json.load(handle)
@@ -50,7 +44,7 @@ def main():
     status_path = context["status_path"]
 
     try:
-        from PySide6 import QtCore, QtWidgets
+        from PySide6 import QtWidgets
     except Exception as exc:
         write_json(status_path, {
             "status": "failed",
@@ -60,14 +54,11 @@ def main():
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     app.setApplicationName("Mimics Script")
-    paths = choose_path_without_shell(
-        QtCore,
-        QtWidgets,
+    paths, _selected_filter = QtWidgets.QFileDialog.getOpenFileNames(
         None,
         "Select Masks to Import",
         str(Path.home()),
-        allow_file=True,
-        multi_file=True,
+        "Segmentation files (*.nii *.nii.gz *.mha *.mhd *.nrrd *.seg.nii *.seg.nii.gz);;All files (*)",
     )
     if not paths:
         write_json(status_path, {"status": "cancelled", "updated_at_epoch": time.time()})

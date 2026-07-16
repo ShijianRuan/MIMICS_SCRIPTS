@@ -1404,6 +1404,19 @@ def do_convert(params: dict) -> dict:
     except Exception:
         source_geometry = None
     export_space = str(params.get("export_space") or manifest.get("export_space") or "source_image").lower()
+    if (
+        export_space in ("source", "source_image", "source_grid")
+        and bool(params.get("require_source_geometry", False))
+        and source_geometry is None
+    ):
+        return {
+            "status": "error",
+            "error": (
+                "Source-image export was requested, but the original image geometry could not be "
+                "resolved. Select the original image or case folder; export was stopped instead of "
+                "writing a mask with ambiguous shape or orientation."
+            ),
+        }
     if export_space in ("source", "source_image", "source_grid") and source_geometry:
         export_shape = tuple(int(value) for value in source_geometry["shape"])
         export_affine = np.asarray(source_geometry["affine"], dtype=float)
@@ -1429,17 +1442,19 @@ def do_convert(params: dict) -> dict:
     total_overwritten = 0
     total_unchanged = 0
     total_skipped_existing = 0
+    final_export_shape = list(export_shape) if export_shape is not None else None
 
     for mask_info in manifest["masks"]:
         name = mask_info["original_name"]
-        u8_filename = mask_info.get("u8_filename") or (mask_info.get("safe_name", name) + ".u8")
+        safe_name = str(mask_info.get("safe_name") or name)
+        u8_filename = mask_info.get("u8_filename") or (safe_name + ".u8")
         u8_path = os.path.join(buffers_dir, u8_filename)
 
         if not os.path.isfile(u8_path):
             exported.append({"name": name, "action": "skipped", "reason": "buffer not found"})
             continue
 
-        nifti_path = os.path.join(seg_dir, name + ".nii.gz")
+        nifti_path = os.path.join(seg_dir, safe_name + ".nii.gz")
 
         # Read .u8, inverse map
         with open(u8_path, "rb") as f:
@@ -1466,6 +1481,8 @@ def do_convert(params: dict) -> dict:
             )
         else:
             nifti_array = mimics_grid_array
+        if final_export_shape is None:
+            final_export_shape = [int(value) for value in nifti_array.shape]
 
         # If file already exists, compare content; skip write if unchanged.
         if os.path.isfile(nifti_path):
@@ -1511,6 +1528,7 @@ def do_convert(params: dict) -> dict:
         "export_voxel_to_ras_matrix_source": export_affine_source,
         "export_voxel_to_ras_matrix": export_affine.tolist(),
         "output_seg_dir": seg_dir,
+        "export_shape": final_export_shape or [],
     }
 
 

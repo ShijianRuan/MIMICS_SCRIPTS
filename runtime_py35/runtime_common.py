@@ -264,16 +264,14 @@ def _current_process_executable():
 
 
 def find_mimics_exe(force_refresh=False):
-    """Find MimicsResearch.exe using the most reliable methods first.
+    """Find a separate Mimics executable for background automation.
 
     Search order:
-      1. MIMICS_EXE environment variable (explicit override)
+      1. MIMICS_BACKGROUND_EXE / MIMICS_EXE explicit override
       2. Hardcoded path constant (HARDCODED_MIMICS_EXE) — for machines where
          the auto-detection below fails; set it to the full path of
          MimicsResearch.exe on that machine.
-      3. sys.executable — when running inside Mimics, this IS
-         MimicsResearch.exe (or its Python wrapper).  Walk up from
-         the executable's directory to find MimicsResearch.exe.
+      3. The current installation directory, preferring MimicsResearch.exe.
       4. Windows registry (Uninstall keys for Materialise Mimics)
       5. Program Files sub-directories (any Mimics version)
       6. Drive-root scan on C/D/E/F for common folder names
@@ -284,7 +282,10 @@ def find_mimics_exe(force_refresh=False):
         return cached
 
     # 1. Explicit override
-    env_exe = os.environ.get("MIMICS_EXE", "").strip()
+    env_exe = (
+        os.environ.get("MIMICS_BACKGROUND_EXE", "").strip()
+        or os.environ.get("MIMICS_EXE", "").strip()
+    )
     if env_exe and os.path.isfile(env_exe):
         value = os.path.abspath(env_exe)
         _MIMICS_EXE_CACHE.update({"value": value, "checked_at": now})
@@ -299,6 +300,7 @@ def find_mimics_exe(force_refresh=False):
     # 2. sys.executable — inside Mimics this is the Mimics process itself
     #    or a Python DLL host beside MimicsResearch.exe.
     current_exe = _current_process_executable()
+    current_medical_exe = ""
     exe_dir = os.path.dirname(current_exe) if current_exe else ""
     if exe_dir:
         # The executable itself might be MimicsResearch.exe
@@ -309,7 +311,10 @@ def find_mimics_exe(force_refresh=False):
         if exe_name == "mimicsresearch.exe":
             _MIMICS_EXE_CACHE.update({"value": current_exe, "checked_at": now})
             return current_exe
-        # Walk up from exe_dir looking for MimicsResearch.exe
+        current_medical_exe = current_exe if exe_name == "mimicsmedical.exe" else ""
+        # Walk up from exe_dir looking for the dedicated background-capable
+        # Research executable. The foreground Medical executable is excluded
+        # unless the user explicitly selects it through an environment override.
         walk = exe_dir
         for _ in range(5):
             candidate = os.path.join(walk, "MimicsResearch.exe")
@@ -321,6 +326,19 @@ def find_mimics_exe(force_refresh=False):
             if parent == walk:
                 break
             walk = parent
+
+    def usable_background_candidate(candidate):
+        if not candidate or not os.path.isfile(candidate):
+            return False
+        if current_medical_exe:
+            try:
+                if os.path.normcase(os.path.abspath(candidate)) == os.path.normcase(
+                    os.path.abspath(current_medical_exe)
+                ):
+                    return False
+            except Exception:
+                pass
+        return True
 
     # Cache only the expensive registry/Program Files/drive scan. Explicit
     # overrides and the current Mimics executable above must take effect
@@ -361,11 +379,12 @@ def find_mimics_exe(force_refresh=False):
                             except Exception:
                                 continue
                             if loc and os.path.isdir(loc):
-                                candidate = os.path.join(loc, "MimicsResearch.exe")
-                                if os.path.isfile(candidate):
-                                    value = os.path.abspath(candidate)
-                                    _MIMICS_EXE_CACHE.update({"value": value, "checked_at": now})
-                                    return value
+                                for executable_name in ("MimicsResearch.exe", "MimicsMedical.exe"):
+                                    candidate = os.path.join(loc, executable_name)
+                                    if usable_background_candidate(candidate):
+                                        value = os.path.abspath(candidate)
+                                        _MIMICS_EXE_CACHE.update({"value": value, "checked_at": now})
+                                        return value
                     finally:
                         winreg.CloseKey(base)
 
@@ -381,11 +400,12 @@ def find_mimics_exe(force_refresh=False):
         for name in sorted(entries, reverse=True):
             if "mimics" not in name.lower():
                 continue
-            candidate = os.path.join(pf, name, "MimicsResearch.exe")
-            if os.path.isfile(candidate):
-                value = os.path.abspath(candidate)
-                _MIMICS_EXE_CACHE.update({"value": value, "checked_at": now})
-                return value
+            for executable_name in ("MimicsResearch.exe", "MimicsMedical.exe"):
+                candidate = os.path.join(pf, name, executable_name)
+                if usable_background_candidate(candidate):
+                    value = os.path.abspath(candidate)
+                    _MIMICS_EXE_CACHE.update({"value": value, "checked_at": now})
+                    return value
 
         materialise = os.path.join(pf, "Materialise")
         if os.path.isdir(materialise):
@@ -396,11 +416,12 @@ def find_mimics_exe(force_refresh=False):
             for name in sorted(materialise_entries, reverse=True):
                 if "mimics" not in name.lower():
                     continue
-                candidate = os.path.join(materialise, name, "MimicsResearch.exe")
-                if os.path.isfile(candidate):
-                    value = os.path.abspath(candidate)
-                    _MIMICS_EXE_CACHE.update({"value": value, "checked_at": now})
-                    return value
+                for executable_name in ("MimicsResearch.exe", "MimicsMedical.exe"):
+                    candidate = os.path.join(materialise, name, executable_name)
+                    if usable_background_candidate(candidate):
+                        value = os.path.abspath(candidate)
+                        _MIMICS_EXE_CACHE.update({"value": value, "checked_at": now})
+                        return value
 
     # 5. Drive-root scan for common folder patterns
     for drive in ("C:", "D:", "E:", "F:"):
@@ -412,11 +433,12 @@ def find_mimics_exe(force_refresh=False):
             lower = name.lower()
             if "mimics" not in lower:
                 continue
-            candidate = os.path.join(drive + "\\", name, "MimicsResearch.exe")
-            if os.path.isfile(candidate):
-                value = os.path.abspath(candidate)
-                _MIMICS_EXE_CACHE.update({"value": value, "checked_at": now})
-                return value
+            for executable_name in ("MimicsResearch.exe", "MimicsMedical.exe"):
+                candidate = os.path.join(drive + "\\", name, executable_name)
+                if usable_background_candidate(candidate):
+                    value = os.path.abspath(candidate)
+                    _MIMICS_EXE_CACHE.update({"value": value, "checked_at": now})
+                    return value
 
     _MIMICS_EXE_CACHE.update({"value": None, "checked_at": now})
     return None
@@ -447,6 +469,32 @@ def background_process_kwargs(low_priority=True):
         BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
         kwargs["creationflags"] = kwargs.get("creationflags", 0) | BELOW_NORMAL_PRIORITY_CLASS
     return kwargs
+
+
+def background_mimics_command(mimics_exe, runner_path, mimics_log_path=None, script_args=None):
+    """Build the documented background-script command consistently."""
+    command = [str(mimics_exe), "-background_mode"]
+    if mimics_log_path:
+        command.extend(["-save_log", str(mimics_log_path)])
+    command.extend(["-run_script", str(runner_path)])
+    for value in script_args or []:
+        command.append(str(value))
+    return command
+
+
+def read_text_tail(path, max_bytes=16384):
+    """Read a bounded UTF-8 diagnostic tail from a possibly locked log."""
+    if not path or not os.path.isfile(path):
+        return ""
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - int(max_bytes)), os.SEEK_SET)
+            data = handle.read(int(max_bytes))
+        return data.decode("utf-8", "replace").strip()
+    except Exception:
+        return ""
 
 
 def background_env(extra=None, include_itk=False):
