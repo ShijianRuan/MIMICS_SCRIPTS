@@ -57,11 +57,20 @@ def _alert_once(key, title, message):
 
 def _read_json(path):
     try:
-        with open(path, "r") as handle:
+        with open(path, "r", encoding="utf-8") as handle:
             value = json.load(handle)
         return value if isinstance(value, dict) else None
     except Exception:
         return None
+
+
+def _write_status_quick(path, value):
+    """Atomically write UI hand-off state without blocking the GUI on retries."""
+    try:
+        runtime_common.write_json_atomic(path, value)
+        return True
+    except Exception:
+        return False
 
 
 def _read_stderr_tail(path, max_bytes=8192):
@@ -192,11 +201,49 @@ def _tick(monitor):
             return
         if state != "submitted":
             return
-        _stop_monitor(key)
-        _ALERTED.discard(key)  # submitted cleanly; clear so a later error can still alert
         try:
-            monitor["on_submit"](status.get("selection") or {})
+            task = monitor["on_submit"](status.get("selection") or {})
+            if not isinstance(task, dict):
+                task = {}
+            written = _write_status_quick(
+                monitor["status_path"],
+                {
+                    "status": "launched",
+                    "selection": status.get("selection") or {},
+                    "task": task,
+                    "updated_at_epoch": time.time(),
+                },
+            )
+            if not written:
+                try:
+                    mimics.logging.log_user_message(
+                        level=logging.WARNING,
+                        message=(
+                            "The task started, but the external progress window could not be attached "
+                            "because its local hand-off status could not be written. Progress remains "
+                            "available in the Mimics log."
+                        ),
+                    )
+                except Exception:
+                    pass
+                process = monitor.get("process")
+                if process is not None and process.poll() is None:
+                    runtime_common.terminate_process_async(process=process, graceful_seconds=1.0)
+            _stop_monitor(key)
+            _ALERTED.discard(key)
         except Exception as exc:
+            try:
+                _write_status_quick(
+                    monitor["status_path"],
+                    {
+                        "status": "failed",
+                        "error": str(exc),
+                        "updated_at_epoch": time.time(),
+                    },
+                )
+            except Exception:
+                pass
+            _stop_monitor(key)
             _alert_once(key, "Could Not Start", str(exc))
     except Exception as exc:
         # Never let an exception escape into the Win32 timer callback.

@@ -647,7 +647,29 @@ def test_external_io_setup_routing(fake, tmp):
         project = tmp / "saved_projects" / "s0001.mcs"
         fake.file.project_path = str(project)
         image.metadata.create(export_module.SOURCE_IMAGE_PATH_METADATA, str(tmp / "dataset" / "s0001" / "ct.nii.gz"))
-        export_module._launch_external_export_setup()
+        # _start_current_project_export validates that at least one mask exists
+        # and needs a foreground export monitor timer (Win32 / PyQt5).
+        liver = FakeMask("liver", image=image, array=_u8_buffer((2, 2, 2), 1))
+        fake.data.masks.append(liver)
+        export_calls = []
+        old_foreground_monitor = export_module._start_foreground_export_monitor
+        old_start_export = export_module._start_current_project_export
+        export_module._start_foreground_export_monitor = lambda monitor: True
+        def _recorded_export(*args, **kwargs):
+            export_calls.append((args, kwargs))
+            return {"kind": "export", "title": "test"}
+        export_module._start_current_project_export = _recorded_export
+        try:
+            result = export_module._launch_external_export_setup()
+        finally:
+            export_module._start_foreground_export_monitor = old_foreground_monitor
+            export_module._start_current_project_export = old_start_export
+        assert_equal(result, 0, "foreground export launch must not raise")
+        assert_equal(len(export_calls), 1, "_start_current_project_export call count")
+        eargs, ekwargs = export_calls[0]
+        assert_equal(eargs[2] if len(eargs) > 2 else None, str(tmp / "chosen_labels"), "output root")
+        assert_equal(eargs[1] if len(eargs) > 1 else None, str(tmp / "dataset" / "s0001" / "ct.nii.gz"), "source image")
+        assert_equal(ekwargs.get("overwrite_existing"), False, "skip policy became overwrite")
     finally:
         setup_module.launch = old_launch
         import_module._run_main_with_args = old_import_run
@@ -659,11 +681,6 @@ def test_external_io_setup_routing(fake, tmp):
     assert_true("--output-dir" in launched[0][1], "chosen import output was not routed")
     assert_true(str(tmp / "chosen_mcs") in launched[0][1], "chosen import output path missing")
     assert_equal(captured[1][0], "export_masks", "mask export setup mode")
-    assert_true("--mcs-path" in launched[1][1], "current project path was not routed")
-    assert_true(str(project) in launched[1][1], "current project path is incorrect")
-    assert_true(str(tmp / "chosen_labels") in launched[1][1], "chosen label destination missing")
-    assert_true("--overwrite-source" not in launched[1][1], "skip policy became overwrite")
-    assert_equal(launched[1][2]["image"], str(tmp / "dataset" / "s0001" / "ct.nii.gz"), "explicit source image was not routed")
     return "external PySide6 selections route explicit import/export paths"
 
 
@@ -1084,7 +1101,15 @@ def test_stop_background_locks(fake, tmp):
     lock_dir = tmp / ".mimics_runtime" / "locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
     for name in ("gpu.lock", "background_mimics.lock"):
-        (lock_dir / name).write_text("{}", encoding="utf-8")
+        path = lock_dir / name
+        path.write_text(
+            json.dumps({
+                "pid": 987654321,
+                "token": name + "-token",
+                "owner": "stale test owner",
+            }),
+            encoding="utf-8",
+        )
     output_dir = tmp / "mcs_output"
     output_dir.mkdir()
     output_runtime = Path(module.runtime_common.import_queue_runtime_dir(str(tmp), str(output_dir)))

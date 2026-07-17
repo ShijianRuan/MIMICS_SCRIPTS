@@ -12,6 +12,11 @@ import time
 import uuid
 from pathlib import Path
 
+try:
+    from ui_theme import configure_application, stylesheet as shared_stylesheet
+except ImportError:
+    from tools.ui_theme import configure_application, stylesheet as shared_stylesheet
+
 
 TITLE = "Select DINOv3 Model"
 
@@ -116,6 +121,8 @@ class ModelChooser(object):
 
         splitter = QtWidgets.QSplitter(self.QtCore.Qt.Horizontal)
         self.list_widget = QtWidgets.QListWidget()
+        self.list_widget.setWordWrap(True)
+        self.list_widget.setHorizontalScrollBarPolicy(self.QtCore.Qt.ScrollBarAlwaysOff)
         self.list_widget.currentRowChanged.connect(self._show_current)
         for candidate in self.candidates:
             self.list_widget.addItem(self._row_label(candidate))
@@ -143,23 +150,11 @@ class ModelChooser(object):
             self.list_widget.setCurrentRow(0)
 
     def _stylesheet(self):
-        return """
-        QMainWindow, QWidget { background: #f7f8fb; color: #172033; font-family: "Segoe UI", "Microsoft YaHei", "Helvetica Neue", sans-serif; font-size: 10pt; }
-        QLabel#titleLabel { font-size: 18pt; font-weight: 650; color: #101827; }
-        QLabel#subtitleLabel { color: #4b5565; }
-        QListWidget, QTextEdit { background: #ffffff; border: 1px solid #cfd7e3; border-radius: 6px; padding: 6px; }
-        QListWidget::item { padding: 8px; }
-        QListWidget::item:selected { background: #dbeafe; color: #111827; }
-        QPushButton { background: #ffffff; border: 1px solid #aeb7c5; border-radius: 6px; padding: 8px 14px; }
-        QPushButton:hover { background: #f1f5fb; }
-        QPushButton#primaryButton { background: #2458c8; color: #ffffff; border-color: #2458c8; font-weight: 600; }
-        QPushButton#primaryButton:hover { background: #1d49a8; }
-        """
+        return shared_stylesheet()
 
     def _row_label(self, candidate):
-        return "{scope} | {model} | samples {samples} | Dice {dice} | {created}".format(
+        return "{scope}  |  {samples} samples  |  Dice {dice}\n{created}".format(
             scope=candidate.get("scope", "?"),
-            model=candidate.get("model_id", "?"),
             samples=candidate.get("sample_count", "?"),
             dice=best_dice_text(candidate),
             created=format_time(candidate.get("created_at_epoch", 0.0)),
@@ -173,16 +168,16 @@ class ModelChooser(object):
         manifest = candidate.get("manifest") or {}
         lines = [
             "Model: {0}".format(candidate.get("model_id", "?")),
-            "Scope: {0}".format(candidate.get("scope", "?")),
-            "Organ: {0}".format(candidate.get("organ", "?")),
-            "Created: {0}".format(format_time(candidate.get("created_at_epoch", 0.0))),
-            "Samples: {0}".format(candidate.get("sample_count", "?")),
+            "Available in: {0}".format(candidate.get("scope", "?")),
+            "Trained for: {0}".format(candidate.get("organ", "?")),
+            "Training samples: {0}".format(candidate.get("sample_count", "?")),
             "Best validation Dice: {0}".format(best_dice_text(candidate)),
+            "Trained: {0}".format(format_time(candidate.get("created_at_epoch", 0.0))),
             "",
-            "Checkpoint:",
+            "Model file:",
             str(manifest.get("checkpoint", "")),
             "",
-            "Config:",
+            "Training configuration:",
             str(manifest.get("config", "")),
         ]
         self.detail.setPlainText("\n".join(lines))
@@ -217,7 +212,7 @@ def run(context):
     app = QtWidgets.QApplication.instance()
     if app is None:
         app = QtWidgets.QApplication(sys.argv[:1])
-    app.setApplicationName(TITLE)
+    configure_application(app, TITLE)
 
     class CloseAwareMainWindow(QtWidgets.QMainWindow):
         def closeEvent(self, event):

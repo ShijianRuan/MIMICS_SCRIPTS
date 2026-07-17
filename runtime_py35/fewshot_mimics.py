@@ -695,6 +695,24 @@ def _split_csv(values):
     return [item.strip() for item in str(values).replace(";", ",").split(",") if item.strip()]
 
 
+def _configured_mask_names(config, organ):
+    names = [str(organ or "").strip()]
+    aliases = config.get("organ_mask_aliases") or {}
+    if isinstance(aliases, dict):
+        organ_key = _safe_slug(organ)
+        for key, values in aliases.items():
+            if _safe_slug(key) == organ_key:
+                names.extend(_split_csv(values))
+    result = []
+    seen = set()
+    for name in names:
+        key = _safe_slug(name)
+        if name and key not in seen:
+            seen.add(key)
+            result.append(name)
+    return result
+
+
 def _append_training_args(cmd, config, options):
     cmd.extend([
         "--strategy",
@@ -762,6 +780,9 @@ def _append_training_args(cmd, config, options):
     cmd.extend(["--sub-volume-size", str(options.get("sub_volume_size", config.get("default_sub_volume_size", "32,256,256")))])
     if bool(options.get("keep_materialized_dataset", config.get("default_keep_materialized_dataset", False))):
         cmd.append("--keep-materialized-dataset")
+    mask_names = _split_csv(options.get("mask_names", ""))
+    if mask_names:
+        cmd.extend(["--mask-names", ",".join(mask_names)])
 
 
 def _current_project_path():
@@ -831,27 +852,6 @@ def _choose_dataset_root(title):
     return None
 
 
-def _count_available_labels(ts_root, organ):
-    """Count how many cases under ts_root have saved .mcs files with labels."""
-    mcs_dir = _resolve_mimics_output_dir(ts_root)
-    if not os.path.isdir(mcs_dir):
-        return 0
-    count = 0
-    for fname in sorted(os.listdir(mcs_dir)):
-        if not fname.lower().endswith(".mcs"):
-            continue
-        dir_name = fname[:-4]
-        seg_dir = os.path.join(ts_root, dir_name, "segmentations")
-        if not os.path.isdir(seg_dir):
-            continue
-        for seg_name in os.listdir(seg_dir):
-            stem = seg_name.replace(".nii.gz", "").replace(".nii", "")
-            if stem.lower() == organ.lower() or stem.lower() == _safe_slug(organ).lower():
-                count += 1
-                break
-    return count
-
-
 def _infer_case_id(ts_root):
     """Match the open .mcs project to a dataset case.
 
@@ -900,30 +900,52 @@ def _process_exists(pid):
         pid = int(pid)
     except Exception:
         return False
-    if pid <= 0:
-        return False
-    if os.name != "nt":
+    return runtime_common.process_exists(pid)
+
+
+def _job_process_ids(job):
+    result = []
+    for key in ("pid", "controller_pid", "launcher_pid"):
         try:
-            os.kill(pid, 0)
-            return True
+            pid = int((job or {}).get(key) or 0)
         except Exception:
-            return False
+            pid = 0
+        if pid > 0 and pid not in result:
+            result.append(pid)
+    return result
+
+
+def _job_has_live_process(job):
+    return any(_process_exists(pid) for pid in _job_process_ids(job))
+
+
+def _mark_reaped_stopping_job_failed(status_path, job):
+    latest = dict(job or {})
+    if str(latest.get("status") or "").lower() != "stopping":
+        return False
+    if _job_has_live_process(latest):
+        return False
+    latest.update({
+        "status": "failed",
+        "phase": "termination_completed_after_error",
+        "termination_pending": False,
+        "terminated_at_epoch": time.time(),
+        "updated_at_epoch": time.time(),
+        "error": str(
+            latest.get("error")
+            or "The background process stopped after an earlier task error."
+        ),
+    })
     try:
-        import ctypes
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        STILL_ACTIVE = 259
-        kernel32 = ctypes.windll.kernel32
-        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid)
-        if not handle:
-            return False
-        try:
-            exit_code = ctypes.c_ulong(0)
-            if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)) == 0:
-                return False
-            return int(exit_code.value) == STILL_ACTIVE
-        finally:
-            kernel32.CloseHandle(handle)
-    except Exception:
+        _write_json_atomic(status_path, latest)
+        return True
+    except Exception as exc:
+        _mimics_log(
+            logging.WARNING,
+            "Could not record the DINOv3 terminal state after process exit: {0}".format(
+                exc
+            ),
+        )
         return False
 
 
@@ -963,6 +985,8 @@ def _latest_active_job(ts_root):
         "training",
         "running",
         "cancelling",
+        "stopping",
+        "finalizing",
         "configuring",
         "selecting_model",
     ])
@@ -974,8 +998,14 @@ def _latest_active_job(ts_root):
         payload = _read_json(path, {}) or {}
         if payload.get("status") not in active:
             continue
-        pid = payload.get("pid") or payload.get("launcher_pid") or payload.get("controller_pid")
-        if pid and not _process_exists(pid):
+        if (
+            str(payload.get("status") or "").lower() == "stopping"
+            and not _job_has_live_process(payload)
+        ):
+            _mark_reaped_stopping_job_failed(path, payload)
+            continue
+        pids = _job_process_ids(payload)
+        if pids and not _job_has_live_process(payload):
             continue
         try:
             mtime = os.path.getmtime(path)
@@ -998,6 +1028,8 @@ def _display_status(value):
         "training": "Training",
         "running": "Running inference",
         "cancelling": "Cancelling",
+        "stopping": "Stopping after an error",
+        "finalizing": "Finalizing",
         "configuring": "Configuring training",
         "selecting_model": "Selecting model",
         "training_started": "Training started",
@@ -1658,29 +1690,14 @@ def _train_model(advanced=False):
             return 0
     else:
         options = _default_training_options(config)
-
-    # Pre-flight: count how many saved .mcs files have labels for this organ
-    label_count = _count_available_labels(ts_root, organ)
-    min_samples = int(options.get("min_samples", config.get("default_min_samples", 1)))
-    label_info = ""
-    if label_count < min_samples:
-        msg = (
-            "Training needs at least {0} saved .mcs with annotated labels for \"{1}\", "
-            "but only {2} were found.\n\n"
-            "Open cases from {3}, annotate the \"{1}\" mask, save them, and retry."
-        ).format(min_samples, organ, label_count,
-                 _resolve_mimics_output_dir(ts_root))
-        mimics.dialogs.message_box(msg, title=TITLE, ui_blocking=False)
-        return 1
-    if label_count < 5:
-        label_info = "\n\n{0} labeled case(s) found for \"{1}\" (minimum {2}).".format(
-            label_count, organ, min_samples)
+        options["mask_names"] = ",".join(_configured_mask_names(config, organ))
 
     answer = mimics.dialogs.question_box(
         message=(
             "Training uses saved .mcs files.\n\n"
             "Save the current project before starting so the latest manual edits "
-            "are included in the exported labels." + label_info
+            "are included in the exported labels. Saved mask names are checked "
+            "in the background before any voxel data is exported."
         ),
         buttons="Start Training;" + BUTTON_CANCEL,
         title=TITLE,
@@ -1730,6 +1747,19 @@ def _train_model(advanced=False):
             "launcher_pid": process.pid,
             "cancel_path": cancel_path,
             "training_options": options,
+            "retry_context": {
+                "project_root": _project_root(),
+                "pipeline_script": _pipeline_script(),
+                "dinov3_root": dinov3_root,
+                "python_exe": python_exe,
+                "mimics_exe": mimics_exe or "",
+                "mcs_output_dir": _resolve_mimics_output_dir(ts_root),
+                "ts_root": os.path.abspath(ts_root),
+                "workspace": _workspace(ts_root),
+                "organ": organ,
+                "case_ids": [],
+                "config": config,
+            },
             "created_at_epoch": time.time(),
             "updated_at_epoch": time.time(),
         },
@@ -2081,7 +2111,19 @@ def _launch_bridge_mask_to_buffer(monitor, status):
     monitor["bridge_output_path"] = output_path
 
     def _wait_bridge():
-        stdout, stderr = process.communicate()
+        try:
+            stdout, stderr = process.communicate(timeout=600)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+            _write_json_atomic(
+                result_path,
+                {
+                    "status": "error",
+                    "error": "Prediction conversion timed out after 600 seconds.",
+                },
+            )
+            return
         if process.returncode != 0:
             result = {
                 "status": "error",
@@ -2099,8 +2141,21 @@ def _launch_bridge_mask_to_buffer(monitor, status):
         thread = threading.Thread(target=_wait_bridge)
         thread.daemon = True
         thread.start()
-    except Exception:
-        pass
+    except Exception as exc:
+        try:
+            runtime_common.terminate_process_async(
+                process=process,
+                graceful_seconds=0.0,
+            )
+        except Exception:
+            pass
+        _write_json_atomic(
+            result_path,
+            {
+                "status": "error",
+                "error": "Could not start prediction conversion monitor: {0}".format(exc),
+            },
+        )
 
 
 def _find_or_create_mask(name):
@@ -2119,18 +2174,17 @@ def _find_or_create_mask(name):
     mask = mimics.segment.create_mask()
     mask.name = name
     try:
-        mask.image = active_image
-    except Exception as exc:
-        try:
-            bound_image = getattr(mask, "image", None)
-        except Exception:
-            bound_image = None
-        try:
-            is_bound_to_active = bound_image == active_image
-        except Exception:
-            is_bound_to_active = bound_image is active_image
-        if bound_image is None or not is_bound_to_active:
-            raise RuntimeError("Failed to bind prediction mask to the active Mimics image: {0}".format(exc))
+        bound_image = getattr(mask, "image", None)
+    except Exception:
+        bound_image = None
+    try:
+        bound_to_active = bound_image == active_image
+    except Exception:
+        bound_to_active = bound_image is active_image
+    if bound_image is not None and not bound_to_active:
+        raise RuntimeError(
+            "Mimics created the prediction Mask on a different image."
+        )
     return mask
 
 
@@ -2151,11 +2205,17 @@ def _new_prediction_mask(name):
     mask = mimics.segment.create_mask()
     mask.name = _unique_mask_name(name)
     try:
-        mask.image = active_image
-    except Exception:
         bound = getattr(mask, "image", None)
-        if bound is None or bound != active_image:
-            raise
+    except Exception:
+        bound = None
+    try:
+        bound_to_active = bound == active_image
+    except Exception:
+        bound_to_active = bound is active_image
+    if bound is not None and not bound_to_active:
+        raise RuntimeError(
+            "Mimics created the prediction copy on a different image."
+        )
     return mask
 
 
@@ -2379,6 +2439,69 @@ def _monitor_model_choice_tick(monitor, status):
             _mimics_log(logging.INFO, "DINOv3 model chooser closed before selecting a model.")
 
 
+def _monitor_stopping_job(monitor, status, line):
+    """Report a stuck shutdown and publish failure only after every PID exits."""
+    key = monitor.get("monitor_key")
+    kind = _display_kind(status.get("kind") or monitor.get("kind") or "task")
+    pids = _job_process_ids(status)
+    if pids and _job_has_live_process(status):
+        if not monitor.get("stopping_notice_shown"):
+            monitor["stopping_notice_shown"] = True
+            message = (
+                "DINOv3 {0} encountered an error and is still stopping an "
+                "external process.\n\n"
+                "Mimics remains available. The GPU/resource lock is being "
+                "retained until the process exits, so another AI task may "
+                "wait. Use Show Status to inspect details. If it does not "
+                "finish stopping, use Stop AI Task again to force cleanup."
+            ).format(kind)
+            _mimics_log(
+                logging.WARNING,
+                "DINOv3 {0} is still stopping; live process IDs: {1}. "
+                "Resource locks remain held until exit.".format(
+                    kind,
+                    ", ".join([str(pid) for pid in pids]),
+                ),
+            )
+            mimics.dialogs.message_box(
+                message,
+                title=TITLE,
+                ui_blocking=False,
+            )
+        return
+
+    # Re-read immediately before publishing a terminal state. The pipeline may
+    # have completed cleanup between the liveness check and this callback.
+    latest = _read_json(monitor.get("status_path"), {}) or {}
+    if str(latest.get("status") or "").lower() != "stopping":
+        return
+    if _job_has_live_process(latest):
+        return
+    error = str(
+        latest.get("error")
+        or status.get("error")
+        or "The background process stopped after an earlier task error."
+    )
+    if not _mark_reaped_stopping_job_failed(
+        monitor.get("status_path"),
+        latest,
+    ):
+        return
+    _stop_monitor(key)
+    _mimics_log(
+        logging.ERROR,
+        "DINOv3 {0} stopped after an error and is now Failed: {1}".format(
+            kind,
+            error,
+        ),
+    )
+    mimics.dialogs.message_box(
+        "DINOv3 {0} failed.\n\n{1}\n\n{2}".format(kind, error, line or ""),
+        title=TITLE,
+        ui_blocking=False,
+    )
+
+
 def _monitor_tick_locked(monitor):
     key = monitor.get("monitor_key")
     if time.time() > monitor.get("deadline", 0):
@@ -2405,11 +2528,11 @@ def _monitor_tick_locked(monitor):
             monitor["last_line"] = line
             _mimics_log(logging.INFO, "DINOv3 training status: {0}".format(line))
         state = status.get("status")
-        if state in ("completed", "failed", "cancelled", "cancelling"):
+        if state in ("completed", "failed", "cancelled"):
             _stop_monitor(key)
             if state == "completed":
                 message = "Few-shot training completed.\n\n{0}".format(line)
-            elif state in ("cancelled", "cancelling"):
+            elif state == "cancelled":
                 message = "Few-shot training was cancelled.\n\n{0}".format(line)
             else:
                 message = "Few-shot training failed.\n\n{0}\n\n{1}".format(
@@ -2417,11 +2540,21 @@ def _monitor_tick_locked(monitor):
                     line,
                 )
             mimics.dialogs.message_box(message, title=TITLE, ui_blocking=False)
+        elif state == "stopping":
+            _monitor_stopping_job(monitor, status, line)
+            return
+        elif state in ("cancelling", "finalizing"):
+            return
         return
     state = status.get("status")
     if state in ("", None, "launching", "running", "waiting_for_gpu", "waiting_for_background_mimics"):
         return
-    if state in ("cancelled", "cancelling"):
+    if state == "stopping":
+        _monitor_stopping_job(monitor, status, _format_job_line(status))
+        return
+    if state == "cancelling":
+        return
+    if state == "cancelled":
         _stop_monitor(key)
         mimics.dialogs.message_box("Few-shot inference was cancelled.", title=TITLE, ui_blocking=False)
         return
@@ -2907,8 +3040,8 @@ def _show_status_text(ts_root):
         jobs = [item for item in jobs if _safe_slug(item[1].get("organ", "")) == _safe_slug(selected_organ)]
     active_states = set([
         "launching", "preparing", "exporting_labels", "waiting_for_background_mimics",
-        "waiting_for_gpu", "training", "running", "cancelling", "configuring",
-        "selecting_model", "training_started",
+        "waiting_for_gpu", "training", "running", "cancelling", "stopping",
+        "finalizing", "configuring", "selecting_model", "training_started",
     ])
     active_jobs = [item for item in jobs if item[1].get("status") in active_states]
     jobs = (active_jobs or jobs)[:1]
@@ -2973,6 +3106,77 @@ def _show_status():
     return _show_status_text(ts_root)
 
 
+def _request_fewshot_cancel_async(job, status_path, grace_seconds=30.0):
+    """Finish cancellation only after every recorded task process has stopped."""
+    pids = []
+    for key in ("pid", "controller_pid", "launcher_pid"):
+        try:
+            pid = int(job.get(key) or 0)
+        except Exception:
+            pid = 0
+        if pid > 0 and pid not in pids:
+            pids.append(pid)
+
+    def finalize_cancelled(killed):
+        if not status_path:
+            return
+        latest = _read_json(status_path, {}) or {}
+        if str(latest.get("status") or "").lower() in (
+            "completed",
+            "failed",
+            "cancelled",
+        ):
+            return
+        latest_pids = []
+        for key in ("pid", "controller_pid", "launcher_pid"):
+            try:
+                pid = int(latest.get(key) or 0)
+            except Exception:
+                pid = 0
+            if pid > 0 and pid not in latest_pids:
+                latest_pids.append(pid)
+        if any(_process_exists(pid) for pid in latest_pids):
+            return
+        latest.update({
+            "status": "cancelled",
+            "cancel_requested_at_epoch": time.time(),
+            "cancelled_pids": killed,
+            "updated_at_epoch": time.time(),
+        })
+        try:
+            _write_json_atomic(status_path, latest)
+        except Exception as exc:
+            _mimics_log(
+                logging.WARNING,
+                "Could not record DINOv3 cancellation completion: {0}".format(exc),
+            )
+
+    if not pids or not any(_process_exists(pid) for pid in pids):
+        finalize_cancelled([])
+        return
+
+    def worker():
+        deadline = time.time() + max(0.0, float(grace_seconds))
+        while time.time() < deadline:
+            if all(not _process_exists(pid) for pid in pids):
+                break
+            time.sleep(0.25)
+        killed = []
+        for pid in pids:
+            if _process_exists(pid) and _terminate_process_tree(pid):
+                killed.append(pid)
+        reap_deadline = time.time() + 10.0
+        while time.time() < reap_deadline:
+            if all(not _process_exists(pid) for pid in pids):
+                break
+            time.sleep(0.25)
+        finalize_cancelled(killed)
+
+    thread = threading.Thread(target=worker, name="MimicsFewshotCancel")
+    thread.daemon = True
+    thread.start()
+
+
 def _stop_latest_job():
     ts_root = _choose_dataset_root("Select dataset folder")
     if not ts_root or not os.path.isdir(ts_root):
@@ -2981,11 +3185,42 @@ def _stop_latest_job():
     if not job:
         mimics.dialogs.message_box("No running DINOv3 task was found.", title=TITLE, ui_blocking=False)
         return 0
+    current_status = str(job.get("status") or "").lower()
+    if current_status in ("cancelling", "finalizing"):
+        mimics.dialogs.message_box(
+            (
+                "Task {0} is already {1}. Wait for cleanup to finish; "
+                "Show Status will report the final result."
+            ).format(job.get("job_id", "?"), current_status),
+            title=TITLE,
+            ui_blocking=False,
+        )
+        return 0
+    force_stopping = current_status == "stopping"
+    if force_stopping and not _job_has_live_process(job):
+        recorded = _mark_reaped_stopping_job_failed(status_path, job)
+        mimics.dialogs.message_box(
+            (
+                "Task {0} has stopped after an error and is now Failed."
+                if recorded else
+                "Task {0} has stopped, but its final status could not be saved. "
+                "Check the Mimics log and retry Show Status."
+            ).format(job.get("job_id", "?")),
+            title=TITLE,
+            ui_blocking=False,
+        )
+        return 0
     answer = mimics.dialogs.question_box(
         message=(
-            "Stop the active DINOv3 task?\n\n"
-            "Task: {0}\nType: {1}\nOrgan: {2}\nStatus: {3}"
+            "{0}\n\n"
+            "Task: {1}\nType: {2}\nOrgan: {3}\nStatus: {4}"
         ).format(
+            (
+                "This task is still stopping after an error. Force-stop its "
+                "remaining external processes?"
+                if force_stopping else
+                "Stop the active DINOv3 task?"
+            ),
             job.get("job_id", "?"),
             job.get("kind", "?"),
             job.get("organ", "?"),
@@ -3007,26 +3242,10 @@ def _stop_latest_job():
         except Exception as exc:
             job["cancel_marker_error"] = str(exc)
             _mimics_log(logging.WARNING, "Could not write DINOv3 cancel marker: {0}".format(exc))
-    # The controller already implements cooperative cancellation: training
-    # gets a 30-second checkpoint/cleanup window and inference exits promptly.
-    # Killing every PID here bypassed that cleanup and could leave checkpoints,
-    # logs, CUDA contexts, and resource locks in inconsistent states.
-    controller_pid = job.get("controller_pid") or job.get("launcher_pid")
-    controller_alive = bool(controller_pid and _process_exists(controller_pid))
-    killed = []
-    if not controller_alive:
-        worker_pid = job.get("pid")
-        if worker_pid and _terminate_process_tree(worker_pid):
-            killed.append(str(worker_pid))
-    job["status"] = "cancelling" if controller_alive else "cancelled"
-    job["cancel_requested_at_epoch"] = time.time()
-    job["cancelled_pids"] = killed
-    job["updated_at_epoch"] = time.time()
-    if status_path:
-        try:
-            _write_json_atomic(status_path, job)
-        except Exception as exc:
-            _mimics_log(logging.WARNING, "Could not update DINOv3 job status after stop: {0}".format(exc))
+    # The controller gets a cooperative cleanup window. The asynchronous
+    # finalizer only writes the terminal state after all recorded processes are
+    # gone, so it cannot overwrite a last-second completed/failed status.
+    _request_fewshot_cancel_async(job, status_path, grace_seconds=30.0)
     mimics.dialogs.message_box(
         (
             "Stop requested for {0}.\n\n"

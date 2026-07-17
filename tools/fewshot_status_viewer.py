@@ -24,6 +24,17 @@ try:
 except ImportError:
     from Queue import Empty, Queue
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from resource_locks import process_exists as resource_process_exists
+
+try:
+    from ui_theme import configure_application, stylesheet as shared_stylesheet
+except ImportError:
+    from tools.ui_theme import configure_application, stylesheet as shared_stylesheet
+
 
 TITLE = "DINOv3 Few-Shot Status"
 ACTIVE_STATUSES = set([
@@ -35,10 +46,15 @@ ACTIVE_STATUSES = set([
     "training",
     "running",
     "cancelling",
+    "stopping",
+    "finalizing",
     "configuring",
     "selecting_model",
     "training_started",
 ])
+CANCELLABLE_STATUSES = ACTIVE_STATUSES - {
+    "cancelling", "stopping", "finalizing", "training_started",
+}
 
 
 def read_json(path, default=None):
@@ -107,6 +123,68 @@ def write_cancel_marker(cancel_path):
         return str(exc)
 
 
+def request_job_cancel_async(job, status_path, grace_seconds=10.0):
+    """Request cancellation without overwriting live progress from the worker."""
+    cancel_error = write_cancel_marker(job.get("cancel_path"))
+    pids = []
+    for key in ("pid", "controller_pid", "launcher_pid"):
+        try:
+            pid = int(job.get(key) or 0)
+        except Exception:
+            pid = 0
+        if pid > 0 and pid not in pids:
+            pids.append(pid)
+
+    def worker():
+        deadline = time.time() + max(0.0, float(grace_seconds))
+        while pids and time.time() < deadline:
+            if all(not process_exists(pid) for pid in pids):
+                break
+            time.sleep(0.25)
+        killed = []
+        for pid in pids:
+            if process_exists(pid) and terminate_process_tree(pid):
+                killed.append(pid)
+        reap_deadline = time.time() + 10.0
+        while pids and time.time() < reap_deadline:
+            if all(not process_exists(pid) for pid in pids):
+                break
+            time.sleep(0.25)
+        if not status_path:
+            return
+        latest = read_json(status_path, {}) or {}
+        if str(latest.get("status") or "").lower() in (
+            "completed",
+            "failed",
+            "cancelled",
+        ):
+            return
+        latest_pids = []
+        for key in ("pid", "controller_pid", "launcher_pid"):
+            try:
+                pid = int(latest.get(key) or 0)
+            except Exception:
+                pid = 0
+            if pid > 0 and pid not in latest_pids:
+                latest_pids.append(pid)
+        if any(process_exists(pid) for pid in latest_pids):
+            return
+        latest.update({
+            "status": "cancelled",
+            "cancel_requested_at_epoch": time.time(),
+            "cancelled_pids": killed,
+            "updated_at_epoch": time.time(),
+        })
+        if cancel_error:
+            latest["cancel_marker_error"] = cancel_error
+        write_json_best_effort(status_path, latest)
+
+    thread = threading.Thread(target=worker, name="fewshot-cancel")
+    thread.daemon = True
+    thread.start()
+    return cancel_error
+
+
 def format_time(epoch):
     try:
         return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(epoch)))
@@ -124,6 +202,8 @@ def display_status(value):
         "training": "Training",
         "running": "Running inference",
         "cancelling": "Cancelling",
+        "stopping": "Stopping after an error",
+        "finalizing": "Finalizing",
         "configuring": "Configuring training",
         "selecting_model": "Selecting model",
         "training_started": "Training started",
@@ -227,6 +307,15 @@ def user_status_lines(job):
     progress = progress_line(job.get("training_progress") or {})
     if progress:
         lines.append("Progress: {0}".format(progress))
+    export_progress = job.get("label_export_progress") or {}
+    if isinstance(export_progress, dict) and export_progress:
+        index = int(export_progress.get("index", 0) or 0)
+        total = int(export_progress.get("total", 0) or 0)
+        phase = str(export_progress.get("phase") or export_progress.get("status") or "running")
+        lines.append(
+            "Label export: {0}/{1} - {2}".format(index, total, phase)
+            if total else "Label export: " + phase
+        )
     application_message = str(job.get("application_message") or "").strip()
     if application_message:
         lines.append("Result: {0}".format(application_message))
@@ -292,6 +381,15 @@ def format_job_line(job):
     progress = progress_line(job.get("training_progress") or {})
     if progress:
         pieces.append(progress)
+    export_progress = job.get("label_export_progress") or {}
+    if isinstance(export_progress, dict) and export_progress:
+        index = int(export_progress.get("index", 0) or 0)
+        total = int(export_progress.get("total", 0) or 0)
+        phase = str(export_progress.get("phase") or export_progress.get("status") or "running")
+        pieces.append(
+            "labels {0}/{1} {2}".format(index, total, phase)
+            if total else "labels " + phase
+        )
     if job.get("error"):
         pieces.append("error: {0}".format(job.get("error")))
     if job.get("train_log_warning") or job.get("log_warning"):
@@ -366,35 +464,7 @@ def select_current_task(rows, organ="", job_id="", limit=25):
 
 
 def process_exists(pid):
-    try:
-        pid = int(pid)
-    except Exception:
-        return False
-    if pid <= 0:
-        return False
-    if os.name != "nt":
-        try:
-            os.kill(pid, 0)
-            return True
-        except Exception:
-            return False
-    try:
-        import ctypes
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        STILL_ACTIVE = 259
-        kernel32 = ctypes.windll.kernel32
-        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid)
-        if not handle:
-            return False
-        try:
-            exit_code = ctypes.c_ulong(0)
-            if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)) == 0:
-                return False
-            return int(exit_code.value) == STILL_ACTIVE
-        finally:
-            kernel32.CloseHandle(handle)
-    except Exception:
-        return False
+    return resource_process_exists(pid)
 
 
 def terminate_process_tree(pid):
@@ -431,6 +501,44 @@ def open_path(path):
             subprocess.Popen(["xdg-open", path])
     except Exception:
         pass
+
+
+def launch_visible_gui_process(command, cwd=None, stderr_path=None):
+    """Start an external GUI without Windows console-hiding flags."""
+    launch_command = list(command)
+    if os.name == "nt" and launch_command:
+        executable = os.path.abspath(str(launch_command[0]))
+        if os.path.basename(executable).lower() == "python.exe":
+            pythonw = os.path.join(os.path.dirname(executable), "pythonw.exe")
+            if os.path.isfile(pythonw):
+                launch_command[0] = pythonw
+
+    stderr_handle = None
+    stderr_target = subprocess.DEVNULL
+    if stderr_path:
+        try:
+            parent = os.path.dirname(os.path.abspath(stderr_path))
+            if parent and not os.path.isdir(parent):
+                os.makedirs(parent)
+            stderr_handle = open(stderr_path, "w", encoding="utf-8")
+            stderr_target = stderr_handle
+        except Exception:
+            stderr_handle = None
+            stderr_target = subprocess.DEVNULL
+    try:
+        return subprocess.Popen(
+            launch_command,
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=stderr_target,
+        )
+    finally:
+        if stderr_handle is not None:
+            try:
+                stderr_handle.close()
+            except Exception:
+                pass
 
 
 def read_log_text(path, max_bytes=2 * 1024 * 1024, retries=3):
@@ -609,6 +717,8 @@ class StatusViewerApp(object):
         self.technical_text = None
         self.chart = None
         self.stop_button = None
+        self.retry_button = None
+        self.edit_retry_button = None
         self.open_log_button = None
         self.filter_var = None
         self._refresh_after_id = None
@@ -779,7 +889,7 @@ class StatusViewerApp(object):
         rows = training_curve_rows(job, log_text, pipeline_text)
         self.draw_chart(rows)
         try:
-            state = ["!disabled"] if job.get("status") in ACTIVE_STATUSES else ["disabled"]
+            state = ["!disabled"] if job.get("status") in CANCELLABLE_STATUSES else ["disabled"]
             self.stop_button.state(state)
         except Exception:
             pass
@@ -949,24 +1059,15 @@ class StatusViewerApp(object):
 
     def request_stop(self):
         job = self.selected_job()
-        if not job:
+        if not job or job.get("status") not in CANCELLABLE_STATUSES:
             return
-        cancel_path = job.get("cancel_path")
-        cancel_error = write_cancel_marker(cancel_path)
-        killed = []
-        for key in ("pid", "controller_pid", "launcher_pid"):
-            pid = job.get(key)
-            if pid and process_exists(pid) and terminate_process_tree(pid):
-                killed.append(int(pid))
-        job["status"] = "cancelled"
+        status_path = self.job_paths.get(job.get("job_id"))
+        cancel_error = request_job_cancel_async(job, status_path)
+        job["status"] = "cancelling"
         job["cancel_requested_at_epoch"] = time.time()
-        job["cancelled_pids"] = killed
         if cancel_error:
             job["cancel_marker_error"] = cancel_error
         job["updated_at_epoch"] = time.time()
-        status_path = self.job_paths.get(job.get("job_id"))
-        if status_path:
-            write_json_best_effort(status_path, job)
         self.show_job(job)
 
 
@@ -997,6 +1098,8 @@ class QtStatusViewerApp(object):
         self.stop_button = None
         self.open_log_button = None
         self.filter_combo = None
+        self.auto_refresh = None
+        self.live_label = None
         self._refresh_running = False
         self._refresh_results = Queue()
         self.timer = self.QtCore.QTimer(self.window)
@@ -1038,9 +1141,23 @@ class QtStatusViewerApp(object):
         self.open_log_button.clicked.connect(self.open_log_folder)
         toolbar.addWidget(self.open_log_button)
         self.stop_button = QtWidgets.QPushButton("Request Stop")
+        self.stop_button.setObjectName("dangerButton")
         self.stop_button.clicked.connect(self.request_stop)
         toolbar.addWidget(self.stop_button)
+        self.retry_button = QtWidgets.QPushButton("Retry")
+        self.retry_button.clicked.connect(self.retry_same_settings)
+        toolbar.addWidget(self.retry_button)
+        self.edit_retry_button = QtWidgets.QPushButton("Edit and Retry")
+        self.edit_retry_button.clicked.connect(self.edit_and_retry)
+        toolbar.addWidget(self.edit_retry_button)
         toolbar.addStretch(1)
+        self.auto_refresh = QtWidgets.QCheckBox("Auto-refresh")
+        self.auto_refresh.setChecked(True)
+        self.auto_refresh.toggled.connect(self._toggle_auto_refresh)
+        toolbar.addWidget(self.auto_refresh)
+        self.live_label = QtWidgets.QLabel("Live")
+        self.live_label.setObjectName("liveLabel")
+        toolbar.addWidget(self.live_label)
         close = QtWidgets.QPushButton("Close")
         close.clicked.connect(self.window.close)
         toolbar.addWidget(close)
@@ -1052,7 +1169,7 @@ class QtStatusViewerApp(object):
         # Job selector combo so the user can switch between completed and
         # active jobs (e.g. review training progress after inference starts).
         selector_row = QtWidgets.QHBoxLayout()
-        selector_label = QtWidgets.QLabel("Job:")
+        selector_label = QtWidgets.QLabel("Task history:")
         selector_row.addWidget(selector_label)
         self.job_combo = QtWidgets.QComboBox()
         self.job_combo.currentIndexChanged.connect(self.on_combo_select)
@@ -1101,20 +1218,19 @@ class QtStatusViewerApp(object):
         self.window.setCentralWidget(central)
 
     def _stylesheet(self):
-        return """
-        QMainWindow, QWidget { background: #f7f8fb; color: #172033; font-family: "Segoe UI", "Microsoft YaHei", "Helvetica Neue", sans-serif; font-size: 10pt; }
-        QLabel#titleLabel { font-size: 18pt; font-weight: 650; color: #101827; }
-        QLabel#subtitleLabel { color: #4b5565; }
-        QGroupBox { background: #ffffff; border: 1px solid #d8dee9; border-radius: 8px; margin-top: 12px; padding-top: 14px; }
-        QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; color: #1f2937; font-weight: 600; }
-        QListWidget, QTextEdit, QComboBox { background: #ffffff; border: 1px solid #cfd7e3; border-radius: 6px; padding: 5px 7px; }
-        QComboBox QAbstractItemView { background: #ffffff; border: 1px solid #cfd7e3; selection-background-color: #dbeafe; selection-color: #111827; }
-        QPushButton { background: #ffffff; border: 1px solid #aeb7c5; border-radius: 6px; padding: 7px 14px; }
-        QPushButton:hover { background: #f1f5fb; }
-        QPushButton:disabled { color: #9aa4b2; background: #f1f3f6; border-color: #d8dee9; }
-        QListWidget::item { padding: 7px; }
-        QListWidget::item:selected { background: #dbeafe; color: #111827; }
-        """
+        return shared_stylesheet()
+
+    def _toggle_auto_refresh(self, enabled):
+        if enabled:
+            self.timer.start(2000)
+            self.live_label.setText("Live")
+            self.live_label.setObjectName("liveLabel")
+        else:
+            self.timer.stop()
+            self.live_label.setText("Paused")
+            self.live_label.setObjectName("subtitleLabel")
+        self.live_label.style().unpolish(self.live_label)
+        self.live_label.style().polish(self.live_label)
 
     def refresh(self):
         if self._refresh_running:
@@ -1140,8 +1256,17 @@ class QtStatusViewerApp(object):
         self._refresh_running = False
         if error:
             self.summary_label.setText("Could not refresh status: {0}".format(error))
+            self.live_label.setText("Refresh failed")
+            self.live_label.setObjectName("errorLabel")
+            self.live_label.style().unpolish(self.live_label)
+            self.live_label.style().polish(self.live_label)
             return
         self._apply_loaded_jobs(jobs, paths)
+        if self.auto_refresh.isChecked():
+            self.live_label.setText("Live - updated {0}".format(time.strftime("%H:%M:%S")))
+            self.live_label.setObjectName("liveLabel")
+            self.live_label.style().unpolish(self.live_label)
+            self.live_label.style().polish(self.live_label)
 
     def _apply_loaded_jobs(self, jobs, paths):
         old_selected = self.selected_job_id
@@ -1165,7 +1290,7 @@ class QtStatusViewerApp(object):
             self.job_combo.setCurrentIndex(selected_index)
             self.selected_job_id = self.jobs[selected_index].get("job_id", "")
             self.show_job(self.jobs[selected_index])
-            self.summary_label.setText("Current task for {0}. Auto-refresh every 2 seconds.".format(
+            self.summary_label.setText("Current task for {0}.".format(
                 self.context.get("selected_organ") or self.jobs[selected_index].get("organ", "selected organ")
             ))
         else:
@@ -1245,7 +1370,24 @@ class QtStatusViewerApp(object):
         self.technical_text.setPlainText(technical)
         rows = training_curve_rows(job, log_text, pipeline_text)
         self.chart.set_rows(rows)
-        self.stop_button.setEnabled(job.get("status") in ACTIVE_STATUSES)
+        self.stop_button.setEnabled(job.get("status") in CANCELLABLE_STATUSES)
+        has_retry = bool(job.get("retry_context") and job.get("training_options"))
+        another_active = any(
+            item is not job and item.get("status") in ACTIVE_STATUSES for item in self.jobs
+        )
+        retryable = job.get("kind") == "train" and job.get("status") in (
+            "failed", "cancelled", "completed",
+        )
+        self.retry_button.setEnabled(bool(has_retry and retryable and not another_active))
+        self.edit_retry_button.setEnabled(bool(has_retry and retryable and not another_active))
+        if another_active:
+            hint = "Wait for the active DINOv3 task to finish or stop it before retrying."
+        elif not has_retry:
+            hint = "This older task does not contain the setup context required for one-click retry."
+        else:
+            hint = ""
+        self.retry_button.setToolTip(hint)
+        self.edit_retry_button.setToolTip(hint)
 
     def _set_log_text(self, text):
         if self.log_text.toPlainText() == (text or ""):
@@ -1271,25 +1413,99 @@ class QtStatusViewerApp(object):
 
     def request_stop(self):
         job = self.selected_job()
-        if not job:
+        if not job or job.get("status") not in CANCELLABLE_STATUSES:
             return
-        cancel_path = job.get("cancel_path")
-        cancel_error = write_cancel_marker(cancel_path)
-        killed = []
-        for key in ("pid", "controller_pid", "launcher_pid"):
-            pid = job.get(key)
-            if pid and process_exists(pid) and terminate_process_tree(pid):
-                killed.append(int(pid))
-        job["status"] = "cancelled"
+        status_path = self.job_paths.get(job.get("job_id"))
+        cancel_error = request_job_cancel_async(job, status_path)
+        job["status"] = "cancelling"
         job["cancel_requested_at_epoch"] = time.time()
-        job["cancelled_pids"] = killed
         if cancel_error:
             job["cancel_marker_error"] = cancel_error
         job["updated_at_epoch"] = time.time()
-        status_path = self.job_paths.get(job.get("job_id"))
-        if status_path:
-            write_json_best_effort(status_path, job)
         self.show_job(job)
+
+    def _retry_context(self, job):
+        context = dict(job.get("retry_context") or {})
+        context["organ"] = job.get("organ") or context.get("organ")
+        context["ts_root"] = job.get("ts_root") or context.get("ts_root")
+        context["workspace"] = job.get("workspace") or context.get("workspace")
+        return context
+
+    def retry_same_settings(self):
+        job = self.selected_job()
+        if not job:
+            return
+        answer = self.QtWidgets.QMessageBox.question(
+            self.window,
+            "Retry Training",
+            "Start a new training run with the same saved data and parameters?",
+            self.QtWidgets.QMessageBox.Yes | self.QtWidgets.QMessageBox.No,
+            self.QtWidgets.QMessageBox.No,
+        )
+        if answer != self.QtWidgets.QMessageBox.Yes:
+            return
+        try:
+            try:
+                import fewshot_training_setup_ui as setup_ui
+            except ImportError:
+                from tools import fewshot_training_setup_ui as setup_ui
+            run_id, _status_path, _pid = setup_ui.launch_training(
+                self._retry_context(job),
+                dict(job.get("training_options") or {}),
+            )
+            self.summary_label.setText("Retry started: {0}".format(run_id))
+            self.refresh()
+        except Exception as exc:
+            self.QtWidgets.QMessageBox.warning(
+                self.window, "Retry Could Not Start", str(exc),
+            )
+
+    def edit_and_retry(self):
+        job = self.selected_job()
+        if not job:
+            return
+        try:
+            context = self._retry_context(job)
+            context["initial_options"] = dict(job.get("training_options") or {})
+            setup_id = "setup_retry_{0}_{1}".format(
+                time.strftime("%Y%m%dT%H%M%S"), uuid.uuid4().hex[:8],
+            )
+            jobs_dir = os.path.join(context.get("workspace") or self.workspace, "jobs")
+            os.makedirs(jobs_dir, exist_ok=True)
+            context_path = os.path.join(jobs_dir, setup_id + "_context.json")
+            context["setup_id"] = setup_id
+            context["setup_status_path"] = os.path.join(jobs_dir, setup_id + ".json")
+            context["setup_stderr_path"] = os.path.join(
+                jobs_dir, setup_id + "_stderr.log",
+            )
+            write_json_atomic(context_path, context)
+            write_json_atomic(
+                context["setup_status_path"],
+                {
+                    "schema_version": "mimics_fewshot_setup.v1",
+                    "job_id": setup_id,
+                    "kind": "train_setup",
+                    "status": "configuring",
+                    "organ": context.get("organ"),
+                    "ts_root": context.get("ts_root"),
+                    "workspace": context.get("workspace"),
+                    "context_path": context_path,
+                    "stderr_log": context.get("setup_stderr_path"),
+                    "created_at_epoch": time.time(),
+                    "updated_at_epoch": time.time(),
+                },
+            )
+            script = str(Path(__file__).with_name("fewshot_training_setup_ui.py"))
+            launch_visible_gui_process(
+                [sys.executable, script, "--context", context_path],
+                cwd=context.get("project_root") or None,
+                stderr_path=context.get("setup_stderr_path"),
+            )
+            self.summary_label.setText("Training settings opened with the previous run prefilled.")
+        except Exception as exc:
+            self.QtWidgets.QMessageBox.warning(
+                self.window, "Settings Could Not Open", str(exc),
+            )
 
 
 def run_pyside6_ui(context):
@@ -1318,8 +1534,8 @@ def run_pyside6_ui(context):
             painter.setClipRect(rect)
             width = max(320, rect.width())
             height = max(190, rect.height())
-            painter.fillRect(rect, QtGui.QColor("#f8fafc"))
-            margin_l, margin_r, margin_t, margin_b = 64, 54, 82, 40
+            painter.fillRect(rect, QtGui.QColor("#ffffff"))
+            margin_l, margin_r, margin_t, margin_b = 60, 52, 62, 40
             x0, y0 = margin_l, height - margin_b
             x1, y1 = width - margin_r, margin_t
             plot_w = max(1, x1 - x0)
@@ -1327,14 +1543,6 @@ def run_pyside6_ui(context):
             painter.setPen(QtGui.QPen(QtGui.QColor("#d1d5db"), 1))
             painter.setBrush(QtGui.QColor("#ffffff"))
             painter.drawRect(QtCore.QRectF(x0, y1, plot_w, plot_h))
-            painter.setPen(QtGui.QColor("#111827"))
-            title_font = painter.font()
-            title_font.setBold(True)
-            painter.setFont(title_font)
-            painter.drawText(16, 24, "Training Progress")
-            font = painter.font()
-            font.setBold(False)
-            painter.setFont(font)
             if not self.rows:
                 painter.setPen(QtGui.QColor("#6b7280"))
                 painter.drawText(rect, QtCore.Qt.AlignCenter, "No epoch metrics yet")
@@ -1385,11 +1593,6 @@ def run_pyside6_ui(context):
                 x = x_at(epoch)
                 painter.drawLine(QtCore.QPointF(x, y0), QtCore.QPointF(x, y0 + 4))
                 painter.drawText(int(x - 8), y0 + 22, str(epoch))
-            painter.drawText(x0, height - 12, "Epoch")
-            painter.setPen(QtGui.QColor("#991b1b"))
-            painter.drawText(x0 - 48, y1 - 8, "Loss")
-            painter.setPen(QtGui.QColor("#1d4ed8"))
-            painter.drawText(int(max(x0 + 40, x1 - 28)), y1 - 8, "Dice")
 
             loss_points = []
             dice_points = []
@@ -1412,34 +1615,31 @@ def run_pyside6_ui(context):
                     painter.drawEllipse(p, 4, 4)
             latest_loss = next((row.get("train_loss") for row in reversed(self.rows) if row.get("train_loss") is not None), None)
             latest_dice = next((row.get("val_dice") for row in reversed(self.rows) if row.get("val_dice") is not None), None)
-            badge_x = min(150, max(16, width // 4))
-            badges = [("Epoch {0}/{1}".format(epochs[-1], max(epochs)), "#374151", "#f3f4f6")]
+            summary = ["Epoch {0}".format(epochs[-1])]
             if latest_loss is not None:
-                badges.append(("loss {0:.4f}".format(float(latest_loss)), "#991b1b", "#fee2e2"))
+                summary.append("train loss {0:.4f}".format(float(latest_loss)))
             if latest_dice is not None:
-                badges.append(("val dice {0:.4f}".format(float(latest_dice)), "#1d4ed8", "#dbeafe"))
-            for text, color, fill in badges:
-                badge_w = min(max(78, len(text) * 7 + 22), max(80, width - badge_x - 16))
-                painter.setPen(QtGui.QColor("#e5e7eb"))
-                painter.setBrush(QtGui.QColor(fill))
-                painter.drawRect(int(badge_x), 12, int(badge_w), 25)
-                painter.setPen(QtGui.QColor(color))
-                painter.drawText(int(badge_x + 10), 29, text)
-                badge_x += badge_w + 8
-            legend_x = int(max(x0 + 120, x1 - 178))
+                summary.append("validation Dice {0:.4f}".format(float(latest_dice)))
+            painter.setPen(QtGui.QColor("#344054"))
+            painter.drawText(
+                QtCore.QRectF(16, 10, max(1, width - 32), 22),
+                QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
+                "   |   ".join(summary),
+            )
+            legend_x = 16
             painter.setPen(QtGui.QPen(QtGui.QColor("#dc2626"), 2))
-            painter.drawLine(legend_x, 58, legend_x + 24, 58)
+            painter.drawLine(legend_x, 44, legend_x + 24, 44)
             painter.setPen(QtGui.QColor("#374151"))
-            painter.drawText(legend_x + 32, 63, "train loss")
+            painter.drawText(legend_x + 32, 49, "train loss")
             painter.setPen(QtGui.QPen(QtGui.QColor("#2563eb"), 2))
-            painter.drawLine(legend_x + 104, 58, legend_x + 128, 58)
+            painter.drawLine(legend_x + 112, 44, legend_x + 136, 44)
             painter.setPen(QtGui.QColor("#374151"))
-            painter.drawText(legend_x + 136, 63, "val dice")
+            painter.drawText(legend_x + 144, 49, "validation Dice")
 
     app = QtWidgets.QApplication.instance()
     if app is None:
         app = QtWidgets.QApplication(sys.argv[:1])
-    app.setApplicationName(TITLE)
+    configure_application(app, TITLE)
     window = QtWidgets.QMainWindow()
     QtStatusViewerApp(window, context, qt_modules, CurveWidget)
     window.show()

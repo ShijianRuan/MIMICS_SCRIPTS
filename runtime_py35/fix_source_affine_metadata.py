@@ -181,7 +181,15 @@ def _read_nifti_ras_affine(image_path, monitor=None):
         if monitor.get("done"):
             runtime_common.terminate_process_async(process=process, graceful_seconds=0.0)
             raise RuntimeError("Affine repair was cancelled during bridge startup.")
-    stdout, stderr = process.communicate(input=json.dumps(params).encode("utf-8"))
+    try:
+        stdout, stderr = process.communicate(
+            input=json.dumps(params).encode("utf-8"),
+            timeout=600,
+        )
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
+        raise RuntimeError("Source-affine bridge timed out after 600 seconds.")
     if process.returncode != 0:
         raise RuntimeError(
             "Bridge exited with code {0}: {1}".format(

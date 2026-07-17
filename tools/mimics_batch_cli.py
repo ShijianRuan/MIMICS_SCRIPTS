@@ -25,14 +25,18 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from resource_locks import FileResourceLock, ResourceLockTimeout
+from resource_locks import (
+    FileResourceLock,
+    ResourceLockTimeout,
+    default_resource_lock_dir,
+)
 
 BRIDGE = ROOT / "mimics_bridge.py"
 RUNTIME = ROOT / "runtime_py35"
 if str(RUNTIME) not in sys.path:
     sys.path.insert(0, str(RUNTIME))
 import runtime_common
-RESOURCE_LOCK_DIR = ROOT / ".mimics_runtime" / "locks"
+RESOURCE_LOCK_DIR = default_resource_lock_dir(ROOT)
 BACKGROUND_MIMICS_LOCK_PATH = RESOURCE_LOCK_DIR / "background_mimics.lock"
 
 
@@ -200,10 +204,56 @@ def launch_create_mcs(output_dir, mimics_exe, bridge_python, lock_timeout_second
             stdout=log,
             stderr=subprocess.STDOUT,
         )
-        lock.update_pid(proc.pid, kind="create_mcs", output_dir=str(output_dir.resolve()))
+        if not lock.update_pid(
+            proc.pid,
+            kind="create_mcs",
+            output_dir=str(output_dir.resolve()),
+        ):
+            raise RuntimeError(
+                "Background Mimics started, but the background-Mimics lock "
+                "could not be transferred to PID {}.".format(proc.pid)
+            )
         return proc
     except Exception:
-        lock.release()
+        poll = getattr(proc, "poll", None) if "proc" in locals() else None
+        process_running = False
+        if "proc" in locals():
+            try:
+                process_running = poll is None or poll() is None
+            except Exception:
+                process_running = True
+        if process_running:
+            try:
+                proc.terminate()
+                if hasattr(proc, "wait"):
+                    proc.wait(timeout=10)
+            except Exception:
+                try:
+                    proc.kill()
+                    if hasattr(proc, "wait"):
+                        proc.wait(timeout=10)
+                except Exception:
+                    pass
+        process_stopped = not process_running
+        if process_running:
+            try:
+                process_stopped = proc.poll() is not None
+            except Exception:
+                process_stopped = not runtime_common.process_exists(
+                    getattr(proc, "pid", 0)
+                )
+        if process_stopped:
+            lock.release()
+        else:
+            try:
+                lock.update_pid(
+                    proc.pid,
+                    kind="create_mcs",
+                    output_dir=str(output_dir.resolve()),
+                    termination_pending=True,
+                )
+            except Exception:
+                pass
         raise
     finally:
         log.close()
@@ -262,16 +312,63 @@ def launch_export_labels(ts_root, cases, mimics_exe, axes, flips, lock_timeout_s
             stdout=log,
             stderr=subprocess.STDOUT,
         )
-        lock.update_pid(
+        if not lock.update_pid(
             proc.pid,
             kind="export_labels",
             ts_root=str(ts_root.resolve()),
             export_root=str(Path(label_output_root).resolve()) if label_output_root else str(ts_root),
             stop_path=str(stop_path),
-        )
+        ):
+            raise RuntimeError(
+                "Background Mimics started, but the background-Mimics lock "
+                "could not be transferred to PID {}.".format(proc.pid)
+            )
         return proc
     except Exception:
-        lock.release()
+        poll = getattr(proc, "poll", None) if "proc" in locals() else None
+        process_running = False
+        if "proc" in locals():
+            try:
+                process_running = poll is None or poll() is None
+            except Exception:
+                process_running = True
+        if process_running:
+            try:
+                proc.terminate()
+                if hasattr(proc, "wait"):
+                    proc.wait(timeout=10)
+            except Exception:
+                try:
+                    proc.kill()
+                    if hasattr(proc, "wait"):
+                        proc.wait(timeout=10)
+                except Exception:
+                    pass
+        process_stopped = not process_running
+        if process_running:
+            try:
+                process_stopped = proc.poll() is not None
+            except Exception:
+                process_stopped = not runtime_common.process_exists(
+                    getattr(proc, "pid", 0)
+                )
+        if process_stopped:
+            lock.release()
+        else:
+            try:
+                lock.update_pid(
+                    proc.pid,
+                    kind="export_labels",
+                    ts_root=str(ts_root.resolve()),
+                    export_root=(
+                        str(Path(label_output_root).resolve())
+                        if label_output_root else str(ts_root)
+                    ),
+                    stop_path=str(stop_path),
+                    termination_pending=True,
+                )
+            except Exception:
+                pass
         raise
     finally:
         log.close()
@@ -425,18 +522,35 @@ def cmd_kill_background(args):
         "reason": "tools/mimics_batch_cli.py kill-background",
     }
     for queue_dir in _runtime_owned_roots():
-        if not queue_dir.is_dir():
+        queue_path = Path(queue_dir)
+        if not queue_path.is_dir():
             continue
         try:
-            runtime_dir = Path(runtime_common.import_queue_runtime_dir(str(ROOT), str(queue_dir)))
+            runtime_dir = Path(runtime_common.import_queue_runtime_dir(str(ROOT), str(queue_path)))
             runtime_dir.mkdir(parents=True, exist_ok=True)
-            (runtime_dir / "_mcs_queue_stop.json").write_text(json.dumps(stop_payload, indent=2, sort_keys=True), encoding="utf-8")
+            write_json_atomic(runtime_dir / "_mcs_queue_stop.json", stop_payload)
             active = runtime_dir / "_mcs_queue_active.json"
             if active.is_file():
                 active.unlink()
-            stopped_queues.append(str(queue_dir))
+            stopped_queues.append(str(queue_path))
         except Exception:
             pass
+    stop_markers = []
+    for lock_path in (BACKGROUND_MIMICS_LOCK_PATH, RESOURCE_LOCK_DIR / "gpu.lock"):
+        try:
+            lock_payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        except Exception:
+            lock_payload = {}
+        details = lock_payload.get("details") or {}
+        for key in ("stop_path", "cancel_path"):
+            marker = lock_payload.get(key) or details.get(key)
+            if not marker:
+                continue
+            try:
+                write_json_atomic(Path(marker), stop_payload)
+                stop_markers.append(str(marker))
+            except Exception:
+                pass
     markers = [
         "mimics_bridge.py",
         "nninteractive_bridge.py",
@@ -458,19 +572,24 @@ def cmd_kill_background(args):
     owned_roots.extend(_runtime_owned_roots())
     ps_roots = "@(" + ",".join("'{}'".format(str(r).replace("'", "''")) for r in owned_roots) + ")"
     ps_queues = "@(" + ",".join("'{}'".format(str(r).replace("'", "''")) for r in stopped_queues) + ")"
-    lock_paths = [str(BACKGROUND_MIMICS_LOCK_PATH), str(RESOURCE_LOCK_DIR / "gpu.lock")]
-    ps_locks = "@(" + ",".join("'{}'".format(str(r).replace("'", "''")) for r in lock_paths) + ")"
+    ps_stop_markers = "@(" + ",".join(
+        "'{}'".format(str(r).replace("'", "''")) for r in stop_markers
+    ) + ")"
     stop_log = ROOT / ".mimics_runtime" / "stop_background_last.json"
     stop_log.parent.mkdir(parents=True, exist_ok=True)
+    cutoff_utc = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     command = (
         "$markers={};"
         "$roots={};"
         "$queues={};"
-        "$locks={};"
+        "$stopMarkers={};"
         "$out='{}';"
+        "$foregroundPid={};"
+        "$cutoff=[DateTime]::Parse('{}').ToUniversalTime();"
         "$matched=Get-CimInstance Win32_Process | Where-Object {{"
         "$cmd=$_.CommandLine; "
-        "$cmd -and "
+        "$cmd -and $_.ProcessId -ne $PID -and $_.ProcessId -ne $foregroundPid -and "
+        "(-not $_.CreationDate -or $_.CreationDate.ToUniversalTime() -le $cutoff) -and "
         "($roots | Where-Object {{ $cmd -like ('*' + $_ + '*') }}) -and "
         "($markers | Where-Object {{ $cmd -like ('*' + $_ + '*') }})"
         "}};"
@@ -482,10 +601,17 @@ def cmd_kill_background(args):
         "  $killed += [PSCustomObject]@{{ProcessId=$procId;Name=$_.Name;ExitCode=0;CommandLine=$_.CommandLine}};"
         "}};"
         "Start-Sleep -Milliseconds 500;"
-        "$locks | ForEach-Object {{ Remove-Item -Path $_ -Force -ErrorAction SilentlyContinue }};"
-        "$report=[PSCustomObject]@{{RequestedAt=(Get-Date).ToString('s');QueueStopDirs=$queues;OwnedRoots=$roots;Matched=$records;Killed=$killed}};"
+        "$report=[PSCustomObject]@{{RequestedAt=(Get-Date).ToString('s');QueueStopDirs=$queues;StopMarkers=$stopMarkers;OwnedRoots=$roots;Matched=$records;Killed=$killed}};"
         "$report | ConvertTo-Json -Depth 5 -Compress | Set-Content -Path $out -Encoding UTF8"
-    ).format(ps_markers, ps_roots, ps_queues, ps_locks, str(stop_log).replace("'", "''"))
+    ).format(
+        ps_markers,
+        ps_roots,
+        ps_queues,
+        ps_stop_markers,
+        str(stop_log).replace("'", "''"),
+        int(os.getpid()),
+        cutoff_utc,
+    )
     subprocess.Popen(["powershell", "-NoProfile", "-Command", command], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     print("Stop request submitted for integration background processes. Queue stop markers: {}. Details: {}".format(len(stopped_queues), stop_log))
     return 0

@@ -144,25 +144,37 @@ def acquire_lock(output_dir):
     lock_path = runtime_path(output_dir, LOCK_FILE)
     lock_parent = os.path.dirname(lock_path)
     if not os.path.isdir(lock_parent):
-        os.makedirs(lock_parent)
+        try:
+            os.makedirs(lock_parent)
+        except OSError:
+            if not os.path.isdir(lock_parent):
+                raise
+    guard = runtime_common._open_resource_guard(lock_path, wait_seconds=2.0)
+    if guard is None:
+        return None
     try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(fd, str(os.getpid()).encode("ascii"))
-        os.close(fd)
-        return lock_path
-    except OSError:
         try:
-            with open(lock_path, "r") as handle:
-                pid = int((handle.read() or "0").strip() or "0")
-            if pid and process_exists(pid):
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except OSError:
+            try:
+                with open(lock_path, "r") as handle:
+                    pid = int((handle.read() or "0").strip() or "0")
+                if pid and process_exists(pid):
+                    return None
+            except Exception:
+                pass
+            try:
+                os.remove(lock_path)
+                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except OSError:
                 return None
-        except Exception:
-            pass
         try:
-            os.remove(lock_path)
-        except Exception:
-            return None
-        return acquire_lock(output_dir)
+            os.write(fd, str(os.getpid()).encode("ascii"))
+        finally:
+            os.close(fd)
+        return lock_path
+    finally:
+        runtime_common._close_resource_guard(guard)
 
 
 def process_exists(pid):
@@ -180,8 +192,13 @@ def metadata_set(obj, name, value):
             obj.metadata.create(name=name, value=text)
         else:
             item.value = text
-    except Exception:
-        pass
+    except Exception as exc:
+        raise RuntimeError(
+            "Could not persist required image metadata '{0}': {1}".format(
+                name,
+                exc,
+            )
+        )
 
 
 def _matrix_close(left, right, tol=1e-4):
@@ -312,7 +329,15 @@ def _resample_masks_to_actual_grid(result, active_image_shape, actual_mimics_vox
         stderr=subprocess.PIPE,
         **runtime_common.background_process_kwargs()
     )
-    stdout, stderr = process.communicate(input=json.dumps(params).encode("utf-8"))
+    try:
+        stdout, stderr = process.communicate(
+            input=json.dumps(params).encode("utf-8"),
+            timeout=600,
+        )
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
+        raise RuntimeError("mimics_bridge.py timed out after 600 seconds")
     if process.returncode != 0:
         raise RuntimeError(
             "External mask resampling failed with exit code {0}: {1}".format(
@@ -564,6 +589,7 @@ def main(output_dir=None, runtime_dir=None):
     consecutive_empty = 0
     total_completed = 0
     total_failed = 0
+    cancelled = False
 
     try:
         log_message(output_dir, "Background Mimics batch process started.")
@@ -682,6 +708,7 @@ def main(output_dir=None, runtime_dir=None):
                 done = os.path.isfile(done_path)
                 stop = os.path.isfile(stop_path)
                 if stop:
+                    cancelled = True
                     log_message(output_dir, "Stop marker found; exiting.")
                     break
                 if done and not active:
@@ -706,10 +733,20 @@ def main(output_dir=None, runtime_dir=None):
 
             # Re-check stop marker before starting work
             if os.path.isfile(stop_path):
+                cancelled = True
                 log_message(output_dir, "Stop marker found; exiting.")
                 break
 
             for i, (case_id, work_dir, mcs_path, descriptor_path) in enumerate(work_dirs):
+                if os.path.isfile(stop_path):
+                    cancelled = True
+                    log_message(
+                        output_dir,
+                        "Stop marker found before case {}; no additional projects will be created.".format(
+                            case_id
+                        ),
+                    )
+                    break
                 log_message(output_dir, "[{}/{}] Creating: {}".format(i + 1, total, case_id))
                 update_status(
                     output_dir,
@@ -726,7 +763,11 @@ def main(output_dir=None, runtime_dir=None):
                     # Persist source fingerprint for incremental rebuild detection
                     manifest_data = {}
                     try:
-                        with open(os.path.join(work_dir, "prepare_manifest.json"), "r") as mf:
+                        with open(
+                            os.path.join(work_dir, "prepare_manifest.json"),
+                            "r",
+                            encoding="utf-8",
+                        ) as mf:
                             manifest_data = json.load(mf)
                     except Exception:
                         pass
@@ -737,7 +778,7 @@ def main(output_dir=None, runtime_dir=None):
                             fingerprint_dir = os.path.dirname(fingerprint_path)
                             if not os.path.isdir(fingerprint_dir):
                                 os.makedirs(fingerprint_dir)
-                            with open(fingerprint_path, "w") as fp:
+                            with open(fingerprint_path, "w", encoding="utf-8") as fp:
                                 fp.write(fingerprint)
                         except Exception:
                             pass
@@ -795,7 +836,12 @@ def main(output_dir=None, runtime_dir=None):
                 total_failed,
             ),
         )
-        update_status(output_dir, "closed", completed=total_completed, failed=total_failed)
+        update_status(
+            output_dir,
+            "cancelled" if cancelled else "closed",
+            completed=total_completed,
+            failed=total_failed,
+        )
         return 0
     finally:
         try:

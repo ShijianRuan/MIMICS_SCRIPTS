@@ -24,13 +24,20 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from resource_locks import FileResourceLock, ResourceLockCancelled, ResourceLockTimeout, release_lock
+from resource_locks import (
+    FileResourceLock,
+    ResourceLockCancelled,
+    ResourceLockTimeout,
+    default_resource_lock_dir,
+    process_exists as resource_process_exists,
+    release_lock,
+)
 from tools.fewshot_strategies import compile_strategy, normalize_strategy_options, strategy_ids
 
 DEFAULT_WORKSPACE = "fewshot_models"
 LOG_ROTATE_BYTES = 5 * 1024 * 1024
 LOG_ROTATE_BACKUPS = 3
-RESOURCE_LOCK_DIR = ROOT / ".mimics_runtime" / "locks"
+RESOURCE_LOCK_DIR = default_resource_lock_dir(ROOT)
 GPU_LOCK_PATH = RESOURCE_LOCK_DIR / "gpu.lock"
 BACKGROUND_MIMICS_LOCK_PATH = RESOURCE_LOCK_DIR / "background_mimics.lock"
 
@@ -53,9 +60,24 @@ def cleanup_local_export_jobs(max_age_days=14, max_jobs=100):
     for index, (modified, path) in enumerate(rows):
         if index < int(max_jobs) and now - modified <= float(max_age_days) * 86400.0:
             continue
+        if local_export_job_is_active(path):
+            continue
         if _remove_tree_quietly(path):
             removed += 1
     return removed
+
+
+def local_export_job_is_active(path):
+    path = Path(path)
+    for relative in ("status.json", "runner_started.json"):
+        payload = read_json(path / relative, {}) or {}
+        status = str(payload.get("status") or "").lower()
+        if status in ("closed", "completed", "failed", "cancelled", "error"):
+            continue
+        pid = payload.get("pid")
+        if pid and process_exists(pid):
+            return True
+    return False
 
 
 def write_json_atomic(path, payload, retries=20, max_sleep=0.25):
@@ -307,11 +329,49 @@ def load_repo_config():
     return {}
 
 
+def resolve_training_mask_names(config, organ, value=None):
+    requested = parse_case_list(value) or []
+    if not requested:
+        requested = [str(organ or "").strip()]
+        aliases = (config or {}).get("organ_mask_aliases") or {}
+        if isinstance(aliases, dict):
+            organ_key = safe_slug(organ)
+            for key, names in aliases.items():
+                if safe_slug(key) == organ_key:
+                    requested.extend(parse_case_list(names) or [])
+    result = []
+    seen = set()
+    for name in requested:
+        text = str(name or "").strip()
+        key = safe_slug(text)
+        if text and key not in seen:
+            seen.add(key)
+            result.append(text)
+    return result
+
+
 TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled"}
 ACTIVE_JOB_STATUSES = {
     "launching", "preparing", "exporting_labels", "waiting_for_background_mimics",
-    "waiting_for_gpu", "training", "running", "cancelling",
+    "waiting_for_gpu", "training", "running", "cancelling", "stopping", "finalizing",
 }
+CANCELLABLE_JOB_STATUSES = ACTIVE_JOB_STATUSES - {"cancelling", "stopping", "finalizing"}
+
+
+def job_process_ids(payload):
+    result = []
+    for key in ("pid", "controller_pid", "launcher_pid"):
+        try:
+            pid = int((payload or {}).get(key) or 0)
+        except Exception:
+            pid = 0
+        if pid > 0 and pid not in result:
+            result.append(pid)
+    return result
+
+
+def job_has_live_process(payload):
+    return any(process_exists(pid) for pid in job_process_ids(payload))
 
 
 def _remove_tree_quietly(path):
@@ -351,16 +411,17 @@ def cleanup_workspace_artifacts(workspace, dinov3_root=None, config=None):
             payload = read_json(path, {}) or {}
             status = str(payload.get("status", "")).lower()
             job_id = str(payload.get("job_id") or path.stem)
-            pid = payload.get("pid") or payload.get("controller_pid") or payload.get("launcher_pid")
-            try:
-                pid = int(pid or 0)
-            except Exception:
-                pid = 0
-            if status in ACTIVE_JOB_STATUSES and pid and not process_exists(pid):
-                status = "failed"
+            pids = job_process_ids(payload)
+            if status in ACTIVE_JOB_STATUSES and pids and not job_has_live_process(payload):
+                cancelled = bool(payload.get("cancel_path") and Path(payload["cancel_path"]).is_file())
+                status = "cancelled" if cancelled else "failed"
                 payload.update({
-                    "status": "failed",
-                    "error": "background controller exited before recording a terminal state",
+                    "status": status,
+                    "error": (
+                        "task processes stopped after cancellation was requested"
+                        if cancelled
+                        else "background controller exited before recording a terminal state"
+                    ),
                     "orphaned": True,
                     "updated_at_epoch": min(
                         float(payload.get("updated_at_epoch") or payload.get("created_at_epoch") or path.stat().st_mtime),
@@ -606,35 +667,7 @@ def background_env():
 
 
 def process_exists(pid):
-    try:
-        pid = int(pid)
-    except Exception:
-        return False
-    if pid <= 0:
-        return False
-    if os.name != "nt":
-        try:
-            os.kill(pid, 0)
-            return True
-        except Exception:
-            return False
-    try:
-        import ctypes
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        STILL_ACTIVE = 259
-        kernel32 = ctypes.windll.kernel32
-        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid)
-        if not handle:
-            return False
-        try:
-            exit_code = ctypes.c_ulong(0)
-            if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)) == 0:
-                return False
-            return int(exit_code.value) == STILL_ACTIVE
-        finally:
-            kernel32.CloseHandle(handle)
-    except Exception:
-        return False
+    return resource_process_exists(pid)
 
 
 def _env_flag_disabled(name):
@@ -728,13 +761,26 @@ def cleanup_idle_nninteractive_server_lock(current):
     if time.time() - last_activity < idle_timeout + 60.0:
         return False
     if process_exists(pid):
-        terminate_process_tree(pid)
-    release_lock(current.get("path") or GPU_LOCK_PATH, current.get("token"))
+        if not terminate_process_tree(pid):
+            return False
+        deadline = time.time() + 15.0
+        while process_exists(pid) and time.time() < deadline:
+            time.sleep(0.25)
+        if process_exists(pid):
+            return False
+    latest_state = read_json(state_path, {}) or {}
+    if latest_state.get("gpu_lock_token") != current.get("token"):
+        return False
     try:
         Path(state_path).unlink()
-    except Exception:
+    except FileNotFoundError:
         pass
-    return True
+    except OSError:
+        return False
+    return bool(release_lock(
+        current.get("path") or GPU_LOCK_PATH,
+        current.get("token"),
+    ))
 
 
 def request_nninteractive_server_release_on_contention(current):
@@ -843,8 +889,12 @@ def acquire_gpu_lock_for_job(workspace, status_path, cancel_path, owner, timeout
         on_wait=on_wait,
         should_cancel=lambda: Path(cancel_path).is_file(),
     )
-    update_status(status_path, {"resource_wait": None})
-    append_log(workspace, "GPU resource acquired for {}.".format(owner))
+    try:
+        update_status(status_path, {"resource_wait": None})
+        append_log(workspace, "GPU resource acquired for {}.".format(owner))
+    except Exception:
+        lock.release()
+        raise
     return lock
 
 
@@ -901,27 +951,51 @@ def terminate_process_tree(pid):
         return False
 
 
+def terminate_and_reap_process(process, timeout_seconds=15.0):
+    """Stop an owned child and confirm it exited before releasing resources."""
+    if process is None:
+        return True
+    try:
+        if process.poll() is not None:
+            return True
+    except Exception:
+        pass
+    try:
+        process.terminate()
+    except Exception:
+        pass
+    try:
+        process.wait(timeout=min(5.0, max(0.0, float(timeout_seconds))))
+    except Exception:
+        try:
+            terminate_process_tree(process.pid)
+        except Exception:
+            pass
+        try:
+            process.wait(timeout=max(0.0, float(timeout_seconds)))
+        except Exception:
+            try:
+                process.kill()
+                process.wait(timeout=10.0)
+            except Exception:
+                pass
+    try:
+        return process.poll() is not None
+    except Exception:
+        return not process_exists(getattr(process, "pid", 0))
+
+
 def latest_running_job(workspace):
     jobs_dir = Path(workspace) / "jobs"
     if not jobs_dir.is_dir():
         return None, None
-    active_statuses = set([
-        "launching",
-        "preparing",
-        "exporting_labels",
-        "waiting_for_background_mimics",
-        "waiting_for_gpu",
-        "training",
-        "running",
-        "cancelling",
-    ])
     rows = []
     for path in jobs_dir.glob("*.json"):
         payload = read_json(path, {}) or {}
-        if payload.get("status") not in active_statuses:
+        if payload.get("status") not in ACTIVE_JOB_STATUSES:
             continue
-        pid = payload.get("pid") or payload.get("launcher_pid") or payload.get("controller_pid")
-        if pid and not process_exists(pid):
+        pids = job_process_ids(payload)
+        if pids and not job_has_live_process(payload):
             continue
         try:
             mtime = path.stat().st_mtime
@@ -1445,6 +1519,7 @@ def launch_mimics_export(
     label_staging_dir=None,
     export_space="source_image",
     mask_names=None,
+    target_mask_name=None,
     mcs_output_dir=None,
 ):
     mimics_exe = find_mimics_exe(mimics_exe)
@@ -1472,6 +1547,7 @@ def launch_mimics_export(
     mimics_log_path = export_root / "mimics_application.log"
     batch_status_path = export_root / "status.json"
     handshake_path = export_root / "runner_started.json"
+    stop_path = export_root / "_export_stop.json"
     config_path_write = export_root / "export_config.json"
     export_config = {
         "ts_root": str(Path(ts_root).resolve()),
@@ -1483,9 +1559,12 @@ def launch_mimics_export(
         "export_root": str(export_root),
         "status_path": str(batch_status_path),
         "job_runtime": str(export_root),
+        "stop_path": str(stop_path),
     }
     if mask_names:
         export_config["mask_names"] = [str(name) for name in mask_names if str(name).strip()]
+    if target_mask_name:
+        export_config["target_mask_name"] = str(target_mask_name).strip()
     if label_staging_dir:
         export_config["label_staging_dir"] = str(label_staging_dir)
     write_json_atomic(config_path_write, export_config)
@@ -1495,12 +1574,14 @@ def launch_mimics_export(
         "\n".join([
             "# Auto-generated runner for Mimics few-shot label export",
             "import sys, os, json, time",
-            "open(r'{}', 'w').write(json.dumps({{'pid': os.getpid(), 'started_at_epoch': time.time()}}))".format(
-                str(handshake_path)
+            "open({}, 'w').write(json.dumps({{'pid': os.getpid(), 'started_at_epoch': time.time()}}))".format(
+                json.dumps(str(handshake_path))
             ),
-            "sys.path.insert(0, r'{}')".format(str(ROOT / "runtime_py35")),
+            "sys.path.insert(0, {})".format(json.dumps(str(ROOT / "runtime_py35"))),
             "import mimics_export",
-            "mimics_export.run_background_batch_export(r'{}')".format(str(config_path_write)),
+            "mimics_export.run_background_batch_export({})".format(
+                json.dumps(str(config_path_write))
+            ),
             "",
         ]),
     )
@@ -1513,6 +1594,8 @@ def launch_mimics_export(
             "DINOv3 label export",
             lock_timeout_seconds if lock_timeout_seconds is not None else timeout_seconds,
         )
+    proc = None
+    lock_releasable = True
     try:
         log_handle, actual_log_path, log_warning = open_subprocess_log(log_path, workspace, "Background Mimics export log")
         with log_handle as log:
@@ -1530,62 +1613,146 @@ def launch_mimics_export(
                 stderr=subprocess.STDOUT,
                 **hidden_process_kwargs()
             )
-        if lock is not None:
-            lock.update_pid(proc.pid, kind="fewshot_label_export", ts_root=str(Path(ts_root).resolve()))
+        if lock is not None and not lock.update_pid(
+            proc.pid,
+            kind="fewshot_label_export",
+            ts_root=str(Path(ts_root).resolve()),
+            stop_path=str(stop_path),
+            cancel_path=str(cancel_path or ""),
+            status_path=str(status_path or ""),
+        ):
+            raise RuntimeError(
+                "Background Mimics lock ownership was lost while recording PID {}.".format(
+                    proc.pid
+                )
+            )
+        append_log(workspace, "Background Mimics export started, pid={}.".format(proc.pid))
+        if status_path:
+            update_status(status_path, {
+                "status": "exporting_labels",
+                "pid": proc.pid,
+                "controller_pid": os.getpid(),
+                "label_export_status": str(batch_status_path),
+                "label_export_stop_path": str(stop_path),
+            })
+        deadline = time.time() + float(timeout_seconds)
+        last_progress_signature = None
+        stop_requested = False
+        while time.time() < deadline:
+            if cancel_path and Path(cancel_path).is_file() and not stop_requested:
+                stop_requested = True
+                write_json_atomic(stop_path, {
+                    "status": "stop_requested",
+                    "requested_at_epoch": time.time(),
+                    "reason": "DINOv3 training was cancelled during label export",
+                })
+                if status_path:
+                    update_status(status_path, {"status": "cancelling"})
+            if status_path and batch_status_path.is_file():
+                live_status = read_json(batch_status_path, {}) or {}
+                signature = (
+                    live_status.get("status"),
+                    live_status.get("phase"),
+                    live_status.get("case_id"),
+                    live_status.get("index"),
+                    live_status.get("total"),
+                    live_status.get("completed"),
+                    live_status.get("failed"),
+                )
+                if signature != last_progress_signature:
+                    last_progress_signature = signature
+                    update_status(status_path, {"label_export_progress": live_status})
+            if proc.poll() is not None:
+                result = {"launched": True, "returncode": proc.returncode}
+                batch_status = read_json(batch_status_path, {}) or {}
+                if str(batch_status.get("status") or "").lower() not in (
+                    "closed", "cancelled", "failed",
+                ):
+                    batch_status.update({
+                        "status": "cancelled" if stop_requested else "failed",
+                        "phase": "cancelled" if stop_requested else "process_exited",
+                        "pid": proc.pid,
+                        "returncode": proc.returncode,
+                        "error": (
+                            "Label export stopped by cancellation request."
+                            if stop_requested
+                            else "Background Mimics exited before recording a terminal export state."
+                        ),
+                        "updated_at_epoch": time.time(),
+                    })
+                    write_json_atomic(batch_status_path, batch_status)
+                if batch_status:
+                    result["batch_status"] = batch_status
+                result["runner_started"] = handshake_path.is_file()
+                result["job_runtime"] = str(export_root)
+                result["mimics_log"] = str(mimics_log_path)
+                if label_staging_dir:
+                    result["label_staging_dir"] = str(label_staging_dir)
+                if actual_log_path is not None:
+                    result["log"] = str(actual_log_path)
+                else:
+                    result["log_unavailable"] = True
+                if log_warning:
+                    result["log_warning"] = log_warning
+                return result
+            time.sleep(2.0)
+        write_json_atomic(stop_path, {
+            "status": "stop_requested",
+            "requested_at_epoch": time.time(),
+            "reason": "DINOv3 label export timed out",
+        })
+        lock_releasable = terminate_and_reap_process(proc)
+        timed_out_status = read_json(batch_status_path, {}) or {}
+        if str(timed_out_status.get("status") or "").lower() not in (
+            "closed", "cancelled", "failed",
+        ):
+            timed_out_status.update({
+                "status": "failed" if lock_releasable else "stopping",
+                "phase": "timeout" if lock_releasable else "stopping_after_timeout",
+                "pid": proc.pid,
+                "error": (
+                    "DINOv3 label export timed out."
+                    if lock_releasable else
+                    "DINOv3 label export timed out, but the background Mimics "
+                    "process has not exited; its resource lock was retained."
+                ),
+                "updated_at_epoch": time.time(),
+            })
+            write_json_atomic(batch_status_path, timed_out_status)
+        result = {
+            "launched": True,
+            "timed_out": True,
+            "pid": proc.pid,
+            "runner_started": handshake_path.is_file(),
+            "job_runtime": str(export_root),
+            "mimics_log": str(mimics_log_path),
+            "batch_status": timed_out_status,
+        }
+        if label_staging_dir:
+            result["label_staging_dir"] = str(label_staging_dir)
+        if actual_log_path is not None:
+            result["log"] = str(actual_log_path)
+        else:
+            result["log_unavailable"] = True
+        if log_warning:
+            result["log_warning"] = log_warning
+        return result
     except Exception:
-        if lock is not None:
-            lock.release()
+        if proc is not None and proc.poll() is None:
+            lock_releasable = terminate_and_reap_process(proc)
+        if not lock_releasable and status_path:
+            update_status(status_path, {
+                "status": "stopping",
+                "pid": getattr(proc, "pid", 0),
+                "controller_pid": os.getpid(),
+                "label_export_status": str(batch_status_path),
+                "label_export_stop_path": str(stop_path),
+                "termination_pending": True,
+            })
         raise
-    append_log(workspace, "Background Mimics export started, pid={}.".format(proc.pid))
-    deadline = time.time() + float(timeout_seconds)
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            if lock is not None:
-                lock.release()
-            result = {"launched": True, "returncode": proc.returncode}
-            batch_status = read_json(batch_status_path, {}) or {}
-            if batch_status:
-                result["batch_status"] = batch_status
-            result["runner_started"] = handshake_path.is_file()
-            result["job_runtime"] = str(export_root)
-            result["mimics_log"] = str(mimics_log_path)
-            if label_staging_dir:
-                result["label_staging_dir"] = str(label_staging_dir)
-            if actual_log_path is not None:
-                result["log"] = str(actual_log_path)
-            else:
-                result["log_unavailable"] = True
-            if log_warning:
-                result["log_warning"] = log_warning
-            return result
-        time.sleep(2.0)
-    try:
-        proc.terminate()
-        proc.wait(timeout=10)
-    except Exception:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-    if lock is not None:
-        lock.release()
-    result = {
-        "launched": True,
-        "timed_out": True,
-        "pid": proc.pid,
-        "runner_started": handshake_path.is_file(),
-        "job_runtime": str(export_root),
-        "mimics_log": str(mimics_log_path),
-    }
-    if label_staging_dir:
-        result["label_staging_dir"] = str(label_staging_dir)
-    if actual_log_path is not None:
-        result["log"] = str(actual_log_path)
-    else:
-        result["log_unavailable"] = True
-    if log_warning:
-        result["log_warning"] = log_warning
-    return result
+    finally:
+        if lock is not None and lock_releasable:
+            lock.release()
 
 
 def latest_epoch_checkpoint(ckpt_dir):
@@ -1710,7 +1877,7 @@ def training_progress_line(progress):
     return ", ".join(parts)
 
 
-def cmd_train(args):
+def _cmd_train_impl(args):
     strategy_id = str(getattr(args, "strategy", "adaptive") or "adaptive")
     try:
         strategy_options = json.loads(str(getattr(args, "strategy_options_json", "") or "{}"))
@@ -1741,6 +1908,7 @@ def cmd_train(args):
 
     workspace.mkdir(parents=True, exist_ok=True)
     repo_config = load_repo_config()
+    mask_names = resolve_training_mask_names(repo_config, args.organ, getattr(args, "mask_names", None))
     maintenance = cleanup_workspace_artifacts(workspace, dinov3_root, repo_config)
     if any(maintenance.values()):
         append_log(workspace, "Automatic storage maintenance removed disposable artifacts: {}.".format(maintenance))
@@ -1756,6 +1924,7 @@ def cmd_train(args):
         "controller_pid": os.getpid(),
         "cancel_path": str(cancel_path),
         "metrics_history": str(metrics_history),
+        "mask_names": mask_names,
         "created_at_epoch": time.time(),
     })
     append_log(workspace, "Training job {} started for organ {}.".format(run_id, args.organ))
@@ -1781,7 +1950,8 @@ def cmd_train(args):
                 lock_timeout_seconds=args.background_mimics_lock_timeout_seconds,
                 label_staging_dir=fresh_label_root,
                 export_space="source_image",
-                mask_names=[args.organ],
+                mask_names=mask_names,
+                target_mask_name=organ_slug,
                 mcs_output_dir=args.mcs_output_dir,
             )
         except ResourceLockCancelled:
@@ -1797,6 +1967,18 @@ def cmd_train(args):
                 "error": "fresh label export was requested but background Mimics export could not be started",
             })
             return 75
+        batch_status = export_result.get("batch_status") or {}
+        if str(batch_status.get("status") or "").lower() == "stopping":
+            update_status(status_path, {
+                "status": "stopping",
+                "label_export": export_result,
+                "termination_pending": True,
+                "error": batch_status.get("error") or (
+                    "The background Mimics label export is still stopping; "
+                    "its resource lock was retained."
+                ),
+            })
+            return 75
         if export_result.get("timed_out") or int(export_result.get("returncode", 0) or 0) != 0:
             update_status(status_path, {
                 "status": "failed",
@@ -1804,7 +1986,20 @@ def cmd_train(args):
                 "error": "fresh label export did not finish successfully; training was not started with stale labels",
             })
             return 75
-        batch_status = export_result.get("batch_status") or {}
+        if str(batch_status.get("status") or "").lower() == "cancelled":
+            update_status(status_path, {
+                "status": "cancelled",
+                "label_export": export_result,
+                "error": "training was cancelled during fresh label export",
+            })
+            return 130
+        if cancel_path.is_file():
+            update_status(status_path, {
+                "status": "cancelled",
+                "label_export": export_result,
+                "error": "training was cancelled after fresh label export",
+            })
+            return 130
         if (
             str(batch_status.get("status") or "").lower() == "failed"
             or int(batch_status.get("failed", 0) or 0) > 0
@@ -1847,7 +2042,7 @@ def cmd_train(args):
             else:
                 diagnosis = (
                     "The export script finished without producing the requested mask. Check whether "
-                    "the selected .mcs projects contain a mask whose name matches the training organ."
+                    "the selected .mcs projects contain exactly one matching saved mask."
                 )
             error = (
                 "Label export produced no files in {1}. {4} "
@@ -1898,9 +2093,10 @@ def cmd_train(args):
         if args.export_labels:
             error = (
                 "not enough freshly exported labels for organ {0}; found {1}, required {2}. "
-                "Check that the selected cases have saved .mcs files and that each .mcs contains a Mask named {0}. "
+                "Check that the selected cases have saved .mcs files and that each .mcs contains exactly one "
+                "matching Mask ({3}). "
                 "If you want to use existing NIfTI labels instead of refreshing from .mcs, disable label export before training."
-            ).format(args.organ, len(selected), args.min_samples)
+            ).format(args.organ, len(selected), args.min_samples, ", ".join(mask_names))
         else:
             error = "not enough labeled samples for organ {}; found {}, required {}".format(
                 args.organ,
@@ -2015,6 +2211,8 @@ def cmd_train(args):
     append_log(workspace, "Launching DINOv3 training: {}".format(" ".join(cmd)))
     proc = None
     gpu_lock = None
+    final_progress = {}
+    gpu_lock_releasable = True
     try:
         gpu_lock = acquire_gpu_lock_for_job(
             workspace,
@@ -2038,8 +2236,17 @@ def cmd_train(args):
                 stderr=subprocess.STDOUT,
                 env=background_env(),
             )
-            if gpu_lock is not None:
-                gpu_lock.update_pid(proc.pid, kind="fewshot_train", job_id=run_id)
+            if gpu_lock is not None and not gpu_lock.update_pid(
+                proc.pid,
+                kind="fewshot_train",
+                job_id=run_id,
+                cancel_path=str(cancel_path),
+                status_path=str(status_path),
+            ):
+                raise RuntimeError(
+                    "Training started, but GPU lock ownership could not be "
+                    "transferred to PID {}.".format(proc.pid)
+                )
             status_payload = {"pid": proc.pid, "command": cmd}
             if actual_train_log is not None and actual_train_log != train_log:
                 train_log = actual_train_log
@@ -2070,6 +2277,36 @@ def cmd_train(args):
                         terminate_process_tree(proc.pid)
                 maybe_update_status(status_path, payload, loop_status_state, heartbeat_seconds=5.0)
                 time.sleep(1.0)
+        final_progress = read_json(train_status, {}) or {}
+        worker_cancelled = str(final_progress.get("status") or "").lower() == "cancelled"
+        cancel_forced_exit = cancel_started is not None and proc.returncode != 0
+        if worker_cancelled or cancel_forced_exit:
+            update_status(status_path, {
+                "status": "cancelled",
+                "returncode": proc.returncode,
+                "training_progress": final_progress,
+                "metrics_history": str(metrics_history),
+            })
+            append_log(workspace, "Training job {} cancelled.".format(run_id))
+            return 130
+        if proc.returncode != 0:
+            error = "training process failed; see train_log"
+            if actual_train_log is None:
+                error = "training process failed; training log is unavailable"
+            update_status(status_path, {
+                "status": "failed",
+                "returncode": proc.returncode,
+                "error": error,
+                "metrics_history": str(metrics_history),
+            })
+            return proc.returncode or 1
+        update_status(status_path, {
+            "status": "finalizing",
+            "returncode": 0,
+            "training_progress": final_progress,
+            "metrics_history": str(metrics_history),
+            "late_cancel_ignored": bool(cancel_path.is_file() and cancel_started is None),
+        })
     except ResourceLockCancelled:
         update_status(status_path, {"status": "cancelled", "error": "cancelled while waiting for GPU"})
         append_log(workspace, "Training job {} cancelled while waiting for GPU.".format(run_id))
@@ -2080,39 +2317,24 @@ def cmd_train(args):
         return 75
     except Exception as exc:
         if proc is not None and proc.poll() is None:
-            terminate_process_tree(proc.pid)
-        update_status(status_path, {"status": "failed", "error": str(exc)})
+            gpu_lock_releasable = terminate_and_reap_process(proc)
+        update_status(status_path, {
+            "status": "failed" if gpu_lock_releasable else "stopping",
+            "error": str(exc),
+            "termination_pending": not gpu_lock_releasable,
+        })
         append_log(workspace, "Training job {} failed before completion: {}.".format(run_id, exc))
+        if not gpu_lock_releasable:
+            append_log(
+                workspace,
+                "Training process {} did not exit after termination; the GPU lock was retained.".format(
+                    getattr(proc, "pid", "?")
+                ),
+            )
         return 1
     finally:
-        if gpu_lock is not None:
+        if gpu_lock is not None and gpu_lock_releasable:
             gpu_lock.release()
-
-    final_progress = read_json(train_status, {}) or {}
-    if cancel_path.is_file() or final_progress.get("status") == "cancelled":
-        update_status(status_path, {
-            "status": "cancelled",
-            "returncode": proc.returncode,
-            "training_progress": final_progress,
-            "metrics_history": str(metrics_history),
-        })
-        append_log(workspace, "Training job {} cancelled.".format(run_id))
-        return 130
-
-    if proc.returncode != 0:
-        error = "training process failed; see train_log"
-        try:
-            if actual_train_log is None:
-                error = "training process failed; training log is unavailable"
-        except Exception:
-            pass
-        update_status(status_path, {
-            "status": "failed",
-            "returncode": proc.returncode,
-            "error": error,
-            "metrics_history": str(metrics_history),
-        })
-        return proc.returncode or 1
 
     exp_dir = dinov3_root / "experiments" / exp_name
     if not bool(repo_config.get("keep_training_experiment_artifacts", False)):
@@ -2133,6 +2355,7 @@ def cmd_train(args):
         "model_id": run_id,
         "organ": args.organ,
         "organ_slug": organ_slug,
+        "source_mask_names": mask_names,
         "best_dsc": best_dsc_value,
         "checkpoint": str(registry_ckpt),
         "config": str(model_dir / "config.yaml"),
@@ -2176,6 +2399,7 @@ def cmd_train(args):
             "sub_volume_size": str(args.sub_volume_size),
             "keep_last_checkpoints": int(args.keep_last_checkpoints),
             "keep_materialized_dataset": bool(args.keep_materialized_dataset),
+            "source_mask_names": mask_names,
         },
         "created_at_epoch": time.time(),
         "ts_root": str(ts_root),
@@ -2219,6 +2443,56 @@ def cmd_train(args):
     else:
         append_log(workspace, "Training job {} completed. Model: {}".format(run_id, registry_ckpt))
     return 0
+
+
+def cmd_train(args):
+    """Run training and fail a created job record closed on finalization errors."""
+    if not getattr(args, "run_id", None):
+        args.run_id = "train_{}_{}".format(
+            time.strftime("%Y%m%dT%H%M%S"), uuid.uuid4().hex[:8]
+        )
+    try:
+        return _cmd_train_impl(args)
+    except Exception as exc:
+        try:
+            workspace = workspace_for(
+                Path(args.ts_root).resolve(), getattr(args, "workspace", None)
+            )
+            status_path = workspace / "jobs" / (str(args.run_id) + ".json")
+            if status_path.is_file():
+                current = read_json(status_path, {}) or {}
+                if (
+                    str(current.get("status") or "").lower() == "stopping"
+                    and job_has_live_process(current)
+                ):
+                    update_status(status_path, {
+                        "phase": "termination_pending",
+                        "error": str(exc),
+                        "termination_pending": True,
+                    })
+                    append_log(
+                        workspace,
+                        "Training job {} could not finish cleanup because an owned "
+                        "process is still running; the resource lock was retained: {}.".format(
+                            args.run_id, exc
+                        ),
+                    )
+                    return 1
+                update_status(status_path, {
+                    "status": "failed",
+                    "phase": "finalization_failed",
+                    "error": str(exc),
+                })
+                append_log(
+                    workspace,
+                    "Training job {} failed while finalizing model artifacts: {}.".format(
+                        args.run_id, exc
+                    ),
+                )
+                return 1
+        except Exception:
+            pass
+        raise
 
 
 def load_model_manifest(workspace, organ, model_id=None, model_manifest=None):
@@ -2491,6 +2765,7 @@ def cmd_infer(args):
     append_log(workspace, "Launching DINOv3 inference: {}".format(" ".join(cmd)))
     proc = None
     gpu_lock = None
+    gpu_lock_releasable = True
     try:
         gpu_lock = acquire_gpu_lock_for_job(
             workspace,
@@ -2514,8 +2789,17 @@ def cmd_infer(args):
                 stderr=subprocess.STDOUT,
                 env=background_env(),
             )
-            if gpu_lock is not None:
-                gpu_lock.update_pid(proc.pid, kind="fewshot_infer", job_id=job_id)
+            if gpu_lock is not None and not gpu_lock.update_pid(
+                proc.pid,
+                kind="fewshot_infer",
+                job_id=job_id,
+                cancel_path=str(cancel_path),
+                status_path=str(status_path),
+            ):
+                raise RuntimeError(
+                    "Inference started, but GPU lock ownership could not be "
+                    "transferred to PID {}.".format(proc.pid)
+                )
             status_payload = {"pid": proc.pid, "command": cmd}
             if actual_log_path is not None and actual_log_path != log_path:
                 log_path = actual_log_path
@@ -2544,6 +2828,32 @@ def cmd_infer(args):
                         heartbeat_seconds=5.0,
                     )
                 time.sleep(2.0)
+        if proc.returncode != 0:
+            if cancel_path.is_file():
+                update_status(status_path, {
+                    "status": "cancelled",
+                    "returncode": proc.returncode,
+                })
+                append_log(workspace, "Inference job {} cancelled.".format(job_id))
+                return 130
+            error = "inference process failed; see log"
+            if actual_log_path is None:
+                error = "inference process failed; inference log is unavailable"
+            update_status(status_path, {
+                "status": "failed",
+                "returncode": proc.returncode,
+                "error": error,
+            })
+            return proc.returncode or 1
+        update_status(status_path, {
+            "status": "completed",
+            "returncode": 0,
+            "output_path": str(output_path),
+            "image_path": str(image),
+            "late_cancel_ignored": bool(cancel_path.is_file()),
+        })
+        append_log(workspace, "Inference job {} completed. Output: {}".format(job_id, output_path))
+        return 0
     except ResourceLockCancelled:
         update_status(status_path, {"status": "cancelled", "error": "cancelled while waiting for GPU"})
         append_log(workspace, "Inference job {} cancelled while waiting for GPU.".format(job_id))
@@ -2554,41 +2864,24 @@ def cmd_infer(args):
         return 75
     except Exception as exc:
         if proc is not None and proc.poll() is None:
-            terminate_process_tree(proc.pid)
-        update_status(status_path, {"status": "failed", "error": str(exc)})
+            gpu_lock_releasable = terminate_and_reap_process(proc)
+        update_status(status_path, {
+            "status": "failed" if gpu_lock_releasable else "stopping",
+            "error": str(exc),
+            "termination_pending": not gpu_lock_releasable,
+        })
         append_log(workspace, "Inference job {} failed before completion: {}.".format(job_id, exc))
+        if not gpu_lock_releasable:
+            append_log(
+                workspace,
+                "Inference process {} did not exit after termination; the GPU lock was retained.".format(
+                    getattr(proc, "pid", "?")
+                ),
+            )
         return 1
     finally:
-        if gpu_lock is not None:
+        if gpu_lock is not None and gpu_lock_releasable:
             gpu_lock.release()
-    if cancel_path.is_file():
-        update_status(status_path, {
-            "status": "cancelled",
-            "returncode": proc.returncode,
-        })
-        append_log(workspace, "Inference job {} cancelled.".format(job_id))
-        return 130
-    if proc.returncode != 0:
-        error = "inference process failed; see log"
-        try:
-            if actual_log_path is None:
-                error = "inference process failed; inference log is unavailable"
-        except Exception:
-            pass
-        update_status(status_path, {
-            "status": "failed",
-            "returncode": proc.returncode,
-            "error": error,
-        })
-        return proc.returncode or 1
-    update_status(status_path, {
-        "status": "completed",
-        "returncode": 0,
-        "output_path": str(output_path),
-        "image_path": str(image),
-    })
-    append_log(workspace, "Inference job {} completed. Output: {}".format(job_id, output_path))
-    return 0
 
 
 def cmd_list_models(args):
@@ -2654,41 +2947,54 @@ def cmd_cancel(args):
         if not status:
             print("No running few-shot job was found.")
             return 0
+    current_status = str(status.get("status") or "").lower()
+    if current_status in TERMINAL_JOB_STATUSES:
+        print("Job {} is already {}.".format(status.get("job_id", status_path.stem), current_status))
+        return 0
+    if current_status not in CANCELLABLE_JOB_STATUSES:
+        print(
+            "Job {} is {} and cannot be cancelled at this stage.".format(
+                status.get("job_id", status_path.stem),
+                current_status or "not running",
+            )
+        )
+        return 0
+
     cancel_path = status.get("cancel_path")
+    cancel_error = None
     if cancel_path:
         cancel_error = write_cancel_marker(cancel_path)
         if cancel_error:
             print("Warning: could not write cancel marker {}: {}".format(cancel_path, cancel_error), file=sys.stderr)
-            update_status(status_path, {"cancel_marker_error": cancel_error})
     grace_seconds = max(0.0, float(getattr(args, "grace_seconds", 30.0)))
-    pids = []
-    for key in ("pid", "controller_pid", "launcher_pid"):
-        pid = status.get(key)
-        try:
-            pid = int(pid)
-        except Exception:
-            pid = 0
-        if pid > 0 and pid not in pids:
-            pids.append(pid)
+    pids = job_process_ids(status)
     deadline = time.time() + grace_seconds
     while pids and time.time() < deadline:
         if all(not process_exists(pid) for pid in pids):
             break
-        update_status(status_path, {
-            "status": "cancelling",
-            "cancel_requested_at_epoch": time.time(),
-            "grace_seconds": grace_seconds,
-        })
         time.sleep(0.5)
     killed = []
     for pid in pids:
         if process_exists(pid) and terminate_process_tree(pid):
             killed.append(int(pid))
-    update_status(status_path, {
-        "status": "cancelled",
-        "cancel_requested_at_epoch": time.time(),
-        "cancelled_pids": killed,
-    })
+    reap_deadline = time.time() + 10.0
+    while pids and time.time() < reap_deadline:
+        if all(not process_exists(pid) for pid in pids):
+            break
+        time.sleep(0.25)
+
+    latest = read_json(status_path, {}) or {}
+    latest_status = str(latest.get("status") or "").lower()
+    if latest_status not in TERMINAL_JOB_STATUSES and not job_has_live_process(latest):
+        latest.update({
+            "status": "cancelled",
+            "cancel_requested_at_epoch": time.time(),
+            "cancelled_pids": killed,
+            "updated_at_epoch": time.time(),
+        })
+        if cancel_error:
+            latest["cancel_marker_error"] = cancel_error
+        write_json_atomic(status_path, latest)
     print("Cancel request submitted for job {}.".format(status.get("job_id", status_path.stem)))
     return 0
 
@@ -2738,6 +3044,10 @@ def build_parser():
     train.add_argument("--export-labels", action="store_true")
     train.add_argument("--mimics-exe")
     train.add_argument("--mcs-output-dir", help="Folder containing saved .mcs projects for this training run")
+    train.add_argument(
+        "--mask-names",
+        help="Comma-separated saved .mcs mask names accepted for this training target",
+    )
     train.add_argument("--export-timeout-seconds", type=float, default=1800)
     train.add_argument("--background-mimics-lock-timeout-seconds", type=float, default=1800)
     train.add_argument("--gpu-lock-timeout-seconds", type=float, default=86400)

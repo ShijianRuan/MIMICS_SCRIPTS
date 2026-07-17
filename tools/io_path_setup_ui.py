@@ -14,6 +14,11 @@ import uuid
 from pathlib import Path
 from queue import Empty, Queue
 
+try:
+    from ui_theme import configure_application, stylesheet as shared_stylesheet
+except ImportError:
+    from tools.ui_theme import configure_application, stylesheet as shared_stylesheet
+
 
 def read_json(path, default=None):
     try:
@@ -27,9 +32,41 @@ def read_json(path, default=None):
 def write_json(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(path.name + ".{0}.{1}.tmp".format(os.getpid(), uuid.uuid4().hex))
-    temp.write_text(json.dumps(value, indent=2, ensure_ascii=False), encoding="utf-8")
-    os.replace(str(temp), str(path))
+    text = json.dumps(value, indent=2, ensure_ascii=False)
+    last_error = None
+    for attempt in range(12):
+        temp = path.with_name(path.name + ".{0}.{1}.tmp".format(os.getpid(), uuid.uuid4().hex))
+        try:
+            with temp.open("w", encoding="utf-8") as handle:
+                handle.write(text)
+                handle.flush()
+                try:
+                    os.fsync(handle.fileno())
+                except Exception:
+                    pass
+            os.replace(str(temp), str(path))
+            return
+        except OSError as exc:
+            last_error = exc
+            try:
+                if temp.is_file():
+                    temp.unlink()
+            except Exception:
+                pass
+            time.sleep(min(0.2, 0.03 * (attempt + 1)))
+    try:
+        with path.open("w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            try:
+                os.fsync(handle.fileno())
+            except Exception:
+                pass
+        return
+    except OSError:
+        if last_error is not None:
+            raise last_error
+        raise
 
 
 def source_default_output(mode, source):
@@ -371,8 +408,7 @@ def run_ui(context, preview_path=""):
     remembered_mode = remembered.get(mode) or {}
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
-    app.setApplicationName("Mimics Data Paths")
-    app.setStyle("Fusion")
+    configure_application(app, "Mimics Data Paths")
     window = QtWidgets.QDialog()
     window.setObjectName("ioWindow")
     window.setModal(False)
@@ -383,25 +419,7 @@ def run_ui(context, preview_path=""):
         "import_single": "Import Single Case",
         "export_masks": "Export Masks",
     }.get(mode, "Data Paths"))
-    window.setStyleSheet("""
-        QDialog#ioWindow { background: #f4f6f8; color: #17212b; }
-        QLabel { color: #273442; font-size: 13px; }
-        QLabel#title { color: #132231; font-size: 23px; font-weight: 650; }
-        QLabel#subtitle { color: #667482; font-size: 13px; }
-        QLabel#section { color: #344453; font-size: 12px; font-weight: 650; }
-        QFrame#panel { background: #ffffff; border: 1px solid #dce2e7; border-radius: 6px; }
-        QLineEdit { min-height: 34px; padding: 0 10px; border: 1px solid #c8d1d9; border-radius: 4px; background: #ffffff; selection-background-color: #1d6f8a; }
-        QLineEdit:focus { border: 1px solid #1d6f8a; }
-        QPushButton { min-height: 34px; padding: 0 14px; border: 1px solid #bcc7cf; border-radius: 4px; background: #ffffff; color: #263745; }
-        QPushButton:hover { background: #edf3f5; border-color: #8da1ad; }
-        QPushButton#primary { background: #176b75; border-color: #176b75; color: #ffffff; font-weight: 650; min-width: 126px; }
-        QPushButton#primary:hover { background: #115963; }
-        QPushButton#primary:disabled { background: #a9b7bc; border-color: #a9b7bc; }
-        QRadioButton, QCheckBox { spacing: 8px; color: #344453; }
-        QRadioButton::indicator, QCheckBox::indicator { width: 16px; height: 16px; }
-        QLabel#hint { color: #75838f; font-size: 12px; }
-        QLabel#preview { color: #176b75; font-size: 12px; font-weight: 600; }
-    """)
+    window.setStyleSheet(shared_stylesheet())
 
     root = QtWidgets.QVBoxLayout(window)
     root.setContentsMargins(30, 26, 30, 24)
@@ -428,6 +446,42 @@ def run_ui(context, preview_path=""):
     form.setContentsMargins(20, 18, 20, 18)
     form.setSpacing(15)
     root.addWidget(panel, 1)
+
+    progress_panel = QtWidgets.QFrame()
+    progress_panel.setObjectName("panel")
+    progress_layout = QtWidgets.QVBoxLayout(progress_panel)
+    progress_layout.setContentsMargins(20, 20, 20, 18)
+    progress_layout.setSpacing(12)
+    progress_heading = QtWidgets.QLabel("Starting task...")
+    progress_heading.setObjectName("section")
+    progress_layout.addWidget(progress_heading)
+    progress_bar = QtWidgets.QProgressBar()
+    progress_bar.setRange(0, 0)
+    progress_layout.addWidget(progress_bar)
+    progress_detail = QtWidgets.QLabel("Waiting for Mimics to start the workflow.")
+    progress_detail.setWordWrap(True)
+    progress_layout.addWidget(progress_detail)
+    progress_activity = QtWidgets.QTextEdit()
+    progress_activity.setReadOnly(True)
+    progress_activity.setMaximumHeight(180)
+    progress_layout.addWidget(progress_activity, 1)
+    progress_actions = QtWidgets.QHBoxLayout()
+    open_output = QtWidgets.QPushButton("Open Output")
+    open_log = QtWidgets.QPushButton("Open Log")
+    stop_task = QtWidgets.QPushButton("Stop")
+    stop_task.setObjectName("dangerButton")
+    hide_task = QtWidgets.QPushButton("Minimize")
+    close_task = QtWidgets.QPushButton("Close")
+    close_task.setEnabled(False)
+    progress_actions.addWidget(open_output)
+    progress_actions.addWidget(open_log)
+    progress_actions.addStretch(1)
+    progress_actions.addWidget(stop_task)
+    progress_actions.addWidget(hide_task)
+    progress_actions.addWidget(close_task)
+    progress_layout.addLayout(progress_actions)
+    progress_panel.hide()
+    root.addWidget(progress_panel, 1)
 
     def path_row(label, initial, browse_folder=True, file_or_folder=False, hint=""):
         form.addWidget(_label(QtWidgets, label, "section"))
@@ -582,7 +636,9 @@ def run_ui(context, preview_path=""):
 
     source_edit.textChanged.connect(lambda _text: refresh_default())
     output_edit.textChanged.connect(output_edited)
-    footer = QtWidgets.QHBoxLayout()
+    footer_widget = QtWidgets.QWidget()
+    footer = QtWidgets.QHBoxLayout(footer_widget)
+    footer.setContentsMargins(0, 0, 0, 0)
     remember = QtWidgets.QCheckBox("Remember these folders on this workstation")
     remember.setChecked(bool(remembered_mode))
     footer.addWidget(remember)
@@ -592,16 +648,167 @@ def run_ui(context, preview_path=""):
     submit.setObjectName("primary")
     footer.addWidget(cancel)
     footer.addWidget(submit)
-    root.addLayout(footer)
+    root.addWidget(footer_widget)
 
     def cancel_window():
+        if submission_state.get("submitted"):
+            window.accept()
+            return
         if status_path:
             write_json(status_path, {"status": "cancelled", "updated_at_epoch": time.time()})
         window.accept()
 
     submission_results = Queue()
-    submission_state = {"running": False}
+    submission_state = {"running": False, "submitted": False}
+    task_state = {"descriptor": {}, "last_signature": None, "stop_requested": False}
     submission_timer = QtCore.QTimer(window)
+    task_timer = QtCore.QTimer(window)
+
+    def open_path(path):
+        target = str(path or "").strip()
+        if not target:
+            return
+        if os.path.isfile(target):
+            target = os.path.dirname(target)
+        if not os.path.exists(target):
+            return
+        try:
+            if os.name == "nt":
+                os.startfile(target)
+            elif sys.platform == "darwin":
+                import subprocess
+                subprocess.Popen(["open", target])
+            else:
+                import subprocess
+                subprocess.Popen(["xdg-open", target])
+        except Exception:
+            pass
+
+    def append_activity(text):
+        text = str(text or "").strip()
+        if not text:
+            return
+        progress_activity.append("[{0}] {1}".format(time.strftime("%H:%M:%S"), text))
+
+    def show_progress():
+        submission_state["submitted"] = True
+        panel.hide()
+        footer_widget.hide()
+        title.setText("Task in progress")
+        subtitle.setText("Mimics remains available while this task runs.")
+        progress_panel.show()
+        append_activity("Request submitted to Mimics.")
+
+    def request_stop():
+        descriptor = task_state.get("descriptor") or {}
+        stop_paths = descriptor.get("stop_paths") or []
+        if isinstance(stop_paths, str):
+            stop_paths = [stop_paths]
+        if descriptor.get("stop_path") and descriptor.get("stop_path") not in stop_paths:
+            stop_paths.insert(0, descriptor.get("stop_path"))
+        stop_paths = [str(path) for path in stop_paths if str(path or "").strip()]
+        if not stop_paths:
+            progress_detail.setText("This task has not exposed a stop path yet.")
+            return
+        try:
+            errors = []
+            for stop_path in stop_paths:
+                try:
+                    write_json(stop_path, {
+                        "status": "cancel_requested",
+                        "requested_at_epoch": time.time(),
+                    })
+                except Exception as exc:
+                    errors.append("{0}: {1}".format(stop_path, exc))
+            if errors:
+                raise RuntimeError("; ".join(errors))
+            task_state["stop_requested"] = True
+            stop_task.setEnabled(False)
+            append_activity("Stop requested. The current safe unit of work will finish first.")
+        except Exception as exc:
+            progress_detail.setText("Could not request stop: {0}".format(exc))
+
+    def terminal_state(state):
+        return str(state or "").lower() in (
+            "closed", "completed", "done", "failed", "cancelled", "canceled",
+        )
+
+    def update_progress_from_payload(payload, descriptor):
+        payload = payload or {}
+        state = str(payload.get("status") or payload.get("phase") or "running")
+        phase = str(payload.get("phase") or state).replace("_", " ")
+        completed = int(payload.get("completed", 0) or 0)
+        failed = int(payload.get("failed", 0) or 0)
+        total = int(payload.get("total", 0) or payload.get("total_count", 0) or 0)
+        index = int(payload.get("index", 0) or 0)
+        current = payload.get("case_id") or payload.get("mask_name") or ""
+        progress_heading.setText(str(descriptor.get("title") or "Task progress"))
+        if total > 0:
+            progress_bar.setRange(0, total)
+            progress_bar.setValue(min(total, max(completed + failed, index)))
+            progress_bar.setFormat("%v / %m")
+        else:
+            progress_bar.setRange(0, 0)
+        detail = phase.capitalize()
+        if total:
+            detail += " - {0} completed, {1} failed, {2} total".format(completed, failed, total)
+        if current:
+            detail += "\nCurrent: {0}".format(current)
+        if payload.get("error"):
+            detail += "\n{0}".format(payload.get("error"))
+        progress_detail.setText(detail)
+        signature = (state, phase, completed, failed, total, current, payload.get("error"))
+        if signature != task_state.get("last_signature"):
+            task_state["last_signature"] = signature
+            append_activity(detail.replace("\n", " | "))
+        if terminal_state(state):
+            progress_bar.setRange(0, max(1, total))
+            progress_bar.setValue(max(1, min(total or 1, completed + failed or 1)))
+            stop_task.setEnabled(False)
+            close_task.setEnabled(True)
+            hide_task.setEnabled(False)
+
+    def poll_task():
+        setup_status = read_json(status_path, {}) or {}
+        setup_state = setup_status.get("status")
+        if setup_state == "failed":
+            update_progress_from_payload(
+                {"status": "failed", "error": setup_status.get("error", "The task could not start.")},
+                {"title": "Could not start task"},
+            )
+            return
+        if setup_state != "launched":
+            return
+        descriptor = setup_status.get("task") or {}
+        task_state["descriptor"] = descriptor
+        open_output.setEnabled(bool(descriptor.get("output_path")))
+        open_log.setEnabled(bool(descriptor.get("log_path")))
+        stop_task.setEnabled(
+            bool(descriptor.get("stop_path") or descriptor.get("stop_paths"))
+            and not task_state.get("stop_requested")
+        )
+        primary = read_json(descriptor.get("status_path"), {}) if descriptor.get("status_path") else {}
+        secondary = read_json(descriptor.get("secondary_status_path"), {}) if descriptor.get("secondary_status_path") else {}
+        payload = primary or {}
+        if secondary:
+            primary_phase = str((primary or {}).get("phase") or (primary or {}).get("status") or "")
+            secondary_state = str(secondary.get("status") or secondary.get("phase") or "")
+            if (
+                primary_phase in ("prepared", "creating_mcs", "waiting_for_mcs", "queued")
+                or not terminal_state(secondary_state)
+            ):
+                payload = secondary
+        if not payload:
+            payload = {"status": "launching", "phase": "starting"}
+        update_progress_from_payload(payload, descriptor)
+
+    task_timer.timeout.connect(poll_task)
+    task_timer.start(400)
+    open_output.clicked.connect(lambda: open_path((task_state.get("descriptor") or {}).get("output_path")))
+    open_log.clicked.connect(lambda: open_path((task_state.get("descriptor") or {}).get("log_path")))
+    stop_task.clicked.connect(request_stop)
+    hide_task.clicked.connect(window.showMinimized)
+    close_task.clicked.connect(window.accept)
 
     def poll_submission():
         try:
@@ -621,7 +828,7 @@ def run_ui(context, preview_path=""):
             state[mode] = selection
             write_json(state_path, state)
         write_json(status_path, {"status": "submitted", "selection": selection, "updated_at_epoch": time.time()})
-        window.accept()
+        show_progress()
 
     submission_timer.timeout.connect(poll_submission)
     submission_timer.start(80)

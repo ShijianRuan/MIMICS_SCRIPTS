@@ -38,6 +38,10 @@ try:
     from fewshot_strategies import DEFAULT_OPTIONS, STRATEGIES, normalize_strategy_options, strategy_defaults, strategy_ids, strategy_label, strategy_summary, suggested_strategy
 except ImportError:
     from tools.fewshot_strategies import DEFAULT_OPTIONS, STRATEGIES, normalize_strategy_options, strategy_defaults, strategy_ids, strategy_label, strategy_summary, suggested_strategy
+try:
+    from ui_theme import configure_application, stylesheet as shared_stylesheet
+except ImportError:
+    from tools.ui_theme import configure_application, stylesheet as shared_stylesheet
 TITLE = "DINOv3 Few-Shot Training"
 STRATEGY_DATA_KEYS = set(DEFAULT_OPTIONS.keys())
 DECODER_CHOICES = (
@@ -114,6 +118,25 @@ def split_csv(value):
     return [item.strip() for item in str(value).replace(";", ",").split(",") if item.strip()]
 
 
+def configured_mask_names(config, organ):
+    names = [str(organ or "").strip()]
+    aliases = config.get("organ_mask_aliases") or {}
+    if isinstance(aliases, dict):
+        organ_key = safe_slug(organ)
+        for key, values in aliases.items():
+            if safe_slug(key) != organ_key:
+                continue
+            names.extend(split_csv(values))
+    result = []
+    seen = set()
+    for name in names:
+        key = safe_slug(name)
+        if name and key not in seen:
+            seen.add(key)
+            result.append(name)
+    return result
+
+
 def hidden_process_kwargs():
     if os.name != "nt":
         return {}
@@ -175,6 +198,7 @@ def training_options_for_organ(config, organ, profile_name=None):
     if not config.get("default_strategy"):
         values["strategy"] = suggested_strategy(organ)
     values.update(strategy_defaults(values.get("strategy")))
+    values["mask_names"] = ",".join(configured_mask_names(config, organ))
     return values
 
 
@@ -227,6 +251,7 @@ def validate_options(options):
     normalized["sub_volume"] = _bool(normalized.get("sub_volume", False))
     normalized["keep_materialized_dataset"] = _bool(normalized.get("keep_materialized_dataset", False))
     normalized["export_labels_before_training"] = _bool(normalized.get("export_labels_before_training", True))
+    normalized["mask_names"] = ",".join(split_csv(normalized.get("mask_names", "")))
     normalized["mcs_output_dir"] = os.path.abspath(os.path.expanduser(
         str(normalized.get("mcs_output_dir", "") or "")
     )) if str(normalized.get("mcs_output_dir", "") or "").strip() else ""
@@ -323,12 +348,18 @@ def append_training_args(cmd, config, options):
     ])
     if bool(options.get("keep_materialized_dataset", config.get("default_keep_materialized_dataset", False))):
         cmd.append("--keep-materialized-dataset")
+    mask_names = split_csv(options.get("mask_names", ""))
+    if mask_names:
+        cmd.extend(["--mask-names", ",".join(mask_names)])
 
 
 def prepare_training_launch(context, options, run_id=None):
     config = context.get("config") or {}
-    options = validate_options(options)
     organ = context["organ"]
+    options = dict(options)
+    if bool(options.get("export_labels_before_training", True)) and not split_csv(options.get("mask_names", "")):
+        options["mask_names"] = ",".join(configured_mask_names(config, organ))
+    options = validate_options(options)
     ts_root = context["ts_root"]
     workspace = context["workspace"]
     python_exe = context.get("python_exe") or sys.executable
@@ -352,6 +383,11 @@ def prepare_training_launch(context, options, run_id=None):
         run_id,
     ]
     if bool(options.get("export_labels_before_training", True)):
+        if "mimics_exe" in context and not str(context.get("mimics_exe") or "").strip():
+            raise RuntimeError(
+                "Refreshing labels requires a separate background Mimics executable. "
+                "Configure MIMICS_BACKGROUND_EXE, or turn off label refresh and use already exported NIfTI labels."
+            )
         cmd.append("--export-labels")
         mcs_output_dir = str(options.get("mcs_output_dir") or context.get("mcs_output_dir") or "").strip()
         if mcs_output_dir:
@@ -370,6 +406,22 @@ def prepare_training_launch(context, options, run_id=None):
         "workspace": workspace,
         "cancel_path": cancel_path,
         "training_options": options,
+        "retry_context": {
+            key: context.get(key)
+            for key in (
+                "project_root",
+                "pipeline_script",
+                "dinov3_root",
+                "python_exe",
+                "mimics_exe",
+                "mcs_output_dir",
+                "ts_root",
+                "workspace",
+                "organ",
+                "case_ids",
+                "config",
+            )
+        },
         "created_at_epoch": time.time(),
         "updated_at_epoch": time.time(),
         "launched_by": "external_advanced_ui",
@@ -445,6 +497,12 @@ def format_status_line(job):
             job.get("train_sample_count", "?"),
             job.get("validation_sample_count", "?"),
         ))
+    export_progress = job.get("label_export_progress") or {}
+    if isinstance(export_progress, dict) and export_progress:
+        index = int(export_progress.get("index", 0) or 0)
+        total = int(export_progress.get("total", 0) or 0)
+        phase = str(export_progress.get("phase") or export_progress.get("status") or "running")
+        parts.append("labels {0}/{1} {2}".format(index, total, phase) if total else "labels " + phase)
     progress = job.get("training_progress") or {}
     if isinstance(progress, dict):
         if progress.get("latest_epoch_line"):
@@ -581,6 +639,8 @@ class TrainingSetupApp(object):
         self.values = training_options_for_organ(
             self.config, self.context.get("organ"), default_profile,
         )
+        if isinstance(self.context.get("initial_options"), dict):
+            self.values.update(self.context.get("initial_options") or {})
         self.started = False
         self.status_var = None
         self.vars = {}
@@ -602,6 +662,7 @@ class TrainingSetupApp(object):
         self.img_size_custom_widget = None
         self._syncing_quick = False
         self._applying_strategy = False
+        self._closing = False
         self._build()
 
     def _build(self):
@@ -786,6 +847,12 @@ class TrainingSetupApp(object):
             text="Refresh labels from saved .mcs before training",
             variable=self.vars["export_labels_before_training"],
         ).pack(anchor="w", pady=(8, 0))
+        mask_row = ttk.Frame(samples)
+        mask_row.pack(fill="x", pady=(8, 0))
+        ttk.Label(mask_row, text="Saved mask names").pack(side="left")
+        ttk.Entry(mask_row, textvariable=self.vars["mask_names"]).pack(
+            side="left", fill="x", expand=True, padx=(8, 0)
+        )
 
     def _build_expert(self, parent):
         import tkinter as tk
@@ -1188,7 +1255,7 @@ class TrainingSetupApp(object):
         self.root.after(500, self.poll_training_status)
 
     def poll_training_status(self):
-        if not self.training_status_path:
+        if self._closing or not self.training_status_path:
             return
         status = read_json(self.training_status_path, {}) or {}
         line = format_status_line(status)
@@ -1198,7 +1265,7 @@ class TrainingSetupApp(object):
             self._append_log(line)
         if status.get("train_log"):
             self.training_log_dir = os.path.dirname(status.get("train_log"))
-        if status.get("status") in ("completed", "failed", "cancelled", "cancelling"):
+        if status.get("status") in ("completed", "failed", "cancelled"):
             return
         self.root.after(1500, self.poll_training_status)
 
@@ -1243,6 +1310,9 @@ class TrainingSetupApp(object):
         })
 
     def close(self):
+        if self._closing:
+            return
+        self._closing = True
         if not self.started:
             path = self.context.get("setup_status_path")
             if path:
@@ -1283,12 +1353,15 @@ class QtTrainingSetupApp(object):
         self.values = training_options_for_organ(
             self.config, self.context.get("organ"), default_profile,
         )
+        if isinstance(self.context.get("initial_options"), dict):
+            self.values.update(self.context.get("initial_options") or {})
         self.widgets = {}
         self.quick_widgets = {}
         self.case_list = None
         self.manual_cases = None
         self.dataset_edit = None
         self.mcs_folder_edit = None
+        self.mask_names_edit = None
         self.status_label = None
         self.status_text = None
         self.start_button = None
@@ -1375,38 +1448,28 @@ class QtTrainingSetupApp(object):
         shortcut_close.activated.connect(self.close)
         self.shortcuts = [shortcut_start, shortcut_close]
         self._refresh_quick_labels()
+        if not (self.context.get("case_ids") or []):
+            self.QtCore.QTimer.singleShot(
+                0,
+                lambda: self.apply_dataset_root(self.context.get("ts_root", "")),
+            )
 
     def _stylesheet(self):
-        return """
-        QMainWindow, QWidget { background: #f7f8fb; color: #172033; font-family: "Segoe UI", "Microsoft YaHei", "Helvetica Neue", sans-serif; font-size: 10pt; }
-        QLabel#titleLabel { font-size: 18pt; font-weight: 650; color: #101827; }
-        QLabel#subtitleLabel { color: #4b5565; }
-        QLabel#warningLabel { color: #8a5a00; }
-        QGroupBox { background: #ffffff; border: 1px solid #d8dee9; border-radius: 8px; margin-top: 12px; padding-top: 14px; }
-        QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; color: #1f2937; font-weight: 600; }
-        QTabWidget::pane { border: 1px solid #d8dee9; background: #ffffff; border-radius: 8px; }
-        QTabBar::tab { padding: 9px 20px; background: #eef2f7; border: 1px solid #d8dee9; border-bottom: none; border-top-left-radius: 6px; border-top-right-radius: 6px; }
-        QTabBar::tab:selected { background: #ffffff; color: #111827; font-weight: 600; }
-        QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QListWidget, QTextEdit {
-            background: #ffffff; border: 1px solid #cfd7e3; border-radius: 6px; padding: 5px 7px;
-        }
-        QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QTextEdit:focus { border-color: #3b73d9; }
-        QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled { color: #98a2b3; background: #f3f5f8; border-color: #e1e6ee; }
-        QPushButton { background: #ffffff; border: 1px solid #aeb7c5; border-radius: 6px; padding: 7px 14px; }
-        QPushButton:hover { background: #f1f5fb; }
-        QPushButton:disabled { color: #9aa4b2; background: #f1f3f6; border-color: #d8dee9; }
-        QPushButton#primaryButton { background: #2458c8; color: #ffffff; border-color: #2458c8; font-weight: 600; }
-        QPushButton#primaryButton:hover { background: #1d49a8; }
-        QListWidget::item { padding: 5px; }
-        QListWidget::item:selected { background: #dbeafe; color: #111827; }
-        """
+        return shared_stylesheet()
 
     def _build_setup_tab(self):
         QtWidgets = self.QtWidgets
         tab = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(tab)
+        tab_layout = QtWidgets.QVBoxLayout(tab)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        body = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(body)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
+        scroll.setWidget(body)
+        tab_layout.addWidget(scroll)
 
         profile_group = QtWidgets.QGroupBox("Dataset")
         profile_layout = QtWidgets.QGridLayout(profile_group)
@@ -1425,6 +1488,13 @@ class QtTrainingSetupApp(object):
         browse_mcs = QtWidgets.QPushButton("Browse")
         browse_mcs.clicked.connect(self.browse_mcs_folder)
         profile_layout.addWidget(browse_mcs, 1, 2)
+        profile_layout.addWidget(QtWidgets.QLabel("Saved mask names"), 2, 0)
+        self.mask_names_edit = QtWidgets.QLineEdit(str(self.values.get("mask_names", "")))
+        self.mask_names_edit.setPlaceholderText("Example: liver, liver_seg")
+        self.mask_names_edit.setToolTip(
+            "Comma-separated names accepted in saved .mcs projects. Exactly one must match in each selected case."
+        )
+        profile_layout.addWidget(self.mask_names_edit, 2, 1, 1, 2)
         layout.addWidget(profile_group)
 
         sample_group = QtWidgets.QGroupBox("Samples")
@@ -1489,6 +1559,7 @@ class QtTrainingSetupApp(object):
         )
         sample_layout.addWidget(self.widgets["export_labels_before_training"])
         layout.addWidget(sample_group, 1)
+        layout.addStretch(1)
         return tab
 
     def _build_expert_tab(self):
@@ -1806,6 +1877,8 @@ class QtTrainingSetupApp(object):
         worker.start()
 
     def _poll_dataset_scan(self):
+        if self._closing:
+            return
         while True:
             try:
                 generation, path, output_dir, cases, error = self._dataset_scan_results.get_nowait()
@@ -1927,6 +2000,8 @@ class QtTrainingSetupApp(object):
         values = dict(self.values)
         if self.mcs_folder_edit is not None:
             values["mcs_output_dir"] = str(self.mcs_folder_edit.text()).strip()
+        if self.mask_names_edit is not None:
+            values["mask_names"] = str(self.mask_names_edit.text()).strip()
         for key in list(self.widgets.keys()):
             if key == "sub_volume_depth":
                 continue
@@ -2147,7 +2222,7 @@ class QtTrainingSetupApp(object):
         self.QtCore.QTimer.singleShot(500, self.poll_training_status)
 
     def poll_training_status(self):
-        if not self.training_status_path:
+        if self._closing or not self.training_status_path:
             return
         status = read_json(self.training_status_path, {}) or {}
         line = format_status_line(status)
@@ -2157,7 +2232,7 @@ class QtTrainingSetupApp(object):
             self._append_log(line)
         if status.get("train_log"):
             self.training_log_dir = os.path.dirname(status.get("train_log"))
-        if status.get("status") in ("completed", "failed", "cancelled", "cancelling"):
+        if status.get("status") in ("completed", "failed", "cancelled"):
             return
         self.QtCore.QTimer.singleShot(1500, self.poll_training_status)
 
@@ -2203,9 +2278,15 @@ class QtTrainingSetupApp(object):
         })
 
     def mark_closed_if_needed(self):
-        if self.started or self._closing:
+        if self._closing:
             return
         self._closing = True
+        try:
+            self._dataset_scan_timer.stop()
+        except Exception:
+            pass
+        if self.started:
+            return
         path = self.context.get("setup_status_path")
         if path:
             payload = read_json(path, {}) or {}
@@ -2241,7 +2322,7 @@ def run_pyside6_ui(context):
     app = QtWidgets.QApplication.instance()
     if app is None:
         app = QtWidgets.QApplication(sys.argv[:1])
-    app.setApplicationName(TITLE)
+    configure_application(app, TITLE)
     window = CloseAwareMainWindow()
     controller = QtTrainingSetupApp(window, context, qt_modules)
     window.controller = controller

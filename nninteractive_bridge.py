@@ -62,7 +62,13 @@ _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _THIS_DIR and _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 
-from resource_locks import FileResourceLock, ResourceLockTimeout, release_lock
+from resource_locks import (
+    FileResourceLock,
+    ResourceLockTimeout,
+    default_resource_lock_dir,
+    process_exists as resource_process_exists,
+    release_lock,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +84,7 @@ SERVER_IDLE_TIMEOUT = 1800
 LOG_ROTATE_BYTES = 10 * 1024 * 1024
 LOG_ROTATE_BACKUPS = 3
 PROJECT_ROOT = Path(__file__).resolve().parent
-RESOURCE_LOCK_DIR = PROJECT_ROOT / ".mimics_runtime" / "locks"
+RESOURCE_LOCK_DIR = default_resource_lock_dir(PROJECT_ROOT)
 GPU_LOCK_PATH = RESOURCE_LOCK_DIR / "gpu.lock"
 
 
@@ -109,13 +115,18 @@ def _gpu_lock_enabled(device: str) -> bool:
     return str(device or "").lower().startswith("cuda")
 
 
-def _release_gpu_lock_from_state(state: dict[str, Any] | None) -> None:
+def _release_gpu_lock_from_state(state: dict[str, Any] | None) -> bool:
     if not state:
-        return
+        return True
     lock_path = state.get("gpu_lock_path")
     token = state.get("gpu_lock_token")
-    if lock_path and token:
-        release_lock(lock_path, str(token))
+    if not lock_path or not token:
+        return True
+    for attempt in range(3):
+        if release_lock(lock_path, str(token)):
+            return True
+        time.sleep(0.05 * (attempt + 1))
+    return False
 
 
 def _runtime_work_dir(model_dir: str, runtime_work_dir: str | None = None) -> Path:
@@ -314,39 +325,8 @@ def _load_server_state(path: Path) -> dict[str, Any] | None:
 
 
 def _process_exists(pid: int) -> bool:
-    """Check whether *pid* is still running.
-
-    On Windows, ``os.kill(pid, 0)`` can raise a cryptic SystemError inside
-    CPython instead of the expected OSError.  Use the WinAPI directly, mirroring
-    the workaround already used in ``nninteractive_mimics.py``.
-    """
-    if pid <= 0:
-        return False
-    if os.name != "nt":
-        try:
-            os.kill(pid, 0)
-            return True
-        except OSError:
-            return False
-    try:
-        import ctypes
-
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        STILL_ACTIVE = 259
-
-        kernel32 = ctypes.windll.kernel32
-        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid)
-        if not handle:
-            return False
-        try:
-            exit_code = ctypes.c_ulong(0)
-            if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)) == 0:
-                return False
-            return int(exit_code.value) == STILL_ACTIVE
-        finally:
-            kernel32.CloseHandle(handle)
-    except Exception:
-        return False
+    """Use the shared conservative process check, including Windows exit code 259."""
+    return resource_process_exists(pid)
 
 
 def _process_command_line(pid: int) -> str | None:
@@ -427,15 +407,57 @@ def _server_running(server_url: str, api_key: str | None = None) -> bool:
         return False
 
 
-def _remove_server_state(path: Path, ownership_token: str | None = None) -> None:
+def _remove_server_state(path: Path, ownership_token: str | None = None) -> bool:
+    """Retire owned state before releasing its GPU lock.
+
+    Keeping the lock until the state file is gone prevents a replacement
+    server from acquiring the GPU, writing a new state file, and then having
+    that new state removed by an older cleanup path. If Windows temporarily
+    refuses deletion, first try to rename the state out of the canonical path.
+    As a final fallback, release only after the recorded server is confirmed
+    dead; the ownership-token check prevents this cleanup from touching a
+    replacement server.
+    """
     state = _load_server_state(path)
-    if ownership_token and state and state.get("ownership_token") != ownership_token:
-        return
-    _release_gpu_lock_from_state(state)
+    if ownership_token and (
+        not state or state.get("ownership_token") != ownership_token
+    ):
+        return False
+    for attempt in range(8):
+        try:
+            path.unlink()
+            return _release_gpu_lock_from_state(state)
+        except FileNotFoundError:
+            return _release_gpu_lock_from_state(state)
+        except OSError:
+            time.sleep(min(0.2, 0.025 * (attempt + 1)))
+
+    retired_path = path.with_name(
+        "{0}.retired.{1}.{2}".format(
+            path.name,
+            str(ownership_token or state.get("ownership_token") or "unknown")[:12],
+            uuid.uuid4().hex,
+        )
+    )
     try:
-        path.unlink()
+        path.replace(retired_path)
     except FileNotFoundError:
+        return _release_gpu_lock_from_state(state)
+    except OSError:
+        latest = _load_server_state(path)
+        if ownership_token and (
+            not latest or latest.get("ownership_token") != ownership_token
+        ):
+            return False
+        if state and _process_matches_server(state):
+            return False
+        return _release_gpu_lock_from_state(state)
+
+    try:
+        retired_path.unlink()
+    except OSError:
         pass
+    return _release_gpu_lock_from_state(state)
 
 
 def _terminate_owned_server(state: dict[str, Any]) -> bool:
@@ -465,7 +487,37 @@ def _terminate_owned_server(state: dict[str, Any]) -> bool:
             os.kill(pid, signal.SIGKILL)
         except OSError:
             pass
-    return True
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        if not _process_exists(pid):
+            return True
+        time.sleep(0.25)
+    return not _process_exists(pid)
+
+
+def _stop_spawned_server(process: subprocess.Popen, timeout_seconds: float = 10.0) -> bool:
+    """Stop a server started by this process and confirm it has exited."""
+    try:
+        if process.poll() is not None:
+            return True
+    except Exception:
+        pass
+    try:
+        process.terminate()
+        process.wait(timeout=timeout_seconds)
+        return True
+    except Exception:
+        pass
+    try:
+        process.kill()
+        process.wait(timeout=timeout_seconds)
+        return True
+    except Exception:
+        pass
+    try:
+        return not _process_exists(int(process.pid))
+    except Exception:
+        return False
 
 
 def _terminate_model_servers(model_dir: str) -> int:
@@ -572,8 +624,10 @@ def _watchdog_main(state_path_value: str, ownership_token: str) -> int:
         if not state or state.get("ownership_token") != ownership_token:
             return 0
         if not _process_matches_server(state):
-            _remove_server_state(state_path, ownership_token)
-            return 0
+            if _remove_server_state(state_path, ownership_token):
+                return 0
+            time.sleep(5.0)
+            continue
         try:
             operation_pid = int(state.get("active_operation_pid", 0) or 0)
         except (TypeError, ValueError):
@@ -588,9 +642,11 @@ def _watchdog_main(state_path_value: str, ownership_token: str) -> int:
         last_activity = float(state.get("last_activity_epoch", time.time()))
         remaining = idle_timeout - (time.time() - last_activity)
         if remaining <= 0:
-            _terminate_owned_server(state)
-            _remove_server_state(state_path, ownership_token)
-            return 0
+            if _terminate_owned_server(state):
+                if _remove_server_state(state_path, ownership_token):
+                    return 0
+            time.sleep(5.0)
+            continue
         time.sleep(max(1.0, min(30.0, remaining)))
 
 
@@ -692,34 +748,48 @@ def _start_server(
         if gpu_lock is not None:
             gpu_lock.release()
         raise
-    if gpu_lock is not None:
-        gpu_lock.update_pid(
+    try:
+        if gpu_lock is not None and not gpu_lock.update_pid(
             proc.pid,
             server_url=server_url,
             model_dir=str(Path(model_dir).resolve()),
             state_path=str(state_path),
-        )
+        ):
+            raise RuntimeError(
+                "nnInteractive server started, but GPU lock ownership could "
+                "not be transferred to PID {}.".format(proc.pid)
+            )
 
-    state = {
-        "schema_version": "nninteractive_owned_server.v2",
-        "pid": proc.pid,
-        "server_url": server_url,
-        "model_dir": str(Path(model_dir).resolve()),
-        "device": device,
-        "fold": fold or "auto",
-        "ownership_token": ownership_token,
-        "started_at_epoch": time.time(),
-        "last_activity_epoch": time.time(),
-        "service_idle_timeout_seconds": float(service_idle_timeout_seconds),
-    }
-    if gpu_lock is not None:
-        state["gpu_lock_path"] = str(GPU_LOCK_PATH)
-        state["gpu_lock_token"] = gpu_lock.token
-    _write_server_state(state_path, state)
-    watchdog = _start_watchdog(state_path, ownership_token)
-    state["watchdog_pid"] = watchdog.pid
-    _write_server_state(state_path, state)
-    return proc, state
+        state = {
+            "schema_version": "nninteractive_owned_server.v2",
+            "pid": proc.pid,
+            "server_url": server_url,
+            "model_dir": str(Path(model_dir).resolve()),
+            "device": device,
+            "fold": fold or "auto",
+            "ownership_token": ownership_token,
+            "started_at_epoch": time.time(),
+            "last_activity_epoch": time.time(),
+            "service_idle_timeout_seconds": float(service_idle_timeout_seconds),
+        }
+        if gpu_lock is not None:
+            state["gpu_lock_path"] = str(GPU_LOCK_PATH)
+            state["gpu_lock_token"] = gpu_lock.token
+        _write_server_state(state_path, state)
+        watchdog = _start_watchdog(state_path, ownership_token)
+        state["watchdog_pid"] = watchdog.pid
+        _write_server_state(state_path, state)
+        return proc, state
+    except Exception:
+        process_stopped = _stop_spawned_server(proc)
+        if process_stopped:
+            _remove_server_state(state_path, ownership_token)
+        if gpu_lock is not None and process_stopped:
+            # Release through the lock object even when an older, undeletable
+            # state file occupies state_path. Token validation prevents this
+            # from releasing a replacement owner's lock.
+            gpu_lock.release()
+        raise
 
 
 def _wait_for_server(
@@ -772,9 +842,21 @@ def _ensure_server(
         if matches_request and _server_running(state_url, api_key):
             _touch_server_activity(state_path, api_key)
             return False, state_url, api_key
-        _terminate_owned_server(state)
+        if not _terminate_owned_server(state):
+            raise RuntimeError(
+                "The previous owned nnInteractive server did not exit; its GPU "
+                "lock was retained and a replacement server was not started."
+            )
     if state:
-        _remove_server_state(state_path, str(state.get("ownership_token") or ""))
+        if not _remove_server_state(
+            state_path,
+            str(state.get("ownership_token") or ""),
+        ):
+            raise RuntimeError(
+                "The previous nnInteractive server stopped, but its owned "
+                "state/GPU lock could not be retired safely. Retry after the "
+                "file lock is released."
+            )
 
     legacy_pid = Path(model_dir).parent / ".nninteractive_server.pid"
     try:
@@ -804,12 +886,15 @@ def _ensure_server(
     )
     if not ready:
         # Server failed to start. Clean up.
-        try:
-            proc.terminate()
-            proc.wait(timeout=5)
-        except Exception:
-            proc.kill()
-        _remove_server_state(state_path, api_key)
+        process_stopped = _stop_spawned_server(proc, timeout_seconds=5.0)
+        if process_stopped:
+            _remove_server_state(state_path, api_key)
+        else:
+            raise RuntimeError(
+                "nnInteractive server did not become ready and could not be "
+                "stopped. Its GPU lock was retained to prevent another job "
+                "from using the same GPU concurrently."
+            )
         exit_detail = (
             f" The server process exited with code {proc.returncode}."
             if proc.returncode is not None
@@ -1729,8 +1814,19 @@ class _BridgeSessionContext:
                 raise
             state = _load_server_state(self.owned_state_path)
             if state:
-                _terminate_owned_server(state)
-                _remove_server_state(self.owned_state_path, str(state.get("ownership_token") or ""))
+                if not _terminate_owned_server(state):
+                    raise RuntimeError(
+                        "The existing nnInteractive server could not be stopped "
+                        "for the capacity-recovery restart."
+                    )
+                if not _remove_server_state(
+                    self.owned_state_path,
+                    str(state.get("ownership_token") or ""),
+                ):
+                    raise RuntimeError(
+                        "The stopped nnInteractive server state could not be "
+                        "retired safely for the capacity-recovery restart."
+                    )
             _append_bridge_log(
                 self.log_path,
                 "server_capacity_restart",

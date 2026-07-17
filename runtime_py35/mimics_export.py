@@ -46,6 +46,52 @@ SOURCE_IMAGE_PATH_METADATA = "mimics_script.source_image_path"
 # can release it when the child Mimics crashes without writing a status (which
 # otherwise leaves a zombie lock that blocks all later exports).
 _ACTIVE_BG_MIMICS_LOCK = {"path": None, "token": None}
+_ACTIVE_BG_MIMICS_LOCK_MUTEX = threading.RLock()
+
+
+def _write_export_task_status(monitor, values):
+    path = monitor.get("task_status_path") if monitor else ""
+    if not path:
+        return
+    try:
+        payload = runtime_common.read_json(path, {}) or {}
+        payload.update(values or {})
+        payload["updated_at_epoch"] = time.time()
+        runtime_common.write_json_atomic(path, payload)
+    except Exception:
+        # Progress telemetry must never fail or delay the export itself.
+        pass
+
+
+def _export_task_stop_requested(monitor):
+    path = monitor.get("task_stop_path") if monitor else ""
+    return bool(path and os.path.isfile(path))
+
+
+def _set_active_background_export_lock(lock_path, lock_token):
+    with _ACTIVE_BG_MIMICS_LOCK_MUTEX:
+        _ACTIVE_BG_MIMICS_LOCK["path"] = lock_path
+        _ACTIVE_BG_MIMICS_LOCK["token"] = lock_token
+
+
+def _active_background_export_lock():
+    with _ACTIVE_BG_MIMICS_LOCK_MUTEX:
+        return (
+            _ACTIVE_BG_MIMICS_LOCK.get("path"),
+            _ACTIVE_BG_MIMICS_LOCK.get("token"),
+        )
+
+
+def _clear_active_background_export_lock(lock_token=None):
+    with _ACTIVE_BG_MIMICS_LOCK_MUTEX:
+        if (
+            lock_token is not None
+            and _ACTIVE_BG_MIMICS_LOCK.get("token") != lock_token
+        ):
+            return False
+        _ACTIVE_BG_MIMICS_LOCK["path"] = None
+        _ACTIVE_BG_MIMICS_LOCK["token"] = None
+        return True
 
 
 def _release_background_export_lock():
@@ -57,8 +103,7 @@ def _release_background_export_lock():
     every subsequent export with "already running". Only remove the lock when
     the recorded PID is gone, so a genuinely running export is never disturbed.
     """
-    lock_path = _ACTIVE_BG_MIMICS_LOCK.get("path")
-    token = _ACTIVE_BG_MIMICS_LOCK.get("token")
+    lock_path, token = _active_background_export_lock()
     if not lock_path or not token:
         return
     payload = runtime_common.read_json(lock_path, {}) or {}
@@ -68,27 +113,85 @@ def _release_background_export_lock():
     try:
         runtime_common.release_resource_lock(lock_path, token)
     except Exception:
-        try:
-            os.remove(lock_path)
-        except Exception:
-            pass
-    _ACTIVE_BG_MIMICS_LOCK["path"] = None
-    _ACTIVE_BG_MIMICS_LOCK["token"] = None
+        pass
+    _clear_active_background_export_lock(token)
+
+
+def _finalize_background_export_process_status(
+    process, status_path=None, stop_path=None, handshake_path=None
+):
+    """Write a terminal export state after the child has definitely exited."""
+    status_path = (
+        status_path or getattr(process, "_mimics_status_path", "") or ""
+    )
+    if not status_path:
+        return {}
+    status = runtime_common.read_json(status_path, {}) or {}
+    if status.get("status") in ("closed", "cancelled", "failed"):
+        return status
+    try:
+        exit_code = process.poll()
+    except Exception:
+        exit_code = getattr(process, "returncode", None)
+    stop_path = stop_path or getattr(process, "_mimics_stop_path", "") or ""
+    stopped = bool(stop_path and os.path.isfile(stop_path))
+    handshake_path = (
+        handshake_path
+        or getattr(process, "_mimics_handshake_path", "")
+        or ""
+    )
+    runner_started = bool(handshake_path and os.path.isfile(handshake_path))
+    status.update({
+        "status": "cancelled" if stopped else "failed",
+        "phase": "cancelled" if stopped else "process_exited",
+        "pid": getattr(process, "pid", 0),
+        "exit_code": exit_code,
+        "runner_started": runner_started,
+        "updated_at_epoch": time.time(),
+    })
+    if stopped:
+        status["error"] = "Background mask export stopped by user request."
+    elif runner_started:
+        status["error"] = (
+            "The export runner started, but the export script stopped before "
+            "recording a terminal state."
+        )
+    else:
+        status["error"] = (
+            "Background Mimics exited before executing the export runner."
+        )
+    try:
+        runtime_common.write_json_atomic(status_path, status)
+    except Exception:
+        pass
+    return status
 
 
 def _watch_background_export_process(process, lock_path, lock_token):
-    """Release the shared background-Mimics slot when the child exits."""
-    try:
-        process.wait()
-    except Exception:
-        pass
+    """Finalize status, then release the shared background-Mimics slot."""
+    while True:
+        try:
+            try:
+                process.wait(timeout=30.0)
+            except TypeError:
+                process.wait()
+        except subprocess.TimeoutExpired:
+            continue
+        except Exception:
+            try:
+                if process.poll() is not None:
+                    break
+            except Exception:
+                pass
+            time.sleep(5.0)
+            continue
+        break
+    _finalize_background_export_process_status(process)
     try:
         runtime_common.release_resource_lock(lock_path, lock_token)
     except Exception:
         pass
-    if _ACTIVE_BG_MIMICS_LOCK.get("token") == lock_token:
-        _ACTIVE_BG_MIMICS_LOCK["path"] = None
-        _ACTIVE_BG_MIMICS_LOCK["token"] = None
+    _clear_active_background_export_lock(lock_token)
 
 # All intermediate / scratch files are placed under this subdirectory inside
 # the user-visible output folder so they do not clutter exported segmentations.
@@ -126,7 +229,35 @@ def _prune_local_export_jobs(max_age_days=14, max_jobs=100):
     for index, (modified, path) in enumerate(rows):
         if index < int(max_jobs) and now - modified <= float(max_age_days) * 86400.0:
             continue
+        if _local_export_job_is_active(path):
+            continue
         shutil.rmtree(path, ignore_errors=True)
+
+
+def _local_export_job_is_active(path):
+    absolute = os.path.abspath(path)
+    for monitor in list(_EXPORT_MONITORS.values()):
+        try:
+            if monitor.get("done"):
+                continue
+            work_dir = monitor.get("work_dir") or monitor.get("job_runtime")
+            if work_dir and os.path.abspath(work_dir) == absolute:
+                return True
+        except Exception:
+            continue
+    for relative in (
+        "status.json",
+        "runner_started.json",
+        os.path.join("bridge", "job_state.json"),
+    ):
+        payload = runtime_common.read_json(os.path.join(path, relative), {}) or {}
+        status = str(payload.get("status") or "").lower()
+        if status in ("closed", "completed", "failed", "cancelled", "error"):
+            continue
+        pid = payload.get("pid")
+        if pid and runtime_common.process_exists(pid):
+            return True
+    return False
 
 
 _write_json_atomic = runtime_common.write_json_atomic
@@ -372,16 +503,20 @@ def _launch_background_batch_export(ts_root, cases_filter, axes, flips, label_ou
             "stop_path": stop_path,
         },
     )
-    with open(runner_path, "w") as f:
+    with open(runner_path, "w", encoding="utf-8") as f:
         f.write("# Auto-generated runner for background Mimics batch export\n")
         f.write("import sys, os, json, time\n")
         f.write(
             "open({0}, 'w').write(json.dumps({{'pid': os.getpid(), "
             "'started_at_epoch': time.time()}}))\n".format(json.dumps(handshake_path))
         )
-        f.write("sys.path.insert(0, r'{0}')\n".format(here))
+        f.write("sys.path.insert(0, {0})\n".format(json.dumps(here)))
         f.write("import mimics_export\n")
-        f.write("mimics_export.run_background_batch_export(r'{0}')\n".format(config_path))
+        f.write(
+            "mimics_export.run_background_batch_export({0})\n".format(
+                json.dumps(config_path)
+            )
+        )
 
     log_path = os.path.join(job_runtime, "process.log")
     _rotate_log_file(log_path)
@@ -398,14 +533,14 @@ def _launch_background_batch_export(ts_root, cases_filter, axes, flips, label_ou
             "Background Mimics is already running for another Mimics-Script task; batch export was not started.",
         )
         return None
-    _ACTIVE_BG_MIMICS_LOCK["path"] = lock_path
-    _ACTIVE_BG_MIMICS_LOCK["token"] = lock_token
+    _set_active_background_export_lock(lock_path, lock_token)
     try:
         if os.path.isfile(stop_path):
             os.remove(stop_path)
     except OSError:
         pass
     log_handle = None
+    process = None
     try:
         log_handle = open(log_path, "ab")
         process = subprocess.Popen(
@@ -425,7 +560,8 @@ def _launch_background_batch_export(ts_root, cases_filter, axes, flips, label_ou
         process._mimics_log_path = mimics_log_path
         process._mimics_process_log_path = log_path
         process._mimics_job_runtime = job_runtime
-        runtime_common.update_resource_lock_pid(
+        process._mimics_stop_path = stop_path
+        if not runtime_common.update_resource_lock_pid(
             lock_path,
             lock_token,
             process.pid,
@@ -435,7 +571,12 @@ def _launch_background_batch_export(ts_root, cases_filter, axes, flips, label_ou
                 "export_root": export_root,
                 "stop_path": stop_path,
             },
-        )
+        ):
+            raise RuntimeError(
+                "Background export started, but lock ownership could not be transferred to PID {0}.".format(
+                    process.pid
+                )
+            )
         _append_export_log(
             export_root,
             "Background Mimics launch requested (PID={0}) for mask export; "
@@ -450,9 +591,47 @@ def _launch_background_batch_export(ts_root, cases_filter, axes, flips, label_ou
         watcher.start()
         return process
     except Exception as exc:
-        runtime_common.release_resource_lock(lock_path, lock_token)
-        _ACTIVE_BG_MIMICS_LOCK["path"] = None
-        _ACTIVE_BG_MIMICS_LOCK["token"] = None
+        process_stopped = process is None
+        if process is not None:
+            try:
+                process.terminate()
+                process.wait(timeout=5.0)
+            except Exception:
+                try:
+                    process.kill()
+                    process.wait(timeout=5.0)
+                except Exception:
+                    pass
+            try:
+                process_stopped = process.poll() is not None
+            except Exception:
+                process_stopped = not runtime_common.process_exists(
+                    getattr(process, "pid", 0)
+                )
+        if process_stopped:
+            runtime_common.release_resource_lock(lock_path, lock_token)
+            _clear_active_background_export_lock(lock_token)
+        else:
+            try:
+                runtime_common.update_resource_lock_pid(
+                    lock_path,
+                    lock_token,
+                    process.pid,
+                    {
+                        "kind": "export_labels",
+                        "ts_root": os.path.abspath(ts_root),
+                        "export_root": export_root,
+                        "stop_path": stop_path,
+                        "termination_pending": True,
+                    },
+                )
+            except Exception:
+                pass
+            _append_export_log(
+                output_dir,
+                "Background Mimics PID {0} did not exit after launch failure; "
+                "the shared lock was retained.".format(getattr(process, "pid", "?")),
+            )
         _append_export_log(output_dir, "Could not start background batch export: {0}".format(exc))
         return None
     finally:
@@ -933,7 +1112,7 @@ def _derive_mimics_voxel_to_ras_matrix(image, image_shape):
         return None
 
 
-def export_masks_to_buffers(buffers_dir, mask_names=None):
+def export_masks_to_buffers(buffers_dir, mask_names=None, target_mask_name=None):
     """Export all masks from current Mimics project as .u8 files.
 
     Returns manifest dict.
@@ -968,6 +1147,14 @@ def export_masks_to_buffers(buffers_dir, mask_names=None):
 
     if wanted:
         print("selected {0} mask(s) by filter".format(len(selected)))
+    if target_mask_name and len(selected) != 1:
+        raise RuntimeError(
+            "Expected exactly one saved mask for training target {0}, but matched {1}: {2}".format(
+                target_mask_name,
+                len(selected),
+                ", ".join(str(getattr(item, "name", "") or "") for item in selected) or "(none)",
+            )
+        )
 
     manifest = {
         "masks": [],
@@ -1015,7 +1202,7 @@ def export_masks_to_buffers(buffers_dir, mask_names=None):
             print("  could not read data for {0}: {1}".format(name, e))
             continue
 
-        safe_name = _sanitize_name(name)
+        safe_name = _sanitize_name(target_mask_name or name)
         u8_path = os.path.join(buffers_dir, safe_name + ".u8")
 
         with open(u8_path, "wb") as f:
@@ -1087,58 +1274,142 @@ def _new_export_manifest(selected):
 def _finish_foreground_export(monitor, error=None, result=None, cancelled=False):
     monitor["done"] = True
     _stop_export_monitor(monitor.get("monitor_key"))
-    runtime_common.release_local_operation(
-        "mask_buffer_access", monitor.get("operation_token")
-    )
     work_dir = monitor.get("work_dir")
     if cancelled:
+        _write_export_task_status(
+            monitor,
+            {
+                "status": "cancelled",
+                "phase": "cancelled",
+                "completed": int(monitor.get("mask_index", 0) or 0),
+                "failed": 0,
+                "total": len(monitor.get("selected_masks") or []),
+            },
+        )
+        runtime_common.release_local_operation(
+            "mask_buffer_access", monitor.get("operation_token")
+        )
         _mimics_log(logging.INFO, "Mask export stopped by user.")
         _append_export_log(
             monitor.get("output_root") or "",
             "Current-project mask export stopped by user.",
         )
-        mimics.dialogs.message_box(
-            title="Export Stopped",
-            message="Mask export stopped. Temporary buffers were removed.",
-            ui_blocking=False,
-        )
         _cleanup_work_dir(work_dir)
+        try:
+            mimics.dialogs.message_box(
+                title="Export Stopped",
+                message="Mask export stopped. Temporary buffers were removed.",
+                ui_blocking=False,
+            )
+        except Exception:
+            pass
         return
     if error:
+        _write_export_task_status(
+            monitor,
+            {
+                "status": "failed",
+                "phase": "failed",
+                "completed": int(monitor.get("mask_index", 0) or 0),
+                "failed": 1,
+                "total": len(monitor.get("selected_masks") or []),
+                "error": str(error),
+            },
+        )
+        runtime_common.release_local_operation(
+            "mask_buffer_access", monitor.get("operation_token")
+        )
         _mimics_log(logging.ERROR, "Mask export failed: {0}".format(error))
         _append_export_log(
             monitor.get("output_root") or "",
             "Current-project mask export failed: {0}".format(error),
         )
-        mimics.dialogs.message_box(
-            title="Export Failed",
-            message="Mask export failed.\n\n{0}\n\nLog/output: {1}".format(
-                error, monitor.get("output_root")
-            ),
-            ui_blocking=False,
-        )
         _cleanup_work_dir(work_dir)
+        try:
+            mimics.dialogs.message_box(
+                title="Export Failed",
+                message="Mask export failed.\n\n{0}\n\nLog/output: {1}".format(
+                    error, monitor.get("output_root")
+                ),
+                ui_blocking=False,
+            )
+        except Exception:
+            pass
         return
     try:
         total_new, total_overwritten, total_unchanged = _apply_export_result(result or {}, work_dir)
-        message = (
-            "Mask export complete: {0} new, {1} overwritten, {2} unchanged, "
-            "{3} existing files preserved. Output: {4}"
-        ).format(
-            total_new,
-            total_overwritten,
-            total_unchanged,
-            int((result or {}).get("total_skipped_existing", 0) or 0),
-            (result or {}).get("output_seg_dir") or monitor.get("output_root"),
-        )
-        _mimics_log(logging.INFO, message)
+    except Exception as exc:
+        _finish_foreground_export(monitor, error=exc)
+        return
+    message = (
+        "Mask export complete: {0} new, {1} overwritten, {2} unchanged, "
+        "{3} existing files preserved. Output: {4}"
+    ).format(
+        total_new,
+        total_overwritten,
+        total_unchanged,
+        int((result or {}).get("total_skipped_existing", 0) or 0),
+        (result or {}).get("output_seg_dir") or monitor.get("output_root"),
+    )
+    _mimics_log(logging.INFO, message)
+    _write_export_task_status(
+        monitor,
+        {
+            "status": "completed",
+            "phase": "completed",
+            "completed": len(monitor.get("selected_masks") or []),
+            "failed": 0,
+            "total": len(monitor.get("selected_masks") or []),
+        },
+    )
+    runtime_common.release_local_operation(
+        "mask_buffer_access", monitor.get("operation_token")
+    )
+    _cleanup_work_dir(work_dir)
+    try:
         mimics.dialogs.message_box(
             title="Export Complete",
             message=message,
             ui_blocking=False,
         )
-    except Exception as exc:
-        _finish_foreground_export(monitor, error=exc)
+    except Exception:
+        pass
+
+
+def _finish_foreground_export_after_process(
+    monitor, error=None, cancelled=False
+):
+    """Reap the external bridge before terminal status and work cleanup."""
+    process = monitor.get("process")
+    if process is None or process.poll() is not None:
+        _finish_foreground_export(
+            monitor, error=error, cancelled=cancelled
+        )
+        return
+    monitor["done"] = True
+    _stop_export_monitor(monitor.get("monitor_key"))
+    _write_export_task_status(
+        monitor,
+        {
+            "status": "cancelling" if cancelled else "stopping",
+            "phase": "cancelling" if cancelled else "stopping_after_error",
+            "completed": int(monitor.get("mask_index", 0) or 0),
+            "failed": 0 if cancelled else 1,
+            "total": len(monitor.get("selected_masks") or []),
+        },
+    )
+
+    def _complete():
+        _finish_foreground_export(
+            monitor, error=error, cancelled=cancelled
+        )
+
+    if not runtime_common.terminate_process_async(
+        process=process,
+        graceful_seconds=2.0,
+        on_complete=_complete,
+    ):
+        _complete()
 
 
 def _foreground_export_tick(monitor):
@@ -1146,17 +1417,15 @@ def _foreground_export_tick(monitor):
         return
     monitor["busy"] = True
     try:
-        if monitor.get("cancel_requested"):
-            process = monitor.get("process")
-            if process is not None:
-                runtime_common.terminate_process_async(process=process, graceful_seconds=2.0)
-            _finish_foreground_export(monitor, cancelled=True)
+        if monitor.get("cancel_requested") or _export_task_stop_requested(monitor):
+            _finish_foreground_export_after_process(
+                monitor, cancelled=True
+            )
             return
         if time.time() > monitor.get("deadline", 0):
-            process = monitor.get("process")
-            if process is not None:
-                runtime_common.terminate_process_async(process=process, graceful_seconds=2.0)
-            _finish_foreground_export(monitor, error="Export timed out.")
+            _finish_foreground_export_after_process(
+                monitor, error="Export timed out."
+            )
             return
         phase = monitor.get("phase")
         if phase == "buffers":
@@ -1170,6 +1439,17 @@ def _foreground_export_tick(monitor):
                     "Mask export: reading {0}/{1}: {2}.".format(
                         index + 1, len(selected), name
                     ),
+                )
+                _write_export_task_status(
+                    monitor,
+                    {
+                        "status": "running",
+                        "phase": "reading_masks",
+                        "completed": index,
+                        "failed": 0,
+                        "total": len(selected),
+                        "mask_name": name,
+                    },
                 )
                 try:
                     mimics.update_gui()
@@ -1219,6 +1499,16 @@ def _foreground_export_tick(monitor):
             )
             monitor["process"] = process
             monitor["phase"] = "bridge"
+            _write_export_task_status(
+                monitor,
+                {
+                    "status": "running",
+                    "phase": "converting_to_source_grid",
+                    "completed": len(selected),
+                    "failed": 0,
+                    "total": len(selected),
+                },
+            )
             _mimics_log(logging.INFO, "Mask buffers captured. Converting to the original image grid in the background.")
             return
         if phase == "bridge":
@@ -1305,6 +1595,17 @@ def _start_current_project_export(case_dir, source_image_path, output_root, axes
         )
         buffers_dir = os.path.join(runtime_dir, "buffers")
         bridge_job_dir = os.path.join(runtime_dir, "bridge")
+        task_id = os.path.basename(runtime_dir)
+        task_dir = os.path.join(_project_root(), ".mimics_runtime", "ui_tasks")
+        if not os.path.isdir(task_dir):
+            os.makedirs(task_dir)
+        task_status_path = os.path.join(task_dir, task_id + ".json")
+        task_stop_path = os.path.join(task_dir, task_id + "_stop.json")
+        try:
+            if os.path.isfile(task_stop_path):
+                os.remove(task_stop_path)
+        except Exception:
+            pass
         os.makedirs(buffers_dir)
         manifest = _new_export_manifest(selected)
         monitor = {
@@ -1327,9 +1628,32 @@ def _start_current_project_export(case_dir, source_image_path, output_root, axes
             "done": False,
             "busy": False,
             "operation_token": token,
+            "task_status_path": task_status_path,
+            "task_stop_path": task_stop_path,
+        }
+        _write_export_task_status(
+            monitor,
+            {
+                "status": "running",
+                "phase": "reading_masks",
+                "completed": 0,
+                "failed": 0,
+                "total": len(selected),
+            },
+        )
+        task_descriptor = {
+            "kind": "export",
+            "title": "Export current project masks",
+            "status_path": task_status_path,
+            "stop_path": task_stop_path,
+            "log_path": os.path.join(
+                os.path.abspath(output_root), _RUNTIME_SUBDIR, "mimics_export.log"
+            ),
+            "output_path": os.path.abspath(output_root),
         }
         if not _start_foreground_export_monitor(monitor):
             raise RuntimeError("Mimics does not expose a usable GUI timer for incremental export.")
+        token = None  # The monitor now owns and releases the local-operation token.
         _mimics_log(
             logging.INFO,
             "Mask export started for {0} mask(s). Mimics remains available between mask reads.".format(
@@ -1340,19 +1664,43 @@ def _start_current_project_export(case_dir, source_image_path, output_root, axes
             mimics.view.show_log_panel()
         except Exception:
             pass
-        return True
+        return task_descriptor
     except Exception:
-        runtime_common.release_local_operation("mask_buffer_access", token)
+        if token:
+            runtime_common.release_local_operation("mask_buffer_access", token)
         raise
 
 
 def cancel_current_project_exports():
-    """Request cancellation for foreground exports owned by this Mimics session."""
+    """Request cancellation for exports owned by this Mimics session."""
     count = 0
     for monitor in list(_EXPORT_MONITORS.values()):
-        if monitor.get("phase") not in ("buffers", "bridge") or monitor.get("done"):
+        if monitor.get("done"):
             continue
         monitor["cancel_requested"] = True
+        stop_path = (
+            monitor.get("task_stop_path")
+            or monitor.get("stop_path")
+            or ""
+        )
+        if stop_path:
+            try:
+                runtime_common.write_json_atomic(
+                    stop_path,
+                    {
+                        "status": "stop_requested",
+                        "requested_at_epoch": time.time(),
+                        "requested_by_pid": os.getpid(),
+                    },
+                )
+            except Exception:
+                pass
+        process = monitor.get("process")
+        if process is not None and monitor.get("launch_finished") and not stop_path:
+            runtime_common.terminate_process_async(
+                process=process,
+                graceful_seconds=2.0,
+            )
         count += 1
     return count
 
@@ -1485,8 +1833,23 @@ def _launch_background_batch_export_async(*args, **kwargs):
                 launch_state["mimics_log_path"] = getattr(process, "_mimics_log_path", "")
                 launch_state["process_log_path"] = getattr(process, "_mimics_process_log_path", "")
                 launch_state["job_runtime"] = getattr(process, "_mimics_job_runtime", "")
+                launch_state["stop_path"] = getattr(process, "_mimics_stop_path", "")
                 if launch_state.get("cancel_requested"):
-                    runtime_common.terminate_process_async(process=process, graceful_seconds=2.0)
+                    stop_path = launch_state.get("stop_path")
+                    if stop_path:
+                        runtime_common.write_json_atomic(
+                            stop_path,
+                            {
+                                "status": "stop_requested",
+                                "requested_at_epoch": time.time(),
+                                "requested_by_pid": os.getpid(),
+                            },
+                        )
+                    else:
+                        runtime_common.terminate_process_async(
+                            process=process,
+                            graceful_seconds=2.0,
+                        )
         except Exception as exc:
             root = kwargs.get("mcs_output_dir") or kwargs.get("label_output_root") or ""
             _append_export_log(root, "Could not start background mask export: {0}".format(exc))
@@ -1501,8 +1864,42 @@ def _launch_background_batch_export_async(*args, **kwargs):
     thread = threading.Thread(target=worker, name="MimicsMaskExportLaunch")
     thread.daemon = True
     _EXPORT_LAUNCH_THREADS.append(thread)
-    thread.start()
-    _start_background_export_status_monitor(launch_state)
+    try:
+        thread.start()
+    except Exception as exc:
+        try:
+            _EXPORT_LAUNCH_THREADS.remove(thread)
+        except Exception:
+            pass
+        _mimics_log(logging.ERROR, "Mask export launcher could not start: {0}".format(exc))
+        return None
+    if not _start_background_export_status_monitor(launch_state):
+        launch_state["cancel_requested"] = True
+        process = launch_state.get("process")
+        if process is not None:
+            stop_path = launch_state.get("stop_path")
+            if stop_path:
+                try:
+                    runtime_common.write_json_atomic(
+                        stop_path,
+                        {
+                            "status": "stop_requested",
+                            "requested_at_epoch": time.time(),
+                            "requested_by_pid": os.getpid(),
+                        },
+                    )
+                except Exception:
+                    pass
+            else:
+                runtime_common.terminate_process_async(
+                    process=process,
+                    graceful_seconds=2.0,
+                )
+        _mimics_log(
+            logging.ERROR,
+            "Mask export was stopped because Mimics could not create a GUI status timer.",
+        )
+        return None
     _mimics_log(
         logging.INFO,
         "Mask export requested. Progress will appear here; output: {0}".format(
@@ -1551,19 +1948,45 @@ def _background_export_status_tick(monitor):
         status_path = monitor.get("status_path") or (_rt(root, "_export_batch_status.json") if root else "")
         status = runtime_common.read_json(status_path, {}) if status_path else {}
         status = status or {}
+        process = monitor.get("process")
+        if (
+            monitor.get("launch_finished")
+            and process is not None
+            and process.poll() is not None
+            and status.get("status") not in ("closed", "cancelled", "failed")
+        ):
+            status = _finalize_background_export_process_status(
+                process,
+                status_path=status_path,
+                stop_path=monitor.get("stop_path"),
+                handshake_path=monitor.get("handshake_path"),
+            )
         try:
             if float(status.get("updated_at_epoch", 0.0) or 0.0) < float(monitor.get("started_at_epoch", 0.0) or 0.0):
                 status = {}
         except Exception:
             status = {}
-        signature = (status.get("status"), status.get("case_id"), status.get("completed"), status.get("failed"))
+        signature = (
+            status.get("status"),
+            status.get("phase"),
+            status.get("case_id"),
+            status.get("index"),
+            status.get("total"),
+            status.get("completed"),
+            status.get("failed"),
+        )
         if status and signature != monitor.get("last_signature"):
             monitor["last_signature"] = signature
             try:
+                index = int(status.get("index", 0) or 0)
+                total = int(status.get("total", 0) or 0)
+                progress = "{0}/{1}".format(index, total) if total else "starting"
+                phase = str(status.get("phase") or status.get("status") or "running")
                 mimics.logging.log_user_message(
                     level=logging.INFO,
-                    message="Mask export: {0}; completed {1}, failed {2}{3}.".format(
-                        status.get("status", "running"),
+                    message="Mask export [{0}] {1}: completed {2}, failed {3}{4}.".format(
+                        progress,
+                        phase,
                         int(status.get("completed", 0) or 0),
                         int(status.get("failed", 0) or 0),
                         "; current " + str(status.get("case_id")) if status.get("case_id") else "",
@@ -1610,45 +2033,6 @@ def _background_export_status_tick(monitor):
                 ui_blocking=False,
             )
             return
-        process = monitor.get("process")
-        if monitor.get("launch_finished") and process is not None and process.poll() is not None and not status:
-            monitor["done"] = True
-            _stop_export_monitor(key)
-            exit_code = process.poll()
-            # Release the background_mimics lock the launcher took on this
-            # process's behalf; a crash here (common with Mimics 21 when a
-            # background -b instance loses the license to the interactive one)
-            # otherwise leaves a zombie lock that blocks every later export.
-            try:
-                _release_background_export_lock()
-            except Exception:
-                pass
-            handshake_path = monitor.get("handshake_path") or ""
-            runner_started = bool(handshake_path and os.path.isfile(handshake_path))
-            mimics_tail = runtime_common.read_text_tail(monitor.get("mimics_log_path") or "", 4000)
-            process_tail = runtime_common.read_text_tail(monitor.get("process_log_path") or "", 4000)
-            if runner_started:
-                reason = (
-                    "The export runner started, but the export script stopped before it could write status."
-                )
-            else:
-                reason = (
-                    "Mimics did not execute the export runner. The background instance may have been "
-                    "redirected to the open Mimics window, denied a license, or stopped during startup."
-                )
-            details = mimics_tail or process_tail
-            message = (
-                "Background mask export stopped before producing status (exit code {0}).\n\n"
-                "{1}\n\nJob diagnostics: {2}"
-            ).format(exit_code, reason, monitor.get("job_runtime") or root)
-            if details:
-                message += "\n\nLast log lines:\n" + details[-1800:]
-            _mimics_log(logging.ERROR, message)
-            mimics.dialogs.message_box(
-                title="Export Failed",
-                message=message,
-                ui_blocking=False,
-            )
     finally:
         monitor["busy"] = False
 
@@ -1749,7 +2133,7 @@ def _launch_external_export_setup():
                 value.strip() for value in mask_selection.split(",") if value.strip()
             ]
         axes, flips = _resolve_buffer_mapping()
-        _start_current_project_export(
+        return _start_current_project_export(
             str(source_info.get("case_dir") or source),
             str(source_info.get("image") or source),
             export_root,
@@ -1776,14 +2160,18 @@ def _launch_external_export_setup():
 
 # -- Single case export -------------------------------------------------
 
-def _export_masks_and_build_params(case_dir, axes, flips, work_dir, output_seg_dir=None, export_space="source_image", mask_names=None, overwrite_existing=None, source_image_path=None):
+def _export_masks_and_build_params(case_dir, axes, flips, work_dir, output_seg_dir=None, export_space="source_image", mask_names=None, target_mask_name=None, overwrite_existing=None, source_image_path=None):
     """Export masks to .u8 buffers and build bridge params. Returns (bridge_params, manifest) or None."""
     print("Exporting masks to: {0}".format(case_dir))
 
     buffers_dir = os.path.join(work_dir, "export_buffers")
 
     # Step 1: Export masks to .u8 buffers
-    manifest = export_masks_to_buffers(buffers_dir, mask_names=mask_names)
+    manifest = export_masks_to_buffers(
+        buffers_dir,
+        mask_names=mask_names,
+        target_mask_name=target_mask_name,
+    )
 
     if not manifest["masks"]:
         print("No masks to export")
@@ -1889,26 +2277,140 @@ def discover_ts_cases(ts_root, case_filter=None, exclude_dirs=None):
     return cases
 
 
-def _acquire_export_lock(output_dir):
-    lock_path = _rt(output_dir, "_export_batch.lock")
+def _matching_current_mask_names(mask_names):
+    wanted = set(
+        _canonical_mask_name(name)
+        for name in (mask_names or [])
+        if str(name or "").strip()
+    )
+    available = _current_mask_names()
+    if not wanted:
+        return available, list(available)
+    matched = [
+        name for name in available
+        if _canonical_mask_name(name) in wanted
+    ]
+    return available, matched
+
+
+def _preflight_batch_mask_names(cases, output_dir, config, export_root, status_path, stop_path):
+    requested = config.get("mask_names") or []
+    if not isinstance(requested, list):
+        requested = [requested]
+    requested = [str(name).strip() for name in requested if str(name).strip()]
+    target_name = str(config.get("target_mask_name") or "").strip()
+    if not requested:
+        return []
+
+    failures = []
+    total = len(cases)
+    _append_export_log(
+        export_root,
+        "Checking saved mask names in {0} project(s) before reading voxel data. Accepted names: {1}".format(
+            total,
+            ", ".join(requested),
+        ),
+    )
+    for index, case_info in enumerate(cases):
+        if os.path.isfile(stop_path):
+            return [{"case_id": "", "reason": "cancelled"}]
+        case_id = case_info["case_id"]
+        mcs_path = str(
+            (config.get("mcs_paths") or {}).get(case_id)
+            or os.path.join(output_dir, case_id + ".mcs")
+        )
+        _write_json_atomic(
+            status_path,
+            {
+                "status": "checking_masks",
+                "phase": "mask_name_preflight",
+                "pid": os.getpid(),
+                "case_id": case_id,
+                "index": index + 1,
+                "total": total,
+                "completed": 0,
+                "failed": len(failures),
+                "updated_at_epoch": time.time(),
+            },
+        )
+        if not os.path.isfile(mcs_path):
+            failures.append({
+                "case_id": case_id,
+                "reason": ".mcs file not found",
+                "mcs_path": mcs_path,
+                "available_masks": [],
+            })
+            continue
+        project_opened = False
+        try:
+            mimics.file.open_project(mcs_path)
+            project_opened = True
+            available, matched = _matching_current_mask_names(requested)
+            if not matched:
+                failures.append({
+                    "case_id": case_id,
+                    "reason": "no saved mask matched",
+                    "mcs_path": mcs_path,
+                    "available_masks": available,
+                })
+            elif target_name and len(matched) != 1:
+                failures.append({
+                    "case_id": case_id,
+                    "reason": "multiple saved masks matched one training target",
+                    "mcs_path": mcs_path,
+                    "available_masks": available,
+                    "matched_masks": matched,
+                })
+        except Exception as exc:
+            failures.append({
+                "case_id": case_id,
+                "reason": "could not inspect project: {0}".format(exc),
+                "mcs_path": mcs_path,
+                "available_masks": [],
+            })
+        finally:
+            if project_opened:
+                try:
+                    mimics.file.close_project()
+                except Exception:
+                    pass
+    return failures
+
+
+def _acquire_export_lock(job_runtime):
+    if not os.path.isdir(job_runtime):
+        try:
+            os.makedirs(job_runtime)
+        except OSError:
+            if not os.path.isdir(job_runtime):
+                raise
+    lock_path = os.path.join(job_runtime, "_export_batch.lock")
+    guard = runtime_common._open_resource_guard(lock_path, wait_seconds=2.0)
+    if guard is None:
+        return None
     try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(fd, str(os.getpid()).encode("ascii"))
-        os.close(fd)
-        return lock_path
-    except OSError:
         try:
-            with open(lock_path, "r") as handle:
-                pid = int((handle.read() or "0").strip() or "0")
-            if pid and _is_pid_alive(pid):
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except OSError:
+            try:
+                with open(lock_path, "r") as handle:
+                    pid = int((handle.read() or "0").strip() or "0")
+                if pid and _is_pid_alive(pid):
+                    return None
+            except Exception:
+                pass
+            try:
+                os.remove(lock_path)
+                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except OSError:
                 return None
-        except Exception:
-            pass
         try:
-            os.remove(lock_path)
-        except Exception:
-            return None
-        return _acquire_export_lock(output_dir)
+            os.write(fd, str(os.getpid()).encode("ascii"))
+        finally:
+            os.close(fd)
+        return lock_path
+    finally:
+        runtime_common._close_resource_guard(guard)
 
 
 def run_background_batch_export(config_path):
@@ -1940,6 +2442,7 @@ def run_background_batch_export(config_path):
     mask_names = config.get("mask_names") or []
     if not isinstance(mask_names, list):
         mask_names = [mask_names]
+    target_mask_name = str(config.get("target_mask_name") or "").strip()
     cases_filter = config.get("cases")
     cases_filter = set(cases_filter) if cases_filter else None
     axes = config.get("axes") or [0, 1, 2]
@@ -1965,7 +2468,12 @@ def run_background_batch_export(config_path):
         _append_export_log(export_root, "Background batch export started.")
         _write_json_atomic(
             status_path,
-            {"status": "discovering", "pid": os.getpid(), "updated_at_epoch": time.time()},
+            {
+                "status": "discovering",
+                "phase": "discovering_cases",
+                "pid": os.getpid(),
+                "updated_at_epoch": time.time(),
+            },
         )
         # Exclude output/work directories under ts_root so they are not mistaken
         # for cases (mask_exports with a stray .nii.gz would otherwise show up
@@ -1979,6 +2487,90 @@ def run_background_batch_export(config_path):
         cases.sort(key=lambda row: row.get("case_id", ""))
         total = len(cases)
         _append_export_log(export_root, "Discovered {0} case(s) for export.".format(total))
+        if total == 0:
+            error = "No dataset cases matched the export selection. Check the dataset root and selected case names."
+            _write_json_atomic(
+                status_path,
+                {
+                    "status": "failed",
+                    "phase": "discovering_cases",
+                    "pid": os.getpid(),
+                    "completed": 0,
+                    "failed": 0,
+                    "total": 0,
+                    "error": error,
+                    "updated_at_epoch": time.time(),
+                },
+            )
+            _append_export_log(export_root, error)
+            return 1
+        preflight_failures = _preflight_batch_mask_names(
+            cases,
+            output_dir,
+            config,
+            export_root,
+            status_path,
+            stop_path,
+        )
+        if preflight_failures:
+            if len(preflight_failures) == 1 and preflight_failures[0].get("reason") == "cancelled":
+                _append_export_log(export_root, "Mask export stopped during saved-mask preflight.")
+                _write_json_atomic(
+                    status_path,
+                    {
+                        "status": "cancelled",
+                        "phase": "mask_name_preflight",
+                        "pid": os.getpid(),
+                        "completed": 0,
+                        "failed": 0,
+                        "total": total,
+                        "updated_at_epoch": time.time(),
+                    },
+                )
+                return 0
+            failed = len(preflight_failures)
+            for row in preflight_failures:
+                available = row.get("available_masks") or []
+                matched = row.get("matched_masks") or []
+                detail = "{0}: {1}; available: {2}".format(
+                    row.get("case_id") or "(unknown case)",
+                    row.get("reason") or "mask validation failed",
+                    ", ".join(available) if available else "(none)",
+                )
+                if matched:
+                    detail += "; matched: " + ", ".join(matched)
+                _append_export_log(export_root, detail)
+                _record_failed_case(
+                    export_root,
+                    row.get("case_id") or "unknown",
+                    "mask_preflight",
+                    detail,
+                )
+            error = (
+                "Saved-mask preflight failed for {0} of {1} project(s). No voxel buffers were read and "
+                "no labels were exported. Accepted names: {2}. Review the per-case diagnostics."
+            ).format(failed, total, ", ".join(str(name) for name in mask_names))
+            _write_json_atomic(
+                status_path,
+                {
+                    "status": "failed",
+                    "phase": "mask_name_preflight",
+                    "pid": os.getpid(),
+                    "completed": 0,
+                    "failed": failed,
+                    "total": total,
+                    "error": error,
+                    "mask_validation": preflight_failures[:100],
+                    "updated_at_epoch": time.time(),
+                },
+            )
+            _append_export_log(export_root, error)
+            return 1
+        if mask_names:
+            _append_export_log(
+                export_root,
+                "Saved-mask preflight passed for all {0} project(s); starting voxel export.".format(total),
+            )
         for index, case_info in enumerate(cases):
             if os.path.isfile(stop_path):
                 cancelled = True
@@ -1994,6 +2586,7 @@ def run_background_batch_export(config_path):
                 status_path,
                 {
                     "status": "exporting",
+                    "phase": "exporting_voxels",
                     "pid": os.getpid(),
                     "case_id": case_id,
                     "index": index + 1,
@@ -2008,9 +2601,11 @@ def run_background_batch_export(config_path):
                 _record_failed_case(export_root, case_id, "open_project", ".mcs file not found: {0}".format(mcs_path))
                 _append_export_log(export_root, "[{0}/{1}] Missing .mcs: {2}".format(index + 1, total, mcs_path))
                 continue
+            project_opened = False
             try:
                 _append_export_log(export_root, "[{0}/{1}] Exporting: {2}".format(index + 1, total, case_id))
                 mimics.file.open_project(mcs_path)
+                project_opened = True
                 output_seg_dir = None
                 if label_staging_dir:
                     output_seg_dir = os.path.join(label_staging_dir, case_id, "segmentations")
@@ -2024,11 +2619,13 @@ def run_background_batch_export(config_path):
                     output_seg_dir=output_seg_dir,
                     export_space=export_space,
                     mask_names=mask_names,
+                    target_mask_name=target_mask_name,
                     overwrite_existing=(True if label_staging_dir else overwrite_existing),
                     source_image_path=(config.get("source_image_paths") or {}).get(case_id),
                 )
                 try:
                     mimics.file.close_project()
+                    project_opened = False
                 except Exception:
                     pass
                 if built is None:
@@ -2069,19 +2666,22 @@ def run_background_batch_export(config_path):
                 _append_export_log(export_root, "Export failed for {0}: {1}".format(case_id, exc))
                 _record_failed_case(export_root, case_id, "export", exc)
                 traceback.print_exc()
-                try:
-                    mimics.file.close_project()
-                except Exception:
-                    pass
+                if project_opened:
+                    try:
+                        mimics.file.close_project()
+                    except Exception:
+                        pass
                 _cleanup_work_dir(work_dir)
 
         _write_json_atomic(
             status_path,
             {
                 "status": "cancelled" if cancelled else "closed",
+                "phase": "cancelled" if cancelled else "completed",
                 "pid": os.getpid(),
                 "completed": completed,
                 "failed": failed,
+                "total": total,
                 "updated_at_epoch": time.time(),
             },
         )
@@ -2098,6 +2698,7 @@ def run_background_batch_export(config_path):
             status_path,
             {
                 "status": "failed",
+                "phase": "failed",
                 "pid": os.getpid(),
                 "completed": completed,
                 "failed": failed,
@@ -2120,6 +2721,40 @@ def run_background_batch_export(config_path):
 
 
 # -- Main entry ---------------------------------------------------------
+
+def _explicit_mcs_path_map(mcs_path=None, mcs_list_arg=None, mcs_list_file=None):
+    paths = []
+    if mcs_path:
+        paths.append(str(mcs_path).strip())
+    if mcs_list_arg:
+        paths.extend(
+            item.strip()
+            for item in str(mcs_list_arg).replace(";", ",").split(",")
+            if item.strip()
+        )
+    if mcs_list_file:
+        with open(mcs_list_file, "r", encoding="utf-8") as handle:
+            for line in handle:
+                value = line.strip()
+                if value and not value.startswith("#"):
+                    paths.append(value)
+    result = {}
+    for value in paths:
+        absolute = os.path.abspath(os.path.expandvars(os.path.expanduser(value)))
+        if not os.path.isfile(absolute):
+            raise RuntimeError("Explicit .mcs file was not found: {0}".format(absolute))
+        if not absolute.lower().endswith(".mcs"):
+            raise RuntimeError("Explicit project is not an .mcs file: {0}".format(absolute))
+        case_id = os.path.basename(absolute)[:-4]
+        if case_id in result and os.path.normcase(result[case_id]) != os.path.normcase(absolute):
+            raise RuntimeError(
+                "More than one explicit .mcs file has the same case name '{0}'.".format(
+                    case_id
+                )
+            )
+        result[case_id] = absolute
+    return result
+
 
 def main(source_info_override=None):
     """Entry point.
@@ -2204,13 +2839,41 @@ def main(source_info_override=None):
         else:
             i += 1
 
+    try:
+        explicit_mcs_paths = _explicit_mcs_path_map(
+            mcs_path=mcs_path_override,
+            mcs_list_arg=mcs_list_arg,
+            mcs_list_file=mcs_list_file,
+        )
+    except Exception as exc:
+        _mimics_log(logging.ERROR, "Mask export arguments are invalid: {0}".format(exc))
+        mimics.dialogs.message_box(
+            title="Export Arguments Invalid",
+            message=str(exc),
+            ui_blocking=False,
+        )
+        return 1
+
     # Interactive setup runs in external PySide6; Mimics remains responsive.
-    if not ts_root and not case_dir:
+    if not ts_root and not case_dir and not explicit_mcs_paths:
         return _launch_external_export_setup()
+
+    if explicit_mcs_paths and not ts_root and not case_dir:
+        message = (
+            "Explicit .mcs export also requires --ts-root so each project can be "
+            "matched to its original image grid."
+        )
+        _mimics_log(logging.ERROR, message)
+        mimics.dialogs.message_box(
+            title="Dataset Root Required",
+            message=message,
+            ui_blocking=False,
+        )
+        return 1
 
     # -- Single case mode ----------------------------------------------
 
-    if case_dir:
+    if case_dir and not explicit_mcs_paths:
         case_id = _current_project_case_id() or os.path.basename(os.path.abspath(case_dir))
         ts_root = os.path.dirname(os.path.abspath(case_dir))
         if not label_output_root and not overwrite_existing:
@@ -2237,11 +2900,38 @@ def main(source_info_override=None):
         return 0
 
     # -- Batch mode -----------------------------------------------------
+    case_dirs = None
+    source_image_paths = None
+    if case_dir and explicit_mcs_paths:
+        case_id = os.path.basename(os.path.abspath(case_dir))
+        if len(explicit_mcs_paths) != 1:
+            message = "--case-dir can be paired with only one explicit .mcs file."
+            _mimics_log(logging.ERROR, message)
+            mimics.dialogs.message_box(
+                title="Export Arguments Invalid",
+                message=message,
+                ui_blocking=False,
+            )
+            return 1
+        explicit_path = list(explicit_mcs_paths.values())[0]
+        explicit_mcs_paths = {case_id: explicit_path}
+        cases_filter = set([case_id])
+        case_dirs = {case_id: os.path.abspath(case_dir)}
+        source_image_paths = {
+            case_id: str((source_info_override or {}).get("image") or case_dir)
+        }
+        ts_root = os.path.dirname(os.path.abspath(case_dir))
+    elif explicit_mcs_paths:
+        cases_filter = set(explicit_mcs_paths)
+
     process = _launch_background_batch_export(
         ts_root, cases_filter, axes, flips,
         label_output_root=label_output_root,
         overwrite_existing=overwrite_existing,
+        case_dirs=case_dirs,
         mcs_output_dir=mcs_dir,
+        mcs_paths=explicit_mcs_paths,
+        source_image_paths=source_image_paths,
         mask_names=mask_names,
     )
     if process is None:

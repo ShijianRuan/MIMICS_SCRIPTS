@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import hashlib
+import re
 import shutil
 import subprocess
 import sys
@@ -47,12 +48,81 @@ _BG_MIMICS_BUSY_NOTICE_AT = 0.0
 _BG_MIMICS_RETRY_OUTPUTS = set()
 _BG_MIMICS_LAUNCH_ACTIVE = False
 _BG_MIMICS_FAILED_OUTPUTS = set()
+_BG_MIMICS_STATE_LOCK = threading.RLock()
 _MCS_QUEUE_ACTIVE = "_mcs_queue_active.json"
 _MCS_QUEUE_DONE = "_mcs_queue_done.json"
 _MCS_QUEUE_STOP = "_mcs_queue_stop.json"
 _LOG_ROTATE_BYTES = 5 * 1024 * 1024
 _LOG_ROTATE_BACKUPS = 3
 _CONFIG_CACHE = None
+_LAST_TASK_DESCRIPTOR = {}
+
+
+def _bg_state_snapshot():
+    with _BG_MIMICS_STATE_LOCK:
+        return {
+            "pid": _BG_MIMICS_PID,
+            "output_dir": _BG_MIMICS_OUTPUT_DIR,
+            "launch_active": _BG_MIMICS_LAUNCH_ACTIVE,
+        }
+
+
+def _bg_try_begin_launch():
+    global _BG_MIMICS_LAUNCH_ACTIVE
+    with _BG_MIMICS_STATE_LOCK:
+        if _BG_MIMICS_LAUNCH_ACTIVE:
+            return False
+        _BG_MIMICS_LAUNCH_ACTIVE = True
+        return True
+
+
+def _bg_end_launch():
+    global _BG_MIMICS_LAUNCH_ACTIVE
+    with _BG_MIMICS_STATE_LOCK:
+        _BG_MIMICS_LAUNCH_ACTIVE = False
+
+
+def _bg_set_process(pid, output_dir):
+    global _BG_MIMICS_PID
+    global _BG_MIMICS_OUTPUT_DIR
+    with _BG_MIMICS_STATE_LOCK:
+        _BG_MIMICS_PID = pid
+        _BG_MIMICS_OUTPUT_DIR = os.path.abspath(output_dir)
+
+
+def _bg_clear_process(pid):
+    global _BG_MIMICS_PID
+    global _BG_MIMICS_OUTPUT_DIR
+    with _BG_MIMICS_STATE_LOCK:
+        if _BG_MIMICS_PID != pid:
+            return False
+        _BG_MIMICS_PID = None
+        _BG_MIMICS_OUTPUT_DIR = None
+        return True
+
+
+def _bg_failed_contains(output_key):
+    with _BG_MIMICS_STATE_LOCK:
+        return output_key in _BG_MIMICS_FAILED_OUTPUTS
+
+
+def _bg_mark_failed(output_key):
+    with _BG_MIMICS_STATE_LOCK:
+        _BG_MIMICS_FAILED_OUTPUTS.add(output_key)
+
+
+def _bg_retry_add(output_key):
+    with _BG_MIMICS_STATE_LOCK:
+        if output_key in _BG_MIMICS_RETRY_OUTPUTS:
+            return False
+        _BG_MIMICS_RETRY_OUTPUTS.add(output_key)
+        return True
+
+
+def _bg_retry_discard(output_key):
+    with _BG_MIMICS_STATE_LOCK:
+        _BG_MIMICS_RETRY_OUTPUTS.discard(output_key)
+
 
 def _rt(output_dir, *parts):
     """Return the local control directory for an output queue.
@@ -81,6 +151,74 @@ def _new_import_run_root():
     )
     os.makedirs(root)
     return root
+
+
+def _write_import_task_status(path, values):
+    if not path:
+        return
+    try:
+        payload = runtime_common.read_json(path, {}) or {}
+        payload.update(values or {})
+        payload["updated_at_epoch"] = time.time()
+        runtime_common.write_json_atomic(path, payload)
+    except Exception:
+        # Progress telemetry must never fail or delay the import itself.
+        pass
+
+
+def _import_task_stopped(monitor):
+    path = monitor.get("task_stop_path") if monitor else ""
+    return bool(path and os.path.isfile(path))
+
+
+def _clear_stale_queue_stop(output_dir):
+    """Clear a prior queue stop only after its owning creator has exited."""
+    stop_path = _queue_stop_path(output_dir)
+    if not os.path.isfile(stop_path):
+        return
+    holder = runtime_common.active_resource_lock(
+        _project_root(), "background_mimics.lock"
+    )
+    if holder and str(holder.get("kind") or "").lower() == "create_mcs":
+        holder_output = str(holder.get("output_dir") or "")
+        if (
+            holder_output
+            and os.path.normcase(os.path.abspath(holder_output))
+            == os.path.normcase(os.path.abspath(output_dir))
+        ):
+            raise RuntimeError(
+                "The previous import queue is still stopping. Wait until its "
+                "background Mimics process exits before starting another import "
+                "into this output folder."
+            )
+    try:
+        os.remove(stop_path)
+    except OSError:
+        if os.path.isfile(stop_path):
+            raise RuntimeError(
+                "The previous import stop marker could not be cleared: {0}".format(
+                    stop_path
+                )
+            )
+
+
+def _set_last_import_task(run_root, output_dir, title):
+    global _LAST_TASK_DESCRIPTOR
+    status_path = os.path.join(run_root, "status.json")
+    task_stop_path = os.path.join(run_root, "stop.json")
+    queue_stop_path = _queue_stop_path(output_dir)
+    _clear_stale_queue_stop(output_dir)
+    _LAST_TASK_DESCRIPTOR = {
+        "kind": "import",
+        "title": str(title),
+        "status_path": status_path,
+        "secondary_status_path": _rt(output_dir, "_mcs_batch_status.json"),
+        "stop_path": task_stop_path,
+        "stop_paths": [task_stop_path, queue_stop_path],
+        "log_path": _rt(output_dir, "logs", "mimics_import.log"),
+        "output_path": os.path.abspath(output_dir),
+    }
+    return status_path, task_stop_path
 
 
 def _prepared_queue_dir(output_dir):
@@ -120,16 +258,8 @@ _background_process_kwargs = runtime_common.background_process_kwargs
 
 
 def _write_json_quick(path, value):
-    """Best-effort lightweight JSON write.
-
-    Uses direct write (no temp file + replace + fsync loop) to avoid possible
-    native instability in host callbacks while still recording state.
-    """
-    parent = os.path.dirname(path)
-    if parent and not os.path.isdir(parent):
-        os.makedirs(parent)
-    with open(path, "w") as handle:
-        json.dump(value, handle, indent=2, sort_keys=True)
+    """Best-effort atomic JSON write for local queue control state."""
+    runtime_common.write_json_atomic(path, value)
 
 
 def _mimics_log(level, message):
@@ -223,7 +353,7 @@ def _append_import_log(root_dir, message):
             os.makedirs(root_dir)
         path = _rt(root_dir or os.getcwd(), "logs", "mimics_import.log")
         _rotate_log_file(path)
-        with open(path, "a") as f:
+        with open(path, "a", encoding="utf-8") as f:
             f.write(text + "\n")
     except Exception:
         pass
@@ -317,15 +447,9 @@ def _mark_mcs_queue_active(output_dir, total_count=0):
     if not os.path.isdir(rt_dir):
         os.makedirs(rt_dir)
     done_path = _queue_done_path(output_dir)
-    stop_path = _queue_stop_path(output_dir)
     try:
         if os.path.isfile(done_path):
             os.remove(done_path)
-    except Exception:
-        pass
-    try:
-        if os.path.isfile(stop_path):
-            os.remove(stop_path)
     except Exception:
         pass
     _write_json_quick(
@@ -555,8 +679,18 @@ def _cleanup_stale_processes():
     #    and background Mimics processes (-b flag).
     try:
         import ctypes
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         PROCESS_TERMINATE = 0x0001
+        kernel32.OpenProcess.argtypes = [
+            ctypes.c_uint32,
+            ctypes.c_int,
+            ctypes.c_uint32,
+        ]
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        kernel32.TerminateProcess.restype = ctypes.c_int
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_int
 
         # Single hidden PowerShell call to get all python.exe and
         # mimicsresearch.exe PIDs and command lines at once.
@@ -600,7 +734,10 @@ def _cleanup_stale_processes():
                 should_kill = False
                 if name == "python.exe" and env_root in cmdline:
                     should_kill = True
-                elif name == "mimicsresearch.exe" and "-b" in cmdline:
+                elif name == "mimicsresearch.exe" and (
+                    "-background_mode" in cmdline
+                    or re.search(r"(^|\s)-b(\s|$)", cmdline)
+                ):
                     should_kill = True
                 if should_kill:
                     handle = kernel32.OpenProcess(PROCESS_TERMINATE, False, pid)
@@ -1121,12 +1258,18 @@ def _prune_empty_parents(path, levels):
 
 def _terminate_job_process(job_dir, on_complete=None):
     """Best-effort termination for a timed-out bridge process."""
-    def _complete_later(delay=0.0):
+    def _complete_later(delay=0.0, target_pid=None):
         if on_complete is None:
             return
         def _run_complete():
             if delay:
                 time.sleep(delay)
+            if target_pid:
+                deadline = time.time() + 15.0
+                while _is_pid_alive(target_pid) and time.time() < deadline:
+                    time.sleep(0.25)
+                if _is_pid_alive(target_pid):
+                    return
             try:
                 on_complete()
             except Exception:
@@ -1171,7 +1314,7 @@ def _terminate_job_process(job_dir, on_complete=None):
             os.kill(pid, signal.SIGTERM)
     except Exception:
         pass
-    _complete_later(3.0)
+    _complete_later(0.0, target_pid=pid)
 
 
 # -- Timer-based async monitor (same pattern as nnInteractive) ----------
@@ -1196,6 +1339,95 @@ def _stop_import_monitor(monitor_key):
             pass
 
 
+def _cancel_import_monitor(monitor, reason="Import stopped by user request."):
+    """Stop one bridge task and publish cancelled only after it is reaped."""
+    if not monitor or monitor.get("_cancel_finalizer_started"):
+        return False
+    monitor["_cancel_finalizer_started"] = True
+    monitor["done"] = True
+    monitor_key = monitor.get("monitor_key")
+    job_dir = monitor.get("job_dir")
+    work_dir = monitor.get("work_dir")
+    _stop_import_monitor(monitor_key)
+    progress = {
+        "status": "cancelling",
+        "phase": "cancelling",
+        "completed": monitor.get("completed", 0),
+        "failed": monitor.get("failed", 0),
+        "total": monitor.get("total", 1),
+    }
+    _write_import_task_status(monitor.get("task_status_path"), progress)
+
+    def _finalize():
+        _cleanup_job_dir(job_dir)
+        _cleanup_work_dir(work_dir)
+        final = dict(progress)
+        final.update({
+            "status": "cancelled",
+            "phase": "cancelled",
+            "error": str(reason or "Import stopped by user request."),
+        })
+        _write_import_task_status(monitor.get("task_status_path"), final)
+
+    _terminate_job_process(job_dir, on_complete=_finalize)
+    return True
+
+
+def _fail_import_monitor_after_process(
+    monitor, phase, error, message_title=None, message=None
+):
+    """Publish a timeout/error terminal only after the bridge has exited."""
+    if not monitor or monitor.get("_failure_finalizer_started"):
+        return False
+    monitor["_failure_finalizer_started"] = True
+    monitor["done"] = True
+    job_dir = monitor.get("job_dir")
+    work_dir = monitor.get("work_dir")
+    output_mcs = monitor.get("output_mcs")
+    output_dir = (
+        os.path.dirname(os.path.abspath(output_mcs))
+        if output_mcs else monitor.get("output_dir", "")
+    )
+    _stop_import_monitor(monitor.get("monitor_key"))
+    _write_import_task_status(
+        monitor.get("task_status_path"),
+        {
+            "status": "stopping",
+            "phase": "stopping_after_{0}".format(phase),
+            "error": str(error),
+            "completed": monitor.get("completed", 0),
+            "failed": monitor.get("failed", 0),
+            "total": monitor.get("total", 1),
+        },
+    )
+    if message_title and message:
+        _safe_message_box(message_title, message)
+
+    def _finalize():
+        _cleanup_job_dir(job_dir)
+        _cleanup_work_dir(work_dir)
+        if monitor.get("case_id"):
+            _record_failed_case(
+                output_dir, monitor.get("case_id"), phase, str(error)
+            )
+        _write_import_task_status(
+            monitor.get("task_status_path"),
+            {
+                "status": "failed",
+                "phase": phase,
+                "error": str(error),
+                "completed": monitor.get("completed", 0),
+                "failed": max(1, int(monitor.get("failed", 0) or 0)),
+                "total": monitor.get("total", 1),
+            },
+        )
+        if not monitor.get("batch_queue") and output_dir:
+            _mark_mcs_queue_done(output_dir, completed=0, failed=1)
+
+    _terminate_job_process(job_dir, on_complete=_finalize)
+    return True
+
+
 def _import_monitor_tick(monitor):
     """Timer callback: check if bridge finished, then queue .mcs creation."""
     if monitor.get("done"):
@@ -1204,24 +1436,21 @@ def _import_monitor_tick(monitor):
     job_dir = monitor.get("job_dir")
     monitor_key = monitor.get("monitor_key")
 
+    if _import_task_stopped(monitor):
+        _cancel_import_monitor(monitor)
+        return
+
     # Timeout check
     if time.time() > monitor.get("deadline", 0):
-        monitor["done"] = True
-        _stop_import_monitor(monitor_key)
-        output_mcs = monitor.get("output_mcs")
-        output_dir = os.path.dirname(os.path.abspath(output_mcs)) if output_mcs else ""
-        _terminate_job_process(
-            job_dir,
-            on_complete=lambda job=job_dir, work=monitor.get("work_dir"): (
-                _cleanup_job_dir(job), _cleanup_work_dir(work)
+        _fail_import_monitor_after_process(
+            monitor,
+            "prepare_timeout",
+            "Dataset preparation timed out.",
+            message_title="Import Timeout",
+            message=(
+                "Dataset preparation timed out. The external converter is "
+                "being stopped; the task will become Failed after it exits."
             ),
-        )
-        _record_failed_case(output_dir, monitor.get("case_id"), "prepare_timeout", "Dataset preparation timed out.")
-        if not monitor.get("batch_queue") and output_dir:
-            _mark_mcs_queue_done(output_dir, completed=0, failed=1)
-        mimics.dialogs.message_box(
-            title="Import Timeout",
-            message="Dataset preparation timed out. Please retry.",
         )
         return
 
@@ -1233,10 +1462,24 @@ def _import_monitor_tick(monitor):
     monitor["done"] = True
     _stop_import_monitor(monitor_key)
 
+    if _import_task_stopped(monitor):
+        _cancel_import_monitor(monitor)
+        return
+
     if status == "error":
         output_mcs = monitor.get("output_mcs")
         output_dir = os.path.dirname(os.path.abspath(output_mcs)) if output_mcs else ""
         _record_failed_case(output_dir, monitor.get("case_id"), "prepare", result)
+        _write_import_task_status(
+            monitor.get("task_status_path"),
+            {
+                "status": "failed",
+                "phase": "prepare_failed",
+                "error": str(result),
+                "case_id": monitor.get("case_id", ""),
+                "total": monitor.get("total", 1),
+            },
+        )
         # Keep the job directory on failure so bridge_error.log / job_state.json
         # survive for diagnosis. The "bridge process exited unexpectedly
         # [no_result_file, no_error_file]" symptom leaves no trace otherwise.
@@ -1278,11 +1521,31 @@ def _import_monitor_tick(monitor):
             output_dir,
             "Data preparation finished; background Mimics is creating the .mcs file: {0}".format(output_mcs),
         )
+        _write_import_task_status(
+            monitor.get("task_status_path"),
+            {
+                "status": "running",
+                "phase": "creating_mcs",
+                "completed": 1,
+                "failed": 0,
+                "total": monitor.get("total", 1),
+                "case_id": monitor.get("case_id", ""),
+            },
+        )
     except Exception as e:
         output_mcs = monitor.get("output_mcs")
         output_dir = os.path.dirname(os.path.abspath(output_mcs)) if output_mcs else ""
         _append_import_log(output_dir, "Import queueing failed: {0}".format(e))
         _record_failed_case(output_dir, monitor.get("case_id"), "prepare_manifest", e)
+        _write_import_task_status(
+            monitor.get("task_status_path"),
+            {
+                "status": "failed",
+                "phase": "queue_failed",
+                "error": str(e),
+                "total": monitor.get("total", 1),
+            },
+        )
         traceback.print_exc()
         mimics.dialogs.message_box(title="Import Error", message="Import queueing failed: {0}".format(e))
         _cleanup_job_dir(job_dir)
@@ -1342,29 +1605,66 @@ def _start_next_batch_case(monitor):
     bridge_params = _build_bridge_params(case_info, axes, flips, work_dir)
 
     # Update monitor for next case
+    old_monitor_key = monitor.get("monitor_key")
     monitor["job_dir"] = job_dir
     monitor["output_mcs"] = output_mcs
     monitor["work_dir"] = work_dir
+    monitor["case_id"] = case_id
     monitor["monitor_key"] = job_dir
     monitor["deadline"] = time.time() + monitor.get("timeout_seconds", 1800)
     monitor["done"] = False
 
     _launch_bridge_job_thread(bridge_params, job_dir, output_dir, "preparing", case_id=case_id)
 
+    _IMPORT_MONITORS.pop(old_monitor_key, None)
     _IMPORT_MONITORS[job_dir] = monitor
 
 
 # -- Batch prepare-only flow (no Mimics API, GUI stays responsive) ------
 
-def _batch_prepare_tick(monitor):
+def _batch_prepare_tick_impl(monitor):
     """Timer callback for batch prepare: bridge done -> manifest -> next case."""
     if monitor.get("done"):
+        return
+
+    if _import_task_stopped(monitor):
+        _cancel_import_monitor(monitor)
+        return
+
+    timeout_pending = monitor.get("_timeout_pending")
+    if timeout_pending:
+        if not monitor.pop("_timed_out_process_stopped", False):
+            return
+        output_dir = monitor.get("output_dir")
+        case_id = timeout_pending.get("case_id", "")
+        error = timeout_pending.get("error", "Dataset conversion timed out.")
+        _record_failed_case(output_dir, case_id, "prepare_timeout", error)
+        monitor["failed"] = monitor.get("failed", 0) + 1
+        monitor.pop("_timeout_pending", None)
+        monitor["busy"] = False
+        _write_import_task_status(
+            monitor.get("task_status_path"),
+            {
+                "status": "running",
+                "phase": "preparing",
+                "completed": monitor.get("completed", 0),
+                "failed": monitor.get("failed", 0),
+                "total": monitor.get("total", 0),
+                "case_id": case_id,
+            },
+        )
+        _start_next_batch_prepare(monitor)
         return
 
     # Prevent re-entrancy: while we process a completed case (which may
     # show a blocking message_box), the timer can fire again and re-enter
     # this function.  The busy flag prevents double-processing.
     if monitor.get("busy"):
+        return
+
+    if monitor.pop("selecting_next", False):
+        monitor["busy"] = True
+        _start_next_batch_prepare(monitor)
         return
 
     job_dir = monitor.get("job_dir")
@@ -1375,17 +1675,38 @@ def _batch_prepare_tick(monitor):
         monitor["busy"] = True
         output_dir = monitor.get("output_dir")
         case_id = monitor.get("case_id", "")
-        _append_import_log(output_dir, "Conversion timed out: {0}".format(case_id))
-        _terminate_job_process(
-            job_dir,
-            on_complete=lambda job=job_dir, work=monitor.get("work_dir"): (
-                _cleanup_job_dir(job), _cleanup_work_dir(work)
+        error = "Dataset conversion timed out."
+        _append_import_log(
+            output_dir,
+            "Conversion timed out for {0}; waiting for the bridge process to exit before continuing.".format(
+                case_id
             ),
         )
-        _record_failed_case(output_dir, case_id, "prepare_timeout", "Dataset conversion timed out.")
-        monitor["failed"] = monitor.get("failed", 0) + 1
-        monitor["busy"] = False
-        _start_next_batch_prepare(monitor)
+        monitor["_timeout_pending"] = {
+            "case_id": case_id,
+            "error": error,
+        }
+        _write_import_task_status(
+            monitor.get("task_status_path"),
+            {
+                "status": "running",
+                "phase": "stopping_case",
+                "completed": monitor.get("completed", 0),
+                "failed": monitor.get("failed", 0),
+                "total": monitor.get("total", 0),
+                "case_id": case_id,
+            },
+        )
+
+        def _timed_out_process_stopped():
+            _cleanup_job_dir(job_dir)
+            _cleanup_work_dir(monitor.get("work_dir"))
+            monitor["_timed_out_process_stopped"] = True
+
+        _terminate_job_process(
+            job_dir,
+            on_complete=_timed_out_process_stopped,
+        )
         return
 
     status, result = _check_job_status(job_dir)
@@ -1397,12 +1718,28 @@ def _batch_prepare_tick(monitor):
     # Set busy flag to prevent re-entrancy during message_box etc.
     monitor["busy"] = True
 
+    if _import_task_stopped(monitor):
+        monitor["busy"] = False
+        _cancel_import_monitor(monitor)
+        return
+
     if status == "error":
         output_dir = monitor.get("output_dir", "")
         case_id = monitor.get("case_id", "")
         _append_import_log(output_dir, "Conversion failed for {0}: {1}".format(case_id, result))
         _record_failed_case(output_dir, case_id, "prepare", result)
         monitor["failed"] = monitor.get("failed", 0) + 1
+        _write_import_task_status(
+            monitor.get("task_status_path"),
+            {
+                "status": "running",
+                "phase": "preparing",
+                "completed": monitor.get("completed", 0),
+                "failed": monitor.get("failed", 0),
+                "total": monitor.get("total", 0),
+                "case_id": case_id,
+            },
+        )
         _cleanup_job_dir(job_dir)
         _cleanup_work_dir(monitor.get("work_dir"))
         monitor["busy"] = False
@@ -1431,6 +1768,17 @@ def _batch_prepare_tick(monitor):
                 case_id,
             ),
         )
+        _write_import_task_status(
+            monitor.get("task_status_path"),
+            {
+                "status": "running",
+                "phase": "preparing",
+                "completed": completed_count,
+                "failed": monitor.get("failed", 0),
+                "total": total,
+                "case_id": case_id,
+            },
+        )
     except Exception as e:
         _append_import_log(output_dir, "Failed to save prepare manifest for {0}: {1}".format(case_id, e))
         _record_failed_case(output_dir, case_id, "prepare_manifest", e)
@@ -1457,57 +1805,81 @@ def _batch_prepare_tick(monitor):
     monitor["busy"] = False
 
 
+def _batch_prepare_tick(monitor):
+    """Run one prepare tick and never leave a stale re-entrancy flag."""
+    was_busy = bool(monitor.get("busy"))
+    try:
+        return _batch_prepare_tick_impl(monitor)
+    finally:
+        if not was_busy:
+            monitor["busy"] = False
+
+
+def _finish_batch_prepare_queue(monitor):
+    monitor["done"] = True
+    monitor["busy"] = False
+    _stop_import_monitor(monitor.get("monitor_key"))
+    completed = monitor.get("completed", 0)
+    failed = monitor.get("failed", 0)
+    total = monitor.get("total", 0)
+    output_dir = monitor.get("output_dir")
+    _append_import_log(
+        output_dir,
+        "All {0} case(s) prepared; {1} failed. Background Mimics is still creating .mcs files from prepared data.".format(
+            completed,
+            failed,
+        ),
+    )
+    _mark_mcs_queue_done(output_dir, completed=completed, failed=failed)
+    _ensure_bg_mimics_running(output_dir, total, mark_active=False)
+    _write_import_task_status(
+        monitor.get("task_status_path"),
+        {
+            "status": "running",
+            "phase": "waiting_for_mcs",
+            "completed": completed,
+            "failed": failed,
+            "total": total,
+        },
+    )
+
+
 def _start_next_batch_prepare(monitor):
-    """Start bridge prepare for the next case in the batch queue.
-
-    Queue items are (name, case_dir) tuples; lazy discovery: each case
-    is scanned only when it's about to be converted.
-    """
-    queue = monitor.get("batch_queue")
-    if not queue:
-        # All cases converted; stop timer.
-        # Background Mimics should already be running (started after 2nd
-        # case).  Just ensure it's alive for any remaining manifests.
-        monitor["done"] = True
-        monitor["busy"] = False
-        _stop_import_monitor(monitor.get("monitor_key"))
-        completed = monitor.get("completed", 0)
-        failed = monitor.get("failed", 0)
-        total = monitor.get("total", 0)
-        output_dir = monitor.get("output_dir")
-        _append_import_log(
-            output_dir,
-            "All {0} case(s) prepared; {1} failed. Background Mimics is still creating .mcs files from prepared data.".format(
-                completed,
-                failed,
-            ),
-        )
-        _mark_mcs_queue_done(output_dir, completed=completed, failed=failed)
-        _ensure_bg_mimics_running(output_dir, total, mark_active=False)
-        return
-
-    # Pop next (name, case_dir) from queue
-    item = queue.pop(0)
+    """Start the next valid case without recursive empty-case skipping."""
     case_info = None
-    if isinstance(item, tuple):
-        case_name, case_dir = item
-    else:
-        # If the bridge already returned full case metadata, use it directly
-        # and avoid a second filesystem scan in the Mimics GUI process.
-        if item.get("image"):
-            case_info = item
-        case_name = item.get("case_id", "")
-        case_dir = item.get("case_dir", "")
-
-    if case_info is None:
-        case_info = _discover_single_case(case_dir)
-    if case_info is None:
-        output_dir = monitor.get("output_dir", "")
-        _append_import_log(output_dir, "Skipping case without image data: {0}".format(case_name))
-        _record_failed_case(output_dir, case_name, "discover_case", "No image data found.")
-        monitor["failed"] = monitor.get("failed", 0) + 1
-        _start_next_batch_prepare(monitor)
-        return
+    skipped_this_tick = 0
+    while case_info is None:
+        queue = monitor.get("batch_queue")
+        if not queue:
+            _finish_batch_prepare_queue(monitor)
+            return
+        item = queue.pop(0)
+        if isinstance(item, tuple):
+            case_name, case_dir = item
+        else:
+            if item.get("image"):
+                case_info = item
+            case_name = item.get("case_id", "")
+            case_dir = item.get("case_dir", "")
+        if case_info is None:
+            case_info = _discover_single_case(case_dir)
+        if case_info is None:
+            output_dir = monitor.get("output_dir", "")
+            _append_import_log(
+                output_dir,
+                "Skipping case without image data: {0}".format(case_name),
+            )
+            _record_failed_case(
+                output_dir,
+                case_name,
+                "discover_case",
+                "No image data found.",
+            )
+            monitor["failed"] = monitor.get("failed", 0) + 1
+            skipped_this_tick += 1
+            if skipped_this_tick >= 8 and monitor.get("batch_queue"):
+                monitor["selecting_next"] = True
+                return
 
     case_id = case_info["case_id"]
     output_dir = monitor.get("output_dir")
@@ -1524,6 +1896,17 @@ def _start_next_batch_prepare(monitor):
     _append_import_log(
         output_dir,
         "[{0}/{1}] Preparing: {2}".format(completed + failed + 1, total, case_id),
+    )
+    _write_import_task_status(
+        monitor.get("task_status_path"),
+        {
+            "status": "running",
+            "phase": "preparing",
+            "completed": completed,
+            "failed": failed,
+            "total": total,
+            "case_id": case_id,
+        },
     )
 
     bridge_params = _build_bridge_params(case_info, axes, flips, work_dir)
@@ -1653,49 +2036,49 @@ def _ensure_bg_mimics_running(output_dir, total_count=0, mark_active=True):
     as manifests become available, rather than waiting for all conversions
     to finish.
     """
-    global _BG_MIMICS_PID
     if mark_active:
         _mark_mcs_queue_active(output_dir, total_count)
     if _background_stop_requested(output_dir):
         _append_import_log(output_dir, "Background .mcs creation is stopped by user request.")
         return
     output_key = os.path.normcase(os.path.abspath(output_dir))
-    if output_key in _BG_MIMICS_FAILED_OUTPUTS:
+    if _bg_failed_contains(output_key):
         return
     # Check if existing background Mimics is still alive
-    if _BG_MIMICS_PID and _is_pid_alive(_BG_MIMICS_PID):
-        if os.path.abspath(_BG_MIMICS_OUTPUT_DIR or "") == os.path.abspath(output_dir):
+    state = _bg_state_snapshot()
+    if state["pid"] and _is_pid_alive(state["pid"]):
+        if os.path.abspath(state["output_dir"] or "") == os.path.abspath(output_dir):
             return  # same queue; the worker will pick up the new descriptor
         _schedule_bg_mimics_retry(output_dir, total_count=total_count)
         return
 
     # Executable discovery, lock acquisition, and Popen can touch slow disks.
     # Keep all of it off the Mimics GUI timer callback.
-    global _BG_MIMICS_LAUNCH_ACTIVE
-    if _BG_MIMICS_LAUNCH_ACTIVE:
+    if not _bg_try_begin_launch():
         _schedule_bg_mimics_retry(output_dir, total_count=total_count)
         return
-    _BG_MIMICS_LAUNCH_ACTIVE = True
 
     def _launch():
-        global _BG_MIMICS_LAUNCH_ACTIVE
         try:
             _launch_background_mimics(output_dir, total_count=total_count)
         finally:
-            _BG_MIMICS_LAUNCH_ACTIVE = False
+            _bg_end_launch()
 
     thread = threading.Thread(target=_launch, name="MimicsBackgroundLauncher")
     thread.daemon = True
-    thread.start()
+    try:
+        thread.start()
+    except Exception:
+        _bg_end_launch()
+        raise
 
 
 def _schedule_bg_mimics_retry(output_dir, total_count=0):
     key = os.path.normcase(os.path.abspath(output_dir))
-    if key in _BG_MIMICS_FAILED_OUTPUTS:
+    if _bg_failed_contains(key):
         return
-    if key in _BG_MIMICS_RETRY_OUTPUTS:
+    if not _bg_retry_add(key):
         return
-    _BG_MIMICS_RETRY_OUTPUTS.add(key)
 
     def _retry():
         retry_started = time.time()
@@ -1706,96 +2089,146 @@ def _schedule_bg_mimics_retry(output_dir, total_count=0):
                 if _background_stop_requested(output_dir, retry_started):
                     _append_import_log(output_dir, "Background Mimics retry stopped by user request.")
                     return
-                if key in _BG_MIMICS_FAILED_OUTPUTS:
+                if _bg_failed_contains(key):
                     return
-                if _BG_MIMICS_PID and _is_pid_alive(_BG_MIMICS_PID):
-                    if os.path.abspath(_BG_MIMICS_OUTPUT_DIR or "") == os.path.abspath(output_dir):
+                state = _bg_state_snapshot()
+                if state["pid"] and _is_pid_alive(state["pid"]):
+                    if os.path.abspath(state["output_dir"] or "") == os.path.abspath(output_dir):
                         return
                     continue
-                process = _launch_background_mimics(
-                    output_dir,
-                    total_count=total_count,
-                    schedule_retry=False,
-                )
+                if not _bg_try_begin_launch():
+                    continue
+                try:
+                    process = _launch_background_mimics(
+                        output_dir,
+                        total_count=total_count,
+                        schedule_retry=False,
+                    )
+                finally:
+                    _bg_end_launch()
                 if process is not None:
                     return
         finally:
-            _BG_MIMICS_RETRY_OUTPUTS.discard(key)
+            _bg_retry_discard(key)
 
     thread = threading.Thread(target=_retry)
     thread.daemon = True
-    thread.start()
+    try:
+        thread.start()
+    except Exception:
+        _bg_retry_discard(key)
+        raise
 
 
 def _watch_background_mimics(process, output_dir, handshake_path, mimics_log_path,
                               process_log_path, lock_path, lock_token):
-    """Release the shared lock and classify startup/script failures."""
-    global _BG_MIMICS_PID
-    global _BG_MIMICS_OUTPUT_DIR
+    """Classify the child exit, persist terminal status, then release its lock."""
     exit_code = None
-    try:
-        exit_code = process.wait()
-    except Exception:
+    forced_reason = ""
+    started_at = time.time()
+    deadline = started_at + 24.0 * 3600.0
+    while exit_code is None:
         try:
-            exit_code = process.poll()
+            exit_code = process.wait(timeout=30.0)
+            break
+        except subprocess.TimeoutExpired:
+            if _background_stop_requested(output_dir, started_at):
+                forced_reason = "stop requested"
+            elif time.time() >= deadline:
+                forced_reason = "24-hour background Mimics safety timeout"
+            else:
+                continue
+            try:
+                process.terminate()
+                exit_code = process.wait(timeout=10.0)
+            except Exception:
+                try:
+                    process.kill()
+                    exit_code = process.wait(timeout=10.0)
+                except Exception:
+                    exit_code = process.poll()
+            if exit_code is None:
+                time.sleep(5.0)
+                continue
+            break
         except Exception:
-            exit_code = None
-    if _BG_MIMICS_PID == getattr(process, "pid", None):
-        _BG_MIMICS_PID = None
-        _BG_MIMICS_OUTPUT_DIR = None
-    try:
-        runtime_common.release_resource_lock(lock_path, lock_token)
-    except Exception:
-        pass
-
+            exit_code = process.poll()
+            if exit_code is None:
+                time.sleep(5.0)
+                continue
+            break
     status_path = _rt(output_dir, "_mcs_batch_status.json")
-    status = runtime_common.read_json(status_path, {}) or {}
-    handshake_exists = os.path.isfile(handshake_path)
-    if handshake_exists and status.get("status") in ("closed", "cancelled"):
-        return
+    try:
+        status = runtime_common.read_json(status_path, {}) or {}
+        handshake_exists = os.path.isfile(handshake_path)
+        if handshake_exists and status.get("status") in ("closed", "cancelled", "failed"):
+            if status.get("status") == "failed":
+                _bg_mark_failed(os.path.normcase(os.path.abspath(output_dir)))
+            return
 
-    if not handshake_exists or status.get("status") not in ("closed", "cancelled"):
-        output_key = os.path.normcase(os.path.abspath(output_dir))
-        _BG_MIMICS_FAILED_OUTPUTS.add(output_key)
-        mimics_tail = runtime_common.read_text_tail(mimics_log_path, 12000)
-        process_tail = runtime_common.read_text_tail(process_log_path, 12000)
-        if not handshake_exists:
-            reason = (
-                "Background Mimics exited before executing the import runner "
-                "(exit code {0})."
-            ).format(exit_code)
-        else:
-            reason = (
-                "Background Mimics executed the import runner but stopped before "
-                "reporting completion (exit code {0})."
-            ).format(exit_code)
-        details = []
-        if mimics_tail:
-            details.append("Mimics log tail:\n" + mimics_tail)
-        if process_tail:
-            details.append("Process log tail:\n" + process_tail)
-        message = reason
-        if details:
-            message += "\n\n" + "\n\n".join(details)
-        message += (
-            "\n\nPrepared import data was kept for retry. "
-            "Mimics log: {0}\nProcess log: {1}"
-        ).format(mimics_log_path, process_log_path)
-        _append_import_log(output_dir, message)
+        if not handshake_exists or status.get("status") not in ("closed", "cancelled", "failed"):
+            output_key = os.path.normcase(os.path.abspath(output_dir))
+            if forced_reason == "stop requested":
+                runtime_common.write_json_atomic(
+                    status_path,
+                    {
+                        "status": "cancelled",
+                        "pid": getattr(process, "pid", 0),
+                        "exit_code": exit_code,
+                        "error": "Background .mcs creation stopped by user request.",
+                        "runner_started": bool(handshake_exists),
+                        "updated_at_epoch": time.time(),
+                    },
+                )
+                return
+            _bg_mark_failed(output_key)
+            mimics_tail = runtime_common.read_text_tail(mimics_log_path, 12000)
+            process_tail = runtime_common.read_text_tail(process_log_path, 12000)
+            if not handshake_exists:
+                reason = (
+                    "Background Mimics exited before executing the import runner "
+                    "(exit code {0})."
+                ).format(exit_code)
+            else:
+                reason = (
+                    "Background Mimics executed the import runner but stopped before "
+                    "reporting completion (exit code {0})."
+                ).format(exit_code)
+            if forced_reason:
+                reason += " Forced shutdown reason: {0}.".format(forced_reason)
+            details = []
+            if mimics_tail:
+                details.append("Mimics log tail:\n" + mimics_tail)
+            if process_tail:
+                details.append("Process log tail:\n" + process_tail)
+            message = reason
+            if details:
+                message += "\n\n" + "\n\n".join(details)
+            message += (
+                "\n\nPrepared import data was kept for retry. "
+                "Mimics log: {0}\nProcess log: {1}"
+            ).format(mimics_log_path, process_log_path)
+            _append_import_log(output_dir, message)
+            try:
+                runtime_common.write_json_atomic(
+                    status_path,
+                    {
+                        "status": "failed",
+                        "pid": getattr(process, "pid", 0),
+                        "exit_code": exit_code,
+                        "error": reason,
+                        "mimics_log": mimics_log_path,
+                        "process_log": process_log_path,
+                        "runner_started": bool(handshake_exists),
+                        "updated_at_epoch": time.time(),
+                    },
+                )
+            except Exception:
+                pass
+    finally:
+        _bg_clear_process(getattr(process, "pid", None))
         try:
-            runtime_common.write_json_atomic(
-                status_path,
-                {
-                    "status": "failed",
-                    "pid": getattr(process, "pid", 0),
-                    "exit_code": exit_code,
-                    "error": reason,
-                    "mimics_log": mimics_log_path,
-                    "process_log": process_log_path,
-                    "runner_started": bool(handshake_exists),
-                    "updated_at_epoch": time.time(),
-                },
-            )
+            runtime_common.release_resource_lock(lock_path, lock_token)
         except Exception:
             pass
 
@@ -1807,11 +2240,9 @@ def _launch_background_mimics(output_dir, total_count=0, schedule_retry=True):
     reads prepare manifests and creates .mcs files one by one.
     Returns the Popen object, or None on failure.
     """
-    global _BG_MIMICS_PID
-    global _BG_MIMICS_OUTPUT_DIR
     global _BG_MIMICS_BUSY_NOTICE_AT
     output_key = os.path.normcase(os.path.abspath(output_dir))
-    if output_key in _BG_MIMICS_FAILED_OUTPUTS:
+    if _bg_failed_contains(output_key):
         return None
     if _background_stop_requested(output_dir):
         _append_import_log(output_dir, "Background .mcs creation was not started because stop was requested.")
@@ -1824,7 +2255,7 @@ def _launch_background_mimics(output_dir, total_count=0, schedule_retry=True):
             "the annotation window. Configure MIMICS_BACKGROUND_EXE if needed."
         )
         _append_import_log(output_dir, message)
-        _BG_MIMICS_FAILED_OUTPUTS.add(output_key)
+        _bg_mark_failed(output_key)
         runtime_common.write_json_atomic(
             _rt(output_dir, "_mcs_batch_status.json"),
             {
@@ -1859,7 +2290,7 @@ def _launch_background_mimics(output_dir, total_count=0, schedule_retry=True):
     if not os.path.isdir(runner_parent):
         os.makedirs(runner_parent)
     script_dir = os.path.dirname(script_path)
-    with open(runner_path, "w") as f:
+    with open(runner_path, "w", encoding="utf-8") as f:
         f.write("# Auto-generated runner for background Mimics .mcs creation\n")
         f.write("import sys, os, json, time\n")
         f.write(
@@ -1900,8 +2331,11 @@ def _launch_background_mimics(output_dir, total_count=0, schedule_retry=True):
     )
     if not lock_token:
         now = time.time()
-        if now - _BG_MIMICS_BUSY_NOTICE_AT >= 60.0:
-            _BG_MIMICS_BUSY_NOTICE_AT = now
+        with _BG_MIMICS_STATE_LOCK:
+            should_log_busy = now - _BG_MIMICS_BUSY_NOTICE_AT >= 60.0
+            if should_log_busy:
+                _BG_MIMICS_BUSY_NOTICE_AT = now
+        if should_log_busy:
             holder = runtime_common.active_resource_lock(_project_root(), "background_mimics.lock")
             _append_import_log(
                 output_dir,
@@ -1917,6 +2351,7 @@ def _launch_background_mimics(output_dir, total_count=0, schedule_retry=True):
             _schedule_bg_mimics_retry(output_dir, total_count=total_count)
         return None
     log_handle = None
+    process = None
     try:
         log_handle = open(log_path, "ab")
         process = subprocess.Popen(
@@ -1927,9 +2362,8 @@ def _launch_background_mimics(output_dir, total_count=0, schedule_retry=True):
             env=_background_env(),
             **_background_process_kwargs()
         )
-        _BG_MIMICS_PID = process.pid
-        _BG_MIMICS_OUTPUT_DIR = os.path.abspath(output_dir)
-        runtime_common.update_resource_lock_pid(
+        _bg_set_process(process.pid, output_dir)
+        if not runtime_common.update_resource_lock_pid(
             lock_path,
             lock_token,
             process.pid,
@@ -1938,7 +2372,12 @@ def _launch_background_mimics(output_dir, total_count=0, schedule_retry=True):
                 "output_dir": os.path.abspath(output_dir),
                 "runtime_dir": _rt(output_dir),
             },
-        )
+        ):
+            raise RuntimeError(
+                "Background Mimics started, but lock ownership could not be transferred to PID {0}.".format(
+                    process.pid
+                )
+            )
         _append_import_log(
             output_dir,
             "Background Mimics launch requested (PID={0}) for .mcs creation. "
@@ -1961,7 +2400,44 @@ def _launch_background_mimics(output_dir, total_count=0, schedule_retry=True):
         watcher.start()
         return process
     except Exception as e:
-        runtime_common.release_resource_lock(lock_path, lock_token)
+        process_stopped = process is None
+        if process is not None:
+            _bg_clear_process(getattr(process, "pid", None))
+            try:
+                process.terminate()
+                process.wait(timeout=5.0)
+            except Exception:
+                try:
+                    process.kill()
+                    process.wait(timeout=5.0)
+                except Exception:
+                    pass
+            try:
+                process_stopped = process.poll() is not None
+            except Exception:
+                process_stopped = not _is_pid_alive(getattr(process, "pid", 0))
+        if process_stopped:
+            runtime_common.release_resource_lock(lock_path, lock_token)
+        else:
+            try:
+                runtime_common.update_resource_lock_pid(
+                    lock_path,
+                    lock_token,
+                    process.pid,
+                    {
+                        "kind": "create_mcs",
+                        "output_dir": os.path.abspath(output_dir),
+                        "runtime_dir": _rt(output_dir),
+                        "termination_pending": True,
+                    },
+                )
+            except Exception:
+                pass
+            _append_import_log(
+                output_dir,
+                "Background Mimics PID {0} did not exit after launch failure; "
+                "the shared lock was retained.".format(getattr(process, "pid", "?")),
+            )
         _append_import_log(output_dir, "Could not start background Mimics: {0}".format(e))
         return None
     finally:
@@ -2384,11 +2860,22 @@ def _discover_monitor_tick(monitor):
         job_dir = monitor.get("job_dir")
         monitor_key = monitor.get("monitor_key")
 
+        if _import_task_stopped(monitor):
+            _cancel_import_monitor(monitor)
+            return
+
         # Timeout check
         if time.time() > monitor.get("deadline", 0):
-            monitor["done"] = True
-            _stop_import_monitor(monitor_key)
-            _safe_message_box("Scan Timeout", "Dataset scan timed out. Please retry.")
+            _fail_import_monitor_after_process(
+                monitor,
+                "scan_timeout",
+                "Dataset scan timed out.",
+                message_title="Scan Timeout",
+                message=(
+                    "Dataset scan timed out. The external scanner is being "
+                    "stopped; the task will become Failed after it exits."
+                ),
+            )
             return
 
         status, result = _check_job_status(job_dir)
@@ -2412,6 +2899,10 @@ def _discover_monitor_tick(monitor):
                 "Discover failed | {0}".format(result),
             )
             _safe_message_box("Scan Error", "Dataset scan failed: {0}".format(result))
+            _write_import_task_status(
+                monitor.get("task_status_path"),
+                {"status": "failed", "phase": "scan_failed", "error": str(result)},
+            )
             _cleanup_job_dir(job_dir)
             return
 
@@ -2426,6 +2917,17 @@ def _discover_monitor_tick(monitor):
 
         if not cases:
             _safe_message_box("Import", "No case data was found in the selected folder.")
+            _write_import_task_status(
+                monitor.get("task_status_path"),
+                {
+                    "status": "failed",
+                    "phase": "no_cases",
+                    "error": "No case data was found in the selected folder.",
+                    "completed": 0,
+                    "failed": 0,
+                    "total": 0,
+                },
+            )
             return
 
         if result.get("mask_mode") == "named" and int(result.get("mask_count", 0) or 0) == 0:
@@ -2434,10 +2936,31 @@ def _discover_monitor_tick(monitor):
                 "No segmentation files matched the requested mask names. Check spelling or choose All masks / Images only.",
                 ui_blocking=False,
             )
+            _write_import_task_status(
+                monitor.get("task_status_path"),
+                {
+                    "status": "failed",
+                    "phase": "no_matching_masks",
+                    "error": "No segmentation files matched the requested mask names.",
+                    "completed": 0,
+                    "failed": 0,
+                    "total": count,
+                },
+            )
             return
 
         output_dir = monitor.get("output_dir")
         _append_import_log(output_dir, "Discovered {0} case(s); starting preparation.".format(count))
+        _write_import_task_status(
+            monitor.get("task_status_path"),
+            {
+                "status": "running",
+                "phase": "preparing",
+                "completed": 0,
+                "failed": 0,
+                "total": count,
+            },
+        )
         if result.get("mask_mode") == "named":
             _append_import_log(
                 output_dir,
@@ -2467,6 +2990,17 @@ def _discover_monitor_tick(monitor):
                 "Insufficient local workspace disk space. Estimated requirement: {0} MB; "
                 "available: {1} MB. Please free disk space and retry.".format(
                     estimated_mb, int(free_mb)),
+            )
+            _write_import_task_status(
+                monitor.get("task_status_path"),
+                {
+                    "status": "failed",
+                    "phase": "insufficient_disk_space",
+                    "error": "Insufficient local workspace disk space.",
+                    "completed": 0,
+                    "failed": 0,
+                    "total": count,
+                },
             )
             return
 
@@ -2499,13 +3033,27 @@ def _discover_monitor_tick(monitor):
             "flips": flips,
             "jobs_dir": jobs_dir,
             "batch_started_epoch": time.time(),
+            "task_status_path": monitor.get("task_status_path"),
+            "task_stop_path": monitor.get("task_stop_path"),
         }
         _verbose_log(output_dir, "Batch prepare | remaining={0}".format(max(0, len(cases) - 1)))
-        _start_batch_prepare_monitor(
+        monitor_started = _start_batch_prepare_monitor(
             first_job_dir, first_work_dir,
             batch_queue=cases[1:],
             batch_info=batch_info,
         )
+        if not monitor_started:
+            _write_import_task_status(
+                monitor.get("task_status_path"),
+                {
+                    "status": "failed",
+                    "phase": "monitor_unavailable",
+                    "error": "Mimics could not monitor the background conversion queue.",
+                    "completed": 0,
+                    "failed": 0,
+                    "total": count,
+                },
+            )
     except Exception as exc:
         output_dir = monitor.get("output_dir", "")
         _append_import_exception(output_dir, "_discover_monitor_tick fatal", exc)
@@ -2515,6 +3063,10 @@ def _discover_monitor_tick(monitor):
         except Exception:
             pass
         _safe_message_box("Import Error", "Discover callback failed. Please check mimics_import.log for details.")
+        _write_import_task_status(
+            monitor.get("task_status_path"),
+            {"status": "failed", "phase": "monitor_failed", "error": str(exc)},
+        )
 
 
 def _start_win32_discover_monitor(monitor, poll_seconds, timeout_seconds):
@@ -2558,7 +3110,8 @@ def _start_win32_discover_monitor(monitor, poll_seconds, timeout_seconds):
 
 
 def _start_import_discover_monitor(job_dir, ts_root, output_dir, axes, flips, jobs_dir, work_root,
-                                    poll_seconds=0.5, timeout_seconds=900):
+                                    poll_seconds=0.5, timeout_seconds=900,
+                                    task_status_path=None, task_stop_path=None):
     """Start a non-blocking timer that polls for discover completion, then auto-starts import."""
     monitor = {
         "monitor_key": job_dir,
@@ -2572,6 +3125,8 @@ def _start_import_discover_monitor(job_dir, ts_root, output_dir, axes, flips, jo
         "flips": flips,
         "jobs_dir": jobs_dir,
         "work_root": work_root,
+        "task_status_path": task_status_path,
+        "task_stop_path": task_stop_path,
     }
     _verbose_log(
         output_dir,
@@ -2673,6 +3228,7 @@ def _launch_external_import_setup(import_mode):
             import_mode=import_mode,
             case_info_override=selection.get("case_info"),
         )
+        return dict(_LAST_TASK_DESCRIPTOR)
 
     return io_setup_mimics.launch(
         mode,
@@ -2697,7 +3253,8 @@ def main(import_mode=None, case_info_override=None):
         None         — interactive (ask)
         "single_case" — skip dialog, single-case mode directly
     """
-    _BG_MIMICS_FAILED_OUTPUTS.clear()
+    with _BG_MIMICS_STATE_LOCK:
+        _BG_MIMICS_FAILED_OUTPUTS.clear()
     live_bridge_jobs = []
     for job_path, process in list(_BRIDGE_PROCESSES.items()):
         try:
@@ -2835,6 +3392,20 @@ def main(import_mode=None, case_info_override=None):
 
         output_dir_abs = os.path.dirname(os.path.abspath(output))
         run_root = _new_import_run_root()
+        task_status_path, task_stop_path = _set_last_import_task(
+            run_root, output_dir_abs, "Import single case",
+        )
+        _write_import_task_status(
+            task_status_path,
+            {
+                "status": "running",
+                "phase": "preparing",
+                "completed": 0,
+                "failed": 0,
+                "total": 1,
+                "case_id": case_info["case_id"],
+            },
+        )
         work_dir = os.path.join(run_root, "work", case_info["case_id"])
         jobs_dir = os.path.join(run_root, "jobs")
         job_dir = os.path.join(jobs_dir, case_info["case_id"])
@@ -2844,7 +3415,27 @@ def main(import_mode=None, case_info_override=None):
         _launch_bridge_job_thread(bridge_params, job_dir, output_dir_abs, "preparing", case_id=case_info["case_id"])
 
         # Bridge launched, timer will queue the result for background Mimics.
-        _start_import_monitor(job_dir, output, work_dir)
+        monitor_started = _start_import_monitor(
+            job_dir,
+            output,
+            work_dir,
+            batch_info={
+                "total": 1,
+                "output_dir": output_dir_abs,
+                "task_status_path": task_status_path,
+                "task_stop_path": task_stop_path,
+            },
+        )
+        if not monitor_started:
+            _write_import_task_status(
+                task_status_path,
+                {
+                    "status": "failed",
+                    "phase": "monitor_unavailable",
+                    "error": "Mimics could not monitor the background preparation process.",
+                    "total": 1,
+                },
+            )
         return 0
 
     # -- Batch mode: discover and prepare cases without blocking Mimics GUI.
@@ -2857,6 +3448,19 @@ def main(import_mode=None, case_info_override=None):
         output_dir = _resolve_import_output_dir(ts_root, create=False)
 
     run_root = _new_import_run_root()
+    task_status_path, task_stop_path = _set_last_import_task(
+        run_root, output_dir, "Import dataset",
+    )
+    _write_import_task_status(
+        task_status_path,
+        {
+            "status": "running",
+            "phase": "discovering_cases",
+            "completed": 0,
+            "failed": 0,
+            "total": 0,
+        },
+    )
     jobs_dir = os.path.join(run_root, "jobs")
     work_root = os.path.join(run_root, "work")
 
@@ -2869,7 +3473,7 @@ def main(import_mode=None, case_info_override=None):
     }
     _update_gui()
     _launch_bridge_job_thread(bridge_params, discover_job_dir, output_dir, "discovering")
-    _start_import_discover_monitor(
+    monitor_started = _start_import_discover_monitor(
         discover_job_dir,
         ts_root,
         output_dir,
@@ -2877,7 +3481,18 @@ def main(import_mode=None, case_info_override=None):
         flips,
         jobs_dir,
         work_root,
+        task_status_path=task_status_path,
+        task_stop_path=task_stop_path,
     )
+    if not monitor_started:
+        _write_import_task_status(
+            task_status_path,
+            {
+                "status": "failed",
+                "phase": "monitor_unavailable",
+                "error": "Mimics could not monitor the background dataset scan.",
+            },
+        )
     return 0
 
 

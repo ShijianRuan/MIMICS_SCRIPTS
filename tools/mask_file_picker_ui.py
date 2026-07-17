@@ -11,9 +11,18 @@ import time
 import uuid
 from pathlib import Path
 
-def read_json(path):
-    with open(path, "r", encoding="utf-8") as handle:
-        return json.load(handle)
+try:
+    from ui_theme import configure_application
+except ImportError:
+    from tools.ui_theme import configure_application
+
+def read_json(path, default=None):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            value = json.load(handle)
+        return value if isinstance(value, dict) else default
+    except Exception:
+        return default
 
 
 def write_json(path, value):
@@ -40,8 +49,24 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--context", required=True)
     args = parser.parse_args()
-    context = read_json(args.context)
-    status_path = context["status_path"]
+    context_path = Path(args.context)
+    fallback_status_path = context_path.with_name(
+        context_path.name.replace("_context.json", ".json")
+    )
+    context = read_json(context_path, None)
+    if not context:
+        error = "Mask selector context is missing or invalid: {0}".format(context_path)
+        try:
+            write_json(fallback_status_path, {
+                "status": "failed",
+                "error": error,
+                "updated_at_epoch": time.time(),
+            })
+        except Exception:
+            pass
+        print(error, file=sys.stderr)
+        return 1
+    status_path = context.get("status_path") or str(fallback_status_path)
 
     try:
         from PySide6 import QtWidgets
@@ -53,7 +78,7 @@ def main():
         return 1
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
-    app.setApplicationName("Mimics Script")
+    configure_application(app, "Mimics Mask Import")
     paths, _selected_filter = QtWidgets.QFileDialog.getOpenFileNames(
         None,
         "Select Masks to Import",

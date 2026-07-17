@@ -284,9 +284,15 @@ def _call_bridge(params, monitor=None):
         if monitor.get("done"):
             runtime_common.terminate_process_async(process=process, graceful_seconds=0.0)
             raise RuntimeError("Mask import was cancelled during bridge startup.")
-    stdout, stderr = process.communicate(
-        input=json.dumps(params).encode("utf-8")
-    )
+    try:
+        stdout, stderr = process.communicate(
+            input=json.dumps(params).encode("utf-8"),
+            timeout=1800,
+        )
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
+        raise RuntimeError("Mask preparation timed out after 1800 seconds.")
     if process.returncode != 0:
         raise RuntimeError(
             "Bridge failed (exit {0}): {1}".format(
@@ -341,9 +347,17 @@ def _find_or_create_mask(name, active_image):
     mask = mimics.segment.create_mask()
     mask.name = name
     try:
-        mask.image = active_image
+        bound_image = getattr(mask, "image", None)
     except Exception:
-        pass
+        bound_image = None
+    try:
+        bound_to_active = bound_image == active_image
+    except Exception:
+        bound_to_active = bound_image is active_image
+    if bound_image is not None and not bound_to_active:
+        raise RuntimeError(
+            "Mimics created the Mask on a different image. Activate the target image and retry."
+        )
     return mask
 
 
@@ -406,6 +420,23 @@ def _finish_mask_import(monitor):
         )
 
 
+def _finish_mask_import_after_process(monitor, error):
+    """Do not delete bridge inputs until the external process is reaped."""
+    monitor.setdefault("errors", []).append(str(error))
+    process = monitor.get("process")
+    if process is None or process.poll() is not None:
+        _finish_mask_import(monitor)
+        return
+    monitor["done"] = True
+    _stop_mask_import_monitor(monitor.get("monitor_key"))
+    if not runtime_common.terminate_process_async(
+        process=process,
+        graceful_seconds=2.0,
+        on_complete=lambda: _finish_mask_import(monitor),
+    ):
+        _finish_mask_import(monitor)
+
+
 def _mask_import_monitor_tick(monitor):
     if monitor.get("busy"):
         return
@@ -424,12 +455,9 @@ def _mask_import_monitor_tick(monitor):
 
 def _mask_import_monitor_tick_locked(monitor):
     if time.time() > monitor.get("deadline", 0):
-        runtime_common.terminate_process_async(
-            process=monitor.get("process"),
-            graceful_seconds=2.0,
+        _finish_mask_import_after_process(
+            monitor, "Background mask preparation timed out."
         )
-        monitor.setdefault("errors", []).append("Background mask preparation timed out.")
-        _finish_mask_import(monitor)
         return
 
     if monitor.get("pending") is None:

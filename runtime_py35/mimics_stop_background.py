@@ -82,12 +82,9 @@ def _owned_roots():
 
 
 def _clear_resource_locks():
+    """Remove only locks whose recorded owner process is no longer alive."""
     lock_dir = runtime_common.resource_lock_dir(_project_root())
-    for name in ("gpu.lock", "background_mimics.lock"):
-        try:
-            os.remove(os.path.join(lock_dir, name))
-        except OSError:
-            pass
+    return runtime_common.cleanup_stale_resource_locks(lock_dir)
 
 
 def _stop_inprocess_monitors():
@@ -151,14 +148,18 @@ def _stop_import_inprocess_monitors():
     stopper = getattr(module, "_stop_import_monitor", None)
     terminator = getattr(module, "_terminate_job_process", None)
     cleanup_work = getattr(module, "_cleanup_work_dir", None)
+    cancel_monitor = getattr(module, "_cancel_import_monitor", None)
     for key, monitor in list(monitors.items()):
         try:
-            monitor["done"] = True
             output_dir = monitor.get("output_dir")
             if not output_dir and monitor.get("output_mcs"):
                 output_dir = os.path.dirname(os.path.abspath(monitor.get("output_mcs")))
             if output_dir:
                 output_dirs.append(output_dir)
+            if cancel_monitor is not None:
+                cancel_monitor(monitor, reason="Import stopped from Mimics.")
+                continue
+            monitor["done"] = True
             work_dir = monitor.get("work_dir")
             if terminator is not None and monitor.get("job_dir"):
                 terminator(
@@ -324,6 +325,37 @@ def _lock_is_mask_export(payload):
     return kind == "export_labels" or "label export" in owner
 
 
+def _request_lock_owned_stop_markers(reason):
+    """Signal lock-owned jobs without mutating or deleting their resource lock."""
+    written = []
+    lock_dir = runtime_common.resource_lock_dir(_project_root())
+    for name in ("background_mimics.lock", "gpu.lock"):
+        payload = runtime_common.read_json(os.path.join(lock_dir, name), {}) or {}
+        if not payload:
+            continue
+        candidates = []
+        if payload.get("stop_path"):
+            candidates.append(payload.get("stop_path"))
+        if payload.get("cancel_path"):
+            candidates.append(payload.get("cancel_path"))
+        for path in candidates:
+            if not path:
+                continue
+            try:
+                runtime_common.write_json_atomic(
+                    path,
+                    {
+                        "status": "stop_requested",
+                        "requested_at_epoch": time.time(),
+                        "reason": reason,
+                    },
+                )
+                written.append(path)
+            except Exception:
+                pass
+    return written
+
+
 def _stop_export_inprocess_monitors():
     """Detach export callbacks and cancel a launcher that is still racing."""
     module = sys.modules.get("mimics_export")
@@ -353,8 +385,8 @@ def stop_background_import():
     import queue stop markers and only targets the background Mimics process
     whose resource lock says it is doing import .mcs creation.
     """
-    inprocess_outputs = _stop_import_inprocess_monitors()
     stopped_queues = _request_queue_stop(reason="Stop Background Import")
+    inprocess_outputs = _stop_import_inprocess_monitors()
     payload = {
         "status": "stop_requested",
         "requested_at_epoch": time.time(),
@@ -372,6 +404,7 @@ def stop_background_import():
             pass
     lock_path = _background_mimics_lock_path()
     lock_payload = runtime_common.read_json(lock_path, {}) or {}
+    lock_token = str(lock_payload.get("token") or "")
     target_pid = None
     if _lock_is_import_creation(lock_payload):
         try:
@@ -425,7 +458,11 @@ def stop_background_import():
         "$pidToStop={0};"
         "$lock='{1}';"
         "$out='{2}';"
+        "$expectedToken='{3}';"
         "$markers=@('_run_create_mcs.py','create_mcs_batch.py');"
+        "$current=$null;"
+        "try {{$current=Get-Content -Raw -Path $lock -ErrorAction Stop | ConvertFrom-Json}} catch {{}};"
+        "$lockMatches=[bool]($current -and ([string]$current.token -eq $expectedToken) -and ([int64]$current.pid -eq $pidToStop));"
         "$record = Get-CimInstance Win32_Process -Filter \"ProcessId=$pidToStop\";"
         "$killed = @();"
         "$matched = $false;"
@@ -433,7 +470,7 @@ def stop_background_import():
         "  $cmd = $record.CommandLine -replace '/', '\\';"
         "  $matched = [bool]($markers | Where-Object {{ $cmd -like ('*' + $_ + '*') }} | Select-Object -First 1);"
         "}};"
-        "if ($record -and $matched) {{"
+        "if ($record -and $matched -and $lockMatches) {{"
         "  taskkill /PID $pidToStop /T /F 2>$null 1>$null;"
         "  $killed += [PSCustomObject]@{{"
         "    ProcessId = $pidToStop;"
@@ -441,13 +478,11 @@ def stop_background_import():
         "    ExitCode = $LASTEXITCODE;"
         "    CommandLine = $record.CommandLine"
         "  }};"
-        "  Start-Sleep -Milliseconds 500;"
-        "  Remove-Item -Path $lock -Force -ErrorAction SilentlyContinue;"
         "}};"
-        "$message = if ($matched) {{ 'Background import stop was requested.' }} else {{ 'Import lock PID did not match an import command line; no process was killed.' }};"
+        "$message = if (-not $lockMatches) {{ 'Import lock ownership changed; no process was killed.' }} elseif ($matched) {{ 'Background import stop was requested.' }} else {{ 'Import lock PID did not match an import command line; no process was killed.' }};"
         "$report = [PSCustomObject]@{{"
         "  RequestedAt = (Get-Date).ToString('s');"
-        "  QueueStopDirs = @({3});"
+        "  QueueStopDirs = @({4});"
         "  TargetPid = $pidToStop;"
         "  CommandLineMatched = $matched;"
         "  Killed = $killed;"
@@ -459,6 +494,7 @@ def stop_background_import():
         int(target_pid),
         lock_path.replace("'", "''"),
         stop_log.replace("'", "''"),
+        lock_token.replace("'", "''"),
         ",".join("'{}'".format(path.replace("'", "''")) for path in stopped_queues),
     )
     launched = False
@@ -489,9 +525,15 @@ def stop_background_import():
 
 def stop_background_export():
     """Stop only the Mimics-Script mask-export worker."""
-    _stop_export_inprocess_monitors()
+    module = sys.modules.get("mimics_export")
+    if module is not None:
+        try:
+            module.cancel_current_project_exports()
+        except Exception:
+            pass
     lock_path = _background_mimics_lock_path()
     lock_payload = runtime_common.read_json(lock_path, {}) or {}
+    lock_token = str(lock_payload.get("token") or "")
     target_pid = None
     export_root = str(lock_payload.get("export_root") or "")
     if _lock_is_mask_export(lock_payload):
@@ -544,27 +586,30 @@ def stop_background_export():
         "$pidToStop={0};"
         "$lock='{1}';"
         "$out='{2}';"
+        "$expectedToken='{3}';"
         "$markers=@('_run_export_batch.py','mimics_export.py');"
         "Start-Sleep -Seconds 2;"
+        "$current=$null;"
+        "try {{$current=Get-Content -Raw -Path $lock -ErrorAction Stop | ConvertFrom-Json}} catch {{}};"
+        "$lockMatches=[bool]($current -and ([string]$current.token -eq $expectedToken) -and ([int64]$current.pid -eq $pidToStop));"
         "$record=Get-CimInstance Win32_Process -Filter \"ProcessId=$pidToStop\";"
         "$matched=$false;$killed=@();$records=@();"
         "if ($record -and $record.CommandLine) {{"
         " $matched=[bool]($markers | Where-Object {{ $record.CommandLine -like ('*' + $_ + '*') }} | Select-Object -First 1);"
         "}};"
-        "if ($record -and $matched) {{"
+        "if ($record -and $matched -and $lockMatches) {{"
         " $records=@($record | Select-Object ProcessId,Name,CommandLine);"
         " taskkill /PID $pidToStop /T /F 2>$null 1>$null;"
         " $killed+=@([PSCustomObject]@{{ProcessId=$pidToStop;Name=$record.Name;ExitCode=$LASTEXITCODE;CommandLine=$record.CommandLine}});"
-        " Start-Sleep -Milliseconds 500;Remove-Item -Path $lock -Force -ErrorAction SilentlyContinue;"
         "}};"
-        "if (-not $record) {{Remove-Item -Path $lock -Force -ErrorAction SilentlyContinue;}};"
-        "$message=if (-not $record) {{'Mask export stopped gracefully.'}} elseif ($matched) {{'Mask export process was stopped.'}} else {{'Lock PID did not match a mask-export command; no process was killed.'}};"
+        "$message=if (-not $lockMatches) {{'Mask-export lock ownership changed; no process was killed.'}} elseif (-not $record) {{'Mask export stopped gracefully.'}} elseif ($matched) {{'Mask export process was stopped.'}} else {{'Lock PID did not match a mask-export command; no process was killed.'}};"
         "$report=[PSCustomObject]@{{RequestedAt=(Get-Date).ToString('s');TargetPid=$pidToStop;Matched=$records;Killed=$killed;Message=$message}};"
         "$report | ConvertTo-Json -Depth 5 -Compress | Set-Content -Path $out -Encoding UTF8"
     ).format(
         int(target_pid),
         lock_path.replace("'", "''"),
         stop_log.replace("'", "''"),
+        lock_token.replace("'", "''"),
     )
     launched = False
     try:
@@ -650,6 +695,46 @@ def _find_cache_paths():
     return sorted(set(os.path.abspath(p) for p in paths if os.path.exists(p)))
 
 
+def _active_cache_cleanup_blockers():
+    """Return active tasks whose scratch files must not be removed."""
+    blockers = []
+    lock_dir = runtime_common.resource_lock_dir(_project_root())
+    for name in ("background_mimics.lock", "gpu.lock"):
+        path = os.path.join(lock_dir, name)
+        payload = runtime_common.read_json(path, {}) or {}
+        pid = payload.get("pid")
+        if pid and runtime_common.process_exists(pid):
+            blockers.append(
+                "{0}: {1}".format(name, runtime_common.resource_lock_summary(payload))
+            )
+
+    for module_name, collection_name in (
+        ("mimics_import", "_IMPORT_MONITORS"),
+        ("mimics_export", "_EXPORT_MONITORS"),
+        ("mask_import", "_MASK_IMPORT_MONITORS"),
+        ("fewshot_mimics", "_MONITORS"),
+        ("nninteractive_mimics", "_ASYNC_MONITORS"),
+    ):
+        module = sys.modules.get(module_name)
+        collection = getattr(module, collection_name, {}) if module is not None else {}
+        if any(item and not item.get("done") for item in (collection or {}).values()):
+            blockers.append("{0} has an active Mimics monitor".format(module_name))
+
+    task_dir = os.path.join(_runtime_dir(), "ui_tasks")
+    if os.path.isdir(task_dir):
+        for name in os.listdir(task_dir):
+            if not name.endswith(".json") or name.endswith("_stop.json"):
+                continue
+            payload = runtime_common.read_json(os.path.join(task_dir, name), {}) or {}
+            status = str(payload.get("status") or "").lower()
+            if status in ("completed", "closed", "failed", "cancelled", "expired"):
+                continue
+            pid = payload.get("pid") or payload.get("controller_pid")
+            if pid and runtime_common.process_exists(pid):
+                blockers.append("active task status: {0}".format(name))
+    return blockers
+
+
 def clear_all_caches():
     """Remove all intermediate files, temp directories, and caches.
 
@@ -659,6 +744,16 @@ def clear_all_caches():
     Files that are currently in use (locked by another process) are skipped
     and reported separately so the user knows what was retained.
     """
+    blockers = _active_cache_cleanup_blockers()
+    if blockers:
+        return {
+            "removed": [],
+            "failed": [],
+            "skipped_in_use": [
+                (_runtime_dir(), "Cache cleanup skipped while tasks are active: " + "; ".join(blockers))
+            ],
+        }
+
     paths = _find_cache_paths()
     removed = []
     failed = []
@@ -731,19 +826,7 @@ def _clear_stale_runtime_files(runtime_dir, removed, failed, skipped_in_use):
 def _clear_resource_locks_safe():
     """Clear resource locks only when no process is holding them."""
     lock_dir = runtime_common.resource_lock_dir(_project_root())
-    for name in ("gpu.lock", "background_mimics.lock"):
-        path = os.path.join(lock_dir, name)
-        if not os.path.isfile(path):
-            continue
-        payload = runtime_common.read_json(path, {}) or {}
-        pid = payload.get("pid")
-        if pid and runtime_common.process_exists(int(pid)):
-            # Lock holder is still running — keep the lock
-            continue
-        try:
-            os.remove(path)
-        except OSError:
-            pass
+    runtime_common.cleanup_stale_resource_locks(lock_dir)
 
 
 # -- Async cache clearing (non-blocking Mimics GUI) -----------------
@@ -796,6 +879,20 @@ def clear_cache_main():
     All heavy disk I/O runs in a daemon thread. Mimics GUI stays responsive.
     A timer polls the thread every 0.5s and shows results when done.
     """
+    for active in list(_CACHE_CLEAR_MONITORS):
+        thread = active.get("thread") if active else None
+        if thread is not None and thread.is_alive():
+            _mimics_log(logging.INFO, "Cache clearing is already running.")
+            try:
+                mimics.dialogs.message_box(
+                    title="Clear Cache",
+                    message="Cache clearing is already running.",
+                    ui_blocking=False,
+                )
+            except Exception:
+                pass
+            return 0
+
     monitor = {
         "thread": None,
         "result": None,
@@ -926,9 +1023,12 @@ def stop_background_processes():
     if os.name != "nt":
         return False
 
-    # 1. Detach in-process timers and write graceful stop signals first.
-    _stop_inprocess_monitors()
+    # 1. Publish graceful stop signals before detaching monitors. A task that
+    # reaches its safe boundary during this window can write its own terminal
+    # state and release its token-owned lock normally.
     stopped_queues = _request_queue_stop()
+    stop_markers = _request_lock_owned_stop_markers("Stop Background Services")
+    _stop_inprocess_monitors()
 
     stop_log = os.path.join(_runtime_dir(), "stop_background_last.json")
 
@@ -943,26 +1043,21 @@ def stop_background_processes():
     queues = "@(" + ",".join(
         "'{}'".format(path.replace("'", "''")) for path in stopped_queues
     ) + ")"
-    lock_paths = [
-        os.path.join(runtime_common.resource_lock_dir(_project_root()), "gpu.lock"),
-        os.path.join(runtime_common.resource_lock_dir(_project_root()), "background_mimics.lock"),
-    ]
-    locks = "@(" + ",".join(
-        "'{}'".format(path.replace("'", "''")) for path in lock_paths
-    ) + ")"
+    cutoff_utc = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     # PowerShell script: find and kill all owned processes
     command = (
         "$markers={0};"
         "$roots={1};"
         "$queues={2};"
-        "$locks={3};"
-        "$out='{4}';"
-        "$foregroundPid={5};"
+        "$out='{3}';"
+        "$foregroundPid={4};"
+        "$cutoff=[DateTime]::Parse('{5}').ToUniversalTime();"
         # Find processes whose command line references both a root and a marker
         "$matched=Get-CimInstance Win32_Process | Where-Object {{"
         "  $cmd = $_.CommandLine;"
         "  if (-not $cmd -or $_.ProcessId -eq $PID -or $_.ProcessId -eq $foregroundPid) {{ return $false }};"
+        "  if ($_.CreationDate -and $_.CreationDate.ToUniversalTime() -gt $cutoff) {{ return $false }};"
         "  $cmd = $cmd -replace '/', '\\';"
         "  $inRoot = ($roots | Where-Object {{ $cmd -like ('*' + $_ + '*') }} | Select-Object -First 1);"
         "  $hasMarker = ($markers | Where-Object {{ $cmd -like ('*' + $_ + '*') }} | Select-Object -First 1);"
@@ -984,7 +1079,6 @@ def stop_background_processes():
         "  }};"
         "}};"
         "Start-Sleep -Milliseconds 500;"
-        "$locks | ForEach-Object {{ Remove-Item -Path $_ -Force -ErrorAction SilentlyContinue }};"
         "$report = [PSCustomObject]@{{"
         "  RequestedAt = (Get-Date).ToString('s');"
         "  QueueStopDirs = $queues;"
@@ -993,7 +1087,14 @@ def stop_background_processes():
         "  Killed = $killed"
         "}};"
         "$report | ConvertTo-Json -Depth 5 -Compress | Set-Content -Path $out -Encoding UTF8"
-    ).format(markers, roots, queues, locks, stop_log.replace("'", "''"), int(os.getpid()))
+    ).format(
+        markers,
+        roots,
+        queues,
+        stop_log.replace("'", "''"),
+        int(os.getpid()),
+        cutoff_utc,
+    )
 
     process = None
     try:

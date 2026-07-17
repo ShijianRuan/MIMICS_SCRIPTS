@@ -19,6 +19,7 @@ from __future__ import print_function
 
 import json
 import importlib.util
+import errno
 import os
 import shutil
 import sys
@@ -28,6 +29,7 @@ import time
 import unittest
 import uuid
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -76,6 +78,7 @@ _mock_mimics.view.set_contrast = _fake_fn
 _mock_mimics.view.get_contrast = lambda: None
 _mock_mimics.file = _FakeModule()
 _mock_mimics.file.import_dicom_images = _fake_fn
+_mock_mimics.file.open_project = _fake_fn
 _mock_mimics.file.save_project = _fake_fn
 _mock_mimics.file.close_project = _fake_fn
 _mock_mimics.dialogs = _FakeModule()
@@ -183,7 +186,11 @@ class TestRuntimeCommon(unittest.TestCase):
         import runtime_common
 
         path = os.path.join(self.tmp, "test.json")
-        data = {"key": "value", "nested": {"a": 1, "b": [2, 3]}}
+        data = {
+            "key": "value",
+            "patient_path": os.path.join(self.tmp, "病例一"),
+            "nested": {"a": 1, "b": [2, 3]},
+        }
         runtime_common.write_json_atomic(path, data)
         self.assertTrue(os.path.isfile(path))
         # Ensure no .tmp residue
@@ -317,6 +324,185 @@ class TestRuntimeCommon(unittest.TestCase):
         self.assertFalse(runtime_common.process_exists(99999999))
         # Negative PID
         self.assertFalse(runtime_common.process_exists(-1))
+
+    def test_process_exists_treats_permission_denied_as_alive(self):
+        import runtime_common
+
+        old_kill = runtime_common.os.kill
+        try:
+            runtime_common.os.kill = lambda _pid, _signal: (_ for _ in ()).throw(
+                PermissionError(errno.EPERM, "operation not permitted")
+            )
+            self.assertTrue(runtime_common.process_exists(12345))
+        finally:
+            runtime_common.os.kill = old_kill
+
+    def test_resource_lock_short_write_is_completed(self):
+        import runtime_common
+
+        lock_path = os.path.join(self.tmp, "short_write.lock")
+        old_write = runtime_common.os.write
+
+        def short_write(fd, data):
+            chunk = data[:max(1, min(7, len(data)))]
+            return old_write(fd, chunk)
+
+        try:
+            runtime_common.os.write = short_write
+            token = runtime_common.acquire_resource_lock(
+                lock_path, "short_write", "test",
+            )
+        finally:
+            runtime_common.os.write = old_write
+        self.assertTrue(token)
+        payload = runtime_common.read_json(lock_path, {})
+        self.assertEqual(token, payload.get("token"))
+        self.assertTrue(runtime_common.release_resource_lock(lock_path, token))
+
+    def test_resource_lock_release_rechecks_token_before_retry(self):
+        import runtime_common
+
+        lock_path = os.path.join(self.tmp, "release_race.lock")
+        token = runtime_common.acquire_resource_lock(lock_path, "race", "old")
+        self.assertTrue(token)
+        old_remove = runtime_common.os.remove
+        calls = []
+
+        def replace_owner_on_first_remove(path):
+            if os.path.abspath(path) == os.path.abspath(lock_path) and not calls:
+                calls.append(path)
+                runtime_common.write_json_atomic(lock_path, {
+                    "pid": os.getpid(),
+                    "resource": "race",
+                    "owner": "new",
+                    "token": "new-token",
+                })
+                raise OSError(5, "access denied")
+            return old_remove(path)
+
+        try:
+            runtime_common.os.remove = replace_owner_on_first_remove
+            self.assertFalse(runtime_common.release_resource_lock(lock_path, token))
+        finally:
+            runtime_common.os.remove = old_remove
+        self.assertEqual("new-token", runtime_common.read_json(lock_path, {}).get("token"))
+        self.assertTrue(runtime_common.release_resource_lock(lock_path, "new-token"))
+
+    def test_resource_lock_implementations_share_the_same_directory(self):
+        import runtime_common
+        from resource_locks import default_resource_lock_dir
+
+        runtime_dir = os.path.abspath(runtime_common.resource_lock_dir(PROJECT_ROOT))
+        external_dir = os.path.abspath(str(default_resource_lock_dir(PROJECT_ROOT)))
+        self.assertEqual(runtime_dir, external_dir)
+
+    def test_external_resource_lock_uses_complete_writes_and_token_release(self):
+        import resource_locks
+
+        lock_path = Path(self.tmp) / "external.lock"
+        old_write = resource_locks.os.write
+
+        def short_write(fd, data):
+            return old_write(fd, data[:max(1, min(5, len(data)))])
+
+        try:
+            resource_locks.os.write = short_write
+            lock = resource_locks.FileResourceLock(
+                lock_path, "external", "test",
+            ).acquire()
+        finally:
+            resource_locks.os.write = old_write
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        self.assertEqual(lock.token, payload.get("token"))
+        self.assertFalse(resource_locks.release_lock(lock_path, "wrong-token"))
+        self.assertTrue(lock_path.exists())
+        lock.release()
+        self.assertFalse(lock_path.exists())
+
+    def test_external_resource_lock_update_survives_replace_denied(self):
+        import resource_locks
+
+        lock_path = Path(self.tmp) / "external_replace.lock"
+        lock = resource_locks.FileResourceLock(
+            lock_path, "external", "test",
+        ).acquire()
+        old_replace = resource_locks.os.replace
+        old_sleep = resource_locks.time.sleep
+        try:
+            resource_locks.os.replace = lambda _src, _dst: (
+                _ for _ in ()
+            ).throw(OSError(5, "access denied"))
+            resource_locks.time.sleep = lambda _seconds: None
+            lock.update_pid(os.getpid(), kind="updated")
+        finally:
+            resource_locks.os.replace = old_replace
+            resource_locks.time.sleep = old_sleep
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        self.assertEqual(lock.token, payload.get("token"))
+        self.assertEqual("updated", payload.get("kind"))
+
+        old_release = resource_locks.release_lock
+        try:
+            resource_locks.release_lock = lambda _path, _token: False
+            lock.release()
+            self.assertTrue(lock.acquired)
+        finally:
+            resource_locks.release_lock = old_release
+        lock.release()
+        self.assertFalse(lock.acquired)
+
+    def test_external_resource_lock_update_detects_lost_token(self):
+        import resource_locks
+
+        lock_path = Path(self.tmp) / "external_lost_token.lock"
+        lock = resource_locks.FileResourceLock(
+            lock_path, "external", "old owner",
+        ).acquire()
+        replacement = {
+            "resource": "external",
+            "owner": "new owner",
+            "pid": os.getpid(),
+            "token": "replacement-token",
+        }
+        lock_path.write_text(json.dumps(replacement), encoding="utf-8")
+        self.assertFalse(lock.update_pid(os.getpid(), kind="should_not_write"))
+        self.assertFalse(lock.acquired)
+        self.assertEqual(
+            "replacement-token",
+            json.loads(lock_path.read_text(encoding="utf-8"))["token"],
+        )
+
+    def test_terminate_process_async_rejects_pid_mismatch(self):
+        import runtime_common
+
+        class Process(object):
+            pid = 1234
+
+        self.assertFalse(
+            runtime_common.terminate_process_async(process=Process(), pid=5678)
+        )
+
+    def test_background_env_preserves_no_bytecode_policy(self):
+        import runtime_common
+
+        old_value = os.environ.get("PYTHONDONTWRITEBYTECODE")
+        try:
+            os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+            env = runtime_common.background_env()
+        finally:
+            if old_value is None:
+                os.environ.pop("PYTHONDONTWRITEBYTECODE", None)
+            else:
+                os.environ["PYTHONDONTWRITEBYTECODE"] = old_value
+        self.assertEqual("1", env.get("PYTHONDONTWRITEBYTECODE"))
+
+    def test_read_text_tail_rejects_nonpositive_limit(self):
+        import runtime_common
+
+        path = os.path.join(self.tmp, "tail.log")
+        Path(path).write_text("abc", encoding="utf-8")
+        self.assertEqual("", runtime_common.read_text_tail(path, 0))
+        self.assertEqual("", runtime_common.read_text_tail(path, -1))
 
     def test_local_operation_lease_prevents_nested_timer_reentry(self):
         import runtime_common
@@ -651,6 +837,21 @@ class TestMimicsBridgeBufferMapping(unittest.TestCase):
         mask = np.random.randint(0, 2, shape, dtype=np.uint8)
         result = resample_mask_to_image_grid(mask, zero_affine, shape, image_affine)
         np.testing.assert_array_equal(mask, result)
+
+    def test_resample_mask_to_image_grid_rejects_singular_affine(self):
+        from mimics_bridge import resample_mask_to_image_grid
+
+        mask = np.zeros((2, 2, 2), dtype=np.uint8)
+        mask[0, 0, 0] = 1
+        singular = np.eye(4, dtype=float)
+        singular[2, 2] = 0.0
+        with self.assertRaisesRegex(ValueError, "singular or invalid"):
+            resample_mask_to_image_grid(
+                mask,
+                singular,
+                (3, 3, 3),
+                np.eye(4, dtype=float),
+            )
 
     def test_affine_is_usable(self):
         from mimics_bridge import _affine_is_usable
@@ -1624,6 +1825,21 @@ class TestCreateMcsBatch(unittest.TestCase):
         self.assertEqual(1, _shape_product([1, 1, 1]))
         self.assertEqual(0, _shape_product([0, 5, 5]))
 
+    def test_required_metadata_write_failure_is_not_silenced(self):
+        from create_mcs_batch import metadata_set
+
+        class Metadata(object):
+            def find(self, _name):
+                return None
+            def create(self, **_kwargs):
+                raise ValueError("metadata denied")
+
+        class Image(object):
+            metadata = Metadata()
+
+        with self.assertRaisesRegex(RuntimeError, "required image metadata"):
+            metadata_set(Image(), "mimics_script.test", "value")
+
     def test_acquire_lock(self):
         from create_mcs_batch import acquire_lock
 
@@ -1912,12 +2128,16 @@ class TestStopBackgroundServices(unittest.TestCase):
         self.assertEqual("error", status)
         self.assertIn("access denied", error)
 
-    def test_stop_all_detaches_mimics_monitors_before_process_cleanup(self):
+    def test_stop_all_signals_tasks_before_detaching_mimics_monitors(self):
         import inspect
         import mimics_stop_background
 
         source = inspect.getsource(mimics_stop_background.stop_background_processes)
-        self.assertLess(source.index("_stop_inprocess_monitors()"), source.index("_request_queue_stop()"))
+        self.assertLess(source.index("_request_queue_stop()"), source.index("_stop_inprocess_monitors()"))
+        self.assertLess(
+            source.index("_request_lock_owned_stop_markers"),
+            source.index("_stop_inprocess_monitors()"),
+        )
         monitor_source = inspect.getsource(mimics_stop_background._stop_inprocess_monitors)
         for module_name in (
             "mimics_import", "mimics_export", "mask_import",
@@ -2653,6 +2873,213 @@ class TestNewFeatures(unittest.TestCase):
         finally:
             mimics_export._EXPORT_LAUNCH_THREADS[:] = previous
 
+    def test_background_export_exit_is_detected_even_with_running_status(self):
+        import mimics_export
+
+        status_path = os.path.join(self.tmp, "status.json")
+        Path(status_path).write_text(
+            json.dumps({
+                "status": "exporting",
+                "phase": "exporting_voxels",
+                "updated_at_epoch": time.time(),
+            }),
+            encoding="utf-8",
+        )
+
+        class Process(object):
+            returncode = 0
+            def poll(self):
+                return 0
+
+        stopped = []
+        old_stop = mimics_export._stop_export_monitor
+        try:
+            mimics_export._stop_export_monitor = lambda key: stopped.append(key)
+            monitor = {
+                "monitor_key": "audit_running_exit",
+                "status_path": status_path,
+                "launch_finished": True,
+                "process": Process(),
+                "started_at_epoch": time.time() - 1,
+                "deadline": time.time() + 60,
+                "done": False,
+                "busy": False,
+                "job_runtime": self.tmp,
+            }
+            mimics_export._background_export_status_tick(monitor)
+        finally:
+            mimics_export._stop_export_monitor = old_stop
+        self.assertTrue(monitor["done"])
+        self.assertEqual(["audit_running_exit"], stopped)
+        terminal = json.loads(Path(status_path).read_text(encoding="utf-8"))
+        self.assertEqual("failed", terminal["status"])
+        self.assertEqual("process_exited", terminal["phase"])
+
+    def test_background_export_watcher_writes_terminal_before_lock_release(self):
+        import mimics_export
+
+        status_path = os.path.join(self.tmp, "watcher_status.json")
+        Path(status_path).write_text(
+            json.dumps({"status": "exporting"}), encoding="utf-8",
+        )
+
+        class Process(object):
+            pid = 8080
+            returncode = 1
+            _mimics_status_path = status_path
+            _mimics_stop_path = ""
+            _mimics_handshake_path = ""
+            def wait(self):
+                return 1
+            def poll(self):
+                return 1
+
+        observations = []
+        old_release = mimics_export.runtime_common.release_resource_lock
+        try:
+            mimics_export.runtime_common.release_resource_lock = (
+                lambda _path, _token: observations.append(
+                    json.loads(Path(status_path).read_text(encoding="utf-8"))["status"]
+                ) or True
+            )
+            mimics_export._watch_background_export_process(
+                Process(), os.path.join(self.tmp, "background.lock"), "token",
+            )
+        finally:
+            mimics_export.runtime_common.release_resource_lock = old_release
+        self.assertEqual(["failed"], observations)
+
+    def test_explicit_mcs_arguments_are_resolved_and_validated(self):
+        import mimics_export
+
+        first = Path(self.tmp) / "case_a.mcs"
+        second = Path(self.tmp) / "case_b.mcs"
+        first.write_bytes(b"a")
+        second.write_bytes(b"b")
+        list_path = Path(self.tmp) / "projects.txt"
+        list_path.write_text(str(second) + "\n", encoding="utf-8")
+        result = mimics_export._explicit_mcs_path_map(
+            mcs_path=str(first),
+            mcs_list_file=str(list_path),
+        )
+        self.assertEqual(os.path.abspath(str(first)), result["case_a"])
+        self.assertEqual(os.path.abspath(str(second)), result["case_b"])
+        with self.assertRaises(RuntimeError):
+            mimics_export._explicit_mcs_path_map(
+                mcs_path=str(Path(self.tmp) / "missing.mcs"),
+            )
+
+    def test_batch_prepare_skips_invalid_cases_without_recursion(self):
+        import mimics_import
+
+        queue = [
+            {"case_id": "empty_{0}".format(index), "case_dir": self.tmp}
+            for index in range(100)
+        ]
+        monitor = {
+            "batch_queue": queue,
+            "output_dir": self.tmp,
+            "failed": 0,
+        }
+        old_discover = mimics_import._discover_single_case
+        old_log = mimics_import._append_import_log
+        old_record = mimics_import._record_failed_case
+        try:
+            mimics_import._discover_single_case = lambda _path: None
+            mimics_import._append_import_log = lambda *_args, **_kwargs: None
+            mimics_import._record_failed_case = lambda *_args, **_kwargs: None
+            mimics_import._start_next_batch_prepare(monitor)
+        finally:
+            mimics_import._discover_single_case = old_discover
+            mimics_import._append_import_log = old_log
+            mimics_import._record_failed_case = old_record
+        self.assertEqual(8, monitor["failed"])
+        self.assertEqual(92, len(monitor["batch_queue"]))
+        self.assertTrue(monitor["selecting_next"])
+
+    def test_status_viewer_cancel_preserves_latest_progress(self):
+        import tools.fewshot_status_viewer as status_viewer
+
+        status_path = Path(self.tmp) / "train.json"
+        cancel_path = Path(self.tmp) / "cancel.request"
+        status_viewer.write_json_atomic(status_path, {
+            "job_id": "train_a",
+            "status": "training",
+            "training_progress": {"epoch": 7, "metrics": {"loss": 0.25}},
+        })
+        status_viewer.request_job_cancel_async(
+            {"cancel_path": str(cancel_path)},
+            str(status_path),
+            grace_seconds=0,
+        )
+        deadline = time.time() + 2.0
+        payload = {}
+        while time.time() < deadline:
+            payload = status_viewer.read_json(status_path, {}) or {}
+            if payload.get("status") == "cancelled":
+                break
+            time.sleep(0.02)
+        self.assertEqual("cancelled", payload.get("status"))
+        self.assertEqual(7, payload["training_progress"]["epoch"])
+        self.assertTrue(cancel_path.is_file())
+
+    def test_fewshot_export_reaps_process_when_lock_transfer_fails(self):
+        import tools.fewshot_pipeline as pipeline
+
+        class Lock(object):
+            acquired = False
+            released = False
+            def update_pid(self, _pid, **_extra):
+                self.acquired = False
+            def release(self):
+                self.released = True
+
+        class Process(object):
+            pid = 24680
+            returncode = None
+            terminated = False
+            killed = False
+            def poll(self):
+                return None if not self.terminated and not self.killed else -1
+            def terminate(self):
+                self.terminated = True
+            def kill(self):
+                self.killed = True
+            def wait(self, timeout=None):
+                return -1
+
+        lock = Lock()
+        process = Process()
+        ts_root = Path(self.tmp) / "dataset"
+        workspace = Path(self.tmp) / "workspace"
+        ts_root.mkdir()
+        old_find = pipeline.find_mimics_exe
+        old_acquire = pipeline.acquire_background_mimics_lock
+        old_popen = pipeline.subprocess.Popen
+        old_resolve = pipeline.resolve_mimics_output_dir
+        try:
+            pipeline.find_mimics_exe = lambda _value=None: "MimicsResearch.exe"
+            pipeline.acquire_background_mimics_lock = lambda *_args, **_kwargs: lock
+            pipeline.subprocess.Popen = lambda *_args, **_kwargs: process
+            pipeline.resolve_mimics_output_dir = lambda _root: Path(self.tmp) / "mcs"
+            with self.assertRaises(RuntimeError):
+                pipeline.launch_mimics_export(
+                    ts_root,
+                    {"case_a"},
+                    None,
+                    workspace,
+                    5,
+                    status_path=workspace / "jobs" / "train.json",
+                    cancel_path=workspace / "jobs" / "train.cancel",
+                )
+        finally:
+            pipeline.find_mimics_exe = old_find
+            pipeline.acquire_background_mimics_lock = old_acquire
+            pipeline.subprocess.Popen = old_popen
+            pipeline.resolve_mimics_output_dir = old_resolve
+        self.assertTrue(process.terminated or process.killed)
+        self.assertTrue(lock.released)
+
     def test_current_project_export_does_not_launch_background_mimics(self):
         import inspect
         import mimics_export
@@ -2785,6 +3212,102 @@ class TestNewFeatures(unittest.TestCase):
         status_refresh = inspect.getsource(status_viewer.QtStatusViewerApp.refresh)
         self.assertIn("threading.Thread", status_refresh)
         self.assertNotIn("self._load_jobs()\n        self.job_combo", status_refresh)
+
+    def test_external_gui_theme_and_real_task_progress_are_shared(self):
+        import inspect
+        import mimics_export
+        import mimics_import
+        import tools.fewshot_model_chooser as model_chooser
+        import tools.fewshot_status_viewer as status_viewer
+        import tools.fewshot_training_setup_ui as training_ui
+        import tools.io_path_setup_ui as path_ui
+
+        theme_source = Path(PROJECT_ROOT, "tools", "ui_theme.py").read_text(encoding="utf-8")
+        self.assertIn("def configure_application", theme_source)
+        self.assertIn("QProgressBar::chunk", theme_source)
+        self.assertIn("shared_stylesheet()", inspect.getsource(training_ui.QtTrainingSetupApp._stylesheet))
+        self.assertIn("shared_stylesheet()", inspect.getsource(status_viewer.QtStatusViewerApp._stylesheet))
+        self.assertIn("shared_stylesheet()", inspect.getsource(model_chooser.ModelChooser._stylesheet))
+
+        path_source = inspect.getsource(path_ui.run_ui)
+        self.assertIn('title.setText("Task in progress")', path_source)
+        self.assertIn("secondary_status_path", path_source)
+        self.assertIn("stop_path", path_source)
+        self.assertIn("show_progress()", path_source)
+
+        output_dir = os.path.join(self.tmp, "mcs_output")
+        os.makedirs(output_dir)
+        run_root = os.path.join(self.tmp, "run")
+        os.makedirs(run_root)
+        previous = dict(mimics_import._LAST_TASK_DESCRIPTOR)
+        try:
+            status_path, stop_path = mimics_import._set_last_import_task(
+                run_root, output_dir, "Import dataset",
+            )
+            descriptor = mimics_import._LAST_TASK_DESCRIPTOR
+            self.assertEqual(status_path, descriptor["status_path"])
+            self.assertEqual(stop_path, descriptor["stop_path"])
+            self.assertIn("_mcs_batch_status.json", descriptor["secondary_status_path"])
+            self.assertEqual(os.path.abspath(output_dir), descriptor["output_path"])
+        finally:
+            mimics_import._LAST_TASK_DESCRIPTOR = previous
+
+        export_source = inspect.getsource(mimics_export._start_current_project_export)
+        self.assertIn('"status_path": task_status_path', export_source)
+        self.assertIn('"stop_path": task_stop_path', export_source)
+
+    def test_status_viewer_retry_uses_saved_training_context(self):
+        import inspect
+        import tools.fewshot_status_viewer as status_viewer
+        import tools.fewshot_training_setup_ui as training_ui
+
+        context = {
+            "config": {},
+            "organ": "liver",
+            "ts_root": self.tmp,
+            "workspace": os.path.join(self.tmp, "fewshot_models"),
+            "python_exe": sys.executable,
+            "pipeline_script": os.path.join(PROJECT_ROOT, "tools", "fewshot_pipeline.py"),
+            "dinov3_root": os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg"),
+        }
+        launch = training_ui.prepare_training_launch(
+            context,
+            training_ui.default_training_options({}),
+            run_id="train_retry_context",
+        )
+        self.assertIn("retry_context", launch["job_payload"])
+        self.assertEqual("liver", launch["job_payload"]["retry_context"]["organ"])
+        self.assertIn("launch_training", inspect.getsource(status_viewer.QtStatusViewerApp.retry_same_settings))
+        edit_source = inspect.getsource(status_viewer.QtStatusViewerApp.edit_and_retry)
+        self.assertIn("initial_options", edit_source)
+        self.assertIn("launch_visible_gui_process", edit_source)
+        self.assertNotIn("hidden_process_kwargs", edit_source)
+
+    def test_status_viewer_visible_gui_launcher_does_not_hide_windows(self):
+        import tools.fewshot_status_viewer as status_viewer
+
+        calls = []
+
+        class Process(object):
+            pid = 13579
+
+        old_popen = status_viewer.subprocess.Popen
+        try:
+            status_viewer.subprocess.Popen = lambda command, **kwargs: (
+                calls.append((command, kwargs)) or Process()
+            )
+            process = status_viewer.launch_visible_gui_process(
+                [sys.executable, os.path.join(PROJECT_ROOT, "tools", "fewshot_training_setup_ui.py")],
+                cwd=PROJECT_ROOT,
+            )
+        finally:
+            status_viewer.subprocess.Popen = old_popen
+
+        self.assertEqual(13579, process.pid)
+        self.assertEqual(1, len(calls))
+        _command, kwargs = calls[0]
+        self.assertNotIn("creationflags", kwargs)
+        self.assertNotIn("startupinfo", kwargs)
 
     def test_ai_prediction_output_modes_are_explicit(self):
         import inspect
@@ -2969,6 +3492,7 @@ class TestNewFeatures(unittest.TestCase):
             "pipeline_script": os.path.join(PROJECT_ROOT, "tools", "fewshot_pipeline.py"),
             "dinov3_root": os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg"),
             "project_root": PROJECT_ROOT,
+            "mimics_exe": r"C:\Program Files\Materialise\MimicsResearch.exe",
             "config": {"base_config": "config/train.yaml", "default_epochs": 3},
         }
         options = {
@@ -3002,6 +3526,7 @@ class TestNewFeatures(unittest.TestCase):
             "sub_volume_size": "24,192,192",
             "keep_materialized_dataset": False,
             "mcs_output_dir": os.path.join(self.tmp, "saved_projects"),
+            "mask_names": "liver,liver_seg",
         }
         launch = ui.prepare_training_launch(context, options, run_id="train_test")
         cmd = launch["cmd"]
@@ -3012,6 +3537,7 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn("--sub-volume", cmd)
         self.assertIn("--export-labels", cmd)
         self.assertEqual(cmd[cmd.index("--mcs-output-dir") + 1], options["mcs_output_dir"])
+        self.assertEqual("liver,liver_seg", cmd[cmd.index("--mask-names") + 1])
         self.assertIn("--strategy-options-json", cmd)
         self.assertEqual("constant_warmup", cmd[cmd.index("--lr-scheduler") + 1])
         self.assertEqual("2", cmd[cmd.index("--warmup-epochs") + 1])
@@ -3032,6 +3558,7 @@ class TestNewFeatures(unittest.TestCase):
             "python_exe": sys.executable,
             "pipeline_script": os.path.join(PROJECT_ROOT, "tools", "fewshot_pipeline.py"),
             "dinov3_root": os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg"),
+            "mimics_exe": "",
             "config": {},
         }
         options = ui.default_training_options({})
@@ -3039,6 +3566,34 @@ class TestNewFeatures(unittest.TestCase):
         launch = ui.prepare_training_launch(context, options, run_id="train_no_export")
         self.assertNotIn("--export-labels", launch["cmd"])
         self.assertFalse(launch["options"]["export_labels_before_training"])
+
+    def test_fewshot_mask_aliases_are_explicit_and_deduplicated(self):
+        ui = __import__("tools.fewshot_training_setup_ui", fromlist=["dummy"])
+        config = {
+            "organ_mask_aliases": {
+                "Liver": ["liver_seg", "Segment Liver", "liver-seg"],
+            },
+        }
+        names = ui.configured_mask_names(config, "liver")
+        self.assertEqual(["liver", "liver_seg", "Segment Liver"], names)
+        options = ui.training_options_for_organ(config, "liver")
+        self.assertEqual("liver,liver_seg,Segment Liver", options["mask_names"])
+
+    def test_fewshot_label_refresh_requires_background_mimics(self):
+        ui = __import__("tools.fewshot_training_setup_ui", fromlist=["dummy"])
+        context = {
+            "organ": "liver",
+            "ts_root": os.path.join(self.tmp, "dataset"),
+            "workspace": os.path.join(self.tmp, "fewshot_models"),
+            "python_exe": sys.executable,
+            "pipeline_script": os.path.join(PROJECT_ROOT, "tools", "fewshot_pipeline.py"),
+            "dinov3_root": os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg"),
+            "mimics_exe": "",
+            "config": {},
+        }
+        options = ui.training_options_for_organ({}, "liver")
+        with self.assertRaisesRegex(RuntimeError, "MIMICS_BACKGROUND_EXE"):
+            ui.prepare_training_launch(context, options, run_id="train_no_mimics")
 
     def test_fewshot_external_setup_window_keeps_action_footer_visible(self):
         """Setup UI window sizing should reserve space for Start Training controls."""
@@ -3146,7 +3701,7 @@ class TestNewFeatures(unittest.TestCase):
 
         class Lock(object):
             def update_pid(self, *_args, **_kwargs):
-                pass
+                return True
             def release(self):
                 pass
 
@@ -3785,6 +4340,112 @@ class TestNewFeatures(unittest.TestCase):
         self.assertFalse((ts_root / "mcs_output" / "_run_export_batch.py").exists())
         self.assertFalse((ts_root / "mcs_output" / "_fewshot_export_mimics.log").exists())
 
+    def test_mimics_export_mask_preflight_does_not_read_voxels(self):
+        import mimics_export
+
+        root = Path(self.tmp) / "preflight"
+        root.mkdir()
+        mcs_path = root / "case001.mcs"
+        mcs_path.write_bytes(b"placeholder")
+        status_path = root / "status.json"
+        stop_path = root / "stop.request"
+        voxel_reads = []
+
+        class Mask(object):
+            name = "Liver Seg"
+            def get_voxel_buffer(self):
+                voxel_reads.append(True)
+                raise AssertionError("preflight must not read voxel buffers")
+
+        old_masks = mimics_export.mimics.data.masks
+        old_open = mimics_export.mimics.file.open_project
+        old_close = mimics_export.mimics.file.close_project
+        try:
+            mimics_export.mimics.data.masks = [Mask()]
+            mimics_export.mimics.file.open_project = lambda _path: None
+            mimics_export.mimics.file.close_project = lambda: None
+            failures = mimics_export._preflight_batch_mask_names(
+                [{"case_id": "case001", "case_dir": str(root)}],
+                str(root),
+                {
+                    "mask_names": ["liver", "liver_seg"],
+                    "target_mask_name": "liver",
+                },
+                str(root),
+                str(status_path),
+                str(stop_path),
+            )
+        finally:
+            mimics_export.mimics.data.masks = old_masks
+            mimics_export.mimics.file.open_project = old_open
+            mimics_export.mimics.file.close_project = old_close
+        self.assertEqual([], failures)
+        self.assertEqual([], voxel_reads)
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+        self.assertEqual("mask_name_preflight", status["phase"])
+        self.assertEqual(1, status["total"])
+
+    def test_mimics_export_training_target_renames_alias_output(self):
+        import mimics_export
+
+        root = Path(self.tmp) / "target_name"
+        root.mkdir()
+
+        class Metadata(object):
+            def find(self, _name):
+                return None
+
+        class Image(object):
+            logical_dimensions = [1, 1, 1]
+            metadata = Metadata()
+            def get_voxel_center(self, *_args):
+                return [0.0, 0.0, 0.0]
+
+        class Mask(object):
+            name = "Liver Seg"
+            image = Image()
+            def get_voxel_buffer(self):
+                return b"\x01"
+
+        old_masks = mimics_export.mimics.data.masks
+        try:
+            mimics_export.mimics.data.masks = [Mask()]
+            manifest = mimics_export.export_masks_to_buffers(
+                str(root),
+                mask_names=["liver_seg"],
+                target_mask_name="liver",
+            )
+        finally:
+            mimics_export.mimics.data.masks = old_masks
+        self.assertEqual("liver", manifest["masks"][0]["safe_name"])
+        self.assertTrue((root / "liver.u8").is_file())
+
+    def test_mimics_export_empty_case_selection_fails_during_discovery(self):
+        import mimics_export
+
+        root = Path(self.tmp) / "empty_export"
+        dataset = root / "dataset"
+        output = root / "mcs"
+        runtime = root / "runtime"
+        dataset.mkdir(parents=True)
+        output.mkdir()
+        runtime.mkdir()
+        status_path = runtime / "status.json"
+        config_path = runtime / "config.json"
+        config_path.write_text(json.dumps({
+            "ts_root": str(dataset),
+            "output_dir": str(output),
+            "export_root": str(runtime),
+            "job_runtime": str(runtime),
+            "status_path": str(status_path),
+            "mask_names": ["liver"],
+        }), encoding="utf-8")
+        self.assertEqual(1, mimics_export.run_background_batch_export(str(config_path)))
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+        self.assertEqual("failed", status["status"])
+        self.assertEqual("discovering_cases", status["phase"])
+        self.assertIn("No dataset cases", status["error"])
+
     def test_fewshot_pipeline_cancel_marker_failure_still_cancels(self):
         """Cancel should continue to process termination even if cancel marker write is denied."""
         pipeline = __import__("tools.fewshot_pipeline", fromlist=["dummy"])
@@ -3810,11 +4471,15 @@ class TestNewFeatures(unittest.TestCase):
         old_marker = pipeline.write_cancel_marker
         old_exists = pipeline.process_exists
         old_kill = pipeline.terminate_process_tree
+        alive = {"value": True}
         try:
             pipeline.workspace_for = lambda _ts_root, _workspace=None: workspace
             pipeline.write_cancel_marker = lambda _path: "[WinError 5] Access is denied"
-            pipeline.process_exists = lambda _pid: True
-            pipeline.terminate_process_tree = lambda _pid: True
+            pipeline.process_exists = lambda _pid: alive["value"]
+            def terminate(_pid):
+                alive["value"] = False
+                return True
+            pipeline.terminate_process_tree = terminate
             result = pipeline.cmd_cancel(args)
         finally:
             pipeline.workspace_for = old_workspace_for
@@ -3827,6 +4492,43 @@ class TestNewFeatures(unittest.TestCase):
         self.assertEqual("cancelled", updated["status"])
         self.assertEqual("[WinError 5] Access is denied", updated["cancel_marker_error"])
         self.assertEqual([12345], updated["cancelled_pids"])
+
+    def test_import_task_does_not_clear_stop_marker_owned_by_live_queue(self):
+        import mimics_import
+
+        output_dir = os.path.join(self.tmp, "mcs_output")
+        run_root = os.path.join(self.tmp, "run")
+        os.makedirs(output_dir)
+        os.makedirs(run_root)
+        stop_path = mimics_import._queue_stop_path(output_dir)
+        os.makedirs(os.path.dirname(stop_path), exist_ok=True)
+        Path(stop_path).write_text('{"status":"stop_requested"}', encoding="utf-8")
+        old_active = mimics_import.runtime_common.active_resource_lock
+        try:
+            mimics_import.runtime_common.active_resource_lock = lambda *_args: {
+                "kind": "create_mcs",
+                "output_dir": output_dir,
+                "pid": os.getpid(),
+                "token": "old-import",
+            }
+            with self.assertRaises(RuntimeError):
+                mimics_import._set_last_import_task(
+                    run_root, output_dir, "Import dataset",
+                )
+            self.assertTrue(os.path.isfile(stop_path))
+            mimics_import.runtime_common.active_resource_lock = lambda *_args: None
+            status_path, task_stop_path = mimics_import._set_last_import_task(
+                run_root, output_dir, "Import dataset",
+            )
+        finally:
+            mimics_import.runtime_common.active_resource_lock = old_active
+        self.assertFalse(os.path.isfile(stop_path))
+        self.assertEqual(os.path.join(run_root, "status.json"), status_path)
+        self.assertEqual(os.path.join(run_root, "stop.json"), task_stop_path)
+        self.assertEqual(
+            [task_stop_path, stop_path],
+            mimics_import._LAST_TASK_DESCRIPTOR["stop_paths"],
+        )
 
     def test_fewshot_external_launch_preserves_worker_status(self):
         """External setup should not overwrite a worker status update with launching."""
@@ -4963,6 +5665,654 @@ class TestLifecycleAndRetention(unittest.TestCase):
     def tearDown(self):
         _cleanup(self.tmp)
 
+    def test_nninteractive_state_is_removed_before_gpu_lock_release(self):
+        import nninteractive_bridge as bridge
+
+        state_path = Path(self.tmp) / "server.json"
+        bridge._write_server_state(state_path, {
+            "schema_version": "nninteractive_owned_server.v2",
+            "ownership_token": "owned-token",
+            "gpu_lock_path": str(Path(self.tmp) / "gpu.lock"),
+            "gpu_lock_token": "gpu-token",
+        })
+        observations = []
+        original = bridge._release_gpu_lock_from_state
+        try:
+            bridge._release_gpu_lock_from_state = lambda _state: (
+                observations.append(state_path.exists()) or True
+            )
+            self.assertTrue(bridge._remove_server_state(state_path, "owned-token"))
+        finally:
+            bridge._release_gpu_lock_from_state = original
+        self.assertEqual([False], observations)
+        self.assertFalse(state_path.exists())
+
+    def test_nninteractive_unlink_failure_releases_owned_lock_after_server_exit(self):
+        import nninteractive_bridge as bridge
+
+        state_path = Path(self.tmp) / "server.json"
+        bridge._write_server_state(state_path, {
+            "schema_version": "nninteractive_owned_server.v2",
+            "pid": 1234,
+            "ownership_token": "owned-token",
+            "gpu_lock_path": str(Path(self.tmp) / "gpu.lock"),
+            "gpu_lock_token": "gpu-token",
+        })
+        releases = []
+        with mock.patch.object(Path, "unlink", side_effect=PermissionError("locked")), \
+             mock.patch.object(Path, "replace", side_effect=PermissionError("locked")), \
+             mock.patch.object(bridge, "_process_matches_server", return_value=False), \
+             mock.patch.object(bridge, "_release_gpu_lock_from_state",
+                               side_effect=lambda state: releases.append(state) or True), \
+             mock.patch.object(bridge.time, "sleep", return_value=None):
+            self.assertTrue(bridge._remove_server_state(state_path, "owned-token"))
+        self.assertTrue(state_path.exists())
+        self.assertEqual(1, len(releases))
+
+    def test_nninteractive_unlink_failure_retains_lock_for_live_server(self):
+        import nninteractive_bridge as bridge
+
+        state_path = Path(self.tmp) / "server.json"
+        bridge._write_server_state(state_path, {
+            "schema_version": "nninteractive_owned_server.v2",
+            "pid": 1234,
+            "ownership_token": "owned-token",
+            "gpu_lock_path": str(Path(self.tmp) / "gpu.lock"),
+            "gpu_lock_token": "gpu-token",
+        })
+        releases = []
+        with mock.patch.object(Path, "unlink", side_effect=PermissionError("locked")), \
+             mock.patch.object(Path, "replace", side_effect=PermissionError("locked")), \
+             mock.patch.object(bridge, "_process_matches_server", return_value=True), \
+             mock.patch.object(bridge, "_release_gpu_lock_from_state",
+                               side_effect=lambda state: releases.append(state) or True), \
+             mock.patch.object(bridge.time, "sleep", return_value=None):
+            self.assertFalse(bridge._remove_server_state(state_path, "owned-token"))
+        self.assertTrue(state_path.exists())
+        self.assertEqual([], releases)
+
+    def test_nninteractive_start_failure_releases_new_lock_after_process_exit(self):
+        import nninteractive_bridge as bridge
+
+        class FakeLock(object):
+            instances = []
+
+            def __init__(self, *_args, **_kwargs):
+                self.token = "new-gpu-token"
+                self.release_count = 0
+                self.__class__.instances.append(self)
+
+            def acquire(self, **_kwargs):
+                return self
+
+            def update_pid(self, _pid, **_kwargs):
+                return True
+
+            def release(self):
+                self.release_count += 1
+
+        class FakeProcess(object):
+            pid = 2468
+
+        with mock.patch.object(bridge, "_gpu_lock_enabled", return_value=True), \
+             mock.patch.object(bridge, "FileResourceLock", FakeLock), \
+             mock.patch.object(bridge.subprocess, "Popen", return_value=FakeProcess()), \
+             mock.patch.object(bridge, "_write_server_state",
+                               side_effect=PermissionError("old state is locked")), \
+             mock.patch.object(bridge, "_stop_spawned_server", return_value=True), \
+             mock.patch.object(bridge, "_remove_server_state", return_value=False):
+            with self.assertRaises(PermissionError):
+                bridge._start_server(
+                    model_dir=self.tmp,
+                    device="cuda:0",
+                    service_idle_timeout_seconds=60,
+                    server_url="http://127.0.0.1:1527",
+                    fold="auto",
+                    runtime_work_dir=self.tmp,
+                )
+        self.assertEqual(1, FakeLock.instances[-1].release_count)
+
+    def test_nninteractive_start_failure_retains_lock_if_process_survives(self):
+        import nninteractive_bridge as bridge
+
+        class FakeLock(object):
+            instances = []
+
+            def __init__(self, *_args, **_kwargs):
+                self.token = "new-gpu-token"
+                self.release_count = 0
+                self.__class__.instances.append(self)
+
+            def acquire(self, **_kwargs):
+                return self
+
+            def update_pid(self, _pid, **_kwargs):
+                return True
+
+            def release(self):
+                self.release_count += 1
+
+        class FakeProcess(object):
+            pid = 2468
+
+        with mock.patch.object(bridge, "_gpu_lock_enabled", return_value=True), \
+             mock.patch.object(bridge, "FileResourceLock", FakeLock), \
+             mock.patch.object(bridge.subprocess, "Popen", return_value=FakeProcess()), \
+             mock.patch.object(bridge, "_write_server_state",
+                               side_effect=PermissionError("old state is locked")), \
+             mock.patch.object(bridge, "_stop_spawned_server", return_value=False), \
+             mock.patch.object(bridge, "_remove_server_state", return_value=False):
+            with self.assertRaises(PermissionError):
+                bridge._start_server(
+                    model_dir=self.tmp,
+                    device="cuda:0",
+                    service_idle_timeout_seconds=60,
+                    server_url="http://127.0.0.1:1527",
+                    fold="auto",
+                    runtime_work_dir=self.tmp,
+                )
+        self.assertEqual(0, FakeLock.instances[-1].release_count)
+
+    def test_nninteractive_old_cleanup_cannot_remove_replacement_state(self):
+        import nninteractive_bridge as bridge
+
+        state_path = Path(self.tmp) / "server.json"
+        bridge._write_server_state(state_path, {
+            "schema_version": "nninteractive_owned_server.v2",
+            "ownership_token": "replacement-token",
+        })
+        releases = []
+        original = bridge._release_gpu_lock_from_state
+        try:
+            bridge._release_gpu_lock_from_state = lambda state: releases.append(state)
+            bridge._remove_server_state(state_path, "old-token")
+        finally:
+            bridge._release_gpu_lock_from_state = original
+        self.assertTrue(state_path.exists())
+        self.assertEqual([], releases)
+
+    def test_process_liveness_wrappers_use_shared_implementation(self):
+        import nninteractive_bridge as bridge
+        import fewshot_mimics
+        import tools.fewshot_pipeline as pipeline
+        import tools.fewshot_status_viewer as status_viewer
+
+        with mock.patch.object(bridge, "resource_process_exists", return_value=True) as check:
+            self.assertTrue(bridge._process_exists(259))
+            check.assert_called_once_with(259)
+        with mock.patch.object(pipeline, "resource_process_exists", return_value=False) as check:
+            self.assertFalse(pipeline.process_exists(259))
+            check.assert_called_once_with(259)
+        with mock.patch.object(status_viewer, "resource_process_exists", return_value=False) as check:
+            self.assertFalse(status_viewer.process_exists(259))
+            check.assert_called_once_with(259)
+        with mock.patch.object(
+            fewshot_mimics.runtime_common,
+            "process_exists",
+            return_value=True,
+        ) as check:
+            self.assertTrue(fewshot_mimics._process_exists(259))
+            check.assert_called_once_with(259)
+
+    def test_windows_cleanup_declares_pointer_sized_process_handles(self):
+        import inspect
+        import nninteractive_mimics
+
+        source = inspect.getsource(nninteractive_mimics._cleanup_stale_processes)
+        self.assertIn('ctypes.WinDLL("kernel32", use_last_error=True)', source)
+        self.assertIn("kernel32.OpenProcess.restype = ctypes.c_void_p", source)
+        self.assertIn("kernel32.TerminateProcess.argtypes", source)
+        self.assertIn("kernel32.CloseHandle.argtypes", source)
+        self.assertNotIn("ctypes.windll.kernel32", source)
+
+    def test_fewshot_stopping_monitor_warns_once_while_process_is_alive(self):
+        import fewshot_mimics
+
+        status = {
+            "job_id": "train_stopping",
+            "kind": "train",
+            "organ": "liver",
+            "status": "stopping",
+            "pid": 2468,
+            "termination_pending": True,
+            "error": "training cleanup failed",
+        }
+        monitor = {
+            "monitor_key": "train_train_stopping",
+            "kind": "train",
+            "deadline": time.time() + 60,
+            "status_path": os.path.join(self.tmp, "train_stopping.json"),
+            "last_line": "",
+        }
+        messages = []
+        writes = []
+        stops = []
+        logs = []
+        with mock.patch.object(
+            fewshot_mimics, "_read_json", return_value=dict(status)
+        ), mock.patch.object(
+            fewshot_mimics, "_process_exists", return_value=True
+        ), mock.patch.object(
+            fewshot_mimics, "_write_json_atomic",
+            side_effect=lambda path, payload: writes.append((path, dict(payload)))
+        ), mock.patch.object(
+            fewshot_mimics, "_stop_monitor", side_effect=lambda key: stops.append(key)
+        ), mock.patch.object(
+            fewshot_mimics, "_mimics_log",
+            side_effect=lambda level, message: logs.append((level, message))
+        ), mock.patch.object(
+            fewshot_mimics.mimics.dialogs,
+            "message_box",
+            side_effect=lambda *args, **kwargs: messages.append((args, kwargs)),
+        ):
+            fewshot_mimics._monitor_tick_locked(monitor)
+            fewshot_mimics._monitor_tick_locked(monitor)
+        self.assertEqual(1, len(messages))
+        self.assertEqual([], writes)
+        self.assertEqual([], stops)
+        self.assertTrue(monitor.get("stopping_notice_shown"))
+        self.assertTrue(any("live process IDs" in item[1] for item in logs))
+
+    def test_fewshot_stopping_monitor_finalizes_only_after_process_exit(self):
+        import fewshot_mimics
+
+        status_path = os.path.join(self.tmp, "train_stopped.json")
+        status = {
+            "job_id": "train_stopped",
+            "kind": "train",
+            "organ": "liver",
+            "status": "stopping",
+            "pid": 2468,
+            "termination_pending": True,
+            "error": "training cleanup failed",
+        }
+        monitor = {
+            "monitor_key": "train_train_stopped",
+            "kind": "train",
+            "deadline": time.time() + 60,
+            "status_path": status_path,
+            "last_line": "",
+        }
+        writes = []
+        stops = []
+        messages = []
+        with mock.patch.object(
+            fewshot_mimics, "_read_json", return_value=dict(status)
+        ), mock.patch.object(
+            fewshot_mimics, "_process_exists", return_value=False
+        ), mock.patch.object(
+            fewshot_mimics, "_write_json_atomic",
+            side_effect=lambda path, payload: writes.append((path, dict(payload)))
+        ), mock.patch.object(
+            fewshot_mimics, "_stop_monitor", side_effect=lambda key: stops.append(key)
+        ), mock.patch.object(
+            fewshot_mimics, "_mimics_log"
+        ), mock.patch.object(
+            fewshot_mimics.mimics.dialogs,
+            "message_box",
+            side_effect=lambda *args, **kwargs: messages.append((args, kwargs)),
+        ):
+            fewshot_mimics._monitor_tick_locked(monitor)
+        self.assertEqual(1, len(writes))
+        self.assertEqual("failed", writes[0][1]["status"])
+        self.assertFalse(writes[0][1]["termination_pending"])
+        self.assertEqual("termination_completed_after_error", writes[0][1]["phase"])
+        self.assertEqual(["train_train_stopped"], stops)
+        self.assertEqual(1, len(messages))
+
+    def test_fewshot_active_scan_closes_reaped_stopping_job(self):
+        import fewshot_mimics
+
+        ts_root = os.path.join(self.tmp, "dataset")
+        jobs_dir = os.path.join(ts_root, "fewshot_models", "jobs")
+        os.makedirs(jobs_dir)
+        status_path = os.path.join(jobs_dir, "train_stale.json")
+        with open(status_path, "w", encoding="utf-8") as handle:
+            json.dump({
+                "job_id": "train_stale",
+                "kind": "train",
+                "organ": "liver",
+                "status": "stopping",
+                "pid": 2468,
+                "termination_pending": True,
+                "error": "cleanup failed",
+            }, handle)
+        with mock.patch.object(fewshot_mimics, "_process_exists", return_value=False):
+            path, job = fewshot_mimics._latest_active_job(ts_root)
+        self.assertIsNone(path)
+        self.assertIsNone(job)
+        with open(status_path, "r", encoding="utf-8") as handle:
+            saved = json.load(handle)
+        self.assertEqual("failed", saved["status"])
+        self.assertFalse(saved["termination_pending"])
+
+    def test_resource_guard_is_intentionally_persistent(self):
+        from resource_locks import FileResourceLock
+
+        lock_path = Path(self.tmp) / "gpu.lock"
+        lock = FileResourceLock(lock_path, "gpu", "test")
+        lock.acquire()
+        guard_path = Path(str(lock_path) + ".guard")
+        self.assertTrue(guard_path.is_file())
+        lock.release()
+        self.assertFalse(lock_path.exists())
+        self.assertTrue(guard_path.is_file())
+
+    def test_idle_nninteractive_cleanup_waits_for_server_exit_before_release(self):
+        import tools.fewshot_pipeline as pipeline
+
+        state_path = Path(self.tmp) / "server.json"
+        pipeline.write_json_atomic(state_path, {
+            "schema_version": "nninteractive_owned_server.v2",
+            "pid": 1234,
+            "gpu_lock_token": "gpu-token",
+            "last_activity_epoch": 0,
+            "service_idle_timeout_seconds": 0,
+        })
+        current = {
+            "resource": "gpu",
+            "token": "gpu-token",
+            "path": str(Path(self.tmp) / "gpu.lock"),
+            "state_path": str(state_path),
+        }
+        calls = {"exists": 0, "terminated": 0, "released": 0}
+        old_exists = pipeline.process_exists
+        old_terminate = pipeline.terminate_process_tree
+        old_release = pipeline.release_lock
+        old_sleep = pipeline.time.sleep
+        try:
+            def process_exists(_pid):
+                calls["exists"] += 1
+                return calls["exists"] <= 2
+            pipeline.process_exists = process_exists
+            pipeline.terminate_process_tree = lambda _pid: calls.__setitem__(
+                "terminated", calls["terminated"] + 1
+            ) or True
+            pipeline.release_lock = lambda _path, _token: calls.__setitem__(
+                "released", calls["released"] + 1
+            ) or (not state_path.exists())
+            pipeline.time.sleep = lambda _seconds: None
+            self.assertTrue(pipeline.cleanup_idle_nninteractive_server_lock(current))
+        finally:
+            pipeline.process_exists = old_exists
+            pipeline.terminate_process_tree = old_terminate
+            pipeline.release_lock = old_release
+            pipeline.time.sleep = old_sleep
+        self.assertEqual(1, calls["terminated"])
+        self.assertEqual(1, calls["released"])
+        self.assertFalse(state_path.exists())
+
+    def test_idle_nninteractive_cleanup_retains_lock_if_server_survives(self):
+        import tools.fewshot_pipeline as pipeline
+
+        state_path = Path(self.tmp) / "server.json"
+        pipeline.write_json_atomic(state_path, {
+            "schema_version": "nninteractive_owned_server.v2",
+            "pid": 1234,
+            "gpu_lock_token": "gpu-token",
+            "last_activity_epoch": 0,
+            "service_idle_timeout_seconds": 0,
+        })
+        current = {
+            "resource": "gpu",
+            "token": "gpu-token",
+            "path": str(Path(self.tmp) / "gpu.lock"),
+            "state_path": str(state_path),
+        }
+        releases = []
+        clock = {"value": 1000.0}
+        old_exists = pipeline.process_exists
+        old_terminate = pipeline.terminate_process_tree
+        old_release = pipeline.release_lock
+        old_time = pipeline.time.time
+        old_sleep = pipeline.time.sleep
+        try:
+            pipeline.process_exists = lambda _pid: True
+            pipeline.terminate_process_tree = lambda _pid: True
+            pipeline.release_lock = lambda *_args: releases.append(True) or True
+            def advancing_time():
+                clock["value"] += 20.0
+                return clock["value"]
+            pipeline.time.time = advancing_time
+            pipeline.time.sleep = lambda _seconds: None
+            self.assertFalse(pipeline.cleanup_idle_nninteractive_server_lock(current))
+        finally:
+            pipeline.process_exists = old_exists
+            pipeline.terminate_process_tree = old_terminate
+            pipeline.release_lock = old_release
+            pipeline.time.time = old_time
+            pipeline.time.sleep = old_sleep
+        self.assertTrue(state_path.exists())
+        self.assertEqual([], releases)
+
+    def test_async_termination_does_not_finalize_while_pid_survives(self):
+        import runtime_common
+
+        callbacks = []
+        clock = {"value": 1000.0}
+
+        class Process(object):
+            pid = 43210
+            def poll(self):
+                return None
+            def terminate(self):
+                return None
+            def wait(self, timeout=None):
+                raise RuntimeError("still running")
+
+        class ImmediateThread(object):
+            def __init__(self, target=None, name=None):
+                self.target = target
+                self.daemon = False
+            def start(self):
+                self.target()
+
+        old_exists = runtime_common.process_exists
+        old_thread = runtime_common.threading.Thread
+        old_kill = runtime_common.os.kill
+        old_time = runtime_common.time.time
+        old_sleep = runtime_common.time.sleep
+        try:
+            runtime_common.process_exists = lambda _pid: True
+            runtime_common.threading.Thread = ImmediateThread
+            runtime_common.os.kill = lambda *_args: None
+            def advancing_time():
+                clock["value"] += 20.0
+                return clock["value"]
+            runtime_common.time.time = advancing_time
+            runtime_common.time.sleep = lambda _seconds: None
+            self.assertTrue(runtime_common.terminate_process_async(
+                process=Process(),
+                graceful_seconds=0.0,
+                on_complete=lambda: callbacks.append(True),
+            ))
+        finally:
+            runtime_common.process_exists = old_exists
+            runtime_common.threading.Thread = old_thread
+            runtime_common.os.kill = old_kill
+            runtime_common.time.time = old_time
+            runtime_common.time.sleep = old_sleep
+        self.assertEqual([], callbacks)
+
+    def test_import_timeout_publishes_terminal_only_after_process_reap(self):
+        import mimics_import
+
+        statuses = []
+        callbacks = []
+        monitor = {
+            "monitor_key": "import-a",
+            "job_dir": os.path.join(self.tmp, "job"),
+            "work_dir": os.path.join(self.tmp, "work"),
+            "output_mcs": os.path.join(self.tmp, "case.mcs"),
+            "case_id": "case",
+            "task_status_path": os.path.join(self.tmp, "status.json"),
+            "total": 1,
+        }
+        old_stop = mimics_import._stop_import_monitor
+        old_write = mimics_import._write_import_task_status
+        old_terminate = mimics_import._terminate_job_process
+        old_message = mimics_import._safe_message_box
+        old_cleanup_job = mimics_import._cleanup_job_dir
+        old_cleanup_work = mimics_import._cleanup_work_dir
+        old_record = mimics_import._record_failed_case
+        old_done = mimics_import._mark_mcs_queue_done
+        try:
+            mimics_import._stop_import_monitor = lambda _key: None
+            mimics_import._write_import_task_status = lambda _path, payload: statuses.append(
+                dict(payload)
+            )
+            mimics_import._terminate_job_process = lambda _job, on_complete=None: callbacks.append(
+                on_complete
+            )
+            mimics_import._safe_message_box = lambda *_args, **_kwargs: None
+            mimics_import._cleanup_job_dir = lambda _path: None
+            mimics_import._cleanup_work_dir = lambda _path: None
+            mimics_import._record_failed_case = lambda *_args: None
+            mimics_import._mark_mcs_queue_done = lambda *_args, **_kwargs: None
+            self.assertTrue(mimics_import._fail_import_monitor_after_process(
+                monitor, "prepare_timeout", "timed out"
+            ))
+            self.assertEqual("stopping", statuses[-1]["status"])
+            self.assertNotIn("failed", [item["status"] for item in statuses])
+            callbacks[0]()
+        finally:
+            mimics_import._stop_import_monitor = old_stop
+            mimics_import._write_import_task_status = old_write
+            mimics_import._terminate_job_process = old_terminate
+            mimics_import._safe_message_box = old_message
+            mimics_import._cleanup_job_dir = old_cleanup_job
+            mimics_import._cleanup_work_dir = old_cleanup_work
+            mimics_import._record_failed_case = old_record
+            mimics_import._mark_mcs_queue_done = old_done
+        self.assertEqual("failed", statuses[-1]["status"])
+
+    def test_batch_import_timeout_does_not_overlap_next_bridge(self):
+        import mimics_import
+
+        callbacks = []
+        starts = []
+        statuses = []
+        monitor = {
+            "job_dir": os.path.join(self.tmp, "job"),
+            "work_dir": os.path.join(self.tmp, "work"),
+            "output_dir": self.tmp,
+            "case_id": "case_a",
+            "deadline": 0,
+            "done": False,
+            "busy": False,
+            "completed": 0,
+            "failed": 0,
+            "total": 2,
+            "batch_queue": [{"case_id": "case_b"}],
+        }
+        old_stopped = mimics_import._import_task_stopped
+        old_terminate = mimics_import._terminate_job_process
+        old_start = mimics_import._start_next_batch_prepare
+        old_write = mimics_import._write_import_task_status
+        old_log = mimics_import._append_import_log
+        old_record = mimics_import._record_failed_case
+        old_cleanup_job = mimics_import._cleanup_job_dir
+        old_cleanup_work = mimics_import._cleanup_work_dir
+        try:
+            mimics_import._import_task_stopped = lambda _monitor: False
+            mimics_import._terminate_job_process = lambda _job, on_complete=None: callbacks.append(
+                on_complete
+            )
+            mimics_import._start_next_batch_prepare = lambda _monitor: starts.append(True)
+            mimics_import._write_import_task_status = lambda _path, payload: statuses.append(
+                dict(payload)
+            )
+            mimics_import._append_import_log = lambda *_args: None
+            mimics_import._record_failed_case = lambda *_args: None
+            mimics_import._cleanup_job_dir = lambda _path: None
+            mimics_import._cleanup_work_dir = lambda _path: None
+            mimics_import._batch_prepare_tick_impl(monitor)
+            self.assertEqual([], starts)
+            self.assertEqual("stopping_case", statuses[-1]["phase"])
+            callbacks[0]()
+            mimics_import._batch_prepare_tick_impl(monitor)
+        finally:
+            mimics_import._import_task_stopped = old_stopped
+            mimics_import._terminate_job_process = old_terminate
+            mimics_import._start_next_batch_prepare = old_start
+            mimics_import._write_import_task_status = old_write
+            mimics_import._append_import_log = old_log
+            mimics_import._record_failed_case = old_record
+            mimics_import._cleanup_job_dir = old_cleanup_job
+            mimics_import._cleanup_work_dir = old_cleanup_work
+        self.assertEqual([True], starts)
+        self.assertEqual(1, monitor["failed"])
+
+    def test_export_notification_failure_does_not_overwrite_completed_state(self):
+        import mimics_export
+
+        statuses = []
+        releases = []
+        monitor = {
+            "monitor_key": "export-a",
+            "work_dir": os.path.join(self.tmp, "work"),
+            "output_root": self.tmp,
+            "selected_masks": [object()],
+            "operation_token": "token",
+            "done": False,
+        }
+        old_stop = mimics_export._stop_export_monitor
+        old_apply = mimics_export._apply_export_result
+        old_write = mimics_export._write_export_task_status
+        old_release = mimics_export.runtime_common.release_local_operation
+        old_cleanup = mimics_export._cleanup_work_dir
+        old_log = mimics_export._mimics_log
+        old_message = mimics_export.mimics.dialogs.message_box
+        try:
+            mimics_export._stop_export_monitor = lambda _key: None
+            mimics_export._apply_export_result = lambda *_args: (1, 0, 0)
+            mimics_export._write_export_task_status = lambda _monitor, payload: statuses.append(
+                dict(payload)
+            )
+            mimics_export.runtime_common.release_local_operation = (
+                lambda *_args: releases.append(True) or True
+            )
+            mimics_export._cleanup_work_dir = lambda _path: None
+            mimics_export._mimics_log = lambda *_args: None
+            mimics_export.mimics.dialogs.message_box = lambda **_kwargs: (
+                _ for _ in ()
+            ).throw(RuntimeError("dialog failed"))
+            mimics_export._finish_foreground_export(
+                monitor,
+                result={"output_seg_dir": self.tmp},
+            )
+        finally:
+            mimics_export._stop_export_monitor = old_stop
+            mimics_export._apply_export_result = old_apply
+            mimics_export._write_export_task_status = old_write
+            mimics_export.runtime_common.release_local_operation = old_release
+            mimics_export._cleanup_work_dir = old_cleanup
+            mimics_export._mimics_log = old_log
+            mimics_export.mimics.dialogs.message_box = old_message
+        self.assertEqual(["completed"], [item["status"] for item in statuses])
+        self.assertEqual([True], releases)
+
+    def test_cache_cleanup_skips_all_scratch_paths_while_task_is_active(self):
+        import mimics_stop_background
+
+        scratch = Path(self.tmp) / "active_work"
+        scratch.mkdir()
+        (scratch / "buffer.u8").write_bytes(b"x")
+        old_blockers = mimics_stop_background._active_cache_cleanup_blockers
+        old_find = mimics_stop_background._find_cache_paths
+        try:
+            mimics_stop_background._active_cache_cleanup_blockers = lambda: [
+                "background import is active"
+            ]
+            mimics_stop_background._find_cache_paths = lambda: [str(scratch)]
+            result = mimics_stop_background.clear_all_caches()
+        finally:
+            mimics_stop_background._active_cache_cleanup_blockers = old_blockers
+            mimics_stop_background._find_cache_paths = old_find
+        self.assertTrue(scratch.exists())
+        self.assertEqual([], result["removed"])
+        self.assertEqual(1, len(result["skipped_in_use"]))
+
     def test_active_nninteractive_operation_cannot_be_released_for_training(self):
         import tools.fewshot_pipeline as pipeline
 
@@ -5093,6 +6443,24 @@ class TestLifecycleAndRetention(unittest.TestCase):
         self.assertTrue(model.exists(), "automatic maintenance must never delete registered models")
         self.assertGreater(sum(report.values()), 0)
 
+    def test_fewshot_cleanup_keeps_job_when_controller_is_alive(self):
+        pipeline = __import__("tools.fewshot_pipeline", fromlist=["dummy"])
+        workspace = Path(self.tmp) / "fewshot_models"
+        jobs = workspace / "jobs"
+        jobs.mkdir(parents=True)
+        path = jobs / "controller_alive.json"
+        pipeline.write_json_atomic(path, {
+            "job_id": "controller_alive",
+            "status": "training",
+            "pid": 987654321,
+            "controller_pid": os.getpid(),
+            "updated_at_epoch": time.time() - 3600,
+        })
+        pipeline.cleanup_workspace_artifacts(workspace, config={})
+        payload = pipeline.read_json(path, {}) or {}
+        self.assertEqual("training", payload.get("status"))
+        self.assertFalse(payload.get("orphaned", False))
+
     def test_clear_cache_does_not_include_runtime_control_state_or_active_jobs(self):
         import mimics_stop_background as stop
 
@@ -5130,6 +6498,17 @@ class TestLifecycleAndRetention(unittest.TestCase):
         self.assertNotIn("$broad=Get-CimInstance", source)
         self.assertIn("$foregroundPid", source)
         self.assertIn("$inRoot -and $hasMarker", source)
+        self.assertIn("$cutoff", source)
+        self.assertNotIn("Remove-Item -Path $lock", source)
+
+    def test_external_kill_background_never_deletes_resource_locks(self):
+        import inspect
+        import tools.mimics_batch_cli as cli
+
+        source = inspect.getsource(cli.cmd_kill_background)
+        self.assertIn("stopMarkers", source)
+        self.assertIn("cutoff", source)
+        self.assertNotIn("Remove-Item", source)
 
 
 if __name__ == "__main__":

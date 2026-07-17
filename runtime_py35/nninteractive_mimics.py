@@ -436,8 +436,22 @@ def _release_state_lock(state):
 def _remove_state_file(path):
     try:
         os.remove(path)
+        return True
     except OSError:
-        pass
+        return not os.path.exists(path)
+
+
+def _remove_owned_state_file(path, state):
+    """Remove only the state record that belongs to *state*."""
+    current = runtime_common.read_json(path, {}) or {}
+    expected = str(state.get("ownership_token") or "")
+    if current and expected and str(current.get("ownership_token") or "") != expected:
+        return False
+    try:
+        os.remove(path)
+        return True
+    except OSError:
+        return not os.path.exists(path)
 
 
 def _cleanup_stale_owned_servers(records):
@@ -462,8 +476,8 @@ def _cleanup_stale_owned_servers(records):
         except (TypeError, ValueError):
             pid = 0
         if not pid or not _process_exists(pid):
-            _release_state_lock(state)
-            _remove_state_file(state_path)
+            if _remove_owned_state_file(state_path, state):
+                _release_state_lock(state)
             continue
 
         command_line = by_pid.get(pid, "").lower()
@@ -495,18 +509,27 @@ def _cleanup_stale_owned_servers(records):
             continue
 
         try:
-            subprocess.Popen(
+            killer = subprocess.Popen(
                 ["taskkill", "/PID", str(pid), "/T", "/F"],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 **_hidden_process_kwargs()
             )
-            killed.append(pid)
+            try:
+                killer.wait(timeout=15.0)
+            except Exception:
+                pass
         except Exception:
-            pass
-        _release_state_lock(state)
-        _remove_state_file(state_path)
+            continue
+        deadline = time.time() + 10.0
+        while _process_exists(pid) and time.time() < deadline:
+            time.sleep(0.25)
+        if _process_exists(pid):
+            continue
+        killed.append(pid)
+        if _remove_owned_state_file(state_path, state):
+            _release_state_lock(state)
     return killed
 
 
@@ -3822,8 +3845,18 @@ def _cleanup_stale_processes():
     )
     try:
         import ctypes
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         PROCESS_TERMINATE = 0x0001
+        kernel32.OpenProcess.argtypes = [
+            ctypes.c_uint32,
+            ctypes.c_int,
+            ctypes.c_uint32,
+        ]
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        kernel32.TerminateProcess.restype = ctypes.c_int
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_int
 
         # Single hidden PowerShell call to get all python.exe PIDs and
         # command lines at once.  This replaces the previous per-process

@@ -717,7 +717,20 @@ def resample_mask_to_image_grid(
             "{} != {}".format(tuple(mask.shape), tuple(image_shape))
         )
 
-    inv_mask_affine = np.linalg.inv(mask_affine)
+    if not _affine_is_usable(mask_affine):
+        raise ValueError(
+            "mask affine is singular or invalid; spatial resampling is unsafe"
+        )
+    if not _affine_is_usable(image_affine):
+        raise ValueError(
+            "target image affine is singular or invalid; spatial resampling is unsafe"
+        )
+    try:
+        inv_mask_affine = np.linalg.inv(mask_affine)
+    except np.linalg.LinAlgError as exc:
+        raise ValueError(
+            "mask affine could not be inverted for spatial resampling: {}".format(exc)
+        )
     out = np.zeros(tuple(int(v) for v in image_shape), dtype=np.uint8)
     x_count, y_count, z_count = [int(v) for v in image_shape]
     yy_template = np.arange(y_count, dtype=float)
