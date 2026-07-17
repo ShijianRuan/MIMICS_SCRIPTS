@@ -25,15 +25,14 @@ except ImportError:
     from Queue import Empty, Queue
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+TOOLS_DIR = Path(__file__).resolve().parent
+for _candidate in (str(TOOLS_DIR), str(PROJECT_ROOT)):
+    if _candidate not in sys.path:
+        sys.path.insert(0, _candidate)
 
 from resource_locks import process_exists as resource_process_exists
 
-try:
-    from ui_theme import configure_application, stylesheet as shared_stylesheet
-except ImportError:
-    from tools.ui_theme import configure_application, stylesheet as shared_stylesheet
+from ui_theme import configure_application, stylesheet as shared_stylesheet
 
 
 TITLE = "DINOv3 Few-Shot Status"

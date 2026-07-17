@@ -126,6 +126,12 @@ def _stop_monitor(key):
             win32_timer[0].KillTimer(None, win32_timer[1])
         except Exception:
             pass
+    subscription = monitor.get("event_subscription")
+    if subscription is not None:
+        try:
+            subscription.unsubscribe()
+        except Exception:
+            pass
 
 
 def _stop_all_monitors():
@@ -201,10 +207,62 @@ def _tick(monitor):
             return
         if state != "submitted":
             return
+        bootstrap_stop_path = monitor.get("bootstrap_stop_path", "")
+        if bootstrap_stop_path and os.path.isfile(bootstrap_stop_path):
+            _write_status_quick(
+                monitor["status_path"],
+                {
+                    "status": "cancelled",
+                    "error": "Task start was cancelled before the import workflow launched.",
+                    "updated_at_epoch": time.time(),
+                },
+            )
+            _stop_monitor(key)
+            return
         try:
+            bootstrap_task = {
+                "kind": "starting",
+                "title": monitor.get("task_title", "Starting task"),
+                "stop_path": bootstrap_stop_path,
+                "stop_paths": [bootstrap_stop_path] if bootstrap_stop_path else [],
+            }
+            _write_status_quick(
+                monitor["status_path"],
+                {
+                    "status": "launching",
+                    "selection": status.get("selection") or {},
+                    "task": bootstrap_task,
+                    "owner_pid": os.getpid(),
+                    "updated_at_epoch": time.time(),
+                },
+            )
             task = monitor["on_submit"](status.get("selection") or {})
             if not isinstance(task, dict):
                 task = {}
+            if not task:
+                raise RuntimeError(
+                    "The workflow returned without a task descriptor. No background task was attached."
+                )
+            if bootstrap_stop_path and os.path.isfile(bootstrap_stop_path):
+                stop_paths = task.get("stop_paths") or []
+                if isinstance(stop_paths, str):
+                    stop_paths = [stop_paths]
+                if task.get("stop_path") and task.get("stop_path") not in stop_paths:
+                    stop_paths.insert(0, task.get("stop_path"))
+                for stop_path in stop_paths:
+                    if not stop_path:
+                        continue
+                    try:
+                        runtime_common.write_json_atomic(
+                            stop_path,
+                            {
+                                "status": "cancel_requested",
+                                "requested_at_epoch": time.time(),
+                                "reason": "Cancelled while the workflow was starting.",
+                            },
+                        )
+                    except Exception:
+                        pass
             written = _write_status_quick(
                 monitor["status_path"],
                 {
@@ -290,8 +348,37 @@ def _start_win32_monitor(monitor, poll_seconds):
         return False
 
 
+def _start_mimics_event_monitor(monitor, poll_seconds):
+    """Use Mimics' own timer notification instead of a raw ctypes callback."""
+    try:
+        events = getattr(mimics, "events", None)
+        subscribe = getattr(events, "subscribe", None)
+        if not callable(subscribe):
+            return False
+        interval = max(0.25, float(poll_seconds))
+        monitor["event_last_tick"] = 0.0
+
+        def callback(*_args, **_kwargs):
+            now = time.time()
+            if now - float(monitor.get("event_last_tick", 0.0)) < interval:
+                return
+            monitor["event_last_tick"] = now
+            _tick(monitor)
+
+        subscription = subscribe("timer", callback)
+        if subscription is None:
+            return False
+        monitor["event_callback"] = callback
+        monitor["event_subscription"] = subscription
+        return True
+    except Exception:
+        return False
+
+
 def _start_monitor(monitor, poll_seconds=2.0):
     _IO_SETUP_MONITORS[monitor["key"]] = monitor
+    if _start_mimics_event_monitor(monitor, poll_seconds):
+        return True
     if _start_win32_monitor(monitor, poll_seconds):
         return True
     try:
@@ -317,12 +404,20 @@ def launch(mode, python_exe, context, on_submit, timeout_seconds=3600, ui_script
     setup_id = "io_{0}_{1}".format(time.strftime("%Y%m%dT%H%M%S"), uuid.uuid4().hex[:8])
     context_path = os.path.join(runtime_dir, setup_id + "_context.json")
     status_path = os.path.join(runtime_dir, setup_id + ".json")
+    bootstrap_stop_path = os.path.join(runtime_dir, setup_id + "_stop.json")
+    try:
+        if os.path.isfile(bootstrap_stop_path):
+            os.remove(bootstrap_stop_path)
+    except OSError:
+        pass
     payload = dict(context or {})
     payload.update({
         "schema_version": "mimics_io_setup.v1",
         "mode": mode,
         "status_path": status_path,
         "state_path": os.path.join(root, ".mimics_runtime", "ui_state", "io_paths.json"),
+        "owner_pid": os.getpid(),
+        "bootstrap_stop_path": bootstrap_stop_path,
     })
     runtime_common.write_json_atomic(context_path, payload)
     runtime_common.write_json_atomic(status_path, {
@@ -368,6 +463,12 @@ def launch(mode, python_exe, context, on_submit, timeout_seconds=3600, ui_script
         "process": process,
         "stderr_log": stderr_log,
         "on_submit": on_submit,
+        "bootstrap_stop_path": bootstrap_stop_path,
+        "task_title": {
+            "import_single": "Import single case",
+            "import_batch": "Import dataset",
+            "export_masks": "Export masks",
+        }.get(mode, "Starting task"),
         "deadline": time.time() + float(timeout_seconds),
         "busy": False,
     }

@@ -5430,6 +5430,255 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn("QFileDialog.getOpenFileName", source)
         self.assertIn("clipboard", source)
 
+    def test_external_io_loads_required_theme_from_isolated_tools_directory(self):
+        import subprocess
+
+        source = Path(PROJECT_ROOT, "tools", "io_path_setup_ui.py")
+        theme = Path(PROJECT_ROOT, "tools", "ui_theme.py")
+        isolated = Path(self.tmp, "isolated_ui")
+        isolated.mkdir(parents=True)
+        target = isolated / source.name
+        shutil.copy2(str(source), str(target))
+        shutil.copy2(str(theme), str(isolated / theme.name))
+        code = (
+            "import importlib.util;"
+            "p={0!r};"
+            "s=importlib.util.spec_from_file_location('isolated_io_ui',p);"
+            "m=importlib.util.module_from_spec(s);"
+            "s.loader.exec_module(m);"
+            "assert m.shared_stylesheet.__module__ == 'ui_theme';"
+            "print(m.shared_stylesheet.__module__)"
+        ).format(str(target))
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", code],
+            cwd=str(isolated),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_external_io_process_liveness_detects_owner_and_dead_pid(self):
+        import tools.io_path_setup_ui as ui
+
+        self.assertTrue(ui.process_exists(os.getpid()))
+        self.assertFalse(ui.process_exists(99999999))
+
+    def test_io_setup_prefers_documented_mimics_timer_event(self):
+        import io_setup_mimics
+
+        class Subscription(object):
+            def __init__(self):
+                self.unsubscribed = False
+
+            def unsubscribe(self):
+                self.unsubscribed = True
+
+        class Events(object):
+            def __init__(self):
+                self.callback = None
+                self.subscription = Subscription()
+
+            def subscribe(self, name, callback):
+                self.name = name
+                self.callback = callback
+                return self.subscription
+
+        events = Events()
+        old_events = getattr(io_setup_mimics.mimics, "events", None)
+        had_events = hasattr(io_setup_mimics.mimics, "events")
+        old_tick = io_setup_mimics._tick
+        calls = []
+        monitor = {"key": "native-event", "busy": False}
+        try:
+            io_setup_mimics.mimics.events = events
+            io_setup_mimics._tick = lambda value: calls.append(value)
+            self.assertTrue(io_setup_mimics._start_monitor(monitor, poll_seconds=0.0))
+            self.assertEqual("timer", events.name)
+            events.callback()
+            self.assertEqual([monitor], calls)
+            io_setup_mimics._stop_monitor(monitor["key"])
+            self.assertTrue(events.subscription.unsubscribed)
+            self.assertNotIn("win32_timer", monitor)
+        finally:
+            io_setup_mimics._tick = old_tick
+            io_setup_mimics._IO_SETUP_MONITORS.pop(monitor["key"], None)
+            if had_events:
+                io_setup_mimics.mimics.events = old_events
+            else:
+                delattr(io_setup_mimics.mimics, "events")
+
+    def test_io_setup_bootstrap_stop_cancels_before_submit_callback(self):
+        import io_setup_mimics
+
+        status_path = os.path.join(self.tmp, "io-submit.json")
+        stop_path = os.path.join(self.tmp, "io-stop.json")
+        Path(status_path).write_text(
+            json.dumps({"status": "submitted", "selection": {"source_path": "x"}}),
+            encoding="utf-8",
+        )
+        Path(stop_path).write_text("{}", encoding="utf-8")
+        submitted = []
+        key = "bootstrap-stop"
+        monitor = {
+            "key": key,
+            "status_path": status_path,
+            "bootstrap_stop_path": stop_path,
+            "deadline": time.time() + 10,
+            "busy": False,
+            "on_submit": lambda selection: submitted.append(selection),
+        }
+        io_setup_mimics._IO_SETUP_MONITORS[key] = monitor
+        io_setup_mimics._tick(monitor)
+        payload = json.loads(Path(status_path).read_text(encoding="utf-8"))
+        self.assertEqual("cancelled", payload["status"])
+        self.assertEqual([], submitted)
+        self.assertNotIn(key, io_setup_mimics._IO_SETUP_MONITORS)
+
+    def test_import_monitor_prefers_mimics_timer_event(self):
+        import mimics_import
+
+        class Subscription(object):
+            def __init__(self):
+                self.unsubscribed = False
+
+            def unsubscribe(self):
+                self.unsubscribed = True
+
+        class Events(object):
+            def __init__(self):
+                self.callback = None
+                self.subscription = Subscription()
+
+            def subscribe(self, name, callback):
+                self.name = name
+                self.callback = callback
+                return self.subscription
+
+        events = Events()
+        old_events = getattr(mimics_import.mimics, "events", None)
+        had_events = hasattr(mimics_import.mimics, "events")
+        calls = []
+        monitor = {"monitor_key": "native-import", "output_dir": self.tmp}
+        try:
+            mimics_import.mimics.events = events
+            self.assertTrue(mimics_import._start_mimics_event_monitor(
+                monitor,
+                lambda: calls.append(True),
+                0.0,
+                "test callback",
+            ))
+            self.assertEqual("timer", events.name)
+            events.callback()
+            self.assertEqual([True], calls)
+            mimics_import._stop_import_monitor(monitor["monitor_key"])
+            self.assertTrue(events.subscription.unsubscribed)
+        finally:
+            mimics_import._IMPORT_MONITORS.pop(monitor["monitor_key"], None)
+            if had_events:
+                mimics_import.mimics.events = old_events
+            else:
+                delattr(mimics_import.mimics, "events")
+
+    def test_export_monitor_prefers_mimics_timer_event(self):
+        import mimics_export
+
+        class Subscription(object):
+            def __init__(self):
+                self.unsubscribed = False
+
+            def unsubscribe(self):
+                self.unsubscribed = True
+
+        class Events(object):
+            def __init__(self):
+                self.callback = None
+                self.subscription = Subscription()
+
+            def subscribe(self, name, callback):
+                self.name = name
+                self.callback = callback
+                return self.subscription
+
+        events = Events()
+        old_events = getattr(mimics_export.mimics, "events", None)
+        had_events = hasattr(mimics_export.mimics, "events")
+        calls = []
+        monitor = {"monitor_key": "native-export"}
+        try:
+            mimics_export.mimics.events = events
+            self.assertTrue(mimics_export._start_mimics_event_export_monitor(
+                monitor,
+                lambda: calls.append(True),
+                0.0,
+                "test callback",
+            ))
+            self.assertEqual("timer", events.name)
+            events.callback()
+            self.assertEqual([True], calls)
+            mimics_export._stop_export_monitor(monitor["monitor_key"])
+            self.assertTrue(events.subscription.unsubscribed)
+        finally:
+            mimics_export._EXPORT_MONITORS.pop(monitor["monitor_key"], None)
+            if had_events:
+                mimics_export.mimics.events = old_events
+            else:
+                delattr(mimics_export.mimics, "events")
+
+    def test_mask_import_monitor_prefers_mimics_timer_event(self):
+        import mask_import
+
+        class Subscription(object):
+            def __init__(self):
+                self.unsubscribed = False
+
+            def unsubscribe(self):
+                self.unsubscribed = True
+
+        class Events(object):
+            def __init__(self):
+                self.callback = None
+                self.subscription = Subscription()
+
+            def subscribe(self, name, callback):
+                self.name = name
+                self.callback = callback
+                return self.subscription
+
+        events = Events()
+        old_events = getattr(mask_import.mimics, "events", None)
+        had_events = hasattr(mask_import.mimics, "events")
+        calls = []
+        monitor = {"monitor_key": "native-mask-import"}
+        old_tick = mask_import._mask_import_monitor_tick
+        try:
+            mask_import.mimics.events = events
+            mask_import._mask_import_monitor_tick = lambda value: calls.append(value)
+            self.assertTrue(mask_import._start_mimics_event_mask_import_monitor(
+                monitor,
+                0.0,
+            ))
+            self.assertEqual("timer", events.name)
+            events.callback()
+            self.assertEqual([monitor], calls)
+            mask_import._stop_mask_import_monitor(monitor["monitor_key"])
+            self.assertTrue(events.subscription.unsubscribed)
+        finally:
+            mask_import._mask_import_monitor_tick = old_tick
+            mask_import._MASK_IMPORT_MONITORS.pop(monitor["monitor_key"], None)
+            if had_events:
+                mask_import.mimics.events = old_events
+            else:
+                delattr(mask_import.mimics, "events")
+
+    def test_offline_package_requires_shared_ui_runtime_files(self):
+        import tools.package_portable as package_portable
+
+        self.assertIn("tools/ui_theme.py", package_portable.REQUIRED_EXTERNAL_UI_FILES)
+        self.assertIn("tools/io_path_setup_ui.py", package_portable.REQUIRED_EXTERNAL_UI_FILES)
+        for relative in package_portable.REQUIRED_EXTERNAL_UI_FILES:
+            self.assertTrue(Path(PROJECT_ROOT, relative).is_file(), relative)
+
     def test_background_mimics_launch_is_off_the_gui_callback(self):
         import mimics_import
 

@@ -640,7 +640,17 @@ def test_external_io_setup_routing(fake, tmp):
         setup_module.launch = launch
         import_module._python_exe = lambda: "external-python"
         export_module._python_exe = lambda: "external-python"
-        import_module._run_main_with_args = lambda args, import_mode=None, case_info_override=None: launched.append(("import", list(args))) or 0
+        def run_import(args, import_mode=None, case_info_override=None):
+            launched.append(("import", list(args)))
+            import_module._LAST_TASK_DESCRIPTOR = {
+                "kind": "import",
+                "title": "Import dataset",
+                "status_path": str(tmp / "import_status.json"),
+                "stop_path": str(tmp / "import_stop.json"),
+            }
+            return 0
+
+        import_module._run_main_with_args = run_import
         export_module._run_main_with_args = lambda args, source_info_override=None: launched.append(("export", list(args), source_info_override)) or 0
         import_module._launch_external_import_setup(None)
 

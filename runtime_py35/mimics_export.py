@@ -798,6 +798,46 @@ def _stop_export_monitor(monitor_key):
         except Exception:
             pass
 
+    subscription = monitor.get("event_subscription")
+    if subscription is not None:
+        try:
+            subscription.unsubscribe()
+        except Exception:
+            pass
+
+
+def _start_mimics_event_export_monitor(monitor, tick, poll_seconds, error_context):
+    """Run export polling through the documented Mimics timer notification."""
+    try:
+        events = getattr(mimics, "events", None)
+        subscribe = getattr(events, "subscribe", None)
+        if not callable(subscribe):
+            return False
+        interval = max(0.1, float(poll_seconds))
+        key = monitor.get("monitor_key")
+        _stop_export_monitor(key)
+        monitor["event_last_tick"] = 0.0
+
+        def callback(*_args, **_kwargs):
+            now = time.time()
+            if now - float(monitor.get("event_last_tick", 0.0)) < interval:
+                return
+            monitor["event_last_tick"] = now
+            try:
+                tick()
+            except Exception as exc:
+                _mimics_log(logging.ERROR, "{0}: {1}".format(error_context, exc))
+
+        subscription = subscribe("timer", callback)
+        if subscription is None:
+            return False
+        monitor["event_callback"] = callback
+        monitor["event_subscription"] = subscription
+        _EXPORT_MONITORS[key] = monitor
+        return True
+    except Exception:
+        return False
+
 
 def _export_monitor_tick(monitor):
     """Timer callback: check if bridge finished, apply result if done."""
@@ -942,6 +982,14 @@ def _start_export_monitor(job_dir, work_dir, case_dir=None, timeout_seconds=600,
     }
     if batch_info:
         monitor.update(batch_info)
+
+    if _start_mimics_event_export_monitor(
+        monitor,
+        lambda: _export_monitor_tick(monitor),
+        poll_seconds,
+        "Export monitor failed",
+    ):
+        return True
 
     # Try PyQt5 QTimer first (works inside Mimics GUI event loop)
     try:
@@ -1529,6 +1577,13 @@ def _foreground_export_tick(monitor):
 def _start_foreground_export_monitor(monitor, poll_seconds=0.15):
     key = monitor["monitor_key"]
     _stop_export_monitor(key)
+    if _start_mimics_event_export_monitor(
+        monitor,
+        lambda: _foreground_export_tick(monitor),
+        poll_seconds,
+        "Current-project export monitor failed",
+    ):
+        return True
     if os.name == "nt":
         try:
             import ctypes
@@ -2040,6 +2095,13 @@ def _background_export_status_tick(monitor):
 def _start_background_export_status_monitor(monitor, poll_seconds=2.0):
     key = monitor["monitor_key"]
     _stop_export_monitor(key)
+    if _start_mimics_event_export_monitor(
+        monitor,
+        lambda: _background_export_status_tick(monitor),
+        poll_seconds,
+        "Background export status monitor failed",
+    ):
+        return True
     if os.name == "nt":
         try:
             import ctypes

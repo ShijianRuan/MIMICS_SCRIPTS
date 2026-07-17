@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import sys
@@ -14,10 +15,14 @@ import uuid
 from pathlib import Path
 from queue import Empty, Queue
 
-try:
-    from ui_theme import configure_application, stylesheet as shared_stylesheet
-except ImportError:
-    from tools.ui_theme import configure_application, stylesheet as shared_stylesheet
+# Embeddable Python can omit the script directory from sys.path.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_HERE)
+for _candidate in (_HERE, _ROOT):
+    if _candidate and _candidate not in sys.path:
+        sys.path.insert(0, _candidate)
+
+from ui_theme import configure_application, stylesheet as shared_stylesheet
 
 
 def read_json(path, default=None):
@@ -27,6 +32,48 @@ def read_json(path, default=None):
         return value if isinstance(value, dict) else default
     except Exception:
         return default
+
+
+def process_exists(pid):
+    """Return whether the owning Mimics process is still alive."""
+    try:
+        value = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if value <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            SYNCHRONIZE = 0x00100000
+            WAIT_TIMEOUT = 0x00000102
+            kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+            kernel32.OpenProcess.restype = ctypes.c_void_p
+            kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+            kernel32.WaitForSingleObject.restype = ctypes.c_uint32
+            kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+            kernel32.CloseHandle.restype = ctypes.c_int
+            handle = kernel32.OpenProcess(SYNCHRONIZE, 0, value)
+            if not handle:
+                return ctypes.get_last_error() == 5
+            try:
+                return kernel32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return True
+    try:
+        os.kill(value, 0)
+        return True
+    except OSError as exc:
+        if exc.errno == errno.ESRCH:
+            return False
+        if exc.errno == errno.EPERM:
+            return True
+        return False
+    except Exception:
+        return True
 
 
 def write_json(path, value):
@@ -404,6 +451,8 @@ def run_ui(context, preview_path=""):
     mode = str(context.get("mode") or "import_batch")
     status_path = context.get("status_path")
     state_path = context.get("state_path")
+    owner_pid = context.get("owner_pid")
+    bootstrap_stop_path = str(context.get("bootstrap_stop_path") or "")
     remembered = read_json(state_path, {}) or {}
     remembered_mode = remembered.get(mode) or {}
 
@@ -660,7 +709,22 @@ def run_ui(context, preview_path=""):
 
     submission_results = Queue()
     submission_state = {"running": False, "submitted": False}
-    task_state = {"descriptor": {}, "last_signature": None, "stop_requested": False}
+    bootstrap_descriptor = {
+        "kind": "starting",
+        "title": {
+            "import_single": "Import single case",
+            "import_batch": "Import dataset",
+            "export_masks": "Export masks",
+        }.get(mode, "Starting task"),
+        "stop_path": bootstrap_stop_path,
+        "stop_paths": [bootstrap_stop_path] if bootstrap_stop_path else [],
+    }
+    task_state = {
+        "descriptor": bootstrap_descriptor,
+        "last_signature": None,
+        "stop_requested": False,
+        "owner_lost": False,
+    }
     submission_timer = QtCore.QTimer(window)
     task_timer = QtCore.QTimer(window)
 
@@ -697,6 +761,7 @@ def run_ui(context, preview_path=""):
         title.setText("Task in progress")
         subtitle.setText("Mimics remains available while this task runs.")
         progress_panel.show()
+        stop_task.setEnabled(bool(bootstrap_stop_path))
         append_activity("Request submitted to Mimics.")
 
     def request_stop():
@@ -707,8 +772,10 @@ def run_ui(context, preview_path=""):
         if descriptor.get("stop_path") and descriptor.get("stop_path") not in stop_paths:
             stop_paths.insert(0, descriptor.get("stop_path"))
         stop_paths = [str(path) for path in stop_paths if str(path or "").strip()]
+        if bootstrap_stop_path and bootstrap_stop_path not in stop_paths:
+            stop_paths.insert(0, bootstrap_stop_path)
         if not stop_paths:
-            progress_detail.setText("This task has not exposed a stop path yet.")
+            progress_detail.setText("This task cannot be stopped from this window. Close it and use the matching Stop entry in Mimics.")
             return
         try:
             errors = []
@@ -724,6 +791,7 @@ def run_ui(context, preview_path=""):
                 raise RuntimeError("; ".join(errors))
             task_state["stop_requested"] = True
             stop_task.setEnabled(False)
+            progress_detail.setText("Stop requested. Waiting for the active process to exit safely.")
             append_activity("Stop requested. The current safe unit of work will finish first.")
         except Exception as exc:
             progress_detail.setText("Could not request stop: {0}".format(exc))
@@ -770,11 +838,56 @@ def run_ui(context, preview_path=""):
 
     def poll_task():
         setup_status = read_json(status_path, {}) or {}
-        setup_state = setup_status.get("status")
-        if setup_state == "failed":
+        setup_state = str(setup_status.get("status") or "")
+        owner_alive = process_exists(owner_pid) if owner_pid else True
+        if not owner_alive and not terminal_state(setup_state):
+            if not task_state.get("owner_lost"):
+                task_state["owner_lost"] = True
+                request_stop()
+                error = (
+                    "The Mimics process closed before it could continue monitoring this task. "
+                    "A stop request was written for any owned background work. Reopen Mimics and retry."
+                )
+                try:
+                    write_json(status_path, {
+                        "status": "failed",
+                        "error": error,
+                        "updated_at_epoch": time.time(),
+                    })
+                except Exception:
+                    pass
+                update_progress_from_payload(
+                    {"status": "failed", "error": error},
+                    {"title": "Mimics closed unexpectedly"},
+                )
+            return
+        if setup_state in ("failed", "cancelled", "canceled", "closed"):
+            default_error = (
+                "Task start was cancelled."
+                if setup_state in ("cancelled", "canceled", "closed")
+                else "The task could not start."
+            )
             update_progress_from_payload(
-                {"status": "failed", "error": setup_status.get("error", "The task could not start.")},
-                {"title": "Could not start task"},
+                {
+                    "status": "cancelled" if setup_state in ("cancelled", "canceled", "closed") else "failed",
+                    "error": setup_status.get("error", default_error),
+                },
+                {"title": "Task cancelled" if setup_state in ("cancelled", "canceled", "closed") else "Could not start task"},
+            )
+            return
+        if setup_state in ("opening", "configuring", "submitted", "launching", ""):
+            descriptor = setup_status.get("task") or bootstrap_descriptor
+            task_state["descriptor"] = descriptor
+            stop_task.setEnabled(
+                bool(descriptor.get("stop_path") or descriptor.get("stop_paths") or bootstrap_stop_path)
+                and not task_state.get("stop_requested")
+            )
+            update_progress_from_payload(
+                {
+                    "status": "running",
+                    "phase": "starting_in_mimics" if setup_state == "launching" else "waiting_for_mimics",
+                },
+                descriptor,
             )
             return
         if setup_state != "launched":

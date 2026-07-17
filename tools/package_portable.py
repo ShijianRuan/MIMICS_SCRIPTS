@@ -41,6 +41,14 @@ INCLUDE_FILES = [
     "window_level_presets.json",
     ".gitignore",
 ]
+REQUIRED_EXTERNAL_UI_FILES = [
+    "tools/io_path_setup_ui.py",
+    "tools/ui_theme.py",
+    "tools/mask_file_picker_ui.py",
+    "tools/fewshot_training_setup_ui.py",
+    "tools/fewshot_status_viewer.py",
+    "tools/fewshot_model_chooser.py",
+]
 
 ARCHIVE_NAME = "mimics_script_portable"
 
@@ -83,6 +91,10 @@ def check():
             print("  {} {}".format(_green("[OK]"), name))
         else:
             print("  {} {}  -- MISSING".format(_red("[!!]"), name))
+            ok = False
+    for name in REQUIRED_EXTERNAL_UI_FILES:
+        if not (PROJECT_ROOT / name).is_file():
+            print("  {} {}  -- REQUIRED EXTERNAL UI FILE MISSING".format(_red("[!!]"), name))
             ok = False
 
     # 2. Python environment
@@ -791,6 +803,16 @@ def offline_bundle():
         if src.is_file():
             shutil.copy2(str(src), str(bundle_dir / name))
             print("  {} {}".format(_green("[+]"), name))
+
+    missing_ui_files = [
+        name for name in REQUIRED_EXTERNAL_UI_FILES
+        if not (bundle_dir / name).is_file()
+    ]
+    if missing_ui_files:
+        print("  {} Offline bundle is missing required UI files:".format(_red("[!!]")))
+        for name in missing_ui_files:
+            print("    - {}".format(name))
+        return 1
 
     # 4. Generate setup_offline.bat
     print(_header("4. setup_offline.bat"))

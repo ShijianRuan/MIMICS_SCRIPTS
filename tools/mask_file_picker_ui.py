@@ -11,10 +11,13 @@ import time
 import uuid
 from pathlib import Path
 
-try:
-    from ui_theme import configure_application
-except ImportError:
-    from tools.ui_theme import configure_application
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_HERE)
+for _candidate in (_HERE, _ROOT):
+    if _candidate and _candidate not in sys.path:
+        sys.path.insert(0, _candidate)
+
+from ui_theme import configure_application
 
 def read_json(path, default=None):
     try:

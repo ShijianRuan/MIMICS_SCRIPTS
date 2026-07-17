@@ -1337,6 +1337,48 @@ def _stop_import_monitor(monitor_key):
             user32.KillTimer(None, timer_id)
         except Exception:
             pass
+    subscription = monitor.get("event_subscription")
+    if subscription is not None:
+        try:
+            subscription.unsubscribe()
+        except Exception:
+            pass
+
+
+def _start_mimics_event_monitor(monitor, tick, poll_seconds, error_context):
+    """Register a throttled callback through the documented Mimics timer event."""
+    try:
+        events = getattr(mimics, "events", None)
+        subscribe = getattr(events, "subscribe", None)
+        if not callable(subscribe):
+            return False
+        interval = max(0.1, float(poll_seconds))
+        monitor_key = monitor.get("monitor_key")
+        _stop_import_monitor(monitor_key)
+        monitor["event_last_tick"] = 0.0
+
+        def callback(*_args, **_kwargs):
+            now = time.time()
+            if now - float(monitor.get("event_last_tick", 0.0)) < interval:
+                return
+            monitor["event_last_tick"] = now
+            try:
+                tick()
+            except Exception as exc:
+                output_dir = monitor.get("output_dir", "")
+                if not output_dir and monitor.get("output_mcs"):
+                    output_dir = os.path.dirname(os.path.abspath(monitor.get("output_mcs")))
+                _append_import_exception(output_dir, error_context, exc)
+
+        subscription = subscribe("timer", callback)
+        if subscription is None:
+            return False
+        monitor["event_callback"] = callback
+        monitor["event_subscription"] = subscription
+        _IMPORT_MONITORS[monitor_key] = monitor
+        return True
+    except Exception:
+        return False
 
 
 def _cancel_import_monitor(monitor, reason="Import stopped by user request."):
@@ -1943,6 +1985,14 @@ def _start_batch_prepare_monitor(job_dir, work_dir, timeout_seconds=1800,
     }
     if batch_info:
         monitor.update(batch_info)
+
+    if _start_mimics_event_monitor(
+        monitor,
+        lambda: _batch_prepare_tick(monitor),
+        poll_seconds,
+        "_start_batch_prepare_monitor Mimics timer callback failed",
+    ):
+        return True
 
     # Try PyQt5 QTimer first
     try:
@@ -2613,6 +2663,14 @@ def _start_first_mcs_monitor(output_dir, target_mcs=None, timeout_seconds=900, p
         "deadline": time.time() + (timeout_seconds if target_mcs else max(timeout_seconds, 7 * 86400)),
     }
 
+    if _start_mimics_event_monitor(
+        monitor,
+        lambda: _first_mcs_monitor_tick(monitor),
+        poll_seconds,
+        "_start_first_mcs_monitor Mimics timer callback failed",
+    ):
+        return True
+
     # Try PyQt5 QTimer first
     try:
         from PyQt5.QtCore import QTimer
@@ -2734,6 +2792,14 @@ def _start_import_monitor(job_dir, output_mcs, work_dir, timeout_seconds=1800,
     }
     if batch_info:
         monitor.update(batch_info)
+
+    if _start_mimics_event_monitor(
+        monitor,
+        lambda: _import_monitor_tick(monitor),
+        poll_seconds,
+        "_start_import_monitor Mimics timer callback failed",
+    ):
+        return True
 
     # Prefer the native Windows message-loop timer. Importing PyQt5 after a
     # folder dialog closes can stall Mimics while Qt scans plugins and paths.
@@ -3135,6 +3201,14 @@ def _start_import_discover_monitor(job_dir, ts_root, output_dir, axes, flips, jo
         ),
     )
 
+    if _start_mimics_event_monitor(
+        monitor,
+        lambda: _discover_monitor_tick(monitor),
+        poll_seconds,
+        "_start_import_discover_monitor Mimics timer callback failed",
+    ):
+        return True
+
     # Prefer Win32 SetTimer so returning from the native folder picker does not
     # immediately trigger a potentially slow PyQt5/plugin import in Mimics.
     if _start_win32_discover_monitor(monitor, poll_seconds, timeout_seconds):
@@ -3213,6 +3287,7 @@ def _launch_external_import_setup(import_mode):
     configured = str(_load_data_io_config().get("mimics_output_dir", "") or "")
 
     def submitted(selection):
+        global _LAST_TASK_DESCRIPTOR
         source = str(selection.get("source_path", "") or "")
         output_dir = str(selection.get("output_path", "") or "")
         if not source or not output_dir:
@@ -3223,12 +3298,20 @@ def _launch_external_import_setup(import_mode):
         else:
             args = ["--ts-root", source, "--output-dir", output_dir]
         args.extend(["--masks", str(selection.get("mask_selection", "all") or "all")])
-        _run_main_with_args(
+        _LAST_TASK_DESCRIPTOR = {}
+        result = _run_main_with_args(
             args,
             import_mode=import_mode,
             case_info_override=selection.get("case_info"),
         )
-        return dict(_LAST_TASK_DESCRIPTOR)
+        descriptor = dict(_LAST_TASK_DESCRIPTOR)
+        if not descriptor:
+            raise RuntimeError(
+                "Import did not start (result {0}). Review the Mimics log for the reported validation or concurrency error.".format(
+                    result
+                )
+            )
+        return descriptor
 
     return io_setup_mimics.launch(
         mode,

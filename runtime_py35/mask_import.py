@@ -398,6 +398,47 @@ def _stop_mask_import_monitor(key):
         except Exception:
             pass
 
+    subscription = monitor.get("event_subscription")
+    if subscription is not None:
+        try:
+            subscription.unsubscribe()
+        except Exception:
+            pass
+
+
+def _start_mimics_event_mask_import_monitor(monitor, poll_seconds):
+    """Prefer Mimics' timer event for incremental Mask application."""
+    try:
+        events = getattr(mimics, "events", None)
+        subscribe = getattr(events, "subscribe", None)
+        if not callable(subscribe):
+            return False
+        interval = max(0.1, float(poll_seconds))
+        monitor["event_last_tick"] = 0.0
+
+        def callback(*_args, **_kwargs):
+            now = time.time()
+            if now - float(monitor.get("event_last_tick", 0.0)) < interval:
+                return
+            monitor["event_last_tick"] = now
+            try:
+                _mask_import_monitor_tick(monitor)
+            except Exception as exc:
+                monitor.setdefault("errors", []).append(
+                    "Mask apply monitor failed: {0}".format(exc)
+                )
+                _finish_mask_import(monitor)
+
+        subscription = subscribe("timer", callback)
+        if subscription is None:
+            return False
+        monitor["event_callback"] = callback
+        monitor["event_subscription"] = subscription
+        _MASK_IMPORT_MONITORS[monitor["monitor_key"]] = monitor
+        return True
+    except Exception:
+        return False
+
 
 def _finish_mask_import(monitor):
     key = monitor.get("monitor_key")
@@ -544,6 +585,8 @@ def _start_win32_mask_import_monitor(monitor, poll_seconds):
 
 
 def _start_mask_import_monitor(monitor, poll_seconds=0.25):
+    if _start_mimics_event_mask_import_monitor(monitor, poll_seconds):
+        return True
     # On Windows, use the native message-loop timer first. Importing a second
     # Qt binding inside Mimics can itself create a noticeable frozen interval.
     if _start_win32_mask_import_monitor(monitor, poll_seconds):

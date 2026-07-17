@@ -38,10 +38,7 @@ try:
     from fewshot_strategies import DEFAULT_OPTIONS, STRATEGIES, normalize_strategy_options, strategy_defaults, strategy_ids, strategy_label, strategy_summary, suggested_strategy
 except ImportError:
     from tools.fewshot_strategies import DEFAULT_OPTIONS, STRATEGIES, normalize_strategy_options, strategy_defaults, strategy_ids, strategy_label, strategy_summary, suggested_strategy
-try:
-    from ui_theme import configure_application, stylesheet as shared_stylesheet
-except ImportError:
-    from tools.ui_theme import configure_application, stylesheet as shared_stylesheet
+from ui_theme import configure_application, stylesheet as shared_stylesheet
 TITLE = "DINOv3 Few-Shot Training"
 STRATEGY_DATA_KEYS = set(DEFAULT_OPTIONS.keys())
 DECODER_CHOICES = (
