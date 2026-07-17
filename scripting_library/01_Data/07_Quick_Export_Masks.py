@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Clear all Mimics-Script caches, temporary files, and intermediate data."""
+"""快速导出当前 Mimics 项目的所有 Mask 为 NIfTI 文件。
+
+选择输出文件夹后，自动导出所有 Mask 到 <输出目录>/<case_id>/segmentations/。
+无需额外的 UI 配置，即点即用。
+"""
 
 from __future__ import print_function
 
@@ -18,4 +22,4 @@ for _ in range(5):
 
 from _mimics_entrypoint import run_runtime_entry
 
-run_runtime_entry(globals(), __file__, "mimics_stop_background", function_name="clear_cache_main")
+run_runtime_entry(globals(), __file__, "mimics_export", function_name="quick_export_main")

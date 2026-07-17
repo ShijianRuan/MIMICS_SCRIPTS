@@ -11,6 +11,16 @@ import time
 import uuid
 from pathlib import Path
 
+# The embeddable Python (nninteractive_env) uses python313._pth, which fully
+# replaces sys.path and does NOT include the script's own directory. Add both
+# the script directory (so `import ui_theme` works) and the project root (so
+# `import tools.ui_theme` works) before the imports below.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_HERE)
+for _p in (_HERE, _ROOT):
+    if _p and _p not in sys.path:
+        sys.path.insert(0, _p)
+
 try:
     from ui_theme import configure_application
 except ImportError:
