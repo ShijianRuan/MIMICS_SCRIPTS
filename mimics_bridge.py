@@ -27,6 +27,8 @@ RAS_TO_LPS = np.diag([-1.0, -1.0, 1.0, 1.0])
 LPS_TO_RAS = RAS_TO_LPS
 DEFAULT_MIMICS_BUFFER_AXES = [0, 1, 2]
 DEFAULT_MIMICS_BUFFER_FLIPS = [False, False, False]
+DEFAULT_DICOM_RESAMPLE_MODE = "auto"
+DEFAULT_MASK_RESAMPLE_METHOD = "distance"
 
 
 def _voxel_spacing_from_affine(affine: np.ndarray) -> np.ndarray:
@@ -47,6 +49,14 @@ def _unit_axis(affine: np.ndarray, axis: int, spacing: np.ndarray) -> np.ndarray
     if not np.isfinite(norm) or norm <= 0:
         raise ValueError("invalid affine axis {}: zero-length direction".format(axis))
     return vector / norm
+
+
+def _normalize_vector(vec: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    arr = np.asarray(vec, dtype=float)
+    norm = float(np.linalg.norm(arr))
+    if (not np.isfinite(norm)) or norm <= eps:
+        raise ValueError("cannot normalize degenerate vector")
+    return arr / norm
 
 
 # -- Image inspection ---------------------------------------------------
@@ -117,36 +127,75 @@ def get_medical_image_disk_geometry(path: str) -> tuple[tuple[int, int, int], np
 # -- NIfTI -> derived DICOM --------------------------------------------
 
 def _sitk_is_axial(sitk_img, threshold: float = 0.001) -> bool:
-    """Return True if the SimpleITK image has no Z-tilt in row/column cosines.
-
-    A purely axial (or XY-plane-rotated) image has near-zero Z components in
-    both the row direction (column 0 of the direction matrix) and the column
-    direction (column 1).  Oblique acquisitions with gantry-tilt have non-zero
-    Z components and must be resampled before DICOM export so that Mimics
-    background import_dicom_images can group all slices into a single series.
-    """
-    direction = np.array(sitk_img.GetDirection()).reshape(3, 3)
-    spacing = np.array(sitk_img.GetSpacing())
-    row_cos = direction[:, 0] / max(np.linalg.norm(direction[:, 0]), 1e-12)
-    col_cos = direction[:, 1] / max(np.linalg.norm(direction[:, 1]), 1e-12)
+    """Return True if the SimpleITK image has no Z-tilt in row/column cosines."""
+    direction = np.array(sitk_img.GetDirection(), dtype=float).reshape(3, 3)
+    row_cos = _normalize_vector(direction[:, 0])
+    col_cos = _normalize_vector(direction[:, 1])
     return abs(float(row_cos[2])) < threshold and abs(float(col_cos[2])) < threshold
 
 
-def _resample_to_axial(sitk_img):
-    """Resample an oblique image to an axis-aligned LPS grid with the same spacing.
+def _sitk_is_classic_dicom_geometry_compatible(sitk_img, ortho_tol: float = 5e-4) -> bool:
+    """Whether image direction can be represented without geometric shearing.
 
-    The output grid covers the full bounding box of the original image so that
-    no data is lost.  Linear interpolation is used; out-of-bounds voxels are
-    filled with -1024 (air HU, safe for CT resampling).
+    Classic single-frame DICOM uses row/column direction cosines + per-slice
+    position. This assumes an orthonormal voxel basis. If the source grid has
+    shearing (non-orthogonal axis vectors), the series should be resampled to
+    a DICOM-compatible orthonormal grid before export.
     """
+    direction = np.array(sitk_img.GetDirection(), dtype=float).reshape(3, 3)
+    try:
+        row = _normalize_vector(direction[:, 0])
+        col = _normalize_vector(direction[:, 1])
+        slc = _normalize_vector(direction[:, 2])
+    except ValueError:
+        return False
+    if not np.all(np.isfinite([row, col, slc])):
+        return False
+    cross = np.cross(row, col)
+    cross_norm = float(np.linalg.norm(cross))
+    if cross_norm <= 1e-8:
+        return False
+    cross /= cross_norm
+    return (
+        abs(float(np.dot(row, col))) <= ortho_tol
+        and abs(float(np.dot(row, slc))) <= ortho_tol
+        and abs(float(np.dot(col, slc))) <= ortho_tol
+        and abs(float(np.dot(cross, slc))) >= (1.0 - 2.0 * ortho_tol)
+    )
+
+
+def _orthonormalize_direction(direction: np.ndarray) -> np.ndarray:
+    """Build a right-handed orthonormal basis close to the input direction."""
+    row = _normalize_vector(direction[:, 0])
+    col_raw = np.asarray(direction[:, 1], dtype=float)
+    col_ortho = col_raw - row * float(np.dot(col_raw, row))
+    if float(np.linalg.norm(col_ortho)) <= 1e-10:
+        fallback = np.array([0.0, 0.0, 1.0], dtype=float)
+        if abs(float(np.dot(row, fallback))) > 0.95:
+            fallback = np.array([0.0, 1.0, 0.0], dtype=float)
+        col_ortho = fallback - row * float(np.dot(fallback, row))
+    col = _normalize_vector(col_ortho)
+    normal = _normalize_vector(np.cross(row, col))
+    source_k = _normalize_vector(direction[:, 2])
+    if float(np.dot(normal, source_k)) < 0.0:
+        normal = -normal
+    col = _normalize_vector(np.cross(normal, row))
+    return np.column_stack([row, col, normal])
+
+
+def _resample_to_oriented_grid(sitk_img, target_direction: np.ndarray, default_value: float = -1024.0):
+    """Resample image to a supplied orthonormal LPS direction, preserving FOV."""
     import SimpleITK as sitk
 
-    spacing = np.array(sitk_img.GetSpacing())
-    direction = np.array(sitk_img.GetDirection()).reshape(3, 3)
-    origin = np.array(sitk_img.GetOrigin())
+    spacing = np.array(sitk_img.GetSpacing(), dtype=float)
+    direction = np.array(sitk_img.GetDirection(), dtype=float).reshape(3, 3)
+    origin = np.array(sitk_img.GetOrigin(), dtype=float)
     size = np.array(sitk_img.GetSize(), dtype=float)
+    target_direction = np.asarray(target_direction, dtype=float).reshape(3, 3)
 
-    # 8 corners of the original image in world (LPS) coordinates
+    if not np.all(np.isfinite(target_direction)):
+        raise ValueError("target_direction contains non-finite values")
+
     corners = []
     for ix in [0.0, size[0] - 1]:
         for iy in [0.0, size[1] - 1]:
@@ -155,20 +204,79 @@ def _resample_to_axial(sitk_img):
                 corners.append(origin + direction @ (spacing * idx))
     corners = np.array(corners)
 
-    new_origin = corners.min(axis=0)
-    new_size = np.ceil((corners.max(axis=0) - new_origin) / spacing + 1).astype(int)
+    projected = corners @ target_direction
+    mins = projected.min(axis=0)
+    maxs = projected.max(axis=0)
+    new_origin = target_direction @ mins
+    new_size = np.ceil((maxs - mins) / spacing + 1.0).astype(int)
+    new_size = np.maximum(new_size, 1)
 
     ref = sitk.Image(int(new_size[0]), int(new_size[1]), int(new_size[2]),
                      sitk_img.GetPixelID())
-    ref.SetOrigin(new_origin.tolist())
+    ref.SetOrigin([float(v) for v in new_origin.tolist()])
     ref.SetSpacing(spacing.tolist())
-    ref.SetDirection([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0])
+    ref.SetDirection([float(v) for v in target_direction.reshape(-1)])
 
     resampler = sitk.ResampleImageFilter()
     resampler.SetReferenceImage(ref)
     resampler.SetInterpolator(sitk.sitkLinear)
-    resampler.SetDefaultPixelValue(-1024.0)
+    resampler.SetDefaultPixelValue(float(default_value))
     return resampler.Execute(sitk_img)
+
+
+def _dicom_resample_policy():
+    mode = str(os.environ.get("MIMICS_DICOM_RESAMPLE_MODE", DEFAULT_DICOM_RESAMPLE_MODE) or "").strip().lower()
+    if mode not in ("auto", "axial", "never"):
+        mode = "auto"
+    return mode
+
+
+def _prepare_dicom_source_grid(sitk_img):
+    """Return (image, info) after applying DICOM export grid policy.
+
+    info fields:
+      - resampled_source_grid: bool
+      - resampled_to_axial: bool
+      - resample_mode: str
+      - resample_reason: str
+      - target_grid: "original" | "axial" | "orthonormal_oblique"
+    """
+    mode = _dicom_resample_policy()
+    info = {
+        "resampled_source_grid": False,
+        "resampled_to_axial": False,
+        "resample_mode": mode,
+        "resample_reason": "",
+        "target_grid": "original",
+    }
+
+    if mode == "never":
+        return sitk_img, info
+
+    if mode == "axial":
+        if not _sitk_is_axial(sitk_img):
+            sitk_img = _resample_to_oriented_grid(sitk_img, np.eye(3, dtype=float))
+            info.update({
+                "resampled_source_grid": True,
+                "resampled_to_axial": True,
+                "resample_reason": "forced_axial",
+                "target_grid": "axial",
+            })
+        return sitk_img, info
+
+    if _sitk_is_classic_dicom_geometry_compatible(sitk_img):
+        return sitk_img, info
+
+    direction = np.array(sitk_img.GetDirection(), dtype=float).reshape(3, 3)
+    target_direction = _orthonormalize_direction(direction)
+    sitk_img = _resample_to_oriented_grid(sitk_img, target_direction)
+    info.update({
+        "resampled_source_grid": True,
+        "resampled_to_axial": False,
+        "resample_reason": "non_orthonormal_direction",
+        "target_grid": "orthonormal_oblique",
+    })
+    return sitk_img, info
 
 
 def nifti_to_derived_dicom(
@@ -190,14 +298,11 @@ def nifti_to_derived_dicom(
 
     sitk_img = _read_image_sitk_lps(nifti_path)
 
-    # Resample oblique (3D-tilted) images to axis-aligned LPS so that Mimics
-    # background import_dicom_images groups all slices into one series.
-    resampled_to_axial = False
-    if not _sitk_is_axial(sitk_img):
-        sitk_img = _resample_to_axial(sitk_img)
-        resampled_to_axial = True
+    sitk_img, grid_info = _prepare_dicom_source_grid(sitk_img)
+    resampled_to_axial = bool(grid_info.get("resampled_to_axial"))
+    resampled_source_grid = bool(grid_info.get("resampled_source_grid"))
 
-    if source_nifti_out and (resampled_to_axial or not is_nifti_file(nifti_path)):
+    if source_nifti_out and (resampled_source_grid or not is_nifti_file(nifti_path)):
         import SimpleITK as sitk
 
         out_path = Path(source_nifti_out)
@@ -354,8 +459,12 @@ def nifti_to_derived_dicom(
         "origin": [float(v) for v in origin],
         "direction": [float(v) for v in direction_matrix.flatten()],
         "affine_lps": affine_lps.tolist(),
+        "resampled_source_grid": resampled_source_grid,
         "resampled_to_axial": resampled_to_axial,
-        "source_nifti_path": str(Path(source_nifti_out).resolve()) if (source_nifti_out and resampled_to_axial) else "",
+        "resample_mode": grid_info.get("resample_mode", "auto"),
+        "resample_reason": grid_info.get("resample_reason", ""),
+        "resampled_grid": grid_info.get("target_grid", "original"),
+        "source_nifti_path": str(Path(source_nifti_out).resolve()) if (source_nifti_out and resampled_source_grid) else "",
         "series_uid": str(series_uid),
         "dicom_folder": str(out_dir),
     }
@@ -365,16 +474,13 @@ def prepare_source_fastpath_nifti(nifti_path: str, source_nifti_out: str) -> dic
     """Prepare an on-demand source NIfTI aligned with Mimics-imported grid.
 
     This is a lightweight helper for nnInteractive fast path. It performs the
-    same oblique->axial resampling rule as :func:`nifti_to_derived_dicom`, but
+    same DICOM-grid preparation rule as :func:`nifti_to_derived_dicom`, but
     does not emit DICOM slices.
     """
     import SimpleITK as sitk
 
     sitk_img = _read_image_sitk_lps(nifti_path)
-    resampled_to_axial = False
-    if not _sitk_is_axial(sitk_img):
-        sitk_img = _resample_to_axial(sitk_img)
-        resampled_to_axial = True
+    sitk_img, grid_info = _prepare_dicom_source_grid(sitk_img)
 
     out_path = Path(source_nifti_out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -388,7 +494,11 @@ def prepare_source_fastpath_nifti(nifti_path: str, source_nifti_out: str) -> dic
         "shape": [int(shape_3d[0]), int(shape_3d[1]), int(shape_3d[2])],
         "spacing": [float(spacing[0]), float(spacing[1]), float(spacing[2])],
         "affine_lps": affine_lps.tolist(),
-        "resampled_to_axial": resampled_to_axial,
+        "resampled_source_grid": bool(grid_info.get("resampled_source_grid")),
+        "resampled_to_axial": bool(grid_info.get("resampled_to_axial")),
+        "resample_mode": grid_info.get("resample_mode", "auto"),
+        "resample_reason": grid_info.get("resample_reason", ""),
+        "resampled_grid": grid_info.get("target_grid", "original"),
         "source_nifti_path": str(out_path.resolve()),
     }
 
@@ -697,47 +807,81 @@ def _mask_file_declares_spatial_geometry(path: str) -> bool:
     return "space origin:" in header or "space directions:" in header
 
 
-def resample_mask_to_image_grid(
-    mask: np.ndarray,
-    mask_affine: np.ndarray,
-    image_shape: tuple[int, int, int],
-    image_affine: np.ndarray,
-    allow_voxel_aligned_fallback: bool = False,
-) -> np.ndarray:
-    """Nearest-neighbor resample of a mask into image voxel index space."""
-    if tuple(mask.shape) == tuple(image_shape) and _affine_close(mask_affine, image_affine):
-        return np.ascontiguousarray(mask.astype(np.uint8))
-    if tuple(mask.shape) == tuple(image_shape) and not _affine_is_usable(mask_affine):
-        return np.ascontiguousarray(mask.astype(np.uint8))
-    if allow_voxel_aligned_fallback:
-        if tuple(mask.shape) == tuple(image_shape):
-            return np.ascontiguousarray(mask.astype(np.uint8))
-        raise ValueError(
-            "mask header has no origin/direction and its shape does not match the target grid: "
-            "{} != {}".format(tuple(mask.shape), tuple(image_shape))
-        )
+def _mask_resample_method() -> str:
+    method = str(os.environ.get("MIMICS_MASK_RESAMPLE_METHOD", DEFAULT_MASK_RESAMPLE_METHOD) or "").strip().lower()
+    if method not in ("distance", "nearest"):
+        method = DEFAULT_MASK_RESAMPLE_METHOD
+    return method
 
-    if not _affine_is_usable(mask_affine):
-        raise ValueError(
-            "mask affine is singular or invalid; spatial resampling is unsafe"
-        )
-    if not _affine_is_usable(image_affine):
-        raise ValueError(
-            "target image affine is singular or invalid; spatial resampling is unsafe"
-        )
-    try:
-        inv_mask_affine = np.linalg.inv(mask_affine)
-    except np.linalg.LinAlgError as exc:
-        raise ValueError(
-            "mask affine could not be inverted for spatial resampling: {}".format(exc)
-        )
+
+def _sitk_reference_from_shape_affine(image_shape, image_affine):
+    import SimpleITK as sitk
+
+    affine_lps = RAS_TO_LPS @ np.asarray(image_affine, dtype=float)
+    spacing = _voxel_spacing_from_affine(affine_lps)
+    direction = affine_lps[:3, :3] / spacing
+    if not np.all(np.isfinite(direction)):
+        raise ValueError("target image affine has invalid direction columns")
+    reference = sitk.Image(int(image_shape[0]), int(image_shape[1]), int(image_shape[2]), sitk.sitkFloat32)
+    reference.SetOrigin([float(value) for value in affine_lps[:3, 3]])
+    reference.SetSpacing([float(value) for value in spacing])
+    reference.SetDirection([float(value) for value in direction.reshape(-1)])
+    return reference
+
+
+def _sitk_binary_from_mask(mask: np.ndarray, mask_affine: np.ndarray):
+    import SimpleITK as sitk
+
+    binary = np.ascontiguousarray((mask != 0).astype(np.uint8))
+    affine_lps = RAS_TO_LPS @ np.asarray(mask_affine, dtype=float)
+    spacing = _voxel_spacing_from_affine(affine_lps)
+    direction = affine_lps[:3, :3] / spacing
+    if not np.all(np.isfinite(direction)):
+        raise ValueError("mask affine has invalid direction columns")
+    image = sitk.GetImageFromArray(np.transpose(binary, (2, 1, 0)))
+    image = sitk.Cast(image, sitk.sitkUInt8)
+    image.SetOrigin([float(value) for value in affine_lps[:3, 3]])
+    image.SetSpacing([float(value) for value in spacing])
+    image.SetDirection([float(value) for value in direction.reshape(-1)])
+    return image
+
+
+def _resample_mask_distance_field(mask: np.ndarray, mask_affine: np.ndarray, image_shape, image_affine) -> np.ndarray:
+    """Resample binary mask by distance field + linear interpolation.
+
+    Compared with pure nearest-neighbor index mapping, distance-field
+    interpolation typically reduces stair-step artifacts after rotation or
+    oblique regridding while preserving a binary output via zero-threshold.
+    """
+    import SimpleITK as sitk
+
+    source = _sitk_binary_from_mask(mask, mask_affine)
+    reference = _sitk_reference_from_shape_affine(image_shape, image_affine)
+
+    distance = sitk.SignedMaurerDistanceMap(
+        source,
+        insideIsPositive=False,
+        squaredDistance=False,
+        useImageSpacing=True,
+    )
+    resampler = sitk.ResampleImageFilter()
+    resampler.SetReferenceImage(reference)
+    resampler.SetInterpolator(sitk.sitkLinear)
+    max_spacing = max(float(value) for value in reference.GetSpacing())
+    resampler.SetDefaultPixelValue(max(1.0, max_spacing * 4.0))
+    distance_resampled = resampler.Execute(distance)
+    distance_xyz = _sitk_to_xyz_array(distance_resampled)
+    return np.ascontiguousarray((distance_xyz <= 0.0).astype(np.uint8))
+
+
+def _resample_mask_nearest_numpy(mask: np.ndarray, mask_affine: np.ndarray, image_shape, image_affine) -> np.ndarray:
+    """Nearest-neighbor resample of a mask into image voxel index space."""
+    inv_mask_affine = np.linalg.inv(mask_affine)
     out = np.zeros(tuple(int(v) for v in image_shape), dtype=np.uint8)
     x_count, y_count, z_count = [int(v) for v in image_shape]
     yy_template = np.arange(y_count, dtype=float)
     xx_template = np.arange(x_count, dtype=float)
 
-    # Work slice-by-slice to avoid allocating a full 4D coordinate grid for
-    # large CT volumes.
     for z_index in range(z_count):
         xx, yy = np.meshgrid(xx_template, yy_template, indexing="ij")
         coords = np.vstack([
@@ -758,6 +902,57 @@ def resample_mask_to_image_grid(
             values[valid] = mask[src_idx[0, valid], src_idx[1, valid], src_idx[2, valid]]
             out[:, :, z_index] = values.reshape((x_count, y_count))
     return np.ascontiguousarray(out)
+
+
+def resample_mask_to_image_grid(
+    mask: np.ndarray,
+    mask_affine: np.ndarray,
+    image_shape: tuple[int, int, int],
+    image_affine: np.ndarray,
+    allow_voxel_aligned_fallback: bool = False,
+) -> np.ndarray:
+    """Resample mask into image voxel index space.
+
+    Default method is distance-field interpolation for binary masks to reduce
+    jagged boundaries after geometric transforms. Set environment variable
+    MIMICS_MASK_RESAMPLE_METHOD=nearest to use legacy nearest-neighbor logic.
+    """
+    if tuple(mask.shape) == tuple(image_shape) and _affine_close(mask_affine, image_affine):
+        return np.ascontiguousarray(mask.astype(np.uint8))
+    if tuple(mask.shape) == tuple(image_shape) and not _affine_is_usable(mask_affine):
+        return np.ascontiguousarray(mask.astype(np.uint8))
+    if allow_voxel_aligned_fallback:
+        if tuple(mask.shape) == tuple(image_shape):
+            return np.ascontiguousarray(mask.astype(np.uint8))
+        raise ValueError(
+            "mask header has no origin/direction and its shape does not match the target grid: "
+            "{} != {}".format(tuple(mask.shape), tuple(image_shape))
+        )
+
+    if not _affine_is_usable(mask_affine):
+        raise ValueError(
+            "mask affine is singular or invalid; spatial resampling is unsafe"
+        )
+    if not _affine_is_usable(image_affine):
+        raise ValueError(
+            "target image affine is singular or invalid; spatial resampling is unsafe"
+        )
+    method = _mask_resample_method()
+    binary_like = bool(np.all((mask == 0) | (mask == 1)))
+
+    if method == "distance" and binary_like:
+        try:
+            return _resample_mask_distance_field(mask, mask_affine, image_shape, image_affine)
+        except Exception:
+            # Keep legacy behavior if SimpleITK distance-map resample fails.
+            pass
+
+    try:
+        return _resample_mask_nearest_numpy(mask, mask_affine, image_shape, image_affine)
+    except np.linalg.LinAlgError as exc:
+        raise ValueError(
+            "mask affine could not be inverted for spatial resampling: {}".format(exc)
+        )
 
 
 def apply_buffer_mapping(array: np.ndarray, axes: list[int], flips: list[bool]) -> np.ndarray:
@@ -1094,6 +1289,13 @@ def do_prepare(params: dict) -> dict:
 
     # Determine image source
     source_image_shape = None
+    prepare_grid_info = {
+        "resampled_source_grid": False,
+        "resampled_to_axial": False,
+        "resampled_grid": "original",
+        "resample_mode": _dicom_resample_policy(),
+        "resample_reason": "",
+    }
     if is_dicom_folder(image_path):
         dicom_folder = image_path
         # Internal resampling uses RAS affines. get_image_affine_from_dicom()
@@ -1122,9 +1324,16 @@ def do_prepare(params: dict) -> dict:
             source_nifti_out=source_cache or None,
             modality=requested_modality,
         )
+        prepare_grid_info = {
+            "resampled_source_grid": bool(info.get("resampled_source_grid")),
+            "resampled_to_axial": bool(info.get("resampled_to_axial")),
+            "resampled_grid": str(info.get("resampled_grid", "original") or "original"),
+            "resample_mode": str(info.get("resample_mode", _dicom_resample_policy()) or _dicom_resample_policy()),
+            "resample_reason": str(info.get("resample_reason", "") or ""),
+        }
         dicom_folder = info["dicom_folder"]
         # Use the actual DICOM grid affine for mask resampling and Mimics coordinate
-        # metadata.  For oblique NIfTI files that were resampled to axis-aligned,
+        # metadata.  For source images that were resampled for DICOM compatibility,
         # this differs from the original NIfTI affine.
         dicom_affine_lps = np.array(info["affine_lps"]).reshape(4, 4)
         image_affine = LPS_TO_RAS @ dicom_affine_lps
@@ -1144,7 +1353,7 @@ def do_prepare(params: dict) -> dict:
             ("nifti_ijk_matches_derived_dicom_columns_rows_slices_v1" if is_nifti_file(image_path)
              else "medical_image_ijk_matches_derived_dicom_columns_rows_slices_v1")
             if source_grid_matches_mimics
-            else "derived_dicom_axial_lps_resampled_from_source_image_v1"
+            else "derived_dicom_lps_resampled_from_source_image_v2"
         )
         source_world_coordinate_system = "ras"
         mimics_world_coordinate_system = "lps"
@@ -1174,10 +1383,10 @@ def do_prepare(params: dict) -> dict:
     # Both matrices are expressed in RAS world coordinates.
     # source_voxel_to_ras_matrix: source_image_path geometry.
     # mimics_voxel_to_ras_matrix: the grid that Mimics actually imports
-    #   (may differ from source when oblique NIfTI is resampled to axial).
+    #   (may differ from source when geometry is resampled for DICOM compatibility).
     if is_medical_image_file(image_path):
         source_voxel_to_ras_matrix = source_nifti_affine.astype(float)
-        mimics_voxel_to_ras_matrix = image_affine.astype(float)  # DICOM axial affine
+        mimics_voxel_to_ras_matrix = image_affine.astype(float)  # DICOM import affine
     else:
         source_voxel_to_ras_matrix = image_affine.astype(float)
         mimics_voxel_to_ras_matrix = image_affine.astype(float)
@@ -1244,6 +1453,11 @@ def do_prepare(params: dict) -> dict:
         "source_fingerprint": source_fingerprint,
         "mimics_voxel_to_ras_matrix": mimics_voxel_to_ras_matrix.tolist(),
         "mimics_to_source_index_matrix": mimics_to_source_index_matrix.astype(float).tolist(),
+        "resampled_source_grid": bool(prepare_grid_info.get("resampled_source_grid")),
+        "resampled_to_axial": bool(prepare_grid_info.get("resampled_to_axial")),
+        "resampled_grid": prepare_grid_info.get("resampled_grid", "original"),
+        "resample_mode": prepare_grid_info.get("resample_mode", _dicom_resample_policy()),
+        "resample_reason": prepare_grid_info.get("resample_reason", ""),
         "source_case_dir": params.get("case_dir", ""),
         "masks": mask_results,
     }

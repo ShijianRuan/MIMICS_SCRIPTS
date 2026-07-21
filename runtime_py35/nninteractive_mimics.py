@@ -1028,9 +1028,14 @@ def _source_image_export(image, config):
         return None
     path = os.path.abspath(os.path.expandvars(os.path.expanduser(str(path))))
     lower_path = path.lower()
+    derived_resampled_index_spaces = (
+        "derived_dicom_axial_lps_resampled_from_nifti_v1",
+        "derived_dicom_lps_resampled_from_source_image_v2",
+    )
     supported_nifti_index_spaces = (
         "nifti_ijk_matches_derived_dicom_columns_rows_slices_v1",
         "derived_dicom_axial_lps_resampled_from_nifti_v1",
+        "derived_dicom_lps_resampled_from_source_image_v2",
     )
     is_nifti = kind == "nifti" and (
         index_space in supported_nifti_index_spaces
@@ -1060,7 +1065,7 @@ def _source_image_export(image, config):
 
     # On-demand mode for derived oblique-NIfTI imports:
     # build a cached axial NIfTI only when nnInteractive is actually used.
-    if is_nifti and index_space == "derived_dicom_axial_lps_resampled_from_nifti_v1":
+    if is_nifti and index_space in derived_resampled_index_spaces:
         case_id = "case"
         if source_case_dir:
             case_id = os.path.basename(os.path.normpath(source_case_dir)) or case_id
@@ -1089,13 +1094,13 @@ def _source_image_export(image, config):
         )[:48] or "case"
         cache_path = os.path.join(
             cache_root,
-            "{0}_{1}_axial_source.nii.gz".format(safe_case_id, cache_key),
+            "{0}_{1}_aligned_source.nii.gz".format(safe_case_id, cache_key),
         )
         if not os.path.isfile(cache_path):
             try:
                 _mimics_log(
                     logging.INFO,
-                    "nnInteractive source-image fast path (on-demand) is preparing axial source cache: {0}".format(cache_path),
+                    "nnInteractive source-image fast path (on-demand) is preparing aligned source cache: {0}".format(cache_path),
                 )
                 _call_mimics_bridge(
                     config,

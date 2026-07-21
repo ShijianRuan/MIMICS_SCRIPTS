@@ -114,8 +114,13 @@ def write_json_atomic(path, payload, retries=20, max_sleep=0.25):
         raise last_error
 
 
-def run_bridge(python_exe, params):
+def run_bridge(python_exe, params, env_overrides=None):
     env = os.environ.copy()
+    if env_overrides:
+        for key, value in env_overrides.items():
+            if value is None:
+                continue
+            env[str(key)] = str(value)
     env.setdefault("OMP_NUM_THREADS", "1")
     env.setdefault("MKL_NUM_THREADS", "1")
     env.setdefault("OPENBLAS_NUM_THREADS", "1")
@@ -147,7 +152,7 @@ def find_mimics_exe(explicit=None):
     return runtime_common.find_mimics_exe()
 
 
-def discover_cases(ts_root, cases, python_exe, mask_selection="all"):
+def discover_cases(ts_root, cases, python_exe, mask_selection="all", env_overrides=None):
     result = run_bridge(
         python_exe,
         {
@@ -156,6 +161,7 @@ def discover_cases(ts_root, cases, python_exe, mask_selection="all"):
             "cases_filter": sorted(cases) if cases else None,
             "mask_selection": mask_selection,
         },
+        env_overrides=env_overrides,
     )
     if result.get("mask_mode") == "named" and int(result.get("mask_count", 0) or 0) == 0:
         raise RuntimeError("No segmentation files matched --masks={0}".format(mask_selection))
@@ -175,23 +181,38 @@ def _acquire_background_mimics_lock(owner, wait_seconds=0.0):
     return lock
 
 
-def launch_create_mcs(output_dir, mimics_exe, bridge_python, lock_timeout_seconds=0.0):
+def launch_create_mcs(
+    output_dir,
+    mimics_exe,
+    bridge_python,
+    lock_timeout_seconds=0.0,
+    dicom_resample_mode=None,
+    mask_resample_method=None,
+):
     runtime_dir = Path(runtime_common.import_queue_runtime_dir(str(ROOT), str(output_dir)))
     runtime_dir.mkdir(parents=True, exist_ok=True)
     runner = runtime_dir / "_run_create_mcs.py"
-    runner.write_text(
-        "\n".join([
-            "# Auto-generated runner for background Mimics .mcs creation",
-            "import sys, os",
-            "sys.path.insert(0, r'{}')".format(str(RUNTIME)),
-            "os.environ['MIMICS_BRIDGE_PYTHON'] = r'{}'".format(str(bridge_python)),
-            "os.environ['MIMICS_BRIDGE_SCRIPT'] = r'{}'".format(str(ROOT / "mimics_bridge.py")),
-            "import create_mcs_batch",
-            "create_mcs_batch.main(r'{}', runtime_dir=r'{}')".format(str(output_dir), str(runtime_dir)),
-            "",
-        ]),
-        encoding="utf-8",
-    )
+    runner_lines = [
+        "# Auto-generated runner for background Mimics .mcs creation",
+        "import sys, os",
+        "sys.path.insert(0, r'{}')".format(str(RUNTIME)),
+        "os.environ['MIMICS_BRIDGE_PYTHON'] = r'{}'".format(str(bridge_python)),
+        "os.environ['MIMICS_BRIDGE_SCRIPT'] = r'{}'".format(str(ROOT / "mimics_bridge.py")),
+    ]
+    if dicom_resample_mode:
+        runner_lines.append(
+            "os.environ['MIMICS_DICOM_RESAMPLE_MODE'] = r'{}'".format(str(dicom_resample_mode))
+        )
+    if mask_resample_method:
+        runner_lines.append(
+            "os.environ['MIMICS_MASK_RESAMPLE_METHOD'] = r'{}'".format(str(mask_resample_method))
+        )
+    runner_lines.extend([
+        "import create_mcs_batch",
+        "create_mcs_batch.main(r'{}', runtime_dir=r'{}')".format(str(output_dir), str(runtime_dir)),
+        "",
+    ])
+    runner.write_text("\n".join(runner_lines), encoding="utf-8")
     lock = _acquire_background_mimics_lock("batch .mcs creation", lock_timeout_seconds)
     log = open(str(runtime_dir / "_background_mimics.log"), "ab")
     mimics_log = runtime_dir / "_background_mimics_application.log"
@@ -380,7 +401,11 @@ def cmd_prepare_import(args):
     output_dir = Path(args.output_dir).resolve() if args.output_dir else ts_root / "mcs_output"
     output_dir.mkdir(parents=True, exist_ok=True)
     cases_filter = set(args.cases.split(",")) if args.cases else None
-    cases = discover_cases(ts_root, cases_filter, bridge_python, args.masks)
+    bridge_env = {
+        "MIMICS_DICOM_RESAMPLE_MODE": args.dicom_resample_mode,
+        "MIMICS_MASK_RESAMPLE_METHOD": args.mask_resample_method,
+    }
+    cases = discover_cases(ts_root, cases_filter, bridge_python, args.masks, env_overrides=bridge_env)
     print("Discovered {} case(s).".format(len(cases)))
     runtime_dir = Path(runtime_common.import_queue_runtime_dir(str(ROOT), str(output_dir)))
     run_root = Path(runtime_common.import_runtime_base(str(ROOT))) / "import_runs" / (
@@ -405,7 +430,7 @@ def cmd_prepare_import(args):
             "case_id": case_id,
         }
         try:
-            result = run_bridge(bridge_python, params)
+            result = run_bridge(bridge_python, params, env_overrides=bridge_env)
             result["output_mcs"] = str(output_dir / (case_id + ".mcs"))
             write_json_atomic(work_dir / "prepare_manifest.json", result)
             write_json_atomic(
@@ -434,7 +459,14 @@ def cmd_prepare_import(args):
         print("A background Mimics executable was not found. Manifests are ready; run .mcs creation later.", file=sys.stderr)
         return 2
     try:
-        proc = launch_create_mcs(output_dir, mimics_exe, bridge_python, args.background_mimics_lock_timeout_seconds)
+        proc = launch_create_mcs(
+            output_dir,
+            mimics_exe,
+            bridge_python,
+            args.background_mimics_lock_timeout_seconds,
+            dicom_resample_mode=args.dicom_resample_mode,
+            mask_resample_method=args.mask_resample_method,
+        )
     except ResourceLockTimeout as exc:
         print("Background Mimics is busy: {}".format(exc), file=sys.stderr)
         return 75
@@ -644,6 +676,18 @@ def build_parser():
     p.add_argument("--mimics-exe")
     p.add_argument("--axes", type=parse_axes, default=[0, 1, 2])
     p.add_argument("--flips", type=parse_flips, default=[False, False, False])
+    p.add_argument(
+        "--dicom-resample-mode",
+        choices=["auto", "axial", "never"],
+        default="auto",
+        help="Derived DICOM grid policy for source medical images.",
+    )
+    p.add_argument(
+        "--mask-resample-method",
+        choices=["distance", "nearest"],
+        default="distance",
+        help="Mask resampling method when mapping to image grids.",
+    )
     p.add_argument("--no-create-mcs", action="store_true")
     p.add_argument("--background-mimics-lock-timeout-seconds", type=float, default=0.0)
     p.set_defaults(func=cmd_prepare_import)

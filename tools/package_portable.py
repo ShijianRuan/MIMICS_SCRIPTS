@@ -43,6 +43,7 @@ INCLUDE_FILES = [
 ]
 REQUIRED_EXTERNAL_UI_FILES = [
     "tools/io_path_setup_ui.py",
+    "tools/single_case_import_worker.py",
     "tools/ui_theme.py",
     "tools/mask_file_picker_ui.py",
     "tools/fewshot_training_setup_ui.py",

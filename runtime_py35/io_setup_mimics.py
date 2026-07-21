@@ -21,6 +21,17 @@ _IO_SETUP_MONITORS = {}
 _ALERTED = set()
 
 
+def _allow_windows_event_monitor():
+    """Opt-in switch for Mimics event monitoring on Windows.
+
+    Some Mimics builds raise an internal AttributeError during Subscription
+    destructor after explicit unsubscribe. Default to Win32 timer callbacks on
+    Windows and only use Mimics events when explicitly enabled.
+    """
+    value = os.environ.get("MIMICS_IO_SETUP_USE_EVENT_TIMER", "").strip().lower()
+    return value in ("1", "true", "yes", "on")
+
+
 def _project_root():
     return runtime_common.find_root(
         os.path.dirname(os.path.abspath(__file__)),
@@ -336,9 +347,12 @@ def _start_win32_monitor(monitor, poll_seconds):
             _tick(monitor)
 
         callback_ref = callback_type(callback)
-        user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint, callback_type]
+        callback_ptr = ctypes.cast(callback_ref, ctypes.c_void_p)
+        # Keep callback signature generic to avoid WinFunctionType class
+        # identity mismatches when other modules set argtypes on the same API.
+        user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint, ctypes.c_void_p]
         user32.SetTimer.restype = ctypes.c_size_t
-        timer_id = user32.SetTimer(None, 0, max(250, int(poll_seconds * 1000)), callback_ref)
+        timer_id = user32.SetTimer(None, 0, max(250, int(poll_seconds * 1000)), callback_ptr)
         if not timer_id:
             return False
         monitor["callback"] = callback_ref
@@ -377,10 +391,16 @@ def _start_mimics_event_monitor(monitor, poll_seconds):
 
 def _start_monitor(monitor, poll_seconds=2.0):
     _IO_SETUP_MONITORS[monitor["key"]] = monitor
-    if _start_mimics_event_monitor(monitor, poll_seconds):
-        return True
-    if _start_win32_monitor(monitor, poll_seconds):
-        return True
+    if os.name == "nt":
+        # Keep Mimics events opt-in on Windows to avoid Subscription cleanup
+        # instability in certain Mimics versions.
+        if _start_win32_monitor(monitor, poll_seconds):
+            return True
+        if _allow_windows_event_monitor() and _start_mimics_event_monitor(monitor, poll_seconds):
+            return True
+    else:
+        if _start_mimics_event_monitor(monitor, poll_seconds):
+            return True
     try:
         from PyQt5.QtCore import QTimer
         timer = QTimer()

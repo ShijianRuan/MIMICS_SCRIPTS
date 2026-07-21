@@ -176,9 +176,19 @@ def _clear_stale_queue_stop(output_dir):
     stop_path = _queue_stop_path(output_dir)
     if not os.path.isfile(stop_path):
         return
-    holder = runtime_common.active_resource_lock(
-        _project_root(), "background_mimics.lock"
-    )
+    # Some Mimics Python builds can become unstable around short-lived Win32
+    # lock probes (msvcrt.locking) during UI-driven startup. For this stale
+    # stop cleanup, a non-locking read is sufficient and avoids that code path.
+    holder = {}
+    try:
+        lock_path = runtime_common.resource_lock_path(
+            _project_root(), "background_mimics.lock"
+        )
+        payload = runtime_common.read_json(lock_path, {}) or {}
+        if isinstance(payload, dict):
+            holder = payload
+    except Exception:
+        holder = {}
     if holder and str(holder.get("kind") or "").lower() == "create_mcs":
         holder_output = str(holder.get("output_dir") or "")
         if (
@@ -204,10 +214,14 @@ def _clear_stale_queue_stop(output_dir):
 
 def _set_last_import_task(run_root, output_dir, title):
     global _LAST_TASK_DESCRIPTOR
+    _checkpoint_record("set_last_task_enter", run_root=run_root, output_dir=output_dir, title=title)
     status_path = os.path.join(run_root, "status.json")
     task_stop_path = os.path.join(run_root, "stop.json")
+    _checkpoint_record("set_last_task_paths_ready", status_path=status_path, task_stop_path=task_stop_path)
     queue_stop_path = _queue_stop_path(output_dir)
+    _checkpoint_record("set_last_task_queue_stop_ready", queue_stop_path=queue_stop_path)
     _clear_stale_queue_stop(output_dir)
+    _checkpoint_record("set_last_task_after_clear_stale", output_dir=output_dir)
     _LAST_TASK_DESCRIPTOR = {
         "kind": "import",
         "title": str(title),
@@ -218,6 +232,7 @@ def _set_last_import_task(run_root, output_dir, title):
         "log_path": _rt(output_dir, "logs", "mimics_import.log"),
         "output_path": os.path.abspath(output_dir),
     }
+    _checkpoint_record("set_last_task_done", descriptor_keys=sorted(_LAST_TASK_DESCRIPTOR.keys()))
     return status_path, task_stop_path
 
 
@@ -255,6 +270,71 @@ _safe_case_filename = runtime_common.safe_filename
 _find_root = runtime_common.find_root
 _hidden_process_kwargs = runtime_common.hidden_process_kwargs
 _background_process_kwargs = runtime_common.background_process_kwargs
+
+
+def _allow_windows_event_monitor():
+    """Opt-in switch for Mimics event timer usage on Windows.
+
+    Certain Mimics versions can emit Subscription.__del__ AttributeError after
+    explicit unsubscribe. Prefer Win32 SetTimer by default and only enable
+    Mimics event subscriptions when this flag is set.
+    """
+    value = os.environ.get("MIMICS_IMPORT_USE_EVENT_TIMER", "").strip().lower()
+    return value in ("1", "true", "yes", "on")
+
+
+def _checkpoint_enabled():
+    value = os.environ.get("MIMICS_IMPORT_CHECKPOINT", "1").strip().lower()
+    return value not in ("0", "false", "no", "off")
+
+
+def _checkpoint_record(stage, **fields):
+    """Write last-stage breadcrumbs for crash diagnosis.
+
+    Mimics host crashes can terminate this script before UI-facing status files
+    update. Keep a best-effort local breadcrumb trail under debug_out.
+    """
+    if not _checkpoint_enabled():
+        return
+    try:
+        root = runtime_common.import_runtime_base(_project_root())
+        out_dir = os.path.join(root, "debug_out")
+        if not os.path.isdir(out_dir):
+            os.makedirs(out_dir)
+        record = {
+            "stage": str(stage),
+            "pid": int(os.getpid()),
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "epoch": time.time(),
+        }
+        for key, value in (fields or {}).items():
+            try:
+                json.dumps(value)
+                record[str(key)] = value
+            except Exception:
+                record[str(key)] = str(value)
+        runtime_common.write_json_atomic(
+            os.path.join(out_dir, "mimics_import_checkpoint_{0}.json".format(os.getpid())),
+            record,
+        )
+        with open(
+            os.path.join(out_dir, "mimics_import_checkpoint_{0}.jsonl".format(os.getpid())),
+            "a",
+            encoding="utf-8",
+        ) as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _startup_cleanup_enabled():
+    """Whether to run startup stale cleanup from import entry.
+
+    This cleanup touches Win32 lock probing and process checks. Keep it opt-in
+    for import startup to avoid host instability on certain Mimics builds.
+    """
+    value = os.environ.get("MIMICS_IMPORT_STARTUP_CLEANUP", "").strip().lower()
+    return value in ("1", "true", "yes", "on")
 
 
 def _write_json_quick(path, value):
@@ -1986,7 +2066,17 @@ def _start_batch_prepare_monitor(job_dir, work_dir, timeout_seconds=1800,
     if batch_info:
         monitor.update(batch_info)
 
-    if _start_mimics_event_monitor(
+    if os.name == "nt":
+        if _start_win32_batch_prepare_monitor(monitor, poll_seconds, timeout_seconds):
+            return True
+        if _allow_windows_event_monitor() and _start_mimics_event_monitor(
+            monitor,
+            lambda: _batch_prepare_tick(monitor),
+            poll_seconds,
+            "_start_batch_prepare_monitor Mimics timer callback failed",
+        ):
+            return True
+    elif _start_mimics_event_monitor(
         monitor,
         lambda: _batch_prepare_tick(monitor),
         poll_seconds,
@@ -2061,10 +2151,11 @@ def _start_win32_batch_prepare_monitor(monitor, poll_seconds, timeout_seconds):
             _append_import_exception(monitor.get("output_dir", ""), "_start_win32_batch_prepare_monitor timer callback failed", exc)
 
     callback = TIMERPROC(_timer_proc)
-    user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint, TIMERPROC]
+    callback_ptr = ctypes.cast(callback, ctypes.c_void_p)
+    user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint, ctypes.c_void_p]
     user32.SetTimer.restype = ctypes.c_size_t
     user32.KillTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    timer_id = user32.SetTimer(None, 0, timer_interval_ms, callback)
+    timer_id = user32.SetTimer(None, 0, timer_interval_ms, callback_ptr)
     if not timer_id:
         return False
     monitor["callback"] = callback
@@ -2663,7 +2754,7 @@ def _start_first_mcs_monitor(output_dir, target_mcs=None, timeout_seconds=900, p
         "deadline": time.time() + (timeout_seconds if target_mcs else max(timeout_seconds, 7 * 86400)),
     }
 
-    if _start_mimics_event_monitor(
+    if os.name != "nt" and _start_mimics_event_monitor(
         monitor,
         lambda: _first_mcs_monitor_tick(monitor),
         poll_seconds,
@@ -2671,25 +2762,26 @@ def _start_first_mcs_monitor(output_dir, target_mcs=None, timeout_seconds=900, p
     ):
         return True
 
-    # Try PyQt5 QTimer first
-    try:
-        from PyQt5.QtCore import QTimer
-        timer = QTimer()
-        _stop_import_monitor(monitor["monitor_key"])
-        monitor["timer"] = timer
-        _IMPORT_MONITORS[monitor["monitor_key"]] = monitor
+    # Non-Windows fallback through Qt event loop.
+    if os.name != "nt":
+        try:
+            from PyQt5.QtCore import QTimer
+            timer = QTimer()
+            _stop_import_monitor(monitor["monitor_key"])
+            monitor["timer"] = timer
+            _IMPORT_MONITORS[monitor["monitor_key"]] = monitor
 
-        def _tick():
-            try:
-                _first_mcs_monitor_tick(monitor)
-            except Exception as exc:
-                _append_import_exception(monitor.get("output_dir", ""), "_start_first_mcs_monitor qtimer callback failed", exc)
+            def _tick():
+                try:
+                    _first_mcs_monitor_tick(monitor)
+                except Exception as exc:
+                    _append_import_exception(monitor.get("output_dir", ""), "_start_first_mcs_monitor qtimer callback failed", exc)
 
-        timer.timeout.connect(_tick)
-        timer.start(int(poll_seconds * 1000))
-        return True
-    except Exception:
-        pass
+            timer.timeout.connect(_tick)
+            timer.start(int(poll_seconds * 1000))
+            return True
+        except Exception:
+            pass
 
     # Fall back to Win32 SetTimer
     if os.name != "nt":
@@ -2715,17 +2807,32 @@ def _start_first_mcs_monitor(output_dir, target_mcs=None, timeout_seconds=900, p
                 _append_import_exception(monitor.get("output_dir", ""), "_start_first_mcs_monitor win32 timer callback failed", exc)
 
         callback = TIMERPROC(_timer_proc)
-        user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint, TIMERPROC]
+        callback_ptr = ctypes.cast(callback, ctypes.c_void_p)
+        user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint, ctypes.c_void_p]
         user32.SetTimer.restype = ctypes.c_size_t
         user32.KillTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-        timer_id = user32.SetTimer(None, 0, timer_interval_ms, callback)
+        timer_id = user32.SetTimer(None, 0, timer_interval_ms, callback_ptr)
         if not timer_id:
+            if _allow_windows_event_monitor() and _start_mimics_event_monitor(
+                monitor,
+                lambda: _first_mcs_monitor_tick(monitor),
+                poll_seconds,
+                "_start_first_mcs_monitor Mimics timer callback failed",
+            ):
+                return True
             return False
         monitor["callback"] = callback
         monitor["win32_timer"] = (user32, timer_id)
         _IMPORT_MONITORS[monitor_key] = monitor
         return True
     except Exception:
+        if _allow_windows_event_monitor() and _start_mimics_event_monitor(
+            monitor,
+            lambda: _first_mcs_monitor_tick(monitor),
+            poll_seconds,
+            "_start_first_mcs_monitor Mimics timer callback failed",
+        ):
+            return True
         return False
 
 
@@ -2762,10 +2869,11 @@ def _start_win32_import_monitor(monitor, poll_seconds, timeout_seconds):
             _append_import_exception(out, "_start_win32_import_monitor timer callback failed", exc)
 
     callback = TIMERPROC(_timer_proc)
-    user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint, TIMERPROC]
+    callback_ptr = ctypes.cast(callback, ctypes.c_void_p)
+    user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint, ctypes.c_void_p]
     user32.SetTimer.restype = ctypes.c_size_t
     user32.KillTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    timer_id = user32.SetTimer(None, 0, timer_interval_ms, callback)
+    timer_id = user32.SetTimer(None, 0, timer_interval_ms, callback_ptr)
     if not timer_id:
         return False
     monitor["callback"] = callback
@@ -2793,17 +2901,24 @@ def _start_import_monitor(job_dir, output_mcs, work_dir, timeout_seconds=1800,
     if batch_info:
         monitor.update(batch_info)
 
-    if _start_mimics_event_monitor(
+    if os.name == "nt":
+        # Use Win32 timer first on Windows to avoid Mimics event subscription
+        # cleanup issues in some Mimics builds.
+        if _start_win32_import_monitor(monitor, poll_seconds, timeout_seconds):
+            return True
+        if _allow_windows_event_monitor() and _start_mimics_event_monitor(
+            monitor,
+            lambda: _import_monitor_tick(monitor),
+            poll_seconds,
+            "_start_import_monitor Mimics timer callback failed",
+        ):
+            return True
+    elif _start_mimics_event_monitor(
         monitor,
         lambda: _import_monitor_tick(monitor),
         poll_seconds,
         "_start_import_monitor Mimics timer callback failed",
     ):
-        return True
-
-    # Prefer the native Windows message-loop timer. Importing PyQt5 after a
-    # folder dialog closes can stall Mimics while Qt scans plugins and paths.
-    if _start_win32_import_monitor(monitor, poll_seconds, timeout_seconds):
         return True
 
     # Non-Windows fallback: use the existing Mimics Qt event loop.
@@ -3163,10 +3278,11 @@ def _start_win32_discover_monitor(monitor, poll_seconds, timeout_seconds):
             _append_import_exception(monitor.get("output_dir", ""), "_start_win32_discover_monitor timer callback failed", exc)
 
     callback = TIMERPROC(_timer_proc)
-    user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint, TIMERPROC]
+    callback_ptr = ctypes.cast(callback, ctypes.c_void_p)
+    user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint, ctypes.c_void_p]
     user32.SetTimer.restype = ctypes.c_size_t
     user32.KillTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    timer_id = user32.SetTimer(None, 0, timer_interval_ms, callback)
+    timer_id = user32.SetTimer(None, 0, timer_interval_ms, callback_ptr)
     if not timer_id:
         return False
     monitor["callback"] = callback
@@ -3201,17 +3317,24 @@ def _start_import_discover_monitor(job_dir, ts_root, output_dir, axes, flips, jo
         ),
     )
 
-    if _start_mimics_event_monitor(
+    if os.name == "nt":
+        # Use Win32 timer first on Windows to avoid Mimics event subscription
+        # cleanup issues in some Mimics builds.
+        if _start_win32_discover_monitor(monitor, poll_seconds, timeout_seconds):
+            return True
+        if _allow_windows_event_monitor() and _start_mimics_event_monitor(
+            monitor,
+            lambda: _discover_monitor_tick(monitor),
+            poll_seconds,
+            "_start_import_discover_monitor Mimics timer callback failed",
+        ):
+            return True
+    elif _start_mimics_event_monitor(
         monitor,
         lambda: _discover_monitor_tick(monitor),
         poll_seconds,
         "_start_import_discover_monitor Mimics timer callback failed",
     ):
-        return True
-
-    # Prefer Win32 SetTimer so returning from the native folder picker does not
-    # immediately trigger a potentially slow PyQt5/plugin import in Mimics.
-    if _start_win32_discover_monitor(monitor, poll_seconds, timeout_seconds):
         return True
 
     # Non-Windows fallback: use the existing Qt event loop.
@@ -3285,12 +3408,23 @@ def _launch_external_import_setup(import_mode):
 
     mode = "import_single" if import_mode == "single_case" else "import_batch"
     configured = str(_load_data_io_config().get("mimics_output_dir", "") or "")
+    _checkpoint_record(
+        "external_setup_launch",
+        mode=mode,
+        configured_output=configured,
+    )
 
     def submitted(selection):
         global _LAST_TASK_DESCRIPTOR
+        _checkpoint_record(
+            "external_setup_submitted",
+            mode=mode,
+            has_case_info=bool((selection or {}).get("case_info")),
+        )
         source = str(selection.get("source_path", "") or "")
         output_dir = str(selection.get("output_path", "") or "")
         if not source or not output_dir:
+            _checkpoint_record("external_setup_missing_paths", source=source, output_dir=output_dir)
             raise RuntimeError("The source and output paths were not returned by the path window.")
         if mode == "import_single":
             source_arg = "--image-file" if os.path.isfile(source) else "--case-dir"
@@ -3298,6 +3432,7 @@ def _launch_external_import_setup(import_mode):
         else:
             args = ["--ts-root", source, "--output-dir", output_dir]
         args.extend(["--masks", str(selection.get("mask_selection", "all") or "all")])
+        _checkpoint_record("external_setup_args_ready", mode=mode, args=args)
         _LAST_TASK_DESCRIPTOR = {}
         result = _run_main_with_args(
             args,
@@ -3305,6 +3440,12 @@ def _launch_external_import_setup(import_mode):
             case_info_override=selection.get("case_info"),
         )
         descriptor = dict(_LAST_TASK_DESCRIPTOR)
+        _checkpoint_record(
+            "external_setup_after_main",
+            mode=mode,
+            result=result,
+            descriptor_keys=sorted(descriptor.keys()),
+        )
         if not descriptor:
             raise RuntimeError(
                 "Import did not start (result {0}). Review the Mimics log for the reported validation or concurrency error.".format(
@@ -3336,6 +3477,12 @@ def main(import_mode=None, case_info_override=None):
         None         — interactive (ask)
         "single_case" — skip dialog, single-case mode directly
     """
+    _checkpoint_record(
+        "main_enter",
+        import_mode=import_mode,
+        argv=list(sys.argv),
+        has_case_info_override=bool(case_info_override),
+    )
     with _BG_MIMICS_STATE_LOCK:
         _BG_MIMICS_FAILED_OUTPUTS.clear()
     live_bridge_jobs = []
@@ -3348,6 +3495,7 @@ def main(import_mode=None, case_info_override=None):
         except Exception:
             _BRIDGE_PROCESSES.pop(job_path, None)
     if live_bridge_jobs:
+        _checkpoint_record("main_blocked_live_bridge", count=len(live_bridge_jobs))
         _safe_message_box(
             "Import Already Running",
             "Another image import is still preparing data. Wait for it to finish or use Stop Import Queue before starting another import.",
@@ -3357,10 +3505,13 @@ def main(import_mode=None, case_info_override=None):
 
     # Safe cleanup runs in a daemon thread. By default it only removes stale
     # resource locks; process killing is explicit or aggressive opt-in.
-    if runtime_common.auto_cleanup_enabled():
+    if _startup_cleanup_enabled():
+        _checkpoint_record("startup_cleanup_thread_begin")
         cleanup_thread = threading.Thread(target=_cleanup_stale_processes)
         cleanup_thread.daemon = True
         cleanup_thread.start()
+    else:
+        _checkpoint_record("startup_cleanup_thread_skipped")
 
     # Parse args (simple, Python 3.5 compatible)
     ts_root = None
@@ -3425,23 +3576,40 @@ def main(import_mode=None, case_info_override=None):
             flips,
         ),
     )
+    _checkpoint_record(
+        "args_parsed",
+        ts_root=ts_root,
+        case_dir=case_dir,
+        output=output,
+        output_dir=output_dir,
+        mask_selection=mask_selection,
+    )
 
     # Interactive path selection is hosted in external PySide6. Mimics only
     # launches it and polls a tiny status JSON through a GUI timer.
     if not ts_root and not case_dir:
+        _checkpoint_record("launch_external_setup", import_mode=import_mode)
         return _launch_external_import_setup(import_mode)
 
     # -- Single case mode ----------------------------------------------
 
     if case_dir:
+        _checkpoint_record("single_case_begin", case_dir=case_dir, output=output, output_dir=output_dir)
         _verbose_log("", "Mode: single-case | source={0}".format(case_dir))
         selected_source = os.path.abspath(case_dir)
         source_is_file = _is_medical_image_file(selected_source)
         source_case_dir = os.path.dirname(selected_source) if source_is_file else selected_source
         source_case_id = _image_stem(selected_source) if source_is_file else os.path.basename(selected_source)
         case_info = case_info_override or _discover_single_case(selected_source)
+        _checkpoint_record(
+            "single_case_discovered",
+            selected_source=selected_source,
+            case_found=bool(case_info),
+            source_is_file=source_is_file,
+        )
         case_info = _filter_case_masks(case_info, mask_selection)
         if case_info is None:
+            _checkpoint_record("single_case_no_supported_data", selected_source=selected_source)
             mimics.dialogs.message_box(title="Error", message="No supported image data found: {0}".format(selected_source))
             return 1
         if not output:
@@ -3475,9 +3643,17 @@ def main(import_mode=None, case_info_override=None):
 
         output_dir_abs = os.path.dirname(os.path.abspath(output))
         run_root = _new_import_run_root()
+        _checkpoint_record("single_case_run_root_created", run_root=run_root, output_dir=output_dir_abs)
+        _checkpoint_record("single_case_before_set_last_task", run_root=run_root, output_dir=output_dir_abs)
         task_status_path, task_stop_path = _set_last_import_task(
             run_root, output_dir_abs, "Import single case",
         )
+        _checkpoint_record(
+            "single_case_after_set_last_task",
+            status_path=task_status_path,
+            task_stop_path=task_stop_path,
+        )
+        _checkpoint_record("single_case_before_write_status", status_path=task_status_path)
         _write_import_task_status(
             task_status_path,
             {
@@ -3489,12 +3665,17 @@ def main(import_mode=None, case_info_override=None):
                 "case_id": case_info["case_id"],
             },
         )
+        _checkpoint_record("single_case_after_write_status", status_path=task_status_path)
         work_dir = os.path.join(run_root, "work", case_info["case_id"])
         jobs_dir = os.path.join(run_root, "jobs")
         job_dir = os.path.join(jobs_dir, case_info["case_id"])
+        _checkpoint_record("single_case_paths_ready", work_dir=work_dir, jobs_dir=jobs_dir, job_dir=job_dir)
 
         # Launch bridge in background + start timer to queue .mcs creation.
+        _checkpoint_record("single_case_before_build_bridge_params", case_id=case_info["case_id"])
         bridge_params = _build_bridge_params(case_info, axes, flips, work_dir)
+        _checkpoint_record("single_case_after_build_bridge_params", case_id=case_info["case_id"])
+        _checkpoint_record("single_case_bridge_launch", job_dir=job_dir, case_id=case_info["case_id"])
         _launch_bridge_job_thread(bridge_params, job_dir, output_dir_abs, "preparing", case_id=case_info["case_id"])
 
         # Bridge launched, timer will queue the result for background Mimics.
@@ -3508,6 +3689,12 @@ def main(import_mode=None, case_info_override=None):
                 "task_status_path": task_status_path,
                 "task_stop_path": task_stop_path,
             },
+        )
+        _checkpoint_record(
+            "single_case_monitor_started",
+            monitor_started=bool(monitor_started),
+            job_dir=job_dir,
+            status_path=task_status_path,
         )
         if not monitor_started:
             _write_import_task_status(
@@ -3529,6 +3716,7 @@ def main(import_mode=None, case_info_override=None):
         # logging happen in the launch worker to avoid slow/network-drive I/O
         # immediately after the folder picker closes.
         output_dir = _resolve_import_output_dir(ts_root, create=False)
+    _checkpoint_record("batch_begin", ts_root=ts_root, output_dir=output_dir)
 
     run_root = _new_import_run_root()
     task_status_path, task_stop_path = _set_last_import_task(
@@ -3555,6 +3743,7 @@ def main(import_mode=None, case_info_override=None):
         "mask_selection": mask_selection,
     }
     _update_gui()
+    _checkpoint_record("batch_discover_launch", discover_job_dir=discover_job_dir)
     _launch_bridge_job_thread(bridge_params, discover_job_dir, output_dir, "discovering")
     monitor_started = _start_import_discover_monitor(
         discover_job_dir,
@@ -3566,6 +3755,12 @@ def main(import_mode=None, case_info_override=None):
         work_root,
         task_status_path=task_status_path,
         task_stop_path=task_stop_path,
+    )
+    _checkpoint_record(
+        "batch_discover_monitor_started",
+        monitor_started=bool(monitor_started),
+        discover_job_dir=discover_job_dir,
+        status_path=task_status_path,
     )
     if not monitor_started:
         _write_import_task_status(

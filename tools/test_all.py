@@ -5676,6 +5676,7 @@ class TestNewFeatures(unittest.TestCase):
 
         self.assertIn("tools/ui_theme.py", package_portable.REQUIRED_EXTERNAL_UI_FILES)
         self.assertIn("tools/io_path_setup_ui.py", package_portable.REQUIRED_EXTERNAL_UI_FILES)
+        self.assertIn("tools/single_case_import_worker.py", package_portable.REQUIRED_EXTERNAL_UI_FILES)
         for relative in package_portable.REQUIRED_EXTERNAL_UI_FILES:
             self.assertTrue(Path(PROJECT_ROOT, relative).is_file(), relative)
 

@@ -409,6 +409,147 @@ def _active_image_shape(image):
     return None
 
 
+def _shape_voxels(shape):
+    result = 1
+    for value in shape or []:
+        result *= int(value)
+    return int(result)
+
+
+def _normalize_shape(shape):
+    if not shape or len(shape) < 3:
+        return None
+    try:
+        return [int(shape[0]), int(shape[1]), int(shape[2])]
+    except Exception:
+        return None
+
+
+def _expected_image_shape_from_manifest(result):
+    masks = result.get("masks") or []
+    for row in masks:
+        shape = _normalize_shape(row.get("image_shape"))
+        if shape:
+            return shape
+    shape = _normalize_shape(result.get("source_image_shape"))
+    if shape:
+        return shape
+    return None
+
+
+def _select_best_imported_image(expected_shape=None):
+    """Pick the most likely volume image after DICOM import.
+
+    Mimics can occasionally expose multiple imported image objects when a
+    DICOM folder is interpreted as several series. Choosing images[0]
+    silently risks saving a single-slice project. This selector prefers the
+    manifest-expected shape, then largest depth and voxel count.
+    """
+    candidates = []
+    total = len(mimics.data.images)
+    for index in range(total):
+        try:
+            image = mimics.data.images[index]
+        except Exception:
+            continue
+        shape = _active_image_shape(image)
+        if not shape:
+            continue
+        shape = [int(shape[0]), int(shape[1]), int(shape[2])]
+        voxels = _shape_voxels(shape)
+        if expected_shape:
+            diff = (
+                abs(int(shape[0]) - int(expected_shape[0]))
+                + abs(int(shape[1]) - int(expected_shape[1]))
+                + abs(int(shape[2]) - int(expected_shape[2]))
+            )
+            exact = 1 if shape == expected_shape else 0
+        else:
+            diff = 10 ** 9
+            exact = 0
+        candidates.append({
+            "index": index,
+            "image": image,
+            "shape": shape,
+            "voxels": voxels,
+            "diff": diff,
+            "exact": exact,
+        })
+
+    if not candidates:
+        return None, []
+
+    def _score(row):
+        # Higher is better.
+        return (
+            int(row.get("exact", 0)),
+            -int(row.get("diff", 10 ** 9)),
+            int(row.get("shape", [0, 0, 0])[2]),
+            int(row.get("voxels", 0)),
+            -int(row.get("index", 0)),
+        )
+
+    best = max(candidates, key=_score)
+    return best, candidates
+
+
+def _format_image_candidates(candidates):
+    rows = []
+    for item in candidates:
+        rows.append(
+            "#{0} shape={1} voxels={2} diff={3} exact={4}".format(
+                int(item.get("index", -1)),
+                item.get("shape"),
+                int(item.get("voxels", 0)),
+                int(item.get("diff", -1)),
+                bool(item.get("exact", 0)),
+            )
+        )
+    return "; ".join(rows)
+
+
+def _shape_looks_single_slice(shape):
+    shape = _normalize_shape(shape)
+    if not shape:
+        return False
+    return min(int(shape[0]), int(shape[1]), int(shape[2])) <= 1
+
+
+def _close_project_safely():
+    try:
+        mimics.file.close_project()
+    except Exception:
+        pass
+
+
+def _dicom_import_profiles():
+    # Try canonical grouping first, then progressively relax grouping keys
+    # when background import splits one volume into many single-slice images.
+    return [
+        {
+            "name": "default",
+            "image_center_grouping": False,
+            "patient_name_grouping": True,
+            "series_description_grouping": True,
+            "study_description_grouping": True,
+        },
+        {
+            "name": "no_description_grouping",
+            "image_center_grouping": False,
+            "patient_name_grouping": True,
+            "series_description_grouping": False,
+            "study_description_grouping": False,
+        },
+        {
+            "name": "no_grouping_keys",
+            "image_center_grouping": False,
+            "patient_name_grouping": False,
+            "series_description_grouping": False,
+            "study_description_grouping": False,
+        },
+    ]
+
+
 def create_mcs_from_manifest(work_dir, output_mcs):
     """Create a .mcs file from a prepare manifest.
 
@@ -426,15 +567,74 @@ def create_mcs_from_manifest(work_dir, output_mcs):
         result = json.load(f)
 
     dicom_folder = result["dicom_folder"]
+    expected_shape = _expected_image_shape_from_manifest(result)
 
-    # Import DICOM
-    mimics.file.import_dicom_images(source_folder=dicom_folder)
-    if len(mimics.data.images) == 0:
-        raise RuntimeError("DICOM import produced no images")
+    selected = None
+    candidates = []
+    used_profile = None
+    import_profiles = _dicom_import_profiles()
+    expected_is_volume = bool(expected_shape and min(expected_shape) > 1)
 
-    image = mimics.data.images[0]
+    for profile_index, profile in enumerate(import_profiles):
+        _close_project_safely()
+        mimics.file.import_dicom_images(
+            source_folder=dicom_folder,
+            image_center_grouping=bool(profile.get("image_center_grouping", False)),
+            patient_name_grouping=bool(profile.get("patient_name_grouping", True)),
+            series_description_grouping=bool(profile.get("series_description_grouping", True)),
+            study_description_grouping=bool(profile.get("study_description_grouping", True)),
+        )
+        if len(mimics.data.images) == 0:
+            continue
+
+        selected, candidates = _select_best_imported_image(expected_shape)
+        if not selected:
+            continue
+
+        all_single_slice = bool(candidates) and all(
+            _shape_looks_single_slice(item.get("shape")) for item in candidates
+        )
+
+        if expected_is_volume and all_single_slice and profile_index < (len(import_profiles) - 1):
+            print(
+                "  import profile '{0}' produced {1} single-slice image objects; retrying with relaxed grouping.".format(
+                    profile.get("name", "unknown"),
+                    len(candidates),
+                )
+            )
+            continue
+
+        used_profile = profile
+        break
+
+    if not selected:
+        raise RuntimeError("DICOM import produced no usable image volume")
+
+    if len(candidates) > 1:
+        print(
+            "  imported {0} image objects (profile={1}); selecting candidate #{2}. candidates: {3}".format(
+                len(candidates),
+                (used_profile or {}).get("name", "unknown"),
+                int(selected.get("index", -1)),
+                _format_image_candidates(candidates),
+            )
+        )
+
+    image = selected["image"]
     mimics.data.images.set_active(image)
-    active_image_shape = _active_image_shape(image)
+    active_image_shape = selected.get("shape") or _active_image_shape(image)
+
+    if expected_is_volume and _shape_looks_single_slice(active_image_shape):
+        raise RuntimeError(
+            "DICOM import selected a single-slice image ({0}) while manifest expects a volume ({1}). "
+            "This indicates series splitting during background import; refusing to save a broken .mcs. "
+            "Candidates: {2}".format(
+                active_image_shape,
+                expected_shape,
+                _format_image_candidates(candidates),
+            )
+        )
+
     actual_mimics_voxel_to_ras = _derive_mimics_voxel_to_ras_matrix(
         image,
         active_image_shape,
