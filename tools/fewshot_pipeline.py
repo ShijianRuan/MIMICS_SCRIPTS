@@ -23,6 +23,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+RUNTIME = ROOT / "runtime_py35"
+if str(RUNTIME) not in sys.path:
+    sys.path.insert(0, str(RUNTIME))
+
+import runtime_common
 
 from resource_locks import (
     FileResourceLock,
@@ -39,7 +44,6 @@ LOG_ROTATE_BYTES = 5 * 1024 * 1024
 LOG_ROTATE_BACKUPS = 3
 RESOURCE_LOCK_DIR = default_resource_lock_dir(ROOT)
 GPU_LOCK_PATH = RESOURCE_LOCK_DIR / "gpu.lock"
-BACKGROUND_MIMICS_LOCK_PATH = RESOURCE_LOCK_DIR / "background_mimics.lock"
 
 
 def cleanup_local_export_jobs(max_age_days=14, max_jobs=100):
@@ -642,8 +646,6 @@ def find_mimics_exe(explicit=None):
     if explicit and Path(explicit).is_file():
         return str(Path(explicit))
     # Delegate to runtime_common which has the full search logic
-    sys.path.insert(0, str(ROOT / "runtime_py35"))
-    import runtime_common
     return runtime_common.find_mimics_exe()
 
 
@@ -898,8 +900,13 @@ def acquire_gpu_lock_for_job(workspace, status_path, cancel_path, owner, timeout
     return lock
 
 
-def acquire_background_mimics_lock(workspace, status_path, cancel_path, owner, timeout_seconds):
-    lock = FileResourceLock(BACKGROUND_MIMICS_LOCK_PATH, "background_mimics", owner)
+def acquire_background_mimics_lock(
+    workspace, status_path, cancel_path, owner, timeout_seconds, scope=None
+):
+    lock_path = Path(runtime_common.background_mimics_lock_path(
+        str(ROOT), str(scope or workspace)
+    ))
+    lock = FileResourceLock(lock_path, "background_mimics", owner)
     last_log = {"epoch": 0.0}
 
     def on_wait(current):
@@ -926,6 +933,62 @@ def acquire_background_mimics_lock(workspace, status_path, cancel_path, owner, t
     )
     update_status(status_path, {"resource_wait": None})
     return lock
+
+
+def acquire_background_mimics_locks(
+    workspace, status_path, cancel_path, owner, timeout_seconds, scopes
+):
+    """Acquire all resources together without holding one while waiting."""
+    unique_scopes = {}
+    for scope in scopes:
+        lock_path = runtime_common.background_mimics_lock_path(
+            str(ROOT), str(scope or workspace)
+        )
+        unique_scopes[str(lock_path)] = scope
+    ordered_scopes = [unique_scopes[path] for path in sorted(unique_scopes)]
+    deadline = time.time() + max(0.0, float(timeout_seconds))
+    last_notice = 0.0
+    while True:
+        locks = []
+        try:
+            for scope in ordered_scopes:
+                locks.append(
+                    acquire_background_mimics_lock(
+                        workspace,
+                        status_path,
+                        cancel_path,
+                        owner,
+                        0.0,
+                        scope=scope,
+                    )
+                )
+            return locks
+        except ResourceLockTimeout as exc:
+            for lock in reversed(locks):
+                lock.release()
+            now = time.time()
+            if now >= deadline:
+                raise
+            if now - last_notice >= 60.0:
+                append_log(
+                    workspace,
+                    "Waiting until the saved .mcs source and label destination "
+                    "are both available: {}.".format(exc),
+                )
+                last_notice = now
+            remaining = min(2.0, max(0.0, deadline - now))
+            while remaining > 0:
+                if Path(cancel_path).is_file():
+                    raise ResourceLockCancelled(
+                        "Cancelled while waiting for background Mimics resources"
+                    )
+                step = min(0.25, remaining)
+                time.sleep(step)
+                remaining -= step
+        except Exception:
+            for lock in reversed(locks):
+                lock.release()
+            raise
 
 
 def terminate_process_tree(pid):
@@ -1585,14 +1648,15 @@ def launch_mimics_export(
             "",
         ]),
     )
-    lock = None
+    locks = []
     if status_path and cancel_path:
-        lock = acquire_background_mimics_lock(
+        locks = acquire_background_mimics_locks(
             workspace,
             status_path,
             cancel_path,
             "DINOv3 label export",
             lock_timeout_seconds if lock_timeout_seconds is not None else timeout_seconds,
+            scopes=[output_dir, label_staging_dir or Path(ts_root).resolve()],
         )
     proc = None
     lock_releasable = True
@@ -1613,19 +1677,22 @@ def launch_mimics_export(
                 stderr=subprocess.STDOUT,
                 **hidden_process_kwargs()
             )
-        if lock is not None and not lock.update_pid(
-            proc.pid,
-            kind="fewshot_label_export",
-            ts_root=str(Path(ts_root).resolve()),
-            stop_path=str(stop_path),
-            cancel_path=str(cancel_path or ""),
-            status_path=str(status_path or ""),
-        ):
-            raise RuntimeError(
-                "Background Mimics lock ownership was lost while recording PID {}.".format(
-                    proc.pid
+        for lock in locks:
+            if not lock.update_pid(
+                proc.pid,
+                kind="fewshot_label_export",
+                ts_root=str(Path(ts_root).resolve()),
+                mcs_source=str(output_dir),
+                destination_scope=str(label_staging_dir or Path(ts_root).resolve()),
+                stop_path=str(stop_path),
+                cancel_path=str(cancel_path or ""),
+                status_path=str(status_path or ""),
+            ):
+                raise RuntimeError(
+                    "Background Mimics lock ownership was lost while recording PID {}.".format(
+                        proc.pid
+                    )
                 )
-            )
         append_log(workspace, "Background Mimics export started, pid={}.".format(proc.pid))
         if status_path:
             update_status(status_path, {
@@ -1751,8 +1818,9 @@ def launch_mimics_export(
             })
         raise
     finally:
-        if lock is not None and lock_releasable:
-            lock.release()
+        if lock_releasable:
+            for lock in reversed(locks):
+                lock.release()
 
 
 def latest_epoch_checkpoint(ckpt_dir):

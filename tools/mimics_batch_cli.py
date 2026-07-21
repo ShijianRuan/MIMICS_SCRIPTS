@@ -14,6 +14,7 @@ Commands:
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -37,7 +38,6 @@ if str(RUNTIME) not in sys.path:
     sys.path.insert(0, str(RUNTIME))
 import runtime_common
 RESOURCE_LOCK_DIR = default_resource_lock_dir(ROOT)
-BACKGROUND_MIMICS_LOCK_PATH = RESOURCE_LOCK_DIR / "background_mimics.lock"
 
 
 def project_python_candidates():
@@ -114,7 +114,7 @@ def write_json_atomic(path, payload, retries=20, max_sleep=0.25):
         raise last_error
 
 
-def run_bridge(python_exe, params, env_overrides=None):
+def run_bridge(python_exe, params, env_overrides=None, on_wait=None):
     env = os.environ.copy()
     if env_overrides:
         for key, value in env_overrides.items():
@@ -125,18 +125,32 @@ def run_bridge(python_exe, params, env_overrides=None):
     env.setdefault("MKL_NUM_THREADS", "1")
     env.setdefault("OPENBLAS_NUM_THREADS", "1")
     env.setdefault("ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS", "1")
-    proc = subprocess.run(
+    proc = subprocess.Popen(
         [python_exe, str(BRIDGE)],
-        input=json.dumps(params).encode("utf-8"),
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
-        check=False,
     )
-    if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.decode("utf-8", "replace")[:2000])
+    payload = json.dumps(params).encode("utf-8")
     try:
-        result = json.loads(proc.stdout.decode("utf-8"))
+        stdout, stderr = proc.communicate(input=payload, timeout=15.0)
+    except subprocess.TimeoutExpired:
+        while True:
+            if on_wait is not None:
+                try:
+                    on_wait()
+                except Exception:
+                    pass
+            try:
+                stdout, stderr = proc.communicate(timeout=15.0)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+    if proc.returncode != 0:
+        raise RuntimeError(stderr.decode("utf-8", "replace")[:2000])
+    try:
+        result = json.loads(stdout.decode("utf-8"))
     except Exception as exc:
         raise RuntimeError("bridge returned invalid JSON: {}".format(exc))
     if result.get("status") != "ok":
@@ -175,10 +189,104 @@ def discover_cases(ts_root, cases, python_exe, mask_selection="all", env_overrid
     return list(result.get("cases", []))
 
 
-def _acquire_background_mimics_lock(owner, wait_seconds=0.0):
-    lock = FileResourceLock(BACKGROUND_MIMICS_LOCK_PATH, "background_mimics", owner)
+def _acquire_background_mimics_lock(owner, scope, wait_seconds=0.0):
+    lock_path = Path(runtime_common.background_mimics_lock_path(str(ROOT), str(scope)))
+    lock = FileResourceLock(lock_path, "background_mimics", owner)
     lock.acquire(wait_seconds=float(wait_seconds), poll_seconds=5.0)
     return lock
+
+
+def _acquire_background_mimics_locks(owner, scopes, wait_seconds=0.0):
+    """Acquire source/destination locks together without hold-and-wait."""
+    paths = sorted(set(
+        Path(runtime_common.background_mimics_lock_path(str(ROOT), str(scope)))
+        for scope in scopes
+    ))
+    deadline = time.time() + max(0.0, float(wait_seconds))
+    while True:
+        locks = []
+        try:
+            for path in paths:
+                lock = FileResourceLock(path, "background_mimics", owner)
+                lock.acquire(wait_seconds=0.0, poll_seconds=5.0)
+                locks.append(lock)
+            return locks
+        except ResourceLockTimeout:
+            for lock in reversed(locks):
+                lock.release()
+            if time.time() >= deadline:
+                raise
+            time.sleep(min(1.0, max(0.05, deadline - time.time())))
+        except Exception:
+            for lock in reversed(locks):
+                lock.release()
+            raise
+
+
+def clear_stale_import_queue_stop(output_dir):
+    """Remove an old queue stop only when no live creator owns this output."""
+    output_dir = Path(output_dir).resolve()
+    runtime_dir = Path(runtime_common.import_queue_runtime_dir(str(ROOT), str(output_dir)))
+    stop_path = runtime_dir / "_mcs_queue_stop.json"
+    if not stop_path.is_file():
+        return False
+    lock_path = Path(runtime_common.background_mimics_lock_path(str(ROOT), str(output_dir)))
+    holder = runtime_common.read_json(str(lock_path), {}) or {}
+    holder_output = str(holder.get("output_dir") or "")
+    same_output = bool(
+        holder_output
+        and os.path.normcase(os.path.abspath(holder_output))
+        == os.path.normcase(os.path.abspath(str(output_dir)))
+    )
+    if (
+        str(holder.get("kind") or "").lower() == "create_mcs"
+        and same_output
+        and runtime_common.process_matches(
+            holder.get("pid"), holder.get("process_start_marker")
+        )
+    ):
+        raise RuntimeError(
+            "The previous import queue is still stopping for this output folder."
+        )
+    stop_path.unlink()
+    return True
+
+
+def _live_create_mcs_holder(output_dir):
+    """Return the live creator lock for this output queue, if one exists."""
+    output_dir = Path(output_dir).resolve()
+    lock_path = Path(runtime_common.background_mimics_lock_path(str(ROOT), str(output_dir)))
+    holder = runtime_common.read_json(str(lock_path), {}) or {}
+    holder_output = str(holder.get("output_dir") or "")
+    if (
+        str(holder.get("kind") or "").lower() == "create_mcs"
+        and holder_output
+        and os.path.normcase(os.path.abspath(holder_output))
+        == os.path.normcase(os.path.abspath(str(output_dir)))
+        and runtime_common.process_matches(
+            holder.get("pid"), holder.get("process_start_marker")
+        )
+    ):
+        return holder
+    return {}
+
+
+def _update_import_queue_active(runtime_dir, total, completed=0, failed=0):
+    """Publish/refresh external preparation progress for the queue consumer."""
+    active_path = Path(runtime_dir) / "_mcs_queue_active.json"
+    payload = runtime_common.read_json(str(active_path), {}) or {}
+    payload.update({
+        "status": "active",
+        "total": int(total or 0),
+        "completed": int(completed or 0),
+        "failed": int(failed or 0),
+        "pid": os.getpid(),
+        "updated_at_epoch": time.time(),
+    })
+    marker = runtime_common.process_start_marker(os.getpid())
+    if marker:
+        payload["process_start_marker"] = marker
+    write_json_atomic(active_path, payload)
 
 
 def launch_create_mcs(
@@ -213,7 +321,9 @@ def launch_create_mcs(
         "",
     ])
     runner.write_text("\n".join(runner_lines), encoding="utf-8")
-    lock = _acquire_background_mimics_lock("batch .mcs creation", lock_timeout_seconds)
+    lock = _acquire_background_mimics_lock(
+        "batch .mcs creation", output_dir, lock_timeout_seconds
+    )
     log = open(str(runtime_dir / "_background_mimics.log"), "ab")
     mimics_log = runtime_dir / "_background_mimics_application.log"
     try:
@@ -321,7 +431,12 @@ def launch_export_labels(ts_root, cases, mimics_exe, axes, flips, lock_timeout_s
         ]),
         encoding="utf-8",
     )
-    lock = _acquire_background_mimics_lock("batch label export", lock_timeout_seconds)
+    export_scope = Path(label_output_root).resolve() if label_output_root else ts_root.resolve()
+    locks = _acquire_background_mimics_locks(
+        "batch label export",
+        [output_dir, export_scope],
+        lock_timeout_seconds,
+    )
     log = open(str(job_dir / "process.log"), "ab")
     mimics_log = job_dir / "mimics_application.log"
     try:
@@ -333,17 +448,19 @@ def launch_export_labels(ts_root, cases, mimics_exe, axes, flips, lock_timeout_s
             stdout=log,
             stderr=subprocess.STDOUT,
         )
-        if not lock.update_pid(
-            proc.pid,
-            kind="export_labels",
-            ts_root=str(ts_root.resolve()),
-            export_root=str(Path(label_output_root).resolve()) if label_output_root else str(ts_root),
-            stop_path=str(stop_path),
-        ):
-            raise RuntimeError(
-                "Background Mimics started, but the background-Mimics lock "
-                "could not be transferred to PID {}.".format(proc.pid)
-            )
+        for lock in locks:
+            if not lock.update_pid(
+                proc.pid,
+                kind="export_labels",
+                ts_root=str(ts_root.resolve()),
+                mcs_source=str(output_dir.resolve()),
+                export_root=str(Path(label_output_root).resolve()) if label_output_root else str(ts_root),
+                stop_path=str(stop_path),
+            ):
+                raise RuntimeError(
+                    "Background Mimics started, but a source/destination lock "
+                    "could not be transferred to PID {}.".format(proc.pid)
+                )
         return proc
     except Exception:
         poll = getattr(proc, "poll", None) if "proc" in locals() else None
@@ -374,22 +491,25 @@ def launch_export_labels(ts_root, cases, mimics_exe, axes, flips, lock_timeout_s
                     getattr(proc, "pid", 0)
                 )
         if process_stopped:
-            lock.release()
+            for lock in locks:
+                lock.release()
         else:
-            try:
-                lock.update_pid(
-                    proc.pid,
-                    kind="export_labels",
-                    ts_root=str(ts_root.resolve()),
-                    export_root=(
-                        str(Path(label_output_root).resolve())
-                        if label_output_root else str(ts_root)
-                    ),
-                    stop_path=str(stop_path),
-                    termination_pending=True,
-                )
-            except Exception:
-                pass
+            for lock in locks:
+                try:
+                    lock.update_pid(
+                        proc.pid,
+                        kind="export_labels",
+                        ts_root=str(ts_root.resolve()),
+                        mcs_source=str(output_dir.resolve()),
+                        export_root=(
+                            str(Path(label_output_root).resolve())
+                            if label_output_root else str(ts_root)
+                        ),
+                        stop_path=str(stop_path),
+                        termination_pending=True,
+                    )
+                except Exception:
+                    pass
         raise
     finally:
         log.close()
@@ -405,72 +525,229 @@ def cmd_prepare_import(args):
         "MIMICS_DICOM_RESAMPLE_MODE": args.dicom_resample_mode,
         "MIMICS_MASK_RESAMPLE_METHOD": args.mask_resample_method,
     }
-    cases = discover_cases(ts_root, cases_filter, bridge_python, args.masks, env_overrides=bridge_env)
-    print("Discovered {} case(s).".format(len(cases)))
     runtime_dir = Path(runtime_common.import_queue_runtime_dir(str(ROOT), str(output_dir)))
     run_root = Path(runtime_common.import_runtime_base(str(ROOT))) / "import_runs" / (
         time.strftime("%Y%m%dT%H%M%S") + "_cli_" + uuid.uuid4().hex[:10]
     )
     queue_dir = runtime_dir / "prepared_queue"
-    write_json_atomic(runtime_dir / "_mcs_queue_active.json", {"total": len(cases), "created_at_epoch": time.time()})
+    producer_lock = FileResourceLock(
+        Path(runtime_common.import_producer_lock_path(str(ROOT), str(output_dir))),
+        "import_producer",
+        "external batch preparation for {}".format(output_dir),
+    )
+    try:
+        producer_lock.acquire(wait_seconds=0.0)
+        if not producer_lock.update_pid(
+            os.getpid(),
+            kind="prepare_import",
+            output_dir=str(output_dir),
+        ):
+            producer_lock.release()
+            raise RuntimeError("Import producer lock ownership changed during startup.")
+        clear_stale_import_queue_stop(output_dir)
+    except ResourceLockTimeout as exc:
+        print(
+            "Another import is preparing data for this output folder: {}".format(exc),
+            file=sys.stderr,
+        )
+        return 75
+    except Exception:
+        producer_lock.release()
+        raise
+
     completed = 0
     failed = 0
-    for index, case in enumerate(cases, 1):
-        case_id = case["case_id"]
-        work_dir = run_root / "work" / case_id
-        print("[{}/{}] Preparing {}".format(index, len(cases), case_id))
-        params = {
-            "action": "prepare",
-            "image_path": case["image"],
-            "masks": case.get("masks", []),
-            "dicom_out": str(work_dir / "derived_dicom"),
-            "buffers_out": str(work_dir / "buffers"),
-            "axes": args.axes,
-            "flips": args.flips,
-            "case_id": case_id,
-        }
+    cancelled = False
+    queue_started = False
+    creator_proc = None
+    creator_joined = False
+    creator_unavailable = False
+    creator_warning = ""
+    mimics_exe = None
+
+    def _ensure_creator(wait_seconds=0.0, final_attempt=False):
+        """Start or join the queue consumer without stopping preparation."""
+        nonlocal creator_proc, creator_joined, creator_unavailable, creator_warning, mimics_exe
+        if args.no_create_mcs:
+            return True
+        holder = _live_create_mcs_holder(output_dir)
+        if holder:
+            if not creator_joined:
+                print(
+                    "Using the background Mimics process already consuming this queue, PID={}.".format(
+                        holder.get("pid", "?")
+                    )
+                )
+            creator_joined = True
+            return True
+        if creator_proc is not None:
+            try:
+                if creator_proc.poll() is None:
+                    return True
+            except Exception:
+                if runtime_common.process_exists(getattr(creator_proc, "pid", 0)):
+                    return True
+            creator_proc = None
+        creator_joined = False
+        if creator_unavailable:
+            return False
+        if mimics_exe is None:
+            mimics_exe = find_mimics_exe(args.mimics_exe)
+            if not mimics_exe:
+                creator_unavailable = True
+                creator_warning = (
+                    "A background Mimics executable was not found. Prepared cases remain queued; "
+                    "run .mcs creation later."
+                )
+                print(creator_warning, file=sys.stderr)
+                return False
         try:
-            result = run_bridge(bridge_python, params, env_overrides=bridge_env)
-            result["output_mcs"] = str(output_dir / (case_id + ".mcs"))
-            write_json_atomic(work_dir / "prepare_manifest.json", result)
+            creator_proc = launch_create_mcs(
+                output_dir,
+                mimics_exe,
+                bridge_python,
+                wait_seconds,
+                dicom_resample_mode=args.dicom_resample_mode,
+                mask_resample_method=args.mask_resample_method,
+            )
+            print(
+                "Background Mimics started for streaming .mcs creation, PID={}.".format(
+                    creator_proc.pid
+                )
+            )
+            creator_warning = ""
+            return True
+        except ResourceLockTimeout as exc:
+            creator_warning = "Background Mimics is busy: {}".format(exc)
+            if final_attempt:
+                print(creator_warning, file=sys.stderr)
+            return False
+        except Exception as exc:
+            creator_warning = "Background Mimics could not start: {}".format(exc)
+            if final_attempt:
+                print(creator_warning, file=sys.stderr)
+            return False
+
+    try:
+        cases = discover_cases(ts_root, cases_filter, bridge_python, args.masks, env_overrides=bridge_env)
+        print("Discovered {} case(s).".format(len(cases)))
+        _update_import_queue_active(runtime_dir, len(cases))
+        queue_started = True
+        for index, case in enumerate(cases, 1):
+            if (runtime_dir / "_mcs_queue_stop.json").is_file():
+                cancelled = True
+                print("Import stop requested; no additional cases will be prepared.")
+                break
+            case_id = case["case_id"]
+            work_dir = run_root / "work" / case_id
+            print("[{}/{}] Preparing {}".format(index, len(cases), case_id))
+            params = {
+                "action": "prepare",
+                "image_path": case["image"],
+                "masks": case.get("masks", []),
+                "dicom_out": str(work_dir / "derived_dicom"),
+                "buffers_out": str(work_dir / "buffers"),
+                "axes": args.axes,
+                "flips": args.flips,
+                "case_id": case_id,
+            }
+            descriptor_committed = False
+            try:
+                result = run_bridge(
+                    bridge_python,
+                    params,
+                    env_overrides=bridge_env,
+                    on_wait=lambda: _update_import_queue_active(
+                        runtime_dir, len(cases), completed, failed
+                    ),
+                )
+                if (runtime_dir / "_mcs_queue_stop.json").is_file():
+                    cancelled = True
+                    shutil.rmtree(str(work_dir), ignore_errors=True)
+                    print("  stop requested; prepared data was not queued")
+                    break
+                result["output_mcs"] = str(output_dir / (case_id + ".mcs"))
+                write_json_atomic(work_dir / "prepare_manifest.json", result)
+                write_json_atomic(
+                    queue_dir / (case_id + "_" + uuid.uuid4().hex + ".json"),
+                    {
+                        "case_id": case_id,
+                        "work_dir": str(work_dir.resolve()),
+                        "output_mcs": result["output_mcs"],
+                        "created_at_epoch": time.time(),
+                    },
+                )
+                descriptor_committed = True
+                completed += 1
+                _update_import_queue_active(
+                    runtime_dir, len(cases), completed, failed
+                )
+                print(
+                    "  prepared and queued; .mcs creation can run in parallel ({}/{} prepared)".format(
+                        completed, len(cases)
+                    )
+                )
+                _ensure_creator(wait_seconds=0.0)
+            except Exception as exc:
+                if descriptor_committed:
+                    print(
+                        "  warning: the case is queued, but progress telemetry failed: {}".format(
+                            exc
+                        ),
+                        file=sys.stderr,
+                    )
+                    _ensure_creator(wait_seconds=0.0)
+                    continue
+                failed += 1
+                fail_dir = runtime_dir / "_failed_cases"
+                write_json_atomic(fail_dir / (case_id + "_prepare.json"), {"case_id": case_id, "error": str(exc)})
+                print("  failed: {}".format(exc))
+                try:
+                    _update_import_queue_active(
+                        runtime_dir, len(cases), completed, failed
+                    )
+                except Exception as telemetry_exc:
+                    print(
+                        "  warning: could not refresh queue progress: {}".format(
+                            telemetry_exc
+                        ),
+                        file=sys.stderr,
+                    )
+    finally:
+        if queue_started:
+            active = runtime_dir / "_mcs_queue_active.json"
+            if active.exists():
+                active.unlink()
             write_json_atomic(
-                queue_dir / (case_id + "_" + uuid.uuid4().hex + ".json"),
+                runtime_dir / "_mcs_queue_done.json",
                 {
-                    "case_id": case_id,
-                    "work_dir": str(work_dir.resolve()),
-                    "output_mcs": result["output_mcs"],
-                    "created_at_epoch": time.time(),
+                    "status": "cancelled" if cancelled else "done",
+                    "completed": completed,
+                    "failed": failed,
+                    "updated_at_epoch": time.time(),
                 },
             )
-            completed += 1
-        except Exception as exc:
-            failed += 1
-            fail_dir = runtime_dir / "_failed_cases"
-            write_json_atomic(fail_dir / (case_id + "_prepare.json"), {"case_id": case_id, "error": str(exc)})
-            print("  failed: {}".format(exc))
-    active = runtime_dir / "_mcs_queue_active.json"
-    if active.exists():
-        active.unlink()
-    write_json_atomic(runtime_dir / "_mcs_queue_done.json", {"completed": completed, "failed": failed, "updated_at_epoch": time.time()})
+        producer_lock.release()
+    if cancelled:
+        return 130
     if args.no_create_mcs:
         return 0
-    mimics_exe = find_mimics_exe(args.mimics_exe)
-    if not mimics_exe:
-        print("A background Mimics executable was not found. Manifests are ready; run .mcs creation later.", file=sys.stderr)
-        return 2
-    try:
-        proc = launch_create_mcs(
-            output_dir,
-            mimics_exe,
-            bridge_python,
-            args.background_mimics_lock_timeout_seconds,
-            dicom_resample_mode=args.dicom_resample_mode,
-            mask_resample_method=args.mask_resample_method,
-        )
-    except ResourceLockTimeout as exc:
-        print("Background Mimics is busy: {}".format(exc), file=sys.stderr)
-        return 75
-    print("Background Mimics started for .mcs creation, PID={}".format(proc.pid))
+    if completed <= 0:
+        print("No case was prepared successfully; no .mcs creation was started.", file=sys.stderr)
+        return 1
+    if not _ensure_creator(
+        wait_seconds=args.background_mimics_lock_timeout_seconds,
+        final_attempt=True,
+    ):
+        if creator_unavailable:
+            return 2
+        if creator_warning.startswith("Background Mimics is busy:"):
+            return 75
+        return 1
+    if creator_joined:
+        print("All prepared cases are queued for the existing background Mimics process.")
+    else:
+        print("Preparation finished; background Mimics continues consuming the queue.")
     return 0
 
 
@@ -505,20 +782,22 @@ def cmd_export_labels(args):
 
 def _runtime_owned_roots():
     result = []
-    payload = {}
-    try:
-        payload = json.loads(BACKGROUND_MIMICS_LOCK_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        payload = {}
-    details = payload.get("details") or {}
-    output_dir = details.get("output_dir")
-    if output_dir:
-        result.append(Path(output_dir))
-    ts_root = details.get("ts_root")
-    if ts_root:
-        ts_root_path = Path(ts_root)
-        result.append(ts_root_path)
-        result.append(ts_root_path / "mcs_output")
+    lock_paths = list(RESOURCE_LOCK_DIR.glob("background_mimics*.lock"))
+    lock_paths.extend(RESOURCE_LOCK_DIR.glob("import_producer*.lock"))
+    for lock_path in lock_paths:
+        try:
+            payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        except Exception:
+            payload = {}
+        details = payload.get("details") or {}
+        output_dir = payload.get("output_dir") or details.get("output_dir")
+        if output_dir:
+            result.append(Path(output_dir))
+        ts_root = payload.get("ts_root") or details.get("ts_root")
+        if ts_root:
+            ts_root_path = Path(ts_root)
+            result.append(ts_root_path)
+            result.append(ts_root_path / "mcs_output")
     registry = Path(runtime_common.import_runtime_base(str(ROOT))) / "mcs_queues"
     if registry.is_dir():
         for path in registry.glob("*.json"):
@@ -568,7 +847,10 @@ def cmd_kill_background(args):
         except Exception:
             pass
     stop_markers = []
-    for lock_path in (BACKGROUND_MIMICS_LOCK_PATH, RESOURCE_LOCK_DIR / "gpu.lock"):
+    lock_paths = list(RESOURCE_LOCK_DIR.glob("background_mimics*.lock"))
+    lock_paths.extend(RESOURCE_LOCK_DIR.glob("import_producer*.lock"))
+    lock_paths.append(RESOURCE_LOCK_DIR / "gpu.lock")
+    for lock_path in lock_paths:
         try:
             lock_payload = json.loads(lock_path.read_text(encoding="utf-8"))
         except Exception:
@@ -585,6 +867,7 @@ def cmd_kill_background(args):
                 pass
     markers = [
         "mimics_bridge.py",
+        "mimics_batch_cli.py",
         "nninteractive_bridge.py",
         "--async-worker",
         "_run_create_mcs.py",
@@ -685,7 +968,7 @@ def build_parser():
     p.add_argument(
         "--mask-resample-method",
         choices=["distance", "nearest"],
-        default="distance",
+        default="nearest",
         help="Mask resampling method when mapping to image grids.",
     )
     p.add_argument("--no-create-mcs", action="store_true")

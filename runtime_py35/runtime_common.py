@@ -611,6 +611,37 @@ def resource_lock_path(project_root, name):
     return os.path.join(resource_lock_dir(project_root), name)
 
 
+def background_mimics_lock_name(scope):
+    """Return a lock name scoped to one independent background Mimics job.
+
+    Set MIMICS_SERIALIZE_BACKGROUND_MIMICS=1 only on installations whose
+    license or Mimics build genuinely permits a single background instance.
+    """
+    serialize = os.environ.get(
+        "MIMICS_SERIALIZE_BACKGROUND_MIMICS", ""
+    ).strip().lower()
+    if serialize in ("1", "true", "yes", "on"):
+        return "background_mimics.lock"
+    normalized = os.path.normcase(os.path.abspath(str(scope or "default")))
+    digest = hashlib.sha1(normalized.encode("utf-8", "replace")).hexdigest()[:20]
+    return "background_mimics_{0}.lock".format(digest)
+
+
+def background_mimics_lock_path(project_root, scope):
+    return resource_lock_path(project_root, background_mimics_lock_name(scope))
+
+
+def import_producer_lock_name(output_dir):
+    """Return the preparation-writer lock for one shared .mcs queue."""
+    normalized = os.path.normcase(os.path.abspath(str(output_dir or "default")))
+    digest = hashlib.sha1(normalized.encode("utf-8", "replace")).hexdigest()[:20]
+    return "import_producer_{0}.lock".format(digest)
+
+
+def import_producer_lock_path(project_root, output_dir):
+    return resource_lock_path(project_root, import_producer_lock_name(output_dir))
+
+
 def process_exists(pid):
     try:
         value = int(pid)

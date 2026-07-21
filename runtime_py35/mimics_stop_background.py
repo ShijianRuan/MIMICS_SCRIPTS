@@ -309,6 +309,29 @@ def _background_mimics_lock_path():
     return os.path.join(runtime_common.resource_lock_dir(_project_root()), "background_mimics.lock")
 
 
+def _background_mimics_lock_records():
+    """Return legacy and scoped background-Mimics ownership records."""
+    lock_dir = runtime_common.resource_lock_dir(_project_root())
+    paths = [_background_mimics_lock_path()]
+    try:
+        for name in os.listdir(lock_dir):
+            if name.startswith("background_mimics") and name.endswith(".lock"):
+                paths.append(os.path.join(lock_dir, name))
+    except Exception:
+        pass
+    records = []
+    seen = set()
+    for path in paths:
+        normalized = os.path.normcase(os.path.abspath(path))
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        payload = runtime_common.read_json(path, {}) or {}
+        if payload:
+            records.append((path, payload))
+    return records
+
+
 def _lock_is_import_creation(payload):
     if not isinstance(payload, dict):
         return False
@@ -329,8 +352,12 @@ def _request_lock_owned_stop_markers(reason):
     """Signal lock-owned jobs without mutating or deleting their resource lock."""
     written = []
     lock_dir = runtime_common.resource_lock_dir(_project_root())
-    for name in ("background_mimics.lock", "gpu.lock"):
-        payload = runtime_common.read_json(os.path.join(lock_dir, name), {}) or {}
+    records = _background_mimics_lock_records()
+    gpu_path = os.path.join(lock_dir, "gpu.lock")
+    gpu_payload = runtime_common.read_json(gpu_path, {}) or {}
+    if gpu_payload:
+        records.append((gpu_path, gpu_payload))
+    for _lock_path, payload in records:
         if not payload:
             continue
         candidates = []
@@ -402,8 +429,14 @@ def stop_background_import():
                 stopped_queues.append(output_dir)
         except Exception:
             pass
-    lock_path = _background_mimics_lock_path()
-    lock_payload = runtime_common.read_json(lock_path, {}) or {}
+    matching_locks = [
+        item for item in _background_mimics_lock_records()
+        if _lock_is_import_creation(item[1])
+    ]
+    lock_path, lock_payload = (
+        matching_locks[0] if matching_locks
+        else (_background_mimics_lock_path(), {})
+    )
     lock_token = str(lock_payload.get("token") or "")
     target_pid = None
     if _lock_is_import_creation(lock_payload):
@@ -531,8 +564,28 @@ def stop_background_export():
             module.cancel_current_project_exports()
         except Exception:
             pass
-    lock_path = _background_mimics_lock_path()
-    lock_payload = runtime_common.read_json(lock_path, {}) or {}
+    matching_locks = [
+        item for item in _background_mimics_lock_records()
+        if _lock_is_mask_export(item[1])
+    ]
+    lock_path, lock_payload = (
+        matching_locks[0] if matching_locks
+        else (_background_mimics_lock_path(), {})
+    )
+    for _candidate_path, candidate_payload in matching_locks:
+        candidate_stop = str(candidate_payload.get("stop_path") or "")
+        if candidate_stop:
+            try:
+                runtime_common.write_json_atomic(
+                    candidate_stop,
+                    {
+                        "status": "stop_requested",
+                        "requested_at_epoch": time.time(),
+                        "reason": "Stop Mask Export",
+                    },
+                )
+            except Exception:
+                pass
     lock_token = str(lock_payload.get("token") or "")
     target_pid = None
     export_root = str(lock_payload.get("export_root") or "")
@@ -699,13 +752,16 @@ def _active_cache_cleanup_blockers():
     """Return active tasks whose scratch files must not be removed."""
     blockers = []
     lock_dir = runtime_common.resource_lock_dir(_project_root())
-    for name in ("background_mimics.lock", "gpu.lock"):
-        path = os.path.join(lock_dir, name)
-        payload = runtime_common.read_json(path, {}) or {}
+    records = _background_mimics_lock_records()
+    gpu_path = os.path.join(lock_dir, "gpu.lock")
+    gpu_payload = runtime_common.read_json(gpu_path, {}) or {}
+    if gpu_payload:
+        records.append((gpu_path, gpu_payload))
+    for path, payload in records:
         pid = payload.get("pid")
         if pid and runtime_common.process_exists(pid):
             blockers.append(
-                "{0}: {1}".format(name, runtime_common.resource_lock_summary(payload))
+                "{0}: {1}".format(os.path.basename(path), runtime_common.resource_lock_summary(payload))
             )
 
     for module_name, collection_name in (

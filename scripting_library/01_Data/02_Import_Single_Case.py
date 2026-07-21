@@ -5,8 +5,9 @@ Opens a folder picker to select one case directory containing imaging data
 (ct.nii.gz, mri.nii.gz, or dicom/) and optional segmentations, then
 converts it to an .mcs package.
 
-This is the single-case equivalent of Import_Dataset — no batch scanning,
-no queue, no background Mimics polling.
+This is the single-case equivalent of Import_Dataset. Selection and preparation
+run outside the foreground Mimics process, then the prepared case is committed
+to the same output-scoped .mcs queue used by batch import.
 """
 
 from __future__ import print_function

@@ -108,29 +108,129 @@ Set `existing_mask_result_mode` to `in_place` or `derived_copy` only when a fixe
 | Feature | Resource | Coordination policy | User-visible behavior |
 | --- | --- | --- | --- |
 | Dataset preparation | CPU, disk | Runs independently in external Python | Mimics remains usable |
-| `.mcs` creation | One background Mimics process and license | Serialized with label export | Import queue continues automatically |
-| DINOv3 label export | One background Mimics process and license | Waits for active `.mcs` creation | Status names the lock owner and points to `04 Stop Import Queue` |
+| `.mcs` creation | One background Mimics instance per active queue | Only creators consuming the same import queue are serialized | Import queue continues automatically |
+| DINOv3 label export | Saved `.mcs` source and fresh-label destination | Waits for a writer of the same `.mcs` folder or another exporter to the same label destination | Status names the conflicting resource and its owner |
+| Current-project mask read/write | Foreground Mimics voxel-buffer API | Mask import, export, nnInteractive apply, and DINOv3 apply share a short `mask_buffer_access` lease | A competing callback is deferred or refused rather than mutating the same masks concurrently |
 | nnInteractive prediction | GPU | Serialized with DINOv3 training and prediction | An active prompt is never interrupted |
 | Idle nnInteractive worker | GPU | Receives a graceful close request when DINOv3 needs the GPU | DINOv3 starts after release; the next prompt creates a fresh worker |
 | DINOv3 training and prediction | GPU | Serialized to prevent CUDA out-of-memory failures | Waiting state, owner, PID, cancellation action, and progress remain visible |
 
-Import does not block DINOv3 computation by design. Only the label-export stage waits when import is using the background Mimics license. Users can wait, stop the import queue, or disable fresh label export when already exported labels are intentionally being used.
+Import does not block DINOv3 computation by design. Background Mimics ownership
+is scoped to an import queue or export destination, so independent jobs may run
+in parallel. Set `MIMICS_SERIALIZE_BACKGROUND_MIMICS=1` only when a workstation's
+license or Mimics installation genuinely allows one background instance.
+
+The Mimics `Import Dataset` entry, the Mimics `Import Single Case` entry, and
+`tools/mimics_batch_cli.py prepare-import` publish the same descriptor format to
+the same output-scoped `prepared_queue`. An `import_producer_<scope>.lock`
+prevents two of those entry points from changing that queue's active/done state
+at the same time. It is released as soon as preparation has committed its work;
+the background Mimics consumer may keep creating `.mcs` files afterward. A
+different output folder has a different producer and consumer lock and may run
+in parallel.
+
+Mask export uses the inverse contract. Every entry first records or measures the
+live Mimics voxel-to-RAS matrix, restores the Mimics buffer order, and maps the
+label to the selected source-image grid. Internal batch export, external
+`export-labels`, and DINOv3 label staging hold both the directory containing the
+source `.mcs` projects and the directory they actually write. This prevents an
+exporter from opening a project while an importer is replacing it, and prevents
+two exporters from writing the same labels. Locks are acquired in stable path
+order. Jobs with unrelated source and destination directories may still run in
+parallel.
+
+### Geometry contract shared by every import entry
+
+`Import Dataset`, `Import Single Case`, `tools/mimics_batch_cli.py
+prepare-import`, and `tools/single_case_import_worker.py` all call the same
+`mimics_bridge.py` preparation actions and publish the same prepared descriptor.
+They do not have separate image-orientation implementations.
+
+The interactive single-case entry delegates preparation and `.mcs` waiting to
+`single_case_import_worker.py`. The interactive batch entry keeps only timer
+orchestration in Mimics and runs discovery/conversion in the external Python.
+The CLI keeps all orchestration outside Mimics. Despite those lifecycle
+differences, all three use the same local runtime root, output-scoped queue,
+producer lock, bridge parameters, buffer mapping defaults, stop marker, and
+background creator. Starting one entry cannot bypass a task started by another.
+
+Batch preparation is streamed by both the interactive entry and the external
+CLI. As soon as one case is prepared, its descriptor is committed and a
+background Mimics process can create that `.mcs` while later cases are still
+being prepared. The first project therefore waits only for discovery, first-case
+preparation, and its own Mimics import/save; it does not wait for the entire
+dataset to finish preparation.
+
+A NumPy/NIfTI array has index order, not an anatomical coordinate system. The
+NIfTI affine supplies that meaning. For a mask voxel index `s`, its physical
+point is `p_RAS = A_mask_RAS * s`. DICOM and Mimics use DICOM patient
+coordinates (LPS), so the bridge converts a measured Mimics point to RAS with
+`diag(-1, -1, 1, 1)`. Mapping a Mimics target voxel `t` to the source mask is
+therefore:
+
+```text
+s = inverse(A_mask_RAS) * A_mimics_RAS * t
+```
+
+This is one physical-coordinate mapping, not "flip the mask to LPS and then
+flip it back." A pure axis permutation, sign flip, or integer translation is
+applied exactly. Nearest-neighbor sampling is used only when the physical grids
+genuinely differ, so labels remain discrete.
+
+Supported source volumes are `.nii`, `.nii.gz`, `.mha`, `.mhd`, `.nrrd`, and
+`.nrrd.gz`, plus a folder containing a DICOM image series. A single `.dcm` file
+is not treated as a complete volume; select the series folder instead.
+
+NIfTI headers are checked before SimpleITK reads image data. Matching valid
+qform/sform headers use the fast direct-read path. If either form is uncoded,
+invalid, or conflicts with the other, the bridge selects a valid coded sform
+first, then a valid coded qform, synchronizes a temporary header copy, and reads
+that copy. The source file is never rewritten. The same selected affine is used
+when NIfTI masks are mapped, preventing image and label readers from choosing
+different forms.
+
+For an original DICOM folder, the series is imported directly and its LPS
+geometry is converted to RAS only for the bridge's matrix arithmetic. For a
+NIfTI, MHD, MHA, or NRRD image, a lossless orientation step may permute or flip
+the image indexes before derived DICOM is written. `DICOMOrient("LPS")` changes
+the index representation, not the physical location of any voxel: axis-aligned
+coronal or sagittal data can become LPS index order by transpose/flip, while a
+residual oblique direction remains in the affine. The original source shape and
+affine remain recorded separately. The current `auto` policy preserves axial,
+coronal, sagittal, orthogonal oblique, and regular gantry-tilt grids. Gantry
+tilt is represented by each slice's full `ImagePositionPatient`; it is not an
+image resample. Only a non-orthogonal in-plane row/column basis, which classic
+DICOM cannot encode, is resampled once to a nearby orthonormal oblique grid.
+The older `auto` policy also required the slice step to be perpendicular to the
+image plane and therefore unnecessarily resampled regular gantry tilt.
+
+After DICOM import, the background creator measures the live Mimics grid with
+`ImageData.get_voxel_center()`. If Mimics has normalized the grid, masks are
+mapped directly from their original files to that measured grid; an intermediate
+mask is not resampled again. Export performs the inverse mapping from the
+measured Mimics grid to the selected original image shape and affine. Thus a
+round trip targets the original image grid even when the temporary Mimics grid
+differs.
 
 ### Switching between features
 
 | Current work | May start immediately | Must wait or stop first | Normal stop | Emergency stop |
 | --- | --- | --- | --- | --- |
 | Dataset scan or image preparation | Review, window controls, nnInteractive, DINOv3 inference on prepared data | Another import of the same queue | `01 Data/04 Stop Import Queue` | `99 Admin/03 Stop All Owned Services` |
-| Background `.mcs` creation | Review and GPU AI work | Mask export or fresh DINOv3 label export | `01 Data/04 Stop Import Queue` | `99 Admin/03 Stop All Owned Services` |
-| Mask export | Review and GPU AI work | Import `.mcs` creation or another label export | `01 Data/06 Stop Mask Export` | `99 Admin/03 Stop All Owned Services` |
+| Background `.mcs` creation | Review, GPU AI work, and exports reading other `.mcs` folders | Another creator or exporter using the same `.mcs` folder | `01 Data/04 Stop Import Queue` | `99 Admin/03 Stop All Owned Services` |
+| Mask export | Review, GPU AI work, and imports/exports using unrelated source and destination folders | Import writing its `.mcs` source folder, or export writing the same label destination | `01 Data/06 Stop Mask Export` | `99 Admin/03 Stop All Owned Services` |
 | nnInteractive active prediction | Review and data preparation | DINOv3 GPU execution | Finish or cancel the current nnInteractive session | `99 Admin/03 Stop All Owned Services` |
 | nnInteractive idle image worker | All review and data work | Nothing; DINOv3 requests a graceful GPU release | Worker exits on idle timeout | `99 Admin/03 Stop All Owned Services` |
 | DINOv3 training or prediction | Review, import preparation, status viewer | Another DINOv3 task for the same dataset; nnInteractive GPU execution | `02 AI/DINOv3/05 Stop AI Task` | `99 Admin/03 Stop All Owned Services` |
 | Environment repair | Review and data work | A second environment repair | Re-run the entry and choose `Stop Current Setup` | `99 Admin/03 Stop All Owned Services` |
 
 Resource conflicts fail or wait explicitly; they do not start a competing
-process silently. `gpu.lock` and `background_mimics.lock` contain the owner and
-PID shown in the Mimics log/status UI. Dead-PID locks are removed automatically.
+writer silently. A background Mimics job may own two scoped
+`background_mimics_<scope>.lock` files, one for its source and one for its
+destination. `gpu.lock` and these scoped lock files
+contain the owner and PID shown in the Mimics log/status UI. Dead-PID locks are
+removed automatically. The legacy global `background_mimics.lock` is used only
+when explicit single-instance serialization is enabled.
 The global stop entry first detaches in-process Mimics timers and asks queues to
 stop, then terminates only processes whose command line contains both this
 project root and a dedicated Mimics-Script marker. It never targets the

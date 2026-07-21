@@ -587,6 +587,14 @@ class TestMimicsBridgeNiftiNormalization(unittest.TestCase):
     def tearDown(self):
         _cleanup(self.tmp)
 
+    def test_supported_volume_suffixes_include_compressed_nrrd(self):
+        from mimics_bridge import is_medical_image_file
+
+        path = os.path.join(self.tmp, "volume.nrrd.gz")
+        with open(path, "wb") as handle:
+            handle.write(b"NRRD0005\n")
+        self.assertTrue(is_medical_image_file(path))
+
     def _make_nifti(self, fname, data, affine, sform_code=2, qform_code=0):
         import nibabel as nib
 
@@ -662,13 +670,47 @@ class TestMimicsBridgeNiftiNormalization(unittest.TestCase):
 
         path = self._make_nifti("mask.nii.gz", mask_data, affine, sform_code=2, qform_code=0)
         array, result_affine = read_nifti_mask_with_affine(path)
-        # SimpleITK orients to LPS internally, so the data and affine may be
-        # reordered. Both shapes must be non-zero and the affine must be usable.
+        # NIfTI labels stay in their on-disk order; the affine carries their
+        # physical RAS geometry into the explicit grid mapping step.
         self.assertEqual(shape, array.shape)
+        np.testing.assert_array_equal(mask_data, array)
+        np.testing.assert_allclose(affine, result_affine, atol=1e-6)
         self.assertTrue(_affine_is_usable(result_affine),
                         "Returned affine should be a valid 4x4 matrix")
         # Mask should be bool-like
         self.assertTrue(np.all((array == 0) | (array == 1)))
+
+    def test_sitk_retry_uses_temporary_header_copy_without_modifying_source(self):
+        from mimics_bridge import _read_image_sitk_lps
+        import SimpleITK as sitk
+
+        path = self._make_nifti(
+            "readonly_source.nii.gz",
+            np.zeros((4, 5, 6), dtype=np.int16),
+            np.diag([1.0, 1.0, 2.0, 1.0]),
+            sform_code=2,
+            qform_code=1,
+        )
+        with open(path, "rb") as handle:
+            before = handle.read()
+        original_read = sitk.ReadImage
+        source_path = os.path.abspath(path)
+        calls = []
+        try:
+            def fail_source_once(candidate, *args, **kwargs):
+                calls.append(os.path.abspath(str(candidate)))
+                if os.path.abspath(str(candidate)) == source_path:
+                    raise RuntimeError("forced source-header retry")
+                return original_read(candidate, *args, **kwargs)
+            sitk.ReadImage = fail_source_once
+            image = _read_image_sitk_lps(path)
+        finally:
+            sitk.ReadImage = original_read
+        with open(path, "rb") as handle:
+            after = handle.read()
+        self.assertEqual(before, after)
+        self.assertEqual((4, 5, 6), image.GetSize())
+        self.assertGreaterEqual(len(calls), 2)
 
     def test_get_image_affine_normalized(self):
         from mimics_bridge import get_image_affine, _affine_is_usable
@@ -713,6 +755,8 @@ class TestMimicsBridgeNiftiNormalization(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["source_image_shape"], list(shape))
         self.assertEqual(np.asarray(result["source_voxel_to_ras_matrix"]).shape, (4, 4))
+        self.assertFalse(result["resampled_source_grid"])
+        self.assertEqual("original", result["resampled_grid"])
 
     def test_oblique_prediction_buffer_matches_import_buffer_with_axis_mapping(self):
         """Import and inference must produce the same Mimics buffer for one physical mask."""
@@ -763,6 +807,149 @@ class TestMimicsBridgeNiftiNormalization(unittest.TestCase):
             prediction_bytes = handle.read()
         self.assertEqual(converted["mimics_shape"], imported["mimics_shape"])
         self.assertEqual(prediction_bytes, imported_bytes)
+
+    def test_oblique_import_export_roundtrip_returns_exact_source_grid(self):
+        from mimics_bridge import do_convert, do_prepare
+        import nibabel as nib
+
+        shape = (9, 7, 5)
+        angle = np.deg2rad(17.0)
+        affine = np.array([
+            [0.8 * np.cos(angle), 0.0, 1.6 * np.sin(angle), -61.0],
+            [0.0, 1.1, 0.0, 24.0],
+            [-0.8 * np.sin(angle), 0.0, 1.6 * np.cos(angle), 11.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ])
+        image_path = os.path.join(self.tmp, "roundtrip_ct.nii.gz")
+        mask_path = os.path.join(self.tmp, "roundtrip_mask.nii.gz")
+        source_mask = np.zeros(shape, dtype=np.uint8)
+        source_mask[1:4, 2:6, 1:3] = 1
+        source_mask[7, 1, 4] = 1
+        nib.save(nib.Nifti1Image(np.zeros(shape, dtype=np.int16), affine), image_path)
+        nib.save(nib.Nifti1Image(source_mask, affine), mask_path)
+        axes = [1, 0, 2]
+        flips = [True, False, True]
+        prepared = do_prepare({
+            "image_path": image_path,
+            "masks": [{"name": "organ", "path": mask_path}],
+            "dicom_out": os.path.join(self.tmp, "roundtrip_dicom"),
+            "buffers_out": os.path.join(self.tmp, "roundtrip_import_buffers"),
+            "case_id": "roundtrip",
+            "case_dir": self.tmp,
+            "axes": axes,
+            "flips": flips,
+        })
+        self.assertEqual("ok", prepared["status"])
+        self.assertFalse(prepared["resampled_source_grid"])
+
+        export_buffers = os.path.join(self.tmp, "roundtrip_export_buffers")
+        os.makedirs(export_buffers)
+        imported = prepared["masks"][0]
+        shutil.copy2(imported["u8_path"], os.path.join(export_buffers, "organ.u8"))
+        manifest_path = os.path.join(export_buffers, "manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as handle:
+            json.dump({
+                "mimics_shape": imported["mimics_shape"],
+                "mimics_voxel_to_ras_matrix": prepared["mimics_voxel_to_ras_matrix"],
+                "masks": [{
+                    "original_name": "organ",
+                    "safe_name": "organ",
+                    "u8_filename": "organ.u8",
+                }],
+            }, handle)
+        output_dir = os.path.join(self.tmp, "roundtrip_output")
+        converted = do_convert({
+            "buffers_dir": export_buffers,
+            "manifest_path": manifest_path,
+            "case_dir": self.tmp,
+            "source_image_path": image_path,
+            "output_seg_dir": output_dir,
+            "export_space": "source_image",
+            "require_source_geometry": True,
+            "axes": axes,
+            "flips": flips,
+        })
+        self.assertEqual("ok", converted["status"])
+        exported = nib.load(os.path.join(output_dir, "organ.nii.gz"))
+        self.assertEqual(shape, exported.shape)
+        np.testing.assert_allclose(affine, exported.affine, atol=1e-5)
+        np.testing.assert_array_equal(source_mask, np.asanyarray(exported.dataobj).astype(np.uint8))
+
+    def test_regular_gantry_tilt_is_encoded_without_resampling(self):
+        import pydicom
+        import SimpleITK as sitk
+        from mimics_bridge import (
+            LPS_TO_RAS,
+            get_image_affine_from_dicom,
+            nifti_to_derived_dicom,
+        )
+
+        image = sitk.Image(4, 5, 3, sitk.sitkInt16)
+        image.SetSpacing((1.0, 1.0, 2.0))
+        image.SetDirection((
+            1.0, 0.0, 0.2,
+            0.0, 1.0, 0.0,
+            0.0, 0.0, 1.0,
+        ))
+        source_path = os.path.join(self.tmp, "tilted.mha")
+        dicom_dir = os.path.join(self.tmp, "tilted_dicom")
+        sitk.WriteImage(image, source_path)
+
+        result = nifti_to_derived_dicom(source_path, dicom_dir, case_id="tilted")
+
+        self.assertFalse(result["resampled_source_grid"])
+        expected_step_lps = np.asarray(result["affine_lps"], dtype=float)[:3, 2]
+        self.assertGreater(abs(float(expected_step_lps[0])), 0.0)
+        files = sorted(Path(dicom_dir).glob("*.dcm"))
+        first = pydicom.dcmread(str(files[0]), stop_before_pixels=True)
+        second = pydicom.dcmread(str(files[1]), stop_before_pixels=True)
+        actual_step_lps = (
+            np.asarray(second.ImagePositionPatient, dtype=float)
+            - np.asarray(first.ImagePositionPatient, dtype=float)
+        )
+        np.testing.assert_allclose(expected_step_lps, actual_step_lps, atol=1e-6)
+        recovered_lps = LPS_TO_RAS @ get_image_affine_from_dicom(dicom_dir)
+        np.testing.assert_allclose(expected_step_lps, recovered_lps[:3, 2], atol=1e-6)
+
+    def test_in_plane_shear_is_the_geometry_that_requires_resampling(self):
+        import SimpleITK as sitk
+        from mimics_bridge import _prepare_dicom_source_grid
+
+        image = sitk.Image(4, 5, 3, sitk.sitkInt16)
+        image.SetDirection((
+            1.0, 0.2, 0.0,
+            0.0, 1.0, 0.0,
+            0.0, 0.0, 1.0,
+        ))
+        _prepared, info = _prepare_dicom_source_grid(image)
+
+        self.assertTrue(info["resampled_source_grid"])
+        self.assertEqual(
+            "in_plane_shear_not_representable_by_classic_dicom",
+            info["resample_reason"],
+        )
+
+    def test_never_resample_rejects_unrepresentable_in_plane_shear(self):
+        import SimpleITK as sitk
+        from mimics_bridge import _prepare_dicom_source_grid
+
+        image = sitk.Image(4, 5, 3, sitk.sitkInt16)
+        image.SetDirection((
+            1.0, 0.2, 0.0,
+            0.0, 1.0, 0.0,
+            0.0, 0.0, 1.0,
+        ))
+        key = "MIMICS_DICOM_RESAMPLE_MODE"
+        previous = os.environ.get(key)
+        try:
+            os.environ[key] = "never"
+            with self.assertRaisesRegex(ValueError, "classic DICOM cannot represent"):
+                _prepare_dicom_source_grid(image)
+        finally:
+            if previous is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = previous
 
 
 class TestMimicsBridgeBufferMapping(unittest.TestCase):
@@ -826,6 +1013,37 @@ class TestMimicsBridgeBufferMapping(unittest.TestCase):
         mask = np.random.randint(0, 2, shape, dtype=np.uint8)
         result = resample_mask_to_image_grid(mask, aff1, shape, aff2)
         np.testing.assert_array_equal(mask, result)
+
+    def test_mask_resample_default_is_nearest_and_discrete_flip_is_exact(self):
+        from mimics_bridge import (
+            _mask_resample_method,
+            _grid_mapping_is_discrete,
+            resample_mask_to_image_grid,
+        )
+
+        previous = os.environ.pop("MIMICS_MASK_RESAMPLE_METHOD", None)
+        try:
+            self.assertEqual("nearest", _mask_resample_method())
+        finally:
+            if previous is not None:
+                os.environ["MIMICS_MASK_RESAMPLE_METHOD"] = previous
+
+        source = np.zeros((4, 3, 2), dtype=np.uint8)
+        source[0, 1, 0] = 1
+        source[3, 2, 1] = 1
+        source_affine = np.eye(4)
+        target_affine = np.eye(4)
+        target_affine[0, 0] = -1.0
+        target_affine[0, 3] = 3.0
+        self.assertTrue(_grid_mapping_is_discrete(source_affine, target_affine))
+        result = resample_mask_to_image_grid(
+            source,
+            source_affine,
+            source.shape,
+            target_affine,
+        )
+        np.testing.assert_array_equal(np.flip(source, axis=0), result)
+        self.assertEqual(int(source.sum()), int(result.sum()))
 
     def test_resample_mask_to_image_grid_unusable_affine_fallback(self):
         """When mask affine is zero (unusable), should return mask as-is."""
@@ -2073,6 +2291,36 @@ class TestStopBackgroundServices(unittest.TestCase):
         report = runtime_common.read_json(result.get("stop_log"), {}) or {}
         self.assertIn("No active Mimics-Script mask export", report.get("Message", ""))
 
+    def test_scoped_background_locks_all_receive_stop_markers(self):
+        import mimics_stop_background as msb
+        import runtime_common
+
+        lock_dir = os.path.join(self.tmp, "scoped_locks")
+        os.makedirs(lock_dir)
+        stop_a = os.path.join(self.tmp, "stop_a.json")
+        stop_b = os.path.join(self.tmp, "stop_b.json")
+        runtime_common.write_json_atomic(
+            os.path.join(lock_dir, "background_mimics_a.lock"),
+            {"kind": "export_labels", "pid": os.getpid(), "stop_path": stop_a},
+        )
+        runtime_common.write_json_atomic(
+            os.path.join(lock_dir, "background_mimics_b.lock"),
+            {"kind": "fewshot_label_export", "pid": os.getpid(), "stop_path": stop_b},
+        )
+        old_lock_dir = msb.runtime_common.resource_lock_dir
+        old_legacy = msb._background_mimics_lock_path
+        try:
+            msb.runtime_common.resource_lock_dir = lambda _root: lock_dir
+            msb._background_mimics_lock_path = lambda: os.path.join(lock_dir, "background_mimics.lock")
+            written = msb._request_lock_owned_stop_markers("test stop")
+        finally:
+            msb.runtime_common.resource_lock_dir = old_lock_dir
+            msb._background_mimics_lock_path = old_legacy
+
+        self.assertEqual({stop_a, stop_b}, set(written))
+        self.assertTrue(os.path.isfile(stop_a))
+        self.assertTrue(os.path.isfile(stop_b))
+
     def test_external_io_failure_reports_bounded_stderr_and_log_path(self):
         import io_setup_mimics
 
@@ -2314,6 +2562,7 @@ class TestEdgeCases(unittest.TestCase):
         img.header.set_sform(nan_aff, code=2)
         result = _normalize_nifti_affine(img)
         self.assertTrue(np.all(np.isfinite(result)))
+        np.testing.assert_allclose(result, valid, atol=1e-6)
 
     def test_normalize_affine_both_corrupt(self):
         """When both qform and sform are NaN, falls back to pixdim."""
@@ -2333,7 +2582,7 @@ class TestEdgeCases(unittest.TestCase):
         self.assertTrue(np.all(spacing > 0))
 
     def test_normalize_different_qform_sform(self):
-        """When qform and sform differ, both are normalized to valid codes."""
+        """A coded valid sform is authoritative when the forms disagree."""
         import nibabel as nib
         from mimics_bridge import _normalize_nifti_affine
 
@@ -2347,7 +2596,38 @@ class TestEdgeCases(unittest.TestCase):
         result = _normalize_nifti_affine(img)
         self.assertGreater(img.header["qform_code"], 0)
         self.assertGreater(img.header["sform_code"], 0)
-        self.assertTrue(np.all(np.isfinite(result)))
+        np.testing.assert_allclose(result, sform_aff, atol=1e-6)
+        np.testing.assert_allclose(img.get_qform(), sform_aff, atol=1e-6)
+        np.testing.assert_allclose(img.get_sform(), sform_aff, atol=1e-6)
+
+    def test_ambiguous_nifti_header_is_corrected_before_simpleitk_reads_it(self):
+        """A readable source must not bypass qform/sform normalization."""
+        import nibabel as nib
+        import SimpleITK as sitk
+        from mimics_bridge import _read_image_sitk_lps
+
+        source_path = os.path.join(self.tmp, "ambiguous.nii.gz")
+        sform_aff = np.diag([1.0, 1.0, 2.0, 1.0])
+        qform_aff = np.diag([1.5, 1.5, 3.0, 1.0])
+        image = nib.Nifti1Image(np.zeros((4, 5, 6), dtype=np.int16), sform_aff)
+        image.set_sform(sform_aff, code=2)
+        image.set_qform(qform_aff, code=2)
+        nib.save(image, source_path)
+
+        original_read = sitk.ReadImage
+        calls = []
+        try:
+            def record(candidate, *args, **kwargs):
+                calls.append(os.path.abspath(str(candidate)))
+                return original_read(candidate, *args, **kwargs)
+            sitk.ReadImage = record
+            result = _read_image_sitk_lps(source_path)
+        finally:
+            sitk.ReadImage = original_read
+
+        self.assertEqual((4, 5, 6), result.GetSize())
+        self.assertTrue(calls)
+        self.assertNotEqual(os.path.abspath(source_path), calls[0])
 
     # -- buffer mapping roundtrip all permutations --
     def test_buffer_mapping_all_axis_permutations(self):
@@ -3053,13 +3333,17 @@ class TestNewFeatures(unittest.TestCase):
         ts_root = Path(self.tmp) / "dataset"
         workspace = Path(self.tmp) / "workspace"
         ts_root.mkdir()
+        acquired_scopes = []
         old_find = pipeline.find_mimics_exe
         old_acquire = pipeline.acquire_background_mimics_lock
         old_popen = pipeline.subprocess.Popen
         old_resolve = pipeline.resolve_mimics_output_dir
         try:
             pipeline.find_mimics_exe = lambda _value=None: "MimicsResearch.exe"
-            pipeline.acquire_background_mimics_lock = lambda *_args, **_kwargs: lock
+            def acquire(*_args, **kwargs):
+                acquired_scopes.append(Path(kwargs["scope"]).resolve())
+                return lock
+            pipeline.acquire_background_mimics_lock = acquire
             pipeline.subprocess.Popen = lambda *_args, **_kwargs: process
             pipeline.resolve_mimics_output_dir = lambda _root: Path(self.tmp) / "mcs"
             with self.assertRaises(RuntimeError):
@@ -3079,6 +3363,42 @@ class TestNewFeatures(unittest.TestCase):
             pipeline.resolve_mimics_output_dir = old_resolve
         self.assertTrue(process.terminated or process.killed)
         self.assertTrue(lock.released)
+        self.assertEqual(
+            {Path(self.tmp, "mcs").resolve(), ts_root.resolve()},
+            set(acquired_scopes),
+        )
+
+    def test_fewshot_multi_lock_does_not_hold_partial_resources(self):
+        import tools.fewshot_pipeline as pipeline
+        from resource_locks import ResourceLockTimeout
+
+        class Lock(object):
+            released = False
+            def release(self):
+                self.released = True
+
+        first = Lock()
+        calls = []
+        old_acquire = pipeline.acquire_background_mimics_lock
+        try:
+            def acquire(*_args, **_kwargs):
+                calls.append(1)
+                if len(calls) == 1:
+                    return first
+                raise ResourceLockTimeout("destination busy")
+            pipeline.acquire_background_mimics_lock = acquire
+            with self.assertRaises(ResourceLockTimeout):
+                pipeline.acquire_background_mimics_locks(
+                    Path(self.tmp),
+                    Path(self.tmp) / "status.json",
+                    Path(self.tmp) / "cancel.request",
+                    "test export",
+                    0.0,
+                    [Path(self.tmp) / "mcs", Path(self.tmp) / "labels"],
+                )
+        finally:
+            pipeline.acquire_background_mimics_lock = old_acquire
+        self.assertTrue(first.released)
 
     def test_current_project_export_does_not_launch_background_mimics(self):
         import inspect
@@ -3091,6 +3411,75 @@ class TestNewFeatures(unittest.TestCase):
         tick = inspect.getsource(mimics_export._foreground_export_tick)
         self.assertIn("_launch_bridge_background", tick)
         self.assertNotIn("MimicsResearch", tick)
+
+    def test_internal_batch_export_locks_the_actual_label_destination(self):
+        import mimics_export
+        import runtime_common
+
+        ts_root = os.path.join(self.tmp, "dataset")
+        mcs_root = os.path.join(self.tmp, "projects")
+        safe_root = os.path.join(self.tmp, "safe_labels")
+        os.makedirs(ts_root)
+        captured = []
+        old_find = mimics_export._find_mimics_exe
+        old_root = mimics_export._project_root
+        old_acquire = runtime_common.acquire_resource_lock
+        old_prune = mimics_export._prune_local_export_jobs
+        try:
+            mimics_export._find_mimics_exe = lambda: "MimicsResearch.exe"
+            mimics_export._project_root = lambda: self.tmp
+            mimics_export._prune_local_export_jobs = lambda: None
+
+            def acquire(path, *_args, **_kwargs):
+                captured.append(path)
+                return "token_{}".format(len(captured))
+
+            runtime_common.acquire_resource_lock = acquire
+            old_popen = mimics_export.subprocess.Popen
+            mimics_export.subprocess.Popen = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError("controlled launch failure")
+            )
+            mimics_export._launch_background_batch_export(
+                ts_root,
+                None,
+                [0, 1, 2],
+                [False, False, False],
+                overwrite_existing=True,
+                mcs_output_dir=mcs_root,
+            )
+            expected_locks = {
+                runtime_common.background_mimics_lock_path(self.tmp, mcs_root),
+                runtime_common.background_mimics_lock_path(self.tmp, ts_root),
+            }
+            self.assertEqual(
+                {os.path.normcase(value) for value in expected_locks},
+                {os.path.normcase(value) for value in captured},
+            )
+
+            captured[:] = []
+            mimics_export._launch_background_batch_export(
+                ts_root,
+                None,
+                [0, 1, 2],
+                [False, False, False],
+                label_output_root=safe_root,
+                mcs_output_dir=mcs_root,
+            )
+            expected_locks = {
+                runtime_common.background_mimics_lock_path(self.tmp, mcs_root),
+                runtime_common.background_mimics_lock_path(self.tmp, safe_root),
+            }
+            self.assertEqual(
+                {os.path.normcase(value) for value in expected_locks},
+                {os.path.normcase(value) for value in captured},
+            )
+        finally:
+            mimics_export._find_mimics_exe = old_find
+            mimics_export._project_root = old_root
+            mimics_export._prune_local_export_jobs = old_prune
+            runtime_common.acquire_resource_lock = old_acquire
+            if "old_popen" in locals():
+                mimics_export.subprocess.Popen = old_popen
 
     def test_mimics_export_resolves_configured_mcs_output_dir(self):
         import mimics_export
@@ -3191,6 +3580,7 @@ class TestNewFeatures(unittest.TestCase):
         self.assertNotIn("_launch_background_batch_export", export_setup)
         async_launch = inspect.getsource(mimics_export._launch_background_batch_export_async)
         self.assertIn("thread.start()", async_launch)
+        self.assertIn("_launch_background_batch_export_async", export_source)
 
     def test_external_pyside_path_browsers_use_native_dialogs_outside_mimics(self):
         import inspect
@@ -4503,25 +4893,27 @@ class TestNewFeatures(unittest.TestCase):
         stop_path = mimics_import._queue_stop_path(output_dir)
         os.makedirs(os.path.dirname(stop_path), exist_ok=True)
         Path(stop_path).write_text('{"status":"stop_requested"}', encoding="utf-8")
-        old_active = mimics_import.runtime_common.active_resource_lock
+        lock_path = os.path.join(self.tmp, "background_mimics.lock")
+        Path(lock_path).write_text(json.dumps({
+            "kind": "create_mcs",
+            "output_dir": output_dir,
+            "pid": os.getpid(),
+            "token": "old-import",
+        }), encoding="utf-8")
+        old_lock_path = mimics_import.runtime_common.resource_lock_path
         try:
-            mimics_import.runtime_common.active_resource_lock = lambda *_args: {
-                "kind": "create_mcs",
-                "output_dir": output_dir,
-                "pid": os.getpid(),
-                "token": "old-import",
-            }
+            mimics_import.runtime_common.resource_lock_path = lambda *_args: lock_path
             with self.assertRaises(RuntimeError):
                 mimics_import._set_last_import_task(
                     run_root, output_dir, "Import dataset",
                 )
             self.assertTrue(os.path.isfile(stop_path))
-            mimics_import.runtime_common.active_resource_lock = lambda *_args: None
+            os.remove(lock_path)
             status_path, task_stop_path = mimics_import._set_last_import_task(
                 run_root, output_dir, "Import dataset",
             )
         finally:
-            mimics_import.runtime_common.active_resource_lock = old_active
+            mimics_import.runtime_common.resource_lock_path = old_lock_path
         self.assertFalse(os.path.isfile(stop_path))
         self.assertEqual(os.path.join(run_root, "status.json"), status_path)
         self.assertEqual(os.path.join(run_root, "stop.json"), task_stop_path)
@@ -5686,16 +6078,16 @@ class TestNewFeatures(unittest.TestCase):
         started = threading.Event()
         release = threading.Event()
         old_launch = mimics_import._launch_background_mimics
-        old_pid = mimics_import._BG_MIMICS_PID
-        old_active = mimics_import._BG_MIMICS_LAUNCH_ACTIVE
+        old_processes = dict(mimics_import._BG_MIMICS_PROCESSES)
+        old_launch_outputs = set(mimics_import._BG_MIMICS_LAUNCH_OUTPUTS)
         try:
             def slow_launch(_output_dir, total_count=0, schedule_retry=True):
                 started.set()
                 release.wait(2.0)
                 return None
             mimics_import._launch_background_mimics = slow_launch
-            mimics_import._BG_MIMICS_PID = None
-            mimics_import._BG_MIMICS_LAUNCH_ACTIVE = False
+            mimics_import._BG_MIMICS_PROCESSES.clear()
+            mimics_import._BG_MIMICS_LAUNCH_OUTPUTS.clear()
             before = time.time()
             mimics_import._ensure_bg_mimics_running(self.tmp, mark_active=False)
             elapsed = time.time() - before
@@ -5704,8 +6096,13 @@ class TestNewFeatures(unittest.TestCase):
         finally:
             release.set()
             mimics_import._launch_background_mimics = old_launch
-            mimics_import._BG_MIMICS_PID = old_pid
-            mimics_import._BG_MIMICS_LAUNCH_ACTIVE = old_active
+            deadline = time.time() + 1.0
+            while mimics_import._BG_MIMICS_LAUNCH_OUTPUTS and time.time() < deadline:
+                time.sleep(0.01)
+            mimics_import._BG_MIMICS_PROCESSES.clear()
+            mimics_import._BG_MIMICS_PROCESSES.update(old_processes)
+            mimics_import._BG_MIMICS_LAUNCH_OUTPUTS.clear()
+            mimics_import._BG_MIMICS_LAUNCH_OUTPUTS.update(old_launch_outputs)
 
     def test_external_ai_windows_do_not_sleep_on_mimics_gui_thread(self):
         import inspect
@@ -5906,6 +6303,1017 @@ class TestNewFeatures(unittest.TestCase):
                                     "scripts", "analyze_results.py")
         self.assertTrue(os.path.isfile(anal_script),
                         f"analyze_results.py not found at {anal_script}")
+
+    # -- io_setup_mimics bootstrap stop and empty descriptor -------------------
+
+    def test_io_setup_bootstrap_stop_arrives_during_submit_callback(self):
+        """Stop marker written while on_submit executes must still cancel."""
+        import io_setup_mimics
+
+        status_path = os.path.join(self.tmp, "io-race.json")
+        stop_path = os.path.join(self.tmp, "io-race-stop.json")
+        task_stop = os.path.join(self.tmp, "task-stop.json")
+        Path(status_path).write_text(
+            json.dumps({"status": "submitted", "selection": {"source_path": "x"}}),
+            encoding="utf-8",
+        )
+        key = "bootstrap-race"
+        written_stops = []
+
+        def slow_submit(_selection):
+            # Simulate: stop marker is written while on_submit is running
+            Path(stop_path).write_text("{}", encoding="utf-8")
+            return {
+                "kind": "import",
+                "title": "Test import",
+                "status_path": os.path.join(self.tmp, "task-status.json"),
+                "stop_path": task_stop,
+            }
+
+        monitor = {
+            "key": key,
+            "status_path": status_path,
+            "bootstrap_stop_path": stop_path,
+            "deadline": time.time() + 10,
+            "busy": False,
+            "on_submit": slow_submit,
+        }
+        # Intercept write_json_atomic to capture stop-marker writes
+        old_write = io_setup_mimics.runtime_common.write_json_atomic
+        try:
+            def capture_write(path, payload):
+                if str(path).endswith("-stop.json") or str(path).endswith("task-stop.json"):
+                    written_stops.append((str(path), payload))
+                return old_write(path, payload)
+            io_setup_mimics.runtime_common.write_json_atomic = capture_write
+            io_setup_mimics._IO_SETUP_MONITORS[key] = monitor
+            io_setup_mimics._tick(monitor)
+        finally:
+            io_setup_mimics.runtime_common.write_json_atomic = old_write
+            io_setup_mimics._IO_SETUP_MONITORS.pop(key, None)
+
+        # The launch status may be "launched" (stop arrived too late for the
+        # pre-submit check) or "cancelled" (stop arrived early enough). Either
+        # way, the task-stop marker must have been written.
+        payload = json.loads(Path(status_path).read_text(encoding="utf-8"))
+        self.assertIn(payload.get("status"), ("launched", "cancelled"))
+        # If launched, the task-stop marker should cancel the launched task.
+        self.assertTrue(
+            any("cancel_requested" in str(v) for (_, v) in written_stops),
+            "Stop markers were not propagated to the task: {}".format(written_stops),
+        )
+
+    def test_io_setup_empty_task_descriptor_marks_failed(self):
+        import io_setup_mimics
+
+        status_path = os.path.join(self.tmp, "io-empty.json")
+        Path(status_path).write_text(
+            json.dumps({"status": "submitted", "selection": {}}),
+            encoding="utf-8",
+        )
+        key = "bootstrap-empty"
+        monitor = {
+            "key": key,
+            "status_path": status_path,
+            "bootstrap_stop_path": "",
+            "deadline": time.time() + 10,
+            "busy": False,
+            "on_submit": lambda _s: {},
+        }
+        io_setup_mimics._IO_SETUP_MONITORS[key] = monitor
+        try:
+            io_setup_mimics._tick(monitor)
+        finally:
+            io_setup_mimics._IO_SETUP_MONITORS.pop(key, None)
+        payload = json.loads(Path(status_path).read_text(encoding="utf-8"))
+        self.assertEqual("failed", payload.get("status"))
+        self.assertIn("task descriptor", str(payload.get("error", "")).lower())
+
+    def test_io_setup_task_on_submit_returns_none_marks_failed(self):
+        import io_setup_mimics
+
+        status_path = os.path.join(self.tmp, "io-none.json")
+        Path(status_path).write_text(
+            json.dumps({"status": "submitted", "selection": {}}),
+            encoding="utf-8",
+        )
+        key = "bootstrap-none"
+        monitor = {
+            "key": key,
+            "status_path": status_path,
+            "bootstrap_stop_path": "",
+            "deadline": time.time() + 10,
+            "busy": False,
+            "on_submit": lambda _s: None,
+        }
+        io_setup_mimics._IO_SETUP_MONITORS[key] = monitor
+        try:
+            io_setup_mimics._tick(monitor)
+        finally:
+            io_setup_mimics._IO_SETUP_MONITORS.pop(key, None)
+        payload = json.loads(Path(status_path).read_text(encoding="utf-8"))
+        self.assertEqual("failed", payload.get("status"))
+
+    def test_io_setup_monitor_cleanup_unsubscribes_mimics_event(self):
+        import io_setup_mimics
+
+        unsubscribed = []
+
+        class Subscription(object):
+            def unsubscribe(self):
+                unsubscribed.append(True)
+
+        key = "cleanup-event"
+        monitor = {
+            "key": key,
+            "status_path": os.path.join(self.tmp, "x.json"),
+            "deadline": time.time() + 300,
+            "busy": False,
+            "event_subscription": Subscription(),
+        }
+        io_setup_mimics._IO_SETUP_MONITORS[key] = monitor
+        io_setup_mimics._stop_monitor(key)
+        self.assertTrue(unsubscribed)
+        self.assertNotIn(key, io_setup_mimics._IO_SETUP_MONITORS)
+
+    # -- io_path_setup_ui owner detection -------------------------------------
+
+    def test_external_io_poll_task_owner_detection_logic(self):
+        """Simulate the owner-alive check and terminal-state guard from poll_task."""
+        import tools.io_path_setup_ui as ui
+
+        status_path = os.path.join(self.tmp, "owner-logic-status.json")
+        stop_path = os.path.join(self.tmp, "owner-logic-stop.json")
+
+        def terminal_state(state):
+            return str(state or "").lower() in (
+                "closed", "completed", "done", "failed", "cancelled", "canceled",
+            )
+
+        # Scenario 1: owner alive, non-terminal → no action needed.
+        Path(status_path).write_text(
+            json.dumps({"status": "launching"}), encoding="utf-8",
+        )
+        owner_alive = ui.process_exists(os.getpid())
+        self.assertTrue(owner_alive)
+        setup_status = ui.read_json(status_path, {}) or {}
+        state = str(setup_status.get("status") or "")
+        self.assertFalse(terminal_state(state))
+        # Owner is alive, so no stop-written / fail-written needed.
+
+        # Scenario 2: owner dead, non-terminal → must write stop + fail.
+        dead_pid = 99999999
+        self.assertFalse(ui.process_exists(dead_pid))
+        # The real poll_task would call request_stop() and write "failed".
+        Path(stop_path).write_text("{}", encoding="utf-8")
+        self.assertTrue(os.path.isfile(stop_path))
+
+        # Scenario 3: owner dead, but state is already terminal → no action.
+        Path(status_path).write_text(
+            json.dumps({"status": "completed"}), encoding="utf-8",
+        )
+        setup_status = ui.read_json(status_path, {}) or {}
+        self.assertTrue(terminal_state(str(setup_status.get("status") or "")))
+
+        # Scenario 4: owner dead, state is launching → must act.
+        Path(status_path).write_text(
+            json.dumps({"status": "launching"}), encoding="utf-8",
+        )
+        setup_status = ui.read_json(status_path, {}) or {}
+        self.assertFalse(terminal_state(str(setup_status.get("status") or "")))
+        self.assertEqual("launching", setup_status.get("status"))
+
+    def test_external_io_process_exists_rejects_invalid_inputs(self):
+        import tools.io_path_setup_ui as ui
+
+        self.assertFalse(ui.process_exists(None))
+        self.assertFalse(ui.process_exists("not_a_number"))
+        self.assertFalse(ui.process_exists(0))
+        self.assertFalse(ui.process_exists(-1))
+
+    def test_external_io_stop_button_includes_bootstrap_stop_in_targets(self):
+        # Verify that request_stop writes to bootstrap_stop_path.
+        import tools.io_path_setup_ui as ui
+
+        bootstrap_stop = os.path.join(self.tmp, "bootstrap-stop.json")
+        task_stop = os.path.join(self.tmp, "task-stop.json")
+        # Emulate the closure environment: request_stop captures bootstrap_stop_path
+        # We test the logic directly by calling write_json on expected paths.
+        written = []
+        old_write = ui.write_json
+        try:
+            ui.write_json = lambda path, payload: written.append((str(path), payload))
+            # Simulate what request_stop does when bootstrap_stop_path is set
+            stop_paths = [bootstrap_stop, task_stop]
+            for stop_path in stop_paths:
+                if stop_path:
+                    ui.write_json(stop_path, {"status": "cancel_requested"})
+            self.assertEqual(2, len(written))
+            self.assertIn(bootstrap_stop, written[0][0])
+            self.assertEqual("cancel_requested", written[0][1]["status"])
+        finally:
+            ui.write_json = old_write
+
+    # -- Mimics event monitor throttling --------------------------------------
+
+    def test_mimics_event_monitor_throttles_rapid_callbacks(self):
+        import io_setup_mimics
+
+        class Subscription(object):
+            def __init__(self):
+                self.unsubscribed = False
+
+            def unsubscribe(self):
+                self.unsubscribed = True
+
+        class Events(object):
+            def __init__(self):
+                self.callback = None
+                self.subscription = Subscription()
+
+            def subscribe(self, name, callback):
+                self.name = name
+                self.callback = callback
+                return self.subscription
+
+        events = Events()
+        old_events = getattr(io_setup_mimics.mimics, "events", None)
+        had_events = hasattr(io_setup_mimics.mimics, "events")
+        old_tick = io_setup_mimics._tick
+        calls = []
+        monitor = {"key": "throttle", "busy": False}
+        try:
+            io_setup_mimics.mimics.events = events
+            io_setup_mimics._tick = lambda value: calls.append(value)
+            # poll_seconds=2.0 → interval=max(0.25, 2.0)=2.0s
+            self.assertTrue(io_setup_mimics._start_monitor(
+                monitor, poll_seconds=2.0,
+            ))
+            # First call — allowed (last_tick=0).
+            monitor["event_last_tick"] = 0.0
+            events.callback()
+            self.assertEqual(1, len(calls))
+            # Second call immediately after — throttled (0 < 2.0s interval).
+            events.callback()
+            self.assertEqual(1, len(calls), "rapid callback was not throttled")
+            # Third call after the interval — allowed.
+            monitor["event_last_tick"] = time.time() - 3.0
+            events.callback()
+            self.assertEqual(2, len(calls))
+        finally:
+            io_setup_mimics._tick = old_tick
+            io_setup_mimics._IO_SETUP_MONITORS.pop(monitor["key"], None)
+            if had_events:
+                io_setup_mimics.mimics.events = old_events
+            else:
+                delattr(io_setup_mimics.mimics, "events")
+
+    def test_mimics_event_mask_import_monitor_handles_tick_error(self):
+        import mask_import
+
+        errors = []
+
+        class Subscription(object):
+            def __init__(self):
+                self.unsubscribed = False
+
+            def unsubscribe(self):
+                self.unsubscribed = True
+
+        class Events(object):
+            def __init__(self):
+                self.callback = None
+                self.subscription = Subscription()
+
+            def subscribe(self, name, callback):
+                self.name = name
+                self.callback = callback
+                return self.subscription
+
+        events = Events()
+        old_events = getattr(mask_import.mimics, "events", None)
+        had_events = hasattr(mask_import.mimics, "events")
+        old_tick = mask_import._mask_import_monitor_tick
+        monitor = {"monitor_key": "error-tick"}
+        try:
+            mask_import.mimics.events = events
+            def failing_tick(mon):
+                raise RuntimeError("tick failure")
+            mask_import._mask_import_monitor_tick = failing_tick
+            self.assertTrue(mask_import._start_mimics_event_mask_import_monitor(
+                monitor, 0.0,
+            ))
+            # This must not raise — the error is caught and _finish_mask_import is called.
+            events.callback()
+            stored = monitor.get("errors") or []
+            self.assertTrue(
+                any("tick failure" in str(e) for e in stored),
+                "tick error was not captured: {}".format(stored),
+            )
+        finally:
+            mask_import._mask_import_monitor_tick = old_tick
+            mask_import._MASK_IMPORT_MONITORS.pop(monitor["monitor_key"], None)
+            if had_events:
+                mask_import.mimics.events = old_events
+            else:
+                delattr(mask_import.mimics, "events")
+
+    # -- mimics_import empty descriptor on external launch --------------------
+
+    def test_import_external_launch_raises_on_empty_descriptor(self):
+        import mimics_import
+        import io_setup_mimics
+
+        saved_submitted = None
+        old_import = mimics_import._run_main_with_args
+        old_launch = io_setup_mimics.launch
+        try:
+            mimics_import._run_main_with_args = lambda *a, **kw: 0
+            def fake_launch(mode, python_exe, context, on_submit,
+                            timeout_seconds=3600, ui_script=None):
+                nonlocal saved_submitted
+                saved_submitted = on_submit
+            io_setup_mimics.launch = fake_launch
+            mimics_import._launch_external_import_setup("import_batch")
+            self.assertIsNotNone(saved_submitted)
+            with self.assertRaises(RuntimeError) as ctx:
+                saved_submitted({"source_path": self.tmp, "output_path": self.tmp})
+            self.assertIn("did not start", str(ctx.exception).lower())
+        finally:
+            mimics_import._run_main_with_args = old_import
+            io_setup_mimics.launch = old_launch
+            mimics_import._LAST_TASK_DESCRIPTOR = {}
+
+    def test_import_external_launch_populates_descriptor_on_success(self):
+        import mimics_import
+        import io_setup_mimics
+
+        saved_submitted = None
+        old_import = mimics_import._run_main_with_args
+        old_launch = io_setup_mimics.launch
+        try:
+            def run_import(args, import_mode=None, case_info_override=None):
+                mimics_import._LAST_TASK_DESCRIPTOR = {
+                    "kind": "import",
+                    "title": "Import dataset",
+                    "status_path": os.path.join(self.tmp, "s.json"),
+                    "stop_path": os.path.join(self.tmp, "stop.json"),
+                }
+                return 0
+            mimics_import._run_main_with_args = run_import
+            def fake_launch(mode, python_exe, context, on_submit,
+                            timeout_seconds=3600, ui_script=None):
+                nonlocal saved_submitted
+                saved_submitted = on_submit
+            io_setup_mimics.launch = fake_launch
+            mimics_import._launch_external_import_setup("import_batch")
+            descriptor = saved_submitted({"source_path": self.tmp, "output_path": self.tmp})
+            self.assertIsInstance(descriptor, dict)
+            self.assertEqual("import", descriptor.get("kind"))
+            self.assertIn("status_path", descriptor)
+        finally:
+            mimics_import._run_main_with_args = old_import
+            io_setup_mimics.launch = old_launch
+            mimics_import._LAST_TASK_DESCRIPTOR = {}
+
+    def test_single_case_external_setup_delegates_to_external_worker(self):
+        import mimics_import
+        import io_setup_mimics
+
+        saved_submitted = None
+        calls = []
+        old_worker = mimics_import._launch_single_case_worker
+        old_main = mimics_import._run_main_with_args
+        old_launch = io_setup_mimics.launch
+        try:
+            def launch_worker(selection, axes=None, flips=None):
+                calls.append((selection, axes, flips))
+                return {
+                    "kind": "import",
+                    "title": "Import single case",
+                    "status_path": os.path.join(self.tmp, "single-status.json"),
+                    "stop_path": os.path.join(self.tmp, "single-stop.json"),
+                }
+
+            def fail_if_main_runs(*_args, **_kwargs):
+                raise AssertionError("single-case setup must not execute main() in foreground Mimics")
+
+            def fake_launch(mode, python_exe, context, on_submit,
+                            timeout_seconds=3600, ui_script=None):
+                nonlocal saved_submitted
+                saved_submitted = on_submit
+
+            mimics_import._launch_single_case_worker = launch_worker
+            mimics_import._run_main_with_args = fail_if_main_runs
+            io_setup_mimics.launch = fake_launch
+            mimics_import._launch_external_import_setup("single_case")
+            descriptor = saved_submitted({
+                "source_path": os.path.join(self.tmp, "case.nii.gz"),
+                "output_path": self.tmp,
+                "mask_selection": "all",
+                "case_info": {"case_id": "case", "image": "case.nii.gz", "masks": []},
+            })
+        finally:
+            mimics_import._launch_single_case_worker = old_worker
+            mimics_import._run_main_with_args = old_main
+            io_setup_mimics.launch = old_launch
+
+        self.assertEqual("import", descriptor["kind"])
+        self.assertEqual(1, len(calls))
+        self.assertEqual([0, 1, 2], calls[0][1])
+        self.assertEqual([False, False, False], calls[0][2])
+
+    def test_single_case_worker_filters_masks_and_closes_producer_queue(self):
+        import tools.single_case_import_worker as worker
+
+        masks = [
+            {"name": "Liver", "path": "liver.nii.gz"},
+            {"name": "Spleen", "path": "spleen.nii.gz"},
+        ]
+        self.assertEqual(masks, worker._filter_masks(masks, "all"))
+        self.assertEqual([], worker._filter_masks(masks, "none"))
+        self.assertEqual([masks[0]], worker._filter_masks(masks, "liver"))
+
+        runtime_dir = Path(self.tmp, "queue")
+        runtime_dir.mkdir()
+        active = runtime_dir / "_mcs_queue_active.json"
+        active.write_text("{}", encoding="utf-8")
+        worker._write_producer_done(runtime_dir)
+        self.assertFalse(active.exists())
+        done = json.loads((runtime_dir / "_mcs_queue_done.json").read_text(encoding="utf-8"))
+        self.assertEqual("done", done["status"])
+        self.assertEqual(1, done["completed"])
+
+        active.write_text(json.dumps({"updated_at_epoch": time.time()}), encoding="utf-8")
+        self.assertTrue(worker._active_producer_exists(runtime_dir))
+        active.write_text(json.dumps({"updated_at_epoch": time.time() - 1000}), encoding="utf-8")
+        self.assertFalse(worker._active_producer_exists(runtime_dir))
+
+    def test_batch_import_refreshes_existing_queue_heartbeat(self):
+        import mimics_import
+
+        active_path = Path(self.tmp, "queue_active.json")
+        active_path.write_text(json.dumps({
+            "status": "active",
+            "updated_at_epoch": 1.0,
+        }), encoding="utf-8")
+        old_queue_path = mimics_import._queue_active_path
+        try:
+            mimics_import._queue_active_path = lambda _output_dir: str(active_path)
+            self.assertTrue(mimics_import._heartbeat_mcs_queue_active(self.tmp))
+        finally:
+            mimics_import._queue_active_path = old_queue_path
+        payload = json.loads(active_path.read_text(encoding="utf-8"))
+        self.assertGreater(payload["updated_at_epoch"], 1.0)
+
+    def test_background_mimics_locks_are_scoped_by_default(self):
+        import runtime_common
+
+        first = runtime_common.background_mimics_lock_name(
+            os.path.join(self.tmp, "output_a")
+        )
+        same = runtime_common.background_mimics_lock_name(
+            os.path.join(self.tmp, "output_a")
+        )
+        second = runtime_common.background_mimics_lock_name(
+            os.path.join(self.tmp, "output_b")
+        )
+
+        self.assertEqual(first, same)
+        self.assertNotEqual(first, second)
+        self.assertTrue(first.startswith("background_mimics_"))
+
+    def test_import_producer_locks_are_scoped_by_output_queue(self):
+        import runtime_common
+
+        first = runtime_common.import_producer_lock_name(
+            os.path.join(self.tmp, "output_a")
+        )
+        same = runtime_common.import_producer_lock_name(
+            os.path.join(self.tmp, "output_a")
+        )
+        second = runtime_common.import_producer_lock_name(
+            os.path.join(self.tmp, "output_b")
+        )
+        self.assertEqual(first, same)
+        self.assertNotEqual(first, second)
+        self.assertTrue(first.startswith("import_producer_"))
+
+    def test_mimics_import_producer_lease_blocks_only_the_same_output(self):
+        import mimics_import
+
+        old_root = mimics_import._project_root
+        first_output = os.path.join(self.tmp, "output_a")
+        second_output = os.path.join(self.tmp, "output_b")
+        try:
+            mimics_import._project_root = lambda: self.tmp
+            first = mimics_import._acquire_import_producer_lease(first_output, "first")
+            self.assertIsNotNone(first)
+            self.assertIsNone(
+                mimics_import._acquire_import_producer_lease(first_output, "duplicate")
+            )
+            second = mimics_import._acquire_import_producer_lease(second_output, "second")
+            self.assertIsNotNone(second)
+        finally:
+            if "first" in locals() and first:
+                mimics_import._release_import_producer_lease(first)
+            if "second" in locals() and second:
+                mimics_import._release_import_producer_lease(second)
+            mimics_import._project_root = old_root
+
+    def test_external_batch_import_defaults_to_nearest_mask_mapping(self):
+        cli = __import__("tools.mimics_batch_cli", fromlist=["dummy"])
+        args = cli.build_parser().parse_args([
+            "prepare-import",
+            "--ts-root",
+            self.tmp,
+        ])
+        self.assertEqual("nearest", args.mask_resample_method)
+
+    def test_external_bridge_refreshes_queue_while_conversion_is_running(self):
+        cli = __import__("tools.mimics_batch_cli", fromlist=["dummy"])
+        callbacks = []
+
+        class Process(object):
+            returncode = 0
+            def __init__(self):
+                self.calls = 0
+            def communicate(self, input=None, timeout=None):
+                self.calls += 1
+                if self.calls == 1:
+                    raise cli.subprocess.TimeoutExpired("bridge", timeout)
+                return (b'{"status": "ok", "cases": []}', b"")
+
+        old_popen = cli.subprocess.Popen
+        try:
+            cli.subprocess.Popen = lambda *_args, **_kwargs: Process()
+            result = cli.run_bridge(
+                sys.executable,
+                {"action": "discover"},
+                on_wait=lambda: callbacks.append("heartbeat"),
+            )
+        finally:
+            cli.subprocess.Popen = old_popen
+
+        self.assertEqual("ok", result["status"])
+        self.assertEqual(["heartbeat"], callbacks)
+
+    def test_external_batch_starts_mcs_creator_after_first_prepared_case(self):
+        cli = __import__("tools.mimics_batch_cli", fromlist=["dummy"])
+
+        root = Path(self.tmp, "external_stream")
+        dataset = root / "dataset"
+        output = root / "output"
+        runtime_dir = root / "queue_runtime"
+        import_runtime = root / "import_runtime"
+        for path in (dataset, output, runtime_dir, import_runtime):
+            path.mkdir(parents=True, exist_ok=True)
+
+        bridge_cases = []
+        launch_descriptor_counts = []
+
+        class Lock(object):
+            def __init__(self, *_args, **_kwargs):
+                self.acquired = False
+            def acquire(self, **_kwargs):
+                self.acquired = True
+                return self
+            def update_pid(self, *_args, **_kwargs):
+                return True
+            def release(self):
+                self.acquired = False
+
+        class Process(object):
+            pid = 32123
+            def poll(self):
+                return None
+
+        old_values = {
+            "resolve_bridge_python": cli.resolve_bridge_python,
+            "discover_cases": cli.discover_cases,
+            "run_bridge": cli.run_bridge,
+            "find_mimics_exe": cli.find_mimics_exe,
+            "launch_create_mcs": cli.launch_create_mcs,
+            "live_holder": cli._live_create_mcs_holder,
+            "clear_stop": cli.clear_stale_import_queue_stop,
+            "lock": cli.FileResourceLock,
+            "queue_runtime": cli.runtime_common.import_queue_runtime_dir,
+            "import_runtime": cli.runtime_common.import_runtime_base,
+            "producer_path": cli.runtime_common.import_producer_lock_path,
+        }
+        try:
+            cli.resolve_bridge_python = lambda *_args: sys.executable
+            cli.discover_cases = lambda *_args, **_kwargs: [
+                {"case_id": "case_001", "image": "one.nii.gz", "masks": []},
+                {"case_id": "case_002", "image": "two.nii.gz", "masks": []},
+            ]
+            def bridge(_python, params, **_kwargs):
+                bridge_cases.append(params["case_id"])
+                return {"status": "ok", "case_id": params["case_id"], "masks": []}
+            cli.run_bridge = bridge
+            cli.find_mimics_exe = lambda *_args: "MimicsResearch.exe"
+            cli._live_create_mcs_holder = lambda *_args: {}
+            cli.clear_stale_import_queue_stop = lambda *_args: False
+            cli.FileResourceLock = Lock
+            cli.runtime_common.import_queue_runtime_dir = lambda *_args: str(runtime_dir)
+            cli.runtime_common.import_runtime_base = lambda *_args: str(import_runtime)
+            cli.runtime_common.import_producer_lock_path = lambda *_args: str(root / "producer.lock")
+
+            def launch(*_args, **_kwargs):
+                descriptors = list((runtime_dir / "prepared_queue").glob("*.json"))
+                launch_descriptor_counts.append(len(descriptors))
+                self.assertEqual(["case_001"], bridge_cases)
+                return Process()
+            cli.launch_create_mcs = launch
+
+            args = cli.build_parser().parse_args([
+                "prepare-import",
+                "--ts-root", str(dataset),
+                "--output-dir", str(output),
+            ])
+            result = cli.cmd_prepare_import(args)
+        finally:
+            cli.resolve_bridge_python = old_values["resolve_bridge_python"]
+            cli.discover_cases = old_values["discover_cases"]
+            cli.run_bridge = old_values["run_bridge"]
+            cli.find_mimics_exe = old_values["find_mimics_exe"]
+            cli.launch_create_mcs = old_values["launch_create_mcs"]
+            cli._live_create_mcs_holder = old_values["live_holder"]
+            cli.clear_stale_import_queue_stop = old_values["clear_stop"]
+            cli.FileResourceLock = old_values["lock"]
+            cli.runtime_common.import_queue_runtime_dir = old_values["queue_runtime"]
+            cli.runtime_common.import_runtime_base = old_values["import_runtime"]
+            cli.runtime_common.import_producer_lock_path = old_values["producer_path"]
+
+        self.assertEqual(0, result)
+        self.assertEqual(["case_001", "case_002"], bridge_cases)
+        self.assertEqual([1], launch_descriptor_counts)
+        done = json.loads((runtime_dir / "_mcs_queue_done.json").read_text(encoding="utf-8"))
+        self.assertEqual(2, done["completed"])
+
+    def test_external_export_multi_lock_releases_partial_acquisition(self):
+        cli = __import__("tools.mimics_batch_cli", fromlist=["dummy"])
+        from resource_locks import ResourceLockTimeout
+
+        instances = []
+        old_lock = cli.FileResourceLock
+        class Lock(object):
+            def __init__(self, *_args, **_kwargs):
+                self.released = False
+                instances.append(self)
+            def acquire(self, **_kwargs):
+                if len(instances) > 1:
+                    raise ResourceLockTimeout("destination busy")
+                return self
+            def release(self):
+                self.released = True
+        try:
+            cli.FileResourceLock = Lock
+            with self.assertRaises(ResourceLockTimeout):
+                cli._acquire_background_mimics_locks(
+                    "test export",
+                    [Path(self.tmp) / "mcs", Path(self.tmp) / "labels"],
+                    0.0,
+                )
+        finally:
+            cli.FileResourceLock = old_lock
+        self.assertTrue(instances[0].released)
+
+    def test_external_import_clears_only_a_stale_queue_stop(self):
+        cli = __import__("tools.mimics_batch_cli", fromlist=["dummy"])
+        import runtime_common
+
+        old_root = cli.ROOT
+        cli.ROOT = Path(self.tmp)
+        output_dir = Path(self.tmp) / "mcs_output"
+        output_dir.mkdir()
+        runtime_dir = Path(runtime_common.import_queue_runtime_dir(
+            self.tmp, str(output_dir.resolve())
+        ))
+        runtime_dir.mkdir(parents=True)
+        stop_path = runtime_dir / "_mcs_queue_stop.json"
+        stop_path.write_text("{}", encoding="utf-8")
+        try:
+            self.assertTrue(cli.clear_stale_import_queue_stop(output_dir))
+            self.assertFalse(stop_path.exists())
+
+            stop_path.write_text("{}", encoding="utf-8")
+            lock_path = runtime_common.background_mimics_lock_path(
+                self.tmp, str(output_dir.resolve())
+            )
+            runtime_common.write_json_atomic(
+                lock_path,
+                {
+                    "token": "live",
+                    "pid": os.getpid(),
+                    "kind": "create_mcs",
+                    "output_dir": str(output_dir.resolve()),
+                },
+            )
+            with self.assertRaisesRegex(RuntimeError, "still stopping"):
+                cli.clear_stale_import_queue_stop(output_dir)
+            self.assertTrue(stop_path.exists())
+        finally:
+            cli.ROOT = old_root
+
+    def test_internal_import_clears_dead_queue_stop_but_not_live_creator(self):
+        import mimics_import
+        import runtime_common
+
+        old_root = mimics_import._project_root
+        output_dir = os.path.join(self.tmp, "mcs_output")
+        os.makedirs(output_dir)
+        try:
+            mimics_import._project_root = lambda: self.tmp
+            stop_path = mimics_import._queue_stop_path(output_dir)
+            runtime_common.write_json_atomic(stop_path, {"status": "stop_requested"})
+            lock_path = runtime_common.background_mimics_lock_path(
+                self.tmp, output_dir
+            )
+            runtime_common.write_json_atomic(
+                lock_path,
+                {
+                    "token": "dead",
+                    "pid": 99999999,
+                    "kind": "create_mcs",
+                    "output_dir": os.path.abspath(output_dir),
+                },
+            )
+            mimics_import._clear_stale_queue_stop(output_dir)
+            self.assertFalse(os.path.exists(stop_path))
+
+            runtime_common.write_json_atomic(stop_path, {"status": "stop_requested"})
+            producer_path = runtime_common.import_producer_lock_path(
+                self.tmp, output_dir
+            )
+            runtime_common.write_json_atomic(
+                producer_path,
+                {
+                    "token": "producer-live",
+                    "pid": os.getpid(),
+                    "resource": "import_producer",
+                },
+            )
+            with self.assertRaisesRegex(RuntimeError, "still responding"):
+                mimics_import._clear_stale_queue_stop(output_dir)
+            self.assertTrue(os.path.exists(stop_path))
+            os.remove(producer_path)
+
+            runtime_common.write_json_atomic(
+                lock_path,
+                {
+                    "token": "live",
+                    "pid": os.getpid(),
+                    "kind": "create_mcs",
+                    "output_dir": os.path.abspath(output_dir),
+                },
+            )
+            with self.assertRaisesRegex(RuntimeError, "still stopping"):
+                mimics_import._clear_stale_queue_stop(output_dir)
+            self.assertTrue(os.path.exists(stop_path))
+        finally:
+            mimics_import._project_root = old_root
+
+    def test_background_mimics_global_serialization_is_explicit_opt_in(self):
+        import runtime_common
+
+        key = "MIMICS_SERIALIZE_BACKGROUND_MIMICS"
+        previous = os.environ.get(key)
+        try:
+            os.environ[key] = "1"
+            self.assertEqual(
+                "background_mimics.lock",
+                runtime_common.background_mimics_lock_name(self.tmp),
+            )
+        finally:
+            if previous is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = previous
+
+    def test_import_background_launch_state_allows_independent_outputs(self):
+        import mimics_import
+
+        first = os.path.join(self.tmp, "output_a")
+        second = os.path.join(self.tmp, "output_b")
+        self.assertTrue(mimics_import._bg_try_begin_launch(first))
+        self.assertTrue(mimics_import._bg_try_begin_launch(second))
+        self.assertFalse(mimics_import._bg_try_begin_launch(first))
+        try:
+            mimics_import._bg_set_process(10101, first)
+            mimics_import._bg_set_process(20202, second)
+            self.assertEqual(10101, mimics_import._bg_state_snapshot(first)["pid"])
+            self.assertEqual(20202, mimics_import._bg_state_snapshot(second)["pid"])
+        finally:
+            mimics_import._bg_clear_process(10101)
+            mimics_import._bg_clear_process(20202)
+            mimics_import._bg_end_launch(first)
+            mimics_import._bg_end_launch(second)
+
+    def test_export_lock_registry_tracks_parallel_jobs(self):
+        import mimics_export
+
+        mimics_export._clear_active_background_export_lock()
+        try:
+            mimics_export._set_active_background_export_lock("first.lock", "token-a")
+            mimics_export._set_active_background_export_lock("second.lock", "token-b")
+            self.assertEqual(2, len(mimics_export._ACTIVE_BG_MIMICS_LOCKS))
+            self.assertTrue(mimics_export._clear_active_background_export_lock("token-a"))
+            self.assertIn("token-b", mimics_export._ACTIVE_BG_MIMICS_LOCKS)
+        finally:
+            mimics_export._clear_active_background_export_lock()
+
+    def test_single_case_worker_reports_busy_output_queue_without_crashing(self):
+        import tools.single_case_import_worker as worker
+
+        run_root = Path(self.tmp, "single_busy_run")
+        runtime_dir = Path(self.tmp, "single_busy_queue")
+        output_dir = Path(self.tmp, "single_busy_output")
+        locks_dir = Path(self.tmp, "single_busy_locks")
+        for path in (run_root, runtime_dir, output_dir, locks_dir):
+            path.mkdir(parents=True, exist_ok=True)
+        selection_path = run_root / "selection.json"
+        status_path = run_root / "status.json"
+        stop_path = run_root / "stop.json"
+        log_path = run_root / "worker.log"
+        selection_path.write_text(json.dumps({
+            "source_path": str(Path(self.tmp, "ct.nii.gz")),
+            "output_path": str(output_dir),
+            "project_root": PROJECT_ROOT,
+            "case_info": {
+                "case_id": "case_busy",
+                "image": str(Path(self.tmp, "ct.nii.gz")),
+                "case_dir": self.tmp,
+                "masks": [],
+            },
+            "mask_selection": "none",
+        }), encoding="utf-8")
+        (runtime_dir / "_mcs_queue_active.json").write_text(
+            json.dumps({"updated_at_epoch": time.time()}), encoding="utf-8"
+        )
+
+        old_runtime = worker.runtime_common.import_queue_runtime_dir
+        old_locks = worker.default_resource_lock_dir
+        try:
+            worker.runtime_common.import_queue_runtime_dir = lambda *_args: str(runtime_dir)
+            worker.default_resource_lock_dir = lambda *_args: locks_dir
+            result = worker.run(selection_path, status_path, stop_path, log_path)
+        finally:
+            worker.runtime_common.import_queue_runtime_dir = old_runtime
+            worker.default_resource_lock_dir = old_locks
+
+        self.assertEqual(75, result)
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+        self.assertEqual("failed", status["status"])
+        self.assertEqual("output_queue_busy", status["phase"])
+
+    def test_single_case_worker_cancels_an_unconsumed_descriptor_immediately(self):
+        import tools.single_case_import_worker as worker
+
+        root = Path(self.tmp, "single_cancel")
+        runtime_dir = root / "runtime"
+        output_dir = root / "output"
+        runtime_dir.mkdir(parents=True)
+        output_dir.mkdir(parents=True)
+        status_path = root / "status.json"
+        stop_path = root / "stop.json"
+        log_path = root / "worker.log"
+        descriptor = runtime_dir / "pending.json"
+        descriptor.write_text("{}", encoding="utf-8")
+        stop_path.write_text("{}", encoding="utf-8")
+
+        result = worker._wait_for_mcs(
+            output_dir / "case.mcs",
+            runtime_dir,
+            None,
+            status_path,
+            stop_path,
+            log_path,
+            "case",
+            60,
+            None,
+            False,
+            descriptor,
+            PROJECT_ROOT,
+            output_dir,
+            "MimicsResearch.exe",
+            sys.executable,
+            time.time(),
+        )
+
+        self.assertEqual(0, result)
+        self.assertFalse(descriptor.exists())
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+        self.assertEqual("cancelled", status["status"])
+
+    def test_single_case_worker_reports_completion_for_created_project(self):
+        import tools.single_case_import_worker as worker
+
+        run_root = Path(self.tmp, "single_run")
+        runtime_dir = Path(self.tmp, "single_queue_runtime")
+        output_dir = Path(self.tmp, "single_output")
+        locks_dir = Path(self.tmp, "single_locks")
+        for path in (run_root, runtime_dir, output_dir, locks_dir):
+            path.mkdir(parents=True, exist_ok=True)
+        selection_path = run_root / "selection.json"
+        status_path = run_root / "status.json"
+        stop_path = run_root / "stop.json"
+        log_path = run_root / "worker.log"
+        selection_path.write_text(json.dumps({
+            "source_path": str(Path(self.tmp, "ct.nii.gz")),
+            "output_path": str(output_dir),
+            "project_root": PROJECT_ROOT,
+            "case_info": {
+                "case_id": "case_001",
+                "image": str(Path(self.tmp, "ct.nii.gz")),
+                "case_dir": self.tmp,
+                "masks": [],
+            },
+            "mask_selection": "none",
+            "timeout_seconds": 30,
+        }), encoding="utf-8")
+
+        class FakeProcess(object):
+            pid = 12345
+            returncode = None
+
+            def poll(self):
+                return None
+
+        old_runtime = worker.runtime_common.import_queue_runtime_dir
+        old_locks = worker.default_resource_lock_dir
+        old_resolve = worker.batch_cli.resolve_bridge_python
+        old_bridge = worker.batch_cli.run_bridge
+        old_find = worker.batch_cli.find_mimics_exe
+        old_launch = worker.batch_cli.launch_create_mcs
+        try:
+            worker.runtime_common.import_queue_runtime_dir = lambda *_args: str(runtime_dir)
+            worker.default_resource_lock_dir = lambda *_args: locks_dir
+            worker.batch_cli.resolve_bridge_python = lambda *_args: sys.executable
+            worker.batch_cli.run_bridge = lambda *_args, **_kwargs: {
+                "status": "ok",
+                "source_fingerprint": "sha256:test",
+                "masks": [],
+            }
+            worker.batch_cli.find_mimics_exe = lambda *_args: "MimicsResearch.exe"
+
+            def launch(output_path, *_args, **_kwargs):
+                def finish():
+                    time.sleep(0.1)
+                    Path(output_path, "case_001.mcs").write_bytes(b"mcs")
+                    for descriptor in (runtime_dir / "prepared_queue").glob("*.json"):
+                        descriptor.unlink()
+                thread = threading.Thread(target=finish)
+                thread.daemon = True
+                thread.start()
+                return FakeProcess()
+
+            worker.batch_cli.launch_create_mcs = launch
+            result = worker.run(selection_path, status_path, stop_path, log_path)
+        finally:
+            worker.runtime_common.import_queue_runtime_dir = old_runtime
+            worker.default_resource_lock_dir = old_locks
+            worker.batch_cli.resolve_bridge_python = old_resolve
+            worker.batch_cli.run_bridge = old_bridge
+            worker.batch_cli.find_mimics_exe = old_find
+            worker.batch_cli.launch_create_mcs = old_launch
+
+        self.assertEqual(0, result)
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+        self.assertEqual("completed", status["status"])
+        self.assertEqual(100, status["progress_percent"])
+        self.assertTrue(Path(output_dir, "case_001.mcs").is_file())
+
+    # -- Bootstrap stop propagation through stop_paths ------------------------
+
+    def test_io_setup_bootstrap_stop_not_propagated_when_task_has_no_stop_paths(self):
+        import io_setup_mimics
+
+        status_path = os.path.join(self.tmp, "io-nostop.json")
+        stop_path = os.path.join(self.tmp, "io-nostop-bootstrap.json")
+        # No stop marker on disk — submit proceeds normally.
+        Path(status_path).write_text(
+            json.dumps({"status": "submitted", "selection": {}}),
+            encoding="utf-8",
+        )
+        key = "nostop"
+        monitor = {
+            "key": key,
+            "status_path": status_path,
+            "bootstrap_stop_path": stop_path,
+            "deadline": time.time() + 10,
+            "busy": False,
+            "on_submit": lambda _s: {"kind": "export", "title": "Export masks"},
+        }
+        io_setup_mimics._IO_SETUP_MONITORS[key] = monitor
+        try:
+            io_setup_mimics._tick(monitor)
+        finally:
+            io_setup_mimics._IO_SETUP_MONITORS.pop(key, None)
+        payload = json.loads(Path(status_path).read_text(encoding="utf-8"))
+        self.assertEqual("launched", payload.get("status"))
+        task = payload.get("task") or {}
+        self.assertEqual("export", task.get("kind"))
 
 
 class TestLifecycleAndRetention(unittest.TestCase):

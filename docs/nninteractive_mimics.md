@@ -516,10 +516,14 @@ foreground GUI thread.
 
 The fast path is based on Mimics voxel index space, not only patient view labels.
 Prompts collected through `image.get_voxel_indexes()` are `(x, y, z)` indexes.
-For NIfTI imported through this pipeline, `(i, j, k)` is preserved when the
-derived DICOM is created. The NIfTI affine is converted from RAS world
-coordinates to LPS world coordinates for Mimics/DICOM, but the voxel array is
-not flipped or canonicalized. For DICOM source folders, source and Mimics world
+For NIfTI imported through this pipeline, the image may undergo a lossless axis
+permutation or flip while it is oriented for DICOM/LPS. This changes voxel index
+order but does not interpolate image values or change physical locations. The
+source NIfTI shape and RAS affine and the derived-DICOM/Mimics grid are recorded
+separately. NIfTI masks are read in their original on-disk order with their RAS
+affine and are mapped once into the actual Mimics grid using physical
+coordinates; they are not independently reoriented to LPS and then transformed
+a second time. For DICOM source folders, source and Mimics world
 coordinates are both LPS; the external worker reads the selected series, sorts
 slices by `ImagePositionPatient` along the slice normal, transposes each pixel
 plane from `(Rows, Columns)` to `(Columns, Rows)`, and stacks the result as
@@ -537,8 +541,9 @@ For imported `.mcs` projects, the background `.mcs` creator derives the actual
 Mimics voxel grid after DICOM import by calling `ImageData.get_voxel_center()`.
 Mimics/DICOM patient coordinates are LPS, so the stored matrix is converted to
 RAS for consistent math with nibabel NIfTI affines. If this actual grid differs
-from the prepared source grid, masks are resampled again into the open Mimics
-grid in the background before `Mask.set_voxel_buffer()` is called. The creator
+from the prepared grid, masks are mapped directly from their original files into
+the measured Mimics grid before `Mask.set_voxel_buffer()` is called; the
+intermediate prepared buffer is not resampled a second time. The creator
 does not blindly reshape equal-size buffers because that can create diagonal
 mirrors or swapped axial/coronal/sagittal views.
 
@@ -556,6 +561,17 @@ internally. NIfTI mask affines from nibabel are already RAS, and DICOM image
 geometry is converted from LPS to RAS before resampling. The bridge therefore
 does not convert mask affines to LPS during resampling; doing so would mix
 coordinate systems and can create left-right/anterior-posterior mirroring.
+
+The derived classic-DICOM writer preserves axial, coronal, sagittal, oblique,
+and regular gantry-tilt stacks without image interpolation. Gantry tilt is
+represented by the full per-slice `ImagePositionPatient` step, including its
+in-plane component. Automatic image resampling is reserved for a genuinely
+non-orthogonal in-plane row/column basis, which classic DICOM pixel geometry
+cannot represent. With `MIMICS_DICOM_RESAMPLE_MODE=never`, that unsupported
+geometry is rejected instead of emitting a geometrically invalid DICOM series.
+If Mimics itself normalizes a valid imported stack, the
+background creator measures the live Mimics voxel centers and maps source masks
+directly to that measured grid.
 
 If source metadata is absent or uses an unsupported legacy geometry contract, the
 fast path is skipped and the normal Mimics buffer path may still be used for

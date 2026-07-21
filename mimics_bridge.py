@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -28,7 +29,7 @@ LPS_TO_RAS = RAS_TO_LPS
 DEFAULT_MIMICS_BUFFER_AXES = [0, 1, 2]
 DEFAULT_MIMICS_BUFFER_FLIPS = [False, False, False]
 DEFAULT_DICOM_RESAMPLE_MODE = "auto"
-DEFAULT_MASK_RESAMPLE_METHOD = "distance"
+DEFAULT_MASK_RESAMPLE_METHOD = "nearest"
 
 
 def _voxel_spacing_from_affine(affine: np.ndarray) -> np.ndarray:
@@ -111,7 +112,7 @@ def is_medical_image_file(path: str) -> bool:
     if not p.is_file():
         return False
     name = p.name.lower()
-    return name.endswith((".nii", ".nii.gz", ".mha", ".mhd", ".nrrd"))
+    return name.endswith((".nii", ".nii.gz", ".mha", ".mhd", ".nrrd", ".nrrd.gz"))
 
 
 def get_medical_image_disk_geometry(path: str) -> tuple[tuple[int, int, int], np.ndarray]:
@@ -135,12 +136,13 @@ def _sitk_is_axial(sitk_img, threshold: float = 0.001) -> bool:
 
 
 def _sitk_is_classic_dicom_geometry_compatible(sitk_img, ortho_tol: float = 5e-4) -> bool:
-    """Whether image direction can be represented without geometric shearing.
+    """Whether the grid can be represented by a parallel classic-DICOM stack.
 
     Classic single-frame DICOM uses row/column direction cosines + per-slice
-    position. This assumes an orthonormal voxel basis. If the source grid has
-    shearing (non-orthogonal axis vectors), the series should be resampled to
-    a DICOM-compatible orthonormal grid before export.
+    position. The in-plane row and column axes must be orthogonal. The slice
+    step does not have to be normal to that plane: a constant in-plane offset
+    between slices (for example gantry tilt) is represented exactly by each
+    slice's ImagePositionPatient.
     """
     direction = np.array(sitk_img.GetDirection(), dtype=float).reshape(3, 3)
     try:
@@ -158,9 +160,7 @@ def _sitk_is_classic_dicom_geometry_compatible(sitk_img, ortho_tol: float = 5e-4
     cross /= cross_norm
     return (
         abs(float(np.dot(row, col))) <= ortho_tol
-        and abs(float(np.dot(row, slc))) <= ortho_tol
-        and abs(float(np.dot(col, slc))) <= ortho_tol
-        and abs(float(np.dot(cross, slc))) >= (1.0 - 2.0 * ortho_tol)
+        and abs(float(np.dot(cross, slc))) > ortho_tol
     )
 
 
@@ -251,6 +251,12 @@ def _prepare_dicom_source_grid(sitk_img):
     }
 
     if mode == "never":
+        if not _sitk_is_classic_dicom_geometry_compatible(sitk_img):
+            raise ValueError(
+                "source image has a non-orthogonal in-plane voxel basis that "
+                "classic DICOM cannot represent; resampling is disabled by "
+                "MIMICS_DICOM_RESAMPLE_MODE=never"
+            )
         return sitk_img, info
 
     if mode == "axial":
@@ -273,7 +279,7 @@ def _prepare_dicom_source_grid(sitk_img):
     info.update({
         "resampled_source_grid": True,
         "resampled_to_axial": False,
-        "resample_reason": "non_orthonormal_direction",
+        "resample_reason": "in_plane_shear_not_representable_by_classic_dicom",
         "target_grid": "orthonormal_oblique",
     })
     return sitk_img, info
@@ -385,6 +391,11 @@ def nifti_to_derived_dicom(
 
     row_cosine = _unit_axis(affine_lps, 0, spacing)
     column_cosine = _unit_axis(affine_lps, 1, spacing)
+    slice_normal = _normalize_vector(np.cross(row_cosine, column_cosine))
+    slice_step = np.asarray(affine_lps[:3, 2], dtype=float)
+    normal_slice_spacing = abs(float(np.dot(slice_normal, slice_step)))
+    if normal_slice_spacing <= 1e-8:
+        raise ValueError("slice positions do not advance through the image plane")
 
     for slice_idx in range(num_slices):
         file_meta = FileMetaDataset()
@@ -396,6 +407,11 @@ def nifti_to_derived_dicom(
 
         dcm_path = str(out_dir / "slice_{:04d}.dcm".format(slice_idx + 1))
         ds = FileDataset(dcm_path, {}, file_meta=file_meta, preamble=b"\0" * 128)
+        # Keep the encoded dataset consistent with the transfer syntax in
+        # file_meta. Older pydicom releases otherwise default the body to
+        # implicit VR while advertising Explicit VR Little Endian.
+        ds.is_little_endian = True
+        ds.is_implicit_VR = False
 
         ds.SOPClassUID = storage_class
         ds.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
@@ -421,8 +437,8 @@ def nifti_to_derived_dicom(
         ds.PixelRepresentation = pixel_representation
         # PixelSpacing = [row_spacing, col_spacing] = [spacing_j, spacing_i]
         ds.PixelSpacing = [float(spacing[1]), float(spacing[0])]
-        ds.SliceThickness = float(spacing[2])
-        ds.SpacingBetweenSlices = float(spacing[2])
+        ds.SliceThickness = float(normal_slice_spacing)
+        ds.SpacingBetweenSlices = float(normal_slice_spacing)
         ds.InstanceNumber = int(slice_idx + 1)
         # Compute slice position using the full LPS affine. This handles
         # oblique and non-standard orientations correctly.
@@ -434,8 +450,7 @@ def nifti_to_derived_dicom(
         ]
         # SliceLocation: signed distance of the slice from the origin along
         # the normal direction (cross product of row/column cosines).
-        normal = np.cross(row_cosine, column_cosine)
-        ds.SliceLocation = float(np.dot(normal, slice_origin[:3]))
+        ds.SliceLocation = float(np.dot(slice_normal, slice_origin[:3]))
         ds.ImageOrientationPatient = [
             float(row_cosine[0]), float(row_cosine[1]), float(row_cosine[2]),
             float(column_cosine[0]), float(column_cosine[1]), float(column_cosine[2]),
@@ -562,7 +577,7 @@ def _validate_derived_dicom_series(out_dir: Path, expected_slices: int, series_u
 # -- NIfTI header normalization ----------------------------------------
 
 def _normalize_nifti_affine(nifti_img) -> np.ndarray:
-    """Return a normalized affine, fixing ambiguous qform/sform codes.
+    """Choose one authoritative affine and normalize ambiguous form codes.
 
     Some NIfTI files have qform_code=0 or sform_code=0, which causes
     tools like ITK-Snap, SimpleITK and 3D Slicer to interpret the
@@ -570,15 +585,14 @@ def _normalize_nifti_affine(nifti_img) -> np.ndarray:
     consistent sform_code=2 / qform_code=2 header so every downstream
     reader sees the same affine.
 
-    Falls back to pixdim-derived affine when either qform or sform is
-    corrupt (NaN, all-zero, or otherwise unable to be decomposed by
-    nibabel).
+    A valid coded sform is preferred because it can represent the general
+    voxel-to-world transform. A valid coded qform is the second choice.
+    Uncoded but usable forms are accepted only as recovery inputs. If neither
+    is usable, a pixdim-derived affine is used.
 
     The file on disk is NOT modified; only the in-memory image object
     header is normalized.
     """
-    import nibabel as nib
-
     def _safe_get_qform(img):
         try:
             return img.get_qform()
@@ -595,10 +609,13 @@ def _normalize_nifti_affine(nifti_img) -> np.ndarray:
         """True when affine has a non-trivial finite linear component."""
         if mat is None:
             return False
-        return (
-            np.all(np.isfinite(mat))
-            and mat.shape == (4, 4)
-            and bool(np.linalg.norm(mat[:3, :3]) > 1e-8)
+        if mat.shape != (4, 4) or not np.all(np.isfinite(mat)):
+            return False
+        linear = np.asarray(mat[:3, :3], dtype=float)
+        spacing = np.linalg.norm(linear, axis=0)
+        return bool(
+            np.all(spacing > 1e-8)
+            and abs(float(np.linalg.det(linear))) > 1e-8
         )
 
     def _try_set_qform(img, affine):
@@ -615,29 +632,24 @@ def _normalize_nifti_affine(nifti_img) -> np.ndarray:
 
     qform = _safe_get_qform(nifti_img)
     sform = _safe_get_sform(nifti_img)
+    try:
+        qform_code = int(nifti_img.header["qform_code"])
+    except Exception:
+        qform_code = 0
+    try:
+        sform_code = int(nifti_img.header["sform_code"])
+    except Exception:
+        sform_code = 0
 
-    if _usable_affine(qform):
-        _try_set_qform(nifti_img, qform)
-    if _usable_affine(sform):
-        _try_set_sform(nifti_img, sform)
-    # If neither was usable, force-set at least sform from pixdim so the
-    # image has a valid spatial mapping.
-    if not _usable_affine(qform) and not _usable_affine(sform):
-        pixdim = nifti_img.header.get_zooms()[:3]
-        fallback = np.eye(4)
-        for i, p in enumerate(pixdim):
-            pp = float(p)
-            if np.isfinite(pp) and pp >= 0.001:
-                fallback[i, i] = pp
-            else:
-                fallback[i, i] = 1.0
-        _try_set_sform(nifti_img, fallback)
-        _try_set_qform(nifti_img, fallback)
-        return fallback
-
-    result = nifti_img.affine.copy()
-    if not np.all(np.isfinite(result)):
-        # Defensive: pixdim fallback for any remaining NaN in the affine
+    if sform_code > 0 and _usable_affine(sform):
+        result = np.asarray(sform, dtype=float)
+    elif qform_code > 0 and _usable_affine(qform):
+        result = np.asarray(qform, dtype=float)
+    elif _usable_affine(sform):
+        result = np.asarray(sform, dtype=float)
+    elif _usable_affine(qform):
+        result = np.asarray(qform, dtype=float)
+    else:
         pixdim = nifti_img.header.get_zooms()[:3]
         result = np.eye(4)
         for i, p in enumerate(pixdim):
@@ -647,36 +659,54 @@ def _normalize_nifti_affine(nifti_img) -> np.ndarray:
             else:
                 result[i, i] = 1.0
 
+    # sform is authoritative. qform is synchronized when the transform is
+    # quaternion-representable; otherwise it is disabled so readers cannot
+    # prefer an approximation over the exact sform.
+    _try_set_sform(nifti_img, result)
+    _try_set_qform(nifti_img, result)
+    normalized_qform = _safe_get_qform(nifti_img)
+    if not _usable_affine(normalized_qform) or not np.allclose(
+        normalized_qform, result, atol=1e-5, rtol=0.0
+    ):
+        try:
+            nifti_img.header["qform_code"] = 0
+        except Exception:
+            pass
+
     return result
+
+
+def _nifti_header_is_unambiguous(nifti_img) -> bool:
+    """Whether qform and sform are both coded, finite, and equivalent."""
+    try:
+        qform_code = int(nifti_img.header["qform_code"])
+        sform_code = int(nifti_img.header["sform_code"])
+        qform = np.asarray(nifti_img.get_qform(), dtype=float)
+        sform = np.asarray(nifti_img.get_sform(), dtype=float)
+        if qform_code <= 0 or sform_code <= 0:
+            return False
+        if qform.shape != (4, 4) or sform.shape != (4, 4):
+            return False
+        if not np.all(np.isfinite(qform)) or not np.all(np.isfinite(sform)):
+            return False
+        if abs(float(np.linalg.det(qform[:3, :3]))) <= 1e-8:
+            return False
+        if abs(float(np.linalg.det(sform[:3, :3]))) <= 1e-8:
+            return False
+        return bool(np.allclose(qform, sform, atol=1e-5, rtol=0.0))
+    except Exception:
+        return False
 
 
 # -- SimpleITK-based image reading with header correction and LPS orient
 
-def _correct_nifti_header(path: str) -> None:
-    """Fix qform/sform codes in a NIfTI file in-place (disk modification).
-
-    Re-sets both qform and sform with code=2 so that SimpleITK can read
-    the file.  This addresses cases where the original header has
-    ambiguous or corrupt qform/sform codes.
-    """
-    import nibabel as nib
-    img = nib.load(path)
-    qform = img.get_qform()
-    if qform is not None:
-        img.set_qform(qform, code=2)
-    sform = img.get_sform()
-    if sform is not None:
-        img.set_sform(sform, code=2)
-    nib.save(img, path)
-
-
 def _read_image_sitk_lps(path: str):
     """Read an image via SimpleITK, correcting NIfTI header if needed, then orient to LPS.
 
-    Tries ``sitk.ReadImage`` first.  If it fails and the file is NIfTI,
-    calls :func:`_correct_nifti_header` to fix qform/sform in-place and
-    retries.  Finally applies ``DICOMOrient("LPS")`` so the returned
-    image is always in LPS orientation.
+    Tries ``sitk.ReadImage`` first. If a NIfTI header needs correction, a
+    corrected temporary copy is read instead. The source image is never
+    modified. Finally ``DICOMOrient("LPS")`` performs a lossless axis
+    permutation/flip; it does not interpolate voxel values.
 
     Works with both NIfTI files and DICOM folders.
     """
@@ -684,13 +714,41 @@ def _read_image_sitk_lps(path: str):
 
     is_nifti = is_nifti_file(path)
 
+    source = None
+    requires_header_correction = False
+    if is_nifti:
+        try:
+            import nibabel as nib
+
+            source = nib.load(path)
+            requires_header_correction = not _nifti_header_is_unambiguous(source)
+        except Exception:
+            # Preserve compatibility with NIfTI variants that ITK can read
+            # even when nibabel cannot inspect their header.
+            source = None
+            requires_header_correction = False
+
     try:
+        if requires_header_correction:
+            raise RuntimeError("NIfTI qform/sform normalization required")
         sitk_img = sitk.ReadImage(path)
     except Exception:
         if not is_nifti:
             raise
-        _correct_nifti_header(path)
-        sitk_img = sitk.ReadImage(path)
+        if source is None:
+            import nibabel as nib
+            source = nib.load(path)
+        affine = _normalize_nifti_affine(source)
+        fd, corrected_path = tempfile.mkstemp(suffix=".nii.gz")
+        os.close(fd)
+        try:
+            nib.save(source, corrected_path)
+            sitk_img = sitk.ReadImage(corrected_path)
+        finally:
+            try:
+                os.remove(corrected_path)
+            except OSError:
+                pass
 
     sitk_img = sitk.DICOMOrient(sitk_img, "LPS")
     return sitk_img
@@ -721,30 +779,39 @@ def _sitk_to_xyz_array(sitk_img) -> np.ndarray:
 
 # -- NIfTI mask -> .u8 buffer -----------------------------------------
 
-def read_nifti_mask(path: str) -> np.ndarray:
+def _read_mask_array_and_affine(path: str) -> tuple[np.ndarray, np.ndarray]:
+    """Read label data in its on-disk voxel order with an explicit RAS affine."""
+    if is_nifti_file(path):
+        import nibabel as nib
+
+        image = nib.load(path)
+        array = np.asanyarray(image.dataobj)
+        if array.ndim != 3:
+            raise ValueError("mask must be 3D: {} shape={}".format(path, array.shape))
+        affine_ras = _normalize_nifti_affine(image)
+        return np.ascontiguousarray(array), np.asarray(affine_ras, dtype=float)
+
     sitk_img = _read_image_sitk_lps(path)
     array = _sitk_to_xyz_array(sitk_img)
     if array.ndim != 3:
         raise ValueError("mask must be 3D: {} shape={}".format(path, array.shape))
+    affine_ras = LPS_TO_RAS @ _sitk_to_lps_affine(sitk_img)
+    return np.ascontiguousarray(array), affine_ras
+
+
+def read_nifti_mask(path: str) -> np.ndarray:
+    array, _affine = _read_mask_array_and_affine(path)
     return (array != 0).astype(np.uint8)
 
 
 def read_nifti_mask_with_affine(path: str) -> tuple[np.ndarray, np.ndarray]:
-    sitk_img = _read_image_sitk_lps(path)
-    array = _sitk_to_xyz_array(sitk_img)
-    if array.ndim != 3:
-        raise ValueError("mask must be 3D: {} shape={}".format(path, array.shape))
-    affine_lps = _sitk_to_lps_affine(sitk_img)
-    affine_ras = LPS_TO_RAS @ affine_lps  # Convert to RAS for internal consistency
+    array, affine_ras = _read_mask_array_and_affine(path)
     return (array != 0).astype(np.uint8), affine_ras
 
 
 def read_mask_labels_with_affine(path: str) -> tuple[np.ndarray, np.ndarray, list]:
     """Read a medical mask while preserving integer label values and RAS geometry."""
-    sitk_img = _read_image_sitk_lps(path)
-    array = _sitk_to_xyz_array(sitk_img)
-    if array.ndim != 3:
-        raise ValueError("mask must be 3D: {} shape={}".format(path, array.shape))
+    array, affine_ras = _read_mask_array_and_affine(path)
     if not np.all(np.isfinite(array)):
         raise ValueError("mask contains NaN or infinite label values: {}".format(path))
 
@@ -756,7 +823,6 @@ def read_mask_labels_with_affine(path: str) -> tuple[np.ndarray, np.ndarray, lis
             # Probability-like masks are binary segmentations, not thousands
             # of separate floating-point labels.
             array = (array != 0).astype(np.uint8)
-    affine_ras = LPS_TO_RAS @ _sitk_to_lps_affine(sitk_img)
     labels = [value.item() if hasattr(value, "item") else value for value in np.unique(array)]
     return np.ascontiguousarray(array), affine_ras, labels
 
@@ -904,6 +970,33 @@ def _resample_mask_nearest_numpy(mask: np.ndarray, mask_affine: np.ndarray, imag
     return np.ascontiguousarray(out)
 
 
+def _grid_mapping_is_discrete(source_affine: np.ndarray, target_affine: np.ndarray, atol: float = 1e-4) -> bool:
+    """Return whether target indices map to source by integer flips/permutation.
+
+    RAS/LPS reorientation and DICOM row/column conventions often change only
+    index order and sign. Those cases must be handled as exact voxel reindexing,
+    not as an interpolating resample.
+    """
+    try:
+        mapping = np.linalg.inv(np.asarray(source_affine, dtype=float)) @ np.asarray(target_affine, dtype=float)
+    except (ValueError, np.linalg.LinAlgError):
+        return False
+    linear = mapping[:3, :3]
+    rounded = np.rint(linear)
+    if not np.allclose(linear, rounded, atol=atol, rtol=0.0):
+        return False
+    absolute = np.abs(rounded).astype(int)
+    if not (
+        np.all(np.sum(absolute, axis=0) == 1)
+        and np.all(np.sum(absolute, axis=1) == 1)
+    ):
+        return False
+    translation = mapping[:3, 3]
+    if not np.allclose(translation, np.rint(translation), atol=atol, rtol=0.0):
+        return False
+    return bool(np.allclose(mapping[3], [0.0, 0.0, 0.0, 1.0], atol=atol, rtol=0.0))
+
+
 def resample_mask_to_image_grid(
     mask: np.ndarray,
     mask_affine: np.ndarray,
@@ -913,9 +1006,11 @@ def resample_mask_to_image_grid(
 ) -> np.ndarray:
     """Resample mask into image voxel index space.
 
-    Default method is distance-field interpolation for binary masks to reduce
-    jagged boundaries after geometric transforms. Set environment variable
-    MIMICS_MASK_RESAMPLE_METHOD=nearest to use legacy nearest-neighbor logic.
+    Exact matching grids return unchanged. Axis permutations/flips use exact
+    voxel reindexing. For a genuinely different physical grid, nearest-neighbor
+    is the conservative default because labels must remain discrete. Set
+    MIMICS_MASK_RESAMPLE_METHOD=distance to explicitly opt into distance-field
+    interpolation for binary masks.
     """
     if tuple(mask.shape) == tuple(image_shape) and _affine_close(mask_affine, image_affine):
         return np.ascontiguousarray(mask.astype(np.uint8))
@@ -937,6 +1032,12 @@ def resample_mask_to_image_grid(
         raise ValueError(
             "target image affine is singular or invalid; spatial resampling is unsafe"
         )
+
+    # A coordinate-system or storage-orientation change is not a geometric
+    # resample. Keep every label voxel exact in this common path.
+    if _grid_mapping_is_discrete(mask_affine, image_affine):
+        return _resample_mask_nearest_numpy(mask, mask_affine, image_shape, image_affine)
+
     method = _mask_resample_method()
     binary_like = bool(np.all((mask == 0) | (mask == 1)))
 
@@ -1147,21 +1248,31 @@ def get_image_affine_from_dicom(dicom_folder: str) -> np.ndarray:
     if positions:
         positions.sort(key=lambda item: float(np.dot(item[1], slice_dir)))
         origin_lps = positions[0][1]
+        slice_step = None
         if len(positions) > 1:
-            distances = [
-                abs(float(np.dot(positions[i][1] - positions[i - 1][1], slice_dir)))
+            position_steps = [
+                positions[i][1] - positions[i - 1][1]
                 for i in range(1, len(positions))
             ]
-            distances = [value for value in distances if value > 1e-6]
-            if distances:
-                slice_thickness = float(np.median(distances))
+            valid_steps = [
+                value for value in position_steps
+                if float(np.dot(value, slice_dir)) > 1e-6
+            ]
+            if valid_steps:
+                slice_step = np.median(np.asarray(valid_steps, dtype=float), axis=0)
+                slice_thickness = abs(float(np.dot(slice_step, slice_dir)))
     else:
         origin_lps = np.array([0.0, 0.0, 0.0], dtype=float)
+        slice_step = None
 
     affine_lps = np.eye(4)
     affine_lps[:3, 0] = row_cosine * float(pixel_spacing[1])
     affine_lps[:3, 1] = column_cosine * float(pixel_spacing[0])
-    affine_lps[:3, 2] = slice_dir * float(slice_thickness)
+    affine_lps[:3, 2] = (
+        np.asarray(slice_step, dtype=float)
+        if slice_step is not None
+        else slice_dir * float(slice_thickness)
+    )
     affine_lps[:3, 3] = origin_lps
     return LPS_TO_RAS @ affine_lps
 
@@ -1206,7 +1317,10 @@ def _nifti_candidates(case_dir: Path):
 
 
 def _other_medical_image_candidates(case_dir: Path):
-    preferred = ("ct.mhd", "mri.mhd", "ct.mha", "mri.mha", "ct.nrrd", "mri.nrrd")
+    preferred = (
+        "ct.mhd", "mri.mhd", "ct.mha", "mri.mha",
+        "ct.nrrd", "mri.nrrd", "ct.nrrd.gz", "mri.nrrd.gz",
+    )
     files = [child for child in case_dir.iterdir() if child.is_file() and is_medical_image_file(str(child)) and not is_nifti_file(str(child))]
     return sorted(files, key=lambda path: (preferred.index(path.name.lower()) if path.name.lower() in preferred else len(preferred), path.name.lower()))
 
@@ -1941,7 +2055,11 @@ def do_discover(params: dict) -> dict:
         # Find image
         image_path = None
         image_type = None
-        for img_name in ("ct.nii.gz", "mri.nii.gz", "ct.nii", "mri.nii", "ct.mhd", "mri.mhd", "ct.mha", "mri.mha"):
+        for img_name in (
+            "ct.nii.gz", "mri.nii.gz", "ct.nii", "mri.nii",
+            "ct.mhd", "mri.mhd", "ct.mha", "mri.mha",
+            "ct.nrrd", "mri.nrrd", "ct.nrrd.gz", "mri.nrrd.gz",
+        ):
             candidate = os.path.join(case_dir, img_name)
             if os.path.isfile(candidate):
                 image_path = candidate

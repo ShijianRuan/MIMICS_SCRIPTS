@@ -574,7 +574,7 @@ def run_ui(context, preview_path=""):
                 window,
                 label,
                 current,
-                "Medical images (*.nii *.nii.gz *.mha *.mhd *.nrrd *.dcm);;All files (*)",
+                "Medical volumes (*.nii *.nii.gz *.mha *.mhd *.nrrd *.nrrd.gz);;All files (*)",
             )
             if value:
                 edit.setProperty("chosenByBrowse", True)
@@ -809,9 +809,18 @@ def run_ui(context, preview_path=""):
         failed = int(payload.get("failed", 0) or 0)
         total = int(payload.get("total", 0) or payload.get("total_count", 0) or 0)
         index = int(payload.get("index", 0) or 0)
+        progress_percent = payload.get("progress_percent")
         current = payload.get("case_id") or payload.get("mask_name") or ""
         progress_heading.setText(str(descriptor.get("title") or "Task progress"))
-        if total > 0:
+        if progress_percent is not None and not terminal_state(state):
+            try:
+                percent = min(100, max(0, int(float(progress_percent))))
+            except (TypeError, ValueError):
+                percent = 0
+            progress_bar.setRange(0, 100)
+            progress_bar.setValue(percent)
+            progress_bar.setFormat("%p%")
+        elif total > 0:
             progress_bar.setRange(0, total)
             progress_bar.setValue(min(total, max(completed + failed, index)))
             progress_bar.setFormat("%v / %m")
@@ -825,7 +834,7 @@ def run_ui(context, preview_path=""):
         if payload.get("error"):
             detail += "\n{0}".format(payload.get("error"))
         progress_detail.setText(detail)
-        signature = (state, phase, completed, failed, total, current, payload.get("error"))
+        signature = (state, phase, completed, failed, total, progress_percent, current, payload.get("error"))
         if signature != task_state.get("last_signature"):
             task_state["last_signature"] = signature
             append_activity(detail.replace("\n", " | "))

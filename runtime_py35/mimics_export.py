@@ -44,8 +44,8 @@ MIMICS_VOXEL_TO_RAS_MATRIX_METADATA = "mimics_script.mimics_voxel_to_ras_matrix"
 SOURCE_IMAGE_PATH_METADATA = "mimics_script.source_image_path"
 # Track the background_mimics lock taken by the launcher so the status monitor
 # can release it when the child Mimics crashes without writing a status (which
-# otherwise leaves a zombie lock that blocks all later exports).
-_ACTIVE_BG_MIMICS_LOCK = {"path": None, "token": None}
+# otherwise leaves a stale lock blocking later writes to that destination).
+_ACTIVE_BG_MIMICS_LOCKS = {}
 _ACTIVE_BG_MIMICS_LOCK_MUTEX = threading.RLock()
 
 
@@ -70,27 +70,25 @@ def _export_task_stop_requested(monitor):
 
 def _set_active_background_export_lock(lock_path, lock_token):
     with _ACTIVE_BG_MIMICS_LOCK_MUTEX:
-        _ACTIVE_BG_MIMICS_LOCK["path"] = lock_path
-        _ACTIVE_BG_MIMICS_LOCK["token"] = lock_token
+        _ACTIVE_BG_MIMICS_LOCKS[str(lock_token)] = str(lock_path)
 
 
 def _active_background_export_lock():
     with _ACTIVE_BG_MIMICS_LOCK_MUTEX:
-        return (
-            _ACTIVE_BG_MIMICS_LOCK.get("path"),
-            _ACTIVE_BG_MIMICS_LOCK.get("token"),
-        )
+        if not _ACTIVE_BG_MIMICS_LOCKS:
+            return (None, None)
+        token, path = next(iter(_ACTIVE_BG_MIMICS_LOCKS.items()))
+        return (path, token)
 
 
 def _clear_active_background_export_lock(lock_token=None):
     with _ACTIVE_BG_MIMICS_LOCK_MUTEX:
-        if (
-            lock_token is not None
-            and _ACTIVE_BG_MIMICS_LOCK.get("token") != lock_token
-        ):
+        if lock_token is None:
+            _ACTIVE_BG_MIMICS_LOCKS.clear()
+            return True
+        if str(lock_token) not in _ACTIVE_BG_MIMICS_LOCKS:
             return False
-        _ACTIVE_BG_MIMICS_LOCK["path"] = None
-        _ACTIVE_BG_MIMICS_LOCK["token"] = None
+        _ACTIVE_BG_MIMICS_LOCKS.pop(str(lock_token), None)
         return True
 
 
@@ -100,21 +98,21 @@ def _release_background_export_lock():
     Called when the background Mimics child exits without writing a status.
     A crash (common with Mimics 21 when a -b instance loses the license to the
     interactive window) leaves the lock file behind with a dead PID, blocking
-    every subsequent export with "already running". Only remove the lock when
-    the recorded PID is gone, so a genuinely running export is never disturbed.
+    later exports to that destination. Only remove the lock when the recorded
+    PID is gone, so a genuinely running export is never disturbed.
     """
-    lock_path, token = _active_background_export_lock()
-    if not lock_path or not token:
-        return
-    payload = runtime_common.read_json(lock_path, {}) or {}
-    pid = payload.get("pid")
-    if pid and runtime_common.process_exists(pid):
-        return  # holder still alive — leave it alone
-    try:
-        runtime_common.release_resource_lock(lock_path, token)
-    except Exception:
-        pass
-    _clear_active_background_export_lock(token)
+    with _ACTIVE_BG_MIMICS_LOCK_MUTEX:
+        locks = list(_ACTIVE_BG_MIMICS_LOCKS.items())
+    for token, lock_path in locks:
+        payload = runtime_common.read_json(lock_path, {}) or {}
+        pid = payload.get("pid")
+        if pid and runtime_common.process_exists(pid):
+            continue
+        try:
+            runtime_common.release_resource_lock(lock_path, token)
+        except Exception:
+            pass
+        _clear_active_background_export_lock(token)
 
 
 def _finalize_background_export_process_status(
@@ -167,7 +165,9 @@ def _finalize_background_export_process_status(
     return status
 
 
-def _watch_background_export_process(process, lock_path, lock_token):
+def _watch_background_export_process(
+    process, lock_path=None, lock_token=None, lock_records=None
+):
     """Finalize status, then release the shared background-Mimics slot."""
     while True:
         try:
@@ -187,11 +187,15 @@ def _watch_background_export_process(process, lock_path, lock_token):
             continue
         break
     _finalize_background_export_process_status(process)
-    try:
-        runtime_common.release_resource_lock(lock_path, lock_token)
-    except Exception:
-        pass
-    _clear_active_background_export_lock(lock_token)
+    records = list(lock_records or [])
+    if not records and lock_path and lock_token:
+        records = [(lock_path, lock_token)]
+    for current_path, current_token in records:
+        try:
+            runtime_common.release_resource_lock(current_path, current_token)
+        except Exception:
+            pass
+        _clear_active_background_export_lock(current_token)
 
 # All intermediate / scratch files are placed under this subdirectory inside
 # the user-visible output folder so they do not clutter exported segmentations.
@@ -520,20 +524,34 @@ def _launch_background_batch_export(ts_root, cases_filter, axes, flips, label_ou
 
     log_path = os.path.join(job_runtime, "process.log")
     _rotate_log_file(log_path)
-    lock_path = _resource_lock_path("background_mimics.lock")
-    lock_token = runtime_common.acquire_resource_lock(
-        lock_path,
-        "background_mimics",
-        "batch label export",
-        wait_seconds=0.0,
-    )
-    if not lock_token:
-        _append_export_log(
-            output_dir,
-            "Background Mimics is already running for another Mimics-Script task; batch export was not started.",
+    # Protect both sides of the operation: import may still be replacing a
+    # project in output_dir, while another export may be writing the final
+    # labels. When no safe-copy root is supplied, do_convert writes under
+    # ts_root regardless of where the .mcs projects are stored.
+    destination_scope = os.path.abspath(label_output_root or ts_root)
+    lock_paths = sorted(set([
+        runtime_common.background_mimics_lock_path(_project_root(), output_dir),
+        runtime_common.background_mimics_lock_path(_project_root(), destination_scope),
+    ]))
+    lock_records = []
+    for lock_path in lock_paths:
+        lock_token = runtime_common.acquire_resource_lock(
+            lock_path,
+            "background_mimics",
+            "batch label export",
+            wait_seconds=0.0,
         )
-        return None
-    _set_active_background_export_lock(lock_path, lock_token)
+        if not lock_token:
+            for held_path, held_token in reversed(lock_records):
+                runtime_common.release_resource_lock(held_path, held_token)
+                _clear_active_background_export_lock(held_token)
+            _append_export_log(
+                output_dir,
+                "The .mcs source or label destination is busy; batch export was not started.",
+            )
+            return None
+        lock_records.append((lock_path, lock_token))
+        _set_active_background_export_lock(lock_path, lock_token)
     try:
         if os.path.isfile(stop_path):
             os.remove(stop_path)
@@ -561,22 +579,25 @@ def _launch_background_batch_export(ts_root, cases_filter, axes, flips, label_ou
         process._mimics_process_log_path = log_path
         process._mimics_job_runtime = job_runtime
         process._mimics_stop_path = stop_path
-        if not runtime_common.update_resource_lock_pid(
-            lock_path,
-            lock_token,
-            process.pid,
-            {
-                "kind": "export_labels",
-                "ts_root": os.path.abspath(ts_root),
-                "export_root": export_root,
-                "stop_path": stop_path,
-            },
-        ):
-            raise RuntimeError(
-                "Background export started, but lock ownership could not be transferred to PID {0}.".format(
-                    process.pid
+        for lock_path, lock_token in lock_records:
+            if not runtime_common.update_resource_lock_pid(
+                lock_path,
+                lock_token,
+                process.pid,
+                {
+                    "kind": "export_labels",
+                    "ts_root": os.path.abspath(ts_root),
+                    "mcs_source": output_dir,
+                    "export_root": export_root,
+                    "destination_scope": destination_scope,
+                    "stop_path": stop_path,
+                },
+            ):
+                raise RuntimeError(
+                    "Background export started, but lock ownership could not be transferred to PID {0}.".format(
+                        process.pid
+                    )
                 )
-            )
         _append_export_log(
             export_root,
             "Background Mimics launch requested (PID={0}) for mask export; "
@@ -584,7 +605,7 @@ def _launch_background_batch_export(ts_root, cases_filter, axes, flips, label_ou
         )
         watcher = threading.Thread(
             target=_watch_background_export_process,
-            args=(process, lock_path, lock_token),
+            args=(process, None, None, lock_records),
             name="MimicsBackgroundExportWatcher",
         )
         watcher.daemon = True
@@ -609,24 +630,28 @@ def _launch_background_batch_export(ts_root, cases_filter, axes, flips, label_ou
                     getattr(process, "pid", 0)
                 )
         if process_stopped:
-            runtime_common.release_resource_lock(lock_path, lock_token)
-            _clear_active_background_export_lock(lock_token)
+            for lock_path, lock_token in lock_records:
+                runtime_common.release_resource_lock(lock_path, lock_token)
+                _clear_active_background_export_lock(lock_token)
         else:
-            try:
-                runtime_common.update_resource_lock_pid(
-                    lock_path,
-                    lock_token,
-                    process.pid,
-                    {
-                        "kind": "export_labels",
-                        "ts_root": os.path.abspath(ts_root),
-                        "export_root": export_root,
-                        "stop_path": stop_path,
-                        "termination_pending": True,
-                    },
-                )
-            except Exception:
-                pass
+            for lock_path, lock_token in lock_records:
+                try:
+                    runtime_common.update_resource_lock_pid(
+                        lock_path,
+                        lock_token,
+                        process.pid,
+                        {
+                            "kind": "export_labels",
+                            "ts_root": os.path.abspath(ts_root),
+                            "mcs_source": output_dir,
+                            "export_root": export_root,
+                            "destination_scope": destination_scope,
+                            "stop_path": stop_path,
+                            "termination_pending": True,
+                        },
+                    )
+                except Exception:
+                    pass
             _append_export_log(
                 output_dir,
                 "Background Mimics PID {0} did not exit after launch failure; "
@@ -1849,20 +1874,39 @@ def _current_project_case_id():
 def _launch_background_batch_export_async(*args, **kwargs):
     """Move output-path I/O and background Mimics startup off the GUI thread."""
     _prune_export_launch_threads()
-    holder = runtime_common.active_resource_lock(_project_root(), "background_mimics.lock")
+    ts_root = args[0] if args else ""
+    mcs_scope = kwargs.get("mcs_output_dir")
+    if not mcs_scope and ts_root:
+        mcs_scope = _resolve_export_output_dir(ts_root)
+    destination_scope = kwargs.get("label_output_root") or ts_root or mcs_scope
+    holder = None
+    seen_lock_names = set()
+    for scope in (mcs_scope, destination_scope):
+        if not scope:
+            continue
+        lock_name = runtime_common.background_mimics_lock_name(scope)
+        if lock_name in seen_lock_names:
+            continue
+        seen_lock_names.add(lock_name)
+        holder = runtime_common.active_resource_lock(_project_root(), lock_name)
+        if holder:
+            break
     if holder:
         try:
             mimics.dialogs.message_box(
                 title="Export Waiting",
                 message=(
-                    "Mask export was not started because the background Mimics license is in use.\n\n"
+                    "Mask export was not started because its saved .mcs source or label destination is busy.\n\n"
                     "Current task: {0}\n\n"
-                    "Wait for that task to finish, or stop it from its own Stop entry before retrying export."
+                    "Wait for the import/export to finish, or stop it from its own Stop entry before retrying."
                 ).format(runtime_common.resource_lock_summary(holder)),
                 ui_blocking=False,
             )
         except TypeError:
-            mimics.dialogs.message_box(title="Export Waiting", message="Background Mimics is currently busy.")
+            mimics.dialogs.message_box(
+                title="Export Waiting",
+                message="The saved .mcs source or selected label destination is currently busy.",
+            )
         return None
     export_root = kwargs.get("label_output_root") or kwargs.get("mcs_output_dir") or ""
     launch_state = {
@@ -2986,7 +3030,7 @@ def main(source_info_override=None):
     elif explicit_mcs_paths:
         cases_filter = set(explicit_mcs_paths)
 
-    process = _launch_background_batch_export(
+    launch_thread = _launch_background_batch_export_async(
         ts_root, cases_filter, axes, flips,
         label_output_root=label_output_root,
         overwrite_existing=overwrite_existing,
@@ -2996,22 +3040,8 @@ def main(source_info_override=None):
         source_image_paths=source_image_paths,
         mask_names=mask_names,
     )
-    if process is None:
-        output_dir = _resolve_export_output_dir(ts_root)
-        mimics.dialogs.message_box(
-            title="Export Error",
-            message="Could not start background batch export. See mimics_export.log in {0}.".format(output_dir),
-        )
+    if launch_thread is None:
         return 1
-    output_dir = _resolve_export_output_dir(ts_root)
-    mimics.dialogs.message_box(
-        title="Export Started",
-        message=(
-            "Batch export is running in a background Mimics process.\n"
-            "The current Mimics window remains available.\n\n"
-            "Status/logs: {0}"
-        ).format(output_dir),
-    )
     return 0
 
 
