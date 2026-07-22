@@ -300,24 +300,28 @@ def launch_create_mcs(
     runtime_dir = Path(runtime_common.import_queue_runtime_dir(str(ROOT), str(output_dir)))
     runtime_dir.mkdir(parents=True, exist_ok=True)
     runner = runtime_dir / "_run_create_mcs.py"
+    handshake = runtime_dir / "_background_import_runner_started.json"
     runner_lines = [
         "# Auto-generated runner for background Mimics .mcs creation",
-        "import sys, os",
-        "sys.path.insert(0, r'{}')".format(str(RUNTIME)),
-        "os.environ['MIMICS_BRIDGE_PYTHON'] = r'{}'".format(str(bridge_python)),
-        "os.environ['MIMICS_BRIDGE_SCRIPT'] = r'{}'".format(str(ROOT / "mimics_bridge.py")),
+        "import sys, os, json, time",
+        "open({0}, 'w').write(json.dumps({{'pid': os.getpid(), 'started_at_epoch': time.time()}}))".format(json.dumps(str(handshake))),
+        "sys.path.insert(0, {})".format(json.dumps(str(RUNTIME))),
+        "os.environ['MIMICS_BRIDGE_PYTHON'] = {}".format(json.dumps(str(bridge_python))),
+        "os.environ['MIMICS_BRIDGE_SCRIPT'] = {}".format(json.dumps(str(ROOT / "mimics_bridge.py"))),
     ]
     if dicom_resample_mode:
         runner_lines.append(
-            "os.environ['MIMICS_DICOM_RESAMPLE_MODE'] = r'{}'".format(str(dicom_resample_mode))
+            "os.environ['MIMICS_DICOM_RESAMPLE_MODE'] = {}".format(json.dumps(str(dicom_resample_mode)))
         )
     if mask_resample_method:
         runner_lines.append(
-            "os.environ['MIMICS_MASK_RESAMPLE_METHOD'] = r'{}'".format(str(mask_resample_method))
+            "os.environ['MIMICS_MASK_RESAMPLE_METHOD'] = {}".format(json.dumps(str(mask_resample_method)))
         )
     runner_lines.extend([
         "import create_mcs_batch",
-        "create_mcs_batch.main(r'{}', runtime_dir=r'{}')".format(str(output_dir), str(runtime_dir)),
+        "create_mcs_batch.main({}, runtime_dir={})".format(
+            json.dumps(str(output_dir)), json.dumps(str(runtime_dir))
+        ),
         "",
     ])
     runner.write_text("\n".join(runner_lines), encoding="utf-8")
@@ -326,10 +330,22 @@ def launch_create_mcs(
     )
     log = open(str(runtime_dir / "_background_mimics.log"), "ab")
     mimics_log = runtime_dir / "_background_mimics_application.log"
+    supervisor = ROOT / "tools" / "mcs_creation_supervisor.py"
+    if not supervisor.is_file():
+        lock.release()
+        log.close()
+        raise RuntimeError("MCS creation supervisor was not found: {}".format(supervisor))
     try:
         proc = subprocess.Popen(
-            runtime_common.background_mimics_command(
-                mimics_exe, str(runner), mimics_log_path=str(mimics_log)
+            runtime_common.mcs_creation_supervisor_command(
+                bridge_python,
+                str(supervisor),
+                mimics_exe,
+                str(runner),
+                str(runtime_dir),
+                str(output_dir),
+                handshake_path=str(handshake),
+                mimics_log_path=str(mimics_log),
             ),
             stdin=subprocess.DEVNULL,
             stdout=log,
@@ -638,21 +654,28 @@ def cmd_prepare_import(args):
                 cancelled = True
                 print("Import stop requested; no additional cases will be prepared.")
                 break
-            case_id = case["case_id"]
+            case_id = str(
+                case.get("case_id") if isinstance(case, dict) else ""
+            ) or "case_{:05d}".format(index)
             work_dir = run_root / "work" / case_id
-            print("[{}/{}] Preparing {}".format(index, len(cases), case_id))
-            params = {
-                "action": "prepare",
-                "image_path": case["image"],
-                "masks": case.get("masks", []),
-                "dicom_out": str(work_dir / "derived_dicom"),
-                "buffers_out": str(work_dir / "buffers"),
-                "axes": args.axes,
-                "flips": args.flips,
-                "case_id": case_id,
-            }
             descriptor_committed = False
             try:
+                if not isinstance(case, dict):
+                    raise RuntimeError("Dataset discovery returned a non-object case entry.")
+                image_path = str(case.get("image") or "")
+                if not image_path:
+                    raise RuntimeError("Dataset discovery returned a case without image data.")
+                print("[{}/{}] Preparing {}".format(index, len(cases), case_id))
+                params = {
+                    "action": "prepare",
+                    "image_path": image_path,
+                    "masks": case.get("masks", []),
+                    "dicom_out": str(work_dir / "derived_dicom"),
+                    "buffers_out": str(work_dir / "buffers"),
+                    "axes": args.axes,
+                    "flips": args.flips,
+                    "case_id": case_id,
+                }
                 result = run_bridge(
                     bridge_python,
                     params,
@@ -700,8 +723,20 @@ def cmd_prepare_import(args):
                     continue
                 failed += 1
                 fail_dir = runtime_dir / "_failed_cases"
-                write_json_atomic(fail_dir / (case_id + "_prepare.json"), {"case_id": case_id, "error": str(exc)})
-                print("  failed: {}".format(exc))
+                try:
+                    write_json_atomic(
+                        fail_dir / (case_id + "_prepare.json"),
+                        {"case_id": case_id, "phase": "prepare", "error": str(exc)},
+                    )
+                except Exception as record_exc:
+                    print(
+                        "  warning: could not persist failure details for {}: {}".format(
+                            case_id, record_exc
+                        ),
+                        file=sys.stderr,
+                    )
+                shutil.rmtree(str(work_dir), ignore_errors=True)
+                print("  failed; continuing with the next case: {}".format(exc))
                 try:
                     _update_import_queue_active(
                         runtime_dir, len(cases), completed, failed
@@ -716,17 +751,23 @@ def cmd_prepare_import(args):
     finally:
         if queue_started:
             active = runtime_dir / "_mcs_queue_active.json"
-            if active.exists():
-                active.unlink()
-            write_json_atomic(
-                runtime_dir / "_mcs_queue_done.json",
-                {
-                    "status": "cancelled" if cancelled else "done",
-                    "completed": completed,
-                    "failed": failed,
-                    "updated_at_epoch": time.time(),
-                },
-            )
+            try:
+                if active.exists():
+                    active.unlink()
+            except OSError as exc:
+                print("Warning: could not remove the active queue marker: {}".format(exc), file=sys.stderr)
+            try:
+                write_json_atomic(
+                    runtime_dir / "_mcs_queue_done.json",
+                    {
+                        "status": "cancelled" if cancelled else "done",
+                        "completed": completed,
+                        "failed": failed,
+                        "updated_at_epoch": time.time(),
+                    },
+                )
+            except Exception as exc:
+                print("Warning: could not write the queue completion marker: {}".format(exc), file=sys.stderr)
         producer_lock.release()
     if cancelled:
         return 130

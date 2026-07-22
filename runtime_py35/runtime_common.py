@@ -536,6 +536,36 @@ def background_mimics_command(mimics_exe, runner_path, mimics_log_path=None, scr
     return command
 
 
+def mcs_creation_supervisor_command(python_exe, supervisor_path, mimics_exe,
+                                    runner_path, runtime_dir, output_dir,
+                                    handshake_path=None, mimics_log_path=None):
+    """Build the external supervisor command used by every batch-import entry."""
+    required = {
+        "Python executable": python_exe,
+        "MCS creation supervisor": supervisor_path,
+        "Mimics executable": mimics_exe,
+        "Mimics runner": runner_path,
+        "queue runtime directory": runtime_dir,
+        "MCS output directory": output_dir,
+    }
+    for label, value in required.items():
+        if not str(value or "").strip():
+            raise ValueError("{} is required.".format(label))
+    command = [
+        str(python_exe),
+        str(supervisor_path),
+        "--mimics-exe", str(mimics_exe),
+        "--runner", str(runner_path),
+        "--runtime-dir", str(runtime_dir),
+        "--output-dir", str(output_dir),
+    ]
+    if handshake_path:
+        command.extend(["--handshake", str(handshake_path)])
+    if mimics_log_path:
+        command.extend(["--mimics-log", str(mimics_log_path)])
+    return command
+
+
 def read_text_tail(path, max_bytes=16384):
     """Read a bounded UTF-8 diagnostic tail from a possibly locked log."""
     if not path or not os.path.isfile(path):

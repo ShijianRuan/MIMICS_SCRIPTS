@@ -30,6 +30,7 @@ QUEUE_ACTIVE_FILE = "_mcs_queue_active.json"
 QUEUE_DONE_FILE = "_mcs_queue_done.json"
 QUEUE_STOP_FILE = "_mcs_queue_stop.json"
 STATUS_FILE = "_mcs_batch_status.json"
+CURRENT_CASE_FILE = "_mcs_current_case.json"
 LOCK_FILE = "_mcs_batch.lock"
 LOG_FILE = os.path.join("logs", "_create_mcs_batch.log")
 LOG_ROTATE_BYTES = 5 * 1024 * 1024
@@ -128,6 +129,17 @@ def record_failed_case(output_dir, case_id, phase, error, traceback_text=None):
 
 
 def update_status(output_dir, status, **details):
+    creation_completed = int(details.get("completed", 0) or 0)
+    creation_failed = int(details.get("failed", 0) or 0)
+    preparation = _preparation_progress(output_dir)
+    preparation_failed = int(preparation.get("failed", 0) or 0)
+    details["completed"] = creation_completed
+    details["failed"] = creation_failed + preparation_failed
+    details["creation_completed"] = creation_completed
+    details["creation_failed"] = creation_failed
+    details["preparation_failed"] = preparation_failed
+    if int(preparation.get("total", 0) or 0) > 0:
+        details["total"] = int(preparation.get("total", 0) or 0)
     payload = {
         "status": status,
         "pid": os.getpid(),
@@ -136,6 +148,103 @@ def update_status(output_dir, status, **details):
     payload.update(details)
     try:
         write_json_atomic(runtime_path(output_dir, STATUS_FILE), payload)
+    except Exception:
+        pass
+
+
+def _preparation_progress(output_dir):
+    """Read producer totals so creation status includes preparation failures."""
+    active = runtime_common.read_json(
+        runtime_path(output_dir, QUEUE_ACTIVE_FILE), {}
+    ) or {}
+    done = runtime_common.read_json(
+        runtime_path(output_dir, QUEUE_DONE_FILE), {}
+    ) or {}
+    source = active if str(active.get("status") or "").lower() == "active" else done
+    completed = int(source.get("completed", 0) or 0)
+    failed = int(source.get("failed", 0) or 0)
+    total = int(
+        source.get("total", 0)
+        or source.get("total_count", 0)
+        or (completed + failed)
+        or 0
+    )
+    return {"completed": completed, "failed": failed, "total": total}
+
+
+def _staging_mcs_path(output_mcs):
+    """Return a same-directory temporary project path for atomic publication."""
+    path = os.path.abspath(output_mcs)
+    stem = path[:-4] if path.lower().endswith(".mcs") else path
+    return "{0}.creating.{1}.mcs".format(stem, os.getpid())
+
+
+def _remove_file(path):
+    if not path:
+        return
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
+def _publish_mcs(staging_path, output_mcs, retries=20):
+    """Publish a completed project without exposing a partially saved .mcs."""
+    if not os.path.isfile(staging_path):
+        raise RuntimeError(
+            "Mimics reported a successful save but the staged project was not found: {0}".format(
+                staging_path
+            )
+        )
+    last_error = None
+    for attempt in range(max(1, int(retries))):
+        try:
+            os.replace(staging_path, output_mcs)
+            return
+        except OSError as exc:
+            last_error = exc
+            if attempt + 1 < max(1, int(retries)):
+                time.sleep(min(0.5, 0.05 * (attempt + 1)))
+    raise RuntimeError(
+        "The completed staged project could not replace the destination {0}: {1}".format(
+            output_mcs, last_error
+        )
+    )
+
+
+def _write_current_case(output_dir, case_id, work_dir, output_mcs,
+                        staging_mcs, descriptor_path, completed, failed):
+    """Persist enough state for the external supervisor to recover a native crash."""
+    marker_path = runtime_path(output_dir, CURRENT_CASE_FILE)
+    write_json_atomic(
+        marker_path,
+        {
+            "case_id": str(case_id),
+            "work_dir": os.path.abspath(work_dir),
+            "output_mcs": os.path.abspath(output_mcs),
+            "staging_mcs": os.path.abspath(staging_mcs),
+            "descriptor_path": os.path.abspath(descriptor_path) if descriptor_path else "",
+            "worker_pid": os.getpid(),
+            "completed_before_case": int(completed or 0),
+            "failed_before_case": int(failed or 0),
+            "started_at_epoch": time.time(),
+        },
+    )
+    return marker_path
+
+
+def _clear_current_case(marker_path, case_id):
+    """Remove only the marker still owned by this worker and case."""
+    try:
+        payload = runtime_common.read_json(marker_path, {}) or {}
+        if (
+            int(payload.get("worker_pid") or 0) == os.getpid()
+            and str(payload.get("case_id") or "") == str(case_id)
+        ):
+            os.remove(marker_path)
+    except OSError:
+        pass
     except Exception:
         pass
 
@@ -787,13 +896,29 @@ def main(output_dir=None, runtime_dir=None):
     poll_seconds = 10
     last_activity = time.time()
     consecutive_empty = 0
-    total_completed = 0
-    total_failed = 0
+    previous_status = runtime_common.read_json(
+        runtime_path(output_dir, STATUS_FILE), {}
+    ) or {}
+    resume_counts = str(previous_status.get("status") or "").lower() in (
+        "recovering",
+        "restarting",
+    )
+    total_completed = int(
+        previous_status.get("creation_completed", previous_status.get("completed", 0)) or 0
+    ) if resume_counts else 0
+    total_failed = int(
+        previous_status.get("creation_failed", previous_status.get("failed", 0)) or 0
+    ) if resume_counts else 0
     cancelled = False
 
     try:
         log_message(output_dir, "Background Mimics batch process started.")
-        update_status(output_dir, "running", completed=0, failed=0)
+        update_status(
+            output_dir,
+            "running",
+            completed=total_completed,
+            failed=total_failed,
+        )
 
         while True:
             # Find local work referenced by lightweight queue descriptors.
@@ -955,8 +1080,22 @@ def main(output_dir=None, runtime_dir=None):
                     completed=total_completed,
                     failed=total_failed,
                 )
+                staging_mcs = _staging_mcs_path(mcs_path)
+                marker_path = runtime_path(output_dir, CURRENT_CASE_FILE)
                 try:
-                    create_mcs_from_manifest(work_dir, mcs_path)
+                    _remove_file(staging_mcs)
+                    marker_path = _write_current_case(
+                        output_dir,
+                        case_id,
+                        work_dir,
+                        mcs_path,
+                        staging_mcs,
+                        descriptor_path,
+                        total_completed,
+                        total_failed,
+                    )
+                    create_mcs_from_manifest(work_dir, staging_mcs)
+                    _publish_mcs(staging_mcs, mcs_path)
                     total_completed += 1
                     last_activity = time.time()
                     log_message(output_dir, "Created: {}".format(mcs_path))
@@ -1018,6 +1157,7 @@ def main(output_dir=None, runtime_dir=None):
                         mimics.file.close_project()
                     except Exception:
                         pass
+                    _remove_file(staging_mcs)
                     try:
                         shutil.rmtree(work_dir, ignore_errors=True)
                     except Exception:
@@ -1028,6 +1168,8 @@ def main(output_dir=None, runtime_dir=None):
                             os.remove(descriptor_path)
                         except OSError:
                             pass
+                finally:
+                    _clear_current_case(marker_path, case_id)
 
         log_message(
             output_dir,

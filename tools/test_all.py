@@ -2036,6 +2036,270 @@ class TestCreateMcsBatch(unittest.TestCase):
         self.assertFalse(os.path.exists(descriptor))
         self.assertFalse(os.path.exists(work_dir))
 
+    def test_failed_mcs_case_does_not_stop_later_cases(self):
+        import create_mcs_batch
+
+        output_dir = os.path.join(self.tmp, "output")
+        runtime_dir = os.path.join(self.tmp, "local_queue")
+        queue_dir = os.path.join(runtime_dir, "prepared_queue")
+        os.makedirs(output_dir)
+        os.makedirs(queue_dir)
+
+        descriptors = []
+        for case_id in ("case_bad", "case_good"):
+            work_dir = os.path.join(self.tmp, "work", case_id)
+            os.makedirs(work_dir)
+            output_mcs = os.path.join(output_dir, case_id + ".mcs")
+            with open(os.path.join(work_dir, "prepare_manifest.json"), "w") as handle:
+                json.dump({"output_mcs": output_mcs}, handle)
+            descriptor = os.path.join(queue_dir, case_id + ".json")
+            with open(descriptor, "w") as handle:
+                json.dump({
+                    "case_id": case_id,
+                    "work_dir": work_dir,
+                    "output_mcs": output_mcs,
+                }, handle)
+            descriptors.append(descriptor)
+        with open(os.path.join(runtime_dir, create_mcs_batch.QUEUE_DONE_FILE), "w") as handle:
+            json.dump({"status": "done"}, handle)
+
+        calls = []
+        old_create = create_mcs_batch.create_mcs_from_manifest
+        old_runtime = create_mcs_batch._ACTIVE_RUNTIME_DIR
+        try:
+            def fake_create(work_dir, staged_path):
+                case_id = os.path.basename(work_dir)
+                calls.append(case_id)
+                if case_id == "case_bad":
+                    raise RuntimeError("controlled create failure")
+                with open(staged_path, "w") as handle:
+                    handle.write("complete project")
+                return staged_path
+            create_mcs_batch.create_mcs_from_manifest = fake_create
+            self.assertEqual(0, create_mcs_batch.main(output_dir, runtime_dir=runtime_dir))
+        finally:
+            create_mcs_batch.create_mcs_from_manifest = old_create
+            create_mcs_batch._ACTIVE_RUNTIME_DIR = old_runtime
+
+        self.assertEqual(["case_bad", "case_good"], calls)
+        self.assertFalse(os.path.exists(os.path.join(output_dir, "case_bad.mcs")))
+        self.assertTrue(os.path.isfile(os.path.join(output_dir, "case_good.mcs")))
+        self.assertTrue(all(not os.path.exists(path) for path in descriptors))
+        status = json.loads(Path(runtime_dir, create_mcs_batch.STATUS_FILE).read_text(encoding="utf-8"))
+        self.assertEqual("closed", status["status"])
+        self.assertEqual(1, status["completed"])
+        self.assertEqual(1, status["failed"])
+
+    def test_failed_mcs_rebuild_keeps_previous_complete_project(self):
+        import create_mcs_batch
+
+        output_dir = os.path.join(self.tmp, "output")
+        runtime_dir = os.path.join(self.tmp, "local_queue")
+        queue_dir = os.path.join(runtime_dir, "prepared_queue")
+        work_dir = os.path.join(self.tmp, "work", "case001")
+        os.makedirs(output_dir)
+        os.makedirs(queue_dir)
+        os.makedirs(work_dir)
+        output_mcs = os.path.join(output_dir, "case001.mcs")
+        Path(output_mcs).write_text("previous complete project", encoding="utf-8")
+        Path(work_dir, "prepare_manifest.json").write_text(
+            json.dumps({"output_mcs": output_mcs}), encoding="utf-8"
+        )
+        Path(queue_dir, "case001.json").write_text(json.dumps({
+            "case_id": "case001",
+            "work_dir": work_dir,
+            "output_mcs": output_mcs,
+        }), encoding="utf-8")
+        Path(runtime_dir, create_mcs_batch.QUEUE_DONE_FILE).write_text(
+            json.dumps({"status": "done"}), encoding="utf-8"
+        )
+
+        old_create = create_mcs_batch.create_mcs_from_manifest
+        old_runtime = create_mcs_batch._ACTIVE_RUNTIME_DIR
+        try:
+            create_mcs_batch.create_mcs_from_manifest = lambda *_args: (_ for _ in ()).throw(
+                RuntimeError("controlled rebuild failure")
+            )
+            self.assertEqual(0, create_mcs_batch.main(output_dir, runtime_dir=runtime_dir))
+        finally:
+            create_mcs_batch.create_mcs_from_manifest = old_create
+            create_mcs_batch._ACTIVE_RUNTIME_DIR = old_runtime
+        self.assertEqual("previous complete project", Path(output_mcs).read_text(encoding="utf-8"))
+
+    def test_native_mimics_exit_quarantines_only_current_case(self):
+        from tools import mcs_creation_supervisor as supervisor
+
+        runtime_dir = Path(self.tmp, "runtime")
+        queue_dir = runtime_dir / "prepared_queue"
+        work_dir = Path(self.tmp, "work", "case_bad")
+        runtime_dir.mkdir()
+        queue_dir.mkdir()
+        work_dir.mkdir(parents=True)
+        descriptor = queue_dir / "case_bad.json"
+        descriptor.write_text("{}", encoding="utf-8")
+        staging = Path(self.tmp, "output", "case_bad.creating.123.mcs")
+        staging.parent.mkdir()
+        staging.write_text("partial", encoding="utf-8")
+        final_mcs = staging.parent / "case_bad.mcs"
+        final_mcs.write_text("previous complete project", encoding="utf-8")
+        runtime_common = __import__("runtime_common")
+        runtime_common.write_json_atomic(str(runtime_dir / supervisor.STATUS_FILE), {
+            "status": "creating", "completed": 2, "failed": 1,
+        })
+        runtime_common.write_json_atomic(str(runtime_dir / supervisor.CURRENT_CASE_FILE), {
+            "case_id": "case_bad",
+            "work_dir": str(work_dir),
+            "output_mcs": str(final_mcs),
+            "staging_mcs": str(staging),
+            "descriptor_path": str(descriptor),
+            "worker_pid": 123,
+            "completed_before_case": 2,
+            "failed_before_case": 1,
+        })
+
+        recovered = supervisor.quarantine_interrupted_case(runtime_dir, 123, -1073741819)
+        self.assertEqual("case_bad", recovered["case_id"])
+        self.assertFalse(descriptor.exists())
+        self.assertFalse(work_dir.exists())
+        self.assertFalse(staging.exists())
+        self.assertEqual("previous complete project", final_mcs.read_text(encoding="utf-8"))
+        status = runtime_common.read_json(str(runtime_dir / supervisor.STATUS_FILE), {})
+        self.assertEqual("recovering", status["status"])
+        self.assertEqual(2, status["completed"])
+        self.assertEqual(2, status["failed"])
+        self.assertEqual(1, len(list((runtime_dir / "_failed_cases").glob("*.json"))))
+
+    def test_supervisor_restarts_after_native_case_exit_and_finishes_queue(self):
+        from argparse import Namespace
+        from tools import mcs_creation_supervisor as supervisor
+
+        runtime_dir = Path(self.tmp, "runtime")
+        output_dir = Path(self.tmp, "output")
+        queue_dir = runtime_dir / "prepared_queue"
+        runtime_dir.mkdir()
+        output_dir.mkdir()
+        queue_dir.mkdir()
+        Path(runtime_dir, supervisor.DONE_FILE).write_text(
+            json.dumps({"status": "done", "completed": 2, "failed": 0}),
+            encoding="utf-8",
+        )
+        for case_id in ("case_bad", "case_good"):
+            work_dir = Path(self.tmp, "work", case_id)
+            work_dir.mkdir(parents=True)
+            Path(work_dir, "prepare_manifest.json").write_text("{}", encoding="utf-8")
+            Path(queue_dir, case_id + ".json").write_text(json.dumps({
+                "case_id": case_id,
+                "work_dir": str(work_dir),
+                "output_mcs": str(output_dir / (case_id + ".mcs")),
+            }), encoding="utf-8")
+
+        child_script = Path(self.tmp, "fake_mimics_child.py")
+        child_script.write_text(
+            "import json, os, pathlib, sys, time\n"
+            "runtime = pathlib.Path(sys.argv[1])\n"
+            "output = pathlib.Path(sys.argv[2])\n"
+            "counter = runtime / 'child_count.txt'\n"
+            "count = int(counter.read_text()) if counter.exists() else 0\n"
+            "counter.write_text(str(count + 1))\n"
+            "if count == 0:\n"
+            "    work = pathlib.Path(sys.argv[3])\n"
+            "    marker = {\n"
+            "      'case_id': 'case_bad', 'work_dir': str(work),\n"
+            "      'output_mcs': str(output / 'case_bad.mcs'),\n"
+            "      'staging_mcs': str(output / 'case_bad.creating.mcs'),\n"
+            "      'descriptor_path': str(runtime / 'prepared_queue' / 'case_bad.json'),\n"
+            "      'worker_pid': os.getpid(), 'completed_before_case': 0,\n"
+            "      'failed_before_case': 0}\n"
+            "    (output / 'case_bad.creating.mcs').write_text('partial')\n"
+            "    (runtime / '_mcs_current_case.json').write_text(json.dumps(marker))\n"
+            "    sys.exit(7)\n"
+            "good = runtime / 'prepared_queue' / 'case_good.json'\n"
+            "payload = json.loads(good.read_text())\n"
+            "pathlib.Path(payload['work_dir']).joinpath('prepare_manifest.json').unlink()\n"
+            "pathlib.Path(payload['work_dir']).rmdir()\n"
+            "good.unlink()\n"
+            "status_path = runtime / '_mcs_batch_status.json'\n"
+            "status = json.loads(status_path.read_text())\n"
+            "status.update({'status': 'closed', 'completed': 1, 'failed': 1,\n"
+            " 'creation_completed': 1, 'creation_failed': 1})\n"
+            "status_path.write_text(json.dumps(status))\n",
+            encoding="utf-8",
+        )
+        bad_work = Path(self.tmp, "work", "case_bad")
+        original_command = supervisor.runtime_common.background_mimics_command
+        try:
+            supervisor.runtime_common.background_mimics_command = lambda *_args, **_kwargs: [
+                sys.executable,
+                str(child_script),
+                str(runtime_dir),
+                str(output_dir),
+                str(bad_work),
+            ]
+            result = supervisor._run(Namespace(
+                runtime_dir=str(runtime_dir),
+                output_dir=str(output_dir),
+                mimics_exe="fake",
+                runner="fake",
+                mimics_log="",
+                handshake="",
+                max_start_retries=2,
+                retry_delay=0.01,
+            ))
+        finally:
+            supervisor.runtime_common.background_mimics_command = original_command
+
+        self.assertEqual(0, result)
+        self.assertEqual("2", Path(runtime_dir, "child_count.txt").read_text(encoding="utf-8"))
+        self.assertFalse(Path(queue_dir, "case_bad.json").exists())
+        self.assertFalse(Path(queue_dir, "case_good.json").exists())
+        status = json.loads(Path(runtime_dir, supervisor.STATUS_FILE).read_text(encoding="utf-8"))
+        self.assertEqual("closed", status["status"])
+        self.assertEqual(1, status["completed"])
+        self.assertEqual(1, status["failed"])
+
+    def test_supervisor_ignores_descriptor_whose_manifest_was_quarantined(self):
+        from tools import mcs_creation_supervisor as supervisor
+
+        runtime_dir = Path(self.tmp, "runtime")
+        output_dir = Path(self.tmp, "output")
+        queue_dir = runtime_dir / "prepared_queue"
+        work_dir = Path(self.tmp, "work", "stale")
+        queue_dir.mkdir(parents=True)
+        output_dir.mkdir()
+        work_dir.mkdir(parents=True)
+        Path(queue_dir, "stale.json").write_text(json.dumps({
+            "case_id": "stale",
+            "work_dir": str(work_dir),
+        }), encoding="utf-8")
+        self.assertFalse(supervisor._queue_has_work(runtime_dir, output_dir))
+        Path(work_dir, "prepare_manifest.json").write_text("{}", encoding="utf-8")
+        self.assertTrue(supervisor._queue_has_work(runtime_dir, output_dir))
+
+    def test_creation_status_combines_prepare_and_mcs_failures(self):
+        import create_mcs_batch
+
+        runtime_dir = Path(self.tmp, "runtime")
+        runtime_dir.mkdir()
+        Path(runtime_dir, create_mcs_batch.QUEUE_DONE_FILE).write_text(json.dumps({
+            "status": "done", "completed": 4, "failed": 1,
+        }), encoding="utf-8")
+        old_runtime = create_mcs_batch._ACTIVE_RUNTIME_DIR
+        try:
+            create_mcs_batch._ACTIVE_RUNTIME_DIR = str(runtime_dir)
+            create_mcs_batch.update_status(
+                self.tmp, "closed", completed=3, failed=1
+            )
+        finally:
+            create_mcs_batch._ACTIVE_RUNTIME_DIR = old_runtime
+        status = json.loads(
+            Path(runtime_dir, create_mcs_batch.STATUS_FILE).read_text(encoding="utf-8")
+        )
+        self.assertEqual(3, status["completed"])
+        self.assertEqual(2, status["failed"])
+        self.assertEqual(1, status["creation_failed"])
+        self.assertEqual(1, status["preparation_failed"])
+        self.assertEqual(5, status["total"])
+
     def test_shape_product(self):
         from create_mcs_batch import _shape_product
 
@@ -6950,6 +7214,149 @@ class TestNewFeatures(unittest.TestCase):
         self.assertEqual([1], launch_descriptor_counts)
         done = json.loads((runtime_dir / "_mcs_queue_done.json").read_text(encoding="utf-8"))
         self.assertEqual(2, done["completed"])
+
+    def test_external_batch_continues_when_one_case_and_failure_record_fail(self):
+        cli = __import__("tools.mimics_batch_cli", fromlist=["dummy"])
+
+        root = Path(self.tmp, "external_continue")
+        dataset = root / "dataset"
+        output = root / "output"
+        runtime_dir = root / "queue_runtime"
+        import_runtime = root / "import_runtime"
+        for path in (dataset, output, runtime_dir, import_runtime):
+            path.mkdir(parents=True, exist_ok=True)
+
+        class Lock(object):
+            def __init__(self, *_args, **_kwargs):
+                pass
+            def acquire(self, **_kwargs):
+                return self
+            def update_pid(self, *_args, **_kwargs):
+                return True
+            def release(self):
+                return None
+
+        prepared = []
+        original = {
+            "resolve": cli.resolve_bridge_python,
+            "discover": cli.discover_cases,
+            "bridge": cli.run_bridge,
+            "write": cli.write_json_atomic,
+            "clear": cli.clear_stale_import_queue_stop,
+            "lock": cli.FileResourceLock,
+            "queue_runtime": cli.runtime_common.import_queue_runtime_dir,
+            "import_runtime": cli.runtime_common.import_runtime_base,
+            "producer_path": cli.runtime_common.import_producer_lock_path,
+        }
+        try:
+            cli.resolve_bridge_python = lambda *_args: sys.executable
+            cli.discover_cases = lambda *_args, **_kwargs: [
+                {"case_id": "case_bad", "image": "bad.nii.gz", "masks": []},
+                {"case_id": "case_good", "image": "good.nii.gz", "masks": []},
+            ]
+            def bridge(_python, params, **_kwargs):
+                if params["case_id"] == "case_bad":
+                    raise RuntimeError("controlled bridge failure")
+                prepared.append(params["case_id"])
+                return {"status": "ok", "case_id": params["case_id"], "masks": []}
+            cli.run_bridge = bridge
+            def write(path, payload, *args, **kwargs):
+                if "_failed_cases" in str(path):
+                    raise PermissionError("controlled failure-record denial")
+                return original["write"](path, payload, *args, **kwargs)
+            cli.write_json_atomic = write
+            cli.clear_stale_import_queue_stop = lambda *_args: False
+            cli.FileResourceLock = Lock
+            cli.runtime_common.import_queue_runtime_dir = lambda *_args: str(runtime_dir)
+            cli.runtime_common.import_runtime_base = lambda *_args: str(import_runtime)
+            cli.runtime_common.import_producer_lock_path = lambda *_args: str(root / "producer.lock")
+
+            args = cli.build_parser().parse_args([
+                "prepare-import",
+                "--ts-root", str(dataset),
+                "--output-dir", str(output),
+                "--no-create-mcs",
+            ])
+            result = cli.cmd_prepare_import(args)
+        finally:
+            cli.resolve_bridge_python = original["resolve"]
+            cli.discover_cases = original["discover"]
+            cli.run_bridge = original["bridge"]
+            cli.write_json_atomic = original["write"]
+            cli.clear_stale_import_queue_stop = original["clear"]
+            cli.FileResourceLock = original["lock"]
+            cli.runtime_common.import_queue_runtime_dir = original["queue_runtime"]
+            cli.runtime_common.import_runtime_base = original["import_runtime"]
+            cli.runtime_common.import_producer_lock_path = original["producer_path"]
+
+        self.assertEqual(0, result)
+        self.assertEqual(["case_good"], prepared)
+        done = json.loads((runtime_dir / "_mcs_queue_done.json").read_text(encoding="utf-8"))
+        self.assertEqual(1, done["completed"])
+        self.assertEqual(1, done["failed"])
+
+    def test_internal_batch_continues_after_case_start_failure(self):
+        import mimics_import
+
+        monitor = {
+            "monitor_key": "old",
+            "batch_queue": [
+                {"case_id": "case_bad", "image": "bad.nii.gz", "masks": []},
+                {"case_id": "case_good", "image": "good.nii.gz", "masks": []},
+            ],
+            "output_dir": self.tmp,
+            "axes": [0, 1, 2],
+            "flips": [False, False, False],
+            "jobs_dir": os.path.join(self.tmp, "jobs"),
+            "work_root": os.path.join(self.tmp, "work"),
+            "completed": 0,
+            "failed": 0,
+            "total": 2,
+            "timeout_seconds": 30,
+        }
+        launched = []
+        original = {
+            "build": mimics_import._build_bridge_params,
+            "launch": mimics_import._launch_bridge_job_thread,
+            "log": mimics_import._append_import_log,
+            "record": mimics_import._record_failed_case,
+            "status": mimics_import._write_import_task_status,
+        }
+        try:
+            def build(case_info, axes, flips, work_dir):
+                if case_info["case_id"] == "case_bad":
+                    raise RuntimeError("controlled setup failure")
+                return {"case_id": case_info["case_id"]}
+            mimics_import._build_bridge_params = build
+            mimics_import._launch_bridge_job_thread = lambda params, *_args, **_kwargs: launched.append(
+                params["case_id"]
+            )
+            mimics_import._append_import_log = lambda *_args, **_kwargs: None
+            mimics_import._record_failed_case = lambda *_args, **_kwargs: None
+            mimics_import._write_import_task_status = lambda *_args, **_kwargs: None
+            mimics_import._start_next_batch_prepare(monitor)
+        finally:
+            mimics_import._build_bridge_params = original["build"]
+            mimics_import._launch_bridge_job_thread = original["launch"]
+            mimics_import._append_import_log = original["log"]
+            mimics_import._record_failed_case = original["record"]
+            mimics_import._write_import_task_status = original["status"]
+            mimics_import._IMPORT_MONITORS.pop(
+                os.path.join(self.tmp, "jobs", "case_good"), None
+            )
+
+        self.assertEqual(1, monitor["failed"])
+        self.assertEqual(["case_good"], launched)
+        self.assertEqual("case_good", monitor["case_id"])
+
+    def test_internal_batch_first_case_uses_the_guarded_queue_path(self):
+        import inspect
+        import mimics_import
+
+        source = inspect.getsource(mimics_import._discover_monitor_tick)
+        self.assertIn('"selecting_next": True', source)
+        self.assertIn("batch_queue=cases", source)
+        self.assertNotIn("first_case = cases[0]", source)
 
     def test_external_export_multi_lock_releases_partial_acquisition(self):
         cli = __import__("tools.mimics_batch_cli", fromlist=["dummy"])

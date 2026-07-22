@@ -2078,24 +2078,44 @@ def _finish_batch_prepare_queue(monitor):
 
 
 def _start_next_batch_prepare(monitor):
-    """Start the next valid case without recursive empty-case skipping."""
-    case_info = None
+    """Start the next case; quarantine setup failures without stopping the batch."""
     skipped_this_tick = 0
-    while case_info is None:
+    while True:
         queue = monitor.get("batch_queue")
         if not queue:
             _finish_batch_prepare_queue(monitor)
             return
         item = queue.pop(0)
+        case_info = None
         if isinstance(item, tuple):
             case_name, case_dir = item
         else:
-            if item.get("image"):
-                case_info = item
-            case_name = item.get("case_id", "")
-            case_dir = item.get("case_dir", "")
-        if case_info is None:
-            case_info = _discover_single_case(case_dir)
+            try:
+                if item.get("image"):
+                    case_info = item
+                case_name = item.get("case_id", "")
+                case_dir = item.get("case_dir", "")
+            except Exception:
+                case_name = "unknown_case"
+                case_dir = ""
+        try:
+            if case_info is None:
+                case_info = _discover_single_case(case_dir)
+        except Exception as exc:
+            output_dir = monitor.get("output_dir", "")
+            _append_import_log(
+                output_dir,
+                "Case discovery failed for {0}; continuing with the next case: {1}".format(
+                    case_name, exc
+                ),
+            )
+            _record_failed_case(output_dir, case_name, "discover_case", exc)
+            monitor["failed"] = monitor.get("failed", 0) + 1
+            skipped_this_tick += 1
+            if skipped_this_tick >= 8 and monitor.get("batch_queue"):
+                monitor["selecting_next"] = True
+                return
+            continue
         if case_info is None:
             output_dir = monitor.get("output_dir", "")
             _append_import_log(
@@ -2113,51 +2133,99 @@ def _start_next_batch_prepare(monitor):
             if skipped_this_tick >= 8 and monitor.get("batch_queue"):
                 monitor["selecting_next"] = True
                 return
+            continue
 
-    case_id = case_info["case_id"]
-    output_dir = monitor.get("output_dir")
-    axes = monitor.get("axes")
-    flips = monitor.get("flips")
-    jobs_dir = monitor.get("jobs_dir")
+        try:
+            work_dir = None
+            job_dir = None
+            case_id = str(case_info["case_id"])
+            if not case_id:
+                raise RuntimeError("Discovered case has an empty case_id.")
+            output_dir = monitor.get("output_dir")
+            axes = monitor.get("axes")
+            flips = monitor.get("flips")
+            jobs_dir = monitor.get("jobs_dir")
 
-    work_dir = os.path.join(monitor.get("work_root"), case_id)
-    job_dir = os.path.join(jobs_dir, case_id)
+            work_dir = os.path.join(monitor.get("work_root"), case_id)
+            job_dir = os.path.join(jobs_dir, case_id)
 
-    completed = monitor.get("completed", 0)
-    failed = monitor.get("failed", 0)
-    total = monitor.get("total", 0)
-    _append_import_log(
-        output_dir,
-        "[{0}/{1}] Preparing: {2}".format(completed + failed + 1, total, case_id),
-    )
-    _write_import_task_status(
-        monitor.get("task_status_path"),
-        {
-            "status": "running",
-            "phase": "preparing",
-            "completed": completed,
-            "failed": failed,
-            "total": total,
-            "case_id": case_id,
-        },
-    )
+            completed = monitor.get("completed", 0)
+            failed = monitor.get("failed", 0)
+            total = monitor.get("total", 0)
+            _append_import_log(
+                output_dir,
+                "[{0}/{1}] Preparing: {2}".format(completed + failed + 1, total, case_id),
+            )
+            _write_import_task_status(
+                monitor.get("task_status_path"),
+                {
+                    "status": "running",
+                    "phase": "preparing",
+                    "completed": completed,
+                    "failed": failed,
+                    "total": total,
+                    "case_id": case_id,
+                },
+            )
 
-    bridge_params = _build_bridge_params(case_info, axes, flips, work_dir)
+            bridge_params = _build_bridge_params(case_info, axes, flips, work_dir)
+            old_monitor_key = monitor.get("monitor_key")
+            _launch_bridge_job_thread(
+                bridge_params,
+                job_dir,
+                output_dir,
+                "preparing",
+                case_id=case_id,
+            )
+        except Exception as exc:
+            output_dir = monitor.get("output_dir", "")
+            case_mapping = case_info if isinstance(case_info, dict) else {}
+            failed_case_id = str(
+                case_mapping.get("case_id") or case_name or "unknown_case"
+            )
+            _append_import_log(
+                output_dir,
+                "Could not start preparation for {0}; continuing with the next case: {1}".format(
+                    failed_case_id, exc
+                ),
+            )
+            _record_failed_case(
+                output_dir, failed_case_id, "prepare_start", exc
+            )
+            monitor["failed"] = monitor.get("failed", 0) + 1
+            try:
+                _cleanup_job_dir(job_dir)
+                _cleanup_work_dir(work_dir)
+            except Exception:
+                pass
+            _write_import_task_status(
+                monitor.get("task_status_path"),
+                {
+                    "status": "running",
+                    "phase": "preparing",
+                    "completed": monitor.get("completed", 0),
+                    "failed": monitor.get("failed", 0),
+                    "total": monitor.get("total", 0),
+                    "case_id": failed_case_id,
+                },
+            )
+            skipped_this_tick += 1
+            if skipped_this_tick >= 8 and monitor.get("batch_queue"):
+                monitor["selecting_next"] = True
+                return
+            continue
 
-    # Update monitor for next case
-    old_monitor_key = monitor.get("monitor_key")
-    monitor["job_dir"] = job_dir
-    monitor["work_dir"] = work_dir
-    monitor["case_id"] = case_id
-    monitor["monitor_key"] = job_dir
-    monitor["deadline"] = time.time() + monitor.get("timeout_seconds", 1800)
-    monitor["done"] = False
-
-    _launch_bridge_job_thread(bridge_params, job_dir, output_dir, "preparing", case_id=case_id)
-
-    # Re-register monitor under new key (timer keeps running)
-    _IMPORT_MONITORS.pop(old_monitor_key, None)
-    _IMPORT_MONITORS[job_dir] = monitor
+        # Register only after the bridge launch has succeeded. A failed launch
+        # must not replace the active monitor key with a job that never ran.
+        monitor["job_dir"] = job_dir
+        monitor["work_dir"] = work_dir
+        monitor["case_id"] = case_id
+        monitor["monitor_key"] = job_dir
+        monitor["deadline"] = time.time() + monitor.get("timeout_seconds", 1800)
+        monitor["done"] = False
+        _IMPORT_MONITORS.pop(old_monitor_key, None)
+        _IMPORT_MONITORS[job_dir] = monitor
+        return
 
 
 def _start_batch_prepare_monitor(job_dir, work_dir, timeout_seconds=1800,
@@ -2563,9 +2631,31 @@ def _launch_background_mimics(output_dir, total_count=0, schedule_retry=True):
                 os.remove(stale_path)
         except OSError:
             pass
-    cmd = runtime_common.background_mimics_command(
+    supervisor_path = os.path.join(
+        _project_root(), "tools", "mcs_creation_supervisor.py"
+    )
+    if not os.path.isfile(supervisor_path):
+        message = "MCS creation supervisor was not found: {0}".format(supervisor_path)
+        _append_import_log(output_dir, message)
+        _bg_mark_failed(output_key)
+        runtime_common.write_json_atomic(
+            _rt(output_dir, "_mcs_batch_status.json"),
+            {
+                "status": "failed",
+                "error": message,
+                "runner_started": False,
+                "updated_at_epoch": time.time(),
+            },
+        )
+        return None
+    cmd = runtime_common.mcs_creation_supervisor_command(
+        _python_exe(),
+        supervisor_path,
         mimics_exe,
         runner_path,
+        _rt(output_dir),
+        output_dir,
+        handshake_path=handshake_path,
         mimics_log_path=mimics_log_path,
     )
     _rotate_log_file(log_path)
@@ -2631,7 +2721,7 @@ def _launch_background_mimics(output_dir, total_count=0, schedule_retry=True):
             )
         _append_import_log(
             output_dir,
-            "Background Mimics launch requested (PID={0}) for .mcs creation. "
+            "Background .mcs creation supervisor started (PID={0}). "
             "Waiting for runner handshake.".format(process.pid),
         )
         watcher = threading.Thread(
@@ -3309,20 +3399,6 @@ def _discover_monitor_tick(monitor):
         flips = monitor.get("flips")
         jobs_dir = monitor.get("jobs_dir")
 
-        first_case = cases[0]
-        first_case_id = first_case["case_id"]
-        first_work_dir = os.path.join(monitor.get("work_root"), first_case_id)
-        first_job_dir = os.path.join(jobs_dir, first_case_id)
-
-        _verbose_log(
-            output_dir,
-            "First case | case_id={0}".format(first_case_id),
-        )
-        _append_import_log(output_dir, "[1/{0}] Preparing: {1}".format(count, first_case_id))
-        bridge_params = _build_bridge_params(first_case, axes, flips, first_work_dir)
-        _verbose_log(output_dir, "Prepare params={0}".format(_summarize_bridge_params(bridge_params)))
-        _launch_bridge_job_thread(bridge_params, first_job_dir, output_dir, "preparing", case_id=first_case_id)
-
         batch_info = {
             "total": count,
             "output_dir": output_dir,
@@ -3337,11 +3413,15 @@ def _discover_monitor_tick(monitor):
             "producer_lock_token": monitor.get("producer_lock_token", ""),
             "producer_output_dir": monitor.get("producer_output_dir", output_dir),
             "queue_marked_active": True,
+            # The first case uses the same guarded path as every later case.
+            # No first-case exception can escape and stop the whole batch.
+            "selecting_next": True,
         }
-        _verbose_log(output_dir, "Batch prepare | remaining={0}".format(max(0, len(cases) - 1)))
+        initial_monitor_key = os.path.join(jobs_dir, "_batch_start")
+        _verbose_log(output_dir, "Batch prepare | queued={0}".format(len(cases)))
         monitor_started = _start_batch_prepare_monitor(
-            first_job_dir, first_work_dir,
-            batch_queue=cases[1:],
+            initial_monitor_key, "",
+            batch_queue=cases,
             batch_info=batch_info,
         )
         if not monitor_started:
