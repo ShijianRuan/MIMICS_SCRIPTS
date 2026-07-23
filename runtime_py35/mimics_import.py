@@ -20,7 +20,6 @@ from __future__ import print_function
 import json
 import logging
 import os
-import hashlib
 import re
 import shutil
 import subprocess
@@ -572,7 +571,7 @@ def _register_mcs_queue(output_dir, total_count=0):
         registry_dir = _mcs_queue_registry_dir()
         if not os.path.isdir(registry_dir):
             os.makedirs(registry_dir)
-        digest = hashlib.sha1(os.path.abspath(output_dir).encode("utf-8", "replace")).hexdigest()[:16]
+        digest = runtime_common.stable_digest_hex(os.path.abspath(output_dir))[:16]
         base = _safe_case_filename(os.path.basename(os.path.abspath(output_dir))).strip("._") or "queue"
         name = "{0}_{1}".format(base, digest)
         path = os.path.join(registry_dir, name + ".json")

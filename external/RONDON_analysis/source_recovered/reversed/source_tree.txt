@@ -1,0 +1,65 @@
+_tauri_app/  —— RONDON 应用后端完整源码树（36 个 .py 文件）
+================================================================
+来源：从编译模块 _tauri_app.cp311-win_amd64.pyd 中提取的源文件路径字符串
+      （Nuitka 编译时保留了每个源文件的路径，形如 "_tauri_app\commands\utils\tiny_unet"）
+方法：grep -aoE '_tauri_app[\\][a-z_\\]+' _tauri_app.cp311-win_amd64.pyd | sort -u
+可靠性：文件路径 100% 确证；函数体不可读（已编译为机器码）。
+
+_tauri_app/
+├── __init__.py                  # 包初始化（导入 pytauri，注册子模块）
+├── __main__.py                  # 入口
+│
+├── commands/                    # Tauri 命令层（前端可调用）
+│   ├── __init__.py
+│   ├── app.py                   # 应用初始化、DB、image/model store、license、平台信息
+│   │
+│   │ ── 模型管理 ──
+│   ├── decoder.py               # 解码器 CRUD + train/run/download/upload/export
+│   ├── encoder.py               # 编码器 CRUD + import/export
+│   ├── _decoder.py              # decoder 内部实现
+│   ├── _encoder.py              # encoder 内部实现
+│   │
+│   │ ── 训练数据 ──
+│   ├── sample.py                # 训练样本（get_pairs/get_embedding_paths）
+│   ├── seg.py                   # 分割标注（944+ 行，最大模块）
+│   ├── image.py                 # 图像导入
+│   │
+│   │ ── DICOM 数据模型 ──
+│   ├── patient.py
+│   ├── study.py
+│   ├── serial.py
+│   ├── stack.py
+│   ├── record.py
+│   ├── dicom_meta.py
+│   │
+│   │ ── 组织与任务 ──
+│   ├── group.py                 # 分组
+│   ├── contain.py               # Patient-Group 关系
+│   ├── task.py                  # 异步任务队列
+│   ├── server.py                # 远程服务
+│   │
+│   └── utils/                   # 工具层（训练核心所在）
+│       ├── __init__.py
+│       ├── array.py             # ★ 归一化 + resize + patch 转换 + tensor 加载
+│       ├── tiny_unet.py         # ★ 训练循环核心
+│       ├── network.py           # ★ 网络工厂 + 图生成
+│       ├── layer.py             # ★ tinygrad 层封装 + shape 推断
+│       ├── metric.py            # ★ Dice 评估
+│       ├── image.py             # 图像处理
+│       ├── feature.py           # 影像组学（pyradiomics）
+│       ├── archive.py           # .model 加解密（TSMODELv1）
+│       ├── remote.py            # 远程 API（api.timeslice.space）
+│       ├── db.py                # SQLModel/SQLite 封装
+│       ├── fs.py                # 文件系统
+│       ├── colors.py            # 颜色
+│       └── msg.py               # 消息
+│
+└── networks/
+    └── decoder_network.py       # Network 类（= 明文 network.py，见 plaintext/）
+
+================================================================
+说明：
+- 标 ★ 的 5 个文件是训练/分割的核心，函数级语义见同目录各 .txt 文件。
+- 这些 .py 源文件不在磁盘上（已被 Nuitka 编译进单文件 .pyd），
+  本目录通过字符串提取还原了"有哪些文件 + 每个文件的函数/类/方法清单"。
+- 函数体（数值逻辑）无法还原，见 00_README.md 的"逆向能力边界"。

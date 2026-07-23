@@ -1,0 +1,140 @@
+"""
+逆向还原：_tauri_app/commands/utils/array.py
+============================================
+来源：从 _tauri_app.cp311-win_amd64.pyd 提取的符号 + docstring
+      （证据见 evidence/pyd_strings.txt）
+可靠性：函数名/docstring 100% 确证；函数体（数值逻辑）不可读。
+
+本文件是编码器前向预处理 + 归一化的核心。
+"""
+
+# ============================================================
+# patch 转换（docstring 确证）
+# ============================================================
+
+def slice_to_patch_channels16(slice):
+    """Convert a 2D slice into 16x16 patch channels.
+    返回 (256, H/16, W/16)，256 = 16*16。
+    等价实现（实测形状确证）：
+      s.reshape(B,C,H//16,16,W//16,16).permute(0,1,3,5,2,4).reshape(B,-1,H//16,W//16)
+    """
+    ...
+
+def patch_channels16_to_slice(patch_channels):
+    """Convert 16x16 patch channels back into a 2D slice.
+    (256, H/16, W/16) -> (1, H, W)
+    """
+    ...
+
+# ============================================================
+# resize / pad（docstring 确证）
+# ============================================================
+
+def resize_slice_array(slice, ...):
+    """Resize a slice array to 512x512.
+    图像用线性插值，标签用 NEAREST。
+    """
+    ...
+
+def apply_pads_to_slice(slice, pads):
+    """Apply padding to a slice array.
+    pads: (left, right, up, down)
+    异常："Pad sizes exceed slice dimensions"
+    """
+    ...
+
+def parse_pads_from_stem(stem):
+    """Parse slice index and pad metadata from embedding filename stem.
+    格式："{idx:05d}_l{left}_r{right}_u{up}_d{down}"
+    返回：(idx, left, right, up, down)
+    """
+    ...
+
+def parse_shape_from_stem(stem):
+    """Parse shape from embedding filename stem.
+    格式："{idx:05d}_h{height}_w{width}"
+    返回：(height, width)
+    """
+    ...
+
+# ============================================================
+# 归一化（4 个函数 + 标量；docstring 部分确证，模态分发不可读）
+# ============================================================
+
+def normalize_value(value, ...):
+    """标量归一化。异常："normalize_value failed" """
+    ...
+
+def normalize_volume_array_min_max(arr):
+    """Min-Max 归一化到 [0,1]。"""
+    ...
+
+def normalize_volume_array_percentile(arr, lower, upper, percentile):
+    """百分位截断后归一化。参数符号：lower / upper / percentile。"""
+    ...
+
+def normalize_volume_array_z_score(arr):
+    """Z-score：(x-mean)/std。"""
+    ...
+
+def normalize_volume_array_x_ray(arr, wl_center, ww_width, slope, intercept):
+    """CT/X光窗归一化。参数符号：wl_center / ww_width / ww_wl / slope / intercept / center / width。
+    推断流程：HU = slope*x + intercept → 截断到 [wl-ww/2, wl+ww/2] → 归一化。
+    """
+    ...
+
+def get_window_settings(dicom):
+    """Get Window Center and Width from DICOM or fallback.
+    读取 DICOM tag：WindowCenter / WindowWidth / RescaleSlope / RescaleIntercept。
+    读不到则 fallback。
+    """
+    ...
+
+# 归一化选择策略（不可读）：
+#   仅知 4 个函数 + DICOM 窗字段符号。CT→x_ray、MRI→percentile/z_score 的 if/else 分支
+#   在机器码中，无法还原。见 docs/01 第 4 节。
+
+# ============================================================
+# 灰度→3通道 + 预处理总入口
+# ============================================================
+
+def process_grayscale_slice(slice):
+    """灰度切片转 3 通道（ONNX 输入要 (B,3,512,512)，实测确证）。
+    异常："Error processing grayscale slice"
+    实现未确证（np.stack([g]*3) 等价）。
+    """
+    ...
+
+def preprocess_for_decoder(...):
+    """解码器预处理总入口。嵌套：process_sample
+    日志："Preprocess: "
+    链路：切片 → resize 512×512 → 归一化 → pad → 灰度转3通道 → ONNX 前向
+    """
+    ...
+
+# ============================================================
+# tensor 加载
+# ============================================================
+
+def load_embedding_as_tensor(path):
+    """加载 embedding 缓存。格式：*.npz（确证）。
+    异常："Embedding files not found at " / "Embedding folder not found at "
+    校验："has embeddings and slices with different names"
+    """
+    ...
+
+def load_seg_as_tensor(path):
+    """加载标签。"""
+    ...
+
+# ============================================================
+# 翻转增强（TTA，在 embedding 空间）
+# ============================================================
+# 符号（确证存在）：
+#   embedding_tensor_h_flip / _w_flip / _h_w_flip
+#   image_tensor_h_flip / _w_flip / _h_w_flip
+#   seg_tensor_h_flip / _w_flip / _h_w_flip
+#   outputs_h_flip / _w_flip / _h_w_flip
+#   predicts_h_flip / _w_flip / _h_w_flip
+#   loss_h_flip / _w_flip / _h_w_flip
+# 训练侧和评估侧都有 loss_*_flip → 翻转增强 + 评估 TTA 都用。

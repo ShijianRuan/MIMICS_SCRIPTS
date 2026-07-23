@@ -1,0 +1,101 @@
+"""
+逆向还原：_tauri_app/commands/utils/network.py + layer.py
+=========================================================
+来源：从 _tauri_app.cp311-win_amd64.pyd 提取的符号 + docstring
+      （证据见 evidence/pyd_strings.txt）
+可靠性：算子清单/shape 公式/docstring 100% 确证；图节点的具体连接不可读。
+
+本部分是"图驱动网络生成"机制：把解码器结构存为 graph.json，运行时动态生成 tinygrad 模型类。
+（注：明文 network.py 的 Network 类已可直接用，本机制主要用于模型导入/导出时重建结构。）
+"""
+
+# ============================================================
+# network.py —— 图构建与动态类生成
+# ============================================================
+
+def build_decoder_graph(...):
+    """构建解码器计算图。"""
+    ...
+
+def save_decoder_graph(graph, path):
+    """保存图到 graph.json。
+    日志："save decoder graph to" / "Decoder graph saved" / "Failed to save decoder graph"
+    """
+    ...
+
+def build_tinygrad_model_class_from_graph(graph):
+    """从图定义动态生成 tinygrad 模型类 GeneratedModel。
+
+    嵌套：
+      GeneratedModel.__init__   # "Declares stateful layers in __init__ based on class_op nodes."
+      GeneratedModel.__call__   # 执行 DAG 前向
+      exec_dynamic              # 动态执行生成的代码
+      to_attr_name              # 节点名 -> 合法属性名
+
+    图元素符号：nodes / nodes_list / edges / edges_list / input_nodes / output_nodes
+                class_op / op_type / in_edges / out_edges / node
+
+    DAG 执行：
+      "Builds a DAG execution plan from edges."
+      "Runs the plan in __call__, supporting multiple inputs/outputs and
+       a broad set of tinygrad ops."
+    """
+    ...
+
+# 网络类（符号确证存在）：
+#   DoubleConv  # 明文 network.py 有
+#   Up          # 明文 network.py 有
+#   Down        # 仅 .pyd（uDown.__init__/__call__），vanilla encoder 用，结构不可读
+#   UNet2D      # 仅 .pyd（uUNet2D.__init__），vanilla encoder 候选，结构不可读
+#   Network     # 明文 network.py（DINOv3 decoder head）
+#   VIT         # 仅 .pyd（aVIT），encoder 类型枚举，非完整 ViT 实现
+#   GeneratedModel / GraphGeneratedModel  # 图生成产物
+
+
+# ============================================================
+# layer.py —— 算子封装 + shape 推断（docstring 公式确证）
+# ============================================================
+
+# 支持的算子（确证）：
+#   Conv2D, ConvTranspose2D, BatchNorm2D, ReLU, Sigmoid, Upsample
+
+def conv2d_out_shape(shape, ...):
+    """Compute output shape for Conv2D using (N, Cin, Hin, Win) -> (N, Cout, Hout, Wout).
+    公式：Hout = floor((Hin + 2*pad - ks)/stride + 1) when Hin is int.
+    嵌套：_one_dim
+    """
+    ...
+
+def conv_transpose2d_out_shape(shape, ...):
+    """Compute output shape for ConvTranspose2D.
+    公式：Hout = (Hin - 1) * stride - 2*pad + ks
+    For symbolic, scale by stride.
+    嵌套：_one_dim
+    """
+    ...
+
+def batchnorm2d_out_shape(shape):
+    """BatchNorm2D does not change the shape."""
+    ...
+
+def relu_out_shape(shape):
+    """ReLU 元素级，形状不变。"""
+    ...
+
+def sigmoid_out_shape(shape):
+    """Sigmoid 元素级，形状不变。"""
+    ...
+
+def upsample_out_shape(shape, scale_factor):
+    """Nearest-neighbor upsample with scale factor.（最近邻）"""
+    ...
+
+def compute_output_shape(op_type, shape, ...):
+    """Dispatch shape computation by operator type."""
+    ...
+
+# 符号维度处理（确证）：
+#   parse: "H/16" -> ("H", 1/16), "W*4" -> ("W", 4.0)
+#   "If B is missing, set to 'B'; if H/W missing, leave symbolic."
+#   "Ensure shape is a list of four elements [B, C, H, W]."
+#   "For symbolic H/W, if stride==1 we keep the symbolic dim; else scale by 1/stride."

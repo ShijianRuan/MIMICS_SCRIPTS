@@ -4,7 +4,6 @@
 from __future__ import print_function
 
 import json
-import hashlib
 import errno
 import os
 import subprocess
@@ -216,10 +215,34 @@ def safe_slug(value):
     return safe_filename(value).strip("._") or "unknown"
 
 
+def stable_digest_hex(value):
+    """Return a deterministic, pure-Python digest suitable for local names.
+
+    Mimics embeds an older Python runtime.  On some installations importing
+    ``_hashlib.pyd`` during an import-start callback can terminate the host.
+    These identifiers only need to be stable and collision-resistant for local
+    queue and lock file names, not cryptographic, so avoid the native module.
+    """
+    if isinstance(value, bytes):
+        data = value
+    else:
+        data = str(value).encode("utf-8", "replace")
+    mask = (1 << 64) - 1
+    states = (0xCBF29CE484222325, 0x9E3779B185EBCA87)
+    results = []
+    for seed in states:
+        state = seed
+        for byte in bytearray(data):
+            state ^= byte
+            state = (state * 0x100000001B3) & mask
+        results.append("{0:016x}".format(state))
+    return "".join(results)
+
+
 def import_queue_runtime_dir(project_root, output_dir):
     """Return a stable local control directory for one .mcs output folder."""
     normalized = os.path.normcase(os.path.abspath(output_dir))
-    digest = hashlib.sha1(normalized.encode("utf-8", "replace")).hexdigest()[:16]
+    digest = stable_digest_hex(normalized)[:16]
     base = safe_slug(os.path.basename(os.path.abspath(output_dir))) or "mcs_output"
     return os.path.join(import_runtime_base(project_root), "import_queues", base + "_" + digest)
 
@@ -238,7 +261,7 @@ def import_runtime_base(project_root):
             or os.path.expanduser("~")
         )
         if local_base:
-            digest = hashlib.sha1(os.path.normcase(project).encode("utf-8", "replace")).hexdigest()[:16]
+            digest = stable_digest_hex(os.path.normcase(project))[:16]
             return os.path.join(local_base, "Mimics-Script", digest)
         return os.path.join(os.getcwd(), ".mimics_runtime")
     return os.path.join(project, ".mimics_runtime")
@@ -630,9 +653,7 @@ def resource_lock_dir(project_root):
             or os.path.expanduser("~")
         )
         if local_base:
-            digest = hashlib.sha1(
-                os.path.normcase(project).encode("utf-8", "replace")
-            ).hexdigest()[:16]
+            digest = stable_digest_hex(os.path.normcase(project))[:16]
             return os.path.join(local_base, "Mimics-Script", digest, "locks")
     return os.path.join(project, ".mimics_runtime", "locks")
 
@@ -653,7 +674,7 @@ def background_mimics_lock_name(scope):
     if serialize in ("1", "true", "yes", "on"):
         return "background_mimics.lock"
     normalized = os.path.normcase(os.path.abspath(str(scope or "default")))
-    digest = hashlib.sha1(normalized.encode("utf-8", "replace")).hexdigest()[:20]
+    digest = stable_digest_hex(normalized)[:20]
     return "background_mimics_{0}.lock".format(digest)
 
 
@@ -664,7 +685,7 @@ def background_mimics_lock_path(project_root, scope):
 def import_producer_lock_name(output_dir):
     """Return the preparation-writer lock for one shared .mcs queue."""
     normalized = os.path.normcase(os.path.abspath(str(output_dir or "default")))
-    digest = hashlib.sha1(normalized.encode("utf-8", "replace")).hexdigest()[:20]
+    digest = stable_digest_hex(normalized)[:20]
     return "import_producer_{0}.lock".format(digest)
 
 

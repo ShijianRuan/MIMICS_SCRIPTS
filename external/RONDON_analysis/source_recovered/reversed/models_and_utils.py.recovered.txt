@@ -1,0 +1,206 @@
+"""
+逆向还原：数据模型类 + archive.py + remote.py + feature.py + task.py
+====================================================================
+来源：从 _tauri_app.cp311-win_amd64.pyd 提取的 u<Class>.<attr> 限定名 + docstring
+      （证据见 evidence/pyd_strings.txt）
+可靠性：类名/属性/方法名 100% 确证；方法体不可读。
+"""
+
+# ============================================================
+# 数据模型类（SQLModel，从 u<Class>.<attr> 还原）
+# ============================================================
+
+class Decoder:
+    """解码器（一次微调训练的产物）。"""
+    # 属性
+    Config                          # pydantic 配置
+    model                           # SQLModel 实例
+    folder / folder_id              # 存储目录
+    network_path                    # -> network.py
+    parameter_path                  # -> model.safetensors
+    graph_path                      # -> graph.json
+    tiny_mesh_path / tiny_mesh_preview_path
+    training_log_path               # -> training_log.log
+    # 状态字段（model.json）：trained / fronzen(原文拼写) / imported
+
+class Encoder:
+    """编码器（DINOv3 ONNX）。"""
+    Config
+    model
+    folder / folder_id
+    model_path                      # -> model.onnx
+    meta_path                       # -> model.json
+    decoder_network_path            # -> decoder_network.py
+
+class Sample:
+    """训练样本（病人/序列/层堆来源）。"""
+    Config
+    model
+    folder / folder_id
+    embedding_folder                # embedding 缓存目录
+    preprocessed_label_folder       # 预处理标签目录
+    tiny_mesh_path / tiny_mesh_preview_path
+    predict_tiny_mesh_path / predict_tiny_mesh_preview_path
+    # 方法
+    get_embedding_folder()
+    get_embedding_paths()
+    get_preprocessed_label_folder()
+    get_preprocessed_label_paths()
+    get_pairs()                     # 生成 (embedding, label) 训练对（含 genexpr）
+    get_status()
+    # sample.json 字段：name, decoder_id, source_id, source_image_path,
+    #   source_label_path, source_data{patient_id, patient_name, study_id,
+    #   serial_id, series_number, stack_id, stack_name, seg_name, spacing},
+    #   role, source_model
+
+class Stack:
+    """层堆（一个 3D 体积）。"""
+    Config / model / folder / folder_id
+    volume_path                     # -> volume.nii.gz
+    seg_folder                      # 标签目录
+    geo_path                        # -> geo.json
+    get_preview_paths()
+
+class Seg:
+    """分割标注。"""
+    Config / model / folder / volume_path
+
+class Patient:
+    Config / model / folder_id
+
+class Study:
+    Config / model / folder / folder_id
+
+class Serial:
+    model
+
+class Group:
+    Config / model / folder_id
+
+class Contain:
+    """Patient-Group 关系。"""
+    model
+
+class Record:
+    """DICOM 元数据记录。"""
+    Config / model
+
+class Task:
+    """异步任务。"""
+    call_back
+
+class DatabaseManager:
+    """SQLite 数据库管理。"""
+    __init__()
+    get_session()                   # 异步 session
+    get_sync_session()              # 同步 session
+    close()                         # "Close the database engine."
+    reset_database()                # "Reset the database by dropping and recreating all tables."
+
+
+# ============================================================
+# task.py —— 异步任务队列
+# ============================================================
+def add_task(...):
+    """任务入队。嵌套：
+      _run_task                  # 执行任务
+      _start_next_from_queue     # 取下一个排队任务
+      _count_running             # 当前运行数
+      _count_running_by_category # 按类别计数
+      _has_running               # 是否有运行中
+    并发受 is_constrained 限制（按 CPU 核数 20）。
+    """
+    ...
+
+
+# ============================================================
+# archive.py —— .model 加解密（TSMODELv1 格式）
+# ============================================================
+# 常量：_MODEL_MAGIC("TSMODELv1"), _MODEL_AAD
+# 加密：AESGCM（AES-256-GCM）
+# 派生：derive_key = PBKDF2HMAC-SHA256(passphrase, salt) -> 256-bit key
+#       "Derive a 256-bit key from passphrase and salt using PBKDF2-HMAC-SHA256."
+
+def encrypt_folder(folder, ...):
+    """Encrypt a folder of neural network related files into a single .model file.
+    嵌套：add_header (magic + header 含 nonce/salt) + AES-GCM 密文
+    """
+    ...
+
+def decrypt_folder(model_path, passphrase):
+    """Decrypt a .model file into a folder.
+    异常："Invalid model file header" / "Invalid file header" / "Path header is required"
+    """
+    ...
+
+def encrypt_bytes_to_file(data, path, ...):
+    """Encrypt raw bytes and save to file with TSMODELv1 header."""
+    ...
+
+def decrypt_bytes_from_file(path, ...):
+    """Decrypt raw bytes from a TSMODELv1 file. Returns the plaintext bytes in data."""
+    ...
+
+
+# ============================================================
+# remote.py / server.py —— 远程服务
+# ============================================================
+# API 域名：api.timeslice.space
+# User-Agent：Mozilla/5.0 (Windows NT 10.0; Win64; x64) ... Chrome/91
+
+def upload_decoder(...):
+    """上传解码器到 R2（S3 兼容，boto3）。嵌套：_handler / call_back"""
+def upload_encoder(...):
+    """上传编码器。嵌套：_handler / call_back"""
+
+def download_decoder(...):
+    """下载解码器。嵌套：_handler / _import_decoder / call_back
+    日志："Downloading " + X + "%" / "Downloaded decoder model " / "Download stopped by user"
+    """
+def download_encoder(...):
+    """下载编码器。嵌套：_handler / _import_encoder / call_back"""
+
+def setup_user(...):
+    """Setup user by calling remote API and saving license. Replaces frontend setupUser logic.
+    license 存到 Downloads 目录。
+    HWID 绑定：get_hwid()，失败 fallback 到持久化 UUID。
+    """
+def save_license(...):
+    """Encrypt user info into a license file and save to Downloads folder."""
+
+
+# ============================================================
+# feature.py —— 影像组学（pyradiomics）
+# ============================================================
+def extract_radiomics_features(...):
+    """用 RadiomicsFeatureExtractor 提取影像组学特征。
+    异常："RadiomicsFeatureExtractor not available"
+    """
+
+def radiomics_seg(...):
+    """影像组学分割命令。嵌套：_on_success / _run_radiomics_handler / call_back"""
+
+class _RadiomicsProgressHandler:
+    """进度处理器。"""
+    __init__()
+    emit()      # 发射进度
+
+
+# ============================================================
+# 其他命令函数（从 a_ 符号 + u<name> 还原）
+# ============================================================
+# decoder.py:     create_decoder / delete_decoder / duplicate_decoder /
+#                 import_decoder / list_decoder / run_decoder / train_decoder /
+#                 download_decoder / upload_decoder / export_decoder /
+#                 set_decoder_metrics / clean_decoder_metrics
+# encoder.py:     create_encoder(禁用,仅import) / delete_encoder / import_encoder /
+#                 export_encoder / list_encoder / run_encoder /
+#                 download_encoder / upload_encoder
+# sample.py:      create_sample / delete_sample / list_sample / refresh_sample /
+#                 refresh_sample_predict_mesh / batch_update_sample / set_sample_metrics
+# seg.py:         init_seg_file / checkout_seg / clear_seg / filter_seg / auto_seg /
+#                 radiomics_seg / import_seg_to_stack (944+ 行)
+# image.py:       import_image_to_group / import_image_to_study / import_image_folder
+# group.py:       create_group / delete_group / update_group / enlarge_group / list_group
+# app.py:         setup_database_state / setup_image_store_state / setup_model_store_state /
+#                 get_app_version / get_platform / get_computer_cores / export_log

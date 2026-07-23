@@ -1,0 +1,147 @@
+"""
+逆向还原：_tauri_app/commands/utils/tiny_unet.py
+================================================
+来源：从 _tauri_app.cp311-win_amd64.pyd 提取的符号 + docstring + 日志/异常消息字符串
+      （证据见 evidence/pyd_strings.txt）
+可靠性：函数名/类名/日志叙事 100% 确证；函数体（数值逻辑）不可读。
+
+本文件是 RONDON 训练循环的核心。以下是还原出的函数/类结构与运行时叙事。
+（注意：这是"还原清单"不是"可运行源码"——函数体已编译为机器码）
+"""
+
+# ============================================================
+# 顶层函数（Tauri 命令 + 训练入口）
+# ============================================================
+
+def train_decoder(decoder_id, ...):
+    """Tauri 命令 TRAIN_DECODER。创建训练任务并入队。
+    日志：
+      "train_decoder failed: decoder_id is None"
+      "create_train_decoder_task failed: "
+    内部嵌套：
+      _train_decoder_handler   # 真正的处理器
+      call_back                # 回调前端进度
+    """
+    ...
+
+def _train_decoder_handler(...):
+    """训练主循环处理器。嵌套：
+      _log_call_back           # 日志回调
+      validation_call_back     # 验证回调
+    """
+    ...
+
+def collect_train_decoder_related_ids(...):
+    """收集训练所需的 sample/encoder/decoder id。
+    日志："Failed to collect train decoder related ids: "
+    """
+    ...
+
+def run_training_step_for_decoder(...):
+    """训练步。嵌套：
+      train_step   # 单步训练（forward+loss+backward+step）
+      scheduler    # 学习率调度（cosine_lr）
+    日志：
+      "Training: "
+      " at step "
+      " batches"
+      " samples missed"
+      "Failed to process sample "
+      " has no valid training data"
+    """
+    ...
+
+def run_validation_step_for_decoder(...):
+    """验证步。嵌套：
+      valid_step
+    日志：
+      "Validation: "
+      ": validation time cost "
+      " has no valid validation data"
+    """
+    ...
+
+def run_evaluation_step_for_decoder(...):
+    """评估步（训练后）。嵌套：
+      evaluation_step
+    日志：
+      "Evaluation: "
+      " has no valid evaluation data"
+    """
+    ...
+
+def run_decoder(...):
+    """解码器推理。嵌套：
+      step   # 单 slice 推理
+    命令：RUN_DECODER
+    """
+    ...
+
+def run_decoder_handler(...):
+    """推理处理器（被 auto_seg 复用）。"""
+    ...
+
+def save_best_validation_network_parameters(...):
+    """保存最优验证权重到 model.safetensors。
+    日志："Save best validation network parameters at epoch "
+    """
+    ...
+
+def save_best_validation_sample_predit_as_decoder_mesh(...):
+    """把最优验证样本的预测导出为 3D 网格（tiny_mesh.glb）。"""
+    ...
+
+def is_best_dice(...):
+    """判断当前 dice 是否为历史最优。"""
+    ...
+
+def split_into_batches(...):
+    """把 sample_pairs 按 batch_size 分块。"""
+    ...
+
+def auto_seg(...):
+    """批量自动分割。嵌套：
+      _on_success
+      _run_decoder_handler
+      call_back
+    """
+    ...
+
+
+# ============================================================
+# 运行时叙事（从日志字符串还原的训练流程）
+# ============================================================
+#
+#   train_decoder
+#     → create_train_decoder_task
+#     → add_task (任务队列: _run_task, _start_next_from_queue,
+#                 _count_running, _count_running_by_category, _has_running)
+#     → _train_decoder_handler
+#          ├─ collect_train_decoder_related_ids
+#          ├─ "Number of training samples: " + N
+#          ├─ "Run training on device " + device_id
+#          ├─ "Shuffled " + N + " training samples into " + M + " batches"
+#          ├─ for epoch in range(epochs):
+#          │      "Epoch " + n
+#          │      "Training: "    → run_training_step_for_decoder (train_step + scheduler)
+#          │      "Validation: "  → run_validation_step_for_decoder (valid_step)
+#          │      if is_best_dice:
+#          │          "Save best validation network parameters at epoch " + n
+#          │      _log_call_back / validation_call_back   # 回调前端
+#          └─ "Training run finished"
+#
+# 训练超参（来自 model.json optimization 字段，确证）：
+#   lr=0.0005, epochs=30, batch_size=4, optimizer=Adam, b1=0.9, b2=0.999,
+#   eps=1e-8, weight_decay=1e-4, loss=CrossEntropyLoss, validation_interval=2
+# 调度器：cosine_lr(base_lr, max_steps, min_lr)   # min_lr 值不可读
+# 优化器：tinygrad.nn.optim.Adam / AdamW
+# 权重IO：tinygrad.nn.state (safetensors)
+# 设备：tinygrad Device（"Run training on device " + device_id，实测默认 CPU）
+
+# ============================================================
+# 不可读部分（机器码立即数，无法从字符串还原）
+# ============================================================
+# - train_step 的具体语句（forward/loss/backward 顺序）
+# - cosine_lr 的 min_lr 具体值
+# - loss 的加权方式（CE 是否对翻转增强求平均）
+# - 翻转 TTA 的精确组合（训练增强 vs 评估 TTA，倾向两者都用）

@@ -1,0 +1,77 @@
+"""
+逆向还原：_tauri_app/commands/utils/metric.py
+=============================================
+来源：从 _tauri_app.cp311-win_amd64.pyd 提取的 docstring（完整签名级）
+      （证据见 evidence/pyd_strings.txt）
+可靠性：函数签名/docstring 100% 确证；smooth/empty_score/threshold 的具体数值不可读。
+
+Dice 评估，二值 + 多类。
+"""
+
+def compute_dice(y_true, y_pred, smooth, threshold=None, empty_score=...):
+    """Compute the Dice coefficient between two segmentation arrays.
+
+    Parameters
+    ----------
+    y_true, y_pred : np.ndarray
+        Ground truth segmentation array.
+        Predicted segmentation array or probabilities.
+    smooth : float
+        Small value to avoid division-by-zero.
+    threshold : Optional[float]
+        If set, binarizes `y_pred` as `(y_pred >= threshold)`.
+    empty_score : float
+        Score returned when both masks are empty.
+
+    Returns
+    -------
+    Dice coefficient in [0, 1].
+
+    Notes
+    -----
+    - Treats any non-zero value as foreground by default.
+    - Returns `empty_score` when both masks are empty.
+    - If `threshold` is provided, applies it to `y_pred` (useful for probabilities).
+    """
+    ...
+
+
+def compute_dice_per_label(y_true, y_pred, labels=None, include_background=False,
+                           smooth=..., threshold=None, empty_score=...):
+    """Compute Dice per label for multi-class masks.
+
+    Parameters
+    ----------
+    y_true, y_pred : np.ndarray
+        Integer-labeled segmentation arrays of the same shape.
+    labels : Optional[Iterable[int]]
+        Specific labels to evaluate. If None, uses union of labels in inputs.
+    include_background : bool
+        Whether to include label 0 in evaluation.
+    smooth : float
+        Small value to avoid division-by-zero in extreme cases.
+    threshold : Optional[float]
+        If `threshold` provided, applies to `y_pred` (useful for probabilities).
+    empty_score : float
+        Score for empty-vs-empty masks for a label.
+
+    Returns
+    -------
+    Mapping of label -> Dice score.
+
+    Notes
+    -----
+    Functions are robust to empty masks.
+    """
+    ...
+
+# 内部辅助（符号）：
+#   _compute_dice   # 底层二值 Dice
+#   dices / dices_list / _dices
+
+# ============================================================
+# 不可读数值（复现建议值）
+# ============================================================
+# smooth        : 不可读 -> 建议 1e-6（标准做法）
+# empty_score   : 不可读 -> 建议 1.0（空对空视为完美）
+# threshold     : 不可读 -> 二值分割用 0.5
