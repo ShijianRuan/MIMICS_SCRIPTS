@@ -2,7 +2,11 @@
 DINOv3 backbone via HuggingFace transformers (local weights).
 """
 
+import hashlib
 import os
+from pathlib import Path
+
+import numpy as np
 import torch
 import torch.nn as nn
 from transformers import DINOv3ViTBackbone, AutoImageProcessor
@@ -42,6 +46,7 @@ class DINOv3Backbone(nn.Module):
         input_normalization: str = "none",
         image_mean=None,
         image_std=None,
+        expected_sha256=None,
     ):
         super().__init__()
         if out_indices is None:
@@ -51,6 +56,27 @@ class DINOv3Backbone(nn.Module):
         # misinterpret it as a HuggingFace Hub repo ID.
         self.model_path = os.path.abspath(model_path)
         self.out_indices = out_indices
+        expected_sha256 = str(expected_sha256 or "").strip().lower()
+        if expected_sha256:
+            weights_path = Path(self.model_path) / "model.safetensors"
+            if not weights_path.is_file():
+                raise FileNotFoundError(
+                    "DINOv3 PyTorch weights were not found: {}".format(weights_path)
+                )
+            digest = hashlib.sha256()
+            with weights_path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            actual_sha256 = digest.hexdigest()
+            if actual_sha256 != expected_sha256:
+                raise RuntimeError(
+                    "The configured PyTorch encoder checksum does not match "
+                    "model.safetensors. Expected {}, found {}.".format(
+                        expected_sha256,
+                        actual_sha256,
+                    )
+                )
+        self.model_sha256 = expected_sha256
 
         # DINOv3 stage names: stem, stage1, stage2, ..., stage12 (1-indexed)
         # transformer layer i → stage{i+1}
@@ -110,3 +136,182 @@ class DINOv3Backbone(nn.Module):
         if images_2d.dim() == 3:
             images_2d = images_2d.unsqueeze(0)
         return self.processor(images=images_2d, return_tensors="pt")
+
+
+class ONNXDINOv3Backbone(nn.Module):
+    """Frozen ViT-S/16 feature extractor for offline-compatible parity runs."""
+
+    def __init__(
+        self,
+        model_path: str,
+        out_indices: list = None,
+        freeze: bool = True,
+        input_normalization: str = "imagenet",
+        image_mean=None,
+        image_std=None,
+        providers=None,
+        expected_sha256=None,
+        input_size=None,
+    ):
+        super().__init__()
+        if not freeze:
+            raise ValueError("The ONNX DINO backend is frozen and cannot be fine-tuned")
+        if list(out_indices or [11]) != [11]:
+            raise ValueError("The ONNX parity backend exposes only the final DINO feature map")
+        path = Path(model_path).resolve()
+        if path.is_dir():
+            path = path / "model.onnx"
+        if not path.is_file():
+            raise FileNotFoundError(
+                "DINOv3 ViT-S ONNX model was not found: {}".format(path)
+            )
+        expected_sha256 = str(expected_sha256 or "").strip().lower()
+        if expected_sha256:
+            digest = hashlib.sha256()
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            actual_sha256 = digest.hexdigest()
+            if actual_sha256 != expected_sha256:
+                raise RuntimeError(
+                    "The configured ONNX encoder checksum does not match the verified "
+                    "model. Expected {}, found {}.".format(
+                        expected_sha256,
+                        actual_sha256,
+                    )
+                )
+        try:
+            import onnxruntime as ort
+        except ImportError as exc:
+            raise RuntimeError(
+                "onnxruntime is required for the local ViT-S ONNX encoder. "
+                "Install onnxruntime-gpu on Windows or provide HuggingFace PyTorch weights."
+            ) from exc
+        if os.name == "nt" and hasattr(ort, "preload_dlls"):
+            try:
+                ort.preload_dlls()
+            except Exception:
+                # Session creation below provides the actionable provider/DLL error.
+                pass
+        available = list(ort.get_available_providers())
+        requested = list(providers or [])
+        if not requested:
+            requested = [
+                name
+                for name in ("CUDAExecutionProvider", "CPUExecutionProvider")
+                if name in available
+            ]
+        if not requested:
+            raise RuntimeError(
+                "ONNX Runtime has no usable execution provider; available: {}".format(
+                    ", ".join(available)
+                )
+            )
+        self.session = ort.InferenceSession(str(path), providers=requested)
+        self.model_path = str(path)
+        self.out_indices = [11]
+        self.input_name = self.session.get_inputs()[0].name
+        self.output_name = self.session.get_outputs()[-1].name
+        self.input_normalization = str(input_normalization or "imagenet").lower()
+        self.image_mean = tuple(float(v) for v in (image_mean or IMAGENET_DEFAULT_MEAN))
+        self.image_std = tuple(float(v) for v in (image_std or IMAGENET_DEFAULT_STD))
+        input_shape = list(self.session.get_inputs()[0].shape)
+        if len(input_shape) != 4:
+            raise RuntimeError(
+                "The ONNX encoder input must be four-dimensional; got {}".format(
+                    input_shape
+                )
+            )
+        configured_size = (
+            tuple(int(value) for value in input_size)
+            if input_size is not None
+            else None
+        )
+        if configured_size is not None and (
+            len(configured_size) != 2
+            or any(value <= 0 or value % 16 for value in configured_size)
+        ):
+            raise ValueError(
+                "The configured ONNX input size must contain two positive multiples of 16"
+            )
+        fixed_size = (
+            tuple(int(value) for value in input_shape[-2:])
+            if all(
+                isinstance(value, int) and value > 0
+                for value in input_shape[-2:]
+            )
+            else None
+        )
+        if fixed_size is not None:
+            if configured_size is not None and configured_size != fixed_size:
+                raise RuntimeError(
+                    "The selected ONNX encoder declares a fixed input size of {}, "
+                    "but the training configuration requests {}.".format(
+                        fixed_size,
+                        configured_size,
+                    )
+                )
+            resolved_size = fixed_size
+        elif configured_size is not None:
+            resolved_size = configured_size
+        else:
+            raise RuntimeError(
+                "The selected ONNX encoder has dynamic in-plane dimensions. "
+                "Set data.img_size explicitly to a pair of multiples of 16."
+            )
+        self.patch_size = 16
+        self.embed_dim = 384
+        self.num_layers = 12
+        self.num_register_tokens = 4
+        self.img_size = resolved_size
+        self.execution_providers = list(self.session.get_providers())
+        self.model_sha256 = expected_sha256
+
+    def freeze(self):
+        return None
+
+    def unfreeze(self):
+        raise RuntimeError("The ONNX DINO backend cannot be unfrozen")
+
+    def get_trainable_params(self) -> int:
+        return 0
+
+    def get_total_params(self) -> int:
+        return 0
+
+    def forward(self, images_2d: torch.Tensor) -> list:
+        if images_2d.dim() != 4 or images_2d.shape[1] != 3:
+            raise RuntimeError(
+                "ONNX DINO input must be (N,3,H,W), got {}".format(
+                    tuple(images_2d.shape)
+                )
+            )
+        if tuple(images_2d.shape[-2:]) != tuple(self.img_size):
+            raise RuntimeError(
+                "The configured ONNX encoder expects {}, but training prepared {}. "
+                "Set Image detail to match this encoder.".format(
+                    tuple(self.img_size),
+                    tuple(images_2d.shape[-2:]),
+                )
+            )
+        values = images_2d
+        if self.input_normalization in ("imagenet", "processor", "dinov3"):
+            values = normalize_imagenet(values, self.image_mean, self.image_std)
+        device = images_2d.device
+        array = values.detach().to(device="cpu", dtype=torch.float32).numpy()
+        output = self.session.run([self.output_name], {self.input_name: array})[0]
+        output = np.asarray(output, dtype=np.float32)
+        expected = (
+            images_2d.shape[0],
+            self.embed_dim,
+            images_2d.shape[-2] // self.patch_size,
+            images_2d.shape[-1] // self.patch_size,
+        )
+        if tuple(output.shape) != tuple(expected):
+            raise RuntimeError(
+                "Unexpected ViT-S ONNX output shape {}; expected {}".format(
+                    tuple(output.shape),
+                    expected,
+                )
+            )
+        return [torch.from_numpy(output).to(device=device)]

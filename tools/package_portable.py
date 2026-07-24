@@ -14,6 +14,7 @@ from __future__ import print_function
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -50,6 +51,9 @@ REQUIRED_EXTERNAL_UI_FILES = [
     "tools/fewshot_status_viewer.py",
     "tools/fewshot_model_chooser.py",
 ]
+DEFAULT_FROZEN_ENCODER = (
+    "external/dinov3-medical-seg/models/dinov3-vits16/model.onnx"
+)
 
 ARCHIVE_NAME = "mimics_script_portable"
 
@@ -120,7 +124,7 @@ def check():
     required_imports = [
         "torch", "numpy", "nibabel", "pydicom", "SimpleITK", "scipy",
         "nnInteractive", "torchvision", "transformers",
-        "yaml", "tqdm", "tensorboard", "PySide6", "shiboken6",
+        "yaml", "tqdm", "tensorboard", "onnxruntime", "PySide6", "shiboken6",
     ]
     try:
         result = subprocess.run(
@@ -154,8 +158,9 @@ def check():
         print("  {} CUDA check skipped".format(_yellow("[--]")))
 
     # 5. Model weights
-    # nnInteractive model is required; DINOv3 models are optional (may not
-    # be downloaded yet — they are fetched on first use via download_weights.py)
+    # The configured default training method cannot run without its ViT-S
+    # encoder, so packaging must fail early instead of producing a broken
+    # offline bundle.
     required_model_dirs = [
         "nninteractive_env/models/nnInteractive_v1.0",
     ]
@@ -178,6 +183,23 @@ def check():
             print("  {} {} ({} files)".format(_green("[OK]"), rel, len(ckpts)))
         else:
             print("  {} {}  -- optional, not found".format(_yellow("[--]"), rel))
+    frozen_encoder = PROJECT_ROOT / DEFAULT_FROZEN_ENCODER
+    if frozen_encoder.is_file() and frozen_encoder.stat().st_size > 1024 * 1024:
+        print(
+            "  {} {} ({:.1f} MB)".format(
+                _green("[OK]"),
+                DEFAULT_FROZEN_ENCODER,
+                frozen_encoder.stat().st_size / (1024.0 * 1024.0),
+            )
+        )
+    else:
+        print(
+            "  {} {}  -- REQUIRED DEFAULT ENCODER MISSING".format(
+                _red("[!!]"),
+                DEFAULT_FROZEN_ENCODER,
+            )
+        )
+        ok = False
 
     print("\n  {}".format(_green("All checks passed.") if ok else _red("Some checks failed.")))
     return 0 if ok else 1
@@ -205,6 +227,14 @@ def pack(output_dir=None, with_env=False):
     if not models_dir.is_dir():
         print(_red("Models directory not found: {}".format(models_dir)))
         print("Model weights are required. Download them before packaging.")
+        return 1
+    frozen_encoder = PROJECT_ROOT / DEFAULT_FROZEN_ENCODER
+    if not frozen_encoder.is_file() or frozen_encoder.stat().st_size <= 1024 * 1024:
+        print(_red("Default frozen encoder was not found: {}".format(frozen_encoder)))
+        print(
+            "Place the verified ViT-S/16 model.onnx at the configured path "
+            "before packaging."
+        )
         return 1
 
     archive = os.path.join(output_dir, ARCHIVE_NAME + ".zip")
@@ -368,6 +398,7 @@ def _detect_python_version():
 # installed by mistake). Must match the version on download.pytorch.org/whl/cu124
 _TORCH_CUDA_VERSION = "2.6.0+cu124"
 _TORCH_CUDA_PIN = "torch==2.6.0+cu124"
+_ONNXRUNTIME_GPU_PIN = "onnxruntime-gpu==1.22.0"
 
 
 def _detect_cuda_index():
@@ -448,6 +479,7 @@ OFFLINE_WHEEL_PACKAGES_FALLBACK = [
     "pyyaml",
     "tqdm",
     "tensorboard",
+    _ONNXRUNTIME_GPU_PIN,
     "PySide6",
     "PySide6_Essentials",
     "PySide6_Addons",
@@ -522,10 +554,11 @@ def _wheel_files_for_package(wheels_dir, pkg_name):
     Uses ``pkg_name + "-"`` as the prefix so ``torch`` matches ``torch-2.5.1…``
     but not ``torchvision-0.20.1…``.
     """
-    prefix = pkg_name.lower() + "-"
+    distribution = re.split(r"[<>=!~\[]", str(pkg_name), maxsplit=1)[0]
+    canonical = re.sub(r"[-_.]+", "-", distribution.strip().lower())
     return [
         path for path in wheels_dir.glob("*.whl")
-        if path.name.lower().startswith(prefix)
+        if re.sub(r"[-_.]+", "-", path.name.lower()).startswith(canonical + "-")
     ]
 
 
@@ -712,16 +745,6 @@ def offline_bundle():
             print("  {} get-pip.py download failed: {}".format(_yellow("[--]"), exc))
             print("    ensurepip should still work as primary method")
 
-    # 2. Download all wheels using pip freeze from the actual environment.
-    #    pip freeze captures EVERY installed package (including all transitive
-    #    dependencies), so the resulting wheels/ directory is 100% self-contained.
-    #    We use --no-deps because pip freeze already lists all dependencies.
-    print(_header("2. Wheels (from pip freeze — exact installed versions)"))
-    freeze_packages = _get_installed_packages()
-    print("  Found {} packages in pip freeze".format(len(freeze_packages)))
-    print("  Downloading exact versions... this may take 15-30 minutes.")
-    print()
-
     # Use the nninteractive_env Python (not sys.executable) so pip downloads
     # wheels matching the correct Python version and platform.
     download_python = python_exe
@@ -741,6 +764,13 @@ def offline_bundle():
     #     We use --no-deps because pip freeze already lists all dependencies.
     print(_header("2b. Other wheels (from pip freeze — exact installed versions)"))
     freeze_packages = _get_installed_packages()
+    freeze_packages = [
+        spec
+        for spec in freeze_packages
+        if re.sub(r"[-_.]+", "-", spec.split("==", 1)[0].lower())
+        not in ("onnxruntime", "onnxruntime-gpu")
+    ]
+    freeze_packages.append(_ONNXRUNTIME_GPU_PIN)
     print("  Found {} packages in pip freeze".format(len(freeze_packages)))
     print("  Downloading exact versions... this may take 15-30 minutes.")
     print()
@@ -771,7 +801,10 @@ def offline_bundle():
     # Verify key packages
     print()
     print("  Verifying key packages in wheels/:")
-    for pkg in ["torch", "numpy", "nibabel", "nnInteractive", "scipy", "PySide6", "shiboken6"]:
+    for pkg in [
+        "torch", "numpy", "nibabel", "nnInteractive", "scipy",
+        "onnxruntime-gpu", "PySide6", "shiboken6",
+    ]:
         found = _wheel_files_for_package(wheels_dir, pkg)
         if found:
             print("    {} {}: {} file(s)".format(_green("[OK]"), pkg, len(found)))
@@ -969,10 +1002,20 @@ def _generate_offline_bat(python_version, python_short):
     lines.append("    pause")
     lines.append("    exit /b 1")
     lines.append(")")
-    lines.append("nninteractive_env\\python.exe -c \"import numpy, nibabel, pydicom, SimpleITK, scipy, nnInteractive, torchvision, transformers, yaml, tqdm, PySide6, shiboken6; print('  All packages OK')\"")
+    lines.append("nninteractive_env\\python.exe -c \"import numpy, nibabel, pydicom, SimpleITK, scipy, nnInteractive, torchvision, transformers, yaml, tqdm, onnxruntime, PySide6, shiboken6; print('  All packages OK'); print('  ONNX providers:', ', '.join(onnxruntime.get_available_providers()))\"")
     lines.append('if !errorlevel! neq 0 (')
-    lines.append("    echo   Some packages failed to import.")
+    lines.append("    echo   Some packages failed to import. The default frozen-feature method requires onnxruntime-gpu.")
     lines.append('    echo   Try: nninteractive_env\\python.exe -m pip install wheels\\*.whl --no-deps --no-index')
+    lines.append("    pause")
+    lines.append("    exit /b 1")
+    lines.append(")")
+    lines.append(
+        'if not exist "external\\dinov3-medical-seg\\models\\dinov3-vits16\\model.onnx" ('
+    )
+    lines.append("    echo   ERROR: The default ViT-S/16 ONNX encoder is missing.")
+    lines.append(
+        "    echo   Expected: external\\dinov3-medical-seg\\models\\dinov3-vits16\\model.onnx"
+    )
     lines.append("    pause")
     lines.append("    exit /b 1")
     lines.append(")")

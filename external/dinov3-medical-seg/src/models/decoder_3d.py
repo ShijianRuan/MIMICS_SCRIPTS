@@ -97,11 +97,18 @@ class DecoderFactory:
 
     Supports both 3D decoders (linear3d, mlp_probe, segformer3d,
     token_pyramid3d, dpt3d)
-    and 2D decoders (conv2d, conv2d_unet, conv2d_deeplab, conv2d_2_5d).
+    and 2D decoders (conv2d, conv2d_unet, conv2d_deeplab, conv2d_2_5d,
+    feature_unet2d).
     2D decoders are imported lazily to avoid hard dependency.
     """
 
-    _2D_DECODERS = {"conv2d", "conv2d_unet", "conv2d_deeplab", "conv2d_2_5d"}
+    _2D_DECODERS = {
+        "conv2d",
+        "conv2d_unet",
+        "conv2d_deeplab",
+        "conv2d_2_5d",
+        "feature_unet2d",
+    }
 
     @staticmethod
     def create(
@@ -134,12 +141,14 @@ class DecoderFactory:
                 Conv2DUNetDecoder,
                 Conv2DDeepLabDecoder,
                 Conv2D_2_5D_Decoder,
+                FrozenFeatureUNet2D,
             )
             _map = {
                 "conv2d": Conv2DDecoder,
                 "conv2d_unet": Conv2DUNetDecoder,
                 "conv2d_deeplab": Conv2DDeepLabDecoder,
                 "conv2d_2_5d": Conv2D_2_5D_Decoder,
+                "feature_unet2d": FrozenFeatureUNet2D,
             }
             return _map[decoder_type](feature_dims, num_classes)
 
@@ -147,7 +156,7 @@ class DecoderFactory:
             raise ValueError(
                 f"Unknown decoder_type: {decoder_type}. "
                 f"Choose from: linear3d, mlp_probe, segformer3d, token_pyramid3d, dpt3d, "
-                f"conv2d, conv2d_unet, conv2d_deeplab, conv2d_2_5d"
+                f"conv2d, conv2d_unet, conv2d_deeplab, conv2d_2_5d, feature_unet2d"
             )
 
 

@@ -473,8 +473,16 @@ def cleanup_workspace_artifacts(workspace, dinov3_root=None, config=None):
                     report["run_logs"] += 1
 
         if dinov3_root and status in TERMINAL_JOB_STATUSES and not bool(config.get("keep_training_experiment_artifacts", False)):
-            experiment = Path(dinov3_root) / "experiments" / "mimics_fewshot_{}_{}".format(
-                safe_slug(payload.get("organ", "")), job_id
+            experiment = Path(
+                payload.get("experiment_dir")
+                or (
+                    Path(dinov3_root)
+                    / "experiments"
+                    / "mimics_fewshot_{}_{}".format(
+                        safe_slug(payload.get("organ", "")),
+                        job_id,
+                    )
+                )
             )
             if _remove_tree_quietly(experiment):
                 report["experiments"] += 1
@@ -1167,7 +1175,14 @@ def _label_skip_reason(label_path):
         return "label could not be read: {}".format(exc)
 
 
-def discover_samples(ts_root, organ, cases=None, label_root=None, fallback_to_case_labels=True):
+def discover_samples(
+    ts_root,
+    organ,
+    cases=None,
+    label_root=None,
+    fallback_to_case_labels=True,
+    label_source=None,
+):
     samples = []
     skipped = []
     for case_dir in case_dirs(ts_root, cases):
@@ -1194,7 +1209,11 @@ def discover_samples(ts_root, organ, cases=None, label_root=None, fallback_to_ca
                 "image": str(image),
                 "label": str(label),
                 "label_root": str(label_root) if label_root else "",
-                "label_source": "fresh_export" if label_root else "case_segmentations",
+                "label_source": (
+                    str(label_source)
+                    if label_source
+                    else ("fresh_export" if label_root else "case_segmentations")
+                ),
                 "label_mtime": float(label.stat().st_mtime),
             })
         else:
@@ -1500,7 +1519,9 @@ def write_training_config(
     strategy_overrides=None,
 ):
     path = Path(path)
-    if int(args.batch_size) != 1:
+    decoder_type = str(args.decoder or "segformer3d")
+    cached_slice_pipeline = decoder_type == "feature_unet2d"
+    if not cached_slice_pipeline and int(args.batch_size) != 1:
         raise RuntimeError(
             "Batch size must stay 1 for variable-depth 3D Mimics cases. "
             "Use Grad accumulation to increase the effective batch size."
@@ -1509,7 +1530,9 @@ def write_training_config(
     model_path = args.model_path
     if not model_path:
         model_scale = str(args.model_scale or "vitb16").lower()
-        if model_scale in ("vitl16", "vit_l", "large"):
+        if model_scale in ("vits16", "vit_s", "small"):
+            model_path = "./models/dinov3-vits16"
+        elif model_scale in ("vitl16", "vit_l", "large"):
             model_path = "./models/dinov3-vitl16"
         elif model_scale in ("vith16plus", "vit_h", "huge"):
             model_path = "./models/dinov3-vith16plus"
@@ -1518,13 +1541,19 @@ def write_training_config(
     finetune_method = str(args.finetune_method or "lora").lower()
     if finetune_method in ("decoder_only", "decode_only", "decoder-only", "decode-only"):
         finetune_method = "frozen"
-    decoder_type = str(args.decoder or "segformer3d")
+    encoder_backend = str(
+        getattr(args, "encoder_backend", "auto") or "auto"
+    ).strip().lower()
+    compatibility_onnx = cached_slice_pipeline and encoder_backend != "pytorch"
     config = {
         "_base_": [str(base_config)],
         "exp_name": exp_name,
         "model": {
-            "model_path": model_path, "num_classes": 2, "input_normalization": "imagenet",
+            "model_path": model_path,
+            "num_classes": 2,
+            "input_normalization": "none" if compatibility_onnx else "imagenet",
             "image_mean": [0.485, 0.456, 0.406], "image_std": [0.229, 0.224, 0.225],
+            "encoder_backend": encoder_backend,
         },
         "finetune": {
             "method": finetune_method, "lora_rank": int(args.lora_rank),
@@ -1534,6 +1563,11 @@ def write_training_config(
         "data": {
             "name": "mimics_fewshot_" + safe_slug(args.organ), "data_root": str(dataset_dir),
             "img_size": img_size, "k_shot": -1, "fold": 0, "modality": args.modality,
+            "slice_normalization": (
+                "timeslice_casewise"
+                if compatibility_onnx
+                else "percentile_minmax"
+            ),
         },
         "training": {
             "epochs": int(args.epochs), "batch_size": int(args.batch_size),
@@ -1541,6 +1575,7 @@ def write_training_config(
             "lr": float(args.lr), "weight_decay": float(args.weight_decay),
             "scheduler": None if getattr(args, "lr_scheduler", "cosine") == "constant" else getattr(args, "lr_scheduler", "cosine"),
             "warmup_epochs": int(getattr(args, "warmup_epochs", 3)),
+            "validation_interval": int(getattr(args, "validation_interval", 2)),
             "keep_last_checkpoints": int(args.keep_last_checkpoints),
             "validation_enabled": bool(validation_enabled),
             "sub_volume": {"enabled": bool(args.sub_volume),
@@ -1560,6 +1595,60 @@ def write_training_config(
         return target
 
     merge(config, strategy_overrides or {})
+    model_sha256 = str(getattr(args, "model_sha256", "") or "").strip().lower()
+    if model_sha256:
+        config["model"]["expected_sha256"] = model_sha256
+    if cached_slice_pipeline:
+        scheduler = str(getattr(args, "lr_scheduler", "cosine") or "cosine")
+        if scheduler == "constant_warmup":
+            raise RuntimeError(
+                "Frozen feature slice training supports cosine or constant learning rate; "
+                "warmup is not part of this verified training path."
+            )
+        config["model"].update({
+            "out_indices": [11],
+            "slice_axis": "axial",
+            "slice_batch_size": max(1, int(args.batch_size)),
+            "channel_policy": "repeat",
+        })
+        config["finetune"]["method"] = "frozen"
+        config["data"].update({
+            "img_size": img_size,
+            "target_spacing": None,
+            "patch": {"enabled": False},
+            "roi": {"enabled": False},
+            "native_grid": True,
+        })
+        config["augmentation"] = {"enabled": False}
+        config["training"].update({
+            "pipeline": "cached_slices",
+            "experiment_root": str(path.parent / "training_artifacts"),
+            "batch_size": max(1, int(args.batch_size)),
+            "grad_accumulation": 1,
+            "mixed_precision": False,
+            "optimizer": "adamw",
+            "beta1": 0.9,
+            "beta2": 0.999,
+            "eps": 1e-8,
+            "scheduler": None if scheduler == "constant" else "cosine_epoch",
+            "warmup_epochs": 0,
+            "cosine_min_lr_ratio": 0.1,
+            "keep_feature_cache": False,
+        })
+        strategy_options = (config.get("strategy") or {}).get("options") or {}
+        if str(strategy_options.get("loss_type", "auto")) == "auto":
+            config["loss"] = {"type": "ce"}
+        config.setdefault("inference", {}).update({
+            "tta_axes": [],
+            "scales": [],
+        })
+        strategy = config.get("strategy")
+        if isinstance(strategy, dict) and isinstance(strategy.get("options"), dict):
+            strategy["options"].update({
+                "sampling_mode": "full",
+                "channel_policy": "repeat",
+                "slice_axis": "axial",
+            })
     if status_path or cancel_path or metrics_history_path:
         config["runtime"] = {
             "status_path": str(status_path or ""), "cancel_path": str(cancel_path or ""),
@@ -1568,6 +1657,189 @@ def write_training_config(
     import yaml
     write_text_atomic(path, yaml.safe_dump(config, sort_keys=False, allow_unicode=False))
     return config
+
+
+def validate_training_encoder_assets(config, dinov3_root):
+    """Fail before GPU acquisition when the configured frozen encoder is unusable."""
+    model = dict(config.get("model") or {})
+    raw_path = str(model.get("model_path") or "").strip()
+    if not raw_path:
+        raise RuntimeError("The training configuration does not define model.model_path")
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = Path(dinov3_root) / path
+    path = path.resolve()
+    onnx_path = path if path.suffix.lower() == ".onnx" else path / "model.onnx"
+    backend = str(model.get("encoder_backend") or "auto").strip().lower()
+    if backend not in ("auto", "onnx", "pytorch"):
+        raise RuntimeError("Unknown encoder backend: {}".format(backend))
+    if backend == "pytorch" and path.suffix.lower() == ".onnx":
+        raise RuntimeError(
+            "The PyTorch encoder backend requires a HuggingFace model directory, "
+            "not an ONNX file."
+        )
+    use_onnx = backend == "onnx" or (
+        backend == "auto" and onnx_path.is_file()
+    )
+    expected_sha256 = str(model.get("expected_sha256") or "").strip().lower()
+    if use_onnx and not onnx_path.is_file():
+        raise RuntimeError(
+            "The verified default encoder is required but was not found: {}".format(
+                onnx_path
+            )
+        )
+    if use_onnx:
+        finetune_method = str(
+            config.get("finetune", {}).get("method") or "frozen"
+        ).lower()
+        if finetune_method != "frozen":
+            raise RuntimeError(
+                "The ONNX encoder is frozen and cannot use {} fine-tuning. "
+                "Choose Frozen Feature 2D or a local PyTorch model.".format(
+                    finetune_method
+                )
+            )
+        out_indices = list(model.get("out_indices") or [])
+        if out_indices != [11]:
+            raise RuntimeError(
+                "The ONNX encoder exposes only its final feature map; model.out_indices "
+                "must be [11], not {}.".format(out_indices)
+            )
+        if expected_sha256:
+            digest = hashlib.sha256()
+            with onnx_path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            actual_sha256 = digest.hexdigest()
+            if actual_sha256 != expected_sha256:
+                raise RuntimeError(
+                    "The configured ViT-S encoder checksum does not match the verified "
+                    "model. Expected {}, found {}.".format(
+                        expected_sha256,
+                        actual_sha256,
+                    )
+                )
+        try:
+            import onnxruntime
+        except ImportError:
+            raise RuntimeError(
+                "The configured ViT-S encoder is ONNX, but onnxruntime is not installed "
+                "in nninteractive_env. Install the offline onnxruntime-gpu wheel first."
+            )
+        if os.name == "nt" and hasattr(onnxruntime, "preload_dlls"):
+            try:
+                onnxruntime.preload_dlls()
+            except Exception:
+                pass
+        available_providers = list(onnxruntime.get_available_providers())
+        try:
+            import torch
+            torch_cuda_ready = bool(torch.cuda.is_available())
+        except Exception:
+            torch_cuda_ready = False
+        if os.name == "nt" and torch_cuda_ready and "CUDAExecutionProvider" not in available_providers:
+            raise RuntimeError(
+                "PyTorch can use CUDA, but ONNX Runtime cannot. Install the matching "
+                "onnxruntime-gpu Windows wheel and CUDA/cuDNN runtime, then rerun "
+                "environment setup. Available ONNX providers: {}".format(
+                    ", ".join(available_providers) or "none"
+                )
+            )
+        session = onnxruntime.InferenceSession(
+            str(onnx_path),
+            providers=["CPUExecutionProvider"],
+        )
+        input_shape = list(session.get_inputs()[0].shape)
+        configured_size = [
+            int(value)
+            for value in (config.get("data", {}).get("img_size") or [])
+        ]
+        fixed_size = (
+            [int(value) for value in input_shape[-2:]]
+            if all(
+                isinstance(value, int) and value > 0
+                for value in input_shape[-2:]
+            )
+            else None
+        )
+        if fixed_size is not None and configured_size != fixed_size:
+            raise RuntimeError(
+                "The local ViT-S ONNX encoder expects image size {}, but training is "
+                "configured for {}. Select the matching Image detail value.".format(
+                    fixed_size,
+                    configured_size,
+                )
+            )
+        if (
+            fixed_size is None
+            and (
+                len(configured_size) != 2
+                or any(value <= 0 or value % 16 for value in configured_size)
+            )
+        ):
+            raise RuntimeError(
+                "A dynamic ONNX encoder requires two configured image dimensions "
+                "that are positive multiples of 16."
+            )
+        input_size = fixed_size or configured_size
+        return {
+            "backend": "onnx",
+            "path": str(onnx_path),
+            "input_size": input_size,
+            "dynamic_input": fixed_size is None,
+            "available_providers": available_providers,
+        }
+    config_path = path / "config.json"
+    weights_path = path / "model.safetensors"
+    processor_path = path / "preprocessor_config.json"
+    missing = [
+        str(candidate)
+        for candidate in (config_path, weights_path, processor_path)
+        if not candidate.is_file()
+    ]
+    if missing:
+        raise RuntimeError(
+            "The configured DINO encoder is incomplete. Missing: {}. "
+            "Provide a local ViT-S HuggingFace directory or model.onnx; "
+            "a different backbone is not substituted automatically.".format(
+                ", ".join(missing)
+            )
+        )
+    if expected_sha256:
+        digest = hashlib.sha256()
+        with weights_path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        actual_sha256 = digest.hexdigest()
+        if actual_sha256 != expected_sha256:
+            raise RuntimeError(
+                "The configured PyTorch encoder checksum does not match "
+                "model.safetensors. Expected {}, found {}.".format(
+                    expected_sha256,
+                    actual_sha256,
+                )
+            )
+    try:
+        metadata = json.loads(config_path.read_text(encoding="utf-8"))
+        hidden_size = int(metadata.get("hidden_size"))
+        patch_size = int(metadata.get("patch_size"))
+    except Exception as exc:
+        raise RuntimeError("Could not validate DINO encoder config {}: {}".format(config_path, exc))
+    if str(config.get("decoder", {}).get("type")) == "feature_unet2d":
+        if hidden_size != 384 or patch_size != 16:
+            raise RuntimeError(
+                "feature_unet2d requires ViT-S/16 (hidden_size=384, patch_size=16); "
+                "configured encoder reports hidden_size={}, patch_size={}.".format(
+                    hidden_size,
+                    patch_size,
+                )
+            )
+    return {
+        "backend": "pytorch",
+        "path": str(path),
+        "hidden_size": hidden_size,
+        "patch_size": patch_size,
+    }
 
 
 def launch_mimics_export(
@@ -2001,6 +2273,26 @@ def _cmd_train_impl(args):
     if not cases:
         cases = None
     fresh_label_root = None
+    reusable_label_root = None
+    if args.export_labels and getattr(args, "label_root", None):
+        update_status(status_path, {
+            "status": "failed",
+            "error": (
+                "Choose either fresh export from saved .mcs or an existing "
+                "exported masks folder, not both."
+            ),
+        })
+        return 2
+    if getattr(args, "label_root", None):
+        reusable_label_root = Path(args.label_root).expanduser().resolve()
+        if not reusable_label_root.is_dir():
+            update_status(status_path, {
+                "status": "failed",
+                "error": "exported masks folder does not exist: {}".format(
+                    reusable_label_root
+                ),
+            })
+            return 2
     fresh_label_cleanup = {"enabled": False}
     if args.export_labels:
         update_status(status_path, {"status": "exporting_labels"})
@@ -2132,12 +2424,23 @@ def _cmd_train_impl(args):
             })
             return 2
 
+    selected_label_root = fresh_label_root or reusable_label_root
+    resolved_label_source = (
+        "fresh_mcs_export"
+        if fresh_label_root
+        else ("exported_masks" if reusable_label_root else "source_dataset")
+    )
+    update_status(status_path, {
+        "label_source": resolved_label_source,
+        "label_root": str(selected_label_root) if selected_label_root else "",
+    })
     samples, skipped = discover_samples(
         ts_root,
         args.organ,
         cases,
-        label_root=fresh_label_root,
-        fallback_to_case_labels=not bool(fresh_label_root),
+        label_root=selected_label_root,
+        fallback_to_case_labels=not bool(selected_label_root),
+        label_source=resolved_label_source,
     )
     empty_labels = [s for s in skipped if s.get("reason") == "label is empty (all zeros)"]
     if empty_labels:
@@ -2232,6 +2535,25 @@ def _cmd_train_impl(args):
     )
     from src.utils.config import load_config as load_dinov3_config
     effective_config = load_dinov3_config(str(config_path))
+    try:
+        encoder_assets = validate_training_encoder_assets(effective_config, dinov3_root)
+    except Exception as exc:
+        update_status(status_path, {
+            "status": "failed",
+            "error": str(exc),
+            "config_path": str(config_path),
+        })
+        append_log(workspace, "Training preflight failed: {}.".format(exc))
+        return 2
+    experiment_root = Path(
+        effective_config.get("training", {}).get("experiment_root")
+        or (dinov3_root / "experiments")
+    )
+    if not experiment_root.is_absolute():
+        experiment_root = (dinov3_root / experiment_root).resolve()
+    exp_dir = experiment_root / exp_name
+    if not bool(repo_config.get("keep_training_experiment_artifacts", False)):
+        _register_transient_cleanup(exp_dir)
     config_sha256 = hashlib.sha256(config_path.read_bytes()).hexdigest()
     write_json_atomic(
         run_dir / "samples.json",
@@ -2246,12 +2568,15 @@ def _cmd_train_impl(args):
             "training_fingerprint": training_fingerprint,
             "derived_policy": derived_policy,
             "strategy": strategy_overrides.get("strategy", {}),
+            "encoder_assets": encoder_assets,
             "selection": {
                 "cases": sorted(cases) if cases else None,
                 "sample_mode": args.sample_mode,
                 "max_samples": int(args.max_samples or 0),
                 "val_fraction": float(args.val_fraction or 0.0),
                 "val_cases": parse_case_list(args.val_cases),
+                "label_source": resolved_label_source,
+                "label_root": str(selected_label_root) if selected_label_root else "",
             },
         },
     )
@@ -2266,6 +2591,8 @@ def _cmd_train_impl(args):
         "config_path": str(config_path),
         "config_sha256": config_sha256,
         "strategy": strategy_overrides.get("strategy", {}),
+        "encoder_assets": encoder_assets,
+        "experiment_dir": str(exp_dir),
         "train_log": str(train_log),
         "training_status": str(train_status),
         "metrics_history": str(metrics_history),
@@ -2404,9 +2731,6 @@ def _cmd_train_impl(args):
         if gpu_lock is not None and gpu_lock_releasable:
             gpu_lock.release()
 
-    exp_dir = dinov3_root / "experiments" / exp_name
-    if not bool(repo_config.get("keep_training_experiment_artifacts", False)):
-        _register_transient_cleanup(exp_dir)
     ckpt = latest_epoch_checkpoint(exp_dir / "checkpoints")
     if not ckpt:
         update_status(status_path, {"status": "failed", "error": "no checkpoint was produced"})
@@ -2468,6 +2792,8 @@ def _cmd_train_impl(args):
             "keep_last_checkpoints": int(args.keep_last_checkpoints),
             "keep_materialized_dataset": bool(args.keep_materialized_dataset),
             "source_mask_names": mask_names,
+            "label_source": resolved_label_source,
+            "label_root": str(selected_label_root) if selected_label_root else "",
         },
         "created_at_epoch": time.time(),
         "ts_root": str(ts_root),
@@ -3097,12 +3423,19 @@ def build_parser():
     train.add_argument("--finetune-method", choices=("frozen", "decoder_only", "decode_only", "lora", "adapter", "full"), default="lora")
     train.add_argument("--decoder", choices=(
         "linear3d", "mlp_probe", "segformer3d", "token_pyramid3d", "dpt3d",
-        "conv2d", "conv2d_unet", "conv2d_deeplab", "conv2d_2_5d",
+        "conv2d", "conv2d_unet", "conv2d_deeplab", "conv2d_2_5d", "feature_unet2d",
     ), default="segformer3d")
     train.add_argument("--lr-scheduler", choices=("constant", "constant_warmup", "cosine"), default="cosine")
     train.add_argument("--warmup-epochs", type=int, default=3)
-    train.add_argument("--model-scale", choices=("vitb16", "vitl16", "vith16plus"), default="vitb16")
+    train.add_argument("--model-scale", choices=("vits16", "vitb16", "vitl16", "vith16plus"), default="vitb16")
+    train.add_argument(
+        "--encoder-backend",
+        choices=("auto", "onnx", "pytorch"),
+        default="auto",
+    )
+    train.add_argument("--validation-interval", type=int, default=2)
     train.add_argument("--model-path")
+    train.add_argument("--model-sha256")
     train.add_argument("--lora-rank", type=int, default=8)
     train.add_argument("--lora-alpha", type=int, default=16)
     train.add_argument("--adapter-bottleneck", type=int, default=64)
@@ -3110,6 +3443,13 @@ def build_parser():
     train.add_argument("--sub-volume", action="store_true")
     train.add_argument("--sub-volume-size", default="32,256,256")
     train.add_argument("--export-labels", action="store_true")
+    train.add_argument(
+        "--label-root",
+        help=(
+            "Reusable exported masks root containing "
+            "<case>/segmentations/<mask>.nii.gz or <case>/<mask>.nii.gz"
+        ),
+    )
     train.add_argument("--mimics-exe")
     train.add_argument("--mcs-output-dir", help="Folder containing saved .mcs projects for this training run")
     train.add_argument(

@@ -240,14 +240,26 @@ if !errorlevel! neq 0 (
 
 )
 
-nninteractive_env\python.exe -c "import numpy, nibabel, pydicom, SimpleITK, scipy, nnInteractive, torchvision, transformers, yaml, tqdm, acvl_utils; print('  All packages OK')"
+nninteractive_env\python.exe -c "import numpy, nibabel, pydicom, SimpleITK, scipy, nnInteractive, torchvision, transformers, yaml, tqdm, acvl_utils, onnxruntime; print('  All packages OK'); print('  ONNX providers:', ', '.join(onnxruntime.get_available_providers()))"
 
 if !errorlevel! neq 0 (
 
-    echo   Some packages failed to import.
+    echo   Some packages failed to import. The default frozen-feature method requires onnxruntime-gpu.
 
     echo   Try: nninteractive_env\python.exe -m pip install wheels\*.whl --no-deps --no-index
     echo   And: nninteractive_env\python.exe -m pip install wheels\*.tar.gz --no-deps --no-index --no-build-isolation
+
+    pause
+
+    exit /b 1
+
+)
+
+if not exist "external\dinov3-medical-seg\models\dinov3-vits16\model.onnx" (
+
+    echo   ERROR: The default ViT-S/16 ONNX encoder is missing.
+
+    echo   Expected: external\dinov3-medical-seg\models\dinov3-vits16\model.onnx
 
     pause
 

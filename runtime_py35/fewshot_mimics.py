@@ -618,6 +618,14 @@ def _workspace(ts_root):
     return os.path.join(os.path.abspath(ts_root), "fewshot_models")
 
 
+def _setup_staging_workspace():
+    return os.path.join(
+        os.path.expanduser("~"),
+        ".mimics_script",
+        "fewshot_setup",
+    )
+
+
 def _global_model_registry_path():
     return os.path.join(os.path.expanduser("~"), ".mimics_script", "fewshot_model_index.json")
 
@@ -655,11 +663,17 @@ def _default_training_options(config, profile_name=None):
     values.setdefault("base_config", config.get("base_config", "config/research/ct_fewshot_fast.yaml"))
     values.setdefault("strategy", config.get("default_strategy", "adaptive"))
     values.setdefault("epochs", config.get("default_epochs", 20))
-    values["batch_size"] = 1
+    values.setdefault("batch_size", config.get("default_batch_size", 1))
     values.setdefault("grad_accumulation", config.get("default_grad_accumulation", 1))
     values.setdefault("lr", config.get("default_lr", 0.001))
     values.setdefault("weight_decay", config.get("default_weight_decay", 0.01))
-    values.setdefault("img_size", config.get("default_img_size", "224,224"))
+    values.setdefault("lr_scheduler", config.get("default_lr_scheduler", "cosine"))
+    values.setdefault("warmup_epochs", config.get("default_warmup_epochs", 3))
+    values.setdefault(
+        "validation_interval",
+        config.get("default_validation_interval", 2),
+    )
+    values.setdefault("img_size", config.get("default_img_size", "256,256"))
     values.setdefault("modality", config.get("default_modality", "ct"))
     values.setdefault("min_samples", config.get("default_min_samples", 1))
     values.setdefault("max_samples", config.get("default_max_samples", 0))
@@ -670,6 +684,23 @@ def _default_training_options(config, profile_name=None):
     values.setdefault("decoder", config.get("default_decoder", "segformer3d"))
     values.setdefault("model_scale", config.get("default_model_scale", "vitb16"))
     values.setdefault("model_path", config.get("default_model_path", ""))
+    values.setdefault("model_sha256", config.get("default_model_sha256", ""))
+    values.setdefault(
+        "encoder_backend",
+        config.get("default_feature_encoder_backend", "onnx"),
+    )
+    values.setdefault(
+        "safetensors_sha256",
+        config.get("default_safetensors_sha256", ""),
+    )
+    if (
+        str(values.get("decoder", "")).lower() == "feature_unet2d"
+        and str(values.get("encoder_backend", "")).lower() == "pytorch"
+        and not str(values.get("model_path", "") or "").strip()
+    ):
+        values["model_sha256"] = str(values.get("safetensors_sha256") or "")
+        if str(values.get("img_size", "")).strip() == "256,256":
+            values["img_size"] = "224,224"
     values.setdefault("lora_rank", config.get("default_lora_rank", 8))
     values.setdefault("lora_alpha", config.get("default_lora_alpha", 16))
     values.setdefault("adapter_bottleneck", config.get("default_adapter_bottleneck", 64))
@@ -679,6 +710,16 @@ def _default_training_options(config, profile_name=None):
     values.setdefault("keep_last_checkpoints", config.get("default_keep_last_checkpoints", 2))
     values.setdefault("keep_materialized_dataset", config.get("default_keep_materialized_dataset", False))
     values.setdefault("export_labels_before_training", config.get("default_export_labels_before_training", True))
+    values.setdefault(
+        "label_source",
+        config.get("default_label_source")
+        or (
+            "mcs_refresh"
+            if values.get("export_labels_before_training", True)
+            else "source_dataset"
+        ),
+    )
+    values.setdefault("label_root", "")
     values.setdefault("gpu_lock_timeout_seconds", config.get("gpu_lock_timeout_seconds", 86400))
     values.setdefault(
         "background_mimics_lock_timeout_seconds",
@@ -731,8 +772,17 @@ def _append_training_args(cmd, config, options):
         str(float(options.get("lr", config.get("default_lr", 0.001)))),
         "--weight-decay",
         str(float(options.get("weight_decay", config.get("default_weight_decay", 0.01)))),
+        "--lr-scheduler",
+        str(options.get("lr_scheduler", config.get("default_lr_scheduler", "cosine"))),
+        "--warmup-epochs",
+        str(int(options.get("warmup_epochs", config.get("default_warmup_epochs", 3)))),
+        "--validation-interval",
+        str(int(options.get(
+            "validation_interval",
+            config.get("default_validation_interval", 2),
+        ))),
         "--img-size",
-        str(options.get("img_size", config.get("default_img_size", "224,224"))),
+        str(options.get("img_size", config.get("default_img_size", "256,256"))),
         "--modality",
         str(options.get("modality", config.get("default_modality", "ct"))),
         "--min-samples",
@@ -751,6 +801,8 @@ def _append_training_args(cmd, config, options):
         str(options.get("decoder", config.get("default_decoder", "segformer3d"))),
         "--model-scale",
         str(options.get("model_scale", config.get("default_model_scale", "vitb16"))),
+        "--encoder-backend",
+        str(options.get("encoder_backend", "auto")),
         "--lora-rank",
         str(int(options.get("lora_rank", config.get("default_lora_rank", 8)))),
         "--lora-alpha",
@@ -767,6 +819,14 @@ def _append_training_args(cmd, config, options):
     model_path = str(options.get("model_path", config.get("default_model_path", "")) or "")
     if model_path:
         cmd.extend(["--model-path", model_path])
+    model_sha256 = str(
+        options.get("model_sha256", config.get("default_model_sha256", "")) or ""
+    ).strip()
+    if model_sha256:
+        cmd.extend(["--model-sha256", model_sha256])
+    label_root = str(options.get("label_root", "") or "").strip()
+    if label_root:
+        cmd.extend(["--label-root", label_root])
     val_cases = _split_csv(options.get("val_cases", ""))
     if val_cases:
         cmd.extend(["--val-cases", ",".join(val_cases)])
@@ -850,6 +910,17 @@ def _choose_dataset_root(title):
         _save_settings(settings)
         return os.path.abspath(path)
     return None
+
+
+def _initial_dataset_root():
+    inferred = _infer_dataset_root_from_project()
+    if inferred and os.path.isdir(inferred):
+        return os.path.abspath(inferred)
+    settings = _load_settings()
+    last_root = str(settings.get("last_dataset_root", "") or "").strip()
+    if last_root and os.path.isdir(last_root):
+        return os.path.abspath(last_root)
+    return ""
 
 
 def _infer_case_id(ts_root):
@@ -1546,26 +1617,27 @@ def _launch_external_advanced_training(config, organ, ts_root):
     dinov3_root = _dinov3_root(config)
     python_exe = _fewshot_python(config, dinov3_root)
     setup_id = "setup_{0}_{1}".format(time.strftime("%Y%m%dT%H%M%S"), uuid.uuid4().hex[:8])
-    workspace = _workspace(ts_root)
+    ts_root = os.path.abspath(ts_root) if ts_root else ""
+    workspace = _workspace(ts_root) if ts_root else _setup_staging_workspace()
     jobs_dir = os.path.join(workspace, "jobs")
     if not os.path.isdir(jobs_dir):
         os.makedirs(jobs_dir)
-    status_path = _status_path(ts_root, setup_id)
+    status_path = os.path.join(jobs_dir, setup_id + ".json")
     context_path = os.path.join(jobs_dir, setup_id + "_context.json")
     context = {
         "schema_version": "mimics_fewshot_setup_context.v1",
         "setup_id": setup_id,
         "organ": organ,
-        "ts_root": os.path.abspath(ts_root),
+        "ts_root": ts_root,
         "workspace": workspace,
-        "mcs_output_dir": _resolve_mimics_output_dir(ts_root),
+        "mcs_output_dir": _resolve_mimics_output_dir(ts_root) if ts_root else "",
         "project_root": _project_root(),
         "pipeline_script": _pipeline_script(),
         "dinov3_root": dinov3_root,
         "python_exe": python_exe,
         "mimics_exe": _find_mimics_exe() or "",
         "config": config,
-        "case_ids": _case_ids_from_dataset(ts_root),
+        "case_ids": _case_ids_from_dataset(ts_root) if ts_root else [],
         "current_project_path": _current_project_path() or "",
         "current_case_id": _infer_case_id(ts_root) or "",
         "setup_status_path": status_path,
@@ -1577,7 +1649,7 @@ def _launch_external_advanced_training(config, organ, ts_root):
         "kind": "train_setup",
         "status": "configuring",
         "organ": organ,
-        "ts_root": os.path.abspath(ts_root),
+        "ts_root": ts_root,
         "workspace": workspace,
         "context_path": context_path,
         "created_at_epoch": time.time(),
@@ -1657,16 +1729,13 @@ def _train_model(advanced=False):
             ui_blocking=False,
         )
         return 1
-    ts_root = _choose_dataset_root("Select dataset folder")
-    if not ts_root or not os.path.isdir(ts_root):
-        _mimics_log(logging.INFO, "DINOv3 training cancelled: no dataset folder was selected.")
-        return 1
-    if not _guard_no_active_job(ts_root, requested_kind="train"):
-        return 1
     config = _config()
     if advanced:
         mode = str(config.get("advanced_ui_mode", "external")).strip().lower()
         if mode != "internal":
+            ts_root = _initial_dataset_root()
+            if ts_root and not _guard_no_active_job(ts_root, requested_kind="train"):
+                return 1
             try:
                 return _launch_external_advanced_training(config, organ, ts_root)
             except Exception as exc:
@@ -1676,7 +1745,12 @@ def _train_model(advanced=False):
                 )
                 if not bool(config.get("advanced_ui_fallback_to_internal", True)):
                     mimics.dialogs.message_box(
-                        "Could not open the external training setup UI.\n\n{0}".format(exc),
+                        (
+                            "Could not open the external training setup UI.\n\n"
+                            "{0}\n\n"
+                            "Run setup_offline.bat to install or repair PySide6 in "
+                            "nninteractive_env, then retry. Training was not started."
+                        ).format(exc),
                         title=TITLE,
                         ui_blocking=False,
                     )
@@ -1685,10 +1759,22 @@ def _train_model(advanced=False):
                     logging.WARNING,
                     "Falling back to Mimics internal Advanced dialogs.",
                 )
+        ts_root = _choose_dataset_root("Select dataset folder")
+        if not ts_root or not os.path.isdir(ts_root):
+            _mimics_log(logging.INFO, "DINOv3 training cancelled: no dataset folder was selected.")
+            return 1
+        if not _guard_no_active_job(ts_root, requested_kind="train"):
+            return 1
         options = _advanced_training_options(config, ts_root)
         if options is None:
             return 0
     else:
+        ts_root = _choose_dataset_root("Select dataset folder")
+        if not ts_root or not os.path.isdir(ts_root):
+            _mimics_log(logging.INFO, "DINOv3 training cancelled: no dataset folder was selected.")
+            return 1
+        if not _guard_no_active_job(ts_root, requested_kind="train"):
+            return 1
         options = _default_training_options(config)
         options["mask_names"] = ",".join(_configured_mask_names(config, organ))
 
@@ -1724,7 +1810,7 @@ def _train_model(advanced=False):
         "--run-id",
         run_id,
     ]
-    if bool(options.get("export_labels_before_training", True)):
+    if str(options.get("label_source") or "mcs_refresh") == "mcs_refresh":
         cmd.append("--export-labels")
     _append_training_args(cmd, config, options)
     mimics_exe = _find_mimics_exe()

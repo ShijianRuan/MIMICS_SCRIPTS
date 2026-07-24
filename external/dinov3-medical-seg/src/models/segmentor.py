@@ -2,11 +2,13 @@
 Complete 3D segmentation model: backbone + encoder + decoder.
 """
 
+import os
+
 import torch
 import torch.nn as nn
 from typing import Dict
 
-from .backbone import DINOv3Backbone
+from .backbone import DINOv3Backbone, ONNXDINOv3Backbone
 from .encoder_3d import SliceWiseEncoder3D
 from .decoder_3d import DecoderFactory
 from .lora import apply_lora_to_dinov3, get_lora_params
@@ -41,14 +43,39 @@ class DINOv33DSegmentor(nn.Module):
 
         # ── 1. Backbone ──
         freeze_backbone = ft_cfg.get("method", "frozen") != "full"
-        self.backbone = DINOv3Backbone(
-            model_path=cfg["model_path"],
-            out_indices=cfg.get("out_indices", [2, 5, 8, 11]),
-            freeze=freeze_backbone,
-            input_normalization=cfg.get("input_normalization", "none"),
-            image_mean=cfg.get("image_mean"),
-            image_std=cfg.get("image_std"),
+        backend = str(cfg.get("encoder_backend", "auto") or "auto").lower()
+        model_path = cfg["model_path"]
+        onnx_path = (
+            str(model_path).lower().endswith(".onnx")
+            or (
+                backend == "auto"
+                and os.path.isfile(os.path.join(str(model_path), "model.onnx"))
+            )
         )
+        if backend == "onnx" or onnx_path:
+            self.backbone = ONNXDINOv3Backbone(
+                model_path=model_path,
+                out_indices=cfg.get("out_indices", [11]),
+                freeze=freeze_backbone,
+                input_normalization=cfg.get("input_normalization", "imagenet"),
+                image_mean=cfg.get("image_mean"),
+                image_std=cfg.get("image_std"),
+                providers=cfg.get("onnx_providers"),
+                expected_sha256=cfg.get("expected_sha256"),
+                input_size=config.get("data", {}).get("img_size"),
+            )
+            self.encoder_backend = "onnx"
+        else:
+            self.backbone = DINOv3Backbone(
+                model_path=model_path,
+                out_indices=cfg.get("out_indices", [2, 5, 8, 11]),
+                freeze=freeze_backbone,
+                input_normalization=cfg.get("input_normalization", "none"),
+                image_mean=cfg.get("image_mean"),
+                image_std=cfg.get("image_std"),
+                expected_sha256=cfg.get("expected_sha256"),
+            )
+            self.encoder_backend = "pytorch"
         self.embed_dim = self.backbone.embed_dim
         self.patch_size = self.backbone.patch_size
 
@@ -181,10 +208,30 @@ class DINOv33DSegmentor(nn.Module):
         features_3d = self.feature_augmentation(features_3d)
 
         # 3D decoding → segmentation
-        output = self.decoder_3d(features_3d, self._original_shape)
+        if getattr(self.decoder_3d, "requires_raw_input", False):
+            output = self.decoder_3d(
+                features_3d,
+                self._original_shape,
+                raw_volume=slice_space_volume,
+            )
+        else:
+            output = self.decoder_3d(features_3d, self._original_shape)
         return self._from_slice_space(output)
 
-    def get_trainable_info(self) -> Dict[str, int]:
+    def decode_cached_slices(
+        self,
+        embeddings: torch.Tensor,
+        raw_slices: torch.Tensor,
+    ) -> torch.Tensor:
+        """Decode precomputed frozen features without rerunning the backbone."""
+        decoder = self.decoder_3d
+        if not hasattr(decoder, "forward_slices"):
+            raise RuntimeError(
+                "Cached slice decoding is only supported by feature_unet2d"
+            )
+        return decoder.forward_slices(embeddings, raw_slices)
+
+    def get_trainable_info(self) -> Dict:
         """Return trainable parameter counts by component."""
         total = sum(p.numel() for p in self.parameters())
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -203,10 +250,11 @@ class DINOv33DSegmentor(nn.Module):
                 if "lora_A" in n or "lora_B" in n
             )
 
+        external_backbone = self.encoder_backend == "onnx"
         return {
             "total": total,
             "trainable": trainable,
-            "trainable_pct": 100 * trainable / total,
+            "trainable_pct": None if external_backbone else 100 * trainable / total,
             "backbone_trainable": backbone_trainable,
             "decoder_trainable": decoder_trainable,
             "lora_trainable": lora_trainable,
@@ -214,4 +262,6 @@ class DINOv33DSegmentor(nn.Module):
             "decoder_type": self.decoder_type,
             "embed_dim": self.embed_dim,
             "patch_size": self.patch_size,
+            "encoder_backend": self.encoder_backend,
+            "external_backbone": external_backbone,
         }

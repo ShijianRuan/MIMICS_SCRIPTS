@@ -101,7 +101,7 @@ def normalize_strategy_options(options, fingerprint=None, policy=None, preset="a
         "patch_focus": ("foreground", "boundary", "negative_balanced"),
         "channel_policy": ("repeat", "2_5d"),
         "slice_axis": ("axial", "coronal", "sagittal"),
-        "loss_type": ("auto", "dice_ce", "dice_focal"),
+        "loss_type": ("auto", "ce", "dice_ce", "dice_focal"),
     }
     for key, allowed in enums.items():
         values[key] = str(values.get(key, ""))
@@ -142,7 +142,9 @@ def compile_strategy(strategy_id, fingerprint=None, policy=None, user_options=No
         if sampling:
             patch["sampling"] = sampling
 
-    if values["loss_type"] == "dice_ce":
+    if values["loss_type"] == "ce":
+        loss = {"type": "ce"}
+    elif values["loss_type"] == "dice_ce":
         loss = {"type": "dice_ce", "dice_weight": 0.5, "ce_weight": 0.5}
     else:
         loss = {"type": "dice_focal", "dice_weight": 0.7, "focal_weight": 0.3,

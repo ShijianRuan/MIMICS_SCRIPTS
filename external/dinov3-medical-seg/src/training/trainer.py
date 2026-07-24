@@ -34,10 +34,10 @@ def is_better_checkpoint(val_dsc, best_dsc, *, train_loss, best_train_loss,
     training loss makes this the better checkpoint. A positive val-Dice
     regression is never overridden by a train-loss drop.
     """
-    if epoch == 1:
-        return True
     if not should_validate:
         return False
+    if epoch == 1:
+        return True
     if val_dsc > best_dsc + min_delta:
         return True
     if val_dsc < best_dsc - min_delta:
@@ -130,8 +130,18 @@ class Trainer3D:
         print(f"\n{'='*60}")
         print(f"Model: {config['model']['model_path']}")
         print(f"Fine-tuning: {info['ft_method']}")
+        print(f"Encoder backend: {info.get('encoder_backend', 'pytorch')}")
         print(f"Decoder: {info['decoder_type']}")
-        print(f"Trainable: {info['trainable']:,} / {info['total']:,} ({info['trainable_pct']:.1f}%)")
+        if info.get("external_backbone"):
+            print(
+                f"Trainable decoder: {info['trainable']:,} "
+                "(encoder is external and frozen)"
+            )
+        else:
+            print(
+                f"Trainable: {info['trainable']:,} / {info['total']:,} "
+                f"({info['trainable_pct']:.1f}%)"
+            )
         if info['lora_trainable']:
             print(f"  LoRA: {info['lora_trainable']:,}")
         print(f"Decoder: {info['decoder_trainable']:,}")
@@ -146,6 +156,7 @@ class Trainer3D:
             experiment_dir=self.exp_dir,
             trainable=info.get("trainable"),
             trainable_pct=info.get("trainable_pct"),
+            encoder_backend=info.get("encoder_backend", "pytorch"),
         )
         self._write_metrics_history("initialized")
 
@@ -263,12 +274,29 @@ class Trainer3D:
         opt_name = cfg.get("optimizer", "adamw")
         lr = cfg.get("lr", 1e-3)
         wd = cfg.get("weight_decay", 0.01)
+        betas = (
+            float(cfg.get("beta1", cfg.get("b1", 0.9))),
+            float(cfg.get("beta2", cfg.get("b2", 0.999))),
+        )
+        eps = float(cfg.get("eps", 1e-8))
 
         trainable = [p for p in self.model.parameters() if p.requires_grad]
         if opt_name == "adamw":
-            return torch.optim.AdamW(trainable, lr=lr, weight_decay=wd)
+            return torch.optim.AdamW(
+                trainable,
+                lr=lr,
+                betas=betas,
+                eps=eps,
+                weight_decay=wd,
+            )
         elif opt_name == "adam":
-            return torch.optim.Adam(trainable, lr=lr, weight_decay=wd)
+            return torch.optim.Adam(
+                trainable,
+                lr=lr,
+                betas=betas,
+                eps=eps,
+                weight_decay=wd,
+            )
         elif opt_name == "sgd":
             return torch.optim.SGD(trainable, lr=lr, weight_decay=wd, momentum=0.9)
         raise ValueError(f"Unknown optimizer: {opt_name}")
@@ -330,9 +358,7 @@ class Trainer3D:
 
                 # Validate
                 val_metrics = {}
-                should_validate = self.val_loader is not None and (
-                    epoch == 1 or epoch == self.epochs or epoch % self.validation_interval == 0
-                )
+                should_validate = self._should_validate(epoch)
                 if should_validate:
                     self._write_training_status(
                         "training",
@@ -359,11 +385,12 @@ class Trainer3D:
                 # Validation Dice is primary; a lower training loss breaks ties
                 # when val Dice is stuck at 0 (needle target), so the best
                 # checkpoint tracks real learning instead of freezing at epoch 1.
-                is_best = is_better_checkpoint(
+                is_best = self._is_better_checkpoint(
                     val_dsc, best_dsc,
                     train_loss=train_loss, best_train_loss=best_train_loss,
                     min_delta=self.early_stopping_min_delta,
-                    epoch=epoch, should_validate=should_validate,
+                    epoch=epoch,
+                    should_validate=should_validate or self.val_loader is None,
                 )
                 if is_best:
                     best_dsc = max(best_dsc, val_dsc)
@@ -445,6 +472,16 @@ class Trainer3D:
             print("\nTraining cancelled by external request.")
         finally:
             self.writer.close()
+
+    def _should_validate(self, epoch: int) -> bool:
+        return self.val_loader is not None and (
+            epoch == 1
+            or epoch == self.epochs
+            or epoch % self.validation_interval == 0
+        )
+
+    def _is_better_checkpoint(self, val_dsc, best_dsc, **kwargs) -> bool:
+        return is_better_checkpoint(val_dsc, best_dsc, **kwargs)
 
     def _train_epoch(self, epoch: int, global_step_start: int) -> Dict:
         self.model.train()

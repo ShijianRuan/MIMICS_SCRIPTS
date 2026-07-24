@@ -33,7 +33,7 @@ class DiceLoss(nn.Module):
         """
         num_classes = pred.shape[1]
         target_one_hot = F.one_hot(target.long(), num_classes=num_classes)
-        target_one_hot = target_one_hot.permute(0, 4, 1, 2, 3).float()  # (B, C, D, H, W)
+        target_one_hot = target_one_hot.movedim(-1, 1).float()
 
         pred_soft = F.softmax(pred, dim=1)
 
@@ -204,7 +204,7 @@ class TverskyLoss(nn.Module):
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         num_classes = pred.shape[1]
         target_one_hot = F.one_hot(target.long(), num_classes=num_classes)
-        target_one_hot = target_one_hot.permute(0, 4, 1, 2, 3).float()
+        target_one_hot = target_one_hot.movedim(-1, 1).float()
         pred_soft = F.softmax(pred, dim=1)
 
         pred_flat = pred_soft.reshape(pred.shape[0], num_classes, -1)

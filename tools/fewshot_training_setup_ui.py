@@ -42,8 +42,27 @@ from ui_theme import configure_application, stylesheet as shared_stylesheet
 TITLE = "DINOv3 Few-Shot Training"
 STRATEGY_DATA_KEYS = set(DEFAULT_OPTIONS.keys())
 DECODER_CHOICES = (
+    "feature_unet2d",
     "segformer3d", "token_pyramid3d", "dpt3d", "linear3d", "mlp_probe",
     "conv2d",
+)
+LABEL_SOURCE_CHOICES = (
+    ("Refresh from saved .mcs", "mcs_refresh"),
+    ("Use source dataset segmentations", "source_dataset"),
+    ("Use an exported masks folder", "exported_masks"),
+)
+FEATURE_ENCODER_BACKEND_CHOICES = (
+    ("Compatibility ONNX", "onnx"),
+    ("Native PyTorch weights", "pytorch"),
+)
+DECODER_ITEMS = (
+    ("Frozen Feature 2D", "feature_unet2d"),
+    ("SegFormer 3D", "segformer3d"),
+    ("Token Pyramid 3D", "token_pyramid3d"),
+    ("DPT 3D", "dpt3d"),
+    ("Linear 3D", "linear3d"),
+    ("MLP Probe 3D", "mlp_probe"),
+    ("Convolution 2D", "conv2d"),
 )
 
 
@@ -155,13 +174,14 @@ def default_training_options(config, profile_name=None):
     values.setdefault("base_config", config.get("base_config", "config/research/ct_fewshot_fast.yaml"))
     values.setdefault("strategy", config.get("default_strategy", "adaptive"))
     values.setdefault("epochs", config.get("default_epochs", 20))
-    values["batch_size"] = 1
+    values.setdefault("batch_size", config.get("default_batch_size", 1))
     values.setdefault("grad_accumulation", config.get("default_grad_accumulation", 1))
     values.setdefault("lr", config.get("default_lr", 0.001))
     values.setdefault("weight_decay", config.get("default_weight_decay", 0.01))
     values.setdefault("lr_scheduler", config.get("default_lr_scheduler", "cosine"))
     values.setdefault("warmup_epochs", config.get("default_warmup_epochs", 3))
-    values.setdefault("img_size", config.get("default_img_size", "224,224"))
+    values.setdefault("validation_interval", config.get("default_validation_interval", 2))
+    values.setdefault("img_size", config.get("default_img_size", "256,256"))
     values.setdefault("modality", config.get("default_modality", "ct"))
     values.setdefault("min_samples", config.get("default_min_samples", 1))
     values.setdefault("max_samples", config.get("default_max_samples", 0))
@@ -172,6 +192,11 @@ def default_training_options(config, profile_name=None):
     values.setdefault("decoder", config.get("default_decoder", "segformer3d"))
     values.setdefault("model_scale", config.get("default_model_scale", "vitb16"))
     values.setdefault("model_path", config.get("default_model_path", ""))
+    values.setdefault("model_sha256", config.get("default_model_sha256", ""))
+    values.setdefault(
+        "safetensors_sha256",
+        config.get("default_safetensors_sha256", ""),
+    )
     values.setdefault("lora_rank", config.get("default_lora_rank", 8))
     values.setdefault("lora_alpha", config.get("default_lora_alpha", 16))
     values.setdefault("adapter_bottleneck", config.get("default_adapter_bottleneck", 64))
@@ -181,6 +206,20 @@ def default_training_options(config, profile_name=None):
     values.setdefault("keep_last_checkpoints", config.get("default_keep_last_checkpoints", 2))
     values.setdefault("keep_materialized_dataset", config.get("default_keep_materialized_dataset", False))
     values.setdefault("export_labels_before_training", config.get("default_export_labels_before_training", True))
+    values.setdefault(
+        "label_source",
+        config.get("default_label_source")
+        or (
+            "mcs_refresh"
+            if _bool(values.get("export_labels_before_training", True))
+            else "source_dataset"
+        ),
+    )
+    values.setdefault("label_root", "")
+    values.setdefault(
+        "encoder_backend",
+        config.get("default_feature_encoder_backend", "onnx"),
+    )
     values.setdefault("gpu_lock_timeout_seconds", config.get("gpu_lock_timeout_seconds", 86400))
     values.setdefault(
         "background_mimics_lock_timeout_seconds",
@@ -195,6 +234,9 @@ def training_options_for_organ(config, organ, profile_name=None):
     if not config.get("default_strategy"):
         values["strategy"] = suggested_strategy(organ)
     values.update(strategy_defaults(values.get("strategy")))
+    if str(values.get("decoder")) == "feature_unet2d":
+        values["strategy"] = "full_volume"
+        values.update(strategy_defaults("full_volume"))
     values["mask_names"] = ",".join(configured_mask_names(config, organ))
     return values
 
@@ -222,7 +264,9 @@ def validate_options(options):
         raise ValueError("Unknown DINOv3 training strategy.")
     normalized["epochs"] = _int(normalized.get("epochs", 20), "Epochs", 1)
     normalized["batch_size"] = _int(normalized.get("batch_size", 1), "Batch size", 1)
-    if normalized["batch_size"] != 1:
+    decoder = str(normalized.get("decoder", "segformer3d"))
+    cached_slices = decoder == "feature_unet2d"
+    if not cached_slices and normalized["batch_size"] != 1:
         raise ValueError(
             "Batch size must stay 1 for variable-depth 3D Mimics cases. "
             "Use Grad accumulation to increase the effective batch size."
@@ -241,14 +285,57 @@ def validate_options(options):
     if normalized["lr_scheduler"] not in ("constant", "constant_warmup", "cosine"):
         raise ValueError("Learning-rate schedule must be constant, constant with warmup, or cosine.")
     normalized["warmup_epochs"] = _int(normalized.get("warmup_epochs", 3), "Warmup epochs", 0)
-    if str(normalized.get("decoder", "segformer3d")) not in DECODER_CHOICES:
+    normalized["validation_interval"] = _int(
+        normalized.get("validation_interval", 2),
+        "Validation interval",
+        1,
+    )
+    if decoder not in DECODER_CHOICES:
         raise ValueError("Unsupported decoder: {0}".format(normalized.get("decoder")))
     normalized["val_fraction"] = _float(normalized.get("val_fraction", 0.2), "Validation fraction")
     normalized["mixed_precision"] = _bool(normalized.get("mixed_precision", False))
     normalized["sub_volume"] = _bool(normalized.get("sub_volume", False))
     normalized["keep_materialized_dataset"] = _bool(normalized.get("keep_materialized_dataset", False))
-    normalized["export_labels_before_training"] = _bool(normalized.get("export_labels_before_training", True))
+    label_source = str(normalized.get("label_source") or "").strip().lower()
+    legacy_export_requested = _bool(
+        normalized.get("export_labels_before_training", True)
+    )
+    if not label_source:
+        label_source = (
+            "mcs_refresh"
+            if legacy_export_requested
+            else "source_dataset"
+        )
+    elif label_source == "mcs_refresh" and not legacy_export_requested:
+        # Preserve saved configurations from the former checkbox-only UI.
+        label_source = "source_dataset"
+    if label_source not in {value for _label, value in LABEL_SOURCE_CHOICES}:
+        raise ValueError("Unknown training label source.")
+    normalized["label_source"] = label_source
+    normalized["export_labels_before_training"] = label_source == "mcs_refresh"
+    label_root = str(normalized.get("label_root", "") or "").strip()
+    normalized["label_root"] = (
+        os.path.abspath(os.path.expanduser(os.path.expandvars(label_root)))
+        if label_root
+        else ""
+    )
+    if label_source == "exported_masks":
+        if not normalized["label_root"]:
+            raise ValueError("Choose the exported masks folder.")
+        if not os.path.isdir(normalized["label_root"]):
+            raise ValueError("The exported masks folder does not exist.")
     normalized["mask_names"] = ",".join(split_csv(normalized.get("mask_names", "")))
+    normalized["model_sha256"] = str(
+        normalized.get("model_sha256", "") or ""
+    ).strip().lower()
+    if normalized["model_sha256"] and (
+        len(normalized["model_sha256"]) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in normalized["model_sha256"]
+        )
+    ):
+        raise ValueError("Model SHA-256 must contain exactly 64 hexadecimal characters.")
     normalized["mcs_output_dir"] = os.path.abspath(os.path.expanduser(
         str(normalized.get("mcs_output_dir", "") or "")
     )) if str(normalized.get("mcs_output_dir", "") or "").strip() else ""
@@ -264,6 +351,49 @@ def validate_options(options):
     if len(sv_parts) != 3:
         raise ValueError("Sub-volume size must be formatted as z,y,x.")
     [_int(part, "Sub-volume size", 1) for part in sv_parts]
+    if cached_slices:
+        encoder_backend = str(
+            normalized.get("encoder_backend") or "onnx"
+        ).strip().lower()
+        if encoder_backend not in {"onnx", "pytorch"}:
+            raise ValueError("Frozen Feature 2D encoder must be ONNX or PyTorch.")
+        normalized["encoder_backend"] = encoder_backend
+        if normalized["lr_scheduler"] == "constant_warmup":
+            raise ValueError(
+                "Frozen feature slice training supports cosine or constant learning rate."
+            )
+        normalized.update({
+            "strategy": "full_volume",
+            "finetune_method": "frozen",
+            "model_scale": "vits16",
+            "sampling_mode": "full",
+            "channel_policy": "repeat",
+            "slice_axis": "axial",
+            "grad_accumulation": 1,
+            "mixed_precision": False,
+            "sub_volume": False,
+            "warmup_epochs": 0,
+        })
+        if (
+            encoder_backend == "onnx"
+            and not str(normalized.get("model_path", "") or "").strip()
+        ):
+            normalized["img_size"] = "256,256"
+        elif encoder_backend == "pytorch":
+            if not str(normalized.get("model_path", "") or "").strip():
+                normalized["model_sha256"] = str(
+                    normalized.get("safetensors_sha256")
+                    or ""
+                ).strip().lower()
+    else:
+        normalized["encoder_backend"] = "pytorch"
+        if not str(normalized.get("model_path", "") or "").strip():
+            if str(normalized.get("model_scale", "")).lower() == "vits16":
+                raise ValueError(
+                    "The bundled ViT-S/16 encoder is available through Frozen Feature 2D. "
+                    "Choose that decoder or select a PyTorch ViT-B/16 or ViT-L/16 model."
+                )
+            normalized["model_sha256"] = ""
     return normalized
 
 
@@ -290,8 +420,13 @@ def append_training_args(cmd, config, options):
         str(options.get("lr_scheduler", config.get("default_lr_scheduler", "cosine"))),
         "--warmup-epochs",
         str(int(options.get("warmup_epochs", config.get("default_warmup_epochs", 3)))),
+        "--validation-interval",
+        str(int(options.get(
+            "validation_interval",
+            config.get("default_validation_interval", 2),
+        ))),
         "--img-size",
-        str(options.get("img_size", config.get("default_img_size", "224,224"))),
+        str(options.get("img_size", config.get("default_img_size", "256,256"))),
         "--modality",
         str(options.get("modality", config.get("default_modality", "ct"))),
         "--min-samples",
@@ -310,6 +445,8 @@ def append_training_args(cmd, config, options):
         str(options.get("decoder", config.get("default_decoder", "segformer3d"))),
         "--model-scale",
         str(options.get("model_scale", config.get("default_model_scale", "vitb16"))),
+        "--encoder-backend",
+        str(options.get("encoder_backend", "auto")),
         "--lora-rank",
         str(int(options.get("lora_rank", config.get("default_lora_rank", 8)))),
         "--lora-alpha",
@@ -329,6 +466,11 @@ def append_training_args(cmd, config, options):
     model_path = str(options.get("model_path", config.get("default_model_path", "")) or "")
     if model_path:
         cmd.extend(["--model-path", model_path])
+    model_sha256 = str(
+        options.get("model_sha256", config.get("default_model_sha256", "")) or ""
+    ).strip()
+    if model_sha256:
+        cmd.extend(["--model-sha256", model_sha256])
     val_cases = split_csv(options.get("val_cases", ""))
     if val_cases:
         cmd.extend(["--val-cases", ",".join(val_cases)])
@@ -345,6 +487,9 @@ def append_training_args(cmd, config, options):
     ])
     if bool(options.get("keep_materialized_dataset", config.get("default_keep_materialized_dataset", False))):
         cmd.append("--keep-materialized-dataset")
+    label_root = str(options.get("label_root", "") or "").strip()
+    if label_root:
+        cmd.extend(["--label-root", label_root])
     mask_names = split_csv(options.get("mask_names", ""))
     if mask_names:
         cmd.extend(["--mask-names", ",".join(mask_names)])
@@ -354,11 +499,20 @@ def prepare_training_launch(context, options, run_id=None):
     config = context.get("config") or {}
     organ = context["organ"]
     options = dict(options)
-    if bool(options.get("export_labels_before_training", True)) and not split_csv(options.get("mask_names", "")):
+    if (
+        str(options.get("label_source") or "mcs_refresh") == "mcs_refresh"
+        and not split_csv(options.get("mask_names", ""))
+    ):
         options["mask_names"] = ",".join(configured_mask_names(config, organ))
     options = validate_options(options)
-    ts_root = context["ts_root"]
-    workspace = context["workspace"]
+    ts_root = os.path.abspath(
+        os.path.expanduser(os.path.expandvars(str(context.get("ts_root") or "")))
+    ) if str(context.get("ts_root") or "").strip() else ""
+    if not ts_root or not os.path.isdir(ts_root):
+        raise RuntimeError("Choose an existing source image root before starting training.")
+    workspace = os.path.join(ts_root, "fewshot_models")
+    context["ts_root"] = ts_root
+    context["workspace"] = workspace
     python_exe = context.get("python_exe") or sys.executable
     run_id = run_id or "train_{0}_{1}".format(time.strftime("%Y%m%dT%H%M%S"), uuid.uuid4().hex[:8])
     organ_slug = safe_slug(organ)
@@ -379,7 +533,7 @@ def prepare_training_launch(context, options, run_id=None):
         "--run-id",
         run_id,
     ]
-    if bool(options.get("export_labels_before_training", True)):
+    if str(options.get("label_source") or "mcs_refresh") == "mcs_refresh":
         if "mimics_exe" in context and not str(context.get("mimics_exe") or "").strip():
             raise RuntimeError(
                 "Refreshing labels requires a separate background Mimics executable. "
@@ -465,7 +619,7 @@ def launch_training(context, options):
             "kind": "train_setup",
             "status": "training_started",
             "organ": context.get("organ"),
-            "ts_root": os.path.abspath(context.get("ts_root", "")),
+            "ts_root": str(context.get("ts_root") or ""),
             "workspace": context.get("workspace"),
             "training_job_id": launch["run_id"],
             "training_status_path": launch["status_path"],
@@ -637,7 +791,17 @@ class TrainingSetupApp(object):
             self.config, self.context.get("organ"), default_profile,
         )
         if isinstance(self.context.get("initial_options"), dict):
-            self.values.update(self.context.get("initial_options") or {})
+            initial_options = self.context.get("initial_options") or {}
+            self.values.update(initial_options)
+            if (
+                "export_labels_before_training" in initial_options
+                and "label_source" not in initial_options
+            ):
+                self.values["label_source"] = (
+                    "mcs_refresh"
+                    if _bool(initial_options["export_labels_before_training"])
+                    else "source_dataset"
+                )
         self.started = False
         self.status_var = None
         self.vars = {}
@@ -878,7 +1042,13 @@ class TrainingSetupApp(object):
 
         ttk.Label(left, text="These change the model family used for this organ. Keep defaults unless comparing strategies.").pack(anchor="w", pady=(0, 8))
         self._labeled_combo(left, "Fine-tuning", "finetune_method", ["lora", "frozen", "adapter", "full"], width=24)
-        self._labeled_combo(left, "Decoder", "decoder", list(DECODER_CHOICES), width=24)
+        self._labeled_combo(
+            left,
+            "Training architecture",
+            "decoder",
+            list(DECODER_CHOICES),
+            width=24,
+        )
         self._labeled_combo(left, "Pretrained scale", "model_scale", self._available_model_scales(), width=24)
         self._labeled_spinbox(left, "LoRA rank", "lora_rank", 1, 128, 1, 10)
         self._labeled_spinbox(left, "LoRA alpha", "lora_alpha", 1, 512, 1, 10)
@@ -892,12 +1062,21 @@ class TrainingSetupApp(object):
 
         ttk.Label(right, text="These affect runtime, memory use, validation, and disk retention.").pack(anchor="w", pady=(0, 8))
         self._labeled_spinbox(right, "Epochs", "epochs", 1, 10000, 1, 10)
-        self._labeled_spinbox(right, "Batch size (fixed)", "batch_size", 1, 1, 1, 10)
+        self._labeled_spinbox(right, "Slice batch size", "batch_size", 1, 64, 1, 10)
         self._labeled_spinbox(right, "Grad accumulation", "grad_accumulation", 1, 1024, 1, 10)
         self._labeled_combo(right, "Learning rate", "lr", self.LR_CHOICES, width=14)
         self._labeled_combo(right, "Weight decay", "weight_decay", self.WEIGHT_DECAY_CHOICES, width=14)
         self._labeled_combo(right, "LR schedule", "lr_scheduler", ["cosine", "constant_warmup", "constant"], width=18)
         self._labeled_spinbox(right, "Warmup epochs", "warmup_epochs", 0, 1000, 1, 10)
+        self._labeled_spinbox(
+            right,
+            "Validation interval",
+            "validation_interval",
+            1,
+            1000,
+            1,
+            10,
+        )
         self.img_size_choice_widget = self._labeled_combo(
             right,
             "Image detail",
@@ -963,6 +1142,7 @@ class TrainingSetupApp(object):
         choices = []
         root = self.context.get("dinov3_root") or ""
         model_dirs = [
+            ("vits16", "dinov3-vits16"),
             ("vitb16", "dinov3-vitb16"),
             ("vitl16", "dinov3-vitl16"),
             ("vith16plus", "dinov3-vith16plus"),
@@ -1351,7 +1531,17 @@ class QtTrainingSetupApp(object):
             self.config, self.context.get("organ"), default_profile,
         )
         if isinstance(self.context.get("initial_options"), dict):
-            self.values.update(self.context.get("initial_options") or {})
+            initial_options = self.context.get("initial_options") or {}
+            self.values.update(initial_options)
+            if (
+                "export_labels_before_training" in initial_options
+                and "label_source" not in initial_options
+            ):
+                self.values["label_source"] = (
+                    "mcs_refresh"
+                    if _bool(initial_options["export_labels_before_training"])
+                    else "source_dataset"
+                )
         self.widgets = {}
         self.quick_widgets = {}
         self.case_list = None
@@ -1359,6 +1549,8 @@ class QtTrainingSetupApp(object):
         self.dataset_edit = None
         self.mcs_folder_edit = None
         self.mask_names_edit = None
+        self.label_root_edit = None
+        self.label_root_browse = None
         self.status_label = None
         self.status_text = None
         self.start_button = None
@@ -1371,6 +1563,7 @@ class QtTrainingSetupApp(object):
         self._closing = False
         self._syncing_quick = False
         self._dataset_scan_generation = 0
+        self._dataset_scan_pending = False
         self._dataset_scan_results = Queue()
         self._dataset_scan_timer = self.QtCore.QTimer(self.window)
         self._dataset_scan_timer.timeout.connect(self._poll_dataset_scan)
@@ -1472,7 +1665,7 @@ class QtTrainingSetupApp(object):
         profile_layout = QtWidgets.QGridLayout(profile_group)
         profile_layout.setColumnStretch(1, 1)
         profile_layout.addWidget(QtWidgets.QLabel("Source image root"), 0, 0)
-        self.dataset_edit = QtWidgets.QLineEdit(os.path.abspath(self.context.get("ts_root", "")))
+        self.dataset_edit = QtWidgets.QLineEdit(str(self.context.get("ts_root") or ""))
         self.dataset_edit.editingFinished.connect(self.apply_dataset_from_field)
         profile_layout.addWidget(self.dataset_edit, 0, 1)
         browse = QtWidgets.QPushButton("Browse")
@@ -1545,18 +1738,38 @@ class QtTrainingSetupApp(object):
         mins.addWidget(self.widgets["min_val_samples"])
         mins.addStretch(1)
         sample_layout.addLayout(mins)
-        self.widgets["export_labels_before_training"] = QtWidgets.QCheckBox(
-            "Refresh labels from saved .mcs before training"
+        label_source_row = QtWidgets.QHBoxLayout()
+        label_source_row.addWidget(QtWidgets.QLabel("Training labels"))
+        self.widgets["label_source"] = self._data_combo(
+            LABEL_SOURCE_CHOICES,
+            self.values.get("label_source", "mcs_refresh"),
         )
-        self.widgets["export_labels_before_training"].setChecked(
-            _bool(self.values.get("export_labels_before_training", True))
+        self.widgets["label_source"].setToolTip(
+            "Refresh from .mcs uses the newest saved edits. Source dataset uses "
+            "<case>/segmentations. Exported masks uses a reusable export folder."
         )
-        self.widgets["export_labels_before_training"].setToolTip(
-            "Turn this off only when labels have already been exported and a background import/export Mimics process is still busy."
+        self.widgets["label_source"].currentIndexChanged.connect(
+            self._refresh_label_source_enabled
         )
-        sample_layout.addWidget(self.widgets["export_labels_before_training"])
+        label_source_row.addWidget(self.widgets["label_source"], 1)
+        sample_layout.addLayout(label_source_row)
+
+        label_root_row = QtWidgets.QHBoxLayout()
+        label_root_row.addWidget(QtWidgets.QLabel("Exported masks folder"))
+        self.label_root_edit = QtWidgets.QLineEdit(
+            str(self.values.get("label_root", "") or "")
+        )
+        self.label_root_edit.setPlaceholderText(
+            "Contains <case>/segmentations/<mask>.nii.gz"
+        )
+        label_root_row.addWidget(self.label_root_edit, 1)
+        self.label_root_browse = QtWidgets.QPushButton("Browse")
+        self.label_root_browse.clicked.connect(self.browse_label_root)
+        label_root_row.addWidget(self.label_root_browse)
+        sample_layout.addLayout(label_root_row)
         layout.addWidget(sample_group, 1)
         layout.addStretch(1)
+        self._refresh_label_source_enabled()
         return tab
 
     def _build_expert_tab(self):
@@ -1629,7 +1842,8 @@ class QtTrainingSetupApp(object):
             data_form.addRow(label, self.widgets[key])
 
         self.widgets["loss_type"] = self._data_combo([
-            ("Automatic (Dice + Focal)", "auto"), ("Dice + Focal", "dice_focal"),
+            ("Automatic (Dice + Focal)", "auto"), ("Cross entropy", "ce"),
+            ("Dice + Focal", "dice_focal"),
             ("Dice + Cross Entropy", "dice_ce"),
         ], self.values.get("loss_type"))
         self.widgets["keep_largest_component"] = QtWidgets.QCheckBox("Keep largest connected component")
@@ -1660,15 +1874,34 @@ class QtTrainingSetupApp(object):
         left_form.addRow(model_hint)
         self.widgets["finetune_method"] = self._combo(["frozen", "lora", "adapter"], self.values.get("finetune_method", "frozen"))
         self.widgets["finetune_method"].currentTextChanged.connect(self._refresh_method_enabled)
-        self.widgets["decoder"] = self._combo(DECODER_CHOICES, self.values.get("decoder", "segformer3d"))
-        self.widgets["decoder"].setToolTip("3D heads fuse slices volumetrically. conv2d heads decode slices independently and stack them back into a 3D mask.")
+        self.widgets["decoder"] = self._data_combo(
+            DECODER_ITEMS,
+            self.values.get("decoder", "segformer3d"),
+        )
+        self.widgets["decoder"].setToolTip(
+            "Frozen Feature 2D uses a frozen ViT-S encoder and a trainable slice "
+            "decoder. Original architectures retain their existing PyTorch "
+            "2D and 3D decoding paths."
+        )
+        self.widgets["encoder_backend"] = self._data_combo(
+            FEATURE_ENCODER_BACKEND_CHOICES,
+            self.values.get("encoder_backend", "onnx"),
+        )
+        self.widgets["encoder_backend"].setToolTip(
+            "Compatibility ONNX reproduces the verified external feature contract. "
+            "Native PyTorch loads model.safetensors and is not numerically interchangeable."
+        )
+        self.widgets["encoder_backend"].currentIndexChanged.connect(
+            self._refresh_method_enabled
+        )
         self.widgets["model_scale"] = self._combo(self._available_model_scales(), self.values.get("model_scale", "vitb16"))
         self.widgets["lora_rank"] = self._spin(1, 128, self.values.get("lora_rank", 8))
         self.widgets["lora_alpha"] = self._spin(1, 512, self.values.get("lora_alpha", 16))
         self.widgets["adapter_bottleneck"] = self._spin(1, 512, self.values.get("adapter_bottleneck", 64))
         for label, key in [
             ("Fine-tuning", "finetune_method"),
-            ("Decoder", "decoder"),
+            ("Training architecture", "decoder"),
+            ("Encoder weights", "encoder_backend"),
             ("Pretrained scale", "model_scale"),
             ("LoRA rank", "lora_rank"),
             ("LoRA alpha", "lora_alpha"),
@@ -1683,20 +1916,33 @@ class QtTrainingSetupApp(object):
         backend_hint.setWordWrap(True)
         left_form.addRow(backend_hint)
 
-        resource_hint = QtWidgets.QLabel("Batch size is fixed at 1 for variable-depth volumes. Grad accumulation controls the effective batch.")
+        self.resource_hint = QtWidgets.QLabel(
+            "Batch size is fixed at 1 for variable-depth volumes. "
+            "Grad accumulation controls the effective batch."
+        )
+        resource_hint = self.resource_hint
         resource_hint.setWordWrap(True)
         right_form.addRow(resource_hint)
         self.widgets["epochs"] = self._spin(1, 10000, self.values.get("epochs", 20))
-        self.widgets["batch_size"] = self._spin(1, 1, 1)
-        self.widgets["batch_size"].setVisible(False)
+        self.widgets["batch_size"] = self._spin(
+            1,
+            64,
+            self.values.get("batch_size", 1),
+        )
         self.widgets["batch_size"].setToolTip(
-            "Fixed at 1 because Mimics cases can have different z-depth. Use Grad accumulation for a larger effective batch."
+            "This is a real 2D slice batch for the frozen feature decoder. "
+            "Other decoders use one variable-depth volume per batch."
         )
         self.widgets["grad_accumulation"] = self._spin(1, 1024, self.values.get("grad_accumulation", 1))
         self.widgets["lr"] = self._combo(self.LR_CHOICES, self.values.get("lr", "0.001"), editable=True)
         self.widgets["weight_decay"] = self._combo(self.WEIGHT_DECAY_CHOICES, self.values.get("weight_decay", "0.01"), editable=True)
         self.widgets["lr_scheduler"] = self._combo(["cosine", "constant_warmup", "constant"], self.values.get("lr_scheduler", "cosine"))
         self.widgets["warmup_epochs"] = self._spin(0, 1000, self.values.get("warmup_epochs", 3))
+        self.widgets["validation_interval"] = self._spin(
+            1,
+            1000,
+            self.values.get("validation_interval", 2),
+        )
         img_label = self._img_size_choice_from_value(self.values.get("img_size", "224,224"))
         self.quick_widgets["img_size_choice"] = self._combo([label for label, _ in self.IMG_SIZE_CHOICES] + [self.IMG_SIZE_CUSTOM_LABEL], img_label)
         self.widgets["img_size"] = QtWidgets.QLineEdit(str(self.values.get("img_size", "224,224")))
@@ -1719,6 +1965,8 @@ class QtTrainingSetupApp(object):
             ("Weight decay", "weight_decay"),
             ("LR schedule", "lr_scheduler"),
             ("Warmup epochs", "warmup_epochs"),
+            ("Validation every N epochs", "validation_interval"),
+            ("Slice batch size", "batch_size"),
         ]:
             right_form.addRow(label, self.widgets[key])
         right_form.addRow("Image detail", self.quick_widgets["img_size_choice"])
@@ -1737,6 +1985,7 @@ class QtTrainingSetupApp(object):
         self.widgets["sub_volume"].stateChanged.connect(self._refresh_method_enabled)
         self.widgets["lr_scheduler"].currentTextChanged.connect(self._refresh_method_enabled)
         self.widgets["decoder"].currentTextChanged.connect(self._update_dimensionality_summary)
+        self.widgets["decoder"].currentTextChanged.connect(self._refresh_method_enabled)
         self.widgets["sampling_mode"].currentTextChanged.connect(self._update_dimensionality_summary)
         self.widgets["channel_policy"].currentTextChanged.connect(self._update_dimensionality_summary)
         self._set_custom_size_entry_state()
@@ -1841,6 +2090,39 @@ class QtTrainingSetupApp(object):
             self.mcs_folder_edit.setText(os.path.abspath(path))
             self.context["mcs_output_dir"] = os.path.abspath(path)
 
+    def browse_label_root(self):
+        current = (
+            str(self.label_root_edit.text()).strip()
+            if self.label_root_edit is not None
+            else ""
+        )
+        path = self.QtWidgets.QFileDialog.getExistingDirectory(
+            self.window,
+            "Select exported masks folder",
+            current or str(Path.home()),
+            self.QtWidgets.QFileDialog.ShowDirsOnly,
+        )
+        if path and self.label_root_edit is not None:
+            self.label_root_edit.setText(os.path.abspath(path))
+
+    def _refresh_label_source_enabled(self):
+        widget = self.widgets.get("label_source")
+        source = (
+            str(widget.currentData() or "mcs_refresh")
+            if widget is not None
+            else str(self.values.get("label_source", "mcs_refresh"))
+        )
+        use_mcs = source == "mcs_refresh"
+        use_export = source == "exported_masks"
+        self.values["label_source"] = source
+        self.values["export_labels_before_training"] = use_mcs
+        for control in (self.mcs_folder_edit, self.mask_names_edit):
+            if control is not None:
+                control.setEnabled(use_mcs)
+        for control in (self.label_root_edit, self.label_root_browse):
+            if control is not None:
+                control.setEnabled(use_export)
+
     def apply_dataset_from_field(self):
         if self.dataset_edit is None:
             return
@@ -1849,15 +2131,23 @@ class QtTrainingSetupApp(object):
             self.apply_dataset_root(path)
 
     def apply_dataset_root(self, path):
-        path = os.path.abspath(os.path.expanduser(os.path.expandvars(str(path))))
+        raw_path = str(path or "").strip()
+        if not raw_path:
+            self._dataset_scan_pending = False
+            self._set_status("Choose the source image root to continue.")
+            return
+        path = os.path.abspath(os.path.expanduser(os.path.expandvars(raw_path)))
         if self.dataset_edit is not None and self.dataset_edit.text() != path:
             self.dataset_edit.setText(path)
         self._dataset_scan_generation += 1
+        self._dataset_scan_pending = True
         generation = self._dataset_scan_generation
         project_root = self.context.get("project_root", "")
         self._set_status("Checking dataset in the background...")
         if self.case_list is not None:
             self.case_list.setEnabled(False)
+        if self.start_button is not None:
+            self.start_button.setEnabled(False)
 
         def scan_dataset():
             try:
@@ -1884,11 +2174,15 @@ class QtTrainingSetupApp(object):
             if generation != self._dataset_scan_generation:
                 continue
             if error:
+                self._dataset_scan_pending = False
                 self._set_status(error)
                 self._append_log(error)
                 if self.case_list is not None:
                     self.case_list.setEnabled(True)
+                if self.start_button is not None and not self.started:
+                    self.start_button.setEnabled(True)
                 continue
+            self._dataset_scan_pending = False
             self.context["ts_root"] = path
             self.context["workspace"] = os.path.join(path, "fewshot_models")
             self.context["mcs_output_dir"] = output_dir
@@ -1899,6 +2193,8 @@ class QtTrainingSetupApp(object):
                 self.case_list.clear()
                 self.case_list.addItems([str(case_id) for case_id in cases])
                 self.case_list.setEnabled(True)
+            if self.start_button is not None and not self.started:
+                self.start_button.setEnabled(True)
             message = "Dataset changed: {0} ({1} cases found)".format(path, len(cases))
             self._set_status(message)
             self._append_log(message)
@@ -1948,6 +2244,8 @@ class QtTrainingSetupApp(object):
         if isinstance(widget, self.QtWidgets.QDoubleSpinBox):
             return float(widget.value())
         if isinstance(widget, self.QtWidgets.QComboBox):
+            if key in ("decoder", "label_source", "encoder_backend"):
+                return str(widget.currentData() or widget.currentText())
             if key == "strategy" or key in STRATEGY_DATA_KEYS:
                 return str(widget.currentData() or "adaptive")
             return str(widget.currentText())
@@ -1973,7 +2271,12 @@ class QtTrainingSetupApp(object):
             except Exception:
                 pass
         elif isinstance(widget, self.QtWidgets.QComboBox):
-            if key == "strategy" or key in STRATEGY_DATA_KEYS:
+            if key in (
+                "strategy",
+                "decoder",
+                "label_source",
+                "encoder_backend",
+            ) or key in STRATEGY_DATA_KEYS:
                 index = widget.findData(str(value))
                 if index >= 0:
                     widget.setCurrentIndex(index)
@@ -1999,6 +2302,8 @@ class QtTrainingSetupApp(object):
             values["mcs_output_dir"] = str(self.mcs_folder_edit.text()).strip()
         if self.mask_names_edit is not None:
             values["mask_names"] = str(self.mask_names_edit.text()).strip()
+        if self.label_root_edit is not None:
+            values["label_root"] = str(self.label_root_edit.text()).strip()
         for key in list(self.widgets.keys()):
             if key == "sub_volume_depth":
                 continue
@@ -2036,10 +2341,41 @@ class QtTrainingSetupApp(object):
         widget = self.widgets.get("img_size")
         choice = self.quick_widgets.get("img_size_choice")
         if widget is not None and choice is not None:
-            widget.setEnabled(True)
+            fixed_default_encoder = (
+                str(self._widget_value("decoder") or "") == "feature_unet2d"
+                and str(self._widget_value("encoder_backend") or "onnx") == "onnx"
+                and not str(self.values.get("model_path", "") or "").strip()
+            )
+            choice.setEnabled(not fixed_default_encoder)
+            widget.setEnabled(not fixed_default_encoder)
+
+    @staticmethod
+    def _set_combo_item_enabled(widget, text, enabled):
+        if widget is None:
+            return
+        index = widget.findText(text)
+        model = widget.model()
+        item = (
+            model.item(index)
+            if index >= 0 and hasattr(model, "item")
+            else None
+        )
+        if item is not None:
+            item.setEnabled(bool(enabled))
 
     def _refresh_method_enabled(self):
+        decoder_widget = self.widgets.get("decoder")
+        cached_slices = (
+            decoder_widget is not None
+            and str(self._widget_value("decoder")) == "feature_unet2d"
+        )
         method_widget = self.widgets.get("finetune_method")
+        backend_widget = self.widgets.get("encoder_backend")
+        encoder_backend = str(
+            self._widget_value("encoder_backend") or "onnx"
+        ).lower()
+        if cached_slices and method_widget is not None and method_widget.currentText() != "frozen":
+            self._set_widget_value("finetune_method", "frozen")
         method = str(method_widget.currentText() if method_widget is not None else "").lower()
         lora_enabled = method == "lora"
         adapter_enabled = method == "adapter"
@@ -2057,7 +2393,111 @@ class QtTrainingSetupApp(object):
         scheduler = self.widgets.get("lr_scheduler")
         warmup = self.widgets.get("warmup_epochs")
         if scheduler is not None and warmup is not None:
-            warmup.setEnabled(str(scheduler.currentText()) in ("cosine", "constant_warmup"))
+            self._set_combo_item_enabled(
+                scheduler,
+                "constant_warmup",
+                not cached_slices,
+            )
+            if cached_slices and str(scheduler.currentText()) == "constant_warmup":
+                self._set_widget_value("lr_scheduler", "cosine")
+            warmup.setEnabled(
+                not cached_slices
+                and str(scheduler.currentText()) in ("cosine", "constant_warmup")
+            )
+        if cached_slices:
+            model_scale_widget = self.widgets.get("model_scale")
+            self._set_combo_item_enabled(model_scale_widget, "vits16", True)
+            strategy_widget = self.widgets.get("strategy")
+            if strategy_widget is not None:
+                blocked = strategy_widget.blockSignals(True)
+                try:
+                    self._set_widget_value("strategy", "full_volume")
+                finally:
+                    strategy_widget.blockSignals(blocked)
+                self._update_strategy_summary()
+            if (
+                encoder_backend == "onnx"
+                and not str(self.values.get("model_path", "") or "").strip()
+            ):
+                self.widgets["img_size"].setText("256,256")
+                self._set_combo_value(
+                    self.quick_widgets["img_size_choice"],
+                    self._img_size_choice_from_value("256,256"),
+                )
+                self.values["model_sha256"] = str(
+                    self.config.get("default_model_sha256", "") or ""
+                )
+            elif (
+                encoder_backend == "pytorch"
+                and not str(self.values.get("model_path", "") or "").strip()
+            ):
+                if self.widgets["img_size"].text().strip() == "256,256":
+                    self.widgets["img_size"].setText("224,224")
+                    self._set_combo_value(
+                        self.quick_widgets["img_size_choice"],
+                        self._img_size_choice_from_value("224,224"),
+                    )
+                self.values["model_sha256"] = str(
+                    self.config.get("default_safetensors_sha256", "") or ""
+                )
+            for key, value in (
+                ("model_scale", "vits16"),
+                ("sampling_mode", "full"),
+                ("channel_policy", "repeat"),
+                ("slice_axis", "axial"),
+                ("grad_accumulation", 1),
+            ):
+                self._set_widget_value(key, value)
+            self.widgets["mixed_precision"].setChecked(False)
+            self.widgets["sub_volume"].setChecked(False)
+            if self._widget_value("loss_type") == "auto":
+                self._set_widget_value("loss_type", "ce")
+            if int(self._widget_value("batch_size") or 1) == 1:
+                self._set_widget_value("batch_size", 4)
+        else:
+            self._set_widget_value("encoder_backend", "pytorch")
+            model_scale_widget = self.widgets.get("model_scale")
+            custom_model_path = bool(str(self.values.get("model_path", "") or "").strip())
+            if (
+                model_scale_widget is not None
+                and not custom_model_path
+                and str(self._widget_value("model_scale") or "").lower() == "vits16"
+            ):
+                self._set_widget_value("model_scale", "vitb16")
+            if model_scale_widget is not None:
+                self._set_combo_item_enabled(
+                    model_scale_widget,
+                    "vits16",
+                    custom_model_path,
+                )
+        self._set_custom_size_entry_state()
+        batch = self.widgets.get("batch_size")
+        if batch is not None:
+            batch.setVisible(cached_slices)
+            if not cached_slices:
+                self._set_widget_value("batch_size", 1)
+        for key in (
+            "finetune_method",
+            "model_scale",
+            "channel_policy",
+            "slice_axis",
+            "grad_accumulation",
+            "mixed_precision",
+            "sub_volume",
+        ):
+            widget = self.widgets.get(key)
+            if widget is not None:
+                widget.setEnabled(not cached_slices)
+        if backend_widget is not None:
+            backend_widget.setEnabled(cached_slices)
+        if hasattr(self, "resource_hint"):
+            self.resource_hint.setText(
+                "Slices are shuffled across cases and trained in real batches; "
+                "the frozen encoder is computed once."
+                if cached_slices
+                else "Batch size is fixed at 1 for variable-depth volumes. "
+                "Grad accumulation controls the effective batch."
+            )
 
     def _update_strategy_summary(self):
         widget = self.widgets.get("strategy")
@@ -2090,6 +2530,10 @@ class QtTrainingSetupApp(object):
         self._refresh_strategy_enabled()
 
     def _refresh_strategy_enabled(self):
+        cached_slices = str(self._widget_value("decoder") or "") == "feature_unet2d"
+        strategy_widget = self.widgets.get("strategy")
+        if strategy_widget is not None:
+            strategy_widget.setEnabled(not cached_slices)
         sampling = str(self._widget_value("sampling_mode") or "full")
         patch_enabled = sampling in ("adaptive", "patch")
         for key in ("patch_size_mode", "patch_focus", "patches_per_case"):
@@ -2098,6 +2542,18 @@ class QtTrainingSetupApp(object):
         custom_patch = patch_enabled and self._widget_value("patch_size_mode") == "custom"
         self.widgets["patch_size_zyx"].setEnabled(custom_patch)
         self.widgets["neighbor_distance_mm"].setEnabled(self._widget_value("channel_policy") == "2_5d")
+        if cached_slices:
+            for key in (
+                "sampling_mode",
+                "patch_size_mode",
+                "patch_size_zyx",
+                "patch_focus",
+                "patches_per_case",
+                "channel_policy",
+                "slice_axis",
+                "neighbor_distance_mm",
+            ):
+                self.widgets[key].setEnabled(False)
         self._update_dimensionality_summary()
 
     def _update_dimensionality_summary(self, *_args):
@@ -2108,7 +2564,11 @@ class QtTrainingSetupApp(object):
         channels = str(self._widget_value("channel_policy") or "repeat")
         region = "a 3D sub-volume" if sampling == "patch" else ("a fingerprint-selected 3D region" if sampling == "adaptive" else "the full 3D volume")
         context = "neighboring-slice (2.5D) encoder context" if channels == "2_5d" else "single-slice encoder context"
-        if decoder.startswith("conv2d"):
+        if decoder == "feature_unet2d":
+            region = "native-grid axial slices with no 3D resampling"
+            context = "one cached frozen DINO feature map plus raw grayscale skips"
+            decoding = "independent 2D decoding followed by ordered 3D stacking"
+        elif decoder.startswith("conv2d"):
             decoding = "slice-wise 2D decoding followed by ordered 3D stacking"
         else:
             decoding = "volumetric 3D feature decoding"
@@ -2178,6 +2638,19 @@ class QtTrainingSetupApp(object):
         self._append_log("Applied profile: {0}".format(profile_name or "default"))
 
     def collect_options(self):
+        if self._dataset_scan_pending:
+            raise RuntimeError("Wait for the dataset check to finish.")
+        selected_root = str(self.dataset_edit.text() if self.dataset_edit is not None else "").strip()
+        selected_root = os.path.abspath(
+            os.path.expanduser(os.path.expandvars(selected_root))
+        ) if selected_root else ""
+        active_root = str(self.context.get("ts_root") or "").strip()
+        if not selected_root or not os.path.isdir(selected_root):
+            raise RuntimeError("Choose an existing source image root.")
+        if os.path.normcase(selected_root) != os.path.normcase(active_root):
+            raise RuntimeError(
+                "The dataset path changed. Press Enter or leave the field, then wait for its check to finish."
+            )
         self._sync_image_size_choice()
         options = self._current_values()
         selected = []
@@ -2268,7 +2741,7 @@ class QtTrainingSetupApp(object):
             "kind": "train_setup",
             "status": "failed",
             "organ": self.context.get("organ"),
-            "ts_root": os.path.abspath(self.context.get("ts_root", "")),
+            "ts_root": str(self.context.get("ts_root") or ""),
             "error": str(exc),
             "traceback": traceback.format_exc(),
             "updated_at_epoch": time.time(),
@@ -2392,10 +2865,10 @@ def generate_preview(path, tab="setup"):
     draw.text((32, 126), "Save edited .mcs projects before starting. Training exports labels from saved projects in the background.", fill="#9a5b00", font=font)
 
     draw.rectangle((30, 166, width - 30, height - 180), outline="#d1d5db", width=2, fill="#ffffff")
-    draw.rectangle((30, 166, 250, 212), fill="#e8eef7" if tab == "setup" else "#ffffff", outline="#d1d5db")
-    draw.text((60, 180), "Setup", fill="#111827", font=head_font)
-    draw.rectangle((250, 166, 470, 212), fill="#e8eef7" if tab == "expert" else "#ffffff", outline="#d1d5db")
-    draw.text((280, 180), "Expert", fill="#111827", font=head_font)
+    draw.rectangle((30, 166, 300, 212), fill="#e8eef7" if tab == "setup" else "#ffffff", outline="#d1d5db")
+    draw.text((60, 180), "Data and samples", fill="#111827", font=head_font)
+    draw.rectangle((300, 166, 570, 212), fill="#e8eef7" if tab == "expert" else "#ffffff", outline="#d1d5db")
+    draw.text((330, 180), "Model and policy", fill="#111827", font=head_font)
 
     def draw_field(x, y, label, value, kind="select", w=230):
         draw.text((x, y), label, fill="#374151", font=small)
@@ -2411,8 +2884,18 @@ def generate_preview(path, tab="setup"):
     def draw_row(x, y, label, value, kind="select", w=300, label_w=168):
         draw.text((x, y + 8), label, fill="#374151", font=small)
         field_x = x + label_w
-        draw.rectangle((field_x, y, field_x + w, y + 30), outline="#9ca3af", fill="#ffffff")
-        draw.text((field_x + 10, y + 7), value, fill="#111827", font=small)
+        disabled = kind == "disabled"
+        draw.rectangle(
+            (field_x, y, field_x + w, y + 30),
+            outline="#d1d5db" if disabled else "#9ca3af",
+            fill="#f3f4f6" if disabled else "#ffffff",
+        )
+        draw.text(
+            (field_x + 10, y + 7),
+            value,
+            fill="#9ca3af" if disabled else "#111827",
+            font=small,
+        )
         if kind == "select":
             draw.polygon([(field_x + w - 20, y + 11), (field_x + w - 10, y + 11), (field_x + w - 15, y + 19)], fill="#4b5563")
         elif kind == "spin":
@@ -2421,8 +2904,8 @@ def generate_preview(path, tab="setup"):
             draw.polygon([(field_x + w - 20, y + 21), (field_x + w - 10, y + 21), (field_x + w - 15, y + 27)], fill="#4b5563")
 
     if tab == "expert":
-        draw.text((60, 240), "Expert parameters", fill="#111827", font=head_font)
-        draw.text((235, 244), "Profile defaults are recommended for routine annotation.", fill="#6b7280", font=small)
+        draw.text((60, 240), "Training strategy and model policy", fill="#111827", font=head_font)
+        draw.text((365, 244), "Only compatible controls remain active for the selected method.", fill="#6b7280", font=small)
         left_x, right_x = 60, 660
         card_y, card_bottom = 280, 780
         card_w = 560
@@ -2430,34 +2913,35 @@ def generate_preview(path, tab="setup"):
         draw.text((left_x + 22, card_y + 22), "Model and task", fill="#111827", font=head_font)
         draw.text((left_x + 22, card_y + 54), "Model family used for this organ.", fill="#6b7280", font=small)
         model_rows = [
-            ("Fine-tuning", "lora", "select"),
-            ("Decoder", "segformer3d", "select"),
-            ("Pretrained scale", "vitb16", "select"),
-            ("LoRA rank", "8", "spin"),
-            ("LoRA alpha", "16", "spin"),
-            ("Adapter bottleneck", "64", "spin"),
+            ("Fine-tuning", "frozen", "disabled"),
+            ("Training architecture", "Frozen Feature 2D", "select"),
+            ("Encoder weights", "Compatibility ONNX", "select"),
+            ("Pretrained scale", "vits16", "disabled"),
+            ("LoRA rank", "8", "disabled"),
+            ("LoRA alpha", "16", "disabled"),
+            ("Adapter bottleneck", "64", "disabled"),
         ]
         y = card_y + 88
         for label, value, kind in model_rows:
             draw_row(left_x + 22, y, label, value, kind, w=330, label_w=170)
             y += 36
-        draw.text((left_x + 22, y + 12), "Backend template, modality, and custom weights are", fill="#6b7280", font=small)
-        draw.text((left_x + 22, y + 34), "controlled centrally in fewshot_config.json.", fill="#6b7280", font=small)
+        draw.text((left_x + 22, y + 12), "ONNX preserves the verified compatibility contract;", fill="#6b7280", font=small)
+        draw.text((left_x + 22, y + 34), "PyTorch loads model.safetensors as a separate backend.", fill="#6b7280", font=small)
 
         draw.rectangle((right_x, card_y, right_x + card_w, card_bottom), outline="#d1d5db", fill="#f9fafb")
         draw.text((right_x + 22, card_y + 22), "Training and resources", fill="#111827", font=head_font)
         draw.text((right_x + 22, card_y + 54), "Runtime, memory, validation, and retention.", fill="#6b7280", font=small)
         opt_rows = [
-            ("Epochs", "10", "spin"),
-            ("Batch size (fixed)", "1", "spin"),
-            ("Grad accumulation", "1", "spin"),
-            ("Learning rate", "0.001", "select"),
-            ("Weight decay", "0.01", "select"),
-            ("Image detail", "Balanced (224 x 224)", "select"),
-            ("Custom size", "224,224", "text"),
-            ("Sub-volume depth", "32", "select"),
+            ("Epochs", "20", "spin"),
+            ("Slice batch size", "4", "spin"),
+            ("Grad accumulation", "1", "disabled"),
+            ("Learning rate", "0.0005", "select"),
+            ("Weight decay", "0.0001", "select"),
+            ("LR schedule", "cosine", "select"),
+            ("Validation interval", "2", "spin"),
+            ("Image detail", "Detailed (256 x 256)", "select"),
+            ("Custom size", "256,256", "disabled"),
             ("Keep checkpoints", "2", "spin"),
-            ("Validation fraction", "0.2", "spin"),
         ]
         y = card_y + 88
         for label, value, kind in opt_rows:
@@ -2466,70 +2950,78 @@ def generate_preview(path, tab="setup"):
         y += 10
         check_x = right_x + 22
         for label, checked in (("Mixed precision", False), ("Sub-volume training", False)):
-            draw.rectangle((check_x, y, check_x + 16, y + 16), outline="#6b7280", fill="#ffffff")
+            draw.rectangle((check_x, y, check_x + 16, y + 16), outline="#d1d5db", fill="#f3f4f6")
             if checked:
                 draw.line((check_x + 3, y + 8, check_x + 8, y + 13), fill="#2563eb", width=2)
                 draw.line((check_x + 8, y + 13, check_x + 16, y + 3), fill="#2563eb", width=2)
-            draw.text((check_x + 28, y - 2), label, fill="#374151", font=small)
+            draw.text((check_x + 28, y - 2), label, fill="#9ca3af", font=small)
             check_x += 190
     else:
-        draw.rectangle((60, 238, width - 60, 320), outline="#d1d5db", fill="#f9fafb")
-        draw.text((80, 256), "Profile", fill="#374151", font=font)
-        draw.rectangle((155, 248, 360, 282), outline="#9ca3af", fill="#ffffff")
-        draw.text((168, 256), "balanced", fill="#111827", font=font)
-        draw.text((390, 256), "Use profiles for routine work; Expert is optional.", fill="#374151", font=small)
-        draw.text((80, 292), "Dataset", fill="#374151", font=small)
-        draw.rectangle((155, 286, 1030, 314), outline="#9ca3af", fill="#ffffff")
-        draw.text((168, 292), "D:\\Dataset\\TotalSegmentator", fill="#111827", font=small)
-        draw.rectangle((1045, 286, 1145, 314), outline="#9ca3af", fill="#ffffff")
-        draw.text((1066, 292), "Browse", fill="#111827", font=small)
-
-        draw.rectangle((60, 338, width - 60, 412), outline="#d1d5db", fill="#f9fafb")
-        quick = [
-            ("Training length", "Standard (10)"),
-            ("Validation", "Standard validation (20%)"),
-            ("Resource preset", "Balanced"),
+        draw.text((60, 236), "Dataset", fill="#111827", font=head_font)
+        draw.rectangle((60, 270, width - 60, 390), outline="#d1d5db", fill="#f9fafb")
+        dataset_rows = [
+            ("Source image root", "D:\\Dataset\\TotalSegmentator"),
+            ("Saved .mcs folder", "D:\\Dataset\\TotalSegmentator\\mcs_output"),
+            ("Saved mask names", "liver, liver_seg"),
         ]
-        x = 80
-        for label, value in quick:
-            draw_field(x, 356, label, value, "select", w=245)
-            x += 300
+        y = 282
+        for label, value in dataset_rows:
+            draw_row(82, y, label, value, "text", w=760, label_w=180)
+            if label != "Saved mask names":
+                draw.rectangle((1040, y, 1145, y + 30), outline="#9ca3af", fill="#ffffff")
+                draw.text((1066, y + 7), "Browse", fill="#111827", font=small)
+            y += 36
 
-        draw.text((60, 440), "Samples", fill="#111827", font=head_font)
-        draw.text((170, 444), "Sample order", fill="#374151", font=small)
-        draw.rectangle((270, 436, 380, 466), outline="#9ca3af", fill="#ffffff")
-        draw.text((282, 442), "all", fill="#111827", font=small)
-        draw.text((410, 444), "Max samples", fill="#374151", font=small)
-        draw.rectangle((510, 436, 610, 466), outline="#9ca3af", fill="#ffffff")
-        draw.text((522, 442), "0", fill="#111827", font=small)
+        draw.text((60, 418), "Samples", fill="#111827", font=head_font)
+        draw.text((170, 422), "Sample order", fill="#374151", font=small)
+        draw.rectangle((270, 414, 380, 444), outline="#9ca3af", fill="#ffffff")
+        draw.text((282, 420), "all", fill="#111827", font=small)
+        draw.text((410, 422), "Max samples", fill="#374151", font=small)
+        draw.rectangle((510, 414, 610, 444), outline="#9ca3af", fill="#ffffff")
+        draw.text((522, 420), "0", fill="#111827", font=small)
 
-        draw.rectangle((60, 482, 835, 625), outline="#9ca3af", fill="#fbfdff")
+        draw.rectangle((60, 460, 835, 625), outline="#9ca3af", fill="#fbfdff")
         cases = ["s0001", "s0002", "s0003", "s0004", "s0005", "s0006"]
-        y = 498
+        y = 476
         for idx, case in enumerate(cases):
-            if idx in (0, 1, 3, 6, 7):
+            if idx in (0, 1, 3):
                 draw.rectangle((68, y - 4, 820, y + 22), fill="#dbeafe")
             draw.text((82, y), case, fill="#111827", font=font)
             y += 24
-        draw.rectangle((870, 482, 990, 518), outline="#9ca3af", fill="#ffffff")
-        draw.text((892, 491), "Select All", fill="#111827", font=font)
-        draw.rectangle((870, 530, 990, 566), outline="#9ca3af", fill="#ffffff")
-        draw.text((910, 539), "Clear", fill="#111827", font=font)
-        draw.text((870, 575), "616 case(s) found", fill="#374151", font=small)
-        draw.text((870, 607), "Selected cases override sample order.", fill="#374151", font=small)
+        draw.rectangle((870, 460, 990, 496), outline="#9ca3af", fill="#ffffff")
+        draw.text((892, 469), "Select All", fill="#111827", font=font)
+        draw.rectangle((870, 508, 990, 544), outline="#9ca3af", fill="#ffffff")
+        draw.text((910, 517), "Clear", fill="#111827", font=font)
+        draw.text((870, 553), "616 case(s) found", fill="#374151", font=small)
+        draw.text((870, 585), "Selected cases override sample order.", fill="#374151", font=small)
         draw.text((60, 642), "Manual cases", fill="#374151", font=font)
         draw.rectangle((180, 634, 920, 670), outline="#9ca3af", fill="#ffffff")
         draw.text((194, 642), "s0012,s0016", fill="#111827", font=font)
-        draw.rectangle((60, 682, 76, 698), outline="#6b7280", fill="#ffffff")
-        draw.line((63, 690, 68, 695), fill="#2563eb", width=2)
-        draw.line((68, 695, 76, 684), fill="#2563eb", width=2)
-        draw.text((88, 679), "Refresh labels from saved .mcs before training", fill="#374151", font=small)
+        draw.text((950, 642), "Min train  1    Min val  1", fill="#374151", font=small)
+        draw_row(
+            60,
+            686,
+            "Training labels",
+            "Refresh from saved .mcs",
+            "select",
+            w=360,
+            label_w=180,
+        )
+        draw_row(
+            60,
+            724,
+            "Exported masks folder",
+            "Enabled when that source is selected",
+            "disabled",
+            w=620,
+            label_w=180,
+        )
 
     status_top = height - 155
     draw.rectangle((30, status_top, width - 30, height - 75), outline="#d1d5db", fill="#ffffff")
     draw.text((50, status_top + 8), "Status", fill="#111827", font=head_font)
     log_lines = [
-        "[14:20:03] Ready. Choose a profile and samples, then start background training.",
+        "[14:20:03] Ready. Choose data, samples, and model policy, then start background training.",
         "[14:20:29] Training progress will appear here after Start Training.",
     ]
     y = status_top + 35

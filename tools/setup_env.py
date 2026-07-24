@@ -40,6 +40,7 @@ REQUIRED_IMPORTS = [
     "yaml",         # pip package is pyyaml
     "tqdm",
     "tensorboard",
+    "onnxruntime",
 ]
 
 # Pip package names (may differ from import names)
@@ -56,6 +57,7 @@ REQUIRED_PACKAGES = [
     "pyyaml",       # import name is yaml
     "tqdm",
     "tensorboard",
+    "onnxruntime-gpu",
 ]
 
 # Preferred external GUI backend for DINOv3 advanced setup/status windows.
@@ -74,6 +76,7 @@ GUI_PACKAGES = [
 # Mapping for __import__: pip name → import name
 _PIP_TO_IMPORT = {
     "pyyaml": "yaml",
+    "onnxruntime-gpu": "onnxruntime",
 }
 
 # Extra index URL for PyTorch CUDA builds

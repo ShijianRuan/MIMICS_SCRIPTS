@@ -4138,9 +4138,11 @@ class TestNewFeatures(unittest.TestCase):
         """External DINOv3 Advanced UI builds the same background train command."""
         ui = __import__("tools.fewshot_training_setup_ui", fromlist=["dummy"])
         workspace = os.path.join(self.tmp, "fewshot_models")
+        dataset_root = os.path.join(self.tmp, "dataset")
+        os.makedirs(dataset_root)
         context = {
             "organ": "liver",
-            "ts_root": os.path.join(self.tmp, "dataset"),
+            "ts_root": dataset_root,
             "workspace": workspace,
             "python_exe": sys.executable,
             "pipeline_script": os.path.join(PROJECT_ROOT, "tools", "fewshot_pipeline.py"),
@@ -4205,9 +4207,11 @@ class TestNewFeatures(unittest.TestCase):
     def test_fewshot_external_setup_can_skip_label_export_wait(self):
         """Users can train from already exported labels without waiting for background Mimics."""
         ui = __import__("tools.fewshot_training_setup_ui", fromlist=["dummy"])
+        dataset_root = os.path.join(self.tmp, "dataset")
+        os.makedirs(dataset_root)
         context = {
             "organ": "liver",
-            "ts_root": os.path.join(self.tmp, "dataset"),
+            "ts_root": dataset_root,
             "workspace": os.path.join(self.tmp, "fewshot_models"),
             "python_exe": sys.executable,
             "pipeline_script": os.path.join(PROJECT_ROOT, "tools", "fewshot_pipeline.py"),
@@ -4220,6 +4224,76 @@ class TestNewFeatures(unittest.TestCase):
         launch = ui.prepare_training_launch(context, options, run_id="train_no_export")
         self.assertNotIn("--export-labels", launch["cmd"])
         self.assertFalse(launch["options"]["export_labels_before_training"])
+
+    def test_fewshot_external_setup_accepts_reusable_exported_masks(self):
+        """A prior Export Masks destination must be selectable without another .mcs export."""
+        ui = __import__("tools.fewshot_training_setup_ui", fromlist=["dummy"])
+        dataset_root = os.path.join(self.tmp, "dataset")
+        label_root = os.path.join(self.tmp, "exported_masks")
+        os.makedirs(dataset_root)
+        os.makedirs(label_root)
+        context = {
+            "organ": "liver",
+            "ts_root": dataset_root,
+            "workspace": os.path.join(self.tmp, "fewshot_models"),
+            "python_exe": sys.executable,
+            "pipeline_script": os.path.join(PROJECT_ROOT, "tools", "fewshot_pipeline.py"),
+            "dinov3_root": os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg"),
+            "mimics_exe": "",
+            "config": {},
+        }
+        options = ui.default_training_options({})
+        options.update({
+            "label_source": "exported_masks",
+            "label_root": label_root,
+            "export_labels_before_training": False,
+        })
+        launch = ui.prepare_training_launch(
+            context,
+            options,
+            run_id="train_reuse_export",
+        )
+        self.assertNotIn("--export-labels", launch["cmd"])
+        self.assertEqual(
+            os.path.abspath(label_root),
+            launch["cmd"][launch["cmd"].index("--label-root") + 1],
+        )
+        self.assertEqual("exported_masks", launch["options"]["label_source"])
+
+    def test_fewshot_pytorch_backend_wins_when_onnx_is_also_present(self):
+        """An explicit safetensors backend must not be redirected to model.onnx."""
+        pipeline = __import__("tools.fewshot_pipeline", fromlist=["dummy"])
+        repository_config = json.loads(
+            Path(PROJECT_ROOT, "fewshot_config.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            "onnx",
+            repository_config["default_feature_encoder_backend"],
+        )
+        model_dir = Path(self.tmp) / "model"
+        model_dir.mkdir()
+        (model_dir / "model.onnx").write_bytes(b"not selected")
+        (model_dir / "model.safetensors").write_bytes(b"pytorch weights")
+        (model_dir / "preprocessor_config.json").write_text("{}", encoding="utf-8")
+        (model_dir / "config.json").write_text(
+            json.dumps({"hidden_size": 384, "patch_size": 16}),
+            encoding="utf-8",
+        )
+        config = {
+            "model": {
+                "model_path": str(model_dir),
+                "encoder_backend": "pytorch",
+            },
+            "decoder": {"type": "feature_unet2d"},
+            "finetune": {"method": "frozen"},
+            "data": {"img_size": [224, 224]},
+        }
+        result = pipeline.validate_training_encoder_assets(
+            config,
+            Path(PROJECT_ROOT) / "external" / "dinov3-medical-seg",
+        )
+        self.assertEqual("pytorch", result["backend"])
+        self.assertTrue(result["path"].endswith("model"))
 
     def test_fewshot_mask_aliases_are_explicit_and_deduplicated(self):
         ui = __import__("tools.fewshot_training_setup_ui", fromlist=["dummy"])
@@ -4235,9 +4309,11 @@ class TestNewFeatures(unittest.TestCase):
 
     def test_fewshot_label_refresh_requires_background_mimics(self):
         ui = __import__("tools.fewshot_training_setup_ui", fromlist=["dummy"])
+        dataset_root = os.path.join(self.tmp, "dataset")
+        os.makedirs(dataset_root)
         context = {
             "organ": "liver",
-            "ts_root": os.path.join(self.tmp, "dataset"),
+            "ts_root": dataset_root,
             "workspace": os.path.join(self.tmp, "fewshot_models"),
             "python_exe": sys.executable,
             "pipeline_script": os.path.join(PROJECT_ROOT, "tools", "fewshot_pipeline.py"),
@@ -4267,12 +4343,48 @@ class TestNewFeatures(unittest.TestCase):
         package_portable = __import__("tools.package_portable", fromlist=["dummy"])
         self.assertIn("PySide6", setup_env.GUI_IMPORTS)
         self.assertIn("PySide6", setup_env.GUI_PACKAGES)
+        self.assertIn("onnxruntime", setup_env.REQUIRED_IMPORTS)
+        self.assertIn("onnxruntime-gpu", setup_env.REQUIRED_PACKAGES)
         bat = package_portable._generate_offline_bat("3.13.7", "python313")
         self.assertIn("pip install PySide6 shiboken6", bat)
+        self.assertIn("onnxruntime", bat)
+        self.assertIn(
+            "external\\dinov3-medical-seg\\models\\dinov3-vits16\\model.onnx",
+            bat,
+        )
+        self.assertEqual(
+            "external/dinov3-medical-seg/models/dinov3-vits16/model.onnx",
+            package_portable.DEFAULT_FROZEN_ENCODER,
+        )
+        config = json.loads(
+            Path(PROJECT_ROOT, "fewshot_config.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(64, len(config["default_model_sha256"]))
         self.assertIn("echo Lib >> nninteractive_env\\python313._pth", bat)
         self.assertIn("Verifying PySide6 external UI backend", bat)
         # Duplicate _pth "Configuring" echo should only appear inside the if block
         self.assertEqual(1, bat.count("echo   Configuring python313._pth"))
+
+    def test_wheel_files_for_package_normalizes_distribution_names(self):
+        package_portable = __import__("tools.package_portable", fromlist=["dummy"])
+        _wffp = package_portable._wheel_files_for_package
+
+        class _P:
+            def __init__(self, name):
+                self.name = name
+
+        class _D:
+            def glob(self, _pattern):
+                return [
+                    _P("onnxruntime_gpu-1.22.0-cp313-cp313-win_amd64.whl"),
+                    _P("onnxruntime-1.22.0-cp313-cp313-win_amd64.whl"),
+                ]
+
+        found = _wffp(_D(), "onnxruntime-gpu==1.22.0")
+        self.assertEqual(
+            ["onnxruntime_gpu-1.22.0-cp313-cp313-win_amd64.whl"],
+            [item.name for item in found],
+        )
 
     def test_wheel_files_for_package_disambiguates_prefixes(self):
         """_wheel_files_for_package must not confuse torch with torchvision."""
@@ -5190,6 +5302,7 @@ class TestNewFeatures(unittest.TestCase):
         """External setup should not overwrite a worker status update with launching."""
         ui = __import__("tools.fewshot_training_setup_ui", fromlist=["dummy"])
         ts_root = os.path.join(self.tmp, "dataset")
+        os.makedirs(ts_root)
         workspace = os.path.join(self.tmp, "fewshot_models")
         context = {
             "organ": "liver",
@@ -5235,6 +5348,7 @@ class TestNewFeatures(unittest.TestCase):
         """After Popen succeeds, status JSON write contention should not report launch failure."""
         ui = __import__("tools.fewshot_training_setup_ui", fromlist=["dummy"])
         ts_root = os.path.join(self.tmp, "dataset")
+        os.makedirs(ts_root)
         workspace = os.path.join(self.tmp, "fewshot_models")
         context = {
             "organ": "liver",
@@ -5323,6 +5437,50 @@ class TestNewFeatures(unittest.TestCase):
             status = json.load(handle)
         self.assertEqual("configuring", status["status"])
         self.assertEqual(43210, status["controller_pid"])
+
+    def test_fewshot_train_entry_does_not_open_a_mimics_directory_picker(self):
+        """The default training entry delegates dataset selection to external PySide6."""
+        import fewshot_mimics
+
+        calls = []
+        old_selected = fewshot_mimics._selected_organ
+        old_config = fewshot_mimics._config
+        old_initial = fewshot_mimics._initial_dataset_root
+        old_picker = fewshot_mimics._choose_dataset_root
+        old_launch = fewshot_mimics._launch_external_advanced_training
+        try:
+            fewshot_mimics._selected_organ = lambda: "liver"
+            fewshot_mimics._config = lambda: {"advanced_ui_mode": "external"}
+            fewshot_mimics._initial_dataset_root = lambda: ""
+            fewshot_mimics._choose_dataset_root = lambda _title: (
+                (_ for _ in ()).throw(AssertionError("Mimics picker was opened"))
+            )
+            fewshot_mimics._launch_external_advanced_training = (
+                lambda config, organ, ts_root: calls.append(
+                    (config, organ, ts_root)
+                ) or 0
+            )
+            result = fewshot_mimics._train_model(True)
+        finally:
+            fewshot_mimics._selected_organ = old_selected
+            fewshot_mimics._config = old_config
+            fewshot_mimics._initial_dataset_root = old_initial
+            fewshot_mimics._choose_dataset_root = old_picker
+            fewshot_mimics._launch_external_advanced_training = old_launch
+
+        self.assertEqual(0, result)
+        self.assertEqual([({"advanced_ui_mode": "external"}, "liver", "")], calls)
+
+    def test_fewshot_internal_fallback_keeps_default_model_contract(self):
+        """The Mimics-dialog fallback must not silently change the new method."""
+        import inspect
+        import fewshot_mimics
+
+        source = inspect.getsource(fewshot_mimics._append_training_args)
+        self.assertIn('"--model-sha256"', source)
+        self.assertIn('"--lr-scheduler"', source)
+        self.assertIn('"--warmup-epochs"', source)
+        self.assertIn('"--validation-interval"', source)
 
     def test_fewshot_mimics_case_ids_use_configured_mcs_output_dir(self):
         """Mimics-side DINOv3 helpers should honor mimics_output_dir for saved .mcs files."""
@@ -5917,7 +6075,7 @@ class TestNewFeatures(unittest.TestCase):
                         launch = ui.prepare_training_launch(context, options, run_id="matrix_{}".format(count))
                         args = pipeline.build_parser().parse_args(launch["cmd"][2:])
                         compiled = strategies.compile_strategy(
-                            preset, fingerprint=fingerprint, policy=policy,
+                            args.strategy, fingerprint=fingerprint, policy=policy,
                             user_options=json.loads(args.strategy_options_json),
                         )
                         config_path = os.path.join(self.tmp, "matrix_{}.yaml".format(count))
@@ -5926,8 +6084,13 @@ class TestNewFeatures(unittest.TestCase):
                             validation_enabled=False, strategy_overrides=compiled,
                         )
                         self.assertEqual(decoder, generated["decoder"]["type"])
-                        self.assertEqual(channel_policy, generated["model"]["channel_policy"])
-                        self.assertEqual(method, generated["finetune"]["method"])
+                        expected_channel = "repeat" if decoder == "feature_unet2d" else channel_policy
+                        expected_method = "frozen" if decoder == "feature_unet2d" else method
+                        self.assertEqual(expected_channel, generated["model"]["channel_policy"])
+                        self.assertEqual(expected_method, generated["finetune"]["method"])
+                        if decoder == "feature_unet2d":
+                            self.assertEqual("full_volume", args.strategy)
+                            self.assertFalse(generated["data"]["patch"]["enabled"])
                         count += 1
         self.assertEqual(len(strategies.strategy_ids()) * len(ui.DECODER_CHOICES) * 2 * 3, count)
 
@@ -6462,17 +6625,44 @@ class TestNewFeatures(unittest.TestCase):
         from src.models.decoder_3d import DecoderFactory
         features = [torch.randn(1, 8, 3, 2, 2) for _ in range(4)]
         for decoder_name in ui.DECODER_CHOICES:
-            decoder = DecoderFactory.create(decoder_name, [8, 8, 8, 8], 2)
+            if decoder_name == "feature_unet2d":
+                decoder_features = [torch.randn(1, 384, 3, 2, 2)]
+                decoder_dims = [384]
+                raw_volume = torch.rand(1, 1, 3, 32, 32)
+                original_shape = (1, 1, 3, 32, 32)
+            else:
+                decoder_features = features
+                decoder_dims = [8, 8, 8, 8]
+                raw_volume = None
+                original_shape = (1, 1, 3, 16, 16)
+            decoder = DecoderFactory.create(decoder_name, decoder_dims, 2)
             with torch.no_grad():
-                output = decoder(features, (1, 1, 3, 16, 16))
-            self.assertEqual((1, 2, 3, 16, 16), tuple(output.shape), decoder_name)
-            restored = DecoderFactory.create(decoder_name, [8, 8, 8, 8], 2)
+                output = decoder(
+                    decoder_features,
+                    original_shape,
+                    **({"raw_volume": raw_volume} if raw_volume is not None else {})
+                )
+            self.assertEqual(
+                (1, 2, *original_shape[2:]),
+                tuple(output.shape),
+                decoder_name,
+            )
+            restored = DecoderFactory.create(decoder_name, decoder_dims, 2)
             restored.load_state_dict(decoder.state_dict(), strict=True)
             restored.eval()
             decoder.eval()
             with torch.no_grad():
-                expected = decoder(features, (1, 1, 3, 16, 16))
-                actual = restored(features, (1, 1, 3, 16, 16))
+                kwargs = {"raw_volume": raw_volume} if raw_volume is not None else {}
+                expected = decoder(
+                    decoder_features,
+                    original_shape,
+                    **kwargs
+                )
+                actual = restored(
+                    decoder_features,
+                    original_shape,
+                    **kwargs
+                )
             torch.testing.assert_close(expected, actual, rtol=0.0, atol=0.0, msg=decoder_name)
 
     def test_2d_decoder_all_variants_in_factory(self):

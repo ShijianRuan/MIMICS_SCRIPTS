@@ -13,6 +13,62 @@ from .data.dataset_3d import prepare_model_input
 from .data.spatial import spacing_zyx, xyz_to_zyx
 
 
+def predict_cached_feature_slices(
+    model,
+    images_zyx: np.ndarray,
+    device,
+    *,
+    slice_batch_size: int = 4,
+) -> np.ndarray:
+    """Run the frozen-feature 2D path with verified four-way mirror TTA."""
+    images = np.asarray(images_zyx, dtype=np.float32)
+    if images.ndim != 3 or any(value <= 0 or value % 16 for value in images.shape[-2:]):
+        raise RuntimeError(
+            "Cached feature inference expects (Z,H,W) with H/W divisible by 16, got {}".format(
+                images.shape
+            )
+        )
+    predictions = []
+    model.backbone.eval()
+    model.decoder_3d.eval()
+    batch_size = max(1, int(slice_batch_size))
+    encoder_device = (
+        torch.device("cpu")
+        if getattr(model, "encoder_backend", "pytorch") == "onnx"
+        else device
+    )
+    with torch.no_grad():
+        for start in range(0, images.shape[0], batch_size):
+            raw = torch.from_numpy(images[start:start + batch_size, None]).to(
+                device=encoder_device,
+                dtype=torch.float32,
+            )
+            embeddings = model.backbone(raw.repeat(1, 3, 1, 1))[-1]
+            if encoder_device != device:
+                raw = raw.to(device=device)
+                embeddings = embeddings.to(device=device)
+            probabilities = []
+            for dimensions in ((), (2,), (3,), (2, 3)):
+                current_embeddings = (
+                    torch.flip(embeddings, dims=dimensions).contiguous()
+                    if dimensions
+                    else embeddings
+                )
+                current_raw = (
+                    torch.flip(raw, dims=dimensions).contiguous()
+                    if dimensions
+                    else raw
+                )
+                logits = model.decode_cached_slices(current_embeddings, current_raw)
+                current = torch.softmax(logits, dim=1)
+                if dimensions:
+                    current = torch.flip(current, dims=dimensions)
+                probabilities.append(current)
+            prediction = torch.stack(probabilities, dim=0).mean(dim=0).argmax(dim=1)
+            predictions.append(prediction.cpu().numpy().astype(np.int16, copy=False))
+    return np.concatenate(predictions, axis=0)
+
+
 def _predict_logits(model, data_zyx: np.ndarray, model_grid, config, device, input_scale: float = 1.0) -> torch.Tensor:
     """Predict logits and restore them to the supplied raw ZYX crop grid."""
     data_cfg = config["data"]

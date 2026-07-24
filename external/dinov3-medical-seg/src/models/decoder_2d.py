@@ -13,18 +13,169 @@ operations.  This design has several advantages for *few-shot* settings:
   (thin wall), scapula (flat bone) — 3D convolutions can over-smooth the
   signal across slices that contain mostly background.
 
-Four variants are provided:
+Five variants are provided:
 
     conv2d          Simple 2D conv fusion (lightest, ~0.1M)
     conv2d_unet     Lightweight 2D U-Net per slice (~0.5M)
     conv2d_deeplab  ASPP-style multi-scale context (~0.3M)
     conv2d_2_5d     3 adjacent slices as pseudo-RGB input (~0.2M)
+    feature_unet2d  Frozen DINO feature decoder with raw-image skip channels
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import List
+
+
+def _tinygrad_uniform_(module: nn.Module, input_channels: int) -> None:
+    """Match the recovered decoder's tinygrad convolution initialization."""
+    kernel = module.kernel_size
+    if not isinstance(kernel, tuple):
+        kernel = (kernel, kernel)
+    bound = 1.0 / float(input_channels * kernel[0] * kernel[1]) ** 0.5
+    nn.init.uniform_(module.weight, -bound, bound)
+    if module.bias is not None:
+        nn.init.uniform_(module.bias, -bound, bound)
+
+
+class _FeatureDoubleConv(nn.Module):
+    """Two instance-normalized convolutions with the recovered residual path."""
+
+    def __init__(self, in_channels: int, out_channels: int):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1, bias=False)
+        self.norm1 = nn.InstanceNorm2d(out_channels, eps=1e-5, affine=True)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False)
+        self.norm2 = nn.InstanceNorm2d(out_channels, eps=1e-5, affine=True)
+        _tinygrad_uniform_(self.conv1, in_channels)
+        _tinygrad_uniform_(self.conv2, out_channels)
+
+    def forward(self, values: torch.Tensor) -> torch.Tensor:
+        values = F.leaky_relu(self.norm1(self.conv1(values)), negative_slope=0.01)
+        residual = self.norm2(self.conv2(values))
+        return F.leaky_relu(residual + values, negative_slope=0.01)
+
+
+class _FeatureUp(nn.Module):
+    def __init__(self, in_channels: int, skip_channels: int, out_channels: int):
+        super().__init__()
+        self.up = nn.ConvTranspose2d(
+            in_channels,
+            out_channels,
+            kernel_size=2,
+            stride=2,
+            bias=False,
+        )
+        self.body = _FeatureDoubleConv(out_channels + skip_channels, out_channels)
+        _tinygrad_uniform_(self.up, in_channels)
+
+    def forward(self, values: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
+        values = self.up(values)
+        if values.shape[-2:] != skip.shape[-2:]:
+            raise RuntimeError(
+                "Feature decoder skip shape mismatch: {} vs {}".format(
+                    tuple(values.shape[-2:]), tuple(skip.shape[-2:])
+                )
+            )
+        return self.body(torch.cat([values, skip], dim=1))
+
+
+class FrozenFeatureUNet2D(nn.Module):
+    """Decode the final DINO feature map with raw grayscale pixel skips.
+
+    This is a direct PyTorch implementation of the verified network topology:
+    the final 1/16 DINO feature map is decoded through four upsampling stages.
+    The skip tensors are pixel-unshuffled views of the normalized source slice,
+    not intermediate backbone features. Each slice is independent and the
+    resulting masks are stacked back into their original volume order.
+    """
+
+    requires_raw_input = True
+    requires_single_feature = True
+
+    def __init__(self, feature_dims: List[int], num_classes: int):
+        super().__init__()
+        if not feature_dims:
+            raise ValueError("feature_unet2d requires one DINO feature dimension")
+        feature_dim = int(feature_dims[-1])
+        self.bottleneck = _FeatureDoubleConv(feature_dim, 256)
+        self.up1 = _FeatureUp(256, 64, 128)
+        self.up2 = _FeatureUp(128, 16, 64)
+        self.up3 = _FeatureUp(64, 4, 32)
+        self.up4 = _FeatureUp(32, 1, 16)
+        self.outc = nn.Conv2d(16, num_classes, 1)
+        _tinygrad_uniform_(self.outc, 16)
+
+    @staticmethod
+    def raw_skip(values: torch.Tensor, factor: int) -> torch.Tensor:
+        if values.dim() != 4 or values.shape[1] != 1:
+            raise RuntimeError(
+                "Raw feature skips require (N,1,H,W), got {}".format(tuple(values.shape))
+            )
+        if values.shape[-2] % factor or values.shape[-1] % factor:
+            raise RuntimeError(
+                "Raw slice shape {} must be divisible by {}".format(
+                    tuple(values.shape[-2:]), factor
+                )
+            )
+        return F.pixel_unshuffle(values, factor)
+
+    def forward_slices(self, embeddings: torch.Tensor, raw_slices: torch.Tensor) -> torch.Tensor:
+        if embeddings.dim() != 4:
+            raise RuntimeError(
+                "DINO embeddings must be (N,C,H,W), got {}".format(tuple(embeddings.shape))
+            )
+        if raw_slices.dim() != 4 or raw_slices.shape[1] != 1:
+            raise RuntimeError(
+                "Raw slices must be (N,1,H,W), got {}".format(tuple(raw_slices.shape))
+            )
+        if raw_slices.shape[-2] % 16 or raw_slices.shape[-1] % 16:
+            raise RuntimeError("feature_unet2d requires image dimensions divisible by 16")
+        expected_grid = (raw_slices.shape[-2] // 16, raw_slices.shape[-1] // 16)
+        if tuple(embeddings.shape[-2:]) != expected_grid:
+            raise RuntimeError(
+                "DINO feature grid {} does not match raw slice grid {}".format(
+                    tuple(embeddings.shape[-2:]), expected_grid
+                )
+            )
+
+        values = self.bottleneck(embeddings)
+        values = self.up1(values, self.raw_skip(raw_slices, 8))
+        values = self.up2(values, self.raw_skip(raw_slices, 4))
+        values = self.up3(values, self.raw_skip(raw_slices, 2))
+        values = self.up4(values, raw_slices)
+        return self.outc(values)
+
+    def forward(
+        self,
+        features_3d: List[torch.Tensor],
+        original_shape: tuple,
+        raw_volume: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if raw_volume is None:
+            raise RuntimeError("feature_unet2d requires the normalized raw volume")
+        feature = features_3d[-1]
+        batch, channels, depth, height, width = feature.shape
+        embeddings = feature.permute(0, 2, 1, 3, 4).reshape(
+            batch * depth, channels, height, width
+        )
+        raw_slices = raw_volume.permute(0, 2, 1, 3, 4).reshape(
+            batch * depth,
+            raw_volume.shape[1],
+            raw_volume.shape[3],
+            raw_volume.shape[4],
+        )
+        logits = self.forward_slices(embeddings, raw_slices)
+        logits = logits.reshape(batch, depth, logits.shape[1], *logits.shape[-2:])
+        logits = logits.permute(0, 2, 1, 3, 4)
+        if tuple(logits.shape[2:]) != tuple(original_shape[2:]):
+            raise RuntimeError(
+                "feature_unet2d preserves the 2D training grid; got {} vs {}".format(
+                    tuple(logits.shape[2:]), tuple(original_shape[2:])
+                )
+            )
+        return logits
 
 
 # ──────────────────────────────────────────────
