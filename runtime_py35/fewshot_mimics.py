@@ -630,6 +630,40 @@ def _global_model_registry_path():
     return os.path.join(os.path.expanduser("~"), ".mimics_script", "fewshot_model_index.json")
 
 
+def _resolve_model_artifact(value, manifest_path, manifest=None):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if not os.path.isabs(text):
+        return os.path.abspath(os.path.join(os.path.dirname(manifest_path), text))
+    if os.path.exists(text):
+        return os.path.abspath(text)
+    relocated = os.path.join(os.path.dirname(manifest_path), os.path.basename(text))
+    if os.path.exists(relocated):
+        return os.path.abspath(relocated)
+    model_id = _safe_slug((manifest or {}).get("model_id", ""))
+    versioned = os.path.join(
+        os.path.dirname(manifest_path), model_id, os.path.basename(text)
+    )
+    if os.path.exists(versioned):
+        return os.path.abspath(versioned)
+    return os.path.abspath(text)
+
+
+def _resolved_model_manifest(manifest_path):
+    manifest = _read_json(manifest_path, {}) or {}
+    if not isinstance(manifest, dict):
+        return {}
+    resolved = dict(manifest)
+    for key in ("checkpoint", "config"):
+        if manifest.get(key):
+            resolved[key] = _resolve_model_artifact(
+                manifest.get(key), manifest_path, manifest
+            )
+    resolved["_manifest_path"] = os.path.abspath(manifest_path)
+    return resolved
+
+
 def _status_path(ts_root, job_id):
     return os.path.join(_workspace(ts_root), "jobs", job_id + ".json")
 
@@ -2883,7 +2917,7 @@ def _latest_model_lines(ts_root, selected_organ=None):
             latest = os.path.join(models_dir, organ_slug, "latest.json")
             if not os.path.isfile(latest):
                 continue
-            manifest = _read_json(latest, {}) or {}
+            manifest = _resolved_model_manifest(latest)
             organ = manifest.get("organ", organ_slug)
             if selected_organ and _safe_slug(organ) != _safe_slug(selected_organ):
                 continue
@@ -2926,26 +2960,27 @@ def _model_candidates(ts_root, organ):
             return header.startswith(b"PK") or header.startswith(b"\x80")
         except Exception:
             return False
-    def usable_manifest(manifest):
+    def usable_manifest(manifest_path):
+        manifest = _resolved_model_manifest(manifest_path)
         if not manifest:
-            return False
+            return None
         checkpoint = manifest.get("checkpoint", "")
         config_path = manifest.get("config", "")
         if not (checkpoint and config_path and os.path.isfile(checkpoint) and os.path.isfile(config_path)):
-            return False
+            return None
         try:
             if os.path.getsize(checkpoint) <= 0 or os.path.getsize(config_path) <= 0:
-                return False
+                return None
         except Exception:
-            return False
+            return None
         if not checkpoint_header_looks_valid(checkpoint):
-            return False
-        return True
+            return None
+        return manifest
     if os.path.isdir(models_dir):
         latest_path = os.path.join(models_dir, "latest.json")
         for manifest_path in [latest_path]:
-            manifest = _read_json(manifest_path, {}) or {}
-            if usable_manifest(manifest):
+            manifest = usable_manifest(manifest_path)
+            if manifest:
                 seen_manifests.add(os.path.abspath(manifest_path))
                 candidates.append({
                     "scope": "dataset latest",
@@ -2959,8 +2994,8 @@ def _model_candidates(ts_root, organ):
         try:
             for run_id in sorted(os.listdir(models_dir), reverse=True):
                 manifest_path = os.path.join(models_dir, run_id, "manifest.json")
-                manifest = _read_json(manifest_path, {}) or {}
-                if not usable_manifest(manifest):
+                manifest = usable_manifest(manifest_path)
+                if not manifest:
                     continue
                 abs_manifest = os.path.abspath(manifest_path)
                 if abs_manifest in seen_manifests:
@@ -2988,8 +3023,8 @@ def _model_candidates(ts_root, organ):
         if abs_manifest in seen_manifests:
             continue
         seen_manifests.add(abs_manifest)
-        manifest = _read_json(abs_manifest, {}) or {}
-        if not usable_manifest(manifest):
+        manifest = usable_manifest(abs_manifest)
+        if not manifest:
             continue
         candidates.append({
             "scope": "global",
@@ -3009,7 +3044,7 @@ def _dataset_latest_model_candidate(ts_root, organ):
     manifest_path = os.path.join(_workspace(ts_root), "models", organ_slug, "latest.json")
     if not os.path.isfile(manifest_path):
         return None, "No latest model was found for organ: {0}".format(organ)
-    manifest = _read_json(manifest_path, {}) or {}
+    manifest = _resolved_model_manifest(manifest_path)
     checkpoint = manifest.get("checkpoint", "")
     config_path = manifest.get("config", "")
     if not checkpoint or not os.path.isfile(checkpoint):

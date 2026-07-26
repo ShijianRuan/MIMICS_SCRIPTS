@@ -287,6 +287,33 @@ class TestRuntimeCommon(unittest.TestCase):
             else:
                 os.environ["MIMICS_EXE"] = old_env
 
+    def test_running_mimics_exe_bypasses_negative_lookup_cache(self):
+        import runtime_common
+
+        exe = os.path.join(self.tmp, "MimicsResearch.exe")
+        Path(exe).write_bytes(b"test")
+        old_cache = dict(runtime_common._MIMICS_EXE_CACHE)
+        old_running = runtime_common._running_mimics_research_executable
+        old_env = os.environ.pop("MIMICS_EXE", None)
+        old_background = os.environ.pop("MIMICS_BACKGROUND_EXE", None)
+        try:
+            runtime_common._MIMICS_EXE_CACHE.update(
+                {"value": None, "checked_at": time.time()}
+            )
+            runtime_common._running_mimics_research_executable = lambda: exe
+            self.assertEqual(
+                os.path.abspath(exe),
+                runtime_common.find_mimics_exe(),
+            )
+        finally:
+            runtime_common._running_mimics_research_executable = old_running
+            runtime_common._MIMICS_EXE_CACHE.clear()
+            runtime_common._MIMICS_EXE_CACHE.update(old_cache)
+            if old_env is not None:
+                os.environ["MIMICS_EXE"] = old_env
+            if old_background is not None:
+                os.environ["MIMICS_BACKGROUND_EXE"] = old_background
+
     def test_safe_filename(self):
         import runtime_common
 
@@ -1447,7 +1474,7 @@ class TestMimicsBridgeBufferMapping(unittest.TestCase):
         self.assertEqual((3, 2, 2), out.shape)
         np.testing.assert_allclose(target_affine, out.affine, atol=1e-6)
 
-    def test_fewshot_materialize_resamples_image_to_label_grid(self):
+    def test_fewshot_materialize_keeps_image_and_resamples_label_to_source_grid(self):
         pipeline = __import__("tools.fewshot_pipeline", fromlist=["dummy"])
         import nibabel as nib
 
@@ -1455,9 +1482,9 @@ class TestMimicsBridgeBufferMapping(unittest.TestCase):
         label_src = os.path.join(self.tmp, "mask.nii.gz")
         nib.save(nib.Nifti1Image(np.ones((2, 2, 2), dtype=np.int16), np.eye(4)), image_src)
         label_affine = np.array([
-            [1.0, 0.0, 0.0, -5.0],
-            [0.0, 1.0, 0.0, -6.0],
-            [0.0, 0.0, 1.0, 7.0],
+            [1.0, 0.0, 0.0, -1.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
             [0.0, 0.0, 0.0, 1.0],
         ])
         nib.save(nib.Nifti1Image(np.ones((3, 2, 2), dtype=np.uint8), label_affine), label_src)
@@ -1469,11 +1496,18 @@ class TestMimicsBridgeBufferMapping(unittest.TestCase):
             "train",
         )
         self.assertEqual(1, len(rows))
-        self.assertEqual("resampled_to_label_grid", rows[0]["image_materialization"])
+        self.assertIn(rows[0]["image_materialization"], ("hardlink", "copy"))
+        self.assertEqual(
+            "label_resampled_to_source_image_grid",
+            rows[0]["label_materialization"],
+        )
         self.assertFalse(rows[0]["image_label_geometry_matched"])
         out = nib.load(rows[0]["dataset_image"])
-        self.assertEqual((3, 2, 2), out.shape)
-        np.testing.assert_allclose(label_affine, out.affine, atol=1e-6)
+        self.assertEqual((2, 2, 2), out.shape)
+        np.testing.assert_allclose(np.eye(4), out.affine, atol=1e-6)
+        label_out = nib.load(rows[0]["dataset_label"])
+        self.assertEqual((2, 2, 2), label_out.shape)
+        np.testing.assert_allclose(np.eye(4), label_out.affine, atol=1e-6)
         validation = pipeline.validate_materialized_dataset(rows)
         self.assertEqual(1, validation["checked_pairs"])
         self.assertEqual([], validation["issues"])
@@ -1741,6 +1775,25 @@ class TestNNInteractiveBridgeSourceImage(unittest.TestCase):
         result = load_image_source(input_data)
         # After transform: 100 * 1.0 + 1024.0 = 1124.0
         self.assertAlmostEqual(1124.0, float(result[0, 0, 0, 0]), places=1)
+
+    def test_load_image_source_mhd_preserves_physical_values(self):
+        from nninteractive_bridge import load_image_source
+        import SimpleITK as sitk
+
+        shape = (7, 6, 5)
+        data_xyz = np.linspace(-3.5, 9.25, np.prod(shape), dtype=np.float32).reshape(shape)
+        image = sitk.GetImageFromArray(np.transpose(data_xyz, (2, 1, 0)))
+        path = os.path.join(self.tmp, "source.mhd")
+        sitk.WriteImage(image, path)
+        identity = np.eye(4)
+        result = load_image_source({
+            "image_path": path,
+            "image_source_kind": "medical_image",
+            "image_expected_shape": list(shape),
+            "image_source_voxel_to_ras_matrix": json.dumps(identity.tolist()),
+            "image_mimics_voxel_to_ras_matrix": json.dumps(identity.tolist()),
+        })
+        np.testing.assert_allclose(result[0], data_xyz, rtol=0.0, atol=1e-6)
 
     def test_load_image_source_permission_error_message(self):
         from nninteractive_bridge import load_image_source
@@ -2380,14 +2433,20 @@ class TestScriptingLibraryEntries(unittest.TestCase):
         self.assertEqual([], errors)
 
     def test_nninteractive_entry_routes_correctly(self):
-        """nnInteractive.py routes to nninteractive_mimics module."""
-        entry = os.path.join(PROJECT_ROOT, "scripting_library", "02_AI", "01_nnInteractive.py")
+        """The official nnInteractive entry routes to nninteractive_mimics."""
+        entry = os.path.join(
+            PROJECT_ROOT,
+            "scripting_library",
+            "02_AI",
+            "nnInteractive",
+            "01_Annotate_Official_Model.py",
+        )
         with open(entry, "r") as f:
             source = f.read()
         self.assertIn("nninteractive_mimics", source)
 
     def test_dinov3_entries_separate_from_nninteractive(self):
-        """DINOv3 entries are in their own DINOv3/ directory, nnInteractive is flat."""
+        """DINOv3 and nnInteractive have separate, ordered feature groups."""
         dino_dir = os.path.join(PROJECT_ROOT, "scripting_library", "02_AI", "DINOv3")
         self.assertTrue(os.path.isdir(dino_dir), "DINOv3/ directory should exist")
 
@@ -2416,9 +2475,19 @@ class TestScriptingLibraryEntries(unittest.TestCase):
         with open(train_entry, "r") as f:
             self.assertIn('action_attr="BUTTON_TRAIN_MODEL"', f.read())
 
-        # nnInteractive.py is flat in 02_AI/
-        nn_entry = os.path.join(PROJECT_ROOT, "scripting_library", "02_AI", "01_nnInteractive.py")
-        self.assertTrue(os.path.isfile(nn_entry), "nnInteractive.py should be in 02_AI/")
+        nn_dir = os.path.join(
+            PROJECT_ROOT, "scripting_library", "02_AI", "nnInteractive"
+        )
+        self.assertEqual(
+            [
+                "01_Annotate_Official_Model.py",
+                "02_Annotate_Custom_Model.py",
+                "03_Train_and_Manage_Custom_Models.py",
+            ],
+            sorted(name for name in os.listdir(nn_dir) if name.endswith(".py")),
+        )
+        nn_entry = os.path.join(nn_dir, "01_Annotate_Official_Model.py")
+        self.assertTrue(os.path.isfile(nn_entry))
         with open(nn_entry, "r") as f:
             self.assertIn("nninteractive_mimics", f.read())
 
@@ -3374,6 +3443,15 @@ class TestSourceImagePathEquivalence(unittest.TestCase):
         })
         self.assertIsNone(result)
 
+    def test_hu_gv_conversion_is_modality_specific(self):
+        from nninteractive_mimics import _source_uses_hu_to_gv
+
+        self.assertTrue(_source_uses_hu_to_gv("nifti", "CT"))
+        self.assertTrue(_source_uses_hu_to_gv("dicom_folder", "CT"))
+        self.assertFalse(_source_uses_hu_to_gv("nifti", "MR"))
+        self.assertFalse(_source_uses_hu_to_gv("medical_image", "MR"))
+        self.assertTrue(_source_uses_hu_to_gv("nifti", ""))
+
 
 # ============================================================================
 # L13: New features from user's round of changes
@@ -3846,7 +3924,7 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn("thread.start()", async_launch)
         self.assertIn("_launch_background_batch_export_async", export_source)
 
-    def test_external_pyside_path_browsers_use_native_dialogs_outside_mimics(self):
+    def test_external_pyside_path_browsers_remain_responsive_outside_mimics(self):
         import inspect
         import mask_import
         import tools.fewshot_training_setup_ui as training_ui
@@ -3857,7 +3935,10 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn("QFileDialog.getExistingDirectory", ui_source)
         self.assertIn("QFileDialog.getOpenFileName", ui_source)
         self.assertIn('QPushButton("Paste")', ui_source)
-        self.assertIn("QFileDialog", inspect.getsource(training_ui.QtTrainingSetupApp.browse_dataset))
+        self.assertIn(
+            "choose_path_without_shell",
+            inspect.getsource(training_ui.QtTrainingSetupApp.browse_dataset),
+        )
         self.assertIn("threading.Thread", inspect.getsource(training_ui.QtTrainingSetupApp.apply_dataset_root))
         self.assertIn("QFileDialog.getOpenFileNames", inspect.getsource(mask_picker.main))
         self.assertNotIn("os.path.isfile(p)", inspect.getsource(mask_import._start_import_for_paths))
@@ -3866,6 +3947,55 @@ class TestNewFeatures(unittest.TestCase):
         status_refresh = inspect.getsource(status_viewer.QtStatusViewerApp.refresh)
         self.assertIn("threading.Thread", status_refresh)
         self.assertNotIn("self._load_jobs()\n        self.job_combo", status_refresh)
+
+    def test_training_setup_inventory_filters_by_selected_label_source(self):
+        from tools.fewshot_training_setup_ui import case_rows_from_dataset_for_ui
+
+        root = Path(self.tmp) / "training_inventory"
+        mcs_root = root / "mcs"
+        exported = root / "exported"
+        for case_id in ("case_labeled", "case_unlabeled"):
+            case_dir = root / case_id
+            case_dir.mkdir(parents=True)
+            (case_dir / "ct.nii.gz").write_bytes(b"image")
+        (root / "case_labeled" / "segmentations").mkdir()
+        (root / "case_labeled" / "segmentations" / "liver.nii.gz").write_bytes(
+            b"label"
+        )
+        (exported / "case_unlabeled" / "segmentations").mkdir(parents=True)
+        (
+            exported / "case_unlabeled" / "segmentations" / "liver.nii.gz"
+        ).write_bytes(b"label")
+        mcs_root.mkdir()
+        (mcs_root / "case_labeled.mcs").write_bytes(b"project")
+
+        source_rows = case_rows_from_dataset_for_ui(
+            root,
+            label_source="source_dataset",
+            mask_names=["liver"],
+            mcs_output_dir=mcs_root,
+        )
+        source_states = {row["case_id"]: row["state"] for row in source_rows}
+        self.assertEqual("ready", source_states["case_labeled"])
+        self.assertEqual("mask_missing", source_states["case_unlabeled"])
+        exported_rows = case_rows_from_dataset_for_ui(
+            root,
+            label_source="exported_masks",
+            label_root=exported,
+            mask_names=["liver"],
+            mcs_output_dir=mcs_root,
+        )
+        exported_states = {row["case_id"]: row["state"] for row in exported_rows}
+        self.assertEqual("mask_missing", exported_states["case_labeled"])
+        self.assertEqual("ready", exported_states["case_unlabeled"])
+        mcs_rows = case_rows_from_dataset_for_ui(
+            root,
+            label_source="mcs_refresh",
+            mask_names=["liver"],
+            mcs_output_dir=mcs_root,
+        )
+        self.assertEqual(["case_labeled"], [row["case_id"] for row in mcs_rows])
+        self.assertEqual("ready", mcs_rows[0]["state"])
 
     def test_external_gui_theme_and_real_task_progress_are_shared(self):
         import inspect
@@ -5150,6 +5280,68 @@ class TestNewFeatures(unittest.TestCase):
         status = json.loads(status_path.read_text(encoding="utf-8"))
         self.assertEqual("mask_name_preflight", status["phase"])
         self.assertEqual(1, status["total"])
+
+    def test_training_mask_preflight_skips_only_unlabeled_projects(self):
+        import mimics_export
+
+        skipped, failures = mimics_export._partition_mask_preflight_failures(
+            [
+                {"case_id": "unlabeled", "reason": "no saved mask matched"},
+                {"case_id": "ambiguous", "reason": "multiple saved masks matched one training target"},
+                {"case_id": "broken", "reason": "could not inspect project"},
+            ],
+            True,
+        )
+        self.assertEqual(["unlabeled"], [row["case_id"] for row in skipped])
+        self.assertEqual(
+            ["ambiguous", "broken"],
+            [row["case_id"] for row in failures],
+        )
+
+        skipped, failures = mimics_export._partition_mask_preflight_failures(
+            [
+                {"case_id": "unlabeled", "reason": "no saved mask matched"},
+                {"case_id": "ambiguous", "reason": "multiple saved masks matched one training target"},
+                {"case_id": "missing", "reason": ".mcs file not found"},
+                {"case_id": "broken", "reason": "could not inspect project: Internal Parsing Error"},
+            ],
+            True,
+            True,
+        )
+        self.assertEqual(
+            ["unlabeled", "missing", "broken"],
+            [row["case_id"] for row in skipped],
+        )
+        self.assertEqual(["ambiguous"], [row["case_id"] for row in failures])
+
+    def test_mask_preflight_closes_partially_opened_corrupt_project(self):
+        import mimics_export
+
+        root = Path(self.tmp) / "corrupt_preflight"
+        root.mkdir()
+        (root / "broken.mcs").write_bytes(b"broken")
+        closes = []
+        old_open = mimics_export.mimics.file.open_project
+        old_close = mimics_export.mimics.file.close_project
+        try:
+            mimics_export.mimics.file.open_project = lambda _path: (
+                _ for _ in ()
+            ).throw(RuntimeError("Internal Parsing Error"))
+            mimics_export.mimics.file.close_project = lambda: closes.append(True)
+            failures = mimics_export._preflight_batch_mask_names(
+                [{"case_id": "broken", "case_dir": str(root)}],
+                str(root),
+                {"mask_names": ["liver"], "target_mask_name": "liver"},
+                str(root),
+                str(root / "status.json"),
+                str(root / "stop.request"),
+            )
+        finally:
+            mimics_export.mimics.file.open_project = old_open
+            mimics_export.mimics.file.close_project = old_close
+        self.assertEqual(1, len(failures))
+        self.assertIn("Internal Parsing Error", failures[0]["reason"])
+        self.assertEqual([True], closes)
 
     def test_mimics_export_training_target_renames_alias_output(self):
         import mimics_export
@@ -6494,6 +6686,10 @@ class TestNewFeatures(unittest.TestCase):
         import tools.package_portable as package_portable
 
         self.assertIn("tools/ui_theme.py", package_portable.REQUIRED_EXTERNAL_UI_FILES)
+        self.assertIn(
+            "tools/training_data_ui.py",
+            package_portable.REQUIRED_EXTERNAL_UI_FILES,
+        )
         self.assertIn("tools/io_path_setup_ui.py", package_portable.REQUIRED_EXTERNAL_UI_FILES)
         self.assertIn("tools/single_case_import_worker.py", package_portable.REQUIRED_EXTERNAL_UI_FILES)
         for relative in package_portable.REQUIRED_EXTERNAL_UI_FILES:

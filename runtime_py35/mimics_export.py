@@ -30,6 +30,7 @@ import uuid
 
 import mimics
 
+import dataset_manifest
 import runtime_common
 
 
@@ -47,6 +48,60 @@ SOURCE_IMAGE_PATH_METADATA = "mimics_script.source_image_path"
 # otherwise leaves a stale lock blocking later writes to that destination).
 _ACTIVE_BG_MIMICS_LOCKS = {}
 _ACTIVE_BG_MIMICS_LOCK_MUTEX = threading.RLock()
+
+
+def _record_exported_labels(
+    manifest_root, case_id, result, source_image_path="", mcs_path=""
+):
+    """Record only labels that exist and were successfully exported."""
+    labels = []
+    for row in (result or {}).get("exported") or []:
+        if row.get("action") not in ("new", "overwritten", "unchanged"):
+            continue
+        path = str(row.get("path") or "")
+        if not path or not os.path.isfile(path):
+            continue
+        labels.append(
+            {
+                "mask_name": row.get("name") or "",
+                "output_name": os.path.basename(path).replace(
+                    ".nii.gz", ""
+                ).replace(".nii", ""),
+                "path": path,
+                "shape": (result or {}).get("export_shape") or [],
+                "voxel_to_ras_matrix": (
+                    (result or {}).get("export_voxel_to_ras_matrix") or []
+                ),
+                "export_space": (result or {}).get("export_space") or "",
+                "source": "mimics_export",
+            }
+        )
+    if not labels:
+        return ""
+    return dataset_manifest.update_case(
+        manifest_root,
+        case_id,
+        image_path=source_image_path,
+        mcs_path=mcs_path,
+        labels=labels,
+        source_geometry={
+            "shape": (result or {}).get("export_shape") or [],
+            "voxel_to_ras_matrix": (
+                (result or {}).get("export_voxel_to_ras_matrix") or []
+            ),
+            "world_coordinate_system": "RAS",
+        },
+        mimics_geometry={
+            "voxel_to_ras_matrix": (
+                (result or {}).get("mimics_voxel_to_ras_matrix") or []
+            ),
+            "world_coordinate_system": "RAS",
+        },
+        provenance={
+            "last_operation": "mimics_export",
+            "export_space": (result or {}).get("export_space") or "",
+        },
+    )
 
 
 def _write_export_task_status(monitor, values):
@@ -1414,6 +1469,34 @@ def _finish_foreground_export(monitor, error=None, result=None, cancelled=False)
     except Exception as exc:
         _finish_foreground_export(monitor, error=exc)
         return
+    try:
+        _record_exported_labels(
+            monitor.get("output_root") or "",
+            monitor.get("case_id") or "",
+            result or {},
+            source_image_path=monitor.get("source_image_path") or "",
+            mcs_path=monitor.get("mcs_path") or "",
+        )
+        mcs_path = str(monitor.get("mcs_path") or "")
+        if mcs_path:
+            mcs_root = os.path.dirname(os.path.abspath(mcs_path))
+            if os.path.normcase(mcs_root) != os.path.normcase(
+                os.path.abspath(monitor.get("output_root") or "")
+            ):
+                _record_exported_labels(
+                    mcs_root,
+                    monitor.get("case_id") or "",
+                    result or {},
+                    source_image_path=monitor.get("source_image_path") or "",
+                    mcs_path=mcs_path,
+                )
+    except Exception as manifest_exc:
+        _mimics_log(
+            logging.WARNING,
+            "Masks were exported, but dataset manifest update failed: {0}".format(
+                manifest_exc
+            ),
+        )
     message = (
         "Mask export complete: {0} new, {1} overwritten, {2} unchanged, "
         "{3} existing files preserved. Output: {4}"
@@ -1694,6 +1777,8 @@ def _start_current_project_export(case_dir, source_image_path, output_root, axes
             "buffers_dir": buffers_dir,
             "bridge_job_dir": bridge_job_dir,
             "case_dir": os.path.abspath(case_dir),
+            "case_id": case_id,
+            "mcs_path": _current_project_path() or "",
             "source_image_path": source_image_path,
             "output_root": os.path.abspath(output_root),
             "output_seg_dir": output_seg_dir,
@@ -2474,6 +2559,13 @@ def _preflight_batch_mask_names(cases, output_dir, config, export_root, status_p
                 "mcs_path": mcs_path,
                 "available_masks": [],
             })
+            # Mimics may have partially replaced the active project before
+            # reporting a parsing error. Attempt a close even when open_project
+            # did not return, so the next case does not inherit that state.
+            try:
+                mimics.file.close_project()
+            except Exception:
+                pass
         finally:
             if project_opened:
                 try:
@@ -2481,6 +2573,29 @@ def _preflight_batch_mask_names(cases, output_dir, config, export_root, status_p
                 except Exception:
                     pass
     return failures
+
+
+def _partition_mask_preflight_failures(
+    failures, allow_unlabeled_projects, allow_invalid_projects=False
+):
+    skipped = []
+    hard_failures = []
+    for row in failures or []:
+        reason = str(row.get("reason") or "")
+        skippable = (
+            allow_unlabeled_projects
+            and reason == "no saved mask matched"
+        )
+        if allow_invalid_projects and (
+            reason == ".mcs file not found"
+            or reason.startswith("could not inspect project:")
+        ):
+            skippable = True
+        if skippable:
+            skipped.append(row)
+        else:
+            hard_failures.append(row)
+    return skipped, hard_failures
 
 
 def _acquire_export_lock(job_runtime):
@@ -2618,6 +2733,50 @@ def run_background_batch_export(config_path):
             status_path,
             stop_path,
         )
+        skipped_mask_cases, preflight_failures = _partition_mask_preflight_failures(
+            preflight_failures,
+            bool(config.get("skip_projects_without_requested_mask", False)),
+            bool(config.get("skip_invalid_projects", False)),
+        )
+        if skipped_mask_cases:
+            skipped_ids = set(
+                row.get("case_id")
+                for row in skipped_mask_cases
+                if row.get("case_id")
+            )
+            cases = [
+                row for row in cases if row.get("case_id") not in skipped_ids
+            ]
+            for row in skipped_mask_cases:
+                _append_export_log(
+                    export_root,
+                    "{0}: skipped during saved-mask preflight: {1}.".format(
+                        row.get("case_id") or "(unknown case)",
+                        row.get("reason") or "project is not usable",
+                    ),
+                )
+            if not cases and not preflight_failures:
+                error = (
+                    "None of the selected .mcs projects is usable for the "
+                    "requested saved Mask: {0}."
+                ).format(", ".join(str(name) for name in mask_names))
+                _write_json_atomic(
+                    status_path,
+                    {
+                        "status": "failed",
+                        "phase": "mask_name_preflight",
+                        "pid": os.getpid(),
+                        "completed": 0,
+                        "failed": 0,
+                        "skipped": len(skipped_mask_cases),
+                        "total": total,
+                        "error": error,
+                        "mask_validation_skipped": skipped_mask_cases[:100],
+                        "updated_at_epoch": time.time(),
+                    },
+                )
+                _append_export_log(export_root, error)
+                return 1
         if preflight_failures:
             if len(preflight_failures) == 1 and preflight_failures[0].get("reason") == "cancelled":
                 _append_export_log(export_root, "Mask export stopped during saved-mask preflight.")
@@ -2672,10 +2831,15 @@ def run_background_batch_export(config_path):
             )
             _append_export_log(export_root, error)
             return 1
+        export_total = len(cases)
         if mask_names:
             _append_export_log(
                 export_root,
-                "Saved-mask preflight passed for all {0} project(s); starting voxel export.".format(total),
+                "Saved-mask preflight found {0} usable project(s); {1} project(s) "
+                "were skipped with case-level diagnostics.".format(
+                    export_total,
+                    len(skipped_mask_cases),
+                ),
             )
         for index, case_info in enumerate(cases):
             if os.path.isfile(stop_path):
@@ -2696,7 +2860,9 @@ def run_background_batch_export(config_path):
                     "pid": os.getpid(),
                     "case_id": case_id,
                     "index": index + 1,
-                    "total": total,
+                    "total": export_total,
+                    "requested_total": total,
+                    "skipped": len(skipped_mask_cases),
                     "completed": completed,
                     "failed": failed,
                     "updated_at_epoch": time.time(),
@@ -2705,11 +2871,11 @@ def run_background_batch_export(config_path):
             if not os.path.isfile(mcs_path):
                 failed += 1
                 _record_failed_case(export_root, case_id, "open_project", ".mcs file not found: {0}".format(mcs_path))
-                _append_export_log(export_root, "[{0}/{1}] Missing .mcs: {2}".format(index + 1, total, mcs_path))
+                _append_export_log(export_root, "[{0}/{1}] Missing .mcs: {2}".format(index + 1, export_total, mcs_path))
                 continue
             project_opened = False
             try:
-                _append_export_log(export_root, "[{0}/{1}] Exporting: {2}".format(index + 1, total, case_id))
+                _append_export_log(export_root, "[{0}/{1}] Exporting: {2}".format(index + 1, export_total, case_id))
                 mimics.file.open_project(mcs_path)
                 project_opened = True
                 output_seg_dir = None
@@ -2752,6 +2918,43 @@ def run_background_batch_export(config_path):
                 if result.get("status") != "ok":
                     raise RuntimeError(result.get("error", "bridge returned non-ok status"))
                 total_new, total_overwritten, total_unchanged = _apply_export_result(result, work_dir)
+                if not label_staging_dir:
+                    try:
+                        _record_exported_labels(
+                            label_output_root or ts_root,
+                            case_id,
+                            result,
+                            source_image_path=(
+                                (config.get("source_image_paths") or {}).get(
+                                    case_id
+                                )
+                                or ""
+                            ),
+                            mcs_path=mcs_path,
+                        )
+                        manifest_root = label_output_root or ts_root
+                        if os.path.normcase(os.path.abspath(output_dir)) != os.path.normcase(
+                            os.path.abspath(manifest_root)
+                        ):
+                            _record_exported_labels(
+                                output_dir,
+                                case_id,
+                                result,
+                                source_image_path=(
+                                    (config.get("source_image_paths") or {}).get(
+                                        case_id
+                                    )
+                                    or ""
+                                ),
+                                mcs_path=mcs_path,
+                            )
+                    except Exception as manifest_exc:
+                        _append_export_log(
+                            export_root,
+                            "Exported {0}, but dataset manifest update failed: {1}".format(
+                                case_id, manifest_exc
+                            ),
+                        )
                 completed += 1
                 _append_export_log(
                     export_root,
@@ -2787,14 +2990,20 @@ def run_background_batch_export(config_path):
                 "pid": os.getpid(),
                 "completed": completed,
                 "failed": failed,
-                "total": total,
+                "skipped": len(skipped_mask_cases),
+                "total": export_total,
+                "requested_total": total,
+                "mask_validation_skipped": skipped_mask_cases[:100],
                 "updated_at_epoch": time.time(),
             },
         )
         _append_export_log(
             export_root,
-            "Background batch export {0}: {1} succeeded, {2} failed.".format(
-                "stopped" if cancelled else "finished", completed, failed,
+            "Background batch export {0}: {1} succeeded, {2} skipped, {3} failed.".format(
+                "stopped" if cancelled else "finished",
+                completed,
+                len(skipped_mask_cases),
+                failed,
             ),
         )
         return 0

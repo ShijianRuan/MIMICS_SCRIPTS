@@ -1,0 +1,21 @@
+{
+  "workspace_dir": "nninteractive_task_models",
+  "official_model_dir": "nninteractive_env/models/nnInteractive_v1.0",
+  "default_strategy": "clopa_in",
+  "default_epochs": 10,
+  "minimum_epochs": 4,
+  "maximum_epochs": 20,
+  "default_validation_fraction": 0.2,
+  "minimum_validation_cases_for_auto_selection": 2,
+  "minimum_mean_auc_improvement": 0.0,
+  "maximum_severe_case_regression": 0.2,
+  "training_steps_per_epoch": 50,
+  "validation_batches": 8,
+  "gpu_lock_timeout_seconds": 86400,
+  "label_export_timeout_seconds": 3600,
+  "pause_grace_seconds": 60,
+  "job_retention_days": 30,
+  "staging_retention_days": 7,
+  "status_poll_seconds": 1.0,
+  "ui_language": "en"
+}

@@ -51,6 +51,14 @@ ACTIVE_STATUSES = set([
     "selecting_model",
     "training_started",
 ])
+
+
+def safe_slug(value):
+    text = str(value or "").strip().lower()
+    result = []
+    for character in text:
+        result.append(character if character.isalnum() or character in "-_." else "_")
+    return re.sub(r"_+", "_", "".join(result)).strip("._-") or "model"
 CANCELLABLE_STATUSES = ACTIVE_STATUSES - {
     "cancelling", "stopping", "finalizing", "training_started",
 }
@@ -1099,6 +1107,8 @@ class QtStatusViewerApp(object):
         self.filter_combo = None
         self.auto_refresh = None
         self.live_label = None
+        self.model_process = None
+        self.model_action = ""
         self._refresh_running = False
         self._refresh_results = Queue()
         self.timer = self.QtCore.QTimer(self.window)
@@ -1161,6 +1171,23 @@ class QtStatusViewerApp(object):
         close.clicked.connect(self.window.close)
         toolbar.addWidget(close)
         outer.addLayout(toolbar)
+
+        model_toolbar = QtWidgets.QHBoxLayout()
+        model_toolbar.addWidget(QtWidgets.QLabel("Model portability"))
+        self.import_model_button = QtWidgets.QPushButton("Import Model Package")
+        self.import_model_button.setToolTip(
+            "Install a portable DINOv3 model package from another workstation."
+        )
+        self.import_model_button.clicked.connect(self.import_model_package)
+        model_toolbar.addWidget(self.import_model_button)
+        self.export_model_button = QtWidgets.QPushButton("Export Selected Model")
+        self.export_model_button.setToolTip(
+            "Export the model used by the selected task as a portable package."
+        )
+        self.export_model_button.clicked.connect(self.export_selected_model)
+        model_toolbar.addWidget(self.export_model_button)
+        model_toolbar.addStretch(1)
+        outer.addLayout(model_toolbar)
 
         self.summary_label = QtWidgets.QLabel("Loading jobs...")
         outer.addWidget(self.summary_label)
@@ -1348,6 +1375,119 @@ class QtStatusViewerApp(object):
             if job.get("job_id") == self.selected_job_id:
                 return job
         return None
+
+    def _start_model_process(self, arguments, action):
+        if self.model_process is not None:
+            return
+        process = self.QtCore.QProcess(self.window)
+        process.setProgram(sys.executable)
+        process.setArguments([str(value) for value in arguments])
+        process.setWorkingDirectory(str(PROJECT_ROOT))
+        process.setProcessChannelMode(self.QtCore.QProcess.MergedChannels)
+        process.finished.connect(self._model_process_finished)
+        self.model_process = process
+        self.model_action = action
+        self.import_model_button.setEnabled(False)
+        self.export_model_button.setEnabled(False)
+        self.summary_label.setText(
+            "{} is running outside Mimics. Other annotation work can continue.".format(
+                action
+            )
+        )
+        process.start()
+
+    def _model_process_finished(self, exit_code, _exit_status):
+        process = self.model_process
+        output = ""
+        if process is not None:
+            output = bytes(process.readAllStandardOutput()).decode(
+                "utf-8", "replace"
+            ).strip()
+            process.deleteLater()
+        action = self.model_action
+        self.model_process = None
+        self.model_action = ""
+        self.import_model_button.setEnabled(True)
+        self.export_model_button.setEnabled(True)
+        if int(exit_code) == 0:
+            self.summary_label.setText(
+                "{} completed. {}".format(
+                    action, output.splitlines()[-1] if output else ""
+                )
+            )
+            self.refresh()
+        else:
+            self.summary_label.setText(
+                "{} failed. {}".format(action, output or "No diagnostic output.")
+            )
+
+    def import_model_package(self):
+        path, _selected_filter = self.QtWidgets.QFileDialog.getOpenFileName(
+            self.window,
+            "Import DINOv3 Model Package",
+            str(Path.home()),
+            "AI model packages (*.zip)",
+        )
+        if not path:
+            return
+        self._start_model_process(
+            [
+                str(PROJECT_ROOT / "tools" / "ai_model_bundle.py"),
+                "import-dinov3",
+                "--workspace",
+                self.workspace,
+                "--bundle",
+                path,
+                "--set-latest",
+            ],
+            "Model import",
+        )
+
+    def export_selected_model(self):
+        job = self.selected_job() or {}
+        model = job.get("model") or job.get("selected_model") or {}
+        model_id = str(model.get("model_id") or job.get("model_id") or "")
+        organ = str(model.get("organ") or job.get("organ") or "")
+        manifest_path = str(
+            model.get("_manifest_path")
+            or job.get("model_manifest")
+            or ""
+        )
+        if not manifest_path and model_id and organ:
+            manifest_path = os.path.join(
+                self.workspace,
+                "models",
+                safe_slug(organ),
+                safe_slug(model_id),
+                "manifest.json",
+            )
+        if not manifest_path or not os.path.isfile(manifest_path):
+            self.summary_label.setText(
+                "The selected task does not reference an exportable trained model."
+            )
+            return
+        suggested = Path.home() / "{}_{}.zip".format(
+            safe_slug(organ), safe_slug(model_id or "model")
+        )
+        output, _selected_filter = self.QtWidgets.QFileDialog.getSaveFileName(
+            self.window,
+            "Export DINOv3 Model Package",
+            str(suggested),
+            "AI model packages (*.zip)",
+        )
+        if not output:
+            return
+        self._start_model_process(
+            [
+                str(PROJECT_ROOT / "tools" / "ai_model_bundle.py"),
+                "export-dinov3",
+                "--manifest",
+                manifest_path,
+                "--output",
+                output,
+            ],
+            "Model export",
+        )
 
     def show_job(self, job):
         self.detail_text.setPlainText("\n".join(user_status_lines(job)))

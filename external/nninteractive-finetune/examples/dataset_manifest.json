@@ -1,0 +1,16 @@
+{
+  "cases": [
+    {
+      "case_id": "case_001",
+      "image": "/path/to/case_001/image.nii.gz",
+      "label": "/path/to/case_001/label.nii.gz",
+      "split": "train"
+    },
+    {
+      "case_id": "case_002",
+      "image": "/path/to/case_002/image.nii.gz",
+      "label": "/path/to/case_002/label.nii.gz",
+      "split": "val"
+    }
+  ]
+}

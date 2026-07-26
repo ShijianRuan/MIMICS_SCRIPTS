@@ -39,17 +39,18 @@ try:
 except ImportError:
     from tools.fewshot_strategies import DEFAULT_OPTIONS, STRATEGIES, normalize_strategy_options, strategy_defaults, strategy_ids, strategy_label, strategy_summary, suggested_strategy
 from ui_theme import configure_application, stylesheet as shared_stylesheet
+from io_path_setup_ui import choose_path_without_shell
+from training_data_ui import (
+    LABEL_SOURCE_CHOICES,
+    label_source_hint,
+    normalized_source_mode,
+)
 TITLE = "DINOv3 Few-Shot Training"
 STRATEGY_DATA_KEYS = set(DEFAULT_OPTIONS.keys())
 DECODER_CHOICES = (
     "feature_unet2d",
     "segformer3d", "token_pyramid3d", "dpt3d", "linear3d", "mlp_probe",
     "conv2d",
-)
-LABEL_SOURCE_CHOICES = (
-    ("Refresh from saved .mcs", "mcs_refresh"),
-    ("Use source dataset segmentations", "source_dataset"),
-    ("Use an exported masks folder", "exported_masks"),
 )
 FEATURE_ENCODER_BACKEND_CHOICES = (
     ("Compatibility ONNX", "onnx"),
@@ -362,22 +363,44 @@ def validate_options(options):
             raise ValueError(
                 "Frozen feature slice training supports cosine or constant learning rate."
             )
-        normalized.update({
-            "strategy": "full_volume",
-            "finetune_method": "frozen",
-            "model_scale": "vits16",
-            "sampling_mode": "full",
-            "channel_policy": "repeat",
-            "slice_axis": "axial",
-            "grad_accumulation": 1,
-            "mixed_precision": False,
-            "sub_volume": False,
-            "warmup_epochs": 0,
-        })
+        adjustments = []
+        cached_overrides = {
+            "strategy": ("full_volume", "Frozen Feature 2D only supports full-volume sampling"),
+            "finetune_method": ("frozen", "Frozen Feature 2D requires a frozen DINO encoder"),
+            "model_scale": ("vits16", "Frozen Feature 2D uses the bundled ViT-S/16 encoder"),
+            "sampling_mode": ("full", "Frozen Feature 2D does not use patch sampling"),
+            "channel_policy": ("repeat", "Frozen Feature 2D uses single-channel repeat"),
+            "slice_axis": ("axial", "Frozen Feature 2D preserves native axial slice order"),
+            "grad_accumulation": (1, "Frozen Feature 2D uses real slice batches"),
+            "mixed_precision": (False, "Frozen Feature 2D disables mixed precision"),
+            "sub_volume": (False, "Frozen Feature 2D does not use 3D sub-volumes"),
+            "warmup_epochs": (0, "Frozen Feature 2D disables warmup"),
+        }
+        for key, (target_value, reason) in cached_overrides.items():
+            current = normalized.get(key)
+            if current != target_value and str(current) != str(target_value):
+                adjustments.append({
+                    "field": key,
+                    "from": current,
+                    "to": target_value,
+                    "reason": reason,
+                })
+            normalized[key] = target_value
+        if adjustments:
+            normalized["_compatibility_adjustments"] = adjustments
         if (
             encoder_backend == "onnx"
             and not str(normalized.get("model_path", "") or "").strip()
         ):
+            if str(normalized.get("img_size", "")) != "256,256":
+                if not normalized.get("_compatibility_adjustments"):
+                    normalized["_compatibility_adjustments"] = []
+                normalized["_compatibility_adjustments"].append({
+                    "field": "img_size",
+                    "from": normalized.get("img_size"),
+                    "to": "256,256",
+                    "reason": "The bundled ONNX encoder declares a fixed 256x256 input",
+                })
             normalized["img_size"] = "256,256"
         elif encoder_backend == "pytorch":
             if not str(normalized.get("model_path", "") or "").strip():
@@ -758,6 +781,93 @@ def case_ids_from_dataset_for_ui(ts_root, project_root=""):
             if os.path.isdir(path) and name not in ("mcs_output", "segmentations", "fewshot_models"):
                 rows.add(name)
     return sorted(rows)
+
+
+def case_rows_from_dataset_for_ui(
+    ts_root,
+    project_root="",
+    label_source="mcs_refresh",
+    label_root="",
+    mask_names=None,
+    mcs_output_dir="",
+):
+    """Return a lightweight, label-aware case inventory for the setup window."""
+    from fewshot_pipeline import find_image, find_label
+
+    root = Path(ts_root).expanduser().resolve()
+    source = normalized_source_mode(label_source)
+    names = list(mask_names or [])
+    mcs_root = (
+        Path(mcs_output_dir).expanduser().resolve()
+        if str(mcs_output_dir or "").strip()
+        else Path(resolve_mimics_output_dir_for_ui(str(root), project_root))
+    )
+    if source == "mcs_refresh":
+        case_ids = (
+            sorted(path.stem for path in mcs_root.glob("*.mcs") if path.is_file())
+            if mcs_root.is_dir()
+            else []
+        )
+    else:
+        excluded_paths = {mcs_root}
+        if str(label_root or "").strip():
+            excluded_paths.add(Path(label_root).expanduser().resolve())
+        case_ids = sorted(
+            path.name
+            for path in root.iterdir()
+            if path.is_dir()
+            and path.name not in ("mcs_output", "segmentations", "fewshot_models")
+            and path.resolve() not in excluded_paths
+        )
+
+    rows = []
+    for case_id in case_ids:
+        case_dir = root / case_id
+        image = find_image(case_dir) if case_dir.is_dir() else None
+        label = None
+        mcs_path = mcs_root / (case_id + ".mcs")
+        if source == "source_dataset" and case_dir.is_dir():
+            label = find_label(
+                case_dir,
+                names[0] if names else "",
+                fallback_to_case_labels=True,
+                mask_names=names,
+            )
+        elif source == "exported_masks" and case_dir.is_dir():
+            label = find_label(
+                case_dir,
+                names[0] if names else "",
+                label_root=label_root,
+                fallback_to_case_labels=False,
+                mask_names=names,
+            )
+
+        if not image:
+            state = "image_missing"
+            detail = "Source image not found"
+        elif source == "mcs_refresh" and mcs_path.is_file():
+            state = "ready"
+            detail = "Saved project found; Mask checked at training start"
+        elif source == "mcs_refresh":
+            state = "mcs_missing"
+            detail = "Saved .mcs project not found"
+        elif label:
+            state = "ready"
+            detail = "Matching Mask found"
+        else:
+            state = "mask_missing"
+            detail = "Matching Mask not found"
+        rows.append(
+            {
+                "case_id": case_id,
+                "state": state,
+                "detail": detail,
+                "image": str(image or ""),
+                "label": str(label or ""),
+                "mcs_path": str(mcs_path) if mcs_path.is_file() else "",
+            }
+        )
+    return rows
 
 
 class TrainingSetupApp(object):
@@ -1241,11 +1351,15 @@ class TrainingSetupApp(object):
         var = self.vars.get(key)
         if var is None:
             return
+        def _on_change(*_args):
+            self._refresh_quick_labels()
+            if key in ("decoder", "finetune_method", "lr_scheduler", "mixed_precision", "sub_volume"):
+                self._refresh_tk_method_enabled()
         try:
-            var.trace_add("write", lambda *_args: self._refresh_quick_labels())
+            var.trace_add("write", _on_change)
         except Exception:
             try:
-                var.trace("w", lambda *_args: self._refresh_quick_labels())
+                var.trace("w", _on_change)
             except Exception:
                 pass
 
@@ -1258,9 +1372,14 @@ class TrainingSetupApp(object):
             "img_size",
             "sub_volume",
             "sub_volume_depth",
+            "decoder",
+            "finetune_method",
+            "lr_scheduler",
+            "mixed_precision",
         ):
             self._trace_var(key)
         self._refresh_quick_labels()
+        self._refresh_tk_method_enabled()
 
     def _set_combo_value(self, widget, key, value):
         if widget is not None:
@@ -1311,6 +1430,64 @@ class TrainingSetupApp(object):
             if "img_size_custom" in self.vars:
                 self.vars["img_size_custom"].set(self.vars["img_size"].get())
             self._set_custom_size_entry_state()
+
+    def _refresh_tk_method_enabled(self):
+        """Tk fallback for the Qt _refresh_method_enabled logic.
+
+        Greys out / forces incompatible options when the decoder selects the
+        cached-slice (Frozen Feature 2D) pipeline, matching the Qt backend.
+        """
+        if not self.vars:
+            return
+        try:
+            decoder = str(self.vars.get("decoder", "").get() or "")
+        except Exception:
+            decoder = ""
+        cached_slices = decoder == "feature_unet2d"
+        try:
+            method = str(self.vars.get("finetune_method", "frozen").get() or "frozen")
+        except Exception:
+            method = "frozen"
+        if cached_slices:
+            if method != "frozen":
+                self.vars["finetune_method"].set("frozen")
+            for key in (
+                "finetune_method",
+                "model_scale",
+                "channel_policy",
+                "slice_axis",
+                "grad_accumulation",
+                "mixed_precision",
+                "sub_volume",
+            ):
+                widget = self.widget_map.get(key) if hasattr(self, "widget_map") else None
+                if widget is not None:
+                    try:
+                        widget.configure(state="disabled")
+                    except Exception:
+                        pass
+            try:
+                loss = str(self.vars.get("loss_type", "auto").get() or "auto")
+                if loss in ("auto", "dice_ce", "dice_focal"):
+                    self.vars["loss_type"].set("ce")
+            except Exception:
+                pass
+        else:
+            for key in (
+                "finetune_method",
+                "model_scale",
+                "channel_policy",
+                "slice_axis",
+                "grad_accumulation",
+                "mixed_precision",
+                "sub_volume",
+            ):
+                widget = self.widget_map.get(key) if hasattr(self, "widget_map") else None
+                if widget is not None:
+                    try:
+                        widget.configure(state="normal")
+                    except Exception:
+                        pass
 
     def _sync_quick_settings(self, _event=None):
         self._syncing_quick = True
@@ -1545,12 +1722,22 @@ class QtTrainingSetupApp(object):
         self.widgets = {}
         self.quick_widgets = {}
         self.case_list = None
+        self.case_rows = []
+        self.case_filter_edit = None
+        self.show_unavailable_cases = None
+        self.choose_specific_cases = None
+        self.manual_case_widget = None
+        self.case_inventory_label = None
+        self.mcs_path_widget = None
+        self.exported_masks_path_widget = None
+        self.data_source_hint = None
         self.manual_cases = None
         self.dataset_edit = None
         self.mcs_folder_edit = None
         self.mask_names_edit = None
         self.label_root_edit = None
         self.label_root_browse = None
+        self.scan_data_button = None
         self.status_label = None
         self.status_text = None
         self.start_button = None
@@ -1564,6 +1751,8 @@ class QtTrainingSetupApp(object):
         self._syncing_quick = False
         self._dataset_scan_generation = 0
         self._dataset_scan_pending = False
+        self._dataset_scan_deadline = 0.0
+        self._active_dataset_scan_signature = None
         self._dataset_scan_results = Queue()
         self._dataset_scan_timer = self.QtCore.QTimer(self.window)
         self._dataset_scan_timer.timeout.connect(self._poll_dataset_scan)
@@ -1592,7 +1781,8 @@ class QtTrainingSetupApp(object):
         subtitle = QtWidgets.QLabel("Organ: {0}".format(self.context.get("organ", "?")))
         subtitle.setObjectName("subtitleLabel")
         warning = QtWidgets.QLabel(
-            "Save edited .mcs projects before starting. Training exports labels from saved projects in the background."
+            "When using saved .mcs projects, save current edits before training. "
+            "Data preparation and training run outside Mimics."
         )
         warning.setObjectName("warningLabel")
         warning.setWordWrap(True)
@@ -1612,7 +1802,9 @@ class QtTrainingSetupApp(object):
         self.status_text.setMaximumHeight(78)
         status_layout.addWidget(self.status_text)
         outer.addWidget(status_group)
-        self._append_log("Ready. Choose a profile and samples, then start background training.")
+        self._append_log(
+            "Ready. Choose the data source and training options, then start background training."
+        )
 
         footer = QtWidgets.QHBoxLayout()
         self.status_label = QtWidgets.QLabel("Configure samples and parameters, then start background training.")
@@ -1638,7 +1830,7 @@ class QtTrainingSetupApp(object):
         shortcut_close.activated.connect(self.close)
         self.shortcuts = [shortcut_start, shortcut_close]
         self._refresh_quick_labels()
-        if not (self.context.get("case_ids") or []):
+        if self.context.get("ts_root"):
             self.QtCore.QTimer.singleShot(
                 0,
                 lambda: self.apply_dataset_root(self.context.get("ts_root", "")),
@@ -1649,6 +1841,19 @@ class QtTrainingSetupApp(object):
 
     def _build_setup_tab(self):
         QtWidgets = self.QtWidgets
+
+        def folder_button(callback, tooltip):
+            button = QtWidgets.QPushButton()
+            button.setIcon(
+                self.window.style().standardIcon(
+                    QtWidgets.QStyle.SP_DirOpenIcon
+                )
+            )
+            button.setFixedWidth(42)
+            button.setToolTip(tooltip)
+            button.clicked.connect(callback)
+            return button
+
         tab = QtWidgets.QWidget()
         tab_layout = QtWidgets.QVBoxLayout(tab)
         tab_layout.setContentsMargins(0, 0, 0, 0)
@@ -1661,34 +1866,112 @@ class QtTrainingSetupApp(object):
         scroll.setWidget(body)
         tab_layout.addWidget(scroll)
 
-        profile_group = QtWidgets.QGroupBox("Dataset")
+        profile_group = QtWidgets.QGroupBox("Training data")
         profile_layout = QtWidgets.QGridLayout(profile_group)
         profile_layout.setColumnStretch(1, 1)
-        profile_layout.addWidget(QtWidgets.QLabel("Source image root"), 0, 0)
+
+        profile_layout.addWidget(QtWidgets.QLabel("Label source"), 0, 0)
+        self.widgets["label_source"] = self._data_combo(
+            LABEL_SOURCE_CHOICES,
+            self.values.get("label_source", "mcs_refresh"),
+        )
+        self.widgets["label_source"].currentIndexChanged.connect(
+            self._refresh_label_source_enabled
+        )
+        profile_layout.addWidget(self.widgets["label_source"], 0, 1, 1, 2)
+
+        self.data_source_hint = QtWidgets.QLabel()
+        self.data_source_hint.setObjectName("hint")
+        self.data_source_hint.setWordWrap(True)
+        profile_layout.addWidget(self.data_source_hint, 1, 0, 1, 3)
+
+        profile_layout.addWidget(QtWidgets.QLabel("Original image dataset *"), 2, 0)
         self.dataset_edit = QtWidgets.QLineEdit(str(self.context.get("ts_root") or ""))
         self.dataset_edit.editingFinished.connect(self.apply_dataset_from_field)
-        profile_layout.addWidget(self.dataset_edit, 0, 1)
-        browse = QtWidgets.QPushButton("Browse")
-        browse.clicked.connect(self.browse_dataset)
-        profile_layout.addWidget(browse, 0, 2)
-        profile_layout.addWidget(QtWidgets.QLabel("Saved .mcs folder"), 1, 0)
-        self.mcs_folder_edit = QtWidgets.QLineEdit(str(self.context.get("mcs_output_dir", "")))
-        self.mcs_folder_edit.setToolTip("Defaults to mimics_io_config.json. You may override it for this training run.")
-        profile_layout.addWidget(self.mcs_folder_edit, 1, 1)
-        browse_mcs = QtWidgets.QPushButton("Browse")
-        browse_mcs.clicked.connect(self.browse_mcs_folder)
-        profile_layout.addWidget(browse_mcs, 1, 2)
-        profile_layout.addWidget(QtWidgets.QLabel("Saved mask names"), 2, 0)
+        self.dataset_edit.setPlaceholderText("Folder containing one subfolder per case")
+        profile_layout.addWidget(self.dataset_edit, 2, 1)
+        browse = folder_button(self.browse_dataset, "Choose original image dataset")
+        profile_layout.addWidget(browse, 2, 2)
+
+        self.mcs_path_widget = QtWidgets.QWidget()
+        mcs_row = QtWidgets.QHBoxLayout(self.mcs_path_widget)
+        mcs_row.setContentsMargins(0, 0, 0, 0)
+        mcs_caption = QtWidgets.QLabel("Saved .mcs folder *")
+        mcs_caption.setMinimumWidth(150)
+        mcs_row.addWidget(mcs_caption)
+        self.mcs_folder_edit = QtWidgets.QLineEdit(
+            str(self.context.get("mcs_output_dir", ""))
+        )
+        self.mcs_folder_edit.setToolTip(
+            "Required only when labels come from saved Mimics projects."
+        )
+        mcs_row.addWidget(self.mcs_folder_edit, 1)
+        browse_mcs = folder_button(
+            self.browse_mcs_folder,
+            "Choose folder containing saved .mcs projects",
+        )
+        mcs_row.addWidget(browse_mcs)
+        profile_layout.addWidget(self.mcs_path_widget, 3, 0, 1, 3)
+
+        self.exported_masks_path_widget = QtWidgets.QWidget()
+        export_row = QtWidgets.QHBoxLayout(self.exported_masks_path_widget)
+        export_row.setContentsMargins(0, 0, 0, 0)
+        export_caption = QtWidgets.QLabel("Exported masks folder *")
+        export_caption.setMinimumWidth(150)
+        export_row.addWidget(export_caption)
+        self.label_root_edit = QtWidgets.QLineEdit(
+            str(self.values.get("label_root", "") or "")
+        )
+        self.label_root_edit.setPlaceholderText(
+            "Contains <case>/segmentations/<mask>.nii.gz"
+        )
+        export_row.addWidget(self.label_root_edit, 1)
+        self.label_root_browse = folder_button(
+            self.browse_label_root,
+            "Choose previously exported masks folder",
+        )
+        export_row.addWidget(self.label_root_browse)
+        profile_layout.addWidget(self.exported_masks_path_widget, 4, 0, 1, 3)
+
+        profile_layout.addWidget(QtWidgets.QLabel("Target Mask name(s) *"), 5, 0)
         self.mask_names_edit = QtWidgets.QLineEdit(str(self.values.get("mask_names", "")))
         self.mask_names_edit.setPlaceholderText("Example: liver, liver_seg")
         self.mask_names_edit.setToolTip(
-            "Comma-separated names accepted in saved .mcs projects. Exactly one must match in each selected case."
+            "Comma-separated aliases for the same training target. One name must "
+            "match in each usable case."
         )
-        profile_layout.addWidget(self.mask_names_edit, 2, 1, 1, 2)
+        profile_layout.addWidget(self.mask_names_edit, 5, 1)
+        self.scan_data_button = QtWidgets.QPushButton("Scan Data")
+        self.scan_data_button.clicked.connect(self.apply_dataset_from_field)
+        profile_layout.addWidget(self.scan_data_button, 5, 2)
+        mask_source_hint = QtWidgets.QLabel(
+            "Filled from the Mask selected in Mimics: {0}. Edit only to add "
+            "alternative names used by other cases.".format(
+                self.context.get("organ") or "(none)"
+            )
+        )
+        mask_source_hint.setObjectName("hint")
+        mask_source_hint.setWordWrap(True)
+        profile_layout.addWidget(mask_source_hint, 6, 1, 1, 2)
         layout.addWidget(profile_group)
 
-        sample_group = QtWidgets.QGroupBox("Samples")
+        sample_group = QtWidgets.QGroupBox("Cases")
         sample_layout = QtWidgets.QVBoxLayout(sample_group)
+        self.choose_specific_cases = QtWidgets.QCheckBox(
+            "Choose specific cases instead of using every matching Mask"
+        )
+        self.choose_specific_cases.setChecked(False)
+        self.choose_specific_cases.toggled.connect(
+            self._refresh_manual_case_selection
+        )
+        sample_layout.addWidget(self.choose_specific_cases)
+        self.case_inventory_label = QtWidgets.QLabel(
+            "Scan the data to find cases with usable labels."
+        )
+        self.case_inventory_label.setObjectName("hint")
+        self.case_inventory_label.setWordWrap(True)
+        sample_layout.addWidget(self.case_inventory_label)
+
         sample_controls = QtWidgets.QHBoxLayout()
         sample_controls.addWidget(QtWidgets.QLabel("Sample order"))
         self.widgets["sample_mode"] = self._combo(["all", "latest"], self.values.get("sample_mode", "all"))
@@ -1700,12 +1983,23 @@ class QtTrainingSetupApp(object):
         sample_controls.addStretch(1)
         sample_layout.addLayout(sample_controls)
 
+        self.manual_case_widget = QtWidgets.QWidget()
+        manual_case_layout = QtWidgets.QVBoxLayout(self.manual_case_widget)
+        manual_case_layout.setContentsMargins(0, 0, 0, 0)
+        filter_row = QtWidgets.QHBoxLayout()
+        self.case_filter_edit = QtWidgets.QLineEdit()
+        self.case_filter_edit.setPlaceholderText("Filter cases")
+        self.case_filter_edit.textChanged.connect(self._refresh_case_list)
+        filter_row.addWidget(self.case_filter_edit, 1)
+        self.show_unavailable_cases = QtWidgets.QCheckBox("Show unavailable")
+        self.show_unavailable_cases.toggled.connect(self._refresh_case_list)
+        filter_row.addWidget(self.show_unavailable_cases)
+        manual_case_layout.addLayout(filter_row)
+
         middle = QtWidgets.QHBoxLayout()
         self.case_list = QtWidgets.QListWidget()
         self.case_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.case_list.setMinimumHeight(160)
-        for case_id in self.context.get("case_ids", []) or []:
-            self.case_list.addItem(str(case_id))
         middle.addWidget(self.case_list, 1)
         side = QtWidgets.QVBoxLayout()
         select_all = QtWidgets.QPushButton("Select All")
@@ -1715,19 +2009,21 @@ class QtTrainingSetupApp(object):
         side.addWidget(select_all)
         side.addWidget(clear)
         side.addSpacing(12)
-        side.addWidget(QtWidgets.QLabel("{0} case(s) found".format(len(self.context.get("case_ids", []) or []))))
-        hint = QtWidgets.QLabel("Selected cases override sample order.")
+        hint = QtWidgets.QLabel(
+            "Manual selection is used only when 'Choose specific cases' is enabled."
+        )
         hint.setWordWrap(True)
         side.addWidget(hint)
         side.addStretch(1)
         middle.addLayout(side)
-        sample_layout.addLayout(middle, 1)
+        manual_case_layout.addLayout(middle, 1)
 
         manual = QtWidgets.QHBoxLayout()
         manual.addWidget(QtWidgets.QLabel("Manual cases"))
         self.manual_cases = QtWidgets.QLineEdit()
         manual.addWidget(self.manual_cases, 1)
-        sample_layout.addLayout(manual)
+        manual_case_layout.addLayout(manual)
+        sample_layout.addWidget(self.manual_case_widget)
 
         mins = QtWidgets.QHBoxLayout()
         mins.addWidget(QtWidgets.QLabel("Min train"))
@@ -1738,38 +2034,10 @@ class QtTrainingSetupApp(object):
         mins.addWidget(self.widgets["min_val_samples"])
         mins.addStretch(1)
         sample_layout.addLayout(mins)
-        label_source_row = QtWidgets.QHBoxLayout()
-        label_source_row.addWidget(QtWidgets.QLabel("Training labels"))
-        self.widgets["label_source"] = self._data_combo(
-            LABEL_SOURCE_CHOICES,
-            self.values.get("label_source", "mcs_refresh"),
-        )
-        self.widgets["label_source"].setToolTip(
-            "Refresh from .mcs uses the newest saved edits. Source dataset uses "
-            "<case>/segmentations. Exported masks uses a reusable export folder."
-        )
-        self.widgets["label_source"].currentIndexChanged.connect(
-            self._refresh_label_source_enabled
-        )
-        label_source_row.addWidget(self.widgets["label_source"], 1)
-        sample_layout.addLayout(label_source_row)
-
-        label_root_row = QtWidgets.QHBoxLayout()
-        label_root_row.addWidget(QtWidgets.QLabel("Exported masks folder"))
-        self.label_root_edit = QtWidgets.QLineEdit(
-            str(self.values.get("label_root", "") or "")
-        )
-        self.label_root_edit.setPlaceholderText(
-            "Contains <case>/segmentations/<mask>.nii.gz"
-        )
-        label_root_row.addWidget(self.label_root_edit, 1)
-        self.label_root_browse = QtWidgets.QPushButton("Browse")
-        self.label_root_browse.clicked.connect(self.browse_label_root)
-        label_root_row.addWidget(self.label_root_browse)
-        sample_layout.addLayout(label_root_row)
         layout.addWidget(sample_group, 1)
         layout.addStretch(1)
         self._refresh_label_source_enabled()
+        self._refresh_manual_case_selection()
         return tab
 
     def _build_expert_tab(self):
@@ -2066,25 +2334,81 @@ class QtTrainingSetupApp(object):
 
     def _select_all_cases(self):
         for idx in range(self.case_list.count()):
-            self.case_list.item(idx).setSelected(True)
+            item = self.case_list.item(idx)
+            if item.flags() & self.QtCore.Qt.ItemIsEnabled:
+                item.setSelected(True)
+
+    def _refresh_manual_case_selection(self):
+        manual = bool(
+            self.choose_specific_cases
+            and self.choose_specific_cases.isChecked()
+        )
+        if self.manual_case_widget is not None:
+            self.manual_case_widget.setVisible(manual)
+        for control in (
+            self.case_filter_edit,
+            self.show_unavailable_cases,
+            self.case_list,
+            self.manual_cases,
+        ):
+            if control is not None:
+                control.setEnabled(manual)
+        self._refresh_case_list()
+
+    def _refresh_case_list(self):
+        if self.case_list is None:
+            return
+        query = (
+            str(self.case_filter_edit.text()).strip().lower()
+            if self.case_filter_edit is not None
+            else ""
+        )
+        show_unavailable = bool(
+            self.show_unavailable_cases
+            and self.show_unavailable_cases.isChecked()
+        )
+        selected_ids = {
+            str(item.data(self.QtCore.Qt.UserRole) or item.text())
+            for item in self.case_list.selectedItems()
+        }
+        self.case_list.clear()
+        for row in self.case_rows:
+            ready = row.get("state") == "ready"
+            case_id = str(row.get("case_id") or "")
+            if not ready and not show_unavailable:
+                continue
+            if query and query not in case_id.lower():
+                continue
+            text = case_id if ready else "{}  -  {}".format(
+                case_id,
+                row.get("detail") or "Unavailable",
+            )
+            item = self.QtWidgets.QListWidgetItem(text)
+            item.setData(self.QtCore.Qt.UserRole, case_id)
+            if not ready:
+                item.setFlags(item.flags() & ~self.QtCore.Qt.ItemIsEnabled)
+                item.setForeground(self.QtGui.QColor("#98a2b3"))
+            elif case_id in selected_ids:
+                item.setSelected(True)
+            self.case_list.addItem(item)
 
     def browse_dataset(self):
-        path = self.QtWidgets.QFileDialog.getExistingDirectory(
+        path = choose_path_without_shell(
             self.window,
-            "Select dataset folder",
-            self.context.get("ts_root", "") or str(Path.home()),
-            self.QtWidgets.QFileDialog.ShowDirsOnly,
+            "Original image dataset",
+            self.dataset_edit.text() or self.context.get("ts_root", "") or str(Path.home()),
+            allow_file=False,
         )
         if path:
             self.apply_dataset_root(path)
 
     def browse_mcs_folder(self):
         current = str(self.mcs_folder_edit.text()).strip() if self.mcs_folder_edit is not None else ""
-        path = self.QtWidgets.QFileDialog.getExistingDirectory(
+        path = choose_path_without_shell(
             self.window,
-            "Select folder containing saved .mcs projects",
+            "Saved .mcs folder",
             current or str(Path.home()),
-            self.QtWidgets.QFileDialog.ShowDirsOnly,
+            allow_file=False,
         )
         if path and self.mcs_folder_edit is not None:
             self.mcs_folder_edit.setText(os.path.abspath(path))
@@ -2096,11 +2420,11 @@ class QtTrainingSetupApp(object):
             if self.label_root_edit is not None
             else ""
         )
-        path = self.QtWidgets.QFileDialog.getExistingDirectory(
+        path = choose_path_without_shell(
             self.window,
-            "Select exported masks folder",
+            "Exported masks folder",
             current or str(Path.home()),
-            self.QtWidgets.QFileDialog.ShowDirsOnly,
+            allow_file=False,
         )
         if path and self.label_root_edit is not None:
             self.label_root_edit.setText(os.path.abspath(path))
@@ -2116,12 +2440,38 @@ class QtTrainingSetupApp(object):
         use_export = source == "exported_masks"
         self.values["label_source"] = source
         self.values["export_labels_before_training"] = use_mcs
-        for control in (self.mcs_folder_edit, self.mask_names_edit):
-            if control is not None:
-                control.setEnabled(use_mcs)
-        for control in (self.label_root_edit, self.label_root_browse):
-            if control is not None:
-                control.setEnabled(use_export)
+        if self.mcs_path_widget is not None:
+            self.mcs_path_widget.setVisible(use_mcs)
+        if self.exported_masks_path_widget is not None:
+            self.exported_masks_path_widget.setVisible(use_export)
+        if self.data_source_hint is not None:
+            self.data_source_hint.setText(label_source_hint(source))
+        if self.case_rows:
+            self.case_inventory_label.setText(
+                "Data source changed. Scan again before starting training."
+            )
+
+    def _current_data_signature(self):
+        def normalized_path(widget):
+            value = str(widget.text()).strip() if widget is not None else ""
+            return os.path.normcase(os.path.abspath(value)) if value else ""
+
+        return (
+            normalized_source_mode(self._widget_value("label_source")),
+            normalized_path(self.dataset_edit),
+            normalized_path(self.mcs_folder_edit),
+            normalized_path(self.label_root_edit),
+            tuple(
+                sorted(
+                    safe_slug(value)
+                    for value in split_csv(
+                        self.mask_names_edit.text()
+                        if self.mask_names_edit is not None
+                        else ""
+                    )
+                )
+            ),
+        )
 
     def apply_dataset_from_field(self):
         if self.dataset_edit is None:
@@ -2141,23 +2491,84 @@ class QtTrainingSetupApp(object):
             self.dataset_edit.setText(path)
         self._dataset_scan_generation += 1
         self._dataset_scan_pending = True
+        self._dataset_scan_deadline = time.time() + float(
+            self.config.get("dataset_scan_timeout_seconds", 120)
+        )
         generation = self._dataset_scan_generation
         project_root = self.context.get("project_root", "")
+        label_source = self._widget_value("label_source")
+        label_root = (
+            str(self.label_root_edit.text()).strip()
+            if self.label_root_edit is not None
+            else ""
+        )
+        mcs_output_dir = (
+            str(self.mcs_folder_edit.text()).strip()
+            if self.mcs_folder_edit is not None
+            else ""
+        )
+        mask_names = split_csv(
+            self.mask_names_edit.text() if self.mask_names_edit is not None else ""
+        )
+        if not mask_names:
+            self._dataset_scan_pending = False
+            self._set_status("Enter at least one Target Mask name before scanning.")
+            return
+        if label_source == "mcs_refresh" and not mcs_output_dir:
+            self._dataset_scan_pending = False
+            self._set_status("Choose the folder containing saved .mcs projects.")
+            return
+        if label_source == "exported_masks" and not label_root:
+            self._dataset_scan_pending = False
+            self._set_status("Choose the previously exported masks folder.")
+            return
+        scan_signature = self._current_data_signature()
         self._set_status("Checking dataset in the background...")
         if self.case_list is not None:
             self.case_list.setEnabled(False)
         if self.start_button is not None:
             self.start_button.setEnabled(False)
+        if self.scan_data_button is not None:
+            self.scan_data_button.setEnabled(False)
 
         def scan_dataset():
             try:
                 if not os.path.isdir(path):
                     raise RuntimeError("Dataset folder does not exist: {0}".format(path))
-                output_dir = resolve_mimics_output_dir_for_ui(path, project_root)
-                cases = case_ids_from_dataset_for_ui(path, project_root)
-                self._dataset_scan_results.put((generation, path, output_dir, cases, ""))
+                if label_source == "mcs_refresh" and not os.path.isdir(
+                    mcs_output_dir
+                ):
+                    raise RuntimeError(
+                        "Saved .mcs folder does not exist or is unavailable: "
+                        "{0}".format(mcs_output_dir)
+                    )
+                if label_source == "exported_masks" and not os.path.isdir(
+                    label_root
+                ):
+                    raise RuntimeError(
+                        "Exported masks folder does not exist or is unavailable: "
+                        "{0}".format(label_root)
+                    )
+                output_dir = (
+                    os.path.abspath(mcs_output_dir)
+                    if mcs_output_dir
+                    else resolve_mimics_output_dir_for_ui(path, project_root)
+                )
+                rows = case_rows_from_dataset_for_ui(
+                    path,
+                    project_root=project_root,
+                    label_source=label_source,
+                    label_root=label_root,
+                    mask_names=mask_names,
+                    mcs_output_dir=output_dir,
+                )
+                self._dataset_scan_results.put(
+                    (generation, path, output_dir, rows, scan_signature, "")
+                )
             except Exception as exc:
-                self._dataset_scan_results.put((generation, path, "", [], str(exc)))
+                self._dataset_scan_results.put(
+                    (generation, path, "", [], scan_signature, str(exc))
+                )
 
         worker = threading.Thread(target=scan_dataset, name="fewshot-dataset-scan")
         worker.daemon = True
@@ -2168,34 +2579,91 @@ class QtTrainingSetupApp(object):
             return
         while True:
             try:
-                generation, path, output_dir, cases, error = self._dataset_scan_results.get_nowait()
+                generation, path, output_dir, rows, scan_signature, error = (
+                    self._dataset_scan_results.get_nowait()
+                )
             except Empty:
+                if (
+                    self._dataset_scan_pending
+                    and self._dataset_scan_deadline
+                    and time.time() >= self._dataset_scan_deadline
+                ):
+                    self._dataset_scan_generation += 1
+                    self._dataset_scan_pending = False
+                    self._dataset_scan_deadline = 0.0
+                    self._active_dataset_scan_signature = None
+                    message = (
+                        "Dataset scan timed out. The selected location may be "
+                        "offline or responding too slowly; choose another path "
+                        "or retry."
+                    )
+                    self._set_status(message)
+                    self._append_log(message)
+                    if self.case_list is not None:
+                        self.case_list.setEnabled(True)
+                    if self.scan_data_button is not None:
+                        self.scan_data_button.setEnabled(True)
+                    if self.start_button is not None and not self.started:
+                        self.start_button.setEnabled(True)
                 return
             if generation != self._dataset_scan_generation:
                 continue
             if error:
                 self._dataset_scan_pending = False
+                self._dataset_scan_deadline = 0.0
                 self._set_status(error)
                 self._append_log(error)
                 if self.case_list is not None:
                     self.case_list.setEnabled(True)
+                if self.scan_data_button is not None:
+                    self.scan_data_button.setEnabled(True)
                 if self.start_button is not None and not self.started:
                     self.start_button.setEnabled(True)
                 continue
             self._dataset_scan_pending = False
+            self._dataset_scan_deadline = 0.0
+            self._active_dataset_scan_signature = scan_signature
             self.context["ts_root"] = path
             self.context["workspace"] = os.path.join(path, "fewshot_models")
             self.context["mcs_output_dir"] = output_dir
-            if self.mcs_folder_edit is not None:
+            if self.mcs_folder_edit is not None and not self.mcs_folder_edit.text().strip():
                 self.mcs_folder_edit.setText(output_dir)
-            self.context["case_ids"] = cases
-            if self.case_list is not None:
-                self.case_list.clear()
-                self.case_list.addItems([str(case_id) for case_id in cases])
-                self.case_list.setEnabled(True)
+            self.case_rows = list(rows)
+            ready_rows = [row for row in rows if row.get("state") == "ready"]
+            unavailable = len(rows) - len(ready_rows)
+            self.context["case_ids"] = [
+                str(row.get("case_id")) for row in ready_rows
+            ]
+            self._refresh_case_list()
+            self._refresh_manual_case_selection()
             if self.start_button is not None and not self.started:
                 self.start_button.setEnabled(True)
-            message = "Dataset changed: {0} ({1} cases found)".format(path, len(cases))
+            if self.scan_data_button is not None:
+                self.scan_data_button.setEnabled(True)
+            if self.case_inventory_label is not None:
+                if scan_signature[0] == "mcs_refresh":
+                    self.case_inventory_label.setText(
+                        "{} saved project candidate(s) found; {} case(s) are "
+                        "missing a source image. Target Masks are verified in the "
+                        "background when training starts, and projects without a "
+                        "match are skipped automatically.".format(
+                            len(ready_rows),
+                            unavailable,
+                        )
+                    )
+                else:
+                    self.case_inventory_label.setText(
+                        "{} usable case(s) found; {} unavailable case(s) hidden. "
+                        "Only cases with both an image and matching Mask will be "
+                        "used.".format(
+                            len(ready_rows),
+                            unavailable,
+                        )
+                    )
+            message = "Dataset checked: {} usable, {} unavailable.".format(
+                len(ready_rows),
+                unavailable,
+            )
             self._set_status(message)
             self._append_log(message)
 
@@ -2314,6 +2782,20 @@ class QtTrainingSetupApp(object):
         if len(parts) == 2:
             values["sub_volume_size"] = "{0},{1},{2}".format(depth, parts[0], parts[1])
         return values
+
+    def _label_for_widget(self, key):
+        """Return the QLabel paired with a form widget, if any."""
+        widget = self.widgets.get(key)
+        if widget is None:
+            return None
+        parent = widget.parentWidget()
+        if parent is None:
+            return None
+        for child in parent.findChildren(self.QtWidgets.QLabel):
+            buddy = child.buddy()
+            if buddy is widget:
+                return child
+        return None
 
     def _sync_image_size_choice(self):
         choice = self.quick_widgets["img_size_choice"].currentText()
@@ -2450,7 +2932,8 @@ class QtTrainingSetupApp(object):
                 self._set_widget_value(key, value)
             self.widgets["mixed_precision"].setChecked(False)
             self.widgets["sub_volume"].setChecked(False)
-            if self._widget_value("loss_type") == "auto":
+            current_loss = self._widget_value("loss_type")
+            if current_loss in ("auto", "dice_ce", "dice_focal"):
                 self._set_widget_value("loss_type", "ce")
             if int(self._widget_value("batch_size") or 1) == 1:
                 self._set_widget_value("batch_size", 4)
@@ -2537,23 +3020,41 @@ class QtTrainingSetupApp(object):
         sampling = str(self._widget_value("sampling_mode") or "full")
         patch_enabled = sampling in ("adaptive", "patch")
         for key in ("patch_size_mode", "patch_focus", "patches_per_case"):
-            if self.widgets.get(key) is not None:
-                self.widgets[key].setEnabled(patch_enabled)
+            widget = self.widgets.get(key)
+            if widget is not None:
+                widget.setEnabled(patch_enabled)
         custom_patch = patch_enabled and self._widget_value("patch_size_mode") == "custom"
         self.widgets["patch_size_zyx"].setEnabled(custom_patch)
         self.widgets["neighbor_distance_mm"].setEnabled(self._widget_value("channel_policy") == "2_5d")
+        hidden_when_cached = (
+            "sampling_mode",
+            "patch_size_mode",
+            "patch_size_zyx",
+            "patch_focus",
+            "patches_per_case",
+            "channel_policy",
+            "slice_axis",
+            "neighbor_distance_mm",
+        )
         if cached_slices:
-            for key in (
-                "sampling_mode",
-                "patch_size_mode",
-                "patch_size_zyx",
-                "patch_focus",
-                "patches_per_case",
-                "channel_policy",
-                "slice_axis",
-                "neighbor_distance_mm",
-            ):
-                self.widgets[key].setEnabled(False)
+            for key in hidden_when_cached:
+                widget = self.widgets.get(key)
+                if widget is None:
+                    continue
+                widget.setEnabled(False)
+                widget.setVisible(False)
+                label = self._label_for_widget(key)
+                if label is not None:
+                    label.setVisible(False)
+        else:
+            for key in hidden_when_cached:
+                widget = self.widgets.get(key)
+                if widget is None:
+                    continue
+                widget.setVisible(True)
+                label = self._label_for_widget(key)
+                if label is not None:
+                    label.setVisible(True)
         self._update_dimensionality_summary()
 
     def _update_dimensionality_summary(self, *_args):
@@ -2651,17 +3152,45 @@ class QtTrainingSetupApp(object):
             raise RuntimeError(
                 "The dataset path changed. Press Enter or leave the field, then wait for its check to finish."
             )
+        if self._active_dataset_scan_signature != self._current_data_signature():
+            raise RuntimeError(
+                "The data source, path, or Target Mask names changed. Scan Data "
+                "again before starting training."
+            )
         self._sync_image_size_choice()
         options = self._current_values()
         selected = []
-        if self.case_list is not None:
+        choose_specific = bool(
+            self.choose_specific_cases
+            and self.choose_specific_cases.isChecked()
+        )
+        if choose_specific and self.case_list is not None:
             for item in self.case_list.selectedItems():
-                selected.append(str(item.text()))
-        manual = split_csv(self.manual_cases.text() if self.manual_cases is not None else "")
+                selected.append(
+                    str(item.data(self.QtCore.Qt.UserRole) or item.text())
+                )
+        elif not choose_specific:
+            selected = [
+                str(row.get("case_id"))
+                for row in self.case_rows
+                if row.get("state") == "ready"
+            ]
+        manual = (
+            split_csv(self.manual_cases.text())
+            if choose_specific and self.manual_cases is not None
+            else []
+        )
         cases = selected + [case for case in manual if case not in selected]
+        if not cases:
+            raise RuntimeError(
+                "No usable case is available. Check the paths, Target Mask names, "
+                "and scan the data again."
+            )
         if cases:
             options["cases"] = cases
             options["sample_mode"] = "all"
+        else:
+            options.pop("cases", None)
         return validate_options(options)
 
     def start_training(self):
@@ -2957,65 +3486,52 @@ def generate_preview(path, tab="setup"):
             draw.text((check_x + 28, y - 2), label, fill="#9ca3af", font=small)
             check_x += 190
     else:
-        draw.text((60, 236), "Dataset", fill="#111827", font=head_font)
-        draw.rectangle((60, 270, width - 60, 390), outline="#d1d5db", fill="#f9fafb")
+        draw.text((60, 236), "Training data", fill="#111827", font=head_font)
+        draw.rectangle((60, 270, width - 60, 490), outline="#d1d5db", fill="#f9fafb")
         dataset_rows = [
-            ("Source image root", "D:\\Dataset\\TotalSegmentator"),
-            ("Saved .mcs folder", "D:\\Dataset\\TotalSegmentator\\mcs_output"),
-            ("Saved mask names", "liver, liver_seg"),
+            ("Label source", "Saved Mimics projects (.mcs)", "select"),
+            ("Original image dataset *", "D:\\Dataset\\TotalSegmentator", "text"),
+            ("Saved .mcs folder *", "D:\\Dataset\\TotalSegmentator\\mcs_output", "text"),
+            ("Target Mask name(s) *", "liver, liver_seg", "text"),
         ]
         y = 282
-        for label, value in dataset_rows:
-            draw_row(82, y, label, value, "text", w=760, label_w=180)
-            if label != "Saved mask names":
+        for label, value, kind in dataset_rows:
+            draw_row(82, y, label, value, kind, w=760, label_w=210)
+            if "dataset" in label.lower() or ".mcs" in label:
                 draw.rectangle((1040, y, 1145, y + 30), outline="#9ca3af", fill="#ffffff")
                 draw.text((1066, y + 7), "Browse", fill="#111827", font=small)
             y += 36
-
-        draw.text((60, 418), "Samples", fill="#111827", font=head_font)
-        draw.text((170, 422), "Sample order", fill="#374151", font=small)
-        draw.rectangle((270, 414, 380, 444), outline="#9ca3af", fill="#ffffff")
-        draw.text((282, 420), "all", fill="#111827", font=small)
-        draw.text((410, 422), "Max samples", fill="#374151", font=small)
-        draw.rectangle((510, 414, 610, 444), outline="#9ca3af", fill="#ffffff")
-        draw.text((522, 420), "0", fill="#111827", font=small)
-
-        draw.rectangle((60, 460, 835, 625), outline="#9ca3af", fill="#fbfdff")
-        cases = ["s0001", "s0002", "s0003", "s0004", "s0005", "s0006"]
-        y = 476
-        for idx, case in enumerate(cases):
-            if idx in (0, 1, 3):
-                draw.rectangle((68, y - 4, 820, y + 22), fill="#dbeafe")
-            draw.text((82, y), case, fill="#111827", font=font)
-            y += 24
-        draw.rectangle((870, 460, 990, 496), outline="#9ca3af", fill="#ffffff")
-        draw.text((892, 469), "Select All", fill="#111827", font=font)
-        draw.rectangle((870, 508, 990, 544), outline="#9ca3af", fill="#ffffff")
-        draw.text((910, 517), "Clear", fill="#111827", font=font)
-        draw.text((870, 553), "616 case(s) found", fill="#374151", font=small)
-        draw.text((870, 585), "Selected cases override sample order.", fill="#374151", font=small)
-        draw.text((60, 642), "Manual cases", fill="#374151", font=font)
-        draw.rectangle((180, 634, 920, 670), outline="#9ca3af", fill="#ffffff")
-        draw.text((194, 642), "s0012,s0016", fill="#111827", font=font)
-        draw.text((950, 642), "Min train  1    Min val  1", fill="#374151", font=small)
-        draw_row(
-            60,
-            686,
-            "Training labels",
-            "Refresh from saved .mcs",
-            "select",
-            w=360,
-            label_w=180,
+        draw.text(
+            (292, 430),
+            "Projects without a matching saved Mask are checked and skipped automatically.",
+            fill="#667085",
+            font=small,
         )
-        draw_row(
-            60,
-            724,
-            "Exported masks folder",
-            "Enabled when that source is selected",
-            "disabled",
-            w=620,
-            label_w=180,
+        draw.rectangle((1040, 426, 1145, 458), outline="#9ca3af", fill="#ffffff")
+        draw.text((1060, 434), "Scan Data", fill="#111827", font=small)
+
+        draw.text((60, 520), "Cases", fill="#111827", font=head_font)
+        draw.rectangle((60, 554, width - 60, 700), outline="#d1d5db", fill="#f9fafb")
+        draw.rectangle((84, 578, 100, 594), outline="#9ca3af", fill="#ffffff")
+        draw.text(
+            (116, 574),
+            "Choose specific cases instead of using every matching Mask",
+            fill="#344054",
+            font=font,
         )
+        draw.text(
+            (84, 616),
+            "12 usable cases found; 604 unavailable cases hidden.",
+            fill="#667085",
+            font=small,
+        )
+        draw.text((84, 660), "Sample order", fill="#374151", font=small)
+        draw.rectangle((190, 652, 300, 684), outline="#9ca3af", fill="#ffffff")
+        draw.text((202, 660), "all", fill="#111827", font=small)
+        draw.text((340, 660), "Max samples", fill="#374151", font=small)
+        draw.rectangle((444, 652, 544, 684), outline="#9ca3af", fill="#ffffff")
+        draw.text((456, 660), "0", fill="#111827", font=small)
+        draw.text((610, 660), "Min train  1    Min val  1", fill="#374151", font=small)
 
     status_top = height - 155
     draw.rectangle((30, status_top, width - 30, height - 75), outline="#d1d5db", fill="#ffffff")

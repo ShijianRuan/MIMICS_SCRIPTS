@@ -16,3 +16,20 @@ tools/pyqt5_wheels/
 
 # Offline wheels (platform-specific, downloaded separately)
 wheels/
+
+# Local agent/browser state
+/.claude/
+/.playwright-cli/
+/.workbuddy/
+
+# Datasets, generated outputs, and locally trained model workspaces
+/data/
+/output/
+/nninteractive_task_models/
+/external/nninteractive-finetune/validation/data/
+/external/nninteractive-finetune/validation/work/
+/external/nninteractive-finetune/validation/outputs/
+/external/dinov3-medical-seg/models/
+
+# Portable model archives are generated on demand and transferred separately
+*.model.zip

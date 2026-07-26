@@ -90,7 +90,8 @@ def stylesheet(extra=""):
         color: #101828;
         font-weight: 650;
     }
-    QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QListWidget, QTextEdit {
+    QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QListWidget, QTableWidget,
+    QTextEdit, QPlainTextEdit {
         background: #ffffff;
         border: 1px solid #c9d2dc;
         border-radius: 6px;
@@ -99,7 +100,7 @@ def stylesheet(extra=""):
         selection-color: #101828;
     }
     QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus,
-    QListWidget:focus, QTextEdit:focus {
+    QListWidget:focus, QTableWidget:focus, QTextEdit:focus, QPlainTextEdit:focus {
         border-color: #2563eb;
     }
     QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled {
@@ -119,6 +120,30 @@ def stylesheet(extra=""):
     QListWidget::item:selected {
         background: #dbeafe;
         color: #101828;
+    }
+    QTableWidget {
+        gridline-color: #e6ebf0;
+        alternate-background-color: #f8fafc;
+    }
+    QTableWidget::item {
+        padding: 5px 7px;
+    }
+    QTableWidget::item:selected {
+        background: #dbeafe;
+        color: #101828;
+    }
+    QHeaderView::section {
+        background: #eef2f6;
+        color: #475467;
+        border: none;
+        border-right: 1px solid #d9e0e8;
+        border-bottom: 1px solid #d9e0e8;
+        padding: 7px 8px;
+        font-weight: 650;
+    }
+    QScrollArea, QScrollArea > QWidget > QWidget {
+        background: transparent;
+        border: none;
     }
     QPushButton {
         min-height: 30px;

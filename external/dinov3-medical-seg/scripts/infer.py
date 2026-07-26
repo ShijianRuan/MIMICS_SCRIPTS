@@ -26,6 +26,7 @@ from src.data.spatial import (
 )
 from src.inference import predict_array, predict_cached_feature_slices
 from src.data.frozen_feature_slices import prepare_native_case, restore_native_prediction
+from src.data.input_contract import validate_input_contract
 from src.models.segmentor import DINOv33DSegmentor
 from src.utils.checkpoint import load_checkpoint
 from src.utils.config import load_config
@@ -42,6 +43,7 @@ def main():
     args = parser.parse_args()
 
     config = load_config(args.config, {})
+    validate_input_contract(config)
     device = torch.device(args.device) if args.device else get_device()
     original_image = nib.load(args.input)
     model = DINOv33DSegmentor(config).to(device)

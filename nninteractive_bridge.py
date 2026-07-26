@@ -41,6 +41,7 @@ Protocol (JSON stdin -> JSON stdout):
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import signal
@@ -957,6 +958,37 @@ def platform_to_mimics(array: np.ndarray, mapping: dict[str, Any]) -> np.ndarray
     )
 
 
+def canonical_ras_buffer_mapping(voxel_to_ras: Any) -> dict[str, Any]:
+    """Return a lossless Mimics-array mapping to closest canonical RAS."""
+    value = voxel_to_ras
+    if isinstance(value, str):
+        value = json.loads(value)
+    affine = np.asarray(value, dtype=float)
+    if affine.shape != (4, 4) or not np.all(np.isfinite(affine)):
+        raise ValueError("Mimics voxel-to-RAS matrix is missing or invalid")
+    if abs(float(np.linalg.det(affine[:3, :3]))) < 1.0e-8:
+        raise ValueError("Mimics voxel-to-RAS matrix is singular")
+
+    orientation = nib.orientations.io_orientation(affine)
+    probe = np.arange(2 * 3 * 4, dtype=np.int16).reshape((2, 3, 4))
+    expected = nib.orientations.apply_orientation(probe, orientation)
+    for axes in itertools.permutations((0, 1, 2)):
+        for flips in itertools.product((False, True), repeat=3):
+            mapping = {
+                "platform_to_mimics_axes": list(axes),
+                "platform_to_mimics_flips": list(flips),
+            }
+            candidate = mimics_to_platform(probe, mapping)
+            if candidate.shape == expected.shape and np.array_equal(
+                candidate, expected
+            ):
+                return mapping
+    raise RuntimeError(
+        "Could not express the Mimics-to-canonical-RAS orientation as an "
+        "axis permutation and flip."
+    )
+
+
 # ---------------------------------------------------------------------------
 #  nnInteractive session
 # ---------------------------------------------------------------------------
@@ -1013,6 +1045,25 @@ def load_image_nifti(path: str) -> np.ndarray:
     else:
         raise RuntimeError(f"Unexpected image dimensions: {data.ndim}")
     return data
+
+
+def load_image_medical_file(path: str) -> np.ndarray:
+    """Load MHD/MHA/NRRD source physical values in XYZ array order."""
+    try:
+        import SimpleITK as sitk
+    except Exception as exc:
+        raise RuntimeError(
+            "SimpleITK is required to read this source medical image"
+        ) from exc
+    image = sitk.ReadImage(str(path))
+    data_zyx = sitk.GetArrayFromImage(image)
+    if data_zyx.ndim != 3:
+        raise RuntimeError(
+            "Unexpected medical image dimensions: {}".format(data_zyx.ndim)
+        )
+    return np.transpose(
+        np.asarray(data_zyx, dtype=np.float32), (2, 1, 0)
+    )[None]
 
 
 def _parse_matrix(value: Any) -> np.ndarray | None:
@@ -1107,6 +1158,18 @@ def _apply_source_intensity_transform(data: np.ndarray, input_data: dict[str, An
     if slope_f == 1.0 and intercept_f == 0.0:
         return data.astype(np.float32, copy=False)
     return data.astype(np.float32, copy=False) * slope_f + intercept_f
+
+
+def _apply_buffer_model_intensity_transform(
+    data: np.ndarray, input_data: dict[str, Any]
+) -> np.ndarray:
+    slope = float(input_data.get("image_buffer_to_model_slope", 1.0) or 1.0)
+    intercept = float(
+        input_data.get("image_buffer_to_model_intercept", 0.0) or 0.0
+    )
+    if slope == 1.0 and intercept == 0.0:
+        return data
+    return data.astype(np.float32, copy=False) * slope + intercept
 
 
 def _dicom_sort_key(record: tuple[Path, Any], normal: np.ndarray | None) -> tuple[float, float, str]:
@@ -1262,6 +1325,8 @@ def load_image_source(input_data: dict[str, Any]) -> np.ndarray:
                 expected_shape,
                 allow_shape_mismatch=has_affine_resample_metadata,
             )
+        elif source_kind == "medical_image":
+            image = load_image_medical_file(path)
         else:
             image = load_image_nifti(path)
     except PermissionError as exc:
@@ -1670,6 +1735,13 @@ class _BridgeSessionContext:
             "platform_to_mimics_axes": [0, 1, 2],
             "platform_to_mimics_flips": [False, False, False],
         }
+        self.model_input_space = str(
+            input_data.get("model_input_space") or "mimics"
+        ).strip().lower()
+        if self.model_input_space == "canonical_ras":
+            self.buffer_mapping = canonical_ras_buffer_mapping(
+                input_data.get("image_mimics_voxel_to_ras_matrix")
+            )
         self.device, self.device_warning = _resolve_device(
             self.requested_device,
             bool(input_data.get("allow_cpu_fallback", True)),
@@ -1696,6 +1768,11 @@ class _BridgeSessionContext:
             image_source_intensity_space=input_data.get("image_source_intensity_space"),
             image_source_to_mimics_gv_slope=input_data.get("image_source_to_mimics_gv_slope"),
             image_source_to_mimics_gv_intercept=input_data.get("image_source_to_mimics_gv_intercept"),
+            model_input_space=self.model_input_space,
+            model_input_intensity_space=input_data.get(
+                "model_input_intensity_space", ""
+            ),
+            effective_buffer_mapping=self.buffer_mapping,
         )
 
         if input_data.get("image_buffer_shape"):
@@ -1714,6 +1791,9 @@ class _BridgeSessionContext:
                 input_data.get("image_buffer_dtype", "int16"),
                 buffer_mapping=self.buffer_mapping,
                 coordinates=input_data.get("image_buffer_coordinates", "mimics"),
+            )
+            self.image_np = _apply_buffer_model_intensity_transform(
+                self.image_np, input_data
             )
         elif input_data.get("image_path"):
             image_mimics = load_image_source(input_data)
@@ -2401,6 +2481,11 @@ def _async_worker_main(job_dir_value: str) -> int:
                     result["expected_target_sha256"] = command.get(
                         "expected_target_sha256"
                     )
+                    result["model_identity"] = command.get("model_identity", "official")
+                    result["model_profile_id"] = command.get("model_profile_id", "official")
+                    result["model_id"] = command.get("model_id", "official")
+                    result["checkpoint_sha256"] = command.get("checkpoint_sha256", "")
+                    result["task_id"] = command.get("task_id", "")
                 except Exception as exc:
                     result = _error_result(
                         exc,
@@ -2415,6 +2500,11 @@ def _async_worker_main(job_dir_value: str) -> int:
                     result["expected_target_sha256"] = command.get(
                         "expected_target_sha256"
                     )
+                    result["model_identity"] = command.get("model_identity", "official")
+                    result["model_profile_id"] = command.get("model_profile_id", "official")
+                    result["model_id"] = command.get("model_id", "official")
+                    result["checkpoint_sha256"] = command.get("checkpoint_sha256", "")
+                    result["task_id"] = command.get("task_id", "")
                 _write_json_atomic(result_path, result)
                 last_sequence = sequence
                 last_activity = time.time()

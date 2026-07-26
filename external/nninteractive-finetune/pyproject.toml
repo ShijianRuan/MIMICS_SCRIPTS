@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mimics-nninteractive-finetune"
+version = "0.1.0"
+description = "Task-specific fine-tuning for nnInteractive"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0",
+    "numpy>=1.24",
+    "nibabel>=5.2",
+    "scipy>=1.10",
+    "PyYAML>=6.0",
+    "nnInteractive>=2.4",
+    "nnunetv2>=2.7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+nninteractive-finetune = "nninteractive_finetune.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

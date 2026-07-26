@@ -8,6 +8,7 @@ in child Python/Mimics background processes.
 
 import argparse
 import atexit
+import copy
 import hashlib
 import json
 import os
@@ -28,6 +29,7 @@ if str(RUNTIME) not in sys.path:
     sys.path.insert(0, str(RUNTIME))
 
 import runtime_common
+import dataset_manifest
 
 from resource_locks import (
     FileResourceLock,
@@ -318,6 +320,47 @@ def maybe_update_status(path, payload, state, heartbeat_seconds=5.0):
 
 def global_registry_path():
     return Path.home() / ".mimics_script" / "fewshot_model_index.json"
+
+
+def resolve_manifest_artifact(value, manifest_path, manifest=None):
+    """Resolve portable relative artifacts and relocate legacy manifests."""
+    text = str(value or "").strip()
+    if not text:
+        return Path()
+    source = Path(manifest_path).expanduser().resolve() if manifest_path else None
+    path = Path(text).expanduser()
+    foreign_absolute = (
+        len(text) >= 3
+        and text[1] == ":"
+        and text[2] in ("\\", "/")
+    ) or text.startswith("\\\\")
+    if not path.is_absolute() and not foreign_absolute:
+        return ((source.parent if source else Path.cwd()) / path).resolve()
+    if path.exists() or source is None:
+        return path.resolve()
+    # Old manifests stored an absolute model path. After copying the model
+    # directory, the artifact still has the same basename beside manifest.json.
+    relocated = source.parent / path.name
+    if relocated.exists():
+        return relocated.resolve()
+    model_id = safe_slug((manifest or {}).get("model_id", ""))
+    versioned = source.parent / model_id / path.name
+    return versioned.resolve() if versioned.exists() else path.resolve()
+
+
+def resolved_manifest_payload(manifest_path):
+    path = Path(manifest_path).expanduser().resolve()
+    payload = read_json(path, {}) or {}
+    if not isinstance(payload, dict):
+        return {}
+    resolved = dict(payload)
+    for key in ("checkpoint", "config"):
+        if payload.get(key):
+            resolved[key] = str(
+                resolve_manifest_artifact(payload[key], path, payload)
+            )
+    resolved["_manifest_path"] = str(path)
+    return resolved
 
 
 def parse_case_list(value):
@@ -1094,15 +1137,34 @@ def case_dirs(ts_root, cases=None):
     return result
 
 
+_IMAGE_SUFFIXES = (
+    ".nii.gz", ".nii", ".mha", ".mhd", ".nrrd.gz", ".nrrd",
+)
+_LABEL_SUFFIXES = (
+    ".nii.gz", ".nii", ".mha", ".mhd", ".nrrd.gz", ".nrrd",
+)
+
+
+def _has_suffix(path, suffixes):
+    return any(str(path.name).lower().endswith(suffix) for suffix in suffixes)
+
+
 def find_image(case_dir):
     root = Path(case_dir)
-    preferred = ("ct.nii.gz", "mri.nii.gz", "ct.nii", "mri.nii")
+    preferred = (
+        "ct.nii.gz", "mr.nii.gz", "mri.nii.gz", "image.nii.gz",
+        "ct.nii", "mr.nii", "mri.nii", "image.nii",
+        "ct.mha", "mr.mha", "mri.mha", "image.mha",
+        "ct.mhd", "mr.mhd", "mri.mhd", "image.mhd",
+        "ct.nrrd", "mr.nrrd", "mri.nrrd", "image.nrrd",
+    )
     candidates = []
+    if not root.is_dir():
+        return None
     for path in root.iterdir():
         if not path.is_file():
             continue
-        lower = path.name.lower()
-        if lower.endswith(".nii") or lower.endswith(".nii.gz"):
+        if _has_suffix(path, _IMAGE_SUFFIXES):
             candidates.append(path)
     for wanted in preferred:
         for path in sorted(candidates):
@@ -1111,36 +1173,83 @@ def find_image(case_dir):
     for path in sorted(candidates):
         if "segmentations" not in [part.lower() for part in path.parts]:
             return path
+    try:
+        from mimics_bridge import is_dicom_folder
+
+        if is_dicom_folder(str(root)):
+            return root
+    except Exception:
+        pass
     return None
 
 
-def _find_label_in_seg_dir(seg_dir, organ):
+def _medical_stem(path):
+    lower = path.name.lower()
+    for suffix in _LABEL_SUFFIXES:
+        if lower.endswith(suffix):
+            return path.name[:-len(suffix)]
+    return path.stem
+
+
+def _find_label_in_seg_dir(seg_dir, mask_names):
     seg_dir = Path(seg_dir)
     if not seg_dir.is_dir():
         return None
-    names = [
-        organ + ".nii.gz",
-        organ + ".nii",
-        safe_slug(organ) + ".nii.gz",
-        safe_slug(organ) + ".nii",
-    ]
-    for name in names:
-        path = seg_dir / name
-        if path.is_file():
-            return path
-    organ_lower = organ.lower()
-    for path in sorted(seg_dir.glob("*.nii.gz")) + sorted(seg_dir.glob("*.nii")):
-        stem = path.name.replace(".nii.gz", "").replace(".nii", "")
-        if stem.lower() == organ_lower:
-            return path
-    return None
+    wanted = set(
+        safe_slug(name)
+        for name in (mask_names or [])
+        if str(name or "").strip()
+    )
+    matches = []
+    for path in sorted(seg_dir.iterdir()):
+        if not path.is_file() or not _has_suffix(path, _LABEL_SUFFIXES):
+            continue
+        if safe_slug(_medical_stem(path)) in wanted:
+            matches.append(path)
+    matches = sorted(
+        dict(
+            (os.path.normcase(os.path.abspath(str(path))), path)
+            for path in matches
+        ).values()
+    )
+    if len(matches) > 1:
+        raise RuntimeError(
+            "More than one label matched the target aliases in {}: {}. "
+            "Keep one label or narrow Target Mask names.".format(
+                seg_dir, ", ".join(path.name for path in matches)
+            )
+        )
+    return matches[0] if matches else None
 
 
-def find_label(case_dir, organ, label_root=None, fallback_to_case_labels=True):
+def find_label(
+    case_dir,
+    organ,
+    label_root=None,
+    fallback_to_case_labels=True,
+    mask_names=None,
+):
     case_dir = Path(case_dir)
+    accepted_names = list(mask_names or [organ])
+    if organ and safe_slug(organ) not in set(safe_slug(v) for v in accepted_names):
+        accepted_names.insert(0, organ)
+    if label_root:
+        manifest_file = Path(label_root)
+        if manifest_file.name.lower() != dataset_manifest.MANIFEST_FILENAME:
+            manifest_file = manifest_file / dataset_manifest.MANIFEST_FILENAME
+        if manifest_file.is_file():
+            payload = dataset_manifest.load_manifest(manifest_file)
+            case_row = dataset_manifest.find_case(payload, case_dir.name) or {}
+            resolved = dataset_manifest.resolve_case_label(
+                manifest_file, case_row, accepted_names
+            )
+            if resolved:
+                return Path(resolved[1])
     search_dirs = []
     if label_root:
         root = Path(label_root)
+        if root.name.lower() == dataset_manifest.MANIFEST_FILENAME:
+            root = root.parent
         search_dirs.extend([
             root / case_dir.name / "segmentations",
             root / case_dir.name,
@@ -1153,7 +1262,7 @@ def find_label(case_dir, organ, label_root=None, fallback_to_case_labels=True):
         if resolved in seen:
             continue
         seen.add(resolved)
-        label = _find_label_in_seg_dir(seg_dir, organ)
+        label = _find_label_in_seg_dir(seg_dir, accepted_names)
         if label:
             return label
     return None
@@ -1162,12 +1271,11 @@ def find_label(case_dir, organ, label_root=None, fallback_to_case_labels=True):
 def _label_skip_reason(label_path):
     """Return a skip reason for unusable labels, otherwise an empty string."""
     try:
-        import nibabel as nib
         import numpy as np
-        img = nib.load(str(label_path))
-        if len(img.shape) < 3 or any(int(value) <= 0 for value in img.shape[:3]):
-            return "label is not a valid 3D NIfTI"
-        data = np.asanyarray(img.dataobj)
+        from mimics_bridge import read_mask_labels_with_affine
+        data, _affine, _labels = read_mask_labels_with_affine(str(label_path))
+        if len(data.shape) < 3 or any(int(value) <= 0 for value in data.shape[:3]):
+            return "label is not a valid 3D medical image"
         if not np.any(data):
             return "label is empty (all zeros)"
         return ""
@@ -1182,6 +1290,7 @@ def discover_samples(
     label_root=None,
     fallback_to_case_labels=True,
     label_source=None,
+    mask_names=None,
 ):
     samples = []
     skipped = []
@@ -1192,6 +1301,7 @@ def discover_samples(
             organ,
             label_root=label_root,
             fallback_to_case_labels=fallback_to_case_labels,
+            mask_names=mask_names,
         )
         if image and label:
             label_skip_reason = _label_skip_reason(label)
@@ -1282,40 +1392,136 @@ def copy_or_link(src, dst):
         return "copy"
 
 
-def _materialize_image_aligned_to_label(image_src, label_src, image_dst):
-    """Materialize image so it shares the label/Mimics grid."""
+def _write_nifti(array, affine, destination):
     import nibabel as nib
-    from mimics_bridge import _affine_close, resample_image_to_grid
+    import numpy as np
 
-    image_img = nib.load(str(image_src))
-    label_img = nib.load(str(label_src))
-    image_shape = tuple(int(value) for value in image_img.shape[:3])
-    label_shape = tuple(int(value) for value in label_img.shape[:3])
-    image_affine = image_img.affine
-    label_affine = label_img.affine
-    if image_shape == label_shape and _affine_close(image_affine, label_affine):
-        return copy_or_link(image_src, image_dst), True
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    image = nib.Nifti1Image(np.asarray(array), np.asarray(affine, dtype=float))
+    image.set_qform(np.asarray(affine, dtype=float), code=1)
+    image.set_sform(np.asarray(affine, dtype=float), code=1)
+    nib.save(image, str(destination))
+    return destination
 
+
+def _materialize_source_image(image_src, image_dst):
+    """Convert any supported source image to NIfTI without changing its grid."""
+    image_src = Path(image_src)
     image_dst = Path(image_dst)
+    lower = image_src.name.lower()
+    if image_src.is_file() and lower.endswith(".nii.gz"):
+        return copy_or_link(image_src, image_dst)
+    if image_src.is_file() and lower.endswith(".nii"):
+        import nibabel as nib
+        import numpy as np
+
+        image = nib.load(str(image_src))
+        _write_nifti(
+            np.asanyarray(image.dataobj),
+            image.affine,
+            image_dst,
+        )
+        return "nifti_repacked"
+
+    try:
+        import SimpleITK as sitk
+    except Exception as exc:
+        raise RuntimeError(
+            "SimpleITK is required to convert source image {}: {}".format(
+                image_src, exc
+            )
+        )
+    if image_src.is_dir():
+        series_ids = list(
+            sitk.ImageSeriesReader.GetGDCMSeriesIDs(str(image_src)) or []
+        )
+        if len(series_ids) != 1:
+            raise RuntimeError(
+                "Expected one DICOM series in {}, found {}.".format(
+                    image_src, len(series_ids)
+                )
+            )
+        names = sitk.ImageSeriesReader.GetGDCMSeriesFileNames(
+            str(image_src), series_ids[0]
+        )
+        reader = sitk.ImageSeriesReader()
+        reader.SetFileNames(names)
+        image = reader.Execute()
+    else:
+        image = sitk.ReadImage(str(image_src))
     image_dst.parent.mkdir(parents=True, exist_ok=True)
-    resample_image_to_grid(str(image_src), label_shape, label_affine, str(image_dst))
-    return "resampled_to_label_grid", False
+    sitk.WriteImage(image, str(image_dst), True)
+    return "converted_to_nifti"
+
+
+def _materialize_label_on_source_grid(label_src, image_dst, label_dst):
+    """Keep the source image fixed and map the binary label onto that grid."""
+    import nibabel as nib
+    import numpy as np
+    from mimics_bridge import (
+        _affine_close,
+        _validate_resampled_mask_foreground,
+        read_nifti_mask_with_affine,
+        resample_mask_to_image_grid,
+    )
+
+    image_img = nib.load(str(image_dst))
+    label_array, label_affine = read_nifti_mask_with_affine(str(label_src))
+    image_shape = tuple(int(value) for value in image_img.shape[:3])
+    image_affine = image_img.affine
+    geometry_matched = (
+        image_shape == tuple(int(value) for value in label_array.shape[:3])
+        and _affine_close(image_affine, label_affine)
+    )
+    if geometry_matched:
+        target_label = np.asarray(label_array, dtype=np.uint8)
+        method = "copied_on_source_grid"
+    else:
+        target_label = resample_mask_to_image_grid(
+            label_array,
+            label_affine,
+            image_shape,
+            image_affine,
+        )
+        method = "label_resampled_to_source_image_grid"
+    source_foreground, target_foreground = _validate_resampled_mask_foreground(
+        label_array,
+        target_label,
+        "Preparing DINOv3 label '{}'".format(label_src),
+    )
+    _write_nifti(target_label.astype(np.uint8), image_affine, label_dst)
+    return method, geometry_matched, source_foreground, target_foreground
+
 
 
 def validate_fresh_export_geometry(samples):
     """Fail closed when a fresh Mimics export is not on its source-image grid."""
-    import nibabel as nib
     from mimics_bridge import _affine_close
+    from mimics_bridge import get_source_image_geometry, read_nifti_mask_with_affine
 
     checked = []
     for sample in samples:
-        if sample.get("label_source") != "fresh_export":
+        if str(sample.get("label_source") or "") not in (
+            "fresh_export",
+            "fresh_mcs_export",
+        ):
             continue
-        image = nib.load(str(sample["image"]))
-        label = nib.load(str(sample["label"]))
-        image_shape = tuple(int(value) for value in image.shape[:3])
-        label_shape = tuple(int(value) for value in label.shape[:3])
-        if image_shape != label_shape or not _affine_close(image.affine, label.affine):
+        image = get_source_image_geometry(str(sample["image"]))
+        if not image:
+            raise RuntimeError(
+                "source image geometry could not be read for case {}".format(
+                    sample.get("case_id", "?")
+                )
+            )
+        label_array, label_affine = read_nifti_mask_with_affine(
+            str(sample["label"])
+        )
+        image_shape = tuple(int(value) for value in image["shape"])
+        label_shape = tuple(int(value) for value in label_array.shape[:3])
+        if image_shape != label_shape or not _affine_close(
+            image["affine"], label_affine
+        ):
             raise RuntimeError(
                 "fresh Mimics label export is not aligned to the source image for case {0}; "
                 "image shape {1}, label shape {2}. Training was stopped instead of silently "
@@ -1335,12 +1541,15 @@ def _materialize_split(samples, image_dir, label_dir, split_name):
         case_id = safe_slug(sample["case_id"])
         image_src = Path(sample["image"])
         label_src = Path(sample["label"])
-        image_ext = ".nii.gz" if image_src.name.endswith(".nii.gz") else ".nii"
-        label_ext = ".nii.gz" if label_src.name.endswith(".nii.gz") else ".nii"
-        image_dst = image_dir / (case_id + image_ext)
-        label_dst = label_dir / (case_id + label_ext)
-        image_method, geometry_matched = _materialize_image_aligned_to_label(image_src, label_src, image_dst)
-        label_method = copy_or_link(label_src, label_dst)
+        image_dst = image_dir / (case_id + ".nii.gz")
+        label_dst = label_dir / (case_id + ".nii.gz")
+        image_method = _materialize_source_image(image_src, image_dst)
+        (
+            label_method,
+            geometry_matched,
+            source_foreground,
+            target_foreground,
+        ) = _materialize_label_on_source_grid(label_src, image_dst, label_dst)
         row = dict(sample)
         row.update({
             "split": split_name,
@@ -1351,6 +1560,8 @@ def _materialize_split(samples, image_dir, label_dir, split_name):
             "image_materialization": image_method,
             "label_materialization": label_method,
             "image_label_geometry_matched": bool(geometry_matched),
+            "source_label_foreground_voxels": source_foreground,
+            "dataset_label_foreground_voxels": target_foreground,
         })
         materialized.append(row)
     return materialized
@@ -1544,13 +1755,26 @@ def write_training_config(
     encoder_backend = str(
         getattr(args, "encoder_backend", "auto") or "auto"
     ).strip().lower()
-    compatibility_onnx = cached_slice_pipeline and encoder_backend != "pytorch"
+    if cached_slice_pipeline and encoder_backend == "auto":
+        encoder_path = Path(model_path)
+        if not encoder_path.is_absolute():
+            encoder_path = Path(base_config).resolve().parents[2] / encoder_path
+        onnx_path = (
+            encoder_path
+            if encoder_path.suffix.lower() == ".onnx"
+            else encoder_path / "model.onnx"
+        )
+        encoder_backend = "onnx" if onnx_path.is_file() else "pytorch"
+    compatibility_onnx = cached_slice_pipeline and encoder_backend == "onnx"
     config = {
         "_base_": [str(base_config)],
         "exp_name": exp_name,
         "model": {
             "model_path": model_path,
             "num_classes": 2,
+            # The compatibility ONNX model consumes the reference casewise
+            # z-score values directly. The optional HuggingFace/PyTorch encoder
+            # is a different model and retains its ImageNet input contract.
             "input_normalization": "none" if compatibility_onnx else "imagenet",
             "image_mean": [0.485, 0.456, 0.406], "image_std": [0.229, 0.224, 0.225],
             "encoder_backend": encoder_backend,
@@ -1614,10 +1838,10 @@ def write_training_config(
         config["finetune"]["method"] = "frozen"
         config["data"].update({
             "img_size": img_size,
-            "target_spacing": None,
             "patch": {"enabled": False},
             "roi": {"enabled": False},
             "native_grid": True,
+            "target_spacing": None,
         })
         config["augmentation"] = {"enabled": False}
         config["training"].update({
@@ -1636,8 +1860,22 @@ def write_training_config(
             "keep_feature_cache": False,
         })
         strategy_options = (config.get("strategy") or {}).get("options") or {}
-        if str(strategy_options.get("loss_type", "auto")) == "auto":
-            config["loss"] = {"type": "ce"}
+        cached_loss_type = str(strategy_options.get("loss_type", "auto"))
+        if cached_loss_type not in ("auto", "ce"):
+            config.setdefault("runtime", {}).setdefault(
+                "compatibility_adjustments", []
+            ).append({
+                "field": "loss_type",
+                "from": cached_loss_type,
+                "to": "ce",
+                "reason": (
+                    "Frozen Feature 2D uses the verified cross-entropy "
+                    "training objective"
+                ),
+            })
+        # Strategy compilation may have resolved "auto" to a volumetric loss.
+        # The final pipeline contract is authoritative for this decoder.
+        config["loss"] = {"type": "ce"}
         config.setdefault("inference", {}).update({
             "tta_axes": [],
             "scales": [],
@@ -1649,13 +1887,94 @@ def write_training_config(
                 "channel_policy": "repeat",
                 "slice_axis": "axial",
             })
+        compatibility_adjustments = getattr(args, "_compatibility_adjustments", None)
+        if not compatibility_adjustments:
+            compatibility_adjustments = []
+            original_finetune = str(getattr(args, "finetune_method", "frozen") or "frozen").lower()
+            if original_finetune in ("decoder_only", "decode_only", "decoder-only", "decode-only"):
+                compatibility_adjustments.append({
+                    "field": "finetune_method",
+                    "from": original_finetune,
+                    "to": "frozen",
+                    "reason": "decoder_only is an alias for frozen (decoder-only training with frozen encoder)",
+                })
+            original_strategy = str(getattr(args, "strategy", "full_volume") or "full_volume")
+            if original_strategy != "full_volume":
+                compatibility_adjustments.append({
+                    "field": "strategy",
+                    "from": original_strategy,
+                    "to": "full_volume",
+                    "reason": "Frozen Feature 2D only supports full-volume sampling",
+                })
+            original_grad = int(getattr(args, "grad_accumulation", 1) or 1)
+            if original_grad != 1:
+                compatibility_adjustments.append({
+                    "field": "grad_accumulation",
+                    "from": original_grad,
+                    "to": 1,
+                    "reason": "Frozen Feature 2D uses real slice batches; grad_accumulation must be 1",
+                })
+            original_mixed = bool(getattr(args, "mixed_precision", False))
+            if original_mixed:
+                compatibility_adjustments.append({
+                    "field": "mixed_precision",
+                    "from": True,
+                    "to": False,
+                    "reason": "Frozen Feature 2D disables mixed precision for feature-cache parity",
+                })
+        if compatibility_adjustments:
+            recorded = config.setdefault("runtime", {}).setdefault(
+                "compatibility_adjustments", []
+            )
+            for adjustment in compatibility_adjustments:
+                if adjustment not in recorded:
+                    recorded.append(adjustment)
     if status_path or cancel_path or metrics_history_path:
-        config["runtime"] = {
+        config.setdefault("runtime", {}).update({
             "status_path": str(status_path or ""), "cancel_path": str(cancel_path or ""),
             "metrics_history_path": str(metrics_history_path or ""), "status_interval_seconds": 2.0,
-        }
+        })
+    from src.data.input_contract import input_contract_for_config
+    config.setdefault("runtime", {})["input_contract"] = input_contract_for_config(
+        config
+    )
     import yaml
     write_text_atomic(path, yaml.safe_dump(config, sort_keys=False, allow_unicode=False))
+    return config
+
+
+def portable_inference_config(effective_config, dinov3_root):
+    """Strip run-local paths while preserving the trained model architecture."""
+    config = copy.deepcopy(effective_config)
+    config.pop("_base_", None)
+    data = config.setdefault("data", {})
+    data.pop("data_root", None)
+    runtime = config.get("runtime")
+    if isinstance(runtime, dict):
+        for key in (
+            "status_path",
+            "cancel_path",
+            "metrics_history_path",
+        ):
+            runtime.pop(key, None)
+    training = config.get("training")
+    if isinstance(training, dict):
+        training.pop("experiment_root", None)
+    model = config.get("model")
+    if isinstance(model, dict):
+        raw = str(model.get("model_path") or "").strip()
+        if raw:
+            path = Path(raw)
+            if not path.is_absolute():
+                path = Path(dinov3_root) / path
+            try:
+                model["model_path"] = path.resolve().relative_to(
+                    Path(dinov3_root).resolve()
+                ).as_posix()
+            except (OSError, RuntimeError, ValueError):
+                # An external encoder path remains explicit; the model audit on
+                # the target machine will report it instead of silently changing it.
+                model["model_path"] = str(path.resolve())
     return config
 
 
@@ -1856,10 +2175,17 @@ def launch_mimics_export(
     mask_names=None,
     target_mask_name=None,
     mcs_output_dir=None,
+    skip_projects_without_requested_mask=False,
+    skip_invalid_projects=False,
 ):
     mimics_exe = find_mimics_exe(mimics_exe)
     if not mimics_exe:
-        append_log(workspace, "A separate background Mimics executable was not found; using existing exported labels only.")
+        append_log(
+            workspace,
+            "A separate background Mimics executable was not found. Fresh .mcs "
+            "label export cannot start. Set MIMICS_BACKGROUND_EXE or "
+            "mimics_background_exe, or select an existing exported masks folder.",
+        )
         return {"launched": False, "reason": "mimics_not_found"}
     # The .mcs files live in the configured Mimics output directory, while
     # few-shot control artifacts stay in the fewshot workspace.
@@ -1895,6 +2221,10 @@ def launch_mimics_export(
         "status_path": str(batch_status_path),
         "job_runtime": str(export_root),
         "stop_path": str(stop_path),
+        "skip_projects_without_requested_mask": bool(
+            skip_projects_without_requested_mask
+        ),
+        "skip_invalid_projects": bool(skip_invalid_projects),
     }
     if mask_names:
         export_config["mask_names"] = [str(name) for name in mask_names if str(name).strip()]
@@ -2134,11 +2464,15 @@ def update_status(path, payload, raise_on_failure=False):
         return False
 
 
-def register_global_model(manifest):
+def register_global_model(manifest, manifest_path=None):
     path = global_registry_path()
     payload = read_json(path, {}) or {}
     models = payload.get("models") or []
-    manifest_path = str(Path(manifest["checkpoint"]).parent / "manifest.json")
+    manifest_path = str(
+        Path(manifest_path).resolve()
+        if manifest_path
+        else Path(manifest["checkpoint"]).parent / "manifest.json"
+    )
     row = {
         "organ": manifest.get("organ", ""),
         "organ_slug": manifest.get("organ_slug", safe_slug(manifest.get("organ", ""))),
@@ -2173,10 +2507,12 @@ def global_model_rows(organ=None):
     for row in payload.get("models") or []:
         if wanted and row.get("organ_slug") != wanted:
             continue
-        manifest_path = Path(row.get("manifest_path", ""))
+        manifest_path = Path(row.get("manifest_path", "")).expanduser()
         if not manifest_path.is_file():
             continue
-        rows.append(row)
+        resolved = dict(row)
+        resolved["manifest_path"] = str(manifest_path.resolve())
+        rows.append(resolved)
     rows.sort(key=lambda item: float(item.get("created_at_epoch", 0.0) or 0.0), reverse=True)
     return rows
 
@@ -2313,6 +2649,8 @@ def _cmd_train_impl(args):
                 mask_names=mask_names,
                 target_mask_name=organ_slug,
                 mcs_output_dir=args.mcs_output_dir,
+                skip_projects_without_requested_mask=True,
+                skip_invalid_projects=True,
             )
         except ResourceLockCancelled:
             update_status(status_path, {"status": "cancelled", "error": "cancelled while waiting for background Mimics"})
@@ -2321,10 +2659,23 @@ def _cmd_train_impl(args):
             update_status(status_path, {"status": "failed", "error": str(exc)})
             return 75
         if not export_result.get("launched"):
+            launch_reason = str(export_result.get("reason") or "")
+            if launch_reason == "mimics_not_found":
+                launch_error = (
+                    "Fresh label export requires MimicsResearch.exe, but it could "
+                    "not be found. Set MIMICS_BACKGROUND_EXE or "
+                    "mimics_background_exe in mimics_io_config.json, then retry. "
+                    "Alternatively, choose an existing exported masks folder."
+                )
+            else:
+                launch_error = (
+                    "Fresh label export was requested but background Mimics "
+                    "export could not be started."
+                )
             update_status(status_path, {
                 "status": "failed",
                 "label_export": export_result,
-                "error": "fresh label export was requested but background Mimics export could not be started",
+                "error": launch_error,
             })
             return 75
         batch_status = export_result.get("batch_status") or {}
@@ -2360,22 +2711,35 @@ def _cmd_train_impl(args):
                 "error": "training was cancelled after fresh label export",
             })
             return 130
-        if (
-            str(batch_status.get("status") or "").lower() == "failed"
-            or int(batch_status.get("failed", 0) or 0) > 0
-        ):
+        if str(batch_status.get("status") or "").lower() == "failed":
             update_status(status_path, {
                 "status": "failed",
                 "label_export": export_result,
                 "error": (
-                    "Fresh label export failed for {0} selected case(s). Training was not started "
-                    "with an incomplete dataset. Review the job-scoped export diagnostics: {1}"
+                    "Fresh label export could not complete. Training was not started. "
+                    "Review the job-scoped export diagnostics: {0}"
                 ).format(
-                    int(batch_status.get("failed", 0) or 0),
                     export_result.get("job_runtime") or export_result.get("log") or workspace,
                 ),
             })
             return 75
+        export_failed = int(batch_status.get("failed", 0) or 0)
+        export_skipped = int(batch_status.get("skipped", 0) or 0)
+        if export_failed or export_skipped:
+            warning = (
+                "Fresh label export isolated {0} failed and {1} skipped case(s). "
+                "Training will continue only if the remaining exported labels "
+                "satisfy the requested sample count. Diagnostics: {2}"
+            ).format(
+                export_failed,
+                export_skipped,
+                export_result.get("job_runtime") or export_result.get("log") or workspace,
+            )
+            append_log(workspace, warning)
+            update_status(status_path, {
+                "label_export_warning": warning,
+                "label_export": export_result,
+            })
         update_status(status_path, {"label_export": export_result})
 
         # Guard against the background Mimics export exiting with code 0 without
@@ -2441,6 +2805,7 @@ def _cmd_train_impl(args):
         label_root=selected_label_root,
         fallback_to_case_labels=not bool(selected_label_root),
         label_source=resolved_label_source,
+        mask_names=mask_names,
     )
     empty_labels = [s for s in skipped if s.get("reason") == "label is empty (all zeros)"]
     if empty_labels:
@@ -2489,6 +2854,22 @@ def _cmd_train_impl(args):
         min_train_samples=args.min_samples,
         min_val_samples=args.min_val_samples,
     )
+    generalization_warnings = []
+    if len(train_samples) < 5:
+        generalization_warnings.append(
+            "Only {} training case(s) were selected; decoder overfitting is likely.".format(
+                len(train_samples)
+            )
+        )
+    if val_samples and len(val_samples) < 2:
+        generalization_warnings.append(
+            "Only one validation case was selected; validation Dice is not a stable "
+            "estimate of generalization."
+        )
+    if generalization_warnings:
+        message = " ".join(generalization_warnings)
+        append_log(workspace, "Training data warning: " + message)
+        update_status(status_path, {"training_data_warning": message})
     fresh_geometry_checked = validate_fresh_export_geometry(train_samples + val_samples)
     if not args.keep_materialized_dataset:
         _register_transient_cleanup(dataset_dir)
@@ -2740,7 +3121,19 @@ def _cmd_train_impl(args):
     model_dir.mkdir(parents=True, exist_ok=True)
     registry_ckpt = model_dir / "model.pth"
     shutil.copy2(str(ckpt), str(registry_ckpt))
-    shutil.copy2(str(config_path), str(model_dir / "config.yaml"))
+    registered_config = model_dir / "config.yaml"
+    import yaml
+    write_text_atomic(
+        registered_config,
+        yaml.safe_dump(
+            portable_inference_config(effective_config, dinov3_root),
+            sort_keys=False,
+            allow_unicode=False,
+        ),
+    )
+    registered_config_sha256 = hashlib.sha256(
+        registered_config.read_bytes()
+    ).hexdigest()
     best_dsc_value = final_progress.get("best_dsc")
     manifest = {
         "schema_version": "mimics_fewshot_model.v2",
@@ -2749,13 +3142,16 @@ def _cmd_train_impl(args):
         "organ_slug": organ_slug,
         "source_mask_names": mask_names,
         "best_dsc": best_dsc_value,
-        "checkpoint": str(registry_ckpt),
-        "config": str(model_dir / "config.yaml"),
-        "config_sha256": config_sha256,
+        "checkpoint": "model.pth",
+        "config": "config.yaml",
+        "config_sha256": registered_config_sha256,
         "strategy": strategy_overrides.get("strategy", {}),
         "effective_config": effective_config,
+        "input_contract": (
+            effective_config.get("runtime", {}).get("input_contract") or {}
+        ),
         "spatial_convention": "canonical_ras_array_xyz__model_tensor_zyx",
-        "source_checkpoint": str(registry_ckpt),
+        "source_checkpoint": "model.pth",
         "training_source_checkpoint": str(ckpt),
         "experiment_dir": str(exp_dir),
         "experiment_artifacts_retained": bool(repo_config.get("keep_training_experiment_artifacts", False)),
@@ -2801,27 +3197,38 @@ def _cmd_train_impl(args):
         "dinov3_root": str(dinov3_root),
         "base_config": str(base_config),
     }
-    write_json_atomic(model_dir / "manifest.json", manifest)
-    write_json_atomic(workspace / "models" / organ_slug / "latest.json", manifest)
+    model_manifest_path = model_dir / "manifest.json"
+    write_json_atomic(model_manifest_path, manifest)
+    latest_manifest = dict(manifest)
+    latest_manifest["checkpoint"] = "{}/model.pth".format(run_id)
+    latest_manifest["config"] = "{}/config.yaml".format(run_id)
+    latest_manifest["model_manifest"] = "{}/manifest.json".format(run_id)
+    latest_path = workspace / "models" / organ_slug / "latest.json"
+    write_json_atomic(latest_path, latest_manifest)
     try:
-        register_global_model(manifest)
+        register_global_model(manifest, model_manifest_path)
     except Exception as exc:
         manifest["global_registry_error"] = str(exc)
-        write_json_atomic(model_dir / "manifest.json", manifest)
-        write_json_atomic(workspace / "models" / organ_slug / "latest.json", manifest)
+        write_json_atomic(model_manifest_path, manifest)
+        latest_manifest.update({"global_registry_error": str(exc)})
+        write_json_atomic(latest_path, latest_manifest)
         append_log(workspace, "Could not update global DINOv3 model registry: {}.".format(exc))
     if not args.keep_materialized_dataset:
         try:
             rmtree_with_retry(dataset_dir)
             manifest["dataset_retained"] = False
             manifest["dataset_cleanup_at_epoch"] = time.time()
-            write_json_atomic(model_dir / "manifest.json", manifest)
-            write_json_atomic(workspace / "models" / organ_slug / "latest.json", manifest)
+            write_json_atomic(model_manifest_path, manifest)
+            latest_manifest["dataset_retained"] = False
+            latest_manifest["dataset_cleanup_at_epoch"] = manifest["dataset_cleanup_at_epoch"]
+            write_json_atomic(latest_path, latest_manifest)
         except Exception as exc:
             manifest["dataset_retained"] = True
             manifest["dataset_cleanup_error"] = str(exc)
-            write_json_atomic(model_dir / "manifest.json", manifest)
-            write_json_atomic(workspace / "models" / organ_slug / "latest.json", manifest)
+            write_json_atomic(model_manifest_path, manifest)
+            latest_manifest["dataset_retained"] = True
+            latest_manifest["dataset_cleanup_error"] = str(exc)
+            write_json_atomic(latest_path, latest_manifest)
             append_log(workspace, "Could not clean materialized dataset {}: {}".format(dataset_dir, exc))
     update_status(status_path, {
         "status": "completed",
@@ -2918,9 +3325,10 @@ def validate_model_manifest(manifest, source=""):
         value = manifest.get(key, "")
         if not value:
             raise RuntimeError("model manifest is missing '{}': {}".format(key, source))
-        path = Path(value)
+        path = resolve_manifest_artifact(value, source, manifest)
         if not path.is_file():
             raise RuntimeError("model manifest points to a missing {}: {} ({})".format(key, path, source))
+        checked[key] = str(path)
         try:
             size = int(path.stat().st_size)
             checked[key + "_size_bytes"] = size
@@ -2931,15 +3339,15 @@ def validate_model_manifest(manifest, source=""):
             raise RuntimeError("model manifest points to an empty {}: {} ({})".format(key, path, source))
     expected_config_sha256 = str(manifest.get("config_sha256") or "").strip().lower()
     if expected_config_sha256:
-        actual_config_sha256 = hashlib.sha256(Path(manifest["config"]).read_bytes()).hexdigest()
+        actual_config_sha256 = hashlib.sha256(Path(checked["config"]).read_bytes()).hexdigest()
         checked["config_sha256_verified"] = actual_config_sha256 == expected_config_sha256
         if actual_config_sha256 != expected_config_sha256:
             raise RuntimeError(
                 "model configuration was changed after training; refusing inconsistent inference: {} ({})".format(
-                    manifest["config"], source,
+                    checked["config"], source,
                 )
             )
-    checkpoint_path = Path(manifest.get("checkpoint", ""))
+    checkpoint_path = Path(checked.get("checkpoint", ""))
     try:
         with open(str(checkpoint_path), "rb") as handle:
             header = handle.read(4)
@@ -3010,12 +3418,16 @@ def validate_inference_source_geometry(
     if not expected_shape and not expected_affine and not expected_image_path:
         result["reason"] = "no expected source geometry was provided"
         return result
-    import nibabel as nib
     import numpy as np
-    from mimics_bridge import _affine_close
+    from mimics_bridge import _affine_close, get_source_image_geometry
 
-    img = nib.load(str(image_path))
-    actual_shape = [int(value) for value in img.shape[:3]]
+    geometry = get_source_image_geometry(str(image_path))
+    if not geometry:
+        raise RuntimeError(
+            "source image geometry could not be read: {}".format(image_path)
+        )
+    actual_shape = [int(value) for value in geometry["shape"][:3]]
+    actual_affine = np.asarray(geometry["affine"], dtype=float)
     result["checked"] = True
     result["actual_shape"] = actual_shape
     if expected_image_path:
@@ -3046,9 +3458,11 @@ def validate_inference_source_geometry(
     if expected_affine:
         expected_affine_np = np.asarray(expected_affine, dtype=float)
         result["expected_voxel_to_ras_matrix"] = expected_affine_np.tolist()
-        result["actual_voxel_to_ras_matrix"] = np.asarray(img.affine, dtype=float).tolist()
-        result["affine_max_abs_diff"] = float(np.max(np.abs(np.asarray(img.affine, dtype=float) - expected_affine_np)))
-        if not _affine_close(img.affine, expected_affine_np):
+        result["actual_voxel_to_ras_matrix"] = actual_affine.tolist()
+        result["affine_max_abs_diff"] = float(
+            np.max(np.abs(actual_affine - expected_affine_np))
+        )
+        if not _affine_close(actual_affine, expected_affine_np):
             raise RuntimeError(
                 "source image affine does not match the open Mimics project (max abs diff {:.6g}): {}".format(
                     result["affine_max_abs_diff"],
@@ -3056,6 +3470,17 @@ def validate_inference_source_geometry(
                 )
             )
     return result
+
+
+def _inference_nifti_input(source, destination):
+    source = Path(source)
+    lower = source.name.lower()
+    if source.is_file() and (
+        lower.endswith(".nii") or lower.endswith(".nii.gz")
+    ):
+        return source.resolve(), False
+    _materialize_source_image(source, destination)
+    return Path(destination).resolve(), True
 
 
 def cmd_infer(args):
@@ -3096,20 +3521,43 @@ def cmd_infer(args):
     try:
         if not case_dir.is_dir():
             raise RuntimeError("case directory was not found: {}".format(case_dir))
-        image = find_image(case_dir)
-        if not image:
-            raise RuntimeError("no NIfTI image found for case: {}".format(args.case_id))
+        source_image = find_image(case_dir)
+        if not source_image:
+            raise RuntimeError(
+                "no supported medical image was found for case: {}".format(
+                    args.case_id
+                )
+            )
         dinov3_root = dinov3_root_from_args(args)
         python_exe = python_from_args(args, dinov3_root)
         model = load_model_manifest(workspace, args.organ, args.model_id, args.model_manifest)
+        if str(dinov3_root) not in sys.path:
+            sys.path.insert(0, str(dinov3_root))
+        from src.data.input_contract import validate_input_contract
+        from src.utils.config import load_config as load_dinov3_config
+        inference_config = load_dinov3_config(str(model["config"]))
+        effective_input_contract = validate_input_contract(inference_config)
+        registered_input_contract = model.get("input_contract") or {}
+        if (
+            registered_input_contract
+            and registered_input_contract != effective_input_contract
+        ):
+            raise RuntimeError(
+                "The selected model registry and config disagree about DINOv3 "
+                "input preprocessing. Inference was stopped before GPU startup."
+            )
         expected_shape = _parse_json_shape(getattr(args, "expected_source_shape", ""))
         expected_affine = _parse_json_matrix(getattr(args, "expected_source_voxel_to_ras_matrix", ""))
         expected_image_path = str(getattr(args, "expected_source_image_path", "") or "").strip()
         source_validation = validate_inference_source_geometry(
-            image,
+            source_image,
             expected_shape=expected_shape,
             expected_affine=expected_affine,
             expected_image_path=expected_image_path,
+        )
+        image, remove_inference_input = _inference_nifti_input(
+            source_image,
+            output_dir / (job_id + "_input.nii.gz"),
         )
     except Exception as exc:
         update_status(status_path, {
@@ -3135,7 +3583,8 @@ def cmd_infer(args):
     status_running = dict(status_base)
     status_running.update({
         "status": "waiting_for_gpu" if gpu_lock_enabled() else "running",
-        "image_path": str(image),
+        "image_path": str(source_image),
+        "inference_input_path": str(image),
         "output_path": str(output_path),
         "model_id": model.get("model_id", args.model_id or "latest"),
         "model_manifest": model.get("_manifest_path", args.model_manifest or ""),
@@ -3243,7 +3692,10 @@ def cmd_infer(args):
             "status": "completed",
             "returncode": 0,
             "output_path": str(output_path),
-            "image_path": str(image),
+            "image_path": str(source_image),
+            "inference_input_path": (
+                "" if remove_inference_input else str(image)
+            ),
             "late_cancel_ignored": bool(cancel_path.is_file()),
         })
         append_log(workspace, "Inference job {} completed. Output: {}".format(job_id, output_path))
@@ -3276,6 +3728,11 @@ def cmd_infer(args):
     finally:
         if gpu_lock is not None and gpu_lock_releasable:
             gpu_lock.release()
+        if locals().get("remove_inference_input"):
+            try:
+                unlink_with_retry(image)
+            except Exception:
+                pass
 
 
 def cmd_list_models(args):
@@ -3288,7 +3745,7 @@ def cmd_list_models(args):
         else:
             manifests = sorted(root.glob("*/latest.json"))
         for manifest_path in manifests:
-            manifest = read_json(manifest_path, {})
+            manifest = resolved_manifest_payload(manifest_path)
             organ = manifest.get("organ", manifest_path.parent.name)
             if args.organ and safe_slug(organ) != safe_slug(args.organ):
                 continue

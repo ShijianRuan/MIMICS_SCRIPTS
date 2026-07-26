@@ -189,7 +189,7 @@ Test:
 3. Run:
 
 ```text
-Scripting Library > 02_AI > 01_nnInteractive
+Scripting Library > 02_AI > nnInteractive > 01_Annotate_Official_Model
 ```
 
 4. Watch Mimics logging for:

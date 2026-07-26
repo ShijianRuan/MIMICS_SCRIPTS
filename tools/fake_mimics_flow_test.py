@@ -497,6 +497,7 @@ def test_runtime_imports(fake, tmp):
         "mimics_stop_background",
         "fewshot_mimics",
         "nninteractive_mimics",
+        "nninteractive_finetune_mimics",
         "create_mcs_batch",
         "mask_identifier",
     ]
@@ -520,6 +521,174 @@ def test_scripting_entrypoint(fake, tmp):
     assert_equal(fake.view.get_contrast(), ((0, 0.0), (100, 1.0)), "reset contrast via entrypoint")
     assert_true(fake.update_gui_calls >= 1, "entrypoint did not trigger GUI update")
     return "shared Scripting Library entrypoint executed inside fake Mimics"
+
+
+def test_nninteractive_task_model_routing(fake, tmp):
+    image = fake.reset_scene(
+        image_shape=(2, 2, 2),
+        minimum_value=0,
+        maximum_value=100,
+    )
+    mask = FakeMask(
+        "Liver",
+        image=image,
+        array=_u8_buffer((2, 2, 2), 1),
+        selected=True,
+    )
+    mask.metadata.set("nninteractive.task_id", "liver")
+    fake.data.masks = FakeCollection([mask])
+    fake.file.project_path = str(tmp / "s0001.mcs")
+
+    model_dir = tmp / "models" / "liver_v1"
+    for name in (
+        "dataset.json",
+        "plans.json",
+        "inference_info.json",
+        "inference_session_class.json",
+    ):
+        path = model_dir / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+    checkpoint = model_dir / "fold_0" / "checkpoint_final.pth"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"checkpoint")
+
+    workspace = tmp / "workspace"
+    workspace.mkdir(parents=True)
+    (workspace / "registry.json").write_text(
+        json.dumps(
+            {
+                "tasks": [
+                    {
+                        "task_id": "liver",
+                        "task_name": "Liver",
+                        "mask_names": ["Liver"],
+                        "recommended_model_id": "liver_v1",
+                        "models": [
+                            {
+                                "model_id": "liver_v1",
+                                "model_dir": str(model_dir),
+                                "checkpoint_sha256": "registered-checksum",
+                                "strategy": "clopa_in",
+                                "state": "validated",
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    module = import_runtime_module("nninteractive_finetune_mimics")
+    inference = import_runtime_module("nninteractive_mimics")
+    module._workspace = lambda: str(workspace)
+    captured = []
+    original_run = inference.run_with_model_profile
+    try:
+        inference.run_with_model_profile = lambda profile: captured.append(profile) or 0
+        result = module.annotate_with_task_model()
+    finally:
+        inference.run_with_model_profile = original_run
+    assert_equal(result, 0, "task-model annotation result")
+    assert_equal(len(captured), 1, "task model should launch once")
+    assert_equal(captured[0].get("task_id"), "liver", "resolved task ID")
+    assert_equal(captured[0].get("model_id"), "liver_v1", "resolved model ID")
+    assert_equal(
+        mask.metadata.find("nninteractive.task_id").value,
+        "liver",
+        "task metadata should remain intact",
+    )
+
+    official_key = inference._worker_cache_key({}, image)
+    task_config = {"_model_profile": captured[0]}
+    task_key = inference._worker_cache_key(task_config, image)
+    assert_true(
+        official_key != task_key,
+        "official and task models must not share an image worker cache",
+    )
+    second_profile = dict(captured[0])
+    second_profile["model_id"] = "liver_v2"
+    second_profile["profile_id"] = "liver:liver_v2"
+    second_key = inference._worker_cache_key(
+        {"_model_profile": second_profile},
+        image,
+    )
+    assert_true(
+        task_key != second_key,
+        "different task-model versions must not share an image worker cache",
+    )
+
+    switch_root = tmp / "switch_workers"
+    official_worker_dir = switch_root / "image_worker_official"
+    official_worker_dir.mkdir(parents=True)
+    (official_worker_dir / "worker_status.json").write_text(
+        json.dumps({"status": "ready", "stage": "waiting_for_prompt"}),
+        encoding="utf-8",
+    )
+    official_worker = {
+        "worker_dir": str(official_worker_dir),
+        "pid": 12345,
+        "model_identity": "official",
+        "model_id": "official",
+    }
+    inference._ASYNC_MONITORS.clear()
+    inference._ASYNC_IMAGE_WORKERS.clear()
+    inference._ASYNC_IMAGE_WORKERS[official_key] = official_worker
+    terminated = []
+    original_terminate = inference.runtime_common.terminate_process_async
+    try:
+        inference.runtime_common.terminate_process_async = (
+            lambda **kwargs: terminated.append(kwargs) or True
+        )
+        task_config = {"_model_profile": captured[0], "gpu_lock_timeout_seconds": 30}
+        assert_equal(
+            inference._different_model_busy_workers(task_config),
+            [],
+            "idle official worker should not block task-model switch",
+        )
+        retired = inference._retire_different_model_workers(task_config)
+    finally:
+        inference.runtime_common.terminate_process_async = original_terminate
+    assert_equal(retired, 1, "idle official worker should be retired")
+    assert_equal(len(terminated), 1, "idle worker should be reaped asynchronously")
+    assert_true(
+        (official_worker_dir / "close.json").is_file(),
+        "model switch should write a close request",
+    )
+    assert_true(
+        float(task_config["gpu_lock_timeout_seconds"]) >= 120,
+        "model switch should tolerate asynchronous GPU lock release",
+    )
+
+    (official_worker_dir / "worker_status.json").write_text(
+        json.dumps({"status": "result_ready", "stage": "waiting_for_mimics"}),
+        encoding="utf-8",
+    )
+    inference._ASYNC_IMAGE_WORKERS[official_key] = official_worker
+    assert_equal(
+        inference._different_model_busy_workers(task_config),
+        [],
+        "an already-consumed result_ready status must not block model switch",
+    )
+
+    (official_worker_dir / "worker_status.json").write_text(
+        json.dumps({"status": "running", "stage": "prediction"}),
+        encoding="utf-8",
+    )
+    inference._ASYNC_IMAGE_WORKERS[official_key] = official_worker
+    busy = inference._different_model_busy_workers(task_config)
+    assert_equal(len(busy), 1, "active official prediction must block model switch")
+    assert_equal(
+        inference._retire_different_model_workers(task_config),
+        0,
+        "active prediction worker must never be retired",
+    )
+    inference._ASYNC_IMAGE_WORKERS.clear()
+    return (
+        "task resolution, model profile routing, worker isolation, and safe "
+        "cross-model switching passed"
+    )
 
 
 def test_window_level_from_selected_mask(fake, tmp):
@@ -1148,7 +1317,7 @@ def build_parser():
     parser.add_argument("--keep-temp", action="store_true", help="Keep the temporary test directory.")
     parser.add_argument(
         "--only",
-        choices=("imports", "entrypoint", "window", "export", "nninteractive", "fewshot", "stop", "all"),
+        choices=("imports", "entrypoint", "window", "export", "nninteractive", "taskmodels", "fewshot", "stop", "all"),
         default="all",
     )
     return parser
@@ -1175,6 +1344,8 @@ def main(argv=None):
     if args.only in ("nninteractive", "all"):
         tests.append(("nnInteractive Mimics-side buffer flow", lambda: test_nninteractive_fast_path_and_mask_buffer(fake, tmp / "nninteractive")))
         tests.append(("nnInteractive derived Draft flow", lambda: test_nninteractive_derived_draft_session(fake, tmp / "nninteractive_draft")))
+    if args.only in ("taskmodels", "all"):
+        tests.append(("nnInteractive task-model routing", lambda: test_nninteractive_task_model_routing(fake, tmp / "nninteractive_task_models")))
     if args.only in ("fewshot", "all"):
         tests.append(("DINOv3 few-shot Mimics-side flow", lambda: test_fewshot_apply_prediction_and_stop(fake, tmp / "fewshot")))
         tests.append(("DINOv3 few-shot profile selector", lambda: test_fewshot_profile_selector(fake, tmp / "fewshot_profile")))

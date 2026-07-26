@@ -1,0 +1,44 @@
+model:
+  base_model_dir: /path/to/nnInteractive_v1.0
+  fold: "0"
+  checkpoint_name: checkpoint_final.pth
+  strategy: clopa_in
+
+data:
+  manifest: ../examples/dataset_manifest.json
+  label_values: [1]
+  validation_fraction: 0.2
+  patch_size: [128, 128, 128]
+  foreground_patch_probability: 0.5
+  num_workers: 0
+  prepared_cache_dir: ""
+  keep_prepared_cache: true
+  augmentation:
+    enabled: true
+    flip_probability: 0.5
+    intensity_scale_range: [0.9, 1.1]
+    intensity_shift_range: [-0.1, 0.1]
+    noise_std_range: [0.0, 0.05]
+
+prompts:
+  mode: clicks
+  interaction_steps: 5
+  point_radius: 4
+  center_bias: 8.0
+  interaction_decay: 0.9
+
+training:
+  output_dir: ../outputs/my_task
+  epochs: 10
+  steps_per_epoch: 50
+  batch_size: 1
+  gradient_accumulation: 2
+  learning_rate: 0.001
+  weight_decay: 0.0
+  mixed_precision: true
+  seed: 20260724
+  validation_batches: 8
+  device: auto
+  resume: true
+  status_path: ""
+  cancel_path: ""

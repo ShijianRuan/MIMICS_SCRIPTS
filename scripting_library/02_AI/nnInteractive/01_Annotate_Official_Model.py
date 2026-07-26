@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Refine a selected Mask into a safe nnInteractive AI Draft."""
+"""Annotate with the official general-purpose nnInteractive model."""
 
 from __future__ import print_function
 

@@ -35,7 +35,8 @@ Mimics 21 官方脚本 API 支持：
 现有公开 API 没有提供向 `Segment` 或 `Advanced Segment` 工具栏注册自定义图标、按钮或 Ribbon 命令的接口。因此当前可靠入口是：
 
 ```text
-Script -> Scripting Library -> 02_AI -> 01_nnInteractive
+Script -> Scripting Library -> 02_AI -> nnInteractive
+  -> 01_Annotate_Official_Model
 ```
 
 这已经是单击启动，不需要打开 Editor、Console 或命令行。若以后要进入 Mimics 原生分割工具栏，需要单独向 Materialise 确认扩展 SDK 或厂商支持，不能把它当作 Python API 已有能力。
@@ -145,7 +146,7 @@ segmentation。上一会话的提示历史不会继续保留，但分割结果�
 1. 在 Mimics 中打开任意项目。
 2. 激活要处理的 image set。
 3. 在 Project Tree 选择原始 Mask 或已有 AI Draft；也可以不选，由脚本创建新 Draft。
-4. 运行 `Script -> Scripting Library -> 02_AI -> 01_nnInteractive`。
+4. 运行 `Script -> Scripting Library -> 02_AI -> nnInteractive -> 01_Annotate_Official_Model`。
 5. 选择 **Add Points**、**Paint Scribble**、**Draw Box** 或 **Draw Lasso**。
 6. Add Points 中可连续加入 Include/Exclude 点，绿色/红色标记会保留到 Run/Discard；必要时使用 Remove Last Point。
 7. Paint Scribble 只需选择一次 Include 或 Exclude，然后在临时 Mask 中绘制。
@@ -203,7 +204,7 @@ Mimics 会自动打开 Log Panel，并在推理开始、CPU 回退和完成时�
 
 | 文件 | 职责 |
 | --- | --- |
-| `scripting_library/02_AI/01_nnInteractive.py` | Mimics Scripting Library 独立入口 |
+| `scripting_library/02_AI/nnInteractive/01_Annotate_Official_Model.py` | 官方模型标注入口 |
 | `runtime_py35/nninteractive_mimics.py` | source/Draft 选择、提示采集、临时文件和结果写回 |
 | `adapters/mimics/nninteractive_bridge.py` | 外部 Python 中加载图像、重放提示并调用 nnInteractive |
 | `scripts/setup_nninteractive_env.py` | 在 Windows 上联网安装独立环境 |

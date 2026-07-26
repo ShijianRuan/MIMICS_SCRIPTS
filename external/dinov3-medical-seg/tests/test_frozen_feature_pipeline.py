@@ -275,6 +275,29 @@ def test_pipeline_writes_native_cached_slice_contract(tmp_path):
     assert config["loss"]["type"] == "ce"
 
 
+def test_pytorch_feature_encoder_keeps_its_distinct_input_contract(tmp_path):
+    args = _pipeline_args()
+    args.encoder_backend = "pytorch"
+    config = write_training_config(
+        tmp_path / "config.yaml",
+        PROJECT_ROOT / "config" / "research" / "ct_fewshot_fast.yaml",
+        tmp_path / "dataset",
+        "pytorch_feature_run",
+        args,
+        validation_enabled=True,
+        strategy_overrides={
+            "strategy": {"options": {"loss_type": "dice_focal"}},
+            "loss": {"type": "dice_focal"},
+        },
+    )
+    assert config["model"]["encoder_backend"] == "pytorch"
+    assert config["model"]["input_normalization"] == "imagenet"
+    assert config["data"]["slice_normalization"] == "percentile_minmax"
+    assert config["data"]["native_grid"] is True
+    assert config["data"]["target_spacing"] is None
+    assert config["loss"] == {"type": "ce"}
+
+
 def test_ui_validation_enforces_only_required_feature_constraints():
     values = validate_options({
         "strategy": "adaptive",
