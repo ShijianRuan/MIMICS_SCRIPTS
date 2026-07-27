@@ -12,6 +12,7 @@
   "default_img_size": "256,256",
   "default_keep_last_checkpoints": 2,
   "default_keep_materialized_dataset": false,
+  "keep_failed_training_artifacts": false,
   "keep_training_experiment_artifacts": false,
   "terminal_job_retention_days": 30,
   "max_terminal_job_records": 100,

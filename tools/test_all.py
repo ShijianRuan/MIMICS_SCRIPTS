@@ -3930,13 +3930,20 @@ class TestNewFeatures(unittest.TestCase):
         import tools.fewshot_training_setup_ui as training_ui
         import tools.io_path_setup_ui as path_ui
         import tools.mask_file_picker_ui as mask_picker
+        import tools.ui_theme as ui_theme
 
         ui_source = inspect.getsource(path_ui.run_ui)
-        self.assertIn("QFileDialog.getExistingDirectory", ui_source)
-        self.assertIn("QFileDialog.getOpenFileName", ui_source)
+        self.assertIn(
+            "QFileDialog.getExistingDirectory",
+            inspect.getsource(ui_theme.choose_existing_directory),
+        )
+        self.assertIn(
+            "QFileDialog.getOpenFileName",
+            inspect.getsource(ui_theme.choose_open_file),
+        )
         self.assertIn('QPushButton("Paste")', ui_source)
         self.assertIn(
-            "choose_path_without_shell",
+            "choose_existing_directory",
             inspect.getsource(training_ui.QtTrainingSetupApp.browse_dataset),
         )
         self.assertIn("threading.Thread", inspect.getsource(training_ui.QtTrainingSetupApp.apply_dataset_root))
@@ -6435,10 +6442,17 @@ class TestNewFeatures(unittest.TestCase):
     def test_external_path_browser_uses_native_dialog_and_supports_paste(self):
         import inspect
         import tools.io_path_setup_ui as ui
+        import tools.ui_theme as theme
 
         source = inspect.getsource(ui.run_ui)
-        self.assertIn("QFileDialog.getExistingDirectory", source)
-        self.assertIn("QFileDialog.getOpenFileName", source)
+        self.assertIn(
+            "QFileDialog.getExistingDirectory",
+            inspect.getsource(theme.choose_existing_directory),
+        )
+        self.assertIn(
+            "QFileDialog.getOpenFileName",
+            inspect.getsource(theme.choose_open_file),
+        )
         self.assertIn("clipboard", source)
 
     def test_external_io_loads_required_theme_from_isolated_tools_directory(self):
@@ -8816,6 +8830,54 @@ class TestLifecycleAndRetention(unittest.TestCase):
         self.assertEqual(close.get("reason"), "gpu_contention")
         state = pipeline.read_json(state_path, {}) or {}
         self.assertNotEqual(state.get("last_activity_epoch"), 0.0)
+
+    def test_failed_fewshot_job_removes_large_artifacts_but_keeps_diagnostics(self):
+        import tools.fewshot_pipeline as pipeline
+
+        workspace = Path(self.tmp) / "fewshot_models"
+        run_id = "train_failed_cleanup"
+        status_path = workspace / "jobs" / (run_id + ".json")
+        run_dir = workspace / "runs" / "liver" / run_id
+        dataset_dir = workspace / "datasets" / "liver" / run_id
+        model_dir = workspace / "models" / "liver" / run_id
+        experiment_dir = Path(self.tmp) / (
+            "mimics_fewshot_liver_" + run_id
+        )
+        for path in (
+            run_dir / "fresh_labels",
+            dataset_dir,
+            model_dir,
+            experiment_dir,
+        ):
+            path.mkdir(parents=True)
+            (path / "large.bin").write_bytes(b"x" * 1024)
+        (run_dir / "train.log").write_text("diagnostic", encoding="utf-8")
+        pipeline.write_json_atomic(
+            status_path,
+            {
+                "job_id": run_id,
+                "status": "failed",
+                "organ": "liver",
+                "workspace": str(workspace),
+                "dataset_dir": str(dataset_dir),
+                "experiment_dir": str(experiment_dir),
+            },
+        )
+        args = type(
+            "Args",
+            (),
+            {"run_id": run_id, "organ": "liver"},
+        )()
+
+        report = pipeline.cleanup_terminal_training_artifacts(args, status_path)
+
+        self.assertGreaterEqual(len(report.get("removed") or []), 4)
+        self.assertFalse(dataset_dir.exists())
+        self.assertFalse(model_dir.exists())
+        self.assertFalse(experiment_dir.exists())
+        self.assertFalse((run_dir / "fresh_labels").exists())
+        self.assertTrue((run_dir / "train.log").is_file())
+        self.assertTrue(status_path.is_file())
 
     def test_fewshot_storage_maintenance_preserves_models_and_active_jobs(self):
         import tools.fewshot_pipeline as pipeline

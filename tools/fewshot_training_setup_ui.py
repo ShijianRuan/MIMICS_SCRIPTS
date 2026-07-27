@@ -38,8 +38,11 @@ try:
     from fewshot_strategies import DEFAULT_OPTIONS, STRATEGIES, normalize_strategy_options, strategy_defaults, strategy_ids, strategy_label, strategy_summary, suggested_strategy
 except ImportError:
     from tools.fewshot_strategies import DEFAULT_OPTIONS, STRATEGIES, normalize_strategy_options, strategy_defaults, strategy_ids, strategy_label, strategy_summary, suggested_strategy
-from ui_theme import configure_application, stylesheet as shared_stylesheet
-from io_path_setup_ui import choose_path_without_shell
+from ui_theme import (
+    choose_existing_directory,
+    configure_application,
+    stylesheet as shared_stylesheet,
+)
 from training_data_ui import (
     LABEL_SOURCE_CHOICES,
     label_source_hint,
@@ -1738,6 +1741,7 @@ class QtTrainingSetupApp(object):
         self.label_root_edit = None
         self.label_root_browse = None
         self.scan_data_button = None
+        self.scan_progress = None
         self.status_label = None
         self.status_text = None
         self.start_button = None
@@ -1843,13 +1847,13 @@ class QtTrainingSetupApp(object):
         QtWidgets = self.QtWidgets
 
         def folder_button(callback, tooltip):
-            button = QtWidgets.QPushButton()
+            button = QtWidgets.QPushButton("Browse...")
             button.setIcon(
                 self.window.style().standardIcon(
                     QtWidgets.QStyle.SP_DirOpenIcon
                 )
             )
-            button.setFixedWidth(42)
+            button.setMinimumWidth(104)
             button.setToolTip(tooltip)
             button.clicked.connect(callback)
             return button
@@ -1868,6 +1872,9 @@ class QtTrainingSetupApp(object):
 
         profile_group = QtWidgets.QGroupBox("Training data")
         profile_layout = QtWidgets.QGridLayout(profile_group)
+        profile_layout.setHorizontalSpacing(12)
+        profile_layout.setVerticalSpacing(10)
+        profile_layout.setColumnMinimumWidth(0, 172)
         profile_layout.setColumnStretch(1, 1)
 
         profile_layout.addWidget(QtWidgets.QLabel("Label source"), 0, 0)
@@ -1885,7 +1892,9 @@ class QtTrainingSetupApp(object):
         self.data_source_hint.setWordWrap(True)
         profile_layout.addWidget(self.data_source_hint, 1, 0, 1, 3)
 
-        profile_layout.addWidget(QtWidgets.QLabel("Original image dataset *"), 2, 0)
+        dataset_caption = QtWidgets.QLabel("Original image dataset *")
+        dataset_caption.setMinimumWidth(172)
+        profile_layout.addWidget(dataset_caption, 2, 0)
         self.dataset_edit = QtWidgets.QLineEdit(str(self.context.get("ts_root") or ""))
         self.dataset_edit.editingFinished.connect(self.apply_dataset_from_field)
         self.dataset_edit.setPlaceholderText("Folder containing one subfolder per case")
@@ -1897,7 +1906,7 @@ class QtTrainingSetupApp(object):
         mcs_row = QtWidgets.QHBoxLayout(self.mcs_path_widget)
         mcs_row.setContentsMargins(0, 0, 0, 0)
         mcs_caption = QtWidgets.QLabel("Saved .mcs folder *")
-        mcs_caption.setMinimumWidth(150)
+        mcs_caption.setMinimumWidth(172)
         mcs_row.addWidget(mcs_caption)
         self.mcs_folder_edit = QtWidgets.QLineEdit(
             str(self.context.get("mcs_output_dir", ""))
@@ -1917,7 +1926,7 @@ class QtTrainingSetupApp(object):
         export_row = QtWidgets.QHBoxLayout(self.exported_masks_path_widget)
         export_row.setContentsMargins(0, 0, 0, 0)
         export_caption = QtWidgets.QLabel("Exported masks folder *")
-        export_caption.setMinimumWidth(150)
+        export_caption.setMinimumWidth(172)
         export_row.addWidget(export_caption)
         self.label_root_edit = QtWidgets.QLineEdit(
             str(self.values.get("label_root", "") or "")
@@ -1933,7 +1942,9 @@ class QtTrainingSetupApp(object):
         export_row.addWidget(self.label_root_browse)
         profile_layout.addWidget(self.exported_masks_path_widget, 4, 0, 1, 3)
 
-        profile_layout.addWidget(QtWidgets.QLabel("Target Mask name(s) *"), 5, 0)
+        mask_caption = QtWidgets.QLabel("Target Mask name(s) *")
+        mask_caption.setMinimumWidth(172)
+        profile_layout.addWidget(mask_caption, 5, 0)
         self.mask_names_edit = QtWidgets.QLineEdit(str(self.values.get("mask_names", "")))
         self.mask_names_edit.setPlaceholderText("Example: liver, liver_seg")
         self.mask_names_edit.setToolTip(
@@ -1953,6 +1964,12 @@ class QtTrainingSetupApp(object):
         mask_source_hint.setObjectName("hint")
         mask_source_hint.setWordWrap(True)
         profile_layout.addWidget(mask_source_hint, 6, 1, 1, 2)
+        self.scan_progress = QtWidgets.QProgressBar()
+        self.scan_progress.setRange(0, 100)
+        self.scan_progress.setValue(0)
+        self.scan_progress.setTextVisible(True)
+        self.scan_progress.setFormat("Dataset has not been scanned")
+        profile_layout.addWidget(self.scan_progress, 7, 1, 1, 2)
         layout.addWidget(profile_group)
 
         sample_group = QtWidgets.QGroupBox("Cases")
@@ -2393,22 +2410,22 @@ class QtTrainingSetupApp(object):
             self.case_list.addItem(item)
 
     def browse_dataset(self):
-        path = choose_path_without_shell(
+        path = choose_existing_directory(
+            self.QtWidgets,
             self.window,
             "Original image dataset",
             self.dataset_edit.text() or self.context.get("ts_root", "") or str(Path.home()),
-            allow_file=False,
         )
         if path:
             self.apply_dataset_root(path)
 
     def browse_mcs_folder(self):
         current = str(self.mcs_folder_edit.text()).strip() if self.mcs_folder_edit is not None else ""
-        path = choose_path_without_shell(
+        path = choose_existing_directory(
+            self.QtWidgets,
             self.window,
             "Saved .mcs folder",
             current or str(Path.home()),
-            allow_file=False,
         )
         if path and self.mcs_folder_edit is not None:
             self.mcs_folder_edit.setText(os.path.abspath(path))
@@ -2420,11 +2437,11 @@ class QtTrainingSetupApp(object):
             if self.label_root_edit is not None
             else ""
         )
-        path = choose_path_without_shell(
+        path = choose_existing_directory(
+            self.QtWidgets,
             self.window,
             "Exported masks folder",
             current or str(Path.home()),
-            allow_file=False,
         )
         if path and self.label_root_edit is not None:
             self.label_root_edit.setText(os.path.abspath(path))
@@ -2480,11 +2497,30 @@ class QtTrainingSetupApp(object):
         if path:
             self.apply_dataset_root(path)
 
+    def _set_scan_busy(self):
+        if self.scan_progress is not None:
+            self.scan_progress.setRange(0, 0)
+            self.scan_progress.setFormat("Scanning dataset...")
+        if self.scan_data_button is not None:
+            self.scan_data_button.setText("Scanning...")
+            self.scan_data_button.setEnabled(False)
+
+    def _finish_scan_progress(self, text, success):
+        self._dataset_scan_deadline = 0.0
+        if self.scan_progress is not None:
+            self.scan_progress.setRange(0, 100)
+            self.scan_progress.setValue(100 if success else 0)
+            self.scan_progress.setFormat(str(text))
+        if self.scan_data_button is not None:
+            self.scan_data_button.setText("Scan Data")
+            self.scan_data_button.setEnabled(True)
+
     def apply_dataset_root(self, path):
         raw_path = str(path or "").strip()
         if not raw_path:
             self._dataset_scan_pending = False
             self._set_status("Choose the source image root to continue.")
+            self._finish_scan_progress("Dataset path is required", False)
             return
         path = os.path.abspath(os.path.expanduser(os.path.expandvars(raw_path)))
         if self.dataset_edit is not None and self.dataset_edit.text() != path:
@@ -2513,23 +2549,25 @@ class QtTrainingSetupApp(object):
         if not mask_names:
             self._dataset_scan_pending = False
             self._set_status("Enter at least one Target Mask name before scanning.")
+            self._finish_scan_progress("Target Mask name is required", False)
             return
         if label_source == "mcs_refresh" and not mcs_output_dir:
             self._dataset_scan_pending = False
             self._set_status("Choose the folder containing saved .mcs projects.")
+            self._finish_scan_progress("Saved .mcs folder is required", False)
             return
         if label_source == "exported_masks" and not label_root:
             self._dataset_scan_pending = False
             self._set_status("Choose the previously exported masks folder.")
+            self._finish_scan_progress("Exported masks folder is required", False)
             return
         scan_signature = self._current_data_signature()
         self._set_status("Checking dataset in the background...")
+        self._set_scan_busy()
         if self.case_list is not None:
             self.case_list.setEnabled(False)
         if self.start_button is not None:
             self.start_button.setEnabled(False)
-        if self.scan_data_button is not None:
-            self.scan_data_button.setEnabled(False)
 
         def scan_dataset():
             try:
@@ -2599,10 +2637,9 @@ class QtTrainingSetupApp(object):
                     )
                     self._set_status(message)
                     self._append_log(message)
+                    self._finish_scan_progress("Scan timed out", False)
                     if self.case_list is not None:
                         self.case_list.setEnabled(True)
-                    if self.scan_data_button is not None:
-                        self.scan_data_button.setEnabled(True)
                     if self.start_button is not None and not self.started:
                         self.start_button.setEnabled(True)
                 return
@@ -2613,10 +2650,9 @@ class QtTrainingSetupApp(object):
                 self._dataset_scan_deadline = 0.0
                 self._set_status(error)
                 self._append_log(error)
+                self._finish_scan_progress("Scan failed", False)
                 if self.case_list is not None:
                     self.case_list.setEnabled(True)
-                if self.scan_data_button is not None:
-                    self.scan_data_button.setEnabled(True)
                 if self.start_button is not None and not self.started:
                     self.start_button.setEnabled(True)
                 continue
@@ -2638,8 +2674,6 @@ class QtTrainingSetupApp(object):
             self._refresh_manual_case_selection()
             if self.start_button is not None and not self.started:
                 self.start_button.setEnabled(True)
-            if self.scan_data_button is not None:
-                self.scan_data_button.setEnabled(True)
             if self.case_inventory_label is not None:
                 if scan_signature[0] == "mcs_refresh":
                     self.case_inventory_label.setText(
@@ -2663,6 +2697,12 @@ class QtTrainingSetupApp(object):
             message = "Dataset checked: {} usable, {} unavailable.".format(
                 len(ready_rows),
                 unavailable,
+            )
+            self._finish_scan_progress(
+                "Scan complete: {} usable, {} unavailable".format(
+                    len(ready_rows), unavailable
+                ),
+                True,
             )
             self._set_status(message)
             self._append_log(message)

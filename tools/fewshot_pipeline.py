@@ -532,6 +532,95 @@ def cleanup_workspace_artifacts(workspace, dinov3_root=None, config=None):
     return report
 
 
+def cleanup_terminal_training_artifacts(args, status_path):
+    """Immediately bound failed/cancelled training storage without losing logs."""
+    status_path = Path(status_path)
+    payload = read_json(status_path, {}) or {}
+    status = str(payload.get("status") or "").lower()
+    if status not in ("failed", "cancelled"):
+        return {}
+    config = load_repo_config()
+    if bool(config.get("keep_failed_training_artifacts", False)):
+        report = {
+            "skipped": True,
+            "reason": "keep_failed_training_artifacts is enabled",
+            "completed_at_epoch": time.time(),
+        }
+        update_status(status_path, {"artifact_cleanup": report})
+        return report
+
+    workspace = Path(payload.get("workspace") or status_path.parent.parent).resolve()
+    run_id = str(payload.get("job_id") or getattr(args, "run_id", "") or "")
+    organ_slug = safe_slug(payload.get("organ") or getattr(args, "organ", ""))
+    run_dir = workspace / "runs" / organ_slug / run_id
+    candidates = [
+        Path(payload.get("dataset_dir") or (workspace / "datasets" / organ_slug / run_id)),
+        run_dir / "fresh_labels",
+    ]
+    model_dir = workspace / "models" / organ_slug / run_id
+    if not (model_dir / "manifest.json").is_file():
+        candidates.append(model_dir)
+
+    experiment_value = str(payload.get("experiment_dir") or "").strip()
+    if experiment_value:
+        candidates.append(Path(experiment_value))
+    else:
+        try:
+            dinov3_root = dinov3_root_from_args(args)
+            candidates.append(
+                dinov3_root
+                / "experiments"
+                / "mimics_fewshot_{}_{}".format(organ_slug, run_id)
+            )
+        except Exception:
+            pass
+
+    report = {"removed": [], "not_removed": []}
+    for candidate in candidates:
+        try:
+            resolved = candidate.expanduser().resolve()
+        except Exception:
+            continue
+        if resolved in (workspace, run_dir, run_dir.parent) or not resolved.exists():
+            continue
+        safe = False
+        try:
+            resolved.relative_to(workspace)
+            safe = True
+        except ValueError:
+            safe = bool(
+                run_id
+                and run_id in resolved.name
+                and resolved.name.startswith("mimics_fewshot_")
+            )
+        if not safe:
+            report["not_removed"].append(
+                {"path": str(resolved), "reason": "outside the job workspace"}
+            )
+            continue
+        try:
+            if resolved.is_dir():
+                rmtree_with_retry(resolved)
+            else:
+                resolved.unlink()
+        except Exception as exc:
+            report["not_removed"].append(
+                {"path": str(resolved), "reason": str(exc)}
+            )
+        else:
+            report["removed"].append(str(resolved))
+    report["completed_at_epoch"] = time.time()
+    update_status(status_path, {"artifact_cleanup": report})
+    append_log(
+        workspace,
+        (
+            "Failed-job storage cleanup removed {} rebuildable path(s); "
+            "{} path(s) could not be removed. Logs and status were retained."
+        ).format(len(report["removed"]), len(report["not_removed"])),
+    )
+    return report
+
+
 def load_mimics_io_config():
     merged = {}
     for path in (ROOT / "mimics_io_config.json", ROOT / "nninteractive_config.json"):
@@ -3294,6 +3383,24 @@ def cmd_train(args):
         except Exception:
             pass
         raise
+    finally:
+        try:
+            workspace = workspace_for(
+                Path(args.ts_root).resolve(), getattr(args, "workspace", None)
+            )
+            status_path = workspace / "jobs" / (str(args.run_id) + ".json")
+            if status_path.is_file():
+                cleanup_terminal_training_artifacts(args, status_path)
+        except Exception as cleanup_exc:
+            try:
+                append_log(
+                    workspace,
+                    "Automatic failed-job storage cleanup could not finish: {}.".format(
+                        cleanup_exc
+                    ),
+                )
+            except Exception:
+                pass
 
 
 def load_model_manifest(workspace, organ, model_id=None, model_manifest=None):

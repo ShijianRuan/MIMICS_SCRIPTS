@@ -4,6 +4,74 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
+
+
+def _dialog_start_path(value, expect_directory=True):
+    """Return a starting location without touching a slow or offline volume."""
+    text = os.path.expandvars(os.path.expanduser(str(value or "").strip()))
+    return text or str(Path.home())
+
+
+def choose_existing_directory(QtWidgets, parent, title, initial=""):
+    """Open the platform's familiar folder picker from an external UI process."""
+    return str(
+        QtWidgets.QFileDialog.getExistingDirectory(
+            parent,
+            str(title),
+            _dialog_start_path(initial, expect_directory=True),
+            QtWidgets.QFileDialog.ShowDirsOnly,
+        )
+        or ""
+    )
+
+
+def choose_open_file(
+    QtWidgets,
+    parent,
+    title,
+    initial="",
+    file_filter="All files (*)",
+):
+    value, _selected_filter = QtWidgets.QFileDialog.getOpenFileName(
+        parent,
+        str(title),
+        _dialog_start_path(initial, expect_directory=False),
+        str(file_filter),
+    )
+    return str(value or "")
+
+
+def choose_open_files(
+    QtWidgets,
+    parent,
+    title,
+    initial="",
+    file_filter="All files (*)",
+):
+    values, _selected_filter = QtWidgets.QFileDialog.getOpenFileNames(
+        parent,
+        str(title),
+        _dialog_start_path(initial, expect_directory=False),
+        str(file_filter),
+    )
+    return [str(value) for value in values or []]
+
+
+def choose_save_file(
+    QtWidgets,
+    parent,
+    title,
+    initial="",
+    file_filter="All files (*)",
+):
+    value, _selected_filter = QtWidgets.QFileDialog.getSaveFileName(
+        parent,
+        str(title),
+        str(initial or Path.home()),
+        str(file_filter),
+    )
+    return str(value or "")
 
 
 def stylesheet(extra=""):

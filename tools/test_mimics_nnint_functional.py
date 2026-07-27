@@ -48,8 +48,21 @@ def _make_model_dir(root: Path, *, checkpoint_bytes: bytes = b"ckpt") -> Path:
     checkpoint = model / "fold_0" / "checkpoint_final.pth"
     checkpoint.parent.mkdir(parents=True, exist_ok=True)
     checkpoint.write_bytes(checkpoint_bytes)
+    fingerprint = "test-effective-{}".format(
+        common.sha256_file(checkpoint)[:16]
+    )
     (model / "finetune_manifest.json").write_text(
-        json.dumps({"input_contract": common.NNINTERACTIVE_INPUT_CONTRACT}),
+        json.dumps(
+            {
+                "input_contract": common.NNINTERACTIVE_INPUT_CONTRACT,
+                "runtime_verification": {
+                    "verified": True,
+                    "expected_parameter_fingerprint": fingerprint,
+                    "loaded_parameter_fingerprint": fingerprint,
+                },
+                "validated_prompt_types": ["point"],
+            }
+        ),
         encoding="utf-8",
     )
     return model
@@ -691,6 +704,46 @@ class ControlFlowTests(unittest.TestCase):
         common.write_json_atomic(job_dir / "status.json", {"status": "completed"})
         with self.assertRaises(RuntimeError):
             pipeline.resume_job(str(job_dir))
+
+    def test_failed_job_cleanup_preserves_diagnostics_and_resets_resume_inputs(self):
+        workspace = Path(self.tmp.name) / "workspace"
+        job_dir = workspace / "jobs" / "failed_job"
+        model_dir = workspace / "tasks" / "brain" / "models" / "candidate"
+        for path in (
+            job_dir / "staging",
+            job_dir / "prepared_cache",
+            model_dir,
+        ):
+            path.mkdir(parents=True)
+            (path / "large.bin").write_bytes(b"x" * 1024)
+        for name in (
+            "dataset_manifest.json",
+            "validation_manifest.json",
+            "training_config.json",
+            "trainer_status.json",
+        ):
+            common.write_json_atomic(job_dir / name, {"temporary": True})
+        (job_dir / "job.log").write_text("diagnostic", encoding="utf-8")
+        common.write_json_atomic(job_dir / "status.json", {"status": "failed"})
+        request = {
+            "workspace": str(workspace),
+            "output_model_dir": str(model_dir),
+        }
+
+        report = pipeline._cleanup_terminal_artifacts(
+            request,
+            job_dir,
+            remove_partial_model=True,
+            reset_resume_state=True,
+        )
+
+        self.assertFalse((job_dir / "staging").exists())
+        self.assertFalse((job_dir / "prepared_cache").exists())
+        self.assertFalse(model_dir.exists())
+        self.assertFalse((job_dir / "dataset_manifest.json").exists())
+        self.assertTrue((job_dir / "job.log").is_file())
+        self.assertTrue((job_dir / "status.json").is_file())
+        self.assertFalse(report.get("not_removed"))
 
 
 # ---------------------------------------------------------------------------

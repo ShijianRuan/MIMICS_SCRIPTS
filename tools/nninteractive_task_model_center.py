@@ -45,13 +45,12 @@ from nninteractive_task_common import (  # noqa: E402
     workspace_root,
     write_json_atomic,
 )
-from io_path_setup_ui import choose_path_without_shell  # noqa: E402
 from training_data_ui import (  # noqa: E402
     LABEL_SOURCE_CHOICES,
     label_source_hint,
     normalized_source_mode,
 )
-from ui_theme import configure_application  # noqa: E402
+from ui_theme import choose_existing_directory, configure_application  # noqa: E402
 
 
 TITLE = "nnInteractive Custom Models"
@@ -184,6 +183,7 @@ class ModelCenter:
         self.log_offset = 0
         self.scan_generation = 0
         self.scan_deadline = 0.0
+        self.scan_progress = None
         self.pending_scan_result: tuple[
             int, list[dict[str, Any]], tuple[Any, ...], str
         ] | None = None
@@ -268,23 +268,22 @@ class ModelCenter:
     def _path_row(self, label, initial=""):
         QtWidgets = self.QtWidgets
         row = QtWidgets.QHBoxLayout()
+        row.setSpacing(10)
         caption = QtWidgets.QLabel(label)
-        caption.setMinimumWidth(138)
+        caption.setMinimumWidth(172)
         edit = QtWidgets.QLineEdit(str(initial or ""))
         edit.setClearButtonEnabled(True)
-        browse = QtWidgets.QPushButton()
+        browse = QtWidgets.QPushButton("Browse...")
         browse.setIcon(self.window.style().standardIcon(QtWidgets.QStyle.SP_DirOpenIcon))
         browse.setToolTip("Choose folder")
-        browse.setFixedWidth(36)
+        browse.setMinimumWidth(104)
 
         def choose():
-            selected = choose_path_without_shell(
-                self.QtCore,
+            selected = choose_existing_directory(
                 self.QtWidgets,
                 self.window,
                 "Choose {}".format(label),
                 edit.text() or str(Path.home()),
-                allow_file=False,
             )
             if selected:
                 edit.setText(str(selected))
@@ -317,7 +316,7 @@ class ModelCenter:
         data_layout.addWidget(heading)
         source_row = QtWidgets.QHBoxLayout()
         source_label = QtWidgets.QLabel("Label source")
-        source_label.setMinimumWidth(138)
+        source_label.setMinimumWidth(172)
         self.source_combo = QtWidgets.QComboBox()
         for label, value in LABEL_SOURCE_CHOICES:
             self.source_combo.addItem(label, value)
@@ -356,7 +355,7 @@ class ModelCenter:
 
         mask_row = QtWidgets.QHBoxLayout()
         mask_label = QtWidgets.QLabel("Target Mask name(s) *")
-        mask_label.setMinimumWidth(138)
+        mask_label.setMinimumWidth(172)
         self.mask_edit = QtWidgets.QLineEdit()
         self.mask_edit.setPlaceholderText("e.g. Liver, liver_seg")
         self.mask_edit.setToolTip(
@@ -383,6 +382,11 @@ class ModelCenter:
         )
         self.scan_hint.setObjectName("hint")
         data_layout.addWidget(self.scan_hint)
+        self.scan_progress = QtWidgets.QProgressBar()
+        self.scan_progress.setRange(0, 100)
+        self.scan_progress.setValue(0)
+        self.scan_progress.setFormat("Dataset has not been scanned")
+        data_layout.addWidget(self.scan_progress)
 
         self.choose_specific_cases = QtWidgets.QCheckBox(
             "Choose specific cases and validation assignments"
@@ -806,36 +810,53 @@ class ModelCenter:
             ),
         )
 
+    def _set_scan_busy(self):
+        if self.scan_progress is not None:
+            self.scan_progress.setRange(0, 0)
+            self.scan_progress.setFormat("Scanning dataset...")
+        self.scan_button.setText("Scanning...")
+        self.scan_button.setEnabled(False)
+
+    def _finish_scan_progress(self, text, success):
+        self.scan_deadline = 0.0
+        if self.scan_progress is not None:
+            self.scan_progress.setRange(0, 100)
+            self.scan_progress.setValue(100 if success else 0)
+            self.scan_progress.setFormat(str(text))
+        self.scan_button.setText("Scan Data")
+        self.scan_button.setEnabled(True)
+
     def scan_cases(self):
         mask_names = [
             value.strip() for value in self.mask_edit.text().split(",") if value.strip()
         ]
         if not mask_names:
             self.scan_hint.setText("Enter the target Mask name before scanning.")
+            self._finish_scan_progress("Target Mask name is required", False)
             return
         self.scan_generation += 1
         generation = self.scan_generation
         self.scan_deadline = time.time() + float(
             self.config.get("case_scan_timeout_seconds", 120)
         )
-        self.scan_button.setEnabled(False)
-        self.scan_hint.setText("Scanning cases in the background...")
         source_mode = self.source_combo.currentData()
         mcs_dir = self.mcs_edit.text().strip()
         image_root = self.image_root_edit.text().strip()
         prepared_labels = self.prepared_label_edit.text().strip()
         if not image_root:
-            self.scan_button.setEnabled(True)
             self.scan_hint.setText("Choose the original image dataset.")
+            self._finish_scan_progress("Dataset path is required", False)
             return
         if source_mode == "mcs_refresh" and not mcs_dir:
-            self.scan_button.setEnabled(True)
             self.scan_hint.setText("Choose the folder containing saved .mcs projects.")
+            self._finish_scan_progress("Saved .mcs folder is required", False)
             return
         if source_mode == "exported_masks" and not prepared_labels:
-            self.scan_button.setEnabled(True)
             self.scan_hint.setText("Choose the previously exported masks folder.")
+            self._finish_scan_progress("Exported masks folder is required", False)
             return
+        self.scan_hint.setText("Scanning cases in the background...")
+        self._set_scan_busy()
         scan_signature = self._current_data_signature()
 
         def worker():
@@ -891,23 +912,23 @@ class ModelCenter:
                 self.scan_generation += 1
                 self.scan_deadline = 0.0
                 self.last_scan_signature = None
-                self.scan_button.setEnabled(True)
                 self.scan_hint.setText(
                     "Case scan timed out. The selected location may be offline "
                     "or responding too slowly; choose another path or retry."
                 )
+                self._finish_scan_progress("Scan timed out", False)
             return
         self.pending_scan_result = None
         generation, rows, scan_signature, error = result
         if generation != self.scan_generation:
             return
         self.scan_deadline = 0.0
-        self.scan_button.setEnabled(True)
         self.case_rows = rows
         self.last_scan_signature = scan_signature
         self._populate_cases()
         if error:
             self.scan_hint.setText("Case scan failed: {}".format(error))
+            self._finish_scan_progress("Scan failed", False)
         elif rows:
             ready = sum(row.get("state") == "ready" for row in rows)
             unavailable = len(rows) - ready
@@ -924,8 +945,15 @@ class ModelCenter:
                     "Only cases with both an image and matching Mask will be "
                     "used.".format(ready, unavailable)
                 )
+            self._finish_scan_progress(
+                "Scan complete: {} usable, {} unavailable".format(
+                    ready, unavailable
+                ),
+                True,
+            )
         else:
             self.scan_hint.setText("No cases were found in the selected location.")
+            self._finish_scan_progress("Scan complete: no usable cases", True)
 
     def _populate_cases(self):
         QtCore, QtWidgets = self.QtCore, self.QtWidgets

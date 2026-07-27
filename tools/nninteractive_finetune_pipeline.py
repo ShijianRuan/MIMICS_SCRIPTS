@@ -1152,7 +1152,10 @@ def _cleanup_terminal_artifacts(
     job_dir: Path,
     *,
     remove_partial_model: bool,
-) -> None:
+    reset_resume_state: bool = False,
+) -> dict[str, Any]:
+    """Remove large rebuildable files while preserving job diagnostics."""
+    workspace = Path(request.get("workspace") or job_dir.parent.parent).resolve()
     paths = [
         job_dir / "staging",
         job_dir / "prepared_cache",
@@ -1160,6 +1163,7 @@ def _cleanup_terminal_artifacts(
     ]
     if remove_partial_model:
         paths.append(Path(request.get("output_model_dir") or ""))
+    report: dict[str, Any] = {"removed": [], "not_removed": []}
     for path in paths:
         try:
             resolved = path.resolve()
@@ -1167,8 +1171,60 @@ def _cleanup_terminal_artifacts(
             continue
         if not str(path) or resolved in (ROOT, job_dir, job_dir.parent):
             continue
-        if resolved.is_dir():
-            shutil.rmtree(resolved, ignore_errors=True)
+        try:
+            resolved.relative_to(job_dir)
+            safe = True
+        except ValueError:
+            try:
+                resolved.relative_to(workspace)
+                safe = True
+            except ValueError:
+                safe = False
+        if not safe:
+            report["not_removed"].append(
+                {"path": str(resolved), "reason": "outside job workspace"}
+            )
+            continue
+        if not resolved.exists():
+            continue
+        last_error = ""
+        for attempt in range(8):
+            try:
+                if resolved.is_dir():
+                    shutil.rmtree(resolved)
+                else:
+                    resolved.unlink()
+                last_error = ""
+                break
+            except OSError as exc:
+                last_error = str(exc)
+                time.sleep(min(0.4, 0.04 * (attempt + 1)))
+        if resolved.exists():
+            report["not_removed"].append(
+                {"path": str(resolved), "reason": last_error or "still exists"}
+            )
+        else:
+            report["removed"].append(str(resolved))
+    if reset_resume_state:
+        for name in (
+            "dataset_manifest.json",
+            "validation_manifest.json",
+            "training_config.json",
+            "trainer_status.json",
+            "trainer_cancel.request",
+        ):
+            path = job_dir / name
+            try:
+                path.unlink()
+                report["removed"].append(str(path))
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                report["not_removed"].append(
+                    {"path": str(path), "reason": str(exc)}
+                )
+    report["completed_at_epoch"] = time.time()
+    return report
 
 
 def run_job(job_dir_value: str) -> int:
@@ -1263,11 +1319,12 @@ def run_job(job_dir_value: str) -> int:
             progress_percent=100,
         )
         append_log(log_path, "Training completed: {}.".format(outcome))
-        _cleanup_terminal_artifacts(
+        cleanup = _cleanup_terminal_artifacts(
             request,
             job_dir,
             remove_partial_model=False,
         )
+        update_status(status_path, artifact_cleanup=cleanup)
         return 0
     except InterruptedError as exc:
         action = str(exc) or _control_action(control_path)
@@ -1280,22 +1337,24 @@ def run_job(job_dir_value: str) -> int:
         )
         append_log(log_path, "Training {} by user request.".format(final))
         if final == "cancelled":
-            _cleanup_terminal_artifacts(
+            cleanup = _cleanup_terminal_artifacts(
                 request,
                 job_dir,
                 remove_partial_model=True,
             )
+            update_status(status_path, artifact_cleanup=cleanup)
         return 0
     except (ResourceLockCancelled,):
         action = _control_action(control_path)
         final = "paused" if action == "pause" else "cancelled"
         update_status(status_path, status=final, phase=final)
         if final == "cancelled":
-            _cleanup_terminal_artifacts(
+            cleanup = _cleanup_terminal_artifacts(
                 request,
                 job_dir,
                 remove_partial_model=True,
             )
+            update_status(status_path, artifact_cleanup=cleanup)
         return 0
     except Exception as exc:
         update_status(
@@ -1307,6 +1366,24 @@ def run_job(job_dir_value: str) -> int:
             completed_at_epoch=time.time(),
         )
         append_log(log_path, "Training failed: {}: {}.".format(type(exc).__name__, exc))
+        if not bool(load_config().get("keep_failed_training_artifacts", False)):
+            cleanup = _cleanup_terminal_artifacts(
+                request,
+                job_dir,
+                remove_partial_model=True,
+                reset_resume_state=True,
+            )
+            update_status(status_path, artifact_cleanup=cleanup)
+            if cleanup.get("not_removed"):
+                append_log(
+                    log_path,
+                    "Some failed-job artifacts could not be removed; see artifact_cleanup in status.json.",
+                )
+            else:
+                append_log(
+                    log_path,
+                    "Removed rebuildable failed-job data; logs and status were retained.",
+                )
         return 1
 
 
