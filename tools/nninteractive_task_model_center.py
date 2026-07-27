@@ -30,6 +30,7 @@ from nninteractive_task_common import (  # noqa: E402
     jobs_dir,
     load_config,
     load_registry,
+    model_is_usable,
     model_rows,
     official_model_dir,
     read_json,
@@ -38,6 +39,7 @@ from nninteractive_task_common import (  # noqa: E402
     save_registry,
     selected_model,
     status_summary,
+    strategy_display_name,
     task_dir,
     task_rows,
     workspace_root,
@@ -425,10 +427,10 @@ class ModelCenter:
         heading.setObjectName("section")
         adaptation_layout.addWidget(heading)
         self.light_radio = QtWidgets.QRadioButton(
-            "Lightweight adaptation  ·  Stable first choice for a new task"
+            "CLoPA-IN  ·  Lightweight intensity-domain adaptation for CT and MR"
         )
         self.strong_radio = QtWidgets.QRadioButton(
-            "Stronger boundary adaptation  ·  More flexible for difficult CT boundaries"
+            "CLoPA-CN  ·  Instance normalization plus selected convolution adaptation"
         )
         self.light_radio.setChecked(True)
         adaptation_layout.addWidget(self.light_radio)
@@ -567,7 +569,7 @@ class ModelCenter:
         current = self._surface()
         current_layout = QtWidgets.QVBoxLayout(current)
         current_layout.setContentsMargins(16, 14, 16, 14)
-        self.current_model_title = QtWidgets.QLabel("No custom model selected")
+        self.current_model_title = QtWidgets.QLabel("No active annotation model")
         self.current_model_title.setObjectName("section")
         self.current_model_detail = QtWidgets.QLabel(
             "Train and validate a model before target-specific annotation."
@@ -587,19 +589,26 @@ class ModelCenter:
         )
         self.import_model_button.clicked.connect(self.import_model_package)
         table_head.addWidget(self.import_model_button)
-        self.export_model_button = QtWidgets.QPushButton("Export Current Model")
+        self.export_model_button = QtWidgets.QPushButton("Export Active Model")
         self.export_model_button.setToolTip(
             "Create a self-contained model package for another workstation."
         )
         self.export_model_button.clicked.connect(self.export_current_model)
         table_head.addWidget(self.export_model_button)
-        self.show_failed = QtWidgets.QCheckBox("Show failed or unverified")
+        self.show_failed = QtWidgets.QCheckBox("Show failed versions")
         self.show_failed.toggled.connect(self.refresh_models)
         table_head.addWidget(self.show_failed)
         layout.addLayout(table_head)
-        self.model_table = QtWidgets.QTableWidget(0, 5)
+        self.model_table = QtWidgets.QTableWidget(0, 6)
         self.model_table.setHorizontalHeaderLabels(
-            ["Date", "Adaptation", "Data", "Validation", "Use"]
+            [
+                "Date",
+                "Model version",
+                "Adaptation",
+                "Data",
+                "Validation",
+                "Annotation model",
+            ]
         )
         self.model_table.verticalHeader().setVisible(False)
         self.model_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
@@ -609,6 +618,7 @@ class ModelCenter:
         self.model_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
         self.model_table.horizontalHeader().setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeToContents)
         self.model_table.horizontalHeader().setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeToContents)
+        self.model_table.horizontalHeader().setSectionResizeMode(5, QtWidgets.QHeaderView.ResizeToContents)
         layout.addWidget(self.model_table, 1)
         self.model_io_status = QtWidgets.QLabel("")
         self.model_io_status.setObjectName("hint")
@@ -995,7 +1005,7 @@ class ModelCenter:
         selected = self._selected_cases()
         train = sum(row.get("split") == "train" for row in selected)
         val = sum(row.get("split") == "val" for row in selected)
-        strategy = "Lightweight" if self.light_radio.isChecked() else "Stronger boundary"
+        strategy = "CLoPA-IN" if self.light_radio.isChecked() else "CLoPA-CN"
         if train < 1:
             self.setup_summary.setText("Select at least one training case.")
             self.start_button.setEnabled(False)
@@ -1174,7 +1184,10 @@ class ModelCenter:
             {
                 "training": "Training",
                 "exporting_labels": "Training",
+                "preparing_data": "Preparing",
                 "waiting_for_gpu": "Waiting",
+                "validating": "Validating",
+                "registering": "Finishing",
                 "paused": "Paused",
                 "completed": "Completed",
                 "cancelled": "Stopped",
@@ -1187,11 +1200,23 @@ class ModelCenter:
             or status.get("phase")
             or "Start training from Training Setup."
         )
+        phase = str(status.get("phase") or "").strip().lower()
         if state == "training":
-            detail = (
-                "Learning from the selected cases in the background. "
-                "Mimics remains available for annotation."
-            )
+            if phase.startswith("validat"):
+                detail = (
+                    "Validating the current training epoch. The remaining "
+                    "model comparison and registration stages are not yet complete."
+                )
+            elif phase.startswith("final") or "verif" in phase:
+                detail = (
+                    "Saving and verifying the trained checkpoint. Mimics remains "
+                    "available for annotation."
+                )
+            else:
+                detail = (
+                    "Learning from the selected cases in the background. "
+                    "Mimics remains available for annotation."
+                )
         elif state == "exporting_labels":
             progress = status.get("label_export_progress") or {}
             case_id = str(progress.get("case_id") or status.get("current_case") or "")
@@ -1203,7 +1228,15 @@ class ModelCenter:
         elif state == "waiting_for_gpu":
             detail = "Waiting without blocking Mimics. Pause or stop this task at any time."
         elif state == "validating":
-            detail = "Comparing the new model with the current model on the validation cases."
+            detail = (
+                "Comparing the new model with the active annotation model on "
+                "the validation cases."
+            )
+        elif state == "registering":
+            detail = (
+                "Verifying the loaded checkpoint identity and publishing this "
+                "model version. Training is not complete until this finishes."
+            )
         elif state == "completed":
             outcome = str(status.get("selection_outcome") or "")
             quality = status.get("quality") or {}
@@ -1214,7 +1247,7 @@ class ModelCenter:
                 ).format(float(quality.get("delta_auc") or 0.0) * 100.0)
             elif outcome == "current_model_retained":
                 detail = (
-                    "Training completed, but the current model remains selected "
+                    "Training completed, but the active annotation model remains selected "
                     "because the candidate did not pass the quality check."
                 )
             else:
@@ -1227,17 +1260,11 @@ class ModelCenter:
         elif state == "cancelled":
             detail = "Training was stopped. The incomplete model was removed."
         self.progress_detail.setText(detail)
-        epoch = int(status.get("epoch") or 0)
-        epochs = int(status.get("epochs") or self.epochs.value() or 1)
-        export = status.get("label_export_progress") or {}
-        if state == "exporting_labels" and export.get("total"):
-            value = int(100.0 * float(export.get("index") or export.get("completed") or 0) / max(1, int(export["total"])))
-        elif state in ("training", "preparing_data", "validating") and epochs:
-            value = int(100.0 * epoch / epochs)
-        elif state == "completed":
+        value = int(status.get("progress_percent") or 0)
+        if state == "completed":
             value = 100
-        else:
-            value = 0
+        elif state in ACTIVE_STATUSES:
+            value = min(99, value)
         self.progress_bar.setValue(max(0, min(100, value)))
         latest = status.get("latest_epoch") or {}
         displayed_loss = status.get("loss")
@@ -1292,8 +1319,7 @@ class ModelCenter:
         if terminal_signature and terminal_signature != self.last_terminal_signature:
             self.last_terminal_signature = terminal_signature
             self.refresh_tasks()
-            if self.tabs.currentWidget() == self.models_tab:
-                self.refresh_models()
+            self.refresh_models()
 
     def _duration(self, seconds):
         seconds = max(0, int(seconds))
@@ -1392,20 +1418,20 @@ class ModelCenter:
         if current:
             quality = current.get("quality") or {}
             self.current_model_title.setText(
-                "Current model · {}".format(_format_time(current.get("created_at_epoch")))
+                "Active annotation model · {}".format(
+                    _format_time(current.get("created_at_epoch"))
+                )
             )
             self.current_model_detail.setText(
                 "{} · {} training + {} validation · validation {}".format(
-                    "Lightweight adaptation"
-                    if current.get("strategy") == "clopa_in"
-                    else "Stronger boundary adaptation",
+                    strategy_display_name(current.get("strategy")),
                     current.get("train_case_count", 0),
                     current.get("validation_case_count", 0),
                     _format_delta(quality.get("delta_auc")),
                 )
             )
         else:
-            self.current_model_title.setText("No custom model selected")
+            self.current_model_title.setText("No active annotation model")
             self.current_model_detail.setText(
                 "Train and validate a model, or select an unverified version explicitly."
             )
@@ -1418,7 +1444,7 @@ class ModelCenter:
             rows = [
                 row
                 for row in rows
-                if row.get("state") not in ("failed", "corrupt", "unverified")
+                if row.get("state") not in ("failed", "corrupt", "incompatible")
             ]
         self.model_table.setRowCount(len(rows))
         for index, row in enumerate(rows):
@@ -1430,14 +1456,19 @@ class ModelCenter:
                 index,
                 1,
                 self.QtWidgets.QTableWidgetItem(
-                    "Lightweight"
-                    if row.get("strategy") == "clopa_in"
-                    else "Stronger boundary"
+                    str(row.get("display_name") or row.get("model_id") or "")
                 ),
             )
             self.model_table.setItem(
                 index,
                 2,
+                self.QtWidgets.QTableWidgetItem(
+                    strategy_display_name(row.get("strategy"))
+                ),
+            )
+            self.model_table.setItem(
+                index,
+                3,
                 self.QtWidgets.QTableWidgetItem(
                     "{} + {}".format(
                         row.get("train_case_count", 0),
@@ -1449,16 +1480,21 @@ class ModelCenter:
             if row.get("state") == "unverified":
                 validation = "Not verified"
             self.model_table.setItem(
-                index, 3, self.QtWidgets.QTableWidgetItem(validation)
+                index, 4, self.QtWidgets.QTableWidgetItem(validation)
             )
             button = self.QtWidgets.QPushButton(
-                "Current" if row.get("model_id") == recommended else "Use"
+                "Active"
+                if row.get("model_id") == recommended
+                else "Set Active"
             )
-            button.setEnabled(row.get("compatible", True) and row.get("model_id") != recommended)
+            button.setEnabled(
+                model_is_usable(row)
+                and row.get("model_id") != recommended
+            )
             button.clicked.connect(
                 lambda _checked=False, model_id=row.get("model_id"): self.use_model(model_id)
             )
-            self.model_table.setCellWidget(index, 4, button)
+            self.model_table.setCellWidget(index, 5, button)
 
     def _start_model_io(self, command, action):
         if self.model_io_process is not None:
@@ -1536,7 +1572,7 @@ class ModelCenter:
         current = selected_model(self.workspace, task_id)
         if not current:
             self.model_io_status.setText(
-                "Select a current model before exporting a package."
+                "Select an active annotation model before exporting a package."
             )
             return
         suggested = Path.home() / "{}_{}.zip".format(
@@ -1581,6 +1617,23 @@ class ModelCenter:
                 break
         if changed:
             save_registry(self.workspace, registry)
+            project_path = str(self.context.get("project_path") or "").strip()
+            if project_path:
+                bindings_path = self.workspace / "project_bindings.json"
+                payload = read_json(bindings_path, {}) or {}
+                bindings = payload.get("bindings") or {}
+                binding_key = os.path.normcase(
+                    os.path.abspath(project_path)
+                ).lower()
+                bindings[binding_key] = {
+                    "project_path": os.path.abspath(project_path),
+                    "task_id": str(task_id),
+                    "model_id": str(model_id),
+                    "updated_at_epoch": time.time(),
+                }
+                payload["schema_version"] = "nninteractive_project_bindings.v2"
+                payload["bindings"] = bindings
+                write_json_atomic(bindings_path, payload)
             self.refresh_models()
             self._refresh_start_models()
 

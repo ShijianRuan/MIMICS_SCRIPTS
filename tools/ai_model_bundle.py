@@ -29,6 +29,7 @@ from tools.nninteractive_task_common import (
     audit_model_dir,
     find_task,
     load_registry,
+    model_is_usable,
     relative_model_path,
     resolve_registered_model_dir,
     safe_slug,
@@ -36,6 +37,27 @@ from tools.nninteractive_task_common import (
     task_dir,
     write_json_atomic,
 )
+
+
+def _require_nninteractive_runtime_identity(
+    audit: dict[str, Any], model: dict[str, Any]
+) -> str:
+    if not model_is_usable(model):
+        raise RuntimeError("The selected task model is not usable.")
+    if not audit.get("runtime_verified"):
+        raise RuntimeError(
+            "This task model predates effective runtime verification. Re-export "
+            "it through the current training pipeline before moving it between "
+            "workspaces."
+        )
+    fingerprint = str(audit.get("effective_model_fingerprint") or "")
+    registered = str(model.get("effective_model_fingerprint") or "")
+    if not fingerprint or (registered and registered != fingerprint):
+        raise RuntimeError(
+            "The task model effective parameter fingerprint does not match its "
+            "registered identity."
+        )
+    return fingerprint
 
 
 def _write_bundle(
@@ -118,9 +140,12 @@ def export_nninteractive(args: argparse.Namespace) -> int:
                 ", ".join(audit.get("missing") or [])
             )
         )
+    effective_fingerprint = _require_nninteractive_runtime_identity(audit, model)
     portable_model = dict(model)
     portable_model.pop("model_dir", None)
     portable_model["model_relpath"] = "."
+    portable_model["runtime_verified"] = True
+    portable_model["effective_model_fingerprint"] = effective_fingerprint
     metadata = {
         "schema_version": "mimics_ai_model_bundle.v1",
         "model_family": "nninteractive_task",
@@ -132,6 +157,7 @@ def export_nninteractive(args: argparse.Namespace) -> int:
         },
         "model": portable_model,
         "checkpoint_sha256": audit.get("checkpoint_sha256"),
+        "effective_model_fingerprint": effective_fingerprint,
     }
     with tempfile.TemporaryDirectory(prefix="mimics_nnint_export_") as raw:
         portable_dir = Path(raw) / "model"
@@ -172,6 +198,18 @@ def import_nninteractive(args: argparse.Namespace) -> int:
                 "The imported model is incomplete: {}".format(
                     ", ".join(audit.get("missing") or [])
                 )
+            )
+        effective_fingerprint = _require_nninteractive_runtime_identity(
+            audit, model
+        )
+        packaged_fingerprint = str(
+            metadata.get("effective_model_fingerprint")
+            or model.get("effective_model_fingerprint")
+            or ""
+        )
+        if packaged_fingerprint and packaged_fingerprint != effective_fingerprint:
+            raise RuntimeError(
+                "The imported model runtime fingerprint does not match the package."
             )
         expected = str(
             metadata.get("checkpoint_sha256")
@@ -219,6 +257,11 @@ def import_nninteractive(args: argparse.Namespace) -> int:
             model.pop("model_dir", None)
             model["compatible"] = True
             model["checkpoint_sha256"] = audit.get("checkpoint_sha256")
+            model["runtime_verified"] = True
+            model["effective_model_fingerprint"] = effective_fingerprint
+            model["validated_prompt_types"] = list(
+                model.get("validated_prompt_types") or ["point"]
+            )
             task["models"] = [
                 row
                 for row in task.get("models") or []

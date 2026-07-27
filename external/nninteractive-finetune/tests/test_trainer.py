@@ -122,7 +122,10 @@ def test_complete_training_flow_with_true_interaction_loop(tmp_path, monkeypatch
     assert result["training"]["epochs_completed"] == 1
     assert len(result["training"]["history"]) == 1
     status = json.loads((tmp_path / "status.json").read_text())
-    assert status["status"] == "completed"
+    # The CLI performs a fresh-network reload after train() releases its large
+    # optimizer/network objects, then advances this to completed.
+    assert status["status"] == "finalizing"
+    assert status["phase"] == "awaiting_runtime_verification"
     assert not (
         output_dir.parent
         / "_nninteractive_finetune_work"

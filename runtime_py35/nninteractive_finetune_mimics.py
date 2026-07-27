@@ -277,6 +277,32 @@ def _models(task):
     return result
 
 
+def _model_is_usable(model):
+    if not isinstance(model, dict) or not model.get("compatible", True):
+        return False
+    return str(model.get("state") or "").strip().lower() not in (
+        "corrupt",
+        "failed",
+        "incompatible",
+        "cancelled",
+    )
+
+
+def _model_by_id(task, model_id):
+    wanted = str(model_id or "")
+    for model in _models(task):
+        if (
+            str(model.get("model_id") or "") == wanted
+            and _model_is_usable(model)
+        ):
+            return model
+    return None
+
+
+def _usable_models(task):
+    return [model for model in _models(task) if _model_is_usable(model)]
+
+
 def _find_task(task_id):
     wanted = _safe_slug(task_id)
     for task in _registry():
@@ -286,11 +312,7 @@ def _find_task(task_id):
 
 
 def _recommended_model(task):
-    wanted = str(task.get("recommended_model_id") or "")
-    for model in _models(task):
-        if str(model.get("model_id") or "") == wanted:
-            return model
-    return None
+    return _model_by_id(task, task.get("recommended_model_id"))
 
 
 def _registered_model_dir(task, model):
@@ -318,6 +340,8 @@ def _registered_model_dir(task, model):
 
 
 def _model_is_complete(task, model):
+    if not _model_is_usable(model):
+        return False
     model_dir = _registered_model_dir(task, model)
     for name in (
         "dataset.json",
@@ -327,7 +351,30 @@ def _model_is_complete(task, model):
     ):
         if not os.path.isfile(os.path.join(model_dir, name)):
             return False
-    return bool(glob.glob(os.path.join(model_dir, "fold_*", "checkpoint_final.pth")))
+    if not glob.glob(os.path.join(model_dir, "fold_*", "checkpoint_final.pth")):
+        return False
+    if model.get("runtime_verified"):
+        manifest = _read_json(
+            os.path.join(model_dir, "finetune_manifest.json"), {}
+        ) or {}
+        verification = manifest.get("runtime_verification") or {}
+        expected = str(
+            verification.get("expected_parameter_fingerprint") or ""
+        )
+        loaded = str(
+            verification.get("loaded_parameter_fingerprint") or ""
+        )
+        registered = str(
+            model.get("effective_model_fingerprint") or ""
+        )
+        if (
+            not verification.get("verified")
+            or not expected
+            or expected != loaded
+            or (registered and registered != loaded)
+        ):
+            return False
+    return True
 
 
 def _profile(task, model):
@@ -350,6 +397,14 @@ def _profile(task, model):
         "model_dir": _registered_model_dir(task, model),
         "checkpoint_sha256": str(model.get("checkpoint_sha256") or ""),
         "strategy": str(model.get("strategy") or ""),
+        "validated_prompt_types": list(
+            model.get("validated_prompt_types") or ["point"]
+        ),
+        "effective_model_fingerprint": str(
+            model.get("effective_model_fingerprint") or ""
+        ),
+        "runtime_verified": bool(model.get("runtime_verified")),
+        "input_contract": model.get("input_contract") or {},
     }
 
 
@@ -357,18 +412,22 @@ def _binding_key(project_path):
     return os.path.normcase(os.path.abspath(project_path or "")).lower()
 
 
-def _project_binding(project_path):
+def _project_binding_values(project_path):
     if not project_path:
-        return ""
+        return {}
     payload = _read_json(
         os.path.join(_workspace(), "project_bindings.json"), {}
     ) or {}
     bindings = payload.get("bindings") or {}
     value = bindings.get(_binding_key(project_path)) or {}
-    return str(value.get("task_id") or "")
+    return value if isinstance(value, dict) else {}
 
 
-def _save_project_binding(project_path, task_id):
+def _project_binding(project_path):
+    return str(_project_binding_values(project_path).get("task_id") or "")
+
+
+def _save_project_binding(project_path, task_id, model_id=""):
     if not project_path or not task_id:
         return
     path = os.path.join(_workspace(), "project_bindings.json")
@@ -377,9 +436,10 @@ def _save_project_binding(project_path, task_id):
     bindings[_binding_key(project_path)] = {
         "project_path": os.path.abspath(project_path),
         "task_id": str(task_id),
+        "model_id": str(model_id or ""),
         "updated_at_epoch": time.time(),
     }
-    payload["schema_version"] = "nninteractive_project_bindings.v1"
+    payload["schema_version"] = "nninteractive_project_bindings.v2"
     payload["bindings"] = bindings
     _write_json(path, payload)
 
@@ -519,6 +579,7 @@ def _finish_choice(key, payload):
         _save_project_binding(
             payload.get("project_path") or monitor.get("project_path") or "",
             profile.get("task_id") or "",
+            profile.get("model_id") or "",
         )
     try:
         nninteractive_mimics.run_with_model_profile(profile)
@@ -696,7 +757,25 @@ def annotate_with_task_model():
             )
             return open_model_center()
         return _open_model_chooser()
-    model = _recommended_model(task)
+    usable = _usable_models(task)
+    if not usable:
+        _log(
+            logging.ERROR,
+            "This task has no usable custom nnInteractive model.",
+        )
+        return open_model_center()
+
+    mask = _selected_mask()
+    metadata_model_id = str(
+        _metadata_get(mask, MODEL_ID_METADATA, "") or ""
+    )
+    model = _model_by_id(task, metadata_model_id)
+    if model is None:
+        binding = _project_binding_values(_current_project_path())
+        if _safe_slug(binding.get("task_id")) == _safe_slug(task.get("task_id")):
+            model = _model_by_id(task, binding.get("model_id"))
+    if model is None and len(usable) == 1:
+        model = usable[0]
     if model is None:
         return _open_model_chooser(task.get("task_id") or "")
     try:

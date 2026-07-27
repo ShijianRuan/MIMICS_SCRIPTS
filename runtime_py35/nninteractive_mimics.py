@@ -685,6 +685,13 @@ def _model_profile(config):
             "task_id": "",
             "task_name": "",
             "model_dir": "",
+            "validated_prompt_types": [
+                "point",
+                "scribble",
+                "box",
+                "lasso",
+            ],
+            "effective_model_fingerprint": "",
         }
     raw_model_dir = str(raw.get("model_dir") or "").strip()
     profile = {
@@ -695,6 +702,12 @@ def _model_profile(config):
         "task_id": str(raw.get("task_id") or "").strip(),
         "task_name": str(raw.get("task_name") or "").strip(),
         "model_dir": os.path.abspath(raw_model_dir) if raw_model_dir else "",
+        "validated_prompt_types": list(
+            raw.get("validated_prompt_types") or ["point"]
+        ),
+        "effective_model_fingerprint": str(
+            raw.get("effective_model_fingerprint") or ""
+        ),
         "input_contract": raw.get("input_contract") or {
             "schema_version": "nninteractive_input_contract.v1",
             "spatial_orientation": "canonical_ras",
@@ -761,9 +774,18 @@ def _model_state_values(profile):
         "model_profile_id": profile.get("profile_id") or "official",
         "model_id": profile.get("model_id") or "official",
         "checkpoint_sha256": profile.get("checkpoint_sha256") or "",
+        "effective_model_fingerprint": profile.get(
+            "effective_model_fingerprint"
+        ) or "",
         "task_id": profile.get("task_id") or "",
         "task_name": profile.get("task_name") or "",
         "input_contract": profile.get("input_contract") or {},
+        "validated_prompt_types": list(
+            profile.get("validated_prompt_types") or []
+        ),
+        "effective_model_fingerprint": profile.get(
+            "effective_model_fingerprint"
+        ) or "",
         "model_identity": _model_identity(profile),
     }
 
@@ -3359,6 +3381,9 @@ def _enqueue_async_prediction(state, target, expected_hash=None):
         "model_profile_id": state.get("model_profile_id", "official"),
         "model_id": state.get("model_id", "official"),
         "checkpoint_sha256": state.get("checkpoint_sha256", ""),
+        "effective_model_fingerprint": state.get(
+            "effective_model_fingerprint", ""
+        ),
         "task_id": state.get("task_id", ""),
     }
     state["pending_sequence"] = sequence
@@ -3835,17 +3860,33 @@ def _handle_async_result(image, target, state):
     return "applied"
 
 
-def _async_prompt_menu(target, state, source=None):
+def _prompt_buttons_for_profile(profile):
+    prompt_types = set(
+        str(value or "").strip().lower()
+        for value in profile.get("validated_prompt_types") or []
+    )
+    buttons = []
+    for prompt_type, button in (
+        ("point", BUTTON_POINT),
+        ("scribble", BUTTON_SCRIBBLE),
+        ("box", BUTTON_BOX),
+        ("lasso", BUTTON_LASSO),
+    ):
+        if prompt_type in prompt_types:
+            buttons.append(button)
+    if not buttons:
+        raise RuntimeError(
+            "The selected nnInteractive model declares no validated prompt type."
+        )
+    return buttons
+
+
+def _async_prompt_menu(target, state, source=None, profile=None):
     count = len(state.get("interactions", [])) if state else 0
     menu_source = target if source is None else source
     source_name = state.get("source_name") if state else str(getattr(menu_source, "name", ""))
     target_name = state.get("target_name") if state else str(getattr(target, "name", ""))
-    buttons = [
-        BUTTON_POINT,
-        BUTTON_SCRIBBLE,
-        BUTTON_BOX,
-        BUTTON_LASSO,
-    ]
+    buttons = _prompt_buttons_for_profile(profile or {})
     if state and state.get("interactions"):
         buttons.extend([BUTTON_UNDO, BUTTON_RESET])
     buttons.append(BUTTON_FINISH)
@@ -3935,7 +3976,7 @@ def _run_async(image, target, config, source=None, auto_created=False, write_mod
     pending_visual_objects = []
     visual_objects_registered = False
     try:
-        action = _async_prompt_menu(target, state, source)
+        action = _async_prompt_menu(target, state, source, profile)
         if action == BUTTON_FINISH or not action:
             if state is not None:
                 _close_async_job(target, state, "user_finished")
@@ -4039,24 +4080,16 @@ def _run_async(image, target, config, source=None, auto_created=False, write_mod
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-def _prompt_menu(target, interaction_count):
+def _prompt_menu(target, interaction_count, profile):
+    buttons = _prompt_buttons_for_profile(profile)
+    buttons.extend([BUTTON_UNDO, BUTTON_RESET, BUTTON_FINISH])
     return mimics.dialogs.question_box(
         message=(
             "Target Mask: {0}\n"
             "Prompts in this session: {1}\n\n"
             "Each new prompt immediately updates the selected Mask."
         ).format(getattr(target, "name", ""), interaction_count),
-        buttons=";".join(
-            [
-                BUTTON_POINT,
-                BUTTON_SCRIBBLE,
-                BUTTON_BOX,
-                BUTTON_LASSO,
-                BUTTON_UNDO,
-                BUTTON_RESET,
-                BUTTON_FINISH,
-            ]
-        ),
+        buttons=";".join(buttons),
         title=TITLE,
         ui_blocking=True,
     )
@@ -4098,7 +4131,11 @@ def _run_sync(image, target, config):
             except Exception:
                 pass
         while True:
-            action = _prompt_menu(target, len(interactions))
+            action = _prompt_menu(
+                target,
+                len(interactions),
+                _model_profile(config),
+            )
             if action == BUTTON_FINISH or not action:
                 _mimics_log(
                     logging.INFO,
@@ -4291,6 +4328,15 @@ def run_with_model_profile(profile):
     # Validate before selecting/creating a Mask so an invalid model cannot
     # mutate the Mimics project.
     _runtime_paths(config)
+    selected = _model_profile(config)
+    _mimics_log(
+        logging.INFO,
+        "nnInteractive custom model selected: {0} ({1}, checkpoint {2}).".format(
+            selected.get("task_name") or selected.get("task_id") or "custom task",
+            selected.get("model_id") or "unknown",
+            (selected.get("checkpoint_sha256") or "unverified")[:12],
+        ),
+    )
     return _run_with_config(config)
 
 

@@ -67,6 +67,58 @@ def checkpoint_sha256(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def network_parameter_fingerprint(network: torch.nn.Module) -> str:
+    """Hash the effective, de-duplicated parameters owned by a loaded network."""
+    return _named_parameter_fingerprint(network.named_parameters())
+
+
+def _named_parameter_fingerprint(parameters: Any) -> str:
+    digest = hashlib.sha256()
+    digest.update(b"nninteractive_effective_parameters.v1\0")
+    for name, parameter in parameters:
+        tensor = parameter.detach().to(device="cpu").contiguous()
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(tuple(int(value) for value in tensor.shape)).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(str(tensor.dtype).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(tensor.view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()
+
+
+def state_dict_loaded_parameter_fingerprint(
+    network: torch.nn.Module, state_dict: dict[str, torch.Tensor]
+) -> str:
+    """Predict the effective parameters after loading a possibly aliased state.
+
+    PyTorch state dictionaries can expose the same Parameter under several
+    module paths. Loading assigns each path in traversal order, so the last
+    alias wins. This reproduces that ownership rule without allocating a
+    second full nnInteractive network.
+    """
+    references = network.state_dict(keep_vars=True)
+    final_values: dict[int, torch.Tensor] = {}
+    for name, reference in references.items():
+        if isinstance(reference, torch.nn.Parameter):
+            if name not in state_dict:
+                raise RuntimeError(
+                    "Exported state is missing parameter alias: {}".format(name)
+                )
+            final_values[id(reference)] = state_dict[name]
+    effective = []
+    for name, parameter in network.named_parameters():
+        value = final_values.get(id(parameter))
+        if value is None:
+            raise RuntimeError(
+                "Could not resolve the exported value for parameter: {}".format(
+                    name
+                )
+            )
+        effective.append((name, value))
+    return _named_parameter_fingerprint(effective)
+
+
 def audit_model_dir(
     model_dir: str | Path,
     fold: int | str = 0,

@@ -546,6 +546,8 @@ def _train_unlocked(config: dict[str, Any]) -> dict[str, Any]:
             _load_parameter_delta(bundle.network, best_delta)
         summary = {
             "strategy": model_config["strategy"],
+            "prompt_mode": str(prompt_config["mode"]),
+            "validated_prompt_types": ["point"],
             "epochs_completed": int(training["epochs"]),
             "steps_per_epoch": updates_per_epoch,
             "interaction_steps": int(prompt_config["interaction_steps"]),
@@ -572,8 +574,8 @@ def _train_unlocked(config: dict[str, Any]) -> dict[str, Any]:
         if not bool(data_config.get("keep_prepared_cache", True)):
             remove_prepared_cache(cache_dir)
         status.update(
-            status="completed",
-            phase="completed",
+            status="finalizing",
+            phase="awaiting_runtime_verification",
             model_dir=str(output_dir),
             manifest=str(output_dir / "finetune_manifest.json"),
             best_score=best_score,

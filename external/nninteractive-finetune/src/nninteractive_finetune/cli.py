@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import sys
+import time
 from pathlib import Path
 
 from .config import load_config
 from .evaluate import evaluate_model
+from .checkpoint import verify_exported_model
 from .model import audit_model_dir
-from .runtime import CancelledError
+from .runtime import CancelledError, write_json_atomic
 from .trainer import train
 
 
@@ -23,7 +26,65 @@ def cmd_audit(args: argparse.Namespace) -> None:
 
 
 def cmd_train(args: argparse.Namespace) -> None:
-    _print(train(load_config(args.config)))
+    config = load_config(args.config)
+    manifest = train(config)
+    # train() has returned, so its network/optimizer can be reclaimed before a
+    # fresh full network is constructed for runtime-identity verification.
+    gc.collect()
+    try:
+        manifest = verify_exported_model(
+            manifest["model_dir"],
+            fold=config["model"].get("fold", 0),
+        )
+    except Exception as exc:
+        _finish_training_status(
+            config,
+            status="failed",
+            phase="runtime_verification_failed",
+            error="{}: {}".format(type(exc).__name__, exc),
+        )
+        raise
+    _finish_training_status(
+        config,
+        status="completed",
+        phase="completed",
+        model_dir=str(manifest.get("model_dir") or ""),
+        manifest=str(
+            Path(str(manifest.get("model_dir") or ""))
+            / "finetune_manifest.json"
+        ),
+    )
+    _print(manifest)
+
+
+def _finish_training_status(
+    config: dict, status: str, phase: str, **values: object
+) -> None:
+    path_value = config.get("training", {}).get("status_path")
+    if not path_value:
+        return
+    path = Path(path_value)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        payload = {
+            "schema_version": "nninteractive_finetune_status.v1",
+        }
+    payload.update(values)
+    payload["status"] = status
+    payload["phase"] = phase
+    payload["updated_at_epoch"] = time.time()
+    write_json_atomic(path, payload)
+
+
+def cmd_verify_runtime(args: argparse.Namespace) -> None:
+    _print(
+        verify_exported_model(
+            args.model_dir,
+            fold=args.fold,
+            checkpoint_name=args.checkpoint,
+        )
+    )
 
 
 def cmd_evaluate(args: argparse.Namespace) -> None:
@@ -55,6 +116,15 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser = subparsers.add_parser("train", help="Run task adaptation")
     train_parser.add_argument("--config", required=True)
     train_parser.set_defaults(func=cmd_train)
+
+    verify = subparsers.add_parser(
+        "verify-runtime",
+        help="Reload an exported checkpoint and verify effective parameters",
+    )
+    verify.add_argument("--model-dir", required=True)
+    verify.add_argument("--fold", default="0")
+    verify.add_argument("--checkpoint", default="checkpoint_final.pth")
+    verify.set_defaults(func=cmd_verify_runtime)
 
     evaluate = subparsers.add_parser(
         "evaluate", help="Evaluate a model through the real nnInteractive session"

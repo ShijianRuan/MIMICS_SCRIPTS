@@ -42,6 +42,7 @@ Protocol (JSON stdin -> JSON stdout):
 from __future__ import annotations
 
 import itertools
+import hashlib
 import json
 import os
 import signal
@@ -298,6 +299,49 @@ def _resolve_fold(model_dir: str, requested: Any) -> str | None:
             f"Requested fold {value!r} is unavailable. Available folds: {', '.join(folds)}"
         )
     return value
+
+
+def _selected_checkpoint_identity(model_dir: str, fold: str | None) -> str:
+    """Return the exact checkpoint identity that the server will load.
+
+    Task models currently register one checkpoint SHA256. When more than one
+    fold is selected, use a deterministic set identity rather than pretending
+    that one member checksum identifies the ensemble.
+    """
+    root = Path(model_dir)
+    checkpoints = sorted(
+        path
+        for path in root.glob("fold_*/checkpoint_final.pth")
+        if path.is_file()
+    )
+    if fold not in (None, "", "auto", "all"):
+        checkpoints = [
+            root / "fold_{}".format(fold) / "checkpoint_final.pth"
+        ]
+    if not checkpoints or any(not path.is_file() for path in checkpoints):
+        raise RuntimeError(
+            "The selected nnInteractive checkpoint is missing under: {}".format(
+                model_dir
+            )
+        )
+
+    checksums = []
+    for path in checkpoints:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+                digest.update(chunk)
+        checksums.append((path.parent.name, digest.hexdigest()))
+    if len(checksums) == 1:
+        return checksums[0][1]
+
+    combined = hashlib.sha256()
+    for fold_name, checksum in checksums:
+        combined.update(fold_name.encode("utf-8"))
+        combined.update(b"\0")
+        combined.update(checksum.encode("ascii"))
+        combined.update(b"\0")
+    return "set:{}".format(combined.hexdigest())
 
 
 def _write_server_state(path: Path, state: dict[str, Any]) -> None:
@@ -675,6 +719,7 @@ def _start_server(
     fold: str | None,
     gpu_lock_timeout_seconds: float = 30.0,
     runtime_work_dir: str | None = None,
+    checkpoint_identity: str = "",
 ) -> tuple[subprocess.Popen, dict[str, Any]]:
     """Start the nnInteractive server as a background subprocess.
 
@@ -762,12 +807,13 @@ def _start_server(
             )
 
         state = {
-            "schema_version": "nninteractive_owned_server.v2",
+            "schema_version": "nninteractive_owned_server.v3",
             "pid": proc.pid,
             "server_url": server_url,
             "model_dir": str(Path(model_dir).resolve()),
             "device": device,
             "fold": fold or "auto",
+            "checkpoint_sha256": str(checkpoint_identity or ""),
             "ownership_token": ownership_token,
             "started_at_epoch": time.time(),
             "last_activity_epoch": time.time(),
@@ -822,6 +868,7 @@ def _ensure_server(
     fold: str | None = None,
     gpu_lock_timeout_seconds: float = 30.0,
     runtime_work_dir: str | None = None,
+    expected_checkpoint_sha256: str = "",
 ) -> tuple[bool, str, str]:
     """Ensure the nnInteractive server is running; start it if needed.
 
@@ -832,12 +879,18 @@ def _ensure_server(
     state = _load_server_state(state_path)
     expected_model = str(Path(model_dir).resolve())
     fold = _resolve_fold(model_dir, fold)
+    expected_checkpoint = str(expected_checkpoint_sha256 or "").strip().lower()
     if state and _process_matches_server(state):
         state_url = str(state.get("server_url") or preferred_server_url)
         matches_request = (
             str(state.get("model_dir")) == expected_model
             and str(state.get("device")) == str(device)
             and str(state.get("fold") or "auto") == str(fold or "auto")
+            and (
+                not expected_checkpoint
+                or str(state.get("checkpoint_sha256") or "").strip().lower()
+                == expected_checkpoint
+            )
         )
         api_key = str(state.get("ownership_token") or "")
         if matches_request and _server_running(state_url, api_key):
@@ -866,6 +919,15 @@ def _ensure_server(
         pass
 
     _terminate_model_servers(model_dir)
+    checkpoint_identity = ""
+    if expected_checkpoint:
+        checkpoint_identity = _selected_checkpoint_identity(model_dir, fold)
+        if checkpoint_identity.lower() != expected_checkpoint:
+            raise RuntimeError(
+                "The selected nnInteractive checkpoint does not match the "
+                "registered model identity. Refusing to start a different or "
+                "partially replaced model."
+            )
     server_url = _available_server_url(preferred_server_url)
     proc, state = _start_server(
         model_dir,
@@ -875,6 +937,7 @@ def _ensure_server(
         fold,
         gpu_lock_timeout_seconds,
         runtime_work_dir,
+        checkpoint_identity,
     )
     api_key = str(state["ownership_token"])
 
@@ -1834,6 +1897,7 @@ class _BridgeSessionContext:
                 input_data.get("fold", "auto"),
                 float(input_data.get("gpu_lock_timeout_seconds", 30)),
                 self.runtime_work_dir,
+                str(input_data.get("checkpoint_sha256") or ""),
             )
             self.owned_state_path = _server_state_path(self.model_dir, self.runtime_work_dir)
             self.owned_token = server_api_key
@@ -1927,6 +1991,7 @@ class _BridgeSessionContext:
                 input_data.get("fold", "auto"),
                 float(input_data.get("gpu_lock_timeout_seconds", 30)),
                 self.runtime_work_dir,
+                str(input_data.get("checkpoint_sha256") or ""),
             )
             self.owned_state_path = _server_state_path(self.model_dir, self.runtime_work_dir)
             self.owned_token = server_api_key
@@ -2485,6 +2550,9 @@ def _async_worker_main(job_dir_value: str) -> int:
                     result["model_profile_id"] = command.get("model_profile_id", "official")
                     result["model_id"] = command.get("model_id", "official")
                     result["checkpoint_sha256"] = command.get("checkpoint_sha256", "")
+                    result["effective_model_fingerprint"] = command.get(
+                        "effective_model_fingerprint", ""
+                    )
                     result["task_id"] = command.get("task_id", "")
                 except Exception as exc:
                     result = _error_result(
@@ -2504,6 +2572,9 @@ def _async_worker_main(job_dir_value: str) -> int:
                     result["model_profile_id"] = command.get("model_profile_id", "official")
                     result["model_id"] = command.get("model_id", "official")
                     result["checkpoint_sha256"] = command.get("checkpoint_sha256", "")
+                    result["effective_model_fingerprint"] = command.get(
+                        "effective_model_fingerprint", ""
+                    )
                     result["task_id"] = command.get("task_id", "")
                 _write_json_atomic(result_path, result)
                 last_sequence = sequence

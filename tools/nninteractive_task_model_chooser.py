@@ -17,11 +17,13 @@ for candidate in (str(ROOT), str(ROOT / "tools")):
 from nninteractive_task_common import (  # noqa: E402
     audit_model_dir,
     find_task,
+    model_is_usable,
     model_profile,
     resolve_registered_model_dir,
     model_rows,
     read_json,
     selected_model,
+    strategy_display_name,
     task_rows,
     write_json_atomic,
 )
@@ -79,7 +81,9 @@ class Chooser:
         self.summary.setObjectName("hint")
         self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
-        self.remember = self.QtWidgets.QCheckBox("Use this task for the current project")
+        self.remember = self.QtWidgets.QCheckBox(
+            "Remember this task and model for the current project"
+        )
         self.remember.setChecked(bool(context.get("project_path")))
         self.remember.setEnabled(bool(context.get("project_path")))
         layout.addWidget(self.remember)
@@ -87,7 +91,7 @@ class Chooser:
         footer.addStretch(1)
         cancel = self.QtWidgets.QPushButton("Cancel")
         cancel.clicked.connect(self.cancel)
-        use = self.QtWidgets.QPushButton("Use Model")
+        use = self.QtWidgets.QPushButton("Annotate with This Model")
         use.setObjectName("primary")
         use.clicked.connect(self.accept)
         footer.addWidget(cancel)
@@ -102,14 +106,17 @@ class Chooser:
         recommended = str(task.get("recommended_model_id") or "")
         self.model_combo.clear()
         for model in model_rows(self.workspace, task_id):
-            if not model.get("compatible", True):
+            if not model_is_usable(model):
                 continue
-            label = time.strftime(
-                "%Y-%m-%d %H:%M",
-                time.localtime(float(model.get("created_at_epoch") or 0)),
+            label = "{}  ·  {}".format(
+                str(model.get("display_name") or model.get("model_id") or "model"),
+                time.strftime(
+                    "%Y-%m-%d %H:%M",
+                    time.localtime(float(model.get("created_at_epoch") or 0)),
+                ),
             )
             if model.get("model_id") == recommended:
-                label += "  ·  Current"
+                label += "  ·  Active"
             elif model.get("state") == "unverified":
                 label += "  ·  Not verified"
             self.model_combo.addItem(label, str(model.get("model_id") or ""))
@@ -120,6 +127,7 @@ class Chooser:
 
     def refresh_summary(self):
         task_id = str(self.task_combo.currentData() or "")
+        task = find_task(self.workspace, task_id) or {}
         model_id = str(self.model_combo.currentData() or "")
         model = next(
             (row for row in model_rows(self.workspace, task_id) if row.get("model_id") == model_id),
@@ -136,14 +144,9 @@ class Chooser:
             if delta is not None
             else "No automatic validation comparison"
         )
-        strategy = (
-            "Lightweight adaptation"
-            if model.get("strategy") == "clopa_in"
-            else "Stronger boundary adaptation"
-        )
         self.summary.setText(
-            "{} · {} training + {} validation · {}".format(
-                strategy,
+            "{} · Point prompts · {} training + {} validation · {}".format(
+                strategy_display_name(model.get("strategy")),
                 model.get("train_case_count", 0),
                 model.get("validation_case_count", 0),
                 validation,
@@ -153,7 +156,9 @@ class Chooser:
             resolve_registered_model_dir(self.workspace, model, task),
             include_checksum=False,
         )
-        self.use_button.setEnabled(bool(audit.get("compatible")))
+        self.use_button.setEnabled(
+            model_is_usable(model) and bool(audit.get("compatible"))
+        )
         if not audit.get("compatible"):
             self.summary.setText(
                 "This model is incomplete: {}".format(", ".join(audit.get("missing") or []))

@@ -46,6 +46,8 @@ NNINTERACTIVE_INPUT_CONTRACT = {
     "normalization_channel": 0,
     "standard_deviation_correction": 1,
 }
+DEFAULT_VALIDATED_PROMPT_TYPES = ("point",)
+UNUSABLE_MODEL_STATES = {"corrupt", "failed", "incompatible", "cancelled"}
 
 
 def read_json(path: str | Path, default: Any = None) -> Any:
@@ -249,6 +251,16 @@ def audit_model_dir(
         if include_checksum:
             result["checkpoint_sha256"] = sha256_file(checkpoints[0])
         result["fold"] = checkpoints[0].parent.name.replace("fold_", "", 1)
+    manifest = read_json(model_dir / "finetune_manifest.json", {}) or {}
+    verification = manifest.get("runtime_verification") or {}
+    result["runtime_verified"] = bool(
+        verification.get("verified")
+        and verification.get("expected_parameter_fingerprint")
+        == verification.get("loaded_parameter_fingerprint")
+    )
+    result["effective_model_fingerprint"] = str(
+        verification.get("loaded_parameter_fingerprint") or ""
+    )
     return result
 
 
@@ -299,6 +311,23 @@ def model_rows(workspace: Path, task_id: str) -> list[dict[str, Any]]:
     return result
 
 
+def model_is_usable(model: dict[str, Any] | None) -> bool:
+    if not isinstance(model, dict) or not model.get("compatible", True):
+        return False
+    return str(model.get("state") or "").strip().lower() not in UNUSABLE_MODEL_STATES
+
+
+def strategy_display_name(value: object) -> str:
+    strategy = str(value or "").strip().lower()
+    if strategy == "clopa_in":
+        return "CLoPA-IN"
+    if strategy in {"clopa_conv", "clopa_cn"}:
+        return "CLoPA-CN"
+    if strategy == "full":
+        return "Full adaptation"
+    return strategy or "Unknown"
+
+
 def selected_model(
     workspace: Path, task_id: str, model_id: str = ""
 ) -> dict[str, Any] | None:
@@ -307,7 +336,11 @@ def selected_model(
         return None
     wanted = str(model_id or task.get("recommended_model_id") or "").strip()
     for row in task.get("models") or []:
-        if isinstance(row, dict) and str(row.get("model_id") or "") == wanted:
+        if (
+            isinstance(row, dict)
+            and str(row.get("model_id") or "") == wanted
+            and model_is_usable(row)
+        ):
             selected = dict(row)
             selected["_workspace"] = str(workspace.expanduser().resolve())
             return selected
@@ -321,6 +354,8 @@ def model_profile(
     workspace: Path | None = None,
     verify_checksum: bool = True,
 ) -> dict[str, Any]:
+    if not model_is_usable(model):
+        raise RuntimeError("The selected task model is not available for annotation.")
     workspace = workspace or (
         Path(str(model.get("_workspace")))
         if model.get("_workspace")
@@ -343,6 +378,10 @@ def model_profile(
         raise RuntimeError(
             "The selected task model checkpoint does not match its registered checksum."
         )
+    if model.get("runtime_verified") and not audit.get("runtime_verified"):
+        raise RuntimeError(
+            "The selected task model lost its effective runtime verification metadata."
+        )
     return {
         "source": "task_model",
         "profile_id": "{}:{}".format(task.get("task_id"), model.get("model_id")),
@@ -352,6 +391,18 @@ def model_profile(
         "model_dir": str(model_dir),
         "checkpoint_sha256": actual,
         "strategy": str(model.get("strategy") or ""),
+        "validated_prompt_types": list(
+            model.get("validated_prompt_types")
+            or DEFAULT_VALIDATED_PROMPT_TYPES
+        ),
+        "effective_model_fingerprint": str(
+            model.get("effective_model_fingerprint")
+            or audit.get("effective_model_fingerprint")
+            or ""
+        ),
+        "runtime_verified": bool(
+            model.get("runtime_verified") or audit.get("runtime_verified")
+        ),
         "input_contract": dict(
             model.get("input_contract") or NNINTERACTIVE_INPUT_CONTRACT
         ),
@@ -573,6 +624,9 @@ def status_summary(status: dict[str, Any]) -> str:
     if phase == "waiting_for_gpu":
         return "Waiting for the GPU"
     if phase == "training":
+        training_phase = str(status.get("phase") or "").lower()
+        if "verif" in training_phase or training_phase.startswith("final"):
+            return "Verifying the trained model"
         return "Training, epoch {} of {}".format(
             status.get("epoch") or 0, status.get("epochs") or "?"
         )

@@ -227,6 +227,7 @@ def _run_label_export(
         status_path,
         status="exporting_labels",
         phase="exporting_labels",
+        progress_percent=2,
         case_total=len(cases),
         label_export_status=str(batch_status),
         label_export_stop_path=str(stop_path),
@@ -295,7 +296,20 @@ def _run_label_export(
             )
             if signature != last_progress:
                 last_progress = signature
-                update_status(status_path, label_export_progress=progress)
+                total = int(progress.get("total") or len(cases) or 1)
+                completed = int(
+                    progress.get("index")
+                    or progress.get("completed")
+                    or 0
+                )
+                update_status(
+                    status_path,
+                    label_export_progress=progress,
+                    progress_percent=min(
+                        10,
+                        2 + int(8.0 * completed / max(1, total)),
+                    ),
+                )
             if time.time() >= deadline:
                 write_json_atomic(
                     stop_path,
@@ -473,7 +487,12 @@ def _prepare_manifest(
         staging = _run_label_export(
             request, job_dir, status_path, control_path, log_path
         )
-    update_status(status_path, status="preparing_data", phase="preparing_data")
+    update_status(
+        status_path,
+        status="preparing_data",
+        phase="preparing_data",
+        progress_percent=10,
+    )
     rows = []
     validation_rows = []
     image_cache = job_dir / "staging" / "images"
@@ -522,6 +541,10 @@ def _prepare_manifest(
             preparation_index=index + 1,
             preparation_total=len(selected),
             current_case=case_id,
+            progress_percent=min(
+                15,
+                10 + int(5.0 * (index + 1) / max(1, len(selected))),
+            ),
         )
     if not rows:
         raise RuntimeError(
@@ -659,6 +682,9 @@ def _copy_trainer_status(job_status: Path, trainer_status: dict[str, Any]) -> No
         "training": "training",
         "validating": "training",
         "finalizing": "training",
+        # The trainer subprocess has finished exporting, but the controller
+        # still has model comparison and registry publication to complete.
+        "completed": "training",
     }.get(raw_status, raw_status or "training")
     values = {
         key: value
@@ -677,9 +703,47 @@ def _copy_trainer_status(job_status: Path, trainer_status: dict[str, Any]) -> No
             "best_score",
             "validation_batch",
             "validation_batches",
+            "completed_cases",
+            "total_cases",
             "error",
         }
     }
+    if raw_status == "completed":
+        values["phase"] = "checkpoint_runtime_verified"
+    epochs = max(1, int(trainer_status.get("epochs") or 1))
+    epoch = max(0, int(trainer_status.get("epoch") or 0))
+    progress_percent = 15
+    if raw_status == "preparing":
+        completed_cases = int(trainer_status.get("completed_cases") or 0)
+        total_cases = max(1, int(trainer_status.get("total_cases") or 1))
+        progress_percent = 10 + int(
+            5.0 * completed_cases / total_cases
+        )
+    elif raw_status in ("training", "validating", "finalizing", "completed"):
+        completed_epochs = max(0, min(epochs, epoch - 1))
+        epoch_fraction = 0.0
+        if raw_status == "training":
+            updates = max(1, int(trainer_status.get("updates_per_epoch") or 1))
+            epoch_fraction = 0.85 * min(
+                1.0,
+                float(trainer_status.get("update") or 0) / updates,
+            )
+            if str(trainer_status.get("phase") or "") == "epoch_completed":
+                epoch_fraction = 1.0
+        elif raw_status == "validating":
+            batches = max(1, int(trainer_status.get("validation_batches") or 1))
+            epoch_fraction = 0.85 + 0.15 * min(
+                1.0,
+                float(trainer_status.get("validation_batch") or 0) / batches,
+            )
+        else:
+            completed_epochs = epochs
+            epoch_fraction = 0.0
+        training_fraction = min(
+            1.0,
+            (completed_epochs + epoch_fraction) / epochs,
+        )
+        progress_percent = 15 + int(70.0 * training_fraction)
     current = read_json(job_status, {}) or {}
     history = list(current.get("metrics_history") or [])
     latest = trainer_status.get("latest_epoch") or {}
@@ -729,6 +793,7 @@ def _copy_trainer_status(job_status: Path, trainer_status: dict[str, Any]) -> No
         trainer_status=trainer_status,
         metrics_history=history[-500:],
         metric_log_signature=signature,
+        progress_percent=min(85, max(10, progress_percent)),
         **values
     )
 
@@ -851,11 +916,15 @@ def _run_evaluation(
     gpu_lock = _gpu_lock(status_path, control_path, status_path.stem)
     process = None
     try:
+        evaluation_progress = (
+            86 if safe_slug(label) == "current_model" else 93
+        )
         update_status(
             status_path,
             status="validating",
             phase="validating_{}".format(safe_slug(label)),
             validation_label=label,
+            progress_percent=evaluation_progress,
         )
         with output.with_suffix(".log").open("ab") as handle:
             process = subprocess.Popen(
@@ -912,6 +981,10 @@ def _run_evaluation(
         report = read_json(output, {}) or {}
         if "trajectory_auc" not in report:
             raise RuntimeError("{} evaluation did not produce a valid report.".format(label))
+        update_status(
+            status_path,
+            progress_percent=92 if evaluation_progress == 86 else 98,
+        )
         return report
     finally:
         if process is not None and process.poll() is None:
@@ -1013,6 +1086,19 @@ def _register_model(
             "The exported task model does not declare the supported "
             "nnInteractive input contract. Training output was not registered."
         )
+    runtime_verification = finetune_manifest.get("runtime_verification") or {}
+    if (
+        not runtime_verification.get("verified")
+        or runtime_verification.get("expected_parameter_fingerprint")
+        != runtime_verification.get("loaded_parameter_fingerprint")
+    ):
+        raise RuntimeError(
+            "The exported task model did not pass effective runtime-weight "
+            "verification and was not registered."
+        )
+    validated_prompt_types = list(
+        finetune_manifest.get("validated_prompt_types") or ["point"]
+    )
     model = {
         "model_id": model_id,
         "model_relpath": relative_model_path(workspace, model_dir),
@@ -1030,6 +1116,11 @@ def _register_model(
         "compatible": True,
         "source_mode": str(request.get("source_mode") or ""),
         "input_contract": input_contract,
+        "validated_prompt_types": validated_prompt_types,
+        "effective_model_fingerprint": runtime_verification.get(
+            "loaded_parameter_fingerprint"
+        ),
+        "runtime_verified": True,
     }
     rows.append(model)
     rows.sort(key=lambda row: float(row.get("created_at_epoch") or 0), reverse=True)
@@ -1098,6 +1189,7 @@ def run_job(job_dir_value: str) -> int:
         task_name=request.get("task_name"),
         status="validating_cases",
         phase="validating_cases",
+        progress_percent=0,
         controller_pid=os.getpid(),
         control_path=str(control_path),
         log_path=str(log_path),
@@ -1142,7 +1234,12 @@ def run_job(job_dir_value: str) -> int:
                 "new model",
             )
             quality = _quality_result(baseline_report, candidate_report, load_config())
-        update_status(status_path, status="registering", phase="registering")
+        update_status(
+            status_path,
+            status="registering",
+            phase="registering",
+            progress_percent=99,
+        )
         model, selected = _register_model(
             request, workspace, model_dir, quality, validation_count
         )
@@ -1163,6 +1260,7 @@ def run_job(job_dir_value: str) -> int:
             quality=quality or {},
             selection_outcome=outcome,
             completed_at_epoch=time.time(),
+            progress_percent=100,
         )
         append_log(log_path, "Training completed: {}.".format(outcome))
         _cleanup_terminal_artifacts(

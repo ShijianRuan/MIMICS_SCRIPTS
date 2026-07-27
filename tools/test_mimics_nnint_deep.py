@@ -17,6 +17,7 @@ Covers edge cases and bug-prone paths that a user would hit in real Mimics usage
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import shutil
 import sys
@@ -1118,6 +1119,51 @@ class FinetuneCLITests(unittest.TestCase):
         strong = "clopa_conv" if True else "clopa_in"  # stronger boundary radio
         self.assertEqual(light, "clopa_in")
         self.assertEqual(strong, "clopa_conv")
+
+
+# ============================================================================
+# 13. Effective model identity and controller progress
+# ============================================================================
+
+class EffectiveIdentityTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_bridge_checkpoint_identity_matches_selected_fold(self):
+        import nninteractive_bridge as bridge
+
+        checkpoint = self.root / "model" / "fold_0" / "checkpoint_final.pth"
+        checkpoint.parent.mkdir(parents=True)
+        checkpoint.write_bytes(b"adapted-checkpoint")
+        expected = hashlib.sha256(b"adapted-checkpoint").hexdigest()
+        self.assertEqual(
+            expected,
+            bridge._selected_checkpoint_identity(str(checkpoint.parents[1]), "0"),
+        )
+
+    def test_trainer_completion_is_not_controller_completion(self):
+        status_path = self.root / "status.json"
+        common.write_json_atomic(status_path, {"status": "training"})
+        pipeline._copy_trainer_status(
+            status_path,
+            {
+                "status": "completed",
+                "phase": "completed",
+                "epoch": 20,
+                "epochs": 20,
+            },
+        )
+        status = common.read_json(status_path)
+        self.assertEqual("training", status["status"])
+        self.assertEqual("checkpoint_runtime_verified", status["phase"])
+        self.assertEqual(85, status["progress_percent"])
+        self.assertEqual(
+            "Verifying the trained model", common.status_summary(status)
+        )
 
 
 if __name__ == "__main__":
