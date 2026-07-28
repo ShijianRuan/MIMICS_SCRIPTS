@@ -23,6 +23,7 @@ import traceback
 
 import mimics
 
+import dataset_manifest
 import runtime_common
 
 
@@ -51,6 +52,51 @@ MIMICS_TO_SOURCE_INDEX_MATRIX_METADATA = "mimics_script.mimics_to_source_index_m
 SOURCE_CASE_DIR_METADATA = "mimics_script.source_case_dir"
 write_json_atomic = runtime_common.write_json_atomic
 safe_case_filename = runtime_common.safe_filename
+
+
+def _record_created_project(output_dir, case_id, mcs_path, manifest_data):
+    """Publish the source/Mimics grid relationship after the .mcs is durable."""
+    source_image = manifest_data.get("source_image_path") or ""
+    source_case_dir = manifest_data.get("source_case_dir") or ""
+    source_geometry = {
+        "shape": manifest_data.get("source_image_shape") or [],
+        "voxel_to_ras_matrix": manifest_data.get("source_voxel_to_ras_matrix") or [],
+        "world_coordinate_system": "RAS",
+        "source_world_coordinate_system": manifest_data.get(
+            "source_world_coordinate_system", ""
+        ),
+    }
+    mimics_geometry = {
+        "shape": manifest_data.get("actual_mimics_shape") or (
+            (manifest_data.get("masks") or [{}])[0].get("image_shape")
+            if manifest_data.get("masks")
+            else []
+        ),
+        "voxel_to_ras_matrix": manifest_data.get(
+            "mimics_voxel_to_ras_matrix"
+        ) or [],
+        "world_coordinate_system": "RAS",
+        "mimics_world_coordinate_system": manifest_data.get(
+            "mimics_world_coordinate_system", ""
+        ),
+    }
+    dataset_manifest.update_case(
+        output_dir,
+        case_id,
+        image_path=source_image,
+        mcs_path=mcs_path,
+        source_case_dir=source_case_dir,
+        source_geometry=source_geometry,
+        mimics_geometry=mimics_geometry,
+        provenance={
+            "last_operation": "mimics_import",
+            "source_fingerprint": manifest_data.get("source_fingerprint") or "",
+            "resampled_source_grid": bool(
+                manifest_data.get("resampled_source_grid")
+            ),
+            "resample_reason": manifest_data.get("resample_reason") or "",
+        },
+    )
 
 
 def runtime_path(output_dir, *parts):
@@ -759,6 +805,17 @@ def create_mcs_from_manifest(work_dir, output_mcs):
         actual_mimics_voxel_to_ras,
         work_dir,
     )
+    result["actual_mimics_shape"] = list(active_image_shape)
+    result["mimics_voxel_to_ras_matrix"] = actual_mimics_voxel_to_ras
+    try:
+        write_json_atomic(manifest_path, result)
+    except Exception as exc:
+        print(
+            "  warning: could not persist verified grid metadata to the work "
+            "manifest; the in-memory grid will still be recorded after save: {0}".format(
+                exc
+            )
+        )
     if result.get("actual_mimics_grid_resampled"):
         print("  actual Mimics image grid differs from prepared grid; masks were resampled to the open Mimics grid.")
     else:
@@ -852,7 +909,8 @@ def create_mcs_from_manifest(work_dir, output_mcs):
     except Exception:
         pass
 
-    return mcs_path
+    result["saved_mcs_path"] = mcs_path
+    return result
 
 
 def main(output_dir=None, runtime_dir=None):
@@ -1094,22 +1152,29 @@ def main(output_dir=None, runtime_dir=None):
                         total_completed,
                         total_failed,
                     )
-                    create_mcs_from_manifest(work_dir, staging_mcs)
+                    created_manifest = create_mcs_from_manifest(
+                        work_dir, staging_mcs
+                    )
                     _publish_mcs(staging_mcs, mcs_path)
                     total_completed += 1
                     last_activity = time.time()
                     log_message(output_dir, "Created: {}".format(mcs_path))
                     # Persist source fingerprint for incremental rebuild detection
-                    manifest_data = {}
-                    try:
-                        with open(
-                            os.path.join(work_dir, "prepare_manifest.json"),
-                            "r",
-                            encoding="utf-8",
-                        ) as mf:
-                            manifest_data = json.load(mf)
-                    except Exception:
-                        pass
+                    manifest_data = (
+                        created_manifest
+                        if isinstance(created_manifest, dict)
+                        else {}
+                    )
+                    if not manifest_data:
+                        try:
+                            with open(
+                                os.path.join(work_dir, "prepare_manifest.json"),
+                                "r",
+                                encoding="utf-8",
+                            ) as mf:
+                                manifest_data = json.load(mf)
+                        except Exception:
+                            pass
                     fingerprint = manifest_data.get("source_fingerprint", "")
                     if fingerprint:
                         fingerprint_path = runtime_path(output_dir, "fingerprints", safe_case_filename(case_id) + ".fingerprint")
@@ -1121,6 +1186,19 @@ def main(output_dir=None, runtime_dir=None):
                                 fp.write(fingerprint)
                         except Exception:
                             pass
+                    try:
+                        _record_created_project(
+                            output_dir, case_id, mcs_path, manifest_data
+                        )
+                    except Exception as manifest_exc:
+                        # The .mcs is already valid. Keep it, but make the
+                        # missing provenance visible for later repair.
+                        log_message(
+                            output_dir,
+                            "Created {0}, but dataset manifest update failed: {1}".format(
+                                case_id, manifest_exc
+                            ),
+                        )
                     # Keep the manifest until its fingerprint is persisted.
                     # Deleting the work directory inside create_mcs_from_manifest
                     # made every later import look changed and reconvert the case.

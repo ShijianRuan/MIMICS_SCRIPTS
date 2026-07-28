@@ -1,0 +1,1459 @@
+#!/usr/bin/env python3
+"""External training controller for Mimics nnInteractive task models."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+import traceback
+import uuid
+from pathlib import Path
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parents[1]
+TOOLS_DIR = ROOT / "tools"
+FINETUNE_SRC = ROOT / "external" / "nninteractive-finetune" / "src"
+for candidate in (str(ROOT), str(TOOLS_DIR), str(FINETUNE_SRC)):
+    if candidate not in sys.path:
+        sys.path.insert(0, candidate)
+
+from nninteractive_task_common import (  # noqa: E402
+    ACTIVE_STATUSES,
+    NNINTERACTIVE_INPUT_CONTRACT,
+    append_log,
+    audit_model_dir,
+    find_environment_python,
+    load_config,
+    load_registry,
+    model_rows,
+    official_model_dir,
+    read_json,
+    relative_model_path,
+    safe_slug,
+    save_registry,
+    sha256_file,
+    task_dir,
+    write_json_atomic,
+    workspace_root,
+)
+from resource_locks import (  # noqa: E402
+    FileResourceLock,
+    ResourceLockCancelled,
+    ResourceLockTimeout,
+    default_resource_lock_dir,
+)
+
+
+def _finetune_runner_script() -> str:
+    """Build a ``python -c`` script launching the fine-tune CLI.
+
+    The subcommand (``train``/``evaluate``) and flags are passed as real argv
+    by the caller, not embedded here.
+
+    NOTE: We always insert the paths unconditionally. The child process is a
+    fresh Python interpreter whose sys.path differs from this controller's
+    (especially on Windows embeddable Python which ignores PYTHONPATH), so
+    checking ``if p not in sys.path`` against the *parent* sys.path is wrong.
+    """
+    inserts = [
+        "sys.path.insert(0,{!r})".format(p)
+        for p in [str(FINETUNE_SRC), str(ROOT)]
+    ]
+    prefix = "import sys;" + ";".join(inserts) + ";"
+    return "{}from nninteractive_finetune.__main__ import main;sys.exit(main())".format(prefix)
+
+
+def update_status(path: Path, **values: Any) -> dict[str, Any]:
+    payload = read_json(path, {}) or {}
+    payload.update(values)
+    payload["updated_at_epoch"] = time.time()
+    write_json_atomic(path, payload)
+    return payload
+
+
+def _hidden_process_kwargs() -> dict[str, Any]:
+    if os.name != "nt":
+        return {"start_new_session": True}
+    return {
+        "creationflags": int(
+            getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        )
+    }
+
+
+def _process_exists(pid: object) -> bool:
+    try:
+        from resource_locks import process_exists
+
+        return process_exists(pid)
+    except Exception:
+        return False
+
+
+def _terminate_process_tree(process: subprocess.Popen[Any], grace: float = 10.0) -> bool:
+    if process.poll() is not None:
+        return True
+    try:
+        process.terminate()
+    except Exception:
+        pass
+    deadline = time.time() + max(0.0, grace)
+    while time.time() < deadline:
+        if process.poll() is not None:
+            return True
+        time.sleep(0.2)
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=20,
+                **_hidden_process_kwargs()
+            )
+        except Exception:
+            pass
+    else:
+        try:
+            process.kill()
+        except Exception:
+            pass
+    try:
+        process.wait(timeout=10)
+    except Exception:
+        pass
+    return process.poll() is not None
+
+
+def _control_action(control_path: Path) -> str:
+    payload = read_json(control_path, {}) or {}
+    action = str(payload.get("action") or "").strip().lower()
+    if action:
+        return action
+    if str(payload.get("status") or "").strip().lower() == "stop_requested":
+        return "stop"
+    return ""
+
+
+def _write_cancel_marker(path: Path, action: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "{} requested at {}\n".format(action, time.strftime("%Y-%m-%d %H:%M:%S")),
+        encoding="utf-8",
+    )
+
+
+def _find_mimics_exe(request: dict[str, Any]) -> str:
+    configured = str(request.get("mimics_exe") or "").strip()
+    if configured and Path(configured).is_file():
+        return configured
+    try:
+        from tools.fewshot_pipeline import find_mimics_exe
+
+        return str(find_mimics_exe(configured) or "")
+    except Exception:
+        return ""
+
+
+def _run_label_export(
+    request: dict[str, Any],
+    job_dir: Path,
+    status_path: Path,
+    control_path: Path,
+    log_path: Path,
+) -> Path:
+    cases = [row for row in request.get("cases") or [] if row.get("split") in ("train", "val")]
+    case_ids = [str(row["case_id"]) for row in cases]
+    if not case_ids:
+        raise RuntimeError("No training or validation cases were selected.")
+    mimics_exe = _find_mimics_exe(request)
+    if not mimics_exe:
+        raise RuntimeError(
+            "A background-capable Mimics executable was not found. "
+            "Label export from saved .mcs projects cannot start."
+        )
+    staging = job_dir / "staging" / "labels"
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True, exist_ok=True)
+    export_root = job_dir / "mimics_export"
+    export_root.mkdir(parents=True, exist_ok=True)
+    batch_status = export_root / "status.json"
+    stop_path = export_root / "stop.request"
+    config_path = export_root / "export_config.json"
+    runner_path = export_root / "run_export.py"
+    runtime_log = export_root / "process.log"
+    task_label_name = safe_slug(request.get("task_name") or request.get("task_id"))
+    mask_names = [
+        str(value).strip()
+        for value in request.get("mask_names") or []
+        if str(value).strip()
+    ]
+    for stale_control in (stop_path,):
+        try:
+            stale_control.unlink()
+        except FileNotFoundError:
+            pass
+    export_config = {
+        "ts_root": str(Path(request["image_root"]).resolve()),
+        "output_dir": str(Path(request["mcs_dir"]).resolve()),
+        "export_root": str(export_root),
+        "job_runtime": str(export_root),
+        "status_path": str(batch_status),
+        "stop_path": str(stop_path),
+        "label_staging_dir": str(staging),
+        "export_space": "source_image",
+        "cases": case_ids,
+        "case_dirs": {
+            str(row["case_id"]): str(Path(row["case_dir"]).resolve())
+            for row in cases
+        },
+        "mcs_paths": {
+            str(row["case_id"]): str(Path(row["mcs_path"]).resolve())
+            for row in cases
+        },
+        "source_image_paths": {
+            str(row["case_id"]): str(Path(row["image"]).resolve())
+            for row in cases
+        },
+        "mask_names": mask_names,
+        "target_mask_name": task_label_name,
+        "skip_projects_without_requested_mask": True,
+    }
+    write_json_atomic(config_path, export_config)
+    runner_path.write_text(
+        "\n".join(
+            [
+                "import sys",
+                "sys.path.insert(0, {!r})".format(str(ROOT / "runtime_py35")),
+                "import mimics_export",
+                "raise SystemExit(mimics_export.run_background_batch_export({!r}))".format(
+                    str(config_path)
+                ),
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    update_status(
+        status_path,
+        status="exporting_labels",
+        phase="exporting_labels",
+        progress_percent=2,
+        case_total=len(cases),
+        label_export_status=str(batch_status),
+        label_export_stop_path=str(stop_path),
+    )
+    lock_path = (
+        default_resource_lock_dir(ROOT)
+        / "nninteractive_finetune_export_{}.lock".format(job_dir.name)
+    )
+    export_lock = FileResourceLock(
+        lock_path,
+        "background_mimics",
+        "nnInteractive task label export",
+    ).acquire(wait_seconds=0)
+    process = None
+    try:
+        with runtime_log.open("ab") as log_handle:
+            process = subprocess.Popen(
+                [
+                    mimics_exe,
+                    "-background_mode",
+                    "-save_log",
+                    str(export_root / "mimics_application.log"),
+                    "-run_script",
+                    str(runner_path),
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                **_hidden_process_kwargs()
+            )
+        export_lock.update_pid(
+            process.pid,
+            kind="nninteractive_finetune_export",
+            controller_pid=os.getpid(),
+            stop_path=str(stop_path),
+            control_path=str(control_path),
+            status_path=str(status_path),
+            job_id=job_dir.name,
+        )
+        append_log(log_path, "Background Mimics label export started (PID {}).".format(process.pid))
+        timeout = float(load_config().get("label_export_timeout_seconds", 3600))
+        deadline = time.time() + timeout
+        last_progress = None
+        while process.poll() is None:
+            action = _control_action(control_path)
+            if action in ("pause", "stop", "cancel") and not stop_path.exists():
+                write_json_atomic(
+                    stop_path,
+                    {
+                        "action": action,
+                        "requested_at_epoch": time.time(),
+                    },
+                )
+                update_status(
+                    status_path,
+                    status="pausing" if action == "pause" else "stopping",
+                )
+            progress = read_json(batch_status, {}) or {}
+            signature = (
+                progress.get("status"),
+                progress.get("phase"),
+                progress.get("case_id"),
+                progress.get("index"),
+                progress.get("completed"),
+                progress.get("failed"),
+            )
+            if signature != last_progress:
+                last_progress = signature
+                total = int(progress.get("total") or len(cases) or 1)
+                completed = int(
+                    progress.get("index")
+                    or progress.get("completed")
+                    or 0
+                )
+                update_status(
+                    status_path,
+                    label_export_progress=progress,
+                    progress_percent=min(
+                        10,
+                        2 + int(8.0 * completed / max(1, total)),
+                    ),
+                )
+            if time.time() >= deadline:
+                write_json_atomic(
+                    stop_path,
+                    {"action": "timeout", "requested_at_epoch": time.time()},
+                )
+                if not _terminate_process_tree(process):
+                    update_status(
+                        status_path,
+                        status="stopping",
+                        termination_pending=True,
+                        worker_pid=process.pid,
+                    )
+                    raise RuntimeError(
+                        "Label export timed out and the background Mimics process did not exit."
+                    )
+                raise TimeoutError("Label export exceeded {} seconds.".format(int(timeout)))
+            time.sleep(1.0)
+        final = read_json(batch_status, {}) or {}
+        action = _control_action(control_path)
+        if action in ("pause", "stop", "cancel"):
+            raise InterruptedError(action)
+        if process.returncode != 0 or str(final.get("status") or "").lower() == "failed":
+            raise RuntimeError(
+                final.get("error")
+                or "Background Mimics label export failed with code {}.".format(
+                    process.returncode
+                )
+            )
+        if int(final.get("failed") or 0) > 0:
+            raise RuntimeError(
+                "Label export failed for {} selected case(s).".format(final.get("failed"))
+            )
+        append_log(
+            log_path,
+            "Label export completed: {} exported, {} without the target Mask skipped.".format(
+                int(final.get("completed") or 0),
+                int(final.get("skipped") or 0),
+            ),
+        )
+        return staging
+    finally:
+        if process is not None and process.poll() is None:
+            _terminate_process_tree(process)
+        export_lock.release()
+
+
+def _ensure_nifti_image(source: Path, destination: Path) -> Path:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    prepared_source = source
+    temporary_source = None
+    if source.is_dir():
+        try:
+            import SimpleITK as sitk
+        except Exception as exc:
+            raise RuntimeError(
+                "SimpleITK is required to convert DICOM source images: {}".format(
+                    exc
+                )
+            )
+        series_ids = list(
+            sitk.ImageSeriesReader.GetGDCMSeriesIDs(str(source)) or []
+        )
+        if not series_ids:
+            raise RuntimeError(
+                "No readable DICOM series was found in {}.".format(source)
+            )
+        if len(series_ids) > 1:
+            raise RuntimeError(
+                "More than one DICOM series was found in {}. Prepare one series per case.".format(
+                    source
+                )
+            )
+        names = sitk.ImageSeriesReader.GetGDCMSeriesFileNames(
+            str(source), series_ids[0]
+        )
+        reader = sitk.ImageSeriesReader()
+        reader.SetFileNames(names)
+        image = reader.Execute()
+        temporary_source = destination.with_name("source_dicom_input.nii.gz")
+        sitk.WriteImage(image, str(temporary_source), True)
+        prepared_source = temporary_source
+    elif not source.is_file():
+        raise RuntimeError("Source image was not found: {}.".format(source))
+
+    from mimics_bridge import prepare_source_fastpath_nifti
+
+    try:
+        prepare_source_fastpath_nifti(str(prepared_source), str(destination))
+    finally:
+        if temporary_source is not None:
+            try:
+                temporary_source.unlink()
+            except OSError:
+                pass
+    return destination.resolve()
+
+
+def _ensure_binary_nifti_label(
+    source: Path, destination: Path, reference_image: Path
+) -> Path:
+    """Normalize a label onto the Mimics-compatible training image grid."""
+    import nibabel as nib
+    import numpy as np
+    from mimics_bridge import (
+        _affine_close,
+        _validate_resampled_mask_foreground,
+        read_nifti_mask_with_affine,
+        resample_mask_to_image_grid,
+    )
+
+    label, affine = read_nifti_mask_with_affine(str(source))
+    foreground = int(np.count_nonzero(label))
+    if foreground <= 0:
+        raise RuntimeError("The selected label is empty: {}.".format(source))
+    reference = nib.load(str(reference_image))
+    reference_shape = tuple(int(value) for value in reference.shape[:3])
+    reference_affine = np.asarray(reference.affine, dtype=np.float64)
+    if (
+        tuple(int(value) for value in label.shape[:3]) != reference_shape
+        or not _affine_close(affine, reference_affine)
+    ):
+        aligned = resample_mask_to_image_grid(
+            label,
+            affine,
+            reference_shape,
+            reference_affine,
+        )
+        _validate_resampled_mask_foreground(
+            label,
+            aligned,
+            "Preparing nnInteractive fine-tuning label '{}'".format(source),
+        )
+        label = aligned
+        affine = reference_affine
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    image = nib.Nifti1Image(
+        np.asarray(label, dtype=np.uint8),
+        np.asarray(affine, dtype=float),
+    )
+    image.set_qform(np.asarray(affine, dtype=float), code=1)
+    image.set_sform(np.asarray(affine, dtype=float), code=1)
+    nib.save(image, str(destination))
+    return destination.resolve()
+
+
+def _find_exported_label(staging: Path, case_id: str) -> Path | None:
+    folder = staging / case_id / "segmentations"
+    candidates = sorted(folder.glob("*.nii")) + sorted(folder.glob("*.nii.gz"))
+    candidates = sorted(set(path.resolve() for path in candidates if path.is_file()))
+    if not candidates:
+        return None
+    if len(candidates) != 1:
+        raise RuntimeError(
+            "Expected exactly one exported label for {}, found {} in {}.".format(
+                case_id, len(candidates), folder
+            )
+        )
+    return candidates[0]
+
+
+def _prepare_manifest(
+    request: dict[str, Any],
+    job_dir: Path,
+    status_path: Path,
+    control_path: Path,
+    log_path: Path,
+) -> tuple[Path, Path | None]:
+    manifest_path = job_dir / "dataset_manifest.json"
+    validation_path = job_dir / "validation_manifest.json"
+    if manifest_path.is_file():
+        return manifest_path, validation_path if validation_path.is_file() else None
+    source_mode = str(request.get("source_mode") or "mcs").lower()
+    staging = None
+    if source_mode == "mcs":
+        staging = _run_label_export(
+            request, job_dir, status_path, control_path, log_path
+        )
+    update_status(
+        status_path,
+        status="preparing_data",
+        phase="preparing_data",
+        progress_percent=10,
+    )
+    rows = []
+    validation_rows = []
+    image_cache = job_dir / "staging" / "images"
+    label_cache = job_dir / "staging" / "labels"
+    selected = [
+        row for row in request.get("cases") or [] if row.get("split") in ("train", "val")
+    ]
+    for index, row in enumerate(selected):
+        action = _control_action(control_path)
+        if action in ("pause", "stop", "cancel"):
+            raise InterruptedError(action)
+        case_id = str(row["case_id"])
+        image_source = Path(row["image"])
+        image_path = _ensure_nifti_image(
+            image_source, image_cache / case_id / "image.nii.gz"
+        )
+        if staging is not None:
+            label_source = _find_exported_label(staging, case_id)
+            if label_source is None:
+                append_log(
+                    log_path,
+                    "Skipped {} because its saved .mcs project has no matching target Mask.".format(
+                        case_id
+                    ),
+                )
+                continue
+        else:
+            label_source = Path(row["label"]).resolve()
+        label_path = _ensure_binary_nifti_label(
+            label_source,
+            label_cache / case_id / "label.nii.gz",
+            image_path,
+        )
+        item = {
+            "case_id": case_id,
+            "image": str(image_path),
+            "label": str(label_path),
+            "source_label": str(label_source),
+            "split": str(row.get("split") or "train"),
+        }
+        rows.append(item)
+        if item["split"] == "val":
+            validation_rows.append(dict(item))
+        update_status(
+            status_path,
+            preparation_index=index + 1,
+            preparation_total=len(selected),
+            current_case=case_id,
+            progress_percent=min(
+                15,
+                10 + int(5.0 * (index + 1) / max(1, len(selected))),
+            ),
+        )
+    if not rows:
+        raise RuntimeError(
+            "No selected case has both a source image and a matching target Mask."
+        )
+    if not any(row["split"] == "val" for row in rows) and len(rows) >= 2:
+        rows[-1]["split"] = "val"
+        validation_rows = [dict(rows[-1])]
+        append_log(
+            log_path,
+            "The originally assigned validation cases had no matching Mask; "
+            "{} was reassigned to validation.".format(rows[-1]["case_id"]),
+        )
+    write_json_atomic(manifest_path, {"cases": rows})
+    if validation_rows:
+        write_json_atomic(validation_path, {"cases": validation_rows})
+    append_log(
+        log_path,
+        "Prepared {} training and {} validation case(s).".format(
+            sum(row["split"] == "train" for row in rows),
+            len(validation_rows),
+        ),
+    )
+    return manifest_path, validation_path if validation_rows else None
+
+
+def _training_config(
+    request: dict[str, Any],
+    job_dir: Path,
+    manifest_path: Path,
+) -> dict[str, Any]:
+    model_dir = Path(request["output_model_dir"]).resolve()
+    trainer_status = job_dir / "trainer_status.json"
+    trainer_cancel = job_dir / "trainer_cancel.request"
+    config = load_config()
+    return {
+        "model": {
+            "base_model_dir": str(Path(request["base_model_dir"]).resolve()),
+            "fold": str(request.get("fold") or "0"),
+            "checkpoint_name": "checkpoint_final.pth",
+            "strategy": str(request.get("strategy") or "clopa_in"),
+        },
+        "data": {
+            "manifest": str(manifest_path),
+            "label_values": [1],
+            "validation_fraction": 0.0,
+            "patch_size": [128, 128, 128],
+            "foreground_patch_probability": 0.5,
+            "num_workers": 0,
+            "prepared_cache_dir": str(job_dir / "prepared_cache"),
+            "keep_prepared_cache": True,
+            "augmentation": {
+                "enabled": True,
+                "flip_probability": 0.5,
+                "intensity_scale_range": [0.9, 1.1],
+                "intensity_shift_range": [-0.1, 0.1],
+                "noise_std_range": [0.0, 0.05],
+            },
+        },
+        "prompts": {
+            "mode": "clicks",
+            "interaction_steps": 5,
+            "point_radius": 4,
+            "center_bias": 8.0,
+            "interaction_decay": 0.9,
+        },
+        "training": {
+            "output_dir": str(model_dir),
+            "epochs": int(request.get("epochs") or config.get("default_epochs", 10)),
+            "steps_per_epoch": int(config.get("training_steps_per_epoch", 50)),
+            "batch_size": 1,
+            "gradient_accumulation": 1,
+            "learning_rate": 0.001,
+            "weight_decay": 0.0,
+            "mixed_precision": True,
+            "seed": int(request.get("seed") or 20260724),
+            "validation_batches": int(config.get("validation_batches", 8)),
+            "device": "auto",
+            "resume": True,
+            "status_path": str(trainer_status),
+            "cancel_path": str(trainer_cancel),
+        },
+    }
+
+
+def _gpu_lock(
+    status_path: Path,
+    control_path: Path,
+    job_id: str,
+) -> FileResourceLock:
+    config = load_config()
+    lock = FileResourceLock(
+        default_resource_lock_dir(ROOT) / "gpu.lock",
+        "GPU",
+        "nnInteractive task fine-tuning",
+    )
+
+    def on_wait(holder: dict[str, Any]) -> None:
+        update_status(
+            status_path,
+            status="waiting_for_gpu",
+            phase="waiting_for_gpu",
+            gpu_holder=holder,
+        )
+        try:
+            from tools.fewshot_pipeline import (
+                request_nninteractive_server_release_on_contention,
+            )
+
+            request_nninteractive_server_release_on_contention(holder)
+        except Exception:
+            pass
+
+    acquired = lock.acquire(
+        wait_seconds=float(config.get("gpu_lock_timeout_seconds", 86400)),
+        poll_seconds=2.0,
+        on_wait=on_wait,
+        should_cancel=lambda: _control_action(control_path)
+        in ("pause", "stop", "cancel"),
+    )
+    acquired.update_pid(
+        os.getpid(),
+        kind="nninteractive_finetune",
+        stop_path=str(control_path),
+        job_id=str(job_id),
+    )
+    return acquired
+
+
+def _copy_trainer_status(job_status: Path, trainer_status: dict[str, Any]) -> None:
+    raw_status = str(trainer_status.get("status") or "")
+    mapped = {
+        "initializing": "training",
+        "preparing": "preparing_data",
+        "training": "training",
+        "validating": "training",
+        "finalizing": "training",
+        # The trainer subprocess has finished exporting, but the controller
+        # still has model comparison and registry publication to complete.
+        "completed": "training",
+    }.get(raw_status, raw_status or "training")
+    values = {
+        key: value
+        for key, value in trainer_status.items()
+        if key
+        in {
+            "phase",
+            "epoch",
+            "epochs",
+            "update",
+            "updates_per_epoch",
+            "loss",
+            "train_final_dice",
+            "elapsed_seconds",
+            "latest_epoch",
+            "best_score",
+            "validation_batch",
+            "validation_batches",
+            "completed_cases",
+            "total_cases",
+            "error",
+        }
+    }
+    if raw_status == "completed":
+        values["phase"] = "checkpoint_runtime_verified"
+    epochs = max(1, int(trainer_status.get("epochs") or 1))
+    epoch = max(0, int(trainer_status.get("epoch") or 0))
+    progress_percent = 15
+    if raw_status == "preparing":
+        completed_cases = int(trainer_status.get("completed_cases") or 0)
+        total_cases = max(1, int(trainer_status.get("total_cases") or 1))
+        progress_percent = 10 + int(
+            5.0 * completed_cases / total_cases
+        )
+    elif raw_status in ("training", "validating", "finalizing", "completed"):
+        completed_epochs = max(0, min(epochs, epoch - 1))
+        epoch_fraction = 0.0
+        if raw_status == "training":
+            updates = max(1, int(trainer_status.get("updates_per_epoch") or 1))
+            epoch_fraction = 0.85 * min(
+                1.0,
+                float(trainer_status.get("update") or 0) / updates,
+            )
+            if str(trainer_status.get("phase") or "") == "epoch_completed":
+                epoch_fraction = 1.0
+        elif raw_status == "validating":
+            batches = max(1, int(trainer_status.get("validation_batches") or 1))
+            epoch_fraction = 0.85 + 0.15 * min(
+                1.0,
+                float(trainer_status.get("validation_batch") or 0) / batches,
+            )
+        else:
+            completed_epochs = epochs
+            epoch_fraction = 0.0
+        training_fraction = min(
+            1.0,
+            (completed_epochs + epoch_fraction) / epochs,
+        )
+        progress_percent = 15 + int(70.0 * training_fraction)
+    current = read_json(job_status, {}) or {}
+    history = list(current.get("metrics_history") or [])
+    latest = trainer_status.get("latest_epoch") or {}
+    latest_epoch = int(latest.get("epoch") or 0)
+    if latest_epoch:
+        validation = latest.get("validation") or {}
+        point = {
+            "epoch": latest_epoch,
+            "train_loss": latest.get("train_loss"),
+            "validation_auc": validation.get("trajectory_auc"),
+        }
+        replaced = False
+        for index, row in enumerate(history):
+            if int(row.get("epoch") or 0) == latest_epoch:
+                history[index] = point
+                replaced = True
+                break
+        if not replaced:
+            history.append(point)
+        history.sort(key=lambda row: int(row.get("epoch") or 0))
+        signature = "{}|{}|{}".format(
+            latest_epoch,
+            point.get("train_loss"),
+            point.get("validation_auc"),
+        )
+        if signature != str(current.get("metric_log_signature") or ""):
+            pieces = [
+                "Epoch {}/{}".format(
+                    latest_epoch,
+                    trainer_status.get("epochs") or "?",
+                )
+            ]
+            if point.get("train_loss") is not None:
+                pieces.append("loss {:.4f}".format(float(point["train_loss"])))
+            if point.get("validation_auc") is not None:
+                pieces.append(
+                    "validation AUC {:.4f}".format(
+                        float(point["validation_auc"])
+                    )
+                )
+            append_log(job_status.parent / "job.log", " | ".join(pieces))
+    else:
+        signature = str(current.get("metric_log_signature") or "")
+    update_status(
+        job_status,
+        status=mapped,
+        trainer_status=trainer_status,
+        metrics_history=history[-500:],
+        metric_log_signature=signature,
+        progress_percent=min(85, max(10, progress_percent)),
+        **values
+    )
+
+
+def _run_training(
+    request: dict[str, Any],
+    job_dir: Path,
+    status_path: Path,
+    control_path: Path,
+    log_path: Path,
+    manifest_path: Path,
+) -> None:
+    python_exe = find_environment_python()
+    config_path = job_dir / "training_config.json"
+    training_config = _training_config(request, job_dir, manifest_path)
+    write_json_atomic(config_path, training_config)
+    trainer_status_path = Path(training_config["training"]["status_path"])
+    trainer_cancel_path = Path(training_config["training"]["cancel_path"])
+    try:
+        trainer_cancel_path.unlink()
+    except FileNotFoundError:
+        pass
+    gpu_lock = _gpu_lock(status_path, control_path, job_dir.name)
+    process = None
+    lock_releasable = True
+    try:
+        update_status(status_path, status="training", phase="starting_training")
+        with (job_dir / "trainer.log").open("ab") as handle:
+            process = subprocess.Popen(
+                [
+                    str(python_exe),
+                    "-c",
+                    _finetune_runner_script(),
+                    "train",
+                    "--config",
+                    str(config_path),
+                ],
+                cwd=str(ROOT),
+                env=os.environ.copy(),
+                stdin=subprocess.DEVNULL,
+                stdout=handle,
+                stderr=subprocess.STDOUT,
+                **_hidden_process_kwargs()
+            )
+        gpu_lock.update_pid(
+            process.pid,
+            kind="nninteractive_finetune",
+            controller_pid=os.getpid(),
+            worker_pid=process.pid,
+            control_path=str(control_path),
+            cancel_path=str(trainer_cancel_path),
+            status_path=str(status_path),
+            job_id=job_dir.name,
+        )
+        append_log(log_path, "Training process started (PID {}).".format(process.pid))
+        last_signature = None
+        while process.poll() is None:
+            action = _control_action(control_path)
+            if action in ("pause", "stop", "cancel") and not trainer_cancel_path.exists():
+                _write_cancel_marker(trainer_cancel_path, action)
+                update_status(
+                    status_path,
+                    status="pausing" if action == "pause" else "stopping",
+                    requested_action=action,
+                )
+            trainer_status = read_json(trainer_status_path, {}) or {}
+            signature = (
+                trainer_status.get("status"),
+                trainer_status.get("phase"),
+                trainer_status.get("epoch"),
+                trainer_status.get("update"),
+                trainer_status.get("validation_batch"),
+            )
+            if trainer_status and signature != last_signature:
+                last_signature = signature
+                _copy_trainer_status(status_path, trainer_status)
+            time.sleep(1.0)
+        trainer_status = read_json(trainer_status_path, {}) or {}
+        if trainer_status:
+            _copy_trainer_status(status_path, trainer_status)
+        action = _control_action(control_path)
+        if action in ("pause", "stop", "cancel"):
+            raise InterruptedError(action)
+        if process.returncode != 0:
+            raise RuntimeError(
+                trainer_status.get("error")
+                or "The fine-tuning process exited with code {}.".format(
+                    process.returncode
+                )
+            )
+        append_log(log_path, "Fine-tuning completed; the best validation checkpoint was exported.")
+    finally:
+        if process is not None and process.poll() is None:
+            lock_releasable = _terminate_process_tree(process)
+        if lock_releasable:
+            gpu_lock.release()
+        else:
+            update_status(
+                status_path,
+                status="stopping",
+                termination_pending=True,
+                worker_pid=process.pid if process else 0,
+            )
+
+
+def _run_evaluation(
+    model_dir: Path,
+    manifest: Path,
+    output: Path,
+    status_path: Path,
+    control_path: Path,
+    label: str,
+) -> dict[str, Any]:
+    python_exe = find_environment_python()
+    gpu_lock = _gpu_lock(status_path, control_path, status_path.stem)
+    process = None
+    try:
+        evaluation_progress = (
+            86 if safe_slug(label) == "current_model" else 93
+        )
+        update_status(
+            status_path,
+            status="validating",
+            phase="validating_{}".format(safe_slug(label)),
+            validation_label=label,
+            progress_percent=evaluation_progress,
+        )
+        with output.with_suffix(".log").open("ab") as handle:
+            process = subprocess.Popen(
+                [
+                    str(python_exe),
+                    "-c",
+                    _finetune_runner_script(),
+                    "evaluate",
+                    "--model-dir",
+                    str(model_dir),
+                    "--manifest",
+                    str(manifest),
+                    "--output",
+                    str(output),
+                    "--label-values",
+                    "1",
+                    "--clicks",
+                    "5",
+                    "--device",
+                    "auto",
+                ],
+                cwd=str(ROOT),
+                env=os.environ.copy(),
+                stdin=subprocess.DEVNULL,
+                stdout=handle,
+                stderr=subprocess.STDOUT,
+                **_hidden_process_kwargs()
+            )
+        gpu_lock.update_pid(
+            process.pid,
+            kind="nninteractive_finetune_evaluation",
+            controller_pid=os.getpid(),
+            worker_pid=process.pid,
+            control_path=str(control_path),
+            status_path=str(status_path),
+        )
+        while process.poll() is None:
+            action = _control_action(control_path)
+            if action in ("pause", "stop", "cancel"):
+                _terminate_process_tree(process)
+                raise InterruptedError(action)
+            time.sleep(1.0)
+        if process.returncode != 0:
+            raise RuntimeError(
+                "{} evaluation exited with code {}. See {}.".format(
+                    label, process.returncode, output.with_suffix(".log")
+                )
+            )
+        report = read_json(output, {}) or {}
+        if "trajectory_auc" not in report:
+            raise RuntimeError("{} evaluation did not produce a valid report.".format(label))
+        update_status(
+            status_path,
+            progress_percent=92 if evaluation_progress == 86 else 98,
+        )
+        return report
+    finally:
+        if process is not None and process.poll() is None:
+            _terminate_process_tree(process)
+        gpu_lock.release()
+
+
+def _case_auc(report: dict[str, Any]) -> dict[str, float]:
+    result = {}
+    for row in report.get("cases") or []:
+        trajectory = [float(value) for value in row.get("dice_by_click") or []]
+        if trajectory:
+            result[str(row.get("case_id"))] = sum(trajectory) / len(trajectory)
+    return result
+
+
+def _quality_result(
+    baseline: dict[str, Any],
+    candidate: dict[str, Any],
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    baseline_auc = float(baseline.get("trajectory_auc") or 0.0)
+    candidate_auc = float(candidate.get("trajectory_auc") or 0.0)
+    baseline_cases = _case_auc(baseline)
+    candidate_cases = _case_auc(candidate)
+    regression_limit = float(config.get("maximum_severe_case_regression", 0.2))
+    severe = []
+    for case_id, value in candidate_cases.items():
+        if case_id in baseline_cases and baseline_cases[case_id] - value > regression_limit:
+            severe.append(
+                {
+                    "case_id": case_id,
+                    "baseline_auc": baseline_cases[case_id],
+                    "candidate_auc": value,
+                    "delta": value - baseline_cases[case_id],
+                }
+            )
+    delta = candidate_auc - baseline_auc
+    qualifies = (
+        delta >= float(config.get("minimum_mean_auc_improvement", 0.0))
+        and not severe
+    )
+    return {
+        "baseline_auc": baseline_auc,
+        "candidate_auc": candidate_auc,
+        "delta_auc": delta,
+        "severe_regressions": severe,
+        "qualifies": qualifies,
+    }
+
+
+def _register_model(
+    request: dict[str, Any],
+    workspace: Path,
+    model_dir: Path,
+    quality: dict[str, Any] | None,
+    validation_count: int,
+) -> tuple[dict[str, Any], bool]:
+    config = load_config()
+    audit = audit_model_dir(model_dir)
+    if not audit.get("compatible"):
+        raise RuntimeError(
+            "The exported model failed compatibility audit: {}".format(
+                ", ".join(audit.get("missing") or [])
+            )
+        )
+    task_id = safe_slug(request["task_id"])
+    registry = load_registry(workspace)
+    tasks = registry.get("tasks") or []
+    task = next(
+        (row for row in tasks if safe_slug(row.get("task_id")) == task_id),
+        None,
+    )
+    if task is None:
+        task = {
+            "task_id": task_id,
+            "task_name": str(request.get("task_name") or task_id),
+            "mask_names": list(request.get("mask_names") or []),
+            "models": [],
+        }
+        tasks.append(task)
+    model_id = str(request["model_id"])
+    rows = [row for row in task.get("models") or [] if row.get("model_id") != model_id]
+    minimum_validation = int(
+        config.get("minimum_validation_cases_for_auto_selection", 2)
+    )
+    automatically_selected = bool(
+        quality
+        and quality.get("qualifies")
+        and validation_count >= minimum_validation
+    )
+    state = "validated" if quality else "unverified"
+    if quality and not quality.get("qualifies"):
+        state = "not_improved"
+    finetune_manifest = read_json(model_dir / "finetune_manifest.json", {}) or {}
+    input_contract = finetune_manifest.get("input_contract")
+    if input_contract != NNINTERACTIVE_INPUT_CONTRACT:
+        raise RuntimeError(
+            "The exported task model does not declare the supported "
+            "nnInteractive input contract. Training output was not registered."
+        )
+    runtime_verification = finetune_manifest.get("runtime_verification") or {}
+    if (
+        not runtime_verification.get("verified")
+        or runtime_verification.get("expected_parameter_fingerprint")
+        != runtime_verification.get("loaded_parameter_fingerprint")
+    ):
+        raise RuntimeError(
+            "The exported task model did not pass effective runtime-weight "
+            "verification and was not registered."
+        )
+    validated_prompt_types = list(
+        finetune_manifest.get("validated_prompt_types") or ["point"]
+    )
+    model = {
+        "model_id": model_id,
+        "model_relpath": relative_model_path(workspace, model_dir),
+        "checkpoint_sha256": audit.get("checkpoint_sha256"),
+        "fold": audit.get("fold", "0"),
+        "strategy": str(request.get("strategy") or ""),
+        "parent_model_id": str(request.get("parent_model_id") or "official"),
+        "created_at_epoch": time.time(),
+        "train_case_count": sum(
+            row.get("split") == "train" for row in request.get("cases") or []
+        ),
+        "validation_case_count": validation_count,
+        "quality": quality or {},
+        "state": state,
+        "compatible": True,
+        "source_mode": str(request.get("source_mode") or ""),
+        "input_contract": input_contract,
+        "validated_prompt_types": validated_prompt_types,
+        "effective_model_fingerprint": runtime_verification.get(
+            "loaded_parameter_fingerprint"
+        ),
+        "runtime_verified": True,
+    }
+    rows.append(model)
+    rows.sort(key=lambda row: float(row.get("created_at_epoch") or 0), reverse=True)
+    task["models"] = rows
+    task["task_name"] = str(request.get("task_name") or task_id)
+    task["mask_names"] = list(request.get("mask_names") or [])
+    task["updated_at_epoch"] = time.time()
+    if automatically_selected:
+        task["recommended_model_id"] = model_id
+    registry["tasks"] = tasks
+    save_registry(workspace, registry)
+    write_json_atomic(task_dir(workspace, task_id) / "task.json", task)
+    write_json_atomic(model_dir / "integration_manifest.json", model)
+    finetune_manifest["model_dir"] = "."
+    finetune_manifest["checkpoint"] = "fold_{}/checkpoint_final.pth".format(
+        audit.get("fold", "0")
+    )
+    finetune_manifest["base_model_id"] = str(
+        request.get("parent_model_id") or "official"
+    )
+    finetune_manifest.pop("base_model_dir", None)
+    finetune_manifest.pop("base_checkpoint", None)
+    write_json_atomic(model_dir / "finetune_manifest.json", finetune_manifest)
+    return model, automatically_selected
+
+
+def _cleanup_terminal_artifacts(
+    request: dict[str, Any],
+    job_dir: Path,
+    *,
+    remove_partial_model: bool,
+    reset_resume_state: bool = False,
+) -> dict[str, Any]:
+    """Remove large rebuildable files while preserving job diagnostics."""
+    workspace = Path(request.get("workspace") or job_dir.parent.parent).resolve()
+    paths = [
+        job_dir / "staging",
+        job_dir / "prepared_cache",
+        job_dir / "mimics_export" / "work",
+    ]
+    if remove_partial_model:
+        paths.append(Path(request.get("output_model_dir") or ""))
+    report: dict[str, Any] = {"removed": [], "not_removed": []}
+    for path in paths:
+        try:
+            resolved = path.resolve()
+        except Exception:
+            continue
+        if not str(path) or resolved in (ROOT, job_dir, job_dir.parent):
+            continue
+        try:
+            resolved.relative_to(job_dir)
+            safe = True
+        except ValueError:
+            try:
+                resolved.relative_to(workspace)
+                safe = True
+            except ValueError:
+                safe = False
+        if not safe:
+            report["not_removed"].append(
+                {"path": str(resolved), "reason": "outside job workspace"}
+            )
+            continue
+        if not resolved.exists():
+            continue
+        last_error = ""
+        for attempt in range(8):
+            try:
+                if resolved.is_dir():
+                    shutil.rmtree(resolved)
+                else:
+                    resolved.unlink()
+                last_error = ""
+                break
+            except OSError as exc:
+                last_error = str(exc)
+                time.sleep(min(0.4, 0.04 * (attempt + 1)))
+        if resolved.exists():
+            report["not_removed"].append(
+                {"path": str(resolved), "reason": last_error or "still exists"}
+            )
+        else:
+            report["removed"].append(str(resolved))
+    if reset_resume_state:
+        for name in (
+            "dataset_manifest.json",
+            "validation_manifest.json",
+            "training_config.json",
+            "trainer_status.json",
+            "trainer_cancel.request",
+        ):
+            path = job_dir / name
+            try:
+                path.unlink()
+                report["removed"].append(str(path))
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                report["not_removed"].append(
+                    {"path": str(path), "reason": str(exc)}
+                )
+    report["completed_at_epoch"] = time.time()
+    return report
+
+
+def run_job(job_dir_value: str) -> int:
+    job_dir = Path(job_dir_value).expanduser().resolve()
+    request_path = job_dir / "request.json"
+    status_path = job_dir / "status.json"
+    control_path = job_dir / "control.json"
+    log_path = job_dir / "job.log"
+    request = read_json(request_path, {}) or {}
+    if not request:
+        raise RuntimeError("Training request is missing: {}".format(request_path))
+    workspace = Path(request["workspace"]).resolve()
+    update_status(
+        status_path,
+        schema_version="nninteractive_task_job.v1",
+        job_id=job_dir.name,
+        task_id=request.get("task_id"),
+        task_name=request.get("task_name"),
+        status="validating_cases",
+        phase="validating_cases",
+        progress_percent=0,
+        controller_pid=os.getpid(),
+        control_path=str(control_path),
+        log_path=str(log_path),
+    )
+    append_log(log_path, "nnInteractive task training controller started.")
+    try:
+        manifest_path, validation_path = _prepare_manifest(
+            request, job_dir, status_path, control_path, log_path
+        )
+        action = _control_action(control_path)
+        if action in ("pause", "stop", "cancel"):
+            raise InterruptedError(action)
+        _run_training(
+            request,
+            job_dir,
+            status_path,
+            control_path,
+            log_path,
+            manifest_path,
+        )
+        model_dir = Path(request["output_model_dir"]).resolve()
+        quality = None
+        validation_count = sum(
+            row.get("split") == "val" for row in request.get("cases") or []
+        )
+        if validation_path is not None:
+            baseline_dir = Path(request["base_model_dir"]).resolve()
+            baseline_report = _run_evaluation(
+                baseline_dir,
+                validation_path,
+                job_dir / "baseline_evaluation.json",
+                status_path,
+                control_path,
+                "current model",
+            )
+            candidate_report = _run_evaluation(
+                model_dir,
+                validation_path,
+                job_dir / "candidate_evaluation.json",
+                status_path,
+                control_path,
+                "new model",
+            )
+            quality = _quality_result(baseline_report, candidate_report, load_config())
+        update_status(
+            status_path,
+            status="registering",
+            phase="registering",
+            progress_percent=99,
+        )
+        model, selected = _register_model(
+            request, workspace, model_dir, quality, validation_count
+        )
+        outcome = (
+            "new_model_selected"
+            if selected
+            else (
+                "current_model_retained"
+                if quality
+                else "model_saved_without_automatic_selection"
+            )
+        )
+        update_status(
+            status_path,
+            status="completed",
+            phase="completed",
+            model=model,
+            quality=quality or {},
+            selection_outcome=outcome,
+            completed_at_epoch=time.time(),
+            progress_percent=100,
+        )
+        append_log(log_path, "Training completed: {}.".format(outcome))
+        cleanup = _cleanup_terminal_artifacts(
+            request,
+            job_dir,
+            remove_partial_model=False,
+        )
+        update_status(status_path, artifact_cleanup=cleanup)
+        return 0
+    except InterruptedError as exc:
+        action = str(exc) or _control_action(control_path)
+        final = "paused" if action == "pause" else "cancelled"
+        update_status(
+            status_path,
+            status=final,
+            phase=final,
+            completed_at_epoch=time.time(),
+        )
+        append_log(log_path, "Training {} by user request.".format(final))
+        if final == "cancelled":
+            cleanup = _cleanup_terminal_artifacts(
+                request,
+                job_dir,
+                remove_partial_model=True,
+            )
+            update_status(status_path, artifact_cleanup=cleanup)
+        return 0
+    except (ResourceLockCancelled,):
+        action = _control_action(control_path)
+        final = "paused" if action == "pause" else "cancelled"
+        update_status(status_path, status=final, phase=final)
+        if final == "cancelled":
+            cleanup = _cleanup_terminal_artifacts(
+                request,
+                job_dir,
+                remove_partial_model=True,
+            )
+            update_status(status_path, artifact_cleanup=cleanup)
+        return 0
+    except Exception as exc:
+        update_status(
+            status_path,
+            status="failed",
+            phase="failed",
+            error="{}: {}".format(type(exc).__name__, exc),
+            traceback=traceback.format_exc(),
+            completed_at_epoch=time.time(),
+        )
+        append_log(log_path, "Training failed: {}: {}.".format(type(exc).__name__, exc))
+        if not bool(load_config().get("keep_failed_training_artifacts", False)):
+            cleanup = _cleanup_terminal_artifacts(
+                request,
+                job_dir,
+                remove_partial_model=True,
+                reset_resume_state=True,
+            )
+            update_status(status_path, artifact_cleanup=cleanup)
+            if cleanup.get("not_removed"):
+                append_log(
+                    log_path,
+                    "Some failed-job artifacts could not be removed; see artifact_cleanup in status.json.",
+                )
+            else:
+                append_log(
+                    log_path,
+                    "Removed rebuildable failed-job data; logs and status were retained.",
+                )
+        return 1
+
+
+def resume_job(job_dir_value: str) -> int:
+    job_dir = Path(job_dir_value).expanduser().resolve()
+    status_path = job_dir / "status.json"
+    status = read_json(status_path, {}) or {}
+    if str(status.get("status") or "") not in {"paused", "failed"}:
+        raise RuntimeError("Only paused or failed training can be resumed.")
+    for path in (
+        job_dir / "control.json",
+        job_dir / "trainer_cancel.request",
+    ):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    update_status(
+        status_path,
+        status="created",
+        phase="resuming",
+        error="",
+        traceback="",
+        resumed_at_epoch=time.time(),
+    )
+    return run_job(str(job_dir))
+
+
+def request_control(job_dir_value: str, action: str) -> int:
+    job_dir = Path(job_dir_value).expanduser().resolve()
+    action = str(action).strip().lower()
+    if action not in {"pause", "stop", "cancel"}:
+        raise ValueError("Unsupported control action: {}".format(action))
+    write_json_atomic(
+        job_dir / "control.json",
+        {"action": action, "requested_at_epoch": time.time()},
+    )
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    run_parser = subparsers.add_parser("run")
+    run_parser.add_argument("--job-dir", required=True)
+    resume_parser = subparsers.add_parser("resume")
+    resume_parser.add_argument("--job-dir", required=True)
+    control_parser = subparsers.add_parser("control")
+    control_parser.add_argument("--job-dir", required=True)
+    control_parser.add_argument("--action", required=True, choices=("pause", "stop", "cancel"))
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    if args.command == "run":
+        return run_job(args.job_dir)
+    if args.command == "resume":
+        return resume_job(args.job_dir)
+    return request_control(args.job_dir, args.action)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

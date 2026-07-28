@@ -38,6 +38,7 @@ INCLUDE_FILES = [
     "nninteractive_bridge.py",
     "resource_locks.py",
     "nninteractive_config.json",
+    "nninteractive_finetune_config.json",
     "fewshot_config.json",
     "window_level_presets.json",
     ".gitignore",
@@ -46,10 +47,16 @@ REQUIRED_EXTERNAL_UI_FILES = [
     "tools/io_path_setup_ui.py",
     "tools/single_case_import_worker.py",
     "tools/ui_theme.py",
+    "tools/training_data_ui.py",
     "tools/mask_file_picker_ui.py",
     "tools/fewshot_training_setup_ui.py",
     "tools/fewshot_status_viewer.py",
     "tools/fewshot_model_chooser.py",
+    "tools/nninteractive_task_common.py",
+    "tools/nninteractive_finetune_pipeline.py",
+    "tools/nninteractive_task_model_center.py",
+    "tools/nninteractive_task_model_chooser.py",
+    "tools/ai_model_bundle.py",
 ]
 DEFAULT_FROZEN_ENCODER = (
     "external/dinov3-medical-seg/models/dinov3-vits16/model.onnx"
@@ -260,6 +267,17 @@ def pack(output_dir=None, with_env=False):
     EXCLUDE_SUFFIXES = (".pyc", ".pyo")
     # DINOv3 external: ship src + scripts + config + models, skip docs + tests + caches
     EXCLUDE_DINOV3_DIRS = {"docs", "tests", ".cache", "__pycache__", ".pytest_cache"}
+    # The fine-tuning package contains large experiment workspaces and
+    # validation datasets. Runtime deployment only needs its source/config.
+    EXCLUDE_NNINTERACTIVE_FINETUNE_DIRS = {
+        "data",
+        "docs",
+        "tests",
+        "validation",
+        "work",
+        ".cache",
+        ".pytest_cache",
+    }
 
     def _should_include(fpath, arcname):
         parts = arcname.replace("\\", "/").split("/")
@@ -273,6 +291,11 @@ def pack(output_dir=None, with_env=False):
             dinov3_rel = arcname[len("external/dinov3-medical-seg/"):]
             top = dinov3_rel.split("/")[0] if "/" in dinov3_rel else dinov3_rel
             if top in EXCLUDE_DINOV3_DIRS:
+                return False
+        if arcname.startswith("external/nninteractive-finetune/"):
+            package_rel = arcname[len("external/nninteractive-finetune/"):]
+            top = package_rel.split("/")[0] if "/" in package_rel else package_rel
+            if top in EXCLUDE_NNINTERACTIVE_FINETUNE_DIRS:
                 return False
         return True
 
@@ -830,7 +853,8 @@ def offline_bundle():
             shutil.rmtree(str(dst), ignore_errors=True)
         shutil.copytree(str(src), str(dst),
                          ignore=shutil.ignore_patterns("__pycache__", ".DS_Store", ".pyc", ".pyo",
-                                                       ".git", "docs", "tests", ".cache"))
+                                                       ".git", "docs", "tests", "validation",
+                                                       "work", ".cache", ".pytest_cache"))
         print("  {} {}/".format(_green("[+]"), name))
     for name in INCLUDE_FILES:
         src = PROJECT_ROOT / name

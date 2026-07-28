@@ -22,7 +22,13 @@ for _candidate in (_HERE, _ROOT):
     if _candidate and _candidate not in sys.path:
         sys.path.insert(0, _candidate)
 
-from ui_theme import configure_application, stylesheet as shared_stylesheet
+from ui_theme import (
+    choose_existing_directory,
+    choose_open_file,
+    choose_open_files,
+    configure_application,
+    stylesheet as shared_stylesheet,
+)
 
 
 def read_json(path, default=None):
@@ -241,7 +247,32 @@ def discover_single_source(source):
 def choose_path_without_shell(
     QtCore, QtWidgets, parent, title, initial, allow_file=False, multi_file=False
 ):
-    """Browse paths without Windows Shell enumeration on the GUI thread."""
+    """Compatibility wrapper around the platform-native external path dialog."""
+    if multi_file:
+        return choose_open_files(
+            QtWidgets,
+            parent,
+            title,
+            initial,
+            "Medical volumes (*.nii *.nii.gz *.mha *.mhd *.nrrd *.nrrd.gz);;All files (*)",
+        )
+    if allow_file:
+        return choose_open_file(
+            QtWidgets,
+            parent,
+            title,
+            initial,
+            "Medical volumes (*.nii *.nii.gz *.mha *.mhd *.nrrd *.nrrd.gz);;All files (*)",
+        )
+    return choose_existing_directory(
+        QtWidgets,
+        parent,
+        title,
+        initial,
+    )
+
+    # Kept below only for source compatibility with older portable bundles.
+    # Current windows always return through the native dialog above.
     allow_file = bool(allow_file or multi_file)
     dialog = QtWidgets.QDialog(parent)
     dialog.setWindowTitle(title)
@@ -551,29 +582,22 @@ def run_ui(context, preview_path=""):
             form.addWidget(_label(QtWidgets, hint, "hint"))
 
         def browse_folder_path():
-            current = edit.text().strip()
-            if not current:
-                current = str(Path.home())
-            if os.path.isfile(current):
-                current = os.path.dirname(current)
-            value = QtWidgets.QFileDialog.getExistingDirectory(
+            value = choose_existing_directory(
+                QtWidgets,
                 window,
                 label,
-                current,
-                QtWidgets.QFileDialog.ShowDirsOnly,
+                edit.text().strip() or str(Path.home()),
             )
             if value:
                 edit.setProperty("chosenByBrowse", True)
                 edit.setText(str(value))
 
         def browse_file_path():
-            current = edit.text().strip()
-            if not current:
-                current = str(Path.home())
-            value, _selected_filter = QtWidgets.QFileDialog.getOpenFileName(
+            value = choose_open_file(
+                QtWidgets,
                 window,
                 label,
-                current,
+                edit.text().strip() or str(Path.home()),
                 "Medical volumes (*.nii *.nii.gz *.mha *.mhd *.nrrd *.nrrd.gz);;All files (*)",
             )
             if value:

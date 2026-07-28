@@ -16,6 +16,7 @@ from src.utils.config import load_config
 from src.utils.device import get_device
 from src.models.segmentor import DINOv33DSegmentor
 from src.data.dataset_3d import CaseIdSubset, MedicalVolumeDataset, FewShotSubset
+from src.data.input_contract import validate_input_contract
 from src.data.augmentation import VolumeAugmentation
 from src.training.trainer import Trainer3D
 import torch
@@ -140,7 +141,11 @@ def _train_cached_slices(config, seed):
     if str(model_cfg.get("slice_axis", "axial")).lower() != "axial":
         raise ValueError("cached_slices pipeline currently preserves native axial slice order")
     if data_cfg.get("target_spacing") not in (None, [], ""):
-        raise ValueError("cached_slices pipeline does not resample the source volume")
+        raise ValueError(
+            "cached_slices preserves the source NIfTI grid and does not support "
+            "data.target_spacing. Resample image and label together before training "
+            "if a common physical spacing is required."
+        )
     if bool((data_cfg.get("patch") or {}).get("enabled", False)):
         raise ValueError("cached_slices pipeline does not combine with 3D patch sampling")
     if bool(config.get("augmentation", {}).get("enabled", False)):
@@ -301,6 +306,7 @@ def main():
 
     # Load config
     config = load_config(args.config, overrides)
+    validate_input_contract(config)
     seed = int(config.get("training", {}).get("seed", 0))
     _seed_process(seed)
 

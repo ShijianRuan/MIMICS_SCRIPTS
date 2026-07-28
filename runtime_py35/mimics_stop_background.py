@@ -44,6 +44,9 @@ MARKERS = (
     "fewshot_model_chooser.py",
     "fewshot_training_setup_ui.py",
     "fewshot_status_viewer.py",
+    "nninteractive_finetune_pipeline.py",
+    "nninteractive_task_model_center.py",
+    "nninteractive_task_model_chooser.py",
     "io_path_setup_ui.py",
     "mask_file_picker_ui.py",
 
@@ -118,6 +121,13 @@ def _stop_inprocess_monitors():
                 stopped += 1
             except Exception:
                 pass
+    task_models = sys.modules.get("nninteractive_finetune_mimics")
+    if task_models is not None:
+        try:
+            task_models._stop_all_monitors()
+            stopped += 1
+        except Exception:
+            pass
     fewshot = sys.modules.get("fewshot_mimics")
     if fewshot is not None:
         for process in list(getattr(fewshot, "_GUI_PROCESSES", {}).values()):
@@ -1109,6 +1119,8 @@ def stop_background_processes():
         "$out='{3}';"
         "$foregroundPid={4};"
         "$cutoff=[DateTime]::Parse('{5}').ToUniversalTime();"
+        # Give lock owners a short safe-boundary window after stop markers.
+        "Start-Sleep -Seconds 2;"
         # Find processes whose command line references both a root and a marker
         "$matched=Get-CimInstance Win32_Process | Where-Object {{"
         "  $cmd = $_.CommandLine;"

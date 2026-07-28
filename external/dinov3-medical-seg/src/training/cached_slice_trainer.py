@@ -35,11 +35,21 @@ class CachedFeatureSliceTrainer(Trainer3D):
         best_dsc,
         *,
         should_validate,
+        train_loss=None,
+        best_train_loss=None,
         **_kwargs,
     ) -> bool:
         if not should_validate or not np.isfinite(val_dsc):
             return False
-        return float(val_dsc) >= float(best_dsc)
+        val_dsc = float(val_dsc)
+        best_dsc = float(best_dsc)
+        if val_dsc > best_dsc:
+            return True
+        if val_dsc == best_dsc and val_dsc == 0.0:
+            if train_loss is None or best_train_loss is None:
+                return True
+            return float(train_loss) < float(best_train_loss)
+        return False
 
     def _build_scheduler(self, cfg):
         self.cosine_min_lr_ratio = float(cfg.get("cosine_min_lr_ratio", 0.1))

@@ -183,7 +183,9 @@ def _orthonormalize_direction(direction: np.ndarray) -> np.ndarray:
     return np.column_stack([row, col, normal])
 
 
-def _resample_to_oriented_grid(sitk_img, target_direction: np.ndarray, default_value: float = -1024.0):
+def _resample_to_oriented_grid(
+    sitk_img, target_direction: np.ndarray, default_value: float | None = None
+):
     """Resample image to a supplied orthonormal LPS direction, preserving FOV."""
     import SimpleITK as sitk
 
@@ -195,6 +197,10 @@ def _resample_to_oriented_grid(sitk_img, target_direction: np.ndarray, default_v
 
     if not np.all(np.isfinite(target_direction)):
         raise ValueError("target_direction contains non-finite values")
+    if default_value is None:
+        values = sitk.GetArrayViewFromImage(sitk_img)
+        finite = np.asarray(values)[np.isfinite(values)]
+        default_value = float(np.min(finite)) if finite.size else 0.0
 
     corners = []
     for ix in [0.0, size[0] - 1]:
@@ -700,6 +706,31 @@ def _nifti_header_is_unambiguous(nifti_img) -> bool:
 
 # -- SimpleITK-based image reading with header correction and LPS orient
 
+def _nibabel_image_to_sitk_lps(nifti_img, affine_ras):
+    """Build a SimpleITK image without losing a general NIfTI sform."""
+    import SimpleITK as sitk
+
+    array_xyz = np.asanyarray(nifti_img.dataobj)
+    if array_xyz.ndim != 3:
+        raise ValueError(
+            "NIfTI image must be 3D: shape={}".format(array_xyz.shape)
+        )
+    affine_lps = RAS_TO_LPS @ np.asarray(affine_ras, dtype=float)
+    linear = affine_lps[:3, :3]
+    spacing = np.linalg.norm(linear, axis=0)
+    if (
+        not np.all(np.isfinite(spacing))
+        or np.any(spacing <= 1.0e-8)
+    ):
+        raise ValueError("NIfTI affine has invalid voxel spacing")
+    direction = linear / spacing
+    image = sitk.GetImageFromArray(np.transpose(array_xyz, (2, 1, 0)))
+    image.SetSpacing([float(value) for value in spacing])
+    image.SetOrigin([float(value) for value in affine_lps[:3, 3]])
+    image.SetDirection([float(value) for value in direction.reshape(-1)])
+    return image
+
+
 def _read_image_sitk_lps(path: str):
     """Read an image via SimpleITK, correcting NIfTI header if needed, then orient to LPS.
 
@@ -743,12 +774,19 @@ def _read_image_sitk_lps(path: str):
         os.close(fd)
         try:
             nib.save(source, corrected_path)
-            sitk_img = sitk.ReadImage(corrected_path)
+            try:
+                sitk_img = sitk.ReadImage(corrected_path)
+            except Exception:
+                sitk_img = _nibabel_image_to_sitk_lps(source, affine)
         finally:
             try:
                 os.remove(corrected_path)
             except OSError:
                 pass
+        if not _sitk_is_classic_dicom_geometry_compatible(sitk_img):
+            # DICOMOrient cannot represent a sheared basis. The caller's
+            # DICOM-grid policy performs the one required interpolation.
+            return sitk_img
 
     sitk_img = sitk.DICOMOrient(sitk_img, "LPS")
     return sitk_img
@@ -786,6 +824,8 @@ def _read_mask_array_and_affine(path: str) -> tuple[np.ndarray, np.ndarray]:
 
         image = nib.load(path)
         array = np.asanyarray(image.dataobj)
+        if array.ndim == 4 and array.shape[-1] == 1:
+            array = array[..., 0]
         if array.ndim != 3:
             raise ValueError("mask must be 3D: {} shape={}".format(path, array.shape))
         affine_ras = _normalize_nifti_affine(image)
@@ -793,6 +833,8 @@ def _read_mask_array_and_affine(path: str) -> tuple[np.ndarray, np.ndarray]:
 
     sitk_img = _read_image_sitk_lps(path)
     array = _sitk_to_xyz_array(sitk_img)
+    if array.ndim == 4 and array.shape[-1] == 1:
+        array = array[..., 0]
     if array.ndim != 3:
         raise ValueError("mask must be 3D: {} shape={}".format(path, array.shape))
     affine_ras = LPS_TO_RAS @ _sitk_to_lps_affine(sitk_img)
@@ -1054,6 +1096,25 @@ def resample_mask_to_image_grid(
         raise ValueError(
             "mask affine could not be inverted for spatial resampling: {}".format(exc)
         )
+
+
+def _validate_resampled_mask_foreground(
+    source_mask: np.ndarray,
+    target_mask: np.ndarray,
+    context: str,
+) -> tuple[int, int]:
+    """Reject a non-empty label that silently maps to an empty target grid."""
+    source_foreground = int(np.count_nonzero(source_mask))
+    target_foreground = int(np.count_nonzero(target_mask))
+    if source_foreground > 0 and target_foreground == 0:
+        raise RuntimeError(
+            "{} produced an empty mask from {} foreground voxel(s). "
+            "The source and target grids likely do not overlap, so the operation "
+            "was stopped instead of accepting a silently misregistered label.".format(
+                context, source_foreground
+            )
+        )
+    return source_foreground, target_foreground
 
 
 def apply_buffer_mapping(array: np.ndarray, axes: list[int], flips: list[bool]) -> np.ndarray:
@@ -1520,6 +1581,11 @@ def do_prepare(params: dict) -> dict:
             array, mask_affine, image_shape, image_affine,
             allow_voxel_aligned_fallback=not _mask_file_declares_spatial_geometry(mask_path),
         )
+        source_foreground, image_foreground = _validate_resampled_mask_foreground(
+            array,
+            image_grid_mask,
+            "Importing mask '{}' onto the prepared Mimics grid".format(name),
+        )
         transformed = apply_buffer_mapping(image_grid_mask, axes, flips)
         u8_path = os.path.join(buffers_out, name + ".u8")
         with open(u8_path, "wb") as f:
@@ -1534,6 +1600,8 @@ def do_prepare(params: dict) -> dict:
             "mask_affine_usable": bool(_affine_is_usable(mask_affine)),
             "mask_affine_matches_image": bool(_affine_close(mask_affine, image_affine)),
             "mask_voxel_to_ras_matrix": mask_affine.astype(float).tolist(),
+            "source_foreground_voxels": source_foreground,
+            "foreground_voxels": image_foreground,
             "buffer_axes": list(axes),
             "buffer_flips": list(flips),
         })
@@ -1588,6 +1656,11 @@ def _mask_buffer_for_target_grid(mask_path: str, target_shape, target_voxel_to_r
         target_voxel_to_ras,
         allow_voxel_aligned_fallback=not _mask_file_declares_spatial_geometry(mask_path),
     )
+    source_foreground, target_foreground = _validate_resampled_mask_foreground(
+        mask,
+        target_grid_mask,
+        "Importing mask '{}' onto the active Mimics grid".format(mask_path),
+    )
     transformed = apply_buffer_mapping(target_grid_mask, axes, flips)
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -1598,7 +1671,8 @@ def _mask_buffer_for_target_grid(mask_path: str, target_shape, target_voxel_to_r
         "u8_path": str(output),
         "mimics_shape": [int(value) for value in transformed.shape],
         "image_shape": [int(value) for value in target_shape],
-        "foreground_voxels": int(np.count_nonzero(target_grid_mask)),
+        "source_foreground_voxels": source_foreground,
+        "foreground_voxels": target_foreground,
         "mask_affine_usable": bool(_affine_is_usable(mask_affine)),
         "mask_affine_matches_target": bool(_affine_close(mask_affine, target_voxel_to_ras)),
         "mask_voxel_to_ras_matrix": mask_affine.astype(float).tolist(),
@@ -1645,6 +1719,15 @@ def do_prepare_masks_for_grid(params: dict) -> dict:
                     binary, mask_affine, _shape_from_params(target_shape), target_matrix,
                     allow_voxel_aligned_fallback=not _mask_file_declares_spatial_geometry(mask_path),
                 )
+                source_foreground, target_foreground = (
+                    _validate_resampled_mask_foreground(
+                        binary,
+                        target_grid_mask,
+                        "Importing mask '{}' label {} onto the active Mimics grid".format(
+                            name, label_val
+                        ),
+                    )
+                )
                 transformed = apply_buffer_mapping(target_grid_mask, axes, flips)
                 Path(output_path).parent.mkdir(parents=True, exist_ok=True)
                 with open(str(output_path), "wb") as handle:
@@ -1657,7 +1740,8 @@ def do_prepare_masks_for_grid(params: dict) -> dict:
                     "u8_path": str(output_path),
                     "mimics_shape": [int(value) for value in transformed.shape],
                     "image_shape": [int(value) for value in _shape_from_params(target_shape)],
-                    "foreground_voxels": int(np.count_nonzero(target_grid_mask)),
+                    "source_foreground_voxels": source_foreground,
+                    "foreground_voxels": target_foreground,
                     "mask_affine_usable": bool(_affine_is_usable(mask_affine)),
                     "mask_affine_matches_target": bool(_affine_close(mask_affine, target_voxel_to_ras)),
                     "mask_voxel_to_ras_matrix": mask_affine.astype(float).tolist(),
@@ -1822,6 +1906,15 @@ def do_convert(params: dict) -> dict:
             )
         else:
             nifti_array = mimics_grid_array
+        mimics_foreground, export_foreground = (
+            _validate_resampled_mask_foreground(
+                mimics_grid_array,
+                nifti_array,
+                "Exporting Mimics mask '{}' onto the original image grid".format(
+                    name
+                ),
+            )
+        )
         if final_export_shape is None:
             final_export_shape = [int(value) for value in nifti_array.shape]
 
@@ -1833,7 +1926,13 @@ def do_convert(params: dict) -> dict:
             same_affine = _affine_close(existing_img.affine, export_affine)
             if existing.shape == nifti_array.shape and np.array_equal(existing, nifti_array) and same_affine:
                 total_unchanged += 1
-                exported.append({"name": name, "action": "unchanged", "path": nifti_path})
+                exported.append({
+                    "name": name,
+                    "action": "unchanged",
+                    "path": nifti_path,
+                    "source_foreground_voxels": mimics_foreground,
+                    "foreground_voxels": export_foreground,
+                })
                 continue
             if not overwrite_existing:
                 total_skipped_existing += 1
@@ -1855,6 +1954,8 @@ def do_convert(params: dict) -> dict:
         else:
             total_overwritten += 1
         exported.append({"name": name, "action": action, "path": nifti_path})
+        exported[-1]["source_foreground_voxels"] = mimics_foreground
+        exported[-1]["foreground_voxels"] = export_foreground
 
     return {
         "status": "ok",
@@ -1932,6 +2033,11 @@ def do_mask_to_buffer(params: dict) -> dict:
         mask, mask_affine, image_shape, image_affine,
         allow_voxel_aligned_fallback=not _mask_file_declares_spatial_geometry(mask_path),
     )
+    source_foreground, image_foreground = _validate_resampled_mask_foreground(
+        mask,
+        image_grid_mask,
+        "Applying prediction '{}' to the active Mimics grid".format(mask_path),
+    )
     transformed = apply_buffer_mapping(image_grid_mask, axes, flips)
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -1942,7 +2048,8 @@ def do_mask_to_buffer(params: dict) -> dict:
         "output_path": str(output),
         "mimics_shape": [int(value) for value in transformed.shape],
         "image_shape": [int(value) for value in image_shape],
-        "foreground_voxels": int(np.count_nonzero(image_grid_mask)),
+        "source_foreground_voxels": source_foreground,
+        "foreground_voxels": image_foreground,
         "target_voxel_to_ras_matrix": image_affine.astype(float).tolist(),
         "buffer_axes": list(axes),
         "buffer_flips": list(flips),
@@ -2117,8 +2224,11 @@ def do_prepare_source_fastpath(params: dict) -> dict:
     """Build source NIfTI cache on-demand for nnInteractive fast path."""
     image_path = params.get("image_path", "")
     source_nifti_out = params.get("source_nifti_out", "")
-    if not image_path or not is_nifti_file(image_path):
-        return {"status": "error", "error": "image_path must be a NIfTI file"}
+    if not image_path or not is_medical_image_file(image_path):
+        return {
+            "status": "error",
+            "error": "image_path must be a supported 3D medical image file",
+        }
     if not source_nifti_out:
         return {"status": "error", "error": "source_nifti_out is required"}
     info = prepare_source_fastpath_nifti(image_path, source_nifti_out)

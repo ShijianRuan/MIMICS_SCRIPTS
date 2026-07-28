@@ -15,12 +15,6 @@ import uuid
 
 INVALID_LOCK_GRACE_SECONDS = 5.0
 
-# Hardcoded MimicsResearch.exe path for machines where find_mimics_exe()'s
-# auto-detection (sys.executable, registry, Program Files, drive scan) fails.
-# Set this to the full path on the target machine, e.g.
-#   r"C:\Program Files\Materialise\Mimics Research 25\MimicsResearch.exe"
-# Leave empty to rely on auto-detection.
-HARDCODED_MIMICS_EXE = r""
 _MIMICS_EXE_CACHE = {"value": None, "checked_at": 0.0}
 _MIMICS_EXE_CACHE_LOCK = threading.Lock()
 _MIMICS_EXE_SCAN_IN_PROGRESS = False
@@ -300,18 +294,138 @@ def _current_process_executable():
         return ""
 
 
+def _configured_mimics_executable():
+    """Return an explicit repository-level background Mimics path."""
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for filename in ("mimics_io_config.json", "fewshot_config.json"):
+        path = os.path.join(project_root, filename)
+        try:
+            with open(path, "r") as handle:
+                payload = json.load(handle)
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        raw = str(payload.get("mimics_background_exe") or "").strip()
+        if not raw:
+            continue
+        candidate = os.path.abspath(
+            os.path.expandvars(os.path.expanduser(raw))
+        )
+        if os.path.isfile(candidate):
+            return candidate
+    return ""
+
+
+def _running_mimics_research_executable():
+    """Find a running MimicsResearch process without PowerShell or WMI."""
+    if os.name != "nt":
+        return ""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        TH32CS_SNAPPROCESS = 0x00000002
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        MAX_PATH = 260
+        INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_void_p),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", wintypes.WCHAR * MAX_PATH),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateToolhelp32Snapshot.argtypes = [
+            wintypes.DWORD,
+            wintypes.DWORD,
+        ]
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.Process32FirstW.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(PROCESSENTRY32W),
+        ]
+        kernel32.Process32FirstW.restype = wintypes.BOOL
+        kernel32.Process32NextW.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(PROCESSENTRY32W),
+        ]
+        kernel32.Process32NextW.restype = wintypes.BOOL
+        kernel32.OpenProcess.argtypes = [
+            wintypes.DWORD,
+            wintypes.BOOL,
+            wintypes.DWORD,
+        ]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if not snapshot or snapshot == INVALID_HANDLE_VALUE:
+            return ""
+        try:
+            entry = PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+            has_entry = bool(kernel32.Process32FirstW(snapshot, ctypes.byref(entry)))
+            while has_entry:
+                if str(entry.szExeFile or "").lower() == "mimicsresearch.exe":
+                    process = kernel32.OpenProcess(
+                        PROCESS_QUERY_LIMITED_INFORMATION,
+                        False,
+                        int(entry.th32ProcessID),
+                    )
+                    if process:
+                        try:
+                            size = wintypes.DWORD(32768)
+                            buffer_value = ctypes.create_unicode_buffer(size.value)
+                            if kernel32.QueryFullProcessImageNameW(
+                                process,
+                                0,
+                                buffer_value,
+                                ctypes.byref(size),
+                            ):
+                                candidate = os.path.abspath(buffer_value.value)
+                                if os.path.isfile(candidate):
+                                    return candidate
+                        finally:
+                            kernel32.CloseHandle(process)
+                has_entry = bool(
+                    kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+                )
+        finally:
+            kernel32.CloseHandle(snapshot)
+    except Exception:
+        pass
+    return ""
+
+
 def find_mimics_exe(force_refresh=False):
     """Find a separate Mimics executable for background automation.
 
     Search order:
       1. MIMICS_BACKGROUND_EXE / MIMICS_EXE explicit override
-      2. Hardcoded path constant (HARDCODED_MIMICS_EXE) — for machines where
-         the auto-detection below fails; set it to the full path of
-         MimicsResearch.exe on that machine.
-      3. The current installation directory, preferring MimicsResearch.exe.
-      4. Windows registry (Uninstall keys for Materialise Mimics)
-      5. Program Files sub-directories (any Mimics version)
-      6. Drive-root scan on C/D/E/F for common folder names
+      2. mimics_background_exe in repository configuration
+      3. The current installation directory, preferring MimicsResearch.exe
+      4. A running MimicsResearch process, queried through the Win32 API
+      5. Windows registry (Uninstall keys for Materialise Mimics)
+      6. Program Files sub-directories (any Mimics version)
+      7. Drive-root scan on C/D/E/F for common folder names
     """
     global _MIMICS_EXE_SCAN_IN_PROGRESS
     now = time.time()
@@ -331,9 +445,10 @@ def find_mimics_exe(force_refresh=False):
             _MIMICS_EXE_CACHE.update({"value": value, "checked_at": now})
         return value
 
-    # 2. Hardcoded fallback for machines where auto-detection fails.
-    if HARDCODED_MIMICS_EXE and os.path.isfile(HARDCODED_MIMICS_EXE):
-        value = os.path.abspath(HARDCODED_MIMICS_EXE)
+    # 2. Explicit repository configuration for managed/offline installations.
+    configured_exe = _configured_mimics_executable()
+    if configured_exe:
+        value = os.path.abspath(configured_exe)
         with _MIMICS_EXE_CACHE_LOCK:
             _MIMICS_EXE_CACHE.update({"value": value, "checked_at": now})
         return value
@@ -383,6 +498,15 @@ def find_mimics_exe(force_refresh=False):
                 pass
         return True
 
+    # 4. A non-standard installation is often still visible through the
+    # running process path even when its installer wrote no InstallLocation.
+    running_exe = _running_mimics_research_executable()
+    if usable_background_candidate(running_exe):
+        value = os.path.abspath(running_exe)
+        with _MIMICS_EXE_CACHE_LOCK:
+            _MIMICS_EXE_CACHE.update({"value": value, "checked_at": now})
+        return value
+
     # Cache only the expensive registry/Program Files/drive scan. Explicit
     # overrides and the current Mimics executable above must take effect
     # immediately even after an earlier failed lookup.
@@ -396,7 +520,7 @@ def find_mimics_exe(force_refresh=False):
 
     found = None
     try:
-        # 4. Windows registry — check Uninstall keys for any Mimics version.
+        # 5. Windows registry — check Uninstall keys for any Mimics version.
         if os.name == "nt":
             try:
                 import _winreg as winreg
@@ -449,7 +573,7 @@ def find_mimics_exe(force_refresh=False):
                     if found:
                         break
 
-        # 5. Program Files sub-directories — scan for any Mimics* folder.
+        # 6. Program Files sub-directories — scan for any Mimics* folder.
         if not found:
             for env_var in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"):
                 pf = os.environ.get(env_var, "")
@@ -491,7 +615,7 @@ def find_mimics_exe(force_refresh=False):
                 if found:
                     break
 
-        # 6. Drive-root scan for common folder patterns.
+        # 7. Drive-root scan for common folder patterns.
         if not found and os.name == "nt":
             for drive in ("C:", "D:", "E:", "F:"):
                 try:

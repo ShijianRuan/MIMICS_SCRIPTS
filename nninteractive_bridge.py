@@ -41,6 +41,8 @@ Protocol (JSON stdin -> JSON stdout):
 
 from __future__ import annotations
 
+import itertools
+import hashlib
 import json
 import os
 import signal
@@ -299,21 +301,104 @@ def _resolve_fold(model_dir: str, requested: Any) -> str | None:
     return value
 
 
+def _selected_checkpoint_identity(model_dir: str, fold: str | None) -> str:
+    """Return the exact checkpoint identity that the server will load.
+
+    Task models currently register one checkpoint SHA256. When more than one
+    fold is selected, use a deterministic set identity rather than pretending
+    that one member checksum identifies the ensemble.
+    """
+    root = Path(model_dir)
+    checkpoints = sorted(
+        path
+        for path in root.glob("fold_*/checkpoint_final.pth")
+        if path.is_file()
+    )
+    if fold not in (None, "", "auto", "all"):
+        checkpoints = [
+            root / "fold_{}".format(fold) / "checkpoint_final.pth"
+        ]
+    if not checkpoints or any(not path.is_file() for path in checkpoints):
+        raise RuntimeError(
+            "The selected nnInteractive checkpoint is missing under: {}".format(
+                model_dir
+            )
+        )
+
+    checksums = []
+    for path in checkpoints:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+                digest.update(chunk)
+        checksums.append((path.parent.name, digest.hexdigest()))
+    if len(checksums) == 1:
+        return checksums[0][1]
+
+    combined = hashlib.sha256()
+    for fold_name, checksum in checksums:
+        combined.update(fold_name.encode("utf-8"))
+        combined.update(b"\0")
+        combined.update(checksum.encode("ascii"))
+        combined.update(b"\0")
+    return "set:{}".format(combined.hexdigest())
+
+
+def _atomic_replace(temporary: Path, path: Path, text: str, retries: int = 12) -> None:
+    """Publish ``temporary`` over ``path`` tolerating transient WinError 5.
+
+    On Windows a half-written or antivirus-scanned target can reject
+    ``os.replace`` with "Access is denied". Readers already tolerate a
+    temporarily incomplete document, so after bounded replace retries we drop
+    the stale target and retry, then fall back to a direct flushed write.
+    The staged ``temporary`` is always cleaned up.
+    """
+    last_error: Exception | None = None
+    for attempt in range(max(1, int(retries))):
+        try:
+            os.replace(temporary, path)
+            return
+        except OSError as exc:
+            last_error = exc
+            # A stale/corrupt target is the common cause: remove it and retry.
+            if path.exists():
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            if attempt + 1 < max(1, int(retries)):
+                time.sleep(min(0.15, 0.02 * (attempt + 1)))
+    # Last resort: write straight over the target. Readers tolerate a brief
+    # incomplete window; a fresh write beats failing the whole worker.
+    try:
+        path.write_text(text, encoding="utf-8")
+        return
+    except OSError as exc:
+        last_error = exc
+    finally:
+        try:
+            if temporary.exists():
+                os.remove(temporary)
+        except OSError:
+            pass
+    if last_error is not None:
+        raise last_error
+
+
 def _write_server_state(path: Path, state: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(state, indent=2)
     temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
-    temporary.write_text(json.dumps(state, indent=2), encoding="utf-8")
-    os.replace(temporary, path)
+    temporary.write_text(text, encoding="utf-8")
+    _atomic_replace(temporary, path, text)
 
 
 def _write_json_atomic(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(value, indent=2, ensure_ascii=False, default=str)
     temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
-    temporary.write_text(
-        json.dumps(value, indent=2, ensure_ascii=False, default=str),
-        encoding="utf-8",
-    )
-    os.replace(temporary, path)
+    temporary.write_text(text, encoding="utf-8")
+    _atomic_replace(temporary, path, text)
 
 
 def _load_server_state(path: Path) -> dict[str, Any] | None:
@@ -674,6 +759,7 @@ def _start_server(
     fold: str | None,
     gpu_lock_timeout_seconds: float = 30.0,
     runtime_work_dir: str | None = None,
+    checkpoint_identity: str = "",
 ) -> tuple[subprocess.Popen, dict[str, Any]]:
     """Start the nnInteractive server as a background subprocess.
 
@@ -761,12 +847,13 @@ def _start_server(
             )
 
         state = {
-            "schema_version": "nninteractive_owned_server.v2",
+            "schema_version": "nninteractive_owned_server.v3",
             "pid": proc.pid,
             "server_url": server_url,
             "model_dir": str(Path(model_dir).resolve()),
             "device": device,
             "fold": fold or "auto",
+            "checkpoint_sha256": str(checkpoint_identity or ""),
             "ownership_token": ownership_token,
             "started_at_epoch": time.time(),
             "last_activity_epoch": time.time(),
@@ -821,6 +908,7 @@ def _ensure_server(
     fold: str | None = None,
     gpu_lock_timeout_seconds: float = 30.0,
     runtime_work_dir: str | None = None,
+    expected_checkpoint_sha256: str = "",
 ) -> tuple[bool, str, str]:
     """Ensure the nnInteractive server is running; start it if needed.
 
@@ -831,12 +919,18 @@ def _ensure_server(
     state = _load_server_state(state_path)
     expected_model = str(Path(model_dir).resolve())
     fold = _resolve_fold(model_dir, fold)
+    expected_checkpoint = str(expected_checkpoint_sha256 or "").strip().lower()
     if state and _process_matches_server(state):
         state_url = str(state.get("server_url") or preferred_server_url)
         matches_request = (
             str(state.get("model_dir")) == expected_model
             and str(state.get("device")) == str(device)
             and str(state.get("fold") or "auto") == str(fold or "auto")
+            and (
+                not expected_checkpoint
+                or str(state.get("checkpoint_sha256") or "").strip().lower()
+                == expected_checkpoint
+            )
         )
         api_key = str(state.get("ownership_token") or "")
         if matches_request and _server_running(state_url, api_key):
@@ -865,6 +959,15 @@ def _ensure_server(
         pass
 
     _terminate_model_servers(model_dir)
+    checkpoint_identity = ""
+    if expected_checkpoint:
+        checkpoint_identity = _selected_checkpoint_identity(model_dir, fold)
+        if checkpoint_identity.lower() != expected_checkpoint:
+            raise RuntimeError(
+                "The selected nnInteractive checkpoint does not match the "
+                "registered model identity. Refusing to start a different or "
+                "partially replaced model."
+            )
     server_url = _available_server_url(preferred_server_url)
     proc, state = _start_server(
         model_dir,
@@ -874,6 +977,7 @@ def _ensure_server(
         fold,
         gpu_lock_timeout_seconds,
         runtime_work_dir,
+        checkpoint_identity,
     )
     api_key = str(state["ownership_token"])
 
@@ -957,6 +1061,37 @@ def platform_to_mimics(array: np.ndarray, mapping: dict[str, Any]) -> np.ndarray
     )
 
 
+def canonical_ras_buffer_mapping(voxel_to_ras: Any) -> dict[str, Any]:
+    """Return a lossless Mimics-array mapping to closest canonical RAS."""
+    value = voxel_to_ras
+    if isinstance(value, str):
+        value = json.loads(value)
+    affine = np.asarray(value, dtype=float)
+    if affine.shape != (4, 4) or not np.all(np.isfinite(affine)):
+        raise ValueError("Mimics voxel-to-RAS matrix is missing or invalid")
+    if abs(float(np.linalg.det(affine[:3, :3]))) < 1.0e-8:
+        raise ValueError("Mimics voxel-to-RAS matrix is singular")
+
+    orientation = nib.orientations.io_orientation(affine)
+    probe = np.arange(2 * 3 * 4, dtype=np.int16).reshape((2, 3, 4))
+    expected = nib.orientations.apply_orientation(probe, orientation)
+    for axes in itertools.permutations((0, 1, 2)):
+        for flips in itertools.product((False, True), repeat=3):
+            mapping = {
+                "platform_to_mimics_axes": list(axes),
+                "platform_to_mimics_flips": list(flips),
+            }
+            candidate = mimics_to_platform(probe, mapping)
+            if candidate.shape == expected.shape and np.array_equal(
+                candidate, expected
+            ):
+                return mapping
+    raise RuntimeError(
+        "Could not express the Mimics-to-canonical-RAS orientation as an "
+        "axis permutation and flip."
+    )
+
+
 # ---------------------------------------------------------------------------
 #  nnInteractive session
 # ---------------------------------------------------------------------------
@@ -1013,6 +1148,25 @@ def load_image_nifti(path: str) -> np.ndarray:
     else:
         raise RuntimeError(f"Unexpected image dimensions: {data.ndim}")
     return data
+
+
+def load_image_medical_file(path: str) -> np.ndarray:
+    """Load MHD/MHA/NRRD source physical values in XYZ array order."""
+    try:
+        import SimpleITK as sitk
+    except Exception as exc:
+        raise RuntimeError(
+            "SimpleITK is required to read this source medical image"
+        ) from exc
+    image = sitk.ReadImage(str(path))
+    data_zyx = sitk.GetArrayFromImage(image)
+    if data_zyx.ndim != 3:
+        raise RuntimeError(
+            "Unexpected medical image dimensions: {}".format(data_zyx.ndim)
+        )
+    return np.transpose(
+        np.asarray(data_zyx, dtype=np.float32), (2, 1, 0)
+    )[None]
 
 
 def _parse_matrix(value: Any) -> np.ndarray | None:
@@ -1107,6 +1261,18 @@ def _apply_source_intensity_transform(data: np.ndarray, input_data: dict[str, An
     if slope_f == 1.0 and intercept_f == 0.0:
         return data.astype(np.float32, copy=False)
     return data.astype(np.float32, copy=False) * slope_f + intercept_f
+
+
+def _apply_buffer_model_intensity_transform(
+    data: np.ndarray, input_data: dict[str, Any]
+) -> np.ndarray:
+    slope = float(input_data.get("image_buffer_to_model_slope", 1.0) or 1.0)
+    intercept = float(
+        input_data.get("image_buffer_to_model_intercept", 0.0) or 0.0
+    )
+    if slope == 1.0 and intercept == 0.0:
+        return data
+    return data.astype(np.float32, copy=False) * slope + intercept
 
 
 def _dicom_sort_key(record: tuple[Path, Any], normal: np.ndarray | None) -> tuple[float, float, str]:
@@ -1262,6 +1428,8 @@ def load_image_source(input_data: dict[str, Any]) -> np.ndarray:
                 expected_shape,
                 allow_shape_mismatch=has_affine_resample_metadata,
             )
+        elif source_kind == "medical_image":
+            image = load_image_medical_file(path)
         else:
             image = load_image_nifti(path)
     except PermissionError as exc:
@@ -1670,6 +1838,13 @@ class _BridgeSessionContext:
             "platform_to_mimics_axes": [0, 1, 2],
             "platform_to_mimics_flips": [False, False, False],
         }
+        self.model_input_space = str(
+            input_data.get("model_input_space") or "mimics"
+        ).strip().lower()
+        if self.model_input_space == "canonical_ras":
+            self.buffer_mapping = canonical_ras_buffer_mapping(
+                input_data.get("image_mimics_voxel_to_ras_matrix")
+            )
         self.device, self.device_warning = _resolve_device(
             self.requested_device,
             bool(input_data.get("allow_cpu_fallback", True)),
@@ -1696,6 +1871,11 @@ class _BridgeSessionContext:
             image_source_intensity_space=input_data.get("image_source_intensity_space"),
             image_source_to_mimics_gv_slope=input_data.get("image_source_to_mimics_gv_slope"),
             image_source_to_mimics_gv_intercept=input_data.get("image_source_to_mimics_gv_intercept"),
+            model_input_space=self.model_input_space,
+            model_input_intensity_space=input_data.get(
+                "model_input_intensity_space", ""
+            ),
+            effective_buffer_mapping=self.buffer_mapping,
         )
 
         if input_data.get("image_buffer_shape"):
@@ -1714,6 +1894,9 @@ class _BridgeSessionContext:
                 input_data.get("image_buffer_dtype", "int16"),
                 buffer_mapping=self.buffer_mapping,
                 coordinates=input_data.get("image_buffer_coordinates", "mimics"),
+            )
+            self.image_np = _apply_buffer_model_intensity_transform(
+                self.image_np, input_data
             )
         elif input_data.get("image_path"):
             image_mimics = load_image_source(input_data)
@@ -1754,6 +1937,7 @@ class _BridgeSessionContext:
                 input_data.get("fold", "auto"),
                 float(input_data.get("gpu_lock_timeout_seconds", 30)),
                 self.runtime_work_dir,
+                str(input_data.get("checkpoint_sha256") or ""),
             )
             self.owned_state_path = _server_state_path(self.model_dir, self.runtime_work_dir)
             self.owned_token = server_api_key
@@ -1847,6 +2031,7 @@ class _BridgeSessionContext:
                 input_data.get("fold", "auto"),
                 float(input_data.get("gpu_lock_timeout_seconds", 30)),
                 self.runtime_work_dir,
+                str(input_data.get("checkpoint_sha256") or ""),
             )
             self.owned_state_path = _server_state_path(self.model_dir, self.runtime_work_dir)
             self.owned_token = server_api_key
@@ -2401,6 +2586,14 @@ def _async_worker_main(job_dir_value: str) -> int:
                     result["expected_target_sha256"] = command.get(
                         "expected_target_sha256"
                     )
+                    result["model_identity"] = command.get("model_identity", "official")
+                    result["model_profile_id"] = command.get("model_profile_id", "official")
+                    result["model_id"] = command.get("model_id", "official")
+                    result["checkpoint_sha256"] = command.get("checkpoint_sha256", "")
+                    result["effective_model_fingerprint"] = command.get(
+                        "effective_model_fingerprint", ""
+                    )
+                    result["task_id"] = command.get("task_id", "")
                 except Exception as exc:
                     result = _error_result(
                         exc,
@@ -2415,6 +2608,14 @@ def _async_worker_main(job_dir_value: str) -> int:
                     result["expected_target_sha256"] = command.get(
                         "expected_target_sha256"
                     )
+                    result["model_identity"] = command.get("model_identity", "official")
+                    result["model_profile_id"] = command.get("model_profile_id", "official")
+                    result["model_id"] = command.get("model_id", "official")
+                    result["checkpoint_sha256"] = command.get("checkpoint_sha256", "")
+                    result["effective_model_fingerprint"] = command.get(
+                        "effective_model_fingerprint", ""
+                    )
+                    result["task_id"] = command.get("task_id", "")
                 _write_json_atomic(result_path, result)
                 last_sequence = sequence
                 last_activity = time.time()
