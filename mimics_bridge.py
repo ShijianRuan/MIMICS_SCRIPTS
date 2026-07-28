@@ -824,6 +824,8 @@ def _read_mask_array_and_affine(path: str) -> tuple[np.ndarray, np.ndarray]:
 
         image = nib.load(path)
         array = np.asanyarray(image.dataobj)
+        if array.ndim == 4 and array.shape[-1] == 1:
+            array = array[..., 0]
         if array.ndim != 3:
             raise ValueError("mask must be 3D: {} shape={}".format(path, array.shape))
         affine_ras = _normalize_nifti_affine(image)
@@ -831,6 +833,8 @@ def _read_mask_array_and_affine(path: str) -> tuple[np.ndarray, np.ndarray]:
 
     sitk_img = _read_image_sitk_lps(path)
     array = _sitk_to_xyz_array(sitk_img)
+    if array.ndim == 4 and array.shape[-1] == 1:
+        array = array[..., 0]
     if array.ndim != 3:
         raise ValueError("mask must be 3D: {} shape={}".format(path, array.shape))
     affine_ras = LPS_TO_RAS @ _sitk_to_lps_affine(sitk_img)

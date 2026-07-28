@@ -574,6 +574,14 @@ class StatusTrackingTests(unittest.TestCase):
             self.assertIn(expected_substr.lower(), summary,
                           f"Phase '{phase}' summary '{summary}' missing '{expected_substr}'")
 
+    def test_preparing_data_summary_includes_progress(self):
+        summary = common.status_summary({
+            "status": "preparing_data",
+            "preparation_index": 3,
+            "preparation_total": 8,
+        })
+        self.assertEqual("Preparing data 3/8 (38%)", summary)
+
     def test_active_statuses_excludes_terminal(self):
         for status in common.TERMINAL_STATUSES:
             self.assertNotIn(status, common.ACTIVE_STATUSES)
@@ -993,6 +1001,16 @@ class TrainingConfigGenerationTests(unittest.TestCase):
         trainer_cancel = Path(config["training"]["cancel_path"])
         self.assertTrue(str(trainer_status).startswith(str(self.job_dir)))
         self.assertTrue(str(trainer_cancel).startswith(str(self.job_dir)))
+
+    def test_finetune_runner_injects_paths_inside_child_interpreter(self):
+        script = pipeline._finetune_runner_script()
+        self.assertIn(repr(str(pipeline.FINETUNE_SRC)), script)
+        self.assertIn(repr(str(pipeline.ROOT)), script)
+        self.assertIn(
+            "from nninteractive_finetune.__main__ import main",
+            script,
+        )
+        self.assertNotIn("PYTHONPATH", script)
 
 
 # ---------------------------------------------------------------------------

@@ -34,7 +34,17 @@ def _model_dir(root: Path) -> Path:
     checkpoint.parent.mkdir(parents=True, exist_ok=True)
     checkpoint.write_bytes(b"small-test-checkpoint")
     (model / "finetune_manifest.json").write_text(
-        json.dumps({"input_contract": common.NNINTERACTIVE_INPUT_CONTRACT}),
+        json.dumps(
+            {
+                "input_contract": common.NNINTERACTIVE_INPUT_CONTRACT,
+                "runtime_verification": {
+                    "verified": True,
+                    "expected_parameter_fingerprint": "integration-runtime-v1",
+                    "loaded_parameter_fingerprint": "integration-runtime-v1",
+                },
+                "validated_prompt_types": ["point"],
+            }
+        ),
         encoding="utf-8",
     )
     return model

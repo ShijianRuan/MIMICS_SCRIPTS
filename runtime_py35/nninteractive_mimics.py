@@ -3588,13 +3588,24 @@ def _start_win32_async_result_monitor(image, target, state, config, poll_seconds
         _async_monitor_tick(monitor)
 
     callback = TIMERPROC(_timer_proc)
-    user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint, TIMERPROC]
+    # Another Mimics module may have configured SetTimer with a distinct
+    # WINFUNCTYPE class. Passing the callback as a raw pointer avoids that
+    # ctypes type-identity mismatch.
+    user32.SetTimer.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+        ctypes.c_uint,
+        ctypes.c_void_p,
+    ]
     user32.SetTimer.restype = ctypes.c_size_t
     user32.KillTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-    timer_id = user32.SetTimer(None, 0, timer_interval_ms, callback)
+    user32.KillTimer.restype = ctypes.c_int
+    callback_void = ctypes.cast(callback, ctypes.c_void_p)
+    timer_id = user32.SetTimer(None, 0, timer_interval_ms, callback_void)
     if not timer_id:
         return False
     monitor["callback"] = callback
+    monitor["callback_void"] = callback_void
     monitor["win32_timer"] = (user32, timer_id)
     _ASYNC_MONITORS[job_dir] = monitor
     return True

@@ -344,21 +344,62 @@ def _selected_checkpoint_identity(model_dir: str, fold: str | None) -> str:
     return "set:{}".format(combined.hexdigest())
 
 
-def _write_server_state(path: Path, state: dict[str, Any]) -> None:
+def _write_text_atomic(path: Path, text: str, retries: int = 12) -> None:
+    """Publish text reliably without deleting a readable previous state."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
-    temporary.write_text(json.dumps(state, indent=2), encoding="utf-8")
-    os.replace(temporary, path)
+    last_error: OSError | None = None
+    direct_write_succeeded = False
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            try:
+                os.fsync(handle.fileno())
+            except OSError:
+                pass
+        for attempt in range(max(1, int(retries))):
+            try:
+                os.replace(temporary, path)
+                return
+            except OSError as exc:
+                last_error = exc
+                if attempt + 1 < max(1, int(retries)):
+                    time.sleep(min(0.15, 0.02 * (attempt + 1)))
+
+        # Some SMB shares allow writes but reject replace. Readers already
+        # tolerate a brief incomplete JSON document, so use a flushed direct
+        # write only after bounded atomic-replace retries.
+        with path.open("w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            try:
+                os.fsync(handle.fileno())
+            except OSError:
+                pass
+        direct_write_succeeded = True
+    except OSError as exc:
+        last_error = exc
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+    if not direct_write_succeeded and last_error is not None:
+        raise last_error
+
+
+def _write_server_state(path: Path, state: dict[str, Any]) -> None:
+    _write_text_atomic(path, json.dumps(state, indent=2))
 
 
 def _write_json_atomic(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
-    temporary.write_text(
+    _write_text_atomic(
+        path,
         json.dumps(value, indent=2, ensure_ascii=False, default=str),
-        encoding="utf-8",
     )
-    os.replace(temporary, path)
 
 
 def _load_server_state(path: Path) -> dict[str, Any] | None:

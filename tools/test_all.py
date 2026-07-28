@@ -1202,6 +1202,20 @@ class TestMimicsBridgeBufferMapping(unittest.TestCase):
         with self.assertRaises((ValueError, RuntimeError)):
             read_nifti_mask(path)
 
+    def test_read_nifti_mask_accepts_trailing_singleton_channel(self):
+        from mimics_bridge import read_nifti_mask
+
+        import nibabel as nib
+
+        data = np.zeros((5, 6, 7, 1), dtype=np.uint8)
+        data[1, 2, 3, 0] = 1
+        path = os.path.join(self.tmp, "singleton_channel.nii.gz")
+        nib.save(nib.Nifti1Image(data, np.eye(4)), path)
+
+        result = read_nifti_mask(path)
+        self.assertEqual((5, 6, 7), result.shape)
+        self.assertEqual(1, int(result[1, 2, 3]))
+
     def test_convert_uses_mimics_grid_affine_from_manifest(self):
         from mimics_bridge import do_convert
         import nibabel as nib
@@ -1828,6 +1842,71 @@ class TestNNInteractiveBridgeSourceImage(unittest.TestCase):
         self.assertIsNone(_parse_matrix(None))
         self.assertIsNone(_parse_matrix(""))
         self.assertIsNone(_parse_matrix("[[1,2,3]]"))
+
+    def test_atomic_json_retries_without_deleting_previous_state(self):
+        import nninteractive_bridge as bridge
+
+        path = Path(self.tmp) / "state.json"
+        path.write_text('{"old": true}', encoding="utf-8")
+        original_replace = bridge.os.replace
+        original_remove = bridge.os.remove
+        original_sleep = bridge.time.sleep
+        calls = {"replace": 0, "remove": 0}
+
+        def flaky_replace(source, target):
+            calls["replace"] += 1
+            if calls["replace"] < 3:
+                raise OSError(5, "access denied")
+            return original_replace(source, target)
+
+        def tracked_remove(target):
+            calls["remove"] += 1
+            return original_remove(target)
+
+        try:
+            bridge.os.replace = flaky_replace
+            bridge.os.remove = tracked_remove
+            bridge.time.sleep = lambda _seconds: None
+            bridge._write_json_atomic(path, {"new": True})
+        finally:
+            bridge.os.replace = original_replace
+            bridge.os.remove = original_remove
+            bridge.time.sleep = original_sleep
+
+        self.assertEqual({"new": True}, json.loads(path.read_text(encoding="utf-8")))
+        self.assertEqual(0, calls["remove"])
+
+    def test_atomic_json_falls_back_when_replace_is_denied(self):
+        import nninteractive_bridge as bridge
+
+        path = Path(self.tmp) / "smb_state.json"
+        path.write_text('{"old": true}', encoding="utf-8")
+        original_replace = bridge.os.replace
+        original_sleep = bridge.time.sleep
+        try:
+            bridge.os.replace = lambda _source, _target: (_ for _ in ()).throw(
+                OSError(5, "access denied")
+            )
+            bridge.time.sleep = lambda _seconds: None
+            bridge._write_json_atomic(path, {"fallback": True})
+        finally:
+            bridge.os.replace = original_replace
+            bridge.time.sleep = original_sleep
+
+        self.assertEqual(
+            {"fallback": True},
+            json.loads(path.read_text(encoding="utf-8")),
+        )
+
+    def test_win32_timer_keeps_raw_callback_pointer_alive(self):
+        import inspect
+        import nninteractive_mimics
+
+        source = inspect.getsource(
+            nninteractive_mimics._start_win32_async_result_monitor
+        )
+        self.assertIn("ctypes.cast(callback, ctypes.c_void_p)", source)
+        self.assertIn('monitor["callback_void"] = callback_void', source)
 
 
 # ============================================================================
@@ -9006,7 +9085,7 @@ class TestLifecycleAndRetention(unittest.TestCase):
 
     def test_stop_all_requires_owned_root_and_excludes_foreground(self):
         path = os.path.join(PROJECT_ROOT, "runtime_py35", "mimics_stop_background.py")
-        with open(path, "r") as handle:
+        with open(path, "r", encoding="utf-8") as handle:
             source = handle.read()
         self.assertNotIn("$broad=Get-CimInstance", source)
         self.assertIn("$foregroundPid", source)

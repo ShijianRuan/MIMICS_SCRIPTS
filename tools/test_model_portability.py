@@ -30,6 +30,20 @@ def _nninteractive_model(root: Path) -> Path:
     checkpoint = model / "fold_0" / "checkpoint_final.pth"
     checkpoint.parent.mkdir(parents=True, exist_ok=True)
     checkpoint.write_bytes(b"portable-nninteractive")
+    (model / "finetune_manifest.json").write_text(
+        json.dumps(
+            {
+                "input_contract": task_common.NNINTERACTIVE_INPUT_CONTRACT,
+                "runtime_verification": {
+                    "verified": True,
+                    "expected_parameter_fingerprint": "portable-runtime-v1",
+                    "loaded_parameter_fingerprint": "portable-runtime-v1",
+                },
+                "validated_prompt_types": ["point"],
+            }
+        ),
+        encoding="utf-8",
+    )
     return model
 
 

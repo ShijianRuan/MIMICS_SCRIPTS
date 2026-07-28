@@ -632,10 +632,19 @@ def status_summary(status: dict[str, Any]) -> str:
         )
     if phase == "validating":
         return "Checking model quality"
+    if phase == "preparing_data":
+        index = int(status.get("preparation_index") or 0)
+        total = int(status.get("preparation_total") or 0)
+        if total > 0:
+            return "Preparing data {}/{} ({:.0f}%)".format(
+                index,
+                total,
+                100.0 * index / total,
+            )
+        return "Preparing training data"
     mapping = {
         "created": "Preparing training",
         "validating_cases": "Checking selected cases",
-        "preparing_data": "Preparing training data",
         "registering": "Saving the best model",
         "completed": "Training completed",
         "paused": "Training paused; GPU released",

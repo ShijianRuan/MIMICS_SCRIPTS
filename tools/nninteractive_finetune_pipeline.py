@@ -50,6 +50,24 @@ from resource_locks import (  # noqa: E402
 )
 
 
+def _finetune_runner_script() -> str:
+    """Build a child script that imports the fine-tune CLI explicitly.
+
+    Windows embeddable Python can ignore PYTHONPATH when a ``._pth`` file is
+    active, so the child must insert the repository paths into its own
+    ``sys.path`` before importing the package.
+    """
+    inserts = [
+        "sys.path.insert(0,{!r})".format(path)
+        for path in (str(FINETUNE_SRC), str(ROOT))
+    ]
+    return (
+        "import sys;"
+        + ";".join(inserts)
+        + ";from nninteractive_finetune.__main__ import main;sys.exit(main())"
+    )
+
+
 def update_status(path: Path, **values: Any) -> dict[str, Any]:
     payload = read_json(path, {}) or {}
     payload.update(values)
@@ -825,19 +843,14 @@ def _run_training(
             process = subprocess.Popen(
                 [
                     str(python_exe),
-                    "-m",
-                    "nninteractive_finetune",
+                    "-c",
+                    _finetune_runner_script(),
                     "train",
                     "--config",
                     str(config_path),
                 ],
                 cwd=str(ROOT),
-                env={
-                    **os.environ,
-                    "PYTHONPATH": os.pathsep.join(
-                        [str(FINETUNE_SRC), str(ROOT), os.environ.get("PYTHONPATH", "")]
-                    ),
-                },
+                env=os.environ.copy(),
                 stdin=subprocess.DEVNULL,
                 stdout=handle,
                 stderr=subprocess.STDOUT,
@@ -930,8 +943,8 @@ def _run_evaluation(
             process = subprocess.Popen(
                 [
                     str(python_exe),
-                    "-m",
-                    "nninteractive_finetune",
+                    "-c",
+                    _finetune_runner_script(),
                     "evaluate",
                     "--model-dir",
                     str(model_dir),
@@ -947,12 +960,7 @@ def _run_evaluation(
                     "auto",
                 ],
                 cwd=str(ROOT),
-                env={
-                    **os.environ,
-                    "PYTHONPATH": os.pathsep.join(
-                        [str(FINETUNE_SRC), str(ROOT), os.environ.get("PYTHONPATH", "")]
-                    ),
-                },
+                env=os.environ.copy(),
                 stdin=subprocess.DEVNULL,
                 stdout=handle,
                 stderr=subprocess.STDOUT,
