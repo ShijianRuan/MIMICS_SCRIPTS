@@ -51,12 +51,19 @@ from training_data_ui import (  # noqa: E402
     normalized_source_mode,
 )
 from ui_theme import choose_existing_directory, configure_application  # noqa: E402
+try:
+    from remote_compute_ui import RemoteComputeSelector  # noqa: E402
+except Exception:
+    # Keep the existing local model center usable in incomplete/older bundles.
+    RemoteComputeSelector = None
 
 
 TITLE = "nnInteractive Custom Models"
 
 
-def _launch_process(command: list[str]) -> subprocess.Popen[Any]:
+def _launch_process(
+    command: list[str], output_path: Path | None = None
+) -> subprocess.Popen[Any]:
     launch = list(command)
     if os.name == "nt":
         python_path = Path(launch[0])
@@ -69,14 +76,24 @@ def _launch_process(command: list[str]) -> subprocess.Popen[Any]:
         if value not in existing:
             existing.insert(0, value)
     env["PYTHONPATH"] = os.pathsep.join(existing)
-    return subprocess.Popen(
-        launch,
-        cwd=str(ROOT),
-        env=env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    output_handle = None
+    try:
+        if output_path is not None:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_handle = output_path.open(
+                "a", encoding="utf-8", errors="replace"
+            )
+        return subprocess.Popen(
+            launch,
+            cwd=str(ROOT),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=output_handle or subprocess.DEVNULL,
+            stderr=subprocess.STDOUT if output_handle else subprocess.DEVNULL,
+        )
+    finally:
+        if output_handle is not None:
+            output_handle.close()
 
 
 def _format_time(value: object) -> str:
@@ -92,6 +109,38 @@ def _format_delta(value: object) -> str:
     except Exception:
         return "-"
     return "{:+.1f}%".format(number * 100.0)
+
+
+def _task_model_registry_signature(workspace: Path, task_id: str) -> tuple[Any, ...]:
+    """Return a small signature that changes when one task's models change."""
+    payload = load_registry(workspace)
+    wanted = safe_slug(task_id)
+    task = next(
+        (
+            row
+            for row in payload.get("tasks") or []
+            if isinstance(row, dict)
+            and safe_slug(row.get("task_id")) == wanted
+        ),
+        {},
+    )
+    models = tuple(
+        sorted(
+            (
+                str(row.get("model_id") or ""),
+                str(row.get("state") or ""),
+                bool(row.get("compatible", True)),
+                float(row.get("created_at_epoch") or 0),
+            )
+            for row in task.get("models") or []
+            if isinstance(row, dict)
+        )
+    )
+    return (
+        wanted,
+        str(task.get("recommended_model_id") or ""),
+        models,
+    )
 
 
 class TrainingCurve:
@@ -190,6 +239,7 @@ class ModelCenter:
         self.last_scan_signature: tuple[Any, ...] | None = None
         self.mask_manually_edited = False
         self.last_terminal_signature = ""
+        self.last_model_registry_signature = None
         self.case_filter_edit = None
         self.show_unavailable_cases = None
         self.choose_specific_cases = None
@@ -199,6 +249,7 @@ class ModelCenter:
         self.exported_path_widget = None
         self.model_io_process = None
         self.model_io_action = ""
+        self.remote_selector = None
         self._build()
         self._load_context_defaults()
         self.refresh_tasks()
@@ -307,6 +358,13 @@ class ModelCenter:
         layout = QtWidgets.QVBoxLayout(body)
         layout.setContentsMargins(4, 8, 4, 8)
         layout.setSpacing(12)
+
+        if RemoteComputeSelector is not None:
+            self.remote_selector = RemoteComputeSelector(
+                self.window,
+                (self.QtCore, self.QtGui, self.QtWidgets),
+            )
+            layout.addWidget(self.remote_selector.group)
 
         data = self._surface()
         data_layout = QtWidgets.QVBoxLayout(data)
@@ -622,7 +680,10 @@ class ModelCenter:
         self.model_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
         self.model_table.horizontalHeader().setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeToContents)
         self.model_table.horizontalHeader().setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeToContents)
-        self.model_table.horizontalHeader().setSectionResizeMode(5, QtWidgets.QHeaderView.ResizeToContents)
+        self.model_table.horizontalHeader().setSectionResizeMode(
+            5, QtWidgets.QHeaderView.Fixed
+        )
+        self.model_table.setColumnWidth(5, 136)
         layout.addWidget(self.model_table, 1)
         self.model_io_status = QtWidgets.QLabel("")
         self.model_io_status.setObjectName("hint")
@@ -1096,12 +1157,26 @@ class ModelCenter:
         start_kind = self.start_model.currentData()
         parent = selected_model(self.workspace, task_id) if start_kind == "current" else None
         parent_task = find_task(self.workspace, task_id)
+        execution_backend, remote_profile_id = (
+            self.remote_selector.selection()
+            if self.remote_selector is not None
+            else ("local", "")
+        )
+        if execution_backend == "remote" and not remote_profile_id:
+            self.setup_summary.setText(
+                "Choose a saved remote server or use This workstation."
+            )
+            return
         base_model = (
             resolve_registered_model_dir(self.workspace, parent, parent_task)
             if parent
             else official_model_dir(self.config)
         )
-        base_audit = audit_model_dir(base_model, include_checksum=False)
+        base_audit = (
+            audit_model_dir(base_model, include_checksum=False)
+            if parent or execution_backend == "local"
+            else {"compatible": True, "remote_official_model": True}
+        )
         if not base_audit.get("compatible"):
             self.setup_summary.setText(
                 "The starting model is incomplete: {}".format(
@@ -1142,6 +1217,8 @@ class ModelCenter:
             "model_id": model_id,
             "output_model_dir": str(output_model_dir.resolve()),
             "mimics_exe": str(self.context.get("mimics_exe") or ""),
+            "execution_backend": execution_backend,
+            "remote_profile_id": remote_profile_id,
             "created_at_epoch": time.time(),
         }
         write_json_atomic(job_dir / "request.json", request)
@@ -1159,17 +1236,54 @@ class ModelCenter:
                 "log_path": str(job_dir / "job.log"),
                 "created_at_epoch": time.time(),
                 "updated_at_epoch": time.time(),
+                "execution_backend": execution_backend,
+                "remote_profile_id": remote_profile_id,
             },
         )
-        _launch_process(
-            [
-                str(self.python),
-                str(self.pipeline),
-                "run",
-                "--job-dir",
-                str(job_dir),
-            ]
-        )
+        if execution_backend == "remote":
+            spec_path = job_dir / "remote_launch.json"
+            write_json_atomic(
+                spec_path,
+                {
+                    "schema_version": "mimics_remote_launch.v1",
+                    "kind": "nninteractive",
+                    "job_id": job_id,
+                    "job_dir": str(job_dir),
+                    "status_path": str(job_dir / "status.json"),
+                    "remote_profile_id": remote_profile_id,
+                    "created_at_epoch": time.time(),
+                },
+            )
+            process = _launch_process(
+                [
+                    str(self.python),
+                    str(ROOT / "tools" / "remote_training_controller.py"),
+                    "run",
+                    "--spec",
+                    str(spec_path),
+                ],
+                output_path=job_dir / "job.log",
+            )
+            status = read_json(job_dir / "status.json", {}) or {}
+            status.update(
+                {
+                    "controller_pid": process.pid,
+                    "launcher_pid": process.pid,
+                    "remote_launch_spec": str(spec_path),
+                    "updated_at_epoch": time.time(),
+                }
+            )
+            write_json_atomic(job_dir / "status.json", status)
+        else:
+            _launch_process(
+                [
+                    str(self.python),
+                    str(self.pipeline),
+                    "run",
+                    "--job-dir",
+                    str(job_dir),
+                ]
+            )
         self.current_job_dir = job_dir
         self.metrics = []
         self.last_metric_epoch = 0
@@ -1202,6 +1316,13 @@ class ModelCenter:
     def refresh_status(self):
         self._poll_model_io()
         self._apply_pending_scan_result()
+        registry_signature = _task_model_registry_signature(
+            self.workspace,
+            self.current_task_id(),
+        )
+        if registry_signature != self.last_model_registry_signature:
+            self.last_model_registry_signature = registry_signature
+            self.refresh_models()
         if self.current_job_dir:
             status = read_json(self.current_job_dir / "status.json", {}) or {}
             self.current_status = status
@@ -1213,6 +1334,15 @@ class ModelCenter:
                 "training": "Training",
                 "exporting_labels": "Training",
                 "preparing_data": "Preparing",
+                "preparing_remote": "Preparing",
+                "connecting_remote": "Connecting",
+                "uploading": "Uploading",
+                "starting_remote": "Starting",
+                "waiting_for_remote_gpu": "Waiting",
+                "reconnecting_remote": "Reconnecting",
+                "remote_control_unavailable": "Connection issue",
+                "finalizing_remote": "Finishing",
+                "downloading": "Downloading",
                 "waiting_for_gpu": "Waiting",
                 "validating": "Validating",
                 "registering": "Finishing",
@@ -1253,6 +1383,46 @@ class ModelCenter:
             ).format(" for " + case_id if case_id else "")
         elif state == "preparing_data":
             detail = "Checking image-label geometry and preparing the selected cases."
+        elif state == "preparing_remote":
+            detail = (
+                "Preparing source-grid images and Target Masks locally before "
+                "the remote transfer."
+            )
+        elif state == "connecting_remote":
+            detail = "Checking the saved SSH server, runtime image, model, and GPU."
+        elif state == "uploading":
+            if phase == "remote_dataset_cache_hit":
+                detail = (
+                    "The unchanged training data is already verified on the "
+                    "server. Only this job's settings are being sent."
+                )
+            else:
+                detail = "Uploading training data in the background."
+        elif state == "starting_remote":
+            detail = (
+                "Starting an isolated container on GPU {}."
+            ).format(status.get("remote_gpu_device") or "automatic")
+        elif state == "waiting_for_remote_gpu":
+            detail = (
+                "Waiting for GPU {} without blocking Mimics."
+            ).format(status.get("remote_gpu_device") or "automatic")
+        elif state == "reconnecting_remote":
+            detail = (
+                "The SSH connection was interrupted. Training remains on the "
+                "server while the controller reconnects."
+            )
+        elif state == "remote_control_unavailable":
+            detail = (
+                "The server is reachable but Docker status is temporarily "
+                "unavailable. The task remains active and is not assumed stopped."
+            )
+        elif state == "finalizing_remote":
+            detail = (
+                "Remote training finished. Verifying and packaging the model "
+                "before local registration."
+            )
+        elif state == "downloading":
+            detail = "Downloading and verifying the trained model."
         elif state == "waiting_for_gpu":
             detail = "Waiting without blocking Mimics. Pause or stop this task at any time."
         elif state == "validating":
@@ -1294,6 +1464,22 @@ class ModelCenter:
         elif state in ACTIVE_STATUSES:
             value = min(99, value)
         self.progress_bar.setValue(max(0, min(100, value)))
+        progress_stage = {
+            "validating": "Comparing models",
+            "registering": "Registering model",
+            "completed": "Completed",
+            "failed": "Needs attention",
+            "cancelled": "Stopped",
+        }.get(state, "")
+        if state == "training" and (
+            "verif" in phase or phase.startswith("final")
+        ):
+            progress_stage = "Checkpoint ready; final checks"
+        self.progress_bar.setFormat(
+            "%p% · {}".format(progress_stage)
+            if progress_stage
+            else "%p%"
+        )
         latest = status.get("latest_epoch") or {}
         displayed_loss = status.get("loss")
         if displayed_loss is None:
@@ -1388,8 +1574,13 @@ class ModelCenter:
     def _update_progress_actions(self, status):
         state = str(status.get("status") or "")
         active = state in ACTIVE_STATUSES
-        self.pause_button.setEnabled(active and state not in ("pausing", "stopping"))
-        self.resume_button.setEnabled(state in ("paused", "failed"))
+        remote = str(status.get("execution_backend") or "") == "remote"
+        self.pause_button.setEnabled(
+            active and not remote and state not in ("pausing", "stopping")
+        )
+        self.resume_button.setEnabled(
+            state in ("paused", "failed") and not remote
+        )
         self.stop_button.setEnabled(active or state == "paused")
         self.open_log_button.setEnabled(bool(self.current_job_dir))
 
@@ -1440,6 +1631,10 @@ class ModelCenter:
 
     def refresh_models(self):
         task_id = self.current_task_id()
+        self.last_model_registry_signature = _task_model_registry_signature(
+            self.workspace,
+            task_id,
+        )
         task = find_task(self.workspace, task_id) or {}
         recommended = str(task.get("recommended_model_id") or "")
         current = selected_model(self.workspace, task_id)
@@ -1474,6 +1669,14 @@ class ModelCenter:
                 for row in rows
                 if row.get("state") not in ("failed", "corrupt", "incompatible")
             ]
+        for row_index in range(self.model_table.rowCount()):
+            action_cell = self.model_table.cellWidget(row_index, 5)
+            if action_cell is not None:
+                action_cell.hide()
+                self.model_table.removeCellWidget(row_index, 5)
+                action_cell.deleteLater()
+        self.model_table.clearContents()
+        self.model_table.setRowCount(0)
         self.model_table.setRowCount(len(rows))
         for index, row in enumerate(rows):
             quality = row.get("quality") or {}
@@ -1519,10 +1722,20 @@ class ModelCenter:
                 model_is_usable(row)
                 and row.get("model_id") != recommended
             )
+            button.setMinimumWidth(96)
             button.clicked.connect(
                 lambda _checked=False, model_id=row.get("model_id"): self.use_model(model_id)
             )
-            self.model_table.setCellWidget(index, 5, button)
+            button_cell = self.QtWidgets.QWidget()
+            button_cell.setObjectName("modelActionCell")
+            button_cell.setStyleSheet(
+                "QWidget#modelActionCell { background: transparent; }"
+            )
+            button_layout = self.QtWidgets.QHBoxLayout(button_cell)
+            button_layout.setContentsMargins(6, 3, 6, 3)
+            button_layout.addWidget(button)
+            self.model_table.setCellWidget(index, 5, button_cell)
+            self.model_table.setRowHeight(index, 42)
 
     def _start_model_io(self, command, action):
         if self.model_io_process is not None:

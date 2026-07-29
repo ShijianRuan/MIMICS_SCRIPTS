@@ -23,6 +23,15 @@ ACTIVE_STATUSES = {
     "validating_cases",
     "exporting_labels",
     "preparing_data",
+    "preparing_remote",
+    "connecting_remote",
+    "uploading",
+    "starting_remote",
+    "reconnecting_remote",
+    "waiting_for_remote_gpu",
+    "remote_control_unavailable",
+    "finalizing_remote",
+    "downloading",
     "waiting_for_gpu",
     "training",
     "validating",
@@ -197,7 +206,11 @@ def bindings_path(workspace: Path) -> Path:
 
 
 def find_environment_python() -> Path:
+    configured = str(
+        os.environ.get("NNINTERACTIVE_ENV_PYTHON") or ""
+    ).strip()
     candidates = (
+        Path(configured) if configured else None,
         ROOT / "nninteractive_env" / "python.exe",
         ROOT / "nninteractive_env" / "Scripts" / "python.exe",
         ROOT / "nninteractive_env" / "python" / "python.exe",
@@ -205,7 +218,7 @@ def find_environment_python() -> Path:
         ROOT / "nninteractive_env" / "bin" / "python",
     )
     for candidate in candidates:
-        if candidate.is_file():
+        if candidate is not None and candidate.is_file():
             return candidate.resolve()
     raise FileNotFoundError(
         "The nninteractive_env Python was not found. Run Setup Environment first."
@@ -642,6 +655,32 @@ def status_summary(status: dict[str, Any]) -> str:
                 100.0 * index / total,
             )
         return "Preparing training data"
+    if phase == "preparing_remote":
+        return "Preparing verified data for the remote server"
+    if phase == "connecting_remote":
+        return "Connecting to the remote server"
+    if phase == "uploading":
+        if str(status.get("phase") or "") == "remote_dataset_cache_hit":
+            return "Verified training data reused on the remote server"
+        return "Uploading training data, {}%".format(
+            int(status.get("transfer_percent") or 0)
+        )
+    if phase == "starting_remote":
+        return "Starting the remote GPU container"
+    if phase == "reconnecting_remote":
+        return "Remote connection interrupted; training continues on the server"
+    if phase == "waiting_for_remote_gpu":
+        return "Waiting for remote GPU {}".format(
+            status.get("remote_gpu_device") or "automatic"
+        )
+    if phase == "remote_control_unavailable":
+        return "Remote training continues; Docker status is temporarily unavailable"
+    if phase in {"remote_training_completed", "finalizing_remote"}:
+        return "Remote training completed; preparing the model for local use"
+    if phase == "downloading":
+        return "Downloading the trained model, {}%".format(
+            int(status.get("transfer_percent") or 0)
+        )
     mapping = {
         "created": "Preparing training",
         "validating_cases": "Checking selected cases",

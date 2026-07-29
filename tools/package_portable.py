@@ -27,6 +27,7 @@ INCLUDE_DIRS = [
     "runtime_py35",
     "external",
     "tools",
+    "remote",
     # Model weights are portable (neural network parameters, not compiled code).
     # The Python environment itself (Lib/, Scripts/, etc.) is NOT included
     # because venvs are not portable across machines. Rebuild on the target
@@ -41,6 +42,7 @@ INCLUDE_FILES = [
     "nninteractive_finetune_config.json",
     "fewshot_config.json",
     "window_level_presets.json",
+    ".dockerignore",
     ".gitignore",
 ]
 REQUIRED_EXTERNAL_UI_FILES = [
@@ -57,6 +59,10 @@ REQUIRED_EXTERNAL_UI_FILES = [
     "tools/nninteractive_task_model_center.py",
     "tools/nninteractive_task_model_chooser.py",
     "tools/ai_model_bundle.py",
+    "tools/remote_compute.py",
+    "tools/remote_compute_ui.py",
+    "tools/remote_training_controller.py",
+    "tools/remote_worker.py",
 ]
 DEFAULT_FROZEN_ENCODER = (
     "external/dinov3-medical-seg/models/dinov3-vits16/model.onnx"
@@ -422,6 +428,14 @@ def _detect_python_version():
 _TORCH_CUDA_VERSION = "2.6.0+cu124"
 _TORCH_CUDA_PIN = "torch==2.6.0+cu124"
 _ONNXRUNTIME_GPU_PIN = "onnxruntime-gpu==1.22.0"
+_OPTIONAL_REMOTE_WHEEL_PACKAGES = [
+    "paramiko>=3.5,<5",
+    "bcrypt>=4.2",
+    "cryptography>=44",
+    "PyNaCl>=1.5",
+    "cffi>=1.17",
+    "pycparser>=2.22",
+]
 
 
 def _detect_cuda_index():
@@ -794,6 +808,17 @@ def offline_bundle():
         not in ("onnxruntime", "onnxruntime-gpu")
     ]
     freeze_packages.append(_ONNXRUNTIME_GPU_PIN)
+    installed_names = {
+        re.sub(r"[-_.]+", "-", spec.split("==", 1)[0].split(">=", 1)[0].lower())
+        for spec in freeze_packages
+    }
+    for spec in _OPTIONAL_REMOTE_WHEEL_PACKAGES:
+        name = re.sub(
+            r"[-_.]+", "-", spec.split("==", 1)[0].split(">=", 1)[0].lower()
+        )
+        if name not in installed_names:
+            freeze_packages.append(spec)
+            installed_names.add(name)
     print("  Found {} packages in pip freeze".format(len(freeze_packages)))
     print("  Downloading exact versions... this may take 15-30 minutes.")
     print()
@@ -826,7 +851,7 @@ def offline_bundle():
     print("  Verifying key packages in wheels/:")
     for pkg in [
         "torch", "numpy", "nibabel", "nnInteractive", "scipy",
-        "onnxruntime-gpu", "PySide6", "shiboken6",
+        "onnxruntime-gpu", "PySide6", "shiboken6", "paramiko",
     ]:
         found = _wheel_files_for_package(wheels_dir, pkg)
         if found:
@@ -1032,6 +1057,10 @@ def _generate_offline_bat(python_version, python_short):
     lines.append('    echo   Try: nninteractive_env\\python.exe -m pip install wheels\\*.whl --no-deps --no-index')
     lines.append("    pause")
     lines.append("    exit /b 1")
+    lines.append(")")
+    lines.append("nninteractive_env\\python.exe -c \"import paramiko; print('  Optional remote training transport ready:', paramiko.__version__)\"")
+    lines.append("if !errorlevel! neq 0 (")
+    lines.append("    echo   WARNING: Paramiko is unavailable. Local training is unaffected; remote training is disabled.")
     lines.append(")")
     lines.append(
         'if not exist "external\\dinov3-medical-seg\\models\\dinov3-vits16\\model.onnx" ('

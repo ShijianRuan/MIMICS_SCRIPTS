@@ -401,6 +401,11 @@ TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled"}
 ACTIVE_JOB_STATUSES = {
     "launching", "preparing", "exporting_labels", "waiting_for_background_mimics",
     "waiting_for_gpu", "training", "running", "cancelling", "stopping", "finalizing",
+    "preparing_remote", "connecting_remote", "uploading", "starting_remote",
+    "reconnecting_remote", "downloading",
+    "waiting_for_remote_gpu",
+    "remote_control_unavailable",
+    "finalizing_remote",
 }
 CANCELLABLE_JOB_STATUSES = ACTIVE_JOB_STATUSES - {"cancelling", "stopping", "finalizing"}
 

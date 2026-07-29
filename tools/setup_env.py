@@ -7,6 +7,7 @@ Runs outside Mimics (Python 3.10+) to check and repair the nninteractive_env.
 Usage:
     python tools/setup_env.py check                # Validate env, write JSON report
     python tools/setup_env.py install              # Check + pip install missing pkgs
+    python tools/setup_env.py install-remote       # Add optional SSH transport
     python tools/setup_env.py extract <archive>    # Extract portable .zip archive
     python tools/setup_env.py setup-from-scratch   # Create full env from scratch
 
@@ -71,6 +72,12 @@ GUI_IMPORTS = [
 GUI_PACKAGES = [
     "PySide6",
     "shiboken6",
+]
+
+# Optional client transport for SSH/Docker training. It is deliberately not
+# part of REQUIRED_PACKAGES so a local-only workstation has no new dependency.
+REMOTE_PACKAGES = [
+    "paramiko>=3.5,<5",
 ]
 
 # Mapping for __import__: pip name → import name
@@ -564,6 +571,54 @@ def install():
 
     _write_state("ok", message="All packages installed successfully.", all_ok=True)
     _log("=== Install complete: OK ===")
+    return 0
+
+
+def install_remote():
+    """Install only the optional SSH client without changing local AI packages."""
+    _write_state(
+        "installing",
+        step="installing_remote_transport",
+        message="Installing optional remote training transport...",
+    )
+    ret, _output = _run_python(["-c", "import paramiko"], timeout=60)
+    if ret == 0:
+        _write_state(
+            "ok",
+            message="Remote training transport is already installed.",
+            remote_training_ready=True,
+        )
+        return 0
+    ok, error = _pip_install(REMOTE_PACKAGES)
+    if not ok:
+        _write_state(
+            "error",
+            message="Remote training transport installation failed.",
+            error=error,
+            local_training_unaffected=True,
+        )
+        return 1
+    ret, output = _run_python(
+        [
+            "-c",
+            "import paramiko; print(paramiko.__version__)",
+        ],
+        timeout=60,
+    )
+    if ret != 0:
+        _write_state(
+            "error",
+            message="Paramiko was installed but could not be imported.",
+            error=output[-500:],
+            local_training_unaffected=True,
+        )
+        return 1
+    _write_state(
+        "ok",
+        message="Remote training transport is ready.",
+        remote_training_ready=True,
+        paramiko_version=output.strip(),
+    )
     return 0
 
 
@@ -1095,7 +1150,7 @@ def _run_shell(command, timeout=600):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python tools/setup_env.py <check|install|extract|setup-from-scratch|offline-install> [archive]")
+        print("Usage: python tools/setup_env.py <check|install|install-remote|extract|setup-from-scratch|offline-install> [archive]")
         return 1
 
     cmd = sys.argv[1].lower()
@@ -1103,6 +1158,8 @@ def main():
         return check()
     elif cmd == "install":
         return install()
+    elif cmd == "install-remote":
+        return install_remote()
     elif cmd == "extract":
         archive = sys.argv[2] if len(sys.argv) > 2 else None
         if not archive:

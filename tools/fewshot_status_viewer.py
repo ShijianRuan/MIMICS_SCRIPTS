@@ -50,6 +50,15 @@ ACTIVE_STATUSES = set([
     "configuring",
     "selecting_model",
     "training_started",
+    "preparing_remote",
+    "connecting_remote",
+    "uploading",
+    "starting_remote",
+    "reconnecting_remote",
+    "waiting_for_remote_gpu",
+    "remote_control_unavailable",
+    "finalizing_remote",
+    "downloading",
 ])
 
 
@@ -133,6 +142,25 @@ def write_cancel_marker(cancel_path):
 def request_job_cancel_async(job, status_path, grace_seconds=10.0):
     """Request cancellation without overwriting live progress from the worker."""
     cancel_error = write_cancel_marker(job.get("cancel_path"))
+    remote = str(job.get("execution_backend") or "") == "remote"
+    if remote and status_path:
+        try:
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    str(PROJECT_ROOT / "tools" / "remote_training_controller.py"),
+                    "cancel",
+                    "--status",
+                    str(status_path),
+                ],
+                cwd=str(PROJECT_ROOT),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            grace_seconds = max(float(grace_seconds), 45.0)
+        except Exception as exc:
+            cancel_error = "Could not start remote stop helper: {}".format(exc)
     pids = []
     for key in ("pid", "controller_pid", "launcher_pid"):
         try:
@@ -148,6 +176,20 @@ def request_job_cancel_async(job, status_path, grace_seconds=10.0):
             if all(not process_exists(pid) for pid in pids):
                 break
             time.sleep(0.25)
+        if remote and status_path:
+            latest = read_json(status_path, {}) or {}
+            if not bool(latest.get("remote_stop_confirmed")):
+                latest.update({
+                    "status": "stopping",
+                    "phase": "remote_termination_pending",
+                    "error": (
+                        latest.get("error")
+                        or "Waiting to reconnect and confirm the remote container stop."
+                    ),
+                    "updated_at_epoch": time.time(),
+                })
+                write_json_best_effort(status_path, latest)
+                return
         killed = []
         for pid in pids:
             if process_exists(pid) and terminate_process_tree(pid):
@@ -175,6 +217,18 @@ def request_job_cancel_async(job, status_path, grace_seconds=10.0):
             if pid > 0 and pid not in latest_pids:
                 latest_pids.append(pid)
         if any(process_exists(pid) for pid in latest_pids):
+            return
+        if remote and not bool(latest.get("remote_stop_confirmed")):
+            latest.update({
+                "status": "stopping",
+                "phase": "remote_termination_pending",
+                "error": (
+                    latest.get("error")
+                    or "The remote container stop has not been confirmed."
+                ),
+                "updated_at_epoch": time.time(),
+            })
+            write_json_best_effort(status_path, latest)
             return
         latest.update({
             "status": "cancelled",
@@ -214,6 +268,15 @@ def display_status(value):
         "configuring": "Configuring training",
         "selecting_model": "Selecting model",
         "training_started": "Training started",
+        "preparing_remote": "Preparing remote data",
+        "connecting_remote": "Connecting to remote server",
+        "uploading": "Uploading training data",
+        "starting_remote": "Starting remote training",
+        "waiting_for_remote_gpu": "Waiting for remote GPU",
+        "reconnecting_remote": "Reconnecting to remote server",
+        "remote_control_unavailable": "Remote Docker status unavailable",
+        "finalizing_remote": "Preparing remote model for local use",
+        "downloading": "Downloading trained model",
         "closed": "Closed",
         "cancelled": "Cancelled",
         "failed": "Failed",
@@ -299,6 +362,19 @@ def user_status_lines(job):
     ]
     if job.get("case_id"):
         lines.append("Case: {0}".format(job.get("case_id")))
+    if str(job.get("execution_backend") or "") == "remote":
+        lines.append(
+            "Compute: {0}, GPU {1}".format(
+                job.get("profile_name") or "remote server",
+                job.get("remote_gpu_device") or "automatic",
+            )
+        )
+        if job.get("dataset_cache_hit") is True:
+            lines.append("Data transfer: reused verified remote cache.")
+        elif job.get("dataset_cache_hit") is False and job.get("transfer_percent") is not None:
+            lines.append(
+                "Data transfer: {0}%.".format(job.get("transfer_percent"))
+            )
     strategy = job.get("strategy") or (job.get("training_options") or {}).get("strategy") or {}
     strategy_id = (strategy.get("preset") or strategy.get("id")) if isinstance(strategy, dict) else strategy
     if strategy_id:
@@ -342,6 +418,7 @@ def technical_status_lines(job):
     ]
     for label, key in (
         ("Training log", "train_log"),
+        ("Remote controller log", "controller_log_path"),
         ("Metrics history", "metrics_history"),
         ("Inference log", "log"),
         ("Prediction", "output_path"),
@@ -878,6 +955,7 @@ class StatusViewerApp(object):
         self._set_text(self.detail_text, "\n".join(user_status_lines(job)))
 
         log_path = job.get("train_log") or job.get("log")
+        controller_log = job.get("controller_log_path")
         pipeline_log = os.path.join(self.workspace, "fewshot_pipeline.log")
         log_text = read_log_text(log_path, max_bytes=2 * 1024 * 1024)
         pipeline_text = ""
@@ -892,6 +970,11 @@ class StatusViewerApp(object):
             pipeline_tail = tail_text_from_text(pipeline_text, 60)
             if pipeline_tail:
                 log_tail = (log_tail + "\n" if log_tail else "") + "---- pipeline log ----\n" + pipeline_tail
+        controller_tail = tail_text(controller_log, 40)
+        if controller_tail:
+            log_tail += (
+                "\n\n---- remote connection log ----\n" + controller_tail
+            )
         self._set_text(self.log_text, log_tail, preserve_scroll=True)
         rows = training_curve_rows(job, log_text, pipeline_text)
         self.draw_chart(rows)
@@ -1493,6 +1576,7 @@ class QtStatusViewerApp(object):
         self.detail_text.setPlainText("\n".join(user_status_lines(job)))
 
         log_path = job.get("train_log") or job.get("log")
+        controller_log = job.get("controller_log_path")
         pipeline_log = os.path.join(self.workspace, "fewshot_pipeline.log")
         log_text = read_log_text(log_path, max_bytes=2 * 1024 * 1024)
         pipeline_text = ""
@@ -1505,6 +1589,11 @@ class QtStatusViewerApp(object):
             pipeline_tail = tail_text_from_text(pipeline_text, 60)
             if pipeline_tail:
                 technical += ("\n\n" if technical else "") + "---- pipeline log ----\n" + pipeline_tail
+        controller_tail = tail_text(controller_log, 40)
+        if controller_tail:
+            technical += (
+                "\n\n---- remote connection log ----\n" + controller_tail
+            )
         self._set_log_text(log_tail)
         self.technical_text.setPlainText(technical)
         rows = training_curve_rows(job, log_text, pipeline_text)

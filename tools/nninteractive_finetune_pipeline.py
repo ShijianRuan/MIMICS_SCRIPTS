@@ -902,7 +902,11 @@ def _run_training(
                     process.returncode
                 )
             )
-        append_log(log_path, "Fine-tuning completed; the best validation checkpoint was exported.")
+        append_log(
+            log_path,
+            "Training epochs finished and the best checkpoint was exported. "
+            "Quality comparison and model registration are still running.",
+        )
     finally:
         if process is not None and process.poll() is None:
             lock_releasable = _terminate_process_tree(process)

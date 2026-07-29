@@ -1,0 +1,13 @@
+numpy>=1.24,<2.3
+nibabel>=5.2
+pydicom>=3.0
+SimpleITK>=2.4
+scipy>=1.10
+PyYAML>=6.0
+tqdm>=4.65
+tensorboard>=2.14
+torchvision>=0.21,<0.22
+transformers>=5.12,<6
+nnInteractive>=2.4
+nnunetv2>=2.7
+onnxruntime-gpu==1.22.0

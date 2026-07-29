@@ -1094,6 +1094,15 @@ def _latest_active_job(ts_root):
         "finalizing",
         "configuring",
         "selecting_model",
+        "preparing_remote",
+        "connecting_remote",
+        "uploading",
+        "starting_remote",
+        "reconnecting_remote",
+        "waiting_for_remote_gpu",
+        "remote_control_unavailable",
+        "finalizing_remote",
+        "downloading",
     ])
     rows = []
     for name in os.listdir(jobs_dir):
@@ -1138,6 +1147,15 @@ def _display_status(value):
         "configuring": "Configuring training",
         "selecting_model": "Selecting model",
         "training_started": "Training started",
+        "preparing_remote": "Preparing remote data",
+        "connecting_remote": "Connecting to remote server",
+        "uploading": "Uploading training data",
+        "starting_remote": "Starting remote training",
+        "reconnecting_remote": "Remote training continues; reconnecting",
+        "waiting_for_remote_gpu": "Waiting for remote GPU",
+        "remote_control_unavailable": "Remote Docker status unavailable",
+        "finalizing_remote": "Preparing remote model for local use",
+        "downloading": "Downloading trained model",
         "closed": "Closed",
         "cancelled": "Cancelled",
         "failed": "Failed",
@@ -3163,6 +3181,11 @@ def _show_status_text(ts_root):
         "launching", "preparing", "exporting_labels", "waiting_for_background_mimics",
         "waiting_for_gpu", "training", "running", "cancelling", "stopping",
         "finalizing", "configuring", "selecting_model", "training_started",
+        "preparing_remote", "connecting_remote", "uploading",
+        "starting_remote", "reconnecting_remote", "waiting_for_remote_gpu",
+        "remote_control_unavailable",
+        "finalizing_remote",
+        "downloading",
     ])
     active_jobs = [item for item in jobs if item[1].get("status") in active_states]
     jobs = (active_jobs or jobs)[:1]
@@ -3229,6 +3252,31 @@ def _show_status():
 
 def _request_fewshot_cancel_async(job, status_path, grace_seconds=30.0):
     """Finish cancellation only after every recorded task process has stopped."""
+    remote = str(job.get("execution_backend") or "") == "remote"
+    if remote and status_path:
+        try:
+            config = _config()
+            python_exe = _fewshot_python(config, _dinov3_root(config))
+            _launch_process(
+                [
+                    python_exe,
+                    os.path.join(
+                        _project_root(),
+                        "tools",
+                        "remote_training_controller.py",
+                    ),
+                    "cancel",
+                    "--status",
+                    status_path,
+                ],
+                cwd=_project_root(),
+            )
+            grace_seconds = max(float(grace_seconds), 45.0)
+        except Exception as exc:
+            _mimics_log(
+                logging.WARNING,
+                "Could not start remote DINOv3 stop helper: {0}".format(exc),
+            )
     pids = []
     for key in ("pid", "controller_pid", "launcher_pid"):
         try:
@@ -3258,6 +3306,21 @@ def _request_fewshot_cancel_async(job, status_path, grace_seconds=30.0):
                 latest_pids.append(pid)
         if any(_process_exists(pid) for pid in latest_pids):
             return
+        if remote and not bool(latest.get("remote_stop_confirmed")):
+            latest.update({
+                "status": "stopping",
+                "phase": "remote_termination_pending",
+                "error": (
+                    latest.get("error")
+                    or "The remote container stop has not been confirmed."
+                ),
+                "updated_at_epoch": time.time(),
+            })
+            try:
+                _write_json_atomic(status_path, latest)
+            except Exception:
+                pass
+            return
         latest.update({
             "status": "cancelled",
             "cancel_requested_at_epoch": time.time(),
@@ -3282,6 +3345,23 @@ def _request_fewshot_cancel_async(job, status_path, grace_seconds=30.0):
             if all(not _process_exists(pid) for pid in pids):
                 break
             time.sleep(0.25)
+        if remote and status_path:
+            latest = _read_json(status_path, {}) or {}
+            if not bool(latest.get("remote_stop_confirmed")):
+                latest.update({
+                    "status": "stopping",
+                    "phase": "remote_termination_pending",
+                    "error": (
+                        latest.get("error")
+                        or "Waiting to reconnect and confirm the remote container stop."
+                    ),
+                    "updated_at_epoch": time.time(),
+                })
+                try:
+                    _write_json_atomic(status_path, latest)
+                except Exception:
+                    pass
+                return
         killed = []
         for pid in pids:
             if _process_exists(pid) and _terminate_process_tree(pid):

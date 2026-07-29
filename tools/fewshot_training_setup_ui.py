@@ -43,6 +43,12 @@ from ui_theme import (
     configure_application,
     stylesheet as shared_stylesheet,
 )
+try:
+    from remote_compute_ui import RemoteComputeSelector
+except Exception:
+    # Remote compute is optional. A missing optional module must never prevent
+    # the existing local training window from opening.
+    RemoteComputeSelector = None
 from training_data_ui import (
     LABEL_SOURCE_CHOICES,
     label_source_hint,
@@ -614,6 +620,8 @@ def prepare_training_launch(context, options, run_id=None):
 
 
 def launch_training(context, options):
+    if str(options.get("execution_backend") or "local") == "remote":
+        return launch_remote_training(context, options)
     launch = prepare_training_launch(context, options)
     write_json_atomic(launch["status_path"], launch["job_payload"])
     try:
@@ -655,6 +663,106 @@ def launch_training(context, options):
     return launch["run_id"], launch["status_path"], process.pid
 
 
+def launch_remote_training(context, options):
+    profile_id = str(options.get("remote_profile_id") or "").strip()
+    if not profile_id:
+        raise RuntimeError(
+            "Choose a saved remote server or switch Compute back to This workstation."
+        )
+    launch = prepare_training_launch(context, options)
+    payload = dict(launch["job_payload"])
+    payload.update({
+        "execution_backend": "remote",
+        "remote_profile_id": profile_id,
+        "status": "preparing_remote",
+        "phase": "preparing_remote_data",
+        "progress_percent": 0,
+    })
+    write_json_atomic(launch["status_path"], payload)
+    spec_path = launch["status_path"] + ".remote.json"
+    serializable_context = json.loads(json.dumps(context, default=str))
+    write_json_atomic(spec_path, {
+        "schema_version": "mimics_remote_launch.v1",
+        "kind": "dinov3",
+        "run_id": launch["run_id"],
+        "status_path": launch["status_path"],
+        "cancel_path": launch["cancel_path"],
+        "remote_profile_id": profile_id,
+        "context": serializable_context,
+        "options": launch["options"],
+        "created_at_epoch": time.time(),
+    })
+    controller = os.path.join(
+        context.get("project_root") or _project_root,
+        "tools",
+        "remote_training_controller.py",
+    )
+    controller_log_path = launch["status_path"] + ".remote_controller.log"
+    payload["controller_log_path"] = controller_log_path
+    payload["diagnostic_log_paths"] = [controller_log_path]
+    write_json_best_effort(launch["status_path"], payload)
+    controller_log = None
+    try:
+        os.makedirs(os.path.dirname(controller_log_path), exist_ok=True)
+        controller_log = open(
+            controller_log_path, "a", encoding="utf-8", errors="replace"
+        )
+        process = subprocess.Popen(
+            [
+                str(context.get("python_exe") or sys.executable),
+                controller,
+                "run",
+                "--spec",
+                spec_path,
+            ],
+            cwd=context.get("project_root") or None,
+            stdin=subprocess.DEVNULL,
+            stdout=controller_log,
+            stderr=subprocess.STDOUT,
+            **hidden_process_kwargs()
+        )
+    except Exception:
+        payload["status"] = "failed"
+        payload["phase"] = "remote_controller_launch_failed"
+        payload["error"] = "Could not start the remote training controller."
+        payload["traceback"] = traceback.format_exc()
+        payload["updated_at_epoch"] = time.time()
+        write_json_best_effort(launch["status_path"], payload)
+        raise
+    finally:
+        if controller_log is not None:
+            try:
+                controller_log.close()
+            except Exception:
+                pass
+    latest = read_json(launch["status_path"], payload) or payload
+    latest.update({
+        "controller_pid": process.pid,
+        "launcher_pid": process.pid,
+        "remote_launch_spec": spec_path,
+        "updated_at_epoch": time.time(),
+    })
+    write_json_best_effort(launch["status_path"], latest)
+    setup_status_path = context.get("setup_status_path")
+    if setup_status_path:
+        write_json_best_effort(setup_status_path, {
+            "schema_version": "mimics_fewshot_setup.v1",
+            "job_id": context.get("setup_id"),
+            "kind": "train_setup",
+            "status": "training_started",
+            "execution_backend": "remote",
+            "remote_profile_id": profile_id,
+            "organ": context.get("organ"),
+            "ts_root": str(context.get("ts_root") or ""),
+            "workspace": context.get("workspace"),
+            "training_job_id": launch["run_id"],
+            "training_status_path": launch["status_path"],
+            "launcher_pid": process.pid,
+            "updated_at_epoch": time.time(),
+        })
+    return launch["run_id"], launch["status_path"], process.pid
+
+
 def _bool(value):
     if isinstance(value, bool):
         return value
@@ -669,6 +777,17 @@ def format_status_line(job):
     status = job.get("status")
     if job_id or status:
         parts.append("{0} | {1}".format(job_id or "job", status or "unknown"))
+    if str(job.get("execution_backend") or "") == "remote":
+        parts.append(
+            "{0}, GPU {1}".format(
+                job.get("profile_name") or "remote",
+                job.get("remote_gpu_device") or "automatic",
+            )
+        )
+        if job.get("dataset_cache_hit") is True:
+            parts.append("training data reused")
+        elif job.get("transfer_percent") is not None and status == "uploading":
+            parts.append("upload {0}%".format(job.get("transfer_percent")))
     if job.get("train_sample_count") is not None or job.get("validation_sample_count") is not None:
         parts.append("train {0}, val {1}".format(
             job.get("train_sample_count", "?"),
@@ -916,6 +1035,7 @@ class TrainingSetupApp(object):
                     else "source_dataset"
                 )
         self.started = False
+        self.remote_selector = None
         self.status_var = None
         self.vars = {}
         self.case_list = None
@@ -1870,6 +1990,13 @@ class QtTrainingSetupApp(object):
         scroll.setWidget(body)
         tab_layout.addWidget(scroll)
 
+        if RemoteComputeSelector is not None:
+            self.remote_selector = RemoteComputeSelector(
+                self.window,
+                (self.QtCore, self.QtGui, self.QtWidgets),
+            )
+            layout.addWidget(self.remote_selector.group)
+
         profile_group = QtWidgets.QGroupBox("Training data")
         profile_layout = QtWidgets.QGridLayout(profile_group)
         profile_layout.setHorizontalSpacing(12)
@@ -2095,6 +2222,10 @@ class QtTrainingSetupApp(object):
         prediction_form = QtWidgets.QFormLayout(prediction_group)
         data_form.setLabelAlignment(self.QtCore.Qt.AlignRight)
         prediction_form.setLabelAlignment(self.QtCore.Qt.AlignRight)
+        self.data_policy_note = QtWidgets.QLabel()
+        self.data_policy_note.setObjectName("hint")
+        self.data_policy_note.setWordWrap(True)
+        data_form.addRow(self.data_policy_note)
 
         self.widgets["sampling_mode"] = self._data_combo([
             ("Adaptive", "adaptive"), ("Full volume", "full"), ("Patch", "patch"),
@@ -3066,7 +3197,7 @@ class QtTrainingSetupApp(object):
         custom_patch = patch_enabled and self._widget_value("patch_size_mode") == "custom"
         self.widgets["patch_size_zyx"].setEnabled(custom_patch)
         self.widgets["neighbor_distance_mm"].setEnabled(self._widget_value("channel_policy") == "2_5d")
-        hidden_when_cached = (
+        data_policy_keys = (
             "sampling_mode",
             "patch_size_mode",
             "patch_size_zyx",
@@ -3077,17 +3208,21 @@ class QtTrainingSetupApp(object):
             "neighbor_distance_mm",
         )
         if cached_slices:
-            for key in hidden_when_cached:
+            self.data_policy_note.setText(
+                "Frozen Feature 2D uses a fixed native-slice policy. The values "
+                "below are shown for clarity and are locked to compatible settings."
+            )
+            for key in data_policy_keys:
                 widget = self.widgets.get(key)
                 if widget is None:
                     continue
                 widget.setEnabled(False)
-                widget.setVisible(False)
-                label = self._label_for_widget(key)
-                if label is not None:
-                    label.setVisible(False)
         else:
-            for key in hidden_when_cached:
+            self.data_policy_note.setText(
+                "Sampling and slice context are applied consistently during "
+                "training and prediction."
+            )
+            for key in data_policy_keys:
                 widget = self.widgets.get(key)
                 if widget is None:
                     continue
@@ -3231,6 +3366,10 @@ class QtTrainingSetupApp(object):
             options["sample_mode"] = "all"
         else:
             options.pop("cases", None)
+        if self.remote_selector is not None:
+            backend, profile_id = self.remote_selector.selection()
+            options["execution_backend"] = backend
+            options["remote_profile_id"] = profile_id
         return validate_options(options)
 
     def start_training(self):

@@ -32,6 +32,7 @@ for value in (str(ROOT), str(TOOLS)):
 
 import nninteractive_task_common as common
 import nninteractive_finetune_pipeline as pipeline
+import nninteractive_task_model_center as model_center
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +200,31 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(len(models), 2)
         self.assertEqual(models[0]["model_id"], "new")  # newest first
         self.assertEqual(models[1]["model_id"], "old")
+
+    def test_model_center_registry_signature_changes_after_registration(self):
+        before = model_center._task_model_registry_signature(
+            self.workspace,
+            "test",
+        )
+        registry = common.load_registry(self.workspace)
+        registry["tasks"].append({
+            "task_id": "test",
+            "task_name": "Test",
+            "recommended_model_id": "v1",
+            "models": [{
+                "model_id": "v1",
+                "state": "validated",
+                "compatible": True,
+                "created_at_epoch": 123.0,
+            }],
+        })
+        common.save_registry(self.workspace, registry)
+        after = model_center._task_model_registry_signature(
+            self.workspace,
+            "test",
+        )
+        self.assertNotEqual(before, after)
+        self.assertEqual("v1", after[1])
 
     def test_recommended_model_selection(self):
         registry = common.load_registry(self.workspace)

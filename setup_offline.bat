@@ -255,6 +255,14 @@ if !errorlevel! neq 0 (
 
 )
 
+nninteractive_env\python.exe -c "import paramiko; print('  Optional remote training transport ready:', paramiko.__version__)" 2>nul
+
+if !errorlevel! neq 0 (
+
+    echo   WARNING: Paramiko is unavailable. Local training is unaffected; remote training is disabled.
+
+)
+
 if not exist "external\dinov3-medical-seg\models\dinov3-vits16\model.onnx" (
 
     echo   ERROR: The default ViT-S/16 ONNX encoder is missing.

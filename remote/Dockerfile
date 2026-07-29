@@ -1,0 +1,25 @@
+# One Linux CUDA runtime for both optional remote training backends.
+# Model weights are intentionally mounted at /models and are not baked in.
+FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    MIMICS_AI_APP_ROOT=/app \
+    TORCH_HOME=/models/cache \
+    PYTHONPATH=/app:/app/tools:/app/external/dinov3-medical-seg/src:/app/external/nninteractive-finetune/src
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY remote/requirements.txt /tmp/remote-requirements.txt
+RUN python -m pip install --upgrade pip \
+    && python -m pip install -r /tmp/remote-requirements.txt
+
+COPY . /app
+RUN python -m pip install --no-deps -e /app/external/dinov3-medical-seg \
+    && python -m pip install --no-deps -e /app/external/nninteractive-finetune
+
+CMD ["python", "/app/tools/remote_worker.py", "preflight", "--models-dir", "/models"]
