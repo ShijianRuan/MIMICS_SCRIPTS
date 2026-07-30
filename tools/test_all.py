@@ -2912,6 +2912,39 @@ class TestNNInteractiveMimicsParsing(unittest.TestCase):
         self.assertTrue(_matrix_close(identity, identity))
         self.assertFalse(_matrix_close(identity, ras_to_lps))
 
+    def test_deleted_point_marker_is_not_accessed_again(self):
+        import nninteractive_mimics
+
+        class Marker(object):
+            def __init__(self):
+                self.removed = False
+
+            def __bool__(self):
+                if self.removed:
+                    raise ValueError(
+                        "Cannot access Point object. Probably it was removed"
+                    )
+                return True
+
+        marker = Marker()
+        point = {"_marker": marker}
+        visual_objects = [marker]
+        original_delete = nninteractive_mimics.mimics.data.points.delete
+        try:
+            nninteractive_mimics.mimics.data.points.delete = (
+                lambda value: setattr(value, "removed", True)
+            )
+            nninteractive_mimics._delete_point_marker(
+                point,
+                visual_objects,
+            )
+        finally:
+            nninteractive_mimics.mimics.data.points.delete = original_delete
+
+        self.assertTrue(marker.removed)
+        self.assertEqual([], visual_objects)
+        self.assertNotIn("_marker", point)
+
 
 # ============================================================================
 # L10: nninteractive_bridge DICOM loading
@@ -4153,6 +4186,39 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn("launch_visible_gui_process", edit_source)
         self.assertNotIn("hidden_process_kwargs", edit_source)
 
+    def test_status_viewer_explains_resolved_architecture_and_auto_batch(self):
+        import tools.fewshot_status_viewer as status_viewer
+
+        job = {
+            "status": "training",
+            "kind": "train",
+            "organ": "liver",
+            "training_seed": 20260711,
+            "training_fold": 0,
+            "architecture_plan": {
+                "requested_dimension": "auto",
+                "resolved_dimension": "3d",
+                "quality_mode": "standard",
+                "decoder": "context3d_lite",
+                "resolved_batch_size": 2,
+                "batch_size_source": "hardware_recommendation",
+                "gpu_memory_gb": 24.0,
+                "plan_sha256": "abc123",
+            },
+        }
+        user_lines = status_viewer.user_status_lines(job)
+        self.assertIn("Architecture: Auto \u2192 3D Standard", user_lines)
+        self.assertIn(
+            "Batch size: 2 (Auto for 24 GB GPU budget)",
+            user_lines,
+        )
+        self.assertNotIn("context3d_lite", "\n".join(user_lines))
+        technical_lines = status_viewer.technical_status_lines(job)
+        self.assertIn("Resolved decoder: context3d_lite", technical_lines)
+        self.assertIn("Architecture plan hash: abc123", technical_lines)
+        self.assertIn("Training seed: 20260711", technical_lines)
+        self.assertIn("Training fold: 0", technical_lines)
+
     def test_status_viewer_visible_gui_launcher_does_not_hide_windows(self):
         import tools.fewshot_status_viewer as status_viewer
 
@@ -4492,7 +4558,12 @@ class TestNewFeatures(unittest.TestCase):
         (model_dir / "model.safetensors").write_bytes(b"pytorch weights")
         (model_dir / "preprocessor_config.json").write_text("{}", encoding="utf-8")
         (model_dir / "config.json").write_text(
-            json.dumps({"hidden_size": 384, "patch_size": 16}),
+            json.dumps({
+                "model_type": "dinov3_vit",
+                "num_hidden_layers": 12,
+                "hidden_size": 384,
+                "patch_size": 16,
+            }),
             encoding="utf-8",
         )
         config = {
@@ -4813,41 +4884,72 @@ class TestNewFeatures(unittest.TestCase):
         self.assertTrue(options["sub_volume"])
         self.assertEqual("48,256,256", options["sub_volume_size"])
 
-    def test_fewshot_external_setup_rejects_batch_size_above_one(self):
-        """Variable-depth 3D Mimics cases should use grad accumulation, not batch_size > 1."""
+    def test_fewshot_external_setup_accepts_resource_scaled_batch(self):
+        """Real batch size remains user-configurable for larger local or remote GPUs."""
         ui = __import__("tools.fewshot_training_setup_ui", fromlist=["dummy"])
-        with self.assertRaises(ValueError):
-            ui.validate_options({
-                "epochs": 3,
-                "batch_size": 2,
-                "grad_accumulation": 1,
-                "min_samples": 1,
-                "max_samples": 0,
-                "min_val_samples": 0,
-                "lora_rank": 8,
-                "lora_alpha": 16,
-                "adapter_bottleneck": 64,
-                "keep_last_checkpoints": 2,
-                "lr": 0.001,
-                "weight_decay": 0.01,
-                "val_fraction": 0.0,
-                "mixed_precision": False,
-                "sub_volume": False,
-                "keep_materialized_dataset": False,
-                "img_size": "224,224",
-                "sub_volume_size": "32,224,224",
-            })
+        options = ui.default_training_options({})
+        options.update({
+            "epochs": 3,
+            "batch_size": 4,
+            "gpu_memory_gb": 48,
+            "sub_volume": False,
+            "val_fraction": 0.0,
+            "img_size": "224,224",
+        })
+        validated = ui.validate_options(options)
+        self.assertEqual(4, validated["batch_size"])
+        self.assertEqual(48.0, validated["gpu_memory_gb"])
 
-    def test_fewshot_external_setup_lists_only_available_model_scales(self):
-        """Expert UI should not advertise pretrained scales that are not installed."""
+        options["sub_volume"] = True
+        with self.assertRaises(ValueError):
+            ui.validate_options(options)
+
+    def test_fewshot_external_setup_lists_only_installed_model_weights(self):
+        """The setup UI lists the fixed repository and no arbitrary custom entry."""
         ui = __import__("tools.fewshot_training_setup_ui", fromlist=["dummy"])
         dinov3_root = os.path.join(self.tmp, "fake_dinov3")
-        os.makedirs(os.path.join(dinov3_root, "models", "dinov3-vitb16"))
-        os.makedirs(os.path.join(dinov3_root, "models", "dinov3-vitl16"))
+        for dirname, depth, hidden in (
+            ("dinov3-vitb16", 12, 768),
+            ("dinov3-vitl16", 24, 1024),
+        ):
+            model_root = os.path.join(dinov3_root, "models", dirname)
+            os.makedirs(model_root)
+            Path(model_root, "config.json").write_text(
+                json.dumps({
+                    "model_type": "dinov3_vit",
+                    "num_hidden_layers": depth,
+                    "hidden_size": hidden,
+                    "patch_size": 16,
+                }),
+                encoding="utf-8",
+            )
+            Path(model_root, "preprocessor_config.json").write_text(
+                json.dumps({
+                    "image_mean": [0.5, 0.5, 0.5],
+                    "image_std": [0.25, 0.25, 0.25],
+                }),
+                encoding="utf-8",
+            )
+            Path(model_root, "model.safetensors").write_bytes(b"weights")
         app = object.__new__(ui.TrainingSetupApp)
         app.context = {"dinov3_root": dinov3_root}
         app.values = {"model_scale": "vitb16"}
-        self.assertEqual(["vitb16", "vitl16"], app._available_model_scales())
+        self.assertEqual(
+            ["vitb16", "vitl16"],
+            app._available_model_scales(),
+        )
+        records = ui.discover_pretrained_models(
+            dinov3_root,
+            current_scale="vitl16",
+        )
+        self.assertEqual(["vitl16", "vitb16"], [
+            record["scale"] for record in records
+        ])
+        self.assertTrue(all(
+            os.path.realpath(os.path.dirname(record["path"]))
+            == os.path.realpath(os.path.join(dinov3_root, "models"))
+            for record in records
+        ))
 
     def test_fewshot_pipeline_disables_validation_without_val_samples(self):
         """No-validation training configs should not let the DINO script reuse train data as validation."""
@@ -4925,8 +5027,8 @@ class TestNewFeatures(unittest.TestCase):
         self.assertTrue(torch.allclose(out[:, 1], torch.ones_like(out[:, 1])))
         self.assertTrue(torch.allclose(out[:, 2], torch.ones_like(out[:, 2])))
 
-    def test_fewshot_pipeline_rejects_batch_size_above_one(self):
-        """Pipeline config generation should reject variable-depth unsafe batch sizes."""
+    def test_fewshot_pipeline_writes_resource_scaled_batch(self):
+        """Resolved real batches are preserved in the executable configuration."""
         pipeline = __import__("tools.fewshot_pipeline", fromlist=["dummy"])
 
         class Args(object):
@@ -4950,16 +5052,16 @@ class TestNewFeatures(unittest.TestCase):
             sub_volume = False
             sub_volume_size = "32,224,224"
 
-        with self.assertRaises(RuntimeError) as raised:
-            pipeline.write_training_config(
-                os.path.join(self.tmp, "bad_batch_config.yaml"),
-                os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg", "config", "mimics_lora_segformer3d.yaml"),
-                os.path.join(self.tmp, "dataset"),
-                "exp_test",
-                Args(),
-                validation_enabled=False,
-            )
-        self.assertIn("Batch size must stay 1", str(raised.exception))
+        generated = pipeline.write_training_config(
+            os.path.join(self.tmp, "batch_config.yaml"),
+            os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg", "config", "mimics_lora_segformer3d.yaml"),
+            os.path.join(self.tmp, "dataset"),
+            "exp_test",
+            Args(),
+            validation_enabled=False,
+        )
+        self.assertEqual(2, generated["training"]["batch_size"])
+        self.assertEqual("fit_pad", generated["data"]["resize_mode"])
 
     def test_fewshot_pipeline_writes_metrics_history_runtime_path(self):
         """Training config should point the DINO trainer at the structured metrics history file."""
@@ -6323,10 +6425,11 @@ class TestNewFeatures(unittest.TestCase):
         self.assertFalse(full["data"]["patch"]["enabled"])
 
     def test_mimics_training_option_matrix_reaches_backend_config(self):
-        """Every public dimensionality combination must survive Mimics UI command/config generation."""
+        """Every public architecture family survives UI, CLI, and config generation."""
         import tools.fewshot_training_setup_ui as ui
         import tools.fewshot_pipeline as pipeline
         import tools.fewshot_strategies as strategies
+        import tools.fewshot_architecture as architecture
 
         context = {
             "organ": "organ", "ts_root": self.tmp,
@@ -6335,23 +6438,51 @@ class TestNewFeatures(unittest.TestCase):
             "dinov3_root": os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg"),
             "project_root": PROJECT_ROOT, "config": {"base_config": "config/research/ct_fewshot_fast.yaml"},
         }
-        fingerprint = {"summary": {}}
-        policy = {"patch": {"enabled": True, "size_zyx": [8, 32, 32]}}
+        fingerprint = {
+            "summary": {
+                "median_spacing_zyx": [1.0, 1.0, 1.0],
+                "median_foreground_fraction": 0.02,
+            },
+        }
+        policy = {
+            "patch": {"enabled": True, "size_zyx": [8, 32, 32]},
+            "recommended_slice_axis": "axial",
+        }
         count = 0
         for preset in strategies.strategy_ids():
-            for decoder in ui.DECODER_CHOICES:
-                for channel_policy in ("repeat", "2_5d"):
-                    for method in ("frozen", "lora", "adapter"):
+            for dimension in ("auto", "2d", "3d"):
+                for quality in ("standard", "high_detail"):
+                    if dimension == "2d" and quality == "high_detail":
+                        continue
+                    for method in ("frozen", "lora"):
                         options = ui.default_training_options(context["config"])
                         options.update(strategies.strategy_defaults(preset))
                         options.update({
-                            "strategy": preset, "decoder": decoder, "channel_policy": channel_policy,
+                            "strategy": preset,
+                            "training_dimension": dimension,
+                            "quality_mode": quality,
+                            "decoder": "auto",
                             "finetune_method": method, "cases": ["case1"], "val_fraction": 0.0,
                             "export_labels_before_training": False,
+                            "modality": "ct",
+                            "batch_size": 1,
                         })
                         options = ui.validate_options(options)
                         launch = ui.prepare_training_launch(context, options, run_id="matrix_{}".format(count))
                         args = pipeline.build_parser().parse_args(launch["cmd"][2:])
+                        plan = architecture.resolve_architecture(
+                            {
+                                "training_dimension": args.training_dimension,
+                                "quality_mode": args.quality_mode,
+                                "finetune_method": args.finetune_method,
+                                "decoder": args.decoder,
+                            },
+                            fingerprint,
+                            gpu_memory_gb=24,
+                        )
+                        args.decoder = plan["decoder"]
+                        args.architecture_plan = plan
+                        args.encoder_backend = "pytorch"
                         compiled = strategies.compile_strategy(
                             args.strategy, fingerprint=fingerprint, policy=policy,
                             user_options=json.loads(args.strategy_options_json),
@@ -6361,16 +6492,286 @@ class TestNewFeatures(unittest.TestCase):
                             config_path, args.base_config, self.tmp, "matrix", args,
                             validation_enabled=False, strategy_overrides=compiled,
                         )
-                        self.assertEqual(decoder, generated["decoder"]["type"])
-                        expected_channel = "repeat" if decoder == "feature_unet2d" else channel_policy
-                        expected_method = "frozen" if decoder == "feature_unet2d" else method
-                        self.assertEqual(expected_channel, generated["model"]["channel_policy"])
-                        self.assertEqual(expected_method, generated["finetune"]["method"])
-                        if decoder == "feature_unet2d":
-                            self.assertEqual("full_volume", args.strategy)
-                            self.assertFalse(generated["data"]["patch"]["enabled"])
+                        self.assertEqual(plan["decoder"], generated["decoder"]["type"])
+                        self.assertEqual(method, generated["finetune"]["method"])
+                        self.assertEqual(
+                            ["q_proj", "v_proj"],
+                            generated["finetune"]["target_modules"],
+                        )
+                        self.assertEqual(
+                            plan["resolved_dimension"],
+                            generated["decoder"]["architecture_family"],
+                        )
+                        self.assertEqual("fit_pad", generated["data"]["resize_mode"])
                         count += 1
-        self.assertEqual(len(strategies.strategy_ids()) * len(ui.DECODER_CHOICES) * 2 * 3, count)
+        self.assertEqual(len(strategies.strategy_ids()) * 5 * 2, count)
+
+    def test_architecture_auto_is_orientation_independent_and_resource_aware(self):
+        import tools.fewshot_architecture as architecture
+
+        thick_sagittal = {
+            "summary": {"median_spacing_zyx": [1.0, 1.0, 4.0]},
+        }
+        plan = architecture.resolve_architecture(
+            {
+                "training_dimension": "auto",
+                "quality_mode": "high_detail",
+                "finetune_method": "frozen",
+            },
+            thick_sagittal,
+            gpu_memory_gb=48,
+        )
+        self.assertEqual("2d", plan["resolved_dimension"])
+        self.assertEqual("scale_aware2d", plan["decoder"])
+        self.assertEqual("standard", plan["quality_mode"])
+
+        isotropic = {
+            "summary": {"median_spacing_zyx": [1.0, 1.0, 1.0]},
+        }
+        plan = architecture.resolve_architecture(
+            {
+                "training_dimension": "auto",
+                "quality_mode": "high_detail",
+                "finetune_method": "lora",
+            },
+            isotropic,
+            gpu_memory_gb=48,
+        )
+        self.assertEqual("3d", plan["resolved_dimension"])
+        self.assertEqual("context3d_hybrid", plan["decoder"])
+        self.assertEqual(
+            1,
+            architecture.recommended_batch_size(
+                plan,
+                {
+                    "patch": {"enabled": True},
+                    "input_size": [224, 224],
+                },
+                gpu_memory_gb=48,
+            ),
+        )
+        frozen_plan = architecture.resolve_architecture(
+            {
+                "training_dimension": "3d",
+                "quality_mode": "high_detail",
+                "finetune_method": "frozen",
+            },
+            isotropic,
+            gpu_memory_gb=48,
+        )
+        self.assertEqual(
+            2,
+            architecture.recommended_batch_size(
+                frozen_plan,
+                {
+                    "patch": {"enabled": True},
+                    "input_size": [224, 224],
+                },
+                gpu_memory_gb=48,
+            ),
+        )
+        self.assertEqual(
+            1,
+            architecture.recommended_batch_size(
+                plan,
+                {
+                    "patch": {"enabled": True},
+                    "input_size": [384, 384],
+                },
+                gpu_memory_gb=48,
+            ),
+        )
+
+    def test_dinov3_feature_layers_follow_backbone_depth(self):
+        import tools.fewshot_architecture as architecture
+        import tools.fewshot_pipeline as pipeline
+
+        self.assertEqual([2, 5, 8, 11], architecture.intermediate_layer_indices(12))
+        self.assertEqual([4, 11, 17, 23], architecture.intermediate_layer_indices(24))
+        self.assertEqual([6, 15, 23, 31], architecture.intermediate_layer_indices(32))
+        self.assertEqual([0, 1, 3, 4], architecture.intermediate_layer_indices(5))
+
+        model_root = os.path.join(
+            PROJECT_ROOT,
+            "external",
+            "dinov3-medical-seg",
+            "models",
+            "dinov3-vitl16",
+        )
+        base_config = os.path.join(
+            PROJECT_ROOT,
+            "external",
+            "dinov3-medical-seg",
+            "config",
+            "research",
+            "ct_fewshot_fast.yaml",
+        )
+        plan = pipeline._backbone_feature_plan(
+            model_root,
+            base_config,
+            "vitl16",
+        )
+        self.assertEqual(24, plan["num_hidden_layers"])
+        self.assertEqual(1024, plan["hidden_size"])
+        self.assertEqual(16, plan["patch_size"])
+        self.assertEqual([4, 11, 17, 23], plan["out_indices"])
+
+        for name, depth, hidden in (
+            ("dinov3-vits16", 12, 384),
+            ("dinov3-vitb16", 12, 768),
+            ("dinov3-vitl16", 24, 1024),
+        ):
+            spec = architecture.inspect_dinov3_vit_weights(
+                os.path.join(
+                    PROJECT_ROOT,
+                    "external",
+                    "dinov3-medical-seg",
+                    "models",
+                    name,
+                )
+            )
+            self.assertEqual(depth, spec["num_hidden_layers"])
+            self.assertEqual(hidden, spec["hidden_size"])
+            self.assertEqual(16, spec["patch_size"])
+            self.assertEqual(
+                architecture.intermediate_layer_indices(depth),
+                spec["out_indices"],
+            )
+
+    def test_custom_backbone_rejects_non_dinov3_and_uses_its_patch_size(self):
+        import tools.fewshot_architecture as architecture
+        import tools.fewshot_training_setup_ui as setup_ui
+
+        root = os.path.join(self.tmp, "wrong_backbone")
+        os.makedirs(root)
+        with open(os.path.join(root, "config.json"), "w") as handle:
+            json.dump({
+                "model_type": "vit",
+                "num_hidden_layers": 12,
+                "hidden_size": 384,
+                "patch_size": 16,
+            }, handle)
+        for name in ("model.safetensors", "preprocessor_config.json"):
+            with open(os.path.join(root, name), "wb") as handle:
+                handle.write(b"x")
+        with self.assertRaisesRegex(ValueError, "Unsupported pretrained architecture"):
+            architecture.inspect_dinov3_vit_weights(root)
+
+        valid_root = os.path.join(self.tmp, "custom_patch14")
+        os.makedirs(valid_root)
+        Path(valid_root, "config.json").write_text(
+            json.dumps({
+                "model_type": "dinov3_vit",
+                "num_hidden_layers": 8,
+                "hidden_size": 512,
+                "patch_size": 14,
+            }),
+            encoding="utf-8",
+        )
+        Path(valid_root, "preprocessor_config.json").write_text(
+            json.dumps({
+                "image_mean": [0.4, 0.5, 0.6],
+                "image_std": [0.2, 0.25, 0.3],
+            }),
+            encoding="utf-8",
+        )
+        Path(valid_root, "model.safetensors").write_bytes(b"weights")
+        options = setup_ui.default_training_options({})
+        options.update({
+            "model_scale": "custom",
+            "model_path": valid_root,
+            "img_size": "224,224",
+            "val_fraction": 0.0,
+        })
+        validated = setup_ui.validate_options(options)
+        self.assertEqual(valid_root, validated["model_path"])
+        options["img_size"] = "256,256"
+        with self.assertRaisesRegex(ValueError, "patch size \\(14\\)"):
+            setup_ui.validate_options(options)
+
+    def test_auto_modality_uses_manifest_and_rejects_mixed_runs(self):
+        import dataset_manifest
+        import tools.fewshot_pipeline as pipeline
+
+        root = os.path.join(self.tmp, "manifest")
+        os.makedirs(root)
+        dataset_manifest.update_case(
+            root,
+            "case_ct",
+            provenance={"source_modality": "CT"},
+        )
+        samples = [{"case_id": "case_ct", "image": os.path.join(self.tmp, "image.nii.gz")}]
+        result = pipeline.resolve_training_modality("auto", samples, [root])
+        self.assertEqual("ct", result["resolved"])
+        self.assertEqual("ct", samples[0]["source_modality"])
+
+        dataset_manifest.update_case(
+            root,
+            "case_mr",
+            provenance={"source_modality": "MR"},
+        )
+        samples.append(
+            {"case_id": "case_mr", "image": os.path.join(self.tmp, "image2.nii.gz")}
+        )
+        with self.assertRaisesRegex(RuntimeError, "mixed CT and MR"):
+            pipeline.resolve_training_modality("auto", samples, [root])
+
+    def test_auto_modality_requires_explicit_choice_for_partial_metadata(self):
+        import dataset_manifest
+        import tools.fewshot_pipeline as pipeline
+
+        root = os.path.join(self.tmp, "manifest_partial")
+        os.makedirs(root)
+        dataset_manifest.update_case(
+            root,
+            "case_ct",
+            provenance={"source_modality": "CT"},
+        )
+        samples = [
+            {
+                "case_id": "case_ct",
+                "image": os.path.join(self.tmp, "ct_source.nii.gz"),
+            },
+            {
+                "case_id": "case_unknown",
+                "image": os.path.join(self.tmp, "scan.nii.gz"),
+            },
+        ]
+        with self.assertRaisesRegex(RuntimeError, "Choose CT, MRI, or Other"):
+            pipeline.resolve_training_modality("auto", samples, [root])
+
+
+    def test_qt_architecture_combos_return_internal_values(self):
+        try:
+            from PySide6 import QtCore, QtGui, QtWidgets
+        except ImportError:
+            self.skipTest("PySide6 is not installed in this test environment")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        import tools.fewshot_training_setup_ui as ui
+
+        application = QtWidgets.QApplication.instance()
+        if application is None:
+            application = QtWidgets.QApplication([])
+        setup = object.__new__(ui.QtTrainingSetupApp)
+        setup.QtCore = QtCore
+        setup.QtGui = QtGui
+        setup.QtWidgets = QtWidgets
+        setup.values = {}
+        setup.widgets = {
+            "training_dimension": setup._data_combo(
+                ui.TRAINING_DIMENSION_ITEMS,
+                "auto",
+            ),
+            "quality_mode": setup._data_combo(
+                ui.QUALITY_MODE_ITEMS,
+                "standard",
+            ),
+        }
+        self.assertEqual("auto", setup._widget_value("training_dimension"))
+        setup._set_widget_value("training_dimension", "3d")
+        setup._set_widget_value("quality_mode", "high_detail")
+        self.assertEqual("3d", setup._widget_value("training_dimension"))
+        self.assertEqual("high_detail", setup._widget_value("quality_mode"))
 
     def test_every_public_policy_choice_compiles(self):
         import tools.fewshot_strategies as strategies
@@ -6953,6 +7354,134 @@ class TestNewFeatures(unittest.TestCase):
                     **kwargs
                 )
             torch.testing.assert_close(expected, actual, rtol=0.0, atol=0.0, msg=decoder_name)
+
+    def test_public_decoders_accept_small_base_and_large_hidden_sizes(self):
+        import torch
+        sys.path.insert(
+            0,
+            os.path.join(os.getcwd(), "external", "dinov3-medical-seg"),
+        )
+        from src.models.decoder_3d import DecoderFactory
+
+        for hidden_size in (384, 768, 1024):
+            features = [
+                torch.randn(1, hidden_size, 3, 2, 2)
+                for _ in range(4)
+            ]
+            for decoder_name in (
+                "scale_aware2d",
+                "context3d_lite",
+                "context3d_hybrid",
+            ):
+                decoder = DecoderFactory.create(
+                    decoder_name,
+                    [hidden_size] * 4,
+                    2,
+                )
+                with torch.no_grad():
+                    output = decoder(
+                        features,
+                        (1, 1, 3, 32, 32),
+                    )
+                self.assertEqual(
+                    (1, 2, 3, 32, 32),
+                    tuple(output.shape),
+                    "{} hidden={}".format(
+                        decoder_name, hidden_size
+                    ),
+                )
+
+    def test_variable_depth_batch_ignores_padding_in_loss(self):
+        import torch
+        sys.path.insert(
+            0,
+            os.path.join(os.getcwd(), "external", "dinov3-medical-seg"),
+        )
+        from src.data.dataset_3d import pad_volume_batch
+        from src.training.losses import DiceFocalLoss
+
+        items = []
+        for index, depth in enumerate((2, 4)):
+            items.append({
+                "image": torch.randn(3, depth, 16, 16),
+                "label": torch.randint(0, 2, (depth, 16, 16)),
+                "case_id": str(index),
+                "image_path": "image",
+                "label_path": "label",
+                "spacing_zyx": torch.ones(3),
+            })
+        batch = pad_volume_batch(items)
+        logits = torch.randn(
+            2,
+            2,
+            4,
+            16,
+            16,
+            requires_grad=True,
+        )
+        loss = DiceFocalLoss()(logits, batch["label"])["loss"]
+        loss.backward()
+        self.assertTrue(torch.isfinite(loss))
+        self.assertEqual(
+            0,
+            int(torch.count_nonzero(logits.grad[0, :, 2:])),
+        )
+
+    def test_fit_pad_preprocessing_preserves_aspect_ratio_and_contract(self):
+        import numpy as np
+        sys.path.insert(
+            0,
+            os.path.join(os.getcwd(), "external", "dinov3-medical-seg"),
+        )
+        from src.data.dataset_3d import fit_pad_geometry, prepare_model_input
+        from src.data.input_contract import input_contract_for_config
+
+        geometry = fit_pad_geometry((20, 40), (32, 32))
+        self.assertEqual((16, 32), geometry["resized_size"])
+        volume = np.ones((3, 20, 40), dtype=np.float32)
+        prepared = prepare_model_input(
+            volume,
+            (32, 32),
+            resize_mode="fit_pad",
+        )
+        self.assertEqual((1, 3, 32, 32), tuple(prepared.shape))
+        contract = input_contract_for_config({
+            "data": {
+                "img_size": [32, 32],
+                "resize_mode": "fit_pad",
+            },
+            "model": {},
+            "training": {},
+        })
+        self.assertEqual("fit_pad", contract["resize_mode"])
+        self.assertEqual("dinov3_volume_input.v3", contract["schema_version"])
+        self.assertEqual("sample", contract["normalization_scope"])
+
+    def test_legacy_stretch_input_contract_remains_loadable(self):
+        sys.path.insert(
+            0,
+            os.path.join(os.getcwd(), "external", "dinov3-medical-seg"),
+        )
+        from src.data.input_contract import (
+            input_contract_for_config,
+            validate_input_contract,
+        )
+
+        config = {
+            "data": {"img_size": [224, 224]},
+            "model": {},
+            "training": {},
+        }
+        legacy = input_contract_for_config(config)
+        legacy["schema_version"] = "dinov3_volume_input.v1"
+        legacy.pop("resize_mode")
+        legacy.pop("normalization_scope")
+        config["runtime"] = {"input_contract": legacy}
+        self.assertEqual(legacy, validate_input_contract(config))
+
+        config["data"]["resize_mode"] = "fit_pad"
+        with self.assertRaises(RuntimeError):
+            validate_input_contract(config)
 
     def test_2d_decoder_all_variants_in_factory(self):
         """All 2D decoder types must be creatable via DecoderFactory."""

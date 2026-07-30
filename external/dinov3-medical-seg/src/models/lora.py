@@ -6,6 +6,14 @@ import torch
 import torch.nn as nn
 import math
 
+DEFAULT_LORA_TARGET_MODULES = ("q_proj", "v_proj")
+SUPPORTED_LORA_TARGET_MODULES = {
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+}
+
 
 class LoRALinear(nn.Module):
     """LoRA wrapper for nn.Linear.
@@ -76,13 +84,24 @@ def apply_lora_to_dinov3(
         r: LoRA rank
         alpha: LoRA scaling factor
         dropout: LoRA dropout
-        target_modules: which modules to target (default: ['query', 'value'])
+        target_modules: attention projections to target (default: ['q_proj', 'v_proj'])
 
     Returns:
         backbone with LoRA applied (modified in-place)
     """
     if target_modules is None:
-        target_modules = ["q_proj", "v_proj"]
+        target_modules = list(DEFAULT_LORA_TARGET_MODULES)
+    target_modules = [str(value).strip() for value in target_modules]
+    if (
+        not target_modules
+        or len(target_modules) != len(set(target_modules))
+        or any(value not in SUPPORTED_LORA_TARGET_MODULES for value in target_modules)
+    ):
+        raise ValueError(
+            "LoRA target_modules must be a non-empty, unique subset of {}.".format(
+                sorted(SUPPORTED_LORA_TARGET_MODULES)
+            )
+        )
 
     lora_modules = []
 
@@ -99,8 +118,23 @@ def apply_lora_to_dinov3(
                     lora_modules.append(lora_linear)
 
     n_layers = len(backbone.backbone.model.layer)
-    print(f"Applied LoRA (r={r}, alpha={alpha}) to {len(lora_modules)} modules "
-          f"across {n_layers} layers")
+    expected_modules = n_layers * len(target_modules)
+    if len(lora_modules) != expected_modules:
+        raise RuntimeError(
+            "DINOv3 LoRA expected {} configured attention projections but found {}. "
+            "The installed Transformers model structure is incompatible.".format(
+                expected_modules, len(lora_modules)
+            )
+        )
+    print(
+        "Applied LoRA (r={}, alpha={}, targets={}) to {} modules across {} layers".format(
+            r,
+            alpha,
+            ",".join(target_modules),
+            len(lora_modules),
+            n_layers,
+        )
+    )
     return backbone
 
 

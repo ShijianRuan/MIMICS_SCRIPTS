@@ -55,7 +55,12 @@ def _patch_coverage(extent_zyx, shape_zyx, image_size: int, patch_size: int = 16
     }
 
 
-def build_training_fingerprint(fold_root: Path, support_case_ids: Sequence[str], task_name: str) -> dict:
+def build_training_fingerprint(
+    fold_root: Path,
+    support_case_ids: Sequence[str],
+    task_name: str,
+    modality: str = "other",
+) -> dict:
     """Describe only selected support images and labels, never evaluation data."""
     rows = []
     for case_id in support_case_ids:
@@ -93,11 +98,18 @@ def build_training_fingerprint(fold_root: Path, support_case_ids: Sequence[str],
     median_spacing = [float(value) for value in np.median(spacing, axis=0)]
     median_shape = [float(value) for value in np.median(shapes, axis=0)]
     median_extent = [float(value) for value in np.median(extents, axis=0)]
+    p90_extent = [float(value) for value in np.percentile(extents, 90, axis=0)]
+    p95_extent = [float(value) for value in np.percentile(extents, 95, axis=0)]
+    p90_extent_mm = [
+        float(value)
+        for value in np.asarray(p90_extent, dtype=float)
+        * np.asarray(median_spacing, dtype=float)
+    ]
     payload = {
         "schema_version": "dinov3_medical_training_fingerprint.v2",
         "task": task_name,
         "support_case_ids": [str(value) for value in support_case_ids],
-        "modality": "ct",
+        "modality": str(modality or "other").strip().lower(),
         "metadata_availability": {
             "scanner_or_site": False,
             "patient_ids": True,
@@ -118,13 +130,16 @@ def build_training_fingerprint(fold_root: Path, support_case_ids: Sequence[str],
             "median_shape_zyx": median_shape,
             "median_foreground_fraction": float(np.median(foreground_fraction)),
             "median_foreground_extent_zyx": median_extent,
+            "p90_foreground_extent_zyx": p90_extent,
+            "p95_foreground_extent_zyx": p95_extent,
+            "p90_foreground_extent_mm_zyx": p90_extent_mm,
             "support_bbox_union_normalized_zyx": [
                 [float(value) for value in np.min(boxes[:, 0, :], axis=0)],
                 [float(value) for value in np.max(boxes[:, 1, :], axis=0)],
             ],
             "target_patch_coverage": {
                 str(image_size): _patch_coverage(median_extent, median_shape, image_size)
-                for image_size in (224, 256, 320)
+                for image_size in (224, 256, 320, 384)
             },
         },
     }
@@ -139,12 +154,36 @@ def derive_policy(fingerprint: Mapping, *, gpu_memory_gb: float = 12.0) -> dict:
     spacing_iqr = np.asarray(summary["spacing_iqr_zyx"], dtype=float)
     shape = np.asarray(summary["median_shape_zyx"], dtype=float)
     extent = np.asarray(summary["median_foreground_extent_zyx"], dtype=float)
+    p90_extent = np.asarray(
+        summary.get("p90_foreground_extent_zyx")
+        or summary["median_foreground_extent_zyx"],
+        dtype=float,
+    )
     foreground_fraction = float(summary["median_foreground_fraction"])
-    coverage_256 = summary.get("target_patch_coverage", {}).get("256", {})
-    minimum_patches_256 = float(coverage_256.get("minimum_inplane_patches", float("inf")))
-    anisotropy = float(spacing[0] / max(1e-6, min(spacing[1], spacing[2])))
+    largest_spacing_axis = int(np.argmax(spacing))
+    plane_axes = [
+        axis for axis in range(3) if axis != largest_spacing_axis
+    ]
+    plane_scale_256 = min(
+        256.0 / max(1.0, shape[axis])
+        for axis in plane_axes
+    )
+    minimum_patches_256 = float(
+        min(
+            extent[axis] * plane_scale_256 / 16.0
+            for axis in plane_axes
+        )
+    )
+    anisotropy = float(
+        np.max(spacing) / max(1e-6, np.min(spacing))
+    )
     spacing_variability = float(np.max(spacing_iqr / np.maximum(spacing, 1e-6)))
-    inplane_extent_fraction = float(np.min(extent[1:] / np.maximum(shape[1:], 1.0)))
+    inplane_extent_fraction = float(
+        min(
+            extent[axis] / max(shape[axis], 1.0)
+            for axis in plane_axes
+        )
+    )
     # Foreground fraction alone is not enough: a large organ may occupy under
     # 1% of a whole-body CT while still covering many ViT patches. Require
     # either direct patch under-coverage or two geometric/volume signals.
@@ -175,17 +214,21 @@ def derive_policy(fingerprint: Mapping, *, gpu_memory_gb: float = 12.0) -> dict:
     # upsample a near-empty crop. Prevents a sub-voxel target collapsing the box.
     patch_lower_bound = np.array([16.0, 24.0, 24.0], dtype=float)
     tiny_patch_size = [
-        int(min(shape[axis], max(patch_lower_bound[axis], round(extent[axis] * patch_margin))))
+        int(min(shape[axis], max(patch_lower_bound[axis], round(p90_extent[axis] * patch_margin))))
         for axis in range(3)
     ]
     patch_size = tiny_patch_size if tiny_target else legacy_patch_size
     # Patch model input still has to be a valid DINO patch grid after resize.
     image_size = 320 if small_target else 256
+    if minimum_patches_256 < 2.0 and gpu_memory_gb >= 16:
+        image_size = 384
+    recommended_slice_axis = ("axial", "coronal", "sagittal")[largest_spacing_axis]
     policy = {
         "policy_version": "dinov3_medical_data_policy.v1",
         "input_size": [image_size, image_size],
         "slice_batch_size": 1 if image_size >= 320 or gpu_memory_gb <= 12 else 2,
         "use_2_5d": bool(anisotropy >= 2.5),
+        "recommended_slice_axis": recommended_slice_axis,
         "target_spacing_xyz": None if spacing_variability < 0.15 else [float(spacing[2]), float(spacing[1]), float(spacing[0])],
         "patch": {
             "enabled": small_target,
@@ -201,6 +244,7 @@ def derive_policy(fingerprint: Mapping, *, gpu_memory_gb: float = 12.0) -> dict:
             "median_foreground_fraction": foreground_fraction,
             "minimum_inplane_target_patches_at_256": minimum_patches_256,
             "minimum_inplane_extent_fraction": inplane_extent_fraction,
+            "p90_foreground_extent_zyx": [float(value) for value in p90_extent],
             "small_target": small_target,
             "tiny_target": tiny_target,
             "patch_window_source": "extent_times_margin" if tiny_target else "legacy_spacing",

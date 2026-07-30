@@ -327,7 +327,11 @@ def update_case(
         if mimics_geometry:
             current["mimics_geometry"] = dict(mimics_geometry)
         if provenance:
-            current["provenance"] = dict(provenance)
+            current_provenance = current.get("provenance")
+            if not isinstance(current_provenance, dict):
+                current_provenance = {}
+            current_provenance.update(dict(provenance))
+            current["provenance"] = current_provenance
         current_labels = current.get("labels")
         if not isinstance(current_labels, dict):
             current_labels = {}

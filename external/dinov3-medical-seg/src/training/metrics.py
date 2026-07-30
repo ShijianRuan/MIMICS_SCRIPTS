@@ -20,14 +20,15 @@ def dice_score(pred: torch.Tensor, target: torch.Tensor, num_classes: int,
     """
     if pred.dim() == 5:
         pred = pred.argmax(dim=1)
+    valid = target >= 0
 
     smooth = 1e-6
     dsc_per_class = []
 
     start = 1 if ignore_background else 0
     for c in range(start, num_classes):
-        pred_c = (pred == c).float()
-        target_c = (target == c).float()
+        pred_c = ((pred == c) & valid).float()
+        target_c = ((target == c) & valid).float()
 
         intersection = (pred_c * target_c).sum()
         union = pred_c.sum() + target_c.sum()
@@ -63,12 +64,13 @@ def hausdorff_95(pred: torch.Tensor, target: torch.Tensor, num_classes: int,
 
         pred_np = pred.cpu().numpy().astype(np.int64)
         target_np = target.cpu().numpy().astype(np.int64)
+        valid_np = target_np >= 0
 
         hd95_per_class = []
         start = 1  # skip background
         for c in range(start, num_classes):
-            pred_c = (pred_np == c).astype(np.uint8)
-            target_c = (target_np == c).astype(np.uint8)
+            pred_c = ((pred_np == c) & valid_np).astype(np.uint8)
+            target_c = ((target_np == c) & valid_np).astype(np.uint8)
 
             if pred_c.sum() == 0 or target_c.sum() == 0:
                 hd95_per_class.append(float("nan"))

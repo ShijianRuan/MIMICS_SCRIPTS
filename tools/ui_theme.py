@@ -82,6 +82,9 @@ def stylesheet(extra=""):
         font-family: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "Helvetica Neue", sans-serif;
         font-size: 10pt;
     }
+    QLabel {
+        background: transparent;
+    }
     QLabel#titleLabel, QLabel#title {
         color: #101828;
         font-size: 18pt;
@@ -133,6 +136,9 @@ def stylesheet(extra=""):
         margin-top: 12px;
         padding-top: 14px;
     }
+    QGroupBox QWidget {
+        background: transparent;
+    }
     QGroupBox::title {
         subcontrol-origin: margin;
         left: 12px;
@@ -148,6 +154,7 @@ def stylesheet(extra=""):
     QTabBar::tab {
         padding: 8px 18px;
         background: #eef2f6;
+        color: #475467;
         border: 1px solid #d9e0e8;
         border-bottom: none;
         border-top-left-radius: 6px;
@@ -164,6 +171,7 @@ def stylesheet(extra=""):
         border: 1px solid #c9d2dc;
         border-radius: 6px;
         padding: 5px 7px;
+        min-height: 22px;
         selection-background-color: #dbeafe;
         selection-color: #101828;
     }
@@ -212,6 +220,19 @@ def stylesheet(extra=""):
     QScrollArea, QScrollArea > QWidget > QWidget {
         background: transparent;
         border: none;
+    }
+    QScrollBar:vertical {
+        background: transparent;
+        width: 12px;
+        margin: 2px;
+    }
+    QScrollBar::handle:vertical {
+        background: #b8c2ce;
+        border-radius: 4px;
+        min-height: 32px;
+    }
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+        height: 0;
     }
     QPushButton {
         min-height: 30px;

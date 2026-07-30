@@ -3,6 +3,7 @@ DINOv3 backbone via HuggingFace transformers (local weights).
 """
 
 import hashlib
+import json
 import os
 from pathlib import Path
 
@@ -14,6 +15,58 @@ from transformers import DINOv3ViTBackbone, AutoImageProcessor
 
 IMAGENET_DEFAULT_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_DEFAULT_STD = (0.229, 0.224, 0.225)
+
+
+def intermediate_layer_indices(num_hidden_layers: int) -> list[int]:
+    """Return four approximately uniform semantic depths for a ViT backbone."""
+    depth = int(num_hidden_layers)
+    if depth < 4:
+        raise ValueError("DINOv3 multi-level extraction requires at least four layers")
+    indices = [
+        depth // 5,
+        depth // 2 - 1,
+        (3 * depth) // 4 - 1,
+        depth - 1,
+    ]
+    if indices != sorted(set(indices)) or indices[0] < 0:
+        indices = [
+            int(round(index * (depth - 1) / 3.0))
+            for index in range(4)
+        ]
+    if indices != sorted(set(indices)) or indices[0] < 0:
+        raise ValueError(
+            "Could not derive four unique feature layers from depth {}".format(depth)
+        )
+    return indices
+
+
+def _local_model_depth(model_path: str) -> int:
+    config_path = Path(model_path) / "config.json"
+    try:
+        with config_path.open("r", encoding="utf-8") as handle:
+            return int((json.load(handle) or {}).get("num_hidden_layers") or 0)
+    except Exception:
+        return 0
+
+
+def _validated_out_indices(out_indices, num_hidden_layers: int) -> list[int]:
+    depth = int(num_hidden_layers)
+    indices = (
+        intermediate_layer_indices(depth)
+        if out_indices is None
+        else [int(value) for value in out_indices]
+    )
+    if not indices:
+        raise ValueError("At least one DINOv3 feature layer is required")
+    if indices != sorted(set(indices)):
+        raise ValueError("DINOv3 feature layer indices must be unique and sorted")
+    if indices[0] < 0 or indices[-1] >= depth:
+        raise ValueError(
+            "DINOv3 feature layers {} are invalid for a {}-layer backbone".format(
+                indices, depth
+            )
+        )
+    return indices
 
 
 def normalize_imagenet(images_2d: torch.Tensor, mean, std) -> torch.Tensor:
@@ -49,13 +102,16 @@ class DINOv3Backbone(nn.Module):
         expected_sha256=None,
     ):
         super().__init__()
-        if out_indices is None:
-            out_indices = [2, 5, 8, 11]
-
         # Resolve relative path to absolute so transformers doesn't
         # misinterpret it as a HuggingFace Hub repo ID.
         self.model_path = os.path.abspath(model_path)
-        self.out_indices = out_indices
+        configured_depth = _local_model_depth(self.model_path)
+        if configured_depth <= 0:
+            raise RuntimeError(
+                "The local DINOv3 model has no readable num_hidden_layers in "
+                "{}.".format(Path(self.model_path) / "config.json")
+            )
+        self.out_indices = _validated_out_indices(out_indices, configured_depth)
         expected_sha256 = str(expected_sha256 or "").strip().lower()
         if expected_sha256:
             weights_path = Path(self.model_path) / "model.safetensors"
@@ -80,7 +136,7 @@ class DINOv3Backbone(nn.Module):
 
         # DINOv3 stage names: stem, stage1, stage2, ..., stage12 (1-indexed)
         # transformer layer i → stage{i+1}
-        out_features = [f"stage{i+1}" for i in out_indices]
+        out_features = [f"stage{i+1}" for i in self.out_indices]
 
         self.backbone = DINOv3ViTBackbone.from_pretrained(
             self.model_path,
@@ -100,6 +156,12 @@ class DINOv3Backbone(nn.Module):
         self.num_layers = cfg.num_hidden_layers
         self.num_register_tokens = getattr(cfg, "num_register_tokens", 4)
         self.img_size = getattr(cfg, "image_size", 518)
+        if int(self.num_layers) != configured_depth:
+            raise RuntimeError(
+                "DINOv3 config depth changed while loading: expected {}, loaded {}.".format(
+                    configured_depth, self.num_layers
+                )
+            )
 
         if freeze:
             self.freeze()

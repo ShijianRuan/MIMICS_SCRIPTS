@@ -30,6 +30,70 @@ from torch.utils.data import Dataset, Subset
 from .spatial import load_canonical_pair, resample_pair_to_spacing, spacing_zyx, xyz_to_zyx
 
 
+VOLUME_LABEL_IGNORE_INDEX = -100
+
+
+def pad_volume_batch(items: list[dict]) -> dict:
+    """Collate variable-depth volumes by padding labels with an ignore index.
+
+    This enables real volume batches on larger local or remote GPUs. The loss
+    and metrics ignore padded voxels; batch size one remains padding-free.
+    """
+    if not items:
+        raise ValueError("Cannot collate an empty volume batch")
+    image_shapes = [tuple(item["image"].shape) for item in items]
+    label_shapes = [tuple(item["label"].shape) for item in items]
+    if any(len(shape) != 4 for shape in image_shapes):
+        raise ValueError("Volume images must use (C,Z,Y,X)")
+    if any(len(shape) != 3 for shape in label_shapes):
+        raise ValueError("Volume labels must use (Z,Y,X)")
+    channels = {shape[0] for shape in image_shapes}
+    if len(channels) != 1:
+        raise ValueError("All images in a volume batch must have equal channels")
+    target = tuple(max(shape[axis] for shape in label_shapes) for axis in range(3))
+    images = []
+    labels = []
+    valid_masks = []
+    for item, image_shape, label_shape in zip(items, image_shapes, label_shapes):
+        if tuple(image_shape[1:]) != tuple(label_shape):
+            raise ValueError("Image and label shapes differ before volume padding")
+        pad_z = target[0] - label_shape[0]
+        pad_y = target[1] - label_shape[1]
+        pad_x = target[2] - label_shape[2]
+        image = F.pad(
+            item["image"],
+            (0, pad_x, 0, pad_y, 0, pad_z),
+            mode="constant",
+            value=0.0,
+        )
+        label = F.pad(
+            item["label"],
+            (0, pad_x, 0, pad_y, 0, pad_z),
+            mode="constant",
+            value=VOLUME_LABEL_IGNORE_INDEX,
+        )
+        images.append(image)
+        labels.append(label)
+        valid_masks.append(label != VOLUME_LABEL_IGNORE_INDEX)
+    result = {
+        "image": torch.stack(images, dim=0),
+        "label": torch.stack(labels, dim=0),
+        "valid_mask": torch.stack(valid_masks, dim=0),
+        "case_id": [item.get("case_id") for item in items],
+        "image_path": [item.get("image_path") for item in items],
+        "label_path": [item.get("label_path") for item in items],
+        "spacing_zyx": torch.stack(
+            [torch.as_tensor(item["spacing_zyx"]) for item in items],
+            dim=0,
+        ),
+        "unpadded_shape_zyx": torch.as_tensor(
+            label_shapes,
+            dtype=torch.int64,
+        ),
+    }
+    return result
+
+
 def _unit_window(volume: np.ndarray, low: float, high: float) -> np.ndarray:
     if not np.isfinite(low) or not np.isfinite(high) or high <= low:
         raise ValueError("Invalid intensity window [{}, {}]".format(low, high))
@@ -64,7 +128,21 @@ def normalize_volume(
             raise ValueError("CT intensity.window must contain [low, high]")
         lo, hi = float(window[0]), float(window[1])
     else:
-        lo, hi = np.percentile(volume, [0.5, 99.5])
+        percentiles = cfg.get("percentiles", [0.5, 99.5])
+        if (
+            not isinstance(percentiles, (list, tuple))
+            or len(percentiles) != 2
+            or float(percentiles[0]) < 0.0
+            or float(percentiles[1]) > 100.0
+            or float(percentiles[1]) <= float(percentiles[0])
+        ):
+            raise ValueError(
+                "Non-CT intensity.percentiles must contain increasing values within [0, 100]"
+            )
+        lo, hi = np.percentile(
+            volume,
+            [float(percentiles[0]), float(percentiles[1])],
+        )
         lo, hi = float(lo), float(hi)
     if hi <= lo:
         lo, hi = float(volume.min()), float(volume.max())
@@ -81,6 +159,7 @@ def build_input_channels(
     modality: str = "other",
     intensity: Mapping | None = None,
     channel_policy: str = "repeat",
+    pre_normalized: bool = False,
 ) -> np.ndarray:
     """Create label-free model input channels in ``(C, Z, Y, X)`` order.
 
@@ -101,6 +180,13 @@ def build_input_channels(
         return np.stack(channels, axis=0).astype(np.float32, copy=False)
     if policy not in ("repeat", "single", "2_5d", "2.5d"):
         raise ValueError("Unknown channel policy: {}".format(channel_policy))
+    if pre_normalized:
+        finite = np.isfinite(volume)
+        if not np.all(finite):
+            volume = np.where(finite, volume, 0.0)
+        return np.clip(volume, 0.0, 1.0).astype(
+            np.float32, copy=False
+        )[None, ...]
     return normalize_volume(volume, modality, cfg)[None, ...]
 
 
@@ -112,6 +198,8 @@ def prepare_model_input(
     intensity: Mapping | None = None,
     channel_policy: str = "repeat",
     slice_axis="axial",
+    resize_mode: str = "stretch",
+    pre_normalized: bool = False,
 ) -> torch.Tensor:
     """Apply channel construction and resize the selected model slice plane."""
     size = tuple(int(value) for value in img_size)
@@ -122,8 +210,15 @@ def prepare_model_input(
         modality=modality,
         intensity=intensity,
         channel_policy=channel_policy,
+        pre_normalized=pre_normalized,
     )
-    return _resize_slice_plane(torch.from_numpy(channels), size, slice_axis, mode="trilinear")
+    return _resize_slice_plane(
+        torch.from_numpy(channels),
+        size,
+        slice_axis,
+        mode="trilinear",
+        resize_mode=resize_mode,
+    )
 
 
 def _slice_axis_name(value) -> str:
@@ -142,7 +237,33 @@ def _slice_axis_name(value) -> str:
     raise ValueError("slice_axis must be axial/coronal/sagittal or 2/1/0")
 
 
-def _resize_slice_plane(tensor_czyx: torch.Tensor, size, slice_axis, *, mode: str) -> torch.Tensor:
+def fit_pad_geometry(source_size, target_size) -> dict:
+    source_h, source_w = (max(1, int(value)) for value in source_size)
+    target_h, target_w = (max(1, int(value)) for value in target_size)
+    scale = min(target_h / float(source_h), target_w / float(source_w))
+    resized_h = max(1, min(target_h, int(round(source_h * scale))))
+    resized_w = max(1, min(target_w, int(round(source_w * scale))))
+    top = (target_h - resized_h) // 2
+    left = (target_w - resized_w) // 2
+    return {
+        "resized_size": (resized_h, resized_w),
+        "padding": (
+            left,
+            target_w - resized_w - left,
+            top,
+            target_h - resized_h - top,
+        ),
+    }
+
+
+def _resize_slice_plane(
+    tensor_czyx: torch.Tensor,
+    size,
+    slice_axis,
+    *,
+    mode: str,
+    resize_mode: str = "stretch",
+) -> torch.Tensor:
     axis = _slice_axis_name(slice_axis)
     tensor = tensor_czyx.unsqueeze(0)
     if axis == "axial":
@@ -152,12 +273,32 @@ def _resize_slice_plane(tensor_czyx: torch.Tensor, size, slice_axis, *, mode: st
     else:
         oriented = tensor.permute(0, 1, 4, 2, 3)
     kwargs = {"align_corners": False} if mode != "nearest" else {}
-    oriented = F.interpolate(
-        oriented,
-        size=(oriented.shape[2], *tuple(int(value) for value in size)),
-        mode=mode,
-        **kwargs,
-    )
+    target_size = tuple(int(value) for value in size)
+    resize_mode = str(resize_mode or "stretch").strip().lower()
+    if resize_mode == "fit_pad":
+        geometry = fit_pad_geometry(oriented.shape[-2:], target_size)
+        oriented = F.interpolate(
+            oriented,
+            size=(oriented.shape[2], *geometry["resized_size"]),
+            mode=mode,
+            **kwargs,
+        )
+        left, right, top, bottom = geometry["padding"]
+        oriented = F.pad(
+            oriented,
+            (left, right, top, bottom, 0, 0),
+            mode="constant",
+            value=0.0,
+        )
+    elif resize_mode == "stretch":
+        oriented = F.interpolate(
+            oriented,
+            size=(oriented.shape[2], *target_size),
+            mode=mode,
+            **kwargs,
+        )
+    else:
+        raise ValueError("resize_mode must be stretch or fit_pad")
     if axis == "axial":
         restored = oriented
     elif axis == "coronal":
@@ -241,6 +382,8 @@ class MedicalVolumeDataset(Dataset):
         roi: Mapping | None = None,
         target: Mapping | None = None,
         slice_axis="axial",
+        resize_mode="stretch",
+        normalization_scope="sample",
         augmentation=None,
     ):
         self.data_root = Path(data_root)
@@ -254,6 +397,18 @@ class MedicalVolumeDataset(Dataset):
         self.roi = dict(roi or {})
         self.target = dict(target or {})
         self.slice_axis = slice_axis
+        self.resize_mode = str(resize_mode or "stretch")
+        self.normalization_scope = str(
+            normalization_scope or "sample"
+        ).strip().lower()
+        if self.normalization_scope not in {
+            "sample",
+            "case_before_roi_or_patch",
+        }:
+            raise ValueError(
+                "data.normalization_scope must be sample or "
+                "case_before_roi_or_patch"
+            )
         self.use_patch = bool(self.patch.get("enabled", False)) and split in ("train", "tr")
         self.patch_size_zyx = tuple(int(value) for value in self.patch.get("size_zyx", []))
         self.foreground_probability = float(self.patch.get("foreground_probability", 0.67))
@@ -378,6 +533,18 @@ class MedicalVolumeDataset(Dataset):
                     label_data.shape,
                 )
             )
+        pre_normalized = False
+        if (
+            self.normalization_scope == "case_before_roi_or_patch"
+            and str(self.channel_policy or "repeat").lower()
+            not in ("ct_windows", "multiwindow", "multi_window")
+        ):
+            image_data = normalize_volume(
+                image_data,
+                modality=self.modality,
+                intensity=self.intensity,
+            )
+            pre_normalized = True
         image_data, label_data = self._apply_roi(image_data, label_data)
         label_data = self._apply_target_transform(label_data, spacing_zyx(image))
         if self.use_patch:
@@ -390,12 +557,15 @@ class MedicalVolumeDataset(Dataset):
             intensity=self.intensity,
             channel_policy=self.channel_policy,
             slice_axis=self.slice_axis,
+            resize_mode=self.resize_mode,
+            pre_normalized=pre_normalized,
         )
         label_tensor = _resize_slice_plane(
             torch.from_numpy(label_data).unsqueeze(0).float(),
             self.img_size,
             self.slice_axis,
             mode="nearest",
+            resize_mode=self.resize_mode,
         ).squeeze(0).long()
 
         item = {

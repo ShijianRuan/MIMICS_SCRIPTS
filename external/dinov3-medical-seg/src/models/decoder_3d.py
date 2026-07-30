@@ -103,6 +103,7 @@ class DecoderFactory:
     """
 
     _2D_DECODERS = {
+        "scale_aware2d",
         "conv2d",
         "conv2d_unet",
         "conv2d_deeplab",
@@ -116,9 +117,29 @@ class DecoderFactory:
         feature_dims: List[int],
         num_classes: int,
         z_smooth_sigma: float = 0.0,
+        decoder_options: dict | None = None,
     ) -> nn.Module:
+        options = dict(decoder_options or {})
         # ── 3D decoders ──
-        if decoder_type == "linear3d":
+        if decoder_type == "context3d_lite":
+            return Context3DLiteDecoder(
+                feature_dims,
+                num_classes,
+                anisotropic=bool(options.get("anisotropic_context", False)),
+            )
+        elif decoder_type == "context3d_hybrid":
+            return Context3DHybridDecoder(
+                feature_dims,
+                num_classes,
+                anisotropic=bool(options.get("anisotropic_context", False)),
+            )
+        elif decoder_type == "context3d_multiscale":
+            return Context3DMultiScaleDecoder(
+                feature_dims,
+                num_classes,
+                anisotropic=bool(options.get("anisotropic_context", False)),
+            )
+        elif decoder_type == "linear3d":
             return LinearDecoder3D(feature_dims[0], num_classes, num_levels=len(feature_dims),
                                    z_smooth_sigma=z_smooth_sigma)
         elif decoder_type == "mlp_probe":
@@ -142,8 +163,10 @@ class DecoderFactory:
                 Conv2DDeepLabDecoder,
                 Conv2D_2_5D_Decoder,
                 FrozenFeatureUNet2D,
+                ScaleAware2DDecoder,
             )
             _map = {
+                "scale_aware2d": ScaleAware2DDecoder,
                 "conv2d": Conv2DDecoder,
                 "conv2d_unet": Conv2DUNetDecoder,
                 "conv2d_deeplab": Conv2DDeepLabDecoder,
@@ -155,9 +178,300 @@ class DecoderFactory:
         else:
             raise ValueError(
                 f"Unknown decoder_type: {decoder_type}. "
-                f"Choose from: linear3d, mlp_probe, segformer3d, token_pyramid3d, dpt3d, "
+                f"Choose from: scale_aware2d, context3d_lite, context3d_hybrid, "
+                f"context3d_multiscale, "
+                f"linear3d, mlp_probe, segformer3d, token_pyramid3d, dpt3d, "
                 f"conv2d, conv2d_unet, conv2d_deeplab, conv2d_2_5d, feature_unet2d"
             )
+
+
+class _ResidualContext3D(nn.Module):
+    def __init__(self, channels: int, anisotropic: bool = False):
+        super().__init__()
+        spatial_kernel = (1, 3, 3) if anisotropic else (3, 3, 3)
+        spatial_padding = tuple(value // 2 for value in spatial_kernel)
+        layers = [
+            nn.Conv3d(
+                channels,
+                channels,
+                kernel_size=spatial_kernel,
+                padding=spatial_padding,
+                groups=channels,
+                bias=False,
+            ),
+            norm3d(channels),
+            nn.GELU(),
+        ]
+        if anisotropic:
+            layers.extend(
+                [
+                    nn.Conv3d(
+                        channels,
+                        channels,
+                        kernel_size=(3, 1, 1),
+                        padding=(1, 0, 0),
+                        groups=channels,
+                        bias=False,
+                    ),
+                    norm3d(channels),
+                    nn.GELU(),
+                ]
+            )
+        layers.extend(
+            [
+                nn.Conv3d(channels, channels, kernel_size=1, bias=False),
+                norm3d(channels),
+                nn.GELU(),
+            ]
+        )
+        self.body = nn.Sequential(*layers)
+
+    def forward(self, values: torch.Tensor) -> torch.Tensor:
+        return values + self.body(values)
+
+
+class Context3DLiteDecoder(nn.Module):
+    """Converged lightweight 3D context decoder.
+
+    Multiple semantic DINO levels are fused on their native token grid, then a
+    bounded residual 3D block models cross-slice context. This replaces the
+    overlapping public roles of the former linear3d and segformer3d decoders.
+    """
+
+    def __init__(
+        self,
+        feature_dims: List[int],
+        num_classes: int,
+        proj_dim: int = 64,
+        anisotropic: bool = False,
+    ):
+        super().__init__()
+        if not feature_dims:
+            raise ValueError("context3d_lite requires DINO feature levels")
+        self.projections = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Conv3d(dim, proj_dim, kernel_size=1, bias=False),
+                    norm3d(proj_dim),
+                    nn.GELU(),
+                )
+                for dim in feature_dims
+            ]
+        )
+        self.fuse = nn.Sequential(
+            nn.Conv3d(
+                proj_dim * len(feature_dims),
+                proj_dim,
+                kernel_size=1,
+                bias=False,
+            ),
+            norm3d(proj_dim),
+            nn.GELU(),
+        )
+        self.context = _ResidualContext3D(proj_dim, anisotropic=anisotropic)
+        self.head = nn.Conv3d(proj_dim, num_classes, kernel_size=1)
+
+    def forward(
+        self,
+        features_3d: List[torch.Tensor],
+        original_shape: tuple,
+    ) -> torch.Tensor:
+        target = features_3d[0].shape[-3:]
+        projected = []
+        for projection, feature in zip(self.projections, features_3d):
+            current = projection(feature)
+            if current.shape[-3:] != target:
+                current = F.interpolate(
+                    current,
+                    size=target,
+                    mode="trilinear",
+                    align_corners=False,
+                )
+            projected.append(current)
+        logits = self.head(self.context(self.fuse(torch.cat(projected, dim=1))))
+        return F.interpolate(
+            logits,
+            size=original_shape[2:],
+            mode="trilinear",
+            align_corners=False,
+        )
+
+
+class Context3DHybridDecoder(nn.Module):
+    """Boundary-aware 2D pyramid plus bounded volumetric context.
+
+    DINOv3 produces semantically different intermediate blocks on one spatial
+    token grid. The detail branch follows SegDINO's four-level spatial
+    reassembly and decodes slices in chunks. The volume branch keeps those
+    features on the token grid while applying lightweight 3D context. Only
+    class logits are materialized at full volume resolution, which keeps this
+    usable on workstation GPUs while preserving both in-plane boundaries and
+    inter-slice continuity.
+    """
+
+    def __init__(
+        self,
+        feature_dims: List[int],
+        num_classes: int,
+        anisotropic: bool = False,
+    ):
+        super().__init__()
+        if len(feature_dims) < 4:
+            raise ValueError(
+                "context3d_hybrid requires four DINO intermediate feature levels"
+            )
+        from .decoder_2d import ScaleAware2DDecoder
+
+        self.detail_branch = ScaleAware2DDecoder(
+            feature_dims[-4:],
+            num_classes,
+            proj_dim=40,
+            decode_slice_batch_size=16,
+        )
+        self.volume_branch = Context3DLiteDecoder(
+            feature_dims[-4:],
+            num_classes,
+            proj_dim=48,
+            anisotropic=anisotropic,
+        )
+        self.logit_fusion = nn.Conv3d(
+            num_classes * 2,
+            num_classes,
+            kernel_size=1,
+        )
+        with torch.no_grad():
+            self.logit_fusion.weight.zero_()
+            self.logit_fusion.bias.zero_()
+            for class_index in range(num_classes):
+                self.logit_fusion.weight[class_index, class_index, 0, 0, 0] = 0.5
+                self.logit_fusion.weight[
+                    class_index,
+                    num_classes + class_index,
+                    0,
+                    0,
+                    0,
+                ] = 0.5
+
+    def forward(
+        self,
+        features_3d: List[torch.Tensor],
+        original_shape: tuple,
+    ) -> torch.Tensor:
+        detail_logits = self.detail_branch(features_3d, original_shape)
+        volume_logits = self.volume_branch(features_3d, original_shape)
+        return self.logit_fusion(
+            torch.cat([detail_logits, volume_logits], dim=1)
+        )
+
+
+class Context3DMultiScaleDecoder(nn.Module):
+    """Legacy volumetric pyramid retained for existing model compatibility.
+
+    Four equal-grid DINO levels are reassembled at H/4, H/8, H/16, and H/32.
+    Volumetric context is concentrated at the lower resolutions while the
+    H/4 branch restores in-plane boundaries without a prohibitively expensive
+    full-resolution 3D feature volume.
+    """
+
+    def __init__(
+        self,
+        feature_dims: List[int],
+        num_classes: int,
+        proj_dim: int = 40,
+        anisotropic: bool = False,
+    ):
+        super().__init__()
+        if len(feature_dims) < 4:
+            raise ValueError(
+                "context3d_multiscale requires four DINO intermediate feature levels"
+            )
+        self.projections = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Conv3d(dim, proj_dim, kernel_size=1, bias=False),
+                    norm3d(proj_dim),
+                    nn.GELU(),
+                )
+                for dim in feature_dims[-4:]
+            ]
+        )
+        self.context = nn.ModuleList(
+            [
+                _ResidualContext3D(
+                    proj_dim,
+                    anisotropic=(anisotropic or index < 2),
+                )
+                for index in range(4)
+            ]
+        )
+        self.head = nn.Sequential(
+            nn.Conv3d(
+                proj_dim,
+                proj_dim,
+                kernel_size=(1, 3, 3),
+                padding=(0, 1, 1),
+                bias=False,
+            ),
+            norm3d(proj_dim),
+            nn.GELU(),
+            nn.Conv3d(proj_dim, num_classes, kernel_size=1),
+        )
+
+    @staticmethod
+    def _target_sizes(
+        depth: int,
+        height: int,
+        width: int,
+    ) -> list[tuple[int, int, int]]:
+        return [
+            (depth, max(1, height // 4), max(1, width // 4)),
+            (depth, max(1, height // 8), max(1, width // 8)),
+            (depth, max(1, height // 16), max(1, width // 16)),
+            (depth, max(1, height // 32), max(1, width // 32)),
+        ]
+
+    def forward(
+        self,
+        features_3d: List[torch.Tensor],
+        original_shape: tuple,
+    ) -> torch.Tensor:
+        depth, height, width = (
+            int(original_shape[-3]),
+            int(original_shape[-2]),
+            int(original_shape[-1]),
+        )
+        targets = self._target_sizes(depth, height, width)
+        levels = []
+        for projection, feature, target in zip(
+            self.projections,
+            features_3d[-4:],
+            targets,
+        ):
+            current = projection(feature)
+            if current.shape[-3:] != target:
+                current = F.interpolate(
+                    current,
+                    size=target,
+                    mode="trilinear",
+                    align_corners=False,
+                )
+            levels.append(current)
+        current = self.context[-1](levels[-1])
+        for index in range(2, -1, -1):
+            current = F.interpolate(
+                current,
+                size=levels[index].shape[-3:],
+                mode="trilinear",
+                align_corners=False,
+            )
+            current = self.context[index](current + levels[index])
+        logits = self.head(current)
+        return F.interpolate(
+            logits,
+            size=original_shape[2:],
+            mode="trilinear",
+            align_corners=False,
+        )
 
 
 # ──────────────────────────────────────────────

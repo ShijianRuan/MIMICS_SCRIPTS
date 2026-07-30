@@ -7,6 +7,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _safe_target_and_mask(target: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    valid = target >= 0
+    safe_target = torch.where(valid, target, torch.zeros_like(target)).long()
+    return safe_target, valid
+
+
+def _masked_mean(values: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
+    weights = valid.to(dtype=values.dtype)
+    return (values * weights).sum() / weights.sum().clamp_min(1.0)
+
+
 class DiceLoss(nn.Module):
     """3D Dice loss for volumetric segmentation.
 
@@ -32,10 +43,14 @@ class DiceLoss(nn.Module):
             scalar loss
         """
         num_classes = pred.shape[1]
-        target_one_hot = F.one_hot(target.long(), num_classes=num_classes)
+        safe_target, valid = _safe_target_and_mask(target)
+        target_one_hot = F.one_hot(safe_target, num_classes=num_classes)
         target_one_hot = target_one_hot.movedim(-1, 1).float()
 
         pred_soft = F.softmax(pred, dim=1)
+        valid_channels = valid.unsqueeze(1).to(dtype=pred_soft.dtype)
+        pred_soft = pred_soft * valid_channels
+        target_one_hot = target_one_hot * valid_channels
 
         # Flatten spatial dims
         pred_flat = pred_soft.reshape(pred.shape[0], num_classes, -1)
@@ -154,7 +169,7 @@ class FocalLoss(nn.Module):
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         num_classes = pred.shape[1]
         log_p = F.log_softmax(pred, dim=1)
-        target = target.long()
+        target, valid = _safe_target_and_mask(target)
         log_pt = log_p.gather(1, target.unsqueeze(1)).squeeze(1)
         ce = -log_pt
         if self.class_weights is not None:
@@ -178,7 +193,7 @@ class FocalLoss(nn.Module):
             alpha_t = torch.ones_like(ce)
 
         loss = alpha_t * focal_weight * ce
-        return loss.mean()
+        return _masked_mean(loss, valid)
 
 
 class TverskyLoss(nn.Module):
@@ -203,9 +218,13 @@ class TverskyLoss(nn.Module):
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         num_classes = pred.shape[1]
-        target_one_hot = F.one_hot(target.long(), num_classes=num_classes)
+        safe_target, valid = _safe_target_and_mask(target)
+        target_one_hot = F.one_hot(safe_target, num_classes=num_classes)
         target_one_hot = target_one_hot.movedim(-1, 1).float()
         pred_soft = F.softmax(pred, dim=1)
+        valid_channels = valid.unsqueeze(1).to(dtype=pred_soft.dtype)
+        pred_soft = pred_soft * valid_channels
+        target_one_hot = target_one_hot * valid_channels
 
         pred_flat = pred_soft.reshape(pred.shape[0], num_classes, -1)
         target_flat = target_one_hot.reshape(target.shape[0], num_classes, -1)
@@ -264,8 +283,10 @@ class DiceBoundaryLoss(nn.Module):
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> dict:
         region = self.region(pred, target)
-        foreground_probability = F.softmax(pred, dim=1)[:, 1:2]
-        foreground_target = (target == 1).unsqueeze(1).to(dtype=pred.dtype)
+        _safe_target, valid = _safe_target_and_mask(target)
+        valid = valid.unsqueeze(1).to(dtype=pred.dtype)
+        foreground_probability = F.softmax(pred, dim=1)[:, 1:2] * valid
+        foreground_target = (target == 1).unsqueeze(1).to(dtype=pred.dtype) * valid
         pred_boundary = _soft_boundary(foreground_probability)
         target_boundary = _soft_boundary(foreground_target)
         intersection = (pred_boundary * target_boundary).sum(dim=(1, 2, 3, 4))
@@ -313,8 +334,10 @@ class DiceFocalClDiceLoss(nn.Module):
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> dict:
         d_loss = self.dice(pred, target)
         f_loss = self.focal(pred, target)
-        probability = F.softmax(pred, dim=1)[:, 1:2]
-        truth = (target == 1).unsqueeze(1).to(dtype=pred.dtype)
+        _safe_target, valid = _safe_target_and_mask(target)
+        valid = valid.unsqueeze(1).to(dtype=pred.dtype)
+        probability = F.softmax(pred, dim=1)[:, 1:2] * valid
+        truth = (target == 1).unsqueeze(1).to(dtype=pred.dtype) * valid
         # Topology is evaluated on a bounded half-resolution grid to avoid
         # turning skeletonization into the dominant memory/time cost.
         if min(probability.shape[-3:]) >= 4:

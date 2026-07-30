@@ -40,12 +40,59 @@ from resource_locks import (
     release_lock,
 )
 from tools.fewshot_strategies import compile_strategy, normalize_strategy_options, strategy_ids
+from tools.fewshot_architecture import (
+    SUPPORTED_DECODERS,
+    inspect_dinov3_vit_weights,
+    recommended_batch_size,
+    resolve_architecture,
+    seal_architecture_plan,
+)
 
 DEFAULT_WORKSPACE = "fewshot_models"
 LOG_ROTATE_BYTES = 5 * 1024 * 1024
 LOG_ROTATE_BACKUPS = 3
 RESOURCE_LOCK_DIR = default_resource_lock_dir(ROOT)
 GPU_LOCK_PATH = RESOURCE_LOCK_DIR / "gpu.lock"
+
+
+def detect_gpu_memory_gb(requested=0.0):
+    """Resolve the planning memory budget without allocating a CUDA context."""
+    try:
+        value = float(requested or 0.0)
+    except Exception:
+        value = 0.0
+    if value > 0:
+        return value
+    try:
+        value = float(os.environ.get("MIMICS_TRAINING_GPU_MEMORY_GB", "0") or 0)
+    except Exception:
+        value = 0.0
+    if value > 0:
+        return value
+    try:
+        output = subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-gpu=memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            text=True,
+        )
+        values = [
+            float(line.strip()) / 1024.0
+            for line in output.splitlines()
+            if line.strip()
+        ]
+        if values:
+            # Training uses the first visible CUDA device by default. Taking
+            # the largest card on a multi-GPU host can over-plan a job that is
+            # actually bound to a smaller device.
+            return values[0]
+    except Exception:
+        pass
+    return 12.0
 
 
 def cleanup_local_export_jobs(max_age_days=14, max_jobs=100):
@@ -1429,6 +1476,135 @@ def discover_samples(
     return samples, skipped
 
 
+def _normalized_modality(value):
+    text = str(value or "").strip().lower()
+    if text in ("ct", "computed_tomography"):
+        return "ct"
+    if text in ("mr", "mri", "magnetic_resonance"):
+        return "mr"
+    if text in ("other", "generic", "unknown"):
+        return "other"
+    return ""
+
+
+def _manifest_modality(case_id, roots):
+    for root in roots or []:
+        if not root:
+            continue
+        manifest_file = Path(root)
+        if manifest_file.name.lower() != dataset_manifest.MANIFEST_FILENAME:
+            manifest_file = manifest_file / dataset_manifest.MANIFEST_FILENAME
+        if not manifest_file.is_file():
+            continue
+        payload = dataset_manifest.load_manifest(str(manifest_file))
+        row = dataset_manifest.find_case(payload, case_id) or {}
+        provenance = row.get("provenance") or {}
+        value = _normalized_modality(
+            provenance.get("source_modality")
+            or row.get("source_modality")
+            or row.get("modality")
+        )
+        if value:
+            return value, "dataset manifest"
+    return "", ""
+
+
+def _source_image_modality(image_path):
+    path = Path(image_path)
+    if path.is_dir():
+        try:
+            from mimics_bridge import infer_dicom_modality
+
+            value = _normalized_modality(infer_dicom_modality(str(path)))
+            if value:
+                return value, "DICOM metadata"
+        except Exception:
+            pass
+    name = path.name.lower()
+    for suffix in _IMAGE_SUFFIXES:
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    if name in ("ct", "computed_tomography") or name.startswith("ct_"):
+        return "ct", "standard image filename"
+    if name in ("mr", "mri") or name.startswith(("mr_", "mri_")):
+        return "mr", "standard image filename"
+    return "", ""
+
+
+def resolve_training_modality(requested, samples, manifest_roots=None):
+    """Resolve one label-free intensity policy for the complete training run."""
+    requested_value = str(requested or "auto").strip().lower()
+    if requested_value != "auto":
+        explicit = _normalized_modality(requested_value)
+        if not explicit:
+            raise RuntimeError(
+                "Image modality must be Auto, CT, MRI, or Other."
+            )
+        for sample in samples or []:
+            sample["source_modality"] = explicit
+            sample["modality_source"] = "user selection"
+        return {
+            "requested": requested_value,
+            "resolved": explicit,
+            "source": "user selection",
+            "unresolved_cases": [],
+        }
+
+    detected = {}
+    unresolved = []
+    for sample in samples or []:
+        case_id = str(sample.get("case_id") or "")
+        value, source = _manifest_modality(case_id, manifest_roots)
+        if not value:
+            value, source = _source_image_modality(sample.get("image"))
+        if value:
+            detected.setdefault(value, []).append(case_id)
+            sample["source_modality"] = value
+            sample["modality_source"] = source
+        else:
+            unresolved.append(case_id)
+    if len(detected) > 1:
+        details = "; ".join(
+            "{}: {}".format(key.upper(), ", ".join(values[:8]))
+            for key, values in sorted(detected.items())
+        )
+        raise RuntimeError(
+            "Automatic modality detection found mixed CT and MR data ({}). "
+            "Train them separately or choose the intended modality explicitly.".format(
+                details
+            )
+        )
+    if detected and unresolved:
+        raise RuntimeError(
+            "Automatic modality detection could not classify {} of {} selected "
+            "case(s) (for example: {}). Choose CT, MRI, or Other explicitly so "
+            "one intensity policy is not silently applied to an unknown "
+            "modality.".format(
+                len(unresolved),
+                len(samples or []),
+                ", ".join(unresolved[:8]),
+            )
+        )
+    resolved = next(iter(detected), "other")
+    for sample in samples or []:
+        sample.setdefault("source_modality", resolved)
+        sample.setdefault(
+            "modality_source",
+            "robust image percentiles" if resolved == "other" else "run consensus",
+        )
+    return {
+        "requested": "auto",
+        "resolved": resolved,
+        "source": (
+            "dataset metadata"
+            if detected
+            else "no reliable metadata; robust image percentiles"
+        ),
+        "unresolved_cases": unresolved,
+    }
+
+
 def select_samples(samples, mode, max_samples):
     selected = list(samples)
     if mode == "latest":
@@ -1810,6 +1986,35 @@ def compute_class_weights(materialized_rows, max_weight=20.0):
     return [1.0, round(fg_weight, 2)]
 
 
+def _model_root_for_config(model_path, base_config):
+    path = Path(str(model_path)).expanduser()
+    if path.is_absolute():
+        return path
+    base_path = Path(base_config).expanduser().resolve()
+    candidates = []
+    for parent in (base_path.parent,) + tuple(base_path.parents):
+        if (parent / "src").is_dir() and (parent / "models").is_dir():
+            candidates.append(parent / path)
+            break
+    candidates.append(
+        ROOT / "external" / "dinov3-medical-seg" / path
+    )
+    candidates.append(base_path.parent / path)
+    for candidate in candidates:
+        if candidate.is_dir() or candidate.is_file():
+            return candidate
+    return candidates[0]
+
+
+def _backbone_feature_plan(model_path, base_config, model_scale):
+    """Resolve semantic feature layers from the actual local model config."""
+    model_root = _model_root_for_config(model_path, base_config)
+    try:
+        return inspect_dinov3_vit_weights(model_root)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+
 def write_training_config(
     path,
     base_config,
@@ -1826,11 +2031,13 @@ def write_training_config(
     path = Path(path)
     decoder_type = str(args.decoder or "segformer3d")
     cached_slice_pipeline = decoder_type == "feature_unet2d"
-    if not cached_slice_pipeline and int(args.batch_size) != 1:
+    if not cached_slice_pipeline and str(args.modality or "auto").lower() == "auto":
         raise RuntimeError(
-            "Batch size must stay 1 for variable-depth 3D Mimics cases. "
-            "Use Grad accumulation to increase the effective batch size."
+            "Training modality must be resolved before writing the portable "
+            "model configuration."
         )
+    if int(args.batch_size) < 1:
+        raise RuntimeError("Resolved batch size must be at least one.")
     img_size = [int(part.strip()) for part in str(args.img_size).split(",")]
     model_path = args.model_path
     if not model_path:
@@ -1860,6 +2067,27 @@ def write_training_config(
         )
         encoder_backend = "onnx" if onnx_path.is_file() else "pytorch"
     compatibility_onnx = cached_slice_pipeline and encoder_backend == "onnx"
+    backbone_plan = (
+        {
+            "num_hidden_layers": 12,
+            "hidden_size": 384,
+            "patch_size": 16,
+            "out_indices": [11],
+            "config_path": "",
+            "model_type": "dinov3_vit",
+            "weights_format": "onnx",
+            "image_mean": [0.485, 0.456, 0.406],
+            "image_std": [0.229, 0.224, 0.225],
+        }
+        if cached_slice_pipeline
+        else _backbone_feature_plan(model_path, base_config, args.model_scale)
+    )
+    patch_size = int(backbone_plan.get("patch_size") or 16)
+    if any(value % patch_size for value in img_size):
+        raise RuntimeError(
+            "Image height and width {} must be divisible by the selected "
+            "DINOv3 patch size {}.".format(img_size, patch_size)
+        )
     config = {
         "_base_": [str(base_config)],
         "exp_name": exp_name,
@@ -1870,17 +2098,49 @@ def write_training_config(
             # z-score values directly. The optional HuggingFace/PyTorch encoder
             # is a different model and retains its ImageNet input contract.
             "input_normalization": "none" if compatibility_onnx else "imagenet",
-            "image_mean": [0.485, 0.456, 0.406], "image_std": [0.229, 0.224, 0.225],
+            "image_mean": list(backbone_plan["image_mean"]),
+            "image_std": list(backbone_plan["image_std"]),
             "encoder_backend": encoder_backend,
+            "out_indices": list(backbone_plan["out_indices"]),
         },
         "finetune": {
             "method": finetune_method, "lora_rank": int(args.lora_rank),
-            "lora_alpha": int(args.lora_alpha), "adapter_bottleneck": int(args.adapter_bottleneck),
+            "lora_alpha": int(args.lora_alpha),
+            # Q/V is the bounded LoRA policy used by every supported DINOv3
+            # ViT scale. Recording it removes an otherwise hidden architecture
+            # decision from model manifests and keeps inference reproducible.
+            "target_modules": ["q_proj", "v_proj"],
+            "adapter_bottleneck": int(args.adapter_bottleneck),
         },
-        "decoder": {"type": decoder_type},
+        "decoder": {
+            "type": decoder_type,
+            "architecture_family": (
+                getattr(args, "architecture_plan", {}) or {}
+            ).get("resolved_dimension"),
+            "quality_mode": (
+                getattr(args, "architecture_plan", {}) or {}
+            ).get("quality_mode"),
+            "anisotropic_context": bool(
+                (strategy_overrides or {}).get("model", {}).get(
+                    "channel_policy"
+                )
+                == "2_5d"
+            ),
+        },
         "data": {
             "name": "mimics_fewshot_" + safe_slug(args.organ), "data_root": str(dataset_dir),
             "img_size": img_size, "k_shot": -1, "fold": 0, "modality": args.modality,
+            "intensity": (
+                {"window": [-1024.0, 1024.0], "percentiles": None}
+                if str(args.modality).lower() == "ct"
+                else {"window": None, "percentiles": [0.5, 99.5]}
+            ),
+            "resize_mode": "stretch" if cached_slice_pipeline else "fit_pad",
+            "normalization_scope": (
+                "slice_case"
+                if cached_slice_pipeline
+                else "case_before_roi_or_patch"
+            ),
             "slice_normalization": (
                 "timeslice_casewise"
                 if compatibility_onnx
@@ -1896,6 +2156,9 @@ def write_training_config(
             "validation_interval": int(getattr(args, "validation_interval", 2)),
             "keep_last_checkpoints": int(args.keep_last_checkpoints),
             "validation_enabled": bool(validation_enabled),
+            "gpu_memory_budget_gb": float(
+                getattr(args, "gpu_memory_gb", 0.0) or 0.0
+            ),
             "sub_volume": {"enabled": bool(args.sub_volume),
                            "size": [int(part.strip()) for part in str(args.sub_volume_size).split(",")]},
         },
@@ -1913,6 +2176,39 @@ def write_training_config(
         return target
 
     merge(config, strategy_overrides or {})
+    architecture_plan = copy.deepcopy(
+        getattr(args, "architecture_plan", {}) or {}
+    )
+    if architecture_plan:
+        architecture_plan["backbone_depth"] = int(
+            backbone_plan["num_hidden_layers"]
+        )
+        architecture_plan["backbone_hidden_size"] = int(
+            backbone_plan.get("hidden_size") or 0
+        )
+        architecture_plan["backbone_patch_size"] = patch_size
+        architecture_plan["backbone_model_type"] = str(
+            backbone_plan.get("model_type") or ""
+        )
+        architecture_plan["backbone_image_mean"] = list(
+            backbone_plan.get("image_mean") or []
+        )
+        architecture_plan["backbone_image_std"] = list(
+            backbone_plan.get("image_std") or []
+        )
+        architecture_plan["backbone_out_indices"] = list(
+            backbone_plan["out_indices"]
+        )
+        architecture_plan = seal_architecture_plan(architecture_plan)
+        args.architecture_plan = architecture_plan
+        config.setdefault("runtime", {})["architecture_plan"] = architecture_plan
+    modality_resolution = copy.deepcopy(
+        getattr(args, "modality_resolution", {}) or {}
+    )
+    if modality_resolution:
+        config.setdefault("runtime", {})[
+            "modality_resolution"
+        ] = modality_resolution
     model_sha256 = str(getattr(args, "model_sha256", "") or "").strip().lower()
     if model_sha256:
         config["model"]["expected_sha256"] = model_sha256
@@ -2028,7 +2324,13 @@ def write_training_config(
             "status_path": str(status_path or ""), "cancel_path": str(cancel_path or ""),
             "metrics_history_path": str(metrics_history_path or ""), "status_interval_seconds": 2.0,
         })
-    from src.data.input_contract import input_contract_for_config
+    try:
+        from src.data.input_contract import input_contract_for_config
+    except ImportError:
+        bundled_root = ROOT / "external" / "dinov3-medical-seg"
+        if str(bundled_root) not in sys.path:
+            sys.path.insert(0, str(bundled_root))
+        from src.data.input_contract import input_contract_for_config
     config.setdefault("runtime", {})["input_contract"] = input_contract_for_config(
         config
     )
@@ -2202,23 +2504,18 @@ def validate_training_encoder_assets(config, dinov3_root):
             "dynamic_input": fixed_size is None,
             "available_providers": available_providers,
         }
-    config_path = path / "config.json"
+    try:
+        backbone_spec = inspect_dinov3_vit_weights(path)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    config_path = Path(backbone_spec["config_path"])
     weights_path = path / "model.safetensors"
-    processor_path = path / "preprocessor_config.json"
-    missing = [
-        str(candidate)
-        for candidate in (config_path, weights_path, processor_path)
-        if not candidate.is_file()
-    ]
-    if missing:
-        raise RuntimeError(
-            "The configured DINO encoder is incomplete. Missing: {}. "
-            "Provide a local ViT-S HuggingFace directory or model.onnx; "
-            "a different backbone is not substituted automatically.".format(
-                ", ".join(missing)
-            )
-        )
     if expected_sha256:
+        if not weights_path.is_file():
+            raise RuntimeError(
+                "A single-file SHA-256 was configured, but the selected "
+                "DINOv3 model uses sharded safetensors."
+            )
         digest = hashlib.sha256()
         with weights_path.open("rb") as handle:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -2233,9 +2530,8 @@ def validate_training_encoder_assets(config, dinov3_root):
                 )
             )
     try:
-        metadata = json.loads(config_path.read_text(encoding="utf-8"))
-        hidden_size = int(metadata.get("hidden_size"))
-        patch_size = int(metadata.get("patch_size"))
+        hidden_size = int(backbone_spec["hidden_size"])
+        patch_size = int(backbone_spec["patch_size"])
     except Exception as exc:
         raise RuntimeError("Could not validate DINO encoder config {}: {}".format(config_path, exc))
     if str(config.get("decoder", {}).get("type")) == "feature_unet2d":
@@ -2948,6 +3244,35 @@ def _cmd_train_impl(args):
         min_train_samples=args.min_samples,
         min_val_samples=args.min_val_samples,
     )
+    modality_resolution = resolve_training_modality(
+        args.modality,
+        train_samples + val_samples,
+        manifest_roots=[
+            args.mcs_output_dir,
+            selected_label_root,
+            resolve_mimics_output_dir(ts_root),
+            ts_root,
+        ],
+    )
+    args.modality = modality_resolution["resolved"]
+    args.modality_resolution = modality_resolution
+    modality_message = (
+        "Image modality: requested {requested}, resolved {resolved} "
+        "({source})."
+    ).format(**modality_resolution)
+    if modality_resolution["unresolved_cases"]:
+        modality_message += (
+            " {} case(s) had no modality metadata and use the same resolved "
+            "run policy."
+        ).format(len(modality_resolution["unresolved_cases"]))
+    append_log(workspace, modality_message)
+    update_status(
+        status_path,
+        {
+            "modality": args.modality,
+            "modality_resolution": modality_resolution,
+        },
+    )
     generalization_warnings = []
     if len(train_samples) < 5:
         generalization_warnings.append(
@@ -2990,10 +3315,83 @@ def _cmd_train_impl(args):
         sys.path.insert(0, str(dinov3_root))
     from src.research.fingerprint import build_training_fingerprint, derive_policy
     support_case_ids = [item["case_id"] for item in materialized_train]
-    training_fingerprint = build_training_fingerprint(dataset_dir, support_case_ids, args.organ)
-    derived_policy = derive_policy(training_fingerprint, gpu_memory_gb=12.0)
+    training_fingerprint = build_training_fingerprint(
+        dataset_dir,
+        support_case_ids,
+        args.organ,
+        modality=args.modality,
+    )
+    gpu_memory_gb = detect_gpu_memory_gb(
+        getattr(args, "gpu_memory_gb", 0.0)
+    )
+    args.gpu_memory_gb = gpu_memory_gb
+    derived_policy = derive_policy(
+        training_fingerprint,
+        gpu_memory_gb=gpu_memory_gb,
+    )
     strategy_overrides = compile_strategy(
-        strategy_id, training_fingerprint, derived_policy, strategy_options,
+        strategy_id,
+        training_fingerprint,
+        derived_policy,
+        strategy_options,
+    )
+    effective_resource_policy = copy.deepcopy(derived_policy)
+    effective_resource_policy["patch"] = copy.deepcopy(
+        (strategy_overrides.get("data") or {}).get("patch") or {}
+    )
+    effective_resource_policy["input_size"] = [
+        int(part.strip())
+        for part in str(args.img_size).split(",")
+    ]
+    architecture_plan = resolve_architecture(
+        {
+            "training_dimension": getattr(args, "training_dimension", None),
+            "quality_mode": getattr(args, "quality_mode", "standard"),
+            "finetune_method": args.finetune_method,
+            "decoder": args.decoder,
+        },
+        training_fingerprint,
+        gpu_memory_gb=gpu_memory_gb,
+    )
+    architecture_plan["sub_volume"] = bool(args.sub_volume)
+    requested_batch_size = int(args.batch_size)
+    if bool(args.sub_volume) and requested_batch_size > 1:
+        raise RuntimeError(
+            "Sub-volume training cannot be combined with volume batch size "
+            "above 1. Use batch size 1 with gradient accumulation, or disable "
+            "sub-volume training."
+        )
+    if requested_batch_size == 0:
+        args.batch_size = recommended_batch_size(
+            architecture_plan,
+            effective_resource_policy,
+            gpu_memory_gb=gpu_memory_gb,
+        )
+        architecture_plan["batch_size_source"] = "hardware_recommendation"
+    else:
+        args.batch_size = requested_batch_size
+        architecture_plan["batch_size_source"] = "user"
+    architecture_plan["requested_batch_size"] = requested_batch_size
+    architecture_plan["resolved_batch_size"] = int(args.batch_size)
+    architecture_plan = seal_architecture_plan(architecture_plan)
+    args.decoder = architecture_plan["decoder"]
+    args.architecture_plan = architecture_plan
+    if not architecture_plan.get("legacy_compatibility"):
+        args.encoder_backend = "pytorch"
+        if (
+            str(args.model_scale or "").lower() == "vits16"
+            and not str(args.model_path or "").strip()
+        ):
+            args.model_sha256 = str(
+                repo_config.get("default_safetensors_sha256") or ""
+            ).strip()
+    append_log(
+        workspace,
+        (
+            "Architecture plan: requested {requested_dimension}, resolved "
+            "{resolved_dimension}/{quality_mode} with {decoder}; batch size "
+            "{resolved_batch_size} on a {gpu_memory_gb:.1f} GB planning budget."
+        ).format(**architecture_plan),
     )
     write_training_config(
         config_path,
@@ -3010,6 +3408,17 @@ def _cmd_train_impl(args):
     )
     from src.utils.config import load_config as load_dinov3_config
     effective_config = load_dinov3_config(str(config_path))
+    architecture_plan = copy.deepcopy(
+        (effective_config.get("runtime") or {}).get("architecture_plan")
+        or architecture_plan
+    )
+    append_log(
+        workspace,
+        "DINOv3 feature layers: {} of {} transformer blocks.".format(
+            architecture_plan.get("backbone_out_indices"),
+            architecture_plan.get("backbone_depth"),
+        ),
+    )
     try:
         encoder_assets = validate_training_encoder_assets(effective_config, dinov3_root)
     except Exception as exc:
@@ -3042,6 +3451,7 @@ def _cmd_train_impl(args):
             "fresh_source_geometry_checked_cases": fresh_geometry_checked,
             "training_fingerprint": training_fingerprint,
             "derived_policy": derived_policy,
+            "architecture_plan": architecture_plan,
             "strategy": strategy_overrides.get("strategy", {}),
             "encoder_assets": encoder_assets,
             "selection": {
@@ -3066,6 +3476,13 @@ def _cmd_train_impl(args):
         "config_path": str(config_path),
         "config_sha256": config_sha256,
         "strategy": strategy_overrides.get("strategy", {}),
+        "architecture_plan": architecture_plan,
+        "training_seed": int(
+            effective_config.get("training", {}).get("seed", 0)
+        ),
+        "training_fold": int(
+            effective_config.get("data", {}).get("fold", 0)
+        ),
         "encoder_assets": encoder_assets,
         "experiment_dir": str(exp_dir),
         "train_log": str(train_log),
@@ -3240,6 +3657,7 @@ def _cmd_train_impl(args):
         "config": "config.yaml",
         "config_sha256": registered_config_sha256,
         "strategy": strategy_overrides.get("strategy", {}),
+        "architecture_plan": architecture_plan,
         "effective_config": effective_config,
         "input_contract": (
             effective_config.get("runtime", {}).get("input_contract") or {}
@@ -3267,10 +3685,23 @@ def _cmd_train_impl(args):
             "strategy": strategy_id,
             "finetune_method": str(args.finetune_method),
             "decoder": str(args.decoder),
+            "training_dimension": str(
+                architecture_plan.get("requested_dimension") or "auto"
+            ),
+            "resolved_dimension": str(
+                architecture_plan.get("resolved_dimension") or ""
+            ),
+            "quality_mode": str(
+                architecture_plan.get("quality_mode") or "standard"
+            ),
             "model_scale": str(args.model_scale),
             "model_path": str(args.model_path or ""),
             "epochs": int(args.epochs),
             "batch_size": int(args.batch_size),
+            "requested_batch_size": int(requested_batch_size),
+            "gpu_memory_gb": float(gpu_memory_gb),
+            "seed": int(effective_config.get("training", {}).get("seed", 0)),
+            "fold": int(effective_config.get("data", {}).get("fold", 0)),
             "grad_accumulation": int(args.grad_accumulation),
             "lr": float(args.lr),
             "weight_decay": float(args.weight_decay),
@@ -3980,20 +4411,41 @@ def build_parser():
     train.add_argument("--min-samples", type=int, default=1)
     train.add_argument("--max-samples", type=int, default=0)
     train.add_argument("--epochs", type=int, default=20)
-    train.add_argument("--batch-size", type=int, default=1)
+    train.add_argument(
+        "--batch-size",
+        type=int,
+        default=0,
+        help="Real training batch; 0 selects a hardware-aware recommendation",
+    )
     train.add_argument("--grad-accumulation", type=int, default=1)
     train.add_argument("--lr", type=float, default=1e-3)
     train.add_argument("--weight-decay", type=float, default=0.01)
     train.add_argument("--img-size", default="224,224")
-    train.add_argument("--modality", default="ct")
+    train.add_argument(
+        "--modality",
+        choices=("auto", "ct", "mr", "mri", "other"),
+        default="auto",
+    )
     train.add_argument("--val-fraction", type=float, default=0.0)
     train.add_argument("--val-cases")
     train.add_argument("--min-val-samples", type=int, default=1)
-    train.add_argument("--finetune-method", choices=("frozen", "decoder_only", "decode_only", "lora", "adapter", "full"), default="lora")
+    train.add_argument("--finetune-method", choices=("frozen", "decoder_only", "decode_only", "lora", "adapter", "full"), default="frozen")
+    train.add_argument(
+        "--training-dimension",
+        choices=("auto", "2d", "3d"),
+        default=None,
+    )
+    train.add_argument(
+        "--quality-mode",
+        choices=("standard", "high_detail"),
+        default="standard",
+    )
     train.add_argument("--decoder", choices=(
+        "scale_aware2d", "context3d_lite", "context3d_hybrid",
+        "context3d_multiscale",
         "linear3d", "mlp_probe", "segformer3d", "token_pyramid3d", "dpt3d",
         "conv2d", "conv2d_unet", "conv2d_deeplab", "conv2d_2_5d", "feature_unet2d",
-    ), default="segformer3d")
+    ), default=None)
     train.add_argument("--lr-scheduler", choices=("constant", "constant_warmup", "cosine"), default="cosine")
     train.add_argument("--warmup-epochs", type=int, default=3)
     train.add_argument("--model-scale", choices=("vits16", "vitb16", "vitl16", "vith16plus"), default="vitb16")
@@ -4028,6 +4480,12 @@ def build_parser():
     train.add_argument("--export-timeout-seconds", type=float, default=1800)
     train.add_argument("--background-mimics-lock-timeout-seconds", type=float, default=1800)
     train.add_argument("--gpu-lock-timeout-seconds", type=float, default=86400)
+    train.add_argument(
+        "--gpu-memory-gb",
+        type=float,
+        default=0.0,
+        help="Planning budget; 0 detects the selected local/remote GPU",
+    )
     train.add_argument("--keep-last-checkpoints", type=int, default=2)
     train.add_argument("--keep-materialized-dataset", action="store_true")
     train.add_argument("--run-id")

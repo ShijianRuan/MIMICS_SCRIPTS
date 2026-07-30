@@ -90,6 +90,9 @@ def _record_created_project(output_dir, case_id, mcs_path, manifest_data):
         mimics_geometry=mimics_geometry,
         provenance={
             "last_operation": "mimics_import",
+            "source_modality": str(
+                manifest_data.get("source_image_modality") or ""
+            ).strip().upper(),
             "source_fingerprint": manifest_data.get("source_fingerprint") or "",
             "resampled_source_grid": bool(
                 manifest_data.get("resampled_source_grid")

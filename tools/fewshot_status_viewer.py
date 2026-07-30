@@ -354,6 +354,43 @@ def progress_line(progress):
     return ", ".join(parts)
 
 
+def architecture_status_lines(job):
+    plan = job.get("architecture_plan") or {}
+    if not isinstance(plan, dict) or not plan:
+        return []
+    requested = str(plan.get("requested_dimension") or "auto").strip().lower()
+    resolved = str(plan.get("resolved_dimension") or "").strip().upper()
+    quality = str(plan.get("quality_mode") or "standard").strip().lower()
+    requested_label = "Auto" if requested == "auto" else requested.upper()
+    quality_label = "High detail" if quality == "high_detail" else "Standard"
+    architecture = requested_label
+    if resolved:
+        architecture += " \u2192 {0}".format(resolved)
+        if resolved == "3D":
+            architecture += " {0}".format(quality_label)
+
+    lines = ["Architecture: {0}".format(architecture)]
+    resolved_batch = plan.get("resolved_batch_size")
+    if resolved_batch is not None:
+        source = str(plan.get("batch_size_source") or "").strip().lower()
+        batch_text = "Batch size: {0}".format(resolved_batch)
+        if source == "hardware_recommendation":
+            memory = plan.get("gpu_memory_gb")
+            if memory is not None:
+                try:
+                    batch_text += " (Auto for {0:g} GB GPU budget)".format(
+                        float(memory)
+                    )
+                except Exception:
+                    batch_text += " (Auto)"
+            else:
+                batch_text += " (Auto)"
+        else:
+            batch_text += " (user setting)"
+        lines.append(batch_text)
+    return lines
+
+
 def user_status_lines(job):
     """Build the concise status summary shown to annotators."""
     lines = [
@@ -379,6 +416,7 @@ def user_status_lines(job):
     strategy_id = (strategy.get("preset") or strategy.get("id")) if isinstance(strategy, dict) else strategy
     if strategy_id:
         lines.append("Strategy: {0}".format(str(strategy_id).replace("_", " ")))
+    lines.extend(architecture_status_lines(job))
     if job.get("train_sample_count") is not None or job.get("validation_sample_count") is not None:
         lines.append("Samples: {0} training, {1} validation".format(
             job.get("train_sample_count", "?"),
@@ -431,6 +469,21 @@ def technical_status_lines(job):
             lines.append("Model ID: {0}".format(model.get("model_id")))
         if model.get("checkpoint"):
             lines.append("Checkpoint: {0}".format(model.get("checkpoint")))
+    architecture_plan = job.get("architecture_plan") or {}
+    if isinstance(architecture_plan, dict) and architecture_plan.get("decoder"):
+        lines.append(
+            "Resolved decoder: {0}".format(architecture_plan.get("decoder"))
+        )
+        if architecture_plan.get("plan_sha256"):
+            lines.append(
+                "Architecture plan hash: {0}".format(
+                    architecture_plan.get("plan_sha256")
+                )
+            )
+    if job.get("training_seed") is not None:
+        lines.append("Training seed: {0}".format(job.get("training_seed")))
+    if job.get("training_fold") is not None:
+        lines.append("Training fold: {0}".format(job.get("training_fold")))
     for label, key in (
         ("Training log warning", "train_log_warning"),
         ("Inference log warning", "log_warning"),

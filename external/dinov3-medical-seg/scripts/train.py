@@ -15,7 +15,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from src.utils.config import load_config
 from src.utils.device import get_device
 from src.models.segmentor import DINOv33DSegmentor
-from src.data.dataset_3d import CaseIdSubset, MedicalVolumeDataset, FewShotSubset
+from src.data.dataset_3d import (
+    CaseIdSubset,
+    MedicalVolumeDataset,
+    FewShotSubset,
+    pad_volume_batch,
+)
 from src.data.input_contract import validate_input_contract
 from src.data.augmentation import VolumeAugmentation
 from src.training.trainer import Trainer3D
@@ -327,6 +332,10 @@ def main():
         roi=data_cfg.get("roi", {}),
         target=data_cfg.get("target", {}),
         slice_axis=config["model"].get("slice_axis", "axial"),
+        resize_mode=data_cfg.get("resize_mode", "stretch"),
+        normalization_scope=data_cfg.get(
+            "normalization_scope", "sample"
+        ),
     )
 
     # Augmentation (train only)
@@ -356,17 +365,15 @@ def main():
     g = torch.Generator()
     g.manual_seed(seed)
     batch_size = int(config["training"].get("batch_size", 1))
-    if batch_size != 1:
-        raise ValueError(
-            "Full-volume cases have variable Z length, so this pipeline requires "
-            "training.batch_size=1. Increase training.grad_accumulation instead."
-        )
+    if batch_size < 1:
+        raise ValueError("training.batch_size must be positive")
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
         generator=g,
+        collate_fn=pad_volume_batch if batch_size > 1 else None,
     )
     val_loader = None
     if val_dataset is not None:

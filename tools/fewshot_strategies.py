@@ -13,8 +13,8 @@ DEFAULT_OPTIONS = {
     "patch_size_zyx": "64,192,192",
     "patches_per_case": 2,
     "patch_focus": "foreground",
-    "channel_policy": "repeat",
-    "slice_axis": "axial",
+    "channel_policy": "auto",
+    "slice_axis": "auto",
     "neighbor_distance_mm": 3.0,
     "loss_type": "auto",
     "keep_largest_component": False,
@@ -99,8 +99,8 @@ def normalize_strategy_options(options, fingerprint=None, policy=None, preset="a
         "sampling_mode": ("adaptive", "full", "patch"),
         "patch_size_mode": ("fingerprint", "custom"),
         "patch_focus": ("foreground", "boundary", "negative_balanced"),
-        "channel_policy": ("repeat", "2_5d"),
-        "slice_axis": ("axial", "coronal", "sagittal"),
+        "channel_policy": ("auto", "repeat", "2_5d"),
+        "slice_axis": ("auto", "axial", "coronal", "sagittal"),
         "loss_type": ("auto", "ce", "dice_ce", "dice_focal"),
     }
     for key, allowed in enums.items():
@@ -126,6 +126,15 @@ def compile_strategy(strategy_id, fingerprint=None, policy=None, user_options=No
     values = normalize_strategy_options(user_options, fingerprint, policy, strategy_id)
     if values["sampling_mode"] == "adaptive":
         raise ValueError("Adaptive sampling requires a training-data fingerprint policy")
+    policy = dict(policy or {})
+    if values["channel_policy"] == "auto":
+        values["channel_policy"] = (
+            "2_5d" if bool(policy.get("use_2_5d")) else "repeat"
+        )
+    if values["slice_axis"] == "auto":
+        values["slice_axis"] = str(
+            policy.get("recommended_slice_axis") or "axial"
+        )
     patch = {"enabled": values["sampling_mode"] == "patch"}
     if patch["enabled"]:
         if values["patch_size_mode"] == "fingerprint":
@@ -134,7 +143,9 @@ def compile_strategy(strategy_id, fingerprint=None, policy=None, user_options=No
             patch["size_zyx"] = _parse_patch_size(values["patch_size_zyx"])
         patch.update({
             "patches_per_case_per_epoch": values["patches_per_case"],
-            "foreground_probability": 0.75,
+            "foreground_probability": float(
+                (policy.get("patch") or {}).get("foreground_probability", 0.75)
+            ),
             "inference_sliding_window": True,
             "inference_overlap": 0.5,
         })
@@ -146,10 +157,31 @@ def compile_strategy(strategy_id, fingerprint=None, policy=None, user_options=No
         loss = {"type": "ce"}
     elif values["loss_type"] == "dice_ce":
         loss = {"type": "dice_ce", "dice_weight": 0.5, "ce_weight": 0.5}
-    else:
+    elif values["loss_type"] == "dice_focal":
         loss = {"type": "dice_focal", "dice_weight": 0.7, "focal_weight": 0.3,
                 "focal_alpha": 0.75, "focal_gamma": 2.0}
-    model = {"slice_axis": values["slice_axis"], "slice_batch_size": 1,
+    else:
+        foreground_fraction = float(
+            ((fingerprint or {}).get("summary") or {}).get(
+                "median_foreground_fraction", 0.0
+            )
+        )
+        if foreground_fraction >= 0.05:
+            loss = {
+                "type": "dice_ce",
+                "dice_weight": 0.5,
+                "ce_weight": 0.5,
+            }
+        else:
+            loss = {
+                "type": "dice_focal",
+                "dice_weight": 0.7,
+                "focal_weight": 0.3,
+                "focal_alpha": 0.75,
+                "focal_gamma": 2.0,
+            }
+    model = {"slice_axis": values["slice_axis"],
+             "slice_batch_size": int(policy.get("slice_batch_size") or 1),
              "channel_policy": values["channel_policy"]}
     if values["channel_policy"] == "2_5d":
         model["neighbor_distance_mm"] = values["neighbor_distance_mm"]

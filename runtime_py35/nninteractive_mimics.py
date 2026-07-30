@@ -1735,10 +1735,16 @@ def _capture_point(image, include):
     }
 
 
-def _delete_point_marker(point):
-    marker = point.get("_marker")
+def _delete_point_marker(point, visual_objects=None):
+    marker = point.pop("_marker", None)
     if marker is None:
         return
+    if visual_objects is not None:
+        visual_objects[:] = [
+            candidate
+            for candidate in visual_objects
+            if candidate is not marker
+        ]
     try:
         mimics.data.points.delete(marker)
     except Exception:
@@ -1791,22 +1797,23 @@ def _capture_point_set(image, _visual_objects=None):
                 point = _capture_point(image, True)
                 if point is not None:
                     points.append(point)
-                    if _visual_objects is not None and point.get("_marker"):
+                    if (
+                        _visual_objects is not None
+                        and point.get("_marker") is not None
+                    ):
                         _visual_objects.append(point["_marker"])
             elif answer == BUTTON_EXCLUDE_POINT:
                 point = _capture_point(image, False)
                 if point is not None:
                     points.append(point)
-                    if _visual_objects is not None and point.get("_marker"):
+                    if (
+                        _visual_objects is not None
+                        and point.get("_marker") is not None
+                    ):
                         _visual_objects.append(point["_marker"])
             elif answer == BUTTON_REMOVE_POINT and points:
                 removed = points.pop()
-                _delete_point_marker(removed)
-                if _visual_objects is not None and removed.get("_marker"):
-                    try:
-                        _visual_objects.remove(removed["_marker"])
-                    except ValueError:
-                        pass
+                _delete_point_marker(removed, _visual_objects)
             elif answer == run_button and points:
                 if _visual_objects is None:
                     for point in points:
@@ -1825,28 +1832,12 @@ def _capture_point_set(image, _visual_objects=None):
             else:
                 # Discard: delete markers immediately since no prediction will run.
                 for point in points:
-                    _delete_point_marker(point)
-                if _visual_objects is not None:
-                    for point in points:
-                        marker = point.get("_marker")
-                        if marker and marker in _visual_objects:
-                            try:
-                                _visual_objects.remove(marker)
-                            except ValueError:
-                                pass
+                    _delete_point_marker(point, _visual_objects)
                 return None
     except Exception:
         # On exception, clean up markers to avoid orphaned points.
         for point in points:
-            _delete_point_marker(point)
-        if _visual_objects is not None:
-            for point in points:
-                marker = point.get("_marker")
-                if marker and marker in _visual_objects:
-                    try:
-                        _visual_objects.remove(marker)
-                    except ValueError:
-                        pass
+            _delete_point_marker(point, _visual_objects)
         raise
 
 

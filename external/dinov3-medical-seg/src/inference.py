@@ -9,7 +9,11 @@ import torch
 import torch.nn.functional as F
 from scipy import ndimage
 
-from .data.dataset_3d import prepare_model_input
+from .data.dataset_3d import (
+    fit_pad_geometry,
+    normalize_volume,
+    prepare_model_input,
+)
 from .data.spatial import spacing_zyx, xyz_to_zyx
 
 
@@ -69,7 +73,15 @@ def predict_cached_feature_slices(
     return np.concatenate(predictions, axis=0)
 
 
-def _predict_logits(model, data_zyx: np.ndarray, model_grid, config, device, input_scale: float = 1.0) -> torch.Tensor:
+def _predict_logits(
+    model,
+    data_zyx: np.ndarray,
+    model_grid,
+    config,
+    device,
+    input_scale: float = 1.0,
+    pre_normalized: bool = False,
+) -> torch.Tensor:
     """Predict logits and restore them to the supplied raw ZYX crop grid."""
     data_cfg = config["data"]
     model_cfg = config["model"]
@@ -86,6 +98,8 @@ def _predict_logits(model, data_zyx: np.ndarray, model_grid, config, device, inp
         intensity=data_cfg.get("intensity", {}),
         channel_policy=model_cfg.get("channel_policy", "repeat"),
         slice_axis=model_cfg.get("slice_axis", "axial"),
+        resize_mode=data_cfg.get("resize_mode", "stretch"),
+        pre_normalized=pre_normalized,
     ).unsqueeze(0).to(device=device, dtype=torch.float32)
     spacing = torch.tensor(spacing_zyx(model_grid), dtype=torch.float32, device=device).unsqueeze(0)
     with torch.no_grad():
@@ -95,7 +109,48 @@ def _predict_logits(model, data_zyx: np.ndarray, model_grid, config, device, inp
             enabled=device.type == "cuda",
         ):
             logits = model(tensor, spacing_zyx=spacing)
+            if str(data_cfg.get("resize_mode", "stretch")) == "fit_pad":
+                logits = _crop_fit_pad_logits(
+                    logits,
+                    data_zyx.shape,
+                    scaled_size,
+                    model_cfg.get("slice_axis", "axial"),
+                )
             return F.interpolate(logits, size=data_zyx.shape, mode="trilinear", align_corners=False)
+
+
+def _crop_fit_pad_logits(
+    logits: torch.Tensor,
+    source_shape_zyx,
+    target_size,
+    slice_axis,
+) -> torch.Tensor:
+    axis = str(slice_axis or "axial").strip().lower()
+    if axis in {"z", "2"}:
+        axis = "axial"
+    elif axis in {"y", "1"}:
+        axis = "coronal"
+    elif axis in {"x", "0"}:
+        axis = "sagittal"
+    source_shape = tuple(int(value) for value in source_shape_zyx)
+    if axis == "axial":
+        plane = (source_shape[1], source_shape[2])
+        spatial_axes = (3, 4)
+    elif axis == "coronal":
+        plane = (source_shape[0], source_shape[2])
+        spatial_axes = (2, 4)
+    elif axis == "sagittal":
+        plane = (source_shape[0], source_shape[1])
+        spatial_axes = (2, 3)
+    else:
+        raise ValueError("Unknown slice axis for fit-pad restoration: {}".format(slice_axis))
+    geometry = fit_pad_geometry(plane, target_size)
+    left, _right, top, _bottom = geometry["padding"]
+    height, width = geometry["resized_size"]
+    slices = [slice(None)] * logits.dim()
+    slices[spatial_axes[0]] = slice(top, top + height)
+    slices[spatial_axes[1]] = slice(left, left + width)
+    return logits[tuple(slices)]
 
 
 def _parse_tta_axes(raw_axes: Iterable) -> list[tuple[int, ...]]:
@@ -122,14 +177,30 @@ def _parse_scales(raw_scales: Iterable) -> list[float]:
     return values
 
 
-def _predict_with_tta(model, data_zyx, model_grid, config, device) -> torch.Tensor:
+def _predict_with_tta(
+    model,
+    data_zyx,
+    model_grid,
+    config,
+    device,
+    *,
+    pre_normalized=False,
+) -> torch.Tensor:
     tta_axes = _parse_tta_axes(config.get("inference", {}).get("tta_axes", []))
     scales = _parse_scales(config.get("inference", {}).get("scales", []))
     logits = []
     for scale in scales:
         for axes in tta_axes:
             input_data = np.flip(data_zyx, axis=axes).copy() if axes else data_zyx
-            current = _predict_logits(model, input_data, model_grid, config, device, input_scale=scale)
+            current = _predict_logits(
+                model,
+                input_data,
+                model_grid,
+                config,
+                device,
+                input_scale=scale,
+                pre_normalized=pre_normalized,
+            )
             if axes:
                 current = torch.flip(current, dims=[axis + 2 for axis in axes])
             logits.append(current)
@@ -168,6 +239,34 @@ def _extract_padded(data: np.ndarray, start: tuple[int, int, int], size: tuple[i
         data = np.pad(data, tuple((0, int(value)) for value in pad_after), mode="edge")
     slices = tuple(slice(int(origin), int(origin + length)) for origin, length in zip(start, size))
     return data[slices], slices
+
+
+def _case_normalized_input(data_zyx, config):
+    """Apply the saved case-level intensity contract before any ROI/patch."""
+    data_cfg = config.get("data", {})
+    model_cfg = config.get("model", {})
+    scope = str(data_cfg.get("normalization_scope") or "sample").lower()
+    channel_policy = str(
+        model_cfg.get("channel_policy") or "repeat"
+    ).lower()
+    if (
+        scope == "case_before_roi_or_patch"
+        and channel_policy
+        not in ("ct_windows", "multiwindow", "multi_window")
+    ):
+        return (
+            normalize_volume(
+                data_zyx,
+                modality=data_cfg.get("modality", "other"),
+                intensity=data_cfg.get("intensity", {}),
+            ),
+            True,
+        )
+    if scope not in {"sample", "case_before_roi_or_patch"}:
+        raise ValueError(
+            "Unknown data.normalization_scope: {}".format(scope)
+        )
+    return np.asarray(data_zyx, dtype=np.float32), False
 
 
 def prediction_center_zyx(mask: np.ndarray) -> tuple[int, int, int] | None:
@@ -236,6 +335,7 @@ def predict_refinement_array(model, model_grid, config, device, center_zyx: tupl
     if len(size) != 3 or any(value <= 0 for value in size):
         raise ValueError("Fine-stage refinement requires data.patch.size_zyx")
     data = xyz_to_zyx(model_grid.get_fdata(dtype=np.float32))
+    data, pre_normalized = _case_normalized_input(data, config)
     shape = np.asarray(data.shape, dtype=int)
     center = np.asarray(center_zyx, dtype=int)
 
@@ -249,7 +349,14 @@ def predict_refinement_array(model, model_grid, config, device, center_zyx: tupl
         sub_data = data[region]
         # Tile the training window across the search ROI and threshold the
         # aggregated foreground probability with the same rule as predict_array.
-        foreground_probability = _sliding_window_logits(model, sub_data, model_grid, config, device)
+        foreground_probability = _sliding_window_logits(
+            model,
+            sub_data,
+            model_grid,
+            config,
+            device,
+            pre_normalized=pre_normalized,
+        )
         local = postprocess_foreground(
             foreground_probability,
             threshold=float(config.get("inference", {}).get("threshold", 0.5)),
@@ -264,7 +371,14 @@ def predict_refinement_array(model, model_grid, config, device, center_zyx: tupl
     start = np.maximum(start, 0)
     start = np.minimum(start, np.maximum(shape - size_array, 0))
     crop, _ = _extract_padded(data, tuple(int(value) for value in start), size)
-    logits = _predict_with_tta(model, crop, model_grid, config, device)
+    logits = _predict_with_tta(
+        model,
+        crop,
+        model_grid,
+        config,
+        device,
+        pre_normalized=pre_normalized,
+    )
     local = logits.argmax(dim=1).squeeze(0).cpu().numpy().astype(np.int16, copy=False)
     result = np.zeros(shape, dtype=np.int16)
     valid = np.minimum(size_array, shape - start)
@@ -273,7 +387,15 @@ def predict_refinement_array(model, model_grid, config, device, center_zyx: tupl
     return result
 
 
-def _sliding_window_logits(model, data_zyx, model_grid, config, device) -> np.ndarray:
+def _sliding_window_logits(
+    model,
+    data_zyx,
+    model_grid,
+    config,
+    device,
+    *,
+    pre_normalized=False,
+) -> np.ndarray:
     patch = dict(config.get("data", {}).get("patch", {}))
     size = tuple(int(value) for value in patch.get("size_zyx", []))
     if len(size) != 3 or any(value <= 0 for value in size):
@@ -289,7 +411,14 @@ def _sliding_window_logits(model, data_zyx, model_grid, config, device) -> np.nd
         for y in _starts(shape[1], size[1], overlap):
             for x in _starts(shape[2], size[2], overlap):
                 crop, _ = _extract_padded(data_zyx, (z, y, x), size)
-                logits = _predict_with_tta(model, crop, model_grid, config, device)
+                logits = _predict_with_tta(
+                    model,
+                    crop,
+                    model_grid,
+                    config,
+                    device,
+                    pre_normalized=pre_normalized,
+                )
                 foreground = torch.softmax(logits, dim=1)[0, 1].cpu().numpy()
                 valid = (min(size[0], shape[0] - z), min(size[1], shape[1] - y), min(size[2], shape[2] - x))
                 region = (slice(z, z + valid[0]), slice(y, y + valid[1]), slice(x, x + valid[2]))
@@ -324,6 +453,7 @@ def postprocess_foreground(
 def predict_array(model, model_grid, config, device):
     """Return a native model-grid class-index prediction in ``(Z,Y,X)`` order."""
     data_zyx = xyz_to_zyx(model_grid.get_fdata(dtype=np.float32))
+    data_zyx, pre_normalized = _case_normalized_input(data_zyx, config)
     full_shape = data_zyx.shape
     roi = dict(config.get("data", {}).get("roi", {}))
     roi_slices = None
@@ -333,14 +463,28 @@ def predict_array(model, model_grid, config, device):
         data_zyx = data_zyx[roi_slices]
     patch = dict(config.get("data", {}).get("patch", {}))
     if bool(patch.get("inference_sliding_window", False)):
-        foreground_probability = _sliding_window_logits(model, data_zyx, model_grid, config, device)
+        foreground_probability = _sliding_window_logits(
+            model,
+            data_zyx,
+            model_grid,
+            config,
+            device,
+            pre_normalized=pre_normalized,
+        )
         prediction = postprocess_foreground(
             foreground_probability,
             threshold=float(config.get("inference", {}).get("threshold", 0.5)),
             keep_largest_component=bool(config.get("inference", {}).get("keep_largest_component", False)),
         )
     else:
-        logits = _predict_with_tta(model, data_zyx, model_grid, config, device)
+        logits = _predict_with_tta(
+            model,
+            data_zyx,
+            model_grid,
+            config,
+            device,
+            pre_normalized=pre_normalized,
+        )
         prediction = logits.argmax(dim=1).squeeze(0).cpu().numpy().astype(np.int16, copy=False)
         if bool(config.get("inference", {}).get("keep_largest_component", False)) and np.any(prediction):
             components, count = ndimage.label(prediction > 0)

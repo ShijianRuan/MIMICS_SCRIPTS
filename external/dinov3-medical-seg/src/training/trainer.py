@@ -500,12 +500,23 @@ class Trainer3D:
             spacing_zyx = batch.get("spacing_zyx")
             if spacing_zyx is not None:
                 spacing_zyx = spacing_zyx.to(self.device, dtype=torch.float32)
+            valid_shape_zyx = batch.get("unpadded_shape_zyx")
+            if valid_shape_zyx is not None:
+                valid_shape_zyx = valid_shape_zyx.to(
+                    self.device,
+                    dtype=torch.int64,
+                )
 
             # Sub-volume training
             if self.use_sub_volume:
                 loss_dict = self._train_step_sub_volume(images, labels, spacing_zyx)
             else:
-                loss_dict = self._train_step(images, labels, spacing_zyx)
+                loss_dict = self._train_step(
+                    images,
+                    labels,
+                    spacing_zyx,
+                    valid_shape_zyx,
+                )
 
             loss = loss_dict["loss"] / self.grad_accumulation
             loss.backward()
@@ -562,13 +573,23 @@ class Trainer3D:
         n = len(self.train_loader)
         return {"loss": total_loss / n, "dice_loss": total_dice / n, "ce_loss": total_ce / n}
 
-    def _train_step(self, images: torch.Tensor, labels: torch.Tensor, spacing_zyx=None) -> Dict:
+    def _train_step(
+        self,
+        images: torch.Tensor,
+        labels: torch.Tensor,
+        spacing_zyx=None,
+        valid_shape_zyx=None,
+    ) -> Dict:
         with torch.autocast(
             device_type=self.device.type if self.device.type != "mps" else "cpu",
             dtype=self.dtype,
             enabled=self.dtype != torch.float32,
         ):
-            pred = self.model(images, spacing_zyx=spacing_zyx)
+            pred = self.model(
+                images,
+                spacing_zyx=spacing_zyx,
+                valid_shape_zyx=valid_shape_zyx,
+            )
             return self.criterion(pred, labels)
 
     def _train_step_sub_volume(self, images: torch.Tensor, labels: torch.Tensor, spacing_zyx=None) -> Dict:

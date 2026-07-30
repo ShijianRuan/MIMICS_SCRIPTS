@@ -28,6 +28,162 @@ import torch.nn.functional as F
 from typing import List
 
 
+def _norm2d(channels: int) -> nn.GroupNorm:
+    groups = min(8, int(channels))
+    while groups > 1 and channels % groups:
+        groups -= 1
+    return nn.GroupNorm(groups, channels)
+
+
+class _ScaleAwareRefine2D(nn.Module):
+    """Depthwise spatial refinement followed by channel mixing."""
+
+    def __init__(self, channels: int):
+        super().__init__()
+        self.body = nn.Sequential(
+            nn.Conv2d(
+                channels,
+                channels,
+                kernel_size=3,
+                padding=1,
+                groups=channels,
+                bias=False,
+            ),
+            _norm2d(channels),
+            nn.GELU(),
+            nn.Conv2d(channels, channels, kernel_size=1, bias=False),
+            _norm2d(channels),
+            nn.GELU(),
+        )
+
+    def forward(self, values: torch.Tensor) -> torch.Tensor:
+        return values + self.body(values)
+
+
+class ScaleAware2DDecoder(nn.Module):
+    """DINO-aware 2D decoder with an explicit spatial token pyramid.
+
+    DINO intermediate blocks have different semantic depth but the same patch
+    grid. This decoder projects four levels, reassembles them at H/2, H/4,
+    H/8, and H/16, and performs lightweight top-down fusion. Slices are
+    decoded in bounded chunks so a long CT volume does not materialize every
+    high-resolution feature map at once.
+    """
+
+    def __init__(
+        self,
+        feature_dims: List[int],
+        num_classes: int,
+        proj_dim: int = 48,
+        decode_slice_batch_size: int = 16,
+    ):
+        super().__init__()
+        if len(feature_dims) < 4:
+            raise ValueError(
+                "scale_aware2d requires four DINO intermediate feature levels"
+            )
+        self.feature_dims = list(feature_dims[-4:])
+        self.decode_slice_batch_size = max(1, int(decode_slice_batch_size))
+        self.projections = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Conv2d(dim, proj_dim, kernel_size=1, bias=False),
+                    _norm2d(proj_dim),
+                    nn.GELU(),
+                )
+                for dim in self.feature_dims
+            ]
+        )
+        self.refine = nn.ModuleList(
+            [_ScaleAwareRefine2D(proj_dim) for _ in range(4)]
+        )
+        self.head = nn.Sequential(
+            nn.Conv2d(proj_dim, proj_dim, kernel_size=3, padding=1, bias=False),
+            _norm2d(proj_dim),
+            nn.GELU(),
+            nn.Conv2d(proj_dim, num_classes, kernel_size=1),
+        )
+
+    @staticmethod
+    def _target_sizes(height: int, width: int) -> list[tuple[int, int]]:
+        return [
+            (max(1, height // 2), max(1, width // 2)),
+            (max(1, height // 4), max(1, width // 4)),
+            (max(1, height // 8), max(1, width // 8)),
+            (max(1, height // 16), max(1, width // 16)),
+        ]
+
+    def _decode_chunk(
+        self,
+        features: List[torch.Tensor],
+        output_size: tuple[int, int],
+    ) -> torch.Tensor:
+        sizes = self._target_sizes(*output_size)
+        levels = []
+        for projection, feature, target in zip(
+            self.projections, features[-4:], sizes
+        ):
+            current = projection(feature)
+            if current.shape[-2:] != target:
+                current = F.interpolate(
+                    current,
+                    size=target,
+                    mode="bilinear",
+                    align_corners=False,
+                )
+            levels.append(current)
+        current = self.refine[-1](levels[-1])
+        for index in range(2, -1, -1):
+            current = F.interpolate(
+                current,
+                size=levels[index].shape[-2:],
+                mode="bilinear",
+                align_corners=False,
+            )
+            current = self.refine[index](current + levels[index])
+        logits = self.head(current)
+        return F.interpolate(
+            logits,
+            size=output_size,
+            mode="bilinear",
+            align_corners=False,
+        )
+
+    def forward(
+        self,
+        features_3d: List[torch.Tensor],
+        original_shape: tuple,
+    ) -> torch.Tensor:
+        batch, _, depth = features_3d[0].shape[:3]
+        flattened = [
+            feature.permute(0, 2, 1, 3, 4).reshape(
+                batch * depth,
+                feature.shape[1],
+                feature.shape[3],
+                feature.shape[4],
+            )
+            for feature in features_3d[-4:]
+        ]
+        output_size = (int(original_shape[-2]), int(original_shape[-1]))
+        chunks = []
+        for start in range(0, batch * depth, self.decode_slice_batch_size):
+            end = min(batch * depth, start + self.decode_slice_batch_size)
+            chunks.append(
+                self._decode_chunk(
+                    [feature[start:end] for feature in flattened],
+                    output_size,
+                )
+            )
+        logits = torch.cat(chunks, dim=0)
+        return logits.reshape(
+            batch,
+            depth,
+            logits.shape[1],
+            output_size[0],
+            output_size[1],
+        ).permute(0, 2, 1, 3, 4)
+
+
 def _tinygrad_uniform_(module: nn.Module, input_channels: int) -> None:
     """Match the recovered decoder's tinygrad convolution initialization."""
     kernel = module.kernel_size

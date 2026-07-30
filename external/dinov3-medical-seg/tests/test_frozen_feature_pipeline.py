@@ -333,7 +333,7 @@ def test_ui_validation_enforces_only_required_feature_constraints():
     assert not values["mixed_precision"]
 
 
-def test_ui_validation_locks_default_frozen_encoder_image_size():
+def test_ui_validation_locks_default_frozen_encoder_image_size(tmp_path):
     values = validate_options({
         "strategy": "full_volume",
         "decoder": "feature_unet2d",
@@ -346,6 +346,9 @@ def test_ui_validation_locks_default_frozen_encoder_image_size():
     })
     assert values["img_size"] == "256,256"
 
+    custom_model = tmp_path / "custom-vits16"
+    custom_model.mkdir()
+    (custom_model / "model.onnx").write_bytes(b"custom-onnx")
     custom = validate_options({
         "strategy": "full_volume",
         "decoder": "feature_unet2d",
@@ -355,7 +358,7 @@ def test_ui_validation_locks_default_frozen_encoder_image_size():
         "weight_decay": 1e-4,
         "lr_scheduler": "cosine",
         "img_size": "512,512",
-        "model_path": "/models/custom-vits16",
+        "model_path": str(custom_model),
     })
     assert custom["img_size"] == "512,512"
 

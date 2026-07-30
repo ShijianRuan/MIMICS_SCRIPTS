@@ -43,6 +43,19 @@ def test_volume_contract_rejects_modality_drift():
         validate_input_contract(changed, required=True)
 
 
+def test_previous_volume_contract_keeps_legacy_sample_normalization():
+    config = _config("volume")
+    previous = copy.deepcopy(config["runtime"]["input_contract"])
+    previous["schema_version"] = "dinov3_volume_input.v2"
+    previous.pop("normalization_scope")
+    config["runtime"]["input_contract"] = previous
+    assert validate_input_contract(config, required=True) == previous
+
+    config["data"]["normalization_scope"] = "case_before_roi_or_patch"
+    with pytest.raises(RuntimeError, match="differs"):
+        validate_input_contract(config, required=True)
+
+
 def test_cached_slice_contract_rejects_normalization_drift():
     config = _config("cached_slices")
     changed = copy.deepcopy(config)

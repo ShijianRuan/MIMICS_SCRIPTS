@@ -694,10 +694,12 @@ def _default_training_options(config, profile_name=None):
     values = {}
     if default_profile and isinstance(profiles, dict):
         values.update(profiles.get(default_profile, {}) or {})
+    if values.get("decoder") and "training_dimension" not in values:
+        values["preserve_legacy_decoder"] = True
     values.setdefault("base_config", config.get("base_config", "config/research/ct_fewshot_fast.yaml"))
     values.setdefault("strategy", config.get("default_strategy", "adaptive"))
     values.setdefault("epochs", config.get("default_epochs", 20))
-    values.setdefault("batch_size", config.get("default_batch_size", 1))
+    values.setdefault("batch_size", config.get("default_batch_size", 0))
     values.setdefault("grad_accumulation", config.get("default_grad_accumulation", 1))
     values.setdefault("lr", config.get("default_lr", 0.001))
     values.setdefault("weight_decay", config.get("default_weight_decay", 0.01))
@@ -708,14 +710,19 @@ def _default_training_options(config, profile_name=None):
         config.get("default_validation_interval", 2),
     )
     values.setdefault("img_size", config.get("default_img_size", "256,256"))
-    values.setdefault("modality", config.get("default_modality", "ct"))
+    values.setdefault("modality", config.get("default_modality", "auto"))
     values.setdefault("min_samples", config.get("default_min_samples", 1))
     values.setdefault("max_samples", config.get("default_max_samples", 0))
     values.setdefault("sample_mode", config.get("default_sample_mode", "all"))
     values.setdefault("val_fraction", config.get("default_val_fraction", 0.2))
     values.setdefault("min_val_samples", config.get("default_min_val_samples", 1))
     values.setdefault("finetune_method", config.get("default_finetune_method", "lora"))
-    values.setdefault("decoder", config.get("default_decoder", "segformer3d"))
+    values.setdefault(
+        "training_dimension",
+        config.get("default_training_dimension", "auto"),
+    )
+    values.setdefault("quality_mode", config.get("default_quality_mode", "standard"))
+    values.setdefault("decoder", config.get("default_decoder", "auto"))
     values.setdefault("model_scale", config.get("default_model_scale", "vitb16"))
     values.setdefault("model_path", config.get("default_model_path", ""))
     values.setdefault("model_sha256", config.get("default_model_sha256", ""))
@@ -755,6 +762,7 @@ def _default_training_options(config, profile_name=None):
     )
     values.setdefault("label_root", "")
     values.setdefault("gpu_lock_timeout_seconds", config.get("gpu_lock_timeout_seconds", 86400))
+    values.setdefault("gpu_memory_gb", config.get("default_gpu_memory_gb", 0.0))
     values.setdefault(
         "background_mimics_lock_timeout_seconds",
         config.get("background_mimics_lock_timeout_seconds", 1800),
@@ -799,7 +807,7 @@ def _append_training_args(cmd, config, options):
         "--epochs",
         str(int(options.get("epochs", config.get("default_epochs", 20)))),
         "--batch-size",
-        str(int(options.get("batch_size", config.get("default_batch_size", 1)))),
+        str(int(options.get("batch_size", config.get("default_batch_size", 0)))),
         "--grad-accumulation",
         str(int(options.get("grad_accumulation", config.get("default_grad_accumulation", 1)))),
         "--lr",
@@ -818,7 +826,7 @@ def _append_training_args(cmd, config, options):
         "--img-size",
         str(options.get("img_size", config.get("default_img_size", "256,256"))),
         "--modality",
-        str(options.get("modality", config.get("default_modality", "ct"))),
+        str(options.get("modality", config.get("default_modality", "auto"))),
         "--min-samples",
         str(int(options.get("min_samples", config.get("default_min_samples", 1)))),
         "--max-samples",
@@ -831,8 +839,6 @@ def _append_training_args(cmd, config, options):
         str(int(options.get("min_val_samples", config.get("default_min_val_samples", 1)))),
         "--finetune-method",
         str(options.get("finetune_method", config.get("default_finetune_method", "lora"))),
-        "--decoder",
-        str(options.get("decoder", config.get("default_decoder", "segformer3d"))),
         "--model-scale",
         str(options.get("model_scale", config.get("default_model_scale", "vitb16"))),
         "--encoder-backend",
@@ -845,11 +851,25 @@ def _append_training_args(cmd, config, options):
         str(int(options.get("adapter_bottleneck", config.get("default_adapter_bottleneck", 64)))),
         "--gpu-lock-timeout-seconds",
         str(float(options.get("gpu_lock_timeout_seconds", config.get("gpu_lock_timeout_seconds", 86400)))),
+        "--gpu-memory-gb",
+        str(float(options.get("gpu_memory_gb", config.get("default_gpu_memory_gb", 0.0)))),
         "--background-mimics-lock-timeout-seconds",
         str(float(options.get("background_mimics_lock_timeout_seconds", config.get("background_mimics_lock_timeout_seconds", 1800)))),
         "--keep-last-checkpoints",
         str(int(options.get("keep_last_checkpoints", config.get("default_keep_last_checkpoints", 2)))),
     ])
+    if bool(options.get("preserve_legacy_decoder", False)):
+        cmd.extend([
+            "--decoder",
+            str(options.get("decoder") or "feature_unet2d"),
+        ])
+    else:
+        cmd.extend([
+            "--training-dimension",
+            str(options.get("training_dimension") or "auto"),
+            "--quality-mode",
+            str(options.get("quality_mode") or "standard"),
+        ])
     model_path = str(options.get("model_path", config.get("default_model_path", "")) or "")
     if model_path:
         cmd.extend(["--model-path", model_path])
@@ -1425,7 +1445,7 @@ def _advanced_training_options(config, ts_root):
     model_scale = QComboBox()
     model_scale.addItems(["vitb16", "vitl16", "vith16plus"])
     modality = QComboBox()
-    modality.addItems(["ct", "mri", "other"])
+    modality.addItems(["auto", "ct", "mri", "other"])
     epochs = QSpinBox()
     epochs.setRange(1, 10000)
     batch_size = QSpinBox()
@@ -1477,7 +1497,7 @@ def _advanced_training_options(config, ts_root):
         combo_set(finetune, new_values.get("finetune_method", "lora"))
         combo_set(decoder, new_values.get("decoder", "segformer3d"))
         combo_set(model_scale, new_values.get("model_scale", "vitb16"))
-        combo_set(modality, new_values.get("modality", "ct"))
+        combo_set(modality, new_values.get("modality", "auto"))
         epochs.setValue(int(new_values.get("epochs", 10)))
         batch_size.setValue(int(new_values.get("batch_size", 1)))
         grad_accum.setValue(int(new_values.get("grad_accumulation", 1)))

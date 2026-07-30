@@ -68,7 +68,7 @@ class DINOv33DSegmentor(nn.Module):
         else:
             self.backbone = DINOv3Backbone(
                 model_path=model_path,
-                out_indices=cfg.get("out_indices", [2, 5, 8, 11]),
+                out_indices=cfg.get("out_indices"),
                 freeze=freeze_backbone,
                 input_normalization=cfg.get("input_normalization", "none"),
                 image_mean=cfg.get("image_mean"),
@@ -84,7 +84,12 @@ class DINOv33DSegmentor(nn.Module):
         if self.ft_method == "lora":
             r = ft_cfg.get("lora_rank", 8)
             alpha = ft_cfg.get("lora_alpha", 16)
-            apply_lora_to_dinov3(self.backbone, r=r, alpha=alpha)
+            apply_lora_to_dinov3(
+                self.backbone,
+                r=r,
+                alpha=alpha,
+                target_modules=ft_cfg.get("target_modules"),
+            )
         elif self.ft_method == "adapter":
             bn = ft_cfg.get("adapter_bottleneck", 64)
             pos = ft_cfg.get("adapter_position", "after_attn")
@@ -104,7 +109,7 @@ class DINOv33DSegmentor(nn.Module):
         )
 
         # ── 4. 3D Decoder ──
-        feature_dims = [self.embed_dim] * len(cfg.get("out_indices", [2, 5, 8, 11]))
+        feature_dims = [self.embed_dim] * len(self.backbone.out_indices)
         self.decoder_type = dec_cfg.get("type", "segformer3d")
 
         # z_smooth_sigma is configured in physical mm.  Convert to voxel
@@ -133,6 +138,7 @@ class DINOv33DSegmentor(nn.Module):
             feature_dims,
             num_classes=cfg["num_classes"],
             z_smooth_sigma=z_smooth_sigma,
+            decoder_options=dec_cfg,
         )
         self.feature_augmentation = build_feature_augmentation(config.get("feature_augmentation"))
 
@@ -188,7 +194,12 @@ class DINOv33DSegmentor(nn.Module):
             return spacing[..., [1, 0, 2]]
         return spacing[..., [2, 0, 1]]
 
-    def forward(self, volume_3d: torch.Tensor, spacing_zyx: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(
+        self,
+        volume_3d: torch.Tensor,
+        spacing_zyx: torch.Tensor | None = None,
+        valid_shape_zyx: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """
         Args:
             volume_3d: (B, 1, D, H, W) input volume
@@ -207,16 +218,86 @@ class DINOv33DSegmentor(nn.Module):
         )
         features_3d = self.feature_augmentation(features_3d)
 
-        # 3D decoding → segmentation
-        if getattr(self.decoder_3d, "requires_raw_input", False):
-            output = self.decoder_3d(
-                features_3d,
-                self._original_shape,
-                raw_volume=slice_space_volume,
-            )
-        else:
-            output = self.decoder_3d(features_3d, self._original_shape)
+        output = self._decode_features(
+            features_3d,
+            slice_space_volume,
+            valid_shape_zyx=valid_shape_zyx,
+        )
         return self._from_slice_space(output)
+
+    def _decode_one(self, features_3d, raw_volume):
+        if getattr(self.decoder_3d, "requires_raw_input", False):
+            return self.decoder_3d(
+                features_3d,
+                raw_volume.shape,
+                raw_volume=raw_volume,
+            )
+        return self.decoder_3d(features_3d, raw_volume.shape)
+
+    def _decode_features(
+        self,
+        features_3d,
+        slice_space_volume,
+        *,
+        valid_shape_zyx=None,
+    ):
+        """Decode padded batches on each case's real slice extent.
+
+        Slice-wise DINO encoding is independent across depth, so it can safely
+        share one padded batch. Volumetric decoder interpolation is not: using
+        the longest case as every case's depth changes the feature pyramid for
+        shorter scans. Decode those scans independently, then pad only their
+        final logits for the ignore-index loss.
+        """
+        if valid_shape_zyx is None:
+            return self._decode_one(features_3d, slice_space_volume)
+        shapes = torch.as_tensor(valid_shape_zyx).detach().cpu()
+        if shapes.ndim != 2 or shapes.shape != (slice_space_volume.shape[0], 3):
+            raise ValueError(
+                "valid_shape_zyx must have shape (batch, 3), got {}".format(
+                    tuple(shapes.shape)
+                )
+            )
+        axis_index = {
+            "axial": 0,
+            "coronal": 1,
+            "sagittal": 2,
+        }[self._slice_axis_name()]
+        valid_depths = [int(row[axis_index]) for row in shapes.tolist()]
+        padded_depth = int(slice_space_volume.shape[2])
+        if any(depth <= 0 or depth > padded_depth for depth in valid_depths):
+            raise ValueError(
+                "valid_shape_zyx contains an invalid slice extent: {}".format(
+                    valid_depths
+                )
+            )
+        if all(depth == padded_depth for depth in valid_depths):
+            return self._decode_one(features_3d, slice_space_volume)
+        decoded = []
+        for sample_index, valid_depth in enumerate(valid_depths):
+            raw = slice_space_volume[
+                sample_index : sample_index + 1,
+                :,
+                :valid_depth,
+            ]
+            sample_features = [
+                feature[
+                    sample_index : sample_index + 1,
+                    :,
+                    :valid_depth,
+                ]
+                for feature in features_3d
+            ]
+            logits = self._decode_one(sample_features, raw)
+            if valid_depth < padded_depth:
+                logits = torch.nn.functional.pad(
+                    logits,
+                    (0, 0, 0, 0, 0, padded_depth - valid_depth),
+                    mode="constant",
+                    value=0.0,
+                )
+            decoded.append(logits)
+        return torch.cat(decoded, dim=0)
 
     def decode_cached_slices(
         self,

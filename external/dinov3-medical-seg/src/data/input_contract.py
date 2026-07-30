@@ -5,7 +5,9 @@ from __future__ import annotations
 from copy import deepcopy
 
 
-VOLUME_CONTRACT_VERSION = "dinov3_volume_input.v1"
+LEGACY_VOLUME_CONTRACT_VERSION = "dinov3_volume_input.v1"
+PREVIOUS_VOLUME_CONTRACT_VERSION = "dinov3_volume_input.v2"
+VOLUME_CONTRACT_VERSION = "dinov3_volume_input.v3"
 CACHED_SLICE_CONTRACT_VERSION = "dinov3_cached_slice_input.v1"
 
 
@@ -38,6 +40,10 @@ def input_contract_for_config(config: dict) -> dict:
         "channel_policy": str(model.get("channel_policy") or "repeat"),
         "slice_axis": str(model.get("slice_axis") or "axial"),
         "image_size": list(data.get("img_size") or [224, 224]),
+        "resize_mode": str(data.get("resize_mode") or "stretch"),
+        "normalization_scope": str(
+            data.get("normalization_scope") or "sample"
+        ),
         "encoder_input_normalization": str(
             model.get("input_normalization") or "none"
         ),
@@ -67,6 +73,23 @@ def validate_input_contract(config: dict, *, required: bool = False) -> dict:
         return {}
     expected = input_contract_for_config(config)
     if stored != expected:
+        previous_expected = deepcopy(expected)
+        previous_expected["schema_version"] = PREVIOUS_VOLUME_CONTRACT_VERSION
+        previous_expected.pop("normalization_scope", None)
+        if (
+            stored == previous_expected
+            and expected.get("normalization_scope") == "sample"
+        ):
+            return stored
+        legacy_expected = deepcopy(expected)
+        legacy_expected["schema_version"] = LEGACY_VOLUME_CONTRACT_VERSION
+        legacy_expected.pop("resize_mode", None)
+        legacy_expected.pop("normalization_scope", None)
+        if (
+            stored == legacy_expected
+            and expected.get("resize_mode") == "stretch"
+        ):
+            return stored
         raise RuntimeError(
             "The DINOv3 input preprocessing configuration differs from the "
             "contract saved for this model. Refusing distribution-shifted inference."

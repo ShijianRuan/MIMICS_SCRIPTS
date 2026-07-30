@@ -135,8 +135,12 @@ def test_localization_ball_and_virtual_patch_sampling(tmp_path):
         target={"mode": "localization_ball", "radius_mm_zyx": [4, 5, 6]},
         patch={"enabled": True, "size_zyx": [16, 16, 16],
                "patches_per_case_per_epoch": 4,
-               "sampling": {"interior": 0.25, "boundary": 0.25,
-                            "near_negative": 0.25, "random": 0.25}},
+               # This assertion verifies the localization target transform,
+               # so sample a foreground-centered patch deterministically.
+               # Random/near-negative cells are covered by separate sampling
+               # tests and may legitimately contain no foreground.
+               "sampling": {"interior": 1.0, "boundary": 0.0,
+                            "near_negative": 0.0, "random": 0.0}},
     )
     assert len(dataset) == 4
     item = dataset[3]
@@ -266,6 +270,53 @@ def test_prepare_model_input_resizes_selected_slice_plane(slice_axis, expected_s
         "sagittal": (tensor.shape[1], tensor.shape[2]),
     }[slice_axis]
     assert all(int(value) % 16 == 0 for value in plane_shape)
+
+
+def test_case_normalization_is_stable_across_full_and_patch_inputs():
+    from src.data.dataset_3d import normalize_volume, prepare_model_input
+    from src.inference import _case_normalized_input
+
+    volume = np.linspace(-50.0, 250.0, 6 * 8 * 10, dtype=np.float32).reshape(
+        6, 8, 10
+    )
+    config = {
+        "data": {
+            "modality": "mr",
+            "intensity": {"percentiles": [0.5, 99.5]},
+            "normalization_scope": "case_before_roi_or_patch",
+        },
+        "model": {"channel_policy": "repeat"},
+    }
+    normalized, ready = _case_normalized_input(volume, config)
+    assert ready is True
+    assert np.allclose(
+        normalized,
+        normalize_volume(
+            volume,
+            modality="mr",
+            intensity={"percentiles": [0.5, 99.5]},
+        ),
+    )
+    patch = normalized[2:5, 2:7, 3:8]
+    prepared = prepare_model_input(
+        patch,
+        (16, 16),
+        modality="mr",
+        intensity={"percentiles": [0.5, 99.5]},
+        pre_normalized=True,
+    )
+    assert float(prepared.min()) > 0.0
+    assert float(prepared.max()) < 1.0
+
+    legacy = prepare_model_input(
+        patch,
+        (16, 16),
+        modality="mr",
+        intensity={"percentiles": [0.5, 99.5]},
+        pre_normalized=False,
+    )
+    assert float(legacy.min()) == pytest.approx(0.0)
+    assert float(legacy.max()) == pytest.approx(1.0)
 
 
 def test_dataset_pairs_msd_image_suffix_with_label_case_id(tmp_path):

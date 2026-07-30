@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--scale", type=float, default=1.0, choices=(1.0, 1.25, 1.5))
+    parser.add_argument("--tab", choices=("data", "model"), default="data")
     parser.add_argument("--output")
     args = parser.parse_args(argv)
 
@@ -28,9 +29,10 @@ def main(argv=None):
     os.environ["QT_SCALE_FACTOR"] = str(args.scale)
     from PySide6 import QtCore, QtGui, QtWidgets
     from tools.fewshot_training_setup_ui import QtTrainingSetupApp
+    from tools.ui_theme import configure_application
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    app.setStyle("Windows")
+    configure_application(app, "DINOv3 Few-Shot Training")
     temp = Path(tempfile.mkdtemp(prefix="mimics_fewshot_ui_"))
     dataset = temp / "dataset"
     dataset.mkdir()
@@ -48,6 +50,7 @@ def main(argv=None):
     }
     window = QtWidgets.QMainWindow()
     ui = QtTrainingSetupApp(window, context, (QtCore, QtGui, QtWidgets))
+    ui.tabs.setCurrentIndex(1 if args.tab == "model" else 0)
     window.show()
     app.processEvents()
 
@@ -61,8 +64,14 @@ def main(argv=None):
         rect = QtCore.QRect(top_left, widget.size())
         if not central.intersects(rect):
             errors.append("{} is outside the visible central area".format(widget.objectName() or widget.__class__.__name__))
+    if args.tab == "model":
+        model_selector = ui.widgets.get("model_selection")
+        if model_selector is None or model_selector.count() != len(ui.model_records):
+            errors.append("pretrained weights selector does not match the fixed model repository")
+        if "model_path" in ui.widgets:
+            errors.append("arbitrary custom model path is still exposed in the setup UI")
 
-    output = Path(args.output) if args.output else ROOT / "docs" / "images" / "fewshot_windows_scale_{}.png".format(str(args.scale).replace(".", "_"))
+    output = Path(args.output) if args.output else ROOT / "docs" / "images" / "fewshot_windows_{}_scale_{}.png".format(args.tab, str(args.scale).replace(".", "_"))
     output.parent.mkdir(parents=True, exist_ok=True)
     if not window.grab().save(str(output)):
         errors.append("could not save screenshot")
