@@ -232,6 +232,79 @@ def _build_dataset_tar(bundle: Path, archive: Path) -> tuple[str, int]:
     return _sha256_file(archive), size
 
 
+def _build_dataset_parts(
+    bundle: Path, destination: Path
+) -> list[dict[str, Any]]:
+    """Build deterministic per-case archives for incremental remote reuse."""
+    case_names = set()
+    for top_name in ("input", "labels"):
+        top = bundle / top_name
+        if not top.is_dir():
+            continue
+        case_names.update(
+            child.name for child in top.iterdir() if child.is_dir()
+        )
+    if not case_names:
+        archive = destination / "dataset_shared.tar"
+        fingerprint, size = _build_dataset_tar(bundle, archive)
+        return (
+            [{
+                "case_id": "shared",
+                "archive": archive,
+                "fingerprint": fingerprint,
+                "size": size,
+            }]
+            if fingerprint
+            else []
+        )
+    destination.mkdir(parents=True, exist_ok=True)
+    parts = []
+    for case_name in sorted(case_names):
+        archive = destination / (
+            "dataset_{}.tar".format(safe_identifier(case_name, "case"))
+        )
+        temporary = archive.with_name(archive.name + ".tmp")
+        try:
+            with tarfile.open(str(temporary), "w") as handle:
+                for top_name in ("input", "labels"):
+                    source = bundle / top_name / case_name
+                    if not source.exists():
+                        continue
+                    paths = [source]
+                    if source.is_dir():
+                        paths.extend(sorted(source.rglob("*")))
+                    for path in paths:
+                        handle.add(
+                            str(path),
+                            arcname=str(path.relative_to(bundle)),
+                            recursive=False,
+                            filter=_normalized_tar_info,
+                        )
+            os.replace(str(temporary), str(archive))
+        finally:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+        parts.append({
+            "case_id": case_name,
+            "archive": archive,
+            "fingerprint": _sha256_file(archive),
+            "size": int(archive.stat().st_size),
+        })
+    return parts
+
+
+def _dataset_parts_fingerprint(parts: list[dict[str, Any]]) -> str:
+    digest = hashlib.sha256()
+    for part in parts:
+        digest.update(str(part["case_id"]).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(part["fingerprint"]).encode("ascii"))
+        digest.update(b"\0")
+    return digest.hexdigest() if parts else ""
+
+
 def _copy_model_input(
     source_value: str, bundle: Path
 ) -> tuple[str, str]:
@@ -325,39 +398,91 @@ def _prepare_dino(spec: dict[str, Any], bundle: Path) -> dict[str, Any]:
         fresh_root = (
             workspace / "runs" / organ_slug / run_id / "remote_fresh_labels"
         )
-        result = pipeline.launch_mimics_export(
+        plan = pipeline._plan_dino_mcs_label_cache(
             Path(context["ts_root"]).resolve(),
-            cases,
-            context.get("mimics_exe"),
             workspace,
-            float((context.get("config") or {}).get("label_export_timeout_seconds", 3600)),
-            status_path=status_path,
-            cancel_path=cancel_path,
-            lock_timeout_seconds=float(
-                options.get("background_mimics_lock_timeout_seconds", 1800)
-            ),
-            label_staging_dir=fresh_root,
-            export_space="source_image",
-            mask_names=mask_names,
-            target_mask_name=organ_slug,
+            organ_slug,
+            cases,
+            mask_names,
             mcs_output_dir=options.get("mcs_output_dir")
             or context.get("mcs_output_dir"),
-            skip_projects_without_requested_mask=True,
-            skip_invalid_projects=True,
         )
-        batch = result.get("batch_status") or {}
-        if (
-            not result.get("launched")
-            or result.get("timed_out")
-            or int(result.get("returncode", 0) or 0) != 0
-            or str(batch.get("status") or "").lower() in {"failed", "stopping"}
-        ):
-            raise RuntimeError(
-                "Local Mimics label export did not complete successfully. "
-                "Remote training was not started. Diagnostics: {}".format(
-                    result.get("job_runtime") or result.get("log") or fresh_root
+        fresh_root.mkdir(parents=True, exist_ok=True)
+        for case_id, cached_label in plan["reusable"].items():
+            pipeline._copy_label_atomic(
+                cached_label,
+                fresh_root
+                / case_id
+                / "segmentations"
+                / cached_label.name,
+            )
+        _status_update(
+            status_path,
+            label_cache_reused=len(plan["reusable"]),
+            label_cache_refresh=len(plan["changed"]),
+        )
+        if plan["changed"]:
+            changed_root = fresh_root.with_name(
+                fresh_root.name + "_changed"
+            )
+            result = pipeline.launch_mimics_export(
+                Path(context["ts_root"]).resolve(),
+                set(plan["changed"]),
+                context.get("mimics_exe"),
+                workspace,
+                float((context.get("config") or {}).get("label_export_timeout_seconds", 3600)),
+                status_path=status_path,
+                cancel_path=cancel_path,
+                lock_timeout_seconds=float(
+                    options.get("background_mimics_lock_timeout_seconds", 1800)
+                ),
+                label_staging_dir=changed_root,
+                export_space="source_image",
+                mask_names=mask_names,
+                target_mask_name=organ_slug,
+                mcs_output_dir=options.get("mcs_output_dir")
+                or context.get("mcs_output_dir"),
+                skip_projects_without_requested_mask=True,
+                skip_invalid_projects=True,
+            )
+            batch = result.get("batch_status") or {}
+            if (
+                not result.get("launched")
+                or result.get("timed_out")
+                or int(result.get("returncode", 0) or 0) != 0
+                or str(batch.get("status") or "").lower()
+                in {"failed", "stopping"}
+            ):
+                raise RuntimeError(
+                    "Local Mimics label export did not complete successfully. "
+                    "Remote training was not started. Diagnostics: {}".format(
+                        result.get("job_runtime")
+                        or result.get("log")
+                        or changed_root
+                    )
+                )
+            available, cache_warnings = (
+                pipeline._publish_dino_mcs_label_cache(
+                    plan,
+                    changed_root,
+                    mask_names,
+                    output_root=fresh_root,
                 )
             )
+            if cache_warnings:
+                _status_update(
+                    status_path,
+                    label_cache_warnings=cache_warnings[:10],
+                )
+            shutil.rmtree(str(changed_root), ignore_errors=True)
+        available = {
+            case_id
+            for case_id in plan["requested"]
+            if (
+                fresh_root / case_id / "segmentations"
+            ).is_dir()
+        }
+        cases = available
         label_root = fresh_root
     elif label_source == "exported_masks":
         label_root = Path(str(options.get("label_root") or "")).resolve()
@@ -570,15 +695,22 @@ def _prepare_nninteractive(
         label_dst = case_root / "label.nii.gz"
         shutil.copy2(str(row["image"]), str(image_dst))
         shutil.copy2(str(row["label"]), str(label_dst))
-        remote_rows.append(
-            {
-                "case_id": str(row.get("case_id") or case_id),
-                "image": "/job/input/{}/image.nii.gz".format(case_id),
-                "label": "/job/input/{}/label.nii.gz".format(case_id),
-                "split": str(row.get("split") or "train"),
-                "state": "ready",
-            }
-        )
+        remote_row = {
+            "case_id": str(row.get("case_id") or case_id),
+            "image": "/job/input/{}/image.nii.gz".format(case_id),
+            "label": "/job/input/{}/label.nii.gz".format(case_id),
+            "initial_mask": "",
+            "split": str(row.get("split") or "train"),
+            "state": "ready",
+        }
+        initial_mask = str(row.get("initial_mask") or "").strip()
+        if initial_mask:
+            initial_dst = case_root / "initial_mask.nii.gz"
+            shutil.copy2(initial_mask, str(initial_dst))
+            remote_row["initial_mask"] = (
+                "/job/input/{}/initial_mask.nii.gz".format(case_id)
+            )
+        remote_rows.append(remote_row)
         _status_update(
             status_path,
             status="preparing_remote",
@@ -597,6 +729,14 @@ def _prepare_nninteractive(
     remote_request["label_root"] = "/job/input"
     remote_request["mcs_dir"] = ""
     remote_request["cases"] = remote_rows
+    if any(row.get("initial_mask") for row in remote_rows):
+        remote_request["initial_mask_source"] = "exported_masks"
+        remote_request["initial_mask_root"] = "/job/input"
+        remote_request["initial_mask_names"] = ["initial_mask"]
+    else:
+        remote_request["initial_mask_source"] = "synthetic"
+        remote_request["initial_mask_root"] = ""
+        remote_request["initial_mask_names"] = []
     remote_request["output_model_dir"] = "/job/model_output"
     if str(request.get("parent_model_id") or "official") == "official":
         remote_request[
@@ -724,7 +864,7 @@ def _launch_container(
     paths: dict[str, str],
     profile: dict[str, Any],
     container_name: str,
-    dataset_cache_path: str = "",
+    dataset_cache_paths: list[str] | None = None,
     remove_dataset_after_extract: bool = False,
 ) -> str:
     owner = _remote_owner(profile)
@@ -759,8 +899,10 @@ def _launch_container(
                 "The previous owned remote container could not be removed."
             )
     dataset_extract = ""
-    if dataset_cache_path:
-        dataset_extract = "tar -xf {dataset} -C {job} && {after_extract}".format(
+    for dataset_cache_path in dataset_cache_paths or []:
+        dataset_extract += (
+            "tar -xf {dataset} -C {job} && {after_extract}"
+        ).format(
             dataset=shlex.quote(dataset_cache_path),
             job=shlex.quote(paths["job"]),
             after_extract=(
@@ -1151,13 +1293,20 @@ def _upload_progress(
     phase: str = "uploading_training_data",
     start_percent: int = 20,
     end_percent: int = 35,
+    aggregate_offset: int = 0,
+    aggregate_total: int = 0,
 ):
     state = {"last_time": 0.0, "last_percent": -1}
 
     def callback(transferred: int, total: int) -> None:
         _raise_if_cancelled(status_path)
         now = time.time()
-        percent = int(100.0 * transferred / max(1, total))
+        effective_transferred = int(aggregate_offset) + int(transferred)
+        effective_total = int(aggregate_total) or int(total)
+        percent = int(
+            100.0 * effective_transferred / max(1, effective_total)
+        )
+        percent = min(100, max(0, percent))
         if percent == state["last_percent"] and now - state["last_time"] < 1.0:
             return
         if now - state["last_time"] < 0.25 and percent < 100:
@@ -1168,8 +1317,8 @@ def _upload_progress(
             status_path,
             status="uploading",
             phase=phase,
-            transfer_bytes=int(transferred),
-            transfer_total_bytes=int(total),
+            transfer_bytes=effective_transferred,
+            transfer_total_bytes=effective_total,
             transfer_percent=percent,
             progress_percent=start_percent
             + int(percent * max(0, end_percent - start_percent) / 100.0),
@@ -1185,6 +1334,7 @@ def _ensure_remote_dataset_archive(
     local_archive: Path,
     fingerprint: str,
     status_path: Path,
+    progress_callback=None,
 ) -> tuple[str, bool]:
     use_cache = bool(profile.get("cache_training_data", True))
     if use_cache:
@@ -1202,16 +1352,26 @@ def _ensure_remote_dataset_archive(
                 "touch {}".format(shlex.quote(remote_archive)),
                 check=False,
             )
+            cache_progress = {}
+            if progress_callback is not None:
+                size = int(local_archive.stat().st_size)
+                progress_callback(size, size)
+            else:
+                cache_progress = {
+                    "transfer_bytes": 0,
+                    "transfer_total_bytes": int(
+                        local_archive.stat().st_size
+                    ),
+                    "transfer_percent": 100,
+                    "progress_percent": 33,
+                }
             _status_update(
                 status_path,
                 status="uploading",
                 phase="remote_dataset_cache_hit",
                 dataset_cache_hit=True,
                 dataset_fingerprint=fingerprint,
-                transfer_bytes=0,
-                transfer_total_bytes=int(local_archive.stat().st_size),
-                transfer_percent=100,
-                progress_percent=33,
+                **cache_progress
             )
             return remote_archive, True
         if output.strip():
@@ -1220,7 +1380,9 @@ def _ensure_remote_dataset_archive(
                 check=False,
             )
     else:
-        remote_archive = paths["archive"] + ".dataset"
+        remote_archive = (
+            paths["archive"] + ".dataset." + fingerprint + ".tar"
+        )
 
     _status_update(
         status_path,
@@ -1232,7 +1394,8 @@ def _ensure_remote_dataset_archive(
     session.upload(
         local_archive,
         remote_archive,
-        callback=_upload_progress(
+        callback=progress_callback
+        or _upload_progress(
             status_path,
             phase="uploading_training_dataset",
             start_percent=20,
@@ -1599,7 +1762,7 @@ def run(spec_path: Path) -> int:
     local_root = status_path.parent / (job_id + "_remote")
     bundle = local_root / "bundle"
     archive = local_root / "job_upload.tar"
-    dataset_archive = local_root / "dataset_upload.tar"
+    dataset_archive_dir = local_root / "dataset_parts"
     result_archive = local_root / "result.tar"
     if kind == "nninteractive":
         remote_log = status_path.parent / "job.log"
@@ -1645,8 +1808,10 @@ def run(spec_path: Path) -> int:
         )
         if _cancel_requested(status_path):
             raise InterruptedError("cancel")
-        dataset_fingerprint, dataset_archive_size = _build_dataset_tar(
-            bundle, dataset_archive
+        dataset_parts = _build_dataset_parts(bundle, dataset_archive_dir)
+        dataset_fingerprint = _dataset_parts_fingerprint(dataset_parts)
+        dataset_archive_size = sum(
+            int(part["size"]) for part in dataset_parts
         )
         archive_size = _build_tar(
             bundle,
@@ -1706,27 +1871,61 @@ def run(spec_path: Path) -> int:
             "-delete".format(cache=shlex.quote(remote_paths["dataset_cache"])),
             check=False,
         )
-        remote_dataset_archive = ""
-        dataset_cache_hit = False
+        remote_dataset_archives = []
+        dataset_cache_hits = 0
+        dataset_bytes_completed = 0
         dataset_reconnect_attempt = 0
-        while dataset_fingerprint:
+        pending_dataset_parts = list(dataset_parts)
+        while pending_dataset_parts:
             _raise_if_cancelled(status_path)
             try:
                 if session is None:
                     raise RemoteComputeError(
                         "No active SSH dataset-upload session."
                     )
-                remote_dataset_archive, dataset_cache_hit = (
+                part = pending_dataset_parts[0]
+                remote_dataset_archive, part_cache_hit = (
                     _ensure_remote_dataset_archive(
                         session,
                         remote_paths,
                         profile,
-                        dataset_archive,
-                        dataset_fingerprint,
+                        Path(part["archive"]),
+                        str(part["fingerprint"]),
                         status_path,
+                        progress_callback=_upload_progress(
+                            status_path,
+                            phase="uploading_training_dataset",
+                            start_percent=20,
+                            end_percent=33,
+                            aggregate_offset=dataset_bytes_completed,
+                            aggregate_total=dataset_archive_size,
+                        ),
                     )
                 )
-                break
+                remote_dataset_archives.append(remote_dataset_archive)
+                if part_cache_hit:
+                    dataset_cache_hits += 1
+                dataset_bytes_completed += int(part["size"])
+                pending_dataset_parts.pop(0)
+                _status_update(
+                    status_path,
+                    dataset_fingerprint=dataset_fingerprint,
+                    dataset_case_total=len(dataset_parts),
+                    dataset_case_completed=len(remote_dataset_archives),
+                    dataset_transfer_bytes=dataset_bytes_completed,
+                    dataset_transfer_total_bytes=dataset_archive_size,
+                    progress_percent=20
+                    + int(
+                        13
+                        * dataset_bytes_completed
+                        / max(1, dataset_archive_size)
+                    ),
+                    dataset_cache_hits=dataset_cache_hits,
+                    dataset_cache_hit=(
+                        bool(dataset_parts)
+                        and dataset_cache_hits == len(dataset_parts)
+                    ),
+                )
             except RemoteCommandError:
                 raise
             except (RemoteComputeError, EOFError, OSError, socket.error) as exc:
@@ -1813,7 +2012,7 @@ def run(spec_path: Path) -> int:
                     remote_paths,
                     profile,
                     container_name,
-                    dataset_cache_path=remote_dataset_archive,
+                    dataset_cache_paths=remote_dataset_archives,
                     remove_dataset_after_extract=not bool(
                         profile.get("cache_training_data", True)
                     ),
@@ -1856,10 +2055,23 @@ def run(spec_path: Path) -> int:
             remote_container_id=container_id,
             remote_job_dir=remote_paths["job"],
             remote_gpu_device=profile.get("gpu_device") or "auto",
-            dataset_cache_hit=bool(dataset_cache_hit),
-            remote_dataset_cache_path=(
-                remote_dataset_archive
+            dataset_cache_hit=bool(
+                dataset_parts
+                and dataset_cache_hits == len(dataset_parts)
+            ),
+            dataset_cache_hits=dataset_cache_hits,
+            dataset_case_total=len(dataset_parts),
+            remote_dataset_cache_paths=(
+                remote_dataset_archives
                 if profile.get("cache_training_data", True)
+                else []
+            ),
+            remote_dataset_cache_path=(
+                remote_dataset_archives[0]
+                if (
+                    len(remote_dataset_archives) == 1
+                    and profile.get("cache_training_data", True)
+                )
                 else ""
             ),
             status="starting_remote",
@@ -2360,7 +2572,8 @@ def run(spec_path: Path) -> int:
                     ),
                 )
         shutil.rmtree(str(bundle), ignore_errors=True)
-        for path in (archive, dataset_archive, result_archive):
+        shutil.rmtree(str(dataset_archive_dir), ignore_errors=True)
+        for path in (archive, result_archive):
             try:
                 path.unlink()
             except OSError:

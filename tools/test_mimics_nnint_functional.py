@@ -970,7 +970,9 @@ class TrainingConfigGenerationTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def _build_config(self, *, strategy="clopa_in", epochs=10) -> dict:
+    def _build_config(
+        self, *, strategy="clopa_in", epochs=10, request_values=None
+    ) -> dict:
         model_dir = self.root / "output_model"
         model_dir.mkdir(parents=True, exist_ok=True)
         manifest = self.job_dir / "manifest.json"
@@ -981,6 +983,7 @@ class TrainingConfigGenerationTests(unittest.TestCase):
             "strategy": strategy,
             "epochs": epochs,
         }
+        request.update(request_values or {})
         return pipeline._training_config(request, self.job_dir, manifest)
 
     def test_training_config_model_section(self):
@@ -1001,7 +1004,22 @@ class TrainingConfigGenerationTests(unittest.TestCase):
         config = self._build_config()
         prompts = config["prompts"]
         self.assertEqual(prompts["mode"], "clicks")
-        self.assertEqual(prompts["interaction_steps"], 5)
+        self.assertEqual(prompts["training_goal"], "general")
+        self.assertEqual(prompts["interaction_profile"], "")
+        self.assertEqual(prompts["correction_policy"], "official_single")
+        self.assertEqual(prompts["min_interaction_steps"], 1)
+        self.assertEqual(prompts["max_interaction_steps"], 5)
+        self.assertEqual(
+            prompts["validation_interaction_steps"], [1, 3, 5]
+        )
+        self.assertEqual(
+            prompts["interaction_step_weights"],
+            [0.35, 0.25, 0.20, 0.12, 0.08],
+        )
+        self.assertGreater(prompts["initial_mask_probability"], 0.0)
+        self.assertEqual(
+            prompts["provided_initial_mask_probability"], 0.7
+        )
         self.assertEqual(prompts["point_radius"], 4)
         self.assertEqual(prompts["center_bias"], 8.0)
         self.assertEqual(prompts["interaction_decay"], 0.9)
@@ -1020,6 +1038,32 @@ class TrainingConfigGenerationTests(unittest.TestCase):
             with self.subTest(strategy=strategy):
                 config = self._build_config(strategy=strategy)
                 self.assertEqual(config["model"]["strategy"], strategy)
+
+    def test_training_config_uses_request_real_initial_mask_mix(self):
+        config = self._build_config(
+            request_values={
+                "training_goal": "refine_existing",
+                "provided_initial_mask_probability": 0.6,
+            }
+        )
+        prompts = config["prompts"]
+        self.assertEqual(prompts["initial_mask_probability"], 1.0)
+        self.assertEqual(
+            prompts["provided_initial_mask_probability"], 0.6
+        )
+
+    def test_empty_start_disables_real_initial_masks(self):
+        config = self._build_config(
+            request_values={
+                "training_goal": "start_empty",
+                "provided_initial_mask_probability": 0.9,
+            }
+        )
+        prompts = config["prompts"]
+        self.assertEqual(prompts["initial_mask_probability"], 0.0)
+        self.assertEqual(
+            prompts["provided_initial_mask_probability"], 0.0
+        )
 
     def test_status_and_cancel_paths_are_writable(self):
         config = self._build_config()

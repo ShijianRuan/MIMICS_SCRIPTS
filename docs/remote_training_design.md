@@ -55,9 +55,9 @@ flowchart LR
     B -->|"This workstation"| C["Existing local pipeline"]
     B -->|"Remote profile"| D["External remote controller"]
     D --> E["Existing local source-grid preparation"]
-    E --> F{"Dataset fingerprint cached?"}
-    F -->|"No"| O["Resumable SSH/SFTP upload"]
-    F -->|"Yes"| G
+    E --> F{"Each selected case cached?"}
+    F -->|"Changed cases"| O["Resumable SSH/SFTP upload"]
+    F -->|"Unchanged cases"| G
     O --> G["Unified Docker image"]
     G --> H{"Training kind"}
     H --> I["DINOv3 pipeline"]
@@ -72,6 +72,12 @@ flowchart LR
 One image contains both training frameworks because the local project already
 uses one compatible Python/CUDA environment. Separate containers are still
 used per job, so process termination and GPU-memory release remain isolated.
+
+The Windows client connects to the Linux host's SSH service, not to a service
+inside a training container. The remote controller uses the host Docker daemon
+to start the job container. Job containers expose no SSH port and run with
+`--network none`; passwords, private keys, and host SSH configuration are never
+copied into them.
 
 Key implementation files:
 
@@ -112,19 +118,22 @@ NIfTI files are already compressed, so the transfer archive is an uncompressed
 tar. SFTP writes `.part` files and resumes both upload and model download after
 a connection interruption.
 
-Image and label files are placed in a deterministic tar archive. Its SHA-256
-is the dataset cache key. With **Reuse unchanged uploaded training data**
-enabled, the controller checks:
+Image and label files are placed in deterministic per-case tar archives. Each
+case archive has its own SHA-256 cache key. With the
+**Reuse unchanged uploaded training data** option enabled, the controller
+checks:
 
 ```text
 <remote-root>/cache/<ssh-username>/datasets/<sha256>.tar
 ```
 
-An exact cache hit skips the large data transfer; only the small job
-configuration and any job-specific custom model are sent. Any changed image,
-label, selected case, or target task produces a different fingerprint. Cache
-entries unused for 30 days are removed. The cache is per SSH user and is never
-silently shared across accounts.
+An exact case cache hit skips that case's transfer. Adding or changing one case
+therefore does not re-upload every unchanged case. The small job configuration
+and any job-specific custom model are still sent for each run. Changed image or
+label bytes produce a different case fingerprint. The aggregate dataset
+fingerprint records the exact selected set and case fingerprints. Cache entries
+unused for 30 days are removed. The cache is per SSH user and is never silently
+shared across accounts.
 
 ## 5. Models and reproducibility
 
@@ -139,6 +148,13 @@ Base models are installed once by the server administrator under:
 
 The model directory is mounted read-only in every training container. A custom
 base model selected by the user is copied into that job only.
+
+Base weights are deliberately not baked into the Docker image. The image
+contains the pinned Python/CUDA environment and the training code; the
+persistent remote work folder contains large weights, jobs, logs, locks, and
+content-addressed data caches. Updating a weight therefore does not require
+rebuilding the runtime image, and rebuilding code does not duplicate large
+weights in every image layer.
 
 Before upload, the controller verifies that the required remote base-model path
 exists. When the corresponding local official model is available, the client
@@ -229,6 +245,10 @@ finalizing_remote
 downloading
 completed / failed / cancelled
 ```
+
+During upload, progress is aggregated across all selected case archives.
+Finishing one case and starting the next cannot reset the visible progress bar.
+Status also records total/completed case counts and cache-hit counts.
 
 Failure handling:
 

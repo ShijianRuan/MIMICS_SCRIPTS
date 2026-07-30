@@ -20,6 +20,7 @@ import uuid
 
 import mimics
 
+import dataset_manifest
 import runtime_common
 
 
@@ -110,6 +111,62 @@ def _save_settings(value):
         _write_json_atomic(_settings_path(), value)
     except Exception:
         pass
+
+
+def _remember_dataset_root(ts_root):
+    path = os.path.abspath(str(ts_root or "")) if ts_root else ""
+    if not path or not os.path.isdir(path):
+        return
+    settings = _load_settings()
+    settings["last_dataset_root"] = path
+    rows = []
+    for row in settings.get("recent_dataset_roots", []) or []:
+        if isinstance(row, dict):
+            candidate = str(row.get("path") or "")
+            used_at = float(row.get("used_at_epoch") or 0.0)
+        else:
+            candidate = str(row or "")
+            used_at = 0.0
+        if (
+            candidate
+            and os.path.normcase(os.path.abspath(candidate))
+            != os.path.normcase(path)
+        ):
+            rows.append({"path": os.path.abspath(candidate), "used_at_epoch": used_at})
+    rows.insert(0, {"path": path, "used_at_epoch": time.time()})
+    settings["recent_dataset_roots"] = rows[:20]
+    _save_settings(settings)
+
+
+def _known_dataset_roots():
+    settings = _load_settings()
+    candidates = []
+    inferred = _infer_dataset_root_from_project()
+    if inferred:
+        candidates.append(inferred)
+    last_root = str(settings.get("last_dataset_root") or "").strip()
+    if last_root:
+        candidates.append(last_root)
+    for row in settings.get("recent_dataset_roots", []) or []:
+        if isinstance(row, dict):
+            candidates.append(row.get("path"))
+        else:
+            candidates.append(row)
+    registry = _read_json(_global_model_registry_path(), {}) or {}
+    for row in registry.get("models", []) or []:
+        candidates.append(row.get("ts_root"))
+    result = []
+    seen = set()
+    for value in candidates:
+        if not value:
+            continue
+        path = os.path.abspath(str(value))
+        key = os.path.normcase(path)
+        if key in seen or not os.path.isdir(path):
+            continue
+        seen.add(key)
+        result.append(path)
+    return result
 
 
 def _project_root():
@@ -960,8 +1017,7 @@ def _choose_dataset_root(title):
     initial = settings.get("last_dataset_root", "")
     path = _pick_directory(title, initial)
     if path and os.path.isdir(path):
-        settings["last_dataset_root"] = os.path.abspath(path)
-        _save_settings(settings)
+        _remember_dataset_root(path)
         return os.path.abspath(path)
     return None
 
@@ -975,6 +1031,167 @@ def _initial_dataset_root():
     if last_root and os.path.isdir(last_root):
         return os.path.abspath(last_root)
     return ""
+
+
+def _current_case_id():
+    project_path = _current_project_path()
+    if not project_path:
+        return ""
+    name = os.path.basename(project_path)
+    return name[:-4] if name.lower().endswith(".mcs") else name
+
+
+def _manifest_source_image(project_path, case_id):
+    project_dir = os.path.dirname(project_path)
+    for root in (project_dir, os.path.dirname(project_dir)):
+        manifest_path = os.path.join(
+            root, dataset_manifest.MANIFEST_FILENAME
+        )
+        if not os.path.isfile(manifest_path):
+            continue
+        payload = dataset_manifest.load_manifest(manifest_path)
+        row = dataset_manifest.find_case(payload, case_id) or {}
+        resolved = dataset_manifest.resolve_case_path(
+            manifest_path, row, "image"
+        )
+        if resolved:
+            return os.path.abspath(resolved)
+    return ""
+
+
+def _source_image_for_current_project(ts_root, case_id):
+    project_path = _current_project_path() or ""
+    if project_path:
+        resolved = _manifest_source_image(project_path, case_id)
+        if resolved:
+            return resolved
+    geometry = _active_source_geometry_payload() or {}
+    recorded = str(geometry.get("source_image_path") or "").strip()
+    if recorded and os.path.exists(recorded):
+        return os.path.abspath(recorded)
+    case_dir = os.path.join(ts_root, case_id) if ts_root else ""
+    if case_dir and os.path.isdir(case_dir):
+        preferred = (
+            "ct.nii.gz", "mri.nii.gz", "mr.nii.gz",
+            "ct.nii", "mri.nii", "mr.nii",
+            "ct.mhd", "mri.mhd", "mr.mhd",
+            "ct.mha", "mri.mha", "mr.mha",
+            "ct.nrrd.gz", "mri.nrrd.gz", "mr.nrrd.gz",
+            "ct.nrrd", "mri.nrrd", "mr.nrrd",
+        )
+        try:
+            names = dict(
+                (name.lower(), name) for name in os.listdir(case_dir)
+            )
+        except OSError:
+            names = {}
+        for name in preferred:
+            if name in names:
+                return os.path.join(case_dir, names[name])
+        dicom_dir = os.path.join(case_dir, "dicom")
+        if os.path.isdir(dicom_dir):
+            return dicom_dir
+    return ""
+
+
+def _dataset_root_from_source(source_path, case_id):
+    if not source_path:
+        return ""
+    path = os.path.abspath(source_path)
+    case_dir = path if os.path.isdir(path) else os.path.dirname(path)
+    if os.path.basename(case_dir).lower() == "dicom":
+        case_dir = os.path.dirname(case_dir)
+    if (
+        os.path.basename(case_dir).lower() == str(case_id or "").lower()
+        and os.path.isdir(os.path.dirname(case_dir))
+    ):
+        return os.path.dirname(case_dir)
+    return ""
+
+
+def _resolve_prediction_context():
+    case_id = _current_case_id()
+    if not case_id:
+        return "", "", ""
+    project_path = _current_project_path() or ""
+    if project_path:
+        source = _manifest_source_image(project_path, case_id)
+        if source:
+            root = (
+                _dataset_root_from_source(source, case_id)
+                or _infer_dataset_root_from_project()
+                or os.path.dirname(os.path.dirname(project_path))
+            )
+            if root and os.path.isdir(root):
+                root = os.path.abspath(root)
+                _remember_dataset_root(root)
+                return root, case_id, source
+    candidates = _known_dataset_roots()
+    initial = _initial_dataset_root()
+    if initial and initial not in candidates:
+        candidates.insert(0, initial)
+    for root in candidates:
+        source = _source_image_for_current_project(root, case_id)
+        if source:
+            derived = _dataset_root_from_source(source, case_id)
+            resolved_root = derived or root
+            _remember_dataset_root(resolved_root)
+            return resolved_root, case_id, source
+    geometry = _active_source_geometry_payload() or {}
+    recorded = str(geometry.get("source_image_path") or "").strip()
+    if recorded and os.path.exists(recorded):
+        root = _dataset_root_from_source(recorded, case_id)
+        if root:
+            _remember_dataset_root(root)
+            return root, case_id, os.path.abspath(recorded)
+    return "", case_id, ""
+
+
+def _management_dataset_root():
+    return os.path.join(
+        os.path.expanduser("~"),
+        ".mimics_script",
+        "dinov3_workspace",
+    )
+
+
+def _resolve_status_root(allow_management_fallback=False):
+    try:
+        selected_organ = _selected_organ() or ""
+    except Exception:
+        selected_organ = ""
+    candidates = []
+    for root in _known_dataset_roots():
+        jobs_dir = os.path.join(_workspace(root), "jobs")
+        models_dir = os.path.join(
+            _workspace(root), "models", _safe_slug(selected_organ)
+        )
+        timestamps = []
+        for directory in (jobs_dir, models_dir):
+            if os.path.isdir(directory):
+                try:
+                    timestamps.append(os.path.getmtime(directory))
+                except OSError:
+                    pass
+        if timestamps:
+            candidates.append((max(timestamps), root))
+    if not candidates:
+        if not allow_management_fallback:
+            return ""
+        root = _management_dataset_root()
+        workspace = _workspace(root)
+        try:
+            if not os.path.isdir(workspace):
+                os.makedirs(workspace)
+        except OSError:
+            if not os.path.isdir(workspace):
+                return ""
+        _remember_dataset_root(root)
+        return root
+    candidates.sort(reverse=True)
+    root = candidates[0][1]
+    _remember_dataset_root(root)
+    return root
 
 
 def _infer_case_id(ts_root):
@@ -1957,7 +2174,15 @@ def _train_model(advanced=False):
     return 0
 
 
-def _launch_inference_job(config, ts_root, case_id, organ, selected_model=None, target_spec=None):
+def _launch_inference_job(
+    config,
+    ts_root,
+    case_id,
+    organ,
+    selected_model=None,
+    target_spec=None,
+    source_image_path="",
+):
     dinov3_root = _dinov3_root(config)
     python_exe = _fewshot_python(config, dinov3_root)
     job_id = "infer_{0}_{1}_{2}".format(_safe_slug(case_id), _safe_slug(organ), uuid.uuid4().hex[:8])
@@ -1980,6 +2205,8 @@ def _launch_inference_job(config, ts_root, case_id, organ, selected_model=None, 
         "--job-id",
         job_id,
     ]
+    if source_image_path:
+        cmd.extend(["--image-path", os.path.abspath(source_image_path)])
     source_geometry = _active_source_geometry_payload()
     if source_geometry:
         cmd.extend([
@@ -1988,11 +2215,21 @@ def _launch_inference_job(config, ts_root, case_id, organ, selected_model=None, 
             "--expected-source-voxel-to-ras-matrix",
             json.dumps(source_geometry["source_voxel_to_ras_matrix"]),
         ])
-        source_image_path = str(source_geometry.get("source_image_path", "") or "").strip()
-        if source_image_path:
+        expected_source_path = str(
+            source_geometry.get("source_image_path", "") or ""
+        ).strip()
+        if (
+            expected_source_path
+            and os.path.exists(expected_source_path)
+            and (
+                not source_image_path
+                or os.path.normcase(os.path.abspath(expected_source_path))
+                == os.path.normcase(os.path.abspath(source_image_path))
+            )
+        ):
             cmd.extend([
                 "--expected-source-image-path",
-                source_image_path,
+                expected_source_path,
             ])
     if selected_model:
         cmd.extend([
@@ -2066,7 +2303,14 @@ def _launch_inference_job(config, ts_root, case_id, organ, selected_model=None, 
     return 0
 
 
-def _launch_external_model_chooser(config, ts_root, case_id, organ, target_spec=None):
+def _launch_external_model_chooser(
+    config,
+    ts_root,
+    case_id,
+    organ,
+    target_spec=None,
+    source_image_path="",
+):
     candidates = _model_candidates(ts_root, organ)
     if not candidates:
         mimics.dialogs.message_box(
@@ -2077,7 +2321,13 @@ def _launch_external_model_chooser(config, ts_root, case_id, organ, target_spec=
         return 1
     if len(candidates) == 1:
         return _launch_inference_job(
-            config, ts_root, case_id, organ, candidates[0], target_spec=target_spec
+            config,
+            ts_root,
+            case_id,
+            organ,
+            candidates[0],
+            target_spec=target_spec,
+            source_image_path=source_image_path,
         )
 
     script = _model_chooser_script()
@@ -2148,6 +2398,7 @@ def _launch_external_model_chooser(config, ts_root, case_id, organ, target_spec=
             "case_id": case_id,
             "organ": organ,
             "prediction_target": target_spec or {},
+            "source_image_path": source_image_path,
             "controller_pid": process.pid,
             "startup_stderr_path": stderr_log,
             "deadline": time.time() + float(config.get("model_choice_timeout_seconds", 30 * 60)),
@@ -2177,28 +2428,49 @@ def _start_inference(choose_model=False):
         )
         return 1
     target_spec = _deferred_prediction_target(selected_mask)
-    ts_root = _choose_dataset_root("Select dataset folder")
-    if not ts_root or not os.path.isdir(ts_root):
-        _mimics_log(logging.INFO, "DINOv3 prediction cancelled: no dataset folder was selected.")
-        return 1
-    if not _guard_no_active_job(ts_root, requested_kind="infer"):
-        return 1
-    case_id = _infer_case_id(ts_root)
-    if not case_id:
+    ts_root, case_id, source_image_path = _resolve_prediction_context()
+    if not ts_root or not source_image_path:
+        source_geometry = _active_source_geometry_payload() or {}
+        recorded = str(
+            source_geometry.get("source_image_path") or ""
+        ).strip()
+        detail = (
+            "\n\nRecorded source path:\n{0}".format(recorded)
+            if recorded else
+            ""
+        )
         mimics.dialogs.message_box(
-            "Could not infer the current case.\n\nOpen a saved project from:\n{0}".format(
-                os.path.join(_resolve_mimics_output_dir(ts_root), "<case>.mcs")
-            ),
+            (
+                "The current project could not be linked to its source medical "
+                "image. DINOv3 prediction was not started because this model "
+                "expects source-grid physical intensities, not an unverified "
+                "Mimics display buffer.{0}\n\nMove the dataset manifest with "
+                "the .mcs folder, restore/relink the source image, or use a "
+                "model trained with an explicit Mimics-buffer input contract."
+            ).format(detail),
             title=TITLE,
             ui_blocking=False,
         )
+        _mimics_log(
+            logging.ERROR,
+            "DINOv3 prediction could not resolve the current source image.{0}".format(
+                detail.replace("\n", " ")
+            ),
+        )
+        return 1
+    if not _guard_no_active_job(ts_root, requested_kind="infer"):
         return 1
 
     config = _config()
     if choose_model:
         try:
             return _launch_external_model_chooser(
-                config, ts_root, case_id, organ, target_spec=target_spec
+                config,
+                ts_root,
+                case_id,
+                organ,
+                target_spec=target_spec,
+                source_image_path=source_image_path,
             )
         except Exception as exc:
             _mimics_log(logging.ERROR, "DINOv3 external model chooser could not start: {0}".format(exc))
@@ -2208,7 +2480,15 @@ def _start_inference(choose_model=False):
                 ui_blocking=False,
             )
             return 1
-    selected_model, reason = _dataset_latest_model_candidate(ts_root, organ)
+    model_rows = _model_candidates(ts_root, organ)
+    selected_model = model_rows[0] if model_rows else None
+    reason = (
+        ""
+        if selected_model
+        else "No usable local or registered model was found for organ: {0}".format(
+            organ
+        )
+    )
     if not selected_model:
         mimics.dialogs.message_box(
             "{0}\n\nUse Predict Current Case (Choose Model) to select another valid model, or train a new model for this organ.".format(reason),
@@ -2218,7 +2498,13 @@ def _start_inference(choose_model=False):
         _mimics_log(logging.WARNING, "DINOv3 latest-model prediction was not started: {0}".format(reason))
         return 1
     return _launch_inference_job(
-        config, ts_root, case_id, organ, selected_model, target_spec=target_spec
+        config,
+        ts_root,
+        case_id,
+        organ,
+        selected_model,
+        target_spec=target_spec,
+        source_image_path=source_image_path,
     )
 
 
@@ -2561,6 +2847,7 @@ def _monitor_model_choice_tick(monitor, status):
             monitor.get("organ"),
             selected_model,
             target_spec=monitor.get("prediction_target") or {},
+            source_image_path=monitor.get("source_image_path") or "",
         )
         return
     if state in ("cancelled", "closed"):
@@ -3239,16 +3526,15 @@ def _show_status_text(ts_root):
 
 
 def _show_status():
-    if not _selected_organ():
+    ts_root = _resolve_status_root(allow_management_fallback=True)
+    if not ts_root or not os.path.isdir(ts_root):
         mimics.dialogs.message_box(
-            "Select one organ Mask to view its current DINOv3 task.",
+            "No recent DINOv3 task or model workspace was found. Start a "
+            "training or prediction task first.",
             title=TITLE,
             ui_blocking=False,
         )
-        return 1
-    ts_root = _choose_dataset_root("Select dataset folder")
-    if not ts_root or not os.path.isdir(ts_root):
-        return 1
+        return 0
     config = _config()
     mode = str(config.get("status_ui_mode", "external")).strip().lower()
     if mode != "text":
@@ -3399,9 +3685,14 @@ def _request_fewshot_cancel_async(job, status_path, grace_seconds=30.0):
 
 
 def _stop_latest_job():
-    ts_root = _choose_dataset_root("Select dataset folder")
+    ts_root = _resolve_status_root()
     if not ts_root or not os.path.isdir(ts_root):
-        return 1
+        mimics.dialogs.message_box(
+            "No recent DINOv3 workspace was found.",
+            title=TITLE,
+            ui_blocking=False,
+        )
+        return 0
     status_path, job = _latest_active_job(ts_root)
     if not job:
         mimics.dialogs.message_box("No running DINOv3 task was found.", title=TITLE, ui_blocking=False)

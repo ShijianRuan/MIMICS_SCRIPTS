@@ -102,12 +102,46 @@ Evaluation loads the model once, then uses the real
 simulated corrective click and trajectory AUC. A final Dice alone is not enough
 to establish that an interactive model became easier to use.
 
+New Mimics training requests use one of three goals: **General adaptation**
+(default), **Start from an empty Mask**, or **Refine an existing Mask**. The
+default runs one to five sequential corrections, weighted toward one to three,
+and reports checkpoints at 1, 3, and 5 interactions. Every point is followed
+by a prediction before the next error is sampled.
+
+The default `official_single` correction policy selects one false-negative or
+false-positive connected component, weighted by its volume, and places one
+signed point in that component. Empty predictions therefore receive a
+foreground point, pure over-segmentations receive a background point, and
+mixed errors receive one sampled correction rather than a forced pair.
+
+General and refinement training can use an optional `initial_mask` file in each
+manifest row. The Mimics model center exposes three sources: synthetic
+corrections only, a different Mask in each saved `.mcs` project, or previously
+exported initial Masks. When a usable real draft is present, 70% of
+existing-Mask trajectories start from that draft and 30% still use a newly
+simulated error. This preserves variation instead of overfitting one upstream
+model or one partial-annotation style. Cases with no real draft use simulation
+only.
+
+Synthetic initial Masks are generated online rather than saved as fixed files.
+They vary across samples while remaining reproducible through the training RNG
+state. The generator uses erosion, dilation, translation, axis cutoffs, sparse
+annotated slices, and extra structures. Empty or target-identical supplied
+Masks are rejected and fall back to simulation. Empty-start and initial-Mask
+trajectories are validated separately.
+
+Historical YAML files that contain only `interaction_steps: N` retain an exact
+N-step CLoPA-style paired-click budget for experiment reproducibility. New
+configurations use `training_goal`, `correction_policy`,
+`min_interaction_steps`, `max_interaction_steps`,
+`interaction_step_weights`, and `validation_interaction_steps` explicitly.
+
 ## Evidence And Boundaries
 
 The architecture and prompt contract follow the
 [official nnInteractive repository](https://github.com/MIC-DKFZ/nnInteractive)
 and [nnInteractive paper](https://arxiv.org/abs/2503.08373). The parameter
-policies and default ten-epoch, five-interaction protocol follow
+policies and the historical ten-epoch, five-interaction protocol follow
 [CLoPA](https://arxiv.org/abs/2603.06426). The public
 [segfm3d_nora_team implementation](https://github.com/tidiane-camaret/segfm3d_nora_team)
 demonstrates checkpoint reconstruction and click-aware adaptation, but its

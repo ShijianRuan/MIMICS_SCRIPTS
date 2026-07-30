@@ -300,6 +300,80 @@ class LocalCompatibilityTests(unittest.TestCase):
         remote_launch.assert_called_once()
         local_prepare.assert_not_called()
 
+    def test_remote_nninteractive_preserves_real_initial_masks(self):
+        import tools.nninteractive_finetune_pipeline as pipeline
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            local_job = root / "job"
+            bundle = root / "bundle"
+            local_job.mkdir()
+            image = root / "image.nii.gz"
+            label = root / "label.nii.gz"
+            initial = root / "initial.nii.gz"
+            image.write_bytes(b"image")
+            label.write_bytes(b"label")
+            initial.write_bytes(b"initial")
+            manifest_path = local_job / "dataset_manifest.json"
+            remote_compute.write_json_atomic(
+                manifest_path,
+                {
+                    "cases": [
+                        {
+                            "case_id": "case 1",
+                            "image": str(image),
+                            "label": str(label),
+                            "initial_mask": str(initial),
+                            "split": "train",
+                        }
+                    ]
+                },
+            )
+            remote_compute.write_json_atomic(
+                local_job / "request.json",
+                {
+                    "job_id": "nn_job",
+                    "base_model_dir": str(root / "official_model"),
+                    "parent_model_id": "official",
+                    "initial_mask_source": "mcs",
+                    "initial_mask_names": ["AI draft"],
+                },
+            )
+            with mock.patch.object(
+                pipeline,
+                "_prepare_manifest",
+                return_value=(manifest_path, None),
+            ):
+                result = controller._prepare_nninteractive(
+                    {"job_dir": str(local_job)},
+                    bundle,
+                )
+            payload = remote_compute.read_json(
+                bundle / "remote_request.json", {}
+            )
+            remote_request = payload["pipeline_request"]
+            self.assertEqual(result["train_count"], 1)
+            self.assertEqual(
+                remote_request["initial_mask_source"],
+                "exported_masks",
+            )
+            self.assertEqual(
+                remote_request["initial_mask_names"], ["initial_mask"]
+            )
+            self.assertEqual(
+                remote_request["cases"][0]["initial_mask"],
+                "/job/input/case_1/initial_mask.nii.gz",
+            )
+            self.assertEqual(
+                (
+                    bundle
+                    / "input"
+                    / "case_1"
+                    / "initial_mask.nii.gz"
+                ).read_bytes(),
+                b"initial",
+            )
+
     def test_dino_remote_launch_does_not_overwrite_fast_controller_status(self):
         with tempfile.TemporaryDirectory() as temporary:
             status_path = Path(temporary) / "status.json"
@@ -347,6 +421,163 @@ class LocalCompatibilityTests(unittest.TestCase):
             self.assertEqual(status["status"], "uploading")
             self.assertEqual(status["progress_percent"], 27)
             self.assertEqual(status["controller_pid"], 4321)
+
+    def test_remote_dino_label_refresh_uses_current_run_before_cache(self):
+        import tools.fewshot_pipeline as pipeline
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ts_root = root / "dataset"
+            workspace = root / "workspace"
+            dinov3_root = root / "dinov3"
+            bundle = root / "bundle"
+            status_path = root / "status.json"
+            cancel_path = root / "cancel.request"
+            source_image = root / "source.nii.gz"
+            source_label = root / "source_label.nii.gz"
+            source_image.write_bytes(b"image")
+            source_label.write_bytes(b"label")
+            remote_compute.write_json_atomic(status_path, {})
+            plan = {
+                "cache_root": root / "cache",
+                "reusable": {},
+                "changed": ["case_1"],
+                "fingerprints": {"case_1": "fingerprint"},
+                "requested": ["case_1"],
+            }
+            publish_calls = []
+
+            def launch_export(*_args, **kwargs):
+                label = (
+                    Path(kwargs["label_staging_dir"])
+                    / "case_1"
+                    / "segmentations"
+                    / "liver.nii.gz"
+                )
+                label.parent.mkdir(parents=True, exist_ok=True)
+                label.write_bytes(b"fresh-label")
+                return {
+                    "launched": True,
+                    "timed_out": False,
+                    "returncode": 0,
+                    "batch_status": {"status": "completed"},
+                }
+
+            def publish_cache(
+                received_plan,
+                changed_root,
+                mask_names,
+                output_root=None,
+            ):
+                publish_calls.append(
+                    (received_plan, Path(changed_root), mask_names, output_root)
+                )
+                destination = (
+                    Path(output_root)
+                    / "case_1"
+                    / "segmentations"
+                    / "liver.nii.gz"
+                )
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(b"fresh-label")
+                return {"case_1"}, [
+                    {
+                        "case_id": "case_1",
+                        "stage": "cache_publish",
+                        "error": "simulated cache failure",
+                    }
+                ]
+
+            samples = [
+                {
+                    "case_id": "case_1",
+                    "image": str(source_image),
+                    "label": str(source_label),
+                }
+            ]
+
+            def materialize_image(_source, destination):
+                destination = Path(destination)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(b"image")
+
+            def materialize_label(_source, _image, destination):
+                destination = Path(destination)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(b"label")
+
+            spec = {
+                "context": {
+                    "workspace": str(workspace),
+                    "ts_root": str(ts_root),
+                    "dinov3_root": str(dinov3_root),
+                    "organ": "liver",
+                    "config": {},
+                },
+                "options": {
+                    "label_source": "mcs_refresh",
+                    "min_samples": 1,
+                    "val_fraction": 0.0,
+                },
+                "status_path": str(status_path),
+                "cancel_path": str(cancel_path),
+                "run_id": "remote_job",
+            }
+
+            with mock.patch.object(
+                pipeline,
+                "resolve_training_mask_names",
+                return_value=["liver"],
+            ), mock.patch.object(
+                pipeline,
+                "_plan_dino_mcs_label_cache",
+                return_value=plan,
+            ), mock.patch.object(
+                pipeline,
+                "launch_mimics_export",
+                side_effect=launch_export,
+            ), mock.patch.object(
+                pipeline,
+                "_publish_dino_mcs_label_cache",
+                side_effect=publish_cache,
+            ), mock.patch.object(
+                pipeline,
+                "discover_samples",
+                return_value=(samples, []),
+            ), mock.patch.object(
+                pipeline,
+                "select_samples",
+                side_effect=lambda rows, *_args: rows,
+            ), mock.patch.object(
+                pipeline,
+                "split_train_validation",
+                return_value=(samples, []),
+            ), mock.patch.object(
+                pipeline,
+                "_materialize_source_image",
+                side_effect=materialize_image,
+            ), mock.patch.object(
+                pipeline,
+                "_materialize_label_on_source_grid",
+                side_effect=materialize_label,
+            ), mock.patch.object(
+                dino_ui,
+                "append_training_args",
+                return_value=None,
+            ):
+                prepared = controller._prepare_dino(spec, bundle)
+
+            self.assertEqual(prepared["train_count"], 1)
+            self.assertEqual(len(publish_calls), 1)
+            self.assertEqual(Path(publish_calls[0][3]).name, "remote_fresh_labels")
+            status = remote_compute.read_json(status_path, {})
+            self.assertEqual(
+                status["label_cache_warnings"][0]["stage"],
+                "cache_publish",
+            )
+            self.assertTrue(
+                (bundle / "labels" / "case_1" / "segmentations" / "liver.nii.gz").is_file()
+            )
 
 
 class ArchiveSafetyTests(unittest.TestCase):
@@ -408,8 +639,74 @@ class ArchiveSafetyTests(unittest.TestCase):
                     handle.getnames(), ["remote_request.json"]
                 )
 
+    def test_dataset_parts_reuse_unchanged_cases_independently(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle = root / "bundle"
+            for case_id in ("case_a", "case_b"):
+                (bundle / "input" / case_id).mkdir(parents=True)
+                (bundle / "labels" / case_id).mkdir(parents=True)
+                (bundle / "input" / case_id / "image.nii.gz").write_bytes(
+                    ("image-" + case_id).encode("ascii")
+                )
+                (bundle / "labels" / case_id / "label.nii.gz").write_bytes(
+                    ("label-" + case_id).encode("ascii")
+                )
+            first = controller._build_dataset_parts(
+                bundle, root / "parts_first"
+            )
+            first_fingerprints = {
+                row["case_id"]: row["fingerprint"] for row in first
+            }
+            (
+                bundle / "labels" / "case_b" / "label.nii.gz"
+            ).write_bytes(b"changed-label")
+            second = controller._build_dataset_parts(
+                bundle, root / "parts_second"
+            )
+            second_fingerprints = {
+                row["case_id"]: row["fingerprint"] for row in second
+            }
+            self.assertEqual(
+                first_fingerprints["case_a"],
+                second_fingerprints["case_a"],
+            )
+            self.assertNotEqual(
+                first_fingerprints["case_b"],
+                second_fingerprints["case_b"],
+            )
+
 
 class StatusAndLifecycleTests(unittest.TestCase):
+    def test_aggregate_upload_progress_never_resets_between_case_parts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            status_path = Path(temporary) / "status.json"
+            remote_compute.write_json_atomic(status_path, {})
+            first = controller._upload_progress(
+                status_path,
+                start_percent=20,
+                end_percent=33,
+                aggregate_offset=0,
+                aggregate_total=300,
+            )
+            second = controller._upload_progress(
+                status_path,
+                start_percent=20,
+                end_percent=33,
+                aggregate_offset=100,
+                aggregate_total=300,
+            )
+            first(100, 100)
+            first_status = remote_compute.read_json(status_path, {})
+            second(50, 200)
+            second_status = remote_compute.read_json(status_path, {})
+            self.assertEqual(first_status["transfer_percent"], 33)
+            self.assertEqual(second_status["transfer_percent"], 50)
+            self.assertGreaterEqual(
+                second_status["progress_percent"],
+                first_status["progress_percent"],
+            )
+
     def test_verified_dataset_cache_hit_skips_upload(self):
         class Session:
             def __init__(self, fingerprint):
@@ -448,6 +745,49 @@ class StatusAndLifecycleTests(unittest.TestCase):
             status = remote_compute.read_json(status_path, {})
             self.assertTrue(status["dataset_cache_hit"])
             self.assertEqual(status["phase"], "remote_dataset_cache_hit")
+
+    def test_case_cache_hit_preserves_aggregate_upload_percent(self):
+        class Session:
+            def __init__(self, fingerprint):
+                self.fingerprint = fingerprint
+
+            def ensure_directory(self, _path):
+                pass
+
+            def execute_result(self, _command):
+                return 0, self.fingerprint
+
+            def execute(self, _command, **_kwargs):
+                return ""
+
+            def upload(self, *_args, **_kwargs):
+                raise AssertionError("cache hit must not upload")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = Path(temporary) / "case.tar"
+            archive.write_bytes(b"x" * 100)
+            fingerprint = controller._sha256_file(archive)
+            status_path = Path(temporary) / "status.json"
+            remote_compute.write_json_atomic(status_path, {})
+            progress = controller._upload_progress(
+                status_path,
+                start_percent=20,
+                end_percent=33,
+                aggregate_offset=100,
+                aggregate_total=400,
+            )
+            controller._ensure_remote_dataset_archive(
+                Session(fingerprint),
+                {"dataset_cache": "/cache"},
+                {"cache_training_data": True},
+                archive,
+                fingerprint,
+                status_path,
+                progress_callback=progress,
+            )
+            status = remote_compute.read_json(status_path, {})
+            self.assertEqual(status["transfer_percent"], 50)
+            self.assertLess(status["progress_percent"], 33)
 
     def test_container_launch_exposes_only_selected_gpu(self):
         class Session:

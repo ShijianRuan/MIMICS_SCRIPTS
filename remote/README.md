@@ -51,6 +51,8 @@ profile.
 
 ## Runtime lifecycle
 
+- The client connects to the Linux host over SSH. Training containers do not
+  run SSH and do not expose a network port.
 - One training job uses one GPU and one disposable container.
 - `Automatic` GPU selection serializes against all explicitly selected GPUs.
 - Selecting GPU `0`, GPU `1`, or a GPU UUID creates an independent queue for
@@ -64,5 +66,6 @@ profile.
 - Every stop and cleanup verifies the container owner/job labels and confines
   deletion to `jobs/<ssh-user>/<job-id>`.
 - The Docker image and base weights remain installed.
-- Unchanged image and label archives are reused by content fingerprint.
+- Unchanged image and label archives are reused per case by content
+  fingerprint, so adding one case does not re-upload the full dataset.
 - Cached datasets expire after 30 days without use.

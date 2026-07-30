@@ -99,6 +99,11 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
             clicks=args.clicks,
             max_cases=args.max_cases,
             device=args.device,
+            training_goal=args.training_goal,
+            initial_mask_probability=args.initial_mask_probability,
+            provided_initial_mask_probability=(
+                args.provided_initial_mask_probability
+            ),
         )
     )
 
@@ -138,6 +143,17 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--clicks", type=int, default=5)
     evaluate.add_argument("--max-cases", type=int, default=0)
     evaluate.add_argument("--device", default="auto")
+    evaluate.add_argument(
+        "--training-goal",
+        choices=("general", "start_empty", "refine_existing"),
+        default="general",
+    )
+    evaluate.add_argument(
+        "--initial-mask-probability", type=float, default=0.5
+    )
+    evaluate.add_argument(
+        "--provided-initial-mask-probability", type=float, default=0.7
+    )
     evaluate.set_defaults(func=cmd_evaluate)
     return parser
 

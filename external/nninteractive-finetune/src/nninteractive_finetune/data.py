@@ -62,6 +62,12 @@ def load_manifest(path: str | Path) -> list[dict[str, Any]]:
             raise ValueError("{} has unsupported split {!r}.".format(case_id, split))
         image = _absolute_path(str(row.get("image") or ""), source.parent)
         label = _absolute_path(str(row.get("label") or ""), source.parent)
+        initial_mask_value = str(row.get("initial_mask") or "").strip()
+        initial_mask = (
+            _absolute_path(initial_mask_value, source.parent)
+            if initial_mask_value
+            else None
+        )
         if not image.is_file():
             raise FileNotFoundError(
                 "Image is missing for {}: {}".format(case_id, image)
@@ -70,12 +76,32 @@ def load_manifest(path: str | Path) -> list[dict[str, Any]]:
             raise FileNotFoundError(
                 "Label is missing for {}: {}".format(case_id, label)
             )
+        if initial_mask is not None and not initial_mask.is_file():
+            raise FileNotFoundError(
+                "Initial Mask is missing for {}: {}".format(
+                    case_id, initial_mask
+                )
+            )
         resolved.append(
             {
                 "case_id": case_id,
                 "image": str(image),
                 "label": str(label),
+                "initial_mask": str(initial_mask) if initial_mask else "",
                 "split": split,
+                **{
+                    key: str(
+                        _absolute_path(str(row[key]), source.parent)
+                    )
+                    for key in (
+                        "source_image",
+                        "source_label",
+                        "source_mcs",
+                        "source_initial_mask",
+                        "source_initial_mcs",
+                    )
+                    if str(row.get(key) or "").strip()
+                },
             }
         )
     return resolved
@@ -159,14 +185,57 @@ def _binary_label(label: np.ndarray, values: Iterable[int]) -> np.ndarray:
 
 def _case_fingerprint(row: dict[str, Any], label_values: Iterable[int]) -> str:
     digest = hashlib.sha256()
-    for key in ("image", "label"):
-        path = Path(row[key])
+
+    def first_existing(*values: Any) -> Path:
+        candidates = [
+            Path(str(value))
+            for value in values
+            if str(value or "").strip()
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        if candidates:
+            return candidates[-1]
+        raise FileNotFoundError("No source path is available for fingerprinting.")
+
+    sources = (
+        (
+            "image",
+            first_existing(row.get("source_image"), row.get("image")),
+        ),
+        (
+            "label",
+            first_existing(
+                row.get("source_mcs"),
+                row.get("source_label"),
+                row.get("label"),
+            ),
+        ),
+    )
+    for key, value in sources:
+        path = Path(value)
         stat = path.stat()
-        digest.update(str(path).encode("utf-8"))
+        digest.update(key.encode("ascii"))
+        digest.update(path.name.encode("utf-8"))
+        digest.update(str(stat.st_size).encode("ascii"))
+        digest.update(str(stat.st_mtime_ns).encode("ascii"))
+    initial_mask = str(row.get("initial_mask") or "").strip()
+    if initial_mask:
+        path = first_existing(
+            row.get("source_initial_mcs"),
+            row.get("source_initial_mask"),
+            initial_mask,
+        )
+        stat = path.stat()
+        digest.update(b"initial_mask")
+        digest.update(path.name.encode("utf-8"))
         digest.update(str(stat.st_size).encode("ascii"))
         digest.update(str(stat.st_mtime_ns).encode("ascii"))
     digest.update(json.dumps(list(label_values), sort_keys=True).encode("utf-8"))
-    digest.update(b"canonical_ras+nninteractive_nonzero_bbox_zscore+fg_centers.v2")
+    digest.update(
+        b"canonical_ras+nninteractive_nonzero_bbox_zscore+initial_mask+fg_centers.v5"
+    )
     return digest.hexdigest()
 
 
@@ -233,6 +302,7 @@ def prepare_cases(
         metadata_path = case_dir / "metadata.json"
         image_path = case_dir / "image.npy"
         label_path = case_dir / "label.npy"
+        initial_mask_path = case_dir / "initial_mask.npy"
         foreground_path = case_dir / "foreground_centers.npy"
         fingerprint = _case_fingerprint(row, values)
 
@@ -247,6 +317,11 @@ def prepare_cases(
             and image_path.is_file()
             and label_path.is_file()
             and foreground_path.is_file()
+            and (
+                not row.get("initial_mask")
+                or initial_mask_path.is_file()
+                or bool(metadata.get("initial_mask_rejected_reason"))
+            )
         )
         if not reusable:
             case_dir.mkdir(parents=True, exist_ok=True)
@@ -278,6 +353,38 @@ def prepare_cases(
             foreground_centers = _foreground_centers(label)
             _save_npy_atomic(image_path, image)
             _save_npy_atomic(label_path, label)
+            has_initial_mask = bool(row.get("initial_mask"))
+            initial_mask_rejected_reason = ""
+            if has_initial_mask:
+                initial_mask, initial_affine, _ = _canonical_volume(
+                    row["initial_mask"]
+                )
+                if initial_mask.shape != image.shape or not np.allclose(
+                    initial_affine,
+                    image_affine,
+                    rtol=1e-5,
+                    atol=1e-4,
+                ):
+                    raise ValueError(
+                        "{} initial Mask is not on the image grid after "
+                        "canonical orientation.".format(row["case_id"])
+                    )
+                initial_binary = np.ascontiguousarray(
+                    initial_mask != 0, dtype=np.uint8
+                )
+                if not initial_binary.any():
+                    has_initial_mask = False
+                    initial_mask_rejected_reason = "empty"
+                elif np.array_equal(initial_binary, label):
+                    has_initial_mask = False
+                    initial_mask_rejected_reason = "identical_to_target"
+                else:
+                    _save_npy_atomic(initial_mask_path, initial_binary)
+            if not has_initial_mask:
+                try:
+                    initial_mask_path.unlink()
+                except OSError:
+                    pass
             _save_npy_atomic(foreground_path, foreground_centers)
             metadata = {
                 "schema_version": "nninteractive_prepared_case.v1",
@@ -290,6 +397,11 @@ def prepare_cases(
                 "cached_foreground_centers": int(len(foreground_centers)),
                 "source_image": row["image"],
                 "source_label": row["label"],
+                "source_initial_mask": row.get("initial_mask") or "",
+                "has_initial_mask": has_initial_mask,
+                "initial_mask_rejected_reason": (
+                    initial_mask_rejected_reason
+                ),
                 "affine_close": bool(affine_close),
             }
             write_json_atomic(metadata_path, metadata)
@@ -299,6 +411,11 @@ def prepare_cases(
                 **row,
                 "prepared_image": str(image_path),
                 "prepared_label": str(label_path),
+                "prepared_initial_mask": (
+                    str(initial_mask_path)
+                    if bool(metadata.get("has_initial_mask"))
+                    else ""
+                ),
                 "prepared_foreground_centers": str(foreground_path),
                 "metadata": metadata,
             }
@@ -355,32 +472,40 @@ class InteractivePatchDataset(Dataset):
         self.foreground_probability = float(foreground_probability)
         self.virtual_length = max(int(virtual_length), len(self.cases))
         self.augmentation = dict(augmentation or {})
-        self._array_cache: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+        self._array_cache: dict[
+            str, tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray]
+        ] = {}
 
     def __len__(self) -> int:
         return self.virtual_length
 
     def _case_arrays(
         self, row: dict[str, Any]
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray]:
         case_id = str(row["case_id"])
         cached = self._array_cache.get(case_id)
         if cached is not None:
             return cached
         image = np.load(row["prepared_image"], mmap_mode="r")
         label = np.load(row["prepared_label"], mmap_mode="r")
+        initial_mask_path = str(row.get("prepared_initial_mask") or "")
+        initial_mask = (
+            np.load(initial_mask_path, mmap_mode="r")
+            if initial_mask_path
+            else None
+        )
         foreground_path = row.get("prepared_foreground_centers")
         if foreground_path:
             foreground = np.load(foreground_path, mmap_mode="r")
         else:
             foreground = _foreground_centers(label)
-        cached = (image, label, foreground)
+        cached = (image, label, initial_mask, foreground)
         self._array_cache[case_id] = cached
         return cached
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         row = self.cases[index % len(self.cases)]
-        image, label, foreground = self._case_arrays(row)
+        image, label, initial_mask, foreground = self._case_arrays(row)
         if foreground.size and np.random.random() < self.foreground_probability:
             center = foreground[np.random.randint(len(foreground))]
         else:
@@ -390,12 +515,20 @@ class InteractivePatchDataset(Dataset):
             )
         image_patch = _extract_patch(image, center, self.patch_size)
         label_patch = _extract_patch(label, center, self.patch_size)
+        initial_mask_patch = (
+            _extract_patch(initial_mask, center, self.patch_size)
+            if initial_mask is not None
+            else np.zeros(self.patch_size, dtype=np.uint8)
+        )
         if bool(self.augmentation.get("enabled", False)):
             flip_probability = float(self.augmentation.get("flip_probability", 0.5))
             for axis in range(3):
                 if np.random.random() < flip_probability:
                     image_patch = np.flip(image_patch, axis=axis)
                     label_patch = np.flip(label_patch, axis=axis)
+                    initial_mask_patch = np.flip(
+                        initial_mask_patch, axis=axis
+                    )
             scale_low, scale_high = self.augmentation.get(
                 "intensity_scale_range", [1.0, 1.0]
             )
@@ -416,5 +549,9 @@ class InteractivePatchDataset(Dataset):
         return {
             "image": torch.from_numpy(np.ascontiguousarray(image_patch))[None],
             "target": torch.from_numpy(np.ascontiguousarray(label_patch)).long(),
+            "initial_mask": torch.from_numpy(
+                np.ascontiguousarray(initial_mask_patch)
+            ).long(),
+            "has_initial_mask": bool(initial_mask is not None),
             "case_id": row["case_id"],
         }

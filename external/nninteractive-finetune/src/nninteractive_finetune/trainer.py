@@ -202,9 +202,29 @@ def validate(
         center_bias=float(prompt_config["center_bias"]),
         decay=float(prompt_config["interaction_decay"]),
         seed=seed,
+        initial_mask_probability=float(
+            prompt_config.get("initial_mask_probability", 0.0)
+        ),
+        provided_initial_mask_probability=float(
+            prompt_config.get("provided_initial_mask_probability", 0.7)
+        ),
+        correction_policy=str(
+            prompt_config.get("correction_policy") or "official_single"
+        ),
     )
+    validation_steps = [
+        int(value)
+        for value in (
+            prompt_config.get("validation_interaction_steps")
+            or [int(prompt_config["interaction_steps"])]
+        )
+    ]
+    validation_horizon = max(validation_steps)
     trajectory: list[list[float]] = [
-        [] for _ in range(int(prompt_config["interaction_steps"]))
+        [] for _ in range(validation_horizon)
+    ]
+    initial_mask_trajectory: list[list[float]] = [
+        [] for _ in range(validation_horizon)
     ]
     iterator = _infinite(loader)
     total_batches = max(1, int(batches))
@@ -216,7 +236,9 @@ def validate(
         batch = next(iterator)
         image = batch["image"].to(device, non_blocking=True)
         target = batch["target"].to(device, non_blocking=True)
-        interactions = sampler.new_interactions(target)
+        interactions = sampler.new_interactions(
+            target, allow_initial_mask=False
+        )
         for interaction_index in range(len(trajectory)):
             logits = _forward(network, torch.cat([image, interactions], dim=1))
             prediction = logits.argmax(1)
@@ -225,14 +247,69 @@ def validate(
             )
             if interaction_index + 1 < len(trajectory):
                 sampler.add_corrections(interactions, prediction, target)
+        if bool(prompt_config.get("validate_initial_masks", True)):
+            interactions = sampler.new_interactions(
+                target,
+                allow_initial_mask=True,
+                force_initial_mask=True,
+                initial_prediction=batch.get("initial_mask", None).to(
+                    device, non_blocking=True
+                )
+                if batch.get("initial_mask", None) is not None
+                else None,
+                initial_mask_available=batch.get(
+                    "has_initial_mask", None
+                ).to(device, non_blocking=True)
+                if batch.get("has_initial_mask", None) is not None
+                else None,
+            )
+            for interaction_index in range(len(initial_mask_trajectory)):
+                logits = _forward(
+                    network, torch.cat([image, interactions], dim=1)
+                )
+                prediction = logits.argmax(1)
+                initial_mask_trajectory[interaction_index].extend(
+                    float(value)
+                    for value in binary_dice(prediction, target).cpu()
+                )
+                if interaction_index + 1 < len(initial_mask_trajectory):
+                    sampler.add_corrections(
+                        interactions, prediction, target
+                    )
         if progress:
             progress(batch_index + 1, total_batches)
     means = [float(np.mean(values)) if values else 0.0 for values in trajectory]
+    initial_mask_means = [
+        float(np.mean(values)) if values else 0.0
+        for values in initial_mask_trajectory
+    ]
+    reported = {
+        str(step): means[step - 1] for step in validation_steps
+    }
+    reported_initial = {
+        str(step): initial_mask_means[step - 1]
+        for step in validation_steps
+    }
+    initial_probability = float(
+        prompt_config.get("initial_mask_probability", 0.0)
+    )
+    empty_auc = float(np.mean([reported[str(step)] for step in validation_steps]))
+    initial_auc = float(
+        np.mean([reported_initial[str(step)] for step in validation_steps])
+    )
     return {
         "dice_by_interaction": means,
+        "dice_at_interactions": reported,
+        "initial_mask_dice_by_interaction": initial_mask_means,
+        "initial_mask_dice_at_interactions": reported_initial,
         "initial_dice": means[0],
         "final_dice": means[-1],
-        "trajectory_auc": float(np.mean(means)),
+        "empty_mask_trajectory_auc": empty_auc,
+        "initial_mask_trajectory_auc": initial_auc,
+        "trajectory_auc": (
+            (1.0 - initial_probability) * empty_auc
+            + initial_probability * initial_auc
+        ),
     }
 
 
@@ -377,6 +454,17 @@ def _train_unlocked(config: dict[str, Any]) -> dict[str, Any]:
             center_bias=float(prompt_config["center_bias"]),
             decay=float(prompt_config["interaction_decay"]),
             seed=seed,
+            initial_mask_probability=float(
+                prompt_config.get("initial_mask_probability", 0.0)
+            ),
+            provided_initial_mask_probability=float(
+                prompt_config.get(
+                    "provided_initial_mask_probability", 0.7
+                )
+            ),
+            correction_policy=str(
+                prompt_config.get("correction_policy") or "official_single"
+            ),
         )
         if bool(training.get("resume", True)) and training_state_path.is_file():
             (
@@ -416,15 +504,59 @@ def _train_unlocked(config: dict[str, Any]) -> dict[str, Any]:
                     batch = next(train_iterator)
                     image = batch["image"].to(device, non_blocking=True)
                     target = batch["target"].to(device, non_blocking=True)
-                    interactions = sampler.new_interactions(target)
-                    active = torch.ones(
-                        target.shape[0], dtype=torch.bool, device=target.device
+                    interactions = sampler.new_interactions(
+                        target,
+                        allow_initial_mask=True,
+                        initial_prediction=batch.get(
+                            "initial_mask", None
+                        ).to(target.device, non_blocking=True)
+                        if batch.get("initial_mask", None) is not None
+                        else None,
+                        initial_mask_available=batch.get(
+                            "has_initial_mask", None
+                        ).to(target.device, non_blocking=True)
+                        if batch.get("has_initial_mask", None) is not None
+                        else None,
                     )
+                    legacy_fixed_steps = (
+                        "min_interaction_steps" not in prompt_config
+                        and "max_interaction_steps" not in prompt_config
+                    )
+                    minimum_interactions = int(
+                        prompt_config.get(
+                            "min_interaction_steps",
+                            (
+                                prompt_config["interaction_steps"]
+                                if legacy_fixed_steps
+                                else 1
+                            ),
+                        )
+                    )
+                    maximum_interactions = int(
+                        prompt_config.get(
+                            "max_interaction_steps",
+                            prompt_config["interaction_steps"],
+                        )
+                    )
+                    budgets = sampler.sample_interaction_budgets(
+                        target.shape[0],
+                        minimum_interactions,
+                        maximum_interactions,
+                        float(
+                            prompt_config.get(
+                                "short_interaction_probability", 0.7
+                            )
+                        ),
+                        weights=prompt_config.get(
+                            "interaction_step_weights"
+                        ),
+                    ).to(device=target.device)
+                    active = budgets > 0
                     final_dice = torch.zeros(
                         target.shape[0], dtype=torch.float32, device=target.device
                     )
                     for interaction_index in range(
-                        int(prompt_config["interaction_steps"])
+                        int(budgets.max().item())
                     ):
                         if cancellation_requested(cancel_path):
                             raise CancelledError("Training cancellation was requested.")
@@ -441,20 +573,21 @@ def _train_unlocked(config: dict[str, Any]) -> dict[str, Any]:
                             per_sample_loss = dice_ce_loss(
                                 logits, target, reduction="none"
                             )
-                            loss = per_sample_loss[active].mean()
-                            scaled_loss = loss / (
-                                int(prompt_config["interaction_steps"]) * accumulation
+                            step_active = active & (budgets > interaction_index)
+                            weighted = (
+                                per_sample_loss[step_active]
+                                / budgets[step_active].float()
                             )
+                            loss = weighted.sum() / float(target.shape[0])
+                            scaled_loss = loss / accumulation
                         scaler.scale(scaled_loss).backward()
                         prediction = logits.detach().argmax(1)
                         final_dice = binary_dice(prediction, target)
-                        update_loss += float(loss.detach().cpu()) / (
-                            int(prompt_config["interaction_steps"]) * accumulation
-                        )
-                        if interaction_index + 1 < int(
-                            prompt_config["interaction_steps"]
-                        ):
-                            active &= final_dice < 1.0
+                        update_loss += float(loss.detach().cpu()) / accumulation
+                        if interaction_index + 1 < int(budgets.max().item()):
+                            active &= (final_dice < 1.0) & (
+                                budgets > interaction_index + 1
+                            )
                             sampler.add_corrections(
                                 interactions, prediction, target, active=active
                             )
@@ -547,10 +680,47 @@ def _train_unlocked(config: dict[str, Any]) -> dict[str, Any]:
         summary = {
             "strategy": model_config["strategy"],
             "prompt_mode": str(prompt_config["mode"]),
+            "training_goal": str(
+                prompt_config.get("training_goal") or "legacy"
+            ),
+            "correction_policy": str(
+                prompt_config.get("correction_policy") or "official_single"
+            ),
             "validated_prompt_types": ["point"],
             "epochs_completed": int(training["epochs"]),
             "steps_per_epoch": updates_per_epoch,
             "interaction_steps": int(prompt_config["interaction_steps"]),
+            "min_interaction_steps": int(
+                prompt_config.get(
+                    "min_interaction_steps",
+                    (
+                        prompt_config["interaction_steps"]
+                        if "max_interaction_steps" not in prompt_config
+                        else 1
+                    ),
+                )
+            ),
+            "max_interaction_steps": int(
+                prompt_config.get(
+                    "max_interaction_steps",
+                    prompt_config["interaction_steps"],
+                )
+            ),
+            "validation_interaction_steps": list(
+                prompt_config.get("validation_interaction_steps")
+                or [int(prompt_config["interaction_steps"])]
+            ),
+            "interaction_step_weights": list(
+                prompt_config.get("interaction_step_weights") or []
+            ),
+            "initial_mask_probability": float(
+                prompt_config.get("initial_mask_probability", 0.0)
+            ),
+            "provided_initial_mask_probability": float(
+                prompt_config.get(
+                    "provided_initial_mask_probability", 0.7
+                )
+            ),
             "patch_size": list(data_config["patch_size"]),
             "batch_size": batch_size,
             "gradient_accumulation": accumulation,
@@ -560,6 +730,16 @@ def _train_unlocked(config: dict[str, Any]) -> dict[str, Any]:
             "trainable_fraction": policy["trainable_fraction"],
             "train_cases": [row["case_id"] for row in train_cases],
             "validation_cases": [row["case_id"] for row in val_cases],
+            "real_initial_mask_train_cases": [
+                row["case_id"]
+                for row in train_prepared
+                if bool((row.get("metadata") or {}).get("has_initial_mask"))
+            ],
+            "real_initial_mask_validation_cases": [
+                row["case_id"]
+                for row in val_prepared
+                if bool((row.get("metadata") or {}).get("has_initial_mask"))
+            ],
             "best_score": best_score,
             "history": history,
             "config": config,

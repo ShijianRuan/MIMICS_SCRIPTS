@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -29,6 +30,7 @@ from nninteractive_task_common import (  # noqa: E402
     append_log,
     audit_model_dir,
     find_environment_python,
+    find_prepared_label,
     load_config,
     load_registry,
     model_rows,
@@ -426,13 +428,18 @@ def _ensure_nifti_image(source: Path, destination: Path) -> Path:
 
 
 def _ensure_binary_nifti_label(
-    source: Path, destination: Path, reference_image: Path
+    source: Path,
+    destination: Path,
+    reference_image: Path,
+    *,
+    allow_empty: bool = False,
 ) -> Path:
     """Normalize a label onto the Mimics-compatible training image grid."""
     import nibabel as nib
     import numpy as np
     from mimics_bridge import (
         _affine_close,
+        _mask_file_declares_spatial_geometry,
         _validate_resampled_mask_foreground,
         read_nifti_mask_with_affine,
         resample_mask_to_image_grid,
@@ -440,7 +447,7 @@ def _ensure_binary_nifti_label(
 
     label, affine = read_nifti_mask_with_affine(str(source))
     foreground = int(np.count_nonzero(label))
-    if foreground <= 0:
+    if foreground <= 0 and not allow_empty:
         raise RuntimeError("The selected label is empty: {}.".format(source))
     reference = nib.load(str(reference_image))
     reference_shape = tuple(int(value) for value in reference.shape[:3])
@@ -454,6 +461,9 @@ def _ensure_binary_nifti_label(
             affine,
             reference_shape,
             reference_affine,
+            allow_voxel_aligned_fallback=(
+                not _mask_file_declares_spatial_geometry(str(source))
+            ),
         )
         _validate_resampled_mask_foreground(
             label,
@@ -488,6 +498,212 @@ def _find_exported_label(staging: Path, case_id: str) -> Path | None:
     return candidates[0]
 
 
+def _mcs_export_fingerprint(
+    row: dict[str, Any], mask_names: list[str]
+) -> str:
+    digest = hashlib.sha256()
+    for key in ("mcs_path", "image"):
+        path = Path(str(row.get(key) or "")).expanduser().resolve()
+        stat = path.stat()
+        digest.update(key.encode("ascii"))
+        digest.update(path.name.encode("utf-8"))
+        digest.update(str(stat.st_size).encode("ascii"))
+        digest.update(str(stat.st_mtime_ns).encode("ascii"))
+    digest.update(
+        json.dumps(
+            sorted(str(value).strip().lower() for value in mask_names),
+            sort_keys=True,
+        ).encode("utf-8")
+    )
+    digest.update(b"nninteractive_mcs_source_grid_export.v2")
+    return digest.hexdigest()
+
+
+def _copy_file_atomic(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(
+        "{}.{}.tmp".format(destination.name, uuid.uuid4().hex)
+    )
+    try:
+        shutil.copy2(str(source), str(temporary))
+        last_error = None
+        for attempt in range(20):
+            try:
+                os.replace(str(temporary), str(destination))
+                return
+            except OSError as exc:
+                last_error = exc
+                time.sleep(min(0.25, 0.02 * (attempt + 1)))
+        raise OSError(
+            "Could not publish {} after bounded replace retries: {}".format(
+                destination, last_error
+            )
+        )
+    finally:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+
+
+def _prepare_cached_mcs_labels(
+    request: dict[str, Any],
+    job_dir: Path,
+    status_path: Path,
+    control_path: Path,
+    log_path: Path,
+    *,
+    mask_names_override: list[str] | None = None,
+    cache_role: str = "target",
+    output_name: str = "labels",
+) -> Path:
+    selected = [
+        row
+        for row in request.get("cases") or []
+        if row.get("split") in ("train", "val")
+    ]
+    mask_names = [
+        str(value).strip()
+        for value in (
+            mask_names_override
+            if mask_names_override is not None
+            else request.get("mask_names") or []
+        )
+        if str(value).strip()
+    ]
+    if not mask_names:
+        raise RuntimeError(
+            "No Mask name was configured for the {} export.".format(
+                cache_role
+            )
+        )
+    workspace = Path(request["workspace"]).expanduser().resolve()
+    task_id = safe_slug(request.get("task_id") or request.get("task_name"))
+    cache_bucket = (
+        "mcs_labels"
+        if cache_role == "target"
+        else "mcs_initial_masks"
+    )
+    cache_root = workspace / "cache" / cache_bucket / task_id
+    output_root = job_dir / "staging" / output_name
+    if output_root.exists():
+        shutil.rmtree(str(output_root))
+    output_root.mkdir(parents=True, exist_ok=True)
+    reusable = []
+    changed = []
+    signatures = {}
+    for row in selected:
+        case_id = str(row["case_id"])
+        try:
+            signature = _mcs_export_fingerprint(row, mask_names)
+        except OSError:
+            changed.append(row)
+            continue
+        signatures[case_id] = signature
+        case_cache = cache_root / safe_slug(case_id)
+        metadata = read_json(case_cache / "metadata.json", {}) or {}
+        cached_labels = sorted(
+            (case_cache / "segmentations").glob("*.nii.gz")
+        ) + sorted((case_cache / "segmentations").glob("*.nii"))
+        if (
+            metadata.get("fingerprint") == signature
+            and len(cached_labels) == 1
+            and cached_labels[0].is_file()
+        ):
+            reusable.append((row, cached_labels[0]))
+        else:
+            changed.append(row)
+    for row, cached_label in reusable:
+        destination = (
+            output_root
+            / str(row["case_id"])
+            / "segmentations"
+            / cached_label.name
+        )
+        _copy_file_atomic(cached_label, destination)
+    append_log(
+        log_path,
+        "Label cache: reused {} unchanged case(s); {} case(s) require fresh "
+        "Mimics export for {} Masks.".format(
+            len(reusable), len(changed), cache_role
+        ),
+    )
+    cache_status = {
+        "{}_mask_cache_reused".format(cache_role): len(reusable),
+        "{}_mask_cache_refresh".format(cache_role): len(changed),
+    }
+    if cache_role == "target":
+        cache_status.update(
+            label_cache_reused=len(reusable),
+            label_cache_refresh=len(changed),
+        )
+    update_status(status_path, **cache_status)
+    if changed:
+        export_request = dict(request)
+        export_request["cases"] = changed
+        export_request["mask_names"] = list(mask_names)
+        export_request["task_name"] = "{}_{}".format(
+            request.get("task_name") or request.get("task_id") or "task",
+            cache_role,
+        )
+        export_job_dir = job_dir / "_changed_{}_export".format(
+            safe_slug(cache_role)
+        )
+        fresh = _run_label_export(
+            export_request,
+            export_job_dir,
+            status_path,
+            control_path,
+            log_path,
+        )
+        for row in changed:
+            case_id = str(row["case_id"])
+            exported = _find_exported_label(fresh, case_id)
+            if exported is None:
+                continue
+            destination = (
+                output_root
+                / case_id
+                / "segmentations"
+                / exported.name
+            )
+            _copy_file_atomic(exported, destination)
+            signature = signatures.get(case_id)
+            if not signature:
+                signature = _mcs_export_fingerprint(row, mask_names)
+            cache_case = cache_root / safe_slug(case_id)
+            cache_label = cache_case / "segmentations" / exported.name
+            try:
+                _copy_file_atomic(exported, cache_label)
+                write_json_atomic(
+                    cache_case / "metadata.json",
+                    {
+                        "schema_version": "nninteractive_mcs_label_cache.v1",
+                        "case_id": case_id,
+                        "fingerprint": signature,
+                        "mask_names": mask_names,
+                        "cache_role": cache_role,
+                        "updated_at_epoch": time.time(),
+                    },
+                )
+            except OSError as exc:
+                append_log(
+                    log_path,
+                    "Warning: label cache could not publish case {}: {}. "
+                    "The current training run will continue with its staged "
+                    "label.".format(case_id, exc),
+                )
+                update_status(
+                    status_path,
+                    label_cache_warning={
+                        "case_id": case_id,
+                        "error": str(exc),
+                    },
+                )
+        shutil.rmtree(str(export_job_dir), ignore_errors=True)
+    return output_root
+
+
 def _prepare_manifest(
     request: dict[str, Any],
     job_dir: Path,
@@ -500,10 +716,80 @@ def _prepare_manifest(
     if manifest_path.is_file():
         return manifest_path, validation_path if validation_path.is_file() else None
     source_mode = str(request.get("source_mode") or "mcs").lower()
+    initial_mask_source = str(
+        request.get("initial_mask_source") or "synthetic"
+    ).strip().lower()
+    training_goal = str(
+        request.get("training_goal") or "general"
+    ).strip().lower()
+    if training_goal not in {
+        "general",
+        "start_empty",
+        "refine_existing",
+    }:
+        raise RuntimeError(
+            "Unsupported nnInteractive training goal: {}".format(
+                training_goal
+            )
+        )
+    if training_goal == "start_empty":
+        initial_mask_source = "synthetic"
+    initial_mask_names = [
+        str(value).strip()
+        for value in request.get("initial_mask_names") or []
+        if str(value).strip()
+    ]
+    if (
+        initial_mask_source in ("mcs", "exported_masks")
+        and {
+            safe_slug(value)
+            for value in request.get("mask_names") or []
+            if str(value).strip()
+        }
+        & {safe_slug(value) for value in initial_mask_names}
+    ):
+        raise RuntimeError(
+            "Initial Mask names overlap the final Target Mask names. "
+            "Choose a distinct draft or partial Mask."
+        )
     staging = None
     if source_mode == "mcs":
-        staging = _run_label_export(
+        staging = _prepare_cached_mcs_labels(
             request, job_dir, status_path, control_path, log_path
+        )
+    initial_staging = None
+    if initial_mask_source == "mcs":
+        if not initial_mask_names:
+            raise RuntimeError(
+                "Initial Mask source is saved .mcs projects, but no Initial "
+                "Mask name was configured."
+            )
+        initial_request = dict(request)
+        initial_cases = []
+        for row in request.get("cases") or []:
+            item = dict(row)
+            initial_mcs_path = str(
+                item.get("initial_mcs_path") or item.get("mcs_path") or ""
+            ).strip()
+            if initial_mcs_path:
+                item["mcs_path"] = initial_mcs_path
+                initial_cases.append(item)
+        initial_request["cases"] = initial_cases
+        initial_staging = _prepare_cached_mcs_labels(
+            initial_request,
+            job_dir,
+            status_path,
+            control_path,
+            log_path,
+            mask_names_override=initial_mask_names,
+            cache_role="initial",
+            output_name="initial_masks",
+        )
+    elif initial_mask_source not in ("synthetic", "exported_masks"):
+        raise RuntimeError(
+            "Unsupported Initial Mask source: {}".format(
+                initial_mask_source
+            )
         )
     update_status(
         status_path,
@@ -515,6 +801,8 @@ def _prepare_manifest(
     validation_rows = []
     image_cache = job_dir / "staging" / "images"
     label_cache = job_dir / "staging" / "labels"
+    initial_cache = job_dir / "staging" / "initial_masks_aligned"
+    real_initial_count = 0
     selected = [
         row for row in request.get("cases") or [] if row.get("split") in ("train", "val")
     ]
@@ -544,11 +832,99 @@ def _prepare_manifest(
             label_cache / case_id / "label.nii.gz",
             image_path,
         )
+        initial_source = None
+        if initial_staging is not None:
+            initial_source = _find_exported_label(
+                initial_staging, case_id
+            )
+        elif initial_mask_source == "exported_masks":
+            configured = str(row.get("initial_mask") or "").strip()
+            if configured and Path(configured).is_file():
+                initial_source = Path(configured).resolve()
+            else:
+                initial_root = Path(
+                    str(request.get("initial_mask_root") or "")
+                ).expanduser()
+                if initial_root.is_dir():
+                    initial_source = find_prepared_label(
+                        initial_root / case_id,
+                        initial_mask_names,
+                    )
+        initial_path = None
+        if initial_source is not None:
+            initial_path = _ensure_binary_nifti_label(
+                Path(initial_source),
+                initial_cache / case_id / "initial_mask.nii.gz",
+                image_path,
+                allow_empty=True,
+            )
+            try:
+                import nibabel as nib
+                import numpy as np
+
+                final_values = np.asarray(
+                    nib.load(str(label_path)).dataobj
+                ) != 0
+                initial_values = np.asarray(
+                    nib.load(str(initial_path)).dataobj
+                ) != 0
+                if not initial_values.any():
+                    append_log(
+                        log_path,
+                        "Ignored the Initial Mask for {} because it is empty; "
+                        "synthetic variations will be used.".format(case_id),
+                    )
+                    initial_path = None
+                elif np.array_equal(final_values, initial_values):
+                    append_log(
+                        log_path,
+                        "Ignored the Initial Mask for {} because it is "
+                        "identical to the final Target Mask; synthetic "
+                        "variations will be used.".format(case_id),
+                    )
+                    initial_path = None
+                else:
+                    real_initial_count += 1
+            except Exception as exc:
+                raise RuntimeError(
+                    "Could not verify the Initial Mask for {}: {}".format(
+                        case_id, exc
+                    )
+                )
         item = {
             "case_id": case_id,
             "image": str(image_path),
             "label": str(label_path),
             "source_label": str(label_source),
+            "source_image": str(image_source.resolve()),
+            "source_mcs": (
+                str(Path(row["mcs_path"]).resolve())
+                if source_mode == "mcs" and row.get("mcs_path")
+                else ""
+            ),
+            "initial_mask": str(initial_path) if initial_path else "",
+            "source_initial_mask": (
+                str(Path(initial_source).resolve())
+                if initial_source is not None and initial_path is not None
+                else ""
+            ),
+            "source_initial_mcs": (
+                str(
+                    Path(
+                        row.get("initial_mcs_path")
+                        or row.get("mcs_path")
+                    ).resolve()
+                )
+                if (
+                    initial_mask_source == "mcs"
+                    and initial_path is not None
+                    and (
+                        row.get("initial_mcs_path")
+                        or row.get("mcs_path")
+                    )
+                )
+                else ""
+            ),
             "split": str(row.get("split") or "train"),
         }
         rows.append(item)
@@ -579,11 +955,42 @@ def _prepare_manifest(
     write_json_atomic(manifest_path, {"cases": rows})
     if validation_rows:
         write_json_atomic(validation_path, {"cases": validation_rows})
-    append_log(
-        log_path,
-        "Prepared {} training and {} validation case(s).".format(
-            sum(row["split"] == "train" for row in rows),
-            len(validation_rows),
+    if training_goal == "start_empty":
+        append_log(
+            log_path,
+            "Prepared {} training and {} validation case(s). Initial Masks "
+            "are disabled for the empty-start training goal.".format(
+                sum(row["split"] == "train" for row in rows),
+                len(validation_rows),
+            ),
+        )
+    else:
+        append_log(
+            log_path,
+            "Prepared {} training and {} validation case(s); {} case(s) have "
+            "a real Initial Mask. Missing Initial Masks use synthetic "
+            "variations.".format(
+                sum(row["split"] == "train" for row in rows),
+                len(validation_rows),
+                real_initial_count,
+            ),
+        )
+    update_status(
+        status_path,
+        real_initial_mask_cases=real_initial_count,
+        synthetic_initial_mask_cases=(
+            0
+            if training_goal == "start_empty"
+            else max(0, len(rows) - real_initial_count)
+        ),
+        initial_mask_policy=(
+            "disabled"
+            if training_goal == "start_empty"
+            else (
+                "real_and_synthetic"
+                if real_initial_count
+                else "synthetic_only"
+            )
         ),
     )
     return manifest_path, validation_path if validation_rows else None
@@ -598,6 +1005,136 @@ def _training_config(
     trainer_status = job_dir / "trainer_status.json"
     trainer_cancel = job_dir / "trainer_cancel.request"
     config = load_config()
+    legacy_interaction_profiles = {
+        "quick": {
+            "interaction_steps": 3,
+            "min_interaction_steps": 1,
+            "max_interaction_steps": 3,
+            "interaction_step_weights": None,
+            "short_interaction_probability": 1.0,
+            "validation_interaction_steps": [1, 3],
+            "initial_mask_probability": 0.6,
+            "provided_initial_mask_probability": 0.7,
+            "validate_initial_masks": True,
+            "training_goal": "legacy",
+            "correction_policy": "clopa_paired",
+        },
+        "typical": {
+            "interaction_steps": 10,
+            "min_interaction_steps": 1,
+            "max_interaction_steps": 10,
+            "interaction_step_weights": None,
+            "short_interaction_probability": 0.7,
+            "validation_interaction_steps": [1, 3, 5, 10],
+            "initial_mask_probability": 0.35,
+            "provided_initial_mask_probability": 0.7,
+            "validate_initial_masks": True,
+            "training_goal": "legacy",
+            "correction_policy": "clopa_paired",
+        },
+        "extended": {
+            "interaction_steps": 15,
+            "min_interaction_steps": 1,
+            "max_interaction_steps": 15,
+            "interaction_step_weights": None,
+            "short_interaction_probability": 0.55,
+            "validation_interaction_steps": [1, 3, 5, 10, 15],
+            "initial_mask_probability": 0.45,
+            "provided_initial_mask_probability": 0.7,
+            "validate_initial_masks": True,
+            "training_goal": "legacy",
+            "correction_policy": "clopa_paired",
+        },
+    }
+    goal_plans = {
+        "general": {
+            "initial_mask_probability": 0.5,
+            "provided_initial_mask_probability": 0.7,
+            "validate_initial_masks": True,
+        },
+        "start_empty": {
+            "initial_mask_probability": 0.0,
+            "provided_initial_mask_probability": 0.0,
+            "validate_initial_masks": False,
+        },
+        "refine_existing": {
+            "initial_mask_probability": 1.0,
+            "provided_initial_mask_probability": 0.7,
+            "validate_initial_masks": True,
+        },
+    }
+    requested_goal = str(request.get("training_goal") or "").strip().lower()
+    legacy_profile = str(
+        request.get("interaction_profile") or ""
+    ).strip().lower()
+    if requested_goal:
+        goal_values = goal_plans.get(requested_goal)
+        if goal_values is None:
+            raise RuntimeError(
+                "Unknown nnInteractive training goal: {}".format(
+                    requested_goal
+                )
+            )
+        prompt_plan = {
+            "training_goal": requested_goal,
+            "correction_policy": "official_single",
+            "interaction_steps": 5,
+            "min_interaction_steps": 1,
+            "max_interaction_steps": 5,
+            "interaction_step_weights": [0.35, 0.25, 0.20, 0.12, 0.08],
+            "short_interaction_probability": 0.7,
+            "validation_interaction_steps": [1, 3, 5],
+            **goal_values,
+        }
+        provided_probability = float(
+            request.get(
+                "provided_initial_mask_probability",
+                prompt_plan["provided_initial_mask_probability"],
+            )
+        )
+        if not 0.0 <= provided_probability <= 1.0:
+            raise RuntimeError(
+                "provided_initial_mask_probability must be in [0, 1]."
+            )
+        prompt_plan["provided_initial_mask_probability"] = (
+            0.0
+            if requested_goal == "start_empty"
+            else provided_probability
+        )
+        interaction_profile = ""
+    elif legacy_profile:
+        prompt_plan = legacy_interaction_profiles.get(legacy_profile)
+        if prompt_plan is None:
+            raise RuntimeError(
+                "Unknown legacy nnInteractive interaction profile: {}".format(
+                    legacy_profile
+                )
+            )
+        interaction_profile = legacy_profile
+    else:
+        requested_goal = "general"
+        prompt_plan = {
+            "training_goal": requested_goal,
+            "correction_policy": "official_single",
+            "interaction_steps": 5,
+            "min_interaction_steps": 1,
+            "max_interaction_steps": 5,
+            "interaction_step_weights": [0.35, 0.25, 0.20, 0.12, 0.08],
+            "short_interaction_probability": 0.7,
+            "validation_interaction_steps": [1, 3, 5],
+            **goal_plans[requested_goal],
+        }
+        provided_probability = float(
+            request.get("provided_initial_mask_probability", 0.7)
+        )
+        if not 0.0 <= provided_probability <= 1.0:
+            raise RuntimeError(
+                "provided_initial_mask_probability must be in [0, 1]."
+            )
+        prompt_plan["provided_initial_mask_probability"] = (
+            provided_probability
+        )
+        interaction_profile = ""
     return {
         "model": {
             "base_model_dir": str(Path(request["base_model_dir"]).resolve()),
@@ -612,7 +1149,14 @@ def _training_config(
             "patch_size": [128, 128, 128],
             "foreground_patch_probability": 0.5,
             "num_workers": 0,
-            "prepared_cache_dir": str(job_dir / "prepared_cache"),
+            "prepared_cache_dir": str(
+                Path(
+                    request.get("workspace") or job_dir.parent
+                ).expanduser().resolve()
+                / "cache"
+                / "prepared_cases"
+                / safe_slug(request.get("task_id") or request.get("task_name"))
+            ),
             "keep_prepared_cache": True,
             "augmentation": {
                 "enabled": True,
@@ -624,7 +1168,8 @@ def _training_config(
         },
         "prompts": {
             "mode": "clicks",
-            "interaction_steps": 5,
+            **prompt_plan,
+            "interaction_profile": interaction_profile,
             "point_radius": 4,
             "center_bias": 8.0,
             "interaction_decay": 0.9,
@@ -928,6 +1473,9 @@ def _run_evaluation(
     status_path: Path,
     control_path: Path,
     label: str,
+    training_goal: str,
+    initial_mask_probability: float,
+    provided_initial_mask_probability: float,
 ) -> dict[str, Any]:
     python_exe = find_environment_python()
     gpu_lock = _gpu_lock(status_path, control_path, status_path.stem)
@@ -962,6 +1510,12 @@ def _run_evaluation(
                     "5",
                     "--device",
                     "auto",
+                    "--training-goal",
+                    str(training_goal),
+                    "--initial-mask-probability",
+                    str(float(initial_mask_probability)),
+                    "--provided-initial-mask-probability",
+                    str(float(provided_initial_mask_probability)),
                 ],
                 cwd=str(ROOT),
                 env=os.environ.copy(),
@@ -1117,6 +1671,15 @@ def _register_model(
         "checkpoint_sha256": audit.get("checkpoint_sha256"),
         "fold": audit.get("fold", "0"),
         "strategy": str(request.get("strategy") or ""),
+        "training_goal": str(
+            finetune_manifest.get("training", {}).get("training_goal")
+            or request.get("training_goal")
+            or "legacy"
+        ),
+        "correction_policy": str(
+            finetune_manifest.get("training", {}).get("correction_policy")
+            or "clopa_paired"
+        ),
         "parent_model_id": str(request.get("parent_model_id") or "official"),
         "created_at_epoch": time.time(),
         "train_case_count": sum(
@@ -1285,6 +1848,16 @@ def run_job(job_dir_value: str) -> int:
         )
         if validation_path is not None:
             baseline_dir = Path(request["base_model_dir"]).resolve()
+            evaluation_goal = str(
+                request.get("training_goal") or "general"
+            )
+            initial_probability = {
+                "start_empty": 0.0,
+                "refine_existing": 1.0,
+            }.get(evaluation_goal, 0.5)
+            provided_probability = float(
+                request.get("provided_initial_mask_probability", 0.7)
+            )
             baseline_report = _run_evaluation(
                 baseline_dir,
                 validation_path,
@@ -1292,6 +1865,9 @@ def run_job(job_dir_value: str) -> int:
                 status_path,
                 control_path,
                 "current model",
+                evaluation_goal,
+                initial_probability,
+                provided_probability,
             )
             candidate_report = _run_evaluation(
                 model_dir,
@@ -1300,6 +1876,9 @@ def run_job(job_dir_value: str) -> int:
                 status_path,
                 control_path,
                 "new model",
+                evaluation_goal,
+                initial_probability,
+                provided_probability,
             )
             quality = _quality_result(baseline_report, candidate_report, load_config())
         update_status(

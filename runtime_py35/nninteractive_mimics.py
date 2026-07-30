@@ -2,7 +2,8 @@
 """Standalone nnInteractive tool for Mimics Research 21.
 
 This module runs inside Mimics Python 3.5. It intentionally has no dependency
-on SegmentationPlatform cases, reviews, registries, or runtime manifests.
+on SegmentationPlatform cases, reviews, or registries. It may use the shared
+relocatable dataset manifest written by the Mimics import/export tools.
 
 The user selects a target Mask in the Project Tree and launches the
 ``nnInteractive`` Scripting Library entry. Prompts are collected with Mimics
@@ -26,6 +27,7 @@ import uuid
 
 import mimics
 
+import dataset_manifest
 import runtime_common
 
 
@@ -1149,6 +1151,54 @@ def _hu_to_mimics_gv_transform():
         return None
 
 
+def _current_project_path():
+    try:
+        info = mimics.file.get_project_information()
+    except Exception:
+        return ""
+    for attr in (
+        "filename",
+        "file_name",
+        "path",
+        "project_path",
+        "project_file",
+    ):
+        try:
+            value = getattr(info, attr, None)
+        except Exception:
+            value = None
+        if value:
+            return os.path.abspath(str(value))
+    return ""
+
+
+def _relocated_source_image_path():
+    project_path = _current_project_path()
+    if not project_path:
+        return ""
+    case_name = os.path.basename(project_path)
+    case_id = (
+        case_name[:-4]
+        if case_name.lower().endswith(".mcs")
+        else case_name
+    )
+    project_dir = os.path.dirname(project_path)
+    for root in (project_dir, os.path.dirname(project_dir)):
+        manifest_path = os.path.join(
+            root, dataset_manifest.MANIFEST_FILENAME
+        )
+        if not os.path.isfile(manifest_path):
+            continue
+        payload = dataset_manifest.load_manifest(manifest_path)
+        row = dataset_manifest.find_case(payload, case_id) or {}
+        resolved = dataset_manifest.resolve_case_path(
+            manifest_path, row, "image"
+        )
+        if resolved:
+            return os.path.abspath(resolved)
+    return ""
+
+
 def _source_uses_hu_to_gv(kind, modality):
     modality_text = str(modality or "").strip().upper()
     if modality_text:
@@ -1201,6 +1251,20 @@ def _source_image_export(image, config):
         )
         return None
     path = _metadata_get(image, SOURCE_IMAGE_PATH_METADATA, "")
+    recorded_path = str(path or "").strip()
+    relocated_path = _relocated_source_image_path()
+    if relocated_path:
+        path = relocated_path
+        if (
+            not recorded_path
+            or os.path.normcase(os.path.abspath(recorded_path))
+            != os.path.normcase(os.path.abspath(relocated_path))
+        ):
+            _mimics_log(
+                logging.INFO,
+                "nnInteractive resolved the moved source image from "
+                "dataset_manifest.json: {0}".format(relocated_path),
+            )
     kind = str(_metadata_get(image, SOURCE_IMAGE_KIND_METADATA, "") or "").lower()
     modality = str(_metadata_get(image, SOURCE_IMAGE_MODALITY_METADATA, "") or "").upper()
     index_space = str(_metadata_get(image, SOURCE_IMAGE_INDEX_SPACE_METADATA, "") or "")
@@ -3351,18 +3415,42 @@ def _persist_interaction(job_dir, interaction):
     return result
 
 
-def _enqueue_async_prediction(state, target, expected_hash=None):
+def _interaction_prediction_step_count(interaction):
+    interaction_type = str(interaction.get("interaction_type") or "")
+    if interaction_type == "point_set":
+        return max(1, len(interaction.get("points") or []))
+    if interaction_type == "scribble_set":
+        return max(1, len(interaction.get("scribbles") or []))
+    return 1
+
+
+def _enqueue_async_prediction(
+    state, target, expected_hash=None, replay_all=False
+):
     worker_dir = _async_state_worker_dir(state)
     sequence = _next_async_sequence(worker_dir)
     if expected_hash is None:
         expected_hash = _mask_sha256(target, state.get("shape"))
+    interactions = state.get("interactions", [])
+    if replay_all:
+        prediction_steps = sum(
+            _interaction_prediction_step_count(value)
+            for value in interactions
+        )
+    else:
+        prediction_steps = (
+            _interaction_prediction_step_count(interactions[-1])
+            if interactions
+            else 1
+        )
     command = {
         "schema_version": "nninteractive_async_command.v1",
         "command_id": uuid.uuid4().hex,
         "sequence": sequence,
         "created_at_epoch": time.time(),
         "expected_target_sha256": expected_hash,
-        "interactions": state.get("interactions", []),
+        "interactions": interactions,
+        "prediction_steps_hint": max(1, int(prediction_steps)),
         "initial_seg_path": state["base_path"] if state.get("base_path") else None,
         "initial_seg_shape": state.get("shape"),
         "target_guid": state.get("target_guid"),
@@ -3378,6 +3466,7 @@ def _enqueue_async_prediction(state, target, expected_hash=None):
         "task_id": state.get("task_id", ""),
     }
     state["pending_sequence"] = sequence
+    state["pending_prediction_steps"] = max(1, int(prediction_steps))
     state["next_sequence"] = sequence + 1
     state["expected_target_sha256"] = expected_hash
     state["status"] = "queued"
@@ -3391,7 +3480,9 @@ def _enqueue_async_prediction(state, target, expected_hash=None):
     _write_json_atomic(command_path, command)
     _mimics_log(
         logging.INFO,
-        "nnInteractive prompt queued for background inference. Sequence: {0}.".format(sequence),
+        "nnInteractive prompt queued for background inference. Sequence: {0}; "
+        "sequential prediction steps: {1}. Mimics will apply only the final "
+        "result.".format(sequence, max(1, int(prediction_steps))),
     )
     return sequence
 
@@ -3605,12 +3696,18 @@ def _start_win32_async_result_monitor(image, target, state, config, poll_seconds
 def _start_async_result_monitor(image, target, state, config):
     """Start a non-blocking Mimics-side timer that applies async results."""
     poll_seconds = float(config.get("async_result_poll_seconds", config.get("async_poll_seconds", 0.25)))
-    timeout_seconds = float(
-        config.get(
-            "async_result_wait_timeout_seconds",
-            config.get("prediction_timeout_seconds", 1800) + 120,
+    configured_timeout = config.get("async_result_wait_timeout_seconds")
+    if configured_timeout is not None:
+        timeout_seconds = float(configured_timeout)
+    else:
+        prediction_steps = max(
+            1, int(state.get("pending_prediction_steps") or 1)
         )
-    )
+        timeout_seconds = (
+            float(config.get("prediction_timeout_seconds", 1800))
+            * prediction_steps
+            + 120
+        )
 
     try:
         from PyQt5.QtCore import QTimer
@@ -3745,7 +3842,7 @@ def _handle_async_result(image, target, state):
         )
         if answer == BUTTON_RETRY:
             state["pending_sequence"] = None
-            _enqueue_async_prediction(state, target)
+            _enqueue_async_prediction(state, target, replay_all=True)
             _show_async_running(target, state)
             return "waiting"
         if answer == BUTTON_DISCARD_SESSION:
@@ -3833,6 +3930,7 @@ def _handle_async_result(image, target, state):
         for obj in _ASYNC_VISUAL_OBJECTS.pop(job_dir):
             _delete_mimics_object(obj)
     state["pending_sequence"] = None
+    state["pending_prediction_steps"] = 0
     state["applied_sequence"] = int(sequence)
     # Re-anchor the stale check on the mask buffer we just wrote, not on the
     # output file: the next prompt compares _mask_sha256(target, ...) against
@@ -3844,9 +3942,12 @@ def _handle_async_result(image, target, state):
     _save_async_job(state)
     _mimics_log(
         logging.INFO,
-        "nnInteractive result applied to Mask {0}. Foreground voxels: {1}, elapsed: {2}s, device: {3}. Timing: {4}.".format(
+        "nnInteractive result applied to Mask {0}. Foreground voxels: {1}, "
+        "sequential prediction steps: {2}, elapsed: {3}s, device: {4}. "
+        "Timing: {5}.".format(
             getattr(target, "name", ""),
             result.get("foreground_voxels", "?"),
+            result.get("prediction_steps", 1),
             result.get("elapsed_seconds", "?"),
             result.get("device", "?"),
             _timing_summary(result) or "not available",
@@ -4000,7 +4101,12 @@ def _run_async(image, target, config, source=None, auto_created=False, write_mod
                     _delete_mimics_object(obj)
             if interactions:
                 _retire_different_model_workers(config)
-                _enqueue_async_prediction(state, target, expected_hash=validated_target_hash)
+                _enqueue_async_prediction(
+                    state,
+                    target,
+                    expected_hash=validated_target_hash,
+                    replay_all=True,
+                )
                 _start_async_result_monitor(image, target, state, config)
             else:
                 _restore_base(target, state["base_path"], state["shape"])

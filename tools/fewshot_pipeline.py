@@ -1803,7 +1803,103 @@ def validate_fresh_export_geometry(samples):
     return checked
 
 
-def _materialize_split(samples, image_dir, label_dir, split_name):
+def _materialization_fingerprint(sample):
+    payload = {
+        "image": _path_stat_signature(sample["image"]),
+        "label": _path_stat_signature(sample["label"]),
+        "contract": "dinov3_source_grid_materialization.v2",
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
+def _materialized_cache_case(sample, cache_dir):
+    """Return a source-grid cache entry, rebuilding only the changed case."""
+    case_id = safe_slug(sample["case_id"])
+    cache_case = Path(cache_dir) / case_id
+    fingerprint = _materialization_fingerprint(sample)
+    metadata_path = cache_case / "metadata.json"
+    image_path = cache_case / "image.nii.gz"
+    label_path = cache_case / "label.nii.gz"
+    metadata = read_json(metadata_path, {}) or {}
+    if (
+        metadata.get("fingerprint") == fingerprint
+        and image_path.is_file()
+        and label_path.is_file()
+    ):
+        return {
+            "cache_hit": True,
+            "image": image_path,
+            "label": label_path,
+            "metadata": metadata,
+        }
+
+    cache_case.parent.mkdir(parents=True, exist_ok=True)
+    staging = cache_case.with_name(
+        "{}.publishing_{}".format(cache_case.name, uuid.uuid4().hex)
+    )
+    try:
+        staging.mkdir(parents=True)
+        image_method = _materialize_source_image(
+            sample["image"], staging / "image.nii.gz"
+        )
+        (
+            label_method,
+            geometry_matched,
+            source_foreground,
+            target_foreground,
+        ) = _materialize_label_on_source_grid(
+            sample["label"],
+            staging / "image.nii.gz",
+            staging / "label.nii.gz",
+        )
+        metadata = {
+            "schema_version": "dinov3_materialized_case_cache.v1",
+            "case_id": str(sample["case_id"]),
+            "fingerprint": fingerprint,
+            "image_materialization": image_method,
+            "label_materialization": label_method,
+            "image_label_geometry_matched": bool(geometry_matched),
+            "source_label_foreground_voxels": source_foreground,
+            "dataset_label_foreground_voxels": target_foreground,
+            "updated_at_epoch": time.time(),
+        }
+        write_json_atomic(staging / "metadata.json", metadata)
+        if cache_case.exists():
+            rmtree_with_retry(cache_case)
+        last_error = None
+        for attempt in range(20):
+            try:
+                os.replace(str(staging), str(cache_case))
+                last_error = None
+                break
+            except OSError as exc:
+                last_error = exc
+                time.sleep(min(0.25, 0.02 * (attempt + 1)))
+        if last_error is not None:
+            raise OSError(
+                "Could not publish materialized cache for {}: {}".format(
+                    sample["case_id"], last_error
+                )
+            )
+    finally:
+        if staging.exists():
+            try:
+                rmtree_with_retry(staging)
+            except OSError:
+                pass
+    return {
+        "cache_hit": False,
+        "image": cache_case / "image.nii.gz",
+        "label": cache_case / "label.nii.gz",
+        "metadata": metadata,
+    }
+
+
+def _materialize_split(
+    samples, image_dir, label_dir, split_name, cache_dir=None
+):
     image_dir.mkdir(parents=True, exist_ok=True)
     label_dir.mkdir(parents=True, exist_ok=True)
     materialized = []
@@ -1813,13 +1909,36 @@ def _materialize_split(samples, image_dir, label_dir, split_name):
         label_src = Path(sample["label"])
         image_dst = image_dir / (case_id + ".nii.gz")
         label_dst = label_dir / (case_id + ".nii.gz")
-        image_method = _materialize_source_image(image_src, image_dst)
-        (
-            label_method,
-            geometry_matched,
-            source_foreground,
-            target_foreground,
-        ) = _materialize_label_on_source_grid(label_src, image_dst, label_dst)
+        cache_entry = None
+        cache_error = ""
+        if cache_dir:
+            try:
+                cache_entry = _materialized_cache_case(sample, cache_dir)
+            except Exception as exc:
+                cache_error = str(exc)
+        if cache_entry:
+            image_method = copy_or_link(cache_entry["image"], image_dst)
+            label_method = copy_or_link(cache_entry["label"], label_dst)
+            metadata = cache_entry["metadata"]
+            geometry_matched = bool(
+                metadata.get("image_label_geometry_matched", True)
+            )
+            source_foreground = int(
+                metadata.get("source_label_foreground_voxels", 0) or 0
+            )
+            target_foreground = int(
+                metadata.get("dataset_label_foreground_voxels", 0) or 0
+            )
+        else:
+            image_method = _materialize_source_image(image_src, image_dst)
+            (
+                label_method,
+                geometry_matched,
+                source_foreground,
+                target_foreground,
+            ) = _materialize_label_on_source_grid(
+                label_src, image_dst, label_dst
+            )
         row = dict(sample)
         row.update({
             "split": split_name,
@@ -1832,6 +1951,10 @@ def _materialize_split(samples, image_dir, label_dir, split_name):
             "image_label_geometry_matched": bool(geometry_matched),
             "source_label_foreground_voxels": source_foreground,
             "dataset_label_foreground_voxels": target_foreground,
+            "materialization_cache_hit": bool(
+                cache_entry and cache_entry["cache_hit"]
+            ),
+            "materialization_cache_error": cache_error,
         })
         materialized.append(row)
     return materialized
@@ -1875,7 +1998,9 @@ def _check_materialize_disk_space(train_samples, val_samples, dataset_dir):
         )
 
 
-def materialize_dataset(train_samples, dataset_dir, val_samples=None):
+def materialize_dataset(
+    train_samples, dataset_dir, val_samples=None, cache_dir=None
+):
     dataset_dir = Path(dataset_dir)
     _check_materialize_disk_space(train_samples, val_samples or [], dataset_dir)
     if dataset_dir.exists():
@@ -1885,12 +2010,14 @@ def materialize_dataset(train_samples, dataset_dir, val_samples=None):
         dataset_dir / "imagesTr",
         dataset_dir / "labelsTr",
         "train",
+        cache_dir=cache_dir,
     )
     val_rows = _materialize_split(
         val_samples or [],
         dataset_dir / "imagesVal",
         dataset_dir / "labelsVal",
         "validation",
+        cache_dir=cache_dir,
     )
     return train_rows, val_rows
 
@@ -2815,6 +2942,202 @@ def launch_mimics_export(
                 lock.release()
 
 
+def _path_stat_signature(path):
+    path = Path(path)
+    if path.is_file():
+        stat = path.stat()
+        return {
+            "kind": "file",
+            "name": path.name,
+            "size": int(stat.st_size),
+            "mtime_ns": int(stat.st_mtime_ns),
+        }
+    if path.is_dir():
+        count = 0
+        total_size = 0
+        latest_mtime = 0
+        for child in path.rglob("*"):
+            if not child.is_file():
+                continue
+            stat = child.stat()
+            count += 1
+            total_size += int(stat.st_size)
+            latest_mtime = max(latest_mtime, int(stat.st_mtime_ns))
+        return {
+            "kind": "directory",
+            "name": path.name,
+            "file_count": count,
+            "total_size": total_size,
+            "latest_mtime_ns": latest_mtime,
+        }
+    raise OSError("path does not exist: {}".format(path))
+
+
+def _dino_mcs_label_fingerprint(mcs_path, image_path, mask_names):
+    payload = {
+        "mcs": _path_stat_signature(mcs_path),
+        "image": _path_stat_signature(image_path),
+        "mask_names": sorted(str(value).strip().lower() for value in mask_names),
+        "export_contract": "dinov3_source_grid_mcs_export.v2",
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
+def _cached_case_label(cache_root, case_id, fingerprint):
+    case_root = Path(cache_root) / safe_slug(case_id)
+    metadata = read_json(case_root / "metadata.json", {}) or {}
+    labels = sorted((case_root / "segmentations").glob("*.nii.gz"))
+    labels += sorted((case_root / "segmentations").glob("*.nii"))
+    if (
+        metadata.get("fingerprint") == fingerprint
+        and len(labels) == 1
+        and labels[0].is_file()
+    ):
+        return labels[0]
+    return None
+
+
+def _copy_label_atomic(source, destination):
+    source = Path(source)
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(
+        "{}.{}.tmp".format(destination.name, uuid.uuid4().hex)
+    )
+    try:
+        shutil.copy2(str(source), str(temporary))
+        last_error = None
+        for attempt in range(20):
+            try:
+                os.replace(str(temporary), str(destination))
+                return
+            except OSError as exc:
+                last_error = exc
+                time.sleep(min(0.25, 0.02 * (attempt + 1)))
+        raise OSError(
+            "Could not publish {} after bounded replace retries: {}".format(
+                destination, last_error
+            )
+        )
+    finally:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+
+
+def _plan_dino_mcs_label_cache(
+    ts_root,
+    workspace,
+    organ_slug,
+    cases,
+    mask_names,
+    mcs_output_dir=None,
+):
+    mcs_root = (
+        Path(mcs_output_dir).expanduser().resolve()
+        if mcs_output_dir
+        else resolve_mimics_output_dir(ts_root)
+    )
+    requested = set(cases or [])
+    if requested:
+        case_ids = sorted(requested)
+    else:
+        case_ids = sorted(path.stem for path in mcs_root.glob("*.mcs"))
+    cache_root = Path(workspace) / "cache" / "mcs_labels" / organ_slug
+    reusable = {}
+    changed = []
+    fingerprints = {}
+    for case_id in case_ids:
+        mcs_path = mcs_root / (case_id + ".mcs")
+        image_path = find_image(Path(ts_root) / case_id)
+        if not mcs_path.is_file() or not image_path:
+            changed.append(case_id)
+            continue
+        try:
+            fingerprint = _dino_mcs_label_fingerprint(
+                mcs_path, image_path, mask_names
+            )
+        except OSError:
+            changed.append(case_id)
+            continue
+        fingerprints[case_id] = fingerprint
+        cached = _cached_case_label(cache_root, case_id, fingerprint)
+        if cached:
+            reusable[case_id] = cached
+        else:
+            changed.append(case_id)
+    return {
+        "cache_root": cache_root,
+        "reusable": reusable,
+        "changed": changed,
+        "fingerprints": fingerprints,
+        "requested": case_ids,
+    }
+
+
+def _publish_dino_mcs_label_cache(
+    plan, staging_root, mask_names, output_root=None
+):
+    available = set(plan["reusable"])
+    warnings = []
+    cache_root = Path(plan["cache_root"])
+    staging_root = Path(staging_root)
+    for case_id in plan["changed"]:
+        source_dir = staging_root / case_id / "segmentations"
+        labels = sorted(source_dir.glob("*.nii.gz"))
+        labels += sorted(source_dir.glob("*.nii"))
+        if len(labels) != 1:
+            continue
+        if output_root is not None:
+            try:
+                _copy_label_atomic(
+                    labels[0],
+                    Path(output_root)
+                    / case_id
+                    / "segmentations"
+                    / labels[0].name,
+                )
+            except OSError as exc:
+                warnings.append(
+                    {
+                        "case_id": case_id,
+                        "stage": "training_staging",
+                        "error": str(exc),
+                    }
+                )
+                continue
+        available.add(case_id)
+        fingerprint = plan["fingerprints"].get(case_id)
+        if not fingerprint:
+            continue
+        cache_case = cache_root / safe_slug(case_id)
+        cached_label = cache_case / "segmentations" / labels[0].name
+        try:
+            _copy_label_atomic(labels[0], cached_label)
+            write_json_atomic(
+                cache_case / "metadata.json",
+                {
+                    "schema_version": "dinov3_mcs_label_cache.v1",
+                    "case_id": case_id,
+                    "fingerprint": fingerprint,
+                    "mask_names": list(mask_names),
+                    "updated_at_epoch": time.time(),
+                },
+            )
+        except OSError as exc:
+            warnings.append(
+                {
+                    "case_id": case_id,
+                    "stage": "cache_publish",
+                    "error": str(exc),
+                }
+            )
+    return available, warnings
+
+
 def latest_epoch_checkpoint(ckpt_dir):
     ckpt_dir = Path(ckpt_dir)
     best = ckpt_dir / "best_model.pth"
@@ -3024,24 +3347,72 @@ def _cmd_train_impl(args):
         update_status(status_path, {"status": "exporting_labels"})
         fresh_label_root = run_dir / "fresh_labels"
         _register_transient_cleanup(fresh_label_root)
+        label_cache_plan = _plan_dino_mcs_label_cache(
+            ts_root,
+            workspace,
+            organ_slug,
+            cases,
+            mask_names,
+            mcs_output_dir=args.mcs_output_dir,
+        )
+        fresh_label_root.mkdir(parents=True, exist_ok=True)
+        for case_id, cached_label in label_cache_plan["reusable"].items():
+            _copy_label_atomic(
+                cached_label,
+                fresh_label_root
+                / case_id
+                / "segmentations"
+                / cached_label.name,
+        )
+        changed_label_root = run_dir / "fresh_labels_changed"
+        _register_transient_cleanup(changed_label_root)
+        update_status(
+            status_path,
+            {
+                "label_cache_reused": len(label_cache_plan["reusable"]),
+                "label_cache_refresh": len(label_cache_plan["changed"]),
+            },
+        )
+        append_log(
+            workspace,
+            "MCS label cache: reused {} unchanged case(s); {} case(s) "
+            "require fresh export.".format(
+                len(label_cache_plan["reusable"]),
+                len(label_cache_plan["changed"]),
+            ),
+        )
         try:
-            export_result = launch_mimics_export(
-                ts_root,
-                cases,
-                args.mimics_exe,
-                workspace,
-                args.export_timeout_seconds,
-                status_path=status_path,
-                cancel_path=cancel_path,
-                lock_timeout_seconds=args.background_mimics_lock_timeout_seconds,
-                label_staging_dir=fresh_label_root,
-                export_space="source_image",
-                mask_names=mask_names,
-                target_mask_name=organ_slug,
-                mcs_output_dir=args.mcs_output_dir,
-                skip_projects_without_requested_mask=True,
-                skip_invalid_projects=True,
-            )
+            if label_cache_plan["changed"]:
+                export_result = launch_mimics_export(
+                    ts_root,
+                    set(label_cache_plan["changed"]),
+                    args.mimics_exe,
+                    workspace,
+                    args.export_timeout_seconds,
+                    status_path=status_path,
+                    cancel_path=cancel_path,
+                    lock_timeout_seconds=args.background_mimics_lock_timeout_seconds,
+                    label_staging_dir=changed_label_root,
+                    export_space="source_image",
+                    mask_names=mask_names,
+                    target_mask_name=organ_slug,
+                    mcs_output_dir=args.mcs_output_dir,
+                    skip_projects_without_requested_mask=True,
+                    skip_invalid_projects=True,
+                )
+            else:
+                export_result = {
+                    "launched": True,
+                    "returncode": 0,
+                    "runner_started": False,
+                    "cache_only": True,
+                    "batch_status": {
+                        "status": "completed",
+                        "completed": len(label_cache_plan["reusable"]),
+                        "failed": 0,
+                        "skipped": 0,
+                    },
+                }
         except ResourceLockCancelled:
             update_status(status_path, {"status": "cancelled", "error": "cancelled while waiting for background Mimics"})
             return 130
@@ -3113,6 +3484,32 @@ def _cmd_train_impl(args):
                 ),
             })
             return 75
+        if label_cache_plan["changed"]:
+            available_cases, cache_warnings = (
+                _publish_dino_mcs_label_cache(
+                    label_cache_plan,
+                    changed_label_root,
+                    mask_names,
+                    output_root=fresh_label_root,
+                )
+            )
+            if cache_warnings:
+                append_log(
+                    workspace,
+                    "Warning: {} MCS label cache publication operation(s) "
+                    "failed. Current training labels remain available; these "
+                    "cases may be exported again next run.".format(
+                        len(cache_warnings)
+                    ),
+                )
+                update_status(
+                    status_path,
+                    {"label_cache_warnings": cache_warnings[:10]},
+                )
+            rmtree_with_retry(changed_label_root)
+        else:
+            available_cases = set(label_cache_plan["reusable"])
+        cases = set(available_cases)
         export_failed = int(batch_status.get("failed", 0) or 0)
         export_skipped = int(batch_status.get("skipped", 0) or 0)
         if export_failed or export_skipped:
@@ -3292,7 +3689,39 @@ def _cmd_train_impl(args):
     fresh_geometry_checked = validate_fresh_export_geometry(train_samples + val_samples)
     if not args.keep_materialized_dataset:
         _register_transient_cleanup(dataset_dir)
-    materialized_train, materialized_val = materialize_dataset(train_samples, dataset_dir, val_samples)
+    materialized_train, materialized_val = materialize_dataset(
+        train_samples,
+        dataset_dir,
+        val_samples,
+        cache_dir=workspace / "cache" / "materialized" / organ_slug,
+    )
+    materialized_rows = materialized_train + materialized_val
+    materialization_cache_hits = sum(
+        bool(row.get("materialization_cache_hit"))
+        for row in materialized_rows
+    )
+    materialization_cache_errors = [
+        {
+            "case_id": row.get("case_id"),
+            "error": row.get("materialization_cache_error"),
+        }
+        for row in materialized_rows
+        if row.get("materialization_cache_error")
+    ]
+    append_log(
+        workspace,
+        "Source-grid materialization cache: reused {} of {} case(s).".format(
+            materialization_cache_hits, len(materialized_rows)
+        ),
+    )
+    update_status(
+        status_path,
+        {
+            "materialization_cache_reused": materialization_cache_hits,
+            "materialization_cache_total": len(materialized_rows),
+            "materialization_cache_warnings": materialization_cache_errors[:10],
+        },
+    )
     dataset_validation = validate_materialized_dataset(materialized_train + materialized_val)
     if fresh_label_root:
         fresh_label_cleanup = {
@@ -4062,9 +4491,20 @@ def cmd_infer(args):
     write_json_atomic(status_path, status_base)
     case_dir = ts_root / args.case_id
     try:
-        if not case_dir.is_dir():
+        explicit_image = str(getattr(args, "image_path", "") or "").strip()
+        if not case_dir.is_dir() and not explicit_image:
             raise RuntimeError("case directory was not found: {}".format(case_dir))
-        source_image = find_image(case_dir)
+        source_image = (
+            Path(explicit_image).expanduser().resolve()
+            if explicit_image
+            else find_image(case_dir)
+        )
+        if explicit_image and not source_image.exists():
+            raise RuntimeError(
+                "the explicitly resolved source image was not found: {}".format(
+                    source_image
+                )
+            )
         if not source_image:
             raise RuntimeError(
                 "no supported medical image was found for case: {}".format(
@@ -4496,6 +4936,13 @@ def build_parser():
     infer.add_argument("--case-id", required=True)
     infer.add_argument("--organ", required=True)
     infer.add_argument("--workspace")
+    infer.add_argument(
+        "--image-path",
+        help=(
+            "Explicit source image resolved from the open Mimics project or "
+            "its relocatable dataset manifest"
+        ),
+    )
     infer.add_argument("--dinov3-root")
     infer.add_argument("--python")
     infer.add_argument("--model-id", default="latest")

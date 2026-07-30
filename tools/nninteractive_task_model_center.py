@@ -26,6 +26,7 @@ from nninteractive_task_common import (  # noqa: E402
     discover_mcs_cases,
     discover_prepared_cases,
     find_environment_python,
+    find_prepared_label,
     find_task,
     jobs_dir,
     load_config,
@@ -247,6 +248,9 @@ class ModelCenter:
         self.data_source_hint = None
         self.mcs_path_widget = None
         self.exported_path_widget = None
+        self.initial_mask_name_widget = None
+        self.initial_mask_path_widget = None
+        self.initial_mask_hint = None
         self.model_io_process = None
         self.model_io_action = ""
         self.remote_selector = None
@@ -435,6 +439,61 @@ class ModelCenter:
         )
         data_layout.addWidget(self.mask_source_hint)
 
+        initial_source_row = QtWidgets.QHBoxLayout()
+        initial_source_label = QtWidgets.QLabel("Initial Mask source")
+        initial_source_label.setMinimumWidth(172)
+        self.initial_mask_source_combo = QtWidgets.QComboBox()
+        self.initial_mask_source_combo.addItem(
+            "Synthetic corrections only", "synthetic"
+        )
+        self.initial_mask_source_combo.addItem(
+            "Another Mask in saved .mcs projects", "mcs"
+        )
+        self.initial_mask_source_combo.addItem(
+            "Previously exported initial masks", "exported_masks"
+        )
+        self.initial_mask_source_combo.currentIndexChanged.connect(
+            self._update_initial_mask_visibility
+        )
+        initial_source_row.addWidget(initial_source_label)
+        initial_source_row.addWidget(self.initial_mask_source_combo, 1)
+        data_layout.addLayout(initial_source_row)
+
+        self.initial_mask_name_widget = QtWidgets.QWidget()
+        initial_name_layout = QtWidgets.QHBoxLayout(
+            self.initial_mask_name_widget
+        )
+        initial_name_layout.setContentsMargins(0, 0, 0, 0)
+        initial_name_label = QtWidgets.QLabel("Initial Mask name(s) *")
+        initial_name_label.setMinimumWidth(172)
+        self.initial_mask_edit = QtWidgets.QLineEdit()
+        self.initial_mask_edit.setPlaceholderText(
+            "e.g. Liver_AI_Draft, liver_initial"
+        )
+        self.initial_mask_edit.setToolTip(
+            "Names used to find the draft or partial Mask for the same case. "
+            "Do not enter the final target Mask name."
+        )
+        initial_name_layout.addWidget(initial_name_label)
+        initial_name_layout.addWidget(self.initial_mask_edit, 1)
+        data_layout.addWidget(self.initial_mask_name_widget)
+
+        self.initial_mask_path_widget = QtWidgets.QWidget()
+        initial_path_layout = QtWidgets.QVBoxLayout(
+            self.initial_mask_path_widget
+        )
+        initial_path_layout.setContentsMargins(0, 0, 0, 0)
+        row, self.initial_mask_root_edit = self._path_row(
+            "Initial masks folder *"
+        )
+        initial_path_layout.addLayout(row)
+        data_layout.addWidget(self.initial_mask_path_widget)
+
+        self.initial_mask_hint = QtWidgets.QLabel()
+        self.initial_mask_hint.setObjectName("hint")
+        self.initial_mask_hint.setWordWrap(True)
+        data_layout.addWidget(self.initial_mask_hint)
+
         self.scan_hint = QtWidgets.QLabel(
             "Required paths are marked with *. Scan to find usable cases."
         )
@@ -498,24 +557,48 @@ class ModelCenter:
         adaptation_layout.addWidget(self.light_radio)
         adaptation_layout.addWidget(self.strong_radio)
 
-        training_layout = QtWidgets.QHBoxLayout()
+        training_layout = QtWidgets.QGridLayout()
         training_layout.setContentsMargins(22, 4, 0, 0)
-        training_layout.setSpacing(10)
-        training_layout.addWidget(QtWidgets.QLabel("Maximum epochs"))
+        training_layout.setHorizontalSpacing(14)
+        training_layout.setVerticalSpacing(6)
+        training_layout.addWidget(QtWidgets.QLabel("Maximum epochs"), 0, 0)
         self.epochs = QtWidgets.QSpinBox()
         self.epochs.setRange(
             int(self.config.get("minimum_epochs", 4)),
             int(self.config.get("maximum_epochs", 20)),
         )
         self.epochs.setValue(int(self.config.get("default_epochs", 10)))
-        training_layout.addWidget(self.epochs)
-        training_layout.addSpacing(18)
-        training_layout.addWidget(QtWidgets.QLabel("Starting model"))
+        training_layout.addWidget(self.epochs, 1, 0)
+        training_layout.addWidget(
+            QtWidgets.QLabel("Training goal"), 0, 1
+        )
+        self.training_goal = QtWidgets.QComboBox()
+        self.training_goal.addItem(
+            "General adaptation (recommended)", "general"
+        )
+        self.training_goal.addItem(
+            "Start from an empty Mask", "start_empty"
+        )
+        self.training_goal.addItem(
+            "Refine an existing Mask", "refine_existing"
+        )
+        self.training_goal.currentIndexChanged.connect(
+            self._update_initial_mask_visibility
+        )
+        self.training_goal.setToolTip(
+            "General adaptation trains both new annotations and corrections. "
+            "Every simulated point is followed by a prediction; trajectories "
+            "use one to five corrections and stop early when no error remains."
+        )
+        training_layout.addWidget(self.training_goal, 1, 1)
+        training_layout.addWidget(QtWidgets.QLabel("Starting model"), 0, 2)
         self.start_model = QtWidgets.QComboBox()
         self.start_model.addItem("Official nnInteractive", "official")
         self.start_model_user_selected = False
         self.start_model.activated.connect(self._mark_start_model_selected)
-        training_layout.addWidget(self.start_model, 1)
+        training_layout.addWidget(self.start_model, 1, 2)
+        training_layout.setColumnStretch(1, 1)
+        training_layout.setColumnStretch(2, 1)
         adaptation_layout.addLayout(training_layout)
         layout.addWidget(adaptation)
         layout.addStretch(1)
@@ -534,6 +617,7 @@ class ModelCenter:
         footer.addWidget(self.start_button)
         outer.addLayout(footer)
         self._update_source_visibility()
+        self._update_initial_mask_visibility()
         self._update_case_selection_visibility()
         return page
 
@@ -813,13 +897,80 @@ class ModelCenter:
 
     def _update_source_visibility(self):
         source = normalized_source_mode(self.source_combo.currentData())
-        self.mcs_path_widget.setVisible(source == "mcs_refresh")
+        initial_source = (
+            str(self.initial_mask_source_combo.currentData() or "synthetic")
+            if hasattr(self, "initial_mask_source_combo")
+            else "synthetic"
+        )
+        self.mcs_path_widget.setVisible(
+            source == "mcs_refresh" or initial_source == "mcs"
+        )
         self.exported_path_widget.setVisible(source == "exported_masks")
         if self.data_source_hint is not None:
             self.data_source_hint.setText(label_source_hint(source))
+        self._update_initial_mask_visibility()
         if self.case_rows:
             self.scan_hint.setText(
                 "Data source changed. Scan Data again before starting training."
+            )
+
+    def _update_initial_mask_visibility(self):
+        if not hasattr(self, "initial_mask_source_combo"):
+            return
+        goal = (
+            str(self.training_goal.currentData() or "general")
+            if hasattr(self, "training_goal")
+            else "general"
+        )
+        enabled = goal != "start_empty"
+        source = str(
+            self.initial_mask_source_combo.currentData() or "synthetic"
+        )
+        self.initial_mask_source_combo.setEnabled(enabled)
+        show_names = enabled and source in ("mcs", "exported_masks")
+        if self.initial_mask_name_widget is not None:
+            self.initial_mask_name_widget.setVisible(show_names)
+        if self.initial_mask_path_widget is not None:
+            self.initial_mask_path_widget.setVisible(
+                enabled and source == "exported_masks"
+            )
+        if self.mcs_path_widget is not None:
+            label_source = normalized_source_mode(
+                self.source_combo.currentData()
+            )
+            self.mcs_path_widget.setVisible(
+                label_source == "mcs_refresh"
+                or (enabled and source == "mcs")
+            )
+        if self.initial_mask_hint is not None:
+            if not enabled:
+                text = (
+                    "Start from an empty Mask does not use initial Masks. "
+                    "No initial Mask will be exported."
+                )
+            elif source == "mcs":
+                text = (
+                    "A matching draft Mask is read from each saved project. "
+                    "Training uses real drafts for about 70% of existing-Mask "
+                    "samples and synthetic variations for the remaining 30%. "
+                    "Cases without a matching draft still use synthetic variations."
+                )
+            elif source == "exported_masks":
+                text = (
+                    "A matching NIfTI draft is read for each case. Training "
+                    "keeps a 70% real / 30% synthetic mix; missing drafts fall "
+                    "back to synthetic variations."
+                )
+            else:
+                text = (
+                    "Initial Masks are simulated from final annotations. "
+                    "Choose another source only when real AI drafts or partial "
+                    "annotations have been saved."
+                )
+            self.initial_mask_hint.setText(text)
+        if self.case_rows:
+            self.scan_hint.setText(
+                "Initial Mask settings changed. Scan Data again before training."
             )
 
     def _update_case_selection_visibility(self):
@@ -869,6 +1020,23 @@ class ModelCenter:
                     if value.strip()
                 )
             ),
+            (
+                "synthetic"
+                if str(self.training_goal.currentData() or "general")
+                == "start_empty"
+                else str(
+                    self.initial_mask_source_combo.currentData()
+                    or "synthetic"
+                )
+            ),
+            normalized_path(self.initial_mask_root_edit),
+            tuple(
+                sorted(
+                    safe_slug(value)
+                    for value in self.initial_mask_edit.text().split(",")
+                    if value.strip()
+                )
+            ),
         )
 
     def _set_scan_busy(self):
@@ -904,6 +1072,34 @@ class ModelCenter:
         mcs_dir = self.mcs_edit.text().strip()
         image_root = self.image_root_edit.text().strip()
         prepared_labels = self.prepared_label_edit.text().strip()
+        goal = str(self.training_goal.currentData() or "general")
+        initial_source = (
+            "synthetic"
+            if goal == "start_empty"
+            else str(
+                self.initial_mask_source_combo.currentData() or "synthetic"
+            )
+        )
+        initial_mask_names = [
+            value.strip()
+            for value in self.initial_mask_edit.text().split(",")
+            if value.strip()
+        ]
+        initial_mask_root = self.initial_mask_root_edit.text().strip()
+        if (
+            initial_source in ("mcs", "exported_masks")
+            and {
+                safe_slug(value) for value in mask_names
+            }
+            & {safe_slug(value) for value in initial_mask_names}
+        ):
+            self.scan_hint.setText(
+                "The Initial Mask must be different from the final Target Mask."
+            )
+            self._finish_scan_progress(
+                "Initial and final Mask names overlap", False
+            )
+            return
         if not image_root:
             self.scan_hint.setText("Choose the original image dataset.")
             self._finish_scan_progress("Dataset path is required", False)
@@ -915,6 +1111,26 @@ class ModelCenter:
         if source_mode == "exported_masks" and not prepared_labels:
             self.scan_hint.setText("Choose the previously exported masks folder.")
             self._finish_scan_progress("Exported masks folder is required", False)
+            return
+        if initial_source in ("mcs", "exported_masks") and not initial_mask_names:
+            self.scan_hint.setText(
+                "Enter the Initial Mask name before scanning."
+            )
+            self._finish_scan_progress("Initial Mask name is required", False)
+            return
+        if initial_source == "mcs" and not mcs_dir:
+            self.scan_hint.setText(
+                "Choose the folder containing saved .mcs projects."
+            )
+            self._finish_scan_progress("Saved .mcs folder is required", False)
+            return
+        if initial_source == "exported_masks" and not initial_mask_root:
+            self.scan_hint.setText(
+                "Choose the previously exported initial masks folder."
+            )
+            self._finish_scan_progress(
+                "Initial masks folder is required", False
+            )
             return
         self.scan_hint.setText("Scanning cases in the background...")
         self._set_scan_busy()
@@ -951,6 +1167,38 @@ class ModelCenter:
                             else None
                         ),
                     )
+                if initial_source == "mcs":
+                    if not os.path.isdir(mcs_dir):
+                        raise RuntimeError(
+                            "Saved .mcs folder does not exist or is unavailable: "
+                            "{}".format(mcs_dir)
+                        )
+                    mcs_rows = {
+                        str(row.get("case_id")): row
+                        for row in discover_mcs_cases(mcs_dir, image_root)
+                    }
+                    for row in rows:
+                        match = mcs_rows.get(str(row.get("case_id"))) or {}
+                        if match.get("mcs_path"):
+                            row["initial_mcs_path"] = str(
+                                match["mcs_path"]
+                            )
+                            if not row.get("mcs_path"):
+                                row["mcs_path"] = str(match["mcs_path"])
+                elif initial_source == "exported_masks":
+                    if not os.path.isdir(initial_mask_root):
+                        raise RuntimeError(
+                            "Initial masks folder does not exist or is "
+                            "unavailable: {}".format(initial_mask_root)
+                        )
+                    for row in rows:
+                        initial_mask = find_prepared_label(
+                            Path(initial_mask_root)
+                            / str(row.get("case_id")),
+                            initial_mask_names,
+                        )
+                        if initial_mask is not None:
+                            row["initial_mask"] = str(initial_mask)
                 error = ""
             except Exception as exc:
                 rows = []
@@ -993,18 +1241,38 @@ class ModelCenter:
         elif rows:
             ready = sum(row.get("state") == "ready" for row in rows)
             unavailable = len(rows) - ready
+            initial_source = str(scan_signature[5] or "synthetic")
+            if initial_source == "exported_masks":
+                initial_count = sum(
+                    bool(row.get("initial_mask"))
+                    for row in rows
+                    if row.get("state") == "ready"
+                )
+                initial_note = (
+                    " {} of {} usable case(s) have a matching real Initial "
+                    "Mask; the rest use synthetic variations."
+                ).format(initial_count, ready)
+            elif initial_source == "mcs":
+                initial_note = (
+                    " Initial Masks in saved projects are verified when "
+                    "training starts; missing drafts use synthetic variations."
+                )
+            else:
+                initial_note = " Initial Masks will be simulated online."
             if scan_signature[0] == "mcs_refresh":
                 self.scan_hint.setText(
                     "{} saved project candidate(s) found; {} case(s) are missing "
                     "a source image. Target Masks are verified in the background "
                     "when training starts, and projects without a match are "
-                    "skipped automatically.".format(ready, unavailable)
+                    "skipped automatically.{}".format(
+                        ready, unavailable, initial_note
+                    )
                 )
             else:
                 self.scan_hint.setText(
                     "{} usable case(s) found; {} unavailable case(s) hidden. "
                     "Only cases with both an image and matching Mask will be "
-                    "used.".format(ready, unavailable)
+                    "used.{}".format(ready, unavailable, initial_note)
                 )
             self._finish_scan_progress(
                 "Scan complete: {} usable, {} unavailable".format(
@@ -1209,8 +1477,27 @@ class ModelCenter:
                 else ""
             ),
             "mask_names": mask_names,
+            "initial_mask_source": (
+                "synthetic"
+                if str(self.training_goal.currentData() or "general")
+                == "start_empty"
+                else str(
+                    self.initial_mask_source_combo.currentData()
+                    or "synthetic"
+                )
+            ),
+            "initial_mask_names": [
+                value.strip()
+                for value in self.initial_mask_edit.text().split(",")
+                if value.strip()
+            ],
+            "initial_mask_root": self.initial_mask_root_edit.text().strip(),
+            "provided_initial_mask_probability": 0.7,
             "cases": selected,
             "strategy": "clopa_in" if self.light_radio.isChecked() else "clopa_conv",
+            "training_goal": str(
+                self.training_goal.currentData() or "general"
+            ),
             "epochs": int(self.epochs.value()),
             "base_model_dir": str(base_model.resolve()),
             "parent_model_id": str(parent.get("model_id") if parent else "official"),

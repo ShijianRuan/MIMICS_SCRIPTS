@@ -1684,22 +1684,27 @@ def _apply_interaction(
     interaction_mask: np.ndarray,
     interaction_type: str,
     include_interaction: bool,
-) -> bool:
+) -> int:
     if interaction_type == "point":
         nonzero = np.argwhere(interaction_mask)
         if len(nonzero):
             session.add_point_interaction(
                 tuple(int(value) for value in nonzero[0]),
                 include_interaction=include_interaction,
+                run_prediction=True,
             )
-            return True
-        return False
+            return 1
+        return 0
     if interaction_type == "box":
         bbox = _nonzero_bbox(interaction_mask)
         if bbox is not None:
-            session.add_bbox_interaction(bbox, include_interaction=include_interaction)
-            return True
-        return False
+            session.add_bbox_interaction(
+                bbox,
+                include_interaction=include_interaction,
+                run_prediction=True,
+            )
+            return 1
+        return 0
     if interaction_type == "lasso":
         interaction_mask = _filled_region_boundary(interaction_mask)
         add_method = session.add_lasso_interaction
@@ -1708,14 +1713,19 @@ def _apply_interaction(
     else:
         raise RuntimeError(f"Unsupported interaction_type: {interaction_type}")
     crops = _iter_2d_interaction_crops(interaction_mask)
-    for index, (crop, bbox) in enumerate(crops):
+    for crop, bbox in crops:
+        # nnInteractive performs patch-centred 3D inference. Every newly
+        # collected prompt must therefore receive its own prediction so it
+        # becomes the centre of a patch and the resulting prev_seg is
+        # available to the following prompt. Mimics receives only the final
+        # buffer after this ordered sequence has completed.
         add_method(
             crop,
             include_interaction=include_interaction,
-            run_prediction=index == len(crops) - 1,
+            run_prediction=True,
             interaction_bbox=bbox,
         )
-    return bool(crops)
+    return len(crops)
 
 
 def _interaction_fingerprint(interaction: dict[str, Any]) -> str:
@@ -1733,7 +1743,7 @@ def _apply_point_set(
     mimics_shape: list[int],
     platform_shape: list[int],
     buffer_mapping: dict[str, Any],
-) -> bool:
+) -> int:
     points = []
     coordinates = interaction.get("coordinates", "mimics")
     for item in interaction.get("points", []):
@@ -1756,23 +1766,19 @@ def _apply_point_set(
             )
 
     if not points:
-        return False
+        return 0
 
-    # Keep one final prediction call, but avoid using a background point as the
-    # trigger center when foreground points are available.
-    include_points = [entry for entry in points if entry[1]]
-    exclude_points = [entry for entry in points if not entry[1]]
-    submission_points = points
-    if include_points and exclude_points:
-        submission_points = exclude_points + include_points
-
-    for index, (point, include) in enumerate(submission_points):
+    # Preserve the annotator's order. Each point runs inside the external
+    # worker, updates the official session's previous segmentation, and feeds
+    # that result into the next point. Only the final target buffer is copied
+    # back to Mimics.
+    for point, include in points:
         session.add_point_interaction(
             point,
             include_interaction=include,
-            run_prediction=index == len(submission_points) - 1,
+            run_prediction=True,
         )
-    return bool(points)
+    return len(points)
 
 
 def _apply_scribble_set(
@@ -1782,7 +1788,7 @@ def _apply_scribble_set(
     mimics_shape: list[int],
     platform_shape: list[int],
     buffer_mapping: dict[str, Any],
-) -> bool:
+) -> int:
     scribbles = interaction.get("scribbles") or []
     accepted = 0
     prepared: list[tuple[np.ndarray, bool]] = []
@@ -1799,18 +1805,17 @@ def _apply_scribble_set(
         if np.any(mask):
             prepared.append((mask, bool(item.get("include_interaction", True))))
 
-    for mask_index, (mask, include) in enumerate(prepared):
+    for mask, include in prepared:
         crops = _iter_2d_interaction_crops(mask)
-        for crop_index, (crop, bbox) in enumerate(crops):
-            is_last = mask_index == len(prepared) - 1 and crop_index == len(crops) - 1
+        for crop, bbox in crops:
             session.add_scribble_interaction(
                 crop,
                 include_interaction=include,
-                run_prediction=is_last,
+                run_prediction=True,
                 interaction_bbox=bbox,
             )
             accepted += 1
-    return accepted > 0
+    return accepted
 
 
 def _is_capacity_error(exc: BaseException) -> bool:
@@ -2150,7 +2155,7 @@ class _BridgeSessionContext:
             default=str,
         )
 
-        def _apply_one_interaction(interaction: dict[str, Any]) -> bool:
+        def _apply_one_interaction(interaction: dict[str, Any]) -> int:
             interaction_type = str(interaction.get("interaction_type", "scribble"))
             if interaction_type == "point_set":
                 return _apply_point_set(
@@ -2175,7 +2180,7 @@ class _BridgeSessionContext:
                 buffer_mapping=self.buffer_mapping,
             )
             if not np.any(interaction_platform):
-                return False
+                return 0
             return _apply_interaction(
                 self.session,
                 interaction_platform,
@@ -2206,9 +2211,7 @@ class _BridgeSessionContext:
                 start_index = 0
             applied_count = 0
             for interaction in interactions[start_index:]:
-                accepted = _apply_one_interaction(interaction)
-                if accepted:
-                    applied_count += 1
+                applied_count += _apply_one_interaction(interaction)
             return applied_count, start_index, round(time.time() - apply_started, 2)
 
         applied, replay_start_index, prompt_apply_seconds = _apply_interactions()
@@ -2262,6 +2265,7 @@ class _BridgeSessionContext:
             "bridge_log": str(self.log_path),
             "server_log": str(_server_log_path(self.model_dir, getattr(self, "runtime_work_dir", None))),
             "interaction_count": len(interactions),
+            "prediction_steps": applied,
             "model_license": getattr(self.session, "license", None),
             "result_shape": list(result_mimics.shape),
             "foreground_voxels": int(np.count_nonzero(result_mimics)),
@@ -2280,6 +2284,7 @@ class _BridgeSessionContext:
             "prediction_completed",
             elapsed_seconds=result["elapsed_seconds"],
             interaction_count=len(interactions),
+            prediction_steps=applied,
             foreground_voxels=result["foreground_voxels"],
             warmup_retry=warmup_retry,
             incremental_replay=result["incremental_replay"],
@@ -2572,6 +2577,9 @@ def _async_worker_main(job_dir_value: str) -> int:
                     "running",
                     stage="prediction",
                     sequence=sequence,
+                    prediction_steps_hint=int(
+                        command.get("prediction_steps_hint") or 1
+                    ),
                     command_path=str(command_path),
                 )
                 try:
@@ -2626,6 +2634,7 @@ def _async_worker_main(job_dir_value: str) -> int:
                     stage="waiting_for_mimics",
                     sequence=sequence,
                     result_status=result.get("status"),
+                    prediction_steps=result.get("prediction_steps"),
                     result_path=str(result_path),
                     output_path=result.get("output_path"),
                     error=result.get("error"),

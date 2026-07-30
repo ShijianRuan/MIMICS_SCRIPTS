@@ -1,3 +1,5 @@
+import json
+import time
 from pathlib import Path
 
 import nibabel as nib
@@ -7,6 +9,7 @@ import torch
 
 from nninteractive_finetune.data import (
     InteractivePatchDataset,
+    load_manifest,
     nninteractive_input_contract,
     normalize_like_nninteractive,
     prepare_cases,
@@ -77,7 +80,9 @@ def test_prepare_reorients_pair_without_resampling(tmp_path):
 def test_prepare_rejects_affine_mismatch(tmp_path):
     image_path = tmp_path / "image.nii.gz"
     label_path = tmp_path / "label.nii.gz"
-    image = np.ones((32, 32, 32), dtype=np.float32)
+    image = (
+        np.arange(32**3, dtype=np.float32).reshape((32, 32, 32)) + 1
+    )
     label = np.zeros((32, 32, 32), dtype=np.uint8)
     label[4:8, 4:8, 4:8] = 1
     _write(image_path, image, np.eye(4))
@@ -152,3 +157,162 @@ def test_augmentation_keeps_image_and_label_flips_aligned(tmp_path, monkeypatch)
     assert np.array_equal(
         (sample["image"][0].numpy() > 0), sample["target"].numpy().astype(bool)
     )
+
+
+def test_prepare_and_patch_preserve_optional_initial_mask(tmp_path):
+    image_path = tmp_path / "image.nii.gz"
+    label_path = tmp_path / "label.nii.gz"
+    initial_path = tmp_path / "initial.nii.gz"
+    image = (
+        np.arange(32**3, dtype=np.float32).reshape((32, 32, 32)) + 1
+    )
+    label = np.zeros_like(image, dtype=np.uint8)
+    initial = np.zeros_like(label)
+    label[6:26, 6:26, 6:26] = 1
+    initial[8:24, 8:24, 8:24] = 1
+    for path, array in (
+        (image_path, image),
+        (label_path, label),
+        (initial_path, initial),
+    ):
+        _write(path, array, np.eye(4))
+    prepared = prepare_cases(
+        [
+            {
+                "case_id": "case",
+                "image": str(image_path),
+                "label": str(label_path),
+                "initial_mask": str(initial_path),
+                "split": "train",
+            }
+        ],
+        tmp_path / "cache",
+        [1],
+    )
+    cached_initial = np.load(prepared[0]["prepared_initial_mask"])
+    assert int(cached_initial.sum()) == int(initial.sum())
+    dataset = InteractivePatchDataset(
+        prepared,
+        (32, 32, 32),
+        1.0,
+        1,
+        augmentation={"enabled": False},
+    )
+    sample = dataset[0]
+    assert sample["has_initial_mask"] is True
+    assert int(sample["initial_mask"].sum()) > 0
+    assert torch.all(
+        sample["initial_mask"].bool() <= sample["target"].bool()
+    )
+
+
+@pytest.mark.parametrize(
+    ("initial_kind", "expected_reason"),
+    [
+        ("empty", "empty"),
+        ("target", "identical_to_target"),
+    ],
+)
+def test_prepare_rejects_invalid_initial_mask_without_rejecting_case(
+    tmp_path, initial_kind, expected_reason
+):
+    image_path = tmp_path / "image.nii.gz"
+    label_path = tmp_path / "label.nii.gz"
+    initial_path = tmp_path / "initial.nii.gz"
+    image = (
+        np.arange(32**3, dtype=np.float32).reshape((32, 32, 32)) + 1
+    )
+    label = np.zeros((32, 32, 32), dtype=np.uint8)
+    label[6:26, 6:26, 6:26] = 1
+    initial = (
+        np.zeros_like(label)
+        if initial_kind == "empty"
+        else label.copy()
+    )
+    for path, array in (
+        (image_path, image),
+        (label_path, label),
+        (initial_path, initial),
+    ):
+        _write(path, array, np.eye(4))
+    rows = [
+        {
+            "case_id": "case",
+            "image": str(image_path),
+            "label": str(label_path),
+            "initial_mask": str(initial_path),
+            "split": "train",
+        }
+    ]
+    prepared = prepare_cases(rows, tmp_path / "cache", [1])
+    assert prepared[0]["prepared_initial_mask"] == ""
+    assert prepared[0]["metadata"]["has_initial_mask"] is False
+    assert (
+        prepared[0]["metadata"]["initial_mask_rejected_reason"]
+        == expected_reason
+    )
+    sample = InteractivePatchDataset(
+        prepared,
+        (32, 32, 32),
+        1.0,
+        1,
+        augmentation={"enabled": False},
+    )[0]
+    assert sample["has_initial_mask"] is False
+    assert int(sample["initial_mask"].sum()) == 0
+
+    reused = prepare_cases(rows, tmp_path / "cache", [1])
+    assert reused[0]["prepared_initial_mask"] == ""
+    assert (
+        reused[0]["metadata"]["initial_mask_rejected_reason"]
+        == expected_reason
+    )
+
+
+def test_initial_mask_cache_uses_original_source_fingerprint(tmp_path):
+    image_path = tmp_path / "image.nii.gz"
+    label_path = tmp_path / "label.nii.gz"
+    source_initial_path = tmp_path / "source_initial.nii.gz"
+    staged_initial_path = tmp_path / "staged_initial.nii.gz"
+    image = (
+        np.arange(32**3, dtype=np.float32).reshape((32, 32, 32)) + 1
+    )
+    label = np.zeros((32, 32, 32), dtype=np.uint8)
+    label[6:26, 6:26, 6:26] = 1
+    initial = np.zeros_like(label)
+    initial[8:24, 8:24, 8:24] = 1
+    for path, array in (
+        (image_path, image),
+        (label_path, label),
+        (source_initial_path, initial),
+        (staged_initial_path, initial),
+    ):
+        _write(path, array, np.eye(4))
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "cases": [
+                    {
+                        "case_id": "case",
+                        "image": str(image_path),
+                        "label": str(label_path),
+                        "initial_mask": str(staged_initial_path),
+                        "source_initial_mask": str(source_initial_path),
+                        "split": "train",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    rows = load_manifest(manifest_path)
+    cache = tmp_path / "cache"
+    first = prepare_cases(rows, cache, [1])
+    metadata_path = Path(first[0]["prepared_image"]).parent / "metadata.json"
+    first_mtime = metadata_path.stat().st_mtime_ns
+    time.sleep(0.01)
+    _write(staged_initial_path, initial, np.eye(4))
+    second = prepare_cases(rows, cache, [1])
+    assert second[0]["metadata"]["has_initial_mask"] is True
+    assert metadata_path.stat().st_mtime_ns == first_mtime

@@ -35,7 +35,21 @@ DEFAULT_CONFIG = {
     },
     "prompts": {
         "mode": "clicks",
+        # Each correction is followed by a prediction. Most trajectories are
+        # intentionally short; a small fraction reaches five refinements.
+        "training_goal": "general",
+        "correction_policy": "official_single",
         "interaction_steps": 5,
+        "min_interaction_steps": 1,
+        "max_interaction_steps": 5,
+        "interaction_step_weights": [0.35, 0.25, 0.20, 0.12, 0.08],
+        "short_interaction_probability": 0.7,
+        "validation_interaction_steps": [1, 3, 5],
+        "initial_mask_probability": 0.5,
+        # When a real draft is available, preserve synthetic errors in 30% of
+        # existing-Mask trajectories to avoid overfitting one draft generator.
+        "provided_initial_mask_probability": 0.7,
+        "validate_initial_masks": True,
         "point_radius": 4,
         "center_bias": 8.0,
         "interaction_decay": 0.9,
@@ -102,6 +116,23 @@ def validate_config(config: dict[str, Any]) -> None:
             "Only prompts.mode=clicks is enabled in the validated first release. "
             "Mixed prompt training requires a separate equivalence study."
         )
+    if prompts.get("training_goal", "general") not in {
+        "general",
+        "start_empty",
+        "refine_existing",
+        "legacy",
+    }:
+        raise ValueError(
+            "prompts.training_goal must be general, start_empty, "
+            "refine_existing, or legacy."
+        )
+    if prompts.get("correction_policy", "official_single") not in {
+        "official_single",
+        "clopa_paired",
+    }:
+        raise ValueError(
+            "prompts.correction_policy must be official_single or clopa_paired."
+        )
 
     patch_size = tuple(int(value) for value in data["patch_size"])
     if len(patch_size) != 3 or any(value < 64 or value % 32 for value in patch_size):
@@ -137,6 +168,14 @@ def validate_config(config: dict[str, Any]) -> None:
 
     positive_ints = (
         ("prompts.interaction_steps", prompts["interaction_steps"]),
+        (
+            "prompts.min_interaction_steps",
+            prompts["min_interaction_steps"],
+        ),
+        (
+            "prompts.max_interaction_steps",
+            prompts["max_interaction_steps"],
+        ),
         ("prompts.point_radius", prompts["point_radius"]),
         ("training.epochs", training["epochs"]),
         ("training.steps_per_epoch", training["steps_per_epoch"]),
@@ -147,6 +186,54 @@ def validate_config(config: dict[str, Any]) -> None:
     for name, value in positive_ints:
         if int(value) < 1:
             raise ValueError("{} must be at least 1.".format(name))
+    if int(prompts["min_interaction_steps"]) > int(
+        prompts["max_interaction_steps"]
+    ):
+        raise ValueError(
+            "prompts.min_interaction_steps cannot exceed "
+            "prompts.max_interaction_steps."
+        )
+    validation_steps = [
+        int(value)
+        for value in prompts.get("validation_interaction_steps") or []
+    ]
+    if (
+        not validation_steps
+        or any(value < 1 for value in validation_steps)
+        or validation_steps != sorted(set(validation_steps))
+        or validation_steps[-1] > int(prompts["max_interaction_steps"])
+    ):
+        raise ValueError(
+            "prompts.validation_interaction_steps must be unique increasing "
+            "values within the configured interaction range."
+        )
+    for name in (
+        "short_interaction_probability",
+        "initial_mask_probability",
+        "provided_initial_mask_probability",
+    ):
+        if not 0.0 <= float(prompts[name]) <= 1.0:
+            raise ValueError("prompts.{} must be in [0, 1].".format(name))
+    weights = prompts.get("interaction_step_weights")
+    if weights is not None:
+        expected = (
+            int(prompts["max_interaction_steps"])
+            - int(prompts["min_interaction_steps"])
+            + 1
+        )
+        if len(weights) != expected:
+            raise ValueError(
+                "prompts.interaction_step_weights must contain one value for "
+                "each configured interaction count."
+            )
+        if (
+            any(float(value) < 0 for value in weights)
+            or sum(float(value) for value in weights) <= 0
+        ):
+            raise ValueError(
+                "prompts.interaction_step_weights must be non-negative and "
+                "contain a positive value."
+            )
     if float(training["learning_rate"]) <= 0:
         raise ValueError("training.learning_rate must be positive.")
     if float(training["weight_decay"]) < 0:
@@ -169,7 +256,46 @@ def validate_config(config: dict[str, Any]) -> None:
 def load_config(path: str | Path) -> dict[str, Any]:
     """Load a config and resolve all filesystem paths relative to it."""
     source = Path(path).expanduser().resolve()
-    config = _merge(DEFAULT_CONFIG, _read(source))
+    override = _read(source)
+    config = _merge(DEFAULT_CONFIG, override)
+    prompt_override = override.get("prompts") or {}
+    if (
+        "interaction_steps" in prompt_override
+        and "max_interaction_steps" not in prompt_override
+    ):
+        legacy_horizon = int(prompt_override["interaction_steps"])
+        config["prompts"]["max_interaction_steps"] = legacy_horizon
+        # Preserve historical exact-N experiments. New Mimics requests write
+        # min/max explicitly and use a variable interaction distribution.
+        config["prompts"]["min_interaction_steps"] = legacy_horizon
+        config["prompts"]["training_goal"] = "legacy"
+        config["prompts"]["interaction_step_weights"] = None
+        if "correction_policy" not in prompt_override:
+            config["prompts"]["correction_policy"] = "clopa_paired"
+        if "initial_mask_probability" not in prompt_override:
+            config["prompts"]["initial_mask_probability"] = 0.0
+        if "validate_initial_masks" not in prompt_override:
+            config["prompts"]["validate_initial_masks"] = False
+        checkpoints = [
+            value
+            for value in config["prompts"]["validation_interaction_steps"]
+            if int(value) <= legacy_horizon
+        ]
+        if legacy_horizon not in checkpoints:
+            checkpoints.append(legacy_horizon)
+        config["prompts"]["validation_interaction_steps"] = sorted(
+            set(int(value) for value in checkpoints)
+        )
+    elif (
+        (
+            "min_interaction_steps" in prompt_override
+            or "max_interaction_steps" in prompt_override
+        )
+        and "interaction_step_weights" not in prompt_override
+    ):
+        # Custom ranges written by earlier releases used the short/long
+        # sampler and have no explicit categorical distribution.
+        config["prompts"]["interaction_step_weights"] = None
     base = source.parent
     config["model"]["base_model_dir"] = _resolve_path(
         str(config["model"].get("base_model_dir") or ""), base

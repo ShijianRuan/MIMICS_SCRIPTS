@@ -2878,6 +2878,28 @@ class TestStopBackgroundServices(unittest.TestCase):
 
 
 class TestNNInteractiveMimicsParsing(unittest.TestCase):
+    def test_prompt_set_prediction_step_count(self):
+        from nninteractive_mimics import _interaction_prediction_step_count
+
+        self.assertEqual(
+            3,
+            _interaction_prediction_step_count(
+                {
+                    "interaction_type": "point_set",
+                    "points": [{}, {}, {}],
+                }
+            ),
+        )
+        self.assertEqual(
+            2,
+            _interaction_prediction_step_count(
+                {
+                    "interaction_type": "scribble_set",
+                    "scribbles": [{}, {}],
+                }
+            ),
+        )
+
     def test_parse_shape_metadata_json(self):
         from nninteractive_mimics import _parse_shape_metadata
 
@@ -6016,27 +6038,683 @@ class TestNewFeatures(unittest.TestCase):
         launched = []
 
         old_selected = fewshot_mimics._selected_mask
-        old_choose = fewshot_mimics._choose_dataset_root
+        old_context = fewshot_mimics._resolve_prediction_context
         old_guard = fewshot_mimics._guard_no_active_job
-        old_case = fewshot_mimics._infer_case_id
         old_launch = fewshot_mimics._launch_inference_job
         try:
             selected = type("Mask", (object,), {"name": "liver"})()
             fewshot_mimics._selected_mask = lambda: selected
-            fewshot_mimics._choose_dataset_root = lambda _title: ts_root
+            fewshot_mimics._resolve_prediction_context = lambda: (
+                ts_root,
+                "s0001",
+                os.path.join(ts_root, "s0001", "ct.nii.gz"),
+            )
             fewshot_mimics._guard_no_active_job = lambda root, requested_kind="train": True
-            fewshot_mimics._infer_case_id = lambda root: "s0001"
-            fewshot_mimics._launch_inference_job = lambda config_arg, root, case_id, organ, selected_model=None, target_spec=None: launched.append(selected_model) or 0
+            fewshot_mimics._launch_inference_job = lambda config_arg, root, case_id, organ, selected_model=None, target_spec=None, source_image_path=None: launched.append(selected_model) or 0
             result = fewshot_mimics._start_inference(choose_model=False)
         finally:
             fewshot_mimics._selected_mask = old_selected
-            fewshot_mimics._choose_dataset_root = old_choose
+            fewshot_mimics._resolve_prediction_context = old_context
             fewshot_mimics._guard_no_active_job = old_guard
-            fewshot_mimics._infer_case_id = old_case
             fewshot_mimics._launch_inference_job = old_launch
         self.assertEqual(0, result)
         self.assertEqual("train_latest", launched[0]["model_id"])
         self.assertTrue(launched[0]["manifest_path"].endswith("latest.json"))
+
+    def test_fewshot_relocated_manifest_resolves_source_before_stale_absolute(self):
+        import dataset_manifest
+        import fewshot_mimics
+
+        dataset_root = Path(self.tmp) / "relocated_dataset"
+        source = dataset_root / "s0001" / "ct.nii.gz"
+        project = dataset_root / "saved_projects" / "s0001.mcs"
+        source.parent.mkdir(parents=True)
+        project.parent.mkdir(parents=True)
+        source.write_bytes(b"image")
+        project.write_bytes(b"project")
+        manifest_path = project.parent / dataset_manifest.MANIFEST_FILENAME
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": dataset_manifest.SCHEMA_VERSION,
+                    "cases": {
+                        "s0001": {
+                            "case_id": "s0001",
+                            "image": {
+                                "relative": "../s0001/ct.nii.gz",
+                                "absolute": "Z:/old-machine/s0001/ct.nii.gz",
+                            },
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        old_project = fewshot_mimics._current_project_path
+        old_known = fewshot_mimics._known_dataset_roots
+        old_geometry = fewshot_mimics._active_source_geometry_payload
+        old_remember = fewshot_mimics._remember_dataset_root
+        remembered = []
+        try:
+            fewshot_mimics._current_project_path = lambda: str(project)
+            fewshot_mimics._known_dataset_roots = lambda: []
+            fewshot_mimics._active_source_geometry_payload = lambda: None
+            fewshot_mimics._remember_dataset_root = remembered.append
+            resolved_root, case_id, resolved_source = (
+                fewshot_mimics._resolve_prediction_context()
+            )
+        finally:
+            fewshot_mimics._current_project_path = old_project
+            fewshot_mimics._known_dataset_roots = old_known
+            fewshot_mimics._active_source_geometry_payload = old_geometry
+            fewshot_mimics._remember_dataset_root = old_remember
+        self.assertEqual("s0001", case_id)
+        self.assertEqual(
+            os.path.abspath(str(source)), resolved_source
+        )
+        self.assertEqual(os.path.abspath(str(dataset_root)), resolved_root)
+        self.assertEqual([resolved_root], remembered)
+
+    def test_fewshot_status_does_not_open_dataset_picker(self):
+        import fewshot_mimics
+
+        ts_root = os.path.join(self.tmp, "status_without_picker")
+        os.makedirs(ts_root)
+        old_resolve = fewshot_mimics._resolve_status_root
+        old_config = fewshot_mimics._config
+        old_text = fewshot_mimics._show_status_text
+        old_choose = fewshot_mimics._choose_dataset_root
+        shown = []
+        try:
+            fewshot_mimics._resolve_status_root = (
+                lambda allow_management_fallback=False: ts_root
+            )
+            fewshot_mimics._config = lambda: {"status_ui_mode": "text"}
+            fewshot_mimics._show_status_text = (
+                lambda root: shown.append(root) or 0
+            )
+            fewshot_mimics._choose_dataset_root = lambda _title: (
+                _ for _ in ()
+            ).throw(AssertionError("status must not open a path picker"))
+            self.assertEqual(0, fewshot_mimics._show_status())
+        finally:
+            fewshot_mimics._resolve_status_root = old_resolve
+            fewshot_mimics._config = old_config
+            fewshot_mimics._show_status_text = old_text
+            fewshot_mimics._choose_dataset_root = old_choose
+        self.assertEqual([ts_root], shown)
+
+    def test_fewshot_status_can_open_empty_portable_model_workspace(self):
+        import fewshot_mimics
+
+        root = os.path.join(self.tmp, "portable_model_workspace")
+        old_known = fewshot_mimics._known_dataset_roots
+        old_management = fewshot_mimics._management_dataset_root
+        old_remember = fewshot_mimics._remember_dataset_root
+        remembered = []
+        try:
+            fewshot_mimics._known_dataset_roots = lambda: []
+            fewshot_mimics._management_dataset_root = lambda: root
+            fewshot_mimics._remember_dataset_root = remembered.append
+            resolved = fewshot_mimics._resolve_status_root(
+                allow_management_fallback=True
+            )
+        finally:
+            fewshot_mimics._known_dataset_roots = old_known
+            fewshot_mimics._management_dataset_root = old_management
+            fewshot_mimics._remember_dataset_root = old_remember
+        self.assertEqual(root, resolved)
+        self.assertTrue(
+            os.path.isdir(os.path.join(root, "fewshot_models"))
+        )
+        self.assertEqual([root], remembered)
+
+    def test_dino_mcs_label_cache_reuses_only_unchanged_cases(self):
+        pipeline = __import__("tools.fewshot_pipeline", fromlist=["dummy"])
+
+        dataset_root = Path(self.tmp) / "cache_dataset"
+        workspace = dataset_root / "fewshot_models"
+        mcs_root = dataset_root / "mcs_output"
+        image = dataset_root / "s0001" / "ct.nii.gz"
+        mcs = mcs_root / "s0001.mcs"
+        image.parent.mkdir(parents=True)
+        mcs.parent.mkdir(parents=True)
+        image.write_bytes(b"image")
+        mcs.write_bytes(b"project-v1")
+        first = pipeline._plan_dino_mcs_label_cache(
+            dataset_root,
+            workspace,
+            "liver",
+            {"s0001"},
+            ["liver"],
+            mcs_output_dir=mcs_root,
+        )
+        self.assertEqual(["s0001"], first["changed"])
+        cache_case = first["cache_root"] / "s0001"
+        cached_label = cache_case / "segmentations" / "liver.nii.gz"
+        cached_label.parent.mkdir(parents=True)
+        cached_label.write_bytes(b"label")
+        pipeline.write_json_atomic(
+            cache_case / "metadata.json",
+            {"fingerprint": first["fingerprints"]["s0001"]},
+        )
+        second = pipeline._plan_dino_mcs_label_cache(
+            dataset_root,
+            workspace,
+            "liver",
+            {"s0001"},
+            ["liver"],
+            mcs_output_dir=mcs_root,
+        )
+        self.assertIn("s0001", second["reusable"])
+        time.sleep(0.01)
+        mcs.write_bytes(b"project-v2-with-new-mask")
+        third = pipeline._plan_dino_mcs_label_cache(
+            dataset_root,
+            workspace,
+            "liver",
+            {"s0001"},
+            ["liver"],
+            mcs_output_dir=mcs_root,
+        )
+        self.assertEqual(["s0001"], third["changed"])
+
+    def test_dino_materialization_cache_rebuilds_only_changed_case(self):
+        import nibabel as nib
+        pipeline = __import__("tools.fewshot_pipeline", fromlist=["dummy"])
+
+        root = Path(self.tmp) / "materialization_cache"
+        source = root / "source"
+        source.mkdir(parents=True)
+        image_path = source / "ct.nii.gz"
+        label_path = source / "liver.nii.gz"
+        image = np.arange(64, dtype=np.float32).reshape((4, 4, 4))
+        label = np.zeros((4, 4, 4), dtype=np.uint8)
+        label[1:3, 1:3, 1:3] = 1
+        nib.save(nib.Nifti1Image(image, np.eye(4)), str(image_path))
+        nib.save(nib.Nifti1Image(label, np.eye(4)), str(label_path))
+        sample = {
+            "case_id": "s0001",
+            "image": str(image_path),
+            "label": str(label_path),
+        }
+        cache_dir = root / "cache"
+        first, _ = pipeline.materialize_dataset(
+            [sample], root / "run_1", cache_dir=cache_dir
+        )
+        second, _ = pipeline.materialize_dataset(
+            [sample], root / "run_2", cache_dir=cache_dir
+        )
+        self.assertFalse(first[0]["materialization_cache_hit"])
+        self.assertTrue(second[0]["materialization_cache_hit"])
+        time.sleep(0.01)
+        label[0, 0, 0] = 1
+        nib.save(nib.Nifti1Image(label, np.eye(4)), str(label_path))
+        third, _ = pipeline.materialize_dataset(
+            [sample], root / "run_3", cache_dir=cache_dir
+        )
+        self.assertFalse(third[0]["materialization_cache_hit"])
+
+    def test_dino_label_cache_failure_does_not_discard_current_label(self):
+        pipeline = __import__("tools.fewshot_pipeline", fromlist=["dummy"])
+
+        root = Path(self.tmp) / "cache_fail_open"
+        staging = root / "changed"
+        output = root / "training"
+        cache_root = root / "cache"
+        label = staging / "s0001" / "segmentations" / "liver.nii.gz"
+        label.parent.mkdir(parents=True)
+        label.write_bytes(b"label")
+        plan = {
+            "reusable": {},
+            "changed": ["s0001"],
+            "fingerprints": {"s0001": "fingerprint"},
+            "cache_root": cache_root,
+        }
+        original_copy = pipeline._copy_label_atomic
+
+        def fail_cache_only(source, destination):
+            destination = Path(destination)
+            if cache_root in destination.parents:
+                raise OSError("cache is read-only")
+            return original_copy(source, destination)
+
+        pipeline._copy_label_atomic = fail_cache_only
+        try:
+            available, warnings = (
+                pipeline._publish_dino_mcs_label_cache(
+                    plan,
+                    staging,
+                    ["liver"],
+                    output_root=output,
+                )
+            )
+        finally:
+            pipeline._copy_label_atomic = original_copy
+        self.assertEqual({"s0001"}, available)
+        self.assertEqual("cache_publish", warnings[0]["stage"])
+        self.assertTrue(
+            (
+                output
+                / "s0001"
+                / "segmentations"
+                / "liver.nii.gz"
+            ).is_file()
+        )
+
+    def test_nninteractive_mcs_label_fingerprint_changes_with_annotation(self):
+        pipeline = __import__(
+            "tools.nninteractive_finetune_pipeline",
+            fromlist=["dummy"],
+        )
+        root = Path(self.tmp) / "nn_cache"
+        root.mkdir()
+        image = root / "ct.nii.gz"
+        mcs = root / "case.mcs"
+        image.write_bytes(b"image")
+        mcs.write_bytes(b"mask-v1")
+        row = {"image": str(image), "mcs_path": str(mcs)}
+        first = pipeline._mcs_export_fingerprint(row, ["liver"])
+        time.sleep(0.01)
+        mcs.write_bytes(b"mask-v2-updated")
+        second = pipeline._mcs_export_fingerprint(row, ["liver"])
+        self.assertNotEqual(first, second)
+
+    def test_nninteractive_target_and_initial_mcs_exports_use_separate_caches(self):
+        pipeline = __import__(
+            "tools.nninteractive_finetune_pipeline",
+            fromlist=["dummy"],
+        )
+        root = Path(self.tmp) / "nn_separate_mcs_caches"
+        workspace = root / "workspace"
+        job_dir = root / "job"
+        job_dir.mkdir(parents=True)
+        image_path = root / "image.nii.gz"
+        mcs_path = root / "case.mcs"
+        image_path.write_bytes(b"image")
+        mcs_path.write_bytes(b"project")
+        row = {
+            "case_id": "case",
+            "image": str(image_path),
+            "mcs_path": str(mcs_path),
+            "split": "train",
+        }
+        request = {
+            "workspace": str(workspace),
+            "task_id": "brain",
+            "mask_names": ["target"],
+            "cases": [row],
+        }
+        cache_specs = (
+            ("mcs_labels", ["target"], "target.nii.gz", b"target"),
+            (
+                "mcs_initial_masks",
+                ["draft"],
+                "draft.nii.gz",
+                b"initial",
+            ),
+        )
+        for bucket, mask_names, filename, content in cache_specs:
+            case_cache = workspace / "cache" / bucket / "brain" / "case"
+            segmentation = case_cache / "segmentations" / filename
+            segmentation.parent.mkdir(parents=True)
+            segmentation.write_bytes(content)
+            pipeline.write_json_atomic(
+                case_cache / "metadata.json",
+                {
+                    "fingerprint": pipeline._mcs_export_fingerprint(
+                        row, mask_names
+                    )
+                },
+            )
+
+        target_staging = pipeline._prepare_cached_mcs_labels(
+            request,
+            job_dir,
+            job_dir / "status.json",
+            job_dir / "control.json",
+            job_dir / "job.log",
+        )
+        initial_staging = pipeline._prepare_cached_mcs_labels(
+            request,
+            job_dir,
+            job_dir / "status.json",
+            job_dir / "control.json",
+            job_dir / "job.log",
+            mask_names_override=["draft"],
+            cache_role="initial",
+            output_name="initial_masks",
+        )
+        target_file = target_staging / "case" / "segmentations" / "target.nii.gz"
+        initial_file = (
+            initial_staging / "case" / "segmentations" / "draft.nii.gz"
+        )
+        self.assertNotEqual(target_staging, initial_staging)
+        self.assertEqual(target_file.read_bytes(), b"target")
+        self.assertEqual(initial_file.read_bytes(), b"initial")
+
+    def test_nninteractive_manifest_keeps_distinct_real_initial_mask(self):
+        import nibabel as nib
+
+        pipeline = __import__(
+            "tools.nninteractive_finetune_pipeline",
+            fromlist=["dummy"],
+        )
+        root = Path(self.tmp) / "nn_initial_manifest"
+        source = root / "source"
+        source.mkdir(parents=True)
+        image_path = source / "image.nii.gz"
+        label_path = source / "target.nii.gz"
+        initial_path = source / "draft.nii.gz"
+        image = np.arange(32**3, dtype=np.float32).reshape((32, 32, 32)) + 1
+        target = np.zeros((32, 32, 32), dtype=np.uint8)
+        target[6:26, 6:26, 6:26] = 1
+        initial = np.zeros_like(target)
+        initial[8:24, 8:24, 8:24] = 1
+        for path, array in (
+            (image_path, image),
+            (label_path, target),
+            (initial_path, initial),
+        ):
+            nib.save(nib.Nifti1Image(array, np.eye(4)), str(path))
+        job_dir = root / "job"
+        job_dir.mkdir()
+        request = {
+            "workspace": str(root / "workspace"),
+            "source_mode": "prepared",
+            "mask_names": ["target"],
+            "initial_mask_source": "exported_masks",
+            "initial_mask_names": ["draft"],
+            "initial_mask_root": str(source),
+            "cases": [
+                {
+                    "case_id": "case",
+                    "image": str(image_path),
+                    "label": str(label_path),
+                    "initial_mask": str(initial_path),
+                    "split": "train",
+                }
+            ],
+        }
+        manifest_path, validation_path = pipeline._prepare_manifest(
+            request,
+            job_dir,
+            job_dir / "status.json",
+            job_dir / "control.json",
+            job_dir / "job.log",
+        )
+        payload = pipeline.read_json(manifest_path, {})
+        self.assertIsNone(validation_path)
+        self.assertEqual(len(payload["cases"]), 1)
+        prepared_initial = Path(payload["cases"][0]["initial_mask"])
+        self.assertTrue(prepared_initial.is_file())
+        self.assertEqual(
+            int(np.count_nonzero(nib.load(str(prepared_initial)).dataobj)),
+            int(initial.sum()),
+        )
+
+    def test_nninteractive_manifest_rejects_target_as_initial_mask(self):
+        pipeline = __import__(
+            "tools.nninteractive_finetune_pipeline",
+            fromlist=["dummy"],
+        )
+        root = Path(self.tmp) / "nn_initial_overlap"
+        job_dir = root / "job"
+        job_dir.mkdir(parents=True)
+        request = {
+            "workspace": str(root / "workspace"),
+            "source_mode": "prepared",
+            "mask_names": ["Liver"],
+            "initial_mask_source": "exported_masks",
+            "initial_mask_names": ["liver"],
+            "cases": [],
+        }
+        with self.assertRaisesRegex(RuntimeError, "overlap"):
+            pipeline._prepare_manifest(
+                request,
+                job_dir,
+                job_dir / "status.json",
+                job_dir / "control.json",
+                job_dir / "job.log",
+            )
+
+    def test_nninteractive_empty_start_never_exports_initial_masks(self):
+        pipeline = __import__(
+            "tools.nninteractive_finetune_pipeline",
+            fromlist=["dummy"],
+        )
+        root = Path(self.tmp) / "nn_empty_start"
+        job_dir = root / "job"
+        job_dir.mkdir(parents=True)
+        request = {
+            "workspace": str(root / "workspace"),
+            "source_mode": "prepared",
+            "mask_names": ["target"],
+            "training_goal": "start_empty",
+            "initial_mask_source": "mcs",
+            "initial_mask_names": ["draft"],
+            "cases": [],
+        }
+        with mock.patch.object(
+            pipeline,
+            "_prepare_cached_mcs_labels",
+            side_effect=AssertionError(
+                "empty-start must not export Initial Masks"
+            ),
+        ), self.assertRaisesRegex(RuntimeError, "No selected case"):
+            pipeline._prepare_manifest(
+                request,
+                job_dir,
+                job_dir / "status.json",
+                job_dir / "control.json",
+                job_dir / "job.log",
+            )
+
+    def test_nninteractive_target_nifti_and_initial_mhd_share_training_grid(self):
+        import nibabel as nib
+        import SimpleITK as sitk
+
+        pipeline = __import__(
+            "tools.nninteractive_finetune_pipeline",
+            fromlist=["dummy"],
+        )
+        root = Path(self.tmp) / "nn_mixed_mask_formats"
+        root.mkdir()
+        shape = (8, 10, 12)
+        reference_affine = np.diag([-1.0, -1.0, 1.0, 1.0])
+        image = (
+            np.arange(np.prod(shape), dtype=np.float32).reshape(shape) + 1
+        )
+        target = np.zeros(shape, dtype=np.uint8)
+        target[2:7, 2:8, 3:10] = 1
+        initial = np.zeros(shape, dtype=np.uint8)
+        initial[3:7, 3:8, 4:10] = 1
+        image_path = root / "image.nii.gz"
+        target_path = root / "target.nii.gz"
+        initial_path = root / "initial.mhd"
+        nib.save(
+            nib.Nifti1Image(image, reference_affine), str(image_path)
+        )
+        nib.save(
+            nib.Nifti1Image(target, reference_affine), str(target_path)
+        )
+
+        # Store the same physical draft with x/y axes exchanged in an
+        # explicitly LPS-oriented MHD file.
+        initial_xyz = np.transpose(initial, (1, 0, 2))
+        sitk_initial = sitk.GetImageFromArray(
+            np.transpose(initial_xyz, (2, 1, 0))
+        )
+        sitk_initial.SetSpacing((1.0, 1.0, 1.0))
+        sitk_initial.SetOrigin((0.0, 0.0, 0.0))
+        sitk_initial.SetDirection(
+            (0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+        )
+        sitk.WriteImage(sitk_initial, str(initial_path))
+
+        target_output = pipeline._ensure_binary_nifti_label(
+            target_path,
+            root / "target_aligned.nii.gz",
+            image_path,
+        )
+        initial_output = pipeline._ensure_binary_nifti_label(
+            initial_path,
+            root / "initial_aligned.nii.gz",
+            image_path,
+            allow_empty=True,
+        )
+        target_image = nib.load(str(target_output))
+        initial_image = nib.load(str(initial_output))
+        self.assertEqual(target_image.shape, shape)
+        self.assertEqual(initial_image.shape, shape)
+        np.testing.assert_allclose(
+            target_image.affine, reference_affine, atol=1e-6
+        )
+        np.testing.assert_allclose(
+            initial_image.affine, reference_affine, atol=1e-6
+        )
+        np.testing.assert_array_equal(
+            np.asarray(target_image.dataobj), target
+        )
+        np.testing.assert_array_equal(
+            np.asarray(initial_image.dataobj), initial
+        )
+        np.testing.assert_allclose(
+            initial_image.get_qform(), reference_affine, atol=1e-6
+        )
+        np.testing.assert_allclose(
+            initial_image.get_sform(), reference_affine, atol=1e-6
+        )
+
+    def test_nninteractive_initial_nrrd_resamples_to_target_size_and_affine(self):
+        import nibabel as nib
+        import SimpleITK as sitk
+
+        pipeline = __import__(
+            "tools.nninteractive_finetune_pipeline",
+            fromlist=["dummy"],
+        )
+        root = Path(self.tmp) / "nn_mixed_mask_sizes"
+        root.mkdir()
+        target_shape = (8, 10, 12)
+        target_affine = np.diag([-1.0, -1.0, 1.0, 1.0])
+        image_path = root / "image.nii.gz"
+        nib.save(
+            nib.Nifti1Image(
+                np.ones(target_shape, dtype=np.float32),
+                target_affine,
+            ),
+            str(image_path),
+        )
+        coarse = np.zeros((4, 5, 6), dtype=np.uint8)
+        coarse[1:3, 1:4, 2:5] = 1
+        initial_path = root / "initial.nrrd"
+        sitk_initial = sitk.GetImageFromArray(
+            np.transpose(coarse, (2, 1, 0))
+        )
+        sitk_initial.SetSpacing((2.0, 2.0, 2.0))
+        sitk_initial.SetOrigin((0.0, 0.0, 0.0))
+        sitk_initial.SetDirection(
+            (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+        )
+        sitk.WriteImage(sitk_initial, str(initial_path))
+        output = pipeline._ensure_binary_nifti_label(
+            initial_path,
+            root / "initial_aligned.nii.gz",
+            image_path,
+            allow_empty=True,
+        )
+        aligned = nib.load(str(output))
+        aligned_values = np.asarray(aligned.dataobj)
+        self.assertEqual(aligned.shape, target_shape)
+        np.testing.assert_allclose(
+            aligned.affine, target_affine, atol=1e-6
+        )
+        self.assertGreater(int(np.count_nonzero(aligned_values)), 0)
+        self.assertTrue(
+            np.all(
+                (aligned_values == 0)
+                | (aligned_values == 1)
+            )
+        )
+
+    def test_nninteractive_geometryless_mhd_with_different_size_fails_closed(self):
+        import nibabel as nib
+
+        pipeline = __import__(
+            "tools.nninteractive_finetune_pipeline",
+            fromlist=["dummy"],
+        )
+        root = Path(self.tmp) / "nn_geometryless_mhd"
+        root.mkdir()
+        image_path = root / "image.nii.gz"
+        nib.save(
+            nib.Nifti1Image(
+                np.ones((8, 10, 12), dtype=np.float32),
+                np.eye(4, dtype=np.float64),
+            ),
+            str(image_path),
+        )
+        values = np.zeros((4, 5, 6), dtype=np.uint8)
+        values[1:3, 1:4, 2:5] = 1
+        raw_path = root / "initial.raw"
+        raw_path.write_bytes(
+            np.transpose(values, (2, 1, 0)).tobytes(order="C")
+        )
+        mhd_path = root / "initial.mhd"
+        mhd_path.write_text(
+            "\n".join(
+                [
+                    "ObjectType = Image",
+                    "NDims = 3",
+                    "BinaryData = True",
+                    "BinaryDataByteOrderMSB = False",
+                    "CompressedData = False",
+                    "DimSize = 4 5 6",
+                    "ElementType = MET_UCHAR",
+                    "ElementDataFile = initial.raw",
+                    "",
+                ]
+            ),
+            encoding="ascii",
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "no origin/direction.*shape does not match",
+        ):
+            pipeline._ensure_binary_nifti_label(
+                mhd_path,
+                root / "initial_aligned.nii.gz",
+                image_path,
+                allow_empty=True,
+            )
+
+    def test_nninteractive_relocates_source_path_from_dataset_manifest(self):
+        import dataset_manifest
+        import nninteractive_mimics
+
+        dataset_root = Path(self.tmp) / "nn_relocated"
+        source = dataset_root / "case_a" / "ct.nii.gz"
+        project = dataset_root / "saved_projects" / "case_a.mcs"
+        source.parent.mkdir(parents=True)
+        project.parent.mkdir(parents=True)
+        source.write_bytes(b"image")
+        project.write_bytes(b"project")
+        dataset_manifest.update_case(
+            project.parent,
+            "case_a",
+            image_path=source,
+            mcs_path=project,
+        )
+        old_project = nninteractive_mimics._current_project_path
+        try:
+            nninteractive_mimics._current_project_path = lambda: str(project)
+            resolved = (
+                nninteractive_mimics._relocated_source_image_path()
+            )
+        finally:
+            nninteractive_mimics._current_project_path = old_project
+        self.assertEqual(os.path.abspath(str(source)), resolved)
 
     def test_fewshot_inference_guard_allows_training_queue(self):
         """Prediction should not be blocked by a queued/waiting training job."""
@@ -6169,7 +6847,6 @@ class TestNewFeatures(unittest.TestCase):
         sys.path.insert(0, os.path.join(os.getcwd(), "external", "dinov3-medical-seg"))
         from src.utils.config import load_config
         from src.utils.checkpoint import save_checkpoint, load_checkpoint
-        from src.models.segmentor import DINOv33DSegmentor
 
         tmp = Path(tempfile.mkdtemp(prefix="lora_roundtrip_"))
         try:
@@ -6182,6 +6859,13 @@ class TestNewFeatures(unittest.TestCase):
                 model_path = Path(os.getcwd()) / "external" / "dinov3-medical-seg" / model_path
             if not model_path.is_dir():
                 self.skipTest("bundled DINOv3 weights are not present in this checkout")
+            try:
+                __import__("transformers")
+            except ImportError:
+                self.skipTest(
+                    "transformers is not installed in this test environment"
+                )
+            from src.models.segmentor import DINOv33DSegmentor
 
             model = DINOv33DSegmentor(cfg)
             opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=1e-3)
