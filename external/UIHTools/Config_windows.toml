@@ -1,0 +1,124 @@
+
+#自动器官分割的配置文件，每个模型都要有一个自己的配置文件，和模型一一对应，以便于回溯和优化
+
+[COMMON]
+
+#modality = "CT"
+
+
+
+[PATHS]
+# 标注数据的根路径
+labeled_path = "E:/"
+
+# 所选的标注数据集
+labeled_dataset = ["TotalsegmentatorMRI_dataset_v200"]
+
+
+# 训练数据的根路径
+train_path = "D:/data"
+
+# 训练所服务的项目（每个项目一个文件夹，在traindata目录下）
+train_project = "MR_windows"
+
+
+#nnUnet的环境变量
+nnUNet_raw = "nnUNet_raw"
+nnUNet_preprocessed = "nnUNet_preprocessed"
+nnUNet_results = "nnUNet_results"
+
+
+[MODEL]
+
+# 所生成的训练测试集数据批次，即模型批次（每个项目可能要迅雷多个模型）
+train_dataset = ["Dataset101_MR1test","Dataset102_MR2test"]
+
+#包含的组织器官（需要用标准名称），或者选用ModelMap.toml中的已有列表
+segment_model_file = "ModelMap.toml"
+
+segment_list_name = ["MR1_Head", "MR2_Chest"]
+
+
+[GPU]
+# 训练使用的 GPU 编号，对应 CUDA_VISIBLE_DEVICES
+# 批量训练(workflow4)时，不同配置文件指定不同 gpu_id 可在多卡上并行训练
+# 单卡机器保持 0 即可
+gpu_id = [0,1]
+
+
+[PREPROCESS]
+
+#默认3d_fullres，其他可选项为2D, 3d_lowres(不可用），3d_cascade_fullres（不可用）
+configuration = "3d_fullres"
+
+#totalsegmentator的CT数据默认[1.5, 1.5, 1.5]，MR不统一。如不更改则数组为空，数据维持原本分辨率
+spacing = []
+
+#是否指定patch size，如不更改则数组为空，由nnUNet自动规划
+#注意：手动设置patch_size时，各轴值会被自动向上取整为 2^(该轴池化次数) 的整数倍
+#较大的patch_size需要更多显存，可能需要减小batch_size；较小的patch_size会减少感受野
+#示例：patch_size = [128, 128, 128]  或  patch_size = [64, 128, 128]
+patch_size = []
+
+#是否指定batch size，为0时由nnUNet自动规划（默认按8GB显存估算，通常为2），一般不超过总样本量的5%
+#80GB显存的卡可以适当增大，如4、8、16等，加快训练收敛
+#注意：过大的batch_size可能导致显存溢出(OOM)；nnUNet建议最小值为2
+#[128,128,128]一般自动规划为2，[80,80,80]自动规划为10
+batch_size = 0
+
+
+
+[TRAIN]
+
+#默认1000，NoMirroring只能选择250，2000，4000，8000, Mirroring可以选择1，5，10，20，50，100，250，500，750，2000，4000，8000
+epoch = 1000
+
+#默认0，totalsegmentator都是设为0，其他值还没测试过
+fold = 0
+
+#是否镜像的设置
+trainer = "nnUNetTrainerNoMirroring"
+
+#默认参数，勿改
+plans = "nnUNetPlans"
+
+
+
+
+[PREDICT]
+# 可选：输入文件或文件夹；为空时走默认 nnUNet_raw/<dataset>/imagesTs
+input_path = ""
+
+# 可选：输出文件或文件夹；为空时走默认 nnUNet_raw/<dataset>/labelsTs_predicted
+output_path = ""
+
+# 可选：模型根目录（框架内会自动拼接 train_dataset，得到每个模型目录）
+# 例如: /data1/segmentationForTrain/traindata/MIv500_MR/nnUNet_results
+model_folder = ""
+
+# 预测参数
+disable_tta = true
+enable_stats = true
+
+
+[EVALUATION]
+# 默认评估输入子目录：<nnUNet_raw>/<train_dataset>/labelsTs
+gt_subdir = ""
+
+# 默认预测结果子目录：<nnUNet_raw>/<train_dataset>/labelsTs_predicted
+pred_subdir = ""
+
+# 每个数据集的评估输出目录：<nnUNet_raw>/<train_dataset>/evaluation
+eval_subdir = ""
+
+# 是否聚合多个模型/数据集的评估结果
+run_aggregation = true
+
+# 聚合结果输出目录（为空时默认输出到 nnUNet_raw 根目录）
+aggregate_output_dir = ""
+
+# 聚合结果文件名前缀
+aggregate_output_basename = "evaluation"
+
+# 聚合前是否清空聚合输出目录
+clear_aggregate_output = false

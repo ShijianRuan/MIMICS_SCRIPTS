@@ -1048,7 +1048,7 @@ def _training_config(
     }
     goal_plans = {
         "general": {
-            "initial_mask_probability": 0.5,
+            "initial_mask_probability": 0.3,
             "provided_initial_mask_probability": 0.7,
             "validate_initial_masks": True,
         },
@@ -1188,6 +1188,7 @@ def _training_config(
             "device": "auto",
             "resume": True,
             "status_path": str(trainer_status),
+            "job_status_path": str(job_dir / "status.json"),
             "cancel_path": str(trainer_cancel),
         },
     }
@@ -1333,20 +1334,29 @@ def _copy_trainer_status(job_status: Path, trainer_status: dict[str, Any]) -> No
             point.get("validation_auc"),
         )
         if signature != str(current.get("metric_log_signature") or ""):
+            train_loss = point.get("train_loss")
+            val_auc = validation.get("trajectory_auc")
+            val_dice = validation.get("dice", {})
+            val_fg = val_dice.get("foreground") if isinstance(val_dice, dict) else None
+            lr = trainer_status.get("learning_rate")
+            elapsed = trainer_status.get("elapsed_seconds", 0)
             pieces = [
                 "Epoch {}/{}".format(
                     latest_epoch,
                     trainer_status.get("epochs") or "?",
                 )
             ]
-            if point.get("train_loss") is not None:
-                pieces.append("loss {:.4f}".format(float(point["train_loss"])))
-            if point.get("validation_auc") is not None:
-                pieces.append(
-                    "validation AUC {:.4f}".format(
-                        float(point["validation_auc"])
-                    )
-                )
+            if train_loss is not None:
+                pieces.append("loss {:.4f}".format(float(train_loss)))
+            if val_auc is not None:
+                pieces.append("AUC {:.4f}".format(float(val_auc)))
+            if val_fg is not None:
+                pieces.append("Dice {:.4f}".format(float(val_fg)))
+            if lr is not None:
+                pieces.append("lr {:.2e}".format(float(lr)))
+            elapsed_min = elapsed / 60
+            if elapsed_min > 1:
+                pieces.append("{:.1f}m".format(elapsed_min))
             append_log(job_status.parent / "job.log", " | ".join(pieces))
     else:
         signature = str(current.get("metric_log_signature") or "")
@@ -1854,7 +1864,7 @@ def run_job(job_dir_value: str) -> int:
             initial_probability = {
                 "start_empty": 0.0,
                 "refine_existing": 1.0,
-            }.get(evaluation_goal, 0.5)
+            }.get(evaluation_goal, 0.3)
             provided_probability = float(
                 request.get("provided_initial_mask_probability", 0.7)
             )
@@ -1910,6 +1920,26 @@ def run_job(job_dir_value: str) -> int:
             progress_percent=100,
         )
         append_log(log_path, "Training completed: {}.".format(outcome))
+        # Log a human-readable summary
+        best_epoch = None
+        hist = trainer_status.get("metrics_history", current.get("metrics_history") or [])
+        if hist:
+            best_epoch = max(hist, key=lambda x: float(x.get("validation_auc") or 0))
+        best_msg = (
+            "Best epoch {}/{} AUC {:.4f}".format(
+                best_epoch.get("epoch"), best_epoch.get("epochs") or "?",
+                float(best_epoch.get("validation_auc") or 0),
+            ) if best_epoch else ""
+        )
+        dur = int(trainer_status.get("elapsed_seconds", current.get("elapsed_seconds", 0)))
+        selected_tag = "NEW MODEL SELECTED" if selected else "current model retained"
+        append_log(log_path, "Summary: {} epochs, {:.1f}m, best AUC {:.4f} | {} | {}".format(
+            trainer_status.get("epochs") or current.get("epochs") or "?",
+            dur / 60,
+            trainer_status.get("best_score", current.get("best_score", 0)) or 0,
+            best_msg,
+            selected_tag,
+        ))
         cleanup = _cleanup_terminal_artifacts(
             request,
             job_dir,

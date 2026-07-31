@@ -7,6 +7,7 @@
 - 为什么耗时工作不会直接运行在 Mimics GUI 线程；
 - 图像与 Mask 如何在原始数据、Mimics 和 AI 模型之间保持空间一致；
 - DINOv3 与 nnInteractive 模型如何训练、注册、推理和跨机器迁移；
+- 可选的远程训练如何在 Linux GPU 服务器上运行、数据如何缓存、模型如何回流本机；
 - 出现异常时应查看哪里、如何停止以及如何继续开发。
 
 本文描述的是当前代码架构。实际部署目标为 Windows + Mimics，项目开发与多数离线测试也可在 macOS/Linux 完成。
@@ -233,8 +234,10 @@ runtime_py35/fewshot_mimics.py
   |-- tools/fewshot_pipeline.py
           |-- runtime_py35/mimics_export.py
           |-- external/dinov3-medical-seg/
-          |-- tools/resource_locks.py
+          |-- resource_locks.py
 ```
+
+> 注：`resource_locks.py` 位于项目根目录，不在 `tools/` 下。DINOv3 训练界面里的 **Compute** 区域可以把同一个训练任务转向远程 Linux GPU 服务器执行，详见第 11 节。
 
 `fewshot_mimics.py` 只负责 Mimics 上下文、外部进程启动、状态轮询和预测 Mask 应用。训练、数据物化和模型推理由 `fewshot_pipeline.py` 在外部环境完成。
 
@@ -477,7 +480,74 @@ nnInteractive 被明确分成“官方通用模型”和“自定义任务模型
 
 新导入项目不应依赖此修复入口。
 
-## 8. 图像与 Mask 的空间契约
+## 8. 远程训练（可选）
+
+本节是对 `docs/remote_training_design.md` 的精简导读，回答新手最常问的三个问题：怎么用、数据要不要重传、模型怎么回到本机。完整设计与失败处理矩阵见上述原文。
+
+### 8.1 它解决什么问题
+
+本机通常是 Windows + Mimics，往往没有强力 GPU。远程训练把耗时的 DINOv3 少样本训练和 nnInteractive 任务微调放到一台 Linux GPU 服务器上的 Docker 容器里执行，本机只负责准备数据、传输、监控和接收模型。**远程训练是可选的、附加的**：默认始终是「This workstation」本地训练，本地命令、环境、GPU 锁、数据准备和推理路径完全不变。
+
+关键边界：
+
+- 远程模块在用户显式选择某台已保存服务器前**不导入 Paramiko**；Paramiko 或远程代码缺失时，本地训练照常可用；
+- 远程代码不被 Mimics Python 运行时导入，Mimics 只照常启动外部 PySide6 进程；
+- 远程服务器**不打开 `.mcs`、不需要 Mimics 许可证**；所有依赖 Mimics 的工作（含标签导出）都在本机完成。
+
+### 8.2 怎么用
+
+DINOv3 训练界面和 nnInteractive 模型中心都含同一个 **Compute** 区域：
+
+1. 默认「This workstation」；
+2. 「Manage Servers...」打开外部服务器配置器（`tools/remote_compute_ui.py`），填写：配置名、主机/IP、SSH 端口、SSH 用户名、密码或私钥路径、远程工作文件夹（如 `mimics-ai`）、运行时镜像（如 `mimics-ai-runtime:1.0`）、GPU 设备（Automatic / 数字索引 / NVIDIA GPU 或 MIG UUID）、是否复用未变更的上传数据；
+3. 「Test Connection」依次校验 SSH 主机身份、认证、Docker、NVIDIA GPU 访问、磁盘空间、镜像内两个 AI 框架；
+4. 显式选择 `Remote · <profile>` 后启动训练。
+
+密码只存于 Windows 凭据管理器，绝不写入 `servers.json`、job JSON、命令行或日志。首次连接需确认服务器 SSH 指纹，指纹变化则拒绝连接。
+
+### 8.3 数据要不要重传：内容寻址缓存
+
+**不需要重传未变更的数据。** 这是远程训练最值得了解的机制。
+
+数据按 case 切分为独立的 tar 包，每个 case 包有自己的 SHA-256 指纹（内容寻址，与文件名/路径/时间无关）。开启「Reuse unchanged uploaded training data」时，控制器先查远程缓存：
+
+```text
+<remote-root>/cache/<ssh-username>/datasets/<sha256>.tar
+```
+
+命中条件是「远程文件存在 且 远端实测 SHA-256 == 本地指纹」，命中即跳过该 case 的上传。因此：
+
+- 改了 1 个 case 的标签重训，只重传这 1 个 case，其余全部命中缓存秒过；
+- 缓存按 SSH 用户隔离，不同账号互不共享；
+- 30 天未命中的缓存条目自动清理；
+- 首次上传必然全量 miss，之后重跑同样数据基本不再走网络。
+
+上传本身是可断点续传的 SFTP（`.part` 文件，连接中断后自动续传），且写入已启用 pipelining 以提升吞吐。
+
+### 8.4 模型怎么回到本机
+
+训练成功后，**只下载最终模型产物**（不下载整个实验目录）。下载的模型经过审计和校验后，通过本地训练复用的同一套注册函数登记到本机模型注册表，随后出现在本机模型历史里，可被现有的本地预测入口直接选用。也就是说：**远程训练只负责算，推理始终在本地已验证的路径上完成**（远程交互推理不在首版范围内）。
+
+### 8.5 GPU 调度与多用户
+
+一个训练任务用一个 GPU（这两个框架当前不做分布式多卡训练）。显式指定 GPU 0 和 GPU 1 的两个任务可并发；两个都指定 GPU 0 的任务串行；Automatic 模式与所有显式 GPU 任务互斥，以免选到正在使用的设备。锁用 Linux 内核 `flock`，容器退出或被杀时自动释放。任务存储在 `<remote-root>/jobs/<ssh-username>/<job-id>/`，天然避免命名冲突并支持多 SSH 账号。
+
+### 8.6 关键实现文件
+
+| 文件 | 作用 |
+|---|---|
+| `tools/remote_compute.py` | 服务器配置、凭据管理、SSH 主机密钥、SSH/SFTP 传输、连接预检 |
+| `tools/remote_compute_ui.py` | 共享的服务器配置与计算选择器 UI |
+| `tools/remote_training_controller.py` | 本机准备、传输、远程生命周期、状态镜像、下载、本机注册 |
+| `tools/remote_worker.py` | 容器入口，对接两种训练流水线 |
+| `remote/Dockerfile` | 统一 CUDA 运行时镜像 |
+| `remote/setup_remote_server.sh` | 服务器一次性初始化 |
+
+### 8.7 何时该看完整设计
+
+如果遇到：状态长时间停留在 `waiting_for_remote_gpu` / `reconnecting_remote` / `stopping`、`.part` 上传中断续传、停止后容器未清理、或要在多 GPU 服务器上排多个任务——请直接读 `docs/remote_training_design.md` 的第 7 节（生命周期与失败行为矩阵）和第 6 节（GPU 调度）。本节只做入口级导读。
+
+## 9. 图像与 Mask 的空间契约
 
 ### 8.1 RAS、LPS 与数组
 
@@ -528,7 +598,7 @@ NIfTI 数组本身没有“RAS 数组”或“LPS 数组”的固有属性。空
 
 manifest 中优先保存相对路径；数据集整体迁移后，解析器会从 manifest 所在位置重新解析。
 
-## 9. 后台任务生命周期
+## 10. 后台任务生命周期
 
 每个长任务都应遵循以下状态机：
 
@@ -558,7 +628,7 @@ created -> starting -> running/waiting
 - 同一输出目录的 import producer 使用 lease 防止互相覆盖；
 - 同一个活动项目的 Mask 导入、导出和 AI 结果应用有本地 monitor 防重入。
 
-## 10. nnInteractive 脑模型跨 Windows 迁移
+## 11. nnInteractive 脑模型跨 Windows 迁移
 
 当前本机模型：
 
@@ -669,7 +739,7 @@ tasks/brain_extraction/models/brain_clopa_in_v1
 
 这验证了模型文件和注册设计的跨机器可迁移性。由于开发机没有 Mimics，仍需在目标 Windows + Mimics 上完成一次真实 GPU 推理验收，重点检查环境版本、显存和结果应用；这不需要重新训练模型。
 
-## 11. DINOv3 模型跨机器迁移
+## 12. DINOv3 模型跨机器迁移
 
 DINOv3 使用相同的模型包工具：
 

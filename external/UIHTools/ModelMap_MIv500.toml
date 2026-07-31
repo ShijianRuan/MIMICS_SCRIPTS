@@ -1,0 +1,210 @@
+[MODELS]
+
+#MI v500器官分割的模型划分
+CT1_Head = [
+    "brain",
+    "skull",
+]
+
+
+#由于CT5_vessel只有一个上腔静脉，合并到胸部器官一起分割
+CT2_Chest = [
+    "lung_upper_lobe_left",
+    "lung_lower_lobe_left",
+    "lung_upper_lobe_right",
+    "lung_middle_lobe_right",
+    "lung_lower_lobe_right",
+    "thyroid_gland",
+    "heart",
+    "aorta",
+    "superior_vena_cava",
+]
+
+CT3_Abdomen = [
+    "spleen",
+    "kidney_right",
+    "kidney_left",
+    "gallbladder",
+    "liver",
+    "stomach",
+    "pancreas",
+    "adrenal_gland_right",
+    "adrenal_gland_left",
+    "small_bowel",
+    "duodenum",
+    "urinary_bladder",
+    "prostate",
+    "kidney_cyst_left",
+    "kidney_cyst_right",
+]
+
+#CT4_vessel除了上腔静脉外，都不注册，暂不训练
+
+CT5_Vertebrae = [
+    "sacrum",
+    "vertebrae_S1",
+    "vertebrae_L5",
+    "vertebrae_L4",
+    "vertebrae_L3",
+    "vertebrae_L2",
+    "vertebrae_L1",
+    "vertebrae_T12",
+    "vertebrae_T11",
+    "vertebrae_T10",
+    "vertebrae_T9",
+    "vertebrae_T8",
+    "vertebrae_T7",
+    "vertebrae_T6",
+    "vertebrae_T5",
+    "vertebrae_T4",
+    "vertebrae_T3",
+    "vertebrae_T2",
+    "vertebrae_T1",
+    "vertebrae_C7",
+    "vertebrae_C6",
+    "vertebrae_C5",
+    "vertebrae_C4",
+    "vertebrae_C3",
+    "vertebrae_C2",
+    "vertebrae_C1",
+    "spinal_cord",
+]
+
+
+CT6_Rib = [
+    "rib_left_1",
+    "rib_left_2",
+    "rib_left_3",
+    "rib_left_4",
+    "rib_left_5",
+    "rib_left_6",
+    "rib_left_7",
+    "rib_left_8",
+    "rib_left_9",
+    "rib_left_10",
+    "rib_left_11",
+    "rib_left_12",
+    "rib_right_1",
+    "rib_right_2",
+    "rib_right_3",
+    "rib_right_4",
+    "rib_right_5",
+    "rib_right_6",
+    "rib_right_7",
+    "rib_right_8",
+    "rib_right_9",
+    "rib_right_10",
+    "rib_right_11",
+    "rib_right_12",
+    "sternum",
+]
+
+
+CT7_Chestbone = [
+    "humerus_left",
+    "humerus_right",
+    "scapula_left",
+    "scapula_right",
+    "clavicula_left",
+    "clavicula_right",  
+]
+
+
+CT8_Abdomenbone = [
+    "femur_left",
+    "femur_right",
+    "hip_left",
+    "hip_right",
+]
+
+
+CT9_Abdomenmuscle = [
+    "gluteus_maximus_left",
+    "gluteus_maximus_right",
+    "gluteus_medius_left",
+    "gluteus_medius_right",
+    "gluteus_minimus_left",
+    "gluteus_minimus_right",
+    "autochthon_left",
+    "autochthon_right",
+    "iliopsoas_left",
+    "iliopsoas_right",
+]
+
+
+MR1_Head = [
+    "brain",
+]
+
+
+MR2_Chest = [
+    "heart",
+    "aorta",
+    "lung_left",
+    "lung_right",
+]
+
+MR3_Abdomen = [
+    "spleen",
+    "kidney_right",
+    "kidney_left",
+    "liver",
+    "stomach",
+    "duodenum",
+    "urinary_bladder",
+    "prostate",
+]
+
+#MR4_Vessel
+
+MR5_Vertebrae = [
+    "intervertebral_discs",
+    "spinal_cord",
+    "sacrum",
+    "vertebrae_L5",
+    "vertebrae_L4",
+    "vertebrae_L3",
+    "vertebrae_L2",
+    "vertebrae_L1",
+    "vertebrae_T12",
+    "vertebrae_T11",
+    "vertebrae_T10",
+    "vertebrae_T9",
+    "vertebrae_T8",
+    "vertebrae_T7",
+    "vertebrae_T6",
+    "vertebrae_T5",
+    "vertebrae_T4",
+    "vertebrae_T3",
+    "vertebrae_T2",
+    "vertebrae_T1",
+    "vertebrae_C7",
+    "vertebrae_C6",
+    "vertebrae_C5",
+    "vertebrae_C4",
+    "vertebrae_C3",
+    "vertebrae_C2",
+    "vertebrae_C1",
+]
+
+
+#MR6_Chestbone 
+
+MR7_AbdomenBone = [
+    "femur_left",
+    "femur_right",
+]
+
+
+MR8_muscle = [
+    "gluteus_maximus_left",
+    "gluteus_maximus_right",
+    "gluteus_medius_left",
+    "gluteus_medius_right",
+    "gluteus_minimus_left",
+    "gluteus_minimus_right",
+    "autochthon_left",
+    "autochthon_right",
+    "iliopsoas_left",
+    "iliopsoas_right",
+]

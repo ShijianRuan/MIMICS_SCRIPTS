@@ -1,0 +1,154 @@
+#自动器官分割的配置文件，每个模型都要有一个自己的配置文件，和模型一一对应，以便于回溯和优化
+
+[COMMON]
+
+#图像模态，目前仅支持CT和MR
+modality = "CT"
+
+
+[PATHS]
+# 标注数据的根路径
+labeled_path = "/data1/segmentationForTrain/labeled"
+
+# 所选的标注数据集
+labeled_dataset = ["Totalsegmentator_dataset_v201"]
+
+
+# 训练数据的根路径
+train_path = "/data1/segmentationForTrain/traindata"
+
+# 训练所服务的项目（每个项目一个文件夹，在train_path目录下）
+train_project = "AllCoarse_RAI"
+
+#nnUnet的环境变量，在train_project之下
+nnUNet_raw = "nnUNet_raw"
+nnUNet_preprocessed = "nnUNet_preprocessed"
+nnUNet_results = "nnUNet_results"
+
+
+[MODEL]
+
+# 所生成的训练测试集数据批次，即同时训练的模型批次
+# 在nnUNet_raw,nnUNet_preprocessed,nnUNet_results目录下，分别会建立train_dataset的文件夹，分别存放数据、预处理数据、训练结果
+train_dataset = [
+    "Dataset505_CT_FixPatch",
+    ]
+
+#组织列表文件，ModelMap.toml中已有列表，如果新增其他列表，需参照“ModelMap.toml”的格式写，组织名称需用标准名称
+segment_model_file = "ModelMap.toml"
+
+#待分割的组织列表，每个分割列表对应一个train_dataset
+segment_list_name = [
+    "CT_All_Coarse",
+    ]
+
+
+[GPU]
+
+# 训练使用的 GPU 编号，支持两种写法：
+#   1. 单整数  gpu_id = 0         → 所有数据集在同一 GPU 上顺序训练/预测
+#   2. 列表    gpu_id = [0,1,0,1]  → 列表长度须与 [MODEL].train_dataset 一致，
+# 每个元素指定对应数据集使用的 GPU。不同 GPU 上的任务并行执行，同一 GPU 上的多个任务串行执行，避免显存冲突。
+gpu_id = 1
+
+
+
+[PREPROCESS]
+
+#默认3d_fullres，其他可选项为2D, 3d_lowres(不可用），3d_cascade_fullres（不可用）
+configuration = "3d_fullres"
+
+# plan_and_preprocess 使用的并行进程数
+num_processes = 6
+
+#是否指定分辨率，如不更改则数组为空，分辨率由nnUnet自动规划
+spacing = [5.0, 5.0, 5.0]
+
+#是否指定patch size，如不更改则数组为空，由nnUNet自动规划
+#注意：手动设置patch_size时，各轴值会被自动向上取整为 2^(该轴池化次数) 的整数倍
+#较大的patch_size需要更多显存，可能需要减小batch_size；较小的patch_size会减少感受野
+#示例：patch_size = [128, 128, 128]  或  patch_size = [64, 128, 128]
+patch_size = [128,128,128]
+
+#是否指定batch size，为0时由nnUNet自动规划（默认按8GB显存估算，通常为2），一般不超过总样本量的5%
+#80GB显存的卡可以适当增大，如4、8、16等，加快训练收敛
+#注意：过大的batch_size可能导致显存溢出(OOM)；nnUNet建议最小值为2
+#[128,128,128]一般自动规划为2，[80,80,80]自动规划为10
+batch_size = 0
+
+#目标图像方位，三位方位码，如 "RAS", "LPI", "RAI" 等，和 ITK-SNAP 一致
+#每个字母对应一个轴的方向: R/L=Right/Left, A/P=Anterior/Posterior, I/S=Inferior/Superior
+#例如 RAI 表示 x轴 Right→Left, y轴 Anterior→Posterior, z轴 Inferior→Superior
+#仅通过轴置换和翻转实现，不做插值，不改变原始体素值
+#为空字符串时保持源图像方位不变
+orientation = "RAI"
+
+#是否重新排列图像的方位
+#如果orientation指定了方位，此处应设置为NibabelIO，以避免重新排列为LPS(ITK-SNAP方位，nii一般成为RAS）
+#如果orientation未指定方位，此处应设置为NibabelIOWithReorient，以避免图像方位不一致，影响训练效果
+#可选方位还包括如下选择：
+# "SimpleITKIO": SimpleITK 读取 NIfTI/NRRD/MHA/GIPL；不做统一方位重排。
+# "SimpleITKIOWithReorient": SimpleITK 读取并重排到 RAS；写回分割时恢复原方位。
+# "NibabelIO": Nibabel 读取 NIfTI；不做统一方位重排。
+# "NibabelIOWithReorient": Nibabel 读取并重排到 RAS；写回分割时恢复原 affine。
+# "NaturalImage2DIO": 2D 自然图像 reader（png/jpg/bmp 等），不适用于 3D 医学体数据。
+# "Tiff3DIO": 3D TIFF reader，不适用于常规 .nii.gz 流程。
+reorientaion = "NibabelIO"
+
+
+
+[TRAIN]
+
+#默认1000，NoMirroring只能选择250，2000，4000，8000, Mirroring可以选择1，5，10，20，50，100，250，500，750，2000，4000，8000
+epoch = 1000
+
+#默认0，totalsegmentator都是设为0，其他值还没测试过
+fold = 0
+
+#是否镜像的设置
+trainer = "nnUNetTrainerNoMirroring"
+
+#默认参数，勿改
+plans = "nnUNetPlans"
+
+
+
+#下面的设置为单独调用时所用
+
+[PREDICT]
+# 可选：输入文件或文件夹；为空时走默认 nnUNet_raw/<dataset>/imagesTs
+input_path = ""
+
+# 可选：输出文件或文件夹；为空时走默认 nnUNet_raw/<dataset>/labelsTs_predicted
+output_path = ""
+
+# 可选：模型根目录（框架内会自动拼接 train_dataset，得到每个模型目录）
+# 例如: /data1/segmentationForTrain/traindata/MIv500_MR/nnUNet_results
+model_folder = ""
+
+# 预测参数
+disable_tta = true
+enable_stats = true
+
+
+[EVALUATION]
+# 默认评估输入子目录：<nnUNet_raw>/<train_dataset>/labelsTs
+gt_subdir = ""
+
+# 默认预测结果子目录：<nnUNet_raw>/<train_dataset>/labelsTs_predicted
+pred_subdir = ""
+
+# 每个数据集的评估输出目录：<nnUNet_raw>/<train_dataset>/evaluation
+eval_subdir = ""
+
+# 是否聚合多个模型/数据集的评估结果
+run_aggregation = true
+
+# 聚合结果输出目录（为空时默认输出到 nnUNet_raw 根目录）
+aggregate_output_dir = ""
+
+# 聚合结果文件名前缀
+aggregate_output_basename = "evaluation"
+
+# 聚合前是否清空聚合输出目录
+clear_aggregate_output = false

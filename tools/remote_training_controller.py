@@ -898,30 +898,40 @@ def _launch_container(
             raise RuntimeError(
                 "The previous owned remote container could not be removed."
             )
-    dataset_extract = ""
-    for dataset_cache_path in dataset_cache_paths or []:
-        dataset_extract += (
-            "tar -xf {dataset} -C {job} && {after_extract}"
-        ).format(
-            dataset=shlex.quote(dataset_cache_path),
+    # Each SSH exec passes the command through the remote login shell as a
+    # single argument, which the kernel caps near MAX_ARG_STRLEN (~128 KB on
+    # Linux). Concatenating one "tar -xf ... && ..." clause per dataset case
+    # produced a string that exceeded the cap and failed with
+    # "/bin/bash: Argument list too long". Execute each step in its own short
+    # command so the per-exec size is bounded by path length, not case count.
+    session.execute(
+        "rm -rf {job} && mkdir -p {job}".format(
             job=shlex.quote(paths["job"]),
-            after_extract=(
-                "rm -f {dataset} && ".format(
-                    dataset=shlex.quote(dataset_cache_path)
-                )
-                if remove_dataset_after_extract
-                else "touch {dataset} && ".format(
-                    dataset=shlex.quote(dataset_cache_path)
-                )
+        ),
+        timeout=300,
+    )
+    for dataset_cache_path in dataset_cache_paths or []:
+        after_extract = (
+            "rm -f {dataset}".format(
+                dataset=shlex.quote(dataset_cache_path)
+            )
+            if remove_dataset_after_extract
+            else "touch {dataset}".format(
+                dataset=shlex.quote(dataset_cache_path)
+            )
+        )
+        session.execute(
+            "tar -xf {dataset} -C {job} && {after_extract}".format(
+                dataset=shlex.quote(dataset_cache_path),
+                job=shlex.quote(paths["job"]),
+                after_extract=after_extract,
             ),
+            timeout=300,
         )
     session.execute(
-        "rm -rf {job} && mkdir -p {job} && "
-        "{dataset_extract}"
         "tar -xf {archive} -C {job} && rm -f {archive}".format(
-            job=shlex.quote(paths["job"]),
             archive=shlex.quote(paths["archive"]),
-            dataset_extract=dataset_extract,
+            job=shlex.quote(paths["job"]),
         ),
         timeout=300,
     )

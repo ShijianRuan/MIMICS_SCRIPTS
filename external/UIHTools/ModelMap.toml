@@ -1,0 +1,844 @@
+# ==============================================================================
+# ModelMap.toml
+# ==============================================================================
+# 每个模型的分割类别及其对应的mask值，每个模型独立从1开始编号，0为背景（nnUnet要求必须如此）
+# ！！！注意：[CT_Combine]和[MR_Combine]列表是为了拼成一张整体Mask时统一且不重复而设立的，不能用于训练
+
+
+
+#=========================================================
+# 模型索引
+#=========================================================
+# MI器官分割的模型
+# CT：[CT1_Head],[CT2_Chest],[CT3_Lung],[CT4_Abdomen],[CT5_Liver],[CT6_KidneySpleen],
+#     [CT7_Vessel],[CT8_Vertebrae]，[CT9_Chestbone]，[CT10_Abdomenbone]，[CT11_Abdomenmuscle]，
+#     [CT12_Rib]，[CT13_Sternum]，[CT14_Breast]，[CT15_Headglands]，[CT16_uterus]
+# 注：CT12-CT16暂未重新训练，12调用bingbing的更好的肋骨分割模型，13-15调用subtask模型，16暂无标注）
+#
+# MR: [MR1_Head],[MR2_Chest],[MR3_Abdomen],[MR4_Vessel]，[MR5_Vertebrae],
+#     [MR6_Chestbone]， [MR7_AbdomenBone], [MR8_muscle]
+# 注：MR5仅包含椎间盘和脊髓，椎骨等使用subtask模型（因训练数据标注中椎骨都是一个label）
+#
+# 粗分割定位模型
+#     [CT_All_Coarse],[MR_All_Coarse]，[MR_Old_Coarse]
+#
+# 探针去骨预处理所需骨分割
+#     [CT_BoneProbe],[CT_BoneProbe_Simple]
+#
+# 总的组织列表（非模型）
+#     [CT_Combine],[MR_Combine]
+
+
+
+
+# ==============================================================================
+# CT MIv500 系列模型
+# ==============================================================================
+
+# MI v500器官分割的模型划分
+[CT1_Head]
+brain = 1
+skull = 2
+
+
+# 由于CT7_vessel只有一个上腔静脉注册，因此合并到胸部器官一起分割
+[CT2_Chest]
+esophagus              = 1  #不注册
+trachea                = 2  #不注册
+thyroid_gland          = 3 
+heart                  = 4
+aorta                  = 5
+superior_vena_cava     = 6
+
+
+
+[CT3_Lung]
+lung_upper_lobe_left   = 1
+lung_lower_lobe_left   = 2
+lung_upper_lobe_right  = 3
+lung_middle_lobe_right = 4
+lung_lower_lobe_right  = 5
+
+
+
+[CT4_Abdomen]
+stomach             = 1
+pancreas            = 2
+small_bowel         = 3
+duodenum            = 4
+colon               = 5  #不注册
+urinary_bladder     = 6
+prostate            = 7
+
+
+[CT5_Liver]
+gallbladder         = 1
+liver               = 2
+
+
+[CT6_KidneySpleen]
+spleen              = 1
+kidney_right        = 2
+kidney_left         = 3
+adrenal_gland_right = 4
+adrenal_gland_left  = 5
+kidney_cyst_left    = 2
+kidney_cyst_right   = 3
+
+
+# CT7_vessel都不注册，只有上腔静脉注册，放到CT2_Chest
+[CT7_Vessel]
+pulmonary_vein         = 1  #不注册
+brachiocephalic_trunk  = 2  #不注册
+subclavian_artery_right= 3  #不注册
+subclavian_artery_left = 4  #不注册
+common_carotid_artery_right  = 5  #不注册
+common_carotid_artery_left   = 6  #不注册
+brachiocephalic_vein_left    = 7  #不注册
+brachiocephalic_vein_right   = 8  #不注册
+atrial_appendage_left  = 9  #不注册
+inferior_vena_cava     = 10  #不注册
+portal_vein_and_splenic_vein  = 11  #不注册
+iliac_artery_left      = 12  #不注册
+iliac_artery_right     = 13  #不注册
+iliac_vena_left        = 14  #不注册
+iliac_vena_right       = 15  #不注册
+
+
+
+[CT8_Vertebrae]
+sacrum        = 1
+vertebrae_S1  = 2
+vertebrae_L5  = 3
+vertebrae_L4  = 4
+vertebrae_L3  = 5
+vertebrae_L2  = 6
+vertebrae_L1  = 7
+vertebrae_T12 = 8
+vertebrae_T11 = 9
+vertebrae_T10 = 10
+vertebrae_T9  = 11
+vertebrae_T8  = 12
+vertebrae_T7  = 13
+vertebrae_T6  = 14
+vertebrae_T5  = 15
+vertebrae_T4  = 16
+vertebrae_T3  = 17
+vertebrae_T2  = 18
+vertebrae_T1  = 19
+vertebrae_C7  = 20
+vertebrae_C6  = 21
+vertebrae_C5  = 22
+vertebrae_C4  = 23
+vertebrae_C3  = 24
+vertebrae_C2  = 25
+vertebrae_C1  = 26
+spinal_cord   = 27
+
+
+[CT9_Chestbone]
+humerus_left    = 1
+humerus_right   = 2
+scapula_left    = 3
+scapula_right   = 4
+clavicula_left  = 5
+clavicula_right = 6
+
+
+[CT10_Abdomenbone]
+femur_left  = 1
+femur_right = 2
+hip_left    = 3
+hip_right   = 4
+
+
+[CT11_Abdomenmuscle]
+gluteus_maximus_left  = 1
+gluteus_maximus_right = 2
+gluteus_medius_left   = 3
+gluteus_medius_right  = 4
+gluteus_minimus_left  = 5
+gluteus_minimus_right = 6
+autochthon_left       = 7
+autochthon_right      = 8
+iliopsoas_left        = 9
+iliopsoas_right       = 10
+
+
+[CT12_Rib]
+rib_left_1   = 1
+rib_left_2   = 2
+rib_left_3   = 3
+rib_left_4   = 4
+rib_left_5   = 5
+rib_left_6   = 6
+rib_left_7   = 7
+rib_left_8   = 8
+rib_left_9   = 9
+rib_left_10  = 10
+rib_left_11  = 11
+rib_left_12  = 12
+rib_right_1  = 13
+rib_right_2  = 14
+rib_right_3  = 15
+rib_right_4  = 16
+rib_right_5  = 17
+rib_right_6  = 18
+rib_right_7  = 19
+rib_right_8  = 20
+rib_right_9  = 21
+rib_right_10 = 22
+rib_right_11 = 23
+rib_right_12 = 24
+
+
+[CT13_Sternum]
+sternum      = 1        #另有模型
+costal_cartilages  = 2  #不注册
+
+
+[CT14_Breast]
+breast                 = 1  #另有模型
+
+
+[CT15_Headglands]
+parotid_gland_left     = 1  #另有模型
+parotid_gland_right    = 2  #另有模型
+submandibular_gland_right = 3  #另有模型
+submandibular_gland_left  = 4  #另有模型
+
+
+[CT16_Uterus]
+uterus                    = 1  #暂未实现
+
+
+[CT17_Bodybone]
+humerus_left    = 1
+humerus_right   = 2
+scapula_left    = 3
+scapula_right   = 4
+clavicula_left  = 5
+clavicula_right = 6
+femur_left  = 7
+femur_right = 8
+hip_left    = 9
+hip_right   = 10
+
+
+
+# ==============================================================================
+# CT MIv500 系列模型的粗分割模型
+# ==============================================================================
+# 每个子表代表一个粗分割通道，label 为该通道的标签值，organs 为归入该通道的器官列表
+[CT_All_Coarse.CT1_Head]
+label = 1
+organs = ["brain", "skull"]
+[CT_All_Coarse.CT2_Chest]
+label = 2
+organs = ["esophagus", "trachea", "thyroid_gland", "heart", "aorta", "superior_vena_cava"]
+[CT_All_Coarse.CT3_Lung]
+label = 3
+organs = ["lung_upper_lobe_left", "lung_lower_lobe_left", "lung_upper_lobe_right", "lung_middle_lobe_right", "lung_lower_lobe_right"]
+[CT_All_Coarse.CT4_Abdomen]
+label = 4
+organs = ["stomach", "pancreas", "small_bowel", "duodenum", "colon", "urinary_bladder", "prostate"]
+[CT_All_Coarse.CT5_Liver]
+label = 5
+organs = ["gallbladder", "liver"]
+[CT_All_Coarse.CT6_KidneySpleen]
+label = 6
+organs = ["spleen", "kidney_right", "kidney_left", "adrenal_gland_right", "adrenal_gland_left", "kidney_cyst_left", "kidney_cyst_right"]
+[CT_All_Coarse.CT7_Vessel]
+label = 7
+organs = [
+    "pulmonary_vein", "brachiocephalic_trunk",
+    "subclavian_artery_right", "subclavian_artery_left",
+    "common_carotid_artery_right", "common_carotid_artery_left",
+    "brachiocephalic_vein_left", "brachiocephalic_vein_right",
+    "atrial_appendage_left", "inferior_vena_cava",
+    "portal_vein_and_splenic_vein",
+    "iliac_artery_left", "iliac_artery_right",
+    "iliac_vena_left", "iliac_vena_right",
+]
+[CT_All_Coarse.CT8_Vertebrae]
+label = 8
+organs = [
+    "sacrum",
+    "vertebrae_S1", "vertebrae_L5", "vertebrae_L4", "vertebrae_L3", "vertebrae_L2", "vertebrae_L1",
+    "vertebrae_T12", "vertebrae_T11", "vertebrae_T10", "vertebrae_T9", "vertebrae_T8",
+    "vertebrae_T7", "vertebrae_T6", "vertebrae_T5", "vertebrae_T4", "vertebrae_T3",
+    "vertebrae_T2", "vertebrae_T1",
+    "vertebrae_C7", "vertebrae_C6", "vertebrae_C5", "vertebrae_C4", "vertebrae_C3",
+    "vertebrae_C2", "vertebrae_C1",
+    "spinal_cord",
+]
+[CT_All_Coarse.CT9_Chestbone]
+label = 9
+organs = ["humerus_left", "humerus_right", "scapula_left", "scapula_right", "clavicula_left", "clavicula_right"]
+[CT_All_Coarse.CT10_Abdomenbone]
+label = 10
+organs = ["femur_left", "femur_right", "hip_left", "hip_right"]
+[CT_All_Coarse.CT11_Abdomenmuscle]
+label = 11
+organs = [
+    "gluteus_maximus_left", "gluteus_maximus_right",
+    "gluteus_medius_left", "gluteus_medius_right",
+    "gluteus_minimus_left", "gluteus_minimus_right",
+    "autochthon_left", "autochthon_right",
+    "iliopsoas_left", "iliopsoas_right",
+]
+[CT_All_Coarse.CT12_Rib]
+label = 12
+organs = [
+    "rib_left_1", "rib_left_2", "rib_left_3", "rib_left_4", "rib_left_5", "rib_left_6",
+    "rib_left_7", "rib_left_8", "rib_left_9", "rib_left_10", "rib_left_11", "rib_left_12",
+    "rib_right_1", "rib_right_2", "rib_right_3", "rib_right_4", "rib_right_5", "rib_right_6",
+    "rib_right_7", "rib_right_8", "rib_right_9", "rib_right_10", "rib_right_11", "rib_right_12",
+]
+[CT_All_Coarse.CT13_Sternum]
+label = 13
+organs = ["sternum", "costal_cartilages"]
+
+
+# ==============================================================================
+#  CT探针去骨所用预处理的全骨分割
+# ==============================================================================
+[CT_BoneProbe]
+sacrum           = 1
+vertebrae_S1     = 2
+vertebrae_L5     = 3
+vertebrae_L4     = 4
+vertebrae_L3     = 5
+vertebrae_L2     = 6
+vertebrae_L1     = 7
+vertebrae_T12    = 8
+vertebrae_T11    = 9
+vertebrae_T10    = 10
+vertebrae_T9     = 11
+vertebrae_T8     = 12
+vertebrae_T7     = 13
+vertebrae_T6     = 14
+vertebrae_T5     = 15
+vertebrae_T4     = 16
+vertebrae_T3     = 17
+vertebrae_T2     = 18
+vertebrae_T1     = 19
+vertebrae_C7     = 20
+vertebrae_C6     = 21
+vertebrae_C5     = 22
+vertebrae_C4     = 23
+vertebrae_C3     = 24
+vertebrae_C2     = 25
+vertebrae_C1     = 26
+humerus_left     = 27
+humerus_right    = 28
+scapula_left     = 29
+scapula_right    = 30
+clavicula_left   = 31
+clavicula_right  = 32
+femur_left       = 33
+femur_right      = 34
+hip_left         = 35
+hip_right        = 36
+skull            = 37
+rib_left_1       = 38
+rib_left_2       = 39
+rib_left_3       = 40
+rib_left_4       = 41
+rib_left_5       = 42
+rib_left_6       = 43
+rib_left_7       = 44
+rib_left_8       = 45
+rib_left_9       = 46
+rib_left_10      = 47
+rib_left_11      = 48
+rib_left_12      = 49
+rib_right_1      = 50
+rib_right_2      = 51
+rib_right_3      = 52
+rib_right_4      = 53
+rib_right_5      = 54
+rib_right_6      = 55
+rib_right_7      = 56
+rib_right_8      = 57
+rib_right_9      = 58
+rib_right_10     = 59
+rib_right_11     = 60
+rib_right_12     = 61
+sternum          = 62
+costal_cartilages = 63
+
+#多label速度慢，合并部分label
+[CT_BoneProbe_Simple.sacrum]
+label = 1
+organs = ["sacrum"]
+[CT_BoneProbe_Simple.lumbar_vertebrae]
+label = 2
+organs = ["vertebrae_S1", "vertebrae_L5", "vertebrae_L4", "vertebrae_L3", "vertebrae_L2", "vertebrae_L1"]
+[CT_BoneProbe_Simple.thoracic_vertebrae]
+label = 3
+organs = [
+    "vertebrae_T12", "vertebrae_T11", "vertebrae_T10", "vertebrae_T9", "vertebrae_T8",
+    "vertebrae_T7", "vertebrae_T6", "vertebrae_T5", "vertebrae_T4", "vertebrae_T3",
+    "vertebrae_T2", "vertebrae_T1",
+]
+[CT_BoneProbe_Simple.cervical_vertebrae]
+label = 4
+organs = ["vertebrae_C7", "vertebrae_C6", "vertebrae_C5", "vertebrae_C4", "vertebrae_C3", "vertebrae_C2", "vertebrae_C1"]
+[CT_BoneProbe_Simple.humerus_left]
+label = 5
+organs = ["humerus_left"]
+[CT_BoneProbe_Simple.humerus_right]
+label = 6
+organs = ["humerus_right"]
+[CT_BoneProbe_Simple.scapula_left]
+label = 7
+organs = ["scapula_left"]
+[CT_BoneProbe_Simple.scapula_right]
+label = 8
+organs = ["scapula_right"]
+[CT_BoneProbe_Simple.clavicula_left]
+label = 9
+organs = ["clavicula_left"]
+[CT_BoneProbe_Simple.clavicula_right]
+label = 10
+organs = ["clavicula_right"]
+[CT_BoneProbe_Simple.femur_left]
+label = 11
+organs = ["femur_left"]
+[CT_BoneProbe_Simple.femur_right]
+label = 12
+organs = ["femur_right"]
+[CT_BoneProbe_Simple.hip_left]
+label = 13
+organs = ["hip_left"]
+[CT_BoneProbe_Simple.hip_right]
+label = 14
+organs = ["hip_right"]
+[CT_BoneProbe_Simple.skull]
+label = 15
+organs = ["skull"]
+[CT_BoneProbe_Simple.rib_left]
+label = 16
+organs = [
+    "rib_left_1", "rib_left_2", "rib_left_3", "rib_left_4", "rib_left_5", "rib_left_6",
+    "rib_left_7", "rib_left_8", "rib_left_9", "rib_left_10", "rib_left_11", "rib_left_12",
+]
+[CT_BoneProbe_Simple.rib_right]
+label = 17
+organs = [
+    "rib_right_1", "rib_right_2", "rib_right_3", "rib_right_4", "rib_right_5", "rib_right_6",
+    "rib_right_7", "rib_right_8", "rib_right_9", "rib_right_10", "rib_right_11", "rib_right_12",
+]
+[CT_BoneProbe_Simple.sternum]
+label = 18
+organs = ["sternum"]
+[CT_BoneProbe_Simple.costal_cartilages]
+label = 19
+organs = ["costal_cartilages"]
+
+#骨分割单独训练的胫骨和腓骨
+[CT_Bone_Extremities_Leg]
+tibia_left      = 1
+fibula_left     = 2
+tibia_right     = 3
+fibula_right    = 4
+
+
+
+
+#CT_Combine模型是为了将所有不同模型拼接起来写的列表
+#该列表对每个不同分割目标有唯一指定的label值
+#但该列表有可能不是从1开始连续编号，因此不能用于训练
+[CT_Combine]
+spleen                 = 1
+kidney_right           = 2
+kidney_left            = 3
+gallbladder            = 4
+liver                  = 5
+stomach                = 6
+pancreas               = 7
+adrenal_gland_right    = 8
+adrenal_gland_left     = 9
+lung_upper_lobe_left   = 10
+lung_lower_lobe_left   = 11
+lung_upper_lobe_right  = 12
+lung_middle_lobe_right = 13
+lung_lower_lobe_right  = 14
+esophagus              = 15  #不注册
+trachea                = 16  #不注册
+thyroid_gland          = 17
+small_bowel            = 18
+duodenum               = 19
+colon                  = 20  #不注册 
+urinary_bladder        = 21
+prostate               = 22
+kidney_cyst_left       = 2   #肾囊肿合并到肾2
+kidney_cyst_right      = 3   #肾囊肿合并到肾3
+sacrum                 = 25
+vertebrae_S1           = 26
+vertebrae_L5           = 27
+vertebrae_L4           = 28
+vertebrae_L3           = 29
+vertebrae_L2           = 30
+vertebrae_L1           = 31
+vertebrae_T12          = 32
+vertebrae_T11          = 33
+vertebrae_T10          = 34
+vertebrae_T9           = 35
+vertebrae_T8           = 36
+vertebrae_T7           = 37
+vertebrae_T6           = 38
+vertebrae_T5           = 39
+vertebrae_T4           = 40
+vertebrae_T3           = 41
+vertebrae_T2           = 42
+vertebrae_T1           = 43
+vertebrae_C7           = 44
+vertebrae_C6           = 45
+vertebrae_C5           = 46
+vertebrae_C4           = 47
+vertebrae_C3           = 48
+vertebrae_C2           = 49
+vertebrae_C1           = 50
+heart                  = 51
+aorta                  = 52
+pulmonary_vein         = 53  #不注册
+brachiocephalic_trunk  = 54  #不注册
+subclavian_artery_right= 55  #不注册
+subclavian_artery_left = 56  #不注册
+common_carotid_artery_right  = 57  #不注册
+common_carotid_artery_left   = 58  #不注册
+brachiocephalic_vein_left    = 59  #不注册
+brachiocephalic_vein_right   = 60  #不注册
+atrial_appendage_left  = 61  #不注册
+superior_vena_cava     = 62
+inferior_vena_cava     = 63  #不注册
+portal_vein_and_splenic_vein  = 64  #不注册
+iliac_artery_left      = 65  #不注册
+iliac_artery_right     = 66  #不注册
+iliac_vena_left        = 67  #不注册
+iliac_vena_right       = 68  #不注册
+humerus_left           = 69
+humerus_right          = 70
+scapula_left           = 71
+scapula_right          = 72
+clavicula_left         = 73
+clavicula_right        = 74
+femur_left             = 75
+femur_right            = 76
+hip_left               = 77
+hip_right              = 78
+spinal_cord            = 79
+gluteus_maximus_left   = 80
+gluteus_maximus_right  = 81
+gluteus_medius_left    = 82
+gluteus_medius_right   = 83
+gluteus_minimus_left   = 84
+gluteus_minimus_right  = 85
+autochthon_left        = 86
+autochthon_right       = 87
+iliopsoas_left         = 88
+iliopsoas_right        = 89
+brain                  = 90
+skull                  = 91
+rib_left_1             = 92
+rib_left_2             = 93
+rib_left_3             = 94
+rib_left_4             = 95
+rib_left_5             = 96
+rib_left_6             = 97
+rib_left_7             = 98
+rib_left_8             = 99
+rib_left_9             = 100
+rib_left_10            = 101
+rib_left_11            = 102
+rib_left_12            = 103
+rib_right_1            = 104
+rib_right_2            = 105
+rib_right_3            = 106
+rib_right_4            = 107
+rib_right_5            = 108
+rib_right_6            = 109
+rib_right_7            = 110
+rib_right_8            = 111
+rib_right_9            = 112
+rib_right_10           = 113
+rib_right_11           = 114
+rib_right_12           = 115
+sternum                = 116  #另有模型
+costal_cartilages      = 117  #不注册
+breast                 = 118  #另有模型
+parotid_gland_left     = 119  #另有模型
+parotid_gland_right    = 120  #另有模型
+submandibular_gland_right = 121  #另有模型
+submandibular_gland_left  = 122  #另有模型
+uterus                    = 123  #暂未实现
+
+
+
+# ==============================================================================
+# MR MIv500 系列模型
+# ==============================================================================
+
+[MR1_Head]
+brain = 1
+
+
+[MR2_Chest]
+heart      = 1
+aorta      = 2
+lung_left  = 3
+lung_right = 4
+esophagus  = 5  #不注册
+
+
+[MR3_Abdomen]
+spleen          = 1
+kidney_right    = 2
+kidney_left     = 3
+gallbladder     = 4      #不注册
+liver           = 5
+stomach         = 6
+pancreas        = 7      #不注册
+adrenal_gland_right = 8  #不注册
+adrenal_gland_left  = 9  #不注册
+small_bowel     = 10     #不注册
+duodenum        = 11
+colon           = 12     #不注册
+urinary_bladder = 13
+prostate        = 14
+
+
+[MR4_Vessel]
+inferior_vena_cava            = 1  #不注册
+portal_vein_and_splenic_vein  = 2  #不注册
+iliac_artery_left             = 3  #不注册
+iliac_artery_right            = 4  #不注册
+iliac_vena_left               = 5  #不注册
+iliac_vena_right              = 6  #不注册
+
+
+
+[MR5_Vertebrae]
+intervertebral_discs = 1
+spinal_cord          = 2
+# sacrum               = 3   #椎骨分割已有专门模型MR_Vertebrae
+# vertebrae_L5         = 4
+# vertebrae_L4         = 5
+# vertebrae_L3         = 6
+# vertebrae_L2         = 7
+# vertebrae_L1         = 8
+# vertebrae_T12        = 9
+# vertebrae_T11        = 10
+# vertebrae_T10        = 11
+# vertebrae_T9         = 12
+# vertebrae_T8         = 13
+# vertebrae_T7         = 14
+# vertebrae_T6         = 15
+# vertebrae_T5         = 16
+# vertebrae_T4         = 17
+# vertebrae_T3         = 18
+# vertebrae_T2         = 19
+# vertebrae_T1         = 20
+# vertebrae_C7         = 21
+# vertebrae_C6         = 22
+# vertebrae_C5         = 23
+# vertebrae_C4         = 24
+# vertebrae_C3         = 25
+# vertebrae_C2         = 26
+# vertebrae_C1         = 27
+
+
+[MR6_Chestbone]
+humerus_left    = 1  #不注册
+humerus_right   = 2  #不注册
+scapula_left    = 3  #不注册
+scapula_right   = 4  #不注册
+clavicula_left  = 5  #不注册
+clavicula_right = 6  #不注册
+
+
+[MR7_AbdomenBone]
+femur_left  = 1
+femur_right = 2
+hip_left    = 3  #不注册
+hip_right   = 4  #不注册
+
+
+[MR8_Muscle]
+gluteus_maximus_left  = 1
+gluteus_maximus_right = 2
+gluteus_medius_left   = 3
+gluteus_medius_right  = 4
+gluteus_minimus_left  = 5
+gluteus_minimus_right = 6
+autochthon_left       = 7
+autochthon_right      = 8
+iliopsoas_left        = 9
+iliopsoas_right       = 10
+
+
+# ==============================================================================
+# MR MIv500 系列模型的粗分割定位模型
+# ==============================================================================
+[MR_All_Coarse.MR1_Head]
+label = 1
+organs = ["brain"]
+
+[MR_All_Coarse.MR2_Chest]
+label = 2
+organs = ["heart", "aorta", "lung_left", "lung_right", "esophagus"]
+
+[MR_All_Coarse.MR3_Abdomen]
+label = 3
+organs = [
+    "spleen", "kidney_right", "kidney_left", "gallbladder", "liver",
+    "stomach", "pancreas", "adrenal_gland_right", "adrenal_gland_left",
+    "small_bowel", "duodenum", "colon", "urinary_bladder", "prostate",
+    ]
+
+[MR_All_Coarse.MR4_Vessel]
+label = 4
+organs = [
+    "inferior_vena_cava", "portal_vein_and_splenic_vein", "iliac_artery_left",
+    "iliac_artery_right", "iliac_vena_left", "iliac_vena_right",
+]
+
+[MR_All_Coarse.MR5_Vertebrae]
+label = 5
+organs = [
+    "intervertebral_discs", "spinal_cord", "sacrum",
+    "vertebrae",           #精分割没有椎骨和sacrum，用的老模型，但粗分割定位需要
+]
+
+[MR_All_Coarse.MR6_Chestbone]
+label = 6
+organs = [
+    "humerus_left", "humerus_right", "scapula_left", "scapula_right",
+    "clavicula_left", "clavicula_right",
+]
+
+[MR_All_Coarse.MR7_AbdomenBone]
+label = 7
+organs = ["femur_left", "femur_right", "hip_left", "hip_right",]
+
+[MR_All_Coarse.MR8_muscle]
+label = 8
+organs = [
+    "gluteus_maximus_left", "gluteus_maximus_right",
+    "gluteus_medius_left", "gluteus_medius_right",
+    "gluteus_minimus_left", "gluteus_minimus_right",
+    "autochthon_left", "autochthon_right",
+    "iliopsoas_left", "iliopsoas_right",
+]
+
+
+#针对yihao老算法模型训练的粗分割
+[MR_Old_Coarse.MR_part1]
+label = 1
+organs = [
+    "spleen", "kidney_right", "kidney_left", "gallbladder", "liver",
+    "stomach", "pancreas", "adrenal_gland_right", "adrenal_gland_left",
+    "lung_left", "lung_right", "esophagus", "small_bowel", "duodenum", "colon",
+    "urinary_bladder", "prostate", "intervertebral_discs", "spinal_cord",
+    "heart", "aorta", "inferior_vena_cava", "portal_vein_and_splenic_vein",
+    "iliac_artery_left", "iliac_artery_right", "iliac_vena_left", "iliac_vena_right",
+]
+[MR_Old_Coarse.MR_part2]
+label = 2
+organs = [
+    "humerus_left", "humerus_right", "scapula_left", "scapula_right",
+    "clavicula_left", "clavicula_right", "femur_left", "femur_right",
+    "hip_left", "hip_right", "gluteus_maximus_left", "gluteus_maximus_right",
+    "gluteus_medius_left", "gluteus_medius_right", "gluteus_minimus_left",
+    "gluteus_minimus_right", "autochthon_left", "autochthon_right",
+    "iliopsoas_left", "iliopsoas_right", "brain",
+]
+[MR_Old_Coarse.MR_Vertebrae]
+label = 3
+organs = [
+    "sacrum", "vertebrae",
+]
+
+
+#MR_Combine模型是为了将所有不同模型拼接起来写的列表
+#该列表对每个不同分割目标有唯一指定的label值
+#但该列表有可能不是从1开始连续编号，因此不能用于训练
+[MR_Combine]
+spleen                = 1
+kidney_right          = 2
+kidney_left           = 3
+gallbladder           = 4      #不注册
+liver                 = 5
+stomach               = 6
+pancreas              = 7      #不注册
+adrenal_gland_right   = 8      #不注册
+adrenal_gland_left    = 9      #不注册
+lung_left             = 10
+lung_right            = 11
+esophagus             = 12     #不注册
+small_bowel           = 13     #不注册
+duodenum              = 14
+colon                 = 15     #不注册
+urinary_bladder       = 16
+prostate              = 17
+#sacrum                = 18    #以51为准
+intervertebral_discs  = 20
+spinal_cord           = 21
+heart                 = 22
+aorta                 = 23
+inferior_vena_cava            = 24  #不注册
+portal_vein_and_splenic_vein  = 25  #不注册
+iliac_artery_left             = 26  #不注册
+iliac_artery_right            = 27  #不注册
+iliac_vena_left               = 28  #不注册
+iliac_vena_right              = 29  #不注册
+humerus_left          = 30    #不注册
+humerus_right         = 31    #不注册
+scapula_left          = 32    #不注册
+scapula_right         = 33    #不注册
+clavicula_left        = 34    #不注册
+clavicula_right       = 35    #不注册
+femur_left            = 36
+femur_right           = 37
+hip_left              = 38    #不注册
+hip_right             = 39    #不注册
+gluteus_maximus_left  = 40
+gluteus_maximus_right = 41
+gluteus_medius_left   = 42
+gluteus_medius_right  = 43
+gluteus_minimus_left  = 44
+gluteus_minimus_right = 45
+autochthon_left       = 46
+autochthon_right      = 47
+iliopsoas_left        = 48
+iliopsoas_right       = 49
+brain                 = 50
+sacrum                = 51
+vertebrae_L5          = 52
+vertebrae_L4          = 53
+vertebrae_L3          = 54
+vertebrae_L2          = 55
+vertebrae_L1          = 56
+vertebrae_T12         = 57
+vertebrae_T11         = 58
+vertebrae_T10         = 59
+vertebrae_T9          = 60
+vertebrae_T8          = 61
+vertebrae_T7          = 62
+vertebrae_T6          = 63
+vertebrae_T5          = 64
+vertebrae_T4          = 65
+vertebrae_T3          = 66
+vertebrae_T2          = 67
+vertebrae_T1          = 68
+vertebrae_C7          = 69
+vertebrae_C6          = 70
+vertebrae_C5          = 71
+vertebrae_C4          = 72
+vertebrae_C3          = 73
+vertebrae_C2          = 74
+vertebrae_C1          = 75
+
+

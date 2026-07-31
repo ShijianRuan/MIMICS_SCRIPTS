@@ -150,9 +150,9 @@ class ResumableTransferTests(unittest.TestCase):
         def rename(self, source, destination):
             os.replace(source, destination)
 
-    def _session(self):
+    def _session(self, sftp=None):
         session = object.__new__(remote_compute.SSHSession)
-        session.sftp = self._LocalSFTP()
+        session.sftp = sftp or self._LocalSFTP()
         session.ensure_directory = lambda path: Path(path).mkdir(
             parents=True, exist_ok=True
         )
@@ -175,6 +175,61 @@ class ResumableTransferTests(unittest.TestCase):
             self.assertEqual(destination.read_bytes(), content)
             self.assertEqual(progress[0], (137, len(content)))
             self.assertEqual(progress[-1], (len(content), len(content)))
+
+    def test_upload_enables_pipelined_writes_when_available(self):
+        class _RecordingRemote:
+            def __init__(self):
+                self.pipelined = None
+                self.written = bytearray()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def set_pipelined(self, value):
+                self.pipelined = value
+
+            def write(self, chunk):
+                self.written.extend(chunk)
+
+            def flush(self):
+                pass
+
+        class _Stat:
+            def __init__(self, size):
+                self.st_size = size
+
+        class _SFTP:
+            def __init__(self, remote):
+                self._remote = remote
+
+            def stat(self, path):
+                if path.endswith(".part"):
+                    return _Stat(len(self._remote.written))
+                return Path(path).stat()
+
+            def open(self, _path, _mode):
+                return self._remote
+
+            def remove(self, path):
+                Path(path).unlink(missing_ok=True)
+
+            def rename(self, source, destination):
+                # The fake remote keeps bytes in memory, so there is no real
+                # .part file to move; this stub satisfies the upload contract.
+                pass
+
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "source.bin"
+            destination = Path(temporary) / "remote" / "payload.bin"
+            content = b"\xab" * 4096
+            source.write_bytes(content)
+            remote = _RecordingRemote()
+            self._session(sftp=_SFTP(remote)).upload(source, str(destination))
+            self.assertTrue(remote.pipelined)
+            self.assertEqual(bytes(remote.written), content)
 
     def test_download_resumes_existing_local_part(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -825,6 +880,64 @@ class StatusAndLifecycleTests(unittest.TestCase):
         self.assertIn("gpu-1.lock", command)
         self.assertIn("MIMICS_REMOTE_GPU_LOCK_SCOPE=device", command)
         self.assertIn("mimics-script.job=job", command)
+
+    def test_container_launch_runs_one_command_per_dataset_case(self):
+        # Each remote command must stay small enough to fit within the
+        # kernel's single-argument cap; concatenating one tar clause per
+        # case previously hit "/bin/bash: Argument list too long".
+        class Session:
+            def __init__(self):
+                self.commands = []
+
+            def execute_result(self, _command):
+                return 1, "Error: No such object: job-container"
+
+            def execute(self, command, **_kwargs):
+                self.commands.append(command)
+                return "container-id"
+
+        session = Session()
+        profile = {
+            "username": "user",
+            "runtime_image": "mimics-ai-runtime:1.0",
+            "gpu_device": "auto",
+            "remote_root": "/remote",
+        }
+        controller._launch_container(
+            session,
+            {
+                "job": "/remote/jobs/user/job",
+                "archive": "/remote/jobs/user/job.tar",
+                "models": "/remote/models",
+                "locks": "/remote/locks",
+            },
+            profile,
+            "job-container",
+            dataset_cache_paths=[
+                "/remote/cache/user/datasets/aaa.tar",
+                "/remote/cache/user/datasets/bbb.tar",
+            ],
+            remove_dataset_after_extract=False,
+        )
+        # No single command may carry more than one dataset tar extraction.
+        dataset_tar_commands = [
+            command
+            for command in session.commands
+            if command.count("tar -xf") > 1
+        ]
+        self.assertEqual(dataset_tar_commands, [])
+        # Each dataset path appears in its own command.
+        for path in (
+            "/remote/cache/user/datasets/aaa.tar",
+            "/remote/cache/user/datasets/bbb.tar",
+        ):
+            matches = [c for c in session.commands if path in c]
+            self.assertEqual(len(matches), 1)
+            self.assertIn("touch", matches[0])
+        # Job cleanup is isolated from the archive extraction.
+        self.assertTrue(
+            any("rm -rf" in c and "mkdir -p" in c for c in session.commands)
+        )
 
     def test_foreign_container_is_never_removed(self):
         class Session:
