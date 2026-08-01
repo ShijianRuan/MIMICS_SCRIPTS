@@ -98,7 +98,7 @@ reorientaion = "NibabelIO"
 
 [TRAIN]
 
-#默认1000，NoMirroring只能选择250，2000，4000，8000, Mirroring可以选择1，5，10，20，50，100，250，500，750，2000，4000，8000
+# Effective training length; unsupported custom trainers are rejected.
 epoch = 1000
 
 #默认0，totalsegmentator都是设为0，其他值还没测试过

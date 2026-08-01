@@ -3,7 +3,7 @@
 [COMMON]
 
 #图像模态，目前仅支持CT和MR
-modality = "CT"
+modality = "MR"
 
 
 [PATHS]
@@ -11,14 +11,14 @@ modality = "CT"
 labeled_path = "/data1/segmentationForTrain/labeled"
 
 # 所选的标注数据集
-labeled_dataset = ["Totalsegmentator_dataset_v201"]
+labeled_dataset = ["TotalsegmentatorMRI_dataset_v200"]
 
 
 # 训练数据的根路径
 train_path = "/data1/segmentationForTrain/traindata"
 
 # 训练所服务的项目（每个项目一个文件夹，在train_path目录下）
-train_project = "AllCoarse_RAI"
+train_project = "CoaseSegmentation"
 
 #nnUnet的环境变量，在train_project之下
 nnUNet_raw = "nnUNet_raw"
@@ -31,7 +31,8 @@ nnUNet_results = "nnUNet_results"
 # 所生成的训练测试集数据批次，即同时训练的模型批次
 # 在nnUNet_raw,nnUNet_preprocessed,nnUNet_results目录下，分别会建立train_dataset的文件夹，分别存放数据、预处理数据、训练结果
 train_dataset = [
-    "Dataset505_CT_FixPatch",
+    "Dataset101_MR1test",
+    "Dataset102_MR2test"
     ]
 
 #组织列表文件，ModelMap.toml中已有列表，如果新增其他列表，需参照“ModelMap.toml”的格式写，组织名称需用标准名称
@@ -39,7 +40,8 @@ segment_model_file = "ModelMap.toml"
 
 #待分割的组织列表，每个分割列表对应一个train_dataset
 segment_list_name = [
-    "CT_All_Coarse",
+    "MR1_Head", 
+    "MR2_Chest"
     ]
 
 
@@ -49,8 +51,7 @@ segment_list_name = [
 #   1. 单整数  gpu_id = 0         → 所有数据集在同一 GPU 上顺序训练/预测
 #   2. 列表    gpu_id = [0,1,0,1]  → 列表长度须与 [MODEL].train_dataset 一致，
 # 每个元素指定对应数据集使用的 GPU。不同 GPU 上的任务并行执行，同一 GPU 上的多个任务串行执行，避免显存冲突。
-gpu_id = 1
-
+gpu_id = [0, 1]
 
 
 [PREPROCESS]
@@ -62,13 +63,13 @@ configuration = "3d_fullres"
 num_processes = 6
 
 #是否指定分辨率，如不更改则数组为空，分辨率由nnUnet自动规划
-spacing = [5.0, 5.0, 5.0]
+spacing = []
 
 #是否指定patch size，如不更改则数组为空，由nnUNet自动规划
 #注意：手动设置patch_size时，各轴值会被自动向上取整为 2^(该轴池化次数) 的整数倍
 #较大的patch_size需要更多显存，可能需要减小batch_size；较小的patch_size会减少感受野
 #示例：patch_size = [128, 128, 128]  或  patch_size = [64, 128, 128]
-patch_size = [128,128,128]
+patch_size = []
 
 #是否指定batch size，为0时由nnUNet自动规划（默认按8GB显存估算，通常为2），一般不超过总样本量的5%
 #80GB显存的卡可以适当增大，如4、8、16等，加快训练收敛
@@ -76,7 +77,8 @@ patch_size = [128,128,128]
 #[128,128,128]一般自动规划为2，[80,80,80]自动规划为10
 batch_size = 0
 
-#目标图像方位，三位方位码，如 "RAS", "LPI", "RAI" 等，和 ITK-SNAP 一致
+
+#指定目标图像方位，三位方位码，如 "RAS", "LPI", "RAI" 等，和 ITK-SNAP 一致
 #每个字母对应一个轴的方向: R/L=Right/Left, A/P=Anterior/Posterior, I/S=Inferior/Superior
 #例如 RAI 表示 x轴 Right→Left, y轴 Anterior→Posterior, z轴 Inferior→Superior
 #仅通过轴置换和翻转实现，不做插值，不改变原始体素值
@@ -99,7 +101,8 @@ reorientaion = "NibabelIO"
 
 [TRAIN]
 
-#默认1000，NoMirroring只能选择250，2000，4000，8000, Mirroring可以选择1，5，10，20，50，100，250，500，750，2000，4000，8000
+# Effective training length. The workflow maps the standard/no-mirroring trainer
+# to a configurable equivalent and rejects unsupported custom trainers.
 epoch = 1000
 
 #默认0，totalsegmentator都是设为0，其他值还没测试过

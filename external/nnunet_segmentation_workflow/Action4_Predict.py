@@ -33,7 +33,7 @@ def _to_path(value: Union[str, Path]) -> Path:
 def _normalize_single_dataset_id(dataset_id: Union[int, str, Sequence[Union[int, str]]]) -> Union[int, str]:
     if isinstance(dataset_id, (list, tuple)):
         if len(dataset_id) != 1:
-            raise ValueError(f"dataset_id 当前仅支持单模型预测，收到: {dataset_id}")
+            raise ValueError(f"dataset_id accepts one model for this prediction path; received: {dataset_id}")
         return dataset_id[0]
     return dataset_id
 
@@ -54,16 +54,16 @@ def parse_input_paths(input_path: Union[str, Path]) -> List[Path]:
     """解析输入路径（文件或文件夹），返回受支持的医学影像文件列表。"""
     src = _to_path(input_path)
     if not src.exists():
-        raise FileNotFoundError(f"输入路径不存在: {src}")
+        raise FileNotFoundError(f"Input path does not exist: {src}")
 
     if src.is_file():
         if not _is_supported_image_file(src):
-            raise ValueError(f"不支持的输入格式: {src}")
+            raise ValueError(f"Unsupported input format: {src}")
         return [src.resolve()]
 
     files = [p.resolve() for p in src.rglob("*") if _is_supported_image_file(p)]
     if not files:
-        raise ValueError(f"目录中未找到受支持的影像文件: {src}")
+        raise ValueError(f"No supported image files were found in: {src}")
     files.sort()
     return files
 
@@ -89,7 +89,7 @@ def build_io_mapping(
     - 默认保留输入相对目录结构与扩展名
     """
     if not input_files:
-        raise ValueError("input_files 不能为空")
+        raise ValueError("input_files cannot be empty")
 
     out = _to_path(output_path)
     root = _to_path(input_root) if input_root is not None else None
@@ -101,7 +101,7 @@ def build_io_mapping(
         return mapping
 
     if len(input_files) > 1 and (out.suffix or out.name.lower().endswith(".nii.gz")):
-        raise ValueError("多文件输入时 output_path 必须是目录，不能是单文件路径")
+        raise ValueError("output_path must be a directory when multiple input files are used")
 
     for src in input_files:
         rel = _safe_relpath(src, root)
@@ -140,7 +140,7 @@ def _repair_nifti_header_with_nibabel(src: Path, dst: Path) -> None:
     try:
         import nibabel as nib
     except Exception as exc:
-        raise RuntimeError("未安装 nibabel，无法执行 NIfTI header 修复") from exc
+        raise RuntimeError("nibabel is required to repair NIfTI headers") from exc
 
     img = nib.load(str(src))
     affine = img.affine
@@ -174,7 +174,7 @@ def convert_to_nnunet_format(
             _repair_nifti_header_with_nibabel(src, dst)
             return dst
         except Exception as exc:
-            print(f"[警告] NIfTI header 修复失败，尝试使用 SITK 转换: {src} ({exc})")
+            print(f"[Warning] NIfTI header repair failed; trying SimpleITK conversion: {src} ({exc})")
 
     import SimpleITK as sitk
 
@@ -532,21 +532,23 @@ def _log_memory_snapshot(stage: str, device: Optional[torch.device] = None) -> N
 def _get_available_folds_without_loading_weights(
     model_folder: Union[str, Path],
     checkpoint_name: str = "checkpoint_final.pth",
-) -> List[int]:
+) -> List[Union[int, str]]:
     """通过扫描 fold 目录获取可用 folds，不加载任何 checkpoint 权重。"""
     mf = _to_path(model_folder)
     fold_dirs = sorted(
-        [d for d in mf.iterdir() if d.is_dir() and d.name.startswith("fold_") and d.name != "fold_all"],
+        [d for d in mf.iterdir() if d.is_dir() and d.name.startswith("fold_")],
         key=lambda d: d.name,
     )
-    available_folds: List[int] = []
+    available_folds: List[Union[int, str]] = []
     for fd in fold_dirs:
         ckpt_path = fd / checkpoint_name
         if ckpt_path.exists():
             fold_id_str = fd.name.split("_")[-1]
-            available_folds.append(int(fold_id_str))
+            available_folds.append(
+                "all" if fold_id_str == "all" else int(fold_id_str)
+            )
     if not available_folds:
-        raise FileNotFoundError(f"模型目录中未找到可用的 fold checkpoint: {mf}")
+        raise FileNotFoundError(f"No usable fold checkpoint was found in the model folder: {mf}")
     return available_folds
 
 
@@ -659,7 +661,7 @@ def _resolve_model_folder(
     if model_folder is not None:
         folder = str(_to_path(model_folder))
         if not Path(folder).exists():
-            raise FileNotFoundError(f"模型目录不存在: {folder}")
+            raise FileNotFoundError(f"Model folder does not exist: {folder}")
         return folder
 
     from nnunetv2.utilities.file_path_utilities import get_output_folder
@@ -701,7 +703,7 @@ def _export_prediction_to_target(
         try:
             _repair_nifti_header_with_nibabel(pred_nifti_path, target_path)
         except Exception as exc:
-            print(f"[警告] NIfTI header 重写失败，改为直接复制预测结果: {pred_nifti_path} ({exc})")
+            print(f"[Warning] NIfTI header rewrite failed; copying the prediction directly: {pred_nifti_path} ({exc})")
             shutil.copy2(pred_nifti_path, target_path)
         return
 
@@ -712,13 +714,13 @@ def _export_prediction_to_target(
         ref_img = sitk.ReadImage(str(reference_image_path))
         pred_img.CopyInformation(ref_img)
     except Exception as exc:
-        print(f"[警告] 读取参考图像失败，跳过 CopyInformation: {reference_image_path} ({exc})")
+        print(f"[Warning] Reference image could not be read; CopyInformation was skipped: {reference_image_path} ({exc})")
 
     if suffix in {".mha", ".mhd", ".nrrd"}:
         sitk.WriteImage(pred_img, str(target_path))
         return
 
-    raise ValueError(f"不支持的输出格式: {target_path}")
+    raise ValueError(f"Unsupported output format: {target_path}")
 
 
 def stage_predict(
@@ -1005,12 +1007,12 @@ def _read_model_meta(model_folder: Union[str, Path], checkpoint_name: str = "che
 
     mf = _to_path(model_folder)
     if not mf.exists():
-        raise FileNotFoundError(f"模型目录不存在: {mf}")
+        raise FileNotFoundError(f"Model folder does not exist: {mf}")
 
     # --- 从 plans.json 读取 plans 标识名 ---
     plans_json_path = mf / "plans.json"
     if not plans_json_path.exists():
-        raise FileNotFoundError(f"模型目录中缺少 plans.json: {plans_json_path}")
+        raise FileNotFoundError(f"plans.json is missing from the model folder: {plans_json_path}")
     with plans_json_path.open("r", encoding="utf-8") as f:
         plans_data = json.load(f)
     plans_identifier = plans_data.get("plans_name", "nnUNetPlans")
@@ -1117,7 +1119,7 @@ def easy_predict(
     # 步骤 1：打印模型元信息
     # ------------------------------------------------------------------ #
     print(f"\n{'=' * 72}")
-    print("模型元信息（自动从模型目录读取）")
+    print("Model metadata (read from the trained model folder)")
     print(f"  model_folder        : {model_folder}")
     print(f"  dataset_name        : {meta['dataset_name']}")
     print(f"  dataset_id          : {meta['dataset_id']}")
@@ -1172,11 +1174,11 @@ def easy_predict(
     # 步骤 5：根据操作系统选择推理策略
     # ------------------------------------------------------------------ #
     is_windows = platform.system() == "Windows"
-    strategy = "单线程（Windows 优化）" if is_windows else f"多进程（Linux, prep={num_processes_preprocessing}, export={num_processes_segmentation_export}）"
+    strategy = "single process (Windows)" if is_windows else f"multiprocess (Linux, prep={num_processes_preprocessing}, export={num_processes_segmentation_export})"
 
     print(f"\n{'=' * 72}")
-    print("预测")
-    print(f"  推理策略            : {strategy}")
+    print("Prediction")
+    print(f"  execution strategy  : {strategy}")
     print(f"  device              : {device}")
     print(f"  input_path          : {real_input}")
     print(f"  output_path         : {real_output}")
@@ -1195,7 +1197,7 @@ def easy_predict(
         else None
     )
     if enable_stats and gpu_monitor is not None and not gpu_monitor.available:
-        print("[提示] 未检测到可用 NVML/GPU，显存统计将自动降级为 0，仅记录时间。")
+        print("[Info] NVML/GPU metrics are unavailable; only timing will be recorded.")
 
     # ------------------------------------------------------------------ #
     # 步骤 7：推理
@@ -1233,12 +1235,12 @@ def easy_predict(
             base = real_output if real_output.is_dir() else real_output.parent
             stats_output_file = base / f"prediction_stats_{ts}.csv"
         csv_path = time_stats.export_csv(stats_output_file)
-        print(f"[统计] CSV 已保存: {csv_path}")
+        print(f"[Statistics] CSV saved: {csv_path}")
 
         if gpu_monitor is not None:
             gpu_monitor.close()
 
-    print("\n预测完成。")
+    print("\nPrediction completed.")
 
 
 def _easy_predict_singlethread(
@@ -1272,10 +1274,10 @@ def _easy_predict_singlethread(
             size, spacing = collect_image_metadata(src)
             start_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-            print(f"\n[{idx}/{len(input_files)}] 预测: {src.name}")
-            print(f"  输入尺寸(size)       : {list(size)}")
-            print(f"  输入间距(spacing)    : {[round(s, 6) for s in spacing]}")
-            print(f"  目标输出             : {target_output}")
+            print(f"\n[{idx}/{len(input_files)}] Predicting: {src.name}")
+            print(f"  input size           : {list(size)}")
+            print(f"  input spacing        : {[round(s, 6) for s in spacing]}")
+            print(f"  target output        : {target_output}")
 
             case_id = f"case_{idx:05d}"
             converted_input = convert_to_nnunet_format(src, temp_root_path / "inputs", case_id)
@@ -1306,7 +1308,7 @@ def _easy_predict_singlethread(
                 peak, valley, diff = 0.0, 0.0, 0.0
 
             if not pred_nifti.exists():
-                raise FileNotFoundError(f"预测输出未生成: {pred_nifti}")
+                raise FileNotFoundError(f"Prediction output was not produced: {pred_nifti}")
 
             _export_prediction_to_target(
                 pred_nifti_path=pred_nifti,
@@ -1314,9 +1316,9 @@ def _easy_predict_singlethread(
                 reference_image_path=src,
             )
 
-            print(f"  预测耗时(s)          : {pred_time:.3f}")
+            print(f"  prediction time (s)  : {pred_time:.3f}")
             if enable_stats:
-                print(f"  显存统计(MB)         : peak={peak:.2f}, valley={valley:.2f}, diff={diff:.2f}")
+                print(f"  GPU memory (MB)      : peak={peak:.2f}, valley={valley:.2f}, diff={diff:.2f}")
 
             if enable_stats:
                 record = CaseStats(
@@ -1372,9 +1374,9 @@ def _easy_predict_multiprocess(
             src_list.append(src)
 
             size, spacing = collect_image_metadata(src)
-            print(f"\n[{idx}/{len(input_files)}] 准备: {src.name}")
-            print(f"  输入尺寸(size)       : {list(size)}")
-            print(f"  输入间距(spacing)    : {[round(s, 6) for s in spacing]}")
+            print(f"\n[{idx}/{len(input_files)}] Preparing: {src.name}")
+            print(f"  input size           : {list(size)}")
+            print(f"  input spacing        : {[round(s, 6) for s in spacing]}")
 
         # 整批推理（nnUNet 内部自行管理多进程预处理和导出）
         if gpu_monitor is not None:
@@ -1398,8 +1400,8 @@ def _easy_predict_multiprocess(
             peak, valley, diff = 0.0, 0.0, 0.0
 
         avg_time = total_pred_time / len(input_files) if input_files else 0.0
-        print(f"\n  批量推理总耗时(s)    : {total_pred_time:.3f}")
-        print(f"  平均每病例(s)        : {avg_time:.3f}")
+        print(f"\n  total prediction time (s): {total_pred_time:.3f}")
+        print(f"  average per case (s)     : {avg_time:.3f}")
 
         # 将预测结果导出到目标路径，并收集统计信息
         file_ending = predictor.dataset_json.get("file_ending", ".nii.gz")
@@ -1409,14 +1411,14 @@ def _easy_predict_multiprocess(
             pred_nifti = temp_outputs / f"{case_id}{file_ending}"
 
             if not pred_nifti.exists():
-                raise FileNotFoundError(f"预测输出未生成: {pred_nifti}")
+                raise FileNotFoundError(f"Prediction output was not produced: {pred_nifti}")
 
             _export_prediction_to_target(
                 pred_nifti_path=pred_nifti,
                 target_path=target_output,
                 reference_image_path=src,
             )
-            print(f"  已导出: {target_output}")
+            print(f"  Exported: {target_output}")
 
             if enable_stats:
                 size, spacing = collect_image_metadata(src)
@@ -2330,4 +2332,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

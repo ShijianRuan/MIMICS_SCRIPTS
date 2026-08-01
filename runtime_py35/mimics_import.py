@@ -1681,7 +1681,25 @@ def _import_monitor_tick(monitor):
     status, result = _check_job_status(job_dir)
 
     if status == "running":
+        detail = str(monitor.get("case_id") or "case")
+        due, elapsed = runtime_common.progress_notice_due(
+            monitor,
+            "case_preparation",
+            detail=detail,
+            interval_seconds=60.0,
+            initial_delay_seconds=30.0,
+        )
+        if due:
+            _user_progress(
+                logging.INFO,
+                "Import is still preparing {0} ({1}s). Mimics remains "
+                "available. Use 04 Stop Import Queue to cancel.".format(
+                    detail, int(elapsed)
+                ),
+            )
         return  # still running, next tick will check again
+
+    runtime_common.clear_progress_notice(monitor, "case_preparation")
 
     monitor["done"] = True
     _stop_import_monitor(monitor_key)
@@ -1942,7 +1960,29 @@ def _batch_prepare_tick_impl(monitor):
     status, result = _check_job_status(job_dir)
 
     if status == "running":
+        detail = str(monitor.get("case_id") or "case")
+        due, elapsed = runtime_common.progress_notice_due(
+            monitor,
+            "case_preparation",
+            detail=detail,
+            interval_seconds=60.0,
+            initial_delay_seconds=30.0,
+        )
+        if due:
+            _user_progress(
+                logging.INFO,
+                "Import is still preparing {0} ({1}s); completed {2}/{3}, "
+                "failed {4}. Use 04 Stop Import Queue to cancel.".format(
+                    detail,
+                    int(elapsed),
+                    int(monitor.get("completed", 0) or 0),
+                    int(monitor.get("total", 0) or 0),
+                    int(monitor.get("failed", 0) or 0),
+                ),
+            )
         return  # still running, next tick will check again
+
+    runtime_common.clear_progress_notice(monitor, "case_preparation")
 
     # Case finished (done or error).
     # Set busy flag to prevent re-entrancy during message_box etc.
@@ -2862,6 +2902,30 @@ def _first_mcs_monitor_tick(monitor):
                     ).format(os.path.join(output_dir, "logs", "_create_mcs_batch.log")),
                     ui_blocking=False,
                 )
+            elif status.get("status") not in ("closed", "failed", "cancelled"):
+                detail = "{0}|{1}|{2}".format(
+                    status.get("status") or "waiting",
+                    status.get("case_id") or "",
+                    status.get("completed") or 0,
+                )
+                due, elapsed = runtime_common.progress_notice_due(
+                    monitor,
+                    "mcs_creation_progress",
+                    detail=detail,
+                    interval_seconds=60.0,
+                    initial_delay_seconds=60.0,
+                )
+                if due:
+                    _user_progress(
+                        logging.INFO,
+                        "Background .mcs creation is still running ({0}s in "
+                        "the current stage); completed {1}, failed {2}. Use "
+                        "04 Stop Import Queue to cancel.".format(
+                            int(elapsed),
+                            int(status.get("completed", 0) or 0),
+                            int(status.get("failed", 0) or 0),
+                        ),
+                    )
         return
 
     # Timeout check
@@ -2939,6 +3003,21 @@ def _first_mcs_monitor_tick(monitor):
         except Exception as exc:
             _append_import_log(output_dir, "Could not automatically open .mcs {0}: {1}".format(mcs_path, exc))
         return
+
+    due, elapsed = runtime_common.progress_notice_due(
+        monitor,
+        "first_mcs_wait",
+        detail=str(target_mcs or output_dir),
+        interval_seconds=60.0,
+        initial_delay_seconds=30.0,
+    )
+    if due:
+        _user_progress(
+            logging.INFO,
+            "Waiting for the first .mcs file ({0}s). Preparation and "
+            "background Mimics continue independently; use 04 Stop Import "
+            "Queue to cancel.".format(int(elapsed)),
+        )
 
 
 def _start_first_mcs_monitor(output_dir, target_mcs=None, timeout_seconds=900, poll_seconds=2.0,
@@ -3270,7 +3349,23 @@ def _discover_monitor_tick(monitor):
             )
 
         if status == "running":
+            due, elapsed = runtime_common.progress_notice_due(
+                monitor,
+                "dataset_discovery",
+                detail="running",
+                interval_seconds=60.0,
+                initial_delay_seconds=30.0,
+            )
+            if due:
+                _user_progress(
+                    logging.INFO,
+                    "Dataset discovery is still running in external Python "
+                    "({0}s). Mimics remains available. Use 04 Stop Import "
+                    "Queue to cancel.".format(int(elapsed)),
+                )
             return  # still discovering
+
+        runtime_common.clear_progress_notice(monitor, "dataset_discovery")
 
         monitor["done"] = True
         _stop_import_monitor(monitor_key)

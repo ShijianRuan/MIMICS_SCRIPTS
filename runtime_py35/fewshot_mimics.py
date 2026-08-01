@@ -36,6 +36,7 @@ BUTTON_CANCEL = "Cancel"
 BUTTON_UPDATE_SELECTED = "Update Selected Mask"
 SOURCE_IMAGE_PATH_METADATA = "mimics_script.source_image_path"
 SOURCE_IMAGE_SHAPE_METADATA = "mimics_script.source_image_shape"
+SOURCE_IMAGE_MODALITY_METADATA = "mimics_script.source_image_modality"
 SOURCE_VOXEL_TO_RAS_MATRIX_METADATA = "mimics_script.source_voxel_to_ras_matrix"
 MIMICS_VOXEL_TO_RAS_MATRIX_METADATA = "mimics_script.mimics_voxel_to_ras_matrix"
 
@@ -662,6 +663,7 @@ def _active_source_geometry_payload():
     return {
         "source_image_path": _metadata_get(image, SOURCE_IMAGE_PATH_METADATA, ""),
         "source_shape": shape,
+        "source_modality": _metadata_get(image, SOURCE_IMAGE_MODALITY_METADATA, ""),
         "source_voxel_to_ras_matrix": matrix,
     }
 
@@ -2550,6 +2552,7 @@ def _launch_bridge_mask_to_buffer(monitor, status):
             **_background_process_kwargs()
         )
     monitor["bridge_started"] = True
+    monitor["bridge_process"] = process
     monitor["bridge_pid"] = process.pid
     monitor["bridge_result_path"] = result_path
     monitor["bridge_output_path"] = output_path
@@ -2732,7 +2735,7 @@ def _set_mask_from_u8(mask, path, shape):
             pixels = memoryview(bytearray(raw)).cast("?", shape=list(shape))
             mask.set_voxel_buffer(pixels)
     _update_gui()
-    _apply()
+    runtime_common.execute_mimics_transaction(mimics, _apply)
     _update_gui()
     try:
         mask.visible = True
@@ -2745,6 +2748,15 @@ def _stop_monitor(key):
     monitor = _MONITORS.pop(key, None)
     if not monitor:
         return
+    bridge_process = monitor.get("bridge_process")
+    if bridge_process is not None and bridge_process.poll() is None:
+        try:
+            runtime_common.terminate_process_async(
+                process=bridge_process,
+                graceful_seconds=0.5,
+            )
+        except Exception:
+            pass
     timer = monitor.get("timer")
     if timer is not None:
         try:
@@ -2973,7 +2985,30 @@ def _monitor_tick_locked(monitor):
             monitor["last_line"] = line
             _mimics_log(logging.INFO, "DINOv3 training status: {0}".format(line))
         state = status.get("status")
-        if state in ("completed", "failed", "cancelled"):
+        if state in (
+            "waiting_for_gpu",
+            "waiting_for_background_mimics",
+            "waiting_for_remote_gpu",
+            "waiting_for_dataset",
+        ):
+            due, elapsed = runtime_common.progress_notice_due(
+                monitor,
+                "dino_train_wait",
+                detail="{0}|{1}".format(state, line),
+                interval_seconds=60.0,
+                initial_delay_seconds=60.0,
+            )
+            if due:
+                _mimics_log(
+                    logging.INFO,
+                    "DINOv3 training is still waiting ({0}s): {1}. Use 05 "
+                    "Stop AI Task to cancel and release its resources.".format(
+                        int(elapsed), line
+                    ),
+                )
+        else:
+            runtime_common.clear_progress_notice(monitor, "dino_train_wait")
+        if state in ("completed", "failed", "cancelled", "abandoned"):
             _stop_monitor(key)
             if state == "completed":
                 message = "Few-shot training completed.\n\n{0}".format(line)
@@ -2992,8 +3027,39 @@ def _monitor_tick_locked(monitor):
             return
         return
     state = status.get("status")
-    if state in ("", None, "launching", "running", "waiting_for_gpu", "waiting_for_background_mimics"):
+    if state in (
+        "",
+        None,
+        "launching",
+        "running",
+        "waiting_for_gpu",
+        "waiting_for_background_mimics",
+        "waiting_for_remote_gpu",
+    ):
+        line = _format_job_line(status)
+        due, elapsed = runtime_common.progress_notice_due(
+            monitor,
+            "dino_infer_progress",
+            detail="{0}|{1}".format(state, line),
+            interval_seconds=60.0,
+            initial_delay_seconds=0.0,
+        )
+        if due:
+            suffix = (
+                " Use 05 Stop AI Task to cancel and release its resources."
+                if state and str(state).startswith("waiting_for")
+                else ""
+            )
+            _mimics_log(
+                logging.INFO,
+                "DINOv3 prediction status{0}: {1}.{2}".format(
+                    " ({0}s)".format(int(elapsed)) if elapsed >= 1.0 else "",
+                    line or str(state or "Starting"),
+                    suffix,
+                ),
+            )
         return
+    runtime_common.clear_progress_notice(monitor, "dino_infer_progress")
     if state == "stopping":
         _monitor_stopping_job(monitor, status, _format_job_line(status))
         return
@@ -3016,9 +3082,23 @@ def _monitor_tick_locked(monitor):
     if not monitor.get("bridge_started"):
         target_open, reason = _monitor_target_is_open(monitor)
         if not target_open:
-            if not monitor.get("waiting_to_apply_logged"):
+            due, elapsed = runtime_common.progress_notice_due(
+                monitor,
+                "dino_apply_target",
+                detail=reason,
+                interval_seconds=60.0,
+                initial_delay_seconds=0.0,
+            )
+            if due:
                 monitor["waiting_to_apply_logged"] = True
-                _mimics_log(logging.INFO, "DINOv3 prediction is ready but was not applied: {0}".format(reason))
+                _mimics_log(
+                    logging.INFO,
+                    "DINOv3 prediction is ready but has not been applied{0}: "
+                    "{1} Use 05 Stop AI Task to discard the pending result.".format(
+                        " ({0}s)".format(int(elapsed)) if elapsed >= 1.0 else "",
+                        reason,
+                    ),
+                )
             status["application_state"] = "waiting_for_source_case"
             status["application_message"] = reason
             status["updated_at_epoch"] = time.time()
@@ -3028,6 +3108,7 @@ def _monitor_tick_locked(monitor):
                 pass
             return
         monitor["waiting_to_apply_logged"] = False
+        runtime_common.clear_progress_notice(monitor, "dino_apply_target")
         status.pop("application_state", None)
         status.pop("application_message", None)
         try:
@@ -3049,6 +3130,22 @@ def _monitor_tick_locked(monitor):
         return
     target_open, reason = _monitor_target_is_open(monitor)
     if not target_open:
+        due, elapsed = runtime_common.progress_notice_due(
+            monitor,
+            "dino_apply_target",
+            detail=reason,
+            interval_seconds=60.0,
+            initial_delay_seconds=0.0,
+        )
+        if due:
+            _mimics_log(
+                logging.INFO,
+                "DINOv3 prediction conversion is ready but application is "
+                "waiting{0}: {1} Use 05 Stop AI Task to discard it.".format(
+                    " ({0}s)".format(int(elapsed)) if elapsed >= 1.0 else "",
+                    reason,
+                ),
+            )
         status["application_state"] = "waiting_for_source_case"
         status["application_message"] = reason
         try:
@@ -3056,6 +3153,7 @@ def _monitor_tick_locked(monitor):
         except Exception:
             pass
         return
+    runtime_common.clear_progress_notice(monitor, "dino_apply_target")
     try:
         mask = _prediction_target_mask(monitor)
         _set_mask_from_u8(mask, bridge_result["output_path"], bridge_result["mimics_shape"])
@@ -3102,7 +3200,24 @@ def _monitor_tick(monitor):
         "mask_buffer_access", "DINOv3 result monitor"
     )
     if not operation_token:
+        owner = runtime_common.active_local_operation("mask_buffer_access") or {}
+        owner_text = str(owner.get("owner") or "another Mask operation")
+        due, elapsed = runtime_common.progress_notice_due(
+            monitor,
+            "dino_buffer_wait",
+            detail=owner_text,
+            interval_seconds=60.0,
+            initial_delay_seconds=5.0,
+        )
+        if due:
+            _mimics_log(
+                logging.INFO,
+                "DINOv3 result handling is waiting for {0} ({1}s). Mimics "
+                "remains available; stop the owning task if this wait is no "
+                "longer wanted.".format(owner_text, int(elapsed)),
+            )
         return
+    runtime_common.clear_progress_notice(monitor, "dino_buffer_wait")
     monitor["busy"] = True
     try:
         _monitor_tick_locked(monitor)
@@ -3684,9 +3799,69 @@ def _request_fewshot_cancel_async(job, status_path, grace_seconds=30.0):
     thread.start()
 
 
+def _stop_pending_inference_application():
+    pending = []
+    for monitor in list(_MONITORS.values()):
+        if str(monitor.get("kind") or "") != "infer":
+            continue
+        status = _read_json(monitor.get("status_path"), {}) or {}
+        if str(status.get("status") or "").lower() != "completed":
+            continue
+        if bool(status.get("applied_to_mimics")):
+            continue
+        pending.append(
+            (
+                float(status.get("updated_at_epoch", 0.0) or 0.0),
+                monitor,
+                status,
+            )
+        )
+    if not pending:
+        return False
+    pending.sort(key=lambda row: row[0], reverse=True)
+    _updated, monitor, status = pending[0]
+    answer = mimics.dialogs.question_box(
+        message=(
+            "Discard the pending DINOv3 result application?\n\n"
+            "The completed prediction file will be kept, but it will not be "
+            "applied automatically to a Mimics Mask."
+        ),
+        buttons=BUTTON_STOP + ";" + BUTTON_CANCEL,
+        title=TITLE,
+        ui_blocking=True,
+    )
+    if answer != BUTTON_STOP:
+        return True
+    status["application_cancelled"] = True
+    status["application_cancelled_at_epoch"] = time.time()
+    status["application_state"] = "cancelled"
+    status["application_message"] = (
+        "Pending Mimics application was cancelled by the user."
+    )
+    status["updated_at_epoch"] = time.time()
+    try:
+        _write_json_atomic(monitor.get("status_path"), status)
+    except Exception as exc:
+        _mimics_log(
+            logging.WARNING,
+            "Could not record pending DINOv3 application cancellation: {0}".format(
+                exc
+            ),
+        )
+    _stop_monitor(monitor.get("monitor_key"))
+    _mimics_log(
+        logging.INFO,
+        "Pending DINOv3 result application was cancelled; the existing "
+        "Mimics Mask was not changed.",
+    )
+    return True
+
+
 def _stop_latest_job():
     ts_root = _resolve_status_root()
     if not ts_root or not os.path.isdir(ts_root):
+        if _stop_pending_inference_application():
+            return 0
         mimics.dialogs.message_box(
             "No recent DINOv3 workspace was found.",
             title=TITLE,
@@ -3695,6 +3870,8 @@ def _stop_latest_job():
         return 0
     status_path, job = _latest_active_job(ts_root)
     if not job:
+        if _stop_pending_inference_application():
+            return 0
         mimics.dialogs.message_box("No running DINOv3 task was found.", title=TITLE, ui_blocking=False)
         return 0
     current_status = str(job.get("status") or "").lower()

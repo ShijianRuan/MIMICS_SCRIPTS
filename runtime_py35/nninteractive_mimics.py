@@ -1172,6 +1172,17 @@ def _current_project_path():
     return ""
 
 
+def _same_project_path(left, right):
+    if not left or not right:
+        return not left and not right
+    try:
+        return os.path.normcase(os.path.abspath(str(left))) == os.path.normcase(
+            os.path.abspath(str(right))
+        )
+    except Exception:
+        return False
+
+
 def _relocated_source_image_path():
     project_path = _current_project_path()
     if not project_path:
@@ -1681,7 +1692,8 @@ def _mask_sha256(mask, shape_hint=None):
 
 
 def _set_mask_from_u8(mask, path, shape):
-    raw = open(path, "rb").read()
+    with open(path, "rb") as handle:
+        raw = handle.read()
     expected = int(shape[0]) * int(shape[1]) * int(shape[2])
     if len(raw) != expected:
         raise RuntimeError("Prediction byte count mismatch: {0} != {1}".format(len(raw), expected))
@@ -1694,7 +1706,9 @@ def _set_mask_from_u8(mask, path, shape):
         except ImportError:
             pixels = memoryview(bytearray(raw)).cast("?", shape=list(shape))
             mask.set_voxel_buffer(pixels)
-    _with_gui_updates_disabled(_apply)
+    _with_gui_updates_disabled(
+        lambda: runtime_common.execute_mimics_transaction(mimics, _apply)
+    )
 
 
 def _choose_completed_result_target(image, target, state, result):
@@ -3121,12 +3135,41 @@ def _get_or_start_image_worker(config, image, jobs_root, allow_buffer_export=Tru
     ):
         os.makedirs(path)
 
-    image_export = _export_image_for_nninteractive(
-        config,
-        image,
-        os.path.join(inputs_dir, "image.raw"),
-        allow_buffer_export=allow_buffer_export,
+    snapshot_token = runtime_common.try_acquire_local_operation(
+        "mask_buffer_access", "nnInteractive image preparation"
     )
+    if not snapshot_token:
+        shutil.rmtree(worker_dir, ignore_errors=True)
+        owner = runtime_common.active_local_operation("mask_buffer_access") or {}
+        raise RuntimeError(
+            "nnInteractive cannot prepare its image while {0} is using Mimics buffers. "
+            "Wait for that short operation to finish or stop it, then retry.".format(
+                owner.get("owner") or "another Mimics-Script task"
+            )
+        )
+    try:
+        image_export = _export_image_for_nninteractive(
+            config,
+            image,
+            os.path.join(inputs_dir, "image.raw"),
+            allow_buffer_export=allow_buffer_export,
+        )
+        try:
+            current_image = mimics.data.images.get_active()
+        except Exception:
+            current_image = None
+        if current_image is None or _object_id(current_image) != image_guid:
+            raise RuntimeError(
+                "The active image changed while nnInteractive was preparing its input. "
+                "The partial worker was discarded; reactivate the intended image and retry."
+            )
+    except Exception:
+        shutil.rmtree(worker_dir, ignore_errors=True)
+        raise
+    finally:
+        runtime_common.release_local_operation(
+            "mask_buffer_access", snapshot_token
+        )
     if image_export is None:
         shutil.rmtree(worker_dir, ignore_errors=True)
         _mimics_log(
@@ -3275,30 +3318,50 @@ def _start_async_job(config, image, target, source=None, write_mode="in_place"):
     ):
         os.makedirs(path)
 
-    if shared_worker is None:
-        image_export = _export_image_for_nninteractive(config, image, os.path.join(inputs_dir, "image.raw"))
-    else:
-        image_export = {
-            "kind": "shared_image_worker",
-            "path": "",
-            "shape": shared_worker["shape"],
-            "dtype": "",
-            "sha256": "",
-            "source": shared_worker.get("image_source", "shared_image_worker"),
-            "source_kind": shared_worker.get("image_source_kind", ""),
-            "source_index_space": shared_worker.get("image_source_index_space", ""),
-            "source_world_coordinate_system": shared_worker.get("image_source_world_coordinate_system", ""),
-            "mimics_world_coordinate_system": shared_worker.get("image_mimics_world_coordinate_system", ""),
-            "mimics_to_source_index_matrix": shared_worker.get("image_mimics_to_source_index_matrix", ""),
-        }
-    base_export = _export_mask(source, os.path.join(inputs_dir, "target_at_start.u8"), image_export["shape"])
-    if image_export["shape"] != base_export["shape"]:
+    snapshot_token = runtime_common.try_acquire_local_operation(
+        "mask_buffer_access", "nnInteractive input snapshot"
+    )
+    if not snapshot_token:
         shutil.rmtree(job_dir, ignore_errors=True)
+        owner = runtime_common.active_local_operation("mask_buffer_access") or {}
         raise RuntimeError(
-            "Image and target Mask buffer shapes differ: {0} vs {1}".format(
-                image_export["shape"],
-                base_export["shape"],
+            "nnInteractive cannot snapshot the image and Mask while {0} is using Mimics buffers. "
+            "Wait for that short operation to finish or stop it, then retry.".format(
+                owner.get("owner") or "another Mimics-Script task"
             )
+        )
+    try:
+        if shared_worker is None:
+            image_export = _export_image_for_nninteractive(config, image, os.path.join(inputs_dir, "image.raw"))
+        else:
+            image_export = {
+                "kind": "shared_image_worker",
+                "path": "",
+                "shape": shared_worker["shape"],
+                "dtype": "",
+                "sha256": "",
+                "source": shared_worker.get("image_source", "shared_image_worker"),
+                "source_kind": shared_worker.get("image_source_kind", ""),
+                "source_index_space": shared_worker.get("image_source_index_space", ""),
+                "source_world_coordinate_system": shared_worker.get("image_source_world_coordinate_system", ""),
+                "mimics_world_coordinate_system": shared_worker.get("image_mimics_world_coordinate_system", ""),
+                "mimics_to_source_index_matrix": shared_worker.get("image_mimics_to_source_index_matrix", ""),
+            }
+        base_export = _export_mask(source, os.path.join(inputs_dir, "target_at_start.u8"), image_export["shape"])
+        if image_export["shape"] != base_export["shape"]:
+            shutil.rmtree(job_dir, ignore_errors=True)
+            raise RuntimeError(
+                "Image and target Mask buffer shapes differ: {0} vs {1}".format(
+                    image_export["shape"],
+                    base_export["shape"],
+                )
+            )
+        # Use the same Mimics-side lease for the base export and stale-check
+        # anchor so another timer cannot modify the target between them.
+        target_sha256 = _mask_sha256(target, image_export["shape"])
+    finally:
+        runtime_common.release_local_operation(
+            "mask_buffer_access", snapshot_token
         )
     if shared_worker is None:
         parameters = _bridge_parameters(config, image_export, base_export)
@@ -3317,13 +3380,6 @@ def _start_async_job(config, image, target, source=None, write_mode="in_place"):
         worker_log_path = shared_worker["worker_log"]
         runtime_log = shared_worker["runtime_log"]
 
-    # Hash the target mask itself (not the exported .u8 file) so the post-
-    # inference stale check compares like with like: both expected and current
-    # come from _mask_sha256(target, ...) on the same object. Using the exported
-    # file hash here made the check fire whenever get_voxel_buffer().tobytes()
-    # marshalled differently across two calls, falsely flagging every result as
-    # stale and blocking the overwrite/new-mask choice.
-    target_sha256 = _mask_sha256(target, image_export["shape"])
     state = {
         "_job_dir": job_dir,
         "_worker_dir": worker_dir,
@@ -3333,6 +3389,7 @@ def _start_async_job(config, image, target, source=None, write_mode="in_place"):
         "worker_dir": worker_dir,
         "image_guid": _object_id(image),
         "image_name": str(getattr(image, "name", "")),
+        "launch_project_path": _current_project_path() or "",
         "image_source": image_export.get("source", "mimics_buffer"),
         "image_source_kind": image_export.get("source_kind", ""),
         "image_source_index_space": image_export.get("source_index_space", ""),
@@ -3606,7 +3663,24 @@ def _async_monitor_tick(monitor):
         "mask_buffer_access", "nnInteractive result monitor"
     )
     if not operation_token:
+        owner = runtime_common.active_local_operation("mask_buffer_access") or {}
+        owner_text = str(owner.get("owner") or "another Mask operation")
+        due, elapsed = runtime_common.progress_notice_due(
+            monitor,
+            "nninteractive_buffer_wait",
+            detail=owner_text,
+            interval_seconds=60.0,
+            initial_delay_seconds=5.0,
+        )
+        if due:
+            _mimics_log(
+                logging.INFO,
+                "nnInteractive result handling is waiting for {0} ({1}s). "
+                "Run nnInteractive again to inspect or discard the pending "
+                "session.".format(owner_text, int(elapsed)),
+            )
         return
+    runtime_common.clear_progress_notice(monitor, "nninteractive_buffer_wait")
     monitor["busy"] = True
     job_dir = monitor["state"]["_job_dir"]
     try:
@@ -3620,7 +3694,37 @@ def _async_monitor_tick(monitor):
             monitor["target"],
             monitor["state"],
         )
+        if outcome == "waiting":
+            worker = _async_worker_status(
+                _async_state_worker_dir(monitor["state"])
+            )
+            stage = str(
+                worker.get("stage")
+                or worker.get("status")
+                or monitor["state"].get("status")
+                or "running"
+            )
+            sequence = monitor["state"].get("pending_sequence")
+            due, elapsed = runtime_common.progress_notice_due(
+                monitor,
+                "nninteractive_inference",
+                detail="{0}|{1}".format(stage, sequence),
+                interval_seconds=60.0,
+                initial_delay_seconds=30.0,
+            )
+            if due:
+                _mimics_log(
+                    logging.INFO,
+                    "nnInteractive prediction is still running ({0}s). "
+                    "Stage: {1}; sequence: {2}. Mimics remains available. "
+                    "Run nnInteractive again to inspect or discard it.".format(
+                        int(elapsed), stage, sequence
+                    ),
+                )
         if outcome != "waiting":
+            runtime_common.clear_progress_notice(
+                monitor, "nninteractive_inference"
+            )
             monitor["done"] = True
             _stop_async_monitor(job_dir)
     except Exception as error:
@@ -3869,6 +3973,27 @@ def _handle_async_result(image, target, state):
                 result_path,
             )
         )
+    try:
+        active_image = mimics.data.images.get_active()
+    except Exception:
+        active_image = None
+    launch_project = str(state.get("launch_project_path") or "")
+    project_changed = bool(
+        launch_project
+        and not _same_project_path(_current_project_path(), launch_project)
+    )
+    if (
+        project_changed
+        or active_image is None
+        or _object_id(active_image) != state.get("image_guid")
+    ):
+        _mimics_log(
+            logging.WARNING,
+            "nnInteractive result was not applied because the active project or image changed while prediction was running. "
+            "The newly opened project was not modified; start a new AI session there if needed.",
+        )
+        _close_async_job(target, state, "active_project_changed")
+        return "ready"
     if _object_id(image) != state.get("image_guid") or _object_id(target) != state.get(
         "target_guid"
     ):
@@ -4345,19 +4470,33 @@ def _run_with_config(config):
     image = mimics.data.images.get_active()
     if image is None:
         raise RuntimeError("Open a project and activate an image set before running nnInteractive.")
+    buffer_owner = runtime_common.active_local_operation("mask_buffer_access")
+    if buffer_owner:
+        mimics.dialogs.message_box(
+            message=(
+                "nnInteractive cannot take a consistent image and Mask snapshot while {0} is using Mimics buffers.\n\n"
+                "Wait for that operation to finish or stop it, then retry."
+            ).format(buffer_owner.get("owner") or "another Mimics-Script task"),
+            title=TITLE,
+            ui_blocking=False,
+        )
+        return 1
     gpu_holder = runtime_common.active_resource_lock(_project_root(), "gpu.lock")
     if gpu_holder:
         owner = str(gpu_holder.get("owner") or "").lower()
-        kind = str(gpu_holder.get("kind") or "").lower()
-        if (
-            "dinov3" in owner
-            or "finetune" in owner
-            or kind in ("fewshot_train", "fewshot_infer", "nninteractive_finetune")
-        ):
+        holder_is_nninteractive_server = bool(
+            "nninteractive" in owner
+            and (
+                "server" in owner
+                or str(gpu_holder.get("state_path") or "").strip()
+            )
+        )
+        if not holder_is_nninteractive_server:
             mimics.dialogs.message_box(
                 message=(
                     "The GPU is currently used by {0}.\n\n"
                     "nnInteractive was not started, so no prompt or Mask state was changed. "
+                    "Interactive prompting should not sit behind a long training or inference queue. "
                     "Wait for that task to finish, stop it from its task window, or use "
                     "Admin > Stop All Owned Background Services."
                 ).format(runtime_common.resource_lock_summary(gpu_holder)),

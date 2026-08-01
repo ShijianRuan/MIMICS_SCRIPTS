@@ -1,8 +1,8 @@
-# Remote Training Server Setup
+# Remote AI Server Setup
 
-The remote runtime is an optional addition. Local DINOv3 and nnInteractive
-training do not use these files unless a user explicitly chooses a saved
-remote server in the training window.
+The remote runtime is optional. Local DINOv3, nnInteractive, and nnU-Net
+training or inference do not use it unless a user explicitly chooses a saved
+remote server in the corresponding external window.
 
 ## Build directly on the GPU server
 
@@ -15,7 +15,8 @@ MIMICS_AI_ROOT=/srv/mimics-ai \
 ```
 
 This builds `mimics-ai-runtime:1.0`, creates the work folders, checks the
-installed base weights, and runs the container preflight. The image is built
+installed base weights, all three frameworks, and the offline container
+contract. The image is built
 once. Starting a later training job creates a small disposable container from
 the existing image and does not rebuild the image.
 
@@ -53,6 +54,9 @@ profile.
 
 - The client connects to the Linux host over SSH. Training containers do not
   run SSH and do not expose a network port.
+- Containers have `--network none`; Hugging Face, Transformers, datasets, and
+  experiment tracking are forced offline. Required weights must exist under
+  the read-only `models` mount before a job starts.
 - One training job uses one GPU and one disposable container.
 - `Automatic` GPU selection serializes against all explicitly selected GPUs.
 - Selecting GPU `0`, GPU `1`, or a GPU UUID creates an independent queue for
@@ -68,4 +72,17 @@ profile.
 - The Docker image and base weights remain installed.
 - Unchanged image and label archives are reused per case by content
   fingerprint, so adding one case does not re-upload the full dataset.
+- nnU-Net raw and preprocessed data are isolated by the complete dataset
+  fingerprint. A changed case creates a new cache namespace instead of
+  contaminating an earlier plan.
+- nnU-Net models are downloaded into the same portable local registry used by
+  local training. Remote inference reuses model and image transfer archives by
+  content identity.
 - Cached datasets expire after 30 days without use.
+- `remote_worker.log` rotates at 32 MiB with three backups.
+- Before downloading a model or nnU-Net prediction, the Windows controller
+  checks space for the remaining transfer, unpacked artifact, and a safety
+  margin. Existing registered models are not replaced on a failed download.
+- If SSH remains unavailable, Stop never claims the container was stopped. The
+  status window offers **Abandon Locally** as an explicit last resort and keeps
+  the server/container identity for administrator cleanup.

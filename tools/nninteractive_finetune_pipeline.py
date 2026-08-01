@@ -85,6 +85,7 @@ def _hidden_process_kwargs() -> dict[str, Any]:
         "creationflags": int(
             getattr(subprocess, "CREATE_NO_WINDOW", 0)
             | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            | getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)
         )
     }
 
@@ -483,6 +484,210 @@ def _ensure_binary_nifti_label(
     return destination.resolve()
 
 
+def _source_grid_path_signature(path: Path) -> dict[str, Any]:
+    """Return a cheap invalidation signature without reading image voxels."""
+    resolved = Path(path).expanduser().resolve()
+    stat = resolved.stat()
+    if resolved.is_file():
+        return {
+            "kind": "file",
+            "name": resolved.name,
+            "size": int(stat.st_size),
+            "mtime_ns": int(stat.st_mtime_ns),
+        }
+    if resolved.is_dir():
+        # DICOM series may contain thousands of files. The source directory is
+        # treated as immutable after selection, so a directory-level signature
+        # avoids turning a cache lookup back into a full dataset scan.
+        return {
+            "kind": "directory",
+            "name": resolved.name,
+            "mtime_ns": int(stat.st_mtime_ns),
+        }
+    raise FileNotFoundError("Training input does not exist: {}.".format(resolved))
+
+
+def _source_grid_case_fingerprint(
+    image_source: Path,
+    label_source: Path,
+    initial_source: Path | None,
+) -> str:
+    payload = {
+        "image": _source_grid_path_signature(image_source),
+        "label": _source_grid_path_signature(label_source),
+        "initial": (
+            _source_grid_path_signature(initial_source)
+            if initial_source is not None
+            else None
+        ),
+        "contract": "nninteractive_source_grid_inputs.v2",
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
+def _prepare_source_grid_case_cache(
+    workspace: Path,
+    task_id: str,
+    case_id: str,
+    image_source: Path,
+    label_source: Path,
+    initial_source: Path | None,
+) -> tuple[Path, Path, Path | None, bool, str, str]:
+    """Materialize one source-grid case once and reuse it across jobs.
+
+    The entry is content-addressed by cheap source signatures. Each completed
+    entry is immutable, so concurrent local/remote launches cannot overwrite a
+    usable case while another job is reading it.
+    """
+    fingerprint = _source_grid_case_fingerprint(
+        image_source, label_source, initial_source
+    )
+    entry = (
+        workspace
+        / "cache"
+        / "source_grid_inputs"
+        / safe_slug(task_id)
+        / safe_slug(case_id)
+        / fingerprint
+    )
+    image_path = entry / "image.nii.gz"
+    label_path = entry / "label.nii.gz"
+    initial_path = entry / "initial_mask.nii.gz"
+    metadata_path = entry / "metadata.json"
+    metadata = read_json(metadata_path, {}) or {}
+    expects_initial = initial_source is not None
+    initial_checked = bool(metadata.get("initial_mask_checked"))
+    has_initial = bool(metadata.get("has_initial_mask"))
+    initial_rejected_reason = str(
+        metadata.get("initial_mask_rejected_reason") or ""
+    )
+    if (
+        metadata.get("fingerprint") == fingerprint
+        and image_path.is_file()
+        and label_path.is_file()
+        and (
+            not expects_initial
+            or (
+                initial_checked
+                and (not has_initial or initial_path.is_file())
+            )
+        )
+    ):
+        return (
+            image_path.resolve(),
+            label_path.resolve(),
+            initial_path.resolve() if has_initial else None,
+            True,
+            initial_rejected_reason,
+            fingerprint,
+        )
+
+    entry.parent.mkdir(parents=True, exist_ok=True)
+    staging = entry.with_name("{}.{}.tmp".format(entry.name, uuid.uuid4().hex))
+    try:
+        staging.mkdir(parents=True)
+        staged_image = _ensure_nifti_image(
+            image_source, staging / "image.nii.gz"
+        )
+        staged_label = _ensure_binary_nifti_label(
+            label_source,
+            staging / "label.nii.gz",
+            staged_image,
+        )
+        staged_initial = None
+        has_initial = False
+        initial_rejected_reason = ""
+        if initial_source is not None:
+            staged_initial = _ensure_binary_nifti_label(
+                initial_source,
+                staging / "initial_mask.nii.gz",
+                staged_image,
+                allow_empty=True,
+            )
+            try:
+                import nibabel as nib
+                import numpy as np
+
+                final_values = np.asarray(
+                    nib.load(str(staged_label)).dataobj
+                ) != 0
+                initial_values = np.asarray(
+                    nib.load(str(staged_initial)).dataobj
+                ) != 0
+                if not initial_values.any():
+                    initial_rejected_reason = "empty"
+                elif np.array_equal(final_values, initial_values):
+                    initial_rejected_reason = "identical_to_target"
+                else:
+                    has_initial = True
+                if not has_initial:
+                    try:
+                        Path(staged_initial).unlink()
+                    except OSError:
+                        pass
+            except Exception as exc:
+                raise RuntimeError(
+                    "Could not verify the Initial Mask for {}: {}".format(
+                        case_id, exc
+                    )
+                )
+        write_json_atomic(
+            staging / "metadata.json",
+            {
+                "schema_version": "nninteractive_source_grid_input_cache.v2",
+                "fingerprint": fingerprint,
+                "case_id": str(case_id),
+                "source_image": str(image_source),
+                "source_label": str(label_source),
+                "source_initial_mask": (
+                    str(initial_source) if initial_source is not None else ""
+                ),
+                "initial_mask_checked": bool(expects_initial),
+                "has_initial_mask": bool(has_initial),
+                "initial_mask_rejected_reason": initial_rejected_reason,
+                "updated_at_epoch": time.time(),
+            },
+        )
+        try:
+            os.replace(str(staging), str(entry))
+        except OSError:
+            # A concurrent job may have published the same immutable entry.
+            metadata = read_json(metadata_path, {}) or {}
+            if not (
+                metadata.get("fingerprint") == fingerprint
+                and image_path.is_file()
+                and label_path.is_file()
+                and (
+                    not expects_initial
+                    or (
+                        bool(metadata.get("initial_mask_checked"))
+                        and (
+                            not bool(metadata.get("has_initial_mask"))
+                            or initial_path.is_file()
+                        )
+                    )
+                )
+            ):
+                raise
+            has_initial = bool(metadata.get("has_initial_mask"))
+            initial_rejected_reason = str(
+                metadata.get("initial_mask_rejected_reason") or ""
+            )
+        return (
+            image_path.resolve(),
+            label_path.resolve(),
+            initial_path.resolve() if has_initial else None,
+            False,
+            initial_rejected_reason,
+            fingerprint,
+        )
+    finally:
+        if staging.exists():
+            shutil.rmtree(str(staging), ignore_errors=True)
+
+
 def _find_exported_label(staging: Path, case_id: str) -> Path | None:
     folder = staging / case_id / "segmentations"
     candidates = sorted(folder.glob("*.nii")) + sorted(folder.glob("*.nii.gz"))
@@ -715,6 +920,7 @@ def _prepare_manifest(
     validation_path = job_dir / "validation_manifest.json"
     if manifest_path.is_file():
         return manifest_path, validation_path if validation_path.is_file() else None
+    workspace = Path(request["workspace"]).expanduser().resolve()
     source_mode = str(request.get("source_mode") or "mcs").lower()
     initial_mask_source = str(
         request.get("initial_mask_source") or "synthetic"
@@ -799,10 +1005,8 @@ def _prepare_manifest(
     )
     rows = []
     validation_rows = []
-    image_cache = job_dir / "staging" / "images"
-    label_cache = job_dir / "staging" / "labels"
-    initial_cache = job_dir / "staging" / "initial_masks_aligned"
     real_initial_count = 0
+    source_grid_cache_hits = 0
     selected = [
         row for row in request.get("cases") or [] if row.get("split") in ("train", "val")
     ]
@@ -812,9 +1016,6 @@ def _prepare_manifest(
             raise InterruptedError(action)
         case_id = str(row["case_id"])
         image_source = Path(row["image"])
-        image_path = _ensure_nifti_image(
-            image_source, image_cache / case_id / "image.nii.gz"
-        )
         if staging is not None:
             label_source = _find_exported_label(staging, case_id)
             if label_source is None:
@@ -827,11 +1028,6 @@ def _prepare_manifest(
                 continue
         else:
             label_source = Path(row["label"]).resolve()
-        label_path = _ensure_binary_nifti_label(
-            label_source,
-            label_cache / case_id / "label.nii.gz",
-            image_path,
-        )
         initial_source = None
         if initial_staging is not None:
             initial_source = _find_exported_label(
@@ -850,47 +1046,42 @@ def _prepare_manifest(
                         initial_root / case_id,
                         initial_mask_names,
                     )
-        initial_path = None
-        if initial_source is not None:
-            initial_path = _ensure_binary_nifti_label(
-                Path(initial_source),
-                initial_cache / case_id / "initial_mask.nii.gz",
-                image_path,
-                allow_empty=True,
+        (
+            image_path,
+            label_path,
+            initial_path,
+            cache_hit,
+            initial_rejected_reason,
+            source_grid_fingerprint,
+        ) = (
+            _prepare_source_grid_case_cache(
+                workspace,
+                str(
+                    request.get("prepared_cache_namespace")
+                    or request.get("task_id")
+                    or request.get("task_name")
+                    or "task"
+                ),
+                case_id,
+                image_source,
+                Path(label_source),
+                Path(initial_source) if initial_source is not None else None,
             )
-            try:
-                import nibabel as nib
-                import numpy as np
-
-                final_values = np.asarray(
-                    nib.load(str(label_path)).dataobj
-                ) != 0
-                initial_values = np.asarray(
-                    nib.load(str(initial_path)).dataobj
-                ) != 0
-                if not initial_values.any():
-                    append_log(
-                        log_path,
-                        "Ignored the Initial Mask for {} because it is empty; "
-                        "synthetic variations will be used.".format(case_id),
-                    )
-                    initial_path = None
-                elif np.array_equal(final_values, initial_values):
-                    append_log(
-                        log_path,
-                        "Ignored the Initial Mask for {} because it is "
-                        "identical to the final Target Mask; synthetic "
-                        "variations will be used.".format(case_id),
-                    )
-                    initial_path = None
-                else:
-                    real_initial_count += 1
-            except Exception as exc:
-                raise RuntimeError(
-                    "Could not verify the Initial Mask for {}: {}".format(
-                        case_id, exc
-                    )
-                )
+        )
+        if cache_hit:
+            source_grid_cache_hits += 1
+        if initial_path is not None:
+            real_initial_count += 1
+        elif initial_rejected_reason:
+            reason = {
+                "empty": "it is empty",
+                "identical_to_target": "it is identical to the final Target Mask",
+            }.get(initial_rejected_reason, initial_rejected_reason)
+            append_log(
+                log_path,
+                "Ignored the Initial Mask for {} because {}; synthetic "
+                "variations will be used.".format(case_id, reason),
+            )
         item = {
             "case_id": case_id,
             "image": str(image_path),
@@ -925,6 +1116,7 @@ def _prepare_manifest(
                 )
                 else ""
             ),
+            "source_grid_cache_fingerprint": source_grid_fingerprint,
             "split": str(row.get("split") or "train"),
         }
         rows.append(item)
@@ -935,6 +1127,12 @@ def _prepare_manifest(
             preparation_index=index + 1,
             preparation_total=len(selected),
             current_case=case_id,
+            source_grid_case_cache_hit=cache_hit,
+            phase=(
+                "reusing_local_prepared_data"
+                if cache_hit
+                else "preparing_data"
+            ),
             progress_percent=min(
                 15,
                 10 + int(5.0 * (index + 1) / max(1, len(selected))),
@@ -944,6 +1142,31 @@ def _prepare_manifest(
         raise RuntimeError(
             "No selected case has both a source image and a matching target Mask."
         )
+        append_log(
+            log_path,
+            "[{}/{}] {} source-grid data for {}.".format(
+                index + 1,
+                len(selected),
+                "Reused" if cache_hit else "Prepared",
+                case_id,
+            ),
+        )
+    append_log(
+        log_path,
+        "Local source-grid cache: reused {} of {} selected case(s).".format(
+            source_grid_cache_hits, len(rows)
+        ),
+    )
+    update_status(
+        status_path,
+        source_grid_cache_reused=source_grid_cache_hits,
+        source_grid_cache_total=len(rows),
+        phase=(
+            "reusing_local_prepared_data"
+            if source_grid_cache_hits == len(rows)
+            else "preparing_data"
+        ),
+    )
     if not any(row["split"] == "val" for row in rows) and len(rows) >= 2:
         rows[-1]["split"] = "val"
         validation_rows = [dict(rows[-1])]
@@ -1155,7 +1378,11 @@ def _training_config(
                 ).expanduser().resolve()
                 / "cache"
                 / "prepared_cases"
-                / safe_slug(request.get("task_id") or request.get("task_name"))
+                / safe_slug(
+                    request.get("prepared_cache_namespace")
+                    or request.get("task_id")
+                    or request.get("task_name")
+                )
             ),
             "keep_prepared_cache": True,
             "augmentation": {
@@ -1205,13 +1432,25 @@ def _gpu_lock(
         "GPU",
         "nnInteractive task fine-tuning",
     )
+    last_notice = [0.0]
 
     def on_wait(holder: dict[str, Any]) -> None:
+        owner = str((holder or {}).get("owner") or "another AI task")
         update_status(
             status_path,
             status="waiting_for_gpu",
             phase="waiting_for_gpu",
+            message=(
+                "Waiting for the GPU held by {}. Training can be paused or "
+                "stopped from Task Models; Mimics remains available."
+            ).format(owner),
             gpu_holder=holder,
+            resource_wait={
+                "resource": "GPU",
+                "owner": owner,
+                "pid": (holder or {}).get("pid"),
+                "cancel_action": "Pause and Release GPU or Stop Training",
+            },
         )
         try:
             from tools.fewshot_pipeline import (
@@ -1221,6 +1460,16 @@ def _gpu_lock(
             request_nninteractive_server_release_on_contention(holder)
         except Exception:
             pass
+        now = time.time()
+        if now - last_notice[0] >= 30.0:
+            append_log(
+                status_path.parent / "job.log",
+                "Waiting for the GPU held by {} (pid {}). Use Pause and "
+                "Release GPU or Stop Training to release the wait.".format(
+                    owner, str((holder or {}).get("pid") or "unknown")
+                ),
+            )
+            last_notice[0] = now
 
     acquired = lock.acquire(
         wait_seconds=float(config.get("gpu_lock_timeout_seconds", 86400)),
@@ -1234,6 +1483,11 @@ def _gpu_lock(
         kind="nninteractive_finetune",
         stop_path=str(control_path),
         job_id=str(job_id),
+    )
+    update_status(status_path, resource_wait=None)
+    append_log(
+        status_path.parent / "job.log",
+        "GPU resource acquired for nnInteractive task fine-tuning.",
     )
     return acquired
 
@@ -1269,6 +1523,9 @@ def _copy_trainer_status(job_status: Path, trainer_status: dict[str, Any]) -> No
             "validation_batches",
             "completed_cases",
             "total_cases",
+            "prepared_cache_reused",
+            "prepared_cache_total",
+            "reused",
             "error",
         }
     }
@@ -1921,6 +2178,8 @@ def run_job(job_dir_value: str) -> int:
         )
         append_log(log_path, "Training completed: {}.".format(outcome))
         # Log a human-readable summary
+        trainer_status = read_json(job_dir / "trainer_status.json", {}) or {}
+        current = read_json(status_path, {}) or {}
         best_epoch = None
         hist = trainer_status.get("metrics_history", current.get("metrics_history") or [])
         if hist:

@@ -613,7 +613,7 @@ class StatusTrackingTests(unittest.TestCase):
             self.assertNotIn(status, common.ACTIVE_STATUSES)
 
     def test_terminal_statuses_are_complete(self):
-        expected = {"completed", "failed", "cancelled", "paused"}
+        expected = {"completed", "failed", "cancelled", "paused", "abandoned"}
         self.assertEqual(common.TERMINAL_STATUSES, expected)
 
     def test_atomic_write_preserves_content(self):

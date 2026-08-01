@@ -41,7 +41,10 @@ REQUIRED_IMPORTS = [
     "yaml",         # pip package is pyyaml
     "tqdm",
     "tensorboard",
+    "tomli",
     "onnxruntime",
+    "nnunetv2",
+    "acvl_utils",
 ]
 
 # Pip package names (may differ from import names)
@@ -58,7 +61,9 @@ REQUIRED_PACKAGES = [
     "pyyaml",       # import name is yaml
     "tqdm",
     "tensorboard",
+    "tomli>=2.0",
     "onnxruntime-gpu",
+    "nnunetv2>=2.8.1,<2.9",
 ]
 
 # Preferred external GUI backend for DINOv3 advanced setup/status windows.
@@ -224,6 +229,23 @@ def _run_python_script(script_lines, timeout=600):
             pass
 
 
+def _nnunet_version_supported():
+    ret, output = _run_python_script(
+        [
+            "import re",
+            "from importlib.metadata import version",
+            "value = version('nnunetv2')",
+            "parts = tuple(int(x) for x in re.findall(r'\\d+', value)[:3])",
+            "parts = parts + (0,) * (3 - len(parts))",
+            "print(value)",
+            "raise SystemExit(0 if (2, 8, 1) <= parts < (2, 9, 0) else 2)",
+        ],
+        timeout=60,
+    )
+    version_text = output.strip().split("\n")[-1] if output else "unknown"
+    return ret == 0, version_text
+
+
 def _probe_gui_backends():
     """Return GUI backend availability inside nninteractive_env."""
     ret, output = _run_python_script([
@@ -352,6 +374,14 @@ def check():
             result["package_versions"] = json.loads(output.strip().split("\n")[-1])
         except Exception:
             pass
+    nnunet_version_ok, nnunet_version = _nnunet_version_supported()
+    result["nnunet_version_compatible"] = nnunet_version_ok
+    result["nnunet_version"] = nnunet_version
+    _log(
+        "nnU-Net version {0}: {1}".format(
+            nnunet_version, "OK" if nnunet_version_ok else "UNSUPPORTED"
+        )
+    )
 
     # 5. CUDA
     ret, output = _run_python_script([
@@ -427,6 +457,7 @@ def check():
         result["python_version"] is not None
         and len(missing_pkgs) == 0
         and gui_ready
+        and nnunet_version_ok
     )
 
     _write_state(
@@ -434,7 +465,9 @@ def check():
         message=(
             "All checks passed."
             if all_ok else
-            "{0} package(s) missing; PySide6 GUI ready: {1}.".format(len(missing_pkgs), gui_ready)
+            "{0} package(s) missing; PySide6 GUI ready: {1}; nnU-Net version ready: {2}.".format(
+                len(missing_pkgs), gui_ready, nnunet_version_ok
+            )
         ),
         detail=result,
         missing_packages=missing_pkgs,
@@ -519,6 +552,13 @@ def install():
     # First check
     check_result = check_result_dict()
     missing = [p for p, ok in check_result.get("packages", {}).items() if not ok]
+    if not check_result.get("nnunet_version_compatible", False):
+        missing = [
+            "nnunetv2>=2.8.1,<2.9" if value == "nnunetv2" else value
+            for value in missing
+        ]
+        if not any(value.startswith("nnunetv2") for value in missing):
+            missing.append("nnunetv2>=2.8.1,<2.9")
     gui_backends = check_result.get("gui_backends") or {}
     missing_gui = []
     if not gui_backends.get("pyside6"):
@@ -562,6 +602,9 @@ def install():
     else:
         still_missing = missing
 
+    nnunet_version_ok, _nnunet_version = _nnunet_version_supported()
+    if not nnunet_version_ok:
+        still_missing.append("nnunetv2>=2.8.1,<2.9")
     if still_missing:
         _write_state("incomplete",
                      message="{0} package(s) still missing.".format(len(still_missing)),
@@ -646,6 +689,9 @@ def check_result_dict():
         except Exception:
             pass
     result["gui_backends"] = _probe_gui_backends()
+    result["nnunet_version_compatible"], result["nnunet_version"] = (
+        _nnunet_version_supported()
+    )
     return result
 
 
@@ -777,6 +823,15 @@ def _get_missing_packages():
                         pip_name = p
                         break
                 result.append(pip_name)
+            result = [
+                "nnunetv2>=2.8.1,<2.9" if value == "nnunetv2" else value
+                for value in result
+            ]
+            nnunet_version_ok, _nnunet_version = _nnunet_version_supported()
+            if not nnunet_version_ok and not any(
+                value.startswith("nnunetv2") for value in result
+            ):
+                result.append("nnunetv2>=2.8.1,<2.9")
             return result
         except Exception:
             pass

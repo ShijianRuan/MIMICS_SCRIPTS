@@ -1973,7 +1973,7 @@ class TrainingSetupApp(object):
             self._append_log(line)
         if status.get("train_log"):
             self.training_log_dir = os.path.dirname(status.get("train_log"))
-        if status.get("status") in ("completed", "failed", "cancelled"):
+        if status.get("status") in ("completed", "failed", "cancelled", "abandoned"):
             return
         self.root.after(1500, self.poll_training_status)
 
@@ -3823,7 +3823,7 @@ class QtTrainingSetupApp(object):
             self._append_log(line)
         if status.get("train_log"):
             self.training_log_dir = os.path.dirname(status.get("train_log"))
-        if status.get("status") in ("completed", "failed", "cancelled"):
+        if status.get("status") in ("completed", "failed", "cancelled", "abandoned"):
             return
         self.QtCore.QTimer.singleShot(1500, self.poll_training_status)
 

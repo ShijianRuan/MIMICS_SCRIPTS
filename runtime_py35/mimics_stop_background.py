@@ -47,6 +47,13 @@ MARKERS = (
     "nninteractive_finetune_pipeline.py",
     "nninteractive_task_model_center.py",
     "nninteractive_task_model_chooser.py",
+    "interactive_algorithms_worker.py",
+    "igac_gui.py",
+    "nnunet_pipeline.py",
+    "nnunet_stage_worker.py",
+    "nnunet_training_setup_ui.py",
+    "nnunet_prediction_setup_ui.py",
+    "nnunet_status_viewer.py",
     "io_path_setup_ui.py",
     "mask_file_picker_ui.py",
 
@@ -100,13 +107,57 @@ def _stop_inprocess_monitors():
             stopped += 1
         except Exception:
             pass
+    # nnU-Net controllers, especially remote controllers, need their control
+    # marker before the Mimics monitor is detached. The controller remains
+    # responsible for stopping/removing its remote container safely.
+    nnunet = sys.modules.get("nnunet_mimics")
+    if nnunet is not None:
+        monitors = getattr(nnunet, "_MONITORS", {}) or {}
+        for monitor in list(monitors.values()):
+            status_path = str(monitor.get("status_path") or "")
+            status = runtime_common.read_json(status_path, {}) or {}
+            state = str(status.get("status") or "").lower()
+            if state in (
+                "completed", "failed", "cancelled", "abandoned", "orphaned_remote",
+                "attention_required",
+            ):
+                continue
+            control_path = str(status.get("control_path") or "")
+            if not control_path and status_path:
+                control_path = os.path.join(os.path.dirname(status_path), "control.json")
+            if control_path:
+                try:
+                    runtime_common.write_json_atomic(
+                        control_path,
+                        {
+                            "action": "cancel",
+                            "requested_at_epoch": time.time(),
+                            "reason": "Stop Background Services",
+                        },
+                    )
+                except Exception:
+                    pass
+    exporter = sys.modules.get("mimics_export")
+    if exporter is not None:
+        try:
+            exporter.cancel_current_project_exports()
+        except Exception:
+            pass
+    mask_importer = sys.modules.get("mask_import")
+    if mask_importer is not None:
+        try:
+            stopped += int(mask_importer.cancel_all_mask_imports(
+                "Mask import stopped by Stop All Owned Services."
+            ) or 0)
+        except Exception:
+            pass
     for module_name, collection_name, stop_name in (
         ("mimics_import", "_IMPORT_MONITORS", "_stop_import_monitor"),
-        ("mimics_export", "_EXPORT_MONITORS", "_stop_export_monitor"),
-        ("mask_import", "_MASK_IMPORT_MONITORS", "_stop_mask_import_monitor"),
         ("fix_source_affine_metadata", "_MONITORS", "_stop_monitor"),
         ("fewshot_mimics", "_MONITORS", "_stop_monitor"),
         ("nninteractive_mimics", "_ASYNC_MONITORS", "_stop_async_monitor"),
+        ("interactive_algorithms_mimics", "_MONITORS", "_cancel_monitor"),
+        ("nnunet_mimics", "_MONITORS", "_stop_monitor"),
     ):
         module = sys.modules.get(module_name)
         if module is None:
@@ -780,6 +831,8 @@ def _active_cache_cleanup_blockers():
         ("mask_import", "_MASK_IMPORT_MONITORS"),
         ("fewshot_mimics", "_MONITORS"),
         ("nninteractive_mimics", "_ASYNC_MONITORS"),
+        ("interactive_algorithms_mimics", "_MONITORS"),
+        ("nnunet_mimics", "_MONITORS"),
     ):
         module = sys.modules.get(module_name)
         collection = getattr(module, collection_name, {}) if module is not None else {}
@@ -1095,6 +1148,7 @@ def stop_background_processes():
     stopped_queues = _request_queue_stop()
     stop_markers = _request_lock_owned_stop_markers("Stop Background Services")
     _stop_inprocess_monitors()
+    released_local_operations = runtime_common.clear_local_operations()
 
     stop_log = os.path.join(_runtime_dir(), "stop_background_last.json")
 
@@ -1187,6 +1241,13 @@ def stop_background_processes():
             stop_log,
         ),
     )
+    if released_local_operations:
+        _mimics_log(
+            logging.INFO,
+            "Released {0} Mimics-side operation lease(s) after their monitors were stopped.".format(
+                released_local_operations
+            ),
+        )
     return {
         "ok": True,
         "stop_log": stop_log,

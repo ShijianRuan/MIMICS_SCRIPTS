@@ -262,6 +262,20 @@ def make_fake_dinov3_root(tmp: Path) -> Path:
     research = root / "config" / "research"
     research.mkdir(parents=True, exist_ok=True)
     (research / "ct_fewshot_fast.yaml").write_text("training:\n  epochs: 1\n", encoding="utf-8")
+    model = root / "models" / "dinov3-vitb16"
+    model.mkdir(parents=True, exist_ok=True)
+    (model / "config.json").write_text(json.dumps({
+        "model_type": "dinov3_vit",
+        "architectures": ["Dinov3ViTModel"],
+        "num_hidden_layers": 12,
+        "hidden_size": 768,
+        "patch_size": 16,
+    }), encoding="utf-8")
+    (model / "preprocessor_config.json").write_text(json.dumps({
+        "image_mean": [0.485, 0.456, 0.406],
+        "image_std": [0.229, 0.224, 0.225],
+    }), encoding="utf-8")
+    (model / "model.safetensors").write_bytes(b"fake safetensors")
     train_script = r'''
 import json
 import os
@@ -367,6 +381,7 @@ def train_args(ts_root: Path, workspace: Path, dinov3_root: Path, run_id: str):
         sub_volume_size="16,64,64",
         export_labels=False,
         mimics_exe=None,
+        mcs_output_dir=None,
         export_timeout_seconds=30,
         background_mimics_lock_timeout_seconds=1,
         gpu_lock_timeout_seconds=20,
@@ -423,7 +438,10 @@ def test_fewshot_fake_training_queue(tmp: Path) -> str:
             status = read_json(workspace / "jobs" / (run_id + ".json"), {}) or {}
             assert_equal(status.get("status"), "completed", "{} status".format(run_id))
             manifest = status.get("model") or {}
-            assert_true(Path(manifest.get("checkpoint", "")).is_file(), "{} checkpoint missing".format(run_id))
+            checkpoint = Path(manifest.get("checkpoint", ""))
+            if not checkpoint.is_absolute():
+                checkpoint = workspace / "models" / "liver" / run_id / checkpoint
+            assert_true(checkpoint.is_file(), "{} checkpoint missing".format(run_id))
             assert_true(not Path(manifest.get("dataset_dir", "")).exists(), "{} materialized dataset was not cleaned".format(run_id))
         assert_true((tmp / "global_models.json").is_file(), "global model index was not written")
         return "two fake training jobs serialized on GPU lock; models registered; materialized datasets cleaned"

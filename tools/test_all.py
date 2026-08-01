@@ -229,6 +229,75 @@ class TestRuntimeCommon(unittest.TestCase):
         loaded = runtime_common.read_json(path)
         self.assertEqual({"b": 2}, loaded)
 
+    def test_progress_notice_is_immediate_or_throttled_as_requested(self):
+        import runtime_common
+
+        state = {}
+        due, elapsed = runtime_common.progress_notice_due(
+            state, "wait", "gpu", 60, 10, now=100
+        )
+        self.assertFalse(due)
+        self.assertEqual(0, elapsed)
+        self.assertTrue(
+            runtime_common.progress_notice_due(
+                state, "wait", "gpu", 60, 10, now=110
+            )[0]
+        )
+        self.assertFalse(
+            runtime_common.progress_notice_due(
+                state, "wait", "gpu", 60, 10, now=150
+            )[0]
+        )
+        self.assertTrue(
+            runtime_common.progress_notice_due(
+                state, "wait", "gpu", 60, 10, now=170
+            )[0]
+        )
+        runtime_common.clear_progress_notice(state, "wait")
+        self.assertNotIn("_progress_notices", state)
+
+    def test_mimics_transaction_commits_or_rolls_back_once(self):
+        import runtime_common
+
+        events = []
+
+        class Transaction(object):
+            def __enter__(self):
+                events.append("enter")
+                return self
+            def __exit__(self, exc_type, exc, tb):
+                events.append("exit")
+            def commit(self):
+                events.append("commit")
+            def rollback(self):
+                events.append("rollback")
+
+        module = _FakeModule()
+        module.Transaction = Transaction
+        self.assertEqual(
+            "ok",
+            runtime_common.execute_mimics_transaction(
+                module, lambda: "ok"
+            ),
+        )
+        self.assertEqual(["enter", "commit", "exit"], events)
+
+        events[:] = []
+        def fail():
+            raise ValueError("failed write")
+        with self.assertRaisesRegex(ValueError, "failed write"):
+            runtime_common.execute_mimics_transaction(module, fail)
+        self.assertEqual(["enter", "rollback", "exit"], events)
+
+        events[:] = []
+        def fail_commit():
+            events.append("commit")
+            raise RuntimeError("commit failed")
+        Transaction.commit = lambda self: fail_commit()
+        with self.assertRaisesRegex(RuntimeError, "commit failed"):
+            runtime_common.execute_mimics_transaction(module, lambda: "ok")
+        self.assertEqual(["enter", "commit", "rollback", "exit"], events)
+
     def test_write_json_atomic_retries_transient_replace_failure(self):
         import runtime_common
 
@@ -545,6 +614,54 @@ class TestRuntimeCommon(unittest.TestCase):
         self.assertTrue(second)
         self.assertTrue(runtime_common.release_local_operation(resource, second))
 
+    def test_global_stop_can_clear_only_inprocess_operation_leases(self):
+        import runtime_common
+
+        token_a = runtime_common.try_acquire_local_operation(
+            "test_global_stop_a", "first task"
+        )
+        token_b = runtime_common.try_acquire_local_operation(
+            "test_global_stop_b", "second task"
+        )
+        self.assertTrue(token_a and token_b)
+        owners = sorted(
+            row["owner"]
+            for row in runtime_common.active_local_operations()
+            if row["resource"].startswith("test_global_stop_")
+        )
+        self.assertEqual(["first task", "second task"], owners)
+        runtime_common.clear_local_operations()
+        self.assertIsNone(runtime_common.active_local_operation("test_global_stop_a"))
+        self.assertIsNone(runtime_common.active_local_operation("test_global_stop_b"))
+
+    def test_runtime_blocker_census_includes_live_monitor_and_resource_lock(self):
+        import runtime_common
+
+        fake = _FakeModule()
+        fake._MASK_IMPORT_MONITORS = {"active": {"done": False}}
+        previous = sys.modules.get("mask_import")
+        lock_dir = os.path.join(self.tmp, ".mimics_runtime", "locks")
+        os.makedirs(lock_dir)
+        runtime_common.write_json_atomic(
+            os.path.join(lock_dir, "gpu.lock"),
+            {
+                "pid": os.getpid(),
+                "token": "live-token",
+                "resource": "gpu",
+                "owner": "test GPU task",
+            },
+        )
+        try:
+            sys.modules["mask_import"] = fake
+            blockers = runtime_common.active_runtime_blockers(self.tmp)
+        finally:
+            if previous is None:
+                sys.modules.pop("mask_import", None)
+            else:
+                sys.modules["mask_import"] = previous
+        self.assertTrue(any("mask import" in item for item in blockers))
+        self.assertTrue(any("test GPU task" in item for item in blockers))
+
     def test_cleanup_stale_resource_locks(self):
         import runtime_common
 
@@ -621,6 +738,52 @@ class TestMimicsBridgeNiftiNormalization(unittest.TestCase):
         with open(path, "wb") as handle:
             handle.write(b"NRRD0005\n")
         self.assertTrue(is_medical_image_file(path))
+
+    def test_mask_nifti_publish_is_atomic_and_preserves_existing_on_failure(self):
+        import nibabel as nib
+        import mimics_bridge
+
+        path = os.path.join(self.tmp, "mask.nii.gz")
+        affine = np.diag([1.2, 1.3, 2.4, 1.0])
+        original = np.ones((3, 4, 5), dtype=np.uint8)
+        nib.save(nib.Nifti1Image(original, affine), path)
+        old_replace = mimics_bridge.os.replace
+        old_sleep = mimics_bridge.time.sleep
+        try:
+            mimics_bridge.os.replace = lambda _src, _dst: (_ for _ in ()).throw(
+                OSError(5, "access denied")
+            )
+            mimics_bridge.time.sleep = lambda _seconds: None
+            with self.assertRaisesRegex(RuntimeError, "left unchanged"):
+                mimics_bridge.write_mask_nifti(
+                    np.zeros_like(original), affine, path
+                )
+        finally:
+            mimics_bridge.os.replace = old_replace
+            mimics_bridge.time.sleep = old_sleep
+        np.testing.assert_array_equal(
+            original, np.asanyarray(nib.load(path).dataobj)
+        )
+        self.assertFalse(
+            any(name.startswith("._mimics_mask_") for name in os.listdir(self.tmp))
+        )
+
+    def test_mask_nifti_publish_sets_qform_and_sform(self):
+        import nibabel as nib
+        from mimics_bridge import write_mask_nifti
+
+        path = os.path.join(self.tmp, "published.nii.gz")
+        affine = np.array([
+            [0.0, -1.5, 0.0, 40.0],
+            [1.5, 0.0, 0.0, -25.0],
+            [0.0, 0.0, 2.0, 5.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ])
+        write_mask_nifti(np.ones((4, 5, 6), dtype=np.uint8), affine, path)
+        image = nib.load(path)
+        self.assertGreater(int(image.header["qform_code"]), 0)
+        self.assertGreater(int(image.header["sform_code"]), 0)
+        np.testing.assert_allclose(image.affine, affine, atol=1e-6)
 
     def _make_nifti(self, fname, data, affine, sform_code=2, qform_code=0):
         import nibabel as nib
@@ -2635,6 +2798,11 @@ class TestStopBackgroundServices(unittest.TestCase):
             "fewshot_model_chooser.py",
             "fewshot_training_setup_ui.py",
             "fewshot_status_viewer.py",
+            "nnunet_pipeline.py",
+            "nnunet_stage_worker.py",
+            "nnunet_training_setup_ui.py",
+            "nnunet_prediction_setup_ui.py",
+            "nnunet_status_viewer.py",
             "io_path_setup_ui.py",
             "nninteractive.inference.server.main",
             "setup_env.py",
@@ -2802,8 +2970,42 @@ class TestStopBackgroundServices(unittest.TestCase):
         for module_name in (
             "mimics_import", "mimics_export", "mask_import",
             "fix_source_affine_metadata", "fewshot_mimics", "nninteractive_mimics",
+            "nnunet_mimics",
         ):
             self.assertIn(module_name, monitor_source)
+        self.assertIn('"action": "cancel"', monitor_source)
+
+    def test_stop_all_writes_nnunet_cancel_before_detaching_monitor(self):
+        import mimics_stop_background as msb
+
+        status_path = os.path.join(self.tmp, "nnunet_status.json")
+        control_path = os.path.join(self.tmp, "nnunet_control.json")
+        Path(status_path).write_text(
+            json.dumps({
+                "status": "training",
+                "control_path": control_path,
+            }),
+            encoding="utf-8",
+        )
+        observations = []
+
+        def stop_monitor(key):
+            control = msb.runtime_common.read_json(control_path, {}) or {}
+            observations.append((key, control.get("action")))
+
+        fake = _FakeModule()
+        fake._MONITORS = {"nnunet-active": {"status_path": status_path}}
+        fake._stop_monitor = stop_monitor
+        previous = sys.modules.get("nnunet_mimics")
+        try:
+            sys.modules["nnunet_mimics"] = fake
+            msb._stop_inprocess_monitors()
+        finally:
+            if previous is None:
+                sys.modules.pop("nnunet_mimics", None)
+            else:
+                sys.modules["nnunet_mimics"] = previous
+        self.assertEqual([("nnunet-active", "cancel")], observations)
 
     def test_environment_setup_has_a_scoped_stop_path(self):
         import inspect
@@ -2812,6 +3014,43 @@ class TestStopBackgroundServices(unittest.TestCase):
         source = inspect.getsource(setup_environment.main)
         self.assertIn("Stop Current Setup", source)
         self.assertIn("terminate_process_async", source)
+
+    def test_environment_repair_is_blocked_while_other_tasks_are_active(self):
+        import setup_environment
+
+        launched = []
+        messages = []
+        old_blockers = setup_environment.runtime_common.active_runtime_blockers
+        old_launch = setup_environment._launch_setup_worker
+        old_message = setup_environment.mimics.dialogs.message_box
+        try:
+            setup_environment.runtime_common.active_runtime_blockers = (
+                lambda *_args, **_kwargs: ["DINOv3 training"]
+            )
+            setup_environment._launch_setup_worker = (
+                lambda *_args, **_kwargs: launched.append(True)
+            )
+            setup_environment.mimics.dialogs.message_box = (
+                lambda **kwargs: messages.append(kwargs.get("message", ""))
+            )
+            result = setup_environment.main("install")
+        finally:
+            setup_environment.runtime_common.active_runtime_blockers = old_blockers
+            setup_environment._launch_setup_worker = old_launch
+            setup_environment.mimics.dialogs.message_box = old_message
+        self.assertEqual(1, result)
+        self.assertEqual([], launched)
+        self.assertTrue(any("DINOv3 training" in item for item in messages))
+
+    def test_global_stop_releases_detached_mimics_operation_leases(self):
+        import inspect
+        import mimics_stop_background
+
+        source = inspect.getsource(mimics_stop_background.stop_background_processes)
+        self.assertLess(
+            source.index("_stop_inprocess_monitors()"),
+            source.index("clear_local_operations()"),
+        )
 
     def test_mcs_fingerprint_is_persisted_before_work_cleanup(self):
         import inspect
@@ -3779,6 +4018,41 @@ class TestNewFeatures(unittest.TestCase):
         self.assertEqual(7, payload["training_progress"]["epoch"])
         self.assertTrue(cancel_path.is_file())
 
+    def test_fewshot_stop_can_discard_completed_pending_application(self):
+        import fewshot_mimics
+
+        status_path = os.path.join(self.tmp, "infer_completed.json")
+        fewshot_mimics._write_json_atomic(
+            status_path,
+            {
+                "status": "completed",
+                "updated_at_epoch": time.time(),
+                "applied_to_mimics": False,
+            },
+        )
+        key = "pending_inference_application"
+        monitor = {
+            "monitor_key": key,
+            "kind": "infer",
+            "status_path": status_path,
+        }
+        old_answer = fewshot_mimics.mimics.dialogs.question_box
+        try:
+            fewshot_mimics._MONITORS[key] = monitor
+            fewshot_mimics.mimics.dialogs.question_box = (
+                lambda **_kwargs: fewshot_mimics.BUTTON_STOP
+            )
+            self.assertTrue(
+                fewshot_mimics._stop_pending_inference_application()
+            )
+        finally:
+            fewshot_mimics.mimics.dialogs.question_box = old_answer
+            fewshot_mimics._MONITORS.pop(key, None)
+        status = fewshot_mimics._read_json(status_path, {}) or {}
+        self.assertTrue(status.get("application_cancelled"))
+        self.assertEqual("cancelled", status.get("application_state"))
+        self.assertNotIn(key, fewshot_mimics._MONITORS)
+
     def test_fewshot_export_reaps_process_when_lock_transfer_fails(self):
         import tools.fewshot_pipeline as pipeline
 
@@ -3887,6 +4161,119 @@ class TestNewFeatures(unittest.TestCase):
         tick = inspect.getsource(mimics_export._foreground_export_tick)
         self.assertIn("_launch_bridge_background", tick)
         self.assertNotIn("MimicsResearch", tick)
+        self.assertIn("_foreground_export_target_is_open", tick)
+        self.assertLess(
+            tick.index('monitor.pop("operation_token", None)'),
+            tick.index("_launch_bridge_background"),
+        )
+
+    def test_mask_import_cancel_releases_full_apply_lease(self):
+        import mask_import
+        import runtime_common
+
+        work_dir = os.path.join(self.tmp, "mask_import_work")
+        os.makedirs(work_dir)
+        token = runtime_common.try_acquire_local_operation(
+            "mask_buffer_access", "Mask import apply"
+        )
+        self.assertTrue(token)
+        monitor = {
+            "monitor_key": work_dir,
+            "work_dir": work_dir,
+            "done": False,
+            "operation_token": token,
+            "process": None,
+        }
+        mask_import._MASK_IMPORT_MONITORS[work_dir] = monitor
+        count = mask_import.cancel_all_mask_imports("test stop")
+        self.assertEqual(1, count)
+        self.assertIsNone(runtime_common.active_local_operation("mask_buffer_access"))
+        self.assertNotIn(work_dir, mask_import._MASK_IMPORT_MONITORS)
+
+    def test_mask_import_name_collision_creates_editable_copy(self):
+        import mask_import
+
+        active_image = _FakeModule()
+        existing = _FakeModule()
+        existing.name = "Liver"
+        existing.image = active_image
+        created = []
+
+        def create_mask():
+            mask = _FakeModule()
+            mask.name = ""
+            mask.image = None
+            created.append(mask)
+            return mask
+
+        old_masks = mask_import.mimics.data.masks
+        old_create = mask_import.mimics.segment.create_mask
+        try:
+            mask_import.mimics.data.masks = [existing]
+            mask_import.mimics.segment.create_mask = create_mask
+            result = mask_import._find_or_create_mask("Liver", active_image)
+        finally:
+            mask_import.mimics.data.masks = old_masks
+            mask_import.mimics.segment.create_mask = old_create
+        self.assertIs(result, created[0])
+        self.assertEqual("Liver - Imported", result.name)
+        self.assertEqual("Liver", existing.name)
+
+    def test_mask_import_waits_for_the_original_active_image(self):
+        import mask_import
+
+        image_a = _FakeModule()
+        image_a.guid = "image-a"
+        image_b = _FakeModule()
+        image_b.guid = "image-b"
+        monitor = {
+            "active_image_id": "image-a",
+            "launch_project_path": os.path.join(self.tmp, "case.mcs"),
+        }
+        old_image = mask_import._active_image_reference
+        old_project = mask_import._current_project_path
+        try:
+            mask_import._active_image_reference = lambda: image_a
+            mask_import._current_project_path = lambda: os.path.join(self.tmp, "case.mcs")
+            self.assertTrue(mask_import._target_image_is_open(monitor)[0])
+            mask_import._active_image_reference = lambda: image_b
+            self.assertFalse(mask_import._target_image_is_open(monitor)[0])
+            mask_import._active_image_reference = lambda: image_a
+            mask_import._current_project_path = lambda: os.path.join(self.tmp, "other.mcs")
+            self.assertFalse(mask_import._target_image_is_open(monitor)[0])
+        finally:
+            mask_import._active_image_reference = old_image
+            mask_import._current_project_path = old_project
+
+    def test_interactive_ai_switching_guards_are_present(self):
+        import inspect
+        import interactive_algorithms_mimics
+        import nninteractive_mimics
+        from tools import interactive_algorithms_worker
+
+        interactive_tick = inspect.getsource(
+            interactive_algorithms_mimics._monitor_tick
+        )
+        self.assertIn("_monitor_target_is_open", interactive_tick)
+        nn_start = inspect.getsource(nninteractive_mimics._start_async_job)
+        self.assertIn('"nnInteractive input snapshot"', nn_start)
+        nn_prewarm = inspect.getsource(
+            nninteractive_mimics._get_or_start_image_worker
+        )
+        self.assertIn('"nnInteractive image preparation"', nn_prewarm)
+        self.assertIn("release_local_operation", nn_prewarm)
+        nn_result = inspect.getsource(
+            nninteractive_mimics._handle_async_result
+        )
+        self.assertIn("active_project_changed", nn_result)
+        self.assertIn(
+            "request_nninteractive_server_release_on_contention",
+            inspect.getsource(interactive_algorithms_worker._gpu_lock),
+        )
+        self.assertIn(
+            "request_nninteractive_server_release_on_contention",
+            Path(PROJECT_ROOT, "tools", "igac_gui.py").read_text(encoding="utf-8"),
+        )
 
     def test_internal_batch_export_locks_the_actual_label_destination(self):
         import mimics_export
@@ -4149,6 +4536,13 @@ class TestNewFeatures(unittest.TestCase):
 
         theme_source = Path(PROJECT_ROOT, "tools", "ui_theme.py").read_text(encoding="utf-8")
         self.assertIn("def configure_application", theme_source)
+        self.assertIn("SetProcessDpiAwarenessContext", theme_source)
+        self.assertIn("SetThreadDpiAwarenessContext", theme_source)
+        self.assertIn("HighDpiScaleFactorRoundingPolicy", theme_source)
+        self.assertLess(
+            theme_source.index("\n_prepare_windows_dpi_awareness()\n"),
+            theme_source.index("def configure_application"),
+        )
         self.assertIn("QProgressBar::chunk", theme_source)
         self.assertIn("shared_stylesheet()", inspect.getsource(training_ui.QtTrainingSetupApp._stylesheet))
         self.assertIn("shared_stylesheet()", inspect.getsource(status_viewer.QtStatusViewerApp._stylesheet))
@@ -4653,8 +5047,14 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn("PySide6", setup_env.GUI_IMPORTS)
         self.assertIn("PySide6", setup_env.GUI_PACKAGES)
         self.assertIn("onnxruntime", setup_env.REQUIRED_IMPORTS)
+        self.assertIn("nnunetv2", setup_env.REQUIRED_IMPORTS)
+        self.assertIn("acvl_utils", setup_env.REQUIRED_IMPORTS)
         self.assertIn("onnxruntime-gpu", setup_env.REQUIRED_PACKAGES)
         bat = package_portable._generate_offline_bat("3.13.7", "python313")
+        self.assertIn("import numpy, nibabel, pydicom, SimpleITK", bat)
+        self.assertIn("nnunetv2", bat)
+        self.assertIn("Version('2.8.1')", bat)
+        self.assertIn("Version('2.9')", bat)
         self.assertIn("pip install PySide6 shiboken6", bat)
         self.assertIn("onnxruntime", bat)
         self.assertIn(
@@ -4673,6 +5073,30 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn("Verifying PySide6 external UI backend", bat)
         # Duplicate _pth "Configuring" echo should only appear inside the if block
         self.assertEqual(1, bat.count("echo   Configuring python313._pth"))
+
+    def test_configuration_reference_matches_dinov3_defaults(self):
+        config = json.loads(
+            Path(PROJECT_ROOT, "fewshot_config.json").read_text(encoding="utf-8")
+        )
+        reference = Path(PROJECT_ROOT, "CONFIG_REFERENCE.md").read_text(
+            encoding="utf-8"
+        )
+        for key in (
+            "default_epochs",
+            "default_lr",
+            "default_lr_scheduler",
+            "default_warmup_epochs",
+            "default_weight_decay",
+            "default_grad_accumulation",
+            "default_img_size",
+            "default_decoder",
+            "default_finetune_method",
+            "default_model_scale",
+            "default_modality",
+            "default_val_fraction",
+        ):
+            rendered = json.dumps(config[key])
+            self.assertIn("| `{0}` | `{1}` |".format(key, rendered), reference)
 
     def test_wheel_files_for_package_normalizes_distribution_names(self):
         package_portable = __import__("tools.package_portable", fromlist=["dummy"])
@@ -6320,6 +6744,61 @@ class TestNewFeatures(unittest.TestCase):
         second = pipeline._mcs_export_fingerprint(row, ["liver"])
         self.assertNotEqual(first, second)
 
+    def test_nninteractive_completed_job_summary_keeps_completed_terminal_state(self):
+        pipeline = __import__(
+            "tools.nninteractive_finetune_pipeline",
+            fromlist=["dummy"],
+        )
+        root = Path(self.tmp) / "nn_completed_summary"
+        job_dir = root / "job"
+        workspace = root / "workspace"
+        model_dir = root / "model"
+        job_dir.mkdir(parents=True)
+        workspace.mkdir()
+        model_dir.mkdir()
+        pipeline.write_json_atomic(
+            job_dir / "request.json",
+            {
+                "workspace": str(workspace),
+                "task_id": "brain",
+                "task_name": "Brain",
+                "output_model_dir": str(model_dir),
+                "base_model_dir": str(model_dir),
+                "cases": [],
+            },
+        )
+        manifest = job_dir / "dataset_manifest.json"
+        manifest.write_text('{"cases": []}', encoding="utf-8")
+
+        def run_training(*_args, **_kwargs):
+            pipeline.write_json_atomic(
+                job_dir / "trainer_status.json",
+                {
+                    "epochs": 2,
+                    "elapsed_seconds": 4,
+                    "best_score": 0.7,
+                    "metrics_history": [
+                        {"epoch": 2, "epochs": 2, "validation_auc": 0.7}
+                    ],
+                },
+            )
+
+        with mock.patch.object(
+            pipeline, "_prepare_manifest", return_value=(manifest, None)
+        ), mock.patch.object(
+            pipeline, "_run_training", side_effect=run_training
+        ), mock.patch.object(
+            pipeline, "_register_model", return_value=({"model_id": "m1"}, True)
+        ), mock.patch.object(
+            pipeline, "_cleanup_terminal_artifacts", return_value={}
+        ):
+            self.assertEqual(0, pipeline.run_job(str(job_dir)))
+
+        status = pipeline.read_json(job_dir / "status.json", {}) or {}
+        self.assertEqual("completed", status.get("status"))
+        self.assertEqual("new_model_selected", status.get("selection_outcome"))
+        self.assertIn("Summary:", (job_dir / "job.log").read_text(encoding="utf-8"))
+
     def test_nninteractive_target_and_initial_mcs_exports_use_separate_caches(self):
         pipeline = __import__(
             "tools.nninteractive_finetune_pipeline",
@@ -6392,6 +6871,92 @@ class TestNewFeatures(unittest.TestCase):
         self.assertNotEqual(target_staging, initial_staging)
         self.assertEqual(target_file.read_bytes(), b"target")
         self.assertEqual(initial_file.read_bytes(), b"initial")
+
+    def test_nninteractive_source_grid_inputs_reuse_and_invalidate_by_label(self):
+        import nibabel as nib
+
+        pipeline = __import__(
+            "tools.nninteractive_finetune_pipeline",
+            fromlist=["dummy"],
+        )
+        root = Path(self.tmp) / "nn_source_grid_reuse"
+        root.mkdir()
+        image = root / "image.nii.gz"
+        label = root / "label.nii.gz"
+        values = np.arange(64, dtype=np.float32).reshape((4, 4, 4)) + 1
+        target = np.zeros((4, 4, 4), dtype=np.uint8)
+        target[1:3, 1:3, 1:3] = 1
+        nib.save(nib.Nifti1Image(values, np.eye(4)), str(image))
+        nib.save(nib.Nifti1Image(target, np.eye(4)), str(label))
+
+        first = pipeline._prepare_source_grid_case_cache(
+            root / "workspace", "brain", "case", image, label, None
+        )
+        second = pipeline._prepare_source_grid_case_cache(
+            root / "workspace", "brain", "case", image, label, None
+        )
+        self.assertFalse(first[3])
+        self.assertTrue(second[3])
+        self.assertEqual(first[:2], second[:2])
+
+        time.sleep(0.01)
+        target[0, 0, 0] = 1
+        nib.save(nib.Nifti1Image(target, np.eye(4)), str(label))
+        changed = pipeline._prepare_source_grid_case_cache(
+            root / "workspace", "brain", "case", image, label, None
+        )
+        self.assertFalse(changed[3])
+        self.assertNotEqual(first[0].parent, changed[0].parent)
+
+    def test_nninteractive_initial_mask_validation_is_cached(self):
+        import nibabel as nib
+
+        pipeline = __import__(
+            "tools.nninteractive_finetune_pipeline",
+            fromlist=["dummy"],
+        )
+        root = Path(self.tmp) / "nn_initial_validation_cache"
+        root.mkdir()
+        image_path = root / "image.nii.gz"
+        label_path = root / "target.nii.gz"
+        initial_path = root / "draft.nii.gz"
+        image = np.ones((8, 8, 8), dtype=np.float32)
+        target = np.zeros((8, 8, 8), dtype=np.uint8)
+        target[1:7, 1:7, 1:7] = 1
+        initial = np.zeros_like(target)
+        initial[2:6, 2:6, 2:6] = 1
+        for path, array in (
+            (image_path, image),
+            (label_path, target),
+            (initial_path, initial),
+        ):
+            nib.save(nib.Nifti1Image(array, np.eye(4)), str(path))
+
+        first = pipeline._prepare_source_grid_case_cache(
+            root / "workspace",
+            "task",
+            "case",
+            image_path,
+            label_path,
+            initial_path,
+        )
+        with mock.patch.object(
+            pipeline,
+            "_ensure_binary_nifti_label",
+            side_effect=AssertionError("cache hit must not reload masks"),
+        ):
+            second = pipeline._prepare_source_grid_case_cache(
+                root / "workspace",
+                "task",
+                "case",
+                image_path,
+                label_path,
+                initial_path,
+            )
+        self.assertFalse(first[3])
+        self.assertTrue(second[3])
+        self.assertEqual(second[4], "")
+        self.assertEqual(first[2], second[2])
 
     def test_nninteractive_manifest_keeps_distinct_real_initial_mask(self):
         import nibabel as nib
@@ -7000,7 +7565,8 @@ class TestNewFeatures(unittest.TestCase):
             os.getcwd(), "scripting_library", "01_Data", "04_Stop_Import_Queue.py"
         )
         self.assertTrue(os.path.isfile(entry), "Stop_Background_Import entry must exist")
-        content = open(entry, "r", encoding="utf-8").read()
+        with open(entry, "r", encoding="utf-8") as handle:
+            content = handle.read()
         self.assertIn("main_stop_import", content,
                       "must route to main_stop_import function")
 
@@ -7865,6 +8431,14 @@ class TestNewFeatures(unittest.TestCase):
 
         self.assertIn("tools/ui_theme.py", package_portable.REQUIRED_EXTERNAL_UI_FILES)
         self.assertIn(
+            "tools/interactive_algorithms_worker.py",
+            package_portable.REQUIRED_EXTERNAL_UI_FILES,
+        )
+        self.assertIn(
+            "runtime_py35/interactive_algorithms_mimics.py",
+            package_portable.REQUIRED_EXTERNAL_UI_FILES,
+        )
+        self.assertIn(
             "tools/training_data_ui.py",
             package_portable.REQUIRED_EXTERNAL_UI_FILES,
         )
@@ -7952,7 +8526,7 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn("_background_process_kwargs", inspect.getsource(fewshot_mimics._launch_bridge_mask_to_buffer))
         self.assertIn("_background_process_kwargs", inspect.getsource(nninteractive_mimics._start_async_worker))
 
-    def test_mask_writers_share_a_nested_callback_lease(self):
+    def test_mask_writers_use_exclusive_callback_or_batch_leases(self):
         import inspect
         import fewshot_mimics
         import mask_import
@@ -7960,12 +8534,29 @@ class TestNewFeatures(unittest.TestCase):
 
         for callback in (
             fewshot_mimics._monitor_tick,
-            mask_import._mask_import_monitor_tick,
             nninteractive_mimics._async_monitor_tick,
         ):
             source = inspect.getsource(callback)
             self.assertIn("mask_buffer_access", source)
             self.assertIn("release_local_operation", source)
+
+        apply_source = inspect.getsource(mask_import._mask_import_monitor_tick_locked)
+        finish_source = inspect.getsource(mask_import._finish_mask_import)
+        cancel_source = inspect.getsource(mask_import.cancel_all_mask_imports)
+        self.assertIn('"mask_buffer_access", "Mask import apply"', apply_source)
+        self.assertIn("release_local_operation", finish_source)
+        self.assertIn("release_local_operation", cancel_source)
+
+    def test_external_compute_children_use_below_normal_windows_priority(self):
+        for relative in (
+            "runtime_py35/interactive_algorithms_mimics.py",
+            "tools/fewshot_pipeline.py",
+            "tools/nninteractive_finetune_pipeline.py",
+            "tools/nnunet_jobs.py",
+            "tools/nnunet_pipeline.py",
+        ):
+            source = Path(PROJECT_ROOT, relative).read_text(encoding="utf-8")
+            self.assertIn("BELOW_NORMAL_PRIORITY_CLASS", source, relative)
 
     def test_external_batch_export_requires_explicit_safe_or_overwrite_destination(self):
         import tools.mimics_batch_cli as cli

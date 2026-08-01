@@ -2,8 +2,8 @@
 
 ## 1. Goal and compatibility boundary
 
-This feature adds optional SSH/Docker training for the existing DINOv3
-few-shot and nnInteractive task fine-tuning workflows.
+This feature adds optional SSH/Docker execution for DINOv3 few-shot training,
+nnInteractive task fine-tuning, and managed nnU-Net training/inference.
 
 The primary compatibility rule is:
 
@@ -17,15 +17,16 @@ The primary compatibility rule is:
 - No remote code is imported by the Mimics Python runtime. Mimics only launches
   the existing external PySide6 process.
 
-Remote inference is intentionally not part of the first version. A trained
-model is downloaded and registered locally, then the existing local inference
-path is used. This avoids uploading every active case before inference,
-preserves interactive response time, and keeps prediction-to-Mimics geometry
-on the already validated local path.
+DINOv3 and nnInteractive inference remain local after the downloaded model is
+registered. Managed nnU-Net additionally supports optional remote batch
+inference; its prediction is downloaded, geometry-validated, and then applied
+through the same Mimics-side buffer path as a local prediction. Local remains
+the default for every framework.
 
 ## 2. User workflow
 
-Both training windows contain the same additive **Compute** section:
+The DINOv3, nnInteractive, and nnU-Net setup windows use the same additive
+**Compute** section:
 
 1. **This workstation** remains the default.
 2. **Manage Servers...** opens an external PySide6 server editor.
@@ -39,8 +40,9 @@ Both training windows contain the same additive **Compute** section:
    - Runtime image, normally `mimics-ai-runtime:1.0`
    - GPU device: Automatic, a numeric index, or an NVIDIA GPU/MIG UUID
    - Whether unchanged uploaded training data should be reused
-4. **Test Connection** verifies SSH host identity, authentication, Docker,
-   NVIDIA GPU access, free disk space, and both AI frameworks inside the image.
+4. **Test Connection** verifies SSH host identity, authentication, work-folder
+   permissions, Docker, NVIDIA GPU access, free disk space, all three AI
+   frameworks, required default weights, and enforced offline mode.
 5. The user explicitly selects `Remote · <profile>` and starts training.
 
 Passwords are stored in Windows Credential Manager. They are never written to
@@ -62,8 +64,10 @@ flowchart LR
     G --> H{"Training kind"}
     H --> I["DINOv3 pipeline"]
     H --> J["nnInteractive fine-tuning pipeline"]
+    H --> P["nnU-Net training or inference pipeline"]
     I --> K["Model artifact"]
     J --> K
+    P --> K
     K --> L["Resumable download"]
     L --> M["Existing local model registry"]
     M --> N["Existing local inference"]
@@ -86,7 +90,7 @@ Key implementation files:
 - `tools/remote_compute_ui.py`: shared server profile and compute selector UI.
 - `tools/remote_training_controller.py`: local preparation, transfer, remote
   lifecycle, status mirroring, download, and local registration.
-- `tools/remote_worker.py`: container entry point for both training pipelines.
+- `tools/remote_worker.py`: container entry point for all three pipelines.
 - `remote/Dockerfile`: unified CUDA runtime.
 - `remote/build_image.sh`: image build and optional archive export.
 - `remote/setup_remote_server.sh`: one-time server initialization.
@@ -108,6 +112,8 @@ local training:
 - Labels are mapped to the source-image grid before upload.
 - Image and label shape/affine checks remain in the existing pipeline.
 - nnInteractive uses its existing manifest preparation and input contract.
+- nnU-Net uses source-grid image/label preparation, a dataset-fingerprint
+  isolated raw/preprocessed cache, and its existing model geometry contract.
 
 The upload contains only the selected cases, labels, job request, and an
 explicitly selected custom base model when applicable. Public/shared storage is
@@ -222,11 +228,14 @@ The local status file is the UI-facing source of truth. Remote status is
 mirrored into it without replacing local paths such as `workspace`,
 `cancel_path`, or `control_path`.
 
-The UI shows preparation counts, upload/download percentages, cache hit or
+The UI shows preparation counts, upload/download percentages, current transfer
+rate and ETA, cache hit or
 miss, selected server/GPU, GPU wait, epoch/loss/validation metrics emitted by
 the existing trainer, reconnect attempts, model verification, and the final
 result. `remote_worker.log` is appended to the local task log while training is
-running rather than being downloaded only at the end. SSH/controller
+running rather than being downloaded only at the end. The remote file rotates
+at 32 MiB and retains three backups, so a verbose or long job cannot grow it
+without bound. SSH/controller
 diagnostics are kept in `remote_controller.log` for DINOv3 and in the existing
 nnInteractive task log. Both status viewers expose the relevant log paths.
 
@@ -243,7 +252,7 @@ reconnecting_remote
 remote_control_unavailable
 finalizing_remote
 downloading
-completed / failed / cancelled
+completed / failed / cancelled / abandoned
 ```
 
 During upload, progress is aggregated across all selected case archives.
@@ -261,12 +270,14 @@ Failure handling:
 | Missing Docker/GPU/image/framework | Connection preflight fails |
 | Missing base model | Job fails before the large upload |
 | Upload/download interruption | `.part` transfer resumes after reconnect |
+| Download disk shortage | Download is refused before transfer; the existing local model remains unchanged |
 | SSH loss during training | Container continues; controller reports reconnecting and retries |
 | Docker status temporarily unavailable | Job remains non-terminal and monitoring retries |
 | User stops a job | Framework stop marker/control is written first, then bounded `docker stop` |
 | Container crash | Exit code, pipeline status, and remote worker log are retained locally |
 | Successful job | Model downloads, is locally audited/registered, then the container and per-job files are removed; verified dataset cache remains. Cleanup failure is recorded as a warning and does not turn a registered model into a failed training result |
 | Cancelled job | Container and remote job data are removed after stop confirmation |
+| Server permanently unreachable | Status remains unknown; the single Stop button changes to **Abandon Locally**, which ends local waiting but explicitly warns that the remote container may still run |
 | Failed job | Container is stopped and removed; remote job files are retained for diagnosis. They are not deleted by an age-only cleanup that could mistake a long-running task for stale work |
 
 The controller never reports `cancelled` until the remote container stop is
@@ -277,6 +288,13 @@ confirmed. Before any stop, removal, or control-marker write, the controller
 verifies the container owner/job labels and confines the path to
 `jobs/<ssh-user>/<job-id>`. A second controller cannot replace a still-running
 container for the same job.
+
+When remote state is unknown, **Abandon Locally** is an explicit escape path.
+It marks only the local task terminal, stops automatic local waiting, preserves
+the server/container identity in status, and never claims that the GPU lock or
+container was released. This action does not contact, stop, or delete anything
+on the server. It is shown only for an unknown remote state and requires one
+confirmation, so normal users do not see another routine action.
 
 The Docker image is never removed by a job. A subsequent training starts a new
 disposable container from the already-installed image, normally in seconds.
@@ -293,7 +311,14 @@ MIMICS_AI_ROOT=/srv/mimics-ai \
 ```
 
 This builds the image, creates the remote folders, verifies base weights, and
-runs both framework preflights.
+runs DINOv3, nnInteractive, nnU-Net, CUDA, and offline-runtime preflights.
+
+Job containers use `--network none` and also set
+`HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`,
+`HF_DATASETS_OFFLINE=1`, and `WANDB_MODE=offline`. Base weights are supplied by
+explicit paths under the read-only `/models` mount; writable library caches use
+container-local `/tmp`. Consequently, a missing weight fails during preflight
+or job asset validation instead of causing a hidden first-run download.
 
 For an offline server, build an image archive on another Linux machine:
 
@@ -338,6 +363,9 @@ Automated local tests cover:
 - Deterministic dataset archives produce stable cache fingerprints.
 - A verified cache hit skips the large data upload.
 - Growing remote logs are appended locally without rereading the full file.
+- Remote subprocess logs rotate at a bounded size.
+- Local artifact space is checked before model download/extraction.
+- Local abandon is terminal without claiming remote stop confirmation.
 - The default DINOv3 launch calls the unchanged local command.
 - Remote execution occurs only when explicitly selected.
 - Remote status cannot replace local control paths.
@@ -353,13 +381,13 @@ python -m unittest tools.test_remote_training -v
 
 Required Windows/Mimics acceptance tests:
 
-1. Start local DINOv3 and nnInteractive training without creating a server
+1. Start local DINOv3, nnInteractive, and nnU-Net training without creating a server
    profile; compare command, status, model registration, and inference with the
    previous version.
 2. Save a password profile, restart Windows, and confirm the password is read
    from Credential Manager while absent from project JSON/logs.
-3. Train one small DINOv3 job and one nnInteractive job remotely, then run
-   local inference with each downloaded model.
+3. Train one small DINOv3, nnInteractive, and nnU-Net job remotely, then run
+   inference with each downloaded model; also verify one remote nnU-Net inference.
 4. Compare local and remote training using identical data, seed, image, and
    parameters. Exact floating-point identity is not guaranteed across CUDA
    hardware, but input manifests and model configuration must match.
@@ -372,14 +400,19 @@ Required Windows/Mimics acceptance tests:
    cleanup.
 8. Verify that no action in the external UI blocks or closes the open Mimics
    GUI.
+9. Disconnect the server permanently, request Stop, then use **Abandon
+   Locally**. Confirm the local task becomes terminal while the UI continues to
+   warn that server GPU/container state is unknown.
 
 ## 10. Deliberate limitations
 
-- No remote interactive inference in the first version.
+- No remote interactive nnInteractive inference and no remote DINOv3
+  single-case inference. Managed nnU-Net remote inference is supported.
 - No central model marketplace or cross-user model approval workflow.
 - No password is stored on non-Windows development machines; use an SSH key or
   a test-only environment variable there.
 - One job uses one selected GPU. Distributed training across several GPUs for
   one job is not implemented.
 - A permanently unreachable server cannot provide proof that its container
-  stopped. The client keeps the job non-terminal rather than claiming success.
+  stopped. Stop therefore remains non-terminal; the user may explicitly
+  abandon local monitoring, which retains an unresolved-remote warning.

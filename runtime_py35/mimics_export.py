@@ -1367,6 +1367,45 @@ def _selected_masks(mask_names=None):
     return selected
 
 
+def _object_identity(value):
+    for attr in ("guid", "id", "identifier"):
+        try:
+            current = getattr(value, attr, None)
+        except Exception:
+            current = None
+        if current is not None:
+            return str(current)
+    return str(id(value)) if value is not None else ""
+
+
+def _foreground_export_target_is_open(monitor):
+    launch_project = str(monitor.get("launch_project_path") or "")
+    current_project = _current_project_path()
+    if launch_project:
+        try:
+            same_project = os.path.normcase(os.path.abspath(launch_project)) == os.path.normcase(
+                os.path.abspath(current_project)
+            )
+        except Exception:
+            same_project = False
+        if not same_project:
+            return False
+    try:
+        active_image = mimics.data.images.get_active()
+    except Exception:
+        active_image = None
+    expected_image = str(monitor.get("launch_image_id") or "")
+    if active_image is not None and _object_identity(active_image) == expected_image:
+        return True
+    try:
+        for image in mimics.data.images:
+            if _object_identity(image) == expected_image:
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _new_export_manifest(selected):
     manifest = {
         "masks": [],
@@ -1585,6 +1624,15 @@ def _foreground_export_tick(monitor):
             return
         phase = monitor.get("phase")
         if phase == "buffers":
+            if not _foreground_export_target_is_open(monitor):
+                _finish_foreground_export(
+                    monitor,
+                    error=(
+                        "The active Mimics project or image changed while mask buffers were being read. "
+                        "Export stopped before conversion; reopen the original project and retry."
+                    ),
+                )
+                return
             selected = monitor["selected_masks"]
             index = int(monitor.get("mask_index", 0))
             if index < len(selected):
@@ -1634,6 +1682,14 @@ def _foreground_export_tick(monitor):
             manifest_path = os.path.join(monitor["buffers_dir"], "manifest.json")
             with open(manifest_path, "w") as handle:
                 json.dump(monitor["manifest"], handle, indent=2, ensure_ascii=False)
+            # The source snapshot is now immutable on disk. Release Mimics'
+            # Mask-buffer lease before the external geometry conversion so AI
+            # results and Mask import do not wait for unrelated file I/O.
+            operation_token = monitor.pop("operation_token", None)
+            if operation_token:
+                runtime_common.release_local_operation(
+                    "mask_buffer_access", operation_token
+                )
             params = {
                 "action": "convert",
                 "buffers_dir": monitor["buffers_dir"],
@@ -1670,7 +1726,24 @@ def _foreground_export_tick(monitor):
         if phase == "bridge":
             status, payload = _check_job_status(monitor["bridge_job_dir"])
             if status == "running":
+                due, elapsed = runtime_common.progress_notice_due(
+                    monitor,
+                    "current_export_convert",
+                    detail="converting_to_source_grid",
+                    interval_seconds=60.0,
+                    initial_delay_seconds=30.0,
+                )
+                if due:
+                    _mimics_log(
+                        logging.INFO,
+                        "Mask export is still converting to the original "
+                        "image grid ({0}s). Mimics remains available. Use "
+                        "Stop Mask Export to cancel.".format(int(elapsed)),
+                    )
                 return
+            runtime_common.clear_progress_notice(
+                monitor, "current_export_convert"
+            )
             if status == "error":
                 _finish_foreground_export(monitor, error=payload)
                 return
@@ -1779,6 +1852,10 @@ def _start_current_project_export(case_dir, source_image_path, output_root, axes
             "case_dir": os.path.abspath(case_dir),
             "case_id": case_id,
             "mcs_path": _current_project_path() or "",
+            "launch_project_path": _current_project_path() or "",
+            "launch_image_id": _object_identity(
+                getattr(selected[0], "image", None)
+            ),
             "source_image_path": source_image_path,
             "output_root": os.path.abspath(output_root),
             "output_seg_dir": output_seg_dir,
@@ -1861,6 +1938,12 @@ def cancel_current_project_exports():
             except Exception:
                 pass
         process = monitor.get("process")
+        if monitor.get("operation_token") and not monitor.get("busy"):
+            _finish_foreground_export_after_process(
+                monitor, cancelled=True
+            )
+            count += 1
+            continue
         if process is not None and monitor.get("launch_finished") and not stop_path:
             runtime_common.terminate_process_async(
                 process=process,
@@ -2178,6 +2261,32 @@ def _background_export_status_tick(monitor):
                 )
             except Exception:
                 pass
+        if status and status.get("status") not in (
+            "closed", "cancelled", "failed"
+        ):
+            detail = "{0}|{1}|{2}".format(
+                status.get("phase") or status.get("status") or "running",
+                status.get("case_id") or "",
+                status.get("index") or status.get("completed") or 0,
+            )
+            due, elapsed = runtime_common.progress_notice_due(
+                monitor,
+                "background_export_progress",
+                detail=detail,
+                interval_seconds=60.0,
+                initial_delay_seconds=60.0,
+            )
+            if due:
+                _mimics_log(
+                    logging.INFO,
+                    "Mask export is still running ({0}s in the current "
+                    "stage): {1}. Use Stop Mask Export to cancel.".format(
+                        int(elapsed),
+                        status.get("phase")
+                        or status.get("status")
+                        or "running",
+                    ),
+                )
         if status.get("status") in ("closed", "cancelled", "failed"):
             monitor["done"] = True
             _stop_export_monitor(key)

@@ -26,7 +26,7 @@ def _override_plans(dataset_id, plans_identifier, configuration,
         plans = json.load(f)
 
     if configuration not in plans["configurations"]:
-        print(f"  警告：configuration '{configuration}' 不存在于 plans 中，跳过 patch_size 覆盖")
+        print(f"  Warning: configuration '{configuration}' is absent from the plans; patch override skipped.")
         return
 
     cfg = plans["configurations"][configuration]
@@ -36,7 +36,7 @@ def _override_plans(dataset_id, plans_identifier, configuration,
     if target_patch_size is None and target_batch_size is not None:
         old_bs = cfg["batch_size"]
         cfg["batch_size"] = target_batch_size
-        print(f"  batch_size 覆盖: {old_bs} → {target_batch_size}")
+        print(f"  Batch size override: {old_bs} -> {target_batch_size}")
         from nnunetv2.utilities.json_export import recursive_fix_for_json_export
         recursive_fix_for_json_export(plans)
         with open(plans_path, "w", encoding="utf-8") as f:
@@ -45,8 +45,8 @@ def _override_plans(dataset_id, plans_identifier, configuration,
 
     # ── 覆盖 patch_size（同时重算网络拓扑）──
     old_patch_size = cfg["patch_size"]
-    print(f"  原始 patch_size: {old_patch_size}")
-    print(f"  目标 patch_size: {target_patch_size}")
+    print(f"  Original patch size: {old_patch_size}")
+    print(f"  Requested patch size: {target_patch_size}")
     print(f"  spacing:         {spacing}")
 
     # ── 使用 get_pool_and_conv_props 重新计算网络拓扑 ──
@@ -60,7 +60,7 @@ def _override_plans(dataset_id, plans_identifier, configuration,
     num_stages = len(pool_op_kernel_sizes)
 
     if list(new_patch_size) != list(target_patch_size):
-        print(f"  patch_size 已自动调整为可整除值: {list(target_patch_size)} → {list(new_patch_size)}")
+        print(f"  Patch size adjusted for network divisibility: {list(target_patch_size)} -> {list(new_patch_size)}")
 
     # ── 更新 architecture 参数 ──
     arch = cfg["architecture"]["arch_kwargs"]
@@ -117,14 +117,14 @@ def _override_plans(dataset_id, plans_identifier, configuration,
 
         batch_size = max(2, round((reference / estimate) * ref_bs))
         cfg["batch_size"] = batch_size
-        print(f"  重新估算 batch_size: {batch_size}")
+        print(f"  Re-estimated batch size: {batch_size}")
     except Exception as e:
-        print(f"  警告：无法自动估算 batch_size，保持原值 {cfg['batch_size']}。原因：{e}")
+        print(f"  Warning: batch size estimation failed; keeping {cfg['batch_size']}. Reason: {e}")
 
     # ── 用户指定的 batch_size 优先级最高，覆盖自动估算值 ──
     if target_batch_size is not None:
         cfg["batch_size"] = target_batch_size
-        print(f"  用户指定 batch_size 覆盖: {target_batch_size}")
+        print(f"  User batch size override: {target_batch_size}")
 
     # ── 写回 plans ──
     # 将 numpy 类型（np.int64 等）转换为 Python 原生类型，否则 json.dump 会写出无效 JSON
@@ -134,8 +134,8 @@ def _override_plans(dataset_id, plans_identifier, configuration,
     with open(plans_path, "w", encoding="utf-8") as f:
         json.dump(plans, f, indent=2, ensure_ascii=False)
 
-    print(f"  patch_size 覆盖完成: {list(new_patch_size)}")
-    print(f"  网络层数: {num_stages}, 池化核: {[list(s) for s in pool_op_kernel_sizes]}")
+    print(f"  Patch size override complete: {list(new_patch_size)}")
+    print(f"  Network stages: {num_stages}; pooling kernels: {[list(s) for s in pool_op_kernel_sizes]}")
 
 
 def stage_preprocess(
@@ -169,25 +169,25 @@ def stage_preprocess(
     )
 
     print(f"\n{'='*60}")
-    print(f"阶段 1 / 预处理  dataset={dataset_id}  config={configuration}")
+    print(f"Stage 1 / Preprocessing  dataset={dataset_id}  config={configuration}")
     print(f"{'='*60}")
 
-    print("  步骤 1/3：指纹提取 (extract_fingerprints)...")
+    print("  Step 1/3: extracting dataset fingerprints...")
     extract_fingerprints(
         dataset_ids=[dataset_id],
         num_processes=num_processes,
         check_dataset_integrity=verify_integrity,
     )
 
-    print("  步骤 2/3：实验规划 (plan_experiments)...")
+    print("  Step 2/3: planning the experiment...")
     if target_spacing is not None and len(target_spacing) > 0:
-        print(f"  目标间距: {target_spacing} mm")
+        print(f"  Target spacing: {target_spacing} mm")
         plans_id = plan_experiments(
             dataset_ids=[dataset_id],
             overwrite_target_spacing=target_spacing,
         )
     else:
-        print("  目标间距: 由 nnUNet 自动规划")
+        print("  Target spacing: selected automatically by nnU-Net")
         plans_id = plan_experiments(dataset_ids=[dataset_id])
 
     # 可选：覆盖 patch_size / batch_size
@@ -197,12 +197,12 @@ def stage_preprocess(
             overrides.append(f"patch_size={target_patch_size}")
         if target_batch_size is not None:
             overrides.append(f"batch_size={target_batch_size}")
-        print(f"  步骤 2.5/3：覆盖 {', '.join(overrides)}...")
+        print(f"  Step 2.5/3: applying {', '.join(overrides)}...")
         _override_plans(dataset_id, plans_id, configuration,
                         target_patch_size=target_patch_size,
                         target_batch_size=target_batch_size)
 
-    print("  步骤 3/3：数据预处理 (preprocess)...")
+    print("  Step 3/3: preprocessing the dataset...")
     preprocess(
         dataset_ids=[dataset_id],
         plans_identifier=plans_id,
@@ -210,5 +210,5 @@ def stage_preprocess(
         num_processes=[num_processes],
     )
 
-    print(f"  预处理完成，plans_identifier = {plans_id}")
+    print(f"  Preprocessing completed; plans identifier: {plans_id}")
     return plans_id

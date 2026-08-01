@@ -192,7 +192,29 @@ def discover_cases(ts_root, cases, python_exe, mask_selection="all", env_overrid
 def _acquire_background_mimics_lock(owner, scope, wait_seconds=0.0):
     lock_path = Path(runtime_common.background_mimics_lock_path(str(ROOT), str(scope)))
     lock = FileResourceLock(lock_path, "background_mimics", owner)
-    lock.acquire(wait_seconds=float(wait_seconds), poll_seconds=5.0)
+    started = time.time()
+    last_notice = [0.0]
+
+    def on_wait(holder):
+        now = time.time()
+        if now - last_notice[0] < 30.0:
+            return
+        print(
+            "Waiting for background Mimics held by {} (pid {}); {:.0f}s "
+            "elapsed. Press Ctrl+C to cancel this wait.".format(
+                str((holder or {}).get("owner") or "another task"),
+                str((holder or {}).get("pid") or "unknown"),
+                now - started,
+            ),
+            flush=True,
+        )
+        last_notice[0] = now
+
+    lock.acquire(
+        wait_seconds=float(wait_seconds),
+        poll_seconds=5.0,
+        on_wait=on_wait,
+    )
     return lock
 
 
@@ -203,12 +225,20 @@ def _acquire_background_mimics_locks(owner, scopes, wait_seconds=0.0):
         for scope in scopes
     ))
     deadline = time.time() + max(0.0, float(wait_seconds))
+    started = time.time()
+    last_notice = 0.0
     while True:
         locks = []
+        blocked_holder = {}
         try:
             for path in paths:
                 lock = FileResourceLock(path, "background_mimics", owner)
-                lock.acquire(wait_seconds=0.0, poll_seconds=5.0)
+                try:
+                    lock.acquire(wait_seconds=0.0, poll_seconds=5.0)
+                except ResourceLockTimeout:
+                    read_holder = getattr(lock, "read", None)
+                    blocked_holder = read_holder() if callable(read_holder) else {}
+                    raise
                 locks.append(lock)
             return locks
         except ResourceLockTimeout:
@@ -216,6 +246,18 @@ def _acquire_background_mimics_locks(owner, scopes, wait_seconds=0.0):
                 lock.release()
             if time.time() >= deadline:
                 raise
+            now = time.time()
+            if now - last_notice >= 30.0:
+                print(
+                    "Waiting for background Mimics held by {} (pid {}); "
+                    "{:.0f}s elapsed. Press Ctrl+C to cancel this wait.".format(
+                        str(blocked_holder.get("owner") or "another task"),
+                        str(blocked_holder.get("pid") or "unknown"),
+                        now - started,
+                    ),
+                    flush=True,
+                )
+                last_notice = now
             time.sleep(min(1.0, max(0.05, deadline - time.time())))
         except Exception:
             for lock in reversed(locks):
@@ -915,6 +957,8 @@ def cmd_kill_background(args):
         "_run_export_batch.py",
         "fewshot_pipeline.py",
         "nninteractive.inference.server.main",
+        "interactive_algorithms_worker.py",
+        "igac_gui.py",
         "--watchdog",
     ]
     ps_markers = "@(" + ",".join("'{}'".format(m.replace("'", "''")) for m in markers) + ")"

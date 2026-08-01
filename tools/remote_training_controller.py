@@ -56,11 +56,14 @@ except ImportError:
     )
 
 
-TERMINAL = {"completed", "failed", "cancelled", "paused"}
+TERMINAL = {"completed", "failed", "cancelled", "paused", "abandoned"}
+LOCAL_ARCHIVE_REVERIFY_SECONDS = 7 * 24 * 60 * 60
+LOCAL_ARCHIVE_RETENTION_SECONDS = 30 * 24 * 60 * 60
 REMOTE_TRAINING_LABEL = "mimics-script.remote-training"
 REMOTE_OWNER_LABEL = "mimics-script.owner"
 REMOTE_JOB_LABEL = "mimics-script.job"
 LOCAL_STATUS_KEYS = {
+    "abandon_path",
     "cancel_path",
     "control_path",
     "controller_pid",
@@ -70,6 +73,10 @@ LOCAL_STATUS_KEYS = {
     "kind",
     "launcher_pid",
     "local_log_path",
+    "local_dataset_archive_cache_reused",
+    "local_dataset_archive_cache_total",
+    "local_materialization_cache_reused",
+    "local_materialization_cache_total",
     "controller_log_path",
     "diagnostic_log_paths",
     "log_path",
@@ -87,9 +94,16 @@ LOCAL_STATUS_KEYS = {
     "task_name",
     "training_options",
     "train_log",
+    "training_curve_path",
+    "source_grid_cache_reused",
+    "source_grid_cache_total",
     "ts_root",
     "workspace",
 }
+
+
+class RemoteTaskAbandoned(RuntimeError):
+    """Local monitoring ended without claiming that the remote job stopped."""
 
 
 def _status_update(path: Path, **values: Any) -> dict[str, Any]:
@@ -133,7 +147,30 @@ def _cancel_requested(status_path: Path) -> bool:
     }
 
 
+def _abandon_path(status_path: Path) -> Path:
+    status = read_json(status_path, {}) or {}
+    configured = str(status.get("abandon_path") or "").strip()
+    return (
+        Path(configured).expanduser().resolve()
+        if configured
+        else status_path.with_name(status_path.name + ".abandon.request")
+    )
+
+
+def _abandon_requested(status_path: Path) -> bool:
+    if _abandon_path(status_path).is_file():
+        return True
+    status = read_json(status_path, {}) or {}
+    return bool(status.get("local_abandon_requested"))
+
+
+def _raise_if_abandoned(status_path: Path) -> None:
+    if _abandon_requested(status_path):
+        raise RemoteTaskAbandoned("local abandon requested")
+
+
 def _raise_if_cancelled(status_path: Path) -> None:
+    _raise_if_abandoned(status_path)
     if _cancel_requested(status_path):
         raise InterruptedError("cancel")
 
@@ -182,6 +219,10 @@ def _normalized_tar_info(info: tarfile.TarInfo) -> tarfile.TarInfo:
     info.gid = 0
     info.uname = ""
     info.gname = ""
+    # The archive digest is the data identity used for both transfer and
+    # prepared-data cache namespaces. Normalise every timestamp so a metadata
+    # touch does not force an upload or a full remote preparation. Actual file
+    # content changes alter the archive digest and get a new namespace below.
     info.mtime = 0
     return info
 
@@ -233,9 +274,40 @@ def _build_dataset_tar(bundle: Path, archive: Path) -> tuple[str, int]:
 
 
 def _build_dataset_parts(
-    bundle: Path, destination: Path
+    bundle: Path,
+    destination: Path,
+    *,
+    cache_dir: Path | None = None,
+    case_cache_keys: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Build deterministic per-case archives for incremental remote reuse."""
+    """Build or reuse deterministic per-case archives.
+
+    ``case_cache_keys`` must describe the already materialized image, label,
+    and optional Initial Mask. A matching local archive is immutable and its
+    recorded SHA-256 can be reused without rereading the volume bytes.
+    """
+    if cache_dir is not None:
+        cache_root = Path(cache_dir)
+        cutoff = time.time() - LOCAL_ARCHIVE_RETENTION_SECONDS
+        if cache_root.is_dir():
+            for stale_archive in cache_root.rglob("*.tar"):
+                try:
+                    stale_metadata = stale_archive.with_suffix(".json")
+                    metadata = read_json(stale_metadata, {}) or {}
+                    last_used = float(
+                        metadata.get("last_used_at_epoch")
+                        or metadata.get("created_at_epoch")
+                        or stale_archive.stat().st_mtime
+                    )
+                    if last_used >= cutoff:
+                        continue
+                    stale_archive.unlink()
+                    try:
+                        stale_metadata.unlink()
+                    except OSError:
+                        pass
+                except OSError:
+                    pass
     case_names = set()
     for top_name in ("input", "labels"):
         top = bundle / top_name
@@ -259,11 +331,84 @@ def _build_dataset_parts(
         )
     destination.mkdir(parents=True, exist_ok=True)
     parts = []
+    cache_keys = case_cache_keys or {}
     for case_name in sorted(case_names):
-        archive = destination / (
-            "dataset_{}.tar".format(safe_identifier(case_name, "case"))
+        source_key = str(cache_keys.get(case_name) or "").strip()
+        cache_identity = (
+            hashlib.sha256(
+                (
+                    "remote_dataset_case_archive.v1\0" + source_key
+                ).encode("utf-8")
+            ).hexdigest()
+            if source_key
+            else ""
         )
-        temporary = archive.with_name(archive.name + ".tmp")
+        metadata_path = None
+        if cache_dir is not None and cache_identity:
+            case_cache = (
+                Path(cache_dir)
+                / safe_identifier(case_name, "case")
+            )
+            archive = case_cache / (cache_identity + ".tar")
+            metadata_path = case_cache / (cache_identity + ".json")
+            metadata = read_json(metadata_path, {}) or {}
+            cache_valid = (
+                archive.is_file()
+                and metadata.get("cache_identity") == cache_identity
+                and int(metadata.get("size") or -1) == archive.stat().st_size
+                and str(metadata.get("fingerprint") or "")
+            )
+            if cache_valid:
+                archive_stat = archive.stat()
+                last_verified = float(metadata.get("verified_at_epoch") or 0)
+                recorded_mtime = int(metadata.get("archive_mtime_ns") or -1)
+                needs_reverify = (
+                    recorded_mtime
+                    != int(
+                        getattr(
+                            archive_stat,
+                            "st_mtime_ns",
+                            archive_stat.st_mtime * 1e9,
+                        )
+                    )
+                    or time.time() - last_verified
+                    >= LOCAL_ARCHIVE_REVERIFY_SECONDS
+                )
+                if needs_reverify:
+                    cache_valid = (
+                        _sha256_file(archive)
+                        == str(metadata.get("fingerprint") or "")
+                    )
+                    if cache_valid:
+                        metadata["verified_at_epoch"] = time.time()
+                        metadata["archive_mtime_ns"] = int(
+                            getattr(
+                                archive_stat,
+                                "st_mtime_ns",
+                                archive_stat.st_mtime * 1e9,
+                            )
+                        )
+            if cache_valid:
+                metadata["last_used_at_epoch"] = time.time()
+                write_json_atomic(metadata_path, metadata)
+                parts.append(
+                    {
+                        "case_id": case_name,
+                        "archive": archive,
+                        "fingerprint": str(metadata["fingerprint"]),
+                        "size": int(metadata["size"]),
+                        "local_cache_hit": True,
+                    }
+                )
+                continue
+            case_cache.mkdir(parents=True, exist_ok=True)
+        else:
+            archive = destination / (
+                "dataset_{}.tar".format(safe_identifier(case_name, "case"))
+            )
+        temporary = archive.with_name(
+            "{}.{}.tmp".format(archive.name, uuid.uuid4().hex)
+        )
         try:
             with tarfile.open(str(temporary), "w") as handle:
                 for top_name in ("input", "labels"):
@@ -286,11 +431,37 @@ def _build_dataset_parts(
                 temporary.unlink()
             except OSError:
                 pass
+        fingerprint = _sha256_file(archive)
+        size = int(archive.stat().st_size)
+        if metadata_path is not None:
+            archive_stat = archive.stat()
+            write_json_atomic(
+                metadata_path,
+                {
+                    "schema_version": "remote_dataset_case_archive.v1",
+                    "case_id": case_name,
+                    "cache_identity": cache_identity,
+                    "source_key": source_key,
+                    "fingerprint": fingerprint,
+                    "size": size,
+                    "created_at_epoch": time.time(),
+                    "verified_at_epoch": time.time(),
+                    "last_used_at_epoch": time.time(),
+                    "archive_mtime_ns": int(
+                        getattr(
+                            archive_stat,
+                            "st_mtime_ns",
+                            archive_stat.st_mtime * 1e9,
+                        )
+                    ),
+                },
+            )
         parts.append({
             "case_id": case_name,
             "archive": archive,
-            "fingerprint": _sha256_file(archive),
-            "size": int(archive.stat().st_size),
+            "fingerprint": fingerprint,
+            "size": size,
+            "local_cache_hit": False,
         })
     return parts
 
@@ -303,6 +474,40 @@ def _dataset_parts_fingerprint(parts: list[dict[str, Any]]) -> str:
         digest.update(str(part["fingerprint"]).encode("ascii"))
         digest.update(b"\0")
     return digest.hexdigest() if parts else ""
+
+
+_REMOTE_DATASET_CACHE_TOKEN = "__MIMICS_REMOTE_DATASET_FINGERPRINT__"
+
+
+def _bind_remote_prepared_cache(
+    bundle: Path, dataset_fingerprint: str
+) -> None:
+    """Bind persistent prepared caches to the exact archived dataset bytes.
+
+    The request is built before the per-case archives are hashed. Replacing
+    this token afterwards reuses prepared tensors only when the selected
+    image/label data is byte-identical, including same-size edits.
+    """
+    request_path = bundle / "remote_request.json"
+    request = read_json(request_path, {}) or {}
+    if not dataset_fingerprint:
+        raise RuntimeError("Remote training data has no content fingerprint.")
+
+    def replace(value: Any) -> Any:
+        if isinstance(value, str):
+            return value.replace(_REMOTE_DATASET_CACHE_TOKEN, dataset_fingerprint)
+        if isinstance(value, list):
+            return [replace(item) for item in value]
+        if isinstance(value, dict):
+            return {key: replace(item) for key, item in value.items()}
+        return value
+
+    bound = replace(request)
+    if bound == request:
+        raise RuntimeError(
+            "Remote training request has no prepared-cache identity placeholder."
+        )
+    write_json_atomic(request_path, bound)
 
 
 def _copy_model_input(
@@ -322,6 +527,16 @@ def _copy_model_input(
 
 
 def _local_model_fingerprint(path: Path) -> str:
+    """Content-only fingerprint of a model file or directory.
+
+    Directory fingerprints aggregate the sorted content hashes of the
+    supported weight files only.  Relative paths are intentionally excluded:
+    the remote server may install the same weights under a different
+    directory layout (custom ``remote_root`` or mount point), and an
+    unrelated extra file (backup, README) must not invalidate the identity
+    check.  Symbolic links are skipped so the set matches GNU ``find``
+    without ``-L`` on the remote side.
+    """
     path = path.resolve()
     if path.is_file():
         digest = hashlib.sha256()
@@ -335,6 +550,9 @@ def _local_model_fingerprint(path: Path) -> str:
     allowed_names = {"config.json", "plans.json"}
     allowed_suffixes = {".pth", ".safetensors", ".bin"}
     for candidate in path.rglob("*"):
+        if candidate.is_symlink():
+            # GNU find without -L never treats a symlink as a file.
+            continue
         if not candidate.is_file():
             continue
         relative = candidate.relative_to(path)
@@ -345,18 +563,19 @@ def _local_model_fingerprint(path: Path) -> str:
             and candidate.suffix.lower() not in allowed_suffixes
         ):
             continue
-        candidates.append((relative.as_posix(), candidate))
+        candidates.append(candidate)
     if not candidates:
         return ""
-    aggregate = hashlib.sha256()
-    for relative, candidate in sorted(candidates):
+    digests = []
+    for candidate in candidates:
         file_digest = hashlib.sha256()
         with candidate.open("rb") as handle:
             for chunk in iter(lambda: handle.read(4 * 1024 * 1024), b""):
                 file_digest.update(chunk)
-        aggregate.update(relative.encode("utf-8"))
-        aggregate.update(b"\0")
-        aggregate.update(file_digest.hexdigest().encode("ascii"))
+        digests.append(file_digest.hexdigest())
+    aggregate = hashlib.sha256()
+    for digest in sorted(digests):
+        aggregate.update(digest.encode("ascii"))
         aggregate.update(b"\0")
     return aggregate.hexdigest()
 
@@ -367,6 +586,19 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(4 * 1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _link_or_copy(source: str | Path, destination: str | Path) -> str:
+    """Stage an immutable cached file without rereading it when possible."""
+    source_path = Path(source).resolve()
+    destination_path = Path(destination)
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(str(source_path), str(destination_path))
+        return "hardlink"
+    except OSError:
+        shutil.copy2(str(source_path), str(destination_path))
+        return "copy"
 
 
 def _prepare_dino(spec: dict[str, Any], bundle: Path) -> dict[str, Any]:
@@ -523,6 +755,9 @@ def _prepare_dino(spec: dict[str, Any], bundle: Path) -> dict[str, Any]:
     input_root = bundle / "input"
     labels_root = bundle / "labels"
     all_rows = train_rows + val_rows
+    materialization_cache = workspace / "cache" / "materialized" / organ_slug
+    local_cache_hits = 0
+    dataset_case_cache_keys: dict[str, str] = {}
     _status_update(
         status_path,
         status="preparing_remote",
@@ -539,18 +774,36 @@ def _prepare_dino(spec: dict[str, Any], bundle: Path) -> dict[str, Any]:
         label_dst = labels_root / case_id / "segmentations" / (
             organ_slug + ".nii.gz"
         )
-        pipeline._materialize_source_image(row["image"], image_dst)
-        pipeline._materialize_label_on_source_grid(
-            row["label"], image_dst, label_dst
+        cache_entry = pipeline._materialized_cache_case(
+            row, materialization_cache
         )
+        dataset_case_cache_keys[case_id] = str(
+            (cache_entry.get("metadata") or {}).get("fingerprint") or ""
+        )
+        pipeline.copy_or_link(cache_entry["image"], image_dst)
+        pipeline.copy_or_link(cache_entry["label"], label_dst)
+        local_cache_hits += int(bool(cache_entry.get("cache_hit")))
         _status_update(
             status_path,
             status="preparing_remote",
+            phase=(
+                "reusing_local_prepared_data"
+                if cache_entry.get("cache_hit")
+                else "preparing_remote_data"
+            ),
             current_case=row["case_id"],
             preparation_index=index + 1,
+            local_materialization_cache_reused=local_cache_hits,
+            local_materialization_cache_total=len(all_rows),
             progress_percent=5
             + int(15.0 * (index + 1) / max(1, len(all_rows))),
         )
+    _append_log(
+        status_path.with_name(status_path.name + ".remote_controller.log"),
+        "Local source-grid cache: reused {} of {} DINOv3 case(s).".format(
+            local_cache_hits, len(all_rows)
+        ),
+    )
 
     remote_options = dict(options)
     remote_options["cases"] = ",".join(
@@ -614,6 +867,10 @@ def _prepare_dino(spec: dict[str, Any], bundle: Path) -> dict[str, Any]:
         "/job/input",
         "--workspace",
         "/job/output",
+        "--materialization-cache-dir",
+        "/remote-cache/dinov3/{}/{}/materialized".format(
+            organ_slug, _REMOTE_DATASET_CACHE_TOKEN
+        ),
         "--organ",
         organ,
         "--dinov3-root",
@@ -659,6 +916,14 @@ def _prepare_dino(spec: dict[str, Any], bundle: Path) -> dict[str, Any]:
         "validation_count": len(val_rows),
         "required_model_relative": required_model_relative,
         "local_required_model": local_required_model,
+        "local_dataset_archive_cache": str(
+            workspace
+            / "cache"
+            / "remote_dataset_archives"
+            / "dinov3"
+            / organ_slug
+        ),
+        "dataset_case_cache_keys": dataset_case_cache_keys,
     }
 
 
@@ -684,6 +949,7 @@ def _prepare_nninteractive(
     if not rows:
         raise RuntimeError("No prepared nnInteractive case is available.")
     remote_rows = []
+    dataset_case_cache_keys: dict[str, str] = {}
     input_root = bundle / "input"
     for index, row in enumerate(rows):
         if _cancel_requested(status_path):
@@ -693,8 +959,11 @@ def _prepare_nninteractive(
         case_root.mkdir(parents=True, exist_ok=True)
         image_dst = case_root / "image.nii.gz"
         label_dst = case_root / "label.nii.gz"
-        shutil.copy2(str(row["image"]), str(image_dst))
-        shutil.copy2(str(row["label"]), str(label_dst))
+        _link_or_copy(row["image"], image_dst)
+        _link_or_copy(row["label"], label_dst)
+        dataset_case_cache_keys[case_id] = str(
+            row.get("source_grid_cache_fingerprint") or ""
+        )
         remote_row = {
             "case_id": str(row.get("case_id") or case_id),
             "image": "/job/input/{}/image.nii.gz".format(case_id),
@@ -706,7 +975,7 @@ def _prepare_nninteractive(
         initial_mask = str(row.get("initial_mask") or "").strip()
         if initial_mask:
             initial_dst = case_root / "initial_mask.nii.gz"
-            shutil.copy2(initial_mask, str(initial_dst))
+            _link_or_copy(initial_mask, initial_dst)
             remote_row["initial_mask"] = (
                 "/job/input/{}/initial_mask.nii.gz".format(case_id)
             )
@@ -722,7 +991,12 @@ def _prepare_nninteractive(
         )
 
     remote_request = dict(request)
-    remote_request["workspace"] = "/job/remote_workspace"
+    remote_request["workspace"] = (
+        "/remote-cache/nninteractive/datasets/{}".format(
+            _REMOTE_DATASET_CACHE_TOKEN
+        )
+    )
+    remote_request["prepared_cache_namespace"] = "dataset"
     remote_request["source_mode"] = "prepared"
     remote_request["prepared_root"] = "/job/input"
     remote_request["image_root"] = "/job/input"
@@ -773,6 +1047,277 @@ def _prepare_nninteractive(
         "validation_count": sum(row.get("split") == "val" for row in remote_rows),
         "required_model_relative": required_model_relative,
         "local_required_model": local_required_model,
+        "local_dataset_archive_cache": str(
+            Path(
+                request.get("workspace") or local_job_dir.parent
+            ).expanduser().resolve()
+            / "cache"
+            / "remote_dataset_archives"
+            / "nninteractive"
+        ),
+        "dataset_case_cache_keys": dataset_case_cache_keys,
+    }
+
+
+def _prepare_nnunet(
+    spec: dict[str, Any], bundle: Path
+) -> dict[str, Any]:
+    """Prepare source-grid nnU-Net cases and a portable remote request."""
+    import tools.nnunet_pipeline as pipeline
+    from tools.nnunet_common import (
+        normalize_request,
+        read_json as read_nnunet_json,
+        safe_identifier as nnunet_safe_identifier,
+        write_json_atomic as write_nnunet_json,
+    )
+
+    local_job_dir = Path(spec["job_dir"]).resolve()
+    status_path = Path(spec["status_path"]).resolve()
+    control_path = local_job_dir / "control.json"
+    request = normalize_request(
+        read_nnunet_json(Path(spec["request_path"]).resolve(), {}) or {}
+    )
+    if request["operation"] != "train":
+        raise RuntimeError("Remote nnU-Net training received a non-training request.")
+    prepared_root = bundle / "prepared_local"
+    rows = pipeline.prepare_source_grid_cases(
+        request,
+        prepared_root,
+        status_path,
+        control_path,
+    )
+    remote_rows = []
+    dataset_case_cache_keys: dict[str, str] = {}
+    for index, row in enumerate(rows, start=1):
+        _raise_if_cancelled(status_path)
+        case_id = nnunet_safe_identifier(row["case_id"], "case")
+        image_dst = bundle / "input" / case_id / "image.nii.gz"
+        label_dst = bundle / "labels" / case_id / "label.nii.gz"
+        _link_or_copy(row["image"], image_dst)
+        _link_or_copy(row["label"], label_dst)
+        dataset_case_cache_keys[case_id] = str(row.get("fingerprint") or "")
+        remote_rows.append(
+            {
+                "case_id": str(row["case_id"]),
+                "image": "/job/input/{}/image.nii.gz".format(case_id),
+                "label": "/job/labels/{}/label.nii.gz".format(case_id),
+                "fingerprint": str(row.get("fingerprint") or ""),
+            }
+        )
+        _status_update(
+            status_path,
+            status="preparing_remote",
+            phase="preparing_remote_data",
+            message="Preparing remote nnU-Net case {} of {}.".format(
+                index, len(rows)
+            ),
+            preparation_index=index,
+            preparation_total=len(rows),
+            progress_percent=10 + int(10 * index / max(1, len(rows))),
+        )
+
+    remote_request = dict(request)
+    remote_request["execution_backend"] = "remote"
+    remote_request["label_source"] = "prepared"
+    remote_request["prepared_cases"] = remote_rows
+    remote_request["dataset_root"] = "/job/input"
+    remote_request["label_root"] = "/job/labels"
+    remote_request["mcs_dir"] = ""
+    remote_request["workspace"] = "/job/output"
+    remote_request["gpu_lock_managed_externally"] = True
+    remote_request["gpu_id"] = ""
+    remote_request["runtime_roots"] = {
+        "raw": "/remote-cache/nnunet/{}/raw".format(
+            _REMOTE_DATASET_CACHE_TOKEN
+        ),
+        "preprocessed": "/remote-cache/nnunet/{}/preprocessed".format(
+            _REMOTE_DATASET_CACHE_TOKEN
+        ),
+        "results": "/job/output/runtime/nnUNet_results",
+    }
+    pretrained = str(request.get("pretrained_weights") or "").strip()
+    if pretrained:
+        source = Path(pretrained).expanduser().resolve()
+        if not source.is_file():
+            raise RuntimeError(
+                "Selected nnU-Net pretrained checkpoint does not exist: {}".format(
+                    source
+                )
+            )
+        target = bundle / "custom_model" / source.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(source), str(target))
+        remote_request["pretrained_weights"] = "/job/custom_model/{}".format(
+            source.name
+        )
+    model_id = str(
+        remote_request.get("model_id")
+        or "nnunet_{}_{}".format(
+            time.strftime("%Y%m%dT%H%M%S"), uuid.uuid4().hex[:8]
+        )
+    )
+    remote_request["model_id"] = model_id
+    task_slug = nnunet_safe_identifier(request["task_id"], "task")
+    artifact = "output/models/{}/{}".format(task_slug, model_id)
+    payload = {
+        "schema_version": "mimics_remote_training_request.v1",
+        "kind": "nnunet_train",
+        "job_id": request["job_id"],
+        "pipeline_request": remote_request,
+        "remote_status_path": "/job/pipeline_job/status.json",
+        "artifact_path": "/job/{}".format(artifact),
+        "created_at_epoch": time.time(),
+    }
+    write_nnunet_json(bundle / "remote_request.json", payload)
+    shutil.rmtree(str(prepared_root), ignore_errors=True)
+    return {
+        "remote_status_relative": "pipeline_job/status.json",
+        "remote_control_relative": "pipeline_job/control.json",
+        "remote_control_kind": "json",
+        "remote_artifact_relative": artifact,
+        "train_count": len(rows),
+        "validation_count": max(
+            0,
+            int(round(len(rows) * float(request.get("validation_fraction") or 0))),
+        ),
+        "required_model_relative": "",
+        "local_required_model": "",
+        "local_model_id": model_id,
+        "local_dataset_archive_cache": str(
+            Path(request["workspace"])
+            / "cache"
+            / "remote_dataset_archives"
+            / "nnunet"
+            / task_slug
+        ),
+        "dataset_case_cache_keys": dataset_case_cache_keys,
+    }
+
+
+def _prepare_nnunet_infer(
+    spec: dict[str, Any], bundle: Path
+) -> dict[str, Any]:
+    from tools.nnunet_common import (
+        normalize_request,
+        path_signature,
+        read_json as read_nnunet_json,
+        safe_identifier as nnunet_safe_identifier,
+        stable_digest,
+        write_json_atomic as write_nnunet_json,
+    )
+    from tools.fewshot_pipeline import _materialize_source_image
+    from tools.nnunet_pipeline import (
+        validate_materialized_source_geometry,
+        validate_model_input_compatibility,
+    )
+
+    request = normalize_request(
+        read_nnunet_json(Path(spec["request_path"]).resolve(), {}) or {}
+    )
+    if request["operation"] != "infer":
+        raise RuntimeError("Remote nnU-Net inference received a training request.")
+    source_image = Path(str(request.get("image_path") or "")).expanduser().resolve()
+    if not source_image.exists():
+        raise RuntimeError("Prediction image does not exist: {}".format(source_image))
+    case_id = nnunet_safe_identifier(request.get("case_id") or source_image.stem, "case")
+    image_dst = bundle / "input" / case_id / "image.nii.gz"
+    image_dst.parent.mkdir(parents=True, exist_ok=True)
+    _materialize_source_image(source_image, image_dst)
+    validate_materialized_source_geometry(
+        image_dst, request.get("source_geometry_expected")
+    )
+
+    manifest_path = Path(str(request.get("model_manifest") or "")).expanduser().resolve()
+    manifest = read_nnunet_json(manifest_path, {}) or {}
+    model_dir = Path(str(manifest.get("model_dir") or manifest_path.parent)).expanduser().resolve()
+    if not manifest_path.is_file() or not model_dir.is_dir():
+        raise RuntimeError("Selected nnU-Net model is missing or invalid.")
+    compatibility_warnings = validate_model_input_compatibility(
+        image_dst, manifest, request
+    )
+    if compatibility_warnings:
+        _status_update(
+            Path(spec["status_path"]).resolve(),
+            compatibility_warnings=compatibility_warnings,
+        )
+    model_bundle = bundle / "labels" / "model" / "model_dir"
+    model_bundle.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.copytree(str(model_dir), str(model_bundle), copy_function=os.link)
+    except OSError:
+        shutil.rmtree(str(model_bundle), ignore_errors=True)
+        shutil.copytree(str(model_dir), str(model_bundle))
+    remote_manifest = model_bundle / manifest_path.name
+    if not remote_manifest.is_file():
+        shutil.copy2(str(manifest_path), str(remote_manifest))
+
+    model_fingerprint = stable_digest(
+        {
+            "weights": _local_model_fingerprint(model_dir),
+            "manifest": path_signature(manifest_path),
+            "model_id": manifest.get("model_id"),
+        }
+    )
+    image_fingerprint = stable_digest(
+        {"source": path_signature(source_image), "contract": "nnunet_remote_infer_image.v1"}
+    )
+    remote_request = dict(request)
+    remote_request["execution_backend"] = "remote"
+    remote_request["gpu_lock_managed_externally"] = True
+    remote_request["gpu_id"] = ""
+    remote_request["workspace"] = "/job/output"
+    remote_request["image_path"] = "/job/input/{}/image.nii.gz".format(case_id)
+    remote_request["model_manifest"] = "/job/labels/model/model_dir/{}".format(
+        remote_manifest.name
+    )
+    remote_request["model_dir_override"] = "/job/labels/model/model_dir"
+    remote_request["output_path"] = "/job/output/prediction_bundle/prediction.nii.gz"
+    model_dataset_id = int(
+        manifest.get("dataset_id") or request.get("dataset_id") or 0
+    )
+    inference_cache_namespace = "Dataset{:03d}_{}".format(
+        model_dataset_id, _REMOTE_DATASET_CACHE_TOKEN
+    )
+    remote_request["runtime_roots"] = {
+        "raw": "/remote-cache/nnunet/inference/{}/raw".format(
+            inference_cache_namespace
+        ),
+        "preprocessed": "/remote-cache/nnunet/inference/{}/preprocessed".format(
+            inference_cache_namespace
+        ),
+        "results": "/remote-cache/nnunet/inference/{}/results".format(
+            inference_cache_namespace
+        ),
+    }
+    payload = {
+        "schema_version": "mimics_remote_training_request.v1",
+        "kind": "nnunet_infer",
+        "job_id": request["job_id"],
+        "pipeline_request": remote_request,
+        "remote_status_path": "/job/pipeline_job/status.json",
+        "artifact_path": "/job/output/prediction_bundle",
+        "created_at_epoch": time.time(),
+    }
+    write_nnunet_json(bundle / "remote_request.json", payload)
+    return {
+        "remote_status_relative": "pipeline_job/status.json",
+        "remote_control_relative": "pipeline_job/control.json",
+        "remote_control_kind": "json",
+        "remote_artifact_relative": "output/prediction_bundle",
+        "train_count": 0,
+        "validation_count": 0,
+        "required_model_relative": "",
+        "local_required_model": "",
+        "local_dataset_archive_cache": str(
+            Path(request["workspace"])
+            / "cache"
+            / "remote_inference_archives"
+            / nnunet_safe_identifier(manifest.get("model_id"), "model")
+        ),
+        "dataset_case_cache_keys": {
+            case_id: image_fingerprint,
+            "model": model_fingerprint,
+        },
     }
 
 
@@ -803,7 +1348,126 @@ def _remote_paths(session: SSHSession, job_id: str) -> dict[str, str]:
             / owner
             / "datasets"
         ),
+        "prepared_cache": str(
+            PurePosixPath(session.remote_root)
+            / "cache"
+            / owner
+            / "prepared"
+        ),
     }
+
+
+def _prepared_cache_namespace(bundle: Path, remote_paths: dict[str, str]) -> str:
+    payload = read_json(bundle / "remote_request.json", {}) or {}
+    raw = str(
+        (((payload.get("pipeline_request") or {}).get("runtime_roots") or {}).get("raw"))
+        or ""
+    )
+    raw_path = PurePosixPath(raw)
+    container_root = PurePosixPath("/remote-cache")
+    try:
+        relative = raw_path.relative_to(container_root).parent
+    except ValueError:
+        return ""
+    if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        return ""
+    prepared_root = PurePosixPath(remote_paths["prepared_cache"])
+    namespace = prepared_root / relative
+    try:
+        namespace.relative_to(prepared_root)
+    except ValueError:
+        return ""
+    return str(namespace)
+
+
+def _maintain_remote_nnunet_cache(
+    session: SSHSession,
+    profile: dict[str, Any],
+    remote_paths: dict[str, str],
+    namespace: str,
+    status_path: Path,
+    log_path: Path,
+) -> None:
+    if not namespace:
+        return
+    prepared_root = PurePosixPath(remote_paths["prepared_cache"])
+    namespace_path = PurePosixPath(namespace)
+    try:
+        namespace_path.relative_to(prepared_root)
+    except ValueError:
+        raise RuntimeError("Refusing to maintain a cache outside the remote cache root.")
+    base = namespace_path.parent
+    owner_filter = "label={}={}".format(
+        REMOTE_OWNER_LABEL, _remote_owner(profile)
+    )
+    active = str(
+        session.execute(
+            "docker ps -q --filter {owner} --filter {training}".format(
+                owner=shlex.quote(owner_filter),
+                training=shlex.quote("label={}={}".format(REMOTE_TRAINING_LABEL, "true")),
+            ),
+            check=False,
+        )
+        or ""
+    ).strip()
+    removed_old = False
+    if not active:
+        retention = int(profile.get("remote_cache_retention_days") or 30)
+        exclude_inference = (
+            " ! -name inference" if base.name == "nnunet" else ""
+        )
+        session.execute(
+            "mkdir -p {base} && find {base} -mindepth 1 -maxdepth 1 "
+            "-type d -mtime +{days} ! -path {current}{exclude} "
+            "-exec rm -rf -- {{}} +".format(
+                base=shlex.quote(str(base)),
+                days=max(1, retention),
+                current=shlex.quote(str(namespace_path)),
+                exclude=exclude_inference,
+            ),
+            timeout=600,
+        )
+        removed_old = True
+    session.execute(
+        "mkdir -p {path} && touch {path}".format(
+            path=shlex.quote(str(namespace_path))
+        ),
+        timeout=300,
+    )
+    _status_update(
+        status_path,
+        remote_prepared_cache_namespace=str(namespace_path),
+        remote_cache_cleanup_performed=removed_old,
+        remote_cache_cleanup_skipped_for_active_jobs=bool(active),
+    )
+    _append_log(
+        log_path,
+        (
+            "Remote nnU-Net cache retention was checked."
+            if removed_old
+            else "Remote nnU-Net cache cleanup was deferred because another owned container is active."
+        ),
+    )
+
+
+def _remove_remote_prepared_namespace(
+    session: SSHSession, remote_paths: dict[str, str], namespace: str
+) -> bool:
+    if not namespace:
+        return True
+    root = PurePosixPath(remote_paths["prepared_cache"])
+    candidate = PurePosixPath(namespace)
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError:
+        raise RuntimeError("Refusing to remove a cache outside the remote cache root.")
+    if not relative.parts:
+        raise RuntimeError("Refusing to remove the remote prepared-cache root.")
+    session.execute(
+        "rm -rf -- {path}".format(path=shlex.quote(str(candidate))),
+        timeout=600,
+    )
+    return True
 
 
 def _remote_owner(profile: dict[str, Any]) -> str:
@@ -866,6 +1530,8 @@ def _launch_container(
     container_name: str,
     dataset_cache_paths: list[str] | None = None,
     remove_dataset_after_extract: bool = False,
+    status_path: Path | None = None,
+    log_path: Path | None = None,
 ) -> str:
     owner = _remote_owner(profile)
     job_slug = safe_identifier(PurePosixPath(paths["job"]).name, "job")
@@ -910,7 +1576,29 @@ def _launch_container(
         ),
         timeout=300,
     )
-    for dataset_cache_path in dataset_cache_paths or []:
+    dataset_paths = list(dataset_cache_paths or [])
+    for index, dataset_cache_path in enumerate(dataset_paths, start=1):
+        if status_path is not None:
+            _status_update(
+                status_path,
+                status="starting_remote",
+                phase="extracting_remote_dataset",
+                remote_dataset_extract_index=index,
+                remote_dataset_extract_total=len(dataset_paths),
+                progress_percent=35
+                + int(3.0 * index / max(1, len(dataset_paths))),
+            )
+        if log_path is not None and (
+            index == 1
+            or index == len(dataset_paths)
+            or index % 10 == 0
+        ):
+            _append_log(
+                log_path,
+                "Remote dataset extraction: {} of {} case archives.".format(
+                    index, len(dataset_paths)
+                ),
+            )
         after_extract = (
             "rm -f {dataset}".format(
                 dataset=shlex.quote(dataset_cache_path)
@@ -947,11 +1635,17 @@ def _launch_container(
         "--label {job_label} "
         "--label {gpu_label} "
         "-v {job}:/job -v {models}:/models:ro -v {locks}:/remote-locks "
+        "-v {prepared_cache}:/remote-cache "
         "-e MIMICS_AI_APP_ROOT=/app "
         "-e MIMICS_REMOTE_GPU_GLOBAL_LOCK=/remote-locks/gpu-all.lock "
         "-e MIMICS_REMOTE_GPU_LOCK=/remote-locks/{gpu_lock} "
         "-e MIMICS_REMOTE_GPU_LOCK_SCOPE={gpu_scope} "
         "-e MIMICS_REMOTE_GPU_DEVICE={gpu_device} "
+        "-e MIMICS_REMOTE_MODELS_ROOT=/models "
+        "-e HF_HOME=/tmp/mimics-ai-cache/huggingface "
+        "-e TORCH_HOME=/tmp/mimics-ai-cache/torch "
+        "-e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 "
+        "-e HF_DATASETS_OFFLINE=1 -e WANDB_MODE=offline "
         "{image} python /app/tools/remote_worker.py run --job-dir /job"
     ).format(
         name=shlex.quote(container_name),
@@ -970,6 +1664,12 @@ def _launch_container(
         job=shlex.quote(paths["job"]),
         models=shlex.quote(paths["models"]),
         locks=shlex.quote(paths["locks"]),
+        prepared_cache=shlex.quote(
+            paths.get(
+                "prepared_cache",
+                str(PurePosixPath(paths["locks"]).parent / "prepared"),
+            )
+        ),
         gpu_lock=shlex.quote(gpu_lock),
         gpu_scope=shlex.quote(gpu_scope),
         gpu_device=shlex.quote(gpu_device),
@@ -982,10 +1682,19 @@ def _validate_remote_assets(
     session: SSHSession,
     paths: dict[str, str],
     prepared: dict[str, Any],
+    verify_mode: str = "strict",
 ) -> dict[str, str]:
     relative = str(prepared.get("required_model_relative") or "").strip()
     if not relative:
         return {}
+    verify_mode = str(verify_mode or "strict").strip().lower()
+    if verify_mode == "off":
+        return {
+            "remote_base_model_path": str(
+                PurePosixPath(paths["models"]) / PurePosixPath(relative)
+            ),
+            "remote_base_model_verify": "off",
+        }
     model_path = str(PurePosixPath(paths["models"]) / PurePosixPath(relative))
     output = session.execute(
         "test -e {path} && printf ready || printf missing".format(
@@ -999,6 +1708,11 @@ def _validate_remote_assets(
             "{}. Ask the server administrator to install it under the configured "
             "remote work folder.".format(model_path)
         )
+    # Content-only directory fingerprint: sorted SHA-256 of each supported
+    # weight file, no path names. The remote layout may differ from the local
+    # one (custom remote_root or mount point), and unrelated extra files must
+    # not invalidate the identity check. `find -type f` without -L skips
+    # symlinks, matching _local_model_fingerprint.
     fingerprint = session.execute(
         "if test -f {path}; then "
         "sha256sum {path} | awk '{{print $1}}'; "
@@ -1006,11 +1720,9 @@ def _validate_remote_assets(
         "find . -maxdepth 4 -type f "
         "\\( -name '*.pth' -o -name '*.safetensors' -o -name '*.bin' "
         "-o -name 'config.json' -o -name 'plans.json' \\) "
-        "-printf '%P\\n' | LC_ALL=C sort | "
-        "while IFS= read -r file; do "
-        "printf '%s\\0' \"$file\"; "
-        "sha256sum \"$file\" | awk '{{printf \"%s\", $1}}'; "
-        "printf '\\0'; done | sha256sum | awk '{{print $1}}'; "
+        "-exec sha256sum {{}} + 2>/dev/null | "
+        "awk '{{print $1}}' | LC_ALL=C sort | "
+        "sha256sum | awk '{{print $1}}'; "
         "fi".format(path=shlex.quote(model_path)),
         timeout=300,
     ).strip()
@@ -1028,19 +1740,31 @@ def _validate_remote_assets(
         if local_path_text and Path(local_path_text).exists()
         else ""
     )
-    if local_fingerprint and local_fingerprint != fingerprint:
-        raise RuntimeError(
-            "The remote base model does not match the corresponding local "
-            "model. Local SHA-256: {}; remote SHA-256: {}. Install the same "
-            "base weights on the server before training.".format(
-                local_fingerprint, fingerprint
-            )
-        )
-    return {
+    identity = {
         "remote_base_model_path": model_path,
         "remote_base_model_sha256": fingerprint,
         "local_base_model_sha256": local_fingerprint,
+        "remote_base_model_verify": "strict",
     }
+    if local_fingerprint and local_fingerprint != fingerprint:
+        detail = (
+            "The remote base model does not match the corresponding local "
+            "model. Local SHA-256: {}; remote SHA-256: {}. Note: only weight "
+            "file contents are hashed — directory layout and extra files are "
+            "ignored. Install the same base weights on the server before "
+            "training.".format(local_fingerprint, fingerprint)
+        )
+        if verify_mode == "warn":
+            identity.update(
+                {
+                    "remote_base_model_verify": "warn",
+                    "remote_base_model_mismatch": True,
+                    "remote_base_model_mismatch_detail": detail,
+                }
+            )
+        else:
+            raise RuntimeError(detail)
+    return identity
 
 
 def _container_state(session: SSHSession, container_name: str) -> tuple[str, int]:
@@ -1228,9 +1952,11 @@ def _reconnect_session(
             "Remote reconnect attempt {} failed: {}".format(attempt, exc),
         )
         return None
-    if _cancel_requested(status_path):
+    try:
+        _raise_if_cancelled(status_path)
+    except BaseException:
         session.close()
-        raise InterruptedError("cancel")
+        raise
     _status_update(
         status_path,
         status=previous_status,
@@ -1249,6 +1975,7 @@ def _merge_remote_status(
     container_name: str,
     remote_job_dir: str,
 ) -> dict[str, Any]:
+    _raise_if_abandoned(status_path)
     local = read_json(status_path, {}) or {}
     preserved = {key: local.get(key) for key in LOCAL_STATUS_KEYS if key in local}
     remote_copy = dict(remote)
@@ -1306,13 +2033,34 @@ def _upload_progress(
     aggregate_offset: int = 0,
     aggregate_total: int = 0,
 ):
-    state = {"last_time": 0.0, "last_percent": -1}
+    state = {
+        "last_time": 0.0,
+        "last_percent": -1,
+        "started_at": 0.0,
+        "started_bytes": 0,
+    }
 
     def callback(transferred: int, total: int) -> None:
         _raise_if_cancelled(status_path)
         now = time.time()
         effective_transferred = int(aggregate_offset) + int(transferred)
         effective_total = int(aggregate_total) or int(total)
+        if not state["started_at"]:
+            state["started_at"] = now
+            state["started_bytes"] = effective_transferred
+        elapsed = max(0.001, now - float(state["started_at"]))
+        measured_bytes = max(
+            0, effective_transferred - int(state["started_bytes"])
+        )
+        bytes_per_second = (
+            float(measured_bytes) / elapsed if measured_bytes else 0.0
+        )
+        eta_seconds = (
+            max(0.0, effective_total - effective_transferred)
+            / bytes_per_second
+            if bytes_per_second > 0
+            else None
+        )
         percent = int(
             100.0 * effective_transferred / max(1, effective_total)
         )
@@ -1330,6 +2078,8 @@ def _upload_progress(
             transfer_bytes=effective_transferred,
             transfer_total_bytes=effective_total,
             transfer_percent=percent,
+            transfer_bytes_per_second=bytes_per_second,
+            transfer_eta_seconds=eta_seconds,
             progress_percent=start_percent
             + int(percent * max(0, end_percent - start_percent) / 100.0),
         )
@@ -1352,14 +2102,38 @@ def _ensure_remote_dataset_archive(
         remote_archive = str(
             PurePosixPath(paths["dataset_cache"]) / (fingerprint + ".tar")
         )
+        remote_verified = remote_archive[:-4] + ".verified"
+        local_size = int(local_archive.stat().st_size)
         code, output = session.execute_result(
-            "if test -f {path}; then sha256sum {path} | awk '{{print $1}}'; fi".format(
-                path=shlex.quote(remote_archive)
+            "if test -f {path}; then "
+            "actual_size=$(stat -c %s {path} 2>/dev/null || printf 0); "
+            "actual_mtime=$(stat -c %Y {path} 2>/dev/null || printf 0); "
+            "if test -f {verified} && "
+            "read saved_digest saved_size saved_mtime < {verified} && "
+            "test \"$saved_digest\" = {fingerprint} && "
+            "test \"$saved_size\" = {size} && "
+            "test \"$actual_size\" = {size} && "
+            "test \"$saved_mtime\" = \"$actual_mtime\"; then "
+            "printf '%s' {fingerprint}; "
+            "elif test \"$actual_size\" = {size}; then "
+            "actual_digest=$(sha256sum {path} | awk '{{print $1}}'); "
+            "if test \"$actual_digest\" = {fingerprint}; then "
+            "tmp={verified}.$$.tmp; "
+            "printf '%s %s %s\n' {fingerprint} {size} \"$actual_mtime\" > \"$tmp\" && "
+            "mv -f \"$tmp\" {verified}; "
+            "fi; printf '%s' \"$actual_digest\"; "
+            "fi; fi".format(
+                path=shlex.quote(remote_archive),
+                verified=shlex.quote(remote_verified),
+                fingerprint=shlex.quote(fingerprint),
+                size=local_size,
             )
         )
         if code == 0 and output.strip() == fingerprint:
             session.execute(
-                "touch {}".format(shlex.quote(remote_archive)),
+                "touch {verified}".format(
+                    verified=shlex.quote(remote_verified),
+                ),
                 check=False,
             )
             cache_progress = {}
@@ -1386,7 +2160,10 @@ def _ensure_remote_dataset_archive(
             return remote_archive, True
         if output.strip():
             session.execute(
-                "rm -f {}".format(shlex.quote(remote_archive)),
+                "rm -f {archive} {verified}".format(
+                    archive=shlex.quote(remote_archive),
+                    verified=shlex.quote(remote_verified),
+                ),
                 check=False,
             )
     else:
@@ -1420,21 +2197,60 @@ def _ensure_remote_dataset_archive(
     ).strip()
     if remote_digest != fingerprint:
         session.execute(
-            "rm -f {}".format(shlex.quote(remote_archive)),
+            "rm -f {archive}{verified}".format(
+                archive=shlex.quote(remote_archive),
+                verified=(
+                    " " + shlex.quote(remote_verified)
+                    if use_cache
+                    else ""
+                ),
+            ),
             check=False,
         )
         raise RuntimeError(
             "The uploaded training-data archive failed SHA-256 verification."
         )
+    if use_cache:
+        session.execute(
+            "tmp={verified}.$$.tmp; "
+            "archive_mtime=$(stat -c %Y {archive}); "
+            "printf '%s %s %s\n' {fingerprint} {size} \"$archive_mtime\" > \"$tmp\" && "
+            "mv -f \"$tmp\" {verified}".format(
+                verified=shlex.quote(remote_verified),
+                archive=shlex.quote(remote_archive),
+                fingerprint=shlex.quote(fingerprint),
+                size=int(local_archive.stat().st_size),
+            )
+        )
     return remote_archive, False
 
 
 def _download_progress(status_path: Path):
-    state = {"last_time": 0.0, "last_percent": -1}
+    state = {
+        "last_time": 0.0,
+        "last_percent": -1,
+        "started_at": 0.0,
+        "started_bytes": 0,
+    }
 
     def callback(transferred: int, total: int) -> None:
         _raise_if_cancelled(status_path)
         now = time.time()
+        if not state["started_at"]:
+            state["started_at"] = now
+            state["started_bytes"] = int(transferred)
+        elapsed = max(0.001, now - float(state["started_at"]))
+        measured_bytes = max(
+            0, int(transferred) - int(state["started_bytes"])
+        )
+        bytes_per_second = (
+            float(measured_bytes) / elapsed if measured_bytes else 0.0
+        )
+        eta_seconds = (
+            max(0.0, int(total) - int(transferred)) / bytes_per_second
+            if bytes_per_second > 0
+            else None
+        )
         percent = int(100.0 * transferred / max(1, total))
         if percent == state["last_percent"] and now - state["last_time"] < 1.0:
             return
@@ -1449,10 +2265,88 @@ def _download_progress(status_path: Path):
             transfer_bytes=int(transferred),
             transfer_total_bytes=int(total),
             transfer_percent=percent,
+            transfer_bytes_per_second=bytes_per_second,
+            transfer_eta_seconds=eta_seconds,
             progress_percent=96 + int(percent * 0.03),
         )
 
     return callback
+
+
+def _existing_parent(path: Path) -> Path:
+    candidate = Path(path).expanduser().resolve()
+    if not candidate.is_dir():
+        candidate = candidate.parent
+    while not candidate.exists() and candidate != candidate.parent:
+        candidate = candidate.parent
+    return candidate
+
+
+def _ensure_local_download_capacity(
+    session: SSHSession,
+    remote_archive: str,
+    local_archive: Path,
+    local_target: Path,
+    status_path: Path,
+) -> int:
+    size_text = session.execute(
+        "stat -c %s {}".format(shlex.quote(remote_archive)),
+        timeout=30,
+    ).strip()
+    try:
+        archive_size = int(size_text)
+    except Exception as exc:
+        raise RuntimeError(
+            "The remote model archive size could not be read before download."
+        ) from exc
+    if archive_size <= 0:
+        raise RuntimeError("The remote model archive is empty.")
+
+    local_archive.parent.mkdir(parents=True, exist_ok=True)
+    local_target.parent.mkdir(parents=True, exist_ok=True)
+    archive_parent = _existing_parent(local_archive.parent)
+    target_parent = _existing_parent(local_target.parent)
+    part_path = local_archive.with_name(local_archive.name + ".part")
+    try:
+        partial_size = min(archive_size, int(part_path.stat().st_size))
+    except OSError:
+        partial_size = 0
+    remaining_download = max(0, archive_size - partial_size)
+    margin = max(256 * 1024 * 1024, int(archive_size * 0.05))
+    same_volume = os.stat(str(archive_parent)).st_dev == os.stat(
+        str(target_parent)
+    ).st_dev
+    archive_free = int(shutil.disk_usage(str(archive_parent)).free)
+    target_free = int(shutil.disk_usage(str(target_parent)).free)
+    if same_volume:
+        required = remaining_download + archive_size + margin
+        sufficient = archive_free >= required
+        free_bytes = archive_free
+    else:
+        archive_required = remaining_download + margin
+        target_required = archive_size + margin
+        sufficient = (
+            archive_free >= archive_required and target_free >= target_required
+        )
+        required = max(archive_required, target_required)
+        free_bytes = min(archive_free, target_free)
+    _status_update(
+        status_path,
+        remote_artifact_bytes=archive_size,
+        local_download_required_bytes=required,
+        local_download_free_bytes=free_bytes,
+        local_download_space_checked=True,
+    )
+    if not sufficient:
+        raise RuntimeError(
+            "Not enough local disk space to download and unpack the trained "
+            "model safely. Need approximately {:.2f} GiB; only {:.2f} GiB is "
+            "free. Free space on the model workspace drive, then retry the "
+            "download.".format(
+                required / float(1024 ** 3), free_bytes / float(1024 ** 3)
+            )
+        )
+    return archive_size
 
 
 def _stop_remote(
@@ -1562,10 +2456,27 @@ def _sync_remote_log(
     session: SSHSession,
     remote_job: str,
     local_log: Path,
-    state: dict[str, int],
+    state: dict[str, Any],
 ) -> None:
-    remote_log = str(PurePosixPath(remote_job) / "remote_worker.log")
+    remote_relative = str(state.get("remote_relative") or "remote_worker.log")
+    remote_log = str(PurePosixPath(remote_job) / PurePosixPath(remote_relative))
     if session.path_exists(remote_log):
+        try:
+            identity = session.execute(
+                "stat -c '%i' {}".format(shlex.quote(remote_log)),
+                timeout=30,
+            ).strip()
+        except Exception:
+            identity = ""
+        previous_identity = str(state.get("remote_log_identity") or "")
+        if identity and previous_identity and identity != previous_identity:
+            state["offset"] = 0
+            _append_log(
+                local_log,
+                "Remote worker log rotated; continuing with the new log file.",
+            )
+        if identity:
+            state["remote_log_identity"] = identity
         state["offset"] = session.download_appended(
             remote_log,
             local_log,
@@ -1600,11 +2511,19 @@ def _download_artifact(
         raise RuntimeError(
             "The remote model archive checksum could not be read."
         )
+    archive_size = _ensure_local_download_capacity(
+        session,
+        result_tar,
+        local_archive,
+        local_target,
+        status_path,
+    )
     _status_update(
         status_path,
         status="downloading",
         phase="downloading_model",
         progress_percent=96,
+        transfer_total_bytes=archive_size,
     )
     session.download(
         result_tar,
@@ -1632,17 +2551,32 @@ def _download_artifact(
     shutil.rmtree(str(backup), ignore_errors=True)
     _safe_extract(local_archive, temporary)
     had_existing = local_target.exists()
+    published = False
     try:
         if had_existing:
             os.replace(str(local_target), str(backup))
         os.replace(str(temporary), str(local_target))
-    except Exception:
+        published = True
+    except Exception as publish_exc:
+        restore_error = None
         if had_existing and backup.exists() and not local_target.exists():
-            os.replace(str(backup), str(local_target))
+            try:
+                os.replace(str(backup), str(local_target))
+            except Exception as exc:
+                restore_error = exc
+        if restore_error is not None:
+            raise RuntimeError(
+                "Could not publish the downloaded artifact and automatic rollback "
+                "also failed. The previous artifact is preserved at '{}'. "
+                "Publish error: {}; rollback error: {}".format(
+                    backup, publish_exc, restore_error
+                )
+            )
         raise
     finally:
         shutil.rmtree(str(temporary), ignore_errors=True)
-    shutil.rmtree(str(backup), ignore_errors=True)
+    if published:
+        shutil.rmtree(str(backup), ignore_errors=True)
 
 
 def _register_dino(
@@ -1760,6 +2694,66 @@ def _register_nninteractive(
     return model, selected
 
 
+def _register_nnunet(
+    spec: dict[str, Any],
+    local_model_dir: Path,
+    remote_status: dict[str, Any],
+    profile: dict[str, Any],
+) -> dict[str, Any]:
+    import tools.nnunet_pipeline as pipeline
+    from tools.nnunet_common import read_json as read_nnunet_json
+
+    request = read_nnunet_json(Path(spec["request_path"]).resolve(), {}) or {}
+    return pipeline.register_downloaded_model(
+        request,
+        local_model_dir,
+        {
+            "remote_profile_id": profile["profile_id"],
+            "remote_profile_name": profile["name"],
+            "remote_runtime_image": profile["runtime_image"],
+            "remote_gpu_device": remote_status.get(
+                "remote_gpu_device", profile.get("gpu_device") or "auto"
+            ),
+            "remote_dataset_fingerprint": remote_status.get(
+                "dataset_fingerprint", ""
+            ),
+            "remote_runtime_image_id": remote_status.get(
+                "remote_runtime_image_id", ""
+            ),
+            "downloaded_at_epoch": time.time(),
+        },
+    )
+
+
+def _sync_remote_nnunet_curve(
+    session: SSHSession,
+    remote_job: str,
+    remote_status: dict[str, Any],
+    local_curve: Path,
+    state: dict[str, Any],
+) -> bool:
+    container_path = str(remote_status.get("training_curve_path") or "")
+    if not container_path.startswith("/job/"):
+        return False
+    remote_curve = str(
+        PurePosixPath(remote_job)
+        / PurePosixPath(container_path[len("/job/") :])
+    )
+    try:
+        stat = session.sftp.stat(remote_curve)
+    except IOError:
+        return False
+    identity = (
+        int(getattr(stat, "st_size", 0)),
+        int(getattr(stat, "st_mtime", 0)),
+    )
+    if identity == state.get("curve_identity") and local_curve.is_file():
+        return False
+    session.download(remote_curve, local_curve)
+    state["curve_identity"] = identity
+    return True
+
+
 def run(spec_path: Path) -> int:
     spec = read_json(spec_path, {}) or {}
     kind = str(spec.get("kind") or "")
@@ -1774,6 +2768,13 @@ def run(spec_path: Path) -> int:
     archive = local_root / "job_upload.tar"
     dataset_archive_dir = local_root / "dataset_parts"
     result_archive = local_root / "result.tar"
+    abandon_path = status_path.with_name(
+        status_path.name + ".abandon.request"
+    )
+    try:
+        abandon_path.unlink()
+    except FileNotFoundError:
+        pass
     if kind == "nninteractive":
         remote_log = status_path.parent / "job.log"
         controller_log = remote_log
@@ -1787,6 +2788,8 @@ def run(spec_path: Path) -> int:
     _status_update(
         status_path,
         execution_backend="remote",
+        abandon_path=str(abandon_path),
+        local_abandon_requested=False,
         remote_profile_id=profile["profile_id"],
         profile_name=profile["name"],
         remote_container_name=container_name,
@@ -1796,8 +2799,8 @@ def run(spec_path: Path) -> int:
         diagnostic_log_paths=list(
             dict.fromkeys((str(remote_log), str(controller_log)))
         ),
-        train_log=str(remote_log) if kind == "dinov3" else "",
-        log_path=str(remote_log) if kind == "nninteractive" else "",
+        train_log=str(remote_log) if kind in {"dinov3", "nnunet"} else "",
+        log_path=str(remote_log) if kind in {"nninteractive", "nnunet", "nnunet_infer"} else "",
         remote_gpu_device=profile.get("gpu_device") or "auto",
         status="preparing_remote",
         phase="preparing_remote_data",
@@ -1810,16 +2813,49 @@ def run(spec_path: Path) -> int:
     asset_identity: dict[str, str] = {}
     runtime_image_id = ""
     container_may_exist = False
+    prepared_cache_namespace = ""
+    prepared_cache_removed = False
     try:
-        prepared = (
-            _prepare_dino(spec, bundle)
-            if kind == "dinov3"
-            else _prepare_nninteractive(spec, bundle)
-        )
+        if kind == "dinov3":
+            prepared = _prepare_dino(spec, bundle)
+        elif kind == "nninteractive":
+            prepared = _prepare_nninteractive(spec, bundle)
+        elif kind == "nnunet":
+            prepared = _prepare_nnunet(spec, bundle)
+        elif kind == "nnunet_infer":
+            prepared = _prepare_nnunet_infer(spec, bundle)
+        else:
+            raise RuntimeError("Unsupported remote controller kind: {}".format(kind))
         if _cancel_requested(status_path):
             raise InterruptedError("cancel")
-        dataset_parts = _build_dataset_parts(bundle, dataset_archive_dir)
+        dataset_parts = _build_dataset_parts(
+            bundle,
+            dataset_archive_dir,
+            cache_dir=(
+                Path(prepared["local_dataset_archive_cache"])
+                if prepared.get("local_dataset_archive_cache")
+                else None
+            ),
+            case_cache_keys=dict(
+                prepared.get("dataset_case_cache_keys") or {}
+            ),
+        )
+        local_archive_cache_hits = sum(
+            bool(part.get("local_cache_hit")) for part in dataset_parts
+        )
+        _append_log(
+            controller_log,
+            "Local remote-data archives: reused {} of {} case(s).".format(
+                local_archive_cache_hits, len(dataset_parts)
+            ),
+        )
         dataset_fingerprint = _dataset_parts_fingerprint(dataset_parts)
+        prepared_cache_identity = dataset_fingerprint
+        if not bool(profile.get("cache_training_data", True)):
+            prepared_cache_identity = "{}_{}".format(
+                dataset_fingerprint, job_slug
+            )
+        _bind_remote_prepared_cache(bundle, prepared_cache_identity)
         dataset_archive_size = sum(
             int(part["size"]) for part in dataset_parts
         )
@@ -1835,6 +2871,8 @@ def run(spec_path: Path) -> int:
             transfer_total_bytes=archive_size + dataset_archive_size,
             dataset_fingerprint=dataset_fingerprint,
             dataset_archive_bytes=dataset_archive_size,
+            local_dataset_archive_cache_reused=local_archive_cache_hits,
+            local_dataset_archive_cache_total=len(dataset_parts),
             progress_percent=20,
         )
         _raise_if_cancelled(status_path)
@@ -1849,6 +2887,19 @@ def run(spec_path: Path) -> int:
         session.ensure_directory(remote_paths["jobs"])
         session.ensure_directory(remote_paths["locks"])
         session.ensure_directory(remote_paths["dataset_cache"])
+        session.ensure_directory(remote_paths["prepared_cache"])
+        if kind in {"nnunet", "nnunet_infer"}:
+            prepared_cache_namespace = _prepared_cache_namespace(
+                bundle, remote_paths
+            )
+            _maintain_remote_nnunet_cache(
+                session,
+                profile,
+                remote_paths,
+                prepared_cache_namespace,
+                status_path,
+                controller_log,
+            )
         session.execute(
             "docker container prune -f "
             "--filter label=mimics-script.remote-training=true "
@@ -1866,7 +2917,12 @@ def run(spec_path: Path) -> int:
                 shlex.quote(profile["runtime_image"])
             )
         ).strip()
-        asset_identity = _validate_remote_assets(session, remote_paths, prepared)
+        asset_identity = _validate_remote_assets(
+            session,
+            remote_paths,
+            prepared,
+            verify_mode=profile.get("remote_weights_verify", "strict"),
+        )
         _status_update(
             status_path,
             remote_runtime_image=profile["runtime_image"],
@@ -1877,8 +2933,15 @@ def run(spec_path: Path) -> int:
         # directories are never age-pruned here because a long-running job's
         # parent mtime can remain unchanged while nested status files update.
         session.execute(
+            "find {cache} -maxdepth 1 -type f -name '*.verified' -mtime +30 "
+            "-print | while IFS= read -r marker; do "
+            "rm -f \"$marker\" \"${{marker%.verified}}.tar\"; done; "
             "find {cache} -maxdepth 1 -type f -name '*.tar' -mtime +30 "
-            "-delete".format(cache=shlex.quote(remote_paths["dataset_cache"])),
+            "-print | while IFS= read -r archive; do "
+            "test -f \"${{archive%.tar}}.verified\" || rm -f \"$archive\"; "
+            "done".format(
+                cache=shlex.quote(remote_paths["dataset_cache"])
+            ),
             check=False,
         )
         remote_dataset_archives = []
@@ -1894,6 +2957,26 @@ def run(spec_path: Path) -> int:
                         "No active SSH dataset-upload session."
                     )
                 part = pending_dataset_parts[0]
+                verification_index = len(remote_dataset_archives) + 1
+                _status_update(
+                    status_path,
+                    status="uploading",
+                    phase="verifying_remote_dataset_cache",
+                    dataset_case_completed=len(remote_dataset_archives),
+                    dataset_case_total=len(dataset_parts),
+                    current_case=part.get("case_id"),
+                )
+                if (
+                    verification_index == 1
+                    or verification_index == len(dataset_parts)
+                    or verification_index % 10 == 0
+                ):
+                    _append_log(
+                        controller_log,
+                        "Remote data cache verification: {} of {} cases.".format(
+                            verification_index, len(dataset_parts)
+                        ),
+                    )
                 remote_dataset_archive, part_cache_hit = (
                     _ensure_remote_dataset_archive(
                         session,
@@ -2026,6 +3109,8 @@ def run(spec_path: Path) -> int:
                     remove_dataset_after_extract=not bool(
                         profile.get("cache_training_data", True)
                     ),
+                    status_path=status_path,
+                    log_path=controller_log,
                 )
                 break
             except RemoteCommandError:
@@ -2108,9 +3193,18 @@ def run(spec_path: Path) -> int:
         )
         missing_status_since = time.time()
         reconnect_attempt = 0
-        log_sync_state = {"offset": 0}
+        log_sync_state = {
+            "offset": 0,
+            "remote_relative": (
+                "pipeline_job/job.log"
+                if kind in {"nnunet", "nnunet_infer"}
+                else "remote_worker.log"
+            ),
+            "last_curve_sync_epoch": 0.0,
+        }
         while True:
             try:
+                _raise_if_abandoned(status_path)
                 if session is None:
                     raise RemoteComputeError("No active SSH monitoring session.")
                 try:
@@ -2122,6 +3216,9 @@ def run(spec_path: Path) -> int:
                     )
                 except IOError:
                     pass
+                # A remote read can outlive the UI action that requested a
+                # local abandon. Recheck before any active state is written.
+                _raise_if_abandoned(status_path)
                 if _cancel_requested(status_path):
                     _stop_remote(
                         session,
@@ -2160,6 +3257,27 @@ def run(spec_path: Path) -> int:
                         container_name,
                         remote_paths["job"],
                     )
+                    if kind == "nnunet" and (
+                        time.time()
+                        - float(log_sync_state.get("last_curve_sync_epoch") or 0)
+                        >= 5.0
+                    ):
+                        log_sync_state["last_curve_sync_epoch"] = time.time()
+                        try:
+                            local_curve = status_path.parent / "remote_progress.png"
+                            if _sync_remote_nnunet_curve(
+                                session,
+                                remote_paths["job"],
+                                candidate,
+                                local_curve,
+                                log_sync_state,
+                            ) or local_curve.is_file():
+                                _status_update(
+                                    status_path,
+                                    training_curve_path=str(local_curve),
+                                )
+                        except (IOError, OSError, RemoteComputeError):
+                            pass
                     state = str(candidate.get("status") or "").lower()
                     if state in TERMINAL:
                         break
@@ -2296,11 +3414,24 @@ def run(spec_path: Path) -> int:
                 / organ_slug
                 / str(spec["run_id"])
             )
-        else:
+        elif kind == "nninteractive":
             local_request = read_json(
                 Path(spec["job_dir"]) / "request.json", {}
             ) or {}
             local_model_dir = Path(local_request["output_model_dir"]).resolve()
+        elif kind == "nnunet":
+            from tools.nnunet_common import read_json as read_nnunet_json
+            from tools.nnunet_common import safe_identifier as nnunet_safe_identifier
+
+            local_request = read_nnunet_json(Path(spec["request_path"]), {}) or {}
+            local_model_dir = (
+                Path(local_request["workspace"]).expanduser().resolve()
+                / "models"
+                / nnunet_safe_identifier(local_request["task_id"])
+                / nnunet_safe_identifier(prepared["local_model_id"])
+            )
+        else:
+            local_model_dir = Path(spec["job_dir"]).resolve() / "remote_prediction_bundle"
         _status_update(
             status_path,
             status="downloading",
@@ -2353,7 +3484,7 @@ def run(spec_path: Path) -> int:
                 spec, local_model_dir, remote_status, profile
             )
             selected = True
-        else:
+        elif kind == "nninteractive":
             remote_status.update(asset_identity)
             remote_status["remote_runtime_image_id"] = runtime_image_id
             remote_status["remote_gpu_device"] = profile.get("gpu_device") or "auto"
@@ -2361,6 +3492,34 @@ def run(spec_path: Path) -> int:
             model, selected = _register_nninteractive(
                 spec, local_model_dir, remote_status, profile
             )
+        elif kind == "nnunet":
+            remote_status.update(asset_identity)
+            remote_status["remote_runtime_image_id"] = runtime_image_id
+            remote_status["remote_gpu_device"] = profile.get("gpu_device") or "auto"
+            remote_status["dataset_fingerprint"] = dataset_fingerprint
+            model = _register_nnunet(
+                spec, local_model_dir, remote_status, profile
+            )
+            selected = True
+        else:
+            from tools.nnunet_common import read_json as read_nnunet_json
+
+            local_request = read_nnunet_json(Path(spec["request_path"]), {}) or {}
+            downloaded = local_model_dir / "prediction.nii.gz"
+            output_path = Path(str(local_request.get("output_path") or downloaded)).resolve()
+            if not downloaded.is_file():
+                raise RuntimeError("Remote nnU-Net inference produced no prediction file.")
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            if downloaded.resolve() != output_path.resolve():
+                temporary_output = output_path.with_name(output_path.name + ".remote-part")
+                shutil.copy2(str(downloaded), str(temporary_output))
+                os.replace(str(temporary_output), str(output_path))
+            model = {
+                "model_id": str(remote_status.get("model_id") or ""),
+                "output_path": str(output_path),
+            }
+            selected = True
+            remote_status["output_path"] = str(output_path)
         _status_update(
             status_path,
             status="completed",
@@ -2374,6 +3533,11 @@ def run(spec_path: Path) -> int:
             local_log_path=str(remote_log),
             controller_log_path=str(controller_log),
             remote_container_removed=False,
+            output_path=(
+                str(remote_status.get("output_path") or "")
+                if kind == "nnunet_infer"
+                else None
+            ),
         )
         # Training data and the downloaded archive are no longer needed on the
         # server. The model now lives in the existing local registry.
@@ -2394,6 +3558,13 @@ def run(spec_path: Path) -> int:
                 expected_owner=owner,
                 remote_job_dir=remote_paths["job"],
             )
+            if (
+                kind in {"nnunet", "nnunet_infer"}
+                and not bool(profile.get("cache_training_data", True))
+            ):
+                prepared_cache_removed = _remove_remote_prepared_namespace(
+                    session, remote_paths, prepared_cache_namespace
+                )
             if not (container_removed and job_removed):
                 cleanup_warning = (
                     "Training completed, but some remote temporary files "
@@ -2414,35 +3585,93 @@ def run(spec_path: Path) -> int:
                 profile.get("cache_training_data", True)
                 and dataset_fingerprint
             ),
+            remote_prepared_cache_removed=bool(prepared_cache_removed),
         )
         return 0
+    except RemoteTaskAbandoned:
+        warning = (
+            "Local monitoring was abandoned because the remote state could not "
+            "be confirmed. The remote container may still be running and may "
+            "still use GPU or disk resources. Ask the server administrator to "
+            "inspect the recorded container name before deleting this task."
+        )
+        _append_log(controller_log, warning)
+        _status_update(
+            status_path,
+            status="abandoned",
+            phase="abandoned_locally",
+            local_abandon_requested=True,
+            remote_state_unknown=bool(container_may_exist),
+            remote_stop_confirmed=False if container_may_exist else None,
+            remote_abandon_warning=warning,
+            message=warning,
+            error=warning,
+            completed_at_epoch=time.time(),
+        )
+        return 125
     except InterruptedError:
         if session is not None and remote_paths:
-            _stop_remote(
-                session,
-                container_name,
-                status_path,
-                final="cancelled",
-                remote_control_path=str(
-                    (read_json(status_path, {}) or {}).get(
-                        "remote_control_path"
-                    )
-                    or ""
-                ),
-                remote_control_kind=str(
-                    (read_json(status_path, {}) or {}).get(
-                        "remote_control_kind"
-                    )
-                    or ""
-                ),
-                remote_job_dir=str(
-                    (read_json(status_path, {}) or {}).get("remote_job_dir")
-                    or ""
-                ),
-                remote_root=profile["remote_root"],
-                expected_owner=owner,
-                expected_job=job_slug,
+            try:
+                _stop_remote(
+                    session,
+                    container_name,
+                    status_path,
+                    final="cancelled",
+                    remote_control_path=str(
+                        (read_json(status_path, {}) or {}).get(
+                            "remote_control_path"
+                        )
+                        or ""
+                    ),
+                    remote_control_kind=str(
+                        (read_json(status_path, {}) or {}).get(
+                            "remote_control_kind"
+                        )
+                        or ""
+                    ),
+                    remote_job_dir=str(
+                        (read_json(status_path, {}) or {}).get("remote_job_dir")
+                        or ""
+                    ),
+                    remote_root=profile["remote_root"],
+                    expected_owner=owner,
+                    expected_job=job_slug,
+                )
+            except Exception as stop_exc:
+                warning = (
+                    "Stop was requested, but the remote container stop could "
+                    "not be confirmed: {}. Retry Stop, or use Abandon Locally "
+                    "if the server remains unreachable.".format(stop_exc)
+                )
+                _append_log(controller_log, warning)
+                _status_update(
+                    status_path,
+                    status="stopping",
+                    phase="remote_termination_pending",
+                    remote_state_unknown=True,
+                    remote_stop_confirmed=False,
+                    error=warning,
+                    message=warning,
+                )
+                return 1
+        elif container_may_exist:
+            warning = (
+                "Stop was requested, but the server is unreachable and the "
+                "remote container stop cannot be confirmed. Retry Stop after "
+                "the connection returns, or use Abandon Locally to release "
+                "this workstation without claiming that the server GPU is free."
             )
+            _append_log(controller_log, warning)
+            _status_update(
+                status_path,
+                status="stopping",
+                phase="remote_termination_pending",
+                remote_state_unknown=True,
+                remote_stop_confirmed=False,
+                error=warning,
+                message=warning,
+            )
+            return 1
         else:
             _status_update(
                 status_path,
@@ -2529,6 +3758,36 @@ def run(spec_path: Path) -> int:
         )
         return 1
     finally:
+        if (
+            session is not None
+            and kind in {"nnunet", "nnunet_infer"}
+            and not bool(profile.get("cache_training_data", True))
+            and prepared_cache_namespace
+            and not prepared_cache_removed
+        ):
+            final_status = read_json(status_path, {}) or {}
+            safe_to_remove = str(final_status.get("status") or "") in {
+                "completed",
+                "cancelled",
+                "failed",
+            } and not bool(final_status.get("remote_state_unknown"))
+            if safe_to_remove:
+                try:
+                    prepared_cache_removed = _remove_remote_prepared_namespace(
+                        session, remote_paths, prepared_cache_namespace
+                    )
+                    _status_update(
+                        status_path,
+                        remote_prepared_cache_removed=bool(
+                            prepared_cache_removed
+                        ),
+                    )
+                except Exception as cache_cleanup_exc:
+                    _append_log(
+                        controller_log,
+                        "Could not remove the job-specific remote nnU-Net cache: {}"
+                        .format(cache_cleanup_exc),
+                    )
         if session is not None:
             session.close()
         if (
@@ -2581,6 +3840,14 @@ def run(spec_path: Path) -> int:
                         exc
                     ),
                 )
+        if kind in {"nnunet", "nnunet_infer"}:
+            try:
+                from tools.nnunet_common import compact_completed_log
+
+                for completed_log in (remote_log, controller_log):
+                    compact_completed_log(completed_log)
+            except Exception:
+                pass
         shutil.rmtree(str(bundle), ignore_errors=True)
         shutil.rmtree(str(dataset_archive_dir), ignore_errors=True)
         for path in (archive, result_archive):
@@ -2634,9 +3901,62 @@ def cancel(status_path: Path) -> int:
             status="stopping",
             phase="remote_termination_pending",
             remote_stop_confirmed=False,
-            error="Remote stop could not be confirmed: {}".format(exc),
+            remote_state_unknown=True,
+            error=(
+                "Remote stop could not be confirmed: {}. Retry Stop after the "
+                "connection returns, or use Abandon Locally if the server "
+                "remains unreachable."
+            ).format(exc),
         )
         return 1
+
+
+def abandon(status_path: Path) -> int:
+    """End local monitoring without claiming that remote work was stopped."""
+    path = Path(status_path).expanduser().resolve()
+    status = read_json(path, {}) or {}
+    if str(status.get("execution_backend") or "") != "remote":
+        raise RuntimeError("Only a remote task can be abandoned locally.")
+    if str(status.get("status") or "").lower() in TERMINAL:
+        return 0
+    marker = _abandon_path(path)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    temporary = marker.with_name(
+        "{}.{}.tmp".format(marker.name, uuid.uuid4().hex)
+    )
+    try:
+        temporary.write_text(
+            "local abandon requested at {}\n".format(
+                time.strftime("%Y-%m-%d %H:%M:%S")
+            ),
+            encoding="utf-8",
+        )
+        os.replace(str(temporary), str(marker))
+    finally:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+    warning = (
+        "Local monitoring was abandoned. The remote server could not confirm "
+        "the container state, so it may still be running and consuming GPU or "
+        "disk resources. Give the recorded container name to the server "
+        "administrator for inspection."
+    )
+    _status_update(
+        path,
+        status="abandoned",
+        phase="abandoned_locally",
+        abandon_path=str(marker),
+        local_abandon_requested=True,
+        remote_state_unknown=True,
+        remote_stop_confirmed=False,
+        remote_abandon_warning=warning,
+        message=warning,
+        error=warning,
+        completed_at_epoch=time.time(),
+    )
+    return 0
 
 
 def main() -> int:
@@ -2646,7 +3966,11 @@ def main() -> int:
     run_parser.add_argument("--spec", required=True)
     cancel_parser = sub.add_parser("cancel")
     cancel_parser.add_argument("--status", required=True)
+    abandon_parser = sub.add_parser("abandon")
+    abandon_parser.add_argument("--status", required=True)
     args = parser.parse_args()
+    if args.command == "abandon":
+        return abandon(Path(args.status).resolve())
     if args.command == "cancel":
         return cancel(Path(args.status).resolve())
     return run(Path(args.spec).resolve())

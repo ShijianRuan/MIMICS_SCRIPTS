@@ -24,6 +24,91 @@ _LOCAL_OPERATION_GUARD = threading.RLock()
 _LOCAL_OPERATIONS = {}
 
 
+def progress_notice_due(state, key, detail="", interval_seconds=60.0,
+                        initial_delay_seconds=0.0, now=None):
+    """Return ``(due, elapsed)`` for low-noise progress/wait reporting.
+
+    Mimics timers may poll several times per second.  Callers use this helper
+    to report a new wait reason immediately, then repeat it at a restrained
+    interval instead of showing modal dialogs or flooding the Mimics log.
+    ``state`` is the owning monitor dictionary, so notices disappear with the
+    task and cannot leak across workflows.
+    """
+    current = time.time() if now is None else float(now)
+    notices = state.setdefault("_progress_notices", {})
+    identity = str(detail or "")
+    entry = notices.get(str(key))
+    if not entry or entry.get("detail") != identity:
+        entry = {
+            "detail": identity,
+            "started_at_epoch": current,
+            "last_notice_at_epoch": None,
+        }
+        notices[str(key)] = entry
+    started = float(entry.get("started_at_epoch") or current)
+    elapsed = max(0.0, current - started)
+    last_notice = entry.get("last_notice_at_epoch")
+    if last_notice is None:
+        due = elapsed >= max(0.0, float(initial_delay_seconds))
+    else:
+        due = current - float(last_notice) >= max(1.0, float(interval_seconds))
+    if due:
+        entry["last_notice_at_epoch"] = current
+    return due, elapsed
+
+
+def clear_progress_notice(state, key):
+    notices = state.get("_progress_notices") or {}
+    notices.pop(str(key), None)
+    if not notices:
+        state.pop("_progress_notices", None)
+
+
+def execute_mimics_transaction(mimics_module, operation):
+    """Run one foreground mutation in a Mimics transaction when available.
+
+    The external computations remain outside Mimics.  Only the final, already
+    validated write is grouped here so an exception cannot leave a partially
+    committed API operation and Mimics can expose it as one undoable action.
+    Older Mimics versions without ``Transaction`` keep the existing behavior.
+    """
+    transaction_class = getattr(mimics_module, "Transaction", None)
+    if not callable(transaction_class):
+        return operation()
+    try:
+        transaction = transaction_class()
+    except Exception as exc:
+        raise RuntimeError(
+            "Mimics could not start a transaction; the Mask was not changed: "
+            "{0}".format(exc)
+        )
+
+    error = None
+    rollback_error = None
+    result = None
+    with transaction:
+        try:
+            result = operation()
+            transaction.commit()
+        except BaseException:
+            error = sys.exc_info()
+            try:
+                transaction.rollback()
+            except Exception as exc:
+                rollback_error = exc
+    if error is not None:
+        _error_type, error_value, traceback_value = error
+        if rollback_error is not None:
+            raise RuntimeError(
+                "The Mimics operation failed and its transaction could not "
+                "confirm rollback. Original error: {0}; rollback error: {1}".format(
+                    error_value, rollback_error
+                )
+            )
+        raise error_value.with_traceback(traceback_value)
+    return result
+
+
 def try_acquire_local_operation(resource, owner):
     """Claim a Mimics-host operation that must not be re-entered by timers."""
     token = uuid.uuid4().hex
@@ -54,6 +139,132 @@ def active_local_operation(resource):
     with _LOCAL_OPERATION_GUARD:
         current = _LOCAL_OPERATIONS.get(resource)
         return dict(current) if current else None
+
+
+def active_local_operations():
+    """Return a stable snapshot of Mimics-thread operations currently owned."""
+    with _LOCAL_OPERATION_GUARD:
+        return [dict(value) for value in _LOCAL_OPERATIONS.values()]
+
+
+def clear_local_operations():
+    """Release in-process leases after all owning monitors were detached.
+
+    This is intentionally reserved for the explicit global-stop path. Normal
+    tasks must release their token so one task cannot accidentally unlock
+    another task's Mimics buffer operation.
+    """
+    with _LOCAL_OPERATION_GUARD:
+        count = len(_LOCAL_OPERATIONS)
+        _LOCAL_OPERATIONS.clear()
+    return count
+
+
+def active_runtime_blockers(project_root, exclude_modules=None):
+    """Describe live integration work that makes environment mutation unsafe.
+
+    This census is deliberately lightweight and bounded: it reads in-memory
+    monitors plus the small resource-lock directory. It does not enumerate
+    Windows processes or recursively scan job histories on Mimics' GUI thread.
+    """
+    excluded = set(str(value) for value in (exclude_modules or ()))
+    blockers = []
+
+    for operation in active_local_operations():
+        blockers.append(
+            "Mimics operation: {0}".format(
+                operation.get("owner") or operation.get("resource") or "unknown"
+            )
+        )
+
+    collections = (
+        ("io_setup_mimics", "_IO_SETUP_MONITORS", "data path window"),
+        ("mimics_import", "_IMPORT_MONITORS", "data import"),
+        ("mimics_export", "_EXPORT_MONITORS", "mask export"),
+        ("mask_import", "_MASK_IMPORT_MONITORS", "mask import"),
+        ("fewshot_mimics", "_MONITORS", "DINOv3 task"),
+        ("nninteractive_mimics", "_ASYNC_MONITORS", "nnInteractive prediction"),
+        (
+            "nninteractive_finetune_mimics",
+            "_CHOOSER_MONITORS",
+            "nnInteractive model window",
+        ),
+        ("interactive_algorithms_mimics", "_MONITORS", "interactive algorithm"),
+        ("nnunet_mimics", "_MONITORS", "nnU-Net task"),
+        ("setup_environment", "_MONITORS", "environment setup"),
+    )
+    for module_name, collection_name, label in collections:
+        if module_name in excluded:
+            continue
+        module = sys.modules.get(module_name)
+        collection = getattr(module, collection_name, {}) if module is not None else {}
+        active = False
+        for item in list((collection or {}).values()):
+            if item and not item.get("done"):
+                active = True
+                break
+        if active:
+            blockers.append(label)
+
+    # A reusable image worker owns imported modules and may retain a CUDA
+    # context even when no prompt result monitor is currently active.
+    if "nninteractive_mimics" not in excluded:
+        module = sys.modules.get("nninteractive_mimics")
+        workers = getattr(module, "_ASYNC_IMAGE_WORKERS", {}) if module is not None else {}
+        for worker in list((workers or {}).values()):
+            pid = worker.get("pid") if isinstance(worker, dict) else None
+            if pid and process_exists(pid):
+                blockers.append("nnInteractive image worker")
+                break
+
+    # Training/status/setup windows also execute from nninteractive_env. Do
+    # not repair packages underneath a still-running external GUI process.
+    if "fewshot_mimics" not in excluded:
+        module = sys.modules.get("fewshot_mimics")
+        processes = getattr(module, "_GUI_PROCESSES", {}) if module is not None else {}
+        for process in list((processes or {}).values()):
+            try:
+                if process.poll() is None:
+                    blockers.append("DINOv3 external window")
+                    break
+            except Exception:
+                continue
+
+    if "nninteractive_finetune_mimics" not in excluded:
+        module = sys.modules.get("nninteractive_finetune_mimics")
+        processes = getattr(module, "_GUI_PROCESSES", {}) if module is not None else {}
+        for process in list((processes or {}).values()):
+            try:
+                if process.poll() is None:
+                    blockers.append("nnInteractive custom-model window")
+                    break
+            except Exception:
+                continue
+
+    lock_dir = resource_lock_dir(project_root)
+    try:
+        names = sorted(os.listdir(lock_dir)) if os.path.isdir(lock_dir) else []
+    except Exception:
+        names = []
+    for name in names:
+        if not name.endswith(".lock"):
+            continue
+        path = os.path.join(lock_dir, name)
+        payload = read_json(path, {}) or {}
+        if payload and _lock_payload_is_live(payload):
+            blockers.append(
+                "{0}: {1}".format(name, resource_lock_summary(payload))
+            )
+
+    unique = []
+    seen = set()
+    for blocker in blockers:
+        text = str(blocker)
+        if text in seen:
+            continue
+        seen.add(text)
+        unique.append(text)
+    return unique
 
 
 def _install_subprocess_cleanup_guard():

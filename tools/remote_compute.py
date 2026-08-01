@@ -220,6 +220,20 @@ def normalize_profile(profile: dict[str, Any]) -> dict[str, Any]:
     remote_root = str(remote_root_path)
     gpu_device = normalize_gpu_device(profile.get("gpu_device"))
     cache_training_data = bool(profile.get("cache_training_data", True))
+    try:
+        remote_cache_retention_days = int(
+            profile.get("remote_cache_retention_days") or 30
+        )
+    except Exception:
+        remote_cache_retention_days = 30
+    remote_cache_retention_days = min(
+        3650, max(1, remote_cache_retention_days)
+    )
+    remote_weights_verify = str(
+        profile.get("remote_weights_verify") or "strict"
+    ).strip().lower()
+    if remote_weights_verify not in {"strict", "warn", "off"}:
+        remote_weights_verify = "strict"
     return {
         "profile_id": profile_id,
         "name": name,
@@ -232,6 +246,8 @@ def normalize_profile(profile: dict[str, Any]) -> dict[str, Any]:
         "runtime_image": image,
         "gpu_device": gpu_device,
         "cache_training_data": cache_training_data,
+        "remote_cache_retention_days": remote_cache_retention_days,
+        "remote_weights_verify": remote_weights_verify,
         "updated_at_epoch": time.time(),
     }
 
@@ -523,7 +539,10 @@ class SSHSession:
         except Exception as exc:
             self.client.close()
             raise RemoteComputeError(
-                "SSH authentication or connection failed for {}@{}:{}: {}".format(
+                "SSH authentication or connection failed for {}@{}:{}. Check "
+                "the server address and port, then verify the username and "
+                "saved password or SSH key. Also confirm that a firewall or "
+                "VPN is not blocking SSH. Details: {}".format(
                     self.profile["username"],
                     self.profile["host"],
                     self.profile["port"],
@@ -763,28 +782,59 @@ def test_connection(
 ) -> dict[str, Any]:
     with SSHSession(profile, trust_unknown=trust_unknown) as session:
         root = session.remote_root
-        session.ensure_directory(str(PurePosixPath(root) / "jobs"))
-        session.ensure_directory(str(PurePosixPath(root) / "models"))
-        session.ensure_directory(str(PurePosixPath(root) / "outputs"))
-        image = session.profile["runtime_image"]
-        image_id = session.execute(
-            "docker image inspect --format '{{{{.Id}}}}' {}".format(
-                shlex.quote(image)
+        try:
+            session.ensure_directory(str(PurePosixPath(root) / "jobs"))
+            session.ensure_directory(str(PurePosixPath(root) / "models"))
+            session.ensure_directory(str(PurePosixPath(root) / "outputs"))
+            probe = str(
+                PurePosixPath(root)
+                / (".mimics_write_test_" + uuid.uuid4().hex)
             )
-        ).strip()
+            session.execute(
+                "printf ready > {probe} && rm -f {probe}".format(
+                    probe=shlex.quote(probe)
+                )
+            )
+        except Exception as exc:
+            raise RemoteComputeError(
+                "The SSH account cannot write the remote work folder '{}'. "
+                "Create it and grant this account read/write permission, then "
+                "run Test Connection again. Details: {}".format(root, exc)
+            ) from exc
+        image = session.profile["runtime_image"]
+        try:
+            image_id = session.execute(
+                "docker image inspect --format '{{{{.Id}}}}' {}".format(
+                    shlex.quote(image)
+                )
+            ).strip()
+        except Exception as exc:
+            raise RemoteComputeError(
+                "Docker cannot use runtime image '{}'. Confirm Docker access "
+                "for this SSH account and run remote/setup_remote_server.sh "
+                "to build or load the image. Details: {}".format(image, exc)
+            ) from exc
         models = str(PurePosixPath(root) / "models")
         gpu_request = docker_gpu_request(session.profile)
-        preflight_output = session.execute(
-            "docker run --rm --gpus {gpu} --network none "
-            "-v {models}:/models:ro {image} "
-            "python /app/tools/remote_worker.py preflight "
-            "--models-dir /models".format(
-                gpu=shlex.quote(gpu_request),
-                models=shlex.quote(models),
-                image=shlex.quote(image),
-            ),
-            timeout=180,
-        ).strip()
+        try:
+            preflight_output = session.execute(
+                "docker run --rm --gpus {gpu} --network none "
+                "-v {models}:/models:ro {image} "
+                "python /app/tools/remote_worker.py preflight "
+                "--models-dir /models".format(
+                    gpu=shlex.quote(gpu_request),
+                    models=shlex.quote(models),
+                    image=shlex.quote(image),
+                ),
+                timeout=180,
+            ).strip()
+        except Exception as exc:
+            raise RemoteComputeError(
+                "The isolated GPU container preflight failed. Verify the NVIDIA "
+                "driver and Container Toolkit, install the required DINOv3 and "
+                "nnInteractive weights under '{}/models', then rerun "
+                "remote/setup_remote_server.sh. Details: {}".format(root, exc)
+            ) from exc
         try:
             start = preflight_output.index("{")
             end = preflight_output.rindex("}") + 1
@@ -795,10 +845,42 @@ def test_connection(
                     preflight_output[-1000:]
                 )
             ) from exc
-        gpu_lines = session.execute(
-            "nvidia-smi --query-gpu=index,uuid,name,memory.total "
-            "--format=csv,noheader,nounits"
-        ).strip().splitlines()
+        if not bool(preflight.get("ok")):
+            missing = []
+            if not preflight.get("cuda_available"):
+                missing.append("CUDA is unavailable inside the container")
+            if not preflight.get("offline_mode"):
+                missing.append("offline runtime variables are not active")
+            if not preflight.get("dinov3_default_model"):
+                missing.append("DINOv3 default model.onnx is missing")
+            if not preflight.get("nninteractive_weights"):
+                missing.append("nnInteractive base weights are missing")
+            if not preflight.get("dinov3_import"):
+                missing.append("DINOv3/ONNX runtime imports failed")
+            if not preflight.get("nninteractive_import"):
+                missing.append("nnInteractive runtime imports failed")
+            if not preflight.get("nnunet_import"):
+                missing.append("nnU-Net runtime import failed")
+            if not preflight.get("nnunet_custom_trainer"):
+                missing.append("Mimics nnU-Net trainer is missing")
+            raise RemoteComputeError(
+                "The runtime image is not ready: {}. Run "
+                "remote/setup_remote_server.sh as the SSH user after correcting "
+                "these items. Preflight: {}".format(
+                    "; ".join(missing) or "an unknown preflight check failed",
+                    json.dumps(preflight, sort_keys=True)
+                )
+            )
+        try:
+            gpu_lines = session.execute(
+                "nvidia-smi --query-gpu=index,uuid,name,memory.total "
+                "--format=csv,noheader,nounits"
+            ).strip().splitlines()
+        except Exception as exc:
+            raise RemoteComputeError(
+                "The SSH account cannot query NVIDIA GPUs. Verify the server "
+                "driver and account permissions. Details: {}".format(exc)
+            ) from exc
         gpus = []
         for line in gpu_lines:
             parts = [part.strip() for part in line.split(",", 3)]

@@ -13,6 +13,8 @@ import time
 
 import mimics
 
+import runtime_common
+
 
 MAX_MASKS_PER_CLICK = int(os.environ.get("MIMICS_MASK_IDENTIFIER_MAX_MASKS_PER_CLICK", "0"))
 MAX_SECONDS_PER_CLICK = float(os.environ.get("MIMICS_MASK_IDENTIFIER_MAX_SECONDS_PER_CLICK", "0"))
@@ -393,7 +395,31 @@ def main():
 
         ix, iy, iz = int(idx[0]), int(idx[1]), int(idx[2])
 
-        result = _scan_point(candidates, point, ix, iy, iz, bbox_cache, cache, cache_order)
+        operation_token = runtime_common.try_acquire_local_operation(
+            "mask_buffer_access", "Mask Identifier scan"
+        )
+        if not operation_token:
+            owner = runtime_common.active_local_operation("mask_buffer_access") or {}
+            answer = mimics.dialogs.question_box(
+                title="Mask Identifier",
+                message=(
+                    "Mask buffers are currently used by {0}.\n\n"
+                    "No Mask was scanned. Wait for that operation to finish, then try again."
+                ).format(owner.get("owner") or "another Mimics-Script task"),
+                buttons="{0};{1}".format(BUTTON_CLICK, BUTTON_FINISH),
+                ui_blocking=False,
+            )
+            if answer == BUTTON_CLICK:
+                continue
+            break
+        try:
+            result = _scan_point(
+                candidates, point, ix, iy, iz, bbox_cache, cache, cache_order
+            )
+        finally:
+            runtime_common.release_local_operation(
+                "mask_buffer_access", operation_token
+            )
         found = result["found"]
 
         # ── 5. Build a concise result message ──

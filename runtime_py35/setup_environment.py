@@ -341,26 +341,9 @@ def _start_monitor(monitor, poll_seconds=2.0, timeout_seconds=1800):
     key = monitor.get("monitor_key")
     _MONITORS[key] = monitor
 
-    # Try PyQt5 QTimer first
-    try:
-        from PyQt5.QtCore import QTimer
-        timer = QTimer()
-        timer.setSingleShot(False)
-
-        def _tick():
-            try:
-                _poll_setup_state(monitor)
-            except Exception as exc:
-                _mimics_log(logging.WARNING, "[Setup] Monitor tick failed: {0}".format(exc))
-
-        timer.timeout.connect(_tick)
-        timer.start(max(100, int(poll_seconds * 1000)))
-        monitor["qt_timer"] = timer
-        return True
-    except Exception:
-        pass
-
-    # Fallback: Win32 SetTimer
+    # Prefer the native message-loop timer. Importing PyQt5 into a Mimics
+    # session solely to poll a JSON file can itself cause a visible pause and
+    # introduces a second Qt runtime beside the external PySide6 windows.
     if os.name == "nt":
         try:
             import ctypes
@@ -384,9 +367,27 @@ def _start_monitor(monitor, poll_seconds=2.0, timeout_seconds=1800):
             if timer_id:
                 monitor["win32_timer"] = (user32, timer_id)
                 monitor["win32_callback"] = callback
-            return True
+                return True
         except Exception:
             pass
+
+    try:
+        from PyQt5.QtCore import QTimer
+        timer = QTimer()
+        timer.setSingleShot(False)
+
+        def _tick():
+            try:
+                _poll_setup_state(monitor)
+            except Exception as exc:
+                _mimics_log(logging.WARNING, "[Setup] Monitor tick failed: {0}".format(exc))
+
+        timer.timeout.connect(_tick)
+        timer.start(max(100, int(poll_seconds * 1000)))
+        monitor["qt_timer"] = timer
+        return True
+    except Exception:
+        pass
 
     # Last resort: daemon thread
     def _thread_poll():
@@ -473,6 +474,28 @@ def main(action=None):
     if action not in ("check", "install", "extract", "setup-from-scratch", "offline-install"):
         _mimics_log(logging.WARNING, "Unknown action: {0}".format(action))
         return 1
+
+    if action != "check":
+        blockers = runtime_common.active_runtime_blockers(
+            _project_root(), exclude_modules=("setup_environment",)
+        )
+        if blockers:
+            detail = "\n".join("- " + value for value in blockers[:8])
+            if len(blockers) > 8:
+                detail += "\n- and {0} more".format(len(blockers) - 8)
+            message = (
+                "The Python environment cannot be changed while Mimics-Script tasks are running.\n\n"
+                "Active work:\n{0}\n\n"
+                "Let those tasks finish or use Stop All Owned Services, then retry. "
+                "The read-only Check action remains available."
+            ).format(detail)
+            _mimics_log(logging.WARNING, "Environment maintenance blocked by active tasks: {0}".format("; ".join(blockers)))
+            mimics.dialogs.message_box(
+                title=TITLE,
+                message=message,
+                ui_blocking=False,
+            )
+            return 1
 
     # For extract, find the archive file
     extra_args = None

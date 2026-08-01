@@ -6,8 +6,9 @@ scipy>=1.10
 PyYAML>=6.0
 tqdm>=4.65
 tensorboard>=2.14
+tomli>=2.0
 torchvision>=0.21,<0.22
 transformers>=5.12,<6
 nnInteractive>=2.4
-nnunetv2>=2.7
+nnunetv2>=2.8.1,<2.9
 onnxruntime-gpu==1.22.0

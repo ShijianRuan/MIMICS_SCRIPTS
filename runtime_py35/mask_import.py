@@ -132,6 +132,55 @@ def _active_image_reference():
     return image
 
 
+def _object_identity(value):
+    for attr in ("guid", "id", "identifier"):
+        try:
+            current = getattr(value, attr, None)
+        except Exception:
+            current = None
+        if current is not None:
+            return str(current)
+    return str(id(value)) if value is not None else ""
+
+
+def _current_project_path():
+    try:
+        info = mimics.file.get_project_information()
+    except Exception:
+        return ""
+    for attr in ("filename", "file_name", "path", "project_path", "project_file"):
+        try:
+            value = getattr(info, attr, None)
+        except Exception:
+            value = None
+        if value:
+            return os.path.abspath(str(value))
+    return ""
+
+
+def _same_path(left, right):
+    if not left or not right:
+        return not left and not right
+    try:
+        return os.path.normcase(os.path.abspath(str(left))) == os.path.normcase(
+            os.path.abspath(str(right))
+        )
+    except Exception:
+        return False
+
+
+def _target_image_is_open(monitor):
+    expected_project = str(monitor.get("launch_project_path") or "")
+    if expected_project and not _same_path(_current_project_path(), expected_project):
+        return False, "Reopen the project used when Mask import started: {0}".format(
+            expected_project
+        )
+    image = _active_image_reference()
+    if image is None or _object_identity(image) != str(monitor.get("active_image_id") or ""):
+        return False, "Reactivate the image used when Mask import started."
+    return True, ""
+
+
 def _active_image_info():
     """Get the active Mimics image shape and voxel-to-RAS matrix."""
     image = _active_image_reference()
@@ -311,7 +360,7 @@ def _call_bridge(params, monitor=None):
     return result
 
 
-def _inject_buffer(mask, buffer_path, mimics_shape):
+def _inject_buffer(mask, buffer_path, mimics_shape, use_transaction=True):
     """Inject a .u8 buffer into a Mimics mask (binary)."""
     with open(buffer_path, "rb") as f:
         raw = f.read()
@@ -322,30 +371,38 @@ def _inject_buffer(mask, buffer_path, mimics_shape):
         raise RuntimeError(
             "Buffer size mismatch: {0} != {1}".format(len(raw), expected)
         )
-    try:
-        import numpy as np
-        pixels = np.frombuffer(raw, dtype=np.uint8).reshape(
-            tuple(mimics_shape)
-        ).astype(np.bool_)
-        mask.set_voxel_buffer(pixels)
-    except ImportError:
-        view = memoryview(bytearray(raw)).cast("?", shape=list(mimics_shape))
-        mask.set_voxel_buffer(view)
+    def _apply():
+        try:
+            import numpy as np
+            pixels = np.frombuffer(raw, dtype=np.uint8).reshape(
+                tuple(mimics_shape)
+            ).astype(np.bool_)
+            mask.set_voxel_buffer(pixels)
+        except ImportError:
+            view = memoryview(bytearray(raw)).cast("?", shape=list(mimics_shape))
+            mask.set_voxel_buffer(view)
+
+    if use_transaction:
+        runtime_common.execute_mimics_transaction(mimics, _apply)
+    else:
+        _apply()
 
 
 def _find_or_create_mask(name, active_image):
-    """Find an existing mask by name, or create a new one."""
-    for mask in mimics.data.masks:
-        if str(getattr(mask, "name", "")) != name:
-            continue
-        try:
-            if getattr(mask, "image", None) not in (None, active_image):
-                continue
-        except Exception:
-            pass
-        return mask
+    """Create an import target without silently replacing existing work."""
+    existing_names = set()
+    for existing in mimics.data.masks:
+        existing_names.add(str(getattr(existing, "name", "") or ""))
+    target_name = str(name or "Mask")
+    if target_name in existing_names:
+        base = target_name + " - Imported"
+        target_name = base
+        index = 2
+        while target_name in existing_names:
+            target_name = "{0} {1}".format(base, index)
+            index += 1
     mask = mimics.segment.create_mask()
-    mask.name = name
+    mask.name = target_name
     try:
         bound_image = getattr(mask, "image", None)
     except Exception:
@@ -378,6 +435,13 @@ def _safe_message(message, title=TITLE):
             print("{0}: {1}".format(title, message))
     except Exception:
         print("{0}: {1}".format(title, message))
+
+
+def _log_mask_import(level, message):
+    try:
+        mimics.logging.log_user_message(level, message)
+    except Exception:
+        print(message)
 
 
 def _stop_mask_import_monitor(key):
@@ -445,6 +509,9 @@ def _finish_mask_import(monitor):
     created_names = monitor.get("created_names", [])
     errors = monitor.get("errors", [])
     _stop_mask_import_monitor(key)
+    token = monitor.pop("operation_token", None)
+    if token:
+        runtime_common.release_local_operation("mask_buffer_access", token)
     _cleanup_work_dir(monitor.get("work_dir"))
     if created_names:
         message = "Imported {0} mask(s):\n\n{1}".format(
@@ -478,20 +545,39 @@ def _finish_mask_import_after_process(monitor, error):
         _finish_mask_import(monitor)
 
 
+def cancel_all_mask_imports(reason="Mask import stopped by user request."):
+    """Stop every import owned by this Mimics session and release apply leases."""
+    count = 0
+    for monitor in list(_MASK_IMPORT_MONITORS.values()):
+        if not monitor or monitor.get("done"):
+            continue
+        count += 1
+        monitor["done"] = True
+        monitor.setdefault("errors", []).append(str(reason))
+        _stop_mask_import_monitor(monitor.get("monitor_key"))
+        token = monitor.pop("operation_token", None)
+        if token:
+            runtime_common.release_local_operation("mask_buffer_access", token)
+        process = monitor.get("process")
+        if process is not None and runtime_common.process_exists(getattr(process, "pid", 0)):
+            if runtime_common.terminate_process_async(
+                process=process,
+                graceful_seconds=2.0,
+                on_complete=lambda path=monitor.get("work_dir"): _cleanup_work_dir(path),
+            ):
+                continue
+        _cleanup_work_dir(monitor.get("work_dir"))
+    return count
+
+
 def _mask_import_monitor_tick(monitor):
     if monitor.get("busy"):
-        return
-    operation_token = runtime_common.try_acquire_local_operation(
-        "mask_buffer_access", "Mask import"
-    )
-    if not operation_token:
         return
     monitor["busy"] = True
     try:
         _mask_import_monitor_tick_locked(monitor)
     finally:
         monitor["busy"] = False
-        runtime_common.release_local_operation("mask_buffer_access", operation_token)
 
 
 def _mask_import_monitor_tick_locked(monitor):
@@ -504,7 +590,24 @@ def _mask_import_monitor_tick_locked(monitor):
     if monitor.get("pending") is None:
         result = _read_json(monitor.get("result_path"), None)
         if result is None or result.get("status") == "running":
+            due, elapsed = runtime_common.progress_notice_due(
+                monitor,
+                "mask_prepare",
+                detail="external_bridge",
+                interval_seconds=60.0,
+                initial_delay_seconds=30.0,
+            )
+            if due:
+                _log_mask_import(
+                    mimics.logging.Level.INFO,
+                    "Mask preparation is still running in external Python "
+                    "({0}s elapsed). Mimics remains available. Run Import "
+                    "Masks again to keep or stop this task.".format(
+                        int(elapsed)
+                    ),
+                )
             return
+        runtime_common.clear_progress_notice(monitor, "mask_prepare")
         if result.get("status") != "ok":
             monitor.setdefault("errors", []).append(
                 "Mask preparation failed: {0}".format(result.get("error", "unknown error"))
@@ -516,6 +619,59 @@ def _mask_import_monitor_tick_locked(monitor):
             monitor.setdefault("errors", []).append("The selected files produced no labels.")
             _finish_mask_import(monitor)
             return
+
+    target_open, reason = _target_image_is_open(monitor)
+    if not target_open:
+        due, elapsed = runtime_common.progress_notice_due(
+            monitor,
+            "mask_target",
+            detail=reason,
+            interval_seconds=60.0,
+            initial_delay_seconds=0.0,
+        )
+        if due:
+            monitor["waiting_for_target_reason"] = reason
+            _log_mask_import(
+                mimics.logging.Level.WARNING,
+                "Mask import is ready but paused{0}. {1} Run Import Masks "
+                "again to keep or stop this task.".format(
+                    " ({0}s)".format(int(elapsed)) if elapsed >= 1.0 else "",
+                    reason,
+                ),
+            )
+        return
+    monitor.pop("waiting_for_target_reason", None)
+    runtime_common.clear_progress_notice(monitor, "mask_target")
+
+    if not monitor.get("operation_token"):
+        token = runtime_common.try_acquire_local_operation(
+            "mask_buffer_access", "Mask import apply"
+        )
+        if not token:
+            owner = runtime_common.active_local_operation("mask_buffer_access") or {}
+            owner_text = str(owner.get("owner") or "another Mask operation")
+            due, elapsed = runtime_common.progress_notice_due(
+                monitor,
+                "mask_buffer",
+                detail=owner_text,
+                interval_seconds=60.0,
+                initial_delay_seconds=0.0,
+            )
+            if due:
+                monitor["waiting_for_buffer_owner"] = owner_text
+                _log_mask_import(
+                    mimics.logging.Level.INFO,
+                    "Mask import is ready and waiting for {0} to finish{1}. "
+                    "Run Import Masks again to keep or stop this task.".format(
+                        owner_text,
+                        " ({0}s elapsed)".format(int(elapsed))
+                        if elapsed >= 1.0 else "",
+                    ),
+                )
+            return
+        monitor["operation_token"] = token
+        monitor.pop("waiting_for_buffer_owner", None)
+        runtime_common.clear_progress_notice(monitor, "mask_buffer")
 
     pending = monitor.get("pending") or []
     if not pending:
@@ -537,11 +693,30 @@ def _mask_import_monitor_tick_locked(monitor):
         shape = item.get("mimics_shape") or monitor.get("image_shape")
         try:
             _update_gui()
-            mask = _find_or_create_mask(name, monitor.get("active_image"))
-            _inject_buffer(mask, path, shape)
-            mask.visible = True
-            mask.selected = True
-            monitor.setdefault("created_names", []).append(name)
+            created = [None]
+
+            def _create_and_apply():
+                created[0] = _find_or_create_mask(
+                    name, monitor.get("active_image")
+                )
+                _inject_buffer(created[0], path, shape, use_transaction=False)
+                created[0].visible = True
+                created[0].selected = True
+
+            runtime_common.execute_mimics_transaction(
+                mimics, _create_and_apply
+            )
+            mask = created[0]
+            actual_name = str(getattr(mask, "name", name) or name)
+            if actual_name != name:
+                _log_mask_import(
+                    mimics.logging.Level.WARNING,
+                    "Mask '{0}' already exists. The import will be saved as "
+                    "'{1}' so the existing Mask remains unchanged.".format(
+                        name, actual_name
+                    ),
+                )
+            monitor.setdefault("created_names", []).append(actual_name)
         except Exception as exc:
             monitor.setdefault("errors", []).append("Mask '{0}': {1}".format(name, exc))
         _update_gui()
@@ -695,11 +870,14 @@ def _start_import_for_paths(mask_paths):
         "result_path": result_path,
         "work_dir": work_dir,
         "active_image": active_image,
+        "active_image_id": _object_identity(active_image),
+        "launch_project_path": _current_project_path(),
         "image_shape": image_shape,
         "pending": None,
         "created_names": [],
         "errors": [],
         "deadline": time.time() + 1800,
+        "operation_token": None,
     }
     if not _start_mask_import_monitor(monitor):
         _cleanup_work_dir(work_dir)
@@ -731,14 +909,7 @@ def main():
             ui_blocking=True,
         )
         if answer == "Stop Current Import":
-            for active in active_monitors:
-                active["done"] = True
-                _stop_mask_import_monitor(active.get("monitor_key"))
-                runtime_common.terminate_process_async(
-                    process=active.get("process"),
-                    graceful_seconds=2.0,
-                    on_complete=lambda path=active.get("work_dir"): _cleanup_work_dir(path),
-                )
+            cancel_all_mask_imports()
             _safe_message("Mask import stop requested. No additional Masks will be applied.")
         return 0
 

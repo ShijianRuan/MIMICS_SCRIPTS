@@ -294,6 +294,7 @@ def prepare_cases(
     destination.mkdir(parents=True, exist_ok=True)
     prepared: list[dict[str, Any]] = []
     values = [int(value) for value in label_values]
+    reused_cases = 0
 
     for index, row in enumerate(cases, start=1):
         if cancellation_requested(cancel_path):
@@ -405,6 +406,8 @@ def prepare_cases(
                 "affine_close": bool(affine_close),
             }
             write_json_atomic(metadata_path, metadata)
+        else:
+            reused_cases += 1
 
         prepared.append(
             {
@@ -428,6 +431,13 @@ def prepare_cases(
                     "total_cases": len(cases),
                     "case_id": row["case_id"],
                     "reused": reusable,
+                    "prepared_cache_reused": reused_cases,
+                    "prepared_cache_total": len(cases),
+                    "phase": (
+                        "reusing_prepared_cases"
+                        if reusable
+                        else "preparing_data"
+                    ),
                 }
             )
     return prepared

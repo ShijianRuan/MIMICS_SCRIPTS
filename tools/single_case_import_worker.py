@@ -593,6 +593,8 @@ def run(selection_path: Path, status_path: Path, stop_path: Path, log_path: Path
         )
         proc = None
         launch_deadline = time.time() + min(timeout_seconds, 3600.0)
+        wait_started = time.time()
+        last_wait_notice = 0.0
         while proc is None:
             if _stop_requested(stop_path):
                 _emit_queue_stop(runtime_dir, "Stop requested while waiting for background Mimics.")
@@ -612,6 +614,37 @@ def run(selection_path: Path, status_path: Path, stop_path: Path, log_path: Path
                     _withdraw_descriptor(descriptor)
                     _write_status(status_path, "failed", "background_mimics_busy_timeout", error=error, completed=0, failed=1, total=1, case_id=case_id)
                     return 1
+                now = time.time()
+                if now - last_wait_notice >= 30.0:
+                    holder = runtime_common.active_resource_lock(
+                        str(project_root),
+                        runtime_common.background_mimics_lock_name(
+                            str(output_dir_path)
+                        ),
+                    )
+                    owner = runtime_common.resource_lock_summary(holder)
+                    elapsed = int(now - wait_started)
+                    message = (
+                        "Waiting for background Mimics ({0}s): {1}. Use Stop "
+                        "Import Queue to cancel.".format(elapsed, owner)
+                    )
+                    _append_log(log_path, message)
+                    _write_status(
+                        status_path,
+                        "running",
+                        "waiting_for_background_mimics",
+                        message=message,
+                        wait_elapsed_seconds=elapsed,
+                        resource_wait=holder or {
+                            "resource": "background_mimics"
+                        },
+                        completed=0,
+                        failed=0,
+                        total=1,
+                        progress_percent=60,
+                        case_id=case_id,
+                    )
+                    last_wait_notice = now
                 time.sleep(2.0)
             except Exception as exc:
                 _append_log(log_path, "background Mimics launch failed: {0}".format(exc))

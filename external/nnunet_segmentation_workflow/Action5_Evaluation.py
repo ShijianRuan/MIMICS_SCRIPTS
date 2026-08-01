@@ -692,7 +692,7 @@ def stage_evaluation_from_config(config_file, run_aggregation=True):
 def main() -> None:
     # # 独立运行时仅需修改这里，不依赖 argparse。
     # run_cfg = {
-    #     "config_file": "/data1/User/shijian_ruan/UIH_Seg/PythonFiles/auto-segmentation/workflow/Config_MROrganMIv500.toml",
+    #     "config_file": "/data/projects/segmentation_workflow/Config_MR.toml",
     #     "run_aggregation": True,
     # }
 

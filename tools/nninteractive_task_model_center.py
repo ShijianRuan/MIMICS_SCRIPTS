@@ -22,6 +22,7 @@ for candidate in (str(ROOT), str(ROOT / "tools")):
 
 from nninteractive_task_common import (  # noqa: E402
     ACTIVE_STATUSES,
+    TERMINAL_STATUSES,
     audit_model_dir,
     discover_mcs_cases,
     discover_prepared_cases,
@@ -692,7 +693,7 @@ class ModelCenter:
         self.resume_button.clicked.connect(self.resume_training)
         self.stop_button = QtWidgets.QPushButton("Stop Training")
         self.stop_button.setObjectName("dangerButton")
-        self.stop_button.clicked.connect(lambda: self.request_action("stop"))
+        self.stop_button.clicked.connect(self.request_primary_stop)
         self.open_log_button = QtWidgets.QPushButton("Open Log")
         self.open_log_button.clicked.connect(self.open_log)
         hide = QtWidgets.QPushButton("Hide Window")
@@ -1636,6 +1637,7 @@ class ModelCenter:
                 "paused": "Paused",
                 "completed": "Completed",
                 "cancelled": "Stopped",
+                "abandoned": "Abandoned locally",
                 "failed": "Needs attention",
             }.get(state, "Ready")
         )
@@ -1669,16 +1671,38 @@ class ModelCenter:
                 "Reading the saved target Mask{} and converting it to the source image grid."
             ).format(" for " + case_id if case_id else "")
         elif state == "preparing_data":
-            detail = "Checking image-label geometry and preparing the selected cases."
+            if phase == "reusing_prepared_cases":
+                detail = (
+                    "Reusing verified prepared arrays on the remote server; "
+                    "no image conversion is running."
+                )
+            elif phase == "reusing_local_prepared_data":
+                detail = (
+                    "Reusing verified local source-grid inputs before remote "
+                    "transfer."
+                )
+            else:
+                detail = "Checking image-label geometry and preparing the selected cases."
         elif state == "preparing_remote":
-            detail = (
-                "Preparing source-grid images and Target Masks locally before "
-                "the remote transfer."
-            )
+            if phase == "reusing_local_prepared_data":
+                detail = (
+                    "Reusing verified local source-grid inputs before remote "
+                    "transfer."
+                )
+            else:
+                detail = (
+                    "Preparing source-grid images and Target Masks locally before "
+                    "the remote transfer."
+                )
         elif state == "connecting_remote":
             detail = "Checking the saved SSH server, runtime image, model, and GPU."
         elif state == "uploading":
-            if phase == "remote_dataset_cache_hit":
+            if phase == "verifying_remote_dataset_cache":
+                detail = "Checking remote data cache ({}/{} cases); unchanged archives are not uploaded.".format(
+                    status.get("dataset_case_completed") or 0,
+                    status.get("dataset_case_total") or 0,
+                )
+            elif phase == "remote_dataset_cache_hit":
                 detail = (
                     "The unchanged training data is already verified on the "
                     "server. Only this job's settings are being sent."
@@ -1686,9 +1710,15 @@ class ModelCenter:
             else:
                 detail = "Uploading training data in the background."
         elif state == "starting_remote":
-            detail = (
-                "Starting an isolated container on GPU {}."
-            ).format(status.get("remote_gpu_device") or "automatic")
+            if phase == "extracting_remote_dataset":
+                detail = "Making verified remote data available to the container ({}/{} cases).".format(
+                    status.get("remote_dataset_extract_index") or 0,
+                    status.get("remote_dataset_extract_total") or 0,
+                )
+            else:
+                detail = (
+                    "Starting an isolated container on GPU {}."
+                ).format(status.get("remote_gpu_device") or "automatic")
         elif state == "waiting_for_remote_gpu":
             detail = (
                 "Waiting for GPU {} without blocking Mimics."
@@ -1744,6 +1774,20 @@ class ModelCenter:
             detail = "Training is paused and its GPU memory has been released."
         elif state == "cancelled":
             detail = "Training was stopped. The incomplete model was removed."
+        elif state == "abandoned":
+            detail = str(
+                status.get("remote_abandon_warning")
+                or "Local monitoring ended, but the remote container state is unknown."
+            )
+        if state in {"preparing_remote", "connecting_remote", "uploading"}:
+            archive_reused = status.get(
+                "local_dataset_archive_cache_reused"
+            )
+            archive_total = status.get("local_dataset_archive_cache_total")
+            if archive_reused is not None and archive_total is not None:
+                detail += " Local packaging reused {}/{} case archives.".format(
+                    archive_reused, archive_total
+                )
         self.progress_detail.setText(detail)
         value = int(status.get("progress_percent") or 0)
         if state == "completed":
@@ -1757,6 +1801,7 @@ class ModelCenter:
             "completed": "Completed",
             "failed": "Needs attention",
             "cancelled": "Stopped",
+            "abandoned": "Abandoned locally",
         }.get(state, "")
         if state == "training" and (
             "verif" in phase or phase.startswith("final")
@@ -1814,7 +1859,7 @@ class ModelCenter:
         self._update_progress_actions(status)
         terminal_signature = (
             "{}:{}".format(self.current_job_dir, state)
-            if state in ("completed", "failed", "cancelled")
+            if state in ("completed", "failed", "cancelled", "abandoned")
             else ""
         )
         if terminal_signature and terminal_signature != self.last_terminal_signature:
@@ -1862,14 +1907,59 @@ class ModelCenter:
         state = str(status.get("status") or "")
         active = state in ACTIVE_STATUSES
         remote = str(status.get("execution_backend") or "") == "remote"
+        abandonable = bool(
+            remote
+            and status.get("remote_state_unknown")
+            and state not in TERMINAL_STATUSES
+        )
         self.pause_button.setEnabled(
             active and not remote and state not in ("pausing", "stopping")
         )
         self.resume_button.setEnabled(
             state in ("paused", "failed") and not remote
         )
-        self.stop_button.setEnabled(active or state == "paused")
+        self.stop_button.setText(
+            "Abandon Locally" if abandonable else "Stop Training"
+        )
+        self.stop_button.setEnabled(abandonable or active or state == "paused")
         self.open_log_button.setEnabled(bool(self.current_job_dir))
+
+    def request_primary_stop(self):
+        if not self.current_job_dir:
+            return
+        status = read_json(self.current_job_dir / "status.json", {}) or {}
+        abandonable = bool(
+            str(status.get("execution_backend") or "") == "remote"
+            and status.get("remote_state_unknown")
+            and str(status.get("status") or "") not in TERMINAL_STATUSES
+        )
+        if not abandonable:
+            self.request_action("stop")
+            return
+        answer = self.QtWidgets.QMessageBox.warning(
+            self.window,
+            "Abandon Remote Task Locally",
+            "Stop waiting on this workstation?\n\nThe server cannot confirm "
+            "whether the container stopped. It may still use GPU or disk "
+            "resources. An administrator must inspect the recorded container "
+            "name.",
+            self.QtWidgets.QMessageBox.Yes | self.QtWidgets.QMessageBox.No,
+            self.QtWidgets.QMessageBox.No,
+        )
+        if answer != self.QtWidgets.QMessageBox.Yes:
+            return
+        _launch_process(
+            [
+                str(self.python),
+                str(ROOT / "tools" / "remote_training_controller.py"),
+                "abandon",
+                "--status",
+                str(self.current_job_dir / "status.json"),
+            ]
+        )
+        self.progress_detail.setText(
+            "Ending local monitoring without claiming the remote GPU is free."
+        )
 
     def request_action(self, action):
         if not self.current_job_dir:

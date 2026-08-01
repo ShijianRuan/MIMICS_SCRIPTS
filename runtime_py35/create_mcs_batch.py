@@ -530,15 +530,20 @@ def inject_buffer(mask, buffer_path, mimics_shape):
         raise RuntimeError(
             "buffer byte count mismatch: {} != {}  path={}".format(len(raw), expected, buffer_path)
         )
-    try:
-        import numpy as np
-        pixels = np.frombuffer(raw, dtype=np.uint8).reshape(tuple(mimics_shape)).astype(np.bool_)
-        mask.set_voxel_buffer(pixels)
-        return "numpy"
-    except ImportError:
-        view = memoryview(bytearray(raw)).cast("?", shape=list(mimics_shape))
-        mask.set_voxel_buffer(view)
-        return "memoryview"
+    method = ["memoryview"]
+
+    def _apply():
+        try:
+            import numpy as np
+            pixels = np.frombuffer(raw, dtype=np.uint8).reshape(tuple(mimics_shape)).astype(np.bool_)
+            mask.set_voxel_buffer(pixels)
+            method[0] = "numpy"
+        except ImportError:
+            view = memoryview(bytearray(raw)).cast("?", shape=list(mimics_shape))
+            mask.set_voxel_buffer(view)
+
+    runtime_common.execute_mimics_transaction(mimics, _apply)
+    return method[0]
 
 
 def _shape_product(shape):

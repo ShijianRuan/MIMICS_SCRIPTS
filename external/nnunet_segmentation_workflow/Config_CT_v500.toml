@@ -3,7 +3,7 @@
 [COMMON]
 
 #图像模态，目前仅支持CT和MR
-modality = "MR"
+modality = "CT"
 
 
 [PATHS]
@@ -11,14 +11,14 @@ modality = "MR"
 labeled_path = "/data1/segmentationForTrain/labeled"
 
 # 所选的标注数据集
-labeled_dataset = ["TotalsegmentatorMRI_dataset_v200"]
+labeled_dataset = ["Totalsegmentator_dataset_v201"]
 
 
 # 训练数据的根路径
 train_path = "/data1/segmentationForTrain/traindata"
 
 # 训练所服务的项目（每个项目一个文件夹，在train_path目录下）
-train_project = "CoaseSegmentation"
+train_project = "MIv500_RAI_CT"
 
 #nnUnet的环境变量，在train_project之下
 nnUNet_raw = "nnUNet_raw"
@@ -31,8 +31,20 @@ nnUNet_results = "nnUNet_results"
 # 所生成的训练测试集数据批次，即同时训练的模型批次
 # 在nnUNet_raw,nnUNet_preprocessed,nnUNet_results目录下，分别会建立train_dataset的文件夹，分别存放数据、预处理数据、训练结果
 train_dataset = [
-    "Dataset101_MR1test",
-    "Dataset102_MR2test"
+    # "Dataset401_CT1_Head",
+    # "Dataset402_CT2_Chest",
+    # "Dataset403_CT3_Lung",
+    # "Dataset404_CT4_Abdomen",
+    # "Dataset405_CT5_Liver",
+    # "Dataset406_CT6_KidneySpleen",
+    # "Dataset407_CT7_Vessel",
+    # "Dataset408_CT8_Vertebrae",
+    #"Dataset409_CT9_Chestbone",
+    # "Dataset410_CT10_Abdomenbone", 
+    # "Dataset411_CT11_Abdomenmuscle",
+    # "Dataset412_CT12_Rib",
+    # "Dataset413_CT13_Sternum",
+    "Dataset417_CT17_Bodybone"
     ]
 
 #组织列表文件，ModelMap.toml中已有列表，如果新增其他列表，需参照“ModelMap.toml”的格式写，组织名称需用标准名称
@@ -40,8 +52,23 @@ segment_model_file = "ModelMap.toml"
 
 #待分割的组织列表，每个分割列表对应一个train_dataset
 segment_list_name = [
-    "MR1_Head", 
-    "MR2_Chest"
+    # "CT1_Head", 
+    # "CT2_Chest",
+    # "CT3_Lung",
+    # "CT4_Abdomen",
+    # "CT5_Liver",
+    # "CT6_KidneySpleen",
+    # "CT7_Vessel",
+    # "CT8_Vertebrae",
+    # "CT9_Chestbone",
+    # "CT10_Abdomenbone", 
+    # "CT11_Abdomenmuscle",
+    # "CT12_Rib",
+    # "CT13_Sternum",
+    # "CT14_Breast",
+    # "CT15_Head_glands",
+    # "CT16_Uterus",
+    "CT17_Bodybone"
     ]
 
 
@@ -51,7 +78,8 @@ segment_list_name = [
 #   1. 单整数  gpu_id = 0         → 所有数据集在同一 GPU 上顺序训练/预测
 #   2. 列表    gpu_id = [0,1,0,1]  → 列表长度须与 [MODEL].train_dataset 一致，
 # 每个元素指定对应数据集使用的 GPU。不同 GPU 上的任务并行执行，同一 GPU 上的多个任务串行执行，避免显存冲突。
-gpu_id = [0, 1]
+gpu_id = 0
+
 
 
 [PREPROCESS]
@@ -77,8 +105,7 @@ patch_size = []
 #[128,128,128]一般自动规划为2，[80,80,80]自动规划为10
 batch_size = 0
 
-
-#指定目标图像方位，三位方位码，如 "RAS", "LPI", "RAI" 等，和 ITK-SNAP 一致
+#目标图像方位，三位方位码，如 "RAS", "LPI", "RAI" 等，和 ITK-SNAP 一致
 #每个字母对应一个轴的方向: R/L=Right/Left, A/P=Anterior/Posterior, I/S=Inferior/Superior
 #例如 RAI 表示 x轴 Right→Left, y轴 Anterior→Posterior, z轴 Inferior→Superior
 #仅通过轴置换和翻转实现，不做插值，不改变原始体素值
@@ -98,10 +125,9 @@ orientation = "RAI"
 reorientaion = "NibabelIO"
 
 
-
 [TRAIN]
 
-#默认1000，NoMirroring只能选择250，2000，4000，8000, Mirroring可以选择1，5，10，20，50，100，250，500，750，2000，4000，8000
+# Effective training length; unsupported custom trainers are rejected.
 epoch = 1000
 
 #默认0，totalsegmentator都是设为0，其他值还没测试过

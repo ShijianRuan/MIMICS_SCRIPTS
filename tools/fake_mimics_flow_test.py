@@ -886,11 +886,14 @@ def test_async_mask_import_apply(fake, tmp):
         "result_path": str(result_path),
         "work_dir": str(tmp),
         "active_image": image,
+        "active_image_id": module._object_identity(image),
+        "launch_project_path": module._current_project_path(),
         "image_shape": [2, 3, 4],
         "pending": None,
         "created_names": [],
         "errors": [],
         "deadline": time.time() + 10,
+        "operation_token": None,
     }
     module._MASK_IMPORT_MONITORS[str(tmp)] = monitor
     module._mask_import_monitor_tick(monitor)

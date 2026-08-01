@@ -40,6 +40,7 @@ INCLUDE_FILES = [
     "resource_locks.py",
     "nninteractive_config.json",
     "nninteractive_finetune_config.json",
+    "interactive_algorithms_config.json",
     "fewshot_config.json",
     "window_level_presets.json",
     ".dockerignore",
@@ -63,6 +64,21 @@ REQUIRED_EXTERNAL_UI_FILES = [
     "tools/remote_compute_ui.py",
     "tools/remote_training_controller.py",
     "tools/remote_worker.py",
+    "tools/nnunet_common.py",
+    "tools/nnunet_jobs.py",
+    "tools/nnunet_pipeline.py",
+    "tools/nnunet_stage_worker.py",
+    "tools/nnunet_training_setup_ui.py",
+    "tools/nnunet_prediction_setup_ui.py",
+    "tools/nnunet_status_viewer.py",
+    "tools/interactive_algorithms_worker.py",
+    "tools/igac_engine.py",
+    "tools/igac_gui.py",
+    "tools/verify_medical_geometry.py",
+    "runtime_py35/interactive_algorithms_mimics.py",
+    "runtime_py35/nnunet_mimics.py",
+    "external/nnunet_segmentation_workflow/trainers/MimicsNNUNetTrainer.py",
+    "external/nnunet_segmentation_workflow/trainers/MimicsNNUNetTrainerNoMirroring.py",
 ]
 DEFAULT_FROZEN_ENCODER = (
     "external/dinov3-medical-seg/models/dinov3-vits16/model.onnx"
@@ -119,7 +135,8 @@ def check():
     python_exe = _find_python()
     if not python_exe:
         print("\n  {} Python not found in nninteractive_env/".format(_red("[!!]")))
-        print("    Run: python tools/package_portable.py setup-env")
+        print("    Offline bundle: run setup_offline.bat on the target Windows machine.")
+        print("    Online repair: use 99_Admin/01_Setup_Repair_Environment.py in Mimics.")
         return False
     print("\n  {} Python: {}".format(_green("[OK]"), python_exe))
 
@@ -137,7 +154,9 @@ def check():
     required_imports = [
         "torch", "numpy", "nibabel", "pydicom", "SimpleITK", "scipy",
         "nnInteractive", "torchvision", "transformers",
-        "yaml", "tqdm", "tensorboard", "onnxruntime", "PySide6", "shiboken6",
+        "yaml", "tqdm", "tensorboard", "tomli", "onnxruntime", "nnunetv2",
+        "acvl_utils",
+        "PySide6", "shiboken6",
     ]
     try:
         result = subprocess.run(
@@ -196,6 +215,21 @@ def check():
             print("  {} {} ({} files)".format(_green("[OK]"), rel, len(ckpts)))
         else:
             print("  {} {}  -- optional, not found".format(_yellow("[--]"), rel))
+    scribbleprompt_checkpoint = (
+        PROJECT_ROOT
+        / "external"
+        / "ScribblePrompt"
+        / "checkpoints"
+        / "ScribblePrompt_unet_v1_nf192_res128.pt"
+    )
+    if scribbleprompt_checkpoint.is_file():
+        print("  {} ScribblePrompt UNet checkpoint".format(_green("[OK]")))
+    else:
+        print(
+            "  {} ScribblePrompt UNet checkpoint -- optional entry unavailable".format(
+                _yellow("[--]")
+            )
+        )
     frozen_encoder = PROJECT_ROOT / DEFAULT_FROZEN_ENCODER
     if frozen_encoder.is_file() and frozen_encoder.stat().st_size > 1024 * 1024:
         print(
@@ -1051,7 +1085,7 @@ def _generate_offline_bat(python_version, python_short):
     lines.append("    pause")
     lines.append("    exit /b 1")
     lines.append(")")
-    lines.append("nninteractive_env\\python.exe -c \"import numpy, nibabel, pydicom, SimpleITK, scipy, nnInteractive, torchvision, transformers, yaml, tqdm, onnxruntime, PySide6, shiboken6; print('  All packages OK'); print('  ONNX providers:', ', '.join(onnxruntime.get_available_providers()))\"")
+    lines.append("nninteractive_env\\python.exe -c \"import numpy, nibabel, pydicom, SimpleITK, scipy, nnInteractive, nnunetv2, torchvision, transformers, yaml, tqdm, tensorboard, tomli, acvl_utils, onnxruntime, PySide6, shiboken6; from importlib.metadata import version as package_version; from packaging.version import Version; nnv=Version(package_version('nnunetv2')); assert Version('2.8.1') ^<= nnv ^< Version('2.9'), 'nnunetv2 2.8.1 through 2.8.x is required'; print('  All packages OK'); print('  nnU-Net', nnv); print('  ONNX providers:', ', '.join(onnxruntime.get_available_providers()))\"")
     lines.append('if !errorlevel! neq 0 (')
     lines.append("    echo   Some packages failed to import. The default frozen-feature method requires onnxruntime-gpu.")
     lines.append('    echo   Try: nninteractive_env\\python.exe -m pip install wheels\\*.whl --no-deps --no-index')
@@ -1071,6 +1105,14 @@ def _generate_offline_bat(python_version, python_short):
     )
     lines.append("    pause")
     lines.append("    exit /b 1")
+    lines.append(")")
+    lines.append(
+        'if not exist "external\\ScribblePrompt\\checkpoints\\ScribblePrompt_unet_v1_nf192_res128.pt" ('
+    )
+    lines.append("    echo   WARNING: The official ScribblePrompt UNet checkpoint is missing.")
+    lines.append(
+        "    echo   Expected: external\\ScribblePrompt\\checkpoints\\ScribblePrompt_unet_v1_nf192_res128.pt"
+    )
     lines.append(")")
     lines.append("")
     lines.append("echo.")

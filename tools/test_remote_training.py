@@ -10,6 +10,7 @@ import os
 import sys
 import tarfile
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -266,6 +267,38 @@ class ResumableTransferTests(unittest.TestCase):
                 "epoch 1\nepoch 2\n",
             )
 
+    def test_rotated_remote_log_restarts_from_new_inode(self):
+        class Session:
+            def __init__(self):
+                self.identities = iter(("100", "200"))
+                self.contents = iter((b"old\n", b"new\n"))
+                self.offsets = []
+
+            def path_exists(self, _path):
+                return True
+
+            def execute(self, _command, **_kwargs):
+                return next(self.identities)
+
+            def download_appended(self, _remote, local, offset):
+                self.offsets.append(offset)
+                content = next(self.contents)
+                with Path(local).open("ab") as handle:
+                    handle.write(content[offset:])
+                return len(content)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            local_log = Path(temporary) / "local.log"
+            state = {"offset": 0}
+            session = Session()
+            controller._sync_remote_log(session, "/job", local_log, state)
+            controller._sync_remote_log(session, "/job", local_log, state)
+            self.assertEqual(session.offsets, [0, 0])
+            text = local_log.read_text(encoding="utf-8")
+            self.assertIn("old\n", text)
+            self.assertIn("Remote worker log rotated", text)
+            self.assertTrue(text.endswith("new\n"))
+
 
 class LocalCompatibilityTests(unittest.TestCase):
     def test_portable_bundle_keeps_remote_runtime_and_dockerignore(self):
@@ -420,6 +453,14 @@ class LocalCompatibilityTests(unittest.TestCase):
                 "/job/input/case_1/initial_mask.nii.gz",
             )
             self.assertEqual(
+                remote_request["workspace"],
+                "/remote-cache/nninteractive/datasets/"
+                "__MIMICS_REMOTE_DATASET_FINGERPRINT__",
+            )
+            self.assertEqual(
+                remote_request["prepared_cache_namespace"], "dataset"
+            )
+            self.assertEqual(
                 (
                     bundle
                     / "input"
@@ -427,6 +468,77 @@ class LocalCompatibilityTests(unittest.TestCase):
                     / "initial_mask.nii.gz"
                 ).read_bytes(),
                 b"initial",
+            )
+
+    def test_remote_dino_reuses_local_source_grid_cache(self):
+        import nibabel as nib
+        import numpy as np
+        import tools.fewshot_pipeline as pipeline
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = root / "workspace"
+            image = root / "image.nii.gz"
+            label = root / "label.nii.gz"
+            model = root / "model.onnx"
+            model.write_bytes(b"model")
+            values = np.arange(64, dtype=np.float32).reshape((4, 4, 4)) + 1
+            target = np.zeros((4, 4, 4), dtype=np.uint8)
+            target[1:3, 1:3, 1:3] = 1
+            nib.save(nib.Nifti1Image(values, np.eye(4)), str(image))
+            nib.save(nib.Nifti1Image(target, np.eye(4)), str(label))
+            sample = {
+                "case_id": "case_1",
+                "image": str(image),
+                "label": str(label),
+            }
+            spec = {
+                "context": {
+                    "workspace": str(workspace),
+                    "ts_root": str(root),
+                    "dinov3_root": str(root),
+                    "organ": "liver",
+                    "config": {},
+                },
+                "options": {
+                    "label_source": "exported_masks",
+                    "label_root": str(root),
+                    "min_samples": 1,
+                    "val_fraction": 0.0,
+                    "model_path": str(model),
+                },
+                "status_path": str(root / "status.json"),
+                "cancel_path": str(root / "cancel.request"),
+                "run_id": "remote_job",
+            }
+            with mock.patch.object(
+                pipeline,
+                "resolve_training_mask_names",
+                return_value=["liver"],
+            ), mock.patch.object(
+                pipeline,
+                "discover_samples",
+                return_value=([sample], []),
+            ), mock.patch.object(
+                pipeline,
+                "select_samples",
+                side_effect=lambda rows, *_args: rows,
+            ), mock.patch.object(
+                pipeline,
+                "split_train_validation",
+                return_value=([sample], []),
+            ), mock.patch.object(
+                dino_ui,
+                "append_training_args",
+                return_value=None,
+            ):
+                controller._prepare_dino(spec, root / "bundle_1")
+                controller._prepare_dino(spec, root / "bundle_2")
+            status = remote_compute.read_json(root / "status.json", {})
+            self.assertEqual(status["local_materialization_cache_reused"], 1)
+            self.assertEqual(status["local_materialization_cache_total"], 1)
+            self.assertTrue(
+                (root / "bundle_2" / "input" / "case_1" / "ct.nii.gz").is_file()
             )
 
     def test_dino_remote_launch_does_not_overwrite_fast_controller_status(self):
@@ -560,6 +672,7 @@ class LocalCompatibilityTests(unittest.TestCase):
                 destination = Path(destination)
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_bytes(b"label")
+                return "test", True, 1, 1
 
             spec = {
                 "context": {
@@ -662,7 +775,7 @@ class ArchiveSafetyTests(unittest.TestCase):
                     archive, Path(temporary) / "destination"
                 )
 
-    def test_dataset_archive_fingerprint_is_stable_and_job_tar_is_small(self):
+    def test_dataset_archive_ignores_source_mtime_and_job_tar_is_small(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             bundle = root / "bundle"
@@ -715,7 +828,8 @@ class ArchiveSafetyTests(unittest.TestCase):
             }
             (
                 bundle / "labels" / "case_b" / "label.nii.gz"
-            ).write_bytes(b"changed-label")
+            ).write_bytes(b"edited-label")
+            changed_label = bundle / "labels" / "case_b" / "label.nii.gz"
             second = controller._build_dataset_parts(
                 bundle, root / "parts_second"
             )
@@ -731,8 +845,229 @@ class ArchiveSafetyTests(unittest.TestCase):
                 second_fingerprints["case_b"],
             )
 
+    def test_local_case_archives_are_reused_without_repacking(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle = root / "bundle"
+            (bundle / "input" / "case").mkdir(parents=True)
+            (bundle / "input" / "case" / "image.nii.gz").write_bytes(
+                b"image"
+            )
+            keys = {"case": "source-grid-fingerprint-a"}
+            first = controller._build_dataset_parts(
+                bundle,
+                root / "temporary_first",
+                cache_dir=root / "persistent_cache",
+                case_cache_keys=keys,
+            )
+            second = controller._build_dataset_parts(
+                bundle,
+                root / "temporary_second",
+                cache_dir=root / "persistent_cache",
+                case_cache_keys=keys,
+            )
+            self.assertFalse(first[0]["local_cache_hit"])
+            self.assertTrue(second[0]["local_cache_hit"])
+            self.assertEqual(first[0]["archive"], second[0]["archive"])
+            self.assertEqual(
+                first[0]["fingerprint"], second[0]["fingerprint"]
+            )
+
+            stale_time = time.time() - 31 * 86400
+            os.utime(first[0]["archive"], (stale_time, stale_time))
+            metadata_path = first[0]["archive"].with_suffix(".json")
+            metadata = remote_compute.read_json(metadata_path, {})
+            metadata["last_used_at_epoch"] = stale_time
+            remote_compute.write_json_atomic(metadata_path, metadata)
+            changed = controller._build_dataset_parts(
+                bundle,
+                root / "temporary_changed",
+                cache_dir=root / "persistent_cache",
+                case_cache_keys={"case": "source-grid-fingerprint-b"},
+            )
+            self.assertFalse(changed[0]["local_cache_hit"])
+            self.assertNotEqual(first[0]["archive"], changed[0]["archive"])
+            self.assertFalse(first[0]["archive"].exists())
+
+    def test_local_archive_cache_periodically_rehashes_owned_archive(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle = root / "bundle"
+            (bundle / "input" / "case").mkdir(parents=True)
+            (bundle / "input" / "case" / "image.nii.gz").write_bytes(b"image")
+            first = controller._build_dataset_parts(
+                bundle,
+                root / "parts_first",
+                cache_dir=root / "cache",
+                case_cache_keys={"case": "source-key"},
+            )[0]
+            original_fingerprint = first["fingerprint"]
+            archive = first["archive"]
+            content = bytearray(archive.read_bytes())
+            content[-1] ^= 1
+            archive.write_bytes(content)
+            metadata_path = archive.with_suffix(".json")
+            metadata = remote_compute.read_json(metadata_path, {})
+            metadata["verified_at_epoch"] = 0
+            metadata["archive_mtime_ns"] = int(archive.stat().st_mtime_ns)
+            remote_compute.write_json_atomic(metadata_path, metadata)
+            second = controller._build_dataset_parts(
+                bundle,
+                root / "parts_second",
+                cache_dir=root / "cache",
+                case_cache_keys={"case": "source-key"},
+            )[0]
+            self.assertFalse(second["local_cache_hit"])
+            self.assertEqual(second["fingerprint"], original_fingerprint)
+
+    def test_remote_nnunet_cache_cleanup_is_scoped_and_activity_aware(self):
+        class Session:
+            def __init__(self, active=""):
+                self.active = active
+                self.commands = []
+
+            def execute(self, command, **_kwargs):
+                self.commands.append(command)
+                if command.startswith("docker ps"):
+                    return self.active
+                return ""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            status = Path(temporary) / "status.json"
+            log = Path(temporary) / "controller.log"
+            remote_compute.write_json_atomic(status, {})
+            profile = {
+                "username": "alice",
+                "remote_cache_retention_days": 30,
+            }
+            paths = {"prepared_cache": "/srv/mimics/cache/alice/prepared"}
+            namespace = "/srv/mimics/cache/alice/prepared/nnunet/digest"
+            idle = Session()
+            controller._maintain_remote_nnunet_cache(
+                idle, profile, paths, namespace, status, log
+            )
+            find_commands = [value for value in idle.commands if "find " in value]
+            self.assertEqual(len(find_commands), 1)
+            self.assertIn("! -name inference", find_commands[0])
+            self.assertIn(namespace, idle.commands[-1])
+
+            active = Session("container-id\n")
+            controller._maintain_remote_nnunet_cache(
+                active, profile, paths, namespace, status, log
+            )
+            self.assertFalse(any("find " in value for value in active.commands))
+
+    def test_remote_prepared_cache_uses_dataset_content_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle = Path(temporary)
+            request_path = bundle / "remote_request.json"
+            remote_compute.write_json_atomic(
+                request_path,
+                {
+                    "pipeline_args": [
+                        "--materialization-cache-dir",
+                        "/remote-cache/dinov3/liver/"
+                        "__MIMICS_REMOTE_DATASET_FINGERPRINT__/materialized",
+                    ],
+                    "pipeline_request": {
+                        "workspace": "/remote-cache/nninteractive/liver/"
+                        "__MIMICS_REMOTE_DATASET_FINGERPRINT__"
+                    },
+                },
+            )
+            controller._bind_remote_prepared_cache(bundle, "digest-123")
+            bound = remote_compute.read_json(request_path, {})
+            self.assertIn("digest-123", bound["pipeline_args"][1])
+            self.assertIn(
+                "digest-123", bound["pipeline_request"]["workspace"]
+            )
+            self.assertNotIn(
+                "__MIMICS_REMOTE_DATASET_FINGERPRINT__", str(bound)
+            )
+
 
 class StatusAndLifecycleTests(unittest.TestCase):
+    def test_remote_worker_log_rotation_is_bounded(self):
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            remote_worker, "REMOTE_LOG_MAX_BYTES", 10
+        ), mock.patch.object(remote_worker, "REMOTE_LOG_BACKUP_COUNT", 2):
+            path = Path(temporary) / "remote_worker.log"
+            writer = remote_worker._RotatingBinaryLog(path)
+            try:
+                writer.write(b"123456")
+                writer.write(b"abcdef")
+                writer.write(b"UVWXYZ")
+            finally:
+                writer.close()
+            self.assertEqual(path.read_bytes(), b"UVWXYZ")
+            self.assertEqual(
+                path.with_name(path.name + ".1").read_bytes(), b"abcdef"
+            )
+            self.assertEqual(
+                path.with_name(path.name + ".2").read_bytes(), b"123456"
+            )
+
+    def test_download_refuses_insufficient_local_space_before_transfer(self):
+        class Session:
+            def execute(self, _command, **_kwargs):
+                return str(1024 * 1024 * 1024)
+
+        class Usage:
+            free = 64 * 1024 * 1024
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            status_path = root / "status.json"
+            remote_compute.write_json_atomic(status_path, {})
+            with mock.patch.object(
+                controller.shutil, "disk_usage", return_value=Usage()
+            ), self.assertRaisesRegex(RuntimeError, "Not enough local disk"):
+                controller._ensure_local_download_capacity(
+                    Session(),
+                    "/remote/result.tar",
+                    root / "result.tar",
+                    root / "model",
+                    status_path,
+                )
+            status = remote_compute.read_json(status_path, {})
+            self.assertTrue(status["local_download_space_checked"])
+            self.assertEqual(
+                status["remote_artifact_bytes"], 1024 * 1024 * 1024
+            )
+
+    def test_remote_task_can_be_abandoned_locally_without_stop_claim(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            status_path = Path(temporary) / "status.json"
+            remote_compute.write_json_atomic(
+                status_path,
+                {
+                    "status": "stopping",
+                    "execution_backend": "remote",
+                    "remote_state_unknown": True,
+                    "remote_container_name": "mimics-ai-user-job",
+                },
+            )
+            self.assertTrue(
+                status_viewer.can_abandon_remote_job(
+                    remote_compute.read_json(status_path, {})
+                )
+            )
+            self.assertEqual(controller.abandon(status_path), 0)
+            status = remote_compute.read_json(status_path, {})
+            self.assertEqual(status["status"], "abandoned")
+            self.assertFalse(status["remote_stop_confirmed"])
+            self.assertTrue(status["remote_state_unknown"])
+            self.assertTrue(Path(status["abandon_path"]).is_file())
+            self.assertIn("may still be running", status["message"])
+
+    def test_remote_design_covers_all_three_frameworks_and_escape_path(self):
+        text = (ROOT / "docs" / "remote_training_design.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("nnU-Net training/inference", text)
+        self.assertIn("Abandon Locally", text)
+        self.assertIn("HF_HUB_OFFLINE=1", text)
+
     def test_aggregate_upload_progress_never_resets_between_case_parts(self):
         with tempfile.TemporaryDirectory() as temporary:
             status_path = Path(temporary) / "status.json"
@@ -787,8 +1122,9 @@ class StatusAndLifecycleTests(unittest.TestCase):
             fingerprint = controller._sha256_file(archive)
             status_path = Path(temporary) / "status.json"
             remote_compute.write_json_atomic(status_path, {})
+            session = Session(fingerprint)
             remote_path, hit = controller._ensure_remote_dataset_archive(
-                Session(fingerprint),
+                session,
                 {"dataset_cache": "/cache"},
                 {"cache_training_data": True},
                 archive,
@@ -800,6 +1136,9 @@ class StatusAndLifecycleTests(unittest.TestCase):
             status = remote_compute.read_json(status_path, {})
             self.assertTrue(status["dataset_cache_hit"])
             self.assertEqual(status["phase"], "remote_dataset_cache_hit")
+            self.assertTrue(
+                any(".verified" in command for command in session.commands)
+            )
 
     def test_case_cache_hit_preserves_aggregate_upload_percent(self):
         class Session:
@@ -880,6 +1219,12 @@ class StatusAndLifecycleTests(unittest.TestCase):
         self.assertIn("gpu-1.lock", command)
         self.assertIn("MIMICS_REMOTE_GPU_LOCK_SCOPE=device", command)
         self.assertIn("mimics-script.job=job", command)
+        self.assertIn("-v /remote/prepared:/remote-cache", command)
+        self.assertIn("--network none", command)
+        self.assertIn("HF_HUB_OFFLINE=1", command)
+        self.assertIn("TRANSFORMERS_OFFLINE=1", command)
+        self.assertIn("HF_DATASETS_OFFLINE=1", command)
+        self.assertIn("WANDB_MODE=offline", command)
 
     def test_container_launch_runs_one_command_per_dataset_case(self):
         # Each remote command must stay small enough to fit within the
@@ -1273,6 +1618,8 @@ class StatusAndLifecycleTests(unittest.TestCase):
                 self.archive = archive
 
             def execute(self, command, **_kwargs):
+                if "stat -c %s" in command:
+                    return str(self.archive.stat().st_size)
                 if "sha256sum" in command:
                     return controller._sha256_file(self.archive)
                 return ""
@@ -1321,9 +1668,70 @@ class StatusAndLifecycleTests(unittest.TestCase):
             )
             self.assertFalse((target / "new.txt").exists())
 
+    def test_artifact_publish_preserves_backup_when_rollback_fails(self):
+        class Session:
+            def __init__(self, archive):
+                self.archive = archive
+
+            def execute(self, command, **_kwargs):
+                if "stat -c %s" in command:
+                    return str(self.archive.stat().st_size)
+                if "sha256sum" in command:
+                    return controller._sha256_file(self.archive)
+                return ""
+
+            def download(self, _remote, local, callback=None):
+                content = self.archive.read_bytes()
+                Path(local).write_bytes(content)
+                if callback:
+                    callback(len(content), len(content))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            (source / "new.txt").write_text("new", encoding="utf-8")
+            archive = root / "remote-result.tar"
+            with tarfile.open(archive, "w") as handle:
+                handle.add(source / "new.txt", arcname="new.txt")
+            target = root / "model"
+            target.mkdir()
+            (target / "old.txt").write_text("old", encoding="utf-8")
+            status = root / "status.json"
+            remote_compute.write_json_atomic(status, {})
+            original_replace = controller.os.replace
+
+            def fail_publish_and_restore(source_path, destination_path):
+                source_text = str(source_path)
+                if source_text.endswith(".remote-part") or ".remote-backup-" in source_text:
+                    raise PermissionError("replace denied")
+                return original_replace(source_path, destination_path)
+
+            with mock.patch.object(
+                controller.os,
+                "replace",
+                side_effect=fail_publish_and_restore,
+            ), self.assertRaisesRegex(RuntimeError, "backup"):
+                controller._download_artifact(
+                    Session(archive),
+                    "/remote/jobs/user/job",
+                    "model_output",
+                    target,
+                    root / "downloaded.tar",
+                    status,
+                )
+            backups = list(root.glob("model.remote-backup-*"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(
+                (backups[0] / "old.txt").read_text(encoding="utf-8"),
+                "old",
+            )
+
     def test_corrupt_download_is_rejected_before_model_publish(self):
         class Session:
             def execute(self, command, **_kwargs):
+                if "stat -c %s" in command:
+                    return "7"
                 if "sha256sum" in command:
                     return "a" * 64
                 return ""

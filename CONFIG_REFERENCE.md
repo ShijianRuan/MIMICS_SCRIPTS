@@ -20,16 +20,16 @@ unless noted otherwise.
 | --- | --- | --- |
 | `default_training_profile` | `"balanced"` | Initial profile loaded by the training window. |
 | `default_epochs` | `20` | Default training epochs. |
-| `default_lr` | `0.0003` | Default learning rate. |
+| `default_lr` | `0.001` | Default learning rate. |
 | `default_lr_scheduler` | `"cosine"` | Initial learning-rate schedule. |
-| `default_warmup_epochs` | `3` | Warmup epochs where supported. |
-| `default_weight_decay` | `0.01` | Default optimizer weight decay. |
-| `default_grad_accumulation` | `2` | Effective-batch accumulation. Physical batch size remains one for variable-depth volumes. |
+| `default_warmup_epochs` | `0` | Warmup epochs where supported; zero disables warmup. |
+| `default_weight_decay` | `0.0001` | Default optimizer weight decay. |
+| `default_grad_accumulation` | `1` | Effective-batch accumulation. Physical batch size remains one for variable-depth volumes unless a compatible 2D policy is selected. |
 | `default_img_size` | `"256,256"` | In-plane training size. |
-| `default_decoder` | `"segformer3d"` | Initial decoder. |
+| `default_decoder` | `"auto"` | Let the selected strategy and dimensionality choose a compatible decoder. |
 | `default_finetune_method` | `"frozen"` | Initial backbone fine-tuning method. |
-| `default_model_scale` | `"vitb16"` | Initial DINOv3 backbone scale. |
-| `default_modality` | `"ct"` | Initial modality-aware preprocessing mode. |
+| `default_model_scale` | `"vits16"` | Initial DINOv3 backbone scale. |
+| `default_modality` | `"auto"` | Infer CT/MR preprocessing from the selected training data when possible. |
 | `default_val_fraction` | `0.2` | Default validation fraction. |
 | `default_min_samples` | `1` | Minimum usable training samples. |
 | `default_min_val_samples` | `1` | Minimum validation samples when validation is enabled. |
@@ -200,3 +200,30 @@ DINOv3 packages contain the trained decoder or adaptation checkpoint and its
 flattened inference configuration. Standard pretrained encoders remain shared
 runtime assets under `external/dinov3-medical-seg/models` and must exist on the
 target installation, as verified by environment setup and package checks.
+
+## ITK Snake, IGAC, And ScribblePrompt
+
+`interactive_algorithms_config.json` configures the three independent Mimics
+entries. ITK Snake always uses the selected non-empty Mask as its initial 3D
+contour. Its profiles define the maximum physical displacement, iterations,
+level-set scaling, and volume-change safety limit.
+
+IGAC opens a non-modal PySide6 workspace and evolves a spacing-aware 3D local
+Gaussian distribution fitting contour in the external Python environment. The
+Mimics image and selected Mask are copied once when the entry starts. All live
+interaction remains outside Mimics; the project changes only after **Apply to
+Mimics**. The shared `gpu.lock` prevents IGAC from competing with training or
+nnInteractive for CUDA memory. `workspace_margin_mm` bounds work around a
+non-empty Mask, while `max_roi_voxels` and `max_cpu_roi_voxels` prevent an
+unresponsive or out-of-memory workspace.
+
+ScribblePrompt uses the official UNet checkpoint at
+`external/ScribblePrompt/checkpoints/ScribblePrompt_unet_v1_nf192_res128.pt`.
+The default device is `cpu`, avoiding competition with training and
+nnInteractive for GPU memory. Set `scribbleprompt.device` to `auto` or `cuda`
+only when shared GPU-lock waiting is acceptable.
+
+| Variable | Purpose |
+| --- | --- |
+| `MIMICS_INTERACTIVE_ALGORITHMS_CONFIG` | Override the configuration JSON path. |
+| `SCRIBBLEPROMPT_CHECKPOINT` | Override the official ScribblePrompt UNet checkpoint path. |

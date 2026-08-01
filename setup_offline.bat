@@ -240,7 +240,7 @@ if !errorlevel! neq 0 (
 
 )
 
-nninteractive_env\python.exe -c "import numpy, nibabel, pydicom, SimpleITK, scipy, nnInteractive, torchvision, transformers, yaml, tqdm, acvl_utils, onnxruntime; print('  All packages OK'); print('  ONNX providers:', ', '.join(onnxruntime.get_available_providers()))"
+nninteractive_env\python.exe -c "import numpy, nibabel, pydicom, SimpleITK, scipy, nnInteractive, nnunetv2, torchvision, transformers, yaml, tqdm, tomli, acvl_utils, onnxruntime; from importlib.metadata import version as package_version; from packaging.version import Version; nnv=Version(package_version('nnunetv2')); assert Version('2.8.1') ^<= nnv ^< Version('2.9'), 'nnunetv2 2.8.1 through 2.8.x is required'; print('  All packages OK'); print('  nnU-Net', nnv); print('  ONNX providers:', ', '.join(onnxruntime.get_available_providers()))"
 
 if !errorlevel! neq 0 (
 
@@ -272,6 +272,14 @@ if not exist "external\dinov3-medical-seg\models\dinov3-vits16\model.onnx" (
     pause
 
     exit /b 1
+
+)
+
+if not exist "external\ScribblePrompt\checkpoints\ScribblePrompt_unet_v1_nf192_res128.pt" (
+
+    echo   WARNING: The official ScribblePrompt UNet checkpoint is missing.
+
+    echo   Expected: external\ScribblePrompt\checkpoints\ScribblePrompt_unet_v1_nf192_res128.pt
 
 )
 

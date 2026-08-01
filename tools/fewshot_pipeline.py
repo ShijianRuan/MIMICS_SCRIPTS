@@ -444,7 +444,7 @@ def resolve_training_mask_names(config, organ, value=None):
     return result
 
 
-TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled"}
+TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled", "abandoned"}
 ACTIVE_JOB_STATUSES = {
     "launching", "preparing", "exporting_labels", "waiting_for_background_mimics",
     "waiting_for_gpu", "training", "running", "cancelling", "stopping", "finalizing",
@@ -849,6 +849,7 @@ def hidden_process_kwargs():
     startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    flags |= getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)
     return {"startupinfo": startupinfo, "creationflags": flags}
 
 
@@ -3693,7 +3694,11 @@ def _cmd_train_impl(args):
         train_samples,
         dataset_dir,
         val_samples,
-        cache_dir=workspace / "cache" / "materialized" / organ_slug,
+        cache_dir=(
+            Path(args.materialization_cache_dir).expanduser().resolve()
+            if getattr(args, "materialization_cache_dir", None)
+            else workspace / "cache" / "materialized" / organ_slug
+        ),
     )
     materialized_rows = materialized_train + materialized_val
     materialization_cache_hits = sum(
@@ -4928,6 +4933,13 @@ def build_parser():
     )
     train.add_argument("--keep-last-checkpoints", type=int, default=2)
     train.add_argument("--keep-materialized-dataset", action="store_true")
+    train.add_argument(
+        "--materialization-cache-dir",
+        help=(
+            "Persistent source-grid materialization cache. Remote workers use "
+            "this to reuse unchanged image/label preparation across containers."
+        ),
+    )
     train.add_argument("--run-id")
     train.set_defaults(func=cmd_train)
 

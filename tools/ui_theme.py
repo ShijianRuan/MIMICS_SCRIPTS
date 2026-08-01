@@ -7,6 +7,67 @@ import os
 from pathlib import Path
 
 
+def _prepare_windows_dpi_awareness():
+    """Enable native per-monitor rendering before QApplication creates a window."""
+    os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
+    os.environ.setdefault("QT_SCALE_FACTOR_ROUNDING_POLICY", "PassThrough")
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        per_monitor_v2 = ctypes.c_void_p(-4)
+        try:
+            setter = user32.SetProcessDpiAwarenessContext
+            setter.argtypes = [ctypes.c_void_p]
+            setter.restype = ctypes.c_bool
+            setter(per_monitor_v2)
+        except Exception:
+            try:
+                shcore = ctypes.windll.shcore
+                shcore.SetProcessDpiAwareness.argtypes = [ctypes.c_int]
+                shcore.SetProcessDpiAwareness.restype = ctypes.c_long
+                shcore.SetProcessDpiAwareness(2)
+            except Exception:
+                try:
+                    user32.SetProcessDPIAware()
+                except Exception:
+                    pass
+        # A Python executable manifest or Windows compatibility override can
+        # lock the process context. The GUI main thread can still request PMv2.
+        try:
+            thread_setter = user32.SetThreadDpiAwarenessContext
+            thread_setter.argtypes = [ctypes.c_void_p]
+            thread_setter.restype = ctypes.c_void_p
+            thread_setter(per_monitor_v2)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _prepare_qt_high_dpi_policy():
+    try:
+        from PySide6 import QtCore, QtGui
+
+        if QtCore.QCoreApplication.instance() is not None:
+            return
+        attribute = getattr(QtCore.Qt.ApplicationAttribute, "AA_UseHighDpiPixmaps", None)
+        if attribute is not None:
+            QtCore.QCoreApplication.setAttribute(attribute, True)
+        policy_group = getattr(QtCore.Qt, "HighDpiScaleFactorRoundingPolicy", None)
+        policy = getattr(policy_group, "PassThrough", None) if policy_group is not None else None
+        if policy is not None:
+            QtGui.QGuiApplication.setHighDpiScaleFactorRoundingPolicy(policy)
+    except Exception:
+        pass
+
+
+_prepare_windows_dpi_awareness()
+_prepare_qt_high_dpi_policy()
+
+
 def _dialog_start_path(value, expect_directory=True):
     """Return a starting location without touching a slow or offline volume."""
     text = os.path.expandvars(os.path.expanduser(str(value or "").strip()))
@@ -79,7 +140,7 @@ def stylesheet(extra=""):
     QMainWindow, QDialog, QWidget {
         background: #f5f7fa;
         color: #182230;
-        font-family: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "Helvetica Neue", sans-serif;
+        font-family: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "Helvetica Neue", "Arial";
         font-size: 10pt;
     }
     QLabel {
@@ -217,6 +278,12 @@ def stylesheet(extra=""):
         padding: 7px 8px;
         font-weight: 650;
     }
+    QTableCornerButton::section {
+        background: #eef2f6;
+        border: none;
+        border-right: 1px solid #d9e0e8;
+        border-bottom: 1px solid #d9e0e8;
+    }
     QScrollArea, QScrollArea > QWidget > QWidget {
         background: transparent;
         border: none;
@@ -306,9 +373,18 @@ def configure_application(app, name="Mimics Script"):
     except Exception:
         pass
     try:
-        app.setStyle("Fusion")
+        if os.name == "nt":
+            from PySide6 import QtWidgets
+
+            styles = {str(value).lower(): str(value) for value in QtWidgets.QStyleFactory.keys()}
+            app.setStyle(styles.get("windowsvista", styles.get("windows", "Fusion")))
+        else:
+            app.setStyle("Fusion")
     except Exception:
-        pass
+        try:
+            app.setStyle("Fusion")
+        except Exception:
+            pass
     if os.name == "nt":
         try:
             import ctypes

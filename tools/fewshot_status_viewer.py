@@ -73,6 +73,18 @@ CANCELLABLE_STATUSES = ACTIVE_STATUSES - {
 }
 
 
+def hidden_process_kwargs():
+    if os.name != "nt":
+        return {}
+    startup = subprocess.STARTUPINFO()
+    startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow = subprocess.SW_HIDE
+    return {
+        "startupinfo": startup,
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    }
+
+
 def read_json(path, default=None):
     try:
         return json.loads(Path(path).read_text(encoding="utf-8"))
@@ -206,6 +218,7 @@ def request_job_cancel_async(job, status_path, grace_seconds=10.0):
             "completed",
             "failed",
             "cancelled",
+            "abandoned",
         ):
             return
         latest_pids = []
@@ -246,6 +259,39 @@ def request_job_cancel_async(job, status_path, grace_seconds=10.0):
     return cancel_error
 
 
+def can_abandon_remote_job(job):
+    return bool(
+        str(job.get("execution_backend") or "") == "remote"
+        and job.get("remote_state_unknown")
+        and str(job.get("status") or "").lower() not in {
+            "completed", "failed", "cancelled", "paused", "abandoned"
+        }
+    )
+
+
+def request_job_abandon_async(status_path):
+    if not status_path:
+        return "This task has no local status path."
+    try:
+        subprocess.Popen(
+            [
+                sys.executable,
+                str(PROJECT_ROOT / "tools" / "remote_training_controller.py"),
+                "abandon",
+                "--status",
+                str(status_path),
+            ],
+            cwd=str(PROJECT_ROOT),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **hidden_process_kwargs()
+        )
+        return None
+    except Exception as exc:
+        return "Could not start local abandon helper: {}".format(exc)
+
+
 def format_time(epoch):
     try:
         return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(epoch)))
@@ -279,6 +325,7 @@ def display_status(value):
         "downloading": "Downloading trained model",
         "closed": "Closed",
         "cancelled": "Cancelled",
+        "abandoned": "Abandoned locally",
         "failed": "Failed",
         "completed": "Completed",
     }
@@ -409,8 +456,57 @@ def user_status_lines(job):
         if job.get("dataset_cache_hit") is True:
             lines.append("Data transfer: reused verified remote cache.")
         elif job.get("dataset_cache_hit") is False and job.get("transfer_percent") is not None:
+            speed = float(job.get("transfer_bytes_per_second") or 0.0)
+            eta = job.get("transfer_eta_seconds")
+            detail = ""
+            if speed > 0:
+                detail += " at {:.1f} MiB/s".format(speed / float(1024 ** 2))
+            if eta is not None:
+                detail += ", about {} min remaining".format(
+                    max(1, int(round(float(eta) / 60.0)))
+                )
             lines.append(
-                "Data transfer: {0}%.".format(job.get("transfer_percent"))
+                "Data transfer: {0}%{1}.".format(
+                    job.get("transfer_percent"), detail
+                )
+            )
+        local_reused = job.get("local_materialization_cache_reused")
+        local_total = job.get("local_materialization_cache_total")
+        if local_reused is not None and local_total is not None:
+            lines.append(
+                "Local preparation: reused {0}/{1} source-grid cases.".format(
+                    local_reused, local_total
+                )
+            )
+        archive_reused = job.get("local_dataset_archive_cache_reused")
+        archive_total = job.get("local_dataset_archive_cache_total")
+        if archive_reused is not None and archive_total is not None:
+            lines.append(
+                "Local packaging: reused {0}/{1} case archives.".format(
+                    archive_reused, archive_total
+                )
+            )
+        remote_reused = job.get("materialization_cache_reused")
+        remote_total = job.get("materialization_cache_total")
+        if remote_reused is not None and remote_total is not None:
+            lines.append(
+                "Remote preparation: reused {0}/{1} prepared cases.".format(
+                    remote_reused, remote_total
+                )
+            )
+        if str(job.get("phase") or "") == "verifying_remote_dataset_cache":
+            lines.append(
+                "Remote cache check: {0}/{1} cases.".format(
+                    job.get("dataset_case_completed") or 0,
+                    job.get("dataset_case_total") or 0,
+                )
+            )
+        if str(job.get("phase") or "") == "extracting_remote_dataset":
+            lines.append(
+                "Remote data access: {0}/{1} case archives ready.".format(
+                    job.get("remote_dataset_extract_index") or 0,
+                    job.get("remote_dataset_extract_total") or 0,
+                )
             )
     strategy = job.get("strategy") or (job.get("training_options") or {}).get("strategy") or {}
     strategy_id = (strategy.get("preset") or strategy.get("id")) if isinstance(strategy, dict) else strategy
@@ -617,7 +713,8 @@ def terminate_process_tree(pid):
                 ["taskkill", "/PID", str(pid), "/T", "/F"],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **hidden_process_kwargs()
             )
         else:
             os.kill(pid, 15)
@@ -1032,7 +1129,15 @@ class StatusViewerApp(object):
         rows = training_curve_rows(job, log_text, pipeline_text)
         self.draw_chart(rows)
         try:
-            state = ["!disabled"] if job.get("status") in CANCELLABLE_STATUSES else ["disabled"]
+            abandonable = can_abandon_remote_job(job)
+            self.stop_button.configure(
+                text="Abandon Locally" if abandonable else "Request Stop"
+            )
+            state = (
+                ["!disabled"]
+                if abandonable or job.get("status") in CANCELLABLE_STATUSES
+                else ["disabled"]
+            )
             self.stop_button.state(state)
         except Exception:
             pass
@@ -1202,9 +1307,28 @@ class StatusViewerApp(object):
 
     def request_stop(self):
         job = self.selected_job()
-        if not job or job.get("status") not in CANCELLABLE_STATUSES:
+        if not job:
             return
         status_path = self.job_paths.get(job.get("job_id"))
+        if can_abandon_remote_job(job):
+            from tkinter import messagebox
+
+            confirmed = messagebox.askyesno(
+                "Abandon Remote Task Locally",
+                "Stop waiting on this workstation?\n\nThe server cannot confirm "
+                "whether the container stopped. It may still use GPU or disk "
+                "resources. An administrator must inspect the recorded "
+                "container name.",
+                parent=self.root,
+            )
+            if not confirmed:
+                return
+            error = request_job_abandon_async(status_path)
+            if error:
+                self.summary_var.set(error)
+            return
+        if job.get("status") not in CANCELLABLE_STATUSES:
+            return
         cancel_error = request_job_cancel_async(job, status_path)
         job["status"] = "cancelling"
         job["cancel_requested_at_epoch"] = time.time()
@@ -1651,7 +1775,13 @@ class QtStatusViewerApp(object):
         self.technical_text.setPlainText(technical)
         rows = training_curve_rows(job, log_text, pipeline_text)
         self.chart.set_rows(rows)
-        self.stop_button.setEnabled(job.get("status") in CANCELLABLE_STATUSES)
+        abandonable = can_abandon_remote_job(job)
+        self.stop_button.setText(
+            "Abandon Locally" if abandonable else "Request Stop"
+        )
+        self.stop_button.setEnabled(
+            abandonable or job.get("status") in CANCELLABLE_STATUSES
+        )
         has_retry = bool(job.get("retry_context") and job.get("training_options"))
         another_active = any(
             item is not job and item.get("status") in ACTIVE_STATUSES for item in self.jobs
@@ -1694,9 +1824,30 @@ class QtStatusViewerApp(object):
 
     def request_stop(self):
         job = self.selected_job()
-        if not job or job.get("status") not in CANCELLABLE_STATUSES:
+        if not job:
             return
         status_path = self.job_paths.get(job.get("job_id"))
+        if can_abandon_remote_job(job):
+            answer = self.QtWidgets.QMessageBox.warning(
+                self.window,
+                "Abandon Remote Task Locally",
+                "Stop waiting on this workstation?\n\nThe server cannot confirm "
+                "whether the container stopped. It may still use GPU or disk "
+                "resources. An administrator must inspect the recorded "
+                "container name.",
+                self.QtWidgets.QMessageBox.Yes
+                | self.QtWidgets.QMessageBox.No,
+                self.QtWidgets.QMessageBox.No,
+            )
+            if answer != self.QtWidgets.QMessageBox.Yes:
+                return
+            error = request_job_abandon_async(status_path)
+            self.summary_label.setText(
+                error or "Local monitoring is being abandoned."
+            )
+            return
+        if job.get("status") not in CANCELLABLE_STATUSES:
+            return
         cancel_error = request_job_cancel_async(job, status_path)
         job["status"] = "cancelling"
         job["cancel_requested_at_epoch"] = time.time()

@@ -1,0 +1,884 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
+  <title>nnInteractive Task Models Preview</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --canvas: #f5f7fa;
+      --surface: #ffffff;
+      --surface-muted: #f2f5f8;
+      --ink: #182230;
+      --muted: #667085;
+      --line: #d5dde6;
+      --line-strong: #b6c2cf;
+      --blue: #2563eb;
+      --blue-dark: #1d4ed8;
+      --teal: #0f766e;
+      --green: #067647;
+      --red: #b42318;
+      --amber: #8a5700;
+      font-family: "Segoe UI", "Microsoft YaHei UI", "Helvetica Neue", Arial, sans-serif;
+      font-size: 14px;
+      letter-spacing: 0;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-width: 320px;
+      min-height: 100vh;
+      background: var(--canvas);
+      color: var(--ink);
+    }
+
+    button, input, select { font: inherit; letter-spacing: 0; }
+    button { cursor: pointer; }
+    button:disabled { cursor: default; }
+
+    .app {
+      width: min(1180px, 100%);
+      min-height: 100vh;
+      margin: 0 auto;
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .header {
+      display: grid;
+      grid-template-columns: minmax(260px, 1fr) auto;
+      align-items: center;
+      gap: 24px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 26px;
+      line-height: 1.15;
+      font-weight: 700;
+    }
+
+    .subtitle {
+      margin: 5px 0 0;
+      color: var(--muted);
+    }
+
+    .task-bar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 360px;
+    }
+
+    .task-bar input { min-width: 260px; }
+    .live {
+      color: var(--green);
+      font-weight: 650;
+      min-width: 88px;
+    }
+
+    .tabs {
+      display: flex;
+      align-items: end;
+      gap: 2px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .tab {
+      border: 1px solid var(--line);
+      border-bottom: 0;
+      border-radius: 6px 6px 0 0;
+      background: #edf1f5;
+      color: #344054;
+      min-height: 40px;
+      padding: 0 20px;
+    }
+
+    .tab.active {
+      background: var(--surface);
+      color: #101828;
+      font-weight: 650;
+      position: relative;
+      top: 1px;
+    }
+
+    .view {
+      display: none;
+      min-height: 0;
+      flex: 1;
+    }
+    .view.active { display: flex; flex-direction: column; gap: 12px; }
+
+    .surface {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 16px;
+    }
+
+    .section-title {
+      margin: 0 0 12px;
+      color: #344054;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .form {
+      display: grid;
+      grid-template-columns: 150px minmax(0, 1fr);
+      gap: 9px 12px;
+      align-items: center;
+    }
+
+    label { color: #344054; }
+    input[type="text"], input[type="number"], select {
+      width: 100%;
+      min-height: 36px;
+      border: 1px solid var(--line-strong);
+      border-radius: 6px;
+      background: var(--surface);
+      color: var(--ink);
+      padding: 6px 9px;
+      outline: none;
+    }
+
+    input:focus, select:focus {
+      border-color: var(--blue);
+      box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.12);
+    }
+
+    .path-control {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 86px;
+      gap: 8px;
+    }
+
+    .button {
+      min-height: 36px;
+      border: 1px solid #aeb9c6;
+      border-radius: 6px;
+      background: var(--surface);
+      color: #253244;
+      padding: 6px 13px;
+      white-space: nowrap;
+    }
+
+    .button:hover { background: #f0f4f8; border-color: #8795a6; }
+    .button.primary {
+      background: var(--blue);
+      border-color: var(--blue);
+      color: #fff;
+      font-weight: 650;
+    }
+    .button.primary:hover { background: var(--blue-dark); }
+    .button.danger {
+      background: #fff7f6;
+      border-color: #efaaa4;
+      color: var(--red);
+    }
+    .button:disabled {
+      background: #f2f4f7;
+      border-color: #d9e0e8;
+      color: #98a2b3;
+    }
+
+    .hidden { display: none !important; }
+    .hint {
+      margin: 8px 0;
+      min-height: 18px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .hint.error { color: var(--red); font-weight: 600; }
+
+    .table-wrap {
+      border: 1px solid var(--line);
+      max-height: 225px;
+      overflow: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+      background: var(--surface);
+    }
+    th, td {
+      height: 36px;
+      border-bottom: 1px solid var(--line);
+      padding: 6px 9px;
+      text-align: left;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: #eef2f6;
+      color: #344054;
+      font-weight: 650;
+    }
+    tr:last-child td { border-bottom: 0; }
+    .col-use { width: 58px; }
+    .col-split { width: 145px; }
+    .col-status { width: 150px; }
+    .ready { color: var(--green); }
+    .missing { color: var(--red); }
+
+    .training-plan {
+      display: grid;
+      grid-template-columns: minmax(0, 1.35fr) minmax(300px, 0.65fr);
+      gap: 22px;
+      align-items: end;
+    }
+
+    .radio-list { display: grid; gap: 9px; }
+    .radio-list label { display: flex; gap: 8px; align-items: start; }
+    .radio-list strong { display: block; color: var(--ink); }
+    .radio-list span { color: var(--muted); font-size: 13px; }
+
+    .compact-fields {
+      display: grid;
+      grid-template-columns: 1fr 1.5fr;
+      gap: 12px;
+    }
+    .compact-fields label { display: grid; gap: 5px; font-size: 13px; }
+
+    .footer {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .footer .hint { flex: 1; margin: 0; }
+
+    .status-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: baseline;
+    }
+    .status-head strong { font-size: 15px; }
+    .status-detail { color: var(--muted); margin: 4px 0 12px; }
+
+    .progress-track {
+      position: relative;
+      height: 24px;
+      border: 1px solid var(--line-strong);
+      border-radius: 5px;
+      background: #eef2f6;
+      overflow: hidden;
+    }
+    .progress-fill {
+      width: 0;
+      height: 100%;
+      background: var(--teal);
+      transition: width 240ms ease;
+    }
+    .progress-value {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      font-size: 12px;
+      color: #253244;
+    }
+
+    .metrics {
+      display: flex;
+      gap: 22px;
+      flex-wrap: wrap;
+      margin-top: 10px;
+    }
+    .metrics span { font-variant-numeric: tabular-nums; }
+
+    .status-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.3fr) minmax(320px, 0.7fr);
+      gap: 12px;
+      min-height: 390px;
+    }
+    .chart-shell, .log-shell { min-height: 390px; }
+    canvas { width: 100%; height: 320px; display: block; }
+    .log {
+      height: 320px;
+      overflow: auto;
+      border: 1px solid var(--line);
+      background: #f8fafc;
+      padding: 10px;
+      color: #344054;
+      font: 13px/1.45 Consolas, "SFMono-Regular", monospace;
+      white-space: pre-wrap;
+    }
+
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .actions .spacer { flex: 1; }
+
+    .current-model {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    .model-mark {
+      width: 42px;
+      height: 42px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      color: #fff;
+      background: var(--teal);
+      font-weight: 700;
+    }
+    .current-model h2 { margin: 0 0 3px; font-size: 17px; }
+    .current-model p { margin: 0; color: var(--muted); }
+    .model-use { width: 110px; }
+
+    @media (max-width: 860px) {
+      .app { padding: 14px; }
+      .header { grid-template-columns: 1fr; gap: 12px; }
+      .task-bar { min-width: 0; width: 100%; }
+      .task-bar input { min-width: 0; flex: 1; }
+      .tabs { overflow-x: auto; }
+      .tab { padding: 0 13px; flex: 0 0 auto; }
+      .form { grid-template-columns: 1fr; gap: 5px; }
+      .training-plan, .status-grid { grid-template-columns: 1fr; }
+      .status-grid { min-height: 0; }
+      .chart-shell, .log-shell { min-height: 300px; }
+      canvas, .log { height: 250px; }
+      .col-status { width: 125px; }
+      .col-split { width: 125px; }
+      .footer { align-items: stretch; flex-direction: column; }
+      .footer .button { width: 100%; }
+    }
+
+    @media (max-width: 520px) {
+      h1 { font-size: 22px; }
+      .surface { padding: 12px; }
+      .path-control { grid-template-columns: minmax(0, 1fr) 74px; }
+      .compact-fields { grid-template-columns: 1fr; }
+      .tabs { overflow: visible; }
+      .tab {
+        min-width: 0;
+        flex: 1 1 0;
+        padding: 0 5px;
+        font-size: 12px;
+      }
+      .col-status { display: none; }
+      .actions .button { flex: 1 1 100%; }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header class="header">
+      <div>
+        <h1>nnInteractive Task Models</h1>
+        <p class="subtitle">Train, monitor, and select models for one annotation task.</p>
+      </div>
+      <div class="task-bar">
+        <label for="taskSelect">Annotation task</label>
+        <input id="taskSelect" type="text" list="taskOptions" value="Liver"
+               placeholder="Select existing or type a new task">
+        <datalist id="taskOptions">
+          <option value="Liver">
+          <option value="Aorta">
+        </datalist>
+        <span class="live" id="headerState">Ready</span>
+      </div>
+    </header>
+
+    <nav class="tabs" aria-label="Model center views">
+      <button class="tab active" data-view="setup">Training Setup</button>
+      <button class="tab" data-view="progress">Training Progress</button>
+      <button class="tab" data-view="models">Model Versions</button>
+    </nav>
+
+    <section class="view active" id="view-setup">
+      <div class="surface">
+        <h2 class="section-title">Data</h2>
+        <div class="form">
+          <label for="sourceMode">Data source</label>
+          <select id="sourceMode">
+            <option value="mcs">Saved Mimics projects</option>
+            <option value="prepared">Image dataset with existing or exported Masks</option>
+          </select>
+
+          <label class="mcs-row" for="mcsPath">Saved .mcs folder</label>
+          <div class="path-control mcs-row">
+            <input id="mcsPath" type="text" value="E:\total_test\mcs_output">
+            <button class="button browse" data-target="mcsPath">Browse</button>
+          </div>
+
+          <label class="mcs-row" for="imagePath">Source image folder</label>
+          <div class="path-control mcs-row">
+            <input id="imagePath" type="text" value="E:\total_test\dataset">
+            <button class="button browse" data-target="imagePath">Browse</button>
+          </div>
+
+          <label class="prepared-row hidden" for="preparedPath">Image dataset folder</label>
+          <div class="path-control prepared-row hidden">
+            <input id="preparedPath" type="text" value="E:\total_test\dataset">
+            <button class="button browse" data-target="preparedPath">Browse</button>
+          </div>
+
+          <label class="prepared-row hidden" for="preparedLabelPath">Exported Mask folder (optional)</label>
+          <div class="path-control prepared-row hidden">
+            <input id="preparedLabelPath" type="text" value="E:\total_test\mask_exports">
+            <button class="button browse" data-target="preparedLabelPath">Browse</button>
+          </div>
+
+          <label for="maskName">Target Mask name(s)</label>
+          <div class="path-control">
+            <input id="maskName" type="text" value="Liver">
+            <button class="button" id="scanButton">Scan Cases</button>
+          </div>
+        </div>
+        <p class="hint" id="scanHint">Choose the data location, then scan cases.</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th class="col-use">Use</th>
+                <th>Case</th>
+                <th class="col-split">Split</th>
+                <th class="col-status">Status</th>
+              </tr>
+            </thead>
+            <tbody id="caseRows"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="surface training-plan">
+        <div>
+          <h2 class="section-title">Training plan</h2>
+          <div class="radio-list">
+            <label>
+              <input type="radio" name="strategy" value="light" checked>
+              <span><strong>Lightweight adaptation</strong>Stable first choice for a new task</span>
+            </label>
+            <label>
+              <input type="radio" name="strategy" value="strong">
+              <span><strong>Stronger boundary adaptation</strong>More flexible for difficult CT boundaries</span>
+            </label>
+          </div>
+        </div>
+        <div class="compact-fields">
+          <label>Maximum epochs
+            <input id="epochs" type="number" min="4" max="20" value="10">
+          </label>
+          <label>Starting model
+            <select id="startingModel">
+              <option>Official nnInteractive</option>
+              <option selected>Current task model</option>
+            </select>
+          </label>
+        </div>
+      </div>
+
+      <footer class="footer">
+        <p class="hint" id="setupSummary">Scan cases to prepare training.</p>
+        <button class="button primary" id="startButton" disabled>Start Training</button>
+      </footer>
+    </section>
+
+    <section class="view" id="view-progress">
+      <div class="surface">
+        <div class="status-head">
+          <strong id="progressTitle">No training is running</strong>
+          <span class="hint" id="elapsed">00:00:00</span>
+        </div>
+        <p class="status-detail" id="progressDetail">Start training from Training Setup.</p>
+        <div class="progress-track">
+          <div class="progress-fill" id="progressFill"></div>
+          <div class="progress-value" id="progressValue">0%</div>
+        </div>
+        <div class="metrics">
+          <span id="lossMetric">Loss&nbsp; -</span>
+          <span id="aucMetric">Validation AUC&nbsp; -</span>
+          <span id="bestMetric">Best AUC&nbsp; -</span>
+        </div>
+      </div>
+
+      <div class="status-grid">
+        <div class="surface chart-shell">
+          <h2 class="section-title">Training curve</h2>
+          <canvas id="curve" aria-label="Training metrics chart"></canvas>
+        </div>
+        <div class="surface log-shell">
+          <h2 class="section-title">Recent activity</h2>
+          <div class="log" id="logPanel"></div>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button class="button" id="pauseButton" disabled>Pause and Release GPU</button>
+        <button class="button" id="resumeButton" disabled>Resume Training</button>
+        <button class="button danger" id="stopButton" disabled>Stop Training</button>
+        <span class="spacer"></span>
+        <button class="button" id="openLogButton">Open Log</button>
+        <button class="button" id="hideButton">Hide Window</button>
+      </div>
+    </section>
+
+    <section class="view" id="view-models">
+      <div class="surface current-model">
+        <div class="model-mark">AI</div>
+        <div>
+          <h2 id="currentModelTitle">Current model · Official nnInteractive</h2>
+          <p id="currentModelDetail">No task model has passed validation yet.</p>
+        </div>
+      </div>
+      <div class="surface">
+        <h2 class="section-title">Model history</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Adaptation</th>
+                <th>Data</th>
+                <th>Validation</th>
+                <th class="model-use">Use</th>
+              </tr>
+            </thead>
+            <tbody id="modelRows">
+              <tr>
+                <td>2026-07-20 09:32</td>
+                <td>Lightweight</td>
+                <td>6 + 2</td>
+                <td class="ready">+3.8% AUC</td>
+                <td><button class="button model-button" disabled>Current</button></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const state = {
+      scanned: false,
+      status: "ready",
+      epoch: 0,
+      epochs: 10,
+      startedAt: 0,
+      timer: null,
+      points: [],
+      cases: [
+        { id: "s0001", ready: true, split: "train" },
+        { id: "s0002", ready: true, split: "train" },
+        { id: "s0003", ready: true, split: "train" },
+        { id: "s0004", ready: true, split: "train" },
+        { id: "s0005", ready: true, split: "validation" },
+        { id: "s0006", ready: false, split: "exclude" }
+      ]
+    };
+
+    const $ = (selector) => document.querySelector(selector);
+    const $$ = (selector) => [...document.querySelectorAll(selector)];
+
+    function showView(name) {
+      $$(".tab").forEach((button) => button.classList.toggle("active", button.dataset.view === name));
+      $$(".view").forEach((view) => view.classList.toggle("active", view.id === `view-${name}`));
+      if (name === "progress") requestAnimationFrame(drawCurve);
+    }
+
+    $$(".tab").forEach((button) => button.addEventListener("click", () => showView(button.dataset.view)));
+
+    let previousTaskName = $("#taskSelect").value;
+    $("#taskSelect").addEventListener("change", (event) => {
+      const nextTaskName = event.target.value.trim();
+      const maskInput = $("#maskName");
+      if (!maskInput.value.trim() || maskInput.value.trim() === previousTaskName) {
+        maskInput.value = nextTaskName;
+      }
+      previousTaskName = nextTaskName;
+      updateSummary();
+    });
+
+    $("#sourceMode").addEventListener("change", (event) => {
+      const isMcs = event.target.value === "mcs";
+      $$(".mcs-row").forEach((node) => node.classList.toggle("hidden", !isMcs));
+      $$(".prepared-row").forEach((node) => node.classList.toggle("hidden", isMcs));
+      state.scanned = false;
+      renderCases();
+      updateSummary();
+    });
+
+    $$(".browse").forEach((button) => button.addEventListener("click", () => {
+      const input = document.getElementById(button.dataset.target);
+      input.focus();
+      input.select();
+    }));
+
+    function renderCases() {
+      const body = $("#caseRows");
+      if (!state.scanned) {
+        body.innerHTML = `<tr><td colspan="4" class="hint">No cases scanned.</td></tr>`;
+        return;
+      }
+      body.innerHTML = state.cases.map((item, index) => `
+        <tr>
+          <td><input type="checkbox" class="case-use" data-index="${index}" ${item.ready ? "checked" : "disabled"}></td>
+          <td>${item.id}</td>
+          <td>
+            <select class="case-split" data-index="${index}" ${item.ready ? "" : "disabled"}>
+              <option value="train" ${item.split === "train" ? "selected" : ""}>Train</option>
+              <option value="validation" ${item.split === "validation" ? "selected" : ""}>Validation</option>
+              <option value="exclude" ${item.split === "exclude" ? "selected" : ""}>Exclude</option>
+            </select>
+          </td>
+          <td class="${item.ready ? "ready" : "missing"}">${item.ready ? "Ready" : "Image missing"}</td>
+        </tr>
+      `).join("");
+      $$(".case-use, .case-split").forEach((control) => control.addEventListener("change", updateSummary));
+    }
+
+    $("#scanButton").addEventListener("click", () => {
+      const button = $("#scanButton");
+      button.disabled = true;
+      $("#scanHint").className = "hint";
+      $("#scanHint").textContent = "Scanning cases in the background...";
+      setTimeout(() => {
+        state.scanned = true;
+        button.disabled = false;
+        $("#scanHint").textContent = "Found 6 cases; 5 are ready.";
+        renderCases();
+        updateSummary();
+      }, 650);
+    });
+
+    function selectedCounts() {
+      let train = 0;
+      let validation = 0;
+      $$(".case-use").forEach((use) => {
+        const split = document.querySelector(`.case-split[data-index="${use.dataset.index}"]`);
+        if (!use.checked || !split || split.value === "exclude") return;
+        if (split.value === "validation") validation += 1;
+        else train += 1;
+      });
+      return { train, validation };
+    }
+
+    function updateSummary() {
+      if (!$("#taskSelect").value.trim()) {
+        $("#setupSummary").textContent = "Choose or enter an annotation task.";
+        $("#startButton").disabled = true;
+        return;
+      }
+      if (!state.scanned) {
+        $("#setupSummary").textContent = "Scan cases to prepare training.";
+        $("#startButton").disabled = true;
+        return;
+      }
+      const counts = selectedCounts();
+      const strategy = document.querySelector('input[name="strategy"]:checked').value === "light"
+        ? "Lightweight" : "Stronger boundary";
+      const epochs = Math.max(4, Math.min(20, Number($("#epochs").value) || 10));
+      const suffix = counts.validation < 2 ? " · New model will not be selected automatically" : "";
+      $("#setupSummary").textContent =
+        `${counts.train} training · ${counts.validation} validation · ${strategy} · up to ${epochs} epochs${suffix}`;
+      $("#startButton").disabled = counts.train < 1 || ["training", "paused"].includes(state.status);
+    }
+
+    $$('input[name="strategy"], #epochs').forEach((control) => control.addEventListener("change", updateSummary));
+
+    function appendLog(text) {
+      const panel = $("#logPanel");
+      const stamp = new Date().toLocaleTimeString([], { hour12: false });
+      panel.textContent += `[${stamp}] ${text}\n`;
+      panel.scrollTop = panel.scrollHeight;
+    }
+
+    function setStatus(status) {
+      state.status = status;
+      const active = status === "training";
+      $("#pauseButton").disabled = !active;
+      $("#resumeButton").disabled = status !== "paused";
+      $("#stopButton").disabled = !["training", "paused"].includes(status);
+      $("#headerState").textContent = {
+        ready: "Ready",
+        training: "Training",
+        paused: "Paused",
+        stopped: "Stopped",
+        completed: "Completed"
+      }[status] || "Ready";
+      updateSummary();
+    }
+
+    function updateProgress() {
+      const pct = Math.round((state.epoch / state.epochs) * 100);
+      $("#progressFill").style.width = `${pct}%`;
+      $("#progressValue").textContent = `${pct}%`;
+      $("#progressTitle").textContent = `Training, epoch ${state.epoch} of ${state.epochs}`;
+      $("#progressDetail").textContent =
+        "Learning from the selected cases in the background. Mimics remains available for annotation.";
+      if (state.points.length) {
+        const point = state.points[state.points.length - 1];
+        $("#lossMetric").innerHTML = `Loss&nbsp; ${point.loss.toFixed(4)}`;
+        $("#aucMetric").innerHTML = `Validation AUC&nbsp; ${point.auc.toFixed(4)}`;
+        const best = Math.max(...state.points.map((value) => value.auc));
+        $("#bestMetric").innerHTML = `Best AUC&nbsp; ${best.toFixed(4)}`;
+      }
+      drawCurve();
+    }
+
+    function tick() {
+      if (state.status !== "training") return;
+      state.epoch += 1;
+      const progress = state.epoch / state.epochs;
+      const loss = 0.95 * Math.exp(-2.4 * progress) + 0.07;
+      const auc = Math.min(0.89, 0.34 + 0.53 * (1 - Math.exp(-2.8 * progress)));
+      state.points.push({ epoch: state.epoch, loss, auc });
+      appendLog(`Epoch ${state.epoch}/${state.epochs} | loss ${loss.toFixed(4)} | validation AUC ${auc.toFixed(4)}`);
+      updateProgress();
+      if (state.epoch >= state.epochs) completeTraining();
+    }
+
+    function startTimer() {
+      clearInterval(state.timer);
+      state.timer = setInterval(tick, 850);
+    }
+
+    $("#startButton").addEventListener("click", () => {
+      state.epochs = Math.max(4, Math.min(20, Number($("#epochs").value) || 10));
+      state.epoch = 0;
+      state.points = [];
+      state.startedAt = Date.now();
+      $("#logPanel").textContent = "";
+      appendLog("Training request accepted. Preparing selected cases.");
+      appendLog("Saved Masks will be exported in the background before GPU training.");
+      setStatus("training");
+      updateProgress();
+      showView("progress");
+      startTimer();
+    });
+
+    $("#pauseButton").addEventListener("click", () => {
+      clearInterval(state.timer);
+      setStatus("paused");
+      $("#progressTitle").textContent = "Training paused";
+      $("#progressDetail").textContent = "Training is paused and its GPU memory has been released.";
+      appendLog("Training paused by user. Resume data was preserved and GPU memory was released.");
+    });
+
+    $("#resumeButton").addEventListener("click", () => {
+      setStatus("training");
+      appendLog(`Training resumed from epoch ${state.epoch}.`);
+      updateProgress();
+      startTimer();
+    });
+
+    $("#stopButton").addEventListener("click", () => {
+      clearInterval(state.timer);
+      setStatus("stopped");
+      $("#progressTitle").textContent = "Training stopped";
+      $("#progressDetail").textContent = "The incomplete model and temporary training data were removed.";
+      appendLog("Training stopped by user. Incomplete model artifacts were removed.");
+    });
+
+    function completeTraining() {
+      clearInterval(state.timer);
+      setStatus("completed");
+      $("#progressTitle").textContent = "Training completed";
+      $("#progressDetail").textContent =
+        "Validation passed. The new model is now used for this task (+4.6% AUC).";
+      appendLog("Quality check passed. The new model was selected for Liver.");
+      $("#currentModelTitle").textContent = "Current model · Just completed";
+      $("#currentModelDetail").textContent =
+        "Lightweight adaptation · 4 training + 1 validation · +4.6% validation AUC";
+      const row = document.createElement("tr");
+      row.innerHTML = `
+        <td>${new Date().toISOString().slice(0, 16).replace("T", " ")}</td>
+        <td>Lightweight</td>
+        <td>4 + 1</td>
+        <td class="ready">+4.6% AUC</td>
+        <td><button class="button model-button" disabled>Current</button></td>`;
+      $("#modelRows").prepend(row);
+    }
+
+    $("#openLogButton").addEventListener("click", () => {
+      appendLog("Full log path copied from the real application in production.");
+    });
+    $("#hideButton").addEventListener("click", () => {
+      document.body.style.opacity = "0.18";
+      setTimeout(() => { document.body.style.opacity = "1"; }, 450);
+    });
+
+    function drawCurve() {
+      const canvas = $("#curve");
+      const rect = canvas.getBoundingClientRect();
+      const dpr = Math.max(1, window.devicePixelRatio || 1);
+      canvas.width = Math.max(1, Math.round(rect.width * dpr));
+      canvas.height = Math.max(1, Math.round(rect.height * dpr));
+      const context = canvas.getContext("2d");
+      context.scale(dpr, dpr);
+      const width = rect.width;
+      const height = rect.height;
+      const pad = { left: 42, right: 14, top: 12, bottom: 34 };
+      const plotWidth = Math.max(1, width - pad.left - pad.right);
+      const plotHeight = Math.max(1, height - pad.top - pad.bottom);
+      context.clearRect(0, 0, width, height);
+      context.strokeStyle = "#d5dde6";
+      context.lineWidth = 1;
+      context.strokeRect(pad.left, pad.top, plotWidth, plotHeight);
+      context.fillStyle = "#667085";
+      context.font = "12px Segoe UI";
+      context.fillText("Metric", 4, 16);
+      context.fillText("Epoch", width - 46, height - 8);
+      if (!state.points.length) {
+        context.textAlign = "center";
+        context.fillText("Training metrics will appear here.", width / 2, height / 2);
+        context.textAlign = "left";
+        return;
+      }
+      const maxLoss = Math.max(...state.points.map((point) => point.loss), 1);
+      function series(key, color, transform = (value) => value) {
+        context.beginPath();
+        state.points.forEach((point, index) => {
+          const x = pad.left + ((point.epoch - 1) / Math.max(1, state.epochs - 1)) * plotWidth;
+          const normalized = Math.max(0, Math.min(1, transform(point[key])));
+          const y = pad.top + (1 - normalized) * plotHeight;
+          if (index === 0) context.moveTo(x, y);
+          else context.lineTo(x, y);
+        });
+        context.strokeStyle = color;
+        context.lineWidth = 2.2;
+        context.stroke();
+      }
+      series("loss", "#2563eb", (value) => value / maxLoss);
+      series("auc", "#0f766e");
+      context.fillStyle = "#2563eb";
+      context.fillText("Loss", pad.left, height - 8);
+      context.fillStyle = "#0f766e";
+      context.fillText("Validation AUC", pad.left + 48, height - 8);
+    }
+
+    window.addEventListener("resize", drawCurve);
+    setInterval(() => {
+      if (!state.startedAt || !["training", "paused", "completed"].includes(state.status)) return;
+      const seconds = Math.floor((Date.now() - state.startedAt) / 1000);
+      const hours = String(Math.floor(seconds / 3600)).padStart(2, "0");
+      const minutes = String(Math.floor((seconds % 3600) / 60)).padStart(2, "0");
+      const secs = String(seconds % 60).padStart(2, "0");
+      $("#elapsed").textContent = `${hours}:${minutes}:${secs}`;
+    }, 1000);
+
+    renderCases();
+    drawCurve();
+  </script>
+</body>
+</html>

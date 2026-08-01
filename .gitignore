@@ -30,6 +30,7 @@ wheels/
 /external/nninteractive-finetune/validation/work/
 /external/nninteractive-finetune/validation/outputs/
 /external/dinov3-medical-seg/models/
+/external/ScribblePrompt/checkpoints/*.pt
 
 # Portable model archives are generated on demand and transferred separately
 *.model.zip

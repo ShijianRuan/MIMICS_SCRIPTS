@@ -17,7 +17,9 @@ from runtime_py35 import dataset_manifest
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "nninteractive_finetune_config.json"
-TERMINAL_STATUSES = {"completed", "failed", "cancelled", "paused"}
+TERMINAL_STATUSES = {
+    "completed", "failed", "cancelled", "paused", "abandoned"
+}
 ACTIVE_STATUSES = {
     "created",
     "validating_cases",
@@ -662,9 +664,18 @@ def status_summary(status: dict[str, Any]) -> str:
     if phase == "uploading":
         if str(status.get("phase") or "") == "remote_dataset_cache_hit":
             return "Verified training data reused on the remote server"
-        return "Uploading training data, {}%".format(
+        text = "Uploading training data, {}%".format(
             int(status.get("transfer_percent") or 0)
         )
+        speed = float(status.get("transfer_bytes_per_second") or 0.0)
+        eta = status.get("transfer_eta_seconds")
+        if speed > 0:
+            text += " at {:.1f} MiB/s".format(speed / float(1024 ** 2))
+        if eta is not None:
+            text += ", about {} min remaining".format(
+                max(1, int(round(float(eta) / 60.0)))
+            )
+        return text
     if phase == "starting_remote":
         return "Starting the remote GPU container"
     if phase == "reconnecting_remote":
@@ -678,9 +689,18 @@ def status_summary(status: dict[str, Any]) -> str:
     if phase in {"remote_training_completed", "finalizing_remote"}:
         return "Remote training completed; preparing the model for local use"
     if phase == "downloading":
-        return "Downloading the trained model, {}%".format(
+        text = "Downloading the trained model, {}%".format(
             int(status.get("transfer_percent") or 0)
         )
+        speed = float(status.get("transfer_bytes_per_second") or 0.0)
+        eta = status.get("transfer_eta_seconds")
+        if speed > 0:
+            text += " at {:.1f} MiB/s".format(speed / float(1024 ** 2))
+        if eta is not None:
+            text += ", about {} min remaining".format(
+                max(1, int(round(float(eta) / 60.0)))
+            )
+        return text
     mapping = {
         "created": "Preparing training",
         "validating_cases": "Checking selected cases",
@@ -688,6 +708,7 @@ def status_summary(status: dict[str, Any]) -> str:
         "completed": "Training completed",
         "paused": "Training paused; GPU released",
         "cancelled": "Training stopped",
+        "abandoned": "Local monitoring ended; remote state remains unknown",
         "failed": "Training needs attention",
         "pausing": "Pausing training and releasing the GPU",
         "stopping": "Stopping training",

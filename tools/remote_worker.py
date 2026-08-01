@@ -16,6 +16,65 @@ from typing import Any
 
 
 APP_ROOT = Path(os.environ.get("MIMICS_AI_APP_ROOT") or "/app").resolve()
+REMOTE_LOG_MAX_BYTES = max(
+    1024 * 1024,
+    int(os.environ.get("MIMICS_REMOTE_LOG_MAX_BYTES") or 32 * 1024 * 1024),
+)
+REMOTE_LOG_BACKUP_COUNT = max(
+    1, min(10, int(os.environ.get("MIMICS_REMOTE_LOG_BACKUP_COUNT") or 3))
+)
+
+
+class _RotatingBinaryLog:
+    """Bound remote subprocess output while preserving recent diagnostics."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.handle = self.path.open("ab")
+
+    def _rotate(self) -> None:
+        self.handle.close()
+        oldest = self.path.with_name(
+            "{}.{}".format(self.path.name, REMOTE_LOG_BACKUP_COUNT)
+        )
+        try:
+            oldest.unlink()
+        except FileNotFoundError:
+            pass
+        for index in range(REMOTE_LOG_BACKUP_COUNT - 1, 0, -1):
+            source = self.path.with_name("{}.{}".format(self.path.name, index))
+            target = self.path.with_name(
+                "{}.{}".format(self.path.name, index + 1)
+            )
+            if source.exists():
+                os.replace(str(source), str(target))
+        if self.path.exists():
+            os.replace(str(self.path), str(self.path) + ".1")
+        self.handle = self.path.open("ab")
+
+    def write(self, data: bytes) -> None:
+        if not data:
+            return
+        try:
+            current = int(self.handle.tell())
+        except Exception:
+            current = int(self.path.stat().st_size) if self.path.exists() else 0
+        if current > 0 and current + len(data) > REMOTE_LOG_MAX_BYTES:
+            self._rotate()
+        self.handle.write(data)
+        self.handle.flush()
+
+    def close(self) -> None:
+        self.handle.close()
+
+
+def _append_worker_log(job_dir: Path, text: str) -> None:
+    writer = _RotatingBinaryLog(job_dir / "remote_worker.log")
+    try:
+        writer.write(str(text).encode("utf-8", "replace"))
+    finally:
+        writer.close()
 
 
 def _read_json(path: Path, default: Any = None) -> Any:
@@ -54,17 +113,27 @@ def _run(command: list[str], job_dir: Path) -> int:
         worker_pid=os.getpid(),
         log_path="/job/remote_worker.log",
     )
-    with log_path.open("ab") as log:
+    log = _RotatingBinaryLog(log_path)
+    try:
         process = subprocess.Popen(
             command,
             cwd=str(APP_ROOT),
             stdin=subprocess.DEVNULL,
-            stdout=log,
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             env=dict(os.environ),
+            bufsize=0,
         )
         _worker_status(job_dir, child_pid=process.pid)
+        assert process.stdout is not None
+        while True:
+            chunk = process.stdout.read(1024 * 1024)
+            if not chunk:
+                break
+            log.write(chunk)
         returncode = int(process.wait())
+    finally:
+        log.close()
     _worker_status(
         job_dir,
         status="completed" if returncode == 0 else "failed",
@@ -195,14 +264,36 @@ def run_nninteractive(job_dir: Path, request: dict[str, Any]) -> int:
             "updated_at_epoch": time.time(),
         },
     )
+
+
+def run_nnunet(job_dir: Path, request: dict[str, Any]) -> int:
+    pipeline = APP_ROOT / "tools" / "nnunet_pipeline.py"
+    if not pipeline.is_file():
+        raise RuntimeError("nnU-Net pipeline is missing from the runtime image.")
+    pipeline_job = job_dir / "pipeline_job"
+    pipeline_job.mkdir(parents=True, exist_ok=True)
+    pipeline_request = request.get("pipeline_request")
+    if not isinstance(pipeline_request, dict):
+        raise RuntimeError("Remote nnU-Net request is missing.")
+    _write_json(pipeline_job / "request.json", pipeline_request)
+    _write_json(
+        pipeline_job / "control.json",
+        {"action": "run", "updated_at_epoch": time.time()},
+    )
+    _write_json(
+        pipeline_job / "status.json",
+        {
+            "schema_version": "mimics_nnunet_job.v1",
+            "job_id": str(pipeline_request.get("job_id") or job_dir.name),
+            "status": "created",
+            "phase": "created",
+            "created_at_epoch": time.time(),
+            "updated_at_epoch": time.time(),
+        },
+    )
+    command = "infer" if str(pipeline_request.get("operation")) == "infer" else "run"
     return _run(
-        [
-            sys.executable,
-            str(pipeline),
-            "run",
-            "--job-dir",
-            str(pipeline_job),
-        ],
+        [sys.executable, str(pipeline), command, "--job-dir", str(pipeline_job)],
         job_dir,
     )
 
@@ -221,7 +312,34 @@ def preflight(models_dir: Path) -> int:
         "nninteractive_model": str(
             models_dir / "nninteractive" / "nnInteractive_v1.0"
         ),
+        "offline_environment": {
+            key: str(os.environ.get(key) or "")
+            for key in (
+                "HF_HUB_OFFLINE",
+                "TRANSFORMERS_OFFLINE",
+                "HF_DATASETS_OFFLINE",
+                "WANDB_MODE",
+            )
+        },
     }
+    result["offline_mode"] = bool(
+        result["offline_environment"].get("HF_HUB_OFFLINE") == "1"
+        and result["offline_environment"].get("TRANSFORMERS_OFFLINE") == "1"
+        and result["offline_environment"].get("HF_DATASETS_OFFLINE") == "1"
+        and result["offline_environment"].get("WANDB_MODE") == "offline"
+    )
+    result["dinov3_default_model"] = bool(
+        (models_dir / "dinov3" / "dinov3-vits16" / "model.onnx").is_file()
+    )
+    nninteractive_root = models_dir / "nninteractive" / "nnInteractive_v1.0"
+    result["nninteractive_weights"] = bool(
+        nninteractive_root.is_dir()
+        and any(
+            path.is_file()
+            for pattern in ("*.pth", "*.safetensors")
+            for path in nninteractive_root.rglob(pattern)
+        )
+    )
     try:
         import nnInteractive  # noqa: F401
         import nninteractive_finetune  # noqa: F401
@@ -240,10 +358,34 @@ def preflight(models_dir: Path) -> int:
         result["onnx_providers"] = []
         result["dinov3_import"] = False
         result["onnx_error"] = str(exc)
+    try:
+        import nnunetv2  # noqa: F401
+
+        trainer_root = (
+            APP_ROOT
+            / "external"
+            / "nnunet_segmentation_workflow"
+            / "trainers"
+        )
+        if str(trainer_root) not in sys.path:
+            sys.path.insert(0, str(trainer_root))
+        from MimicsNNUNetTrainer import MimicsNNUNetTrainer  # noqa: F401
+
+        result["nnunet_import"] = True
+        result["nnunet_custom_trainer"] = True
+    except Exception as exc:
+        result["nnunet_import"] = False
+        result["nnunet_custom_trainer"] = False
+        result["nnunet_error"] = str(exc)
     result["ok"] = bool(
         result["ok"]
+        and result.get("offline_mode")
+        and result.get("dinov3_default_model")
+        and result.get("nninteractive_weights")
         and result.get("nninteractive_import")
         and result.get("dinov3_import")
+        and result.get("nnunet_import")
+        and result.get("nnunet_custom_trainer")
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result["ok"] else 2
@@ -276,6 +418,8 @@ def main() -> int:
                 return run_dino(job_dir, request)
             if kind == "nninteractive_train":
                 return run_nninteractive(job_dir, request)
+            if kind in {"nnunet_train", "nnunet_infer"}:
+                return run_nnunet(job_dir, request)
             raise RuntimeError("Unsupported remote job kind: {}".format(kind))
     except Exception as exc:
         _worker_status(
@@ -285,10 +429,7 @@ def main() -> int:
             traceback=traceback.format_exc(),
             completed_at_epoch=time.time(),
         )
-        with (job_dir / "remote_worker.log").open(
-            "a", encoding="utf-8", errors="replace"
-        ) as handle:
-            handle.write(traceback.format_exc())
+        _append_worker_log(job_dir, traceback.format_exc())
         return 1
 
 

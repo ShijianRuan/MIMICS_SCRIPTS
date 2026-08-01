@@ -19,6 +19,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import numpy as np
@@ -1140,8 +1141,46 @@ def inverse_buffer_mapping(array: np.ndarray, axes: list[int], flips: list[bool]
 
 def write_mask_nifti(array: np.ndarray, affine: np.ndarray, output_path: str) -> None:
     import nibabel as nib
-    nii = nib.Nifti1Image(array.astype(np.uint8), affine)
-    nib.save(nii, output_path)
+
+    destination = os.path.abspath(output_path)
+    parent = os.path.dirname(destination)
+    os.makedirs(parent, exist_ok=True)
+    suffix = ".nii.gz" if destination.lower().endswith(".nii.gz") else ".nii"
+    fd, temporary = tempfile.mkstemp(
+        prefix="._mimics_mask_", suffix=suffix, dir=parent
+    )
+    os.close(fd)
+    try:
+        nii = nib.Nifti1Image(array.astype(np.uint8), affine)
+        nii.set_qform(np.asarray(affine, dtype=float), code=1)
+        nii.set_sform(np.asarray(affine, dtype=float), code=1)
+        nib.save(nii, temporary)
+        try:
+            with open(temporary, "rb") as handle:
+                os.fsync(handle.fileno())
+        except Exception:
+            pass
+
+        last_error = None
+        for attempt in range(12):
+            try:
+                os.replace(temporary, destination)
+                return
+            except OSError as exc:
+                last_error = exc
+                time.sleep(min(0.2, 0.02 * (attempt + 1)))
+        raise RuntimeError(
+            "Could not publish exported Mask '{}'. The existing file, if "
+            "present, was left unchanged. Error: {}".format(
+                destination, last_error
+            )
+        )
+    finally:
+        try:
+            if os.path.isfile(temporary):
+                os.remove(temporary)
+        except OSError:
+            pass
 
 
 def _force_nifti_affine(path: Path, target_affine: np.ndarray) -> None:
@@ -1762,6 +1801,9 @@ def do_prepare_masks_for_grid(params: dict) -> dict:
                 output_path,
             )
             row["name"] = name
+            row["label_value"] = (
+                int(nonzero_labels[0]) if len(nonzero_labels) == 1 else 0
+            )
             row["mask_path"] = str(Path(mask_path).resolve())
             results.append(row)
     source_matrix = None
