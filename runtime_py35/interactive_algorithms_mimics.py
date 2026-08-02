@@ -596,9 +596,10 @@ def _prepare_request(action, image, target, config, job_dir, scribbles=None, par
                     "max_roi_voxels": int(section.get("max_roi_voxels", 10000000)),
                     "workspace_margin_mm": float(section.get("workspace_margin_mm", 40.0)),
                     "gpu_lock_timeout_seconds": float(section.get("gpu_lock_timeout_seconds", 300)),
-                    "display_interval_seconds": float(section.get("display_interval_seconds", 0.12)),
+                    "display_interval_seconds": float(section.get("display_interval_seconds", 0.06)),
                     "iterations_per_cycle": int(section.get("iterations_per_cycle", 1)),
-                    "auto_run": bool(section.get("auto_run", True)) and initial_foreground > 0,
+                    "ffd": dict(section.get("ffd") or {}),
+                    "convergence": dict(section.get("convergence") or {}),
                     "parameters": dict(section.get("parameters") or {}),
                 },
             }
@@ -838,7 +839,12 @@ def _apply_completed(monitor, state):
     )
     _update_gui()
     apply_started = time.time()
-    nnm._set_mask_from_u8(target, path, shape)
+    nnm._set_mask_from_u8(
+        target,
+        path,
+        shape,
+        "Apply {0} Result".format(monitor.get("display_name") or "Interactive Algorithm"),
+    )
     try:
         target.visible = True
         target.selected = True

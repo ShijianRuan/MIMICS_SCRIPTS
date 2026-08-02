@@ -169,8 +169,7 @@ back to opening projects synchronously in the annotation window.
 When background Mimics is unavailable:
 
 1. Configure `MIMICS_BACKGROUND_EXE`, or
-2. Export labels separately and turn off **Refresh labels from saved .mcs
-   before training**.
+2. Export labels separately and turn off **Refresh labels from saved .mcs before training**.
 
 Current-project mask export remains available through **Export Masks** and is
 split into timer-driven steps so GUI updates can occur between mask-buffer
@@ -211,11 +210,37 @@ level-set scaling, and volume-change safety limit.
 IGAC opens a non-modal PySide6 workspace and evolves a spacing-aware 3D local
 Gaussian distribution fitting contour in the external Python environment. The
 Mimics image and selected Mask are copied once when the entry starts. All live
-interaction remains outside Mimics; the project changes only after **Apply to
-Mimics**. The shared `gpu.lock` prevents IGAC from competing with training or
+interaction remains outside Mimics; the project changes only after **Apply to Mimics**.
+The shared `gpu.lock` prevents IGAC from competing with training or
 nnInteractive for CUDA memory. `workspace_margin_mm` bounds work around a
 non-empty Mask, while `max_roi_voxels` and `max_cpu_roi_voxels` prevent an
 unresponsive or out-of-memory workspace.
+
+IGAC starts paused. The default `Correct` gesture converts clicks and strokes
+outside the current Mask to Add guidance and those inside the Mask to Barrier
+guidance. A stroke crossing from inside to outside is restored and replayed as
+Add; the opposite crossing is replayed as Barrier. The first crossing locks the
+meaning for the remainder of the stroke. Explicit `Add`, `Remove`, and
+`Clear` remain available as overrides. The translated guidance uses the same 3D
+level-set operations while LGDF fitting runs in small external worker cycles.
+Boundary movement is a separate `Boundary drag (FFD)` tool and never
+implicitly replaces a correction stroke. IGAC `ffd` keys:
+
+- `boundary_capture_mm` (default `3.0`): maximum physical distance from the
+  pointer to a displayed Mask boundary point when starting a pull.
+- `influence_radius_mm` (default `18.0`): initial physical radius of the local
+  3D cubic B-spline support. The UI exposes this value.
+- `maximum_drag_ratio` (default `0.65`): maximum drag/support ratio. A larger
+  drag expands support automatically instead of accepting a folded field.
+- `anchor_radius_mm` (default `0.8`): small inside/outside pins around the
+  target boundary used while LGDF settles after release.
+
+Static image planes are cached; live frames update only Mask/guidance overlays.
+`convergence` controls the visible-Mask stability test and the per-action
+time/iteration safety ceilings. **Stop** keeps the current preview,
+**Undo last** restores the exact pre-action level set and constraints, and
+**Reset** restores the Mask captured when the workspace opened. No gradient
+peak snapping or direct deformation of the Mask is used.
 
 ScribblePrompt uses the official UNet checkpoint at
 `external/ScribblePrompt/checkpoints/ScribblePrompt_unet_v1_nf192_res128.pt`.

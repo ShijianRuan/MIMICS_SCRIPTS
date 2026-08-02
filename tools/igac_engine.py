@@ -17,12 +17,16 @@ from typing import Any, Iterable
 
 import numpy as np
 
+from tools.local_bspline_ffd import warp_signed_distance
+
 
 ORIENTATIONS = ("axial", "coronal", "sagittal")
 
 
 def intensity_range(values: np.ndarray, maximum_samples: int = 2_000_000) -> tuple[float, float]:
-    array = np.asarray(values, dtype=np.float32)
+    # Preserve memmap laziness: converting the complete volume to float32 here
+    # doubled startup I/O and memory before the ROI was even known.
+    array = np.asarray(values)
     stride = max(1, int(math.ceil(float(array.size) / float(maximum_samples))))
     sample = np.asarray(array.reshape(-1)[::stride], dtype=np.float32)
     finite = sample[np.isfinite(sample)]
@@ -79,15 +83,31 @@ def orientation_extent(shape_xyz: Iterable[int], orientation: str) -> tuple[int,
     raise ValueError("Unknown orientation: {}".format(orientation))
 
 
+def _mask_bounds(mask_xyz: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+    """Return exclusive 3D foreground bounds without allocating Nx3 indices."""
+    mask = np.asarray(mask_xyz, dtype=bool)
+    minimum = []
+    maximum = []
+    for axis in range(3):
+        reduced_axes = tuple(value for value in range(3) if value != axis)
+        occupied = np.flatnonzero(np.any(mask, axis=reduced_axes))
+        if occupied.size == 0:
+            return None
+        minimum.append(int(occupied[0]))
+        maximum.append(int(occupied[-1]) + 1)
+    return np.asarray(minimum, dtype=np.int64), np.asarray(maximum, dtype=np.int64)
+
+
 def roi_slices(
     mask_xyz: np.ndarray,
     spacing_xyz: tuple[float, float, float],
     margin_mm: float,
     max_voxels: int,
+    bounds: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> tuple[slice, slice, slice]:
     shape = tuple(int(value) for value in mask_xyz.shape)
-    foreground = np.argwhere(mask_xyz)
-    if foreground.size == 0:
+    bounds = bounds if bounds is not None else _mask_bounds(mask_xyz)
+    if bounds is None:
         voxel_count = int(np.prod(shape))
         if voxel_count > int(max_voxels):
             raise RuntimeError(
@@ -96,8 +116,7 @@ def roi_slices(
                 .format(voxel_count)
             )
         return tuple(slice(0, value) for value in shape)  # type: ignore[return-value]
-    minimum = foreground.min(axis=0)
-    maximum = foreground.max(axis=0) + 1
+    minimum, maximum = bounds
     result = []
     for axis in range(3):
         margin = max(2, int(math.ceil(float(margin_mm) / float(spacing_xyz[axis]))))
@@ -147,6 +166,58 @@ class IGACParameters:
         )
 
 
+@dataclass
+class IGACConvergenceMonitor:
+    """Stop interactive evolution after the visible Mask becomes stable."""
+
+    minimum_iterations: int = 3
+    maximum_iterations: int = 80
+    stable_cycles_required: int = 3
+    changed_voxel_ratio: float = 1.0e-5
+    maximum_seconds: float = 15.0
+    stable_cycles: int = 0
+
+    @classmethod
+    def from_mapping(cls, values: dict[str, Any] | None) -> "IGACConvergenceMonitor":
+        source = values or {}
+        minimum_iterations = max(1, int(source.get("minimum_iterations", 3)))
+        return cls(
+            minimum_iterations=minimum_iterations,
+            maximum_iterations=max(
+                minimum_iterations,
+                int(source.get("maximum_iterations", 80)),
+            ),
+            stable_cycles_required=max(1, int(source.get("stable_cycles", 3))),
+            changed_voxel_ratio=max(0.0, float(source.get("changed_voxel_ratio", 1.0e-5))),
+            maximum_seconds=max(0.1, float(source.get("maximum_seconds", 15.0))),
+        )
+
+    def reset(self) -> None:
+        self.stable_cycles = 0
+
+    def observe(
+        self,
+        *,
+        iterations: int,
+        elapsed_seconds: float,
+        changed_voxel_ratio: float,
+    ) -> str | None:
+        if float(changed_voxel_ratio) <= self.changed_voxel_ratio:
+            self.stable_cycles += 1
+        else:
+            self.stable_cycles = 0
+        if (
+            int(iterations) >= self.minimum_iterations
+            and self.stable_cycles >= self.stable_cycles_required
+        ):
+            return "converged"
+        if int(iterations) >= self.maximum_iterations:
+            return "iteration_limit"
+        if float(elapsed_seconds) >= self.maximum_seconds:
+            return "time_limit"
+        return None
+
+
 class IGACEngine:
     """Own the 3D level set, guidance constraints, and display-plane mapping."""
 
@@ -183,11 +254,10 @@ class IGACEngine:
             raise RuntimeError("IGAC requires three positive voxel spacing values.")
         self.parameters = IGACParameters.from_mapping(parameters)
         self.initial_mask_xyz = np.asarray(initial_mask_xyz, dtype=bool).copy()
-        foreground = np.argwhere(self.initial_mask_xyz)
+        bounds = _mask_bounds(self.initial_mask_xyz)
         self.initial_bbox_xyz = None
-        if foreground.size:
-            minimum = foreground.min(axis=0)
-            maximum = foreground.max(axis=0) + 1
+        if bounds is not None:
+            minimum, maximum = bounds
             self.initial_bbox_xyz = [
                 [int(minimum[axis]), int(maximum[axis])] for axis in range(3)
             ]
@@ -200,6 +270,7 @@ class IGACEngine:
             self.spacing_xyz,
             float(workspace_margin_mm),
             int(max_roi_voxels),
+            bounds=bounds,
         )
         self.roi_shape_xyz = tuple(item.stop - item.start for item in self.roi)
         self.roi_offset_xyz = tuple(int(item.start) for item in self.roi)
@@ -229,6 +300,8 @@ class IGACEngine:
         self.add_constraint = torch.zeros_like(self.phi, dtype=torch.bool)
         self.barrier_constraint = torch.zeros_like(self.phi, dtype=torch.bool)
         self.iteration = 0
+        self.last_step_changed_voxels = 0
+        self.last_step_changed_ratio = 0.0
         self._kernel_signature: tuple[float, tuple[float, float, float]] | None = None
         self._kernels: list[Any] = []
         self._refresh_gaussian_cache()
@@ -373,6 +446,7 @@ class IGACEngine:
         p = self.parameters
         self._refresh_gaussian_cache()
         with torch.inference_mode():
+            before = self.phi < 0
             for _ in range(max(1, int(iterations))):
                 # phi < 0 is foreground.  This Heaviside therefore represents
                 # foreground probability and has a positive Dirac magnitude.
@@ -421,6 +495,11 @@ class IGACEngine:
                 self.phi.clamp_(-p.phi_limit, p.phi_limit)
                 self._apply_constraints()
                 self.iteration += 1
+            changed = torch.count_nonzero(before != (self.phi < 0))
+            self.last_step_changed_voxels = int(changed.item())
+            self.last_step_changed_ratio = (
+                float(self.last_step_changed_voxels) / float(max(1, self.roi_voxels))
+            )
         return self.iteration
 
     def _apply_constraints(self) -> None:
@@ -437,6 +516,32 @@ class IGACEngine:
             self.add_constraint.zero_()
             self.barrier_constraint.zero_()
         self.iteration = 0
+        self.last_step_changed_voxels = 0
+        self.last_step_changed_ratio = 0.0
+
+    def capture_state(self) -> dict[str, Any]:
+        """Capture one exact device-local undo point for an interactive action."""
+        with self.torch.inference_mode():
+            return {
+                "phi": self.phi.clone(),
+                "add_constraint": self.add_constraint.clone(),
+                "barrier_constraint": self.barrier_constraint.clone(),
+                "iteration": int(self.iteration),
+            }
+
+    def restore_state(self, state: dict[str, Any]) -> None:
+        required = ("phi", "add_constraint", "barrier_constraint", "iteration")
+        if not isinstance(state, dict) or any(key not in state for key in required):
+            raise ValueError("The IGAC undo state is incomplete.")
+        if tuple(state["phi"].shape) != tuple(self.phi.shape):
+            raise ValueError("The IGAC undo state does not match this workspace.")
+        with self.torch.inference_mode():
+            self.phi.copy_(state["phi"])
+            self.add_constraint.copy_(state["add_constraint"])
+            self.barrier_constraint.copy_(state["barrier_constraint"])
+        self.iteration = max(0, int(state["iteration"]))
+        self.last_step_changed_voxels = 0
+        self.last_step_changed_ratio = 0.0
 
     def apply_brush(
         self,
@@ -549,6 +654,171 @@ class IGACEngine:
                 raise ValueError("Unknown IGAC brush mode: {}".format(mode))
         return True
 
+    def _sample_phi_zyx(self, phi: Any, point_zyx: Iterable[float]) -> float:
+        indices = []
+        for value, size in zip(point_zyx, reversed(self.roi_shape_xyz)):
+            indices.append(max(0, min(int(size) - 1, int(round(float(value))))))
+        with self.torch.inference_mode():
+            return float(phi[(0, 0) + tuple(indices)].item())
+
+    def _boundary_pull_anchors(
+        self,
+        *,
+        base_phi: Any,
+        start_zyx: tuple[float, float, float],
+        end_zyx: tuple[float, float, float],
+        anchor_radius_mm: float,
+    ) -> tuple[tuple[float, float, float], tuple[float, float, float], float] | None:
+        start_mm = np.asarray(
+            [value * spacing for value, spacing in zip(start_zyx, self.spacing_zyx)],
+            dtype=np.float64,
+        )
+        end_mm = np.asarray(
+            [value * spacing for value, spacing in zip(end_zyx, self.spacing_zyx)],
+            dtype=np.float64,
+        )
+        direction = end_mm - start_mm
+        distance = float(np.linalg.norm(direction))
+        if not math.isfinite(distance) or distance < 1.0e-4:
+            return None
+        direction /= distance
+        probe_mm = max(min(self.spacing_zyx) * 1.25, min(2.0, distance * 0.25))
+        plus_start = tuple(
+            (start_mm[axis] + direction[axis] * probe_mm) / self.spacing_zyx[axis]
+            for axis in range(3)
+        )
+        minus_start = tuple(
+            (start_mm[axis] - direction[axis] * probe_mm) / self.spacing_zyx[axis]
+            for axis in range(3)
+        )
+        plus_inside = self._sample_phi_zyx(base_phi, plus_start) < 0.0
+        minus_inside = self._sample_phi_zyx(base_phi, minus_start) < 0.0
+        if plus_inside == minus_inside:
+            # A boundary can run almost tangent to the drag direction. The end
+            # point still receives the FFD displacement, but pinning an
+            # arbitrary inside/outside direction would damage the contour.
+            return None
+        inside_sign = 1.0 if plus_inside else -1.0
+        offset_mm = max(min(self.spacing_zyx) * 0.75, float(anchor_radius_mm) * 0.75)
+        inside_mm = end_mm + direction * inside_sign * offset_mm
+        outside_mm = end_mm - direction * inside_sign * offset_mm
+        inside_zyx = tuple(
+            inside_mm[axis] / self.spacing_zyx[axis] for axis in range(3)
+        )
+        outside_zyx = tuple(
+            outside_mm[axis] / self.spacing_zyx[axis] for axis in range(3)
+        )
+        return inside_zyx, outside_zyx, max(0.5, float(anchor_radius_mm))
+
+    def _apply_constraint_sphere_zyx(
+        self,
+        mode: str,
+        center_zyx: tuple[float, float, float],
+        radius_mm: float,
+    ) -> bool:
+        axes = []
+        for center, spacing, size in zip(
+            center_zyx,
+            self.spacing_zyx,
+            reversed(self.roi_shape_xyz),
+        ):
+            extent = max(1, int(math.ceil(float(radius_mm) / float(spacing))))
+            lower = max(0, int(math.floor(center)) - extent)
+            upper = min(int(size), int(math.floor(center)) + extent + 1)
+            axes.append((lower, upper, float(spacing)))
+        if any(upper <= lower for lower, upper, _spacing in axes):
+            return False
+        grids = self.torch.meshgrid(
+            *[
+                self.torch.arange(lower, upper, device=self.device, dtype=self.image.dtype)
+                for lower, upper, _spacing in axes
+            ],
+            indexing="ij",
+        )
+        distance_sq = self.torch.zeros_like(grids[0])
+        for grid, center, (_lower, _upper, spacing) in zip(grids, center_zyx, axes):
+            distance_sq = distance_sq + ((grid - float(center)) * spacing).square()
+        sphere = distance_sq <= float(radius_mm) ** 2
+        tensor_slice = (0, 0) + tuple(
+            slice(lower, upper) for lower, upper, _spacing in axes
+        )
+        if str(mode) == "add":
+            self.add_constraint[tensor_slice] |= sphere
+            self.barrier_constraint[tensor_slice] &= ~sphere
+        elif str(mode) == "barrier":
+            self.barrier_constraint[tensor_slice] |= sphere
+            self.add_constraint[tensor_slice] &= ~sphere
+        else:
+            raise ValueError("Unknown boundary pull anchor mode: {}".format(mode))
+        return True
+
+    def apply_boundary_pull(
+        self,
+        *,
+        base_state: dict[str, Any],
+        orientation: str,
+        slice_index: int,
+        start_u: float,
+        start_v: float,
+        end_u: float,
+        end_v: float,
+        influence_radius_mm: float,
+        maximum_drag_ratio: float = 0.65,
+        anchor_radius_mm: float = 0.8,
+    ) -> dict[str, float] | None:
+        """Move one captured 2D contour point with a local 3D B-spline FFD.
+
+        Every preview is recomputed from ``base_state`` (the mouse-down
+        snapshot), matching a boundary-point drag rather than accumulating a
+        sequence of brush strokes. The displacement lies in the displayed
+        plane, while its compact support deforms neighbouring slices in 3D.
+        """
+        if not isinstance(base_state, dict) or "phi" not in base_state:
+            raise ValueError("Boundary pull requires the mouse-down IGAC state.")
+        self.restore_state(base_state)
+        start_xyz = display_to_xyz(orientation, slice_index, start_u, start_v)
+        end_xyz = display_to_xyz(orientation, slice_index, end_u, end_v)
+        local_start_xyz = tuple(
+            start_xyz[axis] - self.roi_offset_xyz[axis] for axis in range(3)
+        )
+        local_end_xyz = tuple(
+            end_xyz[axis] - self.roi_offset_xyz[axis] for axis in range(3)
+        )
+        start_zyx = tuple(reversed(local_start_xyz))
+        end_zyx = tuple(reversed(local_end_xyz))
+        result = warp_signed_distance(
+            torch=self.torch,
+            functional=self.functional,
+            base_phi=base_state["phi"],
+            spacing_zyx=self.spacing_zyx,
+            start_zyx=start_zyx,
+            end_zyx=end_zyx,
+            influence_radius_mm=float(influence_radius_mm),
+            maximum_drag_ratio=float(maximum_drag_ratio),
+        )
+        if result is None:
+            return None
+        tensor_slice = (slice(None), slice(None)) + result.slices_zyx
+        with self.torch.inference_mode():
+            self.phi[tensor_slice].copy_(result.values)
+            anchors = self._boundary_pull_anchors(
+                base_phi=base_state["phi"],
+                start_zyx=start_zyx,
+                end_zyx=end_zyx,
+                anchor_radius_mm=float(anchor_radius_mm),
+            )
+            if anchors is not None:
+                inside, outside, radius = anchors
+                self._apply_constraint_sphere_zyx("add", inside, radius)
+                self._apply_constraint_sphere_zyx("barrier", outside, radius)
+            self._apply_constraints()
+        self.last_step_changed_voxels = 0
+        self.last_step_changed_ratio = 0.0
+        return {
+            "drag_distance_mm": float(result.drag_distance_mm),
+            "influence_radius_mm": float(result.influence_radius_mm),
+        }
+
     def _roi_mask_xyz(self) -> np.ndarray:
         with self.torch.inference_mode():
             mask_zyx = (self.phi[0, 0] < 0).to("cpu").numpy()
@@ -600,19 +870,15 @@ class IGACEngine:
             raise ValueError("Unknown orientation: {}".format(orientation))
         return output
 
-    def frame(self, orientation: str, index: int) -> dict[str, np.ndarray]:
-        width, height, depth = orientation_extent(self.shape_xyz, orientation)
+    def frame(
+        self,
+        orientation: str,
+        index: int,
+        *,
+        include_image: bool = True,
+    ) -> dict[str, np.ndarray]:
+        _width, _height, depth = orientation_extent(self.shape_xyz, orientation)
         safe_index = max(0, min(depth - 1, int(index)))
-        raw_plane = np.asarray(
-            plane_from_xyz(self.image_source_xyz, orientation, safe_index),
-            dtype=np.float32,
-        )
-        image = np.clip(
-            (raw_plane - self.display_low) / (self.display_high - self.display_low),
-            0.0,
-            1.0,
-        )
-        image[~np.isfinite(image)] = 0.0
         base_mask = plane_from_xyz(self.initial_mask_xyz, orientation, safe_index)
         mask_plane = self._roi_display_plane(self.phi < 0, orientation, safe_index)
         mask = self._compose_roi_plane(base_mask, mask_plane, orientation, safe_index)
@@ -621,7 +887,21 @@ class IGACEngine:
         barrier_plane = self._roi_display_plane(self.barrier_constraint, orientation, safe_index)
         add = self._compose_roi_plane(empty, add_plane, orientation, safe_index)
         barrier = self._compose_roi_plane(empty, barrier_plane, orientation, safe_index)
-        return {"image": image, "mask": mask, "add": add, "barrier": barrier}
+        frame = {"mask": mask, "add": add, "barrier": barrier}
+        if include_image:
+            raw_plane = np.asarray(
+                plane_from_xyz(self.image_source_xyz, orientation, safe_index),
+                dtype=np.float32,
+            )
+            image = np.clip(
+                (raw_plane - self.display_low) / (self.display_high - self.display_low),
+                0.0,
+                1.0,
+            )
+            image[~np.isfinite(image)] = 0.0
+            frame["image"] = image
+            frame["raw_image"] = raw_plane
+        return frame
 
 
 def load_raw_inputs(request: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
