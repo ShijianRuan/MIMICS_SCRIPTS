@@ -4923,6 +4923,7 @@ class TestNewFeatures(unittest.TestCase):
             "keep_materialized_dataset": False,
             "mcs_output_dir": os.path.join(self.tmp, "saved_projects"),
             "mask_names": "liver,liver_seg",
+            "mirror_tta": True,
         }
         launch = ui.prepare_training_launch(context, options, run_id="train_test")
         cmd = launch["cmd"]
@@ -4940,6 +4941,7 @@ class TestNewFeatures(unittest.TestCase):
         strategy_payload = json.loads(cmd[cmd.index("--strategy-options-json") + 1])
         self.assertEqual(strategy_payload["sampling_mode"], "adaptive")
         self.assertEqual(strategy_payload["loss_type"], "auto")
+        self.assertTrue(strategy_payload["mirror_tta"])
         self.assertEqual("train_test", launch["run_id"])
         self.assertEqual("launching", launch["job_payload"]["status"])
         self.assertEqual("external_advanced_ui", launch["job_payload"]["launched_by"])
@@ -5480,6 +5482,8 @@ class TestNewFeatures(unittest.TestCase):
         self.assertEqual(generated["model"]["input_normalization"], "imagenet")
         self.assertEqual(generated["model"]["image_mean"], [0.485, 0.456, 0.406])
         self.assertEqual(generated["model"]["image_std"], [0.229, 0.224, 0.225])
+        self.assertEqual(generated["training"]["early_stopping"]["min_epochs"], 3)
+        self.assertEqual(generated["training"]["early_stopping"]["patience"], 0)
 
     def test_dinov3_imagenet_normalization_helper(self):
         """Backbone helper should apply processor/ImageNet mean and std to [0, 1] RGB tensors."""
@@ -7705,16 +7709,18 @@ class TestNewFeatures(unittest.TestCase):
             },
         }
         patch = strategies.compile_strategy("patch_focused", fingerprint, policy, {
-            "channel_policy": "2_5d", "slice_axis": "coronal",
+            "channel_policy": "2_5d", "slice_axis": "coronal", "mirror_tta": True,
         })
         self.assertEqual(patch["model"]["slice_axis"], "coronal")
         self.assertEqual(patch["model"]["channel_policy"], "2_5d")
         self.assertEqual(patch["loss"]["type"], "dice_focal")
         self.assertEqual(patch["data"]["patch"]["size_zyx"], [64, 192, 192])
         self.assertTrue(patch["data"]["patch"]["inference_sliding_window"])
+        self.assertEqual(patch["inference"]["tta_axes"], [[0], [2], [0, 2]])
 
         full = strategies.compile_strategy("full_volume", fingerprint, policy)
         self.assertFalse(full["data"]["patch"]["enabled"])
+        self.assertEqual(full["inference"]["tta_axes"], [])
 
     def test_mimics_training_option_matrix_reaches_backend_config(self):
         """Every public architecture family survives UI, CLI, and config generation."""
@@ -7795,6 +7801,10 @@ class TestNewFeatures(unittest.TestCase):
                             generated["decoder"]["architecture_family"],
                         )
                         self.assertEqual("fit_pad", generated["data"]["resize_mode"])
+                        self.assertEqual(
+                            compiled["inference"]["tta_axes"],
+                            generated["inference"]["tta_axes"],
+                        )
                         count += 1
         self.assertEqual(len(strategies.strategy_ids()) * 5 * 2, count)
 

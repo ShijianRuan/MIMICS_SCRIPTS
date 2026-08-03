@@ -93,6 +93,7 @@ class CachedFeatureSliceTrainer(Trainer3D):
 
     def _train_epoch(self, epoch: int, global_step_start: int):
         del global_step_start
+        self._set_epoch_lr(epoch - 1)
         self.model.backbone.eval()
         self.model.decoder_3d.train()
         total_loss = 0.0
@@ -137,7 +138,6 @@ class CachedFeatureSliceTrainer(Trainer3D):
 
         if not processed:
             raise RuntimeError("Cached slice training produced no complete batches")
-        self._set_epoch_lr(epoch - 1)
         return {
             "loss": total_loss / processed,
             "ce_loss": total_ce / processed,

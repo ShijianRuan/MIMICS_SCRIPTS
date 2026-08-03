@@ -1687,6 +1687,89 @@ def test_spatial_augmentation_handles_multichannel_images():
         assert out["label"].shape == (D, H, W)
 
 
+def test_augmentation_reseed_replays_the_same_transform():
+    """Worker-specific augmentation streams must remain reproducible."""
+    from src.data.augmentation import VolumeAugmentation
+
+    augmentation = VolumeAugmentation(
+        {
+            "enabled": True,
+            "flip_axes": [1, 2],
+            "flip_probability": 1.0,
+            "intensity": {"gamma_range": [0.8, 1.2], "noise_std": 0.02},
+        },
+        seed=0,
+    )
+    item = {
+        "image": torch.linspace(0.0, 1.0, 2 * 4 * 5).reshape(1, 2, 4, 5),
+        "label": torch.zeros((2, 4, 5), dtype=torch.long),
+    }
+    torch.manual_seed(123)
+    augmentation.reseed(987)
+    first = augmentation({key: value.clone() for key, value in item.items()})
+    torch.manual_seed(123)
+    augmentation.reseed(987)
+    second = augmentation({key: value.clone() for key, value in item.items()})
+    assert torch.equal(first["image"], second["image"])
+    assert torch.equal(first["label"], second["label"])
+
+
+def test_scheduler_counts_gradient_remainder_as_optimizer_step():
+    """LR scheduling must match the trainer's remainder-gradient flush."""
+    from src.training.trainer import Trainer3D
+
+    parameter = torch.nn.Parameter(torch.tensor(1.0))
+    trainer = Trainer3D.__new__(Trainer3D)
+    trainer.epochs = 2
+    trainer.train_loader = [None] * 5
+    trainer.grad_accumulation = 2
+    trainer.optimizer = torch.optim.SGD([parameter], lr=1.0)
+    scheduler = trainer._build_scheduler(
+        {"scheduler": "constant_warmup", "warmup_epochs": 1}
+    )
+    # ceil(5 / 2) gives three optimizer steps per epoch, so the third
+    # warmup step uses 2/3 rather than completing after only two steps.
+    assert scheduler.lr_lambdas[0](1) == pytest.approx(2.0 / 3.0)
+
+
+def test_early_stopping_patience_starts_at_minimum_epoch(monkeypatch, tmp_path):
+    """Pre-window validation misses must not trigger stopping at min_epochs."""
+    import src.training.trainer as trainer_module
+    from src.training.trainer import Trainer3D
+
+    parameter = torch.nn.Parameter(torch.tensor(1.0))
+    trainer = Trainer3D.__new__(Trainer3D)
+    trainer.epochs = 6
+    trainer.validation_interval = 1
+    trainer.early_stopping_patience = 2
+    trainer.early_stopping_min_epochs = 3
+    trainer.early_stopping_min_delta = 0.0
+    trainer.train_loader = [None]
+    trainer.val_loader = [None]
+    trainer.model = torch.nn.Linear(1, 1)
+    trainer.optimizer = torch.optim.SGD([parameter], lr=0.1)
+    trainer.config = {"training": {"keep_last_checkpoints": 0}}
+    trainer.ckpt_dir = str(tmp_path)
+    trainer.writer = type("Writer", (), {"close": lambda self: None})()
+    statuses = []
+    trainer._cancel_requested = lambda: False
+    trainer._train_epoch = lambda _epoch, _step: {"loss": 1.0, "mean_dsc": 0.0}
+    trainer._validate_epoch = lambda _epoch: {"mean_dsc": 0.0}
+    trainer._log_epoch = lambda *_args: None
+    trainer._append_metrics_history = lambda *_args, **_kwargs: None
+    trainer._write_metrics_history = lambda *_args, **_kwargs: None
+    trainer._write_training_status = (
+        lambda status, **payload: statuses.append({"status": status, **payload})
+    )
+    monkeypatch.setattr(trainer_module, "save_checkpoint", lambda *_args, **_kwargs: None)
+
+    trainer.train()
+
+    completed = [row for row in statuses if row.get("early_stopped")]
+    assert completed
+    assert completed[-1]["epoch"] == 4
+
+
 def test_is_better_checkpoint_uses_train_loss_when_val_dice_tied():
     from src.training.trainer import is_better_checkpoint
     # Epoch 1 is always the initial best (a valid inference checkpoint must exist).

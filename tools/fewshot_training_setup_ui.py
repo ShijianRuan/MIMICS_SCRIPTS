@@ -2544,12 +2544,20 @@ class QtTrainingSetupApp(object):
         ], self.values.get("loss_type"))
         self.widgets["keep_largest_component"] = QtWidgets.QCheckBox("Keep largest connected component")
         self.widgets["keep_largest_component"].setChecked(_bool(self.values.get("keep_largest_component", False)))
+        self.widgets["mirror_tta"] = QtWidgets.QCheckBox("Mirror averaging (slower)")
+        self.widgets["mirror_tta"].setChecked(_bool(self.values.get("mirror_tta", False)))
+        self.widgets["mirror_tta"].setToolTip(
+            "Average the original prediction with three in-plane mirrored "
+            "predictions. This can improve robustness but takes about four "
+            "times as many forward passes."
+        )
         for label, key in (("Loss", "loss_type"),):
             prediction_form.addRow(label, self.widgets[key])
         inference_note = QtWidgets.QLabel("Inference is automatic: full-volume training uses whole-volume inference; patch training uses sliding windows.")
         inference_note.setWordWrap(True)
         prediction_form.addRow(inference_note)
         prediction_form.addRow(self.widgets["keep_largest_component"])
+        prediction_form.addRow(self.widgets["mirror_tta"])
         policy_row = QtWidgets.QWidget()
         policy_layout = QtWidgets.QHBoxLayout(policy_row)
         policy_layout.setContentsMargins(0, 0, 0, 0)
@@ -2804,6 +2812,8 @@ class QtTrainingSetupApp(object):
             widget.currentTextChanged.connect(callback)
         elif hasattr(widget, "textChanged"):
             widget.textChanged.connect(callback)
+        elif hasattr(widget, "stateChanged"):
+            widget.stateChanged.connect(callback)
 
     def _select_all_cases(self):
         for idx in range(self.case_list.count()):
@@ -3623,6 +3633,10 @@ class QtTrainingSetupApp(object):
                 label = self._label_for_widget(key)
                 if label is not None:
                     label.setVisible(True)
+        mirror_tta = self.widgets.get("mirror_tta")
+        if mirror_tta is not None:
+            mirror_tta.setVisible(not cached_slices)
+            mirror_tta.setEnabled(not cached_slices)
         self._update_dimensionality_summary()
 
     def _update_dimensionality_summary(self, *_args):

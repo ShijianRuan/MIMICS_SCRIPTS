@@ -3,6 +3,7 @@
 import os
 import time
 import json
+import math
 import uuid
 import torch
 import torch.nn as nn
@@ -302,15 +303,21 @@ class Trainer3D:
         raise ValueError(f"Unknown optimizer: {opt_name}")
 
     def _build_scheduler(self, cfg: Dict):
-        total_steps = max(1, self.epochs * max(1, len(self.train_loader)) // max(1, self.grad_accumulation))
+        steps_per_epoch = max(
+            1,
+            math.ceil(
+                max(1, len(self.train_loader))
+                / max(1, self.grad_accumulation)
+            ),
+        )
+        total_steps = max(1, self.epochs * steps_per_epoch)
         warmup_epochs = min(cfg.get("warmup_epochs", 5), max(0, self.epochs // 2))
-        warmup = warmup_epochs * max(1, len(self.train_loader)) // max(1, self.grad_accumulation)
+        warmup = warmup_epochs * steps_per_epoch
 
         scheduler = cfg.get("scheduler")
         if scheduler in ("cosine", "constant_warmup") and warmup > 0:
             # LambdaLR: linear warmup, followed by cosine decay or a constant LR.
             decay_steps = max(1, total_steps - warmup)
-            base_lr = self.optimizer.param_groups[0]["lr"]
 
             def lr_lambda(step):
                 if step < warmup:
@@ -318,7 +325,7 @@ class Trainer3D:
                 if scheduler == "constant_warmup":
                     return 1.0
                 progress = (step - warmup) / decay_steps
-                return 0.5 * (1.0 + __import__("math").cos(__import__("math").pi * progress))
+                return 0.5 * (1.0 + math.cos(math.pi * progress))
 
             return torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
         if scheduler == "cosine":
@@ -396,8 +403,12 @@ class Trainer3D:
                     best_dsc = max(best_dsc, val_dsc)
                     best_train_loss = min(best_train_loss, train_loss)
                     epochs_without_improvement = 0
-                elif should_validate:
+                elif should_validate and epoch >= self.early_stopping_min_epochs:
                     epochs_without_improvement += 1
+                elif should_validate:
+                    # Early validation is reported, but it must not consume
+                    # patience before the configured observation window.
+                    epochs_without_improvement = 0
 
                 metrics = {**train_metrics, **val_metrics}
                 lr = self.optimizer.param_groups[0]["lr"]

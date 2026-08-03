@@ -18,6 +18,7 @@ DEFAULT_OPTIONS = {
     "neighbor_distance_mm": 3.0,
     "loss_type": "auto",
     "keep_largest_component": False,
+    "mirror_tta": False,
 }
 
 PRESETS = {
@@ -87,6 +88,12 @@ def _patch_sampling(name):
     return None
 
 
+def _as_bool(value):
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
 def normalize_strategy_options(options, fingerprint=None, policy=None, preset="adaptive"):
     if preset not in PRESETS:
         raise ValueError("Unknown DINOv3 preset: {}".format(preset))
@@ -116,7 +123,8 @@ def normalize_strategy_options(options, fingerprint=None, policy=None, preset="a
     values["patches_per_case"] = int(values["patches_per_case"])
     if values["patches_per_case"] < 1:
         raise ValueError("Patch count must be positive")
-    values["keep_largest_component"] = bool(values.get("keep_largest_component"))
+    values["keep_largest_component"] = _as_bool(values.get("keep_largest_component"))
+    values["mirror_tta"] = _as_bool(values.get("mirror_tta"))
     if values["sampling_mode"] == "patch" and values["patch_size_mode"] == "custom":
         _parse_patch_size(values["patch_size_zyx"])
     return values
@@ -135,6 +143,12 @@ def compile_strategy(strategy_id, fingerprint=None, policy=None, user_options=No
         values["slice_axis"] = str(
             policy.get("recommended_slice_axis") or "axial"
         )
+    in_plane_axes = {
+        "axial": [[1], [2], [1, 2]],
+        "coronal": [[0], [2], [0, 2]],
+        "sagittal": [[0], [1], [0, 1]],
+    }
+    tta_axes = in_plane_axes[values["slice_axis"]] if values["mirror_tta"] else []
     patch = {"enabled": values["sampling_mode"] == "patch"}
     if patch["enabled"]:
         if values["patch_size_mode"] == "fingerprint":
@@ -191,5 +205,6 @@ def compile_strategy(strategy_id, fingerprint=None, policy=None, user_options=No
         "data": {"patch": patch, "roi": {"enabled": False}},
         "loss": loss,
         "inference": {"threshold": 0.5,
-                      "keep_largest_component": values["keep_largest_component"]},
+                      "keep_largest_component": values["keep_largest_component"],
+                      "tta_axes": tta_axes},
     }

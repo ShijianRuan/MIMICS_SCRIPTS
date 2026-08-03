@@ -27,6 +27,7 @@ from src.training.trainer import Trainer3D
 import torch
 import numpy as np
 from torch.utils.data import DataLoader
+from torch.utils.data import Subset, get_worker_info
 
 
 _LAST_CACHE_STATUS_WRITE_ERROR = {"key": "", "time": 0.0}
@@ -42,6 +43,27 @@ def _seed_process(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+
+def _base_dataset(dataset):
+    """Unwrap torch Subset objects without depending on a concrete dataset."""
+    while isinstance(dataset, Subset):
+        dataset = dataset.dataset
+    return dataset
+
+
+def _seed_data_worker(_worker_id: int) -> None:
+    """Seed Python, NumPy, torch, and the dataset-owned augmentation RNG."""
+    info = get_worker_info()
+    if info is None:
+        return
+    worker_seed = int(info.seed % (2**32))
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
+    torch.manual_seed(worker_seed)
+    augmentation = getattr(_base_dataset(info.dataset), "augmentation", None)
+    if augmentation is not None and hasattr(augmentation, "reseed"):
+        augmentation.reseed(worker_seed + 1)
 
 
 def _write_cache_status(config, payload):
@@ -242,6 +264,7 @@ def _train_cached_slices(config, seed):
             drop_last=drop_last,
             num_workers=int(training_cfg.get("num_workers", 0)),
             generator=generator,
+            worker_init_fn=_seed_data_worker,
         )
         val_dataset = (
             CachedFeatureSliceDataset(val_manifest)
@@ -254,6 +277,7 @@ def _train_cached_slices(config, seed):
                 batch_size=1,
                 shuffle=False,
                 num_workers=int(training_cfg.get("num_workers", 0)),
+                worker_init_fn=_seed_data_worker,
             )
             if val_manifest is not None
             else None
@@ -373,6 +397,7 @@ def main():
         shuffle=True,
         num_workers=num_workers,
         generator=g,
+        worker_init_fn=_seed_data_worker,
         collate_fn=pad_volume_batch if batch_size > 1 else None,
     )
     val_loader = None
@@ -382,6 +407,7 @@ def main():
             batch_size=1,
             shuffle=False,
             num_workers=num_workers,
+            worker_init_fn=_seed_data_worker,
         )
 
     # Model

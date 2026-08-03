@@ -2333,6 +2333,13 @@ def write_training_config(
             "scheduler": None if getattr(args, "lr_scheduler", "cosine") == "constant" else getattr(args, "lr_scheduler", "cosine"),
             "warmup_epochs": int(getattr(args, "warmup_epochs", 3)),
             "validation_interval": int(getattr(args, "validation_interval", 2)),
+            # The Mimics UI exposes an explicit epoch budget. Do not inherit
+            # hidden early stopping from a research base configuration.
+            "early_stopping": {
+                "min_epochs": int(args.epochs),
+                "patience": 0,
+                "min_delta": 0.0,
+            },
             "keep_last_checkpoints": int(args.keep_last_checkpoints),
             "validation_enabled": bool(validation_enabled),
             "gpu_memory_budget_gb": float(

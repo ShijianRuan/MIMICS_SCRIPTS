@@ -63,6 +63,10 @@ class VolumeAugmentation:
         self.scale_range = _parse_range(sc.get("scale_range", [0.9, 1.1]))
         self.translation_px = int(sc.get("translation_px", 10))
 
+    def reseed(self, seed: int) -> None:
+        """Give each DataLoader worker an independent deterministic stream."""
+        self.rng.seed(int(seed))
+
     def __call__(self, item: dict) -> dict:
         if not self.enabled:
             return item
