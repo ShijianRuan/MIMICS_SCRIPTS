@@ -32,7 +32,10 @@ _MONITORS = {}
 
 
 def _project_root():
-    return runtime_common.find_root(__file__)
+    return runtime_common.find_root(
+        __file__,
+        ("nnunet_config.json", "fewshot_config.json", "runtime_py35"),
+    )
 
 
 def _read_json(path, default=None):
@@ -186,6 +189,7 @@ def _training_context():
     return {
         "dataset_root": dataset_root,
         "mcs_dir": mcs_dir,
+        "label_root": str(settings.get("label_root") or ""),
         "selected_mask_names": [
             str(getattr(mask, "name", "") or "") for mask in selected
         ],
@@ -763,7 +767,12 @@ def _apply_one(monitor):
         record["target_guid"] = fewshot_mimics._mask_identity(mask)
         _persist_application_state(monitor, application)
     row = item["buffer"]
-    fewshot_mimics._set_mask_from_u8(mask, row["output_path"], row["mimics_shape"])
+    fewshot_mimics._set_mask_from_u8(
+        mask,
+        row["output_path"],
+        row["mimics_shape"],
+        "Apply nnU-Net Prediction",
+    )
     mask_name = str(getattr(mask, "name", "") or "")
     record["state"] = "applied"
     record["target_name"] = mask_name

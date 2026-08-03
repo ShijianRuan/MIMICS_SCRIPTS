@@ -53,6 +53,7 @@ from training_data_ui import (  # noqa: E402
     normalized_source_mode,
 )
 from ui_theme import choose_existing_directory, configure_application  # noqa: E402
+from ui_preferences import load_preferences, save_preferences  # noqa: E402
 try:
     from remote_compute_ui import RemoteComputeSelector  # noqa: E402
 except Exception:
@@ -777,14 +778,15 @@ class ModelCenter:
         return page
 
     def _load_context_defaults(self):
+        remembered = load_preferences("nninteractive_training")
         initial_name = str(self.context.get("mask_name") or "")
         self.task_combo.setEditText(initial_name)
         self.mask_edit.setText(initial_name)
-        self.mcs_edit.setText(str(self.context.get("mcs_dir") or ""))
-        self.image_root_edit.setText(str(self.context.get("image_root") or ""))
+        self.mcs_edit.setText(str(self.context.get("mcs_dir") or remembered.get("mcs_dir") or ""))
+        self.image_root_edit.setText(str(self.context.get("image_root") or remembered.get("image_root") or ""))
         self.prepared_edit.setText(str(self.context.get("image_root") or ""))
         self.prepared_label_edit.setText(
-            str(self.context.get("label_root") or "")
+            str(self.context.get("label_root") or remembered.get("label_root") or "")
         )
 
     def refresh_tasks(self):
@@ -1509,6 +1511,15 @@ class ModelCenter:
             "remote_profile_id": remote_profile_id,
             "created_at_epoch": time.time(),
         }
+        try:
+            save_preferences("nninteractive_training", {
+                "image_root": request.get("image_root") or "",
+                "mcs_dir": request.get("mcs_dir") or "",
+                "label_root": request.get("label_root") or "",
+                "initial_mask_root": request.get("initial_mask_root") or "",
+            })
+        except Exception:
+            pass
         write_json_atomic(job_dir / "request.json", request)
         write_json_atomic(
             job_dir / "status.json",

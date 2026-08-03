@@ -10,6 +10,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import numpy as np
@@ -40,6 +41,48 @@ class WorkerGeometryTests(unittest.TestCase):
         ]
         with self.assertRaisesRegex(RuntimeError, "same slice"):
             worker._prompt_plane(specs, (12, 13, 14))
+
+    def test_requested_prompt_plane_accepts_thin_in_plane_stroke(self):
+        specs = [{"bbox": [[2, 6], [3, 4], [4, 5]]}]
+        self.assertEqual(
+            worker._prompt_plane(
+                specs,
+                (12, 13, 14),
+                requested_axis=2,
+                requested_index=4,
+            ),
+            (2, 4),
+        )
+
+    def test_click_channels_preserve_sign_and_xyz_to_xy_mapping(self):
+        points = [
+            {"point": [4, 6, 3], "include": True},
+            {"point": [8, 2, 3], "include": False},
+        ]
+        channels = worker._point_channels(
+            points,
+            (10, 12, 7),
+            axis=2,
+            index=3,
+            output_shape=(20, 24),
+        )
+        self.assertEqual(channels.shape, (2, 20, 24))
+        self.assertEqual(float(channels[0, 8, 12]), 1.0)
+        self.assertEqual(float(channels[1, 16, 4]), 1.0)
+        self.assertEqual(float(channels.sum()), 2.0)
+
+    def test_box_channel_uses_foreground_shaded_rectangle(self):
+        boxes = [{"bbox": [[2, 6], [3, 8], [4, 5]]}]
+        channel = worker._box_channel(
+            boxes,
+            (10, 12, 7),
+            axis=2,
+            index=4,
+            output_shape=(20, 24),
+        )
+        self.assertEqual(channel.shape, (1, 20, 24))
+        self.assertEqual(float(channel.sum()), 80.0)
+        self.assertTrue(np.all(channel[0, 4:12, 6:16] == 1.0))
 
     def test_scribble_channels_and_plane_write_are_local(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -88,6 +131,101 @@ class WorkerGeometryTests(unittest.TestCase):
 
 @unittest.skipUnless(importlib.util.find_spec("PySide6") is not None, "PySide6 is unavailable")
 class IGACCanvasTests(unittest.TestCase):
+    def test_canvas_uses_physical_pixel_aspect_ratio(self):
+        from PySide6 import QtWidgets
+        from tools.igac_gui import ImageCanvas
+
+        app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        canvas = ImageCanvas()
+        canvas.resize(500, 500)
+        canvas.display_spacing_uv = (0.5, 1.0)
+        image = np.zeros((100, 100), dtype=np.float32)
+        mask = np.zeros_like(image, dtype=bool)
+        canvas.set_frame({"image": image, "mask": mask})
+        target = canvas._compute_target()
+        self.assertAlmostEqual(target.width() / target.height(), 0.5, places=4)
+        app.processEvents()
+
+    def test_contour_display_paths_preserve_components_holes_and_bounds(self):
+        from PySide6 import QtWidgets
+        from tools.igac_gui import ImageCanvas
+
+        app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        canvas = ImageCanvas()
+        image = np.zeros((64, 72), dtype=np.float32)
+        mask = np.zeros_like(image, dtype=bool)
+        mask[5:35, 6:38] = True
+        mask[15:25, 16:28] = False
+        mask[42:57, 48:66] = True
+        canvas.set_frame({"image": image, "mask": mask})
+
+        exact = canvas._boundary_path_exact
+        smooth = canvas._boundary_path_smooth
+        self.assertFalse(exact.isEmpty())
+        self.assertFalse(smooth.isEmpty())
+        self.assertGreaterEqual(len(exact.toSubpathPolygons()), 3)
+        self.assertGreaterEqual(len(smooth.toSubpathPolygons()), 3)
+        exact_bounds = exact.boundingRect()
+        smooth_bounds = smooth.boundingRect()
+        self.assertAlmostEqual(exact_bounds.left(), 6.0, places=4)
+        self.assertAlmostEqual(exact_bounds.top(), 5.0, places=4)
+        self.assertAlmostEqual(exact_bounds.right(), 66.0, places=4)
+        self.assertAlmostEqual(exact_bounds.bottom(), 57.0, places=4)
+        self.assertGreaterEqual(smooth_bounds.left(), exact_bounds.left())
+        self.assertGreaterEqual(smooth_bounds.top(), exact_bounds.top())
+        self.assertLessEqual(smooth_bounds.right(), exact_bounds.right())
+        self.assertLessEqual(smooth_bounds.bottom(), exact_bounds.bottom())
+        app.processEvents()
+
+    def test_read_only_context_canvas_navigates_without_editing(self):
+        from PySide6 import QtCore, QtTest, QtWidgets
+        from tools.igac_gui import ImageCanvas
+
+        app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        canvas = ImageCanvas(compact=True, read_only=True)
+        canvas.resize(300, 240)
+        canvas.show()
+        image = np.zeros((40, 60), dtype=np.float32)
+        mask = np.zeros_like(image, dtype=bool)
+        mask[10:30, 15:45] = True
+        canvas.set_frame({"image": image, "mask": mask})
+        navigation, promotion, edits = [], [], []
+        canvas.navigation_requested.connect(lambda value: navigation.append(tuple(value)))
+        canvas.promote_requested.connect(lambda: promotion.append(True))
+        canvas.boundary_drag_started.connect(lambda value: edits.append(value))
+        canvas.contour_trace_started.connect(lambda value: edits.append(value))
+        canvas.brush_requested.connect(lambda *value: edits.append(value))
+        point = canvas._screen_at_voxel((30.0, 20.0))
+        self.assertIsNotNone(point)
+        QtTest.QTest.mouseClick(canvas, QtCore.Qt.LeftButton, pos=point.toPoint())
+        QtTest.QTest.mouseDClick(canvas, QtCore.Qt.LeftButton, pos=point.toPoint())
+        app.processEvents()
+        self.assertGreaterEqual(len(navigation), 2)
+        self.assertEqual(promotion, [True])
+        self.assertFalse(edits)
+        canvas.close()
+
+    def test_crosshair_queue_coalesces_to_latest_position(self):
+        from tools.igac_gui import EngineThread
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            thread = EngineThread(
+                {
+                    "shape": [10, 11, 12],
+                    "igac": {},
+                    "status_path": str(root / "status.json"),
+                    "log_path": str(root / "igac.log"),
+                }
+            )
+            thread.submit("crosshair", (1.0, 2.0, 3.0))
+            thread.submit("crosshair", (7.0, 8.0, 9.0))
+            commands = []
+            while not thread.commands.empty():
+                commands.append(thread.commands.get_nowait())
+            self.assertEqual([value[0] for value in commands], ["crosshair_flush"])
+            self.assertEqual(commands[0][1]["payload"], (7.0, 8.0, 9.0))
+
     def test_zoomed_canvas_maps_brush_back_to_full_image_coordinates(self):
         from PySide6 import QtCore, QtWidgets
         from tools.igac_gui import ImageCanvas
@@ -157,6 +295,21 @@ class IGACCanvasTests(unittest.TestCase):
         canvas.set_frame({"mask": mask})
         self.assertIs(canvas._image, background)
         self.assertTrue(np.array_equal(canvas._mask_plane, mask))
+        app.processEvents()
+
+    def test_canvas_builds_a_complete_continuous_contour_not_handle_points(self):
+        from PySide6 import QtWidgets
+        from tools.igac_gui import ImageCanvas
+
+        app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        canvas = ImageCanvas()
+        image = np.zeros((24, 30), dtype=np.float32)
+        mask = np.zeros_like(image, dtype=bool)
+        mask[5:17, 7:23] = True
+        canvas.set_frame({"image": image, "mask": mask})
+        # Rectangle perimeter: two 16-pixel horizontal sides and two
+        # 12-pixel vertical sides. Every pixel edge remains selectable/visible.
+        self.assertEqual(len(canvas._boundary_segments), 2 * 16 + 2 * 12)
         app.processEvents()
 
     def test_transposed_noncontiguous_image_plane_is_accepted(self):
@@ -274,6 +427,111 @@ class IGACCanvasTests(unittest.TestCase):
         self.assertIn("boundary_miss", modes)
         canvas.close()
 
+    def test_trace_mode_guides_a_contour_without_emitting_brush_strokes(self):
+        from PySide6 import QtCore, QtTest, QtWidgets
+        from tools.igac_gui import ImageCanvas
+
+        app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        canvas = ImageCanvas()
+        canvas.interaction_mode = "trace"
+        canvas.resize(480, 420)
+        canvas.show()
+        image = np.zeros((48, 48), dtype=np.float32)
+        mask = np.zeros_like(image, dtype=bool)
+        mask[10:38, 8:26] = True
+        canvas.set_frame({"image": image, "mask": mask})
+        app.processEvents()
+
+        starts, targets, finishes, brushes = [], [], [], []
+        canvas.contour_trace_started.connect(lambda point: starts.append(tuple(point)))
+        canvas.contour_trace_requested.connect(lambda point: targets.append(tuple(point)))
+        canvas.contour_trace_finished.connect(lambda: finishes.append(True))
+        canvas.brush_requested.connect(lambda *values: brushes.append(values))
+        start = canvas._screen_at_voxel((25.5, 22.0))
+        middle = canvas._screen_at_voxel((29.0, 25.0))
+        end = canvas._screen_at_voxel((31.0, 29.0))
+        self.assertIsNotNone(start)
+        self.assertIsNotNone(middle)
+        self.assertIsNotNone(end)
+        QtTest.QTest.mousePress(canvas, QtCore.Qt.LeftButton, pos=start.toPoint())
+        QtTest.QTest.mouseMove(canvas, middle.toPoint())
+        QtTest.QTest.mouseRelease(canvas, QtCore.Qt.LeftButton, pos=end.toPoint())
+        app.processEvents()
+        self.assertEqual(len(starts), 1)
+        self.assertGreaterEqual(len(targets), 2)
+        self.assertEqual(len(finishes), 1)
+        self.assertFalse(brushes)
+        self.assertFalse(canvas._contour_tracing)
+        canvas.close()
+
+    def test_trace_handle_tracks_the_last_applied_contour_point(self):
+        from PySide6 import QtCore, QtTest, QtWidgets
+        from tools.igac_gui import ImageCanvas
+
+        app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        canvas = ImageCanvas()
+        canvas.interaction_mode = "trace"
+        canvas.resize(480, 420)
+        canvas.show()
+        image = np.zeros((48, 48), dtype=np.float32)
+        mask = np.zeros_like(image, dtype=bool)
+        mask[10:38, 8:26] = True
+        canvas.set_frame({"image": image, "mask": mask})
+        app.processEvents()
+
+        start = canvas._screen_at_voxel((25.5, 22.0))
+        self.assertIsNotNone(start)
+        QtTest.QTest.mousePress(canvas, QtCore.Qt.LeftButton, pos=start.toPoint())
+        self.assertTrue(canvas._contour_tracing)
+        self.assertGreater(len(canvas._interaction_origin_segments), 0)
+        self.assertFalse(canvas._interaction_origin_path_exact.isEmpty())
+        self.assertFalse(canvas._interaction_origin_path_smooth.isEmpty())
+        canvas.set_contour_trace_preview(
+            {
+                "applied_end_u": 29.5,
+                "applied_end_v": 24.5,
+                "drag_was_clamped": False,
+            }
+        )
+        self.assertEqual(canvas._trace_applied_current, (29.5, 24.5))
+        self.assertFalse(canvas._trace_drag_clamped)
+
+        QtTest.QTest.mouseRelease(canvas, QtCore.Qt.LeftButton, pos=start.toPoint())
+        app.processEvents()
+        self.assertFalse(canvas._contour_tracing)
+        self.assertIsNone(canvas._trace_applied_current)
+        self.assertFalse(canvas._interaction_origin_segments)
+        self.assertTrue(canvas._interaction_origin_path_exact.isEmpty())
+        self.assertTrue(canvas._interaction_origin_path_smooth.isEmpty())
+        canvas.close()
+
+    def test_escape_cancels_an_active_contour_drag_without_finishing_it(self):
+        from PySide6 import QtCore, QtTest, QtWidgets
+        from tools.igac_gui import ImageCanvas
+
+        app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        canvas = ImageCanvas()
+        canvas.interaction_mode = "ffd"
+        canvas.resize(480, 420)
+        canvas.show()
+        image = np.zeros((40, 40), dtype=np.float32)
+        mask = np.zeros_like(image, dtype=bool)
+        mask[8:32, 6:20] = True
+        canvas.set_frame({"image": image, "mask": mask})
+        cancelled, finished = [], []
+        canvas.interaction_cancel_requested.connect(lambda value: cancelled.append(str(value)))
+        canvas.boundary_drag_finished.connect(lambda: finished.append(True))
+        press = canvas._screen_at_voxel((20.5, 20.0))
+        self.assertIsNotNone(press)
+        QtTest.QTest.mousePress(canvas, QtCore.Qt.LeftButton, pos=press.toPoint())
+        self.assertTrue(canvas._boundary_dragging)
+        QtTest.QTest.keyClick(canvas, QtCore.Qt.Key_Escape)
+        app.processEvents()
+        self.assertFalse(canvas._boundary_dragging)
+        self.assertEqual(cancelled, ["ffd"])
+        self.assertFalse(finished)
+        canvas.close()
+
     def test_crossing_from_deep_inside_reclassifies_the_whole_stroke(self):
         from PySide6 import QtCore, QtTest, QtWidgets
         from tools.igac_gui import ImageCanvas
@@ -375,6 +633,44 @@ class IGACCanvasTests(unittest.TestCase):
                 ["boundary_pull_start", "boundary_pull_flush", "boundary_pull_end"],
             )
             self.assertEqual(commands[1][1]["payload"]["end_u"], 8.0)
+
+    def test_igac_window_exposes_contour_tools_and_safe_shortcuts(self):
+        from PySide6 import QtCore, QtTest, QtWidgets
+        from tools.igac_gui import IGACWindow
+
+        app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        window = IGACWindow(None, preview=True)
+        window.show()
+        app.processEvents()
+        values = [str(button.property("segmentValue")) for button in window.tool_group.buttons()]
+        self.assertEqual(values, ["ffd", "trace"])
+        with mock.patch.object(QtWidgets.QApplication, "focusWidget", return_value=window.canvas):
+            window._shortcuts[1].activated.emit()
+        app.processEvents()
+        self.assertEqual(window._selected_value(window.tool_group, "ffd"), "trace")
+        with mock.patch.object(
+            QtWidgets.QApplication,
+            "focusWidget",
+            return_value=window.display_width,
+        ):
+            window._shortcuts[0].activated.emit()
+        app.processEvents()
+        self.assertEqual(window._selected_value(window.tool_group, "ffd"), "trace")
+        self.assertEqual(window.run_button.text(), "Refine local edit")
+        self.assertEqual(
+            [canvas.view_orientation for canvas in window.context_canvases],
+            ["coronal", "sagittal"],
+        )
+        self.assertTrue(all(canvas.read_only for canvas in window.context_canvases))
+        self.assertTrue(all(canvas._image is not None for canvas in window.context_canvases))
+        window._promote_context(window.context_canvases[0])
+        self.assertEqual(window.orientation, "coronal")
+        self.assertEqual(
+            [canvas.view_orientation for canvas in window.context_canvases],
+            ["axial", "sagittal"],
+        )
+        window.terminal = True
+        window.close()
 
 
 @unittest.skipUnless(
@@ -708,7 +1004,361 @@ class IGACEngineTests(unittest.TestCase):
             self.assertTrue(thread._process_commands())
             self.assertEqual(int(engine.barrier_constraint.sum().item()), 0)
             self.assertGreater(int(engine.add_constraint.sum().item()), 0)
+            self.assertFalse(thread.running)
+            thread.submit("stroke_end")
+            self.assertTrue(thread._process_commands())
             self.assertTrue(thread.running)
+
+    def test_local_evolution_never_changes_voxels_outside_the_edit_region(self):
+        shape = (30, 30, 20)
+        x, y, z = np.indices(shape)
+        initial = ((x - 15) ** 2 + (y - 15) ** 2 + (z - 10) ** 2) <= 5 ** 2
+        image = np.where(
+            ((x - 15) ** 2 + (y - 15) ** 2 + (z - 10) ** 2) <= 8 ** 2,
+            1.0,
+            0.0,
+        ).astype(np.float32)
+        engine = igac_engine.IGACEngine(
+            image,
+            initial,
+            (1.0, 1.0, 1.0),
+            device="cpu",
+            workspace_margin_mm=10.0,
+            max_roi_voxels=100000,
+            parameters={"range_mm": 1.5, "data_weight": 20.0, "time_step": 0.05},
+        )
+        active = (slice(7, 14), slice(9, 22), slice(9, 22))
+        engine.set_local_evolution_region(active, margin_mm=0.0)
+        before = engine.phi.clone()
+        engine.step(2)
+        outside = engine.torch.ones_like(engine.phi, dtype=engine.torch.bool)
+        outside[(slice(None), slice(None)) + engine.evolution_slices_zyx] = False
+        self.assertTrue(bool(engine.torch.equal(engine.phi[outside], before[outside])))
+        self.assertLess(engine.last_step_observed_voxels, engine.roi_voxels)
+
+    def test_local_evolution_matches_full_force_inside_the_writable_region(self):
+        shape = (48, 46, 30)
+        x, y, z = np.indices(shape)
+        radius = np.sqrt((x - 24) ** 2 + (y - 23) ** 2 + (z - 15) ** 2)
+        initial = radius <= 6
+        image = np.exp(-((radius - 9.0) / 3.0) ** 2).astype(np.float32)
+        arguments = dict(
+            spacing_xyz=(1.0, 1.0, 1.0),
+            device="cpu",
+            workspace_margin_mm=20.0,
+            max_roi_voxels=200000,
+            parameters={"range_mm": 1.0, "smooth": 5.0, "data_weight": 8.0},
+        )
+        full = igac_engine.IGACEngine(image, initial, **arguments)
+        local = igac_engine.IGACEngine(image, initial, **arguments)
+        local.set_local_evolution_region(
+            (slice(10, 20), slice(15, 31), slice(16, 32)), margin_mm=0.0
+        )
+        full.step(1)
+        local.step(1)
+        active = (slice(None), slice(None)) + local.evolution_slices_zyx
+        self.assertTrue(
+            bool(
+                local.torch.allclose(
+                    local.phi[active], full.phi[active], atol=2.0e-6, rtol=1.0e-5
+                )
+            )
+        )
+
+    def test_boundary_pull_has_fixed_support_and_clamps_long_pointer_motion(self):
+        shape = (44, 44, 28)
+        x, y, z = np.indices(shape)
+        initial = ((x - 22) ** 2 + (y - 22) ** 2 + (z - 14) ** 2) <= 7 ** 2
+        engine = igac_engine.IGACEngine(
+            initial.astype(np.float32),
+            initial,
+            (1.0, 1.0, 1.0),
+            device="cpu",
+            workspace_margin_mm=14.0,
+            max_roi_voxels=500000,
+            parameters={"max_displacement_mm": 20.0},
+        )
+        base = engine.capture_state()
+        result = engine.apply_boundary_pull(
+            base_state=base,
+            orientation="axial",
+            slice_index=14,
+            start_u=29.5,
+            start_v=22.5,
+            end_u=42.5,
+            end_v=22.5,
+            influence_radius_mm=8.0,
+            maximum_drag_ratio=0.65,
+            anchor_radius_mm=0.8,
+        )
+        self.assertIsNotNone(result)
+        self.assertTrue(result["drag_was_clamped"])
+        self.assertAlmostEqual(result["influence_radius_mm"], 8.0, places=5)
+        self.assertAlmostEqual(result["applied_drag_distance_mm"], 5.2, places=4)
+        self.assertLess(result["applied_end_u"], 36.0)
+        affected = (slice(None), slice(None)) + result["slices_zyx"]
+        outside = engine.torch.ones_like(engine.phi, dtype=engine.torch.bool)
+        outside[affected] = False
+        self.assertTrue(bool(engine.torch.equal(engine.phi[outside], base["phi"][outside])))
+
+    def test_incremental_boundary_preview_matches_full_restore_and_can_return_to_start(self):
+        shape = (34, 34, 22)
+        x, y, z = np.indices(shape)
+        initial = ((x - 17) ** 2 + (y - 17) ** 2 + (z - 11) ** 2) <= 6 ** 2
+        engine = igac_engine.IGACEngine(
+            initial.astype(np.float32),
+            initial,
+            (0.8, 0.8, 1.4),
+            device="cpu",
+            workspace_margin_mm=12.0,
+            max_roi_voxels=200000,
+        )
+        base = engine.capture_state()
+        common = dict(
+            base_state=base,
+            orientation="axial",
+            slice_index=11,
+            start_u=23.5,
+            start_v=17.5,
+            influence_radius_mm=8.0,
+            maximum_drag_ratio=0.65,
+            anchor_radius_mm=0.8,
+        )
+        first = engine.apply_boundary_pull(
+            end_u=26.5,
+            end_v=17.5,
+            incremental_preview=True,
+            previous_slices_zyx=None,
+            **common,
+        )
+        self.assertIsNotNone(first)
+        second = engine.apply_boundary_pull(
+            end_u=27.5,
+            end_v=18.5,
+            incremental_preview=True,
+            previous_slices_zyx=first["slices_zyx"],
+            **common,
+        )
+        self.assertIsNotNone(second)
+        incremental = engine.phi.clone()
+        engine.apply_boundary_pull(end_u=27.5, end_v=18.5, **common)
+        self.assertTrue(bool(engine.torch.equal(engine.phi, incremental)))
+        returned = engine.apply_boundary_pull(
+            end_u=23.5,
+            end_v=17.5,
+            incremental_preview=True,
+            previous_slices_zyx=second["slices_zyx"],
+            **common,
+        )
+        self.assertIsNone(returned)
+        self.assertTrue(bool(engine.torch.equal(engine.phi, base["phi"])))
+        self.assertTrue(
+            bool(
+                engine.torch.equal(
+                    engine.add_constraint, base["add_constraint"]
+                )
+            )
+        )
+        self.assertTrue(
+            bool(
+                engine.torch.equal(
+                    engine.barrier_constraint, base["barrier_constraint"]
+                )
+            )
+        )
+
+    def test_nearest_boundary_display_respects_all_three_plane_mappings(self):
+        shape = (36, 34, 24)
+        x, y, z = np.indices(shape)
+        initial = ((x - 18) ** 2 + (y - 17) ** 2 + (z - 12) ** 2) <= 7 ** 2
+        engine = igac_engine.IGACEngine(
+            initial.astype(np.float32),
+            initial,
+            (0.7, 0.9, 1.6),
+            device="cpu",
+            workspace_margin_mm=10.0,
+            max_roi_voxels=300000,
+        )
+        cases = [
+            ("axial", 12, 25.5, 17.5),
+            ("coronal", 17, 25.5, 12.5),
+            ("sagittal", 18, 24.5, 12.5),
+        ]
+        for orientation, index, target_u, target_v in cases:
+            result = engine.nearest_boundary_display(
+                orientation=orientation,
+                slice_index=index,
+                target_u=target_u,
+                target_v=target_v,
+                maximum_distance_mm=5.0,
+            )
+            self.assertIsNotNone(result, orientation)
+            self.assertLess(abs(result[0] - target_u), 3.0, orientation)
+            self.assertLess(abs(result[1] - target_v), 3.0, orientation)
+
+    def test_contour_attraction_is_local_and_does_not_paint_constraints(self):
+        shape = (42, 42, 26)
+        x, y, z = np.indices(shape)
+        initial = ((x - 21) ** 2 + (y - 21) ** 2 + (z - 13) ** 2) <= 7 ** 2
+        engine = igac_engine.IGACEngine(
+            initial.astype(np.float32),
+            initial,
+            (0.8, 0.8, 1.5),
+            device="cpu",
+            workspace_margin_mm=12.0,
+            max_roi_voxels=400000,
+        )
+        before = engine.phi.clone()
+        result = engine.apply_contour_attraction(
+            orientation="axial",
+            slice_index=13,
+            target_u=31.0,
+            target_v=21.5,
+            influence_radius_mm=7.0,
+            maximum_drag_ratio=0.65,
+            capture_distance_mm=12.0,
+        )
+        self.assertIsNotNone(result)
+        affected = (slice(None), slice(None)) + result["slices_zyx"]
+        outside = engine.torch.ones_like(engine.phi, dtype=engine.torch.bool)
+        outside[affected] = False
+        self.assertTrue(bool(engine.torch.equal(engine.phi[outside], before[outside])))
+        self.assertFalse(bool(engine.torch.equal(engine.phi[affected], before[affected])))
+        self.assertEqual(int(engine.add_constraint.sum().item()), 0)
+        self.assertEqual(int(engine.barrier_constraint.sum().item()), 0)
+
+    def test_trace_worker_refines_only_after_pointer_release(self):
+        from tools.igac_gui import EngineThread
+
+        shape = (36, 36, 24)
+        x, y, z = np.indices(shape)
+        initial = ((x - 18) ** 2 + (y - 18) ** 2 + (z - 12) ** 2) <= 6 ** 2
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            thread = EngineThread(
+                {
+                    "shape": list(shape),
+                    "spacing_mm": [1.0, 1.0, 1.0],
+                    "igac": {"trace": {"sample_spacing_mm": 1.0}},
+                    "status_path": str(root / "status.json"),
+                    "log_path": str(root / "igac.log"),
+                }
+            )
+            thread.engine = igac_engine.IGACEngine(
+                initial.astype(np.float32),
+                initial,
+                (1.0, 1.0, 1.0),
+                device="cpu",
+                workspace_margin_mm=10.0,
+                max_roi_voxels=300000,
+            )
+            initial_frame = np.asarray(
+                thread.engine.frame("axial", 12)["mask"], dtype=bool
+            ).copy()
+            previews, frames = [], []
+            thread.contour_trace_preview.connect(
+                lambda values: previews.append(dict(values) if values else None)
+            )
+            thread.frame_ready.connect(
+                lambda frame, _iteration, _fps: frames.append(
+                    np.asarray(frame["mask"], dtype=bool).copy()
+                )
+            )
+            thread.submit("contour_trace_start", {"target_u": 24.5, "target_v": 18.5})
+            thread.submit(
+                "contour_trace_update",
+                {
+                    "orientation": "axial",
+                    "slice_index": 12,
+                    "target_u": 28.0,
+                    "target_v": 18.5,
+                    "influence_radius_mm": 7.0,
+                    "capture_distance_mm": 12.0,
+                },
+            )
+            self.assertTrue(thread._process_commands())
+            self.assertTrue(thread._trace_changed)
+            self.assertFalse(thread.running)
+            self.assertTrue(previews)
+            self.assertIsNotNone(previews[-1])
+            self.assertIn("applied_end_u", previews[-1])
+            self.assertTrue(frames)
+            self.assertFalse(np.array_equal(frames[-1], initial_frame))
+            thread.submit("contour_trace_end")
+            self.assertTrue(thread._process_commands())
+            self.assertTrue(thread.running)
+            self.assertEqual(thread._evolution_context, "contour_trace")
+
+    def test_cancelled_interactions_restore_exact_pre_gesture_state(self):
+        from tools.igac_gui import EngineThread
+
+        shape = (32, 32, 20)
+        x, y, z = np.indices(shape)
+        initial = ((x - 16) ** 2 + (y - 16) ** 2 + (z - 10) ** 2) <= 6 ** 2
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            thread = EngineThread(
+                {
+                    "shape": list(shape),
+                    "spacing_mm": [1.0, 1.0, 1.0],
+                    "igac": {"trace": {"sample_spacing_mm": 1.0}},
+                    "status_path": str(root / "status.json"),
+                    "log_path": str(root / "igac.log"),
+                }
+            )
+            thread.engine = igac_engine.IGACEngine(
+                initial.astype(np.float32),
+                initial,
+                (1.0, 1.0, 1.0),
+                device="cpu",
+                workspace_margin_mm=10.0,
+                max_roi_voxels=300000,
+            )
+            previous_undo = thread.engine.capture_state()
+            thread._undo_state = previous_undo
+            thread.submit("boundary_pull_start")
+            thread.submit(
+                "boundary_pull_update",
+                {
+                    "orientation": "axial",
+                    "slice_index": 10,
+                    "start_u": 22.5,
+                    "start_v": 16.5,
+                    "end_u": 26.0,
+                    "end_v": 16.5,
+                    "influence_radius_mm": 8.0,
+                    "maximum_drag_ratio": 0.65,
+                    "anchor_radius_mm": 0.8,
+                },
+            )
+            self.assertTrue(thread._process_commands())
+            self.assertFalse(np.array_equal(thread.engine.result_xyz(), initial))
+            thread.submit("boundary_pull_cancel")
+            self.assertTrue(thread._process_commands())
+            self.assertTrue(np.array_equal(thread.engine.result_xyz(), initial))
+            self.assertIs(thread._undo_state, previous_undo)
+            self.assertFalse(thread.running)
+
+            thread.submit("contour_trace_start", {"target_u": 22.5, "target_v": 16.5})
+            thread.submit(
+                "contour_trace_update",
+                {
+                    "orientation": "axial",
+                    "slice_index": 10,
+                    "target_u": 26.0,
+                    "target_v": 16.5,
+                    "influence_radius_mm": 7.0,
+                    "maximum_drag_ratio": 0.65,
+                    "capture_distance_mm": 12.0,
+                },
+            )
+            self.assertTrue(thread._process_commands())
+            self.assertFalse(np.array_equal(thread.engine.result_xyz(), initial))
+            thread.submit("contour_trace_cancel")
+            self.assertTrue(thread._process_commands())
+            self.assertTrue(np.array_equal(thread.engine.result_xyz(), initial))
+            self.assertIs(thread._undo_state, previous_undo)
+            self.assertFalse(thread.running)
 
     def test_convergence_monitor_requires_stability_after_minimum_iterations(self):
         monitor = igac_engine.IGACConvergenceMonitor(
@@ -746,6 +1396,26 @@ class IGACEngineTests(unittest.TestCase):
         self.assertEqual(
             monitor.observe(iterations=3, elapsed_seconds=0.3, changed_voxel_ratio=0.2),
             "iteration_limit",
+        )
+
+    def test_convergence_uses_a_bounded_local_changed_voxel_threshold(self):
+        monitor = igac_engine.IGACConvergenceMonitor(
+            minimum_iterations=1,
+            maximum_iterations=10,
+            stable_cycles_required=1,
+            changed_voxel_ratio=0.01,
+            changed_voxel_limit=8,
+            maximum_seconds=5.0,
+        )
+        self.assertEqual(
+            monitor.observe(
+                iterations=1,
+                elapsed_seconds=0.1,
+                changed_voxel_ratio=0.5,
+                changed_voxels=4,
+                observed_voxels=1000,
+            ),
+            "converged",
         )
 
 
@@ -878,6 +1548,59 @@ class ScribblePromptIntegrationTests(unittest.TestCase):
             self.assertEqual(int(result[:, :, 4:].sum()), 0)
             self.assertEqual((root / "logits.f32").stat().st_size, 32 * 40 * 4)
 
+    def test_official_checkpoint_accepts_clicks_box_and_explicit_plane(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            shape = (32, 40, 8)
+            x, y, _z = np.indices(shape)
+            image = np.exp(-((x - 16) ** 2 + (y - 20) ** 2) / 80.0).astype(np.float32)
+            base = np.zeros(shape, dtype=np.uint8)
+            image.tofile(root / "image.raw")
+            base.tofile(root / "mask.u8")
+            request = {
+                "tool": "scribbleprompt",
+                "display_name": "ScribblePrompt",
+                "shape": list(shape),
+                "spacing_mm": [1.0, 1.0, 2.0],
+                "image_path": str(root / "image.raw"),
+                "image_dtype": "float32",
+                "mask_path": str(root / "mask.u8"),
+                "status_path": str(root / "status.json"),
+                "cancel_path": str(root / "cancel.requested"),
+                "log_path": str(root / "worker.log"),
+                "result_path": str(root / "result.u8"),
+                "logits_result_path": str(root / "logits.f32"),
+                "checkpoint_path": str(
+                    ROOT
+                    / "external"
+                    / "ScribblePrompt"
+                    / "checkpoints"
+                    / "ScribblePrompt_unet_v1_nf192_res128.pt"
+                ),
+                "device": "cpu",
+                "input_size": 128,
+                "prior_logit_magnitude": 6.0,
+                "prompt_plane_axis": 2,
+                "prompt_plane_index": 3,
+                "scribbles": [],
+                "points": [
+                    {"point": [16, 20, 3], "include": True},
+                    {"point": [4, 4, 3], "include": False},
+                ],
+                "boxes": [
+                    {"bbox": [[10, 23], [12, 29], [3, 4]]}
+                ],
+            }
+            request_path = root / "request.json"
+            request_path.write_text(json.dumps(request), encoding="utf-8")
+            self.assertEqual(worker.run(request_path), 0)
+            status = json.loads((root / "status.json").read_text(encoding="utf-8"))
+            result = np.fromfile(root / "result.u8", dtype=np.uint8).reshape(shape)
+            self.assertEqual(status["status"], "completed")
+            self.assertEqual(status["result"]["prompt_counts"], {"points": 2, "scribbles": 0, "boxes": 1})
+            self.assertEqual(int(result[:, :, :3].sum()), 0)
+            self.assertEqual(int(result[:, :, 4:].sum()), 0)
+
 
 class MimicsRuntimeTests(unittest.TestCase):
     def setUp(self):
@@ -921,6 +1644,13 @@ class MimicsRuntimeTests(unittest.TestCase):
     def test_igac_captures_current_mimics_contrast_in_gv(self):
         self.fake.view.contrast = ((125.0, 0.0), (875.0, 1.0))
         self.assertEqual(self.runtime._current_display_contrast_gv(), [125.0, 875.0])
+
+    def test_click_plane_labels_are_derived_from_voxel_to_ras(self):
+        image = FakeImage(_u8_pattern_buffer((4, 5, 6), lambda x, y, z: False))
+        self.assertEqual(
+            self.runtime._click_plane_axes(image),
+            {"Axial View": 2, "Coronal View": 1, "Sagittal View": 0},
+        )
 
     def test_stale_scribble_logits_are_not_reused(self):
         image = FakeImage(_u8_pattern_buffer((2, 3, 4), lambda x, y, z: False))

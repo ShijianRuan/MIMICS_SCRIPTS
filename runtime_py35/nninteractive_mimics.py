@@ -1691,7 +1691,7 @@ def _mask_sha256(mask, shape_hint=None):
     return _sha256_bytes(mask.get_voxel_buffer().tobytes())
 
 
-def _set_mask_from_u8(mask, path, shape):
+def _set_mask_from_u8(mask, path, shape, transaction_name=None):
     with open(path, "rb") as handle:
         raw = handle.read()
     expected = int(shape[0]) * int(shape[1]) * int(shape[2])
@@ -1707,7 +1707,11 @@ def _set_mask_from_u8(mask, path, shape):
             pixels = memoryview(bytearray(raw)).cast("?", shape=list(shape))
             mask.set_voxel_buffer(pixels)
     _with_gui_updates_disabled(
-        lambda: runtime_common.execute_mimics_transaction(mimics, _apply)
+        lambda: runtime_common.execute_mimics_transaction(
+            mimics,
+            _apply,
+            transaction_name or "Apply nnInteractive Prediction",
+        )
     )
 
 

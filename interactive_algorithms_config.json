@@ -42,19 +42,31 @@
     "max_roi_voxels": 10000000,
     "max_cpu_roi_voxels": 1500000,
     "display_interval_seconds": 0.06,
+    "context_display_interval_seconds": 0.12,
     "iterations_per_cycle": 1,
+    "local_refine_margin_mm": 3.0,
     "ffd": {
-      "boundary_capture_mm": 3.0,
-      "influence_radius_mm": 18.0,
+      "boundary_capture_pixels": 16.0,
+      "boundary_capture_max_mm": 8.0,
+      "influence_radius_mm": 8.0,
       "maximum_drag_ratio": 0.65,
-      "anchor_radius_mm": 0.8
+      "anchor_radius_mm": 0.8,
+      "refine_margin_mm": 3.0
+    },
+    "trace": {
+      "capture_pixels": 28.0,
+      "capture_max_mm": 12.0,
+      "sample_spacing_mm": 2.0,
+      "maximum_samples_per_flush": 8,
+      "refine_margin_mm": 3.0
     },
     "convergence": {
-      "minimum_iterations": 3,
-      "maximum_iterations": 80,
-      "stable_cycles": 3,
-      "changed_voxel_ratio": 0.00001,
-      "maximum_seconds": 15.0
+      "minimum_iterations": 2,
+      "maximum_iterations": 24,
+      "stable_cycles": 2,
+      "changed_voxel_ratio": 0.0002,
+      "changed_voxel_limit": 32,
+      "maximum_seconds": 5.0
     },
     "parameters": {
       "range_mm": 3.0,

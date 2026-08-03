@@ -216,31 +216,47 @@ nnInteractive for CUDA memory. `workspace_margin_mm` bounds work around a
 non-empty Mask, while `max_roi_voxels` and `max_cpu_roi_voxels` prevent an
 unresponsive or out-of-memory workspace.
 
-IGAC starts paused. The default `Correct` gesture converts clicks and strokes
-outside the current Mask to Add guidance and those inside the Mask to Barrier
-guidance. A stroke crossing from inside to outside is restored and replayed as
-Add; the opposite crossing is replayed as Barrier. The first crossing locks the
-meaning for the remainder of the stroke. Explicit `Add`, `Remove`, and
-`Clear` remain available as overrides. The translated guidance uses the same 3D
-level-set operations while LGDF fitting runs in small external worker cycles.
-Boundary movement is a separate `Boundary drag (FFD)` tool and never
-implicitly replaces a correction stroke. IGAC `ffd` keys:
+IGAC starts paused and exposes a complete continuous contour, not a set of
+control-point markers. `Drag contour` moves one captured contour position.
+`Guide edge` resamples an ordered pointer path and repeatedly attracts the
+nearest current contour section with the same local FFD. Neither tool exposes a
+foreground/background paint mode. LGDF starts once, after release, and operates
+only on the merged edited 3D neighbourhood. IGAC `ffd` keys:
 
-- `boundary_capture_mm` (default `3.0`): maximum physical distance from the
-  pointer to a displayed Mask boundary point when starting a pull.
-- `influence_radius_mm` (default `18.0`): initial physical radius of the local
-  3D cubic B-spline support. The UI exposes this value.
-- `maximum_drag_ratio` (default `0.65`): maximum drag/support ratio. A larger
-  drag expands support automatically instead of accepting a folded field.
+- `boundary_capture_pixels` (default `16.0`): screen-space hit target for a
+  displayed Mask boundary, kept usable at different zoom levels and DPI scales.
+- `boundary_capture_max_mm` (default `8.0`): physical upper bound on boundary
+  capture so a distant contour is never selected accidentally.
+- `influence_radius_mm` (default `8.0`): fixed physical radius of the local 3D
+  cubic B-spline support. The UI exposes this value.
+- `maximum_drag_ratio` (default `0.65`): maximum applied drag/support ratio. A
+  longer pointer movement is visibly clamped instead of expanding the support.
 - `anchor_radius_mm` (default `0.8`): small inside/outside pins around the
   target boundary used while LGDF settles after release.
+- `refine_margin_mm` (default `3.0`): physical margin added around the FFD patch
+  for the post-release local LGDF cycle.
+
+IGAC `trace` keys:
+
+- `capture_pixels` (default `28.0`) and `capture_max_mm` (default `12.0`):
+  screen and physical limits for starting trajectory guidance near a contour.
+- `sample_spacing_mm` (default `2.0`): physical spacing used to resample
+  coalesced pointer events while preserving their order.
+- `maximum_samples_per_flush` (default `8`): bound on work consumed from one
+  GUI event batch so pointer updates cannot build an ever-growing backlog.
+- `refine_margin_mm` (default `3.0`): local margin used by the single LGDF cycle
+  started after pointer release.
 
 Static image planes are cached; live frames update only Mask/guidance overlays.
+The large canvas is the only editable plane. Two read-only orthogonal context
+views share a linked 3D cursor, use physical voxel aspect ratios, and refresh at
+`context_display_interval_seconds` (default `0.12` seconds). Pointer updates are
+coalesced so the context views cannot build an input backlog.
 `convergence` controls the visible-Mask stability test and the per-action
 time/iteration safety ceilings. **Stop** keeps the current preview,
-**Undo last** restores the exact pre-action level set and constraints, and
+**Undo** restores the exact pre-action level set and constraints, and
 **Reset** restores the Mask captured when the workspace opened. No gradient
-peak snapping or direct deformation of the Mask is used.
+peak snapping or foreground/background painting is used by the normal GUI.
 
 ScribblePrompt uses the official UNet checkpoint at
 `external/ScribblePrompt/checkpoints/ScribblePrompt_unet_v1_nf192_res128.pt`.

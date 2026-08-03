@@ -309,6 +309,13 @@ def _cleanup_old_jobs(action, config):
 
 def _delete_visual_objects(values):
     for obj in values or []:
+        deleter = getattr(nnm, "_delete_mimics_object", None)
+        if callable(deleter):
+            try:
+                deleter(obj)
+                continue
+            except Exception:
+                pass
         try:
             mimics.data.masks.delete(obj)
         except Exception:
@@ -422,34 +429,284 @@ def _capture_scribble(image, include, job_dir, visual_objects):
         raise
 
 
-def _collect_scribbles(image, job_dir, visual_objects):
-    values = []
+def _prompt_plane_from_bbox(bbox, preferred_axis=None):
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 3:
+        return None
+    candidates = []
+    for axis in range(3):
+        try:
+            if int(bbox[axis][1]) - int(bbox[axis][0]) == 1:
+                candidates.append(axis)
+        except Exception:
+            return None
+    if preferred_axis in candidates:
+        axis = int(preferred_axis)
+    elif len(candidates) == 1:
+        axis = candidates[0]
+    else:
+        return None
+    return axis, int(bbox[axis][0])
+
+
+def _click_plane_axes(image):
+    matrix = nnm._parse_matrix_metadata(
+        nnm._metadata_get(image, nnm.MIMICS_VOXEL_TO_RAS_MATRIX_METADATA, "")
+    )
+    if matrix is None:
+        dimensions = getattr(image, "logical_dimensions", None)
+        try:
+            shape = [int(dimensions[0]), int(dimensions[1]), int(dimensions[2])]
+        except Exception:
+            shape = None
+        if shape:
+            matrix = nnm._derive_image_voxel_to_ras_matrix(image, shape)
+    if matrix is None:
+        return None
+    result = {}
+    for label, world_axis in (
+        ("Axial View", 2),
+        ("Coronal View", 1),
+        ("Sagittal View", 0),
+    ):
+        scores = []
+        for voxel_axis in range(3):
+            length = math.sqrt(
+                sum(float(matrix[row][voxel_axis]) ** 2 for row in range(3))
+            )
+            score = (
+                abs(float(matrix[world_axis][voxel_axis])) / length
+                if length > 0.0
+                else 0.0
+            )
+            scores.append(score)
+        axis = max(range(3), key=lambda value: scores[value])
+        if scores[axis] < 0.5:
+            return None
+        result[label] = axis
+    if len(set(result.values())) != 3:
+        return None
+    return result
+
+
+def _choose_click_plane(image):
+    axes = _click_plane_axes(image)
+    if not axes:
+        mimics.dialogs.message_box(
+            title="ScribblePrompt",
+            message=(
+                "The active image orientation could not be mapped safely to the three "
+                "standard 2D views. Add a Scribble or Box first so the slice is explicit."
+            ),
+            ui_blocking=True,
+        )
+        return None
+    labels = ["Axial View", "Coronal View", "Sagittal View"]
+    answer = mimics.dialogs.question_box(
+        title="ScribblePrompt Plane",
+        message=(
+            "Choose the 2D view in which you are placing prompts. All prompts in this "
+            "prediction must stay on that same slice."
+        ),
+        buttons=";".join(labels + ["Cancel"]),
+        ui_blocking=True,
+    )
+    if answer not in axes:
+        return None
+    return int(axes[answer])
+
+
+def _choose_prompt_sign():
+    answer = mimics.dialogs.question_box(
+        title="ScribblePrompt",
+        message=(
+            "Foreground marks pixels that belong to the structure.\n"
+            "Background marks pixels that must be excluded."
+        ),
+        buttons="Foreground;Background;Cancel",
+        ui_blocking=True,
+    )
+    if answer == "Foreground":
+        return True
+    if answer == "Background":
+        return False
+    return None
+
+
+def _capture_prompt_point(image, include):
+    try:
+        coordinates = mimics.indicate_coordinate(
+            message=(
+                "Click inside the structure."
+                if include
+                else "Click an area that must be excluded."
+            ),
+            show_message_box=True,
+            confirm=False,
+            title="ScribblePrompt",
+        )
+    except mimics.UserInterrupted:
+        return None
+    indexes = [int(value) for value in image.get_voxel_indexes(coordinates)]
+    marker = None
+    try:
+        marker = mimics.analyze.create_point(
+            point=nnm._point_coordinates(coordinates),
+            name="ScribblePrompt {0} Click".format(
+                "Foreground" if include else "Background"
+            ),
+            color=(0.1, 1.0, 0.2) if include else (1.0, 0.2, 0.1),
+        )
+    except Exception:
+        pass
+    return {
+        "point": indexes,
+        "include": bool(include),
+        "_visual_object": marker,
+    }
+
+
+def _remove_visual_object(value, visual_objects):
+    if value is None:
+        return
+    visual_objects[:] = [item for item in visual_objects if item is not value]
+    _delete_visual_objects([value])
+
+
+def _collect_scribbleprompt_prompts(image, target, job_dir, visual_objects):
+    records = []
+    plane_axis = None
+    plane_index = None
+
+    def accept_plane(candidate, visual):
+        nonlocal plane_axis, plane_index
+        if candidate is None:
+            _remove_visual_object(visual, visual_objects)
+            mimics.dialogs.message_box(
+                title="ScribblePrompt",
+                message=(
+                    "This prompt does not identify one 2D image slice. Draw it in one "
+                    "axial, coronal, or sagittal view and try again."
+                ),
+                ui_blocking=True,
+            )
+            return False
+        axis, index = candidate
+        if plane_axis is None:
+            plane_axis, plane_index = int(axis), int(index)
+            return True
+        if int(axis) == plane_axis and int(index) == plane_index:
+            return True
+        _remove_visual_object(visual, visual_objects)
+        mimics.dialogs.message_box(
+            title="ScribblePrompt",
+            message=(
+                "All clicks, scribbles, and the box for one prediction must be placed "
+                "on the same 2D slice. The last prompt was not added."
+            ),
+            ui_blocking=True,
+        )
+        return False
+
     while True:
-        foreground = len([value for value in values if value.get("include")])
-        background = len(values) - foreground
-        buttons = ["Add Foreground Scribble", "Add Background Scribble"]
-        if foreground:
+        clicks = [item for item in records if item["kind"] == "point"]
+        scribbles = [item for item in records if item["kind"] == "scribble"]
+        boxes = [item for item in records if item["kind"] == "box"]
+        positive = any(
+            item["kind"] == "box" or bool(item["value"].get("include"))
+            for item in records
+        )
+        can_run = bool(records) and (
+            positive or int(getattr(target, "number_of_pixels", 0) or 0) > 0
+        )
+        buttons = ["Add Click", "Add Scribble"]
+        if not boxes:
+            buttons.append("Add Box")
+        if records:
+            buttons.append("Undo Last")
+        if can_run:
             buttons.append("Run ScribblePrompt")
         buttons.append("Cancel")
         answer = mimics.dialogs.question_box(
             title="ScribblePrompt",
             message=(
-                "Draw foreground and optional background scribbles on one 2D image slice.\n\n"
-                "Foreground scribbles: {0}\nBackground scribbles: {1}"
-            ).format(foreground, background),
+                "Add clicks, scribbles, or one foreground box on a single 2D slice. "
+                "Existing Mask content and the previous prediction are used for refinement.\n\n"
+                "Clicks: {0}    Scribbles: {1}    Box: {2}\n"
+                "Foreground prompts: {3}    Background prompts: {4}"
+            ).format(
+                len(clicks),
+                len(scribbles),
+                "added" if boxes else "none",
+                len([item for item in records if item["kind"] == "box" or item["value"].get("include")]),
+                len([item for item in records if item["kind"] != "box" and not item["value"].get("include")]),
+            ),
             buttons=";".join(buttons),
             ui_blocking=True,
         )
-        if answer == "Add Foreground Scribble":
-            value = _capture_scribble(image, True, job_dir, visual_objects)
+        if answer == "Add Click":
+            include = _choose_prompt_sign()
+            if include is None:
+                continue
+            chosen_axis = plane_axis
+            if chosen_axis is None:
+                chosen_axis = _choose_click_plane(image)
+                if chosen_axis is None:
+                    continue
+            value = _capture_prompt_point(image, include)
             if value is not None:
-                values.append(value)
-        elif answer == "Add Background Scribble":
-            value = _capture_scribble(image, False, job_dir, visual_objects)
+                visual = value.pop("_visual_object", None)
+                if visual is not None:
+                    visual_objects.append(visual)
+                candidate = (chosen_axis, int(value["point"][chosen_axis]))
+                if accept_plane(candidate, visual):
+                    records.append({"kind": "point", "value": value, "visual": visual})
+        elif answer == "Add Scribble":
+            include = _choose_prompt_sign()
+            if include is None:
+                continue
+            before = len(visual_objects)
+            value = _capture_scribble(image, include, job_dir, visual_objects)
             if value is not None:
-                values.append(value)
-        elif answer == "Run ScribblePrompt" and foreground:
-            return values
+                visual = visual_objects[-1] if len(visual_objects) > before else None
+                candidate = _prompt_plane_from_bbox(value.get("bbox"), plane_axis)
+                if candidate is None and plane_axis is None:
+                    chosen_axis = _choose_click_plane(image)
+                    candidate = _prompt_plane_from_bbox(
+                        value.get("bbox"), chosen_axis
+                    )
+                if accept_plane(candidate, visual):
+                    records.append({"kind": "scribble", "value": value, "visual": visual})
+        elif answer == "Add Box":
+            before = len(visual_objects)
+            value = nnm._capture_box(image, visual_objects)
+            if value is not None:
+                visual = visual_objects[-1] if len(visual_objects) > before else None
+                candidate = _prompt_plane_from_bbox(value.get("bbox"), plane_axis)
+                if accept_plane(candidate, visual):
+                    records.append({"kind": "box", "value": value, "visual": visual})
+        elif answer == "Undo Last" and records:
+            removed = records.pop()
+            _remove_visual_object(removed.get("visual"), visual_objects)
+            if records:
+                first = records[0]
+                if first["kind"] == "point":
+                    plane_axis = int(plane_axis)
+                    plane_index = int(first["value"]["point"][plane_axis])
+                else:
+                    plane_axis, plane_index = _prompt_plane_from_bbox(
+                        first["value"].get("bbox"), plane_axis
+                    )
+            else:
+                plane_axis = None
+                plane_index = None
+        elif answer == "Run ScribblePrompt" and can_run:
+            return {
+                "scribbles": [item["value"] for item in records if item["kind"] == "scribble"],
+                "points": [item["value"] for item in records if item["kind"] == "point"],
+                "boxes": [item["value"] for item in records if item["kind"] == "box"],
+                "plane_axis": plane_axis,
+                "plane_index": plane_index,
+            }
         else:
             return None
 
@@ -510,7 +767,7 @@ def _write_initial_status(path, action):
     )
 
 
-def _prepare_request(action, image, target, config, job_dir, scribbles=None, parameters=None):
+def _prepare_request(action, image, target, config, job_dir, prompts=None, parameters=None):
     inputs = os.path.join(job_dir, "inputs")
     outputs = os.path.join(job_dir, "outputs")
     snapshot_started = time.time()
@@ -566,11 +823,11 @@ def _prepare_request(action, image, target, config, job_dir, scribbles=None, par
         "log_path": os.path.join(job_dir, "worker.log"),
         "result_path": os.path.join(outputs, "result.u8"),
         "logits_result_path": os.path.join(outputs, "slice_logits.f32"),
-        "scribbles": list(scribbles or []),
         "parameters": dict(parameters or {}),
     }
     if action == ACTION_SCRIBBLEPROMPT:
         section = config.get("scribbleprompt") or {}
+        prompt_values = dict(prompts or {})
         request.update(
             {
                 "checkpoint_path": _checkpoint_path(config),
@@ -578,6 +835,11 @@ def _prepare_request(action, image, target, config, job_dir, scribbles=None, par
                 "input_size": section.get("input_size", 128),
                 "prior_logit_magnitude": section.get("prior_logit_magnitude", 6.0),
                 "gpu_lock_timeout_seconds": section.get("gpu_lock_timeout_seconds", 120),
+                "scribbles": list(prompt_values.get("scribbles") or []),
+                "points": list(prompt_values.get("points") or []),
+                "boxes": list(prompt_values.get("boxes") or []),
+                "prompt_plane_axis": prompt_values.get("plane_axis"),
+                "prompt_plane_index": prompt_values.get("plane_index"),
             }
         )
         request.update(_session_values(target, mask_export["sha256"]))
@@ -610,9 +872,9 @@ def _prepare_request(action, image, target, config, job_dir, scribbles=None, par
     return request_path, request
 
 
-def _launch(action, image, target, config, job_dir, scribbles=None, parameters=None, visual_objects=None):
+def _launch(action, image, target, config, job_dir, prompts=None, parameters=None, visual_objects=None):
     request_path, request = _prepare_request(
-        action, image, target, config, job_dir, scribbles=scribbles, parameters=parameters
+        action, image, target, config, job_dir, prompts=prompts, parameters=parameters
     )
     if action == ACTION_IGAC:
         stderr_handle = None
@@ -1132,8 +1394,10 @@ def _start_scribbleprompt(config):
     job_dir = _unique_job_dir(ACTION_SCRIBBLEPROMPT)
     visual_objects = []
     try:
-        scribbles = _collect_scribbles(image, job_dir, visual_objects)
-        if not scribbles:
+        prompts = _collect_scribbleprompt_prompts(
+            image, target, job_dir, visual_objects
+        )
+        if not prompts:
             _delete_visual_objects(visual_objects)
             shutil.rmtree(job_dir, ignore_errors=True)
             return 0
@@ -1147,7 +1411,7 @@ def _start_scribbleprompt(config):
             target,
             config,
             job_dir,
-            scribbles=scribbles,
+            prompts=prompts,
             visual_objects=visual_objects,
         )
     except Exception:

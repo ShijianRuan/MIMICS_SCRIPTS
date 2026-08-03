@@ -542,7 +542,9 @@ def inject_buffer(mask, buffer_path, mimics_shape):
             view = memoryview(bytearray(raw)).cast("?", shape=list(mimics_shape))
             mask.set_voxel_buffer(view)
 
-    runtime_common.execute_mimics_transaction(mimics, _apply)
+    runtime_common.execute_mimics_transaction(
+        mimics, _apply, "Import Mask into Project"
+    )
     return method[0]
 
 

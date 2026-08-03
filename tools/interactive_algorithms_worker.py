@@ -304,26 +304,50 @@ def _write_plane(volume: np.ndarray, plane: np.ndarray, axis: int, index: int) -
     volume[tuple(slices)] = plane
 
 
-def _prompt_plane(specs: list[dict[str, Any]], shape: tuple[int, int, int]) -> tuple[int, int]:
-    axis = None
-    index = None
+def _prompt_plane(
+    specs: list[dict[str, Any]],
+    shape: tuple[int, int, int],
+    requested_axis: Any = None,
+    requested_index: Any = None,
+) -> tuple[int, int]:
+    if requested_axis is not None and requested_index is not None:
+        axis = int(requested_axis)
+        index = int(requested_index)
+        if axis not in (0, 1, 2) or index < 0 or index >= shape[axis]:
+            raise RuntimeError("The selected ScribblePrompt slice lies outside the active image.")
+    else:
+        possible = None
+        for spec in specs:
+            bbox = spec.get("bbox") or []
+            if len(bbox) != 3:
+                raise RuntimeError("A ScribblePrompt interaction is missing its 3D bounding box.")
+            current = {
+                (value, int(bbox[value][0]))
+                for value in range(3)
+                if int(bbox[value][1]) - int(bbox[value][0]) == 1
+            }
+            possible = current if possible is None else possible.intersection(current)
+        if not possible:
+            raise RuntimeError(
+                "All ScribblePrompt interactions must be drawn on the same slice in one 2D view."
+            )
+        if len(possible) != 1:
+            raise RuntimeError(
+                "The prompt slice is ambiguous. Choose the 2D view explicitly or add a Box first."
+            )
+        axis, index = next(iter(possible))
+
     for spec in specs:
         bbox = spec.get("bbox") or []
         if len(bbox) != 3:
             raise RuntimeError("A ScribblePrompt interaction is missing its 3D bounding box.")
-        candidates = [value for value in range(3) if int(bbox[value][1]) - int(bbox[value][0]) == 1]
-        if len(candidates) != 1:
-            raise RuntimeError("Each ScribblePrompt scribble must lie on exactly one 2D image slice.")
-        current_axis = candidates[0]
-        current_index = int(bbox[current_axis][0])
-        if current_index < 0 or current_index >= shape[current_axis]:
+        if int(bbox[axis][1]) - int(bbox[axis][0]) != 1:
+            raise RuntimeError("Each ScribblePrompt interaction must lie on the selected 2D slice.")
+        current_index = int(bbox[axis][0])
+        if current_index < 0 or current_index >= shape[axis]:
             raise RuntimeError("A ScribblePrompt interaction lies outside the active image.")
-        if axis is None:
-            axis, index = current_axis, current_index
-        elif axis != current_axis or index != current_index:
-            raise RuntimeError("All ScribblePrompt scribbles in one prediction must be drawn on the same slice.")
-    if axis is None or index is None:
-        raise RuntimeError("At least one ScribblePrompt scribble is required.")
+        if index != current_index:
+            raise RuntimeError("All ScribblePrompt interactions must be drawn on the same slice.")
     return int(axis), int(index)
 
 
@@ -348,6 +372,59 @@ def _scribble_planes(
     overlap = (output[0] > 0) & (output[1] > 0)
     if np.any(overlap):
         raise RuntimeError("Foreground and background ScribblePrompt strokes overlap.")
+    return output
+
+
+def _point_channels(
+    points: list[dict[str, Any]],
+    shape: tuple[int, int, int],
+    axis: int,
+    index: int,
+    output_shape: tuple[int, int],
+) -> np.ndarray:
+    plane_axes = [value for value in range(3) if value != axis]
+    plane_shape = (shape[plane_axes[0]], shape[plane_axes[1]])
+    output = np.zeros((2,) + tuple(output_shape), dtype=np.float32)
+    for spec in points:
+        point = [int(value) for value in spec.get("point") or []]
+        if len(point) != 3 or any(point[value] < 0 or point[value] >= shape[value] for value in range(3)):
+            raise RuntimeError("A ScribblePrompt click lies outside the active image.")
+        if point[axis] != index:
+            raise RuntimeError("All ScribblePrompt clicks must be placed on the selected 2D slice.")
+        x = int(point[plane_axes[1]] * (float(output_shape[1]) / float(plane_shape[1])))
+        y = int(point[plane_axes[0]] * (float(output_shape[0]) / float(plane_shape[0])))
+        x = min(output_shape[1] - 1, max(0, x))
+        y = min(output_shape[0] - 1, max(0, y))
+        channel = 0 if bool(spec.get("include", True)) else 1
+        output[channel, y, x] = 1.0
+    return output
+
+
+def _box_channel(
+    boxes: list[dict[str, Any]],
+    shape: tuple[int, int, int],
+    axis: int,
+    index: int,
+    output_shape: tuple[int, int],
+) -> np.ndarray:
+    plane_axes = [value for value in range(3) if value != axis]
+    plane_shape = (shape[plane_axes[0]], shape[plane_axes[1]])
+    output = np.zeros((1,) + tuple(output_shape), dtype=np.float32)
+    for spec in boxes:
+        bbox = spec.get("bbox") or []
+        if len(bbox) != 3 or int(bbox[axis][1]) - int(bbox[axis][0]) != 1:
+            raise RuntimeError("A ScribblePrompt Box must lie on one 2D image slice.")
+        if int(bbox[axis][0]) != index:
+            raise RuntimeError("The ScribblePrompt Box is not on the selected prompt slice.")
+        y1 = int(int(bbox[plane_axes[0]][0]) * (float(output_shape[0]) / float(plane_shape[0])))
+        y2 = int(int(bbox[plane_axes[0]][1]) * (float(output_shape[0]) / float(plane_shape[0])))
+        x1 = int(int(bbox[plane_axes[1]][0]) * (float(output_shape[1]) / float(plane_shape[1])))
+        x2 = int(int(bbox[plane_axes[1]][1]) * (float(output_shape[1]) / float(plane_shape[1])))
+        x1, x2 = sorted((max(0, x1), min(output_shape[1], x2)))
+        y1, y2 = sorted((max(0, y1), min(output_shape[0], y2)))
+        if x2 <= x1 or y2 <= y1:
+            raise RuntimeError("The ScribblePrompt Box became empty after input resizing.")
+        output[0, y1:y2, x1:x2] = 1.0
     return output
 
 
@@ -409,22 +486,31 @@ def _gpu_lock(job: Job, device: Any) -> Any:
     last_notice = [0.0]
 
     def on_wait(holder: dict[str, Any]) -> None:
+        release_requested = False
         try:
             from tools.fewshot_pipeline import (
                 request_nninteractive_server_release_on_contention,
             )
 
-            request_nninteractive_server_release_on_contention(holder)
+            release_requested = request_nninteractive_server_release_on_contention(holder)
         except Exception:
             pass
         now = time.time()
         if now - last_notice[0] >= 10.0:
+            if release_requested:
+                message = (
+                    "Releasing the idle nnInteractive model before "
+                    "ScribblePrompt starts. Mimics remains available."
+                )
+            else:
+                message = (
+                    "Waiting for the GPU held by {}. Mimics remains available."
+                    .format(str((holder or {}).get("owner") or "another AI task"))
+                )
             job.status(
                 "waiting_for_gpu",
                 8,
-                "Waiting for the GPU held by {}. Mimics remains available.".format(
-                    str((holder or {}).get("owner") or "another AI task")
-                ),
+                message,
             )
             last_notice[0] = now
     lock.acquire(
@@ -447,7 +533,14 @@ def run_scribbleprompt(job: Job) -> dict[str, Any]:
     request = job.request
     shape = _shape(request)
     specs = list(request.get("scribbles") or [])
-    axis, index = _prompt_plane(specs, shape)
+    points = list(request.get("points") or [])
+    boxes = list(request.get("boxes") or [])
+    axis, index = _prompt_plane(
+        specs + boxes,
+        shape,
+        requested_axis=request.get("prompt_plane_axis"),
+        requested_index=request.get("prompt_plane_index"),
+    )
     checkpoint = _resolve_checkpoint(request)
     device_name = str(request.get("device") or "cpu").lower()
     if device_name == "auto":
@@ -457,14 +550,12 @@ def run_scribbleprompt(job: Job) -> dict[str, Any]:
     device = torch.device(device_name)
     lock = None
     try:
-        job.status("reading_inputs", 8, "Reading the active image, selected Mask, and scribbles.")
+        job.status("reading_inputs", 8, "Reading the active image, selected Mask, and prompts.")
         image = _raw_array(request["image_path"], request["image_dtype"], shape)
         base_mask = np.asarray(_raw_array(request["mask_path"], "uint8", shape), dtype=bool)
         image_plane = _normalise_image(_plane_from_volume(image, axis, index))
         base_plane = _plane_from_volume(base_mask, axis, index)
         scribbles = _scribble_planes(specs, shape, axis, index)
-        if not np.any(scribbles[0]):
-            raise RuntimeError("ScribblePrompt requires at least one foreground scribble.")
         job.check_cancelled()
 
         input_size = max(32, int(request.get("input_size", 128)))
@@ -476,6 +567,15 @@ def run_scribbleprompt(job: Job) -> dict[str, Any]:
         scribble_small = torch_functional.interpolate(
             scribble_tensor, size=(input_size, input_size), mode="bilinear", align_corners=False
         ).clamp_(0.0, 1.0)
+        point_values = _point_channels(
+            points, shape, axis, index, (input_size, input_size)
+        )
+        point_small = torch.from_numpy(point_values.copy())[None].float()
+        prompt_small = torch.clamp(scribble_small + point_small, 0.0, 1.0)
+        box_values = _box_channel(
+            boxes, shape, axis, index, (input_size, input_size)
+        )
+        box_channel = torch.from_numpy(box_values.copy())[None].float()
 
         prior_source = "empty"
         prior_path = str(request.get("previous_logits_path") or "")
@@ -500,11 +600,23 @@ def run_scribbleprompt(job: Job) -> dict[str, Any]:
             prior_source = "selected_mask"
         if prior is None:
             prior = torch.zeros_like(image_tensor)
+        has_prior = prior_source != "empty"
+        has_positive_prompt = bool(
+            np.any(scribbles[0])
+            or np.any(point_values[0])
+            or np.any(box_values[0])
+        )
+        if not has_positive_prompt and not has_prior:
+            raise RuntimeError(
+                "Start ScribblePrompt with a foreground click, foreground scribble, or Box. "
+                "Background-only correction is available after a Mask or prediction exists."
+            )
         prior_small = torch_functional.interpolate(
             prior.float(), size=(input_size, input_size), mode="bilinear", align_corners=False
         )
-        box_channel = torch.zeros_like(image_small)
-        model_input = torch.cat((image_small, box_channel, scribble_small, prior_small), dim=1)
+        model_input = torch.cat(
+            (image_small, box_channel, prompt_small, prior_small), dim=1
+        )
 
         job.status("waiting_for_compute", 25, "Preparing the ScribblePrompt model on {}.".format(device))
         lock = _gpu_lock(job, device)
@@ -541,6 +653,11 @@ def run_scribbleprompt(job: Job) -> dict[str, Any]:
             "logits_path": str(logits_path),
             "logits_shape": list(image_plane.shape),
             "prior_source": prior_source,
+            "prompt_counts": {
+                "points": len(points),
+                "scribbles": len(specs),
+                "boxes": len(boxes),
+            },
             "device": str(device),
         }
     finally:

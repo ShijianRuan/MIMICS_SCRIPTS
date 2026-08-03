@@ -64,7 +64,7 @@ def clear_progress_notice(state, key):
         state.pop("_progress_notices", None)
 
 
-def execute_mimics_transaction(mimics_module, operation):
+def execute_mimics_transaction(mimics_module, operation, transaction_name=None):
     """Run one foreground mutation in a Mimics transaction when available.
 
     The external computations remain outside Mimics.  Only the final, already
@@ -75,12 +75,25 @@ def execute_mimics_transaction(mimics_module, operation):
     transaction_class = getattr(mimics_module, "Transaction", None)
     if not callable(transaction_class):
         return operation()
+    name = str(transaction_name or "Mimics-Script Mask Update")
     try:
-        transaction = transaction_class()
+        transaction = transaction_class(name)
+    except TypeError as named_error:
+        # A few older/fake Mimics runtimes expose a no-argument Transaction.
+        # Current Mimics requires a transaction name, so always try the
+        # documented named form first.
+        try:
+            transaction = transaction_class()
+        except Exception as fallback_error:
+            raise RuntimeError(
+                "Mimics could not start transaction '{0}'; the Mask was not "
+                "changed. Named constructor: {1}; compatibility constructor: "
+                "{2}".format(name, named_error, fallback_error)
+            )
     except Exception as exc:
         raise RuntimeError(
-            "Mimics could not start a transaction; the Mask was not changed: "
-            "{0}".format(exc)
+            "Mimics could not start transaction '{0}'; the Mask was not "
+            "changed: {1}".format(name, exc)
         )
 
     error = None
@@ -472,8 +485,36 @@ def import_runtime_base(project_root):
     return os.path.join(project, ".mimics_runtime")
 
 
-def find_root(start_dir, sentinel_files, max_depth=6):
+def user_config_dir():
+    """Return persistent per-user configuration outside disposable runtimes."""
+    configured = os.environ.get("MIMICS_USER_CONFIG_DIR", "").strip()
+    if configured:
+        return os.path.abspath(os.path.expandvars(os.path.expanduser(configured)))
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+        if base:
+            return os.path.join(base, "Mimics-Script")
+    return os.path.join(os.path.expanduser("~"), ".mimics_script")
+
+
+def find_root(start_dir, sentinel_files=None, max_depth=6):
+    """Find the repository root from a file or directory path.
+
+    ``sentinel_files`` is optional because Mimics entry modules historically
+    called this helper with only ``__file__``.  Keeping the default here avoids
+    signature drift when another entry point adopts the shared helper.
+    """
+    if sentinel_files is None:
+        sentinel_files = (
+            "mimics_io_config.json",
+            "fewshot_config.json",
+            "runtime_py35",
+        )
+    elif isinstance(sentinel_files, str):
+        sentinel_files = (sentinel_files,)
     current = os.path.abspath(start_dir)
+    if os.path.isfile(current) or not os.path.isdir(current):
+        current = os.path.dirname(current)
     for _ in range(max_depth):
         for sentinel in sentinel_files:
             if os.path.isfile(os.path.join(current, sentinel)):

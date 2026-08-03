@@ -379,10 +379,34 @@ class FakeFile:
         self.fake.imported_dicom.append(source_folder or kwargs.get("source_folder"))
 
 
+class FakeTransaction:
+    """Match the real Mimics contract: every transaction has a user-facing name."""
+
+    def __init__(self, transaction_name):
+        if not str(transaction_name or "").strip():
+            raise TypeError("transaction_name is required")
+        self.transaction_name = str(transaction_name)
+        self.committed = False
+        self.rolled_back = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def commit(self):
+        self.committed = True
+
+    def rollback(self):
+        self.rolled_back = True
+
+
 class FakeMimics(types.ModuleType):
     def __init__(self):
         super().__init__("mimics")
         self.UserInterrupted = type("UserInterrupted", (Exception,), {})
+        self.Transaction = FakeTransaction
         self.logging = FakeLogging()
         self.dialogs = FakeDialogs()
         self.data = SimpleNamespace(
@@ -498,6 +522,8 @@ def test_runtime_imports(fake, tmp):
         "fewshot_mimics",
         "nninteractive_mimics",
         "nninteractive_finetune_mimics",
+        "interactive_algorithms_mimics",
+        "nnunet_mimics",
         "create_mcs_batch",
         "mask_identifier",
     ]

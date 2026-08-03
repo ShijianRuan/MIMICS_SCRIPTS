@@ -19,7 +19,10 @@ class LocalFFDResult:
     slices_zyx: tuple[slice, slice, slice]
     values: Any
     drag_distance_mm: float
+    applied_drag_distance_mm: float
     influence_radius_mm: float
+    drag_was_clamped: bool
+    applied_end_zyx: tuple[float, float, float]
 
 
 def centered_cubic_bspline(torch: Any, coordinate: Any) -> Any:
@@ -62,9 +65,9 @@ def warp_signed_distance(
     """Warp a local signed-distance patch using a physical-space B-spline FFD.
 
     ``start_zyx`` and ``end_zyx`` are continuous voxel coordinates in the same
-    local grid as ``base_phi``.  The returned tensor contains only the affected
-    patch.  Large drags automatically expand the support radius instead of
-    creating a folded deformation field.
+    local grid as ``base_phi``. The returned tensor contains only the affected
+    patch. The support radius is fixed: a long pointer movement is clamped to a
+    safe local displacement instead of silently turning into a global edit.
     """
     if int(base_phi.ndim) != 5:
         raise ValueError("FFD expects a [N, C, Z, Y, X] signed-distance tensor.")
@@ -83,12 +86,21 @@ def warp_signed_distance(
 
     requested_radius = max(2.0, float(influence_radius_mm))
     ratio = min(0.8, max(0.2, float(maximum_drag_ratio)))
-    effective_radius = max(requested_radius, distance / ratio)
+    maximum_distance = requested_radius * ratio
+    applied_scale = min(1.0, maximum_distance / distance)
+    applied_delta = tuple(value * applied_scale for value in delta)
+    applied_end_physical = tuple(
+        start + value for start, value in zip(start_physical, applied_delta)
+    )
+    applied_distance = distance * applied_scale
+    effective_radius = requested_radius
     lattice_spacing = effective_radius / 2.0
 
     shape_zyx = tuple(int(value) for value in base_phi.shape[-3:])
     axes: list[tuple[int, int]] = []
-    for start, end, step, size in zip(start_physical, end_physical, spacing, shape_zyx):
+    for start, end, step, size in zip(
+        start_physical, applied_end_physical, spacing, shape_zyx
+    ):
         lower = max(0, int(math.floor((min(start, end) - effective_radius) / step)) - 1)
         upper = min(size, int(math.ceil((max(start, end) + effective_radius) / step)) + 2)
         axes.append((lower, upper))
@@ -112,7 +124,7 @@ def warp_signed_distance(
         weight = _weight(torch, source_physical, start_physical, lattice_spacing)
         source_physical = [
             target - weight * float(component)
-            for target, component in zip(target_physical, delta)
+            for target, component in zip(target_physical, applied_delta)
         ]
 
     source_indices = [
@@ -144,5 +156,10 @@ def warp_signed_distance(
         slices_zyx=tuple(slice(lower, upper) for lower, upper in axes),  # type: ignore[arg-type]
         values=values,
         drag_distance_mm=float(distance),
+        applied_drag_distance_mm=float(applied_distance),
         influence_radius_mm=float(effective_radius),
+        drag_was_clamped=bool(applied_scale < 1.0 - 1.0e-6),
+        applied_end_zyx=tuple(
+            value / step for value, step in zip(applied_end_physical, spacing)
+        ),
     )

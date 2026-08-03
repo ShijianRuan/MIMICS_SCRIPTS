@@ -1411,7 +1411,7 @@ class MimicsRuntimeTests(unittest.TestCase):
         sys.modules["mimics"] = mimics
 
         runtime = types.ModuleType("runtime_common")
-        runtime.find_root = lambda value: str(ROOT)
+        runtime.find_root = lambda value, sentinel_files=None, max_depth=6: str(ROOT)
         runtime.read_json = common.read_json
         runtime.write_json_atomic = common.write_json_atomic
         runtime.safe_slug = common.safe_identifier
@@ -1425,7 +1425,9 @@ class MimicsRuntimeTests(unittest.TestCase):
         fewshot = types.ModuleType("fewshot_mimics")
         fewshot._mask_identity = lambda mask: mask.guid
         fewshot._new_prediction_mask = lambda name: FakeMask(name, 0)
-        fewshot._set_mask_from_u8 = lambda mask, path, shape: setattr(mask, "applied", True)
+        fewshot._set_mask_from_u8 = lambda mask, path, shape, transaction_name=None: setattr(
+            mask, "applied", True
+        )
         fewshot._monitor_target_is_open = lambda monitor: (True, "")
         fewshot._current_project_path = lambda: ""
         fewshot._active_live_grid_payload = lambda: {}
@@ -1567,7 +1569,7 @@ class MimicsRuntimeTests(unittest.TestCase):
 
             calls = [0]
 
-            def fail_once(mask, path, shape):
+            def fail_once(mask, path, shape, transaction_name=None):
                 calls[0] += 1
                 if calls[0] == 1:
                     raise RuntimeError("simulated Mimics crash")

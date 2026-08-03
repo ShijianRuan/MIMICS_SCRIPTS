@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import importlib.util
 import json
@@ -1726,6 +1727,21 @@ class StatusAndLifecycleTests(unittest.TestCase):
                 (backups[0] / "old.txt").read_text(encoding="utf-8"),
                 "old",
             )
+
+    def test_directory_model_fingerprint_matches_remote_shell_protocol(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            model = Path(temporary) / "model"
+            model.mkdir()
+            (model / "config.json").write_text("{}", encoding="utf-8")
+            (model / "model.safetensors").write_bytes(b"weights")
+            digests = sorted(
+                controller._sha256_file(path)
+                for path in (model / "config.json", model / "model.safetensors")
+            )
+            expected = hashlib.sha256(
+                "".join(value + "\n" for value in digests).encode("ascii")
+            ).hexdigest()
+            self.assertEqual(controller._local_model_fingerprint(model), expected)
 
     def test_corrupt_download_is_rejected_before_model_publish(self):
         class Session:

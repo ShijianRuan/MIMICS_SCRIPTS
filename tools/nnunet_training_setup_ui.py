@@ -462,6 +462,7 @@ class TrainingSetupWindow:
         )
         self.dataset_edit.setText(str(self.context.get("dataset_root") or ""))
         self.mcs_edit.setText(str(self.context.get("mcs_dir") or ""))
+        self.label_root_edit.setText(str(self.context.get("label_root") or ""))
         selected = [str(value) for value in self.context.get("selected_mask_names") or []]
         if len(selected) == 1:
             self.task_edit.setText(selected[0])
@@ -695,6 +696,7 @@ class TrainingSetupWindow:
                     "workspace": request["workspace"],
                     "dataset_root": request["dataset_root"],
                     "mcs_dir": request.get("mcs_dir") or "",
+                    "label_root": request.get("label_root") or "",
                     "last_task_id": request["task_id"],
                     "last_task_name": request["task_name"],
                     "updated_at_epoch": time.time(),

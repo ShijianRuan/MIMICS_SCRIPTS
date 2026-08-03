@@ -529,8 +529,8 @@ def _copy_model_input(
 def _local_model_fingerprint(path: Path) -> str:
     """Content-only fingerprint of a model file or directory.
 
-    Directory fingerprints aggregate the sorted content hashes of the
-    supported weight files only.  Relative paths are intentionally excluded:
+    Directory fingerprints aggregate the sorted content hashes of supported
+    weight and model-configuration files. Relative paths are intentionally excluded:
     the remote server may install the same weights under a different
     directory layout (custom ``remote_root`` or mount point), and an
     unrelated extra file (backup, README) must not invalidate the identity
@@ -576,7 +576,11 @@ def _local_model_fingerprint(path: Path) -> str:
     aggregate = hashlib.sha256()
     for digest in sorted(digests):
         aggregate.update(digest.encode("ascii"))
-        aggregate.update(b"\0")
+        # GNU ``sort | sha256sum`` emits one newline-terminated digest per
+        # file.  Use the identical byte stream locally; the previous NUL
+        # separator made equal local/remote model directories fail strict
+        # verification every time.
+        aggregate.update(b"\n")
     return aggregate.hexdigest()
 
 
@@ -1749,8 +1753,8 @@ def _validate_remote_assets(
     if local_fingerprint and local_fingerprint != fingerprint:
         detail = (
             "The remote base model does not match the corresponding local "
-            "model. Local SHA-256: {}; remote SHA-256: {}. Note: only weight "
-            "file contents are hashed — directory layout and extra files are "
+            "model. Local SHA-256: {}; remote SHA-256: {}. Note: supported weight "
+            "and model-configuration contents are hashed; directory layout and unrelated files are "
             "ignored. Install the same base weights on the server before "
             "training.".format(local_fingerprint, fingerprint)
         )

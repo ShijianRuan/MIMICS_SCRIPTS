@@ -59,6 +59,7 @@ from ui_theme import (
     configure_application,
     stylesheet as shared_stylesheet,
 )
+from ui_preferences import load_preferences, save_preferences
 try:
     from remote_compute_ui import RemoteComputeSelector
 except Exception:
@@ -2053,6 +2054,11 @@ class QtTrainingSetupApp(object):
     def __init__(self, window, context, qt_modules):
         self.window = window
         self.context = context
+        remembered_paths = load_preferences("dinov3_training")
+        if not str(self.context.get("ts_root") or "").strip():
+            self.context["ts_root"] = remembered_paths.get("dataset_root", "")
+        if not str(self.context.get("mcs_output_dir") or "").strip():
+            self.context["mcs_output_dir"] = remembered_paths.get("mcs_dir", "")
         self.QtCore, self.QtGui, self.QtWidgets = qt_modules
         self.config = context.get("config") or {}
         self.profiles = self.config.get("training_profiles") or {}
@@ -2073,6 +2079,8 @@ class QtTrainingSetupApp(object):
                     if _bool(initial_options["export_labels_before_training"])
                     else "source_dataset"
                 )
+        if not str(self.values.get("label_root") or "").strip():
+            self.values["label_root"] = remembered_paths.get("label_root", "")
         self.model_records = discover_pretrained_models(
             self.context.get("dinov3_root") or "",
             self.values.get("model_path", ""),
@@ -3794,6 +3802,14 @@ class QtTrainingSetupApp(object):
             self._set_status("Cannot start training: {0}".format(exc))
             self._append_log("Cannot start training: {0}".format(exc))
             return
+        try:
+            save_preferences("dinov3_training", {
+                "dataset_root": self.context.get("ts_root") or "",
+                "mcs_dir": options.get("mcs_output_dir") or self.context.get("mcs_output_dir") or "",
+                "label_root": options.get("label_root") or "",
+            })
+        except Exception:
+            pass
         try:
             run_id, status_path, pid = launch_training(self.context, options)
         except Exception as exc:

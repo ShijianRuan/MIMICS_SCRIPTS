@@ -4,9 +4,9 @@
 
 - **ITK Snake** runs a 3D ITK geodesic active contour from the selected,
   non-empty Mask.
-- **ScribblePrompt** accepts foreground and optional background scribbles on
-  one axial, coronal, or sagittal slice. The selected Mask may be empty or may
-  provide the starting segmentation.
+- **ScribblePrompt** accepts positive/negative clicks, positive/negative
+  scribbles, and one foreground box on one axial, coronal, or sagittal slice.
+  The selected Mask may be empty or may provide the starting segmentation.
 
 Both entries return to Mimics immediately after the necessary native prompt or
 Mask-buffer collection. Computation runs under `nninteractive_env` in a hidden,
@@ -30,13 +30,24 @@ not organ presets.
 
 The integration uses the official ScribblePrompt-UNet architecture and 128 x
 128 input contract. The active grayscale slice is min-max normalized to
-`[0,1]`; foreground and background scribbles occupy their official two prompt
-channels. Only the prompted slice is replaced in the 3D Mask.
+`[0,1]`. The five model channels are image, box, positive click/scribble,
+negative click/scribble, and previous logits/Mask input. Only the prompted
+slice is replaced in the 3D Mask.
+
+All prompts in one prediction must lie on the same slice. A box or scribble
+identifies that slice directly. For an initial click-only prediction, the user
+chooses the active axial, coronal, or sagittal view; the integration maps that
+view to a Mimics buffer axis from the image voxel-to-RAS matrix instead of
+assuming fixed array axes.
 
 When a prior ScribblePrompt result is unchanged, the next invocation reuses its
 saved logits. If the Mask has been edited, stale logits are rejected and the
 selected Mask is converted to a bounded logit prior. This preserves manual
 edits and prevents an old AI state from silently replacing them.
+
+An empty Mask needs at least one foreground click, foreground scribble, or
+box. Once a Mask or previous prediction exists, a background-only correction
+is valid and can remove an over-segmented region.
 
 The official checkpoint is not stored in Git. Place it at:
 

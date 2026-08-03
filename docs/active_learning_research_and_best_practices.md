@@ -1,7 +1,8 @@
 # 主动学习在医学图像分割中的调研、效能边界与最佳实践
 
 - **日期**：2026-07-14
-- **状态**：调研完成（源码级 MONAI Label 分析 + 多路文献检索 + 对抗式验证）
+- **状态**：调研完成（源码级 MONAI Label 分析 + 多路文献检索 + 对抗式验证；2026-08-01 经独立复核：16 条 arXiv 引用全部真实存在，无虚构）
+- **更新**：2026-08-01 追加 §8 增量调研（工业界工具全景、Mimics 集成、微调框架结合、2024–2026 学术增量、标注效率量化证据），并对 §1 源码细节与 §7 引用做勘误（详见 §8.6）
 - **指向**：本文是 Mimics 难例分诊模块设计的参考依据，设计 spec 见 `docs/superpowers/specs/2026-07-14-mimics-active-learning-hardcase-design.md`
 
 ---
@@ -15,12 +16,13 @@
 5. [最佳实践：针对 Mimics 场景的落地方案](#5-最佳实践针对-mimics-场景的落地方案)
 6. [最小可行验证](#6-最小可行验证)
 7. [参考文献](#7-参考文献)
+8. [2026-08-01 增量调研：工业界工具、Mimics 集成与微调框架结合](#8-2026-08-01-增量调研工业界工具mimics-集成与微调框架结合)
 
 ---
 
 ## 1. MONAI Label 主动学习模块：实现与原理
 
-> 本节基于 `Project-MONAI/MONAILabel@main` 源码级分析，TTA 相关回溯到 `0.3.x`/`0.4.x` tag。关键论断均经对抗式验证。
+> 本节基于 `Project-MONAI/MONAILabel@main` 源码级分析，TTA 相关回溯到 `0.3.0`/`0.4.0` release tag。关键论断均经对抗式验证（2026-08-01 复核：除 §8.6 所列勘误外全部属实）。
 
 ### 1.1 核心架构：两个解耦抽象
 
@@ -74,9 +76,9 @@ class Strategy(metaclass=ABCMeta):
 
 #### Datastore — 数据/分数抽象存储
 
-**源码位置**：`monailabel/interfaces/datastore.py`（~200 行，20 个抽象方法）
+**源码位置**：`monailabel/interfaces/datastore.py`（144 行，13 个 `@abstractmethod`，共 25 个方法定义）——⚠️ 2026-08-01 勘误：旧记作"~200 行、20 个抽象方法"不准确。
 
-核心的主动学习相关方法（20 个中的 3 个）：
+核心的主动学习相关方法（13 个抽象方法中的 3 个）：
 - `get_unlabeled_images(label_tag=None) -> List[str]` — 无 final 标签的候选池
 - `get_image_info(image_id) -> Dict[str, Any]` — 读分数
 - `update_image_info(image_id, info) -> None` — 写分数
@@ -103,7 +105,7 @@ self._scoring_methods = self.init_scoring_methods() # 默认空 {}，由 sample-
 **源码**：`monailabel/tasks/scoring/epistemic_v2.py`（v1 自 0.5.0 deprecated）
 
 机制（逐步骤对应源码）：
-1. 将模型置 `.train()` 打开推理期 dropout
+1. 打开推理期 dropout——⚠️ 2026-08-01 勘误：v2 评分方法自身**不直接调用 `model.train()`**，而是经 `BasicInferTask(train_mode=True)`（`tasks/infer/basic_infer.py` 第 483–486 行 `if self.train_mode: network.train() else: network.eval()`）间接实现；v1（`epistemic.py`）才显式 `model.train()`
 2. 跑 `simulation_size`（默认 5）次前向，`torch.stack` 成 `[N, C, H, W, D]`
 3. 逐通道先对 N 次取均值，再算熵：`H(x) = -\sum_c \bar p_c(x) \ln \bar p_c(x)`，其中 `\bar p_c = \frac{1}{N}\sum_i p_c^{(i)}`
 4. `np.nanmean` 聚合成标量，写 `{"epistemic_entropy": ...}`
@@ -114,7 +116,7 @@ self._scoring_methods = self.init_scoring_methods() # 默认空 {}，由 sample-
 
 #### (b) TTA — Volume Variation Coefficient (VVC)
 
-**源码**：`monailabel/tasks/scoring/tta.py`（0.3.x/0.4.x release，基于 Wang et al. 2019 [doi:10.1016/j.neucom.2019.01.103]）——注意：**已从当前 main 移除**，但算法本身在此后独立验证过。
+**源码**：`monailabel/tasks/scoring/tta.py`（0.3.0/0.4.0 release tag，基于 Wang et al. 2019 [doi:10.1016/j.neucom.2019.01.103]）——注意：**已从当前 main 移除**，但算法本身在此后独立验证过。⚠️ 2026-08-01 勘误："0.3.x/0.4.x" 不是有效分支/tag 名（直接访问 404），实际为 release tag `0.3.0`/`0.4.0`。
 
 机制：
 - 模型 **eval 模式**（不确定性来自输入增强而非 dropout）
@@ -174,7 +176,7 @@ Wang et al. 2019 [arXiv:1807.07356]：K 个保标签增强，预测跨增强不�
 
 #### D. 多样性/代表性（池上几何）
 
-- **Core-Set**（Sener & Savarese 2018 [arXiv:1708.00489]）：嵌入空间 k-center 覆盖，`min_{|s|≤b} max_i min_{j∈s} ‖f(x_i)-f(x_j)‖₂`，贪心 2-近似。纯代表性、无不确定性项。代价 1 embed pass + `O(b·|pool|·d)`。
+- **Core-Set**（Sener & Savarese 2018 [arXiv:1708.00489]；⚠️ 2026-08-01 勘误：正式标题为 *A Geometric Approach to Active Learning for Convolutional Neural Networks*，"Core-Set" 为方法名）：嵌入空间 k-center 覆盖，`min_{|s|≤b} max_i min_{j∈s} ‖f(x_i)-f(x_j)‖₂`，贪心 2-近似。纯代表性、无不确定性项。代价 1 embed pass + `O(b·|pool|·d)`。
 - **BADGE**（Ash et al. 2020 [arXiv:1906.03671]）：梯度嵌入 → k-means++ 播种取多样 batch。隐式 hybrid。代价 1 fwd+bwd + k-means++。
 
 #### E. Hybrid（不确定性 + 多样性，经验最佳）
@@ -457,8 +459,8 @@ RRF 公式：`RRF(c) = ∑_j w_j / (k + r_j(c))`，`k ≈ 60`，`r_j` = 该 case
 ### 效能对比与基准
 - Burmeister, E. et al. (2022). "Less Is More: A Comparison of Active Learning Strategies for 3D Medical Image Segmentation." [arXiv:2207.00845] — **Random 几乎不可能被击败**
 - Liu, J. et al. (2023). "COLosSAL: A Benchmark for Cold-Start Active Learning in 3D Medical Image Segmentation." *MICCAI*. [arXiv:2307.12004] — **冷启动：无策略一致优于 Random**
-- Luth, C. et al. (2025). "Navigating the Pitfalls of Active Learning Evaluation in Medical Imaging." [arXiv:2511.19183] — **nnActive 基准**（nnU-Net 骨干）
-- Luth, C. et al. (2026). "ClaSP PE: Finally Outshining the Random Baseline." [arXiv:2601.13677] — **首个一致优于改进版 Random 的方法**（nnU-Net + class-stratified + power noising）
+- Luth, C. et al. (2025). "Navigating the Pitfalls of Active Learning Evaluation in Medical Imaging." [arXiv:2511.19183] — **nnActive 基准**（nnU-Net 骨干；TMLR 2025 发表版标题：*nnActive: A Framework for Evaluation of Active Learning in 3D Biomedical Segmentation*）
+- Luth, C. et al. (2026). "ClaSP PE: Finally Outshining the Random Baseline." [arXiv:2601.13677]（正式标题 *Finally Outshining the Random Baseline: A Simple and Effective Solution for Active Learning in 3D Biomedical Imaging*，"ClaSP PE" 为方法名）— **首个一致优于改进版 Random 的方法**（nnU-Net + class-stratified + power noising）
 - Ma, Z. et al. (2024). "Breaking the Barrier: Selective Uncertainty-based AL." [arXiv:2401.16298] — **标准熵在低预算时 < Random；选择性变体逆转**
 - Houlsby, N. et al. (2011). "Bayesian Active Learning for Classification and Preference Learning." [arXiv:1112.5745] — BALD 基础
 - Kirsch, A. et al. (2019). "BatchBALD: Efficient and Diverse Batch Acquisition." *NeurIPS*. [arXiv:1906.08158]
@@ -471,7 +473,7 @@ RRF 公式：`RRF(c) = ∑_j w_j / (k + r_j(c))`，`k ≈ 60`，`r_j` = 该 case
 
 ### 无 GT 质量评估
 - Valindria, V. et al. (2017). "Reverse Classification Accuracy: Predicting Segmentation Performance in the Absence of Ground Truth." *IEEE TMI*. — RCA
-- Carvalho, J. et al. (2025). "In-Context Reverse Classification Accuracy." [arXiv:2503.04522] — 改进版 RCA
+- Carvalho, J. et al. (2025). "In-Context Reverse Classification Accuracy." [arXiv:2503.04522]（⚠️ 2026-08-01 勘误：正式标题 *ConfIC-RCA: Statistically Grounded Efficient Estimation of Segmentation Quality*，作者为 Cosarinsky et al.，原记"Carvalho"错误）— 改进版 RCA（In-Context RCA 方法）
 
 ### 相关工具与框架
 - Diaz-Pinto, A. et al. (2022). "MONAI Label: A Framework for AI-Assisted Interactive Labeling of 3D Medical Images." [arXiv:2203.12362]
@@ -480,3 +482,112 @@ RRF 公式：`RRF(c) = ∑_j w_j / (k + r_j(c))`，`k ≈ 60`，`r_j` = 该 case
 ---
 
 > 本文档将作为 Mimics 主动学习/难例分诊模块设计与实施的最终参考文档。所有关键论断均标注了来自文献的置信度；不确定性所在之处已在文本中坦率指出。
+
+---
+
+## 8. 2026-08-01 增量调研：工业界工具、Mimics 集成与微调框架结合
+
+> 本节为 2026-08-01 三路并行深度调研（firecrawl + exa + Semantic Scholar）的增量，回答用户五问中的增量部分：工业界权威工具、Mimics 集成路径、与现有微调框架的结合、标注效率量化证据。完整版独立快照见 `docs/active_learning_integration_research_2026-08.md`。
+
+### 8.1 学术界权威方案（2024–2026 增量，§2 的补充）
+
+#### Foundation Model 时代的 AL
+
+| 工作 | 年份 | 要点 | 对 Mimics 的启示 |
+|---|---|---|---|
+| **MedCAL-Bench** [arXiv:2508.03441] | 2025 | 首个 FM 冷启动 AL 基准：14 基础模型 × 7 查询策略 × 7 数据集。**DINOv2 家族做分割 AL 特征提取器最强**；ALPS 分割选样最优 | 冷启动期可用预训练 FM 特征做多样性选样——与项目 DINOv3 资产契合 |
+| **MedSAM-COALF** [DOI:10.1109/JSEN.2026.3691964] | 2026 | SAM 引导代理任务 + 不确定性采样，解决"无初始标签时第一批怎么选" | "先用 FM 跑弱结果→再不确定性选例"是冷启动可行答案 |
+| **SAM 驱动乳腺多模态 AL** [DOI:10.1007/s11517-026-03534-y] | 2026 | SAM prompt + 多模态 AL；**声称**达专家性能 96.75%、标注成本降 >95%（单数据集自述） | 方向性证据：FM 交互标注 + AL 选例可叠加 |
+| **VLM 驱动主动域适应** [DOI:10.1109/ICCV51701.2025.02234] | 2025 | VLM 参与主动域适应选样与提示 | 前沿方向，暂不必追 |
+
+#### AL + 交互式分割（与 Mimics 场景最相关的组合）
+
+- **ScribblePrompt**（2024, ICML）：用户研究显示比 SAM **标注时间减 28%、Dice 提升 15%**——交互式标注本身效率的直接证据。
+- **HAL-IA**（2023, [PMID:37295312]）：AL 采样 + 带 superpixel 建议的交互点击标注的组合范式。
+- **共识**：AL 负责"选哪些例"、交互式分割（SAM/DeepEdit/nnInteractive）负责"怎么标得快"，两者正交可叠加——2024–2026 最主流混合流水线。
+
+#### AL + 半监督/伪标签（减少标注负担的另一半杠杆）
+
+- **ASSFT** [arXiv:2509.10784]（2025）：无源数据下 AL 选"知识差异 + 解剖难度"最难样本微调医学 VFM + **选择性**伪标签（按置信度+语义距离筛选）。
+- **FM-ABS**（MICCAI 2024）：promptable FM 驱动 barely-supervised AL，标注从像素级降到点/文本级。
+- **设计哲学**：伪标签要"选择性而非全量"——与 Ma 2024 selective uncertainty 同一原则。
+
+### 8.2 工业界权威工具全景（按"是否真 AL 闭环"分级）
+
+| 工具 | 类型 | AL 能力 | 借鉴价值 |
+|---|---|---|---|
+| **MONAI Label** | 开源 | ScoringMethod（epistemic v2 / aleatoric=TTA）+ Strategy + Datastore；2024–25 新增 CVAT 插件端到端 AL、OHIF/DICOMweb AL | **架构原型**（本模块已镜像） |
+| **nnActive** | 开源 | AL 做进 nnU-Net v2（3D patch 查询、FG-Random 基线、`register_strategy()` 可插拔）；TMLR 2025.08 同行评审 | **当前最可靠量化结论** + nnU-Net 接入示范 |
+| **Encord Active** | 开源 | 文档明确 acquisition functions（LC/Mean Confidence/模型不确定度）→ 自动送标 → 回灌 | 通用 CV 最正统开源 AL |
+| **RedBrick AI** | 商业 | MONAI-in-the-loop（2025）：标注即训练切份；Boost + F.A.S.T.（SAM）+ SAM2 | 学架构不学数字（"60% faster"无审计） |
+| **Lightly** | 商业 | 自监督 embedding + 多样性/类平衡/置信度选样；SDSC 案例 230 万帧 10× 提速 | "自监督预训练 + 主动选样"范式可借鉴 |
+| **Labelbox Foundry** | 商业 | model-assisted prelabel + 低置信送人工 | 编排层，非自主采选 |
+| **Scale AI** | 商业 | Taxonomy Loss Masking 跨数据集预标注 + HITL 质检 | **无选样闭环**，非 AL |
+| **3D Slicer / MITK / ITK-SNAP** | 开源桌面 | Slicer=MONAI Label 插件；MITK/ITK-SNAP 集成 **nnInteractive**（交互修正引擎） | 本身无不确定性选样，是人工修正环节 UI |
+| **medAL** | — | **未找到**活跃维护的通用框架（O-MedAL 为研究代码，Medal-S 为命名冲突） | 此名不可依赖 |
+
+**厂商数字可信度**：Lightly"90% less labeling"、RedBrick"60% faster"等均无第三方审计——学架构，别引用数字。
+
+### 8.3 标注效率量化证据（区分"论文声称"与"公认共识"）
+
+| 数字 | 来源 | 领域 | 性质 |
+|---|---|---|---|
+| 标注 **28.6%** 数据达可比性能（Dice 0.868 vs 0.906），>60% 免标注 | Luan 2023, Insights in Imaging [DOI:10.1186/s13244-023-01487-6] | 3D 分割 | 声称（单数据集） |
+| 节省 **56%–93%** 人工标注；肺癌 X 光 5% 标注达 93.1% | Frontiers in Radiology 2021 [3389/fradi.2021.748968] | 影像分类 | 声称（常被引为上限） |
+| 标注成本降 **>95%**、达专家性能 96.75% | SAM 乳腺 AL 2026 | 2D 分割 | 声称（单数据集） |
+| 标注时间减 **28%**、Dice +15%（交互式 vs SAM） | ScribblePrompt 2024 用户研究 | 交互标注 | 声称（用户研究） |
+| **无方法可靠超越 FG-Random**；熵最佳但成本最高 | nnActive, TMLR 2025 | 3D 分割 | **公认共识**（跨 4 数据集复现） |
+| 肾脏 CT 标注时间减半以上、Dice 逐轮提升 | Korea 2019（Mimics 做修正标注） | 3D 分割 | 声称 |
+
+**综合口径**：分类领域 40–90% 有较多重复证据；3D 分割领域**必须实测**——项目内按"FG-Random 对照实验"测自己的节省率，而非引用文献数字。
+
+### 8.4 主动学习能否与 Mimics 结合——能，且有直接先例
+
+- **官方立场**：Materialise AI-enabled segmentation 明确**不含自适应 AI/ML**；AI Assistant 插件（Mimics Research 24+）提供数据管理/评估/template script，同样不含 AL。→ AL 逻辑放 Mimics 外部、Mimics 只做数据进出是稳妥路径（项目 subprocess 桥接正是此范式）。
+- **直接先例**：韩国团队 2019 年腹部 CT 肾脏分割跑通"CNN 预测 → **用 Mimics 人工修正** → 合并重训"的 AL 闭环，标注时间减半以上 [PMC6962335]——与"难例分诊 + Mimics 复查标注"设计同构。
+- **版本约束**：Mimics 21 内嵌 Py3.5（现状）、28.0 已升 Py3.13（迁移成本高）→ 保持薄封装 + 外部引擎分层不变。
+- 未找到 Mimics 与 MONAI/nnU-Net 的官方或成熟社区集成插件；社区主流 = "数据进出"式。
+
+### 8.5 训练与现有微调框架的结合（四后端矩阵）
+
+| 后端 | AL 训练结合方式 | 成熟度 |
+|---|---|---|
+| nnU-Net 5 折（nnunet_segmentation_workflow） | AL 难例进数据集 → `--c` 续训或自定义 trainer 增量（官方：`-pretrained_weights` 自动丢分割层，须自定义 trainer 防毁预训练权重 [issue #774]）；5 折天然提供集成分歧打分 | 高 |
+| nnInteractive 任务微调（nninteractive-finetune） | 作为**人工修正引擎**：AL 选例 → 交互修正产新标注 → 增量训练；nnInteractive 论文本身**不含 AL 选例** | 高 |
+| DINOv3 few-shot | 冷启动多样性选样特征底座（MedCAL-Bench：DINOv2 家族分割 AL 最强）；解码器无 dropout → TTA-only（既有设计不变） | 中 |
+| SSH/Docker 远程训练 | 对 AL 透明：选例后批量上传训练即可；批量打分推理可在远程 GPU 跑 | 高 |
+
+**增量训练防遗忘（AL 多轮重训的核心问题）**：
+- **Continual Tuning**（ISBI 2024 [DOI:10.1109/isbi56570.2024.10635518]）：冻结已学类共享网络、只更新被修正类子网络 + 按重要性挑旧数据复用，比从头重训快 **16×** 且不降性能——直接对口"AL 多轮微调"。
+- **经验回放 = 学术共识首选**：旧样本子集混入新难例一起训练（MS 病灶 CL [arXiv:2210.15091]）；UNEG 基准 [arXiv:2010.11008] 警示多数 CL 算法损可塑性——类别/分布差异大时"每器官单独模型"简单可靠。
+- **落地**：每轮 AL 迭代 = 经验回放（旧样本子集）+ 新难例混合训练；全量重训是保底。
+
+**MONAI Label + nnU-Net 官方集成路线存在**：MONet bundle 把原生 nnU-Net v2 trainer 接进 MONAI Label（AL）+ Deploy + NVFlare（MAIA 教程）。但本模块决策（记忆文件）是**移植契约、不引整包**（MONAILabel 依赖重、离线不可得）——MONet 作参照而非依赖。
+
+### 8.6 勘误与复核记录（2026-08-01 独立对抗式验证）
+
+**引用完整性**：原文档 §7 全部 16 条 arXiv ID 均真实存在，**无虚构引用**。以下为需修正的细节：
+
+| # | 位置 | 原述 | 修正 |
+|---|---|---|---|
+| 1 | §1.1 | datastore.py ~200 行、20 个抽象方法 | **144 行、13 个 `@abstractmethod`、共 25 个方法定义** |
+| 2 | §1.1(b) | "0.3.x/0.4.x tag" | release tag **`0.3.0`/`0.4.0`**（"0.3.x" 访问 404） |
+| 3 | §1.2(a) | "将模型置 `.train()`" | 经 **`BasicInferTask(train_mode=True)`** 间接实现（basic_infer.py 第 483–486 行）；v1 才显式 `model.train()` |
+| 4 | §2.1 | Core-Set [arXiv:1708.00489] 标题 | 正式标题 *A Geometric Approach to Active Learning for Convolutional Neural Networks*（Core-Set 为方法名） |
+| 5 | §7 | nnActive [arXiv:2511.19183] 标题 | TMLR 发表版：*nnActive: A Framework for Evaluation of Active Learning in 3D Biomedical Segmentation* |
+| 6 | §7 | ClaSP PE [arXiv:2601.13677] 标题 | 正式标题 *Finally Outshining the Random Baseline: A Simple and Effective Solution for Active Learning in 3D Biomedical Imaging* |
+| 7 | §7 | ConfIC-RCA [arXiv:2503.04522] "Carvalho 2025" | 正式标题 *ConfIC-RCA: Statistically Grounded Efficient Estimation of Segmentation Quality*，作者 **Cosarinsky et al.** |
+
+**复核确认无误的关键论断**：ScoringMethod/Strategy 双抽象与 `info()`/`__call__` 契约、默认仅 `{"random": Random()}`、三端点语义（同步/异步/stop+empty_cache）、Epistemic 策略 Top-N 降序 + serve 时间戳去优先化、epistemic v2 的 H[mean-p] 机制与 simulation_size=5、v1 deprecated since 0.5.0、TTA eval 模式 + 可逆增强 + VVC=std/mean、EpistemicScoring 深绑 InferTask、"不拖入 fastapi"核心结论（scoring/strategy 依赖面实际含 datastore 模块，但 import 链确实不含 fastapi；`interfaces/tasks/__init__.py` 有 license 头非真空文件，但无 import）。
+
+**结论一致性**：原文档 §3 效能边界结论（AL 非万能、Random 强基线、须预验证）与 2025–2026 最新证据（nnActive/ClaSP PE）一致，被进一步强化；§5 设计原则（信号堆叠、RRF、Hard Gate、先验证后编码）无需修改。
+
+### 8.7 增量参考文献
+
+**学术界（2024–2026）**：MedCAL-Bench（arXiv:2508.03441）、MedSAM-COALF（DOI:10.1109/JSEN.2026.3691964）、ASSFT（arXiv:2509.10784）、FM-ABS（DOI:10.1007/978-3-031-72111-3_28）、SAM 乳腺 AL（DOI:10.1007/s11517-026-03534-y）、VLM ADA（DOI:10.1109/ICCV51701.2025.02234）、ScribblePrompt（scribbleprompt.csail.mit.edu）、HAL-IA（PMID:37295312）、Continual Tuning（DOI:10.1109/isbi56570.2024.10635518）、MS 病灶 CL（arXiv:2210.15091）、UNEG（arXiv:2010.11008）、Luan 2023（DOI:10.1186/s13244-023-01487-6）、"AL is 90% effective"（10.3389/fradi.2021.748968）、nnInteractive（arXiv:2503.08373）
+
+**工业界**：MONAI Label（github.com/Project-MONAI/MONAILabel）、nnActive（github.com/MIC-DKFZ/nnActive）、Encord Active（github.com/encord-team/encord-active）、RedBrick（docs.redbrickai.com）、Lightly（lightly.ai/case-studies/sdsc）、Labelbox Foundry（docs.labelbox.com）、Scale AI（medium.com/scale-ai）、MITK v2025.08（github.com/MITK/MITK/releases/tag/v2025.08）、ITK-SNAP 4.0（itksnap.org/ReleaseNotes）、iMerit 平台对比（imerit.ai）
+
+**Mimics 集成**：Materialise AI-enabled segmentation（materialise.com/en/healthcare/mimics/ai-enabled-segmentation）、AI Assistant 插件（materialise.com/en/healthcare/mimics/plugins/ai-assistant）、Mimics 28.0 Py3.13（materialise.com/en/academy/healthcare/mimics-innovation-suite）、肾脏 CT CNN 辅助 AL [PMC6962335]
+
+**nnU-Net 微调**：pretraining/finetuning 文档（github.com/MIC-DKFZ/nnUNet/blob/master/documentation/how_to_use_nnunet.md）、issue #774（自定义 trainer 必要性）、issue #2415（增量数据训练）、MONet bundle / MAIA 教程（maia-toolkit.readthedocs.io）

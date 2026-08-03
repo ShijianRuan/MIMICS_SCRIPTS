@@ -366,17 +366,20 @@ nninteractive_env\python.exe tools\verify_medical_geometry.py ^
 使用流程：
 
 1. 从 Mimics 导出当前图像和初始 mask 到外部 IGAC 窗口。
-2. 在外部窗口缩放、平移、切片和局部画 Add/Barrier。
-3. 实时查看演化，不在每一帧回写 Mimics。
+2. 默认使用 `Correct` 在错误区域点击或拖动；必要时使用 Add/Remove/Clear 显式覆盖。
+3. 鼠标按下和移动期间实时查看 LGDF 演化，抬起后自动稳定并暂停，不在每一帧回写 Mimics。
 4. 确认最终结果后一次性返回 Mimics。
 
 预期：
 
 - 大图像只处理局部 ROI，不要求用户在全图精细操作。
 - 显示使用原始图像强度和可调窗宽窗位，不依赖 Mimics GV。
-- Add 与 Barrier 在每轮演化中保持硬约束。
+- Mask 外操作转换为 Add、Mask 内操作转换为 Barrier；内部跨到外部整笔重放为 Add，反向跨越整笔重放为 Barrier，第一次跨界后锁定。
+- 转换后的 Add 与 Barrier 在每轮演化中保持硬约束。
 - 最大位移限制默认可用，弱边界不无限膨胀。
 - 画刷轨迹连续，缩放后坐标映射准确。
+- 高频鼠标事件不会积压；同一笔合并处理，不跨笔合并或破坏撤销点。
+- `Stop` 保留当前预览，`Undo last` 恢复上一笔，稳定条件或安全上限会自动暂停。
 - 外部窗口关闭、取消或异常后不留下 worker。
 - 最终结果返回时由用户选择更新选中 mask 或创建副本。
 

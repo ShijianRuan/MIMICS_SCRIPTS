@@ -920,6 +920,61 @@ def _nninteractive_operation_is_active(state):
     return time.time() - started <= timeout
 
 
+def _nninteractive_worker_has_pending_work(state):
+    """Return whether an async nnInteractive worker still has queued compute.
+
+    The server-level ``active_operation`` flag covers requests already inside
+    prediction.  This check closes the small gap between a command being
+    queued and prediction setting that flag, while allowing a completed result
+    waiting for Mimics to be applied to yield the GPU immediately.
+    """
+    control_dir = str(state.get("client_control_dir") or "").strip()
+    if not control_dir:
+        return False
+    root = Path(control_dir)
+    worker_status_path = root / "worker_status.json"
+    worker_status = read_json(worker_status_path, {}) or {}
+    if (
+        not worker_status_path.is_file()
+        and str(state.get("schema_version") or "") == "nninteractive_owned_server.v3"
+    ):
+        try:
+            client_pid = int(state.get("client_pid", 0) or 0)
+        except Exception:
+            client_pid = 0
+        # State publication can precede the first worker-status write. Treat
+        # that short initialization window as active instead of terminating a
+        # model process which is about to receive its first command.
+        if client_pid and process_exists(client_pid):
+            return True
+    if str(worker_status.get("status") or "").lower() in (
+        "initializing", "running", "closing"
+    ):
+        return True
+    try:
+        completed_sequence = int(worker_status.get("sequence", 0) or 0)
+    except Exception:
+        completed_sequence = 0
+    try:
+        for command_path in (root / "commands").glob("command_*.json"):
+            try:
+                sequence = int(command_path.stem.rsplit("_", 1)[1])
+            except (IndexError, ValueError):
+                continue
+            if sequence > completed_sequence:
+                return True
+    except OSError:
+        return True
+    return False
+
+
+def _is_owned_nninteractive_state(state):
+    return str(state.get("schema_version") or "") in (
+        "nninteractive_owned_server.v2",
+        "nninteractive_owned_server.v3",
+    )
+
+
 def cleanup_idle_nninteractive_server_lock(current):
     if not isinstance(current, dict):
         return False
@@ -929,7 +984,7 @@ def cleanup_idle_nninteractive_server_lock(current):
     if not state_path:
         return False
     state = read_json(state_path, {}) or {}
-    if state.get("schema_version") != "nninteractive_owned_server.v2":
+    if not _is_owned_nninteractive_state(state):
         return False
     if state.get("gpu_lock_token") != current.get("token"):
         return False
@@ -992,7 +1047,7 @@ def request_nninteractive_server_release_on_contention(current):
     if not state_path:
         return False
     state = read_json(state_path, {}) or {}
-    if state.get("schema_version") != "nninteractive_owned_server.v2":
+    if not _is_owned_nninteractive_state(state):
         return False
     if state.get("gpu_lock_token") != current.get("token"):
         return False
@@ -1004,21 +1059,9 @@ def request_nninteractive_server_release_on_contention(current):
         return False
     if _nninteractive_operation_is_active(state):
         return False
-    try:
-        watchdog_pid = int(state.get("watchdog_pid", 0) or 0)
-    except Exception:
-        watchdog_pid = 0
-    if not watchdog_pid or not process_exists(watchdog_pid):
+    if _nninteractive_worker_has_pending_work(state):
         return False
-
     now = time.time()
-    min_idle_seconds = 15.0
-    try:
-        last_activity = float(state.get("last_activity_epoch", now))
-    except Exception:
-        last_activity = now
-    if now - last_activity < min_idle_seconds:
-        return False
 
     try:
         requested_at = float(state.get("contention_release_requested_epoch", 0.0) or 0.0)
@@ -1028,20 +1071,28 @@ def request_nninteractive_server_release_on_contention(current):
         return False
 
     state["contention_release_requested_epoch"] = now
-    state["contention_release_requested_by"] = "fewshot_pipeline"
+    state["contention_release_requested_by"] = "shared_gpu_scheduler"
     control_dir = str(state.get("client_control_dir") or "").strip()
     try:
         client_pid = int(state.get("client_pid", 0) or 0)
     except Exception:
         client_pid = 0
     if control_dir and client_pid and process_exists(client_pid):
+        # The long-lived image worker owns the graceful shutdown protocol. It
+        # remains usable even if the auxiliary watchdog has already failed.
         write_json_atomic(state_path, state)
         write_json_atomic(Path(control_dir) / "close.json", {
             "reason": "gpu_contention",
             "requested_at_epoch": now,
-            "requested_by": "fewshot_pipeline",
+            "requested_by": "shared_gpu_scheduler",
         })
     else:
+        try:
+            watchdog_pid = int(state.get("watchdog_pid", 0) or 0)
+        except Exception:
+            watchdog_pid = 0
+        if not watchdog_pid or not process_exists(watchdog_pid):
+            return False
         # Legacy one-shot bridges have no worker control channel. Expire the
         # server directly; the watchdog owns termination and lock release.
         state["last_activity_epoch"] = 0.0

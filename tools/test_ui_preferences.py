@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+"""Tests for persistent external-UI folder preferences."""
+
+from __future__ import annotations
+
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from tools import ui_preferences
+
+
+class UIPreferencesTests(unittest.TestCase):
+    def test_sections_are_isolated_and_partial_updates_preserve_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with mock.patch.dict(
+                os.environ, {"MIMICS_USER_CONFIG_DIR": temporary}, clear=False
+            ):
+                ui_preferences.save_preferences(
+                    "training", {"dataset_root": "D:/dataset", "mcs_dir": "D:/mcs"}
+                )
+                ui_preferences.save_preferences(
+                    "training", {"dataset_root": "E:/new-dataset", "mcs_dir": ""}
+                )
+                ui_preferences.save_preferences("import", {"source": "F:/cases"})
+
+                training = ui_preferences.load_preferences("training")
+                self.assertEqual(training["dataset_root"], "E:/new-dataset")
+                self.assertEqual(training["mcs_dir"], "D:/mcs")
+                self.assertEqual(
+                    ui_preferences.load_preferences("import")["source"], "F:/cases"
+                )
+                self.assertEqual(
+                    ui_preferences.preferences_path(),
+                    Path(temporary) / "ui_preferences.json",
+                )
+
+
+if __name__ == "__main__":
+    unittest.main()

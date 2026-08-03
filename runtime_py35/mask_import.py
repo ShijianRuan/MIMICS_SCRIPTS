@@ -383,7 +383,9 @@ def _inject_buffer(mask, buffer_path, mimics_shape, use_transaction=True):
             mask.set_voxel_buffer(view)
 
     if use_transaction:
-        runtime_common.execute_mimics_transaction(mimics, _apply)
+        runtime_common.execute_mimics_transaction(
+            mimics, _apply, "Import Mask"
+        )
     else:
         _apply()
 
@@ -704,7 +706,7 @@ def _mask_import_monitor_tick_locked(monitor):
                 created[0].selected = True
 
             runtime_common.execute_mimics_transaction(
-                mimics, _create_and_apply
+                mimics, _create_and_apply, "Import Mask"
             )
             mask = created[0]
             actual_name = str(getattr(mask, "name", name) or name)

@@ -713,7 +713,7 @@ def run_ui(context, preview_path=""):
     footer = QtWidgets.QHBoxLayout(footer_widget)
     footer.setContentsMargins(0, 0, 0, 0)
     remember = QtWidgets.QCheckBox("Remember these folders on this workstation")
-    remember.setChecked(bool(remembered_mode))
+    remember.setChecked(True)
     footer.addWidget(remember)
     footer.addStretch(1)
     cancel = QtWidgets.QPushButton("Cancel")

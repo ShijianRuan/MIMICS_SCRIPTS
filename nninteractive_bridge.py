@@ -2303,7 +2303,22 @@ class _BridgeSessionContext:
                 if self.keep_server_warm_after_session:
                     _touch_server_activity(self.owned_state_path, self.owned_token)
                 else:
-                    _expire_server_activity(self.owned_state_path, self.owned_token)
+                    # A competing GPU workflow must not wait for the normal
+                    # idle watchdog interval after this client has finished.
+                    # Stop only the token-owned server and release its lock;
+                    # fall back to watchdog expiry if termination cannot be
+                    # confirmed safely.
+                    state = _load_server_state(self.owned_state_path)
+                    retired = False
+                    if state and state.get("ownership_token") == self.owned_token:
+                        if _terminate_owned_server(state):
+                            retired = _remove_server_state(
+                                self.owned_state_path, self.owned_token
+                            )
+                    if not retired:
+                        _expire_server_activity(
+                            self.owned_state_path, self.owned_token
+                        )
             _append_bridge_log(
                 self.log_path,
                 "session_closed",

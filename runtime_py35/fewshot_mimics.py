@@ -2721,7 +2721,7 @@ def _prediction_target_mask(monitor):
     return target
 
 
-def _set_mask_from_u8(mask, path, shape):
+def _set_mask_from_u8(mask, path, shape, transaction_name=None):
     raw = open(path, "rb").read()
     expected = int(shape[0]) * int(shape[1]) * int(shape[2])
     if len(raw) != expected:
@@ -2735,7 +2735,9 @@ def _set_mask_from_u8(mask, path, shape):
             pixels = memoryview(bytearray(raw)).cast("?", shape=list(shape))
             mask.set_voxel_buffer(pixels)
     _update_gui()
-    runtime_common.execute_mimics_transaction(mimics, _apply)
+    runtime_common.execute_mimics_transaction(
+        mimics, _apply, transaction_name or "Apply DINOv3 Prediction"
+    )
     _update_gui()
     try:
         mask.visible = True

@@ -431,11 +431,27 @@ def launch(mode, python_exe, context, on_submit, timeout_seconds=3600, ui_script
     except OSError:
         pass
     payload = dict(context or {})
+    persistent_state_path = os.path.join(
+        runtime_common.user_config_dir(), "ui_state", "io_paths.json"
+    )
+    legacy_state_path = os.path.join(
+        root, ".mimics_runtime", "ui_state", "io_paths.json"
+    )
+    if (
+        not os.path.isfile(persistent_state_path)
+        and os.path.isfile(legacy_state_path)
+    ):
+        legacy_state = runtime_common.read_json(legacy_state_path, {}) or {}
+        if legacy_state:
+            runtime_common.write_json_atomic(persistent_state_path, legacy_state)
     payload.update({
         "schema_version": "mimics_io_setup.v1",
         "mode": mode,
         "status_path": status_path,
-        "state_path": os.path.join(root, ".mimics_runtime", "ui_state", "io_paths.json"),
+        # Recent folders are user preferences, not disposable job data.  Keep
+        # them outside .mimics_runtime so cache cleanup and project moves do
+        # not make every picker start from the home directory again.
+        "state_path": persistent_state_path,
         "owner_pid": os.getpid(),
         "bootstrap_stop_path": bootstrap_stop_path,
     })

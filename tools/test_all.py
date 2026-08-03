@@ -262,6 +262,8 @@ class TestRuntimeCommon(unittest.TestCase):
         events = []
 
         class Transaction(object):
+            def __init__(self, transaction_name):
+                events.append("name:" + transaction_name)
             def __enter__(self):
                 events.append("enter")
                 return self
@@ -277,17 +279,22 @@ class TestRuntimeCommon(unittest.TestCase):
         self.assertEqual(
             "ok",
             runtime_common.execute_mimics_transaction(
-                module, lambda: "ok"
+                module, lambda: "ok", "Apply Test Mask"
             ),
         )
-        self.assertEqual(["enter", "commit", "exit"], events)
+        self.assertEqual(
+            ["name:Apply Test Mask", "enter", "commit", "exit"], events
+        )
 
         events[:] = []
         def fail():
             raise ValueError("failed write")
         with self.assertRaisesRegex(ValueError, "failed write"):
             runtime_common.execute_mimics_transaction(module, fail)
-        self.assertEqual(["enter", "rollback", "exit"], events)
+        self.assertEqual(
+            ["name:Mimics-Script Mask Update", "enter", "rollback", "exit"],
+            events,
+        )
 
         events[:] = []
         def fail_commit():
@@ -296,7 +303,42 @@ class TestRuntimeCommon(unittest.TestCase):
         Transaction.commit = lambda self: fail_commit()
         with self.assertRaisesRegex(RuntimeError, "commit failed"):
             runtime_common.execute_mimics_transaction(module, lambda: "ok")
-        self.assertEqual(["enter", "commit", "rollback", "exit"], events)
+        self.assertEqual(
+            [
+                "name:Mimics-Script Mask Update",
+                "enter",
+                "commit",
+                "rollback",
+                "exit",
+            ],
+            events,
+        )
+
+    def test_find_root_accepts_file_path_without_explicit_sentinels(self):
+        import runtime_common
+
+        project = os.path.join(self.tmp, "project")
+        module_dir = os.path.join(project, "runtime_py35")
+        os.makedirs(module_dir)
+        module_path = os.path.join(module_dir, "entry.py")
+        with open(module_path, "w") as handle:
+            handle.write("# entry\n")
+        self.assertEqual(project, runtime_common.find_root(module_path))
+
+    def test_user_config_is_separate_from_disposable_runtime(self):
+        import runtime_common
+
+        old_value = os.environ.get("MIMICS_USER_CONFIG_DIR")
+        try:
+            configured = os.path.join(self.tmp, "persistent-settings")
+            os.environ["MIMICS_USER_CONFIG_DIR"] = configured
+            self.assertEqual(configured, runtime_common.user_config_dir())
+            self.assertNotIn(".mimics_runtime", runtime_common.user_config_dir())
+        finally:
+            if old_value is None:
+                os.environ.pop("MIMICS_USER_CONFIG_DIR", None)
+            else:
+                os.environ["MIMICS_USER_CONFIG_DIR"] = old_value
 
     def test_write_json_atomic_retries_transient_replace_failure(self):
         import runtime_common
@@ -8431,6 +8473,10 @@ class TestNewFeatures(unittest.TestCase):
 
         self.assertIn("tools/ui_theme.py", package_portable.REQUIRED_EXTERNAL_UI_FILES)
         self.assertIn(
+            "tools/ui_preferences.py",
+            package_portable.REQUIRED_EXTERNAL_UI_FILES,
+        )
+        self.assertIn(
             "tools/interactive_algorithms_worker.py",
             package_portable.REQUIRED_EXTERNAL_UI_FILES,
         )
@@ -10035,6 +10081,33 @@ class TestLifecycleAndRetention(unittest.TestCase):
         self.assertEqual([False], observations)
         self.assertFalse(state_path.exists())
 
+    def test_nninteractive_contention_close_retires_server_immediately(self):
+        import nninteractive_bridge as bridge
+
+        state_path = Path(self.tmp) / "server-close.json"
+        context = object.__new__(bridge._BridgeSessionContext)
+        context.session = None
+        context.owned_state_path = state_path
+        context.owned_token = "owned-token"
+        context.keep_server_warm_after_session = False
+        context.log_path = Path(self.tmp) / "bridge.log"
+        calls = []
+        with mock.patch.object(
+            bridge,
+            "_load_server_state",
+            return_value={"ownership_token": "owned-token", "pid": 1234},
+        ), mock.patch.object(
+            bridge,
+            "_terminate_owned_server",
+            side_effect=lambda _state: calls.append("terminate") or True,
+        ), mock.patch.object(
+            bridge,
+            "_remove_server_state",
+            side_effect=lambda _path, _token: calls.append("release") or True,
+        ), mock.patch.object(bridge, "_append_bridge_log"):
+            context.close()
+        self.assertEqual(["terminate", "release"], calls)
+
     def test_nninteractive_unlink_failure_releases_owned_lock_after_server_exit(self):
         import nninteractive_bridge as bridge
 
@@ -10713,6 +10786,131 @@ class TestLifecycleAndRetention(unittest.TestCase):
         self.assertEqual(close.get("reason"), "gpu_contention")
         state = pipeline.read_json(state_path, {}) or {}
         self.assertNotEqual(state.get("last_activity_epoch"), 0.0)
+
+    def test_v3_idle_nninteractive_worker_yields_gpu_without_grace_delay(self):
+        import tools.fewshot_pipeline as pipeline
+
+        control_dir = Path(self.tmp) / "worker-v3"
+        (control_dir / "commands").mkdir(parents=True)
+        state_path = Path(self.tmp) / "server-v3.json"
+        pipeline.write_json_atomic(control_dir / "worker_status.json", {
+            "status": "result_ready", "sequence": 1,
+        })
+        pipeline.write_json_atomic(state_path, {
+            "schema_version": "nninteractive_owned_server.v3",
+            "pid": 2001,
+            "watchdog_pid": 2002,
+            "client_pid": 2003,
+            "client_control_dir": str(control_dir),
+            "gpu_lock_token": "token-v3",
+            "last_activity_epoch": time.time(),
+        })
+        current = {
+            "resource": "gpu", "token": "token-v3",
+            "state_path": str(state_path),
+        }
+        original = pipeline.process_exists
+        try:
+            pipeline.process_exists = lambda _pid: True
+            self.assertTrue(
+                pipeline.request_nninteractive_server_release_on_contention(current)
+            )
+        finally:
+            pipeline.process_exists = original
+        self.assertTrue((control_dir / "close.json").is_file())
+
+    def test_v3_idle_worker_can_close_after_watchdog_failure(self):
+        import tools.fewshot_pipeline as pipeline
+
+        control_dir = Path(self.tmp) / "worker-no-watchdog"
+        (control_dir / "commands").mkdir(parents=True)
+        pipeline.write_json_atomic(control_dir / "worker_status.json", {
+            "status": "result_ready", "sequence": 1,
+        })
+        state_path = Path(self.tmp) / "server-no-watchdog.json"
+        pipeline.write_json_atomic(state_path, {
+            "schema_version": "nninteractive_owned_server.v3",
+            "pid": 4001,
+            "watchdog_pid": 4002,
+            "client_pid": 4003,
+            "client_control_dir": str(control_dir),
+            "gpu_lock_token": "token-no-watchdog",
+        })
+        current = {
+            "resource": "gpu", "token": "token-no-watchdog",
+            "state_path": str(state_path),
+        }
+        original = pipeline.process_exists
+        try:
+            pipeline.process_exists = lambda pid: int(pid) != 4002
+            self.assertTrue(
+                pipeline.request_nninteractive_server_release_on_contention(current)
+            )
+        finally:
+            pipeline.process_exists = original
+        self.assertTrue((control_dir / "close.json").is_file())
+
+    def test_worker_without_first_status_is_not_closed(self):
+        import tools.fewshot_pipeline as pipeline
+
+        control_dir = Path(self.tmp) / "worker-starting"
+        (control_dir / "commands").mkdir(parents=True)
+        state_path = Path(self.tmp) / "server-starting.json"
+        pipeline.write_json_atomic(state_path, {
+            "schema_version": "nninteractive_owned_server.v3",
+            "pid": 5001,
+            "watchdog_pid": 5002,
+            "client_pid": 5003,
+            "client_control_dir": str(control_dir),
+            "gpu_lock_token": "token-starting",
+        })
+        current = {
+            "resource": "gpu", "token": "token-starting",
+            "state_path": str(state_path),
+        }
+        original = pipeline.process_exists
+        try:
+            pipeline.process_exists = lambda _pid: True
+            self.assertFalse(
+                pipeline.request_nninteractive_server_release_on_contention(current)
+            )
+        finally:
+            pipeline.process_exists = original
+        self.assertFalse((control_dir / "close.json").exists())
+
+    def test_queued_nninteractive_prediction_does_not_yield_gpu(self):
+        import tools.fewshot_pipeline as pipeline
+
+        control_dir = Path(self.tmp) / "worker-pending"
+        (control_dir / "commands").mkdir(parents=True)
+        pipeline.write_json_atomic(control_dir / "worker_status.json", {
+            "status": "result_ready", "sequence": 1,
+        })
+        pipeline.write_json_atomic(
+            control_dir / "commands" / "command_000002.json", {"sequence": 2}
+        )
+        state_path = Path(self.tmp) / "server-pending.json"
+        pipeline.write_json_atomic(state_path, {
+            "schema_version": "nninteractive_owned_server.v3",
+            "pid": 3001,
+            "watchdog_pid": 3002,
+            "client_pid": 3003,
+            "client_control_dir": str(control_dir),
+            "gpu_lock_token": "token-pending",
+        })
+        current = {
+            "resource": "gpu", "token": "token-pending",
+            "state_path": str(state_path),
+        }
+        original = pipeline.process_exists
+        try:
+            pipeline.process_exists = lambda _pid: True
+            self.assertFalse(
+                pipeline.request_nninteractive_server_release_on_contention(current)
+            )
+        finally:
+            pipeline.process_exists = original
+        self.assertFalse((control_dir / "close.json").exists())
 
     def test_failed_fewshot_job_removes_large_artifacts_but_keeps_diagnostics(self):
         import tools.fewshot_pipeline as pipeline

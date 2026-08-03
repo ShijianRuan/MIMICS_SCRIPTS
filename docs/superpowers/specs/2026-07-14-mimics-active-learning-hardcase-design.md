@@ -1,10 +1,10 @@
 # Mimics 难例分诊模块设计（MONAI-Mirrored Active Learning）
 
-- **日期**: 2026-07-14
-- **状态**: 设计待评审
+- **日期**: 2026-07-14（2026-08-01 第二版：按"三点主线"对齐 + 多器官/成本约束勘误 + 交互引擎决策）
+- **状态**: 设计待评审（v2 待评审）
 - **作者**: Claude (与 ShijianRuan 协作 brainstorming)
-- **目标**: 在 Mimics 脚本库中集成一个"识别疑难/苦难/不确定病例"的主动学习模块，按难度对一批 case 排序，让人优先复查/标注最难的例，从而减少标注工作量。
-- **参考**: 调研与最佳实践见 `docs/active_learning_research_and_best_practices.md`
+- **目标**: 在 Mimics 脚本库中集成"难例分诊"模块（标注提效三点主线中的 **C 线——减少数据量**）：对一批未标注/待复查 case 用模型算**不确定性/难度分数**，产出**按难度排序的复查队列**，人优先复查/标注最难的例。定位为**叠加组件**（决定"先标谁/必标谁"），不是"省 X% 标注"的独立卖点——能对外引用的节省数字必须来自 FG-Random 对照实测。
+- **参考**: 调研与最佳实践见 `docs/active_learning_research_and_best_practices.md`；实施规划（三点主线：工具效率 A / 少样本冷启动 B / 减少数据量 C）见 `docs/active_learning_implementation_plan.md`；本 spec 对应 C1（难例分诊）。
 
 ---
 
@@ -12,7 +12,9 @@
 
 ### 1.1 需求
 
-用户在 Mimics（Materialise 医学影像分割工具）里已经有一套 DINOv3 few-shot 分割与 nnInteractive 交互分割工作流。现在希望增加"主动学习/难例识别"能力：对一批未标注或待复查的 case，用模型跑推理并算**不确定性/难度分数**，产出一个**按难度排序的复查队列**，人优先处理最难/最可能出错的例。
+用户在 Mimics（Materialise 医学影像分割工具）里已经有一套 DINOv3 few-shot 分割与 nnInteractive 交互分割工作流。标注提效按三点主线组织（详见实施规划）：**A 工具效率**（交互式 AI + 蒙版编辑，确定性最高、先行）、**B 少样本冷启动**（无初始标注器官：预训练交互模型零样本出种子 → DINOv3 few-shot 微调）、**C 减少数据量**（主动学习/难例分诊 + 半监督 + 标签质量检测，验证门控后叠加）。
+
+**本 spec 只覆盖 C1（难例分诊）**：对一批未标注或待复查的 case，用模型跑推理并算**不确定性/难度分数**，产出一个**按难度排序的复查队列**，人优先处理最难/最可能出错的例。多器官场景（ModelMap: CT 16 + MR 8 + 粗分割模型）下**按器官算分、按病例聚合**——队列每行一个病例，显示"最差器官"让标注者知道重点修哪个器官。
 
 ### 1.2 MONAI Label 主动学习：实现与原理（调研结论）
 
@@ -58,10 +60,33 @@ POST /activelearning/{strategy} → 同步读分 → 降序取 Top-N → 盖 ser
 1. 本仓库对 `monai`/`monailabel` **零代码依赖**（仅 dinov3 文档提及）。
 2. 项目是**离线可移植部署**（`setup_offline.bat`、`tools/package_portable.py`，`wheels/` 仅 4 个 PySide6 Windows wheel）——每引入一个包都要进离线 wheel 包。
 3. `external/dinov3-medical-seg/src/models/decoder_3d.py` 的四个解码器（Linear/MLPProbe/SegFormer3D/TokenPyramid3D）**均无 `nn.Dropout` 层**（只有 GroupNorm/ReLU/GELU）；`dropout` 仅出现在 LoRA/adapter 且默认 0.0，backbone 在 frozen/lora 下冻结。**→ MC-Dropout 在 DINOv3 上开箱不可用**。
+4. **训练成本受限（2026-08-01 新增事实）**：nnU-Net 工作流配置 `fold = 0`（单折训练）→ **不存在 5 折集成权重，集成分歧信号默认不可用**，不为打分训练集成；`disable_tta = true`（推理默认关镜像 TTA）→ TTA-VVC 的增强栈**不依赖 nnU-Net 镜像 TTA**，统一复用 DINOv3 的 `_predict_with_tta` 轻量增强作为通用增强组件。
+5. **多器官 = 每器官独立模型**（ModelMap.toml）→ 打分按器官调用对应模型；几何启发式"体积 z 分数"需要**每器官体积先验表**。
+6. **交互引擎决策（2026-08-01）**：交互修正引擎确定为 **nnInteractive（本地已有资产）**；经三方对比调研（nnInteractive vs MedSAM2 vs DeepEdit，详见 §2.1），**不集成 MedSAM2/DeepEdit**——3D CT/MR 上 nnInteractive 精度/速度占优、依赖更轻，后两者无实质增量。
 4. `src/inference.py` 的 `_predict_with_tta`（line 69-80）**已经在跑 TTA**，但 `torch.stack(...).mean(dim=0)` 后把方差丢弃了 → TTA-VVC 几乎零成本可得。
 5. 现有三层架构 + 文件通信 + 外部 UI + JSON 轮询范式（见 §2）。
 
 > **⚠️ 效能边界与先决验证实验**：主动学习并非在所有条件下都有效。在编写任何 pipeline/UI 代码前，**必须**先完成 Phase 1 的最小可行验证实验（对 20–50 例有 GT 的 case 测量 Spearman ρ 和 failure-detection AUROC）。如果 ρ < 0.2 或模型 Dice < 0.4，不确定性信号就是噪声——此时应退化到纯几何启发式或放弃 AL 路径。详见详解见 §3.4–§3.5、完整文献依据见 `docs/active_learning_research_and_best_practices.md`。
+
+---
+
+### 1.5 交互引擎工具决策：nnInteractive 为唯一交互引擎（2026-08-01 调研结论）
+
+对 nnInteractive / MedSAM2 / MONAI Label DeepEdit 三工具的对比调研（依据：论文 + 独立评测 + 工程适配评估）：
+
+| 维度 | nnInteractive（选定） | MedSAM2 | DeepEdit |
+|---|---|---|---|
+| 原理 | **early prompting**：提示编码为额外输入通道，在进入特征提取前拼接（非 SAM 式 latent 融合）；基于 nnU-Net ResEnc-L；120+ 数据集（64,518 volume）训练 | SAM2 的 3D 扩展：Hiera 编码器 + **streaming memory bank**（把切片序列当视频帧传播）；微调 SAM2.1 权重；45.5 万 3D 对训练 | 自动分割 + 交互分割单模型两用：图像 + 正/负点击通道拼接；训练时一半迭代零点击（自动模式）、一半模拟点击；**需带数据训练，非开箱** |
+| 擅长 | 原生 3D、2D 提示→3D 分割、点/框/涂鸦/lasso 多提示、open-set | 3D 体积 + **视频/超声时序**、box 为主 | CT/MR 交互标注（需每例训练） |
+| 零样本 | ✅ 开箱即用 | ✅ 开箱（但需 GPU，有 CPU 版） | ❌ 必须训练 |
+| GPU | 10GB 推荐，<6GB 小物体；**有 torch-free 远程客户端 + Docker server + 离线缓存** | 需 GPU；依赖重（CUDA 12.4 + SAM2 CUDA 扩展编译） | 依赖 MONAI 生态；离线打包成本高 |
+| 独立评测 | CVPR 2025 交互 3D 分割挑战 **第 1 名**；BVM 2026 评测：**推理最快且精度较高** | BVM 2026：最"基础"（foundational）；超声/视频场景最强 | 未进入基础模型时代评测（需训练的老方法） |
+
+**裁决：集成 nnInteractive（本地已有），不集成 MedSAM2/DeepEdit。** 理由：
+1. 3D CT/MR 静态分割场景（Mimics 业务）上，nnInteractive 精度/速度占优（第三方评测），功能与 MedSAM2 高度重合且更轻；
+2. MedSAM2 的唯一实质差异能力是**视频/时序**（超声、内镜）——对 Mimics 静态 CT/MR 不相关；且其依赖（CUDA 12.4 + SAM2 扩展编译）违反离线可移植约束；
+3. DeepEdit 无开箱权重、需带数据训练，且精度不如 nnInteractive；唯一价值是 MONAI Label 生态（本模块已裁定不引整包，路线自洽）；
+4. **落地动作（线 A 的内容，非本 spec）**：nnInteractive 正式组件化——Mimics 按钮"AI 修正"→ 交互进程（点/涂鸦/框）→ 回写蒙版；与难例分诊衔接：分诊队列的"修正"环节用它。
 
 ---
 
@@ -112,12 +137,15 @@ POST /activelearning/{strategy} → 同步读分 → 降序取 Top-N → 盖 ser
 |---|---|---|
 | 架构 | **A：Scoring/Strategy 双抽象跨三层** | 最忠实 MONAI；重算(Tier3)/可测排序(Tier2)/轮询 UI 干净解耦；可重排序而不重打分 |
 | 与 MONAI 一致的层次 | **Vendor MONAI 的 AL ABC 文件（①b），不依赖 `monailabel` 整包** | 详见 §3.3 的数据支撑取舍。逐字拷入 `scoring.py`/`strategy.py`（Apache-2.0，保留 license 头），Datastore 只留需要的 3 方法 → 安装零负担 + 字面同一份类定义（忠实度最高） |
-| 打分算法库 | **引入 `monai` core**（DynUNet/UNETR/sliding_window_inference/transforms） | 相对独立的算法依赖，只进 Tier 2/3 的 py3.10 打分 env，不进 Mimics Py3.5 |
-| 主打分后端 | **带 dropout 的 MONAI 网络** | 让 MONAI 旗舰 Epistemic MC-Dropout 开箱即用；不绑 DINOv3 |
-| DINOv3 地位 | **降为可选的 TTA-only 后端** | 其解码器无 dropout（已验证），MC-Dropout 不可用；但 TTA-VVC 可复用 `_predict_with_tta` |
-| 网络来源 | **MONAI Model Zoo 预训练 bundle 起步 + 预留自训接口** | 最快跑通全链路，无需自己训练；两条路走同一可插拔后端接口 |
+| 打分算法库 | **引入 `monai` core**（transforms/sliding_window_inference，如需要） | 相对独立的算法依赖，只进 Tier 2/3 的 py3.10 打分 env，不进 Mimics Py3.5 |
+| 主打分后端（2026-08-01 修正） | **nnU-Net 单模型（已有）+ DINOv3（已有），统一 TTA-VVC + 几何** | 训练成本受限（`fold=0` 单折）→ 不训练集成、不引入需训练的 MONAI bundle；两个已有后端走同一可插拔接口，`supports_dropout` 均设 False |
+| Epistemic/MC-Dropout | **默认关闭；仅当后端显式带 dropout 才可用** | 现有后端（nnU-Net 推理模型、DINOv3）无推理期 dropout 层；不为打分改模型结构。MONAI 契约保留（`supports_dropout` 标志），将来有带 dropout 自训网络时自动启用 |
+| DINOv3 地位 | **TTA-only 后端（与 nnU-Net 平级）** | 其解码器无 dropout（已验证）；TTA-VVC 可复用 `_predict_with_tta` 增强栈——同时作为**统一增强组件**（nnU-Net 后端复用同一增强栈，不开其镜像 TTA） |
+| 多器官组织（2026-08-01 新增） | **按器官算分 → 病例级聚合 + "最差器官"标签** | ModelMap 每器官独立模型；标注者打开一个病例通常标多个器官 → 队列按病例排；体积先验按器官查表 |
 | 融合 | **RRF rank fusion 默认** | 免调、抗重尾；攒够 30-50 标签后可切 logistic 加权 |
-| 几何启发式 | **纳入为默认信号之一** | 零概率成本，抓"自信但全错"的粗失败（概率分数盲区） |
+| 几何启发式 | **纳入为默认信号之一** | 零概率成本，抓"自信但全错"的粗失败（概率分数盲区）；无模型也能排序 |
+| 冷启动多样性（2026-08-01 新增） | **仅完全无模型的器官启用：DINOv3 特征 + 覆盖最大选第一批** | 有弱模型（含粗分割）的器官直接用 TTA+几何；MedCAL-Bench 证明 DINOv2 家族分割 AL 特征最强 |
+| 交互修正环节 | **nnInteractive（已有），见 §1.5** | 结构错误点两下重做；不集成 MedSAM2/DeepEdit（3D CT/MR 无增量、依赖更重） |
 
 ### 3.3 "是否引入 monailabel 整包"的数据支撑裁决
 
@@ -135,7 +163,7 @@ POST /activelearning/{strategy} → 同步读分 → 降序取 Top-N → 盖 ser
 |---|---|---|
 | `ScoringMethod` | 1（`__call__`）+ `__init__`/`info` | 极低（~20 行） |
 | `Strategy` | 1（`__call__`）+ `__init__`/`info` | 极低（~20 行） |
-| **`Datastore`** | **20 个**（name/datalist/get_image/add_image/save_label/remove_label/status/json/refresh/get_dataset_archive…） | **很高**——继承即须实现全部 20 个（或遍地 `NotImplementedError`），而本模块只需 `get_unlabeled_images`/`get_image_info`/`update_image_info` 三个 |
+| **`Datastore`** | **13 个**（2026-08-01 勘误：经源码复核，`datastore.py` 为 144 行、13 个 `@abstractmethod`、共 25 个方法定义——旧记 20 个不准确） | **很高**——继承即须实现全部 13 个（或遍地 `NotImplementedError`），而本模块只需 `get_unlabeled_images`/`get_image_info`/`update_image_info` 三个 |
 
 反直觉结论：**继承 monailabel 的 `Datastore` ABC 反而比自写 3 方法的文件版 store 更费事更丑**；整包能省的只是 `ScoringMethod`/`Strategy` 那 ~40 行 trivial 样板。且**三个 scoring 实现（Epistemic/TTA/Heuristic）无论哪条路都得自己写**——monailabel 的 `EpistemicScoring` 深度绑其 `InferTask`/`network`/`model_ts`，无法整段复用，"引整包省开发量"的收益极小。
 
@@ -231,9 +259,9 @@ class Strategy(metaclass=ABCMeta):
 #### 4.2.1 `tools/fewshot_pipeline.py` 新增 `cmd_score_batch`
 
 新 subparser `score-batch`（仿 `cmd_infer`，line 2279）：
-- 输入：`--ts-root` `--organ` `--case-ids`（或全 discover）`--backend-spec` `--methods` `--job-id`。
-- 流程：`discover` 出 case 列表 → **逐 case**：`acquire_gpu_lock_for_job` → `Popen scripts/score_case.py` → 分数写 `workspace/scores/<organ>/<case>.json`（**这就是 MONAI 的 `update_image_info`**）→ `update_status` 更新批处理进度（`scored/total`）。
-- 全部算完后调用 §4.2.3 的 ranking，产出排序队列 JSON。
+- 输入：`--ts-root` `--organs`（列表，替代单 `--organ`）`--case-ids`（或全 discover）`--backend-spec` `--methods` `--job-id`。
+- 流程：`discover` 出 case 列表 → **逐 case × 逐器官**（每个器官用其对应模型）：`acquire_gpu_lock_for_job` → `Popen scripts/score_case.py` → 器官级分数写 `workspace/scores/<organ>/<case>.json`（**这就是 MONAI 的 `update_image_info`**）→ `update_status` 更新批处理进度（`scored/total`）。
+- 全部算完后调用 §4.2.3 的 ranking（**器官级融合 → 病例级聚合**），产出排序队列 JSON。
 - 状态 JSON schema：`mimics_hardcase_job.v1`（新），字段含 `kind:"score_batch"`、`total`、`scored`、`failed`、`queue_path`。
 
 #### 4.2.2 Datastore 抽象（轻量文件版）
@@ -268,15 +296,17 @@ class SingleSignalStrategy(Strategy):
 - **RRF**（默认）：$\text{RRF}(c)=\sum_j w_j/(k+r_j(c))$，$k\approx60$，$r_j$=信号 $j$ 上的排名。
 - **robust z + logistic**（进阶）：$z_j=(x_j-\text{median}_j)/(1.4826\,\text{MAD}_j)$，clip 到 ±3，加权和；权重可由 ≥30-50 个人工好/坏标签 logistic 拟合。
 - 分档：分数分位数 → `HIGH/MED/LOW` 三档 + 每 case 的"原因"字符串（哪些信号触发，如"碎片+边界糊"/"触及FOV边界"）。
-- 产出 `workspace/queues/<organ>/<job_id>.json`（schema `mimics_hardcase_queue.v1`）：排序 case 列表 + 各信号明细 + tier + reason。
+- **病例级聚合**（多器官，2026-08-01 新增）：器官级 RRF 融合 → 病例总分 = 各器官分数融合（默认等权，可切"最差器官优先"）→ 队列每个病例一行，附 `worst_organ`（扣分最重器官）标签供标注者先修。
+- 产出 `workspace/queues/<job_id>.json`（schema `mimics_hardcase_queue.v1`，跨器官）：排序 case 列表 + 各器官各信号明细 + 病例总分 + `worst_organ` + tier + reason。
 
-默认信号集：`{ tta_vvc, tta_boundary_entropy, vol_zscore, frag_ratio, border_frac }`（相关信号只留一个代表，避免冗余加权）。
+默认信号集：`{ tta_vvc, tta_boundary_entropy, vol_zscore, frag_ratio, border_frac }`（相关信号只留一个代表，避免冗余加权；按器官计算，体积 z 分数查器官先验表）。
 
 ### 4.3 Tier 2 UI：`tools/hardcase_review_panel.py`
 
 PySide6 外部进程（Tkinter 回退），仿 `fewshot_status_viewer.py`：
 - 读 §4.2.1 的批处理状态 JSON（进度条 `scored/total`）+ §4.2.3 的排序队列 JSON。
-- 表格：`# | case | tier | score | vvc | Usurf | comp | border | reason`，按 score 降序，tier 用颜色（● HIGH 红 / ◐ MED 黄 / ○ LOW 灰）。
+- 表格：`# | case | tier | score | 最差器官 | vvc | Usurf | comp | border | reason`，按 score 降序，tier 用颜色（● HIGH 红 / ◐ MED 黄 / ○ LOW 灰）——**最差器官列**告诉标注者重点修哪个器官（多器官病例先修最差的、其余快速确认）。
+- **抗锚定交互（2026-08-01 新增）**：默认先显示模型结果，但提供明显的"拒绝/重做"入口；低置信区域周期性强制复查（automation bias 缓解；依据：病理实验 AI 建议权重 0.44、CHI 2021 先独立判断再出示 AI 的 RCT）。
 - 交互：`[Refresh]` `[Export CSV]` `[Re-rank ▾]`（切 RRF/单信号/logistic，**只重排不重算**）；**双击行**写 `selection.json`（`{"action":"open_case","case_id":...}`）供 Tier 1 poll 后在 Mimics 打开该 case。
 - QSS 主题沿用 `"Segoe UI","Microsoft YaHei"`，`CloseAwareMainWindow` 模式。
 
@@ -360,11 +390,12 @@ PySide6 外部进程（Tkinter 回退），仿 `fewshot_status_viewer.py`：
 
 ## 7. 分阶段实施
 
-- **Phase 1（骨架 + 免费信号）**：`ScoringBackend` 接口 + `dinov3_backend`（TTA-only）+ `TTAScoring` + `HeuristicScoring` + 算法单测。复用现有 DINOv3，先不引 monai。产出：能对 DINOv3 已训模型算 VVC+几何分数。
-- **Phase 2（Strategy + 队列 + 编排）**：`FileScoreStore` + `hardcase_ranking`（RRF）+ `cmd_score_batch` + 状态 JSON。产出：命令行能出排序队列 JSON。
-- **Phase 3（MONAI 后端）**：引入 `monai` core + `monai_bundle_backend` + `EpistemicScoring`（MC-Dropout）+ Model Zoo bundle 下载/离线打包。产出：MONAI 旗舰方法开箱即用。
-- **Phase 4（UI + Tier1）**：`hardcase_review_panel` + Tier1 按钮/monitor/open_case + 假 Mimics 测试。产出：Mimics 内完整可用。
-- **Phase 5（进阶，可选）**：logistic 加权融合、自训带 dropout 网络接口、RCA/AUROC 验证、成批 core-set 去冗余（Suggestive Annotation）。
+- **Phase 0（验证实验，硬门控，2–3 天）**：20–50 例有真值病例，**逐器官**测 Spearman ρ / failure-detection AUROC + 人时实测（队列顺序 vs 随机顺序各 10 例）。决策树：ρ>0.40 且 AUROC>0.70 → 全量实施；ρ 0.20–0.40 → 只用 TTA-VVC+几何；ρ<0.20 → 只做几何启发式；模型 Dice<0.3 → 放弃不确定性路径。数据不足的器官只启用几何。**与三点主线中的线 A/B 无依赖，可并行推进。**
+- **Phase 1（骨架 + 免费信号）**：`ScoringBackend` 接口 + `nnunet_backend` + `dinov3_backend`（均 TTA-only，`supports_dropout=False`）+ **统一增强组件**（复用 `_predict_with_tta` 轻量增强栈）+ `TTAScoring` + `HeuristicScoring` + 算法单测。产出：能对现有模型算 VVC+几何分数。
+- **Phase 2（Strategy + 队列 + 编排）**：`FileScoreStore` + `hardcase_ranking`（RRF + 病例级聚合 + 最差器官）+ `cmd_score_batch`（多器官）+ 状态 JSON。产出：命令行能出排序队列 JSON。
+- **Phase 3（可选：带 dropout 后端）**：引入 `monai` core + `monai_bundle_backend` + `EpistemicScoring`（MC-Dropout）+ Model Zoo bundle 下载/离线打包——**仅在用户提供带 dropout 的自训/预训练网络时启用**；默认跳过（训练成本约束下无此资产）。
+- **Phase 4（UI + Tier1）**：`hardcase_review_panel`（含最差器官列 + 抗锚定交互）+ Tier1 按钮/monitor/open_case + 假 Mimics 测试。产出：Mimics 内完整可用。
+- **Phase 5（进阶，可选）**：logistic 加权融合、半监督扩量（选择性伪标签 + 经验回放）、标签质量检测接入（复用本模块打分设施：已有标注的可疑度 = 重标优先级）、RCA/AUROC 验证。
 
 ---
 
@@ -378,9 +409,10 @@ PySide6 外部进程（Tkinter 回退），仿 `fewshot_status_viewer.py`：
 | `monai` core 离线打包体积大（拖 torch 生态） | 只进 Tier2/3 的 py3.10 env，不进 Mimics Py3.5；Phase 1-3 不依赖 monai，nnU-Net 后端用已有环境 |
 | MC-Dropout 在无 dropout 训练的网上失校准 | 硬门控 `supports_dropout`；DINOv3 后端禁用 Epistemic，返回 `"unavailable_no_dropout"` |
 | OOD/不确定性分数与真实退化不相关（Vasiliuk 2023） | Phase 1 强制验证 Spearman ρ / AUROC；ρ < 0.2 → 弃用该信号 |
-| 单模型不确定性不如集成强壮（文献一致结论） | TTA-VVC 是单模型下最强信号；如有 5 折 → 优先用集成熵/MI |
-| GPU 批量打分耗时长 | 复用 `acquire_gpu_lock_for_job` 串行 + 进度条；`tta_samples` 可配置 |
+| 单模型不确定性不如集成强壮（文献一致结论） | TTA-VVC 是单模型下最强信号；**fold=0 单折（成本约束）→ 不做集成**；如有历史遗留多模型权重可零成本启用分歧信号 |
+| GPU 批量打分耗时长 | 复用 `acquire_gpu_lock_for_job` 串行 + 进度条；`tta_samples` 可配置；多器官 = 病例数 × 器官数 次推理（粗分割模型可先筛掉无目标器官病例，可选优化） |
 | 与现有 `fewshot_strategies.py`（训练预设）命名混淆 | 新模块统一 `hardcase_*` 前缀 |
+| 模型质量一般（Dice 0.3–0.5，2026-08-01 补充） | 不确定性不可靠时主动学习路径自动降级（硬门槛），但**预标注+确认模式与几何排序仍然有效**——"改"而非"画"的收益不依赖主动学习 |
 
 ### 8.1 最小质量门槛与退化路径
 
