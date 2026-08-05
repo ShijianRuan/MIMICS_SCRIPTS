@@ -2434,6 +2434,10 @@ def write_training_config(
             "warmup_epochs": 0,
             "cosine_min_lr_ratio": 0.1,
             "keep_feature_cache": False,
+            # Each source affine determines a non-left/right in-plane axis.
+            # The cache records that axis per case and the trainer mirrors only
+            # along that case-specific safe direction.
+            "cached_slice_flip_probability": 0.5,
         })
         strategy_options = (config.get("strategy") or {}).get("options") or {}
         cached_loss_type = str(strategy_options.get("loss_type", "auto"))
@@ -4541,7 +4545,7 @@ def cmd_infer(args):
     status_base = {
         "schema_version": "mimics_fewshot_job.v1",
         "job_id": job_id,
-        "kind": "infer",
+        "kind": "guided_infer" if bool(getattr(args, "guided_prompts", False)) else "infer",
         "status": "preparing",
         "organ": args.organ,
         "case_id": args.case_id,
@@ -4624,6 +4628,7 @@ def cmd_infer(args):
     if args.model_manifest and output_model_id == "latest":
         output_model_id = model.get("model_id", "external_model")
     output_path = output_dir / (safe_slug(output_model_id) + ".nii.gz")
+    prompt_suggestions_path = output_dir / (job_id + "_guided_points.json")
     log_path = output_dir / (job_id + ".log")
 
     status_running = dict(status_base)
@@ -4636,6 +4641,12 @@ def cmd_infer(args):
         "model_manifest": model.get("_manifest_path", args.model_manifest or ""),
         "model": model,
         "source_validation": source_validation,
+        "guided_prompts": bool(getattr(args, "guided_prompts", False)),
+        "prompt_suggestions_path": (
+            str(prompt_suggestions_path)
+            if bool(getattr(args, "guided_prompts", False))
+            else ""
+        ),
         "updated_at_epoch": time.time(),
     })
     write_json_atomic(status_path, status_running)
@@ -4651,6 +4662,10 @@ def cmd_infer(args):
         "--output",
         str(output_path),
     ]
+    if bool(getattr(args, "guided_prompts", False)):
+        cmd.extend(
+            ["--prompt-suggestions-output", str(prompt_suggestions_path)]
+        )
     append_log(workspace, "Launching DINOv3 inference: {}".format(" ".join(cmd)))
     proc = None
     gpu_lock = None
@@ -4734,6 +4749,10 @@ def cmd_infer(args):
                 "error": error,
             })
             return proc.returncode or 1
+        if bool(getattr(args, "guided_prompts", False)) and not prompt_suggestions_path.is_file():
+            raise RuntimeError(
+                "DINOv3 inference finished but did not produce guided point suggestions"
+            )
         update_status(status_path, {
             "status": "completed",
             "returncode": 0,
@@ -4743,6 +4762,12 @@ def cmd_infer(args):
                 "" if remove_inference_input else str(image)
             ),
             "late_cancel_ignored": bool(cancel_path.is_file()),
+            "guided_prompts": bool(getattr(args, "guided_prompts", False)),
+            "prompt_suggestions_path": (
+                str(prompt_suggestions_path)
+                if bool(getattr(args, "guided_prompts", False))
+                else ""
+            ),
         })
         append_log(workspace, "Inference job {} completed. Output: {}".format(job_id, output_path))
         return 0
@@ -5022,6 +5047,11 @@ def build_parser():
     infer.add_argument("--expected-source-image-path")
     infer.add_argument("--gpu-lock-timeout-seconds", type=float, default=3600)
     infer.add_argument("--job-id")
+    infer.add_argument(
+        "--guided-prompts",
+        action="store_true",
+        help="Generate reviewed DINO point suggestions for official nnInteractive",
+    )
     infer.set_defaults(func=cmd_infer)
 
     models = sub.add_parser("list-models", help="List latest registered models")

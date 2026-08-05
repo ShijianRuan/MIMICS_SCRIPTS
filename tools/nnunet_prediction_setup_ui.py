@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import threading
 import time
 import traceback
 from pathlib import Path
+from queue import Empty, Queue
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,6 +63,12 @@ class PredictionWindow:
         self.window.setMinimumSize(680, 520)
         self.window.closeEvent = self._close_event
         self.submitted = False
+        self._loading_models = True
+        self._model_deadline = time.time() + 120.0
+        self._model_results = Queue()
+        self._submission_results = Queue()
+        self._submission_generation = 0
+        self._submission_deadline = 0.0
         root = QtWidgets.QVBoxLayout(self.window)
         root.setContentsMargins(22, 18, 22, 18)
         root.setSpacing(12)
@@ -83,12 +92,8 @@ class PredictionWindow:
         case_layout.addWidget(QtWidgets.QLabel(str(context.get("selected_mask_name") or "-")), 1, 1)
         root.addWidget(case)
 
-        all_models = load_models(
-            context.get("workspace") or Path.home() / ".mimics_script" / "nnunet"
-        )
-        usable_models = [row for row in all_models if model_usability(row)[0]]
-        self.models = _rank_models(usable_models, context)
-        self.table = QtWidgets.QTableWidget(len(self.models), 5)
+        self.models = []
+        self.table = QtWidgets.QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(
             ["Task", "Model", "Configuration", "Labels", "Backend"]
         )
@@ -98,21 +103,6 @@ class PredictionWindow:
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        for index, model in enumerate(self.models):
-            values = [
-                model.get("task_name") or model.get("task_id"),
-                model.get("model_id"),
-                model.get("configuration"),
-                ", ".join(str(row.get("name")) for row in model.get("labels") or []),
-                model.get("execution_backend") or "local",
-            ]
-            for column, value in enumerate(values):
-                item = QtWidgets.QTableWidgetItem(str(value or ""))
-                if column == 3:
-                    item.setToolTip(str(value or ""))
-                self.table.setItem(index, column, item)
-        if self.models:
-            self.table.selectRow(0)
         root.addWidget(self.table, 1)
         self.tta_check = QtWidgets.QCheckBox("Use mirroring test-time augmentation")
         self.tta_check.setChecked(False)
@@ -123,9 +113,7 @@ class PredictionWindow:
         )
         root.addWidget(self.remote_selector.group)
         self.status_label = QtWidgets.QLabel(
-            "A selected Mask only ranks models containing that label. The chosen model predicts all of its output labels; its plans control normalization, spacing, and patching."
-            if self.models
-            else "No usable nnU-Net model was found. Open Status and Models to inspect training results."
+            "Loading compatible models in the background..."
         )
         self.status_label.setObjectName("hint")
         self.status_label.setWordWrap(True)
@@ -138,9 +126,110 @@ class PredictionWindow:
         self.start = QtWidgets.QPushButton("Start Prediction")
         self.start.setObjectName("primary")
         self.start.clicked.connect(self._submit)
-        self.start.setEnabled(bool(self.models))
+        self.start.setEnabled(False)
         actions.addWidget(self.start)
         root.addLayout(actions)
+        self._timer = self.QtCore.QTimer(self.window)
+        self._timer.timeout.connect(self._poll_background_results)
+        self._timer.start(80)
+        self._start_model_loading()
+
+    def _start_model_loading(self):
+        workspace = self.context.get("workspace") or Path.home() / ".mimics_script" / "nnunet"
+
+        def load():
+            try:
+                all_models = load_models(workspace)
+                usable = [row for row in all_models if model_usability(row)[0]]
+                self._model_results.put((_rank_models(usable, self.context), ""))
+            except Exception as exc:
+                self._model_results.put(([], str(exc)))
+
+        worker = threading.Thread(target=load, name="nnunet-model-discovery")
+        worker.daemon = True
+        worker.start()
+
+    def _apply_models(self, models, error):
+        self._loading_models = False
+        self.models = list(models or [])
+        self.table.setUpdatesEnabled(False)
+        try:
+            self.table.setRowCount(len(self.models))
+            for index, model in enumerate(self.models):
+                values = [
+                    model.get("task_name") or model.get("task_id"),
+                    model.get("model_id"),
+                    model.get("configuration"),
+                    ", ".join(
+                        str(row.get("name")) for row in model.get("labels") or []
+                    ),
+                    model.get("execution_backend") or "local",
+                ]
+                for column, value in enumerate(values):
+                    item = self.QtWidgets.QTableWidgetItem(str(value or ""))
+                    if column == 3:
+                        item.setToolTip(str(value or ""))
+                    self.table.setItem(index, column, item)
+            if self.models:
+                self.table.selectRow(0)
+        finally:
+            self.table.setUpdatesEnabled(True)
+        self.start.setEnabled(bool(self.models))
+        if error:
+            self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
+            self.status_label.setText("Could not load nnU-Net models: {}".format(error))
+        elif self.models:
+            self.status_label.setText(
+                "A selected Mask only ranks models containing that label. The chosen model predicts all of its output labels; its plans control normalization, spacing, and patching."
+            )
+        else:
+            self.status_label.setText(
+                "No usable nnU-Net model was found. Open Status and Models to inspect training results."
+            )
+
+    def _poll_background_results(self):
+        if self._loading_models:
+            try:
+                models, error = self._model_results.get_nowait()
+            except Empty:
+                pass
+            else:
+                self._apply_models(models, error)
+            if self._loading_models and time.time() >= self._model_deadline:
+                self._loading_models = False
+                self.status_label.setStyleSheet(
+                    "color: #b42318; font-weight: 600;"
+                )
+                self.status_label.setText(
+                    "Model discovery timed out. The model library may be on an "
+                    "offline or slow drive. Close this window, reconnect the drive, "
+                    "and retry."
+                )
+        if (
+            self._submission_deadline
+            and time.time() >= self._submission_deadline
+        ):
+            self._submission_generation += 1
+            self._submission_deadline = 0.0
+            self.start.setEnabled(bool(self.models))
+            self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
+            self.status_label.setText(
+                "Image path checking timed out. The source drive may be offline; "
+                "relink the source image or reconnect the drive before retrying."
+            )
+        try:
+            generation, request, error = self._submission_results.get_nowait()
+        except Empty:
+            return
+        if generation != self._submission_generation:
+            return
+        self._submission_deadline = 0.0
+        if error:
+            self.start.setEnabled(bool(self.models))
+            self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
+            self.status_label.setText(error)
+            return
+        self._create_prediction_job(request)
 
     def _submit(self):
         try:
@@ -148,9 +237,15 @@ class PredictionWindow:
             if not 0 <= row < len(self.models):
                 raise RuntimeError("Select one model.")
             model = self.models[row]
-            image_path = Path(str(self.context.get("source_image_path") or "")).resolve()
-            if not image_path.exists():
-                raise RuntimeError("The current source image is unavailable: {}".format(image_path))
+            image_path = Path(
+                os.path.abspath(
+                    os.path.expandvars(
+                        os.path.expanduser(
+                            str(self.context.get("source_image_path") or "")
+                        )
+                    )
+                )
+            )
             workspace = str(self.context.get("workspace") or Path.home() / ".mimics_script" / "nnunet")
             backend, profile_id = self.remote_selector.selection()
             request = {
@@ -179,6 +274,47 @@ class PredictionWindow:
                 "target_grid": self.context.get("target_grid") or {},
                 "launch_project_path": self.context.get("launch_project_path") or "",
             }
+            self._submission_generation += 1
+            generation = self._submission_generation
+            self._submission_deadline = time.time() + 60.0
+            self.start.setEnabled(False)
+            self.status_label.setStyleSheet("")
+            self.status_label.setText(
+                "Checking the current image location in the background..."
+            )
+
+            def validate():
+                try:
+                    if not image_path.exists():
+                        raise RuntimeError(
+                            "The current source image is unavailable: {}".format(
+                                image_path
+                            )
+                        )
+                    self._submission_results.put((generation, request, ""))
+                except Exception as exc:
+                    self._submission_results.put((generation, None, str(exc)))
+
+            worker = threading.Thread(target=validate, name="nnunet-image-check")
+            worker.daemon = True
+            worker.start()
+        except Exception as exc:
+            self.start.setEnabled(bool(self.models))
+            self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
+            self.status_label.setText(str(exc))
+
+    def _create_prediction_job(self, request):
+        try:
+            workspace = str(request.get("workspace") or "")
+            model = next(
+                (
+                    row
+                    for row in self.models
+                    if str(row.get("manifest_path") or "")
+                    == str(request.get("model_manifest") or "")
+                ),
+                {},
+            )
             provisional = create_job(request)
             settings_path = Path.home() / ".mimics_script" / "nnunet_settings.json"
             settings = read_json(settings_path, {}) or {}
@@ -206,10 +342,13 @@ class PredictionWindow:
                 )
             self.window.accept()
         except Exception as exc:
+            self.start.setEnabled(bool(self.models))
             self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
             self.status_label.setText(str(exc))
 
     def _close_event(self, event):
+        self._submission_generation += 1
+        self._submission_deadline = 0.0
         if not self.submitted and self.context.get("setup_status_path"):
             update_status(
                 self.context["setup_status_path"],

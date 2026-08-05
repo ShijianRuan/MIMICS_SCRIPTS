@@ -30,6 +30,7 @@ BUTTON_TRAIN_ADVANCED = "Train Advanced Setup..."
 BUTTON_TRAIN_MODEL = "Train Model..."
 BUTTON_PREDICT = "Predict Current Case (Latest Model)"
 BUTTON_PREDICT_MODEL = "Predict Current Case (Choose Model)..."
+BUTTON_GUIDED_NNINTERACTIVE = "DINOv3 Guided nnInteractive"
 BUTTON_STATUS = "Show Status"
 BUTTON_STOP = "Stop Running Job"
 BUTTON_CANCEL = "Cancel"
@@ -312,6 +313,10 @@ def _status_viewer_script():
 
 def _model_chooser_script():
     return os.path.join(_project_root(), "tools", "fewshot_model_chooser.py")
+
+
+def _guided_review_script():
+    return os.path.join(_project_root(), "tools", "dino_guided_prompt_review.py")
 
 
 def _bridge_script():
@@ -1415,6 +1420,7 @@ def _display_kind(value):
     labels = {
         "train": "training",
         "infer": "prediction",
+        "guided_infer": "guided prediction",
         "model_choice": "model selection",
         "train_setup": "training setup",
     }
@@ -1437,6 +1443,24 @@ def _resource_wait_text(job):
 
 
 def _guard_no_active_job(ts_root, requested_kind="train"):
+    for monitor in list(_MONITORS.values()):
+        if not bool(monitor.get("guided_prompts")):
+            continue
+        if not monitor.get("guided_review_started"):
+            continue
+        review = _read_json(monitor.get("guided_review_status_path"), {}) or {}
+        if str(review.get("status") or "") in (
+            "reviewing",
+            "confirmed",
+        ):
+            mimics.dialogs.message_box(
+                "DINOv3 suggested points are still being reviewed.\n\n"
+                "Confirm or cancel that review before starting another DINOv3 task. "
+                "The review does not hold the GPU.",
+                title=TITLE,
+                ui_blocking=False,
+            )
+            return False
     path, job = _latest_active_job(ts_root)
     if not job:
         return True
@@ -2184,6 +2208,7 @@ def _launch_inference_job(
     selected_model=None,
     target_spec=None,
     source_image_path="",
+    guided_prompts=False,
 ):
     dinov3_root = _dinov3_root(config)
     python_exe = _fewshot_python(config, dinov3_root)
@@ -2209,6 +2234,8 @@ def _launch_inference_job(
     ]
     if source_image_path:
         cmd.extend(["--image-path", os.path.abspath(source_image_path)])
+    if guided_prompts:
+        cmd.append("--guided-prompts")
     source_geometry = _active_source_geometry_payload()
     if source_geometry:
         cmd.extend([
@@ -2260,7 +2287,7 @@ def _launch_inference_job(
         {
             "schema_version": "mimics_fewshot_job.v1",
             "job_id": job_id,
-            "kind": "infer",
+            "kind": "guided_infer" if guided_prompts else "infer",
             "status": "launching",
             "organ": organ,
             "case_id": case_id,
@@ -2270,6 +2297,7 @@ def _launch_inference_job(
             "cancel_path": cancel_path,
             "selected_model": selected_model,
             "prediction_target": target_spec or {},
+            "guided_prompts": bool(guided_prompts),
             "source_geometry_expected": source_geometry,
             "created_at_epoch": time.time(),
             "updated_at_epoch": time.time(),
@@ -2291,11 +2319,14 @@ def _launch_inference_job(
         "launch_project_path": launch_project_path,
         "target_grid": target_grid,
         "waiting_to_apply_logged": False,
+        "kind": "guided_infer" if guided_prompts else "infer",
+        "guided_prompts": bool(guided_prompts),
     }
     _start_monitor(monitor)
     _mimics_log(
         logging.INFO,
-        "DINOv3 few-shot inference started. Organ: {0}, case: {1}, model: {2}, PID: {3}.".format(
+        "DINOv3 {0} started. Organ: {1}, case: {2}, model: {3}, PID: {4}.".format(
+            "guided point generation" if guided_prompts else "few-shot inference",
             organ,
             case_id,
             (selected_model or {}).get("model_id", "latest"),
@@ -2312,6 +2343,7 @@ def _launch_external_model_chooser(
     organ,
     target_spec=None,
     source_image_path="",
+    guided_prompts=False,
 ):
     candidates = _model_candidates(ts_root, organ)
     if not candidates:
@@ -2330,6 +2362,7 @@ def _launch_external_model_chooser(
             candidates[0],
             target_spec=target_spec,
             source_image_path=source_image_path,
+            guided_prompts=guided_prompts,
         )
 
     script = _model_chooser_script()
@@ -2351,6 +2384,7 @@ def _launch_external_model_chooser(
         "status": "selecting_model",
         "organ": organ,
         "prediction_target": target_spec or {},
+        "guided_prompts": bool(guided_prompts),
         "case_id": case_id,
         "ts_root": os.path.abspath(ts_root),
         "workspace": workspace,
@@ -2400,6 +2434,7 @@ def _launch_external_model_chooser(
             "case_id": case_id,
             "organ": organ,
             "prediction_target": target_spec or {},
+            "guided_prompts": bool(guided_prompts),
             "source_image_path": source_image_path,
             "controller_pid": process.pid,
             "startup_stderr_path": stderr_log,
@@ -2419,7 +2454,7 @@ def _launch_external_model_chooser(
     return 0
 
 
-def _start_inference(choose_model=False):
+def _start_inference(choose_model=False, guided_prompts=False):
     selected_mask = _selected_mask()
     organ = str(getattr(selected_mask, "name", "") or "").strip() if selected_mask is not None else ""
     if not organ:
@@ -2473,6 +2508,7 @@ def _start_inference(choose_model=False):
                 organ,
                 target_spec=target_spec,
                 source_image_path=source_image_path,
+                guided_prompts=guided_prompts,
             )
         except Exception as exc:
             _mimics_log(logging.ERROR, "DINOv3 external model chooser could not start: {0}".format(exc))
@@ -2507,6 +2543,7 @@ def _start_inference(choose_model=False):
         selected_model,
         target_spec=target_spec,
         source_image_path=source_image_path,
+        guided_prompts=guided_prompts,
     )
 
 
@@ -2603,6 +2640,574 @@ def _launch_bridge_mask_to_buffer(monitor, status):
                 "error": "Could not start prediction conversion monitor: {0}".format(exc),
             },
         )
+
+
+def _guided_review_update(monitor, payload):
+    path = monitor.get("guided_review_status_path")
+    if not path:
+        return
+    current = _read_json(path, {}) or {}
+    current.update(payload)
+    current["updated_at_epoch"] = time.time()
+    _write_json_atomic(path, current)
+
+
+def _delete_guided_marker(row):
+    marker = row.get("marker") if isinstance(row, dict) else None
+    if marker is None:
+        return
+    try:
+        mimics.data.points.delete(marker)
+    except Exception:
+        pass
+
+
+def _guided_live_rows(monitor, image=None):
+    try:
+        import nninteractive_mimics as nnm
+    except Exception:
+        return []
+    if image is None:
+        try:
+            image = mimics.data.images.get_active()
+        except Exception:
+            image = None
+    shape = (monitor.get("target_grid") or {}).get("target_shape") or []
+    live = []
+    for row in list(monitor.get("guided_point_rows") or []):
+        marker = row.get("marker")
+        try:
+            coordinates = nnm._point_coordinates(marker)
+            indexes = image.get_voxel_indexes(coordinates) if image is not None else None
+            if indexes is None or len(indexes) != 3:
+                continue
+            voxel = [int(round(float(value))) for value in indexes]
+            if shape and any(
+                voxel[axis] < 0 or voxel[axis] >= int(shape[axis])
+                for axis in range(3)
+            ):
+                _delete_guided_marker(row)
+                continue
+            current = dict(row)
+            current["point"] = voxel
+            live.append(current)
+        except Exception:
+            continue
+    monitor["guided_point_rows"] = live
+    return live
+
+
+def _guided_counts(rows):
+    foreground = len([row for row in rows if row.get("include_interaction")])
+    return foreground, len(rows) - foreground
+
+
+def _guided_nninteractive_models():
+    try:
+        import nninteractive_finetune_mimics as finetune
+
+        payload = finetune.guided_model_options() or {}
+        options = payload.get("options") or []
+        if options:
+            return options, str(payload.get("default_key") or "official")
+    except Exception as exc:
+        _mimics_log(
+            logging.WARNING,
+            "Custom nnInteractive models could not be listed; the official model remains available: {0}".format(
+                exc
+            ),
+        )
+    return [
+        {
+            "key": "official",
+            "label": "Official nnInteractive",
+            "source": "official",
+            "profile": None,
+        }
+    ], "official"
+
+
+def _guided_selected_model(monitor, review=None):
+    review = review or {}
+    key = str(
+        review.get("selected_model_key")
+        or monitor.get("guided_selected_model_key")
+        or "official"
+    )
+    options = monitor.get("guided_model_options") or []
+    selected = None
+    for option in options:
+        if str(option.get("key") or "") == key:
+            selected = option
+            break
+    if selected is None:
+        selected = options[0] if options else {
+            "key": "official",
+            "label": "Official nnInteractive",
+            "profile": None,
+        }
+    monitor["guided_selected_model_key"] = str(selected.get("key") or "official")
+    return selected
+
+
+def _create_guided_marker(image, world_ras, include, name):
+    values = [float(value) for value in world_ras]
+    if len(values) != 3:
+        raise RuntimeError("DINOv3 suggested point has invalid RAS coordinates")
+    point_lps = (-values[0], -values[1], values[2])
+    marker = None
+    try:
+        marker = mimics.analyze.create_point(
+            point=point_lps,
+            name=name,
+            color=(0.1, 1.0, 0.2) if include else (1.0, 0.2, 0.1),
+        )
+        # Fail before review if the physical point is outside the active image.
+        indexes = image.get_voxel_indexes(point_lps)
+        shape = _active_image_shape(image) or []
+        if indexes is None or len(indexes) != 3:
+            raise RuntimeError("Mimics could not map the suggested point to a voxel")
+        if shape and any(
+            float(indexes[axis]) < -0.5
+            or float(indexes[axis]) > float(shape[axis]) - 0.5
+            for axis in range(3)
+        ):
+            raise RuntimeError("DINOv3 suggested point lies outside the active image")
+        return marker
+    except Exception:
+        if marker is not None:
+            _delete_guided_marker({"marker": marker})
+        raise
+
+
+def _start_guided_review(monitor, status):
+    target_open, reason = _monitor_target_is_open(monitor)
+    if not target_open:
+        return False, reason
+    suggestions_path = str(status.get("prompt_suggestions_path") or "")
+    suggestions = _read_json(suggestions_path, {}) or {}
+    if suggestions.get("schema_version") != "dinov3_guided_points.v1":
+        raise RuntimeError("DINOv3 guided point output is missing or invalid")
+    image = mimics.data.images.get_active()
+    rows = []
+    token = str(monitor.get("job_id") or "")[-8:]
+    try:
+        for item in suggestions.get("points") or []:
+            include = bool(item.get("include_interaction", True))
+            label = "FG" if include else "BG"
+            index = 1 + len(
+                [row for row in rows if row.get("include_interaction") == include]
+            )
+            if index > 3:
+                continue
+            marker = _create_guided_marker(
+                image,
+                item.get("world_ras_mm") or [],
+                include,
+                "DINO Guide {0} {1} [{2}]".format(label, index, token),
+            )
+            rows.append(
+                {
+                    "marker": marker,
+                    "include_interaction": include,
+                    "proposal": item,
+                }
+            )
+    except Exception:
+        for row in rows:
+            _delete_guided_marker(row)
+        raise
+    if not any(row.get("include_interaction") for row in rows):
+        for row in rows:
+            _delete_guided_marker(row)
+        raise RuntimeError("DINOv3 did not produce a usable foreground suggestion")
+
+    job_dir = monitor["bridge_job_dir"]
+    if not os.path.isdir(job_dir):
+        os.makedirs(job_dir)
+    review_status_path = os.path.join(job_dir, "guided_review_status.json")
+    context_path = os.path.join(job_dir, "guided_review_context.json")
+    foreground_count, background_count = _guided_counts(rows)
+    model_options, default_model_key = _guided_nninteractive_models()
+    public_model_options = [
+        {
+            "key": str(option.get("key") or "official"),
+            "label": str(option.get("label") or "nnInteractive"),
+            "source": str(option.get("source") or "official"),
+        }
+        for option in model_options
+    ]
+    monitor["guided_model_options"] = model_options
+    monitor["guided_selected_model_key"] = default_model_key
+    _write_json_atomic(
+        review_status_path,
+        {
+            "schema_version": "dinov3_guided_review.v1",
+            "status": "reviewing",
+            "foreground_count": foreground_count,
+            "background_count": background_count,
+            "automatic_foreground_count": foreground_count,
+            "automatic_background_count": background_count,
+            "selected_model_key": default_model_key,
+            "message": "Review or move the temporary points in Mimics.",
+            "created_at_epoch": time.time(),
+        },
+    )
+    _write_json_atomic(
+        context_path,
+        {
+            "schema_version": "dinov3_guided_review_context.v1",
+            "status_path": review_status_path,
+            "organ": monitor.get("organ"),
+            "case_id": monitor.get("case_id"),
+            "model_options": public_model_options,
+            "default_model_key": default_model_key,
+        },
+    )
+    script = _guided_review_script()
+    if not os.path.isfile(script):
+        for row in rows:
+            _delete_guided_marker(row)
+        raise RuntimeError("DINOv3 guided review UI was not found: {0}".format(script))
+    config = _config()
+    python_exe = _fewshot_python(config, _dinov3_root(config))
+    stderr_path = os.path.join(job_dir, "guided_review_stderr.log")
+    try:
+        process = _launch_gui_process(
+            [python_exe, script, "--context", context_path],
+            cwd=_project_root(),
+            stderr_log=stderr_path,
+        )
+    except Exception:
+        for row in rows:
+            _delete_guided_marker(row)
+        raise
+    monitor["guided_point_rows"] = rows
+    monitor["guided_review_status_path"] = review_status_path
+    monitor["guided_review_context_path"] = context_path
+    monitor["guided_review_stderr_path"] = stderr_path
+    monitor["guided_review_process"] = process
+    monitor["guided_review_started"] = True
+    monitor["guided_last_request_id"] = None
+    status["application_state"] = "reviewing_guided_points"
+    status["application_message"] = (
+        "Review the suggested foreground and background points in Mimics."
+    )
+    status["updated_at_epoch"] = time.time()
+    try:
+        _write_json_atomic(monitor["status_path"], status)
+    except Exception:
+        pass
+    _update_gui()
+    _mimics_log(
+        logging.INFO,
+        "DINOv3 suggested {0} foreground and {1} background point(s). Review them in Mimics; nnInteractive is being prepared in the background.".format(
+            foreground_count, background_count
+        ),
+    )
+    return True, ""
+
+
+def _handle_guided_review_request(monitor, review, image):
+    request = review.get("request") or {}
+    request_id = request.get("id")
+    if request_id is None or request_id == monitor.get("guided_last_request_id"):
+        return
+    monitor["guided_last_request_id"] = request_id
+    command = str(request.get("command") or "")
+    rows = _guided_live_rows(monitor, image)
+    foreground_count, background_count = _guided_counts(rows)
+    _guided_review_update(
+        monitor,
+        {"request_pending": True, "message": "Waiting for the Mimics point action..."},
+    )
+    error_message = ""
+    try:
+        if command in ("add_foreground", "add_background"):
+            include = command == "add_foreground"
+            count = foreground_count if include else background_count
+            import nninteractive_mimics as nnm
+
+            captured = nnm._capture_point(image, include)
+            if captured is not None and captured.get("_marker") is not None:
+                marker = captured["_marker"]
+                try:
+                    marker.name = "DINO Guide {0} {1}".format(
+                        "FG" if include else "BG", count + 1
+                    )
+                except Exception:
+                    pass
+                rows.append(
+                    {
+                        "marker": marker,
+                        "include_interaction": include,
+                        "proposal": {"source": "user_added"},
+                    }
+                )
+                monitor["guided_point_rows"] = rows
+        elif command in ("remove_foreground", "remove_background"):
+            include = command == "remove_foreground"
+            for index in range(len(rows) - 1, -1, -1):
+                if bool(rows[index].get("include_interaction")) == include:
+                    removed = rows.pop(index)
+                    _delete_guided_marker(removed)
+                    break
+            monitor["guided_point_rows"] = rows
+    except Exception as exc:
+        error_message = "Point change was not applied: {0}".format(exc)
+    rows = _guided_live_rows(monitor, image)
+    foreground_count, background_count = _guided_counts(rows)
+    _update_gui()
+    _guided_review_update(
+        monitor,
+        {
+            "request_pending": False,
+            "foreground_count": foreground_count,
+            "background_count": background_count,
+            "message": error_message or "Review or move the temporary points in Mimics.",
+        },
+    )
+
+
+def _cleanup_guided_review(monitor):
+    for row in list(monitor.get("guided_point_rows") or []):
+        _delete_guided_marker(row)
+    monitor["guided_point_rows"] = []
+    process = monitor.get("guided_review_process")
+    if process is not None and process.poll() is None:
+        try:
+            runtime_common.terminate_process_async(
+                process=process, graceful_seconds=0.5
+            )
+        except Exception:
+            pass
+    _update_gui()
+
+
+def _cleanup_guided_artifacts(monitor):
+    """Remove disposable DINO outputs while retaining status and diagnostics."""
+    status = _read_json(monitor.get("status_path"), {}) or {}
+    for disposable_path in (
+        status.get("output_path"),
+        status.get("prompt_suggestions_path"),
+    ):
+        try:
+            if disposable_path and os.path.isfile(disposable_path):
+                os.remove(disposable_path)
+        except Exception as exc:
+            _mimics_log(
+                logging.WARNING,
+                "Could not remove disposable DINOv3 guided artifact {0}: {1}".format(
+                    disposable_path, exc
+                ),
+            )
+
+
+def _monitor_guided_review(monitor, status):
+    key = monitor.get("monitor_key")
+    if not monitor.get("guided_review_started"):
+        started, reason = _start_guided_review(monitor, status)
+        if not started:
+            due, elapsed = runtime_common.progress_notice_due(
+                monitor,
+                "guided_review_target",
+                detail=reason,
+                interval_seconds=60.0,
+                initial_delay_seconds=0.0,
+            )
+            if due:
+                _mimics_log(
+                    logging.INFO,
+                    "DINOv3 suggestions are ready but review is waiting{0}: {1}".format(
+                        " ({0}s)".format(int(elapsed)) if elapsed >= 1.0 else "",
+                        reason,
+                    ),
+                )
+            return
+    target_open, reason = _monitor_target_is_open(monitor)
+    if not target_open:
+        _guided_review_update(
+            monitor,
+            {
+                "message": (
+                    "Review paused because the source project is not active: {0}"
+                ).format(reason)
+            },
+        )
+        return
+    review = _read_json(monitor.get("guided_review_status_path"), {}) or {}
+    image = mimics.data.images.get_active()
+    _handle_guided_review_request(monitor, review, image)
+    review = _read_json(monitor.get("guided_review_status_path"), {}) or {}
+    state = str(review.get("status") or "")
+    process = monitor.get("guided_review_process")
+    if state in ("reviewing", "confirmed") and process is not None and process.poll() is not None:
+        detail = _startup_stderr(monitor.get("guided_review_stderr_path"))
+        _guided_review_update(
+            monitor,
+            {
+                "status": "failed" if detail else "cancelled",
+                "error": detail,
+            },
+        )
+        state = "failed" if detail else "cancelled"
+    if state in ("cancelled", "failed"):
+        _cleanup_guided_review(monitor)
+        status["application_cancelled"] = state == "cancelled"
+        status["guided_review_error"] = review.get("error", "")
+        status["updated_at_epoch"] = time.time()
+        try:
+            _write_json_atomic(monitor["status_path"], status)
+        except Exception:
+            pass
+        _stop_monitor(key)
+        if state == "failed":
+            mimics.dialogs.message_box(
+                "DINOv3 point review failed.\n\n{0}".format(
+                    review.get("error", "Unknown error")
+                ),
+                title=TITLE,
+                ui_blocking=False,
+            )
+        else:
+            _mimics_log(logging.INFO, "DINOv3 guided prompting was cancelled.")
+        return
+
+    selected_model = _guided_selected_model(monitor, review)
+    selected_model_key = str(selected_model.get("key") or "official")
+    # Once DINO has relinquished the GPU, hide nnInteractive model loading and
+    # image preprocessing behind the user's point review time.
+    if (
+        monitor.get("guided_prewarm_key") != selected_model_key
+        and monitor.get("guided_prewarm_failed_key") != selected_model_key
+        and not _process_exists(monitor.get("pid"))
+    ):
+        holder = runtime_common.active_resource_lock(_project_root(), "gpu.lock")
+        holder_owner = str((holder or {}).get("owner") or "").lower()
+        if not holder or "nninteractive" in holder_owner:
+            try:
+                import nninteractive_mimics as nnm
+
+                nnm.prewarm_guided_session(
+                    model_profile=selected_model.get("profile")
+                )
+                monitor["guided_prewarm_key"] = selected_model_key
+                monitor.pop("guided_prewarm_failed_key", None)
+            except Exception as exc:
+                monitor["guided_prewarm_failed_key"] = selected_model_key
+                _mimics_log(
+                    logging.WARNING,
+                    "nnInteractive prewarming was deferred; confirmation can retry it: {0}".format(
+                        exc
+                    ),
+                )
+
+    if state != "confirmed":
+        rows = _guided_live_rows(monitor, image)
+        foreground_count, background_count = _guided_counts(rows)
+        _guided_review_update(
+            monitor,
+            {
+                "foreground_count": foreground_count,
+                "background_count": background_count,
+            },
+        )
+        return
+    if _process_exists(monitor.get("pid")):
+        _guided_review_update(
+            monitor,
+            {"message": "Finishing DINOv3 GPU handoff before nnInteractive starts..."},
+        )
+        return
+    holder = runtime_common.active_resource_lock(_project_root(), "gpu.lock")
+    holder_owner = str((holder or {}).get("owner") or "").lower()
+    if holder and "nninteractive" not in holder_owner:
+        _guided_review_update(
+            monitor,
+            {
+                "message": "Waiting for GPU resource: {0}".format(
+                    runtime_common.resource_lock_summary(holder)
+                )
+            },
+        )
+        return
+    rows = _guided_live_rows(monitor, image)
+    foreground_count, background_count = _guided_counts(rows)
+    if foreground_count < 1:
+        _guided_review_update(
+            monitor,
+            {
+                "status": "reviewing",
+                "foreground_count": foreground_count,
+                "background_count": background_count,
+                "message": "Add or restore at least one foreground point before running nnInteractive.",
+            },
+        )
+        return
+    _guided_review_update(
+        monitor,
+        {
+            "status": "submitting",
+            "message": "Handing the confirmed points to nnInteractive...",
+        },
+    )
+    try:
+        import nninteractive_mimics as nnm
+
+        submit_result = nnm.run_with_suggested_points(
+            rows,
+            source_mask_guid=(monitor.get("prediction_target") or {}).get(
+                "target_guid"
+            ),
+            visual_objects=[row.get("marker") for row in rows if row.get("marker")],
+            model_profile=selected_model.get("profile"),
+        )
+        if submit_result not in (None, 0):
+            raise RuntimeError(
+                "Another nnInteractive result is still pending for this Mask. "
+                "The review points were preserved; wait for that result or stop "
+                "the previous session, then run again."
+            )
+    except Exception as exc:
+        _guided_review_update(
+            monitor,
+            {
+                "status": "reviewing",
+                "message": "nnInteractive could not start: {0}".format(exc),
+            },
+        )
+        _mimics_log(
+            logging.ERROR,
+            "DINOv3 guided nnInteractive submission failed: {0}".format(exc),
+        )
+        return
+    monitor["guided_point_rows"] = []
+    _guided_review_update(
+        monitor,
+        {
+            "status": "submitted",
+            "foreground_count": foreground_count,
+            "background_count": background_count,
+            "message": "nnInteractive is running in the background.",
+        },
+    )
+    status["guided_points_submitted"] = True
+    status["guided_foreground_points"] = foreground_count
+    status["guided_background_points"] = background_count
+    status["updated_at_epoch"] = time.time()
+    try:
+        _write_json_atomic(monitor["status_path"], status)
+    except Exception:
+        pass
+    _stop_monitor(key)
+    _mimics_log(
+        logging.INFO,
+        "nnInteractive model {0} started with {1} foreground and {2} background point(s).".format(
+            selected_model.get("label") or "Official nnInteractive",
+            foreground_count,
+            background_count,
+        ),
+    )
 
 
 def _find_or_create_mask(name):
@@ -2750,6 +3355,18 @@ def _stop_monitor(key):
     monitor = _MONITORS.pop(key, None)
     if not monitor:
         return
+    if monitor.get("guided_review_started"):
+        _cleanup_guided_review(monitor)
+    if monitor.get("guided_prompts"):
+        _cleanup_guided_artifacts(monitor)
+    review_process = monitor.get("guided_review_process")
+    if review_process is not None and review_process.poll() is None:
+        try:
+            runtime_common.terminate_process_async(
+                process=review_process, graceful_seconds=0.5
+            )
+        except Exception:
+            pass
     bridge_process = monitor.get("bridge_process")
     if bridge_process is not None and bridge_process.poll() is None:
         try:
@@ -2862,6 +3479,7 @@ def _monitor_model_choice_tick(monitor, status):
             selected_model,
             target_spec=monitor.get("prediction_target") or {},
             source_image_path=monitor.get("source_image_path") or "",
+            guided_prompts=bool(monitor.get("guided_prompts")),
         )
         return
     if state in ("cancelled", "closed"):
@@ -3081,6 +3699,9 @@ def _monitor_tick_locked(monitor):
         return
     if state != "completed":
         return
+    if bool(monitor.get("guided_prompts")):
+        _monitor_guided_review(monitor, status)
+        return
     if not monitor.get("bridge_started"):
         target_open, reason = _monitor_target_is_open(monitor)
         if not target_open:
@@ -3197,6 +3818,16 @@ def _monitor_tick_locked(monitor):
 
 def _monitor_tick(monitor):
     if monitor.get("busy"):
+        return
+    if bool(monitor.get("guided_prompts")):
+        # Guided review manipulates only lightweight Point objects. The
+        # nnInteractive handoff acquires its own short buffer snapshot lock;
+        # holding DINO's buffer lock here would deadlock that nested handoff.
+        monitor["busy"] = True
+        try:
+            _monitor_tick_locked(monitor)
+        finally:
+            monitor["busy"] = False
         return
     operation_token = runtime_common.try_acquire_local_operation(
         "mask_buffer_access", "DINOv3 result monitor"
@@ -3804,7 +4435,7 @@ def _request_fewshot_cancel_async(job, status_path, grace_seconds=30.0):
 def _stop_pending_inference_application():
     pending = []
     for monitor in list(_MONITORS.values()):
-        if str(monitor.get("kind") or "") != "infer":
+        if str(monitor.get("kind") or "") not in ("infer", "guided_infer"):
             continue
         status = _read_json(monitor.get("status_path"), {}) or {}
         if str(status.get("status") or "").lower() != "completed":
@@ -3822,8 +4453,13 @@ def _stop_pending_inference_application():
         return False
     pending.sort(key=lambda row: row[0], reverse=True)
     _updated, monitor, status = pending[0]
+    is_guided = bool(monitor.get("guided_prompts"))
     answer = mimics.dialogs.question_box(
         message=(
+            "Cancel the DINOv3 point review?\n\n"
+            "Temporary points will be removed and nnInteractive will not start."
+            if is_guided
+            else
             "Discard the pending DINOv3 result application?\n\n"
             "The completed prediction file will be kept, but it will not be "
             "applied automatically to a Mimics Mask."
@@ -3838,7 +4474,9 @@ def _stop_pending_inference_application():
     status["application_cancelled_at_epoch"] = time.time()
     status["application_state"] = "cancelled"
     status["application_message"] = (
-        "Pending Mimics application was cancelled by the user."
+        "DINOv3 point review was cancelled by the user."
+        if is_guided
+        else "Pending Mimics application was cancelled by the user."
     )
     status["updated_at_epoch"] = time.time()
     try:
@@ -3853,8 +4491,12 @@ def _stop_pending_inference_application():
     _stop_monitor(monitor.get("monitor_key"))
     _mimics_log(
         logging.INFO,
-        "Pending DINOv3 result application was cancelled; the existing "
-        "Mimics Mask was not changed.",
+        (
+            "DINOv3 point review was cancelled; temporary points were removed."
+            if is_guided
+            else "Pending DINOv3 result application was cancelled; the existing "
+            "Mimics Mask was not changed."
+        ),
     )
     return True
 
@@ -3956,7 +4598,7 @@ def main(action=None):
                 "Select one organ Mask before training or prediction.\n\n"
                 "Training uses saved .mcs files and runs fully in the background."
             ),
-            buttons=";".join([BUTTON_TRAIN_MODEL, BUTTON_PREDICT, BUTTON_PREDICT_MODEL, BUTTON_STATUS, BUTTON_STOP, BUTTON_CANCEL]),
+            buttons=";".join([BUTTON_TRAIN_MODEL, BUTTON_PREDICT, BUTTON_PREDICT_MODEL, BUTTON_GUIDED_NNINTERACTIVE, BUTTON_STATUS, BUTTON_STOP, BUTTON_CANCEL]),
             title=TITLE,
             ui_blocking=True,
         )
@@ -3970,6 +4612,8 @@ def main(action=None):
         return _start_inference(False)
     if action == BUTTON_PREDICT_MODEL:
         return _start_inference(True)
+    if action == BUTTON_GUIDED_NNINTERACTIVE:
+        return _start_inference(False, guided_prompts=True)
     if action == BUTTON_STATUS:
         return _show_status()
     if action == BUTTON_STOP:

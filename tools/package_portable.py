@@ -48,6 +48,7 @@ INCLUDE_FILES = [
 ]
 REQUIRED_EXTERNAL_UI_FILES = [
     "tools/io_path_setup_ui.py",
+    "tools/path_dialog_helper.py",
     "tools/single_case_import_worker.py",
     "tools/ui_theme.py",
     "tools/ui_preferences.py",
@@ -56,6 +57,7 @@ REQUIRED_EXTERNAL_UI_FILES = [
     "tools/fewshot_training_setup_ui.py",
     "tools/fewshot_status_viewer.py",
     "tools/fewshot_model_chooser.py",
+    "tools/dino_guided_prompt_review.py",
     "tools/nninteractive_task_common.py",
     "tools/nninteractive_finetune_pipeline.py",
     "tools/nninteractive_task_model_center.py",

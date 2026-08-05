@@ -55,6 +55,7 @@ MARKERS = (
     "nnunet_prediction_setup_ui.py",
     "nnunet_status_viewer.py",
     "io_path_setup_ui.py",
+    "path_dialog_helper.py",
     "mask_file_picker_ui.py",
 
     # nnInteractive inference server

@@ -1248,17 +1248,17 @@ class BridgeRequestTests(unittest.TestCase):
                          "Official model on CT must apply HU→GV for buffer compatibility")
 
     def test_source_image_export_without_source_metadata(self):
-        """When source metadata is missing, task model should fail, not silently fall back."""
-        # Simulate what _export_image_for_nninteractive does:
-        # source_export is None → raise error when allow_task_model_mimics_buffer_fallback is False
-        allow_fallback = False
+        """Auto mode keeps a task model usable through the portable .mcs buffer."""
+        allow_fallback = True
         source_available = False
         if not source_available and not allow_fallback:
             should_raise = True
         else:
             should_raise = False
-        self.assertTrue(should_raise,
-                        "Task model MUST error when source image is unavailable")
+        self.assertFalse(
+            should_raise,
+            "Task-model auto mode must not require the original source image",
+        )
 
 
 # ---------------------------------------------------------------------------

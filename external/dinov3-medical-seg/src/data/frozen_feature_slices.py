@@ -31,6 +31,24 @@ class FeatureCacheCancelled(RuntimeError):
     """Raised when an external cancellation marker is observed."""
 
 
+def laterality_safe_in_plane_axis_zyx(affine) -> int:
+    """Choose one native axial-plane axis that is not the RAS left/right axis."""
+    matrix = np.asarray(affine, dtype=float)
+    if matrix.shape != (4, 4) or not np.all(np.isfinite(matrix)):
+        raise ValueError("A finite 4x4 voxel-to-RAS affine is required")
+    directions = matrix[:3, :3]
+    lengths = np.linalg.norm(directions, axis=0)
+    if np.any(lengths <= 0.0):
+        raise ValueError("The voxel-to-RAS affine contains a zero direction vector")
+    normalized = directions / lengths
+    left_right_axis_xyz = int(np.argmax(np.abs(normalized[0, :])))
+    left_right_axis_zyx = 2 - left_right_axis_xyz
+    for candidate in (1, 2):
+        if candidate != left_right_axis_zyx:
+            return candidate
+    raise RuntimeError("No laterality-safe native in-plane axis is available")
+
+
 def normalize_percentile_volume(volume: np.ndarray) -> np.ndarray:
     """Apply percentile min-max normalization for the PyTorch alternative."""
     values = np.asarray(volume, dtype=np.float32)
@@ -169,6 +187,9 @@ def prepare_native_case(
         "images": images,
         "labels": labels,
         "native_shape_zyx": native_shape_zyx,
+        "laterality_safe_flip_axis_zyx": laterality_safe_in_plane_axis_zyx(
+            image_nii.affine
+        ),
     }
 
 
@@ -203,6 +224,36 @@ def restore_native_prediction(
     header = original_image.header.copy()
     header.set_data_dtype(np.int16)
     return nib.Nifti1Image(restored_xyz, original_image.affine, header)
+
+
+def restore_native_scalar_array(
+    values_model_zyx: np.ndarray,
+    original_image: nib.spatialimages.SpatialImage,
+) -> np.ndarray:
+    """Resize continuous model-slice values to the source ZYX voxel grid."""
+    native_shape_xyz = tuple(int(value) for value in original_image.shape)
+    native_shape_zyx = native_shape_xyz[::-1]
+    values = np.asarray(values_model_zyx, dtype=np.float32)
+    if values.ndim != 3 or values.shape[0] != native_shape_zyx[0]:
+        raise RuntimeError(
+            "Scalar depth {} does not match native depth {}".format(
+                values.shape if values.ndim == 3 else "invalid",
+                native_shape_zyx[0],
+            )
+        )
+    return np.stack(
+        [
+            np.asarray(
+                Image.fromarray(np.asarray(slc, dtype=np.float32), mode="F").resize(
+                    (native_shape_zyx[2], native_shape_zyx[1]),
+                    Image.Resampling.BILINEAR,
+                ),
+                dtype=np.float32,
+            )
+            for slc in values
+        ],
+        axis=0,
+    )
 
 
 class NativeSliceVolumeDataset(Dataset):
@@ -256,6 +307,9 @@ class NativeSliceVolumeDataset(Dataset):
             "images": prepared["images"],
             "labels": prepared["labels"],
             "native_shape_zyx": prepared["native_shape_zyx"],
+            "laterality_safe_flip_axis_zyx": prepared[
+                "laterality_safe_flip_axis_zyx"
+            ],
         }
 
 
@@ -357,6 +411,9 @@ def build_feature_cache(
                 "directory": case_dir.name,
                 "depth": depth,
                 "native_shape_zyx": list(case["native_shape_zyx"]),
+                "laterality_safe_flip_axis_zyx": int(
+                    case["laterality_safe_flip_axis_zyx"]
+                ),
                 "image_path": case["image_path"],
                 "label_path": case["label_path"],
             })
@@ -413,6 +470,9 @@ class CachedFeatureSliceDataset(Dataset):
             "label": torch.from_numpy(np.array(labels[slice_index], copy=True)).long(),
             "case_id": self.cases[case_index]["case_id"],
             "slice_index": slice_index,
+            "laterality_safe_flip_axis_zyx": int(
+                self.cases[case_index].get("laterality_safe_flip_axis_zyx", 1)
+            ),
         }
 
     def close(self) -> None:

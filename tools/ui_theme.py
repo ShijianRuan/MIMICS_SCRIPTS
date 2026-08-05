@@ -3,7 +3,13 @@
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
 from pathlib import Path
 
 
@@ -133,6 +139,331 @@ def choose_save_file(
         str(file_filter),
     )
     return str(value or "")
+
+
+class _AsyncPathDialog:
+    """Run a native file dialog in an isolated GUI process.
+
+    Windows Shell can spend a long time enumerating disconnected drives or
+    large SMB folders.  A native QFileDialog must run on its GUI thread, so a
+    Python worker thread cannot make that dialog responsive.  Isolating it in
+    a short-lived process keeps the calling setup window and Mimics responsive
+    even while Explorer is waiting on the filesystem.
+    """
+
+    def __init__(
+        self,
+        QtCore,
+        QtWidgets,
+        parent,
+        mode,
+        title,
+        initial,
+        file_filter,
+        callback,
+        button=None,
+        error_callback=None,
+        timeout_seconds=3600,
+    ):
+        self.QtCore = QtCore
+        self.QtWidgets = QtWidgets
+        self.parent = parent
+        self.callback = callback
+        self.error_callback = error_callback
+        self.button = button
+        self.finished = False
+        self.deadline = time.time() + max(60.0, float(timeout_seconds))
+        runtime = Path(tempfile.gettempdir()) / "mimics_script_path_dialogs"
+        runtime.mkdir(parents=True, exist_ok=True)
+        token = "path_{}_{}".format(os.getpid(), uuid.uuid4().hex)
+        self.request_path = runtime / (token + "_request.json")
+        self.status_path = runtime / (token + "_status.json")
+        self.stderr_path = runtime / (token + "_stderr.log")
+        payload = {
+            "mode": str(mode),
+            "title": str(title),
+            "initial": _dialog_start_path(initial, expect_directory=mode == "directory"),
+            "file_filter": str(file_filter or "All files (*)"),
+            "status_path": str(self.status_path),
+        }
+        self.request_path.write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+        )
+        helper = Path(__file__).with_name("path_dialog_helper.py")
+        command = [sys.executable, str(helper), "--request", str(self.request_path)]
+        if os.name == "nt" and Path(command[0]).name.lower() == "python.exe":
+            pythonw = Path(command[0]).with_name("pythonw.exe")
+            if pythonw.is_file():
+                command[0] = str(pythonw)
+        try:
+            self.stderr_handle = self.stderr_path.open(
+                "w", encoding="utf-8", errors="replace"
+            )
+            try:
+                self.process = subprocess.Popen(
+                    command,
+                    cwd=str(helper.parent.parent),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=self.stderr_handle,
+                    env=dict(os.environ),
+                )
+            finally:
+                self.stderr_handle.close()
+        except Exception:
+            for path in (self.request_path, self.status_path, self.stderr_path):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+            raise
+        if self.button is not None:
+            self.button.setEnabled(False)
+            self.button.setText("Opening...")
+        self.timer = QtCore.QTimer(parent)
+        self.timer.timeout.connect(self._poll)
+        self.timer.start(100)
+        try:
+            parent.destroyed.connect(lambda *_args: self.cancel(cleanup=True))
+        except Exception:
+            pass
+
+    def _read_status(self):
+        try:
+            value = json.loads(self.status_path.read_text(encoding="utf-8"))
+            return value if isinstance(value, dict) else None
+        except Exception:
+            return None
+
+    def _diagnostic(self):
+        try:
+            return self.stderr_path.read_text(
+                encoding="utf-8", errors="replace"
+            )[-2000:].strip()
+        except Exception:
+            return ""
+
+    def _poll(self):
+        if self.finished:
+            return
+        status = self._read_status()
+        if status and str(status.get("status") or "") in {
+            "submitted",
+            "cancelled",
+            "failed",
+        }:
+            self._complete(status)
+            return
+        returncode = self.process.poll()
+        if returncode is not None:
+            self._complete(
+                {
+                    "status": "failed",
+                    "error": (
+                        "The path window closed before returning a selection "
+                        "(exit code {}). {}"
+                    ).format(returncode, self._diagnostic()),
+                }
+            )
+            return
+        if time.time() >= self.deadline:
+            self.cancel()
+            self._complete(
+                {
+                    "status": "failed",
+                    "error": "The path window timed out. The selected drive may be offline.",
+                }
+            )
+
+    def _complete(self, status):
+        if self.finished:
+            return
+        self.finished = True
+        self.timer.stop()
+        if self.button is not None:
+            original = str(self.button.property("pathDialogText") or "Browse...")
+            self.button.setText(original)
+            self.button.setEnabled(True)
+        state = str(status.get("status") or "failed")
+        if state == "submitted":
+            self.callback(status.get("selection"))
+        elif state == "failed":
+            message = str(status.get("error") or "The path window failed.")
+            if self.error_callback is not None:
+                self.error_callback(message)
+            else:
+                self.QtWidgets.QMessageBox.warning(
+                    self.parent, "Path Selection Failed", message
+                )
+        controllers = getattr(self.parent, "_mimics_path_dialogs", [])
+        if self in controllers:
+            controllers.remove(self)
+        self._cleanup()
+
+    def _cleanup(self):
+        for path in (self.request_path, self.status_path):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        if not self._diagnostic():
+            try:
+                self.stderr_path.unlink()
+            except OSError:
+                pass
+
+    def cancel(self, cleanup=False):
+        if self.finished:
+            return
+        try:
+            if self.process.poll() is None:
+                self.process.terminate()
+        except Exception:
+            pass
+        if cleanup:
+            self.finished = True
+            try:
+                self.timer.stop()
+            except Exception:
+                pass
+            self._cleanup()
+
+
+def choose_path_async(
+    QtCore,
+    QtWidgets,
+    parent,
+    mode,
+    title,
+    initial,
+    callback,
+    file_filter="All files (*)",
+    button=None,
+    error_callback=None,
+):
+    """Open a native path dialog without blocking the calling Qt window."""
+    if button is not None:
+        button.setProperty("pathDialogText", button.text())
+    try:
+        controller = _AsyncPathDialog(
+            QtCore,
+            QtWidgets,
+            parent,
+            mode,
+            title,
+            initial,
+            file_filter,
+            callback,
+            button=button,
+            error_callback=error_callback,
+        )
+    except Exception as exc:
+        if button is not None:
+            button.setText(str(button.property("pathDialogText") or "Browse..."))
+            button.setEnabled(True)
+        message = "Could not open the path window: {}".format(exc)
+        if error_callback is not None:
+            error_callback(message)
+        else:
+            QtWidgets.QMessageBox.warning(parent, "Path Selection Failed", message)
+        return None
+    controllers = getattr(parent, "_mimics_path_dialogs", None)
+    if controllers is None:
+        controllers = []
+        setattr(parent, "_mimics_path_dialogs", controllers)
+    controllers.append(controller)
+    return controller
+
+
+def choose_existing_directory_async(
+    QtCore, QtWidgets, parent, title, initial, callback, button=None, error_callback=None
+):
+    return choose_path_async(
+        QtCore,
+        QtWidgets,
+        parent,
+        "directory",
+        title,
+        initial,
+        callback,
+        button=button,
+        error_callback=error_callback,
+    )
+
+
+def choose_open_file_async(
+    QtCore,
+    QtWidgets,
+    parent,
+    title,
+    initial,
+    file_filter,
+    callback,
+    button=None,
+    error_callback=None,
+):
+    return choose_path_async(
+        QtCore,
+        QtWidgets,
+        parent,
+        "open_file",
+        title,
+        initial,
+        callback,
+        file_filter=file_filter,
+        button=button,
+        error_callback=error_callback,
+    )
+
+
+def choose_open_files_async(
+    QtCore,
+    QtWidgets,
+    parent,
+    title,
+    initial,
+    file_filter,
+    callback,
+    button=None,
+    error_callback=None,
+):
+    return choose_path_async(
+        QtCore,
+        QtWidgets,
+        parent,
+        "open_files",
+        title,
+        initial,
+        callback,
+        file_filter=file_filter,
+        button=button,
+        error_callback=error_callback,
+    )
+
+
+def choose_save_file_async(
+    QtCore,
+    QtWidgets,
+    parent,
+    title,
+    initial,
+    file_filter,
+    callback,
+    button=None,
+    error_callback=None,
+):
+    return choose_path_async(
+        QtCore,
+        QtWidgets,
+        parent,
+        "save_file",
+        title,
+        initial,
+        callback,
+        file_filter=file_filter,
+        button=button,
+        error_callback=error_callback,
+    )
 
 
 def stylesheet(extra=""):

@@ -1272,8 +1272,16 @@ def _apply_buffer_model_intensity_transform(
         input_data.get("image_buffer_to_model_intercept", 0.0) or 0.0
     )
     if slope == 1.0 and intercept == 0.0:
-        return data
-    return data.astype(np.float32, copy=False) * slope + intercept
+        result = data
+    else:
+        result = data.astype(np.float32, copy=False) * slope + intercept
+    zero_tolerance = input_data.get("image_buffer_model_zero_tolerance")
+    if zero_tolerance is not None:
+        tolerance = abs(float(zero_tolerance))
+        if tolerance > 0.0:
+            result = np.asarray(result, dtype=np.float32).copy()
+            result[np.abs(result) <= tolerance] = 0.0
+    return result
 
 
 def _dicom_sort_key(record: tuple[Path, Any], normal: np.ndarray | None) -> tuple[float, float, str]:
@@ -1881,6 +1889,16 @@ class _BridgeSessionContext:
             model_input_intensity_space=input_data.get(
                 "model_input_intensity_space", ""
             ),
+            image_input_provenance=input_data.get("image_input_provenance", ""),
+            image_intensity_compatibility=input_data.get(
+                "image_intensity_compatibility", ""
+            ),
+            image_source_intensity_encoding=input_data.get(
+                "image_source_intensity_encoding", ""
+            ),
+            image_source_intensity_recovery_basis=input_data.get(
+                "image_source_intensity_recovery_basis", ""
+            ),
             effective_buffer_mapping=self.buffer_mapping,
         )
 
@@ -2063,6 +2081,16 @@ class _BridgeSessionContext:
             set_image_seconds=self.set_image_seconds,
             set_target_seconds=self.set_target_seconds,
             image_source_intensity_space=input_data.get("image_source_intensity_space"),
+            image_input_provenance=input_data.get("image_input_provenance", ""),
+            image_intensity_compatibility=input_data.get(
+                "image_intensity_compatibility", ""
+            ),
+            image_source_intensity_encoding=input_data.get(
+                "image_source_intensity_encoding", ""
+            ),
+            image_source_intensity_recovery_basis=input_data.get(
+                "image_source_intensity_recovery_basis", ""
+            ),
         )
 
     def _load_initial_platform(

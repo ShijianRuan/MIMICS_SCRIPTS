@@ -339,6 +339,7 @@ def nifti_to_derived_dicom(
 
     rescale_slope = 1.0
     rescale_intercept = 0.0
+    intensity_encoding = "dicom_integer_identity_v1"
     finite = array[np.isfinite(array)] if np.issubdtype(array.dtype, np.floating) else array.reshape(-1)
     value_min = float(np.min(finite)) if finite.size else 0.0
     value_max = float(np.max(finite)) if finite.size else 0.0
@@ -347,6 +348,7 @@ def nifti_to_derived_dicom(
         or value_min < -32768.0 or value_max > 32767.0
     )
     if requires_scaling and value_max > value_min:
+        intensity_encoding = "dicom_uint16_linear_rescale_v1"
         rescale_intercept = value_min
         rescale_slope = (value_max - value_min) / 65535.0
         clean = np.nan_to_num(array.astype(np.float64), nan=value_min, posinf=value_max, neginf=value_min)
@@ -360,6 +362,8 @@ def nifti_to_derived_dicom(
         bits_stored = 16
         pixel_representation = 0
     else:
+        if np.issubdtype(array.dtype, np.floating):
+            intensity_encoding = "dicom_int16_cast_v1"
         pixel_array = array.astype(np.int16)
         bits_allocated = 16
         bits_stored = 16
@@ -486,6 +490,13 @@ def nifti_to_derived_dicom(
         "resample_mode": grid_info.get("resample_mode", "auto"),
         "resample_reason": grid_info.get("resample_reason", ""),
         "resampled_grid": grid_info.get("target_grid", "original"),
+        "source_intensity_encoding": intensity_encoding,
+        "source_intensity_rescale_slope": float(rescale_slope),
+        "source_intensity_rescale_intercept": float(rescale_intercept),
+        "source_intensity_value_min": float(value_min),
+        "source_intensity_value_max": float(value_max),
+        "dicom_stored_value_min": int(np.min(pixel_array)) if pixel_array.size else 0,
+        "dicom_stored_value_max": int(np.max(pixel_array)) if pixel_array.size else 0,
         "source_nifti_path": str(Path(source_nifti_out).resolve()) if (source_nifti_out and resampled_source_grid) else "",
         "series_uid": str(series_uid),
         "dicom_folder": str(out_dir),
@@ -1510,6 +1521,13 @@ def do_prepare(params: dict) -> dict:
         "resample_mode": _dicom_resample_policy(),
         "resample_reason": "",
     }
+    source_intensity_encoding = ""
+    source_intensity_rescale_slope = None
+    source_intensity_rescale_intercept = None
+    source_intensity_value_min = None
+    source_intensity_value_max = None
+    dicom_stored_value_min = None
+    dicom_stored_value_max = None
     if is_dicom_folder(image_path):
         dicom_folder = image_path
         # Internal resampling uses RAS affines. get_image_affine_from_dicom()
@@ -1545,6 +1563,13 @@ def do_prepare(params: dict) -> dict:
             "resample_mode": str(info.get("resample_mode", _dicom_resample_policy()) or _dicom_resample_policy()),
             "resample_reason": str(info.get("resample_reason", "") or ""),
         }
+        source_intensity_encoding = str(info.get("source_intensity_encoding", "") or "")
+        source_intensity_rescale_slope = info.get("source_intensity_rescale_slope")
+        source_intensity_rescale_intercept = info.get("source_intensity_rescale_intercept")
+        source_intensity_value_min = info.get("source_intensity_value_min")
+        source_intensity_value_max = info.get("source_intensity_value_max")
+        dicom_stored_value_min = info.get("dicom_stored_value_min")
+        dicom_stored_value_max = info.get("dicom_stored_value_max")
         dicom_folder = info["dicom_folder"]
         # Use the actual DICOM grid affine for mask resampling and Mimics coordinate
         # metadata.  For source images that were resampled for DICOM compatibility,
@@ -1590,6 +1615,17 @@ def do_prepare(params: dict) -> dict:
                 headers.append(ds)
         if not headers:
             return {"status": "error", "error": "no readable DICOM slices in: {}".format(dicom_folder)}
+        try:
+            slopes = set(float(getattr(ds, "RescaleSlope", 1.0) or 1.0) for ds in headers)
+            intercepts = set(float(getattr(ds, "RescaleIntercept", 0.0) or 0.0) for ds in headers)
+            if len(slopes) == 1 and len(intercepts) == 1:
+                source_intensity_encoding = "dicom_uniform_rescale_v1"
+                source_intensity_rescale_slope = next(iter(slopes))
+                source_intensity_rescale_intercept = next(iter(intercepts))
+        except (TypeError, ValueError):
+            # Variable or malformed source tags must not break data import. The
+            # project remains usable and inference will use its raw-GV fallback.
+            pass
         image_shape = (int(headers[0].Columns), int(headers[0].Rows), int(len(headers)))
     if source_image_shape is None:
         source_image_shape = tuple(int(value) for value in image_shape)
@@ -1667,6 +1703,13 @@ def do_prepare(params: dict) -> dict:
         "source_image_shape": list(source_image_shape),
         "source_image_index_space": source_image_index_space,
         "source_image_modality": source_image_modality,
+        "source_intensity_encoding": source_intensity_encoding,
+        "source_intensity_rescale_slope": source_intensity_rescale_slope,
+        "source_intensity_rescale_intercept": source_intensity_rescale_intercept,
+        "source_intensity_value_min": source_intensity_value_min,
+        "source_intensity_value_max": source_intensity_value_max,
+        "dicom_stored_value_min": dicom_stored_value_min,
+        "dicom_stored_value_max": dicom_stored_value_max,
         "source_world_coordinate_system": source_world_coordinate_system,
         "mimics_world_coordinate_system": mimics_world_coordinate_system,
         "source_to_mimics_world_matrix": source_to_mimics_world_matrix.astype(float).tolist(),

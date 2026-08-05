@@ -963,16 +963,30 @@ def _find_case_image(case_dir, allow_direct_dicom=False):
         candidate = os.path.join(case_dir, img_name)
         if _is_medical_image_file(candidate):
             return candidate, "medical_image"
-    for fname in sorted(os.listdir(case_dir)):
-        candidate = os.path.join(case_dir, fname)
-        if _is_medical_image_file(candidate):
-            return candidate, "medical_image"
+    nonempty = False
+    try:
+        with os.scandir(case_dir) as entries:
+            for index, entry in enumerate(entries):
+                nonempty = True
+                lower = entry.name.lower()
+                if any(lower.endswith(suffix) for suffix in _MEDICAL_IMAGE_SUFFIXES):
+                    try:
+                        if entry.is_file():
+                            return entry.path, "medical_image"
+                    except OSError:
+                        pass
+                if allow_direct_dicom and (
+                    lower.endswith(".dcm") or index >= 511
+                ):
+                    return case_dir, "dicom_candidate"
+    except OSError:
+        pass
     dicom_dir = os.path.join(case_dir, "dicom")
     if os.path.isdir(dicom_dir):
         return dicom_dir, "dicom"
     # A directly selected folder may itself be a flat DICOM series. Validation
     # happens in the external bridge so Mimics never parses all DICOM headers.
-    if allow_direct_dicom and os.path.isdir(case_dir) and os.listdir(case_dir):
+    if allow_direct_dicom and nonempty:
         return case_dir, "dicom_candidate"
     return None, None
 
@@ -1058,15 +1072,15 @@ def _discover_single_case(case_dir):
         # present, so stop as soon as a second candidate appears.
         sibling_images = 0
         try:
-            entries = os.listdir(case_dir)
+            with os.scandir(case_dir) as entries:
+                for entry in entries:
+                    lower = entry.name.lower()
+                    if any(lower.endswith(suffix) for suffix in _MEDICAL_IMAGE_SUFFIXES):
+                        sibling_images += 1
+                        if sibling_images > 1:
+                            break
         except OSError:
-            entries = []
-        for entry_name in entries:
-            lower = entry_name.lower()
-            if any(lower.endswith(suffix) for suffix in _MEDICAL_IMAGE_SUFFIXES):
-                sibling_images += 1
-                if sibling_images > 1:
-                    break
+            pass
         allow_masks = sibling_images <= 1
     if allow_masks and os.path.isdir(seg_dir):
         for fname in sorted(os.listdir(seg_dir)):

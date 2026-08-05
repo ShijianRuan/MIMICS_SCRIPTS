@@ -49,6 +49,12 @@ class VolumeAugmentation:
         self.flip_axes = [int(axis) for axis in (cfg.get("flip_axes", []) or [])]
         if any(axis not in (0, 1, 2) for axis in self.flip_axes):
             raise ValueError("flip_axes use model ZYX indices 0, 1, 2")
+        if 2 in self.flip_axes and not bool(cfg.get("allow_left_right_flip", False)):
+            raise ValueError(
+                "Model X is the canonical RAS left/right axis. Set "
+                "augmentation.allow_left_right_flip=true only for a task whose "
+                "labels are explicitly laterality-invariant."
+            )
 
         # Intensity
         ic = cfg.get("intensity", {}) or {}

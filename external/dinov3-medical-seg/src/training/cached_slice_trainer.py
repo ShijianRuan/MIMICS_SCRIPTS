@@ -75,20 +75,36 @@ class CachedFeatureSliceTrainer(Trainer3D):
         for group in self.optimizer.param_groups:
             group["lr"] = value
 
-    @staticmethod
     def _random_flip(
+        self,
         embeddings: torch.Tensor,
         images: torch.Tensor,
         labels: torch.Tensor,
+        safe_axes,
     ):
-        if np.random.rand() > 0.5:
-            embeddings = torch.flip(embeddings, dims=(2,))
-            images = torch.flip(images, dims=(2,))
-            labels = torch.flip(labels, dims=(1,))
-        if np.random.rand() > 0.5:
-            embeddings = torch.flip(embeddings, dims=(3,))
-            images = torch.flip(images, dims=(3,))
-            labels = torch.flip(labels, dims=(2,))
+        probability = float(
+            self.config.get("training", {}).get(
+                "cached_slice_flip_probability", 0.5
+            )
+        )
+        if probability <= 0.0:
+            return embeddings, images, labels
+        for item_index, model_axis in enumerate(safe_axes):
+            model_axis = int(model_axis)
+            if model_axis not in (1, 2):
+                raise ValueError("Cached slice flip axes must be model Y or X")
+            if np.random.rand() < probability:
+                item_tensor_axis = model_axis
+                label_axis = model_axis - 1
+                embeddings[item_index] = torch.flip(
+                    embeddings[item_index], dims=(item_tensor_axis,)
+                )
+                images[item_index] = torch.flip(
+                    images[item_index], dims=(item_tensor_axis,)
+                )
+                labels[item_index] = torch.flip(
+                    labels[item_index], dims=(label_axis,)
+                )
         return embeddings.contiguous(), images.contiguous(), labels.contiguous()
 
     def _train_epoch(self, epoch: int, global_step_start: int):
@@ -106,7 +122,12 @@ class CachedFeatureSliceTrainer(Trainer3D):
             embeddings = batch["embedding"].to(self.device, dtype=torch.float32)
             images = batch["image"].to(self.device, dtype=torch.float32)
             labels = batch["label"].to(self.device)
-            embeddings, images, labels = self._random_flip(embeddings, images, labels)
+            safe_axes = batch.get("laterality_safe_flip_axis_zyx")
+            if safe_axes is None:
+                safe_axes = [1] * int(embeddings.shape[0])
+            embeddings, images, labels = self._random_flip(
+                embeddings, images, labels, safe_axes
+            )
 
             self.optimizer.zero_grad()
             logits = self.model.decode_cached_slices(embeddings, images)
@@ -152,7 +173,18 @@ class CachedFeatureSliceTrainer(Trainer3D):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         probabilities = []
         losses = []
-        for dimensions in ((), (2,), (3,), (2, 3)):
+        configured_axes = list(
+            self.config.get("inference", {}).get("tta_axes", []) or []
+        )
+        dimensions_list = [()]
+        for axes in configured_axes:
+            axes = tuple(sorted(set(int(axis) for axis in axes)))
+            if any(axis not in (1, 2) for axis in axes):
+                raise ValueError("Cached slice TTA axes must be model Y or X")
+            mapped = tuple(axis + 1 for axis in axes)
+            if mapped and mapped not in dimensions_list:
+                dimensions_list.append(mapped)
+        for dimensions in dimensions_list:
             current_embeddings = (
                 torch.flip(embeddings, dims=dimensions).contiguous()
                 if dimensions

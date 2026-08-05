@@ -1671,6 +1671,13 @@ class TestMimicsBridgeBufferMapping(unittest.TestCase):
         reconstructed = first.pixel_array.astype(np.float64) * float(first.RescaleSlope) + float(first.RescaleIntercept)
         np.testing.assert_allclose(reconstructed, source_values[0].astype(np.float64), atol=float(first.RescaleSlope) + 1e-5)
         self.assertEqual("MR", first.Modality)
+        self.assertEqual("dicom_uint16_linear_rescale_v1", result["source_intensity_encoding"])
+        self.assertAlmostEqual(float(first.RescaleSlope), result["source_intensity_rescale_slope"])
+        self.assertAlmostEqual(float(first.RescaleIntercept), result["source_intensity_rescale_intercept"])
+        self.assertAlmostEqual(float(source_values.min()), result["source_intensity_value_min"])
+        self.assertAlmostEqual(float(source_values.max()), result["source_intensity_value_max"])
+        self.assertEqual(0, result["dicom_stored_value_min"])
+        self.assertEqual(65535, result["dicom_stored_value_max"])
 
     def test_resample_image_to_grid_matches_target_shape(self):
         from mimics_bridge import resample_image_to_grid
@@ -2767,6 +2774,7 @@ class TestScriptingLibraryEntries(unittest.TestCase):
                 "01_Annotate_Official_Model.py",
                 "02_Annotate_Custom_Model.py",
                 "03_Train_and_Manage_Custom_Models.py",
+                "04_DINOv3_Guided_Points.py",
             ],
             sorted(name for name in os.listdir(nn_dir) if name.endswith(".py")),
         )
@@ -3867,6 +3875,327 @@ class TestSourceImagePathEquivalence(unittest.TestCase):
         self.assertFalse(_source_uses_hu_to_gv("medical_image", "MR"))
         self.assertTrue(_source_uses_hu_to_gv("nifti", ""))
 
+    def test_task_model_missing_source_uses_portable_mimics_buffer(self):
+        import nninteractive_mimics as module
+
+        class _Meta:
+            def __init__(self):
+                self._values = {
+                    module.SOURCE_IMAGE_KIND_METADATA: "nifti",
+                    module.SOURCE_IMAGE_MODALITY_METADATA: "MR",
+                }
+
+            def find(self, name):
+                if name not in self._values:
+                    return None
+                item = type("Item", (), {})()
+                item.value = self._values[name]
+                return item
+
+        class _Image:
+            logical_dimensions = [2, 3, 4]
+            metadata = _Meta()
+
+            def get_voxel_buffer(self):
+                return memoryview(
+                    np.arange(24, dtype=np.uint16).reshape((2, 3, 4))
+                )
+
+        profile = {"source": "task_model"}
+        output = os.path.join(self.tmp, "portable_image.raw")
+        with mock.patch.object(
+            module, "_model_profile", return_value=profile
+        ), mock.patch.object(
+            module, "_source_image_export", return_value=None
+        ), mock.patch.object(module, "_mimics_log"):
+            result = module._export_image_for_nninteractive(
+                {
+                    "task_model_image_input_mode": "auto",
+                    "fallback_to_mimics_buffer_when_source_unavailable": True,
+                },
+                _Image(),
+                output,
+            )
+
+        self.assertEqual("mimics_buffer", result["kind"])
+        self.assertEqual("mimics_project_buffer", result["image_input_provenance"])
+        self.assertEqual("raw_gv_zscore_best_effort", result["image_intensity_compatibility"])
+        self.assertEqual("unavailable", result["source_intensity_recovery_basis"])
+        self.assertTrue(result["task_model_buffer_fallback"])
+        self.assertEqual(48, os.path.getsize(output))
+
+    def test_task_model_mri_buffer_restores_source_values_from_mcs_metadata(self):
+        import nninteractive_mimics as module
+        from nninteractive_bridge import _apply_buffer_model_intensity_transform
+
+        class _Meta:
+            _values = {
+                module.SOURCE_IMAGE_KIND_METADATA: "nifti",
+                module.SOURCE_IMAGE_MODALITY_METADATA: "MR",
+                module.SOURCE_INTENSITY_ENCODING_METADATA: "dicom_uint16_linear_rescale_v1",
+                module.SOURCE_INTENSITY_RESCALE_SLOPE_METADATA: "0.125",
+                module.SOURCE_INTENSITY_RESCALE_INTERCEPT_METADATA: "-200.0",
+                module.SOURCE_INTENSITY_VALUE_MIN_METADATA: "-200.0",
+                module.SOURCE_INTENSITY_VALUE_MAX_METADATA: "7991.875",
+                module.DICOM_STORED_VALUE_MIN_METADATA: "0",
+                module.DICOM_STORED_VALUE_MAX_METADATA: "65535",
+            }
+
+            def find(self, name):
+                if name not in self._values:
+                    return None
+                return type("Item", (), {"value": self._values[name]})()
+
+        raw = np.array([0, 1600, 65535], dtype=np.uint16).reshape((1, 1, 3))
+
+        class _Image:
+            metadata = _Meta()
+            guid = "mapped-mri-image"
+
+            def get_voxel_buffer(self):
+                return memoryview(raw)
+
+        output = os.path.join(self.tmp, "mapped_mri.raw")
+        exported = module._export_image(_Image(), output)
+        self.assertEqual(0.125, exported["buffer_to_source_slope"])
+        self.assertEqual(-200.0, exported["buffer_to_source_intercept"])
+        self.assertAlmostEqual(0.062500125, exported["buffer_to_source_zero_tolerance"])
+        self.assertEqual("mcs_metadata", exported["source_intensity_recovery_basis"])
+        restored = _apply_buffer_model_intensity_transform(
+            raw.astype(np.float32),
+            {
+                "image_buffer_to_model_slope": exported["buffer_to_source_slope"],
+                "image_buffer_to_model_intercept": exported["buffer_to_source_intercept"],
+            },
+        )
+        np.testing.assert_allclose(restored, raw.astype(np.float32) * 0.125 - 200.0)
+
+    def test_task_model_old_mcs_reads_mri_rescale_from_dicom_tags(self):
+        import nninteractive_mimics as module
+
+        class _Meta:
+            def find(self, name):
+                return None
+
+        class _Tag:
+            def __init__(self, value):
+                self.value = value
+
+        class _Image:
+            metadata = _Meta()
+            guid = "old-mcs-image"
+
+            def __init__(self):
+                self.tag_reads = 0
+
+            def get_dicom_tags(self, image_index=0):
+                self.tag_reads += 1
+                return {
+                    (0x0008, 0x0060): _Tag("MR"),
+                    (0x0028, 0x1053): _Tag("0.03125"),
+                    (0x0028, 0x1052): _Tag("-17.5"),
+                }
+
+        image = _Image()
+        mapping = module._source_intensity_mapping(image)
+        self.assertIsNotNone(mapping)
+        self.assertEqual("MR", module._image_modality(image))
+        self.assertEqual(1, image.tag_reads)
+        self.assertEqual("mcs_dicom_tags", mapping["basis"])
+        self.assertEqual(0.03125, mapping["slope"])
+        self.assertEqual(-17.5, mapping["intercept"])
+
+    def test_mri_rescale_restoration_preserves_negative_background_contract(self):
+        from nninteractive_finetune.data import normalize_like_nninteractive
+
+        source = np.zeros((18, 16, 14), dtype=np.float32)
+        source[4:14, 3:13, 2:12] = np.linspace(
+            -120.0, 850.0, 10 * 10 * 10, dtype=np.float32
+        ).reshape((10, 10, 10))
+        value_min = float(source.min())
+        value_max = float(source.max())
+        slope = (value_max - value_min) / 65535.0
+        stored = np.rint((source - value_min) / slope).astype(np.uint16)
+        raw_gv = stored.astype(np.float32)
+        from nninteractive_bridge import _apply_buffer_model_intensity_transform
+
+        restored = _apply_buffer_model_intensity_transform(
+            raw_gv,
+            {
+                "image_buffer_to_model_slope": slope,
+                "image_buffer_to_model_intercept": value_min,
+                "image_buffer_model_zero_tolerance": slope * 0.500001,
+            },
+        )
+
+        expected = normalize_like_nninteractive(source)
+        recovered = normalize_like_nninteractive(restored)
+        raw_normalized = normalize_like_nninteractive(raw_gv)
+        np.testing.assert_allclose(recovered, expected, rtol=0.0, atol=1.0e-3)
+        self.assertGreater(float(np.max(np.abs(raw_normalized - expected))), 0.1)
+
+    def test_task_model_auto_mode_never_probes_unc_source_on_mimics_thread(self):
+        import nninteractive_mimics as module
+
+        class _Meta:
+            def __init__(self):
+                identity = json.dumps(
+                    [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+                )
+                ras_to_lps = json.dumps(
+                    [[-1.0, 0.0, 0.0, 0.0], [0.0, -1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+                )
+                self._values = {
+                    module.SOURCE_IMAGE_PATH_METADATA: "//server/share/missing/mri.nii.gz",
+                    module.SOURCE_IMAGE_KIND_METADATA: "nifti",
+                    module.SOURCE_IMAGE_INDEX_SPACE_METADATA: "derived_dicom_lps_resampled_from_source_image_v2",
+                    module.SOURCE_IMAGE_MODALITY_METADATA: "MR",
+                    module.SOURCE_WORLD_COORDINATE_SYSTEM_METADATA: "ras",
+                    module.MIMICS_WORLD_COORDINATE_SYSTEM_METADATA: "lps",
+                    module.SOURCE_TO_MIMICS_WORLD_MATRIX_METADATA: ras_to_lps,
+                    module.SOURCE_VOXEL_TO_RAS_MATRIX_METADATA: identity,
+                    module.MIMICS_VOXEL_TO_RAS_MATRIX_METADATA: identity,
+                }
+
+            def find(self, name):
+                if name not in self._values:
+                    return None
+                item = type("Item", (), {})()
+                item.value = self._values[name]
+                return item
+
+        image = type("Image", (), {"metadata": _Meta()})()
+        with mock.patch.object(
+            module, "_relocated_source_image_path", return_value=""
+        ), mock.patch.object(
+            module.os.path,
+            "isfile",
+            side_effect=AssertionError("UNC path was probed on the Mimics thread"),
+        ), mock.patch.object(
+            module, "_call_mimics_bridge", side_effect=AssertionError("bridge was called")
+        ), mock.patch.object(module, "_mimics_log"):
+            result = module._source_image_export(
+                image,
+                {
+                    "image_input_mode": "auto",
+                    "prefer_source_image_for_nninteractive": True,
+                    "fallback_to_mimics_buffer_when_source_unavailable": True,
+                },
+            )
+        self.assertIsNone(result)
+
+    def test_task_model_local_source_alignment_is_deferred_to_external_worker(self):
+        import nninteractive_mimics as module
+
+        source = os.path.join(self.tmp, "source.nii.gz")
+        Path(source).write_bytes(b"external worker reads this file")
+        identity = json.dumps(
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+        )
+        ras_to_lps = json.dumps(
+            [[-1.0, 0.0, 0.0, 0.0], [0.0, -1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+        )
+
+        class _Meta:
+            _values = {
+                module.SOURCE_IMAGE_PATH_METADATA: source,
+                module.SOURCE_IMAGE_KIND_METADATA: "nifti",
+                module.SOURCE_IMAGE_INDEX_SPACE_METADATA: "derived_dicom_lps_resampled_from_source_image_v2",
+                module.SOURCE_IMAGE_MODALITY_METADATA: "MR",
+                module.SOURCE_WORLD_COORDINATE_SYSTEM_METADATA: "ras",
+                module.MIMICS_WORLD_COORDINATE_SYSTEM_METADATA: "lps",
+                module.SOURCE_TO_MIMICS_WORLD_MATRIX_METADATA: ras_to_lps,
+                module.SOURCE_VOXEL_TO_RAS_MATRIX_METADATA: identity,
+                module.MIMICS_VOXEL_TO_RAS_MATRIX_METADATA: identity,
+            }
+
+            def find(self, name):
+                if name not in self._values:
+                    return None
+                item = type("Item", (), {})()
+                item.value = self._values[name]
+                return item
+
+        image = type(
+            "Image", (), {"metadata": _Meta(), "logical_dimensions": [2, 3, 4]}
+        )()
+        with mock.patch.object(
+            module, "_relocated_source_image_path", return_value=""
+        ), mock.patch.object(
+            module, "_call_mimics_bridge", side_effect=AssertionError("bridge was called")
+        ), mock.patch.object(
+            module, "_model_profile", return_value={"source": "task_model"}
+        ), mock.patch.object(module, "_mimics_log"):
+            result = module._source_image_export(
+                image,
+                {
+                    "_model_profile": {"source": "task_model"},
+                    "image_input_mode": "auto",
+                    "prefer_source_image_for_nninteractive": True,
+                    "fallback_to_mimics_buffer_when_source_unavailable": True,
+                    "defer_source_alignment_to_worker": True,
+                },
+            )
+        self.assertEqual(os.path.abspath(source), result["image_path"])
+        self.assertEqual(
+            "derived_dicom_lps_resampled_from_source_image_v2",
+            result["source_index_space"],
+        )
+
+    def test_task_model_strict_source_does_not_silently_fallback(self):
+        import nninteractive_mimics as module
+
+        with mock.patch.object(
+            module, "_model_profile", return_value={"source": "task_model"}
+        ), mock.patch.object(
+            module, "_source_image_export", return_value=None
+        ):
+            with self.assertRaisesRegex(RuntimeError, "task_model_image_input_mode"):
+                module._export_image_for_nninteractive(
+                    {
+                        "task_model_image_input_mode": "source",
+                        "fallback_to_mimics_buffer_when_source_unavailable": True,
+                    },
+                    object(),
+                    os.path.join(self.tmp, "must_not_exist.raw"),
+                )
+
+    def test_task_model_explicit_mimics_mode_ignores_source_fallback_switch(self):
+        import nninteractive_mimics as module
+
+        class _Image:
+            metadata = None
+
+            def get_voxel_buffer(self):
+                return memoryview(np.ones((2, 2, 2), dtype=np.float32))
+
+        output = os.path.join(self.tmp, "explicit_mimics.raw")
+        with mock.patch.object(
+            module, "_model_profile", return_value={"source": "task_model"}
+        ), mock.patch.object(module, "_mimics_log"):
+            result = module._export_image_for_nninteractive(
+                {
+                    "task_model_image_input_mode": "mimics",
+                    "fallback_to_mimics_buffer_when_source_unavailable": False,
+                },
+                _Image(),
+                output,
+            )
+        self.assertEqual("mimics_buffer", result["kind"])
+        self.assertTrue(os.path.isfile(output))
+
+    def test_task_model_mri_uint16_quantization_preserves_zscore_input(self):
+        from nninteractive_finetune.data import normalize_like_nninteractive
+
+        source = np.zeros((20, 18, 16), dtype=np.float32)
+        values = np.linspace(1.0, 2400.0, 12 * 10 * 8, dtype=np.float32)
+        source[4:16, 4:14, 3:11] = values.reshape((12, 10, 8))
+        slope = float(source.max()) / 65535.0
+        quantized = np.rint(source / slope).astype(np.uint16).astype(np.float32)
+        expected = normalize_like_nninteractive(source)
+        actual = normalize_like_nninteractive(quantized)
+        np.testing.assert_allclose(actual, expected, rtol=0.0, atol=5.0e-5)
+
 
 # ============================================================================
 # L13: New features from user's round of changes
@@ -4094,6 +4423,240 @@ class TestNewFeatures(unittest.TestCase):
         self.assertTrue(status.get("application_cancelled"))
         self.assertEqual("cancelled", status.get("application_state"))
         self.assertNotIn(key, fewshot_mimics._MONITORS)
+
+    def test_guided_points_convert_ras_to_lps_before_mimics_creation(self):
+        import fewshot_mimics
+
+        created = []
+
+        class Marker(object):
+            pass
+
+        class Image(object):
+            logical_dimensions = [64, 64, 64]
+
+            @staticmethod
+            def get_voxel_indexes(point):
+                self.assertEqual((-12.0, 8.0, 5.0), tuple(point))
+                return [10.0, 11.0, 12.0]
+
+        old_create = fewshot_mimics.mimics.analyze.create_point
+        try:
+            fewshot_mimics.mimics.analyze.create_point = lambda **kwargs: (
+                created.append(kwargs) or Marker()
+            )
+            marker = fewshot_mimics._create_guided_marker(
+                Image(), [12.0, -8.0, 5.0], True, "FG 1"
+            )
+        finally:
+            fewshot_mimics.mimics.analyze.create_point = old_create
+        self.assertIsInstance(marker, Marker)
+        self.assertEqual((-12.0, 8.0, 5.0), tuple(created[0]["point"]))
+        self.assertEqual((0.1, 1.0, 0.2), tuple(created[0]["color"]))
+
+    def test_guided_stop_removes_review_points_without_changing_mask(self):
+        import fewshot_mimics
+
+        status_path = os.path.join(self.tmp, "guided_completed.json")
+        review_path = os.path.join(self.tmp, "guided_review.json")
+        fewshot_mimics._write_json_atomic(
+            status_path,
+            {
+                "status": "completed",
+                "updated_at_epoch": time.time(),
+                "applied_to_mimics": False,
+            },
+        )
+        fewshot_mimics._write_json_atomic(review_path, {"status": "reviewing"})
+        marker = object()
+        key = "pending_guided_review"
+        deleted = []
+        monitor = {
+            "monitor_key": key,
+            "kind": "guided_infer",
+            "guided_prompts": True,
+            "guided_review_started": True,
+            "guided_review_status_path": review_path,
+            "guided_point_rows": [{"marker": marker, "include_interaction": True}],
+            "status_path": status_path,
+        }
+        old_answer = fewshot_mimics.mimics.dialogs.question_box
+        old_delete = fewshot_mimics.mimics.data.points.delete
+        try:
+            fewshot_mimics._MONITORS[key] = monitor
+            fewshot_mimics.mimics.dialogs.question_box = (
+                lambda **_kwargs: fewshot_mimics.BUTTON_STOP
+            )
+            fewshot_mimics.mimics.data.points.delete = deleted.append
+            self.assertTrue(fewshot_mimics._stop_pending_inference_application())
+        finally:
+            fewshot_mimics.mimics.dialogs.question_box = old_answer
+            fewshot_mimics.mimics.data.points.delete = old_delete
+            fewshot_mimics._MONITORS.pop(key, None)
+        self.assertEqual([marker], deleted)
+        status = fewshot_mimics._read_json(status_path, {}) or {}
+        self.assertEqual("cancelled", status.get("application_state"))
+
+    def test_guided_review_user_points_are_not_limited_by_auto_proposal_cap(self):
+        import fewshot_mimics
+        import nninteractive_mimics
+
+        rows = [
+            {
+                "marker": object(),
+                "include_interaction": True,
+                "proposal": {"source": "automatic"},
+            }
+            for _index in range(3)
+        ]
+        added_marker = object()
+        monitor = {
+            "guided_point_rows": rows,
+            "guided_last_request_id": None,
+        }
+        review = {
+            "request": {"id": 1, "command": "add_foreground"},
+        }
+        old_live = fewshot_mimics._guided_live_rows
+        old_update = fewshot_mimics._guided_review_update
+        old_capture = nninteractive_mimics._capture_point
+        try:
+            fewshot_mimics._guided_live_rows = (
+                lambda current, _image=None: current.get("guided_point_rows") or []
+            )
+            fewshot_mimics._guided_review_update = lambda *_args, **_kwargs: None
+            nninteractive_mimics._capture_point = lambda _image, _include: {
+                "_marker": added_marker,
+            }
+            fewshot_mimics._handle_guided_review_request(
+                monitor, review, object()
+            )
+        finally:
+            fewshot_mimics._guided_live_rows = old_live
+            fewshot_mimics._guided_review_update = old_update
+            nninteractive_mimics._capture_point = old_capture
+        self.assertEqual(4, len(monitor["guided_point_rows"]))
+        self.assertIs(added_marker, monitor["guided_point_rows"][-1]["marker"])
+
+    def test_nninteractive_guided_points_support_custom_async_model(self):
+        import nninteractive_mimics
+
+        image = object()
+        source = object()
+        target = object()
+        captured = {}
+        old_profile = nninteractive_mimics._model_profile
+        old_active = nninteractive_mimics.mimics.data.images.get_active
+        old_masks = nninteractive_mimics._masks_for_image
+        old_object_id = nninteractive_mimics._object_id
+        old_select = nninteractive_mimics._select_session_masks
+        old_run = nninteractive_mimics._run_async
+        old_runtime_paths = nninteractive_mimics._runtime_paths
+        try:
+            nninteractive_mimics._model_profile = lambda config: (
+                config.get("_model_profile")
+                or {"source": "official", "validated_prompt_types": ["point"]}
+            )
+            nninteractive_mimics.mimics.data.images.get_active = lambda: image
+            nninteractive_mimics._masks_for_image = lambda _image: [source]
+            nninteractive_mimics._object_id = lambda _mask: "source-guid"
+            nninteractive_mimics._runtime_paths = lambda _config: {}
+            nninteractive_mimics._select_session_masks = lambda _image, _config, source_override=None: {
+                "source": source_override,
+                "target": target,
+                "auto_created": False,
+                "write_mode": "in_place",
+            }
+            nninteractive_mimics._run_async = lambda *args, **kwargs: (
+                captured.update({"args": args, "kwargs": kwargs}) or 0
+            )
+            result = nninteractive_mimics.run_with_suggested_points(
+                [
+                    {"point": [1, 2, 3], "include_interaction": True},
+                    {"point": [8, 9, 10], "include_interaction": False},
+                ],
+                source_mask_guid="source-guid",
+                visual_objects=["fg", "bg"],
+                model_profile={
+                    "source": "task_model",
+                    "profile_id": "brain:model-b",
+                    "validated_prompt_types": ["point"],
+                },
+            )
+        finally:
+            nninteractive_mimics._model_profile = old_profile
+            nninteractive_mimics.mimics.data.images.get_active = old_active
+            nninteractive_mimics._masks_for_image = old_masks
+            nninteractive_mimics._object_id = old_object_id
+            nninteractive_mimics._runtime_paths = old_runtime_paths
+            nninteractive_mimics._select_session_masks = old_select
+            nninteractive_mimics._run_async = old_run
+        self.assertEqual(0, result)
+        prompt = captured["kwargs"]["supplied_prompt"]
+        self.assertEqual("point_set", prompt["interaction_type"])
+        self.assertEqual("mimics", prompt["coordinates"])
+        self.assertEqual(["fg", "bg"], captured["kwargs"]["supplied_visual_objects"])
+        self.assertEqual(
+            "brain:model-b", captured["args"][2]["_model_profile"]["profile_id"]
+        )
+
+    def test_guided_review_lists_multiple_models_for_the_same_task(self):
+        import nninteractive_finetune_mimics as finetune
+
+        models = [
+            {
+                "model_id": "model-a",
+                "created_at_epoch": 1,
+                "validated_prompt_types": ["point"],
+            },
+            {
+                "model_id": "model-b",
+                "created_at_epoch": 2,
+                "validated_prompt_types": ["point"],
+            },
+        ]
+        task = {
+            "task_id": "brain",
+            "task_name": "Brain extraction",
+            "models": models,
+            "recommended_model_id": "model-a",
+        }
+        saved = {
+            "task": finetune._task_for_selected_context,
+            "mask": finetune._selected_mask,
+            "metadata": finetune._metadata_get,
+            "binding": finetune._project_binding_values,
+            "complete": finetune._model_is_complete,
+            "profile": finetune._profile,
+        }
+        try:
+            finetune._task_for_selected_context = lambda: task
+            finetune._selected_mask = lambda: object()
+            finetune._metadata_get = lambda _obj, key, _default="": (
+                "model-b" if key == finetune.MODEL_ID_METADATA else ""
+            )
+            finetune._project_binding_values = lambda _path: {}
+            finetune._model_is_complete = lambda _task, _model: True
+            finetune._profile = lambda current_task, model: {
+                "source": "task_model",
+                "profile_id": "{}:{}".format(
+                    current_task["task_id"], model["model_id"]
+                ),
+                "task_id": current_task["task_id"],
+                "task_name": current_task["task_name"],
+                "model_id": model["model_id"],
+                "validated_prompt_types": ["point"],
+            }
+            payload = finetune.guided_model_options()
+        finally:
+            finetune._task_for_selected_context = saved["task"]
+            finetune._selected_mask = saved["mask"]
+            finetune._metadata_get = saved["metadata"]
+            finetune._project_binding_values = saved["binding"]
+            finetune._model_is_complete = saved["complete"]
+            finetune._profile = saved["profile"]
+        self.assertEqual(3, len(payload["options"]))
+        self.assertEqual("task_model:brain:model-b", payload["default_key"])
 
     def test_fewshot_export_reaps_process_when_lock_transfer_fails(self):
         import tools.fewshot_pipeline as pipeline
@@ -4493,6 +5056,7 @@ class TestNewFeatures(unittest.TestCase):
         import tools.fewshot_training_setup_ui as training_ui
         import tools.io_path_setup_ui as path_ui
         import tools.mask_file_picker_ui as mask_picker
+        import tools.path_dialog_helper as path_dialog_helper
         import tools.ui_theme as ui_theme
 
         ui_source = inspect.getsource(path_ui.run_ui)
@@ -4510,7 +5074,13 @@ class TestNewFeatures(unittest.TestCase):
             inspect.getsource(training_ui.QtTrainingSetupApp.browse_dataset),
         )
         self.assertIn("threading.Thread", inspect.getsource(training_ui.QtTrainingSetupApp.apply_dataset_root))
-        self.assertIn("QFileDialog.getOpenFileNames", inspect.getsource(mask_picker.main))
+        self.assertIn("choose_open_files_async", inspect.getsource(mask_picker.main))
+        self.assertNotIn("QFileDialog", inspect.getsource(mask_picker.main))
+        self.assertIn(
+            "QFileDialog.getOpenFileNames",
+            inspect.getsource(path_dialog_helper.main),
+        )
+        self.assertIn("subprocess.Popen", inspect.getsource(ui_theme._AsyncPathDialog))
         self.assertNotIn("os.path.isfile(p)", inspect.getsource(mask_import._start_import_for_paths))
 
         import tools.fewshot_status_viewer as status_viewer
@@ -6520,7 +7090,7 @@ class TestNewFeatures(unittest.TestCase):
                 os.path.join(ts_root, "s0001", "ct.nii.gz"),
             )
             fewshot_mimics._guard_no_active_job = lambda root, requested_kind="train": True
-            fewshot_mimics._launch_inference_job = lambda config_arg, root, case_id, organ, selected_model=None, target_spec=None, source_image_path=None: launched.append(selected_model) or 0
+            fewshot_mimics._launch_inference_job = lambda config_arg, root, case_id, organ, selected_model=None, target_spec=None, source_image_path=None, guided_prompts=False: launched.append(selected_model) or 0
             result = fewshot_mimics._start_inference(choose_model=False)
         finally:
             fewshot_mimics._selected_mask = old_selected
@@ -7716,11 +8286,14 @@ class TestNewFeatures(unittest.TestCase):
         self.assertEqual(patch["loss"]["type"], "dice_focal")
         self.assertEqual(patch["data"]["patch"]["size_zyx"], [64, 192, 192])
         self.assertTrue(patch["data"]["patch"]["inference_sliding_window"])
-        self.assertEqual(patch["inference"]["tta_axes"], [[0], [2], [0, 2]])
+        self.assertEqual(patch["inference"]["tta_axes"], [[0]])
+        self.assertEqual(patch["augmentation"]["flip_axes"], [0])
+        self.assertFalse(patch["augmentation"]["allow_left_right_flip"])
 
         full = strategies.compile_strategy("full_volume", fingerprint, policy)
         self.assertFalse(full["data"]["patch"]["enabled"])
         self.assertEqual(full["inference"]["tta_axes"], [])
+        self.assertNotIn("augmentation", full)
 
     def test_mimics_training_option_matrix_reaches_backend_config(self):
         """Every public architecture family survives UI, CLI, and config generation."""
@@ -8179,6 +8752,42 @@ class TestNewFeatures(unittest.TestCase):
         self.assertEqual(dicom_dir, dicom_case["image"])
         self.assertEqual("dicom_candidate", dicom_case["image_type"])
 
+    def test_single_case_discovery_stops_after_first_flat_dicom_slice(self):
+        import tools.io_path_setup_ui as io_ui
+
+        dicom_dir = os.path.join(self.tmp, "large_flat_dicom")
+        os.makedirs(dicom_dir)
+        calls = {"next": 0}
+
+        class Entry:
+            name = "slice000001.dcm"
+            path = os.path.join(dicom_dir, name)
+
+        class Entries:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                calls["next"] += 1
+                if calls["next"] == 1:
+                    return Entry()
+                raise AssertionError("flat DICOM discovery enumerated unnecessary slices")
+
+        old_scandir = io_ui.os.scandir
+        try:
+            io_ui.os.scandir = lambda _path: Entries()
+            case = io_ui.discover_single_source(dicom_dir)
+        finally:
+            io_ui.os.scandir = old_scandir
+        self.assertEqual(dicom_dir, case["image"])
+        self.assertEqual(1, calls["next"])
+
     def test_batch_discovery_supports_all_named_and_no_masks(self):
         import mimics_bridge
 
@@ -8221,20 +8830,24 @@ class TestNewFeatures(unittest.TestCase):
         shutil.rmtree(run_root, ignore_errors=True)
         shutil.rmtree(os.path.dirname(os.path.dirname(descriptor)), ignore_errors=True)
 
-    def test_external_path_browser_uses_native_dialog_and_supports_paste(self):
+    def test_external_path_browser_isolates_native_dialog_and_supports_paste(self):
         import inspect
         import tools.io_path_setup_ui as ui
+        import tools.path_dialog_helper as helper
         import tools.ui_theme as theme
 
         source = inspect.getsource(ui.run_ui)
         self.assertIn(
             "QFileDialog.getExistingDirectory",
-            inspect.getsource(theme.choose_existing_directory),
+            inspect.getsource(helper.main),
         )
         self.assertIn(
             "QFileDialog.getOpenFileName",
-            inspect.getsource(theme.choose_open_file),
+            inspect.getsource(helper.main),
         )
+        self.assertIn("choose_existing_directory_async", source)
+        self.assertNotIn("QFileDialog", source)
+        self.assertIn("subprocess.Popen", inspect.getsource(theme._AsyncPathDialog))
         self.assertIn("clipboard", source)
 
     def test_external_io_loads_required_theme_from_isolated_tools_directory(self):
@@ -8499,6 +9112,7 @@ class TestNewFeatures(unittest.TestCase):
             package_portable.REQUIRED_EXTERNAL_UI_FILES,
         )
         self.assertIn("tools/io_path_setup_ui.py", package_portable.REQUIRED_EXTERNAL_UI_FILES)
+        self.assertIn("tools/path_dialog_helper.py", package_portable.REQUIRED_EXTERNAL_UI_FILES)
         self.assertIn("tools/single_case_import_worker.py", package_portable.REQUIRED_EXTERNAL_UI_FILES)
         for relative in package_portable.REQUIRED_EXTERNAL_UI_FILES:
             self.assertTrue(Path(PROJECT_ROOT, relative).is_file(), relative)

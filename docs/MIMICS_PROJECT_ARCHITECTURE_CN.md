@@ -66,6 +66,10 @@ Mimics 菜单入口只完成必要的短操作，然后立即返回事件循环�
 
 “后台运行”不等于完全没有等待：首次读取一个很大的活动 Image 或 Mask buffer 仍需要经过 Mimics API。但代码必须分块读取、主动更新 GUI、记录耗时，并禁止在同一项目上并发执行两个 buffer 写操作。
 
+路径选择也属于阻塞风险。Windows 原生文件选择器会同步枚举磁盘、断开的盘符和网络共享；因此项目把原生选择器放到可终止的辅助进程中，Mimics 和外部设置窗口只异步接收结果。用户也可以直接粘贴完整路径，跳过盘符枚举。选择完成后的目录发现、几何核查和模型清单读取必须在工作线程执行；超时或用户重新选择路径后，旧结果会被丢弃，不能回写或启动任务。
+
+大数据集的病例列表默认不逐项创建控件。只有用户启用“手动选择病例”时才分批渲染，批次之间归还 Qt 事件循环，从而保持窗口可拖动、可关闭、可取消。
+
 ### 1.5 新手最常见的完整工作流
 
 ```text
@@ -438,6 +442,18 @@ nnInteractive 被明确分成“官方通用模型”和“自定义任务模型
 
 自定义模型不会替换官方模型。调用的是同一交互引擎的 `run_with_model_profile` 路径，model profile 中包含 task、model、checkpoint checksum 和输入契约。
 
+#### 自定义模型跨机器使用图像
+
+`.mcs` metadata 中的 `source_image_path` 是定位原始数据的线索，不是打开自定义模型的永久硬依赖。默认 `task_model_image_input_mode=auto`：
+
+1. 当前机器存在可读的本地源图像时，使用源图像，并在外部 worker 中映射到当前 Mimics grid；
+2. 路径已经失效、项目迁移到另一台机器，或 metadata 指向 UNC/网络共享时，直接使用 `.mcs` 内已经保存的 Image buffer；
+3. UNC 路径不会在 Mimics GUI 线程上做同步探测，避免网络超时造成黑屏；
+4. Mimics 只做一次短时 buffer 快照，模型加载、上传、canonical RAS 重排和预处理继续在外部 worker 中运行；
+5. 需要科研复现实验的严格输入一致性时，可把策略设为 `source`，此时源文件缺失会明确失败；也可设为 `mimics`，始终使用项目内图像。
+
+为什么 buffer 可以作为兼容输入：空间上它就是当前显示和提示所在的 Mimics grid；强度上 CT 可通过 HU/GV 线性关系恢复。新导入的 MRI 会把派生 DICOM 的 `RescaleSlope/RescaleIntercept`、源值范围和 16 位编码范围写入 `.mcs` metadata；fallback 在外部 worker 中先恢复近似源值，并把半个量化步长以内的残余零值重新置零，避免改变 nonzero bounding box。旧 `.mcs` 会尝试读取保留的 DICOM tags。两种映射都不存在时不会阻止标注，而是继续使用 raw GV，并在英文日志中标记 `raw_gv_zscore_best_effort`；此时正线性缩放通常会被 z-score 抵消，但零背景变化可能带来明显分布偏差，因此不声称严格等价。
+
 ### 6.3 `02_AI/nnInteractive/03_Train_and_Manage_Custom_Models.py`
 
 用途：训练、监控、选择、导入和导出 nnInteractive 任务模型。
@@ -461,6 +477,33 @@ nnInteractive 被明确分成“官方通用模型”和“自定义任务模型
 - 导入/导出可迁移模型包。
 
 工作区默认位置：`nninteractive_task_models/`。
+
+### 6.4 `02_AI/nnInteractive/04_DINOv3_Guided_Points.py`
+
+用途：让 DINOv3 只负责提出少量候选点，由标注者确认后交给官方或已注册的微调 nnInteractive 模型完成分割。它不是把粗糙的 DINOv3 Mask 直接当最终结果，也不是无人工确认的自动分割。
+
+完整流程：
+
+1. 对当前病例运行已注册的对应 DINOv3 模型；
+2. 同时累计 TTA 前景概率均值、方差和前景投票比例，不把多份完整 3D logits 长期保留在 GPU；
+3. 对 `probability >= threshold` 做 26 邻域连通域分析。最大区域必保留；其他区域必须同时通过“相对主区域体积、与主区域包围盒的物理距离、相对概率和 TTA 一致性”门槛，最多再保留两个。远处杂点、极小高置信碎片和低置信卫星区会被拒绝；
+4. 在保留区域的高概率、高 TTA 一致性、低方差深部选择 1～3 个自动前景点；单个长器官使用物理距离最远点采样，新增自动点默认至少相距 30 mm，多个可靠区域优先各覆盖一个。没有可靠候选时宁可少给点，不用低可信回退硬凑数量；
+5. 在所有预测区域之外 2～12 mm 的稳定低概率壳层中选择 0～3 个自动背景点，同样用毫米距离避免聚集；
+6. 把候选点从 DINOv3/source RAS 世界坐标显式换成 Mimics LPS 世界坐标，并创建绿色前景点、红色背景点；
+7. 外部非模态审核窗口允许用户在 Mimics 中移动、添加或删除点。1～3 只约束自动建议，用户手工前景点和背景点没有此上限；
+8. 审核窗口列出官方模型以及当前任务下所有完整、支持 point prompt 的微调模型。项目/Mask 已绑定某个模型时默认选择该版本，多个同任务版本可人工切换；
+9. 用户确认后，按顺序把这些点交给所选 nnInteractive 会话。每个点都基于上一轮预测继续修正，最终结果仍走 nnInteractive 原有的安全应用流程。
+
+性能约束：
+
+- DINOv3 支持镜像和多尺度 TTA。引导模式没有显式配置时使用原图加一次非左右轴镜像，共 2 路；canonical RAS/ZYX 的 X 轴不会被默认镜像；
+- cached-slices 模型根据每例 NIfTI affine 找出最接近 RAS 左右方向的原生体素轴，只在另一个平面轴做第二路 decoder TTA。训练 feature cache 同样逐例记录并使用这个安全轴；
+- 连通域、距离变换和点选择全部在外部 Python 进程；候选数有上限；
+- Mimics 前台只创建/读取少量 Point，不读取大 Mask buffer；用户主动补点时才会进入 Mimics 的取点交互；
+- DINOv3 释放 GPU 后才按审核窗口当前选择的官方/微调模型预热 nnInteractive，审核点的时间与模型加载重叠；切换模型会预热新选择而不会复用错误权重；
+- 审核阶段不持有 GPU，但在确认或取消前不允许启动另一个 DINOv3 任务，避免多个审核上下文互相覆盖。
+
+停止与回退：关闭审核窗口或运行 DINOv3 的 Stop 入口会删除临时点且不改变 Mask；nnInteractive 成功接管后，点对象在结果应用、失败、取消、Reset 或会话关闭时自动删除。DINOv3 的临时二值 Mask 和候选点 JSON 在完成交接后自动删除，不写入 Mimics；最终分割结果只来自用户选择的 nnInteractive 模型。
 
 ## 7. 交互算法功能入口
 
@@ -750,6 +793,10 @@ NIfTI 数组本身没有“RAS 数组”或“LPS 数组”的固有属性。空
 | `mimics_script.mimics_voxel_to_ras_matrix` | Mimics buffer voxel 到 RAS |
 | `mimics_script.mimics_to_source_index_matrix` | Mimics voxel 到源 voxel 的索引变换 |
 | `mimics_script.source_image_modality` | CT/MR 等模态信息 |
+| `mimics_script.source_intensity_encoding` | 图像进入派生 DICOM 时使用的强度编码版本 |
+| `mimics_script.source_intensity_rescale_slope/intercept` | 16 位 MRI GV 近似恢复到源值的线性映射 |
+| `mimics_script.source_intensity_value_min/max` | 导入时源图像的有限值范围 |
+| `mimics_script.dicom_stored_value_min/max` | 派生 DICOM 实际存储的整数范围 |
 
 ### 12.3 最小重采样原则
 
@@ -931,6 +978,8 @@ tasks/brain_extraction/models/brain_clopa_in_v1
 ```
 
 这里的 nonzero bounding box 来自图像非零区域，不依赖真实 Mask。训练与推理使用同一实现。
+
+当推理使用 `.mcs` buffer fallback 时，仍先根据保存的 Mimics voxel-to-RAS 矩阵转换到 canonical RAS，再进入相同归一化和模型。它不会重新猜测横断、冠状或矢状方向。MRI 优先使用 `.mcs` metadata 或 DICOM tags 中的 slope/intercept 恢复源值，并修复量化造成的近零背景；只有映射完全缺失时才使用 raw GV best-effort，而且该状态只告警、不阻断。原始浮点值经过 16 位量化后无法逐位恢复，因此严格的数值复现实验仍应保留原始图像；日常跨机器标注不再把它作为硬依赖。
 
 ### 14.5 实际验证结果
 

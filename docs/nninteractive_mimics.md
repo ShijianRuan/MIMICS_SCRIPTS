@@ -363,14 +363,14 @@ Mimics 21 API 文档明确说明：
 
 因此该 buffer 既不能简单称为原始 DICOM stored value，也不是直接的 HU 数组。
 
-Mimics-buffer 路径原样传递 Mimics Gray Value，不主动转换成 HU。原因是 nnInteractive 2.4.2 在 `set_image()` 后会：
+官方模型的 Mimics-buffer 路径原样传递 Mimics Gray Value，不主动转换成 HU。自定义任务模型则会根据可用的项目强度 metadata 恢复其训练使用的 source value。nnInteractive 2.4.2 在 `set_image()` 后会：
 
 1. 把图像转换为 float；
 2. 查找非零区域；
 3. 用非零区域的均值和标准差对整幅图像做 z-score；
 4. 不在这一阶段按 spacing 对整幅图像重采样。
 
-若 Gray Value 与 HU 是正向线性关系，z-score 后的值理论上相同。对已经来自 Mimics 的 buffer 再转 HU 通常不会改变模型输入，反而可能改变“哪些体素等于零”的判定。
+若 Gray Value 与源值是正向线性关系，而且非零空间包围盒不变，z-score 后的值理论上相同。零背景一旦因为 intercept 或量化变成非零，统计区域可能扩大到整幅图像，影响就可能很大。因此自定义 MRI 模型不能只依赖“z-score 会抵消”这一假设。
 
 Source-image fast path 不读 Mimics buffer，而是由外部 Python 读取原始 NIfTI 或 DICOM。该路径会把 source 图像重采样到 Mimics voxel grid 后，再按 ImageData metadata 选择强度空间：当前 NIfTI 导入流程会写成 CT 派生 DICOM，因此使用 Mimics 侧传入的 `HU2GV(0)` 与 `HU2GV(1)` 推导出的线性 HU-to-GV 转换；原始 CT DICOM 也使用该转换；明确的非 CT DICOM 默认保留 source values，避免把 MR 等数据的背景零值错误转换为非零。这样 source path 与 Mimics-buffer path 尽量保持同一 Gray Value 语义，同时避免对非 CT 数据做错误 HU 假设。
 
@@ -574,15 +574,31 @@ If Mimics itself normalizes a valid imported stack, the
 background creator measures the live Mimics voxel centers and maps source masks
 directly to that measured grid.
 
-If source metadata is absent or uses an unsupported legacy geometry contract, the
-fast path is skipped and the normal Mimics buffer path may still be used for
-backward compatibility. If source metadata is present but points to a missing
-file/folder, the default behavior is to fail with an explicit error instead of
-silently switching to the Mimics buffer. A buffer fallback is allowed only when
-`fallback_to_mimics_buffer_when_source_unavailable` is set to `true` or
-`image_input_mode` is explicitly set to `mimics`. Source file read errors are
-reported by the external worker; the foreground Mimics process does not open the
-source image just to probe readability.
+If source metadata is absent, unsupported, or points to a file that does not
+exist on the current workstation, the official model follows `image_input_mode`.
+Custom task models use the separate `task_model_image_input_mode` policy:
+
+- `auto` (default) prefers a readable local source image and otherwise exports
+  the image already embedded in the open `.mcs`;
+- `source` is strict and stops if the source file cannot be used;
+- `mimics` always uses the project image buffer.
+
+In `auto` mode, recorded UNC/network paths are not synchronously probed from the
+Mimics GUI thread. This prevents a moved project or unavailable share from
+freezing prompt collection. A short `get_voxel_buffer()` snapshot is made before
+the prompt; model loading, image upload, canonical-RAS orientation and
+preprocessing continue in the external image worker.
+
+The custom-model fallback keeps the exact open Mimics geometry. CT buffers are
+converted back through the available HU/GV linear transform. New MR imports
+persist their derived-DICOM rescale mapping and value ranges in `.mcs` metadata.
+The external worker reconstructs approximate source values and snaps residuals
+within half a quantization step back to zero, preserving nnInteractive's nonzero
+normalization crop. Older projects try the retained DICOM Rescale Slope and
+Intercept tags. If neither mapping exists, inference still runs with raw GV and
+records `raw_gv_zscore_best_effort`; it never fails merely because the mapping is
+missing. The runtime records `image_input_provenance`, recovery basis and
+`image_intensity_compatibility` in job and bridge logs.
 
 The managed nnInteractive server is kept warm until its configured idle timeout
 or until `Stop Background Services` is run. This avoids turning every prompt
@@ -591,10 +607,18 @@ for image load/resampling, server readiness, `set_image`, `set_target`, prompt
 application and total elapsed time so slow runs can be diagnosed without opening
 raw JSON logs.
 
-The before-prompt prewarm step is stricter: it only runs when the source-image
-fast path is available. It does not use the raw Mimics buffer fallback, so an old
-project cannot move a full image-buffer export from after prompt capture to
-before prompt capture.
+Before-prompt prewarm supports both a validated source image and the portable
+Mimics-buffer fallback. Mimics performs one short local buffer snapshot; source
+recovery, canonical orientation, model loading, upload and preprocessing then
+continue in the external worker while the user collects prompts.
+
+### 13.7 DINOv3 候选点引导
+
+`02_AI/nnInteractive/04_DINOv3_Guided_Points.py` 提供一个有人工确认的组合入口：DINOv3 不直接覆盖 Mask，而是根据 TTA 前景概率提出最多 3 个自动前景点和 3 个自动背景点。最大 26-连通区域必保留；额外区域只有在相对体积、物理距离、概率和 TTA 一致性均可信时才保留，最多两个。前景点来自高概率、低方差的区域深部，背景点只来自所有预测区域外的稳定低概率壳层；弱候选不会通过宽松回退被强行变成提示。
+
+建议点以 RAS 世界坐标写出，Mimics 侧显式转换为 LPS 后创建临时 Point。标注者可以在 Mimics 中移动、添加或删除这些点；自动建议的 1～3 点上限不限制手工点数。确认时会重新读取 Point 的当前位置，而不是使用最初的数组索引；因此用户修改后的坐标才是实际送入 nnInteractive 的坐标。
+
+审核窗口可以选择官方模型或当前任务下任一完整且支持 point prompt 的微调模型。确认后复用既有异步 image worker、initial Mask、结果目标选择、undo/reset 和生命周期管理。一个 `point_set` 内的多个点在 bridge 中按顺序执行，每一步预测都继承上一轮结果。取消审核会删除临时 Point，不修改选中 Mask，也不会保留 GPU 锁；成功提交后，Point 会在推理结果应用或任何终止路径自动删除，DINO 临时 Mask 与建议 JSON 也会清理。
 
 Empty initial Masks use an empty-mask state marker instead of exporting a full
 zero-valued mask buffer. Undo and reset restore such sessions with `mask.clear()`.

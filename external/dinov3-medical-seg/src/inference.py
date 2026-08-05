@@ -23,8 +23,9 @@ def predict_cached_feature_slices(
     device,
     *,
     slice_batch_size: int = 4,
+    tta_axes=None,
 ) -> np.ndarray:
-    """Run the frozen-feature 2D path with verified four-way mirror TTA."""
+    """Run the frozen-feature 2D path with configured in-plane TTA."""
     images = np.asarray(images_zyx, dtype=np.float32)
     if images.ndim != 3 or any(value <= 0 or value % 16 for value in images.shape[-2:]):
         raise RuntimeError(
@@ -52,7 +53,7 @@ def predict_cached_feature_slices(
                 raw = raw.to(device=device)
                 embeddings = embeddings.to(device=device)
             probabilities = []
-            for dimensions in ((), (2,), (3,), (2, 3)):
+            for dimensions in _cached_slice_tta_dimensions(tta_axes):
                 current_embeddings = (
                     torch.flip(embeddings, dims=dimensions).contiguous()
                     if dimensions
@@ -71,6 +72,102 @@ def predict_cached_feature_slices(
             prediction = torch.stack(probabilities, dim=0).mean(dim=0).argmax(dim=1)
             predictions.append(prediction.cpu().numpy().astype(np.int16, copy=False))
     return np.concatenate(predictions, axis=0)
+
+
+def predict_cached_feature_slice_statistics(
+    model,
+    images_zyx: np.ndarray,
+    device,
+    *,
+    slice_batch_size: int = 4,
+    threshold: float = 0.5,
+    tta_axes=None,
+) -> dict:
+    """Return configured mirror-TTA statistics for the cached-slice path."""
+    images = np.asarray(images_zyx, dtype=np.float32)
+    if images.ndim != 3 or any(value <= 0 or value % 16 for value in images.shape[-2:]):
+        raise RuntimeError(
+            "Cached feature inference expects (Z,H,W) with H/W divisible by 16, got {}".format(
+                images.shape
+            )
+        )
+    means = []
+    variances = []
+    agreements = []
+    model.backbone.eval()
+    model.decoder_3d.eval()
+    batch_size = max(1, int(slice_batch_size))
+    encoder_device = (
+        torch.device("cpu")
+        if getattr(model, "encoder_backend", "pytorch") == "onnx"
+        else device
+    )
+    dimensions_list = _cached_slice_tta_dimensions(tta_axes)
+    with torch.no_grad():
+        for start in range(0, images.shape[0], batch_size):
+            raw = torch.from_numpy(images[start:start + batch_size, None]).to(
+                device=encoder_device,
+                dtype=torch.float32,
+            )
+            embeddings = model.backbone(raw.repeat(1, 3, 1, 1))[-1]
+            if encoder_device != device:
+                raw = raw.to(device=device)
+                embeddings = embeddings.to(device=device)
+            probability_sum = None
+            probability_square_sum = None
+            foreground_votes = None
+            for dimensions in dimensions_list:
+                current_embeddings = (
+                    torch.flip(embeddings, dims=dimensions).contiguous()
+                    if dimensions
+                    else embeddings
+                )
+                current_raw = (
+                    torch.flip(raw, dims=dimensions).contiguous()
+                    if dimensions
+                    else raw
+                )
+                logits = model.decode_cached_slices(current_embeddings, current_raw)
+                probability = torch.softmax(logits, dim=1)
+                if dimensions:
+                    probability = torch.flip(probability, dims=dimensions)
+                values = probability[:, 1].detach().to(
+                    device="cpu", dtype=torch.float32
+                ).numpy()
+                if probability_sum is None:
+                    probability_sum = np.zeros(values.shape, dtype=np.float32)
+                    probability_square_sum = np.zeros(values.shape, dtype=np.float32)
+                    foreground_votes = np.zeros(values.shape, dtype=np.uint8)
+                probability_sum += values
+                probability_square_sum += values * values
+                foreground_votes += values >= float(threshold)
+            count = float(len(dimensions_list))
+            mean = probability_sum / count
+            means.append(mean)
+            variances.append(
+                np.maximum(probability_square_sum / count - mean * mean, 0.0)
+            )
+            agreements.append(foreground_votes.astype(np.float32) / count)
+    return {
+        "mean": np.concatenate(means, axis=0).astype(np.float32, copy=False),
+        "variance": np.concatenate(variances, axis=0).astype(np.float32, copy=False),
+        "agreement": np.concatenate(agreements, axis=0).astype(np.float32, copy=False),
+        "member_count": len(dimensions_list),
+    }
+
+
+def _cached_slice_tta_dimensions(tta_axes):
+    """Map model ZYX flip axes to axial BCHW tensor dimensions."""
+    dimensions = [()]
+    for axes in _parse_tta_axes(tta_axes)[1:]:
+        if any(axis not in (1, 2) for axis in axes):
+            raise ValueError(
+                "Cached axial slices only support model Y/X TTA axes 1 and 2"
+            )
+        mapped = tuple(axis + 1 for axis in axes)
+        if mapped not in dimensions:
+            dimensions.append(mapped)
+    return tuple(dimensions)
 
 
 def _predict_logits(
@@ -205,6 +302,74 @@ def _predict_with_tta(
                 current = torch.flip(current, dims=[axis + 2 for axis in axes])
             logits.append(current)
     return torch.stack(logits, dim=0).mean(dim=0)
+
+
+def _predict_tta_probability_statistics(
+    model,
+    data_zyx,
+    model_grid,
+    config,
+    device,
+    *,
+    pre_normalized=False,
+):
+    """Return online TTA foreground mean, variance, and vote agreement.
+
+    This executes the same TTA members as ``_predict_with_tta`` but transfers
+    one foreground probability map at a time to CPU. It therefore does not
+    retain K complete 3D logits tensors on the GPU.
+    """
+    tta_axes = _parse_tta_axes(config.get("inference", {}).get("tta_axes", []))
+    scales = _parse_scales(config.get("inference", {}).get("scales", []))
+    threshold = float(config.get("inference", {}).get("threshold", 0.5))
+    probability_sum = None
+    probability_square_sum = None
+    foreground_votes = None
+    member_count = 0
+    for scale in scales:
+        for axes in tta_axes:
+            input_data = np.flip(data_zyx, axis=axes).copy() if axes else data_zyx
+            current = _predict_logits(
+                model,
+                input_data,
+                model_grid,
+                config,
+                device,
+                input_scale=scale,
+                pre_normalized=pre_normalized,
+            )
+            if axes:
+                current = torch.flip(current, dims=[axis + 2 for axis in axes])
+            probability = (
+                torch.softmax(current, dim=1)[0, 1]
+                .detach()
+                .to(device="cpu", dtype=torch.float32)
+                .numpy()
+            )
+            if probability_sum is None:
+                probability_sum = np.zeros(probability.shape, dtype=np.float32)
+                probability_square_sum = np.zeros(probability.shape, dtype=np.float32)
+                foreground_votes = np.zeros(probability.shape, dtype=np.uint16)
+            probability_sum += probability
+            probability_square_sum += probability * probability
+            foreground_votes += probability >= threshold
+            member_count += 1
+            del current
+
+    if member_count < 1 or probability_sum is None:
+        raise RuntimeError("DINOv3 TTA produced no probability members")
+    mean = probability_sum / float(member_count)
+    variance = np.maximum(
+        probability_square_sum / float(member_count) - mean * mean,
+        0.0,
+    )
+    agreement = foreground_votes.astype(np.float32) / float(member_count)
+    return {
+        "mean": mean.astype(np.float32, copy=False),
+        "variance": variance.astype(np.float32, copy=False),
+        "agreement": agreement.astype(np.float32, copy=False),
+        "member_count": int(member_count),
+    }
 
 
 def _starts(length: int, size: int, overlap: float) -> list[int]:
@@ -428,6 +593,74 @@ def _sliding_window_logits(
     return probability_sum / np.maximum(weight_sum, 1e-6)
 
 
+def _sliding_window_probability_statistics(
+    model,
+    data_zyx,
+    model_grid,
+    config,
+    device,
+    *,
+    pre_normalized=False,
+):
+    """Aggregate bounded-memory TTA statistics over sliding windows."""
+    patch = dict(config.get("data", {}).get("patch", {}))
+    size = tuple(int(value) for value in patch.get("size_zyx", []))
+    if len(size) != 3 or any(value <= 0 for value in size):
+        raise ValueError("sliding-window inference requires data.patch.size_zyx")
+    overlap = float(patch.get("inference_overlap", 0.5))
+    shape = tuple(int(value) for value in data_zyx.shape)
+    mean_sum = np.zeros(shape, dtype=np.float32)
+    second_moment_sum = np.zeros(shape, dtype=np.float32)
+    agreement_sum = np.zeros(shape, dtype=np.float32)
+    weight_sum = np.zeros(shape, dtype=np.float32)
+    weight = _gaussian_weight(size)
+    member_count = 0
+    for z in _starts(shape[0], size[0], overlap):
+        for y in _starts(shape[1], size[1], overlap):
+            for x in _starts(shape[2], size[2], overlap):
+                crop, _ = _extract_padded(data_zyx, (z, y, x), size)
+                current = _predict_tta_probability_statistics(
+                    model,
+                    crop,
+                    model_grid,
+                    config,
+                    device,
+                    pre_normalized=pre_normalized,
+                )
+                member_count = max(member_count, int(current["member_count"]))
+                valid = (
+                    min(size[0], shape[0] - z),
+                    min(size[1], shape[1] - y),
+                    min(size[2], shape[2] - x),
+                )
+                region = (
+                    slice(z, z + valid[0]),
+                    slice(y, y + valid[1]),
+                    slice(x, x + valid[2]),
+                )
+                local_weight = weight[:valid[0], :valid[1], :valid[2]]
+                local_mean = current["mean"][:valid[0], :valid[1], :valid[2]]
+                local_variance = current["variance"][:valid[0], :valid[1], :valid[2]]
+                mean_sum[region] += local_mean * local_weight
+                second_moment_sum[region] += (
+                    local_variance + local_mean * local_mean
+                ) * local_weight
+                agreement_sum[region] += (
+                    current["agreement"][:valid[0], :valid[1], :valid[2]]
+                    * local_weight
+                )
+                weight_sum[region] += local_weight
+    denominator = np.maximum(weight_sum, 1e-6)
+    mean = mean_sum / denominator
+    variance = np.maximum(second_moment_sum / denominator - mean * mean, 0.0)
+    return {
+        "mean": mean.astype(np.float32, copy=False),
+        "variance": variance.astype(np.float32, copy=False),
+        "agreement": (agreement_sum / denominator).astype(np.float32, copy=False),
+        "member_count": int(member_count),
+    }
+
+
 def postprocess_foreground(
     foreground_probability: np.ndarray,
     *,
@@ -497,3 +730,48 @@ def predict_array(model, model_grid, config, device):
         restored[roi_slices] = prediction
         return restored
     return prediction
+
+
+def predict_probability_statistics(model, model_grid, config, device):
+    """Return TTA probability statistics on the complete model ZYX grid."""
+    data_zyx = xyz_to_zyx(model_grid.get_fdata(dtype=np.float32))
+    data_zyx, pre_normalized = _case_normalized_input(data_zyx, config)
+    full_shape = data_zyx.shape
+    roi = dict(config.get("data", {}).get("roi", {}))
+    roi_slices = None
+    if roi.get("enabled", False):
+        from .data.dataset_3d import MedicalVolumeDataset
+
+        roi_slices = MedicalVolumeDataset._normalized_roi_slices(
+            full_shape, roi.get("normalized_zyx")
+        )
+        data_zyx = data_zyx[roi_slices]
+    patch = dict(config.get("data", {}).get("patch", {}))
+    if bool(patch.get("inference_sliding_window", False)):
+        statistics = _sliding_window_probability_statistics(
+            model,
+            data_zyx,
+            model_grid,
+            config,
+            device,
+            pre_normalized=pre_normalized,
+        )
+    else:
+        statistics = _predict_tta_probability_statistics(
+            model,
+            data_zyx,
+            model_grid,
+            config,
+            device,
+            pre_normalized=pre_normalized,
+        )
+    if roi_slices is None:
+        return statistics
+    restored = {
+        "member_count": statistics["member_count"],
+    }
+    for name in ("mean", "variance", "agreement"):
+        values = np.zeros(full_shape, dtype=np.float32)
+        values[roi_slices] = statistics[name]
+        restored[name] = values
+    return restored

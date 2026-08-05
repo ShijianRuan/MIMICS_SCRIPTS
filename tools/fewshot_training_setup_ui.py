@@ -55,7 +55,7 @@ except ImportError:
         normalize_architecture_options,
     )
 from ui_theme import (
-    choose_existing_directory,
+    choose_existing_directory_async,
     configure_application,
     stylesheet as shared_stylesheet,
 )
@@ -2547,9 +2547,9 @@ class QtTrainingSetupApp(object):
         self.widgets["mirror_tta"] = QtWidgets.QCheckBox("Mirror averaging (slower)")
         self.widgets["mirror_tta"].setChecked(_bool(self.values.get("mirror_tta", False)))
         self.widgets["mirror_tta"].setToolTip(
-            "Average the original prediction with three in-plane mirrored "
-            "predictions. This can improve robustness but takes about four "
-            "times as many forward passes."
+            "Average the original prediction with laterality-safe in-plane "
+            "mirrors. Left/right mirroring is excluded. The same safe axes are "
+            "used for training augmentation."
         )
         for label, key in (("Loss", "loss_type"),):
             prediction_form.addRow(label, self.widgets[key])
@@ -2836,10 +2836,17 @@ class QtTrainingSetupApp(object):
         ):
             if control is not None:
                 control.setEnabled(manual)
+        if not manual:
+            if self.case_list is not None:
+                self.case_list.clear()
+            return
         self._refresh_case_list()
 
     def _refresh_case_list(self):
         if self.case_list is None:
+            return
+        if self.choose_specific_cases is not None and not self.choose_specific_cases.isChecked():
+            self.case_list.clear()
             return
         query = (
             str(self.case_filter_edit.text()).strip().lower()
@@ -2854,48 +2861,56 @@ class QtTrainingSetupApp(object):
             str(item.data(self.QtCore.Qt.UserRole) or item.text())
             for item in self.case_list.selectedItems()
         }
-        self.case_list.clear()
-        for row in self.case_rows:
-            ready = row.get("state") == "ready"
-            case_id = str(row.get("case_id") or "")
-            if not ready and not show_unavailable:
-                continue
-            if query and query not in case_id.lower():
-                continue
-            text = case_id if ready else "{}  -  {}".format(
-                case_id,
-                row.get("detail") or "Unavailable",
-            )
-            item = self.QtWidgets.QListWidgetItem(text)
-            item.setData(self.QtCore.Qt.UserRole, case_id)
-            if not ready:
-                item.setFlags(item.flags() & ~self.QtCore.Qt.ItemIsEnabled)
-                item.setForeground(self.QtGui.QColor("#98a2b3"))
-            elif case_id in selected_ids:
-                item.setSelected(True)
-            self.case_list.addItem(item)
+        self.case_list.setUpdatesEnabled(False)
+        try:
+            self.case_list.clear()
+            for row in self.case_rows:
+                ready = row.get("state") == "ready"
+                case_id = str(row.get("case_id") or "")
+                if not ready and not show_unavailable:
+                    continue
+                if query and query not in case_id.lower():
+                    continue
+                text = case_id if ready else "{}  -  {}".format(
+                    case_id,
+                    row.get("detail") or "Unavailable",
+                )
+                item = self.QtWidgets.QListWidgetItem(text)
+                item.setData(self.QtCore.Qt.UserRole, case_id)
+                if not ready:
+                    item.setFlags(item.flags() & ~self.QtCore.Qt.ItemIsEnabled)
+                    item.setForeground(self.QtGui.QColor("#98a2b3"))
+                elif case_id in selected_ids:
+                    item.setSelected(True)
+                self.case_list.addItem(item)
+        finally:
+            self.case_list.setUpdatesEnabled(True)
 
     def browse_dataset(self):
-        path = choose_existing_directory(
+        choose_existing_directory_async(
+            self.QtCore,
             self.QtWidgets,
             self.window,
             "Original image dataset",
             self.dataset_edit.text() or self.context.get("ts_root", "") or str(Path.home()),
+            self.apply_dataset_root,
         )
-        if path:
-            self.apply_dataset_root(path)
 
     def browse_mcs_folder(self):
         current = str(self.mcs_folder_edit.text()).strip() if self.mcs_folder_edit is not None else ""
-        path = choose_existing_directory(
+        def selected(path):
+            if path and self.mcs_folder_edit is not None:
+                self.mcs_folder_edit.setText(os.path.abspath(path))
+                self.context["mcs_output_dir"] = os.path.abspath(path)
+
+        choose_existing_directory_async(
+            self.QtCore,
             self.QtWidgets,
             self.window,
             "Saved .mcs folder",
             current or str(Path.home()),
+            selected,
         )
-        if path and self.mcs_folder_edit is not None:
-            self.mcs_folder_edit.setText(os.path.abspath(path))
-            self.context["mcs_output_dir"] = os.path.abspath(path)
 
     def browse_label_root(self):
         current = (
@@ -2903,14 +2918,18 @@ class QtTrainingSetupApp(object):
             if self.label_root_edit is not None
             else ""
         )
-        path = choose_existing_directory(
+        def selected(path):
+            if path and self.label_root_edit is not None:
+                self.label_root_edit.setText(os.path.abspath(path))
+
+        choose_existing_directory_async(
+            self.QtCore,
             self.QtWidgets,
             self.window,
             "Exported masks folder",
             current or str(Path.home()),
+            selected,
         )
-        if path and self.label_root_edit is not None:
-            self.label_root_edit.setText(os.path.abspath(path))
 
     def _initial_model_key(self):
         raw_path = str(self.values.get("model_path") or "").strip()
@@ -3190,7 +3209,6 @@ class QtTrainingSetupApp(object):
             self.context["case_ids"] = [
                 str(row.get("case_id")) for row in ready_rows
             ]
-            self._refresh_case_list()
             self._refresh_manual_case_selection()
             if self.start_button is not None and not self.started:
                 self.start_button.setEnabled(True)
@@ -3745,7 +3763,7 @@ class QtTrainingSetupApp(object):
             os.path.expanduser(os.path.expandvars(selected_root))
         ) if selected_root else ""
         active_root = str(self.context.get("ts_root") or "").strip()
-        if not selected_root or not os.path.isdir(selected_root):
+        if not selected_root:
             raise RuntimeError("Choose an existing source image root.")
         if os.path.normcase(selected_root) != os.path.normcase(active_root):
             raise RuntimeError(

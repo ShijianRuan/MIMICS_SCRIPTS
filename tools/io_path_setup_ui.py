@@ -24,7 +24,9 @@ for _candidate in (_HERE, _ROOT):
 
 from ui_theme import (
     choose_existing_directory,
+    choose_existing_directory_async,
     choose_open_file,
+    choose_open_file_async,
     choose_open_files,
     configure_application,
     stylesheet as shared_stylesheet,
@@ -186,14 +188,14 @@ def discover_single_source(source):
         # here, which is all this flag is used for.
         sibling_images = 0
         try:
-            entries = os.listdir(case_dir)
+            with os.scandir(case_dir) as entries:
+                for entry in entries:
+                    if _has_medical_suffix(entry.name):
+                        sibling_images += 1
+                        if sibling_images > 1:
+                            break
         except OSError:
-            entries = []
-        for name in entries:
-            if _has_medical_suffix(name):
-                sibling_images += 1
-                if sibling_images > 1:
-                    break
+            pass
         allow_masks = sibling_images <= 1
     elif os.path.isfile(selected) and selected.lower().endswith(".dcm"):
         case_dir = os.path.dirname(selected)
@@ -211,16 +213,19 @@ def discover_single_source(source):
                 image = candidate
                 break
         if not image:
-            # Walk without sorting and stop at the first medical file: sorting
-            # a huge directory listing is what makes this hang.
+            # Walk without sorting and stop early. A flat DICOM folder can
+            # contain tens of thousands of slices; proving that no arbitrary
+            # NIfTI exists by enumerating every slice adds no value here.
             try:
-                entries = os.listdir(case_dir)
+                with os.scandir(case_dir) as entries:
+                    for index, entry in enumerate(entries):
+                        if _has_medical_suffix(entry.name) and entry.is_file():
+                            image = entry.path
+                            break
+                        if entry.name.lower().endswith(".dcm") or index >= 511:
+                            break
             except OSError:
-                entries = []
-            for name in entries:
-                if _has_medical_suffix(name) and _medical_file(os.path.join(case_dir, name)):
-                    image = os.path.join(case_dir, name)
-                    break
+                pass
         if not image:
             dicom_dir = os.path.join(case_dir, "dicom")
             image = dicom_dir if os.path.isdir(dicom_dir) else case_dir
@@ -582,27 +587,37 @@ def run_ui(context, preview_path=""):
             form.addWidget(_label(QtWidgets, hint, "hint"))
 
         def browse_folder_path():
-            value = choose_existing_directory(
+            def selected(value):
+                if value:
+                    edit.setProperty("chosenByBrowse", True)
+                    edit.setText(str(value))
+
+            choose_existing_directory_async(
+                QtCore,
                 QtWidgets,
                 window,
                 label,
                 edit.text().strip() or str(Path.home()),
+                selected,
+                button=button,
             )
-            if value:
-                edit.setProperty("chosenByBrowse", True)
-                edit.setText(str(value))
 
         def browse_file_path():
-            value = choose_open_file(
+            def selected(value):
+                if value:
+                    edit.setProperty("chosenByBrowse", True)
+                    edit.setText(str(value))
+
+            choose_open_file_async(
+                QtCore,
                 QtWidgets,
                 window,
                 label,
                 edit.text().strip() or str(Path.home()),
                 "Medical volumes (*.nii *.nii.gz *.mha *.mhd *.nrrd *.nrrd.gz);;All files (*)",
+                selected,
+                button=file_button,
             )
-            if value:
-                edit.setProperty("chosenByBrowse", True)
-                edit.setText(str(value))
 
         def paste_value():
             value = QtWidgets.QApplication.clipboard().text().strip()

@@ -476,6 +476,80 @@ def _task_for_selected_context():
     return usable[0] if len(usable) == 1 else None
 
 
+def guided_model_options():
+    """Return lightweight model choices for DINO-guided point review.
+
+    The official model is always available. Custom models are limited to the
+    task resolved from the selected Mask/project when possible, so a similarly
+    named model from another task cannot be selected accidentally.
+    """
+    options = [
+        {
+            "key": "official",
+            "label": "Official nnInteractive",
+            "source": "official",
+            "profile": None,
+        }
+    ]
+    selected_task = _task_for_selected_context()
+    tasks = [selected_task] if selected_task is not None else _registry()
+    selected_mask = _selected_mask()
+    metadata_model_id = str(
+        _metadata_get(selected_mask, MODEL_ID_METADATA, "") or ""
+    )
+    binding = _project_binding_values(_current_project_path())
+    default_key = "official"
+    for task in tasks:
+        usable = [model for model in _usable_models(task) if _model_is_complete(task, model)]
+        recommended = _recommended_model(task)
+        for model in usable:
+            profile = _profile(task, model)
+            if "point" not in set(profile.get("validated_prompt_types") or []):
+                continue
+            key = "task_model:{0}".format(profile.get("profile_id") or "")
+            suffix = ""
+            if recommended is not None and str(recommended.get("model_id")) == str(model.get("model_id")):
+                suffix = " (recommended)"
+            options.append(
+                {
+                    "key": key,
+                    "label": "{0} - {1}{2}".format(
+                        profile.get("task_name") or profile.get("task_id") or "Custom task",
+                        profile.get("model_id") or "model",
+                        suffix,
+                    ),
+                    "source": "task_model",
+                    "profile": profile,
+                }
+            )
+            explicitly_selected = bool(
+                metadata_model_id
+                and str(model.get("model_id") or "") == metadata_model_id
+            )
+            project_selected = bool(
+                _safe_slug(binding.get("task_id")) == _safe_slug(task.get("task_id"))
+                and str(binding.get("model_id") or "") == str(model.get("model_id") or "")
+            )
+            if explicitly_selected or project_selected:
+                default_key = key
+        if default_key == "official":
+            matching = [
+                row for row in options
+                if row.get("source") == "task_model"
+                and str((row.get("profile") or {}).get("task_id") or "")
+                == str(task.get("task_id") or "")
+            ]
+            if len(matching) == 1:
+                default_key = matching[0]["key"]
+            elif recommended is not None:
+                recommended_id = str(recommended.get("model_id") or "")
+                for row in matching:
+                    if str((row.get("profile") or {}).get("model_id") or "") == recommended_id:
+                        default_key = row["key"]
+                        break
+    return {"options": options, "default_key": default_key}
+
+
 def _initial_context():
     mask = _selected_mask()
     project_path = _current_project_path()

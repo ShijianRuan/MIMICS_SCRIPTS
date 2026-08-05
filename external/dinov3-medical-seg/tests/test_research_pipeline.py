@@ -1693,9 +1693,10 @@ def test_augmentation_reseed_replays_the_same_transform():
 
     augmentation = VolumeAugmentation(
         {
-            "enabled": True,
-            "flip_axes": [1, 2],
-            "flip_probability": 1.0,
+                "enabled": True,
+                "flip_axes": [1, 2],
+                "allow_left_right_flip": True,
+                "flip_probability": 1.0,
             "intensity": {"gamma_range": [0.8, 1.2], "noise_std": 0.02},
         },
         seed=0,

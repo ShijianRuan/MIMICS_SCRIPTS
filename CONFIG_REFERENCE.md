@@ -38,6 +38,14 @@ unless noted otherwise.
 | `default_keep_last_checkpoints` | `2` | Number of recent checkpoints retained in addition to the best model. |
 | `default_keep_materialized_dataset` | `false` | Keep the temporary `imagesTr`/`labelsTr` dataset after the job. |
 
+Generated DINOv3 experiment YAML uses model-space `ZYX` axes for
+`inference.tta_axes` and `augmentation.flip_axes`. Axis `2` is the canonical
+RAS left/right axis. Standard Mimics profiles do not mirror it. A deliberately
+laterality-invariant custom experiment must set
+`augmentation.allow_left_right_flip: true` before using axis `2`; otherwise
+training fails closed. Native cached-slice models derive their safe in-plane
+flip axis from each source affine and store it in the feature-cache manifest.
+
 ### Saved Mask Name Mapping
 
 `organ_mask_aliases` maps one training target to accepted names in saved
@@ -98,6 +106,7 @@ editable in the training window.
 | --- | --- | --- |
 | `device` | `"auto"` | Inference device selection. |
 | `image_input_mode` | `"mimics"` | Image source used by nnInteractive. |
+| `task_model_image_input_mode` | `"auto"` | Input policy for custom task models: prefer a readable local source, otherwise use the portable image stored in the `.mcs`. MR rescale metadata/tags are restored when available; missing mappings continue as logged raw-GV best effort. Set `source` only for strict source-file parity, or `mimics` to always use the project buffer. |
 | `prefer_source_image_for_nninteractive` | `false` | Prefer the original source image when enabled and geometry is validated. |
 | `fallback_to_mimics_buffer_when_source_unavailable` | `true` | Use the Mimics image buffer if the source image cannot be validated. |
 | `fallback_to_source_when_mimics_export_fails` | `false` | Permit the reverse fallback after a Mimics-buffer export failure. |

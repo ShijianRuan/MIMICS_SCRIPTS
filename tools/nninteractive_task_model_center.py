@@ -52,7 +52,12 @@ from training_data_ui import (  # noqa: E402
     label_source_hint,
     normalized_source_mode,
 )
-from ui_theme import choose_existing_directory, configure_application  # noqa: E402
+from ui_theme import (  # noqa: E402
+    choose_existing_directory_async,
+    choose_open_file_async,
+    choose_save_file_async,
+    configure_application,
+)
 from ui_preferences import load_preferences, save_preferences  # noqa: E402
 try:
     from remote_compute_ui import RemoteComputeSelector  # noqa: E402
@@ -256,6 +261,13 @@ class ModelCenter:
         self.model_io_process = None
         self.model_io_action = ""
         self.remote_selector = None
+        self._case_population_generation = 0
+        self._case_population_index = 0
+        self._case_population_timer = self.QtCore.QTimer(self.window)
+        self._case_population_timer.timeout.connect(self._populate_case_chunk)
+        self._case_filter_timer = self.QtCore.QTimer(self.window)
+        self._case_filter_timer.setSingleShot(True)
+        self._case_filter_timer.timeout.connect(self._apply_case_filters)
         self._build()
         self._load_context_defaults()
         self.refresh_tasks()
@@ -336,14 +348,15 @@ class ModelCenter:
         browse.setMinimumWidth(104)
 
         def choose():
-            selected = choose_existing_directory(
+            choose_existing_directory_async(
+                self.QtCore,
                 self.QtWidgets,
                 self.window,
                 "Choose {}".format(label),
                 edit.text() or str(Path.home()),
+                lambda selected: edit.setText(str(selected)) if selected else None,
+                button=browse,
             )
-            if selected:
-                edit.setText(str(selected))
 
         browse.clicked.connect(choose)
         row.addWidget(caption)
@@ -522,7 +535,7 @@ class ModelCenter:
         filter_row = QtWidgets.QHBoxLayout()
         self.case_filter_edit = QtWidgets.QLineEdit()
         self.case_filter_edit.setPlaceholderText("Filter cases")
-        self.case_filter_edit.textChanged.connect(self._apply_case_filters)
+        self.case_filter_edit.textChanged.connect(self._schedule_case_filters)
         filter_row.addWidget(self.case_filter_edit, 1)
         self.show_unavailable_cases = QtWidgets.QCheckBox("Show unavailable")
         self.show_unavailable_cases.toggled.connect(self._apply_case_filters)
@@ -977,17 +990,27 @@ class ModelCenter:
             )
 
     def _update_case_selection_visibility(self):
+        visible = bool(
+            self.choose_specific_cases and self.choose_specific_cases.isChecked()
+        )
         if self.case_selection_widget is not None:
-            self.case_selection_widget.setVisible(
-                bool(
-                    self.choose_specific_cases
-                    and self.choose_specific_cases.isChecked()
-                )
-            )
+            self.case_selection_widget.setVisible(visible)
+        if visible:
+            self._populate_cases(preserve_assignments=True)
+        elif hasattr(self, "case_table"):
+            self._case_population_generation += 1
+            self._case_population_timer.stop()
+            self.case_table.setRowCount(0)
         self._update_setup_summary()
+
+    def _schedule_case_filters(self):
+        if hasattr(self, "_case_filter_timer"):
+            self._case_filter_timer.start(180)
 
     def _apply_case_filters(self):
         if not hasattr(self, "case_table"):
+            return
+        if self.choose_specific_cases is not None and not self.choose_specific_cases.isChecked():
             return
         query = (
             str(self.case_filter_edit.text()).strip().lower()
@@ -1287,9 +1310,8 @@ class ModelCenter:
             self.scan_hint.setText("No cases were found in the selected location.")
             self._finish_scan_progress("Scan complete: no usable cases", True)
 
-    def _populate_cases(self):
-        QtCore, QtWidgets = self.QtCore, self.QtWidgets
-        self.case_table.setRowCount(len(self.case_rows))
+    def _populate_cases(self, preserve_assignments=False):
+        QtWidgets = self.QtWidgets
         ready_indices = [
             index for index, row in enumerate(self.case_rows) if row.get("state") == "ready"
         ]
@@ -1301,10 +1323,41 @@ class ModelCenter:
         val_indices = set(ready_indices[-val_count:]) if val_count else set()
         for index, row in enumerate(self.case_rows):
             ready = row.get("state") == "ready"
+            if not preserve_assignments or "_selected" not in row:
+                row["_selected"] = ready
+                row["_split"] = (
+                    "validation"
+                    if index in val_indices
+                    else ("train" if ready else "exclude")
+                )
+        if self.choose_specific_cases is None or not self.choose_specific_cases.isChecked():
+            self._case_population_generation += 1
+            self._case_population_timer.stop()
+            self.case_table.setRowCount(0)
+            self._update_setup_summary()
+            return
+        self._case_population_generation += 1
+        self._case_population_index = 0
+        self.case_table.setRowCount(len(self.case_rows))
+        self.case_table.setEnabled(False)
+        self.setup_summary.setText("Loading case choices without blocking this window...")
+        self._case_population_timer.start(0)
+
+    def _populate_case_chunk(self):
+        QtWidgets = self.QtWidgets
+        start = self._case_population_index
+        stop = min(len(self.case_rows), start + 40)
+        for index in range(start, stop):
+            row = self.case_rows[index]
+            ready = row.get("state") == "ready"
             check = QtWidgets.QCheckBox()
-            check.setChecked(ready)
+            check.setChecked(bool(row.get("_selected", ready)))
             check.setEnabled(ready)
-            check.stateChanged.connect(self._update_setup_summary)
+            check.stateChanged.connect(
+                lambda state, case_index=index: self._case_choice_changed(
+                    case_index, selected=bool(state)
+                )
+            )
             wrapper = QtWidgets.QWidget()
             wrapper_layout = QtWidgets.QHBoxLayout(wrapper)
             wrapper_layout.setContentsMargins(8, 0, 0, 0)
@@ -1314,11 +1367,13 @@ class ModelCenter:
             self.case_table.setItem(index, 1, QtWidgets.QTableWidgetItem(str(row.get("case_id"))))
             split = QtWidgets.QComboBox()
             split.addItems(["Train", "Validation", "Exclude"])
-            split.setCurrentText(
-                "Validation" if index in val_indices else ("Train" if ready else "Exclude")
-            )
+            split.setCurrentText(str(row.get("_split") or "exclude").title())
             split.setEnabled(ready)
-            split.currentIndexChanged.connect(self._update_setup_summary)
+            split.currentTextChanged.connect(
+                lambda value, case_index=index: self._case_choice_changed(
+                    case_index, split=str(value).lower()
+                )
+            )
             self.case_table.setCellWidget(index, 2, split)
             label = {
                 "ready": row.get("detail") or "Ready",
@@ -1329,7 +1384,22 @@ class ModelCenter:
             if not ready:
                 item.setForeground(self.QtGui.QColor("#b42318"))
             self.case_table.setItem(index, 3, item)
+        self._case_population_index = stop
+        if stop < len(self.case_rows):
+            return
+        self._case_population_timer.stop()
+        self.case_table.setEnabled(True)
         self._apply_case_filters()
+        self._update_setup_summary()
+
+    def _case_choice_changed(self, index, selected=None, split=None):
+        if not 0 <= int(index) < len(self.case_rows):
+            return
+        row = self.case_rows[int(index)]
+        if selected is not None:
+            row["_selected"] = bool(selected)
+        if split is not None:
+            row["_split"] = str(split).lower()
         self._update_setup_summary()
 
     def _selected_cases(self):
@@ -1339,17 +1409,12 @@ class ModelCenter:
             and self.choose_specific_cases.isChecked()
         )
         for index, row in enumerate(self.case_rows):
-            wrapper = self.case_table.cellWidget(index, 0)
-            check = wrapper.findChild(self.QtWidgets.QCheckBox) if wrapper else None
-            split = self.case_table.cellWidget(index, 2)
             if (
                 row.get("state") != "ready"
-                or not check
-                or not split
-                or (choose_specific and not check.isChecked())
+                or (choose_specific and not bool(row.get("_selected", False)))
             ):
                 continue
-            split_value = str(split.currentText()).lower()
+            split_value = str(row.get("_split") or "train").lower()
             if split_value == "exclude":
                 continue
             item = dict(row)
@@ -2174,12 +2239,18 @@ class ModelCenter:
             )
 
     def import_model_package(self):
-        path, _filter = self.QtWidgets.QFileDialog.getOpenFileName(
+        choose_open_file_async(
+            self.QtCore,
+            self.QtWidgets,
             self.window,
             "Import nnInteractive Model Package",
             str(Path.home()),
             "AI model packages (*.zip)",
+            self._import_model_package_path,
+            button=self.import_model_button,
         )
+
+    def _import_model_package_path(self, path):
         if not path:
             return
         self._start_model_io(
@@ -2207,12 +2278,18 @@ class ModelCenter:
         suggested = Path.home() / "{}_{}.zip".format(
             safe_slug(task_id), safe_slug(current.get("model_id"))
         )
-        path, _filter = self.QtWidgets.QFileDialog.getSaveFileName(
+        choose_save_file_async(
+            self.QtCore,
+            self.QtWidgets,
             self.window,
             "Export nnInteractive Model Package",
             str(suggested),
             "AI model packages (*.zip)",
+            lambda path: self._export_current_model_path(path, task_id, current),
+            button=self.export_model_button,
         )
+
+    def _export_current_model_path(self, path, task_id, current):
         if not path:
             return
         self._start_model_io(

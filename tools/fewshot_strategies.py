@@ -143,9 +143,11 @@ def compile_strategy(strategy_id, fingerprint=None, policy=None, user_options=No
         values["slice_axis"] = str(
             policy.get("recommended_slice_axis") or "axial"
         )
+    # Model arrays are canonical ZYX. Axis 2 is RAS left/right and is excluded
+    # from the standard UI policy so left/right labels cannot be exchanged.
     in_plane_axes = {
-        "axial": [[1], [2], [1, 2]],
-        "coronal": [[0], [2], [0, 2]],
+        "axial": [[1]],
+        "coronal": [[0]],
         "sagittal": [[0], [1], [0, 1]],
     }
     tta_axes = in_plane_axes[values["slice_axis"]] if values["mirror_tta"] else []
@@ -199,7 +201,7 @@ def compile_strategy(strategy_id, fingerprint=None, policy=None, user_options=No
              "channel_policy": values["channel_policy"]}
     if values["channel_policy"] == "2_5d":
         model["neighbor_distance_mm"] = values["neighbor_distance_mm"]
-    return {
+    result = {
         "strategy": {"schema_version": STRATEGY_SCHEMA_VERSION, "preset": strategy_id, "options": values},
         "model": model,
         "data": {"patch": patch, "roi": {"enabled": False}},
@@ -208,3 +210,15 @@ def compile_strategy(strategy_id, fingerprint=None, policy=None, user_options=No
                       "keep_largest_component": values["keep_largest_component"],
                       "tta_axes": tta_axes},
     }
+    if values["mirror_tta"]:
+        # Merge only the flip policy so the selected base config retains its
+        # validated intensity and affine augmentations.
+        result["augmentation"] = {
+            "enabled": True,
+            "flip_probability": 0.5,
+            "flip_axes": sorted(
+                set(axis for item in tta_axes for axis in item)
+            ),
+            "allow_left_right_flip": False,
+        }
+    return result

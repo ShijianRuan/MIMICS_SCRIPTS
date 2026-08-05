@@ -17,7 +17,11 @@ for _candidate in (_HERE, _ROOT):
     if _candidate and _candidate not in sys.path:
         sys.path.insert(0, _candidate)
 
-from ui_theme import configure_application
+from ui_theme import (
+    choose_open_files_async,
+    configure_application,
+    stylesheet,
+)
 
 def read_json(path, default=None):
     try:
@@ -72,7 +76,7 @@ def main():
     status_path = context.get("status_path") or str(fallback_status_path)
 
     try:
-        from PySide6 import QtWidgets
+        from PySide6 import QtCore, QtWidgets
     except Exception as exc:
         write_json(status_path, {
             "status": "failed",
@@ -82,22 +86,134 @@ def main():
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     configure_application(app, "Mimics Mask Import")
-    paths, _selected_filter = QtWidgets.QFileDialog.getOpenFileNames(
-        None,
-        "Select Masks to Import",
-        str(Path.home()),
-        "Segmentation files (*.nii *.nii.gz *.mha *.mhd *.nrrd *.seg.nii *.seg.nii.gz);;All files (*)",
+    app.setStyleSheet(stylesheet())
+    dialog = QtWidgets.QDialog()
+    dialog.setWindowTitle("Import Masks")
+    dialog.resize(720, 480)
+    dialog.setMinimumSize(620, 420)
+    root = QtWidgets.QVBoxLayout(dialog)
+    root.setContentsMargins(22, 18, 22, 18)
+    root.setSpacing(12)
+    title = QtWidgets.QLabel("Import Masks")
+    title.setObjectName("title")
+    subtitle = QtWidgets.QLabel(
+        "Choose one or more segmentation files. File discovery and conversion "
+        "run outside the Mimics GUI."
     )
-    if not paths:
-        write_json(status_path, {"status": "cancelled", "updated_at_epoch": time.time()})
-        return 0
-    paths = [os.path.abspath(str(path)) for path in paths if path]
-    write_json(status_path, {
-        "status": "submitted",
-        "selection": {"mask_paths": paths},
-        "updated_at_epoch": time.time(),
-    })
-    return 0
+    subtitle.setObjectName("subtitle")
+    subtitle.setWordWrap(True)
+    root.addWidget(title)
+    root.addWidget(subtitle)
+    files = QtWidgets.QListWidget()
+    files.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+    files.setAlternatingRowColors(True)
+    root.addWidget(files, 1)
+    tools = QtWidgets.QHBoxLayout()
+    add_files = QtWidgets.QPushButton("Add Files...")
+    paste = QtWidgets.QPushButton("Paste Paths")
+    remove = QtWidgets.QPushButton("Remove Selected")
+    clear = QtWidgets.QPushButton("Clear")
+    tools.addWidget(add_files)
+    tools.addWidget(paste)
+    tools.addStretch(1)
+    tools.addWidget(remove)
+    tools.addWidget(clear)
+    root.addLayout(tools)
+    status = QtWidgets.QLabel(
+        "You can paste newline-separated paths to avoid browsing a slow network drive."
+    )
+    status.setObjectName("hint")
+    status.setWordWrap(True)
+    root.addWidget(status)
+    actions = QtWidgets.QHBoxLayout()
+    actions.addStretch(1)
+    cancel = QtWidgets.QPushButton("Cancel")
+    submit = QtWidgets.QPushButton("Import Masks")
+    submit.setObjectName("primary")
+    submit.setEnabled(False)
+    actions.addWidget(cancel)
+    actions.addWidget(submit)
+    root.addLayout(actions)
+    state = {"submitted": False}
+
+    def current_paths():
+        return [str(files.item(index).data(32) or "") for index in range(files.count())]
+
+    def add_paths(values):
+        existing = {os.path.normcase(path) for path in current_paths() if path}
+        added = 0
+        for value in values or []:
+            path = os.path.abspath(os.path.expandvars(os.path.expanduser(str(value).strip().strip('"'))))
+            if not path or os.path.normcase(path) in existing:
+                continue
+            item = QtWidgets.QListWidgetItem(os.path.basename(path) or path)
+            item.setToolTip(path)
+            item.setData(32, path)
+            files.addItem(item)
+            existing.add(os.path.normcase(path))
+            added += 1
+        submit.setEnabled(files.count() > 0)
+        status.setText("{} file(s) selected.".format(files.count()))
+        return added
+
+    def browse():
+        choose_open_files_async(
+            QtCore,
+            QtWidgets,
+            dialog,
+            "Select Masks to Import",
+            str(context.get("initial_path") or Path.home()),
+            "Segmentation files (*.nii *.nii.gz *.mha *.mhd *.nrrd *.seg.nii *.seg.nii.gz);;All files (*)",
+            add_paths,
+            button=add_files,
+            error_callback=lambda message: status.setText(message),
+        )
+
+    def paste_paths():
+        raw = QtWidgets.QApplication.clipboard().text()
+        values = [line.strip() for line in raw.replace("\r", "\n").split("\n") if line.strip()]
+        if not values:
+            status.setText("The clipboard does not contain any paths.")
+            return
+        add_paths(values)
+
+    def remove_selected():
+        for item in files.selectedItems():
+            files.takeItem(files.row(item))
+        submit.setEnabled(files.count() > 0)
+        status.setText("{} file(s) selected.".format(files.count()))
+
+    def finish():
+        paths = [path for path in current_paths() if path]
+        if not paths:
+            status.setText("Choose at least one segmentation file.")
+            return
+        state["submitted"] = True
+        write_json(status_path, {
+            "status": "submitted",
+            "selection": {"mask_paths": paths},
+            "updated_at_epoch": time.time(),
+        })
+        dialog.accept()
+
+    def cancelled():
+        if not state["submitted"]:
+            write_json(status_path, {"status": "cancelled", "updated_at_epoch": time.time()})
+
+    def clear_paths():
+        files.clear()
+        submit.setEnabled(False)
+        status.setText("No files selected.")
+
+    add_files.clicked.connect(browse)
+    paste.clicked.connect(paste_paths)
+    remove.clicked.connect(remove_selected)
+    clear.clicked.connect(clear_paths)
+    submit.clicked.connect(finish)
+    cancel.clicked.connect(dialog.reject)
+    dialog.rejected.connect(cancelled)
+    dialog.show()
+    return int(app.exec())
 
 
 if __name__ == "__main__":

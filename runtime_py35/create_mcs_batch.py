@@ -43,6 +43,13 @@ SOURCE_IMAGE_KIND_METADATA = "mimics_script.source_image_kind"
 SOURCE_IMAGE_SHAPE_METADATA = "mimics_script.source_image_shape"
 SOURCE_IMAGE_INDEX_SPACE_METADATA = "mimics_script.source_image_index_space"
 SOURCE_IMAGE_MODALITY_METADATA = "mimics_script.source_image_modality"
+SOURCE_INTENSITY_ENCODING_METADATA = "mimics_script.source_intensity_encoding"
+SOURCE_INTENSITY_RESCALE_SLOPE_METADATA = "mimics_script.source_intensity_rescale_slope"
+SOURCE_INTENSITY_RESCALE_INTERCEPT_METADATA = "mimics_script.source_intensity_rescale_intercept"
+SOURCE_INTENSITY_VALUE_MIN_METADATA = "mimics_script.source_intensity_value_min"
+SOURCE_INTENSITY_VALUE_MAX_METADATA = "mimics_script.source_intensity_value_max"
+DICOM_STORED_VALUE_MIN_METADATA = "mimics_script.dicom_stored_value_min"
+DICOM_STORED_VALUE_MAX_METADATA = "mimics_script.dicom_stored_value_max"
 SOURCE_WORLD_COORDINATE_SYSTEM_METADATA = "mimics_script.source_world_coordinate_system"
 MIMICS_WORLD_COORDINATE_SYSTEM_METADATA = "mimics_script.mimics_world_coordinate_system"
 SOURCE_TO_MIMICS_WORLD_MATRIX_METADATA = "mimics_script.source_to_mimics_world_matrix"
@@ -94,6 +101,15 @@ def _record_created_project(output_dir, case_id, mcs_path, manifest_data):
                 manifest_data.get("source_image_modality") or ""
             ).strip().upper(),
             "source_fingerprint": manifest_data.get("source_fingerprint") or "",
+            "source_intensity_encoding": manifest_data.get(
+                "source_intensity_encoding"
+            ) or "",
+            "source_intensity_rescale_slope": manifest_data.get(
+                "source_intensity_rescale_slope"
+            ),
+            "source_intensity_rescale_intercept": manifest_data.get(
+                "source_intensity_rescale_intercept"
+            ),
             "resampled_source_grid": bool(
                 manifest_data.get("resampled_source_grid")
             ),
@@ -836,6 +852,13 @@ def create_mcs_from_manifest(work_dir, output_mcs):
     metadata_set(image, SOURCE_IMAGE_SHAPE_METADATA, json.dumps(result.get("source_image_shape", [])))
     metadata_set(image, SOURCE_IMAGE_INDEX_SPACE_METADATA, result.get("source_image_index_space", ""))
     metadata_set(image, SOURCE_IMAGE_MODALITY_METADATA, result.get("source_image_modality", ""))
+    metadata_set(image, SOURCE_INTENSITY_ENCODING_METADATA, result.get("source_intensity_encoding", ""))
+    metadata_set(image, SOURCE_INTENSITY_RESCALE_SLOPE_METADATA, result.get("source_intensity_rescale_slope", ""))
+    metadata_set(image, SOURCE_INTENSITY_RESCALE_INTERCEPT_METADATA, result.get("source_intensity_rescale_intercept", ""))
+    metadata_set(image, SOURCE_INTENSITY_VALUE_MIN_METADATA, result.get("source_intensity_value_min", ""))
+    metadata_set(image, SOURCE_INTENSITY_VALUE_MAX_METADATA, result.get("source_intensity_value_max", ""))
+    metadata_set(image, DICOM_STORED_VALUE_MIN_METADATA, result.get("dicom_stored_value_min", ""))
+    metadata_set(image, DICOM_STORED_VALUE_MAX_METADATA, result.get("dicom_stored_value_max", ""))
     metadata_set(image, SOURCE_WORLD_COORDINATE_SYSTEM_METADATA, result.get("source_world_coordinate_system", ""))
     metadata_set(image, MIMICS_WORLD_COORDINATE_SYSTEM_METADATA, result.get("mimics_world_coordinate_system", ""))
     metadata_set(

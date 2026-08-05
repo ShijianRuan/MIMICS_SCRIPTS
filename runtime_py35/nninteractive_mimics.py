@@ -76,6 +76,13 @@ SOURCE_IMAGE_KIND_METADATA = "mimics_script.source_image_kind"
 SOURCE_IMAGE_SHAPE_METADATA = "mimics_script.source_image_shape"
 SOURCE_IMAGE_INDEX_SPACE_METADATA = "mimics_script.source_image_index_space"
 SOURCE_IMAGE_MODALITY_METADATA = "mimics_script.source_image_modality"
+SOURCE_INTENSITY_ENCODING_METADATA = "mimics_script.source_intensity_encoding"
+SOURCE_INTENSITY_RESCALE_SLOPE_METADATA = "mimics_script.source_intensity_rescale_slope"
+SOURCE_INTENSITY_RESCALE_INTERCEPT_METADATA = "mimics_script.source_intensity_rescale_intercept"
+SOURCE_INTENSITY_VALUE_MIN_METADATA = "mimics_script.source_intensity_value_min"
+SOURCE_INTENSITY_VALUE_MAX_METADATA = "mimics_script.source_intensity_value_max"
+DICOM_STORED_VALUE_MIN_METADATA = "mimics_script.dicom_stored_value_min"
+DICOM_STORED_VALUE_MAX_METADATA = "mimics_script.dicom_stored_value_max"
 SOURCE_WORLD_COORDINATE_SYSTEM_METADATA = "mimics_script.source_world_coordinate_system"
 MIMICS_WORLD_COORDINATE_SYSTEM_METADATA = "mimics_script.mimics_world_coordinate_system"
 SOURCE_TO_MIMICS_WORLD_MATRIX_METADATA = "mimics_script.source_to_mimics_world_matrix"
@@ -85,6 +92,7 @@ MIMICS_TO_SOURCE_INDEX_MATRIX_METADATA = "mimics_script.mimics_to_source_index_m
 SOURCE_CASE_DIR_METADATA = "mimics_script.source_case_dir"
 _ASYNC_VISUAL_OBJECTS = {}  # job_dir -> list of Mimics objects to delete after inference
 _RUNTIME_PROBE_CACHE = {}
+_DICOM_TAG_CACHE = {}
 _ASYNC_MONITORS = {}
 _ASYNC_IMAGE_WORKERS = {}  # official: image guid; task models: image guid + model fingerprint
 LOG_ROTATE_BYTES = 10 * 1024 * 1024
@@ -358,6 +366,117 @@ def _metadata_get(obj, name, default=None):
             return obj.metadata[name].value
         except Exception:
             return default
+
+
+def _finite_float(value):
+    try:
+        number = float(value)
+        if number != number or number in (float("inf"), float("-inf")):
+            return None
+        return number
+    except Exception:
+        return None
+
+
+def _image_dicom_tags(image):
+    cache_key = _object_id(image)
+    if cache_key and cache_key in _DICOM_TAG_CACHE:
+        return _DICOM_TAG_CACHE[cache_key]
+    try:
+        try:
+            tags = image.get_dicom_tags(0)
+        except TypeError:
+            tags = image.get_dicom_tags()
+        tags = tags or {}
+    except Exception:
+        tags = {}
+    if not cache_key:
+        return tags
+    if len(_DICOM_TAG_CACHE) >= 16:
+        try:
+            del _DICOM_TAG_CACHE[next(iter(_DICOM_TAG_CACHE))]
+        except Exception:
+            _DICOM_TAG_CACHE.clear()
+    _DICOM_TAG_CACHE[cache_key] = tags
+    return tags
+
+
+def _dicom_tag_value(image, group, element):
+    try:
+        item = _image_dicom_tags(image).get((int(group), int(element)))
+        value = getattr(item, "value", item)
+        return value.split("\\", 1)[0].strip() if isinstance(value, str) else value
+    except Exception:
+        return None
+
+
+def _dicom_tag_float(image, group, element):
+    return _finite_float(_dicom_tag_value(image, group, element))
+
+
+def _image_modality(image):
+    modality = str(
+        _metadata_get(image, SOURCE_IMAGE_MODALITY_METADATA, "") or ""
+    ).strip().upper()
+    if modality:
+        return modality
+    return str(_dicom_tag_value(image, 0x0008, 0x0060) or "").strip().upper()
+
+
+def _source_intensity_mapping(image, modality=None):
+    """Return a portable MR GV-to-source mapping when one is recoverable."""
+    modality = str(modality or _image_modality(image) or "").strip().upper()
+    if modality != "MR":
+        return None
+
+    encoding = str(
+        _metadata_get(image, SOURCE_INTENSITY_ENCODING_METADATA, "") or ""
+    ).strip()
+    slope = _finite_float(
+        _metadata_get(image, SOURCE_INTENSITY_RESCALE_SLOPE_METADATA, None)
+    )
+    intercept = _finite_float(
+        _metadata_get(image, SOURCE_INTENSITY_RESCALE_INTERCEPT_METADATA, None)
+    )
+    basis = "mcs_metadata"
+    if slope is None or intercept is None:
+        # Older projects normally retain the source DICOM tags even though the
+        # Mimics-Script metadata predates the portable intensity contract.
+        slope = _dicom_tag_float(image, 0x0028, 0x1053)
+        intercept = _dicom_tag_float(image, 0x0028, 0x1052)
+        basis = "mcs_dicom_tags"
+        if not encoding and slope is not None and intercept is not None:
+            encoding = "dicom_uniform_rescale_v1"
+    if slope is None or intercept is None or abs(float(slope)) <= 1.0e-12:
+        return None
+    source_kind = str(
+        _metadata_get(image, SOURCE_IMAGE_KIND_METADATA, "") or ""
+    ).strip().lower()
+    restores_quantized_source = (
+        encoding == "dicom_uint16_linear_rescale_v1"
+        or (basis == "mcs_dicom_tags" and source_kind in ("nifti", "medical_image"))
+    )
+    return {
+        "encoding": encoding or "dicom_uniform_rescale_v1",
+        "basis": basis,
+        "slope": float(slope),
+        "intercept": float(intercept),
+        "zero_tolerance": (
+            abs(float(slope)) * 0.500001 if restores_quantized_source else None
+        ),
+        "source_value_min": _finite_float(
+            _metadata_get(image, SOURCE_INTENSITY_VALUE_MIN_METADATA, None)
+        ),
+        "source_value_max": _finite_float(
+            _metadata_get(image, SOURCE_INTENSITY_VALUE_MAX_METADATA, None)
+        ),
+        "stored_value_min": _finite_float(
+            _metadata_get(image, DICOM_STORED_VALUE_MIN_METADATA, None)
+        ),
+        "stored_value_max": _finite_float(
+            _metadata_get(image, DICOM_STORED_VALUE_MAX_METADATA, None)
+        ),
+    }
 
 
 def _metadata_set(obj, name, value):
@@ -754,6 +873,39 @@ def _model_identity(profile):
     )
 
 
+def _task_model_image_input_mode(config):
+    """Return the task-model input policy without changing official inference."""
+    value = str(
+        (config or {}).get("task_model_image_input_mode", "auto") or "auto"
+    ).strip().lower()
+    aliases = {
+        "original": "source",
+        "original_image": "source",
+        "source_image": "source",
+        "buffer": "mimics",
+        "mimics_buffer": "mimics",
+    }
+    value = aliases.get(value, value)
+    if value not in ("auto", "source", "mimics"):
+        raise RuntimeError(
+            "Unsupported task_model_image_input_mode: {0}. Use auto, source, or mimics.".format(
+                value
+            )
+        )
+    return value
+
+
+def _effective_image_input_mode(config):
+    if _model_profile(config).get("source") == "task_model":
+        return _task_model_image_input_mode(config)
+    return str((config or {}).get("image_input_mode", "") or "").strip().lower()
+
+
+def _is_network_source_path(path):
+    text = str(path or "").strip().replace("\\", "/")
+    return text.startswith("//")
+
+
 def _worker_cache_key(config, image):
     image_key = _object_id(image)
     identity = _model_identity(_model_profile(config))
@@ -898,13 +1050,20 @@ def _delete_unused_auto_draft(target, auto_created, source=None):
             pass
 
 
-def _select_session_masks(image, config):
+def _select_session_masks(image, config, source_override=None):
     """Resolve immutable session source and mutable result target.
 
     Non-empty manual masks create a Draft by default. Empty masks, existing
     Drafts, and masks with an active legacy session continue in place.
     """
-    selected = [mask for mask in _masks_for_image(image) if bool(getattr(mask, "selected", False))]
+    if source_override is None:
+        selected = [
+            mask
+            for mask in _masks_for_image(image)
+            if bool(getattr(mask, "selected", False))
+        ]
+    else:
+        selected = [source_override]
     if len(selected) > 1:
         raise RuntimeError("Select exactly one source or AI Draft Mask, then run nnInteractive again.")
     if not selected:
@@ -1295,6 +1454,18 @@ def _source_image_export(image, config):
     if not path:
         return None
     path = os.path.abspath(os.path.expandvars(os.path.expanduser(str(path))))
+    if (
+        _is_network_source_path(path)
+        and allow_source_fallback
+        and not force_source
+        and bool(config.get("avoid_sync_network_source_access", True))
+    ):
+        _mimics_log(
+            logging.INFO,
+            "nnInteractive skipped synchronous access to the recorded network source path. "
+            "The portable Mimics image buffer will be used instead: {0}".format(path),
+        )
+        return None
     lower_path = path.lower()
     derived_resampled_index_spaces = (
         "derived_dicom_axial_lps_resampled_from_nifti_v1",
@@ -1342,9 +1513,32 @@ def _source_image_export(image, config):
         )
         return None
 
+    if (is_nifti or is_medical) and not os.path.isfile(path):
+        message = "nnInteractive source image metadata points to a missing file: {0}".format(path)
+        if allow_source_fallback and not force_source:
+            _mimics_log(
+                logging.WARNING,
+                message + ". Falling back to the portable Mimics image buffer.",
+            )
+            return None
+        raise RuntimeError(message + ". Fix the stored source path or use task_model_image_input_mode=\"auto\" for a portable buffer fallback.")
+    if is_dicom and not os.path.isdir(path):
+        message = "nnInteractive source DICOM metadata points to a missing folder: {0}".format(path)
+        if allow_source_fallback and not force_source:
+            _mimics_log(
+                logging.WARNING,
+                message + ". Falling back to the portable Mimics image buffer.",
+            )
+            return None
+        raise RuntimeError(message + ". Fix the stored source path or use task_model_image_input_mode=\"auto\" for a portable buffer fallback.")
+
     # On-demand mode for derived oblique-NIfTI imports:
     # build a cached axial NIfTI only when nnInteractive is actually used.
-    if (is_nifti or is_medical) and index_space in derived_resampled_index_spaces:
+    if (
+        (is_nifti or is_medical)
+        and index_space in derived_resampled_index_spaces
+        and not bool(config.get("defer_source_alignment_to_worker", False))
+    ):
         case_id = "case"
         if source_case_dir:
             case_id = os.path.basename(os.path.normpath(source_case_dir)) or case_id
@@ -1403,24 +1597,6 @@ def _source_image_export(image, config):
         # The on-demand cache is generated on the Mimics target grid.
         source_voxel_to_ras = mimics_voxel_to_ras
         index_space = "nifti_ijk_matches_derived_dicom_columns_rows_slices_v1"
-    if (is_nifti or is_medical) and not os.path.isfile(path):
-        message = "nnInteractive source image metadata points to a missing file: {0}".format(path)
-        if allow_source_fallback and not force_source:
-            _mimics_log(
-                logging.WARNING,
-                message + ". Falling back to Mimics image buffer export because fallback_to_mimics_buffer_when_source_unavailable is enabled.",
-            )
-            return None
-        raise RuntimeError(message + ". Fix the stored source path or set image_input_mode to \"mimics\" for an explicit buffer-based run.")
-    if is_dicom and not os.path.isdir(path):
-        message = "nnInteractive source DICOM metadata points to a missing folder: {0}".format(path)
-        if allow_source_fallback and not force_source:
-            _mimics_log(
-                logging.WARNING,
-                message + ". Falling back to Mimics image buffer export because fallback_to_mimics_buffer_when_source_unavailable is enabled.",
-            )
-            return None
-        raise RuntimeError(message + ". Fix the stored source path or set image_input_mode to \"mimics\" for an explicit buffer-based run.")
     task_model_source_values = (
         _model_profile(config).get("source") == "task_model"
     )
@@ -1511,23 +1687,72 @@ def _source_image_export(image, config):
 def _export_image_for_nninteractive(config, image, path, allow_buffer_export=True):
     profile = _model_profile(config)
     if profile.get("source") == "task_model":
-        # Task-model fine-tuning reads original source intensities. Prefer the
-        # same source here even when the official-model default is "mimics".
-        source_config = dict(config)
-        source_config["image_input_mode"] = "auto"
-        source_config["prefer_source_image_for_nninteractive"] = True
-        source_config["fallback_to_mimics_buffer_when_source_unavailable"] = False
-        source_export = _source_image_export(image, source_config)
-        if source_export is not None:
-            return source_export
-        if not bool(config.get("allow_task_model_mimics_buffer_fallback", False)):
+        task_mode = _task_model_image_input_mode(config)
+        strict_source = task_mode == "source"
+        allow_fallback = bool(
+            config.get("fallback_to_mimics_buffer_when_source_unavailable", True)
+        ) and not strict_source
+        legacy_fallback = config.get("allow_task_model_mimics_buffer_fallback")
+        if legacy_fallback is not None:
+            allow_fallback = bool(legacy_fallback) and not strict_source
+
+        if task_mode != "mimics":
+            # Training reads source physical values. A readable local source is
+            # still preferred, but alignment is deferred to the external image
+            # worker so no bridge conversion blocks the Mimics GUI.
+            source_config = dict(config)
+            source_config["image_input_mode"] = "source" if strict_source else "auto"
+            source_config["prefer_source_image_for_nninteractive"] = True
+            source_config[
+                "fallback_to_mimics_buffer_when_source_unavailable"
+            ] = allow_fallback
+            source_config["defer_source_alignment_to_worker"] = True
+            source_export = _source_image_export(image, source_config)
+            if source_export is not None:
+                source_export["image_input_provenance"] = "source_image"
+                source_export["image_intensity_compatibility"] = "exact_source_values"
+                return source_export
+
+        if strict_source or (task_mode == "auto" and not allow_fallback):
             raise RuntimeError(
                 "The selected nnInteractive task model was trained from source "
                 "physical intensities, but this Mimics image has no usable source "
-                "image geometry/path metadata. Inference was stopped instead of "
-                "silently changing the model input distribution. Restore the "
-                "source dataset path or re-import the case."
+                "image geometry/path metadata. Restore the source dataset path, "
+                "or set task_model_image_input_mode to \"auto\" to allow the "
+                "portable Mimics-buffer compatibility path."
             )
+        if not allow_buffer_export:
+            return None
+
+        buffer_export = _export_image(image, path)
+        buffer_export["image_input_provenance"] = "mimics_project_buffer"
+        buffer_export["task_model_buffer_fallback"] = True
+        if (
+            buffer_export.get("buffer_to_source_slope") is not None
+            and buffer_export.get("buffer_to_source_intercept") is not None
+        ):
+            compatibility = "linear_source_values_restored"
+        else:
+            # Keep old projects usable even when neither Mimics-Script metadata
+            # nor retained DICOM tags expose the original MR rescale mapping.
+            # This is intentionally labelled best-effort: z-score cancels a
+            # positive affine transform only when its nonzero crop is unchanged.
+            compatibility = "raw_gv_zscore_best_effort"
+        buffer_export["image_intensity_compatibility"] = compatibility
+        _mimics_log(
+            logging.WARNING,
+            "nnInteractive custom model is using the image stored in this .mcs "
+            "because the original source is unavailable. Geometry remains the "
+            "open Mimics grid; intensity compatibility: {0}; recovery basis: {1}. "
+            "Missing MR rescale metadata never blocks inference, but raw-GV "
+            "best-effort input can differ when the source zero-background crop "
+            "was not preserved. Model loading, "
+            "upload, and preprocessing continue in the external worker.".format(
+                compatibility,
+                buffer_export.get("source_intensity_recovery_basis", "unavailable"),
+            ),
+        )
+        return buffer_export
 
     image_input_mode = str(config.get("image_input_mode", "") or "").strip().lower()
     force_source = image_input_mode in ("source", "source_image", "original", "original_image")
@@ -1584,9 +1809,10 @@ def _log_effective_image_input_config(config):
     try:
         _mimics_log(
             logging.INFO,
-            "nnInteractive effective config: path={0}; image_input_mode={1}; prefer_source_image_for_nninteractive={2}; fallback_to_mimics_buffer_when_source_unavailable={3}; fallback_to_source_when_mimics_export_fails={4}.".format(
+            "nnInteractive effective config: path={0}; image_input_mode={1}; task_model_image_input_mode={2}; prefer_source_image_for_nninteractive={3}; fallback_to_mimics_buffer_when_source_unavailable={4}; fallback_to_source_when_mimics_export_fails={5}.".format(
                 config.get("_config_path", "?"),
                 config.get("image_input_mode", ""),
+                config.get("task_model_image_input_mode", "auto"),
                 bool(config.get("prefer_source_image_for_nninteractive", False)),
                 bool(config.get("fallback_to_mimics_buffer_when_source_unavailable", False)),
                 bool(config.get("fallback_to_source_when_mimics_export_fails", False)),
@@ -1615,9 +1841,7 @@ def _export_image(image, path):
         matrix = _derive_image_voxel_to_ras_matrix(image, result["shape"])
     if matrix is not None:
         result["mimics_voxel_to_ras_matrix"] = matrix
-    modality = str(
-        _metadata_get(image, SOURCE_IMAGE_MODALITY_METADATA, "") or ""
-    ).upper()
+    modality = _image_modality(image)
     result["source_modality"] = modality
     if _source_uses_hu_to_gv(
         _metadata_get(image, SOURCE_IMAGE_KIND_METADATA, ""),
@@ -1630,6 +1854,21 @@ def _export_image(image, path):
             result["buffer_to_source_intercept"] = (
                 -float(intercept) / float(slope)
             )
+            result["source_intensity_recovery_basis"] = "mimics_hu_gv"
+    elif modality == "MR":
+        mapping = _source_intensity_mapping(image, modality=modality)
+        if mapping is not None:
+            result["buffer_to_source_slope"] = mapping["slope"]
+            result["buffer_to_source_intercept"] = mapping["intercept"]
+            result["source_intensity_encoding"] = mapping["encoding"]
+            result["source_intensity_recovery_basis"] = mapping["basis"]
+            result["buffer_to_source_zero_tolerance"] = mapping["zero_tolerance"]
+            result["source_intensity_value_min"] = mapping["source_value_min"]
+            result["source_intensity_value_max"] = mapping["source_value_max"]
+            result["dicom_stored_value_min"] = mapping["stored_value_min"]
+            result["dicom_stored_value_max"] = mapping["stored_value_max"]
+        else:
+            result["source_intensity_recovery_basis"] = "unavailable"
     _mimics_log(
         logging.INFO,
         "nnInteractive image buffer exported in {0}s. Shape: {1}.".format(
@@ -2381,6 +2620,12 @@ def _bridge_parameters(config, image_export, base_export):
         request["image_source_intensity_space"] = image_export.get("source_intensity_space", "")
         request["image_source_to_mimics_gv_slope"] = image_export.get("source_to_mimics_gv_slope")
         request["image_source_to_mimics_gv_intercept"] = image_export.get("source_to_mimics_gv_intercept")
+        request["image_input_provenance"] = image_export.get(
+            "image_input_provenance", "source_image"
+        )
+        request["image_intensity_compatibility"] = image_export.get(
+            "image_intensity_compatibility", "exact_source_values"
+        )
     else:
         request["image_buffer_path"] = image_export["path"]
         request["image_buffer_shape"] = image_export["shape"]
@@ -2389,12 +2634,27 @@ def _bridge_parameters(config, image_export, base_export):
         request["image_mimics_voxel_to_ras_matrix"] = image_export.get(
             "mimics_voxel_to_ras_matrix", ""
         )
+        request["image_input_provenance"] = image_export.get(
+            "image_input_provenance", "mimics_project_buffer"
+        )
+        request["image_intensity_compatibility"] = image_export.get(
+            "image_intensity_compatibility", ""
+        )
+        request["image_source_intensity_encoding"] = image_export.get(
+            "source_intensity_encoding", ""
+        )
+        request["image_source_intensity_recovery_basis"] = image_export.get(
+            "source_intensity_recovery_basis", ""
+        )
         if profile.get("source") == "task_model":
             request["image_buffer_to_model_slope"] = image_export.get(
                 "buffer_to_source_slope", 1.0
             )
             request["image_buffer_to_model_intercept"] = image_export.get(
                 "buffer_to_source_intercept", 0.0
+            )
+            request["image_buffer_model_zero_tolerance"] = image_export.get(
+                "buffer_to_source_zero_tolerance"
             )
     configured_timeout = config.get("bridge_timeout_seconds")
     if configured_timeout is None:
@@ -3106,7 +3366,7 @@ def _get_or_start_image_worker(config, image, jobs_root, allow_buffer_export=Tru
     profile = _model_profile(config)
     cached = _ASYNC_IMAGE_WORKERS.get(image_key)
     if _shared_image_worker_alive(cached):
-        image_input_mode = str(config.get("image_input_mode", "") or "").strip().lower()
+        image_input_mode = _effective_image_input_mode(config)
         force_source = image_input_mode in ("source", "source_image", "original", "original_image")
         force_mimics_buffer = image_input_mode in ("mimics", "mimics_buffer", "buffer")
         cached_source = str(cached.get("image_source", "") or "").strip().lower()
@@ -3215,6 +3475,10 @@ def _get_or_start_image_worker(config, image, jobs_root, allow_buffer_export=Tru
         "image_source_intensity_space": image_export.get("source_intensity_space", ""),
         "image_source_to_mimics_gv_slope": image_export.get("source_to_mimics_gv_slope"),
         "image_source_to_mimics_gv_intercept": image_export.get("source_to_mimics_gv_intercept"),
+        "image_input_provenance": image_export.get("image_input_provenance", ""),
+        "image_intensity_compatibility": image_export.get("image_intensity_compatibility", ""),
+        "image_source_intensity_encoding": image_export.get("source_intensity_encoding", ""),
+        "image_source_intensity_recovery_basis": image_export.get("source_intensity_recovery_basis", ""),
         "python": python_exe,
         "python_version": probe.get("version"),
         "folds": folds,
@@ -3244,6 +3508,10 @@ def _get_or_start_image_worker(config, image, jobs_root, allow_buffer_export=Tru
             "image_source_intensity_space": worker.get("image_source_intensity_space", ""),
             "image_source_to_mimics_gv_slope": worker.get("image_source_to_mimics_gv_slope"),
             "image_source_to_mimics_gv_intercept": worker.get("image_source_to_mimics_gv_intercept"),
+            "image_input_provenance": worker.get("image_input_provenance", ""),
+            "image_intensity_compatibility": worker.get("image_intensity_compatibility", ""),
+            "image_source_intensity_encoding": worker.get("image_source_intensity_encoding", ""),
+            "image_source_intensity_recovery_basis": worker.get("image_source_intensity_recovery_basis", ""),
             "idle_timeout_seconds": initialize["async_worker_idle_timeout_seconds"],
         },
     )
@@ -3269,15 +3537,21 @@ def _prewarm_async_image_worker(config, image):
         config.get("async_job_retention_days", 3),
         config.get("async_job_max_terminal", 20),
     )
-    image_input_mode = str(config.get("image_input_mode", "") or "").strip().lower()
+    image_input_mode = _effective_image_input_mode(config)
     force_mimics_buffer = image_input_mode in ("mimics", "mimics_buffer", "buffer")
+    profile = _model_profile(config)
+    task_buffer_fallback = (
+        profile.get("source") == "task_model"
+        and _task_model_image_input_mode(config) != "source"
+        and bool(config.get("fallback_to_mimics_buffer_when_source_unavailable", True))
+    )
     # In explicit Mimics mode, prewarm must use buffer export; otherwise the
     # prewarmed source-image worker can be reused by later prompts.
     return _get_or_start_image_worker(
         config,
         image,
         jobs_root,
-        allow_buffer_export=bool(force_mimics_buffer),
+        allow_buffer_export=bool(force_mimics_buffer or task_buffer_fallback),
     )
 
 
@@ -3350,6 +3624,8 @@ def _start_async_job(config, image, target, source=None, write_mode="in_place"):
                 "source_world_coordinate_system": shared_worker.get("image_source_world_coordinate_system", ""),
                 "mimics_world_coordinate_system": shared_worker.get("image_mimics_world_coordinate_system", ""),
                 "mimics_to_source_index_matrix": shared_worker.get("image_mimics_to_source_index_matrix", ""),
+                "image_input_provenance": shared_worker.get("image_input_provenance", ""),
+                "image_intensity_compatibility": shared_worker.get("image_intensity_compatibility", ""),
             }
         base_export = _export_mask(source, os.path.join(inputs_dir, "target_at_start.u8"), image_export["shape"])
         if image_export["shape"] != base_export["shape"]:
@@ -3400,6 +3676,8 @@ def _start_async_job(config, image, target, source=None, write_mode="in_place"):
         "image_source_world_coordinate_system": image_export.get("source_world_coordinate_system", ""),
         "image_mimics_world_coordinate_system": image_export.get("mimics_world_coordinate_system", ""),
         "image_mimics_to_source_index_matrix": image_export.get("mimics_to_source_index_matrix", ""),
+        "image_input_provenance": image_export.get("image_input_provenance", ""),
+        "image_intensity_compatibility": image_export.get("image_intensity_compatibility", ""),
         "target_guid": _object_id(target),
         "target_name": str(getattr(target, "name", "")),
         "source_guid": _object_id(source),
@@ -4136,7 +4414,16 @@ def _async_prompt_menu(target, state, source=None, profile=None):
     )
 
 
-def _run_async(image, target, config, source=None, auto_created=False, write_mode="in_place"):
+def _run_async(
+    image,
+    target,
+    config,
+    source=None,
+    auto_created=False,
+    write_mode="in_place",
+    supplied_prompt=None,
+    supplied_visual_objects=None,
+):
     source = target if source is None else source
     profile = _model_profile(config)
     _log_effective_image_input_config(config)
@@ -4144,22 +4431,27 @@ def _run_async(image, target, config, source=None, auto_created=False, write_mod
     validated_target_hash = None
     if state is not None:
         if not _state_model_matches(state, profile):
-            answer = mimics.dialogs.question_box(
-                message=(
-                    "The selected Mask already has an AI session created with another "
-                    "nnInteractive model.\n\n"
-                    "Start a new session from the current Mask with {0}?"
-                ).format(profile.get("task_name") or profile.get("model_id") or "the selected model"),
-                buttons=BUTTON_START_NEW_MODEL + ";" + BUTTON_KEEP_CURRENT_MODEL,
-                title=TITLE,
-                ui_blocking=True,
-            )
+            if supplied_prompt is not None:
+                # The guided review window already made the model selection
+                # explicit. Do not add a second blocking Mimics dialog.
+                answer = BUTTON_START_NEW_MODEL
+            else:
+                answer = mimics.dialogs.question_box(
+                    message=(
+                        "The selected Mask already has an AI session created with another "
+                        "nnInteractive model.\n\n"
+                        "Start a new session from the current Mask with {0}?"
+                    ).format(profile.get("task_name") or profile.get("model_id") or "the selected model"),
+                    buttons=BUTTON_START_NEW_MODEL + ";" + BUTTON_KEEP_CURRENT_MODEL,
+                    title=TITLE,
+                    ui_blocking=True,
+                )
             if answer != BUTTON_START_NEW_MODEL:
                 _mimics_log(
                     logging.INFO,
                     "nnInteractive model change cancelled; the existing AI session was preserved.",
                 )
-                return 0
+                return 2 if supplied_prompt is not None else 0
             _close_async_job(target, state, "model_profile_changed")
             state = None
             _mimics_log(
@@ -4177,7 +4469,7 @@ def _run_async(image, target, config, source=None, auto_created=False, write_mod
         else:
             outcome = _handle_async_result(image, target, state)
             if outcome == "waiting":
-                return 0
+                return 2 if supplied_prompt is not None else 0
             if outcome == "restart":
                 state = None
             elif outcome == "applied":
@@ -4207,8 +4499,13 @@ def _run_async(image, target, config, source=None, auto_created=False, write_mod
     temp_dir = tempfile.mkdtemp(prefix="mimics_nninteractive_prompt_")
     pending_visual_objects = []
     visual_objects_registered = False
+    prediction_enqueued = False
     try:
-        action = _async_prompt_menu(target, state, source, profile)
+        action = (
+            "DINOv3 Suggested Points"
+            if supplied_prompt is not None
+            else _async_prompt_menu(target, state, source, profile)
+        )
         if action == BUTTON_FINISH or not action:
             if state is not None:
                 _close_async_job(target, state, "user_finished")
@@ -4275,7 +4572,13 @@ def _run_async(image, target, config, source=None, auto_created=False, write_mod
 
         include = None
         visual_objects = []
-        prompt = _capture_prompt(action, image, include, temp_dir, visual_objects)
+        if supplied_prompt is None:
+            prompt = _capture_prompt(
+                action, image, include, temp_dir, visual_objects
+            )
+        else:
+            prompt = dict(supplied_prompt)
+            visual_objects = list(supplied_visual_objects or [])
         pending_visual_objects = visual_objects
         if prompt is None:
             mimics.dialogs.message_box(
@@ -4301,6 +4604,7 @@ def _run_async(image, target, config, source=None, auto_created=False, write_mod
             visual_objects_registered = True
         state.setdefault("interactions", []).append(prompt)
         sequence = _enqueue_async_prediction(state, target, expected_hash=validated_target_hash)
+        prediction_enqueued = True
         _mimics_log(
             logging.INFO,
             "nnInteractive background inference started. Prompt: {0}, sequence: {1}. "
@@ -4309,7 +4613,24 @@ def _run_async(image, target, config, source=None, auto_created=False, write_mod
         _start_async_result_monitor(image, target, state, config)
         return 0
     finally:
-        if pending_visual_objects and not visual_objects_registered:
+        if visual_objects_registered and not prediction_enqueued and state is not None:
+            job_dir = state.get("_job_dir")
+            registered = _ASYNC_VISUAL_OBJECTS.get(job_dir) or []
+            for obj in pending_visual_objects:
+                for index in range(len(registered) - 1, -1, -1):
+                    if registered[index] is obj:
+                        registered.pop(index)
+                        break
+            if registered:
+                _ASYNC_VISUAL_OBJECTS[job_dir] = registered
+            else:
+                _ASYNC_VISUAL_OBJECTS.pop(job_dir, None)
+            visual_objects_registered = False
+        if (
+            pending_visual_objects
+            and not visual_objects_registered
+            and supplied_prompt is None
+        ):
             for obj in pending_visual_objects:
                 _delete_mimics_object(obj)
         if state is None:
@@ -4569,6 +4890,120 @@ def _run_with_config(config):
         source=source,
         auto_created=session.get("auto_created", False),
         write_mode=session.get("write_mode", "in_place"),
+    )
+
+
+def prewarm_guided_session(model_profile=None):
+    """Start the selected model's image worker during guided point review."""
+    config = _config()
+    if model_profile:
+        config["_model_profile"] = dict(model_profile)
+    profile = _model_profile(config)
+    if "point" not in set(profile.get("validated_prompt_types") or []):
+        raise RuntimeError("The selected nnInteractive model does not accept point prompts.")
+    # Validate model/runtime files before the destination chooser can create an
+    # editable draft Mask.
+    _runtime_paths(config)
+    image = mimics.data.images.get_active()
+    if image is None:
+        raise RuntimeError("No active Mimics image is available for nnInteractive prewarming.")
+    _retire_different_model_workers(config)
+    return _prewarm_async_image_worker(config, image) is not None
+
+
+def run_with_suggested_points(
+    points,
+    source_mask_guid=None,
+    visual_objects=None,
+    model_profile=None,
+):
+    """Submit reviewed Mimics-grid points to the selected async workflow."""
+    config = _config()
+    if model_profile:
+        config["_model_profile"] = dict(model_profile)
+    profile = _model_profile(config)
+    if "point" not in set(profile.get("validated_prompt_types") or []):
+        raise RuntimeError("The selected nnInteractive model does not accept point prompts.")
+    # Validate the selected model and runtime before destination selection can
+    # create an editable draft Mask in the Mimics project.
+    _runtime_paths(config)
+    image = mimics.data.images.get_active()
+    if image is None:
+        raise RuntimeError("Open a project and activate an image set before running nnInteractive.")
+    buffer_owner = runtime_common.active_local_operation("mask_buffer_access")
+    if buffer_owner:
+        raise RuntimeError(
+            "Mimics buffers are currently used by {0}. Wait or stop that task before confirming the points.".format(
+                buffer_owner.get("owner") or "another Mimics-Script task"
+            )
+        )
+    gpu_holder = runtime_common.active_resource_lock(_project_root(), "gpu.lock")
+    if gpu_holder:
+        owner = str(gpu_holder.get("owner") or "").lower()
+        holder_is_nninteractive_server = bool(
+            "nninteractive" in owner
+            and (
+                "server" in owner
+                or str(gpu_holder.get("state_path") or "").strip()
+            )
+        )
+        if not holder_is_nninteractive_server:
+            raise RuntimeError(
+                "GPU access is still held by {0}.".format(
+                    runtime_common.resource_lock_summary(gpu_holder)
+                )
+            )
+    busy_workers = _different_model_busy_workers(config)
+    if busy_workers:
+        current = busy_workers[0]
+        raise RuntimeError(
+            "Another nnInteractive model is still producing or applying a result: {0}.".format(
+                current.get("task_name")
+                or current.get("model_id")
+                or "unknown model"
+            )
+        )
+    source = None
+    expected = str(source_mask_guid or "")
+    for candidate in _masks_for_image(image):
+        if expected and _object_id(candidate) == expected:
+            source = candidate
+            break
+    if source is None:
+        raise RuntimeError(
+            "The Mask selected when DINOv3 guidance started is no longer available."
+        )
+    prepared = []
+    for item in points or []:
+        voxel = [int(value) for value in item.get("point") or []]
+        if len(voxel) != 3:
+            continue
+        prepared.append(
+            {
+                "point": voxel,
+                "include_interaction": bool(
+                    item.get("include_interaction", True)
+                ),
+            }
+        )
+    if not any(item["include_interaction"] for item in prepared):
+        raise RuntimeError("At least one confirmed foreground point is required.")
+    session = _select_session_masks(image, config, source_override=source)
+    prompt = {
+        "interaction_type": "point_set",
+        "points": prepared,
+        "coordinates": "mimics",
+        "source": "dinov3_guided_review",
+    }
+    return _run_async(
+        image,
+        session["target"],
+        config,
+        source=session["source"],
+        auto_created=session.get("auto_created", False),
+        write_mode=session.get("write_mode", "in_place"),
+        supplied_prompt=prompt,
+        supplied_visual_objects=visual_objects,
     )
 
 

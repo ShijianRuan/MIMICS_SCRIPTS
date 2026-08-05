@@ -32,7 +32,12 @@ for _candidate in (str(TOOLS_DIR), str(PROJECT_ROOT)):
 
 from resource_locks import process_exists as resource_process_exists
 
-from ui_theme import configure_application, stylesheet as shared_stylesheet
+from ui_theme import (
+    choose_open_file_async,
+    choose_save_file_async,
+    configure_application,
+    stylesheet as shared_stylesheet,
+)
 
 
 TITLE = "DINOv3 Few-Shot Status"
@@ -643,7 +648,7 @@ def filter_jobs(rows, filter_text, limit=80):
         is_active = status in ACTIVE_STATUSES
         if filter_text == "Training" and kind != "train":
             continue
-        if filter_text == "Inference" and kind != "infer":
+        if filter_text == "Inference" and kind not in ("infer", "guided_infer"):
             continue
         if filter_text == "Failed / cancelled" and status not in ("failed", "cancelled", "cancelling"):
             continue
@@ -680,7 +685,11 @@ def select_current_task(rows, organ="", job_id="", limit=25):
     candidates.sort(key=lambda item: item[0], reverse=True)
     # Identify the "current" job to pin at the top of the list.
     active = [item for item in candidates if item[1].get("status") in ACTIVE_STATUSES]
-    active_work = [item for item in active if item[1].get("kind") in ("train", "infer")]
+    active_work = [
+        item
+        for item in active
+        if item[1].get("kind") in ("train", "infer", "guided_infer")
+    ]
     primary = (active_work or active or candidates)[0]
     # Return primary first, then the rest in mtime order, deduplicating.
     seen_ids = set()
@@ -1682,12 +1691,18 @@ class QtStatusViewerApp(object):
             )
 
     def import_model_package(self):
-        path, _selected_filter = self.QtWidgets.QFileDialog.getOpenFileName(
+        choose_open_file_async(
+            self.QtCore,
+            self.QtWidgets,
             self.window,
             "Import DINOv3 Model Package",
             str(Path.home()),
             "AI model packages (*.zip)",
+            self._import_model_package_path,
+            button=self.import_model_button,
         )
+
+    def _import_model_package_path(self, path):
         if not path:
             return
         self._start_model_process(
@@ -1729,12 +1744,20 @@ class QtStatusViewerApp(object):
         suggested = Path.home() / "{}_{}.zip".format(
             safe_slug(organ), safe_slug(model_id or "model")
         )
-        output, _selected_filter = self.QtWidgets.QFileDialog.getSaveFileName(
+        choose_save_file_async(
+            self.QtCore,
+            self.QtWidgets,
             self.window,
             "Export DINOv3 Model Package",
             str(suggested),
             "AI model packages (*.zip)",
+            lambda output: self._export_selected_model_path(
+                output, manifest_path
+            ),
+            button=self.export_model_button,
         )
+
+    def _export_selected_model_path(self, output, manifest_path):
         if not output:
             return
         self._start_model_process(

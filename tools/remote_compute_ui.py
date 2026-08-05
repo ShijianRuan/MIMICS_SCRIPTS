@@ -24,7 +24,7 @@ try:
         store_password,
         test_connection,
     )
-    from ui_theme import choose_open_file
+    from ui_theme import choose_open_file_async
 except ImportError:
     from tools.remote_compute import (
         DEFAULT_GPU_DEVICE,
@@ -40,7 +40,7 @@ except ImportError:
         store_password,
         test_connection,
     )
-    from tools.ui_theme import choose_open_file
+    from tools.ui_theme import choose_open_file_async
 
 
 def _format_bytes(value: object) -> str:
@@ -126,12 +126,12 @@ class ServerProfilesDialog:
         self.remember_check.setChecked(True)
         self.key_edit = QtWidgets.QLineEdit()
         self.key_edit.setPlaceholderText("Private key path")
-        key_button = QtWidgets.QPushButton("Browse...")
-        key_button.clicked.connect(self._browse_key)
+        self.key_button = QtWidgets.QPushButton("Browse...")
+        self.key_button.clicked.connect(self._browse_key)
         key_row = QtWidgets.QHBoxLayout()
         key_row.setContentsMargins(0, 0, 0, 0)
         key_row.addWidget(self.key_edit, 1)
-        key_row.addWidget(key_button)
+        key_row.addWidget(self.key_button)
         self.key_widget = QtWidgets.QWidget()
         self.key_widget.setLayout(key_row)
         self.remote_root_edit = QtWidgets.QLineEdit(DEFAULT_REMOTE_ROOT)
@@ -292,15 +292,16 @@ class ServerProfilesDialog:
         self._reload_profiles()
 
     def _browse_key(self) -> None:
-        path = choose_open_file(
+        choose_open_file_async(
+            self.QtCore,
             self.QtWidgets,
             self.dialog,
             "Choose SSH Private Key",
             self.key_edit.text() or str(Path.home() / ".ssh"),
             "SSH private keys (*)",
+            lambda path: self.key_edit.setText(str(path)) if path else None,
+            button=self.key_button,
         )
-        if path:
-            self.key_edit.setText(path)
 
     def _refresh_auth(self) -> None:
         password_mode = self.auth_combo.currentData() == "password"

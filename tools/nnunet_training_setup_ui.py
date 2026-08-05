@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 import sys
+import threading
 import time
 import traceback
 from pathlib import Path
+from queue import Empty, Queue
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,8 +29,8 @@ from nnunet_common import (  # noqa: E402
 from nnunet_jobs import create_job  # noqa: E402
 from remote_compute_ui import RemoteComputeSelector  # noqa: E402
 from ui_theme import (  # noqa: E402
-    choose_existing_directory,
-    choose_open_file,
+    choose_existing_directory_async,
+    choose_open_file_async,
     configure_application,
     stylesheet,
 )
@@ -46,6 +48,11 @@ class TrainingSetupWindow:
         self.window.setMinimumSize(780, 650)
         self.window.closeEvent = self._close_event
         self.submitted = False
+        self._submission_pending = False
+        self._submission_results = Queue()
+        self._dataset_id_results = Queue()
+        self._submission_generation = 0
+        self._submission_deadline = 0.0
 
         central = QtWidgets.QWidget()
         root = QtWidgets.QVBoxLayout(central)
@@ -86,6 +93,9 @@ class TrainingSetupWindow:
         root.addLayout(actions)
         self.window.setCentralWidget(central)
         self._load_context()
+        self._submission_timer = self.QtCore.QTimer(self.window)
+        self._submission_timer.timeout.connect(self._poll_submission)
+        self._submission_timer.start(80)
         self._refresh_source()
         self._refresh_configuration()
         self._refresh_trainer()
@@ -115,15 +125,26 @@ class TrainingSetupWindow:
         def browse():
             current = edit.text().strip()
             if directory:
-                value = choose_existing_directory(
-                    QtWidgets, self.window, title, current
+                choose_existing_directory_async(
+                    self.QtCore,
+                    QtWidgets,
+                    self.window,
+                    title,
+                    current,
+                    lambda value: edit.setText(str(value)) if value else None,
+                    button=button,
                 )
             else:
-                value = choose_open_file(
-                    QtWidgets, self.window, title, current, file_filter
+                choose_open_file_async(
+                    self.QtCore,
+                    QtWidgets,
+                    self.window,
+                    title,
+                    current,
+                    file_filter,
+                    lambda value: edit.setText(str(value)) if value else None,
+                    button=button,
                 )
-            if value:
-                edit.setText(value)
 
         button.clicked.connect(browse)
         layout.addWidget(button)
@@ -457,9 +478,20 @@ class TrainingSetupWindow:
         self.workspace_edit.setText(
             str(self.context.get("workspace") or default_workspace)
         )
-        self.dataset_id.setValue(
-            suggest_dataset_id(self.workspace_edit.text().strip(), preferred=701)
-        )
+        self.dataset_id.setValue(701)
+        workspace = self.workspace_edit.text().strip()
+
+        def suggest():
+            try:
+                self._dataset_id_results.put(
+                    (suggest_dataset_id(workspace, preferred=701), "")
+                )
+            except Exception as exc:
+                self._dataset_id_results.put((None, str(exc)))
+
+        worker = threading.Thread(target=suggest, name="nnunet-dataset-id-check")
+        worker.daemon = True
+        worker.start()
         self.dataset_edit.setText(str(self.context.get("dataset_root") or ""))
         self.mcs_edit.setText(str(self.context.get("mcs_dir") or ""))
         self.label_root_edit.setText(str(self.context.get("label_root") or ""))
@@ -505,15 +537,20 @@ class TrainingSetupWindow:
             / "nnunet_segmentation_workflow"
             / "ModelMap.toml"
         )
-        selected = choose_open_file(
+        choose_open_file_async(
+            self.QtCore,
             QtWidgets,
             self.window,
             "Select nnU-Net label map",
             str(default_map if default_map.is_file() else ""),
             "Label maps (*.toml *.json);;All files (*)",
+            self._apply_label_set,
         )
+
+    def _apply_label_set(self, selected):
         if not selected:
             return
+        QtWidgets = self.QtWidgets
         try:
             label_sets = load_label_sets(selected)
             names = sorted(label_sets)
@@ -679,15 +716,88 @@ class TrainingSetupWindow:
         return normalize_request(request)
 
     def _submit(self):
+        if self._submission_pending:
+            return
         try:
             request = self._request()
-            if not Path(request["dataset_root"]).is_dir():
-                raise ValueError("Original image dataset does not exist.")
-            if request["label_source"] == "exported_masks" and not Path(request["label_root"]).is_dir():
-                raise ValueError("Exported Mask folder does not exist.")
-            if request["label_source"] == "mcs_refresh" and not Path(request["mcs_dir"]).is_dir():
-                raise ValueError("Saved .mcs folder does not exist.")
+            self._submission_generation += 1
+            generation = self._submission_generation
+            self._submission_pending = True
+            self._submission_deadline = time.time() + 60.0
             self.start_button.setEnabled(False)
+            self.status_label.setStyleSheet("")
+            self.status_label.setText(
+                "Checking the selected data locations in the background..."
+            )
+
+            def validate():
+                try:
+                    if not Path(request["dataset_root"]).is_dir():
+                        raise ValueError("Original image dataset does not exist.")
+                    if request["label_source"] == "exported_masks" and not Path(
+                        request["label_root"]
+                    ).is_dir():
+                        raise ValueError("Exported Mask folder does not exist.")
+                    if request["label_source"] == "mcs_refresh" and not Path(
+                        request["mcs_dir"]
+                    ).is_dir():
+                        raise ValueError("Saved .mcs folder does not exist.")
+                    self._submission_results.put((generation, request, ""))
+                except Exception as exc:
+                    self._submission_results.put((generation, None, str(exc)))
+
+            worker = threading.Thread(target=validate, name="nnunet-path-check")
+            worker.daemon = True
+            worker.start()
+        except Exception as exc:
+            self._submission_pending = False
+            self.start_button.setEnabled(True)
+            self.status_label.setObjectName("errorLabel")
+            self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
+            self.status_label.setText(str(exc))
+
+    def _poll_submission(self):
+        try:
+            dataset_id, dataset_error = self._dataset_id_results.get_nowait()
+        except Empty:
+            pass
+        else:
+            if dataset_id is not None and int(self.dataset_id.value()) == 701:
+                self.dataset_id.setValue(int(dataset_id))
+            elif dataset_error:
+                self.status_label.setText(
+                    "Could not inspect existing Dataset IDs; using 701. {}".format(
+                        dataset_error
+                    )
+                )
+        if (
+            self._submission_pending
+            and self._submission_deadline
+            and time.time() >= self._submission_deadline
+        ):
+            self._submission_generation += 1
+            self._submission_pending = False
+            self._submission_deadline = 0.0
+            self.start_button.setEnabled(True)
+            self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
+            self.status_label.setText(
+                "Path checking timed out. The selected drive may be offline or "
+                "responding too slowly; paste a more specific path or retry."
+            )
+        try:
+            generation, request, error = self._submission_results.get_nowait()
+        except Empty:
+            return
+        if generation != self._submission_generation:
+            return
+        self._submission_pending = False
+        self._submission_deadline = 0.0
+        if error:
+            self.start_button.setEnabled(True)
+            self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
+            self.status_label.setText(error)
+            return
+        try:
             self.status_label.setText("Submitting nnU-Net training...")
             write_json_atomic(
                 Path.home() / ".mimics_script" / "nnunet_settings.json",
@@ -718,11 +828,12 @@ class TrainingSetupWindow:
             self.window.close()
         except Exception as exc:
             self.start_button.setEnabled(True)
-            self.status_label.setObjectName("errorLabel")
             self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
             self.status_label.setText(str(exc))
 
     def _close_event(self, event):
+        self._submission_generation += 1
+        self._submission_pending = False
         if not self.submitted:
             setup_status = self.context.get("setup_status_path")
             if setup_status:
