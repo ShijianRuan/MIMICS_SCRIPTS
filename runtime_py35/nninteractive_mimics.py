@@ -3686,6 +3686,7 @@ def _start_async_job(config, image, target, source=None, write_mode="in_place"):
         "shape": base_export["shape"],
         "base_path": base_export["path"],
         "base_sha256": base_export["sha256"],
+        "base_pixel_count": int(base_export.get("pixel_count") or 0),
         "expected_target_sha256": target_sha256,
         "interactions": [],
         "next_sequence": 1,
@@ -4597,6 +4598,14 @@ def _run_async(
                 write_mode=write_mode,
             )
             validated_target_hash = state.get("expected_target_sha256")
+        if str(prompt.get("interaction_type") or "") == "point_set":
+            first_prompt = not bool(state.get("interactions"))
+            empty_base = int(state.get("base_pixel_count") or 0) == 0
+            prompt["prediction_policy"] = (
+                "initial_empty_batch"
+                if first_prompt and empty_base
+                else "sequential"
+            )
         prompt = _persist_interaction(state["_job_dir"], prompt)
         # Store visual objects for deferred deletion after async result is applied.
         if visual_objects:
@@ -4739,6 +4748,13 @@ def _run_sync(image, target, config):
             prompt = _capture_prompt(action, image, include, temp_dir, visual_objects)
             if prompt is None:
                 continue
+            if str(prompt.get("interaction_type") or "") == "point_set":
+                prompt["prediction_policy"] = (
+                    "initial_empty_batch"
+                    if not interactions
+                    and int(base_export.get("pixel_count") or 0) == 0
+                    else "sequential"
+                )
             interactions.append(prompt)
             _mimics_log(
                 logging.INFO,

@@ -413,6 +413,9 @@ class LocalCompatibilityTests(unittest.TestCase):
                             "image": str(image),
                             "label": str(label),
                             "initial_mask": str(initial),
+                            "initial_mask_source_type": "mimics_saved_mask",
+                            "initial_mask_source_model": "draft_model_v2",
+                            "initial_mask_source_name": "AI draft",
                             "split": "train",
                         }
                     ]
@@ -452,6 +455,18 @@ class LocalCompatibilityTests(unittest.TestCase):
             self.assertEqual(
                 remote_request["cases"][0]["initial_mask"],
                 "/job/input/case_1/initial_mask.nii.gz",
+            )
+            self.assertEqual(
+                remote_request["cases"][0]["initial_mask_source_type"],
+                "mimics_saved_mask",
+            )
+            self.assertEqual(
+                remote_request["cases"][0]["initial_mask_source_model"],
+                "draft_model_v2",
+            )
+            self.assertEqual(
+                remote_request["cases"][0]["initial_mask_source_name"],
+                "AI draft",
             )
             self.assertEqual(
                 remote_request["workspace"],
@@ -1796,6 +1811,43 @@ class StatusAndLifecycleTests(unittest.TestCase):
             self.assertEqual(command[2], "train")
             self.assertEqual(command[4], remote_worker.sys.executable)
             self.assertEqual(command[-1], "liver")
+
+    def test_worker_starts_nninteractive_pipeline_after_staging_request(self):
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            remote_worker, "APP_ROOT", Path(temporary)
+        ), mock.patch.object(remote_worker, "_run", return_value=0) as run:
+            root = Path(temporary)
+            pipeline = root / "tools" / "nninteractive_finetune_pipeline.py"
+            pipeline.parent.mkdir(parents=True)
+            pipeline.write_text("# test\n", encoding="utf-8")
+            job_dir = root / "job"
+            job_dir.mkdir()
+            request = {
+                "pipeline_request": {
+                    "job_id": "nn_job",
+                    "task_id": "liver",
+                    "task_name": "Liver",
+                }
+            }
+
+            result = remote_worker.run_nninteractive(job_dir, request)
+
+            self.assertEqual(result, 0)
+            pipeline_job = job_dir / "pipeline_job"
+            self.assertEqual(
+                remote_compute.read_json(pipeline_job / "control.json", {}),
+                {"action": "run", "updated_at_epoch": mock.ANY},
+            )
+            run.assert_called_once_with(
+                [
+                    remote_worker.sys.executable,
+                    str(pipeline),
+                    "run",
+                    "--job-dir",
+                    str(pipeline_job),
+                ],
+                job_dir,
+            )
 
 
 if __name__ == "__main__":

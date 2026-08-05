@@ -9,6 +9,9 @@ import torch
 
 from nninteractive_finetune.data import (
     InteractivePatchDataset,
+    _augment_intensity_like_nnunet,
+    _nnunet_gaussian_blur,
+    _sample_spatial_patch,
     load_manifest,
     nninteractive_input_contract,
     normalize_like_nninteractive,
@@ -183,6 +186,8 @@ def test_prepare_and_patch_preserve_optional_initial_mask(tmp_path):
                 "image": str(image_path),
                 "label": str(label_path),
                 "initial_mask": str(initial_path),
+                "initial_mask_source_type": "dinov3_prediction",
+                "initial_mask_source_model": "liver_v2",
                 "split": "train",
             }
         ],
@@ -191,6 +196,12 @@ def test_prepare_and_patch_preserve_optional_initial_mask(tmp_path):
     )
     cached_initial = np.load(prepared[0]["prepared_initial_mask"])
     assert int(cached_initial.sum()) == int(initial.sum())
+    metadata = prepared[0]["metadata"]
+    assert metadata["initial_mask_quality_bin"] == "medium"
+    assert metadata["initial_mask_precision"] == pytest.approx(1.0)
+    assert metadata["initial_mask_recall"] == pytest.approx(16**3 / 20**3)
+    assert metadata["initial_mask_source_type"] == "dinov3_prediction"
+    assert metadata["initial_mask_source_model"] == "liver_v2"
     dataset = InteractivePatchDataset(
         prepared,
         (32, 32, 32),
@@ -200,10 +211,170 @@ def test_prepare_and_patch_preserve_optional_initial_mask(tmp_path):
     )
     sample = dataset[0]
     assert sample["has_initial_mask"] is True
+    assert sample["initial_mask_quality_bin"] == "medium"
+    assert sample["initial_mask_source_type"] == "dinov3_prediction"
     assert int(sample["initial_mask"].sum()) > 0
     assert torch.all(
         sample["initial_mask"].bool() <= sample["target"].bool()
     )
+
+
+def test_nnunet_profile_keeps_spatially_transformed_masks_aligned(tmp_path):
+    image = np.zeros((48, 48, 48), dtype=np.float32)
+    label = np.zeros((48, 48, 48), dtype=np.uint8)
+    image[14:34, 16:32, 12:36] = 1.0
+    label[14:34, 16:32, 12:36] = 1
+    image_path = tmp_path / "image.npy"
+    label_path = tmp_path / "label.npy"
+    initial_path = tmp_path / "initial.npy"
+    np.save(image_path, image)
+    np.save(label_path, label)
+    np.save(initial_path, label)
+    np.random.seed(11)
+    sample = InteractivePatchDataset(
+        [
+            {
+                "case_id": "case",
+                "prepared_image": str(image_path),
+                "prepared_label": str(label_path),
+                "prepared_initial_mask": str(initial_path),
+                "metadata": {
+                    "has_initial_mask": True,
+                    "initial_mask_quality_bin": "high",
+                    "initial_mask_source_type": "test",
+                },
+            }
+        ],
+        (32, 32, 32),
+        1.0,
+        1,
+        augmentation={
+            "enabled": True,
+            "profile": "nninteractive_nnunet",
+            "rotation_probability": 1.0,
+            "rotation_degrees": [20.0, 20.0],
+            "scaling_probability": 1.0,
+            "scaling_range": [0.9, 0.9],
+            "noise_probability": 0.0,
+            "blur_probability": 0.0,
+            "brightness_probability": 0.0,
+            "contrast_probability": 0.0,
+            "low_resolution_probability": 0.0,
+            "gamma_invert_probability": 0.0,
+            "gamma_probability": 0.0,
+            "flip_probability": 0.0,
+            "mirror_axes": [0, 1, 2],
+        },
+    )[0]
+    assert torch.equal(sample["target"], sample["initial_mask"])
+    image_foreground = sample["image"][0].numpy() > 0.5
+    target = sample["target"].numpy().astype(bool)
+    overlap = 2 * np.count_nonzero(image_foreground & target)
+    denominator = int(image_foreground.sum()) + int(target.sum())
+    assert overlap / denominator > 0.9
+
+
+def test_nnunet_noise_range_uses_official_sigma_semantics():
+    np.random.seed(23)
+    output = _augment_intensity_like_nnunet(
+        np.zeros((48, 48, 48), dtype=np.float32),
+        {
+            "noise_probability": 1.0,
+            "noise_variance_range": [0.1, 0.1],
+            "blur_probability": 0.0,
+            "brightness_probability": 0.0,
+            "contrast_probability": 0.0,
+            "low_resolution_probability": 0.0,
+            "gamma_invert_probability": 0.0,
+            "gamma_probability": 0.0,
+        },
+    )
+    assert float(output.std()) == pytest.approx(0.1, abs=0.003)
+
+
+def test_local_gaussian_blur_matches_public_batchgeneratorsv2_operator():
+    gaussian_blur = pytest.importorskip(
+        "batchgeneratorsv2.transforms.noise.gaussian_blur"
+    )
+    rng = np.random.default_rng(17)
+    image = rng.normal(size=(18, 19, 20)).astype(np.float32)
+    sigmas = (0.55, 0.8, 0.95)
+    official = torch.from_numpy(image.copy())[None]
+    for axis, sigma in enumerate(sigmas):
+        official = gaussian_blur.blur_dimension(
+            official,
+            sigma,
+            axis,
+            force_use_fft=False,
+            truncate=6,
+        )
+    local = _nnunet_gaussian_blur(image, sigmas)
+    np.testing.assert_allclose(local, official[0].numpy(), rtol=1e-6, atol=1e-6)
+
+
+def test_spatial_identity_matches_even_patch_crop_without_half_voxel_shift():
+    array = np.arange(24**3, dtype=np.float32).reshape((24, 24, 24))
+    center = np.asarray([12, 11, 10], dtype=np.int64)
+    patch_size = (8, 10, 12)
+    transformed = _sample_spatial_patch(
+        array,
+        center,
+        patch_size,
+        np.eye(3, dtype=np.float64),
+        order=1,
+    )
+    expected = array[8:16, 6:16, 4:16]
+    np.testing.assert_allclose(transformed, expected, rtol=0, atol=1e-5)
+
+
+def test_spatial_scale_above_one_makes_object_smaller_like_nnunet():
+    label = np.zeros((33, 33, 33), dtype=np.uint8)
+    label[12:21, 12:21, 12:21] = 1
+    center = np.asarray([16, 16, 16], dtype=np.int64)
+    identity = _sample_spatial_patch(
+        label, center, (17, 17, 17), np.eye(3), order=0
+    )
+    scaled = _sample_spatial_patch(
+        label, center, (17, 17, 17), np.eye(3) * 1.4, order=0
+    )
+    assert 0 < int(scaled.sum()) < int(identity.sum())
+
+
+def test_scipy_spatial_sampling_matches_public_batchgeneratorsv2_grid():
+    spatial = pytest.importorskip(
+        "batchgeneratorsv2.transforms.spatial.spatial"
+    )
+    rng = np.random.default_rng(31)
+    image = rng.normal(size=(28, 30, 32)).astype(np.float32)
+    patch_size = (14, 16, 18)
+    center = np.asarray([14, 15, 16], dtype=np.int64)
+    angles = np.deg2rad([7.0, -5.0, 9.0])
+    official_affine = spatial.create_affine_matrix_3d(
+        angles, [1.08, 1.08, 1.08]
+    )
+
+    grid = spatial._create_centered_identity_grid2(patch_size).float()
+    grid = torch.matmul(grid, torch.from_numpy(official_affine).float())
+    grid += torch.tensor(
+        [float(c) - float(s) / 2.0 for c, s in zip(center, image.shape)]
+    )
+    grid = spatial._convert_my_grid_to_grid_sample_grid(grid, image.shape)
+    official = torch.nn.functional.grid_sample(
+        torch.from_numpy(image)[None, None],
+        grid[None],
+        mode="bilinear",
+        padding_mode="zeros",
+        align_corners=False,
+    )[0, 0].numpy()
+    local = _sample_spatial_patch(
+        image,
+        center,
+        patch_size,
+        official_affine.T,
+        order=1,
+    )
+
+    np.testing.assert_allclose(local, official, rtol=1e-4, atol=1e-4)
 
 
 @pytest.mark.parametrize(

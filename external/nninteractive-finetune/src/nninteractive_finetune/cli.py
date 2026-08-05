@@ -101,9 +101,7 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
             device=args.device,
             training_goal=args.training_goal,
             initial_mask_probability=args.initial_mask_probability,
-            provided_initial_mask_probability=(
-                args.provided_initial_mask_probability
-            ),
+            correction_policy=args.correction_policy,
         )
     )
 
@@ -140,7 +138,7 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--label-values", default="1")
     evaluate.add_argument("--fold", default="0")
     evaluate.add_argument("--checkpoint", default="checkpoint_final.pth")
-    evaluate.add_argument("--clicks", type=int, default=5)
+    evaluate.add_argument("--clicks", type=int, default=8)
     evaluate.add_argument("--max-cases", type=int, default=0)
     evaluate.add_argument("--device", default="auto")
     evaluate.add_argument(
@@ -152,7 +150,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--initial-mask-probability", type=float, default=0.5
     )
     evaluate.add_argument(
-        "--provided-initial-mask-probability", type=float, default=0.7
+        "--correction-policy",
+        choices=("official_single", "clopa_paired"),
+        default="clopa_paired",
     )
     evaluate.set_defaults(func=cmd_evaluate)
     return parser

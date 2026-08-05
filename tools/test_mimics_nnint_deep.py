@@ -399,8 +399,8 @@ class PipelineErrorRecoveryTests(unittest.TestCase):
             "minimum_mean_auc_improvement": 0.0,
             "maximum_severe_case_regression": 0.2,
         })
-        # delta=0.0 >= threshold=0.0 → qualifies=True (passes minimum bar)
-        self.assertTrue(quality["qualifies"])
+        # No paired case means there is no evidence for automatic selection.
+        self.assertFalse(quality["qualifies"])
         self.assertEqual(quality["delta_auc"], 0.0)
         self.assertEqual(len(quality["severe_regressions"]), 0)
 
@@ -1105,7 +1105,8 @@ class FinetuneCLITests(unittest.TestCase):
                 "--manifest", "/path/to/manifest.json",
                 "--output", "/path/to/output.json",
                 "--label-values", "1",
-                "--clicks", "5",
+                "--clicks", "8",
+                "--correction-policy", "clopa_paired",
                 "--device", "auto"]
         # Verify all required args present
         self.assertIn("--model-dir", args)

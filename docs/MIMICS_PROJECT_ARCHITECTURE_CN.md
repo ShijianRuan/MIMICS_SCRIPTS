@@ -476,6 +476,18 @@ nnInteractive 被明确分成“官方通用模型”和“自定义任务模型
 - 模型版本、当前推荐模型；
 - 导入/导出可迁移模型包。
 
+训练起点只有两种真实语义：空 Mask，或与最终 Target Mask 分开保存的真实 Initial Mask。系统不再从最终标签腐蚀、膨胀或平移生成合成 Initial Mask：
+
+- `Start from an empty Mask`：所有病例从空 Mask 学习；
+- `Refine an existing Mask`：只接受具有真实 Initial Mask 的病例，缺失病例在准备阶段跳过；
+- `General adaptation`：具有真实 Initial Mask 的病例可学习修正，其他病例从空 Mask 开始。
+
+图像、最终标签和 Initial Mask 都以 NIfTI affine 为准，先通过轴置换/翻转无插值地重排到 canonical RAS；三者 canonical shape 与 affine 必须一致，否则训练直接拒绝。spacing 元数据保留，但不会在微调准备阶段额外做整卷固定 spacing 重采样。强度归一化严格使用官方会话相同的 nonzero bounding-box z-score；推理时由官方 nnInteractive session 按提示中心和模型 plan 做 crop/resize。任务模型在 Mimics 中使用时，bridge 根据当前 Image 的 voxel-to-RAS 映射执行相同的 canonical RAS 重排，并把结果无损翻回 Mimics grid。
+
+任务模型导出时还会把训练使用的 `point_radius` 与 `interaction_decay` 明确写入 `inference_info.json`。不能依赖不同 nnInteractive 版本各自的默认值，否则相同点击序列在训练和部署时会形成不同的提示通道。
+
+训练状态分别显示空 Mask 与真实 Initial Mask 的验证 AUC。每种模式都记录第 0 次交互的基线 Dice、1/3/5 次交互轨迹 AUC以及相对基线增益；最终模型比较坚持 empty-vs-empty、real-initial-vs-real-initial。任一实际存在的起点模式退化、起始 Mask 基线发生变化，或没有成对验证病例时，都不会自动替换当前模型。
+
 工作区默认位置：`nninteractive_task_models/`。
 
 ### 6.4 `02_AI/nnInteractive/04_DINOv3_Guided_Points.py`
@@ -492,7 +504,7 @@ nnInteractive 被明确分成“官方通用模型”和“自定义任务模型
 6. 把候选点从 DINOv3/source RAS 世界坐标显式换成 Mimics LPS 世界坐标，并创建绿色前景点、红色背景点；
 7. 外部非模态审核窗口允许用户在 Mimics 中移动、添加或删除点。1～3 只约束自动建议，用户手工前景点和背景点没有此上限；
 8. 审核窗口列出官方模型以及当前任务下所有完整、支持 point prompt 的微调模型。项目/Mask 已绑定某个模型时默认选择该版本，多个同任务版本可人工切换；
-9. 用户确认后，按顺序把这些点交给所选 nnInteractive 会话。每个点都基于上一轮预测继续修正，最终结果仍走 nnInteractive 原有的安全应用流程。
+9. 用户确认后，把这些点交给所选 nnInteractive 会话。若会话从空 Mask 开始且这是首轮 Point Set，先累积点、最后一次性预测；若 DINOv3 Mask 被作为已有 Initial Mask，或会话已有预测结果，则每个点都基于上一轮预测顺序修正。最终结果仍走 nnInteractive 原有的安全应用流程。
 
 性能约束：
 

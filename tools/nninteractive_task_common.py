@@ -56,6 +56,13 @@ NNINTERACTIVE_INPUT_CONTRACT = {
     "normalization": "nonzero_spatial_bbox_zscore",
     "normalization_channel": 0,
     "standard_deviation_correction": 1,
+    "orientation_policy": "reindex_to_canonical_ras_without_interpolation",
+    "spacing_policy": "preserve_source_spacing_no_spacing_resample",
+    "session_preprocessing": (
+        "nonzero_bbox_zscore_then_prompt_centered_crop_resize_to_model_plan_patch"
+    ),
+    "training_patch_policy": "fixed_voxel_patch_without_spacing_resample",
+    "geometry_validation": "shape_and_affine_must_match_before_training",
 }
 DEFAULT_VALIDATED_PROMPT_TYPES = ("point",)
 UNUSABLE_MODEL_STATES = {"corrupt", "failed", "incompatible", "cancelled"}

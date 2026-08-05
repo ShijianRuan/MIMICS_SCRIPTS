@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import time
@@ -29,6 +30,30 @@ METADATA_FILES = (
     "inference_session_class.json",
     "LICENSE",
 )
+
+
+def _write_inference_prompt_contract(
+    destination: Path, training_summary: dict[str, Any]
+) -> dict[str, Any]:
+    """Pin prompt encoding values so runtime defaults cannot drift by version."""
+    path = destination / "inference_info.json"
+    capability: dict[str, Any] = {}
+    if path.is_file():
+        with path.open("r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if not isinstance(loaded, dict):
+            raise ValueError(
+                "The base model inference_info.json must contain an object."
+            )
+        capability.update(loaded)
+    capability["point_radius"] = int(
+        training_summary.get("point_radius", 4)
+    )
+    capability["interaction_decay"] = float(
+        training_summary.get("interaction_decay", 0.9)
+    )
+    write_json_atomic(path, capability)
+    return capability
 
 
 def _save_torch_atomic(path: Path, payload: Any) -> None:
@@ -78,6 +103,9 @@ def export_model(
         source = bundle.model_dir / name
         if source.is_file():
             shutil.copy2(str(source), str(destination / name))
+    inference_prompt_contract = _write_inference_prompt_contract(
+        destination, training_summary
+    )
 
     expected_fingerprint = network_parameter_fingerprint(bundle.network)
     # Only replace network_weights. Deep-copying the original checkpoint duplicates
@@ -120,6 +148,12 @@ def export_model(
         "base_checkpoint": str(bundle.checkpoint_path),
         "input_contract": nninteractive_input_contract(),
         "validated_prompt_types": validated_prompt_types,
+        "inference_prompt_contract": {
+            "point_radius": inference_prompt_contract["point_radius"],
+            "interaction_decay": inference_prompt_contract[
+                "interaction_decay"
+            ],
+        },
         "runtime_verification": {
             "schema_version": "nninteractive_runtime_verification.v1",
             "verified": False,

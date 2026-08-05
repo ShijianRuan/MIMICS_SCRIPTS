@@ -314,6 +314,24 @@ class TestRuntimeCommon(unittest.TestCase):
             events,
         )
 
+    def test_mimics_transaction_binding_failure_keeps_validated_write_available(self):
+        import runtime_common
+
+        module = _FakeModule()
+
+        def broken_transaction(*args):
+            raise TypeError("broken compatibility binding")
+
+        module.Transaction = broken_transaction
+        calls = []
+        result = runtime_common.execute_mimics_transaction(
+            module,
+            lambda: calls.append("write") or "ok",
+            "Apply AI Mask",
+        )
+        self.assertEqual("ok", result)
+        self.assertEqual(["write"], calls)
+
     def test_find_root_accepts_file_path_without_explicit_sentinels(self):
         import runtime_common
 
@@ -7683,6 +7701,76 @@ class TestNewFeatures(unittest.TestCase):
                 "empty-start must not export Initial Masks"
             ),
         ), self.assertRaisesRegex(RuntimeError, "No selected case"):
+            pipeline._prepare_manifest(
+                request,
+                job_dir,
+                job_dir / "status.json",
+                job_dir / "control.json",
+                job_dir / "job.log",
+            )
+
+    def test_nninteractive_refine_all_skipped_reports_initial_mask_reason(self):
+        pipeline = __import__(
+            "tools.nninteractive_finetune_pipeline",
+            fromlist=["dummy"],
+        )
+        root = Path(self.tmp) / "nn_refine_without_initial"
+        job_dir = root / "job"
+        job_dir.mkdir(parents=True)
+        request = {
+            "workspace": str(root / "workspace"),
+            "source_mode": "prepared",
+            "mask_names": ["target"],
+            "training_goal": "refine_existing",
+            "initial_mask_source": "exported_masks",
+            "initial_mask_names": ["draft"],
+            "cases": [
+                {
+                    "case_id": "case",
+                    "image": str(root / "image.nii.gz"),
+                    "label": str(root / "target.nii.gz"),
+                    "split": "train",
+                }
+            ],
+        }
+        prepared = root / "prepared.nii.gz"
+        with mock.patch.object(
+            pipeline,
+            "_prepare_source_grid_case_cache",
+            return_value=(
+                prepared,
+                prepared,
+                None,
+                True,
+                "empty",
+                "fingerprint",
+            ),
+        ), self.assertRaisesRegex(RuntimeError, "usable real Initial Mask"):
+            pipeline._prepare_manifest(
+                request,
+                job_dir,
+                job_dir / "status.json",
+                job_dir / "control.json",
+                job_dir / "job.log",
+            )
+
+    def test_nninteractive_removed_synthetic_initial_source_is_rejected(self):
+        pipeline = __import__(
+            "tools.nninteractive_finetune_pipeline",
+            fromlist=["dummy"],
+        )
+        root = Path(self.tmp) / "nn_removed_synthetic"
+        job_dir = root / "job"
+        job_dir.mkdir(parents=True)
+        request = {
+            "workspace": str(root / "workspace"),
+            "source_mode": "prepared",
+            "mask_names": ["target"],
+            "training_goal": "general",
+            "initial_mask_source": "synthetic",
+            "cases": [],
+        }
+        with self.assertRaisesRegex(RuntimeError, "Unsupported Initial Mask source"):
             pipeline._prepare_manifest(
                 request,
                 job_dir,

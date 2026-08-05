@@ -27,28 +27,58 @@ DEFAULT_CONFIG = {
         "keep_prepared_cache": True,
         "augmentation": {
             "enabled": True,
+            # nnInteractive is trained on the nnU-Net augmentation family.
+            # Keep these values aligned with nnUNetTrainer defaults while
+            # implementing them locally so the offline environment does not
+            # need batchgeneratorsv2.
+            "profile": "nninteractive_nnunet",
             "flip_probability": 0.5,
-            "intensity_scale_range": [0.9, 1.1],
-            "intensity_shift_range": [-0.1, 0.1],
-            "noise_std_range": [0.0, 0.05],
+            "mirror_axes": [0, 1, 2],
+            "rotation_probability": 0.2,
+            "rotation_degrees": [-30.0, 30.0],
+            "scaling_probability": 0.2,
+            "scaling_range": [0.7, 1.4],
+            "noise_probability": 0.1,
+            "noise_variance_range": [0.0, 0.1],
+            "blur_probability": 0.2,
+            "blur_channel_probability": 0.5,
+            "blur_sigma_range": [0.5, 1.0],
+            "brightness_probability": 0.15,
+            "brightness_multiplier_range": [0.75, 1.25],
+            "contrast_probability": 0.15,
+            "contrast_range": [0.75, 1.25],
+            "low_resolution_probability": 0.25,
+            "low_resolution_channel_probability": 0.5,
+            "low_resolution_scale_range": [0.5, 1.0],
+            "gamma_invert_probability": 0.1,
+            "gamma_probability": 0.3,
+            "gamma_range": [0.7, 1.5],
         },
     },
     "prompts": {
         "mode": "clicks",
-        # Each correction is followed by a prediction. Most trajectories are
-        # intentionally short; a small fraction reaches five refinements.
+        # Each correction step follows the CLoPA paper: one foreground and
+        # one background correction where the corresponding error exists.
+        # The moderate long tail exposes late editing without the cost of the
+        # paper's 100-step research-only evaluation protocol.
         "training_goal": "general",
-        "correction_policy": "official_single",
-        "interaction_steps": 5,
+        "correction_policy": "clopa_paired",
+        "interaction_steps": 8,
         "min_interaction_steps": 1,
-        "max_interaction_steps": 5,
-        "interaction_step_weights": [0.35, 0.25, 0.20, 0.12, 0.08],
-        "short_interaction_probability": 0.7,
-        "validation_interaction_steps": [1, 3, 5],
+        "max_interaction_steps": 8,
+        "interaction_step_weights": [
+            0.28,
+            0.24,
+            0.17,
+            0.12,
+            0.08,
+            0.05,
+            0.035,
+            0.025,
+        ],
+        "short_interaction_probability": 0.65,
+        "validation_interaction_steps": [1, 3, 5, 8],
         "initial_mask_probability": 0.5,
-        # When a real draft is available, preserve synthetic errors in 30% of
-        # existing-Mask trajectories to avoid overfitting one draft generator.
-        "provided_initial_mask_probability": 0.7,
         "validate_initial_masks": True,
         "point_radius": 4,
         "center_bias": 8.0,
@@ -107,6 +137,11 @@ def validate_config(config: dict[str, Any]) -> None:
     model = config["model"]
     data = config["data"]
     prompts = config["prompts"]
+    if "provided_initial_mask_probability" in prompts:
+        raise ValueError(
+            "prompts.provided_initial_mask_probability was removed because "
+            "synthetic Initial Masks are no longer generated."
+        )
     training = config["training"]
 
     if model["strategy"] not in {"clopa_in", "clopa_conv", "full"}:
@@ -126,7 +161,7 @@ def validate_config(config: dict[str, Any]) -> None:
             "prompts.training_goal must be general, start_empty, "
             "refine_existing, or legacy."
         )
-    if prompts.get("correction_policy", "official_single") not in {
+    if prompts.get("correction_policy", "clopa_paired") not in {
         "official_single",
         "clopa_paired",
     }:
@@ -153,18 +188,82 @@ def validate_config(config: dict[str, Any]) -> None:
             "Image and label must describe the same physical voxel grid."
         )
     augmentation = data["augmentation"]
+    profile = str(augmentation.get("profile") or "legacy").strip().lower()
+    if profile not in {"legacy", "nninteractive_nnunet"}:
+        raise ValueError(
+            "data.augmentation.profile must be legacy or nninteractive_nnunet."
+        )
     if not 0.0 <= float(augmentation["flip_probability"]) <= 1.0:
         raise ValueError("data.augmentation.flip_probability must be in [0, 1].")
-    for key in ("intensity_scale_range", "intensity_shift_range", "noise_std_range"):
+    probability_keys = (
+        "rotation_probability",
+        "scaling_probability",
+        "noise_probability",
+        "blur_probability",
+        "blur_channel_probability",
+        "brightness_probability",
+        "contrast_probability",
+        "low_resolution_probability",
+        "low_resolution_channel_probability",
+        "gamma_invert_probability",
+        "gamma_probability",
+    )
+    for key in probability_keys:
+        if key in augmentation and not 0.0 <= float(augmentation[key]) <= 1.0:
+            raise ValueError(
+                "data.augmentation.{} must be in [0, 1].".format(key)
+            )
+    range_keys = (
+        "rotation_degrees",
+        "scaling_range",
+        "noise_variance_range",
+        "blur_sigma_range",
+        "brightness_multiplier_range",
+        "contrast_range",
+        "low_resolution_scale_range",
+        "gamma_range",
+    )
+    if profile == "legacy":
+        range_keys = range_keys + (
+            "intensity_scale_range",
+            "intensity_shift_range",
+            "noise_std_range",
+        )
+    for key in range_keys:
+        if key not in augmentation:
+            continue
         values = augmentation[key]
         if len(values) != 2 or float(values[0]) > float(values[1]):
             raise ValueError(
                 "data.augmentation.{} must be an ordered pair.".format(key)
             )
-    if float(augmentation["intensity_scale_range"][0]) <= 0:
-        raise ValueError("data.augmentation.intensity_scale_range must be positive.")
-    if float(augmentation["noise_std_range"][0]) < 0:
-        raise ValueError("data.augmentation.noise_std_range cannot be negative.")
+    positive_range_keys = (
+        "scaling_range",
+        "blur_sigma_range",
+        "brightness_multiplier_range",
+        "contrast_range",
+        "low_resolution_scale_range",
+        "gamma_range",
+    )
+    for key in positive_range_keys:
+        if key in augmentation and float(augmentation[key][0]) <= 0:
+            raise ValueError(
+                "data.augmentation.{} must be positive.".format(key)
+            )
+    if (
+        "noise_variance_range" in augmentation
+        and float(augmentation["noise_variance_range"][0]) < 0
+    ):
+        raise ValueError(
+            "data.augmentation.noise_variance_range cannot be negative."
+        )
+    mirror_axes = [int(value) for value in augmentation.get("mirror_axes", [])]
+    if any(value not in (0, 1, 2) for value in mirror_axes) or len(
+        mirror_axes
+    ) != len(set(mirror_axes)):
+        raise ValueError(
+            "data.augmentation.mirror_axes must contain unique axes from 0, 1, 2."
+        )
 
     positive_ints = (
         ("prompts.interaction_steps", prompts["interaction_steps"]),
@@ -210,7 +309,6 @@ def validate_config(config: dict[str, Any]) -> None:
     for name in (
         "short_interaction_probability",
         "initial_mask_probability",
-        "provided_initial_mask_probability",
     ):
         if not 0.0 <= float(prompts[name]) <= 1.0:
             raise ValueError("prompts.{} must be in [0, 1].".format(name))
@@ -257,8 +355,14 @@ def load_config(path: str | Path) -> dict[str, Any]:
     """Load a config and resolve all filesystem paths relative to it."""
     source = Path(path).expanduser().resolve()
     override = _read(source)
-    config = _merge(DEFAULT_CONFIG, override)
     prompt_override = override.get("prompts") or {}
+    if "provided_initial_mask_probability" in prompt_override:
+        raise ValueError(
+            "prompts.provided_initial_mask_probability was removed because "
+            "synthetic Initial Masks are no longer generated. Use real Initial "
+            "Masks with prompts.initial_mask_probability, or start empty."
+        )
+    config = _merge(DEFAULT_CONFIG, override)
     if (
         "interaction_steps" in prompt_override
         and "max_interaction_steps" not in prompt_override

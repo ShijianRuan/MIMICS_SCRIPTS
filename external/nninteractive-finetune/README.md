@@ -115,26 +115,72 @@ foreground point, pure over-segmentations receive a background point, and
 mixed errors receive one sampled correction rather than a forced pair.
 
 General and refinement training can use an optional `initial_mask` file in each
-manifest row. The Mimics model center exposes three sources: synthetic
-corrections only, a different Mask in each saved `.mcs` project, or previously
-exported initial Masks. When a usable real draft is present, 70% of
-existing-Mask trajectories start from that draft and 30% still use a newly
-simulated error. This preserves variation instead of overfitting one upstream
-model or one partial-annotation style. Cases with no real draft use simulation
-only.
+manifest row. The Mimics model center exposes three sources: no Initial Mask, a
+different Mask in each saved `.mcs` project, or previously exported Initial
+Masks. Synthetic Initial Masks are not generated. `start_empty` always begins
+from an empty Mask; `refine_existing` only accepts cases with a usable real
+draft; `general` can mix real-draft cases with empty-start cases. Empty or
+target-identical drafts are rejected explicitly.
 
-Synthetic initial Masks are generated online rather than saved as fixed files.
-They vary across samples while remaining reproducible through the training RNG
-state. The generator uses erosion, dilation, translation, axis cutoffs, sparse
-annotated slices, and extra structures. Empty or target-identical supplied
-Masks are rejected and fall back to simulation. Empty-start and initial-Mask
-trajectories are validated separately.
+Validation reports empty-start and real-Initial-Mask trajectories separately.
+For each mode it records the Dice before any click, the mean AUC at the selected
+interaction counts, and AUC gain relative to that mode's own baseline. Model
+comparison uses empty against empty and real draft against the same real draft;
+no model can be auto-selected without paired validation cases, and every
+available start mode must meet the configured improvement threshold.
+
+Real Initial Masks are also stratified without extra user input. Preparation
+records their source type/model, full-volume baseline Dice, precision, recall,
+and volume ratio, and assigns low (`<0.4`), medium (`0.4-0.7`), or high
+(`>=0.7`) quality. Training summaries and real-session evaluation reports keep
+quality- and source-specific trajectories so a strong average cannot conceal a
+regression on rough drafts.
+
+Input preparation uses one explicit contract on both training and deployment:
+NIfTI arrays are reindexed to canonical RAS by axis permutation and flipping
+only; image, final target, and Initial Mask must have matching shape and affine;
+source spacing is preserved and is not used for an extra whole-volume resample;
+and normalization matches the official session's nonzero-bounding-box z-score.
+The official nnInteractive session then performs prompt-centred crop/resize
+according to the model plan during inference. Training uses fixed voxel patches
+for memory control, which changes available context but does not introduce a
+second spacing or intensity transform.
+
+Model export also writes the training `point_radius` and
+`interaction_decay` into `inference_info.json`. This prevents a newer or older
+nnInteractive runtime from silently applying different prompt-channel defaults
+during inference.
 
 Historical YAML files that contain only `interaction_steps: N` retain an exact
 N-step CLoPA-style paired-click budget for experiment reproducibility. New
 configurations use `training_goal`, `correction_policy`,
 `min_interaction_steps`, `max_interaction_steps`,
-`interaction_step_weights`, and `validation_interaction_steps` explicitly.
+`interaction_step_weights`, and `validation_interaction_steps` explicitly. The
+default uses CLoPA paired corrections with a moderate 1-8-step long tail and
+validates at 1/3/5/8 steps; it deliberately does not run the paper's expensive
+100-step research evaluation during routine training.
+
+The default `nninteractive_nnunet` augmentation profile follows the public
+nnU-Net training recipe used by nnInteractive's ResEnc-L backbone: 3D
+rotation/scaling, Gaussian noise and blur, multiplicative brightness,
+contrast, low-resolution simulation, two gamma transforms, and mirroring use
+the official probabilities and ranges. The operators are implemented locally
+with NumPy/SciPy/PyTorch to keep the offline Windows environment independent of
+the private nnInteractive training code. Spatial scaling direction, even-patch
+centering, linear image interpolation, nearest label interpolation, reflected
+Gaussian padding, and low-resolution interpolation follow the public current
+`batchgeneratorsv2` implementation. Binary targets use the public transform's
+linear class-probability decision rather than an unrelated smoothing operation.
+Image, target, and Initial Mask share exactly the same sampled spatial
+transform; intensity transforms affect only the image. This is
+mathematical/protocol alignment, not a claim of bitwise RNG equivalence with
+the unpublished nnInteractive trainer.
+
+Mimics exposes an `Anatomy mirroring` choice. Its default `Automatic` mode
+keeps all three canonical-RAS mirror axes for ordinary targets, but removes RAS
+axis 0 when the task or Target Mask name explicitly contains left/right,
+L/R, or 左/右. Users can explicitly preserve laterality or allow every axis;
+the resolved policy and axes are stored in the training configuration and log.
 
 ## Evidence And Boundaries
 
@@ -146,7 +192,8 @@ policies and the historical ten-epoch, five-interaction protocol follow
 [segfm3d_nora_team implementation](https://github.com/tidiane-camaret/segfm3d_nora_team)
 demonstrates checkpoint reconstruction and click-aware adaptation, but its
 wrapper computes multiple clicks from one unchanged prediction. This package
-instead recomputes the prediction after every correction.
+instead recomputes the prediction after every correction step; a CLoPA paired
+step adds the available foreground/background pair and then predicts once.
 
 The original nnInteractive training system is not public. Therefore this is a
 research-backed task-adaptation implementation, not a claim to reproduce the

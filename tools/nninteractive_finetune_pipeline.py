@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -923,7 +924,7 @@ def _prepare_manifest(
     workspace = Path(request["workspace"]).expanduser().resolve()
     source_mode = str(request.get("source_mode") or "mcs").lower()
     initial_mask_source = str(
-        request.get("initial_mask_source") or "synthetic"
+        request.get("initial_mask_source") or "none"
     ).strip().lower()
     training_goal = str(
         request.get("training_goal") or "general"
@@ -939,7 +940,7 @@ def _prepare_manifest(
             )
         )
     if training_goal == "start_empty":
-        initial_mask_source = "synthetic"
+        initial_mask_source = "none"
     initial_mask_names = [
         str(value).strip()
         for value in request.get("initial_mask_names") or []
@@ -991,7 +992,7 @@ def _prepare_manifest(
             cache_role="initial",
             output_name="initial_masks",
         )
-    elif initial_mask_source not in ("synthetic", "exported_masks"):
+    elif initial_mask_source not in ("none", "exported_masks"):
         raise RuntimeError(
             "Unsupported Initial Mask source: {}".format(
                 initial_mask_source
@@ -1079,9 +1080,19 @@ def _prepare_manifest(
             }.get(initial_rejected_reason, initial_rejected_reason)
             append_log(
                 log_path,
-                "Ignored the Initial Mask for {} because {}; synthetic "
-                "variations will be used.".format(case_id, reason),
+                "Ignored the Initial Mask for {} because {}. This case will "
+                "start empty unless the training goal requires an existing "
+                "Mask.".format(case_id, reason),
             )
+        if training_goal == "refine_existing" and initial_path is None:
+            append_log(
+                log_path,
+                "Skipped {} because refine-existing training requires a real "
+                "Initial Mask distinct from the final Target Mask.".format(
+                    case_id
+                ),
+            )
+            continue
         item = {
             "case_id": case_id,
             "image": str(image_path),
@@ -1116,6 +1127,20 @@ def _prepare_manifest(
                 )
                 else ""
             ),
+            "initial_mask_source_type": (
+                {
+                    "mcs": "mimics_saved_mask",
+                    "exported_masks": "exported_nifti_mask",
+                }.get(initial_mask_source, "none")
+                if initial_path is not None
+                else "none"
+            ),
+            "initial_mask_source_model": str(
+                row.get("initial_mask_source_model") or ""
+            ),
+            "initial_mask_source_name": (
+                ", ".join(initial_mask_names) if initial_path is not None else ""
+            ),
             "source_grid_cache_fingerprint": source_grid_fingerprint,
             "split": str(row.get("split") or "train"),
         }
@@ -1138,10 +1163,6 @@ def _prepare_manifest(
                 10 + int(5.0 * (index + 1) / max(1, len(selected))),
             ),
         )
-    if not rows:
-        raise RuntimeError(
-            "No selected case has both a source image and a matching target Mask."
-        )
         append_log(
             log_path,
             "[{}/{}] {} source-grid data for {}.".format(
@@ -1150,6 +1171,18 @@ def _prepare_manifest(
                 "Reused" if cache_hit else "Prepared",
                 case_id,
             ),
+        )
+    if not rows:
+        if training_goal == "refine_existing":
+            raise RuntimeError(
+                "None of the selected cases has a usable real Initial Mask. "
+                "Refine-existing training requires an Initial Mask that is "
+                "non-empty, aligned to the source image, and distinct from "
+                "the final Target Mask. Review the Initial Mask source and "
+                "names, or choose empty-start/general training."
+            )
+        raise RuntimeError(
+            "No selected case has both a source image and a matching target Mask."
         )
     append_log(
         log_path,
@@ -1191,8 +1224,8 @@ def _prepare_manifest(
         append_log(
             log_path,
             "Prepared {} training and {} validation case(s); {} case(s) have "
-            "a real Initial Mask. Missing Initial Masks use synthetic "
-            "variations.".format(
+            "a real Initial Mask. Cases without one start from an empty "
+            "Mask.".format(
                 sum(row["split"] == "train" for row in rows),
                 len(validation_rows),
                 real_initial_count,
@@ -1201,22 +1234,69 @@ def _prepare_manifest(
     update_status(
         status_path,
         real_initial_mask_cases=real_initial_count,
-        synthetic_initial_mask_cases=(
-            0
-            if training_goal == "start_empty"
-            else max(0, len(rows) - real_initial_count)
-        ),
+        empty_start_cases=max(0, len(rows) - real_initial_count),
         initial_mask_policy=(
             "disabled"
             if training_goal == "start_empty"
             else (
-                "real_and_synthetic"
+                "real_and_empty"
                 if real_initial_count
-                else "synthetic_only"
+                else "empty_only"
             )
         ),
     )
     return manifest_path, validation_path if validation_rows else None
+
+
+_LATERALITY_TOKENS = {
+    "l",
+    "r",
+    "left",
+    "right",
+    "lhs",
+    "rhs",
+    "lt",
+    "rt",
+}
+
+
+def _request_is_left_right_sensitive(request: dict[str, Any]) -> bool:
+    values = [
+        request.get("task_id"),
+        request.get("task_name"),
+        *(request.get("mask_names") or []),
+    ]
+    for raw in values:
+        text = str(raw or "").strip().lower()
+        if not text:
+            continue
+        if "左" in text or "右" in text:
+            return True
+        tokens = set(re.findall(r"[a-z0-9]+", text))
+        if tokens & _LATERALITY_TOKENS:
+            return True
+    return False
+
+
+def _resolve_mirror_plan(request: dict[str, Any]) -> dict[str, Any]:
+    requested = str(request.get("mirror_policy") or "auto").strip().lower()
+    if requested not in {"auto", "preserve_lr", "all_axes"}:
+        raise RuntimeError(
+            "Unknown nnInteractive mirroring policy: {}".format(requested)
+        )
+    sensitive = _request_is_left_right_sensitive(request)
+    resolved = (
+        "preserve_lr" if requested == "auto" and sensitive else requested
+    )
+    if resolved == "auto":
+        resolved = "all_axes"
+    return {
+        "requested": requested,
+        "resolved": resolved,
+        "left_right_sensitive": sensitive,
+        # Prepared arrays are canonical RAS, so spatial axis 0 is left-right.
+        "mirror_axes": [1, 2] if resolved == "preserve_lr" else [0, 1, 2],
+    }
 
 
 def _training_config(
@@ -1228,6 +1308,7 @@ def _training_config(
     trainer_status = job_dir / "trainer_status.json"
     trainer_cancel = job_dir / "trainer_cancel.request"
     config = load_config()
+    mirror_plan = _resolve_mirror_plan(request)
     legacy_interaction_profiles = {
         "quick": {
             "interaction_steps": 3,
@@ -1237,7 +1318,6 @@ def _training_config(
             "short_interaction_probability": 1.0,
             "validation_interaction_steps": [1, 3],
             "initial_mask_probability": 0.6,
-            "provided_initial_mask_probability": 0.7,
             "validate_initial_masks": True,
             "training_goal": "legacy",
             "correction_policy": "clopa_paired",
@@ -1250,7 +1330,6 @@ def _training_config(
             "short_interaction_probability": 0.7,
             "validation_interaction_steps": [1, 3, 5, 10],
             "initial_mask_probability": 0.35,
-            "provided_initial_mask_probability": 0.7,
             "validate_initial_masks": True,
             "training_goal": "legacy",
             "correction_policy": "clopa_paired",
@@ -1263,7 +1342,6 @@ def _training_config(
             "short_interaction_probability": 0.55,
             "validation_interaction_steps": [1, 3, 5, 10, 15],
             "initial_mask_probability": 0.45,
-            "provided_initial_mask_probability": 0.7,
             "validate_initial_masks": True,
             "training_goal": "legacy",
             "correction_policy": "clopa_paired",
@@ -1272,17 +1350,14 @@ def _training_config(
     goal_plans = {
         "general": {
             "initial_mask_probability": 0.3,
-            "provided_initial_mask_probability": 0.7,
             "validate_initial_masks": True,
         },
         "start_empty": {
             "initial_mask_probability": 0.0,
-            "provided_initial_mask_probability": 0.0,
             "validate_initial_masks": False,
         },
         "refine_existing": {
             "initial_mask_probability": 1.0,
-            "provided_initial_mask_probability": 0.7,
             "validate_initial_masks": True,
         },
     }
@@ -1300,30 +1375,17 @@ def _training_config(
             )
         prompt_plan = {
             "training_goal": requested_goal,
-            "correction_policy": "official_single",
-            "interaction_steps": 5,
+            "correction_policy": "clopa_paired",
+            "interaction_steps": 8,
             "min_interaction_steps": 1,
-            "max_interaction_steps": 5,
-            "interaction_step_weights": [0.35, 0.25, 0.20, 0.12, 0.08],
-            "short_interaction_probability": 0.7,
-            "validation_interaction_steps": [1, 3, 5],
+            "max_interaction_steps": 8,
+            "interaction_step_weights": [
+                0.28, 0.24, 0.17, 0.12, 0.08, 0.05, 0.035, 0.025
+            ],
+            "short_interaction_probability": 0.65,
+            "validation_interaction_steps": [1, 3, 5, 8],
             **goal_values,
         }
-        provided_probability = float(
-            request.get(
-                "provided_initial_mask_probability",
-                prompt_plan["provided_initial_mask_probability"],
-            )
-        )
-        if not 0.0 <= provided_probability <= 1.0:
-            raise RuntimeError(
-                "provided_initial_mask_probability must be in [0, 1]."
-            )
-        prompt_plan["provided_initial_mask_probability"] = (
-            0.0
-            if requested_goal == "start_empty"
-            else provided_probability
-        )
         interaction_profile = ""
     elif legacy_profile:
         prompt_plan = legacy_interaction_profiles.get(legacy_profile)
@@ -1338,25 +1400,17 @@ def _training_config(
         requested_goal = "general"
         prompt_plan = {
             "training_goal": requested_goal,
-            "correction_policy": "official_single",
-            "interaction_steps": 5,
+            "correction_policy": "clopa_paired",
+            "interaction_steps": 8,
             "min_interaction_steps": 1,
-            "max_interaction_steps": 5,
-            "interaction_step_weights": [0.35, 0.25, 0.20, 0.12, 0.08],
-            "short_interaction_probability": 0.7,
-            "validation_interaction_steps": [1, 3, 5],
+            "max_interaction_steps": 8,
+            "interaction_step_weights": [
+                0.28, 0.24, 0.17, 0.12, 0.08, 0.05, 0.035, 0.025
+            ],
+            "short_interaction_probability": 0.65,
+            "validation_interaction_steps": [1, 3, 5, 8],
             **goal_plans[requested_goal],
         }
-        provided_probability = float(
-            request.get("provided_initial_mask_probability", 0.7)
-        )
-        if not 0.0 <= provided_probability <= 1.0:
-            raise RuntimeError(
-                "provided_initial_mask_probability must be in [0, 1]."
-            )
-        prompt_plan["provided_initial_mask_probability"] = (
-            provided_probability
-        )
         interaction_profile = ""
     return {
         "model": {
@@ -1387,10 +1441,31 @@ def _training_config(
             "keep_prepared_cache": True,
             "augmentation": {
                 "enabled": True,
+                "profile": "nninteractive_nnunet",
                 "flip_probability": 0.5,
-                "intensity_scale_range": [0.9, 1.1],
-                "intensity_shift_range": [-0.1, 0.1],
-                "noise_std_range": [0.0, 0.05],
+                "mirror_axes": mirror_plan["mirror_axes"],
+                "mirror_policy_requested": mirror_plan["requested"],
+                "mirror_policy_resolved": mirror_plan["resolved"],
+                "left_right_sensitive": mirror_plan["left_right_sensitive"],
+                "rotation_probability": 0.2,
+                "rotation_degrees": [-30.0, 30.0],
+                "scaling_probability": 0.2,
+                "scaling_range": [0.7, 1.4],
+                "noise_probability": 0.1,
+                "noise_variance_range": [0.0, 0.1],
+                "blur_probability": 0.2,
+                "blur_channel_probability": 0.5,
+                "blur_sigma_range": [0.5, 1.0],
+                "brightness_probability": 0.15,
+                "brightness_multiplier_range": [0.75, 1.25],
+                "contrast_probability": 0.15,
+                "contrast_range": [0.75, 1.25],
+                "low_resolution_probability": 0.25,
+                "low_resolution_channel_probability": 0.5,
+                "low_resolution_scale_range": [0.5, 1.0],
+                "gamma_invert_probability": 0.1,
+                "gamma_probability": 0.3,
+                "gamma_range": [0.7, 1.5],
             },
         },
         "prompts": {
@@ -1606,7 +1681,9 @@ def _copy_trainer_status(job_status: Path, trainer_status: dict[str, Any]) -> No
             if train_loss is not None:
                 pieces.append("loss {:.4f}".format(float(train_loss)))
             if val_auc is not None:
-                pieces.append("AUC {:.4f}".format(float(val_auc)))
+                pieces.append(
+                    "validation AUC {:.4f}".format(float(val_auc))
+                )
             if val_fg is not None:
                 pieces.append("Dice {:.4f}".format(float(val_fg)))
             if lr is not None:
@@ -1640,6 +1717,20 @@ def _run_training(
     config_path = job_dir / "training_config.json"
     training_config = _training_config(request, job_dir, manifest_path)
     write_json_atomic(config_path, training_config)
+    augmentation = training_config["data"]["augmentation"]
+    update_status(
+        status_path,
+        mirror_policy=augmentation.get("mirror_policy_resolved"),
+        mirror_axes=augmentation.get("mirror_axes"),
+        left_right_sensitive=augmentation.get("left_right_sensitive"),
+    )
+    append_log(
+        log_path,
+        "Spatial mirroring: {} (canonical RAS axes {}).".format(
+            augmentation.get("mirror_policy_resolved"),
+            augmentation.get("mirror_axes"),
+        ),
+    )
     trainer_status_path = Path(training_config["training"]["status_path"])
     trainer_cancel_path = Path(training_config["training"]["cancel_path"])
     try:
@@ -1742,7 +1833,6 @@ def _run_evaluation(
     label: str,
     training_goal: str,
     initial_mask_probability: float,
-    provided_initial_mask_probability: float,
 ) -> dict[str, Any]:
     python_exe = find_environment_python()
     gpu_lock = _gpu_lock(status_path, control_path, status_path.stem)
@@ -1774,15 +1864,15 @@ def _run_evaluation(
                     "--label-values",
                     "1",
                     "--clicks",
-                    "5",
+                    "8",
                     "--device",
                     "auto",
                     "--training-goal",
                     str(training_goal),
                     "--initial-mask-probability",
                     str(float(initial_mask_probability)),
-                    "--provided-initial-mask-probability",
-                    str(float(provided_initial_mask_probability)),
+                    "--correction-policy",
+                    "clopa_paired",
                 ],
                 cwd=str(ROOT),
                 env=os.environ.copy(),
@@ -1825,10 +1915,14 @@ def _run_evaluation(
         gpu_lock.release()
 
 
-def _case_auc(report: dict[str, Any]) -> dict[str, float]:
+def _case_auc(
+    report: dict[str, Any], trajectory_key: str = "dice_by_click"
+) -> dict[str, float]:
     result = {}
     for row in report.get("cases") or []:
-        trajectory = [float(value) for value in row.get("dice_by_click") or []]
+        trajectory = [
+            float(value) for value in row.get(trajectory_key) or []
+        ]
         if trajectory:
             result[str(row.get("case_id"))] = sum(trajectory) / len(trajectory)
     return result
@@ -1856,15 +1950,116 @@ def _quality_result(
                 }
             )
     delta = candidate_auc - baseline_auc
+    comparable_case_ids = set(baseline_cases) & set(candidate_cases)
+    mode_comparisons = {}
+    mode_severe = []
+    mode_not_improved = []
+    minimum_improvement = float(
+        config.get("minimum_mean_auc_improvement", 0.0)
+    )
+    for mode, report_key, case_key, starting_key in (
+        (
+            "empty_mask",
+            "empty_mask_trajectory_auc",
+            "empty_mask_dice_by_click",
+            "empty_mask_baseline_dice",
+        ),
+        (
+            "real_initial_mask",
+            "real_initial_mask_trajectory_auc",
+            "real_initial_mask_dice_by_click",
+            "real_initial_mask_baseline_dice",
+        ),
+    ):
+        baseline_mode = baseline.get(report_key)
+        candidate_mode = candidate.get(report_key)
+        if baseline_mode is None and candidate_mode is None:
+            continue
+        baseline_starting = baseline.get(starting_key)
+        candidate_starting = candidate.get(starting_key)
+        starting_matches = (
+            baseline_starting is None
+            and candidate_starting is None
+        ) or (
+            baseline_starting is not None
+            and candidate_starting is not None
+            and abs(float(baseline_starting) - float(candidate_starting)) <= 1e-8
+        )
+        comparison = {
+            "baseline_auc": baseline_mode,
+            "candidate_auc": candidate_mode,
+            "starting_mask_dice": candidate_starting,
+            "starting_mask_baseline_matches": starting_matches,
+            "baseline_auc_gain_vs_start": (
+                float(baseline_mode) - float(baseline_starting)
+                if baseline_mode is not None and baseline_starting is not None
+                else None
+            ),
+            "candidate_auc_gain_vs_start": (
+                float(candidate_mode) - float(candidate_starting)
+                if candidate_mode is not None and candidate_starting is not None
+                else None
+            ),
+            "delta_auc": (
+                float(candidate_mode) - float(baseline_mode)
+                if baseline_mode is not None and candidate_mode is not None
+                else None
+            ),
+        }
+        mode_comparisons[mode] = comparison
+        if (
+            comparison["delta_auc"] is not None
+            and float(comparison["delta_auc"]) < minimum_improvement
+        ):
+            mode_not_improved.append(
+                {
+                    "mode": mode,
+                    "delta_auc": comparison["delta_auc"],
+                    "required_delta_auc": minimum_improvement,
+                }
+            )
+        if not starting_matches:
+            mode_severe.append(
+                {
+                    "mode": mode,
+                    "reason": "starting_mask_baseline_changed",
+                    "baseline_starting_dice": baseline_starting,
+                    "candidate_starting_dice": candidate_starting,
+                }
+            )
+        baseline_mode_cases = _case_auc(baseline, case_key)
+        candidate_mode_cases = _case_auc(candidate, case_key)
+        for case_id, value in candidate_mode_cases.items():
+            if (
+                case_id in baseline_mode_cases
+                and baseline_mode_cases[case_id] - value > regression_limit
+            ):
+                mode_severe.append(
+                    {
+                        "mode": mode,
+                        "case_id": case_id,
+                        "baseline_auc": baseline_mode_cases[case_id],
+                        "candidate_auc": value,
+                        "delta": value - baseline_mode_cases[case_id],
+                    }
+                )
     qualifies = (
-        delta >= float(config.get("minimum_mean_auc_improvement", 0.0))
+        bool(comparable_case_ids)
+        and
+        delta >= minimum_improvement
         and not severe
+        and not mode_severe
+        and not mode_not_improved
     )
     return {
         "baseline_auc": baseline_auc,
         "candidate_auc": candidate_auc,
         "delta_auc": delta,
+        "comparable_cases": len(comparable_case_ids),
         "severe_regressions": severe,
+        "mode_comparisons": mode_comparisons,
+        "mode_severe_regressions": mode_severe,
+        "mode_not_improved": mode_not_improved,
         "qualifies": qualifies,
     }
 
@@ -1932,6 +2127,8 @@ def _register_model(
     validated_prompt_types = list(
         finetune_manifest.get("validated_prompt_types") or ["point"]
     )
+    training_summary = finetune_manifest.get("training") or {}
+    actual_train_cases = list(training_summary.get("train_cases") or [])
     model = {
         "model_id": model_id,
         "model_relpath": relative_model_path(workspace, model_dir),
@@ -1939,18 +2136,23 @@ def _register_model(
         "fold": audit.get("fold", "0"),
         "strategy": str(request.get("strategy") or ""),
         "training_goal": str(
-            finetune_manifest.get("training", {}).get("training_goal")
+            training_summary.get("training_goal")
             or request.get("training_goal")
             or "legacy"
         ),
         "correction_policy": str(
-            finetune_manifest.get("training", {}).get("correction_policy")
+            training_summary.get("correction_policy")
             or "clopa_paired"
         ),
         "parent_model_id": str(request.get("parent_model_id") or "official"),
         "created_at_epoch": time.time(),
-        "train_case_count": sum(
-            row.get("split") == "train" for row in request.get("cases") or []
+        "train_case_count": (
+            len(actual_train_cases)
+            if actual_train_cases
+            else sum(
+                row.get("split") == "train"
+                for row in request.get("cases") or []
+            )
         ),
         "validation_case_count": validation_count,
         "quality": quality or {},
@@ -2110,10 +2312,10 @@ def run_job(job_dir_value: str) -> int:
         )
         model_dir = Path(request["output_model_dir"]).resolve()
         quality = None
-        validation_count = sum(
-            row.get("split") == "val" for row in request.get("cases") or []
-        )
+        validation_count = 0
         if validation_path is not None:
+            validation_manifest = read_json(validation_path, {}) or {}
+            validation_count = len(validation_manifest.get("cases") or [])
             baseline_dir = Path(request["base_model_dir"]).resolve()
             evaluation_goal = str(
                 request.get("training_goal") or "general"
@@ -2122,9 +2324,6 @@ def run_job(job_dir_value: str) -> int:
                 "start_empty": 0.0,
                 "refine_existing": 1.0,
             }.get(evaluation_goal, 0.3)
-            provided_probability = float(
-                request.get("provided_initial_mask_probability", 0.7)
-            )
             baseline_report = _run_evaluation(
                 baseline_dir,
                 validation_path,
@@ -2134,7 +2333,6 @@ def run_job(job_dir_value: str) -> int:
                 "current model",
                 evaluation_goal,
                 initial_probability,
-                provided_probability,
             )
             candidate_report = _run_evaluation(
                 model_dir,
@@ -2145,7 +2343,6 @@ def run_job(job_dir_value: str) -> int:
                 "new model",
                 evaluation_goal,
                 initial_probability,
-                provided_probability,
             )
             quality = _quality_result(baseline_report, candidate_report, load_config())
         update_status(

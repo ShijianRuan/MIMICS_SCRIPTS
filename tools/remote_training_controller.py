@@ -973,6 +973,15 @@ def _prepare_nninteractive(
             "image": "/job/input/{}/image.nii.gz".format(case_id),
             "label": "/job/input/{}/label.nii.gz".format(case_id),
             "initial_mask": "",
+            "initial_mask_source_type": str(
+                row.get("initial_mask_source_type") or "none"
+            ),
+            "initial_mask_source_model": str(
+                row.get("initial_mask_source_model") or ""
+            ),
+            "initial_mask_source_name": str(
+                row.get("initial_mask_source_name") or ""
+            ),
             "split": str(row.get("split") or "train"),
             "state": "ready",
         }
@@ -1012,7 +1021,7 @@ def _prepare_nninteractive(
         remote_request["initial_mask_root"] = "/job/input"
         remote_request["initial_mask_names"] = ["initial_mask"]
     else:
-        remote_request["initial_mask_source"] = "synthetic"
+        remote_request["initial_mask_source"] = "none"
         remote_request["initial_mask_root"] = ""
         remote_request["initial_mask_names"] = []
     remote_request["output_model_dir"] = "/job/model_output"

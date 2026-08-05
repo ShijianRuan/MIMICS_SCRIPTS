@@ -30,8 +30,65 @@ class TinyInteractiveNetwork(torch.nn.Module):
         return self.decoder.seg_layers[0](value)
 
 
+class AlwaysBackgroundNetwork(torch.nn.Module):
+    def forward(self, value):
+        shape = (value.shape[0], 2, *value.shape[-3:])
+        logits = torch.zeros(shape, dtype=value.dtype, device=value.device)
+        logits[:, 0] = 1.0
+        return logits
+
+
 def _write_nifti(path: Path, array: np.ndarray) -> None:
     nib.save(nib.Nifti1Image(array, np.eye(4)), str(path))
+
+
+def test_validation_reports_empty_and_real_initial_auc_against_own_baseline():
+    target = torch.zeros((1, 16, 16, 16), dtype=torch.long)
+    target[:, 4:12, 4:12, 4:12] = 1
+    initial = torch.zeros_like(target)
+    initial[:, 5:11, 5:11, 5:11] = 1
+    loader = [
+        {
+            "image": torch.ones((1, 1, 16, 16, 16)),
+            "target": target,
+            "initial_mask": initial,
+            "has_initial_mask": torch.tensor([True]),
+            "case_id": ["case"],
+            "initial_mask_quality_bin": ["low"],
+            "initial_mask_source_type": ["dinov3_prediction"],
+        }
+    ]
+    metrics = trainer.validate(
+        AlwaysBackgroundNetwork(),
+        loader,
+        torch.device("cpu"),
+        {
+            "point_radius": 2,
+            "center_bias": 8.0,
+            "interaction_decay": 0.9,
+            "interaction_steps": 3,
+            "validation_interaction_steps": [1, 3],
+            "initial_mask_probability": 0.5,
+            "validate_initial_masks": True,
+            "correction_policy": "official_single",
+        },
+        batches=1,
+        seed=7,
+    )
+    assert metrics["empty_mask_baseline_dice"] == 0.0
+    assert metrics["empty_mask_trajectory_auc"] == 0.0
+    assert metrics["empty_mask_auc_gain_vs_baseline"] == 0.0
+    assert metrics["initial_mask_baseline_dice"] > 0.0
+    assert metrics["initial_mask_trajectory_auc"] == 0.0
+    assert metrics["initial_mask_auc_gain_vs_baseline"] < 0.0
+    assert metrics["real_initial_mask_samples"] == 1
+    assert metrics["initial_mask_quality_strata"]["low"]["case_count"] == 1
+    assert (
+        metrics["initial_mask_source_strata"]["dinov3_prediction"][
+            "patch_sample_count"
+        ]
+        == 1
+    )
 
 
 def test_complete_training_flow_with_true_interaction_loop(tmp_path, monkeypatch):

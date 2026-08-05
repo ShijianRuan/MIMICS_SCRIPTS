@@ -565,6 +565,125 @@ class QualityEvaluationTests(unittest.TestCase):
         })
         self.assertFalse(quality["qualifies"])
 
+    def test_empty_and_real_initial_modes_are_compared_like_for_like(self):
+        baseline = {
+            "trajectory_auc": 0.60,
+            "empty_mask_trajectory_auc": 0.55,
+            "real_initial_mask_trajectory_auc": 0.70,
+            "empty_mask_baseline_dice": 0.0,
+            "real_initial_mask_baseline_dice": 0.50,
+            "cases": [
+                {
+                    "case_id": "c1",
+                    "dice_by_click": [0.60],
+                    "empty_mask_dice_by_click": [0.55],
+                    "real_initial_mask_dice_by_click": [0.70],
+                }
+            ],
+        }
+        candidate = {
+            "trajectory_auc": 0.66,
+            "empty_mask_trajectory_auc": 0.63,
+            "real_initial_mask_trajectory_auc": 0.72,
+            "empty_mask_baseline_dice": 0.0,
+            "real_initial_mask_baseline_dice": 0.50,
+            "cases": [
+                {
+                    "case_id": "c1",
+                    "dice_by_click": [0.66],
+                    "empty_mask_dice_by_click": [0.63],
+                    "real_initial_mask_dice_by_click": [0.72],
+                }
+            ],
+        }
+        quality = pipeline._quality_result(
+            baseline,
+            candidate,
+            {
+                "minimum_mean_auc_improvement": 0.0,
+                "maximum_severe_case_regression": 0.2,
+            },
+        )
+        self.assertAlmostEqual(
+            quality["mode_comparisons"]["empty_mask"]["delta_auc"],
+            0.08,
+        )
+        self.assertAlmostEqual(
+            quality["mode_comparisons"]["real_initial_mask"]["delta_auc"],
+            0.02,
+        )
+        self.assertAlmostEqual(
+            quality["mode_comparisons"]["empty_mask"][
+                "candidate_auc_gain_vs_start"
+            ],
+            0.63,
+        )
+        self.assertAlmostEqual(
+            quality["mode_comparisons"]["real_initial_mask"][
+                "candidate_auc_gain_vs_start"
+            ],
+            0.22,
+        )
+        self.assertFalse(quality["mode_severe_regressions"])
+
+    def test_quality_rejects_changed_starting_mask_baseline(self):
+        baseline = {
+            "trajectory_auc": 0.60,
+            "empty_mask_trajectory_auc": 0.60,
+            "empty_mask_baseline_dice": 0.0,
+            "cases": [{"case_id": "c1", "dice_by_click": [0.60]}],
+        }
+        candidate = {
+            "trajectory_auc": 0.70,
+            "empty_mask_trajectory_auc": 0.70,
+            "empty_mask_baseline_dice": 0.1,
+            "cases": [{"case_id": "c1", "dice_by_click": [0.70]}],
+        }
+        quality = pipeline._quality_result(
+            baseline,
+            candidate,
+            {
+                "minimum_mean_auc_improvement": 0.0,
+                "maximum_severe_case_regression": 0.2,
+            },
+        )
+        self.assertFalse(quality["qualifies"])
+        self.assertEqual(
+            quality["mode_severe_regressions"][0]["reason"],
+            "starting_mask_baseline_changed",
+        )
+
+    def test_quality_requires_each_available_start_mode_not_to_regress(self):
+        baseline = {
+            "trajectory_auc": 0.60,
+            "empty_mask_trajectory_auc": 0.50,
+            "real_initial_mask_trajectory_auc": 0.70,
+            "empty_mask_baseline_dice": 0.0,
+            "real_initial_mask_baseline_dice": 0.50,
+            "cases": [{"case_id": "c1", "dice_by_click": [0.60]}],
+        }
+        candidate = {
+            "trajectory_auc": 0.65,
+            "empty_mask_trajectory_auc": 0.65,
+            "real_initial_mask_trajectory_auc": 0.65,
+            "empty_mask_baseline_dice": 0.0,
+            "real_initial_mask_baseline_dice": 0.50,
+            "cases": [{"case_id": "c1", "dice_by_click": [0.65]}],
+        }
+        quality = pipeline._quality_result(
+            baseline,
+            candidate,
+            {
+                "minimum_mean_auc_improvement": 0.0,
+                "maximum_severe_case_regression": 0.2,
+            },
+        )
+        self.assertFalse(quality["qualifies"])
+        self.assertEqual(
+            quality["mode_not_improved"][0]["mode"],
+            "real_initial_mask",
+        )
+
 
 # ---------------------------------------------------------------------------
 # 7. Status tracking
@@ -1000,26 +1119,67 @@ class TrainingConfigGenerationTests(unittest.TestCase):
         self.assertEqual(data["patch_size"], [128, 128, 128])
         self.assertEqual(data["num_workers"], 0)
 
+    def test_training_config_auto_preserves_left_right_for_sided_target(self):
+        config = self._build_config(
+            request_values={
+                "task_name": "Right adrenal gland",
+                "mask_names": ["adrenal_gland_right"],
+                "mirror_policy": "auto",
+            }
+        )
+        augmentation = config["data"]["augmentation"]
+        self.assertEqual(augmentation["mirror_axes"], [1, 2])
+        self.assertEqual(
+            augmentation["mirror_policy_resolved"], "preserve_lr"
+        )
+        self.assertTrue(augmentation["left_right_sensitive"])
+
+    def test_training_config_auto_allows_lr_for_non_sided_target(self):
+        config = self._build_config(
+            request_values={
+                "task_name": "Liver",
+                "mask_names": ["liver_seg"],
+                "mirror_policy": "auto",
+            }
+        )
+        augmentation = config["data"]["augmentation"]
+        self.assertEqual(augmentation["mirror_axes"], [0, 1, 2])
+        self.assertEqual(augmentation["mirror_policy_resolved"], "all_axes")
+
+    def test_training_config_explicit_mirroring_overrides_auto_detection(self):
+        config = self._build_config(
+            request_values={
+                "task_name": "左肾",
+                "mask_names": ["左肾"],
+                "mirror_policy": "all_axes",
+            }
+        )
+        augmentation = config["data"]["augmentation"]
+        self.assertEqual(augmentation["mirror_axes"], [0, 1, 2])
+        self.assertEqual(augmentation["mirror_policy_resolved"], "all_axes")
+
     def test_training_config_prompts_section(self):
         config = self._build_config()
         prompts = config["prompts"]
         self.assertEqual(prompts["mode"], "clicks")
         self.assertEqual(prompts["training_goal"], "general")
         self.assertEqual(prompts["interaction_profile"], "")
-        self.assertEqual(prompts["correction_policy"], "official_single")
+        self.assertEqual(prompts["correction_policy"], "clopa_paired")
         self.assertEqual(prompts["min_interaction_steps"], 1)
-        self.assertEqual(prompts["max_interaction_steps"], 5)
+        self.assertEqual(prompts["max_interaction_steps"], 8)
         self.assertEqual(
-            prompts["validation_interaction_steps"], [1, 3, 5]
+            prompts["validation_interaction_steps"], [1, 3, 5, 8]
         )
         self.assertEqual(
             prompts["interaction_step_weights"],
-            [0.35, 0.25, 0.20, 0.12, 0.08],
+            [0.28, 0.24, 0.17, 0.12, 0.08, 0.05, 0.035, 0.025],
+        )
+        self.assertEqual(
+            config["data"]["augmentation"]["profile"],
+            "nninteractive_nnunet",
         )
         self.assertGreater(prompts["initial_mask_probability"], 0.0)
-        self.assertEqual(
-            prompts["provided_initial_mask_probability"], 0.7
-        )
+        self.assertNotIn("provided_initial_mask_probability", prompts)
         self.assertEqual(prompts["point_radius"], 4)
         self.assertEqual(prompts["center_bias"], 8.0)
         self.assertEqual(prompts["interaction_decay"], 0.9)
@@ -1048,9 +1208,7 @@ class TrainingConfigGenerationTests(unittest.TestCase):
         )
         prompts = config["prompts"]
         self.assertEqual(prompts["initial_mask_probability"], 1.0)
-        self.assertEqual(
-            prompts["provided_initial_mask_probability"], 0.6
-        )
+        self.assertNotIn("provided_initial_mask_probability", prompts)
 
     def test_empty_start_disables_real_initial_masks(self):
         config = self._build_config(
@@ -1061,9 +1219,7 @@ class TrainingConfigGenerationTests(unittest.TestCase):
         )
         prompts = config["prompts"]
         self.assertEqual(prompts["initial_mask_probability"], 0.0)
-        self.assertEqual(
-            prompts["provided_initial_mask_probability"], 0.0
-        )
+        self.assertNotIn("provided_initial_mask_probability", prompts)
 
     def test_status_and_cancel_paths_are_writable(self):
         config = self._build_config()

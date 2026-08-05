@@ -17,6 +17,7 @@ from torch.utils.data import DataLoader
 
 from .checkpoint import export_model, save_training_state
 from .data import (
+    INITIAL_MASK_QUALITY_THRESHOLDS,
     InteractivePatchDataset,
     load_manifest,
     prepare_cases,
@@ -185,6 +186,89 @@ def _forward(network: torch.nn.Module, value: torch.Tensor) -> torch.Tensor:
     return output
 
 
+def _batch_text_values(value: Any, size: int, default: str) -> list[str]:
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, (list, tuple)):
+        values = [str(item) for item in value]
+    else:
+        values = []
+    values.extend([default] * max(0, int(size) - len(values)))
+    return [str(item or default) for item in values[: int(size)]]
+
+
+def _record_initial_stratum_baseline(
+    groups: dict[str, dict[str, Any]],
+    key: str,
+    case_id: str,
+    baseline: float,
+    horizon: int,
+) -> None:
+    group = groups.setdefault(
+        str(key or "unknown"),
+        {
+            "case_ids": set(),
+            "baseline": [],
+            "trajectory": [[] for _ in range(int(horizon))],
+        },
+    )
+    group["case_ids"].add(str(case_id))
+    group["baseline"].append(float(baseline))
+
+
+def _record_initial_stratum_dice(
+    groups: dict[str, dict[str, Any]],
+    key: str,
+    interaction_index: int,
+    value: float,
+) -> None:
+    group = groups.get(str(key or "unknown"))
+    if group is not None:
+        group["trajectory"][int(interaction_index)].append(float(value))
+
+
+def _summarize_initial_strata(
+    groups: dict[str, dict[str, Any]], validation_steps: list[int]
+) -> dict[str, dict[str, Any]]:
+    result = {}
+    for key, group in sorted(groups.items()):
+        trajectory = [
+            float(np.mean(values)) if values else None
+            for values in group["trajectory"]
+        ]
+        selected = [
+            trajectory[step - 1]
+            for step in validation_steps
+            if trajectory[step - 1] is not None
+        ]
+        baseline = float(np.mean(group["baseline"]))
+        auc = float(np.mean(selected)) if selected else None
+        result[key] = {
+            "case_count": len(group["case_ids"]),
+            "patch_sample_count": len(group["baseline"]),
+            "baseline_dice": baseline,
+            "dice_by_interaction": trajectory,
+            "trajectory_auc": auc,
+            "auc_gain_vs_baseline": (
+                float(auc) - baseline if auc is not None else None
+            ),
+        }
+    return result
+
+
+def _initial_mask_distribution(
+    rows: list[dict[str, Any]], key: str
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        metadata = row.get("metadata") or {}
+        if not bool(metadata.get("has_initial_mask")):
+            continue
+        value = str(metadata.get(key) or "unknown")
+        counts[value] = counts.get(value, 0) + 1
+    return dict(sorted(counts.items()))
+
+
 @torch.no_grad()
 def validate(
     network: torch.nn.Module,
@@ -205,11 +289,8 @@ def validate(
         initial_mask_probability=float(
             prompt_config.get("initial_mask_probability", 0.0)
         ),
-        provided_initial_mask_probability=float(
-            prompt_config.get("provided_initial_mask_probability", 0.7)
-        ),
         correction_policy=str(
-            prompt_config.get("correction_policy") or "official_single"
+            prompt_config.get("correction_policy") or "clopa_paired"
         ),
     )
     validation_steps = [
@@ -226,6 +307,10 @@ def validate(
     initial_mask_trajectory: list[list[float]] = [
         [] for _ in range(validation_horizon)
     ]
+    empty_mask_baselines: list[float] = []
+    initial_mask_baselines: list[float] = []
+    initial_quality_groups: dict[str, dict[str, Any]] = {}
+    initial_source_groups: dict[str, dict[str, Any]] = {}
     iterator = _infinite(loader)
     total_batches = max(1, int(batches))
     for batch_index in range(total_batches):
@@ -236,6 +321,10 @@ def validate(
         batch = next(iterator)
         image = batch["image"].to(device, non_blocking=True)
         target = batch["target"].to(device, non_blocking=True)
+        empty_mask_baselines.extend(
+            float(value)
+            for value in binary_dice(torch.zeros_like(target), target).cpu()
+        )
         interactions = sampler.new_interactions(
             target, allow_initial_mask=False
         )
@@ -248,39 +337,99 @@ def validate(
             if interaction_index + 1 < len(trajectory):
                 sampler.add_corrections(interactions, prediction, target)
         if bool(prompt_config.get("validate_initial_masks", True)):
+            provided_initial = batch.get("initial_mask", None)
+            provided_available = batch.get("has_initial_mask", None)
+            if provided_initial is None or provided_available is None:
+                available = torch.zeros(
+                    target.shape[0], dtype=torch.bool, device=device
+                )
+                provided_initial = torch.zeros_like(target)
+            else:
+                provided_initial = provided_initial.to(
+                    device, non_blocking=True
+                )
+                available = provided_available.to(
+                    device, non_blocking=True
+                ).bool()
+            case_ids = _batch_text_values(
+                batch.get("case_id"), target.shape[0], "unknown_case"
+            )
+            quality_bins = _batch_text_values(
+                batch.get("initial_mask_quality_bin"),
+                target.shape[0],
+                "unknown",
+            )
+            source_types = _batch_text_values(
+                batch.get("initial_mask_source_type"),
+                target.shape[0],
+                "unknown",
+            )
+            if bool(available.any()):
+                baseline_values = binary_dice(provided_initial, target)
+                initial_mask_baselines.extend(
+                    float(value)
+                    for value in baseline_values[available].cpu()
+                )
+                for sample_index in torch.nonzero(
+                    available, as_tuple=False
+                ).flatten().tolist():
+                    baseline = float(baseline_values[sample_index].cpu())
+                    _record_initial_stratum_baseline(
+                        initial_quality_groups,
+                        quality_bins[sample_index],
+                        case_ids[sample_index],
+                        baseline,
+                        validation_horizon,
+                    )
+                    _record_initial_stratum_baseline(
+                        initial_source_groups,
+                        source_types[sample_index],
+                        case_ids[sample_index],
+                        baseline,
+                        validation_horizon,
+                    )
             interactions = sampler.new_interactions(
                 target,
                 allow_initial_mask=True,
                 force_initial_mask=True,
-                initial_prediction=batch.get("initial_mask", None).to(
-                    device, non_blocking=True
-                )
-                if batch.get("initial_mask", None) is not None
-                else None,
-                initial_mask_available=batch.get(
-                    "has_initial_mask", None
-                ).to(device, non_blocking=True)
-                if batch.get("has_initial_mask", None) is not None
-                else None,
+                initial_prediction=provided_initial,
+                initial_mask_available=available,
             )
             for interaction_index in range(len(initial_mask_trajectory)):
                 logits = _forward(
                     network, torch.cat([image, interactions], dim=1)
                 )
                 prediction = logits.argmax(1)
-                initial_mask_trajectory[interaction_index].extend(
-                    float(value)
-                    for value in binary_dice(prediction, target).cpu()
-                )
+                if bool(available.any()):
+                    dice_values = binary_dice(prediction, target)
+                    initial_mask_trajectory[interaction_index].extend(
+                        float(value) for value in dice_values[available].cpu()
+                    )
+                    for sample_index in torch.nonzero(
+                        available, as_tuple=False
+                    ).flatten().tolist():
+                        dice_value = float(dice_values[sample_index].cpu())
+                        _record_initial_stratum_dice(
+                            initial_quality_groups,
+                            quality_bins[sample_index],
+                            interaction_index,
+                            dice_value,
+                        )
+                        _record_initial_stratum_dice(
+                            initial_source_groups,
+                            source_types[sample_index],
+                            interaction_index,
+                            dice_value,
+                        )
                 if interaction_index + 1 < len(initial_mask_trajectory):
                     sampler.add_corrections(
-                        interactions, prediction, target
+                        interactions, prediction, target, active=available
                     )
         if progress:
             progress(batch_index + 1, total_batches)
     means = [float(np.mean(values)) if values else 0.0 for values in trajectory]
     initial_mask_means = [
-        float(np.mean(values)) if values else 0.0
+        float(np.mean(values)) if values else None
         for values in initial_mask_trajectory
     ]
     reported = {
@@ -289,26 +438,60 @@ def validate(
     reported_initial = {
         str(step): initial_mask_means[step - 1]
         for step in validation_steps
+        if initial_mask_means[step - 1] is not None
     }
     initial_probability = float(
         prompt_config.get("initial_mask_probability", 0.0)
     )
     empty_auc = float(np.mean([reported[str(step)] for step in validation_steps]))
-    initial_auc = float(
-        np.mean([reported_initial[str(step)] for step in validation_steps])
+    initial_auc = (
+        float(np.mean(list(reported_initial.values())))
+        if reported_initial
+        else None
+    )
+    empty_baseline = float(np.mean(empty_mask_baselines))
+    initial_baseline = (
+        float(np.mean(initial_mask_baselines))
+        if initial_mask_baselines
+        else None
+    )
+    effective_initial_probability = (
+        initial_probability if initial_auc is not None else 0.0
+    )
+    trajectory_auc = (
+        (1.0 - effective_initial_probability) * empty_auc
+        + effective_initial_probability * float(initial_auc or 0.0)
+    )
+    trajectory_baseline = (
+        (1.0 - effective_initial_probability) * empty_baseline
+        + effective_initial_probability * float(initial_baseline or 0.0)
     )
     return {
         "dice_by_interaction": means,
         "dice_at_interactions": reported,
         "initial_mask_dice_by_interaction": initial_mask_means,
         "initial_mask_dice_at_interactions": reported_initial,
-        "initial_dice": means[0],
+        "empty_mask_baseline_dice": empty_baseline,
+        "initial_mask_baseline_dice": initial_baseline,
+        "initial_dice": trajectory_baseline,
         "final_dice": means[-1],
         "empty_mask_trajectory_auc": empty_auc,
         "initial_mask_trajectory_auc": initial_auc,
-        "trajectory_auc": (
-            (1.0 - initial_probability) * empty_auc
-            + initial_probability * initial_auc
+        "empty_mask_auc_gain_vs_baseline": empty_auc - empty_baseline,
+        "initial_mask_auc_gain_vs_baseline": (
+            float(initial_auc) - float(initial_baseline)
+            if initial_auc is not None and initial_baseline is not None
+            else None
+        ),
+        "trajectory_baseline_dice": trajectory_baseline,
+        "trajectory_auc": trajectory_auc,
+        "trajectory_auc_gain_vs_baseline": trajectory_auc - trajectory_baseline,
+        "real_initial_mask_samples": len(initial_mask_baselines),
+        "initial_mask_quality_strata": _summarize_initial_strata(
+            initial_quality_groups, validation_steps
+        ),
+        "initial_mask_source_strata": _summarize_initial_strata(
+            initial_source_groups, validation_steps
         ),
     }
 
@@ -368,6 +551,17 @@ def _train_unlocked(config: dict[str, Any]) -> dict[str, Any]:
 
     try:
         cases = load_manifest(data_config["manifest"])
+        training_goal = str(
+            prompt_config.get("training_goal") or "general"
+        ).strip().lower()
+        if training_goal == "refine_existing":
+            cases = [
+                row for row in cases if str(row.get("initial_mask") or "").strip()
+            ]
+            if not cases:
+                raise ValueError(
+                    "refine_existing requires cases with a real Initial Mask."
+                )
         train_cases, val_cases = split_cases(
             cases, float(data_config["validation_fraction"]), seed
         )
@@ -385,6 +579,22 @@ def _train_unlocked(config: dict[str, Any]) -> dict[str, Any]:
         by_id = {row["case_id"]: row for row in prepared}
         train_prepared = [by_id[row["case_id"]] for row in train_cases]
         val_prepared = [by_id[row["case_id"]] for row in val_cases]
+        if training_goal == "refine_existing":
+            train_prepared = [
+                row
+                for row in train_prepared
+                if bool((row.get("metadata") or {}).get("has_initial_mask"))
+            ]
+            val_prepared = [
+                row
+                for row in val_prepared
+                if bool((row.get("metadata") or {}).get("has_initial_mask"))
+            ]
+            if not train_prepared:
+                raise ValueError(
+                    "refine_existing requires at least one training case with "
+                    "a real Initial Mask distinct from the final target."
+                )
 
         status.update(
             status="initializing", phase="loading_base_model", device=str(device)
@@ -457,13 +667,8 @@ def _train_unlocked(config: dict[str, Any]) -> dict[str, Any]:
             initial_mask_probability=float(
                 prompt_config.get("initial_mask_probability", 0.0)
             ),
-            provided_initial_mask_probability=float(
-                prompt_config.get(
-                    "provided_initial_mask_probability", 0.7
-                )
-            ),
             correction_policy=str(
-                prompt_config.get("correction_policy") or "official_single"
+                prompt_config.get("correction_policy") or "clopa_paired"
             ),
         )
         if bool(training.get("resume", True)) and training_state_path.is_file():
@@ -684,7 +889,7 @@ def _train_unlocked(config: dict[str, Any]) -> dict[str, Any]:
                 prompt_config.get("training_goal") or "legacy"
             ),
             "correction_policy": str(
-                prompt_config.get("correction_policy") or "official_single"
+                prompt_config.get("correction_policy") or "clopa_paired"
             ),
             "validated_prompt_types": ["point"],
             "epochs_completed": int(training["epochs"]),
@@ -716,11 +921,9 @@ def _train_unlocked(config: dict[str, Any]) -> dict[str, Any]:
             "initial_mask_probability": float(
                 prompt_config.get("initial_mask_probability", 0.0)
             ),
-            "provided_initial_mask_probability": float(
-                prompt_config.get(
-                    "provided_initial_mask_probability", 0.7
-                )
-            ),
+            "point_radius": int(prompt_config["point_radius"]),
+            "center_bias": float(prompt_config["center_bias"]),
+            "interaction_decay": float(prompt_config["interaction_decay"]),
             "patch_size": list(data_config["patch_size"]),
             "batch_size": batch_size,
             "gradient_accumulation": accumulation,
@@ -728,8 +931,8 @@ def _train_unlocked(config: dict[str, Any]) -> dict[str, Any]:
             "trainable_count": policy["trainable_count"],
             "total_count": policy["total_count"],
             "trainable_fraction": policy["trainable_fraction"],
-            "train_cases": [row["case_id"] for row in train_cases],
-            "validation_cases": [row["case_id"] for row in val_cases],
+            "train_cases": [row["case_id"] for row in train_prepared],
+            "validation_cases": [row["case_id"] for row in val_prepared],
             "real_initial_mask_train_cases": [
                 row["case_id"]
                 for row in train_prepared
@@ -740,6 +943,22 @@ def _train_unlocked(config: dict[str, Any]) -> dict[str, Any]:
                 for row in val_prepared
                 if bool((row.get("metadata") or {}).get("has_initial_mask"))
             ],
+            "initial_mask_quality_thresholds": list(
+                INITIAL_MASK_QUALITY_THRESHOLDS
+            ),
+            "initial_mask_train_quality_distribution": _initial_mask_distribution(
+                train_prepared, "initial_mask_quality_bin"
+            ),
+            "initial_mask_validation_quality_distribution": _initial_mask_distribution(
+                val_prepared, "initial_mask_quality_bin"
+            ),
+            "initial_mask_train_source_distribution": _initial_mask_distribution(
+                train_prepared, "initial_mask_source_type"
+            ),
+            "initial_mask_validation_source_distribution": _initial_mask_distribution(
+                val_prepared, "initial_mask_source_type"
+            ),
+            "augmentation": dict(data_config.get("augmentation") or {}),
             "best_score": best_score,
             "history": history,
             "config": config,

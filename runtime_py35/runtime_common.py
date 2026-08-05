@@ -5,6 +5,7 @@ from __future__ import print_function
 
 import json
 import errno
+import logging
 import os
 import subprocess
 import sys
@@ -76,25 +77,46 @@ def execute_mimics_transaction(mimics_module, operation, transaction_name=None):
     if not callable(transaction_class):
         return operation()
     name = str(transaction_name or "Mimics-Script Mask Update")
+    constructor_errors = []
+    transaction = None
     try:
         transaction = transaction_class(name)
-    except TypeError as named_error:
+    except Exception as named_error:
+        constructor_errors.append("named: {0}".format(named_error))
         # A few older/fake Mimics runtimes expose a no-argument Transaction.
         # Current Mimics requires a transaction name, so always try the
         # documented named form first.
         try:
             transaction = transaction_class()
         except Exception as fallback_error:
-            raise RuntimeError(
-                "Mimics could not start transaction '{0}'; the Mask was not "
-                "changed. Named constructor: {1}; compatibility constructor: "
-                "{2}".format(name, named_error, fallback_error)
+            constructor_errors.append(
+                "no-argument: {0}".format(fallback_error)
             )
-    except Exception as exc:
-        raise RuntimeError(
-            "Mimics could not start transaction '{0}'; the Mask was not "
-            "changed: {1}".format(name, exc)
-        )
+            # Some Mimics compatibility bindings expose object.__new__ (which
+            # rejects constructor arguments) together with an __init__ that
+            # requires transaction_name. Construct and initialize explicitly.
+            try:
+                transaction = transaction_class.__new__(transaction_class)
+                transaction_class.__init__(transaction, name)
+            except Exception as explicit_error:
+                constructor_errors.append(
+                    "explicit initialization: {0}".format(explicit_error)
+                )
+                transaction = None
+
+    if transaction is None:
+        message = (
+            "Mimics Transaction is unavailable for '{0}'. The validated Mask "
+            "write will continue without transaction grouping; use Mimics Undo "
+            "if the result is not wanted. Details: {1}"
+        ).format(name, "; ".join(constructor_errors))
+        try:
+            mimics_module.logging.log_user_message(
+                level=logging.WARNING, message=message
+            )
+        except Exception:
+            pass
+        return operation()
 
     error = None
     rollback_error = None

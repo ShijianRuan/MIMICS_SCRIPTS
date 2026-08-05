@@ -1,4 +1,4 @@
-"""Synthetic user-in-the-loop click generation."""
+"""User-in-the-loop click generation for empty or real Initial Masks."""
 
 from __future__ import annotations
 
@@ -133,8 +133,7 @@ class InteractivePromptSampler:
     decay: float = 0.9
     seed: int = 20260724
     initial_mask_probability: float = 0.0
-    provided_initial_mask_probability: float = 0.7
-    correction_policy: str = CORRECTION_POLICY_OFFICIAL_SINGLE
+    correction_policy: str = CORRECTION_POLICY_CLOPA_PAIRED
 
     def __post_init__(self) -> None:
         if self.correction_policy not in {
@@ -148,10 +147,6 @@ class InteractivePromptSampler:
             )
         if not 0.0 <= float(self.initial_mask_probability) <= 1.0:
             raise ValueError("initial_mask_probability must be in [0, 1].")
-        if not 0.0 <= float(self.provided_initial_mask_probability) <= 1.0:
-            raise ValueError(
-                "provided_initial_mask_probability must be in [0, 1]."
-            )
         self.rng = np.random.default_rng(int(self.seed))
 
     def sample_interaction_budgets(
@@ -202,105 +197,14 @@ class InteractivePromptSampler:
             values = np.asarray(values, dtype=np.int64)
         return torch.from_numpy(values)
 
-    def _cutoff_mask(self, foreground: np.ndarray) -> np.ndarray:
-        coordinates = np.argwhere(foreground)
-        axis = int(self.rng.integers(0, 3))
-        low = int(coordinates[:, axis].min())
-        high = int(coordinates[:, axis].max()) + 1
-        extent = max(1, high - low)
-        amount = max(1, int(round(extent * self.rng.uniform(0.15, 0.45))))
-        candidate = foreground.copy()
-        slicer = [slice(None)] * 3
-        if self.rng.random() < 0.5:
-            slicer[axis] = slice(low, min(high, low + amount))
-        else:
-            slicer[axis] = slice(max(low, high - amount), high)
-        candidate[tuple(slicer)] = False
-        return candidate
-
-    def _sparse_slice_mask(self, foreground: np.ndarray) -> np.ndarray:
-        coordinates = np.argwhere(foreground)
-        axis = int(self.rng.integers(0, 3))
-        center = int(np.median(coordinates[:, axis]))
-        half_width = int(self.rng.integers(0, 2))
-        candidate = np.zeros_like(foreground, dtype=bool)
-        slicer = [slice(None)] * 3
-        slicer[axis] = slice(
-            max(0, center - half_width),
-            min(foreground.shape[axis], center + half_width + 1),
-        )
-        candidate[tuple(slicer)] = foreground[tuple(slicer)]
-        return candidate
-
-    def _extra_structure_mask(self, foreground: np.ndarray) -> np.ndarray:
-        candidate = foreground.copy()
-        ring = ndimage.binary_dilation(
-            foreground,
-            structure=np.ones((3, 3, 3), dtype=bool),
-            iterations=int(self.rng.integers(2, 6)),
-        ) & ~foreground
-        coordinates = np.argwhere(ring)
-        if not len(coordinates):
-            coordinates = np.argwhere(~foreground)
-        if not len(coordinates):
-            return candidate
-        point = coordinates[int(self.rng.integers(len(coordinates)))]
-        seed = np.zeros_like(foreground, dtype=bool)
-        seed[tuple(int(value) for value in point)] = True
-        blob = ndimage.binary_dilation(
-            seed,
-            structure=np.ones((3, 3, 3), dtype=bool),
-            iterations=int(self.rng.integers(2, 6)),
-        )
-        return candidate | blob
-
-    def _synthetic_initial_mask(self, foreground: np.ndarray) -> np.ndarray:
-        structure = np.ones((3, 3, 3), dtype=bool)
-        operation = int(self.rng.integers(0, 6))
-        iterations = int(self.rng.integers(1, 4))
-        if operation == 0:
-            candidate = ndimage.binary_erosion(
-                foreground, structure=structure, iterations=iterations
-            )
-        elif operation == 1:
-            candidate = ndimage.binary_dilation(
-                foreground, structure=structure, iterations=iterations
-            )
-        elif operation == 2:
-            shift = [
-                int(self.rng.integers(-iterations, iterations + 1))
-                for _ in range(3)
-            ]
-            candidate = ndimage.shift(
-                foreground.astype(np.uint8),
-                shift=shift,
-                order=0,
-                mode="constant",
-                cval=0,
-                prefilter=False,
-            ).astype(bool)
-        elif operation == 3:
-            candidate = self._cutoff_mask(foreground)
-        elif operation == 4:
-            candidate = self._sparse_slice_mask(foreground)
-        else:
-            candidate = self._extra_structure_mask(foreground)
-        if not candidate.any() or np.array_equal(candidate, foreground):
-            candidate = ndimage.binary_dilation(
-                foreground, structure=structure, iterations=1
-            )
-        if np.array_equal(candidate, foreground):
-            candidate = self._cutoff_mask(foreground)
-        return np.asarray(candidate, dtype=bool)
-
-    def _imperfect_initial_prediction(
+    def _real_or_empty_initial_prediction(
         self,
         target: torch.Tensor,
         probability: float | None = None,
         provided: torch.Tensor | None = None,
         provided_available: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Build empty, supplied, or synthetic initial Masks per sample."""
+        """Use a supplied real Initial Mask or an empty Mask per sample."""
         target_np = target.detach().cpu().numpy().astype(bool)
         predictions = np.zeros_like(target_np, dtype=bool)
         provided_np = (
@@ -324,7 +228,6 @@ class InteractivePromptSampler:
                 or self.rng.random() >= probability
             ):
                 continue
-            candidate = None
             if (
                 provided_np is not None
                 and available_np[batch_index]
@@ -332,13 +235,8 @@ class InteractivePromptSampler:
                 and not np.array_equal(
                     provided_np[batch_index], foreground
                 )
-                and self.rng.random()
-                < float(self.provided_initial_mask_probability)
             ):
-                candidate = provided_np[batch_index]
-            if candidate is None:
-                candidate = self._synthetic_initial_mask(foreground)
-            predictions[batch_index] = candidate
+                predictions[batch_index] = provided_np[batch_index]
         return torch.from_numpy(predictions).to(
             device=target.device, dtype=target.dtype
         )
@@ -352,7 +250,7 @@ class InteractivePromptSampler:
         provided_available: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Return the initial Mask used before the first correction."""
-        return self._imperfect_initial_prediction(
+        return self._real_or_empty_initial_prediction(
             target,
             probability=1.0 if force else None,
             provided=provided,

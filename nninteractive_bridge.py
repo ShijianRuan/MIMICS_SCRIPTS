@@ -69,6 +69,8 @@ from resource_locks import (
     ResourceLockTimeout,
     default_resource_lock_dir,
     process_exists as resource_process_exists,
+    process_matches as resource_process_matches,
+    process_start_marker as resource_process_start_marker,
     release_lock,
 )
 
@@ -83,6 +85,8 @@ SERVER_URL = f"http://{SERVER_HOST}:{SERVER_PORT}"
 SERVER_STARTUP_TIMEOUT = 600  # first CPU startup can take several minutes
 HEALTHZ_RETRY_INTERVAL = 0.5   # seconds between healthz checks
 SERVER_IDLE_TIMEOUT = 1800
+SERVER_HEARTBEAT_STALE_SECONDS = 90.0
+SERVER_IDENTITY_STARTUP_GRACE_SECONDS = SERVER_STARTUP_TIMEOUT + 60.0
 LOG_ROTATE_BYTES = 10 * 1024 * 1024
 LOG_ROTATE_BACKUPS = 3
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -415,28 +419,66 @@ def _process_exists(pid: int) -> bool:
     return resource_process_exists(pid)
 
 
-def _process_command_line(pid: int) -> str | None:
+def _windows_process_command_line(pid: int) -> str | None:
     try:
-        if os.name == "nt":
-            command = [
-                "powershell",
-                "-NoProfile",
-                "-Command",
-                (
-                    "(Get-CimInstance Win32_Process -Filter "
-                    "\"ProcessId = {0}\").CommandLine"
-                ).format(pid),
-            ]
+        import psutil
+
+        values = psutil.Process(pid).cmdline()
+        if values:
+            return subprocess.list2cmdline([str(value) for value in values])
+    except Exception:
+        pass
+    commands = [
+        [
+            "powershell",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            (
+                "(Get-CimInstance Win32_Process -Filter "
+                "\"ProcessId = {0}\").CommandLine"
+            ).format(pid),
+        ],
+        [
+            "wmic",
+            "process",
+            "where",
+            "ProcessId={0}".format(pid),
+            "get",
+            "CommandLine",
+            "/value",
+        ],
+    ]
+    for command in commands:
+        try:
             result = subprocess.run(
                 command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                timeout=10,
+                timeout=6,
                 check=False,
                 **_hidden_process_kwargs(),
             )
-            return result.stdout.strip() or None
+        except (OSError, subprocess.SubprocessError):
+            continue
+        output = result.stdout.strip()
+        if not output:
+            continue
+        if command[0].lower() == "wmic":
+            for line in output.splitlines():
+                if line.strip().lower().startswith("commandline="):
+                    output = line.split("=", 1)[1].strip()
+                    break
+        if output:
+            return output
+    return None
+
+
+def _process_command_line(pid: int) -> str | None:
+    if os.name == "nt":
+        return _windows_process_command_line(pid)
+    try:
         proc_cmdline = Path(f"/proc/{pid}/cmdline")
         if proc_cmdline.is_file():
             return proc_cmdline.read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
@@ -452,6 +494,69 @@ def _process_command_line(pid: int) -> str | None:
         return None
 
 
+def _server_heartbeat_is_recent(
+    state: dict[str, Any],
+    *,
+    now: float | None = None,
+) -> bool:
+    try:
+        heartbeat = float(state.get("server_heartbeat_epoch", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return False
+    current = time.time() if now is None else float(now)
+    return heartbeat > 0.0 and 0.0 <= current - heartbeat <= SERVER_HEARTBEAT_STALE_SECONDS
+
+
+def _server_is_within_startup_grace(
+    state: dict[str, Any],
+    *,
+    now: float | None = None,
+) -> bool:
+    try:
+        started = float(state.get("started_at_epoch", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return False
+    current = time.time() if now is None else float(now)
+    return started > 0.0 and 0.0 <= current - started <= SERVER_IDENTITY_STARTUP_GRACE_SECONDS
+
+
+def _server_health_matches_state(state: dict[str, Any]) -> bool:
+    server_url = str(state.get("server_url") or "").strip()
+    ownership_token = str(state.get("ownership_token") or "").strip()
+    return bool(
+        server_url
+        and ownership_token
+        and _server_running(server_url, ownership_token)
+    )
+
+
+def _owned_server_operation_is_active(
+    state: dict[str, Any],
+    *,
+    now: float | None = None,
+) -> bool:
+    if state.get("active_operation") != "prediction":
+        return False
+    try:
+        pid = int(state.get("active_operation_pid", 0) or 0)
+        started = float(
+            state.get("active_operation_started_at_epoch", 0.0) or 0.0
+        )
+        timeout = max(
+            60.0,
+            float(state.get("active_operation_timeout_seconds", 3600.0) or 3600.0),
+        )
+    except (TypeError, ValueError):
+        return False
+    current = time.time() if now is None else float(now)
+    if started <= 0.0 or not 0.0 <= current - started <= timeout:
+        return False
+    return resource_process_matches(
+        pid,
+        state.get("active_operation_process_start_marker"),
+    )
+
+
 def _process_matches_server(state: dict[str, Any]) -> bool:
     try:
         pid = int(state["pid"])
@@ -461,14 +566,14 @@ def _process_matches_server(state: dict[str, Any]) -> bool:
         return False
     command_line = _process_command_line(pid)
     if not command_line:
-        # The process exists (confirmed by _process_exists) but we could not
-        # read its command line; this can happen due to transient permission
-        # issues or PowerShell/CIM slowness.  Returning False here would cause
-        # the watchdog to abandon a still-running server, leaking GPU memory.
-        # Fall back to trusting the PID: the state file was written by us and
-        # contains a token that is extremely unlikely to collide with a
-        # recycled PID.
-        return True
+        # PID alone is not identity: Windows can recycle it after a crash.
+        # An unreadable command line needs a second, bounded liveness signal.
+        return (
+            _server_health_matches_state(state)
+            or _server_heartbeat_is_recent(state)
+            or _server_is_within_startup_grace(state)
+            or _owned_server_operation_is_active(state)
+        )
     normalized = command_line.lower() if os.name == "nt" else command_line
     required = [
         "nnInteractive.inference.server.main",
@@ -673,6 +778,15 @@ def _touch_server_activity(state_path: Path, ownership_token: str) -> None:
     _write_server_state(state_path, state)
 
 
+def _record_server_heartbeat(state_path: Path, ownership_token: str) -> None:
+    """Record a successful token-authenticated server health check."""
+    state = _load_server_state(state_path)
+    if not state or state.get("ownership_token") != ownership_token:
+        return
+    state["server_heartbeat_epoch"] = time.time()
+    _write_server_state(state_path, state)
+
+
 def _set_server_operation_active(
     state_path: Path,
     ownership_token: str,
@@ -687,10 +801,14 @@ def _set_server_operation_active(
         state["active_operation"] = "prediction"
         state["active_operation_pid"] = os.getpid()
         state["active_operation_started_at_epoch"] = time.time()
+        marker = resource_process_start_marker(os.getpid())
+        if marker:
+            state["active_operation_process_start_marker"] = marker
     else:
         state.pop("active_operation", None)
         state.pop("active_operation_pid", None)
         state.pop("active_operation_started_at_epoch", None)
+        state.pop("active_operation_process_start_marker", None)
     _write_server_state(state_path, state)
 
 
@@ -714,6 +832,10 @@ def _watchdog_main(state_path_value: str, ownership_token: str) -> int:
                 return 0
             time.sleep(5.0)
             continue
+        state_url = str(state.get("server_url") or "").strip()
+        if state_url and _server_running(state_url, ownership_token):
+            _record_server_heartbeat(state_path, ownership_token)
+            state = _load_server_state(state_path) or state
         try:
             operation_pid = int(state.get("active_operation_pid", 0) or 0)
         except (TypeError, ValueError):
@@ -858,6 +980,7 @@ def _start_server(
             "ownership_token": ownership_token,
             "started_at_epoch": time.time(),
             "last_activity_epoch": time.time(),
+            "server_heartbeat_epoch": 0.0,
             "service_idle_timeout_seconds": float(service_idle_timeout_seconds),
         }
         if gpu_lock is not None:
@@ -1013,6 +1136,8 @@ def _ensure_server(
                 _server_log_path(model_dir, runtime_work_dir),
             )
         )
+
+    _record_server_heartbeat(state_path, api_key)
 
     return True, server_url, api_key
 
@@ -1544,7 +1669,7 @@ def _polyline_to_mask(
         return result
     if len(points) == 1:
         return _point_mask(shape, points[0])
-    path_points = list(points)
+    path_points = [list(_bounded_voxel_point(shape, point)) for point in points]
     if closed and path_points[-1] != path_points[0]:
         path_points.append(path_points[0])
     previous = np.asarray(path_points[0], dtype=float)
@@ -1592,13 +1717,35 @@ def _filled_region_boundary(mask: np.ndarray) -> np.ndarray:
     return np.moveaxis(boundary, 0, axis)
 
 
-def _point_mask(shape: list[int], point: list[int]) -> np.ndarray:
-    result = np.zeros(tuple(shape), dtype=bool)
+def _bounded_voxel_point(
+    shape: list[int],
+    point: list[int],
+) -> tuple[int, int, int]:
+    """Validate a point and clamp only a one-voxel edge rounding overshoot."""
     if len(point) != 3:
         raise RuntimeError(f"Point must have three indexes: {point}")
-    indexes = tuple(int(value) for value in point)
-    if not all(0 <= indexes[axis] < int(shape[axis]) for axis in range(3)):
+    if len(shape) != 3 or any(int(value) <= 0 for value in shape):
+        raise RuntimeError(f"Invalid image shape for point interaction: {shape}")
+    try:
+        values = tuple(float(value) for value in point)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"Point indexes must be numeric: {point}") from exc
+    if not all(np.isfinite(value) for value in values):
+        raise RuntimeError(f"Point indexes must be finite: {point}")
+    if any(
+        values[axis] < -1.0 or values[axis] > float(shape[axis])
+        for axis in range(3)
+    ):
         raise RuntimeError(f"Point is outside image bounds: {point} vs {shape}")
+    return tuple(
+        min(max(int(round(values[axis])), 0), int(shape[axis]) - 1)
+        for axis in range(3)
+    )
+
+
+def _point_mask(shape: list[int], point: list[int]) -> np.ndarray:
+    result = np.zeros(tuple(shape), dtype=bool)
+    indexes = _bounded_voxel_point(shape, point)
     result[indexes] = True
     return result
 
@@ -1776,15 +1923,24 @@ def _apply_point_set(
     if not points:
         return 0
 
-    # Preserve the annotator's order. Each point runs inside the external
-    # worker, updates the official session's previous segmentation, and feeds
-    # that result into the next point. Only the final target buffer is copied
-    # back to Mimics.
-    for point, include in points:
+    prediction_policy = str(
+        interaction.get("prediction_policy") or "sequential"
+    ).strip().lower()
+    if prediction_policy not in {"sequential", "initial_empty_batch"}:
+        raise RuntimeError(
+            f"Unsupported point-set prediction policy: {prediction_policy}"
+        )
+
+    # An empty-Mask first prompt may accumulate several points and predict
+    # once. Corrections remain sequential so every new prompt sees the prior
+    # prediction through nnInteractive's previous-segmentation channel.
+    for index, (point, include) in enumerate(points):
         session.add_point_interaction(
             point,
             include_interaction=include,
-            run_prediction=True,
+            run_prediction=(
+                prediction_policy == "sequential" or index == len(points) - 1
+            ),
         )
     return len(points)
 
@@ -1941,13 +2097,13 @@ class _BridgeSessionContext:
             )
 
         self.server_url = str(input_data.get("server_url") or SERVER_URL)
-        auto_start = bool(input_data.get("auto_start_server", True))
-        server_api_key = os.environ.get("NN_INTERACTIVE_API_KEY")
+        self.auto_start_server = bool(input_data.get("auto_start_server", True))
+        self.server_api_key = os.environ.get("NN_INTERACTIVE_API_KEY")
         self.owned_state_path: Path | None = None
         self.owned_token: str | None = None
         server_started = time.time()
-        if auto_start and self.server_url == SERVER_URL:
-            self.first_call, self.server_url, server_api_key = _ensure_server(
+        if self.auto_start_server and self.server_url == SERVER_URL:
+            self.first_call, self.server_url, self.server_api_key = _ensure_server(
                 self.model_dir,
                 self.device,
                 float(input_data.get("server_idle_timeout_seconds", SERVER_IDLE_TIMEOUT)),
@@ -1964,7 +2120,7 @@ class _BridgeSessionContext:
                 str(input_data.get("checkpoint_sha256") or ""),
             )
             self.owned_state_path = _server_state_path(self.model_dir, self.runtime_work_dir)
-            self.owned_token = server_api_key
+            self.owned_token = self.server_api_key
         else:
             self.first_call = False
         self.server_ready_seconds = round(time.time() - server_started, 2)
@@ -1984,27 +2140,8 @@ class _BridgeSessionContext:
                 _write_server_state(self.owned_state_path, state)
         self.session = None
 
-        def _connect_and_upload() -> None:
-            upload_started = time.time()
-            self.session = _connect_remote(
-                self.server_url,
-                server_api_key,
-                prediction_timeout_seconds=float(
-                    input_data.get("prediction_timeout_seconds", 1800)
-                ),
-                set_image_timeout_seconds=float(
-                    input_data.get("set_image_timeout_seconds", 1800)
-                ),
-            )
-            self.session.set_image(self.image_np)
-            self.set_image_seconds = round(time.time() - upload_started, 2)
-            target_started = time.time()
-            self.target = np.zeros(self.image_np.shape[1:], dtype=np.uint8)
-            self.session.set_target_buffer(self.target)
-            self.set_target_seconds = round(time.time() - target_started, 2)
-
         try:
-            _connect_and_upload()
+            self._connect_and_upload()
         except Exception as exc:
             if self.session is not None:
                 try:
@@ -2013,7 +2150,7 @@ class _BridgeSessionContext:
                     pass
                 self.session = None
             can_restart_owned_server = (
-                auto_start
+                self.auto_start_server
                 and self.server_url.startswith("http://127.0.0.1:")
                 and self.owned_state_path is not None
                 and _is_capacity_error(exc)
@@ -2041,7 +2178,7 @@ class _BridgeSessionContext:
                 server_url=self.server_url,
                 error=str(exc),
             )
-            self.first_call, self.server_url, server_api_key = _ensure_server(
+            self.first_call, self.server_url, self.server_api_key = _ensure_server(
                 self.model_dir,
                 self.device,
                 float(input_data.get("server_idle_timeout_seconds", SERVER_IDLE_TIMEOUT)),
@@ -2058,8 +2195,8 @@ class _BridgeSessionContext:
                 str(input_data.get("checkpoint_sha256") or ""),
             )
             self.owned_state_path = _server_state_path(self.model_dir, self.runtime_work_dir)
-            self.owned_token = server_api_key
-            _connect_and_upload()
+            self.owned_token = self.server_api_key
+            self._connect_and_upload()
         self.initial_platform = self._load_initial_platform(
             input_data.get("initial_seg_path"),
             input_data.get("initial_seg_shape"),
@@ -2092,6 +2229,138 @@ class _BridgeSessionContext:
                 "image_source_intensity_recovery_basis", ""
             ),
         )
+
+    def _connect_and_upload(self) -> None:
+        upload_started = time.time()
+        self.session = _connect_remote(
+            self.server_url,
+            self.server_api_key,
+            prediction_timeout_seconds=float(
+                self.input_data.get("prediction_timeout_seconds", 1800)
+            ),
+            set_image_timeout_seconds=float(
+                self.input_data.get("set_image_timeout_seconds", 1800)
+            ),
+        )
+        self.session.set_image(self.image_np)
+        self.set_image_seconds = round(time.time() - upload_started, 2)
+        target_started = time.time()
+        self.target = np.zeros(self.image_np.shape[1:], dtype=np.uint8)
+        self.session.set_target_buffer(self.target)
+        self.set_target_seconds = round(time.time() - target_started, 2)
+
+    @staticmethod
+    def _server_failure_is_recoverable(exc: BaseException) -> bool:
+        text = str(exc).lower()
+        if any(
+            value in text
+            for value in (
+                "out of memory",
+                "cuda error",
+                "cudnn error",
+                "device-side assert",
+                "model file not found",
+                "checkpoint",
+                "corrupt",
+                "outside image bounds",
+                "out of bounds",
+                "indexerror",
+                "index error",
+            )
+        ):
+            return False
+        return any(
+            value in text
+            for value in (
+                "10061",
+                "connection refused",
+                "failed to establish a new connection",
+                "remote end closed connection",
+                "server disconnected",
+                "server is not running",
+                "status code 500",
+                "http 500",
+                "internal server error",
+            )
+        )
+
+    def _restart_owned_server(self, exc: BaseException) -> None:
+        if not (
+            self.auto_start_server
+            and self.server_url.startswith("http://127.0.0.1:")
+            and self.owned_state_path is not None
+        ):
+            raise RuntimeError(
+                "The nnInteractive server connection failed and this client "
+                "does not own a local server that can be restarted: {}".format(exc)
+            ) from exc
+        if self.session is not None:
+            try:
+                self.session.close()
+            except Exception:
+                pass
+            self.session = None
+        state = _load_server_state(self.owned_state_path)
+        if state and state.get("ownership_token") == self.owned_token:
+            if _process_matches_server(state) and not _terminate_owned_server(state):
+                raise RuntimeError(
+                    "The failed nnInteractive server could not be stopped safely."
+                ) from exc
+            if not _remove_server_state(self.owned_state_path, self.owned_token):
+                raise RuntimeError(
+                    "The failed nnInteractive server state could not be retired safely."
+                ) from exc
+        _append_bridge_log(
+            self.log_path,
+            "server_recovery_restart",
+            error=str(exc),
+            server_url=self.server_url,
+        )
+        self.first_call, self.server_url, self.server_api_key = _ensure_server(
+            self.model_dir,
+            self.device,
+            float(
+                self.input_data.get(
+                    "server_idle_timeout_seconds", SERVER_IDLE_TIMEOUT
+                )
+            ),
+            float(
+                self.input_data.get(
+                    "server_startup_timeout_seconds", SERVER_STARTUP_TIMEOUT
+                )
+            ),
+            SERVER_URL,
+            self.input_data.get("fold", "auto"),
+            float(self.input_data.get("gpu_lock_timeout_seconds", 30)),
+            self.runtime_work_dir,
+            str(self.input_data.get("checkpoint_sha256") or ""),
+        )
+        self.owned_state_path = _server_state_path(
+            self.model_dir, self.runtime_work_dir
+        )
+        self.owned_token = self.server_api_key
+        self._connect_and_upload()
+        state = _load_server_state(self.owned_state_path)
+        if state and state.get("ownership_token") == self.owned_token:
+            state["client_pid"] = os.getpid()
+            state["active_operation_timeout_seconds"] = max(
+                60.0,
+                float(
+                    self.input_data.get("prediction_timeout_seconds", 1800)
+                )
+                + 60.0,
+            )
+            control_dir = str(
+                self.input_data.get("async_worker_control_dir") or ""
+            ).strip()
+            if control_dir:
+                state["client_control_dir"] = control_dir
+            _write_server_state(self.owned_state_path, state)
+            _set_server_operation_active(
+                self.owned_state_path, self.owned_token, True
+            )
+        self._applied_initial_key = None
+        self._applied_interaction_fingerprints = []
 
     def _load_initial_platform(
         self,
@@ -2136,16 +2405,30 @@ class _BridgeSessionContext:
         if owned_state_path is not None and owned_token:
             _set_server_operation_active(owned_state_path, owned_token, True)
         try:
-            return self._predict_impl(
-                interactions,
-                output_path,
-                initial_seg_path=initial_seg_path,
-                initial_seg_shape=initial_seg_shape,
-                use_context_initial_seg=use_context_initial_seg,
-            )
+            try:
+                return self._predict_impl(
+                    interactions,
+                    output_path,
+                    initial_seg_path=initial_seg_path,
+                    initial_seg_shape=initial_seg_shape,
+                    use_context_initial_seg=use_context_initial_seg,
+                )
+            except Exception as exc:
+                if not self._server_failure_is_recoverable(exc):
+                    raise
+                self._restart_owned_server(exc)
+                return self._predict_impl(
+                    interactions,
+                    output_path,
+                    initial_seg_path=initial_seg_path,
+                    initial_seg_shape=initial_seg_shape,
+                    use_context_initial_seg=use_context_initial_seg,
+                )
         finally:
-            if owned_state_path is not None and owned_token:
-                _set_server_operation_active(owned_state_path, owned_token, False)
+            current_path = self.owned_state_path or owned_state_path
+            current_token = self.owned_token or owned_token
+            if current_path is not None and current_token:
+                _set_server_operation_active(current_path, current_token, False)
 
     def _predict_impl(
         self,
@@ -2443,6 +2726,9 @@ _FATAL_ERROR_SUBSTRINGS = [
     "connection refused",
     "server is not running",
     "server died",
+    "status code 500",
+    "http 500",
+    "internal server error",
 ]
 
 

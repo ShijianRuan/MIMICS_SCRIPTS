@@ -20,6 +20,12 @@ contract. The image is built
 once. Starting a later training job creates a small disposable container from
 the existing image and does not rebuild the image.
 
+The image contains a snapshot of the project code. After pulling changes that
+touch `tools/`, `runtime_py35/`, or an `external/` training package, rebuild the
+image with `remote/setup_remote_server.sh --build` before starting another
+remote job. Dataset caches and model weights live outside the image and are not
+deleted by this rebuild.
+
 ## Build once and transfer an image archive
 
 On a Linux build machine:

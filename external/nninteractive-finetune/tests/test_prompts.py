@@ -67,7 +67,7 @@ def test_weighted_interaction_budgets_follow_configured_support():
     assert torch.equal(budgets, torch.ones_like(budgets))
 
 
-def test_existing_mask_training_populates_previous_segmentation_channel():
+def test_missing_real_initial_mask_keeps_previous_segmentation_empty():
     target = torch.zeros((1, 24, 24, 24), dtype=torch.long)
     target[:, 5:19, 5:19, 5:19] = 1
     sampler = InteractivePromptSampler(
@@ -81,8 +81,7 @@ def test_existing_mask_training_populates_previous_segmentation_channel():
         force_initial_mask=True,
     )
     previous = interactions[:, PREVIOUS_SEGMENTATION_CHANNEL]
-    assert float(previous.sum()) > 0
-    assert not torch.equal(previous, target.float())
+    assert float(previous.sum()) == 0
     assert (
         interactions[:, POSITIVE_POINT_CHANNEL].max() == 1
         or interactions[:, NEGATIVE_POINT_CHANNEL].max() == 1
@@ -125,7 +124,7 @@ def test_mixed_error_chooses_exactly_one_signed_event():
     assert (target & ~prediction)[point] if include else (prediction & ~target)[point]
 
 
-def test_supplied_initial_mask_is_used_before_synthetic_fallback():
+def test_supplied_real_initial_mask_is_used_exactly():
     target = torch.zeros((1, 24, 24, 24), dtype=torch.long)
     target[:, 5:19, 5:19, 5:19] = 1
     supplied = torch.zeros_like(target)
@@ -134,7 +133,6 @@ def test_supplied_initial_mask_is_used_before_synthetic_fallback():
         radius=2,
         seed=37,
         initial_mask_probability=1.0,
-        provided_initial_mask_probability=1.0,
     )
     interactions = sampler.new_interactions(
         target,
@@ -147,7 +145,7 @@ def test_supplied_initial_mask_is_used_before_synthetic_fallback():
     )
 
 
-def test_supplied_initial_masks_keep_a_synthetic_fraction():
+def test_unavailable_supplied_mask_falls_back_to_empty_not_synthetic():
     target = torch.zeros((1, 24, 24, 24), dtype=torch.long)
     target[:, 5:19, 5:19, 5:19] = 1
     supplied = torch.zeros_like(target)
@@ -155,14 +153,12 @@ def test_supplied_initial_masks_keep_a_synthetic_fraction():
     sampler = InteractivePromptSampler(
         seed=41,
         initial_mask_probability=1.0,
-        provided_initial_mask_probability=0.0,
     )
     interactions = sampler.new_interactions(
         target,
         force_initial_mask=True,
         initial_prediction=supplied,
-        initial_mask_available=torch.tensor([True]),
+        initial_mask_available=torch.tensor([False]),
     )
     previous = interactions[:, PREVIOUS_SEGMENTATION_CHANNEL]
-    assert not torch.equal(previous, supplied.float())
-    assert not torch.equal(previous, target.float())
+    assert not torch.any(previous)

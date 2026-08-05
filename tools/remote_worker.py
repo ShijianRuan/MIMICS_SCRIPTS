@@ -264,6 +264,20 @@ def run_nninteractive(job_dir: Path, request: dict[str, Any]) -> int:
             "updated_at_epoch": time.time(),
         },
     )
+    _write_json(
+        pipeline_job / "control.json",
+        {"action": "run", "updated_at_epoch": time.time()},
+    )
+    return _run(
+        [
+            sys.executable,
+            str(pipeline),
+            "run",
+            "--job-dir",
+            str(pipeline_job),
+        ],
+        job_dir,
+    )
 
 
 def run_nnunet(job_dir: Path, request: dict[str, Any]) -> int:

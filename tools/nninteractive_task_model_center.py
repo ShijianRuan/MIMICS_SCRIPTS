@@ -459,7 +459,7 @@ class ModelCenter:
         initial_source_label.setMinimumWidth(172)
         self.initial_mask_source_combo = QtWidgets.QComboBox()
         self.initial_mask_source_combo.addItem(
-            "Synthetic corrections only", "synthetic"
+            "No Initial Mask (start empty)", "none"
         )
         self.initial_mask_source_combo.addItem(
             "Another Mask in saved .mcs projects", "mcs"
@@ -602,8 +602,9 @@ class ModelCenter:
         )
         self.training_goal.setToolTip(
             "General adaptation trains both new annotations and corrections. "
-            "Every simulated point is followed by a prediction; trajectories "
-            "use one to five corrections and stop early when no error remains."
+            "Each correction step can add one foreground and one background "
+            "point before prediction; trajectories use one to eight steps and "
+            "stop early when no error remains."
         )
         training_layout.addWidget(self.training_goal, 1, 1)
         training_layout.addWidget(QtWidgets.QLabel("Starting model"), 0, 2)
@@ -615,6 +616,26 @@ class ModelCenter:
         training_layout.setColumnStretch(1, 1)
         training_layout.setColumnStretch(2, 1)
         adaptation_layout.addLayout(training_layout)
+        mirror_row = QtWidgets.QHBoxLayout()
+        mirror_row.setContentsMargins(22, 4, 0, 0)
+        mirror_label = QtWidgets.QLabel("Anatomy mirroring")
+        mirror_label.setMinimumWidth(172)
+        self.mirror_policy = QtWidgets.QComboBox()
+        self.mirror_policy.addItem(
+            "Automatic (protect left/right targets)", "auto"
+        )
+        self.mirror_policy.addItem(
+            "Preserve left/right orientation", "preserve_lr"
+        )
+        self.mirror_policy.addItem("Allow all spatial axes", "all_axes")
+        self.mirror_policy.setToolTip(
+            "Automatic disables left-right mirroring when the task or Target "
+            "Mask name contains left/right, L/R, or 左/右. Other spatial "
+            "mirroring remains enabled."
+        )
+        mirror_row.addWidget(mirror_label)
+        mirror_row.addWidget(self.mirror_policy, 1)
+        adaptation_layout.addLayout(mirror_row)
         layout.addWidget(adaptation)
         layout.addStretch(1)
         scroll.setWidget(body)
@@ -670,6 +691,10 @@ class ModelCenter:
         metrics.addWidget(self.best_label)
         metrics.addStretch(1)
         status_layout.addLayout(metrics)
+        self.auc_detail_label = QtWidgets.QLabel("")
+        self.auc_detail_label.setObjectName("hint")
+        self.auc_detail_label.setWordWrap(True)
+        status_layout.addWidget(self.auc_detail_label)
         layout.addWidget(status_surface)
 
         lower = QtWidgets.QSplitter(self.QtCore.Qt.Horizontal)
@@ -914,9 +939,9 @@ class ModelCenter:
     def _update_source_visibility(self):
         source = normalized_source_mode(self.source_combo.currentData())
         initial_source = (
-            str(self.initial_mask_source_combo.currentData() or "synthetic")
+            str(self.initial_mask_source_combo.currentData() or "none")
             if hasattr(self, "initial_mask_source_combo")
-            else "synthetic"
+            else "none"
         )
         self.mcs_path_widget.setVisible(
             source == "mcs_refresh" or initial_source == "mcs"
@@ -939,8 +964,14 @@ class ModelCenter:
             else "general"
         )
         enabled = goal != "start_empty"
+        if not enabled:
+            empty_index = self.initial_mask_source_combo.findData("none")
+            if empty_index >= 0 and self.initial_mask_source_combo.currentIndex() != empty_index:
+                self.initial_mask_source_combo.blockSignals(True)
+                self.initial_mask_source_combo.setCurrentIndex(empty_index)
+                self.initial_mask_source_combo.blockSignals(False)
         source = str(
-            self.initial_mask_source_combo.currentData() or "synthetic"
+            self.initial_mask_source_combo.currentData() or "none"
         )
         self.initial_mask_source_combo.setEnabled(enabled)
         show_names = enabled and source in ("mcs", "exported_masks")
@@ -967,21 +998,18 @@ class ModelCenter:
             elif source == "mcs":
                 text = (
                     "A matching draft Mask is read from each saved project. "
-                    "Training uses real drafts for about 70% of existing-Mask "
-                    "samples and synthetic variations for the remaining 30%. "
-                    "Cases without a matching draft still use synthetic variations."
+                    "Only real drafts are used. General training starts empty "
+                    "for cases without one; refine-existing training skips them."
                 )
             elif source == "exported_masks":
                 text = (
-                    "A matching NIfTI draft is read for each case. Training "
-                    "keeps a 70% real / 30% synthetic mix; missing drafts fall "
-                    "back to synthetic variations."
+                    "A matching NIfTI draft is read for each case. Only real "
+                    "drafts are used; no synthetic Initial Mask is generated."
                 )
             else:
                 text = (
-                    "Initial Masks are simulated from final annotations. "
-                    "Choose another source only when real AI drafts or partial "
-                    "annotations have been saved."
+                    "Training starts from an empty Mask. Choose another source "
+                    "only when real AI drafts or partial annotations are available."
                 )
             self.initial_mask_hint.setText(text)
         if self.case_rows:
@@ -1047,12 +1075,12 @@ class ModelCenter:
                 )
             ),
             (
-                "synthetic"
+                "none"
                 if str(self.training_goal.currentData() or "general")
                 == "start_empty"
                 else str(
                     self.initial_mask_source_combo.currentData()
-                    or "synthetic"
+                    or "none"
                 )
             ),
             normalized_path(self.initial_mask_root_edit),
@@ -1100,10 +1128,10 @@ class ModelCenter:
         prepared_labels = self.prepared_label_edit.text().strip()
         goal = str(self.training_goal.currentData() or "general")
         initial_source = (
-            "synthetic"
+            "none"
             if goal == "start_empty"
             else str(
-                self.initial_mask_source_combo.currentData() or "synthetic"
+                self.initial_mask_source_combo.currentData() or "none"
             )
         )
         initial_mask_names = [
@@ -1143,6 +1171,13 @@ class ModelCenter:
                 "Enter the Initial Mask name before scanning."
             )
             self._finish_scan_progress("Initial Mask name is required", False)
+            return
+        if goal == "refine_existing" and initial_source == "none":
+            self.scan_hint.setText(
+                "Refine an existing Mask requires saved .mcs drafts or "
+                "previously exported Initial Masks."
+            )
+            self._finish_scan_progress("Initial Mask source is required", False)
             return
         if initial_source == "mcs" and not mcs_dir:
             self.scan_hint.setText(
@@ -1267,7 +1302,7 @@ class ModelCenter:
         elif rows:
             ready = sum(row.get("state") == "ready" for row in rows)
             unavailable = len(rows) - ready
-            initial_source = str(scan_signature[5] or "synthetic")
+            initial_source = str(scan_signature[5] or "none")
             if initial_source == "exported_masks":
                 initial_count = sum(
                     bool(row.get("initial_mask"))
@@ -1276,15 +1311,16 @@ class ModelCenter:
                 )
                 initial_note = (
                     " {} of {} usable case(s) have a matching real Initial "
-                    "Mask; the rest use synthetic variations."
+                    "Mask; other cases start empty in General mode."
                 ).format(initial_count, ready)
             elif initial_source == "mcs":
                 initial_note = (
                     " Initial Masks in saved projects are verified when "
-                    "training starts; missing drafts use synthetic variations."
+                    "training starts. Missing drafts start empty in General "
+                    "mode and are skipped in Refine Existing mode."
                 )
             else:
-                initial_note = " Initial Masks will be simulated online."
+                initial_note = " Training starts from an empty Mask."
             if scan_signature[0] == "mcs_refresh":
                 self.scan_hint.setText(
                     "{} saved project candidate(s) found; {} case(s) are missing "
@@ -1546,12 +1582,12 @@ class ModelCenter:
             ),
             "mask_names": mask_names,
             "initial_mask_source": (
-                "synthetic"
+                "none"
                 if str(self.training_goal.currentData() or "general")
                 == "start_empty"
                 else str(
                     self.initial_mask_source_combo.currentData()
-                    or "synthetic"
+                    or "none"
                 )
             ),
             "initial_mask_names": [
@@ -1560,13 +1596,13 @@ class ModelCenter:
                 if value.strip()
             ],
             "initial_mask_root": self.initial_mask_root_edit.text().strip(),
-            "provided_initial_mask_probability": 0.7,
             "cases": selected,
             "strategy": "clopa_in" if self.light_radio.isChecked() else "clopa_conv",
             "training_goal": str(
                 self.training_goal.currentData() or "general"
             ),
             "epochs": int(self.epochs.value()),
+            "mirror_policy": str(self.mirror_policy.currentData() or "auto"),
             "base_model_dir": str(base_model.resolve()),
             "parent_model_id": str(parent.get("model_id") if parent else "official"),
             "model_id": model_id,
@@ -1898,10 +1934,62 @@ class ModelCenter:
             else "Loss  -"
         )
         validation = latest.get("validation") or {}
-        auc = validation.get("trajectory_auc")
-        self.auc_label.setText(
-            "Validation AUC  {:.4f}".format(float(auc)) if auc is not None else "Validation AUC  -"
+        quality = status.get("quality") or {}
+        final_validation = bool(
+            state == "completed" and quality.get("mode_comparisons")
         )
+        auc = (
+            quality.get("candidate_auc")
+            if final_validation
+            else validation.get("trajectory_auc")
+        )
+        self.auc_label.setText(
+            "{}  {:.4f}".format(
+                "Final validation AUC" if final_validation else "Validation AUC",
+                float(auc),
+            )
+            if auc is not None
+            else "Validation AUC  -"
+        )
+        auc_details = []
+        if final_validation:
+            metric_rows = []
+            for title, mode in (
+                ("Empty start", "empty_mask"),
+                ("Existing Mask", "real_initial_mask"),
+            ):
+                comparison = (quality.get("mode_comparisons") or {}).get(mode) or {}
+                metric_rows.append(
+                    (
+                        title,
+                        comparison.get("candidate_auc"),
+                        comparison.get("starting_mask_dice"),
+                    )
+                )
+        else:
+            metric_rows = [
+                (
+                    "Empty start",
+                    validation.get("empty_mask_trajectory_auc"),
+                    validation.get("empty_mask_baseline_dice"),
+                ),
+                (
+                    "Existing Mask",
+                    validation.get("initial_mask_trajectory_auc"),
+                    validation.get("initial_mask_baseline_dice"),
+                ),
+            ]
+        for title, mode_auc, mode_baseline in metric_rows:
+            if mode_auc is None:
+                continue
+            detail = "{} AUC {:.4f}".format(title, float(mode_auc))
+            if mode_baseline is not None:
+                detail += " (baseline {:.4f}, {:+.4f})".format(
+                    float(mode_baseline),
+                    float(mode_auc) - float(mode_baseline),
+                )
+            auc_details.append(detail)
+        self.auc_detail_label.setText("  ·  ".join(auc_details))
         self.best_label.setText(
             "Best AUC  {:.4f}".format(float(status["best_score"]))
             if status.get("best_score") not in (None, float("-inf"))

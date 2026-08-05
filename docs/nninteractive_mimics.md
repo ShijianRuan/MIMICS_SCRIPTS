@@ -64,7 +64,7 @@ Reset；选择 Copy 前也不会同步复制大 Mask。
 
 | nnInteractive 提示 | Mimics 采集方式 | 转换方式 |
 | --- | --- | --- |
-| Include/Exclude point set | 多次 `mimics.indicate_coordinate(confirm=False)` | 一次收集任意数量的正负点；最后统一触发一次预测 |
+| Include/Exclude point set | 多次 `mimics.indicate_coordinate(confirm=False)` | 空 Mask 的会话首轮可一次收集多个正负点并只预测一次；已有结果上的修正按点逐轮预测 |
 | Include scribble | 临时 Prompt Mask + `activate_edit_mask(..., "Ellipse", "Draw")` | 把用户画出的 Ellipse 区域裁剪为 Scribble mask |
 | Exclude scribble | 同上 | 写入 Scribble negative channel |
 | Foreground box | `mimics.measure.indicate_distance_measurement()` | 两端点作为二维矩形对角点，转换为半开区间 bbox |
@@ -104,17 +104,17 @@ Windows 实机仍需确认 Mimics 21 的一次 Ellipse 编辑会话能否连续�
 - 按顺序累积的所有提示；
 - 每次预测写回的 target buffer。
 
-Mimics 集成的外部 bridge 每次调用都会关闭 remote session，因此不能直接保留服务器端 session。当前实现采用等价的有序重放：
+Mimics 集成会在外部 image worker 中保留同一 remote session 和已经上传、预处理的图像。正常追加提示时只发送新增提示；Undo、Reset、提示历史变化或 worker 重启时，才从进入会话时保存的 Initial Mask 有序重放：
 
 1. 进入工具时保存一次目标 Mask，作为本次工具会话的 initial segmentation；
-2. 每次新增提示后，新建 remote session；
-3. 注入同一份 initial segmentation；
-4. 按原顺序重放此前所有提示，每个提示事件保持原来的预测边界；
+2. 首次建立 remote session 后上传图像并保留 target buffer；
+3. 正常追加时只执行新增提示，让它读取上一轮 prediction 形成的 previous segmentation；
+4. 需要重放时先 reset，再注入同一份 initial segmentation，并按原顺序执行提示；
 5. 把最终 target buffer 写回 Mimics Mask。
 
 因此连续修正不是“把刚预测出的 Mask 再作为新的 initial segmentation”。后者会在每次提示时重置交互通道并累积模型误差。只有退出工具并重新启动时，当前 Mimics Mask 才成为下一次工具会话的新 initial segmentation。
 
-Point Set 是一个提示事件：多个正负点以 `run_prediction=False` 写入，最后一个点触发一次预测。多切片 Scribble 同理，所有二维 crop 写入后只触发一次预测。
+空 Mask 的首个 Point Set 是一个批量初始化事件：前 N-1 个点以 `run_prediction=False` 写入，最后一个点触发一次预测，以减少首次等待。已有 Initial Mask、已有预测结果后的 Point Set，以及任何后续纠错，全部按点 `run_prediction=True` 顺序执行，保证每一点都看到上一轮结果。多切片 Scribble 仍按切片顺序执行，因为每个新交互都可能改变下一轮的 previous segmentation。
 
 ## 6. 与旧 diff 方案的区别
 
@@ -310,7 +310,7 @@ setx NNINTERACTIVE_MODEL_DIR "D:\nninteractive_env\models\nnInteractive_v1.0"
 2. 任意非平台项目可以直接运行。
 3. 选中已有 Mask 后结果写回正确 Mask。
 4. 未选 Mask 时可创建新结果 Mask。
-5. 一个 Point Set 中可混合多个 Include/Exclude 点，并且只执行一次预测；Run、Discard 和异常退出后均无残留 Point。
+5. 一个 Point Set 中可混合多个 Include/Exclude 点；空 Mask 首轮只执行一次预测，已有 Mask 或后续修正逐点预测；Run、Discard 和异常退出后均无残留 Point。
 6. Point 使用 `confirm=False` 时单击即可返回，没有额外 OK。
 7. Ellipse Scribble 的正负语义正确；检查一次 Edit Masks 会话能否画多个区域。
 8. Distance Measurement 两端点正确生成二维 bbox，测量对象随后被删除。

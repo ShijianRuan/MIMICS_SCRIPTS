@@ -1,10 +1,35 @@
+import json
+
 import torch
+
+from nninteractive_finetune.checkpoint import (
+    _write_inference_prompt_contract,
+)
 
 from nninteractive_finetune.model import (
     configure_trainable_parameters,
     network_parameter_fingerprint,
     state_dict_loaded_parameter_fingerprint,
 )
+
+
+def test_inference_prompt_contract_is_explicit_and_preserves_capabilities(
+    tmp_path,
+):
+    path = tmp_path / "inference_info.json"
+    path.write_text(
+        json.dumps({"supported_interactions": {"points": True}}),
+        encoding="utf-8",
+    )
+    values = _write_inference_prompt_contract(
+        tmp_path,
+        {"point_radius": 5, "interaction_decay": 0.9},
+    )
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert values == saved
+    assert saved["supported_interactions"] == {"points": True}
+    assert saved["point_radius"] == 5
+    assert saved["interaction_decay"] == 0.9
 
 
 class ToyNetwork(torch.nn.Module):
