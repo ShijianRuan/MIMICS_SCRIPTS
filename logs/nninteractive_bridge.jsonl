@@ -1,9 +1,0 @@
-{"time": "2026-07-01T12:58:10", "event": "port_conflict_fallback", "pid": 134836, "preferred_url": "http://127.0.0.1:8140", "fallback_url": "http://127.0.0.1:8142"}
-{"time": "2026-07-03T20:25:14", "event": "port_conflict_fallback", "pid": 22647, "preferred_url": "http://127.0.0.1:1527", "fallback_url": "http://127.0.0.1:63857"}
-{"time": "2026-07-03T20:25:30", "event": "port_conflict_fallback", "pid": 23326, "preferred_url": "http://127.0.0.1:1527", "fallback_url": "http://127.0.0.1:63876"}
-{"time": "2026-07-03T20:26:22", "event": "port_conflict_fallback", "pid": 24151, "preferred_url": "http://127.0.0.1:1527", "fallback_url": "http://127.0.0.1:63889"}
-{"time": "2026-07-03T20:27:04", "event": "port_conflict_fallback", "pid": 25117, "preferred_url": "http://127.0.0.1:1527", "fallback_url": "http://127.0.0.1:63918"}
-{"time": "2026-07-03T20:27:51", "event": "port_conflict_fallback", "pid": 26079, "preferred_url": "http://127.0.0.1:1527", "fallback_url": "http://127.0.0.1:63957"}
-{"time": "2026-07-04T12:12:44", "event": "port_conflict_fallback", "pid": 42190, "preferred_url": "http://127.0.0.1:1527", "fallback_url": "http://127.0.0.1:52781"}
-{"time": "2026-07-04T12:12:56", "event": "port_conflict_fallback", "pid": 42581, "preferred_url": "http://127.0.0.1:1527", "fallback_url": "http://127.0.0.1:52798"}
-{"time": "2026-07-04T12:14:09", "event": "port_conflict_fallback", "pid": 43464, "preferred_url": "http://127.0.0.1:1527", "fallback_url": "http://127.0.0.1:52863"}

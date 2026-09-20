@@ -49,7 +49,7 @@
   "gpu_lock_timeout_seconds": 900,
   "inference_gpu_lock_timeout_seconds": 3600,
   "background_mimics_lock_timeout_seconds": 1800,
-  "dinov3_project": "external/dinov3-medical-seg",
+  "dinov3_project": "E:/mimics_script_offline/external/dinov3-medical-seg",
   "python": "",
   "organ_mask_aliases": {},
   "training_profiles": {

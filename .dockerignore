@@ -30,7 +30,5 @@ external/nninteractive-finetune/tests
 external/nninteractive-finetune/tests/**
 external/nninteractive-finetune/work
 external/nninteractive-finetune/work/**
-external/RONDON_analysis
-external/RONDON_analysis/**
 docs/MimicsHelp_MD
 docs/MimicsHelp_MD/**

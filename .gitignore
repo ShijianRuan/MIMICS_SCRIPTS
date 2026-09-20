@@ -1,4 +1,5 @@
 # Environments
+python_env/
 nninteractive_env/
 
 # Runtime state and caches (per-user/machine, auto-generated)
