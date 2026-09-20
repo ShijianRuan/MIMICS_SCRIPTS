@@ -24,6 +24,8 @@ from src.data.spatial import (
 )
 from src.evaluation import binary_metrics
 from src.models.decoder_3d import (
+    DecoderFactory,
+    FixedZGaussianSmooth,
     LearnableZSmooth,
     MLPProbeDecoder3D,
     SegFormer3DDecoder,
@@ -41,6 +43,7 @@ from src.research.protocol import (
     select_diverse_support,
 )
 from src.training.losses import get_loss
+from src.training.trainer import _depth_chunk_specs
 from src.utils.config import load_config
 
 
@@ -166,6 +169,49 @@ def test_dice_focal_cldice_has_finite_gradient():
     assert torch.isfinite(result["loss"])
     result["loss"].backward()
     assert logits.grad is not None and torch.isfinite(logits.grad).all()
+
+
+def test_z_gradient_consistency_loss_has_finite_gradient():
+    criterion = get_loss({
+        "loss": {
+            "type": "dice_focal",
+            "z_consistency_weight": 0.05,
+        }
+    })
+    logits = torch.randn(1, 2, 8, 12, 12, requires_grad=True)
+    target = torch.zeros(1, 8, 12, 12, dtype=torch.long)
+    target[:, 2:6, 4:8, 4:8] = 1
+    result = criterion(logits, target)
+    assert torch.isfinite(result["loss"])
+    assert torch.isfinite(result["z_consistency_loss"])
+    result["loss"].backward()
+    assert logits.grad is not None and torch.isfinite(logits.grad).all()
+
+
+def test_depth_chunk_specs_add_halo_but_cover_each_core_once():
+    specs = _depth_chunk_specs(depth=70, chunk_size=32, halo=8)
+    assert [(row[2], row[3]) for row in specs] == [(0, 32), (32, 64), (64, 70)]
+    assert specs[0][:2] == (0, 40)
+    assert specs[1][:2] == (24, 70)
+    assert specs[2][:2] == (56, 70)
+    covered = []
+    for _input_start, _input_end, core_start, core_end in specs:
+        covered.extend(range(core_start, core_end))
+    assert covered == list(range(70))
+
+
+def test_multiscale_decoder_applies_fixed_z_smoothing_when_requested():
+    decoder = DecoderFactory.create(
+        "context3d_multiscale",
+        [8, 8, 8, 8],
+        num_classes=2,
+        z_smooth_sigma=2.0,
+        decoder_options={"z_smooth_learnable": False},
+    )
+    assert isinstance(decoder.z_smooth, FixedZGaussianSmooth)
+    features = [torch.randn(1, 8, 8, 8, 8) for _ in range(4)]
+    output = decoder(features, (1, 1, 8, 32, 32))
+    assert output.shape == (1, 2, 8, 32, 32)
 
 
 def test_focused_plan_is_k5_only_and_small_matrix():

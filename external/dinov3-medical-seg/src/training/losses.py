@@ -196,6 +196,40 @@ class FocalLoss(nn.Module):
         return _masked_mean(loss, valid)
 
 
+class ZGradientConsistencyLoss(nn.Module):
+    """Match foreground probability transitions to the target along depth.
+
+    A plain total-variation penalty would also suppress legitimate organ
+    boundaries. This loss instead compares the absolute Z-gradient of the
+    predicted foreground probability with the binary target's Z-gradient:
+    transitions are allowed where the label changes, while isolated slice
+    islands and holes inside a constant-label run are penalized.
+    """
+
+    def __init__(self, smooth: float = 1e-6):
+        super().__init__()
+        self.smooth = float(smooth)
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        if pred.shape[2] < 2:
+            return pred.sum() * 0.0
+        safe_target, valid = _safe_target_and_mask(target)
+        probability = F.softmax(pred, dim=1)[:, 1]
+        predicted_gradient = torch.abs(probability[:, 1:] - probability[:, :-1])
+        target_foreground = (safe_target == 1).to(dtype=probability.dtype)
+        target_gradient = torch.abs(
+            target_foreground[:, 1:] - target_foreground[:, :-1]
+        )
+        pair_valid = valid[:, 1:] & valid[:, :-1]
+        error = F.smooth_l1_loss(
+            predicted_gradient,
+            target_gradient,
+            reduction="none",
+            beta=self.smooth,
+        )
+        return _masked_mean(error, pair_valid)
+
+
 class TverskyLoss(nn.Module):
     """Tversky Loss — generalisation of Dice with asymmetry control.
 
@@ -243,23 +277,44 @@ class TverskyLoss(nn.Module):
 
 
 class DiceFocalLoss(nn.Module):
-    """Combined Dice + Focal Loss — Dice for region overlap, Focal for hard pixels."""
+    """Dice + Focal with an optional target-guided Z continuity term."""
 
     def __init__(self, dice_weight: float = 0.5, focal_weight: float = 0.5,
                  focal_alpha: float = 0.25, focal_gamma: float = 2.0,
-                 class_weights=None):
+                 class_weights=None, z_consistency_weight: float = 0.0):
         super().__init__()
         self.dice_weight = dice_weight
         self.focal_weight = focal_weight
         self.dice = DiceLoss()
         self.focal = FocalLoss(alpha=focal_alpha, gamma=focal_gamma,
                                class_weights=class_weights)
+        self.z_consistency_weight = float(z_consistency_weight)
+        if self.z_consistency_weight < 0.0:
+            raise ValueError("z_consistency_weight must be non-negative")
+        self.z_consistency = (
+            ZGradientConsistencyLoss()
+            if self.z_consistency_weight > 0.0
+            else None
+        )
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> dict:
         d_loss = self.dice(pred, target)
         f_loss = self.focal(pred, target)
-        total = self.dice_weight * d_loss + self.focal_weight * f_loss
-        return {"loss": total, "dice_loss": d_loss.detach(), "focal_loss": f_loss.detach()}
+        if self.z_consistency is not None:
+            z_loss = self.z_consistency(pred, target)
+        else:
+            z_loss = d_loss * 0.0
+        total = (
+            self.dice_weight * d_loss
+            + self.focal_weight * f_loss
+            + self.z_consistency_weight * z_loss
+        )
+        return {
+            "loss": total,
+            "dice_loss": d_loss.detach(),
+            "focal_loss": f_loss.detach(),
+            "z_consistency_loss": z_loss.detach(),
+        }
 
 
 def _soft_boundary(values: torch.Tensor) -> torch.Tensor:
@@ -406,6 +461,7 @@ def get_loss(config: dict) -> nn.Module:
             focal_alpha=loss_cfg.get("focal_alpha", 0.25),
             focal_gamma=loss_cfg.get("focal_gamma", 2.0),
             class_weights=class_weights,
+            z_consistency_weight=loss_cfg.get("z_consistency_weight", 0.0),
         )
     elif loss_type == "dice_boundary":
         return DiceBoundaryLoss(

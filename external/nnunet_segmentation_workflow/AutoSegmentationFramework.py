@@ -227,6 +227,11 @@ def convertdata(config, dataset_index=None):
     if isinstance(orientation, str) and not orientation.strip():
         orientation = None
     datasets = config["PATHS"]["dataset_path"]
+    # annotation_version 是源数据集(labeled_dataset)的属性，按其数量广播；
+    # 传整个列表给 convert()，由其按 subject 的源数据集目录名定位（见 _resolve_subject_version）。
+    ann_versions = _normalize_annotation_version(
+        config["PATHS"].get("annotation_version"), len(datasets)
+    )
     for index in _indices(config, dataset_index):
         action.convert(
             datasets,
@@ -236,6 +241,7 @@ def convertdata(config, dataset_index=None):
             target_orientation=orientation,
             modality=config["COMMON"]["modality"],
             image_reader_writer=preprocess_config["reorientaion"],
+            annotation_version=ann_versions,
         )
 
 
@@ -272,6 +278,24 @@ def _normalize_gpu_ids(config, count):
             )
         )
     return [int(item) for item in rows]
+
+
+def _normalize_annotation_version(value, count):
+    """把 annotation_version 标量/列表广播为与数据集等长的列表。
+
+    None/缺省 → [None]*count（只读 segmentations/，与历史行为一致）；
+    标量 → 复制到每个数据集；列表 → 长度须与 count 一致。空字符串归一化为 None。
+    """
+    if value is None:
+        return [None] * count
+    rows = list(value) if isinstance(value, list) else [value] * count
+    if len(rows) != count:
+        raise ValueError(
+            "PATHS.annotation_version count ({}) does not match dataset count ({}).".format(
+                len(rows), count
+            )
+        )
+    return [str(v) if v else None for v in rows]
 
 
 def _get_single_gpu_id(config):

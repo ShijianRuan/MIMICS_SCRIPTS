@@ -372,10 +372,16 @@ def _select_spread_points(
     scores = np.asarray([max(float(item["score"]), 1e-8) for item in candidates])
     maximum_score = max(float(scores.max()), 1e-8)
     scores = scores / maximum_score
-    coordinate_to_index = {
-        tuple(int(value) for value in coordinate): index
-        for index, coordinate in enumerate(coordinates)
-    }
+    # Background shells of nearby components can overlap, so the same voxel may
+    # appear as a candidate from more than one component with different scores.
+    # Keep the highest-scoring copy so an anchor maps back to its best row
+    # instead of an arbitrary last-write-wins duplicate.
+    coordinate_to_index = {}
+    for index, coordinate in enumerate(coordinates):
+        key = tuple(int(value) for value in coordinate)
+        existing = coordinate_to_index.get(key)
+        if existing is None or scores[index] > scores[existing]:
+            coordinate_to_index[key] = index
     selected = []
     selected_indexes = set()
     for anchor in sorted(component_anchors, key=lambda item: item["component_rank"]):

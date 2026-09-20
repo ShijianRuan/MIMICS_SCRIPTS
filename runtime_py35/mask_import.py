@@ -472,6 +472,20 @@ def _stop_mask_import_monitor(key):
             pass
 
 
+def _allow_windows_event_monitor():
+    """Opt-in switch for Mimics event-timer usage on Windows.
+
+    Certain Mimics versions emit ``Subscription.__del__ AttributeError:
+    'Subscription' object has no attribute 'subscription'`` when the RAII
+    subscription object is collected after an explicit ``unsubscribe()``.
+    Prefer Win32 SetTimer by default and only enable Mimics event
+    subscriptions when this flag is set, matching mimics_import,
+    mimics_export and io_setup_mimics.
+    """
+    value = os.environ.get("MIMICS_MASK_IMPORT_USE_EVENT_TIMER", "").strip().lower()
+    return value in ("1", "true", "yes", "on")
+
+
 def _start_mimics_event_mask_import_monitor(monitor, poll_seconds):
     """Prefer Mimics' timer event for incremental Mask application."""
     try:
@@ -762,11 +776,17 @@ def _start_win32_mask_import_monitor(monitor, poll_seconds):
 
 
 def _start_mask_import_monitor(monitor, poll_seconds=0.25):
-    if _start_mimics_event_mask_import_monitor(monitor, poll_seconds):
-        return True
-    # On Windows, use the native message-loop timer first. Importing a second
-    # Qt binding inside Mimics can itself create a noticeable frozen interval.
-    if _start_win32_mask_import_monitor(monitor, poll_seconds):
+    # On Windows, prefer the native message-loop timer: importing a second Qt
+    # binding inside Mimics can freeze the UI, and the Mimics event subscription
+    # can emit a benign Subscription.__del__ AttributeError on some builds, so
+    # the event path is opt-in there (MIMICS_MASK_IMPORT_USE_EVENT_TIMER). This
+    # matches mimics_import, mimics_export and io_setup_mimics.
+    if os.name == "nt":
+        if _start_win32_mask_import_monitor(monitor, poll_seconds):
+            return True
+        if _allow_windows_event_monitor() and _start_mimics_event_mask_import_monitor(monitor, poll_seconds):
+            return True
+    elif _start_mimics_event_mask_import_monitor(monitor, poll_seconds):
         return True
     try:
         from PyQt5.QtCore import QTimer

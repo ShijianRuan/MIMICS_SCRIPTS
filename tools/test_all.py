@@ -1531,6 +1531,125 @@ class TestMimicsBridgeBufferMapping(unittest.TestCase):
         self.assertEqual(0, int(exported[0, 0, 0]))
         self.assertEqual(1, int(exported[1, 0, 0]))
 
+    def test_convert_canonical_source_mask_bypasses_corrupt_mcs_buffer(self):
+        from mimics_bridge import do_convert
+        import nibabel as nib
+
+        case_dir = os.path.join(self.tmp, "case_canonical")
+        buffers_dir = os.path.join(self.tmp, "buffers_canonical")
+        output_dir = os.path.join(self.tmp, "canonical_output")
+        os.makedirs(case_dir)
+        os.makedirs(buffers_dir)
+
+        shape = (4, 3, 2)
+        affine = np.array([
+            [0.8, 0.0, 0.0, -12.0],
+            [0.0, 1.1, 0.0, 7.0],
+            [0.0, 0.0, 2.5, 3.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ])
+        source_image_path = os.path.join(case_dir, "mri.nii.gz")
+        source_mask_path = os.path.join(self.tmp, "source_brain.nii.gz")
+        source_mask = np.zeros(shape, dtype=np.uint8)
+        source_mask[1:3, 1:3, :] = 1
+        source_mask[3, 0, 1] = 1
+        nib.save(nib.Nifti1Image(np.zeros(shape, dtype=np.int16), affine), source_image_path)
+        nib.save(nib.Nifti1Image(source_mask, affine), source_mask_path)
+
+        # This is intentionally wrong. Canonical export must not read it.
+        with open(os.path.join(buffers_dir, "brain.u8"), "wb") as handle:
+            handle.write(np.zeros(shape, dtype=np.uint8).tobytes())
+        manifest_path = os.path.join(buffers_dir, "manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as handle:
+            json.dump({
+                "mimics_shape": list(shape),
+                "mimics_voxel_to_ras_matrix": np.eye(4).tolist(),
+                "masks": [{
+                    "original_name": "brain",
+                    "safe_name": "brain",
+                    "u8_filename": "brain.u8",
+                }],
+            }, handle)
+
+        result = do_convert({
+            "buffers_dir": buffers_dir,
+            "manifest_path": manifest_path,
+            "case_dir": case_dir,
+            "source_image_path": source_image_path,
+            "source_mask_paths": {"brain": source_mask_path},
+            "output_seg_dir": output_dir,
+            "export_space": "source_image",
+            "require_source_geometry": True,
+        })
+        self.assertEqual("ok", result["status"])
+        self.assertTrue(result["mcs_mask_bypassed"])
+        row = result["exported"][0]
+        self.assertEqual("canonical_source_mask", row["mask_source"])
+        self.assertTrue(row["mcs_mask_bypassed"])
+        self.assertEqual(os.path.abspath(source_mask_path), row["source_mask_path"])
+        self.assertTrue(row["source_mask_sha256"].startswith("sha256:"))
+        out = nib.load(os.path.join(output_dir, "brain.nii.gz"))
+        np.testing.assert_array_equal(source_mask, np.asanyarray(out.dataobj).astype(np.uint8))
+        np.testing.assert_allclose(affine, out.affine, atol=1e-8)
+        self.assertEqual(int(source_mask.sum()), row["foreground_voxels"])
+
+    def test_convert_canonical_source_mask_rejects_bad_shape_affine_and_values(self):
+        from mimics_bridge import do_convert
+        import nibabel as nib
+
+        case_dir = os.path.join(self.tmp, "case_canonical_validation")
+        buffers_dir = os.path.join(self.tmp, "buffers_canonical_validation")
+        os.makedirs(case_dir)
+        os.makedirs(buffers_dir)
+        shape = (3, 2, 1)
+        affine = np.diag([1.0, 1.5, 2.0, 1.0])
+        source_image_path = os.path.join(case_dir, "ct.nii.gz")
+        nib.save(nib.Nifti1Image(np.zeros(shape, dtype=np.int16), affine), source_image_path)
+        manifest_path = os.path.join(buffers_dir, "manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as handle:
+            json.dump({
+                "mimics_shape": list(shape),
+                "mimics_voxel_to_ras_matrix": np.eye(4).tolist(),
+                "masks": [{"original_name": "organ", "safe_name": "organ"}],
+            }, handle)
+
+        def convert(path, array, mask_affine, output_name):
+            nib.save(nib.Nifti1Image(array, mask_affine), path)
+            with self.assertRaises(ValueError):
+                do_convert({
+                    "buffers_dir": buffers_dir,
+                    "manifest_path": manifest_path,
+                    "case_dir": case_dir,
+                    "source_image_path": source_image_path,
+                    "source_mask_paths": {"organ": path},
+                    "output_seg_dir": os.path.join(self.tmp, output_name),
+                    "export_space": "source_image",
+                    "require_source_geometry": True,
+                })
+
+        convert(
+            os.path.join(self.tmp, "bad_shape.nii.gz"),
+            np.zeros((2, 2, 1), dtype=np.uint8),
+            affine,
+            "bad_shape_output",
+        )
+        bad_affine = affine.copy()
+        bad_affine[0, 3] = 9.0
+        convert(
+            os.path.join(self.tmp, "bad_affine.nii.gz"),
+            np.zeros(shape, dtype=np.uint8),
+            bad_affine,
+            "bad_affine_output",
+        )
+        nonbinary = np.zeros(shape, dtype=np.uint8)
+        nonbinary[0, 0, 0] = 2
+        convert(
+            os.path.join(self.tmp, "nonbinary.nii.gz"),
+            nonbinary,
+            affine,
+            "nonbinary_output",
+        )
+
     def test_convert_strict_source_export_refuses_missing_source_geometry(self):
         from mimics_bridge import do_convert
 
@@ -4555,6 +4674,110 @@ class TestNewFeatures(unittest.TestCase):
             nninteractive_mimics._capture_point = old_capture
         self.assertEqual(4, len(monitor["guided_point_rows"]))
         self.assertIs(added_marker, monitor["guided_point_rows"][-1]["marker"])
+
+    def test_guided_live_rows_clamp_edge_point_instead_of_deleting(self):
+        """A point whose sub-voxel index rounds to the boundary must be clamped,
+        not silently deleted — otherwise an edge annotation is lost."""
+        import fewshot_mimics
+        import nninteractive_mimics as nnm
+
+        marker = object()
+
+        class Image(object):
+            @staticmethod
+            def get_voxel_indexes(_point):
+                # 63.6 rounds to 64, which is == shape on a 64-wide axis.
+                return [63.6, 0.0, 0.0]
+
+        monitor = {
+            "guided_point_rows": [{"marker": marker, "include_interaction": True}],
+            "target_grid": {"target_shape": [64, 64, 64]},
+        }
+        deleted = []
+        old_coords = nnm._point_coordinates
+        old_delete = fewshot_mimics._delete_guided_marker
+        try:
+            nnm._point_coordinates = lambda _marker: [0.0, 0.0, 0.0]
+            fewshot_mimics._delete_guided_marker = deleted.append
+            rows = fewshot_mimics._guided_live_rows(monitor, Image())
+        finally:
+            nnm._point_coordinates = old_coords
+            fewshot_mimics._delete_guided_marker = old_delete
+        self.assertEqual([], deleted)
+        self.assertEqual(1, len(rows))
+        self.assertEqual([63, 0, 0], rows[0]["point"])
+
+    def test_guided_guard_skips_zombie_review_with_dead_process(self):
+        """A review whose UI process has died must not permanently block new
+        DINOv3 tasks, even if guided_review_started is still True."""
+        import fewshot_mimics
+
+        status_path = os.path.join(self.tmp, "zombie_review.json")
+        fewshot_mimics._write_json_atomic(
+            status_path, {"status": "reviewing", "updated_at_epoch": time.time()}
+        )
+
+        class DeadProcess(object):
+            def poll(self):
+                return 0  # process exited
+
+        key = "zombie_guided_review"
+        monitor = {
+            "monitor_key": key,
+            "guided_prompts": True,
+            "guided_review_started": True,
+            "guided_review_process": DeadProcess(),
+            "guided_review_status_path": status_path,
+        }
+        old_monitors = fewshot_mimics._MONITORS.get(key)
+        old_latest = fewshot_mimics._latest_active_job
+        try:
+            fewshot_mimics._MONITORS[key] = monitor
+            fewshot_mimics._latest_active_job = lambda _ts_root: (None, None)
+            allowed = fewshot_mimics._guard_no_active_job(self.tmp, "infer")
+        finally:
+            if old_monitors is None:
+                fewshot_mimics._MONITORS.pop(key, None)
+            else:
+                fewshot_mimics._MONITORS[key] = old_monitors
+            fewshot_mimics._latest_active_job = old_latest
+        self.assertTrue(allowed)
+
+    def test_guided_review_request_writes_handled_id_ack(self):
+        """After handling an add/remove request, Mimics writes handled_request_id
+        so the review window can acknowledge it even if request_pending races."""
+        import fewshot_mimics
+        import nninteractive_mimics
+
+        status_path = os.path.join(self.tmp, "handled_ack_review.json")
+        fewshot_mimics._write_json_atomic(
+            status_path, {"status": "reviewing", "updated_at_epoch": time.time()}
+        )
+        monitor = {
+            "guided_point_rows": [
+                {"marker": object(), "include_interaction": True}
+            ],
+            "guided_last_request_id": None,
+            "guided_review_status_path": status_path,
+        }
+        review = {"request": {"id": 7, "command": "remove_foreground"}}
+        old_live = fewshot_mimics._guided_live_rows
+        old_delete = fewshot_mimics._delete_guided_marker
+        old_capture = nninteractive_mimics._capture_point
+        try:
+            fewshot_mimics._guided_live_rows = (
+                lambda current, _image=None: current.get("guided_point_rows") or []
+            )
+            fewshot_mimics._delete_guided_marker = lambda _row: None
+            nninteractive_mimics._capture_point = lambda _image, _include: {}
+            fewshot_mimics._handle_guided_review_request(monitor, review, object())
+        finally:
+            fewshot_mimics._guided_live_rows = old_live
+            fewshot_mimics._delete_guided_marker = old_delete
+            nninteractive_mimics._capture_point = old_capture
+        status = fewshot_mimics._read_json(status_path, {}) or {}
+        self.assertEqual(7, status.get("handled_request_id"))
+        self.assertFalse(status.get("request_pending"))
 
     def test_nninteractive_guided_points_support_custom_async_model(self):
         import nninteractive_mimics
@@ -8996,11 +9219,18 @@ class TestNewFeatures(unittest.TestCase):
         old_events = getattr(io_setup_mimics.mimics, "events", None)
         had_events = hasattr(io_setup_mimics.mimics, "events")
         old_tick = io_setup_mimics._tick
+        old_win32 = io_setup_mimics._start_win32_monitor
+        old_env = os.environ.get("MIMICS_IO_SETUP_USE_EVENT_TIMER")
         calls = []
         monitor = {"key": "native-event", "busy": False}
         try:
             io_setup_mimics.mimics.events = events
             io_setup_mimics._tick = lambda value: calls.append(value)
+            # Force the Mimics event-timer path: bypass the Win32 timer and opt
+            # in to event subscriptions so the test exercises the event callback
+            # regardless of host platform.
+            io_setup_mimics._start_win32_monitor = lambda _monitor, _poll: False
+            os.environ["MIMICS_IO_SETUP_USE_EVENT_TIMER"] = "1"
             self.assertTrue(io_setup_mimics._start_monitor(monitor, poll_seconds=0.0))
             self.assertEqual("timer", events.name)
             events.callback()
@@ -9010,6 +9240,11 @@ class TestNewFeatures(unittest.TestCase):
             self.assertNotIn("win32_timer", monitor)
         finally:
             io_setup_mimics._tick = old_tick
+            io_setup_mimics._start_win32_monitor = old_win32
+            if old_env is None:
+                os.environ.pop("MIMICS_IO_SETUP_USE_EVENT_TIMER", None)
+            else:
+                os.environ["MIMICS_IO_SETUP_USE_EVENT_TIMER"] = old_env
             io_setup_mimics._IO_SETUP_MONITORS.pop(monitor["key"], None)
             if had_events:
                 io_setup_mimics.mimics.events = old_events
@@ -9325,6 +9560,98 @@ class TestNewFeatures(unittest.TestCase):
         self.assertFalse(safe.overwrite_source)
         overwrite = parser.parse_args(["export-labels", "--ts-root", self.tmp, "--overwrite-source"])
         self.assertTrue(overwrite.overwrite_source)
+
+    def test_external_batch_export_accepts_distance_resampling(self):
+        import tools.mimics_batch_cli as cli
+
+        parsed = cli.build_parser().parse_args([
+            "export-labels", "--ts-root", self.tmp,
+            "--output-dir", os.path.join(self.tmp, "labels"),
+            "--mask-resample-method", "distance",
+        ])
+
+        self.assertEqual("distance", parsed.mask_resample_method)
+
+    def test_external_batch_export_accepts_canonical_source_mask_root(self):
+        import tools.mimics_batch_cli as cli
+
+        source_mask_root = os.path.join(self.tmp, "canonical_source")
+        parsed = cli.build_parser().parse_args([
+            "export-labels", "--ts-root", self.tmp,
+            "--output-dir", os.path.join(self.tmp, "labels"),
+            "--source-mask-root", source_mask_root,
+        ])
+
+        self.assertEqual(source_mask_root, parsed.source_mask_root)
+
+    def test_external_batch_export_accepts_raw_mimics_grid(self):
+        import tools.mimics_batch_cli as cli
+
+        parsed = cli.build_parser().parse_args([
+            "export-labels", "--ts-root", self.tmp,
+            "--output-dir", os.path.join(self.tmp, "labels"),
+            "--export-space", "mimics_grid",
+        ])
+
+        self.assertEqual("mimics_grid", parsed.export_space)
+
+    def test_external_batch_export_maps_recursive_mcs_to_independent_images(self):
+        import tools.mimics_batch_cli as cli
+
+        mcs_root = Path(self.tmp, "mcs_store")
+        image_root = Path(self.tmp, "original_images")
+        (mcs_root / "group_a").mkdir(parents=True)
+        (mcs_root / "group_a" / "case001.mcs").write_bytes(b"")
+        (mcs_root / "case002.mcs").write_bytes(b"")
+        (image_root / "case001").mkdir(parents=True)
+        (image_root / "case001" / "ct.nii.gz").write_bytes(b"")
+        (image_root / "case002.nii.gz").write_bytes(b"")
+
+        mapping = cli.discover_export_sources(mcs_root, image_root)
+
+        self.assertEqual(set(["case001", "case002"]), set(mapping["mcs_paths"]))
+        self.assertEqual(
+            "case001.mcs",
+            Path(mapping["mcs_paths"]["case001"]).name,
+        )
+        self.assertEqual(
+            "ct.nii.gz",
+            Path(mapping["source_image_paths"]["case001"]).name,
+        )
+        self.assertEqual(
+            "case002.nii.gz",
+            Path(mapping["source_image_paths"]["case002"]).name,
+        )
+
+    def test_external_batch_export_can_limit_mcs_discovery_to_root_folder(self):
+        import tools.mimics_batch_cli as cli
+
+        mcs_root = Path(self.tmp, "mcs_store")
+        image_root = Path(self.tmp, "original_images")
+        (mcs_root / "nested").mkdir(parents=True)
+        image_root.mkdir(parents=True)
+        (mcs_root / "root_case.mcs").write_bytes(b"")
+        (mcs_root / "nested" / "nested_case.mcs").write_bytes(b"")
+        (image_root / "root_case.nii.gz").write_bytes(b"")
+        (image_root / "nested_case.nii.gz").write_bytes(b"")
+
+        mapping = cli.discover_export_sources(mcs_root, image_root, recursive=False)
+
+        self.assertEqual(["root_case"], sorted(mapping["mcs_paths"]))
+
+    def test_external_batch_export_rejects_missing_external_image(self):
+        import tools.mimics_batch_cli as cli
+
+        mcs_root = Path(self.tmp, "mcs_store")
+        image_root = Path(self.tmp, "original_images")
+        mcs_root.mkdir()
+        image_root.mkdir()
+        (mcs_root / "case001.mcs").write_bytes(b"")
+
+        with self.assertRaises(RuntimeError) as context:
+            cli.discover_export_sources(mcs_root, image_root)
+        self.assertIn("case001", str(context.exception))
+        self.assertIn("metadata path was not used", str(context.exception))
 
 
     # ================================================================
@@ -9845,11 +10172,17 @@ class TestNewFeatures(unittest.TestCase):
         old_events = getattr(io_setup_mimics.mimics, "events", None)
         had_events = hasattr(io_setup_mimics.mimics, "events")
         old_tick = io_setup_mimics._tick
+        old_win32 = io_setup_mimics._start_win32_monitor
+        old_env = os.environ.get("MIMICS_IO_SETUP_USE_EVENT_TIMER")
         calls = []
         monitor = {"key": "throttle", "busy": False}
         try:
             io_setup_mimics.mimics.events = events
             io_setup_mimics._tick = lambda value: calls.append(value)
+            # Force the event-timer path (bypass Win32, opt in to events) so the
+            # throttle logic is exercised on every host platform.
+            io_setup_mimics._start_win32_monitor = lambda _monitor, _poll: False
+            os.environ["MIMICS_IO_SETUP_USE_EVENT_TIMER"] = "1"
             # poll_seconds=2.0 → interval=max(0.25, 2.0)=2.0s
             self.assertTrue(io_setup_mimics._start_monitor(
                 monitor, poll_seconds=2.0,
@@ -9867,6 +10200,11 @@ class TestNewFeatures(unittest.TestCase):
             self.assertEqual(2, len(calls))
         finally:
             io_setup_mimics._tick = old_tick
+            io_setup_mimics._start_win32_monitor = old_win32
+            if old_env is None:
+                os.environ.pop("MIMICS_IO_SETUP_USE_EVENT_TIMER", None)
+            else:
+                os.environ["MIMICS_IO_SETUP_USE_EVENT_TIMER"] = old_env
             io_setup_mimics._IO_SETUP_MONITORS.pop(monitor["key"], None)
             if had_events:
                 io_setup_mimics.mimics.events = old_events

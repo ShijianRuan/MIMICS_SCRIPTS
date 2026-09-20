@@ -1,0 +1,17 @@
+# Exp C — 3D context3d_multiscale (4-level volumetric pyramid).
+# Pure-volumetric 4-level alternative to Exp A; ablates the 2D detail branch
+# (A has it, C does not). Reassembles 4 levels at H/4,H/8,H/16,H/32 with
+# volumetric context and top-down fusion. Same encoder/loss/norm as A -> clean
+# ablation of the detail-branch contribution.
+_base_: ["kidney_0806_base.yaml"]
+
+model:
+  out_indices: [2, 5, 8, 11]                # 4 levels -> stage3/6/9/12 (REQUIRED)
+
+decoder:
+  type: "context3d_multiscale"
+  anisotropic_context: true
+  z_smooth_sigma: 6.0
+  z_smooth_learnable: false
+
+exp_name: "kidney_0806_3d_multiscale_s0657_s0661_s0668_s0693_s0749"

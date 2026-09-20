@@ -154,18 +154,90 @@ def normalize_volume(
     return volume.astype(np.float32, copy=False)
 
 
+def _spatially_sampled_finite(volume: np.ndarray, max_voxels: int = 100_000) -> np.ndarray:
+    """Return a finite flat subset of ``volume`` for percentile/statistics.
+
+    Computing percentiles directly over a large CT volume's full ``values[finite]``
+    flat array can raise ``ArrayMemoryError`` on a workstation. A deterministic
+    stride samples at most ``max_voxels`` voxels, which is more than enough for
+    stable 0.5/99.5 percentiles and z-score statistics. Mirrors the approach used
+    by the frozen-feature slice path for the same reason.
+    """
+    finite = np.isfinite(volume)
+    if not np.any(finite):
+        return np.zeros(0, dtype=np.float32)
+    flat = volume[finite]
+    if flat.size <= max_voxels:
+        return flat
+    stride = int(np.ceil(flat.size / float(max_voxels)))
+    return flat[::stride]
+
+
+def normalize_casewise_zscore(
+    data: np.ndarray,
+    percentiles: Iterable[float] = (0.5, 99.5),
+) -> np.ndarray:
+    """Casewise clip-and-z-score normalization matching the 2D frozen-feature path.
+
+    Reproduces ``normalize_timeslice_casewise_volume`` from
+    ``frozen_feature_slices.py``: clip to the configured percentiles, then z-score
+    using statistics computed from the values above the lower percentile, applied
+    to the clipped volume. The result is intentionally NOT clipped to ``[0, 1]`` —
+    z-scored values are negative for sub-mean voxels, and clipping them destroys
+    the contract (the report documented a Dice crash to 0.4242 when casewise
+    z-score was incorrectly clipped to ``[0, 1]``).
+
+    Used when ``data.normalization_scope == "case_casewise"`` so the 3D volume
+    pipeline and the 2D frozen-feature pipeline see the same input distribution.
+    """
+    volume = np.asarray(data, dtype=np.float32)
+    if volume.size == 0:
+        return volume
+    sampled = _spatially_sampled_finite(volume)
+    if sampled.size == 0:
+        return np.zeros(volume.shape, dtype=np.float32)
+    lo, hi = np.percentile(sampled, [float(percentiles[0]), float(percentiles[1])])
+    lo, hi = float(lo), float(hi)
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        return np.nan_to_num(volume, nan=0.0, posinf=0.0, neginf=0.0).astype(
+            np.float32, copy=False
+        )
+    clipped = np.clip(volume, lo, hi)
+    above_low = sampled[sampled > lo]
+    if above_low.size == 0:
+        above_low = sampled
+    mean = float(above_low.mean())
+    std = float(above_low.std())
+    if not np.isfinite(mean):
+        mean = 0.0
+    if not np.isfinite(std) or std <= np.finfo(np.float32).eps:
+        std = 1.0
+    result = (clipped - mean) / std
+    return np.nan_to_num(result, nan=0.0, posinf=0.0, neginf=0.0).astype(
+        np.float32, copy=False
+    )
+
+
 def build_input_channels(
     data_zyx: np.ndarray,
     modality: str = "other",
     intensity: Mapping | None = None,
     channel_policy: str = "repeat",
     pre_normalized: bool = False,
+    clip_pre_normalized: bool = True,
 ) -> np.ndarray:
     """Create label-free model input channels in ``(C, Z, Y, X)`` order.
 
     ``repeat`` and ``2_5d`` return one normalized channel.  The encoder builds
     RGB repeat/adjacent-slice inputs later. ``ct_windows`` creates exactly three
     fixed CT windows, so the DINOv3 input receives true three-channel data.
+
+    When ``pre_normalized`` is True the volume is assumed already normalized by
+    the caller. By default it is clipped to ``[0, 1]`` (the historical contract
+    for percentile-minmax / CT-window inputs). Pass ``clip_pre_normalized=False``
+    for casewise z-score inputs, which legitimately contain negative values and
+    must NOT be clipped — clipping them collapses the distribution and crashes
+    Dice (see ``normalize_casewise_zscore``).
     """
     policy = str(channel_policy or "repeat").lower()
     cfg = dict(intensity or {})
@@ -184,9 +256,9 @@ def build_input_channels(
         finite = np.isfinite(volume)
         if not np.all(finite):
             volume = np.where(finite, volume, 0.0)
-        return np.clip(volume, 0.0, 1.0).astype(
-            np.float32, copy=False
-        )[None, ...]
+        if clip_pre_normalized:
+            volume = np.clip(volume, 0.0, 1.0)
+        return volume.astype(np.float32, copy=False)[None, ...]
     return normalize_volume(volume, modality, cfg)[None, ...]
 
 
@@ -200,6 +272,7 @@ def prepare_model_input(
     slice_axis="axial",
     resize_mode: str = "stretch",
     pre_normalized: bool = False,
+    clip_pre_normalized: bool = True,
 ) -> torch.Tensor:
     """Apply channel construction and resize the selected model slice plane."""
     size = tuple(int(value) for value in img_size)
@@ -211,6 +284,7 @@ def prepare_model_input(
         intensity=intensity,
         channel_policy=channel_policy,
         pre_normalized=pre_normalized,
+        clip_pre_normalized=clip_pre_normalized,
     )
     return _resize_slice_plane(
         torch.from_numpy(channels),
@@ -385,6 +459,7 @@ class MedicalVolumeDataset(Dataset):
         resize_mode="stretch",
         normalization_scope="sample",
         augmentation=None,
+        validation_case_ids=None,
     ):
         self.data_root = Path(data_root)
         self.split = split
@@ -404,11 +479,17 @@ class MedicalVolumeDataset(Dataset):
         if self.normalization_scope not in {
             "sample",
             "case_before_roi_or_patch",
+            "case_casewise",
         }:
             raise ValueError(
-                "data.normalization_scope must be sample or "
-                "case_before_roi_or_patch"
+                "data.normalization_scope must be sample, "
+                "case_before_roi_or_patch, or case_casewise"
             )
+        self.validation_case_ids = (
+            [str(cid) for cid in validation_case_ids]
+            if validation_case_ids is not None
+            else None
+        )
         self.use_patch = bool(self.patch.get("enabled", False)) and split in ("train", "tr")
         self.patch_size_zyx = tuple(int(value) for value in self.patch.get("size_zyx", []))
         self.foreground_probability = float(self.patch.get("foreground_probability", 0.67))
@@ -425,6 +506,24 @@ class MedicalVolumeDataset(Dataset):
             pairs = _candidate_pairs(self.data_root / "imagesVal", self.data_root / "labelsVal")
             if not pairs:
                 pairs = _candidate_pairs(self.data_root / "imagesTr", self.data_root / "labelsTr")
+            # When an explicit validation-case holdout is requested, the cases
+            # may live in imagesTr (not imagesVal) — e.g. the kidney ablation's
+            # fixed validation cases share imagesTr with the support cases. Fall
+            # back to imagesTr if any requested ID is absent from imagesVal so
+            # the holdout is always resolvable.
+            if self.validation_case_ids is not None:
+                available = {_case_id(image, image=True) for image, _ in pairs}
+                missing = set(self.validation_case_ids) - available
+                if missing:
+                    tr_pairs = _candidate_pairs(
+                        self.data_root / "imagesTr", self.data_root / "labelsTr"
+                    )
+                    tr_by_case = {
+                        _case_id(image, image=True): (image, label)
+                        for image, label in tr_pairs
+                    }
+                    extra = [tr_by_case[cid] for cid in sorted(missing) if cid in tr_by_case]
+                    pairs = pairs + extra
         if not pairs:
             raise RuntimeError(
                 "No NIfTI image/label pairs found for split '{}' under {}".format(split, self.data_root)
@@ -437,6 +536,31 @@ class MedicalVolumeDataset(Dataset):
             }
             for image, label in pairs
         ]
+        # Optional explicit validation-case holdout. The kidney ablation's three
+        # fixed validation cases live in imagesTr alongside the support cases, so
+        # without this filter the val loader would see all 30 Tr cases (including
+        # the 5 support cases) and contaminate validation. Only active for non-train
+        # splits when the key is set; train splits are already filtered to
+        # support_case_ids via CaseIdSubset in the training script.
+        if self.validation_case_ids is not None and split not in ("train", "tr"):
+            requested = self.validation_case_ids
+            available = {sample["case_id"] for sample in self.samples}
+            missing = sorted(set(requested) - available)
+            if missing:
+                raise RuntimeError(
+                    "Requested validation case IDs are absent from split '{}': {}".format(
+                        split, ", ".join(missing)
+                    )
+                )
+            requested_set = set(requested)
+            self.samples = [
+                sample for sample in self.samples
+                if sample["case_id"] in requested_set
+            ]
+            if not self.samples:
+                raise RuntimeError(
+                    "validation_case_ids filtered out every case for split '{}'".format(split)
+                )
 
     def __len__(self) -> int:
         return len(self.samples) * self.patches_per_case
@@ -474,7 +598,10 @@ class MedicalVolumeDataset(Dataset):
         radius_voxels = np.maximum(radius_mm / spacing, 1.0)
         grids = np.ogrid[tuple(slice(0, int(length)) for length in label_data.shape)]
         distance = sum(((grid - center[axis]) / radius_voxels[axis]) ** 2 for axis, grid in enumerate(grids))
-        return (distance <= 1.0).astype(np.int64)
+        # Labels remain binary until conversion to the model tensor. Keeping
+        # this temporary as uint8 avoids a large int64 allocation for long
+        # volumes (e.g. a 390x252x252 label is about 24 MiB instead of 189 MiB).
+        return (distance <= 1.0).astype(np.uint8)
 
     def _crop_patch(self, image_data: np.ndarray, label_data: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Sample a fixed-size support patch with a controlled foreground rate."""
@@ -523,7 +650,12 @@ class MedicalVolumeDataset(Dataset):
         image, label, _, _, _ = load_canonical_pair(str(sample["image"]), str(sample["label"]))
         image, label = resample_pair_to_spacing(image, label, self.target_spacing)
         image_data = xyz_to_zyx(image.get_fdata(dtype=np.float32))
-        label_data = (xyz_to_zyx(label.get_fdata(dtype=np.float32)) > 0).astype(np.int64)
+        # Keep the binary label compact while the full volume is resident.
+        # It is converted to torch.long only after in-plane resizing below.
+        label_data = np.asarray(
+            xyz_to_zyx(label.get_fdata(dtype=np.float32)) > 0,
+            dtype=np.uint8,
+        )
 
         if image_data.shape != label_data.shape:
             raise RuntimeError(
@@ -534,10 +666,11 @@ class MedicalVolumeDataset(Dataset):
                 )
             )
         pre_normalized = False
+        clip_pre_normalized = True
+        channel_policy_lower = str(self.channel_policy or "repeat").lower()
         if (
             self.normalization_scope == "case_before_roi_or_patch"
-            and str(self.channel_policy or "repeat").lower()
-            not in ("ct_windows", "multiwindow", "multi_window")
+            and channel_policy_lower not in ("ct_windows", "multiwindow", "multi_window")
         ):
             image_data = normalize_volume(
                 image_data,
@@ -545,6 +678,17 @@ class MedicalVolumeDataset(Dataset):
                 intensity=self.intensity,
             )
             pre_normalized = True
+        elif (
+            self.normalization_scope == "case_casewise"
+            and channel_policy_lower not in ("ct_windows", "multiwindow", "multi_window")
+        ):
+            percentiles = self.intensity.get(
+                "casewise_percentiles", (0.5, 99.5)
+            )
+            image_data = normalize_casewise_zscore(image_data, percentiles=percentiles)
+            pre_normalized = True
+            # Casewise z-score produces negative values; do NOT clip to [0, 1].
+            clip_pre_normalized = False
         image_data, label_data = self._apply_roi(image_data, label_data)
         label_data = self._apply_target_transform(label_data, spacing_zyx(image))
         if self.use_patch:
@@ -559,6 +703,7 @@ class MedicalVolumeDataset(Dataset):
             slice_axis=self.slice_axis,
             resize_mode=self.resize_mode,
             pre_normalized=pre_normalized,
+            clip_pre_normalized=clip_pre_normalized,
         )
         label_tensor = _resize_slice_plane(
             torch.from_numpy(label_data).unsqueeze(0).float(),

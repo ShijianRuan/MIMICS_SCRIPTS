@@ -118,25 +118,37 @@ def main():
                 name: restore_native_scalar_array(statistics[name], original_image)
                 for name in ("mean", "variance", "agreement")
             }
-            proposal = propose_guided_points(
-                source_statistics["mean"],
-                source_statistics["variance"],
-                source_statistics["agreement"],
-                original_image.affine,
-                threshold=threshold,
-            )
-            proposal.update(
-                {
+            try:
+                proposal = propose_guided_points(
+                    source_statistics["mean"],
+                    source_statistics["variance"],
+                    source_statistics["agreement"],
+                    original_image.affine,
+                    threshold=threshold,
+                )
+                proposal.update(
+                    {
+                        "coordinate_system": "world_ras_mm",
+                        "tta_member_count": int(statistics["member_count"]),
+                        "tta_axes": cached_inference.get("tta_axes", []),
+                        "proposal_grid": "source_image",
+                        "source_shape_xyz": [int(value) for value in original_image.shape[:3]],
+                        "source_voxel_to_ras_matrix": np.asarray(
+                            original_image.affine, dtype=float
+                        ).tolist(),
+                    }
+                )
+            except Exception as exc:
+                # Guided points are an optional review aid; a failure to select
+                # them must not discard the DINOv3 segmentation itself. Write a
+                # schema-less error record so the Mimics review stage rejects it
+                # with a clear message, while the mask below is still saved.
+                proposal = {
+                    "error": "guided point proposal failed: {0}".format(exc),
                     "coordinate_system": "world_ras_mm",
-                    "tta_member_count": int(statistics["member_count"]),
-                    "tta_axes": cached_inference.get("tta_axes", []),
                     "proposal_grid": "source_image",
-                    "source_shape_xyz": [int(value) for value in original_image.shape[:3]],
-                    "source_voxel_to_ras_matrix": np.asarray(
-                        original_image.affine, dtype=float
-                    ).tolist(),
                 }
-            )
+                print("WARNING: {0}".format(proposal["error"]))
             _write_json_atomic(Path(args.prompt_suggestions_output), proposal)
             prediction_zyx = (
                 source_statistics["mean"] >= threshold
@@ -193,26 +205,36 @@ def main():
         statistics = predict_probability_statistics(
             model, model_grid, guided_config, device
         )
-        proposal = propose_guided_points(
-            statistics["mean"],
-            statistics["variance"],
-            statistics["agreement"],
-            model_grid.affine,
-            threshold=threshold,
-        )
-        proposal.update(
-            {
+        try:
+            proposal = propose_guided_points(
+                statistics["mean"],
+                statistics["variance"],
+                statistics["agreement"],
+                model_grid.affine,
+                threshold=threshold,
+            )
+            proposal.update(
+                {
+                    "coordinate_system": "world_ras_mm",
+                    "tta_member_count": int(statistics["member_count"]),
+                    "tta_axes": guided_inference.get("tta_axes", []),
+                    "tta_scales": guided_inference.get("scales", []),
+                    "proposal_grid": "dinov3_model_grid",
+                    "model_shape_xyz": [int(value) for value in model_grid.shape[:3]],
+                    "model_voxel_to_ras_matrix": np.asarray(
+                        model_grid.affine, dtype=float
+                    ).tolist(),
+                }
+            )
+        except Exception as exc:
+            # See the cached-slice branch: a failed proposal must not discard
+            # the segmentation. Emit a schema-less error record and keep going.
+            proposal = {
+                "error": "guided point proposal failed: {0}".format(exc),
                 "coordinate_system": "world_ras_mm",
-                "tta_member_count": int(statistics["member_count"]),
-                "tta_axes": guided_inference.get("tta_axes", []),
-                "tta_scales": guided_inference.get("scales", []),
                 "proposal_grid": "dinov3_model_grid",
-                "model_shape_xyz": [int(value) for value in model_grid.shape[:3]],
-                "model_voxel_to_ras_matrix": np.asarray(
-                    model_grid.affine, dtype=float
-                ).tolist(),
             }
-        )
+            print("WARNING: {0}".format(proposal["error"]))
         _write_json_atomic(Path(args.prompt_suggestions_output), proposal)
         prediction_zyx = (
             statistics["mean"] >= threshold

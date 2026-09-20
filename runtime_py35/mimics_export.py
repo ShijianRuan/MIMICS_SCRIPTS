@@ -74,6 +74,10 @@ def _record_exported_labels(
                 ),
                 "export_space": (result or {}).get("export_space") or "",
                 "source": "mimics_export",
+                "mask_source": row.get("mask_source") or "mcs_mask_buffer",
+                "source_mask_path": row.get("source_mask_path") or "",
+                "source_mask_sha256": row.get("source_mask_sha256") or "",
+                "mcs_mask_bypassed": bool(row.get("mcs_mask_bypassed", False)),
             }
         )
     if not labels:
@@ -100,6 +104,8 @@ def _record_exported_labels(
         provenance={
             "last_operation": "mimics_export",
             "export_space": (result or {}).get("export_space") or "",
+            "mcs_mask_bypassed": bool((result or {}).get("mcs_mask_bypassed", False)),
+            "source_mask_paths": (result or {}).get("source_mask_paths") or {},
         },
     )
 
@@ -722,7 +728,7 @@ def _launch_background_batch_export(ts_root, cases_filter, axes, flips, label_ou
                 pass
 
 
-def call_bridge(params):
+def call_bridge(params, extra_env=None):
     """Call mimics_bridge.py via subprocess, return parsed JSON result."""
     python_exe = _python_exe()
     bridge = _bridge_script()
@@ -732,7 +738,7 @@ def call_bridge(params):
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env=_background_env(),
+        env=_background_env(extra_env),
         **_background_process_kwargs()
     )
     stdin_data = json.dumps(params).encode("utf-8")
@@ -858,6 +864,20 @@ def _cleanup_job_dir(job_dir):
 
 
 # -- Timer-based async monitor (same pattern as nnInteractive) ----------
+
+def _allow_windows_event_monitor():
+    """Opt-in switch for Mimics event-timer usage on Windows.
+
+    Certain Mimics versions emit ``Subscription.__del__ AttributeError:
+    'Subscription' object has no attribute 'subscription'`` when the RAII
+    subscription object is collected after an explicit ``unsubscribe()``.
+    Prefer Win32 SetTimer / PyQt QTimer by default and only enable Mimics
+    event subscriptions when this flag is set, matching mimics_import and
+    io_setup_mimics.
+    """
+    value = os.environ.get("MIMICS_EXPORT_USE_EVENT_TIMER", "").strip().lower()
+    return value in ("1", "true", "yes", "on")
+
 
 def _stop_export_monitor(monitor_key):
     """Stop and clean up a running export monitor."""
@@ -1063,7 +1083,7 @@ def _start_export_monitor(job_dir, work_dir, case_dir=None, timeout_seconds=600,
     if batch_info:
         monitor.update(batch_info)
 
-    if _start_mimics_event_export_monitor(
+    if _allow_windows_event_monitor() and _start_mimics_event_export_monitor(
         monitor,
         lambda: _export_monitor_tick(monitor),
         poll_seconds,
@@ -1124,6 +1144,103 @@ def _canonical_mask_name(name):
     while "__" in text:
         text = text.replace("__", "_")
     return text.strip("_")
+
+
+def _source_mask_stem(path):
+    """Return a comparable Mask name for a supported NIfTI filename."""
+    name = os.path.basename(str(path or ""))
+    lower = name.lower()
+    if lower.endswith(".nii.gz"):
+        name = name[:-7]
+    elif lower.endswith(".nii"):
+        name = name[:-4]
+    else:
+        return ""
+    return _canonical_mask_name(name)
+
+
+def _source_mask_search_dirs(source_mask_root, case_id):
+    """Return canonical source-label directories for one case."""
+    root = os.path.abspath(os.path.expanduser(str(source_mask_root or "")))
+    case_id = str(case_id or "").strip()
+    candidates = []
+    case_root = os.path.join(root, case_id)
+    candidates.append(os.path.join(case_root, "segmentations"))
+    if os.path.basename(root).lower() == case_id.lower():
+        candidates.append(os.path.join(root, "segmentations"))
+        candidates.append(root)
+    if os.path.basename(root).lower() == "segmentations":
+        candidates.append(root)
+    result = []
+    seen = set()
+    for path in candidates:
+        normalized = os.path.normcase(os.path.abspath(path))
+        if normalized in seen or not os.path.isdir(path):
+            continue
+        seen.add(normalized)
+        result.append(path)
+    return result
+
+
+def _find_source_mask_path(source_mask_root, case_id, mask_name):
+    """Find one unambiguous canonical source Mask for a saved Mask name."""
+    wanted = _canonical_mask_name(mask_name)
+    if not wanted:
+        return None
+    matches = []
+    for directory in _source_mask_search_dirs(source_mask_root, case_id):
+        try:
+            for filename in os.listdir(directory):
+                path = os.path.join(directory, filename)
+                if not os.path.isfile(path) or not filename.lower().endswith((".nii", ".nii.gz")):
+                    continue
+                if _source_mask_stem(filename) == wanted:
+                    matches.append(os.path.abspath(path))
+        except OSError:
+            continue
+    unique = []
+    seen = set()
+    for path in matches:
+        normalized = os.path.normcase(path)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        unique.append(path)
+    if len(unique) > 1:
+        raise RuntimeError(
+            "More than one canonical source Mask matches '{}' for case '{}': {}".format(
+                mask_name, case_id, ", ".join(unique)
+            )
+        )
+    return unique[0] if unique else None
+
+
+def _resolve_source_mask_paths(source_mask_root, case_id, masks):
+    """Resolve every selected saved Mask to a canonical source file."""
+    root = str(source_mask_root or "").strip()
+    if not root:
+        return {}
+    if not os.path.isdir(root):
+        raise RuntimeError("Canonical source-mask root was not found: {}".format(root))
+    resolved = {}
+    missing = []
+    for a_mask in masks:
+        name = str(
+            getattr(a_mask, "name", a_mask) if a_mask is not None else ""
+        ).strip()
+        path = _find_source_mask_path(root, case_id, name)
+        if path is None:
+            missing.append(name or "(unnamed)")
+        else:
+            resolved[name] = path
+    if missing:
+        raise RuntimeError(
+            "Canonical source Mask(s) were not found for case '{}': {}. Expected "
+            "<source-mask-root>/<case>/segmentations/<mask>.nii or .nii.gz.".format(
+                case_id, ", ".join(missing)
+            )
+        )
+    return resolved
 
 
 def _current_mask_names():
@@ -1240,7 +1357,9 @@ def _derive_mimics_voxel_to_ras_matrix(image, image_shape):
         return None
 
 
-def export_masks_to_buffers(buffers_dir, mask_names=None, target_mask_name=None):
+def export_masks_to_buffers(
+    buffers_dir, mask_names=None, target_mask_name=None, skip_voxel_data=False
+):
     """Export all masks from current Mimics project as .u8 files.
 
     Returns manifest dict.
@@ -1316,31 +1435,36 @@ def export_masks_to_buffers(buffers_dir, mask_names=None, target_mask_name=None)
         name = str(a_mask.name)
         print("exporting mask: {0}".format(name))
 
-        try:
-            try:
-                mimics.update_gui()
-            except Exception:
-                pass
-            raw = _get_voxel_buffer_bytes(a_mask)
-            try:
-                mimics.update_gui()
-            except Exception:
-                pass
-        except Exception as e:
-            print("  could not read data for {0}: {1}".format(name, e))
-            continue
-
         safe_name = _sanitize_name(target_mask_name or name)
         u8_path = os.path.join(buffers_dir, safe_name + ".u8")
 
-        with open(u8_path, "wb") as f:
-            f.write(raw)
+        if not skip_voxel_data:
+            try:
+                try:
+                    mimics.update_gui()
+                except Exception:
+                    pass
+                raw = _get_voxel_buffer_bytes(a_mask)
+                try:
+                    mimics.update_gui()
+                except Exception:
+                    pass
+            except Exception as e:
+                print("  could not read data for {0}: {1}".format(name, e))
+                continue
 
-        manifest["masks"].append({
+            with open(u8_path, "wb") as f:
+                f.write(raw)
+        else:
+            print("  canonical source Mask configured; skipping MCS voxel buffer")
+
+        mask_entry = {
             "original_name": name,
             "safe_name": safe_name,
-            "u8_filename": safe_name + ".u8",
-        })
+        }
+        if not skip_voxel_data:
+            mask_entry["u8_filename"] = safe_name + ".u8"
+        manifest["masks"].append(mask_entry)
         print("  -> {0}".format(safe_name))
 
     # Save manifest
@@ -1758,7 +1882,7 @@ def _foreground_export_tick(monitor):
 def _start_foreground_export_monitor(monitor, poll_seconds=0.15):
     key = monitor["monitor_key"]
     _stop_export_monitor(key)
-    if _start_mimics_event_export_monitor(
+    if _allow_windows_event_monitor() and _start_mimics_event_export_monitor(
         monitor,
         lambda: _foreground_export_tick(monitor),
         poll_seconds,
@@ -2333,7 +2457,7 @@ def _background_export_status_tick(monitor):
 def _start_background_export_status_monitor(monitor, poll_seconds=2.0):
     key = monitor["monitor_key"]
     _stop_export_monitor(key)
-    if _start_mimics_event_export_monitor(
+    if _allow_windows_event_monitor() and _start_mimics_event_export_monitor(
         monitor,
         lambda: _background_export_status_tick(monitor),
         poll_seconds,
@@ -2460,17 +2584,40 @@ def _launch_external_export_setup():
 
 # -- Single case export -------------------------------------------------
 
-def _export_masks_and_build_params(case_dir, axes, flips, work_dir, output_seg_dir=None, export_space="source_image", mask_names=None, target_mask_name=None, overwrite_existing=None, source_image_path=None):
+def _export_masks_and_build_params(
+    case_dir,
+    axes,
+    flips,
+    work_dir,
+    output_seg_dir=None,
+    export_space="source_image",
+    mask_names=None,
+    target_mask_name=None,
+    overwrite_existing=None,
+    source_image_path=None,
+    source_mask_root=None,
+    case_id=None,
+):
     """Export masks to .u8 buffers and build bridge params. Returns (bridge_params, manifest) or None."""
     print("Exporting masks to: {0}".format(case_dir))
 
     buffers_dir = os.path.join(work_dir, "export_buffers")
+    canonical_root = str(source_mask_root or "").strip()
+    normalized_export_space = str(export_space or "source_image").lower()
+    if canonical_root and normalized_export_space not in (
+        "source", "source_image", "source_grid"
+    ):
+        raise RuntimeError(
+            "Canonical source Mask export requires export_space=source_image; "
+            "it cannot be used as a raw Mimics-grid export."
+        )
 
     # Step 1: Export masks to .u8 buffers
     manifest = export_masks_to_buffers(
         buffers_dir,
         mask_names=mask_names,
         target_mask_name=target_mask_name,
+        skip_voxel_data=bool(canonical_root),
     )
 
     if not manifest["masks"]:
@@ -2481,6 +2628,16 @@ def _export_masks_and_build_params(case_dir, axes, flips, work_dir, output_seg_d
     if not mimics_shape:
         print("Error: could not determine mimics_shape")
         return None
+
+    if canonical_root:
+        canonical_case_id = str(case_id or os.path.basename(os.path.abspath(case_dir)))
+        source_mask_paths = _resolve_source_mask_paths(
+            canonical_root,
+            canonical_case_id,
+            [row.get("original_name", "") for row in manifest["masks"]],
+        )
+    else:
+        source_mask_paths = {}
 
     # Step 2: Build bridge params for convert action
     bridge_params = {
@@ -2494,6 +2651,8 @@ def _export_masks_and_build_params(case_dir, axes, flips, work_dir, output_seg_d
         "require_source_geometry": str(export_space or "source_image").lower() in (
             "source", "source_image", "source_grid",
         ),
+        "source_mask_paths": source_mask_paths,
+        "source_mask_root": canonical_root,
     }
     try:
         active_image = mimics.data.images.get_active()
@@ -2772,11 +2931,23 @@ def run_background_batch_export(config_path):
     mask_names = config.get("mask_names") or []
     if not isinstance(mask_names, list):
         mask_names = [mask_names]
+    source_mask_root = str(config.get("source_mask_root") or "").strip()
     target_mask_name = str(config.get("target_mask_name") or "").strip()
     cases_filter = config.get("cases")
     cases_filter = set(cases_filter) if cases_filter else None
     axes = config.get("axes") or [0, 1, 2]
     flips = config.get("flips") or [False, False, False]
+    mask_resample_method = str(
+        config.get("mask_resample_method") or "nearest"
+    ).strip().lower()
+    if mask_resample_method not in ("nearest", "distance"):
+        _append_export_log(
+            export_root,
+            "Invalid mask_resample_method {0!r}; using nearest.".format(
+                mask_resample_method
+            ),
+        )
+        mask_resample_method = "nearest"
     if not os.path.isdir(output_dir):
         os.makedirs(output_dir)
 
@@ -3003,6 +3174,8 @@ def run_background_batch_export(config_path):
                     target_mask_name=target_mask_name,
                     overwrite_existing=(True if label_staging_dir else overwrite_existing),
                     source_image_path=(config.get("source_image_paths") or {}).get(case_id),
+                    source_mask_root=source_mask_root,
+                    case_id=case_id,
                 )
                 try:
                     mimics.file.close_project()
@@ -3023,7 +3196,12 @@ def run_background_batch_export(config_path):
                         completed += 1
                     continue
                 bridge_params, manifest = built
-                result = call_bridge(bridge_params)
+                result = call_bridge(
+                    bridge_params,
+                    extra_env={
+                        "MIMICS_MASK_RESAMPLE_METHOD": mask_resample_method,
+                    },
+                )
                 if result.get("status") != "ok":
                     raise RuntimeError(result.get("error", "bridge returned non-ok status"))
                 total_new, total_overwritten, total_unchanged = _apply_export_result(result, work_dir)
@@ -3042,8 +3220,15 @@ def run_background_batch_export(config_path):
                             mcs_path=mcs_path,
                         )
                         manifest_root = label_output_root or ts_root
-                        if os.path.normcase(os.path.abspath(output_dir)) != os.path.normcase(
-                            os.path.abspath(manifest_root)
+                        # A custom label_output_root is an isolated export
+                        # destination. Do not update dataset_manifest.json
+                        # beside the read-only .mcs store merely because the
+                        # MCS directory is also used as output_dir.
+                        if (
+                            not label_output_root
+                            and os.path.normcase(os.path.abspath(output_dir)) != os.path.normcase(
+                                os.path.abspath(manifest_root)
+                            )
                         ):
                             _record_exported_labels(
                                 output_dir,

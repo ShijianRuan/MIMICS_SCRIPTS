@@ -104,10 +104,19 @@ def test_prepare_rejects_affine_mismatch(tmp_path):
         prepare_cases(rows, tmp_path / "cache", [1])
 
 
-def test_prepare_rejects_conflicting_qform_and_sform(tmp_path):
+def test_prepare_normalizes_conflicting_qform_and_sform(tmp_path):
+    """A conflicting qform/sform is resolved by preferring sform.
+
+    Mimics-exported NIfTIs frequently carry a valid qform that disagrees
+    with the (correct) sform.  Training must not fail on this; the sform
+    geometry is used and the qform is cleared.
+    """
     image_path = tmp_path / "image.nii.gz"
     label_path = tmp_path / "label.nii.gz"
-    image = nib.Nifti1Image(np.ones((32, 32, 32), dtype=np.float32), np.eye(4))
+    image = nib.Nifti1Image(
+        np.linspace(1, 32, 32 * 32 * 32, dtype=np.float32).reshape(32, 32, 32),
+        np.eye(4),
+    )
     shifted = np.eye(4)
     shifted[1, 3] = 3.0
     image.set_qform(np.eye(4), code=1)
@@ -115,7 +124,10 @@ def test_prepare_rejects_conflicting_qform_and_sform(tmp_path):
     nib.save(image, str(image_path))
     label = np.zeros((32, 32, 32), dtype=np.uint8)
     label[4:8, 4:8, 4:8] = 1
-    _write(label_path, label, np.eye(4))
+    label_nii = nib.Nifti1Image(label, np.eye(4))
+    label_nii.set_qform(np.eye(4), code=1)
+    label_nii.set_sform(shifted, code=1)
+    nib.save(label_nii, str(label_path))
     rows = [
         {
             "case_id": "case",
@@ -124,8 +136,13 @@ def test_prepare_rejects_conflicting_qform_and_sform(tmp_path):
             "split": "train",
         }
     ]
-    with pytest.raises(ValueError, match="conflicting valid qform and sform"):
-        prepare_cases(rows, tmp_path / "cache", [1])
+    # Should not raise; sform wins.
+    import warnings as _warnings
+
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("ignore")
+        prepared = prepare_cases(rows, tmp_path / "cache", [1])
+    assert len(prepared) == 1
 
 
 def test_augmentation_keeps_image_and_label_flips_aligned(tmp_path, monkeypatch):

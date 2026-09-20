@@ -265,14 +265,37 @@ class NativeSliceVolumeDataset(Dataset):
         split: str,
         slice_size=DEFAULT_FEATURE_SLICE_SIZE,
         normalization=DEFAULT_FEATURE_NORMALIZATION,
+        validation_case_ids=None,
     ):
         root = Path(data_root)
         self.slice_size = tuple(int(value) for value in slice_size)
         self.normalization = str(normalization or DEFAULT_FEATURE_NORMALIZATION)
+        self.validation_case_ids = (
+            [str(cid) for cid in validation_case_ids]
+            if validation_case_ids is not None
+            else None
+        )
         if split in ("train", "tr"):
             pairs = _candidate_pairs(root / "imagesTr", root / "labelsTr")
         else:
             pairs = _candidate_pairs(root / "imagesVal", root / "labelsVal")
+            # The fixed validation cases may live in imagesTr (not imagesVal);
+            # fall back to imagesTr for any requested IDs missing from imagesVal
+            # so the holdout is always resolvable (parity with MedicalVolumeDataset).
+            if self.validation_case_ids is not None:
+                available = {_case_id(image, image=True) for image, _ in pairs}
+                missing = set(self.validation_case_ids) - available
+                if missing:
+                    tr_pairs = _candidate_pairs(
+                        root / "imagesTr", root / "labelsTr"
+                    )
+                    tr_by_case = {
+                        _case_id(image, image=True): (image, label)
+                        for image, label in tr_pairs
+                    }
+                    pairs = pairs + [
+                        tr_by_case[cid] for cid in sorted(missing) if cid in tr_by_case
+                    ]
         if not pairs:
             raise RuntimeError(
                 "No native-grid image/label pairs found for split '{}' under {}".format(
@@ -288,6 +311,25 @@ class NativeSliceVolumeDataset(Dataset):
             }
             for image, label in pairs
         ]
+        # Filter the val split to the explicit holdout cases when requested.
+        if self.validation_case_ids is not None and split not in ("train", "tr"):
+            requested_set = set(self.validation_case_ids)
+            available = {sample["case_id"] for sample in self.samples}
+            missing = sorted(requested_set - available)
+            if missing:
+                raise RuntimeError(
+                    "Requested validation case IDs are absent from split '{}': {}".format(
+                        split, ", ".join(missing)
+                    )
+                )
+            self.samples = [
+                sample for sample in self.samples
+                if sample["case_id"] in requested_set
+            ]
+            if not self.samples:
+                raise RuntimeError(
+                    "validation_case_ids filtered out every case for split '{}'".format(split)
+                )
 
     def __len__(self) -> int:
         return len(self.samples)

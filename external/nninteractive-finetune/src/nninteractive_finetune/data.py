@@ -9,6 +9,7 @@ import random
 import shutil
 import time
 import uuid
+import warnings
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -156,10 +157,18 @@ def _canonical_volume(path: str) -> tuple[np.ndarray, np.ndarray, tuple[float, .
         and int(sform_code or 0) > 0
         and not np.allclose(qform, sform, rtol=1e-5, atol=1e-4)
     ):
-        raise ValueError(
-            "{} has conflicting valid qform and sform transforms. "
-            "Resolve the NIfTI geometry before fine-tuning.".format(path)
-        )
+        # Some Mimics-exported NIfTIs carry a valid qform that disagrees with
+        # the (correct) sform.  sform is the geometry deep-learning toolkits
+        # respect, so prefer it on conflict instead of failing training.
+        # Warn once per process so the user knows geometry was normalized.
+        if not getattr(_canonical_volume, "_warned_conflict", False):
+            warnings.warn(
+                "{} has conflicting valid qform and sform transforms; "
+                "using sform. (further occurrences suppressed)".format(path)
+            )
+            _canonical_volume._warned_conflict = True
+        image.set_sform(sform, sform_code)
+        image.set_qform(np.eye(4), code=0)
     canonical = nib.as_closest_canonical(image)
     array = np.asarray(canonical.dataobj)
     if array.ndim == 4 and array.shape[-1] == 1:

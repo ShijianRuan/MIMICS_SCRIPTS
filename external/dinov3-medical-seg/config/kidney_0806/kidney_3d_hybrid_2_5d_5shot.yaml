@@ -1,0 +1,19 @@
+# Exp D — 2.5D channel policy on the Exp A hybrid (conditional).
+# Adds channel_policy: 2_5d (neighbor slices [d-1,d,d+1] as pseudo-RGB) to the
+# Exp A hybrid for free inter-slice context at the encoder input. The 3 stacked
+# neighbor slices share the same per-volume casewise stats, so the pseudo-RGB is
+# coherent. Run ONLY if Exp A or C beat 0.5877 (don't add 2.5D to a broken base).
+_base_: ["kidney_0806_base.yaml"]
+
+model:
+  out_indices: [2, 5, 8, 11]
+  channel_policy: "2_5d"
+  neighbor_distance_mm: 1.5                 # ~1 slice at 1.5mm Z spacing
+
+decoder:
+  type: "context3d_hybrid"
+  anisotropic_context: true
+  z_smooth_sigma: 6.0
+  z_smooth_learnable: false
+
+exp_name: "kidney_0806_3d_hybrid_2_5d_s0657_s0661_s0668_s0693_s0749"

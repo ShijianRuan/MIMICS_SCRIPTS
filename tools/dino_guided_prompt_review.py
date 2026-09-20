@@ -64,6 +64,7 @@ class ReviewWindow(object):
         self.QtCore, self.QtGui, self.QtWidgets = qt
         self.finished = False
         self.request_id = 0
+        self.request_sent_epoch = 0.0
         self.foreground_count = 0
         self.background_count = 0
         self.automatic_foreground_count = 0
@@ -185,6 +186,7 @@ class ReviewWindow(object):
 
     def request(self, command):
         self.request_id += 1
+        self.request_sent_epoch = time.time()
         self.status_label.setText("Waiting for Mimics to apply the point change...")
         self.update_status(
             {
@@ -222,7 +224,23 @@ class ReviewWindow(object):
                 self.background_count, self.automatic_background_count
             )
         )
-        busy = bool(status.get("request_pending"))
+        # A point add/remove request is considered handled once Mimics writes
+        # back the matching handled_request_id, clears request_pending, or the
+        # 5s safety timeout elapses. The timeout guards against a lost status
+        # write (read-modify-write race with the Mimics thread) leaving the UI
+        # permanently stuck on "Waiting for Mimics...".
+        handled_id = status.get("handled_request_id")
+        acknowledged = (
+            not bool(status.get("request_pending"))
+            or (handled_id is not None and int(handled_id or 0) == self.request_id)
+        )
+        timed_out = (
+            self.request_sent_epoch > 0.0
+            and time.time() - self.request_sent_epoch > 5.0
+        )
+        if acknowledged or timed_out:
+            self.request_sent_epoch = 0.0
+        busy = bool(status.get("request_pending")) and not acknowledged and not timed_out
         editable = state == "reviewing" and not busy
         self.add_fg.setEnabled(editable)
         self.add_bg.setEnabled(editable)

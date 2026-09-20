@@ -676,14 +676,30 @@ def run_ui(context, preview_path=""):
         export_mask_row.addWidget(mask_named)
         export_mask_row.addStretch(1)
         form.addLayout(export_mask_row)
-        mask_names = QtWidgets.QListWidget()
-        mask_names.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
-        mask_names.setMaximumHeight(110)
-        available_masks = [str(name) for name in (context.get("mask_names") or []) if str(name).strip()]
-        mask_names.addItems(available_masks)
+        # Editable name field: the user can either type names directly
+        # (comma-separated) or pick from the candidate list below.  Clicking a
+        # candidate toggles it into the field, so a project with hundreds of
+        # masks can be narrowed by typing without scrolling.
+        mask_names = QtWidgets.QLineEdit()
+        mask_names.setPlaceholderText("Type names (comma-separated) or pick from the list below")
         mask_names.setEnabled(False)
         form.addWidget(mask_names)
+        available_masks = [str(name) for name in (context.get("mask_names") or []) if str(name).strip()]
+        mask_candidate_list = QtWidgets.QListWidget()
+        mask_candidate_list.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        mask_candidate_list.setMaximumHeight(120)
+        mask_candidate_list.addItems(available_masks)
+        mask_candidate_list.setEnabled(False)
+        mask_candidate_list.itemClicked.connect(
+            lambda item: _toggle_name_in_field(mask_names, item.text())
+        )
+        # Filter the candidate list as the user types in the name field.
+        mask_names.textChanged.connect(
+            lambda text: _filter_list_widget(mask_candidate_list, _last_token(text))
+        )
+        form.addWidget(mask_candidate_list)
         mask_named.toggled.connect(mask_names.setEnabled)
+        mask_named.toggled.connect(mask_candidate_list.setEnabled)
         policy_row = QtWidgets.QHBoxLayout()
         policy_row.addWidget(_label(QtWidgets, "IF FILES ALREADY EXIST", "section"))
         policy_row.addStretch(1)
@@ -867,7 +883,10 @@ def run_ui(context, preview_path=""):
             progress_bar.setRange(0, 0)
         detail = phase.capitalize()
         if total:
-            detail += " - {0} completed, {1} failed, {2} total".format(completed, failed, total)
+            remaining = max(0, total - completed - failed)
+            detail += " - {0} created, {1} failed, {2} total".format(completed, failed, total)
+            if remaining and not terminal_state(state):
+                detail += " ({0} remaining)".format(remaining)
         if current:
             detail += "\nCurrent: {0}".format(current)
         if payload.get("error"):
@@ -1014,12 +1033,12 @@ def run_ui(context, preview_path=""):
         if mode == "export_masks":
             selection["conflict_policy"] = "overwrite" if overwrite_radio.isChecked() else "skip"
             if mask_named.isChecked():
-                names = ",".join(item.text().strip() for item in mask_names.selectedItems())
+                names = ",".join(item.strip() for item in mask_names.text().split(",") if item.strip())
                 if not names:
                     QtWidgets.QMessageBox.warning(
                         window,
                         "Mask Names Required",
-                        "Select one or more masks from the list.",
+                        "Enter one or more mask names (comma-separated) or pick from the list.",
                     )
                     return
                 selection["mask_selection"] = names
@@ -1078,6 +1097,46 @@ def _label(QtWidgets, text, object_name):
     label = QtWidgets.QLabel(text)
     label.setObjectName(object_name)
     return label
+
+
+def _filter_list_widget(widget, text):
+    """Hide list items whose text does not contain the filter (case-insensitive).
+
+    Selection is preserved across filtering so a multi-select built up over
+    several searches is not lost when the filter text changes.
+    """
+    needle = str(text or "").strip().lower()
+    for index in range(widget.count()):
+        item = widget.item(index)
+        item.setHidden(bool(needle) and needle not in item.text().lower())
+
+
+def _last_token(text):
+    """Return the token being typed after the last comma.
+
+    The name field holds comma-separated names; only the token currently being
+    typed should drive the candidate-list filter, so an already-typed
+    "liver, kidney" filters on "kidney", not the whole string.
+    """
+    return str(text or "").rsplit(",", 1)[-1].strip()
+
+
+def _toggle_name_in_field(field, name):
+    """Add or remove a mask name in the comma-separated name field.
+
+    Clicking a candidate toggles its presence so the field always reads as a
+    clean, de-duplicated, comma-separated list.  Names that are absent from
+    the field (typed freehand) are likewise preserved.
+    """
+    current = [item.strip() for item in field.text().split(",") if item.strip()]
+    target = str(name).strip()
+    if not target:
+        return
+    if target in current:
+        current = [item for item in current if item != target]
+    else:
+        current.append(target)
+    field.setText(", ".join(current))
 
 
 def main(argv=None):

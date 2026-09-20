@@ -11,6 +11,7 @@ from scipy import ndimage
 
 from .data.dataset_3d import (
     fit_pad_geometry,
+    normalize_casewise_zscore,
     normalize_volume,
     prepare_model_input,
 )
@@ -188,6 +189,12 @@ def _predict_logits(
         max(patch_size, int(round((size * float(input_scale)) / patch_size)) * patch_size)
         for size in base_size
     )
+    # Casewise z-score produces negative values that must NOT be clipped to
+    # [0, 1]; all other pre-normalized contracts stay clipped. Inferred from the
+    # config scope so the deep TTA helpers do not each need a new parameter.
+    clip_pre_normalized = str(
+        data_cfg.get("normalization_scope") or "sample"
+    ).lower() != "case_casewise"
     tensor = prepare_model_input(
         data_zyx,
         scaled_size,
@@ -197,6 +204,7 @@ def _predict_logits(
         slice_axis=model_cfg.get("slice_axis", "axial"),
         resize_mode=data_cfg.get("resize_mode", "stretch"),
         pre_normalized=pre_normalized,
+        clip_pre_normalized=clip_pre_normalized,
     ).unsqueeze(0).to(device=device, dtype=torch.float32)
     spacing = torch.tensor(spacing_zyx(model_grid), dtype=torch.float32, device=device).unsqueeze(0)
     with torch.no_grad():
@@ -407,7 +415,12 @@ def _extract_padded(data: np.ndarray, start: tuple[int, int, int], size: tuple[i
 
 
 def _case_normalized_input(data_zyx, config):
-    """Apply the saved case-level intensity contract before any ROI/patch."""
+    """Apply the saved case-level intensity contract before any ROI/patch.
+
+    Returns ``(data, pre_normalized)``. Whether pre-normalized data should be
+    clipped is derived from ``data.normalization_scope`` by the input builder;
+    casewise z-score data is intentionally left unclipped there.
+    """
     data_cfg = config.get("data", {})
     model_cfg = config.get("model", {})
     scope = str(data_cfg.get("normalization_scope") or "sample").lower()
@@ -427,7 +440,19 @@ def _case_normalized_input(data_zyx, config):
             ),
             True,
         )
-    if scope not in {"sample", "case_before_roi_or_patch"}:
+    if (
+        scope == "case_casewise"
+        and channel_policy
+        not in ("ct_windows", "multiwindow", "multi_window")
+    ):
+        percentiles = (data_cfg.get("intensity") or {}).get(
+            "casewise_percentiles", (0.5, 99.5)
+        )
+        return (
+            normalize_casewise_zscore(data_zyx, percentiles=percentiles),
+            True,
+        )
+    if scope not in {"sample", "case_before_roi_or_patch", "case_casewise"}:
         raise ValueError(
             "Unknown data.normalization_scope: {}".format(scope)
         )

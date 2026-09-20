@@ -7,8 +7,16 @@ Commands:
   prepare-import  Convert dataset cases to prepare manifests and optionally
                   launch background Mimics to create .mcs files.
   export-labels   Launch background Mimics to export labels from saved .mcs.
+    append-masks    Add arbitrary named NIfTI Masks to existing .mcs files and
+                                    save new projects without overwriting source.
   kill-background Stop integration-created bridge, background Mimics, and
                   nnInteractive service processes.
+
+For export-labels, --image-root is independent from --mcs-dir. Case IDs come
+from .mcs filenames; source images are resolved from either
+<image-root>/<case-id>/ct.nii.gz or <image-root>/<case-id>.nii.gz. The resolved
+source path is passed explicitly to the bridge instead of using stale project
+metadata.
 """
 
 import argparse
@@ -450,7 +458,9 @@ def launch_create_mcs(
 
 def launch_export_labels(ts_root, cases, mimics_exe, axes, flips, lock_timeout_seconds=0.0,
                          mcs_dir=None, label_output_root=None, overwrite_source=False,
-                         mask_names=None):
+                         mask_names=None, case_dirs=None, mcs_paths=None,
+                         source_image_paths=None, mask_resample_method="nearest",
+                         export_space="source_image", source_mask_root=None):
     output_dir = Path(mcs_dir).resolve() if mcs_dir else ts_root / "mcs_output"
     output_dir.mkdir(parents=True, exist_ok=True)
     job_id = "export_{}_{}".format(time.strftime("%Y%m%dT%H%M%S"), uuid.uuid4().hex[:8])
@@ -460,6 +470,7 @@ def launch_export_labels(ts_root, cases, mimics_exe, axes, flips, lock_timeout_s
     runner = job_dir / "run_export_batch.py"
     status_path = job_dir / "status.json"
     stop_path = job_dir / "_export_stop.json"
+    source_mask_root = Path(source_mask_root).resolve() if source_mask_root else None
     write_json_atomic(
         config,
         {
@@ -473,9 +484,15 @@ def launch_export_labels(ts_root, cases, mimics_exe, axes, flips, lock_timeout_s
             "label_output_root": str(Path(label_output_root).resolve()) if label_output_root else "",
             "overwrite_existing": bool(overwrite_source),
             "mask_names": list(mask_names or []),
+            "case_dirs": dict(case_dirs or {}),
+            "mcs_paths": dict(mcs_paths or {}),
+            "source_image_paths": dict(source_image_paths or {}),
+            "mask_resample_method": str(mask_resample_method or "nearest"),
+            "export_space": str(export_space or "source_image"),
             "status_path": str(status_path),
             "stop_path": str(stop_path),
             "job_runtime": str(job_dir),
+            "source_mask_root": str(Path(source_mask_root).resolve()) if source_mask_root else "",
         },
     )
     runner.write_text(
@@ -571,6 +588,202 @@ def launch_export_labels(ts_root, cases, mimics_exe, axes, flips, lock_timeout_s
         raise
     finally:
         log.close()
+
+
+_SOURCE_IMAGE_SUFFIXES = (
+    ".nii.gz", ".nii", ".mha", ".mhd", ".nrrd", ".nrrd.gz",
+)
+_SOURCE_IMAGE_PREFERRED_NAMES = (
+    "ct.nii.gz", "mr.nii.gz", "mri.nii.gz", "image.nii.gz",
+    "ct.nii", "mr.nii", "mri.nii", "image.nii",
+    "ct.mha", "mr.mha", "mri.mha", "image.mha",
+    "ct.mhd", "mr.mhd", "mri.mhd", "image.mhd",
+    "ct.nrrd", "mr.nrrd", "mri.nrrd", "image.nrrd",
+)
+
+
+def _is_source_image_file(path):
+    return str(path).lower().endswith(_SOURCE_IMAGE_SUFFIXES)
+
+
+def _find_source_image_in_case_dir(case_dir):
+    """Return one unambiguous source image or DICOM folder in a case dir."""
+    case_dir = Path(case_dir)
+    if not case_dir.is_dir():
+        return None
+    files = [
+        path for path in case_dir.iterdir()
+        if path.is_file() and _is_source_image_file(path)
+        and not any(token in path.name.lower() for token in ("label", "mask", "seg"))
+    ]
+    by_name = {path.name.lower(): path for path in files}
+    for name in _SOURCE_IMAGE_PREFERRED_NAMES:
+        if name in by_name:
+            return by_name[name].resolve()
+    if len(files) == 1:
+        return files[0].resolve()
+    dicom_dir = case_dir / "dicom"
+    if dicom_dir.is_dir():
+        return dicom_dir.resolve()
+    # The bridge performs authoritative DICOM header validation later.
+    try:
+        if any(path.is_file() and path.suffix.lower() == ".dcm" for path in case_dir.iterdir()):
+            return case_dir.resolve()
+    except OSError:
+        pass
+    return None
+
+
+def _source_case_id_from_image(path):
+    name = Path(path).name.lower()
+    for suffix in _SOURCE_IMAGE_SUFFIXES:
+        if name.endswith(suffix):
+            return name[:-len(suffix)]
+    return Path(path).stem.lower()
+
+
+def _resolve_source_for_case(image_root, case_id, total_cases=1):
+    """Resolve an image path without consulting the .mcs metadata."""
+    root = Path(image_root).expanduser()
+    if root.is_file():
+        return root.resolve(), root.parent.resolve()
+    if not root.is_dir():
+        return None, None
+
+    direct_case_dir = root / str(case_id)
+    if direct_case_dir.is_dir():
+        image = _find_source_image_in_case_dir(direct_case_dir)
+        if image is not None:
+            return image, direct_case_dir.resolve()
+
+    exact_files = []
+    case_text = str(case_id).lower()
+    try:
+        for path in root.iterdir():
+            if path.is_file() and _is_source_image_file(path):
+                if _source_case_id_from_image(path) == case_text:
+                    exact_files.append(path.resolve())
+    except OSError:
+        pass
+    if len(exact_files) == 1:
+        return exact_files[0], exact_files[0].parent.resolve()
+    if len(exact_files) > 1:
+        raise RuntimeError(
+            "More than one source image matches case '{}': {}".format(
+                case_id, ", ".join(str(path) for path in exact_files)
+            )
+        )
+
+    # Allow grouped image roots such as image_root/group_a/case001/ct.nii.gz.
+    matching_dirs = []
+    matching_files = []
+    for current, _dirnames, filenames in os.walk(str(root)):
+        current_path = Path(current)
+        if current_path.name.lower() == case_text:
+            matching_dirs.append(current_path)
+        for filename in filenames:
+            path = current_path / filename
+            if _is_source_image_file(path) and _source_case_id_from_image(path) == case_text:
+                matching_files.append(path)
+    resolved = []
+    for case_dir in matching_dirs:
+        image = _find_source_image_in_case_dir(case_dir)
+        if image is not None:
+            resolved.append((image, case_dir.resolve()))
+    resolved.extend((path.resolve(), path.parent.resolve()) for path in matching_files)
+    unique = {}
+    for image, case_dir in resolved:
+        unique[str(image).lower()] = (image, case_dir)
+    if len(unique) == 1:
+        return list(unique.values())[0]
+    if len(unique) > 1:
+        raise RuntimeError(
+            "More than one source image matches case '{}': {}".format(
+                case_id, ", ".join(sorted(unique))
+            )
+        )
+
+    if int(total_cases or 0) == 1:
+        image = _find_source_image_in_case_dir(root)
+        if image is not None:
+            return image, root.resolve()
+    return None, None
+
+
+def discover_export_sources(mcs_dir, image_root, cases_filter=None, recursive=True):
+    """Build explicit case-to-MCS/source-image mappings before Mimics starts."""
+    mcs_root = Path(mcs_dir).expanduser()
+    if mcs_root.is_file():
+        mcs_files = [mcs_root] if mcs_root.suffix.lower() == ".mcs" else []
+    elif mcs_root.is_dir():
+        mcs_files = []
+        if recursive:
+            file_groups = (
+                (current, filenames)
+                for current, _dirnames, filenames in os.walk(str(mcs_root))
+            )
+        else:
+            file_groups = ((str(mcs_root), os.listdir(str(mcs_root))),)
+        for current, filenames in file_groups:
+            for filename in filenames:
+                if filename.lower().endswith(".mcs"):
+                    mcs_files.append(Path(current) / filename)
+        mcs_files.sort(key=lambda path: str(path).lower())
+    else:
+        raise RuntimeError("The .mcs directory was not found: {}".format(mcs_root))
+    if not mcs_files:
+        raise RuntimeError("No .mcs files were found under: {}".format(mcs_root))
+
+    requested = set(
+        str(value).strip() for value in (cases_filter or set()) if str(value).strip()
+    )
+    rows = {}
+    for mcs_path in mcs_files:
+        case_id = mcs_path.name[:-4]
+        if requested and case_id not in requested:
+            continue
+        if case_id in rows:
+            raise RuntimeError(
+                "More than one .mcs file has the same case name '{}': {} and {}".format(
+                    case_id, rows[case_id]["mcs_path"], mcs_path
+                )
+            )
+        rows[case_id] = {"mcs_path": str(mcs_path.resolve())}
+    if requested:
+        missing = sorted(requested.difference(rows))
+        if missing:
+            raise RuntimeError(
+                "Requested .mcs case(s) were not found: {}".format(", ".join(missing))
+            )
+    if not rows:
+        raise RuntimeError("No selected .mcs files remain after applying --cases.")
+
+    case_dirs = {}
+    mcs_paths = {}
+    source_image_paths = {}
+    missing_images = []
+    total = len(rows)
+    for case_id in sorted(rows):
+        image, case_dir = _resolve_source_for_case(image_root, case_id, total_cases=total)
+        if image is None:
+            missing_images.append(case_id)
+            continue
+        mcs_paths[case_id] = rows[case_id]["mcs_path"]
+        source_image_paths[case_id] = str(image)
+        case_dirs[case_id] = str(case_dir or Path(image).parent)
+    if missing_images:
+        raise RuntimeError(
+            "Could not resolve an original image for case(s) {} under '{}'. "
+            "Expected <image-root>/<case>/ct.nii.gz or <image-root>/<case>.nii.gz; "
+            "the .mcs metadata path was not used.".format(
+                ", ".join(missing_images), image_root
+            )
+        )
+    return {
+        "case_dirs": case_dirs,
+        "mcs_paths": mcs_paths,
+        "source_image_paths": source_image_paths,
+    }
 
 
 def cmd_prepare_import(args):
@@ -839,27 +1052,342 @@ def cmd_export_labels(args):
     if not mimics_exe:
         print("A background Mimics executable was not found.", file=sys.stderr)
         return 2
-    cases = set(args.cases.split(",")) if args.cases else None
+    image_root_value = args.image_root or args.ts_root
+    if not image_root_value:
+        print("export-labels requires --image-root (or the legacy --ts-root).", file=sys.stderr)
+        return 2
+    image_root = Path(image_root_value).resolve()
+    mcs_dir = Path(args.mcs_dir).resolve() if args.mcs_dir else image_root / "mcs_output"
+    source_mask_root = Path(args.source_mask_root).resolve() if args.source_mask_root else None
+    if source_mask_root is not None and not source_mask_root.is_dir():
+        print(
+            "The canonical source-mask root was not found: {}".format(source_mask_root),
+            file=sys.stderr,
+        )
+        return 2
+    requested_cases = set(args.cases.split(",")) if args.cases else None
+    try:
+        mapping = discover_export_sources(
+            mcs_dir,
+            image_root,
+            requested_cases,
+            recursive=not args.mcs_root_only,
+        )
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    cases = set(mapping["mcs_paths"])
     try:
         proc = launch_export_labels(
-            Path(args.ts_root).resolve(),
+            image_root,
             cases,
             mimics_exe,
             args.axes,
             args.flips,
             args.background_mimics_lock_timeout_seconds,
-            mcs_dir=args.mcs_dir,
+            mcs_dir=mcs_dir,
             label_output_root=args.output_dir,
             overwrite_source=args.overwrite_source,
             mask_names=[
                 value.strip() for value in str(args.masks or "all").split(",")
                 if value.strip() and value.strip().lower() != "all"
             ],
+            case_dirs=mapping["case_dirs"],
+            mcs_paths=mapping["mcs_paths"],
+            source_image_paths=mapping["source_image_paths"],
+            mask_resample_method=args.mask_resample_method,
+            export_space=args.export_space,
+            source_mask_root=source_mask_root,
         )
     except ResourceLockTimeout as exc:
         print("Background Mimics is busy: {}".format(exc), file=sys.stderr)
         return 75
     print("Background Mimics started for label export, PID={}".format(proc.pid))
+    return 0
+
+
+def _index_append_files(root, suffixes, kind, nested_mask_name=None):
+    root = Path(root).expanduser()
+    if not root.is_dir():
+        raise RuntimeError("The {} directory was not found: {}".format(kind, root))
+    indexed = {}
+    duplicates = []
+    direct_paths = [
+        path for path in sorted(root.iterdir(), key=lambda item: item.name.lower())
+        if path.is_file()
+        and any(path.name.lower().endswith(suffix) for suffix in suffixes)
+    ]
+    candidates = [(path, None) for path in direct_paths]
+    if not candidates and nested_mask_name:
+        expected_names = [
+            str(nested_mask_name).strip() + suffix for suffix in suffixes
+        ]
+        for case_dir in sorted(root.iterdir(), key=lambda item: item.name.lower()):
+            if not case_dir.is_dir():
+                continue
+            segmentation_dir = case_dir / "segmentations"
+            for expected_name in expected_names:
+                path = segmentation_dir / expected_name
+                if path.is_file():
+                    candidates.append((path, case_dir.name))
+    for path, nested_case_id in candidates:
+        if not path.is_file():
+            continue
+        lower = path.name.lower()
+        if not any(lower.endswith(suffix) for suffix in suffixes):
+            continue
+        if kind == "MCS":
+            case_id = path.stem
+        elif nested_case_id:
+            case_id = nested_case_id
+        elif lower.endswith(".nii.gz"):
+            case_id = path.name[:-7]
+        else:
+            case_id = path.name[:-4]
+        key = case_id.lower()
+        if key in indexed:
+            duplicates.append((case_id, str(indexed[key]), str(path)))
+        else:
+            indexed[key] = path
+    if duplicates:
+        raise RuntimeError(
+            "Duplicate case IDs were found in {}: {}".format(kind, duplicates[:5])
+        )
+    return indexed
+
+
+def launch_append_masks(plan, mimics_exe, force=False,
+                        lock_timeout_seconds=0.0):
+    """Launch a background Mimics process that embeds named Masks per case."""
+    output_dir = Path(plan["output_dir"]).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    job_id = "append_masks_{}_{}".format(
+        time.strftime("%Y%m%dT%H%M%S"), uuid.uuid4().hex[:8]
+    )
+    job_dir = Path(ROOT) / ".mimics_runtime" / "append_jobs" / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    config = job_dir / "append_config.json"
+    runner = job_dir / "run_append.py"
+    status_path = job_dir / "status.json"
+    stop_path = job_dir / "stop.json"
+    write_json_atomic(
+        config,
+        {
+            "schema_version": "append_masks_job.v1",
+            "job_dir": str(job_dir),
+            "mcs_dir": plan["mcs_dir"],
+            "output_dir": str(output_dir),
+            "in_place": bool(plan.get("in_place", False)),
+            "mask_specs": plan["mask_specs"],
+            "cases": plan["cases"],
+            "force": bool(force),
+            "status_path": str(status_path),
+            "stop_path": str(stop_path),
+        },
+    )
+    runner.write_text(
+        "\n".join([
+            "# Auto-generated named-Mask MCS append runner",
+            "import sys",
+            "sys.path.insert(0, r'{}')".format(str(RUNTIME)),
+            "import append_masks_batch",
+            "_result = append_masks_batch.main(r'{}')".format(str(config)),
+            "if _result:\n    raise SystemExit(_result)",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    lock_scopes = [Path(plan["mcs_dir"]), output_dir]
+    lock_scopes.extend(
+        Path(item["directory"])
+        for item in plan.get("mask_specs", [])
+    )
+    locks = _acquire_background_mimics_locks(
+        "append named Masks",
+        lock_scopes,
+        lock_timeout_seconds,
+    )
+    log = open(str(job_dir / "process.log"), "ab")
+    mimics_log = job_dir / "mimics_application.log"
+    try:
+        proc = subprocess.Popen(
+            runtime_common.background_mimics_command(
+                mimics_exe, str(runner), mimics_log_path=str(mimics_log)
+            ),
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+        for lock in locks:
+            if not lock.update_pid(
+                proc.pid,
+                kind="append_masks",
+                mcs_source=str(Path(plan["mcs_dir"]).resolve()),
+                output_dir=str(output_dir),
+                status_path=str(status_path),
+                stop_path=str(stop_path),
+            ):
+                raise RuntimeError(
+                    "Background Mimics started, but the append lock could not "
+                    "be transferred to PID {}.".format(proc.pid)
+                )
+        proc._mimics_append_job_dir = str(job_dir)
+        proc._mimics_append_status_path = str(status_path)
+        return proc
+    except Exception:
+        for lock in locks:
+            try:
+                lock.release()
+            except Exception:
+                pass
+        raise
+    finally:
+        log.close()
+
+
+def _parse_append_mask_specs(args):
+    if not args.mask:
+        raise RuntimeError("--mask is required; use NAME=PATH and repeat --mask for each Mask.")
+    specs = []
+    raw_values = args.mask if isinstance(args.mask, (list, tuple)) else [args.mask]
+    for raw in raw_values:
+        value = raw.strip()
+        if not value or "=" not in value:
+            raise RuntimeError(
+                "Invalid --mask value '{}'; expected NAME=PATH.".format(value)
+            )
+        name, path = value.split("=", 1)
+        name = name.strip()
+        path = path.strip()
+        if not name or not path:
+            raise RuntimeError(
+                "Invalid --mask value '{}'; expected NAME=PATH.".format(value)
+            )
+        specs.append((name, path))
+    names = [name for name, _path in specs]
+    if len(set(names)) != len(names):
+        raise RuntimeError("Duplicate Mask names were supplied: {}".format(", ".join(names)))
+    return specs
+
+
+def discover_append_mask_cases(mcs_dir, mask_specs, output_dir,
+                               requested_cases=None, in_place=False):
+    """Build source/output mappings for arbitrary named Mask files.
+
+    Each mask specification is NAME=DIR.  Files are matched by case ID from
+    their .nii/.nii.gz basename, and only the all-input intersection is queued.
+    """
+    mcs_root = Path(mcs_dir).expanduser().resolve()
+    destination_root = Path(output_dir).expanduser().resolve()
+    if mcs_root == destination_root and not in_place:
+        raise RuntimeError(
+            "Refusing to append in place. --output-dir must differ from --mcs-dir: {}"
+            .format(mcs_root)
+        )
+    mcs = _index_append_files(mcs_root, (".mcs",), "MCS")
+    indexed_masks = []
+    for name, directory in mask_specs:
+        indexed_masks.append((
+            name,
+            _index_append_files(
+                directory,
+                (".nii.gz", ".nii"),
+                name + " masks",
+                nested_mask_name=name,
+            ),
+        ))
+    common = set(mcs)
+    for _name, indexed in indexed_masks:
+        common &= set(indexed)
+    common = sorted(common)
+    if requested_cases:
+        requested = set(
+            str(value).strip().lower()
+            for value in requested_cases
+            if str(value).strip()
+        )
+        missing = sorted(requested - set(mcs))
+        if missing:
+            raise RuntimeError(
+                "Requested MCS case(s) were not found: {}".format(", ".join(missing))
+            )
+        common = [case_id for case_id in common if case_id in requested]
+    if not common:
+        raise RuntimeError("No cases have an MCS plus every requested Mask.")
+    rows = []
+    for key in common:
+        case_id = mcs[key].stem
+        rows.append({
+            "case_id": case_id,
+            "mcs_path": str(mcs[key]),
+            "masks": [
+                {"name": name, "mask_path": str(indexed[key])}
+                for name, indexed in indexed_masks
+            ],
+            "output_mcs_path": str(
+                mcs[key] if in_place else destination_root / (case_id + ".mcs")
+            ),
+        })
+    counts = {
+        "mcs": len(mcs),
+        "common_cases": len(rows),
+    }
+    for name, indexed in indexed_masks:
+        counts[name + "_masks"] = len(indexed)
+        counts[name + "_missing_mcs"] = len(set(indexed) - set(mcs))
+        counts["mcs_missing_" + name] = len(set(mcs) - set(indexed))
+    return {
+        "mcs_dir": str(mcs_root),
+        "output_dir": str(destination_root),
+        "in_place": bool(in_place),
+        "mask_specs": [
+            {"name": name, "directory": str(Path(directory).expanduser().resolve())}
+            for name, directory in mask_specs
+        ],
+        "counts": counts,
+        "cases": rows,
+    }
+
+
+def cmd_append_masks(args):
+    mimics_exe = find_mimics_exe(args.mimics_exe)
+    if not mimics_exe:
+        print("A background Mimics executable was not found.", file=sys.stderr)
+        return 2
+    try:
+        mask_specs = _parse_append_mask_specs(args)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    requested = args.cases.split(",") if args.cases else None
+    try:
+        plan = discover_append_mask_cases(
+            args.mcs_dir,
+            mask_specs,
+            args.mcs_dir if args.in_place else args.output_dir,
+            requested_cases=requested,
+            in_place=args.in_place,
+        )
+        proc = launch_append_masks(
+            plan,
+            mimics_exe,
+            force=args.force,
+            lock_timeout_seconds=args.background_mimics_lock_timeout_seconds,
+        )
+    except (RuntimeError, ResourceLockTimeout) as exc:
+        print(str(exc), file=sys.stderr)
+        return 75 if isinstance(exc, ResourceLockTimeout) else 2
+    counts = plan["counts"]
+    print(
+        "Background Mimics started for named-Mask MCS append, PID={}. "
+        "{} case(s) queued.".format(proc.pid, counts["common_cases"])
+    )
+    if plan.get("in_place"):
+        print("In-place MCS update: source files will be atomically replaced after successful save.")
+    else:
+        print("Output directory: {}".format(plan["output_dir"]))
+    print("Job directory: {}".format(getattr(proc, "_mimics_append_job_dir", "")))
+    print("Status: {}".format(getattr(proc, "_mimics_append_status_path", "")))
     return 0
 
 
@@ -1061,18 +1589,80 @@ def build_parser():
     p.set_defaults(func=cmd_prepare_import)
 
     p = sub.add_parser("export-labels", help="Export labels from saved .mcs files in background Mimics")
-    p.add_argument("--ts-root", required=True)
+    p.add_argument("--ts-root", help="Legacy alias for --image-root")
+    p.add_argument(
+        "--image-root",
+        help="Root containing original images; this overrides paths stored in .mcs metadata",
+    )
     p.add_argument("--cases")
     p.add_argument("--mimics-exe")
     p.add_argument("--mcs-dir", help="Folder containing the saved .mcs projects")
+    p.add_argument(
+        "--mcs-root-only",
+        action="store_true",
+        help="When --mcs-dir is a folder, use only .mcs files directly in that folder (do not recurse)",
+    )
     p.add_argument("--masks", default="all", help="all or comma-separated mask names")
+    p.add_argument(
+        "--source-mask-root",
+        help=(
+            "Explicit canonical source-label root. For each case, selected masks are read from "
+            "<root>/<case>/segmentations/<mask>.nii[.gz] instead of the voxel data stored in .mcs. "
+            "Missing or geometrically mismatched source masks fail the case."
+        ),
+    )
     destination = p.add_mutually_exclusive_group(required=True)
     destination.add_argument("--output-dir", help="Safe export root; writes <root>/<case>/segmentations without overwriting")
     destination.add_argument("--overwrite-source", action="store_true", help="Explicitly overwrite <case>/segmentations")
     p.add_argument("--axes", type=parse_axes, default=[0, 1, 2])
     p.add_argument("--flips", type=parse_flips, default=[False, False, False])
+    p.add_argument(
+        "--mask-resample-method",
+        choices=["nearest", "distance"],
+        default="nearest",
+        help=(
+            "Binary Mask resampling when a Mimics grid differs from the source grid. "
+            "Use distance to reduce stair-step artifacts after oblique regridding."
+        ),
+    )
+    p.add_argument(
+        "--export-space",
+        choices=["source_image", "mimics_grid"],
+        default="source_image",
+        help=(
+            "Output grid. source_image matches the original image; mimics_grid "
+            "writes the raw Mask on the grid stored in the .mcs project."
+        ),
+    )
     p.add_argument("--background-mimics-lock-timeout-seconds", type=float, default=0.0)
     p.set_defaults(func=cmd_export_labels)
+
+    p = sub.add_parser(
+        "append-masks",
+        help="Open existing MCS files and add arbitrary named Masks",
+    )
+    p.add_argument("--mcs-dir", required=True)
+    p.add_argument(
+        "--mask",
+        action="append",
+        required=True,
+        help="Mask specification NAME=DIR; repeat --mask for multiple named NIfTI directories",
+    )
+    destination = p.add_mutually_exclusive_group(required=True)
+    destination.add_argument(
+        "--output-dir",
+        help="Separate output folder for newly saved MCS files; source MCS files are never overwritten",
+    )
+    destination.add_argument(
+        "--in-place",
+        action="store_true",
+        help="Append to the existing MCS files; save beside each source and atomically replace it after success",
+    )
+    p.add_argument("--cases", help="Comma-separated case IDs; default is the intersection of all requested Masks")
+    p.add_argument("--mimics-exe")
+    p.add_argument("--force", action="store_true", help="Replace existing output MCS files")
+    p.add_argument("--background-mimics-lock-timeout-seconds", type=float, default=0.0)
+    p.set_defaults(func=cmd_append_masks)
 
     p = sub.add_parser("kill-background", help="Stop integration-created background processes")
     p.set_defaults(func=cmd_kill_background)

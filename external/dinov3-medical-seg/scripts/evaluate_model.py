@@ -111,13 +111,15 @@ def evaluate_case(model, image_path: Path, label_path: Path, config, device, sav
     return result
 
 
-def evaluate_dataset(model, data_root: Path, split: str, config, device, save_dir: Path | None = None) -> dict:
+def evaluate_dataset(model, data_root: Path, split: str, config, device, save_dir: Path | None = None, case_ids: set | None = None) -> dict:
     image_dir = data_root / "images{}".format(split)
     label_dir = data_root / "labels{}".format(split)
     labels = {_case_stem(path): path for path in label_dir.glob("*.nii*")}
     rows = []
     for image_path in sorted(image_dir.glob("*.nii*")):
         case_id = _case_stem(image_path)
+        if case_ids is not None and case_id not in case_ids:
+            continue
         if case_id not in labels:
             raise RuntimeError("Missing label for {}".format(image_path))
         print("Evaluating {}...".format(case_id), flush=True)
@@ -164,6 +166,12 @@ def main():
     parser.add_argument("--output", required=True)
     parser.add_argument("--save-predictions", action="store_true")
     parser.add_argument("--device", default=None)
+    parser.add_argument(
+        "--case-ids",
+        default=None,
+        help="Comma-separated case IDs to evaluate (default: all in split). "
+        "Used to score a fixed validation subset that shares a directory with training cases.",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config, {})
@@ -172,6 +180,9 @@ def main():
     checkpoint = load_checkpoint(model, args.checkpoint, device=device)
     model.eval()
     output_path = Path(args.output)
+    case_ids = None
+    if args.case_ids:
+        case_ids = {token.strip() for token in args.case_ids.split(",") if token.strip()}
     summary = evaluate_dataset(
         model,
         Path(args.data_root),
@@ -179,6 +190,7 @@ def main():
         config,
         device,
         output_path.parent / "predictions" if args.save_predictions else None,
+        case_ids=case_ids,
     )
     summary["checkpoint"] = str(args.checkpoint)
     summary["checkpoint_epoch"] = checkpoint.get("epoch")

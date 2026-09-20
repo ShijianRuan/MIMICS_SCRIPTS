@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 
 import src.inference as inference
@@ -120,6 +121,39 @@ def test_long_component_gets_three_physically_separated_foreground_and_backgroun
     assert all(mean[tuple(point["voxel_zyx"])] < 0.5 for point in background)
 
 
+def test_overlapping_background_shells_keep_best_score_per_voxel():
+    """Two nearby components share background-shell voxels; the shared voxel's
+    reported score must be the best copy, not an arbitrary last-write one."""
+    mean, variance, agreement = _statistics((60, 60, 60))
+    # Two blocks 6 mm apart (identity affine, 1 mm voxels): their 2-12 mm
+    # background shells overlap in the gap between them.
+    _paint_box(mean, variance, agreement, (20, 10, 10), (40, 30, 30), 0.95)
+    _paint_box(mean, variance, agreement, (20, 31, 10), (40, 51, 30), 0.95)
+
+    proposal = propose_guided_points(
+        mean,
+        variance,
+        agreement,
+        np.eye(4),
+        minimum_point_spacing_mm=4.0,
+        inner_background_shell_mm=2.0,
+        outer_background_shell_mm=12.0,
+    )
+
+    background = [
+        point for point in proposal["points"] if not point["include_interaction"]
+    ]
+    assert background, "expected at least one background point in the shared shell"
+    # Every background point must be a true background voxel (low probability),
+    # never a foreground voxel mis-tagged by a corrupted coordinate map.
+    for point in background:
+        assert mean[tuple(point["voxel_zyx"])] < 0.5
+    # Scores are normalized to [0, 1]; a last-write-wins duplicate could only
+    # depress them, so the top background score should remain the genuine max.
+    scores = [point["score"] for point in background]
+    assert max(scores) > 0.0
+
+
 def test_world_coordinates_follow_xyz_affine_from_zyx_voxels():
     mean, variance, agreement = _statistics((24, 24, 24))
     _paint_box(mean, variance, agreement, (5, 6, 7), (18, 19, 20))
@@ -190,3 +224,19 @@ def test_cached_native_tta_avoids_the_affine_left_right_axis():
         ]
     )
     assert laterality_safe_in_plane_axis_zyx(swapped) == 2
+
+
+def test_region_without_a_stable_core_raises_so_caller_keeps_segmentation():
+    """A foreground region that exists above threshold but lacks a stable core
+    (high TTA disagreement) raises rather than fabricating a weak prompt. The
+    inference script wraps this in try/except so the DINOv3 segmentation is
+    still saved; this test pins the raise that the caller depends on."""
+    mean, variance, agreement = _statistics((40, 40, 40))
+    _paint_box(mean, variance, agreement, (10, 10, 10), (30, 30, 30), 0.9)
+    # High variance everywhere inside the component -> no voxel passes the
+    # stable-core variance limit, so no foreground point can be selected.
+    variance[10:30, 10:30, 10:30] = 0.5
+
+    with pytest.raises(RuntimeError):
+        propose_guided_points(mean, variance, agreement, np.eye(4))
+

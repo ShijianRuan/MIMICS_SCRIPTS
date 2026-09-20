@@ -1,5 +1,7 @@
 import sys
 import os
+import re
+import csv
 from pathlib import Path
 import shutil
 import json
@@ -141,7 +143,7 @@ def _expand_grouped_class_map(class_map):
 
 
 def generate_json_from_dir_v2(train_dataset_name, subjects_train, subjects_val, labels,
-                              modality, image_reader_writer):
+                              modality, image_reader_writer, annotation_version=None):
     """生成 dataset.json 和 splits_final.json。
 
     Parameters
@@ -150,6 +152,9 @@ def generate_json_from_dir_v2(train_dataset_name, subjects_train, subjects_val, 
         图像模态，如 "CT" 或 "MR"，写入 channel_names。
     image_reader_writer : str
         nnUNet 的 image reader/writer 类名，写入 overwrite_image_reader_writer。
+    annotation_version : str or None
+        标注版本，写入 dataset.json 的 "annotation_version" 字段用于追溯
+        （nnUNet 忽略未知字段，无害）。None/空时不写入该字段。
     """
     print("Creating dataset.json...")
 
@@ -177,6 +182,8 @@ def generate_json_from_dir_v2(train_dataset_name, subjects_train, subjects_val, 
     json_dict['numTraining'] = len(subjects_train + subjects_val)
     json_dict['file_ending'] = '.nii.gz'
     json_dict['overwrite_image_reader_writer'] = image_reader_writer
+    if annotation_version:
+        json_dict['annotation_version'] = str(annotation_version)
 
     json.dump(json_dict, open(out_base / "dataset.json", "w"), sort_keys=False, indent=4)
 
@@ -347,6 +354,219 @@ def resample_and_combine_labels_fast(
 
 
 
+def _scan_minor_versions(subject_path, major):
+    """扫描 subject_path 下 segmentations_v{major}.{minor} 形式的小版本目录，返回 minor 整数集。
+
+    仅扫描实际存在的目录，用于小版本按序叠加回退。
+    """
+    pattern = re.compile(r"^segmentations_v{}\.(\d+)$".format(major))
+    minors = set()
+    if not subject_path.is_dir():
+        return minors
+    for entry in subject_path.iterdir():
+        if entry.is_dir():
+            match = pattern.match(entry.name)
+            if match:
+                minors.add(int(match.group(1)))
+    return minors
+
+
+def _version_dirs(subject_path, annotation_version):
+    """构建逐器官回退链（高版本 → 低版本 → 基础版）。
+
+    版本号语义（版本号数字本身区分全量/增量）：
+      v1, v2, v3 ...   大版本(全量重标), 目录 segmentations_v2/ 等; v1 ≡ segmentations/
+      v2.1, v2.3 ...   小版本(某大版本的增量补丁, 只改个别器官), 目录 segmentations_v2.1/ 等
+
+    回退规则：
+      大版本 vN   → [vN, v(N-1), ..., v2, v1]
+                    （大版本是全量基准, 不叠加小版本）
+      小版本 vN.M → [vN.M' (M'<=M 且实际存在, 降序), vN, v(N-1), ..., v2, v1]
+                    同大版本下 minor<=M 的小版本按序叠加, 再回大版本主链向低回退;
+                    跨大版本不取小版本（v3.x 链不含 v2.*）; 不向更高的其他大版本回退。
+
+    小版本叠加语义：同大版本下 minor 递增是时间叠加序，minor 大的修订建立在 minor 小的基础上。
+    若两个小版本都改了同一器官，取 minor 大的（链中更靠前，最新修订优先）。
+
+    annotation_version 为 None/空/"v1" → 仅 ["segmentations"]（与历史行为一致）
+    """
+    if not annotation_version or not str(annotation_version).strip():
+        return [subject_path / "segmentations"]
+    ver = str(annotation_version).strip().lstrip("vV")
+    # 严格解析: 仅接受 纯数字(大版本) 或 数字.数字(小版本), 拒绝 v2.1.3 / latest / v2.a 等
+    match = re.match(r"^(\d+)(?:\.(\d+))?$", ver)
+    if not match:
+        raise ValueError(
+            "annotation_version 需形如 'v2' / 'v2.1' 或留空，实际: {!r}".format(annotation_version)
+        )
+    major = int(match.group(1))
+    if match.group(2) is not None:
+        minor = int(match.group(2))
+        if minor < 1:
+            raise ValueError("小版本号需 >=1（vN.0 等价于大版本 vN，请直接写 'v{}'），实际: {!r}".format(
+                major, annotation_version))
+        is_minor = True
+    else:
+        is_minor = False
+    if major < 1:
+        raise ValueError("annotation_version 大版本需 >=1，实际: {!r}".format(annotation_version))
+
+    chain = []
+    if is_minor:
+        # 扫描同大版本下 minor<=M 且实际存在的小版本目录, 按 minor 降序叠加
+        minors = _scan_minor_versions(subject_path, major)
+        for m in sorted((m for m in minors if m <= minor), reverse=True):
+            chain.append(subject_path / "segmentations_v{}.{}".format(major, m))
+    for v in range(major, 1, -1):            # vN ... v2
+        chain.append(subject_path / "segmentations_v{}".format(v))
+    chain.append(subject_path / "segmentations")  # v1 基础版
+    return chain
+
+
+def _resolve_subject_version(subject, dataset_path, ann_versions):
+    """根据 subject 路径定位源数据集，取对应 annotation_version。
+
+    多数据集合并时，case 路径形如 .../<labeled_dataset_name>/s0001（generate_train_test_dataset 用
+    str(dataset)+"/"+image_id 拼接，保留完整路径）。按完整路径前缀匹配源数据集，避免仅靠
+    末级目录名(parent.name)在两个同名数据集目录间错配。
+
+    ann_versions 为列表/元组时按源数据集定位；为单值(含 None)时所有源共用（向后兼容）。
+    找不到匹配源时打印告警并返回 None（退化为只读 segmentations/），避免静默回退。
+    """
+    if isinstance(ann_versions, (list, tuple)):
+        try:
+            subj_resolved = str(Path(subject).resolve())
+        except OSError:
+            subj_resolved = str(Path(subject))
+        for idx, dpath in enumerate(dataset_path):
+            try:
+                dpath_resolved = str(Path(dpath).resolve())
+            except OSError:
+                dpath_resolved = str(Path(dpath))
+            # 完整路径前缀匹配: subject 必须位于该源数据集目录之下
+            if subj_resolved == dpath_resolved or subj_resolved.startswith(dpath_resolved + os.sep):
+                return ann_versions[idx] if idx < len(ann_versions) else None
+        print("[告警] 无法确定 case {} 的源数据集（不在任何 labeled_dataset 路径下），"
+              "已回退到基础版 segmentations/。".format(Path(subject).name))
+        return None
+    return ann_versions
+
+
+def _resolve_organ_path(subject_path, roi, seg_chain, record=None):
+    """在回退链中逐目录查找 {roi}.nii.gz，返回第一个存在的路径。
+
+    全链都不存在时返回基础版路径，让下游 combine_labels 走现有的 'Missing' 打印逻辑，
+    保持与历史一致的容错行为。
+
+    record : list 或 None
+        调用方传入的列表，用于追加 (roi, source_version) 记录该器官实际取自的版本目录名
+        （None 表示全链缺失回退到基础版）。供 convert 收集告警与 manifest。不传则不记录。
+    """
+    for seg_dir in seg_chain:
+        candidate = seg_dir / "{}.nii.gz".format(roi)
+        if candidate.exists():
+            if record is not None:
+                record.append((roi, seg_dir.name))
+            return candidate
+    # 全链缺失: 回退基础版路径
+    if record is not None:
+        record.append((roi, None))
+    return subject_path / "segmentations" / "{}.nii.gz".format(roi)
+
+
+def _record_manifest(manifest_rows, case_name, split, organ_record, target_version):
+    """把单个 case 的器官来源记录追加到 manifest_rows。
+
+    organ_record: [(roi, source_version_or_None), ...]
+    target_version: 该 case 指定的目标版本（可能为 None）
+    """
+    target_str = str(target_version) if target_version else ""
+    for roi, source_version in organ_record:
+        manifest_rows.append((case_name, split, roi,
+                              source_version if source_version else "", target_str))
+
+
+def _emit_version_warnings(manifest_rows):
+    """目标版本目录缺失或器官回退到非目标版本时打印告警（不中断）。
+
+    汇总按 case 打印，避免逐器官刷屏：
+    - 目标版本目录缺失（该 case 没有任何器官取自目标版本目录）
+    - 器官回退到非目标版本（列出实际来源版本）
+    - 器官全链缺失（source_version 为空）
+    """
+    if not manifest_rows:
+        return
+    from collections import defaultdict
+    by_case = defaultdict(list)
+    for case_name, split, roi, source_version, target_version in manifest_rows:
+        by_case[(case_name, split, target_version)].append((roi, source_version))
+
+    target_missing_cases = []
+    fallback_summary = []   # (case, split, roi, source, target)
+    missing_organ_cases = []
+    for (case_name, split, target_version), organs in by_case.items():
+        if target_version:
+            # 目标版本目录名: 大版本 vN → segmentations_vN; 小版本 vN.M → segmentations_vN.M
+            target_dir = _target_version_dir_name(target_version)
+            if not any(src == target_dir for _, src in organs):
+                target_missing_cases.append((case_name, split, target_version, target_dir))
+        for roi, src in organs:
+            if not src:
+                missing_organ_cases.append((case_name, split, roi))
+            elif target_version and src != _target_version_dir_name(target_version):
+                fallback_summary.append((case_name, split, roi, src, target_version))
+
+    # 4c: 统计摘要，先给总数再列明细，避免大量回退时告警过长难以把握全貌
+    affected_cases = set()
+    if target_missing_cases:
+        affected_cases.update(c for c, _, _, _ in target_missing_cases)
+    if fallback_summary:
+        affected_cases.update(c for c, _, _, _, _ in fallback_summary)
+    if missing_organ_cases:
+        affected_cases.update(c for c, _, _ in missing_organ_cases)
+    if affected_cases:
+        print("\n[告警摘要] 共 {} 个 case 发生版本回退/缺失：目标目录缺失 {} 例，"
+              "器官回退 {} 处，器官全链缺失 {} 处（均未中断）。".format(
+                  len(affected_cases), len(target_missing_cases),
+                  len(fallback_summary), len(missing_organ_cases)))
+
+    if target_missing_cases:
+        print("\n[告警] 以下 case 的目标版本目录不存在，已回退到更低版本（未中断）：")
+        for case_name, split, target_version, target_dir in target_missing_cases:
+            print("  - {}({}): 目标版本 {} 目录 {}/ 缺失".format(
+                case_name, split, target_version, target_dir))
+    if fallback_summary:
+        print("\n[告警] 以下器官回退到了非目标版本（最新修订优先，未中断）：")
+        for case_name, split, roi, src, target_version in fallback_summary:
+            print("  - {}({}): {} 取自 {} (目标 {})".format(
+                case_name, split, roi, src, target_version))
+    if missing_organ_cases:
+        print("\n[告警] 以下器官在所有版本目录均缺失，该器官标为背景（未中断）：")
+        for case_name, split, roi in missing_organ_cases:
+            print("  - {}({}): {}".format(case_name, split, roi))
+
+
+def _target_version_dir_name(target_version):
+    """目标版本字符串 → 对应的目录名（用于告警比对）。"""
+    ver = str(target_version).strip().lstrip("vV")
+    if not ver:
+        return "segmentations"
+    return "segmentations_v{}".format(ver)
+
+
+def _write_annotation_manifest(nnunet_path, manifest_rows):
+    """写 annotation_manifest.csv 到 nnunet_path，列: case,split,roi,source_version,target_version。
+
+    convert() 单进程顺序执行，每个 train_dataset 的 nnunet_path 不同 → 天然分文件无覆盖。
+    """
+    manifest_file = nnunet_path / "annotation_manifest.csv"
+    with open(manifest_file, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["case", "split", "roi", "source_version", "target_version"])
+        writer.writerows(manifest_rows)
+    print("\n标注版本追溯已写入: {}".format(manifest_file))
+
+
 def combine_labels(ref_img, file_out, masks, label_values=None, target_orientation=None):
     ref_img = nib.load(ref_img)
     if target_orientation is not None:
@@ -368,7 +588,7 @@ def combine_labels(ref_img, file_out, masks, label_values=None, target_orientati
 
 
 def convert(dataset_path, nnunet_path, class_map_name, target_spacing=None, target_orientation=None,
-            modality="CT", image_reader_writer="NibabelIOWithReorient"):
+            modality="CT", image_reader_writer="NibabelIOWithReorient", annotation_version=None):
     """
     Convert the downloaded TotalSegmentator dataset (after unzipping it) to nnUNet format and
     generate dataset.json and splits_final.json
@@ -388,6 +608,13 @@ def convert(dataset_path, nnunet_path, class_map_name, target_spacing=None, targ
         图像模态，如 "CT" 或 "MR"，传递给 generate_json_from_dir_v2。
     image_reader_writer : str
         nnUNet 的 image reader/writer 类名，传递给 generate_json_from_dir_v2。
+    annotation_version : str / list[str] / None
+        标注版本（见 _version_dirs）。指定后逐器官沿回退链查找 mask 文件：
+        大版本 v2/v3 = 全量重标（目录 segmentations_v2/ 等），小版本 v2.1 = 增量补丁
+        （目录 segmentations_v2.1/）。小版本按序叠加：指定 v2.3 时同大版本下 minor<=3 的
+        小版本目录按降序叠加（v2.3 → v2.1 → v2 → v1），大版本不叠加小版本，跨大版本不取小版本。
+        多数据集时可为列表，按 labeled_dataset 顺序对齐（convert 内按 subject 的源数据集定位）；
+        单值则所有源共用。None/空/"v1" → 只读 segmentations/（与历史行为一致）。
     """
 
     class_map = class_map_name
@@ -423,9 +650,13 @@ def convert(dataset_path, nnunet_path, class_map_name, target_spacing=None, targ
 
 
     #生成训练用数据集
+    # manifest_rows: 收集每个 case 各器官实际取自的版本目录，用于告警与追溯
+    manifest_rows = []  # list[(case_name, split, roi, source_version, target_version)]
+
     print("Copying train data...")
     for subject in tqdm(subjects_train + subjects_val):
         subject_path = Path(subject)
+        subj_ver = _resolve_subject_version(subject, dataset_path, annotation_version)
 
         #把原来的指定文件名，改成不指定具体文件名
         file_names =  (lambda folder: [f.name for f in subject_path.iterdir() if f.is_file()])(subject_path)
@@ -434,11 +665,16 @@ def convert(dataset_path, nnunet_path, class_map_name, target_spacing=None, targ
         origin_file = subject_path / file_names[0]
 
         #由于数据来自多个数据集，目标文件名需要增加数据集名，以避免重名
-        dst_file = nnunet_path / "imagesTr" / f"{Path(subject).parent.name}_{Path(subject).name}_0000.nii.gz" #0000为nnUnet的通道数
+        case_name = f"{Path(subject).parent.name}_{Path(subject).name}"
+        dst_file = nnunet_path / "imagesTr" / f"{case_name}_0000.nii.gz" #0000为nnUnet的通道数
 
-        #mask的路径
-        dstmask_file = nnunet_path / "labelsTr" / f"{Path(subject).parent.name}_{Path(subject).name}.nii.gz"
-        mask_paths = [subject_path / "segmentations" / f"{roi}.nii.gz" for roi in class_map]
+        #mask的路径（按 subj_ver 逐器官回退查找, 见 _resolve_organ_path）
+        dstmask_file = nnunet_path / "labelsTr" / f"{case_name}.nii.gz"
+        seg_chain = _version_dirs(subject_path, subj_ver)
+        organ_record = []
+        mask_paths = [_resolve_organ_path(subject_path, roi, seg_chain, record=organ_record)
+                      for roi in class_map]
+        _record_manifest(manifest_rows, case_name, "train", organ_record, subj_ver)
         lv_list = list(class_map.values()) if isinstance(class_map, dict) else None
         no_resample = (target_spacing is None or len(target_spacing) == 0)
         if no_resample and target_orientation is None:
@@ -466,14 +702,20 @@ def convert(dataset_path, nnunet_path, class_map_name, target_spacing=None, targ
     print("Copying test data...")
     for subject in tqdm(subjects_test):
         subject_path = Path(subject)
+        subj_ver = _resolve_subject_version(subject, dataset_path, annotation_version)
         file_names =  (lambda folder: [f.name for f in subject_path.iterdir() if f.is_file()])(subject_path)
         if len(file_names) == 0:
             raise ValueError(f"{subject_path}下没有数据")
         origin_file = subject_path / file_names[0]
-        dst_file = nnunet_path / "imagesTs" / f"{Path(subject).parent.name}_{Path(subject).name}_0000.nii.gz" #0000为nnUnet的通道数
-        dstmask_file = nnunet_path / "labelsTs" / f"{Path(subject).parent.name}_{Path(subject).name}.nii.gz"
+        case_name = f"{Path(subject).parent.name}_{Path(subject).name}"
+        dst_file = nnunet_path / "imagesTs" / f"{case_name}_0000.nii.gz" #0000为nnUnet的通道数
+        dstmask_file = nnunet_path / "labelsTs" / f"{case_name}.nii.gz"
 
-        mask_paths = [subject_path / "segmentations" / f"{roi}.nii.gz" for roi in class_map]
+        seg_chain = _version_dirs(subject_path, subj_ver)
+        organ_record = []
+        mask_paths = [_resolve_organ_path(subject_path, roi, seg_chain, record=organ_record)
+                      for roi in class_map]
+        _record_manifest(manifest_rows, case_name, "test", organ_record, subj_ver)
         lv_list = list(class_map.values()) if isinstance(class_map, dict) else None
         no_resample = (target_spacing is None or len(target_spacing) == 0)
         if no_resample and target_orientation is None:
@@ -494,10 +736,14 @@ def convert(dataset_path, nnunet_path, class_map_name, target_spacing=None, targ
             resample_and_combine_labels(origin_file, dstmask_file, mask_paths,
                        target_spacing, label_values=lv_list,
                        target_orientation=target_orientation)
-    
+
+    # 告警与 manifest（问题1/3）：目标版本目录缺失或器官回退时告警不中断，写追溯 CSV
+    _emit_version_warnings(manifest_rows)
+    _write_annotation_manifest(nnunet_path, manifest_rows)
 
     generate_json_from_dir_v2(nnunet_path.name, subjects_train, subjects_val, json_labels,
-                              modality=modality, image_reader_writer=image_reader_writer)
+                              modality=modality, image_reader_writer=image_reader_writer,
+                              annotation_version=annotation_version)
 
 
 

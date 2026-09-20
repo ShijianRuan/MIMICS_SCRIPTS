@@ -197,6 +197,7 @@ def _train_cached_slices(config, seed):
             "val",
             slice_size=slice_size,
             normalization=slice_normalization,
+            validation_case_ids=data_cfg.get("validation_case_ids"),
         )
         if validation_enabled
         else None
@@ -360,6 +361,7 @@ def main():
         normalization_scope=data_cfg.get(
             "normalization_scope", "sample"
         ),
+        validation_case_ids=data_cfg.get("validation_case_ids"),
     )
 
     # Augmentation (train only)

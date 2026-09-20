@@ -896,6 +896,45 @@ def _affine_close(left: np.ndarray, right: np.ndarray, atol: float = 1e-4) -> bo
     return bool(np.allclose(left, right, atol=atol, rtol=0.0))
 
 
+def _read_canonical_source_mask(
+    path: str, expected_shape: tuple[int, int, int], expected_affine: np.ndarray
+) -> tuple[np.ndarray, str]:
+    """Read and strictly validate an explicit source-grid segmentation."""
+    source_path = os.path.abspath(os.path.expanduser(str(path or "")))
+    if not os.path.isfile(source_path):
+        raise ValueError("canonical source Mask file was not found: {}".format(source_path))
+    array, affine = _read_mask_array_and_affine(source_path)
+    if tuple(int(value) for value in array.shape) != tuple(int(value) for value in expected_shape):
+        raise ValueError(
+            "canonical source Mask shape does not match the source image: {} != {} ({})".format(
+                tuple(int(value) for value in array.shape),
+                tuple(int(value) for value in expected_shape),
+                source_path,
+            )
+        )
+    if not _affine_close(np.asarray(affine, dtype=float), expected_affine):
+        raise ValueError(
+            "canonical source Mask affine does not match the source image: {}".format(
+                source_path
+            )
+        )
+    if not np.all(np.isfinite(array)):
+        raise ValueError("canonical source Mask contains NaN or infinite values: {}".format(source_path))
+    unique = np.unique(array)
+    if not np.all(np.logical_or(unique == 0, unique == 1)):
+        raise ValueError(
+            "canonical source Mask must contain only binary values 0 and 1: {} values={}".format(
+                source_path, unique[:20].tolist()
+            )
+        )
+    canonical = np.ascontiguousarray(array.astype(np.uint8, copy=False))
+    digest = hashlib.sha256()
+    with open(source_path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return canonical, "sha256:" + digest.hexdigest()
+
+
 def _mask_file_declares_spatial_geometry(path: str) -> bool:
     """Return False only when a supported text header actually omits geometry.
 
@@ -1914,6 +1953,17 @@ def do_convert(params: dict) -> dict:
     except Exception:
         source_geometry = None
     export_space = str(params.get("export_space") or manifest.get("export_space") or "source_image").lower()
+    source_mask_paths = params.get("source_mask_paths") or {}
+    if not isinstance(source_mask_paths, dict):
+        return {
+            "status": "error",
+            "error": "source_mask_paths must be a mapping from saved Mask name to source Mask path",
+        }
+    if source_mask_paths and export_space not in ("source", "source_image", "source_grid"):
+        return {
+            "status": "error",
+            "error": "canonical source Mask overrides require export_space=source_image",
+        }
     if (
         export_space in ("source", "source_image", "source_grid")
         and bool(params.get("require_source_geometry", False))
@@ -1925,6 +1975,14 @@ def do_convert(params: dict) -> dict:
                 "Source-image export was requested, but the original image geometry could not be "
                 "resolved. Select the original image or case folder; export was stopped instead of "
                 "writing a mask with ambiguous shape or orientation."
+            ),
+        }
+    if source_mask_paths and source_geometry is None:
+        return {
+            "status": "error",
+            "error": (
+                "Canonical source Mask export requires the original source image geometry; "
+                "the source image could not be resolved."
             ),
         }
     if export_space in ("source", "source_image", "source_grid") and source_geometry:
@@ -1959,47 +2017,64 @@ def do_convert(params: dict) -> dict:
         safe_name = str(mask_info.get("safe_name") or name)
         u8_filename = mask_info.get("u8_filename") or (safe_name + ".u8")
         u8_path = os.path.join(buffers_dir, u8_filename)
+        canonical_source_path = str(source_mask_paths.get(name) or "").strip()
+        mask_source = "mcs_mask_buffer"
+        mcs_mask_bypassed = False
+        source_mask_sha256 = ""
 
-        if not os.path.isfile(u8_path):
+        if not canonical_source_path and not os.path.isfile(u8_path):
             exported.append({"name": name, "action": "skipped", "reason": "buffer not found"})
             continue
 
         nifti_path = os.path.join(seg_dir, safe_name + ".nii.gz")
 
-        # Read .u8, inverse map
-        with open(u8_path, "rb") as f:
-            raw = f.read()
-        expected = 1
-        for dim in mimics_shape:
-            expected *= int(dim)
-        if len(raw) != expected:
-            exported.append({
-                "name": name,
-                "action": "error",
-                "error": "buffer size mismatch: {} != {}".format(len(raw), expected),
-            })
-            continue
-
-        array = np.frombuffer(raw, dtype=np.uint8).reshape(tuple(mimics_shape))
-        mimics_grid_array = inverse_buffer_mapping(array, axes, flips)
-        if export_shape is not None:
-            nifti_array = resample_mask_to_image_grid(
-                mimics_grid_array,
-                mimics_affine,
-                export_shape,
+        if canonical_source_path:
+            # The saved project remains the source of case/mask selection and
+            # provenance, but its potentially damaged voxel buffer is bypassed.
+            nifti_array, source_mask_sha256 = _read_canonical_source_mask(
+                canonical_source_path,
+                tuple(export_shape or ()),
                 export_affine,
             )
+            mask_source = "canonical_source_mask"
+            mcs_mask_bypassed = True
+            mimics_foreground = int(np.count_nonzero(nifti_array))
+            export_foreground = mimics_foreground
         else:
-            nifti_array = mimics_grid_array
-        mimics_foreground, export_foreground = (
-            _validate_resampled_mask_foreground(
-                mimics_grid_array,
-                nifti_array,
-                "Exporting Mimics mask '{}' onto the original image grid".format(
-                    name
-                ),
+            # Read .u8, inverse map
+            with open(u8_path, "rb") as f:
+                raw = f.read()
+            expected = 1
+            for dim in mimics_shape:
+                expected *= int(dim)
+            if len(raw) != expected:
+                exported.append({
+                    "name": name,
+                    "action": "error",
+                    "error": "buffer size mismatch: {} != {}".format(len(raw), expected),
+                })
+                continue
+
+            array = np.frombuffer(raw, dtype=np.uint8).reshape(tuple(mimics_shape))
+            mimics_grid_array = inverse_buffer_mapping(array, axes, flips)
+            if export_shape is not None:
+                nifti_array = resample_mask_to_image_grid(
+                    mimics_grid_array,
+                    mimics_affine,
+                    export_shape,
+                    export_affine,
+                )
+            else:
+                nifti_array = mimics_grid_array
+            mimics_foreground, export_foreground = (
+                _validate_resampled_mask_foreground(
+                    mimics_grid_array,
+                    nifti_array,
+                    "Exporting Mimics mask '{}' onto the original image grid".format(
+                        name
+                    ),
+                )
             )
-        )
         if final_export_shape is None:
             final_export_shape = [int(value) for value in nifti_array.shape]
 
@@ -2017,6 +2092,10 @@ def do_convert(params: dict) -> dict:
                     "path": nifti_path,
                     "source_foreground_voxels": mimics_foreground,
                     "foreground_voxels": export_foreground,
+                    "mask_source": mask_source,
+                    "source_mask_path": canonical_source_path,
+                    "source_mask_sha256": source_mask_sha256,
+                    "mcs_mask_bypassed": mcs_mask_bypassed,
                 })
                 continue
             if not overwrite_existing:
@@ -2038,7 +2117,15 @@ def do_convert(params: dict) -> dict:
             total_new += 1
         else:
             total_overwritten += 1
-        exported.append({"name": name, "action": action, "path": nifti_path})
+        exported.append({
+            "name": name,
+            "action": action,
+            "path": nifti_path,
+            "mask_source": mask_source,
+            "source_mask_path": canonical_source_path,
+            "source_mask_sha256": source_mask_sha256,
+            "mcs_mask_bypassed": mcs_mask_bypassed,
+        })
         exported[-1]["source_foreground_voxels"] = mimics_foreground
         exported[-1]["foreground_voxels"] = export_foreground
 
@@ -2056,6 +2143,8 @@ def do_convert(params: dict) -> dict:
         "export_voxel_to_ras_matrix": export_affine.tolist(),
         "output_seg_dir": seg_dir,
         "export_shape": final_export_shape or [],
+        "source_mask_paths": source_mask_paths,
+        "mcs_mask_bypassed": bool(source_mask_paths),
     }
 
 
@@ -2361,7 +2450,11 @@ def main():
             "traceback": traceback.format_exc(),
         }
 
-    json.dump(result, sys.stdout, ensure_ascii=False)
+    # Keep the bridge protocol ASCII-safe. Mimics 21's Python 3.5 child
+    # process may expose stdout using the active Windows code page; emitting
+    # non-ASCII paths directly would make the UTF-8 decoder in call_bridge()
+    # reject an otherwise valid JSON response.
+    json.dump(result, sys.stdout, ensure_ascii=True)
 
 
 if __name__ == "__main__":

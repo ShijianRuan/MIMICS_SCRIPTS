@@ -525,6 +525,7 @@ def test_runtime_imports(fake, tmp):
         "interactive_algorithms_mimics",
         "nnunet_mimics",
         "create_mcs_batch",
+        "append_masks_batch",
         "mask_identifier",
     ]
     loaded = []
@@ -532,6 +533,118 @@ def test_runtime_imports(fake, tmp):
         import_runtime_module(name)
         loaded.append(name)
     return "imported {}".format(", ".join(loaded))
+
+
+def test_append_masks(fake, tmp):
+    """Exercise append worker project isolation, injection, and collisions."""
+    module = import_runtime_module("append_masks_batch")
+    fake.reset_scene(image_shape=(2, 2, 2), minimum_value=0, maximum_value=100)
+    source = tmp / "source" / "s0001.mcs"
+    first = tmp / "pred" / "first" / "s0001.nii.gz"
+    second = tmp / "pred" / "second" / "s0001.nii.gz"
+    output = tmp / "output" / "s0001.mcs"
+    source.parent.mkdir(parents=True)
+    first.parent.mkdir(parents=True)
+    second.parent.mkdir(parents=True)
+    source.write_bytes(b"source-mcs")
+    first.write_bytes(b"first-prediction")
+    second.write_bytes(b"second-prediction")
+
+    job_dir = tmp / "append-job"
+    prepared_dir = tmp / "prepared"
+    prepared_dir.mkdir(parents=True)
+    first_u8 = prepared_dir / "label_a.u8"
+    second_u8 = prepared_dir / "label_b.u8"
+    first_u8.write_bytes(bytes([1, 0, 0, 0, 0, 0, 0, 0]))
+    second_u8.write_bytes(bytes([0, 0, 0, 0, 0, 0, 0, 1]))
+    prepared = [
+        {
+            "name": "label_a",
+            "u8_path": str(first_u8),
+            "mimics_shape": [2, 2, 2],
+            "foreground_voxels": 1,
+        },
+        {
+            "name": "label_b",
+            "u8_path": str(second_u8),
+            "mimics_shape": [2, 2, 2],
+            "foreground_voxels": 1,
+        },
+    ]
+    original_prepare = module._prepare_masks
+    original_save = fake.file.save_project
+
+    def fake_prepare(_case, _shape, _affine, _work_dir):
+        return prepared
+
+    def fake_save(filename=None, save_as_type=None, **kwargs):
+        target = filename or kwargs.get("filename")
+        Path(target).parent.mkdir(parents=True, exist_ok=True)
+        Path(target).write_bytes(b"saved-mcs-with-two-new-masks")
+        fake.file.saved.append((target, save_as_type))
+
+    module._prepare_masks = fake_prepare
+    fake.file.save_project = fake_save
+    try:
+        result = module._append_one(
+            {
+                "case_id": "s0001",
+                "mcs_path": str(source),
+                "masks": [
+                    {"name": "label_a", "mask_path": str(first)},
+                    {"name": "label_b", "mask_path": str(second)},
+                ],
+                "output_mcs_path": str(output),
+            },
+            str(job_dir),
+            False,
+        )
+        assert_equal(result.get("status"), "completed", "append result status")
+        assert_true(output.is_file(), "append output MCS was not published")
+        assert_equal(source.read_bytes(), b"source-mcs", "source MCS changed")
+        assert_equal(
+            [mask.name for mask in fake.data.masks],
+            ["label_a", "label_b"],
+            "new Mask names",
+        )
+        assert_equal(
+            [mask.number_of_pixels for mask in fake.data.masks],
+            [1, 1],
+            "injected Mask foreground counts",
+        )
+        assert_true(fake.file.saved, "save_project was not called")
+        saved_path = os.path.normcase(os.path.abspath(fake.file.saved[-1][0]))
+        assert_true(
+            saved_path != os.path.normcase(os.path.abspath(str(source))),
+            "source MCS was used as save target",
+        )
+
+        fake.reset_scene(image_shape=(2, 2, 2), minimum_value=0, maximum_value=100)
+        fake.data.masks.append(FakeMask("label_a", image=fake.data.images.get_active()))
+        collision_output = tmp / "output_collision" / "s0001.mcs"
+        try:
+            module._append_one(
+                {
+                    "case_id": "s0001",
+                    "mcs_path": str(source),
+                    "masks": [
+                        {"name": "label_a", "mask_path": str(first)},
+                        {"name": "label_b", "mask_path": str(second)},
+                    ],
+                    "output_mcs_path": str(collision_output),
+                },
+                str(job_dir),
+                False,
+            )
+        except RuntimeError as exc:
+            assert_true("label_a" in str(exc), "collision error omitted Mask name")
+        else:
+            raise TestFailure("same-name Mask collision was not rejected")
+        assert_true(not collision_output.exists(), "collision created an output MCS")
+    finally:
+        module._prepare_masks = original_prepare
+        fake.file.save_project = original_save
+    return "two named Masks injected and saved to an isolated MCS; collisions rejected"
 
 
 def test_scripting_entrypoint(fake, tmp):
@@ -1346,7 +1459,7 @@ def build_parser():
     parser.add_argument("--keep-temp", action="store_true", help="Keep the temporary test directory.")
     parser.add_argument(
         "--only",
-        choices=("imports", "entrypoint", "window", "export", "nninteractive", "taskmodels", "fewshot", "stop", "all"),
+        choices=("imports", "append", "entrypoint", "window", "export", "nninteractive", "taskmodels", "fewshot", "stop", "all"),
         default="all",
     )
     return parser
@@ -1361,6 +1474,8 @@ def main(argv=None):
     tests = []
     if args.only in ("imports", "all"):
         tests.append(("runtime modules import with fake mimics", lambda: test_runtime_imports(fake, tmp / "imports")))
+    if args.only in ("append", "all"):
+        tests.append(("generic named-Mask MCS append", lambda: test_append_masks(fake, tmp / "append")))
     if args.only in ("entrypoint", "all"):
         tests.append(("Scripting Library shared entrypoint", lambda: test_scripting_entrypoint(fake, tmp / "entrypoint")))
     if args.only in ("window", "all"):

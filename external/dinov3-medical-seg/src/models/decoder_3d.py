@@ -85,7 +85,68 @@ class LearnableZSmooth(nn.Module):
         Returns:
             (B, C, D, H, W) smoothed output.
         """
-        return self.conv(x)
+        padding = self.conv.padding[0]
+        if padding:
+            left = x[:, :, :1].expand(-1, -1, padding, -1, -1)
+            right = x[:, :, -1:].expand(-1, -1, padding, -1, -1)
+            x = torch.cat((left, x, right), dim=2)
+        return F.conv3d(
+            x,
+            self.conv.weight,
+            bias=None,
+            stride=1,
+            padding=0,
+            groups=self.conv.groups,
+        )
+
+
+class FixedZGaussianSmooth(nn.Module):
+    """Fixed depth-wise Gaussian smoothing for logits.
+
+    Unlike :class:`LearnableZSmooth`, this module cannot learn negative or
+    oscillating filter weights. It is therefore a real low-pass prior, useful
+    when the primary goal is to suppress isolated slice-wise predictions and
+    chunk-seam artifacts rather than to learn an arbitrary depth filter.
+    """
+
+    def __init__(self, num_channels: int, sigma: float = 4.0):
+        super().__init__()
+        sigma = max(float(sigma), 1e-3)
+        kernel_size = int(sigma * 3.0) * 2 + 1
+        t = torch.arange(kernel_size, dtype=torch.float32) - kernel_size // 2
+        kernel = torch.exp(-0.5 * (t / sigma) ** 2)
+        kernel = (kernel / kernel.sum()).view(1, 1, kernel_size, 1, 1)
+        self.register_buffer(
+            "weight",
+            kernel.repeat(int(num_channels), 1, 1, 1, 1),
+        )
+        self.groups = int(num_channels)
+        self.padding = kernel_size // 2
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        left = x[:, :, :1].expand(-1, -1, self.padding, -1, -1)
+        right = x[:, :, -1:].expand(-1, -1, self.padding, -1, -1)
+        padded = torch.cat((left, x, right), dim=2)
+        return F.conv3d(
+            padded,
+            self.weight,
+            bias=None,
+            stride=1,
+            padding=0,
+            groups=self.groups,
+        )
+
+
+def _build_z_smooth(
+    num_channels: int,
+    sigma: float,
+    learnable: bool,
+) -> nn.Module | None:
+    if float(sigma) <= 0.0:
+        return None
+    if learnable:
+        return LearnableZSmooth(num_channels, sigma=float(sigma))
+    return FixedZGaussianSmooth(num_channels, sigma=float(sigma))
 
 
 # ──────────────────────────────────────────────
@@ -132,12 +193,16 @@ class DecoderFactory:
                 feature_dims,
                 num_classes,
                 anisotropic=bool(options.get("anisotropic_context", False)),
+                z_smooth_sigma=z_smooth_sigma,
+                z_smooth_learnable=bool(options.get("z_smooth_learnable", True)),
             )
         elif decoder_type == "context3d_multiscale":
             return Context3DMultiScaleDecoder(
                 feature_dims,
                 num_classes,
                 anisotropic=bool(options.get("anisotropic_context", False)),
+                z_smooth_sigma=z_smooth_sigma,
+                z_smooth_learnable=bool(options.get("z_smooth_learnable", True)),
             )
         elif decoder_type == "linear3d":
             return LinearDecoder3D(feature_dims[0], num_classes, num_levels=len(feature_dims),
@@ -314,6 +379,8 @@ class Context3DHybridDecoder(nn.Module):
         feature_dims: List[int],
         num_classes: int,
         anisotropic: bool = False,
+        z_smooth_sigma: float = 0.0,
+        z_smooth_learnable: bool = True,
     ):
         super().__init__()
         if len(feature_dims) < 4:
@@ -351,6 +418,11 @@ class Context3DHybridDecoder(nn.Module):
                     0,
                     0,
                 ] = 0.5
+        self.z_smooth = _build_z_smooth(
+            num_classes,
+            z_smooth_sigma,
+            z_smooth_learnable,
+        )
 
     def forward(
         self,
@@ -359,9 +431,12 @@ class Context3DHybridDecoder(nn.Module):
     ) -> torch.Tensor:
         detail_logits = self.detail_branch(features_3d, original_shape)
         volume_logits = self.volume_branch(features_3d, original_shape)
-        return self.logit_fusion(
+        logits = self.logit_fusion(
             torch.cat([detail_logits, volume_logits], dim=1)
         )
+        if self.z_smooth is not None:
+            logits = self.z_smooth(logits)
+        return logits
 
 
 class Context3DMultiScaleDecoder(nn.Module):
@@ -379,6 +454,8 @@ class Context3DMultiScaleDecoder(nn.Module):
         num_classes: int,
         proj_dim: int = 40,
         anisotropic: bool = False,
+        z_smooth_sigma: float = 0.0,
+        z_smooth_learnable: bool = True,
     ):
         super().__init__()
         if len(feature_dims) < 4:
@@ -415,6 +492,11 @@ class Context3DMultiScaleDecoder(nn.Module):
             norm3d(proj_dim),
             nn.GELU(),
             nn.Conv3d(proj_dim, num_classes, kernel_size=1),
+        )
+        self.z_smooth = _build_z_smooth(
+            num_classes,
+            z_smooth_sigma,
+            z_smooth_learnable,
         )
 
     @staticmethod
@@ -466,12 +548,15 @@ class Context3DMultiScaleDecoder(nn.Module):
             )
             current = self.context[index](current + levels[index])
         logits = self.head(current)
-        return F.interpolate(
+        logits = F.interpolate(
             logits,
             size=original_shape[2:],
             mode="trilinear",
             align_corners=False,
         )
+        if self.z_smooth is not None:
+            logits = self.z_smooth(logits)
+        return logits
 
 
 # ──────────────────────────────────────────────

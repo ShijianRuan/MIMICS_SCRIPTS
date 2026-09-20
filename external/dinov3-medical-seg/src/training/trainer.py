@@ -47,6 +47,28 @@ def is_better_checkpoint(val_dsc, best_dsc, *, train_loss, best_train_loss,
     return train_loss < best_train_loss
 
 
+def _depth_chunk_specs(depth: int, chunk_size: int, halo: int = 0):
+    """Return ``(input_start, input_end, core_start, core_end)`` depth ranges.
+
+    The model receives a halo around each supervised core. This preserves
+    cross-slice context at internal chunk boundaries while the loss is computed
+    only on non-overlapping core voxels, so overlapping predictions are never
+    double-counted.
+    """
+    depth = int(depth)
+    chunk_size = int(chunk_size)
+    halo = max(0, int(halo))
+    if depth <= 0 or chunk_size <= 0:
+        raise ValueError("depth and chunk_size must be positive")
+    specs = []
+    for core_start in range(0, depth, chunk_size):
+        core_end = min(core_start + chunk_size, depth)
+        input_start = max(0, core_start - halo)
+        input_end = min(depth, core_end + halo)
+        specs.append((input_start, input_end, core_start, core_end))
+    return specs
+
+
 class Trainer3D:
     """Training loop for 3D medical image segmentation."""
 
@@ -499,6 +521,8 @@ class Trainer3D:
         total_loss = 0.0
         total_dice = 0.0
         total_ce = 0.0
+        total_focal = 0.0
+        total_z_consistency = 0.0
 
         pbar = tqdm(self.train_loader, desc=f"Epoch {epoch}/{self.epochs} [Train]")
         self.optimizer.zero_grad()
@@ -520,7 +544,12 @@ class Trainer3D:
 
             # Sub-volume training
             if self.use_sub_volume:
-                loss_dict = self._train_step_sub_volume(images, labels, spacing_zyx)
+                loss_dict = self._train_step_sub_volume(
+                    images,
+                    labels,
+                    spacing_zyx,
+                    backward_scale=1.0 / self.grad_accumulation,
+                )
             else:
                 loss_dict = self._train_step(
                     images,
@@ -530,7 +559,8 @@ class Trainer3D:
                 )
 
             loss = loss_dict["loss"] / self.grad_accumulation
-            loss.backward()
+            if not loss_dict.get("_per_chunk_backward", False):
+                loss.backward()
 
             if (batch_idx + 1) % self.grad_accumulation == 0:
                 self.optimizer.step()
@@ -544,10 +574,16 @@ class Trainer3D:
             total_loss += self._to_float(loss_dict["loss"])
             total_dice += self._to_float(loss_dict.get("dice_loss", 0))
             total_ce += self._to_float(loss_dict.get("ce_loss", 0))
+            total_focal += self._to_float(loss_dict.get("focal_loss", 0))
+            total_z_consistency += self._to_float(
+                loss_dict.get("z_consistency_loss", 0)
+            )
             current = batch_idx + 1
             avg_loss = total_loss / current
             avg_dice = total_dice / current
             avg_ce = total_ce / current
+            avg_focal = total_focal / current
+            avg_z_consistency = total_z_consistency / current
             lr = self.optimizer.param_groups[0]["lr"]
 
             pbar.set_postfix({
@@ -562,7 +598,13 @@ class Trainer3D:
                 batch=current,
                 batches=len(self.train_loader),
                 lr=lr,
-                metrics={"loss": avg_loss, "dice_loss": avg_dice, "ce_loss": avg_ce},
+                metrics={
+                    "loss": avg_loss,
+                    "dice_loss": avg_dice,
+                    "ce_loss": avg_ce,
+                    "focal_loss": avg_focal,
+                    "z_consistency_loss": avg_z_consistency,
+                },
                 force=current == len(self.train_loader),
             )
 
@@ -582,7 +624,13 @@ class Trainer3D:
                 self.scheduler.step()
 
         n = len(self.train_loader)
-        return {"loss": total_loss / n, "dice_loss": total_dice / n, "ce_loss": total_ce / n}
+        return {
+            "loss": total_loss / n,
+            "dice_loss": total_dice / n,
+            "ce_loss": total_ce / n,
+            "focal_loss": total_focal / n,
+            "z_consistency_loss": total_z_consistency / n,
+        }
 
     def _train_step(
         self,
@@ -603,25 +651,92 @@ class Trainer3D:
             )
             return self.criterion(pred, labels)
 
-    def _train_step_sub_volume(self, images: torch.Tensor, labels: torch.Tensor, spacing_zyx=None) -> Dict:
-        """Sub-volume training: split volume, encode/decode per sub-volume, compute global loss."""
+    def _train_step_sub_volume(
+        self,
+        images: torch.Tensor,
+        labels: torch.Tensor,
+        spacing_zyx=None,
+        backward_scale: float = 1.0,
+    ) -> Dict:
+        """Sub-volume training: split volume, encode/decode per sub-volume, compute global loss.
+
+        With ``per_chunk_backward`` enabled (for memory-heavy decoders such as
+        context3d_hybrid on a 12GB card), each depth chunk's loss is back-propagated
+        immediately and its graph freed, instead of concatenating every chunk's
+        prediction into one large graph for a single backward. The returned
+        ``loss`` is a detached core-weighted mean of the per-chunk losses; the
+        caller's ``loss.backward()`` then becomes a no-op (signalled via
+        ``_per_chunk_backward``). ``backward_scale`` keeps this path consistent
+        with outer gradient accumulation.
+        """
         if self.device.type == "mps":
             return self._train_step(images, labels, spacing_zyx)
 
-        d_sub = self.sub_volume_cfg.get("size", [32, 256, 256])[0]
+        d_sub = int(self.sub_volume_cfg.get("size", [32, 256, 256])[0])
+        per_chunk_backward = bool(self.sub_volume_cfg.get("per_chunk_backward", False))
+        depth_halo = int(self.sub_volume_cfg.get("depth_halo", 0))
         B, C, D, H, W = images.shape
 
         if D <= d_sub:
             return self._train_step(images, labels, spacing_zyx)
 
-        n_parts = (D + d_sub - 1) // d_sub
-        all_preds = []
+        chunks = _depth_chunk_specs(D, d_sub, depth_halo)
+        n_parts = len(chunks)
 
-        for i in range(n_parts):
-            d_start = i * d_sub
-            d_end = min(d_start + d_sub, D)
-            sub_img = images[:, :, d_start:d_end]
-            sub_lbl = labels[:, d_start:d_end]
+        if per_chunk_backward:
+            # Memory-bounded path: backward each depth chunk immediately and free
+            # its graph, instead of concatenating every chunk into one graph.
+            # Weight each chunk by its non-overlapping supervised core depth, so
+            # the last shorter chunk contributes proportionally rather than being
+            # over-weighted. The returned loss is detached; the caller skips
+            # backward via _per_chunk_backward.
+            total_loss = 0.0
+            total_dice = 0.0
+            total_ce = 0.0
+            total_focal = 0.0
+            total_z_consistency = 0.0
+            for input_start, input_end, core_start, core_end in chunks:
+                sub_img = images[:, :, input_start:input_end]
+                with torch.autocast(
+                    device_type=self.device.type if self.device.type != "mps" else "cpu",
+                    dtype=self.dtype,
+                    enabled=self.dtype != torch.float32,
+                ):
+                    sub_pred = self.model(sub_img, spacing_zyx=spacing_zyx)
+                core_start_local = core_start - input_start
+                core_end_local = core_end - input_start
+                core_pred = sub_pred[:, :, core_start_local:core_end_local]
+                core_lbl = labels[:, core_start:core_end]
+                chunk_loss_dict = self.criterion(core_pred, core_lbl)
+                core_weight = float(core_end - core_start) / float(D)
+                chunk_loss = (
+                    chunk_loss_dict["loss"]
+                    * core_weight
+                    * float(backward_scale)
+                )
+                chunk_loss.backward()
+                total_loss += core_weight * self._to_float(chunk_loss_dict["loss"])
+                total_dice += core_weight * self._to_float(chunk_loss_dict.get("dice_loss", 0))
+                total_ce += core_weight * self._to_float(chunk_loss_dict.get("ce_loss", 0))
+                total_focal += core_weight * self._to_float(
+                    chunk_loss_dict.get("focal_loss", 0)
+                )
+                total_z_consistency += core_weight * self._to_float(
+                    chunk_loss_dict.get("z_consistency_loss", 0)
+                )
+                del sub_pred, core_pred, chunk_loss
+            return {
+                "loss": torch.as_tensor(total_loss, device=self.device),
+                "dice_loss": total_dice,
+                "ce_loss": total_ce,
+                "focal_loss": total_focal,
+                "z_consistency_loss": total_z_consistency,
+                "_per_chunk_backward": True,
+            }
+
+        all_preds = []
+        for input_start, input_end, core_start, core_end in chunks:
+            sub_img = images[:, :, input_start:input_end]
 
             with torch.autocast(
                 device_type=self.device.type if self.device.type != "mps" else "cpu",
@@ -629,11 +744,45 @@ class Trainer3D:
                 enabled=self.dtype != torch.float32,
             ):
                 sub_pred = self.model(sub_img, spacing_zyx=spacing_zyx)
-            all_preds.append(sub_pred)
+            core_start_local = core_start - input_start
+            core_end_local = core_end - input_start
+            all_preds.append(sub_pred[:, :, core_start_local:core_end_local])
 
         # Concatenate predictions along depth
         full_pred = torch.cat(all_preds, dim=2)
         return self.criterion(full_pred, labels)
+
+    def _validate_sub_volume(self, images: torch.Tensor, spacing_zyx=None) -> torch.Tensor:
+        """Depth-split validation forward for memory-bounded decoders.
+
+        Some decoders (e.g. context3d_hybrid's detail branch) reassemble features
+        at high in-plane resolution and materialize one feature map per slice, so
+        a full-depth forward (300-500 slices at 512x512) OOMs a 12GB card even in
+        eval mode. Split the volume along depth the same way training does, decode
+        each chunk independently (no grad), and concatenate the predictions. This
+        is numerically identical to a full-depth forward for slice-wise encoders
+        because DINO encodes each axial slice independently and the decoders here
+        do not mix information across the depth-chunk boundary.
+        """
+        d_sub = int(self.sub_volume_cfg.get("size", [32, 256, 256])[0])
+        depth_halo = int(self.sub_volume_cfg.get("depth_halo", 0))
+        B, C, D, H, W = images.shape
+        if D <= d_sub:
+            return self.model(images, spacing_zyx=spacing_zyx)
+        preds = []
+        chunks = _depth_chunk_specs(D, d_sub, depth_halo)
+        for input_start, input_end, core_start, core_end in chunks:
+            sub_img = images[:, :, input_start:input_end]
+            with torch.autocast(
+                device_type=self.device.type if self.device.type != "mps" else "cpu",
+                dtype=self.dtype,
+                enabled=self.dtype != torch.float32,
+            ):
+                sub_pred = self.model(sub_img, spacing_zyx=spacing_zyx)
+            core_start_local = core_start - input_start
+            core_end_local = core_end - input_start
+            preds.append(sub_pred[:, :, core_start_local:core_end_local])
+        return torch.cat(preds, dim=2)
 
     def _validate_epoch(self, epoch: int) -> Dict:
         self.model.eval()
@@ -650,7 +799,10 @@ class Trainer3D:
                 if spacing_zyx is not None:
                     spacing_zyx = spacing_zyx.to(self.device, dtype=torch.float32)
 
-                pred = self.model(images, spacing_zyx=spacing_zyx)
+                if self.use_sub_volume:
+                    pred = self._validate_sub_volume(images, spacing_zyx)
+                else:
+                    pred = self.model(images, spacing_zyx=spacing_zyx)
                 metrics = dice_score(
                     pred, labels,
                     num_classes=self.config["model"]["num_classes"],

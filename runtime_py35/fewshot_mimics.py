@@ -1448,10 +1448,19 @@ def _guard_no_active_job(ts_root, requested_kind="train"):
             continue
         if not monitor.get("guided_review_started"):
             continue
+        # A review whose UI process has died but whose monitor was never
+        # _stop_monitor'd (e.g. an exception escaped the tick callback) must not
+        # permanently block every later DINOv3 task. Skip it as a zombie so the
+        # user is not locked out with a "still being reviewed" dialog and no
+        # window to confirm or cancel.
+        review_process = monitor.get("guided_review_process")
+        if review_process is not None and review_process.poll() is not None:
+            continue
         review = _read_json(monitor.get("guided_review_status_path"), {}) or {}
         if str(review.get("status") or "") in (
             "reviewing",
             "confirmed",
+            "submitting",
         ):
             mimics.dialogs.message_box(
                 "DINOv3 suggested points are still being reviewed.\n\n"
@@ -2682,12 +2691,17 @@ def _guided_live_rows(monitor, image=None):
             if indexes is None or len(indexes) != 3:
                 continue
             voxel = [int(round(float(value))) for value in indexes]
-            if shape and any(
-                voxel[axis] < 0 or voxel[axis] >= int(shape[axis])
-                for axis in range(3)
-            ):
-                _delete_guided_marker(row)
-                continue
+            if shape:
+                # Clamp to the valid voxel range instead of deleting the marker.
+                # get_voxel_indexes returns sub-voxel floats whose centers sit in
+                # [0, shape-1]; rounding a value just inside the -0.5/shape-0.5
+                # tolerance (accepted by _create_guided_marker) can land on shape,
+                # which is an off-by-one, not a real out-of-image point. Deleting
+                # such a point would silently drop a user's edge annotation.
+                voxel = [
+                    max(0, min(int(shape[axis]) - 1, voxel[axis]))
+                    for axis in range(min(len(shape), 3))
+                ]
             current = dict(row)
             current["point"] = voxel
             live.append(current)
@@ -2962,6 +2976,7 @@ def _handle_guided_review_request(monitor, review, image):
         monitor,
         {
             "request_pending": False,
+            "handled_request_id": request_id,
             "foreground_count": foreground_count,
             "background_count": background_count,
             "message": error_message or "Review or move the temporary points in Mimics.",
@@ -3076,10 +3091,14 @@ def _monitor_guided_review(monitor, status):
     selected_model = _guided_selected_model(monitor, review)
     selected_model_key = str(selected_model.get("key") or "official")
     # Once DINO has relinquished the GPU, hide nnInteractive model loading and
-    # image preprocessing behind the user's point review time.
+    # image preprocessing behind the user's point review time. A prewarm that
+    # failed once is retried when the user actually confirms, so a transient
+    # failure (GPU lock briefly held, worker startup hiccup) does not silently
+    # discard the review-time warmup for the rest of the session.
+    prewarm_failed_key = monitor.get("guided_prewarm_failed_key")
     if (
         monitor.get("guided_prewarm_key") != selected_model_key
-        and monitor.get("guided_prewarm_failed_key") != selected_model_key
+        and (prewarm_failed_key != selected_model_key or state == "confirmed")
         and not _process_exists(monitor.get("pid"))
     ):
         holder = runtime_common.active_resource_lock(_project_root(), "gpu.lock")

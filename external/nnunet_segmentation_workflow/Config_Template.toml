@@ -13,6 +13,19 @@ labeled_path = "/data1/segmentationForTrain/labeled"
 # 所选的标注数据集
 labeled_dataset = ["TotalsegmentatorMRI_dataset_v200"]
 
+# 标注版本：指定后逐器官沿回退链查找 mask（仅影响取哪个目录的器官文件，不改 class_map）。
+#   大版本 v2/v3   = 全量重标, 目录 segmentations_v2/ 等; v1 ≡ segmentations/(基础版)
+#   小版本 v2.1    = v2 的增量补丁(只改个别器官), 目录 segmentations_v2.1/
+#   回退规则:
+#     大版本 vN   → [vN, v(N-1), ..., v1]            （大版本是全量基准, 不叠加小版本）
+#     小版本 vN.M → [vN.M'(M'<=M且存在,降序), vN, ..., v1]  （同大版本小版本按序叠加, 跨大版本不取小版本）
+#   例 "v2.3" → segmentations_v2.3/ → segmentations_v2.1/ → segmentations_v2/ → segmentations/(v1)
+#       （v2.3 改的 liver + v2.1 改的 spleen 都保留; 同器官冲突取 minor 大的最新修订）
+#   留空/"v1" → 只读 segmentations/（默认，与历史行为一致）
+#   目标版本目录缺失或某器官回退时打印告警(不中断)，并写 annotation_manifest.csv 追溯每个器官来源。
+# 多数据集时可为列表，按 labeled_dataset(非 train_dataset)顺序对齐：annotation_version = ["v2.1", "v3"]
+annotation_version = ""
+
 
 # 训练数据的根路径
 train_path = "/data1/segmentationForTrain/traindata"
