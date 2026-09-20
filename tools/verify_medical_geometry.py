@@ -19,6 +19,25 @@ from mimics_bridge import get_source_image_geometry  # noqa: E402
 
 
 def _as_mask(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    lowered = str(path).lower()
+    if lowered.endswith((".nrrd", ".mha", ".mhd")):
+        # P1 multi-format export: SimpleITK files come back z/y/x with an
+        # LPS affine; convert both to the NIfTI x/y/z RAS convention used by
+        # the rest of this tool.
+        import SimpleITK as sitk
+
+        raster = sitk.ReadImage(str(path))
+        array = np.transpose(sitk.GetArrayFromImage(raster), (2, 1, 0))
+        direction = np.asarray(raster.GetDirection(), dtype=float).reshape(3, 3)
+        spacing = np.asarray(raster.GetSpacing(), dtype=float)
+        origin = np.asarray(raster.GetOrigin(), dtype=float)
+        affine = np.eye(4)
+        affine[:3, :3] = direction * spacing
+        affine[:3, 3] = origin
+        affine[:2, :] *= -1.0
+        if array.ndim != 3 or any(int(value) <= 0 for value in array.shape):
+            raise RuntimeError("Mask is not a valid 3D image: {}".format(path))
+        return array != 0, affine
     image = nib.load(str(path))
     if len(image.shape) < 3 or any(int(value) <= 0 for value in image.shape[:3]):
         raise RuntimeError("Mask is not a valid 3D NIfTI image: {}".format(path))
@@ -32,7 +51,7 @@ def _orientation(affine: np.ndarray) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", required=True, help="Original image file or DICOM folder")
-    parser.add_argument("--mask", required=True, help="Exported .nii or .nii.gz Mask")
+    parser.add_argument("--mask", required=True, help="Exported .nii/.nii.gz/.nrrd/.mha/.mhd Mask")
     parser.add_argument("--reference-mask", help="Optional reference NIfTI for Dice")
     parser.add_argument("--affine-atol", type=float, default=1.0e-4)
     args = parser.parse_args()

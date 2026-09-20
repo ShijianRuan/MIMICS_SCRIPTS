@@ -396,6 +396,59 @@ def _record_failed_case(output_dir_or_export_root, case_id, phase, error):
         pass
 
 
+def _await_degraded_confirmation(status_path, confirm_path, request_id, stop_path,
+                                 export_root, progress, poll_seconds=2.0,
+                                 timeout_seconds=7 * 86400):
+    """Pause the batch until the foreground Mimics answers the degraded-export
+    question for this batch (one prompt total).
+
+    Returns True (export on the Mimics grid), False (declined / timed out) or
+    None (stop requested while waiting). The foreground writes confirm_path in
+    response to the "waiting_degraded_confirm" status written here.
+    """
+    deadline = time.time() + timeout_seconds
+    _write_json_atomic(
+        status_path,
+        {
+            "status": "waiting_degraded_confirm",
+            "phase": "waiting_degraded_confirm",
+            "pid": os.getpid(),
+            "case_id": progress.get("case_id", ""),
+            "index": progress.get("index", 0),
+            "total": progress.get("total", 0),
+            "completed": progress.get("completed", 0),
+            "failed": progress.get("failed", 0),
+            "request_id": request_id,
+            "confirm_path": confirm_path,
+            "updated_at_epoch": time.time(),
+        },
+    )
+    _append_export_log(
+        export_root,
+        "Waiting for user confirmation of degraded Mimics-grid export for this batch.",
+    )
+    while time.time() < deadline:
+        if os.path.isfile(stop_path):
+            _append_export_log(export_root, "Mask export stopped while waiting for the degraded-export confirmation.")
+            return None
+        try:
+            response = runtime_common.read_json(confirm_path, {})
+        except Exception:
+            response = {}
+        if response.get("request_id") == request_id and response.get("answered"):
+            accepted = bool(response.get("accepted"))
+            _append_export_log(
+                export_root,
+                "User {0} the degraded Mimics-grid export for this batch.".format(
+                    "accepted" if accepted else "declined"
+                ),
+            )
+            return accepted
+        time.sleep(poll_seconds)
+    _append_export_log(export_root, "No degraded-export confirmation arrived in time; treating as declined.")
+    return False
+
+
 # -- Path helpers (shared with mimics_import.py) ------------------------
 
 
@@ -518,7 +571,8 @@ def _find_mimics_exe():
 
 def _launch_background_batch_export(ts_root, cases_filter, axes, flips, label_output_root=None,
                                     overwrite_existing=False, case_dirs=None, mcs_output_dir=None,
-                                    mcs_paths=None, source_image_paths=None, mask_names=None):
+                                    mcs_paths=None, source_image_paths=None, mask_names=None,
+                                    export_formats=None):
     """Launch batch export in a separate background Mimics process."""
     output_dir = os.path.abspath(mcs_output_dir) if mcs_output_dir else _resolve_export_output_dir(ts_root)
     if not os.path.isdir(output_dir):
@@ -563,6 +617,11 @@ def _launch_background_batch_export(ts_root, cases_filter, axes, flips, label_ou
             "mcs_paths": dict(mcs_paths or {}),
             "source_image_paths": dict(source_image_paths or {}),
             "mask_names": list(mask_names or []),
+            "export_formats": [
+                str(fmt).lower().lstrip(".")
+                for fmt in (export_formats or [])
+                if str(fmt).strip()
+            ],
             "status_path": status_path,
             "job_runtime": job_runtime,
             "stop_path": stop_path,
@@ -1660,15 +1719,23 @@ def _finish_foreground_export(monitor, error=None, result=None, cancelled=False)
                 manifest_exc
             ),
         )
+    degraded_note = ""
+    if (result or {}).get("degraded_export") or monitor.get("degraded_export"):
+        degraded_note = (
+            "\n\nNote: exported on the current Mimics grid because the original "
+            "source image could not be resolved. The grid differs from the "
+            "original data."
+        )
     message = (
         "Mask export complete: {0} new, {1} overwritten, {2} unchanged, "
-        "{3} existing files preserved. Output: {4}"
+        "{3} existing files preserved. Output: {4}{5}"
     ).format(
         total_new,
         total_overwritten,
         total_unchanged,
         int((result or {}).get("total_skipped_existing", 0) or 0),
         (result or {}).get("output_seg_dir") or monitor.get("output_root"),
+        degraded_note,
     )
     _mimics_log(logging.INFO, message)
     _write_export_task_status(
@@ -1822,10 +1889,11 @@ def _foreground_export_tick(monitor):
                 "axes": monitor["axes"],
                 "flips": monitor["flips"],
                 "export_space": "source_image",
-                "require_source_geometry": True,
+                "require_source_geometry": not monitor.get("degraded_export"),
                 "source_image_path": monitor["source_image_path"],
                 "output_seg_dir": monitor["output_seg_dir"],
                 "overwrite_existing": monitor["overwrite_existing"],
+                "export_formats": monitor.get("export_formats") or [],
                 "mimics_voxel_to_ras_matrix": monitor["manifest"]["mimics_voxel_to_ras_matrix"],
             }
             process = _launch_bridge_background(params, monitor["bridge_job_dir"])
@@ -1926,8 +1994,36 @@ def _start_foreground_export_monitor(monitor, poll_seconds=0.15):
         return False
 
 
+def _confirm_degraded_export(case_count=1):
+    """Ask once before exporting on the Mimics grid without source geometry.
+
+    Returns True when the user accepted the degraded export. The decision is
+    caller-scoped: batch export asks once per batch, single-case export once
+    per export action.
+    """
+    scope = "this mask" if case_count <= 1 else "{0} case(s)".format(case_count)
+    try:
+        answer = mimics.dialogs.question_box(
+            title="Export Without Original Image",
+            message=(
+                "The original source image could not be resolved for {0}, so the mask "
+                "cannot be resampled back to the original grid.\n\n"
+                "It will be exported on the current Mimics grid instead. The resulting "
+                "file's grid differs from the original data; do not use it where "
+                "alignment with the original image is required.\n\n"
+                "Export on the Mimics grid anyway?"
+            ).format(scope),
+            buttons="Export on Mimics Grid;Cancel",
+            ui_blocking=True,
+        )
+        return str(answer or "").strip().lower().startswith("export")
+    except Exception:
+        return False
+
+
 def _start_current_project_export(case_dir, source_image_path, output_root, axes,
-                                  flips, mask_names=None, overwrite_existing=False):
+                                  flips, mask_names=None, overwrite_existing=False,
+                                  export_formats=None):
     _prune_local_export_jobs()
     token = runtime_common.try_acquire_local_operation(
         "mask_buffer_access", "current-project mask export"
@@ -1942,11 +2038,17 @@ def _start_current_project_export(case_dir, source_image_path, output_root, axes
         if not selected:
             raise RuntimeError("No matching masks were found in the current project.")
         source_image_path = str(source_image_path or "").strip()
+        degraded_export = False
         if not source_image_path:
-            raise RuntimeError(
-                "The original source image or case folder is required so the exported mask "
-                "can be resampled to the original shape and orientation."
-            )
+            # P1 degraded path: with the source image gone, offer an export on
+            # the current Mimics grid after an explicit one-time confirmation
+            # instead of hard-failing the export.
+            if not _confirm_degraded_export(len(selected)):
+                raise RuntimeError(
+                    "The original source image or case folder is required so the exported mask "
+                    "can be resampled to the original shape and orientation."
+                )
+            degraded_export = True
         case_id = _current_project_case_id() or os.path.basename(os.path.abspath(case_dir))
         output_seg_dir = os.path.join(output_root, case_id, "segmentations")
         runtime_dir = os.path.join(
@@ -1986,6 +2088,12 @@ def _start_current_project_export(case_dir, source_image_path, output_root, axes
             "axes": list(axes),
             "flips": list(flips),
             "overwrite_existing": bool(overwrite_existing),
+            "degraded_export": degraded_export,
+            "export_formats": [
+                str(fmt).lower().lstrip(".")
+                for fmt in (export_formats or [])
+                if str(fmt).strip()
+            ],
             "selected_masks": selected,
             "manifest": manifest,
             "mask_index": 0,
@@ -2366,6 +2474,37 @@ def _background_export_status_tick(monitor):
             status.get("completed"),
             status.get("failed"),
         )
+        if (
+            status.get("status") == "waiting_degraded_confirm"
+            and monitor.get("degraded_request_id") != status.get("request_id")
+        ):
+            # The background export hit a case without source geometry and is
+            # paused. Answer once for the whole batch via the confirm file.
+            monitor["degraded_request_id"] = status.get("request_id")
+            remaining = 0
+            try:
+                remaining = max(0, int(status.get("total", 0) or 0) - int(status.get("index", 0) or 0))
+            except Exception:
+                remaining = 0
+            accepted = _confirm_degraded_export(max(1, remaining))
+            confirm_path = status.get("confirm_path") or ""
+            if confirm_path:
+                runtime_common.write_json_atomic(
+                    confirm_path,
+                    {
+                        "request_id": status.get("request_id"),
+                        "answered": True,
+                        "accepted": bool(accepted),
+                        "answered_at_epoch": time.time(),
+                        "answered_by_pid": os.getpid(),
+                    },
+                )
+            _mimics_log(
+                logging.INFO,
+                "User {0} the degraded Mimics-grid export for the running batch.".format(
+                    "accepted" if accepted else "declined"
+                ),
+            )
         if status and signature != monitor.get("last_signature"):
             monitor["last_signature"] = signature
             try:
@@ -2439,15 +2578,44 @@ def _background_export_status_tick(monitor):
                     ui_blocking=False,
                 )
                 return
-            mimics.dialogs.message_box(
-                title="Export Completed with Errors" if failed else "Export Complete",
-                message="Mask export finished.\n\nExported: {0}\nFailed: {1}\nOutput: {2}{3}".format(
+            # P1 skip summary: categorized counts instead of a bare total.
+            batch_totals = status.get("batch_totals") or {}
+            summary_lines = [
+                "New: {0}".format(int(batch_totals.get("new", 0) or 0)),
+                "Overwritten: {0}".format(int(batch_totals.get("overwritten", 0) or 0)),
+                "Unchanged: {0}".format(int(batch_totals.get("unchanged", 0) or 0)),
+                "Existing files preserved (not updated): {0}".format(
+                    int(batch_totals.get("skipped_existing", 0) or 0)
+                ),
+            ]
+            not_updated = int(batch_totals.get("skipped_existing", 0) or 0)
+            if status.get("degraded_export"):
+                summary_lines.append(
+                    "\nNote: some cases were exported on the current Mimics grid "
+                    "because their original source image could not be resolved."
+                )
+            if not_updated > 0:
+                summary_lines.append(
+                    "\nCases with files that were not updated are listed in:\n{0}\n"
+                    "Re-run those cases with the overwrite option to refresh them.".format(
+                        status.get("skipped_exports_path") or "(list unavailable)"
+                    )
+                )
+            message = (
+                "Mask export finished.\n\nExported: {0}\nFailed: {1}\n{2}\n\nOutput: {3}{4}".format(
                     int(status.get("completed", 0) or 0),
                     failed,
+                    "\n".join(summary_lines),
                     root,
                     "\n\nReview mimics_export.log before retrying failed cases." if failed else "",
-                ),
-                ui_blocking=False,
+                )
+            )
+            mimics.dialogs.message_box(
+                title="Export Completed with Errors" if failed else "Export Complete",
+                message=message,
+                # When files were left not-updated, the dialog must stay for
+                # the user to read the list path; do not auto-dismiss.
+                ui_blocking=bool(not_updated > 0),
             )
             return
     finally:
@@ -2565,6 +2733,7 @@ def _launch_external_export_setup():
             flips,
             mask_names=mask_names,
             overwrite_existing=selection.get("conflict_policy") == "overwrite",
+            export_formats=selection.get("export_formats") or [],
         )
 
     return io_setup_mimics.launch(
@@ -2597,6 +2766,7 @@ def _export_masks_and_build_params(
     source_image_path=None,
     source_mask_root=None,
     case_id=None,
+    export_formats=None,
 ):
     """Export masks to .u8 buffers and build bridge params. Returns (bridge_params, manifest) or None."""
     print("Exporting masks to: {0}".format(case_dir))
@@ -2670,6 +2840,11 @@ def _export_masks_and_build_params(
         bridge_params["source_image_path"] = str(source_image_path)
     if output_seg_dir:
         bridge_params["output_seg_dir"] = output_seg_dir
+    if export_formats:
+        # P1 multi-format export: the bridge writes one file per format with
+        # identical geometry; nothing is set here when only the historical
+        # .nii.gz default is wanted.
+        bridge_params["export_formats"] = list(export_formats)
     if overwrite_existing is not None:
         bridge_params["overwrite_existing"] = bool(overwrite_existing)
     if manifest.get("mimics_voxel_to_ras_matrix"):
@@ -2933,6 +3108,12 @@ def run_background_batch_export(config_path):
         mask_names = [mask_names]
     source_mask_root = str(config.get("source_mask_root") or "").strip()
     target_mask_name = str(config.get("target_mask_name") or "").strip()
+    export_formats = config.get("export_formats") or []
+    if isinstance(export_formats, str):
+        export_formats = [export_formats]
+    export_formats = [
+        str(fmt).lower().lstrip(".") for fmt in export_formats if str(fmt).strip()
+    ]
     cases_filter = config.get("cases")
     cases_filter = set(cases_filter) if cases_filter else None
     axes = config.get("axes") or [0, 1, 2]
@@ -3112,6 +3293,11 @@ def run_background_batch_export(config_path):
             _append_export_log(export_root, error)
             return 1
         export_total = len(cases)
+        # "unanswered" -> "accepted"/"declined" once the user answers the
+        # batch-level degraded-export confirmation (if it is ever needed).
+        degraded_decision = "unanswered"
+        batch_totals = {"new": 0, "overwritten": 0, "unchanged": 0, "skipped_existing": 0}
+        skipped_exports = []
         if mask_names:
             _append_export_log(
                 export_root,
@@ -3176,6 +3362,7 @@ def run_background_batch_export(config_path):
                     source_image_path=(config.get("source_image_paths") or {}).get(case_id),
                     source_mask_root=source_mask_root,
                     case_id=case_id,
+                    export_formats=export_formats,
                 )
                 try:
                     mimics.file.close_project()
@@ -3202,9 +3389,82 @@ def run_background_batch_export(config_path):
                         "MIMICS_MASK_RESAMPLE_METHOD": mask_resample_method,
                     },
                 )
+                if (
+                    result.get("status") != "ok"
+                    and result.get("error_code") == "source_geometry_unavailable"
+                ):
+                    # P1 degraded path: ask once for the whole batch. If the
+                    # user declines, the batch stops without silently
+                    # switching export spaces mid-run.
+                    if degraded_decision == "unanswered":
+                        request_id = uuid.uuid4().hex
+                        confirm_path = os.path.join(job_runtime, "degraded_confirm.json")
+                        try:
+                            if os.path.isfile(confirm_path):
+                                os.remove(confirm_path)
+                        except Exception:
+                            pass
+                        answer = _await_degraded_confirmation(
+                            status_path, confirm_path, request_id, stop_path,
+                            export_root,
+                            {
+                                "case_id": case_id,
+                                "index": index + 1,
+                                "total": export_total,
+                                "completed": completed,
+                                "failed": failed,
+                            },
+                        )
+                        if answer is None:
+                            cancelled = True
+                            break
+                        degraded_decision = "accepted" if answer else "declined"
+                    if degraded_decision != "accepted":
+                        failed += 1
+                        _record_failed_case(
+                            export_root, case_id, "export",
+                            "Source-image export was requested, but the original image geometry "
+                            "could not be resolved, and the Mimics-grid fallback was not confirmed.",
+                        )
+                        _append_export_log(
+                            export_root,
+                            "{0}: source geometry unavailable; degraded export not confirmed.".format(case_id),
+                        )
+                        _cleanup_work_dir(work_dir)
+                        continue
+                    # Confirmed: retry this case on the Mimics grid.
+                    bridge_params = dict(bridge_params)
+                    bridge_params["export_space"] = "mimics_grid"
+                    bridge_params["require_source_geometry"] = False
+                    result = call_bridge(
+                        bridge_params,
+                        extra_env={
+                            "MIMICS_MASK_RESAMPLE_METHOD": mask_resample_method,
+                        },
+                    )
                 if result.get("status") != "ok":
                     raise RuntimeError(result.get("error", "bridge returned non-ok status"))
                 total_new, total_overwritten, total_unchanged = _apply_export_result(result, work_dir)
+                # P1 skip summary: aggregate per-case classifications so the
+                # completion dialog can show what actually happened, and dump
+                # the not-updated list for one-click retry.
+                batch_totals["new"] += int(total_new)
+                batch_totals["overwritten"] += int(total_overwritten)
+                batch_totals["unchanged"] += int(total_unchanged)
+                batch_totals["skipped_existing"] += int(
+                    result.get("total_skipped_existing", 0) or 0
+                )
+                for row in result.get("exported", []) or []:
+                    if row.get("action") == "skipped_existing":
+                        skipped_exports.append(
+                            {
+                                "case_id": case_id,
+                                "mask_name": row.get("name", ""),
+                                "path": row.get("path", ""),
+                                "reason": row.get("reason", ""),
+                                "per_format_action": row.get("per_format_action", {}),
+                            }
+                        )
                 if not label_staging_dir:
                     try:
                         _record_exported_labels(
@@ -3276,6 +3536,26 @@ def run_background_batch_export(config_path):
                         pass
                 _cleanup_work_dir(work_dir)
 
+        # P1 skip summary: persist the not-updated list next to the labels so
+        # it can be retried directly (only these cases, with overwrite on).
+        try:
+            skipped_path = os.path.join(export_root, "_skipped_exports.json")
+            if skipped_exports:
+                _write_json_atomic(
+                    skipped_path,
+                    {
+                        "generated_at_epoch": time.time(),
+                        "job_runtime": job_runtime,
+                        "label_output_root": label_output_root or ts_root,
+                        "overwrite_existing": bool(overwrite_existing),
+                        "count": len(skipped_exports),
+                        "skipped": skipped_exports,
+                    },
+                )
+            elif os.path.isfile(skipped_path):
+                os.remove(skipped_path)
+        except Exception:
+            pass
         _write_json_atomic(
             status_path,
             {
@@ -3288,6 +3568,13 @@ def run_background_batch_export(config_path):
                 "total": export_total,
                 "requested_total": total,
                 "mask_validation_skipped": skipped_mask_cases[:100],
+                "batch_totals": dict(batch_totals),
+                "degraded_export": degraded_decision == "accepted",
+                "skipped_exports_path": (
+                    os.path.join(export_root, "_skipped_exports.json")
+                    if skipped_exports
+                    else ""
+                ),
                 "updated_at_epoch": time.time(),
             },
         )

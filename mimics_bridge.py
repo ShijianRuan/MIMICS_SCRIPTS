@@ -1189,6 +1189,99 @@ def inverse_buffer_mapping(array: np.ndarray, axes: list[int], flips: list[bool]
     return np.ascontiguousarray(array)
 
 
+# Formats do_convert can write. SimpleITK covers .nrrd/.mha/.mhd without
+# adding new dependencies, while .nii(.gz) keeps the nibabel path that also
+# sets qform/sform explicitly.
+SUPPORTED_EXPORT_FORMATS = ("nii.gz", "nrrd", "mha", "nii")
+
+
+def _write_mask_sitk(array: np.ndarray, affine: np.ndarray, output_path: str) -> None:
+    """Write a mask via SimpleITK (.nrrd/.mha) with an RAS affine."""
+    import SimpleITK as sitk
+
+    # The export pipeline works in the nibabel (x, y, z) voxel convention;
+    # SimpleITK's GetImageFromArray expects (z, y, x), so transpose.
+    raster = sitk.GetImageFromArray(np.transpose(array.astype(np.uint8), (2, 1, 0)))
+    matrix = np.asarray(affine, dtype=float)
+    # SimpleITK stores direction as a unit-orthonormal matrix with the voxel
+    # size in spacing, so split the affine's linear part into the two. Affines
+    # with shear (non-orthogonal columns) cannot be represented; keep spacing
+    # 1 and the identity direction there rather than emitting wrong geometry.
+    direction_ras = matrix[:3, :3]
+    spacing = np.linalg.norm(direction_ras, axis=0)
+    if np.all(spacing > 1e-8):
+        unit_direction = direction_ras / spacing
+        residual = unit_direction.T.dot(unit_direction) - np.eye(3)
+        if np.max(np.abs(residual)) < 1e-4:
+            spacing_tuple = tuple(float(v) for v in spacing)
+            direction = unit_direction
+        else:
+            spacing_tuple = (1.0, 1.0, 1.0)
+            direction = np.eye(3)
+    else:
+        spacing_tuple = (1.0, 1.0, 1.0)
+        direction = np.eye(3)
+    # NIfTI world space is RAS; SimpleITK's LPS convention needs a flip of the
+    # first two direction/origin components to keep exported masks
+    # co-registered with the source images they came from.
+    direction_lps = direction.copy()
+    direction_lps[:2, :] *= -1.0
+    origin_lps = matrix[:3, 3].copy()
+    origin_lps[:2] *= -1.0
+    raster.SetOrigin(tuple(float(v) for v in origin_lps))
+    raster.SetDirection(tuple(float(v) for v in direction_lps.flatten()))
+    raster.SetSpacing(spacing_tuple)
+    sitk.WriteImage(raster, output_path, useCompression=True)
+
+
+def write_mask_file(array: np.ndarray, affine: np.ndarray, output_path: str) -> None:
+    """Atomically write a mask in the format implied by the output extension."""
+    destination = os.path.abspath(output_path)
+    lowered = destination.lower()
+    if lowered.endswith((".nrrd", ".mha", ".mhd")):
+        _write_mask_sitk_atomic(array, affine, destination)
+    elif lowered.endswith(".nii.gz") or lowered.endswith(".nii"):
+        write_mask_nifti(array, affine, destination)
+    else:
+        raise ValueError(
+            "Unsupported mask export format: {}".format(output_path)
+        )
+
+
+def _read_existing_mask(path: str, export_affine: np.ndarray):
+    """Read an exported mask back for skip-existing comparison.
+
+    Returns (array, affine_close) or (None, False) when the file cannot be
+    read. NIfTI is loaded via nibabel; .nrrd/.mha/.mhd go through SimpleITK
+    and are converted back to the RAS affine convention.
+    """
+    lowered = path.lower()
+    try:
+        if lowered.endswith(".nrrd") or lowered.endswith(".mha") or lowered.endswith(".mhd"):
+            import SimpleITK as sitk
+
+            raster = sitk.ReadImage(path)
+            array = sitk.GetArrayFromImage(raster)
+            # sitk arrays come back z/y/x; the export loop works in the
+            # NIfTI x/y/z convention, so reverse the axes.
+            array = np.transpose(array, (2, 1, 0))
+            direction = np.asarray(raster.GetDirection(), dtype=float).reshape(3, 3)
+            spacing = np.asarray(raster.GetSpacing(), dtype=float)
+            origin = np.asarray(raster.GetOrigin(), dtype=float)
+            affine = np.eye(4)
+            affine[:3, :3] = direction * spacing
+            affine[:3, 3] = origin
+            affine[:2, :] *= -1.0  # LPS -> RAS
+            return array, _affine_close(affine, export_affine)
+        import nibabel as nib
+
+        existing_img = nib.load(path)
+        array = np.asanyarray(existing_img.dataobj)
+        return array, _affine_close(existing_img.affine, export_affine)
+    except Exception:
+        return None, False
+
+
 def write_mask_nifti(array: np.ndarray, affine: np.ndarray, output_path: str) -> None:
     import nibabel as nib
 
@@ -1211,6 +1304,51 @@ def write_mask_nifti(array: np.ndarray, affine: np.ndarray, output_path: str) ->
         except Exception:
             pass
 
+        last_error = None
+        for attempt in range(12):
+            try:
+                os.replace(temporary, destination)
+                return
+            except OSError as exc:
+                last_error = exc
+                time.sleep(min(0.2, 0.02 * (attempt + 1)))
+        raise RuntimeError(
+            "Could not publish exported Mask '{}'. The existing file, if "
+            "present, was left unchanged. Error: {}".format(
+                destination, last_error
+            )
+        )
+    finally:
+        try:
+            if os.path.isfile(temporary):
+                os.remove(temporary)
+        except OSError:
+            pass
+
+
+def _write_mask_sitk_atomic(array: np.ndarray, affine: np.ndarray, output_path: str) -> None:
+    """Atomically publish a SimpleITK-writable mask (.nrrd/.mha/.mhd).
+
+    sitk.WriteImage has no temp+replace mode, so the file is written next to
+    the destination and swapped in with the same replace-retry loop used by
+    the NIfTI writer.
+    """
+    destination = os.path.abspath(output_path)
+    parent = os.path.dirname(destination)
+    os.makedirs(parent, exist_ok=True)
+    suffix = os.path.splitext(destination)[1] or ".nrrd"
+    fd, temporary = tempfile.mkstemp(
+        prefix="._mimics_mask_", suffix=suffix, dir=parent
+    )
+    os.close(fd)
+    try:
+        os.remove(temporary)  # sitk needs to create the file itself
+        _write_mask_sitk(array, affine, temporary)
+        try:
+            with open(temporary, "rb") as handle:
+                os.fsync(handle.fileno())
+        except Exception:
+            pass
         last_error = None
         for attempt in range(12):
             try:
@@ -1971,6 +2109,9 @@ def do_convert(params: dict) -> dict:
     ):
         return {
             "status": "error",
+            # Machine-readable marker so the Mimics side can offer the
+            # degraded Mimics-grid export instead of showing a raw failure.
+            "error_code": "source_geometry_unavailable",
             "error": (
                 "Source-image export was requested, but the original image geometry could not be "
                 "resolved. Select the original image or case folder; export was stopped instead of "
@@ -1985,6 +2126,10 @@ def do_convert(params: dict) -> dict:
                 "the source image could not be resolved."
             ),
         }
+    # True only when source_image was requested but its geometry is missing and
+    # the Mimics side let the job through (after the one-time degraded-export
+    # confirmation). See the else branch below.
+    degraded_export = False
     if export_space in ("source", "source_image", "source_grid") and source_geometry:
         export_shape = tuple(int(value) for value in source_geometry["shape"])
         export_affine = np.asarray(source_geometry["affine"], dtype=float)
@@ -1995,6 +2140,11 @@ def do_convert(params: dict) -> dict:
         export_affine = mimics_affine
         export_affine_source = mimics_affine_source
         export_space = "mimics_grid"
+        # P1 degraded path: source_image was requested but its geometry is
+        # unavailable, so the Mimics grid (with its measured voxel-to-RAS
+        # matrix) is used instead. The Mimics side asks the user once per
+        # batch before allowing the job through with this flag set.
+        degraded_export = True
 
     # Create segmentations dir. Normal user exports keep the historical
     # case_dir/segmentations destination; few-shot training may pass a
@@ -2003,6 +2153,26 @@ def do_convert(params: dict) -> dict:
     seg_dir = os.path.abspath(seg_dir)
     os.makedirs(seg_dir, exist_ok=True)
     overwrite_existing = bool(params.get("overwrite_existing", params.get("output_seg_dir") is None))
+
+    # Export formats. The default keeps the historical .nii.gz behaviour;
+    # "nrrd" and "mha" are written via SimpleITK with the same geometry.
+    export_formats = params.get("export_formats") or ["nii.gz"]
+    if isinstance(export_formats, str):
+        export_formats = [export_formats]
+    normalized_formats = []
+    for fmt in export_formats:
+        fmt_clean = str(fmt).lower().lstrip(".")
+        if fmt_clean not in SUPPORTED_EXPORT_FORMATS:
+            return {
+                "status": "error",
+                "error": "Unsupported export format '{}'. Supported: {}".format(
+                    fmt, ", ".join(SUPPORTED_EXPORT_FORMATS)
+                ),
+            }
+        if fmt_clean not in normalized_formats:
+            normalized_formats.append(fmt_clean)
+    if not normalized_formats:
+        normalized_formats = ["nii.gz"]
 
     # Convert each mask
     exported = []
@@ -2026,7 +2196,16 @@ def do_convert(params: dict) -> dict:
             exported.append({"name": name, "action": "skipped", "reason": "buffer not found"})
             continue
 
-        nifti_path = os.path.join(seg_dir, safe_name + ".nii.gz")
+        format_paths = {
+            fmt: os.path.join(seg_dir, safe_name + "." + fmt)
+            for fmt in normalized_formats
+        }
+        # Report path: the historical .nii.gz when present, else the first
+        # requested format so the entry points at a file that was written.
+        if "nii.gz" in format_paths:
+            nifti_path = format_paths["nii.gz"]
+        else:
+            nifti_path = format_paths[normalized_formats[0]]
 
         if canonical_source_path:
             # The saved project remains the source of case/mask selection and
@@ -2078,49 +2257,81 @@ def do_convert(params: dict) -> dict:
         if final_export_shape is None:
             final_export_shape = [int(value) for value in nifti_array.shape]
 
-        # If file already exists, compare content; skip write if unchanged.
-        if os.path.isfile(nifti_path):
-            import nibabel as nib
-            existing_img = nib.load(nifti_path)
-            existing = np.asanyarray(existing_img.dataobj)
-            same_affine = _affine_close(existing_img.affine, export_affine)
-            if existing.shape == nifti_array.shape and np.array_equal(existing, nifti_array) and same_affine:
-                total_unchanged += 1
-                exported.append({
-                    "name": name,
-                    "action": "unchanged",
-                    "path": nifti_path,
-                    "source_foreground_voxels": mimics_foreground,
-                    "foreground_voxels": export_foreground,
-                    "mask_source": mask_source,
-                    "source_mask_path": canonical_source_path,
-                    "source_mask_sha256": source_mask_sha256,
-                    "mcs_mask_bypassed": mcs_mask_bypassed,
-                })
-                continue
-            if not overwrite_existing:
-                total_skipped_existing += 1
-                exported.append({
-                    "name": name,
-                    "action": "skipped_existing",
-                    "path": nifti_path,
-                    "reason": "custom export destinations do not overwrite existing files",
-                })
-                continue
+        # Compare per-format existing files first: a mask counts as unchanged
+        # (or skipped-existing) only when every requested format matches.
+        per_format_action = {}
+        needs_write = False
+        for fmt, target_path in format_paths.items():
+            if os.path.isfile(target_path):
+                existing, same_affine = _read_existing_mask(target_path, export_affine)
+                if (
+                    existing is not None
+                    and existing.shape == nifti_array.shape
+                    and np.array_equal(existing, nifti_array)
+                    and same_affine
+                ):
+                    per_format_action[fmt] = "unchanged"
+                    continue
+                if not overwrite_existing:
+                    per_format_action[fmt] = "skipped_existing"
+                    continue
+                per_format_action[fmt] = "overwritten"
+                needs_write = True
+            else:
+                per_format_action[fmt] = "new"
+                needs_write = True
+        if all(action == "unchanged" for action in per_format_action.values()):
+            total_unchanged += 1
+            exported.append({
+                "name": name,
+                "action": "unchanged",
+                "path": nifti_path,
+                "paths": dict(format_paths),
+                "per_format_action": per_format_action,
+                "source_foreground_voxels": mimics_foreground,
+                "foreground_voxels": export_foreground,
+                "mask_source": mask_source,
+                "source_mask_path": canonical_source_path,
+                "source_mask_sha256": source_mask_sha256,
+                "mcs_mask_bypassed": mcs_mask_bypassed,
+            })
+            continue
+        if not needs_write:
+            # Every requested format exists but differs, and overwriting is off.
+            total_skipped_existing += 1
+            exported.append({
+                "name": name,
+                "action": "skipped_existing",
+                "path": nifti_path,
+                "paths": dict(format_paths),
+                "per_format_action": per_format_action,
+                "reason": "custom export destinations do not overwrite existing files",
+            })
+            continue
+
+        # Overall action for reporting: the highest-priority write performed.
+        if "new" in per_format_action.values():
+            action = "new"
+        elif "overwritten" in per_format_action.values():
             action = "overwritten"
         else:
-            action = "new"
+            action = "unchanged"
 
-        write_mask_nifti(nifti_array, export_affine, nifti_path)
+        for fmt, target_path in format_paths.items():
+            if per_format_action.get(fmt) == "unchanged":
+                continue
+            write_mask_file(nifti_array, export_affine, target_path)
 
         if action == "new":
             total_new += 1
-        else:
+        elif action == "overwritten":
             total_overwritten += 1
         exported.append({
             "name": name,
             "action": action,
             "path": nifti_path,
+            "paths": dict(format_paths),
+            "per_format_action": per_format_action,
             "mask_source": mask_source,
             "source_mask_path": canonical_source_path,
             "source_mask_sha256": source_mask_sha256,
@@ -2137,6 +2348,8 @@ def do_convert(params: dict) -> dict:
         "total_unchanged": total_unchanged,
         "total_skipped_existing": total_skipped_existing,
         "export_space": export_space,
+        "degraded_export": degraded_export,
+        "export_formats": list(normalized_formats),
         "mimics_voxel_to_ras_matrix_source": mimics_affine_source,
         "mimics_voxel_to_ras_matrix": mimics_affine.tolist(),
         "export_voxel_to_ras_matrix_source": export_affine_source,

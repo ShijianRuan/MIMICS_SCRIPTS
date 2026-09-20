@@ -1676,6 +1676,146 @@ class TestMimicsBridgeBufferMapping(unittest.TestCase):
         })
         self.assertEqual("error", result["status"])
         self.assertIn("original image geometry", result["error"])
+        # P1: the strict refusal carries a machine-readable marker so the
+        # Mimics side can offer the degraded Mimics-grid export.
+        self.assertEqual("source_geometry_unavailable", result["error_code"])
+
+    def test_convert_degraded_export_uses_mimics_grid_without_source_geometry(self):
+        from mimics_bridge import do_convert
+        import nibabel as nib
+
+        case_dir = os.path.join(self.tmp, "case_degraded")
+        buffers_dir = os.path.join(self.tmp, "buffers_degraded")
+        os.makedirs(case_dir)
+        os.makedirs(buffers_dir)
+        data = np.zeros((2, 2, 1), dtype=np.uint8)
+        data[1, 0, 0] = 1
+        with open(os.path.join(buffers_dir, "organ.u8"), "wb") as handle:
+            handle.write(data.tobytes())
+        mimics_affine = np.array([
+            [1.5, 0.0, 0.0, -4.0],
+            [0.0, 2.0, 0.0, -6.0],
+            [0.0, 0.0, 3.0, 1.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ])
+        manifest_path = os.path.join(buffers_dir, "manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as handle:
+            json.dump({
+                "mimics_shape": [2, 2, 1],
+                "mimics_voxel_to_ras_matrix": mimics_affine.tolist(),
+                "masks": [{"original_name": "organ", "u8_filename": "organ.u8"}],
+            }, handle)
+        # source_image requested but geometry unavailable and not required:
+        # the export degrades to the Mimics grid instead of failing.
+        result = do_convert({
+            "buffers_dir": buffers_dir,
+            "manifest_path": manifest_path,
+            "case_dir": case_dir,
+            "export_space": "source_image",
+            "require_source_geometry": False,
+        })
+        self.assertEqual("ok", result["status"])
+        self.assertEqual("mimics_grid", result["export_space"])
+        self.assertTrue(result["degraded_export"])
+        out = nib.load(os.path.join(case_dir, "segmentations", "organ.nii.gz"))
+        np.testing.assert_allclose(mimics_affine, out.affine, atol=1e-6)
+        np.testing.assert_array_equal(data, np.asanyarray(out.dataobj).astype(np.uint8))
+
+    def test_convert_rejects_unsupported_export_format(self):
+        from mimics_bridge import do_convert
+
+        case_dir = os.path.join(self.tmp, "case_bad_format")
+        buffers_dir = os.path.join(self.tmp, "buffers_bad_format")
+        os.makedirs(case_dir)
+        os.makedirs(buffers_dir)
+        with open(os.path.join(buffers_dir, "organ.u8"), "wb") as handle:
+            handle.write(np.zeros((2, 2, 1), dtype=np.uint8).tobytes())
+        manifest_path = os.path.join(buffers_dir, "manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as handle:
+            json.dump({
+                "mimics_shape": [2, 2, 1],
+                "mimics_voxel_to_ras_matrix": np.eye(4).tolist(),
+                "masks": [{"original_name": "organ", "u8_filename": "organ.u8"}],
+            }, handle)
+        result = do_convert({
+            "buffers_dir": buffers_dir,
+            "manifest_path": manifest_path,
+            "case_dir": case_dir,
+            "export_formats": ["stl"],
+        })
+        self.assertEqual("error", result["status"])
+        self.assertIn("Unsupported export format", result["error"])
+
+    def test_convert_multi_format_writes_nrrd_and_mha_with_same_geometry(self):
+        import SimpleITK as sitk
+        from mimics_bridge import do_convert
+        import nibabel as nib
+
+        case_dir = os.path.join(self.tmp, "case_multi_format")
+        buffers_dir = os.path.join(self.tmp, "buffers_multi_format")
+        os.makedirs(case_dir)
+        os.makedirs(buffers_dir)
+        data = np.zeros((4, 3, 2), dtype=np.uint8)
+        data[1:3, 1:3, :] = 1
+        with open(os.path.join(buffers_dir, "organ.u8"), "wb") as handle:
+            handle.write(data.tobytes())
+        mimics_affine = np.array([
+            [0.0, -0.7, 0.0, 11.0],
+            [0.7, 0.0, 0.0, -13.0],
+            [0.0, 0.0, 1.25, 2.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ])
+        manifest_path = os.path.join(buffers_dir, "manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as handle:
+            json.dump({
+                "mimics_shape": [4, 3, 2],
+                "mimics_voxel_to_ras_matrix": mimics_affine.tolist(),
+                "masks": [{"original_name": "organ", "u8_filename": "organ.u8"}],
+            }, handle)
+
+        result = do_convert({
+            "buffers_dir": buffers_dir,
+            "manifest_path": manifest_path,
+            "case_dir": case_dir,
+            "export_formats": ["nii.gz", "nrrd", "mha"],
+        })
+        self.assertEqual("ok", result["status"])
+        self.assertEqual(["nii.gz", "nrrd", "mha"], result["export_formats"])
+        row = result["exported"][0]
+        self.assertEqual("new", row["action"])
+        self.assertEqual(3, len(row["paths"]))
+
+        seg_dir = os.path.join(case_dir, "segmentations")
+        # All three files exist with identical content.
+        nii_img = nib.load(os.path.join(seg_dir, "organ.nii.gz"))
+        np.testing.assert_array_equal(
+            data, np.asanyarray(nii_img.dataobj).astype(np.uint8)
+        )
+        for ext in ("nrrd", "mha"):
+            img = sitk.ReadImage(os.path.join(seg_dir, "organ." + ext))
+            back = np.transpose(sitk.GetArrayFromImage(img), (2, 1, 0))
+            self.assertEqual(data.shape, back.shape)
+            np.testing.assert_array_equal(data, back)
+            # Reconstructed RAS affine matches the Mimics grid affine.
+            direction = np.asarray(img.GetDirection(), dtype=float).reshape(3, 3)
+            spacing = np.asarray(img.GetSpacing(), dtype=float)
+            origin = np.asarray(img.GetOrigin(), dtype=float)
+            affine = np.eye(4)
+            affine[:3, :3] = direction * spacing
+            affine[:3, 3] = origin
+            affine[:2, :] *= -1.0
+            np.testing.assert_allclose(mimics_affine, affine, atol=1e-5)
+
+        # Re-running with the same data marks every format unchanged.
+        rerun = do_convert({
+            "buffers_dir": buffers_dir,
+            "manifest_path": manifest_path,
+            "case_dir": case_dir,
+            "export_formats": ["nii.gz", "nrrd", "mha"],
+        })
+        self.assertEqual("ok", rerun["status"])
+        self.assertEqual("unchanged", rerun["exported"][0]["action"])
+        self.assertEqual(1, rerun["total_unchanged"])
 
     def test_convert_can_write_to_job_scoped_segmentations(self):
         from mimics_bridge import do_convert

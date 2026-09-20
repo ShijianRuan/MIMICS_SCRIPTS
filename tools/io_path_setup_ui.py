@@ -710,6 +710,22 @@ def run_ui(context, preview_path=""):
         policy_row.addWidget(skip_radio)
         policy_row.addWidget(overwrite_radio)
         form.addLayout(policy_row)
+        # P1 multi-format export: one or more formats per export, all sharing
+        # identical geometry. NIfTI stays the default so historical behaviour
+        # is unchanged unless the user opts in.
+        form.addWidget(_label(QtWidgets, "EXPORT FORMATS", "section"))
+        format_row = QtWidgets.QHBoxLayout()
+        format_boxes = {}
+        remembered_formats = set(remembered_mode.get("export_formats", []) or [])
+        for fmt_key, fmt_label in (("nii.gz", "NIfTI (.nii.gz)"), ("nrrd", "NRRD (.nrrd)"), ("mha", "MHA (.mha)")):
+            box = QtWidgets.QCheckBox(fmt_label)
+            box.setChecked(
+                fmt_key in remembered_formats if remembered_formats else fmt_key == "nii.gz"
+            )
+            format_boxes[fmt_key] = box
+            format_row.addWidget(box)
+        format_row.addStretch(1)
+        form.addLayout(format_row)
 
     configured_default = context.get("configured_output", "")
     output_user_edited = {"value": bool(output_initial)}
@@ -1032,6 +1048,15 @@ def run_ui(context, preview_path=""):
                 selection["mask_selection"] = "all"
         if mode == "export_masks":
             selection["conflict_policy"] = "overwrite" if overwrite_radio.isChecked() else "skip"
+            selected_formats = [fmt for fmt, box in format_boxes.items() if box.isChecked()]
+            if not selected_formats:
+                QtWidgets.QMessageBox.warning(
+                    window,
+                    "Export Format Required",
+                    "Choose at least one export format.",
+                )
+                return
+            selection["export_formats"] = selected_formats
             if mask_named.isChecked():
                 names = ",".join(item.strip() for item in mask_names.text().split(",") if item.strip())
                 if not names:
