@@ -64,6 +64,11 @@ def _normalize_vector(vec: np.ndarray, eps: float = 1e-12) -> np.ndarray:
 # -- Image inspection ---------------------------------------------------
 
 def is_dicom_folder(path: str) -> bool:
+    # An empty/unset path must never be treated as the process working
+    # directory: Path("") is Path("."), which would recursively scan the
+    # whole cwd (project root, bundled env) for DICOM files.
+    if not str(path or "").strip():
+        return False
     p = Path(path)
     if not p.is_dir():
         return False
@@ -82,6 +87,9 @@ def is_dicom_folder(path: str) -> bool:
 
 
 def infer_dicom_modality(path: str) -> str:
+    # See is_dicom_folder: an empty path must not fall back to scanning cwd.
+    if not str(path or "").strip():
+        return ""
     p = Path(path)
     if not p.is_dir():
         return ""
@@ -1661,6 +1669,9 @@ def find_image_geometry_in_case_dir(case_dir: str) -> dict | None:
 
 
 def get_source_image_geometry(path: str) -> dict | None:
+    # An empty path means "no source image was provided" — not "scan cwd".
+    if not str(path or "").strip():
+        return None
     if is_nifti_file(path):
         shape, affine = get_nifti_disk_geometry(path)
         return {"path": str(Path(path).resolve()), "kind": "nifti", "shape": shape, "affine": affine}

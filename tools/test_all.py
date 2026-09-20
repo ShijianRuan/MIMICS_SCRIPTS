@@ -1795,6 +1795,24 @@ class TestMimicsBridgeBufferMapping(unittest.TestCase):
         self.assertEqual((8, 6, 4), rerun_out.shape)
         np.testing.assert_allclose(source_affine, rerun_out.affine, atol=1e-6)
 
+    def test_empty_source_image_path_never_scans_cwd(self):
+        """An empty source_image_path must not treat cwd as a DICOM folder.
+
+        Path("") is Path("."), so without the guard the bridge recursively
+        scanned the working directory for DICOM files. When tests run from a
+        checkout containing bundled DICOM test data (e.g. a portable python_env
+        with nibabel/pydicom test files), the scan "found" a bogus source
+        geometry that overrode the metadata restore path.
+        """
+        from mimics_bridge import get_source_image_geometry, is_dicom_folder
+
+        self.assertFalse(is_dicom_folder(""))
+        self.assertFalse(is_dicom_folder(None))
+        self.assertFalse(is_dicom_folder("   "))
+        self.assertIsNone(get_source_image_geometry(""))
+        self.assertIsNone(get_source_image_geometry(None))
+        self.assertIsNone(get_source_image_geometry("   "))
+
     def test_convert_rejects_unsupported_export_format(self):
         from mimics_bridge import do_convert
 
