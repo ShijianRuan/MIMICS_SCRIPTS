@@ -18,7 +18,7 @@ from queue import Empty, Queue
 # Embeddable Python can omit the script directory from sys.path.
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
-for _candidate in (_HERE, _ROOT):
+for _candidate in (_HERE, _ROOT, os.path.join(_ROOT, "runtime_py35")):
     if _candidate and _candidate not in sys.path:
         sys.path.insert(0, _candidate)
 
@@ -174,8 +174,14 @@ def _image_stem(path):
     return os.path.splitext(name)[0] or "case"
 
 
-def discover_single_source(source):
+def discover_single_source(source, profile_id=None):
     """Discover one case outside Mimics so large DICOM folders never block it."""
+    from dataset_profiles import load_profile
+
+    profile = load_profile(profile_id)
+    preferred = list(profile["image_candidates"])
+    dicom_dirs = list(profile["dicom_dirs"]) or ["dicom"]
+    mask_dirs = list(profile["mask_dirs"]) or ["segmentations"]
     selected = os.path.abspath(source)
     if _medical_file(selected):
         image = selected
@@ -206,7 +212,6 @@ def discover_single_source(source):
         case_dir = selected
         case_id = os.path.basename(case_dir.rstrip("\\/")) or "case"
         image = ""
-        preferred = ("ct.nii.gz", "mri.nii.gz", "ct.nii", "mri.nii", "ct.mhd", "mri.mhd", "ct.mha", "mri.mha")
         for name in preferred:
             candidate = os.path.join(case_dir, name)
             if _medical_file(candidate):
@@ -227,25 +232,145 @@ def discover_single_source(source):
             except OSError:
                 pass
         if not image:
-            dicom_dir = os.path.join(case_dir, "dicom")
-            image = dicom_dir if os.path.isdir(dicom_dir) else case_dir
+            for dicom_name in dicom_dirs:
+                dicom_dir = os.path.join(case_dir, dicom_name)
+                if os.path.isdir(dicom_dir):
+                    image = dicom_dir
+                    break
+            else:
+                image = case_dir
         allow_masks = True
     else:
         return None
     masks = []
-    seg_dir = os.path.join(case_dir, "segmentations")
-    if allow_masks and os.path.isdir(seg_dir):
-        for name in sorted(os.listdir(seg_dir)):
-            path = os.path.join(seg_dir, name)
-            if not _medical_file(path):
-                continue
-            masks.append({"name": _image_stem(name), "path": path})
+    for mask_dir_name in mask_dirs:
+        seg_dir = os.path.join(case_dir, mask_dir_name)
+        if allow_masks and os.path.isdir(seg_dir):
+            for name in sorted(os.listdir(seg_dir)):
+                path = os.path.join(seg_dir, name)
+                if not _medical_file(path):
+                    continue
+                masks.append({"name": _image_stem(name), "path": path})
     return {
         "case_id": case_id,
         "image": image,
         "image_type": "medical_image" if _medical_file(image) else "dicom_candidate",
         "masks": masks,
         "case_dir": case_dir,
+    }
+
+
+def summarize_dataset(source, profile_id=None, entry_cap=511):
+    """Pre-scan a dataset root and build the recognition summary.
+
+    Mirrors the import discovery order (preferred names, capped fallback scan,
+    DICOM subfolders) so the one-line summary matches what import will do.
+    Returns None when source is not an existing directory.
+    """
+    if not source or not os.path.isdir(source):
+        return None
+    from dataset_profiles import load_profile
+
+    profile = load_profile(profile_id)
+    mask_dirs = list(profile["mask_dirs"]) or ["segmentations"]
+    image_kinds = {}
+    mask_count = 0
+    warnings = []
+    skipped = []
+    case_count = 0
+    try:
+        names = sorted(os.listdir(source))
+    except OSError:
+        return None
+    for name in names:
+        case_dir = os.path.join(source, name)
+        if not os.path.isdir(case_dir):
+            continue
+        if name in profile["exclude_dirs"]:
+            continue
+        image = None
+        for candidate in profile["image_candidates"]:
+            path = os.path.join(case_dir, candidate)
+            if _medical_file(path):
+                image = candidate
+                break
+        volume_files = 0
+        volume_names = []
+        dicom_heuristic = False
+        # One capped scan answers both "is there a fallback image?" and "does
+        # more than one volume live here?" — the anomaly the recognition list
+        # must interrupt on (e.g. ct.nii.gz + old_ct.nii.gz in one case dir).
+        try:
+            with os.scandir(case_dir) as entries:
+                for index, entry in enumerate(entries):
+                    if _has_medical_suffix(entry.name):
+                        try:
+                            if entry.is_file():
+                                volume_files += 1
+                                if len(volume_names) < 2:
+                                    volume_names.append(entry.name)
+                                if image is None and len(volume_names) == 1:
+                                    image = entry.name
+                                if volume_files > 1 and image is not None:
+                                    break
+                        except OSError:
+                            pass
+                    if entry.name.lower().endswith(".dcm") or index >= entry_cap:
+                        dicom_heuristic = True
+                        break
+        except OSError:
+            pass
+        image_kind = "fallback"
+        if image is not None and "." in image and not dicom_heuristic:
+            image_kind = "image file"
+        if image is None:
+            for dicom_name in profile["dicom_dirs"]:
+                if os.path.isdir(os.path.join(case_dir, dicom_name)):
+                    image = dicom_name
+                    image_kind = "dicom folder"
+                    break
+        if image is None:
+            skipped.append(name)
+            continue
+        case_count += 1
+        image_kinds[image_kind] = image_kinds.get(image_kind, 0) + 1
+        if volume_files > 1:
+            warnings.append(
+                "{0}: {1} volume files found ({2}); '{3}' will be used".format(
+                    name, volume_files, ", ".join(volume_names), image
+                )
+            )
+        elif dicom_heuristic and image_kind == "fallback":
+            warnings.append(
+                "{0}: many files detected; the series will be validated during import".format(name)
+            )
+        for mask_dir_name in mask_dirs:
+            seg_dir = os.path.join(case_dir, mask_dir_name)
+            if not os.path.isdir(seg_dir):
+                continue
+            try:
+                for fname in os.listdir(seg_dir):
+                    if _has_medical_suffix(fname):
+                        mask_count += 1
+            except OSError:
+                pass
+    parts = ["Recognized {0} case(s)".format(case_count)]
+    if image_kinds:
+        detail = ", ".join(
+            "{0} ({1})".format(kind, count)
+            for kind, count in sorted(image_kinds.items(), key=lambda kv: -kv[1])
+        )
+        parts.append("images: " + detail)
+    if mask_count:
+        parts.append("{0} mask(s)".format(mask_count))
+    if skipped:
+        parts.append("{0} skipped (no image)".format(len(skipped)))
+    return {
+        "summary": "; ".join(parts),
+        "warnings": warnings,
+        "skipped": skipped,
+        "case_count": case_count,
+        "mask_count": mask_count,
     }
 
 
@@ -643,6 +768,16 @@ def run_ui(context, preview_path=""):
     output_preview.setWordWrap(True)
     form.addWidget(output_preview)
 
+    # Recognition summary (P2): one line describing what import found in the
+    # dataset, refreshed in a background thread so large roots never block the
+    # path picker. Anomalies do not block here; they are surfaced at submit.
+    recognition_state = {"summary": None, "scanning": False}
+    recognition_label = None
+    if mode == "import_batch":
+        recognition_label = _label(QtWidgets, "", "preview")
+        recognition_label.setWordWrap(True)
+        form.addWidget(recognition_label)
+
     policy_row = None
     skip_radio = overwrite_radio = None
     mask_all = mask_none = mask_named = mask_names = None
@@ -753,6 +888,57 @@ def run_ui(context, preview_path=""):
             output_user_edited["value"] = True
             output_edit.setProperty("chosenByBrowse", False)
         refresh_default()
+
+    def apply_recognition(result):
+        recognition_state["scanning"] = False
+        recognition_state["summary"] = result
+        if recognition_label is None:
+            return
+        if result is None:
+            recognition_label.setText("")
+        else:
+            text = result["summary"]
+            if result["warnings"]:
+                text += "  |  {0} item(s) need attention at start".format(len(result["warnings"]))
+            recognition_label.setText(text)
+
+    def refresh_recognition():
+        if recognition_label is None or recognition_state["scanning"]:
+            return
+        source = source_edit.text().strip()
+        if not source or not os.path.isdir(source):
+            recognition_state["summary"] = None
+            recognition_label.setText("")
+            return
+        recognition_state["scanning"] = True
+        recognition_label.setText("Scanning dataset...")
+
+        def scan():
+            try:
+                result = summarize_dataset(source)
+            except Exception:
+                result = None
+            recognition_queue.put(result)
+
+        thread = threading.Thread(target=scan, name="io-recognition-scan")
+        thread.daemon = True
+        thread.start()
+
+    recognition_queue = Queue()
+    recognition_timer = QtCore.QTimer(window)
+    recognition_timer.setInterval(150)
+
+    def poll_recognition():
+        try:
+            apply_recognition(recognition_queue.get_nowait())
+        except Empty:
+            return
+
+    recognition_timer.timeout.connect(poll_recognition)
+    recognition_timer.start(150)
+
+    source_edit.textChanged.connect(refresh_recognition)
+    refresh_recognition()
 
     source_edit.textChanged.connect(lambda _text: refresh_default())
     output_edit.textChanged.connect(output_edited)
@@ -1069,6 +1255,29 @@ def run_ui(context, preview_path=""):
                 selection["mask_selection"] = names
             else:
                 selection["mask_selection"] = "all"
+
+        # Recognition anomalies interrupt once, with a plain list of what will
+        # happen; the user can still proceed (the summary line already told
+        # them the normal path is fine).
+        if mode == "import_batch" and recognition_state.get("summary"):
+            summary = recognition_state["summary"]
+            if summary.get("warnings") or summary.get("skipped"):
+                lines = []
+                for warning in summary["warnings"][:20]:
+                    lines.append("• " + warning)
+                if summary.get("skipped"):
+                    shown = ", ".join(summary["skipped"][:10])
+                    more = "" if len(summary["skipped"]) <= 10 else " (+{0} more)".format(len(summary["skipped"]) - 10)
+                    lines.append("• No usable image found in {0} case(s): {1}{2} — they will be skipped.".format(len(summary["skipped"]), shown, more))
+                answer = QtWidgets.QMessageBox.question(
+                    window,
+                    "Review Recognition Results",
+                    "The dataset scan found:\n\n{0}\n\nProceed with import?".format("\n".join(lines)),
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                    QtWidgets.QMessageBox.No,
+                )
+                if answer != QtWidgets.QMessageBox.Yes:
+                    return
 
         submission_state["running"] = True
         submit.setEnabled(False)

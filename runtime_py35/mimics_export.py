@@ -2928,15 +2928,28 @@ def _apply_export_result(result, work_dir):
 
 # -- TS case discovery (for batch mode) --------------------------------
 
-def discover_ts_cases(ts_root, case_filter=None, exclude_dirs=None):
-    """Find all cases in a TS-like dataset."""
+def discover_ts_cases(ts_root, case_filter=None, exclude_dirs=None, profile_id=None):
+    """Find all cases in a TS-like dataset.
+
+    Layout rules come from dataset_profiles.json (profile defaults to
+    ts-like, whose image candidate list historically also accepted
+    ct.nrrd/mri.nrrd — kept here so export discovery stays equivalent).
+    """
+    import dataset_profiles as _dataset_profiles
+    profile = _dataset_profiles.load_profile(profile_id)
+    # The export scanner historically accepted two extra preferred names.
+    candidates = list(profile["image_candidates"])
+    for extra in ("ct.nrrd", "mri.nrrd"):
+        if extra not in candidates:
+            candidates.append(extra)
+    fallback_suffixes = tuple(profile["fallback_image_suffixes"])
     cases = []
     excluded = set(os.path.abspath(d) for d in (exclude_dirs or []) if d)
     for name in sorted(os.listdir(ts_root)):
         case_dir = os.path.join(ts_root, name)
         if not os.path.isdir(case_dir):
             continue
-        if name in ("mcs_output", "segmentations"):
+        if name in profile["exclude_dirs"]:
             continue
         # Skip output/work directories that happen to live under ts_root and
         # contain stray image files (e.g. mask_exports with a leftover .nii.gz),
@@ -2947,17 +2960,18 @@ def discover_ts_cases(ts_root, case_filter=None, exclude_dirs=None):
             continue
 
         has_image = False
-        for img_name in ("ct.nii.gz", "mri.nii.gz", "ct.nii", "mri.nii", "ct.mhd", "mri.mhd", "ct.mha", "mri.mha", "ct.nrrd", "mri.nrrd"):
+        for img_name in candidates:
             if os.path.isfile(os.path.join(case_dir, img_name)):
                 has_image = True
                 break
         if not has_image:
-            dicom_dir = os.path.join(case_dir, "dicom")
-            if os.path.isdir(dicom_dir):
-                has_image = True
+            for dicom_name in profile["dicom_dirs"]:
+                if os.path.isdir(os.path.join(case_dir, dicom_name)):
+                    has_image = True
+                    break
         if not has_image:
             for fname in sorted(os.listdir(case_dir)):
-                if fname.lower().endswith((".nii", ".nii.gz", ".mha", ".mhd", ".nrrd")):
+                if fname.lower().endswith(fallback_suffixes):
                     has_image = True
                     break
         if not has_image and case_filter and name in case_filter and os.listdir(case_dir):

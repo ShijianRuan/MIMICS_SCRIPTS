@@ -1,0 +1,28 @@
+{
+  "schema_version": "mimics_dataset_profiles.v1",
+  "default_profile": "ts-like",
+  "profiles": {
+    "ts-like": {
+      "display_name": "TotalSegmentator-like dataset",
+      "description": "One folder per case with a preferred image name and masks in segmentations/.",
+      "image_candidates": [
+        "ct.nii.gz", "mri.nii.gz", "ct.nii", "mri.nii", "ct.mhd", "mri.mhd", "ct.mha", "mri.mha"
+      ],
+      "fallback_image_suffixes": [".nii.gz", ".nrrd.gz", ".nii", ".mha", ".mhd", ".nrrd"],
+      "mask_dirs": ["segmentations"],
+      "mask_suffixes": [".seg.nii.gz", ".seg.nii", ".nii.gz", ".nrrd.gz", ".nii", ".mha", ".mhd", ".nrrd"],
+      "dicom_dirs": ["dicom"],
+      "exclude_dirs": ["mcs_output", "segmentations"]
+    },
+    "generic": {
+      "display_name": "Generic scan (no layout assumptions)",
+      "description": "Any medical volume file in a case folder is the image; no preferred names.",
+      "image_candidates": [],
+      "fallback_image_suffixes": [".nii.gz", ".nrrd.gz", ".nii", ".mha", ".mhd", ".nrrd"],
+      "mask_dirs": [],
+      "mask_suffixes": [".seg.nii.gz", ".seg.nii", ".nii.gz", ".nrrd.gz", ".nii", ".mha", ".mhd", ".nrrd"],
+      "dicom_dirs": ["dicom"],
+      "exclude_dirs": []
+    }
+  }
+}

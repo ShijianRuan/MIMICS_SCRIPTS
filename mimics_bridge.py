@@ -32,6 +32,50 @@ DEFAULT_MIMICS_BUFFER_FLIPS = [False, False, False]
 DEFAULT_DICOM_RESAMPLE_MODE = "auto"
 DEFAULT_MASK_RESAMPLE_METHOD = "nearest"
 
+# Hard fallbacks mirroring the ts-like profile in dataset_profiles.json; the
+# bridge deploys as a single copied file so it reads the JSON next to itself
+# (project root when running from the repo, or the Scripts dir of the env it
+# was copied into) and degrades to these constants when the file is missing.
+_PROFILE_FALLBACK = {
+    "image_candidates": [
+        "ct.nii.gz", "mri.nii.gz", "ct.nii", "mri.nii",
+        "ct.mhd", "mri.mhd", "ct.mha", "mri.mha",
+    ],
+    "dicom_dirs": ["dicom"],
+    "exclude_dirs": ["mcs_output", "segmentations"],
+}
+# Names the bridge has always preferred on top of the shared profile list
+# (historical behaviour, kept so candidate ordering never changes).
+_BRIDGE_EXTRA_PREFERRED = ("ct.nrrd", "mri.nrrd", "ct.nrrd.gz", "mri.nrrd.gz")
+
+
+def _load_profile_tables():
+    payload = None
+    try:
+        path = Path(__file__).resolve().parent / "dataset_profiles.json"
+        with open(str(path), "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if not isinstance(payload, dict) or not isinstance(payload.get("profiles"), dict):
+            payload = None
+    except Exception:
+        payload = None
+    if payload is None:
+        tables = _PROFILE_FALLBACK
+    else:
+        wanted = str(payload.get("default_profile") or "").strip() or "ts-like"
+        profile = (payload.get("profiles") or {}).get(wanted) or _PROFILE_FALLBACK
+        tables = profile
+    candidates = [
+        str(name).lower()
+        for name in (tables.get("image_candidates") or [])
+        if str(name or "").strip()
+    ]
+    return {
+        "image_candidates": candidates,
+        "dicom_dirs": [str(d) for d in (tables.get("dicom_dirs") or []) if str(d or "").strip()] or ["dicom"],
+        "exclude_dirs": [str(d) for d in (tables.get("exclude_dirs") or []) if str(d or "").strip()],
+    }
+
 
 def _voxel_spacing_from_affine(affine: np.ndarray) -> np.ndarray:
     spacing = np.linalg.norm(affine[:3, :3], axis=0)
@@ -1598,7 +1642,8 @@ def get_image_shape_from_dicom(dicom_folder: str) -> tuple[int, int, int]:
 
 
 def _nifti_candidates(case_dir: Path):
-    preferred = ("ct.nii.gz", "mri.nii.gz", "ct.nii", "mri.nii")
+    profile = _load_profile_tables()
+    preferred = tuple(name for name in profile["image_candidates"] if name.endswith(".nii") or name.endswith(".nii.gz"))
     files = []
     for child in case_dir.iterdir():
         if not child.is_file():
@@ -1618,10 +1663,8 @@ def _nifti_candidates(case_dir: Path):
 
 
 def _other_medical_image_candidates(case_dir: Path):
-    preferred = (
-        "ct.mhd", "mri.mhd", "ct.mha", "mri.mha",
-        "ct.nrrd", "mri.nrrd", "ct.nrrd.gz", "mri.nrrd.gz",
-    )
+    profile = _load_profile_tables()
+    preferred = tuple(name for name in profile["image_candidates"] if not (name.endswith(".nii") or name.endswith(".nii.gz"))) + _BRIDGE_EXTRA_PREFERRED
     files = [child for child in case_dir.iterdir() if child.is_file() and is_medical_image_file(str(child)) and not is_nifti_file(str(child))]
     return sorted(files, key=lambda path: (preferred.index(path.name.lower()) if path.name.lower() in preferred else len(preferred), path.name.lower()))
 
@@ -1651,14 +1694,15 @@ def find_image_geometry_in_case_dir(case_dir: str) -> dict | None:
             return {"path": str(candidate), "kind": "medical_image", "shape": shape, "affine": affine}
         except Exception:
             continue
-    dicom_dir = d / "dicom"
-    if dicom_dir.is_dir():
-        return {
-            "path": str(dicom_dir),
-            "kind": "dicom_folder",
-            "shape": get_image_shape_from_dicom(str(dicom_dir)),
-            "affine": get_image_affine_from_dicom(str(dicom_dir)),
-        }
+    for dicom_name in _load_profile_tables()["dicom_dirs"]:
+        dicom_dir = d / dicom_name
+        if dicom_dir.is_dir():
+            return {
+                "path": str(dicom_dir),
+                "kind": "dicom_folder",
+                "shape": get_image_shape_from_dicom(str(dicom_dir)),
+                "affine": get_image_affine_from_dicom(str(dicom_dir)),
+            }
     if d.is_dir() and is_dicom_folder(str(d)):
         return {
             "path": str(d), "kind": "dicom_folder",
@@ -2528,8 +2572,9 @@ def do_discover_case_dirs(params: dict) -> dict:
         return {"status": "error", "error": "ts_root is not a directory: {}".format(ts_root)}
 
     cases = []
+    exclude = set(_load_profile_tables()["exclude_dirs"]) or {"mcs_output", "segmentations"}
     for name in sorted(os.listdir(ts_root)):
-        if name in ("mcs_output", "segmentations"):
+        if name in exclude:
             continue
         if cases_filter and name not in cases_filter:
             continue
@@ -2587,11 +2632,14 @@ def do_discover(params: dict) -> dict:
         return {"status": "error", "error": "ts_root is not a directory: {}".format(ts_root)}
 
     cases = []
+    profile = _load_profile_tables()
+    exclude = set(profile["exclude_dirs"]) or {"mcs_output", "segmentations"}
+    preferred_images = list(profile["image_candidates"]) + list(_BRIDGE_EXTRA_PREFERRED)
     for name in sorted(os.listdir(ts_root)):
         case_dir = os.path.join(ts_root, name)
         if not os.path.isdir(case_dir):
             continue
-        if name in ("mcs_output", "segmentations"):
+        if name in exclude:
             continue
         if cases_filter and name not in cases_filter:
             continue
@@ -2599,21 +2647,19 @@ def do_discover(params: dict) -> dict:
         # Find image
         image_path = None
         image_type = None
-        for img_name in (
-            "ct.nii.gz", "mri.nii.gz", "ct.nii", "mri.nii",
-            "ct.mhd", "mri.mhd", "ct.mha", "mri.mha",
-            "ct.nrrd", "mri.nrrd", "ct.nrrd.gz", "mri.nrrd.gz",
-        ):
+        for img_name in preferred_images:
             candidate = os.path.join(case_dir, img_name)
             if os.path.isfile(candidate):
                 image_path = candidate
                 image_type = "nifti"
                 break
         if image_path is None:
-            dicom_dir = os.path.join(case_dir, "dicom")
-            if os.path.isdir(dicom_dir):
-                image_path = dicom_dir
-                image_type = "dicom"
+            for dicom_name in profile["dicom_dirs"]:
+                dicom_dir = os.path.join(case_dir, dicom_name)
+                if os.path.isdir(dicom_dir):
+                    image_path = dicom_dir
+                    image_type = "dicom"
+                    break
         if image_path is None:
             for fname in sorted(os.listdir(case_dir)):
                 if fname.lower().endswith(_DISCOVER_MASK_SUFFIXES):

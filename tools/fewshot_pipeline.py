@@ -1291,15 +1291,26 @@ def _has_suffix(path, suffixes):
     return any(str(path.name).lower().endswith(suffix) for suffix in suffixes)
 
 
-def find_image(case_dir):
+def find_image(case_dir, profile_id=None):
+    """Find the source image in a case directory.
+
+    Preferred names come from the dataset profile (dataset_profiles.json);
+    the few-shot pipeline historically also accepted mr./image. variants,
+    which are kept as built-in extras so behaviour is unchanged.
+    """
+    from dataset_profiles import load_profile
+
+    profile = load_profile(profile_id)
+    preferred = list(profile["image_candidates"])
+    for extra in (
+        "mr.nii.gz", "image.nii.gz", "mr.nii", "image.nii",
+        "mr.mha", "image.mha", "mr.mhd", "image.mhd",
+        "mr.nrrd", "image.nrrd",
+    ):
+        if extra not in preferred:
+            preferred.append(extra)
+    mask_dirs = {d.lower() for d in profile["mask_dirs"]}
     root = Path(case_dir)
-    preferred = (
-        "ct.nii.gz", "mr.nii.gz", "mri.nii.gz", "image.nii.gz",
-        "ct.nii", "mr.nii", "mri.nii", "image.nii",
-        "ct.mha", "mr.mha", "mri.mha", "image.mha",
-        "ct.mhd", "mr.mhd", "mri.mhd", "image.mhd",
-        "ct.nrrd", "mr.nrrd", "mri.nrrd", "image.nrrd",
-    )
     candidates = []
     if not root.is_dir():
         return None
@@ -1313,7 +1324,7 @@ def find_image(case_dir):
             if path.name.lower() == wanted:
                 return path
     for path in sorted(candidates):
-        if "segmentations" not in [part.lower() for part in path.parts]:
+        if not any(part.lower() in mask_dirs for part in path.parts):
             return path
     try:
         from mimics_bridge import is_dicom_folder

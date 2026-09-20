@@ -953,9 +953,13 @@ def _cleanup_stale_processes():
 
 
 # -- TS case discovery (runs in Mimics Python 3.5, stdlib only) ---------
+# Layout rules (preferred image names, mask directories, excluded output
+# folders) come from dataset_profiles.json via the shared profile loader.
 
-_MEDICAL_IMAGE_SUFFIXES = (".nii.gz", ".nrrd.gz", ".nii", ".mha", ".mhd", ".nrrd")
-_MASK_SUFFIXES = (".seg.nii.gz", ".seg.nii", ".nii.gz", ".nrrd.gz", ".nii", ".mha", ".mhd", ".nrrd")
+import dataset_profiles as _dataset_profiles
+
+_MEDICAL_IMAGE_SUFFIXES = tuple(_dataset_profiles.load_profile()["fallback_image_suffixes"])
+_MASK_SUFFIXES = tuple(_dataset_profiles.load_profile()["mask_suffixes"])
 
 
 def _is_medical_image_file(path):
@@ -972,8 +976,9 @@ def _image_stem(path):
     return os.path.splitext(name)[0] or "case"
 
 
-def _find_case_image(case_dir, allow_direct_dicom=False):
-    for img_name in ("ct.nii.gz", "mri.nii.gz", "ct.nii", "mri.nii", "ct.mhd", "mri.mhd", "ct.mha", "mri.mha"):
+def _find_case_image(case_dir, allow_direct_dicom=False, profile=None):
+    profile = profile or _dataset_profiles.load_profile()
+    for img_name in profile["image_candidates"]:
         candidate = os.path.join(case_dir, img_name)
         if _is_medical_image_file(candidate):
             return candidate, "medical_image"
@@ -995,23 +1000,26 @@ def _find_case_image(case_dir, allow_direct_dicom=False):
                     return case_dir, "dicom_candidate"
     except OSError:
         pass
-    dicom_dir = os.path.join(case_dir, "dicom")
-    if os.path.isdir(dicom_dir):
-        return dicom_dir, "dicom"
+    for dicom_name in profile["dicom_dirs"]:
+        dicom_dir = os.path.join(case_dir, dicom_name)
+        if os.path.isdir(dicom_dir):
+            return dicom_dir, "dicom"
     # A directly selected folder may itself be a flat DICOM series. Validation
     # happens in the external bridge so Mimics never parses all DICOM headers.
     if allow_direct_dicom and nonempty:
         return case_dir, "dicom_candidate"
     return None, None
 
-def discover_ts_cases(ts_root, case_filter=None):
+def discover_ts_cases(ts_root, case_filter=None, profile_id=None):
     """Find all cases in a TS-like dataset. Returns list of dicts."""
+    profile = _dataset_profiles.load_profile(profile_id)
+    mask_dirs = list(profile["mask_dirs"]) or ["segmentations"]
     cases = []
     for name in sorted(os.listdir(ts_root)):
         case_dir = os.path.join(ts_root, name)
         if not os.path.isdir(case_dir):
             continue
-        if name in ("mcs_output", "segmentations"):
+        if name in profile["exclude_dirs"]:
             continue
         if case_filter and name not in case_filter:
             continue
@@ -1019,25 +1027,26 @@ def discover_ts_cases(ts_root, case_filter=None):
         image_path = None
         image_type = None
 
-        image_path, image_type = _find_case_image(case_dir)
+        image_path, image_type = _find_case_image(case_dir, profile=profile)
 
         if image_path is None:
             continue
 
         masks = []
-        seg_dir = os.path.join(case_dir, "segmentations")
-        if os.path.isdir(seg_dir):
-            for fname in sorted(os.listdir(seg_dir)):
-                lower = fname.lower()
-                if any(lower.endswith(s) for s in _MASK_SUFFIXES):
-                    organ = fname
-                    for s in _MASK_SUFFIXES:
-                        if organ.lower().endswith(s):
-                            organ = organ[:-len(s)]
-                            break
-                    if not organ:
-                        organ = "mask"
-                    masks.append({"name": organ, "path": os.path.join(seg_dir, fname)})
+        for mask_dir_name in mask_dirs:
+            seg_dir = os.path.join(case_dir, mask_dir_name)
+            if os.path.isdir(seg_dir):
+                for fname in sorted(os.listdir(seg_dir)):
+                    lower = fname.lower()
+                    if any(lower.endswith(s) for s in _MASK_SUFFIXES):
+                        organ = fname
+                        for s in _MASK_SUFFIXES:
+                            if organ.lower().endswith(s):
+                                organ = organ[:-len(s)]
+                                break
+                        if not organ:
+                            organ = "mask"
+                        masks.append({"name": organ, "path": os.path.join(seg_dir, fname)})
 
         cases.append({
             "case_id": name,
@@ -1049,13 +1058,14 @@ def discover_ts_cases(ts_root, case_filter=None):
     return cases
 
 
-def _discover_single_case(case_dir):
+def _discover_single_case(case_dir, profile_id=None):
     """Discover image and masks for a single case directory.
 
     Returns case_info dict, or None if no valid image found.
     Used for lazy discovery; each case is scanned only when it's
     about to be converted, avoiding a blocking full-dataset scan.
     """
+    profile = _dataset_profiles.load_profile(profile_id)
     if _is_medical_image_file(case_dir):
         image_file = os.path.abspath(case_dir)
         case_dir = os.path.dirname(image_file)
@@ -1065,19 +1075,20 @@ def _discover_single_case(case_dir):
         name = os.path.basename(case_dir)
     if not os.path.isdir(case_dir):
         return None
-    if name in ("mcs_output", "segmentations"):
+    if name in profile["exclude_dirs"]:
         return None
 
     if image_file:
         image_path, image_type = image_file, "medical_image"
     else:
-        image_path, image_type = _find_case_image(case_dir, allow_direct_dicom=True)
+        image_path, image_type = _find_case_image(
+            case_dir, allow_direct_dicom=True, profile=profile
+        )
 
     if image_path is None:
         return None
 
     masks = []
-    seg_dir = os.path.join(case_dir, "segmentations")
     allow_masks = True
     if image_file:
         # Count sibling medical images with an early stop: a case directory
@@ -1096,19 +1107,22 @@ def _discover_single_case(case_dir):
         except OSError:
             pass
         allow_masks = sibling_images <= 1
-    if allow_masks and os.path.isdir(seg_dir):
-        for fname in sorted(os.listdir(seg_dir)):
-            lower = fname.lower()
-            if any(lower.endswith(s) for s in _MASK_SUFFIXES):
-                organ = fname
-                # Strip all known suffixes to get the organ name
-                for s in _MASK_SUFFIXES:
-                    if organ.lower().endswith(s):
-                        organ = organ[:-len(s)]
-                        break
-                if not organ:
-                    organ = "mask"
-                masks.append({"name": organ, "path": os.path.join(seg_dir, fname)})
+    if allow_masks:
+        for mask_dir_name in (list(profile["mask_dirs"]) or ["segmentations"]):
+            seg_dir = os.path.join(case_dir, mask_dir_name)
+            if os.path.isdir(seg_dir):
+                for fname in sorted(os.listdir(seg_dir)):
+                    lower = fname.lower()
+                    if any(lower.endswith(s) for s in _MASK_SUFFIXES):
+                        organ = fname
+                        # Strip all known suffixes to get the organ name
+                        for s in _MASK_SUFFIXES:
+                            if organ.lower().endswith(s):
+                                organ = organ[:-len(s)]
+                                break
+                        if not organ:
+                            organ = "mask"
+                        masks.append({"name": organ, "path": os.path.join(seg_dir, fname)})
 
     return {
         "case_id": name,

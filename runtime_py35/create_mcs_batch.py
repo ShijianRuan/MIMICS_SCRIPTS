@@ -123,6 +123,72 @@ def runtime_path(output_dir, *parts):
     return os.path.join(base, *parts)
 
 
+IMPORT_RECEIPT_METADATA_KEYS = (
+    SOURCE_IMAGE_PATH_METADATA,
+    SOURCE_IMAGE_KIND_METADATA,
+    SOURCE_IMAGE_SHAPE_METADATA,
+    SOURCE_IMAGE_INDEX_SPACE_METADATA,
+    SOURCE_IMAGE_MODALITY_METADATA,
+    SOURCE_INTENSITY_ENCODING_METADATA,
+    SOURCE_INTENSITY_RESCALE_SLOPE_METADATA,
+    SOURCE_INTENSITY_RESCALE_INTERCEPT_METADATA,
+    SOURCE_INTENSITY_VALUE_MIN_METADATA,
+    SOURCE_INTENSITY_VALUE_MAX_METADATA,
+    DICOM_STORED_VALUE_MIN_METADATA,
+    DICOM_STORED_VALUE_MAX_METADATA,
+    SOURCE_WORLD_COORDINATE_SYSTEM_METADATA,
+    SOURCE_TO_MIMICS_WORLD_MATRIX_METADATA,
+    SOURCE_VOXEL_TO_RAS_MATRIX_METADATA,
+    MIMICS_VOXEL_TO_RAS_MATRIX_METADATA,
+    MIMICS_TO_SOURCE_INDEX_MATRIX_METADATA,
+    SOURCE_CASE_DIR_METADATA,
+)
+
+
+def _file_fingerprint(path):
+    """Content sha256 of a saved file, used to detect post-import edits."""
+    import hashlib
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+    except OSError:
+        return ""
+    return "sha256:" + digest.hexdigest()
+
+
+def write_import_receipt(output_dir, case_id, mcs_path, mask_names, manifest_data):
+    """Record exactly what one import created, for one-click undo.
+
+    The receipt lives next to the .mcs (not in the runtime dir) because it
+    must survive queue cleanup: undo should work weeks later. Undo deletes
+    the listed masks from the project; the .mcs file itself is only rolled
+    back (deleted) when its content fingerprint still matches this import.
+    """
+    receipt_path = os.path.join(
+        os.path.dirname(os.path.abspath(mcs_path)),
+        "." + safe_case_filename(case_id) + ".import_receipt.json",
+    )
+    payload = {
+        "schema_version": "mimics_import_receipt.v1",
+        "case_id": str(case_id or "case"),
+        "mcs_path": os.path.abspath(mcs_path),
+        "mcs_fingerprint": _file_fingerprint(mcs_path),
+        "created_masks": [str(name) for name in mask_names],
+        "metadata_keys": list(IMPORT_RECEIPT_METADATA_KEYS),
+        "source_fingerprint": manifest_data.get("source_fingerprint") or "",
+        "source_image_path": manifest_data.get("source_image_path") or "",
+        "source_case_dir": manifest_data.get("source_case_dir") or "",
+        "created_at_epoch": time.time(),
+    }
+    write_json_atomic(receipt_path, payload)
+    return receipt_path
+
+
 def prune_empty_work_parents(work_dir):
     current = os.path.dirname(work_dir or "")
     for _ in range(2):
@@ -943,6 +1009,21 @@ def create_mcs_from_manifest(work_dir, output_mcs):
         os.makedirs(mcs_dir)
     mimics.file.save_project(filename=mcs_path, save_as_type="Mimics Project Files")
     print("  saved: {}".format(mcs_path))
+
+    # Import receipt (P4): one-click undo needs to know exactly what this
+    # import created - mask names, metadata keys, and the source fingerprint.
+    try:
+        receipt_case_id = str(result.get("case_id") or os.path.splitext(os.path.basename(mcs_path))[0])
+        receipt_path = write_import_receipt(
+            os.path.dirname(mcs_path),
+            receipt_case_id,
+            mcs_path,
+            [mr["name"] for mr in mask_results],
+            result,
+        )
+        print("  receipt: {}".format(receipt_path))
+    except Exception as exc:
+        print("  warning: could not write import receipt: {}".format(exc))
 
     # Close project to free memory
     try:

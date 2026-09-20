@@ -11410,6 +11410,568 @@ class TestNewFeatures(unittest.TestCase):
         self.assertEqual("export", task.get("kind"))
 
 
+class TestDatasetProfiles(unittest.TestCase):
+    """P2 dataset profile loading, ts-like equivalence, and the recognition summary."""
+
+    def setUp(self):
+        self.tmp = _make_temp_dir()
+        self._tools_on_path = os.path.join(PROJECT_ROOT, "tools") not in sys.path
+        if self._tools_on_path:
+            sys.path.insert(0, os.path.join(PROJECT_ROOT, "tools"))
+
+    def tearDown(self):
+        _cleanup(self.tmp)
+        if self._tools_on_path:
+            try:
+                sys.path.remove(os.path.join(PROJECT_ROOT, "tools"))
+            except ValueError:
+                pass
+
+    def _make_case(self, name, image=None, dicom=False, masks=()):
+        case_dir = os.path.join(self.tmp, name)
+        os.makedirs(case_dir)
+        if image:
+            open(os.path.join(case_dir, image), "w").close()
+        if dicom:
+            os.makedirs(os.path.join(case_dir, "dicom"))
+            open(os.path.join(case_dir, "dicom", "IM0001"), "w").close()
+        if masks:
+            seg = os.path.join(case_dir, "segmentations")
+            os.makedirs(seg)
+            for mask in masks:
+                open(os.path.join(seg, mask), "w").close()
+        return case_dir
+
+    def test_loader_returns_normalized_ts_like_by_default(self):
+        import dataset_profiles
+        profile = dataset_profiles.load_profile(None)
+        self.assertEqual("ts-like", profile["profile_id"])
+        self.assertEqual("ct.nii.gz", profile["image_candidates"][0])
+        self.assertIn("segmentations", profile["mask_dirs"])
+        self.assertIn("mcs_output", profile["exclude_dirs"])
+
+    def test_loader_unknown_id_falls_back_to_default(self):
+        import dataset_profiles
+        profile = dataset_profiles.load_profile("no-such-profile")
+        self.assertEqual(dataset_profiles.default_profile_id(), profile["profile_id"])
+
+    def test_generic_profile_makes_no_assumptions(self):
+        import dataset_profiles
+        profile = dataset_profiles.load_profile("generic")
+        self.assertEqual([], profile["image_candidates"])
+        self.assertEqual([], profile["mask_dirs"])
+        self.assertEqual([], profile["exclude_dirs"])
+        # A dir that ts-like excludes is a plain case dir under generic.
+        self.assertFalse(dataset_profiles.is_excluded_name("mcs_output", profile))
+        self.assertTrue(dataset_profiles.is_excluded_name("mcs_output"))
+
+    def test_fallback_matches_ts_like_byte_for_byte(self):
+        import dataset_profiles
+        self.assertEqual(
+            json.loads(json.dumps(dataset_profiles._FALLBACK["profiles"]["ts-like"])),
+            json.loads(json.dumps(dataset_profiles._load_raw()["profiles"]["ts-like"])),
+        )
+
+    def test_discovery_equivalence_on_ts_like_fixture(self):
+        """The profile-driven discovery must match the historical hard-coded result.
+
+        Expected values below are the pre-refactor behaviour for this fixture:
+        preferred names first, dicom subdir next, capped fallback scan last,
+        excluded roots skipped, masks discovered under segmentations/.
+        """
+        sys.path.insert(0, RUNTIME_DIR)
+        import dataset_profiles
+        profile = dataset_profiles.load_profile("ts-like")
+
+        self._make_case("s0001", image="ct.nii.gz", masks=("liver.seg.nii.gz",))
+        self._make_case("s0002", image="mri.nii", masks=("kidney.seg.nii",))
+        self._make_case("s0003", dicom=True)
+        self._make_case("s0004", image="anat_v2.nii")
+        case = self._make_case("s0005", image="ct.nii.gz")
+        open(os.path.join(case, "old_ct.nii.gz"), "w").close()
+        os.makedirs(os.path.join(self.tmp, "mcs_output"))
+        open(os.path.join(self.tmp, "mcs_output", "junk.nii"), "w").close()
+        os.makedirs(os.path.join(self.tmp, "not_a_case"))
+        open(os.path.join(self.tmp, "plain_file.txt"), "w").close()
+
+        # Simulate the historical discovery directly from the profile tables
+        # (mirrors the pre-refactor hard-coded lists).
+        expected = {
+            "s0001": ("ct.nii.gz", "medical_image", ["liver"]),
+            "s0002": ("mri.nii", "medical_image", ["kidney"]),
+            "s0003": ("dicom", "dicom", []),
+            "s0004": ("anat_v2.nii", "medical_image", []),
+            "s0005": ("ct.nii.gz", "medical_image", []),
+        }
+
+        # Exercise the io-UI single-source discovery, which shares the profile.
+        import tools.io_path_setup_ui as ui
+        for case_id, (image, _kind, masks) in expected.items():
+            result = ui.discover_single_source(os.path.join(self.tmp, case_id))
+            self.assertIsNotNone(result, case_id)
+            self.assertTrue(result["image"].replace("\\", "/").endswith(image), (case_id, result))
+            self.assertEqual(
+                sorted(m["name"] for m in result["masks"]),
+                sorted(masks),
+                (case_id, result),
+            )
+        # An empty dir keeps its historical treatment: a DICOM-series
+        # candidate to be validated in the bridge, not a rejection.
+        empty = ui.discover_single_source(os.path.join(self.tmp, "not_a_case"))
+        self.assertEqual("dicom_candidate", empty["image_type"])
+
+    def test_summarize_dataset_normal_line_and_anomalies(self):
+        import tools.io_path_setup_ui as ui
+        self._make_case("s0001", image="ct.nii.gz", masks=("liver.seg.nii.gz", "spleen.seg.nii.gz"))
+        self._make_case("s0002", image="ct.nii.gz")
+        self._make_case("s0003", dicom=True)
+        self._make_case("s0004")  # no image -> skipped
+        result = ui.summarize_dataset(self.tmp)
+        self.assertIsNotNone(result)
+        self.assertEqual(3, result["case_count"])
+        self.assertEqual(2, result["mask_count"])
+        self.assertIn("3 case(s)", result["summary"])
+        self.assertEqual(["s0004"], result["skipped"])
+
+        # Anomaly: two volume files in one case dir.
+        case = self._make_case("s0005", image="ct.nii.gz")
+        open(os.path.join(case, "old_ct.nii.gz"), "w").close()
+        result = ui.summarize_dataset(self.tmp)
+        self.assertTrue(any("s0005" in w and "2" in w for w in result["warnings"]), result["warnings"])
+
+    def test_summarize_dataset_rejects_missing_root(self):
+        import tools.io_path_setup_ui as ui
+        self.assertIsNone(ui.summarize_dataset(os.path.join(self.tmp, "nope")))
+        self.assertIsNone(ui.summarize_dataset(""))
+
+    def test_bridge_discovery_tables_follow_profile(self):
+        sys.path.insert(0, PROJECT_ROOT)
+        import mimics_bridge as mb
+
+        tables = mb._load_profile_tables()
+        self.assertEqual("ct.nii.gz", tables["image_candidates"][0])
+        self.assertIn("dicom", tables["dicom_dirs"])
+        self.assertIn("mcs_output", tables["exclude_dirs"])
+
+        self._make_case("s0001", image="ct.nii.gz")
+        open(os.path.join(self.tmp, "s0001", "zzz.nii.gz"), "w").close()
+        order = [p.name for p in mb._nifti_candidates(Path(self.tmp) / "s0001")]
+        self.assertEqual(["ct.nii.gz", "zzz.nii.gz"], order)
+
+        # do_discover keeps bridge-only preferred names (ct.nrrd) working.
+        self._make_case("s0002", image="aaa.mha")
+        open(os.path.join(self.tmp, "s0002", "ct.nrrd"), "w").close()
+        result = mb.do_discover({"ts_root": self.tmp})
+        self.assertEqual("ok", result["status"])
+        by_id = {c["case_id"]: c for c in result["cases"]}
+        self.assertTrue(by_id["s0002"]["image"].endswith("ct.nrrd"))
+
+        # Excluded roots are skipped in case-dir listing.
+        result = mb.do_discover_case_dirs({"ts_root": self.tmp})
+        self.assertNotIn("mcs_output", [c["case_id"] for c in result["cases"]])
+
+
+class TestImportDropWindow(unittest.TestCase):
+    """P3 drop window: payload classification, recognition, and state memory."""
+
+    def setUp(self):
+        self.tmp = _make_temp_dir()
+        self._paths_added = []
+        for entry in (os.path.join(PROJECT_ROOT, "tools"), os.path.join(PROJECT_ROOT, "runtime_py35")):
+            if entry not in sys.path:
+                sys.path.insert(0, entry)
+                self._paths_added.append(entry)
+
+    def tearDown(self):
+        _cleanup(self.tmp)
+        for entry in self._paths_added:
+            try:
+                sys.path.remove(entry)
+            except ValueError:
+                pass
+
+    def _make_case(self, name, image="ct.nii.gz"):
+        case_dir = os.path.join(self.tmp, name)
+        os.makedirs(case_dir)
+        open(os.path.join(case_dir, image), "w").close()
+        return case_dir
+
+    def test_classify_single_file(self):
+        import import_drop_window as dw
+        path = os.path.join(self.tmp, "vol.nii.gz")
+        open(path, "w").close()
+        kind, source, _children = dw.classify_payload([path])
+        self.assertEqual("single", kind)
+        self.assertEqual(path, source)
+
+    def test_classify_case_folder(self):
+        import import_drop_window as dw
+        case = self._make_case("s0001")
+        kind, source, _children = dw.classify_payload([case])
+        self.assertEqual("single", kind)
+        self.assertEqual(case, source)
+
+    def test_classify_dataset_root(self):
+        import import_drop_window as dw
+        self._make_case("s0001")
+        self._make_case("s0002")
+        kind, source, children = dw.classify_payload([self.tmp])
+        self.assertEqual("batch", kind)
+        self.assertEqual(self.tmp, source)
+        self.assertGreaterEqual(len(children), 2)
+
+    def test_classify_multi_select_same_parent_is_batch(self):
+        import import_drop_window as dw
+        self._make_case("s0001")
+        self._make_case("s0002")
+        kind, source, _children = dw.classify_payload([
+            os.path.join(self.tmp, "s0001"), os.path.join(self.tmp, "s0002"),
+        ])
+        self.assertEqual("batch", kind)
+        self.assertEqual(self.tmp, source)
+
+    def test_classify_paths_from_different_roots_are_single_imports(self):
+        import import_drop_window as dw
+        self._make_case("s0001")
+        other = os.path.join(self.tmp, "elsewhere", "s0009")
+        os.makedirs(other)
+        open(os.path.join(other, "ct.nii.gz"), "w").close()
+        kind, _source, paths = dw.classify_payload([
+            os.path.join(self.tmp, "s0001"), other,
+        ])
+        self.assertEqual("multi_single", kind)
+        self.assertEqual(2, len(paths))
+
+    def test_excluded_dirs_are_not_treated_as_cases(self):
+        import import_drop_window as dw
+        os.makedirs(os.path.join(self.tmp, "mcs_output"))
+        open(os.path.join(self.tmp, "mcs_output", "x.nii"), "w").close()
+        children = dw._child_case_dirs(self.tmp)
+        self.assertEqual([], children)
+
+    def test_submit_batch_invokes_prepare_import(self):
+        import import_drop_window as dw
+        self._make_case("s0001")
+        self._make_case("s0002")
+        selection = {
+            "kind": "batch",
+            "source_path": self.tmp,
+            "output_path": os.path.join(self.tmp, "mcs_output"),
+            "mask_selection": "all",
+        }
+        calls = []
+
+        class FakeProc:
+            pid = 4242
+
+        def fake_popen(command, **_kwargs):
+            calls.append(command)
+            return FakeProc()
+
+        with mock.patch.object(dw.subprocess, "Popen", side_effect=fake_popen):
+            launched = dw.submit_import(selection, {})
+        self.assertEqual([("dataset", "submitted")], launched)
+        self.assertEqual(1, len(calls))
+        command = calls[0]
+        self.assertIn("mimics_batch_cli.py", command[1])
+        self.assertIn("prepare-import", command)
+        self.assertIn(self.tmp, command)
+
+    def test_submit_single_invokes_single_case_worker(self):
+        import import_drop_window as dw
+        case = self._make_case("s0001")
+        selection = {
+            "kind": "single",
+            "source_path": case,
+            "output_path": os.path.join(self.tmp, "mcs_output"),
+            "mask_selection": "all",
+        }
+        calls = []
+
+        class FakeProc:
+            pid = 4243
+
+        def fake_popen(command, **_kwargs):
+            calls.append(command)
+            return FakeProc()
+
+        with mock.patch.object(dw.subprocess, "Popen", side_effect=fake_popen):
+            launched = dw.submit_import(selection, {})
+        self.assertEqual(1, len(calls))
+        self.assertEqual("single_case_import_worker.py", os.path.basename(calls[0][1]))
+        self.assertIn("submitted", launched[0][1])
+        # The worker receives a selection JSON with the discovered case_info.
+        selection_arg = calls[0][calls[0].index("--selection-json") + 1]
+        with open(selection_arg, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        self.assertEqual("s0001", payload["case_info"]["case_id"])
+        self.assertTrue(payload["case_info"]["image"].endswith("ct.nii.gz"))
+
+    def test_offscreen_window_renders_and_registers(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        import import_drop_window as dw
+        preview = os.path.join(self.tmp, "preview.png")
+        records = []
+        token_holder = {"token": ""}
+
+        def fake_register(project_root, role, pid, **kwargs):
+            self.assertEqual("external_ui", role)
+            records.append((role, pid, kwargs))
+            token_holder["token"] = "tok123"
+            return {"ownership_token": "tok123"}
+
+        def fake_unregister(project_root, role, pid, ownership_token=""):
+            self.assertEqual("tok123", ownership_token)
+
+        import resource_locks
+        with mock.patch.object(resource_locks, "register_process", side_effect=fake_register), \
+                mock.patch.object(resource_locks, "unregister_process", side_effect=fake_unregister):
+            code = dw.run({}, preview_path=preview)
+        self.assertEqual(0, code)
+        self.assertTrue(os.path.isfile(preview) and os.path.getsize(preview) > 0)
+        self.assertEqual(1, len(records))
+        self.assertIn("idle_timeout_s", records[0][2].get("cleanup_policy", ""))
+
+
+# ============================================================================
+# P4: Import receipts and one-click undo
+# ============================================================================
+
+
+class TestImportReceiptAndUndo(unittest.TestCase):
+    """Phase E P4: receipt writing in create_mcs_batch + undo roundtrip."""
+
+    def setUp(self):
+        self.tmp = _make_temp_dir()
+
+    def tearDown(self):
+        _cleanup(self.tmp)
+
+    def _make_case(self, case_id="s0001"):
+        case_dir = os.path.join(self.tmp, "dataset", case_id)
+        os.makedirs(case_dir)
+        with open(os.path.join(case_dir, "ct.nii.gz"), "wb") as handle:
+            handle.write(b"fake-volume")
+        return case_dir
+
+    def test_receipt_schema_and_location(self):
+        from create_mcs_batch import write_import_receipt
+
+        out_dir = os.path.join(self.tmp, "out")
+        os.makedirs(out_dir)
+        mcs_path = os.path.join(out_dir, "{0}.mcs".format("s0001"))
+        with open(mcs_path, "wb") as handle:
+            handle.write(b"fake-project-bytes")
+        receipt_path = write_import_receipt(
+            out_dir, "s0001", mcs_path, ["Bone", "Liver"],
+            {"source_fingerprint": "abc", "source_image_path": "ct.nii.gz",
+             "source_case_dir": self._make_case()},
+        )
+        self.assertEqual(
+            os.path.join(out_dir, ".s0001.import_receipt.json"), receipt_path
+        )
+        with open(receipt_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        self.assertEqual("mimics_import_receipt.v1", payload["schema_version"])
+        self.assertEqual("s0001", payload["case_id"])
+        self.assertEqual(["Bone", "Liver"], payload["created_masks"])
+        self.assertTrue(payload["mcs_fingerprint"].startswith("sha256:"))
+        self.assertEqual("abc", payload["source_fingerprint"])
+        self.assertGreater(float(payload["created_at_epoch"]), 0.0)
+        self.assertTrue(payload["metadata_keys"])
+
+    def test_find_latest_receipt_picks_newest(self):
+        import import_undo_mimics
+
+        out_dir = os.path.join(self.tmp, "out")
+        os.makedirs(out_dir)
+        for case, created in (("s0001", 100.0), ("s0002", 300.0), ("s0003", 200.0)):
+            payload = {
+                "schema_version": "mimics_import_receipt.v1",
+                "case_id": case,
+                "mcs_path": os.path.join(out_dir, "{0}.mcs".format(case)),
+                "mcs_fingerprint": "sha256:x",
+                "created_masks": ["Bone"],
+                "metadata_keys": [],
+                "source_fingerprint": "",
+                "source_image_path": "",
+                "source_case_dir": "",
+                "created_at_epoch": created,
+            }
+            with open(os.path.join(out_dir, ".{0}.import_receipt.json".format(case)),
+                      "w", encoding="utf-8") as handle:
+                json.dump(payload, handle)
+        # A foreign JSON file in the same folder must be ignored.
+        with open(os.path.join(out_dir, "unrelated.json"), "w") as handle:
+            handle.write("{}")
+        with mock.patch.object(import_undo_mimics, "_candidate_receipt_dirs",
+                               lambda: [out_dir]):
+            path, payload = import_undo_mimics.find_latest_receipt()
+        self.assertEqual("s0002", payload["case_id"])
+        self.assertTrue(path.endswith(".s0002.import_receipt.json"))
+
+    def test_find_latest_receipt_ignores_invalid_schemas(self):
+        import import_undo_mimics
+
+        out_dir = os.path.join(self.tmp, "out")
+        os.makedirs(out_dir)
+        with open(os.path.join(out_dir, ".bad.import_receipt.json"), "w",
+                  encoding="utf-8") as handle:
+            json.dump({"schema_version": "something.else.v9"}, handle)
+        with mock.patch.object(import_undo_mimics, "_candidate_receipt_dirs",
+                               lambda: [out_dir]):
+            path, payload = import_undo_mimics.find_latest_receipt()
+        self.assertIsNone(path)
+        self.assertIsNone(payload)
+
+    def _install_undo_env(self, mcs_path, masks_alive):
+        """Patch the undo module's Mimics surface and receipt discovery.
+
+        Returns (save_calls, register of deleted masks) for assertions.
+        """
+        import import_undo_mimics
+
+        saved = {
+            "deleted": [],
+            "saves": [],
+            "closes": 0,
+            "open_target": [],
+            "message_boxes": [],
+        }
+
+        class _FakeMask:
+            def __init__(self, name):
+                self.name = name
+
+            def delete(self):
+                saved["deleted"].append(self.name)
+
+        image = _FakeModule()
+        image.masks = [_FakeMask(name) for name in masks_alive]
+
+        import_undo_mimics.mimics.data.images = [image]
+        import_undo_mimics.mimics.file.get_active_project = (
+            lambda: saved["open_target"][0] if saved["open_target"] else None
+        )
+        import_undo_mimics.mimics.file.open_project = (
+            lambda filename=None: saved["open_target"].append(filename)
+        )
+        import_undo_mimics.mimics.file.save_project = (
+            lambda filename=None, save_as_type=None:
+                saved["saves"].append(filename)
+        )
+        import_undo_mimics.mimics.file.close_project = (
+            lambda: saved.__setitem__("closes", saved["closes"] + 1)
+        )
+        import_undo_mimics.mimics.dialogs.message_box = (
+            lambda *a, **kw: saved["message_boxes"].append((a, kw)) or True
+        )
+        return saved
+
+    def test_undo_roundtrip_file_rolled_back_when_fingerprint_matches(self):
+        import import_undo_mimics
+        from create_mcs_batch import write_import_receipt, _file_fingerprint
+
+        out_dir = os.path.join(self.tmp, "out")
+        os.makedirs(out_dir)
+        mcs_path = os.path.join(out_dir, "s0001.mcs")
+        with open(mcs_path, "wb") as handle:
+            handle.write(b"project-bytes")
+        receipt_path = write_import_receipt(
+            out_dir, "s0001", mcs_path, ["Bone", "Liver"], {}
+        )
+        saved = self._install_undo_env(mcs_path, ["Bone", "Liver", "Skin"])
+        with mock.patch.object(import_undo_mimics, "_candidate_receipt_dirs",
+                               lambda: [out_dir]):
+            code = import_undo_mimics.undo_last_import(confirm=False)
+        self.assertEqual(0, code)
+        # Only the receipt's masks are deleted; the unrelated one stays.
+        self.assertEqual(sorted(["Bone", "Liver"]), sorted(saved["deleted"]))
+        self.assertFalse(os.path.isfile(mcs_path))
+        self.assertFalse(os.path.isfile(receipt_path))
+        self.assertEqual([mcs_path], saved["saves"])
+        self.assertEqual(1, saved["closes"])
+
+    def test_undo_keeps_file_when_fingerprint_differs(self):
+        import import_undo_mimics
+        from create_mcs_batch import write_import_receipt
+
+        out_dir = os.path.join(self.tmp, "out")
+        os.makedirs(out_dir)
+        mcs_path = os.path.join(out_dir, "s0001.mcs")
+        with open(mcs_path, "wb") as handle:
+            handle.write(b"project-bytes")
+        write_import_receipt(out_dir, "s0001", mcs_path, ["Bone"], {})
+        # The project changed after the import (annotations, extra masks).
+        with open(mcs_path, "ab") as handle:
+            handle.write(b"-changed")
+        saved = self._install_undo_env(mcs_path, ["Bone"])
+        with mock.patch.object(import_undo_mimics, "_candidate_receipt_dirs",
+                               lambda: [out_dir]):
+            code = import_undo_mimics.undo_last_import(confirm=False)
+        self.assertEqual(0, code)
+        self.assertEqual(["Bone"], saved["deleted"])
+        self.assertTrue(os.path.isfile(mcs_path))
+        # The project stays open for the user; only the file-rollback path
+        # closes it.
+        self.assertEqual(0, saved["closes"])
+
+    def test_undo_deletion_failure_leaves_receipt(self):
+        import import_undo_mimics
+        from create_mcs_batch import write_import_receipt
+
+        out_dir = os.path.join(self.tmp, "out")
+        os.makedirs(out_dir)
+        mcs_path = os.path.join(out_dir, "s0001.mcs")
+        with open(mcs_path, "wb") as handle:
+            handle.write(b"project-bytes")
+        receipt_path = write_import_receipt(out_dir, "s0001", mcs_path, ["Bone"], {})
+        saved = self._install_undo_env(mcs_path, ["Bone"])
+
+        def boom(*_a, **_kw):
+            raise RuntimeError("transaction failed")
+
+        with mock.patch.object(import_undo_mimics, "_delete_masks", side_effect=boom), \
+                mock.patch.object(import_undo_mimics, "_candidate_receipt_dirs",
+                                  lambda: [out_dir]):
+            code = import_undo_mimics.undo_last_import(confirm=False)
+        self.assertEqual(4, code)
+        # The receipt survives so the user can retry after fixing the cause.
+        self.assertTrue(os.path.isfile(receipt_path))
+        self.assertTrue(os.path.isfile(mcs_path))
+
+    def test_undo_reports_when_no_receipt_exists(self):
+        import import_undo_mimics
+
+        empty = os.path.join(self.tmp, "empty")
+        os.makedirs(empty)
+        boxes = []
+        import_undo_mimics.mimics.dialogs.message_box = (
+            lambda *a, **kw: boxes.append(kw) or True
+        )
+        with mock.patch.object(import_undo_mimics, "_candidate_receipt_dirs",
+                               lambda: [empty]):
+            code = import_undo_mimics.undo_last_import(confirm=False)
+        self.assertEqual(1, code)
+        self.assertEqual(1, len(boxes))
+
+    def test_undo_entry_points_exist(self):
+        entry = os.path.join(
+            PROJECT_ROOT, "scripting_library", "99_Admin", "05_Undo_Last_Import.py"
+        )
+        self.assertTrue(os.path.isfile(entry))
+        with open(entry, "r") as handle:
+            source = handle.read()
+        self.assertIn("import_undo_mimics", source)
+        drop = os.path.join(
+            PROJECT_ROOT, "scripting_library", "01_Data", "08_Quick_Drop_Import.py"
+        )
+        self.assertTrue(os.path.isfile(drop))
+        with open(drop, "r") as handle:
+            source = handle.read()
+        self.assertIn("import_drop_mimics", source)
+
+
 class TestProcessRegistry(unittest.TestCase):
     """Phase B process registry: register/snapshot/sweep/terminate ladder."""
 

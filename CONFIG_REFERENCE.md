@@ -12,6 +12,75 @@ unless noted otherwise.
 | `mimics_buffer_axes` | `[0, 1, 2]` | Optional advanced mapping from external array axes to the Mimics voxel buffer. Change only after real-data orientation validation. |
 | `mimics_buffer_flips` | `[false, false, false]` | Optional advanced flips paired with `mimics_buffer_axes`. Change only after real-data orientation validation. |
 
+## `dataset_profiles.json`
+
+Describes dataset folder layouts. Every discovery site (dataset import,
+single-case import, mask export, the path-setup UI, and the bridge) reads this
+one file, so changing the layout no longer means editing five places.
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `default_profile` | `"ts-like"` | Profile used when a caller does not name one. |
+| `profiles.<id>.display_name` | profile id | Human-readable name. |
+| `profiles.<id>.description` | `""` | Free-form note shown in tooling. |
+| `profiles.<id>.image_candidates` | ts-like: `ct.nii.gz`, `mri.nii.gz`, ... | Preferred image file names, checked first, in order. Empty for the `generic` profile. |
+| `profiles.<id>.fallback_image_suffixes` | `.nii.gz`, `.nrrd.gz`, `.nii`, `.mha`, `.mhd`, `.nrrd` | Suffixes accepted by the capped fallback scan when no preferred name matches. |
+| `profiles.<id>.mask_dirs` | `["segmentations"]` | Sub-folders that hold label masks. Empty for `generic` (masks are only found next to the image). |
+| `profiles.<id>.mask_suffixes` | `.seg.nii.gz`, `.seg.nii`, ... | Suffixes recognized as masks. |
+| `profiles.<id>.dicom_dirs` | `["dicom"]` | Sub-folders treated as DICOM series. |
+| `profiles.<id>.exclude_dirs` | `["mcs_output", "segmentations"]` | Child folders ignored when scanning a dataset root. Empty for `generic`. |
+
+Built-in profiles:
+
+- **`ts-like`** — byte-for-byte equivalent to the historical hard-coded
+  behaviour. This equivalence is locked by
+  `TestDatasetProfiles.test_fallback_matches_ts_like_byte_for_byte` and the
+  discovery-equivalence test in `tools/test_all.py`.
+- **`generic`** — no layout assumptions: any medical volume file in a case
+  folder is the image, no folders are excluded, no preferred names exist.
+
+If the file is missing or corrupt, every consumer silently falls back to a
+built-in copy of the ts-like profile, so discovery never fails because the
+config file was lost. Unknown profile ids fall back to the default profile
+rather than raising.
+
+The import path-setup UI additionally shows a one-line recognition summary
+("Recognized N case(s); images: ... ; M mask(s)") refreshed in a background
+thread, and interrupts once at submit when a case holds more than one volume
+file or has no usable image.
+
+## Import receipts (`.*.import_receipt.json`)
+
+Every finished import writes a receipt next to the created `.mcs` file
+(named `.<case>.import_receipt.json`, schema `mimics_import_receipt.v1`). It
+records the masks the import created, the metadata keys it set, the project
+path, and content fingerprints of the source image and of the saved `.mcs`.
+Receipts are the basis of **Admin > Undo Last Import**
+(`99_Admin/05_Undo_Last_Import.py`):
+
+- masks listed in the receipt are deleted in one transaction;
+- the `.mcs` file itself is deleted only when its fingerprint still matches
+  the receipt (a true rollback); if the project changed since the import
+  (annotations, extra masks), the file is kept and only the masks are
+  removed;
+- the receipt is consumed on success, so a second run cannot repeat the
+  undo.
+
+Receipt writing never fails an import: if the receipt cannot be written, a
+warning is logged and the import still succeeds.
+
+## Drop-to-import window state (`ui_state/io_paths.json`)
+
+`01_Data/08_Quick_Drop_Import.py` opens an always-on-top external window
+(`tools/import_drop_window.py`) that accepts dragged files, case folders,
+dataset folders, or pasted paths, classifies them against the dataset
+profile, and submits to the existing import workers. It is registered in the
+process registry under role `external_ui` with cleanup policy
+`idle_timeout_s:1800` and exits by itself after half an hour without input.
+Its last-used output folder and mask selection are remembered in
+`%LOCALAPPDATA%\Mimics-Script\ui_state\io_paths.json` under the
+`drop_import` key (the same state file the path-setup UI uses).
+
 ## `fewshot_config.json`
 
 ### Common Training Defaults
