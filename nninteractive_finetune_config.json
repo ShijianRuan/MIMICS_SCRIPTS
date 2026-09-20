@@ -13,10 +13,7 @@
   "validation_batches": 8,
   "gpu_lock_timeout_seconds": 86400,
   "label_export_timeout_seconds": 3600,
-  "pause_grace_seconds": 60,
   "job_retention_days": 30,
   "keep_failed_training_artifacts": false,
-  "staging_retention_days": 7,
-  "status_poll_seconds": 1.0,
-  "ui_language": "en"
+  "status_poll_seconds": 1.0
 }

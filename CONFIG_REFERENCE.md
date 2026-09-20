@@ -131,6 +131,40 @@ editable in the training window.
 | `source_cache_retention_days` | `7` | Source-image cache retention. |
 | `source_cache_max_entries` | `12` | Maximum source-image cache entries. |
 
+## `nninteractive_finetune_config.json`
+
+Controls the nnInteractive task fine-tuning pipeline (Model Center, label
+export, training jobs, and quality gating).
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `workspace_dir` | `"nninteractive_task_models"` | Task-model workspace root (tasks, models, registry). |
+| `official_model_dir` | `"nninteractive_env/models/nnInteractive_v1.0"` | Base model that fine-tuning starts from. |
+| `default_strategy` | `"clopa_in"` | Default prompt-sampling strategy for new jobs. |
+| `default_epochs` | `10` | Initial epoch spinner value in the training dialog. |
+| `minimum_epochs` | `4` | Lower bound of the epoch spinner. Exists so a candidate always trains long enough for early-epoch noise to settle before the AUC comparison decides `not_improved`; a 1-epoch candidate would otherwise be rejected on fluke metrics. |
+| `maximum_epochs` | `20` | Upper bound of the epoch spinner. |
+| `default_validation_fraction` | `0.2` | Default hold-out fraction offered for validation cases. |
+| `minimum_validation_cases_for_auto_selection` | `2` | A candidate is only auto-selected as the recommended model when at least this many validation cases were evaluated; with fewer, the result registers as `unverified`. |
+| `minimum_mean_auc_improvement` | `0.0` | Candidate must beat the current model's mean trajectory AUC by at least this margin to qualify. |
+| `maximum_severe_case_regression` | `0.2` | Quality gate: any validation case whose AUC drops more than this against the current model marks the candidate `not_improved` even when the mean improves. |
+| `training_steps_per_epoch` | `50` | Trainer steps per epoch. |
+| `validation_batches` | `8` | Validation batches per evaluation pass. |
+| `gpu_lock_timeout_seconds` | `86400` | How long a queued training job waits for the shared GPU before failing. |
+| `label_export_timeout_seconds` | `3600` | Deadline for the background-Mimics label export stage. |
+| `job_retention_days` | `30` | Terminal job folder retention before cleanup. |
+| `keep_failed_training_artifacts` | `false` | Keep job artifacts after a failed training run for diagnosis (default: cleaned up). |
+| `status_poll_seconds` | `1.0` | Model Center job-status polling interval. |
+
+When a job fails, the Model Center progress page shows an aggregated
+diagnosis (recorded error, failing stage, log tails, and cleanup summary)
+with an **Open Job Folder** button. The same report is available from a
+terminal:
+
+```text
+python tools/nninteractive_finetune_pipeline.py diagnose --job-dir <job folder>
+```
+
 ## Environment Variables
 
 ### Executables and Paths

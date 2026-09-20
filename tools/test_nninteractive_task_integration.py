@@ -203,5 +203,97 @@ class TaskModelIntegrationTests(unittest.TestCase):
         self.assertIn("validation AUC 0.6500", log_text)
 
 
+class DiagnoseJobTests(unittest.TestCase):
+    """Phase D: aggregated failure diagnosis for Model Center."""
+
+    def _failed_job(self, root: Path, error: str = "", **status_extra) -> Path:
+        job = root / "job_001"
+        job.mkdir()
+        status = {
+            "status": "failed",
+            "phase": "failed",
+            "error": error,
+            "traceback": (
+                "Traceback (most recent call last):\n"
+                "  File \"outer.py\", line 10, in outer\n"
+                "  File \"inner.py\", line 42, in inner\n"
+                "RuntimeError: boom"
+            ),
+        }
+        status.update(status_extra)
+        common.write_json_atomic(job / "status.json", status)
+        common.write_json_atomic(
+            job / "request.json",
+            {
+                "task_id": "liver",
+                "epochs": 10,
+                "strategy": "clopa_in",
+                "cases": [{"split": "train"}] * 3,
+            },
+        )
+        (job / "job.log").write_text(
+            "\n".join("line {}".format(i) for i in range(100))
+            + "\nTraining failed.",
+            encoding="utf-8",
+        )
+        (job / "trainer.log").write_text(
+            "epoch 1 ok\nepoch 2 crash\n", encoding="utf-8"
+        )
+        common.write_json_atomic(
+            job / "trainer_status.json", {"status": "crashed"}
+        )
+        return job
+
+    def test_diagnosis_aggregates_error_stage_chain_and_log_tails(self):
+        with tempfile.TemporaryDirectory() as value:
+            job = self._failed_job(
+                Path(value), error="RuntimeError: label export failed"
+            )
+            report = pipeline.diagnose_job(str(job))
+        self.assertEqual("nninteractive_job_diagnosis.v1", report["schema_version"])
+        self.assertEqual("failed", report["status"])
+        self.assertEqual("RuntimeError: label export failed", report["error"])
+        self.assertTrue(report["error_line"].strip().startswith('File "inner.py"'))
+        self.assertEqual(["failed", "crashed"], report["stage_chain"])
+        self.assertTrue(report["job_log_tail"].endswith("Training failed."))
+        self.assertTrue(report["trainer_log_tail"].endswith("epoch 2 crash"))
+        self.assertTrue(report["artifacts"]["job.log"])
+        self.assertFalse(report["artifacts"]["control.json"])
+        self.assertEqual(3, report["request_summary"]["case_count"])
+
+    def test_diagnosis_tail_drops_partial_first_line(self):
+        with tempfile.TemporaryDirectory() as value:
+            job = self._failed_job(Path(value), error="RuntimeError: x")
+            report = pipeline.diagnose_job(str(job))
+        self.assertTrue(report["job_log_tail"].startswith("line "))
+        self.assertNotIn("\r", report["job_log_tail"])
+
+    def test_diagnosis_hint_maps_gpu_memory_errors(self):
+        with tempfile.TemporaryDirectory() as value:
+            job = self._failed_job(
+                Path(value), error="RuntimeError: CUDA out of memory"
+            )
+            report = pipeline.diagnose_job(str(job))
+        self.assertIn("GPU memory", report["hint"])
+
+    def test_diagnosis_degrades_for_missing_directory(self):
+        with tempfile.TemporaryDirectory() as value:
+            report = pipeline.diagnose_job(
+                str(Path(value) / "does_not_exist")
+            )
+        self.assertEqual("", report["error"])
+        self.assertEqual([], report["stage_chain"])
+        self.assertEqual("", report["job_log_tail"])
+        self.assertIn("No error was recorded", report["hint"])
+
+    def test_diagnosis_reports_stopped_jobs_as_not_failures(self):
+        with tempfile.TemporaryDirectory() as value:
+            job = self._failed_job(
+                Path(value), error="", status="cancelled"
+            )
+            report = pipeline.diagnose_job(str(job))
+        self.assertIn("stopped by user request", report["hint"])
+
+
 if __name__ == "__main__":
     unittest.main()

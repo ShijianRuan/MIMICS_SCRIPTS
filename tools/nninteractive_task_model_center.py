@@ -170,10 +170,17 @@ class TrainingCurve:
             def __init__(inner_self):
                 super().__init__()
                 inner_self.points = []
+                inner_self.baseline = None
                 inner_self.setMinimumHeight(210)
 
             def set_points(inner_self, points):
                 inner_self.points = list(points or [])
+                inner_self.update()
+
+            def set_baseline(inner_self, value):
+                inner_self.baseline = (
+                    float(value) if value is not None else None
+                )
                 inner_self.update()
 
             def paintEvent(inner_self, _event):
@@ -212,6 +219,23 @@ class TrainingCurve:
                     painter.drawPath(path)
 
                 path_for("validation_auc", "#0f766e")
+                if inner_self.baseline is not None:
+                    # Dashed reference: the current model's AUC that the
+                    # candidate must beat to be selected automatically.
+                    value = max(0.0, min(1.0, float(inner_self.baseline)))
+                    y = rect.bottom() - value * rect.height()
+                    pen = QtGui.QPen(QtGui.QColor("#dc2626"), 1)
+                    pen.setStyle(QtCore.Qt.DashLine)
+                    painter.setPen(pen)
+                    painter.drawLine(
+                        QtCore.QLineF(rect.left(), y, rect.right(), y)
+                    )
+                    painter.setPen(QtGui.QColor("#dc2626"))
+                    painter.drawText(
+                        rect.left() + 4,
+                        y - 4,
+                        "current model {:.4f}".format(float(inner_self.baseline)),
+                    )
                 normalized = []
                 losses = [float(row["train_loss"]) for row in points if row.get("train_loss") is not None]
                 loss_max = max(losses) if losses else 1.0
@@ -691,6 +715,30 @@ class ModelCenter:
         self.progress_detail = QtWidgets.QLabel("Start training from Training Setup.")
         self.progress_detail.setObjectName("hint")
         status_layout.addWidget(self.progress_detail)
+        self.diagnosis_title = QtWidgets.QLabel("Failure diagnosis")
+        self.diagnosis_title.setObjectName("section")
+        self.diagnosis_title.setVisible(False)
+        status_layout.addWidget(self.diagnosis_title)
+        self.diagnosis_detail = QtWidgets.QLabel("")
+        self.diagnosis_detail.setObjectName("hint")
+        self.diagnosis_detail.setWordWrap(True)
+        self.diagnosis_detail.setVisible(False)
+        status_layout.addWidget(self.diagnosis_detail)
+        self.diagnosis_log = QtWidgets.QPlainTextEdit()
+        self.diagnosis_log.setReadOnly(True)
+        self.diagnosis_log.setVisible(False)
+        self.diagnosis_log.setStyleSheet(
+            "QPlainTextEdit { font-family: Consolas, monospace; font-size: 12px; }"
+        )
+        status_layout.addWidget(self.diagnosis_log)
+        diagnosis_actions = QtWidgets.QHBoxLayout()
+        self.open_job_folder_button = QtWidgets.QPushButton("Open Job Folder")
+        self.open_job_folder_button.clicked.connect(self.open_job_folder)
+        self.open_job_folder_button.setVisible(False)
+        diagnosis_actions.addStretch(1)
+        diagnosis_actions.addWidget(self.open_job_folder_button)
+        self.diagnosis_actions_layout = diagnosis_actions
+        status_layout.addLayout(diagnosis_actions)
         self.progress_bar = QtWidgets.QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
@@ -708,6 +756,9 @@ class ModelCenter:
         self.auc_detail_label.setObjectName("hint")
         self.auc_detail_label.setWordWrap(True)
         status_layout.addWidget(self.auc_detail_label)
+        self.comparison_label = QtWidgets.QLabel("")
+        self.comparison_label.setWordWrap(True)
+        status_layout.addWidget(self.comparison_label)
         layout.addWidget(status_surface)
 
         lower = QtWidgets.QSplitter(self.QtCore.Qt.Horizontal)
@@ -794,7 +845,7 @@ class ModelCenter:
         )
         self.export_model_button.clicked.connect(self.export_current_model)
         table_head.addWidget(self.export_model_button)
-        self.show_failed = QtWidgets.QCheckBox("Show failed versions")
+        self.show_failed = QtWidgets.QCheckBox("Show failed and not-improved versions")
         self.show_failed.toggled.connect(self.refresh_models)
         table_head.addWidget(self.show_failed)
         layout.addLayout(table_head)
@@ -1914,6 +1965,7 @@ class ModelCenter:
                     archive_reused, archive_total
                 )
         self.progress_detail.setText(detail)
+        self._refresh_diagnosis(status, state)
         value = int(status.get("progress_percent") or 0)
         if state == "completed":
             value = 100
@@ -2003,6 +2055,35 @@ class ModelCenter:
                 )
             auc_details.append(detail)
         self.auc_detail_label.setText("  ·  ".join(auc_details))
+        baseline_auc = None
+        baseline_model = selected_model(self.workspace, self.current_task_id())
+        if baseline_model:
+            # The current model's own validation AUC is the reference the
+            # candidate must beat for automatic selection.
+            baseline_quality = baseline_model.get("quality") or {}
+            if baseline_quality.get("candidate_auc") is not None:
+                baseline_auc = float(baseline_quality["candidate_auc"])
+        self.curve.set_baseline(baseline_auc)
+        if auc is not None and baseline_auc is not None:
+            delta = float(auc) - baseline_auc
+            if delta >= 0:
+                self.comparison_label.setText(
+                    "Candidate is {:+.1f}% AUC vs the current model so far.".format(
+                        delta * 100.0
+                    )
+                )
+            else:
+                self.comparison_label.setText(
+                    "Not yet better than the current model ({:.1f}% AUC so far).".format(
+                        delta * 100.0
+                    )
+                )
+        elif auc is not None and state in ACTIVE_STATUSES:
+            self.comparison_label.setText(
+                "No current model to compare against yet; this run will set the first reference."
+            )
+        else:
+            self.comparison_label.setText("")
         self.best_label.setText(
             "Best AUC  {:.4f}".format(float(status["best_score"]))
             if status.get("best_score") not in (None, float("-inf"))
@@ -2183,6 +2264,76 @@ class ModelCenter:
         except Exception:
             pass
 
+    def open_job_folder(self):
+        if not self.current_job_dir:
+            return
+        try:
+            if os.name == "nt":
+                os.startfile(str(self.current_job_dir))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(self.current_job_dir)])
+            else:
+                subprocess.Popen(["xdg-open", str(self.current_job_dir)])
+        except Exception:
+            pass
+
+    def _refresh_diagnosis(self, status, state):
+        """Show the aggregated failure diagnosis when a job needs attention."""
+        from nninteractive_finetune_pipeline import diagnose_job
+
+        show = state == "failed" and bool(self.current_job_dir)
+        if not show:
+            self.diagnosis_title.setVisible(False)
+            self.diagnosis_detail.setVisible(False)
+            self.diagnosis_log.setVisible(False)
+            self.open_job_folder_button.setVisible(False)
+            return
+        try:
+            diagnosis = diagnose_job(str(self.current_job_dir))
+        except Exception as exc:
+            self.diagnosis_detail.setText(
+                "The failure diagnosis could not be read: {}".format(exc)
+            )
+            self.diagnosis_title.setVisible(True)
+            self.diagnosis_detail.setVisible(True)
+            self.diagnosis_log.setVisible(False)
+            self.open_job_folder_button.setVisible(True)
+            return
+        lines = [str(diagnosis.get("hint") or "")]
+        error = str(diagnosis.get("error") or "")
+        if error:
+            lines.append("Error: {}".format(error))
+        error_line = str(diagnosis.get("error_line") or "")
+        if error_line:
+            lines.append("At {}".format(error_line))
+        chain = [
+            str(stage) for stage in diagnosis.get("stage_chain") or [] if stage
+        ]
+        if chain:
+            lines.append("Stages: {}".format(" -> ".join(chain)))
+        cleanup = diagnosis.get("artifact_cleanup") or {}
+        removed = cleanup.get("removed") or []
+        if removed:
+            lines.append(
+                "Rebuildable data was cleaned up ({} items); logs and status were kept.".format(
+                    len(removed)
+                )
+            )
+        self.diagnosis_detail.setText("\n".join(line for line in lines if line))
+        tail = str(diagnosis.get("job_log_tail") or "")
+        trainer_tail = str(diagnosis.get("trainer_log_tail") or "")
+        blocks = []
+        if trainer_tail:
+            blocks.append("--- trainer.log (last lines) ---\n{}".format(trainer_tail))
+        if tail:
+            blocks.append("--- job.log (last lines) ---\n{}".format(tail))
+        self.diagnosis_log.setPlainText("\n\n".join(blocks))
+        self.diagnosis_log.setMaximumHeight(140)
+        self.diagnosis_title.setVisible(True)
+        self.diagnosis_detail.setVisible(True)
+        self.diagnosis_log.setVisible(True)
+        self.open_job_folder_button.setVisible(True)
+
     def refresh_models(self):
         task_id = self.current_task_id()
         self.last_model_registry_signature = _task_model_registry_signature(
@@ -2221,7 +2372,8 @@ class ModelCenter:
             rows = [
                 row
                 for row in rows
-                if row.get("state") not in ("failed", "corrupt", "incompatible")
+                if row.get("state")
+                not in ("failed", "corrupt", "incompatible", "not_improved")
             ]
         for row_index in range(self.model_table.rowCount()):
             action_cell = self.model_table.cellWidget(row_index, 5)
@@ -2262,7 +2414,9 @@ class ModelCenter:
                 ),
             )
             validation = _format_delta(quality.get("delta_auc"))
-            if row.get("state") == "unverified":
+            if row.get("state") == "not_improved":
+                validation = "Did not improve"
+            elif row.get("state") == "unverified":
                 validation = "Not verified"
             self.model_table.setItem(
                 index, 4, self.QtWidgets.QTableWidgetItem(validation)

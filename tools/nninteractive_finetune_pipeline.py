@@ -2468,6 +2468,118 @@ def resume_job(job_dir_value: str) -> int:
     return run_job(str(job_dir))
 
 
+def _tail_text(path: Path, max_bytes: int = 2048) -> str:
+    """Return the last ``max_bytes`` of a text file, or '' when missing."""
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            if size > max_bytes:
+                handle.seek(max(0, size - max_bytes))
+                handle.readline()  # drop the partial first line
+            text = handle.read().decode("utf-8", errors="replace")
+        return text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    except OSError:
+        return ""
+
+
+def diagnose_job(job_dir_value: str) -> dict[str, Any]:
+    """Aggregate everything needed to understand a failed training job.
+
+    Read by the Model Center failed-state panel.  Pure inspection: nothing
+    is written, and unreadable pieces degrade to empty strings instead of
+    raising, so a half-cleaned job directory still yields a diagnosis.
+    """
+    job_dir = Path(job_dir_value).expanduser().resolve()
+    status = read_json(job_dir / "status.json", {}) or {}
+    request = read_json(job_dir / "request.json", {}) or {}
+
+    error = str(status.get("error") or "").strip()
+    error_line = ""
+    if error:
+        # The full traceback lives in status.json; surface the last frame,
+        # which names the failing function and line.
+        frames = [
+            line.strip()
+            for line in str(status.get("traceback") or "").splitlines()
+            if line.strip().startswith('File "')
+        ]
+        error_line = frames[-1] if frames else ""
+
+    stage_chain = []
+    for source, key in (
+        ("status", "status"),
+        ("status", "phase"),
+        ("trainer_status", "status"),
+    ):
+        if source == "status":
+            value = str(status.get(key) or "").strip()
+        else:
+            value = str(
+                (read_json(job_dir / "trainer_status.json", {}) or {}).get(key) or ""
+            ).strip()
+        if value and value not in stage_chain:
+            stage_chain.append(value)
+
+    artifacts = {}
+    for name in (
+        "request.json",
+        "status.json",
+        "job.log",
+        "trainer.log",
+        "trainer_status.json",
+        "dataset_manifest.json",
+        "validation_manifest.json",
+        "training_config.json",
+        "control.json",
+    ):
+        artifacts[name] = (job_dir / name).is_file()
+
+    gpu_wait = bool(status.get("gpu_lock_wait_seconds"))
+    label_export = bool(
+        status.get("label_export_progress")
+        and status.get("status") == "exporting_labels"
+    )
+    if not error:
+        if status.get("status") in ("paused", "cancelled"):
+            hint = "Training was stopped by user request; no failure occurred."
+        else:
+            hint = "No error was recorded for this job."
+    elif gpu_wait or status.get("status") == "waiting_for_gpu":
+        hint = "Failed while waiting for the GPU; another task may have held the lock."
+    elif label_export:
+        hint = "Failed while reading saved Masks; check that every case still contains the target Mask."
+    elif "out of memory" in error.lower() or "cuda" in error.lower():
+        hint = "Failed with a GPU memory error; close other GPU programs or reduce concurrent tasks."
+    elif artifacts.get("job.log") is False:
+        hint = "The job log is missing; the job directory may have been cleaned."
+    else:
+        hint = "See the log tail below for the last activity before the failure."
+
+    return {
+        "schema_version": "nninteractive_job_diagnosis.v1",
+        "job_dir": str(job_dir),
+        "status": str(status.get("status") or ""),
+        "error": error,
+        "error_line": error_line,
+        "stage_chain": stage_chain,
+        "execution_backend": str(status.get("execution_backend") or ""),
+        "epoch": status.get("epoch"),
+        "epochs": status.get("epochs"),
+        "artifacts": artifacts,
+        "artifact_cleanup": status.get("artifact_cleanup") or {},
+        "job_log_tail": _tail_text(job_dir / "job.log"),
+        "trainer_log_tail": _tail_text(job_dir / "trainer.log"),
+        "hint": hint,
+        "request_summary": {
+            "task_id": request.get("task_id"),
+            "epochs": request.get("epochs"),
+            "strategy": request.get("strategy"),
+            "case_count": len(request.get("cases") or []),
+        },
+        "generated_at_epoch": time.time(),
+    }
+
+
 def request_control(job_dir_value: str, action: str) -> int:
     job_dir = Path(job_dir_value).expanduser().resolve()
     action = str(action).strip().lower()
@@ -2490,6 +2602,8 @@ def build_parser() -> argparse.ArgumentParser:
     control_parser = subparsers.add_parser("control")
     control_parser.add_argument("--job-dir", required=True)
     control_parser.add_argument("--action", required=True, choices=("pause", "stop", "cancel"))
+    diagnose_parser = subparsers.add_parser("diagnose")
+    diagnose_parser.add_argument("--job-dir", required=True)
     return parser
 
 
@@ -2499,6 +2613,9 @@ def main() -> int:
         return run_job(args.job_dir)
     if args.command == "resume":
         return resume_job(args.job_dir)
+    if args.command == "diagnose":
+        print(json.dumps(diagnose_job(args.job_dir), indent=2))
+        return 0
     return request_control(args.job_dir, args.action)
 
 

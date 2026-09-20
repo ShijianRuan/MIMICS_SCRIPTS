@@ -20,6 +20,7 @@ from __future__ import print_function
 import json
 import importlib.util
 import errno
+import inspect
 import os
 import subprocess
 import shutil
@@ -3932,6 +3933,108 @@ class TestNNInteractiveGpuMemoryPrecheck(unittest.TestCase):
             torch.cuda.mem_get_info = original
             torch.cuda.is_available = original_available
 
+
+class TestNNInteractiveTaskDiagnostics(unittest.TestCase):
+    """Phase D: model-registry filtering and failed-job diagnostics."""
+
+    @classmethod
+    def setUpClass(cls):
+        tools_dir = os.path.join(PROJECT_ROOT, "tools")
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+
+    def test_model_center_hides_not_improved_models_by_default(self):
+        import nninteractive_task_model_center as model_center
+
+        source = inspect.getsource(model_center.ModelCenter.refresh_models)
+        self.assertIn('"not_improved"', source)
+        self.assertIn("Did not improve", source)
+
+    def test_model_center_shows_failed_versions_toggle_covers_not_improved(self):
+        import nninteractive_task_model_center as model_center
+
+        source = inspect.getsource(model_center.ModelCenter)
+        self.assertIn(
+            "Show failed and not-improved versions",
+            source,
+        )
+
+    def test_task_model_chooser_hides_not_improved_by_default(self):
+        import nninteractive_task_model_chooser as chooser
+
+        source = inspect.getsource(chooser.Chooser.refresh_models)
+        self.assertIn('"not_improved"', source)
+        self.assertIn("Did not improve", source)
+        self.assertIn("Show models that did not improve", inspect.getsource(chooser.Chooser))
+
+    def test_diagnose_job_cli_subcommand_exists(self):
+        import nninteractive_finetune_pipeline as pipeline
+
+        parser = pipeline.build_parser()
+        args = parser.parse_args(["diagnose", "--job-dir", "x"])
+        self.assertEqual("diagnose", args.command)
+        self.assertEqual("x", args.job_dir)
+
+    def test_diagnose_job_aggregates_failure_state(self):
+        import nninteractive_finetune_pipeline as pipeline
+        import nninteractive_task_common as common
+
+        with tempfile.TemporaryDirectory() as value:
+            job = Path(value) / "job_001"
+            job.mkdir()
+            common.write_json_atomic(
+                job / "status.json",
+                {
+                    "status": "failed",
+                    "phase": "failed",
+                    "error": "RuntimeError: CUDA out of memory",
+                    "traceback": (
+                        "Traceback (most recent call last):\n"
+                        '  File "a.py", line 1, in f\n'
+                        '  File "b.py", line 2, in g\n'
+                        "RuntimeError: CUDA out of memory"
+                    ),
+                },
+            )
+            common.write_json_atomic(
+                job / "request.json",
+                {"task_id": "liver", "epochs": 5, "cases": [{}, {}]},
+            )
+            (job / "job.log").write_text(
+                "Training failed: RuntimeError: CUDA out of memory.",
+                encoding="utf-8",
+            )
+            report = pipeline.diagnose_job(str(job))
+        self.assertEqual("failed", report["status"])
+        self.assertIn("GPU memory", report["hint"])
+        self.assertTrue(report["error_line"].strip().startswith('File "b.py"'))
+        self.assertTrue(
+            report["job_log_tail"].endswith("CUDA out of memory.")
+        )
+        self.assertEqual(2, report["request_summary"]["case_count"])
+        self.assertTrue(report["artifacts"]["job.log"])
+        self.assertFalse(report["artifacts"]["control.json"])
+
+    def test_training_curve_draws_current_model_baseline(self):
+        import nninteractive_task_model_center as model_center
+
+        source = inspect.getsource(model_center.TrainingCurve)
+        self.assertIn("set_baseline", source)
+        self.assertIn("current model", source)
+        refresh_source = inspect.getsource(
+            model_center.ModelCenter.refresh_status
+        )
+        self.assertIn("set_baseline", refresh_source)
+        self.assertIn("Candidate is", refresh_source)
+        self.assertIn("Not yet better", refresh_source)
+
+    def test_model_center_failed_state_shows_diagnosis_block(self):
+        import nninteractive_task_model_center as model_center
+
+        source = inspect.getsource(model_center.ModelCenter._refresh_diagnosis)
+        self.assertIn("failed", source)
+        self.assertIn("diagnose_job", source)
+        self.assertIn("Open Job Folder", inspect.getsource(model_center.ModelCenter))
 
 
 class TestBridgeDicomLoading(unittest.TestCase):

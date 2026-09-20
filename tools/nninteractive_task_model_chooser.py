@@ -76,6 +76,11 @@ class Chooser:
         self.model_combo = self.QtWidgets.QComboBox()
         self.model_combo.currentIndexChanged.connect(self.refresh_summary)
         form.addRow("Model version", self.model_combo)
+        # not_improved candidates did not beat the current model in the AUC
+        # comparison; they stay usable but hidden unless explicitly requested.
+        self.show_all = self.QtWidgets.QCheckBox("Show models that did not improve")
+        self.show_all.toggled.connect(self.refresh_models)
+        form.addRow("", self.show_all)
         layout.addLayout(form)
         self.summary = self.QtWidgets.QLabel("")
         self.summary.setObjectName("hint")
@@ -104,9 +109,13 @@ class Chooser:
         task_id = str(self.task_combo.currentData() or "")
         task = find_task(self.workspace, task_id) or {}
         recommended = str(task.get("recommended_model_id") or "")
+        show_all = self.show_all.isChecked()
         self.model_combo.clear()
         for model in model_rows(self.workspace, task_id):
             if not model_is_usable(model):
+                continue
+            state = str(model.get("state") or "").strip().lower()
+            if state == "not_improved" and not show_all:
                 continue
             label = "{}  ·  {}".format(
                 str(model.get("display_name") or model.get("model_id") or "model"),
@@ -117,7 +126,9 @@ class Chooser:
             )
             if model.get("model_id") == recommended:
                 label += "  ·  Active"
-            elif model.get("state") == "unverified":
+            elif state == "not_improved":
+                label += "  ·  Did not improve"
+            elif state == "unverified":
                 label += "  ·  Not verified"
             self.model_combo.addItem(label, str(model.get("model_id") or ""))
         index = self.model_combo.findData(recommended)
