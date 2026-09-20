@@ -137,7 +137,7 @@ def _with_gui_updates_disabled(fn, *args, **kwargs):
 def _project_root():
     return _find_root(
         os.path.dirname(os.path.abspath(__file__)),
-        ("worklist_manifest.json", "nninteractive_config.json", "nninteractive_env", ".git"),
+        ("worklist_manifest.json", "nninteractive_config.json", "python_env", "nninteractive_env", ".git"),
     )
 
 
@@ -150,6 +150,8 @@ def _environment_root():
     # root, or be the standalone bundle root itself.
     root = _project_root()
     candidates = [
+        os.path.join(root, "python_env"),
+        os.path.join(os.path.dirname(root), "python_env"),
         os.path.join(root, "nninteractive_env"),
         os.path.join(os.path.dirname(root), "nninteractive_env"),
         root,
@@ -538,6 +540,7 @@ def _server_state_candidates():
         os.environ.get("NNINTERACTIVE_MODEL_DIR", ""),
         config.get("model_dir", ""),
         os.path.join(environment_root, "models", "nnInteractive_v1.0"),
+        os.path.join(root, "python_env", "models", "nnInteractive_v1.0"),
         os.path.join(root, "nninteractive_env", "models", "nnInteractive_v1.0"),
     ]
     seen = set()
@@ -746,6 +749,9 @@ def _runtime_paths(config):
     integration_root = _integration_root()
     environment_root = _environment_root()
     python_candidates = _environment_python_candidates(environment_root) + [
+        os.path.join(root, "python_env", "python.exe"),
+        os.path.join(root, "python_env", "Scripts", "python.exe"),
+        os.path.join(root, "python_env", "python", "python.exe"),
         os.path.join(root, "nninteractive_env", "python.exe"),
         os.path.join(root, "nninteractive_env", "Scripts", "python.exe"),
         os.path.join(root, "nninteractive_env", "python", "python.exe"),
@@ -774,6 +780,7 @@ def _runtime_paths(config):
                 os.environ.get("NNINTERACTIVE_MODEL_DIR", ""),
                 config.get("model_dir", ""),
                 os.path.join(environment_root, "models", "nnInteractive_v1.0"),
+                os.path.join(root, "python_env", "models", "nnInteractive_v1.0"),
                 os.path.join(root, "nninteractive_env", "models", "nnInteractive_v1.0"),
             ],
             "nnInteractive model directory",

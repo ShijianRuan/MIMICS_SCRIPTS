@@ -255,6 +255,11 @@ def _dinov3_root(config):
 def _project_python_candidates():
     root = _project_root()
     return [
+        os.path.join(root, "python_env", "python.exe"),
+        os.path.join(root, "python_env", "Scripts", "python.exe"),
+        os.path.join(root, "python_env", "python", "python.exe"),
+        os.path.join(root, "python_env", "bin", "python3"),
+        os.path.join(root, "python_env", "bin", "python"),
         os.path.join(root, "nninteractive_env", "python.exe"),
         os.path.join(root, "nninteractive_env", "Scripts", "python.exe"),
         os.path.join(root, "nninteractive_env", "python", "python.exe"),
@@ -284,12 +289,15 @@ def _fewshot_python(config, dinov3_root):
         os.path.join(dinov3_root, "venv", "Scripts", "python.exe"),
         os.path.join(dinov3_root, "venv", "bin", "python"),
     ])
-    env_root = os.path.abspath(os.path.join(_project_root(), "nninteractive_env"))
+    env_roots = [
+        os.path.abspath(os.path.join(_project_root(), name))
+        for name in ("python_env", "nninteractive_env")
+    ]
     try:
         current = os.path.abspath(sys.executable)
     except Exception:
         current = ""
-    if current and current.startswith(env_root + os.sep):
+    if current and any(current.startswith(env_root + os.sep) for env_root in env_roots):
         candidates.append(sys.executable)
     for candidate in candidates:
         if os.path.isfile(candidate):

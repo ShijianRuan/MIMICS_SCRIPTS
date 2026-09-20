@@ -705,7 +705,7 @@ def _record_failed_case(output_dir, case_id, phase, error):
 def _project_root():
     return _find_root(
         os.path.dirname(os.path.abspath(__file__)),
-        ("nninteractive_config.json", "nninteractive_env", ".git"),
+        ("nninteractive_config.json", "python_env", "nninteractive_env", ".git"),
     )
 
 
@@ -765,6 +765,8 @@ def _aggressive_auto_cleanup_enabled():
 def _environment_root():
     root = _project_root()
     candidates = [
+        os.path.join(root, "python_env"),
+        os.path.join(os.path.dirname(root), "python_env"),
         os.path.join(root, "nninteractive_env"),
         os.path.join(os.path.dirname(root), "nninteractive_env"),
         root,

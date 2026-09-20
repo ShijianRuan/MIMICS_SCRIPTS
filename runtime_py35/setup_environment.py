@@ -46,10 +46,15 @@ def _project_root():
 def _find_external_python():
     root = _project_root()
     for rel in (
+        "python_env/python.exe",
+        "python_env/Scripts/python.exe",
+        "python_env/python/python.exe",
         "nninteractive_env/python.exe",
         "nninteractive_env/Scripts/python.exe",
         "nninteractive_env/python/python.exe",
         "python/python.exe",
+        "python_env/bin/python3",
+        "python_env/bin/python",
         "nninteractive_env/bin/python3",
         "nninteractive_env/bin/python",
     ):

@@ -35,7 +35,7 @@ def _allow_windows_event_monitor():
 def _project_root():
     return runtime_common.find_root(
         os.path.dirname(os.path.abspath(__file__)),
-        ("nninteractive_config.json", "nninteractive_env", ".git"),
+        ("nninteractive_config.json", "python_env", "nninteractive_env", ".git"),
     )
 
 

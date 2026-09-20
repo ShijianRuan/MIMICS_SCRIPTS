@@ -773,6 +773,11 @@ def dinov3_root_from_args(args):
 
 def project_python_candidates():
     return [
+        ROOT / "python_env" / "python.exe",
+        ROOT / "python_env" / "Scripts" / "python.exe",
+        ROOT / "python_env" / "python" / "python.exe",
+        ROOT / "python_env" / "bin" / "python3",
+        ROOT / "python_env" / "bin" / "python",
         ROOT / "nninteractive_env" / "python.exe",
         ROOT / "nninteractive_env" / "Scripts" / "python.exe",
         ROOT / "nninteractive_env" / "python" / "python.exe",
@@ -811,8 +816,8 @@ def python_from_args(args, dinov3_root):
     current = Path(sys.executable)
     try:
         current_resolved = current.resolve()
-        env_root = (ROOT / "nninteractive_env").resolve()
-        if str(current_resolved).startswith(str(env_root)):
+        env_roots = [(ROOT / name).resolve() for name in ("python_env", "nninteractive_env")]
+        if any(str(current_resolved).startswith(str(env_root)) for env_root in env_roots):
             candidates.append(current)
     except Exception:
         pass

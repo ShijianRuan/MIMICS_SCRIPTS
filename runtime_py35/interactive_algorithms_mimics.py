@@ -66,6 +66,10 @@ def _python_exe():
     root = _project_root()
     candidates = [
         os.environ.get("MIMICS_BRIDGE_PYTHON", ""),
+        os.path.join(root, "python_env", "python.exe"),
+        os.path.join(root, "python_env", "Scripts", "python.exe"),
+        os.path.join(root, "python_env", "bin", "python3"),
+        os.path.join(root, "python_env", "bin", "python"),
         os.path.join(root, "nninteractive_env", "python.exe"),
         os.path.join(root, "nninteractive_env", "Scripts", "python.exe"),
         os.path.join(root, "nninteractive_env", "bin", "python3"),

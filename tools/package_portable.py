@@ -33,6 +33,7 @@ INCLUDE_DIRS = [
     # because venvs are not portable across machines. Rebuild on the target
     # with: Setup Environment > Setup From Scratch.
     "nninteractive_env/models",
+    "python_env/models",
 ]
 INCLUDE_FILES = [
     "mimics_bridge.py",
@@ -89,9 +90,24 @@ DEFAULT_FROZEN_ENCODER = (
 
 ARCHIVE_NAME = "mimics_script_portable"
 
-# Use --with-env to include the full nninteractive_env/ (only when both
-# machines are identical: same OS, architecture, CUDA, and Python version).
-FULL_ENV_DIR = "nninteractive_env"
+# Environment directory names, in preference order. python_env is the new
+# generic name; nninteractive_env is the legacy name kept so existing
+# installs keep working. Resolution: first existing directory wins, and
+# fresh installs/packages default to python_env.
+ENV_DIR_CANDIDATES = ("python_env", "nninteractive_env")
+
+
+def env_dir_name():
+    """Return the environment directory name to use for this project root."""
+    for name in ENV_DIR_CANDIDATES:
+        if (PROJECT_ROOT / name).is_dir():
+            return name
+    return ENV_DIR_CANDIDATES[0]
+
+
+# Use --with-env to include the full environment (only when both machines
+# are identical: same OS, architecture, CUDA, and Python version).
+FULL_ENV_DIR = "python_env"
 
 
 def _green(t): return "\033[32m{}\033[0m".format(t)
@@ -100,11 +116,12 @@ def _yellow(t): return "\033[33m{}\033[0m".format(t)
 
 
 def _find_python():
-    """Find the nninteractive_env Python executable."""
-    for rel in ("python.exe", "Scripts/python.exe", "python/python.exe", "bin/python3", "bin/python"):
-        p = PROJECT_ROOT / "nninteractive_env" / rel
-        if p.is_file():
-            return str(p)
+    """Find the external Python executable (python_env, legacy nninteractive_env)."""
+    for name in ENV_DIR_CANDIDATES:
+        for rel in ("python.exe", "Scripts/python.exe", "python/python.exe", "bin/python3", "bin/python"):
+            p = PROJECT_ROOT / name / rel
+            if p.is_file():
+                return str(p)
     return None
 
 
@@ -137,7 +154,7 @@ def check():
     # 2. Python environment
     python_exe = _find_python()
     if not python_exe:
-        print("\n  {} Python not found in nninteractive_env/".format(_red("[!!]")))
+        print("\n  {} Python not found in python_env/ or nninteractive_env/".format(_red("[!!]")))
         print("    Offline bundle: run setup_offline.bat on the target Windows machine.")
         print("    Online repair: use 99_Admin/01_Setup_Repair_Environment.py in Mimics.")
         return False
@@ -197,6 +214,7 @@ def check():
     # encoder, so packaging must fail early instead of producing a broken
     # offline bundle.
     required_model_dirs = [
+        "python_env/models/nnInteractive_v1.0",
         "nninteractive_env/models/nnInteractive_v1.0",
     ]
     optional_model_dirs = [
@@ -273,7 +291,7 @@ def pack(output_dir=None, with_env=False):
         output_dir = str(PROJECT_ROOT.parent)
 
     # Validate: models must exist. Full env is optional.
-    models_dir = PROJECT_ROOT / "nninteractive_env" / "models"
+    models_dir = PROJECT_ROOT / env_dir_name() / "models"
     if not models_dir.is_dir():
         print(_red("Models directory not found: {}".format(models_dir)))
         print("Model weights are required. Download them before packaging.")
@@ -345,7 +363,7 @@ def pack(output_dir=None, with_env=False):
     # Build the list of directories to include
     dirs_to_pack = list(INCLUDE_DIRS)
     if with_env:
-        dirs_to_pack.append(FULL_ENV_DIR)
+        dirs_to_pack.append(env_dir_name())
         # Exclude the Python interpreter's own cache and compiled bytecode
         EXCLUDE_PARTS = EXCLUDE_PARTS + ["Include", "Lib/site-packages/pip", "share"]
 
@@ -364,7 +382,7 @@ def pack(output_dir=None, with_env=False):
                         if not _should_include(fpath, arcname):
                             continue
                         # When packaging with env, skip venv symlinks + caches
-                        if with_env and arcname.startswith("nninteractive_env/"):
+                        if with_env and arcname.startswith((FULL_ENV_DIR + "/", "nninteractive_env/")):
                             parts = arcname.split("/")
                             if any(p in ("__pycache__", "Include", "share") for p in parts):
                                 continue
@@ -972,6 +990,7 @@ def _generate_offline_bat(python_version, python_short):
     """
     pth_name = python_short + "._pth"  # e.g. python313._pth
     zip_name = python_short + ".zip"   # e.g. python313.zip
+    env = env_dir_name()
     lines = []
     lines.append("@echo off")
     lines.append("setlocal enabledelayedexpansion")
@@ -985,7 +1004,7 @@ def _generate_offline_bat(python_version, python_short):
     lines.append("")
     lines.append(":: 1. Setup Python embeddable (self-contained, no system Python needed)")
     lines.append('echo [1/6] Setting up Python {}...'.format(python_version))
-    lines.append('if not exist "nninteractive_env\\python.exe" (')
+    lines.append('if not exist "@@ENV@@\\python.exe" (')
     lines.append('    echo   Extracting Python embeddable...')
     lines.append('    if not exist "python\\python.exe" (')
     lines.append('        echo   ERROR: python\\python.exe not found.')
@@ -993,38 +1012,38 @@ def _generate_offline_bat(python_version, python_short):
     lines.append("        pause")
     lines.append("        exit /b 1")
     lines.append("    )")
-    lines.append('    mkdir nninteractive_env 2>nul')
-    lines.append('    xcopy /E /Q /Y python\\* nninteractive_env\\ >nul')
+    lines.append('    mkdir @@ENV@@ 2>nul')
+    lines.append('    xcopy /E /Q /Y python\\* @@ENV@@\\ >nul')
     lines.append('    echo   Configuring {}...'.format(pth_name))
-    lines.append('    echo {} > nninteractive_env\\{}'.format(zip_name, pth_name))
-    lines.append('    echo . >> nninteractive_env\\{}'.format(pth_name))
-    lines.append('    echo Lib >> nninteractive_env\\{}'.format(pth_name))
-    lines.append('    echo Lib\\site-packages >> nninteractive_env\\{}'.format(pth_name))
-    lines.append('    echo import site >> nninteractive_env\\{}'.format(pth_name))
+    lines.append('    echo {} > @@ENV@@\\{}'.format(zip_name, pth_name))
+    lines.append('    echo . >> @@ENV@@\\{}'.format(pth_name))
+    lines.append('    echo Lib >> @@ENV@@\\{}'.format(pth_name))
+    lines.append('    echo Lib\\site-packages >> @@ENV@@\\{}'.format(pth_name))
+    lines.append('    echo import site >> @@ENV@@\\{}'.format(pth_name))
     lines.append(")")
     lines.append(':: Ensure Lib is on the path (idempotent; also covers upgraded installs)')
-    lines.append('echo {} > nninteractive_env\\{}'.format(zip_name, pth_name))
-    lines.append('echo . >> nninteractive_env\\{}'.format(pth_name))
-    lines.append('echo Lib >> nninteractive_env\\{}'.format(pth_name))
-    lines.append('echo Lib\\site-packages >> nninteractive_env\\{}'.format(pth_name))
-    lines.append('echo import site >> nninteractive_env\\{}'.format(pth_name))
-    lines.append('if not exist "nninteractive_env\\Lib\\site-packages" mkdir nninteractive_env\\Lib\\site-packages')
+    lines.append('echo {} > @@ENV@@\\{}'.format(zip_name, pth_name))
+    lines.append('echo . >> @@ENV@@\\{}'.format(pth_name))
+    lines.append('echo Lib >> @@ENV@@\\{}'.format(pth_name))
+    lines.append('echo Lib\\site-packages >> @@ENV@@\\{}'.format(pth_name))
+    lines.append('echo import site >> @@ENV@@\\{}'.format(pth_name))
+    lines.append('if not exist "@@ENV@@\\Lib\\site-packages" mkdir @@ENV@@\\Lib\\site-packages')
     lines.append("")
     lines.append(":: 2. Install pip (try ensurepip, fallback to get-pip.py)")
     lines.append('echo [2/6] Installing pip...')
-    lines.append('nninteractive_env\\python.exe -m pip --version >nul 2>&1')
+    lines.append('@@ENV@@\\python.exe -m pip --version >nul 2>&1')
     lines.append('if !errorlevel! neq 0 (')
     lines.append('    echo   Trying ensurepip...')
-    lines.append('    nninteractive_env\\python.exe -m ensurepip --upgrade 2>nul')
-    lines.append('    nninteractive_env\\python.exe -m pip --version >nul 2>&1')
+    lines.append('    @@ENV@@\\python.exe -m ensurepip --upgrade 2>nul')
+    lines.append('    @@ENV@@\\python.exe -m pip --version >nul 2>&1')
     lines.append('    if !errorlevel! neq 0 (')
     lines.append('        echo   ensurepip failed. Trying get-pip.py...')
     lines.append('        if exist "get-pip.py" (')
-    lines.append('            nninteractive_env\\python.exe get-pip.py --no-index --find-links="wheels" pip setuptools wheel 2>nul')
-    lines.append('            nninteractive_env\\python.exe -m pip --version >nul 2>&1')
+    lines.append('            @@ENV@@\\python.exe get-pip.py --no-index --find-links="wheels" pip setuptools wheel 2>nul')
+    lines.append('            @@ENV@@\\python.exe -m pip --version >nul 2>&1')
     lines.append('            if !errorlevel! neq 0 (')
     lines.append('                echo   ERROR: pip installation failed.')
-    lines.append('                echo   Manual: nninteractive_env\\python.exe get-pip.py --no-index --find-links="wheels" pip setuptools wheel')
+    lines.append('                echo   Manual: @@ENV@@\\python.exe get-pip.py --no-index --find-links="wheels" pip setuptools wheel')
     lines.append("                pause")
     lines.append("                exit /b 1")
     lines.append("            )")
@@ -1054,7 +1073,7 @@ def _generate_offline_bat(python_version, python_short):
     lines.append('set FAIL_COUNT=0')
     lines.append('for %%f in (wheels\\*.whl) do (')
     lines.append('    echo   Installing %%~nxf...')
-    lines.append('    nninteractive_env\\python.exe -m pip install "%%f" --no-deps --no-index --quiet 2>nul')
+    lines.append('    @@ENV@@\\python.exe -m pip install "%%f" --no-deps --no-index --quiet 2>nul')
     lines.append('    if !errorlevel! neq 0 (')
     lines.append('        echo     WARNING: Failed to install %%~nxf')
     lines.append('        set /a FAIL_COUNT+=1')
@@ -1062,7 +1081,7 @@ def _generate_offline_bat(python_version, python_short):
     lines.append(")")
     lines.append('echo   Installation complete. !FAIL_COUNT! package(s) failed.')
     lines.append('echo   Ensuring PySide6 advanced UI wheels are installed consistently...')
-    lines.append('nninteractive_env\\python.exe -m pip install PySide6 shiboken6 --no-index --find-links="wheels" --upgrade --quiet')
+    lines.append('@@ENV@@\\python.exe -m pip install PySide6 shiboken6 --no-index --find-links="wheels" --upgrade --quiet')
     lines.append('if !errorlevel! neq 0 (')
     lines.append('    echo   ERROR: PySide6 installation failed.')
     lines.append('    echo   Make sure wheels\\ contains matching PySide6, PySide6_Essentials, PySide6_Addons, and shiboken6 Windows wheels.')
@@ -1072,30 +1091,30 @@ def _generate_offline_bat(python_version, python_short):
     lines.append("")
     lines.append(":: 5. Verify external GUI backend")
     lines.append('echo [5/6] Verifying PySide6 external UI backend...')
-    lines.append("nninteractive_env\\python.exe -c \"import PySide6, shiboken6; from PySide6 import QtCore, QtWidgets; print('  PySide6', QtCore.__version__)\"")
+    lines.append("@@ENV@@\\python.exe -c \"import PySide6, shiboken6; from PySide6 import QtCore, QtWidgets; print('  PySide6', QtCore.__version__)\"")
     lines.append('if !errorlevel! neq 0 (')
     lines.append("    echo   ERROR: PySide6 import failed.")
-    lines.append("    echo   Advanced DINOv3 Setup and Status windows require PySide6 in nninteractive_env.")
+    lines.append("    echo   Advanced DINOv3 Setup and Status windows require PySide6 in @@ENV@@.")
     lines.append("    pause")
     lines.append("    exit /b 1")
     lines.append(")")
     lines.append("")
     lines.append(":: 6. Verify")
     lines.append('echo [6/6] Verifying installation...')
-    lines.append("nninteractive_env\\python.exe -c \"import torch; print('  torch', torch.__version__); print('  CUDA available:', torch.cuda.is_available())\"")
+    lines.append("@@ENV@@\\python.exe -c \"import torch; print('  torch', torch.__version__); print('  CUDA available:', torch.cuda.is_available())\"")
     lines.append('if !errorlevel! neq 0 (')
     lines.append("    echo   ERROR: torch import failed.")
     lines.append("    pause")
     lines.append("    exit /b 1")
     lines.append(")")
-    lines.append("nninteractive_env\\python.exe -c \"import numpy, nibabel, pydicom, SimpleITK, scipy, nnInteractive, nnunetv2, torchvision, transformers, yaml, tqdm, tensorboard, tomli, acvl_utils, onnxruntime, PySide6, shiboken6; from importlib.metadata import version as package_version; from packaging.version import Version; nnv=Version(package_version('nnunetv2')); assert Version('2.8.1') ^<= nnv ^< Version('2.9'), 'nnunetv2 2.8.1 through 2.8.x is required'; print('  All packages OK'); print('  nnU-Net', nnv); print('  ONNX providers:', ', '.join(onnxruntime.get_available_providers()))\"")
+    lines.append("@@ENV@@\\python.exe -c \"import numpy, nibabel, pydicom, SimpleITK, scipy, nnInteractive, nnunetv2, torchvision, transformers, yaml, tqdm, tensorboard, tomli, acvl_utils, onnxruntime, PySide6, shiboken6; from importlib.metadata import version as package_version; from packaging.version import Version; nnv=Version(package_version('nnunetv2')); assert Version('2.8.1') ^<= nnv ^< Version('2.9'), 'nnunetv2 2.8.1 through 2.8.x is required'; print('  All packages OK'); print('  nnU-Net', nnv); print('  ONNX providers:', ', '.join(onnxruntime.get_available_providers()))\"")
     lines.append('if !errorlevel! neq 0 (')
     lines.append("    echo   Some packages failed to import. The default frozen-feature method requires onnxruntime-gpu.")
-    lines.append('    echo   Try: nninteractive_env\\python.exe -m pip install wheels\\*.whl --no-deps --no-index')
+    lines.append('    echo   Try: @@ENV@@\\python.exe -m pip install wheels\\*.whl --no-deps --no-index')
     lines.append("    pause")
     lines.append("    exit /b 1")
     lines.append(")")
-    lines.append("nninteractive_env\\python.exe -c \"import paramiko; print('  Optional remote training transport ready:', paramiko.__version__)\"")
+    lines.append("@@ENV@@\\python.exe -c \"import paramiko; print('  Optional remote training transport ready:', paramiko.__version__)\"")
     lines.append("if !errorlevel! neq 0 (")
     lines.append("    echo   WARNING: Paramiko is unavailable. Local training is unaffected; remote training is disabled.")
     lines.append(")")
@@ -1125,7 +1144,10 @@ def _generate_offline_bat(python_version, python_short):
     lines.append("echo   Select: scripting_library\\ folder")
     lines.append("echo ========================================")
     lines.append("pause")
-    return "\r\n".join(lines)
+    # Fill in the environment directory name (@@ENV@@ placeholder). Fresh
+    # packages use python_env; a legacy nninteractive_env project keeps its
+    # existing directory so the bundle matches its source.
+    return "\r\n".join(lines).replace("@@ENV@@", env)
 
 
 def _header(text):

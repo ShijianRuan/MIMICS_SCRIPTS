@@ -220,6 +220,11 @@ def find_environment_python() -> Path:
     ).strip()
     candidates = (
         Path(configured) if configured else None,
+        ROOT / "python_env" / "python.exe",
+        ROOT / "python_env" / "Scripts" / "python.exe",
+        ROOT / "python_env" / "python" / "python.exe",
+        ROOT / "python_env" / "bin" / "python3",
+        ROOT / "python_env" / "bin" / "python",
         ROOT / "nninteractive_env" / "python.exe",
         ROOT / "nninteractive_env" / "Scripts" / "python.exe",
         ROOT / "nninteractive_env" / "python" / "python.exe",
@@ -242,6 +247,10 @@ def official_model_dir(config: dict[str, Any] | None = None) -> Path:
     )
     if configured:
         return resolve_path(configured)
+    for name in ("python_env", "nninteractive_env"):
+        path = ROOT / name / "models" / "nnInteractive_v1.0"
+        if path.is_dir():
+            return path.resolve()
     return (ROOT / "nninteractive_env" / "models" / "nnInteractive_v1.0").resolve()
 
 

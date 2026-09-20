@@ -50,6 +50,11 @@ RESOURCE_LOCK_DIR = default_resource_lock_dir(ROOT)
 
 def project_python_candidates():
     return [
+        ROOT / "python_env" / "python.exe",
+        ROOT / "python_env" / "Scripts" / "python.exe",
+        ROOT / "python_env" / "python" / "python.exe",
+        ROOT / "python_env" / "bin" / "python3",
+        ROOT / "python_env" / "bin" / "python",
         ROOT / "nninteractive_env" / "python.exe",
         ROOT / "nninteractive_env" / "Scripts" / "python.exe",
         ROOT / "nninteractive_env" / "python" / "python.exe",
@@ -1492,6 +1497,7 @@ def cmd_kill_background(args):
     ps_markers = "@(" + ",".join("'{}'".format(m.replace("'", "''")) for m in markers) + ")"
     owned_roots = [
         str(ROOT),
+        str(ROOT / "python_env"),
         str(ROOT / "nninteractive_env"),
         str(ROOT / "external"),
         str(ROOT / "tools"),

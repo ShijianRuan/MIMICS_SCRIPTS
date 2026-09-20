@@ -460,7 +460,7 @@ def _await_degraded_confirmation(status_path, confirm_path, request_id, stop_pat
 def _project_root():
     return _find_root(
         os.path.dirname(os.path.abspath(__file__)),
-        ("nninteractive_config.json", "nninteractive_env", ".git"),
+        ("nninteractive_config.json", "python_env", "nninteractive_env", ".git"),
     )
 
 
@@ -524,6 +524,8 @@ def _resource_lock_path(name):
 def _environment_root():
     root = _project_root()
     candidates = [
+        os.path.join(root, "python_env"),
+        os.path.join(os.path.dirname(root), "python_env"),
         os.path.join(root, "nninteractive_env"),
         os.path.join(os.path.dirname(root), "nninteractive_env"),
         root,

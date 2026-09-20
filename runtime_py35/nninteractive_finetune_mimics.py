@@ -104,6 +104,11 @@ def _log(level, message):
 def _environment_python():
     root = _project_root()
     candidates = (
+        os.path.join(root, "python_env", "python.exe"),
+        os.path.join(root, "python_env", "Scripts", "python.exe"),
+        os.path.join(root, "python_env", "python", "python.exe"),
+        os.path.join(root, "python_env", "bin", "python3"),
+        os.path.join(root, "python_env", "bin", "python"),
         os.path.join(root, "nninteractive_env", "python.exe"),
         os.path.join(root, "nninteractive_env", "Scripts", "python.exe"),
         os.path.join(root, "nninteractive_env", "python", "python.exe"),

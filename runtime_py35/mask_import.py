@@ -56,6 +56,10 @@ def _python_exe():
     """Find the nninteractive_env Python executable."""
     root = _project_root()
     candidates = [
+        os.path.join(root, "python_env", "python.exe"),
+        os.path.join(root, "python_env", "Scripts", "python.exe"),
+        os.path.join(root, "python_env", "bin", "python3"),
+        os.path.join(root, "python_env", "bin", "python"),
         os.path.join(root, "nninteractive_env", "python.exe"),
         os.path.join(root, "nninteractive_env", "Scripts", "python.exe"),
         os.path.join(root, "nninteractive_env", "bin", "python3"),

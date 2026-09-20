@@ -6138,7 +6138,10 @@ class TestNewFeatures(unittest.TestCase):
             Path(PROJECT_ROOT, "fewshot_config.json").read_text(encoding="utf-8")
         )
         self.assertEqual(64, len(config["default_model_sha256"]))
-        self.assertIn("echo Lib >> nninteractive_env\\python313._pth", bat)
+        # The bat targets whichever environment directory name this checkout
+        # uses (python_env for fresh installs, legacy nninteractive_env).
+        env_name = package_portable.env_dir_name()
+        self.assertIn("echo Lib >> {0}\\python313._pth".format(env_name), bat)
         self.assertIn("Verifying PySide6 external UI backend", bat)
         # Duplicate _pth "Configuring" echo should only appear inside the if block
         self.assertEqual(1, bat.count("echo   Configuring python313._pth"))

@@ -102,21 +102,40 @@ PYPI_MIRRORS = [
 ]
 
 
+ENV_DIR_CANDIDATES = ("python_env", "nninteractive_env")
+
+
+def env_dir_name():
+    """Return the environment directory name to use.
+
+    Prefers an existing directory (python_env first, so renamed installs win);
+    defaults to python_env for fresh installs. Legacy nninteractive_env is
+    still accepted so old installs keep working untouched.
+    """
+    for name in ENV_DIR_CANDIDATES:
+        if (PROJECT_ROOT / name).is_dir():
+            return name
+    return ENV_DIR_CANDIDATES[0]
+
+
 def _find_python():
-    """Find the nninteractive_env Python.
+    """Find the external Python.
 
     Supports three layouts:
-    1. venv-style:     nninteractive_env/Scripts/python.exe
-    2. embeddable:     nninteractive_env/python.exe  (offline bundle copies python/* here)
-    3. standalone dir: nninteractive_env/python/python.exe
+    1. venv-style:     python_env/Scripts/python.exe
+    2. embeddable:     python_env/python.exe  (offline bundle copies python/* here)
+    3. standalone dir: python_env/python/python.exe
     """
-    for rel in (
-        "nninteractive_env/python.exe",
-        "nninteractive_env/Scripts/python.exe",
-        "nninteractive_env/python/python.exe",
-        "nninteractive_env/bin/python3",
-        "nninteractive_env/bin/python",
-    ):
+    rels = []
+    for name in ENV_DIR_CANDIDATES:
+        rels.extend((
+            "{0}/python.exe".format(name),
+            "{0}/Scripts/python.exe".format(name),
+            "{0}/python/python.exe".format(name),
+            "{0}/bin/python3".format(name),
+            "{0}/bin/python".format(name),
+        ))
+    for rel in rels:
         p = PROJECT_ROOT / rel
         if p.is_file():
             return str(p)
@@ -438,7 +457,8 @@ def check():
 
     # 6. Model weights
     model_roots = [
-        PROJECT_ROOT / "nninteractive_env" / "models",
+        PROJECT_ROOT / name / "models" for name in ENV_DIR_CANDIDATES
+    ] + [
         PROJECT_ROOT / "external" / "dinov3-medical-seg" / "models",
     ]
     for root in model_roots:
@@ -866,7 +886,7 @@ def offline_install():
     _write_state("setting_up", step="starting",
                  message="Starting offline installation...")
 
-    env_dir = PROJECT_ROOT / "nninteractive_env"
+    env_dir = PROJECT_ROOT / env_dir_name()
     python_src = PROJECT_ROOT / "python"
     wheels_dir = PROJECT_ROOT / "wheels"
     get_pip = PROJECT_ROOT / "get-pip.py"
@@ -1066,7 +1086,7 @@ def setup_from_scratch():
     _write_state("setting_up", step="starting",
                  message="Setting up environment from scratch...")
 
-    env_dir = PROJECT_ROOT / "nninteractive_env"
+    env_dir = PROJECT_ROOT / env_dir_name()
 
     # 0. If offline bundle is present, use it (much simpler, no internet needed)
     if _is_offline_bundle():
