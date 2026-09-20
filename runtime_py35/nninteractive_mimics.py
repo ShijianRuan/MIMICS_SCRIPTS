@@ -791,12 +791,7 @@ def _runtime_paths(config):
             "The nnInteractive model directory has no usable checkpoint.\n"
             "Expected fold_*/checkpoint_final.pth under:\n{0}".format(model_dir)
         )
-    probe_timeout = int(
-        os.environ.get(
-            "NNINTERACTIVE_PROBE_TIMEOUT",
-            config.get("environment_probe_timeout_seconds", 180),
-        )
-    )
+    probe_timeout = int(config.get("environment_probe_timeout_seconds", 180))
     probe = _probe_python(python_exe, probe_timeout)
     return python_exe, bridge_script, model_dir, probe, folds
 
@@ -2672,12 +2667,9 @@ def _bridge_parameters(config, image_export, base_export):
                 "nnInteractive config key 'timeout_seconds' is deprecated; use 'bridge_timeout_seconds' for the end-to-end bridge subprocess timeout.",
             )
     timeout = int(
-        os.environ.get(
-            "NNINTERACTIVE_TIMEOUT",
-            configured_timeout
-            if configured_timeout is not None
-            else startup_timeout + set_image_timeout + prediction_timeout + 120,
-        )
+        configured_timeout
+        if configured_timeout is not None
+        else startup_timeout + set_image_timeout + prediction_timeout + 120
     )
     return {
         "python_exe": python_exe,
@@ -2695,133 +2687,353 @@ def _bridge_parameters(config, image_export, base_export):
     }
 
 
-def _bridge_call(config, image_export, base_export, interactions, output_path):
-    parameters = _bridge_parameters(config, image_export, base_export)
-    python_exe = parameters["python_exe"]
-    bridge_script = parameters["bridge_script"]
-    runtime_log = parameters["runtime_log"]
-    requested_device = parameters["requested_device"]
-    probe = parameters["probe"]
-    folds = parameters["folds"]
-    timeout = parameters["timeout"]
-    request = dict(parameters["request"])
-    request["interactions"] = interactions
-    request["output_path"] = output_path
-    _append_runtime_log(
-        runtime_log,
-        "prediction_started",
-        {
-            "python": python_exe,
-            "python_version": probe.get("version"),
-            "cuda_available": probe.get("cuda_available"),
-            "requested_device": requested_device,
-            "folds": folds,
-            "bridge_timeout_seconds": timeout,
-        },
+def _async_prompt_menu(target, state, source=None, profile=None):
+    count = len(state.get("interactions", [])) if state else 0
+    menu_source = target if source is None else source
+    source_name = state.get("source_name") if state else str(getattr(menu_source, "name", ""))
+    target_name = state.get("target_name") if state else str(getattr(target, "name", ""))
+    buttons = _prompt_buttons_for_profile(profile or {})
+    if state and state.get("interactions"):
+        buttons.extend([BUTTON_UNDO, BUTTON_RESET])
+    buttons.append(BUTTON_FINISH)
+    return mimics.dialogs.question_box(
+        message=(
+            "Source snapshot: {0}\n"
+            "AI result Mask: {1}\n"
+            "Prompts in this AI session: {2}\n\n"
+            "Submitting a prompt starts background inference and immediately "
+            "returns control to Mimics. The result is applied automatically when ready."
+        ).format(source_name, target_name, count),
+        buttons=";".join(buttons),
+        title=TITLE,
+        ui_blocking=True,
     )
-    _mimics_log(
-        logging.INFO,
-        "nnInteractive inference started on {0}. Interactions: {1}, timeout: {2}s.".format(
-            requested_device, len(interactions), timeout
-        ),
-    )
+
+
+def _run_async(
+    image,
+    target,
+    config,
+    source=None,
+    auto_created=False,
+    write_mode="in_place",
+):
+    source = target if source is None else source
+    profile = _model_profile(config)
+    _log_effective_image_input_config(config)
+    state = _load_async_job(target)
+    validated_target_hash = None
+    if state is not None:
+        if not _state_model_matches(state, profile):
+            answer = mimics.dialogs.question_box(
+                message=(
+                    "The selected Mask already has an AI session created with another "
+                    "nnInteractive model.\n\n"
+                    "Start a new session from the current Mask with {0}?"
+                ).format(profile.get("task_name") or profile.get("model_id") or "the selected model"),
+                buttons=BUTTON_START_NEW_MODEL + ";" + BUTTON_KEEP_CURRENT_MODEL,
+                title=TITLE,
+                ui_blocking=True,
+            )
+            if answer != BUTTON_START_NEW_MODEL:
+                _mimics_log(
+                    logging.INFO,
+                    "nnInteractive model change cancelled; the existing AI session was preserved.",
+                )
+                return 0
+            _close_async_job(target, state, "model_profile_changed")
+            state = None
+            _mimics_log(
+                logging.INFO,
+                "nnInteractive started a new AI session with model {0}.".format(
+                    profile.get("model_id") or "official"
+                ),
+            )
+    if state is not None:
+        if _object_id(image) != state.get("image_guid") or _object_id(target) != state.get(
+            "target_guid"
+        ):
+            _close_async_job(target, state, "object_identity_changed")
+            state = None
+        else:
+            outcome = _handle_async_result(image, target, state)
+            if outcome == "waiting":
+                return 0
+            if outcome == "restart":
+                state = None
+            elif outcome == "applied":
+                validated_target_hash = state.get("expected_target_sha256")
+
+    if state is not None:
+        if state.get("pending_sequence") is None and not _state_worker_alive(state):
+            _mimics_log(
+                logging.INFO,
+                "nnInteractive previous AI session is no longer running; a new session will start from the current Mask.",
+            )
+            _close_async_job(target, state, "ready_worker_not_alive")
+            state = None
+
+    if state is not None:
+        if validated_target_hash is not None and validated_target_hash == state.get("expected_target_sha256"):
+            current_hash = validated_target_hash
+        else:
+            current_hash = _mask_sha256(target, state.get("shape"))
+        if current_hash != state.get("expected_target_sha256"):
+            _close_async_job(target, state, "manual_mask_change")
+            state = None
+            validated_target_hash = None
+        else:
+            validated_target_hash = current_hash
+
+    temp_dir = tempfile.mkdtemp(prefix="mimics_nninteractive_prompt_")
+    pending_visual_objects = []
+    visual_objects_registered = False
+    prediction_enqueued = False
     try:
-        mimics.view.show_log_panel()
-    except Exception:
-        pass
-    process = subprocess.Popen(
-        [python_exe, bridge_script],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        **_hidden_process_kwargs()
-    )
-    try:
-        stdout, stderr = process.communicate(
-            input=json.dumps(request).encode("utf-8"),
-            timeout=timeout,
+        action = _async_prompt_menu(target, state, source, profile)
+        if action == BUTTON_FINISH or not action:
+            if state is not None:
+                _close_async_job(target, state, "user_finished")
+            _mimics_log(logging.INFO, "nnInteractive session finished.")
+            return 0
+        if action == BUTTON_UNDO and state is not None:
+            interactions = state.get("interactions", [])
+            if interactions:
+                interactions.pop()
+            state["interactions"] = interactions
+            _mimics_log(
+                logging.INFO,
+                "nnInteractive undo. Remaining prompts: {0}.".format(len(interactions)),
+            )
+            # Clean up visual objects from previous prompts on undo.
+            job_dir = state.get("_job_dir")
+            if job_dir and job_dir in _ASYNC_VISUAL_OBJECTS:
+                for obj in _ASYNC_VISUAL_OBJECTS.pop(job_dir):
+                    _delete_mimics_object(obj)
+            if interactions:
+                _retire_different_model_workers(config)
+                _enqueue_async_prediction(
+                    state,
+                    target,
+                    expected_hash=validated_target_hash,
+                    replay_all=True,
+                )
+                _start_async_result_monitor(image, target, state, config)
+            else:
+                _restore_base(target, state["base_path"], state["shape"])
+                # Re-anchor on the restored mask buffer (see apply path): the
+                # next prompt compares _mask_sha256(target) to this value.
+                state["expected_target_sha256"] = _mask_sha256(target, state.get("shape"))
+                state["pending_sequence"] = None
+                state["status"] = "ready"
+                _save_async_job(state)
+            return 0
+        if action == BUTTON_RESET and state is not None:
+            state["interactions"] = []
+            state["pending_sequence"] = None
+            state["status"] = "ready"
+            _mimics_log(logging.INFO, "nnInteractive session reset to initial mask.")
+            _restore_base(target, state["base_path"], state["shape"])
+            # Re-anchor on the restored mask buffer (see apply path).
+            state["expected_target_sha256"] = _mask_sha256(target, state.get("shape"))
+            # Clean up visual objects from previous prompts.
+            job_dir = state.get("_job_dir")
+            if job_dir and job_dir in _ASYNC_VISUAL_OBJECTS:
+                for obj in _ASYNC_VISUAL_OBJECTS.pop(job_dir):
+                    _delete_mimics_object(obj)
+            _save_async_job(state)
+            return 0
+
+        _retire_different_model_workers(config)
+        if state is None and bool(config.get("async_start_worker_before_prompt", True)):
+            _update_gui()
+            prewarmed = _prewarm_async_image_worker(config, image)
+            if prewarmed is not None:
+                _mimics_log(
+                    logging.INFO,
+                    "nnInteractive is preparing the image AI session before prompt capture. Model loading and image preprocessing will continue while you draw.",
+                )
+            _update_gui()
+
+        include = None
+        visual_objects = []
+        prompt = _capture_prompt(
+            action, image, include, temp_dir, visual_objects
         )
-    except subprocess.TimeoutExpired:
-        process.kill()
-        stdout, stderr = process.communicate()
-        _append_runtime_log(
-            runtime_log,
-            "prediction_timed_out",
-            {
-                "timeout_seconds": timeout,
-                "stderr": stderr.decode("utf-8", "replace") if stderr else "",
-            },
+        pending_visual_objects = visual_objects
+        if prompt is None:
+            mimics.dialogs.message_box(
+                "No prompt was submitted for {0}.\n\n"
+                "The AI prediction was not started.".format(action),
+                title="nnInteractive Prompt Empty",
+                ui_blocking=False,
+            )
+            return 0
+        if state is None:
+            state = _start_async_job(
+                config,
+                image,
+                target,
+                source=source,
+                write_mode=write_mode,
+            )
+            validated_target_hash = state.get("expected_target_sha256")
+        if str(prompt.get("interaction_type") or "") == "point_set":
+            first_prompt = not bool(state.get("interactions"))
+            empty_base = int(state.get("base_pixel_count") or 0) == 0
+            prompt["prediction_policy"] = (
+                "initial_empty_batch"
+                if first_prompt and empty_base
+                else "sequential"
+            )
+        prompt = _persist_interaction(state["_job_dir"], prompt)
+        # Store visual objects for deferred deletion after async result is applied.
+        if visual_objects:
+            _ASYNC_VISUAL_OBJECTS.setdefault(state["_job_dir"], []).extend(visual_objects)
+            visual_objects_registered = True
+        state.setdefault("interactions", []).append(prompt)
+        sequence = _enqueue_async_prediction(state, target, expected_hash=validated_target_hash)
+        prediction_enqueued = True
+        _mimics_log(
+            logging.INFO,
+            "nnInteractive background inference started. Prompt: {0}, sequence: {1}. "
+            "Result will be applied automatically when ready.".format(action, sequence),
         )
-        raise RuntimeError(
-            "nnInteractive did not finish within {0} seconds.\n"
-            "The process was stopped. Check:\n{1}".format(timeout, runtime_log)
+        _start_async_result_monitor(image, target, state, config)
+        return 0
+    finally:
+        if visual_objects_registered and not prediction_enqueued and state is not None:
+            job_dir = state.get("_job_dir")
+            registered = _ASYNC_VISUAL_OBJECTS.get(job_dir) or []
+            for obj in pending_visual_objects:
+                for index in range(len(registered) - 1, -1, -1):
+                    if registered[index] is obj:
+                        registered.pop(index)
+                        break
+            if registered:
+                _ASYNC_VISUAL_OBJECTS[job_dir] = registered
+            else:
+                _ASYNC_VISUAL_OBJECTS.pop(job_dir, None)
+            visual_objects_registered = False
+        if (
+            pending_visual_objects
+            and not visual_objects_registered
+        ):
+            for obj in pending_visual_objects:
+                _delete_mimics_object(obj)
+        if state is None:
+            _delete_unused_auto_draft(target, auto_created, source)
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def _run_with_config(config):
+    image = mimics.data.images.get_active()
+    if image is None:
+        raise RuntimeError("Open a project and activate an image set before running nnInteractive.")
+    buffer_owner = runtime_common.active_local_operation("mask_buffer_access")
+    if buffer_owner:
+        mimics.dialogs.message_box(
+            message=(
+                "nnInteractive cannot take a consistent image and Mask snapshot while {0} is using Mimics buffers.\n\n"
+                "Wait for that operation to finish or stop it, then retry."
+            ).format(buffer_owner.get("owner") or "another Mimics-Script task"),
+            title=TITLE,
+            ui_blocking=False,
         )
-    if process.returncode != 0:
-        stderr_text = stderr.decode("utf-8", "replace") if stderr else ""
-        stdout_text = stdout.decode("utf-8", "replace") if stdout else ""
-        _append_runtime_log(
-            runtime_log,
-            "bridge_process_failed",
-            {
-                "returncode": process.returncode,
-                "stdout": stdout_text,
-                "stderr": stderr_text,
-            },
-        )
-        try:
-            result = json.loads(stdout_text)
-        except ValueError:
-            result = {}
-        raise RuntimeError(
-            "nnInteractive failed during {0}.\n\n{1}\n\nLogs:\n{2}\n{3}".format(
-                result.get("stage", "bridge startup or inference"),
-                result.get("error") or stderr_text or "No diagnostic text was returned.",
-                result.get("bridge_log", runtime_log),
-                result.get("server_log", ""),
+        return 1
+    gpu_holder = runtime_common.active_resource_lock(_project_root(), "gpu.lock")
+    if gpu_holder:
+        owner = str(gpu_holder.get("owner") or "").lower()
+        holder_is_nninteractive_server = bool(
+            "nninteractive" in owner
+            and (
+                "server" in owner
+                or str(gpu_holder.get("state_path") or "").strip()
             )
         )
-    try:
-        result = json.loads(stdout.decode("utf-8"))
-    except ValueError:
-        _append_runtime_log(
-            runtime_log,
-            "invalid_bridge_response",
-            {"stdout": stdout.decode("utf-8", "replace")},
-        )
-        raise RuntimeError(
-            "nnInteractive bridge returned invalid JSON.\nCheck:\n{0}".format(runtime_log)
-        )
-    if result.get("status") == "error":
-        raise RuntimeError(
-            "nnInteractive failed during {0}.\n\n{1}\n\nLogs:\n{2}\n{3}".format(
-                result.get("stage", "inference"),
-                result.get("error", "Unknown nnInteractive error"),
-                result.get("bridge_log", runtime_log),
-                result.get("server_log", ""),
+        if not holder_is_nninteractive_server:
+            mimics.dialogs.message_box(
+                message=(
+                    "The GPU is currently used by {0}.\n\n"
+                    "nnInteractive was not started, so no prompt or Mask state was changed. "
+                    "Interactive prompting should not sit behind a long training or inference queue. "
+                    "Wait for that task to finish, stop it from its task window, or use "
+                    "Admin > Stop All Owned Background Services."
+                ).format(runtime_common.resource_lock_summary(gpu_holder)),
+                title=TITLE,
+                ui_blocking=False,
             )
+            return 1
+    profile = _model_profile(config)
+    if profile.get("source") == "task_model":
+        _mimics_log(
+            logging.INFO,
+            "Using nnInteractive task model {0} for task {1}.".format(
+                profile.get("model_id"),
+                profile.get("task_name") or profile.get("task_id") or "unnamed",
+            ),
         )
-    _append_runtime_log(
-        runtime_log,
-        "prediction_completed",
-        {
-            "elapsed_seconds": result.get("elapsed_seconds"),
-            "device": result.get("device"),
-            "device_warning": result.get("device_warning"),
-            "server_url": result.get("server_url"),
-            "first_call": result.get("first_call"),
-        },
+    busy_workers = _different_model_busy_workers(config)
+    if busy_workers:
+        current = busy_workers[0]
+        mimics.dialogs.message_box(
+            message=(
+                "Another nnInteractive model is still producing or applying a result.\n\n"
+                "Model: {0}\n"
+                "No Mask or prompt state was changed. Wait for that result to be applied, "
+                "or stop its session before switching models."
+            ).format(current.get("task_name") or current.get("model_id") or "official"),
+            title=TITLE,
+            ui_blocking=False,
+        )
+        return 1
+    session = _select_session_masks(image, config)
+    if session.get("write_mode") == "cancelled":
+        _mimics_log(logging.INFO, "nnInteractive cancelled before creating an AI session.")
+        return 0
+    source = session["source"]
+    target = session["target"]
+    if source is not target:
+        _mimics_log(
+            logging.INFO,
+            "nnInteractive created AI Draft {0} from source Mask {1}; the source will not be modified.".format(
+                getattr(target, "name", ""),
+                getattr(source, "name", ""),
+            ),
+        )
+    # Async mode returns 0 after submitting a prompt; the background
+    # worker and QTimer monitor are still running.
+    return _run_async(
+        image,
+        target,
+        config,
+        source=source,
+        auto_created=session.get("auto_created", False),
+        write_mode=session.get("write_mode", "in_place"),
     )
-    if result.get("device_warning"):
-        _mimics_log(logging.WARNING, str(result["device_warning"]))
+
+
+def run_with_model_profile(profile):
+    """Run the existing interaction workflow with an explicit task model."""
+    config = _config()
+    config["_model_profile"] = dict(profile or {})
+    # Validate before selecting/creating a Mask so an invalid model cannot
+    # mutate the Mimics project.
+    _runtime_paths(config)
+    selected = _model_profile(config)
     _mimics_log(
         logging.INFO,
-        "nnInteractive inference completed in {0}s on {1}. Timing: {2}.".format(
-            result.get("elapsed_seconds", "?"),
-            result.get("device", requested_device),
-            _timing_summary(result) or "not available",
+        "nnInteractive custom model selected: {0} ({1}, checkpoint {2}).".format(
+            selected.get("task_name") or selected.get("task_id") or "custom task",
+            selected.get("model_id") or "unknown",
+            (selected.get("checkpoint_sha256") or "unverified")[:12],
         ),
     )
-    return result
+    return _run_with_config(config)
+
+
+def run():
+    return _run_with_config(_config())
 
 
 def _timing_summary(result):
@@ -2840,244 +3052,6 @@ def _timing_summary(result):
     return ", ".join(pieces)
 
 
-class _BridgeWorker(object):
-    """Persistent external bridge process for one Mimics interaction session."""
-
-    def __init__(self, config, image_export, base_export):
-        self.parameters = _bridge_parameters(config, image_export, base_export)
-        self.runtime_log = self.parameters["runtime_log"]
-        self.stderr_path = os.path.join(
-            os.path.dirname(self.runtime_log),
-            "nninteractive_worker.stderr.log",
-        )
-        _rotate_log_file(self.stderr_path)
-        self.stderr_handle = open(self.stderr_path, "ab")
-        self.process = subprocess.Popen(
-            [
-                self.parameters["python_exe"],
-                self.parameters["bridge_script"],
-                "--worker",
-            ],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=self.stderr_handle,
-            **_hidden_process_kwargs()
-        )
-        self.ready = False
-        initialize = dict(self.parameters["request"])
-        initialize["action"] = "initialize"
-        self._write(initialize)
-        _append_runtime_log(
-            self.runtime_log,
-            "worker_started",
-            {
-                "pid": self.process.pid,
-                "python": self.parameters["python_exe"],
-                "stderr_log": self.stderr_path,
-            },
-        )
-
-    def _write(self, request):
-        if self.process.poll() is not None:
-            raise RuntimeError(
-                "nnInteractive worker exited before accepting a request.\n"
-                "Check:\n{0}\n{1}".format(self.runtime_log, self.stderr_path)
-            )
-        self.process.stdin.write(
-            json.dumps(request, separators=(",", ":")).encode("utf-8") + b"\n"
-        )
-        self.process.stdin.flush()
-
-    def _readline(self, timeout):
-        result_queue = queue.Queue()
-
-        def read_response():
-            try:
-                result_queue.put((self.process.stdout.readline(), None))
-            except Exception as error:
-                result_queue.put((b"", error))
-
-        thread = threading.Thread(target=read_response)
-        thread.daemon = True
-        thread.start()
-        try:
-            line, error = result_queue.get(timeout=timeout)
-        except queue.Empty:
-            self.process.kill()
-            raise RuntimeError(
-                "nnInteractive worker did not respond within {0} seconds.\n"
-                "Check:\n{1}\n{2}".format(timeout, self.runtime_log, self.stderr_path)
-            )
-        if error is not None:
-            raise RuntimeError(
-                "Could not read the nnInteractive worker response: {0}".format(error)
-            )
-        if not line:
-            raise RuntimeError(
-                "nnInteractive worker stopped without returning a result.\n"
-                "Check:\n{0}\n{1}".format(self.runtime_log, self.stderr_path)
-            )
-        try:
-            return json.loads(line.decode("utf-8"))
-        except ValueError:
-            raise RuntimeError(
-                "nnInteractive worker returned invalid JSON.\n"
-                "Response: {0}\nCheck:\n{1}".format(
-                    line.decode("utf-8", "replace"),
-                    self.stderr_path,
-                )
-            )
-
-    def _raise_result_error(self, result):
-        raise RuntimeError(
-            "nnInteractive failed during {0}.\n\n{1}\n\nLogs:\n{2}\n{3}\n{4}".format(
-                result.get("stage", "worker request"),
-                result.get("error", "Unknown nnInteractive error"),
-                result.get("bridge_log", self.runtime_log),
-                result.get("server_log", ""),
-                self.stderr_path,
-            )
-        )
-
-    def ensure_ready(self):
-        if self.ready:
-            return
-        timeout = (
-            self.parameters["startup_timeout"]
-            + self.parameters["set_image_timeout"]
-            + 300
-        )
-        result = self._readline(timeout)
-        if result.get("status") == "error":
-            self._raise_result_error(result)
-        if result.get("status") != "ready":
-            raise RuntimeError(
-                "nnInteractive worker did not initialize correctly: {0}".format(result)
-            )
-        self.ready = True
-        _append_runtime_log(
-            self.runtime_log,
-            "worker_ready",
-            {
-                "device": result.get("device"),
-                "device_warning": result.get("device_warning"),
-                "server_url": result.get("server_url"),
-                "first_call": result.get("first_call"),
-                "image_load_seconds": result.get("image_load_seconds"),
-                "server_ready_seconds": result.get("server_ready_seconds"),
-                "set_image_seconds": result.get("set_image_seconds"),
-                "set_target_seconds": result.get("set_target_seconds"),
-            },
-        )
-        if result.get("device_warning"):
-            _mimics_log(logging.WARNING, str(result["device_warning"]))
-        _mimics_log(
-            logging.INFO,
-            "nnInteractive session ready on {0} (server: {1}).{2} Timing: {3}.".format(
-                result.get("device", "?"),
-                result.get("server_url", "?"),
-                " First call; model was loaded." if result.get("first_call") else "",
-                _timing_summary(result) or "not available",
-            ),
-        )
-
-    def predict(self, interactions, output_path):
-        self.ensure_ready()
-        _mimics_log(
-            logging.INFO,
-            "nnInteractive prediction running ({0} interaction(s))...".format(
-                len(interactions)
-            ),
-        )
-        self._write(
-            {
-                "action": "predict",
-                "interactions": interactions,
-                "output_path": output_path,
-            }
-        )
-        result = self._readline(self.parameters["prediction_timeout"] + 120)
-        if result.get("status") == "error":
-            self._raise_result_error(result)
-        _append_runtime_log(
-            self.runtime_log,
-            "prediction_completed",
-            {
-                "elapsed_seconds": result.get("elapsed_seconds"),
-                "device": result.get("device"),
-                "server_url": result.get("server_url"),
-            },
-        )
-        _mimics_log(
-            logging.INFO,
-            "nnInteractive prediction completed in {0}s on {1}. Timing: {2}.".format(
-                result.get("elapsed_seconds", "?"),
-                result.get("device", "?"),
-                _timing_summary(result) or "not available",
-            ),
-        )
-        return result
-
-    def close(self):
-        process = getattr(self, "process", None)
-        if process is None:
-            return
-        try:
-            if process.poll() is None:
-                if self.ready:
-                    try:
-                        self._write({"action": "close"})
-                        self._readline(15)
-                    except Exception:
-                        process.kill()
-                else:
-                    process.kill()
-            try:
-                process.wait(timeout=10)
-            except Exception:
-                process.kill()
-        finally:
-            try:
-                self.stderr_handle.close()
-            except Exception:
-                pass
-            self.process = None
-
-
-def _run_prediction(
-    config,
-    image_export,
-    base_export,
-    target,
-    interactions,
-    temp_dir,
-    worker=None,
-):
-    output_path = os.path.join(temp_dir, "prediction.u8")
-    if worker is not None:
-        result = worker.predict(interactions, output_path)
-    else:
-        result = _bridge_call(config, image_export, base_export, interactions, output_path)
-    status = result.get("status")
-    if status == "skipped":
-        # No actionable interaction (e.g. all-empty prompts on undo replay): roll
-        # the mask back to the base instead of treating the non-prediction as error.
-        _restore_base(target, base_export["path"], base_export["shape"])
-        return result
-    if status != "refined":
-        raise RuntimeError(
-            "nnInteractive did not produce a prediction: {0}".format(result.get("reason", status))
-        )
-    _set_mask_from_u8(target, output_path, base_export["shape"])
-    _mimics_log(
-        logging.INFO,
-        "nnInteractive result applied to Mask {0}. Foreground voxels: {1}, elapsed: {2}s.".format(
-            getattr(target, "name", ""),
-            result.get("foreground_voxels", "?"),
-            result.get("elapsed_seconds", "?"),
-        ),
-    )
-    return result
 
 
 def _async_job_state_path(job_dir):
@@ -3204,12 +3178,7 @@ def _start_async_worker(python_exe, bridge_script, worker_dir):
 
 
 def _async_worker_idle_timeout(config):
-    return int(
-        os.environ.get(
-            "NNINTERACTIVE_ASYNC_WORKER_IDLE_TIMEOUT",
-            config.get("async_worker_idle_timeout_seconds", 3600),
-        )
-    )
+    return int(config.get("async_worker_idle_timeout_seconds", 3600))
 
 
 def _shared_image_worker_alive(worker):
@@ -4378,681 +4347,6 @@ def _handle_async_result(image, target, state):
     return "applied"
 
 
-def _prompt_buttons_for_profile(profile):
-    prompt_types = set(
-        str(value or "").strip().lower()
-        for value in profile.get("validated_prompt_types") or []
-    )
-    buttons = []
-    for prompt_type, button in (
-        ("point", BUTTON_POINT),
-        ("scribble", BUTTON_SCRIBBLE),
-        ("box", BUTTON_BOX),
-        ("lasso", BUTTON_LASSO),
-    ):
-        if prompt_type in prompt_types:
-            buttons.append(button)
-    if not buttons:
-        raise RuntimeError(
-            "The selected nnInteractive model declares no validated prompt type."
-        )
-    return buttons
-
-
-def _async_prompt_menu(target, state, source=None, profile=None):
-    count = len(state.get("interactions", [])) if state else 0
-    menu_source = target if source is None else source
-    source_name = state.get("source_name") if state else str(getattr(menu_source, "name", ""))
-    target_name = state.get("target_name") if state else str(getattr(target, "name", ""))
-    buttons = _prompt_buttons_for_profile(profile or {})
-    if state and state.get("interactions"):
-        buttons.extend([BUTTON_UNDO, BUTTON_RESET])
-    buttons.append(BUTTON_FINISH)
-    return mimics.dialogs.question_box(
-        message=(
-            "Source snapshot: {0}\n"
-            "AI result Mask: {1}\n"
-            "Prompts in this AI session: {2}\n\n"
-            "Submitting a prompt starts background inference and immediately "
-            "returns control to Mimics. The result is applied automatically when ready."
-        ).format(source_name, target_name, count),
-        buttons=";".join(buttons),
-        title=TITLE,
-        ui_blocking=True,
-    )
-
-
-def _run_async(
-    image,
-    target,
-    config,
-    source=None,
-    auto_created=False,
-    write_mode="in_place",
-    supplied_prompt=None,
-    supplied_visual_objects=None,
-):
-    source = target if source is None else source
-    profile = _model_profile(config)
-    _log_effective_image_input_config(config)
-    state = _load_async_job(target)
-    validated_target_hash = None
-    if state is not None:
-        if not _state_model_matches(state, profile):
-            if supplied_prompt is not None:
-                # The guided review window already made the model selection
-                # explicit. Do not add a second blocking Mimics dialog.
-                answer = BUTTON_START_NEW_MODEL
-            else:
-                answer = mimics.dialogs.question_box(
-                    message=(
-                        "The selected Mask already has an AI session created with another "
-                        "nnInteractive model.\n\n"
-                        "Start a new session from the current Mask with {0}?"
-                    ).format(profile.get("task_name") or profile.get("model_id") or "the selected model"),
-                    buttons=BUTTON_START_NEW_MODEL + ";" + BUTTON_KEEP_CURRENT_MODEL,
-                    title=TITLE,
-                    ui_blocking=True,
-                )
-            if answer != BUTTON_START_NEW_MODEL:
-                _mimics_log(
-                    logging.INFO,
-                    "nnInteractive model change cancelled; the existing AI session was preserved.",
-                )
-                return 2 if supplied_prompt is not None else 0
-            _close_async_job(target, state, "model_profile_changed")
-            state = None
-            _mimics_log(
-                logging.INFO,
-                "nnInteractive started a new AI session with model {0}.".format(
-                    profile.get("model_id") or "official"
-                ),
-            )
-    if state is not None:
-        if _object_id(image) != state.get("image_guid") or _object_id(target) != state.get(
-            "target_guid"
-        ):
-            _close_async_job(target, state, "object_identity_changed")
-            state = None
-        else:
-            outcome = _handle_async_result(image, target, state)
-            if outcome == "waiting":
-                return 2 if supplied_prompt is not None else 0
-            if outcome == "restart":
-                state = None
-            elif outcome == "applied":
-                validated_target_hash = state.get("expected_target_sha256")
-
-    if state is not None:
-        if state.get("pending_sequence") is None and not _state_worker_alive(state):
-            _mimics_log(
-                logging.INFO,
-                "nnInteractive previous AI session is no longer running; a new session will start from the current Mask.",
-            )
-            _close_async_job(target, state, "ready_worker_not_alive")
-            state = None
-
-    if state is not None:
-        if validated_target_hash is not None and validated_target_hash == state.get("expected_target_sha256"):
-            current_hash = validated_target_hash
-        else:
-            current_hash = _mask_sha256(target, state.get("shape"))
-        if current_hash != state.get("expected_target_sha256"):
-            _close_async_job(target, state, "manual_mask_change")
-            state = None
-            validated_target_hash = None
-        else:
-            validated_target_hash = current_hash
-
-    temp_dir = tempfile.mkdtemp(prefix="mimics_nninteractive_prompt_")
-    pending_visual_objects = []
-    visual_objects_registered = False
-    prediction_enqueued = False
-    try:
-        action = (
-            "DINOv3 Suggested Points"
-            if supplied_prompt is not None
-            else _async_prompt_menu(target, state, source, profile)
-        )
-        if action == BUTTON_FINISH or not action:
-            if state is not None:
-                _close_async_job(target, state, "user_finished")
-            _mimics_log(logging.INFO, "nnInteractive session finished.")
-            return 0
-        if action == BUTTON_UNDO and state is not None:
-            interactions = state.get("interactions", [])
-            if interactions:
-                interactions.pop()
-            state["interactions"] = interactions
-            _mimics_log(
-                logging.INFO,
-                "nnInteractive undo. Remaining prompts: {0}.".format(len(interactions)),
-            )
-            # Clean up visual objects from previous prompts on undo.
-            job_dir = state.get("_job_dir")
-            if job_dir and job_dir in _ASYNC_VISUAL_OBJECTS:
-                for obj in _ASYNC_VISUAL_OBJECTS.pop(job_dir):
-                    _delete_mimics_object(obj)
-            if interactions:
-                _retire_different_model_workers(config)
-                _enqueue_async_prediction(
-                    state,
-                    target,
-                    expected_hash=validated_target_hash,
-                    replay_all=True,
-                )
-                _start_async_result_monitor(image, target, state, config)
-            else:
-                _restore_base(target, state["base_path"], state["shape"])
-                # Re-anchor on the restored mask buffer (see apply path): the
-                # next prompt compares _mask_sha256(target) to this value.
-                state["expected_target_sha256"] = _mask_sha256(target, state.get("shape"))
-                state["pending_sequence"] = None
-                state["status"] = "ready"
-                _save_async_job(state)
-            return 0
-        if action == BUTTON_RESET and state is not None:
-            state["interactions"] = []
-            state["pending_sequence"] = None
-            state["status"] = "ready"
-            _mimics_log(logging.INFO, "nnInteractive session reset to initial mask.")
-            _restore_base(target, state["base_path"], state["shape"])
-            # Re-anchor on the restored mask buffer (see apply path).
-            state["expected_target_sha256"] = _mask_sha256(target, state.get("shape"))
-            # Clean up visual objects from previous prompts.
-            job_dir = state.get("_job_dir")
-            if job_dir and job_dir in _ASYNC_VISUAL_OBJECTS:
-                for obj in _ASYNC_VISUAL_OBJECTS.pop(job_dir):
-                    _delete_mimics_object(obj)
-            _save_async_job(state)
-            return 0
-
-        _retire_different_model_workers(config)
-        if state is None and bool(config.get("async_start_worker_before_prompt", True)):
-            _update_gui()
-            prewarmed = _prewarm_async_image_worker(config, image)
-            if prewarmed is not None:
-                _mimics_log(
-                    logging.INFO,
-                    "nnInteractive is preparing the image AI session before prompt capture. Model loading and image preprocessing will continue while you draw.",
-                )
-            _update_gui()
-
-        include = None
-        visual_objects = []
-        if supplied_prompt is None:
-            prompt = _capture_prompt(
-                action, image, include, temp_dir, visual_objects
-            )
-        else:
-            prompt = dict(supplied_prompt)
-            visual_objects = list(supplied_visual_objects or [])
-        pending_visual_objects = visual_objects
-        if prompt is None:
-            mimics.dialogs.message_box(
-                "No prompt was submitted for {0}.\n\n"
-                "The AI prediction was not started.".format(action),
-                title="nnInteractive Prompt Empty",
-                ui_blocking=False,
-            )
-            return 0
-        if state is None:
-            state = _start_async_job(
-                config,
-                image,
-                target,
-                source=source,
-                write_mode=write_mode,
-            )
-            validated_target_hash = state.get("expected_target_sha256")
-        if str(prompt.get("interaction_type") or "") == "point_set":
-            first_prompt = not bool(state.get("interactions"))
-            empty_base = int(state.get("base_pixel_count") or 0) == 0
-            prompt["prediction_policy"] = (
-                "initial_empty_batch"
-                if first_prompt and empty_base
-                else "sequential"
-            )
-        prompt = _persist_interaction(state["_job_dir"], prompt)
-        # Store visual objects for deferred deletion after async result is applied.
-        if visual_objects:
-            _ASYNC_VISUAL_OBJECTS.setdefault(state["_job_dir"], []).extend(visual_objects)
-            visual_objects_registered = True
-        state.setdefault("interactions", []).append(prompt)
-        sequence = _enqueue_async_prediction(state, target, expected_hash=validated_target_hash)
-        prediction_enqueued = True
-        _mimics_log(
-            logging.INFO,
-            "nnInteractive background inference started. Prompt: {0}, sequence: {1}. "
-            "Result will be applied automatically when ready.".format(action, sequence),
-        )
-        _start_async_result_monitor(image, target, state, config)
-        return 0
-    finally:
-        if visual_objects_registered and not prediction_enqueued and state is not None:
-            job_dir = state.get("_job_dir")
-            registered = _ASYNC_VISUAL_OBJECTS.get(job_dir) or []
-            for obj in pending_visual_objects:
-                for index in range(len(registered) - 1, -1, -1):
-                    if registered[index] is obj:
-                        registered.pop(index)
-                        break
-            if registered:
-                _ASYNC_VISUAL_OBJECTS[job_dir] = registered
-            else:
-                _ASYNC_VISUAL_OBJECTS.pop(job_dir, None)
-            visual_objects_registered = False
-        if (
-            pending_visual_objects
-            and not visual_objects_registered
-            and supplied_prompt is None
-        ):
-            for obj in pending_visual_objects:
-                _delete_mimics_object(obj)
-        if state is None:
-            _delete_unused_auto_draft(target, auto_created, source)
-        shutil.rmtree(temp_dir, ignore_errors=True)
-
-
-def _prompt_menu(target, interaction_count, profile):
-    buttons = _prompt_buttons_for_profile(profile)
-    buttons.extend([BUTTON_UNDO, BUTTON_RESET, BUTTON_FINISH])
-    return mimics.dialogs.question_box(
-        message=(
-            "Target Mask: {0}\n"
-            "Prompts in this session: {1}\n\n"
-            "Each new prompt immediately updates the selected Mask."
-        ).format(getattr(target, "name", ""), interaction_count),
-        buttons=";".join(buttons),
-        title=TITLE,
-        ui_blocking=True,
-    )
-
-
-def _run_sync(image, target, config):
-    _mimics_log(logging.INFO, "Preparing nnInteractive session...")
-    _log_effective_image_input_config(config)
-    temp_dir = tempfile.mkdtemp(prefix="mimics_nninteractive_")
-    worker = None
-    visual_objects = []
-    try:
-        image_export = _export_image_for_nninteractive(config, image, os.path.join(temp_dir, "image.raw"))
-        base_export = _export_mask(target, os.path.join(temp_dir, "target_at_start.u8"), image_export["shape"])
-        if image_export["shape"] != base_export["shape"]:
-            raise RuntimeError(
-                "Image and target Mask buffer shapes differ: {0} vs {1}".format(
-                    image_export["shape"], base_export["shape"]
-                )
-            )
-
-        interactions = []
-        visual_objects[:] = []  # Mimics objects kept visible during inference
-        _mimics_log(
-            logging.INFO,
-            "nnInteractive session started. Target Mask: {0}, image shape: {1}.".format(
-                getattr(target, "name", ""), image_export["shape"]
-            ),
-        )
-        if bool(config.get("reuse_session", True)):
-            _mimics_log(
-                logging.INFO,
-                "nnInteractive is starting the AI engine in the background. "
-                "You can collect prompts while it loads.",
-            )
-            worker = _BridgeWorker(config, image_export, base_export)
-            try:
-                mimics.view.show_log_panel()
-            except Exception:
-                pass
-        while True:
-            action = _prompt_menu(
-                target,
-                len(interactions),
-                _model_profile(config),
-            )
-            if action == BUTTON_FINISH or not action:
-                _mimics_log(
-                    logging.INFO,
-                    "nnInteractive session finished. {0} prompt(s) applied.".format(
-                        len(interactions)
-                    ),
-                )
-                return 0
-            if action == BUTTON_RESET:
-                interactions = []
-                _mimics_log(logging.INFO, "nnInteractive session reset to initial mask.")
-                _restore_base(target, base_export["path"], base_export["shape"])
-                continue
-            if action == BUTTON_UNDO:
-                if not interactions:
-                    continue
-                interactions.pop()
-                _mimics_log(
-                    logging.INFO,
-                    "nnInteractive undo last prompt. Remaining: {0}. Re-running prediction...".format(
-                        len(interactions)
-                    ),
-                )
-                if interactions:
-                    try:
-                        _run_prediction(
-                            config,
-                            image_export,
-                            base_export,
-                            target,
-                            interactions,
-                            temp_dir,
-                            worker,
-                        )
-                    except Exception:
-                        _restore_base(target, base_export["path"], base_export["shape"])
-                        raise
-                else:
-                    _restore_base(target, base_export["path"], base_export["shape"])
-                continue
-
-            include = None
-            prompt = _capture_prompt(action, image, include, temp_dir, visual_objects)
-            if prompt is None:
-                continue
-            if str(prompt.get("interaction_type") or "") == "point_set":
-                prompt["prediction_policy"] = (
-                    "initial_empty_batch"
-                    if not interactions
-                    and int(base_export.get("pixel_count") or 0) == 0
-                    else "sequential"
-                )
-            interactions.append(prompt)
-            _mimics_log(
-                logging.INFO,
-                "nnInteractive prompt #{0}: {1}. Running prediction...".format(
-                    len(interactions), action
-                ),
-            )
-            prediction_error = None
-            try:
-                _run_prediction(
-                    config,
-                    image_export,
-                    base_export,
-                    target,
-                    interactions,
-                    temp_dir,
-                    worker,
-                )
-            except Exception as exc:
-                prediction_error = exc
-                interactions.pop()
-                # Restore the mask to its state before this failed prediction.
-                _restore_base(target, base_export["path"], base_export["shape"])
-            finally:
-                # Delete visual objects after prediction completes (or fails).
-                for obj in visual_objects:
-                    _delete_mimics_object(obj)
-                visual_objects[:] = []
-            if prediction_error is not None:
-                # Show the error but keep the session alive so the user can
-                # adjust prompts and retry, instead of aborting entirely.
-                _mimics_log(
-                    logging.ERROR,
-                    "nnInteractive prediction failed: {0}".format(prediction_error),
-                )
-                mimics.dialogs.message_box(
-                    "Prediction failed for this prompt:\n\n{0}\n\n"
-                    "The mask has been restored. You can try again with "
-                    "different prompts.".format(str(prediction_error)),
-                    title=TITLE,
-                    ui_blocking=True,
-                )
-                continue
-    finally:
-        # Clean up any remaining visual objects on session exit.
-        for obj in visual_objects:
-            _delete_mimics_object(obj)
-        if worker is not None:
-            worker.close()
-        shutil.rmtree(temp_dir, ignore_errors=True)
-
-
-def _run_with_config(config):
-    image = mimics.data.images.get_active()
-    if image is None:
-        raise RuntimeError("Open a project and activate an image set before running nnInteractive.")
-    buffer_owner = runtime_common.active_local_operation("mask_buffer_access")
-    if buffer_owner:
-        mimics.dialogs.message_box(
-            message=(
-                "nnInteractive cannot take a consistent image and Mask snapshot while {0} is using Mimics buffers.\n\n"
-                "Wait for that operation to finish or stop it, then retry."
-            ).format(buffer_owner.get("owner") or "another Mimics-Script task"),
-            title=TITLE,
-            ui_blocking=False,
-        )
-        return 1
-    gpu_holder = runtime_common.active_resource_lock(_project_root(), "gpu.lock")
-    if gpu_holder:
-        owner = str(gpu_holder.get("owner") or "").lower()
-        holder_is_nninteractive_server = bool(
-            "nninteractive" in owner
-            and (
-                "server" in owner
-                or str(gpu_holder.get("state_path") or "").strip()
-            )
-        )
-        if not holder_is_nninteractive_server:
-            mimics.dialogs.message_box(
-                message=(
-                    "The GPU is currently used by {0}.\n\n"
-                    "nnInteractive was not started, so no prompt or Mask state was changed. "
-                    "Interactive prompting should not sit behind a long training or inference queue. "
-                    "Wait for that task to finish, stop it from its task window, or use "
-                    "Admin > Stop All Owned Background Services."
-                ).format(runtime_common.resource_lock_summary(gpu_holder)),
-                title=TITLE,
-                ui_blocking=False,
-            )
-            return 1
-    profile = _model_profile(config)
-    if profile.get("source") == "task_model":
-        _mimics_log(
-            logging.INFO,
-            "Using nnInteractive task model {0} for task {1}.".format(
-                profile.get("model_id"),
-                profile.get("task_name") or profile.get("task_id") or "unnamed",
-            ),
-        )
-    busy_workers = _different_model_busy_workers(config)
-    if busy_workers:
-        current = busy_workers[0]
-        mimics.dialogs.message_box(
-            message=(
-                "Another nnInteractive model is still producing or applying a result.\n\n"
-                "Model: {0}\n"
-                "No Mask or prompt state was changed. Wait for that result to be applied, "
-                "or stop its session before switching models."
-            ).format(current.get("task_name") or current.get("model_id") or "official"),
-            title=TITLE,
-            ui_blocking=False,
-        )
-        return 1
-    session = _select_session_masks(image, config)
-    if session.get("write_mode") == "cancelled":
-        _mimics_log(logging.INFO, "nnInteractive cancelled before creating an AI session.")
-        return 0
-    source = session["source"]
-    target = session["target"]
-    if source is not target:
-        _mimics_log(
-            logging.INFO,
-            "nnInteractive created AI Draft {0} from source Mask {1}; the source will not be modified.".format(
-                getattr(target, "name", ""),
-                getattr(source, "name", ""),
-            ),
-        )
-    if str(config.get("execution_mode", "async")).lower() == "async":
-        result = _run_async(
-            image,
-            target,
-            config,
-            source=source,
-            auto_created=session.get("auto_created", False),
-            write_mode=session.get("write_mode", "in_place"),
-        )
-        # Async mode returns 0 after submitting a prompt; the background
-        # worker and QTimer monitor are still running.  Don't log "ended".
-        return result
-    _mimics_log(
-        logging.WARNING,
-        "Synchronous nnInteractive mode is disabled because it can block the Mimics GUI. "
-        "Running in async mode instead.",
-    )
-    return _run_async(
-        image,
-        target,
-        config,
-        source=source,
-        auto_created=session.get("auto_created", False),
-        write_mode=session.get("write_mode", "in_place"),
-    )
-
-
-def prewarm_guided_session(model_profile=None):
-    """Start the selected model's image worker during guided point review."""
-    config = _config()
-    if model_profile:
-        config["_model_profile"] = dict(model_profile)
-    profile = _model_profile(config)
-    if "point" not in set(profile.get("validated_prompt_types") or []):
-        raise RuntimeError("The selected nnInteractive model does not accept point prompts.")
-    # Validate model/runtime files before the destination chooser can create an
-    # editable draft Mask.
-    _runtime_paths(config)
-    image = mimics.data.images.get_active()
-    if image is None:
-        raise RuntimeError("No active Mimics image is available for nnInteractive prewarming.")
-    _retire_different_model_workers(config)
-    return _prewarm_async_image_worker(config, image) is not None
-
-
-def run_with_suggested_points(
-    points,
-    source_mask_guid=None,
-    visual_objects=None,
-    model_profile=None,
-):
-    """Submit reviewed Mimics-grid points to the selected async workflow."""
-    config = _config()
-    if model_profile:
-        config["_model_profile"] = dict(model_profile)
-    profile = _model_profile(config)
-    if "point" not in set(profile.get("validated_prompt_types") or []):
-        raise RuntimeError("The selected nnInteractive model does not accept point prompts.")
-    # Validate the selected model and runtime before destination selection can
-    # create an editable draft Mask in the Mimics project.
-    _runtime_paths(config)
-    image = mimics.data.images.get_active()
-    if image is None:
-        raise RuntimeError("Open a project and activate an image set before running nnInteractive.")
-    buffer_owner = runtime_common.active_local_operation("mask_buffer_access")
-    if buffer_owner:
-        raise RuntimeError(
-            "Mimics buffers are currently used by {0}. Wait or stop that task before confirming the points.".format(
-                buffer_owner.get("owner") or "another Mimics-Script task"
-            )
-        )
-    gpu_holder = runtime_common.active_resource_lock(_project_root(), "gpu.lock")
-    if gpu_holder:
-        owner = str(gpu_holder.get("owner") or "").lower()
-        holder_is_nninteractive_server = bool(
-            "nninteractive" in owner
-            and (
-                "server" in owner
-                or str(gpu_holder.get("state_path") or "").strip()
-            )
-        )
-        if not holder_is_nninteractive_server:
-            raise RuntimeError(
-                "GPU access is still held by {0}.".format(
-                    runtime_common.resource_lock_summary(gpu_holder)
-                )
-            )
-    busy_workers = _different_model_busy_workers(config)
-    if busy_workers:
-        current = busy_workers[0]
-        raise RuntimeError(
-            "Another nnInteractive model is still producing or applying a result: {0}.".format(
-                current.get("task_name")
-                or current.get("model_id")
-                or "unknown model"
-            )
-        )
-    source = None
-    expected = str(source_mask_guid or "")
-    for candidate in _masks_for_image(image):
-        if expected and _object_id(candidate) == expected:
-            source = candidate
-            break
-    if source is None:
-        raise RuntimeError(
-            "The Mask selected when DINOv3 guidance started is no longer available."
-        )
-    prepared = []
-    for item in points or []:
-        voxel = [int(value) for value in item.get("point") or []]
-        if len(voxel) != 3:
-            continue
-        prepared.append(
-            {
-                "point": voxel,
-                "include_interaction": bool(
-                    item.get("include_interaction", True)
-                ),
-            }
-        )
-    if not any(item["include_interaction"] for item in prepared):
-        raise RuntimeError("At least one confirmed foreground point is required.")
-    session = _select_session_masks(image, config, source_override=source)
-    prompt = {
-        "interaction_type": "point_set",
-        "points": prepared,
-        "coordinates": "mimics",
-        "source": "dinov3_guided_review",
-    }
-    return _run_async(
-        image,
-        session["target"],
-        config,
-        source=session["source"],
-        auto_created=session.get("auto_created", False),
-        write_mode=session.get("write_mode", "in_place"),
-        supplied_prompt=prompt,
-        supplied_visual_objects=visual_objects,
-    )
-
-
-def run_with_model_profile(profile):
-    """Run the existing interaction workflow with an explicit task model."""
-    config = _config()
-    config["_model_profile"] = dict(profile or {})
-    # Validate before selecting/creating a Mask so an invalid model cannot
-    # mutate the Mimics project.
-    _runtime_paths(config)
-    selected = _model_profile(config)
-    _mimics_log(
-        logging.INFO,
-        "nnInteractive custom model selected: {0} ({1}, checkpoint {2}).".format(
-            selected.get("task_name") or selected.get("task_id") or "custom task",
-            selected.get("model_id") or "unknown",
-            (selected.get("checkpoint_sha256") or "unverified")[:12],
-        ),
-    )
-    return _run_with_config(config)
-
-
-def run():
-    return _run_with_config(_config())
-
-
 def _cleanup_stale_processes():
     """Clean safe stale runtime state from a previous crashed session.
 
@@ -5159,9 +4453,8 @@ def main():
             cleanup_thread.daemon = True
             cleanup_thread.start()
         result = run()
-        # Only log "ended" for sync mode (result 0 from _run_sync means the
-        # user finished).  Async mode returns 0 after submitting a prompt
-        # while the background worker keeps running.
+        # Async mode returns 0 after submitting a prompt while the background
+        # worker keeps running; only log "ended" when no monitor is active.
         if result == 0 and not _ASYNC_MONITORS:
             _mimics_log(logging.INFO, "nnInteractive session ended.")
         return result

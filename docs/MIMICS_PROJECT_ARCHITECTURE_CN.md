@@ -21,7 +21,7 @@ Mimics-Script 不是一个单独运行的标注软件，而是给 Mimics 增加�
 1. 把 NIfTI、MHD/MHA、NRRD、DICOM 等数据转换成可标注的 `.mcs`；
 2. 把 Mimics 中修改后的一个或多个 Mask 准确导回源图像网格；
 3. 使用 nnInteractive、DINOv3 或 nnU-Net 辅助标注、训练任务模型并管理版本；
-4. 使用 ITK Snake、IGAC、ScribblePrompt 完成不同类型的局部或交互式修正；
+4. 使用 ScribblePrompt 完成局部的交互式修正；
 5. 在不阻塞 Mimics GUI 的前提下管理外部进程、GPU、日志、取消和异常恢复。
 
 ### 1.2 第一次使用前要准备什么
@@ -490,55 +490,9 @@ nnInteractive 被明确分成“官方通用模型”和“自定义任务模型
 
 工作区默认位置：`nninteractive_task_models/`。
 
-### 6.4 `02_AI/nnInteractive/04_DINOv3_Guided_Points.py`
-
-用途：让 DINOv3 只负责提出少量候选点，由标注者确认后交给官方或已注册的微调 nnInteractive 模型完成分割。它不是把粗糙的 DINOv3 Mask 直接当最终结果，也不是无人工确认的自动分割。
-
-完整流程：
-
-1. 对当前病例运行已注册的对应 DINOv3 模型；
-2. 同时累计 TTA 前景概率均值、方差和前景投票比例，不把多份完整 3D logits 长期保留在 GPU；
-3. 对 `probability >= threshold` 做 26 邻域连通域分析。最大区域必保留；其他区域必须同时通过“相对主区域体积、与主区域包围盒的物理距离、相对概率和 TTA 一致性”门槛，最多再保留两个。远处杂点、极小高置信碎片和低置信卫星区会被拒绝；
-4. 在保留区域的高概率、高 TTA 一致性、低方差深部选择 1～3 个自动前景点；单个长器官使用物理距离最远点采样，新增自动点默认至少相距 30 mm，多个可靠区域优先各覆盖一个。没有可靠候选时宁可少给点，不用低可信回退硬凑数量；
-5. 在所有预测区域之外 2～12 mm 的稳定低概率壳层中选择 0～3 个自动背景点，同样用毫米距离避免聚集；
-6. 把候选点从 DINOv3/source RAS 世界坐标显式换成 Mimics LPS 世界坐标，并创建绿色前景点、红色背景点；
-7. 外部非模态审核窗口允许用户在 Mimics 中移动、添加或删除点。1～3 只约束自动建议，用户手工前景点和背景点没有此上限；
-8. 审核窗口列出官方模型以及当前任务下所有完整、支持 point prompt 的微调模型。项目/Mask 已绑定某个模型时默认选择该版本，多个同任务版本可人工切换；
-9. 用户确认后，把这些点交给所选 nnInteractive 会话。若会话从空 Mask 开始且这是首轮 Point Set，先累积点、最后一次性预测；若 DINOv3 Mask 被作为已有 Initial Mask，或会话已有预测结果，则每个点都基于上一轮预测顺序修正。最终结果仍走 nnInteractive 原有的安全应用流程。
-
-性能约束：
-
-- DINOv3 支持镜像和多尺度 TTA。引导模式没有显式配置时使用原图加一次非左右轴镜像，共 2 路；canonical RAS/ZYX 的 X 轴不会被默认镜像；
-- cached-slices 模型根据每例 NIfTI affine 找出最接近 RAS 左右方向的原生体素轴，只在另一个平面轴做第二路 decoder TTA。训练 feature cache 同样逐例记录并使用这个安全轴；
-- 连通域、距离变换和点选择全部在外部 Python 进程；候选数有上限；
-- Mimics 前台只创建/读取少量 Point，不读取大 Mask buffer；用户主动补点时才会进入 Mimics 的取点交互；
-- DINOv3 释放 GPU 后才按审核窗口当前选择的官方/微调模型预热 nnInteractive，审核点的时间与模型加载重叠；切换模型会预热新选择而不会复用错误权重；
-- 审核阶段不持有 GPU，但在确认或取消前不允许启动另一个 DINOv3 任务，避免多个审核上下文互相覆盖。
-
-停止与回退：关闭审核窗口或运行 DINOv3 的 Stop 入口会删除临时点且不改变 Mask；nnInteractive 成功接管后，点对象在结果应用、失败、取消、Reset 或会话关闭时自动删除。DINOv3 的临时二值 Mask 和候选点 JSON 在完成交接后自动删除，不写入 Mimics；最终分割结果只来自用户选择的 nnInteractive 模型。
-
 ## 7. 交互算法功能入口
 
-这三个入口都是独立工具，不属于 nnInteractive 的子菜单，也不会启动 DINOv3/nnU-Net 训练。共同控制器是 `runtime_py35/interactive_algorithms_mimics.py`；耗时计算在外部环境完成，选中 Mask 只在用户确认结果后改变。
-
-### 7.1 `02_AI/ITK_Snake.py`
-
-用途：从一个非空的粗 Mask 出发，使用 3D geodesic active contour 向附近图像边界演化。
-
-调用链：
-
-```text
-ITK_Snake.py
-  -> runtime_py35/interactive_algorithms_mimics.py
-  -> tools/interactive_algorithms_worker.py
-  -> SimpleITK 3D level set
-  -> result.u8
-  -> Mimics transaction 应用结果
-```
-
-它不是零样本器官识别算法，空 Mask 不能作为输入。Conservative、Balanced、Aggressive 控制最大移动距离和演化强度；物理距离使用 mm，标签结果仍在原 Mimics grid。输出为空、体积变化超过保护阈值或 worker 失败时，原 Mask 不改变。
-
-### 7.2 `02_AI/ScribblePrompt.py`
+### 7.1 `02_AI/ScribblePrompt.py`
 
 用途：使用官方 ScribblePrompt-UNet 在一个二维切片上交互分割，并把该切片写回三维 Mask。
 
@@ -564,14 +518,6 @@ ITK_Snake.py
 首次空 Mask 必须包含 foreground click、foreground scribble 或 Box。已有 Mask/预测需要缩小时，可以只添加 background 提示。官方 checkpoint 默认路径为：
 
 `external/ScribblePrompt/checkpoints/ScribblePrompt_unet_v1_nf192_res128.pt`
-
-### 7.3 `02_AI/IGAC.py`
-
-用途：把当前 Image 和选中 Mask 快照送到独立 PySide6 三视图工作区，进行局部 3D level-set 演化和边界交互修正。
-
-入口只负责一次 Mimics-grid 快照，然后立即恢复 Mimics 使用。外部窗口拥有自己的撤销/重置、ROI、显示窗宽窗位、最大位移保护、自动演化启动/停止和结果确认；窗口关闭前不反复读写 Mimics buffer。用户最终选择 Update 或 Copy 后，结果才通过 Mimics transaction 返回。
-
-IGAC、ITK Snake 和 ScribblePrompt 都会检查 `mask_buffer_access` 本地操作令牌。该令牌只保护前台 Mimics buffer 的短时读写，不会在外部计算的整个生命周期内锁住其他独立功能。
 
 ## 8. nnU-Net 功能入口
 
@@ -859,7 +805,7 @@ created -> starting -> running/waiting
 
 ### 13.1 资源协调
 
-- GPU：DINOv3、nnInteractive、nnU-Net、ScribblePrompt 和 IGAC 使用统一资源锁语义，避免同一设备被不兼容任务同时占满；
+- GPU：DINOv3、nnInteractive、nnU-Net 和 ScribblePrompt 使用统一资源锁语义，避免同一设备被不兼容任务同时占满；
 - 空闲 nnInteractive 服务可以在训练或其他 GPU 推理前按需释放模型和显存；
 - 后台 Mimics：任务按实际输出队列和 `.mcs` 访问关系协调，不假设所有机器都只能单实例；
 - 同一输出目录的 import producer 使用 lease 防止互相覆盖；
@@ -1043,7 +989,7 @@ DINOv3 预训练 encoder 属于目标机器的标准运行资产，不应重复�
 | `nninteractive_config.json` | 官方 nnInteractive 服务、超时、worker 与结果策略 |
 | `nninteractive_finetune_config.json` | 自定义任务模型工作区、训练和模型中心默认值 |
 | `fewshot_config.json` | DINOv3 环境、训练策略、资源和 UI 默认值 |
-| `interactive_algorithms_config.json` | ITK Snake、IGAC、ScribblePrompt 参数、超时和 checkpoint |
+| `interactive_algorithms_config.json` | ScribblePrompt 参数、超时和 checkpoint |
 | `window_level_presets.json` | Mask 名称与窗宽窗位预设 |
 | `%USERPROFILE%/.mimics_script/nnunet_settings.json` | 当前 Windows 用户的 nnU-Net 工作区和最近设置 |
 | `%LOCALAPPDATA%/MimicsScript/remote_compute/servers.json` | 远程服务器非敏感配置；密码不在此文件中 |
@@ -1106,7 +1052,7 @@ python tools/test_all.py
 - DINOv3 训练/推理参数编排；
 - nnInteractive worker、提示和结果应用；
 - nnU-Net 多类别物化、模型注册、预测应用和远程任务；
-- ITK Snake、IGAC、ScribblePrompt 提示通道和结果保护；
+- ScribblePrompt 提示通道和结果保护；
 - Windows 进程存活与锁处理。
 
 ### 18.2 关键专项测试

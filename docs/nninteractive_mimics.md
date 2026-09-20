@@ -206,9 +206,9 @@ Mimics 会自动打开 Log Panel，并在推理开始、CPU 回退和完成时�
 | --- | --- |
 | `scripting_library/02_AI/nnInteractive/01_Annotate_Official_Model.py` | 官方模型标注入口 |
 | `runtime_py35/nninteractive_mimics.py` | source/Draft 选择、提示采集、临时文件和结果写回 |
-| `adapters/mimics/nninteractive_bridge.py` | 外部 Python 中加载图像、重放提示并调用 nnInteractive |
-| `scripts/setup_nninteractive_env.py` | 在 Windows 上联网安装独立环境 |
-| `scripts/build_nninteractive_bundle.py` | 在 Windows 上构建含环境、权重、bridge 和 Mimics 脚本的离线包 |
+| `nninteractive_bridge.py` | 外部 Python 中加载图像、重放提示并调用 nnInteractive |
+| `tools/setup_env.py` | 在 Windows 上联网安装/修复外部 Python 环境 |
+| `tools/package_portable.py` | 构建 Mimics 脚本 + 外部环境的可携带离线包 |
 
 `nnInteractive` 入口不会导入平台 Console，也不会读取平台 runtime。
 
@@ -219,15 +219,15 @@ Mimics 会自动打开 Log Panel，并在推理开始、CPU 回退和完成时�
 在项目根目录使用 Python 3.10+：
 
 ```powershell
-python scripts\setup_nninteractive_env.py --cuda cu124 --device auto
+python_env\python.exe tools\setup_env.py
 ```
 
-安装脚本可恢复“权重已经下载、但虚拟环境不完整”的中断状态：重建 Python 环境时暂存并恢复 `nninteractive_env\models\`，不重新下载已有权重。
+安装脚本可恢复“权重已经下载、但虚拟环境不完整”的中断状态：重建 Python 环境时暂存并恢复 `python_env\models`，不重新下载已有权重。全新安装使用 `python_env/`，旧部署的 `nninteractive_env/` 仍被自动发现。
 
 然后将 Mimics 的 Scripting Library 路径设为：
 
 ```text
-<project>\adapters\mimics\scripting_library
+<project>\scripting_library
 ```
 
 ### 9.2 离线包
@@ -235,72 +235,16 @@ python scripts\setup_nninteractive_env.py --cuda cu124 --device auto
 必须在 Windows 机器上构建 Windows 包：
 
 ```powershell
-python scripts\build_nninteractive_bundle.py
+python_env\python.exe tools\package_portable.py
 ```
 
 解压后，把 Mimics Scripting Library 指向：
 
 ```text
-<extract-root>\nninteractive_env\mimics\scripting_library
+<extract-root>\scripting_library
 ```
 
 虚拟环境、PyTorch wheel 和 Python 可执行文件不能从 macOS 直接复制为 Windows 运行环境。
-
-### 9.3 与标注工作包合并（推荐）
-
-平台操作者可以为标注者生成一个同时包含标注入口和 nnInteractive 的单一工作目录。标注者只需在 Mimics 中配置一次 Scripting Library 路径，就能同时使用六个 `Labeling_*.py` 标注脚本和 `nnInteractive` AI 工具。
-
-**平台操作者执行**：
-
-```powershell
-# 1. 安装 nnInteractive 环境（只需做一次）
-python scripts\setup_nninteractive_env.py --cuda cu124 --device auto
-
-# 2. 导出工作包（自动包含 nnInteractive 脚本）
-sp review export-worklist `
-  --registry D:\platform_registry `
-  --output-root D:\transfer\batch_001 `
-  --limit 30
-```
-
-`export-worklist` 在检测到仓库中存在 nnInteractive 脚本时，会自动把它们复制进工作包。
-
-**工作包目录（标注者收到）**：
-
-```text
-D:\transfer\batch_001\
-  Labeling_Open_Next_Case.py
-  Labeling_Case_Navigation.py
-  Labeling_Submit_Complete.py
-  Labeling_Submit_or_Report_Issue.py
-  Labeling_View_Task_List.py
-  Labeling_Save_Recovery_Backup.py
-  nnInteractive.py              ← AI 工具入口（自动包含）
-  nninteractive_bridge.py       ← Bridge 脚本（自动包含）
-  runtime_py35/
-    sp_common.py
-    sp_open_review.py
-    sp_review_console.py
-    sp_save_checkpoint.py
-    sp_submit_review.py
-    nninteractive_mimics.py     ← AI 工具实现（自动包含）
-  cases/
-    case_001/
-    case_002/
-  worklist_manifest.json
-  worklist_progress.json
-```
-
-外部 Python 环境和模型仍须单独放到标注者机器上。推荐把离线 bundle 解压到标注工作包的父目录下（脚本自动发现），或通过环境变量显式指定：
-
-```powershell
-setx NNINTERACTIVE_PYTHON "D:\nninteractive_env\python\python.exe"
-setx NNINTERACTIVE_MODEL_DIR "D:\nninteractive_env\models\nnInteractive_v1.0"
-```
-
-如果离线 bundle 解压到工作包平级目录 `..\nninteractive_env\`，`nninteractive_mimics.py` 的自动发现机制会找到它。不设置环境变量也能运行。
-
-**标注者**：在 Mimics 中 `File → Preferences → Scripting → Scripting Library` 指向 `D:\transfer\batch_001\` 即可使用全部 7 个入口。
 
 ## 10. 实机验证清单
 
@@ -611,14 +555,6 @@ Before-prompt prewarm supports both a validated source image and the portable
 Mimics-buffer fallback. Mimics performs one short local buffer snapshot; source
 recovery, canonical orientation, model loading, upload and preprocessing then
 continue in the external worker while the user collects prompts.
-
-### 13.7 DINOv3 候选点引导
-
-`02_AI/nnInteractive/04_DINOv3_Guided_Points.py` 提供一个有人工确认的组合入口：DINOv3 不直接覆盖 Mask，而是根据 TTA 前景概率提出最多 3 个自动前景点和 3 个自动背景点。最大 26-连通区域必保留；额外区域只有在相对体积、物理距离、概率和 TTA 一致性均可信时才保留，最多两个。前景点来自高概率、低方差的区域深部，背景点只来自所有预测区域外的稳定低概率壳层；弱候选不会通过宽松回退被强行变成提示。
-
-建议点以 RAS 世界坐标写出，Mimics 侧显式转换为 LPS 后创建临时 Point。标注者可以在 Mimics 中移动、添加或删除这些点；自动建议的 1～3 点上限不限制手工点数。确认时会重新读取 Point 的当前位置，而不是使用最初的数组索引；因此用户修改后的坐标才是实际送入 nnInteractive 的坐标。
-
-审核窗口可以选择官方模型或当前任务下任一完整且支持 point prompt 的微调模型。确认后复用既有异步 image worker、initial Mask、结果目标选择、undo/reset 和生命周期管理。一个 `point_set` 内的多个点在 bridge 中按顺序执行，每一步预测都继承上一轮结果。取消审核会删除临时 Point，不修改选中 Mask，也不会保留 GPU 锁；成功提交后，Point 会在推理结果应用或任何终止路径自动删除，DINO 临时 Mask 与建议 JSON 也会清理。
 
 Empty initial Masks use an empty-mask state marker instead of exporting a full
 zero-valued mask buffer. Undo and reset restore such sessions with `mask.clear()`.

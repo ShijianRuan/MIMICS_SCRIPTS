@@ -302,13 +302,13 @@ def _allow_windows_event_monitor():
     explicit unsubscribe. Prefer Win32 SetTimer by default and only enable
     Mimics event subscriptions when this flag is set.
     """
-    value = os.environ.get("MIMICS_IMPORT_USE_EVENT_TIMER", "").strip().lower()
+    value = os.environ.get("MIMICS_USE_EVENT_TIMER", "").strip().lower()
     return value in ("1", "true", "yes", "on")
 
 
 def _checkpoint_enabled():
-    value = os.environ.get("MIMICS_IMPORT_CHECKPOINT", "1").strip().lower()
-    return value not in ("0", "false", "no", "off")
+    # Crash breadcrumbs are cheap and purely diagnostic; always keep them on.
+    return True
 
 
 def _checkpoint_record(stage, **fields):
@@ -797,7 +797,7 @@ def _bridge_script():
 
 
 def _background_env(extra=None):
-    return runtime_common.background_env(extra, include_itk=True)
+    return runtime_common.background_env(extra)
 
 
 def _python_exe():

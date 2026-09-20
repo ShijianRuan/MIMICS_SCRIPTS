@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Non-blocking Mimics entries for ITK Snake, IGAC, and ScribblePrompt."""
+"""Non-blocking Mimics entry for ScribblePrompt."""
 
 from __future__ import print_function
 
@@ -19,13 +19,9 @@ import nninteractive_mimics as nnm
 import runtime_common
 
 
-ACTION_ITK_SNAKE = "itk_snake"
-ACTION_IGAC = "igac"
 ACTION_SCRIBBLEPROMPT = "scribbleprompt"
 
 DISPLAY_NAMES = {
-    ACTION_ITK_SNAKE: "ITK Snake",
-    ACTION_IGAC: "IGAC",
     ACTION_SCRIBBLEPROMPT: "ScribblePrompt",
 }
 
@@ -90,33 +86,6 @@ def _worker_script():
     return path
 
 
-def _igac_gui_script():
-    path = os.path.join(_project_root(), "tools", "igac_gui.py")
-    if not os.path.isfile(path):
-        raise RuntimeError("igac_gui.py was not found: {0}".format(path))
-    return path
-
-
-def _visible_gui_command(python_exe, script, request_path):
-    executable = os.path.abspath(python_exe)
-    if os.name == "nt" and os.path.basename(executable).lower() == "python.exe":
-        pythonw = os.path.join(os.path.dirname(executable), "pythonw.exe")
-        if os.path.isfile(pythonw):
-            executable = pythonw
-    return [executable, script, "--request", request_path]
-
-
-def _visible_low_priority_kwargs():
-    """Lower IGAC compute priority without hiding its external GUI window."""
-    if os.name != "nt":
-        return {}
-    return {
-        "creationflags": getattr(
-            subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000
-        )
-    }
-
-
 def _checkpoint_path(config):
     section = config.get("scribbleprompt") or {}
     value = os.environ.get("SCRIBBLEPROMPT_CHECKPOINT", "").strip()
@@ -162,17 +131,14 @@ def _active_image():
     return image
 
 
-def _selected_mask(image, require_nonempty):
+def _selected_mask(image):
     selected = []
     for mask in nnm._masks_for_image(image):
         if bool(getattr(mask, "selected", False)):
             selected.append(mask)
     if len(selected) != 1:
         raise RuntimeError("Select exactly one Mask attached to the active image.")
-    mask = selected[0]
-    if require_nonempty and int(getattr(mask, "number_of_pixels", 0) or 0) <= 0:
-        raise RuntimeError("ITK Snake requires a non-empty selected Mask as its initial contour.")
-    return mask
+    return selected[0]
 
 
 def _sha256_bytes(value):
@@ -243,21 +209,6 @@ def _write_raw_buffer(
         "sha256": sha256,
         "byte_count": len(raw),
     }
-
-
-def _current_display_contrast_gv():
-    getter = getattr(getattr(mimics, "view", None), "get_contrast", None)
-    if not callable(getter):
-        return None
-    try:
-        value = getter()
-        low = float(value[0][0])
-        high = float(value[1][0])
-        if math.isfinite(low) and math.isfinite(high) and high > low:
-            return [low, high]
-    except Exception:
-        pass
-    return None
 
 
 def _spacing_mm(image, shape):
@@ -715,30 +666,6 @@ def _collect_scribbleprompt_prompts(image, target, job_dir, visual_objects):
             return None
 
 
-def _profile(config):
-    section = config.get("itk_snake") or {}
-    default = str(section.get("default_profile") or "balanced").lower()
-    labels = [("Balanced", "balanced"), ("Conservative", "conservative"), ("Aggressive", "aggressive")]
-    labels.sort(key=lambda item: 0 if item[1] == default else 1)
-    answer = mimics.dialogs.question_box(
-        title="ITK Snake",
-        message=(
-            "Choose how far the selected 3D Mask may move toward image boundaries.\n\n"
-            "Conservative limits changes to nearby boundaries. Balanced is the default. "
-            "Aggressive allows larger corrections and needs closer review."
-        ),
-        buttons=";".join([item[0] for item in labels] + ["Cancel"]),
-        ui_blocking=True,
-    )
-    for label, name in labels:
-        if answer == label:
-            values = dict((section.get("profiles") or {}).get(name) or {})
-            values["gradient_sigma_mm"] = float(section.get("gradient_sigma_mm", 1.0))
-            values["profile_name"] = name
-            return values
-    return None
-
-
 def _session_values(mask, base_sha):
     path = str(nnm._metadata_get(mask, SESSION_PATH_METADATA, "") or "")
     expected_sha = str(nnm._metadata_get(mask, SESSION_MASK_SHA_METADATA, "") or "")
@@ -771,7 +698,7 @@ def _write_initial_status(path, action):
     )
 
 
-def _prepare_request(action, image, target, config, job_dir, prompts=None, parameters=None):
+def _prepare_request(action, image, target, config, job_dir, prompts=None):
     inputs = os.path.join(job_dir, "inputs")
     outputs = os.path.join(job_dir, "outputs")
     snapshot_started = time.time()
@@ -827,87 +754,47 @@ def _prepare_request(action, image, target, config, job_dir, prompts=None, param
         "log_path": os.path.join(job_dir, "worker.log"),
         "result_path": os.path.join(outputs, "result.u8"),
         "logits_result_path": os.path.join(outputs, "slice_logits.f32"),
-        "parameters": dict(parameters or {}),
     }
-    if action == ACTION_SCRIBBLEPROMPT:
-        section = config.get("scribbleprompt") or {}
-        prompt_values = dict(prompts or {})
-        request.update(
-            {
-                "checkpoint_path": _checkpoint_path(config),
-                "device": section.get("device", "cpu"),
-                "input_size": section.get("input_size", 128),
-                "prior_logit_magnitude": section.get("prior_logit_magnitude", 6.0),
-                "gpu_lock_timeout_seconds": section.get("gpu_lock_timeout_seconds", 120),
-                "scribbles": list(prompt_values.get("scribbles") or []),
-                "points": list(prompt_values.get("points") or []),
-                "boxes": list(prompt_values.get("boxes") or []),
-                "prompt_plane_axis": prompt_values.get("plane_axis"),
-                "prompt_plane_index": prompt_values.get("plane_index"),
-            }
-        )
-        request.update(_session_values(target, mask_export["sha256"]))
-    elif action == ACTION_IGAC:
-        section = config.get("igac") or {}
-        initial_foreground = int(getattr(target, "number_of_pixels", 0) or 0)
-        request.update(
-            {
-                "target_name": str(getattr(target, "name", "") or "IGAC Mask"),
-                "initial_mask_foreground_voxels": initial_foreground,
-                "display_contrast_gv": _current_display_contrast_gv(),
-                "igac": {
-                    "device": section.get("device", "auto"),
-                    "allow_cpu_fallback": bool(section.get("allow_cpu_fallback", True)),
-                    "max_cpu_roi_voxels": int(section.get("max_cpu_roi_voxels", 1500000)),
-                    "max_roi_voxels": int(section.get("max_roi_voxels", 10000000)),
-                    "workspace_margin_mm": float(section.get("workspace_margin_mm", 40.0)),
-                    "gpu_lock_timeout_seconds": float(section.get("gpu_lock_timeout_seconds", 300)),
-                    "display_interval_seconds": float(section.get("display_interval_seconds", 0.06)),
-                    "iterations_per_cycle": int(section.get("iterations_per_cycle", 1)),
-                    "ffd": dict(section.get("ffd") or {}),
-                    "convergence": dict(section.get("convergence") or {}),
-                    "parameters": dict(section.get("parameters") or {}),
-                },
-            }
-        )
+    section = config.get("scribbleprompt") or {}
+    prompt_values = dict(prompts or {})
+    request.update(
+        {
+            "checkpoint_path": _checkpoint_path(config),
+            "device": section.get("device", "cpu"),
+            "input_size": section.get("input_size", 128),
+            "prior_logit_magnitude": section.get("prior_logit_magnitude", 6.0),
+            "gpu_lock_timeout_seconds": section.get("gpu_lock_timeout_seconds", 120),
+            "scribbles": list(prompt_values.get("scribbles") or []),
+            "points": list(prompt_values.get("points") or []),
+            "boxes": list(prompt_values.get("boxes") or []),
+            "prompt_plane_axis": prompt_values.get("plane_axis"),
+            "prompt_plane_index": prompt_values.get("plane_index"),
+        }
+    )
+    request.update(_session_values(target, mask_export["sha256"]))
     request_path = os.path.join(job_dir, "request.json")
     runtime_common.write_json_atomic(request_path, request)
     _write_initial_status(request["status_path"], action)
     return request_path, request
 
 
-def _launch(action, image, target, config, job_dir, prompts=None, parameters=None, visual_objects=None):
+def _launch(action, image, target, config, job_dir, prompts=None, visual_objects=None):
     request_path, request = _prepare_request(
-        action, image, target, config, job_dir, prompts=prompts, parameters=parameters
+        action, image, target, config, job_dir, prompts=prompts
     )
-    if action == ACTION_IGAC:
-        stderr_handle = None
-        try:
-            stderr_handle = open(request["log_path"], "a")
-            process = subprocess.Popen(
-                _visible_gui_command(_python_exe(), _igac_gui_script(), request_path),
-                cwd=_project_root(),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=stderr_handle,
-                env=runtime_common.background_env(),
-                **_visible_low_priority_kwargs()
-            )
-        finally:
-            if stderr_handle is not None:
-                try:
-                    stderr_handle.close()
-                except Exception:
-                    pass
-    else:
-        process = subprocess.Popen(
-            [_python_exe(), _worker_script(), "--request", request_path],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            env=runtime_common.background_env(include_itk=action == ACTION_ITK_SNAKE),
-            **runtime_common.background_process_kwargs(low_priority=True)
-        )
+    process = subprocess.Popen(
+        [_python_exe(), _worker_script(), "--request", request_path],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=runtime_common.background_env(),
+        creationflags=(
+            # BELOW_NORMAL_PRIORITY_CLASS: keep the compute worker from
+            # competing with the foreground Mimics GUI for CPU.
+            getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)
+            if os.name == "nt" else 0
+        ),
+    )
     timeout = float((config.get(action) or {}).get("timeout_seconds", 1800))
     monitor = {
         "key": job_dir,
@@ -1029,22 +916,6 @@ def _choose_result_target(monitor, result):
         except Exception:
             changed = True
     display = monitor["display_name"]
-    if monitor.get("action") == ACTION_IGAC:
-        mode = str(result.get("apply_mode") or "copy").lower()
-        if changed:
-            _mimics_log(
-                logging.WARNING,
-                "IGAC did not overwrite the selected Mask because it changed while the external workspace was open. An editable copy will be created.",
-            )
-            mode = "copy"
-        if mode == "update" and target is not None:
-            return target
-        if mode == "copy":
-            return _create_copy(
-                monitor["image"],
-                "{0} - IGAC".format(monitor["target_name"]),
-            )
-        return None
     if changed:
         answer = mimics.dialogs.question_box(
             title="{0} Ready".format(display),
@@ -1361,29 +1232,6 @@ def _show_running(action):
     if answer == "Stop":
         _request_stop(monitor, "user")
     return True
-
-
-def _start_itk_snake(config):
-    image = _active_image()
-    target = _selected_mask(image, require_nonempty=True)
-    parameters = _profile(config)
-    if parameters is None:
-        return 0
-    job_dir = _unique_job_dir(ACTION_ITK_SNAKE)
-    try:
-        return _launch(
-            ACTION_ITK_SNAKE,
-            image,
-            target,
-            config,
-            job_dir,
-            parameters=parameters,
-        )
-    except Exception:
-        shutil.rmtree(job_dir, ignore_errors=True)
-        raise
-
-
 def _start_scribbleprompt(config):
     checkpoint = _checkpoint_path(config)
     if not checkpoint or not os.path.isfile(checkpoint):
@@ -1394,7 +1242,7 @@ def _start_scribbleprompt(config):
             )
         )
     image = _active_image()
-    target = _selected_mask(image, require_nonempty=False)
+    target = _selected_mask(image)
     job_dir = _unique_job_dir(ACTION_SCRIBBLEPROMPT)
     visual_objects = []
     try:
@@ -1422,25 +1270,6 @@ def _start_scribbleprompt(config):
         _delete_visual_objects(visual_objects)
         shutil.rmtree(job_dir, ignore_errors=True)
         raise
-
-
-def _start_igac(config):
-    image = _active_image()
-    target = _selected_mask(image, require_nonempty=False)
-    job_dir = _unique_job_dir(ACTION_IGAC)
-    try:
-        return _launch(
-            ACTION_IGAC,
-            image,
-            target,
-            config,
-            job_dir,
-        )
-    except Exception:
-        shutil.rmtree(job_dir, ignore_errors=True)
-        raise
-
-
 def main(action):
     display = DISPLAY_NAMES.get(action, str(action))
     try:
@@ -1461,10 +1290,6 @@ def main(action):
             return 1
         config = _config()
         _cleanup_old_jobs(action, config)
-        if action == ACTION_ITK_SNAKE:
-            return _start_itk_snake(config)
-        if action == ACTION_IGAC:
-            return _start_igac(config)
         return _start_scribbleprompt(config)
     except Exception as exc:
         _mimics_log(logging.ERROR, "{0} error: {1}".format(display, exc))

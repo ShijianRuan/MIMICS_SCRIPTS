@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""External workers for ITK Snake and ScribblePrompt Mimics entries."""
+"""External worker for the ScribblePrompt Mimics entry."""
 
 from __future__ import annotations
 
@@ -131,29 +131,6 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def _spacing(request: dict[str, Any]) -> tuple[float, float, float]:
-    values = tuple(float(value) for value in request.get("spacing_mm") or (1.0, 1.0, 1.0))
-    if len(values) != 3 or any(not math.isfinite(value) or value <= 0 for value in values):
-        raise ValueError("Mimics voxel spacing must contain three positive finite values.")
-    return values
-
-
-def _mask_bbox(mask: np.ndarray, margin_voxels: tuple[int, int, int]) -> tuple[slice, slice, slice]:
-    foreground = np.argwhere(mask)
-    if foreground.size == 0:
-        raise RuntimeError("ITK Snake requires a non-empty selected Mask.")
-    minimum = foreground.min(axis=0)
-    maximum = foreground.max(axis=0) + 1
-    result = []
-    for axis in range(3):
-        start = max(0, int(minimum[axis]) - int(margin_voxels[axis]))
-        stop = min(mask.shape[axis], int(maximum[axis]) + int(margin_voxels[axis]))
-        result.append(slice(start, stop))
-    return tuple(result)  # type: ignore[return-value]
-
-
 def _normalise_image(image: np.ndarray) -> np.ndarray:
     values = np.asarray(image, dtype=np.float32)
     finite = values[np.isfinite(values)]
@@ -166,129 +143,6 @@ def _normalise_image(image: np.ndarray) -> np.ndarray:
     if high <= low:
         raise RuntimeError("The active image has no usable intensity variation.")
     return np.clip((values - low) / (high - low), 0.0, 1.0).astype(np.float32, copy=False)
-
-
-def run_itk_snake(job: Job) -> dict[str, Any]:
-    try:
-        import SimpleITK as sitk
-        from scipy.ndimage import distance_transform_edt
-    except ImportError as exc:
-        raise RuntimeError("ITK Snake requires SimpleITK and scipy in nninteractive_env: {}".format(exc))
-
-    request = job.request
-    shape = _shape(request)
-    spacing = _spacing(request)
-    profile = dict(request.get("parameters") or {})
-    max_distance = float(profile.get("maximum_displacement_mm", 5.0))
-    sigma = float(profile.get("gradient_sigma_mm", 1.0))
-    if max_distance <= 0 or sigma <= 0:
-        raise ValueError("ITK Snake distance and gradient sigma must be positive.")
-
-    job.status("reading_inputs", 5, "Reading the selected Mask and active image.")
-    image = _raw_array(request["image_path"], request["image_dtype"], shape)
-    original = np.asarray(_raw_array(request["mask_path"], "uint8", shape), dtype=bool)
-    original_count = int(np.count_nonzero(original))
-    if original_count <= 0:
-        raise RuntimeError("ITK Snake requires a non-empty selected Mask.")
-    job.check_cancelled()
-
-    margin = tuple(max(2, int(math.ceil((max_distance + 3.0 * sigma) / value))) for value in spacing)
-    crop_slices = _mask_bbox(original, margin)
-    crop_image = _normalise_image(np.asarray(image[crop_slices]))
-    crop_mask = np.asarray(original[crop_slices], dtype=np.uint8)
-
-    # SimpleITK arrays are z,y,x. Mimics buffers are exported in x,y,z order.
-    # The explicit transpose preserves the physical spacing assigned below.
-    sitk_image = sitk.GetImageFromArray(np.transpose(crop_image, (2, 1, 0)))
-    sitk_mask = sitk.GetImageFromArray(np.transpose(crop_mask, (2, 1, 0)))
-    sitk_image.SetSpacing(spacing)
-    sitk_mask.SetSpacing(spacing)
-
-    job.status("edge_map", 18, "Building the 3D edge-potential image.")
-    # This filter defines sigma in physical image-spacing units. SetSpacing above
-    # therefore makes gradient_sigma_mm isotropic in millimetres even when the
-    # voxel grid is anisotropic; dividing sigma by spacing here would be wrong.
-    gradient = sitk.GradientMagnitudeRecursiveGaussian(sitk_image, sigma=sigma)
-    gradient_values = sitk.GetArrayViewFromImage(gradient)
-    positive = np.asarray(gradient_values)[np.asarray(gradient_values) > 0]
-    scale = float(np.percentile(positive, 75.0)) if positive.size else 1.0
-    scale = max(scale, 1.0e-6)
-    edge_potential = sitk.Cast(1.0 / (1.0 + gradient / scale), sitk.sitkFloat32)
-    initial_level_set = sitk.Cast(sitk.SignedMaurerDistanceMap(
-        sitk_mask,
-        insideIsPositive=False,
-        squaredDistance=False,
-        useImageSpacing=True,
-    ), sitk.sitkFloat32)
-
-    level_set = sitk.GeodesicActiveContourLevelSetImageFilter()
-    level_set.SetPropagationScaling(float(profile.get("propagation_scaling", 0.7)))
-    level_set.SetCurvatureScaling(float(profile.get("curvature_scaling", 0.8)))
-    level_set.SetAdvectionScaling(float(profile.get("advection_scaling", 1.0)))
-    level_set.SetMaximumRMSError(0.01)
-    maximum_iterations = max(1, int(profile.get("maximum_iterations", 80)))
-    level_set.SetNumberOfIterations(maximum_iterations)
-
-    def on_iteration() -> None:
-        if job.cancelled():
-            raise Cancelled("ITK Snake was stopped by the user.")
-        iteration = int(level_set.GetElapsedIterations())
-        if iteration == 1 or iteration % 5 == 0:
-            progress = 25 + int(50.0 * min(iteration, maximum_iterations) / maximum_iterations)
-            job.status(
-                "evolving_contour",
-                progress,
-                "Evolving the 3D contour: iteration {} of {}.".format(iteration, maximum_iterations),
-                iteration=iteration,
-                maximum_iterations=maximum_iterations,
-            )
-
-    level_set.AddCommand(sitk.sitkIterationEvent, on_iteration)
-    job.status("evolving_contour", 25, "Starting the 3D contour evolution.")
-    try:
-        evolved = level_set.Execute(initial_level_set, edge_potential)
-    except RuntimeError:
-        if job.cancelled():
-            raise Cancelled("ITK Snake was stopped by the user.")
-        raise
-    job.check_cancelled()
-
-    candidate_crop = np.transpose(sitk.GetArrayFromImage(evolved) <= 0.0, (2, 1, 0))
-    original_crop = np.asarray(original[crop_slices], dtype=bool)
-    inside_distance = distance_transform_edt(original_crop, sampling=spacing)
-    outside_distance = distance_transform_edt(~original_crop, sampling=spacing)
-    permitted_band = np.where(original_crop, inside_distance, outside_distance) <= max_distance
-    constrained_crop = np.where(permitted_band, candidate_crop, original_crop)
-
-    result = np.asarray(original, dtype=bool).copy()
-    result[crop_slices] = constrained_crop
-    result_count = int(np.count_nonzero(result))
-    if result_count <= 0:
-        raise RuntimeError("ITK Snake produced an empty Mask; the original Mask was left unchanged.")
-    volume_change = abs(result_count - original_count) / float(original_count)
-    maximum_change = float(profile.get("maximum_volume_change_ratio", 0.6))
-    if volume_change > maximum_change:
-        raise RuntimeError(
-            "ITK Snake changed the Mask volume by {:.1%}, above the {:.1%} safety limit. "
-            "Use a more conservative profile or improve the initial Mask.".format(volume_change, maximum_change)
-        )
-
-    job.status("writing_result", 88, "Validating and writing the ITK Snake result.")
-    result_path = Path(request["result_path"])
-    result_path.parent.mkdir(parents=True, exist_ok=True)
-    np.asarray(result, dtype=np.uint8).tofile(str(result_path))
-    return {
-        "result_path": str(result_path),
-        "result_sha256": _sha256_file(result_path),
-        "shape": list(shape),
-        "foreground_voxels": result_count,
-        "original_foreground_voxels": original_count,
-        "volume_change_ratio": round(volume_change, 6),
-        "elapsed_iterations": int(level_set.GetElapsedIterations()),
-        "maximum_displacement_mm": max_distance,
-    }
-
-
 def _load_prompt_crop(spec: dict[str, Any]) -> np.ndarray:
     shape = tuple(int(value) for value in spec["shape"])
     return np.asarray(_raw_array(spec["path"], "uint8", shape), dtype=np.float32)
@@ -675,9 +529,7 @@ def run(request_path: Path) -> int:
     job = Job(request_path, request)
     tool = str(request.get("tool") or "")
     try:
-        if tool == "itk_snake":
-            result = run_itk_snake(job)
-        elif tool == "scribbleprompt":
+        if tool == "scribbleprompt":
             result = run_scribbleprompt(job)
         else:
             raise ValueError("Unknown interactive algorithm: {}".format(tool))

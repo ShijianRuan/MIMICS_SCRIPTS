@@ -1,30 +1,15 @@
-# ITK Snake And ScribblePrompt In Mimics
+# ScribblePrompt In Mimics
 
-## Entries
+## Entry
 
-- **ITK Snake** runs a 3D ITK geodesic active contour from the selected,
-  non-empty Mask.
-- **ScribblePrompt** accepts positive/negative clicks, positive/negative
-  scribbles, and one foreground box on one axial, coronal, or sagittal slice.
-  The selected Mask may be empty or may provide the starting segmentation.
+**ScribblePrompt** accepts positive/negative clicks, positive/negative
+scribbles, and one foreground box on one axial, coronal, or sagittal slice.
+The selected Mask may be empty or may provide the starting segmentation.
 
-Both entries return to Mimics immediately after the necessary native prompt or
+The entry returns to Mimics immediately after the necessary native prompt or
 Mask-buffer collection. Computation runs under `nninteractive_env` in a hidden,
 below-normal-priority process. Reopening the same entry shows progress and a
 Stop action. Phase changes and failures are also written to the Mimics log.
-
-## ITK Snake Safety Contract
-
-The selected Mask is the initial contour; ITK Snake does not segment an organ
-from an empty image. Image and Mask buffers use the same Mimics grid. The
-worker explicitly converts Mimics `x,y,z` array order to SimpleITK `z,y,x`
-array order while retaining physical voxel spacing.
-
-Contour changes are restricted to a configurable physical-distance band around
-the original boundary. Empty output and excessive volume changes fail closed,
-leaving the project unchanged. Conservative, Balanced, and Aggressive change
-the permitted displacement and evolution settings; they are safety profiles,
-not organ presets.
 
 ## ScribblePrompt Contract
 

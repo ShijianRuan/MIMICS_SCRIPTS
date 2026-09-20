@@ -28,7 +28,7 @@ def _allow_windows_event_monitor():
     destructor after explicit unsubscribe. Default to Win32 timer callbacks on
     Windows and only use Mimics events when explicitly enabled.
     """
-    value = os.environ.get("MIMICS_IO_SETUP_USE_EVENT_TIMER", "").strip().lower()
+    value = os.environ.get("MIMICS_USE_EVENT_TIMER", "").strip().lower()
     return value in ("1", "true", "yes", "on")
 
 
@@ -472,7 +472,7 @@ def launch(mode, python_exe, context, on_submit, timeout_seconds=3600, ui_script
     # Launch as a visible GUI process. background_process_kwargs() sets
     # CREATE_NO_WINDOW + SW_HIDE, which is meant for hidden background scripts
     # and would suppress the PySide window, leaving status stuck on "opening".
-    env = runtime_common.background_env(include_itk=False)
+    env = runtime_common.background_env()
     stderr_log = os.path.join(runtime_dir, setup_id + "_stderr.log")
     try:
         stderr_handle = open(stderr_log, "w", encoding="utf-8")

@@ -137,7 +137,6 @@ def run_bridge(python_exe, params, env_overrides=None, on_wait=None):
     env.setdefault("OMP_NUM_THREADS", "1")
     env.setdefault("MKL_NUM_THREADS", "1")
     env.setdefault("OPENBLAS_NUM_THREADS", "1")
-    env.setdefault("ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS", "1")
     proc = subprocess.Popen(
         [python_exe, str(BRIDGE)],
         stdin=subprocess.PIPE,
@@ -1491,7 +1490,6 @@ def cmd_kill_background(args):
         "fewshot_pipeline.py",
         "nninteractive.inference.server.main",
         "interactive_algorithms_worker.py",
-        "igac_gui.py",
         "--watchdog",
     ]
     ps_markers = "@(" + ",".join("'{}'".format(m.replace("'", "''")) for m in markers) + ")"

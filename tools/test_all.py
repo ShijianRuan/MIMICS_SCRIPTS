@@ -43,6 +43,26 @@ RUNTIME_DIR = os.path.join(PROJECT_ROOT, "runtime_py35")
 sys.path.insert(0, RUNTIME_DIR)
 sys.path.insert(0, PROJECT_ROOT)
 
+
+def _repo_dinov3_root():
+    """Resolve the configured DINOv3 project root.
+
+    The deploy tree keeps external/dinov3-medical-seg at the path recorded in
+    fewshot_config.json (it may live outside this repository), so tests must
+    not hard-code <repo>/external/dinov3-medical-seg.
+    """
+    try:
+        with open(os.path.join(PROJECT_ROOT, "fewshot_config.json"), "r", encoding="utf-8") as handle:
+            configured = json.load(handle).get("dinov3_project") or ""
+    except Exception:
+        configured = ""
+    if configured and os.path.isfile(os.path.join(configured, "scripts", "train.py")):
+        return configured
+    return DINOV3_ROOT
+
+
+DINOV3_ROOT = _repo_dinov3_root()
+
 # -- Mock the ``mimics`` module so we can import runtime files without a
 #    Mimics workstation.  Individual tests that need real Mimics API calls
 #    are skipped on non-Mimics environments.
@@ -484,14 +504,43 @@ class TestRuntimeCommon(unittest.TestCase):
     def test_process_exists_treats_permission_denied_as_alive(self):
         import runtime_common
 
-        old_kill = runtime_common.os.kill
-        try:
-            runtime_common.os.kill = lambda _pid, _signal: (_ for _ in ()).throw(
-                PermissionError(errno.EPERM, "operation not permitted")
-            )
-            self.assertTrue(runtime_common.process_exists(12345))
-        finally:
-            runtime_common.os.kill = old_kill
+        if os.name == "nt":
+            # The Windows branch uses OpenProcess, not os.kill. Simulate the
+            # access-denied error code for a nonexistent-but-protected PID.
+            import ctypes
+
+            old_open = ctypes.WinDLL
+            try:
+                class _DeniedKernel32(object):
+                    def __init__(self, _name, use_last_error=False):
+                        pass
+
+                    def OpenProcess(self, *_args):
+                        return None
+
+                    def CloseHandle(self, _handle):
+                        return 1
+
+                def denied_windll(name, use_last_error=False):
+                    if "kernel32" in str(name):
+                        return _DeniedKernel32(name, use_last_error)
+                    return old_open(name, use_last_error=use_last_error)
+
+                ctypes.get_last_error = lambda: 5  # ERROR_ACCESS_DENIED
+                ctypes.WinDLL = denied_windll
+                self.assertTrue(runtime_common.process_exists(12345))
+            finally:
+                ctypes.WinDLL = old_open
+                del ctypes.get_last_error
+        else:
+            old_kill = runtime_common.os.kill
+            try:
+                runtime_common.os.kill = lambda _pid, _signal: (_ for _ in ()).throw(
+                    PermissionError(errno.EPERM, "operation not permitted")
+                )
+                self.assertTrue(runtime_common.process_exists(12345))
+            finally:
+                runtime_common.os.kill = old_kill
 
     def test_resource_lock_short_write_is_completed(self):
         import runtime_common
@@ -2247,7 +2296,7 @@ class TestMimicsBridgeBufferMapping(unittest.TestCase):
         args.case_id = "s0001"
         args.organ = "liver"
         args.workspace = None
-        args.dinov3_root = str(Path(PROJECT_ROOT) / "external" / "dinov3-medical-seg")
+        args.dinov3_root = DINOV3_ROOT
         args.python = sys.executable
         args.model_id = "latest"
         args.model_manifest = None
@@ -2292,7 +2341,7 @@ class TestMimicsBridgeBufferMapping(unittest.TestCase):
         args.case_id = "s0001"
         args.organ = "liver"
         args.workspace = None
-        args.dinov3_root = str(Path(PROJECT_ROOT) / "external" / "dinov3-medical-seg")
+        args.dinov3_root = DINOV3_ROOT
         args.python = sys.executable
         args.model_id = "latest"
         args.model_manifest = None
@@ -3143,7 +3192,6 @@ class TestScriptingLibraryEntries(unittest.TestCase):
                 "01_Annotate_Official_Model.py",
                 "02_Annotate_Custom_Model.py",
                 "03_Train_and_Manage_Custom_Models.py",
-                "04_DINOv3_Guided_Points.py",
             ],
             sorted(name for name in os.listdir(nn_dir) if name.endswith(".py")),
         )
@@ -4793,344 +4841,6 @@ class TestNewFeatures(unittest.TestCase):
         self.assertEqual("cancelled", status.get("application_state"))
         self.assertNotIn(key, fewshot_mimics._MONITORS)
 
-    def test_guided_points_convert_ras_to_lps_before_mimics_creation(self):
-        import fewshot_mimics
-
-        created = []
-
-        class Marker(object):
-            pass
-
-        class Image(object):
-            logical_dimensions = [64, 64, 64]
-
-            @staticmethod
-            def get_voxel_indexes(point):
-                self.assertEqual((-12.0, 8.0, 5.0), tuple(point))
-                return [10.0, 11.0, 12.0]
-
-        old_create = fewshot_mimics.mimics.analyze.create_point
-        try:
-            fewshot_mimics.mimics.analyze.create_point = lambda **kwargs: (
-                created.append(kwargs) or Marker()
-            )
-            marker = fewshot_mimics._create_guided_marker(
-                Image(), [12.0, -8.0, 5.0], True, "FG 1"
-            )
-        finally:
-            fewshot_mimics.mimics.analyze.create_point = old_create
-        self.assertIsInstance(marker, Marker)
-        self.assertEqual((-12.0, 8.0, 5.0), tuple(created[0]["point"]))
-        self.assertEqual((0.1, 1.0, 0.2), tuple(created[0]["color"]))
-
-    def test_guided_stop_removes_review_points_without_changing_mask(self):
-        import fewshot_mimics
-
-        status_path = os.path.join(self.tmp, "guided_completed.json")
-        review_path = os.path.join(self.tmp, "guided_review.json")
-        fewshot_mimics._write_json_atomic(
-            status_path,
-            {
-                "status": "completed",
-                "updated_at_epoch": time.time(),
-                "applied_to_mimics": False,
-            },
-        )
-        fewshot_mimics._write_json_atomic(review_path, {"status": "reviewing"})
-        marker = object()
-        key = "pending_guided_review"
-        deleted = []
-        monitor = {
-            "monitor_key": key,
-            "kind": "guided_infer",
-            "guided_prompts": True,
-            "guided_review_started": True,
-            "guided_review_status_path": review_path,
-            "guided_point_rows": [{"marker": marker, "include_interaction": True}],
-            "status_path": status_path,
-        }
-        old_answer = fewshot_mimics.mimics.dialogs.question_box
-        old_delete = fewshot_mimics.mimics.data.points.delete
-        try:
-            fewshot_mimics._MONITORS[key] = monitor
-            fewshot_mimics.mimics.dialogs.question_box = (
-                lambda **_kwargs: fewshot_mimics.BUTTON_STOP
-            )
-            fewshot_mimics.mimics.data.points.delete = deleted.append
-            self.assertTrue(fewshot_mimics._stop_pending_inference_application())
-        finally:
-            fewshot_mimics.mimics.dialogs.question_box = old_answer
-            fewshot_mimics.mimics.data.points.delete = old_delete
-            fewshot_mimics._MONITORS.pop(key, None)
-        self.assertEqual([marker], deleted)
-        status = fewshot_mimics._read_json(status_path, {}) or {}
-        self.assertEqual("cancelled", status.get("application_state"))
-
-    def test_guided_review_user_points_are_not_limited_by_auto_proposal_cap(self):
-        import fewshot_mimics
-        import nninteractive_mimics
-
-        rows = [
-            {
-                "marker": object(),
-                "include_interaction": True,
-                "proposal": {"source": "automatic"},
-            }
-            for _index in range(3)
-        ]
-        added_marker = object()
-        monitor = {
-            "guided_point_rows": rows,
-            "guided_last_request_id": None,
-        }
-        review = {
-            "request": {"id": 1, "command": "add_foreground"},
-        }
-        old_live = fewshot_mimics._guided_live_rows
-        old_update = fewshot_mimics._guided_review_update
-        old_capture = nninteractive_mimics._capture_point
-        try:
-            fewshot_mimics._guided_live_rows = (
-                lambda current, _image=None: current.get("guided_point_rows") or []
-            )
-            fewshot_mimics._guided_review_update = lambda *_args, **_kwargs: None
-            nninteractive_mimics._capture_point = lambda _image, _include: {
-                "_marker": added_marker,
-            }
-            fewshot_mimics._handle_guided_review_request(
-                monitor, review, object()
-            )
-        finally:
-            fewshot_mimics._guided_live_rows = old_live
-            fewshot_mimics._guided_review_update = old_update
-            nninteractive_mimics._capture_point = old_capture
-        self.assertEqual(4, len(monitor["guided_point_rows"]))
-        self.assertIs(added_marker, monitor["guided_point_rows"][-1]["marker"])
-
-    def test_guided_live_rows_clamp_edge_point_instead_of_deleting(self):
-        """A point whose sub-voxel index rounds to the boundary must be clamped,
-        not silently deleted — otherwise an edge annotation is lost."""
-        import fewshot_mimics
-        import nninteractive_mimics as nnm
-
-        marker = object()
-
-        class Image(object):
-            @staticmethod
-            def get_voxel_indexes(_point):
-                # 63.6 rounds to 64, which is == shape on a 64-wide axis.
-                return [63.6, 0.0, 0.0]
-
-        monitor = {
-            "guided_point_rows": [{"marker": marker, "include_interaction": True}],
-            "target_grid": {"target_shape": [64, 64, 64]},
-        }
-        deleted = []
-        old_coords = nnm._point_coordinates
-        old_delete = fewshot_mimics._delete_guided_marker
-        try:
-            nnm._point_coordinates = lambda _marker: [0.0, 0.0, 0.0]
-            fewshot_mimics._delete_guided_marker = deleted.append
-            rows = fewshot_mimics._guided_live_rows(monitor, Image())
-        finally:
-            nnm._point_coordinates = old_coords
-            fewshot_mimics._delete_guided_marker = old_delete
-        self.assertEqual([], deleted)
-        self.assertEqual(1, len(rows))
-        self.assertEqual([63, 0, 0], rows[0]["point"])
-
-    def test_guided_guard_skips_zombie_review_with_dead_process(self):
-        """A review whose UI process has died must not permanently block new
-        DINOv3 tasks, even if guided_review_started is still True."""
-        import fewshot_mimics
-
-        status_path = os.path.join(self.tmp, "zombie_review.json")
-        fewshot_mimics._write_json_atomic(
-            status_path, {"status": "reviewing", "updated_at_epoch": time.time()}
-        )
-
-        class DeadProcess(object):
-            def poll(self):
-                return 0  # process exited
-
-        key = "zombie_guided_review"
-        monitor = {
-            "monitor_key": key,
-            "guided_prompts": True,
-            "guided_review_started": True,
-            "guided_review_process": DeadProcess(),
-            "guided_review_status_path": status_path,
-        }
-        old_monitors = fewshot_mimics._MONITORS.get(key)
-        old_latest = fewshot_mimics._latest_active_job
-        try:
-            fewshot_mimics._MONITORS[key] = monitor
-            fewshot_mimics._latest_active_job = lambda _ts_root: (None, None)
-            allowed = fewshot_mimics._guard_no_active_job(self.tmp, "infer")
-        finally:
-            if old_monitors is None:
-                fewshot_mimics._MONITORS.pop(key, None)
-            else:
-                fewshot_mimics._MONITORS[key] = old_monitors
-            fewshot_mimics._latest_active_job = old_latest
-        self.assertTrue(allowed)
-
-    def test_guided_review_request_writes_handled_id_ack(self):
-        """After handling an add/remove request, Mimics writes handled_request_id
-        so the review window can acknowledge it even if request_pending races."""
-        import fewshot_mimics
-        import nninteractive_mimics
-
-        status_path = os.path.join(self.tmp, "handled_ack_review.json")
-        fewshot_mimics._write_json_atomic(
-            status_path, {"status": "reviewing", "updated_at_epoch": time.time()}
-        )
-        monitor = {
-            "guided_point_rows": [
-                {"marker": object(), "include_interaction": True}
-            ],
-            "guided_last_request_id": None,
-            "guided_review_status_path": status_path,
-        }
-        review = {"request": {"id": 7, "command": "remove_foreground"}}
-        old_live = fewshot_mimics._guided_live_rows
-        old_delete = fewshot_mimics._delete_guided_marker
-        old_capture = nninteractive_mimics._capture_point
-        try:
-            fewshot_mimics._guided_live_rows = (
-                lambda current, _image=None: current.get("guided_point_rows") or []
-            )
-            fewshot_mimics._delete_guided_marker = lambda _row: None
-            nninteractive_mimics._capture_point = lambda _image, _include: {}
-            fewshot_mimics._handle_guided_review_request(monitor, review, object())
-        finally:
-            fewshot_mimics._guided_live_rows = old_live
-            fewshot_mimics._delete_guided_marker = old_delete
-            nninteractive_mimics._capture_point = old_capture
-        status = fewshot_mimics._read_json(status_path, {}) or {}
-        self.assertEqual(7, status.get("handled_request_id"))
-        self.assertFalse(status.get("request_pending"))
-
-    def test_nninteractive_guided_points_support_custom_async_model(self):
-        import nninteractive_mimics
-
-        image = object()
-        source = object()
-        target = object()
-        captured = {}
-        old_profile = nninteractive_mimics._model_profile
-        old_active = nninteractive_mimics.mimics.data.images.get_active
-        old_masks = nninteractive_mimics._masks_for_image
-        old_object_id = nninteractive_mimics._object_id
-        old_select = nninteractive_mimics._select_session_masks
-        old_run = nninteractive_mimics._run_async
-        old_runtime_paths = nninteractive_mimics._runtime_paths
-        try:
-            nninteractive_mimics._model_profile = lambda config: (
-                config.get("_model_profile")
-                or {"source": "official", "validated_prompt_types": ["point"]}
-            )
-            nninteractive_mimics.mimics.data.images.get_active = lambda: image
-            nninteractive_mimics._masks_for_image = lambda _image: [source]
-            nninteractive_mimics._object_id = lambda _mask: "source-guid"
-            nninteractive_mimics._runtime_paths = lambda _config: {}
-            nninteractive_mimics._select_session_masks = lambda _image, _config, source_override=None: {
-                "source": source_override,
-                "target": target,
-                "auto_created": False,
-                "write_mode": "in_place",
-            }
-            nninteractive_mimics._run_async = lambda *args, **kwargs: (
-                captured.update({"args": args, "kwargs": kwargs}) or 0
-            )
-            result = nninteractive_mimics.run_with_suggested_points(
-                [
-                    {"point": [1, 2, 3], "include_interaction": True},
-                    {"point": [8, 9, 10], "include_interaction": False},
-                ],
-                source_mask_guid="source-guid",
-                visual_objects=["fg", "bg"],
-                model_profile={
-                    "source": "task_model",
-                    "profile_id": "brain:model-b",
-                    "validated_prompt_types": ["point"],
-                },
-            )
-        finally:
-            nninteractive_mimics._model_profile = old_profile
-            nninteractive_mimics.mimics.data.images.get_active = old_active
-            nninteractive_mimics._masks_for_image = old_masks
-            nninteractive_mimics._object_id = old_object_id
-            nninteractive_mimics._runtime_paths = old_runtime_paths
-            nninteractive_mimics._select_session_masks = old_select
-            nninteractive_mimics._run_async = old_run
-        self.assertEqual(0, result)
-        prompt = captured["kwargs"]["supplied_prompt"]
-        self.assertEqual("point_set", prompt["interaction_type"])
-        self.assertEqual("mimics", prompt["coordinates"])
-        self.assertEqual(["fg", "bg"], captured["kwargs"]["supplied_visual_objects"])
-        self.assertEqual(
-            "brain:model-b", captured["args"][2]["_model_profile"]["profile_id"]
-        )
-
-    def test_guided_review_lists_multiple_models_for_the_same_task(self):
-        import nninteractive_finetune_mimics as finetune
-
-        models = [
-            {
-                "model_id": "model-a",
-                "created_at_epoch": 1,
-                "validated_prompt_types": ["point"],
-            },
-            {
-                "model_id": "model-b",
-                "created_at_epoch": 2,
-                "validated_prompt_types": ["point"],
-            },
-        ]
-        task = {
-            "task_id": "brain",
-            "task_name": "Brain extraction",
-            "models": models,
-            "recommended_model_id": "model-a",
-        }
-        saved = {
-            "task": finetune._task_for_selected_context,
-            "mask": finetune._selected_mask,
-            "metadata": finetune._metadata_get,
-            "binding": finetune._project_binding_values,
-            "complete": finetune._model_is_complete,
-            "profile": finetune._profile,
-        }
-        try:
-            finetune._task_for_selected_context = lambda: task
-            finetune._selected_mask = lambda: object()
-            finetune._metadata_get = lambda _obj, key, _default="": (
-                "model-b" if key == finetune.MODEL_ID_METADATA else ""
-            )
-            finetune._project_binding_values = lambda _path: {}
-            finetune._model_is_complete = lambda _task, _model: True
-            finetune._profile = lambda current_task, model: {
-                "source": "task_model",
-                "profile_id": "{}:{}".format(
-                    current_task["task_id"], model["model_id"]
-                ),
-                "task_id": current_task["task_id"],
-                "task_name": current_task["task_name"],
-                "model_id": model["model_id"],
-                "validated_prompt_types": ["point"],
-            }
-            payload = finetune.guided_model_options()
-        finally:
-            finetune._task_for_selected_context = saved["task"]
-            finetune._selected_mask = saved["mask"]
-            finetune._metadata_get = saved["metadata"]
-            finetune._project_binding_values = saved["binding"]
-            finetune._model_is_complete = saved["complete"]
-            finetune._profile = saved["profile"]
-        self.assertEqual(3, len(payload["options"]))
-        self.assertEqual("task_model:brain:model-b", payload["default_key"])
-
     def test_fewshot_export_reaps_process_when_lock_transfer_fails(self):
         import tools.fewshot_pipeline as pipeline
 
@@ -5347,10 +5057,6 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn(
             "request_nninteractive_server_release_on_contention",
             inspect.getsource(interactive_algorithms_worker._gpu_lock),
-        )
-        self.assertIn(
-            "request_nninteractive_server_release_on_contention",
-            Path(PROJECT_ROOT, "tools", "igac_gui.py").read_text(encoding="utf-8"),
         )
 
     def test_internal_batch_export_locks_the_actual_label_destination(self):
@@ -5672,7 +5378,7 @@ class TestNewFeatures(unittest.TestCase):
             "workspace": os.path.join(self.tmp, "fewshot_models"),
             "python_exe": sys.executable,
             "pipeline_script": os.path.join(PROJECT_ROOT, "tools", "fewshot_pipeline.py"),
-            "dinov3_root": os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg"),
+            "dinov3_root": DINOV3_ROOT,
         }
         launch = training_ui.prepare_training_launch(
             context,
@@ -5929,7 +5635,7 @@ class TestNewFeatures(unittest.TestCase):
             "workspace": workspace,
             "python_exe": sys.executable,
             "pipeline_script": os.path.join(PROJECT_ROOT, "tools", "fewshot_pipeline.py"),
-            "dinov3_root": os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg"),
+            "dinov3_root": DINOV3_ROOT,
             "project_root": PROJECT_ROOT,
             "mimics_exe": r"C:\Program Files\Materialise\MimicsResearch.exe",
             "config": {"base_config": "config/train.yaml", "default_epochs": 3},
@@ -6000,7 +5706,7 @@ class TestNewFeatures(unittest.TestCase):
             "workspace": os.path.join(self.tmp, "fewshot_models"),
             "python_exe": sys.executable,
             "pipeline_script": os.path.join(PROJECT_ROOT, "tools", "fewshot_pipeline.py"),
-            "dinov3_root": os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg"),
+            "dinov3_root": DINOV3_ROOT,
             "mimics_exe": "",
             "config": {},
         }
@@ -6023,7 +5729,7 @@ class TestNewFeatures(unittest.TestCase):
             "workspace": os.path.join(self.tmp, "fewshot_models"),
             "python_exe": sys.executable,
             "pipeline_script": os.path.join(PROJECT_ROOT, "tools", "fewshot_pipeline.py"),
-            "dinov3_root": os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg"),
+            "dinov3_root": DINOV3_ROOT,
             "mimics_exe": "",
             "config": {},
         }
@@ -6080,7 +5786,7 @@ class TestNewFeatures(unittest.TestCase):
         }
         result = pipeline.validate_training_encoder_assets(
             config,
-            Path(PROJECT_ROOT) / "external" / "dinov3-medical-seg",
+            Path(DINOV3_ROOT),
         )
         self.assertEqual("pytorch", result["backend"])
         self.assertTrue(result["path"].endswith("model"))
@@ -6107,7 +5813,7 @@ class TestNewFeatures(unittest.TestCase):
             "workspace": os.path.join(self.tmp, "fewshot_models"),
             "python_exe": sys.executable,
             "pipeline_script": os.path.join(PROJECT_ROOT, "tools", "fewshot_pipeline.py"),
-            "dinov3_root": os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg"),
+            "dinov3_root": DINOV3_ROOT,
             "mimics_exe": "",
             "config": {},
         }
@@ -6309,8 +6015,14 @@ class TestNewFeatures(unittest.TestCase):
         import runtime_common
         queue_runtime = Path(runtime_common.import_queue_runtime_dir(PROJECT_ROOT, str(output_dir)))
         runner = (queue_runtime / "_run_create_mcs.py").read_text(encoding="utf-8")
-        self.assertIn(bridge_python, runner)
+        # The runner embeds paths as JSON string literals, so compare against
+        # the escaped form the file actually contains.
+        self.assertIn(json.dumps(bridge_python)[1:-1], runner)
         self.assertNotIn(sys.executable, runner)
+        # And the embedded literal must still parse back to the real path.
+        literal_line = [l for l in runner.splitlines() if "MIMICS_BRIDGE_PYTHON" in l][0]
+        literal = literal_line.split("= ", 1)[1].strip()
+        self.assertEqual(bridge_python, json.loads(literal))
 
     def test_fewshot_external_setup_validates_parameters(self):
         """External setup rejects invalid values before launching training."""
@@ -6515,7 +6227,7 @@ class TestNewFeatures(unittest.TestCase):
         config_path = os.path.join(self.tmp, "generated_config.yaml")
         pipeline.write_training_config(
             config_path,
-            os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg", "config", "mimics_lora_segformer3d.yaml"),
+            os.path.join(DINOV3_ROOT, "config", "mimics_lora_segformer3d.yaml"),
             os.path.join(self.tmp, "dataset"),
             "exp_test",
             Args(),
@@ -6543,9 +6255,7 @@ class TestNewFeatures(unittest.TestCase):
         sys.modules["transformers"] = fake_transformers
         try:
             module_path = os.path.join(
-                PROJECT_ROOT,
-                "external",
-                "dinov3-medical-seg",
+                DINOV3_ROOT,
                 "src",
                 "models",
                 "backbone.py",
@@ -6592,7 +6302,7 @@ class TestNewFeatures(unittest.TestCase):
 
         generated = pipeline.write_training_config(
             os.path.join(self.tmp, "batch_config.yaml"),
-            os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg", "config", "mimics_lora_segformer3d.yaml"),
+            os.path.join(DINOV3_ROOT, "config", "mimics_lora_segformer3d.yaml"),
             os.path.join(self.tmp, "dataset"),
             "exp_test",
             Args(),
@@ -6630,7 +6340,7 @@ class TestNewFeatures(unittest.TestCase):
         metrics_history = os.path.join(self.tmp, "metrics_history.json")
         pipeline.write_training_config(
             config_path,
-            os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg", "config", "mimics_lora_segformer3d.yaml"),
+            os.path.join(DINOV3_ROOT, "config", "mimics_lora_segformer3d.yaml"),
             os.path.join(self.tmp, "dataset"),
             "exp_test",
             Args(),
@@ -6642,12 +6352,18 @@ class TestNewFeatures(unittest.TestCase):
         with open(config_path, "r", encoding="utf-8") as handle:
             text = handle.read()
         self.assertIn("metrics_history_path:", text)
-        self.assertIn(metrics_history.replace("\\", "/"), text)
+        # The writer uses yaml.safe_dump, which keeps native path separators.
+        # Assert the parsed value rather than a literal substring.
+        import yaml
+        self.assertEqual(
+            metrics_history,
+            yaml.safe_load(text)["runtime"]["metrics_history_path"],
+        )
 
         history_only_config = os.path.join(self.tmp, "generated_config_history_only.yaml")
         pipeline.write_training_config(
             history_only_config,
-            os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg", "config", "mimics_lora_segformer3d.yaml"),
+            os.path.join(DINOV3_ROOT, "config", "mimics_lora_segformer3d.yaml"),
             os.path.join(self.tmp, "dataset"),
             "exp_test",
             Args(),
@@ -7228,7 +6944,7 @@ class TestNewFeatures(unittest.TestCase):
             "workspace": workspace,
             "python_exe": sys.executable,
             "pipeline_script": os.path.join(PROJECT_ROOT, "tools", "fewshot_pipeline.py"),
-            "dinov3_root": os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg"),
+            "dinov3_root": DINOV3_ROOT,
             "project_root": PROJECT_ROOT,
             "config": {},
         }
@@ -7274,7 +6990,7 @@ class TestNewFeatures(unittest.TestCase):
             "workspace": workspace,
             "python_exe": sys.executable,
             "pipeline_script": os.path.join(PROJECT_ROOT, "tools", "fewshot_pipeline.py"),
-            "dinov3_root": os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg"),
+            "dinov3_root": DINOV3_ROOT,
             "project_root": PROJECT_ROOT,
             "config": {},
         }
@@ -7557,6 +7273,7 @@ class TestNewFeatures(unittest.TestCase):
         old_context = fewshot_mimics._resolve_prediction_context
         old_guard = fewshot_mimics._guard_no_active_job
         old_launch = fewshot_mimics._launch_inference_job
+        old_registry = fewshot_mimics._global_model_registry_path
         try:
             selected = type("Mask", (object,), {"name": "liver"})()
             fewshot_mimics._selected_mask = lambda: selected
@@ -7566,11 +7283,13 @@ class TestNewFeatures(unittest.TestCase):
                 os.path.join(ts_root, "s0001", "ct.nii.gz"),
             )
             fewshot_mimics._guard_no_active_job = lambda root, requested_kind="train": True
-            fewshot_mimics._launch_inference_job = lambda config_arg, root, case_id, organ, selected_model=None, target_spec=None, source_image_path=None, guided_prompts=False: launched.append(selected_model) or 0
+            fewshot_mimics._launch_inference_job = lambda config_arg, root, case_id, organ, selected_model=None, target_spec=None, source_image_path=None: launched.append(selected_model) or 0
+            fewshot_mimics._global_model_registry_path = lambda: os.path.join(ts_root, "missing_registry.json")
             result = fewshot_mimics._start_inference(choose_model=False)
         finally:
             fewshot_mimics._selected_mask = old_selected
             fewshot_mimics._resolve_prediction_context = old_context
+            fewshot_mimics._global_model_registry_path = old_registry
             fewshot_mimics._guard_no_active_job = old_guard
             fewshot_mimics._launch_inference_job = old_launch
         self.assertEqual(0, result)
@@ -8521,7 +8240,11 @@ class TestNewFeatures(unittest.TestCase):
 
     def test_checkpoint_saves_and_restores_batchnorm_running_stats(self):
         """Checkpoint save must include BN running_mean/var for correct inference."""
-        checkpoint = __import__("external.dinov3-medical-seg.src.utils.checkpoint",
+        # The DINOv3 project may live outside this repo (fewshot_config.json
+        # "dinov3_project"); import its checkpoint module via DINOV3_ROOT.
+        if str(DINOV3_ROOT) not in sys.path:
+            sys.path.insert(0, str(DINOV3_ROOT))
+        checkpoint = __import__("src.utils.checkpoint",
                                 fromlist=["save_checkpoint", "load_checkpoint"])
         import torch, tempfile, shutil
         from pathlib import Path
@@ -8571,19 +8294,19 @@ class TestNewFeatures(unittest.TestCase):
         """LoRA training → checkpoint → inference must produce identical logits."""
         import torch, tempfile, shutil, sys, os
         from pathlib import Path
-        sys.path.insert(0, os.path.join(os.getcwd(), "external", "dinov3-medical-seg"))
+        sys.path.insert(0, DINOV3_ROOT)
         from src.utils.config import load_config
         from src.utils.checkpoint import save_checkpoint, load_checkpoint
 
         tmp = Path(tempfile.mkdtemp(prefix="lora_roundtrip_"))
         try:
-            cfg_path = os.path.join(os.getcwd(), "external", "dinov3-medical-seg",
+            cfg_path = os.path.join(DINOV3_ROOT,
                                     "config", "mimics_lora_segformer3d.yaml")
             cfg = load_config(cfg_path)
             cfg["finetune"]["method"] = "lora"
             model_path = Path(cfg["model"]["model_path"])
             if not model_path.is_absolute():
-                model_path = Path(os.getcwd()) / "external" / "dinov3-medical-seg" / model_path
+                model_path = Path(DINOV3_ROOT) / model_path
             if not model_path.is_dir():
                 self.skipTest("bundled DINOv3 weights are not present in this checkout")
             try:
@@ -8622,7 +8345,7 @@ class TestNewFeatures(unittest.TestCase):
     def test_mimics_lora_segformer3d_template_exists_and_has_no_k_shot(self):
         """Default template must use k_shot=-1 (use all data) not 5."""
         import yaml, os
-        path = os.path.join(os.getcwd(), "external", "dinov3-medical-seg",
+        path = os.path.join(DINOV3_ROOT,
                             "config", "mimics_lora_segformer3d.yaml")
         self.assertTrue(os.path.isfile(path), "mimics_lora_segformer3d.yaml must exist")
         with open(path, "r", encoding="utf-8") as f:
@@ -8852,7 +8575,7 @@ class TestNewFeatures(unittest.TestCase):
             "organ": "organ", "ts_root": self.tmp,
             "workspace": os.path.join(self.tmp, "fewshot_models"),
             "python_exe": sys.executable, "pipeline_script": os.path.join(PROJECT_ROOT, "tools", "fewshot_pipeline.py"),
-            "dinov3_root": os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg"),
+            "dinov3_root": DINOV3_ROOT,
             "project_root": PROJECT_ROOT, "config": {"base_config": "config/research/ct_fewshot_fast.yaml"},
         }
         fingerprint = {
@@ -9012,17 +8735,15 @@ class TestNewFeatures(unittest.TestCase):
         self.assertEqual([6, 15, 23, 31], architecture.intermediate_layer_indices(32))
         self.assertEqual([0, 1, 3, 4], architecture.intermediate_layer_indices(5))
 
+        # The DINOv3 project may live outside this repo (fewshot_config.json
+        # "dinov3_project"); build paths from DINOV3_ROOT, not PROJECT_ROOT.
         model_root = os.path.join(
-            PROJECT_ROOT,
-            "external",
-            "dinov3-medical-seg",
+            DINOV3_ROOT,
             "models",
             "dinov3-vitl16",
         )
         base_config = os.path.join(
-            PROJECT_ROOT,
-            "external",
-            "dinov3-medical-seg",
+            DINOV3_ROOT,
             "config",
             "research",
             "ct_fewshot_fast.yaml",
@@ -9043,13 +8764,7 @@ class TestNewFeatures(unittest.TestCase):
             ("dinov3-vitl16", 24, 1024),
         ):
             spec = architecture.inspect_dinov3_vit_weights(
-                os.path.join(
-                    PROJECT_ROOT,
-                    "external",
-                    "dinov3-medical-seg",
-                    "models",
-                    name,
-                )
+                os.path.join(DINOV3_ROOT, "models", name)
             )
             self.assertEqual(depth, spec["num_hidden_layers"])
             self.assertEqual(hidden, spec["hidden_size"])
@@ -9455,7 +9170,7 @@ class TestNewFeatures(unittest.TestCase):
         had_events = hasattr(io_setup_mimics.mimics, "events")
         old_tick = io_setup_mimics._tick
         old_win32 = io_setup_mimics._start_win32_monitor
-        old_env = os.environ.get("MIMICS_IO_SETUP_USE_EVENT_TIMER")
+        old_env = os.environ.get("MIMICS_USE_EVENT_TIMER")
         calls = []
         monitor = {"key": "native-event", "busy": False}
         try:
@@ -9465,7 +9180,7 @@ class TestNewFeatures(unittest.TestCase):
             # in to event subscriptions so the test exercises the event callback
             # regardless of host platform.
             io_setup_mimics._start_win32_monitor = lambda _monitor, _poll: False
-            os.environ["MIMICS_IO_SETUP_USE_EVENT_TIMER"] = "1"
+            os.environ["MIMICS_USE_EVENT_TIMER"] = "1"
             self.assertTrue(io_setup_mimics._start_monitor(monitor, poll_seconds=0.0))
             self.assertEqual("timer", events.name)
             events.callback()
@@ -9477,9 +9192,9 @@ class TestNewFeatures(unittest.TestCase):
             io_setup_mimics._tick = old_tick
             io_setup_mimics._start_win32_monitor = old_win32
             if old_env is None:
-                os.environ.pop("MIMICS_IO_SETUP_USE_EVENT_TIMER", None)
+                os.environ.pop("MIMICS_USE_EVENT_TIMER", None)
             else:
-                os.environ["MIMICS_IO_SETUP_USE_EVENT_TIMER"] = old_env
+                os.environ["MIMICS_USE_EVENT_TIMER"] = old_env
             io_setup_mimics._IO_SETUP_MONITORS.pop(monitor["key"], None)
             if had_events:
                 io_setup_mimics.mimics.events = old_events
@@ -9896,7 +9611,7 @@ class TestNewFeatures(unittest.TestCase):
     def test_2d_decoder_conv2d_output_shape(self):
         """conv2d decoder produces correct output shape."""
         import torch
-        sys.path.insert(0, os.path.join(os.getcwd(), "external", "dinov3-medical-seg"))
+        sys.path.insert(0, DINOV3_ROOT)
         from src.models.decoder_2d import Conv2DDecoder
         decoder = Conv2DDecoder([768, 768, 768, 768], num_classes=2)
         feats = [torch.randn(1, 768, 16, 14, 14) for _ in range(4)]
@@ -9906,7 +9621,7 @@ class TestNewFeatures(unittest.TestCase):
     def test_every_public_decoder_produces_a_stacked_3d_prediction(self):
         import torch
         import tools.fewshot_training_setup_ui as ui
-        sys.path.insert(0, os.path.join(os.getcwd(), "external", "dinov3-medical-seg"))
+        sys.path.insert(0, DINOV3_ROOT)
         from src.models.decoder_3d import DecoderFactory
         features = [torch.randn(1, 8, 3, 2, 2) for _ in range(4)]
         for decoder_name in ui.DECODER_CHOICES:
@@ -9952,10 +9667,7 @@ class TestNewFeatures(unittest.TestCase):
 
     def test_public_decoders_accept_small_base_and_large_hidden_sizes(self):
         import torch
-        sys.path.insert(
-            0,
-            os.path.join(os.getcwd(), "external", "dinov3-medical-seg"),
-        )
+        sys.path.insert(0, DINOV3_ROOT)
         from src.models.decoder_3d import DecoderFactory
 
         for hidden_size in (384, 768, 1024):
@@ -9988,10 +9700,7 @@ class TestNewFeatures(unittest.TestCase):
 
     def test_variable_depth_batch_ignores_padding_in_loss(self):
         import torch
-        sys.path.insert(
-            0,
-            os.path.join(os.getcwd(), "external", "dinov3-medical-seg"),
-        )
+        sys.path.insert(0, DINOV3_ROOT)
         from src.data.dataset_3d import pad_volume_batch
         from src.training.losses import DiceFocalLoss
 
@@ -10024,10 +9733,7 @@ class TestNewFeatures(unittest.TestCase):
 
     def test_fit_pad_preprocessing_preserves_aspect_ratio_and_contract(self):
         import numpy as np
-        sys.path.insert(
-            0,
-            os.path.join(os.getcwd(), "external", "dinov3-medical-seg"),
-        )
+        sys.path.insert(0, DINOV3_ROOT)
         from src.data.dataset_3d import fit_pad_geometry, prepare_model_input
         from src.data.input_contract import input_contract_for_config
 
@@ -10053,10 +9759,7 @@ class TestNewFeatures(unittest.TestCase):
         self.assertEqual("sample", contract["normalization_scope"])
 
     def test_legacy_stretch_input_contract_remains_loadable(self):
-        sys.path.insert(
-            0,
-            os.path.join(os.getcwd(), "external", "dinov3-medical-seg"),
-        )
+        sys.path.insert(0, DINOV3_ROOT)
         from src.data.input_contract import (
             input_contract_for_config,
             validate_input_contract,
@@ -10081,7 +9784,7 @@ class TestNewFeatures(unittest.TestCase):
     def test_2d_decoder_all_variants_in_factory(self):
         """All 2D decoder types must be creatable via DecoderFactory."""
         import torch
-        sys.path.insert(0, os.path.join(os.getcwd(), "external", "dinov3-medical-seg"))
+        sys.path.insert(0, DINOV3_ROOT)
         from src.models.decoder_3d import DecoderFactory
         feats = [torch.randn(1, 768, 8, 14, 14) for _ in range(4)]
         for dec_type in ["conv2d", "conv2d_unet", "conv2d_deeplab", "conv2d_2_5d"]:
@@ -10092,7 +9795,7 @@ class TestNewFeatures(unittest.TestCase):
 
     def test_2d_decoder_fewer_params_than_3d(self):
         """2D decoders must have fewer parameters than equivalent 3D decoders."""
-        sys.path.insert(0, os.path.join(os.getcwd(), "external", "dinov3-medical-seg"))
+        sys.path.insert(0, DINOV3_ROOT)
         from src.models.decoder_2d import Conv2DDecoder, Conv2DUNetDecoder
         from src.models.decoder_3d import DPT3DDecoder, SegFormer3DDecoder
         dims = [768, 768, 768, 768]
@@ -10110,7 +9813,7 @@ class TestNewFeatures(unittest.TestCase):
     def test_2d_decoder_single_slice(self):
         """2D decoders must handle D=1 (single slice) edge case."""
         import torch
-        sys.path.insert(0, os.path.join(os.getcwd(), "external", "dinov3-medical-seg"))
+        sys.path.insert(0, DINOV3_ROOT)
         from src.models.decoder_2d import Conv2DDecoder, Conv2DUNetDecoder, Conv2DDeepLabDecoder, Conv2D_2_5D_Decoder
         dims = [768, 768, 768, 768]
         feat_1 = [torch.randn(1, 768, 1, 14, 14) for _ in range(4)]
@@ -10123,7 +9826,7 @@ class TestNewFeatures(unittest.TestCase):
     def test_2d_decoder_25d_neighbour_stacking(self):
         """2.5D decoder _stack_neighbours must correctly replicate edge slices."""
         import torch
-        sys.path.insert(0, os.path.join(os.getcwd(), "external", "dinov3-medical-seg"))
+        sys.path.insert(0, DINOV3_ROOT)
         from src.models.decoder_2d import Conv2D_2_5D_Decoder
         B, C, D, h, w = 1, 4, 5, 2, 2
         feat = torch.zeros(B, C, D, h, w)
@@ -10145,28 +9848,28 @@ class TestNewFeatures(unittest.TestCase):
 
     def test_2d_decoder_batch_experiments_script_exists(self):
         """Batch experiment runner must be importable."""
-        exp_script = os.path.join(os.getcwd(), "external", "dinov3-medical-seg",
+        exp_script = os.path.join(DINOV3_ROOT,
                                    "scripts", "batch_experiments.py")
         self.assertTrue(os.path.isfile(exp_script),
                         f"batch_experiments.py not found at {exp_script}")
 
     def test_2d_decoder_materialize_all_script_exists(self):
         """Multi-organ materialization script must exist."""
-        mat_script = os.path.join(os.getcwd(), "external", "dinov3-medical-seg",
+        mat_script = os.path.join(DINOV3_ROOT,
                                    "scripts", "materialize_all_organs.py")
         self.assertTrue(os.path.isfile(mat_script),
                         f"materialize_all_organs.py not found at {mat_script}")
 
     def test_2d_decoder_evaluate_script_exists(self):
         """Model evaluation script must exist."""
-        eval_script = os.path.join(os.getcwd(), "external", "dinov3-medical-seg",
+        eval_script = os.path.join(DINOV3_ROOT,
                                     "scripts", "evaluate_model.py")
         self.assertTrue(os.path.isfile(eval_script),
                         f"evaluate_model.py not found at {eval_script}")
 
     def test_2d_decoder_analyze_script_exists(self):
         """Results analysis script must exist."""
-        anal_script = os.path.join(os.getcwd(), "external", "dinov3-medical-seg",
+        anal_script = os.path.join(DINOV3_ROOT,
                                     "scripts", "analyze_results.py")
         self.assertTrue(os.path.isfile(anal_script),
                         f"analyze_results.py not found at {anal_script}")
@@ -10408,7 +10111,7 @@ class TestNewFeatures(unittest.TestCase):
         had_events = hasattr(io_setup_mimics.mimics, "events")
         old_tick = io_setup_mimics._tick
         old_win32 = io_setup_mimics._start_win32_monitor
-        old_env = os.environ.get("MIMICS_IO_SETUP_USE_EVENT_TIMER")
+        old_env = os.environ.get("MIMICS_USE_EVENT_TIMER")
         calls = []
         monitor = {"key": "throttle", "busy": False}
         try:
@@ -10417,7 +10120,7 @@ class TestNewFeatures(unittest.TestCase):
             # Force the event-timer path (bypass Win32, opt in to events) so the
             # throttle logic is exercised on every host platform.
             io_setup_mimics._start_win32_monitor = lambda _monitor, _poll: False
-            os.environ["MIMICS_IO_SETUP_USE_EVENT_TIMER"] = "1"
+            os.environ["MIMICS_USE_EVENT_TIMER"] = "1"
             # poll_seconds=2.0 → interval=max(0.25, 2.0)=2.0s
             self.assertTrue(io_setup_mimics._start_monitor(
                 monitor, poll_seconds=2.0,
@@ -10437,9 +10140,9 @@ class TestNewFeatures(unittest.TestCase):
             io_setup_mimics._tick = old_tick
             io_setup_mimics._start_win32_monitor = old_win32
             if old_env is None:
-                os.environ.pop("MIMICS_IO_SETUP_USE_EVENT_TIMER", None)
+                os.environ.pop("MIMICS_USE_EVENT_TIMER", None)
             else:
-                os.environ["MIMICS_IO_SETUP_USE_EVENT_TIMER"] = old_env
+                os.environ["MIMICS_USE_EVENT_TIMER"] = old_env
             io_setup_mimics._IO_SETUP_MONITORS.pop(monitor["key"], None)
             if had_events:
                 io_setup_mimics.mimics.events = old_events

@@ -149,7 +149,7 @@ The integration uses file-backed resource locks under:
 
 `background_mimics.lock` is shared by import `.mcs` creation, label export, and few-shot label export. Only one Mimics-Script-owned `MimicsResearch.exe -b` process should run at a time. This is intentionally conservative because floating-license capacity is not visible to the scripts.
 
-Default startup cleanup is safe by default: it removes stale resource lock files whose PID no longer exists, and nnInteractive can clean an owned server whose watchdog has disappeared after the idle timeout. It does not kill live bridge, training, inference, or background Mimics processes unless the user explicitly runs `Stop Background Services` or sets `MIMICS_AGGRESSIVE_AUTO_CLEANUP_ON_START=1`.
+Default startup cleanup is safe by default: it removes stale resource lock files whose PID no longer exists, and nnInteractive can clean an owned server whose watchdog has disappeared after the idle timeout. It does not kill live bridge, training, inference, or background Mimics processes unless the user explicitly runs `Stop Background Services`.
 
 ## Organ Selection
 

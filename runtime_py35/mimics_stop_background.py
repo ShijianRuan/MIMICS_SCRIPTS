@@ -48,7 +48,6 @@ MARKERS = (
     "nninteractive_task_model_center.py",
     "nninteractive_task_model_chooser.py",
     "interactive_algorithms_worker.py",
-    "igac_gui.py",
     "nnunet_pipeline.py",
     "nnunet_stage_worker.py",
     "nnunet_training_setup_ui.py",

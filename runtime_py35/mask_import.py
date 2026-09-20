@@ -486,7 +486,7 @@ def _allow_windows_event_monitor():
     subscriptions when this flag is set, matching mimics_import,
     mimics_export and io_setup_mimics.
     """
-    value = os.environ.get("MIMICS_MASK_IMPORT_USE_EVENT_TIMER", "").strip().lower()
+    value = os.environ.get("MIMICS_USE_EVENT_TIMER", "").strip().lower()
     return value in ("1", "true", "yes", "on")
 
 
@@ -783,7 +783,7 @@ def _start_mask_import_monitor(monitor, poll_seconds=0.25):
     # On Windows, prefer the native message-loop timer: importing a second Qt
     # binding inside Mimics can freeze the UI, and the Mimics event subscription
     # can emit a benign Subscription.__del__ AttributeError on some builds, so
-    # the event path is opt-in there (MIMICS_MASK_IMPORT_USE_EVENT_TIMER). This
+    # the event path is opt-in there (MIMICS_USE_EVENT_TIMER). This
     # matches mimics_import, mimics_export and io_setup_mimics.
     if os.name == "nt":
         if _start_win32_mask_import_monitor(monitor, poll_seconds):

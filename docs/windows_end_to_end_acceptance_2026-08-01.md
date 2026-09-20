@@ -6,7 +6,7 @@
 
 ## 1. 当前审查结论
 
-本地自动化测试已经覆盖导入导出桥接、异步状态机、进程停止、GPU 与后台 Mimics 资源、DINOv3、nnInteractive、nnU-Net、ITK Snake、ScribblePrompt、IGAC 和远程训练控制等代码路径。
+本地自动化测试已经覆盖导入导出桥接、异步状态机、进程停止、GPU 与后台 Mimics 资源、DINOv3、nnInteractive、nnU-Net、ScribblePrompt 和远程训练控制等代码路径。
 
 当前自动化结果：
 
@@ -181,7 +181,6 @@ nninteractive_env\python.exe -c "import onnxruntime as o; print(o.get_available_
 3. 打开 DINOv3 训练设置、状态查看和模型选择窗口。
 4. 打开 nnInteractive 自定义模型中心。
 5. 打开 nnU-Net 训练、推理和状态窗口。
-6. 打开 IGAC 窗口。
 
 验收标准：
 
@@ -330,58 +329,19 @@ nninteractive_env\python.exe tools\verify_medical_geometry.py ^
 - Undo 恢复上一次设置。
 - Reset Full Range 不崩溃，并恢复当前图像实际完整范围。
 
-## 8. ITK Snake、ScribblePrompt 和 IGAC
-
-### 8.1 ITK Snake
-
-入口：`02_AI/ITK_Snake.py`
-
-使用：选择活动图像和初始 mask，配置演化参数后在外部 worker 运行 3D 吸附。
-
-预期：
-
-- Mimics GUI 在计算期间持续响应。
-- `gradient_sigma_mm` 按体素 spacing 转换，不按像素误解释。
-- 最大位移壳层限制可以阻止弱边界无限渗漏。
-- 结果应用时可更新选中 mask 或创建可编辑副本。
-- 用户可以停止并释放 worker。
-
-### 8.2 ScribblePrompt
+## 8. ScribblePrompt
 
 入口：`02_AI/ScribblePrompt.py`
 
-使用：在 Mimics 采集前景/背景涂画，外部模型完成 2D 提示分割，再把结果返回 Mimics。
+使用：在 Mimics 采集前景/背景点击、涂画或一个前景 box，外部模型完成 2D 提示分割，再把结果返回 Mimics。
 
 预期：
 
 - 检查点缺失时明确提示，不静默降级成未知算法。
-- 快速拖动画笔时轨迹经过插值，不出现明显断点。
+- 所有提示位于同一二维切片；首次只点击时由用户选择视图平面。
 - CT 与 MRI 均走与模型匹配的强度预处理。
+- 上一轮 logits 只有在 Mask 未被人工修改时才复用。
 - 结果可继续编辑，可更新选中 mask 或创建副本。
-
-### 8.3 IGAC
-
-入口：`02_AI/IGAC.py`
-
-使用流程：
-
-1. 从 Mimics 导出当前图像和初始 mask 到外部 IGAC 窗口。
-2. 默认使用 `Correct` 在错误区域点击或拖动；必要时使用 Add/Remove/Clear 显式覆盖。
-3. 鼠标按下和移动期间实时查看 LGDF 演化，抬起后自动稳定并暂停，不在每一帧回写 Mimics。
-4. 确认最终结果后一次性返回 Mimics。
-
-预期：
-
-- 大图像只处理局部 ROI，不要求用户在全图精细操作。
-- 显示使用原始图像强度和可调窗宽窗位，不依赖 Mimics GV。
-- Mask 外操作转换为 Add、Mask 内操作转换为 Barrier；内部跨到外部整笔重放为 Add，反向跨越整笔重放为 Barrier，第一次跨界后锁定。
-- 转换后的 Add 与 Barrier 在每轮演化中保持硬约束。
-- 最大位移限制默认可用，弱边界不无限膨胀。
-- 画刷轨迹连续，缩放后坐标映射准确。
-- 高频鼠标事件不会积压；同一笔合并处理，不跨笔合并或破坏撤销点。
-- `Stop` 保留当前预览，`Undo last` 恢复上一笔，稳定条件或安全上限会自动暂停。
-- 外部窗口关闭、取消或异常后不留下 worker。
-- 最终结果返回时由用户选择更新选中 mask 或创建副本。
 
 ## 9. nnInteractive
 
@@ -519,8 +479,7 @@ nninteractive_env\python.exe tools\verify_medical_geometry.py ^
 | nnInteractive | 图像/初始 mask 快照及结果回填时短暂独占 | 复用推理服务并持有全局 GPU 锁 | 不需要 | 长训练占用 GPU 时在采集提示前拒绝启动；空闲推理服务收到其他 GPU 任务请求时主动释放。 |
 | nnInteractive 微调 | 标签导出阶段受 buffer/后台 Mimics 规则约束 | 全局互斥 | 视数据源而定 | 与其他训练共享 GPU 规则；配置窗口和训练任务都阻止环境被中途修改。 |
 | nnU-Net 训练/推理 | 标签导出或预测回填时短暂占用 | 全局互斥，并附加数据集锁 | 视数据源而定 | 同一数据集写入不并发；预测只回填到启动时的项目。 |
-| ITK Snake | 输入快照和结果回填时短暂独占 | 不占用 | 不需要 | 可与 GPU 训练并行；项目切换后已完成结果不会写入新项目。 |
-| ScribblePrompt / IGAC | 输入快照和结果回填时短暂独占 | 全局互斥 | 不需要 | 等待 GPU 时请求空闲 nnInteractive 服务让出显卡；项目切换后等待原项目，不误写当前项目。 |
+| ScribblePrompt | 输入快照和结果回填时短暂独占 | 全局互斥 | 不需要 | 等待 GPU 时请求空闲 nnInteractive 服务让出显卡；项目切换后等待原项目，不误写当前项目。 |
 | 环境 Check | 不占用 | 不占用 | 不需要 | 只读，可在其他任务运行时执行。 |
 | 安装、修复、解压环境 | 不占用 | 不占用 | 不需要 | 任何任务、外部功能窗口或资源锁仍活跃时拒绝开始，避免运行中替换依赖。 |
 
@@ -534,7 +493,6 @@ Windows 后台训练/推理子进程使用 `BELOW_NORMAL_PRIORITY_CLASS`，降�
 2. nnInteractive 推理结束后立即启动 DINOv3 训练。
 3. DINOv3 训练运行时尝试 nnInteractive 和 nnU-Net GPU 推理。
 4. 导出运行时启动另一个导入或导出。
-5. IGAC 窗口运行时启动 ScribblePrompt。
 6. 每个阶段分别点击专项 Stop 和全局 Stop。
 
 验收标准：
@@ -562,7 +520,7 @@ Windows 后台训练/推理子进程使用 `BELOW_NORMAL_PRIORITY_CLASS`，降�
 ### 13.3 项目切换与全局停止
 
 - 在后台结果尚未完成时打开另一个 `.mcs`，结果必须保持待处理或安全丢弃，不得写入新项目。
-- 返回原项目并激活原图像后，允许仍在有效期内的 Mask 导入、ITK Snake、ScribblePrompt 或 IGAC 结果继续应用。
+- 返回原项目并激活原图像后，允许仍在有效期内的 Mask 导入或 ScribblePrompt 结果继续应用。
 - `Stop All Owned Services` 必须先写取消标记，再拆除 monitor，随后终止仍存活的受管进程，最后清除本 Mimics 会话持有的 buffer 租约和陈旧跨进程锁。
 - 全局停止之后立即运行 Mask 导入、Mask 导出和任一 AI 入口，不能出现永久 busy、永久 `stopping` 或“任务无停止路径”。
 
@@ -601,9 +559,7 @@ Windows 后台训练/推理子进程使用 `BELOW_NORMAL_PRIORITY_CLASS`，降�
 | Mask 导入 | 待测 | 待测 | 待测 | 待测 | 待测 | 待记录 |
 | Mask 导出 | 待测 | 待测 | 待测 | 待测 | 待测 | 待记录 |
 | 窗宽窗位与复查工具 | 待测 | 待测 | 待测 | 待测 | 待测 | 待记录 |
-| ITK Snake | 待测 | 待测 | 待测 | 待测 | 待测 | 待记录 |
 | ScribblePrompt | 待测 | 待测 | 待测 | 待测 | 待测 | 待记录 |
-| IGAC | 待测 | 待测 | 待测 | 待测 | 待测 | 待记录 |
 | nnInteractive 官方模型 | 待测 | 待测 | 待测 | 待测 | 待测 | 待记录 |
 | nnInteractive 自定义模型 | 待测 | 待测 | 待测 | 待测 | 待测 | 待记录 |
 | DINOv3 训练与推理 | 待测 | 待测 | 待测 | 待测 | 待测 | 待记录 |

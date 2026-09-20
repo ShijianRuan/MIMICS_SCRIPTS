@@ -1008,7 +1008,7 @@ def read_text_tail(path, max_bytes=16384):
         return ""
 
 
-def background_env(extra=None, include_itk=False):
+def background_env(extra=None):
     env = os.environ.copy()
     # Remove variables that can hijack the child Python's import system.
     # The bridge runs under nninteractive_env/python.exe (3.13) whose
@@ -1021,8 +1021,6 @@ def background_env(extra=None, include_itk=False):
     env.setdefault("OMP_NUM_THREADS", "1")
     env.setdefault("MKL_NUM_THREADS", "1")
     env.setdefault("OPENBLAS_NUM_THREADS", "1")
-    if include_itk:
-        env.setdefault("ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS", "1")
     if extra:
         env.update(extra)
     return env

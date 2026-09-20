@@ -648,7 +648,7 @@ def filter_jobs(rows, filter_text, limit=80):
         is_active = status in ACTIVE_STATUSES
         if filter_text == "Training" and kind != "train":
             continue
-        if filter_text == "Inference" and kind not in ("infer", "guided_infer"):
+        if filter_text == "Inference" and kind != "infer":
             continue
         if filter_text == "Failed / cancelled" and status not in ("failed", "cancelled", "cancelling"):
             continue
@@ -688,7 +688,7 @@ def select_current_task(rows, organ="", job_id="", limit=25):
     active_work = [
         item
         for item in active
-        if item[1].get("kind") in ("train", "infer", "guided_infer")
+        if item[1].get("kind") in ("train", "infer")
     ]
     primary = (active_work or active or candidates)[0]
     # Return primary first, then the rest in mtime order, deduplicating.

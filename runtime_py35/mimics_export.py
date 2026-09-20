@@ -555,7 +555,7 @@ def _bridge_script():
 
 
 def _background_env(extra=None):
-    return runtime_common.background_env(extra, include_itk=True)
+    return runtime_common.background_env(extra)
 
 
 def _python_exe():
@@ -941,7 +941,7 @@ def _allow_windows_event_monitor():
     event subscriptions when this flag is set, matching mimics_import and
     io_setup_mimics.
     """
-    value = os.environ.get("MIMICS_EXPORT_USE_EVENT_TIMER", "").strip().lower()
+    value = os.environ.get("MIMICS_USE_EVENT_TIMER", "").strip().lower()
     return value in ("1", "true", "yes", "on")
 
 

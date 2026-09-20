@@ -152,7 +152,8 @@ editable in the training window.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `MIMICS_AUTO_CLEANUP_ON_START` | `1` | Remove stale lock records whose owning process is gone. Does not kill healthy live tasks. |
-| `MIMICS_AGGRESSIVE_AUTO_CLEANUP_ON_START` | unset | Opt-in termination of owned stale services. Use only for recovery. |
+| `MIMICS_AGGRESSIVE_AUTO_CLEANUP_ON_START` | unset | Opt-in termination of owned stale services at startup. Use only for recovery. |
+| `MIMICS_USE_EVENT_TIMER` | unset | Opt in to Mimics event subscriptions instead of Win32 SetTimer for background monitors. Certain Mimics versions log Subscription.__del__ errors with the event path. |
 | `MIMICS_IMPORT_AUTO_OPEN_MCS` | unset | Automatically open a completed imported project when supported. |
 | `MIMICS_IMPORT_USE_MIMICS_LOG` | unset | Mirror verbose import diagnostics into the Mimics log panel. |
 | `MIMICS_IMPORT_VERBOSE_LOG` | unset | Enable detailed import diagnostics. |
@@ -209,63 +210,7 @@ flattened inference configuration. Standard pretrained encoders remain shared
 runtime assets under `external/dinov3-medical-seg/models` and must exist on the
 target installation, as verified by environment setup and package checks.
 
-## ITK Snake, IGAC, And ScribblePrompt
-
-`interactive_algorithms_config.json` configures the three independent Mimics
-entries. ITK Snake always uses the selected non-empty Mask as its initial 3D
-contour. Its profiles define the maximum physical displacement, iterations,
-level-set scaling, and volume-change safety limit.
-
-IGAC opens a non-modal PySide6 workspace and evolves a spacing-aware 3D local
-Gaussian distribution fitting contour in the external Python environment. The
-Mimics image and selected Mask are copied once when the entry starts. All live
-interaction remains outside Mimics; the project changes only after **Apply to Mimics**.
-The shared `gpu.lock` prevents IGAC from competing with training or
-nnInteractive for CUDA memory. `workspace_margin_mm` bounds work around a
-non-empty Mask, while `max_roi_voxels` and `max_cpu_roi_voxels` prevent an
-unresponsive or out-of-memory workspace.
-
-IGAC starts paused and exposes a complete continuous contour, not a set of
-control-point markers. `Drag contour` moves one captured contour position.
-`Guide edge` resamples an ordered pointer path and repeatedly attracts the
-nearest current contour section with the same local FFD. Neither tool exposes a
-foreground/background paint mode. LGDF starts once, after release, and operates
-only on the merged edited 3D neighbourhood. IGAC `ffd` keys:
-
-- `boundary_capture_pixels` (default `16.0`): screen-space hit target for a
-  displayed Mask boundary, kept usable at different zoom levels and DPI scales.
-- `boundary_capture_max_mm` (default `8.0`): physical upper bound on boundary
-  capture so a distant contour is never selected accidentally.
-- `influence_radius_mm` (default `8.0`): fixed physical radius of the local 3D
-  cubic B-spline support. The UI exposes this value.
-- `maximum_drag_ratio` (default `0.65`): maximum applied drag/support ratio. A
-  longer pointer movement is visibly clamped instead of expanding the support.
-- `anchor_radius_mm` (default `0.8`): small inside/outside pins around the
-  target boundary used while LGDF settles after release.
-- `refine_margin_mm` (default `3.0`): physical margin added around the FFD patch
-  for the post-release local LGDF cycle.
-
-IGAC `trace` keys:
-
-- `capture_pixels` (default `28.0`) and `capture_max_mm` (default `12.0`):
-  screen and physical limits for starting trajectory guidance near a contour.
-- `sample_spacing_mm` (default `2.0`): physical spacing used to resample
-  coalesced pointer events while preserving their order.
-- `maximum_samples_per_flush` (default `8`): bound on work consumed from one
-  GUI event batch so pointer updates cannot build an ever-growing backlog.
-- `refine_margin_mm` (default `3.0`): local margin used by the single LGDF cycle
-  started after pointer release.
-
-Static image planes are cached; live frames update only Mask/guidance overlays.
-The large canvas is the only editable plane. Two read-only orthogonal context
-views share a linked 3D cursor, use physical voxel aspect ratios, and refresh at
-`context_display_interval_seconds` (default `0.12` seconds). Pointer updates are
-coalesced so the context views cannot build an input backlog.
-`convergence` controls the visible-Mask stability test and the per-action
-time/iteration safety ceilings. **Stop** keeps the current preview,
-**Undo** restores the exact pre-action level set and constraints, and
-**Reset** restores the Mask captured when the workspace opened. No gradient
-peak snapping or foreground/background painting is used by the normal GUI.
+## ScribblePrompt
 
 ScribblePrompt uses the official UNet checkpoint at
 `external/ScribblePrompt/checkpoints/ScribblePrompt_unet_v1_nf192_res128.pt`.

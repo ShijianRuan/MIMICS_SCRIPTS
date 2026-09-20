@@ -25,7 +25,7 @@ Mimics GUI 的前提下，让用户知道任务是否运行、等待什么、如
 | nnInteractive 推理 | GPU worker、顺序提示推理、结果写回 | worker stage、sequence、60 秒日志 | 再次运行 nnInteractive 后丢弃会话，或停止后台服务 |
 | nnInteractive 微调 | GPU、本地或远程训练 | Task Models 状态、loss/AUC、日志 | `Pause and Release GPU` 或 `Stop Training` |
 | nnU-Net | GPU、Dataset ID、远程任务、结果写回 | Status 窗口、阶段、60 秒日志 | `04 Stop Running Task` |
-| ITK Snake / ScribblePrompt / IGAC | GPU 或 Mask buffer | 外部窗口或阶段日志 | 再次运行同一入口后选择 `Stop` |
+| ScribblePrompt | GPU 或 Mask buffer | 阶段日志 | 再次运行同一入口后选择 `Stop` |
 
 “暂停”只在训练器具备可靠 checkpoint 恢复语义时提供。DINOv3、nnU-Net、导入
 和导出当前提供取消，不伪装成暂停；取消后资源必须在子进程确认退出后释放。
@@ -44,7 +44,7 @@ Mimics GUI 的前提下，让用户知道任务是否运行、等待什么、如
 
 - Mask 导入遇到同名 Mask 时不再覆盖，自动创建 `名称 - Imported`、
   `名称 - Imported 2` 等可编辑副本。
-- DINOv3、nnInteractive、nnU-Net、ITK Snake、ScribblePrompt 和 IGAC 的结果
+- DINOv3、nnInteractive、nnU-Net 和 ScribblePrompt 的结果
   在完成后选择 `Update Selected Mask` 或 `Create Editable Copy`。
 - 关闭选择框、目标 Mask 在后台运行期间发生变化、项目或活动图像不一致时，默认
   不覆盖现有工作；根据功能创建副本、等待原项目，或丢弃结果。
