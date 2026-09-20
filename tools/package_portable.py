@@ -793,7 +793,10 @@ def offline_bundle():
         print("    Build/check nninteractive_env first; offline-bundle must download wheels from that environment.")
         return 1
 
-    bundle_dir = PROJECT_ROOT.parent / "mimics_script_offline"
+    # Output beside the project (E:\mimics_script_bundle), NOT inside it and
+    # never the same name as an existing install — a bundle write must not
+    # be able to clobber a live checkout or backup.
+    bundle_dir = PROJECT_ROOT.parent / "mimics_script_bundle"
     if bundle_dir.exists():
         print(_yellow("Bundle directory already exists. Overwriting..."))
 
