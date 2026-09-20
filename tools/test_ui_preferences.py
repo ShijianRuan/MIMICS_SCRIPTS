@@ -9,6 +9,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+# runnable both as `python tools/test_ui_preferences.py` and from a test
+# runner that already has the project root on sys.path.
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in os.sys.path:
+    os.sys.path.insert(0, str(_ROOT))
+
 from tools import ui_preferences
 
 

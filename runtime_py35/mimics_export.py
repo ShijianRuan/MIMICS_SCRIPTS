@@ -559,16 +559,12 @@ def _background_env(extra=None):
 
 
 def _python_exe():
-    env_root = _environment_root()
-    candidates = [
-        os.path.join(env_root, "python.exe"),
-        os.path.join(env_root, "Scripts", "python.exe"),
-        os.path.join(env_root, "python", "python.exe"),
-    ]
-    for c in candidates:
-        if os.path.isfile(c):
-            return c
-    return candidates[0]
+    found = runtime_common.find_external_python(_project_root())
+    if found:
+        return found
+    # Preserve the historical behavior: return the default path even when
+    # missing so callers can report a clear setup error.
+    return os.path.join(_environment_root(), "python.exe")
 
 
 def _find_mimics_exe():

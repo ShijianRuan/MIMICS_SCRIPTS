@@ -44,35 +44,10 @@ def _project_root():
 
 
 def _find_external_python():
-    root = _project_root()
-    for rel in (
-        "python_env/python.exe",
-        "python_env/Scripts/python.exe",
-        "python_env/python/python.exe",
-        "nninteractive_env/python.exe",
-        "nninteractive_env/Scripts/python.exe",
-        "nninteractive_env/python/python.exe",
-        "python/python.exe",
-        "python_env/bin/python3",
-        "python_env/bin/python",
-        "nninteractive_env/bin/python3",
-        "nninteractive_env/bin/python",
-    ):
-        path = os.path.join(root, rel)
-        if os.path.isfile(path):
-            return path
-    # Try system Python before giving up.
-    try:
-        import shutil
-        for cmd in ("python3", "python"):
-            found = shutil.which(cmd)
-            if found:
-                return found
-    except Exception:
-        pass
-    # Do NOT fall back to sys.executable here. Inside Mimics this may point to
-    # MimicsResearch.exe, which would start a new Mimics instance.
-    return ""
+    # allow_system_python: setup must work even before the bundled env exists.
+    return runtime_common.find_external_python(
+        _project_root(), allow_system_python=True
+    )
 
 
 def _state_file():

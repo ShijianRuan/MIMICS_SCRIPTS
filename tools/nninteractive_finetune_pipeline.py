@@ -50,6 +50,12 @@ from resource_locks import (  # noqa: E402
     ResourceLockCancelled,
     ResourceLockTimeout,
     default_resource_lock_dir,
+    register_process,
+)
+
+from pipeline_common import (  # noqa: E402
+    spawn_background_mimics_export as _spawn_bg_mimics,
+    terminate_popen_tree as _pipeline_terminate_tree,
 )
 
 
@@ -101,38 +107,9 @@ def _process_exists(pid: object) -> bool:
 
 
 def _terminate_process_tree(process: subprocess.Popen[Any], grace: float = 10.0) -> bool:
-    if process.poll() is not None:
-        return True
-    try:
-        process.terminate()
-    except Exception:
-        pass
-    deadline = time.time() + max(0.0, grace)
-    while time.time() < deadline:
-        if process.poll() is not None:
-            return True
-        time.sleep(0.2)
-    if os.name == "nt":
-        try:
-            subprocess.run(
-                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=20,
-                **_hidden_process_kwargs()
-            )
-        except Exception:
-            pass
-    else:
-        try:
-            process.kill()
-        except Exception:
-            pass
-    try:
-        process.wait(timeout=10)
-    except Exception:
-        pass
-    return process.poll() is not None
+    # Shared kill ladder from pipeline_common (terminate -> grace poll ->
+    # taskkill /T /F -> final wait).
+    return _pipeline_terminate_tree(process, grace=grace)
 
 
 def _control_action(control_path: Path) -> str:
@@ -254,41 +231,46 @@ def _run_label_export(
         label_export_status=str(batch_status),
         label_export_stop_path=str(stop_path),
     )
-    lock_path = (
-        default_resource_lock_dir(ROOT)
-        / "nninteractive_finetune_export_{}.lock".format(job_dir.name)
+    # Scoped background-Mimics lock (shared protocol): serialize on the
+    # resources the job actually touches — the .mcs source directory and
+    # the label staging destination.  A per-job unique lock would provide
+    # no mutual exclusion between concurrent jobs reading the same .mcs
+    # folder, so it was replaced by the unified scoped protocol.
+    from pipeline_common import acquire_scoped_background_mimics_locks
+
+    output_dir = Path(request["mcs_dir"]).expanduser().resolve()
+    locks = acquire_scoped_background_mimics_locks(
+        [output_dir, staging],
+        owner="nnInteractive task label export",
+        wait_seconds=0,
+        cancel_path=control_path,
     )
-    export_lock = FileResourceLock(
-        lock_path,
-        "background_mimics",
-        "nnInteractive task label export",
-    ).acquire(wait_seconds=0)
     process = None
     try:
         with runtime_log.open("ab") as log_handle:
-            process = subprocess.Popen(
-                [
-                    mimics_exe,
-                    "-background_mode",
-                    "-save_log",
-                    str(export_root / "mimics_application.log"),
-                    "-run_script",
-                    str(runner_path),
-                ],
-                stdin=subprocess.DEVNULL,
-                stdout=log_handle,
-                stderr=subprocess.STDOUT,
-                **_hidden_process_kwargs()
+            process = _spawn_bg_mimics(
+                mimics_exe,
+                runner_path,
+                export_root,
+                status_path=str(status_path),
+                log_handle=log_handle,
+                mimics_log_path=export_root / "mimics_application.log",
             )
-        export_lock.update_pid(
-            process.pid,
-            kind="nninteractive_finetune_export",
-            controller_pid=os.getpid(),
-            stop_path=str(stop_path),
-            control_path=str(control_path),
-            status_path=str(status_path),
-            job_id=job_dir.name,
-        )
+        for lock in locks:
+            if not lock.update_pid(
+                process.pid,
+                kind="nninteractive_finetune_export",
+                controller_pid=os.getpid(),
+                stop_path=str(stop_path),
+                control_path=str(control_path),
+                status_path=str(status_path),
+                job_id=job_dir.name,
+            ):
+                raise RuntimeError(
+                    "Background Mimics lock ownership was lost while recording PID {}.".format(
+                        process.pid
+                    )
+                )
         append_log(log_path, "Background Mimics label export started (PID {}).".format(process.pid))
         timeout = float(load_config().get("label_export_timeout_seconds", 3600))
         deadline = time.time() + timeout
@@ -375,7 +357,8 @@ def _run_label_export(
     finally:
         if process is not None and process.poll() is None:
             _terminate_process_tree(process)
-        export_lock.release()
+        for lock in reversed(locks):
+            lock.release()
 
 
 def _ensure_nifti_image(source: Path, destination: Path) -> Path:
@@ -726,30 +709,10 @@ def _mcs_export_fingerprint(
 
 
 def _copy_file_atomic(source: Path, destination: Path) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(
-        "{}.{}.tmp".format(destination.name, uuid.uuid4().hex)
-    )
-    try:
-        shutil.copy2(str(source), str(temporary))
-        last_error = None
-        for attempt in range(20):
-            try:
-                os.replace(str(temporary), str(destination))
-                return
-            except OSError as exc:
-                last_error = exc
-                time.sleep(min(0.25, 0.02 * (attempt + 1)))
-        raise OSError(
-            "Could not publish {} after bounded replace retries: {}".format(
-                destination, last_error
-            )
-        )
-    finally:
-        try:
-            temporary.unlink()
-        except OSError:
-            pass
+    # Shared staged-rename copy from pipeline_common.
+    from pipeline_common import copy_file_atomic
+
+    copy_file_atomic(source, destination)
 
 
 def _prepare_cached_mcs_labels(
@@ -1769,6 +1732,14 @@ def _run_training(
             status_path=str(status_path),
             job_id=job_dir.name,
         )
+        try:
+            register_process(
+                ROOT, "trainer", process.pid,
+                parent_pid=os.getpid(),
+                state_path=str(status_path),
+            )
+        except Exception:
+            pass
         append_log(log_path, "Training process started (PID {}).".format(process.pid))
         last_signature = None
         while process.poll() is None:
@@ -1889,6 +1860,14 @@ def _run_evaluation(
             control_path=str(control_path),
             status_path=str(status_path),
         )
+        try:
+            register_process(
+                ROOT, "trainer", process.pid,
+                parent_pid=os.getpid(),
+                state_path=str(status_path),
+            )
+        except Exception:
+            pass
         while process.poll() is None:
             action = _control_action(control_path)
             if action in ("pause", "stop", "cancel"):

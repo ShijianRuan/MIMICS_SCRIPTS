@@ -103,21 +103,9 @@ def _log(level, message):
 
 def _environment_python():
     root = _project_root()
-    candidates = (
-        os.path.join(root, "python_env", "python.exe"),
-        os.path.join(root, "python_env", "Scripts", "python.exe"),
-        os.path.join(root, "python_env", "python", "python.exe"),
-        os.path.join(root, "python_env", "bin", "python3"),
-        os.path.join(root, "python_env", "bin", "python"),
-        os.path.join(root, "nninteractive_env", "python.exe"),
-        os.path.join(root, "nninteractive_env", "Scripts", "python.exe"),
-        os.path.join(root, "nninteractive_env", "python", "python.exe"),
-        os.path.join(root, "nninteractive_env", "bin", "python3"),
-        os.path.join(root, "nninteractive_env", "bin", "python"),
-    )
-    for path in candidates:
-        if os.path.isfile(path):
-            return os.path.abspath(path)
+    found = runtime_common.find_external_python(root)
+    if found:
+        return os.path.abspath(found)
     raise RuntimeError(
         "The nninteractive_env Python was not found. Run Setup Environment first."
     )
@@ -180,6 +168,13 @@ def _open_gui_process(script_name, context_path, key):
     finally:
         stderr_handle.close()
     _GUI_PROCESSES[key] = process
+    runtime_common.register_process(
+        runtime_common.project_root(),
+        "external_ui",
+        process.pid,
+        parent_pid=os.getpid(),
+        state_path=context_path,
+    )
     return process, True
 
 

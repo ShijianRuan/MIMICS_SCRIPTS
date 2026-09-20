@@ -59,23 +59,11 @@ def _jobs_root(action):
 
 
 def _python_exe():
-    root = _project_root()
-    candidates = [
-        os.environ.get("MIMICS_BRIDGE_PYTHON", ""),
-        os.path.join(root, "python_env", "python.exe"),
-        os.path.join(root, "python_env", "Scripts", "python.exe"),
-        os.path.join(root, "python_env", "bin", "python3"),
-        os.path.join(root, "python_env", "bin", "python"),
-        os.path.join(root, "nninteractive_env", "python.exe"),
-        os.path.join(root, "nninteractive_env", "Scripts", "python.exe"),
-        os.path.join(root, "nninteractive_env", "bin", "python3"),
-        os.path.join(root, "nninteractive_env", "bin", "python"),
-    ]
-    for candidate in candidates:
-        if candidate and os.path.isfile(candidate):
-            return os.path.abspath(candidate)
+    found = runtime_common.find_external_python(_project_root())
+    if found:
+        return found
     raise RuntimeError(
-        "The nninteractive_env Python was not found. Run Setup / Repair Environment first."
+        "The external Python environment was not found. Run Setup / Repair Environment first."
     )
 
 
@@ -794,6 +782,13 @@ def _launch(action, image, target, config, job_dir, prompts=None, visual_objects
             getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)
             if os.name == "nt" else 0
         ),
+    )
+    runtime_common.register_process(
+        runtime_common.project_root(),
+        "scribble_worker",
+        process.pid,
+        parent_pid=os.getpid(),
+        state_path=os.path.join(job_dir, "status.json"),
     )
     timeout = float((config.get(action) or {}).get("timeout_seconds", 1800))
     monitor = {

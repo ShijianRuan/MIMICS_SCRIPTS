@@ -148,22 +148,11 @@ def _integration_root():
 def _environment_root():
     # The environment may be inside the worklist, beside it, under the project
     # root, or be the standalone bundle root itself.
+    found = runtime_common.find_external_python(_project_root())
+    if found:
+        return os.path.dirname(os.path.abspath(found))
     root = _project_root()
-    candidates = [
-        os.path.join(root, "python_env"),
-        os.path.join(os.path.dirname(root), "python_env"),
-        os.path.join(root, "nninteractive_env"),
-        os.path.join(os.path.dirname(root), "nninteractive_env"),
-        root,
-    ]
-    for candidate in candidates:
-        if (
-            os.path.isfile(os.path.join(candidate, "python.exe"))
-            or os.path.isfile(os.path.join(candidate, "Scripts", "python.exe"))
-            or os.path.isfile(os.path.join(candidate, "python", "python.exe"))
-        ):
-            return candidate
-    return candidates[0]
+    return os.path.join(root, "python_env")
 
 
 def _environment_python_candidates(env_root):
@@ -183,16 +172,21 @@ def _existing_environment_python(env_root):
 
 def _mimics_bridge_paths(config):
     integration_root = _integration_root()
-    env_root = _environment_root()
-    python_exe = _first_existing_file(
-        _environment_python_candidates(env_root) + [
-            os.environ.get("MIMICS_BRIDGE_PYTHON", ""),
-            os.environ.get("NNINTERACTIVE_PYTHON", ""),
-            config.get("python", ""),
-            _existing_environment_python(env_root),
-        ],
-        "Mimics bridge Python",
-    )
+    # Canonical discovery (env overrides, python_env/nninteractive_env layouts).
+    python_exe = runtime_common.find_external_python(_project_root())
+    if not python_exe:
+        # Fall back to the legacy candidate list so the error message still
+        # lists every location that was checked.
+        env_root = _environment_root()
+        python_exe = _first_existing_file(
+            _environment_python_candidates(env_root) + [
+                os.environ.get("MIMICS_BRIDGE_PYTHON", ""),
+                os.environ.get("NNINTERACTIVE_PYTHON", ""),
+                config.get("python", ""),
+                _existing_environment_python(env_root),
+            ],
+            "Mimics bridge Python",
+        )
     bridge_script = _first_existing_file(
         [
             os.environ.get("MIMICS_BRIDGE_SCRIPT", ""),
@@ -749,16 +743,13 @@ def _runtime_paths(config):
     integration_root = _integration_root()
     environment_root = _environment_root()
     python_candidates = _environment_python_candidates(environment_root) + [
-        os.path.join(root, "python_env", "python.exe"),
-        os.path.join(root, "python_env", "Scripts", "python.exe"),
-        os.path.join(root, "python_env", "python", "python.exe"),
-        os.path.join(root, "nninteractive_env", "python.exe"),
-        os.path.join(root, "nninteractive_env", "Scripts", "python.exe"),
-        os.path.join(root, "nninteractive_env", "python", "python.exe"),
         os.environ.get("NNINTERACTIVE_PYTHON", ""),
         config.get("python", ""),
     ]
-    python_exe = _first_existing_file(python_candidates, "nnInteractive Python")
+    python_exe = (
+        runtime_common.find_external_python(root)
+        or _first_existing_file(python_candidates, "nnInteractive Python")
+    )
     bridge_script = _first_existing_file(
         [
             os.environ.get("NNINTERACTIVE_BRIDGE", ""),
@@ -3174,6 +3165,15 @@ def _start_async_worker(python_exe, bridge_script, worker_dir):
         )
     finally:
         worker_log.close()
+    # Register with the process registry so the startup sweep and the
+    # health panel can see this worker (best-effort; never blocks spawn).
+    runtime_common.register_process(
+        runtime_common.project_root(),
+        "async_worker",
+        process.pid,
+        parent_pid=os.getpid(),
+        state_path=os.path.join(worker_dir, "worker_status.json"),
+    )
     return process, worker_log_path
 
 
@@ -4350,11 +4350,17 @@ def _handle_async_result(image, target, state):
 def _cleanup_stale_processes():
     """Clean safe stale runtime state from a previous crashed session.
 
-    Default cleanup removes dead resource locks and only terminates owned
-    nnInteractive servers whose watchdog is gone and whose idle timeout has
-    elapsed. Killing live bridge/worker processes is opt-in via
-    MIMICS_AGGRESSIVE_AUTO_CLEANUP_ON_START=1 or the explicit Stop Background
-    Services entry.
+    The process registry sweep runs first: it clears dead records,
+    terminates registered orphans (parent gone, kill-on-sweep policy) and
+    releases locks they still hold - proving ownership via PID + start
+    marker, so no aggressive flag is needed for those.
+
+    The legacy cmdline path below still handles unregistered processes
+    (started before the registry existed) and owned nnInteractive servers
+    whose watchdog is gone and whose idle timeout has elapsed. Killing
+    other live bridge/worker processes stays opt-in via
+    MIMICS_AGGRESSIVE_AUTO_CLEANUP_ON_START=1 or the explicit Stop
+    Background Services entry.
 
     Uses a single hidden batch PowerShell call instead of per-process calls
     to avoid popping up visible console windows that freeze Mimics.
@@ -4363,6 +4369,11 @@ def _cleanup_stale_processes():
         return
     killed = []
     locks_removed = runtime_common.cleanup_stale_resource_locks(_resource_lock_dir())
+    registry_summary = runtime_common.sweep_processes(
+        runtime_common.project_root()
+    )
+    registry_killed = len(registry_summary.get("terminated_orphans") or [])
+    locks_removed += len(registry_summary.get("released_locks") or [])
     _SERVER_PROTECT_MARKERS = (
         "nninteractive.inference.server.main",
         "--watchdog",
@@ -4432,10 +4443,14 @@ def _cleanup_stale_processes():
                         killed.append(pid)
     except Exception:
         pass
-    if killed or locks_removed:
+    if killed or locks_removed or registry_killed:
         pieces = []
         if killed:
             pieces.append("terminated {0} stale integration process(es)".format(len(killed)))
+        if registry_killed:
+            pieces.append(
+                "terminated {0} orphaned registered process(es)".format(registry_killed)
+            )
         if locks_removed:
             pieces.append("removed {0} stale resource lock file(s)".format(locks_removed))
         _mimics_log(

@@ -215,25 +215,25 @@ def bindings_path(workspace: Path) -> Path:
 
 
 def find_environment_python() -> Path:
+    """Locate the external (py3.13) interpreter.
+
+    Delegates to runtime_common.find_external_python so the candidate list
+    lives in exactly one place; the NNINTERACTIVE_ENV_PYTHON override is
+    honored first for backwards compatibility.
+    """
     configured = str(
         os.environ.get("NNINTERACTIVE_ENV_PYTHON") or ""
     ).strip()
-    candidates = (
-        Path(configured) if configured else None,
-        ROOT / "python_env" / "python.exe",
-        ROOT / "python_env" / "Scripts" / "python.exe",
-        ROOT / "python_env" / "python" / "python.exe",
-        ROOT / "python_env" / "bin" / "python3",
-        ROOT / "python_env" / "bin" / "python",
-        ROOT / "nninteractive_env" / "python.exe",
-        ROOT / "nninteractive_env" / "Scripts" / "python.exe",
-        ROOT / "nninteractive_env" / "python" / "python.exe",
-        ROOT / "nninteractive_env" / "bin" / "python3",
-        ROOT / "nninteractive_env" / "bin" / "python",
-    )
-    for candidate in candidates:
-        if candidate is not None and candidate.is_file():
-            return candidate.resolve()
+    if configured and Path(configured).is_file():
+        return Path(configured).resolve()
+    try:
+        import runtime_common
+
+        found = runtime_common.find_external_python(str(ROOT))
+        if found:
+            return Path(found).resolve()
+    except Exception:
+        pass
     raise FileNotFoundError(
         "The nninteractive_env Python was not found. Run Setup Environment first."
     )

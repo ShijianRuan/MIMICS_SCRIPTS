@@ -53,26 +53,12 @@ def _project_root():
 
 
 def _python_exe():
-    """Find the nninteractive_env Python executable."""
-    root = _project_root()
-    candidates = [
-        os.path.join(root, "python_env", "python.exe"),
-        os.path.join(root, "python_env", "Scripts", "python.exe"),
-        os.path.join(root, "python_env", "bin", "python3"),
-        os.path.join(root, "python_env", "bin", "python"),
-        os.path.join(root, "nninteractive_env", "python.exe"),
-        os.path.join(root, "nninteractive_env", "Scripts", "python.exe"),
-        os.path.join(root, "nninteractive_env", "bin", "python3"),
-        os.path.join(root, "nninteractive_env", "bin", "python"),
-    ]
-    env_val = os.environ.get("MIMICS_BRIDGE_PYTHON", "")
-    if env_val and os.path.isfile(env_val):
-        candidates.insert(0, env_val)
-    for candidate in candidates:
-        if os.path.isfile(candidate):
-            return os.path.abspath(candidate)
+    """Find the external Python executable (shared candidate list)."""
+    found = runtime_common.find_external_python(_project_root())
+    if found:
+        return found
     raise RuntimeError(
-        "The nninteractive_env Python was not found. "
+        "The external Python environment was not found. "
         "Run Setup Environment or setup_offline.bat first."
     )
 

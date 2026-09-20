@@ -55,20 +55,7 @@ def _project_root():
 
 
 def _find_external_python():
-    root = _project_root()
-    for rel in (
-        "python_env/python.exe",
-        "python_env/Scripts/python.exe",
-        "python_env/python/python.exe",
-        "nninteractive_env/python.exe",
-        "nninteractive_env/Scripts/python.exe",
-        "nninteractive_env/python/python.exe",
-        "python/python.exe",
-    ):
-        path = os.path.join(root, rel)
-        if os.path.isfile(path):
-            return path
-    return ""
+    return runtime_common.find_external_python(_project_root())
 
 
 def _bridge_script():

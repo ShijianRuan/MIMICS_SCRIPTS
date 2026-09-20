@@ -19,8 +19,10 @@ if str(ROOT) not in os.sys.path:
     os.sys.path.insert(0, str(ROOT))
 
 from tools.fewshot_pipeline import (
+    load_repo_config,
     portable_inference_config,
     register_global_model,
+    resolve_path,
     resolved_manifest_payload,
     safe_slug as fewshot_slug,
     validate_model_manifest,
@@ -325,7 +327,9 @@ def export_dinov3(args: argparse.Namespace) -> int:
         shutil.copy2(manifest["checkpoint"], portable_dir / "model.pth")
         dino_root = Path(
             manifest.get("dinov3_root")
-            or ROOT / "external" / "dinov3-medical-seg"
+            or os.environ.get("MIMICS_FEWSHOT_DINOV3_ROOT")
+            or load_repo_config().get("dinov3_project")
+            or (ROOT / "external" / "dinov3-medical-seg")
         ).expanduser().resolve()
         if str(dino_root) not in os.sys.path:
             os.sys.path.insert(0, str(dino_root))

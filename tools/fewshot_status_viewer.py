@@ -32,6 +32,8 @@ for _candidate in (str(TOOLS_DIR), str(PROJECT_ROOT)):
 
 from resource_locks import process_exists as resource_process_exists
 
+import pipeline_common
+
 from ui_theme import (
     choose_open_file_async,
     choose_save_file_async,
@@ -98,39 +100,11 @@ def read_json(path, default=None):
 
 
 def write_json_atomic(path, payload, retries=20, max_sleep=0.25):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
-    write_text_atomic(path, text, retries=retries, max_sleep=max_sleep)
+    pipeline_common.write_json_atomic(path, payload, retries=retries, max_sleep=max_sleep)
 
 
 def write_text_atomic(path, text, retries=20, max_sleep=0.25):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = str(text)
-    last_error = None
-    for attempt in range(max(1, int(retries))):
-        tmp = path.with_name(path.name + "." + str(os.getpid()) + "." + uuid.uuid4().hex + ".tmp")
-        try:
-            with tmp.open("w", encoding="utf-8") as handle:
-                handle.write(text)
-                try:
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                except Exception:
-                    pass
-            os.replace(str(tmp), str(path))
-            return
-        except OSError as exc:
-            last_error = exc
-            try:
-                if tmp.is_file():
-                    tmp.unlink()
-            except Exception:
-                pass
-            time.sleep(min(float(max_sleep), 0.05 * (attempt + 1)))
-    if last_error is not None:
-        raise last_error
+    pipeline_common.write_text_atomic(path, text, retries=retries, max_sleep=max_sleep)
 
 
 def write_json_best_effort(path, payload):
@@ -142,18 +116,7 @@ def write_json_best_effort(path, payload):
 
 
 def write_cancel_marker(cancel_path):
-    if not cancel_path:
-        return None
-    try:
-        write_text_atomic(
-            cancel_path,
-            "cancel requested at {0}\n".format(time.strftime("%Y-%m-%d %H:%M:%S")),
-            retries=8,
-            max_sleep=0.15,
-        )
-        return None
-    except Exception as exc:
-        return str(exc)
+    return pipeline_common.write_cancel_marker(cancel_path)
 
 
 def request_job_cancel_async(job, status_path, grace_seconds=10.0):
@@ -710,26 +673,7 @@ def process_exists(pid):
 
 
 def terminate_process_tree(pid):
-    try:
-        pid = int(pid)
-    except Exception:
-        return False
-    if pid <= 0:
-        return False
-    try:
-        if os.name == "nt":
-            subprocess.Popen(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            **hidden_process_kwargs()
-            )
-        else:
-            os.kill(pid, 15)
-        return True
-    except Exception:
-        return False
+    return pipeline_common.terminate_process_tree(pid)
 
 
 def open_path(path):

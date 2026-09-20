@@ -71,6 +71,7 @@ from resource_locks import (
     process_exists as resource_process_exists,
     process_matches as resource_process_matches,
     process_start_marker as resource_process_start_marker,
+    register_process,
     release_lock,
 )
 
@@ -874,6 +875,11 @@ def _start_watchdog(state_path: Path, ownership_token: str) -> subprocess.Popen:
     )
 
 
+def _registry_project_root() -> str:
+    """Project root for the process registry (parent of the lock dir)."""
+    return str(PROJECT_ROOT)
+
+
 def _start_server(
     model_dir: str,
     device: str,
@@ -990,6 +996,28 @@ def _start_server(
         watchdog = _start_watchdog(state_path, ownership_token)
         state["watchdog_pid"] = watchdog.pid
         _write_server_state(state_path, state)
+        # Register both processes with the unified registry so the startup
+        # sweep and the health panel can see them. Best-effort only: the
+        # server state JSON above stays the source of truth.
+        try:
+            register_process(
+                _registry_project_root(),
+                "nninteractive_server",
+                proc.pid,
+                ownership_token=ownership_token,
+                parent_pid=os.getpid(),
+                state_path=str(state_path),
+            )
+            register_process(
+                _registry_project_root(),
+                "nninteractive_watchdog",
+                watchdog.pid,
+                ownership_token=ownership_token,
+                parent_pid=proc.pid,
+                state_path=str(state_path),
+            )
+        except Exception:
+            pass
         return proc, state
     except Exception:
         process_stopped = _stop_spawned_server(proc)
@@ -2425,8 +2453,8 @@ class _BridgeSessionContext:
                     use_context_initial_seg=use_context_initial_seg,
                 )
         finally:
-            current_path = self.owned_state_path or owned_state_path
-            current_token = self.owned_token or owned_token
+            current_path = getattr(self, "owned_state_path", None) or owned_state_path
+            current_token = getattr(self, "owned_token", None) or owned_token
             if current_path is not None and current_token:
                 _set_server_operation_active(current_path, current_token, False)
 

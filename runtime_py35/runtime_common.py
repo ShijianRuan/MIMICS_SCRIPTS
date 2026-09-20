@@ -550,6 +550,58 @@ def find_root(start_dir, sentinel_files=None, max_depth=6):
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def external_python_candidates(project_root_dir=None):
+    """Canonical candidate list for the external (py3.13) interpreter.
+
+    Single source of truth for every runtime_py35 module that needs to
+    spawn a process outside Mimics.  Order matters: the bundled
+    python_env wins over nninteractive_env, and env-relative layouts win
+    over the root itself (portable bundles place python.exe beside the
+    scripts).
+    """
+    root = os.path.abspath(str(project_root_dir or project_root()))
+    candidates = []
+    for env_name in ("python_env", "nninteractive_env"):
+        for base in (os.path.join(root, env_name), os.path.join(os.path.dirname(root), env_name)):
+            candidates.extend((
+                os.path.join(base, "python.exe"),
+                os.path.join(base, "Scripts", "python.exe"),
+                os.path.join(base, "python", "python.exe"),
+                os.path.join(base, "bin", "python3"),
+                os.path.join(base, "bin", "python"),
+            ))
+    candidates.append(os.path.join(root, "python.exe"))
+    return candidates
+
+
+def find_external_python(project_root_dir=None, allow_system_python=False):
+    """Return the external Python executable path, or '' when not found.
+
+    Environment overrides are honored first so a deployment can point at an
+    arbitrary interpreter (MIMICS_BRIDGE_PYTHON / NNINTERACTIVE_PYTHON).
+    Inside Mimics, sys.executable may be MimicsResearch.exe itself, so it
+    is deliberately NOT used as a fallback unless it lives inside one of
+    the candidate environment directories.
+    """
+    for env_key in ("MIMICS_BRIDGE_PYTHON", "NNINTERACTIVE_PYTHON"):
+        value = os.environ.get(env_key, "").strip()
+        if value and os.path.isfile(value):
+            return os.path.abspath(value)
+    for candidate in external_python_candidates(project_root_dir):
+        if os.path.isfile(candidate):
+            return candidate
+    if allow_system_python:
+        try:
+            import shutil
+            for cmd in ("python3", "python"):
+                found = shutil.which(cmd)
+                if found:
+                    return found
+        except Exception:
+            pass
+    return ""
+
+
 def _current_process_executable():
     """Return the host executable without relying on embedded sys.executable."""
     if os.name == "nt":
@@ -1571,3 +1623,109 @@ def _invalid_lock_file_is_old(path):
     except Exception:
         return False
     return age >= INVALID_LOCK_GRACE_SECONDS
+
+
+# ---------------------------------------------------------------------------
+# Process registry (Phase B).
+#
+# The registry itself lives in resource_locks.py at the project root (the
+# only module shared by both the py3.5 Mimics runtime and the external
+# py3.13 tooling).  The helpers below give the py3.5 side a stable import
+# surface: they resolve resource_locks.py relative to this file's parent
+# directory, import it once, and delegate.  The registry mirrors the same
+# MIMICS_RESOURCE_LOCK_DIR mapping as resource_lock_dir() above.
+# ---------------------------------------------------------------------------
+
+_PROCESS_REGISTRY_MODULE = {"module": None, "error": None}
+_PROJECT_ROOT_CACHE = {"value": None}
+
+
+def project_root():
+    """The deploy root that holds resource_locks.py and runtime_py35/."""
+    if _PROJECT_ROOT_CACHE["value"] is None:
+        _PROJECT_ROOT_CACHE["value"] = os.path.dirname(
+            os.path.abspath(os.path.dirname(__file__))
+        )
+    return _PROJECT_ROOT_CACHE["value"]
+
+
+def _process_registry_module():
+    if _PROCESS_REGISTRY_MODULE["module"] is not None:
+        return _PROCESS_REGISTRY_MODULE["module"]
+    if _PROCESS_REGISTRY_MODULE["error"] is not None:
+        return None
+    try:
+        import importlib
+
+        root = project_root()
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        _PROCESS_REGISTRY_MODULE["module"] = importlib.import_module(
+            "resource_locks"
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        _PROCESS_REGISTRY_MODULE["error"] = str(exc)
+        return None
+    return _PROCESS_REGISTRY_MODULE["module"]
+
+
+def register_process(project_root_dir, role, pid, **kwargs):
+    """Delegate to resource_locks.register_process; None when unavailable.
+
+    Registration is best-effort from the py3.5 side: a failure never
+    blocks the caller's own spawn logic (the cmdline fallback in the
+    sweep still finds unregistered legacy processes).
+    """
+    module = _process_registry_module()
+    if module is None:
+        return None
+    try:
+        return module.register_process(project_root_dir, role, pid, **kwargs)
+    except Exception:
+        return None
+
+
+def unregister_process(project_root_dir, role, pid, ownership_token=""):
+    module = _process_registry_module()
+    if module is None:
+        return False
+    try:
+        return module.unregister_process(
+            project_root_dir, role, pid, ownership_token=ownership_token
+        )
+    except Exception:
+        return False
+
+
+def snapshot_processes(project_root_dir, include_dead=False):
+    module = _process_registry_module()
+    if module is None:
+        return []
+    try:
+        return module.snapshot_processes(project_root_dir, include_dead=include_dead)
+    except Exception:
+        return []
+
+
+def sweep_processes(project_root_dir, protect_roles=()):
+    """Delegate to resource_locks.sweep_processes; {} when unavailable."""
+    module = _process_registry_module()
+    if module is None:
+        return {}
+    try:
+        return module.sweep_processes(project_root_dir, protect_roles=protect_roles)
+    except Exception:
+        return {}
+
+
+def terminate_registered_process(project_root_dir, role, pid, graceful_seconds=5.0):
+    """The single kill ladder via the registry; False when unavailable."""
+    module = _process_registry_module()
+    if module is None:
+        return False
+    try:
+        return module.terminate_process(
+            project_root_dir, role, pid, graceful_seconds=graceful_seconds
+        )
+    except Exception:
+        return False

@@ -279,6 +279,12 @@ def _append_python_candidate(candidates, value, base=None):
 
 
 def _fewshot_python(config, dinov3_root):
+    # Canonical discovery first (env overrides + python_env/nninteractive_env
+    # layouts). Only when it fails do we check the fewshot-specific extras
+    # (config python, DINOv3 project venvs, and the running interpreter).
+    found = runtime_common.find_external_python(_project_root())
+    if found:
+        return os.path.abspath(found)
     candidates = list(_project_python_candidates())
     _append_python_candidate(candidates, os.environ.get("MIMICS_FEWSHOT_PYTHON", ""))
     _append_python_candidate(candidates, config.get("python", ""))
@@ -1821,6 +1827,20 @@ def _launch_process(cmd, cwd=None):
     )
 
 
+def _register_spawned_process(role, pid, state_path=""):
+    """Best-effort process-registry registration (never blocks spawn)."""
+    try:
+        return runtime_common.register_process(
+            runtime_common.project_root(),
+            role,
+            pid,
+            parent_pid=os.getpid(),
+            state_path=state_path,
+        )
+    except Exception:
+        return None
+
+
 def _launch_gui_process(cmd, cwd=None, stderr_log=None):
     # Launch GUI apps without CREATE_NO_WINDOW so Tk/PySide windows are visible.
     # On Windows, prefer pythonw.exe (same environment, no console flash).
@@ -1983,6 +2003,7 @@ def _launch_external_advanced_training(config, organ, ts_root):
     current_status["controller_pid"] = process.pid
     current_status["updated_at_epoch"] = time.time()
     _write_json_atomic(status_path, current_status)
+    _register_spawned_process("external_ui", process.pid, state_path=status_path)
 
     monitor_started = False
     try:
@@ -2119,6 +2140,9 @@ def _train_model(advanced=False):
     process = _launch_process(cmd, cwd=_project_root())
     organ_slug = _safe_slug(organ)
     cancel_path = os.path.join(_workspace(ts_root), "runs", organ_slug, run_id, "cancel.request")
+    _register_spawned_process(
+        "training_controller", process.pid, state_path=_status_path(ts_root, run_id)
+    )
     _write_json_atomic(
         _status_path(ts_root, run_id),
         {
@@ -2256,6 +2280,7 @@ def _launch_inference_job(
     launch_project_path = _current_project_path() or ""
     process = _launch_process(cmd, cwd=_project_root())
     status_path = _status_path(ts_root, job_id)
+    _register_spawned_process("training_controller", process.pid, state_path=status_path)
     cancel_path = os.path.join(
         _workspace(ts_root),
         "predictions",
@@ -2401,6 +2426,7 @@ def _launch_external_model_chooser(
     current["context_path"] = context_path
     current["updated_at_epoch"] = time.time()
     _write_json_atomic(status_path, current)
+    _register_spawned_process("external_ui", process.pid, state_path=status_path)
     _start_monitor(
         {
             "monitor_key": choice_id,
@@ -3584,6 +3610,7 @@ def _launch_external_status_viewer(config, ts_root):
         )
 
     _GUI_PROCESSES[gui_key] = process
+    _register_spawned_process("external_ui", process.pid, state_path=context_path)
 
     _mimics_log(
         logging.INFO,
@@ -3690,7 +3717,7 @@ def _request_fewshot_cancel_async(job, status_path, grace_seconds=30.0):
         try:
             config = _config()
             python_exe = _fewshot_python(config, _dinov3_root(config))
-            _launch_process(
+            helper = _launch_process(
                 [
                     python_exe,
                     os.path.join(
@@ -3703,6 +3730,9 @@ def _request_fewshot_cancel_async(job, status_path, grace_seconds=30.0):
                     status_path,
                 ],
                 cwd=_project_root(),
+            )
+            _register_spawned_process(
+                "remote_stop_helper", helper.pid, state_path=status_path
             )
             grace_seconds = max(float(grace_seconds), 45.0)
         except Exception as exc:

@@ -21,6 +21,7 @@ import json
 import importlib.util
 import errno
 import os
+import subprocess
 import shutil
 import sys
 import tempfile
@@ -9493,13 +9494,25 @@ class TestNewFeatures(unittest.TestCase):
     def test_external_compute_children_use_below_normal_windows_priority(self):
         for relative in (
             "runtime_py35/interactive_algorithms_mimics.py",
-            "tools/fewshot_pipeline.py",
             "tools/nninteractive_finetune_pipeline.py",
             "tools/nnunet_jobs.py",
             "tools/nnunet_pipeline.py",
+            "tools/pipeline_common.py",
         ):
             source = Path(PROJECT_ROOT, relative).read_text(encoding="utf-8")
             self.assertIn("BELOW_NORMAL_PRIORITY_CLASS", source, relative)
+        if os.name == "nt":
+            # fewshot_pipeline delegates to pipeline_common - verify the
+            # behavior rather than the implementation string.
+            import tools.fewshot_pipeline as fewshot
+            import tools.pipeline_common as pipeline_common
+            for module in (fewshot, pipeline_common):
+                kwargs = module.hidden_process_kwargs()
+                priority = getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)
+                self.assertTrue(
+                    kwargs.get("creationflags", 0) & priority,
+                    "{} must spawn below-normal priority children".format(module.__name__),
+                )
 
     def test_external_batch_export_requires_explicit_safe_or_overwrite_destination(self):
         import tools.mimics_batch_cli as cli
@@ -11038,6 +11051,339 @@ class TestNewFeatures(unittest.TestCase):
         self.assertEqual("launched", payload.get("status"))
         task = payload.get("task") or {}
         self.assertEqual("export", task.get("kind"))
+
+
+class TestProcessRegistry(unittest.TestCase):
+    """Phase B process registry: register/snapshot/sweep/terminate ladder."""
+
+    def setUp(self):
+        self.tmp = _make_temp_dir()
+        self._old_lock_dir = os.environ.get("MIMICS_RESOURCE_LOCK_DIR")
+        os.environ["MIMICS_RESOURCE_LOCK_DIR"] = os.path.join(
+            self.tmp, "proj", ".mimics_runtime", "locks"
+        )
+        self.root = self.tmp
+
+    def tearDown(self):
+        if self._old_lock_dir is None:
+            os.environ.pop("MIMICS_RESOURCE_LOCK_DIR", None)
+        else:
+            os.environ["MIMICS_RESOURCE_LOCK_DIR"] = self._old_lock_dir
+        _cleanup(self.tmp)
+
+    def _spawn_sleeper(self, seconds=60):
+        import subprocess
+
+        return subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep({0})".format(seconds)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def test_register_snapshot_unregister_roundtrip(self):
+        import resource_locks
+
+        child = self._spawn_sleeper()
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        record = resource_locks.register_process(
+            self.root, "trainer", child.pid,
+            cmdline_signature="unit-test",
+            parent_pid=os.getpid(),
+            state_path=os.path.join(self.tmp, "status.json"),
+        )
+        self.assertEqual("mimics_process_record.v1", record["schema_version"])
+        self.assertTrue(record["start_marker"])
+        self.assertTrue(resource_locks.process_is_live(self.root, "trainer", child.pid))
+
+        snapshot = resource_locks.snapshot_processes(self.root)
+        self.assertEqual(1, len(snapshot))
+        self.assertTrue(snapshot[0]["_live"])
+        self.assertEqual("trainer", snapshot[0]["role"])
+
+        self.assertTrue(resource_locks.unregister_process(self.root, "trainer", child.pid))
+        self.assertEqual([], resource_locks.snapshot_processes(self.root, include_dead=True))
+
+    def test_unregister_rejects_wrong_ownership_token(self):
+        import resource_locks
+
+        child = self._spawn_sleeper()
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        record = resource_locks.register_process(self.root, "async_worker", child.pid)
+        self.assertFalse(
+            resource_locks.unregister_process(
+                self.root, "async_worker", child.pid, ownership_token="wrong"
+            )
+        )
+        self.assertTrue(resource_locks.process_is_live(self.root, "async_worker", child.pid))
+        self.assertTrue(
+            resource_locks.unregister_process(
+                self.root, "async_worker", child.pid,
+                ownership_token=record["ownership_token"],
+            )
+        )
+
+    def test_register_rejects_unknown_role(self):
+        import resource_locks
+
+        with self.assertRaises(ValueError):
+            resource_locks.register_process(self.root, "bogus_role", os.getpid())
+
+    def test_sweep_removes_dead_record_and_releases_its_lock(self):
+        import resource_locks
+
+        child = self._spawn_sleeper()
+        resource_locks.register_process(
+            self.root, "trainer", child.pid, parent_pid=os.getpid()
+        )
+        lock = resource_locks.FileResourceLock(
+            resource_locks.default_resource_lock_dir(self.root) / "gpu.lock",
+            "gpu", "registry-test",
+        ).acquire()
+        lock.update_pid(child.pid)
+
+        child.kill()
+        child.wait()
+        time.sleep(0.2)
+
+        summary = resource_locks.sweep_processes(self.root)
+        self.assertEqual(1, summary["removed_dead_records"])
+        self.assertEqual(1, len(summary["released_locks"]))
+        self.assertIn(str(lock.path), summary["released_locks"])
+        self.assertFalse(lock.path.exists())
+        self.assertEqual(
+            [], resource_locks.snapshot_processes(self.root, include_dead=True)
+        )
+
+    def test_sweep_keeps_live_processes_and_their_locks(self):
+        import resource_locks
+
+        child = self._spawn_sleeper()
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        resource_locks.register_process(
+            self.root, "trainer", child.pid, parent_pid=os.getpid()
+        )
+        lock = resource_locks.FileResourceLock(
+            resource_locks.default_resource_lock_dir(self.root) / "gpu.lock",
+            "gpu", "registry-test",
+        ).acquire()
+        lock.update_pid(child.pid)
+
+        summary = resource_locks.sweep_processes(self.root)
+        self.assertEqual(0, summary["removed_dead_records"])
+        self.assertEqual([], summary["terminated_orphans"])
+        self.assertEqual([], summary["released_locks"])
+        self.assertTrue(lock.path.exists())
+        lock.release()
+
+    def test_sweep_terminates_orphan_and_respects_leave_alive(self):
+        import resource_locks
+
+        fake_parent = self._spawn_sleeper(30)
+        orphan = self._spawn_sleeper(120)
+        ui = self._spawn_sleeper(120)
+        self.addCleanup(ui.wait)
+        self.addCleanup(ui.kill)
+        self.addCleanup(orphan.wait)
+        self.addCleanup(orphan.kill)
+        resource_locks.register_process(
+            self.root, "background_mimics", orphan.pid, parent_pid=fake_parent.pid
+        )
+        resource_locks.register_process(
+            self.root, "external_ui", ui.pid, parent_pid=fake_parent.pid,
+            cleanup_policy=resource_locks.CLEANUP_LEAVE_ALIVE,
+        )
+
+        fake_parent.kill()
+        fake_parent.wait()
+        time.sleep(0.2)
+
+        summary = resource_locks.sweep_processes(self.root)
+        self.assertEqual(
+            [{"role": "background_mimics", "pid": orphan.pid, "reason": "parent_gone"}],
+            summary["terminated_orphans"],
+        )
+        self.assertFalse(
+            resource_locks.process_is_live(self.root, "background_mimics", orphan.pid)
+        )
+        # leave_alive policy: UI process untouched even though parent died.
+        self.assertTrue(
+            resource_locks.process_is_live(self.root, "external_ui", ui.pid)
+        )
+
+    def test_terminate_ladder_force_kills_stubborn_process(self):
+        import resource_locks
+        import subprocess
+
+        stubborn = subprocess.Popen(
+            [sys.executable, "-c", "import time\nwhile True: time.sleep(0.5)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        resource_locks.register_process(
+            self.root, "background_mimics", stubborn.pid, parent_pid=os.getpid()
+        )
+        try:
+            self.assertTrue(
+                resource_locks.terminate_process(
+                    self.root, "background_mimics", stubborn.pid,
+                    graceful_seconds=1.0,
+                )
+            )
+        finally:
+            stubborn.kill()
+            stubborn.wait()
+        self.assertFalse(
+            resource_locks.process_is_live(
+                self.root, "background_mimics", stubborn.pid
+            )
+        )
+
+    def test_sweep_after_foreground_restart_returns_consistent_state(self):
+        """The B4 invariant: Mimics dies, workers get orphaned; one sweep
+        clears dead records, terminates orphans, releases their locks."""
+        import resource_locks
+
+        # Simulate: a foreground Mimics (this test process "was" the parent)
+        # spawned a worker holding a lock, then died.
+        worker = self._spawn_sleeper(120)
+        resource_locks.register_process(
+            self.root, "async_worker", worker.pid,
+            parent_pid=123456789,  # a PID that will not exist
+        )
+        lock = resource_locks.FileResourceLock(
+            resource_locks.default_resource_lock_dir(self.root) / "gpu.lock",
+            "gpu", "registry-test",
+        ).acquire()
+        lock.update_pid(worker.pid)
+
+        summary = resource_locks.sweep_processes(self.root)
+        self.assertEqual(
+            [{"role": "async_worker", "pid": worker.pid, "reason": "parent_gone"}],
+            summary["terminated_orphans"],
+        )
+        self.assertEqual(1, len(summary["released_locks"]))
+        self.assertFalse(lock.path.exists())
+        self.assertEqual(
+            [], resource_locks.snapshot_processes(self.root, include_dead=True)
+        )
+
+
+class TestPipelineCommon(unittest.TestCase):
+    """Phase B5 shared pipeline primitives (tools/pipeline_common.py)."""
+
+    def setUp(self):
+        self.tmp = _make_temp_dir()
+
+    def tearDown(self):
+        _cleanup(self.tmp)
+
+    def test_atomic_writes_roundtrip_and_survive_directory_creation(self):
+        import tools.pipeline_common as pipeline_common
+
+        path = os.path.join(self.tmp, "nested", "state.json")
+        payload = {"status": "training", "epoch": 3}
+        pipeline_common.write_json_atomic(path, payload)
+        self.assertEqual(payload, json.loads(Path(path).read_text(encoding="utf-8")))
+
+        text_path = os.path.join(self.tmp, "nested", "marker.txt")
+        pipeline_common.write_text_atomic(text_path, "cancel requested")
+        self.assertEqual("cancel requested", Path(text_path).read_text(encoding="utf-8"))
+
+    def test_cancel_marker_writes_timestamped_file(self):
+        import tools.pipeline_common as pipeline_common
+
+        path = os.path.join(self.tmp, "train.cancel")
+        self.assertIsNone(pipeline_common.write_cancel_marker(path))
+        self.assertIn("cancel requested at", Path(path).read_text(encoding="utf-8"))
+        self.assertIsNone(pipeline_common.write_cancel_marker(""))
+        self.assertFalse(os.path.exists(""))
+
+    def test_copy_file_atomic_publishes_exactly_once(self):
+        import tools.pipeline_common as pipeline_common
+
+        source = os.path.join(self.tmp, "source.bin")
+        destination = os.path.join(self.tmp, "out", "dest.bin")
+        Path(source).write_bytes(b"payload")
+        pipeline_common.copy_file_atomic(source, destination)
+        self.assertEqual(b"payload", Path(destination).read_bytes())
+        leftovers = [p for p in Path(destination).parent.iterdir() if p.name.endswith(".tmp")]
+        self.assertEqual([], leftovers)
+
+    def test_scoped_locks_serialise_same_scope_and_parallelise_disjoint(self):
+        import tools.pipeline_common as pipeline_common
+        import resource_locks
+
+        old_root = pipeline_common.ROOT
+        lock_dir = os.path.join(self.tmp, "proj", ".mimics_runtime", "locks")
+        os.makedirs(lock_dir)
+        os.environ["MIMICS_RESOURCE_LOCK_DIR"] = lock_dir
+        try:
+            pipeline_common.ROOT = Path(self.tmp) / "proj"
+            # Same scope serialises: a second acquisition attempt times out.
+            locks = pipeline_common.acquire_scoped_background_mimics_locks(
+                [os.path.join(self.tmp, "mcs")], "job-a", wait_seconds=0,
+            )
+            try:
+                with self.assertRaises(resource_locks.ResourceLockTimeout):
+                    pipeline_common.acquire_scoped_background_mimics_locks(
+                        [os.path.join(self.tmp, "mcs")], "job-b", wait_seconds=0,
+                    )
+            finally:
+                for lock in reversed(locks):
+                    lock.release()
+            # A disjoint scope does not conflict.
+            locks_b = pipeline_common.acquire_scoped_background_mimics_locks(
+                [os.path.join(self.tmp, "other_mcs")], "job-b", wait_seconds=0,
+            )
+            for lock in reversed(locks_b):
+                lock.release()
+        finally:
+            pipeline_common.ROOT = old_root
+            os.environ.pop("MIMICS_RESOURCE_LOCK_DIR", None)
+
+    def test_finetune_label_export_uses_scoped_locks_not_per_job(self):
+        """The unified lock protocol: same .mcs folder must serialise jobs."""
+        import inspect
+        import tools.nninteractive_finetune_pipeline as nninteractive_finetune_pipeline
+
+        source = inspect.getsource(nninteractive_finetune_pipeline._run_label_export)
+        self.assertIn("acquire_scoped_background_mimics_locks", source)
+        # The old per-job unique lock name must be gone.
+        self.assertNotIn("nninteractive_finetune_export_{", source)
+
+    def test_spawn_helper_registers_background_mimics(self):
+        import tools.pipeline_common as pipeline_common
+        import resource_locks
+
+        old_root = pipeline_common.ROOT
+        registry_dir = os.path.join(self.tmp, "proj", ".mimics_runtime", "processes")
+        os.makedirs(registry_dir)
+        lock_dir = os.path.join(self.tmp, "proj", ".mimics_runtime", "locks")
+        os.makedirs(lock_dir)
+        os.environ["MIMICS_RESOURCE_LOCK_DIR"] = lock_dir
+        try:
+            pipeline_common.ROOT = Path(self.tmp) / "proj"
+            fake_mimics = os.path.join(self.tmp, "MimicsFake.exe")
+            Path(fake_mimics).write_bytes(b"")
+            runner = os.path.join(self.tmp, "run_export.py")
+            Path(runner).write_text("pass\n", encoding="utf-8")
+            process = pipeline_common.spawn_background_mimics_export(
+                "python.exe",  # not a real Mimics; it just needs to start
+                runner,
+                os.path.join(self.tmp, "export_root"),
+                state_path=os.path.join(self.tmp, "status.json"),
+            )
+            self.addCleanup(process.wait)
+            self.addCleanup(process.kill)
+            records = resource_locks.snapshot_processes(pipeline_common.ROOT)
+            roles = [record["role"] for record in records]
+            self.assertIn("background_mimics", roles)
+        finally:
+            pipeline_common.ROOT = old_root
+            os.environ.pop("MIMICS_RESOURCE_LOCK_DIR", None)
 
 
 class TestLifecycleAndRetention(unittest.TestCase):

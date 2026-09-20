@@ -1,11 +1,17 @@
-"""Cross-process resource locks for Mimics-Script background workers."""
+"""Cross-process resource locks and process registry for Mimics-Script.
 
-from __future__ import annotations
+This module is shared by the external Python 3.13 tooling and the Python
+3.5 scripts that run inside Mimics, so it must stay compatible with
+Python 3.5 syntax: no f-strings, no ``X | Y`` annotations, no
+``from __future__ import annotations``.
+"""
 
 import json
 import errno
 import hashlib
 import os
+import signal
+import subprocess
 import time
 import uuid
 from pathlib import Path
@@ -177,7 +183,7 @@ def process_start_marker(pid: object) -> str:
         except Exception:
             return ""
     try:
-        fields = Path(f"/proc/{value}/stat").read_text(encoding="ascii").split()
+        fields = Path("/proc/{0}/stat".format(value)).read_text(encoding="ascii").split()
         if len(fields) > 21:
             return str(fields[21])
     except Exception:
@@ -195,7 +201,7 @@ def process_matches(pid: object, expected_start_marker: object = None) -> bool:
     return not current or current == expected
 
 
-def default_resource_lock_dir(project_root: os.PathLike[str] | str) -> Path:
+def default_resource_lock_dir(project_root) -> Path:
     configured = os.environ.get("MIMICS_RESOURCE_LOCK_DIR", "").strip()
     if configured:
         return Path(os.path.expandvars(os.path.expanduser(configured))).resolve()
@@ -213,6 +219,359 @@ def default_resource_lock_dir(project_root: os.PathLike[str] | str) -> Path:
             digest = hashlib.sha1(normalized.encode("utf-8", "replace")).hexdigest()[:16]
             return Path(local_base) / "Mimics-Script" / digest / "locks"
     return project / ".mimics_runtime" / "locks"
+
+
+PROCESS_RECORD_SCHEMA = "mimics_process_record.v1"
+
+# Cleanup policies for registered processes.
+#   kill_on_sweep  (default) the sweep may terminate the process when its
+#                  parent is gone or it is explicitly targeted
+#   leave_alive    never terminate via sweep; only the owner stops it
+#                  (foreground-owned UIs that outlive a Mimics restart)
+#   idle_timeout_s:<seconds>  like kill_on_sweep, but the process also
+#                  self-exits after idling; sweep treats it as kill_on_sweep
+CLEANUP_KILL_ON_SWEEP = "kill_on_sweep"
+CLEANUP_LEAVE_ALIVE = "leave_alive"
+
+VALID_PROCESS_ROLES = (
+    "nninteractive_server",
+    "nninteractive_watchdog",
+    "async_worker",
+    "scribble_worker",
+    "background_mimics",
+    "mcs_supervisor",
+    "single_case_import_worker",
+    "trainer",
+    "training_controller",
+    "remote_stop_helper",
+    "external_ui",
+)
+
+
+def default_process_registry_dir(project_root) -> Path:
+    """Directory holding one small JSON record per registered process."""
+    base = default_resource_lock_dir(project_root).parent
+    return base / "processes"
+
+
+def _process_record_path(registry_dir, record_id: str) -> Path:
+    safe = str(record_id).replace("/", "_").replace("\\", "_").replace(":", "_")
+    return Path(registry_dir) / (safe + ".json")
+
+
+def _process_record_id(role: str, pid: int, start_marker: str) -> str:
+    # pid + start marker uniquely identifies one process lifetime; the role
+    # prefix keeps records human-readable in the registry directory.
+    digest = hashlib.sha1(
+        ("{0}|{1}".format(int(pid), str(start_marker))).encode("utf-8", "replace")
+    ).hexdigest()[:12]
+    return "{0}-{1}-{2}".format(str(role), int(pid), digest)
+
+
+def register_process(
+    project_root,
+    role: str,
+    pid: int,
+    cmdline_signature: str = "",
+    ownership_token: str = "",
+    parent_pid=None,
+    state_path: str = "",
+    cleanup_policy: str = CLEANUP_KILL_ON_SWEEP,
+    extra=None,
+) -> dict:
+    """Atomically write a process record into the registry.
+
+    Returns the written record.  The record is a manifest entry, not a
+    status store: ``state_path`` points at the subsystem's own detailed
+    state file (server.json, worker_status.json, job status), which stays
+    where it is.
+    """
+    role = str(role)
+    if role not in VALID_PROCESS_ROLES:
+        raise ValueError("Unknown process role: {0}".format(role))
+    pid = int(pid)
+    start_marker = process_start_marker(pid)
+    record_id = _process_record_id(role, pid, start_marker)
+    registry_dir = default_process_registry_dir(project_root)
+    record = {
+        "schema_version": PROCESS_RECORD_SCHEMA,
+        "record_id": record_id,
+        "role": role,
+        "pid": pid,
+        "start_marker": start_marker,
+        "cmdline_signature": str(cmdline_signature or "")[:512],
+        "ownership_token": str(ownership_token or "") or uuid.uuid4().hex,
+        "parent_pid": int(parent_pid) if parent_pid else 0,
+        "state_path": str(state_path or ""),
+        "cleanup_policy": str(cleanup_policy or CLEANUP_KILL_ON_SWEEP),
+        "created_at_epoch": time.time(),
+    }
+    if extra:
+        # extra keys are merged but cannot overwrite the identity fields
+        identity = set(record.keys())
+        for key, value in dict(extra).items():
+            if str(key) not in identity:
+                record[str(key)] = value
+    _write_json_atomic(_process_record_path(registry_dir, record_id), record)
+    return record
+
+
+def unregister_process(project_root, role: str, pid: int, ownership_token: str = "") -> bool:
+    """Remove a process record.  Ownership token must match when given."""
+    pid = int(pid)
+    path = _find_process_record_path(project_root, role, pid)
+    if path is None:
+        return False
+    payload = _read_process_record(path)
+    if not payload:
+        return False
+    if ownership_token and payload.get("ownership_token") != str(ownership_token):
+        return False
+    try:
+        path.unlink()
+        return True
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+
+
+def _read_process_record(path):
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            return payload
+    except Exception:
+        pass
+    return {}
+
+
+def _find_process_record_path(project_root, role: str, pid: int):
+    registry_dir = default_process_registry_dir(project_root)
+    # Fast path: the deterministic record id.
+    start_marker = process_start_marker(pid)
+    if start_marker:
+        path = _process_record_path(
+            registry_dir, _process_record_id(role, pid, start_marker)
+        )
+        if path.is_file():
+            return path
+    # Fallback: scan for role+pid (covers start-marker lookup failures).
+    prefix = "{0}-{1}-".format(str(role), int(pid))
+    try:
+        for entry in registry_dir.iterdir():
+            if entry.name.startswith(prefix) and entry.suffix == ".json":
+                return entry
+    except OSError:
+        pass
+    return None
+
+
+def snapshot_processes(project_root, include_dead=False):
+    """List registry records, newest first, with a live flag attached."""
+    registry_dir = default_process_registry_dir(project_root)
+    records = []
+    try:
+        entries = sorted(registry_dir.iterdir())
+    except OSError:
+        return records
+    for entry in entries:
+        if entry.suffix != ".json":
+            continue
+        payload = _read_process_record(entry)
+        if not payload:
+            continue
+        payload["_live"] = process_matches(
+            payload.get("pid"), payload.get("start_marker")
+        )
+        payload["_record_path"] = str(entry)
+        records.append(payload)
+    records.sort(key=lambda item: float(item.get("created_at_epoch") or 0.0), reverse=True)
+    if not include_dead:
+        records = [item for item in records if item.get("_live")]
+    return records
+
+
+def process_is_live(project_root, role: str, pid: int) -> bool:
+    """True when a live registry record exists for this role+pid."""
+    path = _find_process_record_path(project_root, role, pid)
+    if path is None:
+        return False
+    payload = _read_process_record(path)
+    if not payload:
+        return False
+    return process_matches(payload.get("pid"), payload.get("start_marker"))
+
+
+def terminate_process(project_root, role: str, pid: int, graceful_seconds: float = 5.0) -> bool:
+    """The single kill ladder: terminate -> grace poll -> taskkill /T /F.
+
+    Liveness is checked against the registry record's start marker so a
+    recycled PID can never be killed by mistake.  Returns True when the
+    process was terminated (or already gone) by the end of the call.
+    """
+    path = _find_process_record_path(project_root, role, pid)
+    payload = _read_process_record(path) if path is not None else {}
+    expected_marker = (payload or {}).get("start_marker")
+    if not process_matches(pid, expected_marker):
+        return True
+    try:
+        if os.name != "nt":
+            os.kill(int(pid), signal.SIGTERM)
+        else:
+            # Windows graceful step: taskkill without /F posts WM_CLOSE to
+            # windowed processes (and their trees).  Console-only processes
+            # reject it, which is harmless - the force step follows.
+            try:
+                subprocess.call(
+                    ["taskkill", "/PID", str(int(pid)), "/T"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except OSError:
+                pass
+        deadline = time.time() + max(0.0, float(graceful_seconds))
+        while time.time() < deadline:
+            if not process_matches(pid, expected_marker):
+                return True
+            time.sleep(0.25)
+    except OSError:
+        pass
+    if not process_matches(pid, expected_marker):
+        return True
+    # Force: taskkill the whole tree (children included).
+    if os.name == "nt":
+        try:
+            subprocess.call(
+                ["taskkill", "/PID", str(int(pid)), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            return False
+    else:
+        try:
+            os.kill(int(pid), signal.SIGKILL)
+        except OSError:
+            return False
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        if not process_matches(pid, expected_marker):
+            return True
+        time.sleep(0.25)
+    return process_matches(pid, expected_marker) is False
+
+
+def sweep_processes(
+    project_root,
+    protect_roles=(),
+    include_cmdline_scan=False,
+):
+    """Bring the runtime back to a consistent state.
+
+    Invariant: after the foreground Mimics (re)starts and calls this once,
+    the registry is consistent - dead records are cleared, orphaned
+    processes with ``kill_on_sweep`` policy are terminated, and locks they
+    held are released (token-verified against the record's ownership
+    token).
+
+    ``include_cmdline_scan`` adds a legacy fallback for processes started
+    before the registry existed: a command-line census finds unregistered
+    env-root python.exe processes.  The registry is the primary path.
+    """
+    protect = set(str(role) for role in protect_roles)
+    summary = {
+        "removed_dead_records": 0,
+        "terminated_orphans": [],
+        "released_locks": [],
+        "cmdline_scan": include_cmdline_scan,
+    }
+    for record in snapshot_processes(project_root, include_dead=True):
+        role = str(record.get("role") or "")
+        pid = record.get("pid")
+        path = record.get("_record_path")
+        live = process_matches(pid, record.get("start_marker"))
+        if not live:
+            # Dead: clear the record; release locks it still holds.
+            if _remove_record_file(path):
+                summary["removed_dead_records"] += 1
+            released = _release_locks_for_record(project_root, record)
+            summary["released_locks"].extend(released)
+            continue
+        if role in protect:
+            continue
+        policy = str(record.get("cleanup_policy") or CLEANUP_KILL_ON_SWEEP)
+        if policy == CLEANUP_LEAVE_ALIVE:
+            continue
+        parent_pid = record.get("parent_pid")
+        if parent_pid and not process_exists(parent_pid):
+            # Orphan: parent died, policy says kill.
+            token = str(record.get("ownership_token") or "")
+            if terminate_process(project_root, role, pid):
+                summary["terminated_orphans"].append(
+                    {"role": role, "pid": pid, "reason": "parent_gone"}
+                )
+                summary["released_locks"].extend(
+                    _release_locks_for_record(project_root, record)
+                )
+                # The process is now dead; drop its record so the registry
+                # reflects reality after a single sweep.
+                if _remove_record_file(record.get("_record_path")):
+                    summary["removed_dead_records"] += 1
+    return summary
+
+
+def _remove_record_file(path) -> bool:
+    try:
+        Path(path).unlink()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+
+
+def _release_locks_for_record(project_root, record):
+    """Release resource locks still held by a dead/terminated process.
+
+    Identity is proven by PID + start marker: the lock payload carries the
+    holder's ``process_start_marker``, and a dead PID with a matching start
+    marker cannot be a different live process.  Locks whose holder is still
+    alive, or whose identity does not match the record, are never touched.
+    """
+    lock_dir = default_resource_lock_dir(project_root)
+    target_pid = record.get("pid")
+    target_marker = str(record.get("start_marker") or "")
+    released = []
+    try:
+        entries = sorted(lock_dir.iterdir())
+    except OSError:
+        return released
+    for entry in entries:
+        if entry.suffix != ".lock":
+            continue
+        try:
+            payload = json.loads(entry.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        lock_pid = payload.get("pid")
+        if not lock_pid or int(lock_pid) != int(target_pid):
+            continue
+        if process_exists(lock_pid):
+            # Still alive (or PID got reused by a live process): never
+            # release a lock owned by a live process.
+            continue
+        lock_marker = str(payload.get("process_start_marker") or "")
+        if lock_marker and target_marker and lock_marker != target_marker:
+            # The lock belonged to an earlier process with the same PID.
+            continue
+        if release_lock(entry, str(payload.get("token") or "") or None):
+            released.append(str(entry))
+    return released
 
 
 def _write_all(fd: int, data: bytes) -> None:
@@ -263,7 +622,7 @@ class _MutationGuard:
                     self.handle.close()
                     self.handle = None
                     raise ResourceLockTimeout(
-                        f"Could not inspect resource lock {self.path}"
+                        "Could not inspect resource lock {0}".format(self.path)
                     )
                 time.sleep(0.02)
 
@@ -289,7 +648,7 @@ class _MutationGuard:
 class FileResourceLock:
     """Exclusive lock backed by an atomically-created JSON file."""
 
-    def __init__(self, path: os.PathLike[str] | str, resource: str, owner: str):
+    def __init__(self, path, resource: str, owner: str):
         self.path = Path(path)
         self.resource = resource
         self.owner = owner
@@ -307,7 +666,9 @@ class FileResourceLock:
         last_notice = 0.0
         while True:
             if should_cancel and should_cancel():
-                raise ResourceLockCancelled(f"Cancelled while waiting for {self.resource} lock")
+                raise ResourceLockCancelled(
+                    "Cancelled while waiting for {0} lock".format(self.resource)
+                )
             try:
                 with _MutationGuard(self.path, wait_seconds=min(0.5, max(0.05, deadline - time.time())) if wait_seconds else 0.25):
                     payload = self._payload(os.getpid())
@@ -342,7 +703,9 @@ class FileResourceLock:
             if now >= deadline:
                 holder = current.get("owner", "unknown") if isinstance(current, dict) else "unknown"
                 pid = current.get("pid", "?") if isinstance(current, dict) else "?"
-                raise ResourceLockTimeout(f"{self.resource} is busy: {holder} (pid {pid})")
+                raise ResourceLockTimeout(
+                    "{0} is busy: {1} (pid {2})".format(self.resource, holder, pid)
+                )
             self._sleep_between_attempts(deadline, poll_seconds, should_cancel)
 
     def read(self) -> dict:
@@ -420,7 +783,9 @@ class FileResourceLock:
         remaining_poll = max(0.25, float(poll_seconds))
         while remaining_poll > 0:
             if should_cancel and should_cancel():
-                raise ResourceLockCancelled(f"Cancelled while waiting for {self.resource} lock")
+                raise ResourceLockCancelled(
+                    "Cancelled while waiting for {0} lock".format(self.resource)
+                )
             remaining_deadline = deadline - time.time()
             if remaining_deadline <= 0:
                 return
@@ -429,7 +794,7 @@ class FileResourceLock:
             remaining_poll -= step
 
 
-def release_lock(path: os.PathLike[str] | str, token: str | None = None) -> bool:
+def release_lock(path, token=None) -> bool:
     lock_path = Path(path)
     if not token:
         return not lock_path.exists()

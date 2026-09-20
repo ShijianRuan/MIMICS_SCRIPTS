@@ -64,14 +64,19 @@ def project_python_candidates():
 
 
 def resolve_bridge_python(explicit=None):
-    candidates = []
+    # Explicit arg wins, then canonical discovery (which honors
+    # MIMICS_BRIDGE_PYTHON / NNINTERACTIVE_PYTHON + standard layouts).
     if explicit:
         path = Path(explicit)
         if not path.is_absolute():
             path = ROOT / path
-        candidates.append(path)
-    candidates.extend(project_python_candidates())
-    env_value = os.environ.get("MIMICS_BRIDGE_PYTHON") or os.environ.get("MIMICS_FEWSHOT_PYTHON")
+        if path.is_file():
+            return str(path)
+    found = runtime_common.find_external_python(str(ROOT))
+    if found:
+        return found
+    candidates = list(project_python_candidates())
+    env_value = os.environ.get("MIMICS_FEWSHOT_PYTHON")
     if env_value:
         path = Path(env_value)
         if not path.is_absolute():

@@ -25,8 +25,11 @@ ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = ROOT / "runtime_py35"
 if str(RUNTIME) not in sys.path:
     sys.path.insert(0, str(RUNTIME))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import runtime_common
+from resource_locks import register_process, unregister_process
 
 
 CURRENT_CASE_FILE = "_mcs_current_case.json"
@@ -257,8 +260,33 @@ def _run(args):
         args.runner,
         mimics_log_path=args.mimics_log or None,
     )
+    # The supervisor itself is a long-lived registered process; each spawned
+    # background Mimics is registered per iteration.
+    supervisor_record = None
+    try:
+        supervisor_record = register_process(
+            ROOT, "mcs_supervisor", os.getpid(),
+            parent_pid=os.getppid(),
+            state_path=str(runtime_dir / STATUS_FILE),
+        )
+    except Exception:
+        supervisor_record = None
     consecutive_start_failures = 0
 
+    try:
+        return _run_loop(args, runtime_dir, output_dir, command, consecutive_start_failures)
+    finally:
+        if supervisor_record is not None:
+            try:
+                unregister_process(
+                    ROOT, "mcs_supervisor", os.getpid(),
+                    ownership_token=supervisor_record.get("ownership_token", ""),
+                )
+            except Exception:
+                pass
+
+
+def _run_loop(args, runtime_dir, output_dir, command, consecutive_start_failures):
     while True:
         if (runtime_dir / STOP_FILE).is_file():
             _write_status(runtime_dir, "cancelled", error="Import queue stopped by user request.")
@@ -273,6 +301,14 @@ def _run(args):
         launch_error = None
         try:
             child = subprocess.Popen(command, stdin=subprocess.DEVNULL)
+            try:
+                register_process(
+                    ROOT, "background_mimics", child.pid,
+                    parent_pid=os.getpid(),
+                    state_path=str(runtime_dir / STATUS_FILE),
+                )
+            except Exception:
+                pass
             exit_code, stopped = _wait_for_child(child, runtime_dir)
         except Exception as exc:
             launch_error = exc

@@ -34,6 +34,19 @@ from resource_locks import FileResourceLock, ResourceLockCancelled, release_lock
 import tools.fewshot_pipeline as fewshot
 
 
+def dinov3_project_root() -> Path:
+    """Locate the DINOv3 project (deploy tree may not bundle external/)."""
+    candidates = [
+        os.environ.get("MIMICS_FEWSHOT_DINOV3_ROOT"),
+        fewshot.load_repo_config().get("dinov3_project"),
+        str(ROOT / "external" / "dinov3-medical-seg"),
+    ]
+    for candidate in candidates:
+        if candidate and (Path(candidate) / "src").is_dir():
+            return Path(candidate)
+    return ROOT / "external" / "dinov3-medical-seg"
+
+
 class StressFailure(RuntimeError):
     pass
 
@@ -256,7 +269,7 @@ def make_fake_dinov3_root(tmp: Path) -> Path:
     # through the real DINOv3 package before launching train.py. Keep those
     # lightweight modules in the fake project so this stress test exercises the
     # current orchestration contract instead of failing before lock contention.
-    shutil.copytree(ROOT / "external" / "dinov3-medical-seg" / "src", root / "src")
+    shutil.copytree(dinov3_project_root() / "src", root / "src")
     for name in ("mimics_lora_segformer3d.yaml", "synthstrip_lora_segformer3d.yaml"):
         (root / "config" / name).write_text("training:\n  epochs: 1\n", encoding="utf-8")
     research = root / "config" / "research"
@@ -476,7 +489,7 @@ def test_log_rotation(tmp: Path) -> str:
 
 
 def load_checkpoint_module_with_stub():
-    module_path = ROOT / "external" / "dinov3-medical-seg" / "src" / "utils" / "checkpoint.py"
+    module_path = dinov3_project_root() / "src" / "utils" / "checkpoint.py"
     previous = sys.modules.get("torch")
     torch_stub = types.SimpleNamespace()
     torch_stub.nn = types.SimpleNamespace(Module=object)

@@ -452,7 +452,15 @@ def _derive_mimics_voxel_to_ras_matrix(image, image_shape, fallback):
 
 
 def _bridge_python():
-    return os.environ.get("MIMICS_BRIDGE_PYTHON", "")
+    # Canonical discovery honors MIMICS_BRIDGE_PYTHON / NNINTERACTIVE_PYTHON
+    # and the standard python_env/nninteractive_env layouts.
+    root = runtime_common.find_root(
+        os.path.dirname(os.path.abspath(__file__)),
+        ("nninteractive_config.json", "fewshot_config.json", "mimics_bridge.py", ".git"),
+    )
+    return runtime_common.find_external_python(root) or os.environ.get(
+        "MIMICS_BRIDGE_PYTHON", ""
+    )
 
 
 def _bridge_script():

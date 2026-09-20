@@ -681,7 +681,7 @@ class DataManifestTests(unittest.TestCase):
         """Pipeline writes absolute paths, but relative should work too."""
         manifest = {"cases": [{
             "case_id": "c1",
-            "image": "/absolute/path/image.nii.gz",
+            "image": os.path.join(self.root, "image.nii.gz"),
             "label": "./relative/path/label.nii.gz",
             "split": "train",
         }]}
@@ -888,9 +888,10 @@ class ConcurrencyAndStalenessTests(unittest.TestCase):
             "pid": dead_pid,
             "kind": "nninteractive_finetune",
         })
-        # Check if process exists (simulate resource_locks.process_exists)
-        import psutil
-        alive = psutil.pid_exists(dead_pid)
+        # resource_locks.process_exists is the production liveness probe
+        # (no psutil dependency — ctypes OpenProcess on Windows).
+        from resource_locks import process_exists
+        alive = process_exists(dead_pid)
         self.assertFalse(alive, "99999999 should not be a valid PID")
 
     def test_metrics_dont_duplicate_same_epoch(self):

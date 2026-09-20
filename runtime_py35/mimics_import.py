@@ -801,16 +801,12 @@ def _background_env(extra=None):
 
 
 def _python_exe():
-    env_root = _environment_root()
-    candidates = [
-        os.path.join(env_root, "python.exe"),
-        os.path.join(env_root, "Scripts", "python.exe"),
-        os.path.join(env_root, "python", "python.exe"),
-    ]
-    for c in candidates:
-        if os.path.isfile(c):
-            return c
-    return candidates[0]
+    found = runtime_common.find_external_python(_project_root())
+    if found:
+        return found
+    # Preserve the historical behavior: return the default path even when
+    # missing so callers can report a clear setup error.
+    return os.path.join(_environment_root(), "python.exe")
 
 
 # -- Stale process / temp cleanup --------------------------------------
@@ -818,20 +814,36 @@ def _python_exe():
 def _cleanup_stale_processes():
     """Clean safe stale runtime state from a previous crashed session.
 
-    By default this only removes Mimics-Script resource lock files whose PID
-    no longer exists. Process termination is deliberately opt-in via
-    MIMICS_AGGRESSIVE_AUTO_CLEANUP_ON_START=1 or the explicit Stop Background
-    Services entry, because killing live bridge/background Mimics processes
-    can interrupt a valid async workflow.
+    The process registry sweep runs first: it clears dead records,
+    terminates registered orphans (parent gone, kill-on-sweep policy) and
+    releases locks they still hold - proving ownership via PID + start
+    marker, so no aggressive flag is needed for those.
+
+    The legacy cmdline path below still handles unregistered processes
+    (started before the registry existed). Killing other live
+    bridge/background Mimics processes stays opt-in via
+    MIMICS_AGGRESSIVE_AUTO_CLEANUP_ON_START=1 or the explicit Stop
+    Background Services entry, because it can interrupt a valid async
+    workflow.
 
     Uses a single hidden batch PowerShell call instead of per-process calls
     to avoid popping up visible console windows that freeze Mimics.
     """
     killed = []
     locks_removed = runtime_common.cleanup_stale_resource_locks(_resource_lock_dir())
+    registry_summary = runtime_common.sweep_processes(
+        runtime_common.project_root()
+    )
+    registry_killed = len(registry_summary.get("terminated_orphans") or [])
+    locks_removed += len(registry_summary.get("released_locks") or [])
     if not _aggressive_auto_cleanup_enabled():
         if locks_removed:
-            print("Startup cleanup: removed {0} stale resource lock file(s)".format(locks_removed))
+            print(
+                "Startup cleanup: removed {0} stale resource lock file(s); "
+                "terminated {1} orphaned registered process(es)".format(
+                    locks_removed, registry_killed
+                )
+            )
         return
 
     # Substrings that identify nnInteractive server / watchdog processes
@@ -2759,6 +2771,13 @@ def _launch_background_mimics(output_dir, total_count=0, schedule_retry=True):
             **_background_process_kwargs()
         )
         _bg_set_process(process.pid, output_dir)
+        runtime_common.register_process(
+            runtime_common.project_root(),
+            "background_mimics",
+            process.pid,
+            parent_pid=os.getpid(),
+            state_path=os.path.join(_rt(output_dir), "_mcs_batch_status.json"),
+        )
         if not runtime_common.update_resource_lock_pid(
             lock_path,
             lock_token,
@@ -3847,6 +3866,13 @@ def _launch_single_case_worker(selection, axes=None, flips=None):
     descriptor["log_path"] = worker_log_path
     descriptor["output_mcs"] = os.path.join(output_dir, case_info.get("case_id", "case") + ".mcs")
     _LAST_TASK_DESCRIPTOR = descriptor
+    runtime_common.register_process(
+        runtime_common.project_root(),
+        "single_case_import_worker",
+        process.pid,
+        parent_pid=os.getpid(),
+        state_path=status_path,
+    )
     _user_progress(
         logging.INFO,
         "Single-case import started in an external worker (PID={0}).".format(process.pid),

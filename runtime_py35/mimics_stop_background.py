@@ -1138,6 +1138,35 @@ def _start_timer(tick_fn, monitor, poll_seconds=0.5):
 
 # -- Stop background processes ------------------------------------------
 
+def _stop_registered_processes():
+    """Terminate every live registered process except the foreground Mimics.
+
+    Registry records prove ownership via PID + start marker, so this is
+    safe without cmdline matching. Returns a summary for logging.
+    """
+    summary = {"terminated": [], "failed": []}
+    try:
+        records = runtime_common.snapshot_processes(_project_root())
+    except Exception:
+        return summary
+    for record in records:
+        role = str(record.get("role") or "")
+        pid = record.get("pid")
+        if not pid:
+            continue
+        if runtime_common.terminate_registered_process(
+            _project_root(), role, pid, graceful_seconds=2.0
+        ):
+            summary["terminated"].append({"role": role, "pid": int(pid)})
+        else:
+            summary["failed"].append({"role": role, "pid": int(pid)})
+        try:
+            runtime_common.unregister_process(_project_root(), role, pid)
+        except Exception:
+            pass
+    return summary
+
+
 def stop_background_processes():
     if os.name != "nt":
         return False
@@ -1149,6 +1178,12 @@ def stop_background_processes():
     stop_markers = _request_lock_owned_stop_markers("Stop Background Services")
     _stop_inprocess_monitors()
     released_local_operations = runtime_common.clear_local_operations()
+
+    # 1b. Primary discovery path: the process registry. Registered processes
+    # are provably ours (PID + start marker), so they can be terminated
+    # without the conservative cmdline heuristics below. The foreground
+    # Mimics (this process) is protected by role: it is never registered.
+    registry_killed = _stop_registered_processes()
 
     stop_log = os.path.join(_runtime_dir(), "stop_background_last.json")
 
@@ -1235,7 +1270,8 @@ def stop_background_processes():
 
     _mimics_log(
         logging.INFO,
-        "Stop request submitted. Queue stop markers: {0}. Owned roots: {1}. Report: {2}".format(
+        "Stop request submitted. Registered process(es) terminated: {0}. Queue stop markers: {1}. Owned roots: {2}. Report: {3}".format(
+            len(registry_killed.get("terminated") or []),
             len(stopped_queues),
             len(owned_roots),
             stop_log,

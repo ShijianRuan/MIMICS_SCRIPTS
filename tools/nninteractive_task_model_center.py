@@ -91,7 +91,7 @@ def _launch_process(
             output_handle = output_path.open(
                 "a", encoding="utf-8", errors="replace"
             )
-        return subprocess.Popen(
+        process = subprocess.Popen(
             launch,
             cwd=str(ROOT),
             env=env,
@@ -102,6 +102,19 @@ def _launch_process(
     finally:
         if output_handle is not None:
             output_handle.close()
+    # Register with the process registry so the health panel can see this
+    # controller (best-effort; never blocks the launch).
+    try:
+        from resource_locks import register_process
+
+        register_process(
+            ROOT, "training_controller", process.pid,
+            parent_pid=os.getpid(),
+            state_path=str(output_path) if output_path is not None else "",
+        )
+    except Exception:
+        pass
+    return process
 
 
 def _format_time(value: object) -> str:

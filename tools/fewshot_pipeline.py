@@ -24,6 +24,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+TOOLS_DIR = Path(__file__).resolve().parent
+if str(TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOLS_DIR))
 RUNTIME = ROOT / "runtime_py35"
 if str(RUNTIME) not in sys.path:
     sys.path.insert(0, str(RUNTIME))
@@ -31,12 +34,15 @@ if str(RUNTIME) not in sys.path:
 import runtime_common
 import dataset_manifest
 
+import pipeline_common
+
 from resource_locks import (
     FileResourceLock,
     ResourceLockCancelled,
     ResourceLockTimeout,
     default_resource_lock_dir,
     process_exists as resource_process_exists,
+    register_process,
     release_lock,
 )
 from tools.fewshot_strategies import compile_strategy, normalize_strategy_options, strategy_ids
@@ -128,39 +134,11 @@ def local_export_job_is_active(path):
 
 
 def write_json_atomic(path, payload, retries=20, max_sleep=0.25):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
-    write_text_atomic(path, text, retries=retries, max_sleep=max_sleep)
+    pipeline_common.write_json_atomic(path, payload, retries=retries, max_sleep=max_sleep)
 
 
 def write_text_atomic(path, text, retries=20, max_sleep=0.25):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = str(text)
-    last_error = None
-    for attempt in range(max(1, int(retries))):
-        tmp = path.with_name(path.name + "." + str(os.getpid()) + "." + uuid.uuid4().hex + ".tmp")
-        try:
-            with tmp.open("w", encoding="utf-8") as handle:
-                handle.write(text)
-                try:
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                except Exception:
-                    pass
-            os.replace(str(tmp), str(path))
-            return
-        except OSError as exc:
-            last_error = exc
-            try:
-                if tmp.is_file():
-                    tmp.unlink()
-            except Exception:
-                pass
-            time.sleep(min(float(max_sleep), 0.05 * (attempt + 1)))
-    if last_error is not None:
-        raise last_error
+    pipeline_common.write_text_atomic(path, text, retries=retries, max_sleep=max_sleep)
 
 
 def append_text(path, text, retries=8, max_sleep=0.15):
@@ -267,18 +245,7 @@ def rmtree_with_retry(path, retries=8, max_sleep=0.25):
 
 
 def write_cancel_marker(cancel_path):
-    if not cancel_path:
-        return None
-    try:
-        write_text_atomic(
-            cancel_path,
-            "cancel requested at {}\n".format(time.strftime("%Y-%m-%d %H:%M:%S")),
-            retries=8,
-            max_sleep=0.15,
-        )
-        return None
-    except Exception as exc:
-        return str(exc)
+    return pipeline_common.write_cancel_marker(cancel_path)
 
 
 def open_subprocess_log(path, workspace, label):
@@ -794,13 +761,23 @@ def append_python_candidate(candidates, value, base=ROOT):
 
 def python_from_args(args, dinov3_root):
     repo_cfg = load_repo_config()
-    candidates = []
+    # Explicit --python always wins; otherwise use the canonical discovery
+    # (env overrides + python_env/nninteractive_env layouts) before falling
+    # back to the fewshot-specific extras (repo config, DINOv3 venvs, and
+    # the running interpreter when it already lives inside an env).
     if args.python:
+        candidates = []
         append_python_candidate(candidates, args.python)
+        for candidate in candidates:
+            if candidate.is_file():
+                return str(candidate)
+    found = runtime_common.find_external_python(str(ROOT))
+    if found:
+        return found
+    candidates = []
     candidates.extend(project_python_candidates())
-    if not args.python:
-        append_python_candidate(candidates, os.environ.get("MIMICS_FEWSHOT_PYTHON"))
-        append_python_candidate(candidates, repo_cfg.get("python"))
+    append_python_candidate(candidates, os.environ.get("MIMICS_FEWSHOT_PYTHON"))
+    append_python_candidate(candidates, repo_cfg.get("python"))
     candidates.extend([
         dinov3_root / ".venv" / "Scripts" / "python.exe",
         dinov3_root / ".venv" / "bin" / "python",
@@ -841,15 +818,7 @@ def find_mimics_exe(explicit=None):
 
 
 def hidden_process_kwargs():
-    if os.name != "nt":
-        return {}
-    startupinfo = subprocess.STARTUPINFO()
-    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    flags |= getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)
-    return {"startupinfo": startupinfo, "creationflags": flags}
+    return pipeline_common.hidden_process_kwargs()
 
 
 def background_env():
@@ -1235,26 +1204,7 @@ def acquire_background_mimics_locks(
 
 
 def terminate_process_tree(pid):
-    try:
-        pid = int(pid)
-    except Exception:
-        return False
-    if pid <= 0:
-        return False
-    try:
-        if os.name == "nt":
-            subprocess.Popen(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                **hidden_process_kwargs()
-            )
-        else:
-            os.kill(pid, 15)
-        return True
-    except Exception:
-        return False
+    return pipeline_common.terminate_process_tree(pid)
 
 
 def terminate_and_reap_process(process, timeout_seconds=15.0):
@@ -2885,6 +2835,14 @@ def launch_mimics_export(
                         proc.pid
                     )
                 )
+        try:
+            register_process(
+                ROOT, "background_mimics", proc.pid,
+                parent_pid=os.getpid(),
+                state_path=str(status_path or ""),
+            )
+        except Exception:
+            pass
         append_log(workspace, "Background Mimics export started, pid={}.".format(proc.pid))
         if status_path:
             update_status(status_path, {
@@ -4040,6 +3998,14 @@ def _cmd_train_impl(args):
                     "Training started, but GPU lock ownership could not be "
                     "transferred to PID {}.".format(proc.pid)
                 )
+            try:
+                register_process(
+                    ROOT, "trainer", proc.pid,
+                    parent_pid=os.getpid(),
+                    state_path=str(status_path),
+                )
+            except Exception:
+                pass
             status_payload = {"pid": proc.pid, "command": cmd}
             if actual_train_log is not None and actual_train_log != train_log:
                 train_log = actual_train_log
@@ -4703,6 +4669,14 @@ def cmd_infer(args):
                     "Inference started, but GPU lock ownership could not be "
                     "transferred to PID {}.".format(proc.pid)
                 )
+            try:
+                register_process(
+                    ROOT, "trainer", proc.pid,
+                    parent_pid=os.getpid(),
+                    state_path=str(status_path),
+                )
+            except Exception:
+                pass
             status_payload = {"pid": proc.pid, "command": cmd}
             if actual_log_path is not None and actual_log_path != log_path:
                 log_path = actual_log_path
