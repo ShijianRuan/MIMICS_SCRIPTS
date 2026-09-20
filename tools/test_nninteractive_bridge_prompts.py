@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
+import os
+import sys
+from pathlib import Path
 from unittest import mock
+
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
 import nninteractive_bridge as bridge
 

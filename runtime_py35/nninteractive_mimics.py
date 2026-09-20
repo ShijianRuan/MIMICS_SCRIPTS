@@ -2583,6 +2583,12 @@ def _bridge_parameters(config, image_export, base_export):
                 config.get("gpu_lock_timeout_seconds", 30),
             )
         ),
+        "minimum_free_gpu_memory_gb": float(
+            os.environ.get(
+                "NNINTERACTIVE_MINIMUM_FREE_GPU_MEMORY_GB",
+                config.get("minimum_free_gpu_memory_gb", 4),
+            )
+        ),
         "incremental_interaction_replay": bool(
             config.get("incremental_interaction_replay", True)
         ),
@@ -2776,6 +2782,43 @@ def _run_async(
         else:
             validated_target_hash = current_hash
 
+    _continue_session_prompt(
+        image,
+        target,
+        state,
+        config,
+        source=source,
+        auto_created=auto_created,
+        write_mode=write_mode,
+        validated_target_hash=validated_target_hash,
+    )
+    return 0
+
+
+def _continue_session_prompt(
+    image,
+    target,
+    state,
+    config,
+    source=None,
+    auto_created=False,
+    write_mode="in_place",
+    validated_target_hash=None,
+):
+    """Show the prompt menu for a session and dispatch the chosen action.
+
+    Shared by the interactive tool entry (_run_async) and by the async
+    result monitor, which re-invokes it after applying a result so one
+    menu entry supports continuous prompting instead of re-entering the
+    tool for every prompt.
+
+    Returns True when a new background prediction was enqueued and its
+    result monitor started; False when the session ended, was reset, or
+    no prompt was submitted.
+    """
+    if source is None:
+        source = target
+    profile = _model_profile(config)
     temp_dir = tempfile.mkdtemp(prefix="mimics_nninteractive_prompt_")
     pending_visual_objects = []
     visual_objects_registered = False
@@ -2786,7 +2829,7 @@ def _run_async(
             if state is not None:
                 _close_async_job(target, state, "user_finished")
             _mimics_log(logging.INFO, "nnInteractive session finished.")
-            return 0
+            return False
         if action == BUTTON_UNDO and state is not None:
             interactions = state.get("interactions", [])
             if interactions:
@@ -2810,15 +2853,15 @@ def _run_async(
                     replay_all=True,
                 )
                 _start_async_result_monitor(image, target, state, config)
-            else:
-                _restore_base(target, state["base_path"], state["shape"])
-                # Re-anchor on the restored mask buffer (see apply path): the
-                # next prompt compares _mask_sha256(target) to this value.
-                state["expected_target_sha256"] = _mask_sha256(target, state.get("shape"))
-                state["pending_sequence"] = None
-                state["status"] = "ready"
-                _save_async_job(state)
-            return 0
+                return True
+            _restore_base(target, state["base_path"], state["shape"])
+            # Re-anchor on the restored mask buffer (see apply path): the
+            # next prompt compares _mask_sha256(target) to this value.
+            state["expected_target_sha256"] = _mask_sha256(target, state.get("shape"))
+            state["pending_sequence"] = None
+            state["status"] = "ready"
+            _save_async_job(state)
+            return False
         if action == BUTTON_RESET and state is not None:
             state["interactions"] = []
             state["pending_sequence"] = None
@@ -2833,7 +2876,7 @@ def _run_async(
                 for obj in _ASYNC_VISUAL_OBJECTS.pop(job_dir):
                     _delete_mimics_object(obj)
             _save_async_job(state)
-            return 0
+            return False
 
         _retire_different_model_workers(config)
         if state is None and bool(config.get("async_start_worker_before_prompt", True)):
@@ -2859,7 +2902,7 @@ def _run_async(
                 title="nnInteractive Prompt Empty",
                 ui_blocking=False,
             )
-            return 0
+            return False
         if state is None:
             state = _start_async_job(
                 config,
@@ -2891,7 +2934,7 @@ def _run_async(
             "Result will be applied automatically when ready.".format(action, sequence),
         )
         _start_async_result_monitor(image, target, state, config)
-        return 0
+        return True
     finally:
         if visual_objects_registered and not prediction_enqueued and state is not None:
             job_dir = state.get("_job_dir")
@@ -3819,6 +3862,79 @@ def _async_result_path(state, sequence):
     return primary
 
 
+def _error_guidance(error_text, stage=""):
+    """Map a raw nnInteractive error to a plain-English category and action.
+
+    Returns (category, message, suggested_action) - all strings. category is
+    one of: out_of_memory, server_unavailable, environment_broken,
+    stale_target, unknown. Used by the failure dialogs so every error the
+    annotator can see comes with a concrete next step.
+    """
+    text = str(error_text or "").lower()
+    stage_text = str(stage or "").lower()
+    combined = text + " " + stage_text
+    if (
+        "out of memory" in combined
+        or "cuda error" in combined
+        or "cudnn error" in combined
+        or "oom" in combined
+    ):
+        return (
+            "out_of_memory",
+            "The AI model ran out of GPU memory.",
+            "Close other GPU programs or stop running AI training jobs "
+            "(Admin > Stop All Owned Background Services), then retry. "
+            "If it keeps failing, try a smaller image or restart Mimics.",
+        )
+    if (
+        "connection refused" in combined
+        or "server is not running" in combined
+        or "server died" in combined
+        or "status code 500" in combined
+        or "http 500" in combined
+        or "internal server error" in combined
+        or "not enough free gpu memory" in combined
+    ):
+        return (
+            "server_unavailable",
+            "The nnInteractive AI server stopped or could not start.",
+            "Retry from the menu. If it fails again, run "
+            "Admin > Setup / Repair Environment, or stop background services "
+            "and retry.",
+        )
+    if (
+        "no module named" in combined
+        or "importerror" in combined
+        or "modulenotfounderror" in combined
+        or ("could not find" in combined and ("environment" in combined or "python" in combined))
+        or "not verified" in combined
+        or (
+            "environment" in combined
+            and ("broken" in combined or "missing" in combined or "not found" in combined)
+        )
+    ):
+        return (
+            "environment_broken",
+            "The nnInteractive Python environment is incomplete or damaged.",
+            "Run Admin > Setup / Repair Environment, then retry.",
+        )
+    if "changed" in combined and (
+        "mask" in combined or "target" in combined or "project" in combined
+    ):
+        return (
+            "stale_target",
+            "The Mask or project changed while the AI was running, so the "
+            "result can no longer be applied safely.",
+            "Start a new AI session from the current Mask.",
+        )
+    return (
+        "unknown",
+        str(error_text or "Unknown error"),
+        "Retry from the menu. If it keeps failing, check the log files in "
+        "the AI session folder or contact support.",
+    )
+
+
 def _describe_async_worker_failure(worker, worker_status):
     stage = worker.get("stage", worker_status or "unknown")
     error = worker.get("error")
@@ -3984,13 +4100,32 @@ def _async_monitor_tick(monitor):
             runtime_common.clear_progress_notice(
                 monitor, "nninteractive_inference"
             )
+            if outcome == "applied":
+                # Continuous prompting: keep the monitor alive and offer the
+                # next prompt immediately instead of forcing the user back
+                # into the menu entry for every prompt. The session ends
+                # through Finish / UNDO-to-empty / RESET inside the prompt
+                # menu, or through the waiting/restart/error paths below.
+                monitor["deadline"] = time.time() + monitor["timeout_seconds"]
+                continued = _continue_session_prompt(
+                    monitor["image"],
+                    monitor["target"],
+                    monitor["state"],
+                    monitor.get("config") or {},
+                )
+                if continued:
+                    return
             monitor["done"] = True
             _stop_async_monitor(job_dir)
     except Exception as error:
         monitor["done"] = True
         _stop_async_monitor(job_dir)
+        _category, guidance_message, suggested_action = _error_guidance(
+            error, "monitor"
+        )
         mimics.dialogs.message_box(
-            "nnInteractive background prediction failed.\n\n{0}".format(error),
+            "nnInteractive background prediction failed.\n\n{0}\n\n{1}\n\n"
+            "Suggested action: {2}".format(error, guidance_message, suggested_action),
             title="nnInteractive Failed",
             ui_blocking=True,
         )
@@ -4136,14 +4271,21 @@ def _handle_async_result(image, target, state):
             state.get("pid") and not _process_exists(state.get("pid"))
         ):
             stage, error = _describe_async_worker_failure(worker, worker_status)
+            _category, guidance_message, suggested_action = _error_guidance(
+                error, stage
+            )
             answer = mimics.dialogs.question_box(
                 message=(
                     "The nnInteractive background worker stopped before producing a result.\n\n"
                     "Stage: {0}\nError: {1}\n\n"
+                    "{2}\n\n"
+                    "Suggested action: {3}\n\n"
                     "Start a new AI session from the current Mask?"
                 ).format(
                     stage,
                     error,
+                    guidance_message,
+                    suggested_action,
                 ),
                 buttons=BUTTON_START_CURRENT + ";" + BUTTON_CANCEL,
                 title="nnInteractive Worker Stopped",
@@ -4188,16 +4330,25 @@ def _handle_async_result(image, target, state):
         return "waiting"
 
     if status == "error":
+        error_stage = result.get("stage", "prediction")
+        error_text = result.get("error", "Unknown error")
+        _category, guidance_message, suggested_action = _error_guidance(
+            error_text, error_stage
+        )
         answer = mimics.dialogs.question_box(
             message=(
                 "The background prediction failed.\n\n"
                 "Stage: {0}\n"
                 "Error: {1}\n\n"
+                "{2}\n\n"
+                "Suggested action: {3}\n\n"
                 "Retry keeps the same prompts. Discard starts a new AI session "
                 "from the current Mask."
             ).format(
-                result.get("stage", "prediction"),
-                result.get("error", "Unknown error"),
+                error_stage,
+                error_text,
+                guidance_message,
+                suggested_action,
             ),
             buttons=BUTTON_RETRY + ";" + BUTTON_DISCARD_SESSION + ";" + BUTTON_CANCEL,
             title="nnInteractive Failed",

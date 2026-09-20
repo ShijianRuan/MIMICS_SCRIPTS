@@ -152,10 +152,10 @@ segmentation。上一会话的提示历史不会继续保留，但分割结果�
 7. Paint Scribble 只需选择一次 Include 或 Exclude，然后在临时 Mask 中绘制。
 8. Box 和 Lasso 默认为前景，不再显示正负选择。
 9. 脚本调用外部 nnInteractive，结果自动写回 AI Draft，并显示非阻塞成功提示。
-10. 继续增加提示，或使用 **Undo Last Prompt** / **Reset To Start**。
+10. 结果应用后，提示菜单会自动再次弹出：继续加入提示即可连续分割，无需重新运行脚本入口；也可使用 **Undo Last Prompt** / **Reset To Start** 撤回。
 11. 选择 **Finish**，按正常 Mimics 方式保存项目。
 
-第一次推理需要启动模型服务，通常比后续提示慢。脚本会复用正在运行的本机服务。
+第一次推理需要启动模型服务，通常比后续提示慢。脚本会复用正在运行的本机服务。启动前会检查 GPU 空闲显存（`minimum_free_gpu_memory_gb`，默认 4 GB）：空闲不足时直接给出"关闭其他 GPU 程序"的明确提示，而不是等到模型加载中途才 OOM。
 
 服务由 bridge 创建并记录所有权，不会根据一个来源不明的 PID 直接终止进程。每次提示都会刷新活动时间；默认连续 30 分钟没有推理请求后，独立 watchdog 会核对 PID、启动命令、模型路径和所有权 token，再关闭自己启动的服务并释放 GPU。受管服务持有 `<repo>/.mimics_runtime/locks/gpu.lock`，DINOv3 训练和推理会等待这把锁而不是同时争抢 CUDA 显存。如果 watchdog 自己崩溃，默认启动清理和 DINOv3 的 GPU 等待逻辑都只会在 state 文件、ownership token 和 idle timeout 同时满足时清理该受管 server。nnInteractive 官方的 `idle-timeout` 只回收 client session，本集成没有把它误当作服务退出机制。
 

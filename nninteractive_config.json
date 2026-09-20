@@ -24,5 +24,6 @@
   "set_image_timeout_seconds": 1800,
   "prediction_timeout_seconds": 1800,
   "gpu_lock_timeout_seconds": 30,
+  "minimum_free_gpu_memory_gb": 4,
   "bridge_timeout_seconds": 4620
 }

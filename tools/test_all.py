@@ -3675,9 +3675,263 @@ class TestNNInteractiveMimicsParsing(unittest.TestCase):
         self.assertNotIn("_marker", point)
 
 
-# ============================================================================
-# L10: nninteractive_bridge DICOM loading
-# ============================================================================
+class TestNNInteractiveContinuousPrompting(unittest.TestCase):
+    """Phase C: continuous prompt loop, VRAM precheck, error guidance."""
+
+    def test_continue_session_prompt_finish_closes_session(self):
+        import nninteractive_mimics
+
+        closed = []
+        logged = []
+        original_close = nninteractive_mimics._close_async_job
+        original_log = nninteractive_mimics._mimics_log
+        original_menu = nninteractive_mimics._async_prompt_menu
+        try:
+            nninteractive_mimics._close_async_job = (
+                lambda target, state, reason: closed.append(reason)
+            )
+            nninteractive_mimics._mimics_log = (
+                lambda level, message: logged.append(message)
+            )
+            nninteractive_mimics._async_prompt_menu = (
+                lambda target, state, source, profile: "Finish"
+            )
+            continued = nninteractive_mimics._continue_session_prompt(
+                None, None, {"_job_dir": "job"}, {}
+            )
+        finally:
+            nninteractive_mimics._close_async_job = original_close
+            nninteractive_mimics._mimics_log = original_log
+            nninteractive_mimics._async_prompt_menu = original_menu
+        self.assertFalse(continued)
+        self.assertEqual(["user_finished"], closed)
+
+    def test_async_monitor_applied_continues_prompt_loop(self):
+        import nninteractive_mimics
+
+        monitor = {
+            "done": False,
+            "busy": False,
+            "deadline": time.time() + 60,
+            "timeout_seconds": 60,
+            "image": "image",
+            "target": "target",
+            "state": {"_job_dir": "job_dir", "pending_sequence": 1},
+            "config": {},
+        }
+        calls = []
+        original_tick_result = nninteractive_mimics._check_async_result_nonblocking
+        original_continue = nninteractive_mimics._continue_session_prompt
+        original_stop = nninteractive_mimics._stop_async_monitor
+        original_notice = nninteractive_mimics.runtime_common.clear_progress_notice
+        try:
+            nninteractive_mimics._check_async_result_nonblocking = (
+                lambda image, target, state: "applied"
+            )
+            nninteractive_mimics._continue_session_prompt = (
+                lambda image, target, state, config, **kwargs: (
+                    calls.append("continue") or True
+                )
+            )
+            nninteractive_mimics._stop_async_monitor = (
+                lambda job_dir: calls.append(("stopped", job_dir))
+            )
+            nninteractive_mimics.runtime_common.clear_progress_notice = (
+                lambda *args, **kwargs: None
+            )
+            nninteractive_mimics._async_monitor_tick(monitor)
+        finally:
+            nninteractive_mimics._check_async_result_nonblocking = original_tick_result
+            nninteractive_mimics._continue_session_prompt = original_continue
+            nninteractive_mimics._stop_async_monitor = original_stop
+            nninteractive_mimics.runtime_common.clear_progress_notice = original_notice
+        # The monitor stayed alive and re-showed the prompt menu; the stop
+        # path must not have run.
+        self.assertEqual(["continue"], calls)
+        self.assertFalse(monitor["done"])
+        # Deadline was refreshed for the next prediction cycle.
+        self.assertGreater(monitor["deadline"], time.time() + 50)
+
+    def test_async_monitor_applied_finish_ends_monitor(self):
+        import nninteractive_mimics
+
+        monitor = {
+            "done": False,
+            "busy": False,
+            "deadline": time.time() + 60,
+            "timeout_seconds": 60,
+            "image": "image",
+            "target": "target",
+            "state": {"_job_dir": "job_dir", "pending_sequence": 1},
+            "config": {},
+        }
+        stopped = []
+        original_tick_result = nninteractive_mimics._check_async_result_nonblocking
+        original_continue = nninteractive_mimics._continue_session_prompt
+        original_stop = nninteractive_mimics._stop_async_monitor
+        original_notice = nninteractive_mimics.runtime_common.clear_progress_notice
+        try:
+            nninteractive_mimics._check_async_result_nonblocking = (
+                lambda image, target, state: "applied"
+            )
+            # User picked Finish in the continuation menu: no new prediction.
+            nninteractive_mimics._continue_session_prompt = (
+                lambda image, target, state, config, **kwargs: False
+            )
+            nninteractive_mimics._stop_async_monitor = (
+                lambda job_dir: stopped.append(job_dir)
+            )
+            nninteractive_mimics.runtime_common.clear_progress_notice = (
+                lambda *args, **kwargs: None
+            )
+            nninteractive_mimics._async_monitor_tick(monitor)
+        finally:
+            nninteractive_mimics._check_async_result_nonblocking = original_tick_result
+            nninteractive_mimics._continue_session_prompt = original_continue
+            nninteractive_mimics._stop_async_monitor = original_stop
+            nninteractive_mimics.runtime_common.clear_progress_notice = original_notice
+        self.assertEqual(["job_dir"], stopped)
+        self.assertTrue(monitor["done"])
+
+    def test_run_async_delegates_to_continue_session_prompt(self):
+        import nninteractive_mimics
+
+        delegated = []
+
+        class _Sentinel(object):
+            pass
+
+        original_load = nninteractive_mimics._load_async_job
+        original_continue = nninteractive_mimics._continue_session_prompt
+        original_profile = nninteractive_mimics._model_profile
+        original_log = nninteractive_mimics._log_effective_image_input_config
+        try:
+            nninteractive_mimics._load_async_job = lambda target: None
+            nninteractive_mimics._model_profile = lambda config: {}
+            nninteractive_mimics._log_effective_image_input_config = (
+                lambda config: None
+            )
+
+            def _fake_continue(image, target, state, config, **kwargs):
+                delegated.append((image, target, state, kwargs))
+                return False
+
+            nninteractive_mimics._continue_session_prompt = _fake_continue
+            image = _Sentinel()
+            target = _Sentinel()
+            result = nninteractive_mimics._run_async(
+                image, target, {}, source=None,
+                auto_created=False, write_mode="in_place",
+            )
+        finally:
+            nninteractive_mimics._load_async_job = original_load
+            nninteractive_mimics._continue_session_prompt = original_continue
+            nninteractive_mimics._model_profile = original_profile
+            nninteractive_mimics._log_effective_image_input_config = original_log
+        self.assertEqual(0, result)
+        self.assertEqual(1, len(delegated))
+        self.assertIs(image, delegated[0][0])
+        self.assertIs(target, delegated[0][1])
+        self.assertIsNone(delegated[0][2])
+        self.assertEqual(
+            {
+                "source": target,
+                "auto_created": False,
+                "write_mode": "in_place",
+                "validated_target_hash": None,
+            },
+            delegated[0][3],
+        )
+
+    def test_error_guidance_categories(self):
+        from nninteractive_mimics import _error_guidance
+
+        category, _message, action = _error_guidance(
+            "CUDA out of memory", "prediction"
+        )
+        self.assertEqual("out_of_memory", category)
+        self.assertIn("Close other GPU programs", action)
+
+        category, _message, action = _error_guidance(
+            "Connection refused to server", "connect"
+        )
+        self.assertEqual("server_unavailable", category)
+        self.assertIn("Setup / Repair Environment", action)
+
+        category, _message, action = _error_guidance(
+            "Not enough free GPU memory to start the nnInteractive server", ""
+        )
+        self.assertEqual("server_unavailable", category)
+
+        category, _message, action = _error_guidance(
+            "ModuleNotFoundError: No module named 'nnInteractive'", "startup"
+        )
+        self.assertEqual("environment_broken", category)
+        self.assertIn("Setup / Repair Environment", action)
+
+        category, _message, action = _error_guidance(
+            "The active image or target Mask changed", "apply"
+        )
+        self.assertEqual("stale_target", category)
+
+        category, _message, action = _error_guidance("something odd", "")
+        self.assertEqual("unknown", category)
+        self.assertIn("Retry", action)
+
+
+class TestNNInteractiveGpuMemoryPrecheck(unittest.TestCase):
+    def _bridge_module(self):
+        import nninteractive_bridge
+
+        return nninteractive_bridge
+
+    def test_precheck_blocks_low_free_vram(self):
+        bridge = self._bridge_module()
+        import torch
+
+        original = torch.cuda.mem_get_info
+        original_available = torch.cuda.is_available
+        try:
+            torch.cuda.is_available = lambda: True
+            torch.cuda.mem_get_info = lambda: (1 * 1024 ** 3, 24 * 1024 ** 3)
+            with self.assertRaises(RuntimeError) as ctx:
+                bridge._check_free_gpu_memory("cuda:0")
+        finally:
+            torch.cuda.mem_get_info = original
+            torch.cuda.is_available = original_available
+        self.assertIn("Not enough free GPU memory", str(ctx.exception))
+
+    def test_precheck_passes_above_floor(self):
+        bridge = self._bridge_module()
+        import torch
+
+        original = torch.cuda.mem_get_info
+        original_available = torch.cuda.is_available
+        try:
+            torch.cuda.is_available = lambda: True
+            torch.cuda.mem_get_info = lambda: (8 * 1024 ** 3, 24 * 1024 ** 3)
+            # Must not raise.
+            bridge._check_free_gpu_memory("cuda:0")
+        finally:
+            torch.cuda.mem_get_info = original
+            torch.cuda.is_available = original_available
+
+    def test_precheck_skips_cpu_and_probe_failures(self):
+        bridge = self._bridge_module()
+        # CPU device never probes.
+        bridge._check_free_gpu_memory("cpu")
+        # A failing probe must not block the start.
+        import torch
+
+        original = torch.cuda.mem_get_info
+        original_available = torch.cuda.is_available
+        try:
+            torch.cuda.is_available = lambda: False
+            bridge._check_free_gpu_memory("cuda:0")
+        finally:
+            torch.cuda.mem_get_info = original
+            torch.cuda.is_available = original_available
+
 
 
 class TestBridgeDicomLoading(unittest.TestCase):

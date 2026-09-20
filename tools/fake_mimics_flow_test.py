@@ -1238,12 +1238,20 @@ def test_nninteractive_derived_draft_session(fake, tmp):
 
     old_check = module._check_async_result_nonblocking
     old_stop = module._stop_async_monitor
+    old_continue = module._continue_session_prompt
     baseline_messages = len(fake.dialogs.messages)
+    baseline_questions = len(fake.dialogs.questions)
     try:
         module._check_async_result_nonblocking = lambda _image, _target, _state: "applied"
         module._stop_async_monitor = lambda _job_dir: None
+        # Applied results now re-show the prompt menu (continuous prompting).
+        # Simulate the user finishing the session there.
+        module._continue_session_prompt = (
+            lambda _image, _target, _state, _config, **_kwargs: False
+        )
         monitor = {
             "done": False,
+            "busy": False,
             "deadline": time.time() + 60,
             "timeout_seconds": 60,
             "image": image,
@@ -1254,7 +1262,9 @@ def test_nninteractive_derived_draft_session(fake, tmp):
     finally:
         module._check_async_result_nonblocking = old_check
         module._stop_async_monitor = old_stop
+        module._continue_session_prompt = old_continue
     assert_equal(len(fake.dialogs.messages), baseline_messages, "result application should not add a second completion notice")
+    assert_true(monitor["done"], "monitor must end when the continuation menu finishes the session")
     return "source snapshot and target Draft remain separate across async startup"
 
 

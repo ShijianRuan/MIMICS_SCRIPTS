@@ -122,6 +122,38 @@ def _gpu_lock_enabled(device: str) -> bool:
     return str(device or "").lower().startswith("cuda")
 
 
+def _check_free_gpu_memory(device: str) -> None:
+    """Refuse to start a CUDA server when free VRAM is below the floor.
+
+    Prevents the classic "server starts, model load dies with CUDA OOM
+    three minutes in" failure. Runs before the GPU lock so the user gets
+    an actionable message instead of a lock timeout. Skipped silently
+    when CUDA is unavailable or the check itself errors (never blocks a
+    working start on a probe failure).
+    """
+    if not str(device or "").lower().startswith("cuda"):
+        return
+    minimum_gb = float(os.environ.get("NNINTERACTIVE_MINIMUM_FREE_GPU_MEMORY_GB", "4"))
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return
+        free_bytes, total_bytes = torch.cuda.mem_get_info()
+    except Exception:
+        return
+    free_gb = free_bytes / (1024 ** 3)
+    total_gb = total_bytes / (1024 ** 3)
+    if free_gb < minimum_gb:
+        raise RuntimeError(
+            "Not enough free GPU memory to start the nnInteractive server.\n\n"
+            f"Free: {free_gb:.1f} GB of {total_gb:.1f} GB "
+            f"(minimum required: {minimum_gb:.0f} GB).\n\n"
+            "Close other GPU programs or stop running AI training jobs, "
+            "then try again."
+        )
+
+
 def _release_gpu_lock_from_state(state: dict[str, Any] | None) -> bool:
     if not state:
         return True
@@ -929,6 +961,7 @@ def _start_server(
 
     gpu_lock = None
     if _gpu_lock_enabled(device):
+        _check_free_gpu_memory(device)
         gpu_lock = FileResourceLock(
             GPU_LOCK_PATH,
             "gpu",
@@ -2127,6 +2160,19 @@ class _BridgeSessionContext:
         self.server_url = str(input_data.get("server_url") or SERVER_URL)
         self.auto_start_server = bool(input_data.get("auto_start_server", True))
         self.server_api_key = os.environ.get("NN_INTERACTIVE_API_KEY")
+        # Surface the request's free-VRAM floor for _check_free_gpu_memory
+        # (env is the channel _start_server reads; the request payload is
+        # authoritative when present).
+        try:
+            _requested_min_free_gb = float(
+                input_data.get("minimum_free_gpu_memory_gb", 0)
+            )
+        except (TypeError, ValueError):
+            _requested_min_free_gb = 0.0
+        if _requested_min_free_gb > 0:
+            os.environ["NNINTERACTIVE_MINIMUM_FREE_GPU_MEMORY_GB"] = str(
+                _requested_min_free_gb
+            )
         self.owned_state_path: Path | None = None
         self.owned_token: str | None = None
         server_started = time.time()

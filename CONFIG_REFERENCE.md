@@ -123,6 +123,7 @@ editable in the training window.
 | `prediction_timeout_seconds` | `1800` | Prediction deadline. |
 | `bridge_timeout_seconds` | `4620` | Overall bridge deadline. |
 | `gpu_lock_timeout_seconds` | `30` | GPU lock wait before reporting contention. |
+| `minimum_free_gpu_memory_gb` | `4` | Free-VRAM floor checked before starting the CUDA server; below it the start fails with a "close other GPU programs" message instead of a mid-start OOM. |
 | `async_poll_seconds` | `0.25` | Mimics-side async state polling interval. |
 | `async_result_poll_seconds` | `0.25` | Result polling interval. |
 | `async_job_retention_days` | `3` | Terminal async-job retention. |
@@ -157,6 +158,7 @@ editable in the training window.
 | `MIMICS_IMPORT_AUTO_OPEN_MCS` | unset | Automatically open a completed imported project when supported. |
 | `MIMICS_IMPORT_USE_MIMICS_LOG` | unset | Mirror verbose import diagnostics into the Mimics log panel. |
 | `MIMICS_IMPORT_VERBOSE_LOG` | unset | Enable detailed import diagnostics. |
+| `NNINTERACTIVE_MINIMUM_FREE_GPU_MEMORY_GB` | `4` | Override for the `minimum_free_gpu_memory_gb` config key (env wins). |
 
 ### Mask-at-Cursor Diagnostics
 
