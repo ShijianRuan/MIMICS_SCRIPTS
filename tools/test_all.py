@@ -512,6 +512,7 @@ class TestRuntimeCommon(unittest.TestCase):
             import ctypes
 
             old_open = ctypes.WinDLL
+            old_get_last_error = ctypes.get_last_error
             try:
                 class _DeniedKernel32(object):
                     def __init__(self, _name, use_last_error=False):
@@ -533,7 +534,7 @@ class TestRuntimeCommon(unittest.TestCase):
                 self.assertTrue(runtime_common.process_exists(12345))
             finally:
                 ctypes.WinDLL = old_open
-                del ctypes.get_last_error
+                ctypes.get_last_error = old_get_last_error
         else:
             old_kill = runtime_common.os.kill
             try:
@@ -11970,6 +11971,191 @@ class TestImportReceiptAndUndo(unittest.TestCase):
         with open(drop, "r") as handle:
             source = handle.read()
         self.assertIn("import_drop_mimics", source)
+
+
+# ============================================================================
+# Phase F: system health panel aggregation
+# ============================================================================
+
+
+class TestSystemHealthPanel(unittest.TestCase):
+    """Health panel: read-only aggregation of registry/locks/queues/server."""
+
+    def setUp(self):
+        self.tmp = _make_temp_dir()
+        self._old_lock_dir = os.environ.get("MIMICS_RESOURCE_LOCK_DIR")
+        os.environ["MIMICS_RESOURCE_LOCK_DIR"] = os.path.join(
+            self.tmp, "proj", ".mimics_runtime", "locks"
+        )
+        self.root = os.path.join(self.tmp, "proj")
+        os.makedirs(self.root)
+        tools_dir = os.path.join(PROJECT_ROOT, "tools")
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+
+    def tearDown(self):
+        if self._old_lock_dir is None:
+            os.environ.pop("MIMICS_RESOURCE_LOCK_DIR", None)
+        else:
+            os.environ["MIMICS_RESOURCE_LOCK_DIR"] = self._old_lock_dir
+        _cleanup(self.tmp)
+
+    def _import_panel(self):
+        import importlib
+        import system_health_panel
+        importlib.reload(system_health_panel)
+        return system_health_panel
+
+    def test_collect_health_empty_project(self):
+        shp = self._import_panel()
+        snapshot = shp.collect_health(self.root)
+        self.assertEqual([], snapshot["processes"])
+        self.assertEqual([], snapshot["locks"])
+        self.assertEqual([], snapshot["queues"])
+        self.assertIsNone(snapshot["server"])
+
+    def test_locks_live_vs_stale_classification(self):
+        shp = self._import_panel()
+        import resource_locks
+
+        lock_dir = resource_locks.default_resource_lock_dir(self.root)
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        # A stale lock: owner PID that cannot exist.
+        stale_payload = {
+            "pid": 99999999,
+            "resource": "background_mimics",
+            "owner": "old import",
+            "kind": "import_producer",
+        }
+        import json as _json
+        with open(str(lock_dir / "stale_import.lock"), "w", encoding="utf-8") as h:
+            _json.dump(stale_payload, h)
+        # The one-byte guard anchor must not be reported as a lock.
+        (lock_dir / "background_mimics_x.lock.guard").write_bytes(b"\x00")
+
+        snapshot = shp.collect_health(self.root)
+        names = [lk["name"] for lk in snapshot["locks"]]
+        self.assertEqual(["stale_import.lock"], names)
+        self.assertTrue(snapshot["locks"][0]["stale"])
+        self.assertFalse(snapshot["locks"][0]["live"])
+
+    def test_held_lock_shows_live_with_owner(self):
+        shp = self._import_panel()
+        import resource_locks
+
+        lock_dir = resource_locks.default_resource_lock_dir(self.root)
+        lock = resource_locks.FileResourceLock(
+            lock_dir / "held.lock", "background_mimics", "job owner"
+        )
+        lock.acquire(wait_seconds=3)
+        try:
+            snapshot = shp.collect_health(self.root)
+        finally:
+            lock.release()
+        self.assertEqual(1, len(snapshot["locks"]))
+        self.assertTrue(snapshot["locks"][0]["live"])
+        self.assertEqual("job owner", snapshot["locks"][0]["owner"])
+
+    def test_queue_state_classification(self):
+        shp = self._import_panel()
+        base = os.path.join(self.root, ".mimics_runtime", "import_queues")
+        # running: active marker, no stop marker
+        running = os.path.join(base, "q_running")
+        os.makedirs(os.path.join(running, "prepared_queue"))
+        open(os.path.join(running, "_mcs_queue_active.json"), "w").close()
+        # stopping: both markers
+        stopping = os.path.join(base, "q_stopping")
+        os.makedirs(stopping)
+        open(os.path.join(stopping, "_mcs_queue_active.json"), "w").close()
+        open(os.path.join(stopping, "_mcs_queue_stop.json"), "w").close()
+        # idle with prepared cases
+        idle = os.path.join(base, "q_idle")
+        os.makedirs(os.path.join(idle, "prepared_queue"))
+        for name in ("case1.json", "case2.json", "notes.txt"):
+            open(os.path.join(idle, "prepared_queue", name), "w").close()
+        # stop requested without active
+        requested = os.path.join(base, "q_requested")
+        os.makedirs(requested)
+        open(os.path.join(requested, "_mcs_queue_stop.json"), "w").close()
+
+        snapshot = shp.collect_health(self.root)
+        states = {q["name"]: q for q in snapshot["queues"]}
+        self.assertEqual("running", states["q_running"]["state"])
+        self.assertEqual("stopping", states["q_stopping"]["state"])
+        self.assertEqual("idle", states["q_idle"]["state"])
+        self.assertEqual(2, states["q_idle"]["prepared_cases"])
+        self.assertEqual("stop requested", states["q_requested"]["state"])
+
+    def test_server_state_live_and_dead(self):
+        shp = self._import_panel()
+        import json as _json
+
+        server_path = os.path.join(self.root, ".nninteractive_server.json")
+        # A dead PID leaves a stale state file.
+        with open(server_path, "w", encoding="utf-8") as h:
+            _json.dump({"pid": 99999999, "model_dir": "m", "port": 8080}, h)
+        server = shp.collect_server(self.root)
+        self.assertFalse(server["live"])
+        # Our own PID reads as live.
+        with open(server_path, "w", encoding="utf-8") as h:
+            _json.dump({"pid": os.getpid(), "state": "running"}, h)
+        server = shp.collect_server(self.root)
+        self.assertTrue(server["live"])
+        self.assertEqual("running", server["state"])
+
+    def test_processes_include_liveness_and_locks(self):
+        shp = self._import_panel()
+        import resource_locks
+        import json as _json
+
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        # A lock held by the spawned process itself (FileResourceLock always
+        # records the acquiring pid, so write the child's payload directly).
+        lock_dir = resource_locks.default_resource_lock_dir(self.root)
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        lock_name = "trainer_{0}.lock".format(proc.pid)
+        with open(str(lock_dir / lock_name), "w", encoding="utf-8") as handle:
+            _json.dump({
+                "pid": proc.pid,
+                "resource": "trainer",
+                "owner": "unit test",
+                "kind": "trainer",
+            }, handle)
+        resource_locks.register_process(
+            self.root, "trainer", proc.pid, state_path=""
+        )
+        snapshot = shp.collect_health(self.root)
+        trainers = [p for p in snapshot["processes"] if p["role"] == "trainer"]
+        self.assertEqual(1, len(trainers))
+        self.assertTrue(trainers[0]["live"])
+        self.assertEqual([lock_name], trainers[0]["locks"])
+
+    def test_offscreen_panel_renders(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        shp = self._import_panel()
+        preview = os.path.join(self.tmp, "health.png")
+        code = shp.run(preview_path=preview)
+        self.assertEqual(0, code)
+        self.assertTrue(os.path.isfile(preview) and os.path.getsize(preview) > 0)
+
+    def test_health_panel_entry_exists(self):
+        entry = os.path.join(
+            PROJECT_ROOT, "scripting_library", "99_Admin", "06_System_Health.py"
+        )
+        self.assertTrue(os.path.isfile(entry))
+        with open(entry, "r") as handle:
+            source = handle.read()
+        self.assertIn("system_health_mimics", source)
+        runtime = os.path.join(PROJECT_ROOT, "runtime_py35", "system_health_mimics.py")
+        with open(runtime, "r") as handle:
+            source = handle.read()
+        self.assertIn("launch_external_gui_process", source)
+        self.assertIn("register_process", source)
 
 
 class TestProcessRegistry(unittest.TestCase):

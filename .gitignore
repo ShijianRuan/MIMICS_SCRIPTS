@@ -36,3 +36,5 @@ wheels/
 # Portable model archives are generated on demand and transferred separately
 *.model.zip
 /nninteractive_task_models.zip
+get-pip.py
+PAIN_POINTS_ANALYSIS.md

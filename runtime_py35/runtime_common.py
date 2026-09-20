@@ -1083,6 +1083,49 @@ def auto_cleanup_enabled():
     return value not in ("0", "false", "no", "off")
 
 
+def launch_external_gui_process(cmd, cwd=None, stderr_log=None):
+    """Start a visible external GUI process (pythonw preferred on Windows).
+
+    The inverse of the hidden background launchers: no CREATE_NO_WINDOW, so
+    Tk/PySide windows show up, and pythonw.exe is preferred when the
+    command is a python.exe from the same environment (no console flash).
+    """
+    launch_cmd = list(cmd)
+    if os.name == "nt" and launch_cmd:
+        exe = os.path.abspath(str(launch_cmd[0]))
+        if os.path.basename(exe).lower() == "python.exe":
+            pythonw = os.path.join(os.path.dirname(exe), "pythonw.exe")
+            if os.path.isfile(pythonw):
+                launch_cmd[0] = pythonw
+    env = background_env()
+    stderr_dest = subprocess.DEVNULL
+    stderr_file_handle = None
+    if stderr_log:
+        try:
+            parent = os.path.dirname(os.path.abspath(stderr_log))
+            if parent and not os.path.isdir(parent):
+                os.makedirs(parent)
+            stderr_file_handle = open(stderr_log, "w", encoding="utf-8")
+            stderr_dest = stderr_file_handle
+        except Exception:
+            stderr_dest = subprocess.DEVNULL
+    try:
+        return subprocess.Popen(
+            launch_cmd,
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=stderr_dest,
+            env=env,
+        )
+    finally:
+        if stderr_file_handle is not None:
+            try:
+                stderr_file_handle.close()
+            except Exception:
+                pass
+
+
 def aggressive_auto_cleanup_enabled():
     value = os.environ.get("MIMICS_AGGRESSIVE_AUTO_CLEANUP_ON_START", "").strip().lower()
     return value in ("1", "true", "yes", "on")
