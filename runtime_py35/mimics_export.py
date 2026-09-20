@@ -43,6 +43,11 @@ _LOG_ROTATE_BACKUPS = 3
 _CONFIG_CACHE = None
 MIMICS_VOXEL_TO_RAS_MATRIX_METADATA = "mimics_script.mimics_voxel_to_ras_matrix"
 SOURCE_IMAGE_PATH_METADATA = "mimics_script.source_image_path"
+# Grid snapshot stored at import time (see create_mcs_batch.py). When the
+# source image file is missing, these two let the bridge resample back to the
+# exact original grid without the file itself.
+SOURCE_IMAGE_SHAPE_METADATA = "mimics_script.source_image_shape"
+SOURCE_VOXEL_TO_RAS_MATRIX_METADATA = "mimics_script.source_voxel_to_ras_matrix"
 # Track the background_mimics lock taken by the launcher so the status monitor
 # can release it when the child Mimics crashes without writing a status (which
 # otherwise leaves a stale lock blocking later writes to that destination).
@@ -1896,6 +1901,17 @@ def _foreground_export_tick(monitor):
                 "export_formats": monitor.get("export_formats") or [],
                 "mimics_voxel_to_ras_matrix": monitor["manifest"]["mimics_voxel_to_ras_matrix"],
             }
+            # When the source image file is gone, pipeline-created projects
+            # still carry its exact grid in mcs metadata; the bridge can
+            # resample to that grid without the file. Forward it so the
+            # export lands on the original grid rather than the Mimics grid.
+            for bridge_key, meta_key in (
+                ("source_image_shape", SOURCE_IMAGE_SHAPE_METADATA),
+                ("source_voxel_to_ras_matrix", SOURCE_VOXEL_TO_RAS_MATRIX_METADATA),
+            ):
+                meta_value = monitor.get("source_grid_metadata", {}).get(meta_key, "")
+                if meta_value:
+                    params[bridge_key] = meta_value
             process = _launch_bridge_background(params, monitor["bridge_job_dir"])
             _write_json_atomic(
                 os.path.join(monitor["bridge_job_dir"], "job_state.json"),
@@ -1994,6 +2010,29 @@ def _start_foreground_export_monitor(monitor, poll_seconds=0.15):
         return False
 
 
+def _read_source_grid_metadata(selected):
+    """Read the import-time grid snapshot (shape + voxel-to-RAS matrix) from
+    the active image's metadata. Returns a dict of raw metadata values or {}
+    when the project carries no usable snapshot (e.g. hand-created projects).
+    """
+    try:
+        image = getattr(selected[0], "image", None)
+        if image is None:
+            return {}
+        shape = _metadata_get(image, SOURCE_IMAGE_SHAPE_METADATA, "")
+        matrix = _metadata_get(image, SOURCE_VOXEL_TO_RAS_MATRIX_METADATA, "")
+        if not str(shape or "").strip() or not str(matrix or "").strip():
+            return {}
+        if _parse_matrix_metadata(matrix) is None:
+            return {}
+        return {
+            SOURCE_IMAGE_SHAPE_METADATA: str(shape),
+            SOURCE_VOXEL_TO_RAS_MATRIX_METADATA: str(matrix),
+        }
+    except Exception:
+        return {}
+
+
 def _confirm_degraded_export(case_count=1):
     """Ask once before exporting on the Mimics grid without source geometry.
 
@@ -2039,16 +2078,21 @@ def _start_current_project_export(case_dir, source_image_path, output_root, axes
             raise RuntimeError("No matching masks were found in the current project.")
         source_image_path = str(source_image_path or "").strip()
         degraded_export = False
+        source_grid_metadata = {}
         if not source_image_path:
-            # P1 degraded path: with the source image gone, offer an export on
-            # the current Mimics grid after an explicit one-time confirmation
-            # instead of hard-failing the export.
-            if not _confirm_degraded_export(len(selected)):
-                raise RuntimeError(
-                    "The original source image or case folder is required so the exported mask "
-                    "can be resampled to the original shape and orientation."
-                )
-            degraded_export = True
+            # The export can still land on the original grid when the project
+            # carries the grid snapshot from import time (pipeline-created
+            # projects always do). Only ask about the Mimics-grid fallback
+            # when even that snapshot is missing.
+            source_grid_metadata = _read_source_grid_metadata(selected)
+            if not source_grid_metadata:
+                if not _confirm_degraded_export(len(selected)):
+                    raise RuntimeError(
+                        "The original source image or case folder is required so the exported mask "
+                        "can be resampled to the original shape and orientation."
+                    )
+                degraded_export = True
+                source_image_path = ""
         case_id = _current_project_case_id() or os.path.basename(os.path.abspath(case_dir))
         output_seg_dir = os.path.join(output_root, case_id, "segmentations")
         runtime_dir = os.path.join(
@@ -2089,6 +2133,7 @@ def _start_current_project_export(case_dir, source_image_path, output_root, axes
             "flips": list(flips),
             "overwrite_existing": bool(overwrite_existing),
             "degraded_export": degraded_export,
+            "source_grid_metadata": dict(source_grid_metadata),
             "export_formats": [
                 str(fmt).lower().lstrip(".")
                 for fmt in (export_formats or [])
@@ -2838,6 +2883,22 @@ def _export_masks_and_build_params(
         source_image_path = _metadata_get(active_image, SOURCE_IMAGE_PATH_METADATA, "")
     if source_image_path:
         bridge_params["source_image_path"] = str(source_image_path)
+    else:
+        # Source file unavailable: forward the import-time grid snapshot so
+        # the bridge resamples to the original grid (shape + affine) instead
+        # of the Mimics grid. Hand-created projects carry no snapshot, in
+        # which case the bridge reports source_geometry_unavailable and the
+        # caller decides on the degraded path.
+        try:
+            shape_snapshot = _metadata_get(active_image, SOURCE_IMAGE_SHAPE_METADATA, "")
+            matrix_snapshot = _metadata_get(active_image, SOURCE_VOXEL_TO_RAS_MATRIX_METADATA, "")
+        except Exception:
+            shape_snapshot = ""
+            matrix_snapshot = ""
+        if str(shape_snapshot or "").strip() and str(matrix_snapshot or "").strip():
+            if _parse_matrix_metadata(matrix_snapshot) is not None:
+                bridge_params["source_image_shape"] = str(shape_snapshot)
+                bridge_params["source_voxel_to_ras_matrix"] = str(matrix_snapshot)
     if output_seg_dir:
         bridge_params["output_seg_dir"] = output_seg_dir
     if export_formats:

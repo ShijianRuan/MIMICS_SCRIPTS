@@ -1721,6 +1721,80 @@ class TestMimicsBridgeBufferMapping(unittest.TestCase):
         np.testing.assert_allclose(mimics_affine, out.affine, atol=1e-6)
         np.testing.assert_array_equal(data, np.asanyarray(out.dataobj).astype(np.uint8))
 
+    def test_convert_restores_source_grid_from_metadata_when_file_missing(self):
+        from mimics_bridge import do_convert
+        import nibabel as nib
+
+        case_dir = os.path.join(self.tmp, "case_meta_grid")
+        buffers_dir = os.path.join(self.tmp, "buffers_meta_grid")
+        os.makedirs(case_dir)
+        os.makedirs(buffers_dir)
+        # The Mimics grid differs from the source grid.
+        mimics_data = np.zeros((4, 3, 2), dtype=np.uint8)
+        mimics_data[1, 1, 0] = 1
+        with open(os.path.join(buffers_dir, "organ.u8"), "wb") as handle:
+            handle.write(mimics_data.tobytes())
+        mimics_affine = np.array([
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ])
+        manifest_path = os.path.join(buffers_dir, "manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as handle:
+            json.dump({
+                "mimics_shape": [4, 3, 2],
+                "mimics_voxel_to_ras_matrix": mimics_affine.tolist(),
+                "masks": [{"original_name": "organ", "u8_filename": "organ.u8"}],
+            }, handle)
+        # Source grid snapshot: different spacing/grid but overlapping world
+        # extent, as recorded in mcs metadata at import time. No source image
+        # file exists.
+        source_affine = np.array([
+            [0.5, 0.0, 0.0, 0.0],
+            [0.0, 0.5, 0.0, 0.0],
+            [0.0, 0.0, 2.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ])
+        result = do_convert({
+            "buffers_dir": buffers_dir,
+            "manifest_path": manifest_path,
+            "case_dir": case_dir,
+            "export_space": "source_image",
+            "require_source_geometry": True,
+            "source_image_shape": [8, 6, 4],
+            "source_voxel_to_ras_matrix": source_affine.tolist(),
+        })
+        self.assertEqual("ok", result["status"])
+        # Landed on the exact original grid, not a degraded Mimics-grid export.
+        self.assertEqual("source_image", result["export_space"])
+        self.assertFalse(result["degraded_export"])
+        self.assertEqual("source_grid_from_metadata", result["export_voxel_to_ras_matrix_source"])
+        self.assertEqual([8, 6, 4], result["export_shape"])
+        out = nib.load(os.path.join(case_dir, "segmentations", "organ.nii.gz"))
+        self.assertEqual((8, 6, 4), out.shape)
+        np.testing.assert_allclose(source_affine, out.affine, atol=1e-6)
+
+        # mcs metadata arrives as JSON text; the same values must work.
+        rerun_dir = os.path.join(self.tmp, "case_meta_grid_text")
+        os.makedirs(rerun_dir)
+        rerun = do_convert({
+            "buffers_dir": buffers_dir,
+            "manifest_path": manifest_path,
+            "case_dir": rerun_dir,
+            "export_space": "source_image",
+            "require_source_geometry": True,
+            "source_image_shape": json.dumps([8, 6, 4]),
+            "source_voxel_to_ras_matrix": json.dumps(source_affine.tolist()),
+        })
+        self.assertEqual("ok", rerun["status"])
+        self.assertEqual("source_image", rerun["export_space"])
+        self.assertFalse(rerun["degraded_export"])
+        self.assertEqual("source_grid_from_metadata", rerun["export_voxel_to_ras_matrix_source"])
+        rerun_out = nib.load(os.path.join(rerun_dir, "segmentations", "organ.nii.gz"))
+        self.assertEqual((8, 6, 4), rerun_out.shape)
+        np.testing.assert_allclose(source_affine, rerun_out.affine, atol=1e-6)
+
     def test_convert_rejects_unsupported_export_format(self):
         from mimics_bridge import do_convert
 

@@ -1204,23 +1204,28 @@ def _write_mask_sitk(array: np.ndarray, affine: np.ndarray, output_path: str) ->
     raster = sitk.GetImageFromArray(np.transpose(array.astype(np.uint8), (2, 1, 0)))
     matrix = np.asarray(affine, dtype=float)
     # SimpleITK stores direction as a unit-orthonormal matrix with the voxel
-    # size in spacing, so split the affine's linear part into the two. Affines
-    # with shear (non-orthogonal columns) cannot be represented; keep spacing
-    # 1 and the identity direction there rather than emitting wrong geometry.
+    # size in spacing, so split the affine's linear part into the two. An
+    # affine with shear cannot be represented in ITK's model; refuse rather
+    # than silently writing wrong geometry. (DICOM-derived medical images
+    # never carry shear, so this only guards against corrupt inputs.)
     direction_ras = matrix[:3, :3]
     spacing = np.linalg.norm(direction_ras, axis=0)
-    if np.all(spacing > 1e-8):
-        unit_direction = direction_ras / spacing
-        residual = unit_direction.T.dot(unit_direction) - np.eye(3)
-        if np.max(np.abs(residual)) < 1e-4:
-            spacing_tuple = tuple(float(v) for v in spacing)
-            direction = unit_direction
-        else:
-            spacing_tuple = (1.0, 1.0, 1.0)
-            direction = np.eye(3)
-    else:
-        spacing_tuple = (1.0, 1.0, 1.0)
-        direction = np.eye(3)
+    if not np.all(spacing > 1e-8):
+        raise ValueError(
+            "Cannot export a mask whose affine is singular; the exported "
+            "geometry would be wrong. Affine:\n{}".format(matrix)
+        )
+    unit_direction = direction_ras / spacing
+    residual = unit_direction.T.dot(unit_direction) - np.eye(3)
+    if np.max(np.abs(residual)) >= 1e-4:
+        raise ValueError(
+            "Cannot export a mask with a sheared affine; ITK (.nrrd/.mha) "
+            "cannot represent it and the exported geometry would be wrong. "
+            "Use .nii.gz, which supports arbitrary linear transforms. "
+            "Affine:\n{}".format(matrix)
+        )
+    spacing_tuple = tuple(float(v) for v in spacing)
+    direction = unit_direction
     # NIfTI world space is RAS; SimpleITK's LPS convention needs a flip of the
     # first two direction/origin components to keep exported masks
     # co-registered with the source images they came from.
@@ -2090,7 +2095,38 @@ def do_convert(params: dict) -> dict:
             source_geometry = find_image_geometry_in_case_dir(case_dir)
     except Exception:
         source_geometry = None
-    export_space = str(params.get("export_space") or manifest.get("export_space") or "source_image").lower()
+    source_grid_from_metadata = False
+    requested_export_space = str(
+        params.get("export_space") or manifest.get("export_space") or "source_image"
+    ).lower()
+    if source_geometry is None and requested_export_space in (
+        "source", "source_image", "source_grid"
+    ):
+        # The source image file is gone, but pipeline-created projects store
+        # its grid (shape + voxel-to-RAS matrix) in mcs metadata. Resampling
+        # only needs that grid, not the image file, so restore the exact
+        # source grid from metadata instead of falling to the Mimics grid.
+        source_shape = None
+        try:
+            shape_value = params.get("source_image_shape")
+            if isinstance(shape_value, str):
+                # mcs metadata values arrive as JSON text.
+                shape_value = json.loads(shape_value)
+            source_shape = _shape_from_params(shape_value)
+        except Exception:
+            source_shape = None
+        source_matrix = None
+        try:
+            matrix_value = params.get("source_voxel_to_ras_matrix")
+            if isinstance(matrix_value, str):
+                matrix_value = json.loads(matrix_value)
+            source_matrix = _matrix_from_params(matrix_value)
+        except Exception:
+            source_matrix = None
+        if source_shape and source_matrix is not None:
+            source_geometry = {"shape": source_shape, "affine": source_matrix}
+            source_grid_from_metadata = True
+    export_space = requested_export_space
     source_mask_paths = params.get("source_mask_paths") or {}
     if not isinstance(source_mask_paths, dict):
         return {
@@ -2133,7 +2169,10 @@ def do_convert(params: dict) -> dict:
     if export_space in ("source", "source_image", "source_grid") and source_geometry:
         export_shape = tuple(int(value) for value in source_geometry["shape"])
         export_affine = np.asarray(source_geometry["affine"], dtype=float)
-        export_affine_source = "source_image:{}".format(source_geometry.get("kind", "unknown"))
+        if source_grid_from_metadata:
+            export_affine_source = "source_grid_from_metadata"
+        else:
+            export_affine_source = "source_image:{}".format(source_geometry.get("kind", "unknown"))
         export_space = "source_image"
     else:
         export_shape = None
