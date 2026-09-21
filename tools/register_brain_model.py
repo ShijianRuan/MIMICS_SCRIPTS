@@ -20,7 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / "tools"
 RUNTIME = ROOT / "runtime_py35"
-FINETUNE_SRC = ROOT / "external" / "nninteractive-finetune" / "src"
+FINETUNE_SRC = ROOT / "integrations" / "nninteractive-finetune" / "src"
 for value in (ROOT, TOOLS, RUNTIME, FINETUNE_SRC):
     if str(value) not in sys.path:
         sys.path.insert(0, str(value))
@@ -47,7 +47,7 @@ from nninteractive_task_common import (
 OFFICIAL_DIR = official_model_dir()
 CLOPA_WEIGHTS = (
     ROOT
-    / "external"
+    / "integrations"
     / "nninteractive-finetune"
     / "validation"
     / "data"
@@ -55,7 +55,7 @@ CLOPA_WEIGHTS = (
 )
 TRAIN_MANIFEST = (
     ROOT
-    / "external"
+    / "integrations"
     / "nninteractive-finetune"
     / "validation"
     / "data"

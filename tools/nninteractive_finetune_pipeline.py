@@ -20,7 +20,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS_DIR = ROOT / "tools"
-FINETUNE_SRC = ROOT / "external" / "nninteractive-finetune" / "src"
+FINETUNE_SRC = ROOT / "integrations" / "nninteractive-finetune" / "src"
 for candidate in (str(ROOT), str(TOOLS_DIR), str(FINETUNE_SRC)):
     if candidate not in sys.path:
         sys.path.insert(0, candidate)

@@ -533,7 +533,7 @@ class TrainingSetupWindow:
         QtWidgets = self.QtWidgets
         default_map = (
             ROOT
-            / "external"
+            / "integrations"
             / "nnunet_segmentation_workflow"
             / "ModelMap.toml"
         )

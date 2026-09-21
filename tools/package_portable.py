@@ -25,7 +25,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 INCLUDE_DIRS = [
     "scripting_library",
     "runtime_py35",
-    "external",
+    "integrations",
     "tools",
     "remote",
     # Model weights are portable (neural network parameters, not compiled code).
@@ -78,11 +78,11 @@ REQUIRED_EXTERNAL_UI_FILES = [
     "tools/verify_medical_geometry.py",
     "runtime_py35/interactive_algorithms_mimics.py",
     "runtime_py35/nnunet_mimics.py",
-    "external/nnunet_segmentation_workflow/trainers/MimicsNNUNetTrainer.py",
-    "external/nnunet_segmentation_workflow/trainers/MimicsNNUNetTrainerNoMirroring.py",
+    "integrations/nnunet_segmentation_workflow/trainers/MimicsNNUNetTrainer.py",
+    "integrations/nnunet_segmentation_workflow/trainers/MimicsNNUNetTrainerNoMirroring.py",
 ]
 DEFAULT_FROZEN_ENCODER = (
-    "external/dinov3-medical-seg/models/dinov3-vits16/model.onnx"
+    "integrations/dinov3-medical-seg/models/dinov3-vits16/model.onnx"
 )
 
 ARCHIVE_NAME = "mimics_script_portable"
@@ -215,8 +215,8 @@ def check():
         "nninteractive_env/models/nnInteractive_v1.0",
     ]
     optional_model_dirs = [
-        "external/dinov3-medical-seg/models/dinov3-vitb16",
-        "external/dinov3-medical-seg/models/dinov3-vitl16",
+        "integrations/dinov3-medical-seg/models/dinov3-vitb16",
+        "integrations/dinov3-medical-seg/models/dinov3-vitl16",
     ]
     for rel in required_model_dirs:
         p = PROJECT_ROOT / rel
@@ -235,7 +235,7 @@ def check():
             print("  {} {}  -- optional, not found".format(_yellow("[--]"), rel))
     scribbleprompt_checkpoint = (
         PROJECT_ROOT
-        / "external"
+        / "integrations"
         / "ScribblePrompt"
         / "checkpoints"
         / "ScribblePrompt_unet_v1_nf192_res128.pt"
@@ -345,13 +345,13 @@ def pack(output_dir=None, with_env=False):
         if arcname.endswith(EXCLUDE_SUFFIXES):
             return False
         # DINOv3 external: only ship what's needed at runtime
-        if arcname.startswith("external/dinov3-medical-seg/"):
-            dinov3_rel = arcname[len("external/dinov3-medical-seg/"):]
+        if arcname.startswith("integrations/dinov3-medical-seg/"):
+            dinov3_rel = arcname[len("integrations/dinov3-medical-seg/"):]
             top = dinov3_rel.split("/")[0] if "/" in dinov3_rel else dinov3_rel
             if top in EXCLUDE_DINOV3_DIRS:
                 return False
-        if arcname.startswith("external/nninteractive-finetune/"):
-            package_rel = arcname[len("external/nninteractive-finetune/"):]
+        if arcname.startswith("integrations/nninteractive-finetune/"):
+            package_rel = arcname[len("integrations/nninteractive-finetune/"):]
             top = package_rel.split("/")[0] if "/" in package_rel else package_rel
             if top in EXCLUDE_NNINTERACTIVE_FINETUNE_DIRS:
                 return False
@@ -1119,21 +1119,21 @@ def _generate_offline_bat(python_version, python_short):
     lines.append("    echo   WARNING: Paramiko is unavailable. Local training is unaffected; remote training is disabled.")
     lines.append(")")
     lines.append(
-        'if not exist "external\\dinov3-medical-seg\\models\\dinov3-vits16\\model.onnx" ('
+        'if not exist "integrations\\dinov3-medical-seg\\models\\dinov3-vits16\\model.onnx" ('
     )
     lines.append("    echo   ERROR: The default ViT-S/16 ONNX encoder is missing.")
     lines.append(
-        "    echo   Expected: external\\dinov3-medical-seg\\models\\dinov3-vits16\\model.onnx"
+        "    echo   Expected: integrations\\dinov3-medical-seg\\models\\dinov3-vits16\\model.onnx"
     )
     lines.append("    pause")
     lines.append("    exit /b 1")
     lines.append(")")
     lines.append(
-        'if not exist "external\\ScribblePrompt\\checkpoints\\ScribblePrompt_unet_v1_nf192_res128.pt" ('
+        'if not exist "integrations\\ScribblePrompt\\checkpoints\\ScribblePrompt_unet_v1_nf192_res128.pt" ('
     )
     lines.append("    echo   WARNING: The official ScribblePrompt UNet checkpoint is missing.")
     lines.append(
-        "    echo   Expected: external\\ScribblePrompt\\checkpoints\\ScribblePrompt_unet_v1_nf192_res128.pt"
+        "    echo   Expected: integrations\\ScribblePrompt\\checkpoints\\ScribblePrompt_unet_v1_nf192_res128.pt"
     )
     lines.append(")")
     lines.append("")

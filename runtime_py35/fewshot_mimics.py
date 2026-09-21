@@ -248,7 +248,7 @@ def _resolve_path(value, base):
 
 def _dinov3_root(config):
     env = os.environ.get("MIMICS_FEWSHOT_DINOV3_ROOT", "")
-    value = env or config.get("dinov3_project") or "external/dinov3-medical-seg"
+    value = env or config.get("dinov3_project") or "integrations/dinov3-medical-seg"
     return _resolve_path(value, _project_root())
 
 

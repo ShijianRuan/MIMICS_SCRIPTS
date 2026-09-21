@@ -30,7 +30,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / "tools"
 RUNTIME = ROOT / "runtime_py35"
-FINETUNE_SRC = ROOT / "external" / "nninteractive-finetune" / "src"
+FINETUNE_SRC = ROOT / "integrations" / "nninteractive-finetune" / "src"
 for value in (str(ROOT), str(TOOLS), str(RUNTIME), str(FINETUNE_SRC)):
     if value not in sys.path:
         sys.path.insert(0, value)

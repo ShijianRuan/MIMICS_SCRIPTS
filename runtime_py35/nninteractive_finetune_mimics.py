@@ -126,7 +126,7 @@ def _gui_environment():
         _project_root(),
         os.path.join(_project_root(), "tools"),
         os.path.join(
-            _project_root(), "external", "nninteractive-finetune", "src"
+            _project_root(), "integrations", "nninteractive-finetune", "src"
         ),
     ]
     existing = [

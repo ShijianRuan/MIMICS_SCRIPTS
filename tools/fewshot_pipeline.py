@@ -749,7 +749,7 @@ def dinov3_root_from_args(args):
     if value:
         path = resolve_path(value, ROOT)
     else:
-        path = (ROOT / "external" / "dinov3-medical-seg").resolve()
+        path = (ROOT / "integrations" / "dinov3-medical-seg").resolve()
     if not (path / "scripts" / "train.py").is_file():
         raise RuntimeError("DINOv3 project was not found: {}".format(path))
     return path
@@ -2162,7 +2162,7 @@ def _model_root_for_config(model_path, base_config):
     if configured:
         candidates.append(Path(configured) / path)
     candidates.append(
-        ROOT / "external" / "dinov3-medical-seg" / path
+        ROOT / "integrations" / "dinov3-medical-seg" / path
     )
     candidates.append(base_path.parent / path)
     for candidate in candidates:
@@ -2505,7 +2505,7 @@ def write_training_config(
     except ImportError:
         # The DINOv3 project may live outside this repo (see fewshot_config.json
         # "dinov3_project"). Try the bundled copy first, then the configured path.
-        candidate_roots = [ROOT / "external" / "dinov3-medical-seg"]
+        candidate_roots = [ROOT / "integrations" / "dinov3-medical-seg"]
         configured = str(load_repo_config().get("dinov3_project") or "").strip()
         if configured:
             candidate_roots.append(Path(configured))

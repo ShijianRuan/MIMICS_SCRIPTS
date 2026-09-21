@@ -20,7 +20,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / "tools"
 RUNTIME = ROOT / "runtime_py35"
-WORKFLOW = ROOT / "external" / "nnunet_segmentation_workflow"
+WORKFLOW = ROOT / "integrations" / "nnunet_segmentation_workflow"
 for path in (ROOT, TOOLS, RUNTIME, WORKFLOW):
     value = str(path)
     if value not in sys.path:
@@ -40,7 +40,7 @@ class ContractTests(unittest.TestCase):
     def test_existing_model_map_loads_multiclass_and_grouped_tasks(self):
         sets = common.load_label_sets(
             ROOT
-            / "external"
+            / "integrations"
             / "nnunet_segmentation_workflow"
             / "ModelMap.toml"
         )
@@ -1108,7 +1108,7 @@ class JobLifecycleTests(unittest.TestCase):
     def test_dead_registry_rows_are_flagged_not_dropped(self):
         with tempfile.TemporaryDirectory() as temp:
             workspace = Path(temp)
-            registry_path = workspace / "nnunet_model_registry.json"
+            registry_path = workspace / "model_registry.json"
             common.write_json_atomic(
                 registry_path,
                 {
@@ -1152,7 +1152,7 @@ class JobLifecycleTests(unittest.TestCase):
     def test_prediction_backend_accepts_fold_all(self):
         source = (
             ROOT
-            / "external"
+            / "integrations"
             / "nnunet_segmentation_workflow"
             / "Action4_Predict.py"
         ).read_text(encoding="utf-8")

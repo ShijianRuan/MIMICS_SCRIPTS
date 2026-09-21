@@ -467,7 +467,7 @@ def check():
     model_roots = [
         PROJECT_ROOT / name / "models" for name in ENV_DIR_CANDIDATES
     ] + [
-        PROJECT_ROOT / "external" / "dinov3-medical-seg" / "models",
+        PROJECT_ROOT / "integrations" / "dinov3-medical-seg" / "models",
     ]
     for root in model_roots:
         if root.is_dir():

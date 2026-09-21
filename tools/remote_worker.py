@@ -377,7 +377,7 @@ def preflight(models_dir: Path) -> int:
 
         trainer_root = (
             APP_ROOT
-            / "external"
+            / "integrations"
             / "nnunet_segmentation_workflow"
             / "trainers"
         )

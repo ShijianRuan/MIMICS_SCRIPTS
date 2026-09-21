@@ -27,7 +27,7 @@ class TestUnderOldRoot(unittest.TestCase):
     def test_detects_paths_under_old_root_case_insensitive(self):
         old_root = migrate_root._normcase(r"E:\OldInstall")
         self.assertTrue(migrate_root._under_old_root(
-            r"E:\oldinstall\external\dinov3-medical-seg", old_root
+            r"E:\oldinstall\integrations\dinov3-medical-seg", old_root
         ))
         self.assertTrue(migrate_root._under_old_root(
             r"E:\OLDINSTALL\foo", old_root
@@ -49,7 +49,7 @@ class TestRewriteConfigPaths(unittest.TestCase):
             base = Path(raw)
             project = self._make_project(base)
             _write_json(project / "fewshot_config.json", {
-                "dinov3_project": r"E:\old\external\dinov3-medical-seg",
+                "dinov3_project": r"E:\old\integrations\dinov3-medical-seg",
                 "default_epochs": 20,
             })
             _write_json(project / "nninteractive_config.json", {
@@ -62,7 +62,7 @@ class TestRewriteConfigPaths(unittest.TestCase):
                 (project / "fewshot_config.json").read_text(encoding="utf-8")
             )
             self.assertEqual(
-                payload["dinov3_project"], "external/dinov3-medical-seg"
+                payload["dinov3_project"], "integrations/dinov3-medical-seg"
             )
             self.assertEqual(payload["default_epochs"], 20)
             ws = json.loads(
@@ -76,7 +76,7 @@ class TestRewriteConfigPaths(unittest.TestCase):
             base = Path(raw)
             project = self._make_project(base)
             _write_json(project / "fewshot_config.json", {
-                "dinov3_project": r"E:\old\external\dinov3-medical-seg",
+                "dinov3_project": r"E:\old\integrations\dinov3-medical-seg",
             })
             migrate_root._rewrite_config_paths(
                 r"E:\old", absolute=True, dry_run=False, project_root=project
@@ -85,7 +85,7 @@ class TestRewriteConfigPaths(unittest.TestCase):
                 (project / "fewshot_config.json").read_text(encoding="utf-8")
             )
             expected = str(
-                migrate_root.PROJECT_ROOT / "external" / "dinov3-medical-seg"
+                migrate_root.PROJECT_ROOT / "integrations" / "dinov3-medical-seg"
             )
             self.assertEqual(payload["dinov3_project"], expected)
 
@@ -94,7 +94,7 @@ class TestRewriteConfigPaths(unittest.TestCase):
             base = Path(raw)
             project = self._make_project(base)
             _write_json(project / "fewshot_config.json", {
-                "dinov3_project": r"E:\old\external\dinov3-medical-seg",
+                "dinov3_project": r"E:\old\integrations\dinov3-medical-seg",
             })
             migrate_root._rewrite_config_paths(
                 r"E:\old", absolute=False, dry_run=True, project_root=project
@@ -103,7 +103,7 @@ class TestRewriteConfigPaths(unittest.TestCase):
                 (project / "fewshot_config.json").read_text(encoding="utf-8")
             )
             self.assertEqual(
-                payload["dinov3_project"], r"E:\old\external\dinov3-medical-seg"
+                payload["dinov3_project"], r"E:\old\integrations\dinov3-medical-seg"
             )
 
     def test_untouched_keys_and_foreign_paths_left_alone(self):
@@ -289,7 +289,7 @@ class TestEndToEndSimulation(unittest.TestCase):
             project.mkdir()
             # Old machine configs with absolute paths.
             _write_json(old_root / "fewshot_config.json", {
-                "dinov3_project": str(old_root / "external" / "dinov3-medical-seg"),
+                "dinov3_project": str(old_root / "integrations" / "dinov3-medical-seg"),
             })
             _write_json(old_root / "nninteractive_config.json", {
                 "workspace_dir": str(old_root / "nninteractive_task_models"),
@@ -314,7 +314,7 @@ class TestEndToEndSimulation(unittest.TestCase):
                 (project / "fewshot_config.json").read_text(encoding="utf-8")
             )
             self.assertEqual(
-                fewshot["dinov3_project"], "external/dinov3-medical-seg"
+                fewshot["dinov3_project"], "integrations/dinov3-medical-seg"
             )
             nni = json.loads(
                 (project / "nninteractive_config.json").read_text(encoding="utf-8")

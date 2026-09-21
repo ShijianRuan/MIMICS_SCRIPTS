@@ -1401,7 +1401,7 @@ def test_fewshot_external_advanced_setup(fake, tmp):
         module._project_root = lambda: str(ROOT)
         module._training_setup_ui_script = lambda: str(ROOT / "tools" / "fewshot_training_setup_ui.py")
         result = module._launch_external_advanced_training(
-            {"python": sys.executable, "dinov3_project": "external/dinov3-medical-seg"},
+            {"python": sys.executable, "dinov3_project": "integrations/dinov3-medical-seg"},
             "liver",
             str(ts_root),
         )

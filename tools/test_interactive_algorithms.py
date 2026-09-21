@@ -119,7 +119,7 @@ class WorkerGeometryTests(unittest.TestCase):
     importlib.util.find_spec("torch") is not None
     and (
         ROOT
-        / "external"
+        / "integrations"
         / "ScribblePrompt"
         / "checkpoints"
         / "ScribblePrompt_unet_v1_nf192_res128.pt"
@@ -153,7 +153,7 @@ class ScribblePromptIntegrationTests(unittest.TestCase):
                 "logits_result_path": str(root / "logits.f32"),
                 "checkpoint_path": str(
                     ROOT
-                    / "external"
+                    / "integrations"
                     / "ScribblePrompt"
                     / "checkpoints"
                     / "ScribblePrompt_unet_v1_nf192_res128.pt"
@@ -204,7 +204,7 @@ class ScribblePromptIntegrationTests(unittest.TestCase):
                 "logits_result_path": str(root / "logits.f32"),
                 "checkpoint_path": str(
                     ROOT
-                    / "external"
+                    / "integrations"
                     / "ScribblePrompt"
                     / "checkpoints"
                     / "ScribblePrompt_unet_v1_nf192_res128.pt"

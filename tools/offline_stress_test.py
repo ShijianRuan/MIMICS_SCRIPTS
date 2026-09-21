@@ -35,16 +35,16 @@ import tools.fewshot_pipeline as fewshot
 
 
 def dinov3_project_root() -> Path:
-    """Locate the DINOv3 project (deploy tree may not bundle external/)."""
+    """Locate the DINOv3 project (deploy tree may not bundle integrations/)."""
     candidates = [
         os.environ.get("MIMICS_FEWSHOT_DINOV3_ROOT"),
         fewshot.load_repo_config().get("dinov3_project"),
-        str(ROOT / "external" / "dinov3-medical-seg"),
+        str(ROOT / "integrations" / "dinov3-medical-seg"),
     ]
     for candidate in candidates:
         if candidate and (Path(candidate) / "src").is_dir():
             return Path(candidate)
-    return ROOT / "external" / "dinov3-medical-seg"
+    return ROOT / "integrations" / "dinov3-medical-seg"
 
 
 class StressFailure(RuntimeError):

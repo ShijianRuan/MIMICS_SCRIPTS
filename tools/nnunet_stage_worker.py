@@ -13,7 +13,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKFLOW = ROOT / "external" / "nnunet_segmentation_workflow"
+WORKFLOW = ROOT / "integrations" / "nnunet_segmentation_workflow"
 TRAINERS = WORKFLOW / "trainers"
 for candidate in (ROOT, ROOT / "tools", WORKFLOW):
     value = str(candidate)

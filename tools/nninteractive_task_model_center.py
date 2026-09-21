@@ -80,7 +80,7 @@ def _launch_process(
             launch[0] = str(pythonw)
     env = dict(os.environ)
     existing = [value for value in env.get("PYTHONPATH", "").split(os.pathsep) if value]
-    for value in (str(ROOT), str(ROOT / "tools"), str(ROOT / "external" / "nninteractive-finetune" / "src")):
+    for value in (str(ROOT), str(ROOT / "tools"), str(ROOT / "integrations" / "nninteractive-finetune" / "src")):
         if value not in existing:
             existing.insert(0, value)
     env["PYTHONPATH"] = os.pathsep.join(existing)

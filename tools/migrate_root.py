@@ -356,7 +356,7 @@ def main(argv=None) -> int:
         print("Migration complete.")
         print("Remaining manual steps (not automatable):")
         print("  * Copy nninteractive_task_models/tasks/ (weights) if not already here.")
-        print("  * Copy external/dinov3-medical-seg code + models/ if not already here.")
+        print("  * Copy integrations/dinov3-medical-seg code + models/ if not already here.")
         print("  * Copy your dataset roots (ts_root folders) if they moved too.")
     return 0
 

@@ -42,7 +42,7 @@ def main(argv=None):
         "mcs_output_dir": str(dataset / "mcs_output"),
         "workspace": str(dataset / "fewshot_models"),
         "project_root": str(ROOT),
-        "dinov3_root": str(ROOT / "external" / "dinov3-medical-seg"),
+        "dinov3_root": str(ROOT / "integrations" / "dinov3-medical-seg"),
         "python_exe": sys.executable,
         "pipeline_script": str(ROOT / "tools" / "fewshot_pipeline.py"),
         "case_ids": ["case_{:03d}".format(index) for index in range(24)],

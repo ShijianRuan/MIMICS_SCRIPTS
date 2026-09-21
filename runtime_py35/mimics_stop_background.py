@@ -84,7 +84,7 @@ def _owned_roots():
     """Return all directory roots that may appear in process command lines."""
     root = _project_root()
     result = [root]
-    for child in ("python_env", "nninteractive_env", "external", "tools", "runtime_py35"):
+    for child in ("python_env", "nninteractive_env", "integrations", "tools", "runtime_py35"):
         path = os.path.join(root, child)
         if os.path.exists(path):
             result.append(path)
@@ -259,7 +259,7 @@ def _scan_filesystem_for_queue_dirs():
     for dirpath, _dirnames, filenames in os.walk(root):
         # Skip deep vendor/env trees
         if any(skip in dirpath.replace(os.sep, "/") for skip in (
-            "python_env", "nninteractive_env", ".git", "__pycache__", "external/dinov3",
+            "python_env", "nninteractive_env", ".git", "__pycache__", "integrations/dinov3",
         )):
             continue
         if "_mcs_queue_active.json" in filenames:
@@ -785,7 +785,7 @@ def _find_cache_paths():
     # __pycache__ directories recursively (skip env and .git)
     for dirpath, dirnames, _filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in (
-            "python_env", "nninteractive_env", ".git", "external",
+            "python_env", "nninteractive_env", ".git", "integrations",
         )]
         if os.path.basename(dirpath) == "__pycache__":
             paths.append(dirpath)

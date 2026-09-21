@@ -329,7 +329,7 @@ def export_dinov3(args: argparse.Namespace) -> int:
             manifest.get("dinov3_root")
             or os.environ.get("MIMICS_FEWSHOT_DINOV3_ROOT")
             or load_repo_config().get("dinov3_project")
-            or (ROOT / "external" / "dinov3-medical-seg")
+            or (ROOT / "integrations" / "dinov3-medical-seg")
         ).expanduser().resolve()
         if str(dino_root) not in os.sys.path:
             os.sys.path.insert(0, str(dino_root))

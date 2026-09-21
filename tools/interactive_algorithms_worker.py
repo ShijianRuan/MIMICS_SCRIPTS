@@ -297,7 +297,7 @@ def _resolve_checkpoint(request: dict[str, Any]) -> Path:
 def _load_scribbleprompt_model(checkpoint: Path, device: Any) -> Any:
     import torch
 
-    source_root = ROOT / "external" / "ScribblePrompt"
+    source_root = ROOT / "integrations" / "ScribblePrompt"
     if str(source_root) not in sys.path:
         sys.path.insert(0, str(source_root))
     from scribbleprompt.models.network import UNet

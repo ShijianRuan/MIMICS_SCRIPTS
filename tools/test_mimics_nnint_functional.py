@@ -1255,7 +1255,7 @@ class InputContractTests(unittest.TestCase):
 
     def test_contracts_are_identical(self):
         """The fine-tuning package and Mimics integration MUST agree on the contract."""
-        ft_data_path = (ROOT / "external" / "nninteractive-finetune" / "src"
+        ft_data_path = (ROOT / "integrations" / "nninteractive-finetune" / "src"
                         / "nninteractive_finetune" / "data.py")
         ft_source = ft_data_path.read_text(encoding="utf-8")
 

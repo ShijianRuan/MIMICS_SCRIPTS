@@ -14,7 +14,7 @@ from typing import Any, Iterable
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKFLOW_ROOT = ROOT / "external" / "nnunet_segmentation_workflow"
+WORKFLOW_ROOT = ROOT / "integrations" / "nnunet_segmentation_workflow"
 TRAINER_ROOT = WORKFLOW_ROOT / "trainers"
 SCHEMA_VERSION = "mimics_nnunet_job.v1"
 MODEL_SCHEMA_VERSION = "mimics_nnunet_model.v1"

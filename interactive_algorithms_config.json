@@ -7,6 +7,6 @@
     "device": "cpu",
     "input_size": 128,
     "prior_logit_magnitude": 6.0,
-    "checkpoint": "external/ScribblePrompt/checkpoints/ScribblePrompt_unet_v1_nf192_res128.pt"
+    "checkpoint": "integrations/ScribblePrompt/checkpoints/ScribblePrompt_unet_v1_nf192_res128.pt"
   }
 }

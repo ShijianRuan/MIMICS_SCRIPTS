@@ -1499,7 +1499,7 @@ def cmd_kill_background(args):
         str(ROOT),
         str(ROOT / "python_env"),
         str(ROOT / "nninteractive_env"),
-        str(ROOT / "external"),
+        str(ROOT / "integrations"),
         str(ROOT / "tools"),
         str(ROOT / "runtime_py35"),
     ]

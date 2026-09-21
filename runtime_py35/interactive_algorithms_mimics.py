@@ -1280,7 +1280,7 @@ def _start_scribbleprompt(config):
         raise RuntimeError(
             "The official ScribblePrompt UNet checkpoint is missing.\n\nExpected: {0}\n\n"
             "Place ScribblePrompt_unet_v1_nf192_res128.pt at this path before drawing prompts.".format(
-                checkpoint or "external/ScribblePrompt/checkpoints/ScribblePrompt_unet_v1_nf192_res128.pt"
+                checkpoint or "integrations/ScribblePrompt/checkpoints/ScribblePrompt_unet_v1_nf192_res128.pt"
             )
         )
     image = _active_image()

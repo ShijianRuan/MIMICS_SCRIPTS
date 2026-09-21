@@ -878,7 +878,7 @@ def _prepare_dino(spec: dict[str, Any], bundle: Path) -> dict[str, Any]:
         "--organ",
         organ,
         "--dinov3-root",
-        "/app/external/dinov3-medical-seg",
+        "/app/integrations/dinov3-medical-seg",
         "--python",
         "__REMOTE_PYTHON__",
         "--run-id",

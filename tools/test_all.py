@@ -49,9 +49,9 @@ sys.path.insert(0, PROJECT_ROOT)
 def _repo_dinov3_root():
     """Resolve the configured DINOv3 project root.
 
-    The deploy tree keeps external/dinov3-medical-seg at the path recorded in
+    The deploy tree keeps integrations/dinov3-medical-seg at the path recorded in
     fewshot_config.json (it may live outside this repository), so tests must
-    not hard-code <repo>/external/dinov3-medical-seg.
+    not hard-code <repo>/integrations/dinov3-medical-seg.
     """
     try:
         with open(os.path.join(PROJECT_ROOT, "fewshot_config.json"), "r", encoding="utf-8") as handle:
@@ -64,7 +64,7 @@ def _repo_dinov3_root():
         candidate = configured if os.path.isabs(configured) else os.path.join(PROJECT_ROOT, configured)
         if os.path.isfile(os.path.join(candidate, "scripts", "train.py")):
             return candidate
-    return os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg")
+    return os.path.join(PROJECT_ROOT, "integrations", "dinov3-medical-seg")
 
 
 DINOV3_ROOT = _repo_dinov3_root()
@@ -151,7 +151,7 @@ class TestSyntax(unittest.TestCase):
                 continue
             if ".git" in root or "venv" in root or ".venv" in root:
                 continue
-            if "external/dinov3-medical-seg" in root:
+            if "integrations/dinov3-medical-seg" in root:
                 continue  # external code
             for fname in files:
                 if not fname.endswith(".py"):
@@ -6364,11 +6364,11 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn("pip install PySide6 shiboken6", bat)
         self.assertIn("onnxruntime", bat)
         self.assertIn(
-            "external\\dinov3-medical-seg\\models\\dinov3-vits16\\model.onnx",
+            "integrations\\dinov3-medical-seg\\models\\dinov3-vits16\\model.onnx",
             bat,
         )
         self.assertEqual(
-            "external/dinov3-medical-seg/models/dinov3-vits16/model.onnx",
+            "integrations/dinov3-medical-seg/models/dinov3-vits16/model.onnx",
             package_portable.DEFAULT_FROZEN_ENCODER,
         )
         config = json.loads(
@@ -6472,7 +6472,7 @@ class TestNewFeatures(unittest.TestCase):
         env_python = os.path.join(root, "nninteractive_env", "python.exe")
         os.makedirs(os.path.dirname(env_python))
         Path(env_python).write_text("", encoding="utf-8")
-        dinov3_root = os.path.join(root, "external", "dinov3-medical-seg")
+        dinov3_root = os.path.join(root, "integrations", "dinov3-medical-seg")
         old_project = fewshot_mimics._project_root
         try:
             fewshot_mimics._project_root = lambda: root
@@ -6495,7 +6495,7 @@ class TestNewFeatures(unittest.TestCase):
         old_root = pipeline.ROOT
         try:
             pipeline.ROOT = root
-            result = pipeline.python_from_args(Args(), root / "external" / "dinov3-medical-seg")
+            result = pipeline.python_from_args(Args(), root / "integrations" / "dinov3-medical-seg")
         finally:
             pipeline.ROOT = old_root
         self.assertEqual(str(env_python), result)
@@ -7568,7 +7568,7 @@ class TestNewFeatures(unittest.TestCase):
             fewshot_mimics._project_root = lambda: PROJECT_ROOT
             fewshot_mimics._training_setup_ui_script = lambda: os.path.join(PROJECT_ROOT, "tools", "fewshot_training_setup_ui.py")
             result = fewshot_mimics._launch_external_advanced_training(
-                {"python": sys.executable, "dinov3_project": "external/dinov3-medical-seg"},
+                {"python": sys.executable, "dinov3_project": "integrations/dinov3-medical-seg"},
                 "liver",
                 ts_root,
             )
@@ -7679,7 +7679,7 @@ class TestNewFeatures(unittest.TestCase):
             fewshot_mimics._project_root = lambda: PROJECT_ROOT
             fewshot_mimics._status_viewer_script = lambda: os.path.join(PROJECT_ROOT, "tools", "fewshot_status_viewer.py")
             pid = fewshot_mimics._launch_external_status_viewer(
-                {"python": sys.executable, "dinov3_project": "external/dinov3-medical-seg"},
+                {"python": sys.executable, "dinov3_project": "integrations/dinov3-medical-seg"},
                 ts_root,
             )
         finally:
@@ -7748,7 +7748,7 @@ class TestNewFeatures(unittest.TestCase):
             fewshot_mimics._model_chooser_script = lambda: os.path.join(PROJECT_ROOT, "tools", "fewshot_model_chooser.py")
             fewshot_mimics._project_root = lambda: PROJECT_ROOT
             result = fewshot_mimics._launch_external_model_chooser(
-                {"python": sys.executable, "dinov3_project": "external/dinov3-medical-seg"},
+                {"python": sys.executable, "dinov3_project": "integrations/dinov3-medical-seg"},
                 ts_root,
                 "s0001",
                 "liver",
@@ -8717,7 +8717,7 @@ class TestNewFeatures(unittest.TestCase):
             fewshot_mimics._status_viewer_script = lambda: os.path.join(PROJECT_ROOT, "tools", "fewshot_status_viewer.py")
             with self.assertRaises(RuntimeError) as raised:
                 fewshot_mimics._launch_external_status_viewer(
-                    {"python": sys.executable, "dinov3_project": "external/dinov3-medical-seg"},
+                    {"python": sys.executable, "dinov3_project": "integrations/dinov3-medical-seg"},
                     ts_root,
                 )
         finally:
@@ -8744,7 +8744,7 @@ class TestNewFeatures(unittest.TestCase):
             fewshot_mimics._status_viewer_script = lambda: os.path.join(PROJECT_ROOT, "tools", "fewshot_status_viewer.py")
             with self.assertRaises(RuntimeError) as raised:
                 fewshot_mimics._launch_external_status_viewer(
-                    {"python": sys.executable, "dinov3_project": "external/dinov3-medical-seg"},
+                    {"python": sys.executable, "dinov3_project": "integrations/dinov3-medical-seg"},
                     ts_root,
                 )
         finally:

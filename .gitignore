@@ -27,11 +27,11 @@ wheels/
 /data/
 /output/
 /nninteractive_task_models/
-/external/nninteractive-finetune/validation/data/
-/external/nninteractive-finetune/validation/work/
-/external/nninteractive-finetune/validation/outputs/
-/external/dinov3-medical-seg/models/
-/external/ScribblePrompt/checkpoints/*.pt
+/integrations/nninteractive-finetune/validation/data/
+/integrations/nninteractive-finetune/validation/work/
+/integrations/nninteractive-finetune/validation/outputs/
+/integrations/dinov3-medical-seg/models/
+/integrations/ScribblePrompt/checkpoints/*.pt
 
 # Portable model archives are generated on demand and transferred separately
 *.model.zip

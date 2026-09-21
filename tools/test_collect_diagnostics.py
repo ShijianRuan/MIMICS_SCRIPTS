@@ -73,7 +73,7 @@ class TestCollectBundle(unittest.TestCase):
             encoding="utf-8",
         )
         (base / "fewshot_config.json").write_text(
-            json.dumps({"dinov3_project": "external/dinov3-medical-seg"}),
+            json.dumps({"dinov3_project": "integrations/dinov3-medical-seg"}),
             encoding="utf-8",
         )
         return runtime
