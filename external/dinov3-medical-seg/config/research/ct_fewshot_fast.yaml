@@ -1,0 +1,12 @@
+_base_: ct_fewshot_base.yaml
+
+training:
+  epochs: 50
+  validation_interval: 2
+  keep_last_checkpoints: 1
+  mixed_precision: true
+  num_workers: 0
+  early_stopping:
+    min_epochs: 12
+    patience: 5
+    min_delta: 0.001

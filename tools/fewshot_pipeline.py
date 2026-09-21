@@ -162,10 +162,7 @@ def append_text(path, text, retries=8, max_sleep=0.15):
 
 
 def read_json(path, default=None):
-    try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
-    except Exception:
-        return default
+    return pipeline_common.read_json(path, default)
 
 
 def rotate_log(path):
@@ -248,9 +245,35 @@ def write_cancel_marker(cancel_path):
     return pipeline_common.write_cancel_marker(cancel_path)
 
 
+TEMP_LOG_RETENTION_DAYS = 30
+
+
+def prune_temp_log_root(retention_days=TEMP_LOG_RETENTION_DAYS):
+    """Delete fallback subprocess logs past the retention window (best effort).
+
+    The %TEMP% fallback root is only used when the primary log is locked, but
+    files written there live outside the project tree and would otherwise
+    accumulate forever.
+    """
+    temp_root = Path(tempfile.gettempdir()) / "mimics_script_fewshot_logs"
+    if not temp_root.is_dir():
+        return
+    cutoff = time.time() - retention_days * 86400
+    try:
+        for entry in temp_root.iterdir():
+            try:
+                if entry.is_file() and entry.stat().st_mtime < cutoff:
+                    entry.unlink()
+            except OSError:
+                continue
+    except OSError:
+        pass
+
+
 def open_subprocess_log(path, workspace, label):
     path = Path(path)
     workspace = Path(workspace)
+    prune_temp_log_root()
     temp_root = Path(tempfile.gettempdir()) / "mimics_script_fewshot_logs"
     candidates = [
         path,

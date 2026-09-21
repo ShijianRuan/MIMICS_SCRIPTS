@@ -162,7 +162,7 @@ class StatusWindow:
         for row in list_jobs(self.workspace):
             task_id = str(row.get("task_id") or "Unassigned")
             tasks[task_id] = str(row.get("task_name") or task_id)
-        for row in load_models(self.workspace):
+        for row in load_models(self.workspace, include_missing=True):
             task_id = str(row.get("task_id") or "Unassigned")
             tasks[task_id] = str(row.get("task_name") or task_id)
         self.task_combo.blockSignals(True)
@@ -205,7 +205,11 @@ class StatusWindow:
                 selected = index
         self.jobs.setCurrentRow(selected if rows else -1)
         self.jobs.blockSignals(False)
-        self._model_rows = [row for row in load_models(self.workspace) if str(row.get("task_id") or "") == task_id]
+        self._model_rows = [
+            row
+            for row in load_models(self.workspace, include_missing=True)
+            if str(row.get("task_id") or "") == task_id
+        ]
         self.models.setRowCount(len(self._model_rows))
         for row_index, model in enumerate(self._model_rows):
             usable, reason = model_usability(model)

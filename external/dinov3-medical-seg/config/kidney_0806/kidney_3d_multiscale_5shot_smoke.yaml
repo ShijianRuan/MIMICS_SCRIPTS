@@ -1,0 +1,7 @@
+# One-epoch real-data smoke for the 0806 continuity pipeline; not a scored experiment.
+_base_: ["kidney_3d_multiscale_5shot.yaml"]
+
+training:
+  epochs: 1
+
+exp_name: "kidney_0806_smoke_3d_multiscale_halo12_zsmooth_zconsistency"

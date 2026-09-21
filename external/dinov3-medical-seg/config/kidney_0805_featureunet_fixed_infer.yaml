@@ -1,0 +1,43 @@
+# Reconstructed from the epoch-18 best_model.pth checkpoint metadata.
+# Used to reproduce review masks for the strict fixed RONDON/TimeSlice protocol.
+model:
+  model_path: "C:/Users/shijian.ruan/AppData/Roaming/RONDON/model/dinov3-vits16/model.onnx"
+  encoder_backend: "onnx"
+  expected_sha256: "6afd8eff259d5103f42276f98c18975e1eabb20204903e1f6dd9879acec0ab2f"
+  num_classes: 2
+  input_normalization: "none"
+  out_indices: [11]
+  slice_axis: axial
+  slice_batch_size: 4
+
+finetune:
+  method: "frozen"
+
+decoder:
+  type: "feature_unet2d"
+
+training:
+  pipeline: "cached_slices"
+  device: "auto"
+  mixed_precision: false
+  num_workers: 0
+
+loss:
+  type: "ce"
+
+inference:
+  tta_axes: []
+
+data:
+  name: "kidney_left_fixed_5shot"
+  data_root: "./data/totalseg/kidney_left"
+  img_size: [512, 512]
+  in_channels: 1
+  modality: "ct"
+  slice_normalization: "timeslice_casewise"
+  validation_source_split: "all"
+  target_spacing: null
+  patch:
+    enabled: false
+  support_case_ids: ["s0657", "s0661", "s0668", "s0693", "s0749"]
+  validation_case_ids: ["s1031", "s1120", "s1130"]

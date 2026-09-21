@@ -311,6 +311,28 @@ def _checkpoint_enabled():
     return True
 
 
+def _prune_old_checkpoints(out_dir, retention_days=14):
+    """Delete breadcrumb files older than ``retention_days`` (best effort).
+
+    Every Mimics import PID leaves a checkpoint pair under debug_out; without
+    pruning these accumulate forever. Failure here must never affect the
+    import workflow.
+    """
+    try:
+        cutoff = time.time() - retention_days * 86400
+        for name in os.listdir(out_dir):
+            if not name.startswith("mimics_import_checkpoint_"):
+                continue
+            path = os.path.join(out_dir, name)
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+            except OSError:
+                continue
+    except Exception:
+        pass
+
+
 def _checkpoint_record(stage, **fields):
     """Write last-stage breadcrumbs for crash diagnosis.
 
@@ -324,6 +346,7 @@ def _checkpoint_record(stage, **fields):
         out_dir = os.path.join(root, "debug_out")
         if not os.path.isdir(out_dir):
             os.makedirs(out_dir)
+        _prune_old_checkpoints(out_dir)
         record = {
             "stage": str(stage),
             "pid": int(os.getpid()),
@@ -1134,40 +1157,9 @@ def _discover_single_case(case_dir, profile_id=None):
 
 
 # -- Call mimics_bridge.py ---------------------------------------------
-
-def call_bridge(params):
-    """Call mimics_bridge.py via subprocess, return parsed JSON result."""
-    python_exe = _python_exe()
-    bridge = _bridge_script()
-
-    process = subprocess.Popen(
-        [python_exe, bridge],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        **_hidden_process_kwargs()
-    )
-    stdin_data = json.dumps(params).encode("utf-8")
-    try:
-        stdout, stderr = process.communicate(input=stdin_data, timeout=600)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.communicate()
-        raise RuntimeError("mimics_bridge.py timed out")
-
-    if process.returncode != 0:
-        err = stderr.decode("utf-8", "replace").strip()
-        raise RuntimeError("mimics_bridge.py failed (exit {}): {}".format(process.returncode, err))
-
-    try:
-        return json.loads(stdout.decode("utf-8"))
-    except Exception as e:
-        raise RuntimeError(
-            "mimics_bridge.py returned invalid JSON: {}\nstdout: {}\nstderr: {}".format(
-                e, stdout.decode("utf-8", "replace")[:500], stderr.decode("utf-8", "replace")[:500]
-            )
-        )
-
+# Synchronous bridge calls were removed from the Mimics GUI process: every
+# long-running bridge action now goes through _launch_bridge_background so
+# the GUI thread never blocks on a subprocess.communicate(timeout=600).
 
 # -- Async bridge helpers ----------------------------------------------
 

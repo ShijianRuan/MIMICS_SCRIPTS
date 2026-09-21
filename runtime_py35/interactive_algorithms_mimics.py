@@ -431,6 +431,38 @@ def _click_plane_axes(image):
     return result
 
 
+_PLANE_LABELS = ["Axial View", "Coronal View", "Sagittal View"]
+
+# Last-used plane/sign memory (per user, persisted outside the runtime dir).
+_PLANE_MEMORY_FILE = "scribbleprompt_last_plane_sign.json"
+
+
+def _plane_memory_path():
+    return os.path.join(
+        runtime_common.user_config_dir(), _PLANE_MEMORY_FILE
+    )
+
+
+def _load_plane_memory():
+    return runtime_common.read_json(_plane_memory_path(), {}) or {}
+
+
+def _remember_plane_sign(kind, value):
+    payload = _load_plane_memory()
+    payload[kind] = value
+    try:
+        runtime_common.write_json_atomic(_plane_memory_path(), payload)
+    except Exception:
+        pass
+
+
+def _remember_plane_enabled():
+    config = _config()
+    return str(config.get("remember_last_plane_sign", "true")).strip().lower() not in (
+        "0", "false", "no", "off"
+    )
+
+
 def _choose_click_plane(image):
     axes = _click_plane_axes(image)
     if not axes:
@@ -443,36 +475,51 @@ def _choose_click_plane(image):
             ui_blocking=True,
         )
         return None
-    labels = ["Axial View", "Coronal View", "Sagittal View"]
+    memory = _load_plane_memory() if _remember_plane_enabled() else {}
+    last_label = str(memory.get("plane_label") or "")
+    default_hint = ""
+    if last_label in axes:
+        default_hint = "\n\n(Last time you chose: {0})".format(last_label)
     answer = mimics.dialogs.question_box(
         title="ScribblePrompt Plane",
         message=(
             "Choose the 2D view in which you are placing prompts. All prompts in this "
-            "prediction must stay on that same slice."
+            "prediction must stay on that same slice.{0}".format(default_hint)
         ),
-        buttons=";".join(labels + ["Cancel"]),
+        buttons=";".join(_PLANE_LABELS + ["Cancel"]),
         ui_blocking=True,
     )
     if answer not in axes:
         return None
+    if _remember_plane_enabled() and answer != last_label:
+        _remember_plane_sign("plane_label", answer)
     return int(axes[answer])
 
 
 def _choose_prompt_sign():
+    memory = _load_plane_memory() if _remember_plane_enabled() else {}
+    last_sign = memory.get("prompt_sign")
+    default_hint = ""
+    if last_sign in ("Foreground", "Background"):
+        default_hint = "\n\n(Last time you chose: {0})".format(last_sign)
     answer = mimics.dialogs.question_box(
         title="ScribblePrompt",
         message=(
             "Foreground marks pixels that belong to the structure.\n"
-            "Background marks pixels that must be excluded."
+            "Background marks pixels that must be excluded.{0}".format(default_hint)
         ),
         buttons="Foreground;Background;Cancel",
         ui_blocking=True,
     )
     if answer == "Foreground":
-        return True
-    if answer == "Background":
-        return False
-    return None
+        result = True
+    elif answer == "Background":
+        result = False
+    else:
+        return None
+    if _remember_plane_enabled() and answer != last_sign:
+        _remember_plane_sign("prompt_sign", answer)
+    return result
 
 
 def _capture_prompt_point(image, include):

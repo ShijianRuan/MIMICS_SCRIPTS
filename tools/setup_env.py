@@ -180,6 +180,24 @@ def _write_state(status, **kwargs):
         pass  # State file is diagnostic only — never crash the worker
 
 
+LOG_ROTATE_MAX_BYTES = 5 * 1024 * 1024
+LOG_ROTATE_BACKUPS = 3
+
+
+def _rotate_log(max_bytes=LOG_ROTATE_MAX_BYTES, backups=LOG_ROTATE_BACKUPS):
+    """Rotate setup_env.log once it exceeds ``max_bytes`` (.1/.2/.3 suffixes)."""
+    try:
+        if not LOG_FILE.exists() or LOG_FILE.stat().st_size < max_bytes:
+            return
+        for index in range(backups - 1, 0, -1):
+            src = LOG_FILE.with_suffix(".log.{0}".format(index))
+            if src.exists():
+                src.replace(LOG_FILE.with_suffix(".log.{0}".format(index + 1)))
+        LOG_FILE.replace(LOG_FILE.with_suffix(".log.1"))
+    except Exception:
+        pass  # Rotation is best effort — never crash the worker
+
+
 def _log(message):
     """Append a line to the setup log."""
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -187,6 +205,7 @@ def _log(message):
     print(line)
     try:
         LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _rotate_log()
         with open(str(LOG_FILE), "a") as f:
             f.write(line + "\n")
     except Exception:
@@ -269,7 +288,7 @@ def _probe_gui_backends():
     """Return GUI backend availability inside nninteractive_env."""
     ret, output = _run_python_script([
         "import json, traceback",
-        "r = {'pyside6': False, 'tkinter': False, 'errors': {}}",
+        "r = {'pyside6': False, 'errors': {}}",
         "try:",
         "    import PySide6, shiboken6",
         "    from PySide6 import QtCore, QtWidgets",
@@ -277,18 +296,11 @@ def _probe_gui_backends():
         "    r['pyside6_version'] = str(getattr(QtCore, '__version__', 'unknown'))",
         "except Exception as e:",
         "    r['errors']['pyside6'] = repr(e)",
-        "try:",
-        "    import tkinter",
-        "    r['tkinter'] = True",
-        "    r['tkinter_version'] = str(getattr(tkinter, 'TkVersion', 'unknown'))",
-        "except Exception as e:",
-        "    r['errors']['tkinter'] = repr(e)",
         "print(json.dumps(r))",
     ], timeout=60)
     if ret != 0:
         return {
             "pyside6": False,
-            "tkinter": False,
             "errors": {"probe": output[-500:] if output else "GUI probe failed"},
         }
     try:
@@ -296,7 +308,6 @@ def _probe_gui_backends():
     except Exception:
         return {
             "pyside6": False,
-            "tkinter": False,
             "errors": {"probe": output[-500:] if output else "Could not parse GUI probe"},
         }
 
@@ -366,9 +377,6 @@ def check():
     if gui_backends.get("pyside6"):
         result["preferred_gui_backend"] = "PySide6"
         _log("External GUI: PySide6 OK ({0})".format(gui_backends.get("pyside6_version", "unknown")))
-    elif gui_backends.get("tkinter"):
-        result["preferred_gui_backend"] = "Tkinter fallback"
-        _log("External GUI: Tkinter fallback OK; PySide6 is missing.")
     else:
         result["preferred_gui_backend"] = "none"
         _log("External GUI: no usable backend found.")

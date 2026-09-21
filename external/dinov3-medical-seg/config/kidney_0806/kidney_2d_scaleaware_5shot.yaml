@@ -1,0 +1,14 @@
+# Exp B — 2D multi-scale (scale_aware2d, 4-level).
+# Tests whether 4-level multi-scale features lift 2D above the report's 0.7606
+# (which used feature_unet2d with raw-pixel skips, single final level).
+# scale_aware2d runs through the VOLUME pipeline (slice-wise chunked decode),
+# NOT cached_slices. It has no raw pixel skips, so it isolates multi-scale value.
+_base_: ["kidney_0806_base.yaml"]
+
+model:
+  out_indices: [2, 5, 8, 11]                # 4 levels -> stage3/6/9/12 (REQUIRED)
+
+decoder:
+  type: "scale_aware2d"
+
+exp_name: "kidney_0806_2d_scaleaware_s0657_s0661_s0668_s0693_s0749"

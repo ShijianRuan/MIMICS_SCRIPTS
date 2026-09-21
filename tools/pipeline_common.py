@@ -98,6 +98,23 @@ def write_json_atomic(path, payload, retries=20, max_sleep=0.25):
     write_text_atomic(path, text, retries=retries, max_sleep=max_sleep)
 
 
+def read_json(path, default=None):
+    """Read a JSON file; return ``default`` on any error (missing, invalid)."""
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+
+def write_json_best_effort(path, payload):
+    """write_json_atomic that never raises; returns True on success."""
+    try:
+        write_json_atomic(path, payload, retries=8, max_sleep=0.15)
+        return True
+    except Exception:
+        return False
+
+
 def write_cancel_marker(cancel_path):
     """Best-effort cancel marker; returns an error string or None."""
     if not cancel_path:

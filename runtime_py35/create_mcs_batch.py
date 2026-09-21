@@ -161,6 +161,30 @@ def _file_fingerprint(path):
     return "sha256:" + digest.hexdigest()
 
 
+IMPORT_RECEIPT_RETENTION_DAYS = 30
+
+
+def prune_import_receipts(output_dir, retention_days=IMPORT_RECEIPT_RETENTION_DAYS):
+    """Delete import receipts past the retention window (best effort).
+
+    Receipts carry patient file paths, so they must not accumulate forever.
+    The undo window is 30 days by user decision; older receipts are stale.
+    """
+    try:
+        cutoff = time.time() - retention_days * 86400
+        for name in os.listdir(output_dir):
+            if not name.endswith(".import_receipt.json"):
+                continue
+            path = os.path.join(output_dir, name)
+            try:
+                if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+            except OSError:
+                continue
+    except OSError:
+        pass
+
+
 def write_import_receipt(output_dir, case_id, mcs_path, mask_names, manifest_data):
     """Record exactly what one import created, for one-click undo.
 
@@ -169,6 +193,7 @@ def write_import_receipt(output_dir, case_id, mcs_path, mask_names, manifest_dat
     the listed masks from the project; the .mcs file itself is only rolled
     back (deleted) when its content fingerprint still matches this import.
     """
+    prune_import_receipts(output_dir)
     receipt_path = os.path.join(
         os.path.dirname(os.path.abspath(mcs_path)),
         "." + safe_case_filename(case_id) + ".import_receipt.json",

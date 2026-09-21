@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import errno
 import json
 import os
 import sys
@@ -44,44 +43,12 @@ def read_json(path, default=None):
 
 def process_exists(pid):
     """Return whether the owning Mimics process is still alive."""
-    try:
-        value = int(pid)
-    except (TypeError, ValueError):
-        return False
-    if value <= 0:
-        return False
-    if os.name == "nt":
-        try:
-            import ctypes
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            SYNCHRONIZE = 0x00100000
-            WAIT_TIMEOUT = 0x00000102
-            kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
-            kernel32.OpenProcess.restype = ctypes.c_void_p
-            kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-            kernel32.WaitForSingleObject.restype = ctypes.c_uint32
-            kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-            kernel32.CloseHandle.restype = ctypes.c_int
-            handle = kernel32.OpenProcess(SYNCHRONIZE, 0, value)
-            if not handle:
-                return ctypes.get_last_error() == 5
-            try:
-                return kernel32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
-            finally:
-                kernel32.CloseHandle(handle)
-        except Exception:
-            return True
-    try:
-        os.kill(value, 0)
-        return True
-    except OSError as exc:
-        if exc.errno == errno.ESRCH:
-            return False
-        if exc.errno == errno.EPERM:
-            return True
-        return False
-    except Exception:
-        return True
+    # Delegate to the shared implementation in resource_locks (it also
+    # treats WAIT_OBJECT_0 and ERROR_INVALID_PARAMETER as dead, which the
+    # old local copy missed).
+    from resource_locks import process_exists as _process_exists
+
+    return _process_exists(pid)
 
 
 def write_json(path, value):

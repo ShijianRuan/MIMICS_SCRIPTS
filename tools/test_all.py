@@ -58,9 +58,13 @@ def _repo_dinov3_root():
             configured = json.load(handle).get("dinov3_project") or ""
     except Exception:
         configured = ""
-    if configured and os.path.isfile(os.path.join(configured, "scripts", "train.py")):
-        return configured
-    return DINOV3_ROOT
+    if configured:
+        # The config may hold a repo-relative path; resolve it against the
+        # project root, never the test process CWD.
+        candidate = configured if os.path.isabs(configured) else os.path.join(PROJECT_ROOT, configured)
+        if os.path.isfile(os.path.join(candidate, "scripts", "train.py")):
+            return candidate
+    return os.path.join(PROJECT_ROOT, "external", "dinov3-medical-seg")
 
 
 DINOV3_ROOT = _repo_dinov3_root()
@@ -4918,6 +4922,144 @@ class TestSourceImagePathEquivalence(unittest.TestCase):
             result["source_index_space"],
         )
 
+    def test_official_model_source_alignment_is_deferred_by_default(self):
+        # The generic (official-model) source branch must never build the
+        # on-demand aligned cache on the Mimics GUI thread: a derived
+        # oblique import would trigger a bridge call of up to 1800 s right
+        # inside the prompt-capture click. The external image worker
+        # resamples from the recorded affines instead.
+        import nninteractive_mimics as module
+
+        source = os.path.join(self.tmp, "official_source.nii.gz")
+        Path(source).write_bytes(b"raw source stays untouched")
+        identity = json.dumps(
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+        )
+        ras_to_lps = json.dumps(
+            [[-1.0, 0.0, 0.0, 0.0], [0.0, -1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+        )
+
+        class _Meta:
+            _values = {
+                module.SOURCE_IMAGE_PATH_METADATA: source,
+                module.SOURCE_IMAGE_KIND_METADATA: "nifti",
+                module.SOURCE_IMAGE_INDEX_SPACE_METADATA: "derived_dicom_lps_resampled_from_source_image_v2",
+                module.SOURCE_IMAGE_MODALITY_METADATA: "MR",
+                module.SOURCE_WORLD_COORDINATE_SYSTEM_METADATA: "ras",
+                module.MIMICS_WORLD_COORDINATE_SYSTEM_METADATA: "lps",
+                module.SOURCE_TO_MIMICS_WORLD_MATRIX_METADATA: ras_to_lps,
+                module.SOURCE_VOXEL_TO_RAS_MATRIX_METADATA: identity,
+                module.MIMICS_VOXEL_TO_RAS_MATRIX_METADATA: identity,
+            }
+
+            def find(self, name):
+                if name not in self._values:
+                    return None
+                item = type("Item", (), {})()
+                item.value = self._values[name]
+                return item
+
+        image = type(
+            "Image", (), {"metadata": _Meta(), "logical_dimensions": [2, 3, 4]}
+        )()
+        with mock.patch.object(
+            module, "_relocated_source_image_path", return_value=""
+        ), mock.patch.object(
+            module, "_call_mimics_bridge", side_effect=AssertionError("bridge was called on the GUI thread")
+        ), mock.patch.object(
+            module, "_model_profile", return_value={"source": "official"}
+        ), mock.patch.object(module, "_mimics_log"):
+            result = module._export_image_for_nninteractive(
+                {
+                    "_model_profile": {"source": "official"},
+                    "image_input_mode": "auto",
+                    "fallback_to_source_when_mimics_export_fails": True,
+                },
+                image,
+                os.path.join(self.tmp, "unused_buffer.raw"),
+                allow_buffer_export=False,
+            )
+        self.assertIsNotNone(result)
+        self.assertEqual(os.path.abspath(source), result["image_path"])
+        # The recorded source affines travel with the request so the worker
+        # can resample onto the Mimics grid itself.
+        self.assertEqual(
+            "derived_dicom_lps_resampled_from_source_image_v2",
+            result["source_index_space"],
+        )
+
+    def test_official_model_sync_alignment_still_available_when_configured(self):
+        # An explicit defer_source_alignment_to_worker=false keeps the old
+        # synchronous on-demand cache behavior for users who prefer it.
+        import nninteractive_mimics as module
+
+        source = os.path.join(self.tmp, "sync_source.nii.gz")
+        Path(source).write_bytes(b"source")
+        identity = json.dumps(
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+        )
+        ras_to_lps = json.dumps(
+            [[-1.0, 0.0, 0.0, 0.0], [0.0, -1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+        )
+
+        class _Meta:
+            _values = {
+                module.SOURCE_IMAGE_PATH_METADATA: source,
+                module.SOURCE_IMAGE_KIND_METADATA: "nifti",
+                module.SOURCE_IMAGE_INDEX_SPACE_METADATA: "derived_dicom_lps_resampled_from_source_image_v2",
+                module.SOURCE_IMAGE_MODALITY_METADATA: "MR",
+                module.SOURCE_WORLD_COORDINATE_SYSTEM_METADATA: "ras",
+                module.MIMICS_WORLD_COORDINATE_SYSTEM_METADATA: "lps",
+                module.SOURCE_TO_MIMICS_WORLD_MATRIX_METADATA: ras_to_lps,
+                module.SOURCE_VOXEL_TO_RAS_MATRIX_METADATA: identity,
+                module.MIMICS_VOXEL_TO_RAS_MATRIX_METADATA: identity,
+            }
+
+            def find(self, name):
+                if name not in self._values:
+                    return None
+                item = type("Item", (), {})()
+                item.value = self._values[name]
+                return item
+
+        image = type(
+            "Image", (), {"metadata": _Meta(), "logical_dimensions": [2, 3, 4]}
+        )()
+        bridge_calls = []
+
+        def _fake_bridge(config, request, timeout_seconds=None):
+            bridge_calls.append(request)
+            cache_path = request["source_nifti_out"]
+            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+            with open(cache_path, "wb") as handle:
+                handle.write(b"aligned")
+            return {"status": "ok"}
+
+        with mock.patch.object(
+            module, "_relocated_source_image_path", return_value=""
+        ), mock.patch.object(
+            module, "_model_profile", return_value={"source": "official"}
+        ), mock.patch.object(
+            module, "_call_mimics_bridge", side_effect=_fake_bridge
+        ), mock.patch.object(module, "_mimics_log"):
+            result = module._export_image_for_nninteractive(
+                {
+                    "_model_profile": {"source": "official"},
+                    "image_input_mode": "source",
+                    "defer_source_alignment_to_worker": False,
+                },
+                image,
+                os.path.join(self.tmp, "unused_buffer.raw"),
+                allow_buffer_export=False,
+            )
+        self.assertEqual(1, len(bridge_calls))
+        self.assertEqual("prepare_source_fastpath", bridge_calls[0]["action"])
+        self.assertEqual(
+            "nifti_ijk_matches_derived_dicom_columns_rows_slices_v1",
+            result["source_index_space"],
+        )
+        self.assertNotEqual(os.path.abspath(source), result["image_path"])
+
     def test_task_model_strict_source_does_not_silently_fallback(self):
         import nninteractive_mimics as module
 
@@ -5536,6 +5678,17 @@ class TestNewFeatures(unittest.TestCase):
         self.assertLess(
             discover_monitor.index("_start_win32_discover_monitor"),
             discover_monitor.index("from PyQt5.QtCore import QTimer"),
+        )
+
+    def test_mimics_import_has_no_synchronous_bridge_call(self):
+        # mimics_import.call_bridge (communicate(timeout=600)) was dead code
+        # and a GUI-blocking hazard if ever called; it was removed. All
+        # bridge work goes through _launch_bridge_background.
+        import mimics_import
+
+        self.assertFalse(
+            hasattr(mimics_import, "call_bridge"),
+            "mimics_import.call_bridge must stay deleted; use _launch_bridge_background",
         )
 
     def test_external_io_setup_defaults_and_nonblocking_entry(self):
@@ -6188,9 +6341,10 @@ class TestNewFeatures(unittest.TestCase):
         self.assertLessEqual(min_height, height)
         self.assertGreaterEqual(width, min_width)
         self.assertGreaterEqual(min_height, 560)
-        source = ui.TrainingSetupApp._build.__code__.co_names
+        source = ui.QtTrainingSetupApp._build.__code__.co_names
         self.assertIn("start_button", source)
-        self.assertIn("footer_frame", source)
+        self.assertIn("open_log_button", source)
+        self.assertIn("window_layout_for_screen", source)
 
     def test_offline_setup_tracks_pyside6_external_ui_dependency(self):
         """Offline setup must install the PySide6 backend used by Advanced DINOv3 windows."""
@@ -6405,85 +6559,93 @@ class TestNewFeatures(unittest.TestCase):
     def test_fewshot_external_setup_custom_choice_labels(self):
         """Custom Expert values should not display as the first preset."""
         ui = __import__("tools.fewshot_training_setup_ui", fromlist=["dummy"])
-        self.assertEqual("Standard (10)", ui._option_label("10", ui.TrainingSetupApp.EPOCH_CHOICES))
-        self.assertEqual("Custom (37)", ui._option_label("37", ui.TrainingSetupApp.EPOCH_CHOICES))
-        self.assertEqual("Custom (0.5)", ui._option_label("0.5", ui.TrainingSetupApp.VAL_CHOICES))
+        self.assertEqual("Standard (10)", ui._option_label("10", ui.EPOCH_CHOICES))
+        self.assertEqual("Custom (37)", ui._option_label("37", ui.EPOCH_CHOICES))
+        self.assertEqual("Custom (0.5)", ui._option_label("0.5", ui.VAL_CHOICES))
 
     def test_fewshot_external_setup_accepts_custom_image_size(self):
         """Expert UI can pass through a manually typed image size."""
         ui = __import__("tools.fewshot_training_setup_ui", fromlist=["dummy"])
+        try:
+            from PySide6 import QtCore, QtGui, QtWidgets
+        except ImportError:
+            self.skipTest("PySide6 is not installed in this test environment")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-        class Var(object):
-            def __init__(self, value):
-                self.value = value
-            def get(self):
-                return self.value
-            def set(self, value):
-                self.value = value
-
-        app = object.__new__(ui.TrainingSetupApp)
-        app.vars = {
-            "img_size_choice": Var(ui.TrainingSetupApp.IMG_SIZE_CUSTOM_LABEL),
-            "img_size_custom": Var("288,288"),
-            "img_size": Var("224,224"),
-            "sub_volume_depth": Var("32"),
-            "sub_volume_size": Var("32,224,224"),
+        application = QtWidgets.QApplication.instance()
+        if application is None:
+            application = QtWidgets.QApplication([])
+        app = object.__new__(ui.QtTrainingSetupApp)
+        app.QtCore, app.QtGui, app.QtWidgets = QtCore, QtGui, QtWidgets
+        app.values = {
+            "img_size": "288,288",
+            "sub_volume_size": "32,224,224",
         }
-        app.img_size_custom_widget = None
-        ui.TrainingSetupApp._sync_image_size_choice(app)
-        self.assertEqual("288,288", app.vars["img_size"].get())
-        ui.TrainingSetupApp._sync_sub_volume_size(app)
-        self.assertEqual("32,288,288", app.vars["sub_volume_size"].get())
+        app.widgets = {}
+        app.mcs_folder_edit = None
+        app.mask_names_edit = None
+        app.label_root_edit = None
+        # A size that is not one of the presets is labelled Custom, and the
+        # sub-volume size is rebuilt from the depth choice plus the img size.
+        self.assertEqual(
+            ui.QtTrainingSetupApp.IMG_SIZE_CUSTOM_LABEL,
+            app._img_size_choice_from_value("288,288"),
+        )
+        self.assertEqual("Balanced (224 x 224)", app._img_size_choice_from_value("224,224"))
+        values = app._current_values()
+        self.assertEqual("288,288", values["img_size"])
+        self.assertEqual("32,288,288", values["sub_volume_size"])
 
     def test_fewshot_external_setup_collect_keeps_expert_values(self):
         """Starting training should not reapply Setup presets over Expert edits."""
         ui = __import__("tools.fewshot_training_setup_ui", fromlist=["dummy"])
+        try:
+            from PySide6 import QtCore, QtGui, QtWidgets
+        except ImportError:
+            self.skipTest("PySide6 is not installed in this test environment")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-        class Var(object):
-            def __init__(self, value):
-                self.value = value
-            def get(self):
-                return self.value
-            def set(self, value):
-                self.value = value
-
-        app = object.__new__(ui.TrainingSetupApp)
-        app.vars = {
-            "epochs_choice": Var("Fast check (3)"),
-            "val_fraction_choice": Var("No validation"),
-            "memory_mode": Var("Balanced"),
-            "base_config": Var("config/train.yaml"),
-            "epochs": Var("37"),
-            "batch_size": Var("1"),
-            "grad_accumulation": Var("4"),
-            "lr": Var("0.0002"),
-            "weight_decay": Var("0.001"),
-            "img_size": Var("256,256"),
-            "modality": Var("ct"),
-            "min_samples": Var("1"),
-            "max_samples": Var("0"),
-            "sample_mode": Var("all"),
-            "val_fraction": Var("0.5"),
-            "min_val_samples": Var("1"),
-            "finetune_method": Var("lora"),
-            "decoder": Var("segformer3d"),
-            "model_scale": Var("vitb16"),
-            "model_path": Var(""),
-            "lora_rank": Var("8"),
-            "lora_alpha": Var("16"),
-            "adapter_bottleneck": Var("64"),
-            "gpu_lock_timeout_seconds": Var("60"),
-            "background_mimics_lock_timeout_seconds": Var("60"),
-            "keep_last_checkpoints": Var("2"),
-            "mixed_precision": Var(False),
-            "sub_volume": Var(True),
-            "sub_volume_depth": Var("48"),
-            "sub_volume_size": Var("32,224,224"),
-            "keep_materialized_dataset": Var(False),
+        application = QtWidgets.QApplication.instance()
+        if application is None:
+            application = QtWidgets.QApplication([])
+        app = object.__new__(ui.QtTrainingSetupApp)
+        app.QtCore, app.QtGui, app.QtWidgets = QtCore, QtGui, QtWidgets
+        app.values = {
+            "epochs": 37,
+            "batch_size": 1,
+            "grad_accumulation": 4,
+            "lr": "0.0002",
+            "weight_decay": "0.001",
+            "img_size": "256,256",
+            "modality": "ct",
+            "min_samples": 1,
+            "max_samples": 0,
+            "sample_mode": "all",
+            "val_fraction": 0.5,
+            "min_val_samples": 1,
+            "finetune_method": "lora",
+            "decoder": "segformer3d",
+            "model_scale": "vitb16",
+            "model_path": "",
+            "lora_rank": 8,
+            "lora_alpha": 16,
+            "adapter_bottleneck": 64,
+            "gpu_lock_timeout_seconds": 60,
+            "background_mimics_lock_timeout_seconds": 60,
+            "keep_last_checkpoints": 2,
+            "mixed_precision": False,
+            "sub_volume": True,
+            "sub_volume_size": "48,256,256",
+            "keep_materialized_dataset": False,
         }
-        app.case_list = None
-        app.manual_cases_var = None
-        options = ui.TrainingSetupApp.collect_options(app)
+        app.widgets = {}
+        app.mcs_folder_edit = None
+        app.mask_names_edit = None
+        app.label_root_edit = None
+        # _current_values is the value-collection half of Qt collect_options:
+        # quick-tab presets must not override these Expert values.
+        values = app._current_values()
+        options = ui.validate_options(values)
         self.assertEqual(37, options["epochs"])
         self.assertEqual(1, options["batch_size"])
         self.assertEqual(4, options["grad_accumulation"])
@@ -6538,7 +6700,7 @@ class TestNewFeatures(unittest.TestCase):
                 encoding="utf-8",
             )
             Path(model_root, "model.safetensors").write_bytes(b"weights")
-        app = object.__new__(ui.TrainingSetupApp)
+        app = object.__new__(ui.QtTrainingSetupApp)
         app.context = {"dinov3_root": dinov3_root}
         app.values = {"model_scale": "vitb16"}
         self.assertEqual(
@@ -11669,7 +11831,8 @@ class TestImportDropWindow(unittest.TestCase):
             calls.append(command)
             return FakeProc()
 
-        with mock.patch.object(dw.subprocess, "Popen", side_effect=fake_popen):
+        with mock.patch.object(dw.subprocess, "Popen", side_effect=fake_popen), \
+                mock.patch.object(dw, "_ROOT", self.tmp):
             launched = dw.submit_import(selection, {})
         self.assertEqual([("dataset", "submitted")], launched)
         self.assertEqual(1, len(calls))
@@ -11677,6 +11840,13 @@ class TestImportDropWindow(unittest.TestCase):
         self.assertIn("mimics_batch_cli.py", command[1])
         self.assertIn("prepare-import", command)
         self.assertIn(self.tmp, command)
+        # Batch drops also write a status file so the Recent-drops list can
+        # show them (single-case drops already write one per case).
+        status_files = [
+            name for name in os.listdir(os.path.join(self.tmp, ".mimics_runtime", "drop_import"))
+            if name.endswith("_batch_status.json")
+        ]
+        self.assertTrue(status_files)
 
     def test_submit_single_invokes_single_case_worker(self):
         import import_drop_window as dw
@@ -11696,7 +11866,8 @@ class TestImportDropWindow(unittest.TestCase):
             calls.append(command)
             return FakeProc()
 
-        with mock.patch.object(dw.subprocess, "Popen", side_effect=fake_popen):
+        with mock.patch.object(dw.subprocess, "Popen", side_effect=fake_popen), \
+                mock.patch.object(dw, "_ROOT", self.tmp):
             launched = dw.submit_import(selection, {})
         self.assertEqual(1, len(calls))
         self.assertEqual("single_case_import_worker.py", os.path.basename(calls[0][1]))
@@ -11707,6 +11878,61 @@ class TestImportDropWindow(unittest.TestCase):
             payload = json.load(handle)
         self.assertEqual("s0001", payload["case_info"]["case_id"])
         self.assertTrue(payload["case_info"]["image"].endswith("ct.nii.gz"))
+
+    def test_collect_recent_drops_summarizes_status_files(self):
+        import import_drop_window as dw
+        status_dir = os.path.join(self.tmp, "drop_import")
+        os.makedirs(status_dir)
+        base = time.time()
+
+        def _write(name, payload, offset=0):
+            path = os.path.join(status_dir, name)
+            dw.write_json(path, payload)
+            stamp = base + offset
+            os.utime(path, (stamp, stamp))
+
+        _write("20260101T000001_0_selection.json", {
+            "source_path": os.path.join(self.tmp, "case_alpha"),
+            "output_path": "out",
+        }, 100)
+        _write("20260101T000001_0_status.json", {
+            "status": "running", "phase": "waiting_for_background_mimics",
+            "case_id": "case_alpha", "updated_at_epoch": base + 100,
+        }, 100)
+        _write("20260101T000002_0_selection.json", {
+            "source_path": os.path.join(self.tmp, "case_beta"),
+        }, 50)
+        _write("20260101T000002_0_status.json", {
+            "status": "failed", "phase": "prepare_failed",
+            "case_id": "case_beta", "error": "boom\nsecond line",
+            "updated_at_epoch": base + 50,
+        }, 50)
+        _write("20260101T000003_0_status.json", {
+            "status": "completed", "case_id": "case_gamma",
+        }, 10)
+        # A corrupt status file must be skipped, not crash the poll.
+        open(os.path.join(status_dir, "20260101T000004_0_status.json"), "w").close()
+
+        entries = dw.collect_recent_drops(status_dir)
+        self.assertEqual(3, len(entries))
+        # Newest first: alpha (running), beta (failed), gamma (completed).
+        self.assertEqual("case_alpha", entries[0]["case_id"])
+        self.assertEqual("running", entries[0]["status"])
+        self.assertEqual(
+            os.path.join(status_dir, "20260101T000001_0.log"),
+            entries[0]["log_path"],
+        )
+        self.assertEqual("case_beta", entries[1]["case_id"])
+        self.assertEqual("boom", entries[1]["error"])
+        self.assertEqual("case_gamma", entries[2]["case_id"])
+        # The limit is respected.
+        self.assertEqual(2, len(dw.collect_recent_drops(status_dir, limit=2)))
+
+    def test_collect_recent_drops_handles_missing_dir(self):
+        import import_drop_window as dw
+        self.assertEqual(
+            [], dw.collect_recent_drops(os.path.join(self.tmp, "no_such_dir"))
+        )
 
     def test_offscreen_window_renders_and_registers(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -12151,11 +12377,21 @@ class TestSystemHealthPanel(unittest.TestCase):
         with open(entry, "r") as handle:
             source = handle.read()
         self.assertIn("system_health_mimics", source)
-        runtime = os.path.join(PROJECT_ROOT, "runtime_py35", "system_health_mimics.py")
-        with open(runtime, "r") as handle:
+        launcher = os.path.join(
+            PROJECT_ROOT, "runtime_py35", "external_window_launcher.py"
+        )
+        with open(launcher, "r") as handle:
             source = handle.read()
         self.assertIn("launch_external_gui_process", source)
         self.assertIn("register_process", source)
+        for thin_shell in (
+            "system_health_mimics.py",
+            "import_drop_mimics.py",
+        ):
+            path = os.path.join(PROJECT_ROOT, "runtime_py35", thin_shell)
+            with open(path, "r") as handle:
+                source = handle.read()
+            self.assertIn("external_window_launcher.open_external_window", source)
 
 
 class TestProcessRegistry(unittest.TestCase):

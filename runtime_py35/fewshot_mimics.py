@@ -21,6 +21,7 @@ import uuid
 import mimics
 
 import dataset_manifest
+import external_window_launcher
 import runtime_common
 
 
@@ -407,21 +408,10 @@ def _pick_directory(title, initial_dir=""):
             return str(path) if path else None
         except Exception:
             pass
-    try:
-        import Tkinter as tk
-        import tkFileDialog
-    except ImportError:
-        try:
-            import tkinter as tk
-            from tkinter import filedialog as tkFileDialog
-        except ImportError:
-            return None
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    path = tkFileDialog.askdirectory(parent=root, title=title)
-    root.destroy()
-    return path if path else None
+    # The Tkinter fallback was removed: it can freeze the Mimics GUI for the
+    # duration of the dialog. PyQt5 ships with every supported Mimics build;
+    # if it is genuinely missing the caller reports the failure instead.
+    return None
 
 
 def _selected_mask():
@@ -1842,53 +1832,16 @@ def _register_spawned_process(role, pid, state_path=""):
 
 
 def _launch_gui_process(cmd, cwd=None, stderr_log=None):
-    # Launch GUI apps without CREATE_NO_WINDOW so Tk/PySide windows are visible.
-    # On Windows, prefer pythonw.exe (same environment, no console flash).
-    launch_cmd = list(cmd)
-    if os.name == "nt" and launch_cmd:
-        exe = os.path.abspath(str(launch_cmd[0]))
-        if os.path.basename(exe).lower() == "python.exe":
-            pythonw = os.path.join(os.path.dirname(exe), "pythonw.exe")
-            if os.path.isfile(pythonw):
-                launch_cmd[0] = pythonw
-    env = _background_env()
-    # Ensure the project root is on PYTHONPATH so external scripts can import
-    # project-local modules (e.g. fewshot_strategies, tools.*).
+    # Thin wrapper over the shared launcher: the project root is prepended to
+    # PYTHONPATH so external scripts can import project-local modules (e.g.
+    # fewshot_strategies, tools.*).
     project_root = os.path.abspath(cwd or _project_root())
-    existing = env.get("PYTHONPATH", "")
-    paths = [p for p in existing.split(os.pathsep) if p] if existing else []
-    if project_root not in paths:
-        paths.insert(0, project_root)
-    env["PYTHONPATH"] = os.pathsep.join(paths)
-    # Optionally capture stderr to a file for diagnostics on immediate exit.
-    stderr_dest = subprocess.DEVNULL
-    stderr_file_handle = None
-    if stderr_log:
-        try:
-            parent = os.path.dirname(os.path.abspath(stderr_log))
-            if parent and not os.path.isdir(parent):
-                os.makedirs(parent)
-            stderr_file_handle = open(stderr_log, "w", encoding="utf-8")
-            stderr_dest = stderr_file_handle
-        except Exception:
-            stderr_dest = subprocess.DEVNULL
-    try:
-        proc = subprocess.Popen(
-            launch_cmd,
-            cwd=cwd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=stderr_dest,
-            env=env,
-        )
-    finally:
-        # Close our handle; the child process has inherited the fd.
-        if stderr_file_handle is not None:
-            try:
-                stderr_file_handle.close()
-            except Exception:
-                pass
-    return proc
+    return runtime_common.launch_external_gui_process(
+        cmd,
+        cwd=cwd,
+        stderr_log=stderr_log,
+        extra_pythonpath=[project_root],
+    )
 
 
 def _startup_stderr(path):
@@ -2068,9 +2021,8 @@ def _train_model(advanced=False):
                         (
                             "Could not open the external training setup UI.\n\n"
                             "{0}\n\n"
-                            "Run setup_offline.bat to install or repair PySide6 in "
-                            "nninteractive_env, then retry. Training was not started."
-                        ).format(exc),
+                            "Training was not started."
+                        ).format(external_window_launcher.error_guidance(exc)),
                         title=TITLE,
                         ui_blocking=False,
                     )
@@ -2513,7 +2465,9 @@ def _start_inference(choose_model=False):
         except Exception as exc:
             _mimics_log(logging.ERROR, "DINOv3 external model chooser could not start: {0}".format(exc))
             mimics.dialogs.message_box(
-                "Could not open the external DINOv3 model chooser.\n\n{0}".format(exc),
+                "Could not open the external DINOv3 model chooser.\n\n{0}".format(
+                    external_window_launcher.error_guidance(exc)
+                ),
                 title=TITLE,
                 ui_blocking=False,
             )
@@ -3702,7 +3656,9 @@ def _show_status():
             )
             if not bool(config.get("status_ui_fallback_to_text", True)):
                 mimics.dialogs.message_box(
-                    "Could not open the external DINOv3 status viewer.\n\n{0}".format(exc),
+                    "Could not open the external DINOv3 status viewer.\n\n{0}".format(
+                        external_window_launcher.error_guidance(exc)
+                    ),
                     title=TITLE,
                     ui_blocking=False,
                 )

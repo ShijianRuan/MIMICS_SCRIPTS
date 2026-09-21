@@ -1,5 +1,5 @@
 {
-  "workspace_dir": "E:/mimics_script_offline/nninteractive_task_models",
+  "workspace_dir": "nninteractive_task_models",
   "device": "auto",
   "auto_start_server": true,
   "image_input_mode": "mimics",

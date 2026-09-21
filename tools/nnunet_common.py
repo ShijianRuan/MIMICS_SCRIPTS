@@ -555,7 +555,9 @@ def model_registry_paths(workspace: str | Path) -> list[Path]:
     return [local, global_path]
 
 
-def load_models(workspace: str | Path) -> list[dict[str, Any]]:
+def load_models(
+    workspace: str | Path, include_missing: bool = False
+) -> list[dict[str, Any]]:
     merged: dict[str, dict[str, Any]] = {}
     for registry_path in model_registry_paths(workspace):
         payload = read_json(registry_path, {}) or {}
@@ -565,7 +567,17 @@ def load_models(workspace: str | Path) -> list[dict[str, Any]]:
             model_id = str(row.get("model_id") or "")
             model_dir = Path(str(row.get("model_dir") or "")).expanduser()
             manifest_path = Path(str(row.get("manifest_path") or "")).expanduser()
-            if not model_id or not model_dir.is_dir() or not manifest_path.is_file():
+            if not model_id:
+                continue
+            if not model_dir.is_dir() or not manifest_path.is_file():
+                # Flag instead of drop: a registry row whose recorded absolute
+                # path is dead (e.g. after moving the checkout to another
+                # machine) stays visible so the user can repair or re-import
+                # it instead of the model silently disappearing.
+                if include_missing:
+                    row = dict(row)
+                    row["status"] = "missing_path"
+                    merged[model_id] = row
                 continue
             merged[model_id] = dict(row)
     models_root = workspace_paths(workspace)["models"]

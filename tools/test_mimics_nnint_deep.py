@@ -445,6 +445,56 @@ class PipelineErrorRecoveryTests(unittest.TestCase):
         cases = [row for row in request.get("cases") or [] if row.get("split") in ("train", "val")]
         self.assertEqual(len(cases), 0)
 
+    def _make_terminal_job(self, workspace, name, status, age_days, completed=None):
+        job = workspace / "jobs" / name
+        job.mkdir(parents=True)
+        payload = {"status": status, "job_id": name}
+        if completed is not None:
+            payload["completed_at_epoch"] = completed
+        pipeline.write_json_atomic(job / "status.json", payload)
+        (job / "job.log").write_text("log\n", encoding="utf-8")
+        (job / "staging").mkdir()
+        (job / "staging" / "big.bin").write_bytes(b"x" * 1024)
+        old = time.time() - age_days * 86400
+        os.utime(str(job / "status.json"), (old, old))
+        return job
+
+    def test_sweep_expired_jobs_prunes_old_terminal_jobs(self):
+        """job_retention_days: old terminal jobs lose bulk files, keep status.json."""
+        workspace = self.root / "ws"
+        old = self._make_terminal_job(
+            workspace, "old_done", "completed", age_days=45
+        )
+        fresh = self._make_terminal_job(
+            workspace, "fresh_done", "completed", age_days=1
+        )
+        running = self._make_terminal_job(
+            workspace, "still_training", "training", age_days=90
+        )
+        paused = self._make_terminal_job(
+            workspace, "paused_job", "paused", age_days=90
+        )
+        report = pipeline._sweep_expired_jobs(
+            workspace, {"job_retention_days": 30}
+        )
+        self.assertEqual(report["removed_jobs"], ["old_done"])
+        self.assertFalse((old / "job.log").exists())
+        self.assertFalse((old / "staging").exists())
+        self.assertTrue((old / "status.json").exists())
+        self.assertTrue((fresh / "job.log").exists())
+        self.assertTrue((running / "job.log").exists())
+        self.assertTrue((paused / "job.log").exists())
+
+    def test_sweep_expired_jobs_disabled_without_config(self):
+        """Zero/absent job_retention_days disables the sweep entirely."""
+        workspace = self.root / "ws"
+        job = self._make_terminal_job(
+            workspace, "ancient", "completed", age_days=400
+        )
+        report = pipeline._sweep_expired_jobs(workspace, {})
+        self.assertEqual(report["removed_jobs"], [])
+        self.assertTrue((job / "job.log").exists())
+
 
 # ============================================================================
 # 4. Registry integrity under stress

@@ -38,7 +38,11 @@ for _candidate in (_HERE, _ROOT, os.path.join(_ROOT, "runtime_py35")):
     if _candidate and _candidate not in sys.path:
         sys.path.insert(0, _candidate)
 
-from ui_theme import configure_application, stylesheet as shared_stylesheet  # noqa: E402
+from ui_theme import (  # noqa: E402
+    choose_existing_directory_async,
+    configure_application,
+    stylesheet as shared_stylesheet,
+)
 
 import io_path_setup_ui as io_ui  # noqa: E402
 
@@ -147,12 +151,98 @@ def build_selection(kind, source, child_dirs, remembered):
     }
 
 
+DROP_IMPORT_RETENTION_DAYS = 30
+
+
+def prune_drop_import_state(status_dir, retention_days=DROP_IMPORT_RETENTION_DAYS):
+    """Delete drop-import status/log/selection files past the retention window.
+
+    Every drop writes 3-4 files here (status, selection with source paths,
+    stop marker, log). Selection JSONs contain patient file paths, so they
+    must not accumulate indefinitely.
+    """
+    try:
+        cutoff = time.time() - retention_days * 86400
+        for name in os.listdir(status_dir):
+            path = os.path.join(status_dir, name)
+            try:
+                if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+            except OSError:
+                continue
+    except OSError:
+        pass
+
+
+RECENT_DROP_LIMIT = 8
+
+
+def collect_recent_drops(status_dir, limit=RECENT_DROP_LIMIT):
+    """Summarize the newest drop-import status files for the activity list.
+
+    Returns a list of dicts: case_id, status/phase, error line, and the log
+    path so a click can open the full log. Dead or unreadable entries are
+    skipped rather than shown as noise.
+    """
+    entries = []
+    try:
+        names = os.listdir(status_dir)
+    except OSError:
+        return entries
+    candidates = []
+    for name in names:
+        if not name.endswith("_status.json"):
+            continue
+        path = os.path.join(status_dir, name)
+        try:
+            candidates.append((os.path.getmtime(path), name, path))
+        except OSError:
+            continue
+    candidates.sort(reverse=True)
+    for _mtime, name, path in candidates:
+        if len(entries) >= limit:
+            break
+        payload = read_json(path, {}) or {}
+        if not payload:
+            continue
+        # The sibling selection file holds the source path for the case id.
+        stem = name[: -len("_status.json")]
+        selection = read_json(
+            os.path.join(status_dir, stem + "_selection.json"), {}
+        ) or {}
+        source = str(selection.get("source_path") or "")
+        case_id = str(payload.get("case_id") or "") or (
+            os.path.basename(source.rstrip("\\/")) or stem
+        )
+        status = str(payload.get("status") or "").lower()
+        if not status:
+            status = "unknown"
+        error = ""
+        # Cancelled rows also carry a human-readable reason in `error`.
+        message = str(payload.get("error") or payload.get("message") or "")
+        if status in ("failed", "error", "cancelled") and message:
+            error = message.splitlines()[0][:160]
+        entries.append({
+            "case_id": case_id,
+            "status": status,
+            "phase": str(payload.get("phase") or ""),
+            "error": error,
+            "log_path": (
+                payload.get("log_path")
+                or os.path.join(status_dir, stem + ".log")
+            ),
+            "updated_at_epoch": payload.get("updated_at_epoch") or 0,
+        })
+    return entries
+
+
 def submit_import(selection, context):
     """Launch the import worker(s). Returns a human-readable status line."""
     kind = selection.get("kind")
     python = external_python()
     status_dir = os.path.join(_ROOT, ".mimics_runtime", "drop_import")
     os.makedirs(status_dir, exist_ok=True)
+    prune_drop_import_state(status_dir)
     run_id = time.strftime("%Y%m%dT%H%M%S")
     if kind in ("single", "multi_single"):
         sources = (
@@ -209,6 +299,12 @@ def submit_import(selection, context):
             "--masks", selection.get("mask_selection") or "all",
         ]
         log_path = os.path.join(status_dir, "{0}_batch.log".format(run_id))
+        write_json(os.path.join(status_dir, "{0}_batch_status.json".format(run_id)), {
+            "status": "running",
+            "phase": "queued_to_prepare",
+            "total": 0, "completed": 0, "failed": 0,
+            "updated_at_epoch": time.time(),
+        })
         log_handle = open(log_path, "w", encoding="utf-8")
         try:
             subprocess.Popen(
@@ -322,6 +418,15 @@ def run(context=None, preview_path=""):
     mask_row.addWidget(mask_none)
     mask_row.addStretch(1)
     root.addLayout(mask_row)
+
+    # -- Recent drops activity list ----------------------------------------
+    recent_header = QtWidgets.QLabel("Recent drops")
+    recent_header.setObjectName("subtitle")
+    root.addWidget(recent_header)
+    recent_list = QtWidgets.QListWidget()
+    recent_list.setMaximumHeight(96)
+    recent_list.setToolTip("Double-click a row to open its import log")
+    root.addWidget(recent_list)
 
     actions = QtWidgets.QHBoxLayout()
     actions.addStretch(1)
@@ -449,13 +554,19 @@ def run(context=None, preview_path=""):
     output_row.insertWidget(3, paste_button)
 
     def browse_output():
-        from ui_theme import choose_existing_directory
-        value = choose_existing_directory(
-            QtWidgets, window, "Choose Output Folder",
+        # A native dialog can hang on disconnected drives / SMB folders; the
+        # async helper isolates it in its own process so this window and
+        # Mimics stay responsive.
+        def _chosen(value):
+            if value:
+                output_edit.setText(str(value))
+
+        choose_existing_directory_async(
+            QtCore, QtWidgets, window, "Choose Output Folder",
             output_edit.text().strip() or str(Path.home()),
+            _chosen,
+            button=browse,
         )
-        if value:
-            output_edit.setText(str(value))
 
     browse.clicked.connect(browse_output)
 
@@ -515,6 +626,46 @@ def run(context=None, preview_path=""):
         analyze([])
 
     submit.clicked.connect(do_submit)
+
+    # -- Recent drops polling ---------------------------------------------
+    _STATUS_LABELS = {
+        "running": "Importing",
+        "queued": "Queued",
+        "completed": "Done",
+        "failed": "Failed",
+        "cancelled": "Cancelled",
+        "unknown": "Unknown",
+    }
+
+    def refresh_recent():
+        status_dir = os.path.join(_ROOT, ".mimics_runtime", "drop_import")
+        entries = collect_recent_drops(status_dir)
+        recent_list.clear()
+        for entry in entries:
+            label = _STATUS_LABELS.get(entry["status"], entry["status"].title())
+            line = "{0} - {1}".format(entry["case_id"], label)
+            if entry["error"]:
+                line += ": {0}".format(entry["error"])
+            item = QtWidgets.QListWidgetItem(line)
+            item.setData(QtCore.Qt.UserRole, entry["log_path"])
+            if entry["status"] == "failed":
+                item.setForeground(QtGui.QColor("#b91c1c"))
+            elif entry["status"] == "completed":
+                item.setForeground(QtGui.QColor("#0f766e"))
+            recent_list.addItem(item)
+
+    def open_recent_log(row_item):
+        log_path = str(row_item.data(QtCore.Qt.UserRole) or "")
+        if log_path and os.path.isfile(log_path):
+            os.startfile(log_path)  # noqa: P102 - Windows shell open
+
+    recent_list.itemDoubleClicked.connect(open_recent_log)
+
+    recent_timer = QtCore.QTimer(window)
+    recent_timer.setInterval(2000)
+    recent_timer.timeout.connect(refresh_recent)
+    recent_timer.start(2000)
+    refresh_recent()
 
     # -- Idle timeout -----------------------------------------------------
     def check_idle():

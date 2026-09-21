@@ -1,6 +1,6 @@
 {
   "workspace_dir": "nninteractive_task_models",
-  "official_model_dir": "nninteractive_env/models/nnInteractive_v1.0",
+  "official_model_dir": "python_env/models/nnInteractive_v1.0",
   "default_strategy": "clopa_in",
   "default_epochs": 10,
   "minimum_epochs": 4,
@@ -14,6 +14,7 @@
   "gpu_lock_timeout_seconds": 86400,
   "label_export_timeout_seconds": 3600,
   "job_retention_days": 30,
+  "prepared_cache_retention_days": 30,
   "keep_failed_training_artifacts": false,
   "status_poll_seconds": 1.0
 }

@@ -1,0 +1,65 @@
+# 0806 验证实验：用 PyTorch ViT-S 复现 feature_unet2d（0805 报告 0.7606 的解码器）。
+#
+# 目的：回答"为什么达不到 0.7606"。0.7606 用的是 feature_unet2d（1 级 final feature
+# + 4 级 raw pixel skips）+ CE + 切片流 + ONNX ViT-S 512。ONNX 文件现已损坏/替换，
+# 故改用 PyTorch ViT-S（同权重，512，encoder_backend=pytorch 强制避开 model.onnx）。
+# 其余尽量对齐 0.7606：cached_slices pipeline、feature_unet2d、frozen、CE loss、
+# timeslice_casewise 归一化、512、batch=4 切片、30 epochs。
+#
+# 若本实验接近 0.76，证明根因是 raw pixel skips（而非编码器差异），且我的多尺度
+# scale_aware2d 丢 raw skips 是方向错误。后续应在 feature_unet2d 上叠加 2.5D/4 级。
+_base_: ["../train.yaml"]
+
+model:
+  model_path: "./models/dinov3-vits16"
+  encoder_backend: "pytorch"            # 强制 PyTorch；ONNX 已损坏且为 256 固定
+  num_classes: 2
+  out_indices: [11]                     # feature_unet2d 只用 final feature
+  slice_axis: axial
+  slice_batch_size: 4
+  channel_policy: repeat
+  input_normalization: "imagenet"
+  image_mean: [0.485, 0.456, 0.406]
+  image_std: [0.229, 0.224, 0.225]
+
+finetune:
+  method: "frozen"
+
+decoder:
+  type: "feature_unet2d"
+
+data:
+  name: "kidney_left"
+  data_root: "./data/totalseg/kidney_left"
+  img_size: [512, 512]
+  modality: "ct"
+  target_spacing: null                  # cached_slices 保留源 NIfTI 网格，不支持 target_spacing
+  k_shot: -1
+  support_case_ids: ["s0657", "s0661", "s0668", "s0693", "s0749"]
+  validation_case_ids: ["s1031", "s1120", "s1130"]
+  slice_normalization: "timeslice_casewise"   # 0.7606 的归一化合同
+
+loss:
+  type: "ce"                             # 对齐 0.7606（CE；raw skips 让前景可见，无需 focal/class_weights）
+
+training:
+  device: "auto"
+  pipeline: "cached_slices"              # 切片流（0.7606 的 pipeline）
+  optimizer: "adam"                      # 0.7606 用 Adam
+  lr: 0.0005
+  weight_decay: 0.0001
+  scheduler: "cosine"
+  warmup_epochs: 1
+  epochs: 30
+  batch_size: 4
+  grad_accumulation: 1
+  mixed_precision: true
+  num_workers: 0
+  seed: 0
+  validation_enabled: true
+  validation_interval: 3
+
+evaluation:
+  surface_tolerance_mm: 2.0
+
+exp_name: "kidney_0806_2d_featureunet_ce_s0657_s0661_s0668_s0693_s0749"

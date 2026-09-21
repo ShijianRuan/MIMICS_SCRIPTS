@@ -45,6 +45,7 @@ RUNTIME = ROOT / "runtime_py35"
 if str(RUNTIME) not in sys.path:
     sys.path.insert(0, str(RUNTIME))
 import runtime_common
+import pipeline_common
 RESOURCE_LOCK_DIR = default_resource_lock_dir(ROOT)
 
 
@@ -91,45 +92,7 @@ def resolve_bridge_python(explicit=None):
 
 
 def write_json_atomic(path, payload, retries=20, max_sleep=0.25):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
-    last_error = None
-    for attempt in range(max(1, int(retries))):
-        tmp = path.with_name(path.name + "." + str(os.getpid()) + "." + uuid.uuid4().hex + ".tmp")
-        try:
-            with tmp.open("w", encoding="utf-8") as handle:
-                handle.write(text)
-                try:
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                except Exception:
-                    pass
-            os.replace(str(tmp), str(path))
-            return
-        except OSError as exc:
-            last_error = exc
-            try:
-                if tmp.is_file():
-                    tmp.unlink()
-            except Exception:
-                pass
-            time.sleep(min(float(max_sleep), 0.05 * (attempt + 1)))
-    # SMB servers can allow create/write but deny rename/replace. Control JSON
-    # readers tolerate a short incomplete interval, so direct overwrite is a
-    # better final fallback than aborting a long import.
-    try:
-        with path.open("w", encoding="utf-8") as handle:
-            handle.write(text)
-            handle.flush()
-            try:
-                os.fsync(handle.fileno())
-            except Exception:
-                pass
-        return
-    except OSError as exc:
-        last_error = exc
-    if last_error is not None:
-        raise last_error
+    pipeline_common.write_json_atomic(path, payload, retries=retries, max_sleep=max_sleep)
 
 
 def run_bridge(python_exe, params, env_overrides=None, on_wait=None):
@@ -1165,11 +1128,45 @@ def _index_append_files(root, suffixes, kind, nested_mask_name=None):
     return indexed
 
 
+APPEND_JOB_RETENTION_DAYS = 14
+# Status values that mean a job dir may still be in use by a live process.
+ACTIVE_JOB_STATUSES = {"", "running", "queued", "starting", "active"}
+
+
+def prune_append_jobs(retention_days=APPEND_JOB_RETENTION_DAYS):
+    """Delete append-mask job dirs past the retention window (best effort).
+
+    Only terminal jobs (no live background Mimics holding their locks) are
+    pruned; jobs younger than the window are left alone.
+    """
+    base = Path(ROOT) / ".mimics_runtime" / "append_jobs"
+    if not base.is_dir():
+        return
+    cutoff = time.time() - retention_days * 86400
+    try:
+        entries = list(base.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if not entry.is_dir() or entry.stat().st_mtime >= cutoff:
+                continue
+            status = runtime_common.read_json(
+                str(entry / "status.json"), {}
+            ) or {}
+            if str(status.get("status") or "") in ACTIVE_JOB_STATUSES:
+                continue
+            shutil.rmtree(entry, ignore_errors=True)
+        except OSError:
+            continue
+
+
 def launch_append_masks(plan, mimics_exe, force=False,
                         lock_timeout_seconds=0.0):
     """Launch a background Mimics process that embeds named Masks per case."""
     output_dir = Path(plan["output_dir"]).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    prune_append_jobs()
     job_id = "append_masks_{}_{}".format(
         time.strftime("%Y%m%dT%H%M%S"), uuid.uuid4().hex[:8]
     )

@@ -1083,12 +1083,14 @@ def auto_cleanup_enabled():
     return value not in ("0", "false", "no", "off")
 
 
-def launch_external_gui_process(cmd, cwd=None, stderr_log=None):
+def launch_external_gui_process(cmd, cwd=None, stderr_log=None, extra_pythonpath=None):
     """Start a visible external GUI process (pythonw preferred on Windows).
 
     The inverse of the hidden background launchers: no CREATE_NO_WINDOW, so
     Tk/PySide windows show up, and pythonw.exe is preferred when the
     command is a python.exe from the same environment (no console flash).
+    ``extra_pythonpath`` prepends directories to PYTHONPATH so external
+    scripts can import project-local modules.
     """
     launch_cmd = list(cmd)
     if os.name == "nt" and launch_cmd:
@@ -1098,6 +1100,14 @@ def launch_external_gui_process(cmd, cwd=None, stderr_log=None):
             if os.path.isfile(pythonw):
                 launch_cmd[0] = pythonw
     env = background_env()
+    if extra_pythonpath:
+        existing = env.get("PYTHONPATH", "")
+        paths = [p for p in existing.split(os.pathsep) if p] if existing else []
+        for path in extra_pythonpath:
+            path = os.path.abspath(str(path))
+            if path not in paths:
+                paths.insert(0, path)
+        env["PYTHONPATH"] = os.pathsep.join(paths)
     stderr_dest = subprocess.DEVNULL
     stderr_file_handle = None
     if stderr_log:

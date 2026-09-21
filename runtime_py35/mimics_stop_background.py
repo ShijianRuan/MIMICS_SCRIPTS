@@ -806,6 +806,52 @@ def _find_cache_paths():
             if str(status.get("status", "")) in ("closed", "failed", "expired"):
                 paths.append(job_dir)
 
+    # Import queues: one control directory per .mcs output folder. Keep the
+    # queue directory itself (the .lock.guard anchors the per-folder lock),
+    # but stale queue contents (runner scripts, worker __pycache__, logs)
+    # are regenerable. A queue is stale when its active-marker heartbeat is
+    # older than 7 days AND no live consumer lock exists.
+    queues_root = os.path.join(root, ".mimics_runtime", "import_queues")
+    if os.path.isdir(queues_root):
+        now = time.time()
+        for name in os.listdir(queues_root):
+            queue_dir = os.path.join(queues_root, name)
+            if not os.path.isdir(queue_dir):
+                continue
+            active_path = os.path.join(queue_dir, "_mcs_queue_active.json")
+            try:
+                active = runtime_common.read_json(active_path, {}) or {}
+            except Exception:
+                active = {}
+            heartbeat = float(active.get("updated_at_epoch") or 0)
+            lock_live = False
+            for lock_name in os.listdir(queue_dir):
+                if not lock_name.endswith(".lock"):
+                    continue
+                payload = runtime_common.read_json(
+                    os.path.join(queue_dir, lock_name), {}
+                ) or {}
+                pid = payload.get("pid") or payload.get("acquiring_pid")
+                if pid and runtime_common.process_exists(pid):
+                    lock_live = True
+                    break
+            if lock_live:
+                continue
+            if heartbeat and now - heartbeat < 7 * 86400:
+                continue
+            # Stale: everything except the persistent guard anchor and the
+            # active/done markers is regenerable.
+            for entry in os.listdir(queue_dir):
+                if entry.endswith(".lock.guard") or entry in (
+                    "_mcs_queue_active.json",
+                    "_mcs_queue_done.json",
+                    "_mcs_queue_stop.json",
+                ):
+                    continue
+                candidate = os.path.join(queue_dir, entry)
+                if os.path.isdir(candidate) or os.path.isfile(candidate):
+                    paths.append(candidate)
+
     return sorted(set(os.path.abspath(p) for p in paths if os.path.exists(p)))
 
 

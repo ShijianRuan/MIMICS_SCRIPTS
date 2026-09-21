@@ -1774,6 +1774,15 @@ def _export_image_for_nninteractive(config, image, path, allow_buffer_export=Tru
         source_config = dict(config)
         source_config["image_input_mode"] = "source"
         source_config["prefer_source_image_for_nninteractive"] = True
+    else:
+        source_config = dict(config)
+    # Derived oblique imports would otherwise build an aligned source cache
+    # right here on the Mimics GUI thread (a bridge call of up to
+    # bridge_timeout_seconds, default 1800). The external image worker
+    # resamples the raw source onto the Mimics grid from the recorded
+    # affines instead, so alignment never blocks the GUI. An explicit
+    # false in the config keeps the old synchronous behavior.
+    source_config.setdefault("defer_source_alignment_to_worker", True)
 
     source_export = _source_image_export(image, source_config)
     if source_export is not None:

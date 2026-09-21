@@ -1,0 +1,51 @@
+# Direct-training config: kidney_left, LoRA + segformer3d, with the class_weights
+# fix and determinism. Validates whether the fix lifts the ceiling above the
+# previous ~0.47 plateau (which used cw=20 + no seed).
+_base_: ["train.yaml"]
+
+model:
+  model_path: "./models/dinov3-vitb16"
+  num_classes: 2
+  input_normalization: "imagenet"
+  image_mean: [0.485, 0.456, 0.406]
+  image_std: [0.229, 0.224, 0.225]
+  out_indices: [2, 5, 8, 11]
+  slice_axis: 2
+
+finetune:
+  method: "lora"
+  lora_rank: 8
+  lora_alpha: 16
+
+decoder:
+  type: "segformer3d"
+
+data:
+  name: "kidney_left_direct"
+  data_root: "E:/total_test/datasets/kidney_left_direct"
+  img_size: [224, 224]
+  in_channels: 1
+  k_shot: -1
+  fold: 0
+  modality: "ct"
+
+training:
+  epochs: 8
+  batch_size: 1
+  grad_accumulation: 1
+  mixed_precision: true
+  lr: 0.001
+  weight_decay: 0.01
+  warmup_epochs: 1
+  scheduler: "cosine"
+  seed: 0
+  validation_enabled: true
+  sub_volume:
+    enabled: false
+    size: [32, 224, 224]
+
+loss:
+  type: "dice_ce"
+  dice_weight: 0.5
+  ce_weight: 0.5
+  class_weights: [1.0, 1.0]

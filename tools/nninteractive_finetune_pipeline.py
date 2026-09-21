@@ -2247,6 +2247,129 @@ def _cleanup_terminal_artifacts(
                     {"path": str(path), "reason": str(exc)}
                 )
     report["completed_at_epoch"] = time.time()
+    try:
+        _sweep_expired_jobs(workspace)
+        _sweep_expired_prepared_cache(workspace)
+    except Exception:
+        pass
+    return report
+
+
+TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled"}
+
+DEFAULT_PREPARED_CACHE_RETENTION_DAYS = 30
+
+
+def _sweep_expired_prepared_cache(
+    workspace: Path,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Prune prepared source-grid cache buckets past their retention window.
+
+    The cache reuses materialized per-case inputs across jobs and can grow to
+    tens of GB; everything in it is rebuildable from the source .mcs files.
+    ``prepared_cache_retention_days`` (0 disables) controls the window.
+    """
+    if config is None:
+        config = load_config()
+    try:
+        retention_days = float(
+            config.get("prepared_cache_retention_days",
+                       DEFAULT_PREPARED_CACHE_RETENTION_DAYS) or 0
+        )
+    except (TypeError, ValueError):
+        retention_days = 0.0
+    report: dict[str, Any] = {
+        "removed_buckets": [],
+        "retention_days": retention_days,
+    }
+    if retention_days <= 0:
+        return report
+    root = workspace / "cache" / "source_grid_inputs"
+    if not root.is_dir():
+        return report
+    cutoff = time.time() - retention_days * 86400
+    for task_dir in _safe_iterdir(root):
+        if task_dir is None or not task_dir.is_dir():
+            continue
+        for case_dir in _safe_iterdir(task_dir):
+            if case_dir is None or not case_dir.is_dir():
+                continue
+            for bucket in _safe_iterdir(case_dir):
+                if bucket is None or not bucket.is_dir():
+                    continue
+                try:
+                    if bucket.stat().st_mtime >= cutoff:
+                        continue
+                    shutil.rmtree(bucket, ignore_errors=True)
+                    report["removed_buckets"].append(
+                        str(bucket.relative_to(root))
+                    )
+                except OSError:
+                    continue
+        # Drop case dirs that became empty so the tree stays tidy.
+        try:
+            if task_dir.is_dir() and not any(task_dir.iterdir()):
+                task_dir.rmdir()
+        except OSError:
+            pass
+    return report
+
+
+def _safe_iterdir(path: Path):
+    """iterdir that swallows races (dir vanished mid-sweep)."""
+    try:
+        return list(path.iterdir())
+    except OSError:
+        return []
+
+
+def _sweep_expired_jobs(workspace: Path, config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Prune terminal finetune job dirs older than ``job_retention_days``.
+
+    Keeps ``status.json`` (Model Center history needs it) and deletes the rest
+    of each expired job dir (job.log, trainer.log, staging residue). Jobs in
+    non-terminal or resumable states are never touched.
+    """
+    if config is None:
+        config = load_config()
+    try:
+        retention_days = float(config.get("job_retention_days", 0) or 0)
+    except (TypeError, ValueError):
+        retention_days = 0.0
+    report: dict[str, Any] = {"removed_jobs": [], "kept_jobs": 0, "retention_days": retention_days}
+    if retention_days <= 0:
+        return report
+    jobs_path = workspace / "jobs"
+    if not jobs_path.is_dir():
+        return report
+    cutoff = time.time() - retention_days * 86400
+    for entry in jobs_path.iterdir():
+        if not entry.is_dir():
+            continue
+        status = read_json(entry / "status.json", {}) or {}
+        if str(status.get("status") or "") not in TERMINAL_JOB_STATUSES:
+            continue
+        completed = float(status.get("completed_at_epoch") or 0)
+        if not completed:
+            try:
+                completed = (entry / "status.json").stat().st_mtime
+            except OSError:
+                continue
+        if completed >= cutoff:
+            report["kept_jobs"] += 1
+            continue
+        for child in entry.iterdir():
+            if child.name == "status.json":
+                continue
+            try:
+                if child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
+                else:
+                    child.unlink()
+            except OSError:
+                pass
+        report["removed_jobs"].append(entry.name)
     return report
 
 
@@ -2609,6 +2732,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    # Startup sweep: prune terminal jobs and stale prepared-cache buckets
+    # past their retention windows no matter which subcommand runs (both are
+    # no-ops when the config keys are absent or zero).
+    try:
+        _sweep_expired_jobs(workspace_root())
+        _sweep_expired_prepared_cache(workspace_root())
+    except Exception:
+        pass
     if args.command == "run":
         return run_job(args.job_dir)
     if args.command == "resume":

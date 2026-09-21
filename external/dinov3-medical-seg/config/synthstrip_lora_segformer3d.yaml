@@ -1,0 +1,27 @@
+_base_: ["train.yaml"]
+
+model:
+  model_path: "./models/dinov3-vitb16"
+  num_classes: 2
+
+finetune:
+  method: "lora"
+  lora_rank: 8
+  lora_alpha: 16
+
+decoder:
+  type: "segformer3d"
+
+data:
+  name: "synthstrip"
+  data_root: "./data/synthstrip"
+  img_size: [224, 224]
+  k_shot: 5
+
+training:
+  epochs: 10
+  batch_size: 1
+  grad_accumulation: 1
+  mixed_precision: false
+  sub_volume:
+    enabled: false

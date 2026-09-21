@@ -2279,23 +2279,9 @@ def _pick_directory(title):
         return str(path) if path else None
     except Exception:
         pass
-
-    # Fallback: Tkinter (may cause GUI freeze in Mimics)
-    try:
-        import Tkinter as tk
-        import tkFileDialog
-    except ImportError:
-        try:
-            import tkinter as tk
-            from tkinter import filedialog as tkFileDialog
-        except ImportError:
-            return None
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    path = tkFileDialog.askdirectory(parent=root, title=title)
-    root.destroy()
-    return path if path else None
+    # The Tkinter fallback was removed: it can freeze the Mimics GUI for the
+    # duration of the dialog. PyQt5 ships with every supported Mimics build.
+    return None
 
 
 def _current_project_case_id():

@@ -1,0 +1,40 @@
+_base_: ["train.yaml"]
+
+model:
+  model_path: "./models/dinov3-vitb16"
+  num_classes: 2
+
+finetune:
+  method: "frozen"
+
+decoder:
+  type: "segformer3d"
+
+data:
+  name: "synthstrip"
+  data_root: "./data/synthstrip"
+  img_size: [224, 224]
+  k_shot: 5
+
+augmentation:
+  enabled: true
+  intensity:
+    gamma_range: [0.7, 1.5]
+    brightness_range: [0.75, 1.25]
+    noise_sigma: 0.05
+  spatial:
+    flip: true
+    rotation_deg: 15.0
+    scale_range: [0.85, 1.15]
+    elastic: false
+
+loss:
+  class_weights: [1.0, 2.0]
+
+training:
+  epochs: 10
+  batch_size: 1
+  grad_accumulation: 1
+  mixed_precision: false
+  sub_volume:
+    enabled: false

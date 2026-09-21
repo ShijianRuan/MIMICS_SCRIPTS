@@ -53,6 +53,8 @@ from resource_locks import (  # noqa: E402
     ResourceLockCancelled,
     default_resource_lock_dir,
     process_start_marker,
+    register_process,
+    unregister_process,
 )
 
 
@@ -901,6 +903,20 @@ def _spawn_worker(
             stderr=subprocess.STDOUT,
             creationflags=flags,
         )
+        ownership_token = ""
+        try:
+            # Register the stage worker so the health panel and kill-background
+            # see it (mirrors the fewshot pipeline's trainer registration).
+            record = register_process(
+                ROOT,
+                "nnunet_{}".format(stage),
+                process.pid,
+                job_id=str(request.get("job_id") or ""),
+                state_path=str(status_path),
+            )
+            ownership_token = (record or {}).get("ownership_token") or ""
+        except Exception:
+            ownership_token = ""
         try:
             if resource_lock is not None:
                 transferred = resource_lock.update_pid(
@@ -1004,6 +1020,16 @@ def _spawn_worker(
             try:
                 start_gate.unlink()
             except OSError:
+                pass
+            try:
+                if ownership_token:
+                    unregister_process(
+                        ROOT,
+                        "nnunet_{}".format(stage),
+                        process.pid,
+                        ownership_token=ownership_token,
+                    )
+            except Exception:
                 pass
     result = read_json(result_path, {}) or {}
     if process.returncode != 0 or result.get("status") != "ok":

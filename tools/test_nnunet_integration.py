@@ -1105,6 +1105,38 @@ class JobLifecycleTests(unittest.TestCase):
             self.assertEqual(len(models), 1)
             self.assertEqual(Path(models[0]["model_dir"]), model_dir.resolve())
 
+    def test_dead_registry_rows_are_flagged_not_dropped(self):
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = Path(temp)
+            registry_path = workspace / "nnunet_model_registry.json"
+            common.write_json_atomic(
+                registry_path,
+                {
+                    "models": [
+                        {
+                            "model_id": "dead_model",
+                            "task_id": "liver",
+                            "model_dir": str(
+                                workspace / "missing" / "dead_model"
+                            ),
+                            "manifest_path": str(
+                                workspace / "missing" / "dead_model"
+                                / "mimics_model_manifest.json"
+                            ),
+                        }
+                    ]
+                },
+            )
+            # Default mode: dead rows are dropped (prediction surfaces keep
+            # only usable models).
+            self.assertEqual(common.load_models(workspace), [])
+            # Migration mode: dead rows stay visible flagged missing_path so
+            # the status viewer can tell the user what to repair.
+            flagged = common.load_models(workspace, include_missing=True)
+            self.assertEqual(len(flagged), 1)
+            self.assertEqual(flagged[0]["status"], "missing_path")
+            self.assertEqual(flagged[0]["model_id"], "dead_model")
+
     def test_model_usability_rejects_incomplete_checkpoint(self):
         with tempfile.TemporaryDirectory() as temp:
             model_dir = Path(temp)

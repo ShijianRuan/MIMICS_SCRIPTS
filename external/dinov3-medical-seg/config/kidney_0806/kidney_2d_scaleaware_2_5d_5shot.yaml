@@ -1,0 +1,17 @@
+# Exp D' — 2.5D channel policy on the Exp B winner (scale_aware2d, NOT hybrid).
+# Exp B (scale_aware2d, 2D) is the current best (0.5209 mean Dice) but has no
+# cross-slice context. Adding channel_policy: 2_5d (neighbor slices as pseudo-RGB)
+# gives the 2D encoder free inter-slice context at the input — the most promising
+# single change to push B higher. The 3 stacked neighbor slices share the same
+# per-volume casewise stats, so the pseudo-RGB is coherent.
+_base_: ["kidney_0806_base.yaml"]
+
+model:
+  out_indices: [2, 5, 8, 11]                # 4 levels -> stage3/6/9/12 (REQUIRED)
+  channel_policy: "2_5d"
+  neighbor_distance_mm: 1.5                 # ~1 slice at 1.5mm Z spacing
+
+decoder:
+  type: "scale_aware2d"
+
+exp_name: "kidney_0806_2d_scaleaware_2_5d_s0657_s0661_s0668_s0693_s0749"

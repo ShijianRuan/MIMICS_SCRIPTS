@@ -15,6 +15,7 @@ import uuid
 
 import mimics
 
+import external_window_launcher
 import fewshot_mimics
 import runtime_common
 
@@ -210,7 +211,9 @@ def start_training():
     except Exception as exc:
         _log(logging.ERROR, "Could not open nnU-Net training setup: {0}".format(exc))
         mimics.dialogs.message_box(
-            "Could not open nnU-Net training setup.\n\n{0}".format(exc),
+            "Could not open nnU-Net training setup.\n\n{0}".format(
+                external_window_launcher.error_guidance(exc)
+            ),
             title=TITLE,
             ui_blocking=False,
         )
@@ -302,7 +305,9 @@ def show_status():
     except Exception as exc:
         _log(logging.ERROR, "Could not open nnU-Net status viewer: {0}".format(exc))
         mimics.dialogs.message_box(
-            "Could not open nnU-Net status viewer.\n\n{0}".format(exc),
+            "Could not open nnU-Net status viewer.\n\n{0}".format(
+                external_window_launcher.error_guidance(exc)
+            ),
             title=TITLE,
             ui_blocking=False,
         )

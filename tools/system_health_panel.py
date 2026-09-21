@@ -466,24 +466,86 @@ def run(preview_path=""):
         box.itemAt(0).widget().setProperty("status", status)
         return box
 
+    # ---- Non-blocking background work (daemon thread + queue + QTimer) ----
+    # collect_health and sweep_stale_state do filesystem/process probing that
+    # can take seconds; running them on the GUI thread would freeze the panel.
+    import queue as _queue
+    import threading as _threading
+
+    _results = _queue.Queue()
+
+    def _poll_results():
+        # Drain every completed result without blocking; each entry is
+        # (kind, payload). Rendering happens here on the GUI thread.
+        while True:
+            try:
+                kind, payload = _results.get_nowait()
+            except _queue.Empty:
+                return
+            if kind == "snapshot":
+                if payload is not None:
+                    render(payload)
+                summary.setText(summary.text().replace(" (refreshing...)", ""))
+            elif kind == "sweep":
+                summary.setText(
+                    "Swept: removed {0} dead record(s), released {1} lock(s).".format(
+                        payload.get("removed_dead_records") or 0,
+                        len(payload.get("released_locks") or []),
+                    )
+                )
+                start_refresh()
+
+    _result_timer = QtCore.QTimer(window)
+    _result_timer.setInterval(250)
+    _result_timer.timeout.connect(_poll_results)
+    _result_timer.start()
+
+    def start_refresh():
+        text = summary.text()
+        if not text.endswith("(refreshing...)"):
+            summary.setText(text + " (refreshing...)")
+
+        def worker():
+            try:
+                _results.put(("snapshot", collect_health(_ROOT)))
+            except Exception as exc:  # never leave the panel stuck
+                _results.put(
+                    ("snapshot", {
+                        "processes": [], "locks": [],
+                        "queues": [], "server": None,
+                        "error": "collect failed: {0}".format(exc),
+                    })
+                )
+
+        thread = _threading.Thread(target=worker)
+        thread.daemon = True
+        thread.start()
+
     def refresh():
-        snapshot = collect_health(_ROOT)
-        render(snapshot)
+        start_refresh()
 
     refresh_btn.clicked.connect(refresh)
 
     def do_sweep():
-        summary.setText("Sweeping stale state...")
-        result = sweep_stale_state(_ROOT)
-        released = len(result.get("released_locks") or [])
-        removed = result.get("removed_dead_records") or 0
-        QtWidgets.QMessageBox.information(
-            window, "Sweep Complete",
-            "Removed {0} dead record(s) and released {1} lock(s).".format(
-                removed, released
-            ),
-        )
-        refresh()
+        summary.setText("Sweeping stale state... (the panel stays usable)")
+        sweep_btn.setEnabled(False)
+
+        def worker():
+            try:
+                _results.put(("sweep", sweep_stale_state(_ROOT)))
+            except Exception as exc:
+                _results.put(
+                    ("sweep", {
+                        "removed_dead_records": 0,
+                        "released_locks": [],
+                        "error": str(exc),
+                    })
+                )
+
+        thread = _threading.Thread(target=worker)
+        thread.daemon = True
+        thread.start()
+        sweep_btn.setEnabled(True)
 
     sweep_btn.clicked.connect(do_sweep)
 
@@ -495,8 +557,18 @@ def run(preview_path=""):
             "stop gracefully first, then terminated.",
         )
         if answer == QtWidgets.QMessageBox.Yes:
-            stop_all_owned_services(_ROOT)
-            summary.setText("Stop requested - processes are shutting down. Refresh in a few seconds.")
+            summary.setText("Stop requested - processes are shutting down...")
+
+            def worker():
+                try:
+                    stop_all_owned_services(_ROOT)
+                except Exception:
+                    pass
+                _results.put(("snapshot", None))
+
+            thread = _threading.Thread(target=worker)
+            thread.daemon = True
+            thread.start()
             QtCore.QTimer.singleShot(4000, refresh)
 
     stop_btn.clicked.connect(do_stop)
