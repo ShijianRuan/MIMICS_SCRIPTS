@@ -16,7 +16,7 @@ import uuid
 import mimics
 
 import external_window_launcher
-import fewshot_mimics
+import mimics_mask_apply as fewshot_mimics
 import runtime_common
 
 

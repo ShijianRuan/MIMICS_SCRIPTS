@@ -342,7 +342,7 @@ def _gpu_lock(job: Job, device: Any) -> Any:
     def on_wait(holder: dict[str, Any]) -> None:
         release_requested = False
         try:
-            from tools.fewshot_pipeline import (
+            from tools.mimics_label_export import (
                 request_nninteractive_server_release_on_contention,
             )
 

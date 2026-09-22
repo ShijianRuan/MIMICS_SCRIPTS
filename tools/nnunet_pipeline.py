@@ -112,7 +112,7 @@ def _acquire_local_gpu(
 
     def on_wait(holder: dict[str, Any]) -> None:
         try:
-            from tools.fewshot_pipeline import (
+            from tools.mimics_label_export import (
                 request_nninteractive_server_release_on_contention,
             )
 
@@ -253,7 +253,7 @@ def _is_medical_file(path: Path) -> bool:
 
 
 def _find_case_image(case_dir: Path) -> Path | None:
-    from tools.fewshot_pipeline import find_image
+    from tools.mimics_label_export import find_image
 
     return find_image(case_dir)
 
@@ -349,7 +349,7 @@ def _export_mcs_labels(
     status_path: Path,
     control_path: Path,
 ) -> Path:
-    from tools import fewshot_pipeline
+    from tools import mimics_label_export as fewshot_pipeline
 
     mcs_dir = Path(str(request.get("mcs_dir") or "")).expanduser().resolve()
     if not mcs_dir.is_dir():
@@ -432,7 +432,7 @@ def _materialize_case(
         read_nifti_mask_with_affine,
         resample_mask_to_image_grid,
     )
-    from tools.fewshot_pipeline import _materialize_source_image
+    from tools.mimics_label_export import materialize_source_image as _materialize_source_image
 
     fingerprint = _case_source_signature(image_source, label_sources, request)
     case_cache = cache_root / safe_identifier(case_id)
@@ -941,7 +941,7 @@ def _spawn_worker(
                 {"ready_at_epoch": time.time(), "worker_pid": process.pid},
             )
         except Exception:
-            from tools.fewshot_pipeline import terminate_process_tree
+            from tools.mimics_label_export import terminate_process_tree
 
             terminate_process_tree(process.pid)
             try:
@@ -954,7 +954,7 @@ def _spawn_worker(
             last_epoch = -1
             while process.poll() is None:
                 if _cancelled(control_path):
-                    from tools.fewshot_pipeline import terminate_process_tree
+                    from tools.mimics_label_export import terminate_process_tree
 
                     terminate_process_tree(process.pid)
                     try:
@@ -1645,7 +1645,7 @@ def run_inference(job_dir: Path) -> int:
             raise RuntimeError("Selected nnU-Net model is missing or invalid.")
         if not image_path.exists():
             raise RuntimeError("Prediction image does not exist: {}".format(image_path))
-        from tools.fewshot_pipeline import _materialize_source_image
+        from tools.mimics_label_export import materialize_source_image as _materialize_source_image
 
         inference_input = job_dir / "input" / "source_image.nii.gz"
         inference_input.parent.mkdir(parents=True, exist_ok=True)

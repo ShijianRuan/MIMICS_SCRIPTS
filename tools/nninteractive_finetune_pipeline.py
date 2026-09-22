@@ -135,7 +135,7 @@ def _find_mimics_exe(request: dict[str, Any]) -> str:
     if configured and Path(configured).is_file():
         return configured
     try:
-        from tools.fewshot_pipeline import find_mimics_exe
+        from tools.mimics_label_export import find_mimics_exe
 
         return str(find_mimics_exe(configured) or "")
     except Exception:
@@ -1491,7 +1491,7 @@ def _gpu_lock(
             },
         )
         try:
-            from tools.fewshot_pipeline import (
+            from tools.mimics_label_export import (
                 request_nninteractive_server_release_on_contention,
             )
 

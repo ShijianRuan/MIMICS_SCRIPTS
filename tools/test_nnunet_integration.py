@@ -1065,7 +1065,7 @@ class JobLifecycleTests(unittest.TestCase):
             with mock.patch.object(
                 pipeline.subprocess, "Popen", return_value=process
             ), mock.patch(
-                "tools.fewshot_pipeline.terminate_process_tree"
+                "tools.mimics_label_export.terminate_process_tree"
             ) as terminate, self.assertRaisesRegex(
                 RuntimeError, "could not be transferred"
             ):
@@ -1220,7 +1220,7 @@ class JobLifecycleTests(unittest.TestCase):
                 return True
 
             with mock.patch.object(jobs, "process_matches", side_effect=matches), mock.patch(
-                "tools.fewshot_pipeline.terminate_process_tree", side_effect=terminate
+                "tools.mimics_label_export.terminate_process_tree", side_effect=terminate
             ):
                 self.assertTrue(jobs.stop_job(status_path))
             status = common.read_json(status_path)
@@ -1243,7 +1243,7 @@ class JobLifecycleTests(unittest.TestCase):
                 },
             )
             with mock.patch.object(jobs, "process_matches", return_value=True), mock.patch(
-                "tools.fewshot_pipeline.terminate_process_tree"
+                "tools.mimics_label_export.terminate_process_tree"
             ) as terminate:
                 self.assertTrue(jobs.stop_job(status_path))
             terminate.assert_not_called()
@@ -1427,7 +1427,7 @@ class MimicsRuntimeTests(unittest.TestCase):
     def setUpClass(cls):
         cls.original_modules = {
             name: sys.modules.get(name)
-            for name in ("mimics", "fewshot_mimics", "runtime_common", "nnunet_mimics")
+            for name in ("mimics", "fewshot_mimics", "mimics_mask_apply", "runtime_common", "nnunet_mimics")
         }
         cls.dialog_answer = "Create Editable Copies"
         cls.masks = [FakeMask("Liver", 10)]
@@ -1454,7 +1454,7 @@ class MimicsRuntimeTests(unittest.TestCase):
         runtime.find_mimics_exe = lambda: ""
         sys.modules["runtime_common"] = runtime
 
-        fewshot = types.ModuleType("fewshot_mimics")
+        fewshot = types.ModuleType("mimics_mask_apply")
         fewshot._mask_identity = lambda mask: mask.guid
         fewshot._new_prediction_mask = lambda name: FakeMask(name, 0)
         fewshot._set_mask_from_u8 = lambda mask, path, shape, transaction_name=None: setattr(
@@ -1469,7 +1469,7 @@ class MimicsRuntimeTests(unittest.TestCase):
         fewshot._dinov3_root = lambda config: str(ROOT)
         fewshot._fewshot_python = lambda config, root: sys.executable
         fewshot._buffer_mapping_from_config = lambda config: ([0, 1, 2], [False, False, False])
-        sys.modules["fewshot_mimics"] = fewshot
+        sys.modules["mimics_mask_apply"] = fewshot
         cls.module = importlib.import_module("nnunet_mimics")
 
     @classmethod

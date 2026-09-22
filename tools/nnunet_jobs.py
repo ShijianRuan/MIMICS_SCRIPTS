@@ -261,7 +261,7 @@ def _stop_orphaned_local_worker(status_path: Path, status: dict[str, Any]) -> No
     if controller_alive or not process_matches(worker_pid, worker_marker):
         return
 
-    from tools.fewshot_pipeline import terminate_process_tree
+    from tools.mimics_label_export import terminate_process_tree
 
     terminate_process_tree(worker_pid)
     deadline = time.time() + 20.0

@@ -1218,7 +1218,7 @@ def _prepare_nnunet_infer(
         stable_digest,
         write_json_atomic as write_nnunet_json,
     )
-    from tools.fewshot_pipeline import _materialize_source_image
+    from tools.mimics_label_export import materialize_source_image as _materialize_source_image
     from tools.nnunet_pipeline import (
         validate_materialized_source_geometry,
         validate_model_input_compatibility,
