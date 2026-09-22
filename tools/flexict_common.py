@@ -208,7 +208,11 @@ def load_models(workspace: str | Path | None = None,
                 relocated["status"] = "missing_path"
                 models[model_id] = relocated
             continue
-        models[model_id] = dict(row)
+        stored = dict(row)
+        if not stored.get("manifest_path"):
+            stored["manifest_path"] = str(
+                model_dir / "flexict_model_manifest.json")
+        models[model_id] = stored
     return sorted(
         models.values(),
         key=lambda row: float(row.get("created_at_epoch") or 0),

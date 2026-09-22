@@ -1061,6 +1061,7 @@ def easy_predict(
     monitor_interval_sec: float = 0.1,
     num_processes_preprocessing: int = 3,
     num_processes_segmentation_export: int = 3,
+    checkpoint_name: str = "checkpoint_final.pth",
 ) -> None:
     """
     简化版预测接口：用户只需提供 model_folder、input_path、output_path。
@@ -1103,6 +1104,9 @@ def easy_predict(
         预处理并发进程数，默认 3（仅 Linux 生效；Windows 自动忽略）
     num_processes_segmentation_export : int
         后处理/保存并发进程数，默认 3（仅 Linux 生效；Windows 自动忽略）
+    checkpoint_name : str
+        加载的 checkpoint 文件名，默认 "checkpoint_final.pth"。
+        少样本微调配方（FlexiCT）按验证 Dice 选优，应传 "checkpoint_best.pth"。
 
     示例
     ----------
@@ -1113,7 +1117,7 @@ def easy_predict(
     ...     enable_stats=True,
     ... )
     """
-    meta = _read_model_meta(model_folder)
+    meta = _read_model_meta(model_folder, checkpoint_name=checkpoint_name)
 
     # ------------------------------------------------------------------ #
     # 步骤 1：打印模型元信息
@@ -1158,7 +1162,7 @@ def easy_predict(
     predictor.initialize_from_trained_model_folder(
         model_training_output_dir=mf,
         use_folds=folds,
-        checkpoint_name="checkpoint_final.pth",
+        checkpoint_name=checkpoint_name,
     )
 
     # ------------------------------------------------------------------ #

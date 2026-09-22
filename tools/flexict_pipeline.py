@@ -67,6 +67,7 @@ from nnunet_pipeline import (  # noqa: E402
     _spawn_worker,
     build_training_data_profile,
     prepare_source_grid_cases,
+    validate_materialized_source_geometry,
 )
 from resource_locks import process_start_marker  # noqa: E402
 
@@ -180,6 +181,31 @@ def flexict_worker_environment(request: dict[str, Any],
                  or DEFAULT_CONFIG["default_mirror_disable_axes"] or "").strip()
     if mirror:
         environment["MIRROR_DISABLE_AXES"] = mirror
+    gpu_id = str(request.get("gpu_id") or "").strip()
+    if gpu_id:
+        environment["CUDA_VISIBLE_DEVICES"] = gpu_id
+    return environment
+
+
+def flexict_infer_environment(request: dict[str, Any],
+                              roots: dict[str, Path],
+                              configuration: str) -> dict[str, str]:
+    """Environment for the FlexiCT inference worker.
+
+    Inference resolves the custom trainer class through the same
+    nnUNet_extTrainer seam as training (nnUNetPredictor needs the trainer to
+    rebuild the network). The pretrained backbone checkpoints are not needed:
+    the trained model checkpoint already contains the fine-tuned weights.
+    """
+    config = load_config()
+    repo = flexict_repo_dir(config)
+    environment = {
+        "nnUNet_raw": str(roots["raw"]),
+        "nnUNet_preprocessed": str(roots["preprocessed"]),
+        "nnUNet_results": str(roots["results"]),
+        "nnUNet_extTrainer": str(repo / "trainers"),
+        "nnUNet_compile": "0",
+    }
     gpu_id = str(request.get("gpu_id") or "").strip()
     if gpu_id:
         environment["CUDA_VISIBLE_DEVICES"] = gpu_id
@@ -787,8 +813,169 @@ def scan_flexict_cases(dataset_root: str | Path, label_name: str) -> list[dict[s
 
 
 def run_inference(job_dir: Path) -> int:
-    """Phase 5 placeholder — implemented with the prediction integration."""
-    raise NotImplementedError("FlexiCT inference lands with the prediction UI (Phase 5).")
+    """FlexiCT inference on the active case (stages preparing_input ->
+    waiting_for_gpu -> predicting -> completed).
+
+    Mirrors nnunet_pipeline.run_inference: materialize the source image on
+    its own grid, validate against the launch-time geometry, then spawn the
+    infer worker with the FlexiCT trainer seam. The FlexiCT differences:
+    the model comes from the flexict registry (model_manifest), inference
+    uses checkpoint_best.pth (validation-Dice-selected) with TTA disabled
+    per the locked recipe, and the trainer resolves through nnUNet_extTrainer.
+    """
+    request_path = job_dir / "request.json"
+    status_path = job_dir / "status.json"
+    control_path = job_dir / "control.json"
+    log_path = job_dir / "job.log"
+    request = normalize_flexict_request(read_json_file(request_path))
+    model_manifest_path = Path(
+        str(request.get("model_manifest") or "")).expanduser().resolve()
+    manifest = read_json_file(model_manifest_path, {}) or {}
+    model_dir = Path(
+        str(request.get("model_dir_override")
+            or manifest.get("model_dir")
+            or model_manifest_path.parent)
+    ).expanduser().resolve()
+    image_path = Path(str(request.get("image_path") or "")).expanduser().resolve()
+    output_path = Path(
+        str(request.get("output_path") or job_dir / "prediction.nii.gz")).resolve()
+    roots = _runtime_roots(request)
+    update_status(
+        status_path,
+        schema_version=SCHEMA_VERSION,
+        job_id=request["job_id"],
+        kind="infer",
+        task_id=manifest.get("task_id") or request.get("task_id") or "",
+        task_name=manifest.get("task_name") or request.get("task_name") or "",
+        label_name=manifest.get("label_name") or request.get("label_name") or "",
+        status="running",
+        phase="preparing_input",
+        message="Preparing the source image for FlexiCT prediction.",
+        model_id=manifest.get("model_id"),
+        model_manifest=str(model_manifest_path),
+        image_path=str(image_path),
+        output_path=str(output_path),
+        log_path=str(log_path),
+        control_path=str(control_path),
+        controller_pid=os.getpid(),
+        controller_start_marker=process_start_marker(os.getpid()),
+        progress_percent=5,
+    )
+    try:
+        if not manifest or not model_dir.is_dir():
+            raise RuntimeError("Selected FlexiCT model is missing or invalid.")
+        if not image_path.exists():
+            raise RuntimeError(
+                "Prediction image does not exist: {}".format(image_path))
+        from tools.mimics_label_export import materialize_source_image as _materialize_source_image
+
+        inference_input = job_dir / "input" / "source_image.nii.gz"
+        inference_input.parent.mkdir(parents=True, exist_ok=True)
+        _materialize_source_image(image_path, inference_input)
+        validate_materialized_source_geometry(
+            inference_input, request.get("source_geometry_expected")
+        )
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        update_status(
+            status_path,
+            status="running",
+            phase="waiting_for_gpu",
+            message="Waiting for the shared GPU before FlexiCT prediction.",
+            progress_percent=20,
+        )
+        gpu_lock = _acquire_local_gpu(
+            request, status_path, control_path, log_path, "flexict inference")
+        try:
+            configuration = str(manifest.get("configuration") or "2d")
+            import nnunet_pipeline as np_mod
+
+            original_env = np_mod._worker_environment
+            try:
+                np_mod._worker_environment = lambda _req, _roots: flexict_infer_environment(
+                    request, roots, configuration)
+                _spawn_worker(
+                    "infer",
+                    {
+                        "model_folder": str(model_dir),
+                        "input_path": str(inference_input),
+                        "output_path": str(output_path),
+                        "disable_tta": True,  # locked recipe: no TTA
+                        "use_cpu": bool(request.get("use_cpu", False)),
+                        "enable_stats": False,
+                        "gpu_device_id": 0,
+                        "num_processes_preprocessing": int(
+                            request.get("inference_workers") or 2),
+                        "num_processes_segmentation_export": int(
+                            request.get("inference_workers") or 2),
+                        "checkpoint_name": "checkpoint_best.pth",
+                    },
+                    request, roots, job_dir, status_path,
+                    control_path, log_path, resource_lock=gpu_lock)
+            finally:
+                np_mod._worker_environment = original_env
+        finally:
+            if gpu_lock is not None:
+                gpu_lock.release()
+        if not output_path.is_file():
+            raise RuntimeError(
+                "FlexiCT inference produced no output: {}".format(output_path))
+        import nibabel as nib
+        import numpy as np
+
+        source = nib.load(str(inference_input))
+        prediction = nib.load(str(output_path))
+        if tuple(source.shape[:3]) != tuple(prediction.shape[:3]) or not np.allclose(
+            source.affine, prediction.affine, atol=1e-4, rtol=0.0
+        ):
+            raise RuntimeError(
+                "Prediction grid does not match the source image. The result was not offered to Mimics.")
+        update_status(
+            status_path,
+            status="completed",
+            phase="completed",
+            message="FlexiCT inference completed and passed spatial validation.",
+            progress_percent=100,
+            label_name=manifest.get("label_name") or request.get("label_name") or "",
+            inference_image_path=str(inference_input),
+            completed_at_epoch=time.time(),
+            worker_pid=None,
+            worker_start_marker=None,
+        )
+        return 0
+    except InterruptedError:
+        update_status(
+            status_path,
+            status="cancelled",
+            phase="cancelled",
+            message="FlexiCT inference was cancelled.",
+            completed_at_epoch=time.time(),
+            worker_pid=None,
+            worker_start_marker=None,
+        )
+        return 0
+    except Exception as exc:
+        append_log(log_path, traceback.format_exc())
+        update_status(
+            status_path,
+            status="failed",
+            phase="failed",
+            error="{}: {}".format(type(exc).__name__, exc),
+            traceback=traceback.format_exc(),
+            completed_at_epoch=time.time(),
+            worker_pid=None,
+            worker_start_marker=None,
+        )
+        return 1
+    finally:
+        try:
+            result = compact_completed_log(log_path)
+            if result.get("compacted"):
+                update_status(status_path, log_compaction=result)
+        except OSError:
+            pass
+        workspace = str(request.get("workspace") or "")
+        if workspace:
+            _sweep_expired_jobs(workspace)
 
 
 def create_flexict_job(values: dict[str, Any]) -> dict[str, Any]:
@@ -897,6 +1084,11 @@ def main() -> int:
     args = parser.parse_args()
     job_dir = Path(args.job_dir).expanduser().resolve()
     job_dir.mkdir(parents=True, exist_ok=True)
+    operation = str(
+        (read_json_file(job_dir / "request.json") or {}).get("operation")
+        or "train").lower()
+    if operation == "infer":
+        return run_inference(job_dir)
     return run_training(job_dir)
 
 

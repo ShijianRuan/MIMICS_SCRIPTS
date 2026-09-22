@@ -427,6 +427,295 @@ class TestJobCreation(unittest.TestCase):
             self.assertEqual(rows[0]["job_id"], "train_x")
 
 
+class TestLoadModelsManifestPath(unittest.TestCase):
+    def test_registry_rows_derive_manifest_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            from nnunet_common import write_json_atomic
+
+            workspace = Path(tmp) / "workspace"
+            model_dir = workspace / "models" / "m1"
+            (model_dir / "fold_0").mkdir(parents=True)
+            (model_dir / "flexict_model_manifest.json").write_text("{}", encoding="utf-8")
+            registry = workspace / "registry.json"
+            registry.parent.mkdir(parents=True, exist_ok=True)
+            write_json_atomic(registry, {
+                "schema_version": fc.SCHEMA_VERSION,
+                "recommended_model_id": "",
+                "models": [{"model_id": "m1", "model_dir": str(model_dir),
+                            "created_at_epoch": 1.0}],
+            })
+            models = fc.load_models(str(workspace))
+            self.assertEqual(len(models), 1)
+            self.assertEqual(
+                models[0]["manifest_path"],
+                str(model_dir / "flexict_model_manifest.json"))
+
+
+class TestFlexictInferEnvironment(unittest.TestCase):
+    def test_infer_environment_trainer_seam_only(self):
+        """Inference needs the trainer seam but NOT the pretrained backbone
+        checkpoints (the trained checkpoint already holds fine-tuned weights)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            roots = {
+                "raw": Path(tmp) / "raw",
+                "preprocessed": Path(tmp) / "preprocessed",
+                "results": Path(tmp) / "results",
+            }
+            request = {"gpu_id": "1"}
+            environment = fp.flexict_infer_environment(request, roots, "2d")
+            self.assertEqual(environment["nnUNet_raw"], str(roots["raw"]))
+            self.assertEqual(environment["nnUNet_preprocessed"], str(roots["preprocessed"]))
+            self.assertEqual(environment["nnUNet_results"], str(roots["results"]))
+            self.assertTrue(environment["nnUNet_extTrainer"].endswith(
+                os.path.join("flexict-finetune", "trainers")))
+            self.assertEqual(environment["nnUNet_compile"], "0")
+            self.assertEqual(environment["CUDA_VISIBLE_DEVICES"], "1")
+            self.assertNotIn("FLEXICT2D_CKPT", environment)
+            self.assertNotIn("FLEXICT3D_CKPT", environment)
+            self.assertNotIn("FLEXICT_EXT_DIR", environment)
+            self.assertNotIn("NUM_EPOCHS", environment)
+
+
+class TestInferenceLifecycle(unittest.TestCase):
+    """run_inference with the worker and GPU lock mocked (no GPU, no nnU-Net)."""
+
+    def _setup_infer_job(self, tmp):
+        import nibabel as nib
+        import numpy as np
+
+        dataset_root = Path(tmp) / "dataset"
+        case_dir = _make_case(dataset_root, "case01")
+        image_path = case_dir / "ct.nii.gz"
+        workspace = Path(tmp) / "workspace"
+        # A registered, usable FlexiCT model.
+        model_dir = (workspace / "runtime" / "nnUNet_results"
+                     / "Dataset750_Kidney" / "flexict2d_Trainer__nnUNetPlans__2d")
+        (model_dir / "fold_0").mkdir(parents=True)
+        (model_dir / "fold_0" / "checkpoint_best.pth").write_bytes(b"x")
+        (model_dir / "plans.json").write_text("{}", encoding="utf-8")
+        (model_dir / "dataset.json").write_text("{}", encoding="utf-8")
+        manifest = {
+            "model_id": "flexict_m1", "model_dir": str(model_dir),
+            "configuration": "2d", "trainer": "flexict2d_Trainer",
+            "label_name": "kidney_left", "task_id": "Kidney",
+            "task_name": "Kidney", "dataset_id": 750,
+        }
+        manifest_path = model_dir / "flexict_model_manifest.json"
+        from nnunet_common import write_json_atomic
+
+        write_json_atomic(manifest_path, manifest)
+        source = nib.load(str(image_path))
+        request = {
+            "operation": "infer",
+            "job_id": "infer_test01",
+            "workspace": str(workspace),
+            "model_manifest": str(manifest_path),
+            "image_path": str(image_path),
+            "label_name": "kidney_left",
+            "source_geometry_expected": {
+                "source_shape": list(source.shape[:3]),
+                "source_voxel_to_ras_matrix": source.affine.tolist(),
+            },
+        }
+        request = fp.normalize_flexict_request(request)
+        job_dir = Path(tmp) / "jobs" / request["job_id"]
+        job_dir.mkdir(parents=True)
+        write_json_atomic(job_dir / "request.json", request)
+        write_json_atomic(job_dir / "control.json", {"action": "run"})
+        write_json_atomic(
+            job_dir / "status.json",
+            {"schema_version": fp.SCHEMA_VERSION, "job_id": request["job_id"],
+             "kind": "infer", "status": "launching",
+             "created_at_epoch": time.time(), "updated_at_epoch": time.time()},
+        )
+        return job_dir, workspace, source
+
+    def _fake_worker_factory(self, capture, shape_override=None):
+        """Worker mock: writes a prediction NIfTI on the source grid."""
+        import nibabel as nib
+        import numpy as np
+
+        def fake_worker(stage, params, *args, **kwargs):
+            capture["stage"] = stage
+            capture["params"] = dict(params)
+            if stage != "infer":
+                raise RuntimeError("unexpected stage: {}".format(stage))
+            source = nib.load(str(params["input_path"]))
+            shape = shape_override or source.shape[:3]
+            affine = source.affine
+            prediction = np.zeros(shape, dtype=np.uint8)
+            prediction[2:-2, 2:-2, 2:-2] = 1
+            output = Path(params["output_path"])
+            output.parent.mkdir(parents=True, exist_ok=True)
+            nib.save(nib.Nifti1Image(prediction, affine), str(output))
+            return {"status": "ok", "result": {}}
+
+        return fake_worker
+
+    def test_completed_inference(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir, workspace, source = self._setup_infer_job(tmp)
+            capture = {}
+            with mock.patch.object(
+                    fp, "_spawn_worker",
+                    side_effect=self._fake_worker_factory(capture)), \
+                 mock.patch("flexict_pipeline._acquire_local_gpu",
+                            return_value=None):
+                exit_code = fp.run_inference(job_dir)
+            from nnunet_common import read_json
+
+            self.assertEqual(exit_code, 0)
+            status = read_json(job_dir / "status.json", {}) or {}
+            self.assertEqual(status["status"], "completed")
+            self.assertEqual(status["phase"], "completed")
+            self.assertEqual(status["label_name"], "kidney_left")
+            self.assertEqual(status["model_id"], "flexict_m1")
+            # locked recipe: best checkpoint, no TTA
+            self.assertEqual(capture["stage"], "infer")
+            self.assertEqual(capture["params"]["checkpoint_name"],
+                             "checkpoint_best.pth")
+            self.assertTrue(capture["params"]["disable_tta"])
+            self.assertIn("flexict2d_Trainer", capture["params"]["model_folder"])
+            self.assertEqual(
+                capture["params"]["input_path"],
+                str(job_dir / "input" / "source_image.nii.gz"))
+            self.assertEqual(
+                capture["params"]["output_path"],
+                str(job_dir / "prediction.nii.gz"))
+            # prediction written next to the job on the source grid
+            prediction = job_dir / "prediction.nii.gz"
+            self.assertTrue(prediction.is_file())
+            import nibabel as nib
+            import numpy as np
+
+            result = nib.load(str(prediction))
+            self.assertEqual(tuple(result.shape[:3]), tuple(source.shape[:3]))
+            self.assertTrue(np.allclose(result.affine, source.affine, atol=1e-4))
+            self.assertIn(str(job_dir / "input" / "source_image.nii.gz"),
+                          status.get("inference_image_path") or "")
+
+    def test_grid_mismatch_marks_failure(self):
+        """A prediction on the wrong grid must never reach Mimics."""
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir, workspace, source = self._setup_infer_job(tmp)
+            capture = {}
+            bad_shape = (source.shape[0] + 2,) + tuple(source.shape[1:])
+            with mock.patch.object(
+                    fp, "_spawn_worker",
+                    side_effect=self._fake_worker_factory(
+                        capture, shape_override=bad_shape)), \
+                 mock.patch("flexict_pipeline._acquire_local_gpu",
+                            return_value=None):
+                exit_code = fp.run_inference(job_dir)
+            from nnunet_common import read_json
+
+            self.assertEqual(exit_code, 1)
+            status = read_json(job_dir / "status.json", {}) or {}
+            self.assertEqual(status["status"], "failed")
+            self.assertIn("grid", str(status.get("error") or "").lower())
+
+    def test_stale_source_geometry_rejected_before_gpu(self):
+        """If the on-disk image no longer matches the launch-time geometry,
+        the job fails before any GPU work happens."""
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir, workspace, source = self._setup_infer_job(tmp)
+            request = json.loads(
+                (job_dir / "request.json").read_text(encoding="utf-8"))
+            request["source_geometry_expected"] = {
+                "source_shape": [3, 3, 3],
+                "source_voxel_to_ras_matrix": source.affine.tolist(),
+            }
+            from nnunet_common import write_json_atomic
+
+            write_json_atomic(job_dir / "request.json", request)
+            with mock.patch.object(fp, "_spawn_worker") as never_called, \
+                 mock.patch("flexict_pipeline._acquire_local_gpu",
+                            return_value=None):
+                exit_code = fp.run_inference(job_dir)
+            self.assertFalse(never_called.called)
+            self.assertEqual(exit_code, 1)
+            from nnunet_common import read_json
+
+            status = read_json(job_dir / "status.json", {}) or {}
+            self.assertEqual(status["status"], "failed")
+            self.assertIn("geometry", str(status.get("error") or "").lower())
+
+
+class TestInferJobCreation(unittest.TestCase):
+    def test_create_infer_job_fills_output_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            request = fp.normalize_flexict_request({
+                "operation": "infer",
+                "workspace": str(workspace),
+                "model_manifest": "X:/missing/manifest.json",
+                "image_path": "X:/missing/ct.nii.gz",
+                "label_name": "kidney_left",
+            })
+            launched = {}
+
+            class FakeProcess:
+                pid = 8642
+
+            def fake_popen(command, **kwargs):
+                launched["command"] = command
+                return FakeProcess()
+
+            with mock.patch("flexict_pipeline.subprocess.Popen",
+                            side_effect=fake_popen), \
+                 mock.patch("flexict_pipeline.process_start_marker",
+                            return_value="m"):
+                job = fp.create_flexict_job(request)
+            saved = json.loads(
+                (Path(job["job_dir"]) / "request.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["output_path"],
+                             str(Path(job["job_dir"]) / "prediction.nii.gz"))
+            status = json.loads(
+                (Path(job["job_dir"]) / "status.json").read_text(encoding="utf-8"))
+            self.assertEqual(status["kind"], "infer")
+
+
+class TestMainRouting(unittest.TestCase):
+    def test_operation_infer_routes_to_run_inference(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = Path(tmp) / "job"
+            job_dir.mkdir()
+            from nnunet_common import write_json_atomic
+
+            write_json_atomic(job_dir / "request.json",
+                              {"operation": "infer", "job_id": "x"})
+            with mock.patch.object(fp, "run_inference",
+                                   return_value=0) as infer_mock, \
+                 mock.patch.object(fp, "run_training",
+                                   return_value=0) as train_mock, \
+                 mock.patch("sys.argv",
+                            ["flexict_pipeline.py", "run",
+                             "--job-dir", str(job_dir)]):
+                self.assertEqual(fp.main(), 0)
+            self.assertEqual(infer_mock.call_count, 1)
+            self.assertEqual(train_mock.call_count, 0)
+            self.assertEqual(infer_mock.call_args[0][0], job_dir)
+
+    def test_operation_train_routes_to_run_training(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = Path(tmp) / "job"
+            job_dir.mkdir()
+            from nnunet_common import write_json_atomic
+
+            write_json_atomic(job_dir / "request.json",
+                              {"operation": "train", "job_id": "x"})
+            with mock.patch.object(fp, "run_inference",
+                                   return_value=0) as infer_mock, \
+                 mock.patch.object(fp, "run_training",
+                                   return_value=0) as train_mock, \
+                 mock.patch("sys.argv",
+                            ["flexict_pipeline.py", "run",
+                             "--job-dir", str(job_dir)]):
+                self.assertEqual(fp.main(), 0)
+            self.assertEqual(infer_mock.call_count, 0)
+            self.assertEqual(train_mock.call_count, 1)
+
+
 class TestModelRegistration(unittest.TestCase):
     def test_register_creates_usable_model(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """Nonblocking Mimics entry points for FlexiCT few-shot tasks.
 
-Phase 4 scope: training setup, status viewer, stop. Prediction (Phase 5) and
-active learning (Phase 6) extend this module.
+Training setup, prediction of the active case (result applied as a Mimics
+Mask after grid verification), status viewer, and stop. Active learning
+(Phase 6) extends this module.
 
 Py3.5 constraints: no f-strings, no pathlib, .format() with positional
 indexes only.
@@ -10,8 +11,11 @@ indexes only.
 
 from __future__ import print_function
 
+import json
 import logging
 import os
+import shutil
+import subprocess
 import threading
 import time
 import traceback
@@ -31,6 +35,8 @@ BUTTON_STATUS = "Show Status and Models"
 BUTTON_STOP = "Stop Running Task"
 BUTTON_ACTIVE_LEARNING = "Active Learning Review"
 BUTTON_CANCEL = "Cancel"
+BUTTON_UPDATE = "Update Matching Mask"
+BUTTON_CREATE = "Create New Mask"
 
 _MONITORS = {}
 
@@ -233,6 +239,103 @@ def show_status():
         return 1
 
 
+def _prediction_context():
+    """Capture the launch-time grid contract (verified grid or no start).
+
+    Mirrors nnunet_mimics._prediction_context: the active project must link
+    to its original source image, and the live grid + source geometry must
+    both be readable. They are frozen into the monitor and never
+    reconstructed from mutable project state after inference finishes.
+    """
+    selected = _selected_masks()
+    selected_mask = selected[0] if len(selected) == 1 else None
+    ts_root, case_id, source_path = mimics_mask_apply._resolve_prediction_context()
+    if not case_id or not source_path:
+        raise RuntimeError(
+            "The active project could not be linked to its original image. "
+            "Relink the source image metadata before starting FlexiCT prediction."
+        )
+    target_grid = mimics_mask_apply._active_live_grid_payload()
+    source_geometry = mimics_mask_apply._active_source_geometry_payload()
+    if not target_grid or not source_geometry:
+        raise RuntimeError(
+            "The active image physical grid could not be verified. "
+            "Prediction was not started."
+        )
+    return {
+        "selected_mask_name": (
+            str(getattr(selected_mask, "name", "") or "") if selected_mask else ""
+        ),
+        "case_id": case_id,
+        "ts_root": ts_root,
+        "source_image_path": source_path,
+        "source_geometry_expected": source_geometry,
+        "target_grid": target_grid,
+        "launch_project_path": mimics_mask_apply._current_project_path() or "",
+        "matching_masks": [
+            _mask_snapshot(mask) for mask in _active_image_masks()
+        ],
+    }
+
+
+def _active_image_masks():
+    rows = []
+    try:
+        active_image = mimics.data.images.get_active()
+    except Exception:
+        active_image = None
+    for mask in mimics.data.masks:
+        try:
+            bound = getattr(mask, "image", None)
+            if active_image is not None and bound is not None and bound != active_image:
+                continue
+        except Exception:
+            pass
+        rows.append(mask)
+    return rows
+
+
+def _mask_snapshot(mask):
+    return {
+        "guid": mimics_mask_apply._mask_identity(mask),
+        "name": str(getattr(mask, "name", "") or ""),
+        "pixel_count": int(getattr(mask, "number_of_pixels", 0) or 0),
+    }
+
+
+def start_prediction():
+    try:
+        context = _prediction_context()
+        return _start_prediction_with_context(context)
+    except Exception as exc:
+        _log(logging.ERROR, "FlexiCT prediction could not start: {0}".format(exc))
+        mimics.dialogs.message_box(
+            "FlexiCT prediction could not start.\n\n{0}".format(exc),
+            title=TITLE,
+            ui_blocking=False,
+        )
+        return 1
+
+
+def _start_prediction_with_context(context):
+    pid = _launch_gui(
+        "flexict_prediction_setup_ui.py", context, "predict_setup"
+    )
+    # Preserve the launch-time grids on the in-memory monitor. They must not
+    # be reconstructed from mutable project state after inference finishes.
+    for row in _MONITORS.values():
+        if int(row.get("controller_pid") or 0) == int(pid):
+            row["prediction_context"] = context
+            break
+    _log(
+        logging.INFO,
+        "FlexiCT model selection opened outside Mimics for case {0}. PID: {1}.".format(
+            context["case_id"], pid
+        ),
+    )
+    return 0
+
+
 def _job_status_paths():
     jobs = os.path.join(_workspace(), "jobs")
     rows = []
@@ -257,6 +360,38 @@ def _job_status_paths():
 def stop_running_task():
     rows = _job_status_paths()
     if not rows:
+        pending = [
+            monitor
+            for monitor in _MONITORS.values()
+            if str(monitor.get("kind") or "") == "infer"
+        ]
+        if pending:
+            pending.sort(
+                key=lambda row: float(row.get("deadline") or 0), reverse=True
+            )
+            monitor = pending[0]
+            answer = mimics.dialogs.question_box(
+                message=(
+                    "Cancel the pending FlexiCT result conversion/application?\n\n"
+                    "The completed prediction file is kept, but it will not be "
+                    "applied automatically."
+                ),
+                buttons=BUTTON_STOP + ";" + BUTTON_CANCEL,
+                title=TITLE,
+                ui_blocking=True,
+            )
+            if answer == BUTTON_STOP:
+                status = _read_json(monitor.get("status_path"), {}) or {}
+                status["application_cancelled"] = True
+                status["application_cancelled_at_epoch"] = time.time()
+                status["updated_at_epoch"] = time.time()
+                try:
+                    _write_json(monitor.get("status_path"), status)
+                except Exception:
+                    pass
+                _stop_monitor(monitor["monitor_key"])
+                _log(logging.INFO, "Pending FlexiCT result application was cancelled.")
+            return 0
         mimics.dialogs.message_box(
             "No running FlexiCT task was found.", title=TITLE, ui_blocking=False
         )
@@ -358,18 +493,44 @@ def _monitor_tick_locked(monitor):
         monitor["deadline"] = time.time() + 14 * 24 * 60 * 60
         monitor["last_line"] = ""
         return
-    if kind == "train_setup":
+    if kind == "predict_setup" and state == "prediction_started":
+        context = monitor.get("prediction_context") or {}
+        monitor.update(context)
+        monitor["kind"] = "infer"
+        monitor["status_path"] = status["prediction_status_path"]
+        monitor["job_dir"] = os.path.dirname(status["prediction_status_path"])
+        monitor["controller_pid"] = None
+        monitor["deadline"] = time.time() + 24 * 60 * 60
+        monitor["last_line"] = ""
+        monitor["bridge_started"] = False
+        return
+    if kind in ("train_setup", "predict_setup"):
         if state in ("cancelled", "failed"):
             _stop_monitor(key)
             if state == "failed":
                 mimics.dialogs.message_box(
-                    "FlexiCT training setup failed.\n\n{0}".format(
+                    "FlexiCT setup failed.\n\n{0}".format(
                         status.get("error") or "Unknown error"
                     ),
                     title=TITLE,
                     ui_blocking=False,
                 )
         return
+    if kind in ("train", "infer") and _managed_job_process_stopped(status):
+        status.update(
+            {
+                "status": "failed",
+                "phase": "controller_stopped",
+                "message": (
+                    "The FlexiCT background process stopped before recording "
+                    "completion."
+                ),
+                "error": "No FlexiCT controller or worker process is running.",
+                "updated_at_epoch": time.time(),
+            }
+        )
+        _write_json(monitor["status_path"], status)
+        state = "failed"
     if kind == "train":
         if state in ("completed", "failed", "cancelled", "abandoned"):
             _stop_monitor(key)
@@ -386,11 +547,455 @@ def _monitor_tick_locked(monitor):
                 )
             mimics.dialogs.message_box(message, title=TITLE, ui_blocking=False)
         return
+    if kind != "infer":
+        return
+    if bool(monitor.get("application_cancelled")):
+        _stop_monitor(key)
+        return
+    if state in ("failed", "cancelled"):
+        _stop_monitor(key)
+        mimics.dialogs.message_box(
+            "FlexiCT prediction {0}.\n\n{1}".format(
+                state, status.get("error") or ""
+            ),
+            title=TITLE,
+            ui_blocking=False,
+        )
+        return
+    if state != "completed":
+        return
+    target_open, reason = _target_open(monitor)
+    if not target_open:
+        due, elapsed = runtime_common.progress_notice_due(
+            monitor,
+            "flexict_apply_target",
+            detail=reason,
+            interval_seconds=60.0,
+            initial_delay_seconds=0.0,
+        )
+        if due:
+            monitor["waiting_logged"] = True
+            _log(
+                logging.INFO,
+                "FlexiCT result is ready but waiting{0}: {1} Use Stop "
+                "Running Task to discard the pending result.".format(
+                    " ({0}s)".format(int(elapsed)) if elapsed >= 1.0 else "",
+                    reason,
+                ),
+            )
+        return
+    runtime_common.clear_progress_notice(monitor, "flexict_apply_target")
+    if not monitor.get("bridge_started"):
+        _launch_bridge(monitor, status)
+        return
+    bridge = _read_json(monitor.get("bridge_result_path"), None)
+    if bridge is None:
+        return
+    if bridge.get("status") != "ok":
+        _stop_monitor(key)
+        mimics.dialogs.message_box(
+            "FlexiCT result conversion failed.\n\n{0}".format(
+                bridge.get("error") or "Unknown error"
+            ),
+            title=TITLE,
+            ui_blocking=False,
+        )
+        return
+    try:
+        if "apply_queue" not in monitor:
+            _prepare_apply_queue(monitor, bridge)
+        more = _apply_one(monitor)
+        if more:
+            return
+    except Exception as exc:
+        _stop_monitor(key)
+        mimics.dialogs.message_box(
+            "Could not apply the FlexiCT prediction.\n\n{0}".format(exc),
+            title=TITLE,
+            ui_blocking=False,
+        )
+        return
+    applied = list(monitor.get("applied_masks") or [])
+    try:
+        shutil.rmtree(monitor.get("bridge_root"), ignore_errors=True)
+    except Exception:
+        pass
+    latest = _read_json(monitor.get("status_path"), {}) or {}
+    latest["applied_to_mimics"] = True
+    latest["applied_mask_names"] = applied
+    latest["applied_at_epoch"] = time.time()
+    application = latest.get("mimics_application") or {}
+    application["state"] = "completed"
+    application["completed_at_epoch"] = time.time()
+    latest["mimics_application"] = application
+    latest["application_phase"] = "completed"
+    latest["updated_at_epoch"] = time.time()
+    try:
+        _write_json(monitor.get("status_path"), latest)
+    except Exception:
+        pass
+    _stop_monitor(key)
+    _log(
+        logging.INFO,
+        "FlexiCT result applied to {0} Mask(s): {1}.".format(
+            len(applied), ", ".join(applied)
+        ),
+    )
+
+
+def _managed_job_process_stopped(status):
+    state = str(status.get("status") or "").lower()
+    if state in (
+        "completed", "failed", "cancelled", "abandoned"
+    ):
+        return False
+    try:
+        age = time.time() - float(
+            status.get("updated_at_epoch") or status.get("created_at_epoch") or 0
+        )
+    except Exception:
+        age = 0.0
+    if age < 10.0:
+        return False
+    pids = []
+    for name in ("worker_pid", "controller_pid", "launcher_pid"):
+        try:
+            pid = int(status.get(name) or 0)
+        except Exception:
+            pid = 0
+        if pid > 0 and pid not in pids:
+            pids.append(pid)
+    return bool(pids and not any(runtime_common.process_exists(pid) for pid in pids))
+
+
+def _target_open(monitor):
+    return mimics_mask_apply._monitor_target_is_open(monitor)
+
+
+def _launch_bridge(monitor, status):
+    """Convert the prediction NIfTI to a grid-matched .u8 buffer.
+
+    Zero-change reuse of mimics_bridge.py's prepare_masks_for_grid action:
+    resample onto the frozen launch-time target grid, then map to the Mimics
+    voxel buffer with the configured axes/flips.
+    """
+    bridge_root = os.path.join(
+        monitor["job_dir"], "mimics_apply_" + uuid.uuid4().hex[:8]
+    )
+    buffers = os.path.join(bridge_root, "buffers")
+    if not os.path.isdir(bridge_root):
+        os.makedirs(bridge_root)
+    axes, flips = mimics_mask_apply._buffer_mapping_from_config(
+        mimics_mask_apply._config()
+    )
+    mask_name = "FlexiCT {0}".format(status.get("label_name") or "Prediction")
+    params = {
+        "action": "prepare_masks_for_grid",
+        "masks": [{"name": "flexict_prediction", "mask_path": status["output_path"]}],
+        "buffers_out": buffers,
+        "target_shape": monitor["target_grid"]["target_shape"],
+        "target_voxel_to_ras_matrix": monitor["target_grid"]["target_voxel_to_ras_matrix"],
+        "source_voxel_to_ras_matrix": monitor.get(
+            "source_geometry_expected", {}
+        ).get("source_voxel_to_ras_matrix"),
+        "axes": axes,
+        "flips": flips,
+    }
+    input_path = os.path.join(bridge_root, "input.json")
+    result_path = os.path.join(bridge_root, "result.json")
+    _write_json(input_path, params)
+    with open(input_path, "rb") as stdin_handle:
+        process = subprocess.Popen(
+            [_external_python(), os.path.join(_project_root(), "mimics_bridge.py")],
+            stdin=stdin_handle,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            **runtime_common.background_process_kwargs()
+        )
+    monitor["bridge_started"] = True
+    monitor["bridge_root"] = bridge_root
+    monitor["bridge_result_path"] = result_path
+    monitor["bridge_pid"] = process.pid
+    monitor["bridge_process"] = process
+    monitor["bridge_mask_name"] = mask_name
+
+    def wait_bridge():
+        try:
+            stdout, stderr = process.communicate(timeout=600)
+            if process.returncode == 0:
+                result = json.loads(stdout.decode("utf-8"))
+            else:
+                result = {
+                    "status": "error",
+                    "error": stderr.decode("utf-8", "replace")[-2000:],
+                }
+        except subprocess.TimeoutExpired:
+            try:
+                runtime_common.terminate_process_async(
+                    process=process, graceful_seconds=0.0
+                )
+            except Exception:
+                pass
+            result = {
+                "status": "error",
+                "error": "Prediction conversion timed out after 600 seconds.",
+            }
+        except Exception as exc:
+            result = {"status": "error", "error": str(exc)}
+        try:
+            _write_json(result_path, result)
+        except Exception:
+            pass
+
+    thread = threading.Thread(target=wait_bridge)
+    thread.daemon = True
+    thread.start()
+
+
+def _matching_update_mask(monitor):
+    """Find the single unchanged launch-time Mask matching the label name.
+
+    FlexiCT predicts one binary target; the update destination is the Mask
+    whose name matches the model's label_name (or the selected Mask at
+    launch). Changed or ambiguous Masks fall back to a fresh copy.
+    """
+    label_name = str(monitor.get("label_name") or "")
+    selected = str(monitor.get("selected_mask_name") or "")
+    wanted = set(
+        value.strip().lower() for value in (label_name, selected)
+        if str(value).strip()
+    )
+    if not wanted:
+        return None
+    candidates = [
+        mask
+        for mask in _active_image_masks()
+        if str(getattr(mask, "name", "") or "").strip().lower() in wanted
+    ]
+    if len(candidates) != 1:
+        if len(candidates) > 1:
+            _log(
+                logging.WARNING,
+                "More than one active-image Mask matches '{0}'; creating a copy instead.".format(
+                    label_name or selected
+                ),
+            )
+        return None
+    mask = candidates[0]
+    launch = None
+    for row in monitor.get("matching_masks") or []:
+        if str(row.get("guid") or "") == mimics_mask_apply._mask_identity(mask):
+            launch = row
+            break
+    if launch is None:
+        _log(
+            logging.WARNING,
+            "Mask '{0}' was not present when prediction started; creating a copy instead.".format(
+                getattr(mask, "name", label_name)
+            ),
+        )
+        return None
+    current = int(getattr(mask, "number_of_pixels", 0) or 0)
+    if current != int(launch.get("pixel_count") or 0):
+        _log(
+            logging.WARNING,
+            "Mask '{0}' changed while prediction was running; creating a copy instead.".format(
+                getattr(mask, "name", label_name)
+            ),
+        )
+        return None
+    return mask
+
+
+def _unique_application_mask_name(base_name):
+    names = set(
+        str(getattr(mask, "name", "") or "") for mask in mimics.data.masks
+    )
+    if base_name not in names:
+        return base_name
+    index = 2
+    while "{0} {1}".format(base_name, index) in names:
+        index += 1
+    return "{0} {1}".format(base_name, index)
+
+
+def _application_state(monitor):
+    status_path = monitor.get("status_path")
+    latest = _read_json(status_path, {}) if status_path else {}
+    application = (latest or {}).get("mimics_application") or {}
+    if not isinstance(application, dict):
+        application = {}
+    application.setdefault("schema_version", "mimics_flexict_application.v1")
+    application.setdefault("records", {})
+    return application
+
+
+def _persist_application_state(monitor, application):
+    monitor["mimics_application"] = application
+    status_path = monitor.get("status_path")
+    if not status_path:
+        return
+    latest = _read_json(status_path, {}) or {}
+    latest["mimics_application"] = application
+    latest["application_phase"] = str(application.get("state") or "applying")
+    latest["updated_at_epoch"] = time.time()
+    _write_json(status_path, latest)
+
+
+def _prepare_apply_queue(monitor, bridge_result):
+    """One buffer, one apply step; ask update-vs-create only once."""
+    application = _application_state(monitor)
+    mode = str(application.get("mode") or "")
+    if mode not in ("update", "create"):
+        answer = mimics.dialogs.question_box(
+            message=(
+                "FlexiCT prediction is complete and ready to apply.\n\n"
+                "Update Matching Mask replaces the unchanged Mask matching this "
+                "target; Create New Mask keeps all existing Masks."
+            ),
+            buttons=BUTTON_UPDATE + ";" + BUTTON_CREATE,
+            title="FlexiCT Prediction Ready",
+            ui_blocking=True,
+        )
+        mode = "update" if answer == BUTTON_UPDATE else "create"
+        application["mode"] = mode
+        application["created_at_epoch"] = time.time()
+    application["state"] = "applying"
+    records = application.get("records") or {}
+    application["records"] = records
+    label_name = str(monitor.get("label_name") or "Prediction")
+    record = records.get("1") or {}
+    already_applied = []
+    buffer_row = None
+    for row in bridge_result.get("masks") or []:
+        if int(row.get("foreground_voxels") or 0) > 0:
+            buffer_row = row
+            break
+    if buffer_row is None:
+        raise RuntimeError("The prediction is empty (no foreground voxels).")
+    if str(record.get("state") or "") == "applied":
+        already_applied.append(str(record.get("target_name") or ""))
+    else:
+        if not record:
+            record = {
+                "label_name": label_name,
+                "state": "pending",
+            }
+            mask = (
+                _matching_update_mask(monitor)
+                if mode == "update" else None
+            )
+            if mask is not None:
+                record["target_kind"] = "update"
+                record["target_name"] = str(getattr(mask, "name", "") or label_name)
+                record["target_guid"] = mimics_mask_apply._mask_identity(mask)
+                record["fallback_name"] = _unique_application_mask_name(
+                    "FlexiCT " + label_name
+                )
+            else:
+                record["target_kind"] = "create"
+                record["target_name"] = _unique_application_mask_name(
+                    "FlexiCT " + label_name
+                )
+                record["target_guid"] = ""
+                record["fallback_name"] = ""
+            records["1"] = record
+        monitor["apply_queue"] = [{"buffer": buffer_row, "mode": mode}]
+    monitor["applied_masks"] = [name for name in already_applied if name]
+    _persist_application_state(monitor, application)
+
+
+def _mask_from_application_record(record):
+    target_kind = str(record.get("target_kind") or "create")
+    target_guid = str(record.get("target_guid") or "")
+    target_name = str(record.get("target_name") or "")
+    for mask in _active_image_masks():
+        if target_kind == "update" and target_guid:
+            if mimics_mask_apply._mask_identity(mask) == target_guid:
+                return mask
+        elif target_kind == "create" and str(
+            getattr(mask, "name", "") or ""
+        ) == target_name:
+            return mask
+    return None
+
+
+def _apply_one(monitor):
+    queue = monitor.get("apply_queue") or []
+    if not queue:
+        return False
+    item = queue[0]
+    application = monitor.get("mimics_application") or _application_state(monitor)
+    records = application.get("records") or {}
+    record = records.get("1") or {}
+    record["state"] = "applying"
+    record["attempted_at_epoch"] = time.time()
+    records["1"] = record
+    application["records"] = records
+    _persist_application_state(monitor, application)
+    mask = _mask_from_application_record(record)
+    if mask is None and str(record.get("target_kind") or "") == "update":
+        record["target_kind"] = "create"
+        record["target_name"] = str(
+            record.get("fallback_name")
+            or _unique_application_mask_name(
+                "FlexiCT " + str(record.get("label_name") or "Prediction")
+            )
+        )
+        record["target_guid"] = ""
+        _persist_application_state(monitor, application)
+    if mask is None:
+        mask = mimics_mask_apply._new_prediction_mask(record["target_name"])
+        record["target_name"] = str(
+            getattr(mask, "name", "") or record["target_name"]
+        )
+        record["target_guid"] = mimics_mask_apply._mask_identity(mask)
+        _persist_application_state(monitor, application)
+    row = item["buffer"]
+    mimics_mask_apply._set_mask_from_u8(
+        mask,
+        row["output_path"],
+        row["mimics_shape"],
+        "Apply FlexiCT Prediction",
+    )
+    mask_name = str(getattr(mask, "name", "") or "")
+    record["state"] = "applied"
+    record["target_name"] = mask_name
+    record["target_guid"] = mimics_mask_apply._mask_identity(mask)
+    record["applied_at_epoch"] = time.time()
+    _persist_application_state(monitor, application)
+    monitor["applied_masks"].append(mask_name)
+    queue.pop(0)
+    return False  # single label: one buffer, done
 
 
 def _monitor_tick(monitor):
     if monitor.get("busy"):
         return
+    token = None
+    if str(monitor.get("kind") or "") == "infer":
+        token = runtime_common.try_acquire_local_operation(
+            "mask_buffer_access", "FlexiCT result monitor"
+        )
+        if not token:
+            owner = runtime_common.active_local_operation("mask_buffer_access") or {}
+            owner_text = str(owner.get("owner") or "another Mask operation")
+            due, elapsed = runtime_common.progress_notice_due(
+                monitor,
+                "flexict_buffer_wait",
+                detail=owner_text,
+                interval_seconds=60.0,
+                initial_delay_seconds=5.0,
+            )
+            if due:
+                _log(
+                    logging.INFO,
+                    "FlexiCT result handling is waiting for {0} ({1}s). Use "
+                    "Stop Running Task if the pending result should be "
+                    "discarded.".format(owner_text, int(elapsed)),
+                )
+            return
+        runtime_common.clear_progress_notice(monitor, "flexict_buffer_wait")
     monitor["busy"] = True
     try:
         _monitor_tick_locked(monitor)
@@ -401,12 +1006,25 @@ def _monitor_tick(monitor):
         )
     finally:
         monitor["busy"] = False
+        if token is not None:
+            runtime_common.release_local_operation("mask_buffer_access", token)
 
 
 def _stop_monitor(key):
     monitor = _MONITORS.pop(key, None)
     if not monitor:
         return
+    bridge_process = monitor.get("bridge_process")
+    bridge_pid = monitor.get("bridge_pid")
+    if bridge_process is not None and bridge_process.poll() is None:
+        try:
+            runtime_common.terminate_process_async(
+                process=bridge_process,
+                pid=bridge_pid,
+                graceful_seconds=0.5,
+            )
+        except Exception:
+            pass
     timer = monitor.get("timer")
     if timer is not None:
         try:
@@ -479,17 +1097,75 @@ def _start_monitor(monitor, seconds):
         return False
 
 
+def _resume_pending_inference_monitors():
+    """Restart monitors for completed-but-unapplied inference jobs.
+
+    If Mimics was closed while a prediction was waiting to be applied (for
+    example the target project was closed), this revives the apply monitor
+    on the next entry so the result is offered instead of silently lost.
+    """
+    jobs = os.path.join(_workspace(), "jobs")
+    if not os.path.isdir(jobs):
+        return
+    try:
+        names = os.listdir(jobs)
+    except OSError:
+        return
+    for name in names:
+        status_path = os.path.join(jobs, name, "status.json")
+        status = _read_json(status_path, {}) or {}
+        if str(status.get("kind") or "") != "infer":
+            continue
+        if bool(status.get("applied_to_mimics")):
+            continue
+        if bool(status.get("application_cancelled")):
+            continue
+        state = str(status.get("status") or "")
+        if state in ("failed", "cancelled"):
+            continue
+        key = str(status.get("job_id") or name)
+        if key in _MONITORS:
+            continue
+        request = _read_json(os.path.join(jobs, name, "request.json"), {}) or {}
+        target_grid = request.get("target_grid") or {}
+        source_geometry = request.get("source_geometry_expected") or {}
+        if not target_grid or not source_geometry:
+            continue
+        monitor = {
+            "monitor_key": key,
+            "kind": "infer",
+            "status_path": status_path,
+            "job_dir": os.path.join(jobs, name),
+            "deadline": time.time() + 24 * 60 * 60,
+            "last_line": "",
+            "bridge_started": False,
+            "target_grid": target_grid,
+            "source_geometry_expected": source_geometry,
+            "label_name": request.get("label_name") or status.get("label_name") or "",
+            "selected_mask_name": request.get("selected_mask_name") or "",
+            "ts_root": request.get("ts_root") or "",
+            "case_id": request.get("case_id") or "",
+            "launch_project_path": request.get("launch_project_path") or "",
+            "matching_masks": request.get("matching_masks") or [],
+        }
+        _start_monitor(monitor, 1.0)
+
+
 def main(action=None):
+    _resume_pending_inference_monitors()
     if action == BUTTON_TRAIN:
         return start_training()
     if action == BUTTON_PREDICT:
-        # Phase 5: prediction entry. Placeholder until the prediction UI lands.
-        mimics.dialogs.message_box(
-            "FlexiCT prediction is not available yet in this build.",
-            title=TITLE,
-            ui_blocking=False,
-        )
-        return 1
+        try:
+            return _start_prediction_with_context(_prediction_context())
+        except Exception as exc:
+            _log(logging.ERROR, "FlexiCT prediction could not start: {0}".format(exc))
+            mimics.dialogs.message_box(
+                "FlexiCT prediction could not start.\n\n{0}".format(exc),
+                title=TITLE,
+                ui_blocking=False,
+            )
+            return 1
     if action == BUTTON_STATUS:
         return show_status()
     if action == BUTTON_STOP:
