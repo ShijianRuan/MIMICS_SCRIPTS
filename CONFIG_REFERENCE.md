@@ -153,6 +153,29 @@ terminal:
 python tools/nninteractive_finetune_pipeline.py diagnose --job-dir <job folder>
 ```
 
+## `flexict_config.json`
+
+Controls the FlexiCT few-shot training pipeline (ViT backbone fine-tuning on
+a handful of annotated cases, model registry, and job management). The
+training recipe itself (optimizer, learning rates, batch size, fp32, TTA) is
+locked to the validated few-shot configuration and is not configurable here.
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `workspace_dir` | `"flexict_models"` | FlexiCT workspace root (jobs, runtime nnU-Net folders, model registry). Relative paths resolve against the project root. |
+| `flexict_dir` | `"integrations/flexict-finetune"` | The standalone FlexiCT integration repo (backbone, trainers, uncertainty tooling). |
+| `pretrained_weights_dir` | `""` | Optional absolute override for the pretrained FlexiCT weights (needs `flexict_2d/model.safetensors` and `flexict_3d/model.safetensors`). Empty = use `integrations/flexict-finetune/weights/`. |
+| `default_configuration` | `"auto"` | `2d`, `3d_fullres`, `pair` (2D+3D for active learning), or `auto` (<16GB GPU → 2D, otherwise pair). |
+| `default_epochs` | `150` | Validated few-shot epoch count. |
+| `default_mirror_disable_axes` | `""` | Mirror-augmentation axes to disable; `"1"` for single-sided organs (one kidney). |
+| `default_val_cases` | `3` | Default held-out validation cases (best-checkpoint selection). |
+| `dataset_id_first` | `750` | First id of the FlexiCT dataset band (750-799, kept apart from nnU-Net's 701+). |
+| `default_uncertainty_method` | `"disagreement"` | Active-learning uncertainty method (2D+3D prediction disagreement). |
+| `gpu_lock_timeout_seconds` | `86400` | How long a queued job waits for the shared GPU before failing. |
+| `label_export_timeout_seconds` | `7200` | Deadline for the background-Mimics label export stage. |
+| `job_retention_days` | `30` | Terminal job folder retention before cleanup (0 disables sweeping). |
+| `status_poll_seconds` | `1.0` | Job-status polling interval. |
+
 ## Environment Variables
 
 ### Executables and Paths

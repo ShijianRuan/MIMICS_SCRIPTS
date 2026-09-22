@@ -2942,6 +2942,11 @@ class TestStopBackgroundServices(unittest.TestCase):
             "nnunet_training_setup_ui.py",
             "nnunet_prediction_setup_ui.py",
             "nnunet_status_viewer.py",
+            "flexict_pipeline.py",
+            "flexict_training_setup_ui.py",
+            "flexict_prediction_setup_ui.py",
+            "flexict_active_learning_ui.py",
+            "flexict_status_viewer.py",
             "io_path_setup_ui.py",
             "nninteractive.inference.server.main",
             "setup_env.py",
@@ -6878,6 +6883,12 @@ class TestNewFeatures(unittest.TestCase):
         ):
             source = Path(PROJECT_ROOT, relative).read_text(encoding="utf-8")
             self.assertIn("BELOW_NORMAL_PRIORITY_CLASS", source, relative)
+        # flexict_pipeline delegates to nnunet_jobs.hidden_process_kwargs
+        # instead of embedding the flag itself.
+        flexict_source = Path(
+            PROJECT_ROOT, "tools/flexict_pipeline.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("hidden_process_kwargs", flexict_source)
         if os.name == "nt":
             # pipeline_common centralizes child-process spawning - verify the
             # behavior rather than the implementation string.

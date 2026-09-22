@@ -163,6 +163,17 @@ def _collect_registry_rows() -> dict:
             )
         except Exception:
             rows["nninteractive_task_registry.json"] = {"error": "unreadable"}
+    # FlexiCT model registry lives in its own workspace folder.
+    try:
+        from tools.flexict_common import workspace_root
+
+        flexict_registry = workspace_root() / "registry.json"
+        if flexict_registry.is_file():
+            rows["flexict_registry.json"] = json.loads(
+                flexict_registry.read_text(encoding="utf-8")
+            )
+    except Exception:
+        pass
     return rows
 
 
