@@ -675,6 +675,243 @@ class TestInferJobCreation(unittest.TestCase):
             self.assertEqual(status["kind"], "infer")
 
 
+class TestResolveFlexictPair(unittest.TestCase):
+    def test_explicit_manifests_win(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            model_dir = workspace / "models" / "m2"
+            (model_dir / "fold_0").mkdir(parents=True)
+            (model_dir / "fold_0" / "checkpoint_best.pth").write_bytes(b"x")
+            (model_dir / "plans.json").write_text("{}", encoding="utf-8")
+            (model_dir / "dataset.json").write_text("{}", encoding="utf-8")
+            manifest_2d = {
+                "model_id": "m2d", "model_dir": str(model_dir),
+                "configuration": "2d",
+            }
+            manifest_3d = {
+                "model_id": "m3d", "model_dir": str(model_dir),
+                "configuration": "3d_fullres",
+            }
+            from nnunet_common import write_json_atomic
+
+            path_2d = workspace / "m2d.json"
+            path_3d = workspace / "m3d.json"
+            write_json_atomic(path_2d, manifest_2d)
+            write_json_atomic(path_3d, manifest_3d)
+            pair = fp._resolve_flexict_pair(
+                {"model_manifest_2d": str(path_2d),
+                 "model_manifest_3d": str(path_3d)},
+                workspace,
+            )
+            self.assertEqual(pair["2d"]["model_id"], "m2d")
+            self.assertEqual(pair["3d_fullres"]["model_id"], "m3d")
+
+    def test_one_manifest_only_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            path = workspace / "m2d.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            from nnunet_common import write_json_atomic
+
+            write_json_atomic(path, {"configuration": "2d"})
+            with self.assertRaises(ValueError):
+                fp._resolve_flexict_pair(
+                    {"model_manifest_2d": str(path)}, workspace)
+
+    def test_registry_pair_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            for configuration in ("2d", "3d_fullres"):
+                model_dir = (workspace / "models" / configuration)
+                (model_dir / "fold_0").mkdir(parents=True)
+                (model_dir / "fold_0" / "checkpoint_best.pth").write_bytes(b"x")
+                (model_dir / "plans.json").write_text("{}", encoding="utf-8")
+                (model_dir / "dataset.json").write_text("{}", encoding="utf-8")
+            from nnunet_common import write_json_atomic
+
+            write_json_atomic(workspace / "registry.json", {
+                "schema_version": fc.SCHEMA_VERSION,
+                "models": [
+                    {"model_id": "p2d", "model_dir": str(
+                        workspace / "models" / "2d"),
+                     "configuration": "2d", "pair_id": "pairA",
+                     "created_at_epoch": 1.0},
+                    {"model_id": "p3d", "model_dir": str(
+                        workspace / "models" / "3d_fullres"),
+                     "configuration": "3d_fullres", "pair_id": "pairA",
+                     "created_at_epoch": 2.0},
+                ],
+            })
+            pair = fp._resolve_flexict_pair({}, workspace)
+            self.assertEqual(pair["2d"]["model_id"], "p2d")
+            self.assertEqual(pair["3d_fullres"]["model_id"], "p3d")
+
+    def test_no_pair_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(RuntimeError):
+                fp._resolve_flexict_pair({}, Path(tmp) / "workspace")
+
+
+class TestActiveLearningLifecycle(unittest.TestCase):
+    """run_active_learning with workers + uncertainty mocked where heavy."""
+
+    def _setup_al_job(self, tmp, cases_count=3):
+        dataset_root = Path(tmp) / "pool"
+        dataset_root.mkdir(parents=True, exist_ok=True)
+        cases = []
+        for index in range(cases_count):
+            case_id = "case{:02d}".format(index)
+            _make_case(dataset_root, case_id)
+            cases.append(case_id)
+        workspace = Path(tmp) / "workspace"
+        # A registered pair.
+        manifests = {}
+        for configuration in ("2d", "3d_fullres"):
+            model_dir = (
+                workspace / "runtime" / "nnUNet_results"
+                / "Dataset750_Kidney" / "flexict{}_Trainer__nnUNetPlans__{}".format(
+                    "2d" if configuration == "2d" else "3d",
+                    configuration))
+            (model_dir / "fold_0").mkdir(parents=True)
+            (model_dir / "fold_0" / "checkpoint_best.pth").write_bytes(b"x")
+            (model_dir / "plans.json").write_text("{}", encoding="utf-8")
+            (model_dir / "dataset.json").write_text("{}", encoding="utf-8")
+            manifests[configuration] = model_dir / "flexict_model_manifest.json"
+        from nnunet_common import write_json_atomic
+
+        for configuration, manifest_path in manifests.items():
+            write_json_atomic(manifest_path, {
+                "model_id": "m_{}".format(configuration),
+                "model_dir": str(manifest_path.parent),
+                "configuration": configuration,
+                "trainer": "flexict2d_Trainer" if configuration == "2d"
+                else "flexict3d_Trainer",
+                "label_name": "kidney_left",
+                "task_id": "Kidney", "task_name": "Kidney",
+            })
+        request = fp.normalize_flexict_request({
+            "operation": "active_learning",
+            "workspace": str(workspace),
+            "dataset_root": str(dataset_root),
+            "label_name": "kidney_left",
+            "model_manifest_2d": str(manifests["2d"]),
+            "model_manifest_3d": str(manifests["3d_fullres"]),
+        })
+        job_dir = Path(tmp) / "jobs" / request["job_id"]
+        job_dir.mkdir(parents=True)
+        write_json_atomic(job_dir / "request.json", request)
+        write_json_atomic(job_dir / "control.json", {"action": "run"})
+        write_json_atomic(
+            job_dir / "status.json",
+            {"schema_version": fp.SCHEMA_VERSION, "job_id": request["job_id"],
+             "kind": "active_learning", "status": "launching",
+             "created_at_epoch": time.time(), "updated_at_epoch": time.time()},
+        )
+        return job_dir, workspace, cases
+
+    def _fake_predict_worker(self, capture):
+        import nibabel as nib
+        import numpy as np
+
+        def fake_worker(stage, params, *args, **kwargs):
+            if stage != "infer":
+                raise RuntimeError("unexpected stage {}".format(stage))
+            capture.append(dict(params))
+            source_dir = Path(params["input_path"])
+            output = Path(params["output_path"])
+            output.mkdir(parents=True, exist_ok=True)
+            model_folder = Path(params["model_folder"])
+            configuration = "2d" if "2d" in model_folder.name else "3d_fullres"
+            for image_path in sorted(source_dir.glob("*.nii.gz")):
+                source = nib.load(str(image_path))
+                prediction = np.zeros(source.shape[:3], dtype=np.uint8)
+                if configuration == "2d":
+                    prediction[2:-2, 2:-2, 2:-2] = 1
+                else:
+                    prediction[1:-1, 1:-1, 1:-1] = 1  # disagrees with 2D
+                nib.save(nib.Nifti1Image(prediction, source.affine),
+                         str(output / image_path.name))
+            return {"status": "ok", "result": {}}
+
+        return fake_worker
+
+    def test_completed_al_lifecycle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir, workspace, cases = self._setup_al_job(tmp)
+            capture = []
+            with mock.patch.object(
+                    fp, "_spawn_worker",
+                    side_effect=self._fake_predict_worker(capture)), \
+                 mock.patch("flexict_pipeline._acquire_local_gpu",
+                            return_value=None):
+                exit_code = fp.run_active_learning(job_dir)
+            self.assertEqual(exit_code, 0)
+            from nnunet_common import read_json
+
+            status = read_json(job_dir / "status.json", {}) or {}
+            self.assertEqual(status["status"], "completed")
+            self.assertEqual(status["phase"], "completed")
+            self.assertEqual(status["uncertainty_method"], "disagreement")
+            # both pair ends ran with the locked recipe
+            self.assertEqual(len(capture), 2)
+            for params in capture:
+                self.assertEqual(params["checkpoint_name"], "checkpoint_best.pth")
+                self.assertTrue(params["disable_tta"])
+            # ranking sorted descending by integrated score
+            ranking = status.get("ranking") or []
+            self.assertEqual(len(ranking), len(cases))
+            scores = [row["integrated"] for row in ranking]
+            self.assertEqual(scores, sorted(scores, reverse=True))
+            self.assertEqual(status["top_case"], ranking[0]["case"])
+            # uncertainty artifacts on disk
+            uncertainty_dir = job_dir / "uncertainty"
+            self.assertTrue((uncertainty_dir / "ranking.csv").is_file())
+            bands = status.get("uncertainty_bands") or {}
+            # a 2-model disagreement pair can only reach level 5 on the x10
+            # scale, so the high threshold clamps to the max present level
+            self.assertEqual(bands["high_threshold"], 5)
+            self.assertEqual(bands["moderate_threshold"], 3)
+            # both bands written for every case (2D/3D predictions disagree)
+            self.assertEqual(bands["written"]["moderate"], len(cases))
+            self.assertEqual(bands["written"]["high"], len(cases))
+            # per-case source geometry recorded for the overlay contract
+            geometries = read_json(
+                job_dir / "input_geometries.json", {}) or {}
+            for case_id in cases:
+                self.assertIn(case_id, geometries.get("cases") or {})
+
+    def test_al_fails_without_pair(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_root = Path(tmp) / "pool"
+            _make_case(dataset_root, "case00")
+            request = fp.normalize_flexict_request({
+                "operation": "active_learning",
+                "workspace": str(Path(tmp) / "workspace"),
+                "dataset_root": str(dataset_root),
+                "label_name": "kidney_left",
+            })
+            job_dir = Path(tmp) / "jobs" / request["job_id"]
+            job_dir.mkdir(parents=True)
+            from nnunet_common import write_json_atomic
+
+            write_json_atomic(job_dir / "request.json", request)
+            write_json_atomic(job_dir / "control.json", {"action": "run"})
+            write_json_atomic(
+                job_dir / "status.json",
+                {"schema_version": fp.SCHEMA_VERSION,
+                 "job_id": request["job_id"],
+                 "kind": "active_learning", "status": "launching",
+                 "created_at_epoch": time.time(),
+                 "updated_at_epoch": time.time()})
+            exit_code = fp.run_active_learning(job_dir)
+            from nnunet_common import read_json
+
+            self.assertEqual(exit_code, 1)
+            status = read_json(job_dir / "status.json", {}) or {}
+            self.assertEqual(status["status"], "failed")
+            self.assertIn("pair", str(status.get("error") or "").lower())
+
+
 class TestMainRouting(unittest.TestCase):
     def test_operation_infer_routes_to_run_inference(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -714,6 +951,83 @@ class TestMainRouting(unittest.TestCase):
                 self.assertEqual(fp.main(), 0)
             self.assertEqual(infer_mock.call_count, 0)
             self.assertEqual(train_mock.call_count, 1)
+
+    def test_operation_active_learning_routes_to_run_active_learning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = Path(tmp) / "job"
+            job_dir.mkdir()
+            from nnunet_common import write_json_atomic
+
+            write_json_atomic(job_dir / "request.json",
+                              {"operation": "active_learning", "job_id": "x"})
+            with mock.patch.object(fp, "run_active_learning",
+                                   return_value=0) as al_mock, \
+                 mock.patch.object(fp, "run_inference",
+                                   return_value=0) as infer_mock, \
+                 mock.patch.object(fp, "run_training",
+                                   return_value=0) as train_mock, \
+                 mock.patch("sys.argv",
+                            ["flexict_pipeline.py", "run",
+                             "--job-dir", str(job_dir)]):
+                self.assertEqual(fp.main(), 0)
+            self.assertEqual(al_mock.call_count, 1)
+            self.assertEqual(infer_mock.call_count, 0)
+            self.assertEqual(train_mock.call_count, 0)
+
+
+class TestActiveLearningReviewUI(unittest.TestCase):
+    """Offline helpers of the review window (no Qt)."""
+
+    def test_load_ranking_prefers_status_then_csv(self):
+        from flexict_active_learning_ui import load_ranking
+        from nnunet_common import write_json_atomic
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = Path(tmp) / "job"
+            job_dir.mkdir()
+            # no status, no csv -> empty
+            self.assertEqual(load_ranking(job_dir), [])
+            # csv fallback
+            uncertainty = job_dir / "uncertainty"
+            uncertainty.mkdir()
+            rows = [
+                "case,integrated,uncertain_vol,max\n",
+                "caseB,9.0,100.0,1.0\n",
+                "caseA,1.0,10.0,0.5\n",
+            ]
+            (uncertainty / "ranking.csv").write_text(
+                "".join(rows), encoding="utf-8")
+            ranking = load_ranking(job_dir)
+            self.assertEqual(len(ranking), 2)
+            self.assertEqual(ranking[0]["case"], "caseB")
+            # status ranking wins
+            write_json_atomic(job_dir / "status.json", {
+                "ranking": [{"case": "caseC", "integrated": 5.0,
+                             "uncertain_vol": 1.0, "max": 1.0}],
+            })
+            ranking = load_ranking(job_dir)
+            self.assertEqual(len(ranking), 1)
+            self.assertEqual(ranking[0]["case"], "caseC")
+
+    def test_annotation_state_roundtrip(self):
+        from flexict_active_learning_ui import (
+            load_annotation_state,
+            set_case_state,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = Path(tmp) / "job"
+            job_dir.mkdir()
+            state = load_annotation_state(job_dir)
+            self.assertEqual(state["cases"], {})
+            set_case_state(job_dir, "case01", "annotated")
+            state = load_annotation_state(job_dir)
+            self.assertEqual(
+                state["cases"]["case01"]["state"], "annotated")
+            set_case_state(job_dir, "case01", "skipped")
+            state = load_annotation_state(job_dir)
+            self.assertEqual(
+                state["cases"]["case01"]["state"], "skipped")
 
 
 class TestModelRegistration(unittest.TestCase):

@@ -435,6 +435,12 @@ def _process_finished_unexpectedly(monitor, status):
 
 
 def _monitor_tick_locked(monitor):
+    kind = monitor.get("kind")
+    if kind == "al_requests":
+        # Overlay-request poller: no status.json, no deadline semantics beyond
+        # the sweep in _monitor_tick.
+        _al_tick()
+        return
     key = monitor["monitor_key"]
     if time.time() > float(monitor.get("deadline") or 0):
         _stop_monitor(key)
@@ -1151,8 +1157,293 @@ def _resume_pending_inference_monitors():
         _start_monitor(monitor, 1.0)
 
 
+def _start_active_learning():
+    """Open the external review UI and start the overlay-request monitor."""
+    context = {"workspace": _workspace()}
+    _launch_gui("flexict_active_learning_ui.py", context, "al_setup")
+    _start_al_request_monitor()
+    return 0
+
+
+_AL_MONITOR_KEY = "flexict_al_requests"
+_AL_APPLY_TRANSACTIONS = {}
+
+
+def _al_request_dir(job_dir):
+    return os.path.join(job_dir, "apply_requests")
+
+
+def _al_pending_requests():
+    """Newest-first overlay requests across every active-learning job."""
+    jobs = os.path.join(_workspace(), "jobs")
+    requests = []
+    if not os.path.isdir(jobs):
+        return requests
+    try:
+        names = os.listdir(jobs)
+    except OSError:
+        return requests
+    for name in names:
+        status = _read_json(os.path.join(jobs, name, "status.json"), {}) or {}
+        if str(status.get("kind") or "") != "active_learning":
+            continue
+        if str(status.get("status") or "") != "completed":
+            continue
+        request_dir = _al_request_dir(os.path.join(jobs, name))
+        if not os.path.isdir(request_dir):
+            continue
+        try:
+            files = os.listdir(request_dir)
+        except OSError:
+            continue
+        for file_name in files:
+            if not file_name.endswith(".json"):
+                continue
+            path = os.path.join(request_dir, file_name)
+            payload = _read_json(path, {}) or {}
+            if not payload:
+                continue
+            if str(payload.get("state") or "pending") != "pending":
+                continue
+            payload["_request_path"] = path
+            payload["_job_dir"] = os.path.join(jobs, name)
+            requests.append(payload)
+    requests.sort(
+        key=lambda row: float(row.get("requested_at_epoch") or 0),
+        reverse=True,
+    )
+    return requests
+
+
+def _al_tick():
+    """Poll for review-UI overlay requests and apply the newest one."""
+    if _AL_APPLY_TRANSACTIONS.get("busy"):
+        return
+    _AL_APPLY_TRANSACTIONS["busy"] = True
+    try:
+        requests = _al_pending_requests()
+        if not requests:
+            return
+        request = requests[0]
+        _al_apply_request(request)
+    except Exception as exc:
+        _log(
+            logging.ERROR,
+            "FlexiCT active-learning overlay error: {0}\n{1}".format(
+                exc, traceback.format_exc()
+            ),
+        )
+    finally:
+        _AL_APPLY_TRANSACTIONS["busy"] = False
+
+
+def _al_mark_request(request_path, state, detail=""):
+    payload = _read_json(request_path, {}) or {}
+    payload["state"] = state
+    payload["detail"] = str(detail)
+    payload["updated_at_epoch"] = time.time()
+    _write_json(request_path, payload)
+
+
+def _al_case_source_geometry(job_dir, case_id):
+    geometries = _read_json(
+        os.path.join(job_dir, "input_geometries.json"), {}
+    ) or {}
+    cases = geometries.get("cases") or {}
+    return cases.get(case_id) or {}
+
+
+def _al_mask_paths(job_dir, case_id, what):
+    """The NIfTI(s) an overlay request maps to."""
+    uncertainty_dir = os.path.join(job_dir, "uncertainty")
+    if what == "consensus":
+        path = os.path.join(uncertainty_dir, "{0}_consensus.nii.gz".format(case_id))
+        if os.path.isfile(path):
+            return [("FlexiCT Consensus", path)]
+        return []
+    bands_dir = os.path.join(uncertainty_dir, "bands")
+    rows = []
+    for level, title in (("high", "FlexiCT Uncertainty (High)"),
+                         ("moderate", "FlexiCT Uncertainty (Moderate)")):
+        path = os.path.join(bands_dir, "{0}_{1}.nii.gz".format(case_id, level))
+        if os.path.isfile(path):
+            rows.append((title, path))
+    return rows
+
+
+def _al_apply_request(request):
+    """Verify the active image matches the request's case, then apply the
+    overlay masks through the same bridge path the prediction flow uses."""
+    request_path = request["_request_path"]
+    job_dir = request["_job_dir"]
+    case_id = str(request.get("case_id") or "")
+    what = str(request.get("what") or "bands")
+    masks = _al_mask_paths(job_dir, case_id, what)
+    if not masks:
+        _al_mark_request(request_path, "failed", "overlay files not found")
+        return
+    # Verified-grid contract: the active image must still be this case on
+    # its original source grid (the one the pool was materialized from).
+    source_geometry = mimics_mask_apply._active_source_geometry_payload()
+    if not source_geometry:
+        _al_mark_request(
+            request_path, "failed",
+            "The active image source geometry could not be verified.",
+        )
+        return
+    expected = _al_case_source_geometry(job_dir, case_id)
+    if not expected:
+        _al_mark_request(
+            request_path, "failed",
+            "No recorded source geometry for case {0}.".format(case_id),
+        )
+        return
+    if list(source_geometry.get("source_shape") or []) != list(
+            expected.get("source_shape") or []) or not _matrix_close_payload(
+                source_geometry.get("source_voxel_to_ras_matrix"),
+                expected.get("source_voxel_to_ras_matrix"),
+            ):
+        _al_mark_request(
+            request_path, "failed",
+            "The active image does not match case {0}. Open that case "
+            "(its original source image) and retry.".format(case_id),
+        )
+        return
+    target_grid = mimics_mask_apply._active_live_grid_payload()
+    if not target_grid:
+        _al_mark_request(
+            request_path, "failed",
+            "The active Mimics image grid could not be measured.",
+        )
+        return
+    bridge_root = os.path.join(
+        job_dir, "al_apply_" + uuid.uuid4().hex[:8]
+    )
+    buffers = os.path.join(bridge_root, "buffers")
+    os.makedirs(buffers)
+    axes, flips = mimics_mask_apply._buffer_mapping_from_config(
+        mimics_mask_apply._config()
+    )
+    params = {
+        "action": "prepare_masks_for_grid",
+        "masks": [
+            {"name": "al_{0}".format(index), "mask_path": path}
+            for index, (_title, path) in enumerate(masks)
+        ],
+        "buffers_out": buffers,
+        "target_shape": target_grid["target_shape"],
+        "target_voxel_to_ras_matrix": target_grid[
+            "target_voxel_to_ras_matrix"],
+        "source_voxel_to_ras_matrix": expected.get(
+            "source_voxel_to_ras_matrix"),
+        "axes": axes,
+        "flips": flips,
+    }
+    input_path = os.path.join(bridge_root, "input.json")
+    result_path = os.path.join(bridge_root, "result.json")
+    _write_json(input_path, params)
+    with open(input_path, "rb") as stdin_handle:
+        process = subprocess.Popen(
+            [_external_python(), os.path.join(_project_root(), "mimics_bridge.py")],
+            stdin=stdin_handle,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            **runtime_common.background_process_kwargs()
+        )
+    try:
+        stdout, stderr = process.communicate(timeout=600)
+    except Exception:
+        try:
+            runtime_common.terminate_process_async(
+                process=process, graceful_seconds=0.0
+            )
+        except Exception:
+            pass
+        _al_mark_request(request_path, "failed", "conversion timed out")
+        shutil.rmtree(bridge_root, ignore_errors=True)
+        return
+    shutil.rmtree(bridge_root, ignore_errors=True)
+    if process.returncode != 0:
+        _al_mark_request(
+            request_path, "failed",
+            stderr.decode("utf-8", "replace")[-2000:],
+        )
+        return
+    result = json.loads(stdout.decode("utf-8"))
+    applied = []
+    for index, (title, _path) in enumerate(masks):
+        row = None
+        for candidate in result.get("masks") or []:
+            if str(candidate.get("name") or "") == "al_{0}".format(index):
+                row = candidate
+                break
+        if row is None:
+            continue
+        mask = mimics_mask_apply._new_prediction_mask(title)
+        mimics_mask_apply._set_mask_from_u8(
+            mask,
+            row["output_path"],
+            row["mimics_shape"],
+            "Apply FlexiCT Active-Learning Overlay",
+        )
+        applied.append(str(getattr(mask, "name", "") or title))
+    if not applied:
+        _al_mark_request(request_path, "failed", "no foreground voxels")
+        return
+    _al_mark_request(
+        request_path, "applied", "applied: {0}".format(", ".join(applied)))
+    _log(
+        logging.INFO,
+        "FlexiCT active-learning overlay applied for {0}: {1}.".format(
+            case_id, ", ".join(applied)),
+    )
+    try:
+        mimics.dialogs.message_box(
+            "Applied {0} for case {1}.".format(
+                ", ".join(applied), case_id),
+            title=TITLE,
+            ui_blocking=False,
+        )
+    except TypeError:
+        mimics.dialogs.message_box(
+            title=TITLE,
+            message="Applied {0} for case {1}.".format(
+                ", ".join(applied), case_id),
+        )
+
+
+def _matrix_close_payload(a, b, tolerance=1e-4):
+    if not a or not b:
+        return False
+    try:
+        for row_index in range(4):
+            for column_index in range(4):
+                if abs(
+                    float(a[row_index][column_index])
+                    - float(b[row_index][column_index])
+                ) > tolerance:
+                    return False
+    except Exception:
+        return False
+    return True
+
+
+def _start_al_request_monitor():
+    if _AL_MONITOR_KEY in _MONITORS:
+        return
+    monitor = {
+        "monitor_key": _AL_MONITOR_KEY,
+        "kind": "al_requests",
+        "deadline": time.time() + 30 * 24 * 60 * 60,
+        "last_line": "",
+    }
+    if _start_monitor(monitor, 2.0):
+        _MONITORS[_AL_MONITOR_KEY] = monitor
+
+
 def main(action=None):
     _resume_pending_inference_monitors()
+    _start_al_request_monitor()
     if action == BUTTON_TRAIN:
         return start_training()
     if action == BUTTON_PREDICT:
@@ -1171,13 +1462,7 @@ def main(action=None):
     if action == BUTTON_STOP:
         return stop_running_task()
     if action == BUTTON_ACTIVE_LEARNING:
-        # Phase 6: active-learning review UI. Placeholder until it lands.
-        mimics.dialogs.message_box(
-            "FlexiCT active learning is not available yet in this build.",
-            title=TITLE,
-            ui_blocking=False,
-        )
-        return 1
+        return _start_active_learning()
     answer = mimics.dialogs.question_box(
         message="Choose a FlexiCT action.",
         buttons=";".join(

@@ -74,6 +74,16 @@ REQUIRED_EXTERNAL_UI_FILES = [
     "tools/verify_medical_geometry.py",
     "runtime_py35/interactive_algorithms_mimics.py",
     "runtime_py35/nnunet_mimics.py",
+    "runtime_py35/flexict_mimics.py",
+    "runtime_py35/mimics_mask_apply.py",
+    "tools/flexict_common.py",
+    "tools/flexict_pipeline.py",
+    "tools/flexict_training_setup_ui.py",
+    "tools/flexict_prediction_setup_ui.py",
+    "tools/flexict_active_learning_ui.py",
+    "tools/flexict_status_viewer.py",
+    "tools/mimics_label_export.py",
+    "flexict_config.json",
     "integrations/nnunet_segmentation_workflow/trainers/MimicsNNUNetTrainer.py",
     "integrations/nnunet_segmentation_workflow/trainers/MimicsNNUNetTrainerNoMirroring.py",
 ]
@@ -297,6 +307,9 @@ def pack(output_dir=None, with_env=False):
         ".cache",
         ".pytest_cache",
     }
+    # FlexiCT pretrained backbones (~576MB each) are distributed separately;
+    # the flexict-finetune package ships source/config/tests only.
+    EXCLUDE_FLEXICT_FINETUNE_DIRS = {"weights", "data"}
 
     def _should_include(fpath, arcname):
         parts = arcname.replace("\\", "/").split("/")
@@ -309,6 +322,11 @@ def pack(output_dir=None, with_env=False):
             package_rel = arcname[len("integrations/nninteractive-finetune/"):]
             top = package_rel.split("/")[0] if "/" in package_rel else package_rel
             if top in EXCLUDE_NNINTERACTIVE_FINETUNE_DIRS:
+                return False
+        if arcname.startswith("integrations/flexict-finetune/"):
+            package_rel = arcname[len("integrations/flexict-finetune/"):]
+            top = package_rel.split("/")[0] if "/" in package_rel else package_rel
+            if top in EXCLUDE_FLEXICT_FINETUNE_DIRS:
                 return False
         return True
 

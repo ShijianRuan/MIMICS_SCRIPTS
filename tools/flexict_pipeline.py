@@ -43,6 +43,7 @@ from flexict_common import (  # noqa: E402
     MODEL_SCHEMA_VERSION,
     TERMINAL_STATES,
     load_config,
+    load_pair,
     flexict_repo_dir,
     register_model as register_flexict_model,
     resolve_pretrained_dir,
@@ -60,7 +61,9 @@ from nnunet_pipeline import (  # noqa: E402
     _acquire_dataset_lock,
     _acquire_local_gpu,
     _assert_dataset_id_available,
+    _case_directories,
     _dataset_name,
+    _find_case_image,
     _materialize_nnunet_raw,
     _preprocess_cache_valid,
     _runtime_roots,
@@ -128,7 +131,10 @@ def normalize_flexict_request(values: dict[str, Any]) -> dict[str, Any]:
                 "configuration must be one of {}".format(", ".join(CONFIGURATIONS)))
         out["configuration"] = flexict_configuration
     else:
+        # infer / active_learning share the inference-side normalization
+        # (workspace, GPU fields); the FlexiCT operation must survive it.
         out = normalize_request(dict(out, operation="infer"))
+        out["operation"] = operation
     return out
 
 
@@ -978,6 +984,363 @@ def run_inference(job_dir: Path) -> int:
             _sweep_expired_jobs(workspace)
 
 
+def _resolve_flexict_pair(request: dict[str, Any],
+                          workspace: Path) -> dict[str, dict[str, Any]]:
+    """Find the 2D + 3D model pair an active-learning run needs.
+
+    Order: explicit request manifests (model_manifest_2d/3d) > the newest
+    usable pair in the registry (flexict_common.load_pair). Both ends must
+    be usable; there is no silent single-model fallback — disagreement
+    between the 2D and 3D predictions IS the uncertainty signal.
+    """
+    manifests = {}
+    for key, configuration in (("model_manifest_2d", "2d"),
+                               ("model_manifest_3d", "3d_fullres")):
+        path = str(request.get(key) or "").strip()
+        if path:
+            manifest = read_json_file(Path(path).expanduser().resolve(), {}) or {}
+            if str(manifest.get("configuration") or "") != configuration:
+                raise ValueError(
+                    "{} must reference a {} model.".format(key, configuration))
+            manifests[configuration] = manifest
+    if len(manifests) == 1:
+        raise ValueError(
+            "Active learning needs both a 2D and a 3D model; only one "
+            "manifest was provided.")
+    if manifests:
+        return manifests
+    model_2d, model_3d = load_pair(str(workspace))
+    if model_2d is None or model_3d is None:
+        raise RuntimeError(
+            "No usable FlexiCT model pair was found. Train with "
+            "configuration 'pair' (or 'auto' on a >=16GB GPU) first — "
+            "active learning ranks cases by 2D-vs-3D disagreement.")
+    return {"2d": model_2d, "3d_fullres": model_3d}
+
+
+def _al_materialize_inputs(job_dir: Path, request: dict[str, Any],
+                           status_path: Path,
+                           control_path: Path) -> list[str]:
+    """Materialize the unlabeled pool as flat <case>.nii.gz inputs."""
+    from tools.mimics_label_export import materialize_source_image as _materialize
+
+    dataset_root = Path(
+        str(request.get("dataset_root") or "")).expanduser().resolve()
+    requested = set(
+        str(case).strip() for case in (request.get("cases") or [])
+        if str(case).strip())
+    case_dirs = _case_directories(dataset_root, requested or None)
+    if not case_dirs:
+        raise RuntimeError(
+            "No image cases were found in {}.".format(dataset_root))
+    input_dir = job_dir / "input"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    case_ids = []
+    geometries: dict[str, dict[str, Any]] = {}
+    total = len(case_dirs)
+    for index, case_dir in enumerate(case_dirs, start=1):
+        _raise_if_cancelled(control_path)
+        image = _find_case_image(case_dir)
+        if image is None:
+            continue
+        case_id = safe_identifier(case_dir.name)
+        destination = input_dir / "{}.nii.gz".format(case_id)
+        _materialize(image, destination)
+        case_ids.append(case_id)
+        try:
+            import nibabel as nib
+
+            header = nib.load(str(destination))
+            geometries[case_id] = {
+                "source_shape": [int(v) for v in header.shape[:3]],
+                "source_voxel_to_ras_matrix": header.affine.astype(
+                    float).tolist(),
+            }
+        except Exception:
+            geometries[case_id] = {}
+        update_status(
+            status_path,
+            phase="preparing_inputs",
+            current_case=case_id,
+            preparation_index=index,
+            preparation_total=total,
+            prepared_cases=len(case_ids),
+            progress_percent=5 + int(10 * index / max(1, total)),
+        )
+    if not case_ids:
+        raise RuntimeError(
+            "No readable images were found in {}.".format(dataset_root))
+    # Per-case source geometry: the Mimics-side overlay verification compares
+    # the active image against this before applying any band mask.
+    write_json_atomic(
+        job_dir / "input_geometries.json",
+        {"schema_version": "flexict_al_geometries.v1", "cases": geometries},
+    )
+    return sorted(case_ids)
+
+
+def _al_predict_configuration(job_dir: Path,
+                              request: dict[str, Any],
+                              roots: dict[str, Path],
+                              manifest: dict[str, Any],
+                              configuration: str,
+                              status_path: Path,
+                              control_path: Path,
+                              log_path: Path,
+                              gpu_lock) -> Path:
+    """Run one pair end over the materialized pool (folder-mode easy_predict)."""
+    model_dir = Path(str(manifest.get("model_dir") or "")).expanduser().resolve()
+    if not model_dir.is_dir():
+        raise RuntimeError(
+            "FlexiCT {} model folder is missing: {}".format(
+                configuration, model_dir))
+    predictions = job_dir / "predictions_{}".format(configuration)
+    predictions.mkdir(parents=True, exist_ok=True)
+    update_status(
+        status_path,
+        status="batch_predicting_2d" if configuration == "2d"
+        else "batch_predicting_3d",
+        phase="batch_predicting_{}".format(configuration),
+        message="FlexiCT {} batch prediction is running.".format(
+            "2D" if configuration == "2d" else "3D"),
+        progress_percent=15 if configuration == "2d" else 45,
+        active_configuration=configuration,
+    )
+    import nnunet_pipeline as np_mod
+
+    original_env = np_mod._worker_environment
+    try:
+        np_mod._worker_environment = lambda _req, _roots: flexict_infer_environment(
+            request, roots, configuration)
+        _spawn_worker(
+            "infer",
+            {
+                "model_folder": str(model_dir),
+                "input_path": str(job_dir / "input"),
+                "output_path": str(predictions),
+                "disable_tta": True,  # locked recipe: no TTA
+                "use_cpu": bool(request.get("use_cpu", False)),
+                "enable_stats": False,
+                "gpu_device_id": 0,
+                "num_processes_preprocessing": int(
+                    request.get("inference_workers") or 2),
+                "num_processes_segmentation_export": int(
+                    request.get("inference_workers") or 2),
+                "checkpoint_name": "checkpoint_best.pth",
+            },
+            request, roots, job_dir, status_path,
+            control_path, log_path, resource_lock=gpu_lock)
+    finally:
+        np_mod._worker_environment = original_env
+    return predictions
+
+
+def _al_write_uncertainty_bands(uncertainty_dir: Path,
+                                case_ids: list[str],
+                                method: str,
+                                moderate: int,
+                                high: int) -> dict[str, Any]:
+    """Derive the two overlay band masks (moderate >= t1, high >= t2) from the
+    uint8 x10 uncertainty maps. The bands stay on the source grid so the
+    Mimics bridge can resample them like any prediction mask.
+
+    The thresholds are data-aware: a two-model disagreement pair can only
+    produce the level 5 (1 - 1/2 scaled by 10), so a high band at the
+    default 6 would never fire. Both thresholds are clamped to the levels
+    actually present in the maps."""
+    import nibabel as nib
+    import numpy as np
+
+    bands_dir = uncertainty_dir / "bands"
+    bands_dir.mkdir(parents=True, exist_ok=True)
+    images: dict[str, Any] = {}
+    max_level = 0
+    for case_id in case_ids:
+        source = uncertainty_dir / "{}_uncertainty_{}.nii.gz".format(
+            case_id, method)
+        if not source.is_file():
+            continue
+        image = nib.load(str(source))
+        values = np.asanyarray(image.dataobj)
+        images[case_id] = (image, values)
+        max_level = max(max_level, int(values.max()) if values.size else 0)
+    if high > max_level:
+        high = max_level
+    if moderate >= high:
+        moderate = max(1, high - 1)
+    written = {"moderate": 0, "high": 0}
+    for case_id, (image, values) in images.items():
+        for level, threshold in (("moderate", moderate), ("high", high)):
+            if threshold < 1:
+                continue
+            band = (values >= threshold).astype(np.uint8)
+            if not band.any():
+                continue
+            nib.save(
+                nib.Nifti1Image(band, image.affine, image.header),
+                str(bands_dir / "{}_{}.nii.gz".format(case_id, level)))
+            written[level] += 1
+    return {"dir": str(bands_dir), "moderate_threshold": moderate,
+            "high_threshold": high, "written": written}
+
+
+def run_active_learning(job_dir: Path) -> int:
+    """Active-learning cycle: batch-predict the unlabeled pool with the 2D and
+    3D pair ends, rank cases by inter-model disagreement, and write overlay
+    band masks for the review UI (stages preparing_inputs ->
+    batch_predicting_2d -> batch_predicting_3d -> computing_uncertainty ->
+    completed)."""
+    request_path = job_dir / "request.json"
+    status_path = job_dir / "status.json"
+    control_path = job_dir / "control.json"
+    log_path = job_dir / "job.log"
+    request = normalize_flexict_request(read_json_file(request_path))
+    write_json_atomic(request_path, request)
+    workspace = Path(request["workspace"]).expanduser().resolve()
+    roots = _runtime_roots(request)
+    method = str(request.get("uncertainty_method")
+                 or DEFAULT_CONFIG["default_uncertainty_method"]).strip()
+    moderate = int(request.get("uncertainty_moderate_threshold") or 3)
+    high = int(request.get("uncertainty_high_threshold") or 6)
+    update_status(
+        status_path,
+        schema_version=SCHEMA_VERSION,
+        job_id=request["job_id"],
+        kind="active_learning",
+        task_id=request.get("task_id") or "",
+        task_name=request.get("task_name") or "",
+        label_name=request.get("label_name") or "",
+        status="running",
+        phase="preparing_inputs",
+        message="Preparing the unlabeled pool for FlexiCT active learning.",
+        log_path=str(log_path),
+        control_path=str(control_path),
+        controller_pid=os.getpid(),
+        controller_start_marker=process_start_marker(os.getpid()),
+        progress_percent=5,
+    )
+    gpu_lock = None
+    try:
+        pair = _resolve_flexict_pair(request, workspace)
+        case_ids = _al_materialize_inputs(
+            job_dir, request, status_path, control_path)
+        update_status(status_path, case_count=len(case_ids), cases=case_ids)
+        gpu_lock = _acquire_local_gpu(
+            request, status_path, control_path, log_path, "flexict active learning")
+        predictions = {}
+        for configuration, manifest in pair.items():
+            _raise_if_cancelled(control_path)
+            predictions[configuration] = _al_predict_configuration(
+                job_dir, request, roots, manifest, configuration,
+                status_path, control_path, log_path, gpu_lock)
+        if gpu_lock is not None:
+            gpu_lock.release()
+            gpu_lock = None
+        update_status(
+            status_path,
+            status="computing_uncertainty",
+            phase="computing_uncertainty",
+            message="Ranking cases by 2D-vs-3D disagreement.",
+            progress_percent=75,
+        )
+        _raise_if_cancelled(control_path)
+        uncertainty_dir = job_dir / "uncertainty"
+        # The one sanctioned sys.path seam into the standalone repo.
+        repo = flexict_repo_dir(load_config())
+        if str(repo) not in sys.path:
+            sys.path.insert(0, str(repo))
+        from uncertainty import analyze_uncertainty_dir, run_batch  # noqa: E402
+
+        run_batch(
+            mask_dirs=[str(predictions["2d"]), str(predictions["3d_fullres"])],
+            out_dir=str(uncertainty_dir),
+            case_names=case_ids,
+            filename_template="{case}.nii.gz",
+            method=method,
+            min_masks=2,
+            target_labels=[1],
+            save_components=False,
+            save_consensus=True,
+            save_plots=False,
+            log_path=str(job_dir / "uncertainty_log.txt"),
+        )
+        ranking = analyze_uncertainty_dir(
+            str(uncertainty_dir),
+            method=method,
+            sort_key="integrated",
+            report_csv=str(uncertainty_dir / "ranking.csv"),
+            compute_boundary=False,
+            compute_cc=False,
+        )
+        bands = _al_write_uncertainty_bands(
+            uncertainty_dir, case_ids, method, moderate, high)
+        summary = [
+            {
+                "case": str(row.get("case") or ""),
+                "integrated": float(row.get("integrated") or 0.0),
+                "uncertain_vol": float(row.get("uncertain_vol") or 0.0),
+                "max": float(row.get("max") or 0.0),
+            }
+            for row in ranking
+        ]
+        update_status(
+            status_path,
+            status="completed",
+            phase="completed",
+            message="FlexiCT active learning ranked {} case(s).".format(
+                len(summary)),
+            progress_percent=100,
+            label_name=request.get("label_name") or "",
+            uncertainty_method=method,
+            uncertainty_dir=str(uncertainty_dir),
+            ranking_csv=str(uncertainty_dir / "ranking.csv"),
+            uncertainty_bands=bands,
+            ranking=summary,
+            top_case=summary[0]["case"] if summary else "",
+            completed_at_epoch=time.time(),
+            worker_pid=None,
+            worker_start_marker=None,
+        )
+        return 0
+    except InterruptedError:
+        update_status(
+            status_path,
+            status="cancelled",
+            phase="cancelled",
+            message="FlexiCT active learning was cancelled.",
+            completed_at_epoch=time.time(),
+            worker_pid=None,
+            worker_start_marker=None,
+        )
+        return 0
+    except Exception as exc:
+        append_log(log_path, traceback.format_exc())
+        update_status(
+            status_path,
+            status="failed",
+            phase="failed",
+            error="{}: {}".format(type(exc).__name__, exc),
+            traceback=traceback.format_exc(),
+            completed_at_epoch=time.time(),
+            worker_pid=None,
+            worker_start_marker=None,
+        )
+        return 1
+    finally:
+        if gpu_lock is not None:
+            try:
+                gpu_lock.release()
+            except Exception:
+                pass
+        try:
+            result = compact_completed_log(log_path)
+            if result.get("compacted"):
+                update_status(status_path, log_compaction=result)
+        except OSError:
+            pass
+        _sweep_expired_jobs(workspace)
+
+
 def create_flexict_job(values: dict[str, Any]) -> dict[str, Any]:
     """Create a FlexiCT job folder and launch flexict_pipeline.py run.
 
@@ -1089,6 +1452,8 @@ def main() -> int:
         or "train").lower()
     if operation == "infer":
         return run_inference(job_dir)
+    if operation == "active_learning":
+        return run_active_learning(job_dir)
     return run_training(job_dir)
 
 

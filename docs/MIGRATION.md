@@ -13,6 +13,8 @@
 | nnInteractive 微调任务模型 | `nninteractive_task_models/` | ✅ 拷贝 `tasks/` + `registry.json` | registry v2 用 workspace 相对路径 `model_relpath`，拷贝即生效 |
 | `cache/`、`jobs/`（微调） | 同上目录 | ⛔ 不迁移 | 可再生（prepared 缓存）/历史日志，体积大 |
 | nnU-Net 模型 | workspace `models/` + 全局注册表 | ✅ 拷贝 + manifest 扫描 | 注册表死路径行标 `missing_path`（不再静默丢弃），manifest 扫描自动重建 |
+| FlexiCT few-shot 模型 | workspace `flexict_models/`（registry + Dataset 训练产物） | ✅ 拷贝整个 `flexict_models/` | registry 用 workspace 相对路径；成对模型共享 `pair_id`，拷贝即识别 |
+| FlexiCT 预训练 backbone | `integrations/flexict-finetune/weights/`（2×~576MB） | ⚠️ 不在 pack 包内 | gitignore 且 package_portable 排除；需手工拷贝或从分发源重新获取 |
 | 数据集（ts_root / mcs） | 任意位置 | ✅ 拷贝 | `dataset_manifest` path_reference 双记录 |
 | `.mimics_runtime/` 状态 | 部署树内 | ⛔ 不迁移 | 全部机器本地（锁/进程记录/队列标记），`migrate_root --reset-runtime` 清除 |
 | `Scripts/*.exe` 入口脚本 | `python_env/Scripts/` | ⚠️ 迁移后失效 | pip.exe 等 wrapper 内嵌绝对路径——项目代码只调 `python.exe`，不依赖它们 |
@@ -65,6 +67,7 @@ python_env/python.exe tools/migrate_root.py --old-root E:\旧机安装根
 
 1. `Admin > System Health`：进程/锁/队列干净，无 stale
 2. `02_AI > nnInteractive > Manage Custom Models`：任务模型列表正常（registry v2 relpath）
+2a. `02_AI > FlexiCT > 01 Train Model`：模型表能列出（flexict_models/registry.json 正常加载）
 3. 任一病例：导入 → 提示 → 导出 全流程走一遍
 4. （可选）`python_env/python.exe tools/test_model_portability.py`
 
