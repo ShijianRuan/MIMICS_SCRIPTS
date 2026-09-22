@@ -27,10 +27,15 @@ wheels/
 /data/
 /output/
 /nninteractive_task_models/
+/flexict_models/
 /integrations/nninteractive-finetune/validation/data/
 /integrations/nninteractive-finetune/validation/work/
 /integrations/nninteractive-finetune/validation/outputs/
 /integrations/ScribblePrompt/checkpoints/*.pt
+
+# FlexiCT pretrained backbones (~576MB each, distributed separately)
+/integrations/flexict-finetune/weights/
+/integrations/flexict-finetune/data/
 
 # Portable model archives are generated on demand and transferred separately
 *.model.zip

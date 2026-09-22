@@ -1,0 +1,20 @@
+# Liver few-shot validation — 3D config.
+# This is a reference config; actual training is driven by env vars + run_train.sh.
+# nnU-Net uses standard nnUNetPlans; this file documents the intended settings.
+
+dataset:
+  id: 907
+  name: LiverFS
+  label_name: liver
+  source: "Z:/ImageAnalysisData/1-CT/Segmentation/data/Totalsegmentator_dataset_v201"
+  n_train: 8            # few-shot train cases
+
+train:
+  config: 3d_fullres    # nnU-Net configuration
+  trainer: flexict3d_Trainer
+  num_epochs: 150
+  # liver is a midline/symmetric organ → keep default mirroring (do NOT set
+  # MIRROR_DISABLE_AXES). For a single-side target you would set "1".
+
+weights:
+  backbone: weights/flexict_3d/model.safetensors

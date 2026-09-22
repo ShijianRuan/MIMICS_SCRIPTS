@@ -1,0 +1,18 @@
+# FlexiCT few-shot finetuning framework
+#
+# Two supported nnU-Net versions (the trainer auto-detects the
+# build_network_architecture signature at runtime):
+#   - nnunetv2 2.5.2 + torch 2.1.0  (validated env, where the original
+#                                    2D/3D few-shot results were obtained)
+#   - nnunetv2 2.8.0 + torch 2.6.0  (local import/smoke compatible)
+#
+# Install nnU-Net into your env of choice first, then:
+#   pip install -r requirements.txt
+
+torch>=2.1.0
+nnunetv2>=2.5.2
+nibabel
+scipy
+numpy
+safetensors
+einops
