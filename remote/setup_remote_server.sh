@@ -41,19 +41,15 @@ mkdir -p \
   "$ROOT/locks" \
   "$ROOT/cache" \
   "$ROOT/models/cache" \
-  "$ROOT/models/dinov3" \
   "$ROOT/models/nninteractive"
 
 echo
 echo "Expected base-model layout:"
-echo "  $ROOT/models/dinov3/dinov3-vits16/model.onnx"
-echo "  $ROOT/models/dinov3/dinov3-vitb16/model.safetensors"
 echo "  $ROOT/models/nninteractive/nnInteractive_v1.0/"
 echo
 
-if [[ ! -s "$ROOT/models/dinov3/dinov3-vits16/model.onnx" ]]; then
-  echo "ERROR: Default DINOv3 ONNX weights are missing." >&2
-  exit 1
+if [[ -d "$ROOT/models/dinov3" ]]; then
+  echo "NOTE: $ROOT/models/dinov3 is no longer used and can be removed." >&2
 fi
 if [[ ! -d "$ROOT/models/nninteractive/nnInteractive_v1.0" ]] || \
   ! find "$ROOT/models/nninteractive/nnInteractive_v1.0" \

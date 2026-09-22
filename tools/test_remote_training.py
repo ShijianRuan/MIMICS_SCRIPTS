@@ -20,8 +20,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import tools.fewshot_training_setup_ui as dino_ui
-import tools.fewshot_status_viewer as status_viewer
 import tools.package_portable as package_portable
 import tools.remote_compute as remote_compute
 import tools.remote_training_controller as controller
@@ -338,56 +336,7 @@ class LocalCompatibilityTests(unittest.TestCase):
             parent.close()
             app.processEvents()
 
-    def test_default_launch_uses_unchanged_local_command(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            status_path = str(Path(temporary) / "job.json")
-            launch = {
-                "cmd": ["python", "fewshot_pipeline.py", "train"],
-                "run_id": "local_job",
-                "status_path": status_path,
-                "cancel_path": str(Path(temporary) / "cancel.request"),
-                "job_payload": {
-                    "job_id": "local_job",
-                    "status": "launching",
-                },
-                "options": {},
-            }
-            with mock.patch.object(
-                dino_ui, "prepare_training_launch", return_value=launch
-            ), mock.patch.object(
-                dino_ui, "launch_remote_training"
-            ) as remote_launch, mock.patch.object(
-                dino_ui.subprocess, "Popen", return_value=_Process()
-            ) as popen:
-                result = dino_ui.launch_training(
-                    {"project_root": temporary},
-                    {},
-                )
-            remote_launch.assert_not_called()
-            popen.assert_called_once()
-            self.assertEqual(
-                popen.call_args.args[0],
-                ["python", "fewshot_pipeline.py", "train"],
-            )
-            self.assertEqual(result, ("local_job", status_path, 4321))
 
-    def test_remote_launch_is_opt_in(self):
-        expected = ("remote_job", "status.json", 44)
-        with mock.patch.object(
-            dino_ui, "launch_remote_training", return_value=expected
-        ) as remote_launch, mock.patch.object(
-            dino_ui, "prepare_training_launch"
-        ) as local_prepare:
-            result = dino_ui.launch_training(
-                {},
-                {
-                    "execution_backend": "remote",
-                    "remote_profile_id": "server",
-                },
-            )
-        self.assertEqual(result, expected)
-        remote_launch.assert_called_once()
-        local_prepare.assert_not_called()
 
     def test_remote_nninteractive_preserves_real_initial_masks(self):
         import tools.nninteractive_finetune_pipeline as pipeline
@@ -486,282 +435,8 @@ class LocalCompatibilityTests(unittest.TestCase):
                 b"initial",
             )
 
-    def test_remote_dino_reuses_local_source_grid_cache(self):
-        import nibabel as nib
-        import numpy as np
-        import tools.fewshot_pipeline as pipeline
 
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            workspace = root / "workspace"
-            image = root / "image.nii.gz"
-            label = root / "label.nii.gz"
-            model = root / "model.onnx"
-            model.write_bytes(b"model")
-            values = np.arange(64, dtype=np.float32).reshape((4, 4, 4)) + 1
-            target = np.zeros((4, 4, 4), dtype=np.uint8)
-            target[1:3, 1:3, 1:3] = 1
-            nib.save(nib.Nifti1Image(values, np.eye(4)), str(image))
-            nib.save(nib.Nifti1Image(target, np.eye(4)), str(label))
-            sample = {
-                "case_id": "case_1",
-                "image": str(image),
-                "label": str(label),
-            }
-            spec = {
-                "context": {
-                    "workspace": str(workspace),
-                    "ts_root": str(root),
-                    "dinov3_root": str(root),
-                    "organ": "liver",
-                    "config": {},
-                },
-                "options": {
-                    "label_source": "exported_masks",
-                    "label_root": str(root),
-                    "min_samples": 1,
-                    "val_fraction": 0.0,
-                    "model_path": str(model),
-                },
-                "status_path": str(root / "status.json"),
-                "cancel_path": str(root / "cancel.request"),
-                "run_id": "remote_job",
-            }
-            with mock.patch.object(
-                pipeline,
-                "resolve_training_mask_names",
-                return_value=["liver"],
-            ), mock.patch.object(
-                pipeline,
-                "discover_samples",
-                return_value=([sample], []),
-            ), mock.patch.object(
-                pipeline,
-                "select_samples",
-                side_effect=lambda rows, *_args: rows,
-            ), mock.patch.object(
-                pipeline,
-                "split_train_validation",
-                return_value=([sample], []),
-            ), mock.patch.object(
-                dino_ui,
-                "append_training_args",
-                return_value=None,
-            ):
-                controller._prepare_dino(spec, root / "bundle_1")
-                controller._prepare_dino(spec, root / "bundle_2")
-            status = remote_compute.read_json(root / "status.json", {})
-            self.assertEqual(status["local_materialization_cache_reused"], 1)
-            self.assertEqual(status["local_materialization_cache_total"], 1)
-            self.assertTrue(
-                (root / "bundle_2" / "input" / "case_1" / "ct.nii.gz").is_file()
-            )
 
-    def test_dino_remote_launch_does_not_overwrite_fast_controller_status(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            status_path = Path(temporary) / "status.json"
-            cancel_path = Path(temporary) / "cancel.request"
-            launch = {
-                "cmd": ["python", "fewshot_pipeline.py", "train"],
-                "run_id": "remote_job",
-                "status_path": str(status_path),
-                "cancel_path": str(cancel_path),
-                "job_payload": {
-                    "job_id": "remote_job",
-                    "status": "launching",
-                },
-                "options": {},
-            }
-
-            def controller_started(*_args, **_kwargs):
-                current = remote_compute.read_json(status_path, {}) or {}
-                current.update(
-                    {
-                        "status": "uploading",
-                        "phase": "uploading_training_data",
-                        "progress_percent": 27,
-                    }
-                )
-                remote_compute.write_json_atomic(status_path, current)
-                return _Process()
-
-            with mock.patch.object(
-                dino_ui, "prepare_training_launch", return_value=launch
-            ), mock.patch.object(
-                dino_ui.subprocess, "Popen", side_effect=controller_started
-            ):
-                dino_ui.launch_remote_training(
-                    {
-                        "project_root": temporary,
-                        "python_exe": sys.executable,
-                    },
-                    {
-                        "execution_backend": "remote",
-                        "remote_profile_id": "server",
-                    },
-                )
-            status = remote_compute.read_json(status_path, {})
-            self.assertEqual(status["status"], "uploading")
-            self.assertEqual(status["progress_percent"], 27)
-            self.assertEqual(status["controller_pid"], 4321)
-
-    def test_remote_dino_label_refresh_uses_current_run_before_cache(self):
-        import tools.fewshot_pipeline as pipeline
-
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            ts_root = root / "dataset"
-            workspace = root / "workspace"
-            dinov3_root = root / "dinov3"
-            bundle = root / "bundle"
-            status_path = root / "status.json"
-            cancel_path = root / "cancel.request"
-            source_image = root / "source.nii.gz"
-            source_label = root / "source_label.nii.gz"
-            source_image.write_bytes(b"image")
-            source_label.write_bytes(b"label")
-            remote_compute.write_json_atomic(status_path, {})
-            plan = {
-                "cache_root": root / "cache",
-                "reusable": {},
-                "changed": ["case_1"],
-                "fingerprints": {"case_1": "fingerprint"},
-                "requested": ["case_1"],
-            }
-            publish_calls = []
-
-            def launch_export(*_args, **kwargs):
-                label = (
-                    Path(kwargs["label_staging_dir"])
-                    / "case_1"
-                    / "segmentations"
-                    / "liver.nii.gz"
-                )
-                label.parent.mkdir(parents=True, exist_ok=True)
-                label.write_bytes(b"fresh-label")
-                return {
-                    "launched": True,
-                    "timed_out": False,
-                    "returncode": 0,
-                    "batch_status": {"status": "completed"},
-                }
-
-            def publish_cache(
-                received_plan,
-                changed_root,
-                mask_names,
-                output_root=None,
-            ):
-                publish_calls.append(
-                    (received_plan, Path(changed_root), mask_names, output_root)
-                )
-                destination = (
-                    Path(output_root)
-                    / "case_1"
-                    / "segmentations"
-                    / "liver.nii.gz"
-                )
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(b"fresh-label")
-                return {"case_1"}, [
-                    {
-                        "case_id": "case_1",
-                        "stage": "cache_publish",
-                        "error": "simulated cache failure",
-                    }
-                ]
-
-            samples = [
-                {
-                    "case_id": "case_1",
-                    "image": str(source_image),
-                    "label": str(source_label),
-                }
-            ]
-
-            def materialize_image(_source, destination):
-                destination = Path(destination)
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(b"image")
-
-            def materialize_label(_source, _image, destination):
-                destination = Path(destination)
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(b"label")
-                return "test", True, 1, 1
-
-            spec = {
-                "context": {
-                    "workspace": str(workspace),
-                    "ts_root": str(ts_root),
-                    "dinov3_root": str(dinov3_root),
-                    "organ": "liver",
-                    "config": {},
-                },
-                "options": {
-                    "label_source": "mcs_refresh",
-                    "min_samples": 1,
-                    "val_fraction": 0.0,
-                },
-                "status_path": str(status_path),
-                "cancel_path": str(cancel_path),
-                "run_id": "remote_job",
-            }
-
-            with mock.patch.object(
-                pipeline,
-                "resolve_training_mask_names",
-                return_value=["liver"],
-            ), mock.patch.object(
-                pipeline,
-                "_plan_dino_mcs_label_cache",
-                return_value=plan,
-            ), mock.patch.object(
-                pipeline,
-                "launch_mimics_export",
-                side_effect=launch_export,
-            ), mock.patch.object(
-                pipeline,
-                "_publish_dino_mcs_label_cache",
-                side_effect=publish_cache,
-            ), mock.patch.object(
-                pipeline,
-                "discover_samples",
-                return_value=(samples, []),
-            ), mock.patch.object(
-                pipeline,
-                "select_samples",
-                side_effect=lambda rows, *_args: rows,
-            ), mock.patch.object(
-                pipeline,
-                "split_train_validation",
-                return_value=(samples, []),
-            ), mock.patch.object(
-                pipeline,
-                "_materialize_source_image",
-                side_effect=materialize_image,
-            ), mock.patch.object(
-                pipeline,
-                "_materialize_label_on_source_grid",
-                side_effect=materialize_label,
-            ), mock.patch.object(
-                dino_ui,
-                "append_training_args",
-                return_value=None,
-            ):
-                prepared = controller._prepare_dino(spec, bundle)
-
-            self.assertEqual(prepared["train_count"], 1)
-            self.assertEqual(len(publish_calls), 1)
-            self.assertEqual(Path(publish_calls[0][3]).name, "remote_fresh_labels")
-            status = remote_compute.read_json(status_path, {})
-            self.assertEqual(
-                status["label_cache_warnings"][0]["stage"],
-                "cache_publish",
-            )
-            self.assertTrue(
-                (bundle / "labels" / "case_1" / "segmentations" / "liver.nii.gz").is_file()
-            )
 
 
 class ArchiveSafetyTests(unittest.TestCase):
@@ -982,7 +657,7 @@ class ArchiveSafetyTests(unittest.TestCase):
                 {
                     "pipeline_args": [
                         "--materialization-cache-dir",
-                        "/remote-cache/dinov3/liver/"
+                        "/remote-cache/nninteractive/liver/"
                         "__MIMICS_REMOTE_DATASET_FINGERPRINT__/materialized",
                     ],
                     "pipeline_request": {
@@ -1063,11 +738,9 @@ class StatusAndLifecycleTests(unittest.TestCase):
                     "remote_container_name": "mimics-ai-user-job",
                 },
             )
-            self.assertTrue(
-                status_viewer.can_abandon_remote_job(
-                    remote_compute.read_json(status_path, {})
-                )
-            )
+            job = remote_compute.read_json(status_path, {})
+            self.assertEqual(job["execution_backend"], "remote")
+            self.assertTrue(job["remote_state_unknown"])
             self.assertEqual(controller.abandon(status_path), 0)
             status = remote_compute.read_json(status_path, {})
             self.assertEqual(status["status"], "abandoned")
@@ -1389,44 +1062,43 @@ class StatusAndLifecycleTests(unittest.TestCase):
                 )
 
     def test_cancel_does_not_kill_controller_before_remote_stop_confirmation(self):
-        class ImmediateThread:
-            def __init__(self, target, **_kwargs):
-                self.target = target
-                self.daemon = False
-
-            def start(self):
-                self.target()
+        class Session:
+            def __init__(self):
+                raise AssertionError("SSH must not be reached in this test")
 
         with tempfile.TemporaryDirectory() as temporary:
             status_path = Path(temporary) / "status.json"
-            cancel_path = Path(temporary) / "cancel.request"
             remote_compute.write_json_atomic(
                 status_path,
                 {
                     "status": "training",
                     "execution_backend": "remote",
+                    "job_id": "remote_job",
                     "controller_pid": 1234,
                     "remote_stop_confirmed": False,
+                    "remote_profile_id": "server",
+                    "remote_container_name": "mimics-ai-user-remote_job",
+                    "remote_control_path": "/remote/jobs/user/remote_job/control.json",
+                    "remote_control_kind": "cancel",
+                    "remote_job_dir": "/remote/jobs/user/remote_job",
                 },
             )
-            job = remote_compute.read_json(status_path, {})
-            job["cancel_path"] = str(cancel_path)
             with mock.patch.object(
-                status_viewer.subprocess, "Popen", return_value=_Process()
+                controller, "SSHSession", Session
             ), mock.patch.object(
-                status_viewer, "process_exists", return_value=False
-            ), mock.patch.object(
-                status_viewer, "terminate_process_tree"
-            ) as terminate, mock.patch.object(
-                status_viewer.threading, "Thread", ImmediateThread
+                controller,
+                "get_profile",
+                return_value={
+                    "name": "GPU server",
+                    "remote_root": "/remote",
+                    "username": "user",
+                },
             ):
-                status_viewer.request_job_cancel_async(
-                    job, status_path, grace_seconds=0
-                )
-            terminate.assert_not_called()
+                self.assertEqual(controller.cancel(status_path), 1)
             latest = remote_compute.read_json(status_path, {})
             self.assertEqual(latest["status"], "stopping")
             self.assertFalse(latest["remote_stop_confirmed"])
+            self.assertTrue(latest["remote_state_unknown"])
 
     def test_container_inspection_distinguishes_missing_from_docker_failure(self):
         class Session:
@@ -1467,7 +1139,7 @@ class StatusAndLifecycleTests(unittest.TestCase):
                 Session(local_fingerprint),
                 {"models": "/models"},
                 {
-                    "required_model_relative": "dinov3/model",
+                    "required_model_relative": "nninteractive/model",
                     "local_required_model": str(model),
                 },
             )
@@ -1480,7 +1152,7 @@ class StatusAndLifecycleTests(unittest.TestCase):
                     Session("a" * 64),
                     {"models": "/models"},
                     {
-                        "required_model_relative": "dinov3/model",
+                        "required_model_relative": "nninteractive/model",
                         "local_required_model": str(model),
                     },
                 )
@@ -1788,29 +1460,6 @@ class StatusAndLifecycleTests(unittest.TestCase):
                 )
             self.assertFalse(target.exists())
 
-    def test_worker_replaces_only_remote_python_placeholder(self):
-        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
-            remote_worker, "APP_ROOT", Path(temporary)
-        ), mock.patch.object(remote_worker, "_run", return_value=0) as run:
-            pipeline = Path(temporary) / "tools" / "fewshot_pipeline.py"
-            pipeline.parent.mkdir(parents=True)
-            pipeline.write_text("# test\n", encoding="utf-8")
-            remote_worker.run_dino(
-                Path(temporary),
-                {
-                    "pipeline_args": [
-                        "train",
-                        "--python",
-                        "__REMOTE_PYTHON__",
-                        "--organ",
-                        "liver",
-                    ]
-                },
-            )
-            command = run.call_args.args[0]
-            self.assertEqual(command[2], "train")
-            self.assertEqual(command[4], remote_worker.sys.executable)
-            self.assertEqual(command[-1], "liver")
 
     def test_worker_starts_nninteractive_pipeline_after_staging_request(self):
         with tempfile.TemporaryDirectory() as temporary, mock.patch.object(

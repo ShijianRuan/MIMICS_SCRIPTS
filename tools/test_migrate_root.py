@@ -27,7 +27,7 @@ class TestUnderOldRoot(unittest.TestCase):
     def test_detects_paths_under_old_root_case_insensitive(self):
         old_root = migrate_root._normcase(r"E:\OldInstall")
         self.assertTrue(migrate_root._under_old_root(
-            r"E:\oldinstall\integrations\dinov3-medical-seg", old_root
+            r"E:\oldinstall\nninteractive_task_models", old_root
         ))
         self.assertTrue(migrate_root._under_old_root(
             r"E:\OLDINSTALL\foo", old_root
@@ -48,62 +48,53 @@ class TestRewriteConfigPaths(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             base = Path(raw)
             project = self._make_project(base)
-            _write_json(project / "fewshot_config.json", {
-                "dinov3_project": r"E:\old\integrations\dinov3-medical-seg",
-                "default_epochs": 20,
-            })
             _write_json(project / "nninteractive_config.json", {
                 "workspace_dir": r"E:\old\nninteractive_task_models",
+                "default_epochs": 20,
             })
             log = migrate_root._rewrite_config_paths(
                 r"E:\old", absolute=False, dry_run=False, project_root=project
             )
-            payload = json.loads(
-                (project / "fewshot_config.json").read_text(encoding="utf-8")
-            )
-            self.assertEqual(
-                payload["dinov3_project"], "integrations/dinov3-medical-seg"
-            )
-            self.assertEqual(payload["default_epochs"], 20)
             ws = json.loads(
                 (project / "nninteractive_config.json").read_text(encoding="utf-8")
             )
             self.assertEqual(ws["workspace_dir"], "nninteractive_task_models")
+            self.assertEqual(ws["default_epochs"], 20)
             self.assertTrue(any("written" in line for line in log))
 
     def test_absolute_mode_writes_new_absolute_paths(self):
         with tempfile.TemporaryDirectory() as raw:
             base = Path(raw)
             project = self._make_project(base)
-            _write_json(project / "fewshot_config.json", {
-                "dinov3_project": r"E:\old\integrations\dinov3-medical-seg",
+            _write_json(project / "nninteractive_config.json", {
+                "workspace_dir": r"E:\old\nninteractive_task_models",
             })
             migrate_root._rewrite_config_paths(
                 r"E:\old", absolute=True, dry_run=False, project_root=project
             )
-            payload = json.loads(
-                (project / "fewshot_config.json").read_text(encoding="utf-8")
+            ws = json.loads(
+                (project / "nninteractive_config.json").read_text(encoding="utf-8")
             )
             expected = str(
-                migrate_root.PROJECT_ROOT / "integrations" / "dinov3-medical-seg"
+                migrate_root.PROJECT_ROOT / "nninteractive_task_models"
             )
-            self.assertEqual(payload["dinov3_project"], expected)
+            self.assertEqual(ws["workspace_dir"], expected)
 
     def test_dry_run_writes_nothing(self):
         with tempfile.TemporaryDirectory() as raw:
             base = Path(raw)
             project = self._make_project(base)
-            _write_json(project / "fewshot_config.json", {
-                "dinov3_project": r"E:\old\integrations\dinov3-medical-seg",
+            _write_json(project / "nninteractive_config.json", {
+                "workspace_dir": r"E:\old\nninteractive_task_models",
             })
             migrate_root._rewrite_config_paths(
                 r"E:\old", absolute=False, dry_run=True, project_root=project
             )
-            payload = json.loads(
-                (project / "fewshot_config.json").read_text(encoding="utf-8")
+            ws = json.loads(
+                (project / "nninteractive_config.json").read_text(encoding="utf-8")
             )
             self.assertEqual(
-                payload["dinov3_project"], r"E:\old\integrations\dinov3-medical-seg"
+                ws["workspace_dir"], r"E:\old\nninteractive_task_models"
             )
 
     def test_untouched_keys_and_foreign_paths_left_alone(self):
@@ -129,97 +120,6 @@ class TestRewriteConfigPaths(unittest.TestCase):
             )
             self.assertEqual(
                 payload["mimics_background_exe"], "mimics/mimics.exe"
-            )
-
-
-class TestRepairFewshotIndex(unittest.TestCase):
-    def _make_manifest(self, ts_root: Path, organ: str, model_id: str) -> Path:
-        manifest = (
-            ts_root / "fewshot_models" / "models" / organ / model_id
-            / "model_manifest.json"
-        )
-        manifest.parent.mkdir(parents=True, exist_ok=True)
-        manifest.write_text("{}", encoding="utf-8")
-        return manifest
-
-    def test_repairs_dead_manifest_path_by_basename(self):
-        with tempfile.TemporaryDirectory() as raw:
-            base = Path(raw)
-            ts_root = base / "dataset"
-            manifest = self._make_manifest(ts_root, "brain", "m1")
-            index_path = base / "fewshot_model_index.json"
-            _write_json(index_path, {
-                "models": [{
-                    "model_id": "m1",
-                    "manifest_path": str(base / "old_machine" / "fewshot_models"
-                                         / "models" / "brain" / "m1"
-                                         / "model_manifest.json"),
-                    "ts_root": str(base / "old_machine"),
-                }]
-            })
-            log = migrate_root._repair_fewshot_index(
-                dry_run=False, index_path=index_path, project_root=base
-            )
-            payload = json.loads(index_path.read_text(encoding="utf-8"))
-            row = payload["models"][0]
-            self.assertEqual(row["manifest_path"], str(manifest))
-            self.assertEqual(row["ts_root"], str(ts_root))
-            self.assertTrue(any("ts_root" in line for line in log))
-
-    def test_dead_ts_root_is_repaired_when_manifest_found_elsewhere(self):
-        with tempfile.TemporaryDirectory() as raw:
-            base = Path(raw)
-            # The manifest has been copied to a *different* ts_root.
-            new_ts_root = base / "moved_dataset"
-            manifest = self._make_manifest(new_ts_root, "brain", "m2")
-            index_path = base / "fewshot_model_index.json"
-            _write_json(index_path, {
-                "models": [{
-                    "model_id": "m2",
-                    "manifest_path": str(manifest),
-                    "ts_root": str(base / "no_such_dir"),
-                }]
-            })
-            migrate_root._repair_fewshot_index(
-                dry_run=False, index_path=index_path, project_root=base
-            )
-            payload = json.loads(index_path.read_text(encoding="utf-8"))
-            self.assertEqual(
-                payload["models"][0]["ts_root"], str(new_ts_root)
-            )
-
-    def test_missing_manifest_kept_with_dead_path(self):
-        with tempfile.TemporaryDirectory() as raw:
-            base = Path(raw)
-            index_path = base / "fewshot_model_index.json"
-            dead = str(base / "nowhere" / "model_manifest.json")
-            _write_json(index_path, {"models": [{
-                "model_id": "ghost",
-                "manifest_path": dead,
-                "ts_root": str(base / "no_such_dir"),
-            }]})
-            log = migrate_root._repair_fewshot_index(
-                dry_run=False, index_path=index_path, project_root=base
-            )
-            payload = json.loads(index_path.read_text(encoding="utf-8"))
-            self.assertEqual(payload["models"][0]["manifest_path"], dead)
-            self.assertTrue(any("no replacement found" in line for line in log))
-
-    def test_live_manifest_paths_untouched(self):
-        with tempfile.TemporaryDirectory() as raw:
-            base = Path(raw)
-            manifest = self._make_manifest(base, "liver", "ok1")
-            index_path = base / "fewshot_model_index.json"
-            _write_json(index_path, {"models": [{
-                "model_id": "ok1",
-                "manifest_path": str(manifest),
-                "ts_root": str(base),
-            }]})
-            log = migrate_root._repair_fewshot_index(
-                dry_run=False, index_path=index_path, project_root=base
-            )
-            self.assertTrue(
-                any("nothing to do" in line for line in log), log
             )
 
 
@@ -288,9 +188,6 @@ class TestEndToEndSimulation(unittest.TestCase):
             project = base / "new_root"
             project.mkdir()
             # Old machine configs with absolute paths.
-            _write_json(old_root / "fewshot_config.json", {
-                "dinov3_project": str(old_root / "integrations" / "dinov3-medical-seg"),
-            })
             _write_json(old_root / "nninteractive_config.json", {
                 "workspace_dir": str(old_root / "nninteractive_task_models"),
             })
@@ -301,7 +198,7 @@ class TestEndToEndSimulation(unittest.TestCase):
             })
             # The "copied tree" in the new root starts as the same configs
             # (simulating a naive whole-tree copy that keeps stale paths).
-            for name in ("fewshot_config.json", "nninteractive_config.json",
+            for name in ("nninteractive_config.json",
                          "nninteractive_finetune_config.json"):
                 payload = json.loads(
                     (old_root / name).read_text(encoding="utf-8")
@@ -309,12 +206,6 @@ class TestEndToEndSimulation(unittest.TestCase):
                 _write_json(project / name, payload)
             log = migrate_root._rewrite_config_paths(
                 str(old_root), absolute=False, dry_run=False, project_root=project
-            )
-            fewshot = json.loads(
-                (project / "fewshot_config.json").read_text(encoding="utf-8")
-            )
-            self.assertEqual(
-                fewshot["dinov3_project"], "integrations/dinov3-medical-seg"
             )
             nni = json.loads(
                 (project / "nninteractive_config.json").read_text(encoding="utf-8")

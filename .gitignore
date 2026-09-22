@@ -30,7 +30,6 @@ wheels/
 /integrations/nninteractive-finetune/validation/data/
 /integrations/nninteractive-finetune/validation/work/
 /integrations/nninteractive-finetune/validation/outputs/
-/integrations/dinov3-medical-seg/models/
 /integrations/ScribblePrompt/checkpoints/*.pt
 
 # Portable model archives are generated on demand and transferred separately

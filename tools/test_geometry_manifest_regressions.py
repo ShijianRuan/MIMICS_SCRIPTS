@@ -22,7 +22,6 @@ for value in (str(ROOT), str(ROOT / "tools"), str(ROOT / "runtime_py35")):
 import dataset_manifest
 import nninteractive_bridge
 from mimics_bridge import _validate_resampled_mask_foreground
-from tools import fewshot_pipeline
 from tools import nninteractive_task_common
 
 
@@ -59,35 +58,6 @@ class GeometryManifestRegressionTests(unittest.TestCase):
                 moved / "exports" / "case_a" / "segmentations" / "Liver.nii.gz",
                 Path(match[1]),
             )
-
-    def test_dinov3_uses_target_mask_alias_and_manifest_path(self):
-        with tempfile.TemporaryDirectory() as value:
-            root = Path(value)
-            case = root / "images" / "case_a"
-            case.mkdir(parents=True)
-            image = case / "ct.nii.gz"
-            nib.save(nib.Nifti1Image(np.ones((3, 3, 3)), np.eye(4)), image)
-            export_root = root / "exports"
-            label = root / "labels_elsewhere" / "liver_seg.nii.gz"
-            label.parent.mkdir(parents=True)
-            mask = np.zeros((3, 3, 3), dtype=np.uint8)
-            mask[1, 1, 1] = 1
-            nib.save(nib.Nifti1Image(mask, np.eye(4)), label)
-            dataset_manifest.update_case(
-                export_root,
-                "case_a",
-                image_path=image,
-                labels=[{"mask_name": "Liver Seg", "path": label}],
-            )
-            samples, skipped = fewshot_pipeline.discover_samples(
-                root / "images",
-                "liver",
-                label_root=export_root,
-                fallback_to_case_labels=False,
-                mask_names=["Liver Seg"],
-            )
-            self.assertEqual([], skipped)
-            self.assertTrue(label.samefile(samples[0]["label"]))
 
     def test_nonempty_mask_cannot_silently_become_empty(self):
         source = np.zeros((3, 3, 3), dtype=np.uint8)
@@ -177,44 +147,6 @@ class GeometryManifestRegressionTests(unittest.TestCase):
             )
             self.assertEqual("ready", rows[0]["state"])
             self.assertEqual("separate_label_root", rows[0]["label_source"])
-
-    def test_dinov3_materializes_mhd_image_and_label_on_source_grid(self):
-        import SimpleITK as sitk
-
-        with tempfile.TemporaryDirectory() as value:
-            root = Path(value)
-            case = root / "case_a"
-            segmentations = case / "segmentations"
-            segmentations.mkdir(parents=True)
-            image_array = np.arange(24, dtype=np.int16).reshape((2, 3, 4))
-            label_array = np.zeros((2, 3, 4), dtype=np.uint8)
-            label_array[:, 1:, 1:3] = 1
-            image = sitk.GetImageFromArray(image_array)
-            label = sitk.GetImageFromArray(label_array)
-            for current in (image, label):
-                current.SetSpacing((0.8, 0.9, 2.5))
-                current.SetOrigin((12.0, -8.0, 30.0))
-            sitk.WriteImage(image, str(case / "ct.mhd"))
-            sitk.WriteImage(label, str(segmentations / "Liver.mhd"))
-            samples, skipped = fewshot_pipeline.discover_samples(
-                root, "liver", mask_names=["Liver"]
-            )
-            self.assertEqual([], skipped)
-            rows = fewshot_pipeline._materialize_split(
-                samples,
-                root / "prepared" / "imagesTr",
-                root / "prepared" / "labelsTr",
-                "train",
-            )
-            prepared_image = nib.load(rows[0]["dataset_image"])
-            prepared_label = nib.load(rows[0]["dataset_label"])
-            self.assertEqual(prepared_image.shape, prepared_label.shape)
-            np.testing.assert_allclose(
-                prepared_image.affine, prepared_label.affine, atol=1.0e-5
-            )
-            self.assertGreater(
-                int(np.count_nonzero(np.asanyarray(prepared_label.dataobj))), 0
-            )
 
 
 if __name__ == "__main__":

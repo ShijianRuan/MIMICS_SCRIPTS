@@ -217,7 +217,6 @@ def active_runtime_blockers(project_root, exclude_modules=None):
         ("mimics_import", "_IMPORT_MONITORS", "data import"),
         ("mimics_export", "_EXPORT_MONITORS", "mask export"),
         ("mask_import", "_MASK_IMPORT_MONITORS", "mask import"),
-        ("fewshot_mimics", "_MONITORS", "DINOv3 task"),
         ("nninteractive_mimics", "_ASYNC_MONITORS", "nnInteractive prediction"),
         (
             "nninteractive_finetune_mimics",
@@ -254,17 +253,6 @@ def active_runtime_blockers(project_root, exclude_modules=None):
 
     # Training/status/setup windows also execute from nninteractive_env. Do
     # not repair packages underneath a still-running external GUI process.
-    if "fewshot_mimics" not in excluded:
-        module = sys.modules.get("fewshot_mimics")
-        processes = getattr(module, "_GUI_PROCESSES", {}) if module is not None else {}
-        for process in list((processes or {}).values()):
-            try:
-                if process.poll() is None:
-                    blockers.append("DINOv3 external window")
-                    break
-            except Exception:
-                continue
-
     if "nninteractive_finetune_mimics" not in excluded:
         module = sys.modules.get("nninteractive_finetune_mimics")
         processes = getattr(module, "_GUI_PROCESSES", {}) if module is not None else {}
@@ -529,7 +517,7 @@ def find_root(start_dir, sentinel_files=None, max_depth=6):
     if sentinel_files is None:
         sentinel_files = (
             "mimics_io_config.json",
-            "fewshot_config.json",
+            "nninteractive_config.json",
             "runtime_py35",
         )
     elif isinstance(sentinel_files, str):
@@ -623,7 +611,7 @@ def _current_process_executable():
 def _configured_mimics_executable():
     """Return an explicit repository-level background Mimics path."""
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    for filename in ("mimics_io_config.json", "fewshot_config.json"):
+    for filename in ("mimics_io_config.json", "nninteractive_config.json"):
         path = os.path.join(project_root, filename)
         try:
             with open(path, "r") as handle:

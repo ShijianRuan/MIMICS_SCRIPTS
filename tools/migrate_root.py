@@ -8,9 +8,6 @@ The command rewrites:
   * absolute path values in the six root config JSONs that point under the
     old root into root-relative paths (or new absolute paths with
     ``--absolute``),
-  * the global fewshot model index (``~/.mimics_script/fewshot_model_index.json``)
-    whose recorded absolute manifest paths are repaired by basename match
-    against the new fewshot workspaces,
   * the root ``setup_offline.bat`` when it still targets the legacy
     ``nninteractive_env`` directory name.
 
@@ -32,7 +29,6 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 CONFIG_FILES = [
-    "fewshot_config.json",
     "nninteractive_config.json",
     "nninteractive_finetune_config.json",
     "mimics_io_config.json",
@@ -43,7 +39,6 @@ CONFIG_FILES = [
 # Keys inside config files whose values are known to be paths. Everything
 # else is left untouched, so unrelated absolute-looking strings are safe.
 PATH_KEYS = {
-    "dinov3_project",
     "workspace_dir",
     "official_model_dir",
     "mimics_output_dir",
@@ -136,115 +131,6 @@ def _new_path_value(value: str, old_root: str, absolute: bool) -> str:
     if absolute:
         return str((PROJECT_ROOT / rel).resolve())
     return Path(rel).as_posix()
-
-
-def _repair_fewshot_index(
-    dry_run: bool,
-    index_path: Path | None = None,
-    project_root: Path | None = None,
-) -> list[str]:
-    """Repair dead absolute manifest paths in the global fewshot index.
-
-    The index lives in ~/.mimics_script/fewshot_model_index.json and records
-    absolute manifest paths from every machine that ever trained a model.
-    When a manifest path is dead, look for a manifest with the same basename
-    under any <ts_root>/fewshot_models/models/**/ tree reachable from the
-    index rows' ts_roots and this checkout, preferring the new checkout's
-    root.
-    """
-    root = project_root or PROJECT_ROOT
-    if index_path is None:
-        index_path = Path.home() / ".mimics_script" / "fewshot_model_index.json"
-    payload, ok = _read_json(index_path)
-    if not ok or not isinstance(payload, dict):
-        return ["fewshot index: not present or unreadable (nothing to do)"]
-    rows = payload.get("models")
-    if not isinstance(rows, list):
-        return ["fewshot index: no models key (nothing to do)"]
-
-    # Candidate roots under which manifests may live after the move.
-    candidate_roots = [root]
-    for row in rows:
-        if isinstance(row, dict):
-            ts_root = str(row.get("ts_root") or "").strip()
-            if ts_root and os.path.isdir(ts_root):
-                candidate_roots.append(Path(ts_root))
-
-    def find_manifest(basename: str) -> Path | None:
-        for search_root in candidate_roots:
-            for workspace in search_root.glob("fewshot_models/models"):
-                # Two levels of organ/model dirs at most, plus version dirs.
-                for candidate in workspace.rglob(basename):
-                    if candidate.is_file():
-                        return candidate
-            for candidate in search_root.rglob(
-                "fewshot_models/models/**/" + basename
-            ):
-                if candidate.is_file():
-                    return candidate
-        return None
-
-    log = []
-    changed = False
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        manifest_path = str(row.get("manifest_path") or "").strip()
-        reference = None
-        if manifest_path and not os.path.isfile(manifest_path):
-            basename = os.path.basename(manifest_path.replace("\\", "/"))
-            found = find_manifest(basename)
-            if found is None:
-                log.append(
-                    "fewshot index: {} (model {}) - no replacement found; "
-                    "row kept with dead path".format(
-                        manifest_path, row.get("model_id") or "?"
-                    )
-                )
-            else:
-                log.append(
-                    "fewshot index: {} (model {}) -> {}".format(
-                        manifest_path, row.get("model_id") or "?", found
-                    )
-                )
-                row["manifest_path"] = str(found)
-                reference = found
-                changed = True
-        if reference is None and manifest_path and os.path.isfile(manifest_path):
-            reference = Path(manifest_path)
-        ts_root = row.get("ts_root")
-        if (
-            isinstance(ts_root, str)
-            and ts_root.strip()
-            and not os.path.isdir(ts_root)
-            and reference is not None
-        ):
-            # Point the workspace root at the tree that now hosts the model.
-            new_root = _find_ts_root_for(reference)
-            if new_root:
-                row["ts_root"] = new_root
-                log.append(
-                    "fewshot index: ts_root (model {}) -> {}".format(
-                        row.get("model_id") or "?", new_root
-                    )
-                )
-                changed = True
-    if changed and not dry_run:
-        if _write_json(index_path, payload):
-            log.append("fewshot index: written")
-        else:
-            log.append("fewshot index: WRITE FAILED")
-    if not log:
-        log.append("fewshot index: all manifest paths resolve (nothing to do)")
-    return log
-
-
-def _find_ts_root_for(manifest: Path) -> str | None:
-    # <ts_root>/fewshot_models/models/<organ>/<model>/model_manifest.json
-    for parent in manifest.parents:
-        if parent.name == "fewshot_models":
-            return str(parent.parent.resolve())
-    return None
 
 
 def _regenerate_setup_bat(dry_run: bool) -> list[str]:
@@ -341,7 +227,6 @@ def main(argv=None) -> int:
 
     log = []
     log += _rewrite_config_paths(old_root, args.absolute, args.dry_run)
-    log += _repair_fewshot_index(args.dry_run)
     log += _regenerate_setup_bat(args.dry_run)
     if args.reset_runtime:
         log += _reset_runtime(args.dry_run)
@@ -356,7 +241,6 @@ def main(argv=None) -> int:
         print("Migration complete.")
         print("Remaining manual steps (not automatable):")
         print("  * Copy nninteractive_task_models/tasks/ (weights) if not already here.")
-        print("  * Copy integrations/dinov3-medical-seg code + models/ if not already here.")
         print("  * Copy your dataset roots (ts_root folders) if they moved too.")
     return 0
 

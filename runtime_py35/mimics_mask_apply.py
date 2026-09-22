@@ -4,8 +4,8 @@
 The mask-apply path (create/find target Mask, write a .u8 voxel buffer, verify
 the live grid matches the inference target, resolve the dataset root and
 source image of the open project) is identical across AI integrations
-(nnU-Net, FlexiCT). Extracted verbatim from the fewshot Mimics entry so
-nnunet_mimics and future entries do not depend on a deleted module.
+(nnU-Net, FlexiCT). Extracted from the original AI Mimics entry so
+nnunet_mimics and future entries share one implementation.
 
 Runs inside the foreground Mimics process (Python 3.5): .format() only, no
 f-strings, no pathlib.
@@ -50,14 +50,19 @@ def _update_gui():
 
 
 def _settings_path():
-    return os.path.join(_project_root(), ".mimics_runtime", "fewshot_mimics_state.json")
+    return os.path.join(_project_root(), ".mimics_runtime", "mimics_mask_apply_state.json")
 
 
 def _migrate_old_settings():
     """Move legacy state file from project root into .mimics_runtime/."""
-    old_path = os.path.join(_project_root(), ".fewshot_mimics_state.json")
+    old_paths = [
+        os.path.join(_project_root(), ".fewshot_mimics_state.json"),
+        os.path.join(_project_root(), ".mimics_runtime", "fewshot_mimics_state.json"),
+    ]
     new_path = _settings_path()
-    if os.path.isfile(old_path) and not os.path.isfile(new_path):
+    for old_path in old_paths:
+        if not os.path.isfile(old_path) or os.path.isfile(new_path):
+            continue
         try:
             new_dir = os.path.dirname(new_path)
             if not os.path.isdir(new_dir):
@@ -138,12 +143,12 @@ def _known_dataset_roots():
 def _project_root():
     return _find_root(
         os.path.dirname(os.path.abspath(__file__)),
-        ("fewshot_config.json", "nninteractive_config.json", ".git"),
+        ("nninteractive_config.json", ".git"),
     )
 
 
 def _config():
-    path = os.path.join(_project_root(), "fewshot_config.json")
+    path = os.path.join(_project_root(), "nnunet_config.json")
     cfg = _read_json(path, {}) or {}
     return cfg
 
@@ -237,21 +242,24 @@ def _append_python_candidate(candidates, value, base=None):
         candidates.append(os.path.abspath(os.path.join(base or _project_root(), value)))
 
 
-def _fewshot_python(config, dinov3_root):
-    # Canonical discovery first (env overrides + python_env/nninteractive_env
-    # layouts). Only when it fails do we check the fewshot-specific extras
-    # (config python, DINOv3 project venvs, and the running interpreter).
+def _integration_python(config, project_root):
+    """Resolve the external Python used by AI training/inference jobs.
+
+    Canonical discovery first (env overrides + python_env/nninteractive_env
+    layouts); the config/project-venv extras are kept for compatibility with
+    existing integrations that pass a project directory.
+    """
     found = runtime_common.find_external_python(_project_root())
     if found:
         return os.path.abspath(found)
     candidates = list(_project_python_candidates())
-    _append_python_candidate(candidates, os.environ.get("MIMICS_FEWSHOT_PYTHON", ""))
-    _append_python_candidate(candidates, config.get("python", ""))
+    _append_python_candidate(candidates, os.environ.get("MIMICS_AI_PYTHON", ""))
+    _append_python_candidate(candidates, (config or {}).get("python", ""))
     candidates.extend([
-        os.path.join(dinov3_root, ".venv", "Scripts", "python.exe"),
-        os.path.join(dinov3_root, ".venv", "bin", "python"),
-        os.path.join(dinov3_root, "venv", "Scripts", "python.exe"),
-        os.path.join(dinov3_root, "venv", "bin", "python"),
+        os.path.join(project_root, ".venv", "Scripts", "python.exe"),
+        os.path.join(project_root, ".venv", "bin", "python"),
+        os.path.join(project_root, "venv", "Scripts", "python.exe"),
+        os.path.join(project_root, "venv", "bin", "python"),
     ])
     env_roots = [
         os.path.abspath(os.path.join(_project_root(), name))
@@ -271,9 +279,10 @@ def _fewshot_python(config, dinov3_root):
     )
 
 
-def _dinov3_root(config):
-    env = os.environ.get("MIMICS_FEWSHOT_DINOV3_ROOT", "")
-    value = env or config.get("dinov3_project") or "integrations/dinov3-medical-seg"
+def _integration_root(config):
+    """Resolve the AI project directory (kept for call compatibility)."""
+    env = os.environ.get("MIMICS_AI_PROJECT_ROOT", "")
+    value = env or (config or {}).get("ai_project") or "integrations/nnunet_segmentation_workflow"
     return _resolve_path(value, _project_root())
 
 
@@ -473,7 +482,7 @@ def _active_source_geometry_payload():
 
 
 def _global_model_registry_path():
-    return os.path.join(os.path.expanduser("~"), ".mimics_script", "fewshot_model_index.json")
+    return os.path.join(os.path.expanduser("~"), ".mimics_script", "ai_model_index.json")
 
 
 def _current_project_path():
@@ -683,7 +692,7 @@ def _infer_case_id(ts_root):
         item_path = os.path.join(ts_root, item)
         if not os.path.isdir(item_path):
             continue
-        if item in ("mcs_output", "segmentations", "fewshot_models", "labels"):
+        if item in ("mcs_output", "segmentations", "fewshot_models", "flexict_models", "nnunet_models", "labels"):
             continue
         candidate_dir = os.path.abspath(os.path.join(item_path, "mcs_output"))
         if os.path.normcase(project_dir) == os.path.normcase(candidate_dir):
@@ -708,8 +717,8 @@ def _launch_process(cmd, cwd=None):
 
 def _launch_gui_process(cmd, cwd=None, stderr_log=None):
     # Thin wrapper over the shared launcher: the project root is prepended to
-    # PYTHONPATH so external scripts can import project-local modules (e.g.
-    # fewshot_strategies, tools.*).
+    # PYTHONPATH so external scripts can import project-local modules
+    # (tools.*).
     project_root = os.path.abspath(cwd or _project_root())
     return runtime_common.launch_external_gui_process(
         cmd,

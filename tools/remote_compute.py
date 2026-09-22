@@ -831,7 +831,7 @@ def test_connection(
         except Exception as exc:
             raise RemoteComputeError(
                 "The isolated GPU container preflight failed. Verify the NVIDIA "
-                "driver and Container Toolkit, install the required DINOv3 and "
+                "driver and Container Toolkit, install the required "
                 "nnInteractive weights under '{}/models', then rerun "
                 "remote/setup_remote_server.sh. Details: {}".format(root, exc)
             ) from exc
@@ -851,12 +851,8 @@ def test_connection(
                 missing.append("CUDA is unavailable inside the container")
             if not preflight.get("offline_mode"):
                 missing.append("offline runtime variables are not active")
-            if not preflight.get("dinov3_default_model"):
-                missing.append("DINOv3 default model.onnx is missing")
             if not preflight.get("nninteractive_weights"):
                 missing.append("nnInteractive base weights are missing")
-            if not preflight.get("dinov3_import"):
-                missing.append("DINOv3/ONNX runtime imports failed")
             if not preflight.get("nninteractive_import"):
                 missing.append("nnInteractive runtime imports failed")
             if not preflight.get("nnunet_import"):

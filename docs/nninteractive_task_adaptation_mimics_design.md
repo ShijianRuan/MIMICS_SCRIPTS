@@ -634,14 +634,14 @@ flowchart LR
 官方 nnInteractive server 空闲时，训练可以请求其正常关闭后取得 GPU。
 正在执行预测的 server 不得被训练任务强制终止。
 
-### 11.3 与 DINOv3 的关系
+### 11.3 GPU 共享锁
 
 继续使用共享 GPU 锁：
 
 - nnInteractive 官方推理。
 - nnInteractive 任务模型推理。
 - nnInteractive 微调。
-- DINOv3 训练和推理。
+- nnU-Net 训练和推理。
 
 同一时刻只允许一个 GPU 重任务。
 

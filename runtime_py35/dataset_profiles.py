@@ -4,7 +4,7 @@
 Before this module existed, the same preferred image names (``ct.nii.gz``,
 ...), the ``segmentations/`` mask directory, and the ``mcs_output``
 exclusion list were hardcoded in four different files (mimics_import,
-mimics_export, fewshot_pipeline, io_path_setup_ui) plus the bridge's
+mimics_export, mimics_label_export, io_path_setup_ui) plus the bridge's
 candidate ordering.  Changing the layout meant synchronising five places.
 
 This module is the single home.  ``dataset_profiles.json`` at the project

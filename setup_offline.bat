@@ -202,7 +202,7 @@ if !errorlevel! neq 0 (
 
     echo   ERROR: PySide6 import failed.
 
-    echo   Advanced DINOv3 Setup and Status windows require PySide6 in python_env.
+    echo   The external AI training and status windows require PySide6 in python_env.
 
     pause
 
@@ -247,18 +247,6 @@ python_env\python.exe -c "import paramiko; print('  Optional remote training tra
 if !errorlevel! neq 0 (
 
     echo   WARNING: Paramiko is unavailable. Local training is unaffected; remote training is disabled.
-
-)
-
-if not exist "integrations\dinov3-medical-seg\models\dinov3-vits16\model.onnx" (
-
-    echo   ERROR: The default ViT-S/16 ONNX encoder is missing.
-
-    echo   Expected: integrations\dinov3-medical-seg\models\dinov3-vits16\model.onnx
-
-    pause
-
-    exit /b 1
 
 )
 

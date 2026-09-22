@@ -519,7 +519,6 @@ def test_runtime_imports(fake, tmp):
         "mimics_export",
         "mimics_import",
         "mimics_stop_background",
-        "fewshot_mimics",
         "nninteractive_mimics",
         "nninteractive_finetune_mimics",
         "interactive_algorithms_mimics",
@@ -1268,162 +1267,10 @@ def test_nninteractive_derived_draft_session(fake, tmp):
     return "source snapshot and target Draft remain separate across async startup"
 
 
-def test_fewshot_apply_prediction_and_stop(fake, tmp):
-    tmp.mkdir(parents=True, exist_ok=True)
-    image = fake.reset_scene(image_shape=(2, 2, 2), minimum_value=0, maximum_value=100)
-    module = import_runtime_module("fewshot_mimics")
-    ts_root = tmp / "dataset"
-    (ts_root / "mcs_output").mkdir(parents=True, exist_ok=True)
-    source_project = ts_root / "mcs_output" / "s0001.mcs"
-    fake.file.project_path = str(source_project)
-
-    status_path = tmp / "infer_status.json"
-    status_path.write_text(json.dumps({"status": "completed"}), encoding="utf-8")
-    output_path = tmp / "prediction_source.nii.gz"
-    output_path.write_bytes(b"fake")
-    bridge_output_path = tmp / "prediction.u8"
-    bridge_output_path.write_bytes(bytes([1, 0, 0, 1, 0, 0, 0, 0]))
-    bridge_result_path = tmp / "bridge_result.json"
-    bridge_result_path.write_text(json.dumps({
-        "status": "ok",
-        "output_path": str(bridge_output_path),
-        "mimics_shape": [2, 2, 2],
-        "foreground_voxels": 2,
-    }), encoding="utf-8")
-    source_mask = FakeMask("liver", image=image, array=_u8_buffer((2, 2, 2), 1), selected=True)
-    fake.data.masks.append(source_mask)
-    fake.dialogs.question_answers.append(module.BUTTON_UPDATE_SELECTED)
-    monitor = {
-        "monitor_key": "fake-monitor",
-        "deadline": time.time() + 60,
-        "status_path": str(status_path),
-        "bridge_started": True,
-        "bridge_result_path": str(bridge_result_path),
-        "mask_name": "liver",
-        "ts_root": str(ts_root),
-        "case_id": "s0001",
-        "launch_project_path": str(source_project),
-        "target_grid": module._active_live_grid_payload(),
-        "prediction_target": module._deferred_prediction_target(source_mask),
-    }
-    module._MONITORS["fake-monitor"] = monitor
-    fake.file.project_path = str(ts_root / "mcs_output" / "different_case.mcs")
-    module._monitor_tick(monitor)
-    assert_equal(source_mask.number_of_pixels, 8,
-                 "prediction must not alter the target in a different open project")
-    waiting_status = json.loads(status_path.read_text(encoding="utf-8"))
-    assert_equal(waiting_status.get("application_state"), "waiting_for_source_case",
-                 "switched-case prediction state")
-    fake.file.project_path = str(source_project)
-    module._monitor_tick(monitor)
-    applied = [mask for mask in fake.data.masks if mask is source_mask]
-    assert_equal(len(applied), 1, "few-shot result mask count")
-    assert_equal(applied[0].number_of_pixels, 2, "few-shot result foreground count")
-    assert_true("fake-monitor" not in module._MONITORS, "few-shot monitor was not stopped")
-    completion_choices = [item for item in fake.dialogs.questions if item.get("title") == "DINOv3 Prediction Ready"]
-    assert_equal(len(completion_choices), 1, "few-shot completion choice count")
-
-    fake.file.project_path = str(source_project)
-    jobs_dir = ts_root / "fewshot_models" / "jobs"
-    jobs_dir.mkdir(parents=True, exist_ok=True)
-    cancel_path = tmp / "cancel.request"
-    job_path = jobs_dir / "job1.json"
-    job_path.write_text(json.dumps({
-        "job_id": "job1",
-        "kind": "train",
-        "organ": "liver",
-        "status": "waiting_for_gpu",
-        "cancel_path": str(cancel_path),
-    }), encoding="utf-8")
-    fake.dialogs.question_answers.append(module.BUTTON_STOP)
-    result = module._stop_latest_job()
-    assert_equal(result, 0, "stop latest job result")
-    stopped = json.loads(job_path.read_text(encoding="utf-8"))
-    assert_equal(stopped.get("status"), "cancelled", "stopped job status")
-    assert_true(cancel_path.is_file(), "cancel request file missing")
-    assert_true(fake.dialogs.messages[-1]["ui_blocking"] is False, "stop confirmation should be non-blocking")
-    return "prediction apply and stop-latest-job flow passed"
 
 
-def test_fewshot_profile_selector(fake, tmp):
-    fake.reset_scene(image_shape=(2, 2, 2), minimum_value=0, maximum_value=100)
-    module = import_runtime_module("fewshot_mimics")
-    config = {
-        "default_training_profile": "balanced",
-        "training_profiles": {
-            "balanced": {
-                "epochs": 10,
-                "finetune_method": "lora",
-                "batch_size": 1,
-                "img_size": "224,224",
-                "val_fraction": 0.2,
-            },
-            "quality_lora": {
-                "epochs": 20,
-                "finetune_method": "lora",
-                "batch_size": 1,
-                "img_size": "256,256",
-                "val_fraction": 0.25,
-            },
-        },
-    }
-    fake.dialogs.question_answers.append("quality_lora")
-    options = module._profile_training_options(config)
-    assert_equal(options.get("epochs"), 20, "selected profile epochs")
-    assert_equal(options.get("img_size"), "256,256", "selected profile image size")
-    assert_true(fake.dialogs.questions, "profile selector did not ask the user")
-    assert_true("quality_lora" in fake.dialogs.questions[-1]["buttons"], "profile button missing")
-    return "DINOv3 profile selector returned the chosen training profile without PyQt5"
 
 
-def test_fewshot_external_advanced_setup(fake, tmp):
-    fake.reset_scene(image_shape=(2, 2, 2), minimum_value=0, maximum_value=100)
-    module = import_runtime_module("fewshot_mimics")
-    ts_root = tmp / "dataset"
-    (ts_root / "mcs_output").mkdir(parents=True, exist_ok=True)
-    (ts_root / "mcs_output" / "s0001.mcs").write_text("", encoding="utf-8")
-    fake.file.project_path = str(ts_root / "mcs_output" / "s0001.mcs")
-    launched = []
-    baseline_messages = len(fake.dialogs.messages)
-
-    class Proc:
-        pid = 76543
-        def poll(self):
-            return None
-
-    old_launch = module._launch_gui_process
-    old_monitor = module._start_monitor
-    old_project = module._project_root
-    old_script = module._training_setup_ui_script
-    try:
-        module._launch_gui_process = lambda cmd, cwd=None, stderr_log=None: launched.append((cmd, cwd)) or Proc()
-        module._start_monitor = lambda monitor, poll_seconds=1.0: True
-        module._project_root = lambda: str(ROOT)
-        module._training_setup_ui_script = lambda: str(ROOT / "tools" / "fewshot_training_setup_ui.py")
-        result = module._launch_external_advanced_training(
-            {"python": sys.executable, "dinov3_project": "integrations/dinov3-medical-seg"},
-            "liver",
-            str(ts_root),
-        )
-    finally:
-        module._launch_gui_process = old_launch
-        module._start_monitor = old_monitor
-        module._project_root = old_project
-        module._training_setup_ui_script = old_script
-    assert_equal(result, 0, "external setup launch result")
-    assert_equal(len(launched), 1, "external setup Popen call count")
-    cmd, _cwd = launched[0]
-    assert_true("fewshot_training_setup_ui.py" in cmd[1], "external setup script not launched")
-    assert_true("--context" in cmd, "external setup context argument missing")
-    context_path = Path(cmd[cmd.index("--context") + 1])
-    assert_true(context_path.is_file(), "external setup context file missing")
-    context = json.loads(context_path.read_text(encoding="utf-8"))
-    assert_equal(context["organ"], "liver", "external setup organ")
-    status = json.loads(Path(context["setup_status_path"]).read_text(encoding="utf-8"))
-    assert_equal(status["status"], "configuring", "external setup status")
-    assert_equal(status["controller_pid"], 76543, "external setup controller pid")
-    assert_equal(len(fake.dialogs.messages), baseline_messages, "external setup should not show a Mimics popup")
-    return "DINOv3 Advanced setup launches externally and returns immediately"
 
 
 def test_stop_background_locks(fake, tmp):
@@ -1469,7 +1316,7 @@ def build_parser():
     parser.add_argument("--keep-temp", action="store_true", help="Keep the temporary test directory.")
     parser.add_argument(
         "--only",
-        choices=("imports", "append", "entrypoint", "window", "export", "nninteractive", "taskmodels", "fewshot", "stop", "all"),
+        choices=("imports", "append", "entrypoint", "window", "export", "nninteractive", "taskmodels", "stop", "all"),
         default="all",
     )
     return parser
@@ -1500,10 +1347,6 @@ def main(argv=None):
         tests.append(("nnInteractive derived Draft flow", lambda: test_nninteractive_derived_draft_session(fake, tmp / "nninteractive_draft")))
     if args.only in ("taskmodels", "all"):
         tests.append(("nnInteractive task-model routing", lambda: test_nninteractive_task_model_routing(fake, tmp / "nninteractive_task_models")))
-    if args.only in ("fewshot", "all"):
-        tests.append(("DINOv3 few-shot Mimics-side flow", lambda: test_fewshot_apply_prediction_and_stop(fake, tmp / "fewshot")))
-        tests.append(("DINOv3 few-shot profile selector", lambda: test_fewshot_profile_selector(fake, tmp / "fewshot_profile")))
-        tests.append(("DINOv3 external Advanced setup", lambda: test_fewshot_external_advanced_setup(fake, tmp / "fewshot_external_setup")))
     if args.only in ("stop", "all"):
         tests.append(("Stop Background Services lock cleanup", lambda: test_stop_background_locks(fake, tmp / "stop")))
     for name, func in tests:

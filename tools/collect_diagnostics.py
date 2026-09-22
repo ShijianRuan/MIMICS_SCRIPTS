@@ -40,7 +40,6 @@ LOG_TARGETS = [
 ]
 
 CONFIG_SNAPSHOTS = [
-    ("configs/fewshot_config.json", "fewshot_config.json"),
     ("configs/nninteractive_config.json", "nninteractive_config.json"),
     ("configs/nninteractive_finetune_config.json", "nninteractive_finetune_config.json"),
     ("configs/mimics_io_config.json", "mimics_io_config.json"),
@@ -149,7 +148,7 @@ def _environment_info() -> dict:
 def _collect_registry_rows() -> dict:
     rows = {}
     home_registry = Path.home() / ".mimics_script"
-    for name in ("fewshot_model_index.json", "nnunet_model_registry.json"):
+    for name in ("nnunet_model_registry.json",):
         path = home_registry / name
         if path.is_file():
             try:

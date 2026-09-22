@@ -38,9 +38,6 @@ Useful log locations:
 - Export background Mimics log: `<ts_root>\mcs_output\_background_export_mimics.log`
 - nnInteractive logs: `<repo>\.mimics_runtime\nninteractive\logs\nninteractive_mimics.log`
 - nnInteractive bridge/server logs: paths shown in Mimics error dialogs, usually under `<repo>\.mimics_runtime\nninteractive\`
-- DINOv3 log: `<ts_root>\fewshot_models\fewshot_pipeline.log`
-- DINOv3 job status: `<ts_root>\fewshot_models\runs\<organ>\<run_id>\job_status.json`
-- DINOv3 train progress: `<ts_root>\fewshot_models\runs\<organ>\<run_id>\train_status.json`
 - Stop report: `<repo>\.mimics_runtime\stop_background_last.json`
 
 ## Test Data Needed
@@ -55,13 +52,13 @@ Prepare a small but representative validation set:
 - 1 MHD/MHA case with non-identity spacing, origin, and direction.
 - Optional but valuable: MR DICOM or MR NIfTI, oblique CT, and one case on a
   network drive if that is part of normal use.
-- At least one already annotated `.mcs` with several named masks for DINOv3 and
-  export validation.
+- At least one already annotated `.mcs` with several named masks for AI
+  training and export validation.
 
 Avoid sending patient-identifying data back. Screenshots can be cropped to the
 image viewport and logs can be redacted for paths if needed.
 
-## 1. Import And MCS Orientation
+## 1.Import And MCS Orientation
 
 Goal: confirm that imported image and mask are aligned in Mimics for arbitrary
 source orientations.
@@ -124,7 +121,7 @@ Report:
 Pass condition: masks overlap the image anatomy in all views, and failures are
 explicitly logged instead of creating a wrong `.mcs`.
 
-## 2. Batch Import Failure, Resume, And Disk Cleanup
+## 2.Batch Import Failure, Resume, And Disk Cleanup
 
 Goal: confirm that failed cases do not corrupt the queue and successful cases do
 not leave unnecessary derived DICOM/buffer data.
@@ -150,7 +147,7 @@ Report:
 Pass condition: one failed case does not stop unrelated cases, retry behavior is
 understandable, and large intermediates are not retained for successful cases.
 
-## 3. Import Responsiveness In Foreground Mimics
+## 3.Import Responsiveness In Foreground Mimics
 
 Goal: confirm that selecting a folder and starting discovery does not black-screen
 or freeze the foreground Mimics GUI.
@@ -177,7 +174,7 @@ Report:
 Pass condition: any pause is short and clearly tied to the native folder dialog
 return, not to Python-side dataset scanning.
 
-## 4. nnInteractive Source Image Path
+## 4.nnInteractive Source Image Path
 
 Goal: confirm that nnInteractive uses source image metadata when available and
 does not silently fall back to the Mimics buffer.
@@ -226,7 +223,7 @@ Report:
 Pass condition: source mode is used for imported projects, missing source paths
 fail explicitly, and repeated prompts avoid unnecessary image reload work.
 
-## 5. nnInteractive Prompt Workflows
+## 5.nnInteractive Prompt Workflows
 
 Goal: confirm the integrated prompt behavior is usable and matches expected
 nnInteractive workflow semantics.
@@ -263,109 +260,15 @@ Pass condition: prompt capture may use Mimics dialogs/tools, inference and
 result waiting do not block the foreground GUI, the source Mask remains
 unchanged, and successful automatic application shows a non-blocking notice.
 
-## 6. DINOv3 Few-Shot Training
-
-Goal: confirm training integrates with the annotation workflow without blocking
-Mimics and exposes enough progress to users.
-
-Inside Mimics:
-
-```text
-Scripting Library > 02_AI > DINOv3 > 01_Train_Model
-Scripting Library > 02_AI > DINOv3 > 04_Show_Status_Results
-Scripting Library > 02_AI > DINOv3 > 05_Stop_AI_Task
-```
-
-External smoke test with few samples:
-
-```powershell
-python tools\fewshot_pipeline.py discover --ts-root "D:\Dataset" --organ liver --cases s0001,s0002
-python tools\fewshot_pipeline.py train --ts-root "D:\Dataset" --organ liver --cases s0001,s0002 --epochs 3 --val-fraction 0.5 --run-id validation_liver
-python tools\fewshot_pipeline.py list-models --ts-root "D:\Dataset" --organ liver --all
-```
-
-In the external setup window, verify the two pages are `Data and samples` and
-`Model and policy`. Confirm that presets are starting points rather than organ
-lookups and that selecting `Custom` allows supported combinations. Exercise the
-dependency rules: full volume must disable sliding inference; 2.5D must enable
-neighbor distance; custom patch/window inputs must enable only in custom mode;
-and LoRA/adapter/clDice fields must follow their parent selection.
-
-After fresh Mask export, inspect the materialized sample record. Every
-`fresh_export` must report matching source image/label shape and affine, and
-`fresh_source_geometry_checked_cases` must list the selected cases. A mismatch
-must fail before GPU training starts.
-
-During training, verify `Show_Status` and `fewshot_pipeline.log` show epoch,
-loss, learning rate, validation dice when validation is enabled, and best dice.
-
-Cancel test:
-
-```powershell
-python tools\fewshot_pipeline.py cancel --ts-root "D:\Dataset"
-```
-
-Report:
-
-- Training profile used, organ name, selected cases, train/validation counts.
-- Whether `Show_Status` updates while training is still running.
-- A few `Training progress:` log lines.
-- Whether cancellation frees GPU memory and marks the job cancelled.
-- `job_status.json`, `train_status.json`, `fewshot_pipeline.log`, and final
-  `manifest.json` if training completed.
-
-Pass condition: training runs outside foreground Mimics, progress is visible,
-cancel works, and checkpoints are cleaned according to `keep_last_checkpoints`.
-
-## 7. DINOv3 Inference And Mask Application
-
-Goal: confirm DINOv3 predictions are converted into the active Mimics grid before
-being applied to masks.
-
-Inside Mimics:
-
-```text
-Scripting Library > 02_AI > DINOv3 > 02_Predict_Current_Case
-Scripting Library > 02_AI > DINOv3 > 03_Predict_Choose_Model
-```
-
-External inference:
-
-```powershell
-python tools\fewshot_pipeline.py infer --ts-root "D:\Dataset" --case-id s0003 --organ liver --model-id latest
-```
-
-Report:
-
-- Whether the prediction mask appears on the correct anatomy in all three views.
-- Whether Mimics logs say:
-
-```text
-DINOv3 prediction conversion will use the active Mimics image grid
-```
-
-- Start prediction on `s0003`, then open another `.mcs` before it finishes. The
-  status must become `waiting_for_source_case`; no Mask may be written to the
-  second project. Reopen `s0003` and confirm application resumes.
-- Modify a copied registered `config.yaml` and confirm inference fails during
-  preflight with a configuration-integrity error instead of using changed
-  preprocessing.
-- Include the launch-time and application-time grid shape/matrix from the job
-  status if grid validation fails. There must be no fallback to source geometry.
-
-Pass condition: DINOv3 output mask aligns with the current `.mcs` image and does
-not require manual flip/rotate fixes; switching projects cannot apply the result
-to the wrong patient.
-
-## 8. GPU And Background Mimics Resource Contention
+## 6.GPU And Background Mimics Resource Contention
 
 Goal: confirm background tasks queue rather than crashing each other.
 
 Test:
 
 1. Start an nnInteractive inference that keeps the server warm.
-2. Start a DINOv3 training job.
-3. Confirm DINOv3 waits for the GPU lock or reports a clear wait status.
+2. Start an nnU-Net training job.
+3. Confirm the training job waits for the GPU lock or reports a clear wait status.
 4. Start batch `.mcs` creation and batch label export near the same time.
 5. Confirm only one background Mimics task owns the `background_mimics.lock`.
 
@@ -373,13 +276,13 @@ Report:
 
 - `.mimics_runtime\locks\gpu.lock`
 - `.mimics_runtime\locks\background_mimics.lock`
-- `fewshot_pipeline.log`
+- nnU-Net training log
 - Any Mimics license or background Mimics startup errors.
 
 Pass condition: tasks wait, fail clearly, or can be cancelled; they do not cause
 CUDA OOM, hidden stuck workers, or foreground Mimics instability.
 
-## 9. Stop Background Services
+## 7.Stop Background Services
 
 Goal: confirm manual stop releases integration-owned processes without killing
 foreground Mimics or unrelated processes.
@@ -400,13 +303,13 @@ Report:
 
 - Whether foreground Mimics stayed open.
 - `stop_background_last.json`.
-- Whether GPU memory was released after stopping nnInteractive/DINOv3.
+- Whether GPU memory was released after stopping nnInteractive/nnU-Net.
 - Any process that remained unexpectedly.
 
 Pass condition: only Mimics-Script-owned bridge, worker, server, watchdog, and
 background Mimics processes are stopped.
 
-## 10. Window/Level Presets
+## 8.Window/Level Presets
 
 Goal: confirm preset values are correct in real Mimics GV range and reset/undo do
 not crash.
@@ -438,7 +341,7 @@ Report:
 Pass condition: presets clamp to the Mimics-accepted range, Reset Full Range does
 not raise `ValueError`, and Undo restores the previous contrast.
 
-## 11. External Batch Export
+## 9.External Batch Export
 
 Goal: confirm labels can be exported without using the foreground Mimics window.
 
@@ -457,17 +360,16 @@ Report:
 Pass condition: export runs in background Mimics, foreground Mimics remains
 usable, and exported label orientation matches the original image/mask geometry.
 
-## 12. Draft Continuation, Resource Handoff, And Storage
+## 10.Draft Continuation, Resource Handoff, And Storage
 
 - Select an existing `<source> - AI Draft`, add another prompt, and confirm no `AI Draft 2` or `AI Draft - AI Draft` is created.
-- Start batch import, then start DINOv3 training with fresh label export enabled. Confirm status reports that label export is waiting for background Mimics, names the import owner, and offers `01 Data > 04 Stop Import Queue` as the optional action.
+- Start batch import, then start nnU-Net training with fresh label export enabled. Confirm status reports that label export is waiting for background Mimics, names the import owner, and offers `01 Data > 04 Stop Import Queue` as the optional action.
 - Let import finish and confirm label export and training start automatically without restarting setup.
-- Start an nnInteractive prompt and immediately queue DINOv3 training. Confirm the active prediction completes before the GPU is released.
-- Leave nnInteractive idle for more than 15 seconds, then queue DINOv3 training. Confirm the image worker closes gracefully and training starts without the legacy one-hour wait.
+- Start an nnInteractive prompt and immediately queue nnU-Net training. Confirm the active prediction completes before the GPU is released.
+- Leave nnInteractive idle for more than 15 seconds, then queue nnU-Net training. Confirm the image worker closes gracefully and training starts without the legacy one-hour wait.
 - After training finishes, run nnInteractive again and confirm a new image worker starts instead of reusing a dead server session.
-- Complete one DINOv3 prediction and confirm its result is applied before the prediction NIfTI and bridge directory are removed.
+- Complete one nnU-Net prediction and confirm its result is applied before the prediction NIfTI and bridge directory are removed.
 - Cancel training after materialization and confirm the run-specific dataset and fresh-label staging are removed when the controller exits.
-- Complete training and confirm the registered model remains while duplicate experiment checkpoints are removed.
 - Run `99 Admin > 02 Clear Cache` while an AI task is active. Confirm active worker, lock, and status files remain intact.
 - Run `03 Stop All Owned Services` in a disposable test. Confirm foreground Mimics and unrelated Python/Mimics processes remain running.
 
@@ -497,7 +399,7 @@ Actual:
 Foreground Mimics responsive? yes/no, freeze time:
 Image/mask alignment in axial/coronal/sagittal:
 Timing summary if nnInteractive:
-Training progress lines if DINOv3:
+Training progress lines if training was tested:
 Stop/cancel behavior:
 
 Files attached or copied:
@@ -506,9 +408,7 @@ Files attached or copied:
 - prepare_manifest.json:
 - nninteractive_mimics.log:
 - nninteractive_bridge.jsonl:
-- fewshot_pipeline.log:
-- job_status.json:
-- train_status.json:
+- training job status/log files:
 - stop_background_last.json:
 
 Screenshots:
@@ -523,6 +423,6 @@ Run these first:
    three views.
 2. Run nnInteractive on one imported `.mcs` and confirm source image mode plus
    timing logs.
-3. Train a 2-3 epoch DINOv3 smoke model and confirm progress/cancel/status.
-4. Run DINOv3 inference and confirm prediction mask aligns in Mimics.
+3. Train a short nnU-Net smoke model and confirm progress/cancel/status.
+4. Run nnU-Net inference and confirm prediction mask aligns in Mimics.
 5. Run Stop Background Services and confirm foreground Mimics is not killed.

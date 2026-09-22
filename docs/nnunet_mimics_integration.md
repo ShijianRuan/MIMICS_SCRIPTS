@@ -193,7 +193,7 @@ Preprocessing is reused only when the source-grid dataset and planning options
 have the same fingerprint. On a mismatch, the old generated dataset directory
 is removed before preprocessing so deleted cases cannot survive as stale
 arrays. Training and inference share the repository-wide local GPU lock with
-DINOv3 and nnInteractive. Waiting is cancellable and visible in status; an idle
+nnInteractive. Waiting is cancellable and visible in status; an idle
 nnInteractive server is asked to release the GPU. Remote containers use the
 server-side GPU scheduler instead and do not acquire this local lock again.
 
@@ -307,7 +307,7 @@ implemented end to end.
   tick.
 - The only intentional modal interaction is the final choice between updating
   matching Masks and creating editable copies, plus explicit Stop confirmation.
-- Local training and inference share the repository GPU lock with DINOv3 and
+- Local training and inference share the repository GPU lock with
   nnInteractive. Remote jobs use the selected server GPU queue and do not take
   the local GPU lock.
 - Local setup failure, local worker death, remote-controller loss, remote

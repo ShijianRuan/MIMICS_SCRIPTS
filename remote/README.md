@@ -1,6 +1,6 @@
 # Remote AI Server Setup
 
-The remote runtime is optional. Local DINOv3, nnInteractive, and nnU-Net
+The remote runtime is optional. Local nnInteractive and nnU-Net
 training or inference do not use it unless a user explicitly chooses a saved
 remote server in the corresponding external window.
 
@@ -15,7 +15,7 @@ MIMICS_AI_ROOT=/srv/mimics-ai \
 ```
 
 This builds `mimics-ai-runtime:1.0`, creates the work folders, checks the
-installed base weights, all three frameworks, and the offline container
+installed base weights, both frameworks, and the offline container
 contract. The image is built
 once. Starting a later training job creates a small disposable container from
 the existing image and does not rebuild the image.
@@ -49,7 +49,6 @@ building.
 Before setup completes, install the base weights at:
 
 ```text
-/srv/mimics-ai/models/dinov3/dinov3-vits16/model.onnx
 /srv/mimics-ai/models/nninteractive/nnInteractive_v1.0/
 ```
 

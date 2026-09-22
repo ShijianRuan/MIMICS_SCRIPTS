@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document defines how DINOv3 and nnInteractive task-model workflows behave
+This document defines how nnInteractive task-model workflows behave
 when data or models move between workstations, and what is reused when a later
 training run changes only part of a dataset.
 
@@ -19,7 +19,6 @@ dataset/
   mcs_output/
     <case-id>.mcs
     dataset_manifest.json
-  fewshot_models/
 ```
 
 `dataset_manifest.json` stores both a relative and an original absolute path.
@@ -27,22 +26,18 @@ Resolution prefers the relative path. A moved dataset therefore remains usable
 when the same internal directory structure is retained, even though the old
 drive letter or workstation path no longer exists.
 
-The DINOv3 prediction and status entries no longer ask for a dataset folder at
-startup:
+Prediction and status entries do not ask for a dataset folder at startup:
 
-- Prediction resolves the open project, manifest, source image, recent
-  workspaces, and reusable model registry automatically.
+- Prediction resolves the open project, manifest, source image, and recent
+  workspaces automatically.
 - Custom nnInteractive inference also uses the manifest when the absolute
   source path stored in `.mcs` metadata no longer exists.
-- Status and Stop resolve the most recently active known workspace.
-- If no history exists, Status opens a user-local model-management workspace
-  so a portable model package can be imported without selecting a dataset.
 - A path error is shown only when the current project cannot be linked safely.
 
 ### Model packages
 
 Do not rely on copying a machine-local registry JSON. Use the model package
-controls in the DINOv3 status window or nnInteractive model center.
+controls in the nnInteractive model center.
 
 The package contains relative model artifacts and portable inference
 configuration. Import creates a new local registry entry whose paths point to
@@ -55,7 +50,7 @@ A copied `.mcs` can still be opened and edited in Mimics. It is not, by itself,
 a verified replacement for the source image used to train a source-grid AI
 model.
 
-DINOv3 and custom nnInteractive models require the declared physical-intensity
+Custom nnInteractive models require the declared physical-intensity
 and geometry input contract. Mimics voxel buffers can differ in intensity
 encoding and grid from the source image. The integration therefore does not
 silently use a display/GV buffer when a source-trained model expects the source
@@ -76,7 +71,7 @@ editing do not require the original source image.
 
 ### Local `.mcs` label export
 
-Both DINOv3 and nnInteractive keep a persistent label cache under their
+nnInteractive keeps a persistent label cache under its
 workspace:
 
 ```text
@@ -91,17 +86,6 @@ Mask names, and export contract version. A later training run:
 - invalidates a case when its image, project, Mask selection, or export
   contract changes;
 - keeps per-run staging temporary and deletes it after publication.
-
-DINOv3 additionally keeps source-grid image/label pairs under:
-
-```text
-<workspace>/cache/materialized/<organ>/<case-id>/
-```
-
-It hard-links or copies unchanged cached pairs into the current run. A changed
-source image or label rebuilds only that case. If the optional cache cannot be
-written, training falls back to direct materialization and records a warning
-instead of failing solely because the optimization was unavailable.
 
 nnInteractive also reuses prepared image/label arrays under:
 

@@ -2,8 +2,8 @@
 
 ## 1. Goal and compatibility boundary
 
-This feature adds optional SSH/Docker execution for DINOv3 few-shot training,
-nnInteractive task fine-tuning, and managed nnU-Net training/inference.
+This feature adds optional SSH/Docker execution for nnInteractive task
+fine-tuning and managed nnU-Net training/inference.
 
 The primary compatibility rule is:
 
@@ -17,7 +17,7 @@ The primary compatibility rule is:
 - No remote code is imported by the Mimics Python runtime. Mimics only launches
   the existing external PySide6 process.
 
-DINOv3 and nnInteractive inference remain local after the downloaded model is
+nnInteractive inference remains local after the downloaded model is
 registered. Managed nnU-Net additionally supports optional remote batch
 inference; its prediction is downloaded, geometry-validated, and then applied
 through the same Mimics-side buffer path as a local prediction. Local remains
@@ -25,7 +25,7 @@ the default for every framework.
 
 ## 2. User workflow
 
-The DINOv3, nnInteractive, and nnU-Net setup windows use the same additive
+The nnInteractive and nnU-Net setup windows use the same additive
 **Compute** section:
 
 1. **This workstation** remains the default.
@@ -62,11 +62,9 @@ flowchart LR
     F -->|"Unchanged cases"| G
     O --> G["Unified Docker image"]
     G --> H{"Training kind"}
-    H --> I["DINOv3 pipeline"]
     H --> J["nnInteractive fine-tuning pipeline"]
     H --> P["nnU-Net training or inference pipeline"]
-    I --> K["Model artifact"]
-    J --> K
+    J --> K["Model artifact"]
     P --> K
     K --> L["Resumable download"]
     L --> M["Existing local model registry"]
@@ -146,9 +144,6 @@ shared across accounts.
 Base models are installed once by the server administrator under:
 
 ```text
-<remote-root>/models/dinov3/dinov3-vits16/
-<remote-root>/models/dinov3/dinov3-vitb16/
-<remote-root>/models/dinov3/dinov3-vitl16/
 <remote-root>/models/nninteractive/nnInteractive_v1.0/
 ```
 
@@ -236,7 +231,7 @@ result. `remote_worker.log` is appended to the local task log while training is
 running rather than being downloaded only at the end. The remote file rotates
 at 32 MiB and retains three backups, so a verbose or long job cannot grow it
 without bound. SSH/controller
-diagnostics are kept in `remote_controller.log` for DINOv3 and in the existing
+diagnostics are kept in `remote_controller.log` and in the existing
 nnInteractive task log. Both status viewers expose the relevant log paths.
 
 Expected states include:
@@ -311,7 +306,7 @@ MIMICS_AI_ROOT=/srv/mimics-ai \
 ```
 
 This builds the image, creates the remote folders, verifies base weights, and
-runs DINOv3, nnInteractive, nnU-Net, CUDA, and offline-runtime preflights.
+runs nnInteractive, nnU-Net, CUDA, and offline-runtime preflights.
 
 Job containers use `--network none` and also set
 `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`,
@@ -366,7 +361,6 @@ Automated local tests cover:
 - Remote subprocess logs rotate at a bounded size.
 - Local artifact space is checked before model download/extraction.
 - Local abandon is terminal without claiming remote stop confirmation.
-- The default DINOv3 launch calls the unchanged local command.
 - Remote execution occurs only when explicitly selected.
 - Remote status cannot replace local control paths.
 - Result archives reject traversal paths and links.
@@ -381,12 +375,12 @@ python -m unittest tools.test_remote_training -v
 
 Required Windows/Mimics acceptance tests:
 
-1. Start local DINOv3, nnInteractive, and nnU-Net training without creating a server
+1. Start local nnInteractive and nnU-Net training without creating a server
    profile; compare command, status, model registration, and inference with the
    previous version.
 2. Save a password profile, restart Windows, and confirm the password is read
    from Credential Manager while absent from project JSON/logs.
-3. Train one small DINOv3, nnInteractive, and nnU-Net job remotely, then run
+3. Train one small nnInteractive and nnU-Net job remotely, then run
    inference with each downloaded model; also verify one remote nnU-Net inference.
 4. Compare local and remote training using identical data, seed, image, and
    parameters. Exact floating-point identity is not guaranteed across CUDA
@@ -406,8 +400,8 @@ Required Windows/Mimics acceptance tests:
 
 ## 10. Deliberate limitations
 
-- No remote interactive nnInteractive inference and no remote DINOv3
-  single-case inference. Managed nnU-Net remote inference is supported.
+- No remote interactive nnInteractive inference. Managed nnU-Net remote
+  inference is supported.
 - No central model marketplace or cross-user model approval workflow.
 - No password is stored on non-Windows development machines; use an SSH key or
   a test-only environment variable there.

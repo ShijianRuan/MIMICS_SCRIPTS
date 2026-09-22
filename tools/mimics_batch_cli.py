@@ -77,7 +77,7 @@ def resolve_bridge_python(explicit=None):
     if found:
         return found
     candidates = list(project_python_candidates())
-    env_value = os.environ.get("MIMICS_FEWSHOT_PYTHON")
+    env_value = os.environ.get("MIMICS_AI_PYTHON") or os.environ.get("MIMICS_FEWSHOT_PYTHON")
     if env_value:
         path = Path(env_value)
         if not path.is_absolute():
@@ -1489,7 +1489,6 @@ def cmd_kill_background(args):
         "--async-worker",
         "_run_create_mcs.py",
         "_run_export_batch.py",
-        "fewshot_pipeline.py",
         "nninteractive.inference.server.main",
         "interactive_algorithms_worker.py",
         "--watchdog",

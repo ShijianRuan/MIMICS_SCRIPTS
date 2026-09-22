@@ -157,7 +157,7 @@ segmentation。上一会话的提示历史不会继续保留，但分割结果�
 
 第一次推理需要启动模型服务，通常比后续提示慢。脚本会复用正在运行的本机服务。启动前会检查 GPU 空闲显存（`minimum_free_gpu_memory_gb`，默认 4 GB）：空闲不足时直接给出"关闭其他 GPU 程序"的明确提示，而不是等到模型加载中途才 OOM。
 
-服务由 bridge 创建并记录所有权，不会根据一个来源不明的 PID 直接终止进程。每次提示都会刷新活动时间；默认连续 30 分钟没有推理请求后，独立 watchdog 会核对 PID、启动命令、模型路径和所有权 token，再关闭自己启动的服务并释放 GPU。受管服务持有 `<repo>/.mimics_runtime/locks/gpu.lock`，DINOv3 训练和推理会等待这把锁而不是同时争抢 CUDA 显存。如果 watchdog 自己崩溃，默认启动清理和 DINOv3 的 GPU 等待逻辑都只会在 state 文件、ownership token 和 idle timeout 同时满足时清理该受管 server。nnInteractive 官方的 `idle-timeout` 只回收 client session，本集成没有把它误当作服务退出机制。
+服务由 bridge 创建并记录所有权，不会根据一个来源不明的 PID 直接终止进程。每次提示都会刷新活动时间；默认连续 30 分钟没有推理请求后，独立 watchdog 会核对 PID、启动命令、模型路径和所有权 token，再关闭自己启动的服务并释放 GPU。受管服务持有 `<repo>/.mimics_runtime/locks/gpu.lock`，GPU 训练和推理任务会等待这把锁而不是同时争抢 CUDA 显存。如果 watchdog 自己崩溃，默认启动清理和 GPU 等待逻辑都只会在 state 文件、ownership token 和 idle timeout 同时满足时清理该受管 server。nnInteractive 官方的 `idle-timeout` 只回收 client session，本集成没有把它误当作服务退出机制。
 
 `start_server.bat` 只用于人工诊断。默认自动管理模式下，诊断结束后应按 Ctrl+C 停止它再运行 Mimics；若确实要长期连接手工启动的服务，需要在 `nninteractive_config.json` 中显式设置 `auto_start_server: false`。自动模式不会接管或结束来源不明的进程；默认端口 `1527` 已被占用时，会为本次受管服务选择另一个空闲本地端口，并把实际地址写入状态和日志。
 
@@ -412,7 +412,7 @@ the integration would change model behavior.
 The Scripting Library entries are organized by workflow:
 
 - `01_Data`: dataset import and mask export.
-- `02_AI`: nnInteractive and DINOv3 few-shot actions.
+- `02_AI`: nnInteractive, nnU-Net, and ScribblePrompt actions.
 - `03_Review`: mask identification, window/level presets, undo and reset.
 - `99_Admin`: background-service cleanup.
 
@@ -422,10 +422,6 @@ loads the target runtime module. The wrappers do not call `importlib.reload()`
 on every click, because reload can discard in-memory monitors for background
 inference or training jobs while those jobs are still expected to report back to
 Mimics.
-
-DINOv3 exposes one external `Train Model` setup entry, separate recommended
-and explicit-model prediction intents, `Show Status Results`, and `Stop AI
-Task`. This preserves one-click common prediction without a mode popup.
 
 ### 13.5 Source-Image Fast Path For Prewarming
 

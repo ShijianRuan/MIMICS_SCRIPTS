@@ -547,7 +547,7 @@ def _bridge_python():
     # and the standard python_env/nninteractive_env layouts.
     root = runtime_common.find_root(
         os.path.dirname(os.path.abspath(__file__)),
-        ("nninteractive_config.json", "fewshot_config.json", "mimics_bridge.py", ".git"),
+        ("nninteractive_config.json", "mimics_bridge.py", ".git"),
     )
     return runtime_common.find_external_python(root) or os.environ.get(
         "MIMICS_BRIDGE_PYTHON", ""

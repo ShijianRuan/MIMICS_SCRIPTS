@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export and import portable DINOv3 and nnInteractive task-model bundles."""
+"""Export and import portable nnInteractive task-model bundles."""
 
 from __future__ import annotations
 
@@ -18,15 +18,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in os.sys.path:
     os.sys.path.insert(0, str(ROOT))
 
-from tools.fewshot_pipeline import (
-    load_repo_config,
-    portable_inference_config,
-    register_global_model,
-    resolve_path,
-    resolved_manifest_payload,
-    safe_slug as fewshot_slug,
-    validate_model_manifest,
-)
 from tools.nninteractive_task_common import (
     audit_model_dir,
     find_task,
@@ -285,145 +276,8 @@ def import_nninteractive(args: argparse.Namespace) -> int:
     return 0
 
 
-def export_dinov3(args: argparse.Namespace) -> int:
-    manifest_path = Path(args.manifest).expanduser().resolve()
-    manifest = validate_model_manifest(
-        resolved_manifest_payload(manifest_path), manifest_path
-    )
-    model_dir = manifest_path.parent
-    portable = {
-        key: value
-        for key, value in manifest.items()
-        if not str(key).startswith("_")
-    }
-    portable["checkpoint"] = Path(manifest["checkpoint"]).name
-    portable["config"] = Path(manifest["config"]).name
-    portable.pop("ts_root", None)
-    portable.pop("workspace", None)
-    portable.pop("dataset_dir", None)
-    portable.pop("experiment_dir", None)
-    portable.pop("dinov3_root", None)
-    portable.pop("base_config", None)
-    portable.pop("training_source_checkpoint", None)
-    portable.pop("metrics_history", None)
-    portable.pop("samples", None)
-    portable.pop("train_samples", None)
-    portable.pop("validation_samples", None)
-    portable.pop("fresh_label_cleanup", None)
-    portable["source_checkpoint"] = Path(manifest["checkpoint"]).name
-    training_parameters = dict(portable.get("training_parameters") or {})
-    for key in ("base_config", "model_path", "label_root"):
-        training_parameters.pop(key, None)
-    portable["training_parameters"] = training_parameters
-    metadata = {
-        "schema_version": "mimics_ai_model_bundle.v1",
-        "model_family": "dinov3_fewshot",
-        "created_at_epoch": time.time(),
-        "manifest": portable,
-    }
-    with tempfile.TemporaryDirectory(prefix="mimics_dinov3_export_") as raw:
-        portable_dir = Path(raw) / "model"
-        portable_dir.mkdir(parents=True)
-        shutil.copy2(manifest["checkpoint"], portable_dir / "model.pth")
-        dino_root = Path(
-            manifest.get("dinov3_root")
-            or os.environ.get("MIMICS_FEWSHOT_DINOV3_ROOT")
-            or load_repo_config().get("dinov3_project")
-            or (ROOT / "integrations" / "dinov3-medical-seg")
-        ).expanduser().resolve()
-        if str(dino_root) not in os.sys.path:
-            os.sys.path.insert(0, str(dino_root))
-        try:
-            from src.utils.config import load_config as load_dinov3_config
-
-            effective = load_dinov3_config(str(manifest["config"]))
-        except Exception as exc:
-            raise RuntimeError(
-                "The DINOv3 inference configuration could not be made "
-                "portable: {}".format(exc)
-            )
-        import yaml
-
-        (portable_dir / "config.yaml").write_text(
-            yaml.safe_dump(
-                portable_inference_config(effective, dino_root),
-                sort_keys=False,
-                allow_unicode=False,
-            ),
-            encoding="utf-8",
-        )
-        portable["checkpoint"] = "model.pth"
-        portable["config"] = "config.yaml"
-        portable["config_sha256"] = __import__("hashlib").sha256(
-            (portable_dir / "config.yaml").read_bytes()
-        ).hexdigest()
-        write_json_atomic(portable_dir / "manifest.json", portable)
-        metadata["manifest"] = portable
-        output = _write_bundle(Path(args.output), metadata, portable_dir)
-    print(str(output))
-    return 0
 
 
-def import_dinov3(args: argparse.Namespace) -> int:
-    workspace = Path(args.workspace).expanduser().resolve()
-    with tempfile.TemporaryDirectory(prefix="mimics_dinov3_import_") as raw:
-        staging = Path(raw)
-        metadata = _extract_bundle(Path(args.bundle).expanduser().resolve(), staging)
-        if metadata.get("model_family") != "dinov3_fewshot":
-            raise RuntimeError("This is not a DINOv3 model package.")
-        manifest = dict(metadata.get("manifest") or {})
-        staged_manifest = staging / "model" / "manifest.json"
-        write_json_atomic(staged_manifest, manifest)
-        checked = validate_model_manifest(manifest, staged_manifest)
-        organ_slug = fewshot_slug(
-            manifest.get("organ_slug")
-            or manifest.get("organ")
-            or "target"
-        )
-        model_id = fewshot_slug(manifest.get("model_id") or "model")
-        destination = workspace / "models" / organ_slug / model_id
-        if destination.exists():
-            raise RuntimeError(
-                "Model already exists in the target workspace: {}".format(
-                    destination
-                )
-            )
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        publishing = destination.with_name(
-            "{}.importing_{}".format(destination.name, uuid.uuid4().hex)
-        )
-        published = False
-        try:
-            shutil.copytree(staging / "model", publishing)
-            manifest["checkpoint"] = Path(checked["checkpoint"]).name
-            manifest["config"] = Path(checked["config"]).name
-            write_json_atomic(publishing / "manifest.json", manifest)
-            os.replace(str(publishing), str(destination))
-            published = True
-            manifest_path = destination / "manifest.json"
-            if args.set_latest:
-                latest = dict(manifest)
-                latest["checkpoint"] = "{}/{}".format(
-                    model_id, manifest["checkpoint"]
-                )
-                latest["config"] = "{}/{}".format(model_id, manifest["config"])
-                latest["model_manifest"] = "{}/manifest.json".format(model_id)
-                write_json_atomic(destination.parent / "latest.json", latest)
-        except Exception:
-            shutil.rmtree(
-                destination if published else publishing,
-                ignore_errors=True,
-            )
-            raise
-        try:
-            register_global_model(manifest, manifest_path)
-        except Exception as exc:
-            print(
-                "Warning: the model was imported into this dataset, but the "
-                "cross-dataset index could not be updated: {}".format(exc)
-            )
-    print(str(destination))
-    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -442,17 +296,6 @@ def build_parser() -> argparse.ArgumentParser:
     import_nn.add_argument("--bundle", required=True)
     import_nn.add_argument("--set-current", action="store_true")
     import_nn.set_defaults(func=import_nninteractive)
-
-    export_dino = sub.add_parser("export-dinov3")
-    export_dino.add_argument("--manifest", required=True)
-    export_dino.add_argument("--output", required=True)
-    export_dino.set_defaults(func=export_dinov3)
-
-    import_dino = sub.add_parser("import-dinov3")
-    import_dino.add_argument("--workspace", required=True)
-    import_dino.add_argument("--bundle", required=True)
-    import_dino.add_argument("--set-latest", action="store_true")
-    import_dino.set_defaults(func=import_dinov3)
     return parser
 
 

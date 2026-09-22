@@ -16,11 +16,10 @@
 | 入口 | 作用 | 需要满足的条件 |
 |------|------|--------------|
 | nnInteractive Segmentation | 以选中掩码为提示做 AI 分割 | **项目已打开** + 已激活图像 + 已选中掩码 + 环境已设置 |
-| DINOv3 Train Model | 训练小样本分割模型 | 数据集（含已导出的掩码）+ 环境已设置 + 推荐 GPU |
-| DINOv3 Predict (Latest Model) | 用最新模型推理当前案例 | **项目已打开** + 已激活图像 + 已选中掩码 + 已有训练好的模型 |
-| DINOv3 Predict (Choose Model) | 手动选择模型后推理 | 同上，多个模型时弹出选择窗口 |
-| DINOv3 Show Status | 查看任务进度/日志/训练曲线 | 有启动过的 DINOv3 任务 |
-| DINOv3 Stop AI Task | 停止当前训练或推理 | 有正在运行的 AI 任务 |
+| nnU-Net Train Model | 训练多类别分割模型 | 数据集（含已导出的掩码）+ 环境已设置 + 推荐 GPU |
+| nnU-Net Predict Current Case | 用训练好的模型推理当前案例 | **项目已打开** + 已激活图像 + 已有训练好的模型 |
+| nnU-Net Show Status & Models | 查看任务进度/模型列表 | 有启动过的 nnU-Net 任务 |
+| nnU-Net Stop Running Task | 停止当前训练或推理 | 有正在运行的 nnU-Net 任务 |
 
 ## 审阅工具
 

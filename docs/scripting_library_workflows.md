@@ -53,18 +53,18 @@ policy through either `--output-dir` or `--overwrite-source`.
 resource lock identifies it as label export. It first writes an export stop
 marker so no additional case is opened, then terminates the recorded process
 tree only when its command line matches the export runner. It does not stop an
-import queue, DINOv3, nnInteractive, foreground Mimics, or unrelated processes.
+import queue, AI training or inference, nnInteractive, foreground Mimics, or unrelated processes.
 
 ### 02 AI
 
 1. `01 nnInteractive`
-2. `DINOv3/01 Train Model`
-3. `DINOv3/02 Predict Current Case`
-4. `DINOv3/03 Predict Choose Model`
-5. `DINOv3/04 Show Status Results`
-6. `DINOv3/05 Stop AI Task`
+2. `nnUNet/01 Train Model`
+3. `nnUNet/02 Predict Current Case`
+4. `nnUNet/03 Show Status & Models`
+5. `nnUNet/04 Stop Running Task`
 
-The two prediction entries intentionally remain separate. The common path uses the latest valid model directly, while the second path lets the user select a previous model version. Combining them would either remove model-version control or add an unnecessary selection step to every prediction.
+The training and prediction entries remain separate so the common path keeps a
+dedicated setup window while prediction stays one click.
 
 ### 03 Review
 
@@ -96,7 +96,7 @@ Set `existing_mask_result_mode` to `in_place` or `derived_copy` only when a fixe
 
 | Event | User feedback |
 | --- | --- |
-| nnInteractive or few-shot prediction ready | One target-choice dialog that also reports completion; no follow-up success dialog |
+| nnInteractive prediction ready | One target-choice dialog that also reports completion; no follow-up success dialog |
 | Training completed | Non-blocking completion dialog and persistent job log |
 | Background task accepted or external window opened | Mimics log only |
 | User cancels a picker or setup window | Mimics log only |
@@ -109,13 +109,13 @@ Set `existing_mask_result_mode` to `in_place` or `derived_copy` only when a fixe
 | --- | --- | --- | --- |
 | Dataset preparation | CPU, disk | Runs independently in external Python | Mimics remains usable |
 | `.mcs` creation | One background Mimics instance per active queue | Only creators consuming the same import queue are serialized | Import queue continues automatically |
-| DINOv3 label export | Saved `.mcs` source and fresh-label destination | Waits for a writer of the same `.mcs` folder or another exporter to the same label destination | Status names the conflicting resource and its owner |
-| Current-project mask read/write | Foreground Mimics voxel-buffer API | Mask import, export, nnInteractive apply, and DINOv3 apply share a short `mask_buffer_access` lease | A competing callback is deferred or refused rather than mutating the same masks concurrently |
-| nnInteractive prediction | GPU | Serialized with DINOv3 training and prediction | An active prompt is never interrupted |
-| Idle nnInteractive worker | GPU | Receives a graceful close request when DINOv3 needs the GPU | DINOv3 starts after release; the next prompt creates a fresh worker |
-| DINOv3 training and prediction | GPU | Serialized to prevent CUDA out-of-memory failures | Waiting state, owner, PID, cancellation action, and progress remain visible |
+| Training label export | Saved `.mcs` source and fresh-label destination | Waits for a writer of the same `.mcs` folder or another exporter to the same label destination | Status names the conflicting resource and its owner |
+| Current-project mask read/write | Foreground Mimics voxel-buffer API | Mask import, export, and AI result apply share a short `mask_buffer_access` lease | A competing callback is deferred or refused rather than mutating the same masks concurrently |
+| nnInteractive prediction | GPU | Serialized with nnU-Net training and prediction | An active prompt is never interrupted |
+| Idle nnInteractive worker | GPU | Receives a graceful close request when another AI task needs the GPU | The waiting task starts after release; the next prompt creates a fresh worker |
+| nnU-Net training and prediction | GPU | Serialized to prevent CUDA out-of-memory failures | Waiting state, owner, PID, cancellation action, and progress remain visible |
 
-Import does not block DINOv3 computation by design. Background Mimics ownership
+Import does not block AI computation by design. Background Mimics ownership
 is scoped to an import queue or export destination, so independent jobs may run
 in parallel. Set `MIMICS_SERIALIZE_BACKGROUND_MIMICS=1` only when a workstation's
 license or Mimics installation genuinely allows one background instance.
@@ -132,7 +132,7 @@ in parallel.
 Mask export uses the inverse contract. Every entry first records or measures the
 live Mimics voxel-to-RAS matrix, restores the Mimics buffer order, and maps the
 label to the selected source-image grid. Internal batch export, external
-`export-labels`, and DINOv3 label staging hold both the directory containing the
+`export-labels`, and training label staging hold both the directory containing the
 source `.mcs` projects and the directory they actually write. This prevents an
 exporter from opening a project while an importer is replacing it, and prevents
 two exporters from writing the same labels. Locks are acquired in stable path
@@ -216,12 +216,12 @@ differs.
 
 | Current work | May start immediately | Must wait or stop first | Normal stop | Emergency stop |
 | --- | --- | --- | --- | --- |
-| Dataset scan or image preparation | Review, window controls, nnInteractive, DINOv3 inference on prepared data | Another import of the same queue | `01 Data/04 Stop Import Queue` | `99 Admin/03 Stop All Owned Services` |
+| Dataset scan or image preparation | Review, window controls, nnInteractive, AI inference on prepared data | Another import of the same queue | `01 Data/04 Stop Import Queue` | `99 Admin/03 Stop All Owned Services` |
 | Background `.mcs` creation | Review, GPU AI work, and exports reading other `.mcs` folders | Another creator or exporter using the same `.mcs` folder | `01 Data/04 Stop Import Queue` | `99 Admin/03 Stop All Owned Services` |
 | Mask export | Review, GPU AI work, and imports/exports using unrelated source and destination folders | Import writing its `.mcs` source folder, or export writing the same label destination | `01 Data/06 Stop Mask Export` | `99 Admin/03 Stop All Owned Services` |
-| nnInteractive active prediction | Review and data preparation | DINOv3 GPU execution | Finish or cancel the current nnInteractive session | `99 Admin/03 Stop All Owned Services` |
-| nnInteractive idle image worker | All review and data work | Nothing; DINOv3 requests a graceful GPU release | Worker exits on idle timeout | `99 Admin/03 Stop All Owned Services` |
-| DINOv3 training or prediction | Review, import preparation, status viewer | Another DINOv3 task for the same dataset; nnInteractive GPU execution | `02 AI/DINOv3/05 Stop AI Task` | `99 Admin/03 Stop All Owned Services` |
+| nnInteractive active prediction | Review and data preparation | nnU-Net GPU execution | Finish or cancel the current nnInteractive session | `99 Admin/03 Stop All Owned Services` |
+| nnInteractive idle image worker | All review and data work | Nothing; another AI task requests a graceful GPU release | Worker exits on idle timeout | `99 Admin/03 Stop All Owned Services` |
+| nnU-Net training or prediction | Review, import preparation, status viewer | Another GPU AI task; nnInteractive GPU execution | `02 AI/nnUNet/04 Stop Running Task` | `99 Admin/03 Stop All Owned Services` |
 | Environment repair | Review and data work | A second environment repair | Re-run the entry and choose `Stop Current Setup` | `99 Admin/03 Stop All Owned Services` |
 
 Resource conflicts fail or wait explicitly; they do not start a competing
@@ -247,24 +247,21 @@ Generated files are separated into disposable runtime data and durable user data
 - nnInteractive terminal async jobs: three days, at most 20 recent terminal jobs.
 - nnInteractive source-image caches: seven days, at most 12 fingerprinted entries.
 - nnInteractive, import, export, and pipeline logs: size-based rotation for shared log files.
-- DINOv3 materialized `imagesTr`, `labelsTr`, `imagesVal`, and `labelsVal`: removed when the training process exits unless explicitly retained.
 - Fresh `.mcs` label staging: removed when the training process exits, including failures and cancellations.
-- DINOv3 training experiment checkpoints: the deployable checkpoint is copied into the model registry; duplicate experiment artifacts are removed when the process exits by default.
-- DINOv3 terminal job records: 30 days, at most 100 recent records.
 - Failed or cancelled run folders: seven days.
 - Completed run text logs: 30 days. Structured metrics and configuration remain available.
-- DINOv3 prediction NIfTI and bridge buffers: removed immediately after successful application to Mimics. Failed results are retained temporarily for diagnosis.
+- Prediction NIfTI and bridge buffers: removed immediately after successful application to Mimics. Failed results are retained temporarily for diagnosis.
 
 ### Never deleted automatically
 
 - Saved `.mcs` projects and exported labels requested by the user.
-- Registered DINOv3 model weights, model manifests, configuration, and structured convergence metrics.
+- Registered model weights, model manifests, configuration, and structured convergence metrics.
 - Active job state, active resource locks, and active worker directories.
 - Source datasets and original medical images.
 
 `99 Admin > 02 Clear Cache` runs outside the GUI thread. It no longer treats the entire `.mimics_runtime` directory as a cache; active lifecycle state and locks are preserved. `03 Stop All Owned Services` requires both a project-owned path and a dedicated process marker, and explicitly excludes the foreground Mimics process.
 
-The retention defaults are configured in `nninteractive_config.json` and `fewshot_config.json`. Durable models require deliberate model-version management and are not silently removed based on age.
+The retention defaults are configured in `nninteractive_config.json`. Durable models require deliberate model-version management and are not silently removed based on age.
 
 ## Validation still requiring Mimics
 

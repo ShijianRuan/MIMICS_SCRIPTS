@@ -15,7 +15,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     WANDB_MODE=offline \
     MIMICS_REMOTE_LOG_MAX_BYTES=33554432 \
     MIMICS_REMOTE_LOG_BACKUP_COUNT=3 \
-    PYTHONPATH=/app:/app/tools:/app/integrations/dinov3-medical-seg/src:/app/integrations/nninteractive-finetune/src:/app/integrations/nnunet_segmentation_workflow
+    PYTHONPATH=/app:/app/tools:/app/integrations/nninteractive-finetune/src:/app/integrations/nnunet_segmentation_workflow
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
@@ -27,7 +27,6 @@ RUN python -m pip install --upgrade pip \
     && python -m pip install -r /tmp/remote-requirements.txt
 
 COPY . /app
-RUN python -m pip install --no-deps -e /app/integrations/dinov3-medical-seg \
-    && python -m pip install --no-deps -e /app/integrations/nninteractive-finetune
+RUN python -m pip install --no-deps -e /app/integrations/nninteractive-finetune
 
 CMD ["python", "/app/tools/remote_worker.py", "preflight", "--models-dir", "/models"]

@@ -38,12 +38,7 @@ MARKERS = (
     "mimics_export.py",
     "mimics_import.py",
 
-    # DINOv3 few-shot training/inference
-    "fewshot_pipeline.py",
-    "fewshot_mimics.py",
-    "fewshot_model_chooser.py",
-    "fewshot_training_setup_ui.py",
-    "fewshot_status_viewer.py",
+    # AI training/inference integrations
     "nninteractive_finetune_pipeline.py",
     "nninteractive_task_model_center.py",
     "nninteractive_task_model_chooser.py",
@@ -76,7 +71,7 @@ _STOP_MONITORS = {}
 def _project_root():
     return runtime_common.find_root(
         os.path.dirname(os.path.abspath(__file__)),
-        ("nninteractive_config.json", "fewshot_config.json", "mimics_bridge.py", ".git"),
+        ("nninteractive_config.json", "mimics_bridge.py", ".git"),
     )
 
 
@@ -154,7 +149,6 @@ def _stop_inprocess_monitors():
     for module_name, collection_name, stop_name in (
         ("mimics_import", "_IMPORT_MONITORS", "_stop_import_monitor"),
         ("fix_source_affine_metadata", "_MONITORS", "_stop_monitor"),
-        ("fewshot_mimics", "_MONITORS", "_stop_monitor"),
         ("nninteractive_mimics", "_ASYNC_MONITORS", "_stop_async_monitor"),
         ("interactive_algorithms_mimics", "_MONITORS", "_cancel_monitor"),
         ("nnunet_mimics", "_MONITORS", "_stop_monitor"),
@@ -177,17 +171,6 @@ def _stop_inprocess_monitors():
         try:
             task_models._stop_all_monitors()
             stopped += 1
-        except Exception:
-            pass
-    fewshot = sys.modules.get("fewshot_mimics")
-    if fewshot is not None:
-        for process in list(getattr(fewshot, "_GUI_PROCESSES", {}).values()):
-            try:
-                runtime_common.terminate_process_async(process=process, graceful_seconds=2.0)
-            except Exception:
-                pass
-        try:
-            fewshot._GUI_PROCESSES.clear()
         except Exception:
             pass
     nninteractive = sys.modules.get("nninteractive_mimics")
@@ -259,7 +242,7 @@ def _scan_filesystem_for_queue_dirs():
     for dirpath, _dirnames, filenames in os.walk(root):
         # Skip deep vendor/env trees
         if any(skip in dirpath.replace(os.sep, "/") for skip in (
-            "python_env", "nninteractive_env", ".git", "__pycache__", "integrations/dinov3",
+            "python_env", "nninteractive_env", ".git", "__pycache__", "integrations",
         )):
             continue
         if "_mcs_queue_active.json" in filenames:
@@ -875,7 +858,6 @@ def _active_cache_cleanup_blockers():
         ("mimics_import", "_IMPORT_MONITORS"),
         ("mimics_export", "_EXPORT_MONITORS"),
         ("mask_import", "_MASK_IMPORT_MONITORS"),
-        ("fewshot_mimics", "_MONITORS"),
         ("nninteractive_mimics", "_ASYNC_MONITORS"),
         ("interactive_algorithms_mimics", "_MONITORS"),
         ("nnunet_mimics", "_MONITORS"),

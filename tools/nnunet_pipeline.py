@@ -265,7 +265,7 @@ def _case_directories(dataset_root: Path, requested: set[str] | None) -> list[Pa
     for child in sorted(dataset_root.iterdir()):
         if not child.is_dir() or child.name.startswith("."):
             continue
-        if child.name in {"mcs_output", "fewshot_models", "nnunet_models"}:
+        if child.name in {"mcs_output", "flexict_models", "nnunet_models"}:
             continue
         if requested and child.name not in requested:
             continue
@@ -349,7 +349,7 @@ def _export_mcs_labels(
     status_path: Path,
     control_path: Path,
 ) -> Path:
-    from tools import mimics_label_export as fewshot_pipeline
+    from tools import mimics_label_export
 
     mcs_dir = Path(str(request.get("mcs_dir") or "")).expanduser().resolve()
     if not mcs_dir.is_dir():
@@ -364,7 +364,7 @@ def _export_mcs_labels(
         message="Exporting selected Masks from saved Mimics projects.",
         progress_percent=3,
     )
-    result = fewshot_pipeline.launch_mimics_export(
+    result = mimics_label_export.launch_mimics_export(
         Path(request["dataset_root"]).expanduser().resolve(),
         set(case_ids),
         request.get("mimics_exe"),
@@ -906,7 +906,7 @@ def _spawn_worker(
         ownership_token = ""
         try:
             # Register the stage worker so the health panel and kill-background
-            # see it (mirrors the fewshot pipeline's trainer registration).
+            # see it (mirrors the finetune pipelines' trainer registration).
             record = register_process(
                 ROOT,
                 "nnunet_{}".format(stage),

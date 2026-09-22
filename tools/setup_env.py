@@ -66,7 +66,7 @@ REQUIRED_PACKAGES = [
     "nnunetv2>=2.8.1,<2.9",
 ]
 
-# Preferred external GUI backend for DINOv3 advanced setup/status windows.
+# Preferred external GUI backend for advanced setup/status windows.
 # PySide6 is intentionally kept separate from the core AI packages so checks can
 # report UI readiness clearly, while the runtime can still fall back if needed.
 GUI_IMPORTS = [
@@ -466,8 +466,6 @@ def check():
     # 6. Model weights
     model_roots = [
         PROJECT_ROOT / name / "models" for name in ENV_DIR_CANDIDATES
-    ] + [
-        PROJECT_ROOT / "integrations" / "dinov3-medical-seg" / "models",
     ]
     for root in model_roots:
         if root.is_dir():

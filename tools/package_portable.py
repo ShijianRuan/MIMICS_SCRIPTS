@@ -42,7 +42,6 @@ INCLUDE_FILES = [
     "nninteractive_config.json",
     "nninteractive_finetune_config.json",
     "interactive_algorithms_config.json",
-    "fewshot_config.json",
     "window_level_presets.json",
     ".dockerignore",
     ".gitignore",
@@ -55,9 +54,6 @@ REQUIRED_EXTERNAL_UI_FILES = [
     "tools/ui_preferences.py",
     "tools/training_data_ui.py",
     "tools/mask_file_picker_ui.py",
-    "tools/fewshot_training_setup_ui.py",
-    "tools/fewshot_status_viewer.py",
-    "tools/fewshot_model_chooser.py",
     "tools/nninteractive_task_common.py",
     "tools/nninteractive_finetune_pipeline.py",
     "tools/nninteractive_task_model_center.py",
@@ -81,10 +77,6 @@ REQUIRED_EXTERNAL_UI_FILES = [
     "integrations/nnunet_segmentation_workflow/trainers/MimicsNNUNetTrainer.py",
     "integrations/nnunet_segmentation_workflow/trainers/MimicsNNUNetTrainerNoMirroring.py",
 ]
-DEFAULT_FROZEN_ENCODER = (
-    "integrations/dinov3-medical-seg/models/dinov3-vits16/model.onnx"
-)
-
 ARCHIVE_NAME = "mimics_script_portable"
 
 # Environment directory names, in preference order. python_env is the new
@@ -214,10 +206,7 @@ def check():
         "python_env/models/nnInteractive_v1.0",
         "nninteractive_env/models/nnInteractive_v1.0",
     ]
-    optional_model_dirs = [
-        "integrations/dinov3-medical-seg/models/dinov3-vitb16",
-        "integrations/dinov3-medical-seg/models/dinov3-vitl16",
-    ]
+    optional_model_dirs = []
     for rel in required_model_dirs:
         p = PROJECT_ROOT / rel
         if p.is_dir():
@@ -248,24 +237,6 @@ def check():
                 _yellow("[--]")
             )
         )
-    frozen_encoder = PROJECT_ROOT / DEFAULT_FROZEN_ENCODER
-    if frozen_encoder.is_file() and frozen_encoder.stat().st_size > 1024 * 1024:
-        print(
-            "  {} {} ({:.1f} MB)".format(
-                _green("[OK]"),
-                DEFAULT_FROZEN_ENCODER,
-                frozen_encoder.stat().st_size / (1024.0 * 1024.0),
-            )
-        )
-    else:
-        print(
-            "  {} {}  -- REQUIRED DEFAULT ENCODER MISSING".format(
-                _red("[!!]"),
-                DEFAULT_FROZEN_ENCODER,
-            )
-        )
-        ok = False
-
     print("\n  {}".format(_green("All checks passed.") if ok else _red("Some checks failed.")))
     return 0 if ok else 1
 
@@ -293,14 +264,6 @@ def pack(output_dir=None, with_env=False):
         print(_red("Models directory not found: {}".format(models_dir)))
         print("Model weights are required. Download them before packaging.")
         return 1
-    frozen_encoder = PROJECT_ROOT / DEFAULT_FROZEN_ENCODER
-    if not frozen_encoder.is_file() or frozen_encoder.stat().st_size <= 1024 * 1024:
-        print(_red("Default frozen encoder was not found: {}".format(frozen_encoder)))
-        print(
-            "Place the verified ViT-S/16 model.onnx at the configured path "
-            "before packaging."
-        )
-        return 1
 
     archive = os.path.join(output_dir, ARCHIVE_NAME + ".zip")
     print("Creating: {}".format(archive))
@@ -323,8 +286,6 @@ def pack(output_dir=None, with_env=False):
         "pyqt5_wheels",
     ]
     EXCLUDE_SUFFIXES = (".pyc", ".pyo")
-    # DINOv3 external: ship src + scripts + config + models, skip docs + tests + caches
-    EXCLUDE_DINOV3_DIRS = {"docs", "tests", ".cache", "__pycache__", ".pytest_cache"}
     # The fine-tuning package contains large experiment workspaces and
     # validation datasets. Runtime deployment only needs its source/config.
     EXCLUDE_NNINTERACTIVE_FINETUNE_DIRS = {
@@ -344,12 +305,6 @@ def pack(output_dir=None, with_env=False):
                 return False
         if arcname.endswith(EXCLUDE_SUFFIXES):
             return False
-        # DINOv3 external: only ship what's needed at runtime
-        if arcname.startswith("integrations/dinov3-medical-seg/"):
-            dinov3_rel = arcname[len("integrations/dinov3-medical-seg/"):]
-            top = dinov3_rel.split("/")[0] if "/" in dinov3_rel else dinov3_rel
-            if top in EXCLUDE_DINOV3_DIRS:
-                return False
         if arcname.startswith("integrations/nninteractive-finetune/"):
             package_rel = arcname[len("integrations/nninteractive-finetune/"):]
             top = package_rel.split("/")[0] if "/" in package_rel else package_rel
@@ -1094,7 +1049,7 @@ def _generate_offline_bat(python_version, python_short):
     lines.append("@@ENV@@\\python.exe -c \"import PySide6, shiboken6; from PySide6 import QtCore, QtWidgets; print('  PySide6', QtCore.__version__)\"")
     lines.append('if !errorlevel! neq 0 (')
     lines.append("    echo   ERROR: PySide6 import failed.")
-    lines.append("    echo   Advanced DINOv3 Setup and Status windows require PySide6 in @@ENV@@.")
+    lines.append("    echo   Advanced AI setup and status windows require PySide6 in @@ENV@@.")
     lines.append("    pause")
     lines.append("    exit /b 1")
     lines.append(")")
@@ -1117,16 +1072,6 @@ def _generate_offline_bat(python_version, python_short):
     lines.append("@@ENV@@\\python.exe -c \"import paramiko; print('  Optional remote training transport ready:', paramiko.__version__)\"")
     lines.append("if !errorlevel! neq 0 (")
     lines.append("    echo   WARNING: Paramiko is unavailable. Local training is unaffected; remote training is disabled.")
-    lines.append(")")
-    lines.append(
-        'if not exist "integrations\\dinov3-medical-seg\\models\\dinov3-vits16\\model.onnx" ('
-    )
-    lines.append("    echo   ERROR: The default ViT-S/16 ONNX encoder is missing.")
-    lines.append(
-        "    echo   Expected: integrations\\dinov3-medical-seg\\models\\dinov3-vits16\\model.onnx"
-    )
-    lines.append("    pause")
-    lines.append("    exit /b 1")
     lines.append(")")
     lines.append(
         'if not exist "integrations\\ScribblePrompt\\checkpoints\\ScribblePrompt_unet_v1_nf192_res128.pt" ('

@@ -72,8 +72,8 @@ class TestCollectBundle(unittest.TestCase):
             "panel error at C:\\Users\\doctor\\private\\path.py",
             encoding="utf-8",
         )
-        (base / "fewshot_config.json").write_text(
-            json.dumps({"dinov3_project": "integrations/dinov3-medical-seg"}),
+        (base / "mimics_io_config.json").write_text(
+            json.dumps({"mcs_output_dir": "E:/exports"}),
             encoding="utf-8",
         )
         return runtime
@@ -90,7 +90,7 @@ class TestCollectBundle(unittest.TestCase):
                 names = set(archive.namelist())
                 self.assertIn("logs/import_tail.log", names)
                 self.assertIn("logs/setup_env_tail.log", names)
-                self.assertIn("configs/fewshot_config.json", names)
+                self.assertIn("configs/mimics_io_config.json", names)
                 self.assertIn("diagnostics/runtime_census.json", names)
                 self.assertIn("diagnostics/environment.json", names)
                 import_tail = archive.read("logs/import_tail.log").decode("utf-8")

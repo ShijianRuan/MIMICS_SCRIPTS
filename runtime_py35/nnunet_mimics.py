@@ -16,7 +16,7 @@ import uuid
 import mimics
 
 import external_window_launcher
-import mimics_mask_apply as fewshot_mimics
+import mimics_mask_apply
 import runtime_common
 
 
@@ -35,7 +35,7 @@ _MONITORS = {}
 def _project_root():
     return runtime_common.find_root(
         __file__,
-        ("nnunet_config.json", "fewshot_config.json", "runtime_py35"),
+        ("nnunet_config.json", "nninteractive_config.json", "runtime_py35"),
     )
 
 
@@ -62,8 +62,8 @@ def _workspace():
 
 
 def _external_python():
-    config = fewshot_mimics._config()
-    return fewshot_mimics._fewshot_python(config, fewshot_mimics._dinov3_root(config))
+    config = mimics_mask_apply._config()
+    return mimics_mask_apply._integration_python(config, mimics_mask_apply._integration_root(config))
 
 
 def _log(level, message):
@@ -113,7 +113,7 @@ def _active_image_masks():
 
 def _mask_snapshot(mask):
     return {
-        "guid": fewshot_mimics._mask_identity(mask),
+        "guid": mimics_mask_apply._mask_identity(mask),
         "name": str(getattr(mask, "name", "") or ""),
         "pixel_count": int(getattr(mask, "number_of_pixels", 0) or 0),
     }
@@ -152,7 +152,7 @@ def _launch_gui(script_name, context, monitor_kind):
     script = os.path.join(_project_root(), "tools", script_name)
     if not os.path.isfile(script):
         raise RuntimeError("External nnU-Net window is missing: {0}".format(script))
-    process = fewshot_mimics._launch_gui_process(
+    process = mimics_mask_apply._launch_gui_process(
         [_external_python(), script, "--context", context_path],
         cwd=_project_root(),
         stderr_log=stderr_path,
@@ -176,13 +176,13 @@ def _training_context():
     dataset_root = str(settings.get("dataset_root") or "")
     mcs_dir = str(settings.get("mcs_dir") or "")
     try:
-        inferred = fewshot_mimics._infer_dataset_root_from_project()
+        inferred = mimics_mask_apply._infer_dataset_root_from_project()
         if inferred:
             dataset_root = inferred
     except Exception:
         pass
     try:
-        project = fewshot_mimics._current_project_path() or ""
+        project = mimics_mask_apply._current_project_path() or ""
         if project:
             mcs_dir = os.path.dirname(project)
     except Exception:
@@ -223,14 +223,14 @@ def start_training():
 def _prediction_context():
     selected = _selected_masks()
     selected_mask = selected[0] if len(selected) == 1 else None
-    ts_root, case_id, source_path = fewshot_mimics._resolve_prediction_context()
+    ts_root, case_id, source_path = mimics_mask_apply._resolve_prediction_context()
     if not case_id or not source_path:
         raise RuntimeError(
             "The active project could not be linked to its original image. "
             "Relink the source image metadata before starting nnU-Net prediction."
         )
-    target_grid = fewshot_mimics._active_live_grid_payload()
-    source_geometry = fewshot_mimics._active_source_geometry_payload()
+    target_grid = mimics_mask_apply._active_live_grid_payload()
+    source_geometry = mimics_mask_apply._active_source_geometry_payload()
     if not target_grid or not source_geometry:
         raise RuntimeError(
             "The active image physical grid could not be verified. Prediction was not started."
@@ -242,7 +242,7 @@ def _prediction_context():
         "source_image_path": source_path,
         "source_geometry_expected": source_geometry,
         "target_grid": target_grid,
-        "launch_project_path": fewshot_mimics._current_project_path() or "",
+        "launch_project_path": mimics_mask_apply._current_project_path() or "",
         "prediction_target": _mask_snapshot(selected_mask) if selected_mask else {},
         "matching_masks": [_mask_snapshot(mask) for mask in _active_image_masks()],
     }
@@ -295,7 +295,7 @@ def show_status():
         stderr_path = context_path + ".stderr.log"
         _write_json(context_path, context)
         script = os.path.join(_project_root(), "tools", "nnunet_status_viewer.py")
-        process = fewshot_mimics._launch_gui_process(
+        process = mimics_mask_apply._launch_gui_process(
             [_external_python(), script, "--context", context_path],
             cwd=_project_root(),
             stderr_log=stderr_path,
@@ -439,7 +439,7 @@ def stop_running_task():
         "--status",
         status_path,
     ]
-    fewshot_mimics._launch_process(command, cwd=_project_root())
+    mimics_mask_apply._launch_process(command, cwd=_project_root())
     _log(logging.INFO, "Stop requested for nnU-Net task {0}.".format(status.get("job_id")))
     return 0
 
@@ -484,8 +484,8 @@ def _launch_bridge(monitor, status):
     buffers = os.path.join(bridge_root, "buffers")
     if not os.path.isdir(bridge_root):
         os.makedirs(bridge_root)
-    axes, flips = fewshot_mimics._buffer_mapping_from_config(
-        fewshot_mimics._config()
+    axes, flips = mimics_mask_apply._buffer_mapping_from_config(
+        mimics_mask_apply._config()
     )
     params = {
         "action": "prepare_masks_for_grid",
@@ -573,7 +573,7 @@ def _matching_update_mask(monitor, label):
         mask = candidates[0]
         launch = None
         for row in monitor.get("matching_masks") or []:
-            if str(row.get("guid") or "") == fewshot_mimics._mask_identity(mask):
+            if str(row.get("guid") or "") == mimics_mask_apply._mask_identity(mask):
                 launch = row
                 break
         if launch is None:
@@ -603,7 +603,7 @@ def _mask_for_label(monitor, label, mode):
         mask = _matching_update_mask(monitor, label)
         if mask is not None:
             return mask
-    return fewshot_mimics._new_prediction_mask("AI_" + label_name)
+    return mimics_mask_apply._new_prediction_mask("AI_" + label_name)
 
 
 def _unique_application_mask_name(base_name):
@@ -649,7 +649,7 @@ def _planned_destination(monitor, label, mode):
             return {
                 "target_kind": "update",
                 "target_name": str(getattr(mask, "name", "") or label_name),
-                "target_guid": fewshot_mimics._mask_identity(mask),
+                "target_guid": mimics_mask_apply._mask_identity(mask),
                 "fallback_name": _unique_application_mask_name("AI_" + label_name),
             }
     return {
@@ -666,7 +666,7 @@ def _mask_from_application_record(record):
     target_name = str(record.get("target_name") or "")
     for mask in _active_image_masks():
         if target_kind == "update" and target_guid:
-            if fewshot_mimics._mask_identity(mask) == target_guid:
+            if mimics_mask_apply._mask_identity(mask) == target_guid:
                 return mask
         elif target_kind == "create" and str(
             getattr(mask, "name", "") or ""
@@ -767,12 +767,12 @@ def _apply_one(monitor):
         record["target_guid"] = ""
         _persist_application_state(monitor, application)
     if mask is None:
-        mask = fewshot_mimics._new_prediction_mask(record["target_name"])
+        mask = mimics_mask_apply._new_prediction_mask(record["target_name"])
         record["target_name"] = str(getattr(mask, "name", "") or record["target_name"])
-        record["target_guid"] = fewshot_mimics._mask_identity(mask)
+        record["target_guid"] = mimics_mask_apply._mask_identity(mask)
         _persist_application_state(monitor, application)
     row = item["buffer"]
-    fewshot_mimics._set_mask_from_u8(
+    mimics_mask_apply._set_mask_from_u8(
         mask,
         row["output_path"],
         row["mimics_shape"],
@@ -781,7 +781,7 @@ def _apply_one(monitor):
     mask_name = str(getattr(mask, "name", "") or "")
     record["state"] = "applied"
     record["target_name"] = mask_name
-    record["target_guid"] = fewshot_mimics._mask_identity(mask)
+    record["target_guid"] = mimics_mask_apply._mask_identity(mask)
     record["applied_at_epoch"] = time.time()
     _persist_application_state(monitor, application)
     monitor["applied_masks"].append(mask_name)
@@ -790,7 +790,7 @@ def _apply_one(monitor):
 
 
 def _target_open(monitor):
-    return fewshot_mimics._monitor_target_is_open(monitor)
+    return mimics_mask_apply._monitor_target_is_open(monitor)
 
 
 def _monitor_tick_locked(monitor):

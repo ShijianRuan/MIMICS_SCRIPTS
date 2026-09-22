@@ -658,11 +658,23 @@ def _cleanup_stale_owned_servers(records):
     return killed
 
 
+def _logging_level_name(level):
+    try:
+        return logging.getLevelName(level) or str(level)
+    except Exception:
+        return str(level)
+
+
 def _mimics_log(level, message):
+    logged = False
     try:
         mimics.logging.log_user_message(level=level, message=message)
+        logged = True
     except Exception:
         pass
+    if not logged:
+        print("[nninteractive {0}] {1}".format(
+            _logging_level_name(level), message))
 
 
 def _probe_python(python_exe, timeout):

@@ -605,330 +605,6 @@ def _link_or_copy(source: str | Path, destination: str | Path) -> str:
         return "copy"
 
 
-def _prepare_dino(spec: dict[str, Any], bundle: Path) -> dict[str, Any]:
-    import tools.fewshot_pipeline as pipeline
-    from tools.fewshot_training_setup_ui import append_training_args
-
-    context = dict(spec["context"])
-    options = dict(spec["options"])
-    status_path = Path(spec["status_path"]).resolve()
-    cancel_path = Path(spec["cancel_path"]).resolve()
-    workspace = Path(context["workspace"]).resolve()
-    run_id = str(spec["run_id"])
-    organ = str(context["organ"])
-    organ_slug = pipeline.safe_slug(organ)
-    cases = set(_split_csv(options.get("cases"))) or None
-    mask_names = pipeline.resolve_training_mask_names(
-        context.get("config") or {}, organ, options.get("mask_names")
-    )
-    label_source = str(options.get("label_source") or "mcs_refresh")
-    label_root: Path | None = None
-    fresh_root: Path | None = None
-    if label_source == "mcs_refresh":
-        _status_update(
-            status_path,
-            status="exporting_labels",
-            phase="preparing_remote_labels",
-            progress_percent=2,
-        )
-        fresh_root = (
-            workspace / "runs" / organ_slug / run_id / "remote_fresh_labels"
-        )
-        plan = pipeline._plan_dino_mcs_label_cache(
-            Path(context["ts_root"]).resolve(),
-            workspace,
-            organ_slug,
-            cases,
-            mask_names,
-            mcs_output_dir=options.get("mcs_output_dir")
-            or context.get("mcs_output_dir"),
-        )
-        fresh_root.mkdir(parents=True, exist_ok=True)
-        for case_id, cached_label in plan["reusable"].items():
-            pipeline._copy_label_atomic(
-                cached_label,
-                fresh_root
-                / case_id
-                / "segmentations"
-                / cached_label.name,
-            )
-        _status_update(
-            status_path,
-            label_cache_reused=len(plan["reusable"]),
-            label_cache_refresh=len(plan["changed"]),
-        )
-        if plan["changed"]:
-            changed_root = fresh_root.with_name(
-                fresh_root.name + "_changed"
-            )
-            result = pipeline.launch_mimics_export(
-                Path(context["ts_root"]).resolve(),
-                set(plan["changed"]),
-                context.get("mimics_exe"),
-                workspace,
-                float((context.get("config") or {}).get("label_export_timeout_seconds", 3600)),
-                status_path=status_path,
-                cancel_path=cancel_path,
-                lock_timeout_seconds=float(
-                    options.get("background_mimics_lock_timeout_seconds", 1800)
-                ),
-                label_staging_dir=changed_root,
-                export_space="source_image",
-                mask_names=mask_names,
-                target_mask_name=organ_slug,
-                mcs_output_dir=options.get("mcs_output_dir")
-                or context.get("mcs_output_dir"),
-                skip_projects_without_requested_mask=True,
-                skip_invalid_projects=True,
-            )
-            batch = result.get("batch_status") or {}
-            if (
-                not result.get("launched")
-                or result.get("timed_out")
-                or int(result.get("returncode", 0) or 0) != 0
-                or str(batch.get("status") or "").lower()
-                in {"failed", "stopping"}
-            ):
-                raise RuntimeError(
-                    "Local Mimics label export did not complete successfully. "
-                    "Remote training was not started. Diagnostics: {}".format(
-                        result.get("job_runtime")
-                        or result.get("log")
-                        or changed_root
-                    )
-                )
-            available, cache_warnings = (
-                pipeline._publish_dino_mcs_label_cache(
-                    plan,
-                    changed_root,
-                    mask_names,
-                    output_root=fresh_root,
-                )
-            )
-            if cache_warnings:
-                _status_update(
-                    status_path,
-                    label_cache_warnings=cache_warnings[:10],
-                )
-            shutil.rmtree(str(changed_root), ignore_errors=True)
-        available = {
-            case_id
-            for case_id in plan["requested"]
-            if (
-                fresh_root / case_id / "segmentations"
-            ).is_dir()
-        }
-        cases = available
-        label_root = fresh_root
-    elif label_source == "exported_masks":
-        label_root = Path(str(options.get("label_root") or "")).resolve()
-        if not label_root.is_dir():
-            raise RuntimeError(
-                "Exported masks folder does not exist: {}".format(label_root)
-            )
-
-    samples, skipped = pipeline.discover_samples(
-        Path(context["ts_root"]).resolve(),
-        organ,
-        cases,
-        label_root=label_root,
-        fallback_to_case_labels=label_root is None,
-        label_source=label_source,
-        mask_names=mask_names,
-    )
-    selected = pipeline.select_samples(
-        samples,
-        str(options.get("sample_mode") or "all"),
-        int(options.get("max_samples") or 0),
-    )
-    minimum = int(options.get("min_samples") or 1)
-    if len(selected) < minimum:
-        raise RuntimeError(
-            "Remote training needs at least {} usable case(s), but {} were "
-            "found. {} case(s) were skipped.".format(
-                minimum, len(selected), len(skipped)
-            )
-        )
-    train_rows, val_rows = pipeline.split_train_validation(
-        selected,
-        val_fraction=float(options.get("val_fraction") or 0.0),
-        val_cases=_split_csv(options.get("val_cases")),
-        min_train_samples=minimum,
-        min_val_samples=int(options.get("min_val_samples") or 0),
-    )
-    input_root = bundle / "input"
-    labels_root = bundle / "labels"
-    all_rows = train_rows + val_rows
-    materialization_cache = workspace / "cache" / "materialized" / organ_slug
-    local_cache_hits = 0
-    dataset_case_cache_keys: dict[str, str] = {}
-    _status_update(
-        status_path,
-        status="preparing_remote",
-        phase="preparing_remote_data",
-        preparation_total=len(all_rows),
-        preparation_index=0,
-        progress_percent=5,
-    )
-    for index, row in enumerate(all_rows):
-        if _cancel_requested(status_path):
-            raise InterruptedError("cancel")
-        case_id = pipeline.safe_slug(row["case_id"])
-        image_dst = input_root / case_id / "ct.nii.gz"
-        label_dst = labels_root / case_id / "segmentations" / (
-            organ_slug + ".nii.gz"
-        )
-        cache_entry = pipeline._materialized_cache_case(
-            row, materialization_cache
-        )
-        dataset_case_cache_keys[case_id] = str(
-            (cache_entry.get("metadata") or {}).get("fingerprint") or ""
-        )
-        pipeline.copy_or_link(cache_entry["image"], image_dst)
-        pipeline.copy_or_link(cache_entry["label"], label_dst)
-        local_cache_hits += int(bool(cache_entry.get("cache_hit")))
-        _status_update(
-            status_path,
-            status="preparing_remote",
-            phase=(
-                "reusing_local_prepared_data"
-                if cache_entry.get("cache_hit")
-                else "preparing_remote_data"
-            ),
-            current_case=row["case_id"],
-            preparation_index=index + 1,
-            local_materialization_cache_reused=local_cache_hits,
-            local_materialization_cache_total=len(all_rows),
-            progress_percent=5
-            + int(15.0 * (index + 1) / max(1, len(all_rows))),
-        )
-    _append_log(
-        status_path.with_name(status_path.name + ".remote_controller.log"),
-        "Local source-grid cache: reused {} of {} DINOv3 case(s).".format(
-            local_cache_hits, len(all_rows)
-        ),
-    )
-
-    remote_options = dict(options)
-    remote_options["cases"] = ",".join(
-        str(row["case_id"]) for row in all_rows
-    )
-    remote_options["val_cases"] = ",".join(
-        str(row["case_id"]) for row in val_rows
-    )
-    remote_options["label_root"] = ""
-    remote_options["mcs_output_dir"] = ""
-    base_config = str(
-        remote_options.get("base_config")
-        or (context.get("config") or {}).get("base_config")
-        or "config/research/ct_fewshot_fast.yaml"
-    )
-    base_path = Path(base_config)
-    if base_path.is_absolute():
-        dinov3_root = Path(context["dinov3_root"]).resolve()
-        try:
-            base_config = str(base_path.resolve().relative_to(dinov3_root))
-        except ValueError:
-            raise RuntimeError(
-                "Remote training currently requires a base configuration inside "
-                "the bundled DINOv3 project: {}".format(base_path)
-            )
-    remote_options["base_config"] = base_config.replace("\\", "/")
-
-    custom_model = str(remote_options.get("model_path") or "").strip()
-    if custom_model:
-        _local, remote_model = _copy_model_input(custom_model, bundle)
-        remote_options["model_path"] = remote_model
-        required_model_relative = ""
-        local_required_model = ""
-    else:
-        decoder = str(remote_options.get("decoder") or "")
-        backend = str(remote_options.get("encoder_backend") or "auto")
-        scale = str(remote_options.get("model_scale") or "vitb16")
-        model_dir = "/models/dinov3/dinov3-{}".format(scale)
-        remote_options["model_path"] = (
-            model_dir + "/model.onnx"
-            if decoder == "feature_unet2d" and backend in {"auto", "onnx"}
-            else model_dir
-        )
-        required_model_relative = remote_options["model_path"].replace(
-            "/models/", "", 1
-        )
-        local_model_dir = (
-            Path(context["dinov3_root"]).resolve()
-            / "models"
-            / "dinov3-{}".format(scale)
-        )
-        local_required_model = str(
-            local_model_dir / "model.onnx"
-            if remote_options["model_path"].endswith("/model.onnx")
-            else local_model_dir
-        )
-
-    arguments = [
-        "train",
-        "--ts-root",
-        "/job/input",
-        "--workspace",
-        "/job/output",
-        "--materialization-cache-dir",
-        "/remote-cache/dinov3/{}/{}/materialized".format(
-            organ_slug, _REMOTE_DATASET_CACHE_TOKEN
-        ),
-        "--organ",
-        organ,
-        "--dinov3-root",
-        "/app/integrations/dinov3-medical-seg",
-        "--python",
-        "__REMOTE_PYTHON__",
-        "--run-id",
-        run_id,
-    ]
-    append_training_args(
-        arguments, context.get("config") or {}, remote_options
-    )
-    arguments.extend(
-        [
-            "--label-root",
-            "/job/labels",
-            "--mask-names",
-            organ_slug,
-        ]
-    )
-    request = {
-        "schema_version": "mimics_remote_training_request.v1",
-        "kind": "dinov3_train",
-        "job_id": run_id,
-        "pipeline_args": arguments,
-        "remote_status_path": "/job/output/jobs/{}.json".format(run_id),
-        "artifact_path": "/job/output/models/{}/{}".format(organ_slug, run_id),
-        "created_at_epoch": time.time(),
-    }
-    write_json_atomic(bundle / "remote_request.json", request)
-    if fresh_root is not None:
-        shutil.rmtree(str(fresh_root), ignore_errors=True)
-    return {
-        "remote_status_relative": "output/jobs/{}.json".format(run_id),
-        "remote_control_relative": "output/runs/{}/{}/cancel.request".format(
-            organ_slug, run_id
-        ),
-        "remote_control_kind": "marker",
-        "remote_artifact_relative": "output/models/{}/{}".format(
-            organ_slug, run_id
-        ),
-        "train_count": len(train_rows),
-        "validation_count": len(val_rows),
-        "required_model_relative": required_model_relative,
-        "local_required_model": local_required_model,
-        "local_dataset_archive_cache": str(
-            workspace
-            / "cache"
-            / "remote_dataset_archives"
-            / "dinov3"
-            / organ_slug
-        ),
-        "dataset_case_cache_keys": dataset_case_cache_keys,
-    }
 
 
 def _prepare_nninteractive(
@@ -2592,62 +2268,6 @@ def _download_artifact(
         shutil.rmtree(str(backup), ignore_errors=True)
 
 
-def _register_dino(
-    spec: dict[str, Any],
-    local_model_dir: Path,
-    remote_status: dict[str, Any],
-    profile: dict[str, Any],
-) -> dict[str, Any]:
-    import tools.fewshot_pipeline as pipeline
-
-    context = spec["context"]
-    run_id = str(spec["run_id"])
-    organ = str(context["organ"])
-    organ_slug = pipeline.safe_slug(organ)
-    manifest_path = local_model_dir / "manifest.json"
-    manifest = read_json(manifest_path, {}) or {}
-    if not manifest:
-        raise RuntimeError("Downloaded DINOv3 model manifest is missing.")
-    manifest.update(
-        {
-            "execution_backend": "remote",
-            "remote_profile_id": profile["profile_id"],
-            "remote_profile_name": profile["name"],
-            "remote_runtime_image": profile["runtime_image"],
-            "remote_gpu_device": remote_status.get(
-                "remote_gpu_device", profile.get("gpu_device") or "auto"
-            ),
-            "remote_dataset_fingerprint": remote_status.get(
-                "dataset_fingerprint", ""
-            ),
-            "remote_runtime_image_id": remote_status.get(
-                "remote_runtime_image_id", ""
-            ),
-            "remote_base_model_path": remote_status.get(
-                "remote_base_model_path", ""
-            ),
-            "remote_base_model_sha256": remote_status.get(
-                "remote_base_model_sha256", ""
-            ),
-            "local_base_model_sha256": remote_status.get(
-                "local_base_model_sha256", ""
-            ),
-            "ts_root": str(Path(context["ts_root"]).resolve()),
-            "workspace": str(Path(context["workspace"]).resolve()),
-            "downloaded_at_epoch": time.time(),
-        }
-    )
-    pipeline.write_json_atomic(manifest_path, manifest)
-    latest = dict(manifest)
-    latest["checkpoint"] = "{}/model.pth".format(run_id)
-    latest["config"] = "{}/config.yaml".format(run_id)
-    latest["model_manifest"] = "{}/manifest.json".format(run_id)
-    latest_path = (
-        Path(context["workspace"]) / "models" / organ_slug / "latest.json"
-    )
-    pipeline.write_json_atomic(latest_path, latest)
-    pipeline.register_global_model(manifest, manifest_path)
-    return manifest
 
 
 def _register_nninteractive(
@@ -2772,7 +2392,7 @@ def run(spec_path: Path) -> int:
     kind = str(spec.get("kind") or "")
     status_path = Path(spec["status_path"]).resolve()
     profile = _profile_for_spec(spec)
-    job_id = str(spec["run_id"] if kind == "dinov3" else spec["job_id"])
+    job_id = str(spec["job_id"])
     owner = _remote_owner(profile)
     job_slug = safe_identifier(job_id, "job")
     container_name = _container_name(profile, job_id)
@@ -2812,7 +2432,7 @@ def run(spec_path: Path) -> int:
         diagnostic_log_paths=list(
             dict.fromkeys((str(remote_log), str(controller_log)))
         ),
-        train_log=str(remote_log) if kind in {"dinov3", "nnunet"} else "",
+        train_log=str(remote_log) if kind == "nnunet" else "",
         log_path=str(remote_log) if kind in {"nninteractive", "nnunet", "nnunet_infer"} else "",
         remote_gpu_device=profile.get("gpu_device") or "auto",
         status="preparing_remote",
@@ -2829,9 +2449,7 @@ def run(spec_path: Path) -> int:
     prepared_cache_namespace = ""
     prepared_cache_removed = False
     try:
-        if kind == "dinov3":
-            prepared = _prepare_dino(spec, bundle)
-        elif kind == "nninteractive":
+        if kind == "nninteractive":
             prepared = _prepare_nninteractive(spec, bundle)
         elif kind == "nnunet":
             prepared = _prepare_nnunet(spec, bundle)
@@ -3416,18 +3034,7 @@ def run(spec_path: Path) -> int:
             )
             return 0 if final_state in {"cancelled", "paused"} else 1
 
-        if kind == "dinov3":
-            import tools.fewshot_pipeline as dino_pipeline
-
-            context = spec["context"]
-            organ_slug = dino_pipeline.safe_slug(context["organ"])
-            local_model_dir = (
-                Path(context["workspace"])
-                / "models"
-                / organ_slug
-                / str(spec["run_id"])
-            )
-        elif kind == "nninteractive":
+        if kind == "nninteractive":
             local_request = read_json(
                 Path(spec["job_dir"]) / "request.json", {}
             ) or {}
@@ -3488,16 +3095,7 @@ def run(spec_path: Path) -> int:
                     exc,
                     download_reconnect_attempt,
                 )
-        if kind == "dinov3":
-            remote_status.update(asset_identity)
-            remote_status["remote_runtime_image_id"] = runtime_image_id
-            remote_status["remote_gpu_device"] = profile.get("gpu_device") or "auto"
-            remote_status["dataset_fingerprint"] = dataset_fingerprint
-            model = _register_dino(
-                spec, local_model_dir, remote_status, profile
-            )
-            selected = True
-        elif kind == "nninteractive":
+        if kind == "nninteractive":
             remote_status.update(asset_identity)
             remote_status["remote_runtime_image_id"] = runtime_image_id
             remote_status["remote_gpu_device"] = profile.get("gpu_device") or "auto"
@@ -3803,25 +3401,6 @@ def run(spec_path: Path) -> int:
                     )
         if session is not None:
             session.close()
-        if (
-            kind == "dinov3"
-            and str((spec.get("options") or {}).get("label_source") or "mcs_refresh")
-            == "mcs_refresh"
-        ):
-            try:
-                context = spec.get("context") or {}
-                import tools.fewshot_pipeline as cleanup_pipeline
-
-                staging = (
-                    Path(context["workspace"]).resolve()
-                    / "runs"
-                    / cleanup_pipeline.safe_slug(context["organ"])
-                    / str(spec["run_id"])
-                    / "remote_fresh_labels"
-                )
-                shutil.rmtree(str(staging), ignore_errors=True)
-            except Exception:
-                pass
         if kind == "nninteractive":
             try:
                 import tools.nninteractive_finetune_pipeline as cleanup_pipeline

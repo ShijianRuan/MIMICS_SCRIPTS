@@ -1427,7 +1427,7 @@ class MimicsRuntimeTests(unittest.TestCase):
     def setUpClass(cls):
         cls.original_modules = {
             name: sys.modules.get(name)
-            for name in ("mimics", "fewshot_mimics", "mimics_mask_apply", "runtime_common", "nnunet_mimics")
+            for name in ("mimics", "mimics_mask_apply", "runtime_common", "nnunet_mimics")
         }
         cls.dialog_answer = "Create Editable Copies"
         cls.masks = [FakeMask("Liver", 10)]
@@ -1454,22 +1454,22 @@ class MimicsRuntimeTests(unittest.TestCase):
         runtime.find_mimics_exe = lambda: ""
         sys.modules["runtime_common"] = runtime
 
-        fewshot = types.ModuleType("mimics_mask_apply")
-        fewshot._mask_identity = lambda mask: mask.guid
-        fewshot._new_prediction_mask = lambda name: FakeMask(name, 0)
-        fewshot._set_mask_from_u8 = lambda mask, path, shape, transaction_name=None: setattr(
+        mask_apply = types.ModuleType("mimics_mask_apply")
+        mask_apply._mask_identity = lambda mask: mask.guid
+        mask_apply._new_prediction_mask = lambda name: FakeMask(name, 0)
+        mask_apply._set_mask_from_u8 = lambda mask, path, shape, transaction_name=None: setattr(
             mask, "applied", True
         )
-        fewshot._monitor_target_is_open = lambda monitor: (True, "")
-        fewshot._current_project_path = lambda: ""
-        fewshot._active_live_grid_payload = lambda: {}
-        fewshot._active_source_geometry_payload = lambda: {}
-        fewshot._resolve_prediction_context = lambda: ("", "", "")
-        fewshot._config = lambda: {}
-        fewshot._dinov3_root = lambda config: str(ROOT)
-        fewshot._fewshot_python = lambda config, root: sys.executable
-        fewshot._buffer_mapping_from_config = lambda config: ([0, 1, 2], [False, False, False])
-        sys.modules["mimics_mask_apply"] = fewshot
+        mask_apply._monitor_target_is_open = lambda monitor: (True, "")
+        mask_apply._current_project_path = lambda: ""
+        mask_apply._active_live_grid_payload = lambda: {}
+        mask_apply._active_source_geometry_payload = lambda: {}
+        mask_apply._resolve_prediction_context = lambda: ("", "", "")
+        mask_apply._config = lambda: {}
+        mask_apply._integration_root = lambda config: str(ROOT)
+        mask_apply._integration_python = lambda config, root: sys.executable
+        mask_apply._buffer_mapping_from_config = lambda config: ([0, 1, 2], [False, False, False])
+        sys.modules["mimics_mask_apply"] = mask_apply
         cls.module = importlib.import_module("nnunet_mimics")
 
     @classmethod
@@ -1590,8 +1590,8 @@ class MimicsRuntimeTests(unittest.TestCase):
             common.write_json_atomic(status_path, {"status": "completed"})
             self.masks[:] = []
             created = []
-            original_new = self.module.fewshot_mimics._new_prediction_mask
-            original_set = self.module.fewshot_mimics._set_mask_from_u8
+            original_new = self.module.mimics_mask_apply._new_prediction_mask
+            original_set = self.module.mimics_mask_apply._set_mask_from_u8
 
             def create_mask(name):
                 mask = FakeMask(name, 0)
@@ -1607,8 +1607,8 @@ class MimicsRuntimeTests(unittest.TestCase):
                     raise RuntimeError("simulated Mimics crash")
                 mask.applied = True
 
-            self.module.fewshot_mimics._new_prediction_mask = create_mask
-            self.module.fewshot_mimics._set_mask_from_u8 = fail_once
+            self.module.mimics_mask_apply._new_prediction_mask = create_mask
+            self.module.mimics_mask_apply._set_mask_from_u8 = fail_once
             bridge = {
                 "masks": [
                     {
@@ -1642,8 +1642,8 @@ class MimicsRuntimeTests(unittest.TestCase):
                 self.assertEqual(application["records"]["1"]["state"], "applied")
                 self.assertEqual(application["records"]["1"]["target_name"], "AI_Liver")
             finally:
-                self.module.fewshot_mimics._new_prediction_mask = original_new
-                self.module.fewshot_mimics._set_mask_from_u8 = original_set
+                self.module.mimics_mask_apply._new_prediction_mask = original_new
+                self.module.mimics_mask_apply._set_mask_from_u8 = original_set
 
     def test_stopping_monitor_terminates_owned_bridge(self):
         process = mock.Mock()

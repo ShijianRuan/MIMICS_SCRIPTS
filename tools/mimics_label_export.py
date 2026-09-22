@@ -8,9 +8,9 @@ image/label NIfTI pairs on the source grid, serialize GPU and background
 Mimics access, and reap child process trees. This module holds that shared
 machinery so no integration depends on another integration's pipeline module.
 
-Extracted verbatim from the fewshot pipeline; function bodies are unchanged
-except for neutralized naming (``mcs_label_fingerprint`` etc. were
-``_dino_mcs_label_fingerprint``) and owner strings that named DINOv3.
+Extracted verbatim from the original AI-pipeline module; function bodies
+are unchanged except for neutralized naming (``mcs_label_fingerprint`` etc.
+were originally framework-prefixed) and framework-specific owner strings.
 
 This script never imports Mimics. It is safe to run from the foreground Mimics
 process through subprocess.Popen because all long-running work happens here or

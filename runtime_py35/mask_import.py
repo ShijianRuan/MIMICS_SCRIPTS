@@ -48,7 +48,7 @@ _SOURCE_VOXEL_TO_RAS_MATRIX_METADATA = "mimics_script.source_voxel_to_ras_matrix
 def _project_root():
     return _find_root(
         os.path.dirname(os.path.abspath(__file__)),
-        ("fewshot_config.json", "nninteractive_config.json", ".git"),
+        ("nninteractive_config.json", ".git"),
     )
 
 
@@ -176,7 +176,7 @@ def _active_image_info():
     image = _active_image_reference()
     if image is None:
         return None, None, None
-    # Get shape using the same approach as fewshot_mimics.py
+    # Get shape using the shared Mimics image helpers
     shape = _active_image_shape(image)
     if shape is None:
         return None, None, None
@@ -189,7 +189,7 @@ def _active_image_info():
 
 
 def _active_image_shape(image):
-    """Get image shape using the same approach as fewshot_mimics.py."""
+    """Get image shape from a Mimics image reference."""
     try:
         dims = getattr(image, "logical_dimensions", None)
         if dims is not None:
@@ -278,8 +278,8 @@ def _voxel_center(image, index):
 def _derive_mimics_voxel_to_ras_matrix(image, shape):
     """Derive a 4x4 voxel-to-RAS matrix from a Mimics image object.
 
-    Uses the same approach as fewshot_mimics.py: measure voxel centers
-    along each axis to build the affine, converting Mimics LPS to RAS.
+    Measure voxel centers along each axis to build the affine, converting
+    Mimics LPS to RAS.
     """
     matrix = [[0.0] * 4 for _ in range(4)]
     matrix[3] = [0.0, 0.0, 0.0, 1.0]

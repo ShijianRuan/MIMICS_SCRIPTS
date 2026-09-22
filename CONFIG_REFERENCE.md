@@ -81,93 +81,12 @@ Its last-used output folder and mask selection are remembered in
 `%LOCALAPPDATA%\Mimics-Script\ui_state\io_paths.json` under the
 `drop_import` key (the same state file the path-setup UI uses).
 
-## `fewshot_config.json`
+## `fewshot_config.json` (removed)
 
-### Common Training Defaults
-
-| Key | Default | Purpose |
-| --- | --- | --- |
-| `default_training_profile` | `"balanced"` | Initial profile loaded by the training window. |
-| `default_epochs` | `20` | Default training epochs. |
-| `default_lr` | `0.001` | Default learning rate. |
-| `default_lr_scheduler` | `"cosine"` | Initial learning-rate schedule. |
-| `default_warmup_epochs` | `0` | Warmup epochs where supported; zero disables warmup. |
-| `default_weight_decay` | `0.0001` | Default optimizer weight decay. |
-| `default_grad_accumulation` | `1` | Effective-batch accumulation. Physical batch size remains one for variable-depth volumes unless a compatible 2D policy is selected. |
-| `default_img_size` | `"256,256"` | In-plane training size. |
-| `default_decoder` | `"auto"` | Let the selected strategy and dimensionality choose a compatible decoder. |
-| `default_finetune_method` | `"frozen"` | Initial backbone fine-tuning method. |
-| `default_model_scale` | `"vits16"` | Initial DINOv3 backbone scale. |
-| `default_modality` | `"auto"` | Infer CT/MR preprocessing from the selected training data when possible. |
-| `default_val_fraction` | `0.2` | Default validation fraction. |
-| `default_min_samples` | `1` | Minimum usable training samples. |
-| `default_min_val_samples` | `1` | Minimum validation samples when validation is enabled. |
-| `default_max_samples` | `0` | Maximum selected samples; zero means no limit. |
-| `default_export_labels_before_training` | `true` | Refresh labels from saved `.mcs` projects before training. |
-| `default_keep_last_checkpoints` | `2` | Number of recent checkpoints retained in addition to the best model. |
-| `default_keep_materialized_dataset` | `false` | Keep the temporary `imagesTr`/`labelsTr` dataset after the job. |
-
-Generated DINOv3 experiment YAML uses model-space `ZYX` axes for
-`inference.tta_axes` and `augmentation.flip_axes`. Axis `2` is the canonical
-RAS left/right axis. Standard Mimics profiles do not mirror it. A deliberately
-laterality-invariant custom experiment must set
-`augmentation.allow_left_right_flip: true` before using axis `2`; otherwise
-training fails closed. Native cached-slice models derive their safe in-plane
-flip axis from each source affine and store it in the feature-cache manifest.
-
-### Saved Mask Name Mapping
-
-`organ_mask_aliases` maps one training target to accepted names in saved
-`.mcs` projects:
-
-```json
-{
-  "organ_mask_aliases": {
-    "liver": ["liver_seg", "Segment_Liver", "肝"],
-    "adrenal_gland_right": ["right_adrenal", "adrenal_right"]
-  }
-}
-```
-
-The training window shows the resolved names in **Saved mask names** and lets
-the user edit them for that run. Matching is case-insensitive and normalizes
-spaces, hyphens, slashes, and periods to underscores. It is intentionally not
-fuzzy: automatic substring matching could silently select the wrong organ.
-
-Before any voxel buffer is read, background Mimics opens every selected
-project and validates the names. Each project must contain exactly one matching
-mask. Missing or ambiguous cases fail the whole fresh-label export before
-training starts. The exported NIfTI label is renamed to the training target,
-so an accepted `liver_seg` mask becomes `liver.nii.gz`.
-
-### Runtime and Retention
-
-| Key | Default | Purpose |
-| --- | --- | --- |
-| `gpu_lock_timeout_seconds` | `900` | Maximum wait for the shared GPU before training fails. |
-| `inference_gpu_lock_timeout_seconds` | `3600` | Maximum wait for the shared GPU before inference fails. |
-| `background_mimics_lock_timeout_seconds` | `1800` | Maximum wait for the shared background Mimics license/process. |
-| `terminal_job_retention_days` | `30` | Retention for terminal job records. |
-| `max_terminal_job_records` | `100` | Maximum terminal job records retained. |
-| `failed_run_retention_days` | `7` | Retention for failed disposable run directories. |
-| `keep_failed_training_artifacts` | `false` | Keep large rebuildable datasets, caches, checkpoints, and partial models after a failed DINOv3 or nnInteractive fine-tuning job. Logs, status, metrics, and configuration are always retained. |
-| `completed_run_log_retention_days` | `30` | Retention for completed text logs. |
-| `setup_context_retention_days` | `7` | Retention for abandoned setup contexts. |
-| `keep_training_experiment_artifacts` | `false` | Keep disposable DINOv3 experiment folders after registration. |
-
-### External UI
-
-| Key | Default | Purpose |
-| --- | --- | --- |
-| `advanced_ui_mode` | `"external"` | Use the external PySide6 training window. |
-| `advanced_ui_fallback_to_internal` | `true` | Permit the limited internal fallback if the external window cannot start. |
-| `status_ui_mode` | `"external"` | Use the external PySide6 status viewer. |
-| `status_ui_fallback_to_text` | `true` | Show concise Mimics text status if the external viewer cannot start. |
-| `dinov3_project` | `"external/dinov3-medical-seg"` | DINOv3 project path. |
-| `python` | `""` | Optional explicit external Python. The packaged `nninteractive_env` is preferred. |
-
-`training_profiles` contains reusable initial values only. Values remain
-editable in the training window.
+The DINOv3 few-shot framework was removed. Its configuration keys
+(`default_*` training defaults, `organ_mask_aliases`, external-UI switches,
+`dinov3_project`) no longer exist. GPU, background-Mimics, and job-retention
+settings now live in the pipeline-specific configs documented below.
 
 ## `nninteractive_config.json`
 
@@ -244,12 +163,9 @@ python tools/nninteractive_finetune_pipeline.py diagnose --job-dir <job folder>
 | `MIMICS_EXE` | Legacy executable override, still accepted. |
 | `MIMICS_BRIDGE_PYTHON` | Explicit bridge Python. Normally the packaged environment is used. |
 | `MIMICS_BRIDGE_SCRIPT` | Explicit `mimics_bridge.py` path. |
-| `MIMICS_FEWSHOT_PYTHON` | Explicit DINOv3 training/inference Python. |
-| `MIMICS_FEWSHOT_DINOV3_ROOT` | Explicit DINOv3 project root. |
 | `MIMICS_IMPORT_RUNTIME_DIR` | Local import queue/control directory override. Do not place it on an unreliable network share. |
 | `MIMICS_RESOURCE_LOCK_DIR` | Optional local directory for the shared GPU and background Mimics locks. Use the same value for Mimics and all external tools. UNC project roots otherwise fall back to a per-project directory under `%LOCALAPPDATA%` or `%TEMP%`. |
 | `MIMICS_QT_PYTHONPATH` | Optional Qt module path for legacy internal UI fallback. |
-| `MIMICS_DINOV3_GUI_BACKEND` | Force `pyside6`, `tkinter`, or `auto` for external DINOv3 windows. |
 
 ### Lifecycle and Diagnostics
 
@@ -296,24 +212,17 @@ Trained model runtime files use paths relative to their own model manifest or
 model workspace. Copying a complete workspace therefore does not preserve a
 dependency on the source computer's drive letter or user directory.
 
-The nnInteractive **Model Versions** tab and DINOv3 **Show Status** window can
-export the current model to a self-contained `.zip` and import that package on
-another workstation. Import validates the package before publishing files and
-rebuilds the target machine's local registry.
+The nnInteractive **Model Versions** tab can export the current model to a
+self-contained `.zip` and import that package on another workstation. Import
+validates the package before publishing files and rebuilds the target
+machine's local registry.
 
 The same operations are available without Mimics:
 
 ```text
 python tools/ai_model_bundle.py export-nninteractive --workspace <dir> --task-id <task> --output <file.zip>
 python tools/ai_model_bundle.py import-nninteractive --workspace <dir> --bundle <file.zip> --set-current
-python tools/ai_model_bundle.py export-dinov3 --manifest <manifest.json> --output <file.zip>
-python tools/ai_model_bundle.py import-dinov3 --workspace <dir> --bundle <file.zip> --set-latest
 ```
-
-DINOv3 packages contain the trained decoder or adaptation checkpoint and its
-flattened inference configuration. Standard pretrained encoders remain shared
-runtime assets under `external/dinov3-medical-seg/models` and must exist on the
-target installation, as verified by environment setup and package checks.
 
 ## ScribblePrompt
 

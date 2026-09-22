@@ -3195,7 +3195,7 @@ def run_background_batch_export(config_path):
     lock_path = _acquire_export_lock(job_runtime)
     if not lock_path:
         _append_export_log(export_root, "Another background export process is already running; exiting.")
-        # Return non-zero so the caller (fewshot training) does not mistake a
+        # Return non-zero so the caller (training preparation) does not mistake a
         # skipped export for a successful one and then fail with a misleading
         # "found 0 labels". A return code of 0 here previously let training
         # proceed on an empty fresh_labels directory.

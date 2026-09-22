@@ -50,7 +50,7 @@ _MONITORS = {}
 def _project_root():
     return runtime_common.find_root(
         os.path.dirname(os.path.abspath(__file__)),
-        ("nninteractive_config.json", "fewshot_config.json", "mimics_bridge.py", ".git"),
+        ("nninteractive_config.json", "mimics_bridge.py", ".git"),
     )
 
 

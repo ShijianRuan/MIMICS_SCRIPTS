@@ -225,20 +225,6 @@ def _remote_gpu_lock(job_dir: Path):
             handle.close()
 
 
-def run_dino(job_dir: Path, request: dict[str, Any]) -> int:
-    pipeline = APP_ROOT / "tools" / "fewshot_pipeline.py"
-    if not pipeline.is_file():
-        raise RuntimeError("DINOv3 pipeline is missing from the runtime image.")
-    arguments = request.get("pipeline_args") or []
-    if not isinstance(arguments, list) or not arguments:
-        raise RuntimeError("Remote DINOv3 pipeline arguments are missing.")
-    resolved = [
-        sys.executable if str(value) == "__REMOTE_PYTHON__" else str(value)
-        for value in arguments
-    ]
-    return _run([sys.executable, str(pipeline)] + resolved, job_dir)
-
-
 def run_nninteractive(job_dir: Path, request: dict[str, Any]) -> int:
     pipeline = APP_ROOT / "tools" / "nninteractive_finetune_pipeline.py"
     if not pipeline.is_file():
@@ -322,7 +308,6 @@ def preflight(models_dir: Path) -> int:
         "cuda_available": bool(torch.cuda.is_available()),
         "gpu_count": int(torch.cuda.device_count()),
         "models_dir": str(models_dir),
-        "dinov3_models": str(models_dir / "dinov3"),
         "nninteractive_model": str(
             models_dir / "nninteractive" / "nnInteractive_v1.0"
         ),
@@ -342,9 +327,6 @@ def preflight(models_dir: Path) -> int:
         and result["offline_environment"].get("HF_DATASETS_OFFLINE") == "1"
         and result["offline_environment"].get("WANDB_MODE") == "offline"
     )
-    result["dinov3_default_model"] = bool(
-        (models_dir / "dinov3" / "dinov3-vits16" / "model.onnx").is_file()
-    )
     nninteractive_root = models_dir / "nninteractive" / "nnInteractive_v1.0"
     result["nninteractive_weights"] = bool(
         nninteractive_root.is_dir()
@@ -362,16 +344,6 @@ def preflight(models_dir: Path) -> int:
     except Exception as exc:
         result["nninteractive_import"] = False
         result["nninteractive_error"] = str(exc)
-    try:
-        import onnxruntime
-        from transformers import DINOv3ViTBackbone  # noqa: F401
-
-        result["onnx_providers"] = onnxruntime.get_available_providers()
-        result["dinov3_import"] = True
-    except Exception as exc:
-        result["onnx_providers"] = []
-        result["dinov3_import"] = False
-        result["onnx_error"] = str(exc)
     try:
         import nnunetv2  # noqa: F401
 
@@ -394,10 +366,8 @@ def preflight(models_dir: Path) -> int:
     result["ok"] = bool(
         result["ok"]
         and result.get("offline_mode")
-        and result.get("dinov3_default_model")
         and result.get("nninteractive_weights")
         and result.get("nninteractive_import")
-        and result.get("dinov3_import")
         and result.get("nnunet_import")
         and result.get("nnunet_custom_trainer")
     )
@@ -428,8 +398,6 @@ def main() -> int:
     )
     try:
         with _remote_gpu_lock(job_dir):
-            if kind == "dinov3_train":
-                return run_dino(job_dir, request)
             if kind == "nninteractive_train":
                 return run_nninteractive(job_dir, request)
             if kind in {"nnunet_train", "nnunet_infer"}:
