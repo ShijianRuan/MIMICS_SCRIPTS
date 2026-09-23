@@ -12,6 +12,54 @@ unless noted otherwise.
 | `mimics_buffer_axes` | `[0, 1, 2]` | Optional advanced mapping from external array axes to the Mimics voxel buffer. Change only after real-data orientation validation. |
 | `mimics_buffer_flips` | `[false, false, false]` | Optional advanced flips paired with `mimics_buffer_axes`. Change only after real-data orientation validation. |
 
+## `interactive_algorithms_config.json`
+
+Controls the interactive segmentation algorithms run outside Mimics
+(ScribblePrompt; shared job retention for all algorithm jobs).
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `poll_seconds` | `0.25` | Mimics-side job monitor poll interval. |
+| `job_retention_days` | `3` | Terminal job folder retention before cleanup. |
+| `job_max_terminal` | `20` | Maximum terminal job folders kept. |
+| `scribbleprompt.timeout_seconds` | `900` | Per-job external process timeout. |
+| `scribbleprompt.device` | `"cpu"` | Inference device. |
+| `scribbleprompt.input_size` | `128` | Model input resolution. |
+| `scribbleprompt.prior_logit_magnitude` | `6.0` | Prior logit magnitude fed to the model. |
+| `scribbleprompt.checkpoint` | `integrations/ScribblePrompt/checkpoints/...` | ScribblePrompt UNet checkpoint. |
+
+## `window_level_presets.json`
+
+CT window/level presets matched against Mask names (Review menu). Editable
+from Mimics via **Review > Window Edit Presets**; no hand editing required.
+
+Each entry: `name`, `width`, `level`, `keywords` (matched case-insensitively
+against the selected Mask name, first keyword hit wins), and `source`
+(citation for the W/L values). Ships with 5 presets: Lung, Abdomen / Soft
+Tissue, Bone, Skull / Cranium, Vessel / Heart. State (undo/last applied)
+lives in `ui_state/window_level_state.json`; user edits are saved back to
+this file.
+
+## Remote compute profiles (`servers.json`)
+
+Server profiles for SSH/Docker remote training and batch inference
+(FlexiCT / nnInteractive / nnU-Net). Managed by the connection setup UI
+(training window > Compute tab); stored **outside the project** at
+`%LOCALAPPDATA%\MimicsScript\remote_compute\servers.json` (override with
+`MIMICS_REMOTE_CONFIG_DIR`). SSH host fingerprints live in `known_hosts`
+next to it (first-connect confirmation, change = refuse). Passwords are
+never stored in this file — they go to Windows Credential Manager
+(`MimicsScript/remote/<profile-id>`), and key auth is preferred.
+
+| Field | Purpose |
+| --- | --- |
+| `profile_id`, `name` | Stable id and display name. |
+| `host`, `port`, `username` | SSH endpoint. |
+| `auth_method` | `key` or `password`. |
+| `image` | Docker image for job containers (`--network none`, HF offline). |
+| `gpu_device` | `auto` or an explicit device index. |
+| `remote_workspace` | Per-user workspace on the server. |
+
 ## `dataset_profiles.json`
 
 Describes dataset folder layouts. Every discovery site (dataset import,
@@ -189,6 +237,24 @@ locked to the validated few-shot configuration and is not configurable here.
 | `MIMICS_IMPORT_RUNTIME_DIR` | Local import queue/control directory override. Do not place it on an unreliable network share. |
 | `MIMICS_RESOURCE_LOCK_DIR` | Optional local directory for the shared GPU and background Mimics locks. Use the same value for Mimics and all external tools. UNC project roots otherwise fall back to a per-project directory under `%LOCALAPPDATA%` or `%TEMP%`. |
 | `MIMICS_QT_PYTHONPATH` | Optional Qt module path for legacy internal UI fallback. |
+| `MIMICS_REMOTE_CONFIG_DIR` | Override for the remote-compute config root (`servers.json`, `known_hosts`). Default: `%LOCALAPPDATA%\MimicsScript\remote_compute`. |
+
+### Training worker seams (set by the pipelines, not by users)
+
+These are written into worker environments by `flexict_pipeline.py` /
+`nnunet_pipeline.py` / `nnunet_stage_worker.py`. They document the contract
+between the Mimics layer and the training frameworks; users never set them.
+
+| Variable | Purpose |
+| --- | --- |
+| `nnUNet_raw` / `nnUNet_preprocessed` / `nnUNet_results` | Per-workspace nnU-Net folder triple. |
+| `nnUNet_extTrainer` | Directory holding the external trainer classes (FlexiCT / nnU-Net extension), avoiding site-packages copies. |
+| `nnUNet_compile` | Set to `0` (torch.compile off — reproducibility and startup time). |
+| `FLEXICT_EXT_DIR` | `flexict` package dir for the FlexiCT trainer. |
+| `FLEXICT2D_CKPT` / `FLEXICT3D_CKPT` | Pretrained FlexiCT backbone weights (safetensors). |
+| `NUM_EPOCHS` | Overridden epochs for a FlexiCT run (smoke tests use 2). |
+| `MIRROR_DISABLE_AXES` | Mirror augmentation axes to disable (e.g. `1` for a single-sided organ). |
+| `MIMICS_REMOTE_GPU_LOCK` | GPU lock coordination for remote jobs. |
 
 ### Lifecycle and Diagnostics
 
