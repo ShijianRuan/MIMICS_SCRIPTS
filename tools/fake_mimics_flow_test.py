@@ -526,12 +526,82 @@ def test_runtime_imports(fake, tmp):
         "create_mcs_batch",
         "append_masks_batch",
         "mask_identifier",
+        # Every runtime_py35 module must stay importable under the embedded
+        # Python 3.5 runtime — this is where syntax regressions (f-strings,
+        # pathlib) are caught before they reach a real Mimics install.
+        "flexict_mimics",
+        "batch_status_mimics",
+        "model_manager_mimics",
+        "config_editor_mimics",
+        "window_level_editor_mimics",
+        "system_health_mimics",
+        "io_setup_mimics",
+        "import_undo_mimics",
+        "import_drop_mimics",
+        "fix_source_affine_metadata",
+        "setup_environment",
+        "dataset_manifest",
+        "mimics_mask_apply",
+        "collect_diagnostics_mimics",
+        "mask_import",
+        "external_window_launcher",
     ]
     loaded = []
     for name in modules:
         import_runtime_module(name)
         loaded.append(name)
-    return "imported {}".format(", ".join(loaded))
+    return "imported {} runtime modules".format(len(loaded))
+
+
+def test_batch_status_flow(fake, tmp):
+    """Batch status viewer aggregates every on-disk record kind.
+
+    Mirrors what an annotator sees after a mixed import/export session: all
+    six record types in one table, newest first, stop markers excluded.
+    """
+    from unittest import mock
+
+    sys.path.insert(0, str(ROOT / "tools"))
+    import batch_status_viewer as viewer
+
+    project = tmp / "project"
+    runtime = project / ".mimics_runtime"
+    records = [
+        # (kind-check, payload, path)
+        ("Import", {"status": "completed", "completed": 3, "total": 3, "updated_at_epoch": 100.0},
+         runtime / "import_runs" / "ts_pid_abc123" / "status.json"),
+        ("Import queue", {"status": "running", "completed": 1, "total": 5, "updated_at_epoch": 250.0},
+         runtime / "import_queues" / "q_digest0123456789" / "_mcs_batch_status.json"),
+        ("Export", {"status": "failed", "phase": "exporting", "error": "No space left", "updated_at_epoch": 200.0},
+         runtime / "export_jobs" / "job_2" / "status.json"),
+        ("Export task", {"status": "running", "title": "Export masks", "updated_at_epoch": 150.0},
+         runtime / "ui_tasks" / "t3.json"),
+        ("Append", {"status": "completed", "updated_at_epoch": 50.0},
+         runtime / "append_jobs" / "append_masks_x" / "status.json"),
+        ("Drop import", {"status": "failed", "error": "bad dcm", "updated_at_epoch": 300.0},
+         runtime / "drop_import" / "run9_1_status.json"),
+    ]
+    for _kind, payload, path in records:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    # Stop markers must not surface as records.
+    stop_marker = runtime / "ui_tasks" / "t3_stop.json"
+    stop_marker.write_text("{}", encoding="utf-8")
+
+    with mock.patch.object(
+        viewer, "import_runtime_base",
+        lambda project_root: Path(project_root) / ".mimics_runtime",
+    ):
+        rows = viewer.collect_batch_rows(project)
+
+    assert_equal(len(rows), 6, "all six record kinds should be aggregated")
+    kinds = [row["kind"] for row in rows]
+    assert_equal(set(kinds), {"Import", "Import queue", "Export", "Export task", "Append", "Drop import"}, "record kinds")
+    epochs = [row["updated_at_epoch"] for row in rows]
+    assert_true(epochs == sorted(epochs, reverse=True), "rows must be newest first, got {}".format(epochs))
+    failed_row = next(row for row in rows if row["kind"] == "Export")
+    assert_true("No space left" in failed_row["error"], "export error text should surface in the table")
+    return "aggregated {} record kinds, newest first, stop markers excluded".format(len(set(kinds)))
 
 
 def test_append_masks(fake, tmp):
@@ -1305,10 +1375,26 @@ def test_stop_background_locks(fake, tmp):
     module._clear_resource_locks()
     assert_true(not (lock_dir / "gpu.lock").exists(), "gpu lock was not cleared")
     assert_true(not (lock_dir / "background_mimics.lock").exists(), "background Mimics lock was not cleared")
+    dialogs_before = len(fake.dialogs.messages)
+    module._STOP_MONITORS.clear()
     result = module.main()
     assert_equal(result, 0, "stop background main result")
-    assert_true(fake.dialogs.messages[-1]["ui_blocking"] is False, "stop background message should be non-blocking")
-    return "owned resource locks cleared and user notification stayed non-blocking"
+    if os.name == "nt":
+        # On Windows a successful stop runs silently in the background: the
+        # PowerShell sweep is monitored via _STOP_MONITORS and reports through
+        # its own timer tick, so main() must not raise a blocking dialog.
+        assert_true(
+            len(fake.dialogs.messages) == dialogs_before,
+            "successful stop should stay silent (message came from the stop monitor path)",
+        )
+        assert_true(
+            len(module._STOP_MONITORS) == 1 or module._STOP_MONITORS == {},
+            "stop monitor should be registered (or already ticked) after main()",
+        )
+    else:
+        # Non-Windows: the not-implemented notice is shown, non-blocking.
+        assert_true(fake.dialogs.messages[-1]["ui_blocking"] is False, "stop background message should be non-blocking")
+    return "owned resource locks cleared and stop stayed non-blocking"
 
 
 def build_parser():
@@ -1331,6 +1417,7 @@ def main(argv=None):
     tests = []
     if args.only in ("imports", "all"):
         tests.append(("runtime modules import with fake mimics", lambda: test_runtime_imports(fake, tmp / "imports")))
+        tests.append(("batch status viewer aggregation", lambda: test_batch_status_flow(fake, tmp / "batch_status")))
     if args.only in ("append", "all"):
         tests.append(("generic named-Mask MCS append", lambda: test_append_masks(fake, tmp / "append")))
     if args.only in ("entrypoint", "all"):

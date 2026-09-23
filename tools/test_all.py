@@ -5181,6 +5181,48 @@ class TestNewFeatures(unittest.TestCase):
         labels = [label for label, _pattern, _glob, _count in diagnostics.SCAN_LOG_TARGETS]
         self.assertIn("logs/batch_status", labels)
 
+    def test_regression_matrix_runner_suite_registry(self):
+        """The one-command regression matrix stays internally consistent."""
+        import tools.run_regression_matrix as matrix
+
+        # 1. Unique names, every command target exists on disk.
+        names = [name for name, _cmd, _profiles in matrix.SUITES]
+        self.assertEqual(len(names), len(set(names)), "duplicate suite names")
+        for _name, command, _profiles in matrix.SUITES:
+            target = command[-1] if command[-1] != "-q" else command[-2]
+            # pytest invocation: [-m, pytest, -q, path]; plain: [python, path]
+            targets = [part for part in command[1:] if part.endswith(".py")]
+            self.assertTrue(targets, "no script target in {0!r}".format(command))
+            for candidate in targets:
+                self.assertTrue(
+                    Path(PROJECT_ROOT, candidate).is_file(),
+                    "suite target missing: {0}".format(candidate),
+                )
+        # 2. Profile membership sanity.
+        for _name, _cmd, profiles in matrix.SUITES:
+            self.assertTrue(profiles, "suite with no profile membership")
+            self.assertTrue(
+                profiles <= {"smoke", "fast", "full"},
+                "unknown profile in {0!r}".format(profiles),
+            )
+        # 3. Every profile selects something; smoke is a strict subset of fast.
+        for profile in ("smoke", "fast", "full"):
+            selected = matrix.select_suites(profile, [])
+            self.assertTrue(selected, "profile {0} selected nothing".format(profile))
+        smoke_names = {name for name, _cmd, _m in matrix.select_suites("smoke", [])}
+        fast_names = {name for name, _cmd, _m in matrix.select_suites("fast", [])}
+        full_names = {name for name, _cmd, _m in matrix.select_suites("full", [])}
+        self.assertTrue(smoke_names <= fast_names, "smoke must be a subset of fast")
+        self.assertTrue(fast_names <= full_names, "fast must be a subset of full")
+        # 4. --only filtering with unknown names is rejected.
+        with self.assertRaises(SystemExit):
+            matrix.select_suites("fast", ["no_such_suite"])
+        # 5. The smoke profile is all flow groups: no long suite can sneak in.
+        self.assertTrue(
+            all(name.startswith("flow_") for name in smoke_names),
+            "smoke profile must only contain flow groups",
+        )
+
     def test_export_launcher_thread_registry_is_pruned(self):
         import mimics_export
 
