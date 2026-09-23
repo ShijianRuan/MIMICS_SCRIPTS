@@ -31,6 +31,7 @@
 | Identify Mask At Cursor | 点击视图查看该位置的掩码名 | **项目已打开** + 已激活图像 + 有掩码 |
 | Window From Selected Mask | 根据掩码名自动匹配窗宽窗位 | **项目已打开** + 已激活图像 + 已选中掩码 |
 | Window Choose Preset | 手动选择窗宽窗位预设 | **项目已打开** + 已激活图像 |
+| Window Edit Presets | 编辑窗宽窗位预设（手输 W/L、增删预设、改关键词） | 环境已设置 |
 | Window Undo Last | 撤销上次窗宽窗位 | 有可撤销的窗宽窗位操作 |
 | Window Reset Full Range | 恢复图像全灰度范围 | **项目已打开** + 已激活图像 |
 
@@ -42,6 +43,10 @@
 | Clear Cache | 清除所有临时文件和缓存 | 无 |
 | Stop All Owned Services | 强制停止所有后台进程 | 无（切换功能前遇锁资源时使用） |
 | Fix Source Affine Metadata | 修复旧版 bridge 导致的仿射矩阵错误 | **项目已打开** + 已激活从 NIfTI 导入的图像 + 源文件仍在 |
+| System Health | 查看进程/锁/队列/服务器状态总览 | 无 |
+| Collect Diagnostics | 一键生成脱敏诊断包（zip）交给支持人员 | 无 |
+| Undo Last Import | 撤销最近一次导入（回退 .mcs 和掩码） | 有导入回执 |
+| Edit Configs | 图形化编辑常用配置（无需手改 JSON） | 环境已设置 |
 
 ## 快速参考
 

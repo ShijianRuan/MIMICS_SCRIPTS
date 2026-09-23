@@ -2464,6 +2464,78 @@ class TestWindowLevelEditor(unittest.TestCase):
         editor.window.close()
 
 
+class TestConfigEditor(unittest.TestCase):
+    """External config editor: schema wiring, nested get/set, validation."""
+
+    def setUp(self):
+        self.tmp = _make_temp_dir()
+        tools_dir = os.path.dirname(os.path.abspath(__file__))
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        import config_editor_ui as editor
+
+        self.editor = editor
+
+    def tearDown(self):
+        _cleanup(self.tmp)
+
+    def test_schemas_reference_real_config_files(self):
+        for file_name in self.editor.CONFIG_SCHEMAS:
+            self.assertTrue(
+                os.path.isfile(os.path.join(PROJECT_ROOT, file_name)), file_name
+            )
+
+    def test_nested_get_set_roundtrip(self):
+        data = {"scribbleprompt": {"device": "cpu", "timeout_seconds": 900}}
+        self.assertEqual("cpu", self.editor._get_nested(data, "scribbleprompt.device"))
+        self.assertIsNone(self.editor._get_nested(data, "missing.key"))
+        self.editor._set_nested(data, "scribbleprompt.device", "cuda")
+        self.assertEqual("cuda", data["scribbleprompt"]["device"])
+        self.editor._set_nested(data, "new.group.key", 5)
+        self.assertEqual(5, data["new"]["group"]["key"])
+
+    def test_choice_options_cover_schema_keys(self):
+        for (file_name, key), options in self.editor.CHOICE_OPTIONS.items():
+            ftype = self.editor.CONFIG_SCHEMAS[file_name][key][1]
+            self.assertEqual("choice", ftype, (file_name, key))
+            self.assertTrue(options, (file_name, key))
+
+    def test_config_editor_files_and_entry_exist(self):
+        self.assertTrue(
+            os.path.isfile(os.path.join(PROJECT_ROOT, "tools", "config_editor_ui.py"))
+        )
+        self.assertTrue(
+            os.path.isfile(
+                os.path.join(PROJECT_ROOT, "runtime_py35", "config_editor_mimics.py")
+            )
+        )
+        entry = os.path.join(
+            PROJECT_ROOT, "scripting_library", "99_Admin", "08_Edit_Configs.py"
+        )
+        self.assertTrue(os.path.isfile(entry))
+        with open(entry, "r") as handle:
+            source = handle.read()
+        self.assertIn("config_editor_mimics", source)
+
+    def test_config_editor_window_renders_offscreen(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        import PySide6
+        from PySide6 import QtWidgets
+
+        app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(
+            ["test"]
+        )
+        editor = self.editor.ConfigEditor(
+            (PySide6.QtCore, PySide6.QtGui, QtWidgets)
+        )
+        # One tab per config schema, widgets populated from real files.
+        self.assertEqual(
+            len(self.editor.CONFIG_SCHEMAS),
+            editor.window.findChild(QtWidgets.QTabWidget).count(),
+        )
+        editor.window.close()
+
+
 # ============================================================================
 # L6: create_mcs_batch.py
 # ============================================================================
@@ -6412,7 +6484,7 @@ class TestNewFeatures(unittest.TestCase):
     def test_stop_background_import_entry_exists(self):
         """Stop_Background_Import entry must route to the correct function."""
         entry = os.path.join(
-            os.getcwd(), "scripting_library", "01_Data", "04_Stop_Import_Queue.py"
+            PROJECT_ROOT, "scripting_library", "01_Data", "04_Stop_Import_Queue.py"
         )
         self.assertTrue(os.path.isfile(entry), "Stop_Background_Import entry must exist")
         with open(entry, "r", encoding="utf-8") as handle:
@@ -6422,7 +6494,7 @@ class TestNewFeatures(unittest.TestCase):
 
     def test_stop_background_import_targets_only_create_mcs(self):
         """stop_background_import must identify import lock by kind=create_mcs."""
-        sys.path.insert(0, os.path.join(os.getcwd(), "runtime_py35"))
+        sys.path.insert(0, os.path.join(PROJECT_ROOT, "runtime_py35"))
         import mimics_stop_background
         self.assertTrue(callable(mimics_stop_background.stop_background_import),
                         "stop_background_import must be callable")
