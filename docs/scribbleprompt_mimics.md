@@ -36,7 +36,7 @@ is valid and can remove an over-segmented region.
 
 The official checkpoint is not stored in Git. Place it at:
 
-`external/ScribblePrompt/checkpoints/ScribblePrompt_unet_v1_nf192_res128.pt`
+`integrations/ScribblePrompt/checkpoints/ScribblePrompt_unet_v1_nf192_res128.pt`
 
 ## Result And Recovery
 

@@ -16,7 +16,7 @@ It only writes a small request, launches the external process, polls a status
 JSON with a timer, and applies a verified result one Mask at a time.
 
 The managed layer reuses the proven planning, training, and prediction calls in
-`external/nnunet_segmentation_workflow`. It does not replace the standalone
+`integrations/nnunet_segmentation_workflow`. It does not replace the standalone
 scripts or their TOML workflows. It adds the contracts that Mimics needs:
 source-grid label preparation, background lifecycle management, portable model
 registration, remote execution, and guarded result application.

@@ -2378,6 +2378,92 @@ class TestWindowLevel(unittest.TestCase):
         self.assertEqual("Lung", presets[0]["name"])
 
 
+class TestWindowLevelEditor(unittest.TestCase):
+    """External preset editor: persistence round-trip, backup, validation."""
+
+    def setUp(self):
+        self.tmp = _make_temp_dir()
+        tools_dir = os.path.dirname(os.path.abspath(__file__))
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        import window_level_editor_ui as editor
+
+        self.editor = editor
+        self.presets_path = Path(self.tmp) / "window_level_presets.json"
+        self.backup_path = Path(self.tmp) / "backup.json"
+        self.sample = [
+            {"name": "Lung", "width": 1500, "level": -600, "keywords": ["lung"]},
+            {"name": "Bone", "width": 1800, "level": 400, "keywords": ["bone"]},
+        ]
+
+    def tearDown(self):
+        _cleanup(self.tmp)
+
+    def test_save_and_load_roundtrip(self):
+        self.editor.save_presets(self.sample, self.presets_path)
+        loaded = self.editor.load_presets(self.presets_path)
+        self.assertEqual(self.sample, loaded)
+
+    def test_load_missing_file_returns_empty(self):
+        self.assertEqual([], self.editor.load_presets(self.presets_path))
+
+    def test_load_rejects_non_list_json(self):
+        self.presets_path.write_text('{"not": "a list"}', encoding="utf-8")
+        self.assertEqual([], self.editor.load_presets(self.presets_path))
+
+    def test_save_is_atomic_no_tmp_residue(self):
+        self.editor.save_presets(self.sample, self.presets_path)
+        leftovers = list(self.presets_path.parent.glob("*.tmp"))
+        self.assertEqual([], leftovers)
+
+    def test_rollback_restores_previous_save(self):
+        self.editor.save_presets(self.sample, self.presets_path)
+        self.editor.write_backup(self.sample, self.backup_path)
+        changed = [dict(self.sample[0]), dict(self.sample[1])]
+        changed[0]["width"] = 999
+        del changed[1]
+        self.editor.save_presets(changed, self.presets_path)
+        self.editor.save_presets(
+            self.editor.load_presets(self.backup_path), self.presets_path
+        )
+        restored = self.editor.load_presets(self.presets_path)
+        self.assertEqual(self.sample, restored)
+
+    def test_editor_files_and_entry_exist(self):
+        self.assertTrue(
+            os.path.isfile(os.path.join(PROJECT_ROOT, "tools", "window_level_editor_ui.py"))
+        )
+        self.assertTrue(
+            os.path.isfile(
+                os.path.join(PROJECT_ROOT, "runtime_py35", "window_level_editor_mimics.py")
+            )
+        )
+        entry = os.path.join(
+            PROJECT_ROOT, "scripting_library", "03_Review", "06_Window_Edit_Presets.py"
+        )
+        self.assertTrue(os.path.isfile(entry))
+        with open(entry, "r") as handle:
+            source = handle.read()
+        self.assertIn("window_level_editor_mimics", source)
+
+    def test_editor_window_renders_offscreen(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        import PySide6
+        from PySide6 import QtWidgets
+
+        app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(
+            ["test"]
+        )
+        editor = self.editor.PresetEditor(
+            (PySide6.QtCore, PySide6.QtGui, QtWidgets)
+        )
+        # Rendering smoke: table populated from the real presets file.
+        self.assertEqual(
+            editor.table.rowCount(), len(self.editor.load_presets())
+        )
+        editor.window.close()
+
+
 # ============================================================================
 # L6: create_mcs_batch.py
 # ============================================================================
