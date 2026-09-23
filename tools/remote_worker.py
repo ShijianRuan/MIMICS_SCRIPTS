@@ -298,6 +298,39 @@ def run_nnunet(job_dir: Path, request: dict[str, Any]) -> int:
     )
 
 
+def run_flexict(job_dir: Path, request: dict[str, Any]) -> int:
+    pipeline = APP_ROOT / "tools" / "flexict_pipeline.py"
+    if not pipeline.is_file():
+        raise RuntimeError("FlexiCT pipeline is missing from the runtime image.")
+    pipeline_job = job_dir / "pipeline_job"
+    pipeline_job.mkdir(parents=True, exist_ok=True)
+    pipeline_request = request.get("pipeline_request")
+    if not isinstance(pipeline_request, dict):
+        raise RuntimeError("Remote FlexiCT request is missing.")
+    _write_json(pipeline_job / "request.json", pipeline_request)
+    _write_json(
+        pipeline_job / "control.json",
+        {"action": "run", "updated_at_epoch": time.time()},
+    )
+    _write_json(
+        pipeline_job / "status.json",
+        {
+            "schema_version": "flexict_job.v1",
+            "job_id": str(pipeline_request.get("job_id") or job_dir.name),
+            "task_id": str(pipeline_request.get("task_id") or ""),
+            "task_name": str(pipeline_request.get("task_name") or ""),
+            "status": "created",
+            "phase": "created",
+            "created_at_epoch": time.time(),
+            "updated_at_epoch": time.time(),
+        },
+    )
+    return _run(
+        [sys.executable, str(pipeline), "run", "--job-dir", str(pipeline_job)],
+        job_dir,
+    )
+
+
 def preflight(models_dir: Path) -> int:
     import torch
 
@@ -363,6 +396,29 @@ def preflight(models_dir: Path) -> int:
         result["nnunet_import"] = False
         result["nnunet_custom_trainer"] = False
         result["nnunet_error"] = str(exc)
+    try:
+        flexict_repo = APP_ROOT / "integrations" / "flexict-finetune"
+        trainer_root = flexict_repo / "trainers"
+        if str(trainer_root) not in sys.path:
+            sys.path.insert(0, str(trainer_root))
+        import einops  # noqa: F401
+        import safetensors  # noqa: F401
+
+        flexict_trainer = flexict_repo / "trainers" / "flexict_trainer.py"
+        result["flexict_import"] = bool(
+            flexict_trainer.is_file()
+            and (flexict_repo / "flexict" / "models.py").is_file()
+        )
+        if not result["flexict_import"]:
+            result["flexict_error"] = "FlexiCT repo files are missing."
+    except Exception as exc:
+        result["flexict_import"] = False
+        result["flexict_error"] = str(exc)
+    flexict_weights = models_dir / "flexict"
+    result["flexict_weights"] = bool(
+        (flexict_weights / "flexict_2d" / "model.safetensors").is_file()
+        and (flexict_weights / "flexict_3d" / "model.safetensors").is_file()
+    )
     result["ok"] = bool(
         result["ok"]
         and result.get("offline_mode")
@@ -370,6 +426,8 @@ def preflight(models_dir: Path) -> int:
         and result.get("nninteractive_import")
         and result.get("nnunet_import")
         and result.get("nnunet_custom_trainer")
+        and result.get("flexict_import")
+        and result.get("flexict_weights")
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result["ok"] else 2
@@ -402,6 +460,8 @@ def main() -> int:
                 return run_nninteractive(job_dir, request)
             if kind in {"nnunet_train", "nnunet_infer"}:
                 return run_nnunet(job_dir, request)
+            if kind in {"flexict", "flexict_infer"}:
+                return run_flexict(job_dir, request)
             raise RuntimeError("Unsupported remote job kind: {}".format(kind))
     except Exception as exc:
         _worker_status(

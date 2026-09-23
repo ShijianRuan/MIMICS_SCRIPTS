@@ -54,6 +54,14 @@ runtime_py35/flexict_mimics.py    tools/flexict_pipeline.py
 training → (training_3d) → registering → completed`。模型注册进
 workspace `flexict_models/registry.json`，pair 的两个模型共享 `pair_id`。
 
+**远程训练（Compute 页）**：训练窗口的 Compute 页默认 **This workstation**
+（本地）。选择已保存的远程服务器后，训练在远程 GPU 容器内执行——同一份
+请求、同一套 source-grid 数据准备、同一份锁定配方与模型 manifest，只是
+stage worker 在容器里跑。FlexiCT 预训练 backbone 从服务器 `/models/flexict`
+只读挂载，上传前做内容指纹校验（与本地 backbone 不一致即拒绝）。训练完成
+后 pair（或单模型）下载注册进本地 registry，带完整 remote 溯源字段，后续
+预测/主动学习照常本地使用。详见 `docs/remote_training_design.md`。
+
 ### 3.2 预测（02 Predict Current Case）
 
 1. 当前病例已打开且有 verified grid（第一次导入时的网格契约）——没有契约时
@@ -65,6 +73,10 @@ workspace `flexict_models/registry.json`，pair 的两个模型共享 `pair_id`�
 推理固定用 `checkpoint_best.pth`（验证 Dice 选出的）且 TTA 关闭——与验证配方
 一致。预测 NIfTI 在 source grid 上，由 `mimics_bridge.py` 重采样到当前 live
 grid 后经 mask buffer 事务应用；网格不匹配的预测会被拒绝而不是硬贴。
+
+预测窗口同样带 Compute 选择：默认本地；选远程时当前病例图像与所选模型一起
+上传，容器内推理后预测 NIfTI 下载回本地，经同样的网格校验与 buffer 路径
+应用——与本地预测完全同一条 Mimics 侧路径。
 
 ### 3.3 主动学习（03 Active Learning Review）
 

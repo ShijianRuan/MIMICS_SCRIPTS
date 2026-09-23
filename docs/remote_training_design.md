@@ -3,7 +3,8 @@
 ## 1. Goal and compatibility boundary
 
 This feature adds optional SSH/Docker execution for nnInteractive task
-fine-tuning and managed nnU-Net training/inference.
+fine-tuning, managed nnU-Net training/inference, and FlexiCT few-shot
+training/inference.
 
 The primary compatibility rule is:
 
@@ -18,14 +19,14 @@ The primary compatibility rule is:
   the existing external PySide6 process.
 
 nnInteractive inference remains local after the downloaded model is
-registered. Managed nnU-Net additionally supports optional remote batch
-inference; its prediction is downloaded, geometry-validated, and then applied
+registered. Managed nnU-Net and FlexiCT additionally support optional remote
+inference; the prediction is downloaded, geometry-validated, and then applied
 through the same Mimics-side buffer path as a local prediction. Local remains
 the default for every framework.
 
 ## 2. User workflow
 
-The nnInteractive and nnU-Net setup windows use the same additive
+The nnInteractive, nnU-Net, and FlexiCT setup windows use the same additive
 **Compute** section:
 
 1. **This workstation** remains the default.
@@ -41,8 +42,9 @@ The nnInteractive and nnU-Net setup windows use the same additive
    - GPU device: Automatic, a numeric index, or an NVIDIA GPU/MIG UUID
    - Whether unchanged uploaded training data should be reused
 4. **Test Connection** verifies SSH host identity, authentication, work-folder
-   permissions, Docker, NVIDIA GPU access, free disk space, all three AI
-   frameworks, required default weights, and enforced offline mode.
+   permissions, Docker, NVIDIA GPU access, free disk space, all AI
+   frameworks (nnInteractive, nnU-Net, FlexiCT), required default weights,
+   and enforced offline mode.
 5. The user explicitly selects `Remote · <profile>` and starts training.
 
 Passwords are stored in Windows Credential Manager. They are never written to
@@ -64,14 +66,16 @@ flowchart LR
     G --> H{"Training kind"}
     H --> J["nnInteractive fine-tuning pipeline"]
     H --> P["nnU-Net training or inference pipeline"]
+    H --> Q["FlexiCT training or inference pipeline"]
     J --> K["Model artifact"]
     P --> K
+    Q --> K
     K --> L["Resumable download"]
     L --> M["Existing local model registry"]
     M --> N["Existing local inference"]
 ```
 
-One image contains both training frameworks because the local project already
+One image contains all training frameworks because the local project already
 uses one compatible Python/CUDA environment. Separate containers are still
 used per job, so process termination and GPU-memory release remain isolated.
 
@@ -88,7 +92,7 @@ Key implementation files:
 - `tools/remote_compute_ui.py`: shared server profile and compute selector UI.
 - `tools/remote_training_controller.py`: local preparation, transfer, remote
   lifecycle, status mirroring, download, and local registration.
-- `tools/remote_worker.py`: container entry point for all three pipelines.
+- `tools/remote_worker.py`: container entry point for all framework pipelines.
 - `remote/Dockerfile`: unified CUDA runtime.
 - `remote/build_image.sh`: image build and optional archive export.
 - `remote/setup_remote_server.sh`: one-time server initialization.
@@ -112,6 +116,11 @@ local training:
 - nnInteractive uses its existing manifest preparation and input contract.
 - nnU-Net uses source-grid image/label preparation, a dataset-fingerprint
   isolated raw/preprocessed cache, and its existing model geometry contract.
+- FlexiCT uses the same source-grid image/label preparation and its locked
+  few-shot recipe. The FlexiCT backbone pair (2D + 3D ViT) initializes the
+  fine-tune from the read-only `/models/flexict` mount; its content
+  fingerprint must match the local backbone weights before training is
+  accepted.
 
 The upload contains only the selected cases, labels, job request, and an
 explicitly selected custom base model when applicable. Public/shared storage is
@@ -145,9 +154,11 @@ Base models are installed once by the server administrator under:
 
 ```text
 <remote-root>/models/nninteractive/nnInteractive_v1.0/
+<remote-root>/models/flexict/flexict_2d/model.safetensors
+<remote-root>/models/flexict/flexict_3d/model.safetensors
 ```
 
-The model directory is mounted read-only in every training container. A custom
+The model directories are mounted read-only in every training container. A custom
 base model selected by the user is copied into that job only.
 
 Base weights are deliberately not baked into the Docker image. The image
@@ -306,7 +317,7 @@ MIMICS_AI_ROOT=/srv/mimics-ai \
 ```
 
 This builds the image, creates the remote folders, verifies base weights, and
-runs nnInteractive, nnU-Net, CUDA, and offline-runtime preflights.
+runs nnInteractive, nnU-Net, FlexiCT, CUDA, and offline-runtime preflights.
 
 Job containers use `--network none` and also set
 `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`,
@@ -380,8 +391,9 @@ Required Windows/Mimics acceptance tests:
    previous version.
 2. Save a password profile, restart Windows, and confirm the password is read
    from Credential Manager while absent from project JSON/logs.
-3. Train one small nnInteractive and nnU-Net job remotely, then run
-   inference with each downloaded model; also verify one remote nnU-Net inference.
+3. Train one small nnInteractive, nnU-Net, and FlexiCT job remotely, then run
+   inference with each downloaded model; also verify one remote nnU-Net and
+   FlexiCT inference.
 4. Compare local and remote training using identical data, seed, image, and
    parameters. Exact floating-point identity is not guaranteed across CUDA
    hardware, but input manifests and model configuration must match.
@@ -400,8 +412,8 @@ Required Windows/Mimics acceptance tests:
 
 ## 10. Deliberate limitations
 
-- No remote interactive nnInteractive inference. Managed nnU-Net remote
-  inference is supported.
+- No remote interactive nnInteractive inference. Managed nnU-Net and FlexiCT
+  remote inference are supported.
 - No central model marketplace or cross-user model approval workflow.
 - No password is stored on non-Windows development machines; use an SSH key or
   a test-only environment variable there.

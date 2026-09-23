@@ -157,6 +157,7 @@ def _stop_inprocess_monitors():
         ("nninteractive_mimics", "_ASYNC_MONITORS", "_stop_async_monitor"),
         ("interactive_algorithms_mimics", "_MONITORS", "_cancel_monitor"),
         ("nnunet_mimics", "_MONITORS", "_stop_monitor"),
+        ("flexict_mimics", "_MONITORS", "_stop_monitor"),
     ):
         module = sys.modules.get(module_name)
         if module is None:

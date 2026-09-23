@@ -1222,5 +1222,456 @@ class TestJobLifecycle(unittest.TestCase):
             self.assertTrue(status.get("traceback"))
 
 
+class TestRemoteExecution(unittest.TestCase):
+    """Remote (SSH/Docker) FlexiCT training and inference contracts.
+
+    Mirrors the nnU-Net remote tests in test_nnunet_integration.py: the
+    controller is exercised only through its pure preparation/registration
+    functions; SSH, containers, and GPU work stay out of scope.
+    """
+
+    def _write_json(self, path, payload):
+        from nnunet_common import write_json_atomic
+
+        write_json_atomic(path, payload)
+        return payload
+
+    # -- job creation ------------------------------------------------------
+
+    def _create_remote_job(self, tmp, **overrides):
+        workspace = Path(tmp) / "workspace"
+        values = _training_request("X:/d", str(workspace))
+        values.update(execution_backend="remote", remote_profile_id="labgpu")
+        values.update(overrides)
+        launched = {}
+
+        class FakeProcess:
+            pid = 4321
+
+        def fake_popen(command, **kwargs):
+            launched["command"] = command
+            return FakeProcess()
+
+        with mock.patch("flexict_pipeline.subprocess.Popen",
+                        side_effect=fake_popen), \
+             mock.patch("flexict_pipeline.process_start_marker",
+                        return_value="m"):
+            job = fp.create_flexict_job(values)
+        return job, launched
+
+    def test_remote_training_job_launches_controller_with_spec(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job, launched = self._create_remote_job(tmp)
+            command = launched["command"]
+            self.assertIn("remote_training_controller.py", command[1])
+            self.assertIn("run", command)
+            self.assertIn("--spec", command)
+            spec = json.loads(
+                (Path(job["job_dir"]) / "remote_spec.json").read_text(
+                    encoding="utf-8"))
+            self.assertEqual(
+                spec["schema_version"], "mimics_remote_flexict_spec.v1")
+            self.assertEqual(spec["kind"], "flexict")
+            self.assertEqual(spec["remote_profile_id"], "labgpu")
+            status = json.loads(
+                (Path(job["job_dir"]) / "status.json").read_text(
+                    encoding="utf-8"))
+            self.assertEqual(status["execution_backend"], "remote")
+            self.assertEqual(status["remote_profile_id"], "labgpu")
+            # The local pipeline must not be the launched command.
+            self.assertNotIn("flexict_pipeline.py", command[1])
+
+    def test_remote_infer_job_uses_flexict_infer_kind(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job, launched = self._create_remote_job(
+                tmp,
+                operation="infer",
+                model_manifest="W:/m/flexict_model_manifest.json",
+                image_path="X:/d/case01/ct.nii.gz",
+                output_path="X:/out/pred.nii.gz",
+                source_modality="ct",
+            )
+            spec = json.loads(
+                (Path(job["job_dir"]) / "remote_spec.json").read_text(
+                    encoding="utf-8"))
+            self.assertEqual(spec["kind"], "flexict_infer")
+            self.assertIn("remote_training_controller.py",
+                          launched["command"][1])
+
+    def test_remote_job_without_profile_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            values = _training_request("X:/d", str(workspace))
+            values["execution_backend"] = "remote"
+            with mock.patch("flexict_pipeline.subprocess.Popen") as popen:
+                with self.assertRaisesRegex(RuntimeError, "server"):
+                    fp.create_flexict_job(values)
+            popen.assert_not_called()
+
+    # -- worker environment -------------------------------------------------
+
+    def test_worker_environment_resolves_remote_weights_override(self):
+        roots = {
+            "raw": Path("W:/raw"),
+            "preprocessed": Path("W:/pre"),
+            "results": Path("W:/res"),
+        }
+        request = fp.normalize_flexict_request(_training_request("X:/d", "W:/w"))
+        request["flexict_pretrained_dir"] = "/models/flexict"
+        environment = fp.flexict_worker_environment(request, roots, "2d")
+        self.assertEqual(
+            environment["FLEXICT2D_CKPT"],
+            "/models/flexict/flexict_2d/model.safetensors")
+        self.assertEqual(
+            environment["FLEXICT3D_CKPT"],
+            "/models/flexict/flexict_3d/model.safetensors")
+
+    # -- controller preparation ----------------------------------------------
+
+    def _controller(self):
+        import remote_training_controller as controller
+
+        return controller
+
+    def _prepare_spec(self, tmp, request):
+        job = Path(tmp) / "job"
+        bundle = Path(tmp) / "bundle"
+        job.mkdir(parents=True, exist_ok=True)
+        bundle.mkdir(parents=True, exist_ok=True)
+        request_path = job / "request.json"
+        status_path = job / "status.json"
+        self._write_json(request_path, request)
+        self._write_json(
+            status_path,
+            {"status": "preparing_remote", "job_id": request.get("job_id", "j")},
+        )
+        self._write_json(job / "control.json", {"action": "run"})
+        return {
+            "job_dir": str(job),
+            "status_path": str(status_path),
+            "request_path": str(request_path),
+        }, bundle
+
+    def test_prepare_flexict_returns_remote_contract(self):
+        controller = self._controller()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = root / "image.nii.gz"
+            label = root / "label.nii.gz"
+            image.write_bytes(b"image")
+            label.write_bytes(b"label")
+            request = fp.normalize_flexict_request(
+                _training_request("X:/d", str(root / "workspace")))
+            spec, bundle = self._prepare_spec(tmp, request)
+            rows = [
+                {
+                    "case_id": "case_1",
+                    "image": image,
+                    "label": label,
+                    "fingerprint": "fingerprint",
+                }
+            ]
+            with mock.patch(
+                "tools.flexict_pipeline.prepare_source_grid_cases",
+                return_value=rows,
+            ):
+                prepared = controller._prepare_flexict(spec, bundle)
+            payload = json.loads(
+                (bundle / "remote_request.json").read_text(encoding="utf-8"))
+            self.assertEqual(payload["kind"], "flexict")
+            remote_request = payload["pipeline_request"]
+            self.assertTrue(remote_request["gpu_lock_managed_externally"])
+            self.assertEqual(
+                remote_request["flexict_pretrained_dir"], "/models/flexict")
+            self.assertEqual(remote_request["dataset_root"], "/job/input")
+            self.assertEqual(remote_request["label_root"], "/job/labels")
+            self.assertEqual(remote_request["workspace"], "/job/output")
+            self.assertTrue(
+                remote_request["runtime_roots"]["raw"].startswith(
+                    "/remote-cache/flexict/"))
+            self.assertEqual(
+                remote_request["runtime_roots"]["results"],
+                "/job/output/runtime/nnUNet_results")
+            self.assertEqual(
+                prepared["required_model_relative"], "flexict")
+            self.assertEqual(prepared["train_count"], 1)
+            self.assertTrue(
+                prepared["remote_artifact_relative"].startswith(
+                    "output/models/"))
+            self.assertEqual(
+                prepared["remote_status_relative"], "pipeline_job/status.json")
+            self.assertEqual(
+                prepared["remote_control_relative"], "pipeline_job/control.json")
+            self.assertEqual(
+                prepared["dataset_case_cache_keys"], {"case_1": "fingerprint"})
+            self.assertIn("flexict", prepared["local_dataset_archive_cache"])
+            # Staged per-case files use the container-side /job layout.
+            self.assertTrue(
+                (bundle / "input" / "case_1" / "image.nii.gz").is_file())
+            self.assertTrue(
+                (bundle / "labels" / "case_1" / "label.nii.gz").is_file())
+            # The local materialization scratch folder is cleaned up.
+            self.assertFalse((bundle / "prepared_local").exists())
+
+    def test_prepare_flexict_rejects_non_training_request(self):
+        controller = self._controller()
+        with tempfile.TemporaryDirectory() as tmp:
+            request = fp.normalize_flexict_request({
+                "operation": "infer",
+                "workspace": "W:/w",
+                "model_manifest": "W:/m/manifest.json",
+                "image_path": "X:/d/case/ct.nii.gz",
+                "output_path": "X:/out/pred.nii.gz",
+            })
+            spec, bundle = self._prepare_spec(tmp, request)
+            with self.assertRaisesRegex(RuntimeError, "non-training"):
+                controller._prepare_flexict(spec, bundle)
+
+    def _infer_fixture(self, tmp, expected_affine=None):
+        import nibabel as nib
+        import numpy as np
+
+        root = Path(tmp)
+        source = root / "image.nii.gz"
+        affine = np.eye(4) if expected_affine is None else expected_affine
+        nib.save(
+            nib.Nifti1Image(np.zeros((4, 4, 4), dtype=np.float32), affine),
+            str(source),
+        )
+        model = root / "model"
+        (model / "fold_0").mkdir(parents=True)
+        (model / "fold_0" / "checkpoint_best.pth").write_bytes(b"weights")
+        (model / "plans.json").write_text("{}", encoding="utf-8")
+        (model / "dataset.json").write_text("{}", encoding="utf-8")
+        manifest_path = model / "flexict_model_manifest.json"
+        self._write_json(
+            manifest_path,
+            {"model_id": "flexict_m1", "model_dir": str(model),
+             "configuration": "2d"},
+        )
+        request = {
+            "operation": "infer",
+            "job_id": "infer_remote",
+            "workspace": str(root / "workspace"),
+            "case_id": "case01",
+            "image_path": str(source),
+            "model_manifest": str(manifest_path),
+            "source_modality": "CT",
+            "source_geometry_expected": {
+                "source_shape": [4, 4, 4],
+                "source_voxel_to_ras_matrix": affine.tolist(),
+            },
+        }
+        return request
+
+    def test_prepare_flexict_infer_returns_remote_contract(self):
+        controller = self._controller()
+        with tempfile.TemporaryDirectory() as tmp:
+            request = self._infer_fixture(tmp)
+            spec, bundle = self._prepare_spec(tmp, request)
+            prepared = controller._prepare_flexict_infer(spec, bundle)
+            payload = json.loads(
+                (bundle / "remote_request.json").read_text(encoding="utf-8"))
+            self.assertEqual(payload["kind"], "flexict_infer")
+            remote_request = payload["pipeline_request"]
+            self.assertEqual(
+                remote_request["image_path"],
+                "/job/input/case01/image.nii.gz")
+            self.assertEqual(
+                remote_request["model_manifest"],
+                "/job/labels/model/model_dir/flexict_model_manifest.json")
+            self.assertEqual(
+                remote_request["model_dir_override"],
+                "/job/labels/model/model_dir")
+            self.assertEqual(
+                remote_request["output_path"],
+                "/job/output/prediction_bundle/prediction.nii.gz")
+            self.assertTrue(
+                remote_request["runtime_roots"]["raw"].startswith(
+                    "/remote-cache/flexict/inference/"))
+            self.assertEqual(
+                prepared["remote_artifact_relative"], "output/prediction_bundle")
+            self.assertIn(
+                "model", prepared["dataset_case_cache_keys"])
+            self.assertIn(
+                "case01", prepared["dataset_case_cache_keys"])
+            self.assertIn(
+                "remote_inference_archives",
+                prepared["local_dataset_archive_cache"])
+            # No /models requirement: the trained model ships with the job.
+            self.assertEqual(prepared["required_model_relative"], "")
+
+    def test_prepare_flexict_infer_rejects_changed_source_geometry(self):
+        import numpy as np
+
+        controller = self._controller()
+        with tempfile.TemporaryDirectory() as tmp:
+            # Image on disk has the identity grid; the recorded expectation
+            # claims a shifted grid, as if the Mimics project relinked a
+            # different source.
+            request = self._infer_fixture(tmp)
+            wrong = np.eye(4)
+            wrong[1, 3] = 9.0
+            request["source_geometry_expected"] = {
+                "source_shape": [4, 4, 4],
+                "source_voxel_to_ras_matrix": wrong.tolist(),
+            }
+            spec, bundle = self._prepare_spec(tmp, request)
+            with self.assertRaisesRegex(RuntimeError, "no longer matches"):
+                controller._prepare_flexict_infer(spec, bundle)
+
+    # -- controller registration ---------------------------------------------
+
+    def test_register_flexict_registers_pair_with_remote_provenance(self):
+        controller = self._controller()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            request = fp.normalize_flexict_request(
+                _training_request("X:/d", str(workspace)))
+            spec, _bundle = self._prepare_spec(tmp, request)
+            artifact = root / "artifact" / "models" / "kidney" / "flexict_x"
+            for configuration in ("2d", "3d_fullres"):
+                model_dir = artifact / configuration
+                model_dir.mkdir(parents=True)
+                (model_dir / "checkpoint_best.pth").write_bytes(b"w")
+                self._write_json(
+                    model_dir / "flexict_model_manifest.json",
+                    {
+                        "model_id": "flexict_" + configuration,
+                        "configuration": configuration,
+                        "pair_id": "pair1",
+                        "task_id": "kidney",
+                    },
+                )
+            profile = {
+                "profile_id": "labgpu",
+                "name": "Lab GPU",
+                "runtime_image": "mimics-ai-runtime:1.0",
+                "gpu_device": "1",
+            }
+            remote_status = {
+                "remote_gpu_device": "1",
+                "dataset_fingerprint": "dsfp",
+                "remote_runtime_image_id": "sha256:abc",
+            }
+            manifests = controller._register_flexict(
+                spec, artifact, remote_status, profile
+            )
+            self.assertEqual(len(manifests), 2)
+            models = fc.load_models(str(workspace))
+            self.assertEqual(len(models), 2)
+            by_config = {m["configuration"]: m for m in models}
+            self.assertEqual(set(by_config), {"2d", "3d_fullres"})
+            for manifest in manifests:
+                self.assertEqual(manifest["execution_backend"], "remote")
+                self.assertEqual(manifest["remote_profile_id"], "labgpu")
+                self.assertEqual(manifest["remote_profile_name"], "Lab GPU")
+                self.assertEqual(
+                    manifest["remote_runtime_image"],
+                    "mimics-ai-runtime:1.0")
+                self.assertEqual(manifest["remote_gpu_device"], "1")
+                self.assertEqual(
+                    manifest["remote_dataset_fingerprint"], "dsfp")
+                # model_dir points at the downloaded local artifact.
+                self.assertTrue(
+                    Path(manifest["model_dir"]).is_dir())
+                self.assertEqual(
+                    manifest["manifest_path"],
+                    str(Path(manifest["model_dir"])
+                        / "flexict_model_manifest.json"))
+
+    def test_register_flexict_without_manifest_fails(self):
+        controller = self._controller()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            request = fp.normalize_flexict_request(
+                _training_request("X:/d", str(root / "workspace")))
+            spec, _bundle = self._prepare_spec(tmp, request)
+            empty = root / "artifact"
+            empty.mkdir()
+            with self.assertRaisesRegex(RuntimeError, "no model manifest"):
+                controller._register_flexict(
+                    spec, empty, {}, {"profile_id": "p", "name": "n",
+                                      "runtime_image": "i"})
+
+    # -- remote worker ---------------------------------------------------------
+
+    def test_worker_run_flexict_writes_pipeline_job_and_dispatches(self):
+        import remote_worker
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = Path(tmp) / "job"
+            job_dir.mkdir()
+            request = {
+                "kind": "flexict",
+                "pipeline_request": {
+                    "job_id": "train_1",
+                    "task_id": "kidney",
+                    "task_name": "Kidney",
+                    "operation": "train",
+                },
+            }
+            commands = []
+
+            def fake_run(command, cwd):
+                commands.append((list(command), cwd))
+                return 0
+
+            with mock.patch.object(remote_worker, "_run", side_effect=fake_run), \
+                 mock.patch.object(
+                     remote_worker, "APP_ROOT", ROOT) as app_root_patch:
+                self.assertTrue(
+                    (app_root_patch / "tools" / "flexict_pipeline.py").is_file())
+                exit_code = remote_worker.run_flexict(job_dir, request)
+            self.assertEqual(exit_code, 0)
+            pipeline_job = job_dir / "pipeline_job"
+            saved = json.loads(
+                (pipeline_job / "request.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["job_id"], "train_1")
+            control = json.loads(
+                (pipeline_job / "control.json").read_text(encoding="utf-8"))
+            self.assertEqual(control["action"], "run")
+            status = json.loads(
+                (pipeline_job / "status.json").read_text(encoding="utf-8"))
+            self.assertEqual(status["schema_version"], "flexict_job.v1")
+            self.assertEqual(status["status"], "created")
+            self.assertEqual(len(commands), 1)
+            command = commands[0][0]
+            self.assertIn("flexict_pipeline.py", command[1])
+            self.assertIn("run", command)
+            self.assertIn("--job-dir", command)
+
+    def test_worker_dispatch_covers_flexict_kinds(self):
+        import inspect
+
+        import remote_worker
+
+        source = inspect.getsource(remote_worker.main)
+        self.assertIn('kind in {"flexict", "flexict_infer"}', source)
+        self.assertIn("run_flexict", source)
+
+    def test_worker_preflight_reports_flexict_weights_and_import(self):
+        import contextlib
+        import io
+
+        import remote_worker
+
+        with tempfile.TemporaryDirectory() as tmp:
+            models_dir = Path(tmp) / "models"
+            for configuration in ("flexict_2d", "flexict_3d"):
+                (models_dir / "flexict" / configuration).mkdir(parents=True)
+                (models_dir / "flexict" / configuration
+                 / "model.safetensors").write_bytes(b"weights")
+            captured = io.StringIO()
+            with contextlib.redirect_stdout(captured), \
+                 mock.patch.object(remote_worker, "APP_ROOT", ROOT):
+                remote_worker.preflight(models_dir)
+            result = json.loads(captured.getvalue())
+            self.assertTrue(result["flexict_weights"])
+            self.assertTrue(result["flexict_import"], result.get("flexict_error"))
+            self.assertIsInstance(result["ok"], bool)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

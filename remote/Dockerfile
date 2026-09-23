@@ -15,7 +15,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     WANDB_MODE=offline \
     MIMICS_REMOTE_LOG_MAX_BYTES=33554432 \
     MIMICS_REMOTE_LOG_BACKUP_COUNT=3 \
-    PYTHONPATH=/app:/app/tools:/app/integrations/nninteractive-finetune/src:/app/integrations/nnunet_segmentation_workflow
+    PYTHONPATH=/app:/app/tools:/app/integrations/nninteractive-finetune/src:/app/integrations/nnunet_segmentation_workflow:/app/integrations/flexict-finetune
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \

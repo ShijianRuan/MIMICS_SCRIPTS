@@ -77,6 +77,7 @@ class TrainingSetupWindow:
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.addTab(self._build_data_tab(), "Data")
         self.tabs.addTab(self._build_training_tab(), "Training")
+        self.tabs.addTab(self._build_compute_tab(), "Compute")
         self.tabs.addTab(self._build_models_tab(), "Existing models")
         root.addWidget(self.tabs, 1)
 
@@ -333,6 +334,34 @@ class TrainingSetupWindow:
         layout.addStretch(1)
         return tab
 
+    def _build_compute_tab(self):
+        QtWidgets = self.QtWidgets
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        layout.setContentsMargins(12, 14, 12, 12)
+        self.remote_selector = None
+        try:
+            from remote_compute_ui import RemoteComputeSelector
+
+            self.remote_selector = RemoteComputeSelector(
+                self.window, (self.QtCore, self.QtGui, self.QtWidgets)
+            )
+            layout.addWidget(self.remote_selector.group)
+        except Exception:
+            layout.addWidget(
+                QtWidgets.QLabel("Remote compute is unavailable on this workstation.")
+            )
+        note = QtWidgets.QLabel(
+            "Local and remote runs use the same request, source-grid preparation, "
+            "recipe, model manifest, and status format. Remote containers are "
+            "disposable; verified data and preprocessing caches remain reusable."
+        )
+        note.setObjectName("hint")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        layout.addStretch(1)
+        return tab
+
     def _load_context(self):
         config = load_config()
         default_workspace = workspace_root(config)
@@ -535,6 +564,10 @@ class TrainingSetupWindow:
             "train_case_ids": train_cases,
             "mimics_exe": self.context.get("mimics_exe") or "",
         }
+        if self.remote_selector is not None:
+            backend, profile_id = self.remote_selector.selection()
+            request["execution_backend"] = backend
+            request["remote_profile_id"] = profile_id
         return request
 
     def _submit(self):

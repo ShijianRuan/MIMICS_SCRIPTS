@@ -1128,11 +1128,19 @@ class JobLifecycleTests(unittest.TestCase):
                 },
             )
             # Default mode: dead rows are dropped (prediction surfaces keep
-            # only usable models).
-            self.assertEqual(common.load_models(workspace), [])
-            # Migration mode: dead rows stay visible flagged missing_path so
-            # the status viewer can tell the user what to repair.
-            flagged = common.load_models(workspace, include_missing=True)
+            # only usable models). Isolate from the workstation's global
+            # registry, which may legitimately carry its own dead rows.
+            with mock.patch.object(
+                common,
+                "model_registry_paths",
+                return_value=[registry_path],
+            ):
+                self.assertEqual(common.load_models(workspace), [])
+                # Migration mode: dead rows stay visible flagged missing_path
+                # so the status viewer can tell the user what to repair.
+                flagged = common.load_models(
+                    workspace, include_missing=True
+                )
             self.assertEqual(len(flagged), 1)
             self.assertEqual(flagged[0]["status"], "missing_path")
             self.assertEqual(flagged[0]["model_id"], "dead_model")

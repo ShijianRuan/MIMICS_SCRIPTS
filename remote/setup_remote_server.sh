@@ -41,11 +41,15 @@ mkdir -p \
   "$ROOT/locks" \
   "$ROOT/cache" \
   "$ROOT/models/cache" \
-  "$ROOT/models/nninteractive"
+  "$ROOT/models/nninteractive" \
+  "$ROOT/models/flexict/flexict_2d" \
+  "$ROOT/models/flexict/flexict_3d"
 
 echo
 echo "Expected base-model layout:"
 echo "  $ROOT/models/nninteractive/nnInteractive_v1.0/"
+echo "  $ROOT/models/flexict/flexict_2d/model.safetensors"
+echo "  $ROOT/models/flexict/flexict_3d/model.safetensors"
 echo
 
 if [[ -d "$ROOT/models/dinov3" ]]; then
@@ -58,6 +62,13 @@ if [[ ! -d "$ROOT/models/nninteractive/nnInteractive_v1.0" ]] || \
   echo "ERROR: Official nnInteractive weights are missing." >&2
   exit 1
 fi
+for variant in flexict_2d flexict_3d; do
+  [[ -f "$ROOT/models/flexict/$variant/model.safetensors" ]] || {
+    echo "ERROR: FlexiCT backbone weights are missing:" >&2
+    echo "  $ROOT/models/flexict/$variant/model.safetensors" >&2
+    exit 1
+  }
+done
 
 docker run --rm --gpus all --network none \
   -v "$ROOT/models:/models:ro" \

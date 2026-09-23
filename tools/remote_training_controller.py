@@ -1010,6 +1010,305 @@ def _prepare_nnunet_infer(
     }
 
 
+def _prepare_flexict(
+    spec: dict[str, Any], bundle: Path
+) -> dict[str, Any]:
+    """Prepare source-grid FlexiCT cases and a portable remote request.
+
+    Mirrors _prepare_nnunet: cases are materialized locally on the source
+    grid, then shipped as per-case content-addressed archives. The FlexiCT
+    differences are the dataset band (750-799), the model artifact layout
+    (output/models/<task>/<model_id>, one folder per trained configuration
+    with a shared pair_id), and the pretrained-backbone requirement under
+    /models/flexict (fingerprint-verified by _validate_remote_assets).
+    """
+    import tools.flexict_pipeline as pipeline
+    from tools.flexict_pipeline import normalize_flexict_request
+    from tools.nnunet_common import (
+        read_json as read_flexict_json,
+        safe_identifier as flexict_safe_identifier,
+        write_json_atomic as write_flexict_json,
+    )
+
+    local_job_dir = Path(spec["job_dir"]).resolve()
+    status_path = Path(spec["status_path"]).resolve()
+    control_path = local_job_dir / "control.json"
+    request = normalize_flexict_request(
+        read_flexict_json(Path(spec["request_path"]).resolve(), {}) or {}
+    )
+    if request["operation"] != "train":
+        raise RuntimeError("Remote FlexiCT training received a non-training request.")
+    prepared_root = bundle / "prepared_local"
+    rows = pipeline.prepare_source_grid_cases(
+        request,
+        prepared_root,
+        status_path,
+        control_path,
+    )
+    remote_rows = []
+    dataset_case_cache_keys: dict[str, str] = {}
+    for index, row in enumerate(rows, start=1):
+        _raise_if_cancelled(status_path)
+        case_id = flexict_safe_identifier(row["case_id"], "case")
+        image_dst = bundle / "input" / case_id / "image.nii.gz"
+        label_dst = bundle / "labels" / case_id / "label.nii.gz"
+        _link_or_copy(row["image"], image_dst)
+        _link_or_copy(row["label"], label_dst)
+        dataset_case_cache_keys[case_id] = str(row.get("fingerprint") or "")
+        remote_rows.append(
+            {
+                "case_id": str(row["case_id"]),
+                "image": "/job/input/{}/image.nii.gz".format(case_id),
+                "label": "/job/labels/{}/label.nii.gz".format(case_id),
+                "fingerprint": str(row.get("fingerprint") or ""),
+            }
+        )
+        _status_update(
+            status_path,
+            status="preparing_remote",
+            phase="preparing_remote_data",
+            message="Preparing remote FlexiCT case {} of {}.".format(
+                index, len(rows)
+            ),
+            preparation_index=index,
+            preparation_total=len(rows),
+            progress_percent=10 + int(10 * index / max(1, len(rows))),
+        )
+
+    remote_request = dict(request)
+    remote_request["execution_backend"] = "remote"
+    remote_request["label_source"] = "prepared"
+    remote_request["prepared_cases"] = remote_rows
+    remote_request["dataset_root"] = "/job/input"
+    remote_request["label_root"] = "/job/labels"
+    remote_request["mcs_dir"] = ""
+    remote_request["workspace"] = "/job/output"
+    remote_request["gpu_lock_managed_externally"] = True
+    remote_request["gpu_id"] = ""
+    # The container resolves the FlexiCT backbone weights from the read-only
+    # /models mount (admin-installed, fingerprint-verified below).
+    remote_request["flexict_pretrained_dir"] = "/models/flexict"
+    remote_request["runtime_roots"] = {
+        "raw": "/remote-cache/flexict/{}/raw".format(
+            _REMOTE_DATASET_CACHE_TOKEN
+        ),
+        "preprocessed": "/remote-cache/flexict/{}/preprocessed".format(
+            _REMOTE_DATASET_CACHE_TOKEN
+        ),
+        "results": "/job/output/runtime/nnUNet_results",
+    }
+    model_id = str(
+        remote_request.get("model_id")
+        or "flexict_{}_{}".format(
+            time.strftime("%Y%m%dT%H%M%S"), uuid.uuid4().hex[:8]
+        )
+    )
+    remote_request["model_id"] = model_id
+    task_slug = flexict_safe_identifier(request["task_id"], "task")
+    artifact = "output/models/{}/{}".format(task_slug, model_id)
+    payload = {
+        "schema_version": "mimics_remote_training_request.v1",
+        "kind": "flexict",
+        "job_id": request["job_id"],
+        "pipeline_request": remote_request,
+        "remote_status_path": "/job/pipeline_job/status.json",
+        "artifact_path": "/job/{}".format(artifact),
+        "created_at_epoch": time.time(),
+    }
+    write_flexict_json(bundle / "remote_request.json", payload)
+    shutil.rmtree(str(prepared_root), ignore_errors=True)
+    return {
+        "remote_status_relative": "pipeline_job/status.json",
+        "remote_control_relative": "pipeline_job/control.json",
+        "remote_control_kind": "json",
+        "remote_artifact_relative": artifact,
+        "train_count": len(rows),
+        "validation_count": 0,
+        # The FlexiCT backbone pair under /models/flexict must match the
+        # local weights (they initialise the fine-tune). Verified with the
+        # same strict/warn fingerprint check as the nnInteractive base model.
+        "required_model_relative": "flexict",
+        "local_required_model": "",
+        "local_model_id": model_id,
+        "local_dataset_archive_cache": str(
+            Path(request["workspace"])
+            / "cache"
+            / "remote_dataset_archives"
+            / "flexict"
+            / task_slug
+        ),
+        "dataset_case_cache_keys": dataset_case_cache_keys,
+    }
+
+
+def _prepare_flexict_infer(
+    spec: dict[str, Any], bundle: Path
+) -> dict[str, Any]:
+    from tools.flexict_pipeline import normalize_flexict_request
+    from tools.nnunet_common import (
+        path_signature,
+        read_json as read_flexict_json,
+        safe_identifier as flexict_safe_identifier,
+        stable_digest,
+        write_json_atomic as write_flexict_json,
+    )
+    from tools.mimics_label_export import materialize_source_image as _materialize_source_image
+    from tools.nnunet_pipeline import validate_materialized_source_geometry
+
+    request = normalize_flexict_request(
+        read_flexict_json(Path(spec["request_path"]).resolve(), {}) or {}
+    )
+    if request["operation"] != "infer":
+        raise RuntimeError("Remote FlexiCT inference received a training request.")
+    source_image = Path(str(request.get("image_path") or "")).expanduser().resolve()
+    if not source_image.exists():
+        raise RuntimeError("Prediction image does not exist: {}".format(source_image))
+    case_id = flexict_safe_identifier(request.get("case_id") or source_image.stem, "case")
+    image_dst = bundle / "input" / case_id / "image.nii.gz"
+    image_dst.parent.mkdir(parents=True, exist_ok=True)
+    _materialize_source_image(source_image, image_dst)
+    validate_materialized_source_geometry(
+        image_dst, request.get("source_geometry_expected")
+    )
+
+    manifest_path = Path(str(request.get("model_manifest") or "")).expanduser().resolve()
+    manifest = read_flexict_json(manifest_path, {}) or {}
+    model_dir = Path(str(manifest.get("model_dir") or manifest_path.parent)).expanduser().resolve()
+    if not manifest_path.is_file() or not model_dir.is_dir():
+        raise RuntimeError("Selected FlexiCT model is missing or invalid.")
+    model_bundle = bundle / "labels" / "model" / "model_dir"
+    model_bundle.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.copytree(str(model_dir), str(model_bundle), copy_function=os.link)
+    except OSError:
+        shutil.rmtree(str(model_bundle), ignore_errors=True)
+        shutil.copytree(str(model_dir), str(model_bundle))
+    remote_manifest = model_bundle / manifest_path.name
+    if not remote_manifest.is_file():
+        shutil.copy2(str(manifest_path), str(remote_manifest))
+
+    model_fingerprint = stable_digest(
+        {
+            "weights": _local_model_fingerprint(model_dir),
+            "manifest": path_signature(manifest_path),
+            "model_id": manifest.get("model_id"),
+        }
+    )
+    image_fingerprint = stable_digest(
+        {"source": path_signature(source_image), "contract": "flexict_remote_infer_image.v1"}
+    )
+    remote_request = dict(request)
+    remote_request["execution_backend"] = "remote"
+    remote_request["gpu_lock_managed_externally"] = True
+    remote_request["gpu_id"] = ""
+    remote_request["workspace"] = "/job/output"
+    remote_request["image_path"] = "/job/input/{}/image.nii.gz".format(case_id)
+    remote_request["model_manifest"] = "/job/labels/model/model_dir/{}".format(
+        remote_manifest.name
+    )
+    remote_request["model_dir_override"] = "/job/labels/model/model_dir"
+    remote_request["output_path"] = "/job/output/prediction_bundle/prediction.nii.gz"
+    remote_request["runtime_roots"] = {
+        "raw": "/remote-cache/flexict/inference/{}/raw".format(
+            _REMOTE_DATASET_CACHE_TOKEN
+        ),
+        "preprocessed": "/remote-cache/flexict/inference/{}/preprocessed".format(
+            _REMOTE_DATASET_CACHE_TOKEN
+        ),
+        "results": "/remote-cache/flexict/inference/{}/results".format(
+            _REMOTE_DATASET_CACHE_TOKEN
+        ),
+    }
+    payload = {
+        "schema_version": "mimics_remote_training_request.v1",
+        "kind": "flexict_infer",
+        "job_id": request["job_id"],
+        "pipeline_request": remote_request,
+        "remote_status_path": "/job/pipeline_job/status.json",
+        "artifact_path": "/job/output/prediction_bundle",
+        "created_at_epoch": time.time(),
+    }
+    write_flexict_json(bundle / "remote_request.json", payload)
+    return {
+        "remote_status_relative": "pipeline_job/status.json",
+        "remote_control_relative": "pipeline_job/control.json",
+        "remote_control_kind": "json",
+        "remote_artifact_relative": "output/prediction_bundle",
+        "train_count": 0,
+        "validation_count": 0,
+        "required_model_relative": "",
+        "local_required_model": "",
+        "local_dataset_archive_cache": str(
+            Path(request["workspace"])
+            / "cache"
+            / "remote_inference_archives"
+            / flexict_safe_identifier(manifest.get("model_id"), "model")
+        ),
+        "dataset_case_cache_keys": {
+            case_id: image_fingerprint,
+            "model": model_fingerprint,
+        },
+    }
+
+
+def _register_flexict(
+    spec: dict[str, Any],
+    local_model_dir: Path,
+    remote_status: dict[str, Any],
+    profile: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Register the downloaded FlexiCT model pair (or single model).
+
+    The remote artifact is one folder per trained configuration, all sharing
+    a pair_id. Each downloaded folder already carries its
+    flexict_model_manifest.json written by the remote pipeline; only the
+    model_dir needs to point at the local destination.
+    """
+    import tools.flexict_common as flexict_common
+    from tools.nnunet_common import (
+        read_json as read_nnunet_json,
+        write_json_atomic as write_nnunet_json,
+    )
+
+    request = read_nnunet_json(
+        Path(spec["request_path"]).resolve(), {}
+    ) or {}
+    workspace = Path(request["workspace"]).expanduser().resolve()
+    manifests = []
+    for manifest_path in sorted(local_model_dir.rglob("flexict_model_manifest.json")):
+        manifest = read_nnunet_json(manifest_path, {}) or {}
+        if not manifest.get("model_id"):
+            continue
+        manifest["model_dir"] = str(manifest_path.parent)
+        manifest["manifest_path"] = str(manifest_path)
+        manifest.update(
+            {
+                "execution_backend": "remote",
+                "remote_profile_id": profile["profile_id"],
+                "remote_profile_name": profile["name"],
+                "remote_runtime_image": profile["runtime_image"],
+                "remote_gpu_device": remote_status.get(
+                    "remote_gpu_device", profile.get("gpu_device") or "auto"
+                ),
+                "remote_dataset_fingerprint": remote_status.get(
+                    "dataset_fingerprint", ""
+                ),
+                "remote_runtime_image_id": remote_status.get(
+                    "remote_runtime_image_id", ""
+                ),
+                "downloaded_at_epoch": time.time(),
+            }
+        )
+        write_nnunet_json(manifest_path, manifest)
+        flexict_common.register_model(manifest, workspace=workspace)
+        manifests.append(manifest)
+    if not manifests:
+        raise RuntimeError(
+            "The downloaded FlexiCT artifact contains no model manifest."
+        )
+    return manifests
+
+
 def _profile_for_spec(spec: dict[str, Any]) -> dict[str, Any]:
     profile_id = str(spec.get("remote_profile_id") or "")
     if not profile_id:
@@ -2432,8 +2731,10 @@ def run(spec_path: Path) -> int:
         diagnostic_log_paths=list(
             dict.fromkeys((str(remote_log), str(controller_log)))
         ),
-        train_log=str(remote_log) if kind == "nnunet" else "",
-        log_path=str(remote_log) if kind in {"nninteractive", "nnunet", "nnunet_infer"} else "",
+        train_log=str(remote_log) if kind in {"nnunet", "flexict"} else "",
+        log_path=str(
+            remote_log
+        ) if kind in {"nninteractive", "nnunet", "nnunet_infer", "flexict", "flexict_infer"} else "",
         remote_gpu_device=profile.get("gpu_device") or "auto",
         status="preparing_remote",
         phase="preparing_remote_data",
@@ -2455,6 +2756,10 @@ def run(spec_path: Path) -> int:
             prepared = _prepare_nnunet(spec, bundle)
         elif kind == "nnunet_infer":
             prepared = _prepare_nnunet_infer(spec, bundle)
+        elif kind == "flexict":
+            prepared = _prepare_flexict(spec, bundle)
+        elif kind == "flexict_infer":
+            prepared = _prepare_flexict_infer(spec, bundle)
         else:
             raise RuntimeError("Unsupported remote controller kind: {}".format(kind))
         if _cancel_requested(status_path):
@@ -2519,7 +2824,7 @@ def run(spec_path: Path) -> int:
         session.ensure_directory(remote_paths["locks"])
         session.ensure_directory(remote_paths["dataset_cache"])
         session.ensure_directory(remote_paths["prepared_cache"])
-        if kind in {"nnunet", "nnunet_infer"}:
+        if kind in {"nnunet", "nnunet_infer", "flexict", "flexict_infer"}:
             prepared_cache_namespace = _prepared_cache_namespace(
                 bundle, remote_paths
             )
@@ -2828,7 +3133,7 @@ def run(spec_path: Path) -> int:
             "offset": 0,
             "remote_relative": (
                 "pipeline_job/job.log"
-                if kind in {"nnunet", "nnunet_infer"}
+                if kind in {"nnunet", "nnunet_infer", "flexict", "flexict_infer"}
                 else "remote_worker.log"
             ),
             "last_curve_sync_epoch": 0.0,
@@ -2888,7 +3193,7 @@ def run(spec_path: Path) -> int:
                         container_name,
                         remote_paths["job"],
                     )
-                    if kind == "nnunet" and (
+                    if kind in {"nnunet", "flexict"} and (
                         time.time()
                         - float(log_sync_state.get("last_curve_sync_epoch") or 0)
                         >= 5.0
@@ -3050,6 +3355,17 @@ def run(spec_path: Path) -> int:
                 / nnunet_safe_identifier(local_request["task_id"])
                 / nnunet_safe_identifier(prepared["local_model_id"])
             )
+        elif kind == "flexict":
+            from tools.nnunet_common import read_json as read_nnunet_json
+            from tools.nnunet_common import safe_identifier as nnunet_safe_identifier
+
+            local_request = read_nnunet_json(Path(spec["request_path"]), {}) or {}
+            local_model_dir = (
+                Path(local_request["workspace"]).expanduser().resolve()
+                / "models"
+                / nnunet_safe_identifier(local_request["task_id"])
+                / nnunet_safe_identifier(prepared["local_model_id"])
+            )
         else:
             local_model_dir = Path(spec["job_dir"]).resolve() / "remote_prediction_bundle"
         _status_update(
@@ -3112,6 +3428,16 @@ def run(spec_path: Path) -> int:
                 spec, local_model_dir, remote_status, profile
             )
             selected = True
+        elif kind == "flexict":
+            remote_status.update(asset_identity)
+            remote_status["remote_runtime_image_id"] = runtime_image_id
+            remote_status["remote_gpu_device"] = profile.get("gpu_device") or "auto"
+            remote_status["dataset_fingerprint"] = dataset_fingerprint
+            models = _register_flexict(
+                spec, local_model_dir, remote_status, profile
+            )
+            model = models[0] if len(models) == 1 else None
+            selected = True
         else:
             from tools.nnunet_common import read_json as read_nnunet_json
 
@@ -3119,7 +3445,11 @@ def run(spec_path: Path) -> int:
             downloaded = local_model_dir / "prediction.nii.gz"
             output_path = Path(str(local_request.get("output_path") or downloaded)).resolve()
             if not downloaded.is_file():
-                raise RuntimeError("Remote nnU-Net inference produced no prediction file.")
+                raise RuntimeError(
+                    "Remote {} inference produced no prediction file.".format(
+                        "nnU-Net" if kind == "nnunet_infer" else "FlexiCT"
+                    )
+                )
             output_path.parent.mkdir(parents=True, exist_ok=True)
             if downloaded.resolve() != output_path.resolve():
                 temporary_output = output_path.with_name(output_path.name + ".remote-part")
@@ -3146,7 +3476,7 @@ def run(spec_path: Path) -> int:
             remote_container_removed=False,
             output_path=(
                 str(remote_status.get("output_path") or "")
-                if kind == "nnunet_infer"
+                if kind in {"nnunet_infer", "flexict_infer"}
                 else None
             ),
         )
@@ -3170,7 +3500,7 @@ def run(spec_path: Path) -> int:
                 remote_job_dir=remote_paths["job"],
             )
             if (
-                kind in {"nnunet", "nnunet_infer"}
+                kind in {"nnunet", "nnunet_infer", "flexict", "flexict_infer"}
                 and not bool(profile.get("cache_training_data", True))
             ):
                 prepared_cache_removed = _remove_remote_prepared_namespace(
@@ -3371,7 +3701,7 @@ def run(spec_path: Path) -> int:
     finally:
         if (
             session is not None
-            and kind in {"nnunet", "nnunet_infer"}
+            and kind in {"nnunet", "nnunet_infer", "flexict", "flexict_infer"}
             and not bool(profile.get("cache_training_data", True))
             and prepared_cache_namespace
             and not prepared_cache_removed
@@ -3432,7 +3762,7 @@ def run(spec_path: Path) -> int:
                         exc
                     ),
                 )
-        if kind in {"nnunet", "nnunet_infer"}:
+        if kind in {"nnunet", "nnunet_infer", "flexict", "flexict_infer"}:
             try:
                 from tools.nnunet_common import compact_completed_log
 

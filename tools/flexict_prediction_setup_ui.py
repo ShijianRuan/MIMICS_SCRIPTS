@@ -100,6 +100,16 @@ class PredictionWindow:
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         root.addWidget(self.table, 1)
+        self.remote_selector = None
+        try:
+            from remote_compute_ui import RemoteComputeSelector
+
+            self.remote_selector = RemoteComputeSelector(
+                self.window, (self.QtCore, self.QtGui, self.QtWidgets)
+            )
+            root.addWidget(self.remote_selector.group)
+        except Exception:
+            pass
         self.status_label = QtWidgets.QLabel(
             "Loading FlexiCT models in the background..."
         )
@@ -258,6 +268,10 @@ class PredictionWindow:
                 "target_grid": self.context.get("target_grid") or {},
                 "launch_project_path": self.context.get("launch_project_path") or "",
             }
+            if self.remote_selector is not None:
+                backend, profile_id = self.remote_selector.selection()
+                request["execution_backend"] = backend
+                request["remote_profile_id"] = profile_id
             self._submission_generation += 1
             generation = self._submission_generation
             self._submission_deadline = time.time() + 60.0

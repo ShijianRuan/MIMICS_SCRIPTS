@@ -27,7 +27,7 @@ import sys
 import time
 import traceback
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 
@@ -171,7 +171,16 @@ def flexict_worker_environment(request: dict[str, Any],
     """
     config = load_config()
     repo = flexict_repo_dir(config)
-    weights, _source = resolve_pretrained_dir(config)
+    # Remote jobs resolve the backbone weights inside the container
+    # (/models/flexict, admin-installed and fingerprint-verified by the
+    # remote controller) instead of this workstation's weight location.
+    weights_override = str(request.get("flexict_pretrained_dir") or "").strip()
+    if weights_override:
+        # Container-side mount path (/models/flexict): normalize to POSIX so
+        # the env var is valid on Linux even when built on Windows.
+        weights = PurePosixPath(weights_override)
+    else:
+        weights, _source = resolve_pretrained_dir(config)
     environment = {
         "nnUNet_raw": str(roots["raw"]),
         "nnUNet_preprocessed": str(roots["preprocessed"]),
@@ -1342,10 +1351,11 @@ def run_active_learning(job_dir: Path) -> int:
 
 
 def create_flexict_job(values: dict[str, Any]) -> dict[str, Any]:
-    """Create a FlexiCT job folder and launch flexict_pipeline.py run.
+    """Create a FlexiCT job folder and launch its controller.
 
     Mirrors nnunet_jobs.create_job but keeps the FlexiCT workspace separate
-    (flexict_models/) and always launches the local flexict pipeline.
+    (flexict_models/). Remote execution launches remote_training_controller
+    through a remote spec, exactly like the nnU-Net job path.
     """
     request = normalize_flexict_request(values)
     job_id = "{}_{}_{}".format(
@@ -1382,19 +1392,48 @@ def create_flexict_job(values: dict[str, Any]) -> dict[str, Any]:
         "request_path": str(request_path),
         "control_path": str(control_path),
         "log_path": str(job_dir / "job.log"),
-        "execution_backend": "local",
+        "execution_backend": str(request.get("execution_backend") or "local"),
+        "remote_profile_id": str(request.get("remote_profile_id") or ""),
         "created_at_epoch": time.time(),
         "updated_at_epoch": time.time(),
         "progress_percent": 0,
     }
     write_json_atomic(status_path, status)
-    command = [
-        sys.executable,
-        str(ROOT / "tools" / "flexict_pipeline.py"),
-        "run",
-        "--job-dir",
-        str(job_dir),
-    ]
+    if status["execution_backend"] == "remote":
+        if not status["remote_profile_id"]:
+            raise RuntimeError("Remote training server was not selected.")
+        spec_path = job_dir / "remote_spec.json"
+        write_json_atomic(
+            spec_path,
+            {
+                "schema_version": "mimics_remote_flexict_spec.v1",
+                "kind": (
+                    "flexict_infer"
+                    if request["operation"] == "infer"
+                    else "flexict"
+                ),
+                "job_id": job_id,
+                "job_dir": str(job_dir),
+                "status_path": str(status_path),
+                "request_path": str(request_path),
+                "remote_profile_id": status["remote_profile_id"],
+            },
+        )
+        command = [
+            sys.executable,
+            str(ROOT / "tools" / "remote_training_controller.py"),
+            "run",
+            "--spec",
+            str(spec_path),
+        ]
+    else:
+        command = [
+            sys.executable,
+            str(ROOT / "tools" / "flexict_pipeline.py"),
+            "run",
+            "--job-dir",
+            str(job_dir),
+        ]
     from nnunet_jobs import hidden_process_kwargs
 
     process = subprocess.Popen(

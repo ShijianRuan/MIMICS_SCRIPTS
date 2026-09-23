@@ -15,8 +15,8 @@ MIMICS_AI_ROOT=/srv/mimics-ai \
 ```
 
 This builds `mimics-ai-runtime:1.0`, creates the work folders, checks the
-installed base weights, both frameworks, and the offline container
-contract. The image is built
+installed base weights, all supported frameworks (nnInteractive, nnU-Net,
+FlexiCT), and the offline container contract. The image is built
 once. Starting a later training job creates a small disposable container from
 the existing image and does not rebuild the image.
 
@@ -50,7 +50,13 @@ Before setup completes, install the base weights at:
 
 ```text
 /srv/mimics-ai/models/nninteractive/nnInteractive_v1.0/
+/srv/mimics-ai/models/flexict/flexict_2d/model.safetensors
+/srv/mimics-ai/models/flexict/flexict_3d/model.safetensors
 ```
+
+The FlexiCT backbone pair initializes every remote FlexiCT fine-tune; its
+content fingerprint is checked against the local backbone weights before a
+training job uploads data.
 
 Use the same directory as the `Remote work folder` in the Windows client
 profile.
@@ -83,6 +89,9 @@ profile.
 - nnU-Net models are downloaded into the same portable local registry used by
   local training. Remote inference reuses model and image transfer archives by
   content identity.
+- FlexiCT models download as one folder per trained configuration (a pair
+  job yields 2D + 3D sharing a pair_id) and register into the existing local
+  FlexiCT registry with full remote provenance.
 - Cached datasets expire after 30 days without use.
 - `remote_worker.log` rotates at 32 MiB with three backups.
 - Before downloading a model or nnU-Net prediction, the Windows controller
