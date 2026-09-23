@@ -1015,7 +1015,11 @@ def _export_monitor_tick(monitor):
         _stop_export_monitor(monitor_key)
         mimics.dialogs.message_box(
             title="Export Timeout",
-            message="Data export timed out. Please retry.",
+            message=(
+                "Data export timed out.\n\nSuggested action: check that the "
+                "output drive is responsive (network drives may be slow or "
+                "disconnected), then retry the export."
+            ),
         )
         return
 
@@ -1028,7 +1032,11 @@ def _export_monitor_tick(monitor):
     _stop_export_monitor(monitor_key)
 
     if status == "error":
-        mimics.dialogs.message_box(title="Export Error", message="Export failed: {0}".format(result))
+        _category, _guidance_message, guidance_action = _error_guidance(result, "bridge")
+        mimics.dialogs.message_box(
+            title="Export Error",
+            message="Export failed: {0}\n\nSuggested action: {1}".format(result, guidance_action),
+        )
         _cleanup_job_dir(job_dir)
         if monitor.get("batch_queue"):
             _start_next_batch_export(monitor)
@@ -1043,7 +1051,11 @@ def _export_monitor_tick(monitor):
     except Exception as e:
         print("  export failed: {0}".format(e))
         traceback.print_exc()
-        mimics.dialogs.message_box(title="Export Error", message="Export failed: {0}".format(e))
+        _category, _guidance_message, guidance_action = _error_guidance(e, "apply")
+        mimics.dialogs.message_box(
+            title="Export Error",
+            message="Export failed: {0}\n\nSuggested action: {1}".format(e, guidance_action),
+        )
         _cleanup_job_dir(job_dir)
         if monitor.get("batch_queue"):
             _start_next_batch_export(monitor)
@@ -1064,6 +1076,84 @@ def _export_monitor_tick(monitor):
     # Batch: update progress and start next case
     monitor["completed"] = monitor.get("completed", 0) + 1
     _start_next_batch_export(monitor)
+
+
+def _error_guidance(error_text, phase=""):
+    """Map a raw export error to a plain-English category and action.
+
+    Returns (category, message, suggested_action) - all strings. category is
+    one of: environment_broken, disk_full, network_unavailable,
+    no_source_metadata, mask_target_stale, unknown. Used by the failure
+    dialogs so every error the annotator can see comes with a concrete
+    next step.
+    """
+    text = str(error_text or "").lower()
+    phase_text = str(phase or "").lower()
+    combined = text + " " + phase_text
+    if (
+        "no module named" in combined
+        or "importerror" in combined
+        or "modulenotfounderror" in combined
+        or "python_env" in combined and "missing" in combined
+        or "environment" in combined and "broken" in combined
+    ):
+        return (
+            "environment_broken",
+            "The mask-export Python environment is incomplete or damaged.",
+            "Run Admin > Setup / Repair Environment, then retry the export.",
+        )
+    if (
+        "no space left" in combined
+        or "disk full" in combined
+        or "not enough disk" in combined
+        or "errno 28" in combined
+    ):
+        return (
+            "disk_full",
+            "The disk ran out of space while exporting.",
+            "Free space on the output drive (or choose a different output "
+            "folder), then retry the export.",
+        )
+    if (
+        "network path not found" in combined
+        or "network name cannot be found" in combined
+        or "unavailable" in combined and "network" in combined
+        or "the network" in combined
+        or "share" in combined and "not accessible" in combined
+    ):
+        return (
+            "network_unavailable",
+            "The network drive or share holding the output folder is "
+            "unreachable.",
+            "Reconnect the network drive and confirm it opens in Explorer, "
+            "then retry the export.",
+        )
+    if (
+        "source metadata" in combined
+        or "source image" in combined and ("not found" in combined or "resolve" in combined)
+        or "grid contract" in combined
+    ):
+        return (
+            "no_source_metadata",
+            "The original source-image geometry could not be resolved for "
+            "one or more cases.",
+            "Open the affected case in Mimics, confirm the source image is "
+            "still resolvable, then retry; or accept the degraded "
+            "current-grid export offered in the dialog.",
+        )
+    if "changed" in combined and ("mask" in combined or "project" in combined):
+        return (
+            "mask_target_stale",
+            "A Mask or the project changed while the export was running.",
+            "Re-run the export without modifying Masks or the project in "
+            "the meantime.",
+        )
+    return (
+        "unknown",
+        str(error_text or "Unknown error"),
+        "Retry the export. If it keeps failing, check mimics_export.log and "
+        "the diagnostics folder shown in the message, or contact support.",
+    )
 
 
 def _start_next_batch_export(monitor):
@@ -1679,10 +1769,15 @@ def _finish_foreground_export(monitor, error=None, result=None, cancelled=False)
         )
         _cleanup_work_dir(work_dir)
         try:
+            _category, _guidance_message, guidance_action = _error_guidance(error, "current_project")
             mimics.dialogs.message_box(
                 title="Export Failed",
-                message="Mask export failed.\n\n{0}\n\nLog/output: {1}".format(
-                    error, monitor.get("output_root")
+                message=(
+                    "Mask export failed.\n\n{0}\n\nSuggested action: {1}\n\nLog/output: {2}"
+                ).format(
+                    error,
+                    guidance_action,
+                    monitor.get("output_root"),
                 ),
                 ui_blocking=False,
             )
@@ -2466,9 +2561,14 @@ def _background_export_status_tick(monitor):
                 logging.ERROR,
                 "Mask export could not start: {0}".format(monitor.get("launch_error")),
             )
+            _category, _guidance_message, guidance_action = _error_guidance(
+                monitor.get("launch_error"), "launch"
+            )
             mimics.dialogs.message_box(
                 title="Export Could Not Start",
-                message=str(monitor.get("launch_error")),
+                message="{0}\n\nSuggested action: {1}".format(
+                    monitor.get("launch_error"), guidance_action
+                ),
                 ui_blocking=False,
             )
             return
@@ -2584,11 +2684,15 @@ def _background_export_status_tick(monitor):
             _stop_export_monitor(key)
             failed = int(status.get("failed", 0) or 0)
             if status.get("status") == "failed":
+                export_error = status.get("error", "The background export script stopped unexpectedly.")
+                _category, _guidance_message, guidance_action = _error_guidance(export_error, "background_export")
                 message = (
-                    "Mask export failed after exporting {0} case(s).\n\n{1}\n\nDiagnostics: {2}"
+                    "Mask export failed after exporting {0} case(s).\n\n{1}\n\n"
+                    "Suggested action: {2}\n\nDiagnostics: {3}"
                 ).format(
                     int(status.get("completed", 0) or 0),
-                    status.get("error", "The background export script stopped unexpectedly."),
+                    export_error,
+                    guidance_action,
                     monitor.get("job_runtime") or root,
                 )
                 _mimics_log(logging.ERROR, message)
@@ -3846,9 +3950,10 @@ def main(source_info_override=None):
             )
         except Exception as exc:
             _mimics_log(logging.ERROR, "Mask export could not start: {0}".format(exc))
+            _category, _guidance_message, guidance_action = _error_guidance(exc, "launch")
             mimics.dialogs.message_box(
                 title="Export Could Not Start",
-                message=str(exc),
+                message="{0}\n\nSuggested action: {1}".format(exc, guidance_action),
                 ui_blocking=False,
             )
             return 1

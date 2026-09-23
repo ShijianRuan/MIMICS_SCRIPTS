@@ -41,6 +41,33 @@ def read_json(path, default=None):
         return default
 
 
+LABEL_FILE_SUFFIXES = (
+    ".nii", ".nii.gz", ".nrrd", ".nrrd.gz", ".mha", ".mha.gz", ".mhd",
+)
+
+
+def count_existing_label_files(output_root, case_id):
+    """Count label files already present in the export target folder.
+
+    Used by the pre-export skip-existing reminder: with "Skip existing"
+    selected and files already on disk, the user is asked before the export
+    runs rather than learning from the end-of-run summary that nothing was
+    updated.
+    """
+    final_folder = os.path.join(str(output_root or ""), str(case_id or "case"), "segmentations")
+    if not os.path.isdir(final_folder):
+        return 0
+    try:
+        names = os.listdir(final_folder)
+    except OSError:
+        return 0
+    count = 0
+    for name in names:
+        if str(name).lower().endswith(LABEL_FILE_SUFFIXES):
+            count += 1
+    return count
+
+
 def process_exists(pid):
     """Return whether the owning Mimics process is still alive."""
     # Delegate to the shared implementation in resource_locks (it also
@@ -1222,6 +1249,35 @@ def run_ui(context, preview_path=""):
                 selection["mask_selection"] = names
             else:
                 selection["mask_selection"] = "all"
+
+        # Skip-existing proactive reminder (P6c): when the target folder
+        # already holds label files and the user chose "Skip existing", say
+        # so before the export runs - the end-of-run summary otherwise tells
+        # them only after the fact that nothing was updated.
+        if mode == "export_masks" and selection.get("conflict_policy") == "skip":
+            case_id = str(context.get("case_id") or "case")
+            existing_count = count_existing_label_files(output, case_id)
+            final_folder = os.path.join(output, case_id, "segmentations")
+            if existing_count:
+                answer = QtWidgets.QMessageBox.question(
+                    window,
+                    "Existing Label Files",
+                    (
+                        "The target folder already contains {0} label file(s):\n\n{1}\n\n"
+                        "With \"Skip existing\" selected they will be kept unchanged "
+                        "(the export will report them as not updated).\n\n"
+                        "Yes = continue with Skip existing\n"
+                        "No = switch to Overwrite existing and continue\n"
+                        "Cancel = go back and change settings"
+                    ).format(existing_count, final_folder),
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel,
+                    QtWidgets.QMessageBox.No,
+                )
+                if answer == QtWidgets.QMessageBox.Cancel:
+                    return
+                if answer == QtWidgets.QMessageBox.No:
+                    selection["conflict_policy"] = "overwrite"
+                    overwrite_radio.setChecked(True)
 
         # Recognition anomalies interrupt once, with a plain list of what will
         # happen; the user can still proceed (the summary line already told

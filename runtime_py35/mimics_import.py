@@ -722,6 +722,89 @@ def _record_failed_case(output_dir, case_id, phase, error):
         pass
 
 
+def _error_guidance(error_text, phase=""):
+    """Map a raw import error to a plain-English category and action.
+
+    Returns (category, message, suggested_action) - all strings. category is
+    one of: environment_broken, disk_full, network_unavailable,
+    source_data_invalid, background_mimics_failed, unknown. Used by the
+    failure dialogs so every error the annotator can see comes with a
+    concrete next step.
+    """
+    text = str(error_text or "").lower()
+    phase_text = str(phase or "").lower()
+    combined = text + " " + phase_text
+    if (
+        "no module named" in combined
+        or "importerror" in combined
+        or "modulenotfounderror" in combined
+        or "python_env" in combined and "missing" in combined
+        or "environment" in combined and "broken" in combined
+    ):
+        return (
+            "environment_broken",
+            "The data-import Python environment is incomplete or damaged.",
+            "Run Admin > Setup / Repair Environment, then retry the import.",
+        )
+    if (
+        "no space left" in combined
+        or "disk full" in combined
+        or "not enough disk" in combined
+        or "errno 28" in combined
+    ):
+        return (
+            "disk_full",
+            "The disk ran out of space while importing.",
+            "Free space on the import output drive (or choose a different "
+            "output folder), then retry. Failed cases are listed in "
+            "_failed_cases.json.",
+        )
+    if (
+        "network path not found" in combined
+        or "network name cannot be found" in combined
+        or "unavailable" in combined and "network" in combined
+        or "the network" in combined
+        or "share" in combined and "not accessible" in combined
+    ):
+        return (
+            "network_unavailable",
+            "The network drive or share holding the input data is unreachable.",
+            "Reconnect the network drive and confirm it opens in Explorer, "
+            "then retry the import.",
+        )
+    if (
+        "not a valid" in combined and ("nifti" in combined or "image" in combined)
+        or "corrupt" in combined
+        or "empty" in combined and ("image" in combined or "mask" in combined)
+        or "geometry" in combined and "mismatch" in combined
+    ):
+        return (
+            "source_data_invalid",
+            "One of the input files is damaged or has an inconsistent "
+            "geometry.",
+            "Check the failing case listed in _failed_cases.json; re-export "
+            "or exclude it, then retry the remaining cases.",
+        )
+    if (
+        "background mimics" in combined
+        or "mimics.exe" in combined
+        or "could not start" in combined and "mimics" in combined
+    ):
+        return (
+            "background_mimics_failed",
+            "The background Mimics instance could not create the .mcs file.",
+            "Retry the import. If it fails again, close other Mimics "
+            "windows, run Admin > Setup / Repair Environment, or check the "
+            "background Mimics log shown in the message.",
+        )
+    return (
+        "unknown",
+        str(error_text or "Unknown error"),
+        "Retry the import. If it keeps failing, check mimics_import.log and "
+        "the diagnostic files kept for the failed case, or contact support.",
+    )
+
+
 # -- Path helpers (same pattern as nninteractive_mimics.py) -------------
 
 
@@ -1765,9 +1848,13 @@ def _import_monitor_tick(monitor):
                 monitor.get("case_id"), result, job_dir,
             ),
         )
+        _category, _guidance_message, guidance_action = _error_guidance(result, "prepare")
         mimics.dialogs.message_box(
             title="Import Error",
-            message="Preparation failed: {0}\n\nDiagnostic files kept at:\n{1}".format(result, job_dir),
+            message=(
+                "Preparation failed: {0}\n\nSuggested action: {1}\n\n"
+                "Diagnostic files kept at:\n{2}"
+            ).format(result, guidance_action, job_dir),
         )
         _cleanup_work_dir(monitor.get("work_dir"))
         # In batch mode, continue to next case
@@ -1828,7 +1915,11 @@ def _import_monitor_tick(monitor):
             },
         )
         traceback.print_exc()
-        mimics.dialogs.message_box(title="Import Error", message="Import queueing failed: {0}".format(e))
+        _category, _guidance_message, guidance_action = _error_guidance(e, "queue")
+        mimics.dialogs.message_box(
+            title="Import Error",
+            message="Import queueing failed: {0}\n\nSuggested action: {1}".format(e, guidance_action),
+        )
         _cleanup_job_dir(job_dir)
         _cleanup_work_dir(monitor.get("work_dir"))
         # In batch mode, continue to next case
@@ -2912,13 +3003,16 @@ def _first_mcs_monitor_tick(monitor):
         elif status.get("status") == "failed":
             monitor["done"] = True
             _stop_import_monitor(monitor_key)
+            worker_error = status.get("error", "Background Mimics could not complete .mcs creation.")
+            _category, _guidance_message, guidance_action = _error_guidance(worker_error, "background_mimics")
             _safe_message_box(
                 "Import Background Worker Failed",
                 (
-                    "{0}\n\nPrepared data was kept and the open Mimics project "
-                    "was not modified.\n\nMimics log: {1}\nProcess log: {2}"
+                    "{0}\n\nSuggested action: {1}\n\nPrepared data was kept and the open Mimics project "
+                    "was not modified.\n\nMimics log: {2}\nProcess log: {3}"
                 ).format(
-                    status.get("error", "Background Mimics could not complete .mcs creation."),
+                    worker_error,
+                    guidance_action,
                     status.get("mimics_log", ""),
                     status.get("process_log", ""),
                 ),
@@ -2939,7 +3033,9 @@ def _first_mcs_monitor_tick(monitor):
                     "Import Stopped Unexpectedly",
                     (
                         "Background .mcs creation stopped before reporting completion.\n\n"
-                        "Prepared files were kept for retry. Run Import again or inspect:\n{0}"
+                        "Suggested action: prepared files were kept for retry. Check that "
+                        "the background Mimics process is still allowed to run (Admin > "
+                        "Stop All Owned Background Services, then retry), or inspect:\n{0}"
                     ).format(os.path.join(output_dir, "logs", "_create_mcs_batch.log")),
                     ui_blocking=False,
                 )

@@ -49,6 +49,7 @@ SCAN_LOG_TARGETS = [
     ("logs/health_panel", ".mimics_runtime/health_panel", "health_panel_*.log", 2),
     ("logs/drop_window", ".mimics_runtime/drop_import", "drop_window_*.log", 2),
     ("logs/drop_batch", ".mimics_runtime/drop_import", "*_batch.log", 2),
+    ("logs/batch_status", ".mimics_runtime/batch_status", "batch_status_*.log", 2),
     # nnU-Net / FlexiCT external-window stderr logs live under the
     # respective workspace setup folder.
     ("logs/flexict_stderr", "flexict_models/setup", "*_stderr.log", 2),

@@ -3712,6 +3712,70 @@ class TestNNInteractiveContinuousPrompting(unittest.TestCase):
         self.assertEqual("unknown", category)
         self.assertIn("Retry", action)
 
+    def test_import_error_guidance_categories(self):
+        from mimics_import import _error_guidance as import_guidance
+
+        category, _message, action = import_guidance(
+            "ModuleNotFoundError: No module named 'nibabel'", "prepare"
+        )
+        self.assertEqual("environment_broken", category)
+        self.assertIn("Setup / Repair Environment", action)
+
+        category, _message, action = import_guidance(
+            "OSError: [Errno 28] No space left on device", "prepare"
+        )
+        self.assertEqual("disk_full", category)
+        self.assertIn("Free space", action)
+
+        category, _message, action = import_guidance(
+            "The network path was not found", "queue"
+        )
+        self.assertEqual("network_unavailable", category)
+
+        category, _message, action = import_guidance(
+            "Not a valid NIfTI image: case_0042.nii.gz", "prepare"
+        )
+        self.assertEqual("source_data_invalid", category)
+        self.assertIn("_failed_cases.json", action)
+
+        category, _message, action = import_guidance(
+            "Background Mimics could not start mimics.exe", "background_mimics"
+        )
+        self.assertEqual("background_mimics_failed", category)
+
+        category, _message, action = import_guidance("unexpected thing", "")
+        self.assertEqual("unknown", category)
+        self.assertIn("Retry", action)
+
+    def test_export_error_guidance_categories(self):
+        from mimics_export import _error_guidance as export_guidance
+
+        category, _message, action = export_guidance(
+            "ModuleNotFoundError: No module named 'nibabel'", "bridge"
+        )
+        self.assertEqual("environment_broken", category)
+        self.assertIn("Setup / Repair Environment", action)
+
+        category, _message, action = export_guidance(
+            "OSError: [Errno 28] No space left on device", "background_export"
+        )
+        self.assertEqual("disk_full", category)
+
+        category, _message, action = export_guidance(
+            "Source image metadata could not be resolved for case s0123", ""
+        )
+        self.assertEqual("no_source_metadata", category)
+        self.assertIn("degraded", action)
+
+        category, _message, action = export_guidance(
+            "The active image or target Mask changed during export", "apply"
+        )
+        self.assertEqual("mask_target_stale", category)
+
+        category, _message, action = export_guidance("strange failure", "")
+        self.assertEqual("unknown", category)
+        self.assertIn("Retry", action)
+
 
 class TestNNInteractiveGpuMemoryPrecheck(unittest.TestCase):
     def _bridge_module(self):
@@ -4965,6 +5029,157 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn('QRadioButton("Skip existing")', ui_source)
         self.assertIn('QRadioButton("Overwrite existing")', ui_source)
         self.assertIn("tempfile.mkstemp", ui_source)
+
+    def test_export_skip_existing_proactive_reminder(self):
+        """P6c: with Skip existing + files already on disk, ask before export."""
+        import tools.io_path_setup_ui as ui
+
+        root = Path(self.tmp) / "exports"
+        seg = root / "case01" / "segmentations"
+        seg.mkdir(parents=True)
+        (seg / "liver.nii.gz").write_bytes(b"x")
+        (seg / "kidney_left.nii.gz").write_bytes(b"x")
+        (seg / "notes.txt").write_bytes(b"x")
+        # 2 label files, 1 non-label file: only label files count.
+        self.assertEqual(2, ui.count_existing_label_files(str(root), "case01"))
+        # Missing folder / different case: no reminder.
+        self.assertEqual(0, ui.count_existing_label_files(str(root), "case02"))
+        self.assertEqual(0, ui.count_existing_label_files(str(Path(self.tmp) / "empty"), "case01"))
+        # The reminder is wired into the export submit path.
+        source = Path(PROJECT_ROOT, "tools", "io_path_setup_ui.py").read_text(encoding="utf-8")
+        self.assertIn('count_existing_label_files(output, case_id)', source)
+        self.assertIn('Existing Label Files', source)
+        # Overwrite selection must not trigger the reminder.
+        self.assertIn('selection.get("conflict_policy") == "skip"', source)
+
+    def test_batch_status_viewer_aggregates_all_record_types(self):
+        """P6b: the batch panel aggregates every on-disk record kind."""
+        import tools.batch_status_viewer as viewer
+
+        root = Path(self.tmp) / "proj"
+        runtime = root / ".mimics_runtime"
+
+        # Import run under the (relocated-capable) import base.
+        import_run = root / ".mimics_runtime" / "import_runs" / "run_001"
+        import_run.mkdir(parents=True)
+        (import_run / "status.json").write_text(json.dumps({
+            "status": "running", "phase": "preparing",
+            "completed": 2, "failed": 1, "total": 10, "case_id": "s0100",
+            "updated_at_epoch": 1700000004.0,
+        }), encoding="utf-8")
+
+        # Import queue with the .mcs batch status.
+        queue = root / ".mimics_runtime" / "import_queues" / "mcs_out_ab12"
+        queue.mkdir(parents=True)
+        (queue / "_mcs_batch_status.json").write_text(json.dumps({
+            "status": "creating", "completed": 3, "failed": 0, "total": 10,
+            "updated_at_epoch": 1700000005.0,
+        }), encoding="utf-8")
+
+        # Export job.
+        export_job = runtime / "export_jobs" / "export_20260101T000000_ab"
+        export_job.mkdir(parents=True)
+        (export_job / "status.json").write_text(json.dumps({
+            "status": "closed", "completed": 7, "failed": 0, "total": 7,
+            "updated_at_epoch": 1700000003.0,
+        }), encoding="utf-8")
+
+        # Foreground export task (flat file).
+        ui_tasks = runtime / "ui_tasks"
+        ui_tasks.mkdir(parents=True)
+        (ui_tasks / "current_task01.json").write_text(json.dumps({
+            "status": "failed", "error": "Mask changed",
+            "updated_at_epoch": 1700000002.0,
+        }), encoding="utf-8")
+        (ui_tasks / "current_task01_stop.json").write_text("{}", encoding="utf-8")
+
+        # Append job.
+        append_job = runtime / "append_jobs" / "append_masks_001"
+        append_job.mkdir(parents=True)
+        (append_job / "status.json").write_text(json.dumps({
+            "status": "completed", "completed": 4, "total": 4,
+            "updated_at_epoch": 1700000001.0,
+        }), encoding="utf-8")
+
+        # Drop import (flat per-case status).
+        drop = runtime / "drop_import"
+        drop.mkdir(parents=True)
+        (drop / "20260101T000000_0_status.json").write_text(json.dumps({
+            "status": "completed", "case_id": "s0200",
+            "updated_at_epoch": 1700000000.0,
+        }), encoding="utf-8")
+
+        # Patch import_runtime_base so the test is independent of UNC/env
+        # relocation behavior.
+        with mock.patch.object(
+            viewer,
+            "import_runtime_base",
+            lambda project_root: Path(project_root) / ".mimics_runtime",
+        ):
+            rows = viewer.collect_batch_rows(str(root))
+
+        kinds = {row["kind"] for row in rows}
+        self.assertEqual(
+            {"Import", "Import queue", "Export", "Export task", "Append", "Drop import"},
+            kinds,
+        )
+        # Newest first: the queue record (epoch 5) leads.
+        self.assertEqual("Import queue", rows[0]["kind"])
+        by_path = {row["status_path"]: row for row in rows}
+        run_row = by_path[str(import_run / "status.json")]
+        self.assertEqual("running", run_row["status"])
+        self.assertEqual(2, run_row["completed"])
+        self.assertEqual(10, run_row["total"])
+        # Stop markers are not records.
+        self.assertNotIn(str(ui_tasks / "current_task01_stop.json"), by_path)
+
+    def test_batch_status_viewer_per_kind_limit_and_missing_dirs(self):
+        import tools.batch_status_viewer as viewer
+
+        root = Path(self.tmp) / "empty_proj"
+        rows = viewer.collect_batch_rows(str(root))
+        self.assertEqual([], rows)
+
+        runs = root / ".mimics_runtime" / "import_runs"
+        runs.mkdir(parents=True)
+        for index in range(20):
+            job = runs / "run_{0:02d}".format(index)
+            job.mkdir()
+            (job / "status.json").write_text(json.dumps({
+                "status": "completed", "updated_at_epoch": 1700000000.0 + index,
+            }), encoding="utf-8")
+        with mock.patch.object(
+            viewer,
+            "import_runtime_base",
+            lambda project_root: Path(project_root) / ".mimics_runtime",
+        ):
+            rows = viewer.collect_batch_rows(str(root))
+        self.assertEqual(viewer.PER_KIND_LIMIT, len(rows))
+        # Newest first.
+        self.assertEqual("run_19", rows[0]["label"])
+
+    def test_batch_status_entry_and_runtime_module_exist(self):
+        entry = Path(
+            PROJECT_ROOT, "scripting_library", "01_Data", "09_Show_Batch_Status.py"
+        )
+        self.assertTrue(entry.is_file(), entry)
+        source = entry.read_text(encoding="utf-8")
+        self.assertIn("batch_status_mimics", source)
+        wrapper = Path(PROJECT_ROOT, "runtime_py35", "batch_status_mimics.py")
+        self.assertTrue(wrapper.is_file(), wrapper)
+        wrapper_source = wrapper.read_text(encoding="utf-8")
+        self.assertIn('"batch_status_viewer.py"', wrapper_source)
+        self.assertIn('"batch_status"', wrapper_source)
+        self.assertIn('"batch_status_"', wrapper_source)
+        # Packaged and diagnosed with the other external windows.
+        import tools.package_portable as package_portable
+
+        self.assertIn("tools/batch_status_viewer.py", package_portable.REQUIRED_EXTERNAL_UI_FILES)
+        self.assertIn("runtime_py35/batch_status_mimics.py", package_portable.REQUIRED_EXTERNAL_UI_FILES)
+        import tools.collect_diagnostics as diagnostics
+
+        labels = [label for label, _pattern, _glob, _count in diagnostics.SCAN_LOG_TARGETS]
+        self.assertIn("logs/batch_status", labels)
 
     def test_export_launcher_thread_registry_is_pruned(self):
         import mimics_export
