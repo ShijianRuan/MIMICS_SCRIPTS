@@ -40,6 +40,7 @@
 | 入口 | 作用 | 需要满足的条件 |
 |------|------|--------------|
 | Setup / Repair Environment | 安装/修复外部 Python 环境 | 网络（首次约需 5–15 GB） |
+| Manage AI Models | 导入模型包/切换默认模型/清理失效模型（三类模型统一管理） | 环境已设置 |
 | Clear Cache | 清除所有临时文件和缓存 | 无 |
 | Stop All Owned Services | 强制停止所有后台进程 | 无（切换功能前遇锁资源时使用） |
 | Fix Source Affine Metadata | 修复旧版 bridge 导致的仿射矩阵错误 | **项目已打开** + 已激活从 NIfTI 导入的图像 + 源文件仍在 |

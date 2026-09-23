@@ -37,12 +37,34 @@ Prediction and status entries do not ask for a dataset folder at startup:
 ### Model packages
 
 Do not rely on copying a machine-local registry JSON. Use the model package
-controls in the nnInteractive model center.
+controls in the nnInteractive model center, or the unified **AI Model
+Manager** (Admin > Manage AI Models) which covers all three model families.
 
 The package contains relative model artifacts and portable inference
 configuration. Import creates a new local registry entry whose paths point to
 the destination workstation. Original training images are not required for
 inference once the target case's source image is available.
+
+Bundles are self-describing zip files (`bundle.json` + `model/`) with a
+schema of `mimics_ai_model_bundle.v1` and a `model_family` of
+`nninteractive_task`, `nnunet`, or `flexict`. They are produced and
+consumed by `tools/ai_model_bundle.py`:
+
+```bash
+python_env/python.exe tools/ai_model_bundle.py export-flexict \
+    --workspace <flexict_models> --model-id <id> --output liver_pair.zip
+python_env/python.exe tools/ai_model_bundle.py import-flexict \
+    --workspace <flexict_models> --bundle liver_pair.zip --set-current
+```
+
+The same pattern applies to `export-nninteractive`/`import-nninteractive`
+(task models) and `export-nnunet`/`import-nnunet` (managed nnU-Net models).
+Exporting either member of a FlexiCT pair (2D+3D) packages both. Import
+validates the family, required files, and checkpoint checksum, relocates
+the model atomically (nothing is overwritten), and registers it so the
+normal prediction/model-selection windows find it. The AI Model Manager
+window wraps the same operations with a file picker — no command line
+needed.
 
 ### Only the `.mcs` file
 

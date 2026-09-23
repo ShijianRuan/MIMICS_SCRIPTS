@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Export and import portable nnInteractive task-model bundles."""
+"""Export and import portable model bundles for all three model families.
+
+nnInteractive task models (nninteractive_task), managed nnU-Net models
+(nnunet), and FlexiCT 2D/3D models (flexict, including active-learning
+pairs) are packaged as self-describing zip files with a bundle.json
+metadata header and the model folder under ``model/``. Import validates
+the required files, relocates the folder into the target workspace, and
+registers it in the existing per-family registry so the normal
+prediction/model-selection UI finds it.
+"""
 
 from __future__ import annotations
 
@@ -18,18 +27,32 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in os.sys.path:
     os.sys.path.insert(0, str(ROOT))
 
-from tools.nninteractive_task_common import (
-    audit_model_dir,
-    find_task,
-    load_registry,
-    model_is_usable,
-    relative_model_path,
-    resolve_registered_model_dir,
-    safe_slug,
-    save_registry,
-    task_dir,
-    write_json_atomic,
-)
+try:
+    from tools.nninteractive_task_common import (  # type: ignore
+        audit_model_dir,
+        find_task,
+        load_registry,
+        model_is_usable,
+        relative_model_path,
+        resolve_registered_model_dir,
+        safe_slug,
+        save_registry,
+        task_dir,
+        write_json_atomic,
+    )
+except ImportError:  # direct tools/ import (tests, smoke runs)
+    from nninteractive_task_common import (  # type: ignore
+        audit_model_dir,
+        find_task,
+        load_registry,
+        model_is_usable,
+        relative_model_path,
+        resolve_registered_model_dir,
+        safe_slug,
+        save_registry,
+        task_dir,
+        write_json_atomic,
+    )
 
 
 def _require_nninteractive_runtime_identity(
@@ -249,6 +272,8 @@ def import_nninteractive(args: argparse.Namespace) -> int:
             model["model_relpath"] = relative_model_path(workspace, destination)
             model.pop("model_dir", None)
             model["compatible"] = True
+            model["imported_from_bundle"] = True
+            model["imported_at_epoch"] = time.time()
             model["checkpoint_sha256"] = audit.get("checkpoint_sha256")
             model["runtime_verified"] = True
             model["effective_model_fingerprint"] = effective_fingerprint
@@ -276,6 +301,267 @@ def import_nninteractive(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Managed nnU-Net models
+# ---------------------------------------------------------------------------
+
+
+def _nnunet_model_manifest(workspace: Path, model_id: str) -> dict[str, Any]:
+    from tools import nnunet_common
+
+    for model in nnunet_common.load_models(workspace, include_missing=True):
+        if str(model.get("model_id") or "") == model_id:
+            return model
+    raise RuntimeError("Model was not found: {}".format(model_id))
+
+
+def export_nnunet(args: argparse.Namespace) -> int:
+    from tools import nnunet_common
+
+    workspace = Path(args.workspace).expanduser().resolve()
+    model = _nnunet_model_manifest(workspace, args.model_id)
+    model_dir = Path(str(model.get("model_dir") or "")).expanduser()
+    usable, reason = nnunet_common.model_usability(model)
+    if not usable:
+        raise RuntimeError("The selected model is not usable: {}".format(reason))
+    portable = dict(model)
+    manifest_path = Path(
+        str(model.get("manifest_path") or model_dir / "mimics_model_manifest.json")
+    )
+    metadata = {
+        "schema_version": "mimics_ai_model_bundle.v1",
+        "model_family": "nnunet",
+        "created_at_epoch": time.time(),
+        "model": portable,
+    }
+    with tempfile.TemporaryDirectory(prefix="mimics_nnunet_export_") as raw:
+        portable_dir = Path(raw) / "model"
+        shutil.copytree(model_dir, portable_dir)
+        # Rewrite the manifest so absolute model_dir/manifest_path do not
+        # leak the exporting machine's paths; import re-points them.
+        manifest = dict(
+            json.loads((manifest_path).read_text(encoding="utf-8"))
+            if manifest_path.is_file()
+            else portable
+        )
+        manifest.pop("model_dir", None)
+        manifest.pop("manifest_path", None)
+        (portable_dir / "mimics_model_manifest.json").write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        output = _write_bundle(Path(args.output), metadata, portable_dir)
+    print(str(output))
+    return 0
+
+
+def import_nnunet(args: argparse.Namespace) -> int:
+    from tools import nnunet_common
+
+    workspace = Path(args.workspace).expanduser().resolve()
+    workspace.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="mimics_nnunet_import_") as raw:
+        staging = Path(raw)
+        metadata = _extract_bundle(Path(args.bundle).expanduser().resolve(), staging)
+        if metadata.get("model_family") != "nnunet":
+            raise RuntimeError("This is not a managed nnU-Net model package.")
+        model = dict(metadata.get("model") or {})
+        model_id = str(model.get("model_id") or "").strip()
+        if not model_id:
+            raise RuntimeError("The model package has no model_id.")
+        staged_model_dir = staging / "model"
+        manifest_path = staged_model_dir / "mimics_model_manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("schema_version") != nnunet_common.MODEL_SCHEMA_VERSION:
+            raise RuntimeError("The packaged nnU-Net model manifest is invalid.")
+        task_slug = nnunet_common.safe_identifier(
+            manifest.get("task_id") or "task", "task"
+        )
+        destination = (
+            nnunet_common.workspace_paths(workspace)["models"]
+            / task_slug
+            / nnunet_common.safe_identifier(model_id, "model")
+        )
+        if destination.exists():
+            raise RuntimeError(
+                "Model already exists in the target workspace: {}".format(destination)
+            )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        publishing = destination.with_name(
+            "{}.importing_{}".format(destination.name, uuid.uuid4().hex)
+        )
+        published = False
+        try:
+            shutil.copytree(staged_model_dir, publishing)
+            os.replace(str(publishing), str(destination))
+            published = True
+            manifest["model_dir"] = str(destination)
+            manifest["manifest_path"] = str(destination / "mimics_model_manifest.json")
+            manifest["imported_from_bundle"] = True
+            manifest["imported_at_epoch"] = time.time()
+            nnunet_common.write_json_atomic(
+                destination / "mimics_model_manifest.json", manifest
+            )
+            nnunet_common.register_model(workspace, manifest)
+        except Exception:
+            shutil.rmtree(
+                destination if published else publishing, ignore_errors=True
+            )
+            raise
+    print(str(destination))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# FlexiCT models (single or 2D+3D active-learning pair)
+# ---------------------------------------------------------------------------
+
+
+def _flexict_model_or_pair(
+    workspace: Path, model_id: str
+) -> list[dict[str, Any]]:
+    from tools import flexict_common
+
+    models = flexict_common.load_models(workspace, include_missing=True)
+    selected = [
+        row for row in models if str(row.get("model_id") or "") == model_id
+    ]
+    if not selected:
+        raise RuntimeError("Model was not found: {}".format(model_id))
+    row = selected[0]
+    pair_id = str(row.get("pair_id") or "")
+    if pair_id:
+        pair = [r for r in models if str(r.get("pair_id") or "") == pair_id]
+        if len(pair) >= 2:
+            # Keep the requested model plus its pair sibling(s).
+            return sorted(pair, key=lambda r: str(r.get("configuration")))
+    return [row]
+
+
+def export_flexict(args: argparse.Namespace) -> int:
+    from tools import flexict_common
+
+    workspace = Path(args.workspace).expanduser().resolve()
+    models = _flexict_model_or_pair(workspace, args.model_id)
+    usable_models = []
+    for model in models:
+        usable, reason = flexict_common.model_usability(model)
+        if not usable:
+            raise RuntimeError(
+                "FlexiCT model {} is not usable: {}".format(
+                    model.get("model_id"), reason
+                )
+            )
+        usable_models.append(dict(model))
+    pair_id = str(usable_models[0].get("pair_id") or "")
+    metadata = {
+        "schema_version": "mimics_ai_model_bundle.v1",
+        "model_family": "flexict",
+        "created_at_epoch": time.time(),
+        "pair_id": pair_id,
+        "models": usable_models,
+    }
+    with tempfile.TemporaryDirectory(prefix="mimics_flexict_export_") as raw:
+        portable_root = Path(raw) / "model"
+        portable_root.mkdir()
+        for model in usable_models:
+            source_dir = Path(str(model.get("model_dir") or "")).expanduser()
+            if not source_dir.is_dir():
+                raise RuntimeError(
+                    "FlexiCT model folder is missing: {}".format(source_dir)
+                )
+            slot = "{}_{}".format(
+                model.get("configuration") or "model", model.get("model_id")
+            )
+            shutil.copytree(source_dir, portable_root / slot)
+            # The per-model manifest keeps relative identity; import re-points.
+            manifest = dict(model)
+            manifest.pop("model_dir", None)
+            manifest.pop("manifest_path", None)
+            (portable_root / slot / "flexict_model_manifest.json").write_text(
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+        output = _write_bundle(Path(args.output), metadata, portable_root)
+    print(str(output))
+    return 0
+
+
+def import_flexict(args: argparse.Namespace) -> int:
+    from tools import flexict_common
+    from tools.nnunet_common import safe_identifier, write_json_atomic
+
+    workspace = Path(args.workspace).expanduser().resolve()
+    workspace.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="mimics_flexict_import_") as raw:
+        staging = Path(raw)
+        metadata = _extract_bundle(Path(args.bundle).expanduser().resolve(), staging)
+        if metadata.get("model_family") != "flexict":
+            raise RuntimeError("This is not a FlexiCT model package.")
+        packaged = list(metadata.get("models") or [])
+        if not packaged:
+            raise RuntimeError("The FlexiCT model package contains no models.")
+        models_root = flexict_common.workspace_paths(workspace)["root"] / "models"
+        published: list[tuple[Path, dict[str, Any]]] = []
+        try:
+            for model in packaged:
+                model = dict(model)
+                model_id = str(model.get("model_id") or "").strip()
+                configuration = str(model.get("configuration") or "model")
+                if not model_id:
+                    raise RuntimeError("A packaged FlexiCT model has no model_id.")
+                staged = staging / "model" / "{}_{}".format(configuration, model_id)
+                if not staged.is_dir():
+                    raise RuntimeError(
+                        "The package is missing the model folder for {}.".format(
+                            model_id
+                        )
+                    )
+                task_slug = safe_identifier(
+                    model.get("task_id") or "task", "task"
+                )
+                destination = models_root / task_slug / model_id
+                if destination.exists():
+                    raise RuntimeError(
+                        "Model already exists in the target workspace: {}".format(
+                            destination
+                        )
+                    )
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                publishing = destination.with_name(
+                    "{}.importing_{}".format(destination.name, uuid.uuid4().hex)
+                )
+                shutil.copytree(staged, publishing)
+                os.replace(str(publishing), str(destination))
+                manifest = dict(model)
+                manifest["model_dir"] = str(destination)
+                manifest["manifest_path"] = str(
+                    destination / "flexict_model_manifest.json"
+                )
+                manifest["imported_from_bundle"] = True
+                manifest["imported_at_epoch"] = time.time()
+                manifest.pop("model_relpath", None)
+                write_json_atomic(
+                    destination / "flexict_model_manifest.json", manifest
+                )
+                published.append((destination, manifest))
+            for _destination, manifest in published:
+                flexict_common.register_model(manifest, workspace=workspace)
+        except Exception:
+            for destination, _manifest in published:
+                shutil.rmtree(destination, ignore_errors=True)
+            raise
+    if args.set_current and published:
+        flexict_common.save_registry(
+            workspace,
+            None,
+            flexict_common.load_models(workspace),
+            recommended_model_id=str(published[0][1].get("model_id")),
+        )
+    print(str(published[0][0]))
+    return 0
+
+
 
 
 
@@ -296,6 +582,29 @@ def build_parser() -> argparse.ArgumentParser:
     import_nn.add_argument("--bundle", required=True)
     import_nn.add_argument("--set-current", action="store_true")
     import_nn.set_defaults(func=import_nninteractive)
+
+    export_unet = sub.add_parser("export-nnunet")
+    export_unet.add_argument("--workspace", required=True)
+    export_unet.add_argument("--model-id", required=True)
+    export_unet.add_argument("--output", required=True)
+    export_unet.set_defaults(func=export_nnunet)
+
+    import_unet = sub.add_parser("import-nnunet")
+    import_unet.add_argument("--workspace", required=True)
+    import_unet.add_argument("--bundle", required=True)
+    import_unet.set_defaults(func=import_nnunet)
+
+    export_fx = sub.add_parser("export-flexict")
+    export_fx.add_argument("--workspace", required=True)
+    export_fx.add_argument("--model-id", required=True)
+    export_fx.add_argument("--output", required=True)
+    export_fx.set_defaults(func=export_flexict)
+
+    import_fx = sub.add_parser("import-flexict")
+    import_fx.add_argument("--workspace", required=True)
+    import_fx.add_argument("--bundle", required=True)
+    import_fx.add_argument("--set-current", action="store_true")
+    import_fx.set_defaults(func=import_flexict)
     return parser
 
 
