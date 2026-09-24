@@ -156,7 +156,24 @@ def _acquire_local_gpu(
         job_id=str(request.get("job_id") or ""),
         stop_path=str(control_path),
     )
-    update_status(status_path, resource_wait=None)
+    # on_wait() overwrote status/phase with waiting_for_gpu while blocked;
+    # restore the active status so viewers do not show a running job as
+    # waiting until the caller's next update_status (which for training only
+    # arrives after the whole worker finishes).
+    try:
+        current = read_json(status_path, {}) or {}
+    except Exception:
+        current = {}
+    if current.get("status") == "waiting_for_gpu":
+        active = "running" if operation != "training" else "training"
+        update_status(
+            status_path,
+            status=active,
+            phase=active,
+            resource_wait=None,
+        )
+    else:
+        update_status(status_path, resource_wait=None)
     append_log(log_path, "GPU resource acquired for nnU-Net {}.".format(operation))
     return lock
 
@@ -875,7 +892,7 @@ def _spawn_worker(
         {
             "stage": stage,
             "params": params,
-            "environment": _worker_environment(request, roots),
+            "environment": _worker_environment(request, roots, stage),
             "start_gate": str(start_gate),
             "start_gate_timeout_seconds": 120,
             "control_path": str(control_path),

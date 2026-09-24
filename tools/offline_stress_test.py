@@ -162,6 +162,142 @@ def test_lock_wait_cancel(tmp: Path) -> str:
     return "waiting lock cancelled in {:.2f}s".format(float(result["elapsed"] or 0))
 
 
+_GPU_HANDSHAKE_WORKER = r'''
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+sys.path.insert(0, os.path.join(sys.argv[1], "tools"))
+
+import nnunet_pipeline
+
+job_dir = Path(sys.argv[2])
+lock_dir = Path(sys.argv[3])
+os.environ["MIMICS_RESOURCE_LOCK_DIR"] = str(lock_dir)
+
+request = {
+    "job_id": "gpu_handshake_b",
+    "workspace": str(job_dir / "workspace"),
+    "gpu_lock_timeout_seconds": 30,
+    "gpu_lock_poll_seconds": 0.2,
+}
+status_path = job_dir / "status.json"
+control_path = job_dir / "control.json"
+log_path = job_dir / "job.log"
+
+from nnunet_common import write_json_atomic
+
+timeline = job_dir / "timeline.jsonl"
+
+
+def record(event):
+    with timeline.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"event": event, "time": time.time()}) + "\n")
+
+
+lock = nnunet_pipeline._acquire_local_gpu(
+    request, status_path, control_path, log_path, "training")
+record("acquired")
+status = json.loads(status_path.read_text(encoding="utf-8"))
+record("status:" + str(status.get("status")))
+lock.release()
+record("released")
+'''
+
+
+def test_gpu_contention_handshake_two_processes(tmp: Path) -> str:
+    """Two REAL processes handshake over the GPU lock (Phase 3d).
+
+    Process A holds the lock; process B runs the pipeline's actual
+    _acquire_local_gpu waiting path. B must record waiting_for_gpu while
+    blocked, acquire only after A releases, and never report training
+    while A still owns the lock.
+    """
+    import subprocess
+
+    root = Path(__file__).resolve().parents[1]
+    lock_dir = tmp / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    job_dir = tmp / "job_b"
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    # Process A: hold the GPU lock like another AI task would.
+    holder = FileResourceLock(lock_dir / "gpu.lock", "GPU", "process-A")
+    holder.acquire(wait_seconds=5, poll_seconds=0.05)
+
+    worker_source = tmp / "gpu_handshake_worker.py"
+    worker_source.write_text(_GPU_HANDSHAKE_WORKER, encoding="utf-8")
+    command = [
+        sys.executable,
+        str(worker_source),
+        str(root),
+        str(job_dir),
+        str(lock_dir),
+    ]
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        cwd=str(root),
+    )
+    try:
+        # While A holds the lock, B must be waiting.
+        deadline = time.time() + 15
+        waiting_seen = False
+        while time.time() < deadline:
+            status_path = job_dir / "status.json"
+            if status_path.is_file():
+                payload = json.loads(status_path.read_text(encoding="utf-8"))
+                if payload.get("status") == "waiting_for_gpu":
+                    waiting_seen = True
+                    break
+            time.sleep(0.2)
+        assert_true(waiting_seen, "process B never reported waiting_for_gpu")
+        assert_true(
+            not (job_dir / "timeline.jsonl").exists()
+            or "acquired" not in (job_dir / "timeline.jsonl").read_text(encoding="utf-8"),
+            "process B acquired the GPU while process A still held it",
+        )
+        # A releases; B must acquire within its timeout.
+        holder.release()
+        stdout, _ = process.communicate(timeout=60)
+        assert_equal(0, process.returncode, "worker process B failed:\n" + stdout.decode(errors="replace"))
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        if holder.acquired:
+            holder.release()
+
+    timeline = [
+        json.loads(line)
+        for line in (job_dir / "timeline.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    events = [row["event"] for row in timeline]
+    assert_true("acquired" in events, "process B never acquired the lock")
+    acquired_at = next(row["time"] for row in timeline if row["event"] == "acquired")
+    # The final status after acquisition must not stay waiting_for_gpu.
+    status_rows = [row for row in timeline if row["event"].startswith("status:")]
+    assert_true(status_rows, "no status recorded after acquisition")
+    last_status = status_rows[-1]["event"]
+    assert_true(
+        "waiting_for_gpu" not in last_status,
+        "status stayed waiting_for_gpu after acquiring the lock",
+    )
+    # B acquired only after A released (A's release happened before our
+    # communicate; verify via the lock file being gone at the end).
+    assert_true(
+        not (lock_dir / "gpu.lock").exists(),
+        "gpu.lock was not cleaned up after both processes finished",
+    )
+    return "process B waited, then acquired after A released (statuses: {})".format(
+        ", ".join(row["event"] for row in status_rows)
+    )
+
+
 
 
 
@@ -342,6 +478,7 @@ def main(argv=None) -> int:
         tests.extend([
             ("resource lock contention", lambda: test_resource_lock_contention(tmp / "resource_lock_contention")),
             ("lock wait cancellation", lambda: test_lock_wait_cancel(tmp / "lock_wait_cancel")),
+            ("GPU contention handshake (two processes)", lambda: test_gpu_contention_handshake_two_processes(tmp / "gpu_handshake")),
         ])
     if args.only in ("mapping", "all"):
         tests.append(("nnInteractive mapping and source-grid resampling", lambda: test_nninteractive_mapping_and_resampling(tmp / "mapping")))
