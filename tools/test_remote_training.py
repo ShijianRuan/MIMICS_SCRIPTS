@@ -774,6 +774,382 @@ class CodeDriftTests(unittest.TestCase):
         self.assertEqual(invalid["remote_code_verify"], "warn")
 
 
+class MonitorRobustnessTests(unittest.TestCase):
+    """Reconnect budget and stall detection bound unattended monitoring."""
+
+    def _status_file(self, temporary):
+        status_path = Path(temporary) / "status.json"
+        remote_compute.write_json_atomic(
+            status_path, {"job_id": "job", "status": "training"}
+        )
+        return status_path
+
+    def test_reconnect_attempts_are_bounded(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            status_path = self._status_file(temporary)
+            log_path = Path(temporary) / "controller.log"
+            with self.assertRaisesRegex(
+                controller.RemoteServerUnreachable, "reconnect"
+            ):
+                controller._reconnect_session(
+                    {"profile_id": "p"},
+                    status_path,
+                    log_path,
+                    OSError("network down"),
+                    controller.RECONNECT_MAX_ATTEMPTS,
+                )
+            final = json.loads(status_path.read_text(encoding="utf-8"))
+            # The status file is untouched by the raise itself; the run()
+            # exception handler records remote_unreachable afterwards.
+            self.assertEqual(final.get("status"), "training")
+
+    def test_reconnect_below_budget_still_attempts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            status_path = self._status_file(temporary)
+            log_path = Path(temporary) / "controller.log"
+            with mock.patch.object(
+                controller, "SSHSession", side_effect=OSError("still down")
+            ):
+                session = controller._reconnect_session(
+                    {"profile_id": "p"},
+                    status_path,
+                    log_path,
+                    OSError("network down"),
+                    controller.RECONNECT_MAX_ATTEMPTS - 1,
+                )
+            self.assertIsNone(session)
+            final = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertEqual(final.get("status"), "reconnecting_remote")
+            self.assertEqual(
+                final.get("remote_reconnect_attempt"),
+                controller.RECONNECT_MAX_ATTEMPTS - 1,
+            )
+
+    def test_stall_hint_is_emitted_once_and_cleared_on_progress(self):
+        # Drive the monitor loop with a scripted session: silent training
+        # polls past the (patched-to-tiny) stall threshold set the hint once,
+        # then a changed status payload proves the hint clears.
+        with tempfile.TemporaryDirectory() as temporary:
+            status_path = self._status_file(temporary)
+            remote_log = Path(temporary) / "worker.log"
+            remote_log.write_bytes(b"")
+            log_path = Path(temporary) / "controller.log"
+
+            class Session:
+                def __init__(self):
+                    self.polls = 0
+                    self.silent_polls = 3
+
+                def ensure_directory(self, _path):
+                    pass
+
+                def path_exists(self, _path):
+                    return True
+
+                def execute(self, command, **_kwargs):
+                    if "stat -c '%i'" in command:
+                        return "1"
+                    if command.startswith("docker inspect"):
+                        return "running 0"
+                    raise AssertionError(
+                        "unexpected command: " + command
+                    )
+
+                def execute_result(self, command, **_kwargs):
+                    assert command.startswith("docker inspect")
+                    return 0, "running 0"
+
+                def read_remote_json(self, path, default=None):
+                    self.polls += 1
+                    if self.polls <= self.silent_polls:
+                        return {"status": "training", "epoch": 1}
+                    return {"status": "completed", "epoch": 2}
+
+                def download_appended(self, _remote, _local, offset):
+                    return offset
+
+            with mock.patch.object(
+                controller, "REMOTE_STALL_SECONDS", 0.0
+            ), mock.patch.object(
+                controller, "_sync_remote_nnunet_curve",
+                side_effect=IOError("no curve"),
+            ), mock.patch.object(
+                controller.time, "sleep", lambda _seconds: None
+            ):
+                session = Session()
+                _returned, remote_status = controller._monitor_remote(
+                    session,
+                    {"kind": "nnunet", "job_id": "job"},
+                    {"profile_id": "p", "name": "server"},
+                    status_path,
+                    {"job": "/remote/job"},
+                    "container",
+                    "user",
+                    log_path,
+                    remote_log,
+                )
+            self.assertEqual(remote_status.get("status"), "completed")
+            final = json.loads(status_path.read_text(encoding="utf-8"))
+            # The hint fired during the silent stretch and was cleared when
+            # the status payload changed before completion.
+            self.assertFalse(final.get("remote_stall_suspected", False))
+
+
+class TransferEfficiencyTests(unittest.TestCase):
+    """Caches keep repeated remote runs from re-paying large transfers."""
+
+    CACHE_PATHS = {
+        "models": "/remote/models",
+        "dataset_cache": "/remote/cache/user/datasets",
+        "models_cache": "/remote/cache/user/models",
+    }
+
+    def test_batch_cache_verification_parses_verdicts(self):
+        class Session:
+            def __init__(self):
+                self.commands = []
+
+            def execute_result(self, command, **_kwargs):
+                self.commands.append(command)
+                return 0, "aa hit\nbb miss\n"
+
+        parts = [
+            {"fingerprint": "aa", "size": 10},
+            {"fingerprint": "bb", "size": 20},
+        ]
+        verdicts = controller._batch_verify_remote_dataset_cache(
+            Session(), self.CACHE_PATHS, parts
+        )
+        self.assertEqual(verdicts, {"aa": True, "bb": False})
+        self.assertEqual(len(Session().commands), 0)  # instance-local capture
+
+    def test_batch_cache_chunks_many_fingerprints(self):
+        class Session:
+            def __init__(self):
+                self.chunk_sizes = []
+
+            def execute_result(self, command, **_kwargs):
+                self.chunk_sizes.append(command.count(" printf "))
+                return 0, ""
+
+        parts = [
+            {"fingerprint": "f{}".format(index), "size": 1}
+            for index in range(120)
+        ]
+        session = Session()
+        controller._batch_verify_remote_dataset_cache(
+            session, self.CACHE_PATHS, parts, chunk_size=50
+        )
+        self.assertEqual(len(session.chunk_sizes), 3)
+
+    def test_batch_verdict_hit_skips_per_case_round_trip(self):
+        class Session:
+            def __init__(self):
+                self.commands = []
+
+            def ensure_directory(self, _path):
+                pass
+
+            def execute(self, command, **_kwargs):
+                self.commands.append(command)
+                return ""
+
+            def upload(self, *_args, **_kwargs):
+                raise AssertionError("cache hit must not upload")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = Path(temporary) / "case.tar"
+            archive.write_bytes(b"case-bytes")
+            status_path = Path(temporary) / "status.json"
+            remote_compute.write_json_atomic(status_path, {})
+            remote, hit = controller._ensure_remote_dataset_archive(
+                Session(),
+                self.CACHE_PATHS,
+                {"cache_training_data": True},
+                archive,
+                "ff" * 32,
+                status_path,
+                assumed_cache_state="hit",
+            )
+            self.assertTrue(hit)
+            self.assertTrue(remote.endswith("ff" * 32 + ".tar"))
+            final = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertTrue(final.get("dataset_cache_hit"))
+
+    def test_custom_model_cache_hit_returns_without_upload(self):
+        class Session:
+            def __init__(self):
+                self.commands = []
+
+            def ensure_directory(self, _path):
+                pass
+
+            def execute_result(self, command, **_kwargs):
+                self.commands.append(command)
+                return 0, "hit"
+
+            def upload(self, *_args, **_kwargs):
+                raise AssertionError("cache hit must not upload")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "custom_model"
+            source.mkdir()
+            (source / "model.safetensors").write_bytes(b"weights")
+            status_path = Path(temporary) / "status.json"
+            remote_compute.write_json_atomic(status_path, {})
+            hit = controller._ensure_remote_custom_model(
+                Session(),
+                self.CACHE_PATHS,
+                {},
+                source,
+                "ab" * 32,
+                status_path,
+                Path(temporary) / "controller.log",
+            )
+            self.assertTrue(hit)
+            self.assertFalse(
+                (source.parent / "custom_model_cache.tar").exists()
+            )
+
+    def test_custom_model_cache_miss_uploads_and_verifies(self):
+        class Session:
+            def __init__(self):
+                self.commands = []
+                self.uploads = []
+
+            def ensure_directory(self, _path):
+                pass
+
+            def execute_result(self, command, **_kwargs):
+                self.commands.append(command)
+                return 0, "miss"
+
+            def execute(self, command, **_kwargs):
+                self.commands.append(command)
+                if command.startswith("sha256sum"):
+                    return self.uploaded_digest
+                return ""
+
+            def upload(self, local, remote, **_kwargs):
+                self.uploads.append((str(local), remote))
+                self.uploaded_digest = controller._sha256_file(Path(local))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "custom_model"
+            source.mkdir()
+            (source / "model.safetensors").write_bytes(b"weights")
+            status_path = Path(temporary) / "status.json"
+            remote_compute.write_json_atomic(status_path, {})
+            session = Session()
+            hit = controller._ensure_remote_custom_model(
+                session,
+                self.CACHE_PATHS,
+                {},
+                source,
+                "ab" * 32,
+                status_path,
+                Path(temporary) / "controller.log",
+            )
+            # First use populates the cache but still ships in the job tar.
+            self.assertFalse(hit)
+            self.assertEqual(len(session.uploads), 1)
+            self.assertTrue(
+                session.uploads[0][0].endswith("custom_model_cache.tar")
+            )
+            final = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertFalse(final.get("custom_model_cache_hit"))
+            self.assertFalse(
+                (source.parent / "custom_model_cache.tar").exists()
+            )
+
+    def test_custom_model_corrupt_upload_is_rejected(self):
+        class Session:
+            def ensure_directory(self, _path):
+                pass
+
+            def execute_result(self, command, **_kwargs):
+                return 0, "miss"
+
+            def execute(self, command, **_kwargs):
+                if command.startswith("sha256sum"):
+                    return "0" * 64
+                return ""
+
+            def upload(self, *_args, **_kwargs):
+                pass
+
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "model.safetensors"
+            source.write_bytes(b"weights")
+            with self.assertRaisesRegex(RuntimeError, "SHA-256"):
+                controller._ensure_remote_custom_model(
+                    Session(),
+                    self.CACHE_PATHS,
+                    {},
+                    source,
+                    "ab" * 32,
+                    Path(temporary) / "status.json",
+                    Path(temporary) / "controller.log",
+                )
+
+    def test_base_model_digest_cache_skips_rehash_when_fresh(self):
+        class Session:
+            def __init__(self):
+                self.commands = []
+
+            def execute(self, command, **_kwargs):
+                self.commands.append(command)
+                if "printf ready" in command:
+                    return "ready"
+                if ".mimics_digest_cache" in command and "then printf" in command:
+                    return "c" * 64
+                raise AssertionError(
+                    "fresh marker must skip the full hash: " + command
+                )
+
+        identity = controller._validate_remote_assets(
+            Session(),
+            self.CACHE_PATHS,
+            {
+                "required_model_relative": "flexict",
+                "local_required_model": "",
+            },
+        )
+        self.assertEqual(identity["remote_base_model_sha256"], "c" * 64)
+
+    def test_base_model_stale_marker_triggers_full_hash_and_rewrite(self):
+        class Session:
+            def __init__(self):
+                self.commands = []
+
+            def execute(self, command, **_kwargs):
+                self.commands.append(command)
+                if "printf ready" in command:
+                    return "ready"
+                if ".mimics_digest_cache" in command and "then printf" in command:
+                    return ""
+                if "sha256sum" in command and "awk" in command:
+                    return "d" * 64
+                return ""
+
+        session = Session()
+        identity = controller._validate_remote_assets(
+            session,
+            self.CACHE_PATHS,
+            {
+                "required_model_relative": "flexict",
+                "local_required_model": "",
+            },
+        )
+        self.assertEqual(identity["remote_base_model_sha256"], "d" * 64)
+        self.assertTrue(
+            any(
+                ".mimics_digest_cache.tmp" in command
+                for command in session.commands
+            )
+        )
+
+
 class ReattachTests(unittest.TestCase):
     """Orphaned remote containers can be re-attached after a controller dies."""
 

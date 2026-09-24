@@ -148,6 +148,16 @@ fingerprint records the exact selected set and case fingerprints. Cache entries
 unused for 30 days are removed. The cache is per SSH user and is never silently
 shared across accounts.
 
+Before uploading, the controller verifies all case cache markers in batched
+SSH commands (50 fingerprints per command) instead of one round trip per case,
+so a mostly-cached dataset costs one round trip per chunk rather than one per
+case. A custom base model selected by the user gets the same content-addressed
+treatment under `cache/<ssh-username>/models/<fingerprint>.tar`; the first run
+uploads it once, and later runs that select the same weights skip the transfer
+entirely. Remote base-model fingerprints are cached in a `.mimics_digest_cache`
+marker next to the installed weights, so multi-gigabyte model directories are
+hashed once instead of on every job.
+
 ## 5. Models and reproducibility
 
 Base models are installed once by the server administrator under:
@@ -256,10 +266,22 @@ waiting_for_remote_gpu
 training / validating
 reconnecting_remote
 remote_control_unavailable
+remote_unreachable
+orphaned_remote
+reattaching
 finalizing_remote
 downloading
 completed / failed / cancelled / abandoned
 ```
+
+Reconnects are bounded: after 30 failed attempts (about 15 minutes with the
+exponential backoff) the task enters the non-terminal `remote_unreachable`
+state. The remote container may still be training, so the status keeps the
+last known remote state and the task can be resumed with **Re-attach** once
+the server is reachable again. A training container that is still running but
+has produced no status or log updates for more than 24 hours only records a
+`remote_stall_suspected` hint in the local status; silence alone never fails
+a task because legitimate training can run for days.
 
 During upload, progress is aggregated across all selected case archives.
 Finishing one case and starting the next cannot reset the visible progress bar.

@@ -176,7 +176,9 @@ def reconcile_job_status(status_path: str | Path) -> dict[str, Any]:
     path = Path(status_path)
     status = read_json(path, {}) or {}
     state = str(status.get("status") or "").lower()
-    if state in TERMINAL_STATES or state in {"orphaned_remote", "attention_required"}:
+    if state in TERMINAL_STATES or state in {
+        "orphaned_remote", "remote_unreachable", "attention_required",
+    }:
         return status
     try:
         age = time.time() - float(

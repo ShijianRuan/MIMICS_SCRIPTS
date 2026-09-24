@@ -59,6 +59,16 @@ except ImportError:
 TERMINAL = {"completed", "failed", "cancelled", "paused", "abandoned"}
 LOCAL_ARCHIVE_REVERIFY_SECONDS = 7 * 24 * 60 * 60
 LOCAL_ARCHIVE_RETENTION_SECONDS = 30 * 24 * 60 * 60
+# Bounded reconnect budget: with the exponential backoff capped at 30 s this
+# is roughly fifteen minutes of unreachable server before the task moves to
+# remote_unreachable and the user picks Re-attach (retry) or Abandon Locally.
+RECONNECT_MAX_ATTEMPTS = 30
+REMOTE_STALL_SECONDS = 24 * 60 * 60
+REMOTE_STALL_HINT = (
+    "The remote container is still running but has produced no status or log "
+    "updates for more than 24 hours. The training may be stuck; inspect the "
+    "log tab or stop the task if this looks wrong."
+)
 REMOTE_TRAINING_LABEL = "mimics-script.remote-training"
 REMOTE_OWNER_LABEL = "mimics-script.owner"
 REMOTE_JOB_LABEL = "mimics-script.job"
@@ -104,6 +114,16 @@ LOCAL_STATUS_KEYS = {
 
 class RemoteTaskAbandoned(RuntimeError):
     """Local monitoring ended without claiming that the remote job stopped."""
+
+
+class RemoteServerUnreachable(RuntimeError):
+    """The reconnect budget ran out; the remote task state is unknown.
+
+    Raised instead of reconnecting forever so the task lands in a visible
+    non-terminal state (remote_unreachable) with an explicit escape path
+    (retry re-attach or Abandon Locally) rather than silently waiting.
+    The remote container itself is untouched: it may still be training.
+    """
 
 
 def _status_update(path: Path, **values: Any) -> dict[str, Any]:
@@ -512,18 +532,185 @@ def _bind_remote_prepared_cache(
 
 def _copy_model_input(
     source_value: str, bundle: Path
-) -> tuple[str, str]:
+) -> tuple[str, str, str]:
+    """Stage a user-selected custom base model into the upload bundle.
+
+    Returns (local path, in-container path, content fingerprint). The
+    fingerprint lets the run() upload path consult the remote content cache
+    first and skip the multi-gigabyte re-upload on a cache hit.
+    """
     source = Path(source_value).expanduser().resolve()
     if not source.exists():
         raise RuntimeError("Selected base model does not exist: {}".format(source))
     destination = bundle / "custom_model"
     if source.is_dir():
         shutil.copytree(str(source), str(destination))
-        return str(destination), "/job/custom_model"
+        fingerprint = _local_model_fingerprint(destination)
+        if not fingerprint:
+            raise RuntimeError(
+                "Selected base model contains no supported weight files: "
+                "{}".format(source)
+            )
+        return str(destination), "/job/custom_model", fingerprint
     destination.mkdir(parents=True, exist_ok=True)
     target = destination / source.name
     shutil.copy2(str(source), str(target))
-    return str(target), "/job/custom_model/{}".format(source.name)
+    return (
+        str(target),
+        "/job/custom_model/{}".format(source.name),
+        _sha256_file(target),
+    )
+
+
+def _remote_custom_model_cache_path(
+    remote_paths: dict[str, str], fingerprint: str
+) -> tuple[str, str]:
+    """Content-addressed remote cache slot for a custom base model.
+
+    Custom base weights ride inside every job archive by default, so the same
+    multi-gigabyte selection is re-uploaded for each training run. This cache
+    follows the dataset cache pattern: one tar per content fingerprint with a
+    `.verified` marker, under the per-user cache root, so a repeated
+    selection uploads zero model bytes. The marker content matches the
+    dataset cache protocol (digest, size, mtime) so recovery logic is shared.
+    """
+    root = PurePosixPath(remote_paths["models_cache"])
+    return (
+        str(root / (fingerprint + ".tar")),
+        str(root / (fingerprint + ".verified")),
+    )
+
+
+def _ensure_remote_custom_model(
+    session: SSHSession,
+    remote_paths: dict[str, str],
+    profile: dict[str, Any],
+    local_source: Path,
+    fingerprint: str,
+    status_path: Path,
+    controller_log: Path,
+) -> bool:
+    """Return True when the custom model is content-verified on the server.
+
+    On a miss the model tar is uploaded into the cache slot; the caller then
+    still ships it inside the job archive for this run, and every later run
+    with the same weights hits the cache instead. A hit means the job tar can
+    drop the model entirely: the container launch extracts the cached tar
+    into the job folder.
+    """
+    remote_archive, remote_verified = _remote_custom_model_cache_path(
+        remote_paths, fingerprint
+    )
+    session.ensure_directory(remote_paths["models_cache"])
+    # Both shapes are packed into a deterministic tar: directory selections
+    # keep their inner layout, a single checkpoint file keeps its basename —
+    # extraction into /job/custom_model then restores exactly what the
+    # pipeline request references. Normalized metadata keeps the tar bytes
+    # (and therefore the digest) stable across machines and rebuilds.
+    packed_archive = local_source.with_name("custom_model_cache.tar")
+    if local_source.is_dir():
+        _build_tar(local_source, packed_archive)
+    else:
+        with tarfile.open(str(packed_archive), "w") as handle:
+            handle.add(
+                str(local_source),
+                arcname=local_source.name,
+                recursive=False,
+                filter=_normalized_tar_info,
+            )
+    local_size = int(packed_archive.stat().st_size)
+    local_digest = _sha256_file(packed_archive)
+    try:
+        code, output = session.execute_result(
+            "if test -f {archive} && test -f {verified} && "
+            "read saved_digest saved_size saved_mtime < {verified} && "
+            'test "$saved_digest" = {digest} && '
+            'test "$saved_size" = {size} && '
+            'test "$(stat -c %s {archive} 2>/dev/null)" = {size} && '
+            'test "$saved_mtime" = "$(stat -c %Y {archive} 2>/dev/null)"; '
+            'then printf hit; else printf miss; fi'.format(
+                archive=shlex.quote(remote_archive),
+                verified=shlex.quote(remote_verified),
+                digest=shlex.quote(local_digest),
+                size=local_size,
+            ),
+            timeout=120,
+        )
+        if code == 0 and output.strip() == "hit":
+            _status_update(
+                status_path,
+                custom_model_cache_hit=True,
+                custom_model_fingerprint=fingerprint,
+            )
+            return True
+        if code == 0 and output.strip() == "miss":
+            session.execute(
+                "rm -f {archive} {verified}".format(
+                    archive=shlex.quote(remote_archive),
+                    verified=shlex.quote(remote_verified),
+                ),
+                check=False,
+            )
+        _status_update(
+            status_path,
+            status="uploading",
+            phase="uploading_custom_base_model",
+            custom_model_cache_hit=False,
+            custom_model_fingerprint=fingerprint,
+        )
+        session.upload(
+            packed_archive,
+            remote_archive,
+            callback=_upload_progress(
+                status_path,
+                phase="uploading_custom_base_model",
+                start_percent=33,
+                end_percent=33,
+            ),
+        )
+        remote_digest = session.execute(
+            "sha256sum {archive} | awk '{{print $1}}'".format(
+                archive=shlex.quote(remote_archive)
+            ),
+            timeout=600,
+        ).strip()
+        if remote_digest != local_digest:
+            session.execute(
+                "rm -f {archive} {verified}".format(
+                    archive=shlex.quote(remote_archive),
+                    verified=shlex.quote(remote_verified),
+                ),
+                check=False,
+            )
+            raise RuntimeError(
+                "The uploaded custom base-model archive failed SHA-256 "
+                "verification."
+            )
+        session.execute(
+            "tmp={verified}.$$.tmp; "
+            "archive_mtime=$(stat -c %Y {archive}); "
+            "printf '%s %s %s\n' {digest} {size} \"$archive_mtime\" > \"$tmp\" && "
+            "mv -f \"$tmp\" {verified}".format(
+                verified=shlex.quote(remote_verified),
+                archive=shlex.quote(remote_archive),
+                digest=shlex.quote(local_digest),
+                size=local_size,
+            )
+        )
+        _append_log(
+            controller_log,
+            "Custom base model cached remotely ({} bytes); future runs with "
+            "the same weights will skip this upload.".format(local_size),
+        )
+        # This run still needs the model in the job archive: the cache slot
+        # is only populated now, and the container launch does not yet know
+        # to extract it. Only subsequent runs take the zero-upload path.
+        return False
+    finally:
+        try:
+            packed_archive.unlink()
+        except OSError:
+            pass
 
 
 def _local_model_fingerprint(path: Path) -> str:
@@ -852,8 +1039,9 @@ def _prepare_nninteractive(
         local_required_model = str(
             Path(request["base_model_dir"]).expanduser().resolve()
         )
+        custom_model_fingerprint = ""
     else:
-        _local, remote_model = _copy_model_input(
+        _local, remote_model, custom_model_fingerprint = _copy_model_input(
             str(request["base_model_dir"]), bundle
         )
         remote_request["base_model_dir"] = remote_model
@@ -879,6 +1067,7 @@ def _prepare_nninteractive(
         "validation_count": sum(row.get("split") == "val" for row in remote_rows),
         "required_model_relative": required_model_relative,
         "local_required_model": local_required_model,
+        "custom_model_fingerprint": custom_model_fingerprint,
         "local_dataset_archive_cache": str(
             Path(
                 request.get("workspace") or local_job_dir.parent
@@ -968,6 +1157,7 @@ def _prepare_nnunet(
         "results": "/job/output/runtime/nnUNet_results",
     }
     pretrained = str(request.get("pretrained_weights") or "").strip()
+    custom_model_fingerprint = ""
     if pretrained:
         source = Path(pretrained).expanduser().resolve()
         if not source.is_file():
@@ -979,6 +1169,7 @@ def _prepare_nnunet(
         target = bundle / "custom_model" / source.name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(str(source), str(target))
+        custom_model_fingerprint = _sha256_file(target)
         remote_request["pretrained_weights"] = "/job/custom_model/{}".format(
             source.name
         )
@@ -1014,6 +1205,7 @@ def _prepare_nnunet(
         ),
         "required_model_relative": "",
         "local_required_model": "",
+        "custom_model_fingerprint": custom_model_fingerprint,
         "local_model_id": model_id,
         "local_dataset_archive_cache": str(
             Path(request["workspace"])
@@ -1484,6 +1676,12 @@ def _remote_paths(session: SSHSession, job_id: str) -> dict[str, str]:
             / "cache"
             / owner
             / "prepared"
+        ),
+        "models_cache": str(
+            PurePosixPath(session.remote_root)
+            / "cache"
+            / owner
+            / "models"
         ),
     }
 
@@ -2163,6 +2361,7 @@ def _launch_container(
     remove_dataset_after_extract: bool = False,
     status_path: Path | None = None,
     log_path: Path | None = None,
+    custom_model_cache_path: str = "",
 ) -> str:
     owner = _remote_owner(profile)
     job_slug = safe_identifier(PurePosixPath(paths["job"]).name, "job")
@@ -2254,6 +2453,19 @@ def _launch_container(
         ),
         timeout=300,
     )
+    if custom_model_cache_path:
+        # The cached custom base model was excluded from the job archive
+        # (content-addressed cache hit). Extract it into the same in-container
+        # location the pipeline request references: the tar was built with
+        # that layout (directory contents at top level / file by basename).
+        session.execute(
+            "mkdir -p {target} && "
+            "tar -xf {model} -C {target} && touch {model}".format(
+                target=shlex.quote(paths["job"] + "/custom_model"),
+                model=shlex.quote(custom_model_cache_path),
+            ),
+            timeout=300,
+        )
     gpu_device = str(profile.get("gpu_device") or "auto")
     gpu_scope = "all" if gpu_device == "auto" else "device"
     gpu_lock = "gpu-{}.lock".format(
@@ -2344,19 +2556,63 @@ def _validate_remote_assets(
     # one (custom remote_root or mount point), and unrelated extra files must
     # not invalidate the identity check. `find -type f` without -L skips
     # symlinks, matching _local_model_fingerprint.
-    fingerprint = session.execute(
-        "if test -f {path}; then "
-        "sha256sum {path} | awk '{{print $1}}'; "
-        "else cd {path} && "
+    #
+    # The full hash of a multi-gigabyte base-model directory costs minutes of
+    # remote I/O on every job. A `.mimics_digest_cache` marker next to the
+    # model records the last computed digest with the newest source mtime;
+    # when no file has changed since, the cached digest is trusted and the
+    # rehash is skipped. A marker mismatch (stale, corrupt, missing) falls
+    # back to the full hash below, and a read-only model mount makes the
+    # best-effort marker write a silent no-op.
+    digest_marker = model_path.rstrip("/") + ".mimics_digest_cache"
+    cache_output = session.execute(
+        "if test -f {marker} && "
+        'read saved_digest saved_mtime < {marker} && '
+        'test "$saved_mtime" = "$(cd {path} 2>/dev/null && '
         "find . -maxdepth 4 -type f "
         "\\( -name '*.pth' -o -name '*.safetensors' -o -name '*.bin' "
         "-o -name 'config.json' -o -name 'plans.json' \\) "
-        "-exec sha256sum {{}} + 2>/dev/null | "
-        "awk '{{print $1}}' | LC_ALL=C sort | "
-        "sha256sum | awk '{{print $1}}'; "
-        "fi".format(path=shlex.quote(model_path)),
-        timeout=300,
+        "-printf '%T@\\n' 2>/dev/null | sort -n | tail -1 | "
+        'cut -d. -f1)"; '
+        'then printf "%s" "$saved_digest"; fi'.format(
+            marker=shlex.quote(digest_marker),
+            path=shlex.quote(model_path),
+        ),
+        timeout=60,
+        check=False,
     ).strip()
+    if cache_output:
+        fingerprint = cache_output
+    else:
+        fingerprint = session.execute(
+            "if test -f {path}; then "
+            "sha256sum {path} | awk '{{print $1}}'; "
+            "else cd {path} && "
+            "find . -maxdepth 4 -type f "
+            "\\( -name '*.pth' -o -name '*.safetensors' -o -name '*.bin' "
+            "-o -name 'config.json' -o -name 'plans.json' \\) "
+            "-exec sha256sum {{}} + 2>/dev/null | "
+            "awk '{{print $1}}' | LC_ALL=C sort | "
+            "sha256sum | awk '{{print $1}}'; "
+            "fi".format(path=shlex.quote(model_path)),
+            timeout=300,
+        ).strip()
+        if len(fingerprint) == 64:
+            session.execute(
+                "if test -d {path}; then cd {path} && "
+                "newest_mtime=$(find . -maxdepth 4 -type f "
+                "\\( -name '*.pth' -o -name '*.safetensors' -o -name '*.bin' "
+                "-o -name 'config.json' -o -name 'plans.json' \\) "
+                "-printf '%T@\\n' 2>/dev/null | sort -n | tail -1 | "
+                "cut -d. -f1) && "
+                "printf '%s %s\\n' {digest} \"$newest_mtime\" "
+                "> {marker}.tmp && mv -f {marker}.tmp {marker}; fi || true".format(
+                    path=shlex.quote(model_path),
+                    digest=shlex.quote(fingerprint),
+                    marker=shlex.quote(digest_marker),
+                ),
+                check=False,
+            )
     if (
         not fingerprint
         or fingerprint == hashlib.sha256(b"").hexdigest()
@@ -2548,6 +2804,15 @@ def _reconnect_session(
     attempt: int,
 ) -> SSHSession | None:
     _raise_if_cancelled(status_path)
+    if attempt >= RECONNECT_MAX_ATTEMPTS:
+        raise RemoteServerUnreachable(
+            "The remote server could not be reached after {} reconnect "
+            "attempts ({}). The remote container may still be running; use "
+            "Re-attach to retry monitoring once the server is reachable "
+            "again, or Stop/Abandon Locally to end this task.".format(
+                attempt, reason
+            )
+        )
     delay = min(30.0, max(2.0, float(2 ** min(attempt, 5))))
     current = read_json(status_path, {}) or {}
     previous_status = str(
@@ -2718,6 +2983,64 @@ def _upload_progress(
     return callback
 
 
+def _batch_verify_remote_dataset_cache(
+    session: SSHSession,
+    paths: dict[str, str],
+    parts: list[dict[str, Any]],
+    chunk_size: int = 50,
+) -> dict[str, bool]:
+    """Classify every case cache slot in a bounded number of SSH round trips.
+
+    Without this, the per-case upload loop costs one verify round trip per
+    case before it even decides whether to upload. The command only trusts a
+    `.verified` marker whose recorded digest, size, and archive mtime all
+    match — the same acceptance rule as `_ensure_remote_dataset_archive`, so
+    a "hit" here is exactly a hit there. Anything else is reported as a miss
+    and the per-case path re-runs its full (repairing) verification.
+    Fingerprints are chunked so one exec stays far below the remote shell's
+    argument-length cap regardless of case count.
+    """
+    verdicts: dict[str, bool] = {}
+    entries = [
+        (str(part["fingerprint"]), int(part["size"]))
+        for part in parts
+        if str(part.get("fingerprint") or "")
+    ]
+    for start in range(0, len(entries), chunk_size):
+        chunk = entries[start : start + chunk_size]
+        clauses = []
+        for fingerprint, size in chunk:
+            archive = PurePosixPath(paths["dataset_cache"]) / (
+                fingerprint + ".tar"
+            )
+            verified = PurePosixPath(paths["dataset_cache"]) / (
+                fingerprint + ".verified"
+            )
+            clauses.append(
+                "if test -f {archive} && test -f {verified} && "
+                "read saved_digest saved_size saved_mtime < {verified} && "
+                'test "$saved_digest" = {fingerprint} && '
+                'test "$saved_size" = {size} && '
+                'test "$(stat -c %s {archive} 2>/dev/null)" = {size} && '
+                'test "$saved_mtime" = "$(stat -c %Y {archive} 2>/dev/null)"; '
+                'then printf "{fingerprint} hit\\n"; '
+                'else printf "{fingerprint} miss\\n"; fi'.format(
+                    archive=shlex.quote(str(archive)),
+                    verified=shlex.quote(str(verified)),
+                    fingerprint=shlex.quote(fingerprint),
+                    size=size,
+                )
+            )
+        code, output = session.execute_result("\n".join(clauses), timeout=120)
+        if code != 0:
+            continue
+        for line in output.splitlines():
+            pieces = line.split()
+            if len(pieces) == 2 and pieces[1] in {"hit", "miss"}:
+                verdicts[pieces[0]] = pieces[1] == "hit"
+    return verdicts
+
+
 def _ensure_remote_dataset_archive(
     session: SSHSession,
     paths: dict[str, str],
@@ -2726,6 +3049,7 @@ def _ensure_remote_dataset_archive(
     fingerprint: str,
     status_path: Path,
     progress_callback=None,
+    assumed_cache_state: str | None = None,
 ) -> tuple[str, bool]:
     use_cache = bool(profile.get("cache_training_data", True))
     if use_cache:
@@ -2735,6 +3059,35 @@ def _ensure_remote_dataset_archive(
         )
         remote_verified = remote_archive[:-4] + ".verified"
         local_size = int(local_archive.stat().st_size)
+        if assumed_cache_state == "hit":
+            # Pre-classified by _batch_verify_remote_dataset_cache with the
+            # same marker rule; skip the per-case round trip entirely.
+            session.execute(
+                "touch {verified}".format(
+                    verified=shlex.quote(remote_verified),
+                ),
+                check=False,
+            )
+            if progress_callback is not None:
+                progress_callback(local_size, local_size)
+            _status_update(
+                status_path,
+                status="uploading",
+                phase="remote_dataset_cache_hit",
+                dataset_cache_hit=True,
+                dataset_fingerprint=fingerprint,
+            )
+            return remote_archive, True
+        if assumed_cache_state == "miss":
+            # Stale or absent marker: drop both files so the fresh upload
+            # below cannot collide with a half-written predecessor.
+            session.execute(
+                "rm -f {archive} {verified}".format(
+                    archive=shlex.quote(remote_archive),
+                    verified=shlex.quote(remote_verified),
+                ),
+                check=False,
+            )
         code, output = session.execute_result(
             "if test -f {path}; then "
             "actual_size=$(stat -c %s {path} 2>/dev/null || printf 0); "
@@ -3367,11 +3720,19 @@ def _monitor_remote(
         "last_curve_sync_epoch": 0.0,
     }
     remote_status: dict[str, Any] = {}
+    # Stall detection: any observable progress (new status content or worker
+    # log growth) refreshes this timestamp. Training can legitimately run for
+    # days, so silence alone never fails the task — it only surfaces a hint
+    # in status after a full day without any sign of life.
+    last_activity_epoch = time.time()
+    stall_hint_active = False
+    last_worker_pid = ""
     while True:
         try:
             _raise_if_abandoned(status_path)
             if session is None:
                 raise RemoteComputeError("No active SSH monitoring session.")
+            log_offset_before = int(log_sync_state.get("offset") or 0)
             try:
                 _sync_remote_log(
                     session,
@@ -3381,6 +3742,11 @@ def _monitor_remote(
                 )
             except IOError:
                 pass
+            if int(log_sync_state.get("offset") or 0) > log_offset_before:
+                last_activity_epoch = time.time()
+                if stall_hint_active:
+                    stall_hint_active = False
+                    _status_update(status_path, remote_stall_suspected=False)
             # A remote read can outlive the UI action that requested a
             # local abandon. Recheck before any active state is written.
             _raise_if_abandoned(status_path)
@@ -3414,6 +3780,13 @@ def _monitor_remote(
             candidate = session.read_remote_json(remote_status_path, {}) or {}
             if candidate:
                 missing_status_since = time.time()
+                if candidate != remote_status:
+                    last_activity_epoch = time.time()
+                    if stall_hint_active:
+                        stall_hint_active = False
+                        _status_update(
+                            status_path, remote_stall_suspected=False
+                        )
                 remote_status = candidate
                 _merge_remote_status(
                     status_path,
@@ -3456,6 +3829,15 @@ def _monitor_remote(
                 ) or {}
                 if str(worker.get("status") or "") == "waiting_for_remote_gpu":
                     missing_status_since = time.time()
+                    worker_pid = str(worker.get("worker_pid") or "")
+                    if worker_pid != last_worker_pid:
+                        last_worker_pid = worker_pid
+                        last_activity_epoch = time.time()
+                        if stall_hint_active:
+                            stall_hint_active = False
+                            _status_update(
+                                status_path, remote_stall_suspected=False
+                            )
                     _status_update(
                         status_path,
                         status="waiting_for_remote_gpu",
@@ -3491,6 +3873,17 @@ def _monitor_remote(
                 raise RuntimeError(
                     "Remote training started but did not create its status "
                     "file within five minutes."
+                )
+            if (
+                not stall_hint_active
+                and time.time() - last_activity_epoch > REMOTE_STALL_SECONDS
+            ):
+                stall_hint_active = True
+                _append_log(controller_log, REMOTE_STALL_HINT)
+                _status_update(
+                    status_path,
+                    remote_stall_suspected=True,
+                    remote_stall_detail=REMOTE_STALL_HINT,
                 )
             reconnect_attempt = 0
         except RemoteCommandError as exc:
@@ -3742,6 +4135,25 @@ def run(spec_path: Path) -> int:
         dataset_bytes_completed = 0
         dataset_reconnect_attempt = 0
         pending_dataset_parts = list(dataset_parts)
+        # One batched round trip classifies all case cache slots up front
+        # (fallback documented in the design notes instead of concurrent
+        # SFTP streams): previously each case cost a verify round trip even
+        # on a hit, and a cache-warm 100-case dataset paid 100 sequential
+        # SSH execs before any upload decision.
+        cache_verdicts: dict[str, bool] = {}
+        if pending_dataset_parts and bool(
+            profile.get("cache_training_data", True)
+        ):
+            try:
+                cache_verdicts = _batch_verify_remote_dataset_cache(
+                    session, remote_paths, pending_dataset_parts
+                )
+            except Exception as batch_exc:
+                _append_log(
+                    controller_log,
+                    "Batched dataset-cache verification failed ({}); "
+                    "falling back to per-case verification.".format(batch_exc),
+                )
         while pending_dataset_parts:
             _raise_if_cancelled(status_path)
             try:
@@ -3786,6 +4198,15 @@ def run(spec_path: Path) -> int:
                             aggregate_offset=dataset_bytes_completed,
                             aggregate_total=dataset_archive_size,
                         ),
+                        assumed_cache_state=(
+                            "hit"
+                            if cache_verdicts.get(str(part["fingerprint"]))
+                            else (
+                                "miss"
+                                if str(part["fingerprint"]) in cache_verdicts
+                                else None
+                            )
+                        ),
                     )
                 )
                 remote_dataset_archives.append(remote_dataset_archive)
@@ -3828,6 +4249,41 @@ def run(spec_path: Path) -> int:
                     exc,
                     dataset_reconnect_attempt,
                 )
+        # Custom base-model upload cache: a repeated multi-gigabyte custom
+        # model selection normally rides inside every job archive. Consult
+        # the content-addressed remote cache first; on a hit exclude it from
+        # the job tar (near-zero upload), on a miss upload it into the cache
+        # once so every later run skips those bytes.
+        custom_model_fingerprint = str(
+            prepared.get("custom_model_fingerprint") or ""
+        )
+        custom_model_source = bundle / "custom_model"
+        custom_model_cached = False
+        if custom_model_fingerprint and custom_model_source.exists():
+            try:
+                custom_model_cached = _ensure_remote_custom_model(
+                    session,
+                    remote_paths,
+                    profile,
+                    custom_model_source,
+                    custom_model_fingerprint,
+                    status_path,
+                    controller_log,
+                )
+            except (RemoteCommandError, RemoteComputeError) as exc:
+                # Cache trouble must not block a job that would otherwise
+                # work: fall back to shipping the model in the job archive.
+                _append_log(
+                    controller_log,
+                    "Custom base-model cache check failed ({}); shipping the "
+                    "model inside the job archive instead.".format(exc),
+                )
+        if custom_model_cached:
+            archive_size = _build_tar(
+                bundle,
+                archive,
+                excluded_top_level={"input", "labels", "custom_model"},
+            )
         upload_reconnect_attempt = 0
         while True:
             _raise_if_cancelled(status_path)
@@ -3899,6 +4355,13 @@ def run(spec_path: Path) -> int:
                     profile,
                     container_name,
                     dataset_cache_paths=remote_dataset_archives,
+                    custom_model_cache_path=(
+                        _remote_custom_model_cache_path(
+                            remote_paths, custom_model_fingerprint
+                        )[0]
+                        if custom_model_cached
+                        else ""
+                    ),
                     remove_dataset_after_extract=not bool(
                         profile.get("cache_training_data", True)
                     ),
@@ -4146,6 +4609,25 @@ def run(spec_path: Path) -> int:
                 completed_at_epoch=time.time(),
             )
         return 130
+    except RemoteServerUnreachable as exc:
+        # The reconnect budget ran out mid-run: the remote container may
+        # still be training, so this stays non-terminal and recoverable via
+        # re-attach rather than being recorded as a failed or stopping task.
+        _append_log(controller_log, "{}: {}".format(type(exc).__name__, exc))
+        _status_update(
+            status_path,
+            status="remote_unreachable",
+            phase="remote_unreachable",
+            message=str(exc),
+            error="{}: {}".format(type(exc).__name__, exc),
+            remote_state_unknown=True,
+            remote_reconnect_exhausted=True,
+            remote_previous_status=str(
+                (read_json(status_path, {}) or {}).get("status") or ""
+            ),
+            completed_at_epoch=None,
+        )
+        return 1
     except Exception as exc:
         termination_confirmed = not container_may_exist
         cleanup_error = ""
@@ -4598,6 +5080,25 @@ def reattach(status_path: Path) -> int:
         )
         return 125
     except Exception as exc:
+        if isinstance(exc, RemoteServerUnreachable):
+            # The reconnect budget ran out: the remote container may still
+            # be training, so this stays non-terminal and recoverable via
+            # another re-attach rather than being recorded as failed.
+            _append_log(controller_log, "{}: {}".format(type(exc).__name__, exc))
+            _status_update(
+                path,
+                status="remote_unreachable",
+                phase="remote_unreachable",
+                message=str(exc),
+                error="{}: {}".format(type(exc).__name__, exc),
+                remote_state_unknown=True,
+                remote_reconnect_exhausted=True,
+                remote_previous_status=str(
+                    (read_json(path, {}) or {}).get("status") or ""
+                ),
+                completed_at_epoch=None,
+            )
+            return 1
         _append_log(
             controller_log,
             "{}: {}\n{}".format(type(exc).__name__, exc, traceback.format_exc()),
