@@ -26,6 +26,7 @@ for candidate in (ROOT, ROOT / "tools", ROOT / "runtime_py35"):
         sys.path.insert(0, value)
 
 from ui_theme import configure_application, stylesheet  # noqa: E402
+from viewer_refresh import BackgroundRefresh  # noqa: E402
 
 
 TERMINAL_STATES = {
@@ -281,18 +282,27 @@ class BatchStatusWindow:
 
         self.window.setCentralWidget(central)
         self._rows = []
-        self.refresh()
-        self.timer = self.QtCore.QTimer(self.window)
-        self.timer.timeout.connect(self.refresh)
-        self.timer.start(2000)
+        # Periodic refresh collects off the GUI thread: the per-kind scans
+        # stat every candidate job directory, which stalls on network paths.
+        self.refresher = BackgroundRefresh(
+            self.QtCore,
+            parent=self.window,
+            interval_ms=2000,
+            collect=lambda: collect_batch_rows(self.project_root),
+            apply=self.refresh,
+        )
+        self.refresher.refresh_now()
 
-    def refresh(self):
+    def refresh(self, rows=None):
+        if rows is None:
+            # Manual/periodic path: collect synchronously (tests, first paint).
+            rows = collect_batch_rows(self.project_root)
         QtWidgets = self.QtWidgets
         selected_status = ""
         for item in self.table.selectedItems():
             selected_status = item.data(_user_role(self.QtCore))
             break
-        self._rows = collect_batch_rows(self.project_root)
+        self._rows = rows
         self.table.setRowCount(len(self._rows))
         for row_index, row in enumerate(self._rows):
             progress = ""

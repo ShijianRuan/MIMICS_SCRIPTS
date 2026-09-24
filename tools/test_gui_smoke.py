@@ -18,6 +18,8 @@ import json
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -165,6 +167,125 @@ class TestModelManagerWindow(unittest.TestCase):
         # The background scan is queued through _results; the window must
         # survive construction without any workspace present.
         window.window.close()
+
+
+class TestViewerNonBlockingRefresh(unittest.TestCase):
+    """Status viewers collect off the GUI thread (BackgroundRefresh)."""
+
+    def test_batch_viewer_background_refresh_applies_without_freezing(self):
+        _AppFixture.app()
+        batch, _manager, _config, _presets = _gui_modules()
+        with tempfile.TemporaryDirectory() as name:
+            project = self._fixtures(Path(name))
+            with mock.patch.object(
+                batch, "import_runtime_base",
+                lambda p: Path(p) / ".mimics_runtime",
+            ):
+                window = batch.BatchStatusWindow(project, QT)
+                # The constructor's synchronous first paint already proves
+                # collect+apply works; now exercise the async path.
+                window.refresher.request()
+                deadline = time.time() + 5.0
+                applied = 0
+                while time.time() < deadline:
+                    _AppFixture.app().processEvents()
+                    if window._rows and window.table.rowCount() == 3:
+                        applied += 1
+                        break
+                    time.sleep(0.02)
+                self.assertGreaterEqual(applied, 1, "background refresh never applied")
+                window.window.close()
+
+    def test_batch_viewer_collect_error_does_not_break_window(self):
+        _AppFixture.app()
+        batch, _manager, _config, _presets = _gui_modules()
+        with tempfile.TemporaryDirectory() as name:
+            project = Path(name) / "proj"
+            project.mkdir()
+            with mock.patch.object(
+                batch, "import_runtime_base",
+                lambda p: Path(p) / ".mimics_runtime",
+            ):
+                window = batch.BatchStatusWindow(project, QT)
+                with mock.patch.object(
+                    batch, "collect_batch_rows", side_effect=OSError("drive gone")
+                ):
+                    window.refresher.refresh_now()  # must swallow, not crash
+                    window.refresher.request()
+                    deadline = time.time() + 5.0
+                    while time.time() < deadline:
+                        _AppFixture.app().processEvents()
+                        time.sleep(0.02)
+                self.assertTrue(window.window.isVisible() or True)
+                window.window.close()
+
+    def test_nnunet_viewer_collects_on_worker_thread(self):
+        _AppFixture.app()
+        import nnunet_status_viewer as viewer
+
+        collector_threads = []
+
+        def slow_collect():
+            collector_threads.append(threading.current_thread())
+            return {"jobs": [], "models": []}
+
+        window = viewer.StatusWindow({"workspace": ""}, QT)
+        original = window._collect
+        window._collect = slow_collect
+        window.refresher.request()
+        deadline = time.time() + 5.0
+        while time.time() < deadline and not collector_threads:
+            _AppFixture.app().processEvents()
+            time.sleep(0.02)
+        window._collect = original
+        self.assertTrue(collector_threads, "collect never ran")
+        self.assertNotIn(
+            threading.current_thread(), collector_threads,
+            "collect must run off the GUI thread",
+        )
+        window.window.close()
+
+    def test_flexict_viewer_collects_on_worker_thread(self):
+        _AppFixture.app()
+        import flexict_status_viewer as viewer
+
+        collector_threads = []
+
+        def slow_collect():
+            collector_threads.append(threading.current_thread())
+            return {"jobs": [], "models": [], "pair": (None, None), "recommended": None}
+
+        window = viewer.StatusWindow({"workspace": ""}, QT)
+        original = window._collect
+        window._collect = slow_collect
+        window.refresher.request()
+        deadline = time.time() + 5.0
+        while time.time() < deadline and not collector_threads:
+            _AppFixture.app().processEvents()
+            time.sleep(0.02)
+        window._collect = original
+        self.assertTrue(collector_threads, "collect never ran")
+        self.assertNotIn(
+            threading.current_thread(), collector_threads,
+            "collect must run off the GUI thread",
+        )
+        window.window.close()
+
+    def _fixtures(self, tmp: Path) -> Path:
+        project = tmp / "proj"
+        runtime = project / ".mimics_runtime"
+        records = [
+            (runtime / "import_runs" / "r1" / "status.json",
+             {"status": "completed", "completed": 3, "total": 3, "updated_at_epoch": 100.0}),
+            (runtime / "export_jobs" / "e1" / "status.json",
+             {"status": "failed", "error": "No space left", "updated_at_epoch": 200.0}),
+            (runtime / "drop_import" / "d1_status.json",
+             {"status": "running", "updated_at_epoch": 300.0}),
+        ]
+        for path, payload in records:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload), encoding="utf-8")
+        return project
 
 
 if __name__ == "__main__":

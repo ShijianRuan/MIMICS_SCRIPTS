@@ -20,6 +20,7 @@ for candidate in (ROOT, ROOT / "tools"):
 from nnunet_common import load_models, model_usability, read_json  # noqa: E402
 from nnunet_jobs import abandon_job, create_job, list_jobs, stop_job  # noqa: E402
 from ui_theme import configure_application, stylesheet  # noqa: E402
+from viewer_refresh import BackgroundRefresh  # noqa: E402
 
 
 def _format_time(value):
@@ -152,9 +153,16 @@ class StatusWindow:
         self._job_rows = []
         self._model_rows = []
         self._populate_tasks()
-        self.timer = QtCore.QTimer(self.window)
-        self.timer.timeout.connect(self.refresh)
-        self.timer.start(2000)
+        # Periodic refresh collects off the GUI thread: list_jobs +
+        # load_models + log tails can stall on a network workspace.
+        self.refresher = BackgroundRefresh(
+            self.QtCore,
+            parent=self.window,
+            interval_ms=2000,
+            collect=lambda: self._collect(),
+            apply=self.refresh,
+        )
+        self.refresher.refresh_now()
 
     def _populate_tasks(self):
         wanted = str(self.context.get("task_id") or "")
@@ -174,12 +182,21 @@ class StatusWindow:
                 selected = index
         self.task_combo.setCurrentIndex(selected)
         self.task_combo.blockSignals(False)
-        self.refresh()
 
     def _selected_task(self):
         return str(self.task_combo.currentData() or "")
 
-    def refresh(self):
+    def _collect(self):
+        """Snapshot everything the UI needs (runs on a worker thread)."""
+        return {
+            "jobs": list_jobs(self.workspace),
+            "models": load_models(self.workspace, include_missing=True),
+        }
+
+    def refresh(self, snapshot=None):
+        if snapshot is None:
+            # Manual/periodic path: collect synchronously (tests, first paint).
+            snapshot = self._collect()
         task_id = self._selected_task()
         if not task_id:
             self.state_label.setText("No nnU-Net task found")
@@ -189,7 +206,7 @@ class StatusWindow:
         current_status_path = ""
         if 0 <= self.jobs.currentRow() < len(self._job_rows):
             current_status_path = str(self._job_rows[self.jobs.currentRow()].get("status_path") or "")
-        rows = [row for row in list_jobs(self.workspace) if str(row.get("task_id") or "") == task_id]
+        rows = [row for row in snapshot["jobs"] if str(row.get("task_id") or "") == task_id]
         self._job_rows = rows
         self.jobs.blockSignals(True)
         self.jobs.clear()
@@ -207,7 +224,7 @@ class StatusWindow:
         self.jobs.blockSignals(False)
         self._model_rows = [
             row
-            for row in load_models(self.workspace, include_missing=True)
+            for row in snapshot["models"]
             if str(row.get("task_id") or "") == task_id
         ]
         self.models.setRowCount(len(self._model_rows))

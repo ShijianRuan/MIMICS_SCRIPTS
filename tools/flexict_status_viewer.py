@@ -26,6 +26,7 @@ from flexict_common import (  # noqa: E402
 from flexict_pipeline import list_flexict_jobs  # noqa: E402
 from nnunet_common import read_json  # noqa: E402
 from ui_theme import configure_application, stylesheet  # noqa: E402
+from viewer_refresh import BackgroundRefresh  # noqa: E402
 
 
 def _format_time(value):
@@ -145,13 +146,31 @@ class StatusWindow:
         self.window.setCentralWidget(central)
         self._job_rows = []
         self._model_rows = []
-        self.refresh()
-        self.timer = QtCore.QTimer(self.window)
-        self.timer.timeout.connect(self.refresh)
-        self.timer.start(2000)
+        # Periodic refresh collects off the GUI thread (see viewer_refresh).
+        self.refresher = BackgroundRefresh(
+            self.QtCore,
+            parent=self.window,
+            interval_ms=2000,
+            collect=lambda: self._collect(),
+            apply=self.refresh,
+        )
+        self.refresher.refresh_now()
 
-    def refresh(self):
-        rows = list_flexict_jobs(self.workspace or None)
+    def _collect(self):
+        """Snapshot everything the UI needs (runs on a worker thread)."""
+        workspace = self.workspace or None
+        return {
+            "jobs": list_flexict_jobs(workspace),
+            "models": load_models(workspace),
+            "pair": load_pair(workspace),
+            "recommended": recommended_model(workspace),
+        }
+
+    def refresh(self, snapshot=None):
+        if snapshot is None:
+            # Manual/periodic path: collect synchronously (tests, first paint).
+            snapshot = self._collect()
+        rows = snapshot["jobs"]
         self._job_rows = rows
         current_status_path = ""
         if 0 <= self.jobs.currentRow() < len(self._job_rows):
@@ -174,7 +193,7 @@ class StatusWindow:
         self.jobs.blockSignals(False)
 
         workspace = self.workspace or None
-        self._model_rows = load_models(workspace)
+        self._model_rows = snapshot["models"]
         self.models.setRowCount(len(self._model_rows))
         for row_index, model in enumerate(self._model_rows):
             usable, reason = model_usability(model)
@@ -190,7 +209,7 @@ class StatusWindow:
                 if not usable:
                     item.setToolTip(reason)
                 self.models.setItem(row_index, column, item)
-        model_2d, model_3d = load_pair(workspace)
+        model_2d, model_3d = snapshot["pair"]
         if model_2d is not None and model_3d is not None:
             self.pair_note.setText(
                 "Active-learning pair ready: {} (2D) + {} (3D).".format(
@@ -198,7 +217,7 @@ class StatusWindow:
                 )
             )
         else:
-            recommended = recommended_model(workspace)
+            recommended = snapshot["recommended"]
             if recommended is not None:
                 self.pair_note.setText(
                     "Recommended model: {} ({}). Train a 2D+3D pair to enable "

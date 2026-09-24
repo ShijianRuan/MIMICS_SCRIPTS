@@ -91,6 +91,7 @@ REQUIRED_EXTERNAL_UI_FILES = [
     "runtime_py35/model_manager_mimics.py",
     "tools/batch_status_viewer.py",
     "runtime_py35/batch_status_mimics.py",
+    "tools/viewer_refresh.py",
     "tools/test_model_portability.py",
     "flexict_config.json",
     "integrations/nnunet_segmentation_workflow/trainers/MimicsNNUNetTrainer.py",
