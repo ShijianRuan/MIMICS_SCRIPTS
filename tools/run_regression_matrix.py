@@ -73,6 +73,10 @@ SUITES = [
     ("flow_append", [sys.executable, "tools/fake_mimics_flow_test.py", "--only", "append"], {"smoke", "fast", "full"}),
     # -- offline stress (concurrency) -----------------------------------
     ("offline_stress", [sys.executable, "tools/offline_stress_test.py"], {"fast", "full"}),
+    # -- convergence smoke (real training, tiny scale; full only) --------
+    ("training_convergence", [sys.executable, "tools/test_training_convergence.py"], {"full"}),
+    # -- cross-workflow handoffs (train -> infer -> AL -> overlay) --------
+    ("cross_workflow", [sys.executable, "tools/test_cross_workflow_transitions.py"], {"fast", "full"}),
 ]
 
 DEFAULT_PROFILE = "fast"
