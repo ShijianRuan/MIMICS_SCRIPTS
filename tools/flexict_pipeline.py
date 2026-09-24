@@ -200,6 +200,15 @@ def flexict_worker_environment(request: dict[str, Any],
         "NUM_EPOCHS": str(int(request.get("epochs") or DEFAULT_CONFIG["default_epochs"])),
         "nnUNet_compile": "0",
     }
+    if os.name == "nt":
+        # Windows: nnU-Net's spawn'd data-augmentation workers each import
+        # torch/OpenBLAS (~1GB commit each, 12 by default) and have a history
+        # of allocation-failure crashes on RAM-tight workstations that then
+        # poison the main process's CUDA context ("CUDA error: unknown
+        # error"). Single-process DA is slower but stable — the same fix the
+        # MedDINOv3 experiments needed on this machine. Linux (remote
+        # containers) keeps nnU-Net's multiprocessing default.
+        environment["nnUNet_n_proc_DA"] = "0"
     mirror = str(request.get("mirror_disable_axes")
                  or DEFAULT_CONFIG["default_mirror_disable_axes"] or "").strip()
     if mirror:
