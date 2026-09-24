@@ -234,6 +234,11 @@ def normalize_profile(profile: dict[str, Any]) -> dict[str, Any]:
     ).strip().lower()
     if remote_weights_verify not in {"strict", "warn", "off"}:
         remote_weights_verify = "strict"
+    remote_code_verify = str(
+        profile.get("remote_code_verify") or "warn"
+    ).strip().lower()
+    if remote_code_verify not in {"strict", "warn", "off"}:
+        remote_code_verify = "warn"
     return {
         "profile_id": profile_id,
         "name": name,
@@ -248,6 +253,7 @@ def normalize_profile(profile: dict[str, Any]) -> dict[str, Any]:
         "cache_training_data": cache_training_data,
         "remote_cache_retention_days": remote_cache_retention_days,
         "remote_weights_verify": remote_weights_verify,
+        "remote_code_verify": remote_code_verify,
         "updated_at_epoch": time.time(),
     }
 

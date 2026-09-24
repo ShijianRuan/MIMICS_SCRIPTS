@@ -677,6 +677,103 @@ class ArchiveSafetyTests(unittest.TestCase):
             )
 
 
+class CodeDriftTests(unittest.TestCase):
+    """The image's baked-in pipeline code is compared before training."""
+
+    class _Session:
+        def __init__(self, image_digest):
+            self.image_digest = image_digest
+            self.commands = []
+
+        def execute(self, command, **kwargs):
+            self.commands.append(command)
+            if "docker run --rm --network none" in command:
+                return self.image_digest
+            raise AssertionError("unexpected command: " + command)
+
+    def test_local_code_fingerprint_changes_with_file_content(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "tools").mkdir()
+            (root / "tools" / "pipeline.py").write_text("print('a')\n")
+            first = controller._local_code_fingerprint(root)
+            (root / "tools" / "pipeline.py").write_text("print('b')\n")
+            second = controller._local_code_fingerprint(root)
+            self.assertNotEqual(first, second)
+            # Adding a file under an excluded directory must not change it.
+            (root / "tools" / "__pycache__").mkdir()
+            (root / "tools" / "__pycache__" / "pipeline.pyc").write_text("x")
+            self.assertEqual(second, controller._local_code_fingerprint(root))
+
+    def test_check_code_drift_match_records_identity(self):
+        local = controller._local_code_fingerprint()
+        session = self._Session(local)
+        profile = {"runtime_image": "img", "remote_code_verify": "warn"}
+        with tempfile.TemporaryDirectory() as temporary:
+            status_path = Path(temporary) / "status.json"
+            remote_compute.write_json_atomic(status_path, {})
+            identity = controller._check_code_drift(
+                session, profile, status_path, "sha256:imageid"
+            )
+        self.assertTrue(identity["remote_code_match"])
+        self.assertEqual(identity["remote_code_verify"], "warn")
+
+    def test_check_code_drift_strict_refuses_on_mismatch(self):
+        session = self._Session("0" * 64)
+        profile = {"runtime_image": "img", "remote_code_verify": "strict"}
+        with tempfile.TemporaryDirectory() as temporary:
+            status_path = Path(temporary) / "status.json"
+            remote_compute.write_json_atomic(status_path, {})
+            with self.assertRaisesRegex(RuntimeError, "rebuild the image"):
+                controller._check_code_drift(
+                    session, profile, status_path, "sha256:imageid"
+                )
+
+    def test_check_code_drift_warn_records_drift(self):
+        session = self._Session("0" * 64)
+        profile = {"runtime_image": "img", "remote_code_verify": "warn"}
+        with tempfile.TemporaryDirectory() as temporary:
+            status_path = Path(temporary) / "status.json"
+            remote_compute.write_json_atomic(status_path, {})
+            identity = controller._check_code_drift(
+                session, profile, status_path, "sha256:imageid"
+            )
+            status = remote_compute.read_json(status_path, {})
+        self.assertFalse(identity["remote_code_match"])
+        self.assertTrue(identity["remote_code_drift"])
+        self.assertIn("rebuild the image", identity["remote_code_drift_detail"])
+        self.assertTrue(status.get("remote_code_drift"))
+
+    def test_check_code_drift_off_skips_comparison(self):
+        session = self._Session("never-used")
+        profile = {"runtime_image": "img", "remote_code_verify": "off"}
+        with tempfile.TemporaryDirectory() as temporary:
+            status_path = Path(temporary) / "status.json"
+            remote_compute.write_json_atomic(status_path, {})
+            identity = controller._check_code_drift(
+                session, profile, status_path, "sha256:imageid"
+            )
+        self.assertEqual(identity, {"remote_code_verify": "off"})
+        self.assertEqual(session.commands, [])
+
+    def test_profile_normalizes_remote_code_verify_default_warn(self):
+        base = {
+            "name": "GPU server",
+            "host": "server",
+            "username": "user",
+        }
+        default = remote_compute.normalize_profile(base)
+        self.assertEqual(default["remote_code_verify"], "warn")
+        strict = remote_compute.normalize_profile(
+            dict(base, remote_code_verify="strict")
+        )
+        self.assertEqual(strict["remote_code_verify"], "strict")
+        invalid = remote_compute.normalize_profile(
+            dict(base, remote_code_verify="bogus")
+        )
+        self.assertEqual(invalid["remote_code_verify"], "warn")
+
+
 class StatusAndLifecycleTests(unittest.TestCase):
     def test_remote_worker_log_rotation_is_bounded(self):
         with tempfile.TemporaryDirectory() as temporary, mock.patch.object(

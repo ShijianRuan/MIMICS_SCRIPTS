@@ -592,6 +592,149 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+# Code subset that participates in remote training/inference parity. The
+# runtime image is built with ``COPY . /app``, so the container runs whatever
+# tools/runtime/integration code it was built with; drift between the local
+# checkout and the image silently trains with stale code.
+CODE_FINGERPRINT_ROOTS = ("tools", "runtime_py35", "integrations")
+CODE_FINGERPRINT_SUFFIXES = (".py", ".sh", ".json")
+CODE_FINGERPRINT_EXCLUDED_DIRS = {
+    "__pycache__", ".git", "node_modules", ".pytest_cache",
+    "weights", "jobs", "models", "tests",
+}
+
+
+def _local_code_fingerprint(root: Path | None = None) -> str:
+    """Content digest of the pipeline code that a remote image must match.
+
+    Hashes every .py/.sh/.json file under the training-relevant roots,
+    keyed by relative path so added/removed files change the digest. The
+    same algorithm runs inside the container (see _remote_code_fingerprint),
+    against /app, so both sides see identical relative paths.
+    """
+    base = Path(root) if root else ROOT
+    lines = []
+    for name in CODE_FINGERPRINT_ROOTS:
+        directory = base / name
+        if not directory.is_dir():
+            continue
+        for candidate in sorted(directory.rglob("*")):
+            if not candidate.is_file() or candidate.is_symlink():
+                continue
+            relative = candidate.relative_to(base).as_posix()
+            if any(
+                part in CODE_FINGERPRINT_EXCLUDED_DIRS
+                for part in candidate.relative_to(base).parts[:-1]
+            ):
+                continue
+            if candidate.suffix.lower() not in CODE_FINGERPRINT_SUFFIXES:
+                continue
+            lines.append(
+                "{}  {}".format(_sha256_file(candidate), relative)
+            )
+    aggregate = hashlib.sha256()
+    aggregate.update("\n".join(lines).encode("utf-8"))
+    return aggregate.hexdigest()
+
+
+# Runs inside the container; mirrors _local_code_fingerprint against /app.
+_REMOTE_CODE_FINGERPRINT_SCRIPT = (
+    "import hashlib,sys\n"
+    "from pathlib import Path\n"
+    "base=Path('/app')\n"
+    "roots=('tools','runtime_py35','integrations')\n"
+    "suffixes=('.py','.sh','.json')\n"
+    "excluded={'__pycache__','.git','node_modules','.pytest_cache',"
+    "'weights','jobs','models','tests'}\n"
+    "lines=[]\n"
+    "for name in roots:\n"
+    "    d=base/name\n"
+    "    if not d.is_dir():\n"
+    "        continue\n"
+    "    for c in sorted(d.rglob('*')):\n"
+    "        if not c.is_file() or c.is_symlink():\n"
+    "            continue\n"
+    "        rel=c.relative_to(base)\n"
+    "        if any(p in excluded for p in rel.parts[:-1]):\n"
+    "            continue\n"
+    "        if c.suffix.lower() not in suffixes:\n"
+    "            continue\n"
+    "        h=hashlib.sha256()\n"
+    "        with c.open('rb') as f:\n"
+    "            for chunk in iter(lambda:f.read(4194304),b''):\n"
+    "                h.update(chunk)\n"
+    "        lines.append(h.hexdigest()+'  '+rel.as_posix())\n"
+    "sys.stdout.write(hashlib.sha256('\\n'.join(lines).encode()).hexdigest())\n"
+)
+
+
+def _remote_code_fingerprint(session: SSHSession, image: str) -> str:
+    """Digest of the pipeline code baked into the runtime image.
+
+    Executes the same fingerprint algorithm inside a throwaway container
+    (``--network none``, no volumes) so local and remote digests are directly
+    comparable regardless of the server's checkout layout.
+    """
+    payload = json.dumps(_REMOTE_CODE_FINGERPRINT_SCRIPT)
+    output = session.execute(
+        "docker run --rm --network none --entrypoint python "
+        "{image} -c {script}".format(
+            image=shlex.quote(image),
+            script=shlex.quote(payload),
+        ),
+        timeout=300,
+    )
+    return output.strip()
+
+
+def _check_code_drift(
+    session: SSHSession,
+    profile: dict[str, Any],
+    status_path: Path,
+    runtime_image_id: str,
+) -> dict[str, Any]:
+    """Compare local pipeline code with the image before training.
+
+    strict: refuse to run on drift (the image would silently train with
+    stale code). warn: record the drift in status. off: skip.
+    """
+    mode = str(profile.get("remote_code_verify") or "warn").strip().lower()
+    if mode == "off":
+        return {"remote_code_verify": "off"}
+    local_digest = _local_code_fingerprint()
+    remote_digest = _remote_code_fingerprint(
+        session, str(profile["runtime_image"])
+    )
+    identity = {
+        "remote_code_verify": mode,
+        "local_code_sha256": local_digest,
+        "remote_code_sha256": remote_digest,
+        "remote_runtime_image_id": runtime_image_id,
+    }
+    if local_digest == remote_digest:
+        identity["remote_code_match"] = True
+        return identity
+    detail = (
+        "The remote runtime image does not contain the current pipeline "
+        "code. Local code SHA-256: {local}; image code SHA-256: {remote}. "
+        "Ask the server administrator to rebuild the image "
+        "(`remote/setup_remote_server.sh --build`) before training.".format(
+            local=local_digest, remote=remote_digest
+        )
+    )
+    if mode == "strict":
+        raise RuntimeError(detail)
+    identity.update(
+        {
+            "remote_code_match": False,
+            "remote_code_drift": True,
+            "remote_code_drift_detail": detail,
+        }
+    )
+    _status_update(status_path, **identity)
+    return identity
+
+
 def _link_or_copy(source: str | Path, destination: str | Path) -> str:
     """Stage an immutable cached file without rereading it when possible."""
     source_path = Path(source).resolve()
@@ -1436,6 +1579,471 @@ def _maintain_remote_nnunet_cache(
             else "Remote nnU-Net cache cleanup was deferred because another owned container is active."
         ),
     )
+
+
+def _finalize_completed_remote_job(
+    session: SSHSession,
+    spec: dict[str, Any],
+    profile: dict[str, Any],
+    status_path: Path,
+    remote_paths: dict[str, str],
+    prepared: dict[str, Any],
+    remote_status: dict[str, Any],
+    asset_identity: dict[str, Any],
+    runtime_image_id: str,
+    container_name: str,
+    container_may_exist: bool,
+    prepared_cache_namespace: str,
+    local_root: Path,
+    result_archive: Path,
+    controller_log: Path,
+    remote_log: Path,
+) -> int:
+    """Download the finished artifact and register it locally.
+
+    Shared by the fresh-run path (run) and the re-attach path (reattach):
+    both end with a remote 'completed' status and must perform the same
+    download → verify → publish → register sequence.
+    """
+    kind = str(spec.get("kind") or "")
+    owner = _remote_owner(profile)
+    job_slug = safe_identifier(str(spec["job_id"]), "job")
+    if kind == "nninteractive":
+        local_request = read_json(
+            Path(spec["job_dir"]) / "request.json", {}
+        ) or {}
+        local_model_dir = Path(local_request["output_model_dir"]).resolve()
+    elif kind == "nnunet":
+        from tools.nnunet_common import read_json as read_nnunet_json
+        from tools.nnunet_common import safe_identifier as nnunet_safe_identifier
+
+        local_request = read_nnunet_json(Path(spec["request_path"]), {}) or {}
+        local_model_dir = (
+            Path(local_request["workspace"]).expanduser().resolve()
+            / "models"
+            / nnunet_safe_identifier(local_request["task_id"])
+            / nnunet_safe_identifier(prepared["local_model_id"])
+        )
+    elif kind == "flexict":
+        from tools.nnunet_common import read_json as read_nnunet_json
+        from tools.nnunet_common import safe_identifier as nnunet_safe_identifier
+
+        local_request = read_nnunet_json(Path(spec["request_path"]), {}) or {}
+        local_model_dir = (
+            Path(local_request["workspace"]).expanduser().resolve()
+            / "models"
+            / nnunet_safe_identifier(local_request["task_id"])
+            / nnunet_safe_identifier(prepared["local_model_id"])
+        )
+    else:
+        local_model_dir = Path(spec["job_dir"]).resolve() / "remote_prediction_bundle"
+    _status_update(
+        status_path,
+        status="downloading",
+        phase="downloading_model",
+        progress_percent=96,
+    )
+    download_reconnect_attempt = 0
+    while True:
+        _raise_if_cancelled(status_path)
+        try:
+            if session is None:
+                raise RemoteComputeError("No active SSH download session.")
+            _sync_remote_log(
+                session,
+                remote_paths["job"],
+                remote_log,
+                {"offset": 0, "remote_relative": _remote_log_relative(kind)},
+            )
+            _download_artifact(
+                session,
+                remote_paths["job"],
+                prepared["remote_artifact_relative"],
+                local_model_dir,
+                result_archive,
+                status_path,
+            )
+            break
+        except RemoteCommandError:
+            raise
+        except (RemoteComputeError, EOFError, OSError, socket.error) as exc:
+            try:
+                session.close()
+            except Exception:
+                pass
+            session = None
+            download_reconnect_attempt += 1
+            session = _reconnect_session(
+                profile,
+                status_path,
+                controller_log,
+                exc,
+                download_reconnect_attempt,
+            )
+    if kind == "nninteractive":
+        remote_status.update(asset_identity)
+        remote_status["remote_runtime_image_id"] = runtime_image_id
+        remote_status["remote_gpu_device"] = profile.get("gpu_device") or "auto"
+        model, selected = _register_nninteractive(
+            spec, local_model_dir, remote_status, profile
+        )
+    elif kind == "nnunet":
+        remote_status.update(asset_identity)
+        remote_status["remote_runtime_image_id"] = runtime_image_id
+        remote_status["remote_gpu_device"] = profile.get("gpu_device") or "auto"
+        model = _register_nnunet(
+            spec, local_model_dir, remote_status, profile
+        )
+        selected = True
+    elif kind == "flexict":
+        remote_status.update(asset_identity)
+        remote_status["remote_runtime_image_id"] = runtime_image_id
+        remote_status["remote_gpu_device"] = profile.get("gpu_device") or "auto"
+        models = _register_flexict(
+            spec, local_model_dir, remote_status, profile
+        )
+        model = models[0] if len(models) == 1 else None
+        selected = True
+    else:
+        from tools.nnunet_common import read_json as read_nnunet_json
+
+        local_request = read_nnunet_json(Path(spec["request_path"]), {}) or {}
+        downloaded = local_model_dir / "prediction.nii.gz"
+        output_path = Path(str(local_request.get("output_path") or downloaded)).resolve()
+        if not downloaded.is_file():
+            raise RuntimeError(
+                "Remote {} inference produced no prediction file.".format(
+                    "nnU-Net" if kind == "nnunet_infer" else "FlexiCT"
+                )
+            )
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if downloaded.resolve() != output_path.resolve():
+            temporary_output = output_path.with_name(output_path.name + ".remote-part")
+            shutil.copy2(str(downloaded), str(temporary_output))
+            os.replace(str(temporary_output), str(output_path))
+        model = {
+            "model_id": str(remote_status.get("model_id") or ""),
+            "output_path": str(output_path),
+        }
+        selected = True
+        remote_status["output_path"] = str(output_path)
+    _status_update(
+        status_path,
+        status="completed",
+        phase="completed",
+        progress_percent=100,
+        model=model,
+        execution_backend="remote",
+        remote_model_downloaded=True,
+        remote_model_selected=bool(selected),
+        completed_at_epoch=time.time(),
+        local_log_path=str(remote_log),
+        controller_log_path=str(controller_log),
+        remote_container_removed=False,
+        output_path=(
+            str(remote_status.get("output_path") or "")
+            if kind in {"nnunet_infer", "flexict_infer"}
+            else None
+        ),
+    )
+    # Training data and the downloaded archive are no longer needed on the
+    # server. The model now lives in the existing local registry.
+    container_removed = False
+    job_removed = False
+    cleanup_warning = ""
+    try:
+        container_removed = _remove_container(
+            session,
+            container_name,
+            expected_owner=owner,
+            expected_job=job_slug,
+            stop_if_running=False,
+        )
+        job_removed = _remove_remote_job(
+            session,
+            remote_root=profile["remote_root"],
+            expected_owner=owner,
+            remote_job_dir=remote_paths["job"],
+        )
+        if (
+            kind in {"nnunet", "nnunet_infer", "flexict", "flexict_infer"}
+            and not bool(profile.get("cache_training_data", True))
+        ):
+            _remove_remote_prepared_namespace(
+                session, remote_paths, prepared_cache_namespace
+            )
+        if not (container_removed and job_removed):
+            cleanup_warning = (
+                "Training completed, but some remote temporary files "
+                "could not be removed."
+            )
+    except Exception as cleanup_exc:
+        cleanup_warning = (
+            "Training and model registration completed, but remote cleanup "
+            "could not be confirmed: {}".format(cleanup_exc)
+        )
+        _append_log(controller_log, cleanup_warning)
+    _status_update(
+        status_path,
+        remote_container_removed=bool(container_removed),
+        remote_job_removed=bool(job_removed),
+        remote_cleanup_warning=cleanup_warning,
+        remote_dataset_cache_retained=True,
+    )
+    return 0
+
+
+def _remote_log_relative(kind: str) -> str:
+    if kind in {"nnunet", "nnunet_infer", "flexict", "flexict_infer"}:
+        return "pipeline_job/job.log"
+    return "remote_worker.log"
+
+
+def _remote_status_relative(kind: str) -> str:
+    return "pipeline_job/status.json"
+
+
+def _remote_artifact_relative(kind: str, spec: dict[str, Any]) -> str:
+    """Recover the artifact path when the original prepared bundle is gone.
+
+    The re-attach path no longer has the local bundle that _prepare_*
+    built, so derive the artifact location from the job kind and the
+    deterministic naming the prepares use (mirrors _prepare_nnunet:993,
+    _prepare_flexict, and the infer prepares).
+    """
+    request = {}
+    try:
+        from tools.nnunet_common import read_json as read_nnunet_json
+        from tools.nnunet_common import safe_identifier as nnunet_safe_identifier
+
+        request = (
+            read_nnunet_json(Path(str(spec.get("request_path") or "")), {}) or {}
+        )
+    except Exception:
+        request = {}
+    task_slug = nnunet_safe_identifier(request.get("task_id") or "task", "task")
+    if kind in {"nnunet", "flexict"}:
+        model_id = str(request.get("model_id") or "")
+        if not model_id:
+            return ""
+        return "output/models/{}/{}".format(task_slug, model_id)
+    return "output/prediction_bundle"
+
+
+def _reattach_finalize_from_status(
+    session: SSHSession,
+    spec: dict[str, Any],
+    profile: dict[str, Any],
+    status_path: Path,
+    remote_paths: dict[str, str],
+    remote_status: dict[str, Any],
+    container_name: str,
+    local_root: Path,
+    result_archive: Path,
+    controller_log: Path,
+    remote_log: Path,
+) -> int:
+    """Download + register a remotely-completed job (controller was dead).
+
+    The remote container already finished; only the local tail (download,
+    verify, register) is missing. Used by the re-attach path when the
+    remote pipeline status is terminal 'completed' but no model was ever
+    downloaded.
+    """
+    kind = str(spec.get("kind") or "")
+    prepared = {
+        "remote_artifact_relative": _remote_artifact_relative(kind, spec),
+    }
+    if not prepared["remote_artifact_relative"]:
+        raise RuntimeError(
+            "The remote job completed, but its model id could not be "
+            "recovered from the local request file. Stop the task and retry "
+            "training."
+        )
+    local_model_dir = _resolve_local_model_dir(spec, kind, remote_status)
+    _status_update(
+        status_path,
+        status="downloading",
+        phase="downloading_model",
+        progress_percent=96,
+        message=(
+            "Re-attached to a completed remote task; downloading the model."
+        ),
+    )
+    download_reconnect_attempt = 0
+    while True:
+        _raise_if_cancelled(status_path)
+        try:
+            if session is None:
+                raise RemoteComputeError("No active SSH download session.")
+            _sync_remote_log(
+                session,
+                remote_paths["job"],
+                remote_log,
+                {"offset": 0, "remote_relative": _remote_log_relative(kind)},
+            )
+            _download_artifact(
+                session,
+                remote_paths["job"],
+                prepared["remote_artifact_relative"],
+                local_model_dir,
+                result_archive,
+                status_path,
+            )
+            break
+        except RemoteCommandError:
+            raise
+        except (RemoteComputeError, EOFError, OSError, socket.error) as exc:
+            try:
+                session.close()
+            except Exception:
+                pass
+            session = None
+            download_reconnect_attempt += 1
+            session = _reconnect_session(
+                profile,
+                status_path,
+                controller_log,
+                exc,
+                download_reconnect_attempt,
+            )
+    asset_identity = {
+        key: value
+        for key, value in (
+            remote_status.get("identity") or {}
+        ).items()
+    }
+    runtime_image_id = str(
+        (read_json(status_path, {}) or {}).get("remote_runtime_image_id") or ""
+    )
+    if kind == "nnunet":
+        model = _register_nnunet(
+            spec, local_model_dir, remote_status, profile
+        )
+    elif kind == "flexict":
+        models = _register_flexict(
+            spec, local_model_dir, remote_status, profile
+        )
+        model = models[0] if len(models) == 1 else None
+    elif kind == "nninteractive":
+        model, _selected = _register_nninteractive(
+            spec, local_model_dir, remote_status, profile
+        )
+    else:
+        _apply_remote_prediction_output(spec, kind, local_model_dir, remote_status)
+        model = {
+            "model_id": str(remote_status.get("model_id") or ""),
+            "output_path": str(remote_status.get("output_path") or ""),
+        }
+    _status_update(
+        status_path,
+        status="completed",
+        phase="completed",
+        progress_percent=100,
+        model=model,
+        execution_backend="remote",
+        remote_model_downloaded=True,
+        remote_model_selected=True,
+        remote_reattached=True,
+        completed_at_epoch=time.time(),
+        local_log_path=str(remote_log),
+        controller_log_path=str(controller_log),
+        remote_container_removed=False,
+        output_path=(
+            str(remote_status.get("output_path") or "")
+            if kind in {"nnunet_infer", "flexict_infer"}
+            else None
+        ),
+    )
+    owner = _remote_owner(profile)
+    job_slug = safe_identifier(str(spec["job_id"]), "job")
+    container_removed = False
+    job_removed = False
+    cleanup_warning = ""
+    try:
+        container_removed = _remove_container(
+            session,
+            container_name,
+            expected_owner=owner,
+            expected_job=job_slug,
+            stop_if_running=False,
+        )
+        job_removed = _remove_remote_job(
+            session,
+            remote_root=profile["remote_root"],
+            expected_owner=owner,
+            remote_job_dir=remote_paths["job"],
+        )
+        if not (container_removed and job_removed):
+            cleanup_warning = (
+                "Training completed, but some remote temporary files "
+                "could not be removed."
+            )
+    except Exception as cleanup_exc:
+        cleanup_warning = (
+            "Training and model registration completed, but remote cleanup "
+            "could not be confirmed: {}".format(cleanup_exc)
+        )
+        _append_log(controller_log, cleanup_warning)
+    _status_update(
+        status_path,
+        remote_container_removed=bool(container_removed),
+        remote_job_removed=bool(job_removed),
+        remote_cleanup_warning=cleanup_warning,
+        remote_dataset_cache_retained=True,
+    )
+    return 0
+
+
+def _resolve_local_model_dir(
+    spec: dict[str, Any], kind: str, remote_status: dict[str, Any]
+) -> Path:
+    if kind == "nninteractive":
+        local_request = read_json(
+            Path(spec["job_dir"]) / "request.json", {}
+        ) or {}
+        return Path(local_request["output_model_dir"]).resolve()
+    if kind in {"nnunet", "flexict"}:
+        from tools.nnunet_common import read_json as read_nnunet_json
+        from tools.nnunet_common import safe_identifier as nnunet_safe_identifier
+
+        local_request = read_nnunet_json(Path(spec["request_path"]), {}) or {}
+        workspace = Path(local_request["workspace"]).expanduser().resolve()
+        task = nnunet_safe_identifier(local_request["task_id"])
+        model_id = str(local_request.get("model_id") or "")
+        if not model_id:
+            raise RuntimeError(
+                "The local request does not record a model id for this remote "
+                "task, so the download target cannot be derived. Stop the task "
+                "and retry training."
+            )
+        return workspace / "models" / task / nnunet_safe_identifier(model_id)
+    return Path(spec["job_dir"]).resolve() / "remote_prediction_bundle"
+
+
+def _apply_remote_prediction_output(
+    spec: dict[str, Any],
+    kind: str,
+    local_model_dir: Path,
+    remote_status: dict[str, Any],
+) -> None:
+    from tools.nnunet_common import read_json as read_nnunet_json
+
+    local_request = read_nnunet_json(Path(spec["request_path"]), {}) or {}
+    downloaded = local_model_dir / "prediction.nii.gz"
+    output_path = Path(str(local_request.get("output_path") or downloaded)).resolve()
+    if not downloaded.is_file():
+        raise RuntimeError(
+            "Remote {} inference produced no prediction file.".format(
+                "nnU-Net" if kind == "nnunet_infer" else "FlexiCT"
+            )
+        )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if downloaded.resolve() != output_path.resolve():
+        temporary_output = output_path.with_name(output_path.name + ".remote-part")
+        shutil.copy2(str(downloaded), str(temporary_output))
+        os.replace(str(temporary_output), str(output_path))
+    remote_status["output_path"] = str(output_path)
 
 
 def _remove_remote_prepared_namespace(
@@ -2859,11 +3467,21 @@ def run(spec_path: Path) -> int:
             prepared,
             verify_mode=profile.get("remote_weights_verify", "strict"),
         )
+        # Refuse (strict) or record (warn) when the image's baked-in pipeline
+        # code differs from the local checkout — a stale image silently
+        # trains with old code otherwise.
+        code_identity = _check_code_drift(
+            session,
+            profile,
+            status_path,
+            runtime_image_id,
+        )
         _status_update(
             status_path,
             remote_runtime_image=profile["runtime_image"],
             remote_runtime_image_id=runtime_image_id,
-            **asset_identity
+            **asset_identity,
+            **code_identity
         )
         # Dataset cache entries are immutable and content-addressed. Job
         # directories are never age-pruned here because a long-running job's
@@ -3339,196 +3957,27 @@ def run(spec_path: Path) -> int:
             )
             return 0 if final_state in {"cancelled", "paused"} else 1
 
-        if kind == "nninteractive":
-            local_request = read_json(
-                Path(spec["job_dir"]) / "request.json", {}
-            ) or {}
-            local_model_dir = Path(local_request["output_model_dir"]).resolve()
-        elif kind == "nnunet":
-            from tools.nnunet_common import read_json as read_nnunet_json
-            from tools.nnunet_common import safe_identifier as nnunet_safe_identifier
-
-            local_request = read_nnunet_json(Path(spec["request_path"]), {}) or {}
-            local_model_dir = (
-                Path(local_request["workspace"]).expanduser().resolve()
-                / "models"
-                / nnunet_safe_identifier(local_request["task_id"])
-                / nnunet_safe_identifier(prepared["local_model_id"])
-            )
-        elif kind == "flexict":
-            from tools.nnunet_common import read_json as read_nnunet_json
-            from tools.nnunet_common import safe_identifier as nnunet_safe_identifier
-
-            local_request = read_nnunet_json(Path(spec["request_path"]), {}) or {}
-            local_model_dir = (
-                Path(local_request["workspace"]).expanduser().resolve()
-                / "models"
-                / nnunet_safe_identifier(local_request["task_id"])
-                / nnunet_safe_identifier(prepared["local_model_id"])
-            )
-        else:
-            local_model_dir = Path(spec["job_dir"]).resolve() / "remote_prediction_bundle"
-        _status_update(
+        # Download → verify → register → cleanup (shared with re-attach).
+        dataset_fingerprint = remote_status.get("dataset_fingerprint") or dataset_fingerprint
+        remote_status["dataset_fingerprint"] = dataset_fingerprint
+        return _finalize_completed_remote_job(
+            session,
+            spec,
+            profile,
             status_path,
-            status="downloading",
-            phase="downloading_model",
-            progress_percent=96,
+            remote_paths,
+            prepared,
+            remote_status,
+            asset_identity,
+            runtime_image_id,
+            container_name,
+            container_may_exist,
+            prepared_cache_namespace,
+            local_root,
+            result_archive,
+            controller_log,
+            remote_log,
         )
-        download_reconnect_attempt = 0
-        while True:
-            _raise_if_cancelled(status_path)
-            try:
-                if session is None:
-                    raise RemoteComputeError("No active SSH download session.")
-                _sync_remote_log(
-                    session,
-                    remote_paths["job"],
-                    remote_log,
-                    log_sync_state,
-                )
-                _download_artifact(
-                    session,
-                    remote_paths["job"],
-                    prepared["remote_artifact_relative"],
-                    local_model_dir,
-                    result_archive,
-                    status_path,
-                )
-                break
-            except RemoteCommandError:
-                raise
-            except (RemoteComputeError, EOFError, OSError, socket.error) as exc:
-                try:
-                    session.close()
-                except Exception:
-                    pass
-                session = None
-                download_reconnect_attempt += 1
-                session = _reconnect_session(
-                    profile,
-                    status_path,
-                    controller_log,
-                    exc,
-                    download_reconnect_attempt,
-                )
-        if kind == "nninteractive":
-            remote_status.update(asset_identity)
-            remote_status["remote_runtime_image_id"] = runtime_image_id
-            remote_status["remote_gpu_device"] = profile.get("gpu_device") or "auto"
-            remote_status["dataset_fingerprint"] = dataset_fingerprint
-            model, selected = _register_nninteractive(
-                spec, local_model_dir, remote_status, profile
-            )
-        elif kind == "nnunet":
-            remote_status.update(asset_identity)
-            remote_status["remote_runtime_image_id"] = runtime_image_id
-            remote_status["remote_gpu_device"] = profile.get("gpu_device") or "auto"
-            remote_status["dataset_fingerprint"] = dataset_fingerprint
-            model = _register_nnunet(
-                spec, local_model_dir, remote_status, profile
-            )
-            selected = True
-        elif kind == "flexict":
-            remote_status.update(asset_identity)
-            remote_status["remote_runtime_image_id"] = runtime_image_id
-            remote_status["remote_gpu_device"] = profile.get("gpu_device") or "auto"
-            remote_status["dataset_fingerprint"] = dataset_fingerprint
-            models = _register_flexict(
-                spec, local_model_dir, remote_status, profile
-            )
-            model = models[0] if len(models) == 1 else None
-            selected = True
-        else:
-            from tools.nnunet_common import read_json as read_nnunet_json
-
-            local_request = read_nnunet_json(Path(spec["request_path"]), {}) or {}
-            downloaded = local_model_dir / "prediction.nii.gz"
-            output_path = Path(str(local_request.get("output_path") or downloaded)).resolve()
-            if not downloaded.is_file():
-                raise RuntimeError(
-                    "Remote {} inference produced no prediction file.".format(
-                        "nnU-Net" if kind == "nnunet_infer" else "FlexiCT"
-                    )
-                )
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            if downloaded.resolve() != output_path.resolve():
-                temporary_output = output_path.with_name(output_path.name + ".remote-part")
-                shutil.copy2(str(downloaded), str(temporary_output))
-                os.replace(str(temporary_output), str(output_path))
-            model = {
-                "model_id": str(remote_status.get("model_id") or ""),
-                "output_path": str(output_path),
-            }
-            selected = True
-            remote_status["output_path"] = str(output_path)
-        _status_update(
-            status_path,
-            status="completed",
-            phase="completed",
-            progress_percent=100,
-            model=model,
-            execution_backend="remote",
-            remote_model_downloaded=True,
-            remote_model_selected=bool(selected),
-            completed_at_epoch=time.time(),
-            local_log_path=str(remote_log),
-            controller_log_path=str(controller_log),
-            remote_container_removed=False,
-            output_path=(
-                str(remote_status.get("output_path") or "")
-                if kind in {"nnunet_infer", "flexict_infer"}
-                else None
-            ),
-        )
-        # Training data and the downloaded archive are no longer needed on the
-        # server. The model now lives in the existing local registry.
-        container_removed = False
-        job_removed = False
-        cleanup_warning = ""
-        try:
-            container_removed = _remove_container(
-                session,
-                container_name,
-                expected_owner=owner,
-                expected_job=job_slug,
-                stop_if_running=False,
-            )
-            job_removed = _remove_remote_job(
-                session,
-                remote_root=profile["remote_root"],
-                expected_owner=owner,
-                remote_job_dir=remote_paths["job"],
-            )
-            if (
-                kind in {"nnunet", "nnunet_infer", "flexict", "flexict_infer"}
-                and not bool(profile.get("cache_training_data", True))
-            ):
-                prepared_cache_removed = _remove_remote_prepared_namespace(
-                    session, remote_paths, prepared_cache_namespace
-                )
-            if not (container_removed and job_removed):
-                cleanup_warning = (
-                    "Training completed, but some remote temporary files "
-                    "could not be removed."
-                )
-        except Exception as cleanup_exc:
-            cleanup_warning = (
-                "Training and model registration completed, but remote cleanup "
-                "could not be confirmed: {}".format(cleanup_exc)
-            )
-            _append_log(controller_log, cleanup_warning)
-        _status_update(
-            status_path,
-            remote_container_removed=bool(container_removed),
-            remote_job_removed=bool(job_removed),
-            remote_cleanup_warning=cleanup_warning,
-            remote_dataset_cache_retained=bool(
-                profile.get("cache_training_data", True)
-                and dataset_fingerprint
-            ),
-            remote_prepared_cache_removed=bool(prepared_cache_removed),
-        )
-        return 0
     except RemoteTaskAbandoned:
         warning = (
             "Local monitoring was abandoned because the remote state could not "
