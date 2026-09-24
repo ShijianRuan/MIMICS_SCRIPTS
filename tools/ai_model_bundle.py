@@ -55,6 +55,51 @@ except ImportError:  # direct tools/ import (tests, smoke runs)
     )
 
 
+def _require_checkpoint_loadable(model_dir: Path, family: str) -> None:
+    """Reject model packages whose checkpoints cannot actually load.
+
+    Byte-level completeness and checksums alone accept truncated or
+    non-torch files; a package like that imports cleanly and only blows up
+    at inference time on the annotator's machine. Loading here (CPU,
+    header-sized read via torch.load with map_location) proves the file is
+    a real serialized torch checkpoint before anything is published into
+    the workspace.
+    """
+    patterns = {
+        "nninteractive_task": ("fold_*/checkpoint_final.pth",),
+        "nnunet": ("fold_*/checkpoint_final.pth",),
+        "flexict": (
+            "fold_*/checkpoint_best.pth",
+            "fold_*/checkpoint_final.pth",
+        ),
+    }
+    names = patterns.get(family)
+    if not names:
+        return
+    checkpoints: list[Path] = []
+    for pattern in names:
+        checkpoints.extend(sorted(model_dir.glob(pattern)))
+    if not checkpoints:
+        # Missing files are already reported by the family-specific audit
+        # (audit_model_dir / manifest checks) with a clearer message.
+        return
+    try:
+        import torch
+    except ImportError:  # pragma: no cover - torch ships with the env
+        return
+    for checkpoint in checkpoints:
+        try:
+            torch.load(
+                str(checkpoint), map_location="cpu", weights_only=False
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "The packaged checkpoint {} is not a loadable torch file "
+                "({}). The bundle is corrupt or was not exported from a "
+                "trained model.".format(checkpoint.name, exc)
+            ) from exc
+
+
 def _require_nninteractive_runtime_identity(
     audit: dict[str, Any], model: dict[str, Any]
 ) -> str:
@@ -234,6 +279,7 @@ def import_nninteractive(args: argparse.Namespace) -> int:
         ).lower()
         if expected and expected != str(audit.get("checkpoint_sha256") or "").lower():
             raise RuntimeError("The imported checkpoint checksum does not match.")
+        _require_checkpoint_loadable(staging / "model", "nninteractive_task")
         destination = task_dir(workspace, task_id) / "models" / model_id
         if destination.exists():
             raise RuntimeError(
@@ -374,6 +420,7 @@ def import_nnunet(args: argparse.Namespace) -> int:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         if manifest.get("schema_version") != nnunet_common.MODEL_SCHEMA_VERSION:
             raise RuntimeError("The packaged nnU-Net model manifest is invalid.")
+        _require_checkpoint_loadable(staged_model_dir, "nnunet")
         task_slug = nnunet_common.safe_identifier(
             manifest.get("task_id") or "task", "task"
         )
@@ -517,6 +564,7 @@ def import_flexict(args: argparse.Namespace) -> int:
                             model_id
                         )
                     )
+                _require_checkpoint_loadable(staged, "flexict")
                 task_slug = safe_identifier(
                     model.get("task_id") or "task", "task"
                 )

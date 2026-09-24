@@ -24,6 +24,18 @@ import flexict_common
 import nnunet_common
 
 
+def _torch_checkpoint_bytes(payload=None) -> bytes:
+    """A real torch.save'd checkpoint, so torch.load-based import
+    validation exercises the true serialization path (Phase 3b)."""
+    import io
+
+    import torch
+
+    buffer = io.BytesIO()
+    torch.save(payload or {"epoch": 2, "state_dict": {}}, buffer)
+    return buffer.getvalue()
+
+
 def _nninteractive_model(root: Path) -> Path:
     model = root / "tasks" / "brain" / "models" / "v1"
     for name in task_common.MODEL_METADATA_FILES:
@@ -32,7 +44,7 @@ def _nninteractive_model(root: Path) -> Path:
         path.write_text("{}", encoding="utf-8")
     checkpoint = model / "fold_0" / "checkpoint_final.pth"
     checkpoint.parent.mkdir(parents=True, exist_ok=True)
-    checkpoint.write_bytes(b"portable-nninteractive")
+    checkpoint.write_bytes(_torch_checkpoint_bytes())
     (model / "finetune_manifest.json").write_text(
         json.dumps(
             {
@@ -166,7 +178,7 @@ def _nnunet_model_dir(workspace: Path, task_id: str, model_id: str) -> Path:
         (model_dir / name).write_text("{}", encoding="utf-8")
     fold = model_dir / "fold_0"
     fold.mkdir()
-    (fold / "checkpoint_final.pth").write_bytes(b"portable-nnunet")
+    (fold / "checkpoint_final.pth").write_bytes(_torch_checkpoint_bytes())
     manifest = {
         "schema_version": nnunet_common.MODEL_SCHEMA_VERSION,
         "model_id": model_id,
@@ -196,6 +208,63 @@ def _nnunet_model_dir(workspace: Path, task_id: str, model_id: str) -> Path:
 
 
 class NnunetBundleTests(unittest.TestCase):
+    def test_nninteractive_import_rejects_corrupt_checkpoint(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "source"
+            model = _nninteractive_model(source)
+            (model / "fold_0" / "checkpoint_final.pth").write_bytes(
+                b"\x80truncated garbage"
+            )
+            task_common.save_registry(
+                source,
+                {
+                    "tasks": [
+                        {
+                            "task_id": "brain",
+                            "task_name": "Brain",
+                            "models": [
+                                {
+                                    "model_id": "v1",
+                                    "model_dir": str(model),
+                                    "checkpoint_sha256": task_common.sha256_file(
+                                        model / "fold_0" / "checkpoint_final.pth"
+                                    ),
+                                }
+                            ],
+                            "recommended_model_id": "v1",
+                        }
+                    ]
+                },
+            )
+            bundle = root / "brain.zip"
+            ai_model_bundle.main(
+                [
+                    "export-nninteractive",
+                    "--workspace",
+                    str(source),
+                    "--task-id",
+                    "brain",
+                    "--output",
+                    str(bundle),
+                ]
+            )
+            target = root / "target"
+            with self.assertRaises(RuntimeError) as ctx:
+                ai_model_bundle.main(
+                    [
+                        "import-nninteractive",
+                        "--workspace",
+                        str(target),
+                        "--bundle",
+                        str(bundle),
+                        "--set-current",
+                    ]
+                )
+            self.assertIn("not a loadable torch file", str(ctx.exception))
+            # Nothing was published into the workspace.
+            self.assertFalse((target / "tasks" / "brain" / "models" / "v1").exists())
+
     def test_nnunet_bundle_roundtrip(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -272,6 +341,58 @@ class NnunetBundleTests(unittest.TestCase):
                     ]
                 )
 
+    def test_nnunet_import_rejects_corrupt_checkpoint(self):
+        """A truncated checkpoint must fail at import, not at inference.
+
+        Byte-presence and checksums alone accept garbage files; the Phase
+        3b torch.load validation must reject them with a clear message.
+        """
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "source_workspace"
+            _nnunet_model_dir(source, "liver_task", "nnunet_v1")
+            # Corrupt the checkpoint in place, then export the bundle.
+            checkpoint = (
+                nnunet_common.workspace_paths(source)["models"]
+                / "liver_task"
+                / "nnunet_v1"
+                / "fold_0"
+                / "checkpoint_final.pth"
+            )
+            checkpoint.write_bytes(checkpoint.read_bytes()[:20])
+            bundle = root / "corrupt.zip"
+            ai_model_bundle.main(
+                [
+                    "export-nnunet",
+                    "--workspace",
+                    str(source),
+                    "--model-id",
+                    "nnunet_v1",
+                    "--output",
+                    str(bundle),
+                ]
+            )
+            target = root / "target"
+            with self.assertRaises(RuntimeError) as ctx:
+                ai_model_bundle.main(
+                    [
+                        "import-nnunet",
+                        "--workspace",
+                        str(target),
+                        "--bundle",
+                        str(bundle),
+                    ]
+                )
+            self.assertIn("not a loadable torch file", str(ctx.exception))
+            # Nothing was published into the workspace.
+            self.assertFalse(
+                (
+                    nnunet_common.workspace_paths(target)["models"]
+                    / "liver_task"
+                    / "nnunet_v1"
+                ).exists()
+            )
+
 
 def _flexict_model_dir(
     workspace: Path,
@@ -292,7 +413,9 @@ def _flexict_model_dir(
         (model_dir / name).write_text("{}", encoding="utf-8")
     for name in ("checkpoint_best.pth", "checkpoint_final.pth"):
         (fold / name).write_bytes(
-            "portable-flexict-{}".format(configuration).encode("utf-8")
+            _torch_checkpoint_bytes(
+                {"config": "portable-flexict-{}".format(configuration)}
+            )
         )
     manifest = {
         "schema_version": flexict_common.MODEL_SCHEMA_VERSION,
@@ -382,6 +505,44 @@ class FlexictBundleTests(unittest.TestCase):
             # No absolute path of the exporting machine leaks.
             for row in models.values():
                 self.assertNotIn(str(source), str(row.get("model_dir")))
+
+    def test_flexict_import_rejects_corrupt_checkpoint(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "source_workspace"
+            _flexict_model_dir(source, "flexict_bad", "2d", "")
+            fold = (
+                flexict_common.workspace_paths(source)["root"]
+                / "models"
+                / "kidney"
+                / "flexict_bad"
+                / "fold_0"
+            )
+            (fold / "checkpoint_best.pth").write_bytes(b"\x80truncated garbage")
+            bundle = root / "bad.zip"
+            ai_model_bundle.main(
+                [
+                    "export-flexict",
+                    "--workspace",
+                    str(source),
+                    "--model-id",
+                    "flexict_bad",
+                    "--output",
+                    str(bundle),
+                ]
+            )
+            target = root / "target"
+            with self.assertRaises(RuntimeError) as ctx:
+                ai_model_bundle.main(
+                    [
+                        "import-flexict",
+                        "--workspace",
+                        str(target),
+                        "--bundle",
+                        str(bundle),
+                    ]
+                )
+            self.assertIn("not a loadable torch file", str(ctx.exception))
 
     def test_flexict_single_model_bundle_roundtrip(self):
         with tempfile.TemporaryDirectory() as raw:
