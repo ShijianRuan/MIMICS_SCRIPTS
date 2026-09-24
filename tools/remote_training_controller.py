@@ -1803,14 +1803,23 @@ def _remote_status_relative(kind: str) -> str:
     return "pipeline_job/status.json"
 
 
-def _remote_artifact_relative(kind: str, spec: dict[str, Any]) -> str:
+def _remote_artifact_relative(
+    kind: str,
+    spec: dict[str, Any],
+    remote_status: dict[str, Any] | None = None,
+) -> str:
     """Recover the artifact path when the original prepared bundle is gone.
 
     The re-attach path no longer has the local bundle that _prepare_*
     built, so derive the artifact location from the job kind and the
-    deterministic naming the prepares use (mirrors _prepare_nnunet:993,
-    _prepare_flexict, and the infer prepares).
+    deterministic naming the prepares use (mirrors _prepare_nnunet,
+    _prepare_flexict, and the infer prepares). Training model ids are
+    taken from the remote pipeline status first (the remote registration
+    writes the trained model manifest there) and fall back to the local
+    request.
     """
+    if kind == "nninteractive":
+        return "model_output"
     request = {}
     try:
         from tools.nnunet_common import read_json as read_nnunet_json
@@ -1823,10 +1832,25 @@ def _remote_artifact_relative(kind: str, spec: dict[str, Any]) -> str:
         request = {}
     task_slug = nnunet_safe_identifier(request.get("task_id") or "task", "task")
     if kind in {"nnunet", "flexict"}:
-        model_id = str(request.get("model_id") or "")
-        if not model_id:
+        status = dict(remote_status or {})
+        model = (
+            status.get("model")
+            if isinstance(status.get("model"), dict)
+            else None
+        )
+        model_ids = [
+            str(source)
+            for source in (
+                (model or {}).get("model_id"),
+                request.get("model_id"),
+            )
+            if str(source or "").strip()
+        ]
+        if not model_ids:
             return ""
-        return "output/models/{}/{}".format(task_slug, model_id)
+        # FlexiCT trains a 2D+3D pair into one artifact folder; use the
+        # first model id, they all share the artifact directory.
+        return "output/models/{}/{}".format(task_slug, model_ids[0])
     return "output/prediction_bundle"
 
 
@@ -1852,7 +1876,9 @@ def _reattach_finalize_from_status(
     """
     kind = str(spec.get("kind") or "")
     prepared = {
-        "remote_artifact_relative": _remote_artifact_relative(kind, spec),
+        "remote_artifact_relative": _remote_artifact_relative(
+            kind, spec, remote_status
+        ),
     }
     if not prepared["remote_artifact_relative"]:
         raise RuntimeError(
@@ -2010,12 +2036,21 @@ def _resolve_local_model_dir(
         local_request = read_nnunet_json(Path(spec["request_path"]), {}) or {}
         workspace = Path(local_request["workspace"]).expanduser().resolve()
         task = nnunet_safe_identifier(local_request["task_id"])
-        model_id = str(local_request.get("model_id") or "")
+        model = (
+            remote_status.get("model")
+            if isinstance(remote_status.get("model"), dict)
+            else None
+        )
+        model_id = str(
+            (model or {}).get("model_id")
+            or local_request.get("model_id")
+            or ""
+        )
         if not model_id:
             raise RuntimeError(
-                "The local request does not record a model id for this remote "
-                "task, so the download target cannot be derived. Stop the task "
-                "and retry training."
+                "Neither the remote pipeline status nor the local request "
+                "records a model id for this remote task, so the download "
+                "target cannot be derived. Stop the task and retry training."
             )
         return workspace / "models" / task / nnunet_safe_identifier(model_id)
     return Path(spec["job_dir"]).resolve() / "remote_prediction_bundle"
@@ -3294,6 +3329,210 @@ def _sync_remote_nnunet_curve(
     return True
 
 
+def _monitor_remote(
+    session: SSHSession | None,
+    spec: dict[str, Any],
+    profile: dict[str, Any],
+    status_path: Path,
+    remote_paths: dict[str, str],
+    container_name: str,
+    owner: str,
+    controller_log: Path,
+    remote_log: Path,
+) -> tuple[SSHSession | None, dict[str, Any]]:
+    """Poll the remote job until it reaches a terminal pipeline status.
+
+    Shared by the fresh-run path and the re-attach path. Returns the (live
+    or reconnected) session and the last remote status payload so the caller
+    can download and register the artifact (or report the failure).
+    """
+    kind = str(spec.get("kind") or "")
+    job_slug = safe_identifier(str(spec["job_id"]), "job")
+    remote_status_path = str(
+        PurePosixPath(remote_paths["job"]) / _remote_status_relative(kind)
+    )
+    status = read_json(status_path, {}) or {}
+    remote_control_path = str(status.get("remote_control_path") or "")
+    remote_control_kind = str(status.get("remote_control_kind") or "")
+    if not remote_control_path:
+        remote_control_path = str(
+            PurePosixPath(remote_paths["job"]) / "pipeline_job/control.json"
+        )
+        remote_control_kind = "json"
+    missing_status_since = time.time()
+    reconnect_attempt = 0
+    log_sync_state = {
+        "offset": 0,
+        "remote_relative": _remote_log_relative(kind),
+        "last_curve_sync_epoch": 0.0,
+    }
+    remote_status: dict[str, Any] = {}
+    while True:
+        try:
+            _raise_if_abandoned(status_path)
+            if session is None:
+                raise RemoteComputeError("No active SSH monitoring session.")
+            try:
+                _sync_remote_log(
+                    session,
+                    remote_paths["job"],
+                    remote_log,
+                    log_sync_state,
+                )
+            except IOError:
+                pass
+            # A remote read can outlive the UI action that requested a
+            # local abandon. Recheck before any active state is written.
+            _raise_if_abandoned(status_path)
+            if _cancel_requested(status_path):
+                _stop_remote(
+                    session,
+                    container_name,
+                    status_path,
+                    final="cancelled",
+                    remote_control_path=remote_control_path,
+                    remote_control_kind=remote_control_kind,
+                    remote_job_dir=remote_paths["job"],
+                    remote_root=profile["remote_root"],
+                    expected_owner=owner,
+                    expected_job=job_slug,
+                )
+                raise InterruptedError("cancel")
+            if _pause_requested(status_path) and kind == "nninteractive":
+                if remote_control_path:
+                    temporary = status_path.parent / "pause-control.json"
+                    write_json_atomic(
+                        temporary,
+                        {"action": "pause", "requested_at_epoch": time.time()},
+                    )
+                    session.upload(temporary, remote_control_path)
+                _status_update(
+                    status_path,
+                    status="pausing",
+                    phase="pausing_remote_training",
+                )
+            candidate = session.read_remote_json(remote_status_path, {}) or {}
+            if candidate:
+                missing_status_since = time.time()
+                remote_status = candidate
+                _merge_remote_status(
+                    status_path,
+                    candidate,
+                    profile,
+                    container_name,
+                    remote_paths["job"],
+                )
+                if kind in {"nnunet", "flexict"} and (
+                    time.time()
+                    - float(log_sync_state.get("last_curve_sync_epoch") or 0)
+                    >= 5.0
+                ):
+                    log_sync_state["last_curve_sync_epoch"] = time.time()
+                    try:
+                        local_curve = status_path.parent / "remote_progress.png"
+                        if _sync_remote_nnunet_curve(
+                            session,
+                            remote_paths["job"],
+                            candidate,
+                            local_curve,
+                            log_sync_state,
+                        ) or local_curve.is_file():
+                            _status_update(
+                                status_path,
+                                training_curve_path=str(local_curve),
+                            )
+                    except (IOError, OSError, RemoteComputeError):
+                        pass
+                state = str(candidate.get("status") or "").lower()
+                if state in TERMINAL:
+                    break
+            else:
+                worker = session.read_remote_json(
+                    str(
+                        PurePosixPath(remote_paths["job"])
+                        / "worker_status.json"
+                    ),
+                    {},
+                ) or {}
+                if str(worker.get("status") or "") == "waiting_for_remote_gpu":
+                    missing_status_since = time.time()
+                    _status_update(
+                        status_path,
+                        status="waiting_for_remote_gpu",
+                        phase="waiting_for_remote_gpu",
+                        progress_percent=35,
+                        remote_worker_pid=worker.get("worker_pid"),
+                    )
+            container_state, container_code = _container_state(
+                session, container_name
+            )
+            if container_state in {"exited", "dead", "missing"}:
+                worker = session.read_remote_json(
+                    str(
+                        PurePosixPath(remote_paths["job"])
+                        / "worker_status.json"
+                    ),
+                    {},
+                ) or {}
+                if not remote_status:
+                    remote_status = worker
+                if (
+                    str(remote_status.get("status") or "").lower()
+                    not in TERMINAL
+                ):
+                    raise RuntimeError(
+                        "Remote training container exited with code {} before "
+                        "writing a terminal pipeline status.".format(
+                            container_code
+                        )
+                    )
+                break
+            if time.time() - missing_status_since > 300:
+                raise RuntimeError(
+                    "Remote training started but did not create its status "
+                    "file within five minutes."
+                )
+            reconnect_attempt = 0
+        except RemoteCommandError as exc:
+            _append_log(
+                controller_log,
+                "Remote Docker control is temporarily unavailable: {}".format(
+                    exc
+                ),
+            )
+            _status_update(
+                status_path,
+                status="remote_control_unavailable",
+                phase="remote_control_unavailable",
+                remote_state_unknown=True,
+                remote_connection_error=str(exc),
+            )
+            deadline = time.time() + 10.0
+            while time.time() < deadline:
+                _raise_if_cancelled(status_path)
+                time.sleep(
+                    min(0.5, max(0.0, deadline - time.time()))
+                )
+            continue
+        except (RemoteComputeError, EOFError, OSError, socket.error) as exc:
+            try:
+                session.close()
+            except Exception:
+                pass
+            session = None
+            reconnect_attempt += 1
+            session = _reconnect_session(
+                profile,
+                status_path,
+                controller_log,
+                exc,
+                reconnect_attempt,
+            )
+            continue
+        time.sleep(2.0)
+    return session, remote_status
+
+
 def run(spec_path: Path) -> int:
     spec = read_json(spec_path, {}) or {}
     kind = str(spec.get("kind") or "")
@@ -3745,180 +3984,17 @@ def run(spec_path: Path) -> int:
             remote_control_path=remote_control_path,
             remote_control_kind=remote_control_kind,
         )
-        missing_status_since = time.time()
-        reconnect_attempt = 0
-        log_sync_state = {
-            "offset": 0,
-            "remote_relative": (
-                "pipeline_job/job.log"
-                if kind in {"nnunet", "nnunet_infer", "flexict", "flexict_infer"}
-                else "remote_worker.log"
-            ),
-            "last_curve_sync_epoch": 0.0,
-        }
-        while True:
-            try:
-                _raise_if_abandoned(status_path)
-                if session is None:
-                    raise RemoteComputeError("No active SSH monitoring session.")
-                try:
-                    _sync_remote_log(
-                        session,
-                        remote_paths["job"],
-                        remote_log,
-                        log_sync_state,
-                    )
-                except IOError:
-                    pass
-                # A remote read can outlive the UI action that requested a
-                # local abandon. Recheck before any active state is written.
-                _raise_if_abandoned(status_path)
-                if _cancel_requested(status_path):
-                    _stop_remote(
-                        session,
-                        container_name,
-                        status_path,
-                        final="cancelled",
-                        remote_control_path=remote_control_path,
-                        remote_control_kind=remote_control_kind,
-                        remote_job_dir=remote_paths["job"],
-                        remote_root=profile["remote_root"],
-                        expected_owner=owner,
-                        expected_job=job_slug,
-                    )
-                    return 130
-                if _pause_requested(status_path) and kind == "nninteractive":
-                    if remote_control_path:
-                        temporary = local_root / "pause-control.json"
-                        write_json_atomic(
-                            temporary,
-                            {"action": "pause", "requested_at_epoch": time.time()},
-                        )
-                        session.upload(temporary, remote_control_path)
-                    _status_update(
-                        status_path,
-                        status="pausing",
-                        phase="pausing_remote_training",
-                    )
-                candidate = session.read_remote_json(remote_status_path, {}) or {}
-                if candidate:
-                    missing_status_since = time.time()
-                    remote_status = candidate
-                    merged = _merge_remote_status(
-                        status_path,
-                        candidate,
-                        profile,
-                        container_name,
-                        remote_paths["job"],
-                    )
-                    if kind in {"nnunet", "flexict"} and (
-                        time.time()
-                        - float(log_sync_state.get("last_curve_sync_epoch") or 0)
-                        >= 5.0
-                    ):
-                        log_sync_state["last_curve_sync_epoch"] = time.time()
-                        try:
-                            local_curve = status_path.parent / "remote_progress.png"
-                            if _sync_remote_nnunet_curve(
-                                session,
-                                remote_paths["job"],
-                                candidate,
-                                local_curve,
-                                log_sync_state,
-                            ) or local_curve.is_file():
-                                _status_update(
-                                    status_path,
-                                    training_curve_path=str(local_curve),
-                                )
-                        except (IOError, OSError, RemoteComputeError):
-                            pass
-                    state = str(candidate.get("status") or "").lower()
-                    if state in TERMINAL:
-                        break
-                else:
-                    worker = session.read_remote_json(
-                        str(
-                            PurePosixPath(remote_paths["job"])
-                            / "worker_status.json"
-                        ),
-                        {},
-                    ) or {}
-                    if str(worker.get("status") or "") == "waiting_for_remote_gpu":
-                        missing_status_since = time.time()
-                        _status_update(
-                            status_path,
-                            status="waiting_for_remote_gpu",
-                            phase="waiting_for_remote_gpu",
-                            progress_percent=35,
-                            remote_worker_pid=worker.get("worker_pid"),
-                        )
-                container_state, container_code = _container_state(
-                    session, container_name
-                )
-                if container_state in {"exited", "dead", "missing"}:
-                    worker = session.read_remote_json(
-                        str(
-                            PurePosixPath(remote_paths["job"])
-                            / "worker_status.json"
-                        ),
-                        {},
-                    ) or {}
-                    if not remote_status:
-                        remote_status = worker
-                    if (
-                        str(remote_status.get("status") or "").lower()
-                        not in TERMINAL
-                    ):
-                        raise RuntimeError(
-                            "Remote training container exited with code {} before "
-                            "writing a terminal pipeline status.".format(
-                                container_code
-                            )
-                        )
-                    break
-                if time.time() - missing_status_since > 300:
-                    raise RuntimeError(
-                        "Remote training started but did not create its status "
-                        "file within five minutes."
-                    )
-                reconnect_attempt = 0
-            except RemoteCommandError as exc:
-                _append_log(
-                    controller_log,
-                    "Remote Docker control is temporarily unavailable: {}".format(
-                        exc
-                    ),
-                )
-                _status_update(
-                    status_path,
-                    status="remote_control_unavailable",
-                    phase="remote_control_unavailable",
-                    remote_state_unknown=True,
-                    remote_connection_error=str(exc),
-                )
-                deadline = time.time() + 10.0
-                while time.time() < deadline:
-                    _raise_if_cancelled(status_path)
-                    time.sleep(
-                        min(0.5, max(0.0, deadline - time.time()))
-                    )
-                continue
-            except (RemoteComputeError, EOFError, OSError, socket.error) as exc:
-                try:
-                    session.close()
-                except Exception:
-                    pass
-                session = None
-                reconnect_attempt += 1
-                session = _reconnect_session(
-                    profile,
-                    status_path,
-                    controller_log,
-                    exc,
-                    reconnect_attempt,
-                )
-                continue
-            time.sleep(2.0)
+        session, remote_status = _monitor_remote(
+            session,
+            spec,
+            profile,
+            status_path,
+            remote_paths,
+            container_name,
+            owner,
+            controller_log,
+            remote_log,
+        )
 
         final_state = str(remote_status.get("status") or "").lower()
         if final_state != "completed":
@@ -4228,6 +4304,322 @@ def run(spec_path: Path) -> int:
                 pass
 
 
+def reattach(status_path: Path) -> int:
+    """Re-attach local monitoring to an orphaned remote container.
+
+    After the local controller dies (crash, reboot, forced logout) the
+    remote container keeps running, but until now the only local action
+    was Stop. This entry point validates ownership of the still-existing
+    remote job, then either resumes monitoring or — when training already
+    finished remotely — downloads and registers the artifact.
+    """
+    path = Path(status_path).expanduser().resolve()
+    status = read_json(path, {}) or {}
+    if str(status.get("execution_backend") or "") != "remote":
+        raise RuntimeError("Only a remote task can be re-attached.")
+    state = str(status.get("status") or "").lower()
+    if state in TERMINAL:
+        raise RuntimeError(
+            "This task already finished ({}); nothing to re-attach.".format(
+                state
+            )
+        )
+    job_id = str(status.get("job_id") or "")
+    remote_job_dir = str(status.get("remote_job_dir") or "")
+    remote_profile_id = str(status.get("remote_profile_id") or "")
+    if not job_id or not remote_job_dir or not remote_profile_id:
+        raise RuntimeError(
+            "This task does not record enough remote state to re-attach. "
+            "Use Stop to clean it up and retry training."
+        )
+    # The launch spec (kind, request_path, job_dir) is preserved next to the
+    # status file by every remote launcher; fall back to the status fields
+    # if it was removed.
+    spec: dict[str, Any] = {}
+    for name in ("remote_spec.json", "remote_launch.json"):
+        candidate = path.parent / name
+        if candidate.is_file():
+            spec = read_json(candidate, {}) or {}
+            break
+    kind = str(spec.get("kind") or status.get("kind") or "")
+    if kind not in {"nninteractive", "nnunet", "nnunet_infer", "flexict", "flexict_infer"}:
+        raise RuntimeError(
+            "The remote job kind '{}' is not recognized; cannot re-attach."
+            .format(kind or "<missing>")
+        )
+    spec.setdefault("kind", kind)
+    spec.setdefault("job_id", job_id)
+    spec.setdefault("job_dir", str(status.get("job_dir") or path.parent))
+    spec.setdefault("status_path", str(path))
+    request_path = str(status.get("request_path") or spec.get("request_path") or "")
+    if request_path:
+        spec.setdefault("request_path", request_path)
+    profile = get_profile(remote_profile_id)
+    owner = _remote_owner(profile)
+    job_slug = safe_identifier(job_id, "job")
+    container_name = _container_name(profile, job_id)
+    recorded_container = str(status.get("remote_container_name") or "")
+    if recorded_container and recorded_container != container_name:
+        raise RuntimeError(
+            "Refusing to re-attach: the recorded remote container does not "
+            "match this job."
+        )
+    _validate_remote_job_path(
+        profile["remote_root"],
+        owner,
+        remote_job_dir,
+    )
+    remote_paths = {
+        "job": remote_job_dir,
+        "jobs": str(PurePosixPath(remote_job_dir).parent),
+        "archive": str(
+            PurePosixPath(remote_job_dir).with_name(
+                PurePosixPath(remote_job_dir).name + ".tar"
+            )
+        ),
+        "models": str(PurePosixPath(profile["remote_root"]) / "models"),
+        "locks": str(PurePosixPath(profile["remote_root"]) / "locks"),
+        "dataset_cache": "",
+        "prepared_cache": "",
+    }
+    local_root = path.parent / (job_id + "_remote")
+    local_root.mkdir(parents=True, exist_ok=True)
+    result_archive = local_root / "result.tar"
+    if kind == "nninteractive":
+        remote_log = path.parent / "job.log"
+        controller_log = remote_log
+    else:
+        remote_log = local_root / "remote_training.log"
+        controller_log = path.with_name(
+            path.name + ".remote_controller.log"
+        )
+    abandon_path = _abandon_path(path)
+    try:
+        abandon_path.unlink()
+    except FileNotFoundError:
+        pass
+    _append_log(
+        controller_log,
+        "Re-attaching to the remote job at {}.".format(remote_job_dir),
+    )
+    _status_update(
+        path,
+        status="reattaching",
+        phase="reattaching_remote",
+        message=(
+            "Re-attaching to the remote container and resuming monitoring."
+        ),
+        controller_pid=os.getpid(),
+        local_abandon_requested=False,
+        remote_state_unknown=False,
+        error="",
+        abandon_path=str(abandon_path),
+        local_log_path=str(remote_log),
+        controller_log_path=str(controller_log),
+        progress_percent=max(
+            30, int(status.get("progress_percent") or 30)
+        ),
+    )
+    session: SSHSession | None = None
+    try:
+        session = SSHSession(profile)
+        container_owned = _assert_container_owned(
+            session,
+            container_name,
+            expected_owner=owner,
+            expected_job=job_slug,
+        )
+        remote_status = session.read_remote_json(
+            str(
+                PurePosixPath(remote_job_dir)
+                / _remote_status_relative(kind)
+            ),
+            {},
+        ) or {}
+        remote_state = str(remote_status.get("status") or "").lower()
+        if remote_state in TERMINAL and remote_state != "paused":
+            if remote_state == "completed":
+                # The controller died after remote completion but before the
+                # download; finish that tail now.
+                return _reattach_finalize_from_status(
+                    session,
+                    spec,
+                    profile,
+                    path,
+                    remote_paths,
+                    remote_status,
+                    container_name,
+                    local_root,
+                    result_archive,
+                    controller_log,
+                    remote_log,
+                )
+            # Remote failed/cancelled: mirror and clean up like run() does.
+            _merge_remote_status(
+                path,
+                remote_status,
+                profile,
+                container_name,
+                remote_job_dir,
+            )
+            try:
+                _sync_remote_log(
+                    session,
+                    remote_job_dir,
+                    remote_log,
+                    {"offset": 0, "remote_relative": _remote_log_relative(kind)},
+                )
+            except Exception as exc:
+                _append_log(
+                    controller_log,
+                    "Could not synchronize the remote diagnostic log: {}".format(
+                        exc
+                    ),
+                )
+            removed = _remove_container(
+                session,
+                container_name,
+                expected_owner=owner,
+                expected_job=job_slug,
+            )
+            _status_update(
+                path,
+                remote_container_removed=bool(removed),
+                remote_job_removed=False,
+                remote_diagnostics_retained=True,
+                status=(
+                    "cancelled"
+                    if remote_state == "cancelled"
+                    else "failed"
+                ),
+                phase="remote_{}_reattached".format(remote_state),
+                completed_at_epoch=time.time(),
+            )
+            return 0 if remote_state == "cancelled" else 1
+        if not container_owned:
+            # Container gone and no terminal pipeline status: nothing to
+            # monitor and nothing to download.
+            guidance = (
+                "The remote container for this task no longer exists and no "
+                "result was recorded. Use Stop to finish cleanup locally, or "
+                "contact the server administrator if the container name "
+                "below looks wrong ({}).".format(container_name)
+            )
+            _status_update(
+                path,
+                status="orphaned_remote",
+                phase="remote_container_missing",
+                message=guidance,
+                error=guidance,
+                remote_state_unknown=True,
+            )
+            _append_log(controller_log, guidance)
+            return 2
+        # Container alive (or status non-terminal): resume monitoring.
+        session, remote_status = _monitor_remote(
+            session,
+            spec,
+            profile,
+            path,
+            remote_paths,
+            container_name,
+            owner,
+            controller_log,
+            remote_log,
+        )
+        final_state = str(remote_status.get("status") or "").lower()
+        if final_state != "completed":
+            try:
+                _sync_remote_log(
+                    session,
+                    remote_job_dir,
+                    remote_log,
+                    {"offset": 0, "remote_relative": _remote_log_relative(kind)},
+                )
+            except Exception:
+                pass
+            _merge_remote_status(
+                path,
+                remote_status,
+                profile,
+                container_name,
+                remote_job_dir,
+            )
+            removed = _remove_container(
+                session,
+                container_name,
+                expected_owner=owner,
+                expected_job=job_slug,
+            )
+            _status_update(
+                path,
+                remote_container_removed=bool(removed),
+                remote_job_removed=False,
+                remote_diagnostics_retained=True,
+            )
+            return 0 if final_state in {"cancelled", "paused"} else 1
+        remote_status["dataset_fingerprint"] = str(
+            remote_status.get("dataset_fingerprint")
+            or status.get("dataset_fingerprint")
+            or ""
+        )
+        return _reattach_finalize_from_status(
+            session,
+            spec,
+            profile,
+            path,
+            remote_paths,
+            remote_status,
+            container_name,
+            local_root,
+            result_archive,
+            controller_log,
+            remote_log,
+        )
+    except RemoteTaskAbandoned:
+        warning = (
+            "Local monitoring was abandoned because the remote state could not "
+            "be confirmed. The remote container may still be running and may "
+            "still use GPU or disk resources. Ask the server administrator to "
+            "inspect the recorded container name before deleting this task."
+        )
+        _append_log(controller_log, warning)
+        _status_update(
+            path,
+            status="abandoned",
+            phase="abandoned_locally",
+            local_abandon_requested=True,
+            remote_state_unknown=True,
+            remote_stop_confirmed=False,
+            remote_abandon_warning=warning,
+            message=warning,
+            error=warning,
+            completed_at_epoch=time.time(),
+        )
+        return 125
+    except Exception as exc:
+        _append_log(
+            controller_log,
+            "{}: {}\n{}".format(type(exc).__name__, exc, traceback.format_exc()),
+        )
+        _status_update(
+            path,
+            status="orphaned_remote",
+            phase="reattach_failed",
+            message=(
+                "Re-attaching to the remote container failed: {}. The remote "
+                "container may still be running; use Stop to clean up, or "
+                "retry re-attach after the connection returns.".format(exc)
+            ),
+            error="{}: {}".format(type(exc).__name__, exc),
+            remote_state_unknown=True,
+        )
+        return 1
+    finally:
+        if session is not None:
+            session.close()
+
+
 def cancel(status_path: Path) -> int:
     status = read_json(status_path, {}) or {}
     profile_id = str(status.get("remote_profile_id") or "")
@@ -4337,6 +4729,8 @@ def main() -> int:
     run_parser.add_argument("--spec", required=True)
     cancel_parser = sub.add_parser("cancel")
     cancel_parser.add_argument("--status", required=True)
+    reattach_parser = sub.add_parser("reattach")
+    reattach_parser.add_argument("--status", required=True)
     abandon_parser = sub.add_parser("abandon")
     abandon_parser.add_argument("--status", required=True)
     args = parser.parse_args()
@@ -4344,6 +4738,8 @@ def main() -> int:
         return abandon(Path(args.status).resolve())
     if args.command == "cancel":
         return cancel(Path(args.status).resolve())
+    if args.command == "reattach":
+        return reattach(Path(args.status).resolve())
     return run(Path(args.spec).resolve())
 
 

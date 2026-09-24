@@ -343,6 +343,47 @@ def abandon_job(status_path: str | Path) -> bool:
     return abandon(path) == 0
 
 
+def reattach_job(status_path: str | Path) -> bool:
+    """Re-launch the remote controller for an orphaned remote task."""
+    path = Path(status_path).expanduser().resolve()
+    status = read_json(path, {}) or {}
+    if str(status.get("execution_backend") or "") != "remote":
+        return False
+    if not str(status.get("remote_job_dir") or "").strip():
+        return False
+    state = str(status.get("status") or "").lower()
+    if state in TERMINAL_STATES:
+        return False
+    try:
+        process = _launch(
+            [
+                sys.executable,
+                str(ROOT / "tools" / "remote_training_controller.py"),
+                "reattach",
+                "--status",
+                str(path),
+            ]
+        )
+    except Exception as exc:
+        update_status(
+            path,
+            status="orphaned_remote",
+            phase="reattach_failed",
+            error="Could not start the re-attach controller: {}".format(exc),
+        )
+        raise
+    update_status(
+        path,
+        status="reattaching",
+        phase="reattaching_remote",
+        message="Re-attaching to the remote container in an external process.",
+        launcher_pid=process.pid,
+        controller_pid=process.pid,
+        remote_state_unknown=False,
+    )
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -350,9 +391,14 @@ def main() -> int:
     stop.add_argument("--status", required=True)
     abandon_parser = sub.add_parser("abandon")
     abandon_parser.add_argument("--status", required=True)
+    reattach_parser = sub.add_parser("reattach")
+    reattach_parser.add_argument("--status", required=True)
     args = parser.parse_args()
     if args.command == "abandon":
         abandon_job(args.status)
+        return 0
+    if args.command == "reattach":
+        reattach_job(args.status)
         return 0
     if args.command == "stop":
         stop_job(args.status)

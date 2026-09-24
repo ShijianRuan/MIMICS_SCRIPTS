@@ -419,8 +419,15 @@ def _register_flexict_model(request: dict[str, Any],
         if not (fold_dir / required).is_file():
             raise RuntimeError(
                 "FlexiCT training completed without {}: {}".format(required, fold_dir))
-    model_id = "flexict_{}_{}".format(
-        time.strftime("%Y%m%dT%H%M%S"), uuid.uuid4().hex[:8])
+    # Remote training pre-assigns the id so the controller can compute the
+    # deterministic artifact path (output/models/<task>/<model_id>) before
+    # training starts; re-attach depends on this. Local runs keep the
+    # generated form.
+    model_id = str(
+        request.get("model_id")
+        or "flexict_{}_{}".format(
+            time.strftime("%Y%m%dT%H%M%S"), uuid.uuid4().hex[:8])
+    )
     workspace = Path(request["workspace"]).expanduser().resolve()
     destination = workspace / "models" / safe_identifier(request["task_id"]) / model_id
     staging = destination.with_name(destination.name + ".publishing_" + uuid.uuid4().hex)

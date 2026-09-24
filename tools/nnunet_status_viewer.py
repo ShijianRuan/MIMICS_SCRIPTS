@@ -18,7 +18,13 @@ for candidate in (ROOT, ROOT / "tools"):
         sys.path.insert(0, value)
 
 from nnunet_common import load_models, model_usability, read_json  # noqa: E402
-from nnunet_jobs import abandon_job, create_job, list_jobs, stop_job  # noqa: E402
+from nnunet_jobs import (  # noqa: E402
+    abandon_job,
+    create_job,
+    list_jobs,
+    reattach_job,
+    stop_job,
+)
 from ui_theme import configure_application, stylesheet  # noqa: E402
 from viewer_refresh import BackgroundRefresh  # noqa: E402
 
@@ -138,6 +144,13 @@ class StatusWindow:
         self.stop_button = QtWidgets.QPushButton("Stop")
         self.stop_button.clicked.connect(self._stop)
         actions.addWidget(self.stop_button)
+        self.reattach_button = QtWidgets.QPushButton("Re-attach")
+        self.reattach_button.clicked.connect(self._reattach)
+        self.reattach_button.setToolTip(
+            "Resume monitoring a remote task whose local controller stopped "
+            "(e.g. after a workstation restart)."
+        )
+        actions.addWidget(self.reattach_button)
         self.retry_button = QtWidgets.QPushButton("Retry Same Settings")
         self.retry_button.clicked.connect(self._retry)
         actions.addWidget(self.retry_button)
@@ -288,6 +301,13 @@ class StatusWindow:
                 "completed", "failed", "cancelled", "abandoned", "unknown"
             }
         )
+        self.reattach_button.setEnabled(
+            str(status.get("execution_backend") or "") == "remote"
+            and bool(str(status.get("remote_job_dir") or "").strip())
+            and state not in {
+                "completed", "failed", "cancelled", "abandoned", "unknown"
+            }
+        )
         # A successful fold is already a registered model. Re-running the same
         # request would target the same nnU-Net results directory and could
         # replace its checkpoints, so one-click retry is intentionally limited
@@ -365,6 +385,19 @@ class StatusWindow:
             else:
                 stop_job(status["status_path"])
             self.refresh()
+
+    def _reattach(self):
+        index = self.jobs.currentRow()
+        if not 0 <= index < len(self._job_rows):
+            return
+        status = self._job_rows[index]
+        try:
+            reattach_job(status["status_path"])
+            self.refresh()
+        except Exception as exc:
+            self.QtWidgets.QMessageBox.critical(
+                self.window, "Re-attach Failed", str(exc)
+            )
 
     def _retry(self):
         index = self.jobs.currentRow()

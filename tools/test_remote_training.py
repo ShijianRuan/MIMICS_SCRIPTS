@@ -774,6 +774,287 @@ class CodeDriftTests(unittest.TestCase):
         self.assertEqual(invalid["remote_code_verify"], "warn")
 
 
+class ReattachTests(unittest.TestCase):
+    """Orphaned remote containers can be re-attached after a controller dies."""
+
+    REMOTE_JOB = "/remote/jobs/user/train_job1"
+
+    def _status(self, root: Path, **overrides):
+        status = {
+            "job_id": "train_job1",
+            "kind": "train",
+            "status": "orphaned_remote",
+            "execution_backend": "remote",
+            "remote_profile_id": "labgpu",
+            "remote_container_name": "mimics-ai-user-train_job1",
+            "remote_job_dir": self.REMOTE_JOB,
+            "request_path": str(root / "request.json"),
+            "control_path": str(root / "control.json"),
+            "job_dir": str(root),
+            "progress_percent": 40,
+        }
+        status.update(overrides)
+        return status
+
+    def _profile(self):
+        return {
+            "profile_id": "labgpu",
+            "name": "Lab GPU",
+            "username": "user",
+            "runtime_image": "mimics-ai-runtime:1.0",
+            "remote_root": "/remote",
+        }
+
+    def _setup(self, root: Path, remote_status=None, container_state="running"):
+        status = self._status(root)
+        remote_compute.write_json_atomic(
+            root / "status.json", status
+        )
+        remote_compute.write_json_atomic(
+            root / "remote_spec.json",
+            {
+                "schema_version": "mimics_remote_nnunet_spec.v1",
+                "kind": "nnunet",
+                "job_id": "train_job1",
+                "job_dir": str(root),
+                "status_path": str(root / "status.json"),
+                "request_path": str(root / "request.json"),
+                "remote_profile_id": "labgpu",
+            },
+        )
+        remote_compute.write_json_atomic(
+            root / "request.json",
+            {
+                "operation": "train",
+                "task_id": "kidney",
+                "model_id": "nnunet_1234",
+                "workspace": str(root / "workspace"),
+            },
+        )
+        remote = dict(remote_status or {})
+        remote.setdefault("status", "training")
+        remote.setdefault(
+            "model",
+            {"model_id": "nnunet_1234", "model_dir": "/job/output/models"},
+        )
+
+        class Session:
+            def __init__(self):
+                self.closed = False
+                self.commands = []
+                self.downloaded_payload = b"payload"
+
+            def execute_result(self, command):
+                self.commands.append(command)
+                if "State.Status" in command:
+                    return 0, "{} -1".format(container_state)
+                if "Config.Labels" in command:
+                    return 0, json.dumps(
+                        {
+                            "mimics-script.remote-training": "true",
+                            "mimics-script.owner": "user",
+                            "mimics-script.job": "train_job1",
+                        }
+                    )
+                if "docker image inspect" in command:
+                    return 0, "sha256:imageid"
+                if command.startswith("sha256sum"):
+                    return 0, "b" * 64 + "  /remote/result.tar"
+                return 0, ""
+
+            def execute(self, command, **kwargs):
+                self.commands.append(command)
+                if command.startswith("sha256sum"):
+                    # Command pipes through awk; only the digest arrives.
+                    return hashlib.sha256(self.downloaded_payload).hexdigest()
+                if command.startswith("stat -c %s"):
+                    return str(len(self.downloaded_payload))
+                return ""
+
+            def read_remote_json(self, path, default=None):
+                if path.endswith("pipeline_job/status.json"):
+                    return remote
+                return default
+
+            def upload(self, *_args, **_kwargs):
+                return None
+
+            def download(self, remote, local, **_kwargs):
+                Path(local).write_bytes(self.downloaded_payload)
+
+            def download_appended(self, *_args, **_kwargs):
+                return 0
+
+            def path_exists(self, _path):
+                return True
+
+            def close(self):
+                self.closed = True
+
+        return status, remote, Session()
+
+    def test_reattach_refuses_local_and_terminal_tasks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            remote_compute.write_json_atomic(
+                root / "status.json",
+                {"status": "training", "execution_backend": "local"},
+            )
+            with self.assertRaisesRegex(RuntimeError, "Only a remote task"):
+                controller.reattach(root / "status.json")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            remote_compute.write_json_atomic(
+                root / "status.json",
+                {
+                    "status": "completed",
+                    "execution_backend": "remote",
+                    "job_id": "j",
+                    "remote_job_dir": "/remote/jobs/user/j",
+                    "remote_profile_id": "p",
+                },
+            )
+            with self.assertRaisesRegex(RuntimeError, "already finished"):
+                controller.reattach(root / "status.json")
+
+    def test_reattach_to_completed_remote_job_downloads_and_registers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _status, remote, session = self._setup(
+                root,
+                remote_status={
+                    "status": "completed",
+                    "dataset_fingerprint": "dsfp",
+                    "model": {
+                        "model_id": "nnunet_1234",
+                        "model_dir": "/job/output/models/kidney/nnunet_1234",
+                    },
+                },
+                container_state="exited",
+            )
+            # A real download is a tar; write one holding the model manifest.
+            import io as _io
+            import tarfile as _tarfile
+
+            manifest_dir = root / "artifact_src"
+            manifest_dir.mkdir(parents=True)
+            remote_compute.write_json_atomic(
+                manifest_dir / "mimics_model_manifest.json",
+                {
+                    "schema_version": "mimics_nnunet_model.v1",
+                    "model_id": "nnunet_1234",
+                    "task_id": "kidney",
+                    "configuration": "3d_fullres",
+                    "folds": ["0"],
+                },
+            )
+            buffer = _io.BytesIO()
+            with _tarfile.open(fileobj=buffer, mode="w") as archive:
+                archive.add(str(manifest_dir), arcname=".")
+            session.downloaded_payload = buffer.getvalue()
+
+            class _Sftp:
+                def stat(self, _path):
+                    class _Stat:
+                        st_size = 10
+                        st_mtime = 1
+
+                    return _Stat()
+
+            session.sftp = _Sftp()
+
+            class _Sftp:
+                def stat(self, _path):
+                    class _Stat:
+                        st_size = 10
+                        st_mtime = 1
+
+                    return _Stat()
+
+            session.sftp = _Sftp()
+            with mock.patch.object(
+                controller, "SSHSession", return_value=session
+            ), mock.patch.object(
+                controller, "get_profile", return_value=self._profile()
+            ), mock.patch.object(
+                controller,
+                "_register_nnunet",
+                side_effect=lambda spec, local_dir, remote_status, profile: {
+                    "model_id": "nnunet_1234",
+                    "model_dir": str(local_dir),
+                },
+            ) as register:
+                code = controller.reattach(root / "status.json")
+            self.assertEqual(code, 0)
+            register.assert_called_once()
+            status = remote_compute.read_json(root / "status.json", {})
+            self.assertEqual(status["status"], "completed")
+            self.assertTrue(status["remote_reattached"])
+            self.assertTrue(status["remote_model_downloaded"])
+
+    def test_reattach_to_running_container_resumes_monitoring(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _status, remote, session = self._setup(root, container_state="running")
+
+            def finalize(
+                live_session,
+                spec,
+                profile,
+                status_path,
+                remote_paths,
+                remote_status,
+                container_name,
+                local_root,
+                result_archive,
+                controller_log,
+                remote_log,
+            ):
+                return 0
+
+            with mock.patch.object(
+                controller, "SSHSession", return_value=session
+            ), mock.patch.object(
+                controller, "get_profile", return_value=self._profile()
+            ), mock.patch.object(
+                controller, "_monitor_remote"
+            ) as monitor:
+                monitor.return_value = (session, {"status": "completed"})
+                with mock.patch.object(
+                    controller,
+                    "_reattach_finalize_from_status",
+                    side_effect=finalize,
+                ) as download:
+                    code = controller.reattach(root / "status.json")
+            self.assertEqual(code, 0)
+            monitor.assert_called_once()
+            download.assert_called_once()
+            status = remote_compute.read_json(root / "status.json", {})
+            self.assertEqual(status["status"], "reattaching")
+            self.assertEqual(
+                status["phase"],
+                "reattaching_remote",
+            )
+
+    def test_reattach_to_removed_container_suggests_abandon(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _status, remote, session = self._setup(
+                root, container_state="missing"
+            )
+            with mock.patch.object(
+                controller, "SSHSession", return_value=session
+            ), mock.patch.object(
+                controller, "get_profile", return_value=self._profile()
+            ):
+                code = controller.reattach(root / "status.json")
+            self.assertEqual(code, 2)
+            status = remote_compute.read_json(root / "status.json", {})
+            self.assertEqual(status["status"], "orphaned_remote")
+            self.assertEqual(status["phase"], "remote_container_missing")
+            self.assertIn("Use Stop", status["message"])
+
+
 class StatusAndLifecycleTests(unittest.TestCase):
     def test_remote_worker_log_rotation_is_bounded(self):
         with tempfile.TemporaryDirectory() as temporary, mock.patch.object(

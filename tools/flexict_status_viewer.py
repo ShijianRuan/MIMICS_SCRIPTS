@@ -132,6 +132,13 @@ class StatusWindow:
         self.stop_button = QtWidgets.QPushButton("Stop")
         self.stop_button.clicked.connect(self._stop)
         actions.addWidget(self.stop_button)
+        self.reattach_button = QtWidgets.QPushButton("Re-attach")
+        self.reattach_button.clicked.connect(self._reattach)
+        self.reattach_button.setToolTip(
+            "Resume monitoring a remote task whose local controller stopped "
+            "(e.g. after a workstation restart)."
+        )
+        actions.addWidget(self.reattach_button)
         self.retry_button = QtWidgets.QPushButton("Retry Same Settings")
         self.retry_button.clicked.connect(self._retry)
         actions.addWidget(self.retry_button)
@@ -246,6 +253,13 @@ class StatusWindow:
         self.stop_button.setEnabled(
             state not in {"completed", "failed", "cancelled", "abandoned", "unknown"}
         )
+        self.reattach_button.setEnabled(
+            str(status.get("execution_backend") or "") == "remote"
+            and bool(str(status.get("remote_job_dir") or "").strip())
+            and state not in {
+                "completed", "failed", "cancelled", "abandoned", "unknown"
+            }
+        )
         self.retry_button.setEnabled(state in {"failed", "cancelled"})
         log_path = Path(str(status.get("log_path") or ""))
         scrollbar = self.log_view.verticalScrollBar()
@@ -269,6 +283,20 @@ class StatusWindow:
 
             stop_job(self._job_rows[index]["status_path"])
             self.refresh()
+
+    def _reattach(self):
+        index = self.jobs.currentRow()
+        if not 0 <= index < len(self._job_rows):
+            return
+        from nnunet_jobs import reattach_job
+
+        try:
+            reattach_job(self._job_rows[index]["status_path"])
+            self.refresh()
+        except Exception as exc:
+            self.QtWidgets.QMessageBox.critical(
+                self.window, "Re-attach Failed", str(exc)
+            )
 
     def _retry(self):
         index = self.jobs.currentRow()

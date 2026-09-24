@@ -302,6 +302,18 @@ container was released. This action does not contact, stop, or delete anything
 on the server. It is shown only for an unknown remote state and requires one
 confirmation, so normal users do not see another routine action.
 
+When the local controller itself dies (workstation restart, Python crash) while
+the remote container keeps running, the task is marked `orphaned_remote`.
+**Re-attach** (a button in both status viewers, or
+`remote_training_controller.py reattach --status <status.json>`) restarts a
+local controller for the same container. It re-verifies the container owner/job
+labels and the remote job path before resuming monitoring, so it can never
+attach to someone else's container. If the remote task already finished while
+the controller was down, the finished model is downloaded and registered
+exactly like a normal completion. If the container is gone, the user is guided
+back to Stop/Abandon. Remote nnInteractive tasks expose re-attach through the
+CLI only, because they are not listed in the status viewers.
+
 The Docker image is never removed by a job. A subsequent training starts a new
 disposable container from the already-installed image, normally in seconds.
 Base weights also remain mounted read-only.
@@ -409,6 +421,10 @@ Required Windows/Mimics acceptance tests:
 9. Disconnect the server permanently, request Stop, then use **Abandon
    Locally**. Confirm the local task becomes terminal while the UI continues to
    warn that server GPU/container state is unknown.
+10. While a remote job is training, kill the local controller process, then
+   use **Re-attach** from the status viewer. Confirm monitoring resumes, and
+   that a job which finished while the controller was down still downloads and
+   registers its model.
 
 ## 10. Deliberate limitations
 
