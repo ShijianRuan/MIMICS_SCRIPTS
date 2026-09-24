@@ -20,6 +20,18 @@ SCHEMA_VERSION = "mimics_nnunet_job.v1"
 MODEL_SCHEMA_VERSION = "mimics_nnunet_model.v1"
 TERMINAL_STATES = {"completed", "failed", "cancelled", "abandoned"}
 
+# Directory-signature cache: scanning a large DICOM/export folder turns a
+# fingerprint check into thousands of stat calls. The cached manifest is
+# keyed by the directory's own mtime/ctime, so adding, removing, or
+# renaming entries invalidates it immediately. Editing an existing file in
+# place does not change any directory mtime, so such a change is picked up
+# at the latest when the weekly revalidation window expires — the same
+# trade-off already accepted for the remote dataset archive cache. In
+# practice these directories hold exported DICOM series that are written
+# once; mutable label files go through the per-file signature path.
+PATH_SIGNATURE_CACHE_SECONDS = 7 * 24 * 60 * 60
+PATH_SIGNATURE_CACHE_VERSION = "path_signature_cache.v1"
+
 
 def safe_identifier(value: object, fallback: str = "item") -> str:
     text = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "").strip())
@@ -145,6 +157,101 @@ def update_status(path: str | Path, **values: Any) -> dict[str, Any]:
     return payload
 
 
+def _path_signature_cache_dir() -> Path | None:
+    configured = os.environ.get("MIMICS_PATH_SIGNATURE_CACHE_DIR", "").strip()
+    if configured.lower() in {"off", "disabled", "none"}:
+        return None
+    if configured:
+        return Path(os.path.expandvars(os.path.expanduser(configured)))
+    if os.name == "nt" and (
+        os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+    ):
+        return (
+            Path(os.environ.get("LOCALAPPDATA") or os.environ["APPDATA"])
+            / "Mimics-Script"
+            / "path_signature_cache"
+        )
+    return (
+        Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache"))
+        / "mimics-script"
+        / "path_signature_cache"
+    )
+
+
+def _load_cached_path_signature(
+    source: Path, stat: Any
+) -> dict[str, Any] | None:
+    try:
+        cache_dir = _path_signature_cache_dir()
+        if cache_dir is None:
+            return None
+        key_material = json.dumps(
+            [
+                PATH_SIGNATURE_CACHE_VERSION,
+                str(source),
+                int(getattr(stat, "st_mtime_ns", stat.st_mtime * 1e9)),
+                int(getattr(stat, "st_dev", 0) or 0),
+            ],
+            separators=(",", ":"),
+        ).encode("utf-8")
+        key = hashlib.sha256(key_material).hexdigest()[:32]
+        entry_path = cache_dir / (key + ".json")
+        entry = read_json(entry_path, {}) or {}
+        if not isinstance(entry, dict):
+            return None
+        if (
+            entry.get("version") != PATH_SIGNATURE_CACHE_VERSION
+            or entry.get("path") != str(source)
+            or not isinstance(entry.get("signature"), dict)
+            or time.time() - float(entry.get("verified_at_epoch") or 0)
+            > PATH_SIGNATURE_CACHE_SECONDS
+        ):
+            return None
+        return entry["signature"]
+    except Exception:
+        return None
+
+
+def _store_cached_path_signature(
+    source: Path, stat: Any, signature: dict[str, Any]
+) -> None:
+    try:
+        cache_dir = _path_signature_cache_dir()
+        if cache_dir is None:
+            return
+        key_material = json.dumps(
+            [
+                PATH_SIGNATURE_CACHE_VERSION,
+                str(source),
+                int(getattr(stat, "st_mtime_ns", stat.st_mtime * 1e9)),
+                int(getattr(stat, "st_dev", 0) or 0),
+            ],
+            separators=(",", ":"),
+        ).encode("utf-8")
+        key = hashlib.sha256(key_material).hexdigest()[:32]
+        entry_path = cache_dir / (key + ".json")
+        write_json_atomic(
+            entry_path,
+            {
+                "version": PATH_SIGNATURE_CACHE_VERSION,
+                "path": str(source),
+                "verified_at_epoch": time.time(),
+                "signature": signature,
+            },
+        )
+        cutoff = time.time() - PATH_SIGNATURE_CACHE_SECONDS * 2
+        for stale in entry_path.parent.glob("*.json"):
+            try:
+                if stale.stat().st_mtime < cutoff:
+                    stale.unlink()
+            except OSError:
+                pass
+    except Exception:
+        # A read-only or unavailable cache location must never fail a
+        # fingerprint check.
+        pass
+
+
 def path_signature(path: str | Path) -> dict[str, Any]:
     source = Path(path)
     stat = source.stat()
@@ -157,6 +264,9 @@ def path_signature(path: str | Path) -> dict[str, Any]:
             "device": int(getattr(stat, "st_dev", 0) or 0),
             "file_id": int(getattr(stat, "st_ino", 0) or 0),
         }
+    cached = _load_cached_path_signature(source, stat)
+    if cached is not None:
+        return cached
     total = 0
     latest = int(getattr(stat, "st_mtime_ns", stat.st_mtime * 1e9))
     count = 0
@@ -192,7 +302,7 @@ def path_signature(path: str | Path) -> dict[str, Any]:
             ).encode("utf-8")
         )
         manifest.update(b"\n")
-    return {
+    signature = {
         "kind": "directory",
         "files": count,
         "size": total,
@@ -200,6 +310,8 @@ def path_signature(path: str | Path) -> dict[str, Any]:
         "ctime_ns": int(getattr(stat, "st_ctime_ns", stat.st_ctime * 1e9)),
         "manifest_sha256": manifest.hexdigest(),
     }
+    _store_cached_path_signature(source, stat, signature)
+    return signature
 
 
 def stable_digest(payload: Any) -> str:
