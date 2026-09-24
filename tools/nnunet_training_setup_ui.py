@@ -475,8 +475,17 @@ class TrainingSetupWindow:
 
     def _load_context(self):
         default_workspace = Path.home() / ".mimics_script" / "nnunet"
+        # Paths from the last successful submission are the default; the
+        # context from the open Mimics project always wins when present.
+        remembered = read_json(
+            Path.home() / ".mimics_script" / "nnunet_settings.json", {}
+        ) or {}
         self.workspace_edit.setText(
-            str(self.context.get("workspace") or default_workspace)
+            str(
+                self.context.get("workspace")
+                or remembered.get("workspace")
+                or default_workspace
+            )
         )
         self.dataset_id.setValue(701)
         workspace = self.workspace_edit.text().strip()
@@ -492,9 +501,15 @@ class TrainingSetupWindow:
         worker = threading.Thread(target=suggest, name="nnunet-dataset-id-check")
         worker.daemon = True
         worker.start()
-        self.dataset_edit.setText(str(self.context.get("dataset_root") or ""))
-        self.mcs_edit.setText(str(self.context.get("mcs_dir") or ""))
-        self.label_root_edit.setText(str(self.context.get("label_root") or ""))
+        self.dataset_edit.setText(
+            str(self.context.get("dataset_root") or remembered.get("dataset_root") or "")
+        )
+        self.mcs_edit.setText(
+            str(self.context.get("mcs_dir") or remembered.get("mcs_dir") or "")
+        )
+        self.label_root_edit.setText(
+            str(self.context.get("label_root") or remembered.get("label_root") or "")
+        )
         selected = [str(value) for value in self.context.get("selected_mask_names") or []]
         if len(selected) == 1:
             self.task_edit.setText(selected[0])

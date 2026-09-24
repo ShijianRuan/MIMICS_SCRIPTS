@@ -288,5 +288,107 @@ class TestViewerNonBlockingRefresh(unittest.TestCase):
         return project
 
 
+class TestTrainingSetupPathMemory(unittest.TestCase):
+    """Training windows prefill paths from the last successful submission."""
+
+    def _settings_home(self, tmp: Path, filename: str, payload: dict) -> Path:
+        home = tmp / "home"
+        (home / ".mimics_script").mkdir(parents=True, exist_ok=True)
+        (home / ".mimics_script" / filename).write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+        return home
+
+    def test_nnunet_window_prefills_remembered_paths(self):
+        _AppFixture.app()
+        import nnunet_training_setup_ui as ui
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            home = self._settings_home(
+                tmp,
+                "nnunet_settings.json",
+                {
+                    "workspace": str(tmp / "ws"),
+                    "dataset_root": str(tmp / "data"),
+                    "mcs_dir": str(tmp / "mcs"),
+                    "label_root": str(tmp / "labels"),
+                },
+            )
+            with mock.patch.object(ui.Path, "home", lambda: home):
+                window = ui.TrainingSetupWindow(
+                    {"workspace": ""},
+                    tmp / "ctx.json",
+                    QT,
+                )
+                try:
+                    self.assertEqual(
+                        window.dataset_edit.text(), str(tmp / "data")
+                    )
+                    self.assertEqual(window.mcs_edit.text(), str(tmp / "mcs"))
+                    self.assertEqual(
+                        window.label_root_edit.text(), str(tmp / "labels")
+                    )
+                finally:
+                    window.window.close()
+
+    def test_nnunet_window_context_overrides_remembered_paths(self):
+        _AppFixture.app()
+        import nnunet_training_setup_ui as ui
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            home = self._settings_home(
+                tmp,
+                "nnunet_settings.json",
+                {"dataset_root": str(tmp / "remembered")},
+            )
+            with mock.patch.object(ui.Path, "home", lambda: home):
+                window = ui.TrainingSetupWindow(
+                    {"dataset_root": str(tmp / "from-context")},
+                    tmp / "ctx.json",
+                    QT,
+                )
+                try:
+                    self.assertEqual(
+                        window.dataset_edit.text(), str(tmp / "from-context")
+                    )
+                finally:
+                    window.window.close()
+
+    def test_flexict_window_prefills_remembered_paths(self):
+        _AppFixture.app()
+        import flexict_training_setup_ui as ui
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            home = self._settings_home(
+                tmp,
+                "flexict_settings.json",
+                {
+                    "workspace": str(tmp / "ws"),
+                    "dataset_root": str(tmp / "data"),
+                    "label_name": "kidney",
+                },
+            )
+            with mock.patch.object(ui.Path, "home", lambda: home), mock.patch.object(
+                ui, "workspace_root", lambda _c: str(tmp / "default-ws")
+            ), mock.patch.object(
+                ui, "load_config", lambda: {"root": str(tmp)}
+            ), mock.patch.object(
+                ui.TrainingSetupWindow, "_refresh_models", lambda self: None
+            ):
+                window = ui.TrainingSetupWindow(
+                    {"workspace": ""}, tmp / "ctx.json", QT
+                )
+                try:
+                    self.assertEqual(
+                        window.dataset_edit.text(), str(tmp / "data")
+                    )
+                    self.assertEqual(window.label_edit.text(), "kidney")
+                finally:
+                    window.window.close()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

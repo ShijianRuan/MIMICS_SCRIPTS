@@ -365,14 +365,27 @@ class TrainingSetupWindow:
     def _load_context(self):
         config = load_config()
         default_workspace = workspace_root(config)
-        workspace = str(self.context.get("workspace") or default_workspace)
+        # Paths from the last successful submission are the default; the
+        # context from the open Mimics project always wins when present.
+        remembered = read_json(
+            Path.home() / ".mimics_script" / "flexict_settings.json", {}
+        ) or {}
+        workspace = str(
+            self.context.get("workspace")
+            or remembered.get("workspace")
+            or default_workspace
+        )
         self.workspace_edit.setText(workspace)
-        self.dataset_edit.setText(str(self.context.get("dataset_root") or ""))
+        self.dataset_edit.setText(
+            str(self.context.get("dataset_root") or remembered.get("dataset_root") or "")
+        )
         selected = [
             str(value) for value in self.context.get("selected_mask_names") or []
         ]
         if len(selected) == 1:
             self.label_edit.setText(selected[0])
+        elif remembered.get("label_name"):
+            self.label_edit.setText(str(remembered["label_name"]))
         self._refresh_models()
 
     def _refresh_models(self):
