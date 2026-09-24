@@ -97,7 +97,8 @@
 | `flexict_pkg` 重跑 | **10/10 通过**（内存释放后；确认此前失败为环境限制，非代码回归） |
 | GUI 自动化冒烟（新增 `tools/test_gui_smoke.py`） | **7/7 通过**：批次状态面板（3 类记录聚合 + 最新在前排序 + 空目录不崩）、配置编辑器、窗宽窗位编辑器（含「编辑不落盘」契约）、AI Model Manager（默认 workspace 构建）。已注册进回归矩阵 `gui_smoke` 套件（fast/full 档）。离线可自动化部分以此覆盖；外观/交互手感仍属人工验收 |
 | FlexiCT 训练冒烟（GPU 实跑） | **发现并修复两个真实的 nnU-Net 2.8.0 兼容 bug**（此前 FlexiCT 从未在本机 nnunetv2 2.8.0 下走过 `nnUNet_extTrainer` 路径，均在冒烟首跑暴露）：① `flexict_trainer.py` 的 `__init__` 无条件向 `nnUNetTrainer.__init__` 转发 `unpack_dataset`，2.8.0 已移除该参数 → TypeError；② 2.8.0 的 `nnUNetTrainer.__init__` 按子类签名自省并索引父帧 `locals()` 记录 init kwargs，子类签名多出的参数名（含 `unpack_dataset`）→ KeyError。修复：条件转发 + 通过 `__signature__` 发布父类签名（2.5.2/2.8.0 双版本兼容），`test_flexict_pkg.py` 新增 `test_trainer_init_forwards_unpack_dataset_conditionally`（完整构造回归，10/10 通过） |
-| FlexiCT 训练冒烟结果 | 8-case 肾 kidney_left 2D、NUM_EPOCHS=2、MIRROR_DISABLE_AXES=1，经 `create_flexict_job` 走 UI 同款路径。job completed、模型注册（见交付报告更新） |
+| FlexiCT 训练冒烟结果 | 8-case 肾 kidney_left 2D、NUM_EPOCHS=2、MIRROR_DISABLE_AXES=1，经 `create_flexict_job` 走 UI 同款路径。**job completed、模型注册成功**（Dataset758、`flexict_20260924T185549_7b555636` 设为 recommended、checkpoint_best/final + plans + 验证产物齐全，2 epoch 验证 Dice 0.667） |
+| 冒烟过程中追加发现并修复的 3 个问题 | ③ **dataset-id 泄漏**：`normalize_flexict_request` 复用 nnU-Net 归一化器，缺省 dataset_id 落到 nnU-Net 波段 701——已改为缺省时经 `flexict_suggest_dataset_id` 从 750–799 波段分配（commit b6e9a47，回归测试已加）；④ **12GB WDDM 显存现实**：bs=8（A40 验证配方）在本机不可行，冒烟用 bs=2 + patch 96×128 通过，训练窗应保持 VRAM 预检警告；⑤ **Windows DA worker 崩溃**：nnU-Net 默认 spawn 12 个数据增强进程，在内存紧张时 OpenBLAS 分配失败并毒化 CUDA 上下文（"CUDA error: unknown error"，复现 3 次）——本地训练 worker 现固定 `nnUNet_n_proc_DA=0`（单进程 DA，同 MedDINOv3 时期结论），且**仅限 train 阶段**（2.8.0 planner 会把该值喂给 `torch.set_num_threads`，0 会让 preprocess 崩溃；commit 35c8e41 + 6ed6ee2，71 测试 OK） |
 
 **无法离线自动化的人工项（原因明确）**：
 
