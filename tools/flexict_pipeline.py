@@ -45,6 +45,7 @@ from flexict_common import (  # noqa: E402
     load_config,
     load_pair,
     flexict_repo_dir,
+    flexict_suggest_dataset_id,
     register_model as register_flexict_model,
     resolve_pretrained_dir,
     workspace_paths,
@@ -118,6 +119,13 @@ def normalize_flexict_request(values: dict[str, Any]) -> dict[str, Any]:
         flexict_configuration = str(out.get("configuration") or "auto").strip().lower()
         nnunet_values = dict(out)
         nnunet_values["configuration"] = "2d"  # concrete placeholder for the normalizer
+        if not nnunet_values.get("dataset_id"):
+            # The nnU-Net normalizer defaults a missing dataset_id to 701
+            # (the nnU-Net band) — suggest a free id in the FlexiCT 750-799
+            # band instead so programmatic callers without an explicit id
+            # never squat on the nnU-Net namespace.
+            nnunet_values["dataset_id"] = flexict_suggest_dataset_id(
+                out.get("workspace"))
         nnunet_values.setdefault("labels", [
             {"name": str(out.get("label_name") or "target"),
              "aliases": [str(out.get("label_name") or "target")],

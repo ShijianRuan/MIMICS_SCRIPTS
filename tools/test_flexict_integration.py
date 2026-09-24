@@ -84,6 +84,21 @@ class TestNormalizeFlexictRequest(unittest.TestCase):
                 _training_request("X:/d", "W:/w", configuration=value))
             self.assertEqual(request["configuration"], value)
 
+    def test_missing_dataset_id_suggested_from_flexict_band(self):
+        """A request without dataset_id must NOT land in the nnU-Net band.
+
+        The nnU-Net normalizer defaults a missing dataset_id to 701; FlexiCT
+        owns 750-799, so an unset id must be suggested from that band instead
+        (regression: programmatic callers without an id silently created
+        Dataset701_* in the FlexiCT workspace).
+        """
+        with tempfile.TemporaryDirectory() as workspace:
+            values = _training_request("X:/d", workspace)
+            values.pop("dataset_id")
+            request = fp.normalize_flexict_request(values)
+            self.assertGreaterEqual(request["dataset_id"], 750)
+            self.assertLessEqual(request["dataset_id"], 799)
+
     def test_rejects_unknown_configuration(self):
         with self.assertRaises(ValueError):
             fp.normalize_flexict_request(
