@@ -578,8 +578,10 @@ def _spawn_flexict_worker(stage: str,
     original_env = np_mod._worker_environment
     original_known = set(np_mod.KNOWN_EPOCH_TRAINERS)
     try:
-        np_mod._worker_environment = lambda _req, _roots: flexict_worker_environment(
-            request, roots, configuration, stage)
+        np_mod._worker_environment = lambda _req, _roots, _stage: (
+            flexict_worker_environment(
+                request, roots, configuration, stage)
+        )
         np_mod.KNOWN_EPOCH_TRAINERS = original_known | set(TRAINERS.values())
         return _spawn_worker(
             stage, params, request, roots, job_dir, status_path,
@@ -933,8 +935,9 @@ def run_inference(job_dir: Path) -> int:
 
             original_env = np_mod._worker_environment
             try:
-                np_mod._worker_environment = lambda _req, _roots: flexict_infer_environment(
-                    request, roots, configuration)
+                np_mod._worker_environment = lambda _req, _roots, _stage: (
+                    flexict_infer_environment(request, roots, configuration)
+                )
                 _spawn_worker(
                     "infer",
                     {
@@ -1146,8 +1149,9 @@ def _al_predict_configuration(job_dir: Path,
 
     original_env = np_mod._worker_environment
     try:
-        np_mod._worker_environment = lambda _req, _roots: flexict_infer_environment(
-            request, roots, configuration)
+        np_mod._worker_environment = lambda _req, _roots, _stage: (
+            flexict_infer_environment(request, roots, configuration)
+        )
         _spawn_worker(
             "infer",
             {

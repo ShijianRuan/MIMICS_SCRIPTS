@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 
 from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
@@ -26,3 +27,15 @@ class MimicsNNUNetTrainer(nnUNetTrainer):
                 )
             )
         self.num_epochs = epochs
+
+
+# nnU-Net 2.8.0 captures init kwargs by introspecting the SUBCLASS __init__
+# signature and indexing the PARENT frame's locals() -- a (*args, **kwargs)
+# forwarding signature crashes there with KeyError('args') (found by the
+# Phase 3a convergence smoke; the FlexiCT trainers solve it the same way).
+# Publish the parent's parameter names so the introspection only sees names
+# that exist in the parent frame. nnU-Net 2.5.2 does not introspect and is
+# unaffected.
+MimicsNNUNetTrainer.__init__.__signature__ = inspect.signature(
+    nnUNetTrainer.__init__
+)

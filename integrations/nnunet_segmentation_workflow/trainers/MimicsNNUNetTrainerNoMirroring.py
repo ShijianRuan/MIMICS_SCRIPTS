@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 
 from nnunetv2.training.nnUNetTrainer.variants.data_augmentation.nnUNetTrainerNoMirroring import (
@@ -28,3 +29,11 @@ class MimicsNNUNetTrainerNoMirroring(nnUNetTrainerNoMirroring):
                 )
             )
         self.num_epochs = epochs
+
+
+# See MimicsNNUNetTrainer: nnU-Net 2.8.0 introspects the subclass __init__
+# signature and indexes the parent frame's locals(); publish the parent's
+# parameter names so kwargs capture does not KeyError('args').
+MimicsNNUNetTrainerNoMirroring.__init__.__signature__ = inspect.signature(
+    nnUNetTrainerNoMirroring.__init__
+)

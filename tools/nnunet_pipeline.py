@@ -853,7 +853,9 @@ def _materialize_nnunet_raw(
     return dataset_dir, fingerprint
 
 
-def _worker_environment(request: dict[str, Any], roots: dict[str, Path]) -> dict[str, str]:
+def _worker_environment(
+    request: dict[str, Any], roots: dict[str, Path], stage: str = "train"
+) -> dict[str, str]:
     environment = {
         "nnUNet_raw": str(roots["raw"]),
         "nnUNet_preprocessed": str(roots["preprocessed"]),
@@ -861,6 +863,16 @@ def _worker_environment(request: dict[str, Any], roots: dict[str, Path]) -> dict
         "nnUNet_extTrainer": str(TRAINER_ROOT),
         "MIMICS_NNUNET_EPOCHS": str(int(request.get("epochs") or 1000)),
     }
+    if os.name == "nt" and stage == "train":
+        # Windows training: nnU-Net's spawn'd data-augmentation workers each
+        # import torch/OpenBLAS and have a history of allocation-failure
+        # crashes ("One or more background workers are no longer alive") on
+        # RAM-tight workstations. Single-process DA is slower but stable —
+        # the same fix the FlexiCT pipeline applies on Windows. Train stage
+        # ONLY: the preprocess stage feeds this value to torch.set_num_threads
+        # and nnunetv2 2.8.0 rejects 0 there. Linux (remote containers) keeps
+        # nnU-Net's multiprocessing default.
+        environment["nnUNet_n_proc_DA"] = "0"
     gpu_id = str(request.get("gpu_id") if request.get("gpu_id") not in (None, "") else "").strip()
     if gpu_id:
         environment["CUDA_VISIBLE_DEVICES"] = gpu_id
