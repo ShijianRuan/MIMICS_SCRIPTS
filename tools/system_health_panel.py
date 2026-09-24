@@ -10,7 +10,9 @@ anything stuck, and what can I do about it":
 2. Resource locks - live vs stale (owner PID dead or absent);
 3. Import/export queues - per output-folder queue state
    (_mcs_queue_active.json / _mcs_queue_stop.json) and recent job runs;
-4. nnInteractive server - .nninteractive_server.json state when present.
+4. nnInteractive server - .nninteractive_server.json state when present;
+5. Environment guidance - setup/migration/weights issues detected by
+   env_guidance.collect_issues, with a jump into the guidance dialog.
 
 Every problem row carries an action: Stop All Owned Services (the existing
 mimics_batch_cli kill-background, which publishes stop markers first and
@@ -40,6 +42,8 @@ from ui_theme import configure_application, stylesheet as shared_stylesheet  # n
 
 import resource_locks  # noqa: E402
 
+import env_guidance  # noqa: E402
+
 REFRESH_SECONDS = 10
 
 
@@ -67,6 +71,7 @@ def collect_health(project_root):
         "locks": collect_locks(root),
         "queues": collect_queues(root),
         "server": collect_server(root),
+        "environment": env_guidance.collect_issues(root),
     }
     return snapshot
 
@@ -336,6 +341,7 @@ def run(preview_path=""):
     section_locks = _Section(page, "Resource Locks")
     section_queues = _Section(page, "Import Queues")
     section_server = _Section(page, "nnInteractive Server")
+    section_environment = _Section(page, "Environment")
     page.addStretch(1)
 
     actions = QtWidgets.QHBoxLayout()
@@ -364,12 +370,16 @@ def run(preview_path=""):
             )
         if server and server["live"]:
             summary_text += " nnInteractive server is running."
+        env_issues = snapshot.get("environment") or []
+        if env_issues:
+            summary_text += " {0} environment issue(s).".format(len(env_issues))
         summary.setText(summary_text)
 
         _render_processes(section_processes, snapshot["processes"])
         _render_locks(section_locks, snapshot["locks"])
         _render_queues(section_queues, snapshot["queues"])
         _render_server(section_server, server)
+        _render_environment(section_environment, env_issues)
 
     def _render_processes(section, entries):
         section.clear()
@@ -465,6 +475,27 @@ def run(preview_path=""):
         box = _row(parent, [entry["name"], entry["detail"]])
         box.itemAt(0).widget().setProperty("status", status)
         return box
+
+    def _render_environment(section, issues):
+        section.clear()
+        if not issues:
+            box = _row(section.body, [
+                "● Environment OK - Python, setup state, paths and weights check out.",
+                "",
+            ])
+            box.itemAt(0).widget().setProperty("status", "ok")
+            return
+        for issue in issues:
+            severity = issue.get("severity") or "warn"
+            box = _row_status(section.body, severity, {
+                "name": "{0} {1}".format(
+                    "✕" if severity == "bad" else "○", issue.get("title") or issue.get("kind")
+                ),
+                "detail": (issue.get("detail") or "").split("\n")[0],
+            })
+            btn = QtWidgets.QPushButton("Guidance")
+            btn.clicked.connect(lambda _=False: env_guidance.show_dialog(Path(_ROOT)))
+            box.addWidget(btn)
 
     # ---- Non-blocking background work (daemon thread + queue + QTimer) ----
     # collect_health and sweep_stale_state do filesystem/process probing that

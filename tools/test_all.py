@@ -9404,6 +9404,157 @@ class TestSystemHealthPanel(unittest.TestCase):
                 source = handle.read()
             self.assertIn("external_window_launcher.open_external_window", source)
 
+    def test_collect_health_reports_environment_issues(self):
+        shp = self._import_panel()
+        snapshot = shp.collect_health(self.root)
+        # Empty project has no python_env: exactly the python_missing issue.
+        kinds = [issue["kind"] for issue in snapshot["environment"]]
+        self.assertEqual(["python_missing"], kinds)
+
+    def test_env_guidance_entry_exists(self):
+        entry = os.path.join(
+            PROJECT_ROOT, "scripting_library", "99_Admin",
+            "10_Environment_Guidance.py"
+        )
+        self.assertTrue(os.path.isfile(entry))
+        with open(entry, "r", encoding="utf-8") as handle:
+            source = handle.read()
+        self.assertIn("env_guidance_mimics", source)
+        wrapper = os.path.join(
+            PROJECT_ROOT, "runtime_py35", "env_guidance_mimics.py"
+        )
+        self.assertTrue(os.path.isfile(wrapper))
+        with open(wrapper, "r", encoding="utf-8") as handle:
+            source = handle.read()
+        self.assertIn("external_window_launcher.open_external_window", source)
+
+
+class TestEnvGuidance(unittest.TestCase):
+    """Phase 2b: environment issues detected as annotator-readable rows."""
+
+    def setUp(self):
+        self.tmp = _make_temp_dir()
+        self.root = os.path.join(self.tmp, "proj")
+        os.makedirs(self.root)
+        tools_dir = os.path.join(PROJECT_ROOT, "tools")
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+
+    def tearDown(self):
+        _cleanup(self.tmp)
+
+    def _import_guidance(self):
+        import importlib
+        import env_guidance
+        importlib.reload(env_guidance)
+        return env_guidance
+
+    def _fake_env(self, root):
+        env_dir = os.path.join(root, "python_env")
+        os.makedirs(env_dir, exist_ok=True)
+        with open(os.path.join(env_dir, "python.exe"), "w") as handle:
+            handle.write("x")
+
+    def _write_state(self, payload):
+        import json as _json
+        runtime = os.path.join(self.root, ".mimics_runtime")
+        os.makedirs(runtime, exist_ok=True)
+        payload = dict(payload)
+        payload.setdefault("updated_at_epoch", time.time())
+        with open(os.path.join(runtime, "setup_env_state.json"), "w",
+                  encoding="utf-8") as handle:
+            _json.dump(payload, handle)
+
+    def test_missing_python_reports_setup_action(self):
+        eg = self._import_guidance()
+        issues = eg.collect_issues(self.root)
+        self.assertEqual(["python_missing"], [i["kind"] for i in issues])
+        self.assertEqual("bad", issues[0]["severity"])
+        self.assertTrue(issues[0]["fix_action"])
+
+    def test_failed_setup_state_is_reported(self):
+        eg = self._import_guidance()
+        self._fake_env(self.root)
+        self._write_state({"status": "error", "message": "boom", "error": "E"})
+        issues = eg.collect_issues(self.root)
+        self.assertEqual(["setup_failed"], [i["kind"] for i in issues])
+        self.assertIn("boom", issues[0]["detail"])
+
+    def test_incomplete_setup_lists_failed_packages(self):
+        eg = self._import_guidance()
+        self._fake_env(self.root)
+        self._write_state({
+            "status": "incomplete", "message": "partial",
+            "failed_packages": ["torch", "nnunetv2"],
+        })
+        issues = eg.collect_issues(self.root)
+        self.assertEqual(["setup_incomplete"], [i["kind"] for i in issues])
+        self.assertIn("torch", issues[0]["detail"])
+
+    def test_stale_setup_state_ignored(self):
+        eg = self._import_guidance()
+        self._fake_env(self.root)
+        self._write_state({
+            "status": "error", "message": "old failure",
+            "updated_at_epoch": time.time() - 3 * 24 * 60 * 60,
+        })
+        self.assertEqual([], eg.collect_issues(self.root))
+
+    def test_moved_checkout_detected_with_old_root(self):
+        import json as _json
+        eg = self._import_guidance()
+        self._fake_env(self.root)
+        old_root = os.path.join(self.tmp, "oldmachine", "MIMICS_SCRIPTS")
+        with open(os.path.join(self.root, "nninteractive_config.json"), "w",
+                  encoding="utf-8") as handle:
+            _json.dump({"workspace_dir": os.path.join(old_root, "ws")}, handle)
+        detected = eg.detect_old_root(self.root)
+        self.assertEqual(old_root, detected)
+        issues = eg.collect_issues(self.root)
+        kinds = [i["kind"] for i in issues]
+        self.assertIn("migration_pending", kinds)
+        issue = next(i for i in issues if i["kind"] == "migration_pending")
+        self.assertTrue(issue["fix_action"].startswith("migrate:"))
+        self.assertIn(old_root, issue["fix_action"])
+
+    def test_live_and_relative_paths_are_not_migration_issues(self):
+        import json as _json
+        eg = self._import_guidance()
+        self._fake_env(self.root)
+        with open(os.path.join(self.root, "nninteractive_config.json"), "w",
+                  encoding="utf-8") as handle:
+            _json.dump({
+                "workspace_dir": "runtime/ws",                 # relative: fine
+                "mimics_output_dir": os.path.join(self.tmp, "live", "out"),
+            }, handle)
+        os.makedirs(os.path.join(self.tmp, "live", "out"), exist_ok=True)
+        self.assertEqual("", eg.detect_old_root(self.root))
+        self.assertEqual([], eg.collect_issues(self.root))
+
+    def test_flexict_missing_weights_is_informational(self):
+        eg = self._import_guidance()
+        self._fake_env(self.root)
+        repo = os.path.join(self.root, "integrations", "flexict-finetune")
+        os.makedirs(repo, exist_ok=True)
+        issues = eg.collect_issues(self.root)
+        kinds = [i["kind"] for i in issues]
+        self.assertIn("flexict_weights", kinds)
+        issue = next(i for i in issues if i["kind"] == "flexict_weights")
+        self.assertEqual("", issue["fix_action"])  # informational only
+        self.assertIn("flexict_2d", issue["detail"])
+
+    def test_flexict_config_override_silences_weights_issue(self):
+        import json as _json
+        eg = self._import_guidance()
+        self._fake_env(self.root)
+        repo = os.path.join(self.root, "integrations", "flexict-finetune")
+        os.makedirs(repo, exist_ok=True)
+        with open(os.path.join(self.root, "flexict_config.json"), "w",
+                  encoding="utf-8") as handle:
+            _json.dump({"pretrained_weights_dir": "X:/weights"}, handle)
+        issues = eg.collect_issues(self.root)
+        self.assertEqual([], [i["kind"] for i in issues if i["kind"] == "flexict_weights"])
+
 
 class TestProcessRegistry(unittest.TestCase):
     """Phase B process registry: register/snapshot/sweep/terminate ladder."""

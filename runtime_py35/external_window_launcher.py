@@ -104,8 +104,9 @@ def open_external_window(
     python_exe = runtime_common.find_external_python(root, allow_system_python=False)
     if not python_exe or not os.path.isfile(python_exe):
         mimics.dialogs.message_box(
-            "The external tools Python was not found. Run Admin > Setup/Repair "
-            "Environment first.",
+            "The external tools Python was not found.\n\n"
+            "Open Admin > Environment Guidance for a step-by-step repair "
+            "window, or run Admin > Setup/Repair Environment.",
             title=window_title,
             ui_blocking=False,
         )

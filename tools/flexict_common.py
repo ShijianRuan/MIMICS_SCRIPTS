@@ -110,9 +110,11 @@ def resolve_pretrained_dir(config: dict[str, Any] | None = None) -> tuple[Path, 
     """Locate the pretrained FlexiCT backbone weights.
 
     Order: config pretrained_weights_dir (absolute override) > the repo's own
-    weights/ > the read-only research share R:\\flexict-finetune (legacy
-    fallback). Returns (path, source) where source is one of
-    "config"/"repo"/"fallback" so callers can warn when using the fallback.
+    weights/. Returns (path, source) where source is one of "config"/"repo".
+    The legacy hardcoded research-share fallback (R:\\flexict-finetune) was
+    machine-specific and is gone: when the weights are missing the error
+    names both accepted locations so the annotator can be guided instead of
+    silently picking a path that only exists on one workstation.
     """
     config = config or load_config()
     override = str(config.get("pretrained_weights_dir") or "").strip()
@@ -132,11 +134,6 @@ def resolve_pretrained_dir(config: dict[str, Any] | None = None) -> tuple[Path, 
         repo / "weights" / "flexict_3d" / "model.safetensors"
     ).is_file():
         return repo / "weights", "repo"
-    fallback = Path("R:/flexict-finetune/weights")
-    if (fallback / "flexict_2d" / "model.safetensors").is_file() and (
-        fallback / "flexict_3d" / "model.safetensors"
-    ).is_file():
-        return fallback, "fallback"
     raise FileNotFoundError(
         "FlexiCT pretrained weights not found: set pretrained_weights_dir in "
         "flexict_config.json, or place flexict_2d/flexict_3d under "
