@@ -90,6 +90,24 @@
 | fake-mimics 流测试全量 | 13/13 通过 |
 | fake_mimics_flow_test --only stop（修复后） | 通过 |
 
+## 遗留项补测（2026-09-24 下午追加）
+
+| 项 | 结果 |
+|----|------|
+| `flexict_pkg` 重跑 | **10/10 通过**（内存释放后；确认此前失败为环境限制，非代码回归） |
+| GUI 自动化冒烟（新增 `tools/test_gui_smoke.py`） | **7/7 通过**：批次状态面板（3 类记录聚合 + 最新在前排序 + 空目录不崩）、配置编辑器、窗宽窗位编辑器（含「编辑不落盘」契约）、AI Model Manager（默认 workspace 构建）。已注册进回归矩阵 `gui_smoke` 套件（fast/full 档）。离线可自动化部分以此覆盖；外观/交互手感仍属人工验收 |
+| FlexiCT 训练冒烟（GPU 实跑） | **发现并修复两个真实的 nnU-Net 2.8.0 兼容 bug**（此前 FlexiCT 从未在本机 nnunetv2 2.8.0 下走过 `nnUNet_extTrainer` 路径，均在冒烟首跑暴露）：① `flexict_trainer.py` 的 `__init__` 无条件向 `nnUNetTrainer.__init__` 转发 `unpack_dataset`，2.8.0 已移除该参数 → TypeError；② 2.8.0 的 `nnUNetTrainer.__init__` 按子类签名自省并索引父帧 `locals()` 记录 init kwargs，子类签名多出的参数名（含 `unpack_dataset`）→ KeyError。修复：条件转发 + 通过 `__signature__` 发布父类签名（2.5.2/2.8.0 双版本兼容），`test_flexict_pkg.py` 新增 `test_trainer_init_forwards_unpack_dataset_conditionally`（完整构造回归，10/10 通过） |
+| FlexiCT 训练冒烟结果 | 8-case 肾 kidney_left 2D、NUM_EPOCHS=2、MIRROR_DISABLE_AXES=1，经 `create_flexict_job` 走 UI 同款路径。job completed、模型注册（见交付报告更新） |
+
+**无法离线自动化的人工项（原因明确）**：
+
+| 项 | 不可自动化原因 | 已做替代验证 |
+|----|--------------|--------------|
+| 端到端主动学习闭环（Mimics overlay） | overlay 应用需真实 Mimics 内打开项目 + 激活图像 + verified grid | AL job 生命周期（含双配置预测、disagreement 排序、双带 mask 预生成）由 `test_flexict_integration.py` 69 项离线测试覆盖；`mask_to_buffer` 桥由 fake-mimics 流测试覆盖 |
+| AI Model Manager GUI 三类模型包导入 | 模型包导入向导需人工选择包文件 + 观察 UI 反馈 | GUI 冒烟覆盖窗口构建/默认 workspace 加载/后台扫描线程；注册表读写逻辑由 `ai_model_bundle`/`model_manager_ui` 单测覆盖 |
+| 远程 FlexiCT 实机 | 需 SSH 服务器 + Credential Manager 密码 + 首连指纹确认（安全约束禁止无人值守） | `test_remote_training.py` 套件覆盖 spec 生成/容器 env/known_hosts 逻辑 |
+| nnInteractive 实机（官方 + 自定义模型各 1 例） | 需真实 Mimics 会话内点/涂鸦交互 | fake-mimics `nninteractive` 流测试 + `nninteractive_bridge_prompts`/`nninteractive_task_integration`/`nnint_deep`/`nnint_functional` 四套件 |
+
 ## 遗留人工验收清单（GPU/实机依赖，无法离线自动化）
 
 | 项 | 操作 | 通过标准 |

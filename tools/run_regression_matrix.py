@@ -61,6 +61,7 @@ SUITES = [
     ("geometry_manifest_regressions", [sys.executable, "tools/test_geometry_manifest_regressions.py"], {"fast", "full"}),
     ("migrate_root", [sys.executable, "tools/test_migrate_root.py"], {"fast", "full"}),
     ("ui_preferences", [sys.executable, "tools/test_ui_preferences.py"], {"fast", "full"}),
+    ("gui_smoke", [sys.executable, "tools/test_gui_smoke.py"], {"fast", "full"}),
     # -- fake-mimics end-to-end flow tests ------------------------------
     ("flow_imports", [sys.executable, "tools/fake_mimics_flow_test.py", "--only", "imports"], {"smoke", "fast", "full"}),
     ("flow_export", [sys.executable, "tools/fake_mimics_flow_test.py", "--only", "export"], {"smoke", "fast", "full"}),

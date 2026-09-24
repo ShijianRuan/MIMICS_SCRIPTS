@@ -53,6 +53,27 @@ for _p in (_EXT_DIR, os.path.dirname(_EXT_DIR)):
 from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 
 
+# nnU-Net (2.8.0) records init kwargs by introspecting the SUBCLASS __init__
+# signature and indexing the PARENT frame's locals() — any parameter name that
+# is not also a parameter of nnUNetTrainer.__init__ itself raises KeyError at
+# construction (2.5.2 instead accepts unpack_dataset as a real parameter).
+# Our trainers keep unpack_dataset in their real signature (so 2.5.2's
+# get_trainer_from_args can pass it) but publish the parent's signature, which
+# is the only parameter-name set that survives both versions' introspection.
+_PARENT_INIT_PARAMS = frozenset(
+    inspect.signature(nnUNetTrainer.__init__).parameters)
+
+
+def _parent_accepts(name):
+    return name in _PARENT_INIT_PARAMS
+
+
+def _publish_parent_init_signature(cls):
+    """Make inspect.signature(cls.__init__) report the parent signature."""
+    cls.__init__.__signature__ = inspect.signature(nnUNetTrainer.__init__)
+    return cls
+
+
 # --- backbone architecture constants (match the pretrained weights) ---
 _EMBED_DIM = 864
 _PATCH_SIZE = 8
@@ -67,8 +88,14 @@ class FlexiCTBaseTrainer(nnUNetTrainer):
 
     def __init__(self, plans, configuration, fold, dataset_json,
                  unpack_dataset=True, device=torch.device("cuda")):
-        super().__init__(plans, configuration, fold, dataset_json,
-                         unpack_dataset=unpack_dataset, device=device)
+        # nnunetv2 2.5.2's nnUNetTrainer.__init__ takes unpack_dataset;
+        # 2.8.0 removed it. Forward it only when the parent accepts it.
+        if _parent_accepts("unpack_dataset"):
+            super().__init__(plans, configuration, fold, dataset_json,
+                             unpack_dataset=unpack_dataset, device=device)
+        else:
+            super().__init__(plans, configuration, fold, dataset_json,
+                             device=device)
         self.initial_lr = 3e-4
         self.vit_lr = 3e-5
         self.weight_decay = 5e-2
@@ -153,8 +180,14 @@ class FlexiCTFP32Trainer(FlexiCTBaseTrainer):
 
     def __init__(self, plans, configuration, fold, dataset_json,
                  unpack_dataset=True, device=torch.device("cuda")):
-        super().__init__(plans, configuration, fold, dataset_json,
-                         unpack_dataset=unpack_dataset, device=device)
+        # nnunetv2 2.5.2's nnUNetTrainer.__init__ takes unpack_dataset;
+        # 2.8.0 removed it. Forward it only when the parent accepts it.
+        if _parent_accepts("unpack_dataset"):
+            super().__init__(plans, configuration, fold, dataset_json,
+                             unpack_dataset=unpack_dataset, device=device)
+        else:
+            super().__init__(plans, configuration, fold, dataset_json,
+                             device=device)
         self.grad_scaler = None  # disable GradScaler -> pure fp32
 
     def train_step(self, batch):
@@ -174,6 +207,14 @@ class FlexiCTFP32Trainer(FlexiCTBaseTrainer):
         torch.nn.utils.clip_grad_norm_(self.network.parameters(), 12)
         self.optimizer.step()
         return {'loss': l.detach().cpu().numpy()}
+
+
+# Both trainer bases declare unpack_dataset in their real signature (needed by
+# nnunetv2 2.5.2's get_trainer_from_args), but nnU-Net 2.8.0 introspects the
+# subclass signature and indexes the parent frame's locals() — publish the
+# parent signature so the kwargs dump only sees names that exist on both sides.
+FlexiCTBaseTrainer = _publish_parent_init_signature(FlexiCTBaseTrainer)
+FlexiCTFP32Trainer = _publish_parent_init_signature(FlexiCTFP32Trainer)
 
 
 # ---------------------------------------------------------------------------
