@@ -170,7 +170,8 @@ def _flexict_configurations(request: dict[str, Any]) -> list[str]:
 
 def flexict_worker_environment(request: dict[str, Any],
                                roots: dict[str, Path],
-                               configuration: str) -> dict[str, str]:
+                               configuration: str,
+                               stage: str = "train") -> dict[str, str]:
     """Environment for a FlexiCT stage worker (documented trainer contract).
 
     The standalone repo's trainers/flexict_trainer.py reads FLEXICT_EXT_DIR,
@@ -200,14 +201,16 @@ def flexict_worker_environment(request: dict[str, Any],
         "NUM_EPOCHS": str(int(request.get("epochs") or DEFAULT_CONFIG["default_epochs"])),
         "nnUNet_compile": "0",
     }
-    if os.name == "nt":
-        # Windows: nnU-Net's spawn'd data-augmentation workers each import
-        # torch/OpenBLAS (~1GB commit each, 12 by default) and have a history
-        # of allocation-failure crashes on RAM-tight workstations that then
-        # poison the main process's CUDA context ("CUDA error: unknown
-        # error"). Single-process DA is slower but stable — the same fix the
-        # MedDINOv3 experiments needed on this machine. Linux (remote
-        # containers) keeps nnU-Net's multiprocessing default.
+    if os.name == "nt" and stage == "train":
+        # Windows training: nnU-Net's spawn'd data-augmentation workers each
+        # import torch/OpenBLAS (~1GB commit each, 12 by default) and have a
+        # history of allocation-failure crashes on RAM-tight workstations
+        # that then poison the main process's CUDA context ("CUDA error:
+        # unknown error"). Single-process DA is slower but stable — the same
+        # fix the MedDINOv3 experiments needed on this machine. Train stage
+        # ONLY: the planner (preprocess stage) feeds this same value to
+        # torch.set_num_threads and nnunetv2 2.8.0 rejects 0 there.
+        # Linux (remote containers) keeps nnU-Net's multiprocessing default.
         environment["nnUNet_n_proc_DA"] = "0"
     mirror = str(request.get("mirror_disable_axes")
                  or DEFAULT_CONFIG["default_mirror_disable_axes"] or "").strip()
@@ -569,7 +572,7 @@ def _spawn_flexict_worker(stage: str,
     original_known = set(np_mod.KNOWN_EPOCH_TRAINERS)
     try:
         np_mod._worker_environment = lambda _req, _roots: flexict_worker_environment(
-            request, roots, configuration)
+            request, roots, configuration, stage)
         np_mod.KNOWN_EPOCH_TRAINERS = original_known | set(TRAINERS.values())
         return _spawn_worker(
             stage, params, request, roots, job_dir, status_path,

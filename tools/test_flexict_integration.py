@@ -177,23 +177,27 @@ class TestWorkerEnvironment(unittest.TestCase):
         self.assertEqual(env["nnUNet_compile"], "0")
         self.assertNotIn("MIRROR_DISABLE_AXES", env)
 
-    def test_windows_forces_single_process_da(self):
-        """Windows workers must pin nnUNet_n_proc_DA=0.
+    def test_windows_forces_single_process_da_train_stage_only(self):
+        """Windows TRAIN workers must pin nnUNet_n_proc_DA=0.
 
         nnU-Net's spawn'd DA workers (12 by default, ~1GB commit each) crash
         with OpenBLAS allocation failures on RAM-tight Windows workstations
         and poison the main process's CUDA context; the fix (same as the
         MedDINOv3 experiments) is single-process data augmentation locally.
-        On non-Windows (remote Linux containers) the key must stay unset so
-        nnU-Net's multiprocessing default applies.
+        Preprocess workers must NOT set it: nnunetv2 2.8.0's planner feeds
+        the value to torch.set_num_threads and rejects 0. Non-Windows
+        (remote Linux containers) never sets it.
         """
-        env = fp.flexict_worker_environment(
-            self._request(), self._roots(), "2d")
         import os as _os
+        train_env = fp.flexict_worker_environment(
+            self._request(), self._roots(), "2d", stage="train")
+        preprocess_env = fp.flexict_worker_environment(
+            self._request(), self._roots(), "2d", stage="preprocess")
         if _os.name == "nt":
-            self.assertEqual(env.get("nnUNet_n_proc_DA"), "0")
+            self.assertEqual(train_env.get("nnUNet_n_proc_DA"), "0")
         else:
-            self.assertNotIn("nnUNet_n_proc_DA", env)
+            self.assertNotIn("nnUNet_n_proc_DA", train_env)
+        self.assertNotIn("nnUNet_n_proc_DA", preprocess_env)
 
     def test_mirror_axes_forwarded(self):
         request = fp.normalize_flexict_request(
