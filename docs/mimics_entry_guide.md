@@ -18,7 +18,7 @@
 
 | 入口 | 作用 | 需要满足的条件 |
 |------|------|--------------|
-| nnInteractive Annotate Official Model | 官方通用模型交互式分割（点/涂鸦提示） | **项目已打开** + 已激活图像 + 环境已设置 |
+| nnInteractive Annotate Official Model | 官方通用模型交互式分割（点/涂鸦提示） | **项目已打开** + 已激活图像 + 环境已设置 + 官方模型已就位（nnInteractive_v1.0，随分发源单独拷贝，缺失时见 99_Admin → Environment Guidance） |
 | nnInteractive Annotate Custom Model | 用自训任务模型交互式分割 | 同上 + 已训练好的自定义模型 |
 | nnInteractive Train and Manage Custom Models | 训练/监控/管理自定义任务模型（Model Center） | 已导出标注 + 环境已设置 |
 | FlexiCT Train Model | 少样本（8 例起）训练单器官分割模型（本地或远程） | 已导出标注的数据集 + 环境已设置 + 预训练权重已就位 |

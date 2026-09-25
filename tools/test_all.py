@@ -9484,6 +9484,13 @@ class TestEnvGuidance(unittest.TestCase):
         with open(os.path.join(env_dir, "python.exe"), "w") as handle:
             handle.write("x")
 
+    def _fake_official_model(self, root):
+        model_dir = os.path.join(
+            root, "python_env", "models", "nnInteractive_v1.0", "fold_0")
+        os.makedirs(model_dir, exist_ok=True)
+        with open(os.path.join(model_dir, "checkpoint_final.pth"), "w") as handle:
+            handle.write("x")
+
     def _write_state(self, payload):
         import json as _json
         runtime = os.path.join(self.root, ".mimics_runtime")
@@ -9501,9 +9508,78 @@ class TestEnvGuidance(unittest.TestCase):
         self.assertEqual("bad", issues[0]["severity"])
         self.assertTrue(issues[0]["fix_action"])
 
+    def test_missing_official_model_is_reported_bad(self):
+        eg = self._import_guidance()
+        self._fake_env(self.root)
+        old = os.environ.pop("NNINTERACTIVE_MODEL_DIR", None)
+        try:
+            issues = eg.collect_issues(self.root)
+        finally:
+            if old is not None:
+                os.environ["NNINTERACTIVE_MODEL_DIR"] = old
+        issue = next(i for i in issues if i["kind"] == "nninteractive_model")
+        self.assertEqual("bad", issue["severity"])
+        self.assertEqual("", issue["fix_action"])  # informational guidance
+        self.assertIn("nnInteractive_v1.0", issue["detail"])
+
+    def test_installed_official_model_silences_issue(self):
+        eg = self._import_guidance()
+        self._fake_env(self.root)
+        self._fake_official_model(self.root)
+        old = os.environ.pop("NNINTERACTIVE_MODEL_DIR", None)
+        try:
+            issues = eg.collect_issues(self.root)
+        finally:
+            if old is not None:
+                os.environ["NNINTERACTIVE_MODEL_DIR"] = old
+        self.assertEqual(
+            [], [i["kind"] for i in issues if i["kind"] == "nninteractive_model"])
+
+    def test_official_model_env_var_override(self):
+        eg = self._import_guidance()
+        self._fake_env(self.root)
+        model_dir = os.path.join(self.tmp, "elsewhere", "nnInteractive_v1.0")
+        fold = os.path.join(model_dir, "fold_0")
+        os.makedirs(fold)
+        with open(os.path.join(fold, "checkpoint_final.pth"), "w") as handle:
+            handle.write("x")
+        old = os.environ.pop("NNINTERACTIVE_MODEL_DIR", None)
+        try:
+            os.environ["NNINTERACTIVE_MODEL_DIR"] = model_dir
+            issues = eg.collect_issues(self.root)
+        finally:
+            if old is None:
+                os.environ.pop("NNINTERACTIVE_MODEL_DIR", None)
+            else:
+                os.environ["NNINTERACTIVE_MODEL_DIR"] = old
+        self.assertEqual(
+            [], [i["kind"] for i in issues if i["kind"] == "nninteractive_model"])
+
+    def test_official_model_config_key_override(self):
+        import json as _json
+        eg = self._import_guidance()
+        self._fake_env(self.root)
+        model_dir = os.path.join(self.tmp, "cfgmodel", "nnInteractive_v1.0")
+        fold = os.path.join(model_dir, "fold_1")
+        os.makedirs(fold)
+        with open(os.path.join(fold, "checkpoint_final.pth"), "w") as handle:
+            handle.write("x")
+        with open(os.path.join(self.root, "nninteractive_config.json"), "w",
+                  encoding="utf-8") as handle:
+            _json.dump({"model_dir": model_dir}, handle)
+        old = os.environ.pop("NNINTERACTIVE_MODEL_DIR", None)
+        try:
+            issues = eg.collect_issues(self.root)
+        finally:
+            if old is not None:
+                os.environ["NNINTERACTIVE_MODEL_DIR"] = old
+        self.assertEqual(
+            [], [i["kind"] for i in issues if i["kind"] == "nninteractive_model"])
+
     def test_failed_setup_state_is_reported(self):
         eg = self._import_guidance()
         self._fake_env(self.root)
+        self._fake_official_model(self.root)
         self._write_state({"status": "error", "message": "boom", "error": "E"})
         issues = eg.collect_issues(self.root)
         self.assertEqual(["setup_failed"], [i["kind"] for i in issues])
@@ -9512,6 +9588,7 @@ class TestEnvGuidance(unittest.TestCase):
     def test_incomplete_setup_lists_failed_packages(self):
         eg = self._import_guidance()
         self._fake_env(self.root)
+        self._fake_official_model(self.root)
         self._write_state({
             "status": "incomplete", "message": "partial",
             "failed_packages": ["torch", "nnunetv2"],
@@ -9523,6 +9600,7 @@ class TestEnvGuidance(unittest.TestCase):
     def test_stale_setup_state_ignored(self):
         eg = self._import_guidance()
         self._fake_env(self.root)
+        self._fake_official_model(self.root)
         self._write_state({
             "status": "error", "message": "old failure",
             "updated_at_epoch": time.time() - 3 * 24 * 60 * 60,
@@ -9533,6 +9611,7 @@ class TestEnvGuidance(unittest.TestCase):
         import json as _json
         eg = self._import_guidance()
         self._fake_env(self.root)
+        self._fake_official_model(self.root)
         old_root = os.path.join(self.tmp, "oldmachine", "MIMICS_SCRIPTS")
         with open(os.path.join(self.root, "nninteractive_config.json"), "w",
                   encoding="utf-8") as handle:
@@ -9550,6 +9629,7 @@ class TestEnvGuidance(unittest.TestCase):
         import json as _json
         eg = self._import_guidance()
         self._fake_env(self.root)
+        self._fake_official_model(self.root)
         with open(os.path.join(self.root, "nninteractive_config.json"), "w",
                   encoding="utf-8") as handle:
             _json.dump({

@@ -480,7 +480,7 @@ def run(preview_path=""):
         section.clear()
         if not issues:
             box = _row(section.body, [
-                "● Environment OK - Python, setup state, paths and weights check out.",
+                "● Environment OK - Python, setup state, paths, weights and the nnInteractive model check out.",
                 "",
             ])
             box.itemAt(0).widget().setProperty("status", "ok")

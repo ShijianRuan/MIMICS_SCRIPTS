@@ -778,21 +778,36 @@ def _runtime_paths(config):
             "nnInteractive task model directory",
         )
     else:
-        model_dir = _first_existing_dir(
-            [
-                os.environ.get("NNINTERACTIVE_MODEL_DIR", ""),
-                config.get("model_dir", ""),
-                os.path.join(environment_root, "models", "nnInteractive_v1.0"),
-                os.path.join(root, "python_env", "models", "nnInteractive_v1.0"),
-                os.path.join(root, "nninteractive_env", "models", "nnInteractive_v1.0"),
-            ],
-            "nnInteractive model directory",
-        )
+        _official_model_candidates = [
+            os.environ.get("NNINTERACTIVE_MODEL_DIR", ""),
+            config.get("model_dir", ""),
+            os.path.join(environment_root, "models", "nnInteractive_v1.0"),
+            os.path.join(root, "python_env", "models", "nnInteractive_v1.0"),
+            os.path.join(root, "nninteractive_env", "models", "nnInteractive_v1.0"),
+        ]
+        try:
+            model_dir = _first_existing_dir(
+                _official_model_candidates,
+                "nnInteractive model directory",
+            )
+        except RuntimeError as exc:
+            raise RuntimeError(
+                "{0}\n\n"
+                "This is the official nnInteractive model, which ships outside "
+                "the deployment package. Copy the nnInteractive_v1.0 folder "
+                "from your distribution source into one of the locations "
+                "above (each fold needs checkpoint_final.pth). See the "
+                "Environment Guidance entry in the 99_Admin menu for help. "
+                "Custom trained models are not affected.".format(exc)
+            )
     folds = _model_folds(model_dir)
     if not folds:
         raise RuntimeError(
             "The nnInteractive model directory has no usable checkpoint.\n"
-            "Expected fold_*/checkpoint_final.pth under:\n{0}".format(model_dir)
+            "Expected fold_*/checkpoint_final.pth under:\n{0}\n"
+            "The copy appears incomplete - re-copy the whole nnInteractive_v1.0 "
+            "folder from your distribution source. See the Environment "
+            "Guidance entry in the 99_Admin menu for help.".format(model_dir)
         )
     probe_timeout = int(config.get("environment_probe_timeout_seconds", 180))
     probe = _probe_python(python_exe, probe_timeout)

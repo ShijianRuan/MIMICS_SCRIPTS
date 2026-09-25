@@ -148,6 +148,51 @@ def detect_old_root(project_root: Path | None = None) -> str:
     return ""
 
 
+def _nninteractive_model_candidates(root: Path) -> list[str]:
+    """Same candidates as runtime_py35.nninteractive_mimics's official-model
+    chain (the chain whose bare error this guidance replaces): env var ->
+    nninteractive_config.json's model_dir -> the found external environment's
+    models folder -> the two repo env folders."""
+    candidates = [os.environ.get("NNINTERACTIVE_MODEL_DIR", "")]
+    config = _read_json(root / "nninteractive_config.json", {}) or {}
+    configured = str(config.get("model_dir") or "").strip()
+    if configured:
+        resolved = Path(configured)
+        if not resolved.is_absolute():
+            resolved = root / configured
+        candidates.append(str(resolved))
+    environment_root = ""
+    found_python = find_external_python(root)
+    if found_python:
+        environment_root = str(Path(found_python).parent)
+    if environment_root:
+        candidates.append(os.path.join(environment_root, "models", "nnInteractive_v1.0"))
+    candidates.extend((
+        str(root / "python_env" / "models" / "nnInteractive_v1.0"),
+        str(root / "nninteractive_env" / "models" / "nnInteractive_v1.0"),
+    ))
+    return candidates
+
+
+def _nninteractive_official_model(root: Path) -> str:
+    """First candidate that is a directory with a fold_*/checkpoint_final.pth
+    (the same usability test as nninteractive_mimics._model_folds)."""
+    for candidate in _nninteractive_model_candidates(root):
+        if not candidate:
+            continue
+        model_dir = Path(candidate)
+        if not model_dir.is_dir():
+            continue
+        try:
+            entries = sorted(model_dir.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.name.startswith("fold_") and (entry / "checkpoint_final.pth").is_file():
+                return str(model_dir)
+    return ""
+
+
 def collect_issues(project_root: Path | None = None) -> list[dict]:
     """Collect current environment issues. Pure reads; safe anywhere."""
     root = Path(project_root or ROOT)
@@ -238,6 +283,27 @@ def collect_issues(project_root: Path | None = None) -> list[dict]:
                 "fix_action": "",
                 "severity": "warn",
             })
+
+    nn_model = _nninteractive_official_model(root)
+    if not nn_model:
+        issues.append({
+            "kind": "nninteractive_model",
+            "title": "nnInteractive official model is not installed",
+            "detail": (
+                "The official nnInteractive model (nnInteractive_v1.0 with "
+                "fold_*/checkpoint_final.pth) was not found in any of the "
+                "searched locations:\n{0}\n"
+                "Without it the official-model annotate entry cannot run "
+                "(custom trained models are unaffected). Copy the model "
+                "folder from your distribution source into one of the "
+                "locations above, or set NNINTERACTIVE_MODEL_DIR / the "
+                "model_dir entry in nninteractive_config.json.".format(
+                    "\n".join(c for c in _nninteractive_model_candidates(root) if c)
+                )
+            ),
+            "fix_action": "",
+            "severity": "bad",
+        })
 
     return issues
 
@@ -334,7 +400,8 @@ def show_dialog(project_root: Path | None = None, parent=None) -> int:
     if not issues:
         note = QtWidgets.QLabel(
             "No environment problems detected.\n"
-            "Python, packages, configured paths and FlexiCT weights all check out."
+            "Python, packages, configured paths, FlexiCT weights and the "
+            "nnInteractive official model all check out."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
