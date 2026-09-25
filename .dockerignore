@@ -36,3 +36,27 @@ docs/MimicsHelp_MD/**
 # FlexiCT backbone weights are mounted at /models, never baked into the image.
 integrations/flexict-finetune/weights
 integrations/flexict-finetune/weights/**
+
+# Local workspaces, job outputs, caches, and the bundled training-model
+# registries are deployment state, not image content. Model weights are
+# mounted at /models at runtime.
+flexict_models
+flexict_models/**
+nninteractive_task_models
+nninteractive_task_models/**
+python_env
+python_env/**
+docs
+docs/**
+external
+external/**
+__pycache__
+__pycache__/**
+.pytest_cache
+.pytest_cache/**
+.claude
+.claude/**
+.mypy_cache
+.mypy_cache/**
+node_modules
+node_modules/**

@@ -37,6 +37,7 @@ try:
         RemoteCommandError,
         RemoteComputeError,
         SSHSession,
+        container_runtime_command,
         docker_gpu_request,
         get_profile,
         read_json,
@@ -48,6 +49,7 @@ except ImportError:
         RemoteCommandError,
         RemoteComputeError,
         SSHSession,
+        container_runtime_command,
         docker_gpu_request,
         get_profile,
         read_json,
@@ -864,8 +866,9 @@ def _remote_code_fingerprint(session: SSHSession, image: str) -> str:
     """
     payload = json.dumps(_REMOTE_CODE_FINGERPRINT_SCRIPT)
     output = session.execute(
-        "docker run --rm --network none --entrypoint python "
+        "{runtime} run --rm --network none --entrypoint python "
         "{image} -c {script}".format(
+            runtime=container_runtime_command(getattr(session, "profile", None)),
             image=shlex.quote(image),
             script=shlex.quote(payload),
         ),
@@ -1731,7 +1734,8 @@ def _maintain_remote_nnunet_cache(
     )
     active = str(
         session.execute(
-            "docker ps -q --filter {owner} --filter {training}".format(
+            "{runtime} ps -q --filter {owner} --filter {training}".format(
+                runtime=container_runtime_command(getattr(session, "profile", None)),
                 owner=shlex.quote(owner_filter),
                 training=shlex.quote("label={}={}".format(REMOTE_TRAINING_LABEL, "true")),
             ),
@@ -2472,7 +2476,7 @@ def _launch_container(
         "automatic" if gpu_scope == "all" else safe_identifier(gpu_device, "device")
     )
     command = (
-        "docker run -d --name {name} --gpus {gpu_request} --network none "
+        "{runtime} run -d --name {name} --gpus {gpu_request} --network none "
         "--label mimics-script.remote-training=true "
         "--label {owner_label} "
         "--label {job_label} "
@@ -2491,6 +2495,7 @@ def _launch_container(
         "-e HF_DATASETS_OFFLINE=1 -e WANDB_MODE=offline "
         "{image} python /app/tools/remote_worker.py run --job-dir /job"
     ).format(
+        runtime=container_runtime_command(profile),
         name=shlex.quote(container_name),
         gpu_request=shlex.quote(docker_gpu_request(profile)),
         owner_label=shlex.quote(
@@ -2656,8 +2661,11 @@ def _validate_remote_assets(
 
 def _container_state(session: SSHSession, container_name: str) -> tuple[str, int]:
     code, output = session.execute_result(
-        "docker inspect --format '{{{{.State.Status}}}} "
-        "{{{{.State.ExitCode}}}}' {}".format(shlex.quote(container_name))
+        "{runtime} inspect --format '{{{{.State.Status}}}} "
+        "{{{{.State.ExitCode}}}}' {container}".format(
+            runtime=container_runtime_command(getattr(session, "profile", None)),
+            container=shlex.quote(container_name),
+        )
     )
     output = output.strip()
     if code != 0:
@@ -2684,8 +2692,9 @@ def _container_labels(
     container_name: str,
 ) -> dict[str, str]:
     code, output = session.execute_result(
-        "docker inspect --format '{{{{json .Config.Labels}}}}' {}".format(
-            shlex.quote(container_name)
+        "{runtime} inspect --format '{{{{json .Config.Labels}}}}' {container}".format(
+            runtime=container_runtime_command(getattr(session, "profile", None)),
+            container=shlex.quote(container_name),
         )
     )
     if code != 0:
@@ -2756,15 +2765,17 @@ def _remove_container(
     state, _code = _container_state(session, container_name)
     if stop_if_running and state not in {"exited", "dead", "created"}:
         session.execute(
-            "docker stop --time 20 {} >/dev/null 2>&1 || true".format(
-                shlex.quote(container_name)
+            "{runtime} stop --time 20 {container} >/dev/null 2>&1 || true".format(
+                runtime=container_runtime_command(getattr(session, "profile", None)),
+                container=shlex.quote(container_name),
             ),
             timeout=40,
             check=False,
         )
     session.execute(
-        "docker rm -f {} >/dev/null 2>&1 || true".format(
-            shlex.quote(container_name)
+        "{runtime} rm -f {container} >/dev/null 2>&1 || true".format(
+            runtime=container_runtime_command(getattr(session, "profile", None)),
+            container=shlex.quote(container_name),
         ),
         timeout=40,
         check=False,
@@ -3390,8 +3401,9 @@ def _stop_remote(
             time.sleep(1.0)
     if container_exists:
         session.execute(
-            "docker stop --time 20 {} >/dev/null 2>&1 || true".format(
-                shlex.quote(container_name)
+            "{runtime} stop --time 20 {container} >/dev/null 2>&1 || true".format(
+                runtime=container_runtime_command(getattr(session, "profile", None)),
+                container=shlex.quote(container_name),
             ),
             timeout=40,
             check=False,
@@ -4077,9 +4089,10 @@ def run(spec_path: Path) -> int:
                 controller_log,
             )
         session.execute(
-            "docker container prune -f "
+            "{runtime} container prune -f "
             "--filter label=mimics-script.remote-training=true "
             "--filter {owner} >/dev/null 2>&1 || true".format(
+                runtime=container_runtime_command(profile),
                 owner=shlex.quote(
                     "label=mimics-script.owner={}".format(
                         safe_identifier(profile.get("username"), "user")
@@ -4089,8 +4102,9 @@ def run(spec_path: Path) -> int:
             check=False,
         )
         runtime_image_id = session.execute(
-            "docker image inspect --format '{{{{.Id}}}}' {}".format(
-                shlex.quote(profile["runtime_image"])
+            "{runtime} image inspect --format '{{{{.Id}}}}' {image}".format(
+                runtime=container_runtime_command(profile),
+                image=shlex.quote(profile["runtime_image"]),
             )
         ).strip()
         asset_identity = _validate_remote_assets(
@@ -4396,8 +4410,11 @@ def run(spec_path: Path) -> int:
                         expected_job=job_slug,
                     )
                     container_id = session.execute(
-                        "docker inspect --format '{{{{.Id}}}}' {}".format(
-                            shlex.quote(container_name)
+                        "{runtime} inspect --format '{{{{.Id}}}}' {container}".format(
+                            runtime=container_runtime_command(
+                                getattr(session, "profile", None)
+                            ),
+                            container=shlex.quote(container_name),
                         )
                     ).strip()
                     break

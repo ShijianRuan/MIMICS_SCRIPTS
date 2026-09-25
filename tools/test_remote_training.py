@@ -774,6 +774,90 @@ class CodeDriftTests(unittest.TestCase):
         self.assertEqual(invalid["remote_code_verify"], "warn")
 
 
+class ContainerRuntimeAdapterTests(unittest.TestCase):
+    """nerdctl servers run the same command flow with a swapped prefix."""
+
+    def test_runtime_command_defaults_to_docker(self):
+        self.assertEqual(
+            remote_compute.container_runtime_command(None), "docker"
+        )
+        self.assertEqual(
+            remote_compute.container_runtime_command(
+                {"container_runtime": ""}
+            ),
+            "docker",
+        )
+        self.assertEqual(
+            remote_compute.container_runtime_command(
+                {"container_runtime": "bogus"}
+            ),
+            "docker",
+        )
+
+    def test_runtime_command_selects_nerdctl(self):
+        self.assertEqual(
+            remote_compute.container_runtime_command(
+                {"container_runtime": "nerdctl"}
+            ),
+            "nerdctl",
+        )
+        # profile normalization preserves and validates the field
+        normalized = remote_compute.normalize_profile(
+            {
+                "name": "GPU server",
+                "host": "server",
+                "username": "user",
+                "container_runtime": "nerdctl",
+            }
+        )
+        self.assertEqual(normalized["container_runtime"], "nerdctl")
+
+    def test_container_commands_use_profile_runtime(self):
+        class Session:
+            def __init__(self, profile):
+                self.profile = remote_compute.normalize_profile(profile)
+                self.commands = []
+
+            def execute(self, command, **_kwargs):
+                self.commands.append(command)
+                if command.startswith("nerdctl inspect"):
+                    return "running 0"
+                return ""
+
+            def execute_result(self, command, **_kwargs):
+                self.commands.append(command)
+                return 0, "running 0"
+
+        session = Session(
+            {
+                "name": "GPU server",
+                "host": "server",
+                "username": "user",
+                "container_runtime": "nerdctl",
+            }
+        )
+        state, code = controller._container_state(session, "job-container")
+        self.assertEqual(state, "running")
+        self.assertEqual(code, 0)
+        self.assertTrue(
+            session.commands[0].startswith("nerdctl inspect"),
+            session.commands[0],
+        )
+        self.assertNotIn("docker", session.commands[0])
+
+    def test_fake_session_without_profile_still_defaults_docker(self):
+        # Test doubles and legacy callers may pass sessions with no
+        # .profile attribute — the adapter must fall back to docker.
+        class Session:
+            def execute_result(self, command, **_kwargs):
+                self.seen = command
+                return 0, "exited 0"
+
+        session = Session()
+        controller._container_state(session, "job-container")
+        self.assertTrue(session.seen.startswith("docker inspect"), session.seen)
+
+
 class MonitorRobustnessTests(unittest.TestCase):
     """Reconnect budget and stall detection bound unattended monitoring."""
 

@@ -173,6 +173,22 @@ def docker_gpu_request(profile: dict[str, Any]) -> str:
     return "all" if device == DEFAULT_GPU_DEVICE else "device={}".format(device)
 
 
+CONTAINER_RUNTIMES = {"docker", "nerdctl"}
+
+
+def container_runtime_command(profile: dict[str, Any] | None) -> str:
+    """Container CLI prefix for this server profile.
+
+    nerdctl is CLI-compatible with the docker subcommands the controller
+    uses (run/ps/inspect/stop/rm/prune/image inspect), so servers that ship
+    nerdctl instead of dockerd (containerd-only nodes) need only a prefix
+    swap. Unknown/missing profiles fall back to docker — the historical
+    behavior and the only runtime pre-nerdctl servers expose.
+    """
+    value = str(((profile or {}).get("container_runtime")) or "").strip().lower()
+    return value if value in CONTAINER_RUNTIMES else "docker"
+
+
 def normalize_profile(profile: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(profile, dict):
         raise ValueError("Remote server profile must be an object.")
@@ -239,6 +255,11 @@ def normalize_profile(profile: dict[str, Any]) -> dict[str, Any]:
     ).strip().lower()
     if remote_code_verify not in {"strict", "warn", "off"}:
         remote_code_verify = "warn"
+    container_runtime = (
+        str(profile.get("container_runtime") or "docker").strip().lower()
+    )
+    if container_runtime not in CONTAINER_RUNTIMES:
+        container_runtime = "docker"
     return {
         "profile_id": profile_id,
         "name": name,
@@ -254,6 +275,7 @@ def normalize_profile(profile: dict[str, Any]) -> dict[str, Any]:
         "remote_cache_retention_days": remote_cache_retention_days,
         "remote_weights_verify": remote_weights_verify,
         "remote_code_verify": remote_code_verify,
+        "container_runtime": container_runtime,
         "updated_at_epoch": time.time(),
     }
 
@@ -808,10 +830,12 @@ def test_connection(
                 "run Test Connection again. Details: {}".format(root, exc)
             ) from exc
         image = session.profile["runtime_image"]
+        runtime_cmd = container_runtime_command(session.profile)
         try:
             image_id = session.execute(
-                "docker image inspect --format '{{{{.Id}}}}' {}".format(
-                    shlex.quote(image)
+                "{runtime} image inspect --format '{{{{.Id}}}}' {image}".format(
+                    runtime=runtime_cmd,
+                    image=shlex.quote(image),
                 )
             ).strip()
         except Exception as exc:
@@ -824,10 +848,11 @@ def test_connection(
         gpu_request = docker_gpu_request(session.profile)
         try:
             preflight_output = session.execute(
-                "docker run --rm --gpus {gpu} --network none "
+                "{runtime} run --rm --gpus {gpu} --network none "
                 "-v {models}:/models:ro {image} "
                 "python /app/tools/remote_worker.py preflight "
                 "--models-dir /models".format(
+                    runtime=runtime_cmd,
                     gpu=shlex.quote(gpu_request),
                     models=shlex.quote(models),
                     image=shlex.quote(image),
