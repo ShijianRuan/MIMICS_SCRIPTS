@@ -1033,6 +1033,83 @@ class SpatialContractTests(unittest.TestCase):
             self.assertIn("/nnunet/inference/Dataset712_", raw)
 
 
+class TestSweepExpiredJobs(unittest.TestCase):
+    def _make_job(self, tmp, name, status, completed_at=None):
+        jobs = Path(tmp) / "jobs" / name
+        jobs.mkdir(parents=True)
+        from nnunet_common import write_json_atomic
+
+        payload = {"status": status, "job_id": name}
+        if completed_at is not None:
+            payload["completed_at_epoch"] = completed_at
+        write_json_atomic(jobs / "status.json", payload)
+        (jobs / "payload.bin").write_bytes(b"x" * 100)
+        return jobs
+
+    def test_old_terminal_jobs_are_pruned_keeping_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._make_job(tmp, "train_old", "completed", completed_at=time.time() - 40 * 86400)
+            result = pipeline._sweep_expired_jobs(tmp, {"job_retention_days": 30})
+            self.assertEqual(result["removed_jobs"], ["train_old"])
+            self.assertTrue((Path(tmp) / "jobs" / "train_old" / "status.json").is_file())
+            self.assertFalse((Path(tmp) / "jobs" / "train_old" / "payload.bin").exists())
+
+    def test_recent_jobs_kept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._make_job(tmp, "train_new", "completed", completed_at=time.time())
+            result = pipeline._sweep_expired_jobs(tmp, {"job_retention_days": 30})
+            self.assertEqual(result["removed_jobs"], [])
+            self.assertTrue((Path(tmp) / "jobs" / "train_new" / "payload.bin").exists())
+
+    def test_live_jobs_never_pruned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._make_job(tmp, "train_live", "training")
+            old = time.time() - 40 * 86400
+            os.utime(str(Path(tmp) / "jobs" / "train_live" / "status.json"), (old, old))
+            result = pipeline._sweep_expired_jobs(tmp, {"job_retention_days": 30})
+            self.assertEqual(result["removed_jobs"], [])
+            self.assertTrue((Path(tmp) / "jobs" / "train_live" / "payload.bin").exists())
+
+    def test_reattaching_remote_jobs_never_pruned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old = time.time() - 40 * 86400
+            self._make_job(tmp, "remote_job", "reattaching", completed_at=old)
+            result = pipeline._sweep_expired_jobs(tmp, {"job_retention_days": 30})
+            self.assertEqual(result["removed_jobs"], [])
+            self.assertTrue((Path(tmp) / "jobs" / "remote_job" / "payload.bin").exists())
+
+    def test_zero_retention_disables(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._make_job(tmp, "train_old", "completed", completed_at=0.0)
+            old = time.time() - 40 * 86400
+            os.utime(str(Path(tmp) / "jobs" / "train_old" / "status.json"), (old, old))
+            result = pipeline._sweep_expired_jobs(tmp, {"job_retention_days": 0})
+            self.assertEqual(result["removed_jobs"], [])
+            self.assertTrue((Path(tmp) / "jobs" / "train_old" / "payload.bin").exists())
+
+    def test_models_and_cache_untouched(self):
+        """Registered models and caches must never be swept.
+
+        models/ holds the user's trained-model assets and cache/ the
+        rebuildable source-grid cache; the sweep's contract is jobs/ only.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            self._make_job(tmp, "train_old", "completed", completed_at=time.time() - 40 * 86400)
+            models = Path(tmp) / "models" / "task701" / "model_x"
+            models.mkdir(parents=True)
+            (models / "model.safetensors").write_bytes(b"weights")
+            cache = Path(tmp) / "cache" / "source_grid" / "task701"
+            cache.mkdir(parents=True)
+            (cache / "case.bin").write_bytes(b"cache")
+            old = time.time() - 40 * 86400
+            os.utime(str(models / "model.safetensors"), (old, old))
+            os.utime(str(cache / "case.bin"), (old, old))
+            result = pipeline._sweep_expired_jobs(tmp, {"job_retention_days": 30})
+            self.assertEqual(result["removed_jobs"], ["train_old"])
+            self.assertTrue((models / "model.safetensors").is_file())
+            self.assertTrue((cache / "case.bin").is_file())
+
+
 class JobLifecycleTests(unittest.TestCase):
     def test_worker_environment_caps_blas_threads_every_stage(self):
         """Every stage worker must cap BLAS threads to one.

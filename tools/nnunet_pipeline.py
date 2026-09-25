@@ -33,6 +33,7 @@ for candidate in (ROOT, ROOT / "tools"):
 from nnunet_common import (  # noqa: E402
     MODEL_SCHEMA_VERSION,
     SCHEMA_VERSION,
+    TERMINAL_STATES,
     TRAINER_ROOT,
     append_log,
     compact_completed_log,
@@ -1473,6 +1474,87 @@ def _record_log_compaction(status_path: Path, log_path: Path) -> None:
         pass
 
 
+NNUNET_CONFIG_PATH = ROOT / "nnunet_config.json"
+
+NNUNET_DEFAULT_CONFIG: dict[str, Any] = {
+    "job_retention_days": 30,
+}
+
+
+def load_nnunet_config(explicit_path: str | Path | None = None) -> dict[str, Any]:
+    """Merge nnunet_config.json over defaults; unknown keys are kept."""
+    config = dict(NNUNET_DEFAULT_CONFIG)
+    source = Path(explicit_path) if explicit_path else NNUNET_CONFIG_PATH
+    payload = None
+    try:
+        with source.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            config[str(key)] = value
+    return config
+
+
+def _sweep_expired_jobs(workspace: str | Path,
+                        config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Prune terminal job dirs older than job_retention_days (keep status.json).
+
+    Mirrors the FlexiCT/nnInteractive sweep: retention 0/absent disables;
+    completed_at_epoch (fallback: status.json mtime) decides; status.json and
+    the registry survive so history stays browsable. Only jobs/ is touched —
+    registered models/ and caches are out of scope by construction.
+    """
+    cfg = config or load_nnunet_config()
+    try:
+        retention_days = float(cfg.get("job_retention_days") or 0)
+    except (TypeError, ValueError):
+        retention_days = 0.0
+    if retention_days <= 0:
+        return {"removed_jobs": [], "kept_jobs": 0, "retention_days": 0.0}
+    paths = workspace_paths(workspace)
+    cutoff = time.time() - retention_days * 86400
+    removed = []
+    kept = 0
+    jobs_dir = paths["jobs"]
+    if not jobs_dir.is_dir():
+        return {"removed_jobs": [], "kept_jobs": 0, "retention_days": retention_days}
+    for job_dir in sorted(jobs_dir.iterdir()):
+        if not job_dir.is_dir():
+            continue
+        status_path = job_dir / "status.json"
+        if not status_path.is_file():
+            continue
+        status = read_json(status_path, {}) or {}
+        if str(status.get("status") or "").lower() not in TERMINAL_STATES:
+            continue
+        try:
+            finished = float(status.get("completed_at_epoch") or 0)
+        except (TypeError, ValueError):
+            finished = 0.0
+        if finished <= 0:
+            try:
+                finished = status_path.stat().st_mtime
+            except OSError:
+                continue
+        if finished >= cutoff:
+            kept += 1
+            continue
+        for child in sorted(job_dir.iterdir()):
+            if child.name == "status.json":
+                continue
+            if child.is_dir():
+                shutil.rmtree(str(child), ignore_errors=True)
+            else:
+                try:
+                    child.unlink()
+                except OSError:
+                    pass
+        removed.append(job_dir.name)
+    return {"removed_jobs": removed, "kept_jobs": kept, "retention_days": retention_days}
+
+
 def run_training(job_dir: Path) -> int:
     request_path = job_dir / "request.json"
     status_path = job_dir / "status.json"
@@ -1649,6 +1731,10 @@ def run_training(job_dir: Path) -> int:
     finally:
         shutil.rmtree(str(staging), ignore_errors=True)
         _record_log_compaction(status_path, log_path)
+        try:
+            _sweep_expired_jobs(str(request["workspace"]))
+        except OSError:
+            pass
 
 
 def run_inference(job_dir: Path) -> int:
@@ -1801,6 +1887,10 @@ def run_inference(job_dir: Path) -> int:
         return 1
     finally:
         _record_log_compaction(status_path, log_path)
+        try:
+            _sweep_expired_jobs(str(request["workspace"]))
+        except OSError:
+            pass
 
 
 def main() -> int:

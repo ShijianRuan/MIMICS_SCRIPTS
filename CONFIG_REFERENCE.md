@@ -224,6 +224,15 @@ locked to the validated few-shot configuration and is not configurable here.
 | `job_retention_days` | `30` | Terminal job folder retention before cleanup (0 disables sweeping). |
 | `status_poll_seconds` | `1.0` | Job-status polling interval. |
 
+## `nnunet_config.json`
+
+Controls the generic nnU-Net training/inference pipeline's job housekeeping.
+The training recipe itself is managed by nnU-Net and is not configurable here.
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `job_retention_days` | `30` | Terminal job folder retention before cleanup (0 disables sweeping). Terminal jobs (completed/failed/cancelled/abandoned) older than this are pruned to their `status.json` when any nnU-Net job finishes; registered models and caches are never touched. |
+
 ## Environment Variables
 
 ### Executables and Paths
