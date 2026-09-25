@@ -113,6 +113,14 @@ class TrainingSetupWindow:
         layout.setColumnStretch(1, 1)
         return group, layout
 
+    def _hint(self, text):
+        """One-line explanation label under a form field (A5 minimal plan)."""
+        QtWidgets = self.QtWidgets
+        label = QtWidgets.QLabel(text)
+        label.setObjectName("hint")
+        label.setWordWrap(True)
+        return label
+
     def _path_row(self, edit, title, directory=True, file_filter="All files (*)"):
         QtWidgets = self.QtWidgets
         container = QtWidgets.QWidget()
@@ -179,16 +187,21 @@ class TrainingSetupWindow:
         )
         form.addWidget(QtWidgets.QLabel("Dataset ID *"), 1, 0)
         form.addWidget(self.dataset_id, 1, 1)
+        self.dataset_id_hint = self._hint(
+            "A number identifying this task. A free number is suggested "
+            "automatically; only change it when training a second, unrelated task."
+        )
+        form.addWidget(self.dataset_id_hint, 2, 0, 1, 2)
         self.modality_combo = QtWidgets.QComboBox()
         for label, value in (("CT", "CT"), ("MRI", "MRI"), ("Other", "Other")):
             self.modality_combo.addItem(label, value)
-        form.addWidget(QtWidgets.QLabel("Image modality"), 2, 0)
-        form.addWidget(self.modality_combo, 2, 1)
+        form.addWidget(QtWidgets.QLabel("Image modality"), 3, 0)
+        form.addWidget(self.modality_combo, 3, 1)
         self.dataset_edit = QtWidgets.QLineEdit()
         self.dataset_edit.setPlaceholderText("Folder containing one subfolder per case")
-        form.addWidget(QtWidgets.QLabel("Original image dataset *"), 3, 0)
+        form.addWidget(QtWidgets.QLabel("Original image dataset *"), 4, 0)
         form.addWidget(
-            self._path_row(self.dataset_edit, "Select original image dataset"), 3, 1
+            self._path_row(self.dataset_edit, "Select original image dataset"), 4, 1
         )
         layout.addWidget(project)
 
@@ -403,50 +416,77 @@ class TrainingSetupWindow:
         self.epochs_spin.setValue(1000)
         train_form.addWidget(QtWidgets.QLabel("Epochs"), 2, 0)
         train_form.addWidget(self.epochs_spin, 2, 1)
+        train_form.addWidget(self._hint(
+            "More epochs mean longer training. 1000 is the nnU-Net standard."
+        ), 3, 0, 1, 2)
         self.fold_combo = QtWidgets.QComboBox()
         for value in ("0", "1", "2", "3", "4", "all"):
             self.fold_combo.addItem("Fold {}".format(value), value)
         self.fold_combo.currentIndexChanged.connect(self._refresh_fold)
-        train_form.addWidget(QtWidgets.QLabel("Fold"), 3, 0)
-        train_form.addWidget(self.fold_combo, 3, 1)
+        train_form.addWidget(QtWidgets.QLabel("Fold"), 4, 0)
+        train_form.addWidget(self.fold_combo, 4, 1)
+        self.fold_hint = self._hint(
+            "One of five data splits is held out to measure quality. Keep "
+            "Fold 0 unless you need cross-validation; 'all' trains five "
+            "models one after another."
+        )
+        train_form.addWidget(self.fold_hint, 5, 0, 1, 2)
         self.validation_spin = QtWidgets.QDoubleSpinBox()
         self.validation_spin.setRange(0.0, 0.8)
         self.validation_spin.setSingleStep(0.05)
         self.validation_spin.setValue(0.2)
-        train_form.addWidget(QtWidgets.QLabel("Validation fraction"), 4, 0)
-        train_form.addWidget(self.validation_spin, 4, 1)
+        train_form.addWidget(QtWidgets.QLabel("Validation fraction"), 6, 0)
+        train_form.addWidget(self.validation_spin, 6, 1)
+        train_form.addWidget(self._hint(
+            "Share of cases kept out for quality measurement. 0.2 is "
+            "standard. Not used when Fold is 'all'."
+        ), 7, 0, 1, 2)
         self.workers_spin = QtWidgets.QSpinBox()
         self.workers_spin.setRange(1, 64)
         self.workers_spin.setValue(4)
-        train_form.addWidget(QtWidgets.QLabel("Preprocessing workers"), 5, 0)
-        train_form.addWidget(self.workers_spin, 5, 1)
+        train_form.addWidget(QtWidgets.QLabel("Preprocessing workers"), 8, 0)
+        train_form.addWidget(self.workers_spin, 8, 1)
+        train_form.addWidget(self._hint(
+            "CPU workers for preparing the training data. 4 works for most machines."
+        ), 9, 0, 1, 2)
         self.num_gpus_spin = QtWidgets.QSpinBox()
         self.num_gpus_spin.setRange(1, 16)
         self.num_gpus_spin.setValue(1)
-        train_form.addWidget(QtWidgets.QLabel("GPU count"), 6, 0)
-        train_form.addWidget(self.num_gpus_spin, 6, 1)
+        train_form.addWidget(QtWidgets.QLabel("GPU count"), 10, 0)
+        train_form.addWidget(self.num_gpus_spin, 10, 1)
+        self.gpu_count_hint = self._hint(
+            "How many GPUs to use in parallel. If you list specific devices "
+            "below, their number must match this count."
+        )
+        train_form.addWidget(self.gpu_count_hint, 11, 0, 1, 2)
         self.gpu_devices_edit = QtWidgets.QLineEdit()
         self.gpu_devices_edit.setPlaceholderText("Optional, for example 0 or 0,1")
         self.gpu_devices_edit.setToolTip(
             "Restricts local execution to these GPU IDs. Remote GPU selection is configured on the Compute tab."
         )
-        train_form.addWidget(QtWidgets.QLabel("Local GPU devices"), 7, 0)
-        train_form.addWidget(self.gpu_devices_edit, 7, 1)
+        train_form.addWidget(QtWidgets.QLabel("Local GPU devices"), 12, 0)
+        train_form.addWidget(self.gpu_devices_edit, 12, 1)
+        self.gpu_devices_hint = self._hint(
+            "Leave empty to let training pick the GPUs automatically. "
+            "Example: 0 or 0,1. The number of listed devices must match "
+            "the GPU count above."
+        )
+        train_form.addWidget(self.gpu_devices_hint, 13, 0, 1, 2)
         self.pretrained_edit = QtWidgets.QLineEdit()
-        train_form.addWidget(QtWidgets.QLabel("Pretrained checkpoint"), 8, 0)
+        train_form.addWidget(QtWidgets.QLabel("Pretrained checkpoint"), 14, 0)
         self.pretrained_widget = self._path_row(
             self.pretrained_edit,
             "Select nnU-Net pretrained checkpoint",
             directory=False,
             file_filter="PyTorch checkpoint (*.pth);;All files (*)",
         )
-        train_form.addWidget(self.pretrained_widget, 8, 1)
+        train_form.addWidget(self.pretrained_widget, 14, 1)
         self.continue_check = QtWidgets.QCheckBox("Continue an interrupted matching fold")
         self.continue_check.toggled.connect(self._refresh_continue_training)
-        train_form.addWidget(self.continue_check, 9, 0, 1, 2)
+        train_form.addWidget(self.continue_check, 15, 0, 1, 2)
         self.tta_check = QtWidgets.QCheckBox("Use mirroring TTA for later inference")
         self.tta_check.setChecked(False)
-        train_form.addWidget(self.tta_check, 10, 0, 1, 2)
+        train_form.addWidget(self.tta_check, 16, 0, 1, 2)
         layout.addWidget(training)
         layout.addStretch(1)
         scroll.setWidget(body)

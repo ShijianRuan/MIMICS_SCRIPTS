@@ -356,6 +356,45 @@ class TestTrainingSetupPathMemory(unittest.TestCase):
                 finally:
                     window.window.close()
 
+    def test_nnunet_form_fields_carry_one_line_explanations(self):
+        # A5 minimal plan: Dataset ID / Fold / GPU count / GPU devices (the
+        # concepts an annotator cannot be expected to know) must carry a
+        # visible one-line explanation, not just a hover tooltip.
+        _AppFixture.app()
+        import nnunet_training_setup_ui as ui
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            home = self._settings_home(tmp, "nnunet_settings.json", {})
+            with mock.patch.object(ui.Path, "home", lambda: home):
+                window = ui.TrainingSetupWindow(
+                    {"workspace": ""}, tmp / "ctx.json", QT
+                )
+                try:
+                    for attribute in (
+                        "dataset_id_hint",
+                        "fold_hint",
+                        "gpu_count_hint",
+                        "gpu_devices_hint",
+                    ):
+                        hint = getattr(window, attribute, None)
+                        self.assertIsNotNone(
+                            hint, "{0} must exist".format(attribute)
+                        )
+                        text = (hint.text() or "").strip()
+                        self.assertTrue(
+                            text, "{0} must not be empty".format(attribute)
+                        )
+                    # The GPU devices hint must state the validation rule
+                    # (device count must match GPU count) that submission
+                    # otherwise rejects with an error dialog.
+                    self.assertIn("must match", window.gpu_devices_hint.text())
+                    self.assertIn("the GPU count above", window.gpu_devices_hint.text())
+                    # Fold hint must not promise unverified split semantics.
+                    self.assertIn("five", window.fold_hint.text())
+                finally:
+                    window.window.close()
+
     def test_flexict_window_prefills_remembered_paths(self):
         _AppFixture.app()
         import flexict_training_setup_ui as ui
