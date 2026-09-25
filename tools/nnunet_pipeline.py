@@ -899,12 +899,23 @@ def _spawn_worker(
         result_path.unlink()
     except FileNotFoundError:
         pass
+    environment = _worker_environment(request, roots, stage)
+    if os.name == "nt":
+        # Long CPU/GPU stages (a 2D slice-model inference runs >1h) must not
+        # keep scratch under the system %TEMP%: periodic IT cleanup on
+        # managed workstations deletes it mid-run and the export step then
+        # fails with FileNotFoundError on its own output. Point TMP/TEMP at
+        # a directory inside the job folder, which lives as long as the job.
+        job_temp = job_dir / "worker_tmp"
+        job_temp.mkdir(parents=True, exist_ok=True)
+        environment.setdefault("TMP", str(job_temp))
+        environment.setdefault("TEMP", str(job_temp))
     write_json_atomic(
         spec_path,
         {
             "stage": stage,
             "params": params,
-            "environment": _worker_environment(request, roots, stage),
+            "environment": environment,
             "start_gate": str(start_gate),
             "start_gate_timeout_seconds": 120,
             "control_path": str(control_path),
