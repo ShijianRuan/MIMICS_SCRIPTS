@@ -10658,6 +10658,119 @@ class TestLifecycleAndRetention(unittest.TestCase):
         self.assertIn("$cutoff", source)
         self.assertNotIn("Remove-Item -Path $lock", source)
 
+    def test_collect_diagnostics_never_blocks_gui_thread(self):
+        """A1: collecting diagnostics must run in a background thread.
+
+        The collector subprocess can take up to 300s; a synchronous
+        subprocess.run in the Mimics script thread froze the whole GUI
+        (iron law 1). The collection has to go through the daemon-thread +
+        timer-poll pattern used by mimics_stop_background.clear_cache_main.
+        """
+        path = os.path.join(
+            PROJECT_ROOT, "runtime_py35", "collect_diagnostics_mimics.py"
+        )
+        with open(path, "r", encoding="utf-8") as handle:
+            source = handle.read()
+        import inspect
+
+        sys.path.insert(0, RUNTIME_DIR)
+        import collect_diagnostics_mimics as cdm
+
+        # collect_bundle itself must not call subprocess synchronously
+        bundle_source = inspect.getsource(cdm.collect_bundle)
+        self.assertNotIn("subprocess.run", bundle_source)
+        self.assertIn("threading.Thread", bundle_source)
+        self.assertIn("daemon", bundle_source)
+        # the subprocess call lives in the worker body only
+        worker_source = inspect.getsource(cdm._collect_in_background)
+        self.assertIn("subprocess.run", worker_source)
+        # completion is reported by a timer tick, never from collect_bundle
+        self.assertIn("_start_timer", bundle_source)
+
+    def test_collect_diagnostics_background_flow_end_to_end(self):
+        """The daemon thread path produces the bundle and reports it."""
+        sys.path.insert(0, RUNTIME_DIR)
+        import collect_diagnostics_mimics as cdm  # noqa: F401 (reimported below)
+
+        root = _make_temp_dir()
+        os.makedirs(os.path.join(root, "tools"))
+        os.makedirs(os.path.join(root, "python_env"))
+        marker = os.path.join(root, "bundle_written.marker")
+        with open(
+            os.path.join(root, "tools", "collect_diagnostics.py"), "w"
+        ) as handle:
+            handle.write(
+                "import sys, os\n"
+                "out = sys.argv[sys.argv.index('--output') + 1]\n"
+                "open(out, 'w').write('bundle')\n"
+                "open({!r}, 'w').write('done')\n".format(marker)
+            )
+        # find_external_python is patched below to return this path; the
+        # collector script is fake, but the interpreter itself must be a
+        # real executable for subprocess.run to launch it.
+        fake_python = os.path.join(root, "python_env", "python.exe")
+        shutil.copy(sys.executable, fake_python)
+
+        messages = []
+
+        class FakeDialogs:
+            @staticmethod
+            def message_box(message, title=None, ui_blocking=None):
+                messages.append(str(message))
+
+        class FakeLogging:
+            @staticmethod
+            def log_user_message(level=None, message=None):
+                messages.append(str(message))
+
+        class FakeMimics:
+            dialogs = FakeDialogs()
+            logging = FakeLogging()
+
+        original_mimics = sys.modules.get("mimics")
+        sys.modules["mimics"] = FakeMimics
+        # reimport so the module-level "import mimics" binds our fake
+        sys.modules.pop("collect_diagnostics_mimics", None)
+        import importlib
+
+        cdm = importlib.import_module("collect_diagnostics_mimics")
+        original_find = cdm.runtime_common.find_external_python
+        original_root = cdm._project_root
+        cdm.runtime_common.find_external_python = lambda *_a, **_k: fake_python
+        cdm._project_root = lambda: root
+        # timer: skip the GUI pump entirely, the test drives the tick
+        cdm._start_timer = lambda tick_fn, monitor, poll_seconds=0.5: None
+        try:
+            exit_code = cdm.collect_bundle()
+            self.assertEqual(exit_code, 0)
+            thread = getattr(cdm, "_ACTIVE_MONITOR", {}).get("thread")
+            self.assertIsNotNone(thread)
+            # the "started" message fires immediately, before any bundle
+            self.assertTrue(
+                any("background" in m for m in messages),
+                messages,
+            )
+            thread.join(timeout=30)
+            self.assertTrue(
+                os.path.isfile(marker),
+                "worker never ran the collector script",
+            )
+            monitor = cdm._ACTIVE_MONITOR
+            monitor["done"] = True
+            cdm._diagnostics_tick(monitor)
+            self.assertTrue(
+                any("safe to share" in m for m in messages),
+                messages,
+            )
+        finally:
+            sys.modules["mimics"] = original_mimics
+            if original_mimics is None:
+                sys.modules.pop("mimics", None)
+            cdm.runtime_common.find_external_python = original_find
+            cdm._project_root = original_root
+            sys.modules.pop("collect_diagnostics_mimics", None)
+            _cleanup(root)
+
     def test_external_kill_background_never_deletes_resource_locks(self):
         import inspect
         import tools.mimics_batch_cli as cli
