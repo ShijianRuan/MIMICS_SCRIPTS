@@ -873,6 +873,16 @@ def _worker_environment(
         # and nnunetv2 2.8.0 rejects 0 there. Linux (remote containers) keeps
         # nnU-Net's multiprocessing default.
         environment["nnUNet_n_proc_DA"] = "0"
+    # Every stage, every platform: the preprocess stage's spawn.Pool workers
+    # each import torch/OpenBLAS, which starts one BLAS thread per core (~20
+    # here); under virtual-memory pressure OpenBLAS dies with "Memory
+    # allocation still failed after 10 retries" and nnU-Net's Pool silently
+    # respawns the corpse, hanging the stage at 0 CPU forever. Capping BLAS
+    # threads matches nnU-Net's own run_training.py entrypoint and the
+    # mimics_batch_cli precedent; the shared remote server wants the cap too.
+    for blas_var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS",
+                     "OPENBLAS_NUM_THREADS"):
+        environment.setdefault(blas_var, "1")
     gpu_id = str(request.get("gpu_id") if request.get("gpu_id") not in (None, "") else "").strip()
     if gpu_id:
         environment["CUDA_VISIBLE_DEVICES"] = gpu_id

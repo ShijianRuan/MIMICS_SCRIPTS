@@ -1034,6 +1034,29 @@ class SpatialContractTests(unittest.TestCase):
 
 
 class JobLifecycleTests(unittest.TestCase):
+    def test_worker_environment_caps_blas_threads_every_stage(self):
+        """Every stage worker must cap BLAS threads to one.
+
+        The preprocess stage's spawn.Pool fingerprint workers each import
+        torch/OpenBLAS and (uncapped) start one BLAS thread per core; under
+        virtual-memory pressure OpenBLAS dies mid-derivation and nnU-Net's
+        Pool silently respawns the corpse, hanging the stage at 0 CPU forever
+        (A10). nnU-Net's own run_training.py entrypoint applies the same caps.
+        """
+        roots = {
+            "raw": Path("W:/raw"),
+            "preprocessed": Path("W:/preprocessed"),
+            "results": Path("W:/results"),
+        }
+        for stage in ("preprocess", "train", "infer"):
+            environment = pipeline._worker_environment(
+                {"epochs": 2}, roots, stage)
+            for blas_var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS",
+                             "OPENBLAS_NUM_THREADS"):
+                self.assertEqual(
+                    environment.get(blas_var), "1",
+                    "{} stage must cap {}".format(stage, blas_var))
+
     def test_gpu_lock_is_transferred_to_worker_pid(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

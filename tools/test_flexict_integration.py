@@ -199,6 +199,33 @@ class TestWorkerEnvironment(unittest.TestCase):
             self.assertNotIn("nnUNet_n_proc_DA", train_env)
         self.assertNotIn("nnUNet_n_proc_DA", preprocess_env)
 
+    def test_environment_caps_blas_threads_every_stage(self):
+        """FlexiCT stages must cap BLAS threads (same A10 fix as nnunet).
+
+        FlexiCT's preprocess runs the same spawn.Pool fingerprint extraction
+        as the nnU-Net pipeline, and uncapped OpenBLAS threads are what killed
+        those workers on RAM-tight workstations. flexict_worker_environment
+        replaces _worker_environment wholesale for FlexiCT stages, so the caps
+        must live here too.
+        """
+        for stage in ("preprocess", "train", "infer"):
+            env = fp.flexict_worker_environment(
+                self._request(), self._roots(), "2d", stage=stage)
+            for blas_var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS",
+                             "OPENBLAS_NUM_THREADS"):
+                self.assertEqual(env.get(blas_var), "1",
+                                 "{} stage must cap {}".format(stage,
+                                                               blas_var))
+
+    def test_infer_environment_caps_blas_threads(self):
+        """FlexiCT inference workers replace _worker_environment too."""
+        env = fp.flexict_infer_environment(
+            self._request(), self._roots(), "2d")
+        for blas_var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS",
+                         "OPENBLAS_NUM_THREADS"):
+            self.assertEqual(env.get(blas_var), "1",
+                             "infer stage must cap {}".format(blas_var))
+
     def test_mirror_axes_forwarded(self):
         request = fp.normalize_flexict_request(
             _training_request("X:/d", "W:/w", mirror_disable_axes="1"))

@@ -213,6 +213,14 @@ def flexict_worker_environment(request: dict[str, Any],
         # torch.set_num_threads and nnunetv2 2.8.0 rejects 0 there.
         # Linux (remote containers) keeps nnU-Net's multiprocessing default.
         environment["nnUNet_n_proc_DA"] = "0"
+    # Same BLAS caps as nnunet_pipeline._worker_environment: FlexiCT's
+    # preprocess stage runs the same spawn.Pool fingerprint extraction, and
+    # uncapped OpenBLAS threads are what killed those workers on RAM-tight
+    # workstations (silent respawn hang). Mirrored here because this function
+    # replaces _worker_environment wholesale for FlexiCT stages.
+    for blas_var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS",
+                     "OPENBLAS_NUM_THREADS"):
+        environment.setdefault(blas_var, "1")
     mirror = str(request.get("mirror_disable_axes")
                  or DEFAULT_CONFIG["default_mirror_disable_axes"] or "").strip()
     if mirror:
@@ -242,6 +250,12 @@ def flexict_infer_environment(request: dict[str, Any],
         "nnUNet_extTrainer": str(repo / "trainers"),
         "nnUNet_compile": "0",
     }
+    # Same BLAS caps as every other stage worker (see
+    # flexict_worker_environment): this function also replaces
+    # _worker_environment wholesale for the FlexiCT inference workers.
+    for blas_var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS",
+                     "OPENBLAS_NUM_THREADS"):
+        environment.setdefault(blas_var, "1")
     gpu_id = str(request.get("gpu_id") or "").strip()
     if gpu_id:
         environment["CUDA_VISIBLE_DEVICES"] = gpu_id
