@@ -1,6 +1,10 @@
 # One Linux CUDA runtime for both optional remote training backends.
 # Model weights are intentionally mounted at /models and are not baked in.
-FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
+# BASE_IMAGE lets restricted networks build from a registry mirror, e.g.
+#   nerdctl build --build-arg BASE_IMAGE=docker.m.daocloud.io/pytorch/pytorch:...
+# without editing this file (the produced image is identical).
+ARG BASE_IMAGE=pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
+FROM ${BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \

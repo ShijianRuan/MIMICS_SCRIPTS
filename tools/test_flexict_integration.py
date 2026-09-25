@@ -1174,6 +1174,69 @@ class TestJobLifecycle(unittest.TestCase):
             models = fc.load_models(str(Path(tmp) / "workspace"))
             self.assertEqual(len(models), 1)
 
+    def test_prepared_case_missing_file_fails_before_training(self):
+        """Remote label_source="prepared": an incomplete case must fail fast.
+
+        The controller materializes /job/input/<case>/image.nii.gz and
+        /job/labels/<case>/label.nii.gz before the container starts; if the
+        container-side copy is missing (upload truncated, archive corrupt),
+        training must refuse rather than silently skip the case.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            request = fp.normalize_flexict_request(
+                _training_request(
+                    "/job/input", str(workspace), ["case_1", "case_2"],
+                    label_source="prepared",
+                    prepared_cases=[
+                        {
+                            "case_id": "case_1",
+                            "image": str(Path(tmp) / "input" / "case_1" / "image.nii.gz"),
+                            "label": str(Path(tmp) / "labels" / "case_1" / "label.nii.gz"),
+                            "fingerprint": "abc",
+                        },
+                        # case_2 image never materialized
+                        {
+                            "case_id": "case_2",
+                            "image": str(Path(tmp) / "input" / "case_2" / "image.nii.gz"),
+                            "label": str(Path(tmp) / "labels" / "case_2" / "label.nii.gz"),
+                            "fingerprint": "def",
+                        },
+                    ],
+                )
+            )
+            for top in ("input", "labels"):
+                for case in ("case_1",):
+                    directory = Path(tmp) / top / case
+                    directory.mkdir(parents=True)
+                    (directory / ("image.nii.gz" if top == "input" else "label.nii.gz")).write_bytes(b"x")
+            job_dir = Path(tmp) / "jobs" / request["job_id"]
+            job_dir.mkdir(parents=True)
+            from nnunet_common import write_json_atomic
+
+            write_json_atomic(job_dir / "request.json", request)
+            write_json_atomic(job_dir / "control.json", {"action": "run"})
+            write_json_atomic(
+                job_dir / "status.json",
+                {"schema_version": fp.SCHEMA_VERSION, "job_id": request["job_id"],
+                 "kind": "train", "status": "launching", "phase": "launching",
+                 "created_at_epoch": time.time(), "updated_at_epoch": time.time()},
+            )
+            # Any worker spawn proves the incomplete case slipped through.
+            with mock.patch.object(
+                fp, "_spawn_flexict_worker"
+            ) as spawn, mock.patch(
+                "flexict_pipeline._acquire_local_gpu", return_value=None
+            ):
+                exit_code = fp.run_training(job_dir)
+            self.assertEqual(exit_code, 1)
+            spawn.assert_not_called()
+            from nnunet_common import read_json
+
+            status = read_json(job_dir / "status.json", {}) or {}
+            self.assertEqual(status["status"], "failed")
+            self.assertIn("Prepared remote case is incomplete", status["error"])
+
     def test_completed_lifecycle_pair(self):
         with tempfile.TocabularyDirectory() if False else tempfile.TemporaryDirectory() as tmp:
             exit_code, status, job_dir = self._run_job(tmp, configuration="pair")

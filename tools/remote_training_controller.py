@@ -790,6 +790,8 @@ CODE_FINGERPRINT_SUFFIXES = (".py", ".sh", ".json")
 CODE_FINGERPRINT_EXCLUDED_DIRS = {
     "__pycache__", ".git", "node_modules", ".pytest_cache",
     "weights", "jobs", "models", "tests",
+    # machine-local state that never ships in the image:
+    ".claude", ".idea", ".vscode", "docs",
 }
 
 
@@ -807,40 +809,52 @@ def _local_code_fingerprint(root: Path | None = None) -> str:
         directory = base / name
         if not directory.is_dir():
             continue
-        for candidate in sorted(directory.rglob("*")):
+        for candidate in directory.rglob("*"):
             if not candidate.is_file() or candidate.is_symlink():
                 continue
-            relative = candidate.relative_to(base).as_posix()
+            relative = candidate.relative_to(base)
             if any(
                 part in CODE_FINGERPRINT_EXCLUDED_DIRS
-                for part in candidate.relative_to(base).parts[:-1]
+                for part in relative.parts[:-1]
             ):
                 continue
             if candidate.suffix.lower() not in CODE_FINGERPRINT_SUFFIXES:
                 continue
+            # Sort by the POSIX relative path so the ordering matches the
+            # container-side walk regardless of the host OS: Windows paths
+            # sort by "\" (0x5C) while Linux sorts by "/" (0x2F), which
+            # flips the order of names like "foo0.py" vs "food/x.py".
             lines.append(
-                "{}  {}".format(_sha256_file(candidate), relative)
+                (relative.as_posix(), candidate)
             )
+    lines.sort(key=lambda item: item[0])
+    lines = [
+        "{}  {}".format(_sha256_file(candidate), relative)
+        for relative, candidate in lines
+    ]
     aggregate = hashlib.sha256()
     aggregate.update("\n".join(lines).encode("utf-8"))
     return aggregate.hexdigest()
 
 
 # Runs inside the container; mirrors _local_code_fingerprint against /app.
+# The base is overridable via env var so the regression suite can execute
+# this exact script against a fixture tree with a real python subprocess —
+# the container itself never sets the variable.
 _REMOTE_CODE_FINGERPRINT_SCRIPT = (
-    "import hashlib,sys\n"
+    "import hashlib,os,sys\n"
     "from pathlib import Path\n"
-    "base=Path('/app')\n"
+    "base=Path(os.environ.get('MIMICS_CODE_FINGERPRINT_BASE','/app'))\n"
     "roots=('tools','runtime_py35','integrations')\n"
     "suffixes=('.py','.sh','.json')\n"
     "excluded={'__pycache__','.git','node_modules','.pytest_cache',"
-    "'weights','jobs','models','tests'}\n"
+    "'weights','jobs','models','tests','.claude','.idea','.vscode','docs'}\n"
     "lines=[]\n"
     "for name in roots:\n"
     "    d=base/name\n"
     "    if not d.is_dir():\n"
     "        continue\n"
-    "    for c in sorted(d.rglob('*')):\n"
+    "    for c in d.rglob('*'):\n"
     "        if not c.is_file() or c.is_symlink():\n"
     "            continue\n"
     "        rel=c.relative_to(base)\n"
@@ -852,7 +866,9 @@ _REMOTE_CODE_FINGERPRINT_SCRIPT = (
     "        with c.open('rb') as f:\n"
     "            for chunk in iter(lambda:f.read(4194304),b''):\n"
     "                h.update(chunk)\n"
-    "        lines.append(h.hexdigest()+'  '+rel.as_posix())\n"
+    "        lines.append((rel.as_posix(),h.hexdigest()))\n"
+    "lines.sort()\n"
+    "lines=[d+'  '+r for r,d in lines]\n"
     "sys.stdout.write(hashlib.sha256('\\n'.join(lines).encode()).hexdigest())\n"
 )
 
@@ -864,13 +880,18 @@ def _remote_code_fingerprint(session: SSHSession, image: str) -> str:
     (``--network none``, no volumes) so local and remote digests are directly
     comparable regardless of the server's checkout layout.
     """
-    payload = json.dumps(_REMOTE_CODE_FINGERPRINT_SCRIPT)
+    # NOTE: pass the script text itself (shlex-quoted). Wrapping it in
+    # json.dumps first hands the container a quoted one-line string
+    # literal, which evaluates to a string and prints nothing — the
+    # command "succeeds" with empty output, so strict mode refused every
+    # run and warn mode flagged drift on every run (a false alarm, never
+    # a silent pass: an empty digest never equals the local digest).
     output = session.execute(
         "{runtime} run --rm --network none --entrypoint python "
         "{image} -c {script}".format(
             runtime=container_runtime_command(getattr(session, "profile", None)),
             image=shlex.quote(image),
-            script=shlex.quote(payload),
+            script=shlex.quote(_REMOTE_CODE_FINGERPRINT_SCRIPT),
         ),
         timeout=300,
     )
@@ -1906,6 +1927,18 @@ def _finalize_completed_remote_job(
         )
         model = models[0] if len(models) == 1 else None
         selected = True
+        # The remote pipeline's status (merged earlier) carries container-side
+        # /job/... paths in its models array. Overwrite it with the locally
+        # registered manifests so downstream consumers (acceptance checklist,
+        # active learning) resolve real local model dirs.
+        local_model_rows = [
+            {
+                key: manifest.get(key)
+                for key in ("configuration", "model_id", "model_dir")
+            }
+            for manifest in models
+        ]
+        _status_update(status_path, models=local_model_rows)
     else:
         from tools.nnunet_common import read_json as read_nnunet_json
 
@@ -2702,8 +2735,17 @@ def _container_labels(
             "Could not inspect ownership labels for remote container '{}': "
             "{}".format(container_name, output.strip()[-2000:])
         )
+    # nerdctl can print warning lines (e.g. "failed to inspect NetNS" for a
+    # stopped container's stale network namespace) to stdout ahead of the
+    # template output; parse the last JSON object on the stream.
+    payload = ""
+    for line in reversed(output.strip().splitlines()):
+        line = line.strip()
+        if line.startswith("{") and line.endswith("}"):
+            payload = line
+            break
     try:
-        labels = json.loads(output.strip())
+        labels = json.loads(payload) if payload else {}
     except Exception as exc:
         raise RemoteCommandError(
             "Remote container '{}' returned invalid ownership labels: {}".format(
@@ -2797,10 +2839,16 @@ def _remove_remote_job(
         remote_job_dir,
     )
     session.execute(
-        "rm -rf -- {}".format(shlex.quote(str(job))),
+        "rm -rf -- {job} {job}.tar {job}.tar.part".format(
+            job=shlex.quote(str(job))
+        ),
         timeout=120,
         check=False,
     )
+    # jobs/<id>.tar is a sibling of the job dir (see _remote_paths): the
+    # uploaded job archive that, before this fix, survived cancellation
+    # because only the directory was removed. Its .part upload fragment
+    # goes the same way.
     code, _output = session.execute_result(
         "test ! -e {}".format(shlex.quote(str(job)))
     )
@@ -3675,10 +3723,10 @@ def _sync_remote_nnunet_curve(
     container_path = str(remote_status.get("training_curve_path") or "")
     if not container_path.startswith("/job/"):
         return False
-    remote_curve = str(
-        PurePosixPath(remote_job)
-        / PurePosixPath(container_path[len("/job/") :])
-    )
+    relative = PurePosixPath(container_path[len("/job/") :])
+    if any(part == ".." for part in relative.parts):
+        return False
+    remote_curve = str(PurePosixPath(remote_job) / relative)
     try:
         stat = session.sftp.stat(remote_curve)
     except IOError:
@@ -4122,16 +4170,23 @@ def run(spec_path: Path) -> int:
             status_path,
             runtime_image_id,
         )
+        identity = dict(asset_identity)
+        identity.update(code_identity)
+        # _check_code_drift already reports remote_runtime_image_id when the
+        # check runs; keep the inspected id for the "off" mode too without
+        # ever passing the same keyword twice.
+        identity.setdefault("remote_runtime_image_id", runtime_image_id)
         _status_update(
             status_path,
             remote_runtime_image=profile["runtime_image"],
-            remote_runtime_image_id=runtime_image_id,
-            **asset_identity,
-            **code_identity
+            **identity
         )
         # Dataset cache entries are immutable and content-addressed. Job
         # directories are never age-pruned here because a long-running job's
         # parent mtime can remain unchanged while nested status files update.
+        # .part/.tmp files are interrupted-upload fragments: never valid
+        # cache entries, so any that are old enough not to be an in-flight
+        # transfer are removed.
         session.execute(
             "find {cache} -maxdepth 1 -type f -name '*.verified' -mtime +30 "
             "-print | while IFS= read -r marker; do "
@@ -4139,7 +4194,10 @@ def run(spec_path: Path) -> int:
             "find {cache} -maxdepth 1 -type f -name '*.tar' -mtime +30 "
             "-print | while IFS= read -r archive; do "
             "test -f \"${{archive%.tar}}.verified\" || rm -f \"$archive\"; "
-            "done".format(
+            "done; "
+            "find {cache} -maxdepth 1 -type f "
+            "\\( -name '*.part' -o -name '*.tmp' \\) -mtime +7 "
+            "-print -delete".format(
                 cache=shlex.quote(remote_paths["dataset_cache"])
             ),
             check=False,
@@ -4464,6 +4522,13 @@ def run(spec_path: Path) -> int:
             remote_control_path=remote_control_path,
             remote_control_kind=remote_control_kind,
         )
+        # Failure-path fallback: if _monitor_remote raises before returning,
+        # the post-mortem log sync below must not hit an unbound name.
+        log_sync_state = {
+            "offset": 0,
+            "remote_relative": _remote_log_relative(kind),
+            "last_curve_sync_epoch": 0.0,
+        }
         session, remote_status = _monitor_remote(
             session,
             spec,

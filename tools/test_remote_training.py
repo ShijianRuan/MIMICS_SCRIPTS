@@ -801,16 +801,49 @@ class ContainerRuntimeAdapterTests(unittest.TestCase):
             ),
             "nerdctl",
         )
-        # profile normalization preserves and validates the field
+        # a namespace keeps our images away from orchestrator-managed ones
+        self.assertEqual(
+            remote_compute.container_runtime_command(
+                {
+                    "container_runtime": "nerdctl",
+                    "container_namespace": "mimics-ai",
+                }
+            ),
+            "nerdctl -n mimics-ai",
+        )
+        # docker ignores the namespace field (docker has none)
+        self.assertEqual(
+            remote_compute.container_runtime_command(
+                {
+                    "container_runtime": "docker",
+                    "container_namespace": "mimics-ai",
+                }
+            ),
+            "docker",
+        )
+        # profile normalization preserves and validates the fields
         normalized = remote_compute.normalize_profile(
             {
                 "name": "GPU server",
                 "host": "server",
                 "username": "user",
                 "container_runtime": "nerdctl",
+                "container_namespace": "mimics-ai",
             }
         )
         self.assertEqual(normalized["container_runtime"], "nerdctl")
+        self.assertEqual(normalized["container_namespace"], "mimics-ai")
+        # invalid namespace characters are dropped
+        bad = remote_compute.normalize_profile(
+            {
+                "name": "GPU server",
+                "host": "server",
+                "username": "user",
+                "container_runtime": "nerdctl",
+                "container_namespace": "evil ns; rm -rf",
+            }
+        )
+        self.assertEqual(bad["container_namespace"], "")
 
     def test_container_commands_use_profile_runtime(self):
         class Session:
@@ -2334,6 +2367,263 @@ class StatusAndLifecycleTests(unittest.TestCase):
                     str(pipeline_job),
                 ],
                 job_dir,
+            )
+
+
+class FingerprintScriptExecutionTests(unittest.TestCase):
+    """The container-side fingerprint script runs for real and matches local.
+
+    The script is a string executed inside a throwaway container; a quoting
+    or syntax defect in it once made every drift check compare against an
+    empty digest. These tests execute the exact script text with a real
+    python subprocess against a fixture tree, so any divergence between
+    _local_code_fingerprint and _REMOTE_CODE_FINGERPRINT_SCRIPT fails here
+    instead of on the server.
+    """
+
+    def _fixture(self, root: Path) -> None:
+        # "foo0.py" vs "food/x.py": on Windows "\" (0x5C) sorts before
+        # alphanumerics while POSIX "/" (0x2F) sorts after most punctuation
+        # but before letters — this pair flips order between the two
+        # algorithms unless both sides sort by the POSIX relative path.
+        (root / "tools").mkdir(parents=True)
+        (root / "tools" / "foo0.py").write_text("print('foo0')\n")
+        (root / "tools" / "food").mkdir()
+        (root / "tools" / "food" / "x.py").write_text("print('x')\n")
+        (root / "integrations").mkdir()
+        (root / "integrations" / "app.py").write_text("print('app')\n")
+        # excluded directories must not affect either digest
+        (root / "tools" / "__pycache__").mkdir()
+        (root / "tools" / "__pycache__" / "junk.pyc").write_text("junk")
+        (root / "docs").mkdir()
+        (root / "docs" / "notes.md").write_text("not hashed")
+
+    def _run_script(self, root: Path) -> str:
+        import subprocess
+
+        environment = dict(os.environ)
+        environment["MIMICS_CODE_FINGERPRINT_BASE"] = str(root)
+        completed = subprocess.run(
+            [sys.executable, "-c", controller._REMOTE_CODE_FINGERPRINT_SCRIPT],
+            capture_output=True,
+            text=True,
+            env=environment,
+            timeout=120,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            "fingerprint script failed: " + completed.stderr,
+        )
+        return completed.stdout.strip()
+
+    def test_container_script_digest_matches_local_fingerprint(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._fixture(root)
+            self.assertEqual(
+                self._run_script(root),
+                controller._local_code_fingerprint(root),
+            )
+
+    def test_container_script_digest_tracks_content_changes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._fixture(root)
+            first = self._run_script(root)
+            (root / "tools" / "foo0.py").write_text("print('changed')\n")
+            self.assertNotEqual(first, self._run_script(root))
+
+
+class RemoteJobCleanupTests(unittest.TestCase):
+    """_remove_remote_job deletes the job dir plus its uploaded tar siblings."""
+
+    class _Session:
+        def __init__(self):
+            self.commands = []
+
+        def execute(self, command, **_kwargs):
+            self.commands.append(command)
+
+        def execute_result(self, command, **_kwargs):
+            self.commands.append(command)
+            return 0, ""
+
+    def test_remove_remote_job_deletes_tar_archive_siblings(self):
+        import shlex
+
+        session = self._Session()
+        removed = controller._remove_remote_job(
+            session,
+            remote_root="/userdata/shijian_ruan/mimics-ai",
+            expected_owner="user",
+            remote_job_dir=(
+                "/userdata/shijian_ruan/mimics-ai/jobs/user/job123"
+            ),
+        )
+        self.assertTrue(removed)
+        self.assertEqual(len(session.commands), 2)
+        arguments = shlex.split(session.commands[0])[3:]
+        self.assertEqual(
+            arguments,
+            [
+                "/userdata/shijian_ruan/mimics-ai/jobs/user/job123",
+                "/userdata/shijian_ruan/mimics-ai/jobs/user/job123.tar",
+                "/userdata/shijian_ruan/mimics-ai/jobs/user/job123.tar.part",
+            ],
+        )
+
+    def test_remove_remote_job_refuses_path_escape(self):
+        session = self._Session()
+        with self.assertRaisesRegex(RuntimeError, "outside this user's"):
+            controller._remove_remote_job(
+                session,
+                remote_root="/userdata/shijian_ruan/mimics-ai",
+                expected_owner="user",
+                remote_job_dir=(
+                    "/userdata/shijian_ruan/mimics-ai/jobs/user/../other/job"
+                ),
+            )
+        self.assertEqual(session.commands, [])
+
+    def test_dataset_cache_cleanup_removes_part_and_tmp_fragments(self):
+        # The cleanup command is buried in the remote launch flow behind a
+        # live SSH session; assert the controller's source carries the
+        # fragment globs next to the pre-existing .verified/.tar cleanup.
+        source = Path(controller.__file__).read_text(encoding="utf-8")
+        self.assertIn("-name '*.part'", source)
+        self.assertIn("-name '*.tmp'", source)
+        self.assertIn("-mtime +7", source)
+
+    def test_curve_sync_rejects_parent_traversal(self):
+        class Session:
+            def sftp(self):
+                return self
+
+            def stat(self, _path):
+                raise AssertionError("stat must not be called on escape paths")
+
+        state = {}
+        with tempfile.TemporaryDirectory() as temporary:
+            changed = controller._sync_remote_nnunet_curve(
+                Session(),
+                "/remote/jobs/user/job1",
+                {"training_curve_path": "/job/../../etc/passwd"},
+                Path(temporary) / "curve.json",
+                state,
+            )
+        self.assertFalse(changed)
+        self.assertNotIn("curve_identity", state)
+
+
+class AcceptanceChecklistTests(unittest.TestCase):
+    """The acceptance script must stop the container on failure paths."""
+
+    def setUp(self):
+        self._module = importlib.import_module(
+            "remote_acceptance_checklist"
+        )
+
+    def test_timeout_writes_control_stop_and_fails(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            job_dir = root / "jobs" / "train_1"
+            job_dir.mkdir(parents=True)
+            remote_compute.write_json_atomic(
+                job_dir / "status.json",
+                {
+                    "status": "training",
+                    "remote_container_name": "mimics-job-1",
+                    "remote_job_dir": "/remote/jobs/user/train_1",
+                },
+            )
+            module = self._module
+            step = module.AcceptanceStep("train_remote", "detail")
+            with mock.patch.object(
+                module.time, "sleep", side_effect=lambda _s: None
+            ), mock.patch.object(
+                module.time, "time", side_effect=[0.0, 10.0, 99999.0]
+            ):
+                # Simulate: first poll still training, second poll far past
+                # the deadline -> timeout branch requests the stop.
+                try:
+                    module._request_stop(job_dir, wait_seconds=180.0)
+                except StopIteration:
+                    pass
+            control = remote_compute.read_json(
+                job_dir / "control.json", {}
+            )
+            self.assertEqual(control.get("action"), "stop")
+
+    def test_verify_weights_fails_when_model_dir_missing(self):
+        module = self._module
+        results = []
+        trained = {
+            "status": {"status": "completed"},
+            "model_dir": "",
+            "job_dir": Path("unused"),
+        }
+        # torch is only imported inside the step; a missing model_dir must
+        # fail before any checkpoint glob, so a stub is enough here.
+        with mock.patch.dict("sys.modules", {"torch": mock.MagicMock()}):
+            ok = module.step_verify_weights(results, trained)
+        self.assertFalse(ok)
+        self.assertEqual(results[0].status, "fail")
+        self.assertIn("no checkpoints found", results[0].output["error"])
+
+    def test_verify_weights_fails_on_unloadable_checkpoint(self):
+        module = self._module
+        results = []
+        with tempfile.TemporaryDirectory() as temporary:
+            model_dir = Path(temporary) / "model"
+            fold = model_dir / "fold_0"
+            fold.mkdir(parents=True)
+            (fold / "checkpoint_final.pth").write_bytes(b"not a checkpoint")
+
+            class FakeTorch:
+                @staticmethod
+                def load(*_args, **_kwargs):
+                    raise RuntimeError("corrupt checkpoint")
+
+            trained = {
+                "status": {"status": "completed"},
+                "model_dir": str(model_dir),
+                "job_dir": Path(temporary),
+            }
+            with mock.patch.dict(
+                "sys.modules", {"torch": FakeTorch}
+            ):
+                ok = module.step_verify_weights(results, trained)
+        self.assertFalse(ok)
+        self.assertEqual(results[0].status, "fail")
+        self.assertIn(
+            "corrupt checkpoint", str(results[0].output["errors"])
+        )
+
+    def test_train_remote_requires_local_model_registration(self):
+        module = self._module
+        with tempfile.TemporaryDirectory() as temporary:
+            registered = Path(temporary) / "model"
+            registered.mkdir()
+            # A locally registered model dir resolves.
+            self.assertEqual(
+                module._resolve_local_model_dir(
+                    {"model": {"model_dir": str(registered)}}
+                ),
+                registered,
+            )
+            # Absent, container-side, and nonexistent paths all refuse —
+            # these previously produced the verify_weights fake PASS.
+            self.assertIsNone(module._resolve_local_model_dir({}))
+            self.assertIsNone(
+                module._resolve_local_model_dir(
+                    {"model": {"model_dir": "/job/output/models/task/m1"}}
+                )
+            )
+            self.assertIsNone(
+                module._resolve_local_model_dir(
+                    {"model": {"model_dir": str(Path(temporary) / "nope")}}
+                )
             )
 
 

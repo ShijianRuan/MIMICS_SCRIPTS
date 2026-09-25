@@ -174,6 +174,7 @@ def docker_gpu_request(profile: dict[str, Any]) -> str:
 
 
 CONTAINER_RUNTIMES = {"docker", "nerdctl"}
+NAMESPACE_PATTERN = re.compile(r"^[a-zA-Z0-9_.-]+$")
 
 
 def container_runtime_command(profile: dict[str, Any] | None) -> str:
@@ -182,11 +183,18 @@ def container_runtime_command(profile: dict[str, Any] | None) -> str:
     nerdctl is CLI-compatible with the docker subcommands the controller
     uses (run/ps/inspect/stop/rm/prune/image inspect), so servers that ship
     nerdctl instead of dockerd (containerd-only nodes) need only a prefix
-    swap. Unknown/missing profiles fall back to docker — the historical
+    swap. A ``container_namespace`` (e.g. ``mimics-ai``) keeps our images
+    and job containers out of namespaces the host container orchestrator
+    garbage-collects (a k3s node prunes unknown images from k8s.io).
+    Unknown/missing profiles fall back to plain docker — the historical
     behavior and the only runtime pre-nerdctl servers expose.
     """
     value = str(((profile or {}).get("container_runtime")) or "").strip().lower()
-    return value if value in CONTAINER_RUNTIMES else "docker"
+    runtime = value if value in CONTAINER_RUNTIMES else "docker"
+    namespace = str(((profile or {}).get("container_namespace")) or "").strip()
+    if runtime == "nerdctl" and namespace and NAMESPACE_PATTERN.match(namespace):
+        return "nerdctl -n {}".format(namespace)
+    return runtime
 
 
 def normalize_profile(profile: dict[str, Any]) -> dict[str, Any]:
@@ -260,6 +268,11 @@ def normalize_profile(profile: dict[str, Any]) -> dict[str, Any]:
     )
     if container_runtime not in CONTAINER_RUNTIMES:
         container_runtime = "docker"
+    container_namespace = (
+        str(profile.get("container_namespace") or "").strip()
+    )
+    if not NAMESPACE_PATTERN.match(container_namespace):
+        container_namespace = ""
     return {
         "profile_id": profile_id,
         "name": name,
@@ -276,6 +289,7 @@ def normalize_profile(profile: dict[str, Any]) -> dict[str, Any]:
         "remote_weights_verify": remote_weights_verify,
         "remote_code_verify": remote_code_verify,
         "container_runtime": container_runtime,
+        "container_namespace": container_namespace,
         "updated_at_epoch": time.time(),
     }
 

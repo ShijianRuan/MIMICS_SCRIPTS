@@ -12,7 +12,6 @@ product-quality program (docs/changes report target):
                       container with the remote GPU lock
   5. artifacts      — weights return, register locally, load with torch.load
   6. inference      — local inference on a held-out case, non-empty mask
-  7. (optional)     — controller-kill + re-attach drill, disconnect recovery
 
 Every step writes a JSON verdict under <output>/acceptance/; the run ends
 with a machine-readable pass/fail table meant to be attached verbatim to
@@ -22,7 +21,7 @@ Usage:
     python_env/python.exe tools/remote_acceptance_checklist.py \
         --profile <server-profile-id> \
         --dataset-root <local folder with nnU-Net-format cases> \
-        [--output <folder>] [--skip-reattach]
+        [--output <folder>]
 
 The server profile must already exist (remote_compute_ui.py or
 remote_compute.save_profile). Credentials stay in Windows Credential
@@ -47,6 +46,46 @@ for candidate in (ROOT, ROOT / "tools"):
 from nnunet_common import read_json, write_json_atomic  # noqa: E402
 
 ACCEPTANCE_SCHEMA = "mimics_remote_acceptance.v1"
+TERMINAL_STATES = {"completed", "failed", "cancelled"}
+
+
+def _request_stop(job_dir: Path, wait_seconds: float = 180.0) -> None:
+    """Ask the job's controller to stop and wait for a terminal state.
+
+    The stop goes through the job's own control.json — the same channel the
+    UI uses — because the controller process owns the container; racing it
+    with a concurrent CLI cancel would be unsafe. Never raises: callers use
+    this on the failure path, where the original error matters most.
+    """
+    control_path = job_dir / "control.json"
+    try:
+        write_json_atomic(
+            control_path,
+            {"action": "stop", "updated_at_epoch": time.time()},
+        )
+    except OSError:
+        return
+    deadline = time.time() + wait_seconds
+    while time.time() < deadline:
+        time.sleep(5)
+        status = read_json(job_dir / "status.json", {}) or {}
+        if str(status.get("status") or "") in TERMINAL_STATES:
+            return
+
+
+def _stop_failure_detail(status: dict) -> str:
+    """One-line summary of a stopped/failed remote run for error messages."""
+    if not isinstance(status, dict):
+        status = {}
+    container = str(status.get("remote_container_name") or "")
+    remote_dir = str(status.get("remote_job_dir") or "")
+    final = str(status.get("status") or "(unknown)")
+    detail = "final status {}".format(final)
+    if container:
+        detail += ", container {}".format(container)
+    if remote_dir:
+        detail += ", remote job dir {}".format(remote_dir)
+    return detail
 
 
 class AcceptanceStep:
@@ -115,11 +154,23 @@ def step_preflight(
     results.append(step)
     try:
         session = _ssh_session(profile)
-        runtime = str(session.execute("command -v docker || command -v nerdctl"))
-        runtime = (runtime or "").strip().splitlines()
-        runtime_cmd = runtime[-1] if runtime else ""
-        if not runtime_cmd:
-            step.fail("no docker or nerdctl on the remote PATH")
+        import remote_compute
+
+        # Use the profile's configured runtime/namespace (e.g. "nerdctl -n
+        # mimics-ai") for every step of this checklist. Earlier versions
+        # silently fell back to nerdctl when docker was missing, but only
+        # for this preflight inspect — every later step would still use the
+        # profile's docker command and fail confusingly. A mismatched
+        # runtime is a profile misconfiguration: fail with the fix instead.
+        runtime_cmd = remote_compute.container_runtime_command(profile)
+        if not str(
+            session.execute("command -v {}".format(runtime_cmd.split()[0]))
+        ).strip():
+            step.fail(
+                "container runtime {!r} is not on the remote PATH; if the "
+                "server uses nerdctl, set container_runtime='nerdctl' in "
+                "the server profile".format(runtime_cmd)
+            )
             return False, ""
         image_id = str(
             session.execute(
@@ -207,19 +258,16 @@ def step_dataset(
     results: list[AcceptanceStep],
     profile: dict,
     dataset_root: Path,
-    output: Path,
 ) -> list[Path] | None:
-    """Stage the read-only source dataset into a local working copy."""
+    """Pick training cases directly from the read-only source dataset."""
     step = AcceptanceStep(
         "dataset",
-        "stage {} local training cases from {}".format(8, dataset_root),
+        "pick {} local training cases from {}".format(8, dataset_root),
     )
     results.append(step)
     if not dataset_root.is_dir():
         step.fail("dataset root does not exist: {}".format(dataset_root))
         return None
-    staged = output / "dataset"
-    staged.mkdir(parents=True, exist_ok=True)
     cases: list[Path] = []
     for case_dir in sorted(p for p in dataset_root.iterdir() if p.is_dir()):
         if len(cases) >= 8:
@@ -235,7 +283,7 @@ def step_dataset(
             )
         )
         return None
-    step.succeed(case_count=len(cases), staged_root=str(staged))
+    step.succeed(case_count=len(cases), dataset_root=str(dataset_root))
     return cases
 
 
@@ -245,6 +293,23 @@ def _find_image(case_dir: Path) -> Path | None:
         if candidate.is_file():
             return candidate
     return None
+
+
+def _resolve_local_model_dir(status: dict) -> Path | None:
+    """The registered local model dir for a completed single-config run.
+
+    status["model"]["model_dir"] is rewritten by the controller to a local
+    registry path on completion; a container-side /job/... path or a
+    missing directory means registration never happened.
+    """
+    model = status.get("model") or {}
+    if not isinstance(model, dict):
+        return None
+    raw = str(model.get("model_dir") or "")
+    if not raw or raw.startswith("/job/"):
+        return None
+    candidate = Path(raw)
+    return candidate if candidate.is_dir() else None
 
 
 def step_train_remote(
@@ -262,8 +327,6 @@ def step_train_remote(
         import flexict_pipeline as fp
 
         workspace = output / "workspace"
-        job_dir = output / "jobs" / "acceptance_train"
-        job_dir.mkdir(parents=True, exist_ok=True)
         request = {
             "operation": "train",
             "task_name": "Acceptance",
@@ -275,48 +338,86 @@ def step_train_remote(
             "dataset_id": 795,
             "configuration": "2d",
             "epochs": 2,
+            # The nnU-Net planner sizes batch_size for a plain UNet; the
+            # FlexiCT attention model needs far more VRAM per sample and
+            # OOMs a 16GB A4000 at the planned default (bs=37 on this
+            # dataset). Force a small explicit batch for the smoke run.
+            "batch_size": 4,
             "val_cases": 1,
             "mimics_exe": "",
             "execution_backend": "remote",
             "remote_profile_id": profile["profile_id"],
         }
-        request = fp.normalize_flexict_request(request)
-        write_json_atomic(job_dir / "request.json", request)
-        write_json_atomic(
-            job_dir / "control.json", {"action": "run"}
-        )
-        write_json_atomic(
-            job_dir / "status.json",
-            {
-                "schema_version": fp.SCHEMA_VERSION,
-                "job_id": request["job_id"],
-                "kind": "train",
-                "status": "launching",
-                "created_at_epoch": time.time(),
-                "updated_at_epoch": time.time(),
-            },
-        )
-        exit_code = fp.run_training(job_dir)
-        status = read_json(job_dir / "status.json", {}) or {}
-        if exit_code != 0 or str(status.get("status")) != "completed":
+        # create_flexict_job is the production entry point: it writes the
+        # job folder and, for execution_backend="remote", launches
+        # remote_training_controller.py --spec in an external process.
+        # Calling fp.run_training() directly here would run the LOCAL
+        # worker path and train on this workstation's GPU instead.
+        launched = fp.create_flexict_job(request)
+        job_dir = Path(launched["job_dir"])
+        try:
+            deadline = time.time() + 3600
+            poll_index = 0
+            while time.time() < deadline:
+                time.sleep(10)
+                poll_index += 1
+                status = read_json(job_dir / "status.json", {}) or {}
+                state = str(status.get("status") or "")
+                if state in TERMINAL_STATES:
+                    break
+                if poll_index % 6 == 0:
+                    print(
+                        "  ... remote train: {} ({}%)".format(
+                            state, status.get("progress_percent")
+                        ),
+                        flush=True,
+                    )
+            else:
+                _request_stop(job_dir, wait_seconds=180)
+                failure = _stop_failure_detail(status)
+                step.fail(
+                    "remote training timed out after 1h; a stop was "
+                    "requested and waited for: {}".format(failure)
+                )
+                return None
+        except BaseException:
+            # KeyboardInterrupt included: never leave an unattended
+            # training container running on the shared server.
+            _request_stop(job_dir, wait_seconds=180)
+            raise
+        if str(status.get("status")) != "completed":
             step.fail(
                 "remote training did not complete: {}".format(
                     str(status.get("error") or status.get("message") or "")[:2000]
-                )
+                ),
+                detail=_stop_failure_detail(status),
             )
             return None
-        models = status.get("models") or []
-        if not models:
-            step.fail("remote training completed but registered no models")
+        # status["models"] rows carry container-side /job/... paths (the
+        # merged remote pipeline status); the authoritative local path is
+        # status["model"]["model_dir"], which the controller rewrites to
+        # the local registry when registering the downloaded artifact. The
+        # acceptance request pins one configuration, so exactly one model
+        # is expected — anything else is a fail, not a guess.
+        local_model_dir = _resolve_local_model_dir(status)
+        if local_model_dir is None:
+            step.fail(
+                "remote training completed but the local model directory "
+                "was not registered (model_dir={!r})".format(
+                    str((status.get("model") or {}).get("model_dir") or "")
+                ),
+                detail=_stop_failure_detail(status),
+            )
             return None
         step.succeed(
-            models=[
-                {k: m.get(k) for k in ("configuration", "model_dir")}
-                for m in models
-            ],
+            model_dir=str(local_model_dir),
             elapsed_status=str(status.get("status")),
         )
-        return {"status": status, "models": models, "job_dir": job_dir}
+        return {
+            "status": status,
+            "model_dir": str(local_model_dir),
+            "job_dir": job_dir,
+        }
     except Exception as exc:
         step.fail("{}: {}".format(type(exc).__name__, exc))
         return None
@@ -332,35 +433,35 @@ def step_verify_weights(
     results.append(step)
     import torch
 
-    ok = True
-    detail = {}
-    for model in trained["models"]:
-        model_dir = Path(model.get("model_dir") or "")
-        loaded = []
-        errors = []
-        for pattern in ("fold_*/checkpoint_final.pth", "checkpoint_best.pth"):
-            for checkpoint in sorted(model_dir.glob(pattern)):
-                try:
-                    payload = torch.load(
-                        str(checkpoint), map_location="cpu", weights_only=False
-                    )
-                    has_weights = "network_weights" in payload or any(
-                        isinstance(v, dict) and v
-                        for v in payload.values()
-                        if hasattr(v, "keys")
-                    )
-                    loaded.append(
-                        {str(checkpoint.name): bool(has_weights)}
-                    )
-                except Exception as exc:
-                    errors.append("{}: {}".format(checkpoint.name, exc))
-                    ok = False
-        detail[str(model_dir.name)] = {"loaded": loaded, "errors": errors}
-    if ok:
-        step.succeed(models=detail)
-    else:
-        step.fail("some checkpoints did not load", models=detail)
-    return ok
+    model_dir = Path(trained["model_dir"])
+    loaded = []
+    errors = []
+    for pattern in ("fold_*/checkpoint_final.pth", "checkpoint_best.pth"):
+        for checkpoint in sorted(model_dir.glob(pattern)):
+            try:
+                payload = torch.load(
+                    str(checkpoint), map_location="cpu", weights_only=False
+                )
+                has_weights = "network_weights" in payload or any(
+                    isinstance(v, dict) and v
+                    for v in payload.values()
+                    if hasattr(v, "keys")
+                )
+                loaded.append({str(checkpoint.name): bool(has_weights)})
+            except Exception as exc:
+                errors.append("{}: {}".format(checkpoint.name, exc))
+    # An empty glob must fail too: "no checkpoints found" was previously
+    # indistinguishable from "all checkpoints verified".
+    if errors:
+        step.fail("some checkpoints did not load", errors=errors)
+        return False
+    if not loaded:
+        step.fail(
+            "no checkpoints found under {}".format(model_dir)
+        )
+        return False
+    step.succeed(model_dir=str(model_dir), loaded=loaded)
+    return True
 
 
 def step_local_inference(
@@ -378,8 +479,7 @@ def step_local_inference(
     try:
         import flexict_pipeline as fp
 
-        model = trained["models"][0]
-        model_dir = Path(model["model_dir"])
+        model_dir = Path(trained["model_dir"])
         held_out = cases[-1]
         image = _find_image(held_out)
         if image is None:
@@ -467,7 +567,6 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--output", default=None, help="Working folder (default: temp dir kept)."
     )
-    parser.add_argument("--skip-reattach", action="store_true")
     args = parser.parse_args(argv)
 
     import tempfile
@@ -500,7 +599,7 @@ def main(argv=None) -> int:
         return 1
     ok = step_code_drift(results, profile, runtime_image_id)
     print("[{}] code_drift".format("PASS" if ok else "FAIL"))
-    cases = step_dataset(results, profile, dataset_root, output)
+    cases = step_dataset(results, profile, dataset_root)
     if cases is None:
         report = write_report(results, output, profile)
         print("Report: {}".format(report))

@@ -70,6 +70,7 @@ from nnunet_pipeline import (  # noqa: E402
     _runtime_roots,
     _spawn_worker,
     build_training_data_profile,
+    path_signature,
     prepare_source_grid_cases,
     validate_materialized_source_geometry,
 )
@@ -622,11 +623,41 @@ def run_training(job_dir: Path) -> int:
     try:
         configurations = _flexict_configurations(request)
         update_status(status_path, configurations=configurations)
-        # prepare_source_grid_cases re-runs the nnU-Net request normalizer,
-        # which only accepts concrete configurations; hand it a concrete copy.
-        prepare_request = dict(request, configuration=configurations[0])
-        rows = prepare_source_grid_cases(
-            prepare_request, staging, status_path, control_path)
+        if request.get("label_source") == "prepared":
+            # Remote execution: the controller already materialized the
+            # cases into /job/input and /job/labels with per-case paths in
+            # prepared_cases. Running prepare_source_grid_cases here would
+            # search for alias-named label files and find none.
+            rows = []
+            for raw in request.get("prepared_cases") or []:
+                image = Path(raw["image"])
+                label = Path(raw["label"])
+                if not image.is_file() or not label.is_file():
+                    raise RuntimeError(
+                        "Prepared remote case is incomplete: {}".format(raw)
+                    )
+                rows.append(
+                    {
+                        "case_id": str(raw["case_id"]),
+                        "image": image,
+                        "label": label,
+                        "fingerprint": str(
+                            raw.get("fingerprint")
+                            or stable_digest({
+                                "image": path_signature(image),
+                                "label": path_signature(label),
+                            })
+                        ),
+                        "cache_hit": True,
+                    }
+                )
+        else:
+            # prepare_source_grid_cases re-runs the nnU-Net request
+            # normalizer, which only accepts concrete configurations; hand
+            # it a concrete copy.
+            prepare_request = dict(request, configuration=configurations[0])
+            rows = prepare_source_grid_cases(
+                prepare_request, staging, status_path, control_path)
         training_data_profile = build_training_data_profile(
             rows, request.get("modality") or "")
         _raise_if_cancelled(control_path)
