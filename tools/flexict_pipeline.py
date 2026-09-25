@@ -43,6 +43,7 @@ from flexict_common import (  # noqa: E402
     MODEL_SCHEMA_VERSION,
     TERMINAL_STATES,
     load_config,
+    load_models,
     load_pair,
     flexict_repo_dir,
     flexict_suggest_dataset_id,
@@ -53,8 +54,11 @@ from flexict_common import (  # noqa: E402
 from nnunet_common import (  # noqa: E402
     append_log,
     compact_completed_log,
+    read_json,
     safe_identifier,
     stable_digest,
+    sweep_dataset_retention,
+    sweep_source_grid_cache_retention,
     update_status,
     write_json_atomic,
 )
@@ -568,6 +572,94 @@ def _sweep_expired_jobs(workspace: str | Path, config: dict[str, Any] | None = N
     return {"removed_jobs": removed, "kept_jobs": kept, "retention_days": retention_days}
 
 
+DEFAULT_RUNTIME_RETENTION_DAYS = 30
+DEFAULT_SOURCE_GRID_CACHE_RETENTION_DAYS = 30
+
+
+def _protected_dataset_names(workspace: str | Path) -> tuple[set[str], set[str]]:
+    """Dataset names and task ids that must survive the runtime/cache sweeps.
+
+    FlexiCT twin of nnunet_pipeline._protected_dataset_names: anchors are the
+    flexict registry (registry.json manifests carry dataset_id + dataset_name)
+    and non-terminal flexict jobs. Inference/active-learning requests carry no
+    dataset_id and never protect runtime dirs.
+    """
+    protected_names: set[str] = set()
+    protected_task_ids: set[str] = set()
+    for model in load_models(workspace):
+        name = str(model.get("dataset_name") or "").strip()
+        if not name:
+            try:
+                name = "Dataset{:03d}_{}".format(
+                    int(model.get("dataset_id")), safe_identifier(model.get("task_id"))
+                )
+            except (TypeError, ValueError):
+                continue
+        protected_names.add(name)
+    jobs_dir = workspace_paths(workspace)["jobs"]
+    if jobs_dir.is_dir():
+        for job_dir in _safe_listdir(jobs_dir):
+            status = read_json(job_dir / "status.json", {}) or {}
+            if str(status.get("status") or "").lower() in TERMINAL_STATES:
+                continue
+            request = read_json(job_dir / "request.json", {}) or {}
+            dataset_id = request.get("dataset_id")
+            task_id = str(request.get("task_id") or "").strip()
+            if dataset_id is None or not task_id:
+                continue
+            try:
+                protected_names.add(
+                    "Dataset{:03d}_{}".format(int(dataset_id), safe_identifier(task_id))
+                )
+            except (TypeError, ValueError):
+                continue
+            protected_task_ids.add(safe_identifier(task_id))
+    return protected_names, protected_task_ids
+
+
+def _safe_listdir(path: Path) -> list[Path]:
+    """iterdir that swallows races (dir vanished mid-sweep)."""
+    try:
+        return list(path.iterdir())
+    except OSError:
+        return []
+
+
+def _sweep_runtime_and_cache(workspace: str | Path,
+                             config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Prune expired runtime Dataset dirs and cache/source_grid case dirs.
+
+    Runs next to _sweep_expired_jobs when any FlexiCT job finishes; see the
+    nnunet_pipeline twin for the protection contract. Failures are the
+    caller's to swallow — sweeps must never turn a finished job into a
+    process error.
+    """
+    cfg = config or load_config()
+    try:
+        runtime_days = float(
+            cfg.get("runtime_retention_days", DEFAULT_RUNTIME_RETENTION_DAYS) or 0
+        )
+    except (TypeError, ValueError):
+        runtime_days = 0.0
+    try:
+        cache_days = float(
+            cfg.get("source_grid_cache_retention_days",
+                    DEFAULT_SOURCE_GRID_CACHE_RETENTION_DAYS) or 0
+        )
+    except (TypeError, ValueError):
+        cache_days = 0.0
+    if runtime_days <= 0 and cache_days <= 0:
+        return {"runtime": {"removed_datasets": [], "retention_days": 0.0},
+                "source_grid_cache": {"removed_cases": [], "retention_days": 0.0}}
+    protected_names, protected_task_ids = _protected_dataset_names(workspace)
+    return {
+        "runtime": sweep_dataset_retention(workspace, protected_names, runtime_days),
+        "source_grid_cache": sweep_source_grid_cache_retention(
+            workspace, protected_task_ids, cache_days
+        ),
+    }
+
+
 def _spawn_flexict_worker(stage: str,
                           params: dict[str, Any],
                           request: dict[str, Any],
@@ -694,6 +786,22 @@ def run_training(job_dir: Path) -> int:
                     continue
                 pending.append((configuration, identity))
             if not pending:
+                # Re-stamp the manifest so the retention sweep sees this
+                # Dataset as alive: a task retrained every few weeks would
+                # otherwise be rebuilt from scratch each time (the atomic
+                # write's temp file refreshes the Dataset dir's mtime).
+                reuse_manifest = roots["preprocessed"] / dataset_name / "flexict_preprocess_manifest.json"
+                reuse_payload = read_json_file(reuse_manifest, {}) or {}
+                write_json_atomic(
+                    reuse_manifest,
+                    {
+                        "schema_version": reuse_payload.get("schema_version")
+                        or "flexict_preprocess.v1",
+                        "identities": reuse_payload.get("identities") or {},
+                        "dataset_fingerprint": dataset_fingerprint,
+                        "updated_at_epoch": time.time(),
+                    },
+                )
                 update_status(
                     status_path,
                     status="preprocessing",
@@ -846,6 +954,10 @@ def run_training(job_dir: Path) -> int:
         except OSError:
             pass
         _sweep_expired_jobs(workspace)
+        try:
+            _sweep_runtime_and_cache(workspace)
+        except Exception:
+            pass
 
 
 def read_json_file(path: Path, default: Any = None) -> Any:
@@ -1066,6 +1178,10 @@ def run_inference(job_dir: Path) -> int:
         workspace = str(request.get("workspace") or "")
         if workspace:
             _sweep_expired_jobs(workspace)
+            try:
+                _sweep_runtime_and_cache(workspace)
+            except Exception:
+                pass
 
 
 def _resolve_flexict_pair(request: dict[str, Any],
@@ -1424,6 +1540,10 @@ def run_active_learning(job_dir: Path) -> int:
         except OSError:
             pass
         _sweep_expired_jobs(workspace)
+        try:
+            _sweep_runtime_and_cache(workspace)
+        except Exception:
+            pass
 
 
 def create_flexict_job(values: dict[str, Any]) -> dict[str, Any]:

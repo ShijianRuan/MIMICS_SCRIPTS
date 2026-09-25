@@ -37,6 +37,7 @@ from nnunet_common import (  # noqa: E402
     TRAINER_ROOT,
     append_log,
     compact_completed_log,
+    load_models,
     medical_stem,
     normalize_request,
     path_signature,
@@ -45,6 +46,8 @@ from nnunet_common import (  # noqa: E402
     safe_identifier,
     selected_case_ids,
     stable_digest,
+    sweep_dataset_retention,
+    sweep_source_grid_cache_retention,
     update_status,
     workspace_paths,
     write_json_atomic,
@@ -1151,6 +1154,23 @@ def _prepare_and_preprocess_dataset(
         )
         plans = str(request.get("plans") or "nnUNetPlans")
         if cache_valid and not bool(request.get("force_preprocess")):
+            # Re-stamp the manifest so the retention sweep sees this Dataset
+            # as alive: a task retrained every few weeks would otherwise be
+            # rebuilt from scratch each time (write_json_atomic creates its
+            # temp file inside the Dataset dir, refreshing its mtime).
+            write_json_atomic(
+                roots["preprocessed"]
+                / dataset_name
+                / "mimics_preprocess_manifest.json",
+                {
+                    "schema_version": "mimics_nnunet_preprocess.v1",
+                    "identity": preprocess_identity,
+                    "dataset_fingerprint": dataset_fingerprint,
+                    "plans": plans,
+                    "configuration": request["configuration"],
+                    "updated_at_epoch": time.time(),
+                },
+            )
             update_status(
                 status_path,
                 status="preprocessing",
@@ -1555,6 +1575,98 @@ def _sweep_expired_jobs(workspace: str | Path,
     return {"removed_jobs": removed, "kept_jobs": kept, "retention_days": retention_days}
 
 
+DEFAULT_RUNTIME_RETENTION_DAYS = 30
+DEFAULT_SOURCE_GRID_CACHE_RETENTION_DAYS = 30
+
+
+def _protected_dataset_names(workspace: str | Path) -> tuple[set[str], set[str]]:
+    """Dataset names and task ids that must survive the runtime/cache sweeps.
+
+    Two anchors: every registered model's dataset (deleting it would resurface
+    a Dataset-ID collision against the registry on the next training), and
+    every non-terminal job's dataset and task id (its worker may be reading
+    those dirs right now). Inference/active-learning requests carry no
+    dataset_id and never protect runtime dirs. When the registry row lacks
+    dataset_name, it is rebuilt from dataset_id + task_id — prefer
+    over-protection over deletion.
+    """
+    protected_names: set[str] = set()
+    protected_task_ids: set[str] = set()
+    for model in load_models(workspace):
+        name = str(model.get("dataset_name") or "").strip()
+        if not name:
+            try:
+                name = "Dataset{:03d}_{}".format(
+                    int(model.get("dataset_id")), safe_identifier(model.get("task_id"))
+                )
+            except (TypeError, ValueError):
+                continue
+        protected_names.add(name)
+    jobs_dir = workspace_paths(workspace)["jobs"]
+    if jobs_dir.is_dir():
+        for job_dir in _safe_listdir(jobs_dir):
+            status = read_json(job_dir / "status.json", {}) or {}
+            if str(status.get("status") or "").lower() in TERMINAL_STATES:
+                continue
+            request = read_json(job_dir / "request.json", {}) or {}
+            dataset_id = request.get("dataset_id")
+            task_id = str(request.get("task_id") or "").strip()
+            if dataset_id is None or not task_id:
+                continue
+            try:
+                protected_names.add(
+                    "Dataset{:03d}_{}".format(int(dataset_id), safe_identifier(task_id))
+                )
+            except (TypeError, ValueError):
+                continue
+            protected_task_ids.add(safe_identifier(task_id))
+    return protected_names, protected_task_ids
+
+
+def _safe_listdir(path: Path) -> list[Path]:
+    """iterdir that swallows races (dir vanished mid-sweep)."""
+    try:
+        return list(path.iterdir())
+    except OSError:
+        return []
+
+
+def _sweep_runtime_and_cache(workspace: str | Path,
+                             config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Prune expired runtime Dataset dirs and cache/source_grid case dirs.
+
+    Runs next to _sweep_expired_jobs when any nnU-Net job finishes. Both
+    sweeps only touch rebuildable data; registered models' datasets and
+    non-terminal jobs' datasets/task trees are protected. Failures are the
+    caller's to swallow — the sweeps must never turn a finished job into a
+    process error.
+    """
+    cfg = config or load_nnunet_config()
+    try:
+        runtime_days = float(
+            cfg.get("runtime_retention_days", DEFAULT_RUNTIME_RETENTION_DAYS) or 0
+        )
+    except (TypeError, ValueError):
+        runtime_days = 0.0
+    try:
+        cache_days = float(
+            cfg.get("source_grid_cache_retention_days",
+                    DEFAULT_SOURCE_GRID_CACHE_RETENTION_DAYS) or 0
+        )
+    except (TypeError, ValueError):
+        cache_days = 0.0
+    if runtime_days <= 0 and cache_days <= 0:
+        return {"runtime": {"removed_datasets": [], "retention_days": 0.0},
+                "source_grid_cache": {"removed_cases": [], "retention_days": 0.0}}
+    protected_names, protected_task_ids = _protected_dataset_names(workspace)
+    return {
+        "runtime": sweep_dataset_retention(workspace, protected_names, runtime_days),
+        "source_grid_cache": sweep_source_grid_cache_retention(
+            workspace, protected_task_ids, cache_days
+        ),
+    }
+
+
 def run_training(job_dir: Path) -> int:
     request_path = job_dir / "request.json"
     status_path = job_dir / "status.json"
@@ -1735,6 +1847,13 @@ def run_training(job_dir: Path) -> int:
             _sweep_expired_jobs(str(request["workspace"]))
         except OSError:
             pass
+        # The sweeps are maintenance; a bug in them must never turn a
+        # finished training job into a process error (hence Exception, not
+        # just OSError — the nninteractive precedent).
+        try:
+            _sweep_runtime_and_cache(str(request["workspace"]))
+        except Exception:
+            pass
 
 
 def run_inference(job_dir: Path) -> int:
@@ -1890,6 +2009,10 @@ def run_inference(job_dir: Path) -> int:
         try:
             _sweep_expired_jobs(str(request["workspace"]))
         except OSError:
+            pass
+        try:
+            _sweep_runtime_and_cache(str(request["workspace"]))
+        except Exception:
             pass
 
 

@@ -396,6 +396,115 @@ class TestSweepExpiredJobs(unittest.TestCase):
             self.assertTrue((Path(tmp) / "jobs" / "train_old" / "payload.bin").exists())
 
 
+class TestSweepRuntimeAndCache(unittest.TestCase):
+    """Retention for runtime Dataset dirs and cache/source_grid (A11)."""
+
+    CONFIG = {"runtime_retention_days": 30, "source_grid_cache_retention_days": 30}
+    OLD = time.time() - 40 * 86400
+
+    def _make_dataset(self, tmp, folder, name):
+        dataset = Path(tmp) / "runtime" / folder / name
+        dataset.mkdir(parents=True)
+        (dataset / "data.bin").write_bytes(b"x" * 100)
+        os.utime(str(dataset), (self.OLD, self.OLD))
+        return dataset
+
+    def _make_cache_case(self, tmp, task, case):
+        case_dir = Path(tmp) / "cache" / "source_grid" / task / case
+        case_dir.mkdir(parents=True)
+        (case_dir / "image.nii.gz").write_bytes(b"img")
+        os.utime(str(case_dir), (self.OLD, self.OLD))
+        return case_dir
+
+    def _make_registry_model(self, tmp, dataset_name, model_id="fm1"):
+        from nnunet_common import write_json_atomic
+
+        model_dir = Path(tmp) / "models" / "task" / model_id
+        model_dir.mkdir(parents=True)
+        fc.save_registry(
+            tmp,
+            {"workspace_dir": str(tmp)},
+            [{
+                "model_id": model_id,
+                "task_id": "task",
+                "dataset_id": 758,
+                "dataset_name": dataset_name,
+                "model_dir": str(model_dir),
+            }],
+        )
+        return model_dir
+
+    def _make_job(self, tmp, name, status, request=None):
+        jobs = Path(tmp) / "jobs" / name
+        jobs.mkdir(parents=True)
+        from nnunet_common import write_json_atomic
+
+        write_json_atomic(jobs / "status.json", {"status": status, "job_id": name})
+        if request is not None:
+            write_json_atomic(jobs / "request.json", request)
+        (jobs / "payload.bin").write_bytes(b"x")
+        return jobs
+
+    def test_expired_unreferenced_dataset_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = self._make_dataset(tmp, "nnUNet_raw", "Dataset751_oldtask")
+            self._make_job(tmp, "train_done", "completed")
+            result = fp._sweep_runtime_and_cache(tmp, dict(self.CONFIG))
+            self.assertEqual(result["runtime"]["removed_datasets"],
+                             ["nnUNet_raw/Dataset751_oldtask"])
+            self.assertFalse(dataset.exists())
+
+    def test_dataset_referenced_by_registry_model_is_kept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = self._make_dataset(tmp, "nnUNet_results", "Dataset758_task")
+            self._make_registry_model(tmp, "Dataset758_task")
+            self._make_job(tmp, "train_done", "completed")
+            result = fp._sweep_runtime_and_cache(tmp, dict(self.CONFIG))
+            self.assertEqual(result["runtime"]["removed_datasets"], [])
+            self.assertTrue(dataset.is_dir())
+
+    def test_dataset_and_cache_tree_of_running_job_are_kept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = self._make_dataset(tmp, "nnUNet_raw", "Dataset752_livetask")
+            case = self._make_cache_case(tmp, "livetask", "case1")
+            self._make_job(
+                tmp,
+                "train_live",
+                "training",
+                request={"dataset_id": 752, "task_id": "livetask"},
+            )
+            result = fp._sweep_runtime_and_cache(tmp, dict(self.CONFIG))
+            self.assertEqual(result["runtime"]["removed_datasets"], [])
+            self.assertEqual(result["source_grid_cache"]["removed_cases"], [])
+            self.assertTrue(dataset.is_dir())
+            self.assertTrue(case.is_dir())
+
+    def test_expired_cache_case_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            case = self._make_cache_case(tmp, "oldtask", "case1")
+            self._make_job(tmp, "train_done", "completed")
+            result = fp._sweep_runtime_and_cache(tmp, dict(self.CONFIG))
+            self.assertEqual(result["source_grid_cache"]["removed_cases"],
+                             ["oldtask/case1"])
+            self.assertFalse(case.exists())
+            # The emptied task dir is dropped.
+            self.assertFalse((Path(tmp) / "cache" / "source_grid" / "oldtask").exists())
+
+    def test_zero_retention_disables_both_sweeps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = self._make_dataset(tmp, "nnUNet_raw", "Dataset751_oldtask")
+            case = self._make_cache_case(tmp, "oldtask", "case1")
+            self._make_job(tmp, "train_done", "completed")
+            result = fp._sweep_runtime_and_cache(
+                tmp, {"runtime_retention_days": 0,
+                      "source_grid_cache_retention_days": 0}
+            )
+            self.assertEqual(result["runtime"]["removed_datasets"], [])
+            self.assertEqual(result["source_grid_cache"]["removed_cases"], [])
+            self.assertTrue(dataset.is_dir())
+            self.assertTrue(case.is_dir())
+
+
 class TestEntryRouting(unittest.TestCase):
     """Scripting shells + runtime module wiring (no Mimics import)."""
 

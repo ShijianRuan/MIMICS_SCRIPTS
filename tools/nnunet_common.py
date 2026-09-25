@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import time
 import uuid
 from pathlib import Path
@@ -629,6 +630,113 @@ def workspace_paths(workspace: str | Path) -> dict[str, Path]:
         "runtime": root / "runtime",
         "registry": root / "model_registry.json",
     }
+
+
+def _iter_dataset_dirs(base: Path):
+    """iterdir over Dataset[0-9][0-9][0-9]_* dirs, swallowing races."""
+    try:
+        return list(base.glob("Dataset[0-9][0-9][0-9]_*"))
+    except OSError:
+        return []
+
+
+def sweep_dataset_retention(
+    workspace: str | Path,
+    protected_names: set[str],
+    retention_days: float,
+) -> dict[str, Any]:
+    """Prune unreferenced runtime Dataset dirs past their retention window.
+
+    Both training families materialize nnUNet_raw/preprocessed/results under
+    ``<workspace>/runtime/`` per Dataset dir and nothing else ever removed
+    them, so disk grew without bound. Everything under runtime/ is
+    rebuildable (raw re-materialized from the source .mcs cases, preprocessed
+    re-planned, results re-trained) and delivered models live in models/ —
+    but a Dataset still in use must survive: callers pass the dataset names
+    referenced by registered models and non-terminal jobs as
+    ``protected_names``. ``retention_days`` <= 0 disables.
+    """
+    report: dict[str, Any] = {
+        "removed_datasets": [],
+        "kept_datasets": 0,
+        "retention_days": retention_days,
+    }
+    if retention_days <= 0:
+        return report
+    runtime = workspace_paths(workspace)["runtime"]
+    cutoff = time.time() - retention_days * 86400
+    for name in ("nnUNet_raw", "nnUNet_preprocessed", "nnUNet_results"):
+        base = runtime / name
+        if not base.is_dir():
+            continue
+        for dataset_dir in _iter_dataset_dirs(base):
+            if not dataset_dir.is_dir() or dataset_dir.name in protected_names:
+                report["kept_datasets"] += 1
+                continue
+            try:
+                if dataset_dir.stat().st_mtime >= cutoff:
+                    report["kept_datasets"] += 1
+                    continue
+                shutil.rmtree(str(dataset_dir), ignore_errors=True)
+                report["removed_datasets"].append(
+                    "{}/{}".format(name, dataset_dir.name)
+                )
+            except OSError:
+                continue
+    return report
+
+
+def sweep_source_grid_cache_retention(
+    workspace: str | Path,
+    protected_task_ids: set[str],
+    retention_days: float,
+) -> dict[str, Any]:
+    """Prune rebuildable cache/source_grid case dirs past their retention.
+
+    ``cache/source_grid/<task_id>/<case_id>/`` holds materialized per-case
+    training inputs, fully rebuildable from the source .mcs files. Whole task
+    trees named in ``protected_task_ids`` (non-terminal jobs' task ids) are
+    skipped so a running job's cache-hit validation never loses its buckets.
+    ``retention_days`` <= 0 disables. Mirrors the nnInteractive prepared-cache
+    sweep's mtime-window contract.
+    """
+    report: dict[str, Any] = {
+        "removed_cases": [],
+        "retention_days": retention_days,
+    }
+    if retention_days <= 0:
+        return report
+    root = workspace_paths(workspace)["cache"] / "source_grid"
+    if not root.is_dir():
+        return report
+    cutoff = time.time() - retention_days * 86400
+    for task_dir in _iter_safe_dir_children(root):
+        if task_dir.name in protected_task_ids:
+            continue
+        for case_dir in _iter_safe_dir_children(task_dir):
+            try:
+                if case_dir.stat().st_mtime >= cutoff:
+                    continue
+                shutil.rmtree(str(case_dir), ignore_errors=True)
+                report["removed_cases"].append(
+                    "{}/{}".format(task_dir.name, case_dir.name)
+                )
+            except OSError:
+                continue
+        try:
+            if task_dir.is_dir() and not any(task_dir.iterdir()):
+                task_dir.rmdir()
+        except OSError:
+            pass
+    return report
+
+
+def _iter_safe_dir_children(path: Path):
+    """list(path.iterdir()) that only yields directories, swallowing races."""
+    try:
+        return [child for child in path.iterdir() if child.is_dir()]
+    except OSError:
+        return []
 
 
 def suggest_dataset_id(workspace: str | Path, preferred: int = 701) -> int:

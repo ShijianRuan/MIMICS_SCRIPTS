@@ -222,6 +222,8 @@ locked to the validated few-shot configuration and is not configurable here.
 | `gpu_lock_timeout_seconds` | `86400` | How long a queued job waits for the shared GPU before failing. |
 | `label_export_timeout_seconds` | `7200` | Deadline for the background-Mimics label export stage. |
 | `job_retention_days` | `30` | Terminal job folder retention before cleanup (0 disables sweeping). |
+| `runtime_retention_days` | `30` | Retention for rebuildable `runtime/` Dataset folders (nnUNet_raw/nnUNet_preprocessed/nnUNet_results, 0 disables). Datasets referenced by registered models or non-terminal jobs are never removed; everything else is deleted once older than this. |
+| `source_grid_cache_retention_days` | `30` | Retention for the rebuildable `cache/source_grid/` per-case training inputs (0 disables). Task trees of non-terminal jobs are never removed. |
 | `status_poll_seconds` | `1.0` | Job-status polling interval. |
 
 ## `nnunet_config.json`
@@ -231,7 +233,9 @@ The training recipe itself is managed by nnU-Net and is not configurable here.
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `job_retention_days` | `30` | Terminal job folder retention before cleanup (0 disables sweeping). Terminal jobs (completed/failed/cancelled/abandoned) older than this are pruned to their `status.json` when any nnU-Net job finishes; registered models and caches are never touched. |
+| `job_retention_days` | `30` | Terminal job folder retention before cleanup (0 disables sweeping). Terminal jobs (completed/failed/cancelled/abandoned) older than this are pruned to their `status.json` when any nnU-Net job finishes; registered models are never touched. |
+| `runtime_retention_days` | `30` | Retention for rebuildable `runtime/` Dataset folders (nnUNet_raw/nnUNet_preprocessed/nnUNet_results, 0 disables). Datasets referenced by registered models or non-terminal jobs are never removed; everything else is deleted once older than this. |
+| `source_grid_cache_retention_days` | `30` | Retention for the rebuildable `cache/source_grid/` per-case training inputs (0 disables). Task trees of non-terminal jobs are never removed. |
 
 ## Environment Variables
 
