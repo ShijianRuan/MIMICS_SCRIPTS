@@ -1149,7 +1149,8 @@ def setup_from_scratch():
             lines.append("")
             lines.append("Solutions:")
             lines.append("  1. Use the offline bundle which includes Python 3.10")
-            lines.append("     Run: python tools/package_portable.py offline-bundle")
+            lines.append("     (ask whoever set up this workstation to prepare it:")
+            lines.append("     'offline-bundle' in the packaging tool)")
             lines.append("  2. Or install Python 3.10+ from https://python.org")
             msg = "\n".join(lines)
         else:
@@ -1157,7 +1158,8 @@ def setup_from_scratch():
                 "No Python interpreter found on this system.\n\n"
                 "Solutions:\n"
                 "  1. Use the offline bundle which includes Python 3.10\n"
-                "     Run: python tools/package_portable.py offline-bundle\n"
+                "     (ask whoever set up this workstation to prepare it:\n"
+                "     'offline-bundle' in the packaging tool)\n"
                 "  2. Or install Python 3.10+ from https://python.org"
             )
         _write_state("error", message=msg, error="No usable Python found")

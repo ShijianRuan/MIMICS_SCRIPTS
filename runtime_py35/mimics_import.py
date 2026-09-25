@@ -800,8 +800,9 @@ def _error_guidance(error_text, phase=""):
     return (
         "unknown",
         str(error_text or "Unknown error"),
-        "Retry the import. If it keeps failing, check mimics_import.log and "
-        "the diagnostic files kept for the failed case, or contact support.",
+        "Retry the import. If it keeps failing, check the import output "
+        "folder's logs subfolder and the diagnostic files kept for the "
+        "failed case, or contact support.",
     )
 
 
@@ -1810,7 +1811,8 @@ def _import_monitor_tick(monitor):
             _user_progress(
                 logging.INFO,
                 "Import is still preparing {0} ({1}s). Mimics remains "
-                "available. Use 04 Stop Import Queue to cancel.".format(
+                "available. Use Stop Import Queue"
+                " (01 Data menu) to cancel.".format(
                     detail, int(elapsed)
                 ),
             )
@@ -2097,7 +2099,8 @@ def _batch_prepare_tick_impl(monitor):
             _user_progress(
                 logging.INFO,
                 "Import is still preparing {0} ({1}s); completed {2}/{3}, "
-                "failed {4}. Use 04 Stop Import Queue to cancel.".format(
+                "failed {4}. Use Stop Import Queue"
+                " (01 Data menu) to cancel.".format(
                     detail,
                     int(elapsed),
                     int(monitor.get("completed", 0) or 0),
@@ -2848,7 +2851,8 @@ def _launch_background_mimics(output_dir, total_count=0, schedule_retry=True):
             )
             _append_import_log(
                 output_dir,
-                "Waiting task: {0}. Use 04 Stop Import Queue to cancel.".format(
+                "Waiting task: {0}. Use Stop Import Queue"
+                " (01 Data menu) to cancel.".format(
                     runtime_common.resource_lock_summary(holder)
                 ),
             )
@@ -2996,7 +3000,7 @@ def _first_mcs_monitor_tick(monitor):
                     completed,
                     failed,
                     output_dir,
-                    "\n\nReview mimics_import.log and _failed_cases.json before retrying failed cases." if failed else "",
+                    "\n\nBefore retrying failed cases, open the import output folder shown above and check the failed-cases list and the log in its logs subfolder." if failed else "",
                 ),
                 ui_blocking=False,
             )
@@ -3057,7 +3061,8 @@ def _first_mcs_monitor_tick(monitor):
                         logging.INFO,
                         "Background .mcs creation is still running ({0}s in "
                         "the current stage); completed {1}, failed {2}. Use "
-                        "04 Stop Import Queue to cancel.".format(
+                        "Stop Import Queue"
+                        " (01 Data menu) to cancel.".format(
                             int(elapsed),
                             int(status.get("completed", 0) or 0),
                             int(status.get("failed", 0) or 0),
@@ -3152,8 +3157,8 @@ def _first_mcs_monitor_tick(monitor):
         _user_progress(
             logging.INFO,
             "Waiting for the first .mcs file ({0}s). Preparation and "
-            "background Mimics continue independently; use 04 Stop Import "
-            "Queue to cancel.".format(int(elapsed)),
+            "background Mimics continue independently; use Stop Import Queue"
+            " (01 Data menu) to cancel.".format(int(elapsed)),
         )
 
 
@@ -3497,8 +3502,8 @@ def _discover_monitor_tick(monitor):
                 _user_progress(
                     logging.INFO,
                     "Dataset discovery is still running in external Python "
-                    "({0}s). Mimics remains available. Use 04 Stop Import "
-                    "Queue to cancel.".format(int(elapsed)),
+                    "({0}s). Mimics remains available. Use Stop Import Queue"
+                    " (01 Data menu) to cancel.".format(int(elapsed)),
                 )
             return  # still discovering
 
@@ -3680,7 +3685,7 @@ def _discover_monitor_tick(monitor):
             _stop_import_monitor(monitor.get("monitor_key"))
         except Exception:
             pass
-        _safe_message_box("Import Error", "Discover callback failed. Please check mimics_import.log for details.")
+        _safe_message_box("Import Error", "Import failed with an unexpected error. The import output folder's logs subfolder has the technical details.")
         _write_import_task_status(
             monitor.get("task_status_path"),
             {"status": "failed", "phase": "monitor_failed", "error": str(exc)},

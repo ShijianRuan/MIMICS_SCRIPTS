@@ -303,7 +303,7 @@ def main():
         if _mask_count() > 0:
             mimics.dialogs.message_box(
                 "No non-empty masks are available to scan.\n"
-                "If visible-only mode is enabled, disable MIMICS_MASK_IDENTIFIER_VISIBLE_ONLY."
+                "If some masks are hidden, show them in the Mask tab and try again."
             )
         else:
             mimics.dialogs.message_box("No masks in the current project.")

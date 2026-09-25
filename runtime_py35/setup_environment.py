@@ -507,8 +507,9 @@ def main(action=None):
                 message=(
                     "Offline bundle not found.\n\n"
                     "This requires the offline bundle with python/ and wheels/ directories.\n"
-                    "Run: python tools/package_portable.py offline-bundle\n"
-                    "to create the bundle first."
+                    "Ask whoever set up this workstation to create the bundle first\n"
+                    "(Mimics-Script: Run 'offline-bundle' in the packaging tool),\n"
+                    "then run this entry again."
                 ),
                 ui_blocking=True,
             )

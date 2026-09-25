@@ -3776,6 +3776,48 @@ class TestNNInteractiveContinuousPrompting(unittest.TestCase):
         self.assertEqual("unknown", category)
         self.assertIn("Retry", action)
 
+    def test_user_facing_text_has_no_developer_residue(self):
+        """B4: user-visible strings must not name env vars, command lines,
+        or fragile menu numbers (they change and annotators cannot act on
+        them). References to entries use the name + menu form instead."""
+        import io
+        import tokenize
+
+        def string_literals(module_path):
+            with open(module_path, "rb") as handle:
+                for token in tokenize.tokenize(handle.readline):
+                    if token.type == tokenize.STRING:
+                        yield token.string
+
+        checks = {
+            os.path.join("runtime_py35", "mask_identifier.py"):
+                # Reading env vars is fine; telling the user to set them is not.
+                ["disable MIMICS_", "enable MIMICS_"],
+            os.path.join("runtime_py35", "setup_environment.py"):
+                ["Run: python"],
+            os.path.join("runtime_py35", "mimics_import.py"):
+                ["04 Stop Import Queue", "check mimics_import.log"],
+            os.path.join("tools", "mimics_label_export.py"):
+                ["04 Stop Import Queue"],
+            os.path.join("tools", "setup_env.py"):
+                ["Run: python"],
+        }
+        for relative, forbidden in checks.items():
+            path = os.path.join(PROJECT_ROOT, relative)
+            self.assertTrue(os.path.isfile(path), path)
+            literals = "\n".join(string_literals(path))
+            for needle in forbidden:
+                self.assertNotIn(
+                    needle, literals,
+                    "{0} still leaks '{1}' to users".format(relative, needle)
+                )
+        # The reachable form must be present where a stop action is offered.
+        import_source = Path(
+            PROJECT_ROOT, "runtime_py35", "mimics_import.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Stop Import Queue", import_source)
+        self.assertIn("(01 Data menu)", import_source)
+
 
 class TestNNInteractiveGpuMemoryPrecheck(unittest.TestCase):
     def _bridge_module(self):
