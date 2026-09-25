@@ -24,6 +24,7 @@
 | FlexiCT Train Model | 少样本（8 例起）训练单器官分割模型（本地或远程） | 已导出标注的数据集 + 环境已设置 + 预训练权重已就位 |
 | FlexiCT Predict Current Case | 用 FlexiCT 模型预测当前病例并应用为 Mask | **项目已打开** + 已激活图像 + 已有训练好的模型 + verified grid |
 | FlexiCT Active Learning Review | 双模型分歧排序未标注池并叠加不确定度带 | 已有 2D+3D 模型对（pair）+ 未标注数据池 |
+| FlexiCT Show Status and Stop | 查看任务进度/日志/模型列表，**并可停止运行中的任务** | 有启动过的 FlexiCT 任务 |
 | nnU-Net Train Model | 训练多类别分割模型（本地或远程） | 数据集（含已导出的掩码）+ 环境已设置 + 推荐 GPU |
 | nnU-Net Predict Current Case | 用训练好的模型推理当前案例 | **项目已打开** + 已激活图像 + 已有训练好的模型 |
 | nnU-Net Show Status & Models | 查看任务进度/日志/曲线/模型列表，**并可停止任务** | 有启动过的 nnU-Net 任务 |

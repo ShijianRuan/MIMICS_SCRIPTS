@@ -422,12 +422,27 @@ class TestEntryRouting(unittest.TestCase):
             "01_Train_Model.py": "BUTTON_TRAIN",
             "02_Predict_Current_Case.py": "BUTTON_PREDICT",
             "03_Active_Learning_Review.py": "BUTTON_ACTIVE_LEARNING",
+            "04_Show_Status_and_Stop.py": "BUTTON_STATUS",
         }
         for name, action in shells.items():
             source = (ROOT / "scripting_library" / "02_AI" / "FlexiCT" / name).read_text(
                 encoding="utf-8")
             self.assertIn('"flexict_mimics"', source, name)
             self.assertIn(action, source, name)
+
+    def test_waiting_messages_reference_reachable_stop_paths(self):
+        # A6-1 regression: FlexiCT waiting messages must not point at the
+        # nnU-Net stop entry (different workspace -> "No running nnU-Net
+        # task was found." dead end) nor at the in-module chooser's stop
+        # action, which no menu entry reaches. The resource-wait message
+        # must name the FlexiCT status entry; result-wait messages must
+        # state the keep-and-auto-apply mechanism instead of a stop path.
+        source = (ROOT / "runtime_py35" / "flexict_mimics.py").read_text(
+            encoding="utf-8")
+        self.assertNotIn("04 Stop Running Task", source)
+        self.assertIn("FlexiCT Show Status and Stop", source)
+        self.assertIn("will be applied when the other Mask", source)
+        self.assertIn("will be applied as soon as the target project is", source)
 
     def test_runtime_module_is_py35_clean(self):
         import ast

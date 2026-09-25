@@ -104,7 +104,20 @@ AL 窗会列出缺什么，不会静默降级成单模型。
 6. **闭环**：标注完 top case 后把它们加入训练集，重训 pair，再跑下一轮 AL。
    顶部表格每列均可导出 CSV（`annotation_progress.csv`）。
 
-### 3.4 应用请求的握手（为什么要点两次）
+### 3.4 状态与停止（04 Show Status and Stop）
+
+打开外部状态窗口：job 列表、日志查看、模型列表；**运行中的任务可从中停止**
+（停止按钮对已完成/失败等终态任务禁用）。资源等待（如 `waiting_for_gpu`）的
+60 秒日志会指向该入口。
+
+两个"等待"场景**不提供丢弃**、而是自动恢复，属设计行为：
+
+- 结果就绪但目标项目未打开：结果保留，目标项目重开后自动应用；
+- 结果就绪但 Mask buffer 被其他操作占用：结果保留，占用结束后自动应用。
+
+（Mimics 重启后由 resume 机制自动恢复这类待应用结果。）
+
+### 3.5 应用请求的握手（为什么要点两次）
 
 Review UI 是 Mimics 外部进程，不能碰 `mimics.*` API。它把请求写成
 `job_dir/apply_requests/<case>_<what>_<ms>.json`，Mimics 内的 AL monitor 每
@@ -124,7 +137,7 @@ Overlay 后需要切回 Mimics，monitor 会弹窗告知结果。
 | AL UI | `tools/flexict_active_learning_ui.py` | 排序表 + apply request 写入 |
 | 状态查看器 | `tools/flexict_status_viewer.py` | job 列表 + 日志查看 |
 | Mimics 入口 | `runtime_py35/flexict_mimics.py` | Py3.5 监控器（train/infer/AL request） |
-| 菜单脚本 | `scripting_library/02_AI/FlexiCT/` | 三个薄壳入口 |
+| 菜单脚本 | `scripting_library/02_AI/FlexiCT/` | 四个薄壳入口（训练 / 预测 / 主动学习 / 状态与停止） |
 | 测试 | `tools/test_flexict_integration.py`（56 项）+ `tools/test_flexict_common.py` + `integrations/flexict-finetune/tests/` | 离线测试 |
 
 ## 5. Windows 安装

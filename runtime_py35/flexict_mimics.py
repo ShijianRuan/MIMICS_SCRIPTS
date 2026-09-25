@@ -485,8 +485,9 @@ def _monitor_tick_locked(monitor):
         if due:
             _log(
                 logging.INFO,
-                "FlexiCT is still waiting ({0}s): {1}. Use 04 Stop Running "
-                "Task to cancel and release its resources.".format(
+                "FlexiCT is still waiting ({0}s): {1}. Open "
+                "FlexiCT Show Status and Stop"
+                " (02_AI menu) to cancel and release its resources.".format(
                     int(elapsed), line
                 ),
             )
@@ -583,8 +584,9 @@ def _monitor_tick_locked(monitor):
             monitor["waiting_logged"] = True
             _log(
                 logging.INFO,
-                "FlexiCT result is ready but waiting{0}: {1} Use Stop "
-                "Running Task to discard the pending result.".format(
+                "FlexiCT result is ready but waiting{0}: {1} The result is "
+                "kept and will be applied as soon as the target project is "
+                "reopened.".format(
                     " ({0}s)".format(int(elapsed)) if elapsed >= 1.0 else "",
                     reason,
                 ),
@@ -996,9 +998,9 @@ def _monitor_tick(monitor):
             if due:
                 _log(
                     logging.INFO,
-                    "FlexiCT result handling is waiting for {0} ({1}s). Use "
-                    "Stop Running Task if the pending result should be "
-                    "discarded.".format(owner_text, int(elapsed)),
+                    "FlexiCT result handling is waiting for {0} ({1}s). The "
+                    "result is kept and will be applied when the other Mask "
+                    "operation finishes.".format(owner_text, int(elapsed)),
                 )
             return
         runtime_common.clear_progress_notice(monitor, "flexict_buffer_wait")
