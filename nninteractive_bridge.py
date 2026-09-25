@@ -56,7 +56,6 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-import nibabel as nib
 import numpy as np
 
 # Embeddable Python may not include script directory on sys.path.
@@ -1259,6 +1258,11 @@ def canonical_ras_buffer_mapping(voxel_to_ras: Any) -> dict[str, Any]:
     if abs(float(np.linalg.det(affine[:3, :3]))) < 1.0e-8:
         raise ValueError("Mimics voxel-to-RAS matrix is singular")
 
+    # Lazy import: nibabel pulls in pydicom and is slow to import (it
+    # dominated cold-start of every async worker that touched this
+    # module). mimics_bridge.py already follows this pattern.
+    import nibabel as nib
+
     orientation = nib.orientations.io_orientation(affine)
     probe = np.arange(2 * 3 * 4, dtype=np.int16).reshape((2, 3, 4))
     expected = nib.orientations.apply_orientation(probe, orientation)
@@ -1326,6 +1330,9 @@ def _connect_local(model_dir: str, device: str) -> Any:
 
 def load_image_nifti(path: str) -> np.ndarray:
     """Load a NIfTI image as a float32 4D array with shape (1, X, Y, Z)."""
+    # Lazy import — see canonical_ras_buffer_mapping.
+    import nibabel as nib
+
     nii = nib.load(path)
     data = np.asarray(nii.dataobj, dtype=np.float32)
     if data.ndim == 3:
