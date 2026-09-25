@@ -719,15 +719,34 @@ def test_append_masks(fake, tmp):
 def test_scripting_entrypoint(fake, tmp):
     fake.reset_scene(image_shape=(2, 2, 2), minimum_value=0, maximum_value=100)
     entry = import_runtime_module("_mimics_entrypoint")
-    result = entry.run_runtime_entry(
-        {"__name__": "scripting_library.03_Review.05_Window_Reset_Full_Range"},
-        str(LIBRARY_DIR / "03_Review" / "05_Window_Reset_Full_Range.py"),
-        "window_level_mimics",
-        action_value="reset",
-    )
+    # Redirect window/level state to the temp dir so the real entrypoint
+    # cannot overwrite the annotator's production window_level_state.json.
+    module = import_runtime_module("window_level_mimics")
+    prod_state = Path(ROOT, ".mimics_runtime", "window_level_state.json")
+    prod_before = prod_state.is_dir(), prod_state.read_bytes() if prod_state.is_file() else None
+    state_path = tmp / "window_state_entry.json"
+    original_state_path = module._state_path
+    try:
+        module._state_path = lambda: str(state_path)
+        result = entry.run_runtime_entry(
+            {"__name__": "scripting_library.03_Review.05_Window_Reset_Full_Range"},
+            str(LIBRARY_DIR / "03_Review" / "05_Window_Reset_Full_Range.py"),
+            "window_level_mimics",
+            action_value="reset",
+        )
+    finally:
+        module._state_path = original_state_path
     assert_equal(result, 0, "entrypoint result")
     assert_equal(fake.view.get_contrast(), ((0, 0.0), (100, 1.0)), "reset contrast via entrypoint")
     assert_true(fake.update_gui_calls >= 1, "entrypoint did not trigger GUI update")
+    assert_true(
+        state_path.is_file(),
+        "entrypoint should persist window state under the temp dir",
+    )
+    assert_true(
+        (prod_state.is_dir(), prod_state.read_bytes() if prod_state.is_file() else None) == prod_before,
+        "entrypoint must not touch the production window_level_state.json",
+    )
     return "shared Scripting Library entrypoint executed inside fake Mimics"
 
 
@@ -905,18 +924,22 @@ def test_window_level_from_selected_mask(fake, tmp):
     fake.data.masks.append(mask)
     module = import_runtime_module("window_level_mimics")
     state_path = tmp / "window_state.json"
+    original_state_path = module._state_path
     module._state_path = lambda: str(state_path)
-    result = module.apply_from_selected_mask()
-    assert_equal(result, 0, "apply_from_selected_mask result")
-    assert_equal(fake.view.get_contrast(), ((0, 0.0), (250, 1.0)), "liver preset clamped contrast")
-    state = json.loads(state_path.read_text(encoding="utf-8"))
-    assert_equal(state.get("last_preset"), "Abdomen / Soft Tissue", "selected mask preset")
-    module.undo_last()
-    assert_equal(fake.view.get_contrast(), ((0.0, 0.0), (2026.0, 1.0)), "undo restored previous contrast")
+    try:
+        result = module.apply_from_selected_mask()
+        assert_equal(result, 0, "apply_from_selected_mask result")
+        assert_equal(fake.view.get_contrast(), ((0, 0.0), (250, 1.0)), "liver preset clamped contrast")
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert_equal(state.get("last_preset"), "Abdomen / Soft Tissue", "selected mask preset")
+        module.undo_last()
+        assert_equal(fake.view.get_contrast(), ((0.0, 0.0), (2026.0, 1.0)), "undo restored previous contrast")
 
-    image = fake.reset_scene(image_shape=(3, 4, 5), minimum_value=0, maximum_value=4095)
-    image._contrast_maximum_value = 3625
-    module.reset_full_range()
+        image = fake.reset_scene(image_shape=(3, 4, 5), minimum_value=0, maximum_value=4095)
+        image._contrast_maximum_value = 3625
+        module.reset_full_range()
+    finally:
+        module._state_path = original_state_path
     assert_equal(fake.view.get_contrast(), ((0, 0.0), (3625, 1.0)), "reset should clamp to Mimics reported range")
     return "mask-name preset, image-range clamp, reset retry, state save, and undo passed"
 

@@ -5855,17 +5855,31 @@ class TestNewFeatures(unittest.TestCase):
         class Proc(object):
             pid = 101
 
+        import runtime_common
+        # The runner must land in an isolated runtime dir, never in the
+        # production .mimics_runtime/import_queues/ tree.
+        prod_queues = Path(PROJECT_ROOT, ".mimics_runtime", "import_queues")
+        prod_before = self._snapshot_dir(prod_queues)
         old_lock = cli._acquire_background_mimics_lock
         old_popen = cli.subprocess.Popen
+        old_runtime_dir = os.environ.get("MIMICS_IMPORT_RUNTIME_DIR")
         try:
             cli._acquire_background_mimics_lock = lambda *_args, **_kwargs: Lock()
             cli.subprocess.Popen = lambda *_args, **_kwargs: Proc()
+            os.environ["MIMICS_IMPORT_RUNTIME_DIR"] = str(Path(self.tmp) / "import_runtime")
             cli.launch_create_mcs(output_dir, r"C:\MimicsResearch.exe", bridge_python, 0.0)
+            # Resolve the expected queue dir through the real function while
+            # the override is still active, so the digest rule cannot drift.
+            queue_runtime = Path(runtime_common.import_queue_runtime_dir(
+                PROJECT_ROOT, str(output_dir)
+            ))
         finally:
             cli._acquire_background_mimics_lock = old_lock
             cli.subprocess.Popen = old_popen
-        import runtime_common
-        queue_runtime = Path(runtime_common.import_queue_runtime_dir(PROJECT_ROOT, str(output_dir)))
+            if old_runtime_dir is None:
+                os.environ.pop("MIMICS_IMPORT_RUNTIME_DIR", None)
+            else:
+                os.environ["MIMICS_IMPORT_RUNTIME_DIR"] = old_runtime_dir
         runner = (queue_runtime / "_run_create_mcs.py").read_text(encoding="utf-8")
         # The runner embeds paths as JSON string literals, so compare against
         # the escaped form the file actually contains.
@@ -5875,6 +5889,21 @@ class TestNewFeatures(unittest.TestCase):
         literal_line = [l for l in runner.splitlines() if "MIMICS_BRIDGE_PYTHON" in l][0]
         literal = literal_line.split("= ", 1)[1].strip()
         self.assertEqual(bridge_python, json.loads(literal))
+        # Anti-revival: the production import_queues tree must be untouched.
+        self.assertEqual(prod_before, self._snapshot_dir(prod_queues))
+
+    @staticmethod
+    def _snapshot_dir(path):
+        """Map of relative path -> file content hash for a pollution guard."""
+        snapshot = {}
+        if not path.is_dir():
+            return snapshot
+        for item in sorted(path.iterdir()):
+            if item.is_dir():
+                snapshot[item.name] = "dir"
+            else:
+                snapshot[item.name] = hash(item.read_bytes())
+        return snapshot
 
 
     def test_mimics_export_mask_preflight_does_not_read_voxels(self):
