@@ -493,7 +493,9 @@ def step_local_inference(
             "model_manifest": str(model_dir / "flexict_model_manifest.json"),
             "image_path": str(image),
             "output_path": str(infer_output),
-            "use_cpu": True,
+            # GPU is the production fast path (75s vs ~70min CPU on a
+            # 1132-slice CT). The GPU lock is free here — training is done.
+            "use_cpu": False,
             "source_modality": "ct",
         }
         request = fp.normalize_flexict_request(request)
