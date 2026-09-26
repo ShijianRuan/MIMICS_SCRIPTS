@@ -90,8 +90,16 @@ SERVER_IDENTITY_STARTUP_GRACE_SECONDS = SERVER_STARTUP_TIMEOUT + 60.0
 LOG_ROTATE_BYTES = 10 * 1024 * 1024
 LOG_ROTATE_BACKUPS = 3
 PROJECT_ROOT = Path(__file__).resolve().parent
-RESOURCE_LOCK_DIR = default_resource_lock_dir(PROJECT_ROOT)
-GPU_LOCK_PATH = RESOURCE_LOCK_DIR / "gpu.lock"
+
+
+def _gpu_lock_path() -> Path:
+    """Resolve the GPU lock path per call, honoring env overrides.
+
+    A module-level constant would freeze the path at import time; test
+    suites that isolate locks via MIMICS_RESOURCE_LOCK_DIR after import
+    would still touch the production lock directory.
+    """
+    return default_resource_lock_dir(PROJECT_ROOT) / "gpu.lock"
 
 
 def _rotate_log_file(path: Path, max_bytes: int = LOG_ROTATE_BYTES, backups: int = LOG_ROTATE_BACKUPS) -> None:
@@ -962,7 +970,7 @@ def _start_server(
     if _gpu_lock_enabled(device):
         _check_free_gpu_memory(device)
         gpu_lock = FileResourceLock(
-            GPU_LOCK_PATH,
+            _gpu_lock_path(),
             "gpu",
             "nnInteractive server ({0})".format(Path(model_dir).name),
         )
@@ -1022,7 +1030,7 @@ def _start_server(
             "service_idle_timeout_seconds": float(service_idle_timeout_seconds),
         }
         if gpu_lock is not None:
-            state["gpu_lock_path"] = str(GPU_LOCK_PATH)
+            state["gpu_lock_path"] = str(gpu_lock.path)
             state["gpu_lock_token"] = gpu_lock.token
         _write_server_state(state_path, state)
         watchdog = _start_watchdog(state_path, ownership_token)

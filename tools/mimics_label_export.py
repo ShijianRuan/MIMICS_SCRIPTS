@@ -56,8 +56,15 @@ from resource_locks import (
 LOG_ROTATE_BYTES = 5 * 1024 * 1024
 LOG_ROTATE_BACKUPS = 3
 
-RESOURCE_LOCK_DIR = default_resource_lock_dir(ROOT)
-GPU_LOCK_PATH = RESOURCE_LOCK_DIR / "gpu.lock"
+
+def _gpu_lock_path():
+    """Resolve the GPU lock path per call, honoring env overrides.
+
+    A module-level constant would freeze the path at import time; test
+    suites that isolate locks via MIMICS_RESOURCE_LOCK_DIR after import
+    would still touch the production lock directory.
+    """
+    return default_resource_lock_dir(ROOT) / "gpu.lock"
 
 
 def detect_gpu_memory_gb(requested=0.0):
@@ -610,7 +617,7 @@ def cleanup_idle_nninteractive_server_lock(current):
     except OSError:
         return False
     return bool(release_lock(
-        current.get("path") or GPU_LOCK_PATH,
+        current.get("path") or _gpu_lock_path(),
         current.get("token"),
     ))
 
@@ -685,7 +692,7 @@ def request_nninteractive_server_release_on_contention(current):
 def acquire_gpu_lock_for_job(workspace, status_path, cancel_path, owner, timeout_seconds):
     if not gpu_lock_enabled():
         return None
-    lock = FileResourceLock(GPU_LOCK_PATH, "gpu", owner)
+    lock = FileResourceLock(_gpu_lock_path(), "gpu", owner)
     cleanup_idle_nninteractive_server_lock(lock.read())
     last_log = {"epoch": 0.0}
 
