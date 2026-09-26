@@ -1359,6 +1359,13 @@ def _open_resource_guard(path, wait_seconds=2.0):
                 else:
                     import fcntl
                     fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                # Stamp activity so the stale-guard sweep can trust mtime:
+                # without this the mtime stays at creation time forever and
+                # a hot resource's guard would look "idle" while in daily use.
+                try:
+                    os.utime(guard_path, None)
+                except OSError:
+                    pass
                 return handle
             except (IOError, OSError):
                 if time.time() >= deadline:

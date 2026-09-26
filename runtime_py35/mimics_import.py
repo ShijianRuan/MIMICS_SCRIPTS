@@ -612,8 +612,136 @@ def _register_mcs_queue(output_dir, total_count=0):
         pass
 
 
+IMPORT_QUEUE_RETENTION_DAYS = 14
+
+
+def _queue_dir_has_live_consumer(queue_dir):
+    """True when any lock JSON in the queue dir names a live pid."""
+    try:
+        for name in os.listdir(queue_dir):
+            if not name.endswith(".lock"):
+                continue
+            payload = runtime_common.read_json(
+                os.path.join(queue_dir, name), {}
+            ) or {}
+            pid = payload.get("pid") or payload.get("acquiring_pid")
+            if pid and runtime_common.process_exists(pid):
+                return True
+    except OSError:
+        return True  # unreadable: assume busy, never delete
+    return False
+
+
+def _prune_import_queues(max_age_days=IMPORT_QUEUE_RETENTION_DAYS):
+    """Delete control directories of long-idle import queues.
+
+    Mirrors the export-side _prune_local_export_jobs precedent. A queue
+    dir is removable when (a) its active-marker heartbeat is older than
+    max_age_days, or it has no heartbeat at all AND the dir mtime itself
+    is that old (the fallback covers dirs caught between creation and the
+    first heartbeat write), and (b) no consumer lock inside it names a
+    live pid, and (c) any *.lock.guard inside it is uncontended
+    (non-blocking try-acquire; a contender disqualifies the dir). The
+    matching mcs_queues registry entry is removed with it, so the Stop
+    Import Queue path cannot resurrect the directory.
+    """
+    base = os.path.join(
+        runtime_common.import_runtime_base(_project_root()), "import_queues"
+    )
+    if not os.path.isdir(base):
+        return 0
+    now = time.time()
+    cutoff = now - float(max_age_days) * 86400.0
+    registry_dir = _mcs_queue_registry_dir()
+    removed = 0
+    try:
+        names = os.listdir(base)
+    except OSError:
+        return 0
+    for name in names:
+        queue_dir = os.path.join(base, name)
+        if not os.path.isdir(queue_dir):
+            continue
+        try:
+            active = runtime_common.read_json(
+                os.path.join(queue_dir, _MCS_QUEUE_ACTIVE), {}
+            ) or {}
+            heartbeat = float(active.get("updated_at_epoch") or 0)
+        except Exception:
+            heartbeat = 0.0
+        try:
+            dir_age = now - os.path.getmtime(queue_dir)
+        except OSError:
+            continue
+        stale = (
+            heartbeat and now - heartbeat >= float(max_age_days) * 86400.0
+        ) or (
+            not heartbeat and dir_age >= float(max_age_days) * 86400.0
+        )
+        if not stale:
+            continue
+        if _queue_dir_has_live_consumer(queue_dir):
+            continue
+        # Same try-acquire rule the guard sweep applies: never delete a
+        # guard someone may be opening right now.
+        try:
+            import resource_locks
+        except Exception:
+            continue
+        contended = False
+        for entry in os.listdir(queue_dir):
+            if not entry.endswith(".guard"):
+                continue
+            guard_path = os.path.join(queue_dir, entry)
+            try:
+                handle = open(guard_path, "a+b")
+                try:
+                    # Seek to byte 0: "a+b" opens at end-of-file and
+                    # msvcrt.locking/flock lock from the current position.
+                    handle.seek(0)
+                    resource_locks._try_lock_byte(handle)
+                    resource_locks._unlock_byte(handle)
+                finally:
+                    handle.close()
+            except Exception:
+                contended = True
+                break
+        if contended:
+            continue
+        shutil.rmtree(queue_dir, ignore_errors=True)
+        if not os.path.isdir(queue_dir):
+            removed += 1
+        # Drop the matching registry entry (same digest naming as
+        # _register_mcs_queue) so stale registrations cannot resurrect
+        # the directory via a stop marker.
+        try:
+            for reg_name in os.listdir(registry_dir):
+                if not reg_name.endswith(".json"):
+                    continue
+                payload = runtime_common.read_json(
+                    os.path.join(registry_dir, reg_name), {}
+                ) or {}
+                if os.path.normcase(
+                    str(payload.get("runtime_dir") or "")
+                ) == os.path.normcase(queue_dir):
+                    try:
+                        os.remove(os.path.join(registry_dir, reg_name))
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+    return removed
+
+
 def _mark_mcs_queue_active(output_dir, total_count=0):
     _verbose_log(output_dir, "Queue active | output_dir={0} | total_count={1}".format(output_dir, int(total_count or 0)))
+    # Import launch is the same cheap user-action moment the export side
+    # uses for its prune: keep the queues directory bounded without any
+    # background timer of its own.
+    try:
+        _prune_import_queues()
+    except Exception:
+        pass
     rt_dir = _rt(output_dir)
     if not os.path.isdir(rt_dir):
         os.makedirs(rt_dir)

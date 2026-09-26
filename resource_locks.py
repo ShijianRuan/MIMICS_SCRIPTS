@@ -520,7 +520,132 @@ def sweep_processes(
                 # reflects reality after a single sweep.
                 if _remove_record_file(record.get("_record_path")):
                     summary["removed_dead_records"] += 1
+    try:
+        summary["removed_stale_guards"] = sweep_stale_guards(project_root)
+    except Exception:
+        summary["removed_stale_guards"] = 0
     return summary
+
+
+# A guard is only removable when it has been idle this long (guard mtimes
+# are stamped on every successful acquisition, so this measures real
+# disuse, not creation age).
+STALE_GUARD_RETENTION_DAYS = 30.0
+
+
+def _try_lock_byte(handle):
+    """Non-blocking one-byte lock; True when acquired."""
+    if os.name == "nt":
+        import msvcrt
+
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    return True
+
+
+def _unlock_byte(handle):
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+
+
+def sweep_stale_guards(project_root, max_age_days=STALE_GUARD_RETENTION_DAYS):
+    """Delete one-byte *.lock.guard files for long-idle resources.
+
+    Guards are deliberately persistent (unlinking one while a contender
+    can open it splits contenders across inodes), so three gates must all
+    pass before an unlink:
+      1. idle: guard mtime older than max_age_days (mtimes are stamped on
+         every acquisition, so a hot resource never qualifies);
+      2. sibling-free: the resource's .lock JSON file does not exist
+         (re-checked AFTER the try-acquire, closing the check-to-delete
+         race);
+      3. uncontended: a non-blocking try-acquire of the guard succeeds —
+         anyone actively waiting on this guard disqualifies it.
+
+    Deletion order is platform-forced: POSIX removes the path while the
+    guard is still locked (no unlocked window); Windows cannot unlink an
+    open handle without FILE_SHARE_DELETE, so it must close first, then
+    re-stat (a changed identity means a contender won the race — give up)
+    and remove (FileNotFoundError counts as success).
+    """
+    lock_dir = default_resource_lock_dir(project_root)
+    removed = 0
+    try:
+        names = sorted(os.listdir(str(lock_dir)))
+    except OSError:
+        return removed
+    cutoff = time.time() - max(0.0, float(max_age_days)) * 86400.0
+    for name in names:
+        if not name.endswith(".guard"):
+            continue
+        guard_path = os.path.join(str(lock_dir), name)
+        try:
+            if not os.path.isfile(guard_path):
+                continue
+            if os.path.getmtime(guard_path) >= cutoff:
+                continue
+            lock_sibling = guard_path[: -len(".guard")]
+            if os.path.exists(lock_sibling):
+                continue
+            handle = open(guard_path, "a+b")
+            try:
+                # "a+b" positions at end-of-file; msvcrt.locking/flock lock
+                # from the CURRENT position, so seek to byte 0 where every
+                # real guard holder locks (_MutationGuard seeks to 0).
+                handle.seek(0)
+                if not _try_lock_byte(handle):
+                    continue
+                # Gate 2 re-check: the sibling may have been created since
+                # the first check.
+                if os.path.exists(lock_sibling):
+                    continue
+                if os.name != "nt":
+                    # POSIX: remove while still locked — no unlocked window.
+                    try:
+                        os.unlink(guard_path)
+                        removed += 1
+                    except OSError:
+                        pass
+                else:
+                    # Windows: cannot unlink an open handle; close first,
+                    # then re-stat to make sure this is still our inode.
+                    handle.close()
+                    handle = None
+                    if os.path.exists(guard_path):
+                        try:
+                            os.remove(guard_path)
+                            removed += 1
+                        except FileNotFoundError:
+                            removed += 1
+                        except OSError:
+                            pass
+            except (IOError, OSError):
+                # Try-acquire contention or a vanished guard: not stale.
+                continue
+            finally:
+                if handle is not None:
+                    _unlock_byte(handle)
+                    try:
+                        handle.close()
+                    except Exception:
+                        pass
+        except Exception:
+            # A sweep failure must never propagate to the caller: this
+            # runs at import startup and health-panel button presses.
+            pass
+    return removed
 
 
 def _remove_record_file(path) -> bool:
@@ -616,6 +741,14 @@ class _MutationGuard:
                         self.handle.fileno(),
                         fcntl.LOCK_EX | fcntl.LOCK_NB,
                     )
+                # Stamp activity so the stale-guard sweep can trust mtime:
+                # without this the mtime stays at creation time forever and
+                # a hot resource's guard would look "idle" while in daily
+                # use. (py3.5-compatible syntax.)
+                try:
+                    os.utime(str(self.path), None)
+                except OSError:
+                    pass
                 return self
             except (IOError, OSError):
                 if time.time() >= deadline:
