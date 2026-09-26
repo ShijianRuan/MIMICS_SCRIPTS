@@ -99,8 +99,18 @@ class CrossWorkflowTransitionTests(unittest.TestCase):
             self.case_ids.append(case_id)
         self.workspace = self.tmp / "workspace"
         self.jobs = self.tmp / "jobs"
+        # Isolate real lock acquisitions (dataset lock, GPU lock) to the
+        # temp dir: per-run temp workspace paths hash to new lock names
+        # and would leak one-byte guard anchors into the production
+        # .mimics_runtime/locks directory forever.
+        self._old_lock_dir = os.environ.get("MIMICS_RESOURCE_LOCK_DIR")
+        os.environ["MIMICS_RESOURCE_LOCK_DIR"] = str(self.tmp / "locks")
 
     def tearDown(self):
+        if self._old_lock_dir is None:
+            os.environ.pop("MIMICS_RESOURCE_LOCK_DIR", None)
+        else:
+            os.environ["MIMICS_RESOURCE_LOCK_DIR"] = self._old_lock_dir
         self._tmp.cleanup()
 
     # -- step 1: train (fake worker) ---------------------------------

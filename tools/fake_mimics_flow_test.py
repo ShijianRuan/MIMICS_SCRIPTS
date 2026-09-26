@@ -1369,8 +1369,15 @@ def test_nninteractive_derived_draft_session(fake, tmp):
 def test_stop_background_locks(fake, tmp):
     module = import_runtime_module("mimics_stop_background")
     module._project_root = lambda: str(tmp)
-    lock_dir = tmp / ".mimics_runtime" / "locks"
+    # Production resolves the lock dir from MIMICS_RESOURCE_LOCK_DIR first
+    # (main() isolates it to the suite temp tree), so fixtures must live
+    # there -- writing them under tmp/.mimics_runtime/locks would test a
+    # directory the runtime never reads.
+    lock_dir = Path(os.environ.get(
+        "MIMICS_RESOURCE_LOCK_DIR", str(tmp / ".mimics_runtime" / "locks")
+    ))
     lock_dir.mkdir(parents=True, exist_ok=True)
+    tmp.mkdir(parents=True, exist_ok=True)
     for name in ("gpu.lock", "background_mimics.lock"):
         path = lock_dir / name
         path.write_text(
@@ -1436,6 +1443,12 @@ def main(argv=None):
     fake = install_fake_mimics()
     temp = tempfile.TemporaryDirectory(prefix="mimics_script_fake_mimics_")
     tmp = Path(temp.name)
+    # Isolate every lock acquisition in this suite to the temp dir. Some
+    # flows exercise real resource locks; without this the per-run temp
+    # paths hash to new lock names and leak one-byte guard anchors into
+    # the production .mimics_runtime/locks directory forever.
+    old_lock_dir = os.environ.get("MIMICS_RESOURCE_LOCK_DIR")
+    os.environ["MIMICS_RESOURCE_LOCK_DIR"] = str(tmp / "locks")
     runner = TestRunner()
     tests = []
     if args.only in ("imports", "all"):
@@ -1462,6 +1475,10 @@ def main(argv=None):
     for name, func in tests:
         runner.run(name, func)
     code = runner.report()
+    if old_lock_dir is None:
+        os.environ.pop("MIMICS_RESOURCE_LOCK_DIR", None)
+    else:
+        os.environ["MIMICS_RESOURCE_LOCK_DIR"] = old_lock_dir
     if args.keep_temp:
         print("Temporary directory kept: {}".format(tmp))
     else:

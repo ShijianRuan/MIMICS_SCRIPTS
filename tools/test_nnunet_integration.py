@@ -2009,4 +2009,12 @@ class MimicsRuntimeTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    # Isolate real lock acquisitions (dataset lock, GPU lock) to a temp
+    # dir: per-run temp workspace paths hash to new lock names and would
+    # leak one-byte guard anchors into the production
+    # .mimics_runtime/locks directory forever. This suite runs as its own
+    # process (regression matrix / direct invocation), so a process-wide
+    # env var covers every test class.
+    with tempfile.TemporaryDirectory(prefix="nnunet_test_locks_") as _lock_tmp:
+        os.environ["MIMICS_RESOURCE_LOCK_DIR"] = _lock_tmp
+        unittest.main(verbosity=2)
