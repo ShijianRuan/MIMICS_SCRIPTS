@@ -1427,12 +1427,101 @@ def test_stop_background_locks(fake, tmp):
     return "owned resource locks cleared and stop stayed non-blocking"
 
 
+def test_first_mcs_monitor_scan_throttle(fake, tmp):
+    """Batch .mcs wait scans the output dir at most every 30s (B3).
+
+    The pre-notify batch tick used to listdir() the whole output dir every
+    2 seconds for up to 7 days - one directory stat per case per tick on a
+    network share. Now the cheap batch status file gates the scan: no scan
+    until 30s elapse, but a completed case triggers one immediately so the
+    first-.mcs notice is not delayed.
+    """
+    import time as _time
+    module = import_runtime_module("mimics_import")
+    original_project_root = module._project_root
+    module._project_root = lambda: str(tmp)
+    try:
+        output_dir = tmp / "mcs_output"
+        output_dir.mkdir(parents=True)
+        # The batch status file lives in the local queue runtime dir (never
+        # on the output share) - resolve it the way the tick does.
+        status_path = Path(module._rt(str(output_dir), "_mcs_batch_status.json"))
+        status_path.parent.mkdir(parents=True, exist_ok=True)
+        # A stable .mcs file in the output dir: if the tick ever scans,
+        # it must be picked up.
+        mcs = output_dir / "case_001.mcs"
+        mcs.write_bytes(b"\0" * 16)
+
+        def write_status(completed):
+            status_path.write_text(json.dumps({
+                "status": "creating", "completed": completed, "failed": 0,
+                "updated_at_epoch": _time.time(),
+            }), encoding="utf-8")
+
+        def make_monitor():
+            return {
+                "monitor_key": "first_mcs_test",
+                "output_dir": str(output_dir),
+                "target_mcs": None,  # batch branch
+                "after_epoch": None,
+                "notify_only": True,
+                "done": False,
+                "deadline": _time.time() + 3600.0,
+            }
+
+        listdir_calls = []
+        real_listdir = os.listdir
+
+        def counting_listdir(path):
+            if str(output_dir) == str(path):
+                listdir_calls.append(path)
+            return real_listdir(path)
+
+        from unittest import mock
+        original_tick = module._first_mcs_monitor_tick
+        baseline_dialogs = len(fake.dialogs.messages)
+        with mock.patch.object(module.os, "listdir", counting_listdir):
+            # 1. Fresh monitor, nothing completed: first tick scans (no
+            #    last_scan_epoch yet), finds nothing stable-new, records the
+            #    scan time.
+            monitor = make_monitor()
+            write_status(0)
+            original_tick(monitor)
+            assert_equal(len(listdir_calls), 1, "first tick should scan once")
+            assert_true("last_scan_epoch" in monitor, "scan timestamp must be recorded")
+
+            # 2. Nothing completed and <30s since the scan: the tick must not
+            #    rescan the directory.
+            original_tick(monitor)
+            assert_equal(len(listdir_calls), 1, "tick inside the 30s window must not rescan")
+
+            # 3. First case completed: the tick must scan immediately even
+            #    inside the window - this is the event the monitor exists
+            #    for. The file was already recorded by tick 1, so this
+            #    second sighting makes it stable and raises the notice.
+            write_status(1)
+            original_tick(monitor)
+            assert_equal(len(listdir_calls), 2, "a completed case must trigger an immediate scan")
+            assert_true(monitor.get("first_notified"), "stable .mcs should raise the notify flag")
+            assert_true(
+                len(fake.dialogs.messages) > baseline_dialogs,
+                "first .mcs notice should reach the annotator",
+            )
+            # 4. After the first notice the tick only reads the cheap batch
+            #    status file (top branch) - no more directory scans at all.
+            original_tick(monitor)
+            assert_equal(len(listdir_calls), 2, "post-notice ticks must not rescan the directory")
+        return "batch wait scans gated by status file: 30s throttle, immediate on first completion"
+    finally:
+        module._project_root = original_project_root
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--keep-temp", action="store_true", help="Keep the temporary test directory.")
     parser.add_argument(
         "--only",
-        choices=("imports", "append", "entrypoint", "window", "export", "nninteractive", "taskmodels", "stop", "all"),
+        choices=("imports", "append", "entrypoint", "window", "export", "nninteractive", "taskmodels", "stop", "all"),  # first_mcs runs under imports
         default="all",
     )
     return parser
@@ -1454,6 +1543,7 @@ def main(argv=None):
     if args.only in ("imports", "all"):
         tests.append(("runtime modules import with fake mimics", lambda: test_runtime_imports(fake, tmp / "imports")))
         tests.append(("batch status viewer aggregation", lambda: test_batch_status_flow(fake, tmp / "batch_status")))
+        tests.append(("first .mcs monitor scan throttle", lambda: test_first_mcs_monitor_scan_throttle(fake, tmp / "first_mcs")))
     if args.only in ("append", "all"):
         tests.append(("generic named-Mask MCS append", lambda: test_append_masks(fake, tmp / "append")))
     if args.only in ("entrypoint", "all"):

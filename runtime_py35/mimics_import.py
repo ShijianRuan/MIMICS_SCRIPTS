@@ -3092,6 +3092,25 @@ def _first_mcs_monitor_tick(monitor):
     if target_mcs:
         candidates = [target_mcs]
     else:
+        # Batch wait: listing the whole output dir costs one directory
+        # stat per case on a network share and this timer can live for
+        # days. The batch status file is a single cheap read, so use it
+        # to decide when a scan is worth it: scan immediately once the
+        # worker reports its first completed case, otherwise at most
+        # every 30 seconds.
+        now_epoch = time.time()
+        status = runtime_common.read_json(_rt(output_dir, "_mcs_batch_status.json"), {}) or {}
+        try:
+            completed_count = int(status.get("completed", 0) or 0)
+        except (TypeError, ValueError):
+            completed_count = 0
+        due_for_scan = (
+            completed_count >= 1
+            or now_epoch - float(monitor.get("last_scan_epoch", 0.0) or 0.0) >= 30.0
+        )
+        if not due_for_scan:
+            return
+        monitor["last_scan_epoch"] = now_epoch
         try:
             items = sorted(os.listdir(output_dir))
         except Exception:
