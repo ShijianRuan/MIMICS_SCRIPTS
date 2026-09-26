@@ -1315,6 +1315,15 @@ def build_training_data_profile(
                     row.get("case_id") or row["image"]
                 )
             )
+        if any(value <= 1 for value in shape):
+            raise RuntimeError(
+                "Training case '{}' is a single-slice or degenerate volume "
+                "(shape {}); volume training needs a real image stack, not a "
+                "single slice. Re-export the case from the full image series, "
+                "or remove it from the training selection.".format(
+                    row.get("case_id") or row["image"], list(shape)
+                )
+            )
         spacing = np.linalg.norm(np.asarray(image.affine, dtype=float)[:3, :3], axis=0)
         if not np.all(np.isfinite(spacing)) or np.any(spacing <= 0):
             raise RuntimeError(

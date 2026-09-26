@@ -623,18 +623,19 @@ class SpatialContractTests(unittest.TestCase):
                     {"task_id": "liver", "source_modality": "MR"},
                 )
 
-    def _profile_case(self, temp, case_id, label_values):
+    def _profile_case(self, temp, case_id, label_values, shape=(6, 6, 6), affine=None):
         import nibabel as nib
         import numpy as np
 
         case_dir = Path(temp) / case_id
         case_dir.mkdir(parents=True, exist_ok=True)
-        affine = np.eye(4)
-        image = np.full((6, 6, 6), 50.0, dtype=np.float32)
+        if affine is None:
+            affine = np.eye(4)
+        image = np.full(shape, 50.0, dtype=np.float32)
         nib.save(
             nib.Nifti1Image(image, affine), str(case_dir / "image.nii.gz")
         )
-        label = (np.asarray(label_values, dtype=np.uint8).reshape(6, 6, 6) > 0).astype(np.uint8)
+        label = (np.asarray(label_values, dtype=np.uint8).reshape(shape) > 0).astype(np.uint8)
         nib.save(
             nib.Nifti1Image(label, affine), str(case_dir / "label.nii.gz")
         )
@@ -674,6 +675,63 @@ class SpatialContractTests(unittest.TestCase):
             self.assertGreater(stats["min"], 0)
             self.assertLessEqual(stats["min"], stats["median"])
             self.assertLessEqual(stats["median"], stats["max"])
+
+    def test_training_data_profile_rejects_single_slice_case(self):
+        # TB-08: a single-slice case (thin slab or corrupted export with one
+        # slice left) must fail closed at the profiling gate with a
+        # human-readable message — both pipelines and both execution paths
+        # (local + remote prepared) pass through here before any nnU-Net
+        # preprocessing, where a z=1 volume fails cryptically or produces
+        # degenerate patches.
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temp:
+            rows = [
+                self._profile_case(temp, "case_ok", np.arange(216) % 7),
+                self._profile_case(
+                    temp, "case_slice", np.ones(400), shape=(1, 20, 20)
+                ),
+            ]
+            with self.assertRaisesRegex(
+                RuntimeError, "'case_slice' is a single-slice"
+            ):
+                pipeline.build_training_data_profile(rows, "CT")
+
+    def test_training_data_profile_rejects_invalid_spacing(self):
+        # TB-08 (异常 spacing): zero spacing on the affine must fail closed
+        # with the existing "invalid physical spacing" error — previously
+        # untested behavior. The singular matrix is stored via set_sform
+        # (raw srow fields, no qform decomposition) because nibabel refuses
+        # to save a singular affine passed to the constructor.
+        import nibabel as nib
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temp:
+            case_dir = Path(temp) / "case_bad_spacing"
+            case_dir.mkdir(parents=True, exist_ok=True)
+            affine = np.eye(4)
+            affine[0, 0] = 0.0
+            image = nib.Nifti1Image(np.full((6, 6, 6), 50.0, dtype=np.float32), None)
+            image.set_sform(affine, code="scanner")
+            nib.save(image, str(case_dir / "image.nii.gz"))
+            nib.save(
+                nib.Nifti1Image(
+                    (np.arange(216) % 7 > 0).astype(np.uint8).reshape(6, 6, 6),
+                    np.eye(4),
+                ),
+                str(case_dir / "label.nii.gz"),
+            )
+            rows = [
+                {
+                    "case_id": "case_bad_spacing",
+                    "image": str(case_dir / "image.nii.gz"),
+                    "label": str(case_dir / "label.nii.gz"),
+                }
+            ]
+            with self.assertRaisesRegex(
+                RuntimeError, "'case_bad_spacing' has invalid physical spacing"
+            ):
+                pipeline.build_training_data_profile(rows, "CT")
 
     def test_bridge_preserves_only_present_multiclass_value(self):
         import nibabel as nib
