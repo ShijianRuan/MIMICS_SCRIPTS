@@ -287,6 +287,84 @@ class TestViewerNonBlockingRefresh(unittest.TestCase):
             path.write_text(json.dumps(payload), encoding="utf-8")
         return project
 
+    def test_hidden_viewer_slows_periodic_ticks_but_request_stays_direct(self):
+        """Hidden/minimized windows poll at the heartbeat rate, not 2s."""
+        from viewer_refresh import BackgroundRefresh
+
+        app = _AppFixture.app()
+        window = QtWidgets.QWidget()
+        window.hide()  # not shown: counts as invisible
+        refresher = BackgroundRefresh(
+            QtCore, parent=window, interval_ms=2000,
+            collect=lambda: {"tick": True}, apply=lambda data: None,
+        )
+        try:
+            self.assertEqual(2000, refresher._timer.interval())
+            # First periodic tick on a hidden window switches to the
+            # heartbeat interval and still collects.
+            refresher._on_period_tick()
+            self.assertEqual(
+                BackgroundRefresh.HIDDEN_INTERVAL_MS,
+                refresher._timer.interval(),
+            )
+            # Explicit request() must ignore visibility entirely.
+            refresher.request()
+            deadline = time.time() + 5.0
+            collected = False
+            while time.time() < deadline:
+                app.processEvents()
+                with refresher._lock:
+                    if not refresher._pending:
+                        collected = True
+                        break
+                time.sleep(0.02)
+            self.assertTrue(collected, "request() must run even when hidden")
+        finally:
+            refresher._timer.stop()
+            refresher._drain_timer.stop()
+            window.deleteLater()
+
+    def test_shown_viewer_keeps_fast_interval(self):
+        """A visible (or non-widget) parent keeps the configured interval."""
+        from viewer_refresh import BackgroundRefresh
+
+        _AppFixture.app()
+        refresher = BackgroundRefresh(
+            QtCore, parent=QtCore.QObject(), interval_ms=2000,
+            collect=lambda: {"tick": True}, apply=lambda data: None,
+        )
+        try:
+            self.assertTrue(BackgroundRefresh._is_shown(refresher._parent))
+            refresher._on_period_tick()
+            self.assertEqual(2000, refresher._timer.interval())
+        finally:
+            refresher._timer.stop()
+            refresher._drain_timer.stop()
+
+
+class TestIoPathSetupDebounce(unittest.TestCase):
+    """Dataset recognition scans are debounced, not per-keystroke."""
+
+    def test_text_changed_goes_through_debounce_timer(self):
+        _AppFixture.app()
+        source = Path(__file__).with_name("io_path_setup_ui.py").read_text(
+            encoding="utf-8"
+        )
+        # textChanged must not call refresh_recognition directly: on a
+        # network dataset each keystroke would spawn a scan thread.
+        self.assertNotIn(
+            "source_edit.textChanged.connect(refresh_recognition)",
+            source,
+        )
+        self.assertIn("recognition_debounce", source)
+        self.assertIn("recognition_debounce.setSingleShot(True)", source)
+        self.assertIn(
+            "recognition_debounce.timeout.connect(refresh_recognition)",
+            source,
+        )
+        # The debounce window must sit in the 300-500ms acceptance band.
+        self.assertIn("recognition_debounce.setInterval(400)", source)
+
 
 class TestTrainingSetupPathMemory(unittest.TestCase):
     """Training windows prefill paths from the last successful submission."""

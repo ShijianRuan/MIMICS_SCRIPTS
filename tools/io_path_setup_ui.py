@@ -931,7 +931,15 @@ def run_ui(context, preview_path=""):
     recognition_timer.timeout.connect(poll_recognition)
     recognition_timer.start(150)
 
-    source_edit.textChanged.connect(refresh_recognition)
+    # textChanged fires per character; on a network dataset each call
+    # spawns a fresh directory scan thread. Debounce so a burst of
+    # keystrokes (or a paste) triggers at most one scan, 400ms after
+    # the last change.
+    recognition_debounce = QtCore.QTimer(window)
+    recognition_debounce.setSingleShot(True)
+    recognition_debounce.setInterval(400)
+    recognition_debounce.timeout.connect(refresh_recognition)
+    source_edit.textChanged.connect(lambda _text: recognition_debounce.start())
     refresh_recognition()
 
     source_edit.textChanged.connect(lambda _text: refresh_default())
