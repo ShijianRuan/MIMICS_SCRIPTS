@@ -623,6 +623,58 @@ class SpatialContractTests(unittest.TestCase):
                     {"task_id": "liver", "source_modality": "MR"},
                 )
 
+    def _profile_case(self, temp, case_id, label_values):
+        import nibabel as nib
+        import numpy as np
+
+        case_dir = Path(temp) / case_id
+        case_dir.mkdir(parents=True, exist_ok=True)
+        affine = np.eye(4)
+        image = np.full((6, 6, 6), 50.0, dtype=np.float32)
+        nib.save(
+            nib.Nifti1Image(image, affine), str(case_dir / "image.nii.gz")
+        )
+        label = (np.asarray(label_values, dtype=np.uint8).reshape(6, 6, 6) > 0).astype(np.uint8)
+        nib.save(
+            nib.Nifti1Image(label, affine), str(case_dir / "label.nii.gz")
+        )
+        return {
+            "case_id": case_id,
+            "image": str(case_dir / "image.nii.gz"),
+            "label": str(case_dir / "label.nii.gz"),
+        }
+
+    def test_training_data_profile_rejects_all_zero_label(self):
+        # TB-04: a label file that exists but contains no foreground must
+        # fail closed at the profiling gate — both pipelines and both
+        # execution paths (local + remote prepared) pass through here, and
+        # the remote branch until now only checked file existence.
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temp:
+            rows = [
+                self._profile_case(temp, "case_ok", np.arange(216) % 7),
+                self._profile_case(temp, "case_empty", np.zeros(216)),
+            ]
+            with self.assertRaisesRegex(
+                RuntimeError, "'case_empty' has an empty"
+            ):
+                pipeline.build_training_data_profile(rows, "CT")
+
+    def test_training_data_profile_reports_label_foreground(self):
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temp:
+            rows = [
+                self._profile_case(temp, "case_a", np.arange(216) % 5),
+                self._profile_case(temp, "case_b", np.arange(216) % 3),
+            ]
+            profile = pipeline.build_training_data_profile(rows, "CT")
+            stats = profile["label_foreground_voxels"]
+            self.assertGreater(stats["min"], 0)
+            self.assertLessEqual(stats["min"], stats["median"])
+            self.assertLessEqual(stats["median"], stats["max"])
+
     def test_bridge_preserves_only_present_multiclass_value(self):
         import nibabel as nib
         import numpy as np

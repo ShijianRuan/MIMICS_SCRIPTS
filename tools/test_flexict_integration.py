@@ -1217,6 +1217,238 @@ class TestActiveLearningReviewUI(unittest.TestCase):
             self.assertEqual(
                 state["cases"]["case01"]["state"], "skipped")
 
+    def test_request_updates_reads_back_monitor_outcomes(self):
+        """The UI poll helper: applied/failed requests newer than the
+        watermark come back oldest-first; pending/old ones don't."""
+        from flexict_active_learning_ui import request_updates
+        from nnunet_common import write_json_atomic
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = Path(tmp) / "job"
+            request_dir = job_dir / "apply_requests"
+            request_dir.mkdir(parents=True)
+            self.assertEqual(request_updates(job_dir, 0.0), [])
+            # a pending request is invisible to the poll
+            write_json_atomic(request_dir / "a.json", {
+                "case_id": "caseA", "what": "open_bands",
+                "state": "pending", "requested_at_epoch": 1.0,
+            })
+            self.assertEqual(request_updates(job_dir, 0.0), [])
+            base = 100.0
+            write_json_atomic(request_dir / "a.json", {
+                "case_id": "caseA", "what": "open_bands",
+                "state": "applied", "detail": "applied: bands",
+                "requested_at_epoch": 1.0, "updated_at_epoch": base,
+            })
+            write_json_atomic(request_dir / "b.json", {
+                "case_id": "caseB", "what": "bands",
+                "state": "failed", "detail": "geometry mismatch",
+                "requested_at_epoch": 2.0,
+                "updated_at_epoch": base + 5,
+            })
+            rows = request_updates(job_dir, 0.0)
+            self.assertEqual(
+                [row["case"] for row in rows], ["caseA", "caseB"])
+            self.assertEqual(rows[0]["state"], "applied")
+            self.assertEqual(rows[1]["state"], "failed")
+            # the watermark suppresses already-seen outcomes: only the
+            # newer failure is still ahead of it
+            remaining = request_updates(job_dir, base)
+            self.assertEqual(
+                [row["case"] for row in remaining], ["caseB"])
+            self.assertEqual(request_updates(job_dir, base + 5), [])
+
+    def test_bands_degenerate_detects_pair_mode_collapse(self):
+        from flexict_active_learning_ui import bands_degenerate
+
+        self.assertFalse(bands_degenerate({}))
+        self.assertFalse(bands_degenerate({"uncertainty_bands": {}}))
+        # distinct bands (different voxel counts) -> no hint
+        self.assertFalse(bands_degenerate({
+            "uncertainty_bands": {
+                "written": {"moderate": 8, "high": 5},
+                "moderate_threshold": 4, "high_threshold": 6},
+        }))
+        # pair mode: one disagreement level means every case that has a
+        # high band has an identical moderate band (>= is cumulative)
+        self.assertTrue(bands_degenerate({
+            "uncertainty_bands": {
+                "written": {"moderate": 5, "high": 5},
+                "moderate_threshold": 4, "high_threshold": 5},
+        }))
+
+    def test_materialized_pool_records_source_paths(self):
+        """_al_materialize_inputs records each case's original image path
+        and its .mcs convention path — the data Open Case needs."""
+        import nibabel as nib
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "dataset"
+            for name in ("case01", "case02"):
+                case = root / name
+                case.mkdir(parents=True)
+                nib.save(
+                    nib.Nifti1Image(
+                        np.zeros((4, 4, 4), dtype=np.uint8),
+                        np.eye(4)),
+                    str(case / "ct.nii.gz"))
+            job_dir = Path(tmp) / "job"
+            job_dir.mkdir()
+            status_path = job_dir / "status.json"
+            control_path = job_dir / "control.json"
+            from nnunet_common import write_json_atomic
+            write_json_atomic(status_path, {})
+            write_json_atomic(control_path, {})
+            case_ids = fp._al_materialize_inputs(
+                job_dir,
+                {"dataset_root": str(root), "cases": []},
+                status_path, control_path)
+            self.assertEqual(case_ids, ["case01", "case02"])
+            from nnunet_common import read_json
+            geometries = read_json(
+                job_dir / "input_geometries.json", {}) or {}
+            cases = geometries.get("cases") or {}
+            for case_id in case_ids:
+                entry = cases.get(case_id) or {}
+                self.assertEqual(
+                    entry.get("source_image_path"),
+                    str(root / case_id / "ct.nii.gz"))
+                # no mcs_output in this dataset -> empty, not an error
+                self.assertEqual(entry.get("mcs_path"), "")
+                self.assertEqual(entry.get("source_shape"), [4, 4, 4])
+
+
+class TestActiveLearningRuntimeHandlers(unittest.TestCase):
+    """Mimics-side open/auto-annotate handlers (mimics module stubbed)."""
+
+    def _import_flexict_mimics(self):
+        import types
+
+        sys.path.insert(0, str(ROOT / "runtime_py35"))
+        try:
+            mimics = sys.modules.get("mimics")
+            if mimics is None:
+                # flexict_mimics imports the Mimics API at module load; the
+                # handlers under test monkeypatch its members anyway, but
+                # mock.patch.object needs the attributes to pre-exist.
+                mimics = types.ModuleType("mimics")
+                mimics.file = types.ModuleType("mimics.file")
+                mimics.file.open_project = None
+                mimics.file.get_active_project = None
+                mimics.dialogs = types.ModuleType("mimics.dialogs")
+                mimics.dialogs.message_box = None
+                sys.modules["mimics"] = mimics
+            import flexict_mimics
+            return flexict_mimics
+        finally:
+            sys.path.remove(str(ROOT / "runtime_py35"))
+
+    def _geometry_job(self, tmp, case_id, mcs_path=""):
+        import numpy as np
+        from nnunet_common import write_json_atomic
+
+        job_dir = Path(tmp) / "job"
+        job_dir.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(job_dir / "input_geometries.json", {
+            "schema_version": "flexict_al_geometries.v1",
+            "cases": {
+                case_id: {
+                    "source_shape": [4, 4, 4],
+                    "source_voxel_to_ras_matrix": np.eye(4).tolist(),
+                    "source_image_path": str(
+                        Path(tmp) / case_id / "ct.nii.gz"),
+                    "mcs_path": mcs_path,
+                },
+            },
+        })
+        return job_dir
+
+    def test_open_case_opens_recorded_mcs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mcs_path = Path(tmp) / "mcs_output" / "case01.mcs"
+            mcs_path.parent.mkdir(parents=True)
+            mcs_path.write_bytes(b"stub")
+            job_dir = self._geometry_job(tmp, "case01", str(mcs_path))
+            module = self._import_flexict_mimics()
+            with mock.patch.object(module.mimics.file, "open_project") as \
+                    open_project, \
+                    mock.patch.object(
+                        module.mimics.file, "get_active_project",
+                        return_value=None), \
+                    mock.patch.object(
+                        module.mimics.dialogs, "message_box") as message_box:
+                opened, detail = module._al_open_case(
+                    str(job_dir), "case01")
+            self.assertTrue(opened, detail)
+            open_project.assert_called_once_with(filename=str(mcs_path))
+            message_box.assert_not_called()
+
+    def test_open_case_refuses_to_stomp_open_project(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mcs_path = Path(tmp) / "mcs_output" / "case01.mcs"
+            mcs_path.parent.mkdir(parents=True)
+            mcs_path.write_bytes(b"stub")
+            job_dir = self._geometry_job(tmp, "case01", str(mcs_path))
+            module = self._import_flexict_mimics()
+            with mock.patch.object(module.mimics.file, "open_project") as \
+                    open_project, \
+                    mock.patch.object(
+                        module.mimics.file, "get_active_project",
+                        return_value=str(Path(tmp) / "other.mcs")), \
+                    mock.patch.object(
+                        module.mimics.dialogs, "message_box") as message_box:
+                opened, detail = module._al_open_case(
+                    str(job_dir), "case01")
+            self.assertFalse(opened)
+            self.assertIn("another project is open", detail)
+            open_project.assert_not_called()
+            message_box.assert_called_once()
+
+    def test_open_case_already_active_is_noop_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mcs_path = Path(tmp) / "mcs_output" / "case01.mcs"
+            mcs_path.parent.mkdir(parents=True)
+            mcs_path.write_bytes(b"stub")
+            job_dir = self._geometry_job(tmp, "case01", str(mcs_path))
+            module = self._import_flexict_mimics()
+            with mock.patch.object(module.mimics.file, "open_project") as \
+                    open_project, \
+                    mock.patch.object(
+                        module.mimics.file, "get_active_project",
+                        return_value=str(mcs_path)):
+                opened, detail = module._al_open_case(
+                    str(job_dir), "case01")
+            self.assertTrue(opened)
+            self.assertIn("already open", detail)
+            open_project.assert_not_called()
+
+    def test_open_case_without_mcs_gives_guidance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = self._geometry_job(tmp, "case01", "")
+            module = self._import_flexict_mimics()
+            opened, detail = module._al_open_case(str(job_dir), "case01")
+            self.assertFalse(opened)
+            self.assertIn("01 Import", detail)
+
+    def test_mark_annotated_only_upgrades_new(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = self._geometry_job(tmp, "case01")
+            module = self._import_flexict_mimics()
+            module._al_mark_annotated(str(job_dir), "case01")
+            from flexict_active_learning_ui import load_annotation_state
+            state = load_annotation_state(job_dir)
+            self.assertEqual(
+                state["cases"]["case01"]["state"], "annotated")
+            # an explicit skipped entry is never downgraded
+            set_case_state = __import__(
+                "flexict_active_learning_ui").set_case_state
+            set_case_state(job_dir, "case01", "skipped")
+            module._al_mark_annotated(str(job_dir), "case01")
+            state = load_annotation_state(job_dir)
+            self.assertEqual(
+                state["cases"]["case01"]["state"], "skipped")
+
 
 class TestModelRegistration(unittest.TestCase):
     def test_register_creates_usable_model(self):
@@ -1387,6 +1619,87 @@ class TestJobLifecycle(unittest.TestCase):
             status = read_json(job_dir / "status.json", {}) or {}
             self.assertEqual(status["status"], "failed")
             self.assertIn("Prepared remote case is incomplete", status["error"])
+
+    def test_prepared_case_all_zero_label_fails_before_training(self):
+        """Remote label_source="prepared": an all-zero label must fail fast.
+
+        The controller pre-filters empty labels on the local path, but the
+        container-side branch until now only checked file existence — a
+        zero-content label (upload corruption, stale prepared case) would
+        train silently on nothing (TB-04).
+        """
+        import nibabel as nib
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            # case_1: healthy label; case_2: label file exists but is all zeros.
+            for case_id, values in (
+                ("case_1", np.arange(216).reshape(6, 6, 6) % 4),
+                ("case_2", np.zeros((6, 6, 6), dtype=np.float64)),
+            ):
+                image_dir = Path(tmp) / "input" / case_id
+                label_dir = Path(tmp) / "labels" / case_id
+                image_dir.mkdir(parents=True)
+                label_dir.mkdir(parents=True)
+                affine = np.eye(4)
+                nib.save(
+                    nib.Nifti1Image(
+                        np.full((6, 6, 6), 50.0, dtype=np.float32), affine
+                    ),
+                    str(image_dir / "image.nii.gz"),
+                )
+                label = np.zeros((6, 6, 6), dtype=np.uint8)
+                label[values > 0] = 1
+                nib.save(
+                    nib.Nifti1Image(label, affine),
+                    str(label_dir / "label.nii.gz"),
+                )
+            request = fp.normalize_flexict_request(
+                _training_request(
+                    "/job/input", str(workspace), ["case_1", "case_2"],
+                    label_source="prepared",
+                    prepared_cases=[
+                        {
+                            "case_id": "case_1",
+                            "image": str(Path(tmp) / "input" / "case_1" / "image.nii.gz"),
+                            "label": str(Path(tmp) / "labels" / "case_1" / "label.nii.gz"),
+                            "fingerprint": "abc",
+                        },
+                        {
+                            "case_id": "case_2",
+                            "image": str(Path(tmp) / "input" / "case_2" / "image.nii.gz"),
+                            "label": str(Path(tmp) / "labels" / "case_2" / "label.nii.gz"),
+                            "fingerprint": "def",
+                        },
+                    ],
+                )
+            )
+            job_dir = Path(tmp) / "jobs" / request["job_id"]
+            job_dir.mkdir(parents=True)
+            from nnunet_common import write_json_atomic
+
+            write_json_atomic(job_dir / "request.json", request)
+            write_json_atomic(job_dir / "control.json", {"action": "run"})
+            write_json_atomic(
+                job_dir / "status.json",
+                {"schema_version": fp.SCHEMA_VERSION, "job_id": request["job_id"],
+                 "kind": "train", "status": "launching", "phase": "launching",
+                 "created_at_epoch": time.time(), "updated_at_epoch": time.time()},
+            )
+            with mock.patch.object(
+                fp, "_spawn_flexict_worker"
+            ) as spawn, mock.patch(
+                "flexict_pipeline._acquire_local_gpu", return_value=None
+            ):
+                exit_code = fp.run_training(job_dir)
+            self.assertEqual(exit_code, 1)
+            spawn.assert_not_called()
+            from nnunet_common import read_json
+
+            status = read_json(job_dir / "status.json", {}) or {}
+            self.assertEqual(status["status"], "failed")
+            self.assertIn("'case_2' has an empty", status["error"])
 
     def test_completed_lifecycle_pair(self):
         with tempfile.TocabularyDirectory() if False else tempfile.TemporaryDirectory() as tmp:

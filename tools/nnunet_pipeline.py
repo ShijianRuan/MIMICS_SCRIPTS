@@ -1305,6 +1305,7 @@ def build_training_data_profile(
     spacings = []
     fields_of_view = []
     orientations = set()
+    label_foreground = []
     for row in rows:
         image = nib.load(str(row["image"]))
         shape = tuple(int(value) for value in image.shape[:3])
@@ -1321,6 +1322,24 @@ def build_training_data_profile(
                     row.get("case_id") or row["image"]
                 )
             )
+        # Empty-label gate. The local dataset path already skips empty
+        # labels (empty_case_policy="skip" in prepare_source_grid_cases);
+        # this covers every other row source — notably the remote/prepared
+        # branch, which until now only checked file existence. Always load
+        # the label rather than trusting a cached foreground_voxels count:
+        # a stale cache entry missing the key would read as 0 and false-
+        # reject good cases.
+        label_array = np.asanyarray(nib.load(str(row["label"])).dataobj)
+        label_count = int(np.count_nonzero(label_array))
+        if label_count == 0:
+            raise RuntimeError(
+                "Training case '{}' has an empty (all-zero) label: {}. "
+                "Re-export the case with its mask annotated, or remove it "
+                "from the training selection.".format(
+                    row.get("case_id") or row["label"], row["label"]
+                )
+            )
+        label_foreground.append(label_count)
         sorted_spacing = sorted(float(value) for value in spacing)
         sorted_fov = sorted(float(spacing[index]) * shape[index] for index in range(3))
         shapes.append(sorted(shape))
@@ -1349,6 +1368,11 @@ def build_training_data_profile(
         "spacing_mm_sorted": bounds(spacings),
         "field_of_view_mm_sorted": bounds(fields_of_view),
         "orientation_codes": sorted(orientations),
+        "label_foreground_voxels": {
+            "min": min(label_foreground),
+            "median": sorted(label_foreground)[len(label_foreground) // 2],
+            "max": max(label_foreground),
+        },
     }
 
 
