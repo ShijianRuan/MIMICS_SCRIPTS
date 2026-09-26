@@ -3,9 +3,10 @@
 
 Reads a completed flexict active_learning job (ranking.csv / status.ranking),
 tracks annotation progress per case (annotation_state.json next to the job),
-and hands the selected case to the Mimics side: opening the case and
-overlaying the uncertainty bands / consensus mask run in the foreground Mimics
-via the runtime module's apply monitors.
+and hands the selected case to the Mimics side: opening the case's project
+and overlaying the uncertainty bands / consensus mask run in the foreground
+Mimics via the runtime module's apply-request monitor, whose outcomes are
+polled back here so the table and status line stay current.
 """
 
 from __future__ import annotations
@@ -100,6 +101,61 @@ def set_case_state(job_dir: str | Path, case_id: str, value: str) -> None:
     save_annotation_state(job_dir, state)
 
 
+def request_updates(job_dir: str | Path,
+                    since_epoch: float) -> list[dict[str, Any]]:
+    """Applied/failed apply-requests newer than `since_epoch`, oldest first.
+
+    The Mimics-side monitor rewrites each request file with a state and an
+    updated_at_epoch when it finishes; this reads that outcome back so the
+    window can refresh its table and status line without the annotator
+    switching windows. Pure function over the job folder — the UI's poll
+    timer simply calls it with its last-seen timestamp.
+    """
+    rows: list[dict[str, Any]] = []
+    request_dir = Path(job_dir) / "apply_requests"
+    if not request_dir.is_dir():
+        return rows
+    for path in request_dir.glob("*.json"):
+        payload = read_json(path, {}) or {}
+        state = str(payload.get("state") or "")
+        if state not in ("applied", "failed"):
+            continue
+        updated = float(payload.get("updated_at_epoch") or 0.0)
+        if updated <= since_epoch:
+            continue
+        rows.append({
+            "case": str(payload.get("case_id") or ""),
+            "what": str(payload.get("what") or ""),
+            "state": state,
+            "detail": str(payload.get("detail") or ""),
+            "updated_at_epoch": updated,
+        })
+    rows.sort(key=lambda row: row["updated_at_epoch"])
+    return rows
+
+
+def bands_degenerate(job: dict[str, Any]) -> bool:
+    """True when the moderate and high uncertainty bands coincide.
+
+    A two-model disagreement map has a single non-zero level, so the
+    data-aware threshold clamp in the pipeline collapses the two bands
+    onto the same voxels. The annotator should know the pair of overlay
+    masks is one signal, not two.
+    """
+    bands = job.get("uncertainty_bands")
+    if not isinstance(bands, dict):
+        return False
+    written = bands.get("written") or {}
+    moderate = int(written.get("moderate") or 0)
+    high = int(written.get("high") or 0)
+    if moderate and moderate == high:
+        return True
+    thresholds = bands.get("moderate_threshold"), bands.get("high_threshold")
+    if None in thresholds:
+        return False
+    return float(thresholds[0]) == float(thresholds[1]) and moderate > 0
+
+
 class ActiveLearningWindow:
     def __init__(self, context, qt_modules):
         self.context = context
@@ -118,8 +174,9 @@ class ActiveLearningWindow:
         title.setObjectName("title")
         subtitle = QtWidgets.QLabel(
             "Cases ranked by 2D-vs-3D disagreement: annotate the top of the "
-            "list first — that is where the two models disagree most. Mark a "
-            "case after annotating it; the state is kept with the run."
+            "list first — that is where the two models disagree most. "
+            "Double-click opens the case in Mimics with its uncertainty "
+            "bands applied; the state updates here as you go."
         )
         subtitle.setObjectName("subtitle")
         subtitle.setWordWrap(True)
@@ -147,7 +204,7 @@ class ActiveLearningWindow:
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.table.itemDoubleClicked.connect(self._overlay_selected)
+        self.table.itemDoubleClicked.connect(self._open_and_overlay_selected)
         root.addWidget(self.table, 1)
 
         self.status_label = QtWidgets.QLabel("Select a completed active-learning run.")
@@ -156,11 +213,11 @@ class ActiveLearningWindow:
         root.addWidget(self.status_label)
 
         actions = QtWidgets.QHBoxLayout()
-        self.open_button = QtWidgets.QPushButton("Open Case")
-        self.open_button.clicked.connect(self._open_selected)
+        self.open_button = QtWidgets.QPushButton("Open + Overlay")
+        self.open_button.setObjectName("primary")
+        self.open_button.clicked.connect(self._open_and_overlay_selected)
         actions.addWidget(self.open_button)
         self.overlay_button = QtWidgets.QPushButton("Overlay Uncertainty")
-        self.overlay_button.setObjectName("primary")
         self.overlay_button.clicked.connect(self._overlay_selected)
         actions.addWidget(self.overlay_button)
         self.consensus_button = QtWidgets.QPushButton("Apply Consensus Mask")
@@ -185,7 +242,15 @@ class ActiveLearningWindow:
         self._rows: list[dict[str, Any]] = []
         self._state: dict[str, Any] = {}
         self._job_dir = ""
+        self._request_poll_epoch = time.time()
         self.refresh()
+        # The Mimics-side monitor reports outcomes by rewriting request
+        # files; poll them so the table and status line follow along
+        # without the annotator switching windows.
+        self.poll_timer = QtCore.QTimer(self.window)
+        self.poll_timer.setInterval(2000)
+        self.poll_timer.timeout.connect(self._poll_requests)
+        self.poll_timer.start()
 
     # -- data ---------------------------------------------------------------
 
@@ -258,10 +323,16 @@ class ActiveLearningWindow:
         annotated = sum(
             1 for entry in cases.values()
             if str(entry.get("state")) == "annotated")
-        self.status_label.setText(
-            "{} case(s) ranked · {} annotated. Double-click a row to overlay "
-            "its uncertainty bands in Mimics.".format(len(self._rows), annotated)
+        text = (
+            "{} case(s) ranked · {} annotated. Double-click a row to open "
+            "its case in Mimics with the uncertainty bands applied.".format(
+                len(self._rows), annotated)
         )
+        if bands_degenerate(status):
+            text += (" Note: with a two-model pair the disagreement map has "
+                     "one level, so the moderate and high bands cover the "
+                     "same voxels.")
+        self.status_label.setText(text)
 
     def _case_image_hint(self, case_id: str) -> str:
         if not self._job_dir:
@@ -283,30 +354,36 @@ class ActiveLearningWindow:
 
     # -- actions --------------------------------------------------------------
 
-    def _open_selected(self):
-        case_id = self._selected_case()
-        if not case_id:
-            return
-        import os
-
-        image = Path(self._job_dir) / "input" / "{}.nii.gz".format(case_id)
-        if not image.is_file():
-            self.QtWidgets.QMessageBox.warning(
-                self.window, "Case Not Found",
-                "The input image for {} is no longer available.".format(case_id))
-            return
-        if os.name == "nt":
-            os.startfile(str(image))  # noqa: S606 - opens the viewer's default app
-        else:
-            import subprocess
-
-            subprocess.Popen(["xdg-open", str(image)])
+    def _open_and_overlay_selected(self):
+        self._apply_to_mimics("open_bands")
 
     def _overlay_selected(self):
         self._apply_to_mimics("bands")
 
     def _apply_consensus(self):
         self._apply_to_mimics("consensus")
+
+    def _poll_requests(self):
+        """Read back apply-request outcomes the Mimics monitor finished."""
+        if not self._job_dir:
+            return
+        updates = request_updates(self._job_dir, self._request_poll_epoch)
+        if not updates:
+            return
+        self._request_poll_epoch = max(
+            row["updated_at_epoch"] for row in updates)
+        self._state = load_annotation_state(self._job_dir)
+        latest = updates[-1]
+        if latest["state"] == "applied":
+            self.status_label.setText(
+                "Applied in Mimics: {} ({}). The table is up to date.".format(
+                    latest["case"], latest["detail"][:160]))
+        else:
+            self.status_label.setText(
+                "Request failed for {} ({}): {}".format(
+                    latest["case"], latest["what"],
+                    latest["detail"][:200]))
+        self._job_selected()
 
     def _apply_to_mimics(self, what: str):
         """Request an in-Mimics application through the runtime monitor.
@@ -330,12 +407,17 @@ class ActiveLearningWindow:
         name = "{}_{}_{}.json".format(
             case_id, what, int(time.time() * 1000))
         write_json_atomic(request_dir / name, request)
+        labels = {
+            "bands": "uncertainty bands on the open case",
+            "consensus": "consensus mask on the open case",
+            "open": "the case's project",
+            "open_bands": "the case's project and its uncertainty bands",
+        }
         self.status_label.setText(
-            "Requested {} overlay for {}. Switch to Mimics and confirm; the "
-            "request is applied by the FlexiCT menu's active-learning "
-            "monitor (03 Active Learning Review).".format(
-                "uncertainty bands" if what == "bands" else "consensus mask",
-                case_id,
+            "Requested {} for {}. It runs in Mimics via the FlexiCT menu's "
+            "active-learning monitor (03 Active Learning Review); this "
+            "window updates automatically.".format(
+                labels.get(what, what), case_id,
             )
         )
 
