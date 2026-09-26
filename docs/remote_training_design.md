@@ -41,6 +41,8 @@ The nnInteractive, nnU-Net, and FlexiCT setup windows use the same additive
    - Runtime image, normally `mimics-ai-runtime:1.0`
    - GPU device: Automatic, a numeric index, or an NVIDIA GPU/MIG UUID
    - Whether unchanged uploaded training data should be reused
+   - Advanced: container runtime (Docker/nerdctl) and nerdctl namespace,
+     code/weights verification strictness, server cleanup retention days
 4. **Test Connection** verifies SSH host identity, authentication, work-folder
    permissions, Docker, NVIDIA GPU access, free disk space, all AI
    frameworks (nnInteractive, nnU-Net, FlexiCT), required default weights,

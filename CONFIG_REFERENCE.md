@@ -56,9 +56,16 @@ never stored in this file — they go to Windows Credential Manager
 | `profile_id`, `name` | Stable id and display name. |
 | `host`, `port`, `username` | SSH endpoint. |
 | `auth_method` | `key` or `password`. |
-| `image` | Docker image for job containers (`--network none`, HF offline). |
+| `runtime_image` | Container image for job containers (`--network none`, HF offline). |
 | `gpu_device` | `auto` or an explicit device index. |
-| `remote_workspace` | Per-user workspace on the server. |
+| `remote_root` | Work folder on the server. Relative paths resolve inside the SSH user's home directory. On a shared server, use the folder your administrator assigned rather than the account's own files. |
+| `container_runtime` | `docker` (default) or `nerdctl` for containerd-only servers. |
+| `container_namespace` | Optional nerdctl namespace for job containers; ignored by Docker. |
+| `remote_code_verify` | Code-drift check on the shipped runtime: `strict` (refuse), `warn` (default), `off`. |
+| `remote_weights_verify` | Downloaded-weights checksum check: `strict` (default), `warn`, `off`. |
+| `remote_cache_retention_days` | Days finished jobs and cached training data stay on the server before cleanup (default 30, max 3650). |
+
+All fields are editable in the connection setup UI (training window > Compute tab > Manage Servers); editing `servers.json` by hand is never required.
 
 ## `dataset_profiles.json`
 

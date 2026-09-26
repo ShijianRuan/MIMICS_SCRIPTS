@@ -168,8 +168,10 @@ def step_preflight(
         ).strip():
             step.fail(
                 "container runtime {!r} is not on the remote PATH; if the "
-                "server uses nerdctl, set container_runtime='nerdctl' in "
-                "the server profile".format(runtime_cmd)
+                "server uses nerdctl, open Manage Servers in the training "
+                "window and set Container runtime to nerdctl".format(
+                    runtime_cmd
+                )
             )
             return False, ""
         image_id = str(

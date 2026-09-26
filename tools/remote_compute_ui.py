@@ -62,8 +62,8 @@ class ServerProfilesDialog:
         self.dialog = QtWidgets.QDialog(parent)
         self.dialog.setWindowTitle("Remote Training Servers")
         self.dialog.setModal(True)
-        self.dialog.resize(740, 660)
-        self.dialog.setMinimumSize(660, 580)
+        self.dialog.resize(740, 820)
+        self.dialog.setMinimumSize(660, 740)
         self._results: Queue[tuple[str, Any]] = Queue()
         self._testing = False
 
@@ -155,6 +155,50 @@ class ServerProfilesDialog:
             "Caches source-grid image and label archives by content fingerprint. "
             "Changed data is uploaded as a new cache entry."
         )
+        self.runtime_combo = QtWidgets.QComboBox()
+        self.runtime_combo.addItem("Docker (default)", "docker")
+        self.runtime_combo.addItem("nerdctl", "nerdctl")
+        self.runtime_combo.setToolTip(
+            "Container runtime on the server. Docker is the default; choose "
+            "nerdctl only when the server runs containerd without Docker."
+        )
+        self.namespace_edit = QtWidgets.QLineEdit()
+        self.namespace_edit.setPlaceholderText("optional")
+        self.namespace_edit.setToolTip(
+            "nerdctl namespace for job containers (for example the containerd "
+            "namespace the admin configured). Ignored by Docker."
+        )
+        self.code_verify_combo = QtWidgets.QComboBox()
+        for label, value in (
+            ("Warn on drift (default)", "warn"),
+            ("Refuse on drift", "strict"),
+            ("Skip verification", "off"),
+        ):
+            self.code_verify_combo.addItem(label, value)
+        self.code_verify_combo.setToolTip(
+            "How strictly the code shipped to the server must match this "
+            "workstation's copy. Verification catches a stale or tampered "
+            "runtime image."
+        )
+        self.weights_verify_combo = QtWidgets.QComboBox()
+        for label, value in (
+            ("Refuse on mismatch (default)", "strict"),
+            ("Warn on mismatch", "warn"),
+            ("Skip verification", "off"),
+        ):
+            self.weights_verify_combo.addItem(label, value)
+        self.weights_verify_combo.setToolTip(
+            "How strictly trained weights are checked against their "
+            "recorded checksum after download."
+        )
+        self.retention_spin = QtWidgets.QSpinBox()
+        self.retention_spin.setRange(1, 3650)
+        self.retention_spin.setValue(30)
+        self.retention_spin.setSuffix(" days")
+        self.retention_spin.setToolTip(
+            "How long finished jobs and cached training data stay on the "
+            "server before automatic cleanup."
+        )
 
         rows = [
             ("Profile name", self.name_edit),
@@ -169,6 +213,11 @@ class ServerProfilesDialog:
             ("Runtime image", self.image_edit),
             ("GPU device", self.gpu_combo),
             ("Data transfer", self.cache_check),
+            ("Container runtime", self.runtime_combo),
+            ("nerdctl namespace", self.namespace_edit),
+            ("Code verification", self.code_verify_combo),
+            ("Weights verification", self.weights_verify_combo),
+            ("Server cleanup after", self.retention_spin),
         ]
         self.password_label = None
         self.key_label = None
@@ -251,6 +300,21 @@ class ServerProfilesDialog:
         self.image_edit.setText(profile.get("runtime_image") or DEFAULT_IMAGE)
         self._set_gpu_device(profile.get("gpu_device") or DEFAULT_GPU_DEVICE)
         self.cache_check.setChecked(bool(profile.get("cache_training_data", True)))
+        self._set_combo(self.runtime_combo, profile.get("container_runtime"), "docker")
+        self.namespace_edit.setText(profile.get("container_namespace") or "")
+        self._set_combo(
+            self.code_verify_combo, profile.get("remote_code_verify"), "warn"
+        )
+        self._set_combo(
+            self.weights_verify_combo,
+            profile.get("remote_weights_verify"),
+            "strict",
+        )
+        try:
+            retention = int(profile.get("remote_cache_retention_days") or 30)
+        except Exception:
+            retention = 30
+        self.retention_spin.setValue(min(3650, max(1, retention)))
         self.password_edit.clear()
         self.status_label.setText(
             "Profile loaded. Test the connection after changing server settings."
@@ -269,6 +333,11 @@ class ServerProfilesDialog:
         self.image_edit.setText(DEFAULT_IMAGE)
         self._set_gpu_device(DEFAULT_GPU_DEVICE)
         self.cache_check.setChecked(True)
+        self._set_combo(self.runtime_combo, "docker", "docker")
+        self.namespace_edit.clear()
+        self._set_combo(self.code_verify_combo, "warn", "warn")
+        self._set_combo(self.weights_verify_combo, "strict", "strict")
+        self.retention_spin.setValue(30)
         self.status_label.setText("Enter the remote server connection details.")
         self._refresh_auth()
 
@@ -326,6 +395,11 @@ class ServerProfilesDialog:
         match = text.split(" ", 1)[0]
         return match or DEFAULT_GPU_DEVICE
 
+    @staticmethod
+    def _set_combo(combo, value, default):
+        index = combo.findData(str(value or default))
+        combo.setCurrentIndex(max(0, index))
+
     def _set_gpu_device(self, value: object) -> None:
         wanted = str(value or DEFAULT_GPU_DEVICE)
         index = self.gpu_combo.findData(wanted)
@@ -370,6 +444,11 @@ class ServerProfilesDialog:
                 "runtime_image": self.image_edit.text(),
                 "gpu_device": self._gpu_device(),
                 "cache_training_data": self.cache_check.isChecked(),
+                "container_runtime": self.runtime_combo.currentData(),
+                "container_namespace": self.namespace_edit.text(),
+                "remote_code_verify": self.code_verify_combo.currentData(),
+                "remote_weights_verify": self.weights_verify_combo.currentData(),
+                "remote_cache_retention_days": self.retention_spin.value(),
             }
         )
 
@@ -465,14 +544,20 @@ class ServerProfilesDialog:
             "GPU {} {}".format(row.get("index"), row.get("name"))
             for row in gpu_rows
         ) or "No GPU reported"
-        self.status_label.setText(
-            "Connected · {} · selected {} · {} free · image ready · {}".format(
+        message = (
+            "Connected · work folder {} · {} · selected {} · {} free · "
+            "image ready · {}".format(
+                result.get("remote_root") or "?",
                 gpus,
                 result.get("gpu_device") or DEFAULT_GPU_DEVICE,
                 _format_bytes(result.get("free_bytes")),
                 result.get("fingerprint"),
             )
         )
+        warning = str(result.get("warning") or "").strip()
+        if warning:
+            message = "⚠ {} — {}".format(warning, message)
+        self.status_label.setText(message)
 
 
 class RemoteComputeSelector:

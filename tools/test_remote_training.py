@@ -311,6 +311,22 @@ class LocalCompatibilityTests(unittest.TestCase):
         ):
             self.assertIn(path, package_portable.REQUIRED_EXTERNAL_UI_FILES)
 
+    def test_connection_warns_for_root_login(self):
+        """B12 red-line guard: root logins get a shared-server warning.
+
+        The live SSH path cannot run in unit tests, so assert the guard
+        and its surfacing where they live: the warning is produced in
+        test_connection and rendered by the dialog's status message.
+        """
+        source = Path("tools/remote_compute.py").read_text(encoding="utf-8")
+        self.assertIn('== "root"', source)
+        self.assertIn('"warning": warning', source)
+        ui_source = Path("tools/remote_compute_ui.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('result.get("warning")', ui_source)
+        self.assertIn("work folder {}", ui_source)
+
     @unittest.skipUnless(
         importlib.util.find_spec("PySide6") is not None,
         "PySide6 is not installed",
@@ -335,6 +351,72 @@ class LocalCompatibilityTests(unittest.TestCase):
             self.assertIn("existing local training", selector.hint.text())
             parent.close()
             app.processEvents()
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("PySide6") is not None,
+        "PySide6 is not installed",
+    )
+    def test_server_dialog_preserves_hand_edited_profile_fields(self):
+        """B12 regression: the form round-trips the five advanced fields.
+
+        Before the form exposed them, _profile_values dropped any
+        hand-edited servers.json values (e.g. container_runtime='nerdctl'),
+        and a Save from the dialog silently reset them to defaults.
+        """
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6 import QtCore, QtGui, QtWidgets
+        from tools.remote_compute_ui import ServerProfilesDialog
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.dict(
+            os.environ,
+            {"MIMICS_REMOTE_CONFIG_DIR": temporary},
+            clear=False,
+        ):
+            remote_compute.write_json_atomic(
+                remote_compute.profiles_path(),
+                {
+                    "schema_version": remote_compute.SCHEMA_VERSION,
+                    "profiles": [
+                        {
+                            "profile_id": "srv",
+                            "name": "Shared Server",
+                            "host": "10.0.0.1",
+                            "port": 22,
+                            "username": "root",
+                            "auth_method": "password",
+                            "key_path": "",
+                            "remote_root": "/userdata/alice/mimics-ai",
+                            "runtime_image": "mimics-ai-runtime:1.0",
+                            "gpu_device": "auto",
+                            "cache_training_data": True,
+                            "container_runtime": "nerdctl",
+                            "container_namespace": "mimics-ai",
+                            "remote_code_verify": "strict",
+                            "remote_weights_verify": "warn",
+                            "remote_cache_retention_days": 7,
+                        }
+                    ],
+                },
+            )
+            app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+            parent = QtWidgets.QWidget()
+            dialog = ServerProfilesDialog(
+                parent, (QtCore, QtGui, QtWidgets), "srv"
+            )
+            try:
+                values = dialog._profile_values()
+                self.assertEqual("nerdctl", values["container_runtime"])
+                self.assertEqual("mimics-ai", values["container_namespace"])
+                self.assertEqual("strict", values["remote_code_verify"])
+                self.assertEqual("warn", values["remote_weights_verify"])
+                self.assertEqual(7, values["remote_cache_retention_days"])
+                self.assertEqual(
+                    "/userdata/alice/mimics-ai", values["remote_root"]
+                )
+            finally:
+                dialog.dialog.close()
+                parent.close()
+                app.processEvents()
 
 
 

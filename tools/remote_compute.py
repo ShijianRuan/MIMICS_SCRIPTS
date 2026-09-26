@@ -943,10 +943,22 @@ def test_connection(
             "df -Pk {} | tail -1".format(shlex.quote(root))
         ).strip().split()
         free_kb = int(disk[3]) if len(disk) >= 4 and disk[3].isdigit() else 0
+        # Shared-server hygiene warning, checked at the only moment the
+        # real resolved path is known. Generic on purpose: the admin's
+        # designated folder differs per server, so we surface the landing
+        # folder rather than hardcode any machine path.
+        warning = ""
+        if str(profile.get("username") or "") == "root":
+            warning = (
+                "This SSH account is root. On a shared server, use the "
+                "folder your administrator assigned instead of root's own "
+                "files. Current work folder: {}".format(root)
+            )
         return {
             "ok": True,
             "fingerprint": session.fingerprint,
             "remote_root": root,
+            "warning": warning,
             "runtime_image": image,
             "image_id": image_id,
             "preflight": preflight,
