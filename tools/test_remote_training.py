@@ -741,6 +741,107 @@ class LocalCompatibilityTests(unittest.TestCase):
         self.assertIn('result.get("warning")', ui_source)
         self.assertIn("work folder {}", ui_source)
 
+    def test_connection_queries_gpu_load_at_server_test_time(self):
+        """TB-06 contract: the server-test GPU query covers live load.
+
+        The "check before use" red line applies at the moment the user is
+        looking — Test Connection. This pins (a) the nvidia-smi query asks
+        for memory.used and utilization.gpu (not just existence/total), and
+        (b) test_connection feeds the parsed rows through gpu_busy_warning
+        so a busy shared server surfaces in the single warning field the
+        dialog renders. Launch-time enforcement / hard blocking is user
+        decision D14 and deliberately NOT asserted here.
+        """
+        source = Path("tools/remote_compute.py").read_text(encoding="utf-8")
+        self.assertIn("memory.used,utilization.gpu", source)
+        self.assertIn("gpu_warning = gpu_busy_warning(", source)
+        # The B12 regression pins this exact literal; the combined warning
+        # must keep flowing through the same field.
+        self.assertIn('"warning": warning', source)
+        ui_source = Path("tools/remote_compute_ui.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("% used", ui_source)
+
+    def test_parse_gpu_lines_handles_not_supported_and_short_rows(self):
+        from tools.remote_compute import parse_gpu_lines
+
+        rows = parse_gpu_lines(
+            [
+                "0, GPU-aaa, NVIDIA A100, 81920, 40960, 0",
+                "1, GPU-bbb, NVIDIA A100, [Not Supported], [Not Supported], 3",
+                "garbage line",
+            ]
+        )
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["memory_mb"], 81920)
+        self.assertEqual(rows[0]["memory_used_mb"], 40960)
+        self.assertEqual(rows[0]["utilization_percent"], 0)
+        # [Not Supported] maps to 0, never crashes the numeric fields.
+        self.assertEqual(rows[1]["memory_mb"], 0)
+        self.assertEqual(rows[1]["memory_used_mb"], 0)
+        self.assertEqual(rows[1]["utilization_percent"], 3)
+        self.assertEqual(parse_gpu_lines([]), [])
+
+    def test_gpu_busy_warning_names_each_busy_gpu(self):
+        from tools.remote_compute import gpu_busy_warning
+
+        idle = {
+            "index": "0", "uuid": "GPU-aaa", "name": "NVIDIA A100",
+            "memory_mb": 81920, "memory_used_mb": 512, "utilization_percent": 2,
+        }
+        memory_busy = {
+            "index": "1", "uuid": "GPU-bbb", "name": "NVIDIA A100",
+            "memory_mb": 81920, "memory_used_mb": 73728, "utilization_percent": 0,
+        }
+        utilization_busy = {
+            "index": "2", "uuid": "GPU-ccc", "name": "NVIDIA A100",
+            "memory_mb": 81920, "memory_used_mb": 1024, "utilization_percent": 93,
+        }
+        # Idle everywhere → no warning.
+        self.assertEqual(gpu_busy_warning([idle]), "")
+        # A busy GPU elsewhere does not warn when another device is selected
+        # and that device is idle.
+        self.assertEqual(gpu_busy_warning([idle, memory_busy], "0"), "")
+        # Selected device busy → named with the memory metric.
+        warning = gpu_busy_warning([idle, memory_busy], "1")
+        self.assertIn("GPU 1", warning)
+        self.assertIn("90% memory in use", warning)
+        self.assertNotIn("GPU 0", warning)
+        # Auto: every busy GPU is named with its own metric (multi-GPU case).
+        warning = gpu_busy_warning([idle, memory_busy, utilization_busy])
+        self.assertIn("GPU 1", warning)
+        self.assertIn("90% memory in use", warning)
+        self.assertIn("GPU 2", warning)
+        self.assertIn("93% utilization", warning)
+        self.assertNotIn("GPU 0", warning)
+
+    def test_gpu_busy_warning_unmatched_device_falls_back_to_all_gpus(self):
+        """A MIG UUID never matches a --query-gpu row (physical GPUs only).
+
+        Conservative fallback: evaluate all GPUs rather than silently
+        disabling the shared-server hint for exactly the users who chose
+        MIG partitioning to share politely.
+        """
+        from tools.remote_compute import gpu_busy_warning
+
+        busy = {
+            "index": "0", "uuid": "GPU-aaa", "name": "NVIDIA A100",
+            "memory_mb": 81920, "memory_used_mb": 77824, "utilization_percent": 0,
+        }
+        warning = gpu_busy_warning([busy], "MIG-gpu-aaa/1/0")
+        self.assertIn("GPU 0", warning)
+
+    def test_gpu_busy_warning_guards_zero_total_memory(self):
+        """[Not Supported] memory (MIG physical GPUs) must not divide by zero."""
+        from tools.remote_compute import gpu_busy_warning
+
+        mig_parent = {
+            "index": "0", "uuid": "GPU-aaa", "name": "NVIDIA A100",
+            "memory_mb": 0, "memory_used_mb": 0, "utilization_percent": 0,
+        }
+        self.assertEqual(gpu_busy_warning([mig_parent]), "")
+
     @unittest.skipUnless(
         importlib.util.find_spec("PySide6") is not None,
         "PySide6 is not installed",

@@ -32,6 +32,11 @@ IMAGE_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.:/@-]*$")
 GPU_DEVICE_PATTERN = re.compile(
     r"^(?:auto|[0-9]+|GPU-[a-zA-Z0-9-]+|MIG-[a-zA-Z0-9./-]+)$"
 )
+# Soft busy thresholds for the shared-server "check before use" hint surfaced
+# by test_connection. Deliberately not config keys; making the check blocking
+# or configurable is user decision D14.
+GPU_BUSY_MEMORY_FRACTION = 0.8
+GPU_BUSY_UTILIZATION_PERCENT = 50
 
 
 class RemoteComputeError(RuntimeError):
@@ -817,6 +822,89 @@ class SSHSession:
             return False
 
 
+def parse_gpu_lines(lines: list[str]) -> list[dict[str, Any]]:
+    """Parse `nvidia-smi --query-gpu=...` CSV lines into GPU rows.
+
+    Query used by test_connection: index,uuid,name,memory.total,memory.used,
+    utilization.gpu (6 columns). GPU names contain no commas in practice, so
+    a full split is safe; rows with fewer columns are skipped. `[Not Supported]`
+    values (e.g. memory on MIG-partitioned physical GPUs) map to 0.
+    """
+    def _int(value: str) -> int:
+        try:
+            return int(value.strip())
+        except (ValueError, TypeError):
+            return 0
+
+    gpus: list[dict[str, Any]] = []
+    for line in lines:
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) < 6:
+            continue
+        gpus.append(
+            {
+                "index": parts[0],
+                "uuid": parts[1],
+                "name": parts[2],
+                "memory_mb": _int(parts[3]),
+                "memory_used_mb": _int(parts[4]),
+                "utilization_percent": _int(parts[5]),
+            }
+        )
+    return gpus
+
+
+def gpu_busy_warning(
+    gpus: list[dict[str, Any]], gpu_device: str = "auto"
+) -> str:
+    """Soft shared-server hint for test_connection: name every busy GPU.
+
+    A GPU counts as busy when memory used is at/above
+    GPU_BUSY_MEMORY_FRACTION of total OR utilization is at/above
+    GPU_BUSY_UTILIZATION_PERCENT. When a specific device is selected, only
+    that GPU is evaluated; if it matches no reported row (e.g. a MIG UUID,
+    which --query-gpu reports only as its physical parent), all GPUs are
+    evaluated conservatively. Returns "" when nothing looks busy.
+    """
+    rows = list(gpus or [])
+    wanted = str(gpu_device or "auto")
+    if wanted != "auto":
+        matching = [
+            row
+            for row in rows
+            if str(row.get("index") or "") == wanted
+            or str(row.get("uuid") or "") == wanted
+        ]
+        rows = matching or rows
+    busy = []
+    for row in rows:
+        total_mb = int(row.get("memory_mb") or 0)
+        used_mb = int(row.get("memory_used_mb") or 0)
+        utilization = int(row.get("utilization_percent") or 0)
+        memory_busy = total_mb > 0 and used_mb >= GPU_BUSY_MEMORY_FRACTION * total_mb
+        if not (memory_busy or utilization >= GPU_BUSY_UTILIZATION_PERCENT):
+            continue
+        details = []
+        if memory_busy:
+            details.append(
+                "{:.0f}% memory in use".format(100.0 * used_mb / total_mb)
+            )
+        if utilization >= GPU_BUSY_UTILIZATION_PERCENT:
+            details.append("{}% utilization".format(utilization))
+        busy.append(
+            "GPU {} ({}) looks busy: {}".format(
+                row.get("index") or "?", row.get("name") or "NVIDIA GPU",
+                " and ".join(details),
+            )
+        )
+    if not busy:
+        return ""
+    return (
+        "{}. On a shared server, wait until the GPU is free or pick another "
+        "GPU before starting training.".format("; ".join(busy))
+    )
+
+
 def test_connection(
     profile: dict[str, Any],
     *,
@@ -914,7 +1002,8 @@ def test_connection(
             )
         try:
             gpu_lines = session.execute(
-                "nvidia-smi --query-gpu=index,uuid,name,memory.total "
+                "nvidia-smi --query-gpu=index,uuid,name,memory.total,"
+                "memory.used,utilization.gpu "
                 "--format=csv,noheader,nounits"
             ).strip().splitlines()
         except Exception as exc:
@@ -922,38 +1011,29 @@ def test_connection(
                 "The SSH account cannot query NVIDIA GPUs. Verify the server "
                 "driver and account permissions. Details: {}".format(exc)
             ) from exc
-        gpus = []
-        for line in gpu_lines:
-            parts = [part.strip() for part in line.split(",", 3)]
-            if len(parts) != 4:
-                continue
-            try:
-                memory_mb = int(parts[3])
-            except Exception:
-                memory_mb = 0
-            gpus.append(
-                {
-                    "index": parts[0],
-                    "uuid": parts[1],
-                    "name": parts[2],
-                    "memory_mb": memory_mb,
-                }
-            )
+        gpus = parse_gpu_lines(gpu_lines)
         disk = session.execute(
             "df -Pk {} | tail -1".format(shlex.quote(root))
         ).strip().split()
         free_kb = int(disk[3]) if len(disk) >= 4 and disk[3].isdigit() else 0
-        # Shared-server hygiene warning, checked at the only moment the
-        # real resolved path is known. Generic on purpose: the admin's
-        # designated folder differs per server, so we surface the landing
-        # folder rather than hardcode any machine path.
-        warning = ""
+        # Shared-server hygiene warnings, checked at the only moment the
+        # real resolved path and live GPU load are known. Generic on purpose:
+        # the admin's designated folder differs per server, so we surface the
+        # landing folder rather than hardcode any machine path.
+        warnings = []
         if str(profile.get("username") or "") == "root":
-            warning = (
+            warnings.append(
                 "This SSH account is root. On a shared server, use the "
                 "folder your administrator assigned instead of root's own "
                 "files. Current work folder: {}".format(root)
             )
+        # Soft "check before use" hint (soft by design; blocking is D14).
+        gpu_warning = gpu_busy_warning(
+            gpus, str(profile.get("gpu_device") or "auto")
+        )
+        if gpu_warning:
+            warnings.append(gpu_warning)
+        warning = " ".join(warnings)
         return {
             "ok": True,
             "fingerprint": session.fingerprint,

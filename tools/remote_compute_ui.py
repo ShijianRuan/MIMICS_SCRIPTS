@@ -420,9 +420,15 @@ class ServerProfilesDialog:
             if not index:
                 continue
             memory_gb = float(row.get("memory_mb") or 0) / 1024.0
+            utilization = row.get("utilization_percent")
+            load = (
+                " · {}% in use".format(utilization)
+                if utilization is not None
+                else ""
+            )
             self.gpu_combo.addItem(
-                "GPU {} · {} · {:.1f} GB".format(
-                    index, row.get("name") or "NVIDIA GPU", memory_gb
+                "GPU {} · {} · {:.1f} GB{}".format(
+                    index, row.get("name") or "NVIDIA GPU", memory_gb, load
                 ),
                 index,
             )
@@ -541,7 +547,11 @@ class ServerProfilesDialog:
         gpu_rows = result.get("gpus") or []
         self._set_detected_gpus(gpu_rows)
         gpus = ", ".join(
-            "GPU {} {}".format(row.get("index"), row.get("name"))
+            "GPU {} {} ({}% used)".format(
+                row.get("index"),
+                row.get("name"),
+                row.get("utilization_percent") or 0,
+            )
             for row in gpu_rows
         ) or "No GPU reported"
         message = (
