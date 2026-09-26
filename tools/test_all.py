@@ -11920,6 +11920,119 @@ class TestLifecycleAndRetention(unittest.TestCase):
         self.assertIn("cutoff", source)
         self.assertNotIn("Remove-Item", source)
 
+    def test_prune_import_receipts_deletes_only_expired_receipts(self):
+        # B9-b: the import-receipt retention hook had zero direct tests.
+        # Receipts carry patient file paths, so an unpruned (or over-pruned)
+        # hook is a privacy/data bug, not just disk hygiene.
+        import create_mcs_batch
+
+        old = time.time()
+        keep = Path(self.tmp) / "keep.import_receipt.json"
+        keep.write_text("{}", encoding="utf-8")
+        expired = Path(self.tmp) / "expired.import_receipt.json"
+        expired.write_text("{}", encoding="utf-8")
+        os.utime(str(expired), (old - 31 * 86400, old - 31 * 86400))
+        unrelated = Path(self.tmp) / "unrelated.json"
+        unrelated.write_text("{}", encoding="utf-8")
+        os.utime(str(unrelated), (old - 60 * 86400, old - 60 * 86400))
+
+        create_mcs_batch.prune_import_receipts(self.tmp, retention_days=30)
+
+        self.assertTrue(keep.exists())
+        self.assertFalse(expired.exists())
+        # Only .import_receipt.json files are ever touched.
+        self.assertTrue(unrelated.exists())
+
+    def test_prune_old_checkpoints_deletes_only_expired_breadcrumbs(self):
+        # B9-b: every Mimics import PID leaves a checkpoint pair under
+        # debug_out; without pruning they accumulate forever. Expired
+        # breadcrumbs go, fresh ones and unrelated debug files stay.
+        import mimics_import
+
+        old = time.time()
+        fresh = Path(self.tmp) / "mimics_import_checkpoint_fresh.json"
+        fresh.write_text("{}", encoding="utf-8")
+        expired = Path(self.tmp) / "mimics_import_checkpoint_old.json"
+        expired.write_text("{}", encoding="utf-8")
+        os.utime(str(expired), (old - 15 * 86400, old - 15 * 86400))
+        unrelated = Path(self.tmp) / "other_debug.json"
+        unrelated.write_text("{}", encoding="utf-8")
+        os.utime(str(unrelated), (old - 60 * 86400, old - 60 * 86400))
+
+        mimics_import._prune_old_checkpoints(self.tmp, retention_days=14)
+
+        self.assertTrue(fresh.exists())
+        self.assertFalse(expired.exists())
+        self.assertTrue(unrelated.exists())
+
+    def test_prune_logs_keeps_newest_logs_only(self):
+        # B9-b: external-window stderr logs keep only the newest N by
+        # mtime; older logs are removed, non-log files untouched.
+        import external_window_launcher
+
+        now = time.time()
+        kept = []
+        removed = []
+        for index in range(4):
+            path = Path(self.tmp) / "window_{}.log".format(index)
+            path.write_text("log", encoding="utf-8")
+            stamp = now - (3 - index) * 3600
+            os.utime(str(path), (stamp, stamp))
+            (kept if index >= 2 else removed).append(path)
+        unrelated = Path(self.tmp) / "window_notes.txt"
+        unrelated.write_text("notes", encoding="utf-8")
+
+        external_window_launcher.prune_logs(self.tmp, "window_", 2)
+
+        for path in kept:
+            self.assertTrue(path.exists(), path.name)
+        for path in removed:
+            self.assertFalse(path.exists(), path.name)
+        self.assertTrue(unrelated.exists())
+
+    def test_prune_local_export_jobs_respects_age_cap_and_active_jobs(self):
+        # B9-b: export job dirs are pruned past the age/count caps, but a
+        # dir whose status file reports a live PID must never be removed.
+        import mimics_export
+
+        jobs_root = Path(self.tmp) / ".mimics_runtime" / "export_jobs"
+        jobs_root.mkdir(parents=True)
+        now = time.time()
+        live_pid = os.getpid()
+
+        recent = jobs_root / "recent"
+        recent.mkdir()
+        (recent / "status.json").write_text("{}", encoding="utf-8")
+
+        expired = jobs_root / "expired"
+        expired.mkdir()
+        (expired / "status.json").write_text("{}", encoding="utf-8")
+        stamp = now - 20 * 86400
+        os.utime(str(expired), (stamp, stamp))
+
+        active = jobs_root / "active"
+        active.mkdir()
+        (active / "status.json").write_text(
+            json.dumps({"status": "running", "pid": live_pid}),
+            encoding="utf-8",
+        )
+        os.utime(str(active), (stamp, stamp))
+
+        non_job = jobs_root / "stray.txt"
+        non_job.write_text("x", encoding="utf-8")
+
+        old_root = mimics_export._project_root
+        try:
+            mimics_export._project_root = lambda: self.tmp
+            mimics_export._prune_local_export_jobs(max_age_days=14, max_jobs=100)
+        finally:
+            mimics_export._project_root = old_root
+
+        self.assertTrue(recent.exists())
+        self.assertFalse(expired.exists())
+        self.assertTrue(active.exists())
+        self.assertTrue(non_job.exists())
+
 
 if __name__ == "__main__":
     print("Mimics-Script Comprehensive Tests")
