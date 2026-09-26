@@ -49,6 +49,7 @@ except ImportError:
         RemoteCommandError,
         RemoteComputeError,
         SSHSession,
+        assert_gpus_not_busy,
         container_runtime_command,
         docker_gpu_request,
         get_profile,
@@ -4124,6 +4125,14 @@ def run(spec_path: Path) -> int:
         session.ensure_directory(remote_paths["locks"])
         session.ensure_directory(remote_paths["dataset_cache"])
         session.ensure_directory(remote_paths["prepared_cache"])
+        # Shared-server "check before use": the launch-time GPU busy gate
+        # runs before any upload so a blocked job costs one SSH round trip,
+        # not hours of transfer. Warn mode surfaces in the controller log
+        # and the status file (the log alone is invisible in the UI).
+        gpu_busy_note = assert_gpus_not_busy(session, profile)
+        if gpu_busy_note:
+            _append_log(controller_log, gpu_busy_note)
+            _status_update(status_path, gpu_busy_warning=gpu_busy_note)
         if kind in {"nnunet", "nnunet_infer", "flexict", "flexict_infer"}:
             prepared_cache_namespace = _prepared_cache_namespace(
                 bundle, remote_paths
@@ -4396,6 +4405,12 @@ def run(spec_path: Path) -> int:
             progress_percent=35,
             remote_job_dir=remote_paths["job"],
         )
+        # Re-check right before launch: the dataset upload above can take
+        # hours, and the moment this job starts crowding the shared GPU is
+        # the container launch. Before the reconnect loop, not inside it,
+        # so a reconnect never re-triggers the gate. Only block mode raises;
+        # warn mode already surfaced at the pre-upload check.
+        assert_gpus_not_busy(session, profile)
         launch_reconnect_attempt = 0
         while True:
             _raise_if_cancelled(status_path)

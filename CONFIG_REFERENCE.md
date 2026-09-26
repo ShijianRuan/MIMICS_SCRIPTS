@@ -63,6 +63,7 @@ never stored in this file — they go to Windows Credential Manager
 | `container_namespace` | Optional nerdctl namespace for job containers; ignored by Docker. |
 | `remote_code_verify` | Code-drift check on the shipped runtime: `strict` (refuse), `warn` (default), `off`. |
 | `remote_weights_verify` | Downloaded-weights checksum check: `strict` (default), `warn`, `off`. |
+| `gpu_busy_policy` | What happens at launch when the selected GPU already looks busy on this shared server: `block` (default, refuse to start training), `warn` (start and record a note), `off` (skip the check). |
 | `remote_cache_retention_days` | Days finished jobs and cached training data stay on the server before cleanup (default 30, max 3650). |
 
 All fields are editable in the connection setup UI (training window > Compute tab > Manage Servers); editing `servers.json` by hand is never required.

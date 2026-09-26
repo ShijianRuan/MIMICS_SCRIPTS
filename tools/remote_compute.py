@@ -37,6 +37,15 @@ GPU_DEVICE_PATTERN = re.compile(
 # or configurable is user decision D14.
 GPU_BUSY_MEMORY_FRACTION = 0.8
 GPU_BUSY_UTILIZATION_PERCENT = 50
+# Shared by test_connection and assert_gpus_not_busy so the soft diagnostic
+# and the hard launch gate can never drift apart. Keep "memory.used,
+# utilization.gpu" contiguous on one line: a regression test pins the
+# literal substring against source.
+GPU_QUERY_COMMAND = (
+    "nvidia-smi --query-gpu=index,uuid,name,memory.total,"
+    "memory.used,utilization.gpu "
+    "--format=csv,noheader,nounits"
+)
 
 
 class RemoteComputeError(RuntimeError):
@@ -268,6 +277,11 @@ def normalize_profile(profile: dict[str, Any]) -> dict[str, Any]:
     ).strip().lower()
     if remote_code_verify not in {"strict", "warn", "off"}:
         remote_code_verify = "warn"
+    gpu_busy_policy = str(
+        profile.get("gpu_busy_policy") or "block"
+    ).strip().lower()
+    if gpu_busy_policy not in {"block", "warn", "off"}:
+        gpu_busy_policy = "block"
     container_runtime = (
         str(profile.get("container_runtime") or "docker").strip().lower()
     )
@@ -293,6 +307,7 @@ def normalize_profile(profile: dict[str, Any]) -> dict[str, Any]:
         "remote_cache_retention_days": remote_cache_retention_days,
         "remote_weights_verify": remote_weights_verify,
         "remote_code_verify": remote_code_verify,
+        "gpu_busy_policy": gpu_busy_policy,
         "container_runtime": container_runtime,
         "container_namespace": container_namespace,
         "updated_at_epoch": time.time(),
@@ -905,6 +920,50 @@ def gpu_busy_warning(
     )
 
 
+def assert_gpus_not_busy(
+    session: SSHSession,
+    profile: dict[str, Any],
+) -> str:
+    """Shared-server launch gate: raise when the target GPU looks busy.
+
+    Query failure raises RemoteComputeError — a silent pass here would open a
+    hole in the shared-server "check before use" red line (test_connection
+    already requires nvidia-smi to work for this account). Policy comes from
+    the profile key ``gpu_busy_policy``:
+
+    - "block" (default): busy GPU raises, naming the GPU and how to change
+      the policy;
+    - "warn": returns the warning text for the caller to surface
+      (controller log + status file); never raises;
+    - "off": returns "" without issuing any remote query.
+    """
+    policy = str(profile.get("gpu_busy_policy") or "block").strip().lower()
+    if policy == "off":
+        return ""
+    try:
+        gpu_lines = session.execute(GPU_QUERY_COMMAND).strip().splitlines()
+    except Exception as exc:
+        raise RemoteComputeError(
+            "The SSH account cannot query NVIDIA GPUs, so the shared-server "
+            "busy check cannot run. Verify the server driver and account "
+            "permissions, or set GPU busy policy to Warn in Manage Servers. "
+            "Details: {}".format(exc)
+        ) from exc
+    warning = gpu_busy_warning(
+        parse_gpu_lines(gpu_lines),
+        str(profile.get("gpu_device") or "auto"),
+    )
+    if not warning:
+        return ""
+    if policy == "warn":
+        return warning
+    raise RemoteComputeError(
+        "{}. Training was not started because this server is shared. Wait "
+        "until the GPU is free, pick another GPU, or change GPU busy policy "
+        "to Warn in Manage Servers (server settings).".format(warning)
+    )
+
+
 def test_connection(
     profile: dict[str, Any],
     *,
@@ -1001,11 +1060,7 @@ def test_connection(
                 )
             )
         try:
-            gpu_lines = session.execute(
-                "nvidia-smi --query-gpu=index,uuid,name,memory.total,"
-                "memory.used,utilization.gpu "
-                "--format=csv,noheader,nounits"
-            ).strip().splitlines()
+            gpu_lines = session.execute(GPU_QUERY_COMMAND).strip().splitlines()
         except Exception as exc:
             raise RemoteComputeError(
                 "The SSH account cannot query NVIDIA GPUs. Verify the server "
@@ -1027,11 +1082,17 @@ def test_connection(
                 "folder your administrator assigned instead of root's own "
                 "files. Current work folder: {}".format(root)
             )
-        # Soft "check before use" hint (soft by design; blocking is D14).
+        # Soft "check before use" hint. Test Connection stays a diagnostic:
+        # it never blocks, but it says what will happen at launch time.
         gpu_warning = gpu_busy_warning(
             gpus, str(profile.get("gpu_device") or "auto")
         )
         if gpu_warning:
+            if str(profile.get("gpu_busy_policy") or "block") == "block":
+                gpu_warning += (
+                    " Training will not start while the GPU is this busy "
+                    "(GPU busy policy: Block)."
+                )
             warnings.append(gpu_warning)
         warning = " ".join(warnings)
         return {

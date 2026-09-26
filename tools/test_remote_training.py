@@ -749,8 +749,9 @@ class LocalCompatibilityTests(unittest.TestCase):
         for memory.used and utilization.gpu (not just existence/total), and
         (b) test_connection feeds the parsed rows through gpu_busy_warning
         so a busy shared server surfaces in the single warning field the
-        dialog renders. Launch-time enforcement / hard blocking is user
-        decision D14 and deliberately NOT asserted here.
+        dialog renders. Test Connection stays a soft diagnostic; the hard
+        launch gate (D14, user-approved) is assert_gpus_not_busy, pinned by
+        the D14 tests below.
         """
         source = Path("tools/remote_compute.py").read_text(encoding="utf-8")
         self.assertIn("memory.used,utilization.gpu", source)
@@ -758,10 +759,143 @@ class LocalCompatibilityTests(unittest.TestCase):
         # The B12 regression pins this exact literal; the combined warning
         # must keep flowing through the same field.
         self.assertIn('"warning": warning', source)
+        # D14: the soft diagnostic and the hard gate share one query, so
+        # they can never drift apart.
+        self.assertIn("session.execute(GPU_QUERY_COMMAND)", source)
         ui_source = Path("tools/remote_compute_ui.py").read_text(
             encoding="utf-8"
         )
         self.assertIn("% used", ui_source)
+
+    def test_assert_gpus_not_busy_blocks_names_gpu_and_escape_hatch(self):
+        from tools.remote_compute import (
+            RemoteComputeError,
+            assert_gpus_not_busy,
+        )
+
+        class FakeSession:
+            def __init__(self, lines):
+                self.lines = lines
+                self.executed = []
+
+            def execute(self, command, *args, **kwargs):
+                self.executed.append(command)
+                return "\n".join(self.lines)
+
+        busy_rows = [
+            "0, GPU-aaa, NVIDIA A100, 81920, 73728, 0",
+            "1, GPU-bbb, NVIDIA A100, 81920, 512, 3",
+        ]
+        # Block (default): busy selected GPU raises, naming it and how to
+        # change the policy.
+        session = FakeSession(busy_rows)
+        with self.assertRaisesRegex(
+            RemoteComputeError, "GPU 0.*GPU busy policy"
+        ) as raised:
+            assert_gpus_not_busy(session, {"gpu_device": "0"})
+        self.assertIn("not started", str(raised.exception))
+        self.assertIn("shared", str(raised.exception))
+        # Idle selected GPU does not raise even when another GPU is busy.
+        self.assertEqual(
+            assert_gpus_not_busy(
+                FakeSession(busy_rows), {"gpu_device": "1"}
+            ),
+            "",
+        )
+
+    def test_assert_gpus_not_busy_warn_and_off_modes(self):
+        from tools.remote_compute import RemoteComputeError, assert_gpus_not_busy
+
+        class FakeSession:
+            def __init__(self, lines):
+                self.lines = lines
+                self.executed = []
+
+            def execute(self, command, *args, **kwargs):
+                self.executed.append(command)
+                return "\n".join(self.lines)
+
+        busy_rows = ["0, GPU-aaa, NVIDIA A100, 81920, 73728, 0"]
+        # Warn: no raise; the warning text comes back for the controller to
+        # surface in the log and the status file.
+        session = FakeSession(busy_rows)
+        warning = assert_gpus_not_busy(
+            session, {"gpu_device": "auto", "gpu_busy_policy": "warn"}
+        )
+        self.assertIn("GPU 0", warning)
+        self.assertEqual(1, len(session.executed))
+        # Off: no remote query is issued at all.
+        session = FakeSession(busy_rows)
+        self.assertEqual(
+            assert_gpus_not_busy(
+                session, {"gpu_device": "auto", "gpu_busy_policy": "off"}
+            ),
+            "",
+        )
+        self.assertEqual([], session.executed)
+        # Query failure fails closed — a silent pass would open a hole in
+        # the shared-server red line.
+        class FailingSession:
+            def execute(self, command, *args, **kwargs):
+                raise RuntimeError("nvidia-smi: command not found")
+
+        with self.assertRaisesRegex(RemoteComputeError, "cannot query"):
+            assert_gpus_not_busy(FailingSession(), {"gpu_device": "auto"})
+
+    def test_run_checks_gpu_before_upload_and_again_before_launch(self):
+        """D14 source contract: the gate runs at two moments.
+
+        Early: after the remote directories are ensured, BEFORE any upload —
+        a blocked job must cost one SSH round trip, not hours of transfer.
+        Late: again right before the container launch, because the dataset
+        upload between the two checks can take hours and the crowding
+        moment is the launch itself.
+        """
+        source = Path("tools/remote_training_controller.py").read_text(
+            encoding="utf-8"
+        )
+        early = source.index('assert_gpus_not_busy(session, profile)')
+        # Early check precedes run()'s dataset-upload loop (helper functions
+        # above run() also contain upload code, so the marker must be one
+        # that exists only inside run()).
+        first_upload = source.index("while pending_dataset_parts:")
+        self.assertLess(early, first_upload)
+        # A second call exists after the starting_remote status update and
+        # before the launch reconnect loop.
+        late = source.index(
+            'assert_gpus_not_busy(session, profile)', early + 1
+        )
+        starting_remote = source.index('phase="starting_remote_container"')
+        launch_loop = source.index("launch_reconnect_attempt = 0")
+        self.assertLess(starting_remote, late)
+        self.assertLess(late, launch_loop)
+
+    def test_gpu_busy_policy_normalizes_and_survives_profile_roundtrip(self):
+        from tools.remote_compute import normalize_profile
+
+        base = {
+            "name": "srv", "host": "10.0.0.1", "username": "user",
+        }
+        # Default is block; invalid values fall back to block.
+        self.assertEqual(normalize_profile(dict(base))["gpu_busy_policy"], "block")
+        self.assertEqual(
+            normalize_profile(
+                dict(base, gpu_busy_policy="nonsense")
+            )["gpu_busy_policy"],
+            "block",
+        )
+        self.assertEqual(
+            normalize_profile(dict(base, gpu_busy_policy="warn"))[
+                "gpu_busy_policy"
+            ],
+            "warn",
+        )
+        self.assertEqual(
+            normalize_profile(dict(base, gpu_busy_policy="off"))[
+                "gpu_busy_policy"
+            ],
+            "off",
+        )
 
     def test_parse_gpu_lines_handles_not_supported_and_short_rows(self):
         from tools.remote_compute import parse_gpu_lines
@@ -908,6 +1042,7 @@ class LocalCompatibilityTests(unittest.TestCase):
                             "container_namespace": "mimics-ai",
                             "remote_code_verify": "strict",
                             "remote_weights_verify": "warn",
+                            "gpu_busy_policy": "warn",
                             "remote_cache_retention_days": 7,
                         }
                     ],
@@ -924,6 +1059,7 @@ class LocalCompatibilityTests(unittest.TestCase):
                 self.assertEqual("mimics-ai", values["container_namespace"])
                 self.assertEqual("strict", values["remote_code_verify"])
                 self.assertEqual("warn", values["remote_weights_verify"])
+                self.assertEqual("warn", values["gpu_busy_policy"])
                 self.assertEqual(7, values["remote_cache_retention_days"])
                 self.assertEqual(
                     "/userdata/alice/mimics-ai", values["remote_root"]

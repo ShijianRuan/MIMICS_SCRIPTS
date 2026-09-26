@@ -191,6 +191,18 @@ class ServerProfilesDialog:
             "How strictly trained weights are checked against their "
             "recorded checksum after download."
         )
+        self.gpu_busy_combo = QtWidgets.QComboBox()
+        for label, value in (
+            ("Block while busy (default)", "block"),
+            ("Warn while busy", "warn"),
+            ("Skip check", "off"),
+        ):
+            self.gpu_busy_combo.addItem(label, value)
+        self.gpu_busy_combo.setToolTip(
+            "What happens when the selected GPU already looks busy on this "
+            "shared server. Block refuses to start training; Warn starts "
+            "anyway and records a note."
+        )
         self.retention_spin = QtWidgets.QSpinBox()
         self.retention_spin.setRange(1, 3650)
         self.retention_spin.setValue(30)
@@ -217,6 +229,7 @@ class ServerProfilesDialog:
             ("nerdctl namespace", self.namespace_edit),
             ("Code verification", self.code_verify_combo),
             ("Weights verification", self.weights_verify_combo),
+            ("GPU busy policy", self.gpu_busy_combo),
             ("Server cleanup after", self.retention_spin),
         ]
         self.password_label = None
@@ -310,6 +323,9 @@ class ServerProfilesDialog:
             profile.get("remote_weights_verify"),
             "strict",
         )
+        self._set_combo(
+            self.gpu_busy_combo, profile.get("gpu_busy_policy"), "block"
+        )
         try:
             retention = int(profile.get("remote_cache_retention_days") or 30)
         except Exception:
@@ -337,6 +353,7 @@ class ServerProfilesDialog:
         self.namespace_edit.clear()
         self._set_combo(self.code_verify_combo, "warn", "warn")
         self._set_combo(self.weights_verify_combo, "strict", "strict")
+        self._set_combo(self.gpu_busy_combo, "block", "block")
         self.retention_spin.setValue(30)
         self.status_label.setText("Enter the remote server connection details.")
         self._refresh_auth()
@@ -454,6 +471,7 @@ class ServerProfilesDialog:
                 "container_namespace": self.namespace_edit.text(),
                 "remote_code_verify": self.code_verify_combo.currentData(),
                 "remote_weights_verify": self.weights_verify_combo.currentData(),
+                "gpu_busy_policy": self.gpu_busy_combo.currentData(),
                 "remote_cache_retention_days": self.retention_spin.value(),
             }
         )
