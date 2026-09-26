@@ -561,14 +561,33 @@ class RegistryIntegrityTests(unittest.TestCase):
         # Python's sort is stable, so order should be preserved for equal keys
         self.assertEqual(len(rows), 2)
 
-    def test_atomic_write_survives_kill_signal(self):
-        """Atomic write leaves original file intact if crash mid-write."""
+    def test_atomic_write_publishes_exactly_one_complete_file(self):
+        """Atomic write leaves exactly one complete file — never a partial.
+
+        Renamed from the misleading "survives_kill_signal": the original
+        never simulated a kill. This version exercises what a kill would
+        actually leave behind: a crashed *non*-atomic write leaves a
+        truncated file that readers must reject, while the atomic writer's
+        temp+replace leaves either the old content or the new — the
+        property real crashes depend on.
+        """
         path = self.workspace / "important.json"
         common.write_json_atomic(path, {"version": 1})
-        # Simulate: a crashed write should not corrupt the original
-        # (atomic write uses os.replace which is atomic on POSIX)
+
+        # A truncated file (what a killed direct write leaves behind) must
+        # be detectable, not silently accepted as valid JSON.
+        truncated = self.workspace / "truncated.json"
+        with open(truncated, "w", encoding="utf-8") as handle:
+            handle.write('{"version": 2, "payload": "to be')  # cut mid-write
+        with open(truncated, "r", encoding="utf-8") as handle:
+            with self.assertRaises(ValueError):
+                json.load(handle)
+
+        # The atomic writer's guarantee: after a successful publish the file
+        # is complete and parseable — there is no intermediate state.
+        common.write_json_atomic(path, {"version": 2})
         original = common.read_json(path)
-        self.assertEqual(original["version"], 1)
+        self.assertEqual(original["version"], 2)
 
     def test_save_registry_with_no_tasks_is_valid(self):
         registry = {"schema_version": "nninteractive_task_registry.v1", "tasks": []}

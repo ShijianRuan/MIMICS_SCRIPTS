@@ -1480,6 +1480,177 @@ class TestMimicsBridgeBufferMapping(unittest.TestCase):
         dcm_files = [f for f in os.listdir(dicom_out) if f.endswith(".dcm")]
         self.assertEqual(shape[2], len(dcm_files))
 
+    def test_derived_dicom_kill_mid_slices_leaves_unpublished_residue_and_rerun_recovers(self):
+        # TB-01: the process dies while writing slice N. The residue must be
+        # confined to the output directory (no manifest, never a valid series
+        # on disk), and a rerun — whose first step wipes the directory —
+        # produces the full, valid series.
+        import pydicom
+        from mimics_bridge import nifti_to_derived_dicom
+
+        import nibabel as nib
+
+        shape = (6, 5, 8)
+        data = np.arange(shape[0] * shape[1] * shape[2], dtype=np.int16).reshape(shape)
+        nii_path = os.path.join(self.tmp, "ct_kill.nii.gz")
+        nib.save(nib.Nifti1Image(data, np.diag([1.0, 1.0, 2.0, 1.0])), nii_path)
+        dicom_out = os.path.join(self.tmp, "dicom_kill")
+
+        # Kill at slice 4 (of 8): write a truncated file, then die like a
+        # hard-killed process would — no exception machinery, no cleanup.
+        real_save_as = pydicom.dataset.FileDataset.save_as
+
+        def killed_save_as(ds_self, path, *args, **kwargs):
+            if path.endswith("slice_0004.dcm"):
+                with open(path, "wb") as handle:
+                    handle.write(ds_self.preamble or b"\0" * 128)
+                raise KeyboardInterrupt("process killed mid-slice")
+            return real_save_as(ds_self, path, *args, **kwargs)
+
+        with mock.patch.object(
+            pydicom.dataset.FileDataset, "save_as", killed_save_as
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                nifti_to_derived_dicom(nii_path, dicom_out)
+
+        # Residue shape: 3 complete slices + 1 truncated, nothing else. No
+        # validation ran (it only runs after a full loop), and no manifest
+        # exists anywhere for a consumer to mistake this for a case.
+        files = sorted(
+            name for name in os.listdir(dicom_out) if name.endswith(".dcm")
+        )
+        self.assertEqual(
+            ["slice_0001.dcm", "slice_0002.dcm", "slice_0003.dcm", "slice_0004.dcm"],
+            files,
+        )
+        self.assertLess(os.path.getsize(os.path.join(dicom_out, files[-1])), 200)
+
+        # Rerun on a healthy process: wipe-then-write recovers fully.
+        result = nifti_to_derived_dicom(nii_path, dicom_out)
+        files = sorted(
+            name for name in os.listdir(dicom_out) if name.endswith(".dcm")
+        )
+        self.assertEqual(shape[2], len(files))
+        first = pydicom.dcmread(os.path.join(dicom_out, files[0]))
+        self.assertEqual(int(first.Rows), shape[1])
+        self.assertEqual(shape[2], result["shape"][2])
+
+    def test_derived_dicom_validation_rejects_incomplete_series(self):
+        # TB-01: the post-loop completeness gate — never directly tested
+        # before. A series missing one slice must fail closed.
+        from mimics_bridge import _validate_derived_dicom_series
+
+        source = os.path.join(self.tmp, "dicom_validate")
+        os.makedirs(source)
+        # Minimal valid-enough DICOM slice for the validator's header read,
+        # built the way the producer builds them (file meta + preamble).
+        import pydicom
+
+        def write_slice(name, series_uid, study_uid):
+            file_meta = pydicom.dataset.FileMetaDataset()
+            file_meta.TransferSyntaxUID = (
+                pydicom.uid.ExplicitVRLittleEndian
+            )
+            file_meta.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.7"
+            file_meta.MediaStorageSOPInstanceUID = pydicom.uid.generate_uid()
+            ds = pydicom.dataset.FileDataset(
+                os.path.join(source, name),
+                {},
+                file_meta=file_meta,
+                preamble=b"\0" * 128,
+            )
+            ds.is_little_endian = True
+            ds.is_implicit_VR = False
+            ds.SOPClassUID = file_meta.MediaStorageSOPClassUID
+            ds.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
+            ds.SeriesInstanceUID = series_uid
+            ds.StudyInstanceUID = study_uid
+            ds.ImageOrientationPatient = [1, 0, 0, 0, 1, 0]
+            ds.ImagePositionPatient = [0, 0, 0]
+            ds.PixelSpacing = [1.0, 1.0]
+            ds.InstanceNumber = 1
+            ds.save_as(os.path.join(source, name))
+
+        write_slice("slice_0001.dcm", "1.2.3", "1.2.4")
+        write_slice("slice_0002.dcm", "1.2.3", "1.2.4")
+
+        # Slice count mismatch: 2 on disk, 3 expected.
+        with self.assertRaisesRegex(RuntimeError, "slice count mismatch"):
+            _validate_derived_dicom_series(Path(source), 3, "1.2.3", "1.2.4")
+
+        # A truncated-to-empty file.
+        write_slice("slice_0003.dcm", "1.2.3", "1.2.4")
+        with open(os.path.join(source, "slice_0003.dcm"), "wb") as handle:
+            handle.write(b"")
+        with self.assertRaisesRegex(RuntimeError, "empty file"):
+            _validate_derived_dicom_series(Path(source), 3, "1.2.3", "1.2.4")
+
+        # A foreign-series UID sneaked in (e.g. residue from another run).
+        write_slice("slice_0003.dcm", "9.9.9", "1.2.4")
+        with self.assertRaisesRegex(RuntimeError, "series UID mismatch"):
+            _validate_derived_dicom_series(Path(source), 3, "1.2.3", "1.2.4")
+
+        # Complete and consistent: passes.
+        write_slice("slice_0003.dcm", "1.2.3", "1.2.4")
+        _validate_derived_dicom_series(Path(source), 3, "1.2.3", "1.2.4")
+
+    def test_mask_nifti_kill_mid_write_never_publishes_partial_file(self):
+        # TB-01 export side: the atomic temp+replace publish means a kill
+        # mid-nib.save can only ever leave a ._mimics_mask_ temp file — the
+        # final .nii.gz either stays at its previous content or never
+        # appears. No truncated mask can be mistaken for an export.
+        import mimics_bridge
+        import nibabel as nib
+
+        data = np.zeros((4, 4, 4), dtype=np.uint8)
+        data[1, 1, 1] = 1
+
+        destination = os.path.join(self.tmp, "published_mask.nii.gz")
+        with open(destination, "wb") as handle:
+            handle.write(b"previous complete export")
+
+        real_nib_save = nib.save
+
+        def killed_save(image, path, *args, **kwargs):
+            if "._mimics_mask_" in str(path):
+                # Half the bytes land, then the process dies.
+                with open(str(path), "ab") as handle:
+                    handle.write(b"\x1f\x8b\x08partial")
+                raise KeyboardInterrupt("process killed mid-write")
+            return real_nib_save(image, path, *args, **kwargs)
+
+        # nibabel is imported lazily inside write_mask_nifti; patch the
+        # module attribute the local import will resolve to.
+        with mock.patch.object(nib, "save", killed_save):
+            with self.assertRaises(KeyboardInterrupt):
+                mimics_bridge.write_mask_nifti(
+                    data, np.eye(4), destination
+                )
+
+        # The published file is untouched; only a temp residue exists.
+        with open(destination, "rb") as handle:
+            self.assertEqual(handle.read(), b"previous complete export")
+        temps = [
+            name
+            for name in os.listdir(self.tmp)
+            if name.startswith("._mimics_mask_")
+        ]
+        # The temp may or may not survive the kill (the finally handler is
+        # skipped on a hard kill) — but it must never be the final name.
+        for name in temps:
+            self.assertNotEqual(name, "published_mask.nii.gz")
+
+        # A rerun with a healthy writer publishes normally, leaving no temp.
+        mimics_bridge.write_mask_nifti(data, np.eye(4), destination)
+        reloaded = nib.load(destination)
+        self.assertEqual((4, 4, 4), reloaded.shape)
+        temps = [
+            name
+            for name in os.listdir(self.tmp)
+            if name.startswith("._mimics_mask_")
+        ]
+        self.assertEqual([], temps)
+
     def test_read_nifti_mask_non_3d_raises(self):
         from mimics_bridge import read_nifti_mask
 
@@ -2738,6 +2909,54 @@ class TestCreateMcsBatch(unittest.TestCase):
         self.assertTrue(os.path.isfile(output_mcs))
         self.assertFalse(os.path.exists(descriptor))
         self.assertFalse(os.path.exists(work_dir))
+
+    def test_partial_work_dir_without_manifest_is_never_converted(self):
+        # TB-01: a bridge process killed mid-DICOM-write leaves a work dir
+        # with partial .dcm files and NO prepare_manifest.json. The manifest
+        # gate must ensure no half-converted case ever becomes an .mcs:
+        # the stale descriptor is discarded and create is never called.
+        import create_mcs_batch
+
+        output_dir = os.path.join(self.tmp, "output")
+        runtime_dir = os.path.join(self.tmp, "local_queue")
+        # Half-written residue: 3 of 10 slices, no manifest (the producer
+        # only writes it after a validated, complete conversion).
+        work_dir = os.path.join(self.tmp, "local_work", "case_killed")
+        queue_dir = os.path.join(runtime_dir, "prepared_queue")
+        os.makedirs(output_dir)
+        os.makedirs(work_dir)
+        os.makedirs(queue_dir)
+        for index in (1, 2, 3):
+            with open(os.path.join(work_dir, "slice_{:04d}.dcm".format(index)), "wb") as handle:
+                handle.write(b"partial")
+        output_mcs = os.path.join(output_dir, "case_killed.mcs")
+        descriptor = os.path.join(queue_dir, "case_killed.json")
+        with open(descriptor, "w") as handle:
+            json.dump({"case_id": "case_killed", "work_dir": work_dir, "output_mcs": output_mcs}, handle)
+        with open(os.path.join(runtime_dir, create_mcs_batch.QUEUE_DONE_FILE), "w") as handle:
+            json.dump({"status": "done"}, handle)
+        # Age the descriptor past the stale window so the consumer may
+        # discard it (fresh descriptors are skipped, not deleted).
+        five_seconds_ago = time.time() - 6.0
+        os.utime(descriptor, (five_seconds_ago, five_seconds_ago))
+
+        calls = []
+        old_create = create_mcs_batch.create_mcs_from_manifest
+        old_runtime = create_mcs_batch._ACTIVE_RUNTIME_DIR
+        try:
+            create_mcs_batch.create_mcs_from_manifest = (
+                lambda work_dir, path: calls.append(work_dir) or path
+            )
+            self.assertEqual(0, create_mcs_batch.main(output_dir, runtime_dir=runtime_dir))
+        finally:
+            create_mcs_batch.create_mcs_from_manifest = old_create
+            create_mcs_batch._ACTIVE_RUNTIME_DIR = old_runtime
+        self.assertEqual([], calls)
+        self.assertFalse(os.path.isfile(output_mcs))
+        # The stale descriptor was discarded; the residue dir itself stays
+        # (cleaned by the import monitor's error path or a later sweep,
+        # never promoted into the dataset).
+        self.assertFalse(os.path.exists(descriptor))
 
     def test_failed_mcs_case_does_not_stop_later_cases(self):
         import create_mcs_batch
@@ -10715,6 +10934,7 @@ class TestLifecycleAndRetention(unittest.TestCase):
             instances = []
 
             def __init__(self, *_args, **_kwargs):
+                self.path = Path(_args[0]) if _args else None
                 self.token = "new-gpu-token"
                 self.release_count = 0
                 self.__class__.instances.append(self)
@@ -10756,6 +10976,7 @@ class TestLifecycleAndRetention(unittest.TestCase):
             instances = []
 
             def __init__(self, *_args, **_kwargs):
+                self.path = Path(_args[0]) if _args else None
                 self.token = "new-gpu-token"
                 self.release_count = 0
                 self.__class__.instances.append(self)
@@ -11120,6 +11341,68 @@ class TestLifecycleAndRetention(unittest.TestCase):
             mimics_import._cleanup_work_dir = old_cleanup_work
         self.assertEqual([True], starts)
         self.assertEqual(1, monitor["failed"])
+
+    def test_bridge_error_cleans_up_partial_derived_dicom_work_dir(self):
+        # TB-01: the bridge dies/errors mid-DICOM-write. The monitor's
+        # error path must remove the work dir with its partial slices —
+        # no half-converted residue survives into the next run.
+        import mimics_import
+
+        work_dir = os.path.join(self.tmp, "work", "case_died")
+        os.makedirs(work_dir)
+        for index in (1, 2, 3):
+            with open(os.path.join(work_dir, "slice_{:04d}.dcm".format(index)), "wb") as handle:
+                handle.write(b"partial")
+        job_dir = os.path.join(self.tmp, "job")
+        os.makedirs(job_dir)
+        starts = []
+        statuses = []
+        monitor = {
+            "job_dir": job_dir,
+            "work_dir": work_dir,
+            "output_dir": self.tmp,
+            "case_id": "case_died",
+            "busy": False,
+            "done": False,
+            "deadline": time.time() + 3600.0,
+            "completed": 0,
+            "failed": 0,
+            "total": 1,
+            "batch_queue": [],
+            "task_status_path": os.path.join(self.tmp, "status.json"),
+        }
+        old_check = mimics_import._check_job_status
+        old_stopped = mimics_import._import_task_stopped
+        old_start = mimics_import._start_next_batch_prepare
+        old_write = mimics_import._write_import_task_status
+        old_log = mimics_import._append_import_log
+        old_record = mimics_import._record_failed_case
+        old_cleanup_job = mimics_import._cleanup_job_dir
+        try:
+            mimics_import._check_job_status = lambda _job: ("error", "bridge died mid-slice")
+            mimics_import._import_task_stopped = lambda _monitor: False
+            mimics_import._start_next_batch_prepare = lambda _monitor: starts.append(True)
+            mimics_import._write_import_task_status = lambda _path, payload: statuses.append(
+                dict(payload)
+            )
+            mimics_import._append_import_log = lambda *_args: None
+            mimics_import._record_failed_case = lambda *_args: None
+            mimics_import._cleanup_job_dir = lambda _path: None
+            mimics_import._batch_prepare_tick_impl(monitor)
+        finally:
+            mimics_import._check_job_status = old_check
+            mimics_import._import_task_stopped = old_stopped
+            mimics_import._start_next_batch_prepare = old_start
+            mimics_import._write_import_task_status = old_write
+            mimics_import._append_import_log = old_log
+            mimics_import._record_failed_case = old_record
+            mimics_import._cleanup_job_dir = old_cleanup_job
+        # The case is recorded as failed, the residue work dir is gone,
+        # and the queue moved on.
+        self.assertEqual(1, monitor["failed"])
+        self.assertFalse(os.path.exists(work_dir))
+        self.assertEqual([True], starts)
+        self.assertEqual(1, statuses[-1]["failed"])
 
     def test_export_notification_failure_does_not_overwrite_completed_state(self):
         import mimics_export
