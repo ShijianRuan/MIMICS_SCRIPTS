@@ -3733,6 +3733,24 @@ class TestNNInteractiveContinuousPrompting(unittest.TestCase):
             delegated[0][3],
         )
 
+    def test_foreground_batch_export_dead_chain_stays_deleted(self):
+        """B8: the foreground batch export chain (whose mid-batch
+        'Batch Export Disabled' dialog asked the annotator to start over)
+        is dead code — main() routes batches to the background process.
+        It must not come back."""
+        import inspect
+        import mimics_export
+
+        source = inspect.getsource(mimics_export)
+        self.assertNotIn("Batch Export Disabled", source)
+        self.assertNotIn("def _start_export_monitor", source)
+        self.assertNotIn("def _export_monitor_tick", source)
+        self.assertNotIn("def _start_next_batch_export", source)
+        self.assertNotIn("def _start_win32_export_monitor", source)
+        # No caller ever passed a batch_queue; the parameter must not
+        # reappear as an implicit promise of foreground batching.
+        self.assertNotIn("batch_queue", source)
+
     def test_error_guidance_categories(self):
         from nninteractive_mimics import _error_guidance
 
