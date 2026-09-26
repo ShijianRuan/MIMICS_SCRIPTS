@@ -1218,6 +1218,19 @@ def _resolve_flexict_pair(request: dict[str, Any],
     return {"2d": model_2d, "3d_fullres": model_3d}
 
 
+def _al_case_mcs_path(dataset_root: Path, case_id: str) -> str:
+    """The case's .mcs project path under the dataset's mcs_output dir,
+    or "" when none exists. Read-only: never creates anything."""
+    try:
+        from tools.mimics_label_export import resolve_mimics_output_dir
+
+        mcs_root = resolve_mimics_output_dir(dataset_root)
+        candidate = mcs_root / "{}.mcs".format(case_id)
+        return str(candidate) if candidate.is_file() else ""
+    except Exception:
+        return ""
+
+
 def _al_materialize_inputs(job_dir: Path, request: dict[str, Any],
                            status_path: Path,
                            control_path: Path) -> list[str]:
@@ -1255,9 +1268,17 @@ def _al_materialize_inputs(job_dir: Path, request: dict[str, Any],
                 "source_shape": [int(v) for v in header.shape[:3]],
                 "source_voxel_to_ras_matrix": header.affine.astype(
                     float).tolist(),
+                # Where the case came from, so the review window can ask
+                # Mimics to open it (the .mcs convention mirrors
+                # mimics_label_export's mcs_output lookup).
+                "source_image_path": str(image),
+                "mcs_path": _al_case_mcs_path(dataset_root, case_id),
             }
         except Exception:
-            geometries[case_id] = {}
+            geometries[case_id] = {
+                "source_image_path": str(image),
+                "mcs_path": _al_case_mcs_path(dataset_root, case_id),
+            }
         update_status(
             status_path,
             phase="preparing_inputs",
