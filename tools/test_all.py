@@ -9372,6 +9372,43 @@ class TestImportReceiptAndUndo(unittest.TestCase):
         self.assertEqual(1, code)
         self.assertEqual(1, len(boxes))
 
+    def test_undo_confirm_copy_explains_steps_and_one_shot_semantics(self):
+        """B7: the confirm dialog states the close-project step and that
+        the undo record is consumed on success (kept on failure)."""
+        import inspect
+        import import_undo_mimics
+
+        source = inspect.getsource(import_undo_mimics.undo_last_import)
+        self.assertIn("close it first and ", source)
+        self.assertIn("one-shot", source)
+        self.assertIn("cannot be undone again", source)
+
+    def test_undo_other_project_refusal_explains_two_steps(self):
+        """B7: the refusal message gives the two-step recovery and says
+        the record was not consumed."""
+        import import_undo_mimics
+
+        boxes = []
+        state = {"active": "C:\\other\\project.mcs"}
+        import_undo_mimics.mimics.file.get_active_project = (
+            lambda: state["active"]
+        )
+        import_undo_mimics.mimics.dialogs.message_box = (
+            lambda *a, **kw: boxes.append((a, kw)) or True
+        )
+        try:
+            ok = import_undo_mimics._open_project("C:\\target\\case.mcs")
+        finally:
+            import_undo_mimics.mimics.file.get_active_project = (
+                lambda: None
+            )
+        self.assertFalse(ok)
+        self.assertEqual(1, len(boxes))
+        text = boxes[0][0][0]
+        self.assertIn("Step 1", text)
+        self.assertIn("Step 2", text)
+        self.assertIn("nothing was consumed", text)
+
     def test_undo_entry_points_exist(self):
         entry = os.path.join(
             PROJECT_ROOT, "scripting_library", "99_Admin", "05_Undo_Last_Import.py"

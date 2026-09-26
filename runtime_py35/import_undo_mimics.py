@@ -112,8 +112,12 @@ def _open_project(mcs_path):
         projects = mimics.file.get_active_project()
         if projects:
             mimics.dialogs.message_box(
-                "Another project is open in Mimics. Close it first, then run "
-                "Undo Last Import again.",
+                "Another project is open in Mimics.\n\n"
+                "Undo Last Import removes the imported masks from the project "
+                "they were created in, so it must open that project itself.\n\n"
+                "Step 1: close the currently open project (save it if needed).\n"
+                "Step 2: run Undo Last Import again.\n"
+                "Your import record is still there — nothing was consumed.",
                 title="Undo Last Import",
                 ui_blocking=False,
             )
@@ -182,7 +186,13 @@ def undo_last_import(confirm=True):
             "Project: {1}\n"
             "It created {2}.\n\n"
             "The masks will be deleted from the project. The .mcs file is "
-            "rolled back only if it has not changed since the import.".format(
+            "rolled back only if it has not changed since the import.\n\n"
+            "Notes:\n"
+            "- If a different project is open in Mimics, close it first and "
+            "run this action again.\n"
+            "- This undo is one-shot: once it completes, the import record "
+            "is consumed and cannot be undone again. If it fails midway, "
+            "the record is kept so you can retry.".format(
                 receipt.get("case_id", "case"), mcs_path, _describe(receipt)
             ),
             title="Undo Last Import",
