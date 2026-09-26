@@ -9925,6 +9925,215 @@ class TestProcessRegistry(unittest.TestCase):
         )
 
 
+class TestStaleGuardSweep(unittest.TestCase):
+    """R12 stale-guard sweep: idle guards go, everything else stays.
+
+    Failure path focus: the sweep runs at import startup, so a wrong delete
+    takes out the anchor of a LIVE lock and splits contenders across inodes
+    (split-brain) -- the exact bug the three gates exist to prevent.
+    """
+
+    def setUp(self):
+        self.tmp = _make_temp_dir()
+        self._old_lock_dir = os.environ.get("MIMICS_RESOURCE_LOCK_DIR")
+        os.environ["MIMICS_RESOURCE_LOCK_DIR"] = os.path.join(
+            self.tmp, "proj", ".mimics_runtime", "locks"
+        )
+        self.lock_dir = os.environ["MIMICS_RESOURCE_LOCK_DIR"]
+        os.makedirs(self.lock_dir, exist_ok=True)
+        self.root = os.path.join(self.tmp, "proj")
+
+    def tearDown(self):
+        if self._old_lock_dir is None:
+            os.environ.pop("MIMICS_RESOURCE_LOCK_DIR", None)
+        else:
+            os.environ["MIMICS_RESOURCE_LOCK_DIR"] = self._old_lock_dir
+        _cleanup(self.tmp)
+
+    def _make_guard(self, name, days_old=None):
+        """One-byte guard file like _MutationGuard creates in production."""
+        guard = os.path.join(self.lock_dir, name)
+        with open(guard, "wb") as handle:
+            handle.write(b"\0")
+        if days_old is not None:
+            self._age(guard, days_old)
+        return guard
+
+    @staticmethod
+    def _age(path, days):
+        stamp = time.time() - days * 86400.0
+        os.utime(path, (stamp, stamp))
+
+    def test_idle_guard_without_sibling_is_removed(self):
+        import resource_locks
+
+        guard = self._make_guard("gpu.lock.guard", days_old=40.0)
+        removed = resource_locks.sweep_stale_guards(self.root, max_age_days=30.0)
+        self.assertEqual(1, removed)
+        self.assertFalse(os.path.exists(guard))
+
+    def test_fresh_guard_is_kept(self):
+        import resource_locks
+
+        guard = self._make_guard("gpu.lock.guard")
+        # mtime is now, well inside the retention window.
+        removed = resource_locks.sweep_stale_guards(self.root, max_age_days=30.0)
+        self.assertEqual(0, removed)
+        self.assertTrue(os.path.exists(guard))
+
+    def test_guard_with_live_sibling_lock_is_kept(self):
+        import resource_locks
+
+        guard = self._make_guard("trainer.lock.guard", days_old=40.0)
+        # A sibling .lock JSON means the resource is registered/alive: the
+        # guard anchor must survive even though the guard itself is idle.
+        sibling = os.path.join(self.lock_dir, "trainer.lock")
+        with open(sibling, "w", encoding="utf-8") as handle:
+            json.dump({"pid": os.getpid()}, handle)
+        removed = resource_locks.sweep_stale_guards(self.root, max_age_days=30.0)
+        self.assertEqual(0, removed)
+        self.assertTrue(os.path.exists(guard))
+
+    def test_contended_guard_is_kept(self):
+        import resource_locks
+
+        guard = self._make_guard("gpu.lock.guard", days_old=40.0)
+        # Hold the byte-0 lock exactly like a real guard holder.
+        handle = open(guard, "a+b")
+        self.addCleanup(handle.close)
+        handle.seek(0)
+        resource_locks._try_lock_byte(handle)
+        self.addCleanup(resource_locks._unlock_byte, handle)
+        removed = resource_locks.sweep_stale_guards(self.root, max_age_days=30.0)
+        self.assertEqual(0, removed)
+        self.assertTrue(os.path.exists(guard))
+
+
+class TestImportQueuePrune(unittest.TestCase):
+    """R12 import-queue prune: stale queue dirs and registry rows go,
+    live queues stay. Failure path focus: deleting a queue a live consumer
+    is still working in breaks the Stop Import Queue path and orphans locks.
+    """
+
+    def setUp(self):
+        self.tmp = _make_temp_dir()
+        self._old_lock_dir = os.environ.get("MIMICS_RESOURCE_LOCK_DIR")
+        os.environ["MIMICS_RESOURCE_LOCK_DIR"] = os.path.join(
+            self.tmp, "locks"
+        )
+        # The prune resolves the runtime base from the project root each
+        # call; point it at the temp tree so no production state is touched.
+        self._old_runtime_dir = os.environ.get("MIMICS_IMPORT_RUNTIME_DIR")
+        os.environ["MIMICS_IMPORT_RUNTIME_DIR"] = os.path.join(
+            self.tmp, "import_runtime"
+        )
+        import mimics_import
+        import resource_locks
+        self.mimics_import = mimics_import
+        self.resource_locks = resource_locks
+        self.base = os.path.join(
+            self.tmp, "import_runtime", "import_queues"
+        )
+
+    def tearDown(self):
+        if self._old_lock_dir is None:
+            os.environ.pop("MIMICS_RESOURCE_LOCK_DIR", None)
+        else:
+            os.environ["MIMICS_RESOURCE_LOCK_DIR"] = self._old_lock_dir
+        if self._old_runtime_dir is None:
+            os.environ.pop("MIMICS_IMPORT_RUNTIME_DIR", None)
+        else:
+            os.environ["MIMICS_IMPORT_RUNTIME_DIR"] = self._old_runtime_dir
+        _cleanup(self.tmp)
+
+    @staticmethod
+    def _age(path, days):
+        stamp = time.time() - days * 86400.0
+        os.utime(path, (stamp, stamp))
+
+    def _make_queue(self, name, heartbeat_epoch=None):
+        import runtime_common
+
+        queue_dir = os.path.join(self.base, name)
+        os.makedirs(queue_dir, exist_ok=True)
+        if heartbeat_epoch is not None:
+            runtime_common.write_json_atomic(
+                os.path.join(queue_dir, "_mcs_queue_active.json"),
+                {
+                    "status": "active",
+                    "updated_at_epoch": heartbeat_epoch,
+                },
+            )
+        return queue_dir
+
+    def _make_registry_row(self, name, queue_dir):
+        import runtime_common
+
+        registry_dir = os.path.join(
+            self.tmp, "import_runtime", "mcs_queues"
+        )
+        os.makedirs(registry_dir, exist_ok=True)
+        path = os.path.join(registry_dir, name + ".json")
+        runtime_common.write_json_atomic(
+            path,
+            {
+                "output_dir": os.path.join(self.tmp, name),
+                "runtime_dir": queue_dir,
+                "total_count": 3,
+                "updated_at_epoch": time.time(),
+            },
+        )
+        return path
+
+    def test_stale_heartbeat_queue_and_registry_row_removed(self):
+        mi = self.mimics_import
+        queue_dir = self._make_queue(
+            "out_stale", heartbeat_epoch=time.time() - 20 * 86400.0
+        )
+        registry_row = self._make_registry_row("out_stale", queue_dir)
+        removed = mi._prune_import_queues(max_age_days=14)
+        self.assertGreaterEqual(removed, 1)
+        self.assertFalse(os.path.isdir(queue_dir))
+        self.assertFalse(os.path.exists(registry_row))
+
+    def test_fresh_heartbeat_queue_is_kept(self):
+        mi = self.mimics_import
+        queue_dir = self._make_queue(
+            "out_fresh", heartbeat_epoch=time.time() - 60.0
+        )
+        removed = mi._prune_import_queues(max_age_days=14)
+        self.assertEqual(0, removed)
+        self.assertTrue(os.path.isdir(queue_dir))
+
+    def test_queue_with_live_pid_lock_is_kept(self):
+        mi = self.mimics_import
+        queue_dir = self._make_queue(
+            "out_live", heartbeat_epoch=time.time() - 20 * 86400.0
+        )
+        # A consumer lock naming THIS live process = an active import.
+        with open(os.path.join(queue_dir, "consumer.lock"), "w",
+                  encoding="utf-8") as handle:
+            json.dump({"pid": os.getpid()}, handle)
+        removed = mi._prune_import_queues(max_age_days=14)
+        self.assertEqual(0, removed)
+        self.assertTrue(os.path.isdir(queue_dir))
+
+    def test_heartbeatless_old_dir_removed_via_mtime_fallback(self):
+        mi = self.mimics_import
+        queue_dir = self._make_queue("out_orphan")  # no heartbeat marker
+        self._age(queue_dir, 20.0)
+        removed = mi._prune_import_queues(max_age_days=14)
+        self.assertGreaterEqual(removed, 1)
+        self.assertFalse(os.path.isdir(queue_dir))
+
+    def test_heartbeatless_fresh_dir_is_kept(self):
+        mi = self.mimics_import
+        queue_dir = self._make_queue("out_new")  # no heartbeat yet, young
+        removed = mi._prune_import_queues(max_age_days=14)
+        self.assertEqual(0, removed)
+        self.assertTrue(os.path.isdir(queue_dir))
+
+
 class TestPipelineCommon(unittest.TestCase):
     """Phase B5 shared pipeline primitives (tools/pipeline_common.py)."""
 
