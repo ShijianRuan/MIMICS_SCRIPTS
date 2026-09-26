@@ -3317,6 +3317,62 @@ class TestStopBackgroundServices(unittest.TestCase):
         self.assertIn("Stop Current Setup", source)
         self.assertIn("terminate_process_async", source)
 
+    def test_environment_setup_menu_recommends_action_first(self):
+        """B6: the first button matches the workstation's actual state."""
+        import setup_environment
+
+        observed = []
+
+        def fake_question_box(message="", buttons="", title="", ui_blocking=None, **kwargs):
+            observed.append({"message": message, "buttons": buttons})
+            return "Cancel"
+
+        old_box = setup_environment.mimics.dialogs.question_box
+        old_bundle = setup_environment._is_offline_bundle
+        old_python = setup_environment.runtime_common.find_external_python
+        old_root = setup_environment._project_root
+        try:
+            setup_environment.mimics.dialogs.question_box = fake_question_box
+            setup_environment._project_root = lambda: "C:\\fake\\root"
+            setup_environment.runtime_common.find_external_python = (
+                lambda *args, **kwargs: ""
+            )
+            # No bundle, no python: extract archive leads.
+            setup_environment._is_offline_bundle = lambda: False
+            result = setup_environment.main()
+            self.assertEqual(1, result)
+            self.assertEqual(1, len(observed))
+            self.assertTrue(observed[0]["buttons"].startswith("Extract Archive;"),
+                            observed[0]["buttons"])
+            self.assertIn("Recommended:", observed[0]["message"])
+            # Existing install: Check leads, in both bundle and non-bundle.
+            setup_environment.runtime_common.find_external_python = (
+                lambda *args, **kwargs: "C:\\fake\\python.exe"
+            )
+            observed[:] = []
+            setup_environment._is_offline_bundle = lambda: False
+            self.assertEqual(1, setup_environment.main())
+            self.assertTrue(observed[0]["buttons"].startswith("Check;"),
+                            observed[0]["buttons"])
+            observed[:] = []
+            setup_environment._is_offline_bundle = lambda: True
+            self.assertEqual(1, setup_environment.main())
+            self.assertTrue(observed[0]["buttons"].startswith("Check;"),
+                            observed[0]["buttons"])
+            # Bundle, no python: Offline Install leads.
+            observed[:] = []
+            setup_environment.runtime_common.find_external_python = (
+                lambda *args, **kwargs: ""
+            )
+            self.assertEqual(1, setup_environment.main())
+            self.assertTrue(observed[0]["buttons"].startswith("Offline Install;"),
+                            observed[0]["buttons"])
+        finally:
+            setup_environment.mimics.dialogs.question_box = old_box
+            setup_environment._is_offline_bundle = old_bundle
+            setup_environment.runtime_common.find_external_python = old_python
+            setup_environment._project_root = old_root
+
     def test_environment_repair_is_blocked_while_other_tasks_are_active(self):
         import setup_environment
 

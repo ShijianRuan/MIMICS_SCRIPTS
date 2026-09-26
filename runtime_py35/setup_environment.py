@@ -415,27 +415,41 @@ def main(action=None):
         return 0
 
     if not action:
-        # Build the menu dynamically — show Offline Install only if bundle is detected
-        if _is_offline_bundle():
-            buttons = "Offline Install;Check;Repair (Install Missing);Setup From Scratch;Cancel"
-            message = (
-                "Offline Install — install everything from the offline bundle (no internet needed).\n"
-                "Check — validate Python, CUDA, packages and models.\n"
-                "Repair — check and install missing packages.\n"
-                "Setup From Scratch — create a new environment from scratch."
-            )
+        # Build the menu dynamically, with the recommended action first:
+        # an annotator with a broken environment should not face a
+        # five-way quiz — the first button is what this workstation
+        # actually needs.
+        bundle = _is_offline_bundle()
+        installed_python = runtime_common.find_external_python(_project_root())
+        if bundle:
+            actions = [
+                ("Offline Install", "install everything from the offline bundle (no internet needed)"),
+                ("Check", "validate Python, CUDA, packages and models"),
+                ("Repair (Install Missing)", "check and install missing packages"),
+                ("Setup From Scratch", "create a new environment from scratch"),
+            ]
+            if installed_python:
+                recommended, reason = "Check", "an environment is already installed — verify it before changing anything"
+            else:
+                recommended, reason = "Offline Install", "no environment is installed yet, and the offline bundle is present"
         else:
-            buttons = "Extract Archive;Check;Repair (Install Missing);Setup From Scratch;Cancel"
-            message = (
-                "Extract Archive — extract a portable .zip archive.\n"
-                "Check — validate Python, CUDA, packages and models.\n"
-                "Repair — check and install missing packages.\n"
-                "Setup From Scratch — create a new environment from scratch."
-            )
+            actions = [
+                ("Extract Archive", "extract a portable .zip archive"),
+                ("Check", "validate Python, CUDA, packages and models"),
+                ("Repair (Install Missing)", "check and install missing packages"),
+                ("Setup From Scratch", "create a new environment from scratch"),
+            ]
+            if installed_python:
+                recommended, reason = "Check", "an environment is already installed — verify it before changing anything"
+            else:
+                recommended, reason = "Extract Archive", "no environment and no offline bundle — start from the portable archive"
+        actions.sort(key=lambda item: item[0] != recommended)
+        lines = ["Recommended: {0} — {1}.".format(recommended, reason)]
+        lines.extend("{0} — {1}.".format(name, description) for name, description in actions)
         answer = mimics.dialogs.question_box(
             title=TITLE,
-            message=message,
-            buttons=buttons,
+            message="\n".join(lines),
+            buttons=";".join(name for name, _description in actions) + ";Cancel",
             ui_blocking=True,
         )
         if answer == "Extract Archive":
