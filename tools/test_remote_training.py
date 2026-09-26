@@ -2708,6 +2708,86 @@ class AcceptanceChecklistTests(unittest.TestCase):
                 )
             )
 
+    class _CleanupSession:
+        """Fake SSH session: find returns a fixed listing, removals succeed."""
+
+        def __init__(self, listing):
+            self.commands = []
+            self._listing = listing
+
+        def execute(self, command, **_kwargs):
+            self.commands.append(command)
+            return self._listing
+
+        def execute_result(self, command, **_kwargs):
+            self.commands.append(command)
+            return 0, ""
+
+    def _run_cleanup(self, listing):
+        module = self._module
+        session = self._CleanupSession(listing)
+        results = []
+        profile = {
+            "remote_root": "/remote/mimics-ai",
+            "username": "user",
+        }
+        with mock.patch.object(
+            module, "_ssh_session", return_value=session
+        ):
+            ok = module.step_cleanup_failed_jobs(results, profile)
+        return ok, results[0], session
+
+    def test_cleanup_failed_jobs_removes_leftovers_under_jobs_root(self):
+        ok, step, session = self._run_cleanup(
+            "/remote/mimics-ai/jobs/user/jobA\n"
+            "/remote/mimics-ai/jobs/user/jobB\n"
+        )
+        self.assertTrue(ok)
+        self.assertEqual(step.status, "pass")
+        self.assertEqual(step.output["leftovers_found"], 2)
+        self.assertEqual(step.output["leftovers_removed"], 2)
+        self.assertEqual(
+            step.output["jobs_root"], "/remote/mimics-ai/jobs/user"
+        )
+        # The listing itself must exclude uploaded tar/.part siblings —
+        # those are removed together with their job dir, not separately.
+        find_command = session.commands[0]
+        self.assertIn("/remote/mimics-ai/jobs/user", find_command)
+        self.assertIn("! -name '*.tar'", find_command)
+        self.assertIn("! -name '*.part'", find_command)
+        # Each leftover goes through the validated removal path (rm -rf
+        # of dir + .tar + .tar.part, then the existence check).
+        self.assertEqual(len(session.commands), 1 + 2 * 2)
+        self.assertIn("jobA", session.commands[1])
+        self.assertIn("jobB", session.commands[3])
+
+    def test_cleanup_failed_jobs_survives_one_refused_path(self):
+        # A path escaping the owner's jobs folder is refused by
+        # _remove_remote_job; the step must keep cleaning the rest.
+        ok, step, session = self._run_cleanup(
+            "/remote/mimics-ai/jobs/user/../other/jobC\n"
+            "/remote/mimics-ai/jobs/user/jobD\n"
+        )
+        self.assertTrue(ok)
+        self.assertEqual(step.status, "pass")
+        self.assertEqual(step.output["leftovers_found"], 2)
+        self.assertEqual(step.output["leftovers_removed"], 1)
+        joined = "\n".join(session.commands)
+        self.assertNotIn("other/jobC", joined)
+        self.assertIn("jobD", joined)
+
+    def test_cleanup_failed_dirs_flag_wires_step_into_main(self):
+        # The cleanup must stay optional: the step only runs when the
+        # user passes --cleanup-failed-dirs at the end of the run.
+        source = Path(self._module.__file__).read_text(encoding="utf-8")
+        self.assertIn("--cleanup-failed-dirs", source)
+        self.assertIn(
+            "if args.cleanup_failed_dirs:", source
+        )
+        self.assertIn(
+            "step_cleanup_failed_jobs(results, profile)", source
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

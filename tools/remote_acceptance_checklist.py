@@ -43,7 +43,7 @@ for candidate in (ROOT, ROOT / "tools"):
     if value not in sys.path:
         sys.path.insert(0, value)
 
-from nnunet_common import read_json, write_json_atomic  # noqa: E402
+from nnunet_common import read_json, safe_identifier, write_json_atomic  # noqa: E402
 
 ACCEPTANCE_SCHEMA = "mimics_remote_acceptance.v1"
 TERMINAL_STATES = {"completed", "failed", "cancelled"}
@@ -314,6 +314,62 @@ def _resolve_local_model_dir(status: dict) -> Path | None:
     return candidate if candidate.is_dir() else None
 
 
+def step_cleanup_failed_jobs(
+    results: list[AcceptanceStep],
+    profile: dict,
+) -> bool:
+    """Remove leftover failed-job diagnostic dirs from the shared server.
+
+    Failed remote training keeps its job directory on the server for
+    diagnosis (``remote_diagnostics_retained``), which on a shared server
+    accumulates without bound. This step deletes only leftovers under
+    ``<remote_root>/jobs/<owner>/`` — no container is running for them
+    (this step runs after training finished) and nothing outside that
+    folder is touched."""
+    step = AcceptanceStep(
+        "cleanup_failed_jobs",
+        "Remove leftover failed-job directories from the shared server",
+    )
+    results.append(step)
+    try:
+        from remote_training_controller import _remove_remote_job
+
+        session = _ssh_session(profile)
+        owner = safe_identifier(str(profile.get("username") or ""), "user")
+        jobs_root = "{}/jobs/{}".format(profile["remote_root"], owner)
+        listing = str(
+            session.execute(
+                "find {root} -mindepth 1 -maxdepth 1 ! -name '*.tar' "
+                "! -name '*.part' 2>/dev/null".format(root=jobs_root),
+                check=False,
+            )
+        ).strip()
+        leftovers = [
+            name for name in listing.splitlines() if name.strip()
+        ]
+        removed = 0
+        for remote_job_dir in leftovers:
+            try:
+                if _remove_remote_job(
+                    session,
+                    remote_root=profile["remote_root"],
+                    expected_owner=owner,
+                    remote_job_dir=remote_job_dir,
+                ):
+                    removed += 1
+            except Exception:
+                pass  # keep going: one refused path must not stop the rest
+        step.succeed(
+            jobs_root=jobs_root,
+            leftovers_found=len(leftovers),
+            leftovers_removed=removed,
+        )
+        return True
+    except Exception as exc:
+        step.fail("{}: {}".format(type(exc).__name__, exc))
+        return False
+
+
 def step_train_remote(
     results: list[AcceptanceStep],
     profile: dict,
@@ -571,6 +627,14 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--output", default=None, help="Working folder (default: temp dir kept)."
     )
+    parser.add_argument(
+        "--cleanup-failed-dirs",
+        action="store_true",
+        help=(
+            "At the end, delete leftover failed-job diagnostic directories "
+            "under the profile's remote jobs folder (shared-server hygiene)."
+        ),
+    )
     args = parser.parse_args(argv)
 
     import tempfile
@@ -619,6 +683,12 @@ def main(argv=None) -> int:
         print("[{}] local_inference".format("PASS" if ok else "FAIL"))
 
     report = write_report(results, output, profile)
+    if args.cleanup_failed_dirs:
+        # Shared-server hygiene: leftover failed-job dirs stay behind for
+        # inspection by default; this flag removes them at the end of a run.
+        ok = step_cleanup_failed_jobs(results, profile)
+        print("[{}] cleanup_failed_jobs".format("PASS" if ok else "FAIL"))
+        report = write_report(results, output, profile)
     print("=" * 72)
     for step in results:
         print("  [{}] {}".format(step.status.upper(), step.name))
