@@ -53,8 +53,28 @@ def _settings_path():
     return os.path.join(_project_root(), ".mimics_runtime", "mimics_mask_apply_state.json")
 
 
+def _existing_dataset_roots(settings):
+    """Dataset roots in ``settings`` that still exist on this machine."""
+    roots = []
+
+    def _add(value):
+        path = str(value or "").strip()
+        if path and os.path.isdir(path) and path not in roots:
+            roots.append(path)
+
+    _add(settings.get("last_dataset_root"))
+    for row in settings.get("recent_dataset_roots") or []:
+        _add(row.get("path") if isinstance(row, dict) else row)
+    return roots
+
+
 def _migrate_old_settings():
-    """Move legacy state file from project root into .mimics_runtime/."""
+    """Move legacy state file from project root into .mimics_runtime/.
+
+    A leftover legacy file (from the retired few-shot workflow) must not
+    become this user's settings when every dataset root it remembers no
+    longer exists — that would silently change the default dataset root.
+    Such state is skipped, not migrated."""
     old_paths = [
         os.path.join(_project_root(), ".fewshot_mimics_state.json"),
         os.path.join(_project_root(), ".mimics_runtime", "fewshot_mimics_state.json"),
@@ -62,6 +82,9 @@ def _migrate_old_settings():
     new_path = _settings_path()
     for old_path in old_paths:
         if not os.path.isfile(old_path) or os.path.isfile(new_path):
+            continue
+        settings = _read_json(old_path, {}) or {}
+        if not _existing_dataset_roots(settings):
             continue
         try:
             new_dir = os.path.dirname(new_path)

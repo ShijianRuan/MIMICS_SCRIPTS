@@ -160,6 +160,56 @@ class TestSyntax(unittest.TestCase):
             self.assertTrue(os.path.isdir(os.path.join(lib, sub)), "Missing dir: {}".format(sub))
 
 
+class TestMaskApplyLegacyStateMigration(unittest.TestCase):
+    """B10b: few-shot leftovers must not become the user's settings."""
+
+    def setUp(self):
+        self.tmp = _make_temp_dir()
+
+    def tearDown(self):
+        _cleanup(self.tmp)
+
+    def _module(self):
+        import mimics_mask_apply
+
+        return mimics_mask_apply
+
+    def test_legacy_state_with_only_dead_roots_is_skipped(self):
+        module = self._module()
+        runtime_dir = os.path.join(self.tmp, ".mimics_runtime")
+        os.makedirs(runtime_dir)
+        legacy = os.path.join(runtime_dir, "fewshot_mimics_state.json")
+        with open(legacy, "w", encoding="utf-8") as handle:
+            json.dump({
+                "last_dataset_root": "C:\\gone\\dataset",
+                "recent_dataset_roots": [
+                    {"path": "C:\\also\\gone", "used_at_epoch": 1.0}
+                ],
+            }, handle)
+        with mock.patch.object(module, "_project_root", lambda: self.tmp):
+            module._migrate_old_settings()
+            # Migration must not run: every remembered root is dead.
+            self.assertTrue(os.path.isfile(legacy))
+            self.assertFalse(
+                os.path.isfile(os.path.join(runtime_dir, "mimics_mask_apply_state.json"))
+            )
+
+    def test_legacy_state_with_live_root_still_migrates(self):
+        module = self._module()
+        runtime_dir = os.path.join(self.tmp, ".mimics_runtime")
+        os.makedirs(runtime_dir)
+        legacy = os.path.join(runtime_dir, "fewshot_mimics_state.json")
+        live_root = os.path.join(self.tmp, "live_dataset")
+        os.makedirs(live_root)
+        with open(legacy, "w", encoding="utf-8") as handle:
+            json.dump({"last_dataset_root": live_root}, handle)
+        new_path = os.path.join(runtime_dir, "mimics_mask_apply_state.json")
+        with mock.patch.object(module, "_project_root", lambda: self.tmp):
+            module._migrate_old_settings()
+            self.assertFalse(os.path.isfile(legacy))
+            self.assertTrue(os.path.isfile(new_path))
+
+
 # ============================================================================
 # L2: runtime_common.py
 # ============================================================================
@@ -9946,6 +9996,53 @@ class TestProcessRegistry(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             resource_locks.register_process(self.root, "bogus_role", os.getpid())
+
+    def test_recycled_pid_is_never_killed_by_terminate_or_sweep(self):
+        """B10a: a record whose start_marker no longer matches the live
+        PID points at a recycled process — killing it would terminate an
+        unrelated program. Both kill paths must refuse."""
+        import resource_locks
+
+        child = self._spawn_sleeper()
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        record = resource_locks.register_process(
+            self.root, "trainer", child.pid, parent_pid=os.getpid()
+        )
+        record_path = resource_locks._process_record_path(
+            resource_locks.default_process_registry_dir(self.root),
+            record["record_id"],
+        )
+        # Simulate PID recycling: the live process keeps running, but the
+        # record now claims a different (stale) start marker.
+        stale_record = dict(record)
+        stale_record["start_marker"] = record["start_marker"] + "0"
+        resource_locks._write_json_atomic(record_path, stale_record)
+
+        # process_is_live must report dead (marker mismatch).
+        self.assertFalse(
+            resource_locks.process_is_live(self.root, "trainer", child.pid)
+        )
+
+        # terminate_process must refuse to kill: it returns True ("already
+        # gone") without ever touching the still-alive child.
+        self.assertTrue(
+            resource_locks.terminate_process(self.root, "trainer", child.pid)
+        )
+        self.assertIsNone(child.poll(), "terminate_process killed a recycled PID")
+
+        # sweep must classify the record dead and remove it — but must not
+        # terminate the live (recycled) process.
+        summary = resource_locks.sweep_processes(self.root)
+        self.assertEqual(1, summary["removed_dead_records"])
+        self.assertEqual([], summary["terminated_orphans"])
+        self.assertIsNone(child.poll(), "sweep killed a recycled PID")
+        self.assertEqual(
+            [], resource_locks.snapshot_processes(self.root, include_dead=True)
+        )
+        # The child survived the whole ladder; clean it up.
+        child.kill()
+        child.wait()
 
     def test_sweep_removes_dead_record_and_releases_its_lock(self):
         import resource_locks
