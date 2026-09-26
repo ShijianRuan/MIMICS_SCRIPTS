@@ -1273,13 +1273,108 @@ def _al_mask_paths(job_dir, case_id, what):
     return rows
 
 
+def _al_open_case(job_dir, case_id):
+    """Open the case's .mcs project in this Mimics session.
+
+    Returns (ok, detail). The path comes from input_geometries.json, where
+    the AL materializer recorded it when the pool was built. Never stomps
+    on an open unsaved session: if another project is active, the user is
+    told to save and close it first (same protection import_undo_mimics
+    applies). Only projects created through the 01_Import flow exist for
+    a dataset, so a missing .mcs is a guidance case, not an error state.
+    """
+    geometry = _al_case_source_geometry(job_dir, case_id)
+    mcs_path = str(geometry.get("mcs_path") or "")
+    source_path = str(geometry.get("source_image_path") or "")
+    if not mcs_path or not os.path.isfile(mcs_path):
+        return False, (
+            "No .mcs project was found for case {0}. Generate one first "
+            "(01 Import, case folder {1}), then retry.".format(
+                case_id, source_path or "(source path not recorded)")
+        )
+    # If the requested project is already active, opening it again would
+    # close/reload it needlessly — skip straight to success.
+    try:
+        active = mimics.file.get_active_project()
+        if active and os.path.abspath(str(active)) == os.path.abspath(mcs_path):
+            return True, "project already open"
+    except Exception:
+        pass
+    try:
+        active = mimics.file.get_active_project()
+        if active:
+            mimics.dialogs.message_box(
+                "Another project is open in Mimics.\n\n"
+                "Opening case {0} requires its own project "
+                "({1}).\n\nStep 1: close the currently open project (save "
+                "it if needed).\nStep 2: open the case from the FlexiCT "
+                "Active Learning window again.".format(case_id, mcs_path),
+                title=TITLE,
+                ui_blocking=False,
+            )
+            return False, "another project is open"
+    except Exception:
+        pass
+    try:
+        mimics.file.open_project(filename=mcs_path)
+    except Exception as exc:
+        return False, "could not open {0}: {1}".format(mcs_path, exc)
+    return True, "opened {0}".format(mcs_path)
+
+
+def _al_mark_annotated(job_dir, case_id):
+    """Mark the case annotated in the review window's state file.
+
+    Same schema the external UI writes (flexict_annotation_state.v1), so
+    both writers converge on the same value regardless of who writes
+    first. Never downgrades an explicit annotated/skipped entry."""
+    path = os.path.join(job_dir, "annotation_state.json")
+    payload = _read_json(path, {}) or {}
+    if str(payload.get("schema_version") or "") != "flexict_annotation_state.v1":
+        payload = {"schema_version": "flexict_annotation_state.v1", "cases": {}}
+    cases = payload.setdefault("cases", {})
+    entry = cases.get(case_id) or {}
+    if str(entry.get("state") or "new") != "new":
+        return
+    cases[case_id] = {
+        "state": "annotated",
+        "updated_at_epoch": time.time(),
+    }
+    payload["updated_at_epoch"] = time.time()
+    _write_json(path, payload)
+
+
 def _al_apply_request(request):
     """Verify the active image matches the request's case, then apply the
-    overlay masks through the same bridge path the prediction flow uses."""
+    overlay masks through the same bridge path the prediction flow uses.
+
+    `what` values: "bands"/"consensus" apply an overlay to the already
+    active case; "open" opens the case's .mcs project; "open_bands" opens
+    the project and then applies the uncertainty bands in one action."""
     request_path = request["_request_path"]
     job_dir = request["_job_dir"]
     case_id = str(request.get("case_id") or "")
     what = str(request.get("what") or "bands")
+    if what == "open":
+        opened, detail = _al_open_case(job_dir, case_id)
+        _al_mark_request(
+            request_path, "applied" if opened else "failed", detail)
+        if opened:
+            _log(
+                logging.INFO,
+                "FlexiCT active-learning opened case {0}: {1}.".format(
+                    case_id, detail),
+            )
+        return
+    if what == "open_bands":
+        opened, detail = _al_open_case(job_dir, case_id)
+        if not opened:
+            _al_mark_request(request_path, "failed", detail)
+            return
+        # The just-opened project's active image is this case in the
+        # normal flow; the verified-grid check below confirms it and
+        # fails with guidance if the project's image is not the case.
+        what = "bands"
     masks = _al_mask_paths(job_dir, case_id, what)
     if not masks:
         _al_mark_request(request_path, "failed", "overlay files not found")
@@ -1394,6 +1489,10 @@ def _al_apply_request(request):
         return
     _al_mark_request(
         request_path, "applied", "applied: {0}".format(", ".join(applied)))
+    # The overlay is on the case's image now, so the annotator can start
+    # (or has started) work on it — reflect that in the review state so
+    # the external window's Status column updates without a manual click.
+    _al_mark_annotated(job_dir, case_id)
     _log(
         logging.INFO,
         "FlexiCT active-learning overlay applied for {0}: {1}.".format(
