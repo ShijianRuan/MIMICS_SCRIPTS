@@ -935,6 +935,26 @@ def test_window_level_from_selected_mask(fake, tmp):
         module.undo_last()
         assert_equal(fake.view.get_contrast(), ((0.0, 0.0), (2026.0, 1.0)), "undo restored previous contrast")
 
+        # Degrade path: no stored previous contrast. Undo must NOT
+        # silently reset — it asks first, and Cancel leaves contrast
+        # untouched.
+        state_path.write_text("{}", encoding="utf-8")
+        fake.dialogs.questions = []
+        fake.dialogs.question_answers = ["Cancel"]
+        module.undo_last()
+        assert_true(fake.dialogs.questions, "undo degrade must ask before resetting")
+        assert_equal(
+            fake.view.get_contrast(), ((0.0, 0.0), (2026.0, 1.0)),
+            "undo cancel must not change contrast",
+        )
+        fake.dialogs.question_answers = ["Reset to Full Range"]
+        fake.view.set_contrast((50.0, 0.0), (900.0, 1.0))
+        module.undo_last()
+        assert_equal(
+            fake.view.get_contrast(), ((0.0, 0.0), (2026.0, 1.0)),
+            "accepted reset must restore full range",
+        )
+
         image = fake.reset_scene(image_shape=(3, 4, 5), minimum_value=0, maximum_value=4095)
         image._contrast_maximum_value = 3625
         module.reset_full_range()

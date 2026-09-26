@@ -368,10 +368,21 @@ def undo_last():
             return 0
         except Exception as exc:
             _mimics_log(logging.WARNING, "Could not restore previous contrast exactly: {0}".format(exc))
-    _mimics_log(
-        logging.WARNING,
-        "Exact previous window/level is not available from this Mimics API session; resetting to full image range.",
+    # No stored previous contrast: "undo" would silently become a full-range
+    # reset. Ask first — the annotator pressed Undo, not Reset.
+    answer = mimics.dialogs.question_box(
+        title=TITLE,
+        message=(
+            "The previous window/level values are not available for this image "
+            "(they were saved in an earlier Mimics session).\n"
+            "Reset the display to the full image range instead?"
+        ),
+        buttons="Reset to Full Range;Cancel",
+        ui_blocking=True,
     )
+    if not answer or answer == "Cancel":
+        _mimics_log(logging.INFO, "Window/level undo cancelled: no previous values available, no reset performed.")
+        return 0
     return reset_full_range()
 
 
