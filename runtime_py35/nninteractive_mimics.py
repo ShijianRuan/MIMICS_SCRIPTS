@@ -202,10 +202,6 @@ def _resource_lock_dir():
     return runtime_common.resource_lock_dir(_project_root())
 
 
-def _aggressive_auto_cleanup_enabled():
-    return runtime_common.aggressive_auto_cleanup_enabled()
-
-
 def _load_json(path):
     with open(path, "r") as handle:
         return json.load(handle)
@@ -4545,9 +4541,9 @@ def _cleanup_stale_processes():
     The legacy cmdline path below still handles unregistered processes
     (started before the registry existed) and owned nnInteractive servers
     whose watchdog is gone and whose idle timeout has elapsed. Killing
-    other live bridge/worker processes stays opt-in via
-    MIMICS_AGGRESSIVE_AUTO_CLEANUP_ON_START=1 or the explicit Stop
-    Background Services entry.
+    other live bridge/worker processes by command-line heuristics was
+    retired (it could interrupt a valid async workflow); use the
+    explicit Stop All Owned Services entry for that.
 
     Uses a single hidden batch PowerShell call instead of per-process calls
     to avoid popping up visible console windows that freeze Mimics.
@@ -4561,25 +4557,7 @@ def _cleanup_stale_processes():
     )
     registry_killed = len(registry_summary.get("terminated_orphans") or [])
     locks_removed += len(registry_summary.get("released_locks") or [])
-    _SERVER_PROTECT_MARKERS = (
-        "nninteractive.inference.server.main",
-        "--watchdog",
-    )
     try:
-        import ctypes
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        PROCESS_TERMINATE = 0x0001
-        kernel32.OpenProcess.argtypes = [
-            ctypes.c_uint32,
-            ctypes.c_int,
-            ctypes.c_uint32,
-        ]
-        kernel32.OpenProcess.restype = ctypes.c_void_p
-        kernel32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-        kernel32.TerminateProcess.restype = ctypes.c_int
-        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-        kernel32.CloseHandle.restype = ctypes.c_int
-
         # Single hidden PowerShell call to get all python.exe PIDs and
         # command lines at once.  This replaces the previous per-process
         # approach that spawned a visible PowerShell window for every
@@ -4607,27 +4585,6 @@ def _cleanup_stale_processes():
             records = [records]
 
         killed.extend(_cleanup_stale_owned_servers(records))
-
-        if _aggressive_auto_cleanup_enabled():
-            env_root = _environment_root().lower()
-            for record in records or []:
-                try:
-                    pid = int(record.get("ProcessId", 0))
-                except (TypeError, ValueError):
-                    continue
-                if not pid:
-                    continue
-                cmdline = str(record.get("CommandLine") or "").lower()
-                is_protected = any(
-                    marker in cmdline
-                    for marker in _SERVER_PROTECT_MARKERS
-                )
-                if not is_protected and env_root in cmdline:
-                    handle = kernel32.OpenProcess(PROCESS_TERMINATE, False, pid)
-                    if handle:
-                        kernel32.TerminateProcess(handle, 1)
-                        kernel32.CloseHandle(handle)
-                        killed.append(pid)
     except Exception:
         pass
     if killed or locks_removed or registry_killed:

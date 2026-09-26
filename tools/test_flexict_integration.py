@@ -182,8 +182,8 @@ class TestWorkerEnvironment(unittest.TestCase):
 
         nnU-Net's spawn'd DA workers (12 by default, ~1GB commit each) crash
         with OpenBLAS allocation failures on RAM-tight Windows workstations
-        and poison the main process's CUDA context; the fix (same as the
-        MedDINOv3 experiments) is single-process data augmentation locally.
+        and poison the main process's CUDA context; the fix is single-process
+        data augmentation locally.
         Preprocess workers must NOT set it: nnunetv2 2.8.0's planner feeds
         the value to torch.set_num_threads and rejects 0. Non-Windows
         (remote Linux containers) never sets it.

@@ -281,7 +281,6 @@ between the Mimics layer and the training frameworks; users never set them.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `MIMICS_AUTO_CLEANUP_ON_START` | `1` | Remove stale lock records whose owning process is gone. Does not kill healthy live tasks. |
-| `MIMICS_AGGRESSIVE_AUTO_CLEANUP_ON_START` | unset | Opt-in termination of owned stale services at startup. Use only for recovery. |
 | `MIMICS_USE_EVENT_TIMER` | unset | Opt in to Mimics event subscriptions instead of Win32 SetTimer for background monitors. Certain Mimics versions log Subscription.__del__ errors with the event path. |
 | `MIMICS_IMPORT_AUTO_OPEN_MCS` | unset | Automatically open a completed imported project when supported. |
 | `MIMICS_IMPORT_USE_MIMICS_LOG` | unset | Mirror verbose import diagnostics into the Mimics log panel. |
@@ -336,7 +335,7 @@ python tools/ai_model_bundle.py import-nninteractive --workspace <dir> --bundle 
 ## ScribblePrompt
 
 ScribblePrompt uses the official UNet checkpoint at
-`external/ScribblePrompt/checkpoints/ScribblePrompt_unet_v1_nf192_res128.pt`.
+`integrations/ScribblePrompt/checkpoints/ScribblePrompt_unet_v1_nf192_res128.pt`.
 The default device is `cpu`, avoiding competition with training and
 nnInteractive for GPU memory. Set `scribbleprompt.device` to `auto` or `cuda`
 only when shared GPU-lock waiting is acceptable.

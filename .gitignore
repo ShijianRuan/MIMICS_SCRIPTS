@@ -20,6 +20,9 @@ wheels/
 
 # Local agent/browser state
 /.claude/
+# Project instructions for local agent sessions; contains credentials,
+# must never enter history
+/CLAUDE.md
 /.playwright-cli/
 /.workbuddy/
 

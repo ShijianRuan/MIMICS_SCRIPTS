@@ -212,7 +212,7 @@ def flexict_worker_environment(request: dict[str, Any],
         # history of allocation-failure crashes on RAM-tight workstations
         # that then poison the main process's CUDA context ("CUDA error:
         # unknown error"). Single-process DA is slower but stable — the same
-        # fix the MedDINOv3 experiments needed on this machine. Train stage
+        # fix earlier local-experiment stability problems on this machine. Train stage
         # ONLY: the planner (preprocess stage) feeds this same value to
         # torch.set_num_threads and nnunetv2 2.8.0 rejects 0 there.
         # Linux (remote containers) keeps nnU-Net's multiprocessing default.

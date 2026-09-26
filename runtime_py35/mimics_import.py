@@ -20,7 +20,6 @@ from __future__ import print_function
 import json
 import logging
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -993,10 +992,6 @@ def _resource_lock_dir():
     return runtime_common.resource_lock_dir(_project_root())
 
 
-def _aggressive_auto_cleanup_enabled():
-    return runtime_common.aggressive_auto_cleanup_enabled()
-
-
 def _environment_root():
     root = _project_root()
     candidates = [
@@ -1054,137 +1049,24 @@ def _cleanup_stale_processes():
     releases locks they still hold - proving ownership via PID + start
     marker, so no aggressive flag is needed for those.
 
-    The legacy cmdline path below still handles unregistered processes
-    (started before the registry existed). Killing other live
-    bridge/background Mimics processes stays opt-in via
-    MIMICS_AGGRESSIVE_AUTO_CLEANUP_ON_START=1 or the explicit Stop
-    Background Services entry, because it can interrupt a valid async
-    workflow.
-
-    Uses a single hidden batch PowerShell call instead of per-process calls
-    to avoid popping up visible console windows that freeze Mimics.
+    The registry sweep is the only terminator here. Killing other live
+    bridge/background Mimics processes by command-line heuristics was
+    retired (it could interrupt a valid async workflow); use the
+    explicit Stop All Owned Services entry for that.
     """
-    killed = []
     locks_removed = runtime_common.cleanup_stale_resource_locks(_resource_lock_dir())
     registry_summary = runtime_common.sweep_processes(
         runtime_common.project_root()
     )
     registry_killed = len(registry_summary.get("terminated_orphans") or [])
     locks_removed += len(registry_summary.get("released_locks") or [])
-    if not _aggressive_auto_cleanup_enabled():
-        if locks_removed:
-            print(
-                "Startup cleanup: removed {0} stale resource lock file(s); "
-                "terminated {1} orphaned registered process(es)".format(
-                    locks_removed, registry_killed
-                )
+    if locks_removed or registry_killed:
+        print(
+            "Startup cleanup: removed {0} stale resource lock file(s); "
+            "terminated {1} orphaned registered process(es)".format(
+                locks_removed, registry_killed
             )
-        return
-
-    # Substrings that identify nnInteractive server / watchdog processes
-    # which must NOT be killed during cleanup.
-    _SERVER_PROTECT_MARKERS = (
-        "nninteractive.inference.server.main",
-        "--watchdog",
-    )
-
-    # 1. Kill stale bridge python processes (nninteractive_env python.exe)
-    #    and background Mimics processes (-b flag).
-    try:
-        import ctypes
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        PROCESS_TERMINATE = 0x0001
-        kernel32.OpenProcess.argtypes = [
-            ctypes.c_uint32,
-            ctypes.c_int,
-            ctypes.c_uint32,
-        ]
-        kernel32.OpenProcess.restype = ctypes.c_void_p
-        kernel32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-        kernel32.TerminateProcess.restype = ctypes.c_int
-        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-        kernel32.CloseHandle.restype = ctypes.c_int
-
-        # Single hidden PowerShell call to get all python.exe and
-        # mimicsresearch.exe PIDs and command lines at once.
-        proc = subprocess.Popen(
-            [
-                "powershell", "-NoProfile", "-Command",
-                "Get-CimInstance Win32_Process | "
-                "Where-Object { $_.Name -eq 'python.exe' -or $_.Name -eq 'mimicsresearch.exe' } | "
-                "Select-Object ProcessId,Name,CommandLine | "
-                "ConvertTo-Json -Compress",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            **_hidden_process_kwargs()
         )
-        stdout, _ = proc.communicate(timeout=15)
-        if proc.returncode == 0 and stdout and stdout.strip():
-            try:
-                records = json.loads(stdout.decode("utf-8", errors="replace"))
-            except ValueError:
-                records = []
-            if isinstance(records, dict):
-                records = [records]
-
-            env_root = _environment_root().lower()
-            for record in records or []:
-                try:
-                    pid = int(record.get("ProcessId", 0))
-                except (TypeError, ValueError):
-                    continue
-                if not pid:
-                    continue
-                name = str(record.get("Name") or "").lower()
-                cmdline = str(record.get("CommandLine") or "").lower()
-                is_protected = any(
-                    marker in cmdline
-                    for marker in _SERVER_PROTECT_MARKERS
-                )
-                if is_protected:
-                    continue
-                should_kill = False
-                if name == "python.exe" and env_root in cmdline:
-                    should_kill = True
-                elif name == "mimicsresearch.exe" and (
-                    "-background_mode" in cmdline
-                    or re.search(r"(^|\s)-b(\s|$)", cmdline)
-                ):
-                    should_kill = True
-                if should_kill:
-                    handle = kernel32.OpenProcess(PROCESS_TERMINATE, False, pid)
-                    if handle:
-                        kernel32.TerminateProcess(handle, 1)
-                        kernel32.CloseHandle(handle)
-                        killed.append((name, pid))
-    except Exception:
-        pass  # Best-effort; don't crash if cleanup fails
-
-    # 2. Remove stale Mimics temp lock files
-    try:
-        temp_dir = os.environ.get("TEMP", "")
-        if temp_dir and os.path.isdir(temp_dir):
-            for root, dirs, files in os.walk(temp_dir):
-                for fname in files:
-                    if fname == "__fold__.lock":
-                        # Only remove locks in Mimics-related directories
-                        if "mimics" in root.lower() or "materialise" in root.lower():
-                            try:
-                                os.remove(os.path.join(root, fname))
-                                locks_removed += 1
-                            except Exception:
-                                pass
-    except Exception:
-        pass
-
-    if killed or locks_removed:
-        parts = []
-        if killed:
-            parts.append("terminated {0} stale process(es)".format(len(killed)))
-        if locks_removed:
-            parts.append("removed {0} lock file(s)".format(locks_removed))
-        print("Startup cleanup: " + ", ".join(parts))
 
 
 # -- TS case discovery (runs in Mimics Python 3.5, stdlib only) ---------

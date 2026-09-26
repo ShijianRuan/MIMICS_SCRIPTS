@@ -10460,16 +10460,49 @@ class TestLifecycleAndRetention(unittest.TestCase):
             self.assertFalse(pipeline.process_exists(259))
             check.assert_called_once_with(259)
 
-    def test_windows_cleanup_declares_pointer_sized_process_handles(self):
-        import inspect
-        import nninteractive_mimics
+    def test_startup_cleanup_has_no_aggressive_kill_path(self):
+        """MIMICS_AGGRESSIVE_AUTO_CLEANUP_ON_START was retired (B13).
 
-        source = inspect.getsource(nninteractive_mimics._cleanup_stale_processes)
-        self.assertIn('ctypes.WinDLL("kernel32", use_last_error=True)', source)
-        self.assertIn("kernel32.OpenProcess.restype = ctypes.c_void_p", source)
-        self.assertIn("kernel32.TerminateProcess.argtypes", source)
-        self.assertIn("kernel32.CloseHandle.argtypes", source)
-        self.assertNotIn("ctypes.windll.kernel32", source)
+        The retired flag gated a command-line-heuristic kill of live
+        bridge/worker processes that could interrupt valid async
+        workflows. Ownership-proven termination now happens only through
+        the process registry sweep and owned-server idle cleanup, and the
+        explicit Stop All Owned Services entry covers the rest — so no
+        runtime_py35 module may read the flag or terminate processes via
+        raw kernel32 OpenProcess/TerminateProcess again.
+        """
+        import inspect
+        import mimics_import
+        import nninteractive_mimics
+        import runtime_common
+
+        for module in (mimics_import, nninteractive_mimics, runtime_common):
+            source = inspect.getsource(module)
+            self.assertNotIn(
+                "MIMICS_AGGRESSIVE_AUTO_CLEANUP_ON_START",
+                "{0} still reads the retired aggressive-cleanup flag".format(
+                    module.__name__
+                ),
+            )
+            self.assertNotIn(
+                "aggressive_auto_cleanup_enabled",
+                "{0} still exposes an aggressive-cleanup helper".format(
+                    module.__name__
+                ),
+            )
+        for module in (mimics_import, nninteractive_mimics):
+            source = inspect.getsource(module)
+            self.assertNotIn(
+                "OpenProcess(PROCESS_TERMINATE",
+                "{0} still kills processes via raw kernel32 handles".format(
+                    module.__name__
+                ),
+            )
+        # The pointer-sized HANDLE declarations the old test guarded live
+        # only in the deleted kill path; the surviving process APIs go
+        # through runtime_common (PROCESS_QUERY_LIMITED_INFORMATION) and
+        # taskkill /T /F.
+        self.assertFalse(hasattr(runtime_common, "aggressive_auto_cleanup_enabled"))
 
 
     def test_resource_guard_is_intentionally_persistent(self):

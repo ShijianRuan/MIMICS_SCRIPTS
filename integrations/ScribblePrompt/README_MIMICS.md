@@ -6,7 +6,7 @@ upstream Apache-2.0 license.
 
 Place the official UNet checkpoint at:
 
-`external/ScribblePrompt/checkpoints/ScribblePrompt_unet_v1_nf192_res128.pt`
+`integrations/ScribblePrompt/checkpoints/ScribblePrompt_unet_v1_nf192_res128.pt`
 
 Official checkpoint URL:
 

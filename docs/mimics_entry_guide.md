@@ -55,6 +55,7 @@
 | Collect Diagnostics | 一键生成脱敏诊断包（zip）交给支持人员 | 无 |
 | Undo Last Import | 撤销最近一次导入（回退 .mcs 和掩码） | 有导入回执 |
 | Edit Configs | 图形化编辑常用配置（无需手改 JSON） | 环境已设置 |
+| Environment Guidance | 检测常见环境问题（环境缺失/安装失败/目录迁移/权重缺失）并给出修复指引 | 无 |
 
 ## 快速参考
 

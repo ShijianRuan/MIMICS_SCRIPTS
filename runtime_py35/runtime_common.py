@@ -1124,11 +1124,6 @@ def launch_external_gui_process(cmd, cwd=None, stderr_log=None, extra_pythonpath
                 pass
 
 
-def aggressive_auto_cleanup_enabled():
-    value = os.environ.get("MIMICS_AGGRESSIVE_AUTO_CLEANUP_ON_START", "").strip().lower()
-    return value in ("1", "true", "yes", "on")
-
-
 def resource_lock_dir(project_root):
     configured = os.environ.get("MIMICS_RESOURCE_LOCK_DIR", "").strip()
     if configured:
