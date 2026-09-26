@@ -4127,6 +4127,105 @@ class TestBridgeDicomLoading(unittest.TestCase):
         self.assertEqual(2, records[1][1].InstanceNumber)
         self.assertEqual(3, records[2][1].InstanceNumber)
 
+    class _DicomSeries:
+        """Minimal pydicom-like header for selection tests."""
+
+        def __init__(self, inst, ipp, uid=None, study=None, snum=None):
+            self.Rows, self.Columns = 4, 4
+            self.InstanceNumber = inst
+            self.ImagePositionPatient = ipp
+            if uid is not None:
+                self.SeriesInstanceUID = uid
+            if study is not None:
+                self.StudyInstanceUID = study
+            if snum is not None:
+                self.SeriesNumber = snum
+
+    def _two_missing_uid_series(self):
+        # Two distinct series (plain + contrast), both missing
+        # SeriesInstanceUID, covering the same z grid — provably interleaved.
+        records = []
+        for i, z in enumerate([0.0, 10.0, 20.0]):
+            records.append(("/a{}.dcm".format(i), self._DicomSeries(i + 1, [0.0, 0.0, z])))
+            records.append(("/b{}.dcm".format(i), self._DicomSeries(i + 1, [0.0, 0.0, z])))
+        return records
+
+    def test_dicom_missing_uid_interleaved_series_fails_closed(self):
+        # Regression (TB-02): two UID-less series used to merge into one
+        # __missing_series_uid__ group and silently stack into a wrong
+        # volume on every call path (no shape, shape match, mismatch-ok).
+        from nninteractive_bridge import _select_dicom_records
+
+        records = self._two_missing_uid_series()
+        for shape, allow in [(None, False), ([4, 4, 3], False), ([4, 4, 3], True)]:
+            with self.assertRaisesRegex(
+                RuntimeError, "cannot be told apart"
+            ):
+                _select_dicom_records(records, shape, allow)
+
+    def test_dicom_single_missing_uid_series_still_selects(self):
+        # One coherent UID-less series (no duplicate positions) must keep
+        # working — de-identified folders load as before.
+        from nninteractive_bridge import _select_dicom_records
+
+        records = [
+            ("/s{}.dcm".format(i), self._DicomSeries(i + 1, [0.0, 0.0, 10.0 * i]))
+            for i in range(3)
+        ]
+        selected = _select_dicom_records(records, [4, 4, 3], False)
+        self.assertEqual(len(selected), 3)
+
+    def test_dicom_missing_uid_distinct_series_number_same_grid(self):
+        # (StudyInstanceUID, SeriesNumber) separates two UID-less series;
+        # with an expected shape both match -> existing multi-series error.
+        from nninteractive_bridge import _select_dicom_records
+
+        records = []
+        for i, z in enumerate([0.0, 10.0, 20.0]):
+            records.append(("/a{}.dcm".format(i), self._DicomSeries(i + 1, [0.0, 0.0, z], study="ST", snum=1)))
+            records.append(("/b{}.dcm".format(i), self._DicomSeries(i + 1, [0.0, 0.0, z], study="ST", snum=2)))
+        with self.assertRaisesRegex(RuntimeError, "Multiple DICOM series"):
+            _select_dicom_records(records, [4, 4, 3], False)
+
+    def test_dicom_missing_uid_duplicate_file_copy_residue_fails_closed(self):
+        # A duplicated slice (copy residue) inside a UID-less series also
+        # produces a duplicate position and must fail closed instead of
+        # stacking the same slice twice.
+        from nninteractive_bridge import _select_dicom_records
+
+        records = [
+            ("/s0.dcm", self._DicomSeries(1, [0.0, 0.0, 0.0])),
+            ("/s0 - Copy.dcm", self._DicomSeries(1, [0.0, 0.0, 0.0])),
+            ("/s1.dcm", self._DicomSeries(2, [0.0, 0.0, 10.0])),
+        ]
+        with self.assertRaisesRegex(RuntimeError, "cannot be told apart"):
+            _select_dicom_records(records, None, False)
+
+    def test_dicom_uid_series_exempt_from_duplicate_position_check(self):
+        # Groups named by a real SeriesInstanceUID keep today's behavior:
+        # the duplicate-position check must not fire for them (the shape
+        # re-check in load_image_dicom_folder covers what matters).
+        from nninteractive_bridge import _dicom_group_key, _select_dicom_records
+
+        records = []
+        for i, z in enumerate([0.0, 10.0, 20.0]):
+            records.append(("/a{}.dcm".format(i), self._DicomSeries(i + 1, [0.0, 0.0, z], uid="1.2.3")))
+            records.append(("/b{}.dcm".format(i), self._DicomSeries(i + 1, [0.0, 0.0, z], uid="1.2.4")))
+        self.assertEqual(len(records), 6)
+        # Sanity: the group keys are the real UIDs.
+        self.assertEqual(_dicom_group_key(records[0][1]), "1.2.3")
+        selected = _select_dicom_records(records, None, False)
+        self.assertEqual(len(selected), 3)
+
+    def test_dicom_series_number_zero_is_real_value(self):
+        # SeriesNumber=0 must not be collapsed into the missing sentinel.
+        from nninteractive_bridge import _dicom_group_key
+
+        ds = self._DicomSeries(1, [0.0, 0.0, 0.0], study="S1", snum=0)
+        self.assertIn("|0", _dicom_group_key(ds))
+        missing = self._DicomSeries(1, [0.0, 0.0, 0.0])
+        self.assertNotIn("|0", _dicom_group_key(missing))
+
 
 # ============================================================================
 # L11: Edge cases and boundary conditions

@@ -1516,8 +1516,62 @@ def _dicom_normal(records: list[tuple[Path, Any]]) -> np.ndarray | None:
     return None
 
 
+def _dicom_attr_part(ds: Any, name: str) -> str:
+    # None and absent must map to the same sentinel, but a present value of
+    # 0 (e.g. SeriesNumber=0) must stay a real, distinct part.
+    value = getattr(ds, name, None)
+    return "" if value is None else str(value)
+
+
 def _dicom_group_key(ds: Any) -> str:
-    return str(getattr(ds, "SeriesInstanceUID", "") or "__missing_series_uid__")
+    uid = getattr(ds, "SeriesInstanceUID", None)
+    if uid:
+        return str(uid)
+    # Without a SeriesInstanceUID (de-identified or legacy export), the
+    # standard remaining discriminator is (StudyInstanceUID, SeriesNumber).
+    # Only when those are missing too do slices share the total-absence
+    # bucket, where the duplicate-position check below guards against
+    # silently interleaving two distinct series.
+    return "__missing_uid__|{}|{}".format(
+        _dicom_attr_part(ds, "StudyInstanceUID"),
+        _dicom_attr_part(ds, "SeriesNumber"),
+    )
+
+
+def _reject_interleaved_missing_uid_groups(
+    groups: dict[str, list[tuple[Path, Any]]],
+) -> None:
+    """Fail closed when a UID-less group provably mixes two series.
+
+    Applies to groups not named by a real SeriesInstanceUID: the
+    (StudyInstanceUID, SeriesNumber) pair is a heuristic, so two distinct
+    series stripped of UIDs can still land in one bucket. Two records at
+    the same (rounded) ImagePositionPatient are proof of interleaving —
+    two series covering the same grid, or copy residue — and must not be
+    silently stacked into a geometrically wrong volume. Records without a
+    parseable IPP (e.g. multi-frame objects) are skipped.
+    """
+    for key, group in groups.items():
+        if key and not key.startswith("__missing_uid__"):
+            continue
+        seen_positions: set[tuple[float, float, float]] = set()
+        for _path, ds in group:
+            if not hasattr(ds, "ImagePositionPatient"):
+                continue
+            try:
+                ipp = tuple(
+                    round(float(value), 2)
+                    for value in ds.ImagePositionPatient
+                )
+            except Exception:
+                continue
+            if ipp in seen_positions:
+                raise RuntimeError(
+                    "The DICOM source folder contains multiple series that "
+                    "cannot be told apart (no SeriesInstanceUID). "
+                    "Use a source folder that contains only the intended series."
+                )
+            seen_positions.add(ipp)
 
 
 def _select_dicom_records(
@@ -1531,6 +1585,8 @@ def _select_dicom_records(
     groups: dict[str, list[tuple[Path, Any]]] = {}
     for record in records:
         groups.setdefault(_dicom_group_key(record[1]), []).append(record)
+
+    _reject_interleaved_missing_uid_groups(groups)
 
     def group_shape(group: list[tuple[Path, Any]]) -> list[int] | None:
         if not group:
