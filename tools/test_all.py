@@ -6558,6 +6558,111 @@ class TestNewFeatures(unittest.TestCase):
         self.assertEqual("discovering_cases", status["phase"])
         self.assertIn("No dataset cases", status["error"])
 
+    def test_export_during_ongoing_import_skips_unpublished_case(self):
+        """TB-07: exporting while an import is mid-conversion never reads
+        half-converted work.
+
+        The import pipeline keeps all conversion work in an isolated local
+        run dir and publishes only the final .mcs to the output folder, so
+        an export racing an ongoing import must simply see "no .mcs yet"
+        for that case: skip it with an explicit reason, never open partial
+        files, never touch the import's work dir, and never leave a
+        .publishing_* staging dir of its own.
+        """
+        import mimics_export
+
+        root = Path(self.tmp) / "tb07"
+        dataset = root / "dataset"
+        output = root / "mcs"
+        runtime = root / "runtime"
+        dataset.mkdir(parents=True)
+        output.mkdir()
+        runtime.mkdir()
+        # case_done has its .mcs already; case_pending is mid-import: its
+        # conversion work exists in an isolated run dir, no .mcs published.
+        (dataset / "case_done").mkdir()
+        (dataset / "case_done" / "ct.nii.gz").write_bytes(b"image")
+        (dataset / "case_pending").mkdir()
+        (dataset / "case_pending" / "ct.nii.gz").write_bytes(b"image")
+        (output / "case_done.mcs").write_bytes(b"mcs-content")
+        import_work = root / "import_runs" / "run_001"
+        import_work.mkdir(parents=True)
+        (import_work / "slice_0001.dcm").write_bytes(b"\0" * 64)
+        work_state_before = sorted(
+            (p.name, p.stat().st_size) for p in import_work.iterdir()
+        )
+
+        # A live import monitor mid-conversion for case_pending (busy tick
+        # would be waiting on the bridge job; its work dir holds partial
+        # output). The export must be able to run concurrently with this.
+        import mimics_import
+        monitor = {
+            "monitor_key": str(import_work),
+            "output_dir": str(output),
+            "case_id": "case_pending",
+            "job_dir": str(root / "import_runs" / "job_001"),
+            "work_dir": str(import_work),
+            "busy": True,
+            "deadline": time.time() + 3600.0,
+            "completed": 0,
+            "failed": 0,
+            "total": 1,
+        }
+        mimics_import._IMPORT_MONITORS[str(import_work)] = monitor
+
+        status_path = runtime / "status.json"
+        config_path = runtime / "config.json"
+        config_path.write_text(json.dumps({
+            "ts_root": str(dataset),
+            "output_dir": str(output),
+            "export_root": str(runtime),
+            "job_runtime": str(runtime),
+            "status_path": str(status_path),
+            "stop_path": str(runtime / "stop.request"),
+            # No mask_names: exercises the export loop without the saved-mask
+            # preflight, which needs real Mimics project internals.
+        }), encoding="utf-8")
+
+        old_project_root = mimics_export._project_root
+        old_open = mimics_export.mimics.file.open_project
+        old_close = mimics_export.mimics.file.close_project
+        opened_projects = []
+        try:
+            mimics_export._project_root = lambda: str(root)
+            mimics_export.mimics.file.open_project = lambda path: opened_projects.append(str(path))
+            mimics_export.mimics.file.close_project = lambda: None
+            code = mimics_export.run_background_batch_export(str(config_path))
+        finally:
+            mimics_export._project_root = old_project_root
+            mimics_export.mimics.file.open_project = old_open
+            mimics_export.mimics.file.close_project = old_close
+
+        # The completed case exported (its .mcs was opened); the pending
+        # case was skipped with an explicit missing-.mcs reason, not a crash
+        # and not an attempt to open half-converted work.
+        self.assertEqual(0, code)
+        self.assertEqual(1, len(opened_projects))
+        self.assertIn("case_done", opened_projects[0])
+        failed_dir = Path(mimics_export._rt(str(runtime), "_failed_exports"))
+        pending_failures = sorted(failed_dir.glob("case_pending_*.json"))
+        self.assertEqual(1, len(pending_failures))
+        failure = json.loads(pending_failures[0].read_text(encoding="utf-8"))
+        self.assertEqual("case_pending", failure.get("case_id"))
+        self.assertIn("not found", str(failure.get("error") or ""))
+        # The import's isolated work dir is untouched and no .publishing_*
+        # staging dir was created anywhere in the export's tree.
+        self.assertEqual(
+            work_state_before,
+            sorted((p.name, p.stat().st_size) for p in import_work.iterdir()),
+        )
+        staging = [str(p) for p in root.rglob("*") if ".publishing_" in p.name]
+        self.assertEqual([], staging)
+        # The live import monitor survived the concurrent export untouched.
+        self.assertEqual(
+            monitor, mimics_import._IMPORT_MONITORS.get(str(import_work))
+        )
+        mimics_import._IMPORT_MONITORS.pop(str(import_work), None)
+
 
     def test_import_task_does_not_clear_stop_marker_owned_by_live_queue(self):
         import mimics_import
