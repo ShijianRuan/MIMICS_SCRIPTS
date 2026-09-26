@@ -96,13 +96,17 @@ AL 窗会列出缺什么，不会静默降级成单模型。
    触发，因此 high 自动 clamp 到数据里实际出现的最大级别，moderate 保持在其下。
 5. **Review UI**（外部 PySide6 窗口）：排序表（排名/case/分数/不确定体积/
    状态 new|annotated|skipped，持久化到 `annotation_state.json`）。每行操作：
-   - **Open Case** — 系统默认程序打开该病例 NIfTI
-   - **Overlay Uncertainty**（双击行同效）— 写 apply request，切回 Mimics 由
-     AL monitor 在 Mimics 内应用 high+moderate 两条带 mask
+   - **Open + Overlay**（双击行同效）— 一个请求在 Mimics 内打开该病例的
+     .mcs 工程（物化时记入 `input_geometries.json` 的 `mcs_path`），再经
+     网格校验应用 high+moderate 两条带 mask
+   - **Overlay Uncertainty** — 工程已打开时只应用不确定度带
    - **Apply Consensus Mask** — 应用两模型共识 mask（`FlexiCT Consensus`）
-   - **Mark Annotated / Mark Skipped** — 更新状态，指导下一轮标注优先级
+   - **Mark Annotated / Mark Skipped** — 手动改状态；应用成功后 Mimics 侧
+     会自动把 new 病例标为 annotated，UI 每 2 秒回读请求结果自动刷新
 6. **闭环**：标注完 top case 后把它们加入训练集，重训 pair，再跑下一轮 AL。
    顶部表格每列均可导出 CSV（`annotation_progress.csv`）。
+   pair 模式下两模型分歧只有单一非零级别，moderate/high 两条带覆盖同一批
+   体素——状态栏会提示这一点，避免把两条 overlay 读成两个独立信号。
 
 ### 3.4 状态与停止（04 Show Status and Stop）
 
@@ -117,13 +121,16 @@ AL 窗会列出缺什么，不会静默降级成单模型。
 
 （Mimics 重启后由 resume 机制自动恢复这类待应用结果。）
 
-### 3.5 应用请求的握手（为什么要点两次）
+### 3.5 应用请求的握手（Mimics 外部进程如何驱动 Mimics）
 
 Review UI 是 Mimics 外部进程，不能碰 `mimics.*` API。它把请求写成
 `job_dir/apply_requests/<case>_<what>_<ms>.json`，Mimics 内的 AL monitor 每
-2 秒轮询：校验当前 active image 的 source geometry 与 job 记录一致 → 调
-mimics_bridge 重采样 → 事务内应用 mask → 把请求标为 applied/failed。因此点
-Overlay 后需要切回 Mimics，monitor 会弹窗告知结果。
+2 秒轮询：`what` 为 `open`/`open_bands` 时先打开病例的 .mcs 工程（已有其它
+工程打开则提示先保存关闭，绝不覆盖），然后校验当前 active image 的 source
+geometry 与 job 记录一致 → 调 mimics_bridge 重采样 → 事务内应用 mask → 把
+请求标为 applied/failed 并自动更新 `annotation_state.json`。Review UI 同样
+每 2 秒回读请求结果，applied/failed 会即时反映到状态栏与表格——标注者双击
+一行后无需再切回 Review 窗口确认。
 
 ## 4. 代码结构
 
