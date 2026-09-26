@@ -6927,6 +6927,58 @@ class TestNewFeatures(unittest.TestCase):
         self.assertEqual(dicom_dir, case["image"])
         self.assertEqual(1, calls["next"])
 
+    def test_batch_discovery_fallback_scan_is_capped(self):
+        """do_discover's loose-image fallback stops at the first slice (B17).
+
+        A flat DICOM case directory can hold tens of thousands of slices.
+        Enumerating all of them to prove no loose NIfTI exists adds no
+        value; the UI-side scanner (discover_single_source) already stops
+        the same walk early, and the bridge must mirror that.
+        """
+        import mimics_bridge
+
+        case = os.path.join(self.tmp, "large_flat_dicom")
+        os.makedirs(case)
+        calls = {"next": 0}
+
+        class Entry:
+            name = "slice000001.dcm"
+            path = os.path.join(case, name)
+
+            def is_file(self):
+                return True
+
+        class Entries:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                calls["next"] += 1
+                if calls["next"] == 1:
+                    return Entry()
+                raise AssertionError(
+                    "batch discovery enumerated past the first DICOM slice"
+                )
+
+        old_scandir = mimics_bridge.os.scandir
+        old_listdir = mimics_bridge.os.listdir
+        try:
+            mimics_bridge.os.scandir = lambda _path: Entries()
+            # The case-level listdir stays real; only the per-case fallback
+            # walk is faked to prove it stops early.
+            result = mimics_bridge.do_discover({"ts_root": self.tmp})
+        finally:
+            mimics_bridge.os.scandir = old_scandir
+            mimics_bridge.os.listdir = old_listdir
+        self.assertEqual(1, calls["next"])
+        self.assertEqual([], result["cases"])
+
     def test_batch_discovery_supports_all_named_and_no_masks(self):
         import mimics_bridge
 

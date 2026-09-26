@@ -2661,11 +2661,21 @@ def do_discover(params: dict) -> dict:
                     image_type = "dicom"
                     break
         if image_path is None:
-            for fname in sorted(os.listdir(case_dir)):
-                if fname.lower().endswith(_DISCOVER_MASK_SUFFIXES):
-                    image_path = os.path.join(case_dir, fname)
-                    image_type = "medical_image"
-                    break
+            # Cap the fallback scan, mirroring discover_single_source in
+            # io_path_setup_ui: a flat DICOM folder can hold tens of
+            # thousands of slices, and proving that no loose NIfTI exists
+            # by enumerating every slice adds no value.
+            try:
+                with os.scandir(case_dir) as entries:
+                    for index, entry in enumerate(entries):
+                        if entry.name.lower().endswith(_DISCOVER_MASK_SUFFIXES) and entry.is_file():
+                            image_path = entry.path
+                            image_type = "medical_image"
+                            break
+                        if entry.name.lower().endswith(".dcm") or index >= 511:
+                            break
+            except OSError:
+                pass
 
         if image_path is None:
             continue  # no image found, skip
