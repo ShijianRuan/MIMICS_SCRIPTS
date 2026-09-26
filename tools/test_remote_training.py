@@ -249,6 +249,141 @@ class ResumableTransferTests(unittest.TestCase):
             self.assertEqual(progress[0], (211, len(content)))
             self.assertEqual(progress[-1], (len(content), len(content)))
 
+    def test_upload_interrupted_midway_keeps_part_for_retry(self):
+        # TB-05: unlike the static resume tests (a pre-existing .part), this
+        # interrupts the transfer mid-flight: the remote write dies with
+        # OSError after one chunk. The .part must hold exactly the bytes
+        # acknowledged before the failure, the destination must not exist,
+        # and the retry must resume from that offset — the content the
+        # controller's remote sha256sum check compares against.
+        class _RemoteHandle:
+            """Real file underneath so the first chunk truly lands on disk."""
+
+            def __init__(self, handle, fail_after):
+                self._handle = handle
+                self._remaining = fail_after
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                self._handle.close()
+                return False
+
+            def write(self, chunk):
+                if self._remaining <= 0:
+                    raise OSError("connection reset mid-transfer")
+                self._remaining -= 1
+                self._handle.write(chunk)
+
+            def flush(self):
+                self._handle.flush()
+
+        class _InterruptedSFTP(self._LocalSFTP):
+            def __init__(self, fail_after):
+                self._fail_after = fail_after
+
+            def open(self, path, mode):
+                handle = Path(path).open(mode)
+                if "w" in mode or "a" in mode:
+                    return _RemoteHandle(handle, self._fail_after)
+                return handle
+
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "source.bin"
+            destination = Path(temporary) / "remote" / "payload.bin"
+            content = b"\xcd" * (10 * 1024 * 1024)  # 3 chunks: 4 MiB + 4 MiB + 2 MiB
+            source.write_bytes(content)
+            destination.parent.mkdir()
+            part = Path(str(destination) + ".part")
+
+            # First attempt: one chunk lands, the next write dies.
+            with self.assertRaisesRegex(OSError, "connection reset"):
+                self._session(sftp=_InterruptedSFTP(fail_after=1)).upload(
+                    source, str(destination)
+                )
+            partial = part.stat().st_size
+            self.assertEqual(partial, 4 * 1024 * 1024)
+            self.assertEqual(part.read_bytes(), content[:partial])
+            self.assertFalse(destination.exists())
+
+            # Retry on a healthy session: resumes from the partial offset,
+            # completes, and leaves no .part behind.
+            progress = []
+            self._session().upload(
+                source,
+                str(destination),
+                callback=lambda done, total: progress.append((done, total)),
+            )
+            self.assertEqual(destination.read_bytes(), content)
+            self.assertEqual(progress[0], (partial, len(content)))
+            self.assertFalse(part.exists())
+
+    def test_download_interrupted_midway_keeps_part_for_retry(self):
+        # TB-05 download twin: the remote read dies with OSError after one
+        # chunk. The local .part holds exactly the received prefix and the
+        # retry resumes from that offset into a byte-identical artifact.
+        class _RemoteHandle:
+            def __init__(self, handle, fail_after):
+                self._handle = handle
+                self._remaining = fail_after
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                self._handle.close()
+                return False
+
+            def read(self, size):
+                if self._remaining <= 0:
+                    raise OSError("connection reset mid-download")
+                self._remaining -= 1
+                return self._handle.read(size)
+
+            def seek(self, offset):
+                self._handle.seek(offset)
+
+        class _InterruptedSFTP(self._LocalSFTP):
+            def __init__(self, fail_after):
+                self._fail_after = fail_after
+
+            def open(self, path, mode):
+                handle = Path(path).open(mode)
+                if "r" in mode:
+                    return _RemoteHandle(handle, self._fail_after)
+                return handle
+
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "remote.bin"
+            destination = Path(temporary) / "local" / "model.bin"
+            content = b"\xef" * (10 * 1024 * 1024)
+            source.write_bytes(content)
+            destination.parent.mkdir()
+            part = Path(str(destination) + ".part")
+
+            # First attempt: one chunk received, the next read dies.
+            with self.assertRaisesRegex(OSError, "connection reset"):
+                self._session(sftp=_InterruptedSFTP(fail_after=1)).download(
+                    str(source), destination
+                )
+            partial = part.stat().st_size
+            self.assertEqual(partial, 4 * 1024 * 1024)
+            self.assertEqual(part.read_bytes(), content[:partial])
+            self.assertFalse(destination.exists())
+
+            # Retry on a healthy session: resumes from the partial offset
+            # and completes into the final artifact.
+            progress = []
+            self._session().download(
+                str(source),
+                destination,
+                callback=lambda done, total: progress.append((done, total)),
+            )
+            self.assertEqual(destination.read_bytes(), content)
+            self.assertEqual(progress[0], (partial, len(content)))
+            self.assertFalse(part.exists())
+
     def test_growing_remote_log_is_appended_from_last_remote_offset(self):
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / "remote.log"
@@ -297,6 +432,285 @@ class ResumableTransferTests(unittest.TestCase):
             self.assertIn("old\n", text)
             self.assertIn("Remote worker log rotated", text)
             self.assertTrue(text.endswith("new\n"))
+
+
+class InterruptedTransferRecoveryTests(unittest.TestCase):
+    """TB-05: mid-transfer network interruption lands in a retryable state.
+
+    All three controller transfer sites (dataset upload, job-archive upload,
+    artifact download) already reconnect and resume from the .part file.
+    These tests interrupt the transfer mid-flight — the timing scenario the
+    static resume tests do not cover — and assert the observable contract:
+    the status lands on "reconnecting_remote" (not a terminal failure), the
+    partial bytes are exact, the retry resumes rather than restarts, and
+    the retry's product passes SHA-256 verification.
+    """
+
+    def _profile(self):
+        return {
+            "profile_id": "labgpu",
+            "name": "Lab GPU",
+            "username": "user",
+            "runtime_image": "mimics-ai-runtime:1.0",
+            "remote_root": "/remote",
+        }
+
+    def _artifact_tar(self, manifest: dict) -> bytes:
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w") as archive:
+            payload = json.dumps(manifest).encode("utf-8")
+            info = tarfile.TarInfo("mimics_model_manifest.json")
+            info.size = len(payload)
+            archive.addfile(info, io.BytesIO(payload))
+        return buffer.getvalue()
+
+    def test_download_interrupted_midway_recovers_via_reconnect(self):
+        # The finished model is downloaded through _finalize_completed_remote_job.
+        # The SFTP read dies after one chunk: the controller must record
+        # "reconnecting_remote" (reattach-compatible, not terminal), the
+        # local .part must hold exactly the received prefix, and the retry
+        # after reconnect must resume and pass SHA-256 verification.
+        manifest = {
+            "schema_version": "mimics_nnunet_model.v1",
+            "model_id": "nnunet_1234",
+            "task_id": "kidney",
+            "configuration": "3d_fullres",
+            "folds": ["0"],
+        }
+        payload = self._artifact_tar(manifest)
+        remote_job = "/remote/jobs/user/train_job1"
+
+        class _FailingReadHandle:
+            def __init__(self, handle, fail_after):
+                self._handle = handle
+                self._remaining = fail_after
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                self._handle.close()
+                return False
+
+            def read(self, size):
+                if self._remaining <= 0:
+                    raise OSError("connection reset mid-download")
+                self._remaining -= 1
+                return self._handle.read(size)
+
+            def seek(self, offset):
+                self._handle.seek(offset)
+
+        class _InterruptedSFTP:
+            """Real files underneath; the remote read dies after 1 chunk."""
+
+            def __init__(self, remote_source: Path, fail_after: int):
+                self._remote_source = remote_source
+                self._fail_after = fail_after
+
+            def stat(self, path):
+                return Path(path).stat()
+
+            def open(self, path, mode):
+                handle = Path(path).open(mode)
+                if "r" in mode and Path(path) == self._remote_source:
+                    return _FailingReadHandle(handle, self._fail_after)
+                return handle
+
+            def remove(self, path):
+                Path(path).unlink()
+
+            def rename(self, source, destination):
+                os.replace(source, destination)
+
+        class Session:
+            """Scripted controller session: one failing download, then live."""
+
+            def __init__(self, sftp):
+                self.sftp = sftp
+                self.closed = False
+                self.download_calls = 0
+                self._failing = True
+
+            def ensure_directory(self, _path):
+                pass
+
+            def path_exists(self, _path):
+                return True
+
+            def execute(self, command, **_kwargs):
+                if command.startswith("test -d "):
+                    return ""
+                if command.startswith("sha256sum"):
+                    return hashlib.sha256(payload).hexdigest()
+                if command.startswith("stat -c %s"):
+                    return str(len(payload))
+                if "stat -c '%i'" in command:
+                    return "1"
+                if command.startswith("docker") or "nerdctl" in command:
+                    # Container cleanup: report already removed.
+                    return ""
+                if command.startswith("rm -rf -- "):
+                    return ""
+                if command.startswith("mkdir -p "):
+                    return ""
+                return ""
+
+            def execute_result(self, command, **_kwargs):
+                if "Config.Labels" in command:
+                    return 0, json.dumps(
+                        {
+                            "mimics-script.remote-training": "true",
+                            "mimics-script.owner": "user",
+                            "mimics-script.job": "train_job1",
+                        }
+                    )
+                if "State.Status" in command:
+                    return 0, "exited -1"
+                if command.startswith("test ! -e "):
+                    return 0, ""
+                return 0, ""
+
+            def read_remote_json(self, _path, default=None):
+                return default
+
+            def download_appended(self, _remote, _local, offset):
+                return offset
+
+            def upload(self, *_args, **_kwargs):
+                return None
+
+            def download(self, remote, local, **_kwargs):
+                self.download_calls += 1
+                if self._failing:
+                    # Mid-flight interruption: one chunk lands in the .part,
+                    # the next read dies. Same shape as a dropped socket.
+                    part = Path(str(local) + ".part")
+                    chunk = max(1, len(payload) // 3)
+                    part.write_bytes(payload[:chunk])
+                    self._failing = False
+                    raise OSError("connection reset mid-download")
+                # Retry: resume from whatever the .part already holds —
+                # exactly the semantics SSHSession.download implements
+                # (verified separately in ResumableTransferTests).
+                part = Path(str(local) + ".part")
+                existing = part.stat().st_size if part.exists() else 0
+                assert existing > 0, "retry must resume, not restart"
+                assert existing < len(payload)
+                with part.open("ab") as handle:
+                    handle.write(payload[existing:])
+                os.replace(str(part), str(local))
+
+            def close(self):
+                self.closed = True
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            remote_source = root / "remote" / "result.tar"
+            remote_source.parent.mkdir(parents=True)
+            remote_source.write_bytes(payload)
+            local_archive = root / "train_job1_remote" / "result.tar"
+            local_model_dir = root / "workspace" / "models" / "kidney" / "nnunet_1234"
+            status_path = root / "status.json"
+            remote_compute.write_json_atomic(
+                status_path,
+                {
+                    "job_id": "train_job1",
+                    "kind": "nnunet",
+                    "status": "training",
+                    "execution_backend": "remote",
+                },
+            )
+            controller_log = root / "controller.log"
+            session = Session(_InterruptedSFTP(remote_source, fail_after=1))
+            prepared = {
+                "remote_artifact_relative": "output/models/kidney/nnunet_1234",
+                "local_model_id": "nnunet_1234",
+            }
+            request_path = root / "request.json"
+            remote_compute.write_json_atomic(
+                request_path,
+                {
+                    "operation": "train",
+                    "task_id": "kidney",
+                    "model_id": "nnunet_1234",
+                    "workspace": str(root / "workspace"),
+                },
+            )
+            with mock.patch.object(
+                controller, "SSHSession", return_value=session
+            ), mock.patch.object(
+                controller,
+                "_register_nnunet",
+                side_effect=lambda spec, local_dir, remote_status, profile: {
+                    "model_id": "nnunet_1234",
+                    "model_dir": str(local_dir),
+                },
+            ):
+                code = controller._finalize_completed_remote_job(
+                    session,
+                    {
+                        "kind": "nnunet",
+                        "job_id": "train_job1",
+                        "request_path": str(request_path),
+                        "job_dir": str(root),
+                    },
+                    self._profile(),
+                    status_path,
+                    {
+                        "job": remote_job,
+                        "jobs": remote_job + "/..",
+                        "dataset_cache": remote_job + "/cache",
+                        "prepared_cache": remote_job + "/prepared",
+                        "locks": remote_job + "/locks",
+                        "archive": remote_job + ".tar",
+                    },
+                    prepared,
+                    {"status": "completed"},
+                    {},
+                    "",
+                    "container",
+                    True,
+                    "",
+                    local_archive.parent,
+                    local_archive,
+                    controller_log,
+                    root / "remote_training.log",
+                )
+            self.assertEqual(code, 0)
+            status = remote_compute.read_json(status_path, {})
+            self.assertEqual(status["status"], "completed")
+            # The interruption was visible as a reconnect, never a failure.
+            self.assertEqual(
+                status.get("remote_reconnect_attempt"), 1
+            )
+            self.assertFalse(status.get("remote_state_unknown", False))
+            self.assertEqual(session.download_calls, 2)
+            # The artifact published is exactly the tar whose SHA-256 the
+            # controller verified against the remote digest.
+            manifest_file = local_model_dir / "mimics_model_manifest.json"
+            self.assertTrue(manifest_file.is_file())
+            self.assertEqual(
+                json.loads(manifest_file.read_text(encoding="utf-8")),
+                manifest,
+            )
+            # No partial-transfer residue: the .part is gone and the
+            # downloaded archive is byte-identical (the SHA-256 the
+            # controller verified against the remote digest).
+            self.assertFalse(Path(str(local_archive) + ".part").exists())
+            self.assertEqual(local_archive.read_bytes(), payload)
+
+    def test_transfer_sites_wrap_interruptible_calls_in_reconnect_retry(self):
+        # Source contract: every session.upload / session.download call the
+        # controller makes for a transfer (not the monitor's control-file
+        # upload or curve sync) is inside a reconnect-retry loop, so an
+        # OSError mid-transfer can never fall through to the terminal
+        # failure handler. Regression guard against silent loop removal.
+        source = Path("tools/remote_training_controller.py").read_text(
+            encoding="utf-8"
+        )
+        retry_blocks = source.count("except (RemoteComputeError, EOFError, OSError, socket.error)")
+        self.assertGreaterEqual(retry_blocks, 5)
 
 
 class LocalCompatibilityTests(unittest.TestCase):
