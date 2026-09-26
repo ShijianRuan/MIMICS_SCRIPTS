@@ -1025,6 +1025,69 @@ def test_export_masks_to_buffers(fake, tmp):
     return "exported 2 mask buffers with manifest and expected byte counts"
 
 
+def test_unicode_and_spaces_paths_flow(fake, tmp):
+    """Chinese + spaces + nested paths must flow through export and import.
+
+    Chinese hospital environments routinely place datasets and outputs under
+    paths like "D:\\患者数据 2026\\..." — this exercises the whole on-disk
+    chain (buffer export, manifest readback, prepared-mask import apply)
+    under such a root instead of only the ASCII temp paths every other
+    test uses (TB-03).
+    """
+    root = tmp / "患者数据 2026" / "标注 输出"
+    root.mkdir(parents=True, exist_ok=True)
+
+    # 1. Export masks to buffers under the unicode+spaces root.
+    image = fake.reset_scene(image_shape=(2, 3, 4), minimum_value=0, maximum_value=100)
+    liver = FakeMask("肝脏 mask", image=image, array=_u8_buffer((2, 3, 4), 1), selected=True)
+    fake.data.masks = FakeCollection([liver])
+    module = import_runtime_module("mimics_export")
+    buffers_dir = root / "缓存 buffers"
+    with contextlib.redirect_stdout(io.StringIO()):
+        manifest = module.export_masks_to_buffers(str(buffers_dir))
+    assert_equal(manifest.get("mimics_shape"), [2, 3, 4], "manifest shape under unicode root")
+    assert_equal(len(manifest.get("masks", [])), 1, "manifest mask count under unicode root")
+    for row in manifest["masks"]:
+        path = buffers_dir / row["u8_filename"]
+        assert_true(path.is_file(), "exported buffer missing under unicode root: {}".format(path))
+    assert_true((buffers_dir / "manifest.json").is_file(), "manifest missing under unicode root")
+
+    # 2. Prepared-mask import apply with every path under the same root.
+    import_module = import_runtime_module("mask_import")
+    buffer_path = root / "导入 buffer.u8"
+    buffer_path.write_bytes(_u8_pattern_buffer((2, 3, 4), lambda x, y, z: x == y).tobytes())
+    result_path = root / "结果 1.json"
+    result_path.write_text(json.dumps({
+        "status": "ok",
+        "masks": [{
+            "name": "导入的肝脏",
+            "u8_path": str(buffer_path),
+            "mimics_shape": [2, 3, 4],
+            "foreground_voxels": 6,
+        }],
+    }), encoding="utf-8")
+    monitor = {
+        "monitor_key": str(root),
+        "result_path": str(result_path),
+        "work_dir": str(root),
+        "active_image": image,
+        "active_image_id": import_module._object_identity(image),
+        "launch_project_path": import_module._current_project_path(),
+        "image_shape": [2, 3, 4],
+        "pending": None,
+        "created_names": [],
+        "errors": [],
+        "deadline": time.time() + 10,
+        "operation_token": None,
+    }
+    import_module._MASK_IMPORT_MONITORS[str(root)] = monitor
+    import_module._mask_import_monitor_tick(monitor)
+    imported = [mask for mask in fake.data.masks if mask.name == "导入的肝脏"]
+    assert_equal(len(imported), 1, "prepared mask under unicode root should be created once")
+    assert_true(imported[0].visible, "imported mask under unicode root should be visible")
+    return "export + import flows work under Chinese/spaces/nested paths"
+
+
 def test_external_io_setup_routing(fake, tmp):
     image = fake.reset_scene(image_shape=(2, 2, 2), minimum_value=0, maximum_value=100)
     import_module = import_runtime_module("mimics_import")
@@ -1573,6 +1636,7 @@ def main(argv=None):
         tests.append(("mask identifier all-mask bounding-box scan", lambda: test_mask_identifier_all_mask_bbox_scan(fake, tmp / "mask_identifier")))
     if args.only in ("export", "all"):
         tests.append(("mask export buffer flow", lambda: test_export_masks_to_buffers(fake, tmp / "export")))
+        tests.append(("unicode and spaces paths flow", lambda: test_unicode_and_spaces_paths_flow(fake, tmp / "unicode_paths")))
         tests.append(("external I/O setup routing", lambda: test_external_io_setup_routing(fake, tmp / "io_setup")))
         tests.append(("asynchronous mask import apply", lambda: test_async_mask_import_apply(fake, tmp / "mask_import")))
     if args.only in ("nninteractive", "all"):

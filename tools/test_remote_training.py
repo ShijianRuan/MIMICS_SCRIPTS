@@ -2597,6 +2597,36 @@ class RemoteJobCleanupTests(unittest.TestCase):
         self.assertFalse(changed)
         self.assertNotIn("curve_identity", state)
 
+    def test_remote_job_removal_quotes_spaces_and_unicode_in_paths(self):
+        # TB-03: a remote_root containing spaces (and non-ASCII) must never
+        # change the meaning of a remote command. Every path interpolates
+        # through shlex.quote, so the rm targets exactly the job dir.
+        import shlex
+
+        session = self._Session()
+        root = "/userdata/患者 数据/mimics-ai"
+        removed = controller._remove_remote_job(
+            session,
+            remote_root=root,
+            expected_owner="user",
+            remote_job_dir="{}/jobs/user/job 1".format(root),
+        )
+        self.assertTrue(removed)
+        rm_command = session.commands[0]
+        arguments = shlex.split(rm_command)[3:]
+        self.assertEqual(
+            arguments,
+            [
+                "{}/jobs/user/job 1".format(root),
+                "{}/jobs/user/job 1.tar".format(root),
+                "{}/jobs/user/job 1.tar.part".format(root),
+            ],
+        )
+        # The parsed arguments are exactly the intended paths — no word
+        # splitting, no shell reinterpretation.
+        for argument in arguments:
+            self.assertTrue(argument.startswith(root))
+
 
 class AcceptanceChecklistTests(unittest.TestCase):
     """The acceptance script must stop the container on failure paths."""
