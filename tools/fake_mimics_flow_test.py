@@ -993,6 +993,29 @@ def test_mask_identifier_all_mask_bbox_scan(fake, tmp):
     assert_equal(hit.reads, 1, "visible hit mask should be read on demand")
     assert_equal(hidden.reads, 1, "hidden mask should be scanned by default")
     assert_true(fake.update_gui_calls >= 2, "mask identifier should yield GUI updates between buffer reads")
+    # A7: the preflight dialog must state the consequence of switching tools
+    # during the modal click (crash + unsaved work lost), per the task
+    # lifecycle policy's data-risk rule. Without the consequence the warning
+    # is a hint annotators will ignore while habitually zooming.
+    preflight = next(
+        (
+            record
+            for record in fake.dialogs.questions
+            if record.get("title") == "Mask Identifier"
+            and "Ready to identify masks" in record.get("message", "")
+        ),
+        None,
+    )
+    assert_true(preflight is not None, "preflight confirmation should be shown before the first click")
+    preflight_message = preflight.get("message", "")
+    assert_true(
+        "crash" in preflight_message and "unsaved work" in preflight_message,
+        "preflight warning should state the crash and data-loss consequence of switching tools during the click window",
+    )
+    assert_true(
+        preflight.get("ui_blocking") is False,
+        "preflight dialog must stay non-blocking (views/tools adjustable while shown)",
+    )
     # Results are shown via a non-blocking question_box (so tools can be switched
     # safely between clicks). Find the result record by its signature content:
     # the concise result body lists hit mask names.

@@ -339,14 +339,19 @@ def main():
     BUTTON_FINISH = "Finish"
 
     # Pre-flight confirmation: let the user prepare the view (and switch tools)
-    # before entering the first modal click.
+    # before entering the first modal click. The warning states the consequence
+    # (crash + unsaved work lost) because switching tools during the modal
+    # click can corrupt Mimics' tool state machine — a data risk, which the
+    # task lifecycle policy requires to be spelled out, not just hinted.
     preflight = mimics.dialogs.question_box(
         title="Mask Identifier",
         message=(
             "Ready to identify masks.\n\n"
             "Click '{0}' then click a point in any view.\n\n"
-            "Switch tools / adjust views only while this dialog is shown, "
-            "not while the cursor is waiting for a click.".format(BUTTON_CLICK)
+            "Important: while the cursor waits for your click, do not switch "
+            "to another tool (zoom, pan, measure, ...). Doing so can crash "
+            "Mimics and lose unsaved work. Switch tools only while this "
+            "dialog is shown.".format(BUTTON_CLICK)
         ),
         buttons="{0};{1}".format(BUTTON_CLICK, BUTTON_FINISH),
         ui_blocking=False,

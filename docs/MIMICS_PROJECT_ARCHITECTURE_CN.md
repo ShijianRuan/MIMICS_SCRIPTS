@@ -503,6 +503,15 @@ runtime_py35/nnunet_mimics.py
 - 显示 Mask 名称、颜色和可见状态；
 - 一次点击结束后明确选择 `Click Again` 或 `Finish`，避免长期占用 Mimics 点击状态机。
 
+**已知平台限制（A7，2026-09-27 登记）**：Mimics 21 公开 API 的点采集
+（`indicate_coordinate`，同族 `measure.indicate_*` / `analyze.indicate_*`）
+均为模态阻塞调用，等待点击期间切换工具（缩放/平移/测量）可能破坏
+Mimics 工具状态机导致崩溃、丢失未保存标注。脚本层已做到的最小化：
+预检对话框（非模态，允许提前调整视图并明确告知风险后果）+ 点击结果
+用非模态对话框展示（其间可自由切工具），仅在用户明确选择
+`Click Again` 的短暂点击窗口内重入模态调用。API 无非模态替代采集
+方式，无法进一步根治。
+
 ### 8.2 `03_Review/02_Window_From_Selected_Mask.py`
 
 用途：根据选中 Mask 的规范化名称自动匹配窗宽窗位预设。
