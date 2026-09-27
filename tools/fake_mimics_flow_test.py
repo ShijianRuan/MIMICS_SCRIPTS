@@ -960,7 +960,27 @@ def test_window_level_from_selected_mask(fake, tmp):
     finally:
         module._state_path = original_state_path
     assert_equal(fake.view.get_contrast(), ((0, 0.0), (3625, 1.0)), "reset should clamp to Mimics reported range")
-    return "mask-name preset, image-range clamp, reset retry, state save, and undo passed"
+
+    # Degrade path (B26): no active image. Every entry (auto/choose/undo/
+    # reset) must show the friendly message instead of raising.
+    fake.reset_scene(image_shape=(3, 4, 5))
+    contrast_before = fake.view.get_contrast()
+    fake.data.images = FakeCollection()
+    fake.dialogs.messages = []
+    fake.dialogs.questions = []
+    fake.dialogs.question_answers = []
+    for action in ("auto", "choose", "undo", "reset"):
+        result = module.main(action)
+        assert_equal(result, 1, "no-image {0} must return 1".format(action))
+        assert_true(fake.dialogs.messages, "no-image {0} must message, not raise".format(action))
+        assert_equal(len(fake.dialogs.questions), 0, "no-image {0} must not open a preset dialog".format(action))
+        fake.dialogs.messages = []
+        fake.dialogs.questions = []
+    assert_equal(
+        fake.view.get_contrast(), contrast_before,
+        "no-image entries must leave contrast untouched",
+    )
+    return "mask-name preset, image-range clamp, reset retry, state save, undo, and no-image guard passed"
 
 
 def test_mask_identifier_all_mask_bbox_scan(fake, tmp):

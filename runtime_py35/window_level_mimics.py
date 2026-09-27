@@ -387,6 +387,14 @@ def undo_last():
 
 
 def main(action="auto"):
+    # Same guard as mask_identifier.main(): every action below ends in
+    # set_contrast, which without an image would surface as a raw script
+    # error or silently do nothing.
+    if _active_image() is None:
+        mimics.dialogs.message_box(
+            "No active image found.\nPlease open a project first."
+        )
+        return 1
     if action == "choose":
         return choose_preset()
     if action == "undo":
