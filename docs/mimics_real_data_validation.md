@@ -84,7 +84,7 @@ Select the dataset root. For each converted `.mcs`:
 ## 1A. Export Destination Safety
 
 1. Save one project containing at least two visible or hidden Masks.
-2. Run `03_Export_Masks`, select the source case directory, and select an empty
+2. Run `07_Quick_Export_Masks`, select the source case directory, and select an empty
    destination root.
 3. Confirm every Mask appears under `<chosen>/<case>/segmentations`.
 4. Modify one exported file and run export to the same destination again.
@@ -319,7 +319,6 @@ Inside Mimics:
 ```text
 Scripting Library > 03_Review > 02_Window_From_Selected_Mask
 Scripting Library > 03_Review > 03_Window_Choose_Preset
-Scripting Library > 03_Review > 05_Window_Reset_Full_Range
 Scripting Library > 03_Review > 04_Window_Undo_Last
 ```
 

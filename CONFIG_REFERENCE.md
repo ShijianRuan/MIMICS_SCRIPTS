@@ -311,9 +311,9 @@ When background Mimics is unavailable:
 1. Configure `MIMICS_BACKGROUND_EXE`, or
 2. Export labels separately and turn off **Refresh labels from saved .mcs before training**.
 
-Current-project mask export remains available through **Export Masks** and is
-split into timer-driven steps so GUI updates can occur between mask-buffer
-reads.
+Current-project mask export remains available through **Quick Export Masks**
+and is split into timer-driven steps so GUI updates can occur between
+mask-buffer reads.
 
 ## Portable AI Models
 

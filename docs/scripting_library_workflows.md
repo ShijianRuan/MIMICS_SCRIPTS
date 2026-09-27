@@ -13,17 +13,19 @@
 
 1. `01 Import Dataset`
 2. `02 Import Single Case`
-3. `03 Export Masks`
-4. `04 Stop Import Queue`
-5. `05 Import Masks`
-6. `06 Stop Mask Export`
+3. `04 Stop Import Queue`
+4. `05 Import Masks`
+5. `06 Stop Mask Export`
+6. `07 Quick Export Masks`
+7. `08 Quick Drop Import`
+8. `09 Show Batch Status`
 
 `02 Import Single Case` accepts a single `.nii`, `.nii.gz`, `.mha`, `.mhd`, or
 `.nrrd` volume, a TotalSegmentator-style case folder, a `dicom/` case folder,
 or a folder containing a DICOM series directly. Header inspection and
 conversion run in the external bridge process.
 
-`01 Import Dataset`, `02 Import Single Case`, and `03 Export Masks` open one
+`01 Import Dataset` and `02 Import Single Case` open the
 shared external PySide6 path window. Mimics starts that process and returns
 immediately; file browsing never runs in the Mimics GUI process. Import always
 requires a source and shows the resolved `.mcs` output folder, while keeping the
@@ -37,7 +39,7 @@ segmentations to the active image. File reading, label splitting, and spatial
 resampling run in external Python. Mimics applies one prepared Mask per GUI
 timer tick; empty results are rejected with a spatial-alignment warning.
 
-`03 Export Masks` exports every Mask in the saved project, including hidden
+`07 Quick Export Masks` exports every Mask in the saved project, including hidden
 Masks. Select the source image or case and then the destination root. The source
 may be NIfTI, MHA/MHD, NRRD, one DICOM file, a DICOM series folder, or a case
 folder containing one of those forms. Output is written to `<chosen
@@ -58,10 +60,14 @@ import queue, AI training or inference, nnInteractive, foreground Mimics, or unr
 ### 02 AI
 
 1. `01 nnInteractive`
-2. `nnUNet/01 Train Model`
-3. `nnUNet/02 Predict Current Case`
-4. `nnUNet/03 Show Status & Models`
-5. `nnUNet/04 Stop Running Task`
+2. `ScribblePrompt`
+3. `FlexiCT/01 Train Model`
+4. `FlexiCT/02 Predict Current Case`
+5. `FlexiCT/03 Active Learning Review`
+6. `FlexiCT/04 Show Status and Stop`
+7. `nnUNet/01 Train Model`
+8. `nnUNet/02 Predict Current Case`
+9. `nnUNet/03 Show Status & Models`
 
 The training and prediction entries remain separate so the common path keeps a
 dedicated setup window while prediction stays one click.
@@ -72,13 +78,19 @@ dedicated setup window while prediction stays one click.
 2. `02 Window From Selected Mask`
 3. `03 Window Choose Preset`
 4. `04 Window Undo Last`
-5. `05 Window Reset Full Range`
+5. `06 Window Edit Presets`
 
 ### 99 Admin
 
 1. `01 Setup Repair Environment`
 2. `02 Clear Cache`
 3. `03 Stop All Owned Services`
+4. `05 Undo Last Import`
+5. `06 System Health`
+6. `07 Collect Diagnostics`
+7. `08 Edit Configs`
+8. `09 Manage AI Models`
+9. `10 Environment Guidance`
 
 The administrative stop entry only targets processes created and registered by this project. The import-specific stop remains under Data because it is part of the import workflow.
 
@@ -221,7 +233,7 @@ differs.
 | Mask export | Review, GPU AI work, and imports/exports using unrelated source and destination folders | Import writing its `.mcs` source folder, or export writing the same label destination | `01 Data/06 Stop Mask Export` | `99 Admin/03 Stop All Owned Services` |
 | nnInteractive active prediction | Review and data preparation | nnU-Net GPU execution | Finish or cancel the current nnInteractive session | `99 Admin/03 Stop All Owned Services` |
 | nnInteractive idle image worker | All review and data work | Nothing; another AI task requests a graceful GPU release | Worker exits on idle timeout | `99 Admin/03 Stop All Owned Services` |
-| nnU-Net training or prediction | Review, import preparation, status viewer | Another GPU AI task; nnInteractive GPU execution | `02 AI/nnUNet/04 Stop Running Task` | `99 Admin/03 Stop All Owned Services` |
+| nnU-Net training or prediction | Review, import preparation, status viewer | Another GPU AI task; nnInteractive GPU execution | `02 AI/nnUNet/03 Show Status & Models` (stop from the status window) | `99 Admin/03 Stop All Owned Services` |
 | Environment repair | Review and data work | A second environment repair | Re-run the entry and choose `Stop Current Setup` | `99 Admin/03 Stop All Owned Services` |
 
 Resource conflicts fail or wait explicitly; they do not start a competing

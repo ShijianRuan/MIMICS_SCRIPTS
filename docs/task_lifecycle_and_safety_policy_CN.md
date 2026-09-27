@@ -23,7 +23,7 @@ Mimics GUI 的前提下，让用户知道任务是否运行、等待什么、如
 | Mask 导出 | Mask buffer、外部空间转换、后台 Mimics | Mask 计数、阶段、60 秒日志 | `06 Stop Mask Export` |
 | nnInteractive 推理 | GPU worker、顺序提示推理、结果写回 | worker stage、sequence、60 秒日志 | 再次运行 nnInteractive 后丢弃会话，或停止后台服务 |
 | nnInteractive 微调 | GPU、本地或远程训练 | Task Models 状态、loss/AUC、日志 | `Pause and Release GPU` 或 `Stop Training` |
-| nnU-Net | GPU、Dataset ID、远程任务、结果写回 | Status 窗口、阶段、60 秒日志 | `04 Stop Running Task` |
+| nnU-Net | GPU、Dataset ID、远程任务、结果写回 | Status 窗口、阶段、60 秒日志 | `nnU-Net Show Status & Models`（02_AI 菜单）内的停止操作 |
 | FlexiCT | GPU、Dataset ID、结果写回 | Status 窗口、阶段、60 秒日志 | `FlexiCT Show Status and Stop`（02_AI 菜单）；就绪结果等待目标项目/写回锁时不丢弃，目标恢复后自动应用 |
 | ScribblePrompt | GPU 或 Mask buffer | 阶段日志 | 再次运行同一入口后选择 `Stop` |
 

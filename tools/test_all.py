@@ -3450,6 +3450,43 @@ class TestScriptingLibraryEntries(unittest.TestCase):
             self.assertIn("window_level_mimics", source)
             self.assertIn('"{}"'.format(action), source)
 
+    def test_living_docs_do_not_reference_deleted_entries(self):
+        """B24: entries deleted by R41/R43 must not appear as live references
+        in user-facing living docs. Explicitly-marked history notes
+        ("原 ... 删除" migration records) are allowed to name them."""
+        deleted_markers = (
+            "03_Export_Masks",
+            "05_Window_Reset_Full_Range",
+            "04_Fix_Source_Affine_Metadata",
+            "nnUNet/04_Stop_Running_Task",
+        )
+        living_docs = [
+            "docs/mimics_entry_guide.md",
+            "docs/scripting_library_workflows.md",
+            "docs/mimics_real_data_validation.md",
+            "docs/task_lifecycle_and_safety_policy_CN.md",
+            "docs/windows_end_to_end_acceptance_2026-08-01.md",
+            "CONFIG_REFERENCE.md",
+        ]
+        offenders = []
+        for rel in living_docs:
+            path = os.path.join(PROJECT_ROOT, rel)
+            if not os.path.isfile(path):
+                continue
+            with open(path, "r", encoding="utf-8") as handle:
+                for lineno, line in enumerate(handle, 1):
+                    # Allow explicit migration-history notes.
+                    if "原 `" in line or "已删除" in line or "deleted" in line.lower():
+                        continue
+                    for marker in deleted_markers:
+                        if marker in line:
+                            offenders.append(
+                                "{}:{} references deleted entry {}".format(
+                                    rel, lineno, marker
+                                )
+                            )
+        self.assertEqual([], offenders)
+
 
 # ============================================================================
 # L8: Stop Background Services
@@ -3832,6 +3869,41 @@ class TestStopBackgroundServices(unittest.TestCase):
         self.assertEqual(1, result)
         self.assertEqual([], launched)
         self.assertTrue(any("nnU-Net training" in item for item in messages))
+
+    def test_portable_archive_dialog_names_the_file_the_finder_searches(self):
+        """B25: the "archive not found" dialog used to tell annotators to
+        place a mistyped filename (mimcs_) while the finder searched the
+        correct one — an annotator following the dialog landed in a loop."""
+        import inspect
+        import setup_environment
+
+        # The finder's search list and the dialog must share one name.
+        source = inspect.getsource(setup_environment._find_portable_archive)
+        for candidate_line in source.splitlines():
+            if "PORTABLE_ARCHIVE_NAME" in candidate_line or "mimics_script_portable" in candidate_line:
+                self.assertNotIn("mimcs_script_portable", candidate_line)
+        # Behavioral: run the real extract branch with no archive present.
+        messages = []
+        old_message = setup_environment.mimics.dialogs.message_box
+        old_archive = setup_environment._find_portable_archive
+        old_blockers = setup_environment.runtime_common.active_runtime_blockers
+        try:
+            setup_environment.mimics.dialogs.message_box = (
+                lambda **kwargs: messages.append(kwargs.get("message", ""))
+            )
+            setup_environment._find_portable_archive = lambda: None
+            setup_environment.runtime_common.active_runtime_blockers = (
+                lambda *_args, **_kwargs: []
+            )
+            result = setup_environment.main("extract")
+        finally:
+            setup_environment.mimics.dialogs.message_box = old_message
+            setup_environment._find_portable_archive = old_archive
+            setup_environment.runtime_common.active_runtime_blockers = old_blockers
+        self.assertEqual(1, result)
+        self.assertEqual(1, len(messages))
+        self.assertIn(setup_environment.PORTABLE_ARCHIVE_NAME, messages[0])
+        self.assertNotIn("mimcs", messages[0])
 
     def test_global_stop_releases_detached_mimics_operation_leases(self):
         import inspect

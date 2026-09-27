@@ -251,7 +251,7 @@ nninteractive_env\python.exe -c "import onnxruntime as o; print(o.get_available_
 
 ### 6.4 导出 mask
 
-入口：`01_Data/03_Export_Masks.py`
+入口：`01_Data/07_Quick_Export_Masks.py`
 
 验证：
 
@@ -319,7 +319,6 @@ nninteractive_env\python.exe tools\verify_medical_geometry.py ^
 - `03_Review/02_Window_From_Selected_Mask.py`
 - `03_Review/03_Window_Choose_Preset.py`
 - `03_Review/04_Window_Undo_Last.py`
-- `03_Review/05_Window_Reset_Full_Range.py`
 
 预期：
 
@@ -417,7 +416,6 @@ nninteractive_env\python.exe tools\verify_medical_geometry.py ^
 - `02_AI/nnUNet/01_Train_Model.py`
 - `02_AI/nnUNet/02_Predict_Current_Case.py`
 - `02_AI/nnUNet/03_Show_Status_Models.py`
-- `02_AI/nnUNet/04_Stop_Running_Task.py`
 
 验收重点：
 
@@ -508,8 +506,7 @@ Windows 后台训练/推理子进程使用 `BELOW_NORMAL_PRIORITY_CLASS`，降�
 
 - `01_Data/04_Stop_Import_Queue.py`
 - `01_Data/06_Stop_Mask_Export.py`
-- `02_AI/DINOv3/05_Stop_AI_Task.py`
-- `02_AI/nnUNet/04_Stop_Running_Task.py`
+- `02_AI/nnUNet/03_Show_Status_Models.py`（状态窗口内停止任务）
 - nnInteractive 模型中心中的停止操作。
 - `99_Admin/03_Stop_All_Owned_Services.py`
 

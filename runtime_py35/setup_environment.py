@@ -78,13 +78,19 @@ def _update_gui():
 
 # -- Background launch ---------------------------------------------------
 
+# The archive name shown in the "archive not found" dialog and searched by
+# _find_portable_archive must be the same file (B25: the dialog used to show
+# a typo, "mimcs_", sending annotators into a loop).
+PORTABLE_ARCHIVE_NAME = "mimics_script_portable.zip"
+
+
 def _find_portable_archive():
     """Search common locations for the portable archive."""
     root = _project_root()
     candidates = [
-        os.path.join(os.path.dirname(root), "mimics_script_portable.zip"),
-        os.path.join(root, "mimics_script_portable.zip"),
-        os.path.join(os.path.expanduser("~"), "Desktop", "mimics_script_portable.zip"),
+        os.path.join(os.path.dirname(root), PORTABLE_ARCHIVE_NAME),
+        os.path.join(root, PORTABLE_ARCHIVE_NAME),
+        os.path.join(os.path.expanduser("~"), "Desktop", PORTABLE_ARCHIVE_NAME),
     ]
     for path in candidates:
         if os.path.isfile(path):
@@ -500,10 +506,11 @@ def main(action=None):
                 title=TITLE,
                 message=(
                     "Portable archive not found.\n\n"
-                    "Place mimcs_script_portable.zip in one of these locations:\n"
-                    "  {0}\n"
+                    "Place {0} in one of these locations:\n"
                     "  {1}\n"
+                    "  {2}\n"
                     "  Your Desktop".format(
+                        PORTABLE_ARCHIVE_NAME,
                         os.path.abspath(os.path.join(_project_root(), "..")),
                         os.path.abspath(_project_root()),
                     )

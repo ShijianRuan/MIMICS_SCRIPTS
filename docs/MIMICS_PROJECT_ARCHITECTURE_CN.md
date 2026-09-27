@@ -300,13 +300,7 @@ Mimics 定时器 <-----+
 
 它通过当前导出任务保存的 PID、ownership token、status 和 stop marker 定位目标，不进行全局进程枚举式误杀。
 
-### 4.7 `01_Data/07_Quick_Export_Masks.py`
-
-用途：快速导出当前打开项目中的全部 Mask。
-
-实现：`runtime_py35/mimics_export.py:quick_export_main`
-
-此入口复用标准导出的几何和转换逻辑，不维护独立的“简化坐标转换”。它适合当前病例快速保存；需要选择 Mask、批量 `.mcs` 或自定义数据关系时使用标准 Export Masks。
+当前项目的快速导出（`quick_export_main`）同样复用 4.3 的几何和转换逻辑，不维护独立的"简化坐标转换"。
 
 ## 5. nnInteractive 功能入口
 
