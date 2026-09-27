@@ -7,8 +7,10 @@ import importlib
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import types
 import unittest
@@ -1371,6 +1373,107 @@ class JobLifecycleTests(unittest.TestCase):
                             "start_gate_timeout_seconds": 1,
                         }
                     )
+
+    def _run_watchdog_subprocess(self, spec: dict, timeout: float = 40.0):
+        """Run the worker's watchdog against a blocked main thread in a real
+        child process: _start_watchdog() + sleep(120). The watchdog must
+        os._exit(3) and leave a result JSON the controller can consume.
+        (A module-shadowing spec would be fragile against sys.path order;
+        this exercises the same code path the blocked run_stage hits.)"""
+        with tempfile.TemporaryDirectory() as temp:
+            spec_path = Path(temp) / "spec.json"
+            result_path = Path(temp) / "result.json"
+            from nnunet_common import write_json_atomic
+
+            write_json_atomic(spec_path, spec)
+            code = textwrap.dedent(
+                """
+                import json, sys, time
+                sys.path.insert(0, {tools!r})
+                import nnunet_stage_worker as worker
+                spec = json.load(open({spec!r}, encoding="utf-8"))
+                worker._start_watchdog(spec, __import__("pathlib").Path({result!r}))
+                time.sleep(120)  # the hung stage
+                """
+            ).format(
+                tools=str(TOOLS), spec=str(spec_path), result=str(result_path)
+            )
+            proc = subprocess.Popen(
+                [sys.executable, "-c", code],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                cwd=str(ROOT),
+            )
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                self.fail("watchdog did not exit the hung worker in {0}s".format(timeout))
+            from nnunet_common import read_json
+
+            return proc.returncode, read_json(result_path, {}) or {}
+
+    def test_stage_worker_watchdog_kills_hung_stage(self):
+        """B21: a stage that blocks forever (the R41/R42 orphan-hang form)
+        must be exited by the worker's own watchdog with a result the
+        controller's failure path can consume."""
+        code, result = self._run_watchdog_subprocess(
+            {
+                "stage": "infer",
+                "stage_deadline_epoch": time.time() + 4.0,
+                "started_epoch": time.time(),
+            }
+        )
+        self.assertEqual(3, code)
+        self.assertEqual("error", result.get("status"))
+        self.assertIn("worker_timeout", str(result.get("error") or ""))
+
+    def test_stage_worker_watchdog_exits_on_dead_parent(self):
+        """B21: a controller that dies mid-stage must not leave the worker
+        hanging forever — the watchdog exits with a parent_gone result."""
+        parent = subprocess.Popen(
+            [sys.executable, "-c", "pass"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        parent.wait()
+        code, result = self._run_watchdog_subprocess(
+            {
+                "stage": "infer",
+                "parent_pid": parent.pid,
+                # Budget longer than the test; only the parent check may
+                # fire, proving the parent_gone path specifically.
+                "stage_deadline_epoch": time.time() + 120.0,
+                "started_epoch": time.time(),
+            }
+        )
+        self.assertEqual(3, code)
+        self.assertEqual("error", result.get("status"))
+        self.assertIn("parent_gone", str(result.get("error") or ""))
+
+    def test_watchdog_trigger_checks_parent_and_deadline(self):
+        now = time.time()
+        # Deadline passed -> timeout reason.
+        self.assertIn(
+            "worker_timeout",
+            stage_worker._watchdog_trigger(
+                {"stage_deadline_epoch": now - 1, "started_epoch": now - 10}
+            ),
+        )
+        # No deadline, live parent -> no trigger.
+        self.assertEqual(
+            "",
+            stage_worker._watchdog_trigger({"parent_pid": os.getpid()}),
+        )
+        # Dead parent -> parent_gone reason.
+        parent = subprocess.Popen(
+            [sys.executable, "-c", "pass"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        parent.wait()
+        self.assertIn(
+            "parent_gone",
+            stage_worker._watchdog_trigger({"parent_pid": parent.pid}),
+        )
 
     def test_gpu_lock_transfer_failure_terminates_worker(self):
         with tempfile.TemporaryDirectory() as temp:

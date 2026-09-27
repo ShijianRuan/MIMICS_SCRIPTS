@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -21,6 +22,66 @@ for candidate in (ROOT, ROOT / "tools", WORKFLOW):
         sys.path.insert(0, value)
 
 from nnunet_common import read_json, write_json_atomic  # noqa: E402
+
+
+# B21: the stage functions can block forever (e.g. a spawn.Pool whose OpenBLAS
+# died under memory pressure silently re-spawns a corpse and stage 0 CPU
+# hangs). The controller has no progress timeout, so the worker must police
+# itself: a watchdog thread exits the whole process when the controller is
+# gone or the stage exceeds its total budget (train: 14 days, aligned with
+# the Mimics-side monitor deadline; other stages: 24h, aligned with the
+# inference monitor deadline).
+_STAGE_BUDGET_SECONDS = {
+    "train": 14 * 24 * 60 * 60,
+    "preprocess": 24 * 60 * 60,
+    "infer": 24 * 60 * 60,
+}
+WATCHDOG_INTERVAL_SECONDS = 5.0
+
+
+def _watchdog_trigger(spec: dict) -> str:
+    """Return the reason the worker must exit, or an empty string."""
+    deadline = float(spec.get("stage_deadline_epoch") or 0)
+    if deadline > 0 and time.time() >= deadline:
+        return (
+            "worker_timeout: the stage exceeded its total time budget "
+            "({0:.0f}s)".format(deadline - float(spec.get("started_epoch") or deadline))
+        )
+    parent_pid = int(spec.get("parent_pid") or 0)
+    if parent_pid > 0:
+        try:
+            from resource_locks import process_exists
+
+            if not process_exists(parent_pid):
+                return (
+                    "parent_gone: the job controller (pid {0}) exited before "
+                    "the stage finished".format(parent_pid)
+                )
+        except Exception:
+            pass
+    return ""
+
+
+def _start_watchdog(spec: dict, result_path: Path) -> None:
+    def run():
+        while True:
+            time.sleep(WATCHDOG_INTERVAL_SECONDS)
+            reason = _watchdog_trigger(spec)
+            if not reason:
+                continue
+            # Write the result first: the controller reads it to build the
+            # user-facing error. os._exit because the main thread is blocked
+            # inside the stage function and will never see any signal.
+            try:
+                write_json_atomic(
+                    result_path, {"status": "error", "error": reason}
+                )
+            except Exception:
+                pass
+            os._exit(3)
+
+    thread = threading.Thread(target=run, name="stage-watchdog", daemon=True)
+    thread.start()
 
 
 def _wait_for_start_gate(spec: dict) -> None:
@@ -91,6 +152,17 @@ def main() -> int:
     try:
         spec = read_json(Path(args.spec).resolve(), {}) or {}
         _wait_for_start_gate(spec)
+        # B21: start the self-policing watchdog after the gate (the gate
+        # phase already has its own bounded timeout and parent check).
+        spec.setdefault("started_epoch", time.time())
+        spec.setdefault(
+            "stage_deadline_epoch",
+            time.time()
+            + _STAGE_BUDGET_SECONDS.get(
+                str(spec.get("stage") or ""), 24 * 60 * 60
+            ),
+        )
+        _start_watchdog(spec, result_path)
         result = run_stage(spec)
         write_json_atomic(result_path, {"status": "ok", "result": result})
         return 0

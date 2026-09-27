@@ -922,6 +922,9 @@ def _spawn_worker(
             "start_gate": str(start_gate),
             "start_gate_timeout_seconds": 120,
             "control_path": str(control_path),
+            # B21: the worker's watchdog uses this to exit when the
+            # controller is gone (no one would otherwise consume its result).
+            "parent_pid": os.getpid(),
         },
     )
     command = [
