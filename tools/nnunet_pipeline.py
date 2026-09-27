@@ -954,12 +954,26 @@ def _spawn_worker(
                 ROOT,
                 "nnunet_{}".format(stage),
                 process.pid,
-                job_id=str(request.get("job_id") or ""),
                 state_path=str(status_path),
+                extra={"job_id": str(request.get("job_id") or "")},
             )
             ownership_token = (record or {}).get("ownership_token") or ""
-        except Exception:
+        except Exception as exc:
             ownership_token = ""
+            # A registration failure removes the orphan safety net — never
+            # silent (B20).
+            try:
+                with log_path.open("ab") as log_handle:
+                    log_handle.write(
+                        (
+                            "[controller] process registration failed for pid "
+                            "{0}: {1}: {2}\n".format(
+                                process.pid, type(exc).__name__, exc
+                            )
+                        ).encode("utf-8", "replace")
+                    )
+            except OSError:
+                pass
         try:
             if resource_lock is not None:
                 transferred = resource_lock.update_pid(

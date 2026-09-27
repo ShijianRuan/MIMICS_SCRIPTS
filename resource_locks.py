@@ -245,6 +245,12 @@ VALID_PROCESS_ROLES = (
     "training_controller",
     "remote_stop_helper",
     "external_ui",
+    # nnU-Net/FlexiCT stage workers (tools/nnunet_pipeline.py _spawn_worker).
+    # Without these, register_process raises ValueError and the health panel /
+    # kill-background safety net never sees the workers that orphan-hang.
+    "nnunet_preprocess",
+    "nnunet_train",
+    "nnunet_infer",
 )
 
 

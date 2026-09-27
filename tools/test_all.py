@@ -10586,6 +10586,28 @@ class TestEnvGuidance(unittest.TestCase):
 
 
 class TestProcessRegistry(unittest.TestCase):
+    def test_spawn_worker_registration_matches_api(self):
+        """B20 source contract: the register_process call in _spawn_worker
+        must use kwargs that exist on the API. The original bug was a
+        job_id= kwarg the API never had — swallowed by a bare except, so
+        every stage-worker registration failed silently."""
+        import inspect
+        import re as _re
+        import resource_locks
+        from tools import nnunet_pipeline
+
+        source = inspect.getsource(nnunet_pipeline._spawn_worker)
+        self.assertIn("register_process(", source)
+        self.assertIn('"nnunet_{}".format(stage)', source)
+        # Any kwarg passed at the call site must exist on the API.
+        api_params = set(inspect.signature(resource_locks.register_process).parameters)
+        call = source.split("register_process(", 1)[1]
+        call = call.split(")", 1)[0]
+        for kwarg in _re.findall(r"(\w+)=", call):
+            if kwarg in ("ROOT", "process", "pid"):
+                continue
+            self.assertIn(kwarg, api_params, "unknown kwarg {0}".format(kwarg))
+
     """Phase B process registry: register/snapshot/sweep/terminate ladder."""
 
     def setUp(self):
@@ -10661,6 +10683,39 @@ class TestProcessRegistry(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             resource_locks.register_process(self.root, "bogus_role", os.getpid())
+
+    def test_stage_worker_roles_are_registered(self):
+        """B20: _spawn_worker registers nnU-Net/FlexiCT stage workers with
+        roles nnunet_<stage>. If a role is missing from the whitelist, the
+        registration fails silently and the health panel / kill-background
+        safety net never sees the workers that orphan-hang."""
+        import resource_locks
+
+        for stage in ("preprocess", "train", "infer"):
+            role = "nnunet_{0}".format(stage)
+            self.assertIn(role, resource_locks.VALID_PROCESS_ROLES)
+        child = self._spawn_sleeper()
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        # The exact registration _spawn_worker performs must succeed (it
+        # previously raised TypeError on an unknown job_id kwarg, swallowed
+        # by the bare except — the safety net never existed).
+        record = resource_locks.register_process(
+            self.root, "nnunet_train", child.pid,
+            state_path=os.path.join(self.tmp, "status.json"),
+            extra={"job_id": "b20-test"},
+        )
+        self.assertEqual("b20-test", record["job_id"])
+        self.assertTrue(record["ownership_token"])
+        self.assertTrue(
+            resource_locks.process_is_live(self.root, "nnunet_train", child.pid)
+        )
+        self.assertTrue(
+            resource_locks.unregister_process(
+                self.root, "nnunet_train", child.pid,
+                ownership_token=record["ownership_token"],
+            )
+        )
 
     def test_recycled_pid_is_never_killed_by_terminate_or_sweep(self):
         """B10a: a record whose start_marker no longer matches the live
