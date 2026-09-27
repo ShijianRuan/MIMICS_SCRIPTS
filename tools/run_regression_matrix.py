@@ -56,7 +56,6 @@ SUITES = [
         str(path.relative_to(ROOT)).replace("\\", "/")
         for path in (ROOT / "integrations" / "nninteractive-finetune" / "tests").glob("test_*.py")
     )], {"fast", "full"}),
-    ("nnunet_annotation_version", [sys.executable, "integrations/nnunet_segmentation_workflow/test_annotation_version.py"], {"fast", "full"}),
     ("nnint_deep", [sys.executable, "tools/test_mimics_nnint_deep.py"], {"fast", "full"}),
     ("nnint_functional", [sys.executable, "tools/test_mimics_nnint_functional.py"], {"fast", "full"}),
     ("remote_training", [sys.executable, "tools/test_remote_training.py"], {"fast", "full"}),

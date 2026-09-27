@@ -32,8 +32,6 @@ import nnunet_pipeline as pipeline
 import nnunet_prediction_setup_ui as prediction_ui
 import nnunet_stage_worker as stage_worker
 import remote_training_controller as remote
-import AutoSegmentationFramework as standalone
-import SetEnvionmentVariables as standalone_environment
 
 
 class ContractTests(unittest.TestCase):
@@ -331,62 +329,7 @@ class ContractTests(unittest.TestCase):
             )
 
 
-class StandaloneWorkflowTests(unittest.TestCase):
-    def _write_config(self, root):
-        model_map = root / "ModelMap.toml"
-        model_map.write_text("[Multi]\nliver = 1\nspleen = 2\n", encoding="utf-8")
-        config = root / "Config.toml"
-        config.write_text(
-            """
-[COMMON]
-modality = "CT"
-
-[PATHS]
-labeled_path = "labeled"
-labeled_dataset = ["source"]
-train_path = "train"
-train_project = "project"
-nnUNet_raw = "nnUNet_raw"
-nnUNet_preprocessed = "nnUNet_preprocessed"
-nnUNet_results = "nnUNet_results"
-
-[MODEL]
-train_dataset = ["Dataset701_Multi"]
-segment_model_file = "ModelMap.toml"
-segment_list_name = ["Multi"]
-
-[GPU]
-gpu_id = 0
-
-[PREPROCESS]
-configuration = "3d_fullres"
-num_processes = 2
-spacing = []
-patch_size = []
-batch_size = 0
-orientation = ""
-reorientaion = "NibabelIOWithReorient"
-
-[TRAIN]
-epoch = 7
-fold = 0
-trainer = "nnUNetTrainerNoMirroring"
-plans = "nnUNetPlans"
-
-[PREDICT]
-input_path = ""
-output_path = ""
-disable_tta = true
-enable_stats = false
-
-[EVALUATION]
-run_aggregation = true
-""".strip()
-            + "\n",
-            encoding="utf-8",
-        )
-        return config
-
+class Action3TrainerContractTests(unittest.TestCase):
     def test_epoch_setting_resolves_to_configurable_equivalent(self):
         fake_torch = types.ModuleType("torch")
         fake_torch.device = type("device", (), {})
@@ -409,72 +352,6 @@ run_aggregation = true
                 sys.modules.pop("torch", None)
             else:
                 sys.modules["torch"] = previous_torch
-
-    def test_default_workflow_includes_conversion(self):
-        self.assertEqual(standalone.DEFAULT_STAGES[0], "convert")
-
-    def test_pre_cancel_is_terminal_without_starting_a_worker(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            config = self._write_config(root)
-            status = root / "status.json"
-            control = root / "control.json"
-            standalone._write_json_atomic(control, {"action": "cancel"})
-            with mock.patch.object(standalone.subprocess, "Popen") as popen:
-                returncode = standalone.run_workflow_controller(
-                    config,
-                    stages=["train"],
-                    status_file=status,
-                    control_file=control,
-                )
-            self.assertEqual(returncode, 130)
-            popen.assert_not_called()
-            payload = standalone._read_json(status)
-            self.assertEqual(payload["status"], "cancelled")
-            self.assertIsNone(payload["worker_pid"])
-
-    def test_cancel_command_publishes_control_request(self):
-        with tempfile.TemporaryDirectory() as temp:
-            control = Path(temp) / "control.json"
-            returncode = standalone.main(
-                ["cancel", "--control-file", str(control)]
-            )
-            self.assertEqual(returncode, 0)
-            payload = standalone._read_json(control)
-            self.assertEqual(payload["action"], "cancel")
-            self.assertGreater(payload["requested_at_epoch"], 0)
-            self.assertEqual(payload["requested_by_pid"], os.getpid())
-
-    def test_invalid_epoch_trainer_fails_before_worker_launch(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            config = self._write_config(root)
-            content = config.read_text(encoding="utf-8").replace(
-                'trainer = "nnUNetTrainerNoMirroring"',
-                'trainer = "UnverifiedCustomTrainer"',
-            )
-            config.write_text(content, encoding="utf-8")
-            status = root / "status.json"
-            with mock.patch.object(standalone.subprocess, "Popen") as popen:
-                with self.assertRaisesRegex(ValueError, "silently ignored"):
-                    standalone.run_workflow_controller(
-                        config,
-                        stages=["train"],
-                        status_file=status,
-                    )
-            popen.assert_not_called()
-            payload = standalone._read_json(status)
-            self.assertEqual(payload["status"], "failed")
-            self.assertEqual(payload["phase"], "configuration")
-            self.assertEqual(payload["error_category"], "configuration_invalid")
-
-    def test_legacy_environment_helper_does_not_touch_shell_files(self):
-        with tempfile.TemporaryDirectory() as temp, mock.patch.dict(
-            os.environ, {"HOME": temp, "SHELL": "/bin/bash"}, clear=False
-        ):
-            standalone_environment.add_to_user_shell_config("nnUNet_raw", "/tmp/raw")
-            self.assertEqual(os.environ["nnUNet_raw"], "/tmp/raw")
-            self.assertFalse((Path(temp) / ".bashrc").exists())
 
 
 class DiscoveryTests(unittest.TestCase):

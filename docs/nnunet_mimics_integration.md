@@ -2,13 +2,13 @@
 
 ## Product workflow
 
-The Scripting Library exposes four entries under `02_AI/nnUNet`:
+The Scripting Library exposes three entries under `02_AI/nnUNet`:
 
 1. **01 Train Model** opens one external PySide6 window.
 2. **02 Predict Current Case** opens a compatible-model selector.
-3. **03 Show Status Models** shows the selected task's runs, live log, curve,
-   and registered models.
-4. **04 Stop Running Task** requests a bounded local or remote shutdown.
+3. **03 Show Status and Models** shows the selected task's runs, live log,
+   curve, and registered models, and requests a bounded local or remote
+   shutdown through its Stop control.
 
 The external windows are separate processes. Mimics performs no dataset scan,
 network connection, preprocessing, training, or inference on its GUI thread.
@@ -16,10 +16,9 @@ It only writes a small request, launches the external process, polls a status
 JSON with a timer, and applies a verified result one Mask at a time.
 
 The managed layer reuses the proven planning, training, and prediction calls in
-`integrations/nnunet_segmentation_workflow`. It does not replace the standalone
-scripts or their TOML workflows. It adds the contracts that Mimics needs:
-source-grid label preparation, background lifecycle management, portable model
-registration, remote execution, and guarded result application.
+`integrations/nnunet_segmentation_workflow`. It adds the contracts that Mimics
+needs: source-grid label preparation, background lifecycle management, portable
+model registration, remote execution, and guarded result application.
 
 ## Task and model hierarchy
 
@@ -105,34 +104,12 @@ ignoring the value. Official or arbitrary custom Trainers selected directly in
 the Mimics UI continue to own their training length, so the epoch control is
 disabled for them.
 
-## Standalone CLI
+## Workflow notes
 
-`AutoSegmentationFramework.py` no longer starts a hard-coded configuration.
-The default command is an explicit, complete workflow:
-
-```text
-python AutoSegmentationFramework.py run --config Config_Template.toml
-```
-
-It executes `convert`, `preprocess`, `train`, and `predict` in order. A subset
-can be selected with `--stages`, or invoked through the corresponding
-subcommand. `--dry-run` resolves the configuration and prints every
-stage/dataset unit without creating production directories.
-
-Each long unit runs in an owned child process. The controller prints and
-records paths to atomic `status.json`, `control.json`, and `workflow.log`
-files. The following commands inspect or stop a run without editing JSON:
-
-```text
-python AutoSegmentationFramework.py status --status-file <status.json>
-python AutoSegmentationFramework.py cancel --control-file <control.json>
-```
-
-Cancellation terminates the active child process tree before publishing the
-terminal `cancelled` state. Status contains the current stage, dataset, epoch
-where available, total progress, worker PID, and a classified failure with
-traceback. nnU-Net roots are injected only into child-process environments; no
-shell startup file is modified.
+The legacy standalone TOML CLI (`AutoSegmentationFramework.py`, `Config_*.toml`)
+was removed together with its dead convert/evaluate stages; the managed Mimics
+window is the only entry point. The surviving stage backends are imported
+directly by `tools/nnunet_stage_worker.py`.
 
 Manual spacing is disabled for the 2D configuration because nnU-Net's planner
 does not apply `overwrite_target_spacing` to an independent 2D plan. Patch
