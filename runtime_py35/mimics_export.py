@@ -2593,7 +2593,21 @@ def _launch_external_export_setup():
 
     project_path = _current_project_path()
     if not project_path or not project_path.lower().endswith(".mcs"):
-        raise RuntimeError("Save the current Mimics project before exporting masks.")
+        # A raw RuntimeError here reaches the annotator as a script-layer
+        # error. The __main__ branch below wraps its exceptions in a
+        # message_box; the same treatment for the interactive path.
+        message = (
+            "Save the current Mimics project before exporting masks.\n\n"
+            "Quick export runs on a saved project file (.mcs), so the export "
+            "can resume even if Mimics is closed."
+        )
+        _mimics_log(logging.ERROR, "Quick export refused: no saved .mcs project.")
+        mimics.dialogs.message_box(
+            title="Save Project First",
+            message=message,
+            ui_blocking=False,
+        )
+        return 1
     case_id = _current_project_case_id() or os.path.splitext(os.path.basename(project_path))[0]
     source_initial = _active_source_path()
 

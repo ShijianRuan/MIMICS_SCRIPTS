@@ -1205,6 +1205,15 @@ def test_external_io_setup_routing(fake, tmp):
         assert_equal(eargs[2] if len(eargs) > 2 else None, str(tmp / "chosen_labels"), "output root")
         assert_equal(eargs[1] if len(eargs) > 1 else None, str(tmp / "dataset" / "s0001" / "ct.nii.gz"), "source image")
         assert_equal(ekwargs.get("overwrite_existing"), False, "skip policy became overwrite")
+
+        # Degrade path (B27): unsaved project. Quick export must show a
+        # friendly message and return 1, not raise RuntimeError.
+        fake.file.project_path = ""
+        fake.dialogs.messages = []
+        result = export_module._launch_external_export_setup()
+        assert_equal(result, 1, "unsaved-project quick export must return 1")
+        assert_true(fake.dialogs.messages, "unsaved-project quick export must message, not raise")
+        fake.file.project_path = str(project)
     finally:
         setup_module.launch = old_launch
         import_module._run_main_with_args = old_import_run
