@@ -5607,8 +5607,8 @@ class TestSourceImagePathEquivalence(unittest.TestCase):
         # A4: the old "Relink the source image metadata" wording pointed at
         # an action that does not exist. The unlink failure (project not
         # resolvable to a source image) must guide the annotator back to the
-        # import flow, and the stale-geometry failure (which Fix Affine
-        # really does repair) must name that entry.
+        # import flow, and the stale-geometry failure must carry the marker
+        # the Mimics-side repair offer detects (D4).
         import inspect
 
         import flexict_mimics
@@ -5628,11 +5628,13 @@ class TestSourceImagePathEquivalence(unittest.TestCase):
             nnunet_pipeline.validate_materialized_source_geometry
         )
         self.assertNotIn("Relink the source image before prediction", pipeline_source)
-        # The entry identifier must stay on one source line so the menu
-        # reference cannot be silently split by future re-wrapping.
-        self.assertIn("04_Fix_Source_Affine_Metadata", pipeline_source)
+        # D4: the standalone Fix Affine menu entry is gone; the error must
+        # carry the stable marker the Mimics-side repair offer detects, keep
+        # the re-import escape hatch, and must not name a deleted menu.
+        self.assertIn("source geometry mismatch", pipeline_source)
+        self.assertNotIn("04_Fix_Source_Affine_Metadata", pipeline_source)
         # The rendered message must keep the re-import escape hatch that
-        # Fix Affine itself recommends when the source file changed.
+        # the repair flow itself recommends when the source file changed.
         with mock.patch("nibabel.load") as fake_load:
             from types import SimpleNamespace
 
@@ -5651,8 +5653,83 @@ class TestSourceImagePathEquivalence(unittest.TestCase):
                     },
                 )
         message = str(ctx.exception)
-        self.assertIn("04_Fix_Source_Affine_Metadata", message)
+        self.assertIn("source geometry mismatch", message)
         self.assertIn("re-import", message)
+        self.assertNotIn("04_Fix_Source_Affine_Metadata", message)
+
+    def test_prediction_failure_offers_repair_on_geometry_mismatch(self):
+        # D4: the standalone Fix Affine menu entry is gone. The repair must
+        # instead be offered by the failure path itself, exactly on the error
+        # it can fix, and only when the user accepts.
+        import inspect
+
+        import fix_source_affine_metadata
+        import flexict_mimics
+        import nnunet_mimics
+
+        for module in (nnunet_mimics, flexict_mimics):
+            source = inspect.getsource(module._monitor_tick_locked)
+            self.assertIn("_offer_source_geometry_repair", source)
+            entry = Path(
+                PROJECT_ROOT,
+                "scripting_library",
+                "99_Admin",
+                "04_Fix_Source_Affine_Metadata.py",
+            )
+            self.assertFalse(
+                entry.exists(), "D4 menu entry must be deleted: {}".format(entry)
+            )
+
+        offer = fix_source_affine_metadata.offer_repair_for_prediction_failure
+        # Unrelated errors must not trigger any dialog.
+        with mock.patch.object(fix_source_affine_metadata.mimics.dialogs, "question_box") as q:
+            self.assertFalse(offer("some other failure", "nnU-Net"))
+            q.assert_not_called()
+        # No active image: nothing to offer, no dialog.
+        with mock.patch.object(
+            fix_source_affine_metadata.mimics.data.images, "get_active",
+            return_value=None,
+        ):
+            with mock.patch.object(fix_source_affine_metadata.mimics.dialogs, "question_box") as q:
+                self.assertFalse(
+                    offer("RuntimeError: source geometry mismatch: ...", "nnU-Net")
+                )
+                q.assert_not_called()
+        # Marker + active image + user accepts: repair flow starts.
+        class _FakeImage(object):
+            pass
+
+        started = []
+
+        def fake_main():
+            started.append(True)
+            return 0
+
+        with mock.patch.object(
+            fix_source_affine_metadata.mimics.data.images, "get_active",
+            return_value=_FakeImage(),
+        ), mock.patch.object(
+            fix_source_affine_metadata.mimics.dialogs, "question_box",
+            return_value="Repair Stored Geometry",
+        ), mock.patch.object(
+            fix_source_affine_metadata, "main", fake_main,
+        ):
+            self.assertTrue(
+                offer("RuntimeError: source geometry mismatch: ...", "nnU-Net")
+            )
+            self.assertEqual(started, [True])
+        # Marker + active image + user declines: no repair, dialog shown once.
+        with mock.patch.object(
+            fix_source_affine_metadata.mimics.data.images, "get_active",
+            return_value=_FakeImage(),
+        ), mock.patch.object(
+            fix_source_affine_metadata.mimics.dialogs, "question_box",
+            return_value="Not Now",
+        ), mock.patch.object(fix_source_affine_metadata, "main", fake_main):
+            self.assertFalse(
+                offer("RuntimeError: source geometry mismatch: ...", "nnU-Net")
+            )
+            self.assertEqual(started, [True])
 
 
 

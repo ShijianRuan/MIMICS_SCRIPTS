@@ -583,22 +583,27 @@ Mimics 工具状态机导致崩溃、丢失未保存标注。脚本层已做到�
 
 该入口不以进程名称直接杀死所有 Python 或 Mimics，因此不会主动终止前台 Mimics和其他软件创建的后台进程。
 
-### 9.4 `99_Admin/04_Fix_Source_Affine_Metadata.py`
+### 9.4 源几何修复（原 `99_Admin/04_Fix_Source_Affine_Metadata.py`，D4 合并）
 
-用途：修复旧版 `.mcs` 中不正确或缺失的源 NIfTI affine metadata。
+用途：修复旧版 `.mcs` 中不正确的源 NIfTI affine metadata（2026-07-13 之前
+版本桥接层导入的病例，存储了 LPS 方向矩阵而非真实 RAS affine）。
 
-适用场景：旧项目在 AI 推理时报告源图像 affine 与当前 Mimics 项目不匹配。
+独立菜单入口已删除（2026-09-28，用户拍板 D4）。修复能力合并进预测失败的
+报错路径：nnU-Net / FlexiCT 预测在 `validate_materialized_source_geometry`
+失败（错误带 `source geometry mismatch` 标记）时，Mimics 侧弹框提供一键
+"Repair Stored Geometry"。
 
-脚本会：
+实现：`runtime_py35/fix_source_affine_metadata.py`
+（`offer_repair_for_prediction_failure`，由 nnunet_mimics / flexict_mimics
+的失败分支调用）。修复流程不变：
 
 - 读取当前活动 Image 的源路径；
-- 从磁盘读取真实 NIfTI affine；
-- 校验 source shape；
-- 更新 metadata；
-- round-trip 验证；
-- 保存项目。
+- 从磁盘读取真实 NIfTI affine（外部 Python 子进程，非阻塞）；
+- 校验 source shape（不一致则建议重新导入）；
+- 更新 metadata、round-trip 验证、保存项目；
+- 修复后重新运行预测即可通过校验。
 
-新导入项目不应依赖此修复入口。
+新导入项目不会产生此问题；此路径仅为旧病例存量保留。
 
 ## 10. 远程训练（可选）
 

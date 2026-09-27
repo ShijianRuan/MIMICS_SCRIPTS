@@ -24,8 +24,19 @@ import uuid
 import mimics
 
 import external_window_launcher
+import fix_source_affine_metadata
 import mimics_mask_apply
 import runtime_common
+
+
+def _offer_source_geometry_repair(error_text):
+    """One-click stale-affine repair on the failure it actually fixes (D4)."""
+    try:
+        return fix_source_affine_metadata.offer_repair_for_prediction_failure(
+            error_text, TITLE
+        )
+    except Exception:
+        return False
 
 
 TITLE = "FlexiCT"
@@ -565,10 +576,11 @@ def _monitor_tick_locked(monitor):
         return
     if state in ("failed", "cancelled"):
         _stop_monitor(key)
+        error_text = str(status.get("error") or "")
+        if state == "failed" and _offer_source_geometry_repair(error_text):
+            return
         mimics.dialogs.message_box(
-            "FlexiCT prediction {0}.\n\n{1}".format(
-                state, status.get("error") or ""
-            ),
+            "FlexiCT prediction {0}.\n\n{1}".format(state, error_text),
             title=TITLE,
             ui_blocking=False,
         )

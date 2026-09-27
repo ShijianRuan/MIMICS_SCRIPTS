@@ -44,6 +44,9 @@ SOURCE_IMAGE_SHAPE_METADATA = "mimics_script.source_image_shape"
 SOURCE_VOXEL_TO_RAS_MATRIX_METADATA = "mimics_script.source_voxel_to_ras_matrix"
 
 TITLE = "Fix Source Affine Metadata"
+# Must stay identical to the marker embedded in
+# tools/nnunet_pipeline.validate_materialized_source_geometry's error message.
+SOURCE_GEOMETRY_MISMATCH_MARKER = "source geometry mismatch"
 _MONITORS = {}
 
 
@@ -316,6 +319,47 @@ def _start_monitor(monitor, poll_seconds=0.5):
         monitor["timer"] = timer
         _MONITORS[key] = monitor
         return True
+    except Exception:
+        return False
+
+
+def offer_repair_for_prediction_failure(error_text, framework_title):
+    """Offer the one-click affine repair on a prediction failure we can fix.
+
+    Called by the nnU-Net / FlexiCT failure handlers when the external
+    pipeline rejected the case with the source-geometry-mismatch marker.
+    Returns True if the repair flow was started; False if the user declined
+    or nothing can be offered. Never raises: a failed repair offer must not
+    mask the original prediction-failure dialog.
+    """
+    if SOURCE_GEOMETRY_MISMATCH_MARKER not in str(error_text or ""):
+        return False
+    try:
+        image = mimics.data.images.get_active()
+    except Exception:
+        image = None
+    if image is None:
+        return False
+    try:
+        answer = mimics.dialogs.question_box(
+            title=framework_title,
+            message=(
+                "The stored source geometry of this case does not match the "
+                "image on disk (a known issue for cases imported by a bridge "
+                "version older than 2026-07-13).\n\n"
+                "Repair the stored geometry now? The project is saved after "
+                "the repair; then run the prediction again. If the source "
+                "file itself changed, re-import the case instead."
+            ),
+            buttons="Repair Stored Geometry;Not Now",
+            ui_blocking=True,
+        )
+    except Exception:
+        return False
+    if answer != "Repair Stored Geometry":
+        return False
+    try:
+        return main() == 0
     except Exception:
         return False
 

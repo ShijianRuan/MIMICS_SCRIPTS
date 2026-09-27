@@ -16,8 +16,19 @@ import uuid
 import mimics
 
 import external_window_launcher
+import fix_source_affine_metadata
 import mimics_mask_apply
 import runtime_common
+
+
+def _offer_source_geometry_repair(error_text):
+    """One-click stale-affine repair on the failure it actually fixes (D4)."""
+    try:
+        return fix_source_affine_metadata.offer_repair_for_prediction_failure(
+            error_text, TITLE
+        )
+    except Exception:
+        return False
 
 
 TITLE = "nnU-Net"
@@ -26,6 +37,12 @@ BUTTON_PREDICT = "Predict Current Case..."
 BUTTON_STATUS = "Show Status and Models"
 BUTTON_UPDATE = "Update Matching Masks"
 BUTTON_CREATE = "Create Editable Copies"
+
+# Stable marker carried by the pipeline's validate_materialized_source_geometry
+# failure; the shared repair offer lives in fix_source_affine_metadata.
+SOURCE_GEOMETRY_MISMATCH_MARKER = (
+    fix_source_affine_metadata.SOURCE_GEOMETRY_MISMATCH_MARKER
+)
 
 _MONITORS = {}
 
@@ -855,10 +872,11 @@ def _monitor_tick_locked(monitor):
         return
     if state in ("failed", "cancelled"):
         _stop_monitor(key)
+        error_text = str(status.get("error") or "")
+        if state == "failed" and _offer_source_geometry_repair(error_text):
+            return
         mimics.dialogs.message_box(
-            "nnU-Net prediction {0}.\n\n{1}".format(
-                state, status.get("error") or ""
-            ),
+            "nnU-Net prediction {0}.\n\n{1}".format(state, error_text),
             title=TITLE,
             ui_blocking=False,
         )
