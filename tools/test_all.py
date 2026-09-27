@@ -2311,9 +2311,123 @@ class TestMimicsBridgeBufferMapping(unittest.TestCase):
         np.testing.assert_allclose(target_affine, out.affine, atol=1e-6)
 
 
-# ============================================================================
-# L4: nninteractive_bridge.py
-# ============================================================================
+class TestVerifyMedicalGeometry(unittest.TestCase):
+    """C8: tools/verify_medical_geometry.py guards data quality — an error
+    there would wave a mis-gridded export through. Zero direct coverage."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="verify_geometry_")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def _write_nifti(self, name, data, affine):
+        import nibabel as nib
+
+        path = os.path.join(self.tmp, name)
+        nib.save(nib.Nifti1Image(data, affine), path)
+        return path
+
+    def _run(self, image, mask, extra_args=None):
+        tools_dir = os.path.dirname(os.path.abspath(__file__))
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        import verify_medical_geometry
+
+        argv = [
+            "verify_medical_geometry",
+            "--image", image,
+            "--mask", mask,
+        ] + list(extra_args or [])
+        with mock.patch.object(sys, "argv", argv):
+            return verify_medical_geometry.main()
+
+    def _fake_geometry(self, shape, affine):
+        """Patch get_source_image_geometry inside verify_medical_geometry."""
+        tools_dir = os.path.dirname(os.path.abspath(__file__))
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        import verify_medical_geometry
+
+        return mock.patch.object(
+            verify_medical_geometry,
+            "get_source_image_geometry",
+            return_value={"shape": list(shape), "affine": np.asarray(affine).tolist()},
+        )
+
+    def test_matching_grid_passes(self):
+        data = np.zeros((3, 4, 5), dtype=np.uint8)
+        data[1, 2, 3] = 1
+        image = self._write_nifti("image.nii.gz", np.arange(60).reshape(3, 4, 5).astype(np.int16), np.eye(4))
+        mask = self._write_nifti("mask.nii.gz", data, np.eye(4))
+        with self._fake_geometry((3, 4, 5), np.eye(4)):
+            self.assertEqual(0, self._run(image, mask))
+
+    def test_affine_mismatch_fails_closed(self):
+        data = np.zeros((3, 4, 5), dtype=np.uint8)
+        data[1, 2, 3] = 1
+        bad_affine = np.eye(4)
+        bad_affine[0, 3] = 5.0
+        image = self._write_nifti("image2.nii.gz", np.arange(60).reshape(3, 4, 5).astype(np.int16), np.eye(4))
+        mask = self._write_nifti("mask2.nii.gz", data, bad_affine)
+        with self._fake_geometry((3, 4, 5), np.eye(4)):
+            self.assertEqual(2, self._run(image, mask))
+
+    def test_shape_mismatch_fails_closed(self):
+        data = np.zeros((3, 4, 5), dtype=np.uint8)
+        data[1, 2, 3] = 1
+        image = self._write_nifti("image3.nii.gz", np.arange(60).reshape(3, 4, 5).astype(np.int16), np.eye(4))
+        mask = self._write_nifti("mask3.nii.gz", data, np.eye(4))
+        # Image reports a different shape than the mask.
+        with self._fake_geometry((4, 4, 5), np.eye(4)):
+            self.assertEqual(2, self._run(image, mask))
+
+    def test_unreadable_source_geometry_raises(self):
+        data = np.zeros((3, 4, 5), dtype=np.uint8)
+        image = self._write_nifti("image4.nii.gz", np.arange(60).reshape(3, 4, 5).astype(np.int16), np.eye(4))
+        mask = self._write_nifti("mask4.nii.gz", data, np.eye(4))
+        tools_dir = os.path.dirname(os.path.abspath(__file__))
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        import verify_medical_geometry
+
+        with mock.patch.object(
+            verify_medical_geometry,
+            "get_source_image_geometry",
+            return_value=None,
+        ):
+            with mock.patch.object(sys, "argv", [
+                "verify_medical_geometry", "--image", image, "--mask", mask,
+            ]):
+                with self.assertRaises(RuntimeError) as ctx:
+                    verify_medical_geometry.main()
+        self.assertIn("could not be read", str(ctx.exception))
+
+    def test_nrrd_mask_uses_lps_to_ras_conversion(self):
+        import SimpleITK as sitk
+
+        data = np.zeros((5, 4, 3), dtype=np.uint8)  # sitk: z/y/x
+        data[3, 2, 1] = 1
+        image = self._write_nifti("image5.nii.gz", np.arange(60).reshape(3, 4, 5).astype(np.int16), np.eye(4))
+        # Build an LPS-affine NRRD whose RAS equivalent is the identity.
+        sitk_image = sitk.GetImageFromArray(np.transpose(data, (2, 1, 0)))
+        sitk_image.SetSpacing((1.0, 1.0, 1.0))
+        sitk_image.SetOrigin((0.0, 0.0, 0.0))
+        sitk_image.SetDirection((1, 0, 0, 0, 1, 0, 0, 0, 1))
+        mask = os.path.join(self.tmp, "mask.nrrd")
+        sitk.WriteImage(sitk_image, mask)
+        # Identity LPS direction -> RAS affine is diag(-1, -1, 1), which
+        # must NOT match the identity-geometry source; the tool must
+        # compare in RAS, not raw LPS.
+        with self._fake_geometry((3, 4, 5), np.eye(4)):
+            self.assertEqual(2, self._run(image, mask))
+
+    def test_reference_mask_dice(self):
+        data = np.zeros((3, 4, 5), dtype=np.uint8)
+        data[1, 2, 3] = 1
+        image = self._write_nifti("image6.nii.gz", np.arange(60).reshape(3, 4, 5).astype(np.int16), np.eye(4))
+        mask = self._write_nifti("mask6.nii.gz", data, np.eye(4))
+        reference = self._write_nifti("ref6.nii.gz", data, np.eye(4))
+        with self._fake_geometry((3, 4, 5), np.eye(4)):
+            self.assertEqual(0, self._run(image, mask, ["--reference-mask", reference]))
 
 
 class TestNNInteractiveBridgeSourceImage(unittest.TestCase):
