@@ -10717,6 +10717,35 @@ class TestProcessRegistry(unittest.TestCase):
             )
         )
 
+    def test_sweep_terminates_stage_worker_orphaned_by_dead_parent(self):
+        """B22: when the matrix (or anything) kills a job controller, its
+        detached stage worker must be terminated by sweep_processes via the
+        registry — the amplifier of the R41/R42 orphan-hang."""
+        import resource_locks
+
+        # Simulate the dead controller: a short-lived parent.
+        parent = self._spawn_sleeper(0)
+        parent.wait()
+        worker = self._spawn_sleeper(30)
+        self.addCleanup(worker.wait)
+        self.addCleanup(worker.kill)
+        record = resource_locks.register_process(
+            self.root, "nnunet_preprocess", worker.pid,
+            parent_pid=parent.pid,
+            state_path=os.path.join(self.tmp, "status.json"),
+        )
+        self.assertTrue(record["ownership_token"])
+        summary = resource_locks.sweep_processes(self.root)
+        terminated = {e["pid"] for e in summary["terminated_orphans"]}
+        self.assertIn(worker.pid, terminated)
+        try:
+            worker.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.fail("sweep reported termination but the worker is still alive")
+        self.assertEqual(
+            [], resource_locks.snapshot_processes(self.root, include_dead=True)
+        )
+
     def test_recycled_pid_is_never_killed_by_terminate_or_sweep(self):
         """B10a: a record whose start_marker no longer matches the live
         PID points at a recycled process — killing it would terminate an

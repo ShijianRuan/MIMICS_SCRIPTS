@@ -954,6 +954,7 @@ def _spawn_worker(
                 ROOT,
                 "nnunet_{}".format(stage),
                 process.pid,
+                parent_pid=os.getpid(),
                 state_path=str(status_path),
                 extra={"job_id": str(request.get("job_id") or "")},
             )

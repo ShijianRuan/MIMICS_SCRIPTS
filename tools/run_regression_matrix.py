@@ -121,6 +121,22 @@ def run_suite(name: str, command: list[str], timeout: int) -> dict:
         output = (exc.stdout or b"").decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else str(exc.stdout or "")
         code = -1
         output += "\n[TIMEOUT after {0}s]".format(timeout)
+        # The killed suite process may leave detached grandchildren (job
+        # controllers, stage workers) holding the GPU lock. Sweep the process
+        # registry so orphans whose parent died are terminated and their locks
+        # released (B22) — this is the amplifier of the R41/R42 orphan-hang.
+        try:
+            sys.path.insert(0, str(ROOT))
+            import resource_locks
+
+            summary = resource_locks.sweep_processes(ROOT)
+            output += "\n[POST-TIMEOUT SWEEP] {0}".format(
+                json.dumps(summary, default=str)
+            )
+        except Exception as sweep_exc:  # never mask the timeout result
+            output += "\n[POST-TIMEOUT SWEEP FAILED] {0}: {1}".format(
+                type(sweep_exc).__name__, sweep_exc
+            )
     duration = time.time() - started
     status = "pass" if code == 0 else "fail"
     print("[{0}] {1} ({2:.1f}s)".format(status.upper(), name, duration), flush=True)
