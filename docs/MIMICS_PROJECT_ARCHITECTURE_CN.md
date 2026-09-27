@@ -227,14 +227,18 @@ Mimics 定时器 <-----+
 
 单例入口与批量入口共用准备、队列、后台 Mimics 和状态机制，避免维护两套不一致的转换逻辑。外部 worker 负责耗时读取和准备；Mimics 内只轮询进度。用户点击 Stop 时，控制器会终止已暴露的外部进程并写入停止标记。
 
-### 4.3 `01_Data/03_Export_Masks.py`
+### 4.3 `01_Data/07_Quick_Export_Masks.py`
 
 用途：将当前项目或一批已保存 `.mcs` 中的 Mask 导出为与源图像网格一致的标签文件。
+
+（2026-09-27：原 `01_Data/03_Export_Masks.py` 与本入口调用同一
+`_launch_external_export_setup` 且本入口功能是其超集，按 D1 决策删除
+重复入口，导出功能统一由本入口承担。）
 
 调用链：
 
 ```text
-03_Export_Masks.py
+07_Quick_Export_Masks.py
   -> runtime_py35/mimics_export.py
   -> tools/io_path_setup_ui.py
   -> 当前项目：Mimics timer 分步读取 buffer
@@ -482,11 +486,9 @@ runtime_py35/nnunet_mimics.py
 
 ### 7.4 `02_AI/nnUNet/03_Show_Status_Models.py`
 
-用途：查看当前 nnU-Net 任务、训练曲线、日志、模型版本和远程状态。状态窗口是外部 PySide6 进程，不要求先选择数据集路径；没有当前任务时显示模型工作区和空状态说明。
+用途：查看当前 nnU-Net 任务、训练曲线、日志、模型版本和远程状态，并从状态窗口停止任务（停止当前本地 worker，或请求远程容器停止。停止先写 cancel marker，再等待框架退出；无法确认远端状态时进入 `orphaned_remote`/`attention_required`，用户可从状态窗口选择重连、再次停止或仅在本机放弃监控）。状态窗口是外部 PySide6 进程，不要求先选择数据集路径；没有当前任务时显示模型工作区和空状态说明。
 
-### 7.5 `02_AI/nnUNet/04_Stop_Running_Task.py`
-
-用途：停止当前本地 worker，或请求远程容器停止。停止先写 cancel marker，再等待框架退出；无法确认远端状态时进入 `orphaned_remote`/`attention_required`，用户可从状态窗口选择重连、再次停止或仅在本机放弃监控。
+（2026-09-27：原 `02_AI/nnUNet/04_Stop_Running_Task.py` 与本入口的状态窗口重复，按 D1 决策删除，停止功能由本入口承担。）
 
 ## 8. Review 功能入口
 
@@ -532,11 +534,14 @@ Mimics 工具状态机导致崩溃、丢失未保存标注。脚本层已做到�
 
 实现：`window_level_mimics.py("undo")`
 
-### 8.5 `03_Review/05_Window_Reset_Full_Range.py`
+### 8.5 `03_Review/06_Window_Edit_Presets.py`
 
-用途：将当前 Image 对比度恢复到 Mimics 允许的完整灰度范围。
+用途：编辑窗宽窗位预设。
 
-实现：`window_level_mimics.py("reset")`
+（2026-09-27：原 `03_Review/05_Window_Reset_Full_Range.py` 与预设选择
+对话框 `03_Window_Choose_Preset` 内的 "Reset Full Range" 按钮调用同一
+`reset_full_range()`，按 D1 决策删除重复菜单入口，完整灰度范围重置由
+预设选择对话框和 Undo 的兜底选项承担。）
 
 输入值会根据 Mimics 当前 Image 的合法 GV 范围裁剪，避免 lower/upper contrast point 越界。
 

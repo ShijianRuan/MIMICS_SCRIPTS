@@ -24,8 +24,6 @@ TITLE = "nnU-Net"
 BUTTON_TRAIN = "Train Model..."
 BUTTON_PREDICT = "Predict Current Case..."
 BUTTON_STATUS = "Show Status and Models"
-BUTTON_STOP = "Stop Running Task"
-BUTTON_CANCEL = "Cancel"
 BUTTON_UPDATE = "Update Matching Masks"
 BUTTON_CREATE = "Create Editable Copies"
 
@@ -384,68 +382,6 @@ def _resume_pending_inference_monitors():
             "prediction_target": request.get("prediction_target") or {},
         }
         _start_monitor(monitor, 1.0)
-
-
-def stop_running_task():
-    rows = _job_status_paths()
-    if not rows:
-        pending = [
-            monitor
-            for monitor in _MONITORS.values()
-            if str(monitor.get("kind") or "") == "infer"
-        ]
-        if pending:
-            pending.sort(
-                key=lambda row: float(row.get("deadline") or 0), reverse=True
-            )
-            monitor = pending[0]
-            answer = mimics.dialogs.question_box(
-                message=(
-                    "Cancel the pending nnU-Net result conversion/application?\n\n"
-                    "The completed prediction file is kept, but it will not be applied automatically."
-                ),
-                buttons=BUTTON_STOP + ";" + BUTTON_CANCEL,
-                title=TITLE,
-                ui_blocking=True,
-            )
-            if answer == BUTTON_STOP:
-                status = _read_json(monitor.get("status_path"), {}) or {}
-                status["application_cancelled"] = True
-                status["application_cancelled_at_epoch"] = time.time()
-                status["updated_at_epoch"] = time.time()
-                try:
-                    _write_json(monitor.get("status_path"), status)
-                except Exception:
-                    pass
-                _stop_monitor(monitor["monitor_key"])
-                _log(logging.INFO, "Pending nnU-Net result application was cancelled.")
-            return 0
-        mimics.dialogs.message_box(
-            "No running nnU-Net task was found.", title=TITLE, ui_blocking=False
-        )
-        return 0
-    _created, status_path, status = rows[0]
-    answer = mimics.dialogs.question_box(
-        message=(
-            "Stop the latest nnU-Net task?\n\n{0}\n{1}\n\n"
-            "The worker will release GPU and temporary resources before the task becomes Cancelled."
-        ).format(status.get("task_name") or status.get("job_id"), status.get("message") or status.get("phase")),
-        buttons=BUTTON_STOP + ";" + BUTTON_CANCEL,
-        title=TITLE,
-        ui_blocking=True,
-    )
-    if answer != BUTTON_STOP:
-        return 0
-    command = [
-        _external_python(),
-        os.path.join(_project_root(), "tools", "nnunet_jobs.py"),
-        "stop",
-        "--status",
-        status_path,
-    ]
-    mimics_mask_apply._launch_process(command, cwd=_project_root())
-    _log(logging.INFO, "Stop requested for nnU-Net task {0}.".format(status.get("job_id")))
-    return 0
 
 
 def _process_finished_unexpectedly(monitor, status):
@@ -856,8 +792,9 @@ def _monitor_tick_locked(monitor):
         if due:
             _log(
                 logging.INFO,
-                "nnU-Net is still waiting ({0}s): {1}. Use 04 Stop Running "
-                "Task to cancel and release its resources.".format(
+                "nnU-Net is still waiting ({0}s): {1}. Use Show Status "
+                "and Models, then Stop, to cancel and release its "
+                "resources.".format(
                     int(elapsed), line
                 ),
             )
@@ -941,8 +878,8 @@ def _monitor_tick_locked(monitor):
             monitor["waiting_logged"] = True
             _log(
                 logging.INFO,
-                "nnU-Net result is ready but waiting{0}: {1} Use 04 Stop "
-                "Running Task to discard the pending result.".format(
+                "nnU-Net result is ready but waiting{0}: {1} Use Show Status "
+                "and Models, then Stop, to discard the pending result.".format(
                     " ({0}s)".format(int(elapsed)) if elapsed >= 1.0 else "",
                     reason,
                 ),
@@ -1025,9 +962,9 @@ def _monitor_tick(monitor):
         if due:
             _log(
                 logging.INFO,
-                "nnU-Net result handling is waiting for {0} ({1}s). Use 04 "
-                "Stop Running Task if the pending result should be "
-                "discarded.".format(owner_text, int(elapsed)),
+                "nnU-Net result handling is waiting for {0} ({1}s). Use Show "
+                "Status and Models, then Stop, if the pending result should "
+                "be discarded.".format(owner_text, int(elapsed)),
             )
         return
     runtime_common.clear_progress_notice(monitor, "nnunet_buffer_wait")
@@ -1143,14 +1080,4 @@ def main(action=None):
             return 1
     if action == BUTTON_STATUS:
         return show_status()
-    if action == BUTTON_STOP:
-        return stop_running_task()
-    answer = mimics.dialogs.question_box(
-        message="Choose an nnU-Net action.",
-        buttons=";".join(
-            [BUTTON_TRAIN, BUTTON_PREDICT, BUTTON_STATUS, BUTTON_STOP, BUTTON_CANCEL]
-        ),
-        title=TITLE,
-        ui_blocking=True,
-    )
-    return main(answer) if answer != BUTTON_CANCEL else 0
+    return 0

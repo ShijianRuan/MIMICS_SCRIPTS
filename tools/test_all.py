@@ -3440,7 +3440,6 @@ class TestScriptingLibraryEntries(unittest.TestCase):
         expected_routes = {
             "03_Window_Choose_Preset.py": "choose",
             "02_Window_From_Selected_Mask.py": "auto",
-            "05_Window_Reset_Full_Range.py": "reset",
             "04_Window_Undo_Last.py": "undo",
         }
         for fname, action in expected_routes.items():

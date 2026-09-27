@@ -215,7 +215,7 @@ def _acquire_dataset_lock(
                 "resource": "nnU-Net dataset",
                 "owner": owner,
                 "pid": (holder or {}).get("pid"),
-                "cancel_action": "Stop Running Task",
+                "cancel_action": "Show Status and Models > Stop",
             },
         )
         now = time.time()
@@ -223,7 +223,7 @@ def _acquire_dataset_lock(
             append_log(
                 log_path,
                 "Waiting for Dataset{:03d}, currently used by {} (pid {}). "
-                "Use Stop Running Task to cancel this wait.".format(
+                "Use Show Status and Models, then Stop, to cancel this wait.".format(
                     int(request["dataset_id"]),
                     owner,
                     str((holder or {}).get("pid") or "unknown"),

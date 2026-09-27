@@ -729,15 +729,14 @@ def test_scripting_entrypoint(fake, tmp):
     try:
         module._state_path = lambda: str(state_path)
         result = entry.run_runtime_entry(
-            {"__name__": "scripting_library.03_Review.05_Window_Reset_Full_Range"},
-            str(LIBRARY_DIR / "03_Review" / "05_Window_Reset_Full_Range.py"),
+            {"__name__": "scripting_library.03_Review.04_Window_Undo_Last"},
+            str(LIBRARY_DIR / "03_Review" / "04_Window_Undo_Last.py"),
             "window_level_mimics",
-            action_value="reset",
+            action_value="undo",
         )
     finally:
         module._state_path = original_state_path
     assert_equal(result, 0, "entrypoint result")
-    assert_equal(fake.view.get_contrast(), ((0, 0.0), (100, 1.0)), "reset contrast via entrypoint")
     assert_true(fake.update_gui_calls >= 1, "entrypoint did not trigger GUI update")
     assert_true(
         state_path.is_file(),
