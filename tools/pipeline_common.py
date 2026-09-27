@@ -106,15 +106,6 @@ def read_json(path, default=None):
         return default
 
 
-def write_json_best_effort(path, payload):
-    """write_json_atomic that never raises; returns True on success."""
-    try:
-        write_json_atomic(path, payload, retries=8, max_sleep=0.15)
-        return True
-    except Exception:
-        return False
-
-
 def write_cancel_marker(cancel_path):
     """Best-effort cancel marker; returns an error string or None."""
     if not cancel_path:

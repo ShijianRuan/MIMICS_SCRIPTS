@@ -718,17 +718,6 @@ def prepare_source_grid_cases(
     return rows
 
 
-def _split_cases(rows: list[dict[str, Any]], request: dict[str, Any]) -> tuple[list[str], list[str]]:
-    case_ids = sorted(str(row["case_id"]) for row in rows)
-    random.Random(int(request["split_seed"])).shuffle(case_ids)
-    if len(case_ids) < 2 or float(request["validation_fraction"]) <= 0:
-        return case_ids, []
-    count = max(1, int(round(len(case_ids) * float(request["validation_fraction"]))))
-    count = min(count, len(case_ids) - 1)
-    validation = sorted(case_ids[-count:])
-    return sorted(case_ids[:-count]), validation
-
-
 def _split_folds(rows: list[dict[str, Any]], request: dict[str, Any]) -> list[dict[str, list[str]]]:
     case_ids = sorted(str(row["case_id"]) for row in rows)
     random.Random(int(request["split_seed"])).shuffle(case_ids)

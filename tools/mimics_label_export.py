@@ -9,15 +9,14 @@ Mimics access, and reap child process trees. This module holds that shared
 machinery so no integration depends on another integration's pipeline module.
 
 Extracted verbatim from the original AI-pipeline module; function bodies
-are unchanged except for neutralized naming (``mcs_label_fingerprint`` etc.
-were originally framework-prefixed) and framework-specific owner strings.
+are unchanged except for neutralized naming and framework-specific owner
+strings.
 
 This script never imports Mimics. It is safe to run from the foreground Mimics
 process through subprocess.Popen because all long-running work happens here or
 in child Python/Mimics background processes.
 """
 
-import hashlib
 import json
 import os
 import shutil
@@ -457,19 +456,6 @@ def _env_flag_disabled(name):
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
-def gpu_lock_enabled():
-    if _env_flag_disabled("MIMICS_DISABLE_GPU_LOCK"):
-        return False
-    try:
-        import torch
-        return bool(torch.cuda.is_available())
-    except Exception:
-        # If torch cannot be imported here, the child training process will
-        # fail soon anyway. Keep the lock conservative so a broken environment
-        # does not start competing with nnInteractive.
-        return True
-
-
 def _lock_wait_payload(resource, current):
     if not isinstance(current, dict):
         current = {}
@@ -687,50 +673,6 @@ def request_nninteractive_server_release_on_contention(current):
         state["last_activity_epoch"] = 0.0
         write_json_atomic(state_path, state)
     return True
-
-
-def acquire_gpu_lock_for_job(workspace, status_path, cancel_path, owner, timeout_seconds):
-    if not gpu_lock_enabled():
-        return None
-    lock = FileResourceLock(_gpu_lock_path(), "gpu", owner)
-    cleanup_idle_nninteractive_server_lock(lock.read())
-    last_log = {"epoch": 0.0}
-
-    def on_wait(current):
-        if cleanup_idle_nninteractive_server_lock(current):
-            append_log(workspace, "Cleaned an idle nnInteractive server whose watchdog was no longer running.")
-            return
-        if request_nninteractive_server_release_on_contention(current):
-            append_log(workspace, "Requested nnInteractive server to release GPU due to lock contention.")
-            return
-        update_status(status_path, {
-            "status": "waiting_for_gpu",
-            "resource_wait": _lock_wait_payload("gpu", current),
-        })
-        now = time.time()
-        if now - last_log["epoch"] >= 60:
-            holder = current.get("owner", "unknown") if isinstance(current, dict) else "unknown"
-            pid = current.get("pid", "?") if isinstance(current, dict) else "?"
-            append_log(workspace, "Waiting for GPU resource held by {} (pid {}).".format(holder, pid))
-            last_log["epoch"] = now
-
-    update_status(status_path, {
-        "status": "waiting_for_gpu",
-        "resource_wait": {"resource": "gpu"},
-    })
-    lock.acquire(
-        wait_seconds=float(timeout_seconds),
-        poll_seconds=2.0,
-        on_wait=on_wait,
-        should_cancel=lambda: Path(cancel_path).is_file(),
-    )
-    try:
-        update_status(status_path, {"resource_wait": None})
-        append_log(workspace, "GPU resource acquired for {}.".format(owner))
-    except Exception:
-        lock.release()
-        raise
-    return lock
 
 
 def acquire_background_mimics_lock(
@@ -991,45 +933,6 @@ def materialize_source_image(image_src, image_dst):
     image_dst.parent.mkdir(parents=True, exist_ok=True)
     sitk.WriteImage(image, str(image_dst), True)
     return "converted_to_nifti"
-
-
-def materialize_label_on_source_grid(label_src, image_dst, label_dst):
-    """Keep the source image fixed and map the binary label onto that grid."""
-    import nibabel as nib
-    import numpy as np
-    from mimics_bridge import (
-        _affine_close,
-        _validate_resampled_mask_foreground,
-        read_nifti_mask_with_affine,
-        resample_mask_to_image_grid,
-    )
-
-    image_img = nib.load(str(image_dst))
-    label_array, label_affine = read_nifti_mask_with_affine(str(label_src))
-    image_shape = tuple(int(value) for value in image_img.shape[:3])
-    image_affine = image_img.affine
-    geometry_matched = (
-        image_shape == tuple(int(value) for value in label_array.shape[:3])
-        and _affine_close(image_affine, label_affine)
-    )
-    if geometry_matched:
-        target_label = np.asarray(label_array, dtype=np.uint8)
-        method = "copied_on_source_grid"
-    else:
-        target_label = resample_mask_to_image_grid(
-            label_array,
-            label_affine,
-            image_shape,
-            image_affine,
-        )
-        method = "label_resampled_to_source_image_grid"
-    source_foreground, target_foreground = _validate_resampled_mask_foreground(
-        label_array,
-        target_label,
-        "Preparing label '{}'".format(label_src),
-    )
-    _write_nifti(target_label.astype(np.uint8), image_affine, label_dst)
-    return method, geometry_matched, source_foreground, target_foreground
 
 
 def launch_mimics_export(
@@ -1302,202 +1205,6 @@ def launch_mimics_export(
         if lock_releasable:
             for lock in reversed(locks):
                 lock.release()
-
-
-def _path_stat_signature(path):
-    path = Path(path)
-    if path.is_file():
-        stat = path.stat()
-        return {
-            "kind": "file",
-            "name": path.name,
-            "size": int(stat.st_size),
-            "mtime_ns": int(stat.st_mtime_ns),
-        }
-    if path.is_dir():
-        count = 0
-        total_size = 0
-        latest_mtime = 0
-        for child in path.rglob("*"):
-            if not child.is_file():
-                continue
-            stat = child.stat()
-            count += 1
-            total_size += int(stat.st_size)
-            latest_mtime = max(latest_mtime, int(stat.st_mtime_ns))
-        return {
-            "kind": "directory",
-            "name": path.name,
-            "file_count": count,
-            "total_size": total_size,
-            "latest_mtime_ns": latest_mtime,
-        }
-    raise OSError("path does not exist: {}".format(path))
-
-
-def mcs_label_fingerprint(mcs_path, image_path, mask_names):
-    payload = {
-        "mcs": _path_stat_signature(mcs_path),
-        "image": _path_stat_signature(image_path),
-        "mask_names": sorted(str(value).strip().lower() for value in mask_names),
-        "export_contract": "source_grid_mcs_export.v2",
-    }
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True).encode("utf-8")
-    ).hexdigest()
-
-
-def _cached_case_label(cache_root, case_id, fingerprint):
-    case_root = Path(cache_root) / safe_slug(case_id)
-    metadata = read_json(case_root / "metadata.json", {}) or {}
-    labels = sorted((case_root / "segmentations").glob("*.nii.gz"))
-    labels += sorted((case_root / "segmentations").glob("*.nii"))
-    if (
-        metadata.get("fingerprint") == fingerprint
-        and len(labels) == 1
-        and labels[0].is_file()
-    ):
-        return labels[0]
-    return None
-
-
-def _copy_label_atomic(source, destination):
-    source = Path(source)
-    destination = Path(destination)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(
-        "{}.{}.tmp".format(destination.name, uuid.uuid4().hex)
-    )
-    try:
-        shutil.copy2(str(source), str(temporary))
-        last_error = None
-        for attempt in range(20):
-            try:
-                os.replace(str(temporary), str(destination))
-                return
-            except OSError as exc:
-                last_error = exc
-                time.sleep(min(0.25, 0.02 * (attempt + 1)))
-        raise OSError(
-            "Could not publish {} after bounded replace retries: {}".format(
-                destination, last_error
-            )
-        )
-    finally:
-        try:
-            temporary.unlink()
-        except OSError:
-            pass
-
-
-def plan_mcs_label_cache(
-    ts_root,
-    workspace,
-    organ_slug,
-    cases,
-    mask_names,
-    mcs_output_dir=None,
-):
-    mcs_root = (
-        Path(mcs_output_dir).expanduser().resolve()
-        if mcs_output_dir
-        else resolve_mimics_output_dir(ts_root)
-    )
-    requested = set(cases or [])
-    if requested:
-        case_ids = sorted(requested)
-    else:
-        case_ids = sorted(path.stem for path in mcs_root.glob("*.mcs"))
-    cache_root = Path(workspace) / "cache" / "mcs_labels" / organ_slug
-    reusable = {}
-    changed = []
-    fingerprints = {}
-    for case_id in case_ids:
-        mcs_path = mcs_root / (case_id + ".mcs")
-        image_path = find_image(Path(ts_root) / case_id)
-        if not mcs_path.is_file() or not image_path:
-            changed.append(case_id)
-            continue
-        try:
-            fingerprint = mcs_label_fingerprint(
-                mcs_path, image_path, mask_names
-            )
-        except OSError:
-            changed.append(case_id)
-            continue
-        fingerprints[case_id] = fingerprint
-        cached = _cached_case_label(cache_root, case_id, fingerprint)
-        if cached:
-            reusable[case_id] = cached
-        else:
-            changed.append(case_id)
-    return {
-        "cache_root": cache_root,
-        "reusable": reusable,
-        "changed": changed,
-        "fingerprints": fingerprints,
-        "requested": case_ids,
-    }
-
-
-def publish_mcs_label_cache(
-    plan, staging_root, mask_names, output_root=None
-):
-    available = set(plan["reusable"])
-    warnings = []
-    cache_root = Path(plan["cache_root"])
-    staging_root = Path(staging_root)
-    for case_id in plan["changed"]:
-        source_dir = staging_root / case_id / "segmentations"
-        labels = sorted(source_dir.glob("*.nii.gz"))
-        labels += sorted(source_dir.glob("*.nii"))
-        if len(labels) != 1:
-            continue
-        if output_root is not None:
-            try:
-                _copy_label_atomic(
-                    labels[0],
-                    Path(output_root)
-                    / case_id
-                    / "segmentations"
-                    / labels[0].name,
-                )
-            except OSError as exc:
-                warnings.append(
-                    {
-                        "case_id": case_id,
-                        "stage": "training_staging",
-                        "error": str(exc),
-                    }
-                )
-                continue
-        available.add(case_id)
-        fingerprint = plan["fingerprints"].get(case_id)
-        if not fingerprint:
-            continue
-        cache_case = cache_root / safe_slug(case_id)
-        cached_label = cache_case / "segmentations" / labels[0].name
-        try:
-            _copy_label_atomic(labels[0], cached_label)
-            write_json_atomic(
-                cache_case / "metadata.json",
-                {
-                    "schema_version": "mcs_label_cache.v1",
-                    "case_id": case_id,
-                    "fingerprint": fingerprint,
-                    "mask_names": list(mask_names),
-                    "updated_at_epoch": time.time(),
-                },
-            )
-        except OSError as exc:
-            warnings.append(
-                {
-                    "case_id": case_id,
-                    "stage": "cache_publish",
-                    "error": str(exc),
-                }
-            )
-    return available, warnings
 
 
 def _status_workspace(path):

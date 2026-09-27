@@ -312,13 +312,6 @@ def _probe_gui_backends():
         }
 
 
-def _gui_wheels_available():
-    wheels_dir = PROJECT_ROOT / "wheels"
-    if not wheels_dir.is_dir():
-        return False
-    return any(wheels_dir.glob("pyside6-*.whl")) and any(wheels_dir.glob("shiboken6-*.whl"))
-
-
 # ---------------------------------------------------------------------------
 # Check
 # ---------------------------------------------------------------------------

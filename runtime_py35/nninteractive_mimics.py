@@ -554,14 +554,6 @@ def _release_state_lock(state):
         pass
 
 
-def _remove_state_file(path):
-    try:
-        os.remove(path)
-        return True
-    except OSError:
-        return not os.path.exists(path)
-
-
 def _remove_owned_state_file(path, state):
     """Remove only the state record that belongs to *state*."""
     current = runtime_common.read_json(path, {}) or {}

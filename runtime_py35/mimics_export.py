@@ -139,14 +139,6 @@ def _set_active_background_export_lock(lock_path, lock_token):
         _ACTIVE_BG_MIMICS_LOCKS[str(lock_token)] = str(lock_path)
 
 
-def _active_background_export_lock():
-    with _ACTIVE_BG_MIMICS_LOCK_MUTEX:
-        if not _ACTIVE_BG_MIMICS_LOCKS:
-            return (None, None)
-        token, path = next(iter(_ACTIVE_BG_MIMICS_LOCKS.items()))
-        return (path, token)
-
-
 def _clear_active_background_export_lock(lock_token=None):
     with _ACTIVE_BG_MIMICS_LOCK_MUTEX:
         if lock_token is None:
@@ -156,29 +148,6 @@ def _clear_active_background_export_lock(lock_token=None):
             return False
         _ACTIVE_BG_MIMICS_LOCKS.pop(str(lock_token), None)
         return True
-
-
-def _release_background_export_lock():
-    """Release the background_mimics lock if its holder process is dead.
-
-    Called when the background Mimics child exits without writing a status.
-    A crash (common with Mimics 21 when a -b instance loses the license to the
-    interactive window) leaves the lock file behind with a dead PID, blocking
-    later exports to that destination. Only remove the lock when the recorded
-    PID is gone, so a genuinely running export is never disturbed.
-    """
-    with _ACTIVE_BG_MIMICS_LOCK_MUTEX:
-        locks = list(_ACTIVE_BG_MIMICS_LOCKS.items())
-    for token, lock_path in locks:
-        payload = runtime_common.read_json(lock_path, {}) or {}
-        pid = payload.get("pid")
-        if pid and runtime_common.process_exists(pid):
-            continue
-        try:
-            runtime_common.release_resource_lock(lock_path, token)
-        except Exception:
-            pass
-        _clear_active_background_export_lock(token)
 
 
 def _finalize_background_export_process_status(

@@ -86,7 +86,6 @@ TRAINERS = {
     "2d": "flexict2d_Trainer",
     "3d_fullres": "flexict3d_Trainer",
 }
-EPOCH_MATCH = re.compile(r"(?i)\bepoch\s*[:#]?\s*(\d+)\b")
 
 
 def _cancelled(control_path: Path) -> bool:
@@ -478,40 +477,6 @@ def _register_flexict_model(request: dict[str, Any],
     write_json_atomic(destination / "flexict_model_manifest.json", manifest)
     register_flexict_model(manifest, workspace=str(workspace))
     return manifest
-
-
-def _parse_training_progress(log_path: Path, request: dict[str, Any],
-                             status_path: Path, last_epoch: int) -> int:
-    """Parse the current epoch from the trainer log tail (job.log) 128KB window.
-
-    Kept for tests and future worker variants; the live poll loop inside
-    nnunet_pipeline._spawn_worker performs the same parse inline.
-    """
-    try:
-        with log_path.open("rb") as reader:
-            reader.seek(0, os.SEEK_END)
-            reader.seek(max(0, reader.tell() - 131072), os.SEEK_SET)
-            tail = reader.read().decode("utf-8", "replace")
-        matches = EPOCH_MATCH.findall(tail)
-        if not matches:
-            return last_epoch
-        epoch = max(int(value) for value in matches)
-        if epoch == last_epoch:
-            return last_epoch
-        total = int(request.get("epochs") or DEFAULT_CONFIG["default_epochs"])
-        completed = min(total, epoch + 1)
-        update_status(
-            status_path,
-            status="training",
-            phase="training",
-            message="FlexiCT training epoch {} of {}.".format(completed, total),
-            current_epoch=completed,
-            total_epochs=total,
-            progress_percent=min(95, 50 + int(45 * completed / max(1, total))),
-        )
-        return epoch
-    except OSError:
-        return last_epoch
 
 
 def _sweep_expired_jobs(workspace: str | Path, config: dict[str, Any] | None = None) -> dict[str, Any]:
