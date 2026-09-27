@@ -34,6 +34,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
 QT = (QtCore, QtGui, QtWidgets)
+_QApplication = QtWidgets.QApplication
 
 
 class _AppFixture:
@@ -528,6 +529,62 @@ class TestTrainingSetupPathMemory(unittest.TestCase):
                         window.dataset_edit.text(), str(tmp / "data")
                     )
                     self.assertEqual(window.label_edit.text(), "kidney")
+                finally:
+                    window.window.close()
+
+    def test_flexict_single_case_submission_is_rejected(self):
+        # B30: the error copy says "at least two cases" but validation only
+        # checked non-empty; one case reached the pipeline, which burned a
+        # GPU lock on an empty training run.
+        _AppFixture.app()
+        import flexict_training_setup_ui as ui
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            (tmp / "data" / "case01").mkdir(parents=True)
+            home = self._settings_home(
+                tmp,
+                "flexict_settings.json",
+                {
+                    "workspace": str(tmp / "ws"),
+                    "dataset_root": str(tmp / "data"),
+                    "label_name": "kidney",
+                },
+            )
+            with mock.patch.object(ui.Path, "home", lambda: home), mock.patch.object(
+                ui, "workspace_root", lambda _c: str(tmp / "default-ws")
+            ), mock.patch.object(
+                ui, "load_config", lambda: {"root": str(tmp)}
+            ), mock.patch.object(
+                ui.TrainingSetupWindow, "_refresh_models", lambda self: None
+            ):
+                window = ui.TrainingSetupWindow(
+                    {"workspace": ""}, tmp / "ctx.json", QT
+                )
+                try:
+                    with mock.patch.object(
+                        window, "_request",
+                        return_value={
+                            "workspace": str(tmp / "ws"),
+                            "dataset_root": str(tmp / "data"),
+                            "label_name": "kidney",
+                            "cases": ["case01"],
+                        },
+                    ):
+                        window._submit()
+                    deadline = time.time() + 5
+                    while (
+                        window._submission_pending
+                        and time.time() < deadline
+                    ):
+                        _QApplication.processEvents()
+                        time.sleep(0.02)
+                        window._poll_submission()
+                    self.assertFalse(window.submitted)
+                    self.assertIn(
+                        "at least two cases",
+                        window.status_label.text().lower(),
+                    )
                 finally:
                     window.window.close()
 

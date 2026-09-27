@@ -604,7 +604,9 @@ class TrainingSetupWindow:
                 try:
                     if not Path(request["dataset_root"]).is_dir():
                         raise ValueError("Original image dataset does not exist.")
-                    if not request["cases"]:
+                    if len(request["cases"]) < 2:
+                        # The copy says "at least two"; the pipeline's train/
+                        # val split needs both, or training runs empty.
                         raise ValueError(
                             "Select at least two cases (rescan the dataset first)."
                         )
