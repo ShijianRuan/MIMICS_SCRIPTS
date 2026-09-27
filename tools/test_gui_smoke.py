@@ -473,6 +473,31 @@ class TestTrainingSetupPathMemory(unittest.TestCase):
                 finally:
                     window.window.close()
 
+    def test_nnunet_training_group_collapsed_by_default(self):
+        # D2: the Training group (Trainer/Fold/GPUs/epochs...) is advanced —
+        # hidden behind a toggle. Hidden widgets still submit their defaults.
+        _AppFixture.app()
+        import nnunet_training_setup_ui as ui
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            home = self._settings_home(tmp, "nnunet_settings.json", {})
+            with mock.patch.object(ui.Path, "home", lambda: home):
+                window = ui.TrainingSetupWindow(
+                    {"workspace": ""}, tmp / "ctx.json", QT
+                )
+                try:
+                    # isHidden() (not isVisible(): the offscreen test never
+                    # shows the window) reports the widget's own visibility.
+                    self.assertTrue(window.training_group.isHidden())
+                    self.assertFalse(window.advanced_toggle.isChecked())
+                    window.advanced_toggle.setChecked(True)
+                    self.assertFalse(window.training_group.isHidden())
+                    window.advanced_toggle.setChecked(False)
+                    self.assertTrue(window.training_group.isHidden())
+                finally:
+                    window.window.close()
+
     def test_flexict_window_prefills_remembered_paths(self):
         _AppFixture.app()
         import flexict_training_setup_ui as ui

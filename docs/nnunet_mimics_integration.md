@@ -83,15 +83,17 @@ the first arbitrary file in a case directory.
 
 ## Exposed parameters
 
-The window groups settings by meaning rather than “basic” and “advanced”:
+The window groups settings by meaning. The one decision an annotator must make
+is which task (dataset ID) — everything else ships with a safe default:
 
 - **Data:** task, dataset ID, modality, image root, label source, label mapping,
   overlap policy, and model library.
 - **Planning:** 2D, 3D full resolution, or 3D low resolution; automatic or
   explicit spacing, patch size, and batch size.
-- **Training:** trainer, epochs, fold, validation fraction, preprocessing
-  workers, GPU count, optional local GPU IDs, pretrained checkpoint,
-  continuation, and inference TTA.
+- **Advanced training settings** (collapsed behind a toggle; every field has a
+  default and a one-line explanation): trainer, epochs, fold, validation
+  fraction, preprocessing workers, GPU count, optional local GPU IDs,
+  pretrained checkpoint, continuation, and inference TTA.
 - **Compute:** this workstation or a saved SSH/Docker server and GPU.
 
 The interface does not expose unsupported combinations. Arbitrary epochs are

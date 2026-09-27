@@ -121,6 +121,27 @@ class TrainingSetupWindow:
         label.setWordWrap(True)
         return label
 
+    def _advanced_toggle(self, group):
+        """Collapse-button for an advanced settings group (D2). Hidden by
+        default; every field inside keeps its default and one-line hint."""
+        QtCore, QtWidgets = self.QtCore, self.QtWidgets
+        toggle = QtWidgets.QToolButton()
+        toggle.setText("Advanced training settings (Trainer, Fold, GPUs, epochs)")
+        toggle.setCheckable(True)
+        toggle.setChecked(False)
+        toggle.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        toggle.setArrowType(QtCore.Qt.RightArrow)
+
+        def refresh(checked):
+            group.setVisible(checked)
+            toggle.setArrowType(
+                QtCore.Qt.DownArrow if checked else QtCore.Qt.RightArrow
+            )
+
+        toggle.toggled.connect(refresh)
+        group.setVisible(False)
+        return toggle
+
     def _path_row(self, edit, title, directory=True, file_filter="All files (*)"):
         QtWidgets = self.QtWidgets
         container = QtWidgets.QWidget()
@@ -394,6 +415,7 @@ class TrainingSetupWindow:
         layout.addWidget(planning)
 
         training, train_form = self._surface("Training")
+        self.training_group = training
         self.trainer_combo = QtWidgets.QComboBox()
         self.trainer_combo.setEditable(True)
         self.trainer_combo.addItem("Configurable standard trainer", "MimicsNNUNetTrainer")
@@ -487,6 +509,11 @@ class TrainingSetupWindow:
         self.tta_check = QtWidgets.QCheckBox("Use mirroring TTA for later inference")
         self.tta_check.setChecked(False)
         train_form.addWidget(self.tta_check, 16, 0, 1, 2)
+        # D2: the whole Training group is advanced — every field has a safe
+        # default and a one-line hint; annotators should not face them unless
+        # they look for them.
+        self.advanced_toggle = self._advanced_toggle(training)
+        layout.addWidget(self.advanced_toggle)
         layout.addWidget(training)
         layout.addStretch(1)
         scroll.setWidget(body)
