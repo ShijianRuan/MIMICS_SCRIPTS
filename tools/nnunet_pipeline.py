@@ -1513,7 +1513,10 @@ def validate_materialized_source_geometry(
     ):
         raise RuntimeError(
             "The source image on disk no longer matches the geometry recorded "
-            "in the open Mimics project. Relink the source image before prediction."
+            "in the open Mimics project. Run 99_Admin > "
+            "04_Fix_Source_Affine_Metadata on the open project to repair the "
+            "stored geometry; if the source file itself changed, re-import "
+            "the case instead."
         )
 
 

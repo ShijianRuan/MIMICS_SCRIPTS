@@ -252,8 +252,12 @@ def _prediction_context():
     ts_root, case_id, source_path = mimics_mask_apply._resolve_prediction_context()
     if not case_id or not source_path:
         raise RuntimeError(
-            "The active project could not be linked to its original image. "
-            "Relink the source image metadata before starting FlexiCT prediction."
+            "The active project could not be linked to its original source "
+            "image, so prediction was not started.\n\n"
+            "Open the project that was created when the case was imported "
+            "(01_Data > 01_Import_Dataset or 02_Import_Single_Case). "
+            "If this project was moved or copied away from the dataset, "
+            "re-import the case instead."
         )
     target_grid = mimics_mask_apply._active_live_grid_payload()
     source_geometry = mimics_mask_apply._active_source_geometry_payload()

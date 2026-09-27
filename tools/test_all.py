@@ -5490,6 +5490,58 @@ class TestSourceImagePathEquivalence(unittest.TestCase):
         actual = normalize_like_nninteractive(quantized)
         np.testing.assert_allclose(actual, expected, rtol=0.0, atol=5.0e-5)
 
+    def test_prediction_context_errors_point_to_real_repair_paths(self):
+        # A4: the old "Relink the source image metadata" wording pointed at
+        # an action that does not exist. The unlink failure (project not
+        # resolvable to a source image) must guide the annotator back to the
+        # import flow, and the stale-geometry failure (which Fix Affine
+        # really does repair) must name that entry.
+        import inspect
+
+        import flexict_mimics
+        import nnunet_mimics
+
+        tools_dir = os.path.dirname(os.path.abspath(__file__))
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        import nnunet_pipeline
+
+        for module in (nnunet_mimics, flexict_mimics):
+            source = inspect.getsource(module._prediction_context)
+            self.assertNotIn("Relink the source image metadata", source)
+            self.assertIn("01_Import_Dataset", source)
+            self.assertIn("re-import the case", source)
+        pipeline_source = inspect.getsource(
+            nnunet_pipeline.validate_materialized_source_geometry
+        )
+        self.assertNotIn("Relink the source image before prediction", pipeline_source)
+        # The entry identifier must stay on one source line so the menu
+        # reference cannot be silently split by future re-wrapping.
+        self.assertIn("04_Fix_Source_Affine_Metadata", pipeline_source)
+        # The rendered message must keep the re-import escape hatch that
+        # Fix Affine itself recommends when the source file changed.
+        with mock.patch("nibabel.load") as fake_load:
+            from types import SimpleNamespace
+
+            fake_load.return_value = SimpleNamespace(
+                shape=(4, 4, 4), affine=np.eye(4)
+            )
+            with self.assertRaises(RuntimeError) as ctx:
+                nnunet_pipeline.validate_materialized_source_geometry(
+                    "image.nii",
+                    {
+                        "source_shape": [4, 4, 4],
+                        "source_voxel_to_ras_matrix": [
+                            [2.0, 0, 0, 0], [0, 1, 0, 0],
+                            [0, 0, 1, 0], [0, 0, 0, 1],
+                        ],
+                    },
+                )
+        message = str(ctx.exception)
+        self.assertIn("04_Fix_Source_Affine_Metadata", message)
+        self.assertIn("re-import", message)
+
+
 
 # ============================================================================
 # L13: New features from user's round of changes
