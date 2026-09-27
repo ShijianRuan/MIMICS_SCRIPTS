@@ -52,7 +52,10 @@ SUITES = [
     ("nnunet_integration", [sys.executable, "tools/test_nnunet_integration.py"], {"fast", "full"}),
     ("nninteractive_bridge_prompts", [sys.executable, "-m", "pytest", "-q", "tools/test_nninteractive_bridge_prompts.py"], {"fast", "full"}),
     ("nninteractive_task_integration", [sys.executable, "tools/test_nninteractive_task_integration.py"], {"fast", "full"}),
-    ("nninteractive_finetune_pkg", [sys.executable, "-m", "pytest", "-q", "integrations/nninteractive-finetune/tests/"], {"fast", "full"}),
+    ("nninteractive_finetune_pkg", [sys.executable, "-m", "pytest", "-q", *sorted(
+        str(path.relative_to(ROOT)).replace("\\", "/")
+        for path in (ROOT / "integrations" / "nninteractive-finetune" / "tests").glob("test_*.py")
+    )], {"fast", "full"}),
     ("nnunet_annotation_version", [sys.executable, "integrations/nnunet_segmentation_workflow/test_annotation_version.py"], {"fast", "full"}),
     ("nnint_deep", [sys.executable, "tools/test_mimics_nnint_deep.py"], {"fast", "full"}),
     ("nnint_functional", [sys.executable, "tools/test_mimics_nnint_functional.py"], {"fast", "full"}),
