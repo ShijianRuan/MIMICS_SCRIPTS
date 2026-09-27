@@ -422,28 +422,65 @@ class PipelineErrorRecoveryTests(unittest.TestCase):
         self.assertGreater(quality["delta_auc"], 0)
 
     def test_cancelled_job_cleans_partial_model(self):
-        """Verify _cleanup_terminal_artifacts doesn't crash on missing paths."""
+        """Cancelled jobs must actually delete the partial model directory."""
         job_dir = self.root / "job"
         job_dir.mkdir()
-        # All paths missing — should not crash
-        try:
-            pipeline._cleanup_terminal_artifacts(
-                {"output_model_dir": str(self.root / "nonexistent")},
-                job_dir, remove_partial_model=True,
-            )
-        except Exception:
-            self.fail("_cleanup_terminal_artifacts crashed on missing paths")
+        # The cleanup only deletes paths inside the job workspace (safety
+        # contract), so the partial model must live there — as it does for
+        # real jobs, where output_model_dir defaults under the workspace.
+        workspace = self.root / "workspace"
+        model_dir = workspace / "task_models" / "partial"
+        model_dir.mkdir(parents=True)
+        (model_dir / "checkpoint.pth").write_bytes(b"x" * 1024)
+        report = pipeline._cleanup_terminal_artifacts(
+            {
+                "workspace": str(workspace),
+                "output_model_dir": str(model_dir),
+            },
+            job_dir,
+            remove_partial_model=True,
+        )
+        self.assertFalse(
+            model_dir.exists(),
+            "cancelled job must delete the partial model directory",
+        )
+        self.assertIn(str(model_dir), report["removed"])
+        # Paths outside the job workspace are never touched, even when the
+        # request asks for them.
+        outside_dir = self.root / "outside" / "model"
+        outside_dir.mkdir(parents=True)
+        report = pipeline._cleanup_terminal_artifacts(
+            {
+                "workspace": str(workspace),
+                "output_model_dir": str(outside_dir),
+            },
+            job_dir,
+            remove_partial_model=True,
+        )
+        self.assertTrue(outside_dir.exists())
+        self.assertEqual(
+            report["not_removed"][0]["reason"], "outside job workspace"
+        )
 
     def test_prepare_manifest_with_no_cases_raises(self):
-        """Empty case list during manifest preparation."""
+        """_run_label_export must fail closed on an empty case selection."""
         job_dir = self.root / "job"
         job_dir.mkdir()
-        # Simulate: request with no cases
-        request = {"cases": [], "source_mode": "prepared"}
-        # The _run_label_export function checks for cases and raises
-        # Here we just verify the empty case guard works
-        cases = [row for row in request.get("cases") or [] if row.get("split") in ("train", "val")]
-        self.assertEqual(len(cases), 0)
+        status_path = job_dir / "status.json"
+        control_path = job_dir / "control.json"
+        log_path = job_dir / "job.log"
+        with self.assertRaises(RuntimeError) as ctx:
+            pipeline._run_label_export(
+                {"cases": [], "source_mode": "prepared"},
+                job_dir,
+                status_path,
+                control_path,
+                log_path,
+            )
+        self.assertIn("No training or validation cases", str(ctx.exception))
+        # Cases are validated before the Mimics executable lookup, so the
+        # empty-selection reason is never masked by a setup error.
+        self.assertFalse((job_dir / "staging").exists())
 
     def _make_terminal_job(self, workspace, name, status, age_days, completed=None):
         job = workspace / "jobs" / name
