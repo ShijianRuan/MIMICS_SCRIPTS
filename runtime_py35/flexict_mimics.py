@@ -574,13 +574,21 @@ def _monitor_tick_locked(monitor):
     if bool(monitor.get("application_cancelled")):
         _stop_monitor(key)
         return
-    if state in ("failed", "cancelled"):
+    if state in ("failed", "cancelled", "abandoned"):
         _stop_monitor(key)
         error_text = str(status.get("error") or "")
         if state == "failed" and _offer_source_geometry_repair(error_text):
             return
+        if state == "abandoned":
+            # Same terminal wording as the training branch: the remote job
+            # was abandoned, and the deadline message would mislead.
+            message = "FlexiCT prediction failed.\n\n{0}".format(
+                error_text or "The remote task was abandoned."
+            )
+        else:
+            message = "FlexiCT prediction {0}.\n\n{1}".format(state, error_text)
         mimics.dialogs.message_box(
-            "FlexiCT prediction {0}.\n\n{1}".format(state, error_text),
+            message,
             title=TITLE,
             ui_blocking=False,
         )

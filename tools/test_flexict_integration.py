@@ -1450,6 +1450,75 @@ class TestActiveLearningRuntimeHandlers(unittest.TestCase):
                 state["cases"]["case01"]["state"], "skipped")
 
 
+class TestInferenceMonitorTerminalStates(unittest.TestCase):
+    """_monitor_tick_locked infer branch must recognize every terminal state
+    the remote pipeline can write - an abandoned remote job otherwise polls
+    until the 24h deadline with a misleading timeout message (B29)."""
+
+    def _import_flexict_mimics(self):
+        # Same stubbing approach as TestActiveLearningRuntimeHandlers above.
+        import types
+
+        sys.path.insert(0, str(ROOT / "runtime_py35"))
+        try:
+            mimics = sys.modules.get("mimics")
+            if mimics is None:
+                mimics = types.ModuleType("mimics")
+                mimics.dialogs = types.ModuleType("mimics.dialogs")
+                mimics.dialogs.message_box = None
+                sys.modules["mimics"] = mimics
+            import flexict_mimics
+            return flexict_mimics
+        finally:
+            sys.path.remove(str(ROOT / "runtime_py35"))
+
+    def _run_infer_tick(self, module, tmp, state, error=""):
+        from nnunet_common import write_json_atomic
+
+        job_dir = Path(tmp) / "job"
+        job_dir.mkdir(parents=True, exist_ok=True)
+        status_path = job_dir / "status.json"
+        write_json_atomic(status_path, {
+            "status": state,
+            "error": error,
+            "updated_at_epoch": time.time(),
+        })
+        monitor = {
+            "monitor_key": "test_infer",
+            "kind": "infer",
+            "status_path": str(status_path),
+            "deadline": time.time() + 60,
+        }
+        module._MONITORS[monitor["monitor_key"]] = monitor
+        with mock.patch.object(
+                module.mimics.dialogs, "message_box") as message_box:
+            module._monitor_tick_locked(monitor)
+        return monitor, message_box
+
+    def test_abandoned_inference_stops_monitor_with_failure_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            module = self._import_flexict_mimics()
+            monitor, message_box = self._run_infer_tick(
+                module, tmp, "abandoned", "remote budget exhausted")
+            self.assertNotIn(
+                "test_infer", module._MONITORS,
+                "abandoned must stop the monitor instead of polling to the "
+                "deadline")
+            message_box.assert_called_once()
+            message = message_box.call_args[0][0]
+            self.assertIn("FlexiCT prediction failed", message)
+            self.assertIn("remote budget exhausted", message)
+
+    def test_failed_inference_still_stops_monitor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            module = self._import_flexict_mimics()
+            monitor, message_box = self._run_infer_tick(
+                module, tmp, "failed", "boom")
+            self.assertNotIn("test_infer", module._MONITORS)
+            message_box.assert_called_once()
+            self.assertIn("FlexiCT prediction failed", message_box.call_args[0][0])
+
+
 class TestModelRegistration(unittest.TestCase):
     def test_register_creates_usable_model(self):
         with tempfile.TemporaryDirectory() as tmp:
