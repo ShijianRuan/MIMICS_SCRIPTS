@@ -1354,7 +1354,60 @@ def test_nninteractive_fast_path_and_mask_buffer(fake, tmp):
 
     module._enqueue_async_prediction(state, counting)
     assert_equal(counting.buffer_reads, 1, "enqueue without supplied hash should read target once")
-    return "source fast path, empty-mask optimization, u8 apply, and hash reuse passed"
+
+    # Degrade path (B28): a 0-voxel result must never wipe the current
+    # Mask without asking. Both branches of the confirm dialog.
+    fake.file.project_path = str(tmp / "session.mcs")
+    fake.data.images.set_active(image)
+    state = {
+        "_job_dir": str(job_dir),
+        "shape": [2, 3, 4],
+        "base_path": "",
+        "interactions": [],
+        "pending_sequence": 1,
+        "image_guid": image.guid,
+        "target_guid": counting.guid,
+        "launch_project_path": module._current_project_path(),
+        "model_identity": "official",
+        "status": "predicting",
+    }
+    module._save_async_job(state)
+    module._metadata_set(counting, module.ASYNC_JOB_METADATA, str(job_dir))
+    counting.set_voxel_buffer(_u8_buffer((2, 3, 4), 1))
+    buffer_path = tmp / "empty_result.u8"
+    buffer_path.write_bytes(bytes(_voxel_count((2, 3, 4))))
+    result_path = job_dir / "results" / "result_000001.json"
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    result_path.write_text(json.dumps({
+        "status": "refined",
+        "output_path": str(buffer_path),
+        "foreground_voxels": 0,
+        "expected_target_sha256": module._mask_sha256(counting, [2, 3, 4]),
+        "model_identity": "official",
+    }), encoding="utf-8")
+    old_apply = module._set_mask_from_u8
+    applies = []
+    try:
+        module._set_mask_from_u8 = lambda *args, **kwargs: applies.append(args)
+        fake.dialogs.questions = []
+        fake.dialogs.question_answers = ["Don't Apply"]
+        outcome = module._handle_async_result(image, counting, state)
+        assert_equal(outcome, "ready", "declined empty result outcome")
+        assert_equal(len(fake.dialogs.questions), 1, "empty result must ask before applying")
+        assert_equal("Don't Apply" in fake.dialogs.questions[0]["buttons"], True, "empty result dialog must offer Don't Apply")
+        assert_equal(applies, [], "declined empty result must not touch the Mask buffer")
+        assert_equal(state["status"], "ready", "declined empty result must leave the session ready")
+
+        fake.dialogs.questions = []
+        fake.dialogs.question_answers = ["Apply Empty Result"]
+        outcome = module._handle_async_result(image, counting, state)
+        assert_equal(outcome, "ready", "accepted empty result outcome")
+        assert_equal(len(fake.dialogs.questions), 0, "re-prompting after a declined empty result must not ask again")
+        assert_equal(applies, [], "accepted empty result must not be re-applied after the decline consumed it")
+    finally:
+        module._set_mask_from_u8 = old_apply
+        module._metadata_delete(counting, module.ASYNC_JOB_METADATA)
+    return "source fast path, empty-mask optimization, u8 apply, hash reuse, and empty-result confirm passed"
 
 
 def test_nninteractive_derived_draft_session(fake, tmp):

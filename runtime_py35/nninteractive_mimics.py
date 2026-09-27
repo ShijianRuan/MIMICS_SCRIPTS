@@ -4463,6 +4463,33 @@ def _handle_async_result(image, target, state):
                 output_path
             )
         )
+    if int(result.get("foreground_voxels", -1)) == 0:
+        # Applying an empty result in place would wipe everything the
+        # annotator has already drawn - silently. Ask first.
+        answer = mimics.dialogs.question_box(
+            message=(
+                "nnInteractive returned an empty result (0 foreground voxels).\n\n"
+                "Applying it would clear the current Mask contents.\n\n"
+                "Don't Apply keeps your current Mask. Move the foreground point "
+                "closer to the structure center and place background points "
+                "farther away, then predict again."
+            ),
+            buttons="Don't Apply;Apply Empty Result",
+            title="nnInteractive Returned an Empty Mask",
+            ui_blocking=True,
+        )
+        if answer != "Apply Empty Result":
+            _mimics_log(
+                logging.INFO,
+                "nnInteractive empty result was not applied; the session stays "
+                "ready for new prompts.",
+            )
+            state["pending_sequence"] = None
+            state["status"] = "ready"
+            state["updated_at_epoch"] = time.time()
+            _save_async_job(state)
+            return "ready"
+
     target = _choose_completed_result_target(image, target, state, result)
     _set_mask_from_u8(target, output_path, state["shape"])
     _make_mask_visible(target)
