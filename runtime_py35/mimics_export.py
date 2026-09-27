@@ -514,7 +514,6 @@ def _bridge_script():
     candidates = [
         os.path.join(here, "..", "mimics_bridge.py"),
         os.path.join(here, "mimics_bridge.py"),
-        os.path.join(_project_root(), "adapters", "mimics", "mimics_bridge.py"),
     ]
     for c in candidates:
         c = os.path.abspath(c)

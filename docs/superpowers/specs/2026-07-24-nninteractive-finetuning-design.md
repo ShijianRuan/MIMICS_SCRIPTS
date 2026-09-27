@@ -2,7 +2,7 @@
 
 - **日期**：2026-07-24
 - **状态**：设计阶段
-- **依赖**：nnInteractive bridge（已集成）、DINOv3 few-shot pipeline（参考设计模式）
+- **依赖**：nnInteractive bridge（已集成）、DINOv3 few-shot pipeline（参考设计模式；**已于 2026-09-23 删除**，commit b632d70，改由 FlexiCT 微调路线取代——本文属历史设计文档，few-shot 相关引用仅存历史价值，现状以 `docs/MIMICS_PROJECT_ARCHITECTURE_CN.md` 为准）
 
 ---
 

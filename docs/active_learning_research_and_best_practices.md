@@ -3,7 +3,7 @@
 - **日期**：2026-07-14
 - **状态**：调研完成（源码级 MONAI Label 分析 + 多路文献检索 + 对抗式验证；2026-08-01 经独立复核：16 条 arXiv 引用全部真实存在，无虚构）
 - **更新**：2026-08-01 追加 §8 增量调研（工业界工具全景、Mimics 集成、微调框架结合、2024–2026 学术增量、标注效率量化证据），并对 §1 源码细节与 §7 引用做勘误（详见 §8.6）
-- **指向**：本文是 Mimics 难例分诊模块设计的参考依据，设计 spec 见 `docs/superpowers/specs/2026-07-14-mimics-active-learning-hardcase-design.md`
+- **指向**：本文是 Mimics 难例分诊模块设计的参考依据，设计 spec 见 `docs/superpowers/specs/2026-07-14-mimics-active-learning-hardcase-design.md`（spec 与本文均为未实施的历史调研产物；文中 `fewshot_strategies.py` 等 few-shot 模块引用已于 2026-09-23 随 DINOv3 路线删除，仅存历史价值）
 
 ---
 

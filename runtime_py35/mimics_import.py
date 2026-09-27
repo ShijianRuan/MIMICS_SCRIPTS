@@ -1017,7 +1017,6 @@ def _bridge_script():
     candidates = [
         os.path.join(here, "..", "mimics_bridge.py"),
         os.path.join(here, "mimics_bridge.py"),
-        os.path.join(_project_root(), "adapters", "mimics", "mimics_bridge.py"),
     ]
     for c in candidates:
         c = os.path.abspath(c)
@@ -2764,7 +2763,6 @@ def _launch_background_mimics(output_dir, total_count=0, schedule_retry=True):
     script_candidates = [
         os.path.join(here, "create_mcs_batch.py"),
         os.path.join(here, "..", "runtime_py35", "create_mcs_batch.py"),
-        os.path.join(_project_root(), "adapters", "mimics", "runtime_py35", "create_mcs_batch.py"),
     ]
     script_path = None
     for c in script_candidates:

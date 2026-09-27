@@ -1,5 +1,13 @@
 # Mimics 难例分诊模块设计（MONAI-Mirrored Active Learning）
 
+> **归档说明（2026-09-27）**：本文为历史设计文档，从未实施。文中引用的
+> DINOv3 few-shot 模块（`fewshot_pipeline.py`、`fewshot_mimics.py` 等）
+> 已于 2026-09-23 整体删除（commit b632d70，改由 FlexiCT 微调路线取代），
+> 文中所有 few-shot 路径与模块引用仅存历史价值。`docs/active_learning_
+> implementation_plan.md` 亦已不存在。阅读时以
+> `docs/MIMICS_PROJECT_ARCHITECTURE_CN.md` 为现状唯一依据。
+
+
 - **日期**: 2026-07-14（2026-08-01 第二版：按"三点主线"对齐 + 多器官/成本约束勘误 + 交互引擎决策）
 - **状态**: 设计待评审（v2 待评审）
 - **作者**: Claude (与 ShijianRuan 协作 brainstorming)
