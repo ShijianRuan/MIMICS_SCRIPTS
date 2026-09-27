@@ -11013,6 +11013,51 @@ class TestPipelineCommon(unittest.TestCase):
         self.assertIsNone(pipeline_common.write_cancel_marker(""))
         self.assertFalse(os.path.exists(""))
 
+    def test_rotate_log_shifts_backups_and_drops_oldest(self):
+        import tools.pipeline_common as pipeline_common
+
+        path = os.path.join(self.tmp, "pipeline.log")
+        for index in range(1, 4):  # .1, .2, .3 already exist (backups=3)
+            Path(path + "." + str(index)).write_text("old" + str(index), encoding="utf-8")
+        Path(path).write_text("x", encoding="utf-8")
+        # A path under the threshold is left untouched.
+        pipeline_common.rotate_log(path, max_bytes=10, backups=3)
+        self.assertTrue(Path(path).exists())
+        # Over the threshold: chain shifts by one, oldest (.3) is dropped,
+        # the live log becomes .1.
+        Path(path).write_text("x" * 20, encoding="utf-8")
+        pipeline_common.rotate_log(path, max_bytes=10, backups=3)
+        self.assertFalse(Path(path).exists())
+        self.assertEqual("x" * 20, Path(path + ".1").read_text(encoding="utf-8"))
+        self.assertEqual("old1", Path(path + ".2").read_text(encoding="utf-8"))
+        self.assertEqual("old2", Path(path + ".3").read_text(encoding="utf-8"))
+        # backups=0 wipes the live log instead of rotating it
+        # (existing backup files are left as-is).
+        Path(path).write_text("x" * 20, encoding="utf-8")
+        pipeline_common.rotate_log(path, max_bytes=10, backups=0)
+        self.assertFalse(Path(path).exists())
+        self.assertTrue(Path(path + ".1").exists())
+        # A missing path must not raise.
+        pipeline_common.rotate_log(os.path.join(self.tmp, "never.log"))
+
+    def test_runtime_common_rotate_log_file_matches_pipeline_semantics(self):
+        """runtime_py35 shares one rotate implementation; pin the py3.5 side."""
+        import runtime_common
+
+        path = os.path.join(self.tmp, "runtime.log")
+        Path(path + ".3").write_text("old3", encoding="utf-8")
+        Path(path + ".2").write_text("old2", encoding="utf-8")
+        Path(path + ".1").write_text("old1", encoding="utf-8")
+        Path(path).write_text("y" * 20, encoding="utf-8")
+        runtime_common.rotate_log_file(path, max_bytes=10, backups=3)
+        self.assertFalse(Path(path).exists())
+        self.assertEqual("y" * 20, Path(path + ".1").read_text(encoding="utf-8"))
+        self.assertEqual("old1", Path(path + ".2").read_text(encoding="utf-8"))
+        self.assertEqual("old2", Path(path + ".3").read_text(encoding="utf-8"))
+        self.assertFalse(Path(path + ".4").exists())
+        # Best-effort contract: a bad path must not raise.
+        runtime_common.rotate_log_file(os.path.join(self.tmp, "no-such-dir", "x.log"))
+
     def test_copy_file_atomic_publishes_exactly_once(self):
         import tools.pipeline_common as pipeline_common
 

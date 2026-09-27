@@ -428,6 +428,34 @@ def read_json(path, default=None):
         return default
 
 
+def rotate_log_file(path, max_bytes=5 * 1024 * 1024, backups=3):
+    """Rotate ``path`` to ``path.1`` .. ``path.N`` once it exceeds ``max_bytes``.
+
+    Single home for the rotation logic previously duplicated (verbatim) in
+    create_mcs_batch, mimics_export, mimics_import, and nninteractive_mimics.
+    Best effort: any failure is swallowed - logging must never crash the
+    Mimics-side scripts that call it.
+    """
+    try:
+        if not os.path.isfile(path) or os.path.getsize(path) < max_bytes:
+            return
+        backups = int(backups)
+        if backups <= 0:
+            os.remove(path)
+            return
+        oldest = "{0}.{1}".format(path, backups)
+        if os.path.isfile(oldest):
+            os.remove(oldest)
+        for index in range(backups - 1, 0, -1):
+            src = "{0}.{1}".format(path, index)
+            dst = "{0}.{1}".format(path, index + 1)
+            if os.path.isfile(src):
+                os.rename(src, dst)
+        os.rename(path, path + ".1")
+    except Exception:
+        pass
+
+
 def safe_filename(value):
     text = str(value or "unknown")
     safe = []

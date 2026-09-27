@@ -432,24 +432,7 @@ def _update_gui():
 
 
 def _rotate_log_file(path, max_bytes=_LOG_ROTATE_BYTES, backups=_LOG_ROTATE_BACKUPS):
-    try:
-        if not os.path.isfile(path) or os.path.getsize(path) < max_bytes:
-            return
-        backups = int(backups)
-        if backups <= 0:
-            os.remove(path)
-            return
-        oldest = "{0}.{1}".format(path, backups)
-        if os.path.isfile(oldest):
-            os.remove(oldest)
-        for index in range(backups - 1, 0, -1):
-            src = "{0}.{1}".format(path, index)
-            dst = "{0}.{1}".format(path, index + 1)
-            if os.path.isfile(src):
-                os.rename(src, dst)
-        os.rename(path, path + ".1")
-    except Exception:
-        pass
+    return runtime_common.rotate_log_file(path, max_bytes=max_bytes, backups=backups)
 
 
 def _append_import_log(root_dir, message):

@@ -171,25 +171,7 @@ def read_json(path, default=None):
 
 
 def rotate_log(path):
-    path = Path(path)
-    try:
-        if not path.is_file() or path.stat().st_size < LOG_ROTATE_BYTES:
-            return
-        backups = int(LOG_ROTATE_BACKUPS)
-        if backups <= 0:
-            path.unlink()
-            return
-        oldest = path.with_name(path.name + "." + str(backups))
-        if oldest.is_file():
-            oldest.unlink()
-        for index in range(backups - 1, 0, -1):
-            src = path.with_name(path.name + "." + str(index))
-            dst = path.with_name(path.name + "." + str(index + 1))
-            if src.is_file():
-                src.rename(dst)
-        path.rename(path.with_name(path.name + ".1"))
-    except Exception:
-        pass
+    return pipeline_common.rotate_log(path, max_bytes=LOG_ROTATE_BYTES, backups=LOG_ROTATE_BACKUPS)
 
 
 def append_log(workspace, message):

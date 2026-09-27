@@ -106,6 +106,34 @@ def read_json(path, default=None):
         return default
 
 
+def rotate_log(path, max_bytes=5 * 1024 * 1024, backups=3):
+    """Rotate ``path`` to ``path.1`` .. ``path.N`` once it exceeds ``max_bytes``.
+
+    Single home for the external-pipeline rotation logic (previously a local
+    copy in mimics_label_export). Best effort: any failure is swallowed -
+    log rotation must never crash the pipeline that calls it.
+    """
+    path = Path(path)
+    try:
+        if not path.is_file() or path.stat().st_size < max_bytes:
+            return
+        backups = int(backups)
+        if backups <= 0:
+            path.unlink()
+            return
+        oldest = path.with_name("{}.{}".format(path.name, backups))
+        if oldest.is_file():
+            oldest.unlink()
+        for index in range(backups - 1, 0, -1):
+            src = path.with_name("{}.{}".format(path.name, index))
+            dst = path.with_name("{}.{}".format(path.name, index + 1))
+            if src.is_file():
+                src.rename(dst)
+        path.rename(path.with_name(path.name + ".1"))
+    except Exception:
+        pass
+
+
 def write_cancel_marker(cancel_path):
     """Best-effort cancel marker; returns an error string or None."""
     if not cancel_path:
