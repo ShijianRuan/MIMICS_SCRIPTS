@@ -79,6 +79,7 @@ _mock_mimics.view = _FakeModule()
 _mock_mimics.view.set_contrast = _fake_fn
 _mock_mimics.view.get_contrast = lambda: None
 _mock_mimics.file = _FakeModule()
+_mock_mimics.file.get_active_project = lambda: None
 _mock_mimics.file.import_dicom_images = _fake_fn
 _mock_mimics.file.open_project = _fake_fn
 _mock_mimics.file.save_project = _fake_fn
@@ -3477,6 +3478,7 @@ class TestStopBackgroundServices(unittest.TestCase):
             "create_mcs_batch.py",
             "mimics_export.py",
             "mimics_import.py",
+            "remote_training_controller.py",
             "nnunet_pipeline.py",
             "nnunet_stage_worker.py",
             "nnunet_training_setup_ui.py",
@@ -3654,10 +3656,24 @@ class TestStopBackgroundServices(unittest.TestCase):
         for module_name in (
             "mimics_import", "mimics_export", "mask_import",
             "fix_source_affine_metadata", "nninteractive_mimics",
-            "nnunet_mimics",
+            "nnunet_mimics", "flexict_mimics",
         ):
             self.assertIn(module_name, monitor_source)
-        self.assertIn('"action": "cancel"', monitor_source)
+        # Both external-controller integrations get a cancel marker written
+        # BEFORE their monitors are detached (B23: FlexiCT previously missed
+        # this, leaving its controllers to the ungraceful PowerShell sweep).
+        cancel_source = inspect.getsource(
+            mimics_stop_background._cancel_controllers_before_detach
+        )
+        self.assertIn('"action": "cancel"', cancel_source)
+        self.assertLess(
+            monitor_source.index('_cancel_controllers_before_detach("nnunet_mimics")'),
+            monitor_source.index('_stop_import_monitor'),
+        )
+        self.assertLess(
+            monitor_source.index('_cancel_controllers_before_detach("flexict_mimics")'),
+            monitor_source.index('_stop_import_monitor'),
+        )
 
     def test_stop_all_writes_nnunet_cancel_before_detaching_monitor(self):
         import mimics_stop_background as msb
@@ -3690,6 +3706,41 @@ class TestStopBackgroundServices(unittest.TestCase):
             else:
                 sys.modules["nnunet_mimics"] = previous
         self.assertEqual([("nnunet-active", "cancel")], observations)
+
+    def test_stop_all_writes_flexict_cancel_before_detaching_monitor(self):
+        """B23: FlexiCT controllers get the same pre-detach cancel marker
+        nnU-Net gets (job_dir/status.json + control.json layout is shared)."""
+        import mimics_stop_background as msb
+
+        status_path = os.path.join(self.tmp, "flexict_status.json")
+        control_path = os.path.join(self.tmp, "control.json")
+        Path(status_path).write_text(
+            json.dumps({
+                "status": "training",
+            }),
+            encoding="utf-8",
+        )
+        observations = []
+
+        def stop_monitor(key):
+            control = msb.runtime_common.read_json(control_path, {}) or {}
+            observations.append((key, control.get("action")))
+
+        fake = _FakeModule()
+        fake._MONITORS = {"flexict-active": {"status_path": status_path}}
+        fake._stop_monitor = stop_monitor
+        previous = sys.modules.get("flexict_mimics")
+        try:
+            sys.modules["flexict_mimics"] = fake
+            msb._stop_inprocess_monitors()
+        finally:
+            if previous is None:
+                sys.modules.pop("flexict_mimics", None)
+            else:
+                sys.modules["flexict_mimics"] = previous
+        # The control marker must exist (fallback: dirname(status)/control.json)
+        # and carry a cancel action before the monitor is detached.
+        self.assertEqual([("flexict-active", "cancel")], observations)
 
     def test_environment_setup_has_a_scoped_stop_path(self):
         import inspect
@@ -9999,23 +10050,36 @@ class TestImportReceiptAndUndo(unittest.TestCase):
         image = _FakeModule()
         image.masks = [_FakeMask(name) for name in masks_alive]
 
-        import_undo_mimics.mimics.data.images = [image]
-        import_undo_mimics.mimics.file.get_active_project = (
-            lambda: saved["open_target"][0] if saved["open_target"] else None
-        )
-        import_undo_mimics.mimics.file.open_project = (
-            lambda filename=None: saved["open_target"].append(filename)
-        )
-        import_undo_mimics.mimics.file.save_project = (
-            lambda filename=None, save_as_type=None:
-                saved["saves"].append(filename)
-        )
-        import_undo_mimics.mimics.file.close_project = (
-            lambda: saved.__setitem__("closes", saved["closes"] + 1)
-        )
-        import_undo_mimics.mimics.dialogs.message_box = (
-            lambda *a, **kw: saved["message_boxes"].append((a, kw)) or True
-        )
+        # Patch (not assign) the shared mimics mock: bare assignment leaked a
+        # plain list into mimics.data.images for the rest of the batch,
+        # breaking later tests that patch images.get_active (R49).
+        patches = [
+            mock.patch.object(import_undo_mimics.mimics.data, "images", [image]),
+            mock.patch.object(
+                import_undo_mimics.mimics.file, "get_active_project",
+                lambda: saved["open_target"][0] if saved["open_target"] else None,
+            ),
+            mock.patch.object(
+                import_undo_mimics.mimics.file, "open_project",
+                lambda filename=None: saved["open_target"].append(filename),
+            ),
+            mock.patch.object(
+                import_undo_mimics.mimics.file, "save_project",
+                lambda filename=None, save_as_type=None:
+                    saved["saves"].append(filename),
+            ),
+            mock.patch.object(
+                import_undo_mimics.mimics.file, "close_project",
+                lambda: saved.__setitem__("closes", saved["closes"] + 1),
+            ),
+            mock.patch.object(
+                import_undo_mimics.mimics.dialogs, "message_box",
+                lambda *a, **kw: saved["message_boxes"].append((a, kw)) or True,
+            ),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
         return saved
 
     def test_undo_roundtrip_file_rolled_back_when_fingerprint_matches(self):
@@ -10096,9 +10160,12 @@ class TestImportReceiptAndUndo(unittest.TestCase):
         empty = os.path.join(self.tmp, "empty")
         os.makedirs(empty)
         boxes = []
-        import_undo_mimics.mimics.dialogs.message_box = (
-            lambda *a, **kw: boxes.append(kw) or True
+        message_patch = mock.patch.object(
+            import_undo_mimics.mimics.dialogs, "message_box",
+            lambda *a, **kw: boxes.append(kw) or True,
         )
+        message_patch.start()
+        self.addCleanup(message_patch.stop)
         with mock.patch.object(import_undo_mimics, "_candidate_receipt_dirs",
                                lambda: [empty]):
             code = import_undo_mimics.undo_last_import(confirm=False)
@@ -10123,18 +10190,19 @@ class TestImportReceiptAndUndo(unittest.TestCase):
 
         boxes = []
         state = {"active": "C:\\other\\project.mcs"}
-        import_undo_mimics.mimics.file.get_active_project = (
-            lambda: state["active"]
+        active_patch = mock.patch.object(
+            import_undo_mimics.mimics.file, "get_active_project",
+            lambda: state["active"],
         )
-        import_undo_mimics.mimics.dialogs.message_box = (
-            lambda *a, **kw: boxes.append((a, kw)) or True
+        message_patch = mock.patch.object(
+            import_undo_mimics.mimics.dialogs, "message_box",
+            lambda *a, **kw: boxes.append((a, kw)) or True,
         )
-        try:
-            ok = import_undo_mimics._open_project("C:\\target\\case.mcs")
-        finally:
-            import_undo_mimics.mimics.file.get_active_project = (
-                lambda: None
-            )
+        active_patch.start()
+        message_patch.start()
+        self.addCleanup(active_patch.stop)
+        self.addCleanup(message_patch.stop)
+        ok = import_undo_mimics._open_project("C:\\target\\case.mcs")
         self.assertFalse(ok)
         self.assertEqual(1, len(boxes))
         text = boxes[0][0][0]

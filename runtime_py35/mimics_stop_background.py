@@ -39,6 +39,7 @@ MARKERS = (
     "mimics_import.py",
 
     # AI training/inference integrations
+    "remote_training_controller.py",
     "nninteractive_finetune_pipeline.py",
     "nninteractive_task_model_center.py",
     "nninteractive_task_model_chooser.py",
@@ -97,6 +98,45 @@ def _clear_resource_locks():
     return runtime_common.cleanup_stale_resource_locks(lock_dir)
 
 
+def _cancel_controllers_before_detach(module_name):
+    """Write control.json cancel markers for a monitor module's live tasks.
+
+    External controllers (nnU-Net / FlexiCT, especially the remote ones)
+    need their control marker before the Mimics monitor is detached; the
+    controller remains responsible for stopping/removing its remote
+    container safely. The shared status/control layout
+    (job_dir/status.json + control.json) makes one helper cover both.
+    """
+    module = sys.modules.get(module_name)
+    if module is None:
+        return
+    monitors = getattr(module, "_MONITORS", {}) or {}
+    for monitor in list(monitors.values()):
+        status_path = str(monitor.get("status_path") or "")
+        status = runtime_common.read_json(status_path, {}) or {}
+        state = str(status.get("status") or "").lower()
+        if state in (
+            "completed", "failed", "cancelled", "abandoned", "orphaned_remote",
+            "attention_required",
+        ):
+            continue
+        control_path = str(status.get("control_path") or "")
+        if not control_path and status_path:
+            control_path = os.path.join(os.path.dirname(status_path), "control.json")
+        if control_path:
+            try:
+                runtime_common.write_json_atomic(
+                    control_path,
+                    {
+                        "action": "cancel",
+                        "requested_at_epoch": time.time(),
+                        "reason": "Stop Background Services",
+                    },
+                )
+            except Exception:
+                pass
+
+
 def _stop_inprocess_monitors():
     """Detach Mimics timers before their owned children are terminated."""
     stopped = 0
@@ -107,36 +147,10 @@ def _stop_inprocess_monitors():
             stopped += 1
         except Exception:
             pass
-    # nnU-Net controllers, especially remote controllers, need their control
-    # marker before the Mimics monitor is detached. The controller remains
-    # responsible for stopping/removing its remote container safely.
-    nnunet = sys.modules.get("nnunet_mimics")
-    if nnunet is not None:
-        monitors = getattr(nnunet, "_MONITORS", {}) or {}
-        for monitor in list(monitors.values()):
-            status_path = str(monitor.get("status_path") or "")
-            status = runtime_common.read_json(status_path, {}) or {}
-            state = str(status.get("status") or "").lower()
-            if state in (
-                "completed", "failed", "cancelled", "abandoned", "orphaned_remote",
-                "attention_required",
-            ):
-                continue
-            control_path = str(status.get("control_path") or "")
-            if not control_path and status_path:
-                control_path = os.path.join(os.path.dirname(status_path), "control.json")
-            if control_path:
-                try:
-                    runtime_common.write_json_atomic(
-                        control_path,
-                        {
-                            "action": "cancel",
-                            "requested_at_epoch": time.time(),
-                            "reason": "Stop Background Services",
-                        },
-                    )
-                except Exception:
-                    pass
+    # Controllers need their cancel marker before the Mimics monitor is
+    # detached (see _cancel_controllers_before_detach).
+    _cancel_controllers_before_detach("nnunet_mimics")
+    _cancel_controllers_before_detach("flexict_mimics")
     exporter = sys.modules.get("mimics_export")
     if exporter is not None:
         try:
