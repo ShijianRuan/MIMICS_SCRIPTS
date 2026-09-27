@@ -2097,6 +2097,19 @@ class MimicsRuntimeTests(unittest.TestCase):
             process=process, pid=123, graceful_seconds=0.5
         )
 
+    def test_remote_unreachable_is_not_rewritten_by_stopped_process_check(self):
+        # B31: after the remote reconnect budget runs out, the controller
+        # writes the non-terminal remote_unreachable state with re-attach
+        # guidance. The Mimics-side process-stopped check must not rewrite
+        # it to a generic failure within 10s (tools/nnunet_jobs.py's
+        # reconcile exemption list already includes it).
+        status = {
+            "status": "remote_unreachable",
+            "updated_at_epoch": time.time() - 60,
+            "worker_pid": 987654,
+        }
+        self.assertFalse(self.module._managed_job_process_stopped(status))
+
 
 if __name__ == "__main__":
     # Isolate real lock acquisitions (dataset lock, GPU lock) to a temp

@@ -412,7 +412,8 @@ def _process_finished_unexpectedly(monitor, status):
 def _managed_job_process_stopped(status):
     state = str(status.get("status") or "").lower()
     if state in (
-        "completed", "failed", "cancelled", "abandoned", "orphaned_remote", "attention_required"
+        "completed", "failed", "cancelled", "abandoned", "orphaned_remote",
+        "remote_unreachable", "attention_required",
     ):
         return False
     try:
