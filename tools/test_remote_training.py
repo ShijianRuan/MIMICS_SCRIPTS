@@ -1744,6 +1744,80 @@ class MonitorRobustnessTests(unittest.TestCase):
             # the status payload changed before completion.
             self.assertFalse(final.get("remote_stall_suspected", False))
 
+    def test_docker_control_failures_are_bounded(self):
+        # B32: a persistently failing docker socket used to retry forever,
+        # keeping the controller process alive with the status stuck in
+        # remote_control_unavailable. The budget mirrors the reconnect one
+        # and lands on the same non-terminal RemoteServerUnreachable path.
+        with tempfile.TemporaryDirectory() as temporary:
+            status_path = self._status_file(temporary)
+            remote_log = Path(temporary) / "worker.log"
+            remote_log.write_bytes(b"")
+            log_path = Path(temporary) / "controller.log"
+
+            class Session:
+                def ensure_directory(self, _path):
+                    pass
+
+                def path_exists(self, _path):
+                    return True
+
+                def execute(self, command, **_kwargs):
+                    raise controller.RemoteCommandError(
+                        "docker: Cannot connect to the Docker daemon"
+                    )
+
+                def execute_result(self, command, **_kwargs):
+                    raise controller.RemoteCommandError("docker down")
+
+                def read_remote_json(self, _path, default=None):
+                    return {"status": "training", "epoch": 1}
+
+                def download_appended(self, _remote, _local, offset):
+                    return offset
+
+            class AdvancingClock(object):
+                # The retry branch waits out ten real seconds per attempt;
+                # with sleep patched to a no-op that wait would busy-spin in
+                # real time (30 attempts x 10s). Advance the clock instead.
+                def __init__(self):
+                    self.now = time.time()
+
+                def __call__(self):
+                    current = self.now
+                    self.now += 1.0
+                    return current
+
+            with mock.patch.object(
+                controller, "REMOTE_STALL_SECONDS", 0.0
+            ), mock.patch.object(
+                controller.time, "sleep", lambda _seconds: None
+            ), mock.patch.object(
+                controller.time, "time", AdvancingClock()
+            ):
+                with self.assertRaisesRegex(
+                    controller.RemoteServerUnreachable, "Docker control"
+                ):
+                    controller._monitor_remote(
+                        Session(),
+                        {"kind": "nnunet", "job_id": "job"},
+                        {"profile_id": "p", "name": "server"},
+                        status_path,
+                        {"job": "/remote/job"},
+                        "container",
+                        "user",
+                        log_path,
+                        remote_log,
+                    )
+            final = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                final.get("status"), "remote_control_unavailable"
+            )
+            self.assertEqual(
+                final.get("remote_docker_error_attempt"),
+                controller.RECONNECT_MAX_ATTEMPTS,
+            )
+
 
 class TransferEfficiencyTests(unittest.TestCase):
     """Caches keep repeated remote runs from re-paying large transfers."""

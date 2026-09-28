@@ -3788,6 +3788,11 @@ def _monitor_remote(
     last_activity_epoch = time.time()
     stall_hint_active = False
     last_worker_pid = ""
+    # Budget for docker-control failures, mirroring the reconnect budget:
+    # without it a persistently failing docker socket keeps this controller
+    # process alive forever with the job status stuck in
+    # remote_control_unavailable.
+    docker_error_attempt = 0
     while True:
         try:
             _raise_if_abandoned(status_path)
@@ -3947,6 +3952,7 @@ def _monitor_remote(
                     remote_stall_detail=REMOTE_STALL_HINT,
                 )
             reconnect_attempt = 0
+            docker_error_attempt = 0
         except RemoteCommandError as exc:
             _append_log(
                 controller_log,
@@ -3954,13 +3960,24 @@ def _monitor_remote(
                     exc
                 ),
             )
+            docker_error_attempt += 1
             _status_update(
                 status_path,
                 status="remote_control_unavailable",
                 phase="remote_control_unavailable",
                 remote_state_unknown=True,
                 remote_connection_error=str(exc),
+                remote_docker_error_attempt=docker_error_attempt,
             )
+            if docker_error_attempt >= RECONNECT_MAX_ATTEMPTS:
+                raise RemoteServerUnreachable(
+                    "Remote Docker control failed {} times in a row ({}). "
+                    "The remote container may still be running; use "
+                    "Re-attach to retry monitoring once Docker is reachable "
+                    "again, or Stop/Abandon Locally to end this task.".format(
+                        docker_error_attempt, exc
+                    )
+                )
             deadline = time.time() + 10.0
             while time.time() < deadline:
                 _raise_if_cancelled(status_path)
