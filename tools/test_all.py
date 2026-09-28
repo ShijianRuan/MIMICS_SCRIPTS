@@ -3459,6 +3459,10 @@ class TestScriptingLibraryEntries(unittest.TestCase):
             "05_Window_Reset_Full_Range",
             "04_Fix_Source_Affine_Metadata",
             "nnUNet/04_Stop_Running_Task",
+            # DINOv3 was retired per constitution; its library entries must
+            # not reappear in living docs (vendored FlexiCT model code
+            # carrying the DINOv3 license header is not a library entry).
+            "02_AI/DINOv3",
         )
         living_docs = [
             "docs/mimics_entry_guide.md",
@@ -3980,6 +3984,17 @@ class TestStopBackgroundServices(unittest.TestCase):
 
 
 class TestNNInteractiveMimicsParsing(unittest.TestCase):
+    def test_owned_server_sweep_accepts_current_schema(self):
+        """C6-1: the bridge writes nninteractive_owned_server.v3; the Mimics
+        startup sweep must not silently skip it for only matching v2."""
+        import inspect
+        import nninteractive_mimics
+
+        source = inspect.getsource(
+            nninteractive_mimics._cleanup_stale_owned_servers
+        )
+        self.assertIn('"nninteractive_owned_server.v3"', source)
+
     def test_prompt_set_prediction_step_count(self):
         from nninteractive_mimics import _interaction_prediction_step_count
 
@@ -4373,11 +4388,21 @@ class TestNNInteractiveContinuousPrompting(unittest.TestCase):
                 # Reading env vars is fine; telling the user to set them is not.
                 ["disable MIMICS_", "enable MIMICS_"],
             os.path.join("runtime_py35", "setup_environment.py"):
-                ["Run: python"],
+                ["Run: python", "Run 'offline-bundle'"],
             os.path.join("runtime_py35", "mimics_import.py"):
-                ["04 Stop Import Queue", "check mimics_import.log"],
+                ["04 Stop Import Queue", "check mimics_import.log",
+                 "Configure MIMICS_BACKGROUND_EXE",
+                 "Stop All Owned Background Services"],
+            os.path.join("runtime_py35", "mimics_export.py"):
+                ["Configure MIMICS_BACKGROUND_EXE", "check mimics_export.log"],
+            os.path.join("runtime_py35", "mimics_stop_background.py"):
+                # Report/check paths belong in the _mimics_log line, never in
+                # user dialogs. Log lines embed them after a format prefix
+                # ("{0}\nReport: ..."); only leaked dialog fragments are
+                # standalone literals starting with "Report: / "Check: .
+                ["Report: {2}", '"Report: ', '"Check: '],
             os.path.join("tools", "mimics_label_export.py"):
-                ["04 Stop Import Queue"],
+                ["04 Stop Import Queue", "Set MIMICS_BACKGROUND_EXE"],
             os.path.join("tools", "setup_env.py"):
                 ["Run: python"],
         }
@@ -4693,6 +4718,75 @@ class TestEdgeCases(unittest.TestCase):
 
     def tearDown(self):
         _cleanup(self.tmp)
+
+    def test_bridge_worker_log_default_is_absolute(self):
+        """C6-2: before the first initialize request the worker's log path
+        must not be relative - early errors would land in an arbitrary CWD."""
+        import inspect
+        import nninteractive_bridge
+
+        source = inspect.getsource(nninteractive_bridge._worker_main)
+        self.assertNotIn(
+            'Path("nninteractive_bridge.jsonl")', source,
+            "the worker log default must stay absolute (temp dir)"
+        )
+
+    def test_affine_repair_already_running_returns_nonzero(self):
+        """C6-4: offer_repair_for_prediction_failure treats main() == 0 as
+        "a repair flow was started" and swallows the original failure dialog.
+        The already-running branch must return non-zero so the caller still
+        shows it."""
+        import fix_source_affine_metadata as fix
+
+        active = {"fix-1": {"done": False, "key": "fix-1"}}
+        with mock.patch.object(fix, "_MONITORS", active), \
+                mock.patch.object(
+                    fix.mimics.dialogs, "question_box",
+                    lambda **_kw: "Keep Running",
+                ):
+            code = fix.main()
+        self.assertNotEqual(0, code)
+
+    def test_setup_monitor_deadline_extends_while_window_alive(self):
+        """C6-3: a training form left open past the 1h deadline must not
+        lose its completion dialog; the deadline extends while the setup
+        window's process is alive."""
+        import nnunet_mimics
+
+        # Deadline already passed, but the setup process still exists.
+        monitor = {
+            "monitor_key": "k",
+            "kind": "train_setup",
+            "status_path": os.path.join(self.tmp, "missing.json"),
+            "controller_pid": os.getpid(),  # this test process is alive
+            "deadline": time.time() - 1.0,
+            "last_line": "",
+        }
+        with mock.patch.object(nnunet_mimics, "_stop_monitor") as stop, \
+                mock.patch.object(
+                    nnunet_mimics, "_read_json", lambda *a, **kw: {}
+                ):
+            nnunet_mimics._monitor_tick_locked(monitor)
+        stop.assert_not_called()
+        self.assertGreater(monitor["deadline"], time.time())
+
+    def test_setup_monitor_deadline_stops_when_window_dead(self):
+        import nnunet_mimics
+
+        monitor = {
+            "monitor_key": "k",
+            "kind": "train_setup",
+            "status_path": os.path.join(self.tmp, "missing.json"),
+            "controller_pid": None,  # process already gone / transitioned
+            "deadline": time.time() - 1.0,
+            "last_line": "",
+        }
+        with mock.patch.object(nnunet_mimics, "_stop_monitor") as stop, \
+                mock.patch.object(
+                    nnunet_mimics, "_read_json", lambda *a, **kw: {}
+                ):
+            nnunet_mimics._monitor_tick_locked(monitor)
+        stop.assert_called_once_with("k")
 
     # -- NIfTI normalization: NaN handling --
     def test_normalize_affine_survives_nan_sform(self):

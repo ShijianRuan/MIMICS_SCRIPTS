@@ -2726,7 +2726,7 @@ def _launch_background_mimics(output_dir, total_count=0, schedule_retry=True):
         message = (
             "A separate background Mimics executable was not found. The open MimicsMedical.exe "
             "is not reused automatically because single-instance redirection can close or reconfigure "
-            "the annotation window. Configure MIMICS_BACKGROUND_EXE if needed."
+            "the annotation window. Configure the background Mimics executable in the settings if needed."
         )
         _append_import_log(output_dir, message)
         _bg_mark_failed(output_key)
@@ -3030,7 +3030,7 @@ def _first_mcs_monitor_tick(monitor):
                         "Background .mcs creation stopped before reporting completion.\n\n"
                         "Suggested action: prepared files were kept for retry. Check that "
                         "the background Mimics process is still allowed to run (Admin > "
-                        "Stop All Owned Background Services, then retry), or inspect:\n{0}"
+                        "Stop All Owned Services, then retry), or inspect:\n{0}"
                     ).format(os.path.join(output_dir, "logs", "_create_mcs_batch.log")),
                     ui_blocking=False,
                 )

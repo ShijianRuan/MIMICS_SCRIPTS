@@ -917,6 +917,126 @@ def test_nninteractive_task_model_routing(fake, tmp):
     )
 
 
+def test_nninteractive_same_model_dual_image_guard(fake, tmp):
+    """C6-5: same-model second image must not kick the first session.
+
+    The owned server runs with --max-sessions 1 and never evicts; its
+    capacity-recovery restart terminates the server under the first image's
+    in-flight prediction. The runtime must reject the second launch up
+    front, and must retire (not keep) an idle prewarmed worker from another
+    image before starting the new one.
+    """
+    image = fake.reset_scene(image_shape=(2, 2, 2))
+    fake.dialogs.messages.clear()
+
+    inference = import_runtime_module("nninteractive_mimics")
+    inference._ASYNC_MONITORS.clear()
+    inference._ASYNC_IMAGE_WORKERS.clear()
+
+    # 1) In-flight prediction on another image blocks the new launch.
+    other_state = {
+        "model_identity": "official",
+        "image_guid": "other-image-guid",
+        "image_name": "s0002",
+        "target_name": "Liver s0002",
+        "pending_sequence": 3,
+    }
+    inference._ASYNC_MONITORS["job_other"] = {
+        "done": False,
+        "state": other_state,
+    }
+    busy = inference._same_model_busy_workers({}, image)
+    assert_true(busy is not None, "in-flight same-model prediction on another image must be detected")
+    assert_equal(busy.get("image_name"), "s0002", "busy state identity")
+
+    config = {"async_reuse_image_worker": True}
+    result = inference._run_with_config(config)
+    assert_equal(result, 1, "second same-model image launch must be rejected")
+    assert_equal(len(fake.dialogs.messages), 1, "rejection must show exactly one dialog")
+    assert_true(
+        "same model" in fake.dialogs.messages[0]["message"],
+        "rejection dialog must explain the single-session server limit",
+    )
+
+    # 2) Session on the SAME image must never be blocked.
+    inference._ASYNC_MONITORS.clear()
+    inference._ASYNC_MONITORS["job_same"] = {
+        "done": False,
+        "state": {
+            "model_identity": "official",
+            "image_guid": inference._object_id(image),
+            "image_name": image.name,
+            "pending_sequence": 1,
+        },
+    }
+    assert_true(
+        inference._same_model_busy_workers({}, image) is None,
+        "a session on the active image must not block itself",
+    )
+    inference._ASYNC_MONITORS.clear()
+
+    # 3) Idle prewarmed worker from another image is retired before prewarm.
+    worker_root = tmp / "dual_image_workers"
+    other_worker_dir = worker_root / "image_worker_other"
+    other_worker_dir.mkdir(parents=True)
+    (other_worker_dir / "worker_status.json").write_text(
+        json.dumps({"status": "ready", "stage": "waiting_for_prompt"}),
+        encoding="utf-8",
+    )
+    own_worker_dir = worker_root / "image_worker_own"
+    own_worker_dir.mkdir(parents=True)
+    (own_worker_dir / "worker_status.json").write_text(
+        json.dumps({"status": "ready", "stage": "waiting_for_prompt"}),
+        encoding="utf-8",
+    )
+    inference._ASYNC_IMAGE_WORKERS["official"] = {
+        "worker_dir": str(other_worker_dir),
+        "pid": 12346,
+        "model_identity": "official",
+        "image_guid": "other-image-guid",
+    }
+    inference._ASYNC_IMAGE_WORKERS["own"] = {
+        "worker_dir": str(own_worker_dir),
+        "pid": 12347,
+        "model_identity": "official",
+        "image_guid": inference._object_id(image),
+    }
+    assert_true(
+        inference._same_model_busy_workers({}, image) is None,
+        "idle worker without pending result must not block",
+    )
+    terminated = []
+    original_terminate = inference.runtime_common.terminate_process_async
+    try:
+        inference.runtime_common.terminate_process_async = (
+            lambda **kwargs: terminated.append(kwargs) or True
+        )
+        retired = inference._retire_idle_image_workers(
+            {},
+            keep_model_identity="official",
+            keep_image_guid=inference._object_id(image),
+        )
+    finally:
+        inference.runtime_common.terminate_process_async = original_terminate
+    assert_equal(retired, 1, "only the other-image worker is retired")
+    assert_true(
+        (other_worker_dir / "close.json").is_file(),
+        "retired worker should receive a close request",
+    )
+    assert_true(
+        not (own_worker_dir / "close.json").exists(),
+        "the active image's worker must be kept",
+    )
+    assert_equal(
+        sorted(inference._ASYNC_IMAGE_WORKERS.keys()),
+        ["own"],
+        "retired worker must leave the cache",
+    )
+
+    inference._ASYNC_IMAGE_WORKERS.clear()
+    return "same-model dual-image guard and idle worker retirement passed"
+
+
 def test_window_level_from_selected_mask(fake, tmp):
     image = fake.reset_scene(image_shape=(3, 4, 5), minimum_value=0, maximum_value=2026)
     mask = FakeMask("liver_portal_region", image=image, array=_u8_buffer((3, 4, 5), 1), selected=True)
@@ -1748,6 +1868,7 @@ def main(argv=None):
         tests.append(("nnInteractive derived Draft flow", lambda: test_nninteractive_derived_draft_session(fake, tmp / "nninteractive_draft")))
     if args.only in ("taskmodels", "all"):
         tests.append(("nnInteractive task-model routing", lambda: test_nninteractive_task_model_routing(fake, tmp / "nninteractive_task_models")))
+        tests.append(("nnInteractive same-model dual-image guard", lambda: test_nninteractive_same_model_dual_image_guard(fake, tmp / "nninteractive_dual_image")))
     if args.only in ("stop", "all"):
         tests.append(("Stop Background Services lock cleanup", lambda: test_stop_background_locks(fake, tmp / "stop")))
     for name, func in tests:

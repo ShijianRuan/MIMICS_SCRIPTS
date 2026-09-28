@@ -378,7 +378,10 @@ def main():
                 monitor["done"] = True
                 _stop_monitor(monitor.get("key"))
                 runtime_common.terminate_process_async(process=monitor.get("process"), graceful_seconds=2.0)
-        return 0
+        # Non-zero: callers of offer_repair_for_prediction_failure treat 0
+        # as "a repair flow was started" and swallow the original failure
+        # dialog. Nothing was started here, so the caller must still show it.
+        return 2
 
     image = mimics.data.images.get_active()
     if image is None:

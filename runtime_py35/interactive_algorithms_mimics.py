@@ -621,6 +621,10 @@ def _collect_scribbleprompt_prompts(image, target, job_dir, visual_objects):
             message=(
                 "Add clicks, scribbles, or one foreground box on a single 2D slice. "
                 "Existing Mask content and the previous prediction are used for refinement.\n\n"
+                "Important: while the cursor waits for your click or stroke, do "
+                "not switch to another tool (zoom, pan, measure, ...). Doing so "
+                "can crash Mimics and lose unsaved work. Switch tools only "
+                "while this dialog is shown.\n\n"
                 "Clicks: {0}    Scribbles: {1}    Box: {2}\n"
                 "Foreground prompts: {3}    Background prompts: {4}"
             ).format(

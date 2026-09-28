@@ -37,8 +37,8 @@ Each entry: `name`, `width`, `level`, `keywords` (matched case-insensitively
 against the selected Mask name, first keyword hit wins), and `source`
 (citation for the W/L values). Ships with 5 presets: Lung, Abdomen / Soft
 Tissue, Bone, Skull / Cranium, Vessel / Heart. State (undo/last applied)
-lives in `ui_state/window_level_state.json`; user edits are saved back to
-this file.
+lives in `.mimics_runtime/window_level_state.json`; user edits are saved back
+to this file.
 
 ## Remote compute profiles (`servers.json`)
 

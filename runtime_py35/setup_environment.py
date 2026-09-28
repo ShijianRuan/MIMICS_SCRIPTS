@@ -529,7 +529,7 @@ def main(action=None):
                     "Offline bundle not found.\n\n"
                     "This requires the offline bundle with python/ and wheels/ directories.\n"
                     "Ask whoever set up this workstation to create the bundle first\n"
-                    "(Mimics-Script: Run 'offline-bundle' in the packaging tool),\n"
+                    "(it is produced by the Mimics-Script packaging step),\n"
                     "then run this entry again."
                 ),
                 ui_blocking=True,

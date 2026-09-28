@@ -939,8 +939,9 @@ def launch_mimics_export(
         append_log(
             workspace,
             "A separate background Mimics executable was not found. Fresh .mcs "
-            "label export cannot start. Set MIMICS_BACKGROUND_EXE or "
-            "mimics_background_exe, or select an existing exported masks folder.",
+            "label export cannot start. Set the background Mimics executable "
+            "in the configuration (mimics_background_exe), or select an "
+            "existing exported masks folder.",
         )
         return {"launched": False, "reason": "mimics_not_found"}
     # The .mcs files live in the configured Mimics output directory, while

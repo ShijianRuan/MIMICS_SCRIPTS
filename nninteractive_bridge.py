@@ -49,6 +49,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 import uuid
@@ -2890,7 +2891,10 @@ def _worker_main() -> int:
     """JSON-lines worker that reuses one preprocessed image across prompts."""
     context = None
     model_dir = ""
-    log_path = Path("nninteractive_bridge.jsonl")
+    # A relative default would write early errors (before the first
+    # initialize request sets the real path) into whatever CWD the worker
+    # happened to start in. Park them in the temp dir until then.
+    log_path = Path(tempfile.gettempdir()) / "nninteractive_bridge.jsonl"
     for raw in sys.stdin:
         started = time.time()
         request: dict[str, Any] = {}

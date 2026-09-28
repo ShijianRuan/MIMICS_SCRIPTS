@@ -537,7 +537,8 @@ def _launch_background_batch_export(ts_root, cases_filter, axes, flips, label_ou
         _append_export_log(
             output_dir,
             "A separate background Mimics executable was not found. Configure "
-            "MIMICS_BACKGROUND_EXE; the open MimicsMedical.exe is not reused automatically.",
+            "the background Mimics executable in the settings; the open "
+            "MimicsMedical.exe is not reused automatically.",
         )
         return None
 
@@ -1025,8 +1026,9 @@ def _error_guidance(error_text, phase=""):
     return (
         "unknown",
         str(error_text or "Unknown error"),
-        "Retry the export. If it keeps failing, check mimics_export.log and "
-        "the diagnostics folder shown in the message, or contact support.",
+        "Retry the export. If it keeps failing, check the export log in the "
+        "output folder (mimics_export.log) and the diagnostics folder shown "
+        "in the message, or contact support.",
     )
 
 
@@ -2492,7 +2494,14 @@ def _background_export_status_tick(monitor):
                     failed,
                     "\n".join(summary_lines),
                     root,
-                    "\n\nReview mimics_export.log before retrying failed cases." if failed else "",
+                    (
+                        "\n\nThe log with the failure reasons is next to the "
+                        "output: {0}".format(
+                            os.path.join(root, _RUNTIME_SUBDIR, "mimics_export.log")
+                        )
+                        if failed
+                        else ""
+                    ),
                 )
             )
             mimics.dialogs.message_box(

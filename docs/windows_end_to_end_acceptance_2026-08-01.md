@@ -6,14 +6,15 @@
 
 ## 1. 当前审查结论
 
-本地自动化测试已经覆盖导入导出桥接、异步状态机、进程停止、GPU 与后台 Mimics 资源、DINOv3、nnInteractive、nnU-Net、ScribblePrompt 和远程训练控制等代码路径。
+本地自动化测试已经覆盖导入导出桥接、异步状态机、进程停止、GPU 与后台 Mimics 资源、nnInteractive、nnU-Net、ScribblePrompt、FlexiCT 和远程训练控制等代码路径。
 
-当前自动化结果：
+当前自动化结果（本文档编写时的快照；最新数字以
+`python_env\python.exe tools\run_regression_matrix.py --profile full`
+的实时输出为准，工件写入 `.mimics_runtime/regression/`）：
 
-- 全量测试：406 项通过，2 项因本机条件跳过。
-- nnU-Net、远程计算和交互算法专项：133 项通过，2 项跳过。
-- fake Mimics 端到端流程：14 项通过。
-- 资源锁、GPU 排队/取消、连续训练、日志轮换、checkpoint 清理和 nnInteractive 映射压测：8 项通过。
+- 全量测试（test_all.py + 集成套件）：数百项通过，个别因本机条件跳过。
+- fake Mimics 端到端流程、资源锁、GPU 排队/取消、日志轮换、checkpoint
+  清理和 nnInteractive 映射压测套件全部通过。
 - Python 编译检查通过。
 - 150% DPI 下的 PySide6 离屏布局和缩放检查通过。
 - 合成数据几何往返检查通过，Dice 为 1.0。
@@ -42,7 +43,7 @@
 | NVIDIA 驱动 | GPU 功能必须 | 安装与所用 PyTorch/ONNX Runtime 兼容的驱动。 |
 | CUDA Toolkit | 通常不需要 | PyTorch 和 ONNX Runtime wheel 自带所需运行库；只有其他自编译扩展需要时才安装。 |
 | Visual C++ Redistributable | 建议安装 | 部分 Windows 二进制 wheel 依赖；缺失时可能出现 DLL 加载失败。 |
-| 模型权重 | 对应功能必须 | nnInteractive、DINOv3/ONNX、ScribblePrompt 等权重必须放在规定目录。 |
+| 模型权重 | 对应功能必须 | nnInteractive、ScribblePrompt、FlexiCT 等权重必须放在规定目录。 |
 | Docker、NVIDIA Container Toolkit | 仅远程模式必须 | 安装在远程服务器，不需要安装在普通本地标注机。 |
 | SSH/Paramiko | 仅远程模式必须 | `paramiko` 由 Python 环境安装；服务器需启用 SSH。 |
 | 编译器或 Visual Studio Build Tools | 正常离线包不需要 | 前提是所有依赖均提供预编译 wheel，不在目标机源码编译。 |
@@ -80,7 +81,7 @@ call setup_offline.bat
 2. 在本地环境中准备 pip。
 3. 从 `wheels/` 离线安装依赖，不访问互联网。
 4. 验证 PySide6、PyTorch、CUDA、nnInteractive、nnU-Net、SimpleITK、ONNX Runtime 等依赖。
-5. 检查默认 DINOv3 ONNX 编码器和 ScribblePrompt 权重。
+5. 检查默认 ScribblePrompt 和 FlexiCT 权重。
 
 安装完成后运行完整性检查：
 
@@ -178,7 +179,7 @@ nninteractive_env\python.exe -c "import onnxruntime as o; print(o.get_available_
 
 1. 打开导入路径窗口。
 2. 打开导出路径窗口。
-3. 打开 DINOv3 训练设置、状态查看和模型选择窗口。
+3. 打开 FlexiCT 训练设置、状态查看窗口。
 4. 打开 nnInteractive 自定义模型中心。
 5. 打开 nnU-Net 训练、推理和状态窗口。
 
@@ -384,29 +385,25 @@ nninteractive_env\python.exe tools\verify_medical_geometry.py ^
 - 训练中的提示模拟覆盖缺失分割、过分割、欠分割和混合误差，不固定为机械的 5 click。
 - 取消后训练进程、GPU 锁、状态文件和子进程顺序一致，不出现永久 `stopping`。
 
-## 10. DINOv3 少样本训练与推理
+## 10. FlexiCT 微调与推理
 
 入口：
 
-- `02_AI/DINOv3/01_Train_Model.py`
-- `02_AI/DINOv3/02_Predict_Current_Case.py`
-- `02_AI/DINOv3/03_Predict_Choose_Model.py`
-- `02_AI/DINOv3/04_Show_Status_Results.py`
-- `02_AI/DINOv3/05_Stop_AI_Task.py`
+- `02_AI/FlexiCT/01_Train_Model.py`
+- `02_AI/FlexiCT/02_Predict_Current_Case.py`
+- `02_AI/FlexiCT/03_Active_Learning_Review.py`
+- `02_AI/FlexiCT/04_Show_Status_and_Stop.py`
 
 验收重点：
 
-- 训练设置窗口布局无重叠，Dataset、Model、Training、Validation 分区清楚。
-- 默认策略、Full-volume baseline 和 Patch 策略对应的参数联动正确。
-- 2D、2.5D、3D decoder 只允许有效组合；无效参数自动禁用并说明原因。
-- Epochs 默认 20；学习率、调度器、warmup、fine-tuning 和 decoder 参数真实传入训练代码，不存在死配置。
-- 用户可选择原始数据、已导出的标签或 `.mcs` 新标数据。
-- `.mcs` 中 mask 名称可在训练前扫描和选择，不用 organ 字符串盲匹配。
-- 状态窗口只突出当前任务，提供 epoch、loss、validation Dice、预计进度、日志和曲线。
-- 失败任务支持用相同设置重试，或编辑设置后重试。
-- 模型选择显示成功模型并在推理前验证 manifest、权重和预处理配置。
-- 训练和推理使用相同的 canonical orientation、归一化、resize/patch 和 decoder 配置。
-- 推理结果的 affine 和 shape 能正确映射回当前 Mimics 图像。
+- 训练设置窗口布局无重叠，Dataset、Training 分区清楚；读到已保存的
+  dataset/label 路径后自动扫描病例，不把空表误读为路径错误。
+- 病例列表展示分割质量指标（Dice、HD 等）和上一轮模型版本，支持按质量排序
+  挑选下一轮微调病例（主动学习闭环）。
+- 训练窗口实时显示 epoch、loss、validation 指标和预计剩余时间。
+- 状态窗口内可停止训练任务；停止后的训练续接（continue training）入口可用。
+- 推理前验证模型 manifest、权重和预处理配置；推理结果的 affine 和 shape
+  能正确映射回当前 Mimics 图像。
 - 结果由用户选择更新选中 mask 或创建 `AI_` 可编辑副本。
 
 ## 11. nnU-Net
@@ -442,7 +439,7 @@ nninteractive_env\python.exe tools\verify_medical_geometry.py ^
 - 预先构建的统一训练镜像，例如 `mimics-ai-runtime:1.0`。
 - 持久化 Remote work folder，用于数据缓存、模型缓存、日志和结果。
 
-分别对 DINOv3、nnInteractive 和 nnU-Net 执行：
+分别对 FlexiCT、nnInteractive 和 nnU-Net 执行：
 
 1. 第一次训练，观察本地打包、上传、容器启动、训练和权重回传。
 2. 不修改数据再次训练，确认直接复用本地归档和远程缓存。
@@ -472,8 +469,8 @@ nninteractive_env\python.exe tools\verify_medical_geometry.py ^
 | 单例/批量数据导入 | 不占用当前项目 buffer | 不占用 | 按输出队列隔离 | 可继续标注和运行不冲突的 AI；单病例失败不得中断后续病例。 |
 | Mask 导入 | 外部准备阶段不占用；结果写入阶段整批独占 | 不占用 | 不需要 | 多个标签作为一个原子应用批次，不能被 AI 回填或导出插入；切换项目后暂停，回到原项目再继续。 |
 | 当前项目 Mask 导出 | 仅逐个读取 buffer 时独占 | 不占用 | 当前项目快速导出不需要 | 所有 buffer 落盘后立即释放租约，后续 affine 转换不妨碍标注、Mask 导入或 AI 回填。 |
-| DINOv3 训练 | 只有从 `.mcs` 获取新标签时由后台 Mimics 读取 | 全局互斥 | 按导出任务隔离 | 训练在外部低优先级进程运行；GPU 冲突显示占用者并排队/停止，不允许以 OOM 结束。 |
-| DINOv3 推理 | 结果返回时短暂独占 | 全局互斥 | 不需要 | 只向启动时的项目和图像回填；项目切换后结果等待或拒绝写入。 |
+| FlexiCT 训练 | 只有从 `.mcs` 获取新标签时由后台 Mimics 读取 | 全局互斥 | 按导出任务隔离 | 训练在外部低优先级进程运行；GPU 冲突显示占用者并排队/停止，不允许以 OOM 结束。 |
+| FlexiCT 推理 | 结果返回时短暂独占 | 全局互斥 | 不需要 | 只向启动时的项目和图像回填；项目切换后结果等待或拒绝写入。 |
 | nnInteractive | 图像/初始 mask 快照及结果回填时短暂独占 | 复用推理服务并持有全局 GPU 锁 | 不需要 | 长训练占用 GPU 时在采集提示前拒绝启动；空闲推理服务收到其他 GPU 任务请求时主动释放。 |
 | nnInteractive 微调 | 标签导出阶段受 buffer/后台 Mimics 规则约束 | 全局互斥 | 视数据源而定 | 与其他训练共享 GPU 规则；配置窗口和训练任务都阻止环境被中途修改。 |
 | nnU-Net 训练/推理 | 标签导出或预测回填时短暂占用 | 全局互斥，并附加数据集锁 | 视数据源而定 | 同一数据集写入不并发；预测只回填到启动时的项目。 |
@@ -487,9 +484,9 @@ Windows 后台训练/推理子进程使用 `BELOW_NORMAL_PRIORITY_CLASS`，降�
 
 按以下顺序做交叉功能测试：
 
-1. 批量导入运行时启动 DINOv3 训练。
-2. nnInteractive 推理结束后立即启动 DINOv3 训练。
-3. DINOv3 训练运行时尝试 nnInteractive 和 nnU-Net GPU 推理。
+1. 批量导入运行时启动 FlexiCT 训练。
+2. nnInteractive 推理结束后立即启动 FlexiCT 训练。
+3. FlexiCT 训练运行时尝试 nnInteractive 和 nnU-Net GPU 推理。
 4. 导出运行时启动另一个导入或导出。
 6. 每个阶段分别点击专项 Stop 和全局 Stop。
 
@@ -507,6 +504,7 @@ Windows 后台训练/推理子进程使用 `BELOW_NORMAL_PRIORITY_CLASS`，降�
 - `01_Data/04_Stop_Import_Queue.py`
 - `01_Data/06_Stop_Mask_Export.py`
 - `02_AI/nnUNet/03_Show_Status_Models.py`（状态窗口内停止任务）
+- `02_AI/FlexiCT/04_Show_Status_and_Stop.py`（状态窗口内停止任务）
 - nnInteractive 模型中心中的停止操作。
 - `99_Admin/03_Stop_All_Owned_Services.py`
 
@@ -559,7 +557,7 @@ Windows 后台训练/推理子进程使用 `BELOW_NORMAL_PRIORITY_CLASS`，降�
 | ScribblePrompt | 待测 | 待测 | 待测 | 待测 | 待测 | 待记录 |
 | nnInteractive 官方模型 | 待测 | 待测 | 待测 | 待测 | 待测 | 待记录 |
 | nnInteractive 自定义模型 | 待测 | 待测 | 待测 | 待测 | 待测 | 待记录 |
-| DINOv3 训练与推理 | 待测 | 待测 | 待测 | 待测 | 待测 | 待记录 |
+| FlexiCT 训练与推理 | 待测 | 待测 | 待测 | 待测 | 待测 | 待记录 |
 | nnU-Net 训练与推理 | 待测 | 待测 | 待测 | 待测 | 待测 | 待记录 |
 | 远程训练与推理 | 待测 | 待测 | 待测 | 待测 | 待测 | 待记录 |
 | 全局停止与缓存清理 | 待测 | 待测 | 待测 | 待测 | 不适用 | 待记录 |

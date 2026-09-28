@@ -1369,9 +1369,10 @@ def _stop_background_tick(monitor):
             lines.append("Queue stop marker dir(s): {0}".format(len(queue_dirs)))
         if report.get("Message"):
             lines.append(str(report.get("Message")))
-        lines.append("Report: {0}".format(report_path))
         msg = "\n".join(lines)
-        _mimics_log(logging.INFO, msg)
+        # The full report file path stays in the Mimics log; a raw runtime
+        # path in a user dialog is noise (B4/C6-9 residue rule).
+        _mimics_log(logging.INFO, "{0}\nReport: {1}".format(msg, report_path))
         try:
             mimics.dialogs.message_box(title=title, message=msg, ui_blocking=False)
         except TypeError:
@@ -1386,9 +1387,12 @@ def _stop_background_tick(monitor):
         title = monitor.get("title", "Stop Background Services")
         msg = (
             "{0} is still running or did not produce a report yet.\n\n"
-            "Check: {1}"
-        ).format(title, monitor.get("stop_log", "(unknown)"))
-        _mimics_log(logging.WARNING, msg)
+            "The detailed report location is recorded in the Mimics log."
+        ).format(title)
+        _mimics_log(
+            logging.WARNING,
+            "{0}\nCheck: {1}".format(msg, monitor.get("stop_log", "(unknown)")),
+        )
         try:
             mimics.dialogs.message_box(title=title, message=msg, ui_blocking=False)
         except TypeError:
@@ -1442,17 +1446,17 @@ def main_stop_import():
         message = (
             "Background import stop requested.\n"
             "Target background Mimics PID: {0}\n"
-            "Queue stop marker dir(s): {1}\n"
-            "Report: {2}"
-        ).format(target, len(queues), report)
+            "Queue stop marker dir(s): {1}".format(target, len(queues))
+        )
     else:
         message = (
             "Background import stop markers were written.\n"
             "No active background Mimics import process was found.\n"
-            "Queue stop marker dir(s): {0}\n"
-            "Report: {1}"
-        ).format(len(queues), report)
-    _mimics_log(logging.INFO, message)
+            "Queue stop marker dir(s): {0}".format(len(queues))
+        )
+    # The full stop report (stop_log JSON path) stays in the Mimics log; a
+    # raw runtime path in a user dialog is noise.
+    _mimics_log(logging.INFO, "{0}\nReport: {1}".format(message, report))
     try:
         mimics.dialogs.message_box(
             title="Stop Background Import",

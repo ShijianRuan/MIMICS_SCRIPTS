@@ -458,12 +458,19 @@ def _monitor_tick_locked(monitor):
         return
     key = monitor["monitor_key"]
     if time.time() > float(monitor.get("deadline") or 0):
-        _stop_monitor(key)
-        _log(
-            logging.WARNING,
-            "FlexiCT status monitor timed out; the external task was not stopped.",
-        )
-        return
+        # Same rationale as nnunet_mimics: a setup form left open past the
+        # 1h deadline is still a live window; a dead window is caught by the
+        # process check below. Extend while the setup process is alive.
+        setup_pid = monitor.get("controller_pid")
+        if str(monitor.get("kind") or "").endswith("_setup") and setup_pid and runtime_common.process_exists(setup_pid):
+            monitor["deadline"] = time.time() + 3600
+        else:
+            _stop_monitor(key)
+            _log(
+                logging.WARNING,
+                "FlexiCT status monitor timed out; the external task was not stopped.",
+            )
+            return
     status = _read_json(monitor["status_path"], {}) or {}
     if _process_finished_unexpectedly(monitor, status):
         _stop_monitor(key)

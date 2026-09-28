@@ -387,6 +387,15 @@ class TrainingSetupWindow:
         elif remembered.get("label_name"):
             self.label_edit.setText(str(remembered["label_name"]))
         self._refresh_models()
+        # An empty case table on a pre-filled dataset path reads as "the path
+        # is wrong" - it usually just means nobody pressed Rescan yet. Run
+        # the existing background scan once when both path and label are
+        # already known (C6-6).
+        if (
+            self.dataset_edit.text().strip()
+            and self.label_edit.text().strip()
+        ):
+            self._rescan_cases_async()
 
     def _refresh_models(self):
         QtWidgets = self.QtWidgets

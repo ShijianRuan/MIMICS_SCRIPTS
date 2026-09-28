@@ -565,7 +565,13 @@ def _cleanup_stale_owned_servers(records):
     now = time.time()
     for state_path in _server_state_candidates():
         state = runtime_common.read_json(state_path, {}) or {}
-        if state.get("schema_version") != "nninteractive_owned_server.v2":
+        # v2 (legacy workers) and v3 (current bridge) both describe an owned
+        # server; accepting both keeps this sweep effective - the same
+        # tuple mimics_label_export._is_owned_nninteractive_state uses.
+        if state.get("schema_version") not in (
+            "nninteractive_owned_server.v2",
+            "nninteractive_owned_server.v3",
+        ):
             continue
         try:
             pid = int(state.get("pid", 0))
@@ -2886,6 +2892,11 @@ def _continue_session_prompt(
             return False
 
         _retire_different_model_workers(config)
+        _retire_idle_image_workers(
+            config,
+            keep_model_identity=_model_identity(_model_profile(config)),
+            keep_image_guid=_object_id(image),
+        )
         if state is None and bool(config.get("async_start_worker_before_prompt", True)):
             _update_gui()
             prewarmed = _prewarm_async_image_worker(config, image)
@@ -3024,6 +3035,25 @@ def _run_with_config(config):
                 "No Mask or prompt state was changed. Wait for that result to be applied, "
                 "or stop its session before switching models."
             ).format(current.get("task_name") or current.get("model_id") or "official"),
+            title=TITLE,
+            ui_blocking=False,
+        )
+        return 1
+    same_model_busy = _same_model_busy_workers(config, image)
+    if same_model_busy is not None:
+        mimics.dialogs.message_box(
+            message=(
+                "Another image is still running an nnInteractive prediction with the "
+                "same model.\n\n"
+                "Image: {0}\n"
+                "No Mask or prompt state was changed. The AI server can only serve one "
+                "image at a time; wait for that prediction to be applied, or finish its "
+                "session, before starting one on this image."
+            ).format(
+                same_model_busy.get("image_name")
+                or same_model_busy.get("target_name")
+                or "(unknown)"
+            ),
             title=TITLE,
             ui_blocking=False,
         )
@@ -3340,17 +3370,60 @@ def _different_model_busy_workers(config):
     return busy
 
 
-def _retire_different_model_workers(config):
-    """Retire idle prewarm workers before a model-profile switch.
+def _same_model_busy_workers(config, image):
+    """Find same-model sessions predicting on another image.
 
-    This runs only after the user has selected an inference action. Workers
-    with pending results are rejected earlier by
-    ``_different_model_busy_workers`` and are never terminated here.
+    The owned nnInteractive server runs with --max-sessions 1 and never
+    evicts; a second image worker on the same model gets a capacity error
+    and its recovery restart terminates the server under the first image's
+    in-flight prediction. Reject the second launch up front instead.
     """
     expected = _model_identity(_model_profile(config))
+    image_guid = _object_id(image)
+    for monitor in list(_ASYNC_MONITORS.values()):
+        if monitor.get("done"):
+            continue
+        state = monitor.get("state") or {}
+        if str(state.get("model_identity") or "official") != expected:
+            continue
+        if str(state.get("image_guid") or "") == image_guid:
+            continue
+        if state.get("pending_sequence"):
+            return state
+    for worker in list(_ASYNC_IMAGE_WORKERS.values()):
+        if str(worker.get("model_identity") or "official") != expected:
+            continue
+        if str(worker.get("image_guid") or "") == image_guid:
+            continue
+        if _worker_has_unapplied_prediction(worker):
+            return worker
+    return None
+
+
+def _retire_idle_image_workers(config, keep_model_identity=None, keep_image_guid=None):
+    """Close idle image workers that block an upcoming launch.
+
+    Prewarmed workers hold the owned server's single session lease for their
+    whole lifetime. Before a same-model switch to another image (or a
+    model-profile switch), close idle ones so the new worker does not hit the
+    server's capacity limit and trigger a destructive restart. Workers with
+    pending results are rejected earlier (``_same_model_busy_workers`` /
+    ``_different_model_busy_workers``) and are never terminated here.
+    """
     retired = 0
     for cache_key, worker in list(_ASYNC_IMAGE_WORKERS.items()):
-        if str(worker.get("model_identity") or "official") == expected:
+        # ``keep_*`` combine with AND: only a worker matching every given
+        # identity survives. A same-model launch on another image passes
+        # both, so only the current image's worker is kept.
+        if keep_model_identity is not None and str(
+            worker.get("model_identity") or "official"
+        ) != keep_model_identity:
+            pass
+        elif keep_image_guid is not None and str(
+            worker.get("image_guid") or ""
+        ) != keep_image_guid:
+            pass
+        else:
             continue
         if _worker_has_unapplied_prediction(worker):
             continue
@@ -3361,6 +3434,21 @@ def _retire_different_model_workers(config):
         )
         _ASYNC_IMAGE_WORKERS.pop(cache_key, None)
         retired += 1
+    return retired
+
+
+def _retire_different_model_workers(config):
+    """Retire idle prewarm workers before a model-profile switch.
+
+    This runs only after the user has selected an inference action. Workers
+    with pending results are rejected earlier by
+    ``_different_model_busy_workers`` and are never terminated here.
+    """
+    expected = _model_identity(_model_profile(config))
+    retired = _retire_idle_image_workers(
+        config,
+        keep_model_identity=expected,
+    )
     if retired:
         # The replacement worker waits outside Mimics while an old server
         # releases its lock. Allow enough time for Windows process teardown
