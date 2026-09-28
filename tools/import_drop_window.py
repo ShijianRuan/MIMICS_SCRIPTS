@@ -19,7 +19,7 @@ It exits by itself after IDLE_TIMEOUT_SECONDS without user interaction, so
 it never becomes another resident service to manage. Last-used settings are
 remembered in ui_state/io_paths.json (same file the path-setup UI uses).
 
-Run inside Mimics via 01_Data/08_Quick_Drop_Import.py, or standalone:
+Run inside Mimics via 01_Data/07_Quick_Drop_Import.py, or standalone:
     python tools/import_drop_window.py [--context <ctx.json>]
 """
 

@@ -112,7 +112,7 @@ Every finished import writes a receipt next to the created `.mcs` file
 records the masks the import created, the metadata keys it set, the project
 path, and content fingerprints of the source image and of the saved `.mcs`.
 Receipts are the basis of **Admin > Undo Last Import**
-(`99_Admin/05_Undo_Last_Import.py`):
+(`99_Admin/04_Undo_Last_Import.py`):
 
 - masks listed in the receipt are deleted in one transaction;
 - the `.mcs` file itself is deleted only when its fingerprint still matches
@@ -127,7 +127,7 @@ warning is logged and the import still succeeds.
 
 ## Drop-to-import window state (`ui_state/io_paths.json`)
 
-`01_Data/08_Quick_Drop_Import.py` opens an always-on-top external window
+`01_Data/07_Quick_Drop_Import.py` opens an always-on-top external window
 (`tools/import_drop_window.py`) that accepts dragged files, case folders,
 dataset folders, or pasted paths, classifies them against the dataset
 profile, and submits to the existing import workers. It is registered in the

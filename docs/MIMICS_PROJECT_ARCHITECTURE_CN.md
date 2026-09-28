@@ -201,7 +201,7 @@ Mimics 定时器 <-----+
 - 每例有独立工作目录和错误记录，单例失败不会中止后续病例；
 - producer lease 防止同一输出队列被多个导入生产者相互覆盖；
 - 后台 Mimics 负责必须由 Mimics API 完成的 `.mcs` 创建；
-- 可通过 `04_Stop_Import_Queue.py` 停止本项目创建的导入队列。
+- 可通过 `03_Stop_Import_Queue.py` 停止本项目创建的导入队列。
 
 关键状态：
 
@@ -227,7 +227,7 @@ Mimics 定时器 <-----+
 
 单例入口与批量入口共用准备、队列、后台 Mimics 和状态机制，避免维护两套不一致的转换逻辑。外部 worker 负责耗时读取和准备；Mimics 内只轮询进度。用户点击 Stop 时，控制器会终止已暴露的外部进程并写入停止标记。
 
-### 4.3 `01_Data/07_Quick_Export_Masks.py`
+### 4.3 `01_Data/06_Quick_Export_Masks.py`
 
 用途：将当前项目或一批已保存 `.mcs` 中的 Mask 导出为与源图像网格一致的标签文件。
 
@@ -238,7 +238,7 @@ Mimics 定时器 <-----+
 调用链：
 
 ```text
-07_Quick_Export_Masks.py
+06_Quick_Export_Masks.py
   -> runtime_py35/mimics_export.py
   -> tools/io_path_setup_ui.py
   -> 当前项目：Mimics timer 分步读取 buffer
@@ -258,9 +258,9 @@ Mimics 定时器 <-----+
 - `dataset_manifest.json` 记录 case、图像、标签、`.mcs` 和几何信息之间的关系；
 - 用户选择的独立输出目录不会修改原始标签；只有明确选择原始标签目录并允许覆盖时才覆盖。
 
-停止入口：`01_Data/06_Stop_Mask_Export.py`。
+停止入口：`01_Data/05_Stop_Mask_Export.py`。
 
-### 4.4 `01_Data/04_Stop_Import_Queue.py`
+### 4.4 `01_Data/03_Stop_Import_Queue.py`
 
 用途：只停止 Mimics-Script 创建的导入准备和 `.mcs` 创建队列。
 
@@ -268,14 +268,14 @@ Mimics 定时器 <-----+
 
 它不会终止当前前台 Mimics，也不会终止非本项目创建的 Python/Mimics 进程。停止过程先写 stop marker，再尝试优雅终止已登记进程，最后清理任务监控器和锁。
 
-### 4.5 `01_Data/05_Import_Masks.py`
+### 4.5 `01_Data/04_Import_Masks.py`
 
 用途：将 NIfTI、MHA、MHD、NRRD 等分割文件导入当前活动 Image。
 
 调用链：
 
 ```text
-05_Import_Masks.py
+04_Import_Masks.py
   -> runtime_py35/mask_import.py
   -> 外部文件选择器
   -> mimics_bridge.py prepare_masks_for_grid
@@ -292,7 +292,7 @@ Mimics 定时器 <-----+
 - Mimics timer 一次应用一个结果并调用 GUI 更新，避免一次性写入多个大 Mask；
 - 有并发防护、超时和取消路径，避免重复点击同时修改同一项目。
 
-### 4.6 `01_Data/06_Stop_Mask_Export.py`
+### 4.6 `01_Data/05_Stop_Mask_Export.py`
 
 用途：只停止当前 Mimics-Script Mask 导出任务。
 
@@ -400,7 +400,7 @@ nnInteractive 被明确分成“官方通用模型”和“自定义任务模型
 
 ## 6. 交互算法功能入口
 
-### 6.1 `02_AI/ScribblePrompt.py`
+### 6.1 `02_AI/Annotate_With_ScribblePrompt.py`
 
 用途：使用官方 ScribblePrompt-UNet 在一个二维切片上交互分割，并把该切片写回三维 Mask。
 
@@ -528,7 +528,7 @@ Mimics 工具状态机导致崩溃、丢失未保存标注。脚本层已做到�
 
 实现：`window_level_mimics.py("undo")`
 
-### 8.5 `03_Review/06_Window_Edit_Presets.py`
+### 8.5 `03_Review/05_Window_Edit_Presets.py`
 
 用途：编辑窗宽窗位预设。
 
@@ -771,8 +771,8 @@ created -> starting -> running/waiting
 ### 12.3 应该用哪个停止入口
 
 1. 任务自己的窗口有 Stop/Cancel 时，优先使用它；
-2. 导入队列使用 `01_Data/04_Stop_Import_Queue`；
-3. Mask 导出使用 `01_Data/06_Stop_Mask_Export`；
+2. 导入队列使用 `01_Data/03_Stop_Import_Queue`；
+3. Mask 导出使用 `01_Data/05_Stop_Mask_Export`；
 4. nnU-Net 使用自己的 Stop 入口；
 5. nnInteractive/交互算法再次打开同一入口可查看并停止当前任务；
 6. 只有状态异常且普通停止无效时，才使用 `99_Admin/03_Stop_All_Owned_Services`。

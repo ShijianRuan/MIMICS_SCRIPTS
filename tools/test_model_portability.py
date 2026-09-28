@@ -727,7 +727,7 @@ class ModelManagerTests(unittest.TestCase):
             (ROOT / "runtime_py35" / "model_manager_mimics.py").is_file()
         )
         entry = (
-            ROOT / "scripting_library" / "99_Admin" / "09_Manage_AI_Models.py"
+            ROOT / "scripting_library" / "99_Admin" / "08_Manage_AI_Models.py"
         )
         self.assertTrue(entry.is_file())
         self.assertIn(

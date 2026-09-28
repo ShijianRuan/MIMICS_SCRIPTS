@@ -7,7 +7,7 @@ tasks, mask-append jobs, drop imports) into a single live table with the
 log/folder one click away. Read-only: stopping a task stays in the
 matching Stop menu entry.
 
-Launch from Mimics: scripting_library/01_Data/09_Show_Batch_Status.py.
+Launch from Mimics: scripting_library/01_Data/08_Show_Batch_Status.py.
 """
 
 from __future__ import annotations

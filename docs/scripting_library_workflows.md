@@ -13,12 +13,12 @@
 
 1. `01 Import Dataset`
 2. `02 Import Single Case`
-3. `04 Stop Import Queue`
-4. `05 Import Masks`
-5. `06 Stop Mask Export`
-6. `07 Quick Export Masks`
-7. `08 Quick Drop Import`
-8. `09 Show Batch Status`
+3. `03 Stop Import Queue`
+4. `04 Import Masks`
+5. `05 Stop Mask Export`
+6. `06 Quick Export Masks`
+7. `07 Quick Drop Import`
+8. `08 Show Batch Status`
 
 `02 Import Single Case` accepts a single `.nii`, `.nii.gz`, `.mha`, `.mhd`, or
 `.nrrd` volume, a TotalSegmentator-style case folder, a `dicom/` case folder,
@@ -34,12 +34,12 @@ administrator/default value and is overridden by the current window selection.
 Paths are remembered only when the annotator explicitly enables the workstation
 remember option.
 
-`05 Import Masks` adds binary or multi-label NIfTI, MHA/MHD, or NRRD
+`04 Import Masks` adds binary or multi-label NIfTI, MHA/MHD, or NRRD
 segmentations to the active image. File reading, label splitting, and spatial
 resampling run in external Python. Mimics applies one prepared Mask per GUI
 timer tick; empty results are rejected with a spatial-alignment warning.
 
-`07 Quick Export Masks` exports every Mask in the saved project, including hidden
+`06 Quick Export Masks` exports every Mask in the saved project, including hidden
 Masks. Select the source image or case and then the destination root. The source
 may be NIfTI, MHA/MHD, NRRD, one DICOM file, a DICOM series folder, or a case
 folder containing one of those forms. Output is written to `<chosen
@@ -51,7 +51,7 @@ a user-configurable data path.
 `tools/mimics_batch_cli.py export-labels` and requires an explicit destination
 policy through either `--output-dir` or `--overwrite-source`.
 
-`06 Stop Mask Export` targets only a Mimics-Script background process whose
+`05 Stop Mask Export` targets only a Mimics-Script background process whose
 resource lock identifies it as label export. It first writes an export stop
 marker so no additional case is opened, then terminates the recorded process
 tree only when its command line matches the export runner. It does not stop an
@@ -60,7 +60,7 @@ import queue, AI training or inference, nnInteractive, foreground Mimics, or unr
 ### 02 AI
 
 1. `01 nnInteractive`
-2. `ScribblePrompt`
+2. `Annotate With ScribblePrompt`
 3. `FlexiCT/01 Train Model`
 4. `FlexiCT/02 Predict Current Case`
 5. `FlexiCT/03 Active Learning Review`
@@ -78,19 +78,19 @@ dedicated setup window while prediction stays one click.
 2. `02 Window From Selected Mask`
 3. `03 Window Choose Preset`
 4. `04 Window Undo Last`
-5. `06 Window Edit Presets`
+5. `05 Window Edit Presets`
 
 ### 99 Admin
 
 1. `01 Setup Repair Environment`
 2. `02 Clear Cache`
 3. `03 Stop All Owned Services`
-4. `05 Undo Last Import`
-5. `06 System Health`
-6. `07 Collect Diagnostics`
-7. `08 Edit Configs`
-8. `09 Manage AI Models`
-9. `10 Environment Guidance`
+4. `04 Undo Last Import`
+5. `05 System Health`
+6. `06 Collect Diagnostics`
+7. `07 Edit Configs`
+8. `08 Manage AI Models`
+9. `09 Environment Guidance`
 
 The administrative stop entry only targets processes created and registered by this project. The import-specific stop remains under Data because it is part of the import workflow.
 
@@ -228,9 +228,9 @@ differs.
 
 | Current work | May start immediately | Must wait or stop first | Normal stop | Emergency stop |
 | --- | --- | --- | --- | --- |
-| Dataset scan or image preparation | Review, window controls, nnInteractive, AI inference on prepared data | Another import of the same queue | `01 Data/04 Stop Import Queue` | `99 Admin/03 Stop All Owned Services` |
-| Background `.mcs` creation | Review, GPU AI work, and exports reading other `.mcs` folders | Another creator or exporter using the same `.mcs` folder | `01 Data/04 Stop Import Queue` | `99 Admin/03 Stop All Owned Services` |
-| Mask export | Review, GPU AI work, and imports/exports using unrelated source and destination folders | Import writing its `.mcs` source folder, or export writing the same label destination | `01 Data/06 Stop Mask Export` | `99 Admin/03 Stop All Owned Services` |
+| Dataset scan or image preparation | Review, window controls, nnInteractive, AI inference on prepared data | Another import of the same queue | `01 Data/03 Stop Import Queue` | `99 Admin/03 Stop All Owned Services` |
+| Background `.mcs` creation | Review, GPU AI work, and exports reading other `.mcs` folders | Another creator or exporter using the same `.mcs` folder | `01 Data/03 Stop Import Queue` | `99 Admin/03 Stop All Owned Services` |
+| Mask export | Review, GPU AI work, and imports/exports using unrelated source and destination folders | Import writing its `.mcs` source folder, or export writing the same label destination | `01 Data/05 Stop Mask Export` | `99 Admin/03 Stop All Owned Services` |
 | nnInteractive active prediction | Review and data preparation | nnU-Net GPU execution | Finish or cancel the current nnInteractive session | `99 Admin/03 Stop All Owned Services` |
 | nnInteractive idle image worker | All review and data work | Nothing; another AI task requests a graceful GPU release | Worker exits on idle timeout | `99 Admin/03 Stop All Owned Services` |
 | nnU-Net training or prediction | Review, import preparation, status viewer | Another GPU AI task; nnInteractive GPU execution | `02 AI/nnUNet/03 Show Status & Models` (stop from the status window) | `99 Admin/03 Stop All Owned Services` |

@@ -20,7 +20,7 @@ only then kills), Sweep Stale State (resource_locks.sweep_processes), or
 opening the relevant folder. Nothing here mutates state without the user
 clicking a clearly-labeled button.
 
-Run inside Mimics via 99_Admin/06_System_Health.py, or standalone:
+Run inside Mimics via 99_Admin/05_System_Health.py, or standalone:
     python tools/system_health_panel.py [--preview out.png]
 """
 

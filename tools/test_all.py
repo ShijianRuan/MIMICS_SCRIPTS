@@ -2775,7 +2775,7 @@ class TestWindowLevelEditor(unittest.TestCase):
             )
         )
         entry = os.path.join(
-            PROJECT_ROOT, "scripting_library", "03_Review", "06_Window_Edit_Presets.py"
+            PROJECT_ROOT, "scripting_library", "03_Review", "05_Window_Edit_Presets.py"
         )
         self.assertTrue(os.path.isfile(entry))
         with open(entry, "r") as handle:
@@ -2846,7 +2846,7 @@ class TestConfigEditor(unittest.TestCase):
             )
         )
         entry = os.path.join(
-            PROJECT_ROOT, "scripting_library", "99_Admin", "08_Edit_Configs.py"
+            PROJECT_ROOT, "scripting_library", "99_Admin", "07_Edit_Configs.py"
         )
         self.assertTrue(os.path.isfile(entry))
         with open(entry, "r") as handle:
@@ -3566,7 +3566,7 @@ class TestStopBackgroundServices(unittest.TestCase):
             msb._stop_export_inprocess_monitors = old_stop
         self.assertEqual(os.getpid(), result.get("target_pid"))
         self.assertTrue(os.path.isfile(os.path.join(export_root, ".mimics_runtime", "_export_stop.json")))
-        entry = os.path.join(PROJECT_ROOT, "scripting_library", "01_Data", "06_Stop_Mask_Export.py")
+        entry = os.path.join(PROJECT_ROOT, "scripting_library", "01_Data", "05_Stop_Mask_Export.py")
         self.assertTrue(os.path.isfile(entry))
         self.assertIn("main_stop_export", Path(entry).read_text(encoding="utf-8"))
 
@@ -3973,7 +3973,7 @@ class TestStopBackgroundServices(unittest.TestCase):
             PROJECT_ROOT,
             "scripting_library",
             "01_Data",
-            "04_Stop_Import_Queue.py",
+            "03_Stop_Import_Queue.py",
         )
         self.assertTrue(os.path.isfile(entry))
 
@@ -6103,7 +6103,7 @@ class TestNewFeatures(unittest.TestCase):
 
     def test_batch_status_entry_and_runtime_module_exist(self):
         entry = Path(
-            PROJECT_ROOT, "scripting_library", "01_Data", "09_Show_Batch_Status.py"
+            PROJECT_ROOT, "scripting_library", "01_Data", "08_Show_Batch_Status.py"
         )
         self.assertTrue(entry.is_file(), entry)
         source = entry.read_text(encoding="utf-8")
@@ -7818,7 +7818,7 @@ class TestNewFeatures(unittest.TestCase):
     def test_stop_background_import_entry_exists(self):
         """Stop_Background_Import entry must route to the correct function."""
         entry = os.path.join(
-            PROJECT_ROOT, "scripting_library", "01_Data", "04_Stop_Import_Queue.py"
+            PROJECT_ROOT, "scripting_library", "01_Data", "03_Stop_Import_Queue.py"
         )
         self.assertTrue(os.path.isfile(entry), "Stop_Background_Import entry must exist")
         with open(entry, "r", encoding="utf-8") as handle:
@@ -10429,14 +10429,14 @@ class TestImportReceiptAndUndo(unittest.TestCase):
 
     def test_undo_entry_points_exist(self):
         entry = os.path.join(
-            PROJECT_ROOT, "scripting_library", "99_Admin", "05_Undo_Last_Import.py"
+            PROJECT_ROOT, "scripting_library", "99_Admin", "04_Undo_Last_Import.py"
         )
         self.assertTrue(os.path.isfile(entry))
         with open(entry, "r") as handle:
             source = handle.read()
         self.assertIn("import_undo_mimics", source)
         drop = os.path.join(
-            PROJECT_ROOT, "scripting_library", "01_Data", "08_Quick_Drop_Import.py"
+            PROJECT_ROOT, "scripting_library", "01_Data", "07_Quick_Drop_Import.py"
         )
         self.assertTrue(os.path.isfile(drop))
         with open(drop, "r") as handle:
@@ -10616,7 +10616,7 @@ class TestSystemHealthPanel(unittest.TestCase):
 
     def test_health_panel_entry_exists(self):
         entry = os.path.join(
-            PROJECT_ROOT, "scripting_library", "99_Admin", "06_System_Health.py"
+            PROJECT_ROOT, "scripting_library", "99_Admin", "05_System_Health.py"
         )
         self.assertTrue(os.path.isfile(entry))
         with open(entry, "r") as handle:
@@ -10648,7 +10648,7 @@ class TestSystemHealthPanel(unittest.TestCase):
     def test_env_guidance_entry_exists(self):
         entry = os.path.join(
             PROJECT_ROOT, "scripting_library", "99_Admin",
-            "10_Environment_Guidance.py"
+            "09_Environment_Guidance.py"
         )
         self.assertTrue(os.path.isfile(entry))
         with open(entry, "r", encoding="utf-8") as handle:

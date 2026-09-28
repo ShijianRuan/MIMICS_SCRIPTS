@@ -234,11 +234,11 @@ nninteractive_env\python.exe -c "import onnxruntime as o; print(o.get_available_
 - 前台标注不被后台发现、准备或 `.mcs` 创建阻塞。
 - 停止队列后，不再启动新病例；当前可安全终止阶段按状态结束。
 
-停止入口：`01_Data/04_Stop_Import_Queue.py`
+停止入口：`01_Data/03_Stop_Import_Queue.py`
 
 ### 6.3 导入 mask
 
-入口：`01_Data/05_Import_Masks.py`
+入口：`01_Data/04_Import_Masks.py`
 
 验证 NIfTI、MHD、NRRD、multi-label mask，以及与图像不同方向但物理空间相同的 mask。
 
@@ -252,7 +252,7 @@ nninteractive_env\python.exe -c "import onnxruntime as o; print(o.get_available_
 
 ### 6.4 导出 mask
 
-入口：`01_Data/07_Quick_Export_Masks.py`
+入口：`01_Data/06_Quick_Export_Masks.py`
 
 验证：
 
@@ -272,9 +272,9 @@ nninteractive_env\python.exe -c "import onnxruntime as o; print(o.get_available_
 - 后台 Mimics 受到许可证限制时给出明确原因和可执行方案。
 - 停止入口仅终止本项目创建的导出任务。
 
-停止入口：`01_Data/06_Stop_Mask_Export.py`
+停止入口：`01_Data/05_Stop_Mask_Export.py`
 
-快速导出入口：`01_Data/07_Quick_Export_Masks.py`
+快速导出入口：`01_Data/06_Quick_Export_Masks.py`
 
 快速导出也必须执行同样的几何验证，不能因为使用当前项目 API 而直接把 Mimics buffer 错写为原图 affine。
 
@@ -331,7 +331,7 @@ nninteractive_env\python.exe tools\verify_medical_geometry.py ^
 
 ## 8. ScribblePrompt
 
-入口：`02_AI/ScribblePrompt.py`
+入口：`02_AI/Annotate_With_ScribblePrompt.py`
 
 使用：在 Mimics 采集前景/背景点击、涂画或一个前景 box，外部模型完成 2D 提示分割，再把结果返回 Mimics。
 
@@ -501,8 +501,8 @@ Windows 后台训练/推理子进程使用 `BELOW_NORMAL_PRIORITY_CLASS`，降�
 
 专项停止入口包括：
 
-- `01_Data/04_Stop_Import_Queue.py`
-- `01_Data/06_Stop_Mask_Export.py`
+- `01_Data/03_Stop_Import_Queue.py`
+- `01_Data/05_Stop_Mask_Export.py`
 - `02_AI/nnUNet/03_Show_Status_Models.py`（状态窗口内停止任务）
 - `02_AI/FlexiCT/04_Show_Status_and_Stop.py`（状态窗口内停止任务）
 - nnInteractive 模型中心中的停止操作。
