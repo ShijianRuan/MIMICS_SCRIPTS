@@ -10178,6 +10178,57 @@ class TestImportReceiptAndUndo(unittest.TestCase):
         self.assertEqual([mcs_path], saved["saves"])
         self.assertEqual(1, saved["closes"])
 
+    def test_undo_announces_blocking_steps_in_log_before_deleting(self):
+        """B33: open/fingerprint/save block the GUI thread for as long as
+        Mimics takes on a multi-hundred-MB .mcs. The log notice must fire
+        before any deletion starts, so the pause is announced work, not a
+        frozen window."""
+        import logging as _logging
+        import import_undo_mimics
+        from create_mcs_batch import write_import_receipt
+
+        out_dir = os.path.join(self.tmp, "out")
+        os.makedirs(out_dir)
+        mcs_path = os.path.join(out_dir, "s0001.mcs")
+        with open(mcs_path, "wb") as handle:
+            handle.write(b"project-bytes")
+        write_import_receipt(out_dir, "s0001", mcs_path, ["Bone"], {})
+        saved = self._install_undo_env(mcs_path, ["Bone", "Skin"])
+
+        notices = []
+        log_patch = mock.patch.object(
+            import_undo_mimics.mimics.logging, "log_user_message",
+            lambda level, message: notices.append((level, message)),
+        )
+        log_patch.start()
+        self.addCleanup(log_patch.stop)
+
+        # Snapshot the notice count at deletion time: the ordering claim is
+        # "notice precedes deletion", which is only observable mid-flight.
+        notice_count_at_deletion = []
+        real_delete = import_undo_mimics._delete_masks
+
+        def _delete_and_record(mask_names):
+            notice_count_at_deletion.append(len(notices))
+            return real_delete(mask_names)
+
+        with mock.patch.object(import_undo_mimics, "_candidate_receipt_dirs",
+                               lambda: [out_dir]), \
+                mock.patch.object(import_undo_mimics, "_delete_masks",
+                                  side_effect=_delete_and_record):
+            code = import_undo_mimics.undo_last_import(confirm=False)
+        self.assertEqual(0, code)
+        # Two log entries: the pre-work notice, then the undo summary that
+        # predates this change. The pre-work one must come first.
+        self.assertEqual(2, len(notices))
+        level, message = notices[0]
+        self.assertEqual(_logging.INFO, level)
+        self.assertIn("verifying", message)
+        self.assertIn("s0001.mcs", message)
+        self.assertEqual([1], notice_count_at_deletion,
+                         "the notice must land before the deletion starts")
+        self.assertEqual(sorted(["Bone"]), sorted(saved["deleted"]))
+
     def test_undo_keeps_file_when_fingerprint_differs(self):
         import import_undo_mimics
         from create_mcs_batch import write_import_receipt

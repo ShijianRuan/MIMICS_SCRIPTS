@@ -209,6 +209,23 @@ def undo_last_import(confirm=True):
     mask_names = set(str(n) for n in (receipt.get("created_masks") or []))
     deleted = []
     if mask_names:
+        # The next steps (project open above, fingerprint hashing below,
+        # save) block the GUI thread for as long as Mimics takes on a
+        # multi-hundred-MB .mcs. Say so in the log panel first - non-modal,
+        # the same channel collect_diagnostics uses - so the pause is
+        # announced work, not a frozen window.
+        try:
+            mimics.logging.log_user_message(
+                level=logging.INFO,
+                message=(
+                    "Undo Last Import: opening and verifying {0}; Mimics "
+                    "may pause for a moment. Masks to remove: {1}.".format(
+                        os.path.basename(mcs_path), len(mask_names)
+                    )
+                ),
+            )
+        except Exception:
+            pass
         try:
             deleted = _delete_masks(mask_names)
         except Exception as exc:
