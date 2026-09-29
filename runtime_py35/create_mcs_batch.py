@@ -328,6 +328,37 @@ def _remove_file(path):
         pass
 
 
+def _stored_provenance_fingerprint(output_dir, case_id):
+    """Return the source fingerprint recorded for a published .mcs.
+
+    The per-case fingerprint file lives inside the import queue runtime
+    and is swept by the 14-day queue prune; the dataset manifest lives
+    next to the .mcs files in the output directory and survives pruning,
+    so it is the durable record of what source produced the .mcs.
+    """
+    try:
+        case = dataset_manifest.find_case(output_dir, case_id) or {}
+    except Exception:
+        return ""
+    provenance = case.get("provenance") or {}
+    return str(provenance.get("source_fingerprint") or "").strip()
+
+
+def _write_fingerprint_file(output_dir, case_id, fingerprint):
+    """(Re)create the per-case fingerprint file (best effort)."""
+    fingerprint_path = runtime_path(
+        output_dir, "fingerprints", safe_case_filename(case_id) + ".fingerprint"
+    )
+    try:
+        fingerprint_dir = os.path.dirname(fingerprint_path)
+        if not os.path.isdir(fingerprint_dir):
+            os.makedirs(fingerprint_dir)
+        with open(fingerprint_path, "w", encoding="utf-8") as fp:
+            fp.write(fingerprint)
+    except Exception:
+        pass
+
+
 def _publish_mcs(staging_path, output_mcs, retries=20):
     """Publish a completed project without exposing a partially saved .mcs."""
     if not os.path.isfile(staging_path):
@@ -1187,7 +1218,59 @@ def main(output_dir=None, runtime_dir=None):
                                 except OSError:
                                     pass
                             continue
-                        # Fingerprint changed or missing — reprocess
+                        # Fingerprint file missing (e.g. swept by the 14-day
+                        # queue prune) must NOT read as "source changed": the
+                        # published .mcs may hold annotations by now. Fall
+                        # back to the dataset manifest provenance, which
+                        # lives next to the .mcs and survives queue pruning.
+                        if current_fp and not stored_fp:
+                            provenance_fp = _stored_provenance_fingerprint(
+                                output_dir, case_id
+                            )
+                            if provenance_fp == current_fp:
+                                # Same source confirmed via manifest — skip
+                                # and heal the missing fingerprint file.
+                                _write_fingerprint_file(
+                                    output_dir, case_id, current_fp
+                                )
+                                log_message(
+                                    output_dir,
+                                    "Fingerprint file missing for {0}; dataset manifest confirms the source is unchanged. Skipping.".format(case_id),
+                                )
+                                try:
+                                    shutil.rmtree(work_dir, ignore_errors=True)
+                                except Exception:
+                                    pass
+                                prune_empty_work_parents(work_dir)
+                                if descriptor_path:
+                                    try:
+                                        os.remove(descriptor_path)
+                                    except OSError:
+                                        pass
+                                continue
+                            if provenance_fp:
+                                # Manifest names a DIFFERENT source — genuine
+                                # change, reprocess (existing log line below).
+                                pass
+                            else:
+                                # Published .mcs with unknown provenance:
+                                # never overwrite silently. Skip and surface.
+                                log_message(
+                                    output_dir,
+                                    "Fingerprint for {0} is missing and the dataset manifest has no record; keeping the existing .mcs and skipping reimport. Delete the .mcs manually to force a reimport.".format(case_id),
+                                )
+                                try:
+                                    shutil.rmtree(work_dir, ignore_errors=True)
+                                except Exception:
+                                    pass
+                                prune_empty_work_parents(work_dir)
+                                if descriptor_path:
+                                    try:
+                                        os.remove(descriptor_path)
+                                    except OSError:
+                                        pass
+                                continue
+                        # Fingerprint changed — reprocess
                         if current_fp:
                             log_message(output_dir, "Source fingerprint changed for {0}; reprocessing.".format(case_id))
                     if os.path.isfile(failed_marker) and not current_fp:
@@ -1307,15 +1390,7 @@ def main(output_dir=None, runtime_dir=None):
                             pass
                     fingerprint = manifest_data.get("source_fingerprint", "")
                     if fingerprint:
-                        fingerprint_path = runtime_path(output_dir, "fingerprints", safe_case_filename(case_id) + ".fingerprint")
-                        try:
-                            fingerprint_dir = os.path.dirname(fingerprint_path)
-                            if not os.path.isdir(fingerprint_dir):
-                                os.makedirs(fingerprint_dir)
-                            with open(fingerprint_path, "w", encoding="utf-8") as fp:
-                                fp.write(fingerprint)
-                        except Exception:
-                            pass
+                        _write_fingerprint_file(output_dir, case_id, fingerprint)
                     try:
                         _record_created_project(
                             output_dir, case_id, mcs_path, manifest_data

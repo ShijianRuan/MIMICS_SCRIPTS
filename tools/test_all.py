@@ -3025,6 +3025,140 @@ class TestCreateMcsBatch(unittest.TestCase):
         self.assertFalse(os.path.exists(descriptor))
         self.assertFalse(os.path.exists(work_dir))
 
+    def test_pruned_fingerprint_with_manifest_match_keeps_existing_mcs(self):
+        """R61-2: after the 14-day queue prune deletes the fingerprint file,
+        a reimport of the SAME source must skip, not overwrite the .mcs that
+        may carry annotations. Provenance is recovered from the dataset
+        manifest, and the fingerprint file is healed."""
+        import create_mcs_batch
+
+        output_dir = os.path.join(self.tmp, "output")
+        runtime_dir = os.path.join(self.tmp, "local_queue")
+        work_dir = os.path.join(self.tmp, "local_work", "case_gone")
+        queue_dir = os.path.join(runtime_dir, "prepared_queue")
+        os.makedirs(output_dir)
+        os.makedirs(work_dir)
+        os.makedirs(queue_dir)
+        output_mcs = os.path.join(output_dir, "case_gone.mcs")
+        with open(output_mcs, "w") as handle:
+            handle.write("annotated mcs")
+        with open(os.path.join(work_dir, "prepare_manifest.json"), "w") as handle:
+            json.dump({"output_mcs": output_mcs, "source_fingerprint": "fp_same"}, handle)
+        descriptor = os.path.join(queue_dir, "case_gone.json")
+        with open(descriptor, "w") as handle:
+            json.dump({"case_id": "case_gone", "work_dir": work_dir, "output_mcs": output_mcs}, handle)
+        with open(os.path.join(runtime_dir, create_mcs_batch.QUEUE_DONE_FILE), "w") as handle:
+            json.dump({"status": "done"}, handle)
+        # The dataset manifest (survives pruning) records the same source.
+        import dataset_manifest
+        dataset_manifest.update_case(
+            output_dir, "case_gone",
+            image_path="ct.nii.gz", mcs_path=output_mcs,
+            provenance={"last_operation": "mimics_import", "source_fingerprint": "fp_same"},
+        )
+
+        calls = []
+        old_create = create_mcs_batch.create_mcs_from_manifest
+        try:
+            create_mcs_batch.create_mcs_from_manifest = (
+                lambda work_dir, path: calls.append(work_dir) or path
+            )
+            self.assertEqual(0, create_mcs_batch.main(output_dir, runtime_dir=runtime_dir))
+        finally:
+            create_mcs_batch.create_mcs_from_manifest = old_create
+        self.assertEqual([], calls, "same-source reimport must not recreate the .mcs")
+        with open(output_mcs, "r") as handle:
+            self.assertEqual("annotated mcs", handle.read(), "existing .mcs was overwritten")
+        # The fingerprint file was healed from the manifest record.
+        fp_path = os.path.join(
+            runtime_dir, "fingerprints", "case_gone.fingerprint"
+        )
+        self.assertTrue(os.path.isfile(fp_path))
+        with open(fp_path, "r") as handle:
+            self.assertEqual("fp_same", handle.read().strip())
+
+    def test_pruned_fingerprint_without_manifest_record_keeps_existing_mcs(self):
+        """R61-2: published .mcs, fingerprint file pruned, NO manifest record
+        (e.g. manifest update failed at creation time). Unknown provenance
+        must never silently overwrite — skip and tell the user how to force."""
+        import create_mcs_batch
+
+        output_dir = os.path.join(self.tmp, "output")
+        runtime_dir = os.path.join(self.tmp, "local_queue")
+        work_dir = os.path.join(self.tmp, "local_work", "case_unknown")
+        queue_dir = os.path.join(runtime_dir, "prepared_queue")
+        os.makedirs(output_dir)
+        os.makedirs(work_dir)
+        os.makedirs(queue_dir)
+        output_mcs = os.path.join(output_dir, "case_unknown.mcs")
+        with open(output_mcs, "w") as handle:
+            handle.write("annotated mcs")
+        with open(os.path.join(work_dir, "prepare_manifest.json"), "w") as handle:
+            json.dump({"output_mcs": output_mcs, "source_fingerprint": "fp_new"}, handle)
+        descriptor = os.path.join(queue_dir, "case_unknown.json")
+        with open(descriptor, "w") as handle:
+            json.dump({"case_id": "case_unknown", "work_dir": work_dir, "output_mcs": output_mcs}, handle)
+        with open(os.path.join(runtime_dir, create_mcs_batch.QUEUE_DONE_FILE), "w") as handle:
+            json.dump({"status": "done"}, handle)
+
+        calls = []
+        old_create = create_mcs_batch.create_mcs_from_manifest
+        try:
+            create_mcs_batch.create_mcs_from_manifest = (
+                lambda work_dir, path: calls.append(work_dir) or path
+            )
+            self.assertEqual(0, create_mcs_batch.main(output_dir, runtime_dir=runtime_dir))
+        finally:
+            create_mcs_batch.create_mcs_from_manifest = old_create
+        self.assertEqual([], calls, "unknown-provenance reimport must not recreate the .mcs")
+        with open(output_mcs, "r") as handle:
+            self.assertEqual("annotated mcs", handle.read())
+
+    def test_pruned_fingerprint_with_manifest_mismatch_reprocesses(self):
+        """R61-2: the manifest records a DIFFERENT source fingerprint — a
+        genuine source change. Reprocessing must still happen."""
+        import create_mcs_batch
+
+        output_dir = os.path.join(self.tmp, "output")
+        runtime_dir = os.path.join(self.tmp, "local_queue")
+        work_dir = os.path.join(self.tmp, "local_work", "case_changed")
+        queue_dir = os.path.join(runtime_dir, "prepared_queue")
+        os.makedirs(output_dir)
+        os.makedirs(work_dir)
+        os.makedirs(queue_dir)
+        output_mcs = os.path.join(output_dir, "case_changed.mcs")
+        with open(output_mcs, "w") as handle:
+            handle.write("old mcs")
+        with open(os.path.join(work_dir, "prepare_manifest.json"), "w") as handle:
+            json.dump({"output_mcs": output_mcs, "source_fingerprint": "fp_new"}, handle)
+        descriptor = os.path.join(queue_dir, "case_changed.json")
+        with open(descriptor, "w") as handle:
+            json.dump({"case_id": "case_changed", "work_dir": work_dir, "output_mcs": output_mcs}, handle)
+        with open(os.path.join(runtime_dir, create_mcs_batch.QUEUE_DONE_FILE), "w") as handle:
+            json.dump({"status": "done"}, handle)
+        import dataset_manifest
+        dataset_manifest.update_case(
+            output_dir, "case_changed",
+            image_path="ct.nii.gz", mcs_path=output_mcs,
+            provenance={"last_operation": "mimics_import", "source_fingerprint": "fp_old"},
+        )
+
+        calls = []
+        old_create = create_mcs_batch.create_mcs_from_manifest
+
+        def fake_create(work_dir_arg, path):
+            calls.append(work_dir_arg)
+            with open(path, "w") as handle:
+                handle.write("mcs")
+            return path
+
+        try:
+            create_mcs_batch.create_mcs_from_manifest = fake_create
+            self.assertEqual(0, create_mcs_batch.main(output_dir, runtime_dir=runtime_dir))
+        finally:
+            create_mcs_batch.create_mcs_from_manifest = old_create
+        self.assertEqual([work_dir], calls, "genuine source change must reprocess")
+
     def test_partial_work_dir_without_manifest_is_never_converted(self):
         # TB-01: a bridge process killed mid-DICOM-write leaves a work dir
         # with partial .dcm files and NO prepare_manifest.json. The manifest
@@ -3924,7 +4058,7 @@ class TestStopBackgroundServices(unittest.TestCase):
         import create_mcs_batch
 
         source = inspect.getsource(create_mcs_batch.main)
-        persist_index = source.index("fp.write(fingerprint)")
+        persist_index = source.index("_write_fingerprint_file(")
         cleanup_index = source.index("shutil.rmtree(work_dir", persist_index)
         self.assertLess(persist_index, cleanup_index)
 
