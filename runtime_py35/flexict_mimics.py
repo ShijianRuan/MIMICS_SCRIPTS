@@ -1249,11 +1249,26 @@ def _al_pending_requests():
 
 
 def _al_tick():
-    """Poll for review-UI overlay requests and apply the newest one."""
+    """Poll for review-UI overlay requests and apply the newest one.
+
+    Conversion runs in a background thread (communicate can take minutes);
+    this tick only starts it and, once result.json exists, applies the
+    finished buffers on the GUI thread. Both stages are guarded by the
+    "busy" flag so ticks never overlap on one request.
+    """
     if _AL_APPLY_TRANSACTIONS.get("busy"):
         return
     _AL_APPLY_TRANSACTIONS["busy"] = True
     try:
+        transaction = _AL_APPLY_TRANSACTIONS.get("conversion")
+        if transaction is not None:
+            # Stage two: the background thread wrote result.json when the
+            # conversion finished. Until then, keep the GUI responsive and
+            # wait for a later tick.
+            if os.path.isfile(transaction["result_path"]):
+                _AL_APPLY_TRANSACTIONS.pop("conversion", None)
+                _al_finish_conversion(transaction)
+            return
         requests = _al_pending_requests()
         if not requests:
             return
@@ -1478,26 +1493,65 @@ def _al_apply_request(request):
             stderr=subprocess.PIPE,
             **runtime_common.background_process_kwargs()
         )
-    try:
-        stdout, stderr = process.communicate(timeout=600)
-    except Exception:
+    # The conversion can run for minutes — never on the GUI timer thread.
+    # Same pattern as the prediction flow's wait_bridge: the thread only
+    # communicates and writes result.json; the Mimics-side application
+    # happens in _al_finish_conversion, back on the monitor tick.
+    _al_mark_request(request_path, "converting", "conversion started")
+
+    def wait_bridge():
         try:
-            runtime_common.terminate_process_async(
-                process=process, graceful_seconds=0.0
-            )
+            stdout, stderr = process.communicate(timeout=600)
+            if process.returncode == 0:
+                result = json.loads(stdout.decode("utf-8"))
+            else:
+                result = {
+                    "status": "error",
+                    "error": stderr.decode("utf-8", "replace")[-2000:],
+                }
+        except Exception:
+            try:
+                runtime_common.terminate_process_async(
+                    process=process, graceful_seconds=0.0
+                )
+            except Exception:
+                pass
+            result = {"status": "error", "error": "conversion timed out"}
+        try:
+            _write_json(result_path, result)
         except Exception:
             pass
-        _al_mark_request(request_path, "failed", "conversion timed out")
-        shutil.rmtree(bridge_root, ignore_errors=True)
-        return
-    shutil.rmtree(bridge_root, ignore_errors=True)
-    if process.returncode != 0:
+
+    thread = threading.Thread(target=wait_bridge)
+    thread.daemon = True
+    thread.start()
+    _AL_APPLY_TRANSACTIONS["conversion"] = {
+        "request": request,
+        "result_path": result_path,
+        "bridge_root": bridge_root,
+        "masks": masks,
+    }
+
+
+def _al_finish_conversion(transaction):
+    """Apply a finished AL conversion result (called from the monitor tick).
+
+    All Mimics API access (mask creation, buffer writes, dialogs) stays on
+    the GUI thread; only the subprocess wait ran in the background.
+    """
+    request = transaction["request"]
+    request_path = request["_request_path"]
+    job_dir = request["_job_dir"]
+    case_id = str(request.get("case_id") or "")
+    masks = transaction["masks"]
+    result = _read_json(transaction["result_path"], {}) or {}
+    shutil.rmtree(transaction["bridge_root"], ignore_errors=True)
+    if result.get("status") == "error" or not result:
         _al_mark_request(
             request_path, "failed",
-            stderr.decode("utf-8", "replace")[-2000:],
+            str(result.get("error") or "conversion produced no result"),
         )
         return
-    result = json.loads(stdout.decode("utf-8"))
     applied = []
     for index, (title, _path) in enumerate(masks):
         row = None
