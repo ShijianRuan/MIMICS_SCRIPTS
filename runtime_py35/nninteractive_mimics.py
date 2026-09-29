@@ -2697,6 +2697,27 @@ def _bridge_parameters(config, image_export, base_export):
     }
 
 
+def _prompt_buttons_for_profile(profile):
+    prompt_types = set(
+        str(value or "").strip().lower()
+        for value in profile.get("validated_prompt_types") or []
+    )
+    buttons = []
+    for prompt_type, button in (
+        ("point", BUTTON_POINT),
+        ("scribble", BUTTON_SCRIBBLE),
+        ("box", BUTTON_BOX),
+        ("lasso", BUTTON_LASSO),
+    ):
+        if prompt_type in prompt_types:
+            buttons.append(button)
+    if not buttons:
+        raise RuntimeError(
+            "The selected nnInteractive model declares no validated prompt type."
+        )
+    return buttons
+
+
 def _async_prompt_menu(target, state, source=None, profile=None):
     count = len(state.get("interactions", [])) if state else 0
     menu_source = target if source is None else source
@@ -3010,7 +3031,7 @@ def _run_with_config(config):
                     "nnInteractive was not started, so no prompt or Mask state was changed. "
                     "Interactive prompting should not sit behind a long training or inference queue. "
                     "Wait for that task to finish, stop it from its task window, or use "
-                    "Admin > Stop All Owned Background Services."
+                    "Admin > Stop All Owned Services."
                 ).format(runtime_common.resource_lock_summary(gpu_holder)),
                 title=TITLE,
                 ui_blocking=False,
@@ -3978,7 +3999,7 @@ def _error_guidance(error_text, stage=""):
             "out_of_memory",
             "The AI model ran out of GPU memory.",
             "Close other GPU programs or stop running AI training jobs "
-            "(Admin > Stop All Owned Background Services), then retry. "
+            "(Admin > Stop All Owned Services), then retry. "
             "If it keeps failing, try a smaller image or restart Mimics.",
         )
     if (

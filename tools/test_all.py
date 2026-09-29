@@ -4116,6 +4116,57 @@ class TestNNInteractiveContinuousPrompting(unittest.TestCase):
         self.assertFalse(continued)
         self.assertEqual(["user_finished"], closed)
 
+    def test_async_prompt_menu_executes_without_monkeypatch(self):
+        """R61-1: the real menu body must run — no NameError from bd180da.
+
+        test_continue_session_prompt_finish_closes_session monkeypatches
+        _async_prompt_menu, so the deleted _prompt_buttons_for_profile went
+        unnoticed (commit bd180da removed the definition but kept the call).
+        This test executes the real function end-to-end against the mocked
+        mimics dialogs module.
+        """
+        import nninteractive_mimics
+
+        observed = []
+
+        def fake_question_box(message="", buttons="", title="", ui_blocking=None, **kw):
+            observed.append({"message": message, "buttons": buttons, "title": title})
+            return "Finish"
+
+        old_box = nninteractive_mimics.mimics.dialogs.question_box
+        try:
+            nninteractive_mimics.mimics.dialogs.question_box = fake_question_box
+            profile = {"validated_prompt_types": ["point", "box"]}
+            state = {
+                "interactions": [{"kind": "point"}],
+                "source_name": "source.nii",
+                "target_name": "AI Result",
+            }
+
+            class _Named(object):
+                name = "fallback-name"
+
+            action = nninteractive_mimics._async_prompt_menu(
+                _Named(), state, _Named(), profile
+            )
+        finally:
+            nninteractive_mimics.mimics.dialogs.question_box = old_box
+        self.assertEqual("Finish", action)
+        self.assertEqual(1, len(observed))
+        # Validated prompt buttons + undo/reset (session has interactions) + finish.
+        self.assertEqual(
+            "Add Points;Draw Box;Undo Last Prompt;Reset To Start;Finish",
+            observed[0]["buttons"],
+        )
+
+    def test_prompt_buttons_for_profile_rejects_empty_profile(self):
+        """R61-1: a model with no validated prompt types must raise, not
+        silently offer an empty button set."""
+        import nninteractive_mimics
+
+        with self.assertRaises(RuntimeError):
+            nninteractive_mimics._prompt_buttons_for_profile({})
+
     def test_async_monitor_applied_continues_prompt_loop(self):
         import nninteractive_mimics
 
@@ -4395,6 +4446,10 @@ class TestNNInteractiveContinuousPrompting(unittest.TestCase):
                  "Stop All Owned Background Services"],
             os.path.join("runtime_py35", "mimics_export.py"):
                 ["Configure MIMICS_BACKGROUND_EXE", "check mimics_export.log"],
+            os.path.join("runtime_py35", "nninteractive_mimics.py"):
+                # The reachable entry is 99_Admin/03_Stop_All_Owned_Services;
+                # the longer name never existed as a menu entry.
+                ["Stop All Owned Background Services"],
             os.path.join("runtime_py35", "mimics_stop_background.py"):
                 # Report/check paths belong in the _mimics_log line, never in
                 # user dialogs. Log lines embed them after a format prefix
