@@ -12879,6 +12879,285 @@ class TestLifecycleAndRetention(unittest.TestCase):
         self.assertTrue(non_job.exists())
 
 
+class TestFlexiCTActiveLearningApply(unittest.TestCase):
+    """R61-3: the AL overlay conversion must not block the GUI thread.
+
+    _al_apply_request may only spawn the bridge process, mark the request
+    "converting", and return — the communicate() wait happens in a daemon
+    thread and its result is applied by _al_finish_conversion on a later
+    monitor tick. Source-contract assertions keep the blocking form from
+    coming back.
+    """
+
+    def test_al_apply_request_returns_without_waiting_for_bridge(self):
+        import ast
+        import inspect
+        import textwrap
+
+        import flexict_mimics
+
+        source = textwrap.dedent(
+            inspect.getsource(flexict_mimics._al_apply_request)
+        )
+        tree = ast.parse(source)
+
+        def _communicate_calls_outside_nested_functions(node):
+            """Yield communicate() calls made directly by _al_apply_request
+            (i.e. NOT inside a nested def — those run on the wait thread)."""
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue  # nested function bodies run on their own thread
+                if isinstance(child, ast.Call):
+                    func = child.func
+                    if (
+                        isinstance(func, ast.Attribute)
+                        and func.attr == "communicate"
+                    ):
+                        yield child
+                for hit in _communicate_calls_outside_nested_functions(child):
+                    yield hit
+
+        blocking = list(_communicate_calls_outside_nested_functions(tree))
+        self.assertEqual(
+            [], blocking,
+            "the bridge communicate must live only inside the wait-thread "
+            "function, not on the GUI monitor tick path",
+        )
+        self.assertIn("threading.Thread", source)
+        self.assertIn('"converting"', source)
+        finish_source = inspect.getsource(flexict_mimics._al_finish_conversion)
+        self.assertIn("_set_mask_from_u8", finish_source)
+        # The tick drives both stages: start, then poll result.json.
+        tick_source = inspect.getsource(flexict_mimics._al_tick)
+        self.assertIn('"conversion"', tick_source)
+        self.assertIn("_al_finish_conversion", tick_source)
+
+    def test_al_conversion_applies_finished_result_and_marks_request(self):
+        import flexict_mimics
+
+        with tempfile.TemporaryDirectory() as tmp:
+            request_dir = os.path.join(tmp, "job", "apply_requests")
+            os.makedirs(request_dir)
+            request_path = os.path.join(request_dir, "req.json")
+            with open(request_path, "w") as handle:
+                json.dump({
+                    "case_id": "caseA", "what": "bands",
+                    "state": "converting", "requested_at_epoch": 1.0,
+                }, handle)
+            # A finished bridge result: one mask row with a u8 buffer.
+            buffer_path = os.path.join(tmp, "mask.u8")
+            with open(buffer_path, "wb") as handle:
+                handle.write(b"\x01" * 24)
+            bridge_root = os.path.join(tmp, "bridge")
+            os.makedirs(bridge_root)
+            result_path = os.path.join(bridge_root, "result.json")
+            with open(result_path, "w") as handle:
+                json.dump({
+                    "status": "ok",
+                    "masks": [{
+                        "name": "al_0",
+                        "output_path": buffer_path,
+                        "mimics_shape": [2, 3, 4],
+                    }],
+                }, handle)
+
+            applied = []
+            marked = []
+            old_new_mask = flexict_mimics.mimics_mask_apply._new_prediction_mask
+            old_set = flexict_mimics.mimics_mask_apply._set_mask_from_u8
+            old_mark = flexict_mimics._al_mark_request
+            old_annotated = flexict_mimics._al_mark_annotated
+
+            class _Mask(object):
+                name = "Bands (Moderate)"
+
+            try:
+                flexict_mimics.mimics_mask_apply._new_prediction_mask = (
+                    lambda title: _Mask()
+                )
+                flexict_mimics.mimics_mask_apply._set_mask_from_u8 = (
+                    lambda mask, path, shape, name=None: applied.append(mask.name)
+                )
+                flexict_mimics._al_mark_request = (
+                    lambda path, state, detail="": marked.append((state, detail))
+                )
+                flexict_mimics._al_mark_annotated = (
+                    lambda job_dir, case_id: None
+                )
+                transaction = {
+                    "request": {
+                        "_request_path": request_path,
+                        "_job_dir": os.path.join(tmp, "job"),
+                        "case_id": "caseA",
+                    },
+                    "result_path": result_path,
+                    "bridge_root": bridge_root,
+                    "masks": [("Bands (Moderate)", buffer_path)],
+                }
+                flexict_mimics._al_finish_conversion(transaction)
+            finally:
+                flexict_mimics.mimics_mask_apply._new_prediction_mask = old_new_mask
+                flexict_mimics.mimics_mask_apply._set_mask_from_u8 = old_set
+                flexict_mimics._al_mark_request = old_mark
+                flexict_mimics._al_mark_annotated = old_annotated
+            self.assertEqual(["Bands (Moderate)"], applied)
+            self.assertEqual(1, len(marked))
+            self.assertEqual("applied", marked[0][0])
+            self.assertFalse(os.path.exists(bridge_root))
+
+    def test_al_conversion_failure_marks_request_failed(self):
+        import flexict_mimics
+
+        with tempfile.TemporaryDirectory() as tmp:
+            request_dir = os.path.join(tmp, "job", "apply_requests")
+            os.makedirs(request_dir)
+            request_path = os.path.join(request_dir, "req.json")
+            bridge_root = os.path.join(tmp, "bridge")
+            os.makedirs(bridge_root)
+            result_path = os.path.join(bridge_root, "result.json")
+            with open(result_path, "w") as handle:
+                json.dump({"status": "error", "error": "conversion timed out"}, handle)
+
+            marked = []
+            old_mark = flexict_mimics._al_mark_request
+            try:
+                flexict_mimics._al_mark_request = (
+                    lambda path, state, detail="": marked.append((state, detail))
+                )
+                transaction = {
+                    "request": {
+                        "_request_path": request_path,
+                        "_job_dir": os.path.join(tmp, "job"),
+                        "case_id": "caseA",
+                    },
+                    "result_path": result_path,
+                    "bridge_root": bridge_root,
+                    "masks": [],
+                }
+                flexict_mimics._al_finish_conversion(transaction)
+            finally:
+                flexict_mimics._al_mark_request = old_mark
+            self.assertEqual([("failed", "conversion timed out")], marked)
+            self.assertFalse(os.path.exists(bridge_root))
+
+
+class TestGuiThreadBlockingContract(unittest.TestCase):
+    """R61-13: source-contract scan — nothing slow may run in a *_tick.
+
+    Mimics monitor ticks run on the GUI thread. Two call shapes are always
+    movable off it and therefore forbidden at tick level (nested thread
+    functions are exempt — that is the correct pattern):
+    - process.communicate(...): a subprocess wait; belongs on a wait thread
+      (see FlexiCT's wait_bridge and the AL conversion in R61-3).
+    - .tobytes() on a mask/voxel buffer: a full-volume copy hashing or
+      write-out; belongs on a worker (see the nnInteractive SHA-256 fix).
+
+    open_project() is a Mimics API call and is thread-affine — it cannot
+    move off the GUI thread, so it is out of scope here (its only tick
+    call site is opt-in via MIMICS_IMPORT_AUTO_OPEN_MCS).
+    """
+
+    FORBIDDEN_ATTRS = ("communicate", "tobytes")
+
+    # Known pre-existing debt, each entry blocks removal only until its
+    # backlog item lands. New violations are NOT allowed on this list.
+    # key: "file:lineno", value: backlog item.
+    KNOWN_VIOLATIONS = {
+        # interactive_algorithms _buffer_byte_view fallback copy (tiny; the
+        # common path is a zero-copy memoryview) - R61-12 follow-up.
+        "interactive_algorithms_mimics.py:148": "R61-12",
+        # mimics_export foreground tick buffer copy - R61-12 follow-up.
+        "mimics_export.py:1170": "R61-12",
+        "mimics_export.py:1179": "R61-12",
+        # nnInteractive full-mask SHA-256 on the GUI thread - R61-12.
+        "nninteractive_mimics.py:1835": "R61-12",
+        "nninteractive_mimics.py:1913": "R61-12",
+        "nninteractive_mimics.py:1936": "R61-12",
+        "nninteractive_mimics.py:2468": "R61-12",
+        # nnInteractive synchronous bridge round-trip (Popen + communicate,
+        # timeout up to 1800s) reachable from the async monitor tick -
+        # tracked separately from R61-12; needs the wait-thread pattern.
+        "nninteractive_mimics.py:1389": "R61-26",
+        "nninteractive_mimics.py:1395": "R61-26",
+    }
+
+    def test_no_tick_function_blocks_the_gui_thread(self):
+        import ast
+
+        runtime_dir = os.path.join(PROJECT_ROOT, "runtime_py35")
+
+        def blocking_calls(node):
+            """(attr, lineno) for forbidden calls outside nested defs."""
+            found = []
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue  # nested function bodies run on their own thread
+                if isinstance(child, ast.Call):
+                    func = child.func
+                    if (
+                        isinstance(func, ast.Attribute)
+                        and func.attr in self.FORBIDDEN_ATTRS
+                    ):
+                        found.append((func.attr, child.lineno))
+                found.extend(blocking_calls(child))
+            return found
+
+        violations = []
+        for name in os.listdir(runtime_dir):
+            if not name.endswith(".py"):
+                continue
+            path = os.path.join(runtime_dir, name)
+            with open(path, "rb") as handle:
+                try:
+                    tree = ast.parse(handle.read())
+                except SyntaxError:
+                    continue
+            # Follow the tick's call closure within the same module: a tick
+            # that delegates to a module function which then blocks is just
+            # as frozen (the pre-R61-3 AL path hid communicate() one hop
+            # below _al_tick in _al_apply_request).
+            functions = {}
+            for top in ast.walk(tree):
+                if isinstance(top, ast.FunctionDef):
+                    functions.setdefault(top.name, top)
+
+            def module_calls(node):
+                called = set()
+                for child in ast.walk(node):
+                    if isinstance(child, ast.Call) and isinstance(child.func, ast.Name):
+                        called.add(child.func.id)
+                return called
+
+            def scan(func_node, seen):
+                hits = list(blocking_calls(func_node))
+                for callee in module_calls(func_node):
+                    if callee in seen:
+                        continue
+                    seen.add(callee)
+                    target = functions.get(callee)
+                    if target is not None:
+                        hits.extend(scan(target, seen))
+                return hits
+
+            for top in ast.walk(tree):
+                if isinstance(top, ast.FunctionDef) and top.name.endswith("_tick"):
+                    for attr, lineno in scan(top, {top.name}):
+                        key = "{0}:{1}".format(name, lineno)
+                        if key in self.KNOWN_VIOLATIONS:
+                            continue
+                        violations.append(
+                            "{0} {1}() reachable from {2}".format(
+                                key, attr, top.name
+                            )
+                        )
+        self.assertEqual(
+            [], violations,
+            "GUI-thread ticks must not reach communicate()/tobytes() - "
+            "move the wait/copy onto a worker thread "
+            "(violations: {0})".format(violations),
+        )
+
+
 if __name__ == "__main__":
     print("Mimics-Script Comprehensive Tests")
     print("=" * 60)
