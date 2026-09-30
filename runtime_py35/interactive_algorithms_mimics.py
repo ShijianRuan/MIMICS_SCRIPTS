@@ -683,7 +683,10 @@ def _collect_scribbleprompt_prompts(image, target, job_dir, visual_objects):
 def _session_values(mask, base_sha):
     path = str(nnm._metadata_get(mask, SESSION_PATH_METADATA, "") or "")
     expected_sha = str(nnm._metadata_get(mask, SESSION_MASK_SHA_METADATA, "") or "")
-    if not path or expected_sha != base_sha or not os.path.isfile(path):
+    # The worker stores a bare hex digest while runtime_common.stream_buffer
+    # prefixes "sha256:"; compare the bare digest so a valid session survives.
+    bare_sha = base_sha[7:] if base_sha.startswith("sha256:") else base_sha
+    if not path or expected_sha != bare_sha or not os.path.isfile(path):
         return {}
     try:
         shape = json.loads(str(nnm._metadata_get(mask, SESSION_SHAPE_METADATA, "") or "[]"))
