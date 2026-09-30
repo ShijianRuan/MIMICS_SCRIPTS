@@ -192,6 +192,11 @@ def main(argv=None):
             stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=subprocess.STDOUT,
+            # Detach Mimics into its own process group so that if this
+            # launcher wrapper is stopped, Mimics keeps running and the
+            # idempotent resume loop only restarts what truly died.
+            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            | getattr(subprocess, "DETACHED_PROCESS", 0),
         )
         for lock in locks:
             lock.update_pid(

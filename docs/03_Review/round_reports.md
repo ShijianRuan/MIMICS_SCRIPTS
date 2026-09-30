@@ -3866,3 +3866,32 @@ R61 期间 E: 盘 100% 满（剩 2.2MB），fast 门禁 2 个 test_all 用例 Er
 - fast 27/27：`20260929T130542`（R61-2 后）、`20260929T131846`（R61-3 后）
 - commits：`201b516` / `0be6ba5` / `a2d3244` / `afff2bc`
 - 外部资源：零使用（纯本地代码+测试）。
+
+## R62（2026-09-30）：R61 待办批次第一轮——R61-4 死按钮
+
+### R61-4 模型管理器死按钮（P1，commit `aadd6e3`）
+
+- **根因**：`tools/model_manager_ui.py` 的 `_fill_table` 末尾无条件
+  `setEnabled(False)`，而全文件无任何选中信号连接（itemSelectionChanged/
+  cellClicked/currentItemChanged 均无）——"Use This Model" 与
+  "Remove Broken Entry" 从窗口写好第一天起就永久禁用，两个 handler 的
+  完整逻辑（含 broken 拦截、set_recommended_model 切换）不可达。
+- **修复**（净 +9 产品代码 / +73 测试）：`itemSelectionChanged` 接
+  `_update_action_buttons`（Use 需 usable 行、Remove 需 broken 行——与
+  handler 语义镜像防将来漂移），`_fill_table` 的两行硬禁用改为调同一
+  入口。
+- **测试**：离屏 Qt 驱动真实窗口（mock collect_rows 返回 usable+broken
+  两行）：无选中双禁 → 选 usable 行 Use 开 → 选 broken 行 Remove 开 →
+  清选中（`setCurrentCell(-1,-1)`；注意 Qt 的 clearSelection 不清
+  currentRow）双禁；+ `_use_clicked` 真调 `set_recommended_model` 并触发
+  reload。
+- **门禁**：smoke 8/8（`20260930T112139`）；fast 首跑 26/27——
+  flexict_pkg 以 exit_code 0xC0000005（原生层 access violation）死于
+  `test_flexict2d_weight_load` 中段，torch 瞬态段错误（A10 记录的
+  OpenBLAS 同类环境问题），单跑 10/10 全过（135s）；复跑 fast 27/27
+  （`20260930T115343`）。本轮改动为纯 PySide6 文件，与 torch 无交集。
+
+### 证据
+
+- commits：`aadd6e3`；工件：`20260930T112139_smoke.json`、
+  `20260930T115343_fast.json`；外部资源：零使用。

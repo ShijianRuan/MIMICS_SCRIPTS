@@ -44,13 +44,16 @@
 
 ### P1（2026-09-29 四视角评审新增）
 
-- [ ] **R61-4【P1】模型管理器死按钮**（UX 视角代理发现，人工核验属实）：
-  `tools/model_manager_ui.py` 的 "Use This Model"(:361-363) 与
-  "Remove Broken Entry"(:364-366) 按钮在表格刷新时被
-  `setEnabled(False)`(:455-456)，但全文件无任何选中信号连接
-  （无 itemSelectionChanged/cellClicked/currentItemChanged）也无任何
-  `setEnabled(True)`——两个按钮永久禁用，功能不可达。
-  验收：选中行后按钮可用；点击 "Use This Model" 真正切换 current 模型。
+- [x] **R61-4【P1】模型管理器死按钮**〔R62 解决，commit `aadd6e3`〕：
+  根因确证——`_fill_table` 末尾无条件 `setEnabled(False)`，全文件无
+  选中信号连接，`_use_clicked`/`_remove_clicked` 的完整逻辑（含 broken
+  拦截）永不可达。修复：`itemSelectionChanged` → `_update_action_buttons`
+  （Use 需 usable 行 / Remove 需 broken 行，与 handler 语义镜像），
+  `_fill_table` 重建后调用同一入口。离屏 Qt 测试：四态选中驱动 +
+  Use 真调 `set_recommended_model` 并触发 reload。smoke 8/8
+  （`20260930T112139`）+ fast 27/27（`20260930T115343`；首跑 26/27 为
+  torch 原生层 0xC0000005 瞬态段错误，flexict_pkg 单跑 10/10 复绿，
+  与本轮纯 PySide6 改动无交集）。
 - [ ] **R61-5【P1】导入失败弹窗指向工作目录而非真实失败位置**
   （`mimics_import.py:2988-2995/3027-3036/868-871`）：用户看到的失败
   路径是内部工作目录，无法定位自己数据的问题。验收：弹窗显示
