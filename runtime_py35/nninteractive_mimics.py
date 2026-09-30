@@ -2772,14 +2772,25 @@ def _async_prompt_menu(target, state, source=None, profile=None):
     if state and state.get("interactions"):
         buttons.extend([BUTTON_UNDO, BUTTON_RESET])
     buttons.append(BUTTON_FINISH)
+    apply_note = (
+        # First result on a non-empty Mask asks once where to apply
+        # (Update Selected Mask / Create Editable Copy); the choice then
+        # sticks for the whole Mimics session (R61-10). Every other case
+        # applies without asking. The menu copy must say which one applies.
+        "The first result will ask once where to apply it "
+        "(the choice is remembered for this Mimics session); later "
+        "results are applied automatically."
+        if state and state.get("write_mode") == "choose_on_first_result"
+        else "The result is applied automatically when ready."
+    )
     return mimics.dialogs.question_box(
         message=(
             "Source snapshot: {0}\n"
             "AI result Mask: {1}\n"
             "Prompts in this AI session: {2}\n\n"
             "Submitting a prompt starts background inference and immediately "
-            "returns control to Mimics. The result is applied automatically when ready."
-        ).format(source_name, target_name, count),
+            "returns control to Mimics. {3}"
+        ).format(source_name, target_name, count, apply_note),
         buttons=";".join(buttons),
         title=TITLE,
         ui_blocking=True,
@@ -3015,7 +3026,13 @@ def _continue_session_prompt(
         _mimics_log(
             logging.INFO,
             "nnInteractive background inference started. Prompt: {0}, sequence: {1}. "
-            "Result will be applied automatically when ready.".format(action, sequence),
+            "Result will be applied when ready ({2}).".format(
+                action,
+                sequence,
+                "destination confirmed at first result"
+                if state.get("write_mode") == "choose_on_first_result"
+                else "automatically",
+            ),
         )
         _start_async_result_monitor(image, target, state, config)
         return True

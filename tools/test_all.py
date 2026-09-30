@@ -4322,6 +4322,29 @@ class TestStopBackgroundServices(unittest.TestCase):
 
 
 class TestNNInteractiveMimicsParsing(unittest.TestCase):
+    def test_async_prompt_menu_apply_note_follows_write_mode(self):
+        """R61-21: the prompt menu must not promise automatic apply when the
+        first result will actually pop the destination dialog. The copy is
+        computed per write_mode; a regression to the unconditional
+        'applied automatically when ready' line recreates the contradiction
+        the UX review flagged."""
+        import inspect
+        import nninteractive_mimics
+
+        source = inspect.getsource(nninteractive_mimics._async_prompt_menu)
+        self.assertIn('apply_note', source)
+        # The branch: first result pops the session-remembered destination
+        # dialog (R61-10) only under choose_on_first_result.
+        self.assertIn(
+            'state and state.get("write_mode") == "choose_on_first_result"',
+            source,
+        )
+        # The ask-once copy must exist and the automatic copy must be the
+        # fallback (else), not the only message.
+        self.assertIn("The first result will ask once", source)
+        self.assertIn("applied automatically", source)
+        self.assertIn("else", source)
+
     def test_owned_server_sweep_accepts_current_schema(self):
         """C6-1: the bridge writes nninteractive_owned_server.v3; the Mimics
         startup sweep must not silently skip it for only matching v2."""
@@ -14019,6 +14042,70 @@ class TestGuiThreadBlockingContract(unittest.TestCase):
             "move the wait/copy onto a worker thread "
             "(violations: {0})".format(violations),
         )
+
+
+class TestUiThemePalette(unittest.TestCase):
+    """R61-21: status colors in external windows come from ui_theme.PALETTE.
+
+    The windows historically each invented near-identical hexes (#1a7f37 vs
+    #067647 vs #49aa55 all meant "good"), so the same status could look
+    different in two windows. The rule: hex literals passed to setForeground
+    or written into setStyleSheet as status colors must be ui_theme.PALETTE
+    values. Neutral layout colors are out of scope — only drift from the
+    shared palette is a defect.
+    """
+
+    # The palette definition itself: every hex lives there by design.
+    EXEMPT_FILES = {"ui_theme.py"}
+
+    def test_status_hex_literals_match_shared_palette(self):
+        import re as _re
+
+        sys.path.insert(0, os.path.join(PROJECT_ROOT, "tools"))
+        import ui_theme
+
+        palette = set(value.lower() for value in ui_theme.PALETTE.values())
+        pattern = _re.compile(r"#[0-9a-fA-F]{6}\b")
+        offenders = []
+        tools_dir = os.path.join(PROJECT_ROOT, "tools")
+        for name in sorted(os.listdir(tools_dir)):
+            if not name.endswith(".py") or name in self.EXEMPT_FILES:
+                continue
+            path = os.path.join(tools_dir, name)
+            if not os.path.isfile(path):
+                continue
+            with open(path, "r", encoding="utf-8") as handle:
+                for lineno, line in enumerate(handle, 1):
+                    if "PALETTE[" in line:
+                        continue  # the compliant pattern
+                    if not ("setForeground" in line or "setStyleSheet" in line):
+                        continue
+                    for match in pattern.finditer(line):
+                        value = match.group(0).lower()
+                        if value not in palette:
+                            offenders.append(
+                                "{0}:{1} non-palette color {2}".format(
+                                    name, lineno, value
+                                )
+                            )
+        self.assertEqual(
+            [],
+            offenders,
+            "status colors must come from ui_theme.PALETTE so windows stay "
+            "visually consistent (offenders: {0})".format(offenders),
+        )
+
+    def test_palette_tokens_exist_and_are_hex(self):
+        sys.path.insert(0, os.path.join(PROJECT_ROOT, "tools"))
+        import ui_theme
+
+        required = (
+            "text", "text_muted", "border", "border_input",
+            "success", "warning", "danger", "info", "accent", "teal",
+        )
+        for token in required:
+            self.assertIn(token, ui_theme.PALETTE)
+            self.assertRegex(ui_theme.PALETTE[token], r"^#[0-9a-fA-F]{6}$")
 
 
 if __name__ == "__main__":
