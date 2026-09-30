@@ -49,6 +49,27 @@ def medical_stem(path: str | Path) -> str:
     return Path(name).stem
 
 
+def replace_with_retry(source: str | Path, destination: str | Path) -> None:
+    """os.replace for freshly built staging dirs.
+
+    Windows callers hit transient WinError 5 (access denied) when an
+    antivirus or the search indexer briefly holds a handle inside the
+    just-written tree; one blip must not fail an hours-long pipeline.
+    Same retry shape as write_json_atomic.
+    """
+    last_error: OSError | None = None
+    for attempt in range(20):
+        try:
+            os.replace(str(source), str(destination))
+            return
+        except OSError as exc:
+            last_error = exc
+            time.sleep(min(0.25, 0.02 * (attempt + 1)))
+    raise OSError(
+        "Could not publish {}: {}".format(destination, last_error)
+    )
+
+
 def read_json(path: str | Path, default: Any = None) -> Any:
     try:
         with Path(path).open("r", encoding="utf-8") as handle:

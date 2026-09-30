@@ -270,6 +270,59 @@ class TestRuntimeCommon(unittest.TestCase):
         loaded = runtime_common.read_json(path)
         self.assertEqual({"b": 2}, loaded)
 
+    def test_replace_with_retry_recovers_from_transient_lock(self):
+        import nnunet_common
+
+        # A freshly built staging dir hits a transient WinError 5 (antivirus
+        # or indexer holding a handle) on first publish attempt; the pipeline
+        # must retry instead of failing an hours-long job.
+        staging = Path(self.tmp) / "case.publishing_abc"
+        destination = Path(self.tmp) / "case"
+        staging.mkdir()
+        (staging / "label.nii.gz").write_bytes(b"payload")
+        old_replace = nnunet_common.os.replace
+        old_sleep = nnunet_common.time.sleep
+        calls = []
+
+        def flaky_replace(src, dst):
+            calls.append(dst)
+            if len(calls) < 3:
+                raise OSError(5, "access denied")
+            return old_replace(src, dst)
+
+        try:
+            nnunet_common.os.replace = flaky_replace
+            nnunet_common.time.sleep = lambda _seconds: None
+            nnunet_common.replace_with_retry(staging, destination)
+        finally:
+            nnunet_common.os.replace = old_replace
+            nnunet_common.time.sleep = old_sleep
+        self.assertGreaterEqual(len(calls), 3)
+        self.assertTrue((destination / "label.nii.gz").is_file())
+        self.assertFalse(staging.exists())
+
+    def test_replace_with_retry_raises_after_persistent_denial(self):
+        import nnunet_common
+
+        staging = Path(self.tmp) / "model.publishing_def"
+        destination = Path(self.tmp) / "model"
+        staging.mkdir()
+        old_replace = nnunet_common.os.replace
+        old_sleep = nnunet_common.time.sleep
+        try:
+            nnunet_common.os.replace = (
+                lambda _src, _dst: (_ for _ in ()).throw(OSError(5, "access denied"))
+            )
+            nnunet_common.time.sleep = lambda _seconds: None
+            with self.assertRaises(OSError):
+                nnunet_common.replace_with_retry(staging, destination)
+        finally:
+            nnunet_common.os.replace = old_replace
+            nnunet_common.time.sleep = old_sleep
+        # The staged tree survives a failed publish so nothing is lost.
+        self.assertTrue(staging.is_dir())
+        self.assertFalse(destination.exists())
+
     def test_progress_notice_is_immediate_or_throttled_as_requested(self):
         import runtime_common
 
