@@ -842,6 +842,25 @@ class LocalCompatibilityTests(unittest.TestCase):
         with self.assertRaisesRegex(RemoteComputeError, "cannot query"):
             assert_gpus_not_busy(FailingSession(), {"gpu_device": "auto"})
 
+    def test_controller_imports_assert_gpus_not_busy_from_both_branches(self):
+        """Both import branches of the controller must expose the GPU gate.
+
+        A real remote training job died at launch with
+        NameError: assert_gpus_not_busy is not defined because only the
+        fallback (flat-module) import listed it; the tools.remote_compute
+        branch the controller actually takes had dropped it.
+        """
+        source = Path("tools/remote_training_controller.py").read_text(
+            encoding="utf-8"
+        )
+        tools_branch = source.index("from tools.remote_compute import")
+        flat_branch = source.index("except ImportError:")
+        flat_end = source.index(")", flat_branch)
+        self.assertIn("assert_gpus_not_busy", source[tools_branch:flat_branch])
+        self.assertIn(
+            "assert_gpus_not_busy", source[flat_branch:flat_end]
+        )
+
     def test_run_checks_gpu_before_upload_and_again_before_launch(self):
         """D14 source contract: the gate runs at two moments.
 
