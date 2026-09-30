@@ -1960,24 +1960,44 @@ def _set_mask_from_u8(mask, path, shape, transaction_name=None):
     )
 
 
+# Session-level memory for the "update mask / editable copy" choice (R61-10).
+# Asking once per case made batch annotation a modal-dialog storm: annotators
+# work through many masks in one Mimics run and want the same answer to stick.
+# In place of None, the stored value is "in_place" or "derived_copy".
+_SESSION_WRITE_MODE = None
+
+
 def _choose_completed_result_target(image, target, state, result):
+    global _SESSION_WRITE_MODE
     if state.get("write_mode") != "choose_on_first_result":
         return target
-    decision = mimics.dialogs.question_box(
-        title="nnInteractive Prediction Ready",
-        message=(
-            "nnInteractive prediction completed in {0}s.\n\n"
-            "Update Selected Mask applies the result to {1}.\n"
-            "Create Editable Copy keeps it unchanged and starts an editable AI Draft."
-        ).format(result.get("elapsed_seconds", "?"), str(getattr(target, "name", "") or "the selected Mask")),
-        buttons="Update Selected Mask;Create Editable Copy",
-        ui_blocking=True,
-    )
-    if decision == "Update Selected Mask":
-        state["write_mode"] = "in_place"
-        return target
-    if decision != "Create Editable Copy":
-        _mimics_log(logging.INFO, "nnInteractive result destination was closed; using a new editable copy to preserve the selected Mask.")
+    if _SESSION_WRITE_MODE is None:
+        # First result in this Mimics run: ask once, then remember the
+        # answer for the rest of the session (R61-10 - asking per case
+        # turned batch annotation into a modal-dialog storm).
+        decision = mimics.dialogs.question_box(
+            title="nnInteractive Prediction Ready",
+            message=(
+                "nnInteractive prediction completed in {0}s.\n\n"
+                "Update Selected Mask applies the result to {1}.\n"
+                "Create Editable Copy keeps it unchanged and starts an editable AI Draft.\n\n"
+                "This choice is remembered for the rest of this Mimics session."
+            ).format(result.get("elapsed_seconds", "?"), str(getattr(target, "name", "") or "the selected Mask")),
+            buttons="Update Selected Mask;Create Editable Copy",
+            ui_blocking=True,
+        )
+        _SESSION_WRITE_MODE = (
+            "in_place" if decision == "Update Selected Mask" else "derived_copy"
+        )
+        if _SESSION_WRITE_MODE == "in_place":
+            state["write_mode"] = "in_place"
+            return target
+        if decision != "Create Editable Copy":
+            _mimics_log(logging.INFO, "nnInteractive result destination was closed; using a new editable copy to preserve the selected Mask.")
+    else:
+        state["write_mode"] = _SESSION_WRITE_MODE
+        if _SESSION_WRITE_MODE == "in_place":
+            return target
     source = target
     target = _create_result_mask(image, "{0} - AI Draft".format(str(getattr(source, "name", "") or "nnInteractive")))
     _mark_ai_draft(target, source)

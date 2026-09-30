@@ -4643,6 +4643,141 @@ class TestNNInteractiveContinuousPrompting(unittest.TestCase):
         self.assertIn("(01 Data menu)", import_source)
 
 
+class TestNNInteractiveSessionWriteMode(unittest.TestCase):
+    """R61-10: the "update mask / editable copy" choice is asked once per
+    Mimics session, not once per result (batch annotation was a modal storm)."""
+
+    class _FakeMetadata(object):
+        """Minimal metadata collection for _metadata_set/_metadata_delete."""
+
+        def __init__(self):
+            self.items = {}
+
+        def create(self, name=None, value=""):
+            self.items[name] = value
+
+        def find(self, name):
+            return self.items.get(name)
+
+        def delete(self, name):
+            self.items.pop(name, None)
+
+    class _FakeMask(object):
+        def __init__(self, name):
+            self.name = name
+            self.selected = True
+            self.deleted = False
+            self.metadata = TestNNInteractiveSessionWriteMode._FakeMetadata()
+
+    def _run_choose(self, decisions, state, target_name="Target", session=None):
+        """Run _choose_completed_result_target against a fake mimics env.
+
+        Returns (target, prompts, created, session_after): prompts records
+        every question_box call; session_after is the stored session choice
+        the call left behind. ``decisions`` is popped one per prompt;
+        ``session`` seeds the stored choice (None = first result).
+        """
+        import nninteractive_mimics
+
+        prompts = []
+
+        def fake_question_box(message="", buttons="", title="", ui_blocking=None, **kw):
+            prompts.append(buttons)
+            return decisions.pop(0) if decisions else "Create Editable Copy"
+
+        created = []
+
+        def fake_create_result_mask(image, name=None):
+            mask = self._FakeMask(name or "AI Draft")
+            created.append(mask)
+            return mask
+
+        old_box = nninteractive_mimics.mimics.dialogs.question_box
+        old_create = nninteractive_mimics._create_result_mask
+        old_mark = nninteractive_mimics._mark_ai_draft
+        old_log = nninteractive_mimics._mimics_log
+        session_after = None
+        try:
+            nninteractive_mimics.mimics.dialogs.question_box = fake_question_box
+            nninteractive_mimics._create_result_mask = fake_create_result_mask
+            nninteractive_mimics._mark_ai_draft = lambda target, source=None: None
+            nninteractive_mimics._mimics_log = lambda level, message: None
+            nninteractive_mimics._SESSION_WRITE_MODE = session
+            target = self._FakeMask(target_name)
+            result = nninteractive_mimics._choose_completed_result_target(
+                "image", target, state, {"elapsed_seconds": 5}
+            )
+            session_after = nninteractive_mimics._SESSION_WRITE_MODE
+        finally:
+            nninteractive_mimics.mimics.dialogs.question_box = old_box
+            nninteractive_mimics._create_result_mask = old_create
+            nninteractive_mimics._mark_ai_draft = old_mark
+            # Always leave no stored choice so tests stay independent.
+            nninteractive_mimics._SESSION_WRITE_MODE = None
+            nninteractive_mimics._mimics_log = old_log
+        return result, prompts, created, session_after
+
+    def test_first_result_asks_and_remembered_choice_sticks(self):
+        # First result: user picks "Update Selected Mask" -> in place, prompt shown once.
+        state = {"write_mode": "choose_on_first_result"}
+        result, prompts, _created, session_after = self._run_choose(
+            ["Update Selected Mask"], state
+        )
+        self.assertEqual(1, len(prompts))
+        self.assertEqual("in_place", state["write_mode"])
+        self.assertIsNone(state.get("target_guid"))
+        self.assertEqual("in_place", session_after)
+
+        # Second result in the same session: no prompt, same mode applies.
+        state2 = {"write_mode": "choose_on_first_result"}
+        result2, prompts2, _created2, _session2 = self._run_choose(
+            [], state2, session="in_place"
+        )
+        self.assertEqual(0, len(prompts2))
+        self.assertEqual("in_place", state2["write_mode"])
+
+    def test_derived_copy_choice_creates_draft_and_persists(self):
+        state = {"write_mode": "choose_on_first_result", "_job_dir": "job"}
+        result, prompts, created, _session_after = self._run_choose(
+            ["Create Editable Copy"], state
+        )
+        self.assertEqual(1, len(prompts))
+        self.assertEqual(1, len(created))
+        self.assertIs(created[0], result)
+        self.assertIn("AI Draft", result.name)
+        self.assertEqual("derived_copy", state["write_mode"])
+        self.assertEqual("job", state.get("_job_dir"))
+
+        # Second result: no prompt, still derived copy.
+        state2 = {"write_mode": "choose_on_first_result"}
+        result2, prompts2, created2, _session2 = self._run_choose(
+            [], state2, session="derived_copy"
+        )
+        self.assertEqual(0, len(prompts2))
+        self.assertEqual(1, len(created2))
+        self.assertEqual("derived_copy", state2["write_mode"])
+
+    def test_write_mode_not_asking_is_untouched(self):
+        # With an explicit write mode there is nothing to choose; the target
+        # passes through unchanged and no dialog appears.
+        state = {"write_mode": "in_place"}
+        result, prompts, created, _session_after = self._run_choose([], state)
+        self.assertEqual(0, len(prompts))
+        self.assertEqual(0, len(created))
+        self.assertEqual("Target", result.name)
+        self.assertEqual("in_place", state["write_mode"])
+
+    def test_closed_dialog_falls_back_to_editable_copy(self):
+        # Failure path: user closes the dialog (answer matches neither
+        # button). The selected Mask must stay untouched -> derived copy.
+        state = {"write_mode": "choose_on_first_result"}
+        result, prompts, created, session_after = self._run_choose([""], state)
+        self.assertEqual(1, len(prompts))
+        self.assertEqual(1, len(created))
+        self.assertEqual("derived_copy", state["write_mode"])
+        self.assertEqual("derived_copy", session_after)
+
+
 class TestNNInteractiveGpuMemoryPrecheck(unittest.TestCase):
     def _bridge_module(self):
         import nninteractive_bridge
