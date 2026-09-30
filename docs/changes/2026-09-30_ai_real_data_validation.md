@@ -1,0 +1,108 @@
+# AI 功能真实数据有效性验证报告（2026-09-30）
+
+分支：`ai-real-data-validation`（基于 ccbda86）
+工作区：`G:\mimics_ai_validation\`（E: 空间不足，模型/工作区放 G:）
+数据：`Z:\ImageAnalysisData\1-CT\Segmentation\data\Totalsegmentator_dataset_v201`（只读红线，全程未写入）
+远程：10.8.168.206（profile `206_root`，remote_root=`/userdata/shijian_ruan/mimics-ai`，只使用该目录）
+
+验证目标：三个 AI 功能（nnU-Net 多器官训练+推理、FlexiCT liver 少样本微调+推理、
+nnInteractive 交互标注+任务微调）各有一份可信的"真实有效"证据链：任务完成 →
+训练收敛 → held-out 推理 → 与 Totalsegmentator GT 的 Dice 对比。
+
+## 选例清单（nibabel 逐例校验 4 器官 mask 非零体素）
+
+- 训练 18 例：s0001, s0004, s0006, s0009, s0010, s0011, s0012, s0013, s0014,
+  s0015, s0016, s0019, s0022, s0024, s0028, s0029, s0030, s0031
+- held-out 4 例：s0038, s0039, s0040, s0042
+- **选例方法结论**：按文件大小/存在性筛例不可靠——s0000/s0002/s0003 有标签
+  文件但 mask 全空（~43KB 压缩空数组），s0005/s0007/s0008 连标签文件都没有。
+  必须加载后数非零体素。
+
+## 外部资源使用登记
+
+| 日期 | 资源 | 操作 | 红线遵守 | 清理 |
+|---|---|---|---|---|
+| 2026-09-30 | 206 服务器 | 只读预检：GPU（2×A4000 空闲）、磁盘 429GB、目录布局、镜像清单 | 未写任何远端文件 | — |
+| 2026-09-30 | Z: 数据集 | nibabel 只读加载 22 例做选例校验 | 未写入 | — |
+| 2026-09-30 | 本地 flexict_models | sweep_dataset_retention 清理过期冒烟残留（~0.7GB，可重建中间产物，超 30 天保留期；Dataset758 注册保护未动） | — | 已完成 |
+| 2026-09-30 | 206 服务器 | nnU-Net 远程训练 job（本报告 Phase 2 节） | 见 Phase 2 | 见 Phase 6 |
+
+发现待清理：206 残留容器 `mimics-ai-root-train_20260925T183409_50564969`
+（5 天前 Exited(1)，非本次验证产生）→ Phase 6 处理。
+
+## Phase 1：真实数据导入（完成）
+
+- 命令：`mimics_batch_cli.py prepare-import`（`01_Import_Dataset.py` 背后同一
+  实现），后台真实 Mimics（`D:\Mimics Research 21.0\MimicsResearch.exe`）。
+- **结果：22/22 成功，0 失败**；每例 receipt 确认 4 器官 mask 全部创建。
+- **耗时 14.8 min（≈40s/例）** —— 账本性能基线"批量导入耗时"首次实测
+  （22 例真实 CT，后台 Mimics 复用一个进程）。
+- 工件：`G:\mimics_ai_validation\mcs\`（receipt + .mcs 工程）。
+
+## Phase 2：nnU-Net 多器官远程训练（进行中）
+
+- 任务：liver+spleen+kidney_left+kidney_right 4 标签单模型，
+  label_source=**mcs_refresh**（从已保存 .mcs 后台导出 mask——此前从未实机
+  验收过的组合），execution_backend=remote，profile 206_root，3d_fullres，
+  50 epochs，18 训练例。
+- job：`train_20260930T205202_36ca9b92`（workspace
+  `G:\mimics_ai_validation\nnunet_workspace`）
+- 验收判据：任务 completed；loss 明显下降；validation Dice 上升趋势；模型
+  下载注册（mimics_model_manifest.json 远程溯源）。held-out 推理 Dice：
+  liver/spleen ≥ 0.7，kidney ≥ 0.5。
+- （待补充：训练曲线、耗时、code-drift 警告实际表现、Dice 表）
+
+## Phase 3：FlexiCT liver 少样本远程微调（待做）
+
+- 判据：completed、loss 下降、checkpoint_best 注册；held-out 推理
+  liver Dice ≥ 0.6。
+
+## Phase 4：nnInteractive（待做）
+
+- 4a 官方模型点 prompt 交互标注（本机 GPU）：liver Dice ≥ 0.8、
+  kidney ≥ 0.6；mask 经 `_set_mask_from_u8` 链路写回 .mcs。
+- 4b 任务微调（本机 GPU，few-shot liver）：微调后点 prompt Dice 不低于
+  官方基线；复核 `_model_is_usable` 质量门行为。
+
+## 过程中发现的问题（待按账本协议入账）
+
+> 注：同事对 improvement_backlog.md / round_reports.md 的改动尚未提交，
+> 账本条目待其提交后补录，先在此记录全文，避免污染其未提交 diff。
+
+### P0-1 mcs_refresh 训练在锁等待处自取消（已修复，commit 4d90b7d）
+
+- **痛点**：任何 label_source=mcs_refresh 的训练 job（本地或远程）在
+  "Exporting selected Masks from saved Mimics projects" 阶段必然以
+  `ResourceLockCancelled: Cancelled while waiting for background_mimics lock`
+  失败——用户从 Mimics 向导发起的 mcs_refresh 训练 100% 无法启动。
+- **根因**：`tools/mimics_label_export.py` 三处以
+  `Path(cancel_path).is_file()` 判断取消，但 job 管线传入的是
+  control.json——该文件**创建 job 时即存在**（内容 `{"action":"run"}`
+  表示运行中），按存在性判断即恒为"已取消"。
+- **修复**：新增 `cancel_requested()`：JSON 文件按内容判断
+  （action∈{cancel,stop} 才算取消），非 JSON 标记文件按存在性判断，
+  缺失不算取消；三处调用点替换。
+- **防回归测试**：`tools/test_all.py::test_cancel_requested_control_json_conventions`
+  覆盖 5 种约定组合（control.json run/cancel、缺失、旧标记、None）。
+- **证据**：修复后同一请求重提交，job 顺利通过锁获取进入真实导出
+  （修复前同阶段必失败）；冒烟 flow_imports/flow_export + fast
+  nnunet_integration 门禁绿。
+
+### P1-1 死进程遗留的 background_mimics 锁不被清扫（未修，待入账）
+
+- **痛点**：宿主 Mimics/进程异常退出后，其持有的 background_mimics 锁
+  文件残留；后续 job 等锁时 `sweep_processes` 只释放"进程注册表内有
+  记录"的进程锁，死进程不在注册表 → 锁永不释放，下一个导出任务
+  只能等锁超时。
+- **实测**：验证过程中发现 pids 36812/31828/36144 已死但锁残留，需手工
+  删除锁文件才能继续。
+- **拟验收标准**：锁等待循环检测到持有者 pid 已死且不在注册表时，
+  主动回收该锁（或 sweep 覆盖此情况）；防回归测试进套件。
+- **状态**：待按账本协议正式入账后修复。
+
+## 性能基线首次填数
+
+| 基线项 | 数值 | 条件 |
+|---|---|---|
+| 批量导入耗时 | 14.8 min（≈40s/例） | 22 例真实 CT，后台 Mimics 单进程复用，Z: 网络盘读取 |
+| 单例推理耗时 | 待测 | Phase 2 held-out 推理时测 |
