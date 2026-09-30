@@ -73,17 +73,85 @@ nnInteractive 交互标注+任务微调）各有一份可信的"真实有效"证
 - 判据：completed、loss 下降、checkpoint_best 注册；held-out 推理
   liver Dice ≥ 0.6。
 
-## Phase 4：nnInteractive（待做）
+## Phase 4a：nnInteractive 官方模型交互标注（完成，全部达标）
 
-- 4a 官方模型点 prompt 交互标注（本机 GPU）：liver Dice ≥ 0.8、
-  kidney ≥ 0.6；mask 经 `_set_mask_from_u8` 链路写回 .mcs。
-- 4b 任务微调（本机 GPU，few-shot liver）：微调后点 prompt Dice 不低于
-  官方基线；复核 `_model_is_usable` 质量门行为。
+- **链路**：完全复刻 Mimics 侧协议——`nninteractive_bridge.py --async-worker`
+  文件队列（initialize.json → command_000001.json → prediction_*.u8），
+  真实加载官方模型 `python_env/models/nnInteractive_v1.0`，本机 GPU
+  （cuda:0，RTX 3060），真实推理服务器
+  （nnInteractive.inference.server.main，端口 1527）。
+- **交互**：1 个正点（GT 质心体素）+ 1 个负点——模拟标注者最小操作。
+- **结果**（4 例 held-out，liver + kidney_left）：
+
+| 例 | liver Dice | kidney_left Dice |
+|---|---|---|
+| s0038 | 0.8931 | — |
+| s0039 | 0.9380 | 0.8859 |
+| s0040 | 0.9528 | 0.9646 |
+| s0042 | 0.9709 | 0.9646 |
+
+- **判据全部达标**：liver ≥0.8（实际 0.89–0.97），kidney ≥0.6
+  （实际 0.89–0.96）。结论：**官方模型交互标注真实有效**。
+- **耗时基线**：服务器冷启动 ~300s + 图像加载 ~200s（首例）；服务器
+  热状态下单次点 prompt 推理 **1.7–9s**（含首例 34.6s 的 warmup）。
+  服务器空闲后由 watchdog 按超时自动回收，无孤儿进程。
+- **有效性之外的观察**（记录待入账）：cold-start 到首个可用预测需
+  ~9 分钟（服务器启动 5min + 图像加载 3min + 首次推理 35s），标注者
+  第一次点 prompt 的等待体验值得在产品层面评估（warm pool/预加载）。
+- 工件：`G:\mimics_ai_validation\nninteractive_official\job_*\results\`
+  （result_*.json + prediction_*.u8）、`logs\nninteractive_bridge.jsonl`。
+
+## Phase 4b：nnInteractive 任务微调（训练完成，质量门通过）
+
+- **链路**：`nninteractive_finetune_pipeline.py run`（`03_Train_and_Manage_Custom_Models.py`
+  Model Center 背后同一实现），prepared 数据源，CLoPA-IN 策略，
+  官方模型为基座，本机 GPU。
+- **规模**：6 训练例 + 2 验证例（few-shot liver），20 epochs，
+  实测 78.9 分钟（RTX 3060）。
+- **训练收敛**：loss 从 ~0.30 降至 ~0.15-0.25 区间；validation AUC
+  从 0.9725 升至 0.9776（best epoch 16）。
+- **质量门（`_model_is_usable`）结果：通过**——
+  - baseline（官方模型）AUC 0.9747
+  - candidate（微调模型）AUC 0.9779，**delta +0.0032，无严重退化模式**
+  - `qualifies: true` → **`new_model_selected`**，模型注册进
+    registry.json（checkpoint SHA-256
+    `45858d26…`，父模型 official，质量记录完整）
+- **历史对照**：此前唯一一次真实 GPU 收敛实验为负结果
+  （qualifies: false）。本次为**首次正结果**：few-shot 微调在真实
+  CT liver 上带来可测量的提升且质量门正确放行。
+- 首跑撞出 P0-2 同款 bug（source-grid 缓存 publish WinError 5），
+  已修复（commit b7d4a10）后重跑成功。
+- **微调 vs 官方基线直接对比**（同一协议：1 正点 + 1 负点，held-out
+  liver，官方基线数字来自 Phase 4a）：
+
+| 例 | 官方模型 Dice | 微调模型 Dice | delta |
+|---|---|---|---|
+| s0039 | 0.9380 | 0.9539 | +0.016 |
+| s0040 | 0.9528 | 0.9660 | +0.013 |
+| s0042 | 0.9709 | 0.9841 | +0.013 |
+
+- **结论**：微调模型在同一 held-out 例上稳定小幅优于官方模型
+  （3/3 例 delta +0.013~0.016），与质量门的 AUC delta（+0.0032，
+  qualifies: true）方向一致。**few-shot 任务微调真实有效且带来可测量
+  提升**——项目历史上首次（此前唯一真实实验为负结果）。
 
 ## 过程中发现的问题（待按账本协议入账）
 
 > 注：同事对 improvement_backlog.md / round_reports.md 的改动尚未提交，
 > 账本条目待其提交后补录，先在此记录全文，避免污染其未提交 diff。
+
+### P0-3 远程训练控制器启动即 NameError（已修复，commit dbb7090）
+
+- **痛点**：远程训练 job 本地阶段全部完成后，容器启动前一刻死于
+  `NameError: name 'assert_gpus_not_busy' is not defined`——GPU 忙闲门
+  函数未随主导入分支导入，任何远程训练/推理 job 100% 无法启动容器。
+- **根因**：`remote_training_controller.py` 的两个导入分支中只有降级
+  分支（flat-module）列了 `assert_gpus_not_busy`，实际生效的
+  `tools.remote_compute` 分支漏了该名字。
+- **修复**：主分支补上该导入；新增源码契约测试钉住两个分支都必须
+  包含它（`test_controller_imports_assert_gpus_not_busy_from_both_branches`）。
+- **证据**：remote_training 套件 156s 全绿；修复前 job
+  train_20260930T211247_4734b4a7 于 18/18 数据准备后死于该错误。
 
 ### P0-1 mcs_refresh 训练在锁等待处自取消（已修复，commit 4d90b7d）
 
