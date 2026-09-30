@@ -196,7 +196,13 @@ def main(argv=None) -> int:
         results.append(row)
         if row["status"] != "pass":
             failed += 1
-            print(row["output_tail"], flush=True)
+            # A GBK console cannot render every character in a failing
+            # suite's output; the artifact keeps the full text, so printing
+            # a lossless fallback must never crash the matrix itself.
+            try:
+                print(row["output_tail"], flush=True)
+            except UnicodeEncodeError:
+                print(row["output_tail"].encode("gbk", "replace").decode("gbk"), flush=True)
             print("-" * 72)
 
     if args.output:
