@@ -1163,22 +1163,22 @@ def _current_mask_names():
     return names
 
 
-def _get_voxel_buffer_bytes(mask):
-    """Get mask voxel buffer as raw bytes, handling various return types."""
+def _stream_mask_to_file(mask, path, progress_callback=None):
+    """Stream one Mask's voxel buffer to ``path`` without a full-volume copy.
+
+    A whole-buffer .tobytes() on the GUI thread (hundreds of MB for a CT)
+    froze Mimics during mask export (R61-12), so the buffer is written in
+    chunks via runtime_common.stream_buffer, pumping the GUI between chunks.
+    Returns the byte count written.
+    """
     buf = mask.get_voxel_buffer()
-    if hasattr(buf, "tobytes"):
-        return buf.tobytes()
-    elif hasattr(buf, "tostring"):
-        return buf.tostring()
-    elif isinstance(buf, (bytes, bytearray)):
-        return bytes(buf)
-    else:
-        try:
-            import numpy as np
-            arr = np.asarray(buf)
-            return arr.astype(np.uint8).tobytes()
-        except Exception:
-            return bytes(buf)
+    raw = runtime_common.buffer_byte_view(buf)
+    with open(path, "wb") as handle:
+        runtime_common.stream_buffer(
+            raw, handle=handle, compute_sha=False,
+            progress_callback=progress_callback,
+        )
+    return len(raw)
 
 
 def _metadata_get(obj, name, default=""):
@@ -1350,7 +1350,7 @@ def export_masks_to_buffers(
                     mimics.update_gui()
                 except Exception:
                     pass
-                raw = _get_voxel_buffer_bytes(a_mask)
+                _stream_mask_to_file(a_mask, u8_path)
                 try:
                     mimics.update_gui()
                 except Exception:
@@ -1358,9 +1358,6 @@ def export_masks_to_buffers(
             except Exception as e:
                 print("  could not read data for {0}: {1}".format(name, e))
                 continue
-
-            with open(u8_path, "wb") as f:
-                f.write(raw)
         else:
             print("  canonical source Mask configured; skipping MCS voxel buffer")
 
@@ -1702,19 +1699,18 @@ def _foreground_export_tick(monitor):
                     mimics.update_gui()
                 except Exception:
                     pass
-                raw = _get_voxel_buffer_bytes(a_mask)
+                safe_name = _sanitize_name(name)
+                u8_path = os.path.join(monitor["buffers_dir"], safe_name + ".u8")
+                written = _stream_mask_to_file(a_mask, u8_path)
                 expected = 1
                 for dim in monitor["manifest"]["mimics_shape"]:
                     expected *= int(dim)
-                if len(raw) != expected:
+                if written != expected:
                     raise RuntimeError(
                         "Mask {0} returned {1} voxels; expected {2}.".format(
-                            name, len(raw), expected
+                            name, written, expected
                         )
                     )
-                safe_name = _sanitize_name(name)
-                with open(os.path.join(monitor["buffers_dir"], safe_name + ".u8"), "wb") as handle:
-                    handle.write(raw)
                 monitor["manifest"]["masks"].append({
                     "original_name": name,
                     "safe_name": safe_name,

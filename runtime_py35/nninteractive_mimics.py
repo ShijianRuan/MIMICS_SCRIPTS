@@ -284,19 +284,17 @@ def _append_runtime_log(path, event, details=None):
         handle.write(json.dumps(payload, sort_keys=True) + "\n")
 
 
-def _sha256_bytes(value):
-    return "sha256:" + hashlib.sha256(value).hexdigest()
+def _buffer_byte_view(view):
+    """runtime_common.buffer_byte_view - see that module for why the copy is avoided."""
+    return runtime_common.buffer_byte_view(view)
 
 
-def _sha256_file(path):
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        while True:
-            chunk = handle.read(1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-    return "sha256:" + digest.hexdigest()
+def _stream_buffer(raw, compute_sha=True, handle=None):
+    """runtime_common.stream_buffer with a GUI pump between chunks (R61-12)."""
+    return runtime_common.stream_buffer(
+        raw, handle=handle, compute_sha=compute_sha,
+        progress_callback=_update_gui,
+    )
 
 
 def _cleanup_cache_entries(root, retention_days, max_entries):
@@ -1831,14 +1829,15 @@ def _log_effective_image_input_config(config):
 def _export_image(image, path):
     started = time.time()
     view = image.get_voxel_buffer()
+    raw = _buffer_byte_view(view)
     with open(path, "wb") as handle:
-        handle.write(view.tobytes())
+        sha256 = _stream_buffer(raw, compute_sha=True, handle=handle)
     result = {
         "kind": "mimics_buffer",
         "path": path,
         "shape": [int(value) for value in view.shape],
         "dtype": _buffer_dtype(view),
-        "sha256": _sha256_file(path),
+        "sha256": sha256,
     }
     matrix = _parse_matrix_metadata(
         _metadata_get(image, MIMICS_VOXEL_TO_RAS_MATRIX_METADATA, "")
@@ -1910,15 +1909,16 @@ def _export_mask(mask, path, shape_hint=None):
         return result
     started = time.time()
     view = mask.get_voxel_buffer()
-    raw = view.tobytes()
+    raw = _buffer_byte_view(view)
+    byte_count = len(raw)
     with open(path, "wb") as handle:
-        handle.write(raw)
+        sha256 = _stream_buffer(raw, compute_sha=True, handle=handle)
     result = {
         "path": path,
         "shape": [int(value) for value in view.shape],
         "pixel_count": pixel_count,
-        "byte_count": len(raw),
-        "sha256": _sha256_bytes(raw),
+        "byte_count": byte_count,
+        "sha256": sha256,
     }
     _mimics_log(
         logging.INFO,
@@ -1933,7 +1933,9 @@ def _export_mask(mask, path, shape_hint=None):
 def _mask_sha256(mask, shape_hint=None):
     if shape_hint is not None and int(getattr(mask, "number_of_pixels", 0)) <= 0:
         return _empty_mask_sha256(shape_hint)
-    return _sha256_bytes(mask.get_voxel_buffer().tobytes())
+    # Streamed in chunks with GUI pumps; a full tobytes() copy froze the
+    # GUI thread for the whole volume (R61-12).
+    return _stream_buffer(_buffer_byte_view(mask.get_voxel_buffer()))
 
 
 def _set_mask_from_u8(mask, path, shape, transaction_name=None):
@@ -4632,8 +4634,8 @@ def _handle_async_result(image, target, state):
     state["applied_sequence"] = int(sequence)
     # Re-anchor the stale check on the mask buffer we just wrote, not on the
     # output file: the next prompt compares _mask_sha256(target, ...) against
-    # this value, so they must use the same source. _sha256_file(output_path)
-    # here made every subsequent prompt flag a "manual mask change" and restart.
+    # this value, so they must use the same source. Hashing the output file
+    # instead made every subsequent prompt flag a "manual mask change" and restart.
     state["expected_target_sha256"] = _mask_sha256(target, state.get("shape"))
     state["status"] = "ready"
     state["updated_at_epoch"] = time.time()

@@ -5,6 +5,7 @@ from __future__ import print_function
 
 import json
 import errno
+import hashlib
 import logging
 import os
 import subprocess
@@ -23,6 +24,51 @@ _ATOMIC_WRITE_LOCKS = {}
 _ATOMIC_WRITE_LOCKS_GUARD = threading.Lock()
 _LOCAL_OPERATION_GUARD = threading.RLock()
 _LOCAL_OPERATIONS = {}
+
+
+def buffer_byte_view(view):
+    """One-dimensional byte view of a voxel buffer, without copying when possible.
+
+    Mimics hands get_voxel_buffer() results to the GUI thread, where a
+    full-volume .tobytes() copy (hundreds of MB for a CT) freezes Mimics.
+    The memoryview cast keeps the common path zero-copy; the tobytes()
+    fallback only fires for buffer objects memoryview cannot wrap.
+    """
+    try:
+        raw = memoryview(view)
+        if raw.ndim != 1 or raw.format not in ("B", "b", "c"):
+            raw = raw.cast("B")
+        elif raw.format != "B":
+            raw = raw.cast("B")
+        return raw
+    except Exception:
+        return memoryview(view.tobytes())
+
+
+def stream_buffer(raw, handle=None, compute_sha=True, progress_callback=None):
+    """Digest/write a voxel buffer in chunks, never copying the whole volume.
+
+    Each chunk is written to ``handle`` (if given) and folded into the SHA-256
+    digest (if requested); ``progress_callback`` (typically a GUI pump) runs
+    between chunks so long exports cannot freeze the Mimics UI.
+    """
+    digest = hashlib.sha256() if compute_sha else None
+    chunk_bytes = 16 * 1024 * 1024
+    byte_count = len(raw)
+    for offset in range(0, byte_count, chunk_bytes):
+        chunk = raw[offset:min(byte_count, offset + chunk_bytes)]
+        if handle is not None:
+            handle.write(chunk)
+        if digest is not None:
+            digest.update(chunk)
+        if progress_callback is not None and offset + len(chunk) < byte_count:
+            try:
+                progress_callback()
+            except Exception:
+                pass
+    if digest is None:
+        return ""
+    return "sha256:" + digest.hexdigest()
 
 
 def progress_notice_due(state, key, detail="", interval_seconds=60.0,

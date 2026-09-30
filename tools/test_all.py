@@ -4826,6 +4826,98 @@ class TestNNInteractiveSessionWriteMode(unittest.TestCase):
         self.assertEqual("derived_copy", session_after)
 
 
+class TestStreamedVoxelBuffers(unittest.TestCase):
+    """R61-12: voxel buffers must be streamed, never full-copied on the GUI thread."""
+
+    def test_buffer_byte_view_is_zero_copy_for_flat_byte_buffers(self):
+        import runtime_common
+        data = bytearray(b"\x01\x02\x03" * 8)
+        view = runtime_common.buffer_byte_view(data)
+        self.assertIsInstance(view, memoryview)
+        self.assertEqual(len(data), len(view))
+        self.assertIs(view.obj, data)
+
+    def test_buffer_byte_view_casts_multidimensional_buffers(self):
+        import numpy as np
+        import runtime_common
+        arr = np.zeros((4, 5, 6), dtype=np.uint8)
+        view = runtime_common.buffer_byte_view(arr)
+        self.assertEqual(arr.size, len(view))
+        self.assertEqual(b"\x00" * arr.size, bytes(view))
+
+    def test_buffer_byte_view_falls_back_to_copy_for_unwrappable_objects(self):
+        # Failure path: memoryview(obj) raises -> tobytes() fallback must
+        # still produce the same bytes, not crash the export.
+        import runtime_common
+
+        class Unwrappable(object):
+            def tobytes(self):
+                return b"abc"
+
+        view = runtime_common.buffer_byte_view(Unwrappable())
+        self.assertEqual(b"abc", bytes(view))
+
+    def test_stream_buffer_digest_matches_whole_buffer_hash(self):
+        import hashlib
+        import runtime_common
+        data = bytes(bytearray((i % 251 for i in range(5 * 1024 * 1024))))
+        streamed = runtime_common.stream_buffer(
+            memoryview(data), compute_sha=True
+        )
+        self.assertEqual(
+            "sha256:" + hashlib.sha256(data).hexdigest(), streamed
+        )
+
+    def test_stream_buffer_writes_identical_bytes_and_pumps_between_chunks(self):
+        import hashlib
+        import runtime_common
+        data = bytes(bytearray((i % 253 for i in range(40 * 1024 * 1024))))
+        pumps = []
+        with tempfile.NamedTemporaryFile(delete=False) as handle:
+            path = handle.name
+        try:
+            with open(path, "wb") as handle:
+                sha = runtime_common.stream_buffer(
+                    memoryview(data), handle=handle, compute_sha=True,
+                    progress_callback=lambda: pumps.append(1),
+                )
+            with open(path, "rb") as handle:
+                written = handle.read()
+            self.assertEqual(data, written)
+            self.assertEqual(
+                "sha256:" + hashlib.sha256(data).hexdigest(), sha
+            )
+            # 40MB over 16MB chunks = 3 chunks -> 2 between-chunk pumps.
+            self.assertEqual(2, len(pumps))
+        finally:
+            os.remove(path)
+
+    def test_stream_buffer_progress_callback_errors_are_swallowed(self):
+        # Failure path: a dead GUI pump must not abort a long export.
+        import runtime_common
+
+        def broken_pump():
+            raise RuntimeError("GUI gone")
+
+        data = b"\x07" * (17 * 1024 * 1024)
+        sha = runtime_common.stream_buffer(
+            memoryview(data), compute_sha=True,
+            progress_callback=broken_pump,
+        )
+        self.assertTrue(sha.startswith("sha256:"))
+
+    def test_stream_buffer_empty_buffer_yields_digest_of_nothing(self):
+        import hashlib
+        import runtime_common
+        self.assertEqual(
+            "sha256:" + hashlib.sha256(b"").hexdigest(),
+            runtime_common.stream_buffer(memoryview(b""), compute_sha=True),
+        )
+        self.assertEqual(
+            "", runtime_common.stream_buffer(memoryview(b""), compute_sha=False)
+        )
+
+
 class TestNNInteractiveGpuMemoryPrecheck(unittest.TestCase):
     def _bridge_module(self):
         import nninteractive_bridge
@@ -13477,22 +13569,14 @@ class TestGuiThreadBlockingContract(unittest.TestCase):
     # backlog item lands. New violations are NOT allowed on this list.
     # key: "file:lineno", value: backlog item.
     KNOWN_VIOLATIONS = {
-        # interactive_algorithms _buffer_byte_view fallback copy (tiny; the
-        # common path is a zero-copy memoryview) - R61-12 follow-up.
-        "interactive_algorithms_mimics.py:148": "R61-12",
-        # mimics_export foreground tick buffer copy - R61-12 follow-up.
-        "mimics_export.py:1170": "R61-12",
-        "mimics_export.py:1179": "R61-12",
-        # nnInteractive full-mask SHA-256 on the GUI thread - R61-12.
-        "nninteractive_mimics.py:1835": "R61-12",
-        "nninteractive_mimics.py:1913": "R61-12",
-        "nninteractive_mimics.py:1936": "R61-12",
-        "nninteractive_mimics.py:2468": "R61-12",
+        # nnInteractive prompt-mask crop: user-interaction bbox-bounded, so
+        # typically tiny; converting it would add a copy for no GUI win.
+        "nninteractive_mimics.py:2490": "R61-12",
         # nnInteractive synchronous bridge round-trip (Popen + communicate,
         # timeout up to 1800s) reachable from the async monitor tick -
         # tracked separately from R61-12; needs the wait-thread pattern.
-        "nninteractive_mimics.py:1389": "R61-26",
-        "nninteractive_mimics.py:1395": "R61-26",
+        "nninteractive_mimics.py:1387": "R61-26",
+        "nninteractive_mimics.py:1393": "R61-26",
     }
 
     def test_no_tick_function_blocks_the_gui_thread(self):

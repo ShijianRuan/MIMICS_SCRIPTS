@@ -3,7 +3,6 @@
 
 from __future__ import print_function
 
-import hashlib
 import json
 import logging
 import math
@@ -129,41 +128,17 @@ def _selected_mask(image):
     return selected[0]
 
 
-def _sha256_bytes(value):
-    digest = hashlib.sha256()
-    digest.update(value)
-    return digest.hexdigest()
-
-
 def _buffer_byte_view(view):
-    """Return a one-dimensional byte view without copying when possible."""
-    try:
-        raw = memoryview(view)
-        if raw.ndim != 1 or raw.format not in ("B", "b", "c"):
-            raw = raw.cast("B")
-        elif raw.format != "B":
-            raw = raw.cast("B")
-        return raw
-    except Exception:
-        return memoryview(view.tobytes())
+    """runtime_common.buffer_byte_view - see that module for why the copy is avoided."""
+    return runtime_common.buffer_byte_view(view)
 
 
 def _stream_buffer(raw, handle=None, compute_sha=True, progress_callback=None):
-    digest = hashlib.sha256() if compute_sha else None
-    chunk_bytes = 16 * 1024 * 1024
-    byte_count = len(raw)
-    for offset in range(0, byte_count, chunk_bytes):
-        chunk = raw[offset:min(byte_count, offset + chunk_bytes)]
-        if handle is not None:
-            handle.write(chunk)
-        if digest is not None:
-            digest.update(chunk)
-        if progress_callback is not None and offset + len(chunk) < byte_count:
-            try:
-                progress_callback()
-            except Exception:
-                pass
-    return digest.hexdigest() if digest is not None else ""
+    """runtime_common.stream_buffer (chunked write/digest with progress pump)."""
+    return runtime_common.stream_buffer(
+        raw, handle=handle, compute_sha=compute_sha,
+        progress_callback=progress_callback,
+    )
 
 
 def _write_raw_buffer(
