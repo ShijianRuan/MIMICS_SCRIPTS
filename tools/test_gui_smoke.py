@@ -440,6 +440,36 @@ class TestIoPathSetupDebounce(unittest.TestCase):
         self.assertIn("recognition_debounce.setInterval(400)", source)
 
 
+class TestIoPathOutputNotSticky(unittest.TestCase):
+    """R61-7: a remembered output folder that was merely the computed
+    default for a *previous* dataset must not pin every new dataset to that
+    old folder. Only a folder the user chose themselves sticks."""
+
+    def test_io_path_setup_prefills_only_user_chosen_output(self):
+        source = Path(__file__).with_name("io_path_setup_ui.py").read_text(
+            encoding="utf-8"
+        )
+        # Load side: prefill the output box only when the remembered value
+        # was a user choice (output_custom), never a computed default.
+        self.assertIn('remembered_mode.get("output_custom")', source)
+        # Save side: record whether the user deviated from the computed
+        # default at submit time.
+        self.assertIn('"output_custom": bool(', source)
+
+    def test_drop_window_output_follows_each_new_dataset(self):
+        drop = Path(__file__).with_name("import_drop_window.py").read_text(
+            encoding="utf-8"
+        )
+        # Load side: same rule as the path-setup UI.
+        self.assertIn('remembered_mode.get("output_custom")', drop)
+        # Within one session, every new drop recomputes the default unless
+        # the user typed or browsed a folder themselves.
+        self.assertIn('if not output_custom["value"]:', drop)
+        self.assertIn('output_edit.textChanged.connect(output_edited)', drop)
+        # The dead build_selection helper (zero callers repo-wide) stays out.
+        self.assertNotIn("def build_selection", drop)
+
+
 class TestTrainingSetupPathMemory(unittest.TestCase):
     """Training windows prefill paths from the last successful submission."""
 

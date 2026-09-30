@@ -756,7 +756,14 @@ def run_ui(context, preview_path=""):
     else:
         source_edit = path_row("SOURCE DATASET", source_initial, hint="Required. This path is never modified by import.")
 
-    output_initial = context.get("output_initial") or remembered_mode.get("output_path", "")
+    # R61-7: only a folder the user actually chose themselves sticks across
+    # sessions. A remembered value that was just the computed default for
+    # the *previous* source would pin every new dataset to that old folder.
+    output_initial = context.get("output_initial") or (
+        remembered_mode.get("output_path", "")
+        if remembered_mode.get("output_custom")
+        else ""
+    )
     output_edit = path_row("MCS OUTPUT FOLDER" if mode.startswith("import") else "EXPORT ROOT", output_initial, hint="Optional to change. A safe default is filled automatically from the source path.")
     output_preview = _label(QtWidgets, "", "preview")
     output_preview.setWordWrap(True)
@@ -1222,7 +1229,19 @@ def run_ui(context, preview_path=""):
             return
         source = os.path.abspath(os.path.expanduser(source_edit.text().strip()))
         output = os.path.abspath(os.path.expanduser(output_edit.text().strip()))
-        selection = {"source_path": source, "output_path": output, "remember": bool(remember.isChecked())}
+        selection = {
+            "source_path": source,
+            "output_path": output,
+            "remember": bool(remember.isChecked()),
+            # True only when the user deviated from the computed default this
+            # round; see the output_initial comment above.
+            "output_custom": bool(
+                os.path.normcase(output)
+                != os.path.normcase(
+                    resolve_configured_output(configured_default, source, mode)
+                )
+            ),
+        }
         if mode.startswith("import"):
             if mask_none.isChecked():
                 selection["mask_selection"] = "none"

@@ -137,20 +137,6 @@ def _child_case_dirs(root, limit=3):
     return found
 
 
-def build_selection(kind, source, child_dirs, remembered):
-    """Build the selection payload for the import worker(s)."""
-    output_dir = remembered.get("output_path") or io_ui.source_default_output(
-        "import_batch" if kind == "batch" else "import_single", source
-    )
-    mask_selection = remembered.get("mask_selection") or "all"
-    return {
-        "kind": kind,
-        "source_path": source,
-        "output_path": output_dir,
-        "mask_selection": mask_selection,
-    }
-
-
 DROP_IMPORT_RETENTION_DAYS = 30
 
 
@@ -400,7 +386,14 @@ def run(context=None, preview_path=""):
 
     output_row = QtWidgets.QHBoxLayout()
     output_label = QtWidgets.QLabel("Output folder")
-    output_edit = QtWidgets.QLineEdit(remembered_mode.get("output_path") or "")
+    # Only a folder the user chose themselves sticks across sessions (same
+    # rule as io_path_setup_ui, R61-7): a remembered computed default would
+    # pin every new dataset to the previous dataset's output folder.
+    output_edit = QtWidgets.QLineEdit(
+        remembered_mode.get("output_path") or ""
+        if remembered_mode.get("output_custom")
+        else ""
+    )
     output_edit.setPlaceholderText("Optional - filled automatically from the source")
     browse = QtWidgets.QPushButton("Browse...")
     output_row.addWidget(output_label)
@@ -493,9 +486,14 @@ def run(context=None, preview_path=""):
                 dropzone.setText(display)
                 return
             dropzone.setText(display)
-        if not output_edit.text().strip():
-            mode = "import_batch" if kind == "batch" else "import_single"
-            output_edit.setText(io_ui.source_default_output(mode, state["source"] or paths[0]))
+        # R61-7: a new drop means a new dataset, so the computed default
+        # follows it — unless the user typed/picked a folder themselves this
+        # session (that choice stays). The pre-submit autofill from a
+        # previous drop is not a user choice and must not stick.
+        mode = "import_batch" if kind == "batch" else "import_single"
+        default_output = io_ui.source_default_output(mode, state["source"] or paths[0])
+        if not output_custom["value"]:
+            output_edit.setText(default_output)
         submit.setEnabled(True)
 
     def add_paths(values):
@@ -513,6 +511,16 @@ def run(context=None, preview_path=""):
         analyze(cleaned)
 
     # -- Drag & drop ------------------------------------------------------
+    # True once the user typed or browsed an output folder this session.
+    output_custom = {"value": False}
+
+    def output_edited():
+        # hasFocus filters out programmatic setText from the autofill; a
+        # programmatic default is not a user choice and must not stick.
+        if output_edit.hasFocus():
+            output_custom["value"] = True
+
+    output_edit.textChanged.connect(output_edited)
     window.setAcceptDrops(True)
 
     def drag_enter(event):
@@ -559,6 +567,7 @@ def run(context=None, preview_path=""):
         # Mimics stay responsive.
         def _chosen(value):
             if value:
+                output_custom["value"] = True
                 output_edit.setText(str(value))
 
         choose_existing_directory_async(
@@ -583,11 +592,6 @@ def run(context=None, preview_path=""):
         kind = state["kind"]
         source = state["source"] or (state["paths"][0] if state["paths"] else "")
         output = os.path.abspath(os.path.expanduser(output_edit.text().strip()))
-        if not output:
-            output = io_ui.source_default_output(
-                "import_batch" if kind == "batch" else "import_single", source
-            )
-            output_edit.setText(output)
         mask_selection = "none" if mask_none.isChecked() else "all"
         selection = {
             "kind": kind,
@@ -608,6 +612,17 @@ def run(context=None, preview_path=""):
         remembered["drop_import"] = {
             "output_path": output,
             "mask_selection": mask_selection,
+            # True only when the user typed/picked a folder different from
+            # the computed default; a default must not stick (R61-7).
+            "output_custom": bool(
+                os.path.normcase(output)
+                != os.path.normcase(
+                    io_ui.source_default_output(
+                        "import_batch" if kind == "batch" else "import_single",
+                        source,
+                    )
+                )
+            ),
         }
         try:
             os.makedirs(os.path.dirname(state_file_path()), exist_ok=True)
