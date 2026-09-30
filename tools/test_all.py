@@ -2990,6 +2990,33 @@ class TestCreateMcsBatch(unittest.TestCase):
         self.assertEqual("prepare", data["phase"])
         self.assertEqual("Test error", data["error"])
 
+    def test_record_failed_case_keeps_user_source_path(self):
+        """R61-5: a failure record must name the user's original input path,
+        not an internal work/runtime dir, so the annotator can locate the
+        problematic data."""
+        from create_mcs_batch import record_failed_case
+
+        record_failed_case(
+            self.tmp, "s0002", "create_mcs", "boom",
+            source_image=r"Z:\datasets\cases\s0002\ct.nii.gz",
+        )
+        failed_dir = os.path.join(self.tmp, ".mimics_runtime", "_failed_cases")
+        files = os.listdir(failed_dir)
+        with open(os.path.join(failed_dir, files[0]), "r") as f:
+            data = json.load(f)
+        self.assertEqual(
+            r"Z:\datasets\cases\s0002\ct.nii.gz", data["source_image"]
+        )
+
+        # Omitted source stays absent (backwards-compatible records).
+        record_failed_case(self.tmp, "s0003", "prepare", "boom")
+        paths = sorted(
+            path for path in os.listdir(failed_dir)
+            if path.startswith("s0003")
+        )
+        with open(os.path.join(failed_dir, paths[0]), "r") as f:
+            self.assertNotIn("source_image", json.load(f))
+
     def test_local_queue_descriptor_is_consumed_by_background_creator(self):
         import create_mcs_batch
 
@@ -4515,7 +4542,11 @@ class TestNNInteractiveContinuousPrompting(unittest.TestCase):
             "Not a valid NIfTI image: case_0042.nii.gz", "prepare"
         )
         self.assertEqual("source_data_invalid", category)
-        self.assertIn("_failed_cases.json", action)
+        # R61-5: the old wording pointed at a nonexistent _failed_cases.json
+        # inside the user output folder; the real records are per-case JSONs
+        # in the queue runtime dir, reachable via Show Batch Status.
+        self.assertNotIn("_failed_cases.json", action)
+        self.assertIn("original source path", action)
 
         category, _message, action = import_guidance(
             "Background Mimics could not start mimics.exe", "background_mimics"

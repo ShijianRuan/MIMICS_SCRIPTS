@@ -812,7 +812,9 @@ def _save_prepare_manifest(work_dir, result, output_mcs=None):
     return path
 
 
-def _record_failed_case(output_dir, case_id, phase, error):
+def _record_failed_case(output_dir, case_id, phase, error, source_image=""):
+    """Record one failed case; source_image is the user's original input
+    path so the failure record names the real data location (R61-5)."""
     try:
         failed_dir = _rt(output_dir or os.getcwd(), "_failed_cases")
         if not os.path.isdir(failed_dir):
@@ -823,6 +825,8 @@ def _record_failed_case(output_dir, case_id, phase, error):
             "error": str(error or ""),
             "failed_at_epoch": time.time(),
         }
+        if source_image:
+            payload["source_image"] = str(source_image)
         filename = "{0}_{1}.json".format(
             _safe_case_filename(case_id),
             _safe_case_filename(phase),
@@ -866,8 +870,9 @@ def _error_guidance(error_text, phase=""):
             "disk_full",
             "The disk ran out of space while importing.",
             "Free space on the import output drive (or choose a different "
-            "output folder), then retry. Failed cases are listed in "
-            "_failed_cases.json.",
+            "output folder), then retry. Failed cases are listed per case "
+            "in the _failed_cases folder of this import; open it via "
+            "Show Batch Status (01 Data menu).",
         )
     if (
         "network path not found" in combined
@@ -892,8 +897,9 @@ def _error_guidance(error_text, phase=""):
             "source_data_invalid",
             "One of the input files is damaged or has an inconsistent "
             "geometry.",
-            "Check the failing case listed in _failed_cases.json; re-export "
-            "or exclude it, then retry the remaining cases.",
+            "Check the failing case (its original source path is recorded "
+            "in the failed-case details); re-export or exclude it, then "
+            "retry the remaining cases.",
         )
     if (
         "background mimics" in combined
@@ -1737,7 +1743,8 @@ def _fail_import_monitor_after_process(
         _cleanup_work_dir(work_dir)
         if monitor.get("case_id"):
             _record_failed_case(
-                output_dir, monitor.get("case_id"), phase, str(error)
+                output_dir, monitor.get("case_id"), phase, str(error),
+                source_image=monitor.get("case_image", ""),
             )
         _write_import_task_status(
             monitor.get("task_status_path"),
@@ -1822,7 +1829,10 @@ def _import_monitor_tick(monitor):
     if status == "error":
         output_mcs = monitor.get("output_mcs")
         output_dir = os.path.dirname(os.path.abspath(output_mcs)) if output_mcs else ""
-        _record_failed_case(output_dir, monitor.get("case_id"), "prepare", result)
+        _record_failed_case(
+            output_dir, monitor.get("case_id"), "prepare", result,
+            source_image=monitor.get("case_image", ""),
+        )
         _write_import_task_status(
             monitor.get("task_status_path"),
             {
@@ -1843,12 +1853,19 @@ def _import_monitor_tick(monitor):
             ),
         )
         _category, _guidance_message, guidance_action = _error_guidance(result, "prepare")
+        source_image = monitor.get("case_image", "")
         mimics.dialogs.message_box(
             title="Import Error",
             message=(
-                "Preparation failed: {0}\n\nSuggested action: {1}\n\n"
-                "Diagnostic files kept at:\n{2}"
-            ).format(result, guidance_action, job_dir),
+                "Preparation failed for case '{0}':\n{1}\n\nSource: {2}\n\n"
+                "Suggested action: {3}\n\nDiagnostic files kept at:\n{4}"
+            ).format(
+                monitor.get("case_id") or "unknown",
+                result,
+                source_image or "see the import log",
+                guidance_action,
+                job_dir,
+            ),
         )
         _cleanup_work_dir(monitor.get("work_dir"))
         # In batch mode, continue to next case
@@ -1898,7 +1915,10 @@ def _import_monitor_tick(monitor):
         output_mcs = monitor.get("output_mcs")
         output_dir = os.path.dirname(os.path.abspath(output_mcs)) if output_mcs else ""
         _append_import_log(output_dir, "Import queueing failed: {0}".format(e))
-        _record_failed_case(output_dir, monitor.get("case_id"), "prepare_manifest", e)
+        _record_failed_case(
+            output_dir, monitor.get("case_id"), "prepare_manifest", e,
+            source_image=monitor.get("case_image", ""),
+        )
         _write_import_task_status(
             monitor.get("task_status_path"),
             {
@@ -2005,7 +2025,10 @@ def _batch_prepare_tick_impl(monitor):
         output_dir = monitor.get("output_dir")
         case_id = timeout_pending.get("case_id", "")
         error = timeout_pending.get("error", "Dataset conversion timed out.")
-        _record_failed_case(output_dir, case_id, "prepare_timeout", error)
+        _record_failed_case(
+            output_dir, case_id, "prepare_timeout", error,
+            source_image=monitor.get("case_image", ""),
+        )
         monitor["failed"] = monitor.get("failed", 0) + 1
         monitor.pop("_timeout_pending", None)
         monitor["busy"] = False
@@ -2117,7 +2140,10 @@ def _batch_prepare_tick_impl(monitor):
         output_dir = monitor.get("output_dir", "")
         case_id = monitor.get("case_id", "")
         _append_import_log(output_dir, "Conversion failed for {0}: {1}".format(case_id, result))
-        _record_failed_case(output_dir, case_id, "prepare", result)
+        _record_failed_case(
+            output_dir, case_id, "prepare", result,
+            source_image=monitor.get("case_image", ""),
+        )
         monitor["failed"] = monitor.get("failed", 0) + 1
         _write_import_task_status(
             monitor.get("task_status_path"),
@@ -2171,7 +2197,10 @@ def _batch_prepare_tick_impl(monitor):
         )
     except Exception as e:
         _append_import_log(output_dir, "Failed to save prepare manifest for {0}: {1}".format(case_id, e))
-        _record_failed_case(output_dir, case_id, "prepare_manifest", e)
+        _record_failed_case(
+            output_dir, case_id, "prepare_manifest", e,
+            source_image=monitor.get("case_image", ""),
+        )
         monitor["failed"] = monitor.get("failed", 0) + 1
         _cleanup_work_dir(work_dir)
     _cleanup_job_dir(job_dir)
@@ -2268,7 +2297,7 @@ def _start_next_batch_prepare(monitor):
                     case_name, exc
                 ),
             )
-            _record_failed_case(output_dir, case_name, "discover_case", exc)
+            _record_failed_case(output_dir, case_name, "discover_case", exc, source_image=case_dir)
             monitor["failed"] = monitor.get("failed", 0) + 1
             skipped_this_tick += 1
             if skipped_this_tick >= 8 and monitor.get("batch_queue"):
@@ -2286,6 +2315,7 @@ def _start_next_batch_prepare(monitor):
                 case_name,
                 "discover_case",
                 "No image data found.",
+                source_image=case_dir,
             )
             monitor["failed"] = monitor.get("failed", 0) + 1
             skipped_this_tick += 1
@@ -2349,7 +2379,12 @@ def _start_next_batch_prepare(monitor):
                 ),
             )
             _record_failed_case(
-                output_dir, failed_case_id, "prepare_start", exc
+                output_dir, failed_case_id, "prepare_start", exc,
+                source_image=str(
+                    (case_mapping or {}).get("image")
+                    or (case_mapping or {}).get("case_dir")
+                    or case_dir
+                ),
             )
             monitor["failed"] = monitor.get("failed", 0) + 1
             try:
@@ -2379,6 +2414,9 @@ def _start_next_batch_prepare(monitor):
         monitor["job_dir"] = job_dir
         monitor["work_dir"] = work_dir
         monitor["case_id"] = case_id
+        # The user's original input path, so failure records point at the
+        # real data location rather than internal work dirs (R61-5).
+        monitor["case_image"] = str(case_info.get("image") or case_info.get("case_dir") or "")
         monitor["monitor_key"] = job_dir
         monitor["deadline"] = time.time() + monitor.get("timeout_seconds", 1800)
         monitor["done"] = False
@@ -2991,7 +3029,13 @@ def _first_mcs_monitor_tick(monitor):
                     completed,
                     failed,
                     output_dir,
-                    "\n\nBefore retrying failed cases, open the import output folder shown above and check the failed-cases list and the log in its logs subfolder." if failed else "",
+                    (
+                        "\n\nEach failed case is recorded with its original source "
+                        "path. Open this import in Show Batch Status (01 Data menu) "
+                        "and use Open Log to see the details before retrying."
+                        if failed
+                        else ""
+                    ),
                 ),
                 ui_blocking=False,
             )
@@ -3030,8 +3074,9 @@ def _first_mcs_monitor_tick(monitor):
                         "Background .mcs creation stopped before reporting completion.\n\n"
                         "Suggested action: prepared files were kept for retry. Check that "
                         "the background Mimics process is still allowed to run (Admin > "
-                        "Stop All Owned Services, then retry), or inspect:\n{0}"
-                    ).format(os.path.join(output_dir, "logs", "_create_mcs_batch.log")),
+                        "Stop All Owned Services, then retry), or open this import in "
+                        "Show Batch Status (01 Data menu) and read its log."
+                    ),
                     ui_blocking=False,
                 )
             elif status.get("status") not in ("closed", "failed", "cancelled"):
@@ -4312,6 +4357,8 @@ def main(import_mode=None, case_info_override=None):
             "output_dir": output_dir_abs,
             "task_status_path": task_status_path,
             "task_stop_path": task_stop_path,
+            # User-recognizable original input path for failure records (R61-5).
+            "case_image": str(case_info.get("image") or case_info.get("case_dir") or ""),
         }
         single_batch_info.update(producer_lease)
         monitor_started = _start_import_monitor(

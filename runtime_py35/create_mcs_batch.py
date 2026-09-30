@@ -245,7 +245,10 @@ def log_message(output_dir, message):
         pass
 
 
-def record_failed_case(output_dir, case_id, phase, error, traceback_text=None):
+def record_failed_case(output_dir, case_id, phase, error, traceback_text=None,
+                       source_image=""):
+    """Record one failed case; source_image is the user's original input
+    path so the record names the real data location (R61-5)."""
     try:
         failed_dir = runtime_path(output_dir or os.getcwd(), "_failed_cases")
         if not os.path.isdir(failed_dir):
@@ -258,6 +261,8 @@ def record_failed_case(output_dir, case_id, phase, error, traceback_text=None):
         }
         if traceback_text:
             payload["traceback"] = traceback_text
+        if source_image:
+            payload["source_image"] = str(source_image)
         filename = "{0}_{1}.json".format(
             safe_case_filename(case_id),
             safe_case_filename(phase),
@@ -1422,7 +1427,24 @@ def main(output_dir=None, runtime_dir=None):
                     last_activity = time.time()
                     log_message(output_dir, "Create failed for {}: {}".format(case_id, e))
                     traceback_text = traceback.format_exc()
-                    record_failed_case(output_dir, case_id, "create_mcs", e, traceback_text)
+                    # Name the user's original input file (from the prepare
+                    # manifest) so the failure record points at the real
+                    # data location, not an internal work dir (R61-5).
+                    source_image = ""
+                    try:
+                        with open(
+                            os.path.join(work_dir, "prepare_manifest.json"),
+                            "r", encoding="utf-8",
+                        ) as handle:
+                            source_image = str(
+                                json.load(handle).get("source_image_path") or ""
+                            )
+                    except Exception:
+                        pass
+                    record_failed_case(
+                        output_dir, case_id, "create_mcs", e, traceback_text,
+                        source_image=source_image,
+                    )
                     try:
                         write_json_atomic(
                             os.path.join(work_dir, "create_failed.json"),
