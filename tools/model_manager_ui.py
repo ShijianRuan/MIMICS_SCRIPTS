@@ -346,6 +346,7 @@ class ModelManagerWindow:
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.table.itemSelectionChanged.connect(self._update_action_buttons)
         root.addWidget(self.table, 1)
 
         self.status_label = QtWidgets.QLabel("Loading models...")
@@ -452,10 +453,14 @@ class ModelManagerWindow:
                     self.table.setItem(index, column, item)
         finally:
             self.table.setUpdatesEnabled(True)
-        self.use_button.setEnabled(False)
-        self.remove_button.setEnabled(False)
+        self._update_action_buttons()
 
     # -- actions ------------------------------------------------------------
+
+    def _update_action_buttons(self):
+        row = self._selected_row()
+        self.use_button.setEnabled(bool(row and row["usable"]))
+        self.remove_button.setEnabled(bool(row and not row["usable"]))
 
     def _selected_row(self):
         row = self.table.currentRow()

@@ -169,6 +169,79 @@ class TestModelManagerWindow(unittest.TestCase):
         # survive construction without any workspace present.
         window.window.close()
 
+    @staticmethod
+    def _row(**overrides):
+        row = {
+            "family": "nninteractive",
+            "workspace": "unused",
+            "task_id": "task1",
+            "model_id": "model_a",
+            "target": "Task 1",
+            "configuration": "",
+            "created_at_epoch": 100.0,
+            "imported": True,
+            "current": False,
+            "usable": True,
+        }
+        row.update(overrides)
+        return row
+
+    def _window_with_rows(self, manager, rows):
+        with tempfile.TemporaryDirectory() as name:
+            workspaces = {"nninteractive": name, "nnunet": name, "flexict": name}
+        window = manager.ModelManagerWindow({"workspaces": workspaces}, QT)
+        self.addCleanup(window.window.close)
+        deadline = time.time() + 5.0
+        while window._loading and time.time() < deadline:
+            _AppFixture.app().processEvents()
+            window._poll()
+            time.sleep(0.02)
+        self.assertFalse(window._loading, "background load never finished")
+        return window
+
+    def test_action_buttons_follow_selection(self):
+        """Use This Model / Remove Broken Entry were permanently disabled
+        (R61-4): selection must drive their enabled state."""
+        _AppFixture.app()
+        _batch, manager, _config, _presets = _gui_modules()
+        rows = [
+            self._row(model_id="good", usable=True),
+            self._row(model_id="gone", usable=False),
+        ]
+        with mock.patch.object(manager, "collect_rows", lambda ws: list(rows)):
+            window = self._window_with_rows(manager, rows)
+            self.assertEqual(window.table.rowCount(), 2)
+            # No selection yet: both action buttons stay disabled.
+            self.assertFalse(window.use_button.isEnabled())
+            self.assertFalse(window.remove_button.isEnabled())
+            # Usable row: Use enabled, Remove not.
+            window.table.selectRow(0)
+            self.assertTrue(window.use_button.isEnabled())
+            self.assertFalse(window.remove_button.isEnabled())
+            # Broken row: the inverse.
+            window.table.selectRow(1)
+            self.assertFalse(window.use_button.isEnabled())
+            self.assertTrue(window.remove_button.isEnabled())
+            # Back to no selection: both disabled again.
+            window.table.setCurrentCell(-1, -1)
+            self.assertFalse(window.use_button.isEnabled())
+            self.assertFalse(window.remove_button.isEnabled())
+
+    def test_use_clicked_switches_recommended_model(self):
+        _AppFixture.app()
+        _batch, manager, _config, _presets = _gui_modules()
+        rows = [self._row(model_id="good", usable=True)]
+        with mock.patch.object(
+            manager, "collect_rows", lambda ws: list(rows)
+        ), mock.patch.object(manager, "set_recommended_model") as set_current:
+            window = self._window_with_rows(manager, rows)
+            window.table.selectRow(0)
+            window._use_clicked()
+            set_current.assert_called_once_with(rows[0])
+            self.assertTrue(
+                window._loading, "Use must trigger a table reload"
+            )
+
 
 class TestViewerNonBlockingRefresh(unittest.TestCase):
     """Status viewers collect off the GUI thread (BackgroundRefresh)."""
