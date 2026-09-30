@@ -445,7 +445,7 @@ class ModelCenter:
         self.data_source_hint.setWordWrap(True)
         data_layout.addWidget(self.data_source_hint)
 
-        row, self.image_root_edit = self._path_row("Original image dataset *")
+        row, self.image_root_edit = self._path_row("原始图像数据集 *")
         self.image_root_edit.setPlaceholderText(
             "每个病例一个子文件夹的目录"
         )
@@ -454,7 +454,7 @@ class ModelCenter:
         self.mcs_path_widget = QtWidgets.QWidget()
         mcs_layout = QtWidgets.QVBoxLayout(self.mcs_path_widget)
         mcs_layout.setContentsMargins(0, 0, 0, 0)
-        row, self.mcs_edit = self._path_row("Saved .mcs folder *")
+        row, self.mcs_edit = self._path_row("已保存的 .mcs 工程 *")
         mcs_layout.addLayout(row)
         data_layout.addWidget(self.mcs_path_widget)
 

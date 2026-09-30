@@ -5138,14 +5138,14 @@ class TestNNInteractiveTaskDiagnostics(unittest.TestCase):
 
         source = inspect.getsource(model_center.ModelCenter.refresh_models)
         self.assertIn('"not_improved"', source)
-        self.assertIn("Did not improve", source)
+        self.assertIn("未改进", source)
 
     def test_model_center_shows_failed_versions_toggle_covers_not_improved(self):
         import nninteractive_task_model_center as model_center
 
         source = inspect.getsource(model_center.ModelCenter)
         self.assertIn(
-            "Show failed and not-improved versions",
+            "显示失败与未改进的版本",
             source,
         )
 
@@ -5154,8 +5154,8 @@ class TestNNInteractiveTaskDiagnostics(unittest.TestCase):
 
         source = inspect.getsource(chooser.Chooser.refresh_models)
         self.assertIn('"not_improved"', source)
-        self.assertIn("Did not improve", source)
-        self.assertIn("Show models that did not improve", inspect.getsource(chooser.Chooser))
+        self.assertIn("未改进", source)
+        self.assertIn("显示未改进的模型", inspect.getsource(chooser.Chooser))
 
     def test_diagnose_job_cli_subcommand_exists(self):
         import nninteractive_finetune_pipeline as pipeline
@@ -5224,7 +5224,7 @@ class TestNNInteractiveTaskDiagnostics(unittest.TestCase):
         source = inspect.getsource(model_center.ModelCenter._refresh_diagnosis)
         self.assertIn("failed", source)
         self.assertIn("diagnose_job", source)
-        self.assertIn("Open Job Folder", inspect.getsource(model_center.ModelCenter))
+        self.assertIn("打开作业文件夹", inspect.getsource(model_center.ModelCenter))
 
 
 class TestBridgeDicomLoading(unittest.TestCase):
@@ -6723,7 +6723,7 @@ class TestNewFeatures(unittest.TestCase):
         # The reminder is wired into the export submit path.
         source = Path(PROJECT_ROOT, "tools", "io_path_setup_ui.py").read_text(encoding="utf-8")
         self.assertIn('count_existing_label_files(output, case_id)', source)
-        self.assertIn('Existing Label Files', source)
+        self.assertIn('目标文件夹已有标签文件', source)
         # Overwrite selection must not trigger the reminder.
         self.assertIn('selection.get("conflict_policy") == "skip"', source)
 

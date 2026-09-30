@@ -256,7 +256,7 @@ class StatusWindow:
                 "completed", "failed", "cancelled", "abandoned", "unknown"
             }
         )
-        self.stop_button.setText("Abandon Locally" if abandonable else "停止")
+        self.stop_button.setText("在本机放弃远程任务" if abandonable else "停止")
         self.stop_button.setEnabled(
             abandonable
             or state not in {

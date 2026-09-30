@@ -152,7 +152,7 @@ class TrainingSetupWindow:
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(12)
 
-        project, form = self._surface("Task and images")
+        project, form = self._surface("任务与图像")
         self.label_edit = QtWidgets.QLineEdit()
         self.label_edit.setPlaceholderText("例如 kidney_left")
         self.label_edit.setToolTip(
@@ -171,12 +171,12 @@ class TrainingSetupWindow:
         )
         form.addWidget(QtWidgets.QLabel("原始图像数据集 *"), 2, 0)
         form.addWidget(
-            self._path_row(self.dataset_edit, "Select original image dataset"), 2, 1
+            self._path_row(self.dataset_edit, "选择原始图像数据集"), 2, 1
         )
         self.dataset_edit.textChanged.connect(self._refresh_cases)
         layout.addWidget(project)
 
-        cases, cases_layout = self._surface("Cases and validation")
+        cases, cases_layout = self._surface("病例与验证")
         hint = QtWidgets.QLabel(
             "每个病例文件夹需要原始图像和一个以目标命名的 Mask 文件（例如 kidney_left.nii.gz）。其余用于训练；验证病例按层位均匀抽取。"
         )
@@ -207,11 +207,11 @@ class TrainingSetupWindow:
         cases_layout.addWidget(self.case_summary, 2, 1)
         layout.addWidget(cases)
 
-        storage, storage_form = self._surface("Storage")
+        storage, storage_form = self._surface("存储")
         self.workspace_edit = QtWidgets.QLineEdit()
         storage_form.addWidget(QtWidgets.QLabel("模型库"), 0, 0)
         storage_form.addWidget(
-            self._path_row(self.workspace_edit, "Select FlexiCT model library"), 0, 1
+            self._path_row(self.workspace_edit, "选择 FlexiCT 模型库"), 0, 1
         )
         storage_hint = QtWidgets.QLabel(
             "包含托管作业、预处理缓存和模型注册表。"
@@ -283,7 +283,7 @@ class TrainingSetupWindow:
         form.addWidget(self.workers_spin, 4, 1)
         layout.addWidget(training)
 
-        recipe, recipe_form = self._surface("Locked recipe (read-only)")
+        recipe, recipe_form = self._surface("锁定配置（只读）")
         recipe_text = QtWidgets.QLabel(
             "FlexiCT ViT 主干（fp32，RoPE 安全）· AdamW 双参数组（backbone 3e-5 / decoder 3e-4，betas 0.9/0.98，wd 5e-2）· poly LR · gradclip 12 · 无 deep supervision · 前景过采样 0.33 · batch size 取自 nnU-Net plans · 按验证 Dice 选最佳 checkpoint · 推理不用 TTA。\n\n以上为已验证的小样本配方，Mimics 中不可修改。"
         )
