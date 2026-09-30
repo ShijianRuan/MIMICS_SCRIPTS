@@ -362,7 +362,7 @@ usable, and exported label orientation matches the original image/mask geometry.
 ## 10.Draft Continuation, Resource Handoff, And Storage
 
 - Select an existing `<source> - AI Draft`, add another prompt, and confirm no `AI Draft 2` or `AI Draft - AI Draft` is created.
-- Start batch import, then start nnU-Net training with fresh label export enabled. Confirm status reports that label export is waiting for background Mimics, names the import owner, and offers `01 Data > 04 Stop Import Queue` as the optional action.
+- Start batch import, then start nnU-Net training with fresh label export enabled. Confirm status reports that label export is waiting for background Mimics, names the import owner, and offers `01 Data > 03 Stop Import Queue` as the optional action.
 - Let import finish and confirm label export and training start automatically without restarting setup.
 - Start an nnInteractive prompt and immediately queue nnU-Net training. Confirm the active prediction completes before the GPU is released.
 - Leave nnInteractive idle for more than 15 seconds, then queue nnU-Net training. Confirm the image worker closes gracefully and training starts without the legacy one-hour wait.

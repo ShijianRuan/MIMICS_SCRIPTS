@@ -3652,6 +3652,57 @@ class TestScriptingLibraryEntries(unittest.TestCase):
                             )
         self.assertEqual([], offenders)
 
+    def test_living_doc_entry_references_match_library_files(self):
+        """R61-19: entry references in living docs (e.g. "03 Stop Import
+        Queue") must match a real scripting_library file. R60 renumbered
+        the 01_Data entries; the lifecycle policy still pointed at the old
+        numbers for weeks because no test cross-checked them."""
+        import re as _re
+
+        # Build the set of real "NN Entry Name" strings from the library.
+        actual = set()
+        lib_root = os.path.join(PROJECT_ROOT, "scripting_library")
+        for section in sorted(os.listdir(lib_root)):
+            section_dir = os.path.join(lib_root, section)
+            if not os.path.isdir(section_dir):
+                continue
+            for base, _dirs, files in os.walk(section_dir):
+                for fname in files:
+                    if fname.endswith(".py"):
+                        name = os.path.splitext(fname)[0]
+                        match = _re.match(r"^(\d\d)_(.+)$", name)
+                        if match:
+                            actual.add("{0} {1}".format(match.group(1), match.group(2).replace("_", " ")))
+        self.assertTrue(
+            len(actual) >= 20, "entry scan came up empty; test is broken"
+        )
+        pattern = _re.compile(r"`(?:\d\d [A-Za-z]+ > )?(\d\d [A-Z][A-Za-z ]+)`")
+        offenders = []
+        for rel in (
+            "docs/mimics_entry_guide.md",
+            "docs/scripting_library_workflows.md",
+            "docs/mimics_real_data_validation.md",
+            "docs/task_lifecycle_and_safety_policy_CN.md",
+            "docs/windows_end_to_end_acceptance_2026-08-01.md",
+            "CONFIG_REFERENCE.md",
+        ):
+            path = os.path.join(PROJECT_ROOT, rel)
+            if not os.path.isfile(path):
+                continue
+            with open(path, "r", encoding="utf-8") as handle:
+                for lineno, line in enumerate(handle, 1):
+                    if "已删除" in line or "deleted" in line.lower():
+                        continue  # explicit migration-history notes
+                    for match in pattern.finditer(line):
+                        referenced = match.group(1)
+                        if referenced not in actual:
+                            offenders.append(
+                                "{}:{} references non-existent entry '{}'".format(
+                                    rel, lineno, referenced
+                                )
+                            )
+        self.assertEqual([], offenders)
+
 
 # ============================================================================
 # L8: Stop Background Services
