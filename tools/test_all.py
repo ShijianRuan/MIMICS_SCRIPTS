@@ -11674,6 +11674,85 @@ class TestEnvGuidance(unittest.TestCase):
         issues = eg.collect_issues(self.root)
         self.assertEqual([], [i["kind"] for i in issues if i["kind"] == "flexict_weights"])
 
+    def _write_scribble_config(self, checkpoint):
+        import json as _json
+        with open(os.path.join(self.root, "interactive_algorithms_config.json"),
+                  "w", encoding="utf-8") as handle:
+            _json.dump({"scribbleprompt": {"checkpoint": checkpoint}}, handle)
+
+    def _pop_checkpoint_env(self):
+        return os.environ.pop("SCRIBBLEPROMPT_CHECKPOINT", None)
+
+    @staticmethod
+    def _restore_checkpoint_env(old):
+        if old is not None:
+            os.environ["SCRIBBLEPROMPT_CHECKPOINT"] = old
+
+    def test_scribbleprompt_missing_checkpoint_is_reported(self):
+        eg = self._import_guidance()
+        self._fake_env(self.root)
+        self._fake_official_model(self.root)
+        missing = os.path.join(self.tmp, "gone", "model.pt")
+        self._write_scribble_config(missing)
+        old = self._pop_checkpoint_env()
+        try:
+            issues = eg.collect_issues(self.root)
+        finally:
+            self._restore_checkpoint_env(old)
+        issue = next(i for i in issues if i["kind"] == "scribbleprompt_checkpoint")
+        self.assertEqual("warn", issue["severity"])
+        self.assertEqual("", issue["fix_action"])  # informational: copy the file
+        self.assertIn(missing, issue["detail"])
+
+    def test_scribbleprompt_present_checkpoint_silences_issue(self):
+        eg = self._import_guidance()
+        self._fake_env(self.root)
+        self._fake_official_model(self.root)
+        checkpoint = os.path.join(self.tmp, "ckpts", "model.pt")
+        os.makedirs(os.path.dirname(checkpoint))
+        with open(checkpoint, "w") as handle:
+            handle.write("x")
+        self._write_scribble_config(checkpoint)
+        old = self._pop_checkpoint_env()
+        try:
+            issues = eg.collect_issues(self.root)
+        finally:
+            self._restore_checkpoint_env(old)
+        self.assertEqual(
+            [], [i["kind"] for i in issues if i["kind"] == "scribbleprompt_checkpoint"])
+
+    def test_scribbleprompt_relative_path_is_anchored_at_root(self):
+        eg = self._import_guidance()
+        self._fake_env(self.root)
+        self._fake_official_model(self.root)
+        # Relative config value must resolve against the project root, the
+        # same anchoring interactive_algorithms_mimics._checkpoint_path uses.
+        checkpoint = os.path.join(self.root, "integrations", "ScribblePrompt",
+                                  "checkpoints", "unet.pt")
+        os.makedirs(os.path.dirname(checkpoint))
+        with open(checkpoint, "w") as handle:
+            handle.write("x")
+        self._write_scribble_config("integrations/ScribblePrompt/checkpoints/unet.pt")
+        old = self._pop_checkpoint_env()
+        try:
+            issues = eg.collect_issues(self.root)
+        finally:
+            self._restore_checkpoint_env(old)
+        self.assertEqual(
+            [], [i["kind"] for i in issues if i["kind"] == "scribbleprompt_checkpoint"])
+
+    def test_scribbleprompt_unconfigured_is_not_an_issue(self):
+        # No env var, no config entry: nothing to check, so no issue. An
+        # empty config is a different problem than a broken path.
+        eg = self._import_guidance()
+        self._fake_env(self.root)
+        self._fake_official_model(self.root)
+        old = self._pop_checkpoint_env()
+        try:
+            self.assertEqual([], eg.collect_issues(self.root))
+        finally:
+            self._restore_checkpoint_env(old)
+
 
 class TestProcessRegistry(unittest.TestCase):
     def test_spawn_worker_registration_matches_api(self):

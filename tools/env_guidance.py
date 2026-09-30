@@ -23,6 +23,7 @@ Issue kinds and their fix actions:
 * ``setup_incomplete``    -> run Repair (install missing packages)
 * ``migration_pending``   -> run migrate_root with the detected old root
 * ``flexict_weights``     -> informational (where to put the weights)
+* ``scribbleprompt_checkpoint`` -> informational (where to put the .pt file)
 """
 
 from __future__ import annotations
@@ -305,7 +306,51 @@ def collect_issues(project_root: Path | None = None) -> list[dict]:
             "severity": "bad",
         })
 
+    scribble = _scribbleprompt_checkpoint(root)
+    if scribble is not None and not scribble:
+        issues.append({
+            "kind": "scribbleprompt_checkpoint",
+            "title": "ScribblePrompt checkpoint is not installed",
+            "detail": (
+                "The ScribblePrompt checkpoint configured for the "
+                "scribble-annotate entry was not found:\n{0}\n"
+                "Copy the .pt file from your distribution source, or set "
+                "SCRIBBLEPROMPT_CHECKPOINT / the checkpoint entry under "
+                "\"scribbleprompt\" in interactive_algorithms_config.json.".format(
+                    _scribbleprompt_configured_path(root)
+                )
+            ),
+            "fix_action": "",
+            "severity": "warn",
+        })
+
     return issues
+
+
+def _scribbleprompt_configured_path(root: Path) -> str:
+    """The checkpoint path as the runtime resolves it (env var > config,
+    relative paths anchored at the project root)."""
+    value = os.environ.get("SCRIBBLEPROMPT_CHECKPOINT", "").strip()
+    if not value:
+        section = (
+            (_read_json(root / "interactive_algorithms_config.json", {}) or {})
+            .get("scribbleprompt") or {}
+        )
+        value = str(section.get("checkpoint") or "").strip()
+    if value and not os.path.isabs(value):
+        value = str(root / value)
+    return value
+
+
+def _scribbleprompt_checkpoint(root: Path) -> str | None:
+    """Resolved checkpoint path, or '' when missing.
+
+    Returns None when no checkpoint is configured at all: an empty config
+    is a different problem (not reported here) than a broken path."""
+    value = _scribbleprompt_configured_path(root)
+    if not value:
+        return None
+    return value if Path(value).is_file() else ""
 
 
 def _run_setup_worker(project_root: Path, action: str) -> int:
