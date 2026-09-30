@@ -25,6 +25,7 @@ from flexict_common import (  # noqa: E402
 )
 from flexict_pipeline import list_flexict_jobs  # noqa: E402
 from nnunet_common import read_json  # noqa: E402
+from nnunet_jobs import abandon_job, stop_job  # noqa: E402
 from ui_theme import configure_application, stylesheet  # noqa: E402
 from viewer_refresh import BackgroundRefresh  # noqa: E402
 
@@ -250,8 +251,19 @@ class StatusWindow:
             str(status.get("message") or status.get("error") or status.get("phase") or "")
         )
         self.progress.setValue(max(0, min(100, int(status.get("progress_percent") or 0))))
+        abandonable = bool(
+            str(status.get("execution_backend") or "") == "remote"
+            and status.get("remote_state_unknown")
+            and state not in {
+                "completed", "failed", "cancelled", "abandoned", "unknown"
+            }
+        )
+        self.stop_button.setText("Abandon Locally" if abandonable else "Stop")
         self.stop_button.setEnabled(
-            state not in {"completed", "failed", "cancelled", "abandoned", "unknown"}
+            abandonable
+            or state not in {
+                "completed", "failed", "cancelled", "abandoned", "unknown"
+            }
         )
         self.reattach_button.setEnabled(
             str(status.get("execution_backend") or "") == "remote"
@@ -279,9 +291,34 @@ class StatusWindow:
     def _stop(self):
         index = self.jobs.currentRow()
         if 0 <= index < len(self._job_rows):
-            from nnunet_jobs import stop_job
-
-            stop_job(self._job_rows[index]["status_path"])
+            status = self._job_rows[index]
+            abandonable = bool(
+                str(status.get("execution_backend") or "") == "remote"
+                and status.get("remote_state_unknown")
+                and str(status.get("status") or "")
+                not in {"completed", "failed", "cancelled", "abandoned"}
+            )
+            if abandonable:
+                # Same contract as the nnU-Net viewer: a remote task whose
+                # state is unknown cannot be confirmed stopped, so plain
+                # Stop must not claim the server GPU is free. The escape
+                # hatch asks once, then abandons monitoring locally only.
+                answer = self.QtWidgets.QMessageBox.warning(
+                    self.window,
+                    "Abandon Remote Task Locally",
+                    "Stop waiting on this workstation?\n\nThe server cannot "
+                    "confirm whether the container stopped. It may still use "
+                    "GPU or disk resources. An administrator must inspect the "
+                    "recorded container name.",
+                    self.QtWidgets.QMessageBox.Yes
+                    | self.QtWidgets.QMessageBox.No,
+                    self.QtWidgets.QMessageBox.No,
+                )
+                if answer != self.QtWidgets.QMessageBox.Yes:
+                    return
+                abandon_job(status["status_path"])
+            else:
+                stop_job(status["status_path"])
             self.refresh()
 
     def _reattach(self):
