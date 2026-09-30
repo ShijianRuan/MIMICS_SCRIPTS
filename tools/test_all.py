@@ -4070,6 +4070,31 @@ class TestStopBackgroundServices(unittest.TestCase):
         self.assertIn(setup_environment.PORTABLE_ARCHIVE_NAME, messages[0])
         self.assertNotIn("mimcs", messages[0])
 
+    def test_nnunet_version_gate_matches_the_pinned_environment(self):
+        """R61-14: the gate demanded >=2.8.1 while the shipped python_env has
+        2.8.0, so every check reported a false 'UNSUPPORTED' and nudged users
+        into a pointless reinstall. The floor must accept the version the
+        project actually pins and installs."""
+        import setup_env
+
+        def _gate_for(version_text):
+            parts = tuple(int(x) for x in version_text.split("."))
+            parts = parts + (0,) * (3 - len(parts))
+            return (2, 8, 0) <= parts < (2, 9, 0)
+
+        # The shipped environment version must pass.
+        self.assertTrue(_gate_for("2.8.0"))
+        # Older or newer lines must still fail closed.
+        self.assertFalse(_gate_for("2.7.3"))
+        self.assertFalse(_gate_for("2.9.0"))
+        # The version probe and the reinstall hints must agree on the floor.
+        import inspect
+        source = inspect.getsource(setup_env._nnunet_version_supported)
+        self.assertIn("(2, 8, 0) <= parts", source)
+        for hint in setup_env.REQUIRED_PACKAGES:
+            if hint.startswith("nnunetv2"):
+                self.assertEqual("nnunetv2>=2.8.0,<2.9", hint)
+
     def test_global_stop_releases_detached_mimics_operation_leases(self):
         import inspect
         import mimics_stop_background
