@@ -88,6 +88,23 @@ nnInteractive 交互标注+任务微调）各有一份可信的"真实有效"证
   （修复前同阶段必失败）；冒烟 flow_imports/flow_export + fast
   nnunet_integration 门禁绿。
 
+### P0-2 staging 目录发布遇瞬时文件占用即整 job 失败（已修复，commit 8ca4e4b）
+
+- **痛点**：第一次真实 mcs_refresh 训练在 preparing_data 阶段（14/18 例）因
+  `os.replace` 发布 s0028 缓存目录时 WinError 5（拒绝访问）整体失败——
+  Windows 杀毒/索引服务对新写入的 nii.gz 树瞬时持有句柄，几小时级训练
+  job 因一瞬占用报废。
+- **根因**：4 处发布点（nnunet_pipeline 的 case 缓存/数据集/模型注册 +
+  flexict_pipeline 模型注册）用裸 `os.replace`，无重试；而
+  `write_json_atomic` 早有同款问题并已带 20 次退避重试——目录发布漏掉了。
+- **修复**：`nnunet_common.replace_with_retry`（复用 write_json_atomic 的
+  重试形状），替换 4 处调用点。
+- **防回归测试**：`test_replace_with_retry_recovers_from_transient_lock`、
+  `test_replace_with_retry_raises_after_persistent_denial`（失败发布不丢
+  staging 树）。
+- **证据**：smoke 门禁 8/8 绿；修复后同请求重提交
+  （train_20260930T211247_4734b4a7）越过原失败点。
+
 ### P1-1 死进程遗留的 background_mimics 锁不被清扫（未修，待入账）
 
 - **痛点**：宿主 Mimics/进程异常退出后，其持有的 background_mimics 锁
