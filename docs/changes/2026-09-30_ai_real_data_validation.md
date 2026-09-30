@@ -39,7 +39,23 @@ nnInteractive 交互标注+任务微调）各有一份可信的"真实有效"证
   （22 例真实 CT，后台 Mimics 复用一个进程）。
 - 工件：`G:\mimics_ai_validation\mcs\`（receipt + .mcs 工程）。
 
-## Phase 2：nnU-Net 多器官远程训练（进行中）
+## 环境阻塞：206 根分区 100% 满（2026-09-30 21:26 发现）
+
+- **现象**：远程训练到容器启动一步必然失败——k3s/containerd 崩溃循环
+  （`/run/k3s/containerd/containerd.sock: connection refused`，systemd 已
+  自动重启 261 次，主进程 exit 255）。
+- **根因**：根分区 `/dev/sdb3` 100G 用满（剩 20K）。占用大户：
+  `/root/.conan2` 37G、`/log/aims-resmgr-agent` 27G、`/opt/_extracted_*`
+  18G（多版本安装包解压残留）。/userdata（3.0T，余 429G）正常，
+  我方目录仅 695M。
+- **处理**：全部在允许路径 `/userdata/shijian_ruan/` 之外，按红线不动，
+  需服务器管理员清理根分区（建议：清 /log/aims-resmgr-agent 旧日志、
+  /opt/_extracted_* 旧版残留、/root/.conan2 缓存）。
+- **影响**：Phase 2 远程训练、Phase 3 FlexiCT 远程训练暂停在远程启动
+  一步；两任务的本地阶段（标签导出、数据准备）不受影响照常完成并缓存，
+  服务器恢复后重提交即可续跑。验证顺序调整为先做 Phase 4（本机 GPU）。
+
+## Phase 2：nnU-Net 多器官远程训练（进行中，阻塞于 206 磁盘满）
 
 - 任务：liver+spleen+kidney_left+kidney_right 4 标签单模型，
   label_source=**mcs_refresh**（从已保存 .mcs 后台导出 mask——此前从未实机
