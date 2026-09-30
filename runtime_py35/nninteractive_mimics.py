@@ -3284,11 +3284,21 @@ def _cleanup_async_jobs(root, retention_days, max_terminal_jobs=20):
             "failed",
             "expired",
         ) or worker_status in ("closed", "failed", "expired")
+        # A Mimics crash leaves jobs/worker dirs in non-terminal states
+        # (queued/ready/running/result_ready) with no live process. Treat
+        # them as terminal once they are older than the retention window:
+        # without this, one crash per session accumulates ~12MB of job
+        # dirs that the sweep never collects (653MB built up in
+        # python_env/models before the placement fix, R61-15).
+        try:
+            modified = max(updated, os.path.getmtime(job_dir))
+        except OSError:
+            modified = updated
+        if not terminal and modified < cutoff:
+            pid = state.get("pid") or _async_worker_status(job_dir).get("pid")
+            if not _process_exists(pid):
+                terminal = True
         if terminal:
-            try:
-                modified = max(updated, os.path.getmtime(job_dir))
-            except OSError:
-                modified = updated
             terminal_jobs.append((modified, job_dir))
     terminal_jobs.sort(reverse=True)
     for index, (modified, job_dir) in enumerate(terminal_jobs):

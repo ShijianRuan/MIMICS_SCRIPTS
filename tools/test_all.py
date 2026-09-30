@@ -13249,6 +13249,54 @@ class TestLifecycleAndRetention(unittest.TestCase):
         self.assertIn(str(terminal), paths)
         self.assertNotIn(str(active), paths)
 
+    def test_cleanup_async_jobs_sweeps_crash_orphaned_nonterminal_dirs(self):
+        """R61-15: a Mimics crash leaves job/worker dirs in non-terminal
+        states (queued/ready/running/result_ready) with a dead pid. The
+        retention sweep must collect them once they age past the window;
+        before this fix 653MB of orphaned dirs accumulated forever."""
+        import time as _time
+        import nninteractive_mimics as nnm
+
+        root = os.path.join(self.tmp, "async_jobs")
+        # Orphaned non-terminal job: "running" but no live process, old.
+        orphan = os.path.join(root, "job_orphan")
+        os.makedirs(orphan)
+        with open(os.path.join(orphan, "job.json"), "w", encoding="utf-8") as h:
+            json.dump({"status": "running", "updated_at_epoch": 1, "pid": 0}, h)
+        old_time = _time.time() - 10 * 86400
+        os.utime(orphan, (old_time, old_time))
+        # Fresh non-terminal job: must survive even with a dead pid.
+        fresh = os.path.join(root, "job_fresh")
+        os.makedirs(fresh)
+        with open(os.path.join(fresh, "job.json"), "w", encoding="utf-8") as h:
+            json.dump({"status": "running", "updated_at_epoch": 1, "pid": 0}, h)
+        # Old job whose pid IS alive: must survive (an active worker).
+        live = os.path.join(root, "job_live")
+        os.makedirs(live)
+        with open(os.path.join(live, "job.json"), "w", encoding="utf-8") as h:
+            json.dump(
+                {"status": "running", "updated_at_epoch": 1, "pid": os.getpid()},
+                h,
+            )
+        os.utime(live, (old_time, old_time))
+        # Terminal job inside the window and under the cap: survives.
+        terminal = os.path.join(root, "job_terminal")
+        os.makedirs(terminal)
+        with open(os.path.join(terminal, "job.json"), "w", encoding="utf-8") as h:
+            json.dump({"status": "closed", "updated_at_epoch": old_time}, h)
+
+        original_exists = nnm._process_exists
+        try:
+            nnm._process_exists = lambda pid: int(pid or 0) == os.getpid()
+            nnm._cleanup_async_jobs(root, retention_days=3, max_terminal_jobs=20)
+        finally:
+            nnm._process_exists = original_exists
+
+        self.assertFalse(os.path.isdir(orphan), "crash-orphaned dir must be swept")
+        self.assertTrue(os.path.isdir(fresh), "fresh non-terminal job must survive")
+        self.assertTrue(os.path.isdir(live), "old job with a live pid must survive")
+        self.assertTrue(os.path.isdir(terminal), "terminal job in window must survive")
+
     def test_stop_all_requires_owned_root_and_excludes_foreground(self):
         path = os.path.join(PROJECT_ROOT, "runtime_py35", "mimics_stop_background.py")
         with open(path, "r", encoding="utf-8") as handle:
