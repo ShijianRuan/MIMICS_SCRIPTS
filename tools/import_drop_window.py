@@ -163,6 +163,71 @@ def prune_drop_import_state(status_dir, retention_days=DROP_IMPORT_RETENTION_DAY
 RECENT_DROP_LIMIT = 8
 
 
+def _batch_runtime_state(source_path, output_path):
+    """Authoritative progress for a batch drop, from the queue runtime dir.
+
+    Batch imports write their per-case status into the import queue's local
+    runtime directory (_mcs_queue_done.json / _mcs_batch_status.json); the
+    drop status file only records "running" at submit time. Reading those
+    markers here lets the recent-drops row show the real final state
+    (done/failed/cancelled) without the batch CLI writing into the drop
+    status dir (R61-8). Returns {} when the queue markers say nothing.
+    """
+    if not output_path:
+        return {}
+    try:
+        import runtime_common
+        runtime_dir = runtime_common.import_queue_runtime_dir(_ROOT, output_path)
+    except Exception:
+        return {}
+    done = read_json(os.path.join(runtime_dir, "_mcs_queue_done.json"), {}) or {}
+    if done.get("status"):
+        return done
+    batch = read_json(os.path.join(runtime_dir, "_mcs_batch_status.json"), {}) or {}
+    if batch.get("status"):
+        return batch
+    return {}
+
+
+def _apply_batch_runtime_state(status, error, payload, source_path):
+    """Fold authoritative queue state into a batch drop's display fields.
+
+    A batch status file that still says "running" is not evidence the import
+    is still running - the batch CLI never rewrites it (R61-8). Trust the
+    queue runtime markers instead when they exist.
+    """
+    if status != "running":
+        return status, error
+    runtime_state = _batch_runtime_state(
+        source_path, payload.get("output_path")
+    )
+    if not runtime_state:
+        return status, error
+    runtime_status = str(runtime_state.get("status") or "").lower()
+    if not runtime_status:
+        return status, error
+    label = {
+        "done": "completed",
+        "cancelled": "cancelled",
+        "canceled": "cancelled",
+        "closed": "completed",
+        "failed": "failed",
+        "error": "failed",
+        "creating": "running",
+        "running": "running",
+        "idle": "running",
+        "recovering": "running",
+        "restarting": "running",
+    }.get(runtime_status, "")
+    if not label:
+        return status, error
+    if not error and label in ("failed", "cancelled"):
+        message = str(runtime_state.get("error") or runtime_state.get("reason") or "")
+        if message:
+            error = message.splitlines()[0][:160]
+    return label, error
+
+
 def collect_recent_drops(status_dir, limit=RECENT_DROP_LIMIT):
     """Summarize the newest drop-import status files for the activity list.
 
@@ -208,6 +273,11 @@ def collect_recent_drops(status_dir, limit=RECENT_DROP_LIMIT):
         message = str(payload.get("error") or payload.get("message") or "")
         if status in ("failed", "error", "cancelled") and message:
             error = message.splitlines()[0][:160]
+        # Batch drops freeze at "running" (the batch CLI never rewrites the
+        # drop status file); derive their real state from the queue runtime
+        # markers instead (R61-8).
+        if name.endswith("_batch_status.json"):
+            status, error = _apply_batch_runtime_state(status, error, payload, source)
         entries.append({
             "case_id": case_id,
             "status": status,
@@ -289,6 +359,11 @@ def submit_import(selection, context):
             "status": "running",
             "phase": "queued_to_prepare",
             "total": 0, "completed": 0, "failed": 0,
+            # The batch CLI never rewrites this file; collect_recent_drops
+            # uses output_path to find the queue runtime markers that hold
+            # the real final state (R61-8).
+            "output_path": selection["output_path"],
+            "source_path": selection["source_path"],
             "updated_at_epoch": time.time(),
         })
         log_handle = open(log_path, "w", encoding="utf-8")

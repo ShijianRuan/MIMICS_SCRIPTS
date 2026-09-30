@@ -10344,6 +10344,130 @@ class TestImportDropWindow(unittest.TestCase):
             [], dw.collect_recent_drops(os.path.join(self.tmp, "no_such_dir"))
         )
 
+    def _queue_runtime_dir_for(self, output_dir):
+        import runtime_common
+        return runtime_common.import_queue_runtime_dir(
+            os.path.join(self.tmp, "fake_root"), output_dir
+        )
+
+    def _write_batch_drop_status(self, status_dir, name, output_dir, source_dir):
+        os.makedirs(status_dir, exist_ok=True)
+        dw_status = {
+            "status": "running",
+            "phase": "queued_to_prepare",
+            "output_path": output_dir,
+            "source_path": source_dir,
+            "updated_at_epoch": time.time(),
+        }
+        import import_drop_window as dw
+        dw.write_json(os.path.join(status_dir, name), dw_status)
+        return os.path.join(status_dir, name)
+
+    def test_batch_drop_status_unfreezes_from_queue_done_marker(self):
+        # R61-8 failure path: the batch CLI never rewrites the drop status
+        # file. When the queue runtime says done/failed/cancelled, the
+        # recent-drops row must show that real state, not "Importing".
+        import import_drop_window as dw
+        import runtime_common
+
+        output_dir = os.path.join(self.tmp, "mcs_output")
+        os.makedirs(output_dir)
+        status_dir = os.path.join(self.tmp, "drop_import")
+        self._write_batch_drop_status(
+            status_dir, "20260101T000001_batch_status.json",
+            output_dir, self.tmp,
+        )
+        # Queue runtime markers live under the project root the batch CLI
+        # ran with; collect_recent_drops derives them via _ROOT. Point _ROOT
+        # at a fake root that shares the real runtime base derivation.
+        fake_root = os.path.join(self.tmp, "fake_root")
+        os.makedirs(fake_root, exist_ok=True)
+        runtime_dir = runtime_common.import_queue_runtime_dir(fake_root, output_dir)
+        os.makedirs(runtime_dir, exist_ok=True)
+        runtime_common.write_json_atomic(
+            os.path.join(runtime_dir, "_mcs_queue_done.json"),
+            {
+                "status": "done",
+                "completed": 3,
+                "failed": 1,
+                "updated_at_epoch": time.time(),
+            },
+        )
+        with mock.patch.object(dw, "_ROOT", fake_root):
+            entries = dw.collect_recent_drops(status_dir)
+        self.assertEqual(1, len(entries))
+        self.assertEqual("completed", entries[0]["status"])
+
+    def test_batch_drop_status_unfreezes_on_failure_with_reason(self):
+        import import_drop_window as dw
+        import runtime_common
+
+        output_dir = os.path.join(self.tmp, "mcs_output2")
+        os.makedirs(output_dir)
+        status_dir = os.path.join(self.tmp, "drop_import2")
+        self._write_batch_drop_status(
+            status_dir, "20260101T000002_batch_status.json",
+            output_dir, self.tmp,
+        )
+        fake_root = os.path.join(self.tmp, "fake_root2")
+        os.makedirs(fake_root, exist_ok=True)
+        runtime_dir = runtime_common.import_queue_runtime_dir(fake_root, output_dir)
+        os.makedirs(runtime_dir, exist_ok=True)
+        runtime_common.write_json_atomic(
+            os.path.join(runtime_dir, "_mcs_batch_status.json"),
+            {
+                "status": "failed",
+                "error": "Background Mimics could not create the .mcs file.\nsecond line",
+                "updated_at_epoch": time.time(),
+            },
+        )
+        with mock.patch.object(dw, "_ROOT", fake_root):
+            entries = dw.collect_recent_drops(status_dir)
+        self.assertEqual(1, len(entries))
+        self.assertEqual("failed", entries[0]["status"])
+        self.assertEqual(
+            "Background Mimics could not create the .mcs file.",
+            entries[0]["error"],
+        )
+
+    def test_batch_drop_status_stays_importing_while_queue_running(self):
+        # No queue markers yet (preparation still in flight): the row must
+        # keep showing "running", not guess a wrong terminal state.
+        import import_drop_window as dw
+
+        output_dir = os.path.join(self.tmp, "mcs_output3")
+        os.makedirs(output_dir)
+        status_dir = os.path.join(self.tmp, "drop_import3")
+        self._write_batch_drop_status(
+            status_dir, "20260101T000003_batch_status.json",
+            output_dir, self.tmp,
+        )
+        fake_root = os.path.join(self.tmp, "fake_root3")
+        os.makedirs(fake_root, exist_ok=True)
+        with mock.patch.object(dw, "_ROOT", fake_root):
+            entries = dw.collect_recent_drops(status_dir)
+        self.assertEqual(1, len(entries))
+        self.assertEqual("running", entries[0]["status"])
+
+    def test_single_case_status_is_not_touched_by_batch_derivation(self):
+        # Single-case workers own their status files end to end; the batch
+        # derivation must not hijack rows it does not own.
+        import import_drop_window as dw
+
+        status_dir = os.path.join(self.tmp, "drop_import4")
+        os.makedirs(status_dir)
+        dw.write_json(os.path.join(status_dir, "20260101T000004_0_status.json"), {
+            "status": "running", "phase": "creating_mcs",
+            "case_id": "s0001", "updated_at_epoch": time.time(),
+        })
+        fake_root = os.path.join(self.tmp, "fake_root4")
+        os.makedirs(fake_root, exist_ok=True)
+        with mock.patch.object(dw, "_ROOT", fake_root):
+            entries = dw.collect_recent_drops(status_dir)
+        self.assertEqual(1, len(entries))
+        self.assertEqual("running", entries[0]["status"])
+        self.assertEqual("s0001", entries[0]["case_id"])
+
     def test_offscreen_window_renders_and_registers(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         import import_drop_window as dw
