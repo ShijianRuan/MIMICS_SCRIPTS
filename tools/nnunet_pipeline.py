@@ -43,6 +43,7 @@ from nnunet_common import (  # noqa: E402
     path_signature,
     read_json,
     register_model,
+    replace_with_retry,
     safe_identifier,
     selected_case_ids,
     stable_digest,
@@ -584,7 +585,7 @@ def _materialize_case(
         write_json_atomic(staging / "metadata.json", metadata)
         if case_cache.exists():
             shutil.rmtree(str(case_cache), ignore_errors=False)
-        os.replace(str(staging), str(case_cache))
+        replace_with_retry(str(staging), str(case_cache))
     finally:
         shutil.rmtree(str(staging), ignore_errors=True)
     return {
@@ -830,7 +831,7 @@ def _materialize_nnunet_raw(
     if dataset_dir.exists():
         shutil.rmtree(str(dataset_dir), ignore_errors=False)
     dataset_dir.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(str(staging), str(dataset_dir))
+    replace_with_retry(str(staging), str(dataset_dir))
     split_dir = preprocessed_root / dataset_name
     split_dir.mkdir(parents=True, exist_ok=True)
     write_json_atomic(
@@ -1271,7 +1272,7 @@ def _copy_model_bundle(
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists():
             shutil.rmtree(str(destination), ignore_errors=False)
-        os.replace(str(staging), str(destination))
+        replace_with_retry(str(staging), str(destination))
     manifest_path = destination / "mimics_model_manifest.json"
     manifest = {
         "schema_version": MODEL_SCHEMA_VERSION,

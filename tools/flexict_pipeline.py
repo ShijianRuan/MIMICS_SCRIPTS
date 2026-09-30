@@ -55,6 +55,7 @@ from nnunet_common import (  # noqa: E402
     append_log,
     compact_completed_log,
     read_json,
+    replace_with_retry,
     safe_identifier,
     stable_digest,
     sweep_dataset_retention,
@@ -454,7 +455,7 @@ def _register_flexict_model(request: dict[str, Any],
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
         shutil.rmtree(str(destination), ignore_errors=False)
-    os.replace(str(staging), str(destination))
+    replace_with_retry(str(staging), str(destination))
     manifest = {
         "schema_version": MODEL_SCHEMA_VERSION,
         "model_id": model_id,
