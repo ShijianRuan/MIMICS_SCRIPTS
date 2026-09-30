@@ -45,6 +45,7 @@ from nninteractive_task_common import (  # noqa: E402
     write_json_atomic,
     workspace_root,
 )
+from nnunet_common import replace_with_retry  # noqa: E402
 from resource_locks import (  # noqa: E402
     FileResourceLock,
     ResourceLockCancelled,
@@ -635,7 +636,7 @@ def _prepare_source_grid_case_cache(
             },
         )
         try:
-            os.replace(str(staging), str(entry))
+            replace_with_retry(str(staging), str(entry))
         except OSError:
             # A concurrent job may have published the same immutable entry.
             metadata = read_json(metadata_path, {}) or {}
