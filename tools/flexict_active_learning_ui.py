@@ -163,20 +163,17 @@ class ActiveLearningWindow:
         QtCore, QtWidgets = self.QtCore, self.QtWidgets
         self.workspace = str(context.get("workspace") or "")
         self.window = QtWidgets.QMainWindow()
-        self.window.setWindowTitle("FlexiCT Active Learning")
+        self.window.setWindowTitle('FlexiCT 主动学习')
         self.window.resize(980, 640)
         self.window.setMinimumSize(820, 520)
         central = QtWidgets.QWidget()
         root = QtWidgets.QVBoxLayout(central)
         root.setContentsMargins(22, 18, 22, 18)
         root.setSpacing(12)
-        title = QtWidgets.QLabel("FlexiCT Active Learning")
+        title = QtWidgets.QLabel('FlexiCT 主动学习')
         title.setObjectName("title")
         subtitle = QtWidgets.QLabel(
-            "Cases ranked by 2D-vs-3D disagreement: annotate the top of the "
-            "list first — that is where the two models disagree most. "
-            "Double-click opens the case in Mimics with its uncertainty "
-            "bands applied; the state updates here as you go."
+            '病例按 2D 与 3D 模型的分歧排序：优先标注列表最前面的病例——那是两个模型分歧最大的地方。双击在 Mimics 中打开病例并叠加不确定度条带；标注状态会实时更新到这里。'
         )
         subtitle.setObjectName("subtitle")
         subtitle.setWordWrap(True)
@@ -184,18 +181,18 @@ class ActiveLearningWindow:
         root.addWidget(subtitle)
 
         picker = QtWidgets.QHBoxLayout()
-        picker.addWidget(QtWidgets.QLabel("Run"))
+        picker.addWidget(QtWidgets.QLabel('运行'))
         self.job_combo = QtWidgets.QComboBox()
         self.job_combo.currentIndexChanged.connect(self._job_selected)
         picker.addWidget(self.job_combo, 1)
-        refresh = QtWidgets.QPushButton("Refresh")
+        refresh = QtWidgets.QPushButton('刷新')
         refresh.clicked.connect(self.refresh)
         picker.addWidget(refresh)
         root.addLayout(picker)
 
         self.table = QtWidgets.QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(
-            ["Rank", "Case", "Score", "Uncertain volume (mm³)", "Status", "Path"]
+            ['排序', '病例', '分数', '不确定体积 (mm³)', '状态', '路径']
         )
         self.table.horizontalHeader().setSectionResizeMode(
             1, QtWidgets.QHeaderView.Stretch)
@@ -207,33 +204,33 @@ class ActiveLearningWindow:
         self.table.itemDoubleClicked.connect(self._open_and_overlay_selected)
         root.addWidget(self.table, 1)
 
-        self.status_label = QtWidgets.QLabel("Select a completed active-learning run.")
+        self.status_label = QtWidgets.QLabel('请选择一个已完成的主动学习运行。')
         self.status_label.setObjectName("hint")
         self.status_label.setWordWrap(True)
         root.addWidget(self.status_label)
 
         actions = QtWidgets.QHBoxLayout()
-        self.open_button = QtWidgets.QPushButton("Open + Overlay")
+        self.open_button = QtWidgets.QPushButton('打开并叠加')
         self.open_button.setObjectName("primary")
         self.open_button.clicked.connect(self._open_and_overlay_selected)
         actions.addWidget(self.open_button)
-        self.overlay_button = QtWidgets.QPushButton("Overlay Uncertainty")
+        self.overlay_button = QtWidgets.QPushButton('叠加不确定度')
         self.overlay_button.clicked.connect(self._overlay_selected)
         actions.addWidget(self.overlay_button)
-        self.consensus_button = QtWidgets.QPushButton("Apply Consensus Mask")
+        self.consensus_button = QtWidgets.QPushButton('应用共识 Mask')
         self.consensus_button.clicked.connect(self._apply_consensus)
         actions.addWidget(self.consensus_button)
-        self.annotated_button = QtWidgets.QPushButton("Mark Annotated")
+        self.annotated_button = QtWidgets.QPushButton('标记为已标注')
         self.annotated_button.clicked.connect(self._mark_annotated)
         actions.addWidget(self.annotated_button)
-        self.skip_button = QtWidgets.QPushButton("Mark Skipped")
+        self.skip_button = QtWidgets.QPushButton('标记为跳过')
         self.skip_button.clicked.connect(self._mark_skipped)
         actions.addWidget(self.skip_button)
         actions.addStretch(1)
-        self.export_button = QtWidgets.QPushButton("Export CSV")
+        self.export_button = QtWidgets.QPushButton('导出 CSV')
         self.export_button.clicked.connect(self._export_csv)
         actions.addWidget(self.export_button)
-        close = QtWidgets.QPushButton("Close")
+        close = QtWidgets.QPushButton('关闭')
         close.clicked.connect(self.window.close)
         actions.addWidget(close)
         root.addLayout(actions)
@@ -280,9 +277,7 @@ class ActiveLearningWindow:
             self.table.setRowCount(0)
             self._set_actions_enabled(False)
             self.status_label.setText(
-                "No completed active-learning run found. Start one from "
-                "02_AI > FlexiCT > 03 Active Learning Review with a trained "
-                "2D+3D pair."
+                '未找到已完成的主动学习运行。请在 02_AI > FlexiCT > 03 主动学习审查中，用已训练的 2D+3D 模型对启动一次。'
             )
 
     def _job_selected(self):
@@ -476,7 +471,7 @@ def main() -> int:
         from PySide6 import QtCore, QtGui, QtWidgets
 
         app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
-        configure_application(app, "FlexiCT Active Learning")
+        configure_application(app, 'FlexiCT 主动学习')
         app.setStyleSheet(stylesheet())
         window = ActiveLearningWindow(context, (QtCore, QtGui, QtWidgets))
         window.show()

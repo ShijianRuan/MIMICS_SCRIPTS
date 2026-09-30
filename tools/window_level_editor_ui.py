@@ -63,32 +63,30 @@ class PresetEditor:
         self.presets = [dict(row) for row in self._original]
 
         self.window = QtWidgets.QWidget()
-        self.window.setWindowTitle("Window/Level Presets")
+        self.window.setWindowTitle("窗宽/窗位预设")
         self.window.resize(720, 520)
         root = QtWidgets.QVBoxLayout(self.window)
         root.setContentsMargins(22, 18, 22, 18)
         root.setSpacing(12)
 
-        title = QtWidgets.QLabel("Window/Level Presets")
+        title = QtWidgets.QLabel("窗宽/窗位预设")
         title.setObjectName("title")
         root.addWidget(title)
         hint = QtWidgets.QLabel(
-            "Width/level are HU values. Keywords (comma separated) auto-match "
-            "Mask names in Mimics; a preset applies when the selected Mask "
-            "name contains one."
+            "宽度和窗位为 HU 值。关键词（逗号分隔）自动匹配 Mimics 中的 Mask 名称；所选 Mask 名称包含任一关键词时应用该预设。"
         )
         hint.setObjectName("subtitle")
         hint.setWordWrap(True)
         root.addWidget(hint)
 
         self.table = QtWidgets.QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["Name", "Width (WW)", "Level (WL)"])
+        self.table.setHorizontalHeaderLabels(['名称', '窗宽 (WW)', '窗位 (WL)'])
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         root.addWidget(self.table, 1)
 
-        keywords_label = QtWidgets.QLabel("Keywords for the selected preset:")
+        keywords_label = QtWidgets.QLabel("所选预设的关键词：")
         keywords_label.setObjectName("section")
         root.addWidget(keywords_label)
         self.keywords = QtWidgets.QLineEdit()
@@ -100,18 +98,18 @@ class PresetEditor:
         self.table.itemChanged.connect(self._cell_changed)
 
         buttons = QtWidgets.QHBoxLayout()
-        add = QtWidgets.QPushButton("Add preset")
+        add = QtWidgets.QPushButton("添加预设")
         add.clicked.connect(self._add_row)
-        remove = QtWidgets.QPushButton("Remove selected")
+        remove = QtWidgets.QPushButton("移除所选")
         remove.clicked.connect(self._remove_row)
-        self.rollback = QtWidgets.QPushButton("Roll back last save")
+        self.rollback = QtWidgets.QPushButton("回滚上次保存")
         self.rollback.clicked.connect(self._do_rollback)
         self.rollback.setEnabled(BACKUP_PATH.is_file())
         buttons.addWidget(add)
         buttons.addWidget(remove)
         buttons.addStretch(1)
         buttons.addWidget(self.rollback)
-        save = QtWidgets.QPushButton("Save")
+        save = QtWidgets.QPushButton("保存")
         save.setObjectName("primary")
         save.clicked.connect(self._do_save)
         buttons.addWidget(save)
@@ -178,7 +176,7 @@ class PresetEditor:
         )
         self._reload()
         self.table.selectRow(len(self.presets) - 1)
-        self.status.setText("Preset added; edit the row, then Save.")
+        self.status.setText("已添加预设；编辑该行后点击保存。")
 
     def _remove_row(self):
         row = self.table.currentRow()
@@ -186,7 +184,7 @@ class PresetEditor:
             return
         del self.presets[row]
         self._reload()
-        self.status.setText("Preset removed; Save to apply (Roll back to undo).")
+        self.status.setText("已移除预设；保存后生效（可用“回滚”撤销）。")
 
     def _do_save(self):
         # Validate before touching the file.
@@ -229,7 +227,7 @@ class PresetEditor:
             return
         self.presets = [dict(row) for row in backup]
         self._reload()
-        self.status.setText("Rolled back to the previous saved presets.")
+        self.status.setText("已回滚到上次保存的预设。")
 
 
 def main(argv=None) -> int:
@@ -238,7 +236,7 @@ def main(argv=None) -> int:
     from PySide6 import QtCore, QtGui, QtWidgets
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
-    configure_application(app, "Window/Level Presets")
+    configure_application(app, "窗宽/窗位预设")
     app.setStyleSheet(stylesheet())
     editor = PresetEditor((QtCore, QtGui, QtWidgets))
     editor.window.show()

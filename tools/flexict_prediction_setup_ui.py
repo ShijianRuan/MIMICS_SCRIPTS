@@ -51,7 +51,7 @@ class PredictionWindow:
         self.QtCore, self.QtGui, self.QtWidgets = qt_modules
         QtWidgets = self.QtWidgets
         self.window = QtWidgets.QDialog()
-        self.window.setWindowTitle("FlexiCT Prediction")
+        self.window.setWindowTitle("FlexiCT 预测")
         self.window.resize(720, 520)
         self.window.setMinimumSize(640, 460)
         self.window.closeEvent = self._close_event
@@ -65,12 +65,10 @@ class PredictionWindow:
         root = QtWidgets.QVBoxLayout(self.window)
         root.setContentsMargins(22, 18, 22, 18)
         root.setSpacing(12)
-        title = QtWidgets.QLabel("FlexiCT Prediction")
+        title = QtWidgets.QLabel("FlexiCT 预测")
         title.setObjectName("title")
         subtitle = QtWidgets.QLabel(
-            "Choose a trained FlexiCT model. Inference runs outside Mimics "
-            "with the locked recipe (best checkpoint, no TTA); the result is "
-            "applied only after its physical grid is verified."
+            "选择一个已训练的 FlexiCT 模型。推理在 Mimics 之外以锁定配方运行（最佳 checkpoint、无 TTA）；结果只有在物理网格校验通过后才会应用。"
         )
         subtitle.setObjectName("subtitle")
         subtitle.setWordWrap(True)
@@ -80,9 +78,9 @@ class PredictionWindow:
         case.setObjectName("surface")
         case_layout = QtWidgets.QGridLayout(case)
         case_layout.setContentsMargins(16, 14, 16, 14)
-        case_layout.addWidget(QtWidgets.QLabel("Current case"), 0, 0)
+        case_layout.addWidget(QtWidgets.QLabel("当前病例"), 0, 0)
         case_layout.addWidget(QtWidgets.QLabel(str(context.get("case_id") or "-")), 0, 1)
-        case_layout.addWidget(QtWidgets.QLabel("Target hint"), 1, 0)
+        case_layout.addWidget(QtWidgets.QLabel("目标提示"), 1, 0)
         case_layout.addWidget(
             QtWidgets.QLabel(str(context.get("selected_mask_name") or "-")), 1, 1
         )
@@ -91,7 +89,7 @@ class PredictionWindow:
         self.models = []
         self.table = QtWidgets.QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(
-            ["Target", "Model", "Configuration", "Created"]
+            ['目标', '模型', '配置', '创建时间']
         )
         self.table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
@@ -111,17 +109,17 @@ class PredictionWindow:
         except Exception:
             pass
         self.status_label = QtWidgets.QLabel(
-            "Loading FlexiCT models in the background..."
+            "正在后台加载 FlexiCT 模型..."
         )
         self.status_label.setObjectName("hint")
         self.status_label.setWordWrap(True)
         root.addWidget(self.status_label)
         actions = QtWidgets.QHBoxLayout()
         actions.addStretch(1)
-        cancel = QtWidgets.QPushButton("Cancel")
+        cancel = QtWidgets.QPushButton("取消")
         cancel.clicked.connect(self.window.close)
         actions.addWidget(cancel)
-        self.start = QtWidgets.QPushButton("Start Prediction")
+        self.start = QtWidgets.QPushButton("开始预测")
         self.start.setObjectName("primary")
         self.start.clicked.connect(self._submit)
         self.start.setEnabled(False)
@@ -178,13 +176,11 @@ class PredictionWindow:
             self.status_label.setText("Could not load FlexiCT models: {}".format(error))
         elif self.models:
             self.status_label.setText(
-                "The recommended model is preselected. A selected Mask hints "
-                "which target to rank first."
+                "已预选推荐模型。所选 Mask 用于提示优先排序的目标。"
             )
         else:
             self.status_label.setText(
-                "No usable FlexiCT model was found. Train a model first "
-                "(02_AI > FlexiCT > Train Model)."
+                "未找到可用的 FlexiCT 模型。请先训练模型（02_AI > FlexiCT > 训练模型）。"
             )
 
     def _poll_background_results(self):
@@ -201,9 +197,7 @@ class PredictionWindow:
                     "color: #b42318; font-weight: 600;"
                 )
                 self.status_label.setText(
-                    "Model discovery timed out. The FlexiCT workspace may be "
-                    "on an offline or slow drive. Close this window, "
-                    "reconnect the drive, and retry."
+                    "模型发现超时。FlexiCT 工作区所在磁盘可能离线或过慢。请关闭本窗口、重新连接磁盘后重试。"
                 )
         if self._submission_deadline and time.time() >= self._submission_deadline:
             self._submission_generation += 1
@@ -211,8 +205,7 @@ class PredictionWindow:
             self.start.setEnabled(bool(self.models))
             self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
             self.status_label.setText(
-                "Image path checking timed out. The source drive may be "
-                "offline; relink the source image before retrying."
+                "图像路径检查超时。源数据盘可能离线；请重新关联源图像后重试。"
             )
         try:
             generation, request, error = self._submission_results.get_nowait()
@@ -278,7 +271,7 @@ class PredictionWindow:
             self.start.setEnabled(False)
             self.status_label.setStyleSheet("")
             self.status_label.setText(
-                "Checking the current image location in the background..."
+                "正在后台检查当前图像位置..."
             )
 
             def validate():
@@ -371,7 +364,7 @@ def main() -> int:
         from PySide6 import QtCore, QtGui, QtWidgets
 
         app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
-        configure_application(app, "FlexiCT Prediction")
+        configure_application(app, "FlexiCT 预测")
         app.setStyleSheet(stylesheet())
         window = PredictionWindow(context, (QtCore, QtGui, QtWidgets))
         window.show()

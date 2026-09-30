@@ -51,8 +51,7 @@ class Chooser:
         title.setObjectName("title")
         layout.addWidget(title)
         subtitle = self.QtWidgets.QLabel(
-            "Choose the annotation target and custom model for the selected "
-            "Mask. This choice can be remembered for the current project."
+            "为所选 Mask 选择标注目标和自定义模型。可以为当前工程记住该选择。"
         )
         subtitle.setObjectName("subtitle")
         subtitle.setWordWrap(True)
@@ -72,13 +71,13 @@ class Chooser:
             if index >= 0:
                 self.task_combo.setCurrentIndex(index)
         self.task_combo.currentIndexChanged.connect(self.refresh_models)
-        form.addRow("Task", self.task_combo)
+        form.addRow("标注目标", self.task_combo)
         self.model_combo = self.QtWidgets.QComboBox()
         self.model_combo.currentIndexChanged.connect(self.refresh_summary)
-        form.addRow("Model version", self.model_combo)
+        form.addRow("模型版本", self.model_combo)
         # not_improved candidates did not beat the current model in the AUC
         # comparison; they stay usable but hidden unless explicitly requested.
-        self.show_all = self.QtWidgets.QCheckBox("Show models that did not improve")
+        self.show_all = self.QtWidgets.QCheckBox("显示未改进的模型")
         self.show_all.toggled.connect(self.refresh_models)
         form.addRow("", self.show_all)
         layout.addLayout(form)
@@ -87,16 +86,16 @@ class Chooser:
         self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
         self.remember = self.QtWidgets.QCheckBox(
-            "Remember this task and model for the current project"
+            "为当前工程记住此目标与模型"
         )
         self.remember.setChecked(bool(context.get("project_path")))
         self.remember.setEnabled(bool(context.get("project_path")))
         layout.addWidget(self.remember)
         footer = self.QtWidgets.QHBoxLayout()
         footer.addStretch(1)
-        cancel = self.QtWidgets.QPushButton("Cancel")
+        cancel = self.QtWidgets.QPushButton("取消")
         cancel.clicked.connect(self.cancel)
-        use = self.QtWidgets.QPushButton("Annotate with This Model")
+        use = self.QtWidgets.QPushButton("使用此模型标注")
         use.setObjectName("primary")
         use.clicked.connect(self.accept)
         footer.addWidget(cancel)
@@ -145,7 +144,7 @@ class Chooser:
             None,
         )
         if not model:
-            self.summary.setText("This task has no usable model.")
+            self.summary.setText("该目标没有可用模型。")
             self.use_button.setEnabled(False)
             return
         quality = model.get("quality") or {}

@@ -88,17 +88,16 @@ def main():
     configure_application(app, "Mimics Mask Import")
     app.setStyleSheet(stylesheet())
     dialog = QtWidgets.QDialog()
-    dialog.setWindowTitle("Import Masks")
+    dialog.setWindowTitle("导入 Mask")
     dialog.resize(720, 480)
     dialog.setMinimumSize(620, 420)
     root = QtWidgets.QVBoxLayout(dialog)
     root.setContentsMargins(22, 18, 22, 18)
     root.setSpacing(12)
-    title = QtWidgets.QLabel("Import Masks")
+    title = QtWidgets.QLabel("导入 Mask")
     title.setObjectName("title")
     subtitle = QtWidgets.QLabel(
-        "Choose one or more segmentation files. File discovery and conversion "
-        "run outside the Mimics GUI."
+        "选择一个或多个分割文件。文件发现和转换在 Mimics GUI 之外运行。"
     )
     subtitle.setObjectName("subtitle")
     subtitle.setWordWrap(True)
@@ -109,10 +108,10 @@ def main():
     files.setAlternatingRowColors(True)
     root.addWidget(files, 1)
     tools = QtWidgets.QHBoxLayout()
-    add_files = QtWidgets.QPushButton("Add Files...")
-    paste = QtWidgets.QPushButton("Paste Paths")
-    remove = QtWidgets.QPushButton("Remove Selected")
-    clear = QtWidgets.QPushButton("Clear")
+    add_files = QtWidgets.QPushButton("添加文件...")
+    paste = QtWidgets.QPushButton("粘贴路径")
+    remove = QtWidgets.QPushButton("移除所选")
+    clear = QtWidgets.QPushButton("清空")
     tools.addWidget(add_files)
     tools.addWidget(paste)
     tools.addStretch(1)
@@ -120,15 +119,15 @@ def main():
     tools.addWidget(clear)
     root.addLayout(tools)
     status = QtWidgets.QLabel(
-        "You can paste newline-separated paths to avoid browsing a slow network drive."
+        "可以粘贴多行路径，避免在慢速网络盘上逐个浏览。"
     )
     status.setObjectName("hint")
     status.setWordWrap(True)
     root.addWidget(status)
     actions = QtWidgets.QHBoxLayout()
     actions.addStretch(1)
-    cancel = QtWidgets.QPushButton("Cancel")
-    submit = QtWidgets.QPushButton("Import Masks")
+    cancel = QtWidgets.QPushButton("取消")
+    submit = QtWidgets.QPushButton("导入 Mask")
     submit.setObjectName("primary")
     submit.setEnabled(False)
     actions.addWidget(cancel)
@@ -173,7 +172,7 @@ def main():
         raw = QtWidgets.QApplication.clipboard().text()
         values = [line.strip() for line in raw.replace("\r", "\n").split("\n") if line.strip()]
         if not values:
-            status.setText("The clipboard does not contain any paths.")
+            status.setText("剪贴板中没有路径。")
             return
         add_paths(values)
 
@@ -186,7 +185,7 @@ def main():
     def finish():
         paths = [path for path in current_paths() if path]
         if not paths:
-            status.setText("Choose at least one segmentation file.")
+            status.setText("请至少选择一个分割文件。")
             return
         state["submitted"] = True
         write_json(status_path, {
@@ -203,7 +202,7 @@ def main():
     def clear_paths():
         files.clear()
         submit.setEnabled(False)
-        status.setText("No files selected.")
+        status.setText("未选择任何文件。")
 
     add_files.clicked.connect(browse)
     paste.clicked.connect(paste_paths)

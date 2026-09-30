@@ -433,20 +433,18 @@ def show_dialog(project_root: Path | None = None, parent=None) -> int:
             pass
 
     dialog = QtWidgets.QDialog(parent)
-    dialog.setWindowTitle("Environment Guidance")
+    dialog.setWindowTitle("环境指引")
     dialog.setMinimumSize(560, 320)
     layout = QtWidgets.QVBoxLayout(dialog)
 
-    header = QtWidgets.QLabel("Environment Guidance")
+    header = QtWidgets.QLabel("环境指引")
     header.setObjectName("title")
     layout.addWidget(header)
 
     issues = collect_issues(root)
     if not issues:
         note = QtWidgets.QLabel(
-            "No environment problems detected.\n"
-            "Python, packages, configured paths, FlexiCT weights and the "
-            "nnInteractive official model all check out."
+            "未检测到环境问题。\nPython、依赖包、已配置路径、FlexiCT 权重和 nnInteractive 官方模型均正常。"
         )
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -489,7 +487,7 @@ def show_dialog(project_root: Path | None = None, parent=None) -> int:
         scroll.setWidget(inner)
         layout.addWidget(scroll, 1)
 
-    close = QtWidgets.QPushButton("Close")
+    close = QtWidgets.QPushButton("关闭")
     close.clicked.connect(dialog.accept)
     layout.addWidget(close)
     dialog.exec()

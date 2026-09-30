@@ -288,12 +288,12 @@ class _AsyncPathDialog:
         if state == "submitted":
             self.callback(status.get("selection"))
         elif state == "failed":
-            message = str(status.get("error") or "The path window failed.")
+            message = str(status.get("error") or "路径选择窗口失败。")
             if self.error_callback is not None:
                 self.error_callback(message)
             else:
                 self.QtWidgets.QMessageBox.warning(
-                    self.parent, "Path Selection Failed", message
+                    self.parent, "路径选择失败", message
                 )
         controllers = getattr(self.parent, "_mimics_path_dialogs", [])
         if self in controllers:
@@ -361,11 +361,11 @@ def choose_path_async(
         if button is not None:
             button.setText(str(button.property("pathDialogText") or "Browse..."))
             button.setEnabled(True)
-        message = "Could not open the path window: {}".format(exc)
+        message = "无法打开路径选择窗口：{}".format(exc)
         if error_callback is not None:
             error_callback(message)
         else:
-            QtWidgets.QMessageBox.warning(parent, "Path Selection Failed", message)
+            QtWidgets.QMessageBox.warning(parent, "路径选择失败", message)
         return None
     controllers = getattr(parent, "_mimics_path_dialogs", None)
     if controllers is None:

@@ -328,21 +328,21 @@ class ModelCenter:
         title = QtWidgets.QLabel(TITLE)
         title.setObjectName("title")
         subtitle = QtWidgets.QLabel(
-            "Train, monitor, and select reusable models for one annotation target."
+            "针对一个标注目标训练、监控并选择可复用的模型。"
         )
         subtitle.setObjectName("subtitle")
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
         header.addLayout(title_box, 1)
-        header.addWidget(QtWidgets.QLabel("Annotation target"))
+        header.addWidget(QtWidgets.QLabel("标注目标"))
         self.task_combo = QtWidgets.QComboBox()
         self.task_combo.setEditable(True)
         self.task_combo.setMinimumWidth(240)
         self.task_combo.setToolTip(
-            "Select an existing target or type a name for a new target."
+            "选择已有目标，或输入新目标的名称。"
         )
         self.task_combo.lineEdit().setPlaceholderText(
-            "Select existing or type a new task"
+            "选择已有目标或输入新目标"
         )
         self.task_combo.currentIndexChanged.connect(
             self._task_selection_changed
@@ -351,7 +351,7 @@ class ModelCenter:
             self._task_editing_finished
         )
         header.addWidget(self.task_combo)
-        self.header_state = QtWidgets.QLabel("Ready")
+        self.header_state = QtWidgets.QLabel("就绪")
         self.header_state.setObjectName("liveLabel")
         self.header_state.setMinimumWidth(110)
         header.addWidget(self.header_state)
@@ -361,9 +361,9 @@ class ModelCenter:
         self.setup_tab = self._build_setup_tab()
         self.progress_tab = self._build_progress_tab()
         self.models_tab = self._build_models_tab()
-        self.tabs.addTab(self.setup_tab, "Training Setup")
-        self.tabs.addTab(self.progress_tab, "Training Progress")
-        self.tabs.addTab(self.models_tab, "Model Versions")
+        self.tabs.addTab(self.setup_tab, "训练设置")
+        self.tabs.addTab(self.progress_tab, "训练进度")
+        self.tabs.addTab(self.models_tab, "模型版本")
         self.tabs.currentChanged.connect(self.on_tab_changed)
         root.addWidget(self.tabs, 1)
 
@@ -380,9 +380,9 @@ class ModelCenter:
         caption.setMinimumWidth(172)
         edit = QtWidgets.QLineEdit(str(initial or ""))
         edit.setClearButtonEnabled(True)
-        browse = QtWidgets.QPushButton("Browse...")
+        browse = QtWidgets.QPushButton("浏览...")
         browse.setIcon(self.window.style().standardIcon(QtWidgets.QStyle.SP_DirOpenIcon))
-        browse.setToolTip("Choose folder")
+        browse.setToolTip("选择文件夹")
         browse.setMinimumWidth(104)
 
         def choose():
@@ -426,11 +426,11 @@ class ModelCenter:
         data = self._surface()
         data_layout = QtWidgets.QVBoxLayout(data)
         data_layout.setContentsMargins(16, 14, 16, 14)
-        heading = QtWidgets.QLabel("Training data")
+        heading = QtWidgets.QLabel("训练数据")
         heading.setObjectName("section")
         data_layout.addWidget(heading)
         source_row = QtWidgets.QHBoxLayout()
-        source_label = QtWidgets.QLabel("Label source")
+        source_label = QtWidgets.QLabel("标签来源")
         source_label.setMinimumWidth(172)
         self.source_combo = QtWidgets.QComboBox()
         for label, value in LABEL_SOURCE_CHOICES:
@@ -447,7 +447,7 @@ class ModelCenter:
 
         row, self.image_root_edit = self._path_row("Original image dataset *")
         self.image_root_edit.setPlaceholderText(
-            "Folder containing one subfolder per case"
+            "每个病例一个子文件夹的目录"
         )
         data_layout.addLayout(row)
 
@@ -469,17 +469,17 @@ class ModelCenter:
         self.prepared_edit = self.image_root_edit
 
         mask_row = QtWidgets.QHBoxLayout()
-        mask_label = QtWidgets.QLabel("Target Mask name(s) *")
+        mask_label = QtWidgets.QLabel("目标 Mask 名称 *")
         mask_label.setMinimumWidth(172)
         self.mask_edit = QtWidgets.QLineEdit()
-        self.mask_edit.setPlaceholderText("e.g. Liver, liver_seg")
+        self.mask_edit.setPlaceholderText("例如 Liver, liver_seg")
         self.mask_edit.setToolTip(
-            "Names used to find the same target Mask across saved Mimics projects."
+            "用于在已保存的 Mimics 工程中找到同一个目标 Mask 的名称。"
         )
         self.mask_edit.textEdited.connect(self._mark_mask_manually_edited)
         mask_row.addWidget(mask_label)
         mask_row.addWidget(self.mask_edit, 1)
-        self.scan_button = QtWidgets.QPushButton("Scan Data")
+        self.scan_button = QtWidgets.QPushButton("扫描数据")
         self.scan_button.clicked.connect(self.scan_cases)
         mask_row.addWidget(self.scan_button)
         data_layout.addLayout(mask_row)
@@ -487,23 +487,22 @@ class ModelCenter:
         self.mask_source_hint.setObjectName("hint")
         self.mask_source_hint.setWordWrap(True)
         self.mask_source_hint.setText(
-            "Select a Mask in Mimics before opening this window, or enter a "
-            "Task name to use it as the first Mask name."
+            "打开本窗口前先在 Mimics 中选中一个 Mask，或输入目标名称作为第一个 Mask 名称。"
         )
         data_layout.addWidget(self.mask_source_hint)
 
         initial_source_row = QtWidgets.QHBoxLayout()
-        initial_source_label = QtWidgets.QLabel("Initial Mask source")
+        initial_source_label = QtWidgets.QLabel("初始 Mask 来源")
         initial_source_label.setMinimumWidth(172)
         self.initial_mask_source_combo = QtWidgets.QComboBox()
         self.initial_mask_source_combo.addItem(
-            "No Initial Mask (start empty)", "none"
+            "无初始 Mask（从零开始）", "none"
         )
         self.initial_mask_source_combo.addItem(
-            "Another Mask in saved .mcs projects", "mcs"
+            "已保存 .mcs 工程中的另一个 Mask", "mcs"
         )
         self.initial_mask_source_combo.addItem(
-            "Previously exported initial masks", "exported_masks"
+            "此前导出的初始 Mask", "exported_masks"
         )
         self.initial_mask_source_combo.currentIndexChanged.connect(
             self._update_initial_mask_visibility
@@ -517,15 +516,14 @@ class ModelCenter:
             self.initial_mask_name_widget
         )
         initial_name_layout.setContentsMargins(0, 0, 0, 0)
-        initial_name_label = QtWidgets.QLabel("Initial Mask name(s) *")
+        initial_name_label = QtWidgets.QLabel("初始 Mask 名称 *")
         initial_name_label.setMinimumWidth(172)
         self.initial_mask_edit = QtWidgets.QLineEdit()
         self.initial_mask_edit.setPlaceholderText(
-            "e.g. Liver_AI_Draft, liver_initial"
+            "例如 Liver_AI_Draft, liver_initial"
         )
         self.initial_mask_edit.setToolTip(
-            "Names used to find the draft or partial Mask for the same case. "
-            "Do not enter the final target Mask name."
+            "用于找到同一病例草稿或半成品 Mask 的名称；不要填最终的目标 Mask 名称。"
         )
         initial_name_layout.addWidget(initial_name_label)
         initial_name_layout.addWidget(self.initial_mask_edit, 1)
@@ -548,18 +546,18 @@ class ModelCenter:
         data_layout.addWidget(self.initial_mask_hint)
 
         self.scan_hint = QtWidgets.QLabel(
-            "Required paths are marked with *. Scan to find usable cases."
+            "必填路径以 * 标注。扫描后即可筛选可用病例。"
         )
         self.scan_hint.setObjectName("hint")
         data_layout.addWidget(self.scan_hint)
         self.scan_progress = QtWidgets.QProgressBar()
         self.scan_progress.setRange(0, 100)
         self.scan_progress.setValue(0)
-        self.scan_progress.setFormat("Dataset has not been scanned")
+        self.scan_progress.setFormat("数据集尚未扫描")
         data_layout.addWidget(self.scan_progress)
 
         self.choose_specific_cases = QtWidgets.QCheckBox(
-            "Choose specific cases and validation assignments"
+            "手动指定训练病例与验证集分配"
         )
         self.choose_specific_cases.setChecked(False)
         self.choose_specific_cases.toggled.connect(
@@ -572,16 +570,16 @@ class ModelCenter:
         case_selection_layout.setContentsMargins(0, 0, 0, 0)
         filter_row = QtWidgets.QHBoxLayout()
         self.case_filter_edit = QtWidgets.QLineEdit()
-        self.case_filter_edit.setPlaceholderText("Filter cases")
+        self.case_filter_edit.setPlaceholderText("筛选病例")
         self.case_filter_edit.textChanged.connect(self._schedule_case_filters)
         filter_row.addWidget(self.case_filter_edit, 1)
-        self.show_unavailable_cases = QtWidgets.QCheckBox("Show unavailable")
+        self.show_unavailable_cases = QtWidgets.QCheckBox("显示不可用病例")
         self.show_unavailable_cases.toggled.connect(self._apply_case_filters)
         filter_row.addWidget(self.show_unavailable_cases)
         case_selection_layout.addLayout(filter_row)
 
         self.case_table = QtWidgets.QTableWidget(0, 4)
-        self.case_table.setHorizontalHeaderLabels(["Use", "Case", "Split", "Status"])
+        self.case_table.setHorizontalHeaderLabels(['选用', '病例', '划分', '状态'])
         self.case_table.verticalHeader().setVisible(False)
         self.case_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.case_table.setAlternatingRowColors(True)
@@ -597,14 +595,14 @@ class ModelCenter:
         adaptation = self._surface()
         adaptation_layout = QtWidgets.QVBoxLayout(adaptation)
         adaptation_layout.setContentsMargins(16, 14, 16, 14)
-        heading = QtWidgets.QLabel("Training plan")
+        heading = QtWidgets.QLabel("训练方案")
         heading.setObjectName("section")
         adaptation_layout.addWidget(heading)
         self.light_radio = QtWidgets.QRadioButton(
-            "CLoPA-IN  ·  Lightweight intensity-domain adaptation for CT and MR"
+            "CLoPA-IN  ·  轻量强度域自适应（CT / MR 通用）"
         )
         self.strong_radio = QtWidgets.QRadioButton(
-            "CLoPA-CN  ·  Instance normalization plus selected convolution adaptation"
+            "CLoPA-CN  ·  Instance 归一化 + 部分卷积自适应"
         )
         self.light_radio.setChecked(True)
         adaptation_layout.addWidget(self.light_radio)
@@ -614,7 +612,7 @@ class ModelCenter:
         training_layout.setContentsMargins(22, 4, 0, 0)
         training_layout.setHorizontalSpacing(14)
         training_layout.setVerticalSpacing(6)
-        training_layout.addWidget(QtWidgets.QLabel("Maximum epochs"), 0, 0)
+        training_layout.addWidget(QtWidgets.QLabel("最大训练轮数 (epoch)"), 0, 0)
         self.epochs = QtWidgets.QSpinBox()
         self.epochs.setRange(
             int(self.config.get("minimum_epochs", 4)),
@@ -623,31 +621,28 @@ class ModelCenter:
         self.epochs.setValue(int(self.config.get("default_epochs", 10)))
         training_layout.addWidget(self.epochs, 1, 0)
         training_layout.addWidget(
-            QtWidgets.QLabel("Training goal"), 0, 1
+            QtWidgets.QLabel("训练目标"), 0, 1
         )
         self.training_goal = QtWidgets.QComboBox()
         self.training_goal.addItem(
-            "General adaptation (recommended)", "general"
+            "通用自适应（推荐）", "general"
         )
         self.training_goal.addItem(
-            "Start from an empty Mask", "start_empty"
+            "从空 Mask 开始", "start_empty"
         )
         self.training_goal.addItem(
-            "Refine an existing Mask", "refine_existing"
+            "在已有 Mask 基础上精修", "refine_existing"
         )
         self.training_goal.currentIndexChanged.connect(
             self._update_initial_mask_visibility
         )
         self.training_goal.setToolTip(
-            "General adaptation trains both new annotations and corrections. "
-            "Each correction step can add one foreground and one background "
-            "point before prediction; trajectories use one to eight steps and "
-            "stop early when no error remains."
+            "通用自适应同时学习新标注和修正。每次修正步骤可在预测前添加一个前景点和一个背景点；轨迹为一到八步，无误差时提前停止。"
         )
         training_layout.addWidget(self.training_goal, 1, 1)
-        training_layout.addWidget(QtWidgets.QLabel("Starting model"), 0, 2)
+        training_layout.addWidget(QtWidgets.QLabel("起始模型"), 0, 2)
         self.start_model = QtWidgets.QComboBox()
-        self.start_model.addItem("Official nnInteractive", "official")
+        self.start_model.addItem("官方 nnInteractive", "official")
         self.start_model_user_selected = False
         self.start_model.activated.connect(self._mark_start_model_selected)
         training_layout.addWidget(self.start_model, 1, 2)
@@ -656,20 +651,18 @@ class ModelCenter:
         adaptation_layout.addLayout(training_layout)
         mirror_row = QtWidgets.QHBoxLayout()
         mirror_row.setContentsMargins(22, 4, 0, 0)
-        mirror_label = QtWidgets.QLabel("Anatomy mirroring")
+        mirror_label = QtWidgets.QLabel("解剖镜像")
         mirror_label.setMinimumWidth(172)
         self.mirror_policy = QtWidgets.QComboBox()
         self.mirror_policy.addItem(
-            "Automatic (protect left/right targets)", "auto"
+            "自动（保护左右对称目标）", "auto"
         )
         self.mirror_policy.addItem(
-            "Preserve left/right orientation", "preserve_lr"
+            "保持左右方向", "preserve_lr"
         )
-        self.mirror_policy.addItem("Allow all spatial axes", "all_axes")
+        self.mirror_policy.addItem("允许所有空间轴", "all_axes")
         self.mirror_policy.setToolTip(
-            "Automatic disables left-right mirroring when the task or Target "
-            "Mask name contains left/right, L/R, or 左/右. Other spatial "
-            "mirroring remains enabled."
+            "自动模式：当目标或目标 Mask 名称包含 left/right、L/R 或左/右 时自动关闭左右镜像；其余空间轴镜像保持开启。"
         )
         mirror_row.addWidget(mirror_label)
         mirror_row.addWidget(self.mirror_policy, 1)
@@ -680,11 +673,11 @@ class ModelCenter:
         outer.addWidget(scroll, 1)
 
         footer = QtWidgets.QHBoxLayout()
-        self.setup_summary = QtWidgets.QLabel("Scan cases to prepare training.")
+        self.setup_summary = QtWidgets.QLabel("先扫描病例，再开始训练。")
         self.setup_summary.setObjectName("hint")
         self.setup_summary.setWordWrap(True)
         footer.addWidget(self.setup_summary, 1)
-        self.start_button = QtWidgets.QPushButton("Start Training")
+        self.start_button = QtWidgets.QPushButton("开始训练")
         self.start_button.setObjectName("primary")
         self.start_button.setEnabled(False)
         self.start_button.clicked.connect(self.start_training)
@@ -706,17 +699,17 @@ class ModelCenter:
         status_layout = QtWidgets.QVBoxLayout(status_surface)
         status_layout.setContentsMargins(16, 14, 16, 14)
         status_head = QtWidgets.QHBoxLayout()
-        self.progress_title = QtWidgets.QLabel("No training is running")
+        self.progress_title = QtWidgets.QLabel("当前没有正在进行的训练")
         self.progress_title.setObjectName("section")
         self.elapsed_label = QtWidgets.QLabel("")
         self.elapsed_label.setObjectName("hint")
         status_head.addWidget(self.progress_title, 1)
         status_head.addWidget(self.elapsed_label)
         status_layout.addLayout(status_head)
-        self.progress_detail = QtWidgets.QLabel("Start training from Training Setup.")
+        self.progress_detail = QtWidgets.QLabel("请在“训练设置”页开始训练。")
         self.progress_detail.setObjectName("hint")
         status_layout.addWidget(self.progress_detail)
-        self.diagnosis_title = QtWidgets.QLabel("Failure diagnosis")
+        self.diagnosis_title = QtWidgets.QLabel("失败诊断")
         self.diagnosis_title.setObjectName("section")
         self.diagnosis_title.setVisible(False)
         status_layout.addWidget(self.diagnosis_title)
@@ -733,7 +726,7 @@ class ModelCenter:
         )
         status_layout.addWidget(self.diagnosis_log)
         diagnosis_actions = QtWidgets.QHBoxLayout()
-        self.open_job_folder_button = QtWidgets.QPushButton("Open Job Folder")
+        self.open_job_folder_button = QtWidgets.QPushButton("打开作业文件夹")
         self.open_job_folder_button.clicked.connect(self.open_job_folder)
         self.open_job_folder_button.setVisible(False)
         diagnosis_actions.addStretch(1)
@@ -746,8 +739,8 @@ class ModelCenter:
         status_layout.addWidget(self.progress_bar)
         metrics = QtWidgets.QHBoxLayout()
         self.loss_label = QtWidgets.QLabel("Loss  -")
-        self.auc_label = QtWidgets.QLabel("Validation AUC  -")
-        self.best_label = QtWidgets.QLabel("Best AUC  -")
+        self.auc_label = QtWidgets.QLabel("验证集 AUC  -")
+        self.best_label = QtWidgets.QLabel("最佳 AUC  -")
         metrics.addWidget(self.loss_label)
         metrics.addWidget(self.auc_label)
         metrics.addWidget(self.best_label)
@@ -766,7 +759,7 @@ class ModelCenter:
         curve_surface = self._surface()
         curve_layout = QtWidgets.QVBoxLayout(curve_surface)
         curve_layout.setContentsMargins(12, 12, 12, 12)
-        curve_layout.addWidget(QtWidgets.QLabel("Training curve"))
+        curve_layout.addWidget(QtWidgets.QLabel("训练曲线"))
         curve_class = TrainingCurve(self.QtCore, self.QtGui, self.QtWidgets).Widget
         self.curve = curve_class()
         curve_layout.addWidget(self.curve, 1)
@@ -775,8 +768,8 @@ class ModelCenter:
         log_layout = QtWidgets.QVBoxLayout(log_surface)
         log_layout.setContentsMargins(12, 12, 12, 12)
         log_head = QtWidgets.QHBoxLayout()
-        log_head.addWidget(QtWidgets.QLabel("Recent activity"))
-        self.new_log_button = QtWidgets.QPushButton("New log entries")
+        log_head.addWidget(QtWidgets.QLabel("最近动态"))
+        self.new_log_button = QtWidgets.QPushButton("有新日志")
         self.new_log_button.setVisible(False)
         self.new_log_button.clicked.connect(self.follow_latest_log)
         log_head.addStretch(1)
@@ -791,16 +784,16 @@ class ModelCenter:
         layout.addWidget(lower, 1)
 
         actions = QtWidgets.QHBoxLayout()
-        self.pause_button = QtWidgets.QPushButton("Pause and Release GPU")
+        self.pause_button = QtWidgets.QPushButton("暂停并释放 GPU")
         self.pause_button.clicked.connect(lambda: self.request_action("pause"))
-        self.resume_button = QtWidgets.QPushButton("Resume Training")
+        self.resume_button = QtWidgets.QPushButton("继续训练")
         self.resume_button.clicked.connect(self.resume_training)
-        self.stop_button = QtWidgets.QPushButton("Stop Training")
+        self.stop_button = QtWidgets.QPushButton("停止训练")
         self.stop_button.setObjectName("dangerButton")
         self.stop_button.clicked.connect(self.request_primary_stop)
-        self.open_log_button = QtWidgets.QPushButton("Open Log")
+        self.open_log_button = QtWidgets.QPushButton("打开日志")
         self.open_log_button.clicked.connect(self.open_log)
-        hide = QtWidgets.QPushButton("Hide Window")
+        hide = QtWidgets.QPushButton("隐藏窗口")
         hide.clicked.connect(self.window.hide)
         actions.addWidget(self.pause_button)
         actions.addWidget(self.resume_button)
@@ -820,10 +813,10 @@ class ModelCenter:
         current = self._surface()
         current_layout = QtWidgets.QVBoxLayout(current)
         current_layout.setContentsMargins(16, 14, 16, 14)
-        self.current_model_title = QtWidgets.QLabel("No active annotation model")
+        self.current_model_title = QtWidgets.QLabel("当前没有启用中的标注模型")
         self.current_model_title.setObjectName("section")
         self.current_model_detail = QtWidgets.QLabel(
-            "Train and validate a model before target-specific annotation."
+            "请先训练并验证模型，再进行目标特定的标注。"
         )
         self.current_model_detail.setObjectName("hint")
         self.current_model_detail.setWordWrap(True)
@@ -832,33 +825,33 @@ class ModelCenter:
         layout.addWidget(current)
 
         table_head = QtWidgets.QHBoxLayout()
-        table_head.addWidget(QtWidgets.QLabel("Model history"))
+        table_head.addWidget(QtWidgets.QLabel("模型历史"))
         table_head.addStretch(1)
-        self.import_model_button = QtWidgets.QPushButton("Import Model Package")
+        self.import_model_button = QtWidgets.QPushButton("导入模型包")
         self.import_model_button.setToolTip(
-            "Install a portable custom-model .zip created on another machine."
+            "安装在其他机器上打包的便携自定义模型 (.zip)。"
         )
         self.import_model_button.clicked.connect(self.import_model_package)
         table_head.addWidget(self.import_model_button)
-        self.export_model_button = QtWidgets.QPushButton("Export Active Model")
+        self.export_model_button = QtWidgets.QPushButton("导出当前模型")
         self.export_model_button.setToolTip(
-            "Create a self-contained model package for another workstation."
+            "生成一个可在其他工作站独立使用的模型包。"
         )
         self.export_model_button.clicked.connect(self.export_current_model)
         table_head.addWidget(self.export_model_button)
-        self.show_failed = QtWidgets.QCheckBox("Show failed and not-improved versions")
+        self.show_failed = QtWidgets.QCheckBox("显示失败与未改进的版本")
         self.show_failed.toggled.connect(self.refresh_models)
         table_head.addWidget(self.show_failed)
         layout.addLayout(table_head)
         self.model_table = QtWidgets.QTableWidget(0, 6)
         self.model_table.setHorizontalHeaderLabels(
             [
-                "Date",
-                "Model version",
-                "Adaptation",
-                "Data",
-                "Validation",
-                "Annotation model",
+                '日期',
+                '模型版本',
+                '自适应',
+                '数据',
+                '验证',
+                '标注模型',
             ]
         )
         self.model_table.verticalHeader().setVisible(False)
@@ -952,8 +945,7 @@ class ModelCenter:
                 self.mask_edit.setText(", ".join(str(name) for name in names))
                 self.mask_manually_edited = False
             self.mask_source_hint.setText(
-                "Loaded the saved Mask name aliases for this annotation task. "
-                "Edit only when the same target uses another name in some cases."
+                "已载入该标注目标保存的 Mask 名称别名。仅当同一目标在部分病例中使用了其他名称时才需要修改。"
             )
         elif str(value or "").strip() and not self.mask_manually_edited:
             self.mask_edit.setText(str(value).strip())
@@ -967,8 +959,7 @@ class ModelCenter:
                 )
             else:
                 self.mask_source_hint.setText(
-                    "For a new task, the Task name is used as the first Mask "
-                    "name. Add comma-separated aliases only when needed."
+                    "新目标将以目标名称作为第一个 Mask 名称；仅在必要时添加逗号分隔的别名。"
                 )
         self.start_model_user_selected = False
         self._refresh_start_models()
@@ -984,7 +975,7 @@ class ModelCenter:
         if not hasattr(self, "start_model"):
             return
         self.start_model.clear()
-        self.start_model.addItem("Official nnInteractive", "official")
+        self.start_model.addItem("官方 nnInteractive", "official")
         model = selected_model(self.workspace, self.current_task_id())
         if model and audit_model_dir(
             resolve_registered_model_dir(
@@ -994,7 +985,7 @@ class ModelCenter:
             ),
             include_checksum=False,
         ).get("compatible"):
-            self.start_model.addItem("Current custom model", "current")
+            self.start_model.addItem("当前自定义模型", "current")
             use_current = (
                 current_value == "current"
                 or not self.start_model_user_selected
@@ -1017,7 +1008,7 @@ class ModelCenter:
         self._update_initial_mask_visibility()
         if self.case_rows:
             self.scan_hint.setText(
-                "Data source changed. Scan Data again before starting training."
+                "数据来源已变化。开始训练前请重新扫描数据。"
             )
 
     def _update_initial_mask_visibility(self):
@@ -1079,7 +1070,7 @@ class ModelCenter:
             self.initial_mask_hint.setText(text)
         if self.case_rows:
             self.scan_hint.setText(
-                "Initial Mask settings changed. Scan Data again before training."
+                "初始 Mask 设置已变化。训练前请重新扫描数据。"
             )
 
     def _update_case_selection_visibility(self):
@@ -1161,8 +1152,8 @@ class ModelCenter:
     def _set_scan_busy(self):
         if self.scan_progress is not None:
             self.scan_progress.setRange(0, 0)
-            self.scan_progress.setFormat("Scanning dataset...")
-        self.scan_button.setText("Scanning...")
+            self.scan_progress.setFormat("正在扫描数据集...")
+        self.scan_button.setText("扫描中...")
         self.scan_button.setEnabled(False)
 
     def _finish_scan_progress(self, text, success):
@@ -1171,7 +1162,7 @@ class ModelCenter:
             self.scan_progress.setRange(0, 100)
             self.scan_progress.setValue(100 if success else 0)
             self.scan_progress.setFormat(str(text))
-        self.scan_button.setText("Scan Data")
+        self.scan_button.setText("扫描数据")
         self.scan_button.setEnabled(True)
 
     def scan_cases(self):
@@ -1179,7 +1170,7 @@ class ModelCenter:
             value.strip() for value in self.mask_edit.text().split(",") if value.strip()
         ]
         if not mask_names:
-            self.scan_hint.setText("Enter the target Mask name before scanning.")
+            self.scan_hint.setText("扫描前请先填写目标 Mask 名称。")
             self._finish_scan_progress("Target Mask name is required", False)
             return
         self.scan_generation += 1
@@ -1213,52 +1204,51 @@ class ModelCenter:
             & {safe_slug(value) for value in initial_mask_names}
         ):
             self.scan_hint.setText(
-                "The Initial Mask must be different from the final Target Mask."
+                "初始 Mask 必须与最终目标 Mask 不同。"
             )
             self._finish_scan_progress(
                 "Initial and final Mask names overlap", False
             )
             return
         if not image_root:
-            self.scan_hint.setText("Choose the original image dataset.")
+            self.scan_hint.setText("请选择原始图像数据集。")
             self._finish_scan_progress("Dataset path is required", False)
             return
         if source_mode == "mcs_refresh" and not mcs_dir:
-            self.scan_hint.setText("Choose the folder containing saved .mcs projects.")
+            self.scan_hint.setText("请选择包含已保存 .mcs 工程的文件夹。")
             self._finish_scan_progress("Saved .mcs folder is required", False)
             return
         if source_mode == "exported_masks" and not prepared_labels:
-            self.scan_hint.setText("Choose the previously exported masks folder.")
+            self.scan_hint.setText("请选择此前导出的 Mask 文件夹。")
             self._finish_scan_progress("Exported masks folder is required", False)
             return
         if initial_source in ("mcs", "exported_masks") and not initial_mask_names:
             self.scan_hint.setText(
-                "Enter the Initial Mask name before scanning."
+                "扫描前请先填写初始 Mask 名称。"
             )
             self._finish_scan_progress("Initial Mask name is required", False)
             return
         if goal == "refine_existing" and initial_source == "none":
             self.scan_hint.setText(
-                "Refine an existing Mask requires saved .mcs drafts or "
-                "previously exported Initial Masks."
+                "“在已有 Mask 基础上精修”需要已保存的 .mcs 草稿或此前导出的初始 Mask。"
             )
             self._finish_scan_progress("Initial Mask source is required", False)
             return
         if initial_source == "mcs" and not mcs_dir:
             self.scan_hint.setText(
-                "Choose the folder containing saved .mcs projects."
+                "请选择包含已保存 .mcs 工程的文件夹。"
             )
             self._finish_scan_progress("Saved .mcs folder is required", False)
             return
         if initial_source == "exported_masks" and not initial_mask_root:
             self.scan_hint.setText(
-                "Choose the previously exported initial masks folder."
+                "请选择此前导出的初始 Mask 文件夹。"
             )
             self._finish_scan_progress(
                 "Initial masks folder is required", False
             )
             return
-        self.scan_hint.setText("Scanning cases in the background...")
+        self.scan_hint.setText("正在后台扫描病例...")
         self._set_scan_busy()
         scan_signature = self._current_data_signature()
 
@@ -1348,8 +1338,7 @@ class ModelCenter:
                 self.scan_deadline = 0.0
                 self.last_scan_signature = None
                 self.scan_hint.setText(
-                    "Case scan timed out. The selected location may be offline "
-                    "or responding too slowly; choose another path or retry."
+                    "病例扫描超时。所选位置可能离线或响应过慢；请换一个路径或重试。"
                 )
                 self._finish_scan_progress("Scan timed out", False)
             return
@@ -1408,7 +1397,7 @@ class ModelCenter:
                 True,
             )
         else:
-            self.scan_hint.setText("No cases were found in the selected location.")
+            self.scan_hint.setText("所选位置没有找到病例。")
             self._finish_scan_progress("Scan complete: no usable cases", True)
 
     def _populate_cases(self, preserve_assignments=False):
@@ -1441,7 +1430,7 @@ class ModelCenter:
         self._case_population_index = 0
         self.case_table.setRowCount(len(self.case_rows))
         self.case_table.setEnabled(False)
-        self.setup_summary.setText("Loading case choices without blocking this window...")
+        self.setup_summary.setText("正在后台载入病例列表（不阻塞本窗口）...")
         self._case_population_timer.start(0)
 
     def _populate_case_chunk(self):
@@ -1477,7 +1466,7 @@ class ModelCenter:
             )
             self.case_table.setCellWidget(index, 2, split)
             label = {
-                "ready": row.get("detail") or "Ready",
+                "ready": row.get("detail") or "就绪",
                 "image_missing": "Image missing",
                 "mask_missing": "Mask missing",
             }.get(row.get("state"), str(row.get("state") or "Needs attention"))
@@ -1525,7 +1514,7 @@ class ModelCenter:
 
     def _update_setup_summary(self):
         if not self.task_combo.currentText().strip():
-            self.setup_summary.setText("Choose or enter an annotation task.")
+            self.setup_summary.setText("请选择或输入标注目标。")
             self.start_button.setEnabled(False)
             return
         selected = self._selected_cases()
@@ -1533,7 +1522,7 @@ class ModelCenter:
         val = sum(row.get("split") == "val" for row in selected)
         strategy = "CLoPA-IN" if self.light_radio.isChecked() else "CLoPA-CN"
         if train < 1:
-            self.setup_summary.setText("Select at least one training case.")
+            self.setup_summary.setText("请至少选择一个训练病例。")
             self.start_button.setEnabled(False)
             return
         minimum_val = int(self.config.get("minimum_validation_cases_for_auto_selection", 2))
@@ -1567,8 +1556,7 @@ class ModelCenter:
     def start_training(self):
         if self.last_scan_signature != self._current_data_signature():
             self.setup_summary.setText(
-                "The data source, path, or Target Mask names changed. Scan Data "
-                "again before starting training."
+                "数据来源、路径或目标 Mask 名称已变化。开始训练前请重新扫描数据。"
             )
             return
         selected = self._selected_cases()
@@ -1577,7 +1565,7 @@ class ModelCenter:
             return
         task_name = self.task_combo.currentText().strip()
         if not task_name:
-            self.setup_summary.setText("Choose or enter an annotation task.")
+            self.setup_summary.setText("请选择或输入标注目标。")
             return
         task_id = safe_slug(task_name)
         mask_names = [
@@ -1601,7 +1589,7 @@ class ModelCenter:
         )
         if execution_backend == "remote" and not remote_profile_id:
             self.setup_summary.setText(
-                "Choose a saved remote server or use This workstation."
+                "请选择已保存的远程服务器，或使用本机。"
             )
             return
         base_model = (
@@ -1816,13 +1804,13 @@ class ModelCenter:
                 "cancelled": "Stopped",
                 "abandoned": "Abandoned locally",
                 "failed": "Needs attention",
-            }.get(state, "Ready")
+            }.get(state, "就绪")
         )
-        self.progress_title.setText(status_summary(status) if status else "No training is running")
+        self.progress_title.setText(status_summary(status) if status else "当前没有正在进行的训练")
         detail = str(
             status.get("error")
             or status.get("phase")
-            or "Start training from Training Setup."
+            or "请在“训练设置”页开始训练。"
         )
         phase = str(status.get("phase") or "").strip().lower()
         if state == "training":
@@ -2015,7 +2003,7 @@ class ModelCenter:
                 float(auc),
             )
             if auc is not None
-            else "Validation AUC  -"
+            else "验证集 AUC  -"
         )
         auc_details = []
         if final_validation:
@@ -2081,14 +2069,14 @@ class ModelCenter:
                 )
         elif auc is not None and state in ACTIVE_STATUSES:
             self.comparison_label.setText(
-                "No current model to compare against yet; this run will set the first reference."
+                "暂无对比基准模型；本次运行将建立第一个参考基准。"
             )
         else:
             self.comparison_label.setText("")
         self.best_label.setText(
             "Best AUC  {:.4f}".format(float(status["best_score"]))
             if status.get("best_score") not in (None, float("-inf"))
-            else "Best AUC  -"
+            else "最佳 AUC  -"
         )
         history = status.get("metrics_history") or []
         if history:
@@ -2178,7 +2166,7 @@ class ModelCenter:
             state in ("paused", "failed") and not remote
         )
         self.stop_button.setText(
-            "Abandon Locally" if abandonable else "Stop Training"
+            "Abandon Locally" if abandonable else "停止训练"
         )
         self.stop_button.setEnabled(abandonable or active or state == "paused")
         self.open_log_button.setEnabled(bool(self.current_job_dir))
@@ -2197,11 +2185,8 @@ class ModelCenter:
             return
         answer = self.QtWidgets.QMessageBox.warning(
             self.window,
-            "Abandon Remote Task Locally",
-            "Stop waiting on this workstation?\n\nThe server cannot confirm "
-            "whether the container stopped. It may still use GPU or disk "
-            "resources. An administrator must inspect the recorded container "
-            "name.",
+            "在本机放弃远程任务",
+            "不再在本机等待该任务？\n\n服务器无法确认容器是否已停止，它可能仍在占用 GPU 或磁盘资源。需要管理员根据记录的容器名进行检查。",
             self.QtWidgets.QMessageBox.Yes | self.QtWidgets.QMessageBox.No,
             self.QtWidgets.QMessageBox.No,
         )
@@ -2217,7 +2202,7 @@ class ModelCenter:
             ]
         )
         self.progress_detail.setText(
-            "Ending local monitoring without claiming the remote GPU is free."
+            "本地监控已结束，但未确认远程 GPU 已空闲。"
         )
 
     def request_action(self, action):
@@ -2360,9 +2345,9 @@ class ModelCenter:
                 )
             )
         else:
-            self.current_model_title.setText("No active annotation model")
+            self.current_model_title.setText("当前没有启用中的标注模型")
             self.current_model_detail.setText(
-                "Train and validate a model, or select an unverified version explicitly."
+                "请先训练并验证模型，或明确选择一个未验证的版本。"
             )
         self.export_model_button.setEnabled(
             current is not None and self.model_io_process is None
@@ -2528,7 +2513,7 @@ class ModelCenter:
         current = selected_model(self.workspace, task_id)
         if not current:
             self.model_io_status.setText(
-                "Select an active annotation model before exporting a package."
+                "导出模型包前请先启用一个标注模型。"
             )
             return
         suggested = Path.home() / "{}_{}.zip".format(

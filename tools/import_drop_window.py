@@ -433,23 +433,22 @@ def run(context=None, preview_path=""):
     app.setStyleSheet(DropWindowStyle.STYLESHEET)
 
     window = QtWidgets.QWidget()
-    window.setWindowTitle("Drop to Import")
+    window.setWindowTitle("拖入导入")
     window.setWindowFlags(QtCore.Qt.WindowStaysOnTopHint | QtCore.Qt.Tool)
     window.setMinimumSize(420, 320)
     root = QtWidgets.QVBoxLayout(window)
 
-    title = QtWidgets.QLabel("Drop to Import")
+    title = QtWidgets.QLabel("拖入导入")
     title.setObjectName("title")
     root.addWidget(title)
     hint = QtWidgets.QLabel(
-        "Drag files or folders here, or paste paths (Ctrl+V, one per line). "
-        "The window exits automatically when idle."
+        "把文件或文件夹拖到这里，或粘贴路径（Ctrl+V，每行一条）。窗口空闲时自动退出。"
     )
     hint.setObjectName("subtitle")
     hint.setWordWrap(True)
     root.addWidget(hint)
 
-    dropzone = QtWidgets.QLabel("Drop images, case folders, or a dataset folder here")
+    dropzone = QtWidgets.QLabel("将图像、病例文件夹或数据集文件夹拖到这里")
     dropzone.setObjectName("dropzone")
     dropzone.setAlignment(QtCore.Qt.AlignCenter)
     dropzone.setWordWrap(True)
@@ -461,7 +460,7 @@ def run(context=None, preview_path=""):
     root.addWidget(recognition)
 
     output_row = QtWidgets.QHBoxLayout()
-    output_label = QtWidgets.QLabel("Output folder")
+    output_label = QtWidgets.QLabel("输出文件夹")
     # Only a folder the user chose themselves sticks across sessions (same
     # rule as io_path_setup_ui, R61-7): a remembered computed default would
     # pin every new dataset to the previous dataset's output folder.
@@ -470,16 +469,16 @@ def run(context=None, preview_path=""):
         if remembered_mode.get("output_custom")
         else ""
     )
-    output_edit.setPlaceholderText("Optional - filled automatically from the source")
-    browse = QtWidgets.QPushButton("Browse...")
+    output_edit.setPlaceholderText("可选——默认从来源自动填写")
+    browse = QtWidgets.QPushButton("浏览...")
     output_row.addWidget(output_label)
     output_row.addWidget(output_edit, 1)
     output_row.addWidget(browse)
     root.addLayout(output_row)
 
     mask_row = QtWidgets.QHBoxLayout()
-    mask_all = QtWidgets.QRadioButton("All masks")
-    mask_none = QtWidgets.QRadioButton("Images only")
+    mask_all = QtWidgets.QRadioButton("全部 Mask")
+    mask_none = QtWidgets.QRadioButton("仅图像")
     remembered_masks = str(remembered_mode.get("mask_selection", "all") or "all")
     mask_none.setChecked(remembered_masks.lower() == "none")
     mask_all.setChecked(not mask_none.isChecked())
@@ -489,18 +488,18 @@ def run(context=None, preview_path=""):
     root.addLayout(mask_row)
 
     # -- Recent drops activity list ----------------------------------------
-    recent_header = QtWidgets.QLabel("Recent drops")
+    recent_header = QtWidgets.QLabel("最近拖入")
     recent_header.setObjectName("subtitle")
     root.addWidget(recent_header)
     recent_list = QtWidgets.QListWidget()
     recent_list.setMaximumHeight(96)
-    recent_list.setToolTip("Double-click a row to open its import log")
+    recent_list.setToolTip("双击一行可打开对应的导入日志")
     root.addWidget(recent_list)
 
     actions = QtWidgets.QHBoxLayout()
     actions.addStretch(1)
-    clear = QtWidgets.QPushButton("Clear")
-    submit = QtWidgets.QPushButton("Import")
+    clear = QtWidgets.QPushButton("清空")
+    submit = QtWidgets.QPushButton("导入")
     submit.setObjectName("primary")
     submit.setEnabled(False)
     actions.addWidget(clear)
@@ -531,7 +530,7 @@ def run(context=None, preview_path=""):
             state["kind"] = None
             state["source"] = None
             submit.setEnabled(False)
-            dropzone.setText("Drop images, case folders, or a dataset folder here")
+            dropzone.setText("将图像、病例文件夹或数据集文件夹拖到这里")
             set_recognition("")
             return
         state["paths"] = paths
@@ -633,7 +632,7 @@ def run(context=None, preview_path=""):
             return
         add_paths(values)
 
-    paste_button = QtWidgets.QPushButton("Paste Paths")
+    paste_button = QtWidgets.QPushButton("粘贴路径")
     paste_button.clicked.connect(paste_paths)
     output_row.insertWidget(3, paste_button)
 
@@ -680,8 +679,8 @@ def run(context=None, preview_path=""):
             launched = submit_import(selection, context)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(
-                window, "Import Failed",
-                "The import could not be started:\n\n{0}".format(exc),
+                window, "导入失败",
+                "导入无法启动：\n\n{0}".format(exc),
             )
             return
         # Remember for next time (same state file as the path-setup UI).
@@ -709,9 +708,8 @@ def run(context=None, preview_path=""):
         if len(launched) > 10:
             lines.append("... and {0} more".format(len(launched) - 10))
         QtWidgets.QMessageBox.information(
-            window, "Import Started",
-            "Import started:\n\n{0}\n\nProgress continues in the background; "
-            "Mimics projects will appear in:\n{1}".format("\n".join(lines), output),
+            window, "导入已开始",
+            "导入已开始：\n\n{0}\n\n任务在后台继续进行；Mimics 工程将生成于：\n{1}".format("\n".join(lines), output),
         )
         state["submitted"] = True
         analyze([])

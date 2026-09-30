@@ -43,7 +43,7 @@ class TrainingSetupWindow:
         self.QtCore, self.QtGui, self.QtWidgets = qt_modules
         QtCore, QtWidgets = self.QtCore, self.QtWidgets
         self.window = QtWidgets.QMainWindow()
-        self.window.setWindowTitle("nnU-Net Training")
+        self.window.setWindowTitle("nnU-Net 训练")
         self.window.resize(920, 760)
         self.window.setMinimumSize(780, 650)
         self.window.closeEvent = self._close_event
@@ -58,11 +58,10 @@ class TrainingSetupWindow:
         root = QtWidgets.QVBoxLayout(central)
         root.setContentsMargins(22, 18, 22, 18)
         root.setSpacing(12)
-        title = QtWidgets.QLabel("nnU-Net Training")
+        title = QtWidgets.QLabel("nnU-Net 训练")
         title.setObjectName("title")
         subtitle = QtWidgets.QLabel(
-            "Prepare source-grid labels, let nnU-Net plan the dataset, and train "
-            "locally or on a saved remote GPU server. Mimics remains usable."
+            "准备原始网格标签，交给 nnU-Net 自动规划数据集，在本机或已保存的远程 GPU 服务器上训练。期间 Mimics 仍可正常使用。"
         )
         subtitle.setObjectName("subtitle")
         subtitle.setWordWrap(True)
@@ -70,23 +69,23 @@ class TrainingSetupWindow:
         root.addWidget(subtitle)
 
         self.tabs = QtWidgets.QTabWidget()
-        self.tabs.addTab(self._build_data_tab(), "Data")
-        self.tabs.addTab(self._build_model_tab(), "Model and Training")
-        self.tabs.addTab(self._build_compute_tab(), "Compute")
+        self.tabs.addTab(self._build_data_tab(), "数据")
+        self.tabs.addTab(self._build_model_tab(), "模型与训练")
+        self.tabs.addTab(self._build_compute_tab(), "计算")
         root.addWidget(self.tabs, 1)
 
         self.status_label = QtWidgets.QLabel(
-            "Labels are mapped to the original image grid before nnU-Net preprocessing."
+            "标签会先映射回原始图像网格，再进行 nnU-Net 预处理。"
         )
         self.status_label.setObjectName("hint")
         self.status_label.setWordWrap(True)
         root.addWidget(self.status_label)
         actions = QtWidgets.QHBoxLayout()
         actions.addStretch(1)
-        cancel = QtWidgets.QPushButton("Cancel")
+        cancel = QtWidgets.QPushButton("取消")
         cancel.clicked.connect(self.window.close)
         actions.addWidget(cancel)
-        self.start_button = QtWidgets.QPushButton("Start Training")
+        self.start_button = QtWidgets.QPushButton("开始训练")
         self.start_button.setObjectName("primary")
         self.start_button.clicked.connect(self._submit)
         actions.addWidget(self.start_button)
@@ -126,7 +125,7 @@ class TrainingSetupWindow:
         default; every field inside keeps its default and one-line hint."""
         QtCore, QtWidgets = self.QtCore, self.QtWidgets
         toggle = QtWidgets.QToolButton()
-        toggle.setText("Advanced training settings (Trainer, Fold, GPUs, epochs)")
+        toggle.setText("高级训练设置（Trainer、Fold、GPU 数量、epoch）")
         toggle.setCheckable(True)
         toggle.setChecked(False)
         toggle.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
@@ -149,7 +148,7 @@ class TrainingSetupWindow:
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
         layout.addWidget(edit, 1)
-        button = QtWidgets.QPushButton("Browse...")
+        button = QtWidgets.QPushButton("浏览...")
 
         def browse():
             current = edit.text().strip()
@@ -194,19 +193,19 @@ class TrainingSetupWindow:
 
         project, form = self._surface("Task and images")
         self.task_edit = QtWidgets.QLineEdit()
-        self.task_edit.setPlaceholderText("Example: abdomen_multi_organ_ct")
+        self.task_edit.setPlaceholderText("例如 abdomen_multi_organ_ct")
         self.task_edit.setToolTip(
-            "Names the complete segmentation task/model, not one organ or Mask."
+            "命名整个分割任务/模型，而不是单个器官或 Mask。"
         )
-        form.addWidget(QtWidgets.QLabel("Model task name *"), 0, 0)
+        form.addWidget(QtWidgets.QLabel("模型任务名 *"), 0, 0)
         form.addWidget(self.task_edit, 0, 1)
         self.dataset_id = QtWidgets.QSpinBox()
         self.dataset_id.setRange(1, 999)
         self.dataset_id.setValue(701)
         self.dataset_id.setToolTip(
-            "nnU-Net dataset number. Use a different number for unrelated tasks."
+            "nnU-Net 数据集编号。不同任务请使用不同编号。"
         )
-        form.addWidget(QtWidgets.QLabel("Dataset ID *"), 1, 0)
+        form.addWidget(QtWidgets.QLabel("数据集 ID *"), 1, 0)
         form.addWidget(self.dataset_id, 1, 1)
         self.dataset_id_hint = self._hint(
             "A number identifying this task. A free number is suggested "
@@ -216,11 +215,11 @@ class TrainingSetupWindow:
         self.modality_combo = QtWidgets.QComboBox()
         for label, value in (("CT", "CT"), ("MRI", "MRI"), ("Other", "Other")):
             self.modality_combo.addItem(label, value)
-        form.addWidget(QtWidgets.QLabel("Image modality"), 3, 0)
+        form.addWidget(QtWidgets.QLabel("成像模态"), 3, 0)
         form.addWidget(self.modality_combo, 3, 1)
         self.dataset_edit = QtWidgets.QLineEdit()
-        self.dataset_edit.setPlaceholderText("Folder containing one subfolder per case")
-        form.addWidget(QtWidgets.QLabel("Original image dataset *"), 4, 0)
+        self.dataset_edit.setPlaceholderText("每个病例一个子文件夹的目录")
+        form.addWidget(QtWidgets.QLabel("原始图像数据集 *"), 4, 0)
         form.addWidget(
             self._path_row(self.dataset_edit, "Select original image dataset"), 4, 1
         )
@@ -228,24 +227,24 @@ class TrainingSetupWindow:
 
         labels, label_layout = self._surface("Labels")
         self.source_combo = QtWidgets.QComboBox()
-        self.source_combo.addItem("Masks in each dataset case", "dataset_masks")
-        self.source_combo.addItem("Previously exported Masks", "exported_masks")
-        self.source_combo.addItem("Refresh from saved .mcs projects", "mcs_refresh")
+        self.source_combo.addItem("各病例目录内的 Mask", "dataset_masks")
+        self.source_combo.addItem("此前导出的 Mask", "exported_masks")
+        self.source_combo.addItem("从已保存的 .mcs 工程刷新", "mcs_refresh")
         self.source_combo.currentIndexChanged.connect(self._refresh_source)
-        label_layout.addWidget(QtWidgets.QLabel("Label source"), 0, 0)
+        label_layout.addWidget(QtWidgets.QLabel("标签来源"), 0, 0)
         label_layout.addWidget(self.source_combo, 0, 1)
         self.source_hint = QtWidgets.QLabel()
         self.source_hint.setObjectName("hint")
         self.source_hint.setWordWrap(True)
         label_layout.addWidget(self.source_hint, 1, 0, 1, 2)
-        self.label_root_label = QtWidgets.QLabel("Exported Mask folder *")
+        self.label_root_label = QtWidgets.QLabel("已导出 Mask 文件夹 *")
         self.label_root_edit = QtWidgets.QLineEdit()
         label_layout.addWidget(self.label_root_label, 2, 0)
         self.label_root_widget = self._path_row(
             self.label_root_edit, "Select exported Mask folder"
         )
         label_layout.addWidget(self.label_root_widget, 2, 1)
-        self.mcs_label = QtWidgets.QLabel("Saved .mcs folder *")
+        self.mcs_label = QtWidgets.QLabel("已保存 .mcs 文件夹 *")
         self.mcs_edit = QtWidgets.QLineEdit()
         label_layout.addWidget(self.mcs_label, 3, 0)
         self.mcs_widget = self._path_row(self.mcs_edit, "Select saved .mcs folder")
@@ -253,7 +252,7 @@ class TrainingSetupWindow:
 
         self.label_table = QtWidgets.QTableWidget(0, 4)
         self.label_table.setHorizontalHeaderLabels(
-            ["Output label name", "ID", "Accepted Mask names", "Source rule"]
+            ['输出标签名', "ID", '接受的 Mask 名称', '来源规则']
         )
         self.label_table.horizontalHeader().setSectionResizeMode(
             0, QtWidgets.QHeaderView.Stretch
@@ -268,14 +267,14 @@ class TrainingSetupWindow:
         self.label_table.setAlternatingRowColors(True)
         label_layout.addWidget(self.label_table, 4, 0, 1, 2)
         row_actions = QtWidgets.QHBoxLayout()
-        import_button = QtWidgets.QPushButton("Import Label Set...")
+        import_button = QtWidgets.QPushButton("导入标签集...")
         import_button.setToolTip(
-            "Load one multi-class task from ModelMap.toml or an nnU-Net dataset.json file."
+            "从 ModelMap.toml 或 nnU-Net dataset.json 文件载入一个多类别任务。"
         )
         import_button.clicked.connect(self._import_label_set)
-        add_button = QtWidgets.QPushButton("Add Label")
+        add_button = QtWidgets.QPushButton("添加标签")
         add_button.clicked.connect(lambda: self._add_label_row("", ""))
-        remove_button = QtWidgets.QPushButton("Remove Selected")
+        remove_button = QtWidgets.QPushButton("移除所选")
         remove_button.clicked.connect(self._remove_label_rows)
         row_actions.addWidget(import_button)
         row_actions.addWidget(add_button)
@@ -284,27 +283,25 @@ class TrainingSetupWindow:
         label_layout.addLayout(row_actions, 5, 0, 1, 2)
         self.missing_policy_combo = QtWidgets.QComboBox()
         self.missing_policy_combo.addItem(
-            "Require every configured label (safer)", "require_all"
+            "要求每个已配置标签都存在（更安全）", "require_all"
         )
         self.missing_policy_combo.addItem(
-            "Treat a missing Mask as background", "background"
+            "缺失的 Mask 视为背景", "background"
         )
         self.missing_policy_combo.setToolTip(
-            "Use the second option only when a missing file means the structure is truly absent or fully annotated as background."
+            "仅当文件缺失意味着该结构确实不存在、或确实全部标注为背景时，才使用第二个选项。"
         )
-        label_layout.addWidget(QtWidgets.QLabel("Incomplete cases"), 6, 0)
+        label_layout.addWidget(QtWidgets.QLabel("不完整病例"), 6, 0)
         label_layout.addWidget(self.missing_policy_combo, 6, 1)
         self.overlap_check = QtWidgets.QCheckBox(
-            "Allow later labels to replace overlapping voxels"
+            "允许排在后面的标签覆盖重叠体素"
         )
         self.overlap_check.setToolTip(
-            "Off is safer. nnU-Net multiclass labels cannot preserve two classes at one voxel."
+            "关闭更安全。nnU-Net 多类别标签无法在同一体素上保留两个类别。"
         )
         label_layout.addWidget(self.overlap_check, 7, 0, 1, 2)
         label_hint = QtWidgets.QLabel(
-            "One model may predict many output labels. Each row defines one model output class; "
-            "Use Match one for alternate names of the same Mask; use Union all when one coarse "
-            "output class combines several source structures."
+            "一个模型可以预测多个输出标签。每行定义一个模型输出类别：同一 Mask 的多个名称用“匹配其一”；一个粗类别合并多个来源结构时用“合并全部”。"
         )
         label_hint.setObjectName("hint")
         label_hint.setWordWrap(True)
@@ -313,12 +310,12 @@ class TrainingSetupWindow:
 
         library, library_form = self._surface("Storage")
         self.workspace_edit = QtWidgets.QLineEdit()
-        library_form.addWidget(QtWidgets.QLabel("Model library"), 0, 0)
+        library_form.addWidget(QtWidgets.QLabel("模型库"), 0, 0)
         library_form.addWidget(
             self._path_row(self.workspace_edit, "Select nnU-Net model library"), 0, 1
         )
         library_hint = QtWidgets.QLabel(
-            "Contains managed jobs, source-grid cache, nnU-Net preprocessing, and portable models."
+            "包含托管作业、原始网格缓存、nnU-Net 预处理数据和便携模型。"
         )
         library_hint.setObjectName("hint")
         library_hint.setWordWrap(True)
@@ -344,14 +341,14 @@ class TrainingSetupWindow:
 
         planning, form = self._surface("Planning")
         self.configuration_combo = QtWidgets.QComboBox()
-        self.configuration_combo.addItem("3D full resolution", "3d_fullres")
-        self.configuration_combo.addItem("2D slices", "2d")
-        self.configuration_combo.addItem("3D low resolution", "3d_lowres")
+        self.configuration_combo.addItem("3D 全分辨率", "3d_fullres")
+        self.configuration_combo.addItem("2D 切片", "2d")
+        self.configuration_combo.addItem("3D 低分辨率", "3d_lowres")
         self.configuration_combo.currentIndexChanged.connect(self._refresh_configuration)
-        form.addWidget(QtWidgets.QLabel("Configuration"), 0, 0)
+        form.addWidget(QtWidgets.QLabel("配置"), 0, 0)
         form.addWidget(self.configuration_combo, 0, 1)
 
-        self.auto_spacing = QtWidgets.QCheckBox("Let nnU-Net determine spacing")
+        self.auto_spacing = QtWidgets.QCheckBox("由 nnU-Net 自动决定 spacing")
         self.auto_spacing.setChecked(True)
         self.auto_spacing.toggled.connect(self._refresh_configuration)
         form.addWidget(self.auto_spacing, 1, 0, 1, 2)
@@ -368,10 +365,10 @@ class TrainingSetupWindow:
             spin.setSuffix(" mm")
             self.spacing_spins.append(spin)
             spacing_row.addWidget(spin)
-        form.addWidget(QtWidgets.QLabel("Target spacing"), 2, 0)
+        form.addWidget(QtWidgets.QLabel("目标 spacing"), 2, 0)
         form.addWidget(spacing_widget, 2, 1)
 
-        self.auto_patch = QtWidgets.QCheckBox("Let nnU-Net determine patch size")
+        self.auto_patch = QtWidgets.QCheckBox("由 nnU-Net 自动决定 patch 大小")
         self.auto_patch.setChecked(True)
         self.auto_patch.toggled.connect(self._refresh_configuration)
         form.addWidget(self.auto_patch, 3, 0, 1, 2)
@@ -390,13 +387,13 @@ class TrainingSetupWindow:
             self.patch_spins.append(spin)
             patch_row.addWidget(label)
             patch_row.addWidget(spin)
-        form.addWidget(QtWidgets.QLabel("Patch size"), 4, 0)
+        form.addWidget(QtWidgets.QLabel("Patch 大小"), 4, 0)
         form.addWidget(patch_widget, 4, 1)
         patch_widget.setToolTip(
-            "Patch dimensions use the nnU-Net array order recorded in plans.json, not patient RAS/LPS axis names."
+            "Patch 维度使用 plans.json 中记录的 nnU-Net 数组顺序，而非患者 RAS/LPS 轴名。"
         )
 
-        self.auto_batch = QtWidgets.QCheckBox("Let nnU-Net determine batch size")
+        self.auto_batch = QtWidgets.QCheckBox("由 nnU-Net 自动决定 batch size")
         self.auto_batch.setChecked(True)
         self.auto_batch.toggled.connect(self._refresh_configuration)
         form.addWidget(self.auto_batch, 5, 0, 1, 2)
@@ -406,8 +403,7 @@ class TrainingSetupWindow:
         form.addWidget(QtWidgets.QLabel("Batch size"), 6, 0)
         form.addWidget(self.batch_spin, 6, 1)
         planning_hint = QtWidgets.QLabel(
-            "Automatic planning is the recommended default. Manual spacing or patch changes "
-            "are recorded with the model and reused during inference."
+            "推荐使用自动规划。手动修改的 spacing 或 patch 会随模型记录，并在推理时复用。"
         )
         planning_hint.setObjectName("hint")
         planning_hint.setWordWrap(True)
@@ -418,13 +414,13 @@ class TrainingSetupWindow:
         self.training_group = training
         self.trainer_combo = QtWidgets.QComboBox()
         self.trainer_combo.setEditable(True)
-        self.trainer_combo.addItem("Configurable standard trainer", "MimicsNNUNetTrainer")
+        self.trainer_combo.addItem("可配置标准 Trainer", "MimicsNNUNetTrainer")
         self.trainer_combo.addItem(
-            "Configurable trainer without mirroring",
+            "可配置无镜像 Trainer",
             "MimicsNNUNetTrainerNoMirroring",
         )
-        self.trainer_combo.addItem("Official standard trainer", "nnUNetTrainer")
-        self.trainer_combo.addItem("Official trainer without mirroring", "nnUNetTrainerNoMirroring")
+        self.trainer_combo.addItem("官方标准 Trainer", "nnUNetTrainer")
+        self.trainer_combo.addItem("官方无镜像 Trainer", "nnUNetTrainerNoMirroring")
         self.trainer_combo.currentIndexChanged.connect(self._refresh_trainer)
         self.trainer_combo.lineEdit().editingFinished.connect(self._refresh_trainer)
         train_form.addWidget(QtWidgets.QLabel("Trainer"), 0, 0)
@@ -436,7 +432,7 @@ class TrainingSetupWindow:
         self.epochs_spin = QtWidgets.QSpinBox()
         self.epochs_spin.setRange(1, 10000)
         self.epochs_spin.setValue(1000)
-        train_form.addWidget(QtWidgets.QLabel("Epochs"), 2, 0)
+        train_form.addWidget(QtWidgets.QLabel("训练轮数 (epoch)"), 2, 0)
         train_form.addWidget(self.epochs_spin, 2, 1)
         train_form.addWidget(self._hint(
             "More epochs mean longer training. 1000 is the nnU-Net standard."
@@ -457,7 +453,7 @@ class TrainingSetupWindow:
         self.validation_spin.setRange(0.0, 0.8)
         self.validation_spin.setSingleStep(0.05)
         self.validation_spin.setValue(0.2)
-        train_form.addWidget(QtWidgets.QLabel("Validation fraction"), 6, 0)
+        train_form.addWidget(QtWidgets.QLabel("验证集比例"), 6, 0)
         train_form.addWidget(self.validation_spin, 6, 1)
         train_form.addWidget(self._hint(
             "Share of cases kept out for quality measurement. 0.2 is "
@@ -466,7 +462,7 @@ class TrainingSetupWindow:
         self.workers_spin = QtWidgets.QSpinBox()
         self.workers_spin.setRange(1, 64)
         self.workers_spin.setValue(4)
-        train_form.addWidget(QtWidgets.QLabel("Preprocessing workers"), 8, 0)
+        train_form.addWidget(QtWidgets.QLabel("预处理进程数"), 8, 0)
         train_form.addWidget(self.workers_spin, 8, 1)
         train_form.addWidget(self._hint(
             "CPU workers for preparing the training data. 4 works for most machines."
@@ -474,7 +470,7 @@ class TrainingSetupWindow:
         self.num_gpus_spin = QtWidgets.QSpinBox()
         self.num_gpus_spin.setRange(1, 16)
         self.num_gpus_spin.setValue(1)
-        train_form.addWidget(QtWidgets.QLabel("GPU count"), 10, 0)
+        train_form.addWidget(QtWidgets.QLabel("GPU 数量"), 10, 0)
         train_form.addWidget(self.num_gpus_spin, 10, 1)
         self.gpu_count_hint = self._hint(
             "How many GPUs to use in parallel. If you list specific devices "
@@ -482,11 +478,11 @@ class TrainingSetupWindow:
         )
         train_form.addWidget(self.gpu_count_hint, 11, 0, 1, 2)
         self.gpu_devices_edit = QtWidgets.QLineEdit()
-        self.gpu_devices_edit.setPlaceholderText("Optional, for example 0 or 0,1")
+        self.gpu_devices_edit.setPlaceholderText("可选，例如 0 或 0,1")
         self.gpu_devices_edit.setToolTip(
-            "Restricts local execution to these GPU IDs. Remote GPU selection is configured on the Compute tab."
+            "限制本机只使用这些 GPU。远程 GPU 在“计算”页配置。"
         )
-        train_form.addWidget(QtWidgets.QLabel("Local GPU devices"), 12, 0)
+        train_form.addWidget(QtWidgets.QLabel("本机 GPU 设备"), 12, 0)
         train_form.addWidget(self.gpu_devices_edit, 12, 1)
         self.gpu_devices_hint = self._hint(
             "Leave empty to let training pick the GPUs automatically. "
@@ -495,7 +491,7 @@ class TrainingSetupWindow:
         )
         train_form.addWidget(self.gpu_devices_hint, 13, 0, 1, 2)
         self.pretrained_edit = QtWidgets.QLineEdit()
-        train_form.addWidget(QtWidgets.QLabel("Pretrained checkpoint"), 14, 0)
+        train_form.addWidget(QtWidgets.QLabel("预训练 checkpoint"), 14, 0)
         self.pretrained_widget = self._path_row(
             self.pretrained_edit,
             "Select nnU-Net pretrained checkpoint",
@@ -503,10 +499,10 @@ class TrainingSetupWindow:
             file_filter="PyTorch checkpoint (*.pth);;All files (*)",
         )
         train_form.addWidget(self.pretrained_widget, 14, 1)
-        self.continue_check = QtWidgets.QCheckBox("Continue an interrupted matching fold")
+        self.continue_check = QtWidgets.QCheckBox("继续上次中断的同名 Fold")
         self.continue_check.toggled.connect(self._refresh_continue_training)
         train_form.addWidget(self.continue_check, 15, 0, 1, 2)
-        self.tta_check = QtWidgets.QCheckBox("Use mirroring TTA for later inference")
+        self.tta_check = QtWidgets.QCheckBox("后续推理启用镜像 TTA")
         self.tta_check.setChecked(False)
         train_form.addWidget(self.tta_check, 16, 0, 1, 2)
         # D2: the whole Training group is advanced — every field has a safe
@@ -530,9 +526,7 @@ class TrainingSetupWindow:
         )
         layout.addWidget(self.remote_selector.group)
         note = QtWidgets.QLabel(
-            "Local and remote runs use the same request, source-grid preparation, "
-            "nnU-Net planning settings, model manifest, and status format. Remote "
-            "containers are disposable; verified data and preprocessing caches remain reusable."
+            "本机与远程使用相同的请求、原始网格准备、nnU-Net 规划设置、模型清单和状态格式。远程容器用后即弃；已验证的数据和预处理缓存仍可复用。"
         )
         note.setObjectName("hint")
         note.setWordWrap(True)
@@ -597,12 +591,12 @@ class TrainingSetupWindow:
         self.label_table.setCellWidget(row, 1, spin)
         self.label_table.setItem(row, 2, QtWidgets.QTableWidgetItem(str(aliases)))
         mode = QtWidgets.QComboBox()
-        mode.addItem("Match one", "alternatives")
-        mode.addItem("Union all", "union")
+        mode.addItem("匹配其一", "alternatives")
+        mode.addItem("合并全部", "union")
         index = mode.findData(str(source_mode or "alternatives"))
         mode.setCurrentIndex(max(0, index))
         mode.setToolTip(
-            "Match one treats names as alternatives. Union all combines every matching source Mask into this output class."
+            "“匹配其一”将多个名称视为同一 Mask 的别名；“合并全部”把所有匹配的来源 Mask 合并为该输出类别。"
         )
         self.label_table.setCellWidget(row, 3, mode)
 
@@ -714,10 +708,10 @@ class TrainingSetupWindow:
         data = self.trainer_combo.currentData()
         text = self.trainer_combo.currentText().strip()
         if data and text in {
-            "Configurable standard trainer",
-            "Configurable trainer without mirroring",
-            "Official standard trainer",
-            "Official trainer without mirroring",
+            "可配置标准 Trainer",
+            "可配置无镜像 Trainer",
+            "官方标准 Trainer",
+            "官方无镜像 Trainer",
         }:
             return str(data)
         return text
@@ -731,11 +725,11 @@ class TrainingSetupWindow:
         self.epochs_spin.setEnabled(configurable)
         if configurable:
             self.trainer_hint.setText(
-                "Uses standard nnU-Net behavior with the epoch count below. The bundled trainer is portable with Mimics-Script."
+                "使用下方 epoch 数的标准 nnU-Net 行为。内置 Trainer 随 Mimics-Script 便携可移植。"
             )
         else:
             self.trainer_hint.setText(
-                "This trainer controls its own training length. Epochs is disabled so the interface does not promise an ignored value."
+                "该 Trainer 自行控制训练时长。epoch 一栏已禁用，避免界面给出一个实际被忽略的数值。"
             )
 
     def _labels(self):
@@ -809,7 +803,7 @@ class TrainingSetupWindow:
             self.start_button.setEnabled(False)
             self.status_label.setStyleSheet("")
             self.status_label.setText(
-                "Checking the selected data locations in the background..."
+                "正在后台检查所选数据位置..."
             )
 
             def validate():
@@ -863,8 +857,7 @@ class TrainingSetupWindow:
             self.start_button.setEnabled(True)
             self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
             self.status_label.setText(
-                "Path checking timed out. The selected drive may be offline or "
-                "responding too slowly; paste a more specific path or retry."
+                "路径检查超时。所选磁盘可能离线或响应过慢；请粘贴更具体的路径或重试。"
             )
         try:
             generation, request, error = self._submission_results.get_nowait()
@@ -880,7 +873,7 @@ class TrainingSetupWindow:
             self.status_label.setText(error)
             return
         try:
-            self.status_label.setText("Submitting nnU-Net training...")
+            self.status_label.setText("正在提交 nnU-Net 训练...")
             write_json_atomic(
                 Path.home() / ".mimics_script" / "nnunet_settings.json",
                 {
@@ -944,7 +937,7 @@ def main() -> int:
         from PySide6 import QtCore, QtGui, QtWidgets
 
         app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
-        configure_application(app, "nnU-Net Training")
+        configure_application(app, "nnU-Net 训练")
         app.setStyleSheet(stylesheet())
         window = TrainingSetupWindow(context, context_path, (QtCore, QtGui, QtWidgets))
         window.show()

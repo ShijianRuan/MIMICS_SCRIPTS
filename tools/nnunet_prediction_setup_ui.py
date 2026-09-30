@@ -58,7 +58,7 @@ class PredictionWindow:
         self.QtCore, self.QtGui, self.QtWidgets = qt_modules
         QtWidgets = self.QtWidgets
         self.window = QtWidgets.QDialog()
-        self.window.setWindowTitle("nnU-Net Prediction")
+        self.window.setWindowTitle("nnU-Net 预测")
         self.window.resize(760, 570)
         self.window.setMinimumSize(680, 520)
         self.window.closeEvent = self._close_event
@@ -72,11 +72,10 @@ class PredictionWindow:
         root = QtWidgets.QVBoxLayout(self.window)
         root.setContentsMargins(22, 18, 22, 18)
         root.setSpacing(12)
-        title = QtWidgets.QLabel("nnU-Net Prediction")
+        title = QtWidgets.QLabel("nnU-Net 预测")
         title.setObjectName("title")
         subtitle = QtWidgets.QLabel(
-            "Choose a compatible trained model. Inference runs outside Mimics; "
-            "the result is applied only after its physical grid is verified."
+            "选择一个兼容的已训练模型。推理在 Mimics 之外运行；结果只有在物理网格校验通过后才会应用。"
         )
         subtitle.setObjectName("subtitle")
         subtitle.setWordWrap(True)
@@ -86,16 +85,16 @@ class PredictionWindow:
         case.setObjectName("surface")
         case_layout = QtWidgets.QGridLayout(case)
         case_layout.setContentsMargins(16, 14, 16, 14)
-        case_layout.addWidget(QtWidgets.QLabel("Current case"), 0, 0)
+        case_layout.addWidget(QtWidgets.QLabel("当前病例"), 0, 0)
         case_layout.addWidget(QtWidgets.QLabel(str(context.get("case_id") or "-")), 0, 1)
-        case_layout.addWidget(QtWidgets.QLabel("Selected Mask hint"), 1, 0)
+        case_layout.addWidget(QtWidgets.QLabel("所选 Mask 提示"), 1, 0)
         case_layout.addWidget(QtWidgets.QLabel(str(context.get("selected_mask_name") or "-")), 1, 1)
         root.addWidget(case)
 
         self.models = []
         self.table = QtWidgets.QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(
-            ["Task", "Model", "Configuration", "Labels", "Backend"]
+            ['任务', '模型', '配置', '标签', '后端']
         )
         self.table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
@@ -104,26 +103,26 @@ class PredictionWindow:
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         root.addWidget(self.table, 1)
-        self.tta_check = QtWidgets.QCheckBox("Use mirroring test-time augmentation")
+        self.tta_check = QtWidgets.QCheckBox("启用镜像 TTA")
         self.tta_check.setChecked(False)
-        self.tta_check.setToolTip("May improve accuracy but increases inference time.")
+        self.tta_check.setToolTip("可能提高精度，但会增加推理时间。")
         root.addWidget(self.tta_check)
         self.remote_selector = RemoteComputeSelector(
             self.window, (self.QtCore, self.QtGui, self.QtWidgets)
         )
         root.addWidget(self.remote_selector.group)
         self.status_label = QtWidgets.QLabel(
-            "Loading compatible models in the background..."
+            "正在后台加载兼容模型..."
         )
         self.status_label.setObjectName("hint")
         self.status_label.setWordWrap(True)
         root.addWidget(self.status_label)
         actions = QtWidgets.QHBoxLayout()
         actions.addStretch(1)
-        cancel = QtWidgets.QPushButton("Cancel")
+        cancel = QtWidgets.QPushButton("取消")
         cancel.clicked.connect(self.window.close)
         actions.addWidget(cancel)
-        self.start = QtWidgets.QPushButton("Start Prediction")
+        self.start = QtWidgets.QPushButton("开始预测")
         self.start.setObjectName("primary")
         self.start.clicked.connect(self._submit)
         self.start.setEnabled(False)
@@ -180,11 +179,11 @@ class PredictionWindow:
             self.status_label.setText("Could not load nnU-Net models: {}".format(error))
         elif self.models:
             self.status_label.setText(
-                "A selected Mask only ranks models containing that label. The chosen model predicts all of its output labels; its plans control normalization, spacing, and patching."
+                "所选 Mask 仅用于对包含该标签的模型排序。选中的模型会预测其全部输出标签；归一化、spacing 和 patch 由其 plans 控制。"
             )
         else:
             self.status_label.setText(
-                "No usable nnU-Net model was found. Open Status and Models to inspect training results."
+                "未找到可用的 nnU-Net 模型。请打开“状态”与“模型”查看训练结果。"
             )
 
     def _poll_background_results(self):
@@ -201,9 +200,7 @@ class PredictionWindow:
                     "color: #b42318; font-weight: 600;"
                 )
                 self.status_label.setText(
-                    "Model discovery timed out. The model library may be on an "
-                    "offline or slow drive. Close this window, reconnect the drive, "
-                    "and retry."
+                    "模型发现超时。模型库所在磁盘可能离线或过慢。请关闭本窗口、重新连接磁盘后重试。"
                 )
         if (
             self._submission_deadline
@@ -214,8 +211,7 @@ class PredictionWindow:
             self.start.setEnabled(bool(self.models))
             self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
             self.status_label.setText(
-                "Image path checking timed out. The source drive may be offline; "
-                "relink the source image or reconnect the drive before retrying."
+                "图像路径检查超时。源数据盘可能离线；请重新关联源图像或重连磁盘后重试。"
             )
         try:
             generation, request, error = self._submission_results.get_nowait()
@@ -280,7 +276,7 @@ class PredictionWindow:
             self.start.setEnabled(False)
             self.status_label.setStyleSheet("")
             self.status_label.setText(
-                "Checking the current image location in the background..."
+                "正在后台检查当前图像位置..."
             )
 
             def validate():
@@ -373,7 +369,7 @@ def main() -> int:
         from PySide6 import QtCore, QtGui, QtWidgets
 
         app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
-        configure_application(app, "nnU-Net Prediction")
+        configure_application(app, "nnU-Net 预测")
         app.setStyleSheet(stylesheet())
         window = PredictionWindow(context, (QtCore, QtGui, QtWidgets))
         window.show()
