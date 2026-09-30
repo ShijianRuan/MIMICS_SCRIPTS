@@ -168,6 +168,37 @@ def _image_stem(path):
     return os.path.splitext(name)[0] or "case"
 
 
+def _looks_like_dataset_root(case_dir, profile):
+    """True when a directory holds several case folders but no top-level image.
+
+    A dataset root dropped/pasted into the single-case flow used to fall
+    through to ``image = case_dir`` and be accepted as one giant DICOM
+    series (R61-9). Sampling a capped number of entries is enough: a real
+    case folder's images appear early, and excluded dirs (mcs_output,
+    segmentations, ...) are not cases.
+    """
+    child_case_dirs = 0
+    try:
+        with os.scandir(case_dir) as entries:
+            for index, entry in enumerate(entries):
+                if index >= 64:
+                    break
+                if _has_medical_suffix(entry.name) and entry.is_file():
+                    return False
+                if entry.name.lower().endswith(".dcm") and entry.is_file():
+                    return False
+                if (
+                    entry.is_dir(follow_symlinks=False)
+                    and entry.name not in profile["exclude_dirs"]
+                ):
+                    child_case_dirs += 1
+                    if child_case_dirs >= 2:
+                        return True
+    except OSError:
+        return False
+    return False
+
+
 def discover_single_source(source, profile_id=None):
     """Discover one case outside Mimics so large DICOM folders never block it."""
     from dataset_profiles import load_profile
@@ -232,6 +263,11 @@ def discover_single_source(source, profile_id=None):
                     image = dicom_dir
                     break
             else:
+                # A dataset root (several case folders, no top-level image)
+                # must not be accepted as one giant DICOM series (R61-9).
+                # Return None so the caller tells the user to pick a case.
+                if _looks_like_dataset_root(case_dir, profile):
+                    return None
                 image = case_dir
         allow_masks = True
     else:

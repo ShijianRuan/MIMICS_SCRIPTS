@@ -10117,6 +10117,32 @@ class TestDatasetProfiles(unittest.TestCase):
         self.assertIsNone(ui.summarize_dataset(os.path.join(self.tmp, "nope")))
         self.assertIsNone(ui.summarize_dataset(""))
 
+    def test_discover_single_source_rejects_dataset_root(self):
+        # R61-9: dropping a dataset root into the single-case flow must be
+        # rejected with None, not accepted as one giant DICOM series.
+        import tools.io_path_setup_ui as ui
+        self._make_case("s0001", image="ct.nii.gz")
+        self._make_case("s0002", image="ct.nii.gz")
+        self.assertIsNone(ui.discover_single_source(self.tmp))
+        # A root whose only "cases" are excluded dirs is not a dataset.
+        os.makedirs(os.path.join(self.tmp, "mcs_output", "x"))
+        self.assertIsNone(ui.discover_single_source(self.tmp))
+
+    def test_discover_single_source_still_accepts_real_cases(self):
+        # The dataset-root rejection must not eat genuine case folders:
+        # image file, case dir with image, DICOM subdir, and empty dir
+        # (historical DICOM-series candidate) all keep working.
+        import tools.io_path_setup_ui as ui
+        case = self._make_case("s0003", image="ct.nii.gz")
+        self.assertIsNotNone(ui.discover_single_source(case))
+        dcm_case = self._make_case("s0004", dicom=True)
+        self.assertIsNotNone(ui.discover_single_source(dcm_case))
+        empty = os.path.join(self.tmp, "empty_dir")
+        os.makedirs(empty)
+        result = ui.discover_single_source(empty)
+        self.assertIsNotNone(result)
+        self.assertEqual("dicom_candidate", result["image_type"])
+
     def test_bridge_discovery_tables_follow_profile(self):
         sys.path.insert(0, PROJECT_ROOT)
         import mimics_bridge as mb
