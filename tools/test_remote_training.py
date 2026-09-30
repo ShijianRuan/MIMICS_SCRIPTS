@@ -1016,7 +1016,7 @@ class LocalCompatibilityTests(unittest.TestCase):
                 (QtCore, QtGui, QtWidgets),
             )
             self.assertEqual(selector.selection(), ("local", ""))
-            self.assertIn("existing local training", selector.hint.text())
+            self.assertIn("使用现有本机训练流程", selector.hint.text())
             parent.close()
             app.processEvents()
 

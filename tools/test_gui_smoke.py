@@ -118,7 +118,7 @@ class TestConfigEditorWindow(unittest.TestCase):
         _batch, _manager, config, _presets = _gui_modules()
         editor = config.ConfigEditor(QT)
         editor.window.show()
-        self.assertEqual(editor.window.windowTitle(), "Configuration Editor")
+        self.assertEqual(editor.window.windowTitle(), "配置编辑器")
         # Every documented config file appears with at least its key list.
         self.assertTrue(editor.widgets, "no config sections were built")
         editor.window.close()
@@ -164,7 +164,7 @@ class TestModelManagerWindow(unittest.TestCase):
         _batch, manager, _config, _presets = _gui_modules()
         window = manager.ModelManagerWindow({}, QT)
         window.window.show()
-        self.assertEqual(window.window.windowTitle(), "AI Model Manager")
+        self.assertEqual(window.window.windowTitle(), "AI 模型管理器")
         # The background scan is queued through _results; the window must
         # survive construction without any workspace present.
         window.window.close()
@@ -570,10 +570,9 @@ class TestTrainingSetupPathMemory(unittest.TestCase):
                     # The GPU devices hint must state the validation rule
                     # (device count must match GPU count) that submission
                     # otherwise rejects with an error dialog.
-                    self.assertIn("must match", window.gpu_devices_hint.text())
-                    self.assertIn("the GPU count above", window.gpu_devices_hint.text())
-                    # Fold hint must not promise unverified split semantics.
-                    self.assertIn("five", window.fold_hint.text())
+                    self.assertIn("必须与上方的 GPU 数量一致", window.gpu_devices_hint.text())
+                                        # Fold hint must not promise unverified split semantics.
+                    self.assertIn("五份数据", window.fold_hint.text())
                 finally:
                     window.window.close()
 
@@ -744,7 +743,7 @@ class TestFlexictStopBehaviour(unittest.TestCase):
                 window._stop()
             warn.assert_called_once()
             self.assertIn(
-                "cannot confirm", warn.call_args[0][2].lower()
+                "无法确认", warn.call_args[0][2]
             )
             abandon.assert_called_once_with("X:/j/status.json")
             stop.assert_not_called()
@@ -807,21 +806,21 @@ class TestFlexictStopBehaviour(unittest.TestCase):
                  "remote_state_unknown": True},
             ]
             window._show_selected_job()
-            self.assertEqual("Abandon Locally", window.stop_button.text())
+            self.assertEqual("在本机放弃远程任务", window.stop_button.text())
             self.assertTrue(window.stop_button.isEnabled())
 
             window._job_rows = [
                 {"status": "running", "execution_backend": "local"},
             ]
             window._show_selected_job()
-            self.assertEqual("Stop", window.stop_button.text())
+            self.assertEqual("停止", window.stop_button.text())
             self.assertTrue(window.stop_button.isEnabled())
 
             window._job_rows = [
                 {"status": "completed", "execution_backend": "local"},
             ]
             window._show_selected_job()
-            self.assertEqual("Stop", window.stop_button.text())
+            self.assertEqual("停止", window.stop_button.text())
             self.assertFalse(window.stop_button.isEnabled())
         finally:
             window.window.close()

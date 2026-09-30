@@ -191,7 +191,7 @@ class TrainingSetupWindow:
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(12)
 
-        project, form = self._surface("Task and images")
+        project, form = self._surface("任务与图像")
         self.task_edit = QtWidgets.QLineEdit()
         self.task_edit.setPlaceholderText("例如 abdomen_multi_organ_ct")
         self.task_edit.setToolTip(
@@ -208,8 +208,7 @@ class TrainingSetupWindow:
         form.addWidget(QtWidgets.QLabel("数据集 ID *"), 1, 0)
         form.addWidget(self.dataset_id, 1, 1)
         self.dataset_id_hint = self._hint(
-            "A number identifying this task. A free number is suggested "
-            "automatically; only change it when training a second, unrelated task."
+            "标识该任务的数字编号。系统会自动建议一个空闲编号；仅当训练第二个不同任务时才需要修改。"
         )
         form.addWidget(self.dataset_id_hint, 2, 0, 1, 2)
         self.modality_combo = QtWidgets.QComboBox()
@@ -221,11 +220,11 @@ class TrainingSetupWindow:
         self.dataset_edit.setPlaceholderText("每个病例一个子文件夹的目录")
         form.addWidget(QtWidgets.QLabel("原始图像数据集 *"), 4, 0)
         form.addWidget(
-            self._path_row(self.dataset_edit, "Select original image dataset"), 4, 1
+            self._path_row(self.dataset_edit, "选择原始图像数据集"), 4, 1
         )
         layout.addWidget(project)
 
-        labels, label_layout = self._surface("Labels")
+        labels, label_layout = self._surface("标签")
         self.source_combo = QtWidgets.QComboBox()
         self.source_combo.addItem("各病例目录内的 Mask", "dataset_masks")
         self.source_combo.addItem("此前导出的 Mask", "exported_masks")
@@ -247,7 +246,7 @@ class TrainingSetupWindow:
         self.mcs_label = QtWidgets.QLabel("已保存 .mcs 文件夹 *")
         self.mcs_edit = QtWidgets.QLineEdit()
         label_layout.addWidget(self.mcs_label, 3, 0)
-        self.mcs_widget = self._path_row(self.mcs_edit, "Select saved .mcs folder")
+        self.mcs_widget = self._path_row(self.mcs_edit, "选择已保存的 .mcs 工程")
         label_layout.addWidget(self.mcs_widget, 3, 1)
 
         self.label_table = QtWidgets.QTableWidget(0, 4)
@@ -308,11 +307,11 @@ class TrainingSetupWindow:
         label_layout.addWidget(label_hint, 8, 0, 1, 2)
         layout.addWidget(labels)
 
-        library, library_form = self._surface("Storage")
+        library, library_form = self._surface("存储")
         self.workspace_edit = QtWidgets.QLineEdit()
         library_form.addWidget(QtWidgets.QLabel("模型库"), 0, 0)
         library_form.addWidget(
-            self._path_row(self.workspace_edit, "Select nnU-Net model library"), 0, 1
+            self._path_row(self.workspace_edit, "选择 nnU-Net 模型库"), 0, 1
         )
         library_hint = QtWidgets.QLabel(
             "包含托管作业、原始网格缓存、nnU-Net 预处理数据和便携模型。"
@@ -339,7 +338,7 @@ class TrainingSetupWindow:
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(12)
 
-        planning, form = self._surface("Planning")
+        planning, form = self._surface("规划")
         self.configuration_combo = QtWidgets.QComboBox()
         self.configuration_combo.addItem("3D 全分辨率", "3d_fullres")
         self.configuration_combo.addItem("2D 切片", "2d")
@@ -410,7 +409,7 @@ class TrainingSetupWindow:
         form.addWidget(planning_hint, 7, 0, 1, 2)
         layout.addWidget(planning)
 
-        training, train_form = self._surface("Training")
+        training, train_form = self._surface("训练")
         self.training_group = training
         self.trainer_combo = QtWidgets.QComboBox()
         self.trainer_combo.setEditable(True)
@@ -435,7 +434,7 @@ class TrainingSetupWindow:
         train_form.addWidget(QtWidgets.QLabel("训练轮数 (epoch)"), 2, 0)
         train_form.addWidget(self.epochs_spin, 2, 1)
         train_form.addWidget(self._hint(
-            "More epochs mean longer training. 1000 is the nnU-Net standard."
+            "epoch 越多训练越久。1000 是 nnU-Net 的标准值。"
         ), 3, 0, 1, 2)
         self.fold_combo = QtWidgets.QComboBox()
         for value in ("0", "1", "2", "3", "4", "all"):
@@ -444,9 +443,8 @@ class TrainingSetupWindow:
         train_form.addWidget(QtWidgets.QLabel("Fold"), 4, 0)
         train_form.addWidget(self.fold_combo, 4, 1)
         self.fold_hint = self._hint(
-            "One of five data splits is held out to measure quality. Keep "
-            "Fold 0 unless you need cross-validation; 'all' trains five "
-            "models one after another."
+            "五份数据中的一份被留出用于衡量质量。没有交叉验证需求时保持 "
+            "Fold 0；'all' 会依次训练五个模型。"
         )
         train_form.addWidget(self.fold_hint, 5, 0, 1, 2)
         self.validation_spin = QtWidgets.QDoubleSpinBox()
@@ -456,8 +454,7 @@ class TrainingSetupWindow:
         train_form.addWidget(QtWidgets.QLabel("验证集比例"), 6, 0)
         train_form.addWidget(self.validation_spin, 6, 1)
         train_form.addWidget(self._hint(
-            "Share of cases kept out for quality measurement. 0.2 is "
-            "standard. Not used when Fold is 'all'."
+            "留出用于质量评估的病例比例。0.2 是标准值。Fold 为 'all' 时不使用。"
         ), 7, 0, 1, 2)
         self.workers_spin = QtWidgets.QSpinBox()
         self.workers_spin.setRange(1, 64)
@@ -465,7 +462,7 @@ class TrainingSetupWindow:
         train_form.addWidget(QtWidgets.QLabel("预处理进程数"), 8, 0)
         train_form.addWidget(self.workers_spin, 8, 1)
         train_form.addWidget(self._hint(
-            "CPU workers for preparing the training data. 4 works for most machines."
+            "准备训练数据的 CPU 进程数。多数机器用 4 即可。"
         ), 9, 0, 1, 2)
         self.num_gpus_spin = QtWidgets.QSpinBox()
         self.num_gpus_spin.setRange(1, 16)
@@ -473,8 +470,7 @@ class TrainingSetupWindow:
         train_form.addWidget(QtWidgets.QLabel("GPU 数量"), 10, 0)
         train_form.addWidget(self.num_gpus_spin, 10, 1)
         self.gpu_count_hint = self._hint(
-            "How many GPUs to use in parallel. If you list specific devices "
-            "below, their number must match this count."
+            "并行训练使用的 GPU 数量。若在下方指定了具体设备，其数量必须与此一致。"
         )
         train_form.addWidget(self.gpu_count_hint, 11, 0, 1, 2)
         self.gpu_devices_edit = QtWidgets.QLineEdit()
@@ -485,9 +481,8 @@ class TrainingSetupWindow:
         train_form.addWidget(QtWidgets.QLabel("本机 GPU 设备"), 12, 0)
         train_form.addWidget(self.gpu_devices_edit, 12, 1)
         self.gpu_devices_hint = self._hint(
-            "Leave empty to let training pick the GPUs automatically. "
-            "Example: 0 or 0,1. The number of listed devices must match "
-            "the GPU count above."
+            "留空则由训练自动选择 GPU。示例：0 或 0,1。列出的设备数量"
+            "必须与上方的 GPU 数量一致。"
         )
         train_form.addWidget(self.gpu_devices_hint, 13, 0, 1, 2)
         self.pretrained_edit = QtWidgets.QLineEdit()
