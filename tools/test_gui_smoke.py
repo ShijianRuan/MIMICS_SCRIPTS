@@ -692,5 +692,140 @@ class TestTrainingSetupPathMemory(unittest.TestCase):
                     window.window.close()
 
 
+class TestFlexictStopBehaviour(unittest.TestCase):
+    """R61-17: remote-state-unknown FlexiCT tasks get the same Abandon
+    Locally confirmation as the nnU-Net viewer; plain local Stop stays
+    one-click (spec: normal flow carries no extra dialog)."""
+
+    def _window_with_rows(self, rows):
+        import flexict_status_viewer as viewer
+
+        _AppFixture.app()
+        window = viewer.StatusWindow({"workspace": ""}, QT)
+        window._job_rows = rows
+        # One list item selected at row 0, like a real selection. refresh()
+        # is stubbed so _stop() does not collect from the real workspace.
+        window.jobs.addItem("job")
+        window.jobs.setCurrentRow(0)
+        window.refresh = lambda *args, **kwargs: None
+        return window
+
+    def test_local_stop_calls_stop_job_without_dialog(self):
+        window = self._window_with_rows([
+            {"status_path": "X:/j/status.json", "status": "running",
+             "execution_backend": "local"},
+        ])
+        try:
+            with mock.patch.object(
+                window.QtWidgets.QMessageBox, "warning"
+            ) as warn, mock.patch("flexict_status_viewer.stop_job") as stop, \
+                    mock.patch("flexict_status_viewer.abandon_job") as abandon:
+                window._stop()
+            warn.assert_not_called()
+            stop.assert_called_once_with("X:/j/status.json")
+            abandon.assert_not_called()
+        finally:
+            window.window.close()
+
+    def test_remote_unknown_stop_asks_then_abandons(self):
+        window = self._window_with_rows([
+            {"status_path": "X:/j/status.json", "status": "stopping",
+             "execution_backend": "remote", "remote_state_unknown": True},
+        ])
+        try:
+            with mock.patch.object(
+                window.QtWidgets.QMessageBox, "warning",
+                return_value=QtWidgets.QMessageBox.Yes,
+            ) as warn, mock.patch(
+                "flexict_status_viewer.stop_job"
+            ) as stop, mock.patch(
+                "flexict_status_viewer.abandon_job"
+            ) as abandon:
+                window._stop()
+            warn.assert_called_once()
+            self.assertIn(
+                "cannot confirm", warn.call_args[0][2].lower()
+            )
+            abandon.assert_called_once_with("X:/j/status.json")
+            stop.assert_not_called()
+        finally:
+            window.window.close()
+
+    def test_remote_unknown_stop_cancelled_does_nothing(self):
+        window = self._window_with_rows([
+            {"status_path": "X:/j/status.json", "status": "stopping",
+             "execution_backend": "remote", "remote_state_unknown": True},
+        ])
+        try:
+            with mock.patch.object(
+                window.QtWidgets.QMessageBox, "warning",
+                return_value=QtWidgets.QMessageBox.No,
+            ) as warn, mock.patch(
+                "flexict_status_viewer.stop_job"
+            ) as stop, mock.patch(
+                "flexict_status_viewer.abandon_job"
+            ) as abandon:
+                window._stop()
+            warn.assert_called_once()
+            stop.assert_not_called()
+            abandon.assert_not_called()
+        finally:
+            window.window.close()
+
+    def test_remote_known_state_uses_plain_stop(self):
+        # Remote but the server still answers: stop_job cancels through the
+        # controller; no abandon escape hatch is offered.
+        window = self._window_with_rows([
+            {"status_path": "X:/j/status.json", "status": "running",
+             "execution_backend": "remote", "remote_state_unknown": False},
+        ])
+        try:
+            with mock.patch.object(
+                window.QtWidgets.QMessageBox, "warning"
+            ) as warn, mock.patch(
+                "flexict_status_viewer.stop_job"
+            ) as stop, mock.patch(
+                "flexict_status_viewer.abandon_job"
+            ) as abandon:
+                window._stop()
+            warn.assert_not_called()
+            stop.assert_called_once_with("X:/j/status.json")
+            abandon.assert_not_called()
+        finally:
+            window.window.close()
+
+    def test_stop_button_label_reflects_abandonable_state(self):
+        import flexict_status_viewer as viewer
+
+        _AppFixture.app()
+        window = viewer.StatusWindow({"workspace": ""}, QT)
+        try:
+            window.jobs.addItem("job")
+            window.jobs.setCurrentRow(0)
+            window._job_rows = [
+                {"status": "stopping", "execution_backend": "remote",
+                 "remote_state_unknown": True},
+            ]
+            window._show_selected_job()
+            self.assertEqual("Abandon Locally", window.stop_button.text())
+            self.assertTrue(window.stop_button.isEnabled())
+
+            window._job_rows = [
+                {"status": "running", "execution_backend": "local"},
+            ]
+            window._show_selected_job()
+            self.assertEqual("Stop", window.stop_button.text())
+            self.assertTrue(window.stop_button.isEnabled())
+
+            window._job_rows = [
+                {"status": "completed", "execution_backend": "local"},
+            ]
+            window._show_selected_job()
+            self.assertEqual("Stop", window.stop_button.text())
+            self.assertFalse(window.stop_button.isEnabled())
+        finally:
+            window.window.close()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
