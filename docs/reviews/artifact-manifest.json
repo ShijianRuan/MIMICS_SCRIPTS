@@ -83,9 +83,14 @@
       "sha256": "a6ee0248598cfa39f9215e8d6ab41badce3d6cacd39789e350876a220055c14d"
     },
     {
+      "path": "2026-10-01-annotation-efficiency-roadmap.md",
+      "bytes": 43387,
+      "sha256": "efae8bd38d926a7bdee346d12d63df138ca56a7cbd19f69087cf3a6e4d177067"
+    },
+    {
       "path": "README.md",
-      "bytes": 2852,
-      "sha256": "bb025ff024c61a25f62de3598ad8389577f62777f809cd854749182e13fc5da5"
+      "bytes": 3484,
+      "sha256": "4d1139c6422af8a58d53a220f9b9d82c752f030597253eb29026e06268cbf7c2"
     },
     {
       "path": "backlog.json",
@@ -94,8 +99,8 @@
     },
     {
       "path": "development-handoff.md",
-      "bytes": 16027,
-      "sha256": "09d48058009e9776d080067f144467320727f53a4142ce36c6e15bacf7ffcd47"
+      "bytes": 16342,
+      "sha256": "de5e2bc4228ba062ce0803b6331053e939404eb0f7dd36514d17b1671024e2f2"
     },
     {
       "path": "evidence-guide.md",
@@ -104,11 +109,31 @@
     },
     {
       "path": "test-plan.md",
-      "bytes": 16677,
-      "sha256": "075fa03e3eeb3b2ccdd9fc864e77790dc7ab477358fa02574a28b1b027b10931"
+      "bytes": 16914,
+      "sha256": "99da23ea159c93ed697437ac19ff91301064c69aa0d97717e66e857c5a4fdb0b"
     }
   ],
   "baseline_source_files": [
+    {
+      "path": "docs/MimicsHelp_MD/pages/3D Interpolate.md",
+      "sha256": "b9e6aa2cb14a0dbf6b72bd1a2c80c2acfeea16a424dfed68a774548c9ac375da"
+    },
+    {
+      "path": "docs/MimicsHelp_MD/pages/Mimics Reference Guide/Applying the registration.md",
+      "sha256": "1d9bca61f708b180e69fa34e2982eb88a61dde0c8131cd7a9b3db89de6c83c45"
+    },
+    {
+      "path": "docs/MimicsHelp_MD/pages/Mimics Reference Guide/General Shortcuts.md",
+      "sha256": "90050db7f9fe58fea205e90e3ac5df4a31dbaacc62d263198d18a7df929288a4"
+    },
+    {
+      "path": "docs/MimicsHelp_MD/pages/Mimics Reference Guide/Image Registration.md",
+      "sha256": "169f140d132c9f04b59d9f38d9a0d7050d7241dfcd63379ef710207f96895d90"
+    },
+    {
+      "path": "docs/MimicsHelp_MD/pages/Mimics Reference Guide/Multiple slice edit.md",
+      "sha256": "51273f103281cd7f507665292b233da4f58fbd07d50a664b337866afca719708"
+    },
     {
       "path": "docs/Mimics_API_Documentation.md",
       "sha256": "64407239cf481a48ef1ff3680578e13bb37eda1138400e5a7100becaa50efb99"
@@ -128,6 +153,10 @@
     {
       "path": "mimics_bridge.py",
       "sha256": "0922ebf13a03f12749cf8a30380e6250b8810d55802368a07a71dae3f70e91cc"
+    },
+    {
+      "path": "nninteractive_bridge.py",
+      "sha256": "0b2b158f82b8ab63a9359c8b2885272f7efdc2d8d19e3ceec03a6dc51878285c"
     },
     {
       "path": "remote/requirements.txt",
@@ -150,6 +179,10 @@
       "sha256": "f50c5334fe7e59e3c05aef26bac2e39ff75e0c78e682dbee0cc6758e67970554"
     },
     {
+      "path": "runtime_py35/mask_identifier.py",
+      "sha256": "c2078778d0eada7eb069eedd7433fa16a1e38af65fa1956cb9f246f7b60200a9"
+    },
+    {
       "path": "runtime_py35/mask_import.py",
       "sha256": "d5866fa1ef90df9b8b5b201fadce94d9f379fa48f6bf8e24d887ed24ffdf2caf"
     },
@@ -168,6 +201,10 @@
     {
       "path": "runtime_py35/sync_missing_masks_batch.py",
       "sha256": "1f93ec1329da579f3aac2161565f635b6660dbf8666e18a3c41a36dba844d585"
+    },
+    {
+      "path": "runtime_py35/window_level_mimics.py",
+      "sha256": "6748ab8a71f028d71bd9f52c830349b9e6161c6e32b3f039e86a8ec8ea2447e9"
     },
     {
       "path": "tools/collect_diagnostics.py",
@@ -217,5 +254,6 @@
       "path": "tools/ui_theme.py",
       "sha256": "1778def756681fd99d3fe4de6a446f71106484d720dd14878482a7db0cc00cc4"
     }
-  ]
+  ],
+  "updated_date": "2026-10-01"
 }
