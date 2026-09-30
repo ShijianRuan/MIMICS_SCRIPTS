@@ -14108,6 +14108,72 @@ class TestUiThemePalette(unittest.TestCase):
             self.assertRegex(ui_theme.PALETTE[token], r"^#[0-9a-fA-F]{6}$")
 
 
+class TestForeignScriptIntegration(unittest.TestCase):
+    """R61-22: the batch inspection/sync tools that grew up untracked are now
+    version-controlled. This suite pins the contracts that make them safe to
+    keep: they must go through the official background-Mimics locks, the sync
+    must be stoppable and publish atomically, and neither runtime script may
+    regress to Py3.5-incompatible syntax (Mimics embeds CPython 3.5).
+    """
+
+    def _source(self, relative):
+        path = os.path.join(PROJECT_ROOT, relative)
+        with open(path, "r", encoding="utf-8") as handle:
+            return handle.read()
+
+    def test_runtime_scripts_are_py35_clean(self):
+        """No f-strings / pathlib / walrus in the background-Mimics scripts;
+        py3.5compileall on a 3.13 interpreter cannot catch these."""
+        import ast
+        import re as _re
+
+        for name in ("inspect_mcs_batch.py", "sync_missing_masks_batch.py"):
+            tree = ast.parse(self._source(os.path.join("runtime_py35", name)))
+            bad_nodes = []
+            for node in ast.walk(tree):
+                if isinstance(node, ast.JoinedStr):
+                    bad_nodes.append("f-string at line {}".format(node.lineno))
+                if isinstance(node, ast.NamedExpr):
+                    bad_nodes.append("walrus at line {}".format(node.lineno))
+            self.assertEqual(
+                [], bad_nodes, "{}: {}".format(name, bad_nodes)
+            )
+            self.assertNotIn(
+                "from pathlib", self._source(os.path.join("runtime_py35", name)),
+                "{} must not import pathlib (Py3.5)".format(name),
+            )
+
+    def test_launchers_acquire_official_background_locks(self):
+        """Both tools must serialize against real import/export jobs through
+        _acquire_background_mimics_locks — running beside an official job and
+        corrupting a shared .mcs was the risk of leaving them untracked."""
+        for name in ("inspect_mcs_projects.py", "sync_missing_masks.py"):
+            source = self._source(os.path.join("tools", name))
+            self.assertIn(
+                "_acquire_background_mimics_locks", source,
+                "{} no longer uses the official background-Mimics locks".format(name),
+            )
+            # A lock that is acquired must be released if the launch fails.
+            self.assertIn("lock.release()", source)
+
+    def test_sync_runtime_stops_between_cases_and_publishes_atomically(self):
+        """Failure paths of the sync job: (1) the stop file is honored before
+        each case, so a stuck 600-case batch is cancellable; (2) the finished
+        .mcs is published via os.replace from a staging name, so an interrupted
+        save can never leave a half-written project behind."""
+        source = self._source(os.path.join("runtime_py35", "sync_missing_masks_batch.py"))
+        self.assertIn('config.get("stop_path")', source)
+        self.assertIn("os.replace(staging_path, output_path)", source)
+        self.assertIn(".creating.", source)  # staging name is recognizable
+
+    def test_sync_launcher_scopes_locks_to_all_written_roots(self):
+        """The sync launcher locks the mcs dir, the source root AND the
+        output dir — writing an output tree nobody locks invites races."""
+        source = self._source(os.path.join("tools", "sync_missing_masks.py"))
+        self.assertIn("scopes.append(source_root)", source)
+        self.assertIn("scopes.append(Path(args.output_dir)", source)
+
+
 if __name__ == "__main__":
     print("Mimics-Script Comprehensive Tests")
     print("=" * 60)

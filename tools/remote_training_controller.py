@@ -37,6 +37,7 @@ try:
         RemoteCommandError,
         RemoteComputeError,
         SSHSession,
+        assert_gpus_not_busy,
         container_runtime_command,
         docker_gpu_request,
         get_profile,
