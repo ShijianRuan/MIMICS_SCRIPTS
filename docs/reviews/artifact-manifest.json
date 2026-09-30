@@ -83,14 +83,19 @@
       "sha256": "a6ee0248598cfa39f9215e8d6ab41badce3d6cacd39789e350876a220055c14d"
     },
     {
+      "path": "2026-10-01-ai-integration-shortlist.md",
+      "bytes": 20513,
+      "sha256": "cbe5536fdd0f24c4f1f2699f11c77138c3cc418e29a80d5c81ba687ee620dc47"
+    },
+    {
       "path": "2026-10-01-annotation-efficiency-roadmap.md",
-      "bytes": 43387,
-      "sha256": "efae8bd38d926a7bdee346d12d63df138ca56a7cbd19f69087cf3a6e4d177067"
+      "bytes": 43639,
+      "sha256": "ffef480daa7ad0670ff25c32faa71c6f15b9bb26ae526083a1b001a617d78723"
     },
     {
       "path": "README.md",
-      "bytes": 3484,
-      "sha256": "4d1139c6422af8a58d53a220f9b9d82c752f030597253eb29026e06268cbf7c2"
+      "bytes": 3732,
+      "sha256": "7d75f009997ada5b3f4f77d3532fcbebddfa6e0e93f05d5f494e7fcdeb1e9c27"
     },
     {
       "path": "backlog.json",
