@@ -4115,6 +4115,54 @@ class TestStopBackgroundServices(unittest.TestCase):
         result = _request_queue_stop()
         self.assertIsInstance(result, list)
 
+    def test_scan_finds_marker_inside_mimics_runtime_and_skips_env(self):
+        """R61-11: the queue-dir scan must PRUNE vendor/env trees while
+        still walking .mimics_runtime (import_queues live there). The old
+        per-dirpath "continue" descended into every python_env subtree."""
+        import mimics_stop_background as msb
+
+        queue = os.path.join(self.tmp, ".mimics_runtime", "import_queues", "out_abc")
+        os.makedirs(queue)
+        with open(os.path.join(queue, "_mcs_queue_active.json"), "w") as handle:
+            handle.write('{"output_dir": "X:/out"}')
+        # Noise trees that must be pruned, not walked.
+        for name in ("python_env", "nninteractive_env", ".git", "__pycache__", "integrations"):
+            noise = os.path.join(self.tmp, name, "deep", "deeper")
+            os.makedirs(noise)
+            with open(os.path.join(noise, "_mcs_queue_active.json"), "w") as handle:
+                handle.write('{"output_dir": "SHOULD_NOT_APPEAR"}')
+
+        old_root = msb._project_root
+        try:
+            msb._project_root = lambda: self.tmp
+            result = msb._scan_filesystem_for_queue_dirs()
+        finally:
+            msb._project_root = old_root
+        self.assertEqual(["X:/out"], result)
+
+    def test_stop_registered_kill_ladder_runs_on_daemon_thread(self):
+        """R61-11: terminate_registered_process polls grace windows per
+        process (seconds each); running the ladder on the GUI thread froze
+        Mimics for the whole ladder. It must run on a daemon thread."""
+        import mimics_stop_background as msb
+
+        called = []
+        old_stop = msb._stop_registered_processes
+        old_log = msb._mimics_log
+        try:
+            msb._stop_registered_processes = lambda: called.append(1) or {
+                "terminated": [], "failed": [],
+            }
+            msb._mimics_log = lambda level, message: None
+            thread = msb._stop_registered_processes_async()
+            thread.join(2.0)
+        finally:
+            msb._stop_registered_processes = old_stop
+            msb._mimics_log = old_log
+        self.assertTrue(thread.daemon)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual([1], called)
+
     def test_stop_import_entry_is_narrower_than_stop_all(self):
         import mimics_stop_background as msb
 

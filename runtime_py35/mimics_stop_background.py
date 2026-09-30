@@ -258,13 +258,15 @@ def _scan_filesystem_for_queue_dirs():
     result = []
     root = _project_root()
 
-    # 1. Scan for _mcs_queue_active.json files under the project root
-    for dirpath, _dirnames, filenames in os.walk(root):
-        # Skip deep vendor/env trees
-        if any(skip in dirpath.replace(os.sep, "/") for skip in (
-            "python_env", "nninteractive_env", ".git", "__pycache__", "integrations",
-        )):
-            continue
+    # 1. Scan for _mcs_queue_active.json files under the project root.
+    # Prune dirnames BEFORE descending (R61-11): the old per-dirpath
+    # "continue" still walked every vendor/env subtree and only skipped
+    # processing it, so a Stop click scanned python_env's whole tree.
+    # .mimics_runtime is NOT skipped: queue runtime dirs under
+    # import_queues/ hold the active markers this scan exists to find.
+    skip_names = ("python_env", "nninteractive_env", ".git", "__pycache__", "integrations")
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [name for name in dirnames if name not in skip_names]
         if "_mcs_queue_active.json" in filenames:
             state = runtime_common.read_json(os.path.join(dirpath, "_mcs_queue_active.json"), {}) or {}
             if state.get("output_dir"):
@@ -276,7 +278,7 @@ def _scan_filesystem_for_queue_dirs():
         # Limit depth to avoid scanning huge model directories
         depth = dirpath.replace(root, "").count(os.sep)
         if depth > 6:
-            _dirnames[:] = []
+            dirnames[:] = []
 
     # 2. Also check the runtime directory for any stored queue info
     runtime = os.path.join(root, ".mimics_runtime")
@@ -1215,6 +1217,33 @@ def _stop_registered_processes():
     return summary
 
 
+def _stop_registered_processes_async():
+    """Run the registry kill ladder on a daemon thread (R61-11).
+
+    terminate_registered_process polls a 2s grace window plus a 10s force
+    wait per process; with several registered processes that froze the
+    Mimics GUI for the whole ladder. The ladder only touches the registry
+    files and foreign processes (no Mimics API), so it is thread-safe.
+    The result is logged when the thread finishes.
+    """
+    def _run():
+        summary = _stop_registered_processes()
+        terminated = len(summary.get("terminated") or [])
+        failed = len(summary.get("failed") or [])
+        if terminated or failed:
+            _mimics_log(
+                logging.INFO,
+                "Registered process termination finished: {0} terminated, {1} failed.".format(
+                    terminated, failed
+                ),
+            )
+
+    thread = threading.Thread(target=_run)
+    thread.daemon = True
+    thread.start()
+    return thread
+
+
 def stop_background_processes():
     if os.name != "nt":
         return False
@@ -1231,7 +1260,15 @@ def stop_background_processes():
     # are provably ours (PID + start marker), so they can be terminated
     # without the conservative cmdline heuristics below. The foreground
     # Mimics (this process) is protected by role: it is never registered.
-    registry_killed = _stop_registered_processes()
+    # The ladder itself is slow (grace polls + force waits per process), so
+    # it runs on a daemon thread; only the cheap registry snapshot that
+    # feeds the user-visible count stays on the GUI thread.
+    try:
+        registry_records = runtime_common.snapshot_processes(_project_root())
+    except Exception:
+        registry_records = []
+    registry_count = len(registry_records)
+    _stop_registered_processes_async()
 
     stop_log = os.path.join(_runtime_dir(), "stop_background_last.json")
 
@@ -1318,8 +1355,8 @@ def stop_background_processes():
 
     _mimics_log(
         logging.INFO,
-        "Stop request submitted. Registered process(es) terminated: {0}. Queue stop markers: {1}. Owned roots: {2}. Report: {3}".format(
-            len(registry_killed.get("terminated") or []),
+        "Stop request submitted. Registered process(es) targeted: {0}. Queue stop markers: {1}. Owned roots: {2}. Report: {3}".format(
+            registry_count,
             len(stopped_queues),
             len(owned_roots),
             stop_log,
