@@ -8027,6 +8027,56 @@ class TestNewFeatures(unittest.TestCase):
         self.assertFalse(mimics_stop_background._lock_is_import_creation(
             {"kind": "train", "owner": "nnU-Net training"}))
 
+    def test_stop_background_import_requires_confirmation_and_states_scope(self):
+        """R61-6: Stop Import must confirm before stopping and spell out that
+        every queue (not just the current one) is affected. Cancelling the
+        confirmation must not write any stop marker."""
+        import mimics_stop_background as msb
+
+        answers = []
+
+        class FakeDialogs:
+            @staticmethod
+            def question_box(message=None, buttons=None, title=None,
+                             ui_blocking=None):
+                answers.append(str(message))
+                return "Cancel"
+
+            @staticmethod
+            def message_box(message=None, title=None, ui_blocking=None):
+                pass
+
+        class FakeLogging:
+            @staticmethod
+            def log_user_message(level=None, message=None):
+                pass
+
+        class FakeMimics:
+            dialogs = FakeDialogs()
+            logging = FakeLogging()
+
+        original_mimics = sys.modules.get("mimics")
+        original_stop = msb.stop_background_import
+        sys.modules["mimics"] = FakeMimics
+        # Bind the fake on the already-imported module too (module-level
+        # "import mimics" keeps a direct reference).
+        original_module_mimics = msb.mimics
+        msb.mimics = FakeMimics
+        msb.stop_background_import = lambda: (_ for _ in ()).throw(
+            AssertionError("stop ran despite a cancelled confirmation")
+        )
+        try:
+            self.assertEqual(0, msb.main_stop_import())
+            self.assertEqual(1, len(answers))
+            # The scope (all queues, not just the current one) must be stated.
+            self.assertIn("every import queue", answers[0])
+        finally:
+            sys.modules["mimics"] = original_mimics
+            if original_mimics is None:
+                sys.modules.pop("mimics", None)
+            msb.mimics = original_module_mimics
+            msb.stop_background_import = original_stop
+
     # ================================================================
     # Preprocessing consistency
     # ================================================================

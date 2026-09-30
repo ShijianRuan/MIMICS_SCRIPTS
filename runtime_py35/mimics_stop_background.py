@@ -1438,6 +1438,23 @@ def main():
 
 
 def main_stop_import():
+    # Stop is global (every discovered import queue, not just the current
+    # one), so the annotator must confirm with the scope spelled out. Same
+    # question_box pattern as the FlexiCT stop entry.
+    answer = mimics.dialogs.question_box(
+        message=(
+            "Stop all running imports?\n\n"
+            "This stops every import queue on this workstation, not just the "
+            "current one: in-progress cases are cancelled, the background "
+            "Mimics that creates .mcs files is shut down, and already "
+            "finished projects are kept. Prepared data is kept for retry."
+        ),
+        buttons="Stop Imports;Cancel",
+        title="Stop Background Import",
+        ui_blocking=True,
+    )
+    if answer != "Stop Imports":
+        return 0
     result = stop_background_import()
     target = result.get("target_pid") if isinstance(result, dict) else None
     queues = result.get("stopped_queues", []) if isinstance(result, dict) else []
