@@ -6443,6 +6443,91 @@ class TestSourceImagePathEquivalence(unittest.TestCase):
             )
             self.assertEqual(started, [True])
 
+    def test_call_mimics_bridge_pumps_gui_during_wait(self):
+        # R61-26: the bridge round-trip must run communicate() on a wait
+        # thread while the GUI thread pumps, so a long bridge call cannot
+        # freeze Mimics.
+        import nninteractive_mimics as module
+
+        pumps = []
+        started = threading.Event()
+
+        class _FakeProcess(object):
+            returncode = 0
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def communicate(self, input=None, timeout=None):
+                started.set()
+                # Hold the "bridge" busy long enough for at least one pump
+                # iteration (poll interval is 0.05 s).
+                time.sleep(0.3)
+                return (b'{"status": "ok"}', b"")
+
+        with mock.patch.object(
+            module, "_mimics_bridge_paths", return_value=("py", "bridge.py")
+        ), mock.patch.object(
+            module.subprocess, "Popen", _FakeProcess
+        ), mock.patch.object(
+            module, "_update_gui", side_effect=lambda: pumps.append(1)
+        ):
+            result = module._call_mimics_bridge({}, {"action": "x"})
+        self.assertEqual("ok", result["status"])
+        started.wait(2.0)
+        self.assertGreaterEqual(len(pumps), 1)
+
+    def test_call_mimics_bridge_timeout_kills_and_raises(self):
+        # Failure path: the bridge exceeding its deadline must kill the
+        # process and raise, not hang the GUI pump loop forever.
+        import nninteractive_mimics as module
+
+        killed = []
+
+        class _FakeProcess(object):
+            returncode = 0
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def communicate(self, input=None, timeout=None):
+                raise subprocess.TimeoutExpired("bridge.py", timeout)
+
+            def kill(self):
+                killed.append(1)
+
+        with mock.patch.object(
+            module, "_mimics_bridge_paths", return_value=("py", "bridge.py")
+        ), mock.patch.object(
+            module.subprocess, "Popen", _FakeProcess
+        ), mock.patch.object(module, "_update_gui"):
+            with self.assertRaisesRegex(RuntimeError, "timed out"):
+                module._call_mimics_bridge(
+                    {}, {"action": "x"}, timeout_seconds=0
+                )
+        self.assertEqual(1, len(killed))
+
+    def test_call_mimics_bridge_nonzero_exit_reports_stderr(self):
+        # Failure path: a failing bridge surfaces its stderr, not a generic
+        # opaque error, so users can act on the actual cause.
+        import nninteractive_mimics as module
+
+        class _FakeProcess(object):
+            returncode = 3
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def communicate(self, input=None, timeout=None):
+                return (b"", b"boom: no model")
+
+        with mock.patch.object(
+            module, "_mimics_bridge_paths", return_value=("py", "bridge.py")
+        ), mock.patch.object(
+            module.subprocess, "Popen", _FakeProcess
+        ), mock.patch.object(module, "_update_gui"):
+            with self.assertRaisesRegex(RuntimeError, "boom: no model"):
+                module._call_mimics_bridge({}, {"action": "x"})
 
 
 # ============================================================================
@@ -13571,12 +13656,7 @@ class TestGuiThreadBlockingContract(unittest.TestCase):
     KNOWN_VIOLATIONS = {
         # nnInteractive prompt-mask crop: user-interaction bbox-bounded, so
         # typically tiny; converting it would add a copy for no GUI win.
-        "nninteractive_mimics.py:2490": "R61-12",
-        # nnInteractive synchronous bridge round-trip (Popen + communicate,
-        # timeout up to 1800s) reachable from the async monitor tick -
-        # tracked separately from R61-12; needs the wait-thread pattern.
-        "nninteractive_mimics.py:1387": "R61-26",
-        "nninteractive_mimics.py:1393": "R61-26",
+        "nninteractive_mimics.py:2513": "R61-12",
     }
 
     def test_no_tick_function_blocks_the_gui_thread(self):

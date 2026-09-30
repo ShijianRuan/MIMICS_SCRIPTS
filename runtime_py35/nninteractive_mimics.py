@@ -1383,15 +1383,38 @@ def _call_mimics_bridge(config, payload, timeout_seconds=1800):
         stderr=subprocess.PIPE,
         **_hidden_process_kwargs()
     )
-    try:
-        stdout, stderr = process.communicate(
-            input=json.dumps(payload).encode("utf-8"),
-            timeout=int(timeout_seconds),
-        )
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.communicate()
+    # The bridge round-trip (up to bridge_timeout_seconds) must never freeze
+    # the Mimics GUI (R61-26). communicate() runs on a wait thread while the
+    # GUI thread pumps the message loop; the caller's busy/operation guards
+    # already prevent re-entry during the pump.
+    outcome = {}
+
+    def _communicate():
+        try:
+            outcome["pair"] = process.communicate(
+                input=json.dumps(payload).encode("utf-8"),
+                timeout=int(timeout_seconds),
+            )
+        except subprocess.TimeoutExpired:
+            # Flag first: the post-kill cleanup communicate() may itself
+            # raise (e.g. already-dead pipe), and losing the flag would
+            # misreport the timeout as a generic bridge failure.
+            outcome["timeout"] = True
+            try:
+                process.kill()
+                process.communicate()
+            except Exception:
+                pass
+
+    waiter = threading.Thread(target=_communicate)
+    waiter.daemon = True
+    waiter.start()
+    while waiter.is_alive():
+        _update_gui()
+        waiter.join(0.05)
+    if outcome.get("timeout"):
         raise RuntimeError("mimics_bridge.py timed out")
+    stdout, stderr = outcome.get("pair", (None, None))
     if process.returncode != 0:
         err = stderr.decode("utf-8", "replace") if stderr else ""
         raise RuntimeError("mimics_bridge.py failed (exit {}): {}".format(process.returncode, err))
