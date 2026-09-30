@@ -213,4 +213,6 @@ nnInteractive 交互标注+任务微调）各有一份可信的"真实有效"证
 | 基线项 | 数值 | 条件 |
 |---|---|---|
 | 批量导入耗时 | 14.8 min（≈40s/例） | 22 例真实 CT，后台 Mimics 单进程复用，Z: 网络盘读取 |
-| 单例推理耗时 | 待测 | Phase 2 held-out 推理时测 |
+| nnInteractive 点 prompt 推理（单次） | 热状态 1.7–9s；冷启动到首个可用预测 ~9 min | RTX 3060，官方/微调模型，1 正点+1 负点 |
+| nnInteractive few-shot 微调 | 78.9 min（20 epochs，6 训练+2 验证例） | RTX 3060，CLoPA-IN，官方模型为基座 |
+| nnU-Net 单例推理 | 待测 | Phase 2 held-out 推理时测 |
