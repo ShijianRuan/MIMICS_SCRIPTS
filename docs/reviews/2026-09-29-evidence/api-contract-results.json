@@ -1,0 +1,18 @@
+{
+  "al": {
+    "current_project_loaded": true,
+    "current_project_modified": true,
+    "get_active_project_available": false,
+    "open_project_calls": 1,
+    "guard_message_calls": 0,
+    "returned_success": true
+  },
+  "undo_import": {
+    "current_project_loaded": true,
+    "current_project_modified": true,
+    "get_active_project_available": false,
+    "open_project_calls": 1,
+    "guard_message_calls": 0,
+    "returned_success": true
+  }
+}

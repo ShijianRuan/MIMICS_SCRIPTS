@@ -1,0 +1,72 @@
+{
+  "schema": "regression_matrix.v1",
+  "profile": "fast",
+  "started_at": "2026-09-29T19:44:23",
+  "total_suites": 5,
+  "failed_suites": 0,
+  "results": [
+    {
+      "name": "nninteractive_bridge_prompts",
+      "command": [
+        "<REVIEW_PYTHON>",
+        "-m",
+        "pytest",
+        "-q",
+        "tools/test_nninteractive_bridge_prompts.py"
+      ],
+      "status": "pass",
+      "exit_code": 0,
+      "duration_seconds": 0.4,
+      "output_tail": "...............                                                          [100%]\n15 passed in 0.14s",
+      "_started_at": "2026-09-29T19:44:23"
+    },
+    {
+      "name": "interactive_algorithms",
+      "command": [
+        "<REVIEW_PYTHON>",
+        "tools/test_interactive_algorithms.py"
+      ],
+      "status": "pass",
+      "exit_code": 0,
+      "duration_seconds": 0.2,
+      "output_tail": ".......ss.......\n----------------------------------------------------------------------\nRan 16 tests in 0.072s\n\nOK (skipped=2)",
+      "_started_at": "2026-09-29T19:44:23"
+    },
+    {
+      "name": "collect_diagnostics",
+      "command": [
+        "<REVIEW_PYTHON>",
+        "tools/test_collect_diagnostics.py"
+      ],
+      "status": "pass",
+      "exit_code": 0,
+      "duration_seconds": 0.1,
+      "output_tail": "...........\n----------------------------------------------------------------------\nRan 11 tests in 0.038s\n\nOK",
+      "_started_at": "2026-09-29T19:44:23"
+    },
+    {
+      "name": "geometry_manifest_regressions",
+      "command": [
+        "<REVIEW_PYTHON>",
+        "tools/test_geometry_manifest_regressions.py"
+      ],
+      "status": "pass",
+      "exit_code": 0,
+      "duration_seconds": 6.3,
+      "output_tail": "......\n----------------------------------------------------------------------\nRan 6 tests in 0.038s\n\nOK",
+      "_started_at": "2026-09-29T19:44:23"
+    },
+    {
+      "name": "gui_smoke",
+      "command": [
+        "<REVIEW_PYTHON>",
+        "tools/test_gui_smoke.py"
+      ],
+      "status": "pass",
+      "exit_code": 0,
+      "duration_seconds": 16.4,
+      "output_tail": "test_missing_dirs_window_is_empty_not_crashing (__main__.TestBatchStatusWindow.test_missing_dirs_window_is_empty_not_crashing) ... qt.qpa.fonts: Populating font family aliases took 148 ms. Replace uses of missing font family \"Sans Serif\" with one that exists to avoid this cost. \nok\ntest_window_builds_and_refreshes_rows (__main__.TestBatchStatusWindow.test_window_builds_and_refreshes_rows) ... ok\ntest_editor_builds_and_lists_configs (__main__.TestConfigEditorWindow.test_editor_builds_and_lists_configs) ... This plugin does not support propagateSizeHints()\nok\ntest_editor_readonly_keys_not_editable (__main__.TestConfigEditorWindow.test_editor_readonly_keys_not_editable) ... ok\ntest_text_changed_goes_through_debounce_timer (__main__.TestIoPathSetupDebounce.test_text_changed_goes_through_debounce_timer) ... ok\ntest_manager_builds_with_default_workspaces (__main__.TestModelManagerWindow.test_manager_builds_with_default_workspaces) ... ok\ntest_flexict_single_case_submission_is_rejected (__main__.TestTrainingSetupPathMemory.test_flexict_single_case_submission_is_rejected) ... ok\ntest_flexict_window_prefills_remembered_paths (__main__.TestTrainingSetupPathMemory.test_flexict_window_prefills_remembered_paths) ... ok\ntest_nnunet_form_fields_carry_one_line_explanations (__main__.TestTrainingSetupPathMemory.test_nnunet_form_fields_carry_one_line_explanations) ... ok\ntest_nnunet_training_group_collapsed_by_default (__main__.TestTrainingSetupPathMemory.test_nnunet_training_group_collapsed_by_default) ... ok\ntest_nnunet_window_context_overrides_remembered_paths (__main__.TestTrainingSetupPathMemory.test_nnunet_window_context_overrides_remembered_paths) ... ok\ntest_nnunet_window_prefills_remembered_paths (__main__.TestTrainingSetupPathMemory.test_nnunet_window_prefills_remembered_paths) ... ok\ntest_batch_viewer_background_refresh_applies_without_freezing (__main__.TestViewerNonBlockingRefresh.test_batch_viewer_background_refresh_applies_without_freezing) ... ok\ntest_batch_viewer_collect_error_does_not_break_window (__main__.TestViewerNonBlockingRefresh.test_batch_viewer_collect_error_does_not_break_window) ... ok\ntest_flexict_viewer_collects_on_worker_thread (__main__.TestViewerNonBlockingRefresh.test_flexict_viewer_collects_on_worker_thread) ... ok\ntest_hidden_viewer_slows_periodic_ticks_but_request_stays_direct (__main__.TestViewerNonBlockingRefresh.test_hidden_viewer_slows_periodic_ticks_but_request_stays_direct)\nHidden/minimized windows poll at the heartbeat rate, not 2s. ... ok\ntest_nnunet_viewer_collects_on_worker_thread (__main__.TestViewerNonBlockingRefresh.test_nnunet_viewer_collects_on_worker_thread) ... ok\ntest_shown_viewer_keeps_fast_interval (__main__.TestViewerNonBlockingRefresh.test_shown_viewer_keeps_fast_interval)\nA visible (or non-widget) parent keeps the configured interval. ... ok\ntest_preset_editor_builds_and_shows_current_presets (__main__.TestWindowLevelPresetEditor.test_preset_editor_builds_and_shows_current_presets) ... This plugin does not support propagateSizeHints()\nok\ntest_preset_editor_edit_updates_row (__main__.TestWindowLevelPresetEditor.test_preset_editor_edit_updates_row) ... ok\n\n----------------------------------------------------------------------\nRan 20 tests in 6.268s\n\nOK",
+      "_started_at": "2026-09-29T19:44:23"
+    }
+  ]
+}

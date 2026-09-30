@@ -1,0 +1,38 @@
+{
+  "repair_pip_arguments": [
+    "yaml",
+    "onnxruntime"
+  ],
+  "broken_torch_health": {
+    "torch_import": "error",
+    "status": "ok",
+    "all_ok": true
+  },
+  "mixed_series": {
+    "status": "ok",
+    "source_image_shape": [
+      4,
+      4,
+      6
+    ]
+  },
+  "multi_frame": {
+    "status": "ok",
+    "source_image_shape": [
+      4,
+      4,
+      1
+    ]
+  },
+  "mask_import_finish_message_threads": [
+    "MimicsOwnedProcessReaper"
+  ],
+  "flexict_inference_backbone_dependency": "<REPO>/integrations/flexict-finetune/trainers/../weights/flexict_2d/model.safetensors",
+  "model_manager_selection": {
+    "row": 0,
+    "use_enabled": false,
+    "remove_enabled": false
+  },
+  "al_empty_primary_enabled": false,
+  "al_nonempty_table": "NameError: name 'QtWidgets' is not defined"
+}

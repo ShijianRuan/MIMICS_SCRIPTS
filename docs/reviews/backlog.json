@@ -1,0 +1,812 @@
+{
+  "schema": "mimics_review_backlog.v1",
+  "review_date": "2026-09-30",
+  "baseline_commit": "36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32",
+  "scope": "review_and_documentation_only",
+  "priority_definitions": {
+    "P0": "具体条件下丢失人工工作或改写源数据，交付阻断",
+    "P1": "对应入口交付前修复的数据/工作流/可用性问题",
+    "P2": "效率、体验、验证或特定条件风险"
+  },
+  "evidence_definitions": {
+    "A": "受控复现；不是Windows/Mimics实机验收",
+    "B": "源码链明确，目标环境未验",
+    "C": "需测量/确认的设计风险"
+  },
+  "work_packages": {
+    "W01": {
+      "depends_on": [],
+      "goal": "源数据不变与病例唯一身份"
+    },
+    "W02": {
+      "depends_on": [],
+      "goal": "项目和撤销所有权"
+    },
+    "W03": {
+      "depends_on": [
+        "W01"
+      ],
+      "goal": "来源几何和标签语义"
+    },
+    "W04": {
+      "depends_on": [
+        "W02",
+        "W03"
+      ],
+      "goal": "预测与主动学习闭环"
+    },
+    "W05": {
+      "depends_on": [],
+      "goal": "部署与模型可迁移"
+    },
+    "W06": {
+      "depends_on": [
+        "W02",
+        "W03"
+      ],
+      "goal": "任务恢复和输出一致性"
+    },
+    "W07": {
+      "depends_on": [
+        "W01",
+        "W03"
+      ],
+      "goal": "训练与验证语义"
+    },
+    "W08": {
+      "depends_on": [],
+      "goal": "日常操作与视觉"
+    },
+    "W09": {
+      "depends_on": [
+        "W03",
+        "W04"
+      ],
+      "goal": "资源和交互性能"
+    },
+    "W10": {
+      "depends_on": [
+        "W03",
+        "W04",
+        "W08"
+      ],
+      "goal": "可选通用工作流入口"
+    }
+  },
+  "issues": [
+    {
+      "id": "F01",
+      "title": "DICOM系列与多帧来源几何",
+      "priority": "P1",
+      "evidence_grade": "A+B",
+      "status": "open",
+      "work_package": "W03",
+      "owner_role": "影像数据集成",
+      "report": "2026-09-29-cross-functional-review.md#f01",
+      "source_refs": [
+        {
+          "path": "mimics_bridge.py",
+          "line": 1551,
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/mimics_bridge.py#L1551"
+        }
+      ],
+      "recommended_change": "明确Series/Frame集合；往返校验shape/affine/物理点。",
+      "acceptance_tests": [
+        "T01"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [],
+      "evidence_record": "2026-09-29-cross-functional-review.md",
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "F02",
+      "title": "AL buffer清理早于应用",
+      "priority": "P1",
+      "evidence_grade": "A",
+      "status": "open",
+      "work_package": "W04",
+      "owner_role": "Mimics集成",
+      "report": "2026-09-29-cross-functional-review.md#f02",
+      "source_refs": [
+        {
+          "path": "runtime_py35/flexict_mimics.py",
+          "line": 1536,
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/runtime_py35/flexict_mimics.py#L1536"
+        }
+      ],
+      "recommended_change": "先校验再创建对象；完整应用/回滚后清理；同时验F20。",
+      "acceptance_tests": [
+        "T02"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [],
+      "evidence_record": "2026-09-29-cross-functional-review.md",
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "F03",
+      "title": "AL非空列表引用未绑定Qt名字",
+      "priority": "P1",
+      "evidence_grade": "A",
+      "status": "open",
+      "work_package": "W04",
+      "owner_role": "Qt开发",
+      "report": "2026-09-29-cross-functional-review.md#f03",
+      "source_refs": [
+        {
+          "path": "tools/flexict_active_learning_ui.py",
+          "line": 288,
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/tools/flexict_active_learning_ui.py#L288"
+        }
+      ],
+      "recommended_change": "统一Qt引用；测试非空列表选择与动作。",
+      "acceptance_tests": [
+        "T03"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [],
+      "evidence_record": "2026-09-29-cross-functional-review.md",
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "F04",
+      "title": "AL首次排序任务无图形入口",
+      "priority": "P1",
+      "evidence_grade": "B",
+      "status": "open",
+      "work_package": "W04",
+      "owner_role": "Qt/流程开发",
+      "report": "2026-09-29-cross-functional-review.md#f04",
+      "source_refs": [
+        {
+          "path": "runtime_py35/flexict_mimics.py",
+          "line": 1193,
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/runtime_py35/flexict_mimics.py#L1193"
+        }
+      ],
+      "recommended_change": "现有窗口增加最小新建排序入口，打通提交到审阅。",
+      "acceptance_tests": [
+        "T04"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [],
+      "evidence_record": "2026-09-29-cross-functional-review.md",
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "F05",
+      "title": "AL叠加自动标成已标注",
+      "priority": "P1",
+      "evidence_grade": "B",
+      "status": "open",
+      "work_package": "W04",
+      "owner_role": "产品/Mimics集成",
+      "report": "2026-09-29-cross-functional-review.md#f05",
+      "source_refs": [
+        {
+          "path": "runtime_py35/flexict_mimics.py",
+          "line": 1577,
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/runtime_py35/flexict_mimics.py#L1577"
+        }
+      ],
+      "recommended_change": "拆开应用、复核、保存、导出事实；显式人工完成。",
+      "acceptance_tests": [
+        "T05"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [],
+      "evidence_record": "2026-09-29-cross-functional-review.md",
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "F06",
+      "title": "FlexiCT推理构造额外依赖backbone",
+      "priority": "P1",
+      "evidence_grade": "A+B",
+      "status": "open",
+      "work_package": "W05",
+      "owner_role": "ML集成",
+      "report": "2026-09-29-cross-functional-review.md#f06",
+      "source_refs": [
+        {
+          "path": "integrations/flexict-finetune/trainers/flexict_trainer.py",
+          "line": 232,
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/integrations/flexict-finetune/trainers/flexict_trainer.py#L232"
+        }
+      ],
+      "recommended_change": "区分网络构造与训练初始化；完整包在无backbone机器推理。",
+      "acceptance_tests": [
+        "T06"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [],
+      "evidence_record": "2026-09-29-cross-functional-review.md",
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "F07",
+      "title": "Repair使用import名而非distribution名",
+      "priority": "P1",
+      "evidence_grade": "A",
+      "status": "open",
+      "work_package": "W05",
+      "owner_role": "环境开发",
+      "report": "2026-09-29-cross-functional-review.md#f07",
+      "source_refs": [
+        {
+          "path": "tools/setup_env.py",
+          "line": 571,
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/tools/setup_env.py#L571"
+        }
+      ],
+      "recommended_change": "单一依赖映射和约束；安装后真实import/provider检查。",
+      "acceptance_tests": [
+        "T07"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [],
+      "evidence_record": "2026-09-29-cross-functional-review.md",
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "F08",
+      "title": "import失败仍体检全绿",
+      "priority": "P1",
+      "evidence_grade": "A",
+      "status": "open",
+      "work_package": "W05",
+      "owner_role": "环境开发",
+      "report": "2026-09-29-cross-functional-review.md#f08",
+      "source_refs": [
+        {
+          "path": "tools/setup_env.py",
+          "line": 472,
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/tools/setup_env.py#L472"
+        }
+      ],
+      "recommended_change": "按能力汇总；失败/未知不可折叠为通过。",
+      "acceptance_tests": [
+        "T08"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [],
+      "evidence_record": "2026-09-29-cross-functional-review.md",
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "F09",
+      "title": "模型管理按钮选择后仍禁用",
+      "priority": "P1",
+      "evidence_grade": "A",
+      "status": "open",
+      "work_package": "W08",
+      "owner_role": "Qt开发",
+      "report": "2026-09-29-cross-functional-review.md#f09",
+      "source_refs": [
+        {
+          "path": "tools/model_manager_ui.py",
+          "line": 455,
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/tools/model_manager_ui.py#L455"
+        }
+      ],
+      "recommended_change": "连接选择状态；正确启用默认切换和失效项清理。",
+      "acceptance_tests": [
+        "T09"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [],
+      "evidence_record": "2026-09-29-cross-functional-review.md",
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "F10",
+      "title": "拖拽多选扩大或不可提交",
+      "priority": "P1",
+      "evidence_grade": "B",
+      "status": "open",
+      "work_package": "W08",
+      "owner_role": "Qt/批量开发",
+      "report": "2026-09-29-cross-functional-review.md#f10",
+      "source_refs": [
+        {
+          "path": "tools/import_drop_window.py",
+          "line": 111,
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/tools/import_drop_window.py#L111"
+        }
+      ],
+      "recommended_change": "保持精确路径集合；逐项验证，显示确定的处理范围。",
+      "acceptance_tests": [
+        "T10"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [],
+      "evidence_record": "2026-09-29-cross-functional-review.md",
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "F11",
+      "title": "回收线程间接调用Mimics对话框",
+      "priority": "P1",
+      "evidence_grade": "A+B",
+      "status": "open",
+      "work_package": "W06",
+      "owner_role": "Mimics集成",
+      "report": "2026-09-29-cross-functional-review.md#f11",
+      "source_refs": [
+        {
+          "path": "runtime_py35/runtime_common.py",
+          "line": 1521,
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/runtime_py35/runtime_common.py#L1521"
+        }
+      ],
+      "recommended_change": "后台只终止/投递事件；主线程完成宿主操作。",
+      "acceptance_tests": [
+        "T11"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [],
+      "evidence_record": "2026-09-29-cross-functional-review.md",
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "F12",
+      "title": "在线离线依赖组合不一致",
+      "priority": "P2",
+      "evidence_grade": "B",
+      "status": "open",
+      "work_package": "W05",
+      "owner_role": "环境开发",
+      "report": "2026-09-29-cross-functional-review.md#f12",
+      "source_refs": [
+        {
+          "path": "tools/setup_env.py",
+          "line": 536,
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/tools/setup_env.py#L536"
+        }
+      ],
+      "recommended_change": "固定少量支持组合；CUDA wheel与驱动能力预检。",
+      "acceptance_tests": [
+        "T12"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [],
+      "evidence_record": "2026-09-29-cross-functional-review.md",
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "F13",
+      "title": "全量复制与模态续问的效率风险",
+      "priority": "P2",
+      "evidence_grade": "B+C",
+      "status": "open",
+      "work_package": "W09",
+      "owner_role": "平台/Mimics集成",
+      "report": "2026-09-29-cross-functional-review.md#f13",
+      "source_refs": [
+        {
+          "path": "runtime_py35/nninteractive_mimics.py",
+          "line": 1933,
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/runtime_py35/nninteractive_mimics.py#L1933"
+        }
+      ],
+      "recommended_change": "量化宿主停顿/内存/I/O，避免重复快照，保留冲突校验。",
+      "acceptance_tests": [
+        "T13"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [],
+      "evidence_record": "2026-09-29-cross-functional-review.md",
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "F14",
+      "title": "错误反馈被刷新摘要覆盖",
+      "priority": "P2",
+      "evidence_grade": "A+B",
+      "status": "open",
+      "work_package": "W04",
+      "owner_role": "Qt开发",
+      "report": "2026-09-29-cross-functional-review.md#f14",
+      "source_refs": [
+        {
+          "path": "tools/flexict_active_learning_ui.py",
+          "line": 366,
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/tools/flexict_active_learning_ui.py#L366"
+        }
+      ],
+      "recommended_change": "任务摘要和操作错误分区；保持选择和滚动。",
+      "acceptance_tests": [
+        "T14"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [],
+      "evidence_record": "2026-09-29-cross-functional-review.md",
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "F15",
+      "title": "状态视觉与布局不一致",
+      "priority": "P2",
+      "evidence_grade": "A+B+C",
+      "status": "open",
+      "work_package": "W08",
+      "owner_role": "UX/Qt开发",
+      "report": "2026-09-29-cross-functional-review.md#f15",
+      "source_refs": [
+        {
+          "path": "tools/ui_theme.py",
+          "line": 650,
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/tools/ui_theme.py#L650"
+        }
+      ],
+      "recommended_change": "禁用/忙碌状态、列宽、空态、中文术语、Windows DPI验收。",
+      "acceptance_tests": [
+        "T15"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [],
+      "evidence_record": "2026-09-29-cross-functional-review.md",
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "F16",
+      "title": "患者分组和固定验证集契约不足",
+      "priority": "P2",
+      "evidence_grade": "B+C",
+      "status": "open",
+      "work_package": "W07",
+      "owner_role": "ML/数据开发",
+      "report": "2026-09-29-cross-functional-review.md#f16",
+      "source_refs": [
+        {
+          "path": "tools/nnunet_pipeline.py",
+          "line": 721,
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/tools/nnunet_pipeline.py#L721"
+        }
+      ],
+      "recommended_change": "可选patient_group；明确独立性假设；冻结验证集。",
+      "acceptance_tests": [
+        "T16"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [],
+      "evidence_record": "2026-09-29-cross-functional-review.md",
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "F17",
+      "title": "未核实项目API失败后仍切换项目",
+      "priority": "P1",
+      "evidence_grade": "A+B",
+      "status": "open",
+      "work_package": "W02",
+      "owner_role": "Mimics集成",
+      "report": "2026-09-29-cross-functional-review.md#f17",
+      "source_refs": [
+        {
+          "path": "runtime_py35/flexict_mimics.py",
+          "line": 1344,
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/runtime_py35/flexict_mimics.py#L1344"
+        }
+      ],
+      "recommended_change": "统一已加载/dirty/path/unknown状态；未知不得继续打开。",
+      "acceptance_tests": [
+        "T17"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [],
+      "evidence_record": "2026-09-29-cross-functional-review.md",
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "F18",
+      "title": "撤销导入可能删除未保存人工工作",
+      "priority": "P0",
+      "evidence_grade": "A+B",
+      "status": "open",
+      "work_package": "W02",
+      "owner_role": "Mimics集成",
+      "report": "2026-09-30-scenario-review.md#f18",
+      "source_refs": [
+        {
+          "path": "runtime_py35/import_undo_mimics.py",
+          "line": 244,
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/runtime_py35/import_undo_mimics.py#L244"
+        }
+      ],
+      "recommended_change": "先捕获dirty和对象版本；不能以磁盘旧hash批准删除新保存文件。",
+      "acceptance_tests": [
+        "T18"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [],
+      "evidence_record": "2026-09-30-evidence/scenario-results.json",
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "F19",
+      "title": "按名称撤销删除其他Image同名对象",
+      "priority": "P1",
+      "evidence_grade": "A+B",
+      "status": "open",
+      "work_package": "W02",
+      "owner_role": "Mimics集成",
+      "report": "2026-09-30-scenario-review.md#f19",
+      "source_refs": [
+        {
+          "path": "runtime_py35/import_undo_mimics.py",
+          "line": 131,
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/runtime_py35/import_undo_mimics.py#L131"
+        }
+      ],
+      "recommended_change": "receipt记录对象及Image身份；旧receipt歧义时停止自动删除。",
+      "acceptance_tests": [
+        "T19"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [],
+      "evidence_record": "2026-09-30-evidence/scenario-results.json",
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "F20",
+      "title": "AL同网格异病例与异步目标切换",
+      "priority": "P1",
+      "evidence_grade": "A+B",
+      "status": "open",
+      "work_package": "W04",
+      "owner_role": "Mimics集成",
+      "report": "2026-09-30-scenario-review.md#f20",
+      "source_refs": [
+        {
+          "path": "runtime_py35/flexict_mimics.py",
+          "line": 1444,
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/runtime_py35/flexict_mimics.py#L1444"
+        }
+      ],
+      "recommended_change": "保存目标身份，完成及每次写入前重新验证。",
+      "acceptance_tests": [
+        "T20"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [],
+      "evidence_record": "2026-09-30-evidence/scenario-results.json",
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "F21",
+      "title": "等体积人工修正未被预测保护识别",
+      "priority": "P1",
+      "evidence_grade": "A",
+      "status": "open",
+      "work_package": "W04",
+      "owner_role": "Mimics集成",
+      "report": "2026-09-30-scenario-review.md#f21",
+      "source_refs": [
+        {
+          "path": "runtime_py35/flexict_mimics.py",
+          "line": 837,
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/runtime_py35/flexict_mimics.py#L837"
+        }
+      ],
+      "recommended_change": "内容revision/摘要保护替代单独体素计数；修改后默认新草稿。",
+      "acceptance_tests": [
+        "T21"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [],
+      "evidence_record": "2026-09-30-evidence/scenario-results.json",
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "F22",
+      "title": "病例slug碰撞与硬链接覆盖源文件",
+      "priority": "P0",
+      "evidence_grade": "A",
+      "status": "open",
+      "work_package": "W01",
+      "owner_role": "数据/平台开发",
+      "report": "2026-09-30-scenario-review.md#f22",
+      "source_refs": [
+        {
+          "path": "tools/nnunet_pipeline.py",
+          "line": 258,
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/tools/nnunet_pipeline.py#L258"
+        }
+      ],
+      "recommended_change": "唯一case key和写前碰撞检测；不原地覆盖外部硬链接inode。",
+      "acceptance_tests": [
+        "T22"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [],
+      "evidence_record": "2026-09-30-evidence/scenario-results.json",
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "F23",
+      "title": "概率与非法Mask值静默转成前景",
+      "priority": "P1",
+      "evidence_grade": "A",
+      "status": "open",
+      "work_package": "W03",
+      "owner_role": "影像数据集成",
+      "report": "2026-09-30-scenario-review.md#f23",
+      "source_refs": [
+        {
+          "path": "mimics_bridge.py",
+          "line": 913,
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/mimics_bridge.py#L913"
+        }
+      ],
+      "recommended_change": "显式Mask数值语义；所有入口统一有限值/范围验证。",
+      "acceptance_tests": [
+        "T23"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [],
+      "evidence_record": "2026-09-30-evidence/scenario-results.json",
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "F24",
+      "title": "补齐Mask将平铺CT影像列作结构",
+      "priority": "P1",
+      "evidence_grade": "A",
+      "status": "open",
+      "work_package": "W03",
+      "owner_role": "数据/批量开发",
+      "report": "2026-09-30-scenario-review.md#f24",
+      "source_refs": [
+        {
+          "path": "tools/sync_missing_masks.py",
+          "line": 63,
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/tools/sync_missing_masks.py#L63"
+        }
+      ],
+      "recommended_change": "从profile/manifest显式区分image和mask；拒绝歧义发现结果。",
+      "acceptance_tests": [
+        "T24"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [],
+      "evidence_record": "2026-09-30-evidence/scenario-results.json",
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "F25",
+      "title": "补齐Mask按全项目名称错误判完整",
+      "priority": "P1",
+      "evidence_grade": "A",
+      "status": "open",
+      "work_package": "W03",
+      "owner_role": "Mimics集成",
+      "report": "2026-09-30-scenario-review.md#f25",
+      "source_refs": [
+        {
+          "path": "runtime_py35/sync_missing_masks_batch.py",
+          "line": 232,
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/runtime_py35/sync_missing_masks_batch.py#L232"
+        }
+      ],
+      "recommended_change": "先绑定目标Image再比较结构；空/缺/未复核分别显示。",
+      "acceptance_tests": [
+        "T25"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [],
+      "evidence_record": "2026-09-30-evidence/scenario-results.json",
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "F26",
+      "title": "检查新任务失败读取旧成功报告",
+      "priority": "P1",
+      "evidence_grade": "A",
+      "status": "open",
+      "work_package": "W06",
+      "owner_role": "平台开发",
+      "report": "2026-09-30-scenario-review.md#f26",
+      "source_refs": [
+        {
+          "path": "tools/inspect_mcs_projects.py",
+          "line": 155,
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/tools/inspect_mcs_projects.py#L155"
+        }
+      ],
+      "recommended_change": "job/attempt身份贯通；本轮退出码与报告匹配才能成功。",
+      "acceptance_tests": [
+        "T26"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [],
+      "evidence_record": "2026-09-30-evidence/scenario-results.json",
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "F27",
+      "title": "取消批量任务丢失逐例结果台账",
+      "priority": "P2",
+      "evidence_grade": "A+B",
+      "status": "open",
+      "work_package": "W06",
+      "owner_role": "平台/Mimics集成",
+      "report": "2026-09-30-scenario-review.md#f27",
+      "source_refs": [
+        {
+          "path": "runtime_py35/sync_missing_masks_batch.py",
+          "line": 343,
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/runtime_py35/sync_missing_masks_batch.py#L343"
+        }
+      ],
+      "recommended_change": "逐例持久化；所有退出路径终态；接入已有进程/取消/资源生命周期。",
+      "acceptance_tests": [
+        "T27"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [],
+      "evidence_record": "2026-09-30-evidence/scenario-results.json",
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "F28",
+      "title": "原子发布可能覆盖较新人工保存",
+      "priority": "P1",
+      "evidence_grade": "A+B",
+      "status": "open",
+      "work_package": "W06",
+      "owner_role": "平台/Mimics集成",
+      "report": "2026-09-30-scenario-review.md#f28",
+      "source_refs": [
+        {
+          "path": "runtime_py35/sync_missing_masks_batch.py",
+          "line": 100,
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/runtime_py35/sync_missing_masks_batch.py#L100"
+        }
+      ],
+      "recommended_change": "目的版本冲突检测；不能排他时发布新副本；明确force与续跑语义。",
+      "acceptance_tests": [
+        "T28"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [],
+      "evidence_record": "2026-09-30-evidence/scenario-results.json",
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "F29",
+      "title": "FlexiCT颅尾分层使用最大spacing轴",
+      "priority": "P2",
+      "evidence_grade": "A+B",
+      "status": "open",
+      "work_package": "W07",
+      "owner_role": "ML/数据开发",
+      "report": "2026-09-30-scenario-review.md#f29",
+      "source_refs": [
+        {
+          "path": "tools/flexict_pipeline.py",
+          "line": 289,
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/tools/flexict_pipeline.py#L289"
+        }
+      ],
+      "recommended_change": "用物理SI或取消错误启发式；与患者级验证一起测试。",
+      "acceptance_tests": [
+        "T29"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [],
+      "evidence_record": "2026-09-30-evidence/scenario-results.json",
+      "target_environment_validation": "not_run"
+    }
+  ],
+  "decision_items": [
+    "D01",
+    "D02",
+    "D03",
+    "D04",
+    "D05",
+    "D06",
+    "D07"
+  ]
+}

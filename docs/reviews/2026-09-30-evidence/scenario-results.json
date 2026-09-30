@@ -1,0 +1,115 @@
+{
+  "schema": "review_evidence.v1",
+  "baseline": "36eac04",
+  "findings": {
+    "F18_dirty_project_undo": {
+      "return_code": 0,
+      "dirty_at_start": true,
+      "save_calls": 1,
+      "project_file_exists_after": false
+    },
+    "F19_name_only_undo": {
+      "deleted_mask_ids": [
+        "imported-A",
+        "manual-B"
+      ]
+    },
+    "F20_al_other_patient_same_grid": {
+      "different_source_paths": true,
+      "conversion_requests": 1,
+      "transaction_keys": [
+        "bridge_root",
+        "masks",
+        "request",
+        "result_path"
+      ]
+    },
+    "F21_equal_count_changed_mask": {
+      "content_changed": true,
+      "before_count": 1,
+      "after_count": 1,
+      "accepted_for_overwrite": {
+        "flexict_mimics": true,
+        "nnunet_mimics": true
+      }
+    },
+    "F22_case_slug_collision": {
+      "case_ids": [
+        "病例乙",
+        "病例甲"
+      ],
+      "normalized_ids": [
+        "item",
+        "item"
+      ],
+      "returned_cases": 2,
+      "distinct_output_images": 1,
+      "source_files_changed": [
+        "病例乙"
+      ],
+      "original_image_values_after": [
+        11,
+        11
+      ]
+    },
+    "F23_mask_semantics": {
+      "probability_input": [
+        0.01,
+        0.49,
+        0.51,
+        0.99
+      ],
+      "imported_values": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "binary_reader_nonfinite_output": [
+        0,
+        1,
+        1,
+        1
+      ]
+    },
+    "F24_sync_source_discovery": {
+      "discovered_mask_names": [
+        "ct",
+        "liver"
+      ]
+    },
+    "F25_sync_other_image_mask": {
+      "target_image": "A",
+      "existing_mask_image": "B",
+      "result": {
+        "case_id": "A",
+        "existing_masks": [
+          "liver"
+        ],
+        "missing_masks": [],
+        "status": "skipped"
+      }
+    },
+    "F26_stale_inspection_report": {
+      "new_process_exit_code": 1,
+      "launcher_exit_code": 0
+    },
+    "F27_cancelled_sync_receipt": {
+      "last_status": {
+        "state": "cancelled",
+        "completed": 1
+      },
+      "results_file_exists": false,
+      "failed_cases_file_exists": false
+    },
+    "F28_concurrent_publish": {
+      "destination_after": "older background snapshot plus masks",
+      "newer_foreground_save_preserved": false
+    },
+    "F29_axis_stratification": {
+      "ras_isotropic_image": true,
+      "computed_z_start": 0.1,
+      "physical_si_voxel_axis_start": 0.8
+    }
+  }
+}

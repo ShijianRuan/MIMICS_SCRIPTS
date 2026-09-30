@@ -1,0 +1,221 @@
+{
+  "schema": "mimics_review_artifacts.v1",
+  "review_date": "2026-09-30",
+  "baseline_commit": "36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32",
+  "scope": "documentation and isolated synthetic evidence; no business implementation changes",
+  "evidence_paths_redacted": true,
+  "artifact_hash_algorithm": "sha256",
+  "manifest_self_excluded": true,
+  "artifacts": [
+    {
+      "path": "2026-09-29-cross-functional-review.md",
+      "bytes": 51823,
+      "sha256": "8672594f9b39f4381209545e883751f72388a06de9f8ae09acb0d2118093850b"
+    },
+    {
+      "path": "2026-09-29-evidence/active-learning-empty.png",
+      "bytes": 46070,
+      "sha256": "4e0ff0bbafc8aba3f5e7c1fd432a07eed44d035e89c43a2f6b701d551a57eb26"
+    },
+    {
+      "path": "2026-09-29-evidence/api-contract-results.json",
+      "bytes": 452,
+      "sha256": "7245ce1e566671cd5ee9fb9fb1449151653640e754c0b179f4133dfbaceaf64e"
+    },
+    {
+      "path": "2026-09-29-evidence/model-manager.png",
+      "bytes": 44537,
+      "sha256": "0da777c62acba140649a4ca151e691e4fef00d8126ac382b26ce7b74220c2c22"
+    },
+    {
+      "path": "2026-09-29-evidence/regression-results.json",
+      "bytes": 5432,
+      "sha256": "4b409d558896c79ad194cd215b9814d8a12199996c423d094135b1e6a6e312a0"
+    },
+    {
+      "path": "2026-09-29-evidence/reproduce_api_contract.py",
+      "bytes": 2363,
+      "sha256": "dedd014572d164d786ae46c56c3573aa24cb87de4347667117a5d4f59e6f31ec"
+    },
+    {
+      "path": "2026-09-29-evidence/reproduce_findings.py",
+      "bytes": 7993,
+      "sha256": "dd08467f611803405e1037ee6b731af264503b6a3008f4e16336db836a9668e1"
+    },
+    {
+      "path": "2026-09-29-evidence/reproduce_ux.py",
+      "bytes": 3473,
+      "sha256": "881dcb53798b6b2d735e7a94035fae30088b6dd48f5321aada8ce6abf929071e"
+    },
+    {
+      "path": "2026-09-29-evidence/reproduction-results.json",
+      "bytes": 795,
+      "sha256": "bf454318efbe9d711590e63dccd538413e16b660373e01384cdf4be1f22ca7d6"
+    },
+    {
+      "path": "2026-09-29-evidence/ux-reproduction-results.txt",
+      "bytes": 466,
+      "sha256": "506f67507f2cbece5e87ec939a5ae31d64226057d1a7d2b12af5020e85d4e7f8"
+    },
+    {
+      "path": "2026-09-30-evidence/flexict-test-output.txt",
+      "bytes": 22498,
+      "sha256": "98e758418500e55eca722eba64e12dd88596af3054c46ffcbcf54e32d2b7f685"
+    },
+    {
+      "path": "2026-09-30-evidence/regression-results.json",
+      "bytes": 16240,
+      "sha256": "3bfbdbb99ef219216133d291d94fe5dc44337b3e32b103804530367d38541589"
+    },
+    {
+      "path": "2026-09-30-evidence/reproduce_scenarios.py",
+      "bytes": 13331,
+      "sha256": "1225fdea2014f9bfacb7b9126e0cf4e13b843e4ab261c22a4935979c127d5c18"
+    },
+    {
+      "path": "2026-09-30-evidence/scenario-results.json",
+      "bytes": 2476,
+      "sha256": "be8f20590524127e3cb0d56b36db035d72c7b0509e7353fbfd99a18683694184"
+    },
+    {
+      "path": "2026-09-30-scenario-review.md",
+      "bytes": 32108,
+      "sha256": "a6ee0248598cfa39f9215e8d6ab41badce3d6cacd39789e350876a220055c14d"
+    },
+    {
+      "path": "README.md",
+      "bytes": 2852,
+      "sha256": "bb025ff024c61a25f62de3598ad8389577f62777f809cd854749182e13fc5da5"
+    },
+    {
+      "path": "backlog.json",
+      "bytes": 27898,
+      "sha256": "8871a35edf02954d4ed21c74636a79f7671a34fccca11c739c1b5b5defa8127b"
+    },
+    {
+      "path": "development-handoff.md",
+      "bytes": 16027,
+      "sha256": "09d48058009e9776d080067f144467320727f53a4142ce36c6e15bacf7ffcd47"
+    },
+    {
+      "path": "evidence-guide.md",
+      "bytes": 5001,
+      "sha256": "4493e6c2391472330c9cc6356041656e5f70774e092470718092e18c39578b06"
+    },
+    {
+      "path": "test-plan.md",
+      "bytes": 16677,
+      "sha256": "075fa03e3eeb3b2ccdd9fc864e77790dc7ab477358fa02574a28b1b027b10931"
+    }
+  ],
+  "baseline_source_files": [
+    {
+      "path": "docs/Mimics_API_Documentation.md",
+      "sha256": "64407239cf481a48ef1ff3680578e13bb37eda1138400e5a7100becaa50efb99"
+    },
+    {
+      "path": "integrations/flexict-finetune/scripts/build_dataset.py",
+      "sha256": "ce457a88a455c63baad19f858043b152f4c94909bc5a6d178466df66ffe25a7a"
+    },
+    {
+      "path": "integrations/flexict-finetune/trainers/flexict_trainer.py",
+      "sha256": "ed5047e30c671a9f7fcadc2a08487b8679a924736cd7b011c8af596727eef37f"
+    },
+    {
+      "path": "integrations/nninteractive-finetune/src/nninteractive_finetune/config.py",
+      "sha256": "ecae6adabe182e37913c8f52e4b57e8fd069cac9839d0bfc7fdb156907b8727b"
+    },
+    {
+      "path": "mimics_bridge.py",
+      "sha256": "0922ebf13a03f12749cf8a30380e6250b8810d55802368a07a71dae3f70e91cc"
+    },
+    {
+      "path": "remote/requirements.txt",
+      "sha256": "6e4a7d042ef6db233df673ec6605c6277705814e5afd1483a7e2d8ffc1de6800"
+    },
+    {
+      "path": "runtime_py35/append_masks_batch.py",
+      "sha256": "e042dc763c89ffe00009624a7527f33697bdf0d6416f10bc1a5b622120b8e977"
+    },
+    {
+      "path": "runtime_py35/create_mcs_batch.py",
+      "sha256": "ce2adec6d2c5187525e54c99d09a48f0a5c83879f7dce921d4ac4da8d02a31c4"
+    },
+    {
+      "path": "runtime_py35/flexict_mimics.py",
+      "sha256": "0ea631180e3f8bde5f31a561a506f61a5aa53f021253aefea2e6d195bd088e9e"
+    },
+    {
+      "path": "runtime_py35/import_undo_mimics.py",
+      "sha256": "f50c5334fe7e59e3c05aef26bac2e39ff75e0c78e682dbee0cc6758e67970554"
+    },
+    {
+      "path": "runtime_py35/mask_import.py",
+      "sha256": "d5866fa1ef90df9b8b5b201fadce94d9f379fa48f6bf8e24d887ed24ffdf2caf"
+    },
+    {
+      "path": "runtime_py35/nninteractive_mimics.py",
+      "sha256": "97f58c893508c9976f82010fd4daca64da200d1762095b404bf41a64a6b1f539"
+    },
+    {
+      "path": "runtime_py35/nnunet_mimics.py",
+      "sha256": "f1e35c1c94648718e9930f9232989a22931fbb5466d113ea3baa80806a477035"
+    },
+    {
+      "path": "runtime_py35/runtime_common.py",
+      "sha256": "b9698eb11757f749b1f849b0b04f07e1eada129ac85eef9ac4fd6a703acf8b74"
+    },
+    {
+      "path": "runtime_py35/sync_missing_masks_batch.py",
+      "sha256": "1f93ec1329da579f3aac2161565f635b6660dbf8666e18a3c41a36dba844d585"
+    },
+    {
+      "path": "tools/collect_diagnostics.py",
+      "sha256": "b770b9b74da2342a39eb6a1305b20b0cd7f9cbfc5cb5eec64648de777465b5fc"
+    },
+    {
+      "path": "tools/flexict_active_learning_ui.py",
+      "sha256": "9b5fcc5f5986b7190c065fbe7b7cfc7de6953ff857e708620c631805e3357f8c"
+    },
+    {
+      "path": "tools/flexict_pipeline.py",
+      "sha256": "21255e46cc7a8d3f21deac7ea1912a420a5f0f8d303d04e04d983ee21a02b989"
+    },
+    {
+      "path": "tools/import_drop_window.py",
+      "sha256": "d75d5d40b3caaceaf3ac0433b319d0642910954e97c9da7cc08ce9427038cf91"
+    },
+    {
+      "path": "tools/inspect_mcs_projects.py",
+      "sha256": "c149fba84191cac7698d804341c2b5d8429aef39d20d8b63ba2353b2174c7b3c"
+    },
+    {
+      "path": "tools/model_manager_ui.py",
+      "sha256": "30c53c41efbf1ae0700352372eb1173dfd663d1e972f3ab6773f5059b4af9a3b"
+    },
+    {
+      "path": "tools/nnunet_common.py",
+      "sha256": "e2b4a24f91e8cfdd5d230dbf9f183482d53c7d35b0891257ad3af06e1f060c35"
+    },
+    {
+      "path": "tools/nnunet_pipeline.py",
+      "sha256": "daa64123247b6c97c9772105712c3bc17880a0326e87bf25d6b0516f0366304c"
+    },
+    {
+      "path": "tools/package_portable.py",
+      "sha256": "a7a8f3e589f644dd782fd8d398782d4e27b002d2bdd1180082092e2908775485"
+    },
+    {
+      "path": "tools/setup_env.py",
+      "sha256": "f3499a9170d59018460b4b1efd5aaa40c60e950eeab4804c7c8451151b14e241"
+    },
+    {
+      "path": "tools/sync_missing_masks.py",
+      "sha256": "8ce429844d458c8b7a0b28794f4e4ac256a4140224305188d86659ae386e484b"
+    },
+    {
+      "path": "tools/ui_theme.py",
+      "sha256": "1778def756681fd99d3fe4de6a446f71106484d720dd14878482a7db0cc00cc4"
+    }
+  ]
+}

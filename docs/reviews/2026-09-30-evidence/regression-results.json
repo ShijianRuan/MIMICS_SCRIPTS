@@ -1,0 +1,99 @@
+{
+  "schema": "regression_matrix.v1",
+  "profile": "fast",
+  "started_at": "2026-09-30T07:59:02",
+  "total_suites": 7,
+  "failed_suites": 2,
+  "results": [
+    {
+      "name": "flexict_integration",
+      "command": [
+        "<REVIEW_PYTHON>",
+        "tools/test_flexict_integration.py"
+      ],
+      "status": "fail",
+      "exit_code": 1,
+      "duration_seconds": 13.9,
+      "output_tail": "----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"<REPO>/tools/test_flexict_integration.py\", line 770, in test_completed_inference\n    self.assertEqual(\nAssertionError: '/private/var/folders/p7/hly8zj_53_59tp5blj[58 chars]i.gz' != '/var/folders/p7/hly8zj_53_59tp5blj4jr_vw00[50 chars]i.gz'\n- <TEMP_REALPATH>/tmpjs2z4s0e/jobs/infer_test01/prediction.nii.gz\n? --------\n+ <TEMP_LINKPATH>/tmpjs2z4s0e/jobs/infer_test01/prediction.nii.gz\n\n\n======================================================================\nFAIL: test_operation_infer_routes_to_run_inference (__main__.TestMainRouting.test_operation_infer_routes_to_run_inference)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"<REPO>/tools/test_flexict_integration.py\", line 1122, in test_operation_infer_routes_to_run_inference\n    self.assertEqual(infer_mock.call_args[0][0], job_dir)\nAssertionError: PosixPath('/private/var/folders/p7/hly8zj_53_59tp5blj[27 chars]job') != PosixPath('/var/folders/p7/hly8zj_53_59tp5blj4jr_vw00[19 chars]job')\n\n----------------------------------------------------------------------\nRan 91 tests in 13.749s\n\nFAILED (failures=3, errors=7)\n\n全部 3 例读取+计算完成，耗时 0.0s。\n\n==== 不确定度排序（按 integrated 从高到低）====\nrank  case                         integrated    uncertain_vol    mean_nz      max  cc_integrated       cc_vol\n--------------------------------------------------------------------------------------------------------------\n   1  case00                             56.0            112.0     0.5000   0.5000            0.0          0.0\n   2  case01                             56.0            112.0     0.5000   0.5000            0.0          0.0\n   3  case02                             56.0            112.0     0.5000   0.5000            0.0          0.0\n\n差异最大（不确定度最大且区域最大）的病例: case00\n  积分不确定度=56.0  不确定体积=112.0 mm^3  最大不确定度=0.5000\n  最大连通域: 体积=0.0 mm^3  均值=0.0000  积分=0.0\n  文件: <TEMP_LINKPATH>/tmpbjun6su1/jobs/infer/uncertainty/case00_uncertainty_disagreement.nii.gz\n\n排序报告已写入: <TEMP_LINKPATH>/tmpbjun6su1/jobs/infer/uncertainty/ranking.csv\n[FlexiCT] FlexiCT status: Abandoned | \n[FlexiCT] FlexiCT status: Failed | ",
+      "_started_at": "2026-09-30T07:59:02"
+    },
+    {
+      "name": "nnunet_integration",
+      "command": [
+        "<REVIEW_PYTHON>",
+        "tools/test_nnunet_integration.py"
+      ],
+      "status": "pass",
+      "exit_code": 0,
+      "duration_seconds": 11.1,
+      "output_tail": "test_remote_unreachable_is_not_rewritten_by_stopped_process_check (__main__.MimicsRuntimeTests.test_remote_unreachable_is_not_rewritten_by_stopped_process_check) ... ok\ntest_single_class_bridge_row_uses_manifest_label (__main__.MimicsRuntimeTests.test_single_class_bridge_row_uses_manifest_label) ... ok\ntest_single_present_class_keeps_multiclass_label_id (__main__.MimicsRuntimeTests.test_single_present_class_keeps_multiclass_label_id) ... ok\ntest_stopping_monitor_terminates_owned_bridge (__main__.MimicsRuntimeTests.test_stopping_monitor_terminates_owned_bridge) ... ok\ntest_bridge_preserves_only_present_multiclass_value (__main__.SpatialContractTests.test_bridge_preserves_only_present_multiclass_value) ... ok\ntest_case_cache_revalidates_cached_image_label_grid (__main__.SpatialContractTests.test_case_cache_revalidates_cached_image_label_grid) ... ok\ntest_discrete_orientation_change_preserves_label_voxel (__main__.SpatialContractTests.test_discrete_orientation_change_preserves_label_voxel) ... ok\ntest_grouped_source_masks_are_unioned_into_one_output_class (__main__.SpatialContractTests.test_grouped_source_masks_are_unioned_into_one_output_class) ... ok\ntest_inference_rejects_source_changed_since_mimics_import (__main__.SpatialContractTests.test_inference_rejects_source_changed_since_mimics_import) ... ok\ntest_inference_rejects_wrong_output_affine (__main__.SpatialContractTests.test_inference_rejects_wrong_output_affine) ... ok\ntest_model_compatibility_allows_different_patient_grid (__main__.SpatialContractTests.test_model_compatibility_allows_different_patient_grid) ... ok\ntest_model_compatibility_rejects_modality_mismatch (__main__.SpatialContractTests.test_model_compatibility_rejects_modality_mismatch) ... ok\ntest_multiclass_overlap_fails_by_default (__main__.SpatialContractTests.test_multiclass_overlap_fails_by_default) ... ok\ntest_remote_inference_cache_namespace_contains_dataset_id (__main__.SpatialContractTests.test_remote_inference_cache_namespace_contains_dataset_id) ... ok\ntest_remote_inference_rejects_changed_source_before_transfer (__main__.SpatialContractTests.test_remote_inference_rejects_changed_source_before_transfer) ... ok\ntest_training_data_profile_rejects_all_zero_label (__main__.SpatialContractTests.test_training_data_profile_rejects_all_zero_label) ... ok\ntest_training_data_profile_rejects_invalid_spacing (__main__.SpatialContractTests.test_training_data_profile_rejects_invalid_spacing) ... ok\ntest_training_data_profile_rejects_single_slice_case (__main__.SpatialContractTests.test_training_data_profile_rejects_single_slice_case) ... ok\ntest_training_data_profile_reports_label_foreground (__main__.SpatialContractTests.test_training_data_profile_reports_label_foreground) ... ok\ntest_live_jobs_never_pruned (__main__.TestSweepExpiredJobs.test_live_jobs_never_pruned) ... ok\ntest_models_and_cache_untouched (__main__.TestSweepExpiredJobs.test_models_and_cache_untouched)\nRegistered models and caches must never be swept. ... ok\ntest_old_terminal_jobs_are_pruned_keeping_status (__main__.TestSweepExpiredJobs.test_old_terminal_jobs_are_pruned_keeping_status) ... ok\ntest_reattaching_remote_jobs_never_pruned (__main__.TestSweepExpiredJobs.test_reattaching_remote_jobs_never_pruned) ... ok\ntest_recent_jobs_kept (__main__.TestSweepExpiredJobs.test_recent_jobs_kept) ... ok\ntest_zero_retention_disables (__main__.TestSweepExpiredJobs.test_zero_retention_disables) ... ok\ntest_cache_task_tree_of_running_job_is_kept (__main__.TestSweepRuntimeAndCache.test_cache_task_tree_of_running_job_is_kept) ... ok\ntest_dataset_of_running_job_is_kept (__main__.TestSweepRuntimeAndCache.test_dataset_of_running_job_is_kept) ... ok\ntest_dataset_referenced_by_registered_model_is_kept (__main__.TestSweepRuntimeAndCache.test_dataset_referenced_by_registered_model_is_kept) ... ok\ntest_expired_cache_case_removed_and_empty_task_dir_dropped (__main__.TestSweepRuntimeAndCache.test_expired_cache_case_removed_and_empty_task_dir_dropped) ... ok\ntest_expired_unreferenced_dataset_removed_in_all_runtime_dirs (__main__.TestSweepRuntimeAndCache.test_expired_unreferenced_dataset_removed_in_all_runtime_dirs) ... ok\ntest_models_dir_never_touched (__main__.TestSweepRuntimeAndCache.test_models_dir_never_touched) ... ok\ntest_recent_dataset_is_kept (__main__.TestSweepRuntimeAndCache.test_recent_dataset_is_kept) ... ok\ntest_registry_row_without_dataset_name_is_rebuilt (__main__.TestSweepRuntimeAndCache.test_registry_row_without_dataset_name_is_rebuilt) ... ok\ntest_zero_retention_disables_both_sweeps (__main__.TestSweepRuntimeAndCache.test_zero_retention_disables_both_sweeps) ... ok\n\n----------------------------------------------------------------------\nRan 85 tests in 10.805s\n\nOK",
+      "_started_at": "2026-09-30T07:59:02"
+    },
+    {
+      "name": "model_portability",
+      "command": [
+        "<REVIEW_PYTHON>",
+        "tools/test_model_portability.py"
+      ],
+      "status": "fail",
+      "exit_code": 1,
+      "duration_seconds": 0.5,
+      "output_tail": "  File \"<REPO>/tools/test_model_portability.py\", line 272, in test_nnunet_bundle_roundtrip\n    _nnunet_model_dir(source, \"liver_task\", \"nnunet_v1\")\n  File \"<REPO>/tools/test_model_portability.py\", line 181, in _nnunet_model_dir\n    (fold / \"checkpoint_final.pth\").write_bytes(_torch_checkpoint_bytes())\n                                                ^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"<REPO>/tools/test_model_portability.py\", line 32, in _torch_checkpoint_bytes\n    import torch\nModuleNotFoundError: No module named 'torch'\n\n======================================================================\nERROR: test_nnunet_import_rejects_corrupt_checkpoint (__main__.NnunetBundleTests.test_nnunet_import_rejects_corrupt_checkpoint)\nA truncated checkpoint must fail at import, not at inference.\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"<REPO>/tools/test_model_portability.py\", line 353, in test_nnunet_import_rejects_corrupt_checkpoint\n    _nnunet_model_dir(source, \"liver_task\", \"nnunet_v1\")\n  File \"<REPO>/tools/test_model_portability.py\", line 181, in _nnunet_model_dir\n    (fold / \"checkpoint_final.pth\").write_bytes(_torch_checkpoint_bytes())\n                                                ^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"<REPO>/tools/test_model_portability.py\", line 32, in _torch_checkpoint_bytes\n    import torch\nModuleNotFoundError: No module named 'torch'\n\n======================================================================\nERROR: test_nnunet_import_rejects_wrong_family (__main__.NnunetBundleTests.test_nnunet_import_rejects_wrong_family)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"<REPO>/tools/test_model_portability.py\", line 320, in test_nnunet_import_rejects_wrong_family\n    _nnunet_model_dir(source, \"liver_task\", \"nnunet_v1\")\n  File \"<REPO>/tools/test_model_portability.py\", line 181, in _nnunet_model_dir\n    (fold / \"checkpoint_final.pth\").write_bytes(_torch_checkpoint_bytes())\n                                                ^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"<REPO>/tools/test_model_portability.py\", line 32, in _torch_checkpoint_bytes\n    import torch\nModuleNotFoundError: No module named 'torch'\n\n----------------------------------------------------------------------\nRan 15 tests in 0.388s\n\nFAILED (errors=12)",
+      "_started_at": "2026-09-30T07:59:02"
+    },
+    {
+      "name": "flow_imports",
+      "command": [
+        "<REVIEW_PYTHON>",
+        "tools/fake_mimics_flow_test.py",
+        "--only",
+        "imports"
+      ],
+      "status": "pass",
+      "exit_code": 0,
+      "duration_seconds": 0.3,
+      "output_tail": "[2026-09-30 07:59:28] [pid=22467] [thread=MainThread] .mcs is ready: <TEMP_LINKPATH>/mimics_script_fake_mimics_x3m0ah7o/first_mcs/mcs_output/case_001.mcs\n\nFake Mimics flow test summary\n========================================================================\n[PASS] runtime modules import with fake mimics\n  imported 27 runtime modules (0.10s)\n[PASS] batch status viewer aggregation\n  aggregated 6 record kinds, newest first, stop markers excluded (0.11s)\n[PASS] first .mcs monitor scan throttle\n  batch wait scans gated by status file: 30s throttle, immediate on first completion (0.01s)\n========================================================================\n3 passed, 0 failed",
+      "_started_at": "2026-09-30T07:59:02"
+    },
+    {
+      "name": "flow_export",
+      "command": [
+        "<REVIEW_PYTHON>",
+        "tools/fake_mimics_flow_test.py",
+        "--only",
+        "export"
+      ],
+      "status": "pass",
+      "exit_code": 0,
+      "duration_seconds": 0.1,
+      "output_tail": "\nFake Mimics flow test summary\n========================================================================\n[PASS] mask export buffer flow\n  exported 2 mask buffers with manifest and expected byte counts (0.01s)\n[PASS] unicode and spaces paths flow\n  export + import flows work under Chinese/spaces/nested paths (0.05s)\n[PASS] external I/O setup routing\n  external PySide6 selections route explicit import/export paths (0.01s)\n[PASS] asynchronous mask import apply\n  prepared buffer applied visibly without disabling GUI updates (0.00s)\n========================================================================\n4 passed, 0 failed",
+      "_started_at": "2026-09-30T07:59:02"
+    },
+    {
+      "name": "flow_append",
+      "command": [
+        "<REVIEW_PYTHON>",
+        "tools/fake_mimics_flow_test.py",
+        "--only",
+        "append"
+      ],
+      "status": "pass",
+      "exit_code": 0,
+      "duration_seconds": 0.1,
+      "output_tail": "[2026-09-30 07:59:28] s0001: created label_a (foreground_voxels=1)\n[2026-09-30 07:59:28] s0001: created label_b (foreground_voxels=1)\n\nFake Mimics flow test summary\n========================================================================\n[PASS] generic named-Mask MCS append\n  two named Masks injected and saved to an isolated MCS; collisions rejected (0.05s)\n========================================================================\n1 passed, 0 failed",
+      "_started_at": "2026-09-30T07:59:02"
+    },
+    {
+      "name": "cross_workflow",
+      "command": [
+        "<REVIEW_PYTHON>",
+        "tools/test_cross_workflow_transitions.py"
+      ],
+      "status": "pass",
+      "exit_code": 0,
+      "duration_seconds": 0.8,
+      "output_tail": "test_retrained_model_supersedes_in_al (__main__.CrossWorkflowTransitionTests.test_retrained_model_supersedes_in_al)\nThe workflow-switch seam: after retraining, AL must resolve the ... ok\ntest_train_infer_al_overlay_handoffs (__main__.CrossWorkflowTransitionTests.test_train_infer_al_overlay_handoffs) ... 开始批量计算：共 4 例...\n\n批量进度 |########----------------------|  25.0%  1/4  已用 0.0s  剩余 0.0s\n批量进度 |###############---------------|  50.0%  2/4  已用 0.0s  剩余 0.0s\n批量进度 |######################--------|  75.0%  3/4  已用 0.0s  剩余 0.0s\n批量进度 |##############################| 100.0%  4/4  已用 0.0s  剩余 0.0s\n批量完成：成功 4/4 例，耗时 0.0s。\n日志已写入: <TEMP_LINKPATH>/tmp3n97rf48/jobs/infer/uncertainty_log.txt\n\n开始统计分析：共 4 例，逐例读取并计算指标...\n\n分析进度 |########----------------------|  25.0%  1/4  已用 0.0s  剩余 0.0s\n分析进度 |###############---------------|  50.0%  2/4  已用 0.0s  剩余 0.0s\n分析进度 |######################--------|  75.0%  3/4  已用 0.0s  剩余 0.0s\n分析进度 |##############################| 100.0%  4/4  已用 0.0s  剩余 0.0sok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.640s\n\nOK\n\n全部 4 例读取+计算完成，耗时 0.0s。\n\n==== 不确定度排序（按 integrated 从高到低）====\nrank  case                         integrated    uncertain_vol    mean_nz      max  cc_integrated       cc_vol\n--------------------------------------------------------------------------------------------------------------\n   1  case00                             56.0            112.0     0.5000   0.5000            0.0          0.0\n   2  case01                             56.0            112.0     0.5000   0.5000            0.0          0.0\n   3  case02                             56.0            112.0     0.5000   0.5000            0.0          0.0\n   4  case03                             56.0            112.0     0.5000   0.5000            0.0          0.0\n\n差异最大（不确定度最大且区域最大）的病例: case00\n  积分不确定度=56.0  不确定体积=112.0 mm^3  最大不确定度=0.5000\n  最大连通域: 体积=0.0 mm^3  均值=0.0000  积分=0.0\n  文件: <TEMP_LINKPATH>/tmp3n97rf48/jobs/infer/uncertainty/case00_uncertainty_disagreement.nii.gz\n\n排序报告已写入: <TEMP_LINKPATH>/tmp3n97rf48/jobs/infer/uncertainty/ranking.csv",
+      "_started_at": "2026-09-30T07:59:02"
+    }
+  ]
+}
