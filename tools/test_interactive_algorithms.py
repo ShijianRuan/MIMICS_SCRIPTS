@@ -271,8 +271,29 @@ class MimicsRuntimeTests(unittest.TestCase):
             path = Path(temporary) / "image.raw"
             result = self.runtime._write_raw_buffer(image, str(path), compute_sha=True)
             self.assertEqual(path.read_bytes(), expected)
-            self.assertEqual(result["sha256"], __import__("hashlib").sha256(expected).hexdigest())
+            self.assertEqual(
+                result["sha256"],
+                "sha256:" + __import__("hashlib").sha256(expected).hexdigest(),
+            )
 
+    def test_session_survives_prefixed_base_sha(self):
+        """R61-12 regression: stream_buffer prefixes 'sha256:' but the worker
+        stores a bare hex digest; the session comparison must normalize or
+        previous-logits continuity is silently dropped every prompt."""
+        image = FakeImage(_u8_pattern_buffer((2, 3, 4), lambda x, y, z: False))
+        mask = FakeMask("Target", image=image, selected=True)
+        with tempfile.TemporaryDirectory() as temporary:
+            logits = Path(temporary) / "logits.f32"
+            np.zeros((2, 3), dtype=np.float32).tofile(logits)
+            shape = json.dumps([2, 3])
+            self.runtime.nnm._metadata_set(mask, self.runtime.SESSION_PATH_METADATA, str(logits))
+            self.runtime.nnm._metadata_set(mask, self.runtime.SESSION_MASK_SHA_METADATA, "abc123")
+            self.runtime.nnm._metadata_set(mask, self.runtime.SESSION_SHAPE_METADATA, shape)
+            self.runtime.nnm._metadata_set(mask, self.runtime.SESSION_AXIS_METADATA, "2")
+            self.runtime.nnm._metadata_set(mask, self.runtime.SESSION_INDEX_METADATA, "5")
+            values = self.runtime._session_values(mask, "sha256:abc123")
+            self.assertEqual(values.get("previous_logits_path"), str(logits))
+            self.assertEqual(values.get("previous_plane_index"), 5)
 
     def test_click_plane_labels_are_derived_from_voxel_to_ras(self):
         image = FakeImage(_u8_pattern_buffer((4, 5, 6), lambda x, y, z: False))
