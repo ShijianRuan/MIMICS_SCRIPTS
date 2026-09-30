@@ -46,25 +46,25 @@ class StatusWindow:
             or Path.home() / ".mimics_script" / "nnunet"
         )
         self.window = QtWidgets.QMainWindow()
-        self.window.setWindowTitle("nnU-Net Status")
+        self.window.setWindowTitle("nnU-Net 状态")
         self.window.resize(980, 740)
         self.window.setMinimumSize(800, 620)
         central = QtWidgets.QWidget()
         root = QtWidgets.QVBoxLayout(central)
         root.setContentsMargins(22, 18, 22, 18)
         root.setSpacing(12)
-        title = QtWidgets.QLabel("nnU-Net Status")
+        title = QtWidgets.QLabel("nnU-Net 状态")
         title.setObjectName("title")
         root.addWidget(title)
         header = QtWidgets.QHBoxLayout()
-        header.addWidget(QtWidgets.QLabel("Task"))
+        header.addWidget(QtWidgets.QLabel("任务"))
         self.task_combo = QtWidgets.QComboBox()
         self.task_combo.currentIndexChanged.connect(self.refresh)
         header.addWidget(self.task_combo, 1)
         self.live_label = QtWidgets.QLabel("● Live")
         self.live_label.setObjectName("liveLabel")
         header.addWidget(self.live_label)
-        refresh = QtWidgets.QPushButton("Refresh")
+        refresh = QtWidgets.QPushButton("刷新")
         refresh.clicked.connect(self.refresh)
         header.addWidget(refresh)
         root.addLayout(header)
@@ -73,7 +73,7 @@ class StatusWindow:
         summary.setObjectName("surface")
         summary_layout = QtWidgets.QGridLayout(summary)
         summary_layout.setContentsMargins(16, 14, 16, 14)
-        self.state_label = QtWidgets.QLabel("No task selected")
+        self.state_label = QtWidgets.QLabel("未选择任务")
         self.state_label.setStyleSheet("font-size: 13pt; font-weight: 650;")
         self.detail_label = QtWidgets.QLabel("")
         self.detail_label.setObjectName("subtitle")
@@ -81,7 +81,7 @@ class StatusWindow:
         self.progress = QtWidgets.QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
-        self.progress.setFormat("Overall %p%")
+        self.progress.setFormat("总进度 %p%")
         summary_layout.addWidget(self.state_label, 0, 0)
         summary_layout.addWidget(self.detail_label, 1, 0)
         summary_layout.addWidget(self.progress, 2, 0)
@@ -92,7 +92,7 @@ class StatusWindow:
         left.setObjectName("surface")
         left_layout = QtWidgets.QVBoxLayout(left)
         left_layout.setContentsMargins(14, 12, 14, 12)
-        heading = QtWidgets.QLabel("Recent runs")
+        heading = QtWidgets.QLabel("最近运行")
         heading.setObjectName("section")
         left_layout.addWidget(heading)
         self.jobs = QtWidgets.QListWidget()
@@ -108,13 +108,13 @@ class StatusWindow:
         self.log_view.setReadOnly(True)
         self.log_view.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
         log_layout.addWidget(self.log_view)
-        right.addTab(log_tab, "Log")
+        right.addTab(log_tab, "日志")
         models_tab = QtWidgets.QWidget()
         models_layout = QtWidgets.QVBoxLayout(models_tab)
         models_layout.setContentsMargins(10, 10, 10, 10)
         self.models = QtWidgets.QTableWidget(0, 6)
         self.models.setHorizontalHeaderLabels(
-            ["Model", "Configuration", "Fold", "Output labels", "Created", "Ready"]
+            ['模型', '配置', 'Fold', '输出标签', '创建时间', '可用']
         )
         self.models.horizontalHeader().setStretchLastSection(True)
         self.models.horizontalHeader().setSectionResizeMode(
@@ -123,42 +123,41 @@ class StatusWindow:
         self.models.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.models.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         models_layout.addWidget(self.models)
-        right.addTab(models_tab, "Models")
+        right.addTab(models_tab, "模型")
         curve_tab = QtWidgets.QWidget()
         curve_layout = QtWidgets.QVBoxLayout(curve_tab)
         curve_layout.setContentsMargins(10, 10, 10, 10)
         self.curve = QtWidgets.QLabel(
-            "The nnU-Net training curve appears here after the trainer writes progress.png."
+            "Trainer 写入 progress.png 后，nnU-Net 训练曲线会显示在这里。"
         )
         self.curve.setObjectName("hint")
         self.curve.setAlignment(QtCore.Qt.AlignCenter)
         self.curve.setScaledContents(False)
         curve_layout.addWidget(self.curve, 1)
-        right.addTab(curve_tab, "Training curve")
+        right.addTab(curve_tab, "训练曲线")
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 2)
         root.addWidget(splitter, 1)
 
         actions = QtWidgets.QHBoxLayout()
-        self.stop_button = QtWidgets.QPushButton("Stop")
+        self.stop_button = QtWidgets.QPushButton("停止")
         self.stop_button.clicked.connect(self._stop)
         actions.addWidget(self.stop_button)
-        self.reattach_button = QtWidgets.QPushButton("Re-attach")
+        self.reattach_button = QtWidgets.QPushButton("重新挂接")
         self.reattach_button.clicked.connect(self._reattach)
         self.reattach_button.setToolTip(
-            "Resume monitoring a remote task whose local controller stopped "
-            "(e.g. after a workstation restart)."
+            "恢复监控本地控制器已停止的远程任务（例如工作站重启后）。"
         )
         actions.addWidget(self.reattach_button)
-        self.retry_button = QtWidgets.QPushButton("Retry Same Settings")
+        self.retry_button = QtWidgets.QPushButton("以相同设置重试")
         self.retry_button.clicked.connect(self._retry)
         actions.addWidget(self.retry_button)
-        self.open_button = QtWidgets.QPushButton("Open Job Folder")
+        self.open_button = QtWidgets.QPushButton("打开作业文件夹")
         self.open_button.clicked.connect(self._open_folder)
         actions.addWidget(self.open_button)
         actions.addStretch(1)
-        close = QtWidgets.QPushButton("Close")
+        close = QtWidgets.QPushButton("关闭")
         close.clicked.connect(self.window.close)
         actions.addWidget(close)
         root.addLayout(actions)
@@ -212,8 +211,8 @@ class StatusWindow:
             snapshot = self._collect()
         task_id = self._selected_task()
         if not task_id:
-            self.state_label.setText("No nnU-Net task found")
-            self.detail_label.setText("Start training to create the first managed task.")
+            self.state_label.setText("未找到 nnU-Net 任务")
+            self.detail_label.setText("开始训练即可创建第一个托管任务。")
             self.progress.setValue(0)
             return
         current_status_path = ""
@@ -294,7 +293,7 @@ class StatusWindow:
                 "completed", "failed", "cancelled", "abandoned", "unknown"
             }
         )
-        self.stop_button.setText("Abandon Locally" if abandonable else "Stop")
+        self.stop_button.setText("Abandon Locally" if abandonable else "停止")
         self.stop_button.setEnabled(
             abandonable
             or state not in {
@@ -339,12 +338,12 @@ class StatusWindow:
         if curve_path is None:
             self.curve.setPixmap(self.QtGui.QPixmap())
             self.curve.setText(
-                "Training curve is not available yet. Live epoch details remain in the Log tab."
+                "训练曲线暂不可用。实时 epoch 详情仍见“日志”页。"
             )
             return
         pixmap = self.QtGui.QPixmap(str(curve_path))
         if pixmap.isNull():
-            self.curve.setText("The training curve could not be decoded.")
+            self.curve.setText("训练曲线无法解码。")
             return
         size = self.curve.size()
         self.curve.setText("")
@@ -370,11 +369,8 @@ class StatusWindow:
             if abandonable:
                 answer = self.QtWidgets.QMessageBox.warning(
                     self.window,
-                    "Abandon Remote Task Locally",
-                    "Stop waiting on this workstation?\n\nThe server cannot "
-                    "confirm whether the container stopped. It may still use "
-                    "GPU or disk resources. An administrator must inspect the "
-                    "recorded container name.",
+                    "在本机放弃远程任务",
+                    "不再在本机等待该任务？\n\n服务器无法确认容器是否已停止，它可能仍在占用 GPU 或磁盘资源。需要管理员根据记录的容器名进行检查。",
                     self.QtWidgets.QMessageBox.Yes
                     | self.QtWidgets.QMessageBox.No,
                     self.QtWidgets.QMessageBox.No,
@@ -396,7 +392,7 @@ class StatusWindow:
             self.refresh()
         except Exception as exc:
             self.QtWidgets.QMessageBox.critical(
-                self.window, "Re-attach Failed", str(exc)
+                self.window, "重新挂接失败", str(exc)
             )
 
     def _retry(self):
@@ -411,7 +407,7 @@ class StatusWindow:
             self.refresh()
         except Exception as exc:
             self.QtWidgets.QMessageBox.critical(
-                self.window, "Retry Failed", str(exc)
+                self.window, "重试失败", str(exc)
             )
 
     def _open_folder(self):
@@ -442,7 +438,7 @@ def main() -> int:
     from PySide6 import QtCore, QtGui, QtWidgets
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
-    configure_application(app, "nnU-Net Status")
+    configure_application(app, "nnU-Net 状态")
     app.setStyleSheet(stylesheet())
     window = StatusWindow(context, (QtCore, QtGui, QtWidgets))
     window.show()

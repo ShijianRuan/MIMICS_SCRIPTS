@@ -459,13 +459,13 @@ def run_ui(context, preview_path=""):
     progress_layout = QtWidgets.QVBoxLayout(progress_panel)
     progress_layout.setContentsMargins(20, 20, 20, 18)
     progress_layout.setSpacing(12)
-    progress_heading = QtWidgets.QLabel("Starting task...")
+    progress_heading = QtWidgets.QLabel("正在启动任务...")
     progress_heading.setObjectName("section")
     progress_layout.addWidget(progress_heading)
     progress_bar = QtWidgets.QProgressBar()
     progress_bar.setRange(0, 0)
     progress_layout.addWidget(progress_bar)
-    progress_detail = QtWidgets.QLabel("Waiting for Mimics to start the workflow.")
+    progress_detail = QtWidgets.QLabel("等待 Mimics 启动工作流。")
     progress_detail.setWordWrap(True)
     progress_layout.addWidget(progress_detail)
     progress_activity = QtWidgets.QTextEdit()
@@ -473,12 +473,12 @@ def run_ui(context, preview_path=""):
     progress_activity.setMaximumHeight(180)
     progress_layout.addWidget(progress_activity, 1)
     progress_actions = QtWidgets.QHBoxLayout()
-    open_output = QtWidgets.QPushButton("Open Output")
-    open_log = QtWidgets.QPushButton("Open Log")
-    stop_task = QtWidgets.QPushButton("Stop")
+    open_output = QtWidgets.QPushButton("打开输出")
+    open_log = QtWidgets.QPushButton("打开日志")
+    stop_task = QtWidgets.QPushButton("停止")
     stop_task.setObjectName("dangerButton")
-    hide_task = QtWidgets.QPushButton("Minimize")
-    close_task = QtWidgets.QPushButton("Close")
+    hide_task = QtWidgets.QPushButton("最小化")
+    close_task = QtWidgets.QPushButton("关闭")
     close_task.setEnabled(False)
     progress_actions.addWidget(open_output)
     progress_actions.addWidget(open_log)
@@ -495,14 +495,14 @@ def run_ui(context, preview_path=""):
         row = QtWidgets.QHBoxLayout()
         edit = QtWidgets.QLineEdit(str(initial or ""))
         edit.setClearButtonEnabled(True)
-        paste_button = QtWidgets.QPushButton("Paste")
+        paste_button = QtWidgets.QPushButton("粘贴")
         row.addWidget(edit, 1)
         row.addWidget(paste_button)
         file_button = None
         if file_or_folder:
-            file_button = QtWidgets.QPushButton("Choose File...")
+            file_button = QtWidgets.QPushButton("选择文件...")
             row.addWidget(file_button)
-        button = QtWidgets.QPushButton("Choose Folder...")
+        button = QtWidgets.QPushButton("选择文件夹...")
         row.addWidget(button)
         form.addLayout(row)
         if hint:
@@ -588,9 +588,9 @@ def run_ui(context, preview_path=""):
     if mode.startswith("import"):
         form.addWidget(_label(QtWidgets, "MASKS TO IMPORT", "section"))
         mask_row = QtWidgets.QHBoxLayout()
-        mask_all = QtWidgets.QRadioButton("All masks")
-        mask_none = QtWidgets.QRadioButton("Images only")
-        mask_named = QtWidgets.QRadioButton("Named masks")
+        mask_all = QtWidgets.QRadioButton("全部 Mask")
+        mask_none = QtWidgets.QRadioButton("仅图像")
+        mask_named = QtWidgets.QRadioButton("指定名称的 Mask")
         remembered_selection = str(remembered_mode.get("mask_selection", "all") or "all")
         mask_none.setChecked(remembered_selection.lower() == "none")
         mask_named.setChecked(remembered_selection.lower() not in ("all", "none"))
@@ -601,15 +601,15 @@ def run_ui(context, preview_path=""):
         mask_row.addStretch(1)
         form.addLayout(mask_row)
         mask_names = QtWidgets.QLineEdit(remembered_selection if mask_named.isChecked() else "")
-        mask_names.setPlaceholderText("Example: liver, spleen, aorta")
+        mask_names.setPlaceholderText("例如 liver, spleen, aorta")
         mask_names.setEnabled(mask_named.isChecked())
         form.addWidget(mask_names)
         mask_named.toggled.connect(mask_names.setEnabled)
     if mode == "export_masks":
         form.addWidget(_label(QtWidgets, "MASKS TO EXPORT", "section"))
         export_mask_row = QtWidgets.QHBoxLayout()
-        mask_all = QtWidgets.QRadioButton("All masks")
-        mask_named = QtWidgets.QRadioButton("Selected names")
+        mask_all = QtWidgets.QRadioButton("全部 Mask")
+        mask_named = QtWidgets.QRadioButton("选定的名称")
         mask_all.setChecked(True)
         export_mask_row.addWidget(mask_all)
         export_mask_row.addWidget(mask_named)
@@ -620,7 +620,7 @@ def run_ui(context, preview_path=""):
         # candidate toggles it into the field, so a project with hundreds of
         # masks can be narrowed by typing without scrolling.
         mask_names = QtWidgets.QLineEdit()
-        mask_names.setPlaceholderText("Type names (comma-separated) or pick from the list below")
+        mask_names.setPlaceholderText("输入名称（逗号分隔），或从下方列表选择")
         mask_names.setEnabled(False)
         form.addWidget(mask_names)
         available_masks = [str(name) for name in (context.get("mask_names") or []) if str(name).strip()]
@@ -642,8 +642,8 @@ def run_ui(context, preview_path=""):
         policy_row = QtWidgets.QHBoxLayout()
         policy_row.addWidget(_label(QtWidgets, "IF FILES ALREADY EXIST", "section"))
         policy_row.addStretch(1)
-        skip_radio = QtWidgets.QRadioButton("Skip existing")
-        overwrite_radio = QtWidgets.QRadioButton("Overwrite existing")
+        skip_radio = QtWidgets.QRadioButton("跳过已存在")
+        overwrite_radio = QtWidgets.QRadioButton("覆盖已存在")
         overwrite_radio.setChecked(remembered_mode.get("conflict_policy") == "overwrite")
         skip_radio.setChecked(not overwrite_radio.isChecked())
         policy_row.addWidget(skip_radio)
@@ -715,7 +715,7 @@ def run_ui(context, preview_path=""):
             recognition_label.setText("")
             return
         recognition_state["scanning"] = True
-        recognition_label.setText("Scanning dataset...")
+        recognition_label.setText("正在扫描数据集...")
 
         def scan():
             try:
@@ -757,11 +757,11 @@ def run_ui(context, preview_path=""):
     footer_widget = QtWidgets.QWidget()
     footer = QtWidgets.QHBoxLayout(footer_widget)
     footer.setContentsMargins(0, 0, 0, 0)
-    remember = QtWidgets.QCheckBox("Remember these folders on this workstation")
+    remember = QtWidgets.QCheckBox("在本机记住这些文件夹")
     remember.setChecked(True)
     footer.addWidget(remember)
     footer.addStretch(1)
-    cancel = QtWidgets.QPushButton("Cancel")
+    cancel = QtWidgets.QPushButton("取消")
     submit = QtWidgets.QPushButton("Start Import" if mode.startswith("import") else "Start Export")
     submit.setObjectName("primary")
     footer.addWidget(cancel)
@@ -827,8 +827,8 @@ def run_ui(context, preview_path=""):
         submission_state["submitted"] = True
         panel.hide()
         footer_widget.hide()
-        title.setText("Task in progress")
-        subtitle.setText("Mimics remains available while this task runs.")
+        title.setText("任务进行中")
+        subtitle.setText("任务运行期间 Mimics 仍可正常使用。")
         progress_panel.show()
         stop_task.setEnabled(bool(bootstrap_stop_path))
         append_activity("Request submitted to Mimics.")
@@ -844,7 +844,7 @@ def run_ui(context, preview_path=""):
         if bootstrap_stop_path and bootstrap_stop_path not in stop_paths:
             stop_paths.insert(0, bootstrap_stop_path)
         if not stop_paths:
-            progress_detail.setText("This task cannot be stopped from this window. Close it and use the matching Stop entry in Mimics.")
+            progress_detail.setText("该任务无法从本窗口停止。请关闭本窗口，使用 Mimics 中对应的停止入口。")
             return
         try:
             errors = []
@@ -860,7 +860,7 @@ def run_ui(context, preview_path=""):
                 raise RuntimeError("; ".join(errors))
             task_state["stop_requested"] = True
             stop_task.setEnabled(False)
-            progress_detail.setText("Stop requested. Waiting for the active process to exit safely.")
+            progress_detail.setText("已请求停止，正在等待活动进程安全退出。")
             append_activity("Stop requested. The current safe unit of work will finish first.")
         except Exception as exc:
             progress_detail.setText("Could not request stop: {0}".format(exc))
@@ -1051,7 +1051,7 @@ def run_ui(context, preview_path=""):
             elif mask_named.isChecked():
                 names = ",".join(item.strip() for item in mask_names.text().split(",") if item.strip())
                 if not names:
-                    QtWidgets.QMessageBox.warning(window, "Mask Names Required", "Enter one or more mask names separated by commas.")
+                    QtWidgets.QMessageBox.warning(window, "需要填写 Mask 名称", "请输入一个或多个 Mask 名称，用逗号分隔。")
                     return
                 selection["mask_selection"] = names
             else:
@@ -1062,8 +1062,8 @@ def run_ui(context, preview_path=""):
             if not selected_formats:
                 QtWidgets.QMessageBox.warning(
                     window,
-                    "Export Format Required",
-                    "Choose at least one export format.",
+                    "需要选择导出格式",
+                    "请至少选择一种导出格式。",
                 )
                 return
             selection["export_formats"] = selected_formats
@@ -1072,8 +1072,8 @@ def run_ui(context, preview_path=""):
                 if not names:
                     QtWidgets.QMessageBox.warning(
                         window,
-                        "Mask Names Required",
-                        "Enter one or more mask names (comma-separated) or pick from the list.",
+                        "需要填写 Mask 名称",
+                        "请输入一个或多个 Mask 名称（逗号分隔），或从列表中选择。",
                     )
                     return
                 selection["mask_selection"] = names
@@ -1091,14 +1091,9 @@ def run_ui(context, preview_path=""):
             if existing_count:
                 answer = QtWidgets.QMessageBox.question(
                     window,
-                    "Existing Label Files",
+                    "目标文件夹已有标签文件",
                     (
-                        "The target folder already contains {0} label file(s):\n\n{1}\n\n"
-                        "With \"Skip existing\" selected they will be kept unchanged "
-                        "(the export will report them as not updated).\n\n"
-                        "Yes = continue with Skip existing\n"
-                        "No = switch to Overwrite existing and continue\n"
-                        "Cancel = go back and change settings"
+                        "目标文件夹已包含 {0} 个标签文件：\n\n{1}\n\n选择了\"跳过已存在\"时这些文件将保持不变（导出会将其报告为未更新）。\n\n是 = 以\"跳过已存在\"继续\n否 = 改为\"覆盖已存在\"并继续\n取消 = 返回修改设置"
                     ).format(existing_count, final_folder),
                     QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel,
                     QtWidgets.QMessageBox.No,
@@ -1124,8 +1119,8 @@ def run_ui(context, preview_path=""):
                     lines.append("• No usable image found in {0} case(s): {1}{2} — they will be skipped.".format(len(summary["skipped"]), shown, more))
                 answer = QtWidgets.QMessageBox.question(
                     window,
-                    "Review Recognition Results",
-                    "The dataset scan found:\n\n{0}\n\nProceed with import?".format("\n".join(lines)),
+                    "请确认识别结果",
+                    "数据集扫描结果：\n\n{0}\n\n是否继续导入？".format("\n".join(lines)),
                     QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
                     QtWidgets.QMessageBox.No,
                 )
@@ -1134,7 +1129,7 @@ def run_ui(context, preview_path=""):
 
         submission_state["running"] = True
         submit.setEnabled(False)
-        output_preview.setText("Checking paths in the background...")
+        output_preview.setText("正在后台检查路径...")
 
         def validate_paths():
             try:

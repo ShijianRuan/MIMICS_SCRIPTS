@@ -47,7 +47,7 @@ class TrainingSetupWindow:
         self.QtCore, self.QtGui, self.QtWidgets = qt_modules
         QtCore, QtWidgets = self.QtCore, self.QtWidgets
         self.window = QtWidgets.QMainWindow()
-        self.window.setWindowTitle("FlexiCT Training")
+        self.window.setWindowTitle("FlexiCT 训练")
         self.window.resize(880, 720)
         self.window.setMinimumSize(760, 620)
         self.window.closeEvent = self._close_event
@@ -63,11 +63,10 @@ class TrainingSetupWindow:
         root = QtWidgets.QVBoxLayout(central)
         root.setContentsMargins(22, 18, 22, 18)
         root.setSpacing(12)
-        title = QtWidgets.QLabel("FlexiCT Training")
+        title = QtWidgets.QLabel("FlexiCT 训练")
         title.setObjectName("title")
         subtitle = QtWidgets.QLabel(
-            "Few-shot training on a handful of annotated cases with the FlexiCT "
-            "ViT backbone. Two to ten cases are enough. Mimics remains usable."
+            "基于 FlexiCT ViT 主干、只需少量标注病例的小样本训练（2~10 例即可）。期间 Mimics 仍可正常使用。"
         )
         subtitle.setObjectName("subtitle")
         subtitle.setWordWrap(True)
@@ -75,24 +74,24 @@ class TrainingSetupWindow:
         root.addWidget(subtitle)
 
         self.tabs = QtWidgets.QTabWidget()
-        self.tabs.addTab(self._build_data_tab(), "Data")
-        self.tabs.addTab(self._build_training_tab(), "Training")
-        self.tabs.addTab(self._build_compute_tab(), "Compute")
-        self.tabs.addTab(self._build_models_tab(), "Existing models")
+        self.tabs.addTab(self._build_data_tab(), "数据")
+        self.tabs.addTab(self._build_training_tab(), "训练")
+        self.tabs.addTab(self._build_compute_tab(), "计算")
+        self.tabs.addTab(self._build_models_tab(), "已有模型")
         root.addWidget(self.tabs, 1)
 
         self.status_label = QtWidgets.QLabel(
-            "Labels are mapped to the original image grid before nnU-Net preprocessing."
+            "标签会先映射回原始图像网格，再进行 nnU-Net 预处理。"
         )
         self.status_label.setObjectName("hint")
         self.status_label.setWordWrap(True)
         root.addWidget(self.status_label)
         actions = QtWidgets.QHBoxLayout()
         actions.addStretch(1)
-        cancel = QtWidgets.QPushButton("Cancel")
+        cancel = QtWidgets.QPushButton("取消")
         cancel.clicked.connect(self.window.close)
         actions.addWidget(cancel)
-        self.start_button = QtWidgets.QPushButton("Start Training")
+        self.start_button = QtWidgets.QPushButton("开始训练")
         self.start_button.setObjectName("primary")
         self.start_button.clicked.connect(self._submit)
         actions.addWidget(self.start_button)
@@ -122,7 +121,7 @@ class TrainingSetupWindow:
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
         layout.addWidget(edit, 1)
-        button = QtWidgets.QPushButton("Browse...")
+        button = QtWidgets.QPushButton("浏览...")
 
         def browse():
             current = edit.text().strip()
@@ -155,22 +154,22 @@ class TrainingSetupWindow:
 
         project, form = self._surface("Task and images")
         self.label_edit = QtWidgets.QLineEdit()
-        self.label_edit.setPlaceholderText("Example: kidney_left")
+        self.label_edit.setPlaceholderText("例如 kidney_left")
         self.label_edit.setToolTip(
-            "One FlexiCT model trains one binary target (organ or structure)."
+            "一个 FlexiCT 模型只训练一个二值目标（器官或结构）。"
         )
-        form.addWidget(QtWidgets.QLabel("Target / label name *"), 0, 0)
+        form.addWidget(QtWidgets.QLabel("目标 / 标签名称 *"), 0, 0)
         form.addWidget(self.label_edit, 0, 1)
         self.modality_combo = QtWidgets.QComboBox()
         for label, value in (("CT", "CT"), ("MRI", "MRI"), ("Other", "Other")):
             self.modality_combo.addItem(label, value)
-        form.addWidget(QtWidgets.QLabel("Image modality"), 1, 0)
+        form.addWidget(QtWidgets.QLabel("成像模态"), 1, 0)
         form.addWidget(self.modality_combo, 1, 1)
         self.dataset_edit = QtWidgets.QLineEdit()
         self.dataset_edit.setPlaceholderText(
-            "Folder containing one subfolder per case"
+            "每个病例一个子文件夹的目录"
         )
-        form.addWidget(QtWidgets.QLabel("Original image dataset *"), 2, 0)
+        form.addWidget(QtWidgets.QLabel("原始图像数据集 *"), 2, 0)
         form.addWidget(
             self._path_row(self.dataset_edit, "Select original image dataset"), 2, 1
         )
@@ -179,16 +178,14 @@ class TrainingSetupWindow:
 
         cases, cases_layout = self._surface("Cases and validation")
         hint = QtWidgets.QLabel(
-            "Every case folder needs the original image and one Mask file named "
-            "after the target (for example kidney_left.nii.gz). Training uses "
-            "the rest; validation cases are drawn evenly across slice positions."
+            "每个病例文件夹需要原始图像和一个以目标命名的 Mask 文件（例如 kidney_left.nii.gz）。其余用于训练；验证病例按层位均匀抽取。"
         )
         hint.setObjectName("hint")
         hint.setWordWrap(True)
         cases_layout.addWidget(hint, 0, 0, 1, 2)
         self.case_table = QtWidgets.QTableWidget(0, 4)
         self.case_table.setHorizontalHeaderLabels(
-            ["Case", "Use for training", "Use for validation", "Status"]
+            ['病例', '用于训练', '用于验证', '状态']
         )
         self.case_table.horizontalHeader().setSectionResizeMode(
             0, QtWidgets.QHeaderView.Stretch
@@ -201,7 +198,7 @@ class TrainingSetupWindow:
         self.case_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.case_table.setAlternatingRowColors(True)
         cases_layout.addWidget(self.case_table, 1, 0, 1, 2)
-        self.rescan_button = QtWidgets.QPushButton("Rescan cases")
+        self.rescan_button = QtWidgets.QPushButton("重新扫描病例")
         self.rescan_button.clicked.connect(self._rescan_cases_async)
         cases_layout.addWidget(self.rescan_button, 2, 0)
         self.case_summary = QtWidgets.QLabel("")
@@ -212,12 +209,12 @@ class TrainingSetupWindow:
 
         storage, storage_form = self._surface("Storage")
         self.workspace_edit = QtWidgets.QLineEdit()
-        storage_form.addWidget(QtWidgets.QLabel("Model library"), 0, 0)
+        storage_form.addWidget(QtWidgets.QLabel("模型库"), 0, 0)
         storage_form.addWidget(
             self._path_row(self.workspace_edit, "Select FlexiCT model library"), 0, 1
         )
         storage_hint = QtWidgets.QLabel(
-            "Contains managed jobs, preprocessing caches, and the model registry."
+            "包含托管作业、预处理缓存和模型注册表。"
         )
         storage_hint.setObjectName("hint")
         storage_hint.setWordWrap(True)
@@ -241,7 +238,7 @@ class TrainingSetupWindow:
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(12)
 
-        training, form = self._surface("Training")
+        training, form = self._surface("训练")
         self.configuration_combo = QtWidgets.QComboBox()
         for label, value in (
             ("Automatic (3D pair on large GPUs, 2D otherwise)", "auto"),
@@ -251,53 +248,44 @@ class TrainingSetupWindow:
         ):
             self.configuration_combo.addItem(label, value)
         self.configuration_combo.setToolTip(
-            "Few-shot validated recipes. Auto picks the pair on GPUs with 16GB+ "
-            "VRAM, otherwise 2D."
+            "已验证的小样本配方。显存 16GB+ 的 GPU 上自动选择成对模型，否则选择 2D。"
         )
-        form.addWidget(QtWidgets.QLabel("Configuration"), 0, 0)
+        form.addWidget(QtWidgets.QLabel("配置"), 0, 0)
         form.addWidget(self.configuration_combo, 0, 1)
         self.epochs_spin = QtWidgets.QSpinBox()
         self.epochs_spin.setRange(10, 2000)
         self.epochs_spin.setValue(150)
         self.epochs_spin.setToolTip(
-            "Validated few-shot default: 150 epochs with the FlexiCT optimizer "
-            "schedule."
+            "已验证的小样本默认值：150 epoch，使用 FlexiCT 优化器调度。"
         )
-        form.addWidget(QtWidgets.QLabel("Epochs"), 1, 0)
+        form.addWidget(QtWidgets.QLabel("训练轮数 (epoch)"), 1, 0)
         form.addWidget(self.epochs_spin, 1, 1)
         self.val_spin = QtWidgets.QSpinBox()
         self.val_spin.setRange(1, 10)
         self.val_spin.setValue(1)
         self.val_spin.setToolTip(
-            "How many of the selected cases are held out for validation "
-            "(best-checkpoint selection)."
+            "从所选病例中留出多少例用于验证（用于选择最佳 checkpoint）。"
         )
-        form.addWidget(QtWidgets.QLabel("Validation cases"), 2, 0)
+        form.addWidget(QtWidgets.QLabel("验证病例数"), 2, 0)
         form.addWidget(self.val_spin, 2, 1)
         self.mirror_combo = QtWidgets.QComboBox()
-        self.mirror_combo.addItem("Both sides (default)", "")
-        self.mirror_combo.addItem("Single-sided organ, disable X mirroring", "1")
+        self.mirror_combo.addItem("双侧（默认）", "")
+        self.mirror_combo.addItem("单侧器官，关闭 X 轴镜像", "1")
         self.mirror_combo.setToolTip(
-            "Disables left-right mirroring augmentation — needed for single "
-            "organs like one kidney."
+            "关闭左右镜像增广——单侧器官（如单个肾脏）需要此设置。"
         )
-        form.addWidget(QtWidgets.QLabel("Mirroring"), 3, 0)
+        form.addWidget(QtWidgets.QLabel("镜像"), 3, 0)
         form.addWidget(self.mirror_combo, 3, 1)
         self.workers_spin = QtWidgets.QSpinBox()
         self.workers_spin.setRange(1, 64)
         self.workers_spin.setValue(4)
-        form.addWidget(QtWidgets.QLabel("Preprocessing workers"), 4, 0)
+        form.addWidget(QtWidgets.QLabel("预处理进程数"), 4, 0)
         form.addWidget(self.workers_spin, 4, 1)
         layout.addWidget(training)
 
         recipe, recipe_form = self._surface("Locked recipe (read-only)")
         recipe_text = QtWidgets.QLabel(
-            "FlexiCT ViT backbone (fp32, RoPE-safe) · AdamW dual groups "
-            "(backbone 3e-5 / decoder 3e-4, betas 0.9/0.98, wd 5e-2) · poly LR "
-            "· gradclip 12 · no deep supervision · foreground oversample 0.33 · "
-            "batch size from nnU-Net plans · best checkpoint by validation Dice · "
-            "inference without TTA.\n\nThese settings are the validated few-shot "
-            "recipe and are not configurable from Mimics."
+            "FlexiCT ViT 主干（fp32，RoPE 安全）· AdamW 双参数组（backbone 3e-5 / decoder 3e-4，betas 0.9/0.98，wd 5e-2）· poly LR · gradclip 12 · 无 deep supervision · 前景过采样 0.33 · batch size 取自 nnU-Net plans · 按验证 Dice 选最佳 checkpoint · 推理不用 TTA。\n\n以上为已验证的小样本配方，Mimics 中不可修改。"
         )
         recipe_text.setObjectName("hint")
         recipe_text.setWordWrap(True)
@@ -315,7 +303,7 @@ class TrainingSetupWindow:
         layout.setContentsMargins(12, 14, 12, 12)
         self.models_table = QtWidgets.QTableWidget(0, 5)
         self.models_table.setHorizontalHeaderLabels(
-            ["Model", "Target", "Configuration", "Created", "Ready"]
+            ['模型', '目标', "配置", '创建时间', '可用']
         )
         self.models_table.horizontalHeader().setStretchLastSection(True)
         self.models_table.horizontalHeader().setSectionResizeMode(
@@ -325,8 +313,7 @@ class TrainingSetupWindow:
         self.models_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         layout.addWidget(self.models_table)
         hint = QtWidgets.QLabel(
-            "Registered FlexiCT models. The most recent usable model is "
-            "pre-selected for prediction and active learning."
+            "已注册的 FlexiCT 模型。最近一个可用模型会预选用于预测和主动学习。"
         )
         hint.setObjectName("hint")
         hint.setWordWrap(True)
@@ -349,12 +336,10 @@ class TrainingSetupWindow:
             layout.addWidget(self.remote_selector.group)
         except Exception:
             layout.addWidget(
-                QtWidgets.QLabel("Remote compute is unavailable on this workstation.")
+                QtWidgets.QLabel("本工作站不可用远程计算。")
             )
         note = QtWidgets.QLabel(
-            "Local and remote runs use the same request, source-grid preparation, "
-            "recipe, model manifest, and status format. Remote containers are "
-            "disposable; verified data and preprocessing caches remain reusable."
+            "本机与远程使用相同的请求、原始网格准备、配方、模型清单和状态格式。远程容器用后即弃；已验证的数据和预处理缓存仍可复用。"
         )
         note.setObjectName("hint")
         note.setWordWrap(True)
@@ -506,8 +491,7 @@ class TrainingSetupWindow:
             self.start_button.setEnabled(True)
             self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
             self.status_label.setText(
-                "Path checking timed out. The selected drive may be offline or "
-                "responding too slowly; paste a more specific path or retry."
+                "路径检查超时。所选磁盘可能离线或响应过慢；请粘贴更具体的路径或重试。"
             )
         try:
             generation, request, error = self._submission_results.get_nowait()
@@ -523,7 +507,7 @@ class TrainingSetupWindow:
             self.status_label.setText(error)
             return
         try:
-            self.status_label.setText("Submitting FlexiCT training...")
+            self.status_label.setText("正在提交 FlexiCT 训练...")
             write_json_atomic(
                 Path.home() / ".mimics_script" / "flexict_settings.json",
                 {
@@ -606,7 +590,7 @@ class TrainingSetupWindow:
             self.start_button.setEnabled(False)
             self.status_label.setStyleSheet("")
             self.status_label.setText(
-                "Checking the selected data locations in the background..."
+                "正在后台检查所选数据位置..."
             )
 
             def validate():
@@ -664,7 +648,7 @@ def main() -> int:
         from PySide6 import QtCore, QtGui, QtWidgets
 
         app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
-        configure_application(app, "FlexiCT Training")
+        configure_application(app, "FlexiCT 训练")
         app.setStyleSheet(stylesheet())
         window = TrainingSetupWindow(context, context_path, (QtCore, QtGui, QtWidgets))
         window.show()

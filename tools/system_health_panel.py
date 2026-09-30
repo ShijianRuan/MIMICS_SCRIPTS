@@ -324,18 +324,18 @@ def run(preview_path=""):
     )))
 
     window = QtWidgets.QMainWindow()
-    window.setWindowTitle("System Health")
+    window.setWindowTitle("系统健康")
     window.setMinimumSize(680, 560)
 
     central = QtWidgets.QWidget()
     window.setCentralWidget(central)
     root = QtWidgets.QVBoxLayout(central)
 
-    title = QtWidgets.QLabel("System Health")
+    title = QtWidgets.QLabel("系统健康")
     title.setObjectName("title")
     root.addWidget(title)
 
-    summary = QtWidgets.QLabel("Loading...")
+    summary = QtWidgets.QLabel("加载中...")
     summary.setObjectName("subtitle")
     summary.setWordWrap(True)
     root.addWidget(summary)
@@ -355,10 +355,10 @@ def run(preview_path=""):
     page.addStretch(1)
 
     actions = QtWidgets.QHBoxLayout()
-    refresh_btn = QtWidgets.QPushButton("Refresh Now")
-    sweep_btn = QtWidgets.QPushButton("Sweep Stale State")
+    refresh_btn = QtWidgets.QPushButton("立即刷新")
+    sweep_btn = QtWidgets.QPushButton("清理过期状态")
     sweep_btn.setObjectName("primary")
-    stop_btn = QtWidgets.QPushButton("Stop All Owned Services")
+    stop_btn = QtWidgets.QPushButton("停止全部自有服务")
     actions.addWidget(refresh_btn)
     actions.addWidget(sweep_btn)
     actions.addWidget(stop_btn)
@@ -407,7 +407,7 @@ def run(preview_path=""):
             status_label = box.itemAt(0).widget()
             status_label.setProperty("status", "ok")
             if proc["state_path"] and os.path.isfile(proc["state_path"]):
-                btn = QtWidgets.QPushButton("Open State")
+                btn = QtWidgets.QPushButton("打开状态文件")
                 btn.clicked.connect(lambda _=False, p=str(proc["state_path"]): _open_folder(os.path.dirname(p)))
                 box.addWidget(btn)
         for proc in dead:
@@ -461,7 +461,7 @@ def run(preview_path=""):
             box.itemAt(0).widget().setProperty(
                 "status", "warn" if q["state"] != "idle" else "ok"
             )
-            btn = QtWidgets.QPushButton("Open Folder")
+            btn = QtWidgets.QPushButton("打开文件夹")
             btn.clicked.connect(lambda _=False, p=q["path"]: _open_folder(p))
             box.addWidget(btn)
         if len(entries) > 20:
@@ -503,7 +503,7 @@ def run(preview_path=""):
                 ),
                 "detail": (issue.get("detail") or "").split("\n")[0],
             })
-            btn = QtWidgets.QPushButton("Guidance")
+            btn = QtWidgets.QPushButton("环境指引")
             btn.clicked.connect(lambda _=False: env_guidance.show_dialog(Path(_ROOT)))
             box.addWidget(btn)
 
@@ -568,7 +568,7 @@ def run(preview_path=""):
     refresh_btn.clicked.connect(refresh)
 
     def do_sweep():
-        summary.setText("Sweeping stale state... (the panel stays usable)")
+        summary.setText("正在清理过期状态...（面板仍可使用）")
         sweep_btn.setEnabled(False)
 
         def worker():
@@ -592,13 +592,11 @@ def run(preview_path=""):
 
     def do_stop():
         answer = QtWidgets.QMessageBox.question(
-            window, "Stop All Owned Services",
-            "Stop every background process this project started?\n\n"
-            "Running imports, exports, and training jobs will be asked to "
-            "stop gracefully first, then terminated.",
+            window, "停止全部自有服务",
+            "停止本项目启动的全部后台进程？\n\n正在运行的导入、导出和训练任务会先被请求正常退出，然后再强制终止。",
         )
         if answer == QtWidgets.QMessageBox.Yes:
-            summary.setText("Stop requested - processes are shutting down...")
+            summary.setText("已请求停止——进程正在退出...")
 
             def worker():
                 try:

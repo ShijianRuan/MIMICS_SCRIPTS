@@ -197,9 +197,8 @@ def import_bundle(bundle_path: Path, workspaces: dict[str, str],
     if not command:
         known = ", ".join(sorted(_IMPORT_COMMANDS))
         raise RuntimeError(
-            "This file is not a recognized model package (expected one of: "
-            "{0}). Ask the sender for a bundle exported with "
-            "ai_model_bundle.".format(known)
+            "该文件不是可识别的模型包（应为以下类型之一：{0}）。"
+            "请让发送方使用 ai_model_bundle 重新导出。".format(known)
         )
     argv = [
         command,
@@ -243,8 +242,7 @@ def set_recommended_model(row: dict) -> None:
         task_common.save_registry(workspace, registry)
     elif family == "nnunet":
         raise RuntimeError(
-            "nnU-Net picks the model per prediction; use the prediction "
-            "window to choose a model."
+            "nnU-Net 在每次预测时选择模型，请使用预测窗口选择模型。"
         )
     else:  # flexict
         flexict_common.save_registry(
@@ -316,20 +314,17 @@ class ModelManagerWindow:
         self._results: Queue = Queue()
 
         self.window = QtWidgets.QDialog()
-        self.window.setWindowTitle("AI Model Manager")
+        self.window.setWindowTitle("AI 模型管理器")
         self.window.resize(980, 600)
         self.window.setMinimumSize(820, 480)
         root = QtWidgets.QVBoxLayout(self.window)
         root.setContentsMargins(22, 18, 22, 18)
         root.setSpacing(12)
-        title = QtWidgets.QLabel("AI Model Manager")
+        title = QtWidgets.QLabel("AI 模型管理器")
         title.setObjectName("title")
         root.addWidget(title)
         subtitle = QtWidgets.QLabel(
-            "Import model packages (zip) you received, see every model of "
-            "every family in one place, and switch which model is used by "
-            "default. Nothing is overwritten: importing an existing model is "
-            "refused until the old one is removed."
+            "导入收到的模型包 (zip)，在一处查看所有系列的全部模型，并切换默认使用的模型。不会覆盖任何内容：旧模型未移除前，同名导入会被拒绝。"
         )
         subtitle.setObjectName("subtitle")
         subtitle.setWordWrap(True)
@@ -337,8 +332,8 @@ class ModelManagerWindow:
 
         self.table = QtWidgets.QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(
-            ["Family", "Target", "Model", "Configuration", "Created",
-             "Source", "Status"]
+            ['系列', '目标', '模型', '配置', '创建时间',
+             '来源', '状态']
         )
         self.table.horizontalHeader().setSectionResizeMode(
             1, QtWidgets.QHeaderView.Stretch
@@ -349,27 +344,27 @@ class ModelManagerWindow:
         self.table.itemSelectionChanged.connect(self._update_action_buttons)
         root.addWidget(self.table, 1)
 
-        self.status_label = QtWidgets.QLabel("Loading models...")
+        self.status_label = QtWidgets.QLabel("正在加载模型...")
         self.status_label.setObjectName("hint")
         self.status_label.setWordWrap(True)
         root.addWidget(self.status_label)
 
         actions = QtWidgets.QHBoxLayout()
-        self.import_button = QtWidgets.QPushButton("Import Model Package...")
+        self.import_button = QtWidgets.QPushButton("导入模型包...")
         self.import_button.setObjectName("primary")
         self.import_button.clicked.connect(self._import_clicked)
         actions.addWidget(self.import_button)
-        self.use_button = QtWidgets.QPushButton("Use This Model")
+        self.use_button = QtWidgets.QPushButton("使用此模型")
         self.use_button.clicked.connect(self._use_clicked)
         actions.addWidget(self.use_button)
-        self.remove_button = QtWidgets.QPushButton("Remove Broken Entry")
+        self.remove_button = QtWidgets.QPushButton("移除失效条目")
         self.remove_button.clicked.connect(self._remove_clicked)
         actions.addWidget(self.remove_button)
         actions.addStretch(1)
-        refresh = QtWidgets.QPushButton("Refresh")
+        refresh = QtWidgets.QPushButton("刷新")
         refresh.clicked.connect(self._reload)
         actions.addWidget(refresh)
-        close = QtWidgets.QPushButton("Close")
+        close = QtWidgets.QPushButton("关闭")
         close.clicked.connect(self.window.close)
         actions.addWidget(close)
         root.addLayout(actions)
@@ -384,7 +379,7 @@ class ModelManagerWindow:
     def _reload(self):
         self._loading = True
         self.status_label.setStyleSheet("")
-        self.status_label.setText("Loading models...")
+        self.status_label.setText("正在加载模型...")
         workspaces = dict(self.workspaces)
 
         def load():
@@ -409,15 +404,14 @@ class ModelManagerWindow:
         self._fill_table()
         if error:
             self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
-            self.status_label.setText("Could not load models: {0}".format(error))
+            self.status_label.setText("无法加载模型：{0}".format(error))
         elif not rows:
             self.status_label.setText(
-                "No models registered yet. Import a model package to start."
+                "尚无已注册模型。导入一个模型包即可开始。"
             )
         else:
             self.status_label.setText(
-                "{0} model(s). Highlighted rows are the current default for "
-                "their family/task.".format(len(rows))
+                "共 {0} 个模型。高亮行为对应系列/任务的当前默认模型。".format(len(rows))
             )
 
     def _fill_table(self):
@@ -472,9 +466,9 @@ class ModelManagerWindow:
         QtWidgets = self.QtWidgets
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self.window,
-            "Select a model package",
+            "选择模型包",
             str(Path.home()),
-            "Model packages (*.zip)",
+            "模型包 (*.zip)",
         )
         if not path:
             return
@@ -482,14 +476,13 @@ class ModelManagerWindow:
             import_bundle(Path(path), self.workspaces, set_current=True)
         except Exception as exc:
             QtWidgets.QMessageBox.warning(
-                self.window, "Import failed", str(exc)
+                self.window, "导入失败", str(exc)
             )
             return
         QtWidgets.QMessageBox.information(
             self.window,
-            "Import finished",
-            "The model package was imported and registered. It is now the "
-            "default model for its task.",
+            "导入完成",
+            "模型包已导入并注册，现在是其任务的默认模型。",
         )
         self._reload()
 
@@ -499,8 +492,7 @@ class ModelManagerWindow:
             return
         if not row["usable"]:
             self._warn(
-                "This model is broken (files missing). Fix or re-import it "
-                "before using it."
+                "该模型已损坏（文件缺失）。请先修复或重新导入后再使用。"
             )
             return
         try:
@@ -516,8 +508,7 @@ class ModelManagerWindow:
             return
         if row["usable"]:
             self._warn(
-                "Only entries whose model folder is missing can be removed "
-                "here. This one still has its files."
+                "此处只能移除模型文件夹已丢失的条目，该模型的文件仍然存在。"
             )
             return
         try:
@@ -528,7 +519,7 @@ class ModelManagerWindow:
         self._reload()
 
     def _warn(self, text):
-        self.QtWidgets.QMessageBox.warning(self.window, "AI Model Manager", text)
+        self.QtWidgets.QMessageBox.warning(self.window, "AI 模型管理器", text)
 
     def show(self):
         self.window.show()
@@ -547,7 +538,7 @@ def main() -> int:
         from PySide6 import QtCore, QtGui, QtWidgets
 
         app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
-        configure_application(app, "AI Model Manager")
+        configure_application(app, "AI 模型管理器")
         app.setStyleSheet(stylesheet())
         window = ModelManagerWindow(context, (QtCore, QtGui, QtWidgets))
         window.show()

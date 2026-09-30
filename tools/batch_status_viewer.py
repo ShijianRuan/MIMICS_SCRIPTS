@@ -224,14 +224,14 @@ class BatchStatusWindow:
         self.project_root = str(project_root)
         QtWidgets = self.QtWidgets
         self.window = QtWidgets.QMainWindow()
-        self.window.setWindowTitle("Batch Status")
+        self.window.setWindowTitle("批量任务状态")
         self.window.resize(1080, 640)
         self.window.setMinimumSize(860, 480)
         central = QtWidgets.QWidget()
         root = QtWidgets.QVBoxLayout(central)
         root.setContentsMargins(22, 18, 22, 16)
         root.setSpacing(10)
-        title = QtWidgets.QLabel("Import / Export Batch Status")
+        title = QtWidgets.QLabel("导入 / 导出批量任务状态")
         title.setObjectName("title")
         root.addWidget(title)
         header = QtWidgets.QHBoxLayout()
@@ -239,7 +239,7 @@ class BatchStatusWindow:
         self.live_label.setObjectName("liveLabel")
         header.addWidget(self.live_label)
         header.addStretch(1)
-        refresh = QtWidgets.QPushButton("Refresh")
+        refresh = QtWidgets.QPushButton("刷新")
         refresh.clicked.connect(self.refresh)
         header.addWidget(refresh)
         root.addLayout(header)
@@ -268,14 +268,14 @@ class BatchStatusWindow:
         root.addWidget(detail)
 
         actions = QtWidgets.QHBoxLayout()
-        self.open_folder = QtWidgets.QPushButton("Open Task Folder")
+        self.open_folder = QtWidgets.QPushButton("打开任务文件夹")
         self.open_folder.clicked.connect(self._open_folder)
-        self.open_log = QtWidgets.QPushButton("Open Status File Location")
+        self.open_log = QtWidgets.QPushButton("打开状态文件位置")
         self.open_log.clicked.connect(self._open_status_location)
         actions.addWidget(self.open_folder)
         actions.addWidget(self.open_log)
         actions.addStretch(1)
-        close = QtWidgets.QPushButton("Close")
+        close = QtWidgets.QPushButton("关闭")
         close.clicked.connect(self.window.close)
         actions.addWidget(close)
         root.addLayout(actions)
@@ -340,7 +340,7 @@ class BatchStatusWindow:
     def _selection_changed(self):
         row = self._selected_row()
         if not row:
-            self.detail.setText("Select a row to see its status file and folder.")
+            self.detail.setText("选择一行即可查看其状态文件和文件夹。")
             self.open_folder.setEnabled(False)
             self.open_log.setEnabled(False)
             return
@@ -431,7 +431,7 @@ def main(argv=None) -> int:
     from PySide6 import QtCore, QtGui, QtWidgets
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
-    configure_application(app, "Batch Status")
+    configure_application(app, "批量任务状态")
     app.setStyleSheet(stylesheet())
     window = BatchStatusWindow(args.root, (QtCore, QtGui, QtWidgets))
     window.show()

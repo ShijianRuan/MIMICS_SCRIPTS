@@ -164,19 +164,17 @@ class ConfigEditor:
         self.widgets: dict[str, dict[str, object]] = {}
 
         self.window = QtWidgets.QWidget()
-        self.window.setWindowTitle("Configuration Editor")
+        self.window.setWindowTitle("配置编辑器")
         self.window.resize(760, 640)
         root = QtWidgets.QVBoxLayout(self.window)
         root.setContentsMargins(22, 18, 22, 18)
         root.setSpacing(12)
 
-        title = QtWidgets.QLabel("Configuration Editor")
+        title = QtWidgets.QLabel("配置编辑器")
         title.setObjectName("title")
         root.addWidget(title)
         hint = QtWidgets.QLabel(
-            "Only commonly tuned keys are shown; everything else in each "
-            "file is preserved. Changes take effect the next time the "
-            "related window or service starts."
+            "仅显示常用的配置项；每个文件中的其余内容原样保留。改动在相关窗口或服务下次启动时生效。"
         )
         hint.setObjectName("subtitle")
         hint.setWordWrap(True)
@@ -206,12 +204,12 @@ class ConfigEditor:
             tabs.addTab(tab, file_name.replace("_config.json", "").replace(".json", ""))
 
         buttons = QtWidgets.QHBoxLayout()
-        self.rollback = QtWidgets.QPushButton("Roll back last save")
+        self.rollback = QtWidgets.QPushButton("回滚上次保存")
         self.rollback.clicked.connect(self._rollback)
         self.rollback.setEnabled((BACKUP_DIR / "latest.json").is_file())
         buttons.addStretch(1)
         buttons.addWidget(self.rollback)
-        save = QtWidgets.QPushButton("Save")
+        save = QtWidgets.QPushButton("保存")
         save.setObjectName("primary")
         save.clicked.connect(self._save)
         buttons.addWidget(save)
@@ -334,7 +332,7 @@ class ConfigEditor:
             name: self._load(ROOT / name) for name in self.widgets
         }
         self._rebuild_widgets()
-        self.status.setText("Rolled back to the previous saved values.")
+        self.status.setText("已回滚到上次保存的值。")
 
     def _rebuild_widgets(self):
         QtWidgets = self.QtWidgets
@@ -359,7 +357,7 @@ def main(argv=None) -> int:
     from PySide6 import QtCore, QtGui, QtWidgets
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
-    configure_application(app, "Configuration Editor")
+    configure_application(app, "配置编辑器")
     app.setStyleSheet(stylesheet())
     editor = ConfigEditor((QtCore, QtGui, QtWidgets))
     editor.window.show()
