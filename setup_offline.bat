@@ -228,7 +228,7 @@ if !errorlevel! neq 0 (
 
 )
 
-python_env\python.exe -c "import numpy, nibabel, pydicom, SimpleITK, scipy, nnInteractive, nnunetv2, torchvision, transformers, yaml, tqdm, tensorboard, tomli, acvl_utils, onnxruntime, PySide6, shiboken6; from importlib.metadata import version as package_version; from packaging.version import Version; nnv=Version(package_version('nnunetv2')); assert Version('2.8.1') ^<= nnv ^< Version('2.9'), 'nnunetv2 2.8.1 through 2.8.x is required'; print('  All packages OK'); print('  nnU-Net', nnv); print('  ONNX providers:', ', '.join(onnxruntime.get_available_providers()))"
+python_env\python.exe -c "import numpy, nibabel, pydicom, SimpleITK, scipy, nnInteractive, nnunetv2, torchvision, transformers, yaml, tqdm, tensorboard, acvl_utils, onnxruntime, PySide6, shiboken6; from importlib.metadata import version as package_version; from packaging.version import Version; nnv=Version(package_version('nnunetv2')); assert Version('2.8.0') ^<= nnv ^< Version('2.9'), 'nnunetv2 2.8.0 through 2.8.x is required'; print('  All packages OK'); print('  nnU-Net', nnv); print('  ONNX providers:', ', '.join(onnxruntime.get_available_providers()))"
 
 if !errorlevel! neq 0 (
 

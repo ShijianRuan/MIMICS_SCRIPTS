@@ -309,7 +309,7 @@ reconstructed from a display buffer.
 
 ## Environment requirement
 
-The shared external Python environment must include `nnunetv2>=2.8.1,<2.9`.
+The shared external Python environment must include `nnunetv2>=2.8.0,<2.9`.
 `tools/setup_env.py`, portable-package verification, the offline setup check,
 and the remote Docker preflight all verify this dependency. An offline Windows
 bundle must therefore include nnU-Net and all of its dependency wheels before

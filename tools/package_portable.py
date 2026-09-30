@@ -183,7 +183,7 @@ def check():
     required_imports = [
         "torch", "numpy", "nibabel", "pydicom", "SimpleITK", "scipy",
         "nnInteractive", "torchvision", "transformers",
-        "yaml", "tqdm", "tensorboard", "tomli", "onnxruntime", "nnunetv2",
+        "yaml", "tqdm", "tensorboard", "onnxruntime", "nnunetv2",
         "acvl_utils",
         "PySide6", "shiboken6",
     ]
@@ -1090,7 +1090,7 @@ def _generate_offline_bat(python_version, python_short):
     lines.append("    pause")
     lines.append("    exit /b 1")
     lines.append(")")
-    lines.append("@@ENV@@\\python.exe -c \"import numpy, nibabel, pydicom, SimpleITK, scipy, nnInteractive, nnunetv2, torchvision, transformers, yaml, tqdm, tensorboard, tomli, acvl_utils, onnxruntime, PySide6, shiboken6; from importlib.metadata import version as package_version; from packaging.version import Version; nnv=Version(package_version('nnunetv2')); assert Version('2.8.1') ^<= nnv ^< Version('2.9'), 'nnunetv2 2.8.1 through 2.8.x is required'; print('  All packages OK'); print('  nnU-Net', nnv); print('  ONNX providers:', ', '.join(onnxruntime.get_available_providers()))\"")
+    lines.append("@@ENV@@\\python.exe -c \"import numpy, nibabel, pydicom, SimpleITK, scipy, nnInteractive, nnunetv2, torchvision, transformers, yaml, tqdm, tensorboard, acvl_utils, onnxruntime, PySide6, shiboken6; from importlib.metadata import version as package_version; from packaging.version import Version; nnv=Version(package_version('nnunetv2')); assert Version('2.8.0') ^<= nnv ^< Version('2.9'), 'nnunetv2 2.8.0 through 2.8.x is required'; print('  All packages OK'); print('  nnU-Net', nnv); print('  ONNX providers:', ', '.join(onnxruntime.get_available_providers()))\"")
     lines.append('if !errorlevel! neq 0 (')
     lines.append("    echo   Some packages failed to import. The default frozen-feature method requires onnxruntime-gpu.")
     lines.append('    echo   Try: @@ENV@@\\python.exe -m pip install wheels\\*.whl --no-deps --no-index')

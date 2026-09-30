@@ -41,7 +41,6 @@ REQUIRED_IMPORTS = [
     "yaml",         # pip package is pyyaml
     "tqdm",
     "tensorboard",
-    "tomli",
     "onnxruntime",
     "nnunetv2",
     "acvl_utils",
@@ -61,9 +60,8 @@ REQUIRED_PACKAGES = [
     "pyyaml",       # import name is yaml
     "tqdm",
     "tensorboard",
-    "tomli>=2.0",
     "onnxruntime-gpu",
-    "nnunetv2>=2.8.1,<2.9",
+    "nnunetv2>=2.8.0,<2.9",
 ]
 
 # Preferred external GUI backend for advanced setup/status windows.
@@ -276,7 +274,7 @@ def _nnunet_version_supported():
             "parts = tuple(int(x) for x in re.findall(r'\\d+', value)[:3])",
             "parts = parts + (0,) * (3 - len(parts))",
             "print(value)",
-            "raise SystemExit(0 if (2, 8, 1) <= parts < (2, 9, 0) else 2)",
+            "raise SystemExit(0 if (2, 8, 0) <= parts < (2, 9, 0) else 2)",
         ],
         timeout=60,
     )
@@ -573,11 +571,11 @@ def install():
     missing = [p for p, ok in check_result.get("packages", {}).items() if not ok]
     if not check_result.get("nnunet_version_compatible", False):
         missing = [
-            "nnunetv2>=2.8.1,<2.9" if value == "nnunetv2" else value
+            "nnunetv2>=2.8.0,<2.9" if value == "nnunetv2" else value
             for value in missing
         ]
         if not any(value.startswith("nnunetv2") for value in missing):
-            missing.append("nnunetv2>=2.8.1,<2.9")
+            missing.append("nnunetv2>=2.8.0,<2.9")
     gui_backends = check_result.get("gui_backends") or {}
     missing_gui = []
     if not gui_backends.get("pyside6"):
@@ -623,7 +621,7 @@ def install():
 
     nnunet_version_ok, _nnunet_version = _nnunet_version_supported()
     if not nnunet_version_ok:
-        still_missing.append("nnunetv2>=2.8.1,<2.9")
+        still_missing.append("nnunetv2>=2.8.0,<2.9")
     if still_missing:
         _write_state("incomplete",
                      message="{0} package(s) still missing.".format(len(still_missing)),
@@ -843,14 +841,14 @@ def _get_missing_packages():
                         break
                 result.append(pip_name)
             result = [
-                "nnunetv2>=2.8.1,<2.9" if value == "nnunetv2" else value
+                "nnunetv2>=2.8.0,<2.9" if value == "nnunetv2" else value
                 for value in result
             ]
             nnunet_version_ok, _nnunet_version = _nnunet_version_supported()
             if not nnunet_version_ok and not any(
                 value.startswith("nnunetv2") for value in result
             ):
-                result.append("nnunetv2>=2.8.1,<2.9")
+                result.append("nnunetv2>=2.8.0,<2.9")
             return result
         except Exception:
             pass
