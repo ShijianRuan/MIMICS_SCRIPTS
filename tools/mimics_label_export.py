@@ -56,6 +56,29 @@ LOG_ROTATE_BYTES = 5 * 1024 * 1024
 LOG_ROTATE_BACKUPS = 3
 
 
+def cancel_requested(cancel_path) -> bool:
+    """True when the caller asked to stop.
+
+    Two control conventions reach this module: job pipelines pass their
+    control.json (present from job creation; only its ``action`` payload
+    says "stopped"), while older marker-file callers pass a path that
+    exists only once cancelled. Treat a JSON file as cancelled by content
+    and anything else (missing, or non-JSON marker) by existence.
+    """
+    if not cancel_path:
+        return False
+    path = Path(cancel_path)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return True  # non-JSON marker file: its existence is the signal
+    if isinstance(payload, dict):
+        return str(payload.get("action") or "").lower() in {"cancel", "stop"}
+    return True
+
+
 def _gpu_lock_path():
     """Resolve the GPU lock path per call, honoring env overrides.
 
@@ -686,7 +709,7 @@ def acquire_background_mimics_lock(
         wait_seconds=float(timeout_seconds),
         poll_seconds=5.0,
         on_wait=on_wait,
-        should_cancel=lambda: Path(cancel_path).is_file(),
+        should_cancel=lambda: cancel_requested(cancel_path),
     )
     update_status(status_path, {"resource_wait": None})
     return lock
@@ -735,7 +758,7 @@ def acquire_background_mimics_locks(
                 last_notice = now
             remaining = min(2.0, max(0.0, deadline - now))
             while remaining > 0:
-                if Path(cancel_path).is_file():
+                if cancel_requested(cancel_path):
                     raise ResourceLockCancelled(
                         "Cancelled while waiting for background Mimics resources"
                     )
@@ -1073,7 +1096,7 @@ def launch_mimics_export(
         last_progress_signature = None
         stop_requested = False
         while time.time() < deadline:
-            if cancel_path and Path(cancel_path).is_file() and not stop_requested:
+            if cancel_path and cancel_requested(cancel_path) and not stop_requested:
                 stop_requested = True
                 write_json_atomic(stop_path, {
                     "status": "stop_requested",
