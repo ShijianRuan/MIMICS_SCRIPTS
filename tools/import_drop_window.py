@@ -39,6 +39,7 @@ for _candidate in (_HERE, _ROOT, os.path.join(_ROOT, "runtime_py35")):
         sys.path.insert(0, _candidate)
 
 from ui_theme import (  # noqa: E402
+    PALETTE,
     choose_existing_directory_async,
     configure_application,
     stylesheet as shared_stylesheet,
@@ -739,9 +740,9 @@ def run(context=None, preview_path=""):
             item = QtWidgets.QListWidgetItem(line)
             item.setData(QtCore.Qt.UserRole, entry["log_path"])
             if entry["status"] == "failed":
-                item.setForeground(QtGui.QColor("#b91c1c"))
+                item.setForeground(QtGui.QColor(PALETTE["danger"]))
             elif entry["status"] == "completed":
-                item.setForeground(QtGui.QColor("#0f766e"))
+                item.setForeground(QtGui.QColor(PALETTE["teal"]))
             recent_list.addItem(item)
 
     def open_recent_log(row_item):

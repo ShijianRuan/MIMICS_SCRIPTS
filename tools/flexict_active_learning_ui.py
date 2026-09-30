@@ -29,7 +29,7 @@ for candidate in (ROOT, ROOT / "tools"):
 
 from flexict_common import TERMINAL_STATES  # noqa: E402
 from nnunet_common import read_json, write_json_atomic  # noqa: E402
-from ui_theme import configure_application, stylesheet  # noqa: E402
+from ui_theme import PALETTE, configure_application, stylesheet  # noqa: E402
 
 
 STATE_SCHEMA = "flexict_annotation_state.v1"
@@ -317,7 +317,8 @@ class ActiveLearningWindow:
                 if str(entry.get("state") or "new") == "annotated":
                     from PySide6 import QtGui
 
-                    item.setForeground(QtGui.QBrush(QtGui.QColor("#49aa55")))
+                    item.setForeground(
+                        QtGui.QBrush(QtGui.QColor(PALETTE["success"])))
                 self.table.setItem(row_index, column, item)
         self._set_actions_enabled(bool(self._rows))
         annotated = sum(

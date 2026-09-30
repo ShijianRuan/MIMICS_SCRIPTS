@@ -25,7 +25,7 @@ for candidate in (ROOT, ROOT / "tools", ROOT / "runtime_py35"):
     if value not in sys.path:
         sys.path.insert(0, value)
 
-from ui_theme import configure_application, stylesheet  # noqa: E402
+from ui_theme import PALETTE, configure_application, stylesheet  # noqa: E402
 from viewer_refresh import BackgroundRefresh  # noqa: E402
 
 
@@ -392,13 +392,13 @@ def _display_status(row):
 
 def _style_status_item(QtGui, item, status):
     status = str(status or "").lower()
-    color = "#1a7f37"  # green: finished
+    color = PALETTE["success"]
     if status in ("failed", "abandoned"):
-        color = "#b42318"  # red
+        color = PALETTE["danger"]
     elif status in ("cancelled", "canceled"):
-        color = "#8a6d00"  # amber
+        color = PALETTE["warning"]
     elif status not in TERMINAL_STATES:
-        color = "#175cd3"  # blue: still running
+        color = PALETTE["info"]  # still running
     item.setForeground(QtGui.QColor(color))
 
 

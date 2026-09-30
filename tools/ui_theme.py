@@ -466,6 +466,23 @@ def choose_save_file_async(
     )
 
 
+# Semantic status palette. Windows that color individual rows/labels must
+# draw from here (enforced by TestUiThemePalette in test_all.py) instead of
+# inventing near-identical hexes, which is how the windows drifted apart.
+PALETTE = {
+    "text": "#182230",
+    "text_muted": "#667085",
+    "border": "#d9e0e8",
+    "border_input": "#c9d2dc",
+    "success": "#067647",  # finished / ok
+    "warning": "#8a5700",  # cancelled / degraded
+    "danger": "#b42318",   # failed / error
+    "info": "#175cd3",     # still running / neutral emphasis
+    "accent": "#2563eb",   # primary buttons, focus, loss curves
+    "teal": "#0f766e",     # progress, previews, AUC curves
+}
+
+
 def stylesheet(extra=""):
     base = """
     QMainWindow, QDialog, QWidget {
@@ -697,12 +714,57 @@ def stylesheet(extra=""):
     return base + "\n" + str(extra or "")
 
 
+def _application_icon():
+    """A simple programmatic icon so our windows stop showing the generic
+    Python logo. Drawn, not loaded: no binary resource to ship or misplace."""
+    try:
+        from PySide6 import QtCore, QtGui
+
+        icon = QtGui.QIcon()
+        for size in (16, 24, 32, 48):
+            pixmap = QtGui.QPixmap(size, size)
+            pixmap.fill(QtCore.Qt.transparent)
+            painter = QtGui.QPainter(pixmap)
+            painter.setRenderHint(QtGui.QPainter.Antialiasing)
+            margin = 1 + size // 16
+            painter.setPen(QtCore.Qt.NoPen)
+            painter.setBrush(QtGui.QColor(PALETTE["teal"]))
+            painter.drawRoundedRect(
+                QtCore.QRect(margin, margin, size - 2 * margin, size - 2 * margin),
+                size // 5,
+                size // 5,
+            )
+            painter.setBrush(QtGui.QColor("#ffffff"))
+            # A stylized "M" mark: two vertical bars and the connecting V.
+            bar = max(2, size // 8)
+            top = size // 3
+            bottom = size - 2 * margin - max(2, size // 6)
+            painter.drawRect(margin + size // 4, top, bar, bottom - top)
+            painter.drawRect(size - margin - size // 4 - bar, top, bar, bottom - top)
+            painter.drawPolygon(
+                QtCore.QPoint(size // 2 - bar, top + bar),
+                QtCore.QPoint(size // 2 + bar, top + bar),
+                QtCore.QPoint(size // 2, top + (bottom - top) // 2),
+            )
+            painter.end()
+            icon.addPixmap(pixmap)
+        return icon
+    except Exception:
+        return None
+
+
 def configure_application(app, name="Mimics Script"):
     app.setApplicationName(str(name))
     try:
         app.setOrganizationName("Mimics Script")
     except Exception:
         pass
+    icon = _application_icon()
+    if icon is not None:
+        try:
+            app.setWindowIcon(icon)
+        except Exception:
+            pass
     try:
         if os.name == "nt":
             from PySide6 import QtWidgets

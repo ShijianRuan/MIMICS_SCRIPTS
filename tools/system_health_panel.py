@@ -38,7 +38,11 @@ for _candidate in (_HERE, _ROOT):
     if _candidate not in sys.path:
         sys.path.insert(0, _candidate)
 
-from ui_theme import configure_application, stylesheet as shared_stylesheet  # noqa: E402
+from ui_theme import (  # noqa: E402
+    PALETTE,
+    configure_application,
+    stylesheet as shared_stylesheet,
+)
 
 import resource_locks  # noqa: E402
 
@@ -301,17 +305,23 @@ def run(preview_path=""):
     app.setStyleSheet(shared_stylesheet("""
     QFrame#healthSection {
         background: #ffffff;
-        border: 1px solid #dbe2ea;
+        border: 1px solid {border};
         border-radius: 8px;
     }
     QLabel#sectionHeader {
         font-weight: 600;
-        color: #0f766e;
+        color: {teal};
     }
-    QLabel[status="ok"] { color: #15803d; }
-    QLabel[status="warn"] { color: #b45309; }
-    QLabel[status="bad"] { color: #b91c1c; }
-    """))
+    QLabel[status="ok"] { color: {success}; }
+    QLabel[status="warn"] { color: {warning}; }
+    QLabel[status="bad"] { color: {danger}; }
+    """.format(
+        border=PALETTE["border"],
+        teal=PALETTE["teal"],
+        success=PALETTE["success"],
+        warning=PALETTE["warning"],
+        danger=PALETTE["danger"],
+    )))
 
     window = QtWidgets.QMainWindow()
     window.setWindowTitle("System Health")

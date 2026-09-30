@@ -148,6 +148,8 @@ settings now live in the pipeline-specific configs documented below.
 
 | Key | Default | Purpose |
 | --- | --- | --- |
+| `workspace_dir` | `"nninteractive_task_models"` | Task-model workspace root (custom trained models). |
+| `model_dir` | *(unset)* | Extra search location for the official model folder (must contain `fold_*/checkpoint_final.pth`); checked after the `NNINTERACTIVE_MODEL_DIR` environment variable and before the bundled `models/nnInteractive_v1.0` folders. Relative paths resolve against the project root. |
 | `device` | `"auto"` | Inference device selection. |
 | `image_input_mode` | `"mimics"` | Image source used by nnInteractive. |
 | `task_model_image_input_mode` | `"auto"` | Input policy for custom task models: prefer a readable local source, otherwise use the portable image stored in the `.mcs`. MR rescale metadata/tags are restored when available; missing mappings continue as logged raw-GV best effort. Set `source` only for strict source-file parity, or `mimics` to always use the project buffer. |

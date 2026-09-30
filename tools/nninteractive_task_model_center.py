@@ -53,6 +53,7 @@ from training_data_ui import (  # noqa: E402
     normalized_source_mode,
 )
 from ui_theme import (  # noqa: E402
+    PALETTE,
     choose_existing_directory_async,
     choose_open_file_async,
     choose_save_file_async,
@@ -224,13 +225,13 @@ class TrainingCurve:
                     # candidate must beat to be selected automatically.
                     value = max(0.0, min(1.0, float(inner_self.baseline)))
                     y = rect.bottom() - value * rect.height()
-                    pen = QtGui.QPen(QtGui.QColor("#dc2626"), 1)
+                    pen = QtGui.QPen(QtGui.QColor(PALETTE["danger"]), 1)
                     pen.setStyle(QtCore.Qt.DashLine)
                     painter.setPen(pen)
                     painter.drawLine(
                         QtCore.QLineF(rect.left(), y, rect.right(), y)
                     )
-                    painter.setPen(QtGui.QColor("#dc2626"))
+                    painter.setPen(QtGui.QColor(PALETTE["danger"]))
                     painter.drawText(
                         rect.left() + 4,
                         y - 4,
