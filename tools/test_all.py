@@ -8416,6 +8416,35 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn("label_staging_dir", sig.parameters,
                       "launch_mimics_export must accept label_staging_dir")
 
+    def test_cancel_requested_control_json_conventions(self):
+        """cancel_requested must not misread an existing control.json as cancelled.
+
+        Job pipelines pass control.json (created at job start with
+        action:"run"); only action "cancel"/"stop" means cancelled. A plain
+        non-JSON marker file still cancels by existence (legacy convention).
+        """
+        pipeline = __import__("tools.mimics_label_export",
+                              fromlist=["cancel_requested"])
+        with tempfile.TemporaryDirectory() as tmp:
+            run_path = os.path.join(tmp, "control.json")
+            with open(run_path, "w", encoding="utf-8") as handle:
+                json.dump({"action": "run"}, handle)
+            self.assertFalse(pipeline.cancel_requested(run_path),
+                             "an active control.json must not read as cancelled")
+            with open(run_path, "w", encoding="utf-8") as handle:
+                json.dump({"action": "cancel"}, handle)
+            self.assertTrue(pipeline.cancel_requested(run_path),
+                            "a cancelled control.json must read as cancelled")
+            marker_path = os.path.join(tmp, "cancel.marker")
+            self.assertFalse(pipeline.cancel_requested(marker_path),
+                             "a missing marker must not read as cancelled")
+            with open(marker_path, "w", encoding="utf-8") as handle:
+                handle.write("cancel requested\n")
+            self.assertTrue(pipeline.cancel_requested(marker_path),
+                            "a legacy marker file must read as cancelled")
+            self.assertFalse(pipeline.cancel_requested(None),
+                             "no cancel path must not read as cancelled")
+
     # ================================================================
     # Stop Background Import
     # ================================================================
