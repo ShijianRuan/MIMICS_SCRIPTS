@@ -1400,6 +1400,127 @@ def cmd_append_masks(args):
     return 0
 
 
+def _predict_cases(image_root, cases_filter):
+    """Resolve (case_id, image_path) pairs for batch prediction.
+
+    Accepts a dataset-style root (<root>/<case>/ containing one source
+    image or DICOM folder - the same layout prepare-import builds from)
+    or a flat folder of image files. Ambiguous case dirs are skipped and
+    reported, never guessed: predicting on the wrong image is worse than
+    not predicting.
+    """
+    root = Path(image_root).expanduser().resolve()
+    if not root.is_dir():
+        raise RuntimeError("Image root not found: {}".format(root))
+    if root.is_file():
+        raise RuntimeError(
+            "--image-root must be a directory of cases, not a single file."
+        )
+    requested = (
+        set(v.strip() for v in cases_filter.split(",") if v.strip())
+        if cases_filter else None
+    )
+    resolved, skipped = [], []
+    for entry in sorted(root.iterdir()):
+        case_id = entry.name
+        if requested is not None and case_id not in requested:
+            continue
+        if entry.is_dir():
+            image = _find_source_image_in_case_dir(entry)
+        elif entry.is_file() and _is_source_image_file(entry):
+            image = entry.resolve()
+        else:
+            continue
+        if image is None:
+            skipped.append(case_id)
+            continue
+        resolved.append((case_id, image))
+    if requested:
+        missing = sorted(requested - {case_id for case_id, _ in resolved})
+        if missing:
+            raise RuntimeError(
+                "Requested case(s) not found: {}".format(", ".join(missing))
+            )
+    if not resolved:
+        raise RuntimeError(
+            "No predictable case was found under: {}".format(root)
+        )
+    return resolved, skipped
+
+
+def cmd_predict(args):
+    """Run an nnU-Net model over a directory of cases in background jobs."""
+    from nnunet_common import load_models, model_usability
+    from nnunet_jobs import create_job
+
+    workspace = Path(args.workspace or Path.home() / ".mimics_script" / "nnunet").expanduser().resolve()
+    models = load_models(workspace, include_missing=True)
+    matches = [
+        model for model in models
+        if str(model.get("model_id") or "") == args.model_id
+        or str(model.get("task_id") or "") == args.model_id
+    ]
+    usable = [model for model in matches if model_usability(model)[0]]
+    if not usable:
+        for model in matches:
+            ok, reason = model_usability(model)
+            if not ok:
+                print("Model {} is not usable: {}".format(
+                    model.get("model_id"), reason), file=sys.stderr)
+        print(
+            "No usable model matches '{}' in workspace {}.".format(
+                args.model_id, workspace),
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        cases, skipped = _predict_cases(args.image_root, args.cases)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    for case_id in skipped:
+        print("Skipped {}: no unambiguous source image.".format(case_id),
+              file=sys.stderr)
+
+    output_root = Path(args.output_dir).expanduser().resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    model = usable[0]
+    manifest_path = str(model["manifest_path"])
+    started = []
+    for case_id, image_path in cases:
+        request = {
+            "operation": "infer",
+            "workspace": str(workspace),
+            "job_id": "predict_{}_{}".format(
+                time.strftime("%Y%m%dT%H%M%S"), case_id),
+            "task_id": str(model.get("task_id") or ""),
+            "task_name": str(model.get("task_name") or model.get("task_id") or ""),
+            "model_manifest": manifest_path,
+            "image_path": str(image_path),
+            "output_path": str(output_root / "{}.nii.gz".format(case_id)),
+            "disable_tta": bool(args.disable_tta),
+            "use_cpu": bool(args.use_cpu),
+            "case_id": case_id,
+            "source_modality": str(args.source_modality or ""),
+        }
+        try:
+            job = create_job(request)
+        except Exception as exc:
+            print("Could not start job for {}: {}".format(case_id, exc),
+                  file=sys.stderr)
+            continue
+        started.append((case_id, job))
+    print(
+        "Started {} prediction job(s) with model {}.".format(
+            len(started), model.get("model_id"))
+    )
+    print("Output directory: {}".format(output_root))
+    for case_id, job in started:
+        print("  {}: {}".format(case_id, job["status_path"]))
+    return 0 if started else 1
+
+
 def _runtime_owned_roots():
     result = []
     lock_paths = list(RESOURCE_LOCK_DIR.glob("background_mimics*.lock"))
@@ -1671,6 +1792,27 @@ def build_parser():
     p.add_argument("--force", action="store_true", help="Replace existing output MCS files")
     p.add_argument("--background-mimics-lock-timeout-seconds", type=float, default=0.0)
     p.set_defaults(func=cmd_append_masks)
+
+    p = sub.add_parser(
+        "predict",
+        help="Run a registered nnU-Net model over a directory of cases",
+    )
+    p.add_argument("--model-id", required=True,
+                   help="Model ID or task ID from the nnU-Net model library")
+    p.add_argument("--image-root", required=True,
+                   help="Dataset-style root (<root>/<case>/) or flat folder of images")
+    p.add_argument("--output-dir", required=True,
+                   help="Folder for <case>.nii.gz predictions; never overwrites sources")
+    p.add_argument("--workspace", default=None,
+                   help="nnU-Net workspace (default: ~/.mimics_script/nnunet)")
+    p.add_argument("--cases", help="Comma-separated case IDs (default: all)")
+    p.add_argument("--disable-tta", action="store_true", default=True,
+                   help="Disable test-time augmentation (default: disabled)")
+    p.add_argument("--use-cpu", action="store_true",
+                   help="Force CPU inference (default: GPU when available)")
+    p.add_argument("--source-modality", default="",
+                   help="Source modality hint (CT/MR) passed to the model")
+    p.set_defaults(func=cmd_predict)
 
     p = sub.add_parser("kill-background", help="Stop integration-created background processes")
     p.set_defaults(func=cmd_kill_background)

@@ -14174,6 +14174,76 @@ class TestForeignScriptIntegration(unittest.TestCase):
         self.assertIn("scopes.append(Path(args.output_dir)", source)
 
 
+class TestBatchPredictCommand(unittest.TestCase):
+    """R61-23: `mimics_batch_cli predict` batch-dispatches inference jobs.
+    Failure paths first: a wrong/unusable model, an ambiguous case dir and
+    a requested-but-missing case must fail loudly and never guess —
+    predicting on the wrong image silently is the harmful outcome."""
+
+    def setUp(self):
+        self.tmp = _make_temp_dir()
+
+    def tearDown(self):
+        _cleanup(self.tmp)
+
+    def _cli(self):
+        return __import__("tools.mimics_batch_cli", fromlist=["dummy"])
+
+    def _write_image(self, path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"dummy-not-really-nifti")
+
+    def test_no_usable_model_reports_reasons_and_exits_2(self):
+        cli = self._cli()
+        root = Path(self.tmp)
+        workspace = root / "workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+        self._write_image(root / "cases" / "case_a" / "ct.nii.gz")
+
+        args = cli.build_parser().parse_args([
+            "predict", "--model-id", "no-such-model",
+            "--image-root", str(root / "cases"),
+            "--output-dir", str(root / "out"),
+            "--workspace", str(workspace),
+        ])
+        exit_code = cli.cmd_predict(args)
+        self.assertEqual(2, exit_code)
+
+    def test_ambiguous_case_dir_is_skipped_and_reported(self):
+        cli = self._cli()
+        root = Path(self.tmp)
+        cases = root / "cases"
+        # Two source images in one dir: which one to predict on is a guess.
+        self._write_image(cases / "ambiguous" / "a.nii.gz")
+        self._write_image(cases / "ambiguous" / "b.nii.gz")
+        # One clean case alongside proves the ambiguous one is skipped,
+        # not guessed, while the batch still proceeds.
+        self._write_image(cases / "case_a" / "ct.nii.gz")
+        resolved, skipped = cli._predict_cases(str(cases), None)
+        self.assertEqual(
+            [("case_a", (cases / "case_a" / "ct.nii.gz").resolve())],
+            resolved,
+        )
+        self.assertEqual(["ambiguous"], skipped)
+
+    def test_requested_but_missing_case_raises(self):
+        cli = self._cli()
+        root = Path(self.tmp)
+        cases = root / "cases"
+        self._write_image(cases / "case_a" / "ct.nii.gz")
+        with self.assertRaises(RuntimeError) as ctx:
+            cli._predict_cases(str(cases), "case_a,case_b")
+        self.assertIn("case_b", str(ctx.exception))
+
+    def test_empty_root_raises(self):
+        cli = self._cli()
+        root = Path(self.tmp)
+        cases = root / "cases"
+        cases.mkdir(parents=True, exist_ok=True)
+        with self.assertRaises(RuntimeError):
+            cli._predict_cases(str(cases), None)
+
+
 if __name__ == "__main__":
     print("Mimics-Script Comprehensive Tests")
     print("=" * 60)
