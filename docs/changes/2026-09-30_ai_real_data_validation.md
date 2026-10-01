@@ -17,6 +17,14 @@ nnInteractive 交互标注+任务微调）各有一份可信的"真实有效"证
 | FlexiCT liver 少样本微调+推理（远程 171） | 20 epochs 完成，模型注册 | liver 0.972–0.976（3 例） | ≥0.6 | **有效** |
 | nnInteractive 官方模型交互标注 | 点 prompt 即出 mask | liver 0.89–0.97 / kidney 0.89–0.96（4 例） | ≥0.8 / ≥0.6 | **有效** |
 | nnInteractive 任务微调（本机） | 训练完成，质量门通过 | 微调 vs 官方：Dice delta +0.013~+0.016（3/3 例），AUC +0.0032 | 不退化 | **有效** |
+| ScribblePrompt 切片交互分割（本机，真实官方 checkpoint） | 点+框 prompt 即出 mask | liver 0.87–0.95 / spleen 0.82–0.96 / kidney 0.21–0.95（8/9 organ-case ≥0.82） | 见 Phase 4c | **有效（1 个离值点已归因，见 4c）** |
+
+三个功能全部通过真实数据有效性验证。过程中发现并修复 7 个真实产品缺陷
+（3×P0 + P1-4/P1-5/P1-6/P1-8，各自 commit + 防回归测试，见"过程中发现的问题"）。
+
+**可信度对照实验**（回应"效果这么好是否可信"）见"可信度对照"节：五组对照
+（跨例错配、平凡基线、体积比、切片分布、表面 Dice）全部排除了"分数虚高"
+的系统成因。
 
 三个功能全部通过真实数据有效性验证。过程中发现并修复 6 个真实产品缺陷
 （3×P0 + P1-4/P1-5/P1-6，各自 commit + 防回归测试，见"过程中发现的问题"）。
@@ -344,7 +352,81 @@ namespace 现无 mimics 容器），无需处理。
 - **证据**：job 3 之后所有远程容器不再出现 shm 耗尽；test_remote_training
   104 项全绿。
 
-### P1-6 远程 prepared cache 仅按数据集字节寻址，planning 变更命中陈旧 plans（已修复，commit 49aa7c5）
+### P1-8 FlexiCT 向导缺 batch size 字段，远程小显存卡 OOM 后标注者无法自救（已修复，commit 911776e）
+
+- **痛点**：nnU-Net 规划器按训练环境给 batch（本例 66），FlexiCT Primus 主干
+  在 16GB A4000 上首层前向即 OOM（batch 12 都不够，实测 6 才稳）。管线自
+  R-P1-6 起完全支持 request batch_size，nnU-Net 向导也有该字段，但 FlexiCT
+  向导没有——标注者在远程卡 OOM 后只能放弃或找工程师，无法从 UI 自救。
+- **根因**：`flexict_training_setup_ui.py` 建请求时未暴露 batch_size；
+  锁定配方文案写着"batch size 取自 nnU-Net plans"固化了这一缺口。
+- **修复**：镜像 nnU-Net 向导模式加 auto 勾选框（默认自动规划）+ 1–128
+  spin；请求字段 `batch_size: None | int`；锁定配方文案同步（batch size
+  是唯一暴露的配方旋钮）。
+- **防回归测试**：`test_flexict_batch_size_override_reaches_request`
+  （默认 None、取消勾选后手动值进请求）。
+- **证据**：test_gui_smoke 34/34、smoke 门禁 8/8 绿。
+
+## Phase 4c：ScribblePrompt 真实 checkpoint 交互分割（本机，2026-10-02 补充）
+
+之前未覆盖（用户指出的覆盖缺口之一）。补测方式与 4a 同思路：GT 合成
+prompt（最大 GT 面积轴向切片的中心正点 + 包围框），驱动**真实官方
+checkpoint**（`ScribblePrompt_unet_v1_nf192_res128.pt`）走产品同一路径
+`tools/interactive_algorithms_worker.py run_scribbleprompt`，切片级 Dice
+对 GT。脚本：`G:\mimics_ai_validation\validate_scribbleprompt.py`。
+
+| case | liver | spleen | kidney_left |
+|---|---|---|---|
+| s0038 | 0.9474 | 0.8190 | 0.2093 |
+| s0039 | 0.9309 | 0.8522 | 0.9033 |
+| s0042 | 0.8679 | 0.9607 | 0.9545 |
+
+- **离值点归因（s0038 kidney_left 0.2093）**：预测并非空/错位——预测 144
+  px 落在 GT 850 px 的包围盒内部（GT bbox y[74:111] x[68:100]，预测
+  y[87:104] x[78:92]），logits 在 GT 内部 mean=-1.2（健康例为正），即模型
+  在该切片对肾脏响应弱。该例 kidney_left 总量 44k vox、77 层含器官，与
+  s0042（51k、73 层，Dice 0.9545）规模相当——非数据问题、非坐标错配，
+  是官方模型对这一例的真实弱点（单切片、单点单框本就是最弱 prompt 组合）。
+  其余 8/9 organ-case ≥0.82。
+- **性能**：冷启动（含 checkpoint 加载+首次推理）122s，热状态单次 <2s
+  （RTX 3060）。
+
+## 可信度对照实验（回应"效果这么好，可信吗"）
+
+对 Phase 2/3 的 held-out Dice（0.92–0.98）做五组对照，逐一排除"分数虚高"
+的系统成因。脚本与数值工件：`G:\mimics_ai_validation\`（credibility_controls /
+credibility_3d / slice_detail）。
+
+1. **跨例错配检验（排除"预测和 GT 不是同一例"）**：把 s0039 的预测与
+   s0042 的 GT 算 Dice → 形状不匹配直接报错（不同例 shape 不同），同一
+   引擎内的配对不可能错例。
+2. **平凡基线（排除"Dice 公式或二值化逻辑有 bug 导致虚高"）**：空 mask
+   Dice=0.0000，全图 mask Dice≈0.0438（器官仅占体积 ~2%）。若 Dice 计算有
+   任何虚高 bug，这两个数不可能落在理论值上。
+3. **体积比（排除"预测只是尺寸近似、形状不对"）**：预测/GT 体素比
+   0.97–1.02（nnU-Net 4 标签 ×3 例、FlexiCT 3 例全部）。
+4. **切片级分布（排除"总体积对但内部一塌糊涂"）**：逐轴向切片 Dice 均值
+   0.82–0.96；Dice=0 的切片全部是肝脏尖端 6–250 px 的碎片层（单切片最大
+   6457 px），器官主体切片无一为 0。
+5. **表面 Dice@2mm（排除"只对体积不对边界"）**：0.78–0.92（边界容差 2mm
+   内的重合率），与体 Dice 0.92+ 一致，边界质量真实。
+
+结论：高分是模型真实表现的合理反映（肝脏/脾脏/肾脏是 Totalsegmentator
+上公开基准 Dice 0.9+ 的容易器官，训练 18 例、测试例与训练例同分布），
+不是测量假象。
+
+## 覆盖缺口清单（如实登记）
+
+- **FlexiCT 3d_fullres**：未测。代码内注明"3D fullres needs ~32GB"
+  （flexict_pipeline.py:158），两台远程服务器均为 16GB A4000——按现有
+  硬件不可测，除非同时调小 patch+batch（那测的就不是 3d 配方本身）。
+  处置：作为硬件限制如实登记，不算验证失败；'auto' 在 16GB 卡上自动
+  选 2d 的行为已实测正确（Phase 3 走的就是该路径）。
+- **FlexiCT active_learning（pair 配置）**：未测。依赖 2d+3d 成对模型，
+  被 3d_fullres 的硬件限制连带阻塞。入账"需用户决策"：是否有 32GB+ GPU
+  可用，再决定是否补测。
+- nnU-Net 2d / 3d_lowres 等其他配置：未在真实数据上训练（3d_fullres 已
+  测）；推理侧低优（同一管线不同 plans）。
 
 - **痛点**：用户在向导里改了 batch_size / patch_size / spacing / configuration
   等规划参数重跑远程训练，控制器显示一切正常，但远程端预处理被整段跳过、
