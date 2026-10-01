@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import importlib.util
 import json
@@ -2188,12 +2189,14 @@ class JobLifecycleTests(unittest.TestCase):
 
 
 class FakeMask:
-    def __init__(self, name, pixels=1):
+    def __init__(self, name, pixels=1, content=None):
         self.name = name
         self.guid = name + "-guid"
         self.number_of_pixels = pixels
         self.selected = False
         self.image = None
+        # F21: voxel content for the launch-time digest.
+        self.content = bytes(content or b"\x00" * 8)
 
 
 class MimicsRuntimeTests(unittest.TestCase):
@@ -2230,6 +2233,19 @@ class MimicsRuntimeTests(unittest.TestCase):
 
         mask_apply = types.ModuleType("mimics_mask_apply")
         mask_apply._mask_identity = lambda mask: mask.guid
+        # F21: the launch snapshot carries a content digest. The real
+        # implementation (chunked SHA-256) is covered by the flexict suite
+        # against the real module; this stub mirrors it so the nnU-Net
+        # change-check behavior is what gets exercised here.
+        mask_apply._mask_snapshot = lambda mask: {
+            "guid": mask.guid,
+            "name": mask.name,
+            "pixel_count": mask.number_of_pixels,
+            "sha256": "sha256:" + hashlib.sha256(mask.content).hexdigest(),
+        }
+        mask_apply._mask_content_digest = lambda mask: (
+            "sha256:" + hashlib.sha256(mask.content).hexdigest()
+        )
         mask_apply._new_prediction_mask = lambda name: FakeMask(name, 0)
         mask_apply._set_mask_from_u8 = lambda mask, path, shape, transaction_name=None: setattr(
             mask, "applied", True
@@ -2350,6 +2366,44 @@ class MimicsRuntimeTests(unittest.TestCase):
             monitor, {"name": "Liver", "aliases": []}, "update"
         )
         self.assertEqual(result.name, "AI_Liver")
+
+    def test_equal_volume_edit_creates_copy_not_overwrite(self):
+        # F21/T21: same number_of_pixels, different voxels - the review's
+        # exact evidence. The prediction must not overwrite the edit.
+        mask = FakeMask("Liver", pixels=1, content=b"\x01\x00\x00\x00")
+        self.masks[:] = [mask]
+        monitor = {
+            "matching_masks": [self.module._mask_snapshot(mask)]
+        }
+        mask.content = b"\x00\x01\x00\x00"  # same volume, moved voxel
+        result = self.module._mask_for_label(
+            monitor, {"name": "Liver", "aliases": []}, "update"
+        )
+        self.assertEqual(result.name, "AI_Liver")
+
+    def test_unchanged_mask_still_updates(self):
+        mask = FakeMask("Liver", pixels=1, content=b"\x01\x00\x00\x00")
+        self.masks[:] = [mask]
+        monitor = {
+            "matching_masks": [self.module._mask_snapshot(mask)]
+        }
+        result = self.module._mask_for_label(
+            monitor, {"name": "Liver", "aliases": []}, "update"
+        )
+        self.assertIs(result, mask)
+
+    def test_edit_undone_back_to_original_still_updates(self):
+        mask = FakeMask("Liver", pixels=1, content=b"\x01\x00\x00\x00")
+        self.masks[:] = [mask]
+        monitor = {
+            "matching_masks": [self.module._mask_snapshot(mask)]
+        }
+        mask.content = b"\x00\x01\x00\x00"  # edit...
+        mask.content = b"\x01\x00\x00\x00"  # ...then undo restores it
+        result = self.module._mask_for_label(
+            monitor, {"name": "Liver", "aliases": []}, "update"
+        )
+        self.assertIs(result, mask)
 
     def test_new_matching_mask_is_not_overwritten_without_launch_snapshot(self):
         monitor = {"matching_masks": []}
