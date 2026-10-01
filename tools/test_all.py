@@ -1740,6 +1740,88 @@ class TestMimicsBridgeBufferMapping(unittest.TestCase):
         self.assertEqual((5, 6, 7), result.shape)
         self.assertEqual(1, int(result[1, 2, 3]))
 
+    def test_read_nifti_mask_rejects_nonfinite_values(self):
+        """F23: NaN/Inf voxels must not become foreground via != 0."""
+        from mimics_bridge import read_nifti_mask, read_nifti_mask_with_affine
+
+        import nibabel as nib
+
+        data = np.array([0.0, float("nan"), float("inf"), 1.0], dtype=np.float32)
+        data = data.reshape(2, 2, 1)
+        path = os.path.join(self.tmp, "nonfinite.nii.gz")
+        nib.save(nib.Nifti1Image(data, np.eye(4)), path)
+
+        for reader in (read_nifti_mask, read_nifti_mask_with_affine):
+            with self.assertRaises(ValueError) as ctx:
+                reader(path)
+            self.assertIn("NaN", str(ctx.exception))
+
+    def test_read_nifti_mask_rejects_fractional_probability_map(self):
+        """F23: an undeclared probability map must not be silently thresholded."""
+        from mimics_bridge import (
+            read_nifti_mask,
+            read_nifti_mask_with_affine,
+            read_mask_labels_with_affine,
+        )
+
+        import nibabel as nib
+
+        data = np.array([0.01, 0.49, 0.51, 0.99], dtype=np.float32).reshape(2, 2, 1)
+        path = os.path.join(self.tmp, "probability.nii.gz")
+        nib.save(nib.Nifti1Image(data, np.eye(4)), path)
+
+        for reader in (read_nifti_mask, read_nifti_mask_with_affine):
+            with self.assertRaises(ValueError) as ctx:
+                reader(path)
+            self.assertIn("probability", str(ctx.exception))
+        with self.assertRaises(ValueError) as ctx:
+            read_mask_labels_with_affine(path)
+        self.assertIn("probability", str(ctx.exception))
+
+    def test_read_nifti_mask_integer_valued_float_passes_all_readers(self):
+        """F23: float dtype with integral values (0/1, 0/255) stays accepted."""
+        from mimics_bridge import (
+            read_nifti_mask,
+            read_nifti_mask_with_affine,
+            read_mask_labels_with_affine,
+        )
+
+        import nibabel as nib
+
+        data = np.array([0.0, 255.0, 0.0, 255.0], dtype=np.float32).reshape(2, 2, 1)
+        path = os.path.join(self.tmp, "int_valued_float.nii.gz")
+        nib.save(nib.Nifti1Image(data, np.eye(4)), path)
+
+        np.testing.assert_array_equal(
+            np.array([0, 1, 0, 1], dtype=np.uint8).reshape(2, 2, 1),
+            read_nifti_mask(path),
+        )
+        binary, _affine = read_nifti_mask_with_affine(path)
+        np.testing.assert_array_equal(
+            np.array([0, 1, 0, 1], dtype=np.uint8).reshape(2, 2, 1), binary
+        )
+        labels_array, _affine, labels = read_mask_labels_with_affine(path)
+        self.assertEqual([0, 255], labels)
+        np.testing.assert_array_equal(
+            np.array([0, 255, 0, 255], dtype=np.int64).reshape(2, 2, 1),
+            labels_array,
+        )
+
+    def test_read_mask_labels_rejects_nonfinite_values(self):
+        """F23: the multi-label entry point keeps rejecting NaN/Inf labels."""
+        from mimics_bridge import read_mask_labels_with_affine
+
+        import nibabel as nib
+
+        data = np.array([0.0, float("nan"), 2.0, 1.0], dtype=np.float32)
+        data = data.reshape(2, 2, 1)
+        path = os.path.join(self.tmp, "nonfinite_labels.nii.gz")
+        nib.save(nib.Nifti1Image(data, np.eye(4)), path)
+
+        with self.assertRaises(ValueError) as ctx:
+            read_mask_labels_with_affine(path)
+        self.assertIn("NaN", str(ctx.exception))
+
     def test_convert_uses_mimics_grid_affine_from_manifest(self):
         from mimics_bridge import do_convert
         import nibabel as nib
