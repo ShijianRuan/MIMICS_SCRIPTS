@@ -164,6 +164,28 @@ def _file_fingerprint(path):
 IMPORT_RECEIPT_RETENTION_DAYS = 30
 
 
+def import_receipt_provenance_token(receipt_case_id, manifest_data):
+    """Token stamped on every mask this import creates (F19/T19).
+
+    Undo proves mask ownership by guid first; when the host regenerates
+    guids across reopen, this token - carried in mask metadata - is the
+    fallback proof. It is derived from data unique to this import so a
+    hand-made mask can never carry it.
+    """
+    fingerprint = str(manifest_data.get("source_fingerprint") or "")
+    return "mimics.import_receipt.{0}.{1}".format(
+        safe_case_filename(str(receipt_case_id)), fingerprint[-16:] or "nofp"
+    )
+
+
+def _stamp_mask_provenance(mask, token):
+    """Best-effort: metadata is an ownership aid, not a hard requirement."""
+    try:
+        metadata_set(mask, token, "1")
+    except Exception:
+        pass
+
+
 def prune_import_receipts(output_dir, retention_days=IMPORT_RECEIPT_RETENTION_DAYS):
     """Delete import receipts past the retention window (best effort).
 
@@ -185,13 +207,21 @@ def prune_import_receipts(output_dir, retention_days=IMPORT_RECEIPT_RETENTION_DA
         pass
 
 
-def write_import_receipt(output_dir, case_id, mcs_path, mask_names, manifest_data):
+def write_import_receipt(output_dir, case_id, mcs_path, mask_names, manifest_data,
+                         mask_objects=None):
     """Record exactly what one import created, for one-click undo.
 
     The receipt lives next to the .mcs (not in the runtime dir) because it
     must survive queue cleanup: undo should work weeks later. Undo deletes
     the listed masks from the project; the .mcs file itself is only rolled
     back (deleted) when its content fingerprint still matches this import.
+
+    v2 (F18/F19): when the live mask objects are passed in, each entry
+    also records the object's guid. Undo resolves masks by guid first, so
+    a same-name mask on another image is never deleted, and a renamed
+    import mask is still found; the guid is also what lets undo detect an
+    in-memory session that holds work beyond the import before it agrees
+    to delete the .mcs file.
     """
     prune_import_receipts(output_dir)
     receipt_path = os.path.join(
@@ -210,6 +240,19 @@ def write_import_receipt(output_dir, case_id, mcs_path, mask_names, manifest_dat
         "source_case_dir": manifest_data.get("source_case_dir") or "",
         "created_at_epoch": time.time(),
     }
+    if mask_objects is not None:
+        token = import_receipt_provenance_token(
+            str(case_id or "case"), manifest_data
+        )
+        payload["schema_version"] = "mimics_import_receipt.v2"
+        payload["provenance_token"] = token
+        payload["created_masks_v2"] = [
+            {
+                "name": str(getattr(mask, "name", "") or name),
+                "guid": str(getattr(mask, "guid", "") or ""),
+            }
+            for mask, name in zip(mask_objects, mask_names)
+        ]
     write_json_atomic(receipt_path, payload)
     return receipt_path
 
@@ -1009,6 +1052,7 @@ def create_mcs_from_manifest(work_dir, output_mcs):
     except Exception:
         gui_was_enabled = False
 
+    created_mask_objects = []
     try:
         # Create masks and inject buffers.
         # Note: mask.image is read-only; masks are automatically linked
@@ -1038,6 +1082,7 @@ def create_mcs_from_manifest(work_dir, output_mcs):
                 pass
 
             method = inject_buffer(mask, u8_path, buf_shape)
+            created_mask_objects.append(mask)
             print("    -> {}".format(name))
     finally:
         if gui_was_enabled:
@@ -1051,19 +1096,25 @@ def create_mcs_from_manifest(work_dir, output_mcs):
     mcs_dir = os.path.dirname(mcs_path)
     if mcs_dir and not os.path.isdir(mcs_dir):
         os.makedirs(mcs_dir)
+    # Stamp the provenance token BEFORE saving: it must be inside the
+    # .mcs, or undo cannot prove ownership after a reopen (F19/T19).
+    receipt_case_id = str(result.get("case_id") or os.path.splitext(os.path.basename(mcs_path))[0])
+    provenance_token = import_receipt_provenance_token(receipt_case_id, result)
+    for mask in created_mask_objects:
+        _stamp_mask_provenance(mask, provenance_token)
     mimics.file.save_project(filename=mcs_path, save_as_type="Mimics Project Files")
     print("  saved: {}".format(mcs_path))
 
     # Import receipt (P4): one-click undo needs to know exactly what this
     # import created - mask names, metadata keys, and the source fingerprint.
     try:
-        receipt_case_id = str(result.get("case_id") or os.path.splitext(os.path.basename(mcs_path))[0])
         receipt_path = write_import_receipt(
             os.path.dirname(mcs_path),
             receipt_case_id,
             mcs_path,
             [mr["name"] for mr in mask_results],
             result,
+            mask_objects=created_mask_objects,
         )
         print("  receipt: {}".format(receipt_path))
     except Exception as exc:

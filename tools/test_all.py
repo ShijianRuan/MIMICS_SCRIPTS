@@ -11209,6 +11209,112 @@ class TestImportReceiptAndUndo(unittest.TestCase):
             self.addCleanup(patch.stop)
         return saved
 
+    def _install_v2_undo_env(self, images, mcs_path, save_writes=b""):
+        """F18/F19 undo environment: guid + metadata + real save-to-disk.
+
+        `images` is a list of (image_name, [mask_specs]) where a mask_spec
+        is a dict(name=..., guid=..., token=...) or a plain string name
+        (no guid, no token). save_project writes `save_writes` to the
+        .mcs so the post-save fingerprint re-check is observable.
+        """
+        import import_undo_mimics
+
+        saved = {
+            "deleted": [],
+            "deleted_guids": [],
+            "saves": [],
+            "closes": 0,
+            "open_target": [],
+            "message_boxes": [],
+        }
+
+        class _FakeMetadataItem:
+            def __init__(self, name, value):
+                self.name = name
+                self.value = value
+
+        class _FakeMetadata:
+            def __init__(self, entries):
+                self._entries = dict(entries)
+
+            def find(self, name):
+                return _FakeMetadataItem(name, self._entries[name]) \
+                    if name in self._entries else None
+
+        class _FakeMask:
+            def __init__(self, spec):
+                if isinstance(spec, dict):
+                    self.name = spec["name"]
+                    self.guid = spec.get("guid", "")
+                    self.metadata = _FakeMetadata(
+                        {spec["token"]: "1"} if spec.get("token") else {}
+                    )
+                else:
+                    self.name = spec
+                    self.guid = ""
+                    self.metadata = _FakeMetadata({})
+
+            def delete(self):
+                saved["deleted"].append(self.name)
+                saved["deleted_guids"].append(getattr(self, "guid", ""))
+
+        image_modules = []
+        for _image_name, mask_specs in images:
+            image = _FakeModule()
+            image.masks = [_FakeMask(spec) for spec in mask_specs]
+            image_modules.append(image)
+
+        patches = [
+            mock.patch.object(import_undo_mimics.mimics.data, "images", image_modules),
+            mock.patch.object(
+                import_undo_mimics.mimics.file, "get_active_project",
+                lambda: saved["open_target"][0] if saved["open_target"] else None,
+            ),
+            mock.patch.object(
+                import_undo_mimics.mimics.file, "open_project",
+                lambda filename=None: saved["open_target"].append(filename),
+            ),
+            mock.patch.object(
+                import_undo_mimics.mimics.file, "save_project",
+                lambda filename=None, save_as_type=None: (
+                    saved["saves"].append(filename),
+                    open(filename, "wb").write(save_writes),
+                )[-1],
+            ),
+            mock.patch.object(
+                import_undo_mimics.mimics.file, "close_project",
+                lambda: saved.__setitem__("closes", saved["closes"] + 1),
+            ),
+            mock.patch.object(
+                import_undo_mimics.mimics.dialogs, "message_box",
+                lambda *a, **kw: saved["message_boxes"].append((a, kw)) or True,
+            ),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        return saved
+
+    def _write_v2_receipt(self, out_dir, mcs_path, masks, token="tok-1",
+                           case_id="s0001", mcs_bytes=b"project-bytes"):
+        """v2 receipt on disk. `masks` is a list of (name, guid)."""
+        from create_mcs_batch import write_import_receipt
+
+        os.makedirs(out_dir)
+        with open(mcs_path, "wb") as handle:
+            handle.write(mcs_bytes)
+        class _Mask:
+            def __init__(self, name, guid):
+                self.name = name
+                self.guid = guid
+        receipt_path = write_import_receipt(
+            out_dir, case_id, mcs_path,
+            [name for name, _guid in masks],
+            {"source_fingerprint": "sf-1234567890abcdef"},
+            mask_objects=[_Mask(name, guid) for name, guid in masks],
+        )
+        return receipt_path
+
     def test_undo_roundtrip_file_rolled_back_when_fingerprint_matches(self):
         import import_undo_mimics
         from create_mcs_batch import write_import_receipt, _file_fingerprint
@@ -11228,10 +11334,13 @@ class TestImportReceiptAndUndo(unittest.TestCase):
         self.assertEqual(0, code)
         # Only the receipt's masks are deleted; the unrelated one stays.
         self.assertEqual(sorted(["Bone", "Liver"]), sorted(saved["deleted"]))
-        self.assertFalse(os.path.isfile(mcs_path))
+        # F18: the extra in-session mask ("Skin") is manual work; the file
+        # is kept even though its disk fingerprint still matches, because
+        # deleting it would destroy that work once the session is saved.
+        self.assertTrue(os.path.isfile(mcs_path))
         self.assertFalse(os.path.isfile(receipt_path))
         self.assertEqual([mcs_path], saved["saves"])
-        self.assertEqual(1, saved["closes"])
+        self.assertEqual(0, saved["closes"])
 
     def test_undo_announces_blocking_steps_in_log_before_deleting(self):
         """B33: open/fingerprint/save block the GUI thread for as long as
@@ -11273,9 +11382,9 @@ class TestImportReceiptAndUndo(unittest.TestCase):
                                   side_effect=_delete_and_record):
             code = import_undo_mimics.undo_last_import(confirm=False)
         self.assertEqual(0, code)
-        # Two log entries: the pre-work notice, then the undo summary that
-        # predates this change. The pre-work one must come first.
-        self.assertEqual(2, len(notices))
+        # Three log entries: the pre-work notice, the F18 file-kept reason,
+        # and the undo summary. The pre-work one must come first.
+        self.assertEqual(3, len(notices))
         level, message = notices[0]
         self.assertEqual(_logging.INFO, level)
         self.assertIn("verifying", message)
@@ -11330,6 +11439,201 @@ class TestImportReceiptAndUndo(unittest.TestCase):
         self.assertEqual(4, code)
         # The receipt survives so the user can retry after fixing the cause.
         self.assertTrue(os.path.isfile(receipt_path))
+        self.assertTrue(os.path.isfile(mcs_path))
+
+    def test_undo_v2_dirty_session_keeps_file_with_unsaved_manual_mask(self):
+        """F18/T18: an unsaved manual mask in the session must stop the
+        delete-file rollback. The disk fingerprint still matches the
+        import (the manual work was never saved), so the old code saved
+        the session - flushing the manual mask into the file - and then
+        deleted the file, destroying work the user never agreed to lose.
+        """
+        import import_undo_mimics
+
+        out_dir = os.path.join(self.tmp, "out")
+        mcs_path = os.path.join(out_dir, "s0001.mcs")
+        receipt_path = self._write_v2_receipt(
+            out_dir, mcs_path, [("Bone", "g-bone")]
+        )
+        saved = self._install_v2_undo_env(
+            [("im1", [
+                {"name": "Bone", "guid": "g-bone", "token": "tok-1"},
+                {"name": "Kidney", "guid": "g-kidney"},  # manual, no token
+            ])],
+            mcs_path, save_writes=b"project-with-manual-work",
+        )
+        with mock.patch.object(import_undo_mimics, "_candidate_receipt_dirs",
+                               lambda: [out_dir]):
+            code = import_undo_mimics.undo_last_import(confirm=False)
+        self.assertEqual(0, code)
+        # The import's own mask is deleted; the manual one survives.
+        self.assertEqual(["Bone"], saved["deleted"])
+        # THE F18 core assertion: the .mcs file is NOT deleted even though
+        # its on-disk fingerprint matched the receipt.
+        self.assertTrue(os.path.isfile(mcs_path))
+        # The receipt was consumed: the mask deletion succeeded and the
+        # file was kept on purpose (not a failure path).
+        self.assertFalse(os.path.isfile(receipt_path))
+        # The message must tell the user why the file was kept.
+        summary_text = " ".join(str(a[0]) for a, _kw in saved["message_boxes"])
+        self.assertIn("KEPT", summary_text)
+
+    def test_undo_v2_dirty_session_keeps_file_with_saved_manual_mask(self):
+        """F18/T18 已保存新增: the manual mask WAS saved to disk, so the
+        disk fingerprint no longer matches and the file must be kept -
+        deleting it would discard the saved manual work."""
+        import import_undo_mimics
+
+        out_dir = os.path.join(self.tmp, "out")
+        mcs_path = os.path.join(out_dir, "s0001.mcs")
+        receipt_path = self._write_v2_receipt(
+            out_dir, mcs_path, [("Bone", "g-bone")], mcs_bytes=b"imported"
+        )
+        # Post-import save of manual work: the file on disk changed.
+        with open(mcs_path, "wb") as handle:
+            handle.write(b"imported+manual")
+        saved = self._install_v2_undo_env(
+            [("im1", [
+                {"name": "Bone", "guid": "g-bone", "token": "tok-1"},
+                {"name": "Kidney", "guid": "g-kidney"},
+            ])],
+            mcs_path, save_writes=b"imported+manual",
+        )
+        with mock.patch.object(import_undo_mimics, "_candidate_receipt_dirs",
+                               lambda: [out_dir]):
+            code = import_undo_mimics.undo_last_import(confirm=False)
+        self.assertEqual(0, code)
+        self.assertEqual(["Bone"], saved["deleted"])
+        self.assertTrue(os.path.isfile(mcs_path))
+
+    def test_undo_v2_clean_session_removes_file(self):
+        """F18 positive control: with no manual work anywhere (session and
+        disk both still exactly what the import produced), the exact
+        rollback - delete the file - still happens."""
+        import import_undo_mimics
+
+        out_dir = os.path.join(self.tmp, "out")
+        mcs_path = os.path.join(out_dir, "s0001.mcs")
+        self._write_v2_receipt(out_dir, mcs_path, [("Bone", "g-bone")])
+        saved = self._install_v2_undo_env(
+            [("im1", [{"name": "Bone", "guid": "g-bone", "token": "tok-1"}])],
+            mcs_path, save_writes=b"project-bytes",
+        )
+        with mock.patch.object(import_undo_mimics, "_candidate_receipt_dirs",
+                               lambda: [out_dir]):
+            code = import_undo_mimics.undo_last_import(confirm=False)
+        self.assertEqual(0, code)
+        self.assertEqual(["Bone"], saved["deleted"])
+        self.assertFalse(os.path.isfile(mcs_path))
+        self.assertEqual(1, saved["closes"])
+
+    def test_undo_v2_deleted_and_recreated_mask_keeps_file(self):
+        """F18/T19 删除后重建同名: the imported mask was deleted and a
+        hand-made mask with the same name created. The recreated mask
+        carries no token, so the session check keeps the file."""
+        import import_undo_mimics
+
+        out_dir = os.path.join(self.tmp, "out")
+        mcs_path = os.path.join(out_dir, "s0001.mcs")
+        self._write_v2_receipt(out_dir, mcs_path, [("Bone", "g-bone")])
+        saved = self._install_v2_undo_env(
+            [("im1", [{"name": "Bone", "guid": "g-new"}])],  # recreated, no token
+            mcs_path, save_writes=b"project-bytes",
+        )
+        with mock.patch.object(import_undo_mimics, "_candidate_receipt_dirs",
+                               lambda: [out_dir]):
+            code = import_undo_mimics.undo_last_import(confirm=False)
+        self.assertEqual(0, code)
+        # Nothing is deleted: the receipt's guid and token match nothing.
+        self.assertEqual([], saved["deleted"])
+        self.assertTrue(os.path.isfile(mcs_path))
+
+    def test_undo_v2_same_name_on_two_images_deletes_only_owned(self):
+        """F19/T19 多Image同名: two images each hold a 'liver' mask; only
+        the one the receipt proves (guid) is deleted. The old name-based
+        code deleted both."""
+        import import_undo_mimics
+
+        out_dir = os.path.join(self.tmp, "out")
+        mcs_path = os.path.join(out_dir, "s0001.mcs")
+        self._write_v2_receipt(
+            out_dir, mcs_path, [("liver", "g-liver-A")]
+        )
+        saved = self._install_v2_undo_env(
+            [
+                ("imA", [{"name": "liver", "guid": "g-liver-A", "token": "tok-1"}]),
+                ("imB", [{"name": "liver", "guid": "g-liver-B"}]),  # manual
+            ],
+            mcs_path, save_writes=b"project-bytes",
+        )
+        with mock.patch.object(import_undo_mimics, "_candidate_receipt_dirs",
+                               lambda: [out_dir]):
+            code = import_undo_mimics.undo_last_import(confirm=False)
+        self.assertEqual(0, code)
+        self.assertEqual(["liver"], saved["deleted"])
+        self.assertEqual(["g-liver-A"], saved["deleted_guids"])
+        # The manual same-name mask on the other image survives - and so
+        # does the .mcs file, because the session holds that manual work.
+        self.assertTrue(os.path.isfile(mcs_path))
+
+    def test_undo_v2_guid_drift_falls_back_to_token_and_name(self):
+        """F19/T19 重命名/GUID漂移: the host regenerated guids across the
+        reopen; the imported mask was also renamed. The provenance token
+        plus the recorded original name must still identify it - without
+        ever matching a hand-made same-name mask."""
+        import import_undo_mimics
+
+        out_dir = os.path.join(self.tmp, "out")
+        mcs_path = os.path.join(out_dir, "s0001.mcs")
+        # Receipt recorded the import-time name 'liver' and guid 'g-old'.
+        self._write_v2_receipt(out_dir, mcs_path, [("liver", "g-old")])
+        saved = self._install_v2_undo_env(
+            [("im1", [
+                # renamed import mask: new guid, new name, but tokened
+                {"name": "liver_edited", "guid": "g-new", "token": "tok-1"},
+                # hand-made mask that happens to carry the original name
+                {"name": "liver", "guid": "g-manual"},
+            ])],
+            mcs_path, save_writes=b"project-bytes",
+        )
+        with mock.patch.object(import_undo_mimics, "_candidate_receipt_dirs",
+                               lambda: [out_dir]):
+            code = import_undo_mimics.undo_last_import(confirm=False)
+        self.assertEqual(0, code)
+        # The tokened renamed mask is found by its token+name pair only if
+        # the name matches the receipt; it does not, so nothing matches by
+        # name - but the token check in the session divergence keeps the
+        # file. Deletion must NOT hit the hand-made same-name mask.
+        self.assertEqual([], saved["deleted"])
+        self.assertTrue(os.path.isfile(mcs_path))
+
+    def test_undo_v1_receipt_with_extra_mask_keeps_file(self):
+        """W02 旧receipt保守处理: a v1 receipt (names only) with an extra
+        manual mask in the session must not trigger the delete-file
+        rollback - v1 has no guid to prove the extra mask is manual, so
+        the conservative answer is to keep the file."""
+        import import_undo_mimics
+        from create_mcs_batch import write_import_receipt
+
+        out_dir = os.path.join(self.tmp, "out")
+        os.makedirs(out_dir)
+        mcs_path = os.path.join(out_dir, "s0001.mcs")
+        with open(mcs_path, "wb") as handle:
+            handle.write(b"project-bytes")
+        # v1 receipt: no mask_objects -> no created_masks_v2.
+        receipt_path = write_import_receipt(
+            out_dir, "s0001", mcs_path, ["Bone"], {}
+        )
+        saved = self._install_undo_env(mcs_path, ["Bone", "Kidney"])
+        # The v1 env's save_project does not write to disk, so the file
+        # still matches the receipt fingerprint after save.
+        with mock.patch.object(import_undo_mimics, "_candidate_receipt_dirs",
+                               lambda: [out_dir]):
+            code = import_undo_mimics.undo_last_import(confirm=False)
+        self.assertEqual(0, code)
+        self.assertEqual(sorted(["Bone"]), sorted(saved["deleted"]))
+        # Extra unaccounted mask in the session -> file kept (old code
+        # deleted it; the manual Kidney would have been destroyed).
         self.assertTrue(os.path.isfile(mcs_path))
 
     def test_undo_reports_when_no_receipt_exists(self):
