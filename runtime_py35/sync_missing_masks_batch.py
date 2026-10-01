@@ -15,6 +15,11 @@ missing brain); their zero foreground is visible in the job results.
 If the saved project already holds a mask whose name collides with a missing
 source mask name, the case fails loudly instead of silently re-importing.
 
+With force=True in the job config the previous output is not used as the
+base: each case is rebuilt from its source. Publish is version-checked
+either way - an output saved by someone else while the job was running is
+never overwritten (the staged result is kept as a .conflict.<pid>.mcs copy).
+
 Py3.5 constraints: no f-strings, no pathlib, .format() with positional
 indexes only.
 """
@@ -97,26 +102,12 @@ def _staging_path(output_path):
     return "{0}.creating.{1}.mcs".format(stem, os.getpid())
 
 
-def _publish(staging_path, output_path):
-    if not os.path.isfile(staging_path):
-        raise RuntimeError(
-            "Mimics saved successfully but the temporary MCS was not found: {0}".format(
-                staging_path
-            )
-        )
-    last_error = None
-    for attempt in range(20):
-        try:
-            os.replace(staging_path, output_path)
-            return
-        except OSError as exc:
-            last_error = exc
-            time.sleep(min(0.5, 0.05 * (attempt + 1)))
-    raise RuntimeError(
-        "Could not publish the completed MCS to {0}: {1}".format(
-            output_path, last_error
-        )
-    )
+def _publish(staging_path, output_path, expected_identity):
+    """F28: refuse to replace an output someone else saved meanwhile."""
+    conflict = runtime_common.publish_conflict(
+        staging_path, output_path, expected_identity)
+    if conflict:
+        raise RuntimeError(conflict)
 
 
 def _mask_names():
@@ -177,7 +168,7 @@ def _scratch_root(job_dir):
     return os.path.join(job_dir, "work")
 
 
-def _sync_one(case, job_dir):
+def _sync_one(case, job_dir, force=False):
     """Check one case and append its missing masks immediately."""
     case_id = str(case.get("case_id", ""))
     source_masks = list(case.get("source_masks") or [])
@@ -189,11 +180,20 @@ def _sync_one(case, job_dir):
         raise RuntimeError("Source MCS not found: {0}".format(source_mcs))
     # In output-dir mode the previous output (if any) holds a superset of the
     # source masks; open it so already-synced cases skip without re-appending.
+    # --force rebuilds from the source instead: the previous output is
+    # replaced (its masks are re-derived), never treated as a base.
+    previous_output = (
+        output_mcs != source_mcs and os.path.isfile(output_mcs))
     open_path = (
         output_mcs
-        if output_mcs != source_mcs and os.path.isfile(output_mcs)
+        if previous_output and not force
         else source_mcs
     )
+    # F28: record who the output is at case start so publish can refuse to
+    # overwrite a newer manual save from this workstation or another one.
+    # This stays on even with --force: rebuilding must not clobber a save
+    # that happened while the rebuild was running.
+    output_identity = runtime_common.capture_output_identity(output_mcs)
 
     _safe_close_project()
     mimics.file.open_project(open_path)
@@ -207,7 +207,8 @@ def _sync_one(case, job_dir):
 
     try:
         return _sync_opened_case(
-            case, job_dir, case_id, source_masks, output_mcs, staging_mcs, work_dir
+            case, job_dir, case_id, source_masks, output_mcs, staging_mcs,
+            work_dir, output_identity,
         )
     finally:
         if opened:
@@ -216,7 +217,8 @@ def _sync_one(case, job_dir):
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
-def _sync_opened_case(case, job_dir, case_id, source_masks, output_mcs, staging_mcs, work_dir):
+def _sync_opened_case(case, job_dir, case_id, source_masks, output_mcs,
+                      staging_mcs, work_dir, output_identity):
     active_image, active_shape, active_affine = mask_import._active_image_info()
     if active_image is None or not active_shape or not active_affine:
         raise RuntimeError("Could not determine the active Mimics image grid.")
@@ -320,7 +322,7 @@ def _sync_opened_case(case, job_dir, case_id, source_masks, output_mcs, staging_
     if not os.path.isfile(staging_mcs):
         raise RuntimeError("Mimics did not create the temporary MCS.")
     _safe_close_project()
-    _publish(staging_mcs, output_mcs)
+    _publish(staging_mcs, output_mcs, output_identity)
     _log(job_dir, "{0}: published {1}".format(case_id, output_mcs))
     return dict(
         summary,
@@ -344,6 +346,7 @@ def run_job(config_path):
     failed_rows = []
     _status(job_dir, "running", "starting", 0, 0, 0, total)
     _log(job_dir, "Sync job started: {0} case(s).".format(total))
+    force = bool(config.get("force", False))
     try:
         for index, case in enumerate(cases):
             stop_path = config.get("stop_path") or ""
@@ -360,7 +363,7 @@ def run_job(config_path):
                 case_id=case_id, index=index + 1,
             )
             try:
-                result = _sync_one(case, job_dir)
+                result = _sync_one(case, job_dir, force)
                 results.append(result)
                 if result.get("status") == "skipped":
                     skipped += 1

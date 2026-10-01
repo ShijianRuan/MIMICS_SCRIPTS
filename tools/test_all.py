@@ -14904,12 +14904,19 @@ class TestForeignScriptIntegration(unittest.TestCase):
     def test_sync_runtime_stops_between_cases_and_publishes_atomically(self):
         """Failure paths of the sync job: (1) the stop file is honored before
         each case, so a stuck 600-case batch is cancellable; (2) the finished
-        .mcs is published via os.replace from a staging name, so an interrupted
-        save can never leave a half-written project behind."""
+        .mcs is published via os.replace from a staging name (shared
+        runtime_common.publish_conflict since F28), so an interrupted save
+        can never leave a half-written project behind."""
         source = self._source(os.path.join("runtime_py35", "sync_missing_masks_batch.py"))
         self.assertIn('config.get("stop_path")', source)
-        self.assertIn("os.replace(staging_path, output_path)", source)
+        self.assertIn("runtime_common.publish_conflict", source)
         self.assertIn(".creating.", source)  # staging name is recognizable
+        common = self._source(os.path.join("runtime_py35", "runtime_common.py"))
+        self.assertIn("os.replace(staging_path, output_path)", common)
+        # The conflict check is not optional in either batch publisher.
+        for name in ("sync_missing_masks_batch.py", "append_masks_batch.py"):
+            text = self._source(os.path.join("runtime_py35", name))
+            self.assertIn("capture_output_identity", text)
 
     def test_sync_launcher_scopes_locks_to_all_written_roots(self):
         """The sync launcher locks the mcs dir, the source root AND the
@@ -14976,12 +14983,131 @@ class TestForeignScriptIntegration(unittest.TestCase):
                     {}, os.path.join(self.tmp, "job"),
                     "case1", [{"name": "liver", "mask_path": "x.nii.gz"}],
                     "out.mcs", "staging.mcs", "work",
+                    {"path": "out.mcs", "identity": ""},
                 )
             self.assertIn("2 images", str(ctx.exception))
             self.assertIn("nothing was changed", str(ctx.exception))
         finally:
             sync_missing_masks_batch.mask_import._active_image_info = original_info
             _mock_mimics.data.images = original_images
+
+    def test_publish_never_overwrites_newer_manual_save(self):
+        """F28: the staging+replace publish used to overwrite an output the
+        annotator (or another workstation) saved after the case started.
+        The publish must keep the newer file and leave the staged result as
+        a job-named conflict copy instead of silently discarding a save."""
+        import runtime_common
+
+        output = os.path.join(self.tmp, "case.mcs")
+        with open(output, "wb") as handle:
+            handle.write(b"case-start-content")
+        identity = runtime_common.capture_output_identity(output)
+
+        staging = os.path.join(self.tmp, "case.creating.123.mcs")
+        with open(staging, "wb") as handle:
+            handle.write(b"staged-background-result")
+        # Someone saved the output while the job was running.
+        with open(output, "wb") as handle:
+            handle.write(b"newer-manual-save")
+
+        message = runtime_common.publish_conflict(staging, output, identity)
+        self.assertTrue(message, "a changed output must not be published over")
+        self.assertIn("conflict", message)
+        # The newer manual save is intact.
+        with open(output, "rb") as handle:
+            self.assertEqual(b"newer-manual-save", handle.read())
+        # The staged result survived as a visible copy, not deleted.
+        conflict_copies = [
+            name for name in os.listdir(self.tmp)
+            if ".conflict." in name and name.endswith(".mcs")
+        ]
+        self.assertEqual(1, len(conflict_copies))
+        with open(os.path.join(self.tmp, conflict_copies[0]), "rb") as handle:
+            self.assertEqual(b"staged-background-result", handle.read())
+
+    def test_publish_replaces_unchanged_output(self):
+        """F28 counterpart: an output nobody touched is still replaced."""
+        import runtime_common
+
+        output = os.path.join(self.tmp, "case.mcs")
+        with open(output, "wb") as handle:
+            handle.write(b"old-content")
+        identity = runtime_common.capture_output_identity(output)
+        staging = os.path.join(self.tmp, "case.creating.123.mcs")
+        with open(staging, "wb") as handle:
+            handle.write(b"staged-background-result")
+
+        message = runtime_common.publish_conflict(staging, output, identity)
+        self.assertEqual("", message)
+        with open(output, "rb") as handle:
+            self.assertEqual(b"staged-background-result", handle.read())
+        # No conflict residue.
+        self.assertEqual(
+            [], [n for n in os.listdir(self.tmp) if ".conflict." in n])
+
+    def test_publish_degrades_when_output_did_not_exist(self):
+        """First publish to a fresh output path must not be treated as a
+        conflict just because the case started without an output file."""
+        import runtime_common
+
+        output = os.path.join(self.tmp, "fresh.mcs")
+        identity = runtime_common.capture_output_identity(output)
+        self.assertEqual("", identity.get("identity"))
+        staging = os.path.join(self.tmp, "fresh.creating.123.mcs")
+        with open(staging, "wb") as handle:
+            handle.write(b"staged-background-result")
+
+        message = runtime_common.publish_conflict(staging, output, identity)
+        self.assertEqual("", message)
+        with open(output, "rb") as handle:
+            self.assertEqual(b"staged-background-result", handle.read())
+
+    def test_sync_force_actually_rebuilds_from_source(self):
+        """F28 adjacent UX gap: --force was written into the job config but
+        the worker never read it, so an existing output was always treated
+        as the base. With force the source project is opened instead."""
+        import sync_missing_masks_batch
+
+        source = os.path.join(self.tmp, "case.mcs")
+        output = os.path.join(self.tmp, "out", "case.mcs")
+        os.makedirs(os.path.dirname(output))
+        with open(source, "wb") as handle:
+            handle.write(b"source")
+        with open(output, "wb") as handle:
+            handle.write(b"previous-output")
+
+        opened = []
+        original_open = _mock_mimics.file.open_project
+        _mock_mimics.file.open_project = opened.append
+        captured = {}
+
+        def fake_sync_opened(*args):
+            captured["args"] = args
+            return {"status": "skipped"}
+
+        original_inner = sync_missing_masks_batch._sync_opened_case
+        sync_missing_masks_batch._sync_opened_case = fake_sync_opened
+        try:
+            case = {
+                "case_id": "case", "mcs_path": source,
+                "output_mcs_path": output,
+                "source_masks": [{"name": "liver", "mask_path": "x.nii.gz"}],
+            }
+            # Without force: continue the existing output (open it).
+            sync_missing_masks_batch._sync_one(
+                case, os.path.join(self.tmp, "job"))
+            self.assertEqual([output], opened)
+            # With force: rebuild from the source instead.
+            opened[:] = []
+            sync_missing_masks_batch._sync_one(
+                case, os.path.join(self.tmp, "job"), force=True)
+            self.assertEqual([source], opened)
+        finally:
+            _mock_mimics.file.open_project = original_open
+            sync_missing_masks_batch._sync_opened_case = original_inner
+        # The identity captured for conflict checking is forwarded to the
+        # per-case worker either way.
+        self.assertTrue(captured["args"])
 
 
 class TestBatchPredictCommand(unittest.TestCase):

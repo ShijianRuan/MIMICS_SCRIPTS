@@ -49,7 +49,9 @@ def build_parser():
     destination.add_argument("--output-dir", help="Write updated .mcs files to this folder")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--force", action="store_true",
-                        help="Replace existing output MCS files")
+                        help="Rebuild from the source instead of continuing an "
+                             "existing output; a newer manual save made while "
+                             "the job runs is still never overwritten")
     parser.add_argument("--job-dir", help="Job directory (default: local .mimics_runtime)")
     parser.add_argument("--scratch-root",
                         help="Buffer scratch root (default: <job-dir>/work)")
