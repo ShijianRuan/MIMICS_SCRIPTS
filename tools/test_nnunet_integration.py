@@ -1420,6 +1420,30 @@ class JobLifecycleTests(unittest.TestCase):
                     environment.get(blas_var), "1",
                     "{} stage must cap {}".format(stage, blas_var))
 
+    def test_worker_environment_disables_torch_compile_for_train(self):
+        """The train stage must default nnUNet_compile off.
+
+        nnU-Net v2.8 turns torch.compile (inductor) ON by default for
+        CUDA/Linux, and inductor needs a C compiler. The remote runtime
+        image ships none, so Epoch 0 dies in dynamo and the threaded data
+        augmenter surfaces it as "One or more background workers are no
+        longer alive" — masking the real cause. Users can still pre-set the
+        variable to opt back in.
+        """
+        roots = {
+            "raw": Path("W:/raw"),
+            "preprocessed": Path("W:/preprocessed"),
+            "results": Path("W:/results"),
+        }
+        environment = pipeline._worker_environment(
+            {"epochs": 2}, roots, "train")
+        self.assertEqual(environment.get("nnUNet_compile"), "false")
+        # inference keeps nnU-Net's own default (compile is off there anyway
+        # unless explicitly requested)
+        environment = pipeline._worker_environment(
+            {"epochs": 2}, roots, "infer")
+        self.assertNotIn("nnUNet_compile", environment)
+
     def test_gpu_lock_is_transferred_to_worker_pid(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
