@@ -1597,6 +1597,59 @@ class ContainerRuntimeAdapterTests(unittest.TestCase):
         )
         self.assertEqual(bad["container_namespace"], "")
 
+    def test_launch_container_sets_shm_size(self):
+        """Remote training containers need a /dev/shm larger than Docker's
+        64 MB default.
+
+        nnU-Net's multi-worker data loaders pass batches through torch
+        shared-memory queues; with the default 64 MB shm the training
+        process dies at Epoch 0 with "unable to write to file </torch_...>:
+        No space left on device", which batchgenerators masks as "One or
+        more background workers are no longer alive" (FlexiCT remote job
+        train_20261001T201954_0ec68c3f). nerdctl accepts the same flag.
+        """
+
+        class Session:
+            profile = remote_compute.normalize_profile(
+                {"name": "s", "host": "h", "username": "u"}
+            )
+
+            def __init__(self):
+                self.commands = []
+
+            def execute(self, command, **_kwargs):
+                self.commands.append(command)
+                if "inspect" in command:
+                    return ""
+                return ""
+
+        session = Session()
+        job_dir = "/remote/jobs/u/job"
+        paths = {
+            "job": job_dir,
+            "models": "/remote/models",
+            "locks": "/remote/locks",
+            "prepared_cache": "/remote/prepared",
+            "archive": "/remote/jobs/u/job.tar",
+        }
+        profile = dict(Session.profile)
+        profile["remote_root"] = "/remote"
+        with mock.patch.object(
+            controller, "_assert_container_owned", return_value=False
+        ):
+            controller._launch_container(
+                session, paths, profile, "job-container"
+            )
+        launch = next(
+            (
+                command
+                for command in session.commands
+                if " run -d " in command
+            ),
+            "",
+        )
+        self.assertIn("--shm-size=", launch, launch)
+
     def test_container_commands_use_profile_runtime(self):
         class Session:
             def __init__(self, profile):
