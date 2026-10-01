@@ -314,6 +314,40 @@ def _mask_identity(mask):
     return str(value) if value else str(getattr(mask, "name", "") or "")
 
 
+def _mask_content_digest(mask):
+    """SHA-256 of a Mask's voxel content, chunked so Mimics stays responsive.
+
+    F21: number_of_pixels cannot detect an equal-volume edit (move a
+    boundary, delete and add a voxel). This digest can. Like the
+    nnInteractive base-sha precedent, it never copies the whole volume
+    (buffer_byte_view + stream_buffer) and pumps the GUI between chunks.
+    Returns "" when the buffer is unreadable so callers can degrade to the
+    pixel-count check instead of blocking the apply flow.
+    """
+    try:
+        view = mask.get_voxel_buffer()
+        raw = runtime_common.buffer_byte_view(view)
+        return runtime_common.stream_buffer(
+            raw, compute_sha=True, progress_callback=_update_gui
+        )
+    except Exception:
+        return ""
+
+
+def _mask_snapshot(mask):
+    """Launch-time identity of a Mask: guid, name, volume and content digest.
+
+    The digest is the F21 edit detector; pixel_count is kept as a cheap
+    early signal (a different count always means a changed Mask).
+    """
+    return {
+        "guid": _mask_identity(mask),
+        "name": str(getattr(mask, "name", "") or ""),
+        "pixel_count": int(getattr(mask, "number_of_pixels", 0) or 0),
+        "sha256": _mask_content_digest(mask),
+    }
+
+
 def _metadata_get(obj, name, default=""):
     try:
         item = obj.metadata.find(name)

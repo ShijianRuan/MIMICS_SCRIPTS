@@ -1732,6 +1732,149 @@ class TestInferenceMonitorTerminalStates(unittest.TestCase):
             self.assertIn("FlexiCT prediction failed", message_box.call_args[0][0])
 
 
+class TestEqualVolumeEditProtection(unittest.TestCase):
+    """F21/T21: an equal-volume edit must not be overwritten by a prediction.
+
+    The launch-time change check compared only number_of_pixels after the
+    GUID match, so "delete one voxel, add another" passed as unchanged and
+    the prediction replaced the annotator's fresh work. The snapshot now
+    carries a content digest and _matching_update_mask re-verifies it
+    before writing.
+    """
+
+    def _import_module(self):
+        import types
+
+        sys.path.insert(0, str(ROOT / "runtime_py35"))
+        try:
+            mimics = sys.modules.get("mimics")
+            if mimics is None:
+                mimics = types.ModuleType("mimics")
+                mimics.dialogs = types.ModuleType("mimics.dialogs")
+                mimics.dialogs.message_box = None
+                sys.modules["mimics"] = mimics
+            import flexict_mimics
+            return flexict_mimics
+        finally:
+            sys.path.remove(str(ROOT / "runtime_py35"))
+
+    def _mask_with_content(self, module, raw):
+        class _Buffer(object):
+            def __init__(self, raw):
+                self._raw = bytes(raw)
+
+            @property
+            def shape(self):
+                return (len(self._raw),)
+
+            def tobytes(self):
+                return self._raw
+
+        class _Mask(object):
+            def __init__(self, raw, guid="guid-1", name="Liver"):
+                self._raw = bytes(raw)
+                self.guid = guid
+                self.name = name
+                self.number_of_pixels = sum(1 for b in self._raw if b)
+
+            def get_voxel_buffer(self):
+                return _Buffer(self._raw)
+
+        return _Mask(raw)
+
+    def test_snapshot_records_content_digest(self):
+        module = self._import_module()
+        mask = self._mask_with_content(module, b"\x00\x01\x00")
+        snapshot = module._mask_snapshot(mask)
+        self.assertEqual("guid-1", snapshot["guid"])
+        self.assertEqual(1, snapshot["pixel_count"])
+        self.assertTrue(snapshot["sha256"].startswith("sha256:"))
+
+    def test_equal_volume_edit_falls_back_to_copy(self):
+        module = self._import_module()
+        mask = self._mask_with_content(module, b"\x01\x00")
+        monitor = {
+            "label_name": "Liver",
+            "selected_mask_name": "",
+            "matching_masks": [module._mask_snapshot(mask)],
+        }
+        # Same volume, different voxels - the exact F21 evidence.
+        mask._raw = b"\x00\x01"
+        with mock.patch.object(module, "_active_image_masks", return_value=[mask]):
+            self.assertIsNone(module._matching_update_mask(monitor))
+
+    def test_unchanged_mask_still_updates(self):
+        module = self._import_module()
+        mask = self._mask_with_content(module, b"\x01\x00")
+        monitor = {
+            "label_name": "Liver",
+            "selected_mask_name": "",
+            "matching_masks": [module._mask_snapshot(mask)],
+        }
+        with mock.patch.object(module, "_active_image_masks", return_value=[mask]):
+            self.assertIs(module._matching_update_mask(monitor), mask)
+
+    def test_edit_then_undo_back_to_original_still_updates(self):
+        module = self._import_module()
+        mask = self._mask_with_content(module, b"\x01\x00")
+        monitor = {
+            "label_name": "Liver",
+            "selected_mask_name": "",
+            "matching_masks": [module._mask_snapshot(mask)],
+        }
+        mask._raw = b"\x00\x01"
+        mask._raw = b"\x01\x00"  # undo restores the original content
+        with mock.patch.object(module, "_active_image_masks", return_value=[mask]):
+            self.assertIs(module._matching_update_mask(monitor), mask)
+
+    def test_legacy_snapshot_without_digest_degrades_to_count_check(self):
+        module = self._import_module()
+        mask = self._mask_with_content(module, b"\x00\x01")
+        monitor = {
+            "label_name": "Liver",
+            "selected_mask_name": "",
+            # Snapshot from a launch before F21: no sha256 key.
+            "matching_masks": [{
+                "guid": "guid-1",
+                "name": "Liver",
+                "pixel_count": 1,
+            }],
+        }
+        with mock.patch.object(module, "_active_image_masks", return_value=[mask]):
+            self.assertIs(module._matching_update_mask(monitor), mask)
+
+    def test_unreadable_buffer_degrades_to_count_check(self):
+        module = self._import_module()
+        mask = self._mask_with_content(module, b"\x01\x00")
+        snapshot = module._mask_snapshot(mask)
+
+        class _BrokenMask(object):
+            guid = "guid-1"
+            name = "Liver"
+            number_of_pixels = 1
+
+            def get_voxel_buffer(self):
+                raise RuntimeError("buffer unavailable")
+
+        monitor = {
+            "label_name": "Liver",
+            "selected_mask_name": "",
+            "matching_masks": [snapshot],
+        }
+        with mock.patch.object(
+                module, "_active_image_masks", return_value=[_BrokenMask()]):
+            # Unreadable now but the digest was recorded at launch: the
+            # digest cannot confirm the content, so the count check alone
+            # decides — matching count still updates (no false block).
+            self.assertIsNotNone(module._matching_update_mask(monitor))
+            # A content change the count would have caught still blocks:
+            broken = _BrokenMask()
+            broken.number_of_pixels = 2
+            with mock.patch.object(
+                    module, "_active_image_masks", return_value=[broken]):
+                self.assertIsNone(module._matching_update_mask(monitor))
+
+
 class TestModelRegistration(unittest.TestCase):
     def test_register_creates_usable_model(self):
         with tempfile.TemporaryDirectory() as tmp:

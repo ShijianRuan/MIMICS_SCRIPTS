@@ -311,11 +311,7 @@ def _active_image_masks():
 
 
 def _mask_snapshot(mask):
-    return {
-        "guid": mimics_mask_apply._mask_identity(mask),
-        "name": str(getattr(mask, "name", "") or ""),
-        "pixel_count": int(getattr(mask, "number_of_pixels", 0) or 0),
-    }
+    return mimics_mask_apply._mask_snapshot(mask)
 
 
 def start_prediction():
@@ -843,6 +839,23 @@ def _matching_update_mask(monitor):
             ),
         )
         return None
+    # F21: equal-volume edits keep number_of_pixels unchanged, so an
+    # unchanged count does not prove the content is unchanged. Compare the
+    # launch-time content digest; when either digest is unavailable
+    # (buffer unreadable, legacy snapshot) degrade to the count check above.
+    expected_sha = str(launch.get("sha256") or "")
+    if expected_sha:
+        current_sha = mimics_mask_apply._mask_content_digest(mask)
+        if current_sha and current_sha != expected_sha:
+            _log(
+                logging.WARNING,
+                "Mask '{0}' was edited while prediction was running "
+                "(content changed at the same volume); creating a copy "
+                "instead.".format(
+                    getattr(mask, "name", label_name)
+                ),
+            )
+            return None
     return mask
 
 

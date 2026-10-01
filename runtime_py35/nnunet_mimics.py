@@ -127,11 +127,7 @@ def _active_image_masks():
 
 
 def _mask_snapshot(mask):
-    return {
-        "guid": mimics_mask_apply._mask_identity(mask),
-        "name": str(getattr(mask, "name", "") or ""),
-        "pixel_count": int(getattr(mask, "number_of_pixels", 0) or 0),
-    }
+    return mimics_mask_apply._mask_snapshot(mask)
 
 
 def _setup_root():
@@ -550,9 +546,32 @@ def _matching_update_mask(monitor, label):
                         getattr(mask, "name", label_name)
                     ),
                 )
+            elif _mask_content_changed(mask, launch):
+                _log(
+                    logging.WARNING,
+                    "Mask '{0}' was edited while prediction was running "
+                    "(content changed at the same volume); creating a copy "
+                    "instead.".format(
+                        getattr(mask, "name", label_name)
+                    ),
+                )
             else:
                 return mask
     return None
+
+
+def _mask_content_changed(mask, launch):
+    """F21: equal-volume edits leave number_of_pixels unchanged.
+
+    Compares the launch-time content digest; when either digest is
+    unavailable (buffer unreadable, legacy snapshot) the count check
+    stands on its own, same as before.
+    """
+    expected_sha = str(launch.get("sha256") or "")
+    if not expected_sha:
+        return False
+    current_sha = mimics_mask_apply._mask_content_digest(mask)
+    return bool(current_sha) and current_sha != expected_sha
 
 
 def _mask_for_label(monitor, label, mode):
