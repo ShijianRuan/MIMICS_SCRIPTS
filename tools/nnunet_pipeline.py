@@ -899,6 +899,14 @@ def _worker_environment(
     for blas_var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS",
                      "OPENBLAS_NUM_THREADS"):
         environment.setdefault(blas_var, "1")
+    if stage == "train":
+        # nnU-Net v2.8 defaults torch.compile (inductor) ON for CUDA/Linux,
+        # which requires a C compiler in the runtime container. The image
+        # ships none, so Epoch 0 dies in dynamo and the threaded data
+        # augmenter swallows the real traceback into "One or more background
+        # workers are no longer alive". Compile's speedup is marginal for
+        # our epoch counts; default it OFF.
+        environment.setdefault("nnUNet_compile", "false")
     gpu_id = str(request.get("gpu_id") if request.get("gpu_id") not in (None, "") else "").strip()
     if gpu_id:
         environment["CUDA_VISIBLE_DEVICES"] = gpu_id
