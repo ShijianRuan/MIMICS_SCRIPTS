@@ -288,13 +288,34 @@ def _materialize_flexict_raw(rows: list[dict[str, Any]],
     )
 
 
+def physical_si_start(img, arr) -> float:
+    """Relative start of ``arr`` along the image's physical SI axis (F29).
+
+    Uses the affine's world-coordinate mapping: the voxel axis whose world
+    displacement is most aligned with the superior direction. This is
+    correct for isotropic, anisotropic, axis-permuted, flipped, and oblique
+    affines, where the previous ``argmax(spacing)`` heuristic picked an
+    in-plane axis (e.g. X for isotropic RAS data).
+    """
+    import numpy as np
+
+    direction = np.abs(img.affine[:3, :3] @ np.array([0.0, 0.0, 1.0]))
+    zax = int(np.argmax(direction))
+    projected = arr.any(axis=tuple(i for i in range(3) if i != zax))
+    zidx = np.where(projected)[0]
+    if not len(zidx):
+        return 0.5
+    return float(zidx.min()) / float(arr.shape[zax])
+
+
 def _split_train_val(rows: list[dict[str, Any]],
                      request: dict[str, Any]) -> tuple[list[str], list[str]]:
     """Train/val split for FlexiCT few-shot: user-chosen val case count.
 
-    Stratified by the target's Z-start when >= 8 cases (few-shot train sets
-    span the cranio-caudal extent, mirroring the validated recipe's
-    build_dataset.py), otherwise the split is a deterministic sort split.
+    Stratified by the target's physical SI start when >= 8 cases (few-shot
+    train sets span the cranio-caudal extent, mirroring the validated
+    recipe's build_dataset.py), otherwise the split is a deterministic sort
+    split.
     """
     case_ids = sorted(str(row["case_id"]) for row in rows)
     val_cases = int(request.get("val_cases") or DEFAULT_CONFIG["default_val_cases"])
@@ -320,12 +341,7 @@ def _split_train_val(rows: list[dict[str, Any]],
                     if not arr.any():
                         return 0.5
                     img = nib.load(str(row["image"]))
-                    spacing = np.linalg.norm(img.affine[:3, :3], axis=0)
-                    zax = int(np.argmax(spacing))
-                    zidx = np.where(
-                        arr.any(axis=tuple(i for i in range(3) if i != zax)))[0]
-                    if len(zidx):
-                        return float(zidx.min()) / float(arr.shape[zax])
+                    return physical_si_start(img, arr)
                 except Exception:
                     pass
                 return 0.5
