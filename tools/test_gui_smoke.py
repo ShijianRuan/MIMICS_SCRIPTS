@@ -826,5 +826,126 @@ class TestFlexictStopBehaviour(unittest.TestCase):
             window.window.close()
 
 
+class TestActiveLearningWindow(unittest.TestCase):
+    """F03/T03 + F14/T14: the AL review window with real data rows.
+
+    _job_selected used QtWidgets/QtCore names that were only bound in other
+    functions' scopes — the window worked with zero rows and raised
+    NameError the moment a real ranking existed. The failure feedback was
+    then overwritten by the refresh summary (F14).
+    """
+
+    def _job_dir(self, root, ranking):
+        """A completed active_learning job with a ranking."""
+        from flexict_common import TERMINAL_STATES  # noqa: F401
+
+        job_dir = root / "jobs" / "aljob1"
+        (job_dir / "uncertainty").mkdir(parents=True)
+        (job_dir / "uncertainty" / "ranking.csv").write_text(
+            "case,integrated,uncertain_vol,max\n"
+            + "".join(
+                "{0},{1:.2f},10.0,1.0\n".format(name, 9.0 - index)
+                for index, name in enumerate(ranking)
+            ),
+            encoding="utf-8",
+        )
+        return job_dir
+
+    def _window(self, tmp, ranking=("caseA", "caseB")):
+        import flexict_active_learning_ui as al_ui
+
+        _AppFixture.app()
+        root = Path(tmp)
+        job_dir = self._job_dir(root, ranking)
+        (job_dir / "status.json").write_text(
+            json.dumps({
+                "kind": "active_learning",
+                "status": "completed",
+                "created_at_epoch": 1.0,
+                "label_name": "Liver",
+                "job_dir": str(job_dir),
+            }),
+            encoding="utf-8",
+        )
+        window = al_ui.ActiveLearningWindow(
+            {"workspace": str(root)}, QT)
+        return window
+
+    def test_real_rows_populate_without_nameerror(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._window(tmp)
+            try:
+                self.assertEqual(
+                    2, window.table.rowCount(),
+                    "non-empty ranking must populate the table")
+                self.assertTrue(window.open_button.isEnabled())
+                summary = window.status_label.text()
+                self.assertIn("2 case(s) ranked", summary)
+            finally:
+                window.window.close()
+
+    def test_annotated_row_gets_success_foreground(self):
+        # F03's crash was inside the per-row loop's annotated branch.
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._window(tmp)
+            try:
+                job_dir = Path(window._job_dir)
+                from flexict_active_learning_ui import set_case_state
+                set_case_state(job_dir, "caseA", "annotated")
+                window._job_selected()
+                self.assertEqual(
+                    "annotated",
+                    window.table.item(0, 4).text())
+                self.assertIn("1 annotated", window.status_label.text())
+            finally:
+                window.window.close()
+
+    def test_failed_request_message_survives_refresh(self):
+        # F14/T14: the poll sets the outcome AFTER refreshing the table.
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._window(tmp)
+            try:
+                request_dir = Path(window._job_dir) / "apply_requests"
+                request_dir.mkdir(parents=True)
+                (request_dir / "a.json").write_text(
+                    json.dumps({
+                        "case_id": "caseA", "what": "bands",
+                        "state": "failed", "detail": "geometry mismatch",
+                        "requested_at_epoch": 1.0,
+                        "updated_at_epoch": time.time(),
+                    }),
+                    encoding="utf-8",
+                )
+                window._request_poll_epoch = 0.0
+                window._poll_requests()
+                text = window.status_label.text()
+                self.assertIn("Request failed for caseA", text)
+                self.assertIn("geometry mismatch", text)
+            finally:
+                window.window.close()
+
+    def test_applied_request_message_survives_refresh(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._window(tmp)
+            try:
+                request_dir = Path(window._job_dir) / "apply_requests"
+                request_dir.mkdir(parents=True)
+                (request_dir / "a.json").write_text(
+                    json.dumps({
+                        "case_id": "caseA", "what": "open_bands",
+                        "state": "applied", "detail": "applied: bands",
+                        "requested_at_epoch": 1.0,
+                        "updated_at_epoch": time.time(),
+                    }),
+                    encoding="utf-8",
+                )
+                window._request_poll_epoch = 0.0
+                window._poll_requests()
+                text = window.status_label.text()
+                self.assertIn("Applied in Mimics: caseA", text)
+            finally:
+                window.window.close()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
