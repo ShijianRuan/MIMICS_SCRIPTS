@@ -9,6 +9,18 @@
 nnInteractive 交互标注+任务微调）各有一份可信的"真实有效"证据链：任务完成 →
 训练收敛 → held-out 推理 → 与 Totalsegmentator GT 的 Dice 对比。
 
+## 总结论（2026-10-02，全部验证完成）
+
+| 功能 | 结果 | held-out Dice | 判据 | 结论 |
+|---|---|---|---|---|
+| nnU-Net 多器官训练+推理（远程 171） | 50 epochs 完成，模型注册 | liver 0.95–0.98 / spleen 0.92–0.99 / kidney 0.95–0.99（3 例） | ≥0.7 / ≥0.5 | **有效** |
+| FlexiCT liver 少样本微调+推理（远程 171） | 20 epochs 完成，模型注册 | liver 0.972–0.976（3 例） | ≥0.6 | **有效** |
+| nnInteractive 官方模型交互标注 | 点 prompt 即出 mask | liver 0.89–0.97 / kidney 0.89–0.96（4 例） | ≥0.8 / ≥0.6 | **有效** |
+| nnInteractive 任务微调（本机） | 训练完成，质量门通过 | 微调 vs 官方：Dice delta +0.013~+0.016（3/3 例），AUC +0.0032 | 不退化 | **有效** |
+
+三个功能全部通过真实数据有效性验证。过程中发现并修复 6 个真实产品缺陷
+（3×P0 + P1-4/P1-5/P1-6，各自 commit + 防回归测试，见"过程中发现的问题"）。
+
 ## 选例清单（nibabel 逐例校验 4 器官 mask 非零体素）
 
 - 训练 18 例：s0001, s0004, s0006, s0009, s0010, s0011, s0012, s0013, s0014,
@@ -26,9 +38,12 @@ nnInteractive 交互标注+任务微调）各有一份可信的"真实有效"证
 | 2026-09-30 | Z: 数据集 | nibabel 只读加载 22 例做选例校验 | 未写入 | — |
 | 2026-09-30 | 本地 flexict_models | sweep_dataset_retention 清理过期冒烟残留（~0.7GB，可重建中间产物，超 30 天保留期；Dataset758 注册保护未动） | — | 已完成 |
 | 2026-09-30 | 206 服务器 | nnU-Net 远程训练 job（本报告 Phase 2 节） | 见 Phase 2 | 见 Phase 6 |
+| 2026-10-01 | 171 服务器 | nnU-Net + FlexiCT 远程训练（Phase 2/3）、镜像重建与上传、FlexiCT 基座权重上传 | 只读写 /home/shijian_ruan/ | 见"外部资源清理登记"节 |
+| 2026-10-01 | Z: 数据集 | Phase 2/3 推理输入、GT Dice 评估（只读加载） | 未写入 | — |
 
 发现待清理：206 残留容器 `mimics-ai-root-train_20260925T183409_50564969`
-（5 天前 Exited(1)，非本次验证产生）→ Phase 6 处理。
+（5 天前 Exited(1)，非本次验证产生）→ 已于 2026-10-02 核验不在（k8s.io
+namespace 现无 mimics 容器），无需处理。
 
 ## Phase 1：真实数据导入（完成）
 
@@ -345,6 +360,32 @@ nnInteractive 交互标注+任务微调）各有一份可信的"真实有效"证
   （batch 12 与 66 产生不同 identity；非训练 job 保持纯指纹）。
 - **证据**：job 6（c4d437f7）日志出现 "Batch size override: 66 -> 12" 与
   plans batch_size=12，缓存 namespace 带新 identity 后缀，预处理确实重跑。
+
+## 外部资源清理登记（2026-10-02）
+
+**171（/home/shijian_ruan/mimics-ai）**：
+- 已删除：本次验证 6 个失败 job 目录（e52e1fd5、0ec68c3f、b41c7e7f、
+  8f3dec09、c4d437f7 及 manual 日志/脚本）、镜像构建源 mimics-ai-src
+  （7.6G，镜像已 load 进 docker）。
+- 保留（登记）：cache/root 42G —— 内容寻址设计缓存（dataset/prepared，
+  30 天过期惯例）；8 月 3 个 nninteractive_train job 目录（c4012773 等，
+  asl_epi 数据，非本次验证产物、归属未确证，不删待确认）；镜像
+  mimics-ai-runtime:1.1（可复用资产）。
+- 终态核验：GPU 0/1 利用率 0%、无 mimics 容器、无 mimics/remote_worker
+  进程、磁盘 43%（145G free）。
+
+**206（/userdata/shijian_ruan/mimics-ai）**：jobs/root 空，k8s.io namespace
+无 mimics 容器（此前的 stale 容器 train_20260925T183409_50564969 已不在），
+仅剩 cache/models 等既有资产，无本次验证新增产物（本次验证因 206 磁盘满
+全程未在 206 产生数据）。
+
+**本地（G:\mimics_ai_validation）**：保留全部验证工件（mcs 工程、两个
+workspace 的 job 记录与模型、predictions、评估脚本）作为证据链，供
+复核；不在仓库内、无污染。
+
+**账本（improvement_backlog.md）状态**：P1-3/P1-4/P1-5/P1-6 与性能基线
+的正式入账待同事的 docs/03_Review 未提交改动合入后补写（避免污染其
+未提交 diff），本报告为唯一状态记录。
 
 ## 性能基线首次填数
 
