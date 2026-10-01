@@ -281,11 +281,11 @@ class ActiveLearningWindow:
             )
 
     def _job_selected(self):
+        QtCore, QtWidgets = self.QtCore, self.QtWidgets
         index = self.job_combo.currentIndex()
         if not 0 <= index < len(self._jobs):
             return
-        status = self._jobs[index]
-        job_dir = str(status.get("job_dir") or "")
+        job_dir = str(self._jobs[index].get("job_dir") or "")
         if not job_dir:
             return
         self._job_dir = job_dir
@@ -310,12 +310,16 @@ class ActiveLearningWindow:
                     item.setTextAlignment(
                         QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
                 if str(entry.get("state") or "new") == "annotated":
-                    from PySide6 import QtGui
-
-                    item.setForeground(
-                        QtGui.QBrush(QtGui.QColor(PALETTE["success"])))
+                    item.setForeground(self.QtGui.QBrush(
+                        self.QtGui.QColor(PALETTE["success"])))
                 self.table.setItem(row_index, column, item)
         self._set_actions_enabled(bool(self._rows))
+        self._refresh_status_text()
+
+    def _refresh_status_text(self):
+        """Summary line for the current job (F14: callers that have a more
+        important outcome message set it AFTER this, so it is not wiped)."""
+        cases = self._state.get("cases") or {}
         annotated = sum(
             1 for entry in cases.values()
             if str(entry.get("state")) == "annotated")
@@ -324,7 +328,8 @@ class ActiveLearningWindow:
             "its case in Mimics with the uncertainty bands applied.".format(
                 len(self._rows), annotated)
         )
-        if bands_degenerate(status):
+        if self._jobs and bands_degenerate(
+                self._jobs[self.job_combo.currentIndex()]):
             text += (" Note: with a two-model pair the disagreement map has "
                      "one level, so the moderate and high bands cover the "
                      "same voxels.")
@@ -370,6 +375,10 @@ class ActiveLearningWindow:
             row["updated_at_epoch"] for row in updates)
         self._state = load_annotation_state(self._job_dir)
         latest = updates[-1]
+        # F14: refresh the table first, then set the outcome text — the
+        # old order let the job summary overwrite the failure reason the
+        # annotator needed to see.
+        self._job_selected()
         if latest["state"] == "applied":
             self.status_label.setText(
                 "Applied in Mimics: {} ({}). The table is up to date.".format(
@@ -379,7 +388,6 @@ class ActiveLearningWindow:
                 "Request failed for {} ({}): {}".format(
                     latest["case"], latest["what"],
                     latest["detail"][:200]))
-        self._job_selected()
 
     def _apply_to_mimics(self, what: str):
         """Request an in-Mimics application through the runtime monitor.
