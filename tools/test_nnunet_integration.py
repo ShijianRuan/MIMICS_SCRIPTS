@@ -416,6 +416,124 @@ class DiscoveryTests(unittest.TestCase):
             self.assertEqual(len(split[0]["val"]), 1)
             self.assertEqual(len(fingerprint), 64)
 
+    def test_unique_case_keys_preserve_slug_without_collision(self):
+        # F22: no-collision workspaces must keep their existing keys so
+        # caches and dataset fingerprints stay stable.
+        keys = common.unique_case_keys(["case01", "liver-7", "a_b"])
+        self.assertEqual(
+            keys, {"case01": "case01", "liver-7": "liver-7", "a_b": "a_b"}
+        )
+
+    def test_unique_case_keys_disambiguate_lossy_collisions(self):
+        # F22: Chinese names, "a b" vs "a_b", and case variants all collapse
+        # under safe_identifier; every case must still get a distinct key.
+        keys = common.unique_case_keys(
+            ["病例甲", "病例乙", "a b", "a_b", "CaseX", "casex"]
+        )
+        self.assertEqual(len(set(keys.values())), len(keys))
+        # Every colliding member is disambiguated predictably: slug + digest.
+        self.assertTrue(keys["a_b"].startswith("a_b_"))
+        self.assertTrue(keys["a b"].startswith("a_b_"))
+        self.assertNotEqual(keys["a_b"], keys["a b"])
+        for key in keys.values():
+            self.assertLessEqual(len(key), 105)  # 96 + "_" + 8 digest chars
+
+    def test_source_grid_collision_never_rewrites_source_files(self):
+        """F22 (P0): two Chinese-named cases must not merge into one bucket
+        and must never modify the source image files — the pre-fix pipeline
+        hardlinked case 甲's source into the output, then truncated that same
+        inode in place for case 乙, rewriting 甲's source image."""
+        import hashlib
+
+        import nibabel as nib
+        import numpy as np
+
+        def file_sha(path):
+            return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source"
+            originals = []
+            for name, value in (("病例甲", 11), ("病例乙", 22)):
+                case_dir = source / name
+                (case_dir / "segmentations").mkdir(parents=True)
+                nib.save(
+                    nib.Nifti1Image(
+                        np.full((4, 4, 4), value, dtype=np.int16), np.eye(4)
+                    ),
+                    str(case_dir / "ct.nii.gz"),
+                )
+                nib.save(
+                    nib.Nifti1Image(
+                        np.ones((4, 4, 4), dtype=np.uint8), np.eye(4)
+                    ),
+                    str(case_dir / "segmentations" / "liver.nii.gz"),
+                )
+                originals.append(case_dir / "ct.nii.gz")
+            before = [file_sha(path) for path in originals]
+            request = common.normalize_request(
+                {
+                    "operation": "train",
+                    "task_name": "Audit",
+                    "task_id": "audit",
+                    "dataset_root": str(source),
+                    "workspace": root / "workspace",
+                    "labels": [{"name": "liver", "id": 1}],
+                    "label_source": "dataset_masks",
+                }
+            )
+            out = root / "output"
+            out.mkdir()
+            rows = pipeline.prepare_source_grid_cases(
+                request, out, out / "status.json", out / "control.json"
+            )
+            # Two distinct cases -> two distinct output images and identities.
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(len({str(row["image"]) for row in rows}), 2)
+            values = sorted(
+                int(np.asanyarray(nib.load(str(row["image"])).dataobj)[0, 0, 0])
+                for row in rows
+            )
+            self.assertEqual(values, [11, 22])
+            # The source files (and any link sharing their inode) must be
+            # byte-identical before and after the whole preparation.
+            self.assertEqual(
+                [file_sha(path) for path in originals], before
+            )
+
+    def test_link_or_copy_replaces_destination_without_truncating_links(self):
+        # F22: the destination may be a hardlink to a source file from an
+        # earlier case; re-staging must replace the directory entry, never
+        # open the shared inode for in-place writing.
+        import hashlib
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_a = root / "a.nii.gz"
+            source_b = root / "b.nii.gz"
+            source_a.write_bytes(b"case-jia-content")
+            source_b.write_bytes(b"case-yi-content")
+            destination = root / "out" / "item.nii.gz"
+            pipeline._link_or_copy(source_a, destination)
+            # A second hardlink to the same inode as the staged destination —
+            # simulates the pre-fix situation where another case's source
+            # shares the destination's inode.
+            second_link = root / "second_link.nii.gz"
+            os.link(str(destination), str(second_link))
+            pipeline._link_or_copy(source_b, destination)
+            self.assertEqual(
+                destination.read_bytes(), b"case-yi-content"
+            )
+            # The old inode (still linked at second_link) was untouched.
+            self.assertEqual(
+                second_link.read_bytes(), b"case-jia-content"
+            )
+            # And copy-fallback (cross-volume style) also replaces cleanly.
+            hashlib.sha256(b"").hexdigest()
+            pipeline._link_or_copy(source_a, destination)
+            self.assertEqual(destination.read_bytes(), b"case-jia-content")
+
     def test_dataset_id_conflict_is_rejected_before_nnunet_resolution(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

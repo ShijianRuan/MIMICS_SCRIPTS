@@ -60,6 +60,7 @@ from nnunet_common import (  # noqa: E402
     stable_digest,
     sweep_dataset_retention,
     sweep_source_grid_cache_retention,
+    unique_case_keys,
     update_status,
     write_json_atomic,
 )
@@ -349,8 +350,8 @@ def _write_flexict_splits(rows: list[dict[str, Any]],
                           dataset_name: str) -> list[dict[str, list[str]]]:
     """Write a single-fold splits_final.json with the FlexiCT split."""
     train, validation = _split_train_val(rows, request)
-    case_key_by_id = {str(row["case_id"]): safe_identifier(row["case_id"])
-                      for row in rows}
+    case_key_by_id = unique_case_keys(
+        [row["case_id"] for row in rows], fallback="case")
     folds = [{
         "train": [case_key_by_id[value] for value in train],
         "val": [case_key_by_id[value] for value in validation],
@@ -1184,14 +1185,19 @@ def _resolve_flexict_pair(request: dict[str, Any],
     return {"2d": model_2d, "3d_fullres": model_3d}
 
 
-def _al_case_mcs_path(dataset_root: Path, case_id: str) -> str:
+def _al_case_mcs_path(dataset_root: Path, original_case_name: str) -> str:
     """The case's .mcs project path under the dataset's mcs_output dir,
-    or "" when none exists. Read-only: never creates anything."""
+    or "" when none exists. Read-only: never creates anything.
+
+    The .mcs file is created from the ORIGINAL case name by the 01_Import
+    flow (mimics_import.py), not from the lossy internal slug — a Chinese
+    name would otherwise never resolve here.
+    """
     try:
         from tools.mimics_label_export import resolve_mimics_output_dir
 
         mcs_root = resolve_mimics_output_dir(dataset_root)
-        candidate = mcs_root / "{}.mcs".format(case_id)
+        candidate = mcs_root / "{}.mcs".format(original_case_name)
         return str(candidate) if candidate.is_file() else ""
     except Exception:
         return ""
@@ -1217,12 +1223,17 @@ def _al_materialize_inputs(job_dir: Path, request: dict[str, Any],
     case_ids = []
     geometries: dict[str, dict[str, Any]] = {}
     total = len(case_dirs)
+    # Pool keys must be collision-free: two Chinese case names would share
+    # one input .nii.gz and one geometries entry (F22). No collisions keeps
+    # the plain slug.
+    case_keys = unique_case_keys(
+        [path.name for path in case_dirs], fallback="case")
     for index, case_dir in enumerate(case_dirs, start=1):
         _raise_if_cancelled(control_path)
         image = _find_case_image(case_dir)
         if image is None:
             continue
-        case_id = safe_identifier(case_dir.name)
+        case_id = case_keys[case_dir.name]
         destination = input_dir / "{}.nii.gz".format(case_id)
         _materialize(image, destination)
         case_ids.append(case_id)
@@ -1238,12 +1249,12 @@ def _al_materialize_inputs(job_dir: Path, request: dict[str, Any],
                 # Mimics to open it (the .mcs convention mirrors
                 # mimics_label_export's mcs_output lookup).
                 "source_image_path": str(image),
-                "mcs_path": _al_case_mcs_path(dataset_root, case_id),
+                "mcs_path": _al_case_mcs_path(dataset_root, case_dir.name),
             }
         except Exception:
             geometries[case_id] = {
                 "source_image_path": str(image),
-                "mcs_path": _al_case_mcs_path(dataset_root, case_id),
+                "mcs_path": _al_case_mcs_path(dataset_root, case_dir.name),
             }
         update_status(
             status_path,

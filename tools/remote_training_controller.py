@@ -949,10 +949,17 @@ def _check_code_drift(
 
 
 def _link_or_copy(source: str | Path, destination: str | Path) -> str:
-    """Stage an immutable cached file without rereading it when possible."""
+    """Stage an immutable cached file without rereading it when possible.
+
+    Unlinks an existing destination first: it may be a hardlink to the
+    source (a previous case sharing a lossy slug), and copy2 would truncate
+    it in place, rewriting the source (F22).
+    """
     source_path = Path(source).resolve()
     destination_path = Path(destination)
     destination_path.parent.mkdir(parents=True, exist_ok=True)
+    if destination_path.exists() or destination_path.is_symlink():
+        destination_path.unlink()
     try:
         os.link(str(source_path), str(destination_path))
         return "hardlink"
@@ -1115,6 +1122,7 @@ def _prepare_nnunet(
         normalize_request,
         read_json as read_nnunet_json,
         safe_identifier as nnunet_safe_identifier,
+        unique_case_keys as nnunet_unique_case_keys,
         write_json_atomic as write_nnunet_json,
     )
 
@@ -1135,9 +1143,12 @@ def _prepare_nnunet(
     )
     remote_rows = []
     dataset_case_cache_keys: dict[str, str] = {}
+    case_keys = nnunet_unique_case_keys(
+        [row["case_id"] for row in rows], fallback="case"
+    )
     for index, row in enumerate(rows, start=1):
         _raise_if_cancelled(status_path)
-        case_id = nnunet_safe_identifier(row["case_id"], "case")
+        case_id = case_keys[str(row["case_id"])]
         image_dst = bundle / "input" / case_id / "image.nii.gz"
         label_dst = bundle / "labels" / case_id / "label.nii.gz"
         _link_or_copy(row["image"], image_dst)
@@ -1388,6 +1399,7 @@ def _prepare_flexict(
     from tools.nnunet_common import (
         read_json as read_flexict_json,
         safe_identifier as flexict_safe_identifier,
+        unique_case_keys as flexict_unique_case_keys,
         write_json_atomic as write_flexict_json,
     )
 
@@ -1408,9 +1420,12 @@ def _prepare_flexict(
     )
     remote_rows = []
     dataset_case_cache_keys: dict[str, str] = {}
+    case_keys = flexict_unique_case_keys(
+        [row["case_id"] for row in rows], fallback="case"
+    )
     for index, row in enumerate(rows, start=1):
         _raise_if_cancelled(status_path)
-        case_id = flexict_safe_identifier(row["case_id"], "case")
+        case_id = case_keys[str(row["case_id"])]
         image_dst = bundle / "input" / case_id / "image.nii.gz"
         label_dst = bundle / "labels" / case_id / "label.nii.gz"
         _link_or_copy(row["image"], image_dst)
