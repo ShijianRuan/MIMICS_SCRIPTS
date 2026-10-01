@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """External, non-modal FlexiCT few-shot training configuration window.
 
-The training recipe (optimizer, learning rates, batch size, fp32, TTA) is
-locked to the validated FlexiCT few-shot configuration — only data selection,
-configuration (2D/3D/pair), epochs, and validation cases are exposed.
+The training recipe (optimizer, learning rates, fp32, TTA) is locked to the
+validated FlexiCT few-shot configuration — only data selection, configuration
+(2D/3D/pair), epochs, validation cases, and the batch size override are
+exposed. The batch size override exists because the nnU-Net planner sizes
+batches for the training-time card, not for a 16GB remote GPU: without it an
+OOM on the remote card leaves the annotator no self-rescue (R-P1-8).
 """
 
 from __future__ import annotations
@@ -276,16 +279,35 @@ class TrainingSetupWindow:
         )
         form.addWidget(QtWidgets.QLabel("镜像"), 3, 0)
         form.addWidget(self.mirror_combo, 3, 1)
+        self.auto_batch = QtWidgets.QCheckBox("由 nnU-Net 规划器自动决定 batch size")
+        self.auto_batch.setChecked(True)
+        self.auto_batch.setToolTip(
+            "自动规划按训练卡显存取较大的 batch；远程小显存卡上首次前向即显存不足时，"
+            "取消勾选并手动调小 batch size 重试。"
+        )
+        form.addWidget(self.auto_batch, 4, 0, 1, 2)
+        self.batch_spin = QtWidgets.QSpinBox()
+        self.batch_spin.setRange(1, 128)
+        self.batch_spin.setValue(6)
+        self.batch_spin.setEnabled(False)
+        self.auto_batch.toggled.connect(
+            lambda checked: self.batch_spin.setEnabled(not checked)
+        )
+        self.batch_spin.setToolTip(
+            "16GB 显存（如 A4000）上 2D 配置建议从 6 起步；显存更大可适当调大。"
+        )
+        form.addWidget(QtWidgets.QLabel("Batch size"), 5, 0)
+        form.addWidget(self.batch_spin, 5, 1)
         self.workers_spin = QtWidgets.QSpinBox()
         self.workers_spin.setRange(1, 64)
         self.workers_spin.setValue(4)
-        form.addWidget(QtWidgets.QLabel("预处理进程数"), 4, 0)
-        form.addWidget(self.workers_spin, 4, 1)
+        form.addWidget(QtWidgets.QLabel("预处理进程数"), 6, 0)
+        form.addWidget(self.workers_spin, 6, 1)
         layout.addWidget(training)
 
         recipe, recipe_form = self._surface("锁定配置（只读）")
         recipe_text = QtWidgets.QLabel(
-            "FlexiCT ViT 主干（fp32，RoPE 安全）· AdamW 双参数组（backbone 3e-5 / decoder 3e-4，betas 0.9/0.98，wd 5e-2）· poly LR · gradclip 12 · 无 deep supervision · 前景过采样 0.33 · batch size 取自 nnU-Net plans · 按验证 Dice 选最佳 checkpoint · 推理不用 TTA。\n\n以上为已验证的小样本配方，Mimics 中不可修改。"
+            "FlexiCT ViT 主干（fp32，RoPE 安全）· AdamW 双参数组（backbone 3e-5 / decoder 3e-4，betas 0.9/0.98，wd 5e-2）· poly LR · gradclip 12 · 无 deep supervision · 前景过采样 0.33 · batch size 默认取自 nnU-Net plans（可手动调小）· 按验证 Dice 选最佳 checkpoint · 推理不用 TTA。\n\n以上为已验证的小样本配方，除 batch size 外在 Mimics 中不可修改。"
         )
         recipe_text.setObjectName("hint")
         recipe_text.setWordWrap(True)
@@ -562,6 +584,8 @@ class TrainingSetupWindow:
             "modality": str(self.modality_combo.currentData()),
             "configuration": str(self.configuration_combo.currentData()),
             "epochs": int(self.epochs_spin.value()),
+            "batch_size": None if self.auto_batch.isChecked()
+            else int(self.batch_spin.value()),
             "mirror_disable_axes": str(self.mirror_combo.currentData()),
             "val_cases": val_count,
             "preprocess_workers": int(self.workers_spin.value()),

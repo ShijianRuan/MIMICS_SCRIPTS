@@ -634,6 +634,46 @@ class TestTrainingSetupPathMemory(unittest.TestCase):
                 finally:
                     window.window.close()
 
+    def test_flexict_batch_size_override_reaches_request(self):
+        # R-P1-8: the FlexiCT wizard had no batch size field while the nnU-Net
+        # wizard did — a planner-sized batch that OOMs a 16GB remote card left
+        # the annotator no self-rescue from the wizard. Default stays None
+        # (planner decides); unchecking auto submits the manual value.
+        _AppFixture.app()
+        import flexict_training_setup_ui as ui
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            home = self._settings_home(
+                tmp,
+                "flexict_settings.json",
+                {
+                    "workspace": str(tmp / "ws"),
+                    "dataset_root": str(tmp / "data"),
+                    "label_name": "kidney",
+                },
+            )
+            with mock.patch.object(ui.Path, "home", lambda: home), mock.patch.object(
+                ui, "workspace_root", lambda _c: str(tmp / "default-ws")
+            ), mock.patch.object(
+                ui, "load_config", lambda: {"root": str(tmp)}
+            ), mock.patch.object(
+                ui.TrainingSetupWindow, "_refresh_models", lambda self: None
+            ):
+                window = ui.TrainingSetupWindow(
+                    {"workspace": ""}, tmp / "ctx.json", QT
+                )
+                try:
+                    self.assertTrue(window.auto_batch.isChecked())
+                    self.assertFalse(window.batch_spin.isEnabled())
+                    self.assertIsNone(window._request()["batch_size"])
+                    window.auto_batch.setChecked(False)
+                    self.assertTrue(window.batch_spin.isEnabled())
+                    window.batch_spin.setValue(6)
+                    self.assertEqual(window._request()["batch_size"], 6)
+                finally:
+                    window.window.close()
+
     def test_flexict_single_case_submission_is_rejected(self):
         # B30: the error copy says "at least two cases" but validation only
         # checked non-empty; one case reached the pipeline, which burned a
