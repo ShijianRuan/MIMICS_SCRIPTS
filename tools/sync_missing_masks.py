@@ -69,13 +69,31 @@ def _source_case_root(source_root: Path, case_id: str) -> Path:
     )
 
 
+_IMAGE_FILE_STEMS = {
+    # Same names every entry point prefers for the case image
+    # (dataset_profiles.json image_candidates + historical mr./image.
+    # variants in mimics_label_export.find_image).
+    "ct", "mri", "mr", "image",
+}
+
+
 def _source_masks(source_root: Path, case_id: str) -> list[dict]:
+    """List the case's source masks, never the case's own image file (F24).
+
+    In a flat case layout (no segmentations/ subdir) the image - ct.nii.gz
+    and its variants - lives next to the masks; globbing every .nii.gz
+    offered the CT itself as an organ to append. A file is excluded only
+    when its stem is a recognized image name, so a lone mask-like volume
+    in a flat layout keeps working as a mask.
+    """
     seg_dir = _source_case_root(source_root, case_id)
     masks = []
     for path in sorted(seg_dir.glob("*.nii.gz")):
         name = path.name[:-7]
         if name.lower().endswith(".nii"):
             name = name[:-4]
+        if name.lower() in _IMAGE_FILE_STEMS:
+            continue
         masks.append({"name": name, "mask_path": str(path)})
     if not masks:
         raise RuntimeError("No source masks found under: {}".format(seg_dir))

@@ -126,19 +126,6 @@ def _mask_names():
     return names
 
 
-def _mask_foreground(mask):
-    try:
-        buf = mask.get_voxel_buffer()
-        return int(buf.sum())
-    except Exception:
-        pass
-    try:
-        import numpy
-        return int(numpy.asarray(buf).sum())
-    except Exception:
-        return None
-
-
 def _prepare_masks(mask_specs, case_id, active_shape, active_affine, work_dir):
     """Resample source NIfTI masks onto the active Mimics grid (bridge call)."""
     buffers_dir = os.path.join(work_dir, "buffers")
@@ -230,6 +217,30 @@ def _sync_one(case, job_dir):
 
 
 def _sync_opened_case(case, job_dir, case_id, source_masks, output_mcs, staging_mcs, work_dir):
+    active_image, active_shape, active_affine = mask_import._active_image_info()
+    if active_image is None or not active_shape or not active_affine:
+        raise RuntimeError("Could not determine the active Mimics image grid.")
+
+    # F25: a multi-image project leaves this job unable to tell which image
+    # the source masks belong to, and appending to whatever happens to be
+    # active would save a wrong-grid Mask into the published project. Fail
+    # the case; nothing was changed.
+    try:
+        image_count = len(list(mimics.data.images))
+    except Exception:
+        image_count = 1
+    if image_count > 1:
+        raise RuntimeError(
+            "This project holds {0} images, so the sync cannot tell which "
+            "one the missing masks belong to; nothing was changed. Remove "
+            "the extra image (or split the project) and rerun this case.".format(
+                image_count
+            )
+        )
+
+    # F25: bind the "already exists" check to the target image. A same-name
+    # Mask on another image must not make this image look complete - with
+    # the single-image check above, this is also the whole project's masks.
     existing = _mask_names()
     missing = []
     for spec in source_masks:
@@ -248,10 +259,6 @@ def _sync_opened_case(case, job_dir, case_id, source_masks, output_mcs, staging_
             "{0}: complete already ({1} mask(s))".format(case_id, len(existing)),
         )
         return dict(summary, status="skipped")
-
-    active_image, active_shape, active_affine = mask_import._active_image_info()
-    if active_image is None or not active_shape or not active_affine:
-        raise RuntimeError("Could not determine the active Mimics image grid.")
 
     appended = {}
     # Prepare masks in small batches: prepare -> inject -> delete buffers.

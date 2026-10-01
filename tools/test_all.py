@@ -14653,6 +14653,10 @@ class TestForeignScriptIntegration(unittest.TestCase):
         with open(path, "r", encoding="utf-8") as handle:
             return handle.read()
 
+    def setUp(self):
+        self.tmp = _make_temp_dir()
+        self.addCleanup(_cleanup, self.tmp)
+
     def test_runtime_scripts_are_py35_clean(self):
         """No f-strings / pathlib / walrus in the background-Mimics scripts;
         py3.5compileall on a 3.13 interpreter cannot catch these."""
@@ -14704,6 +14708,71 @@ class TestForeignScriptIntegration(unittest.TestCase):
         source = self._source(os.path.join("tools", "sync_missing_masks.py"))
         self.assertIn("scopes.append(source_root)", source)
         self.assertIn("scopes.append(Path(args.output_dir)", source)
+
+    def test_sync_source_masks_never_offers_the_case_image(self):
+        """F24: in a flat case layout the CT itself must not be discovered
+        as an organ mask to append. Review evidence: a dir with ct.nii.gz
+        and liver.nii.gz returned BOTH as masks."""
+        sys.path.insert(0, os.path.join(PROJECT_ROOT, "tools"))
+        import sync_missing_masks
+
+        root = Path(self._make_source_case(
+            "case1", ("ct.nii.gz", "liver.nii.gz", "spleen.nii.gz")))
+        specs = sync_missing_masks._source_masks(root, "case1")
+        self.assertEqual(
+            ["liver", "spleen"], [spec["name"] for spec in specs]
+        )
+
+        # segmentations/ layout keeps every .seg file.
+        root = Path(self._make_source_case(
+            "case2", ("liver.seg.nii.gz",), segmentations=True))
+        specs = sync_missing_masks._source_masks(root, "case2")
+        self.assertEqual(["liver.seg"], [spec["name"] for spec in specs])
+
+        # A flat case with ONLY the image left has no masks: fail loudly,
+        # do not append the image as a "mask".
+        root = Path(self._make_source_case("case3", ("ct.nii.gz",)))
+        with self.assertRaises(RuntimeError):
+            sync_missing_masks._source_masks(root, "case3")
+
+    def _make_source_case(self, case_id, files, segmentations=False):
+        case_dir = os.path.join(self.tmp, case_id)
+        target = os.path.join(case_dir, "segmentations") if segmentations else case_dir
+        os.makedirs(target)
+        for name in files:
+            with open(os.path.join(target, name), "wb") as handle:
+                handle.write(b"fixture")
+        return os.path.dirname(case_dir)
+
+    def test_sync_refuses_multi_image_project(self):
+        """F25: a project with several images must fail the case instead of
+        appending masks to whatever image happens to be active — review
+        evidence: Image A missing liver, Image B having it, reported
+        'complete already' via the project-wide name set."""
+        import sync_missing_masks_batch
+
+        class _FakeImage:
+            pass
+
+        images = [_FakeImage(), _FakeImage()]
+        original_info = sync_missing_masks_batch.mask_import._active_image_info
+        original_images = _mock_mimics.data.images
+        sync_missing_masks_batch.mask_import._active_image_info = lambda: (
+            images[0], [4, 5, 6], [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+        )
+        _mock_mimics.data.images = images
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                sync_missing_masks_batch._sync_opened_case(
+                    {}, os.path.join(self.tmp, "job"),
+                    "case1", [{"name": "liver", "mask_path": "x.nii.gz"}],
+                    "out.mcs", "staging.mcs", "work",
+                )
+            self.assertIn("2 images", str(ctx.exception))
+            self.assertIn("nothing was changed", str(ctx.exception))
+        finally:
+            sync_missing_masks_batch.mask_import._active_image_info = original_info
+            _mock_mimics.data.images = original_images
 
 
 class TestBatchPredictCommand(unittest.TestCase):
