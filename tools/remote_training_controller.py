@@ -2527,6 +2527,7 @@ def _launch_container(
     )
     command = (
         "{runtime} run -d --name {name} --gpus {gpu_request} --network none "
+        "--shm-size=16g "
         "--label mimics-script.remote-training=true "
         "--label {owner_label} "
         "--label {job_label} "
