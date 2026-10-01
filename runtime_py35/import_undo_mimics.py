@@ -112,30 +112,43 @@ def _mcs_fingerprint(mcs_path):
 
 
 def _open_project(mcs_path):
-    """Open the receipt's project, or verify the open one matches."""
-    try:
-        active = mimics.file.get_active_project()
-        if active and os.path.abspath(str(active)) == os.path.abspath(mcs_path):
-            return True
-    except Exception:
-        pass
-    # Refuse to stomp on a user's unsaved session in another project.
-    try:
-        projects = mimics.file.get_active_project()
-        if projects:
-            mimics.dialogs.message_box(
-                "Another project is open in Mimics.\n\n"
-                "Undo Last Import removes the imported masks from the project "
-                "they were created in, so it must open that project itself.\n\n"
-                "Step 1: close the currently open project (save it if needed).\n"
-                "Step 2: run Undo Last Import again.\n"
-                "Your import record is still there — nothing was consumed.",
-                title="Undo Last Import",
-                ui_blocking=False,
-            )
-            return False
-    except Exception:
-        pass
+    """Open the receipt's project, or verify the open one matches.
+
+    F17: "cannot tell which project is open" must never be treated as
+    "no project is open". The state comes from the documented
+    get_project_information/is_project_loaded pair (via
+    runtime_common.current_project_state); an unknown state stops here
+    instead of opening another project over a possibly-unsaved session.
+    """
+    state, active = runtime_common.current_project_state(mimics)
+    if state == "path" and active and os.path.abspath(str(active)) == os.path.abspath(mcs_path):
+        return True
+    if state == "unknown":
+        mimics.dialogs.message_box(
+            "Cannot tell whether another project is open in Mimics "
+            "(the project query failed or is unavailable on this "
+            "build).\n\n"
+            "Undo Last Import refuses to open another project while the "
+            "current session state is unknown, so nothing was changed.\n\n"
+            "Step 1: close any open project (save it if needed).\n"
+            "Step 2: run Undo Last Import again.\n"
+            "Your import record is still there — nothing was consumed.",
+            title="Undo Last Import",
+            ui_blocking=False,
+        )
+        return False
+    if state in ("path", "unnamed"):
+        mimics.dialogs.message_box(
+            "Another project is open in Mimics.\n\n"
+            "Undo Last Import removes the imported masks from the project "
+            "they were created in, so it must open that project itself.\n\n"
+            "Step 1: close the currently open project (save it if needed).\n"
+            "Step 2: run Undo Last Import again.\n"
+            "Your import record is still there — nothing was consumed.",
+            title="Undo Last Import",
+            ui_blocking=False,
+        )
+        return False
     mimics.file.open_project(filename=mcs_path)
     return True
 
