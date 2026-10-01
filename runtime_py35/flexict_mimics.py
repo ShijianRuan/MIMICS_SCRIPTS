@@ -1481,6 +1481,29 @@ def _al_apply_request(request):
             "The active Mimics image grid could not be measured.",
         )
         return
+    # F20: geometry equality is not case identity. Two normalized cases can
+    # share shape/affine, and the conversion runs asynchronously — the user
+    # may switch projects or images before it finishes. Record who the
+    # result belongs to so the finish step re-verifies before writing.
+    active_image = None
+    try:
+        active_image = mimics.data.images.get_active()
+    except Exception:
+        active_image = None
+    target_identity = {
+        "project_path": mimics_mask_apply._current_project_path() or "",
+        "image_guid": (
+            mimics_mask_apply._mask_identity(active_image)
+            if active_image is not None else ""
+        ),
+    }
+    if not target_identity["image_guid"]:
+        _al_mark_request(
+            request_path, "failed",
+            "The active Mimics image could not be identified; the overlay "
+            "was not started.",
+        )
+        return
     bridge_root = os.path.join(
         job_dir, "al_apply_" + uuid.uuid4().hex[:8]
     )
@@ -1552,7 +1575,76 @@ def _al_apply_request(request):
         "result_path": result_path,
         "bridge_root": bridge_root,
         "masks": masks,
+        "target_identity": target_identity,
+        "source_geometry": expected,
     }
+
+
+def _al_verify_conversion_buffers(result, masks):
+    """F02: check every buffer exists with the right byte count up front.
+
+    Returns (rows, error). rows is the ordered list of (title, buffer row)
+    ready to apply; error is "" on success. All-or-nothing: a missing or
+    truncated second band must not leave a half-applied overlay.
+    """
+    rows = []
+    by_name = dict(
+        (str(candidate.get("name") or ""), candidate)
+        for candidate in result.get("masks") or []
+    )
+    for index, (title, _path) in enumerate(masks):
+        row = by_name.get("al_{0}".format(index))
+        if row is None:
+            return [], "conversion result is missing buffer {0}".format(index)
+        output_path = str(row.get("output_path") or "")
+        if not output_path or not os.path.isfile(output_path):
+            return [], "conversion buffer {0} was not written".format(index)
+        shape = row.get("mimics_shape") or []
+        try:
+            expected_bytes = int(shape[0]) * int(shape[1]) * int(shape[2])
+            actual_bytes = os.path.getsize(output_path)
+        except Exception:
+            return [], "conversion buffer {0} has no readable shape".format(
+                index)
+        if expected_bytes <= 0 or actual_bytes != expected_bytes:
+            return [], (
+                "conversion buffer {0} is truncated ({1} of {2} bytes)"
+                .format(index, actual_bytes, expected_bytes)
+            )
+        rows.append((title, row))
+    return rows, ""
+
+
+def _al_target_still_matches(transaction):
+    """F20: the async finish must land on the object it was launched on.
+
+    Returns "" when the active project and image are still the recorded
+    launch-time identity and the live source geometry still matches the
+    case; otherwise a guidance message for the request detail.
+    """
+    identity = transaction.get("target_identity") or {}
+    expected_guid = str(identity.get("image_guid") or "")
+    launch_project = str(identity.get("project_path") or "")
+    current_project = mimics_mask_apply._current_project_path() or ""
+    if launch_project and not mimics_mask_apply._same_path(
+            current_project, launch_project):
+        return (
+            "The project changed while the overlay was converting. Reopen "
+            "case {0} and request the overlay again.".format(
+                transaction["request"].get("case_id") or "")
+        )
+    try:
+        active_image = mimics.data.images.get_active()
+    except Exception:
+        active_image = None
+    if active_image is None or mimics_mask_apply._mask_identity(
+            active_image) != expected_guid:
+        return (
+            "The active image changed while the overlay was converting. "
+            "Reactivate the case image and request the overlay again."
+        )
+    # Same object: the recorded source geometry is still the reference.
+    return ""
 
 
 def _al_finish_conversion(transaction):
@@ -1560,64 +1652,99 @@ def _al_finish_conversion(transaction):
 
     All Mimics API access (mask creation, buffer writes, dialogs) stays on
     the GUI thread; only the subprocess wait ran in the background.
+
+    F02: the bridge buffers are validated up front and the bridge directory
+    is deleted only after the whole transaction (apply or rollback) ends —
+    it used to be rmtree'd before the buffers were read, so every real
+    apply died with FileNotFoundError. F20: the finish step re-verifies
+    the project/image identity captured at launch before creating masks.
     """
     request = transaction["request"]
     request_path = request["_request_path"]
     job_dir = request["_job_dir"]
     case_id = str(request.get("case_id") or "")
     masks = transaction["masks"]
-    result = _read_json(transaction["result_path"], {}) or {}
-    shutil.rmtree(transaction["bridge_root"], ignore_errors=True)
-    if result.get("status") == "error" or not result:
-        _al_mark_request(
-            request_path, "failed",
-            str(result.get("error") or "conversion produced no result"),
-        )
-        return
-    applied = []
-    for index, (title, _path) in enumerate(masks):
-        row = None
-        for candidate in result.get("masks") or []:
-            if str(candidate.get("name") or "") == "al_{0}".format(index):
-                row = candidate
-                break
-        if row is None:
-            continue
-        mask = mimics_mask_apply._new_prediction_mask(title)
-        mimics_mask_apply._set_mask_from_u8(
-            mask,
-            row["output_path"],
-            row["mimics_shape"],
-            "Apply FlexiCT Active-Learning Overlay",
-        )
-        applied.append(str(getattr(mask, "name", "") or title))
-    if not applied:
-        _al_mark_request(request_path, "failed", "no foreground voxels")
-        return
-    _al_mark_request(
-        request_path, "applied", "applied: {0}".format(", ".join(applied)))
-    # The overlay is on the case's image now, so the annotator can start
-    # (or has started) work on it — reflect that in the review state so
-    # the external window's Status column updates without a manual click.
-    _al_mark_annotated(job_dir, case_id)
-    _log(
-        logging.INFO,
-        "FlexiCT active-learning overlay applied for {0}: {1}.".format(
-            case_id, ", ".join(applied)),
-    )
     try:
-        mimics.dialogs.message_box(
-            "Applied {0} for case {1}.".format(
-                ", ".join(applied), case_id),
-            title=TITLE,
-            ui_blocking=False,
+        result = _read_json(transaction["result_path"], {}) or {}
+        if result.get("status") == "error" or not result:
+            _al_mark_request(
+                request_path, "failed",
+                str(result.get("error") or "conversion produced no result"),
+            )
+            return
+        rows, error = _al_verify_conversion_buffers(result, masks)
+        if error:
+            _al_mark_request(request_path, "failed", error)
+            return
+        if not rows:
+            _al_mark_request(request_path, "failed", "no foreground voxels")
+            return
+        error = _al_target_still_matches(transaction)
+        if error:
+            _al_mark_request(request_path, "failed", error)
+            return
+        applied = []
+        created = []
+        try:
+            for title, row in rows:
+                mask = mimics_mask_apply._new_prediction_mask(title)
+                created.append(mask)
+                mimics_mask_apply._set_mask_from_u8(
+                    mask,
+                    row["output_path"],
+                    row["mimics_shape"],
+                    "Apply FlexiCT Active-Learning Overlay",
+                )
+                applied.append(str(getattr(mask, "name", "") or title))
+        except Exception as exc:
+            # F02 rollback: no half-applied overlay, no leftover empty
+            # masks from this transaction.
+            for mask in created:
+                try:
+                    mask.delete()
+                except Exception:
+                    pass
+            _al_mark_request(
+                request_path, "failed",
+                "overlay apply failed and was rolled back: {0}".format(exc),
+            )
+            _log(
+                logging.ERROR,
+                "FlexiCT active-learning overlay apply failed for {0}: "
+                "{1}\n{2}".format(case_id, exc, traceback.format_exc()),
+            )
+            return
+        _al_mark_request(
+            request_path, "applied",
+            "applied: {0}".format(", ".join(applied)))
+        # The overlay is on the case's image now, so the annotator can start
+        # (or has started) work on it — reflect that in the review state so
+        # the external window's Status column updates without a manual click.
+        _al_mark_annotated(job_dir, case_id)
+        _log(
+            logging.INFO,
+            "FlexiCT active-learning overlay applied for {0}: {1}.".format(
+                case_id, ", ".join(applied)),
         )
-    except TypeError:
-        mimics.dialogs.message_box(
-            title=TITLE,
-            message="Applied {0} for case {1}.".format(
-                ", ".join(applied), case_id),
-        )
+        try:
+            mimics.dialogs.message_box(
+                "Applied {0} for case {1}.".format(
+                    ", ".join(applied), case_id),
+                title=TITLE,
+                ui_blocking=False,
+            )
+        except TypeError:
+            mimics.dialogs.message_box(
+                title=TITLE,
+                message="Applied {0} for case {1}.".format(
+                    ", ".join(applied), case_id),
+            )
+    finally:
+        # F02: cleanup is the last step of the transaction, not the first.
+        # The bridge directory holds the only copy of the converted
+        # buffers, so it may only go away once they are either applied or
+        # the request has a terminal failed state.
+        shutil.rmtree(transaction["bridge_root"], ignore_errors=True)
 
 
 def _matrix_close_payload(a, b, tolerance=1e-4):
