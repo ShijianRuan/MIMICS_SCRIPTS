@@ -80,6 +80,12 @@ _mock_mimics.view.set_contrast = _fake_fn
 _mock_mimics.view.get_contrast = lambda: None
 _mock_mimics.file = _FakeModule()
 _mock_mimics.file.get_active_project = lambda: None
+# Documented project-state API (F17): current_project_state reads these.
+class _FakeProjectInfo(object):
+    def __init__(self, path=""):
+        self.filename = path
+_mock_mimics.file.get_project_information = lambda: _FakeProjectInfo("")
+_mock_mimics.file.is_project_loaded = lambda: False
 _mock_mimics.file.import_dicom_images = _fake_fn
 _mock_mimics.file.open_project = _fake_fn
 _mock_mimics.file.save_project = _fake_fn
@@ -11180,11 +11186,20 @@ class TestImportReceiptAndUndo(unittest.TestCase):
         # Patch (not assign) the shared mimics mock: bare assignment leaked a
         # plain list into mimics.data.images for the rest of the batch,
         # breaking later tests that patch images.get_active (R49).
+        class _ProjectInfo(object):
+            def __init__(self, path):
+                self.filename = path
         patches = [
             mock.patch.object(import_undo_mimics.mimics.data, "images", [image]),
             mock.patch.object(
-                import_undo_mimics.mimics.file, "get_active_project",
-                lambda: saved["open_target"][0] if saved["open_target"] else None,
+                import_undo_mimics.mimics.file, "get_project_information",
+                lambda: _ProjectInfo(
+                    saved["open_target"][0] if saved["open_target"] else ""
+                ),
+            ),
+            mock.patch.object(
+                import_undo_mimics.mimics.file, "is_project_loaded",
+                lambda: bool(saved["open_target"]),
             ),
             mock.patch.object(
                 import_undo_mimics.mimics.file, "open_project",
@@ -11267,8 +11282,14 @@ class TestImportReceiptAndUndo(unittest.TestCase):
         patches = [
             mock.patch.object(import_undo_mimics.mimics.data, "images", image_modules),
             mock.patch.object(
-                import_undo_mimics.mimics.file, "get_active_project",
-                lambda: saved["open_target"][0] if saved["open_target"] else None,
+                import_undo_mimics.mimics.file, "get_project_information",
+                lambda: _ProjectInfo(
+                    saved["open_target"][0] if saved["open_target"] else ""
+                ),
+            ),
+            mock.patch.object(
+                import_undo_mimics.mimics.file, "is_project_loaded",
+                lambda: bool(saved["open_target"]),
             ),
             mock.patch.object(
                 import_undo_mimics.mimics.file, "open_project",
@@ -11671,19 +11692,27 @@ class TestImportReceiptAndUndo(unittest.TestCase):
         import import_undo_mimics
 
         boxes = []
-        state = {"active": "C:\\other\\project.mcs"}
-        active_patch = mock.patch.object(
-            import_undo_mimics.mimics.file, "get_active_project",
-            lambda: state["active"],
-        )
-        message_patch = mock.patch.object(
-            import_undo_mimics.mimics.dialogs, "message_box",
-            lambda *a, **kw: boxes.append((a, kw)) or True,
-        )
-        active_patch.start()
-        message_patch.start()
-        self.addCleanup(active_patch.stop)
-        self.addCleanup(message_patch.stop)
+
+        class _ProjectInfo(object):
+            filename = "C:\\other\\project.mcs"
+
+        patches = [
+            mock.patch.object(
+                import_undo_mimics.mimics.file, "get_project_information",
+                lambda: _ProjectInfo(),
+            ),
+            mock.patch.object(
+                import_undo_mimics.mimics.file, "is_project_loaded",
+                lambda: True,
+            ),
+            mock.patch.object(
+                import_undo_mimics.mimics.dialogs, "message_box",
+                lambda *a, **kw: boxes.append((a, kw)) or True,
+            ),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
         ok = import_undo_mimics._open_project("C:\\target\\case.mcs")
         self.assertFalse(ok)
         self.assertEqual(1, len(boxes))
@@ -11691,6 +11720,123 @@ class TestImportReceiptAndUndo(unittest.TestCase):
         self.assertIn("Step 1", text)
         self.assertIn("Step 2", text)
         self.assertIn("nothing was consumed", text)
+
+    def test_undo_unknown_project_state_never_opens_another_project(self):
+        """F17/T17 查询失败/缺API: when the project query itself fails,
+        _open_project must refuse to switch - treating "cannot tell" as
+        "no project open" would stomp an unsaved session. The old code
+        swallowed the exception and called open_project anyway."""
+        import import_undo_mimics
+
+        boxes = []
+        opens = []
+
+        def _boom():
+            raise RuntimeError("API missing on this build")
+
+        patches = [
+            mock.patch.object(
+                import_undo_mimics.mimics.file, "get_project_information",
+                _boom,
+            ),
+            mock.patch.object(
+                import_undo_mimics.mimics.file, "is_project_loaded",
+                _boom,
+            ),
+            mock.patch.object(
+                import_undo_mimics.mimics.file, "open_project",
+                lambda filename=None: opens.append(filename),
+            ),
+            mock.patch.object(
+                import_undo_mimics.mimics.dialogs, "message_box",
+                lambda *a, **kw: boxes.append((a, kw)) or True,
+            ),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        ok = import_undo_mimics._open_project("C:\\target\\case.mcs")
+        self.assertFalse(ok)
+        self.assertEqual([], opens, "must not open a project over an unknown session")
+        self.assertEqual(1, len(boxes))
+        text = boxes[0][0][0]
+        self.assertIn("cannot tell", text.lower())
+        self.assertIn("nothing was consumed", text)
+
+    def test_undo_same_project_open_not_reloaded(self):
+        """F17/T17 同项目不重载: when the receipt's project is already
+        the open one, _open_project must succeed WITHOUT calling
+        open_project (a reopen would discard unsaved session work)."""
+        import import_undo_mimics
+
+        boxes = []
+        opens = []
+
+        class _ProjectInfo(object):
+            filename = "C:\\target\\case.mcs"
+
+        patches = [
+            mock.patch.object(
+                import_undo_mimics.mimics.file, "get_project_information",
+                lambda: _ProjectInfo(),
+            ),
+            mock.patch.object(
+                import_undo_mimics.mimics.file, "is_project_loaded",
+                lambda: True,
+            ),
+            mock.patch.object(
+                import_undo_mimics.mimics.file, "open_project",
+                lambda filename=None: opens.append(filename),
+            ),
+            mock.patch.object(
+                import_undo_mimics.mimics.dialogs, "message_box",
+                lambda *a, **kw: boxes.append((a, kw)) or True,
+            ),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        ok = import_undo_mimics._open_project("C:\\target\\case.mcs")
+        self.assertTrue(ok)
+        self.assertEqual([], opens, "same project must not be reloaded")
+        self.assertEqual(0, len(boxes))
+
+    def test_undo_unnamed_project_refused(self):
+        """F17/T17 未命名项目: a loaded project with no file path (never
+        saved) is work in progress; switching away must be refused."""
+        import import_undo_mimics
+
+        boxes = []
+        opens = []
+
+        class _ProjectInfo(object):
+            filename = ""
+
+        patches = [
+            mock.patch.object(
+                import_undo_mimics.mimics.file, "get_project_information",
+                lambda: _ProjectInfo(),
+            ),
+            mock.patch.object(
+                import_undo_mimics.mimics.file, "is_project_loaded",
+                lambda: True,
+            ),
+            mock.patch.object(
+                import_undo_mimics.mimics.file, "open_project",
+                lambda filename=None: opens.append(filename),
+            ),
+            mock.patch.object(
+                import_undo_mimics.mimics.dialogs, "message_box",
+                lambda *a, **kw: boxes.append((a, kw)) or True,
+            ),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        ok = import_undo_mimics._open_project("C:\\target\\case.mcs")
+        self.assertFalse(ok)
+        self.assertEqual([], opens)
+        self.assertEqual(1, len(boxes))
 
     def test_undo_entry_points_exist(self):
         entry = os.path.join(

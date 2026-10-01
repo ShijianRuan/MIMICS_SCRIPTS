@@ -1339,28 +1339,37 @@ def _al_open_case(job_dir, case_id):
                 case_id, source_path or "(source path not recorded)")
         )
     # If the requested project is already active, opening it again would
-    # close/reload it needlessly — skip straight to success.
-    try:
-        active = mimics.file.get_active_project()
-        if active and os.path.abspath(str(active)) == os.path.abspath(mcs_path):
-            return True, "project already open"
-    except Exception:
-        pass
-    try:
-        active = mimics.file.get_active_project()
-        if active:
-            mimics.dialogs.message_box(
-                "Another project is open in Mimics.\n\n"
-                "Opening case {0} requires its own project "
-                "({1}).\n\nStep 1: close the currently open project (save "
-                "it if needed).\nStep 2: open the case from the FlexiCT "
-                "Active Learning window again.".format(case_id, mcs_path),
-                title=TITLE,
-                ui_blocking=False,
-            )
-            return False, "another project is open"
-    except Exception:
-        pass
+    # close/reload it needlessly — skip straight to success. F17: the state
+    # comes from the documented project API; "cannot tell" is never treated
+    # as "nothing is open" and blocks switching to another project.
+    state, active = runtime_common.current_project_state(mimics)
+    if state == "path" and active and os.path.abspath(str(active)) == os.path.abspath(mcs_path):
+        return True, "project already open"
+    if state == "unknown":
+        mimics.dialogs.message_box(
+            "Cannot tell whether another project is open in Mimics (the "
+            "project query failed or is unavailable on this build).\n\n"
+            "Opening case {0} requires its own project ({1}); the window "
+            "refuses to switch while the current session state is "
+            "unknown, so nothing was changed.\n\n"
+            "Step 1: close any open project (save it if needed).\n"
+            "Step 2: open the case from the FlexiCT Active Learning "
+            "window again.".format(case_id, mcs_path),
+            title=TITLE,
+            ui_blocking=False,
+        )
+        return False, "current project state unknown; not switching projects"
+    if state in ("path", "unnamed"):
+        mimics.dialogs.message_box(
+            "Another project is open in Mimics.\n\n"
+            "Opening case {0} requires its own project "
+            "({1}).\n\nStep 1: close the currently open project (save "
+            "it if needed).\nStep 2: open the case from the FlexiCT "
+            "Active Learning window again.".format(case_id, mcs_path),
+            title=TITLE,
+            ui_blocking=False,
+        )
+        return False, "another project is open"
     try:
         mimics.file.open_project(filename=mcs_path)
     except Exception as exc:

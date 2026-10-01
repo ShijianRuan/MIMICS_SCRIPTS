@@ -612,6 +612,65 @@ def find_root(start_dir, sentinel_files=None, max_depth=6):
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def current_project_state(mimics_module):
+    """Project-loaded state via the documented API (F17).
+
+    Returns (state, path):
+    - ("none", "")     - no project is open (or no path known but the
+                         loaded flag is definitively off);
+    - ("path", p)      - a project is open and its file path is p;
+    - ("unnamed", "")  - a project is open but has no file path yet
+                         (never saved);
+    - ("unknown", "")  - the query itself failed (API missing/raised):
+                         callers must NOT treat this as "no project" and
+                         must not open another project over it.
+
+    Uses get_project_information()/is_project_loaded(), the calls the
+    Mimics 21.0 scripting docs actually document; get_active_project()
+    has no documented support and silently fails on builds without it.
+    """
+    loaded = None
+    if hasattr(mimics_module.file, "is_project_loaded"):
+        try:
+            loaded = bool(mimics_module.file.is_project_loaded())
+        except Exception:
+            loaded = None
+    info = None
+    if hasattr(mimics_module.file, "get_project_information"):
+        try:
+            info = mimics_module.file.get_project_information()
+        except Exception:
+            info = None
+    if info is None:
+        if loaded is False:
+            return "none", ""
+        return "unknown", ""
+    for attr in ("filename", "file_name", "path", "project_path", "project_file"):
+        try:
+            value = getattr(info, attr, None)
+        except Exception:
+            value = None
+        if value:
+            return "path", os.path.abspath(str(value))
+    if loaded is False:
+        return "none", ""
+    # get_project_information returned but carries no path: either an
+    # unnamed project or an info object without a path attribute on this
+    # build. is_project_loaded (when available) breaks the tie.
+    if loaded is True:
+        return "unnamed", ""
+    try:
+        for attr in dir(info):
+            if attr.startswith("_"):
+                continue
+            value = getattr(info, attr, None)
+            if value and str(value).lower().endswith(".mcs"):
+                return "path", os.path.abspath(str(value))
+    except Exception:
+        pass
+    return "unknown", ""
+
+
 def external_python_candidates(project_root_dir=None):
     """Canonical candidate list for the external (py3.13) interpreter.
 

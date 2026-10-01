@@ -1394,6 +1394,10 @@ class TestActiveLearningRuntimeHandlers(unittest.TestCase):
                 mimics.file = types.ModuleType("mimics.file")
                 mimics.file.open_project = None
                 mimics.file.get_active_project = None
+                # Documented project-state API (F17): patch targets must
+                # pre-exist on the stub module.
+                mimics.file.get_project_information = None
+                mimics.file.is_project_loaded = None
                 mimics.dialogs = types.ModuleType("mimics.dialogs")
                 mimics.dialogs.message_box = None
                 sys.modules["mimics"] = mimics
@@ -1422,6 +1426,29 @@ class TestActiveLearningRuntimeHandlers(unittest.TestCase):
         })
         return job_dir
 
+    def _project_state_patches(self, module, state, path=""):
+        """Patch the documented project-state API (F17) to a given state.
+
+        state: "none" | "path" | "unnamed" | "unknown"
+        """
+        class _ProjectInfo(object):
+            filename = path if state == "path" else ""
+
+        def _info():
+            if state == "unknown":
+                raise RuntimeError("API failed")
+            return _ProjectInfo()
+
+        def _loaded():
+            if state == "unknown":
+                raise RuntimeError("API failed")
+            return state != "none"
+
+        return [
+            mock.patch.object(module.mimics.file, "get_project_information", _info),
+            mock.patch.object(module.mimics.file, "is_project_loaded", _loaded),
+        ]
+
     def test_open_case_opens_recorded_mcs(self):
         with tempfile.TemporaryDirectory() as tmp:
             mcs_path = Path(tmp) / "mcs_output" / "case01.mcs"
@@ -1429,15 +1456,19 @@ class TestActiveLearningRuntimeHandlers(unittest.TestCase):
             mcs_path.write_bytes(b"stub")
             job_dir = self._geometry_job(tmp, "case01", str(mcs_path))
             module = self._import_flexict_mimics()
+            patches = self._project_state_patches(module, "none")
             with mock.patch.object(module.mimics.file, "open_project") as \
                     open_project, \
                     mock.patch.object(
-                        module.mimics.file, "get_active_project",
-                        return_value=None), \
-                    mock.patch.object(
                         module.mimics.dialogs, "message_box") as message_box:
-                opened, detail = module._al_open_case(
-                    str(job_dir), "case01")
+                for patch in patches:
+                    patch.start()
+                try:
+                    opened, detail = module._al_open_case(
+                        str(job_dir), "case01")
+                finally:
+                    for patch in patches:
+                        patch.stop()
             self.assertTrue(opened, detail)
             open_project.assert_called_once_with(filename=str(mcs_path))
             message_box.assert_not_called()
@@ -1449,17 +1480,50 @@ class TestActiveLearningRuntimeHandlers(unittest.TestCase):
             mcs_path.write_bytes(b"stub")
             job_dir = self._geometry_job(tmp, "case01", str(mcs_path))
             module = self._import_flexict_mimics()
+            patches = self._project_state_patches(
+                module, "path", str(Path(tmp) / "other.mcs"))
             with mock.patch.object(module.mimics.file, "open_project") as \
                     open_project, \
                     mock.patch.object(
-                        module.mimics.file, "get_active_project",
-                        return_value=str(Path(tmp) / "other.mcs")), \
-                    mock.patch.object(
                         module.mimics.dialogs, "message_box") as message_box:
-                opened, detail = module._al_open_case(
-                    str(job_dir), "case01")
+                for patch in patches:
+                    patch.start()
+                try:
+                    opened, detail = module._al_open_case(
+                        str(job_dir), "case01")
+                finally:
+                    for patch in patches:
+                        patch.stop()
             self.assertFalse(opened)
             self.assertIn("another project is open", detail)
+            open_project.assert_not_called()
+            message_box.assert_called_once()
+
+    def test_open_case_unknown_state_refuses_to_switch(self):
+        """F17/T17 查询失败: with the project query failing, the handler
+        must refuse to open another project - "cannot tell" is not
+        "nothing is open"."""
+        with tempfile.TemporaryDirectory() as tmp:
+            mcs_path = Path(tmp) / "mcs_output" / "case01.mcs"
+            mcs_path.parent.mkdir(parents=True)
+            mcs_path.write_bytes(b"stub")
+            job_dir = self._geometry_job(tmp, "case01", str(mcs_path))
+            module = self._import_flexict_mimics()
+            patches = self._project_state_patches(module, "unknown")
+            with mock.patch.object(module.mimics.file, "open_project") as \
+                    open_project, \
+                    mock.patch.object(
+                        module.mimics.dialogs, "message_box") as message_box:
+                for patch in patches:
+                    patch.start()
+                try:
+                    opened, detail = module._al_open_case(
+                        str(job_dir), "case01")
+                finally:
+                    for patch in patches:
+                        patch.stop()
+            self.assertFalse(opened)
+            self.assertIn("unknown", detail)
             open_project.assert_not_called()
             message_box.assert_called_once()
 
@@ -1470,13 +1534,17 @@ class TestActiveLearningRuntimeHandlers(unittest.TestCase):
             mcs_path.write_bytes(b"stub")
             job_dir = self._geometry_job(tmp, "case01", str(mcs_path))
             module = self._import_flexict_mimics()
+            patches = self._project_state_patches(module, "path", str(mcs_path))
             with mock.patch.object(module.mimics.file, "open_project") as \
-                    open_project, \
-                    mock.patch.object(
-                        module.mimics.file, "get_active_project",
-                        return_value=str(mcs_path)):
-                opened, detail = module._al_open_case(
-                    str(job_dir), "case01")
+                    open_project:
+                for patch in patches:
+                    patch.start()
+                try:
+                    opened, detail = module._al_open_case(
+                        str(job_dir), "case01")
+                finally:
+                    for patch in patches:
+                        patch.stop()
             self.assertTrue(opened)
             self.assertIn("already open", detail)
             open_project.assert_not_called()
