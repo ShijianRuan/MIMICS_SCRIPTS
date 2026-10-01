@@ -14404,6 +14404,7 @@ class TestFlexiCTActiveLearningApply(unittest.TestCase):
             old_set = flexict_mimics.mimics_mask_apply._set_mask_from_u8
             old_mark = flexict_mimics._al_mark_request
             old_annotated = flexict_mimics._al_mark_annotated
+            old_target = flexict_mimics._al_target_still_matches
 
             class _Mask(object):
                 name = "Bands (Moderate)"
@@ -14421,6 +14422,10 @@ class TestFlexiCTActiveLearningApply(unittest.TestCase):
                 flexict_mimics._al_mark_annotated = (
                     lambda job_dir, case_id: None
                 )
+                # F20: the target check is covered by its own tests; here it
+                # stands in for "still on the launch-time image".
+                flexict_mimics._al_target_still_matches = (
+                    lambda transaction: "")
                 transaction = {
                     "request": {
                         "_request_path": request_path,
@@ -14437,6 +14442,7 @@ class TestFlexiCTActiveLearningApply(unittest.TestCase):
                 flexict_mimics.mimics_mask_apply._set_mask_from_u8 = old_set
                 flexict_mimics._al_mark_request = old_mark
                 flexict_mimics._al_mark_annotated = old_annotated
+                flexict_mimics._al_target_still_matches = old_target
             self.assertEqual(["Bands (Moderate)"], applied)
             self.assertEqual(1, len(marked))
             self.assertEqual("applied", marked[0][0])
@@ -14475,6 +14481,203 @@ class TestFlexiCTActiveLearningApply(unittest.TestCase):
             finally:
                 flexict_mimics._al_mark_request = old_mark
             self.assertEqual([("failed", "conversion timed out")], marked)
+            self.assertFalse(os.path.exists(bridge_root))
+
+    def test_al_conversion_rollback_on_apply_failure(self):
+        # F02/T02: a failed second band must leave no half-applied overlay
+        # and no leftover masks; the failure is visible in the request.
+        import flexict_mimics
+
+        with tempfile.TemporaryDirectory() as tmp:
+            request_dir = os.path.join(tmp, "job", "apply_requests")
+            os.makedirs(request_dir)
+            request_path = os.path.join(request_dir, "req.json")
+            buffer_one = os.path.join(tmp, "b1.u8")
+            with open(buffer_one, "wb") as handle:
+                handle.write(b"\x01" * 24)
+            buffer_two = os.path.join(tmp, "b2.u8")
+            with open(buffer_two, "wb") as handle:
+                handle.write(b"\x01" * 24)
+            bridge_root = os.path.join(tmp, "bridge")
+            os.makedirs(bridge_root)
+            result_path = os.path.join(bridge_root, "result.json")
+            with open(result_path, "w") as handle:
+                json.dump({
+                    "status": "ok",
+                    "masks": [
+                        {"name": "al_0", "output_path": buffer_one,
+                         "mimics_shape": [2, 3, 4]},
+                        {"name": "al_1", "output_path": buffer_two,
+                         "mimics_shape": [2, 3, 4]},
+                    ],
+                }, handle)
+
+            marked = []
+            deleted = []
+            old_mark = flexict_mimics._al_mark_request
+            old_target = flexict_mimics._al_target_still_matches
+            old_new = flexict_mimics.mimics_mask_apply._new_prediction_mask
+            old_set = flexict_mimics.mimics_mask_apply._set_mask_from_u8
+
+            class _Mask(object):
+                def __init__(self, name):
+                    self.name = name
+
+                def delete(self):
+                    deleted.append(self.name)
+
+            def apply(mask, path, shape, name=None):
+                if len(applied_count) == 1:
+                    raise RuntimeError("second band write failed")
+                applied_count.append(path)
+
+            applied_count = []
+            try:
+                flexict_mimics._al_mark_request = (
+                    lambda path, state, detail="": marked.append(
+                        (state, detail))
+                )
+                flexict_mimics._al_target_still_matches = lambda t: ""
+                flexict_mimics.mimics_mask_apply._new_prediction_mask = (
+                    _Mask)
+                flexict_mimics.mimics_mask_apply._set_mask_from_u8 = apply
+                transaction = {
+                    "request": {
+                        "_request_path": request_path,
+                        "_job_dir": os.path.join(tmp, "job"),
+                        "case_id": "caseA",
+                    },
+                    "result_path": result_path,
+                    "bridge_root": bridge_root,
+                    "masks": [
+                        ("High", buffer_one), ("Moderate", buffer_two)],
+                }
+                flexict_mimics._al_finish_conversion(transaction)
+            finally:
+                flexict_mimics._al_mark_request = old_mark
+                flexict_mimics._al_target_still_matches = old_target
+                flexict_mimics.mimics_mask_apply._new_prediction_mask = old_new
+                flexict_mimics.mimics_mask_apply._set_mask_from_u8 = old_set
+            self.assertEqual(1, len(applied_count))
+            self.assertEqual(2, len(deleted), "both created masks rolled back")
+            self.assertEqual("failed", marked[0][0])
+            self.assertIn("rolled back", marked[0][1])
+            self.assertFalse(os.path.exists(bridge_root))
+
+    def test_al_conversion_rejects_truncated_buffer(self):
+        # F02/T02: a truncated buffer is caught before any mask exists.
+        import flexict_mimics
+
+        with tempfile.TemporaryDirectory() as tmp:
+            request_dir = os.path.join(tmp, "job", "apply_requests")
+            os.makedirs(request_dir)
+            request_path = os.path.join(request_dir, "req.json")
+            buffer_path = os.path.join(tmp, "b1.u8")
+            with open(buffer_path, "wb") as handle:
+                handle.write(b"\x01" * 10)  # 24 expected
+            bridge_root = os.path.join(tmp, "bridge")
+            os.makedirs(bridge_root)
+            result_path = os.path.join(bridge_root, "result.json")
+            with open(result_path, "w") as handle:
+                json.dump({
+                    "status": "ok",
+                    "masks": [
+                        {"name": "al_0", "output_path": buffer_path,
+                         "mimics_shape": [2, 3, 4]},
+                    ],
+                }, handle)
+
+            marked = []
+            created = []
+            old_mark = flexict_mimics._al_mark_request
+            old_new = flexict_mimics.mimics_mask_apply._new_prediction_mask
+            try:
+                flexict_mimics._al_mark_request = (
+                    lambda path, state, detail="": marked.append(
+                        (state, detail))
+                )
+                flexict_mimics.mimics_mask_apply._new_prediction_mask = (
+                    lambda title: created.append(title))
+                transaction = {
+                    "request": {
+                        "_request_path": request_path,
+                        "_job_dir": os.path.join(tmp, "job"),
+                        "case_id": "caseA",
+                    },
+                    "result_path": result_path,
+                    "bridge_root": bridge_root,
+                    "masks": [("High", buffer_path)],
+                }
+                flexict_mimics._al_finish_conversion(transaction)
+            finally:
+                flexict_mimics._al_mark_request = old_mark
+                flexict_mimics.mimics_mask_apply._new_prediction_mask = old_new
+            self.assertEqual([], created, "no mask may be created")
+            self.assertEqual("failed", marked[0][0])
+            self.assertIn("truncated", marked[0][1])
+            self.assertFalse(os.path.exists(bridge_root))
+
+    def test_al_conversion_refuses_when_project_switched(self):
+        # F20/T20: the user switched projects while the conversion ran.
+        # The overlay must not land on the new project's active image.
+        import flexict_mimics
+
+        with tempfile.TemporaryDirectory() as tmp:
+            request_dir = os.path.join(tmp, "job", "apply_requests")
+            os.makedirs(request_dir)
+            request_path = os.path.join(request_dir, "req.json")
+            buffer_path = os.path.join(tmp, "b1.u8")
+            with open(buffer_path, "wb") as handle:
+                handle.write(b"\x01" * 24)
+            bridge_root = os.path.join(tmp, "bridge")
+            os.makedirs(bridge_root)
+            result_path = os.path.join(bridge_root, "result.json")
+            with open(result_path, "w") as handle:
+                json.dump({
+                    "status": "ok",
+                    "masks": [
+                        {"name": "al_0", "output_path": buffer_path,
+                         "mimics_shape": [2, 3, 4]},
+                    ],
+                }, handle)
+
+            marked = []
+            created = []
+            old_mark = flexict_mimics._al_mark_request
+            old_new = flexict_mimics.mimics_mask_apply._new_prediction_mask
+            old_project = flexict_mimics.mimics_mask_apply._current_project_path
+            try:
+                flexict_mimics._al_mark_request = (
+                    lambda path, state, detail="": marked.append(
+                        (state, detail))
+                )
+                flexict_mimics.mimics_mask_apply._new_prediction_mask = (
+                    lambda title: created.append(title))
+                flexict_mimics.mimics_mask_apply._current_project_path = (
+                    lambda: os.path.join(tmp, "another.mcs"))
+                transaction = {
+                    "request": {
+                        "_request_path": request_path,
+                        "_job_dir": os.path.join(tmp, "job"),
+                        "case_id": "caseA",
+                    },
+                    "result_path": result_path,
+                    "bridge_root": bridge_root,
+                    "masks": [("High", buffer_path)],
+                    "target_identity": {
+                        "project_path": os.path.join(tmp, "caseA.mcs"),
+                        "image_guid": "img-1",
+                    },
+                }
+                flexict_mimics._al_finish_conversion(transaction)
+            finally:
+                flexict_mimics._al_mark_request = old_mark
+                flexict_mimics.mimics_mask_apply._new_prediction_mask = old_new
+                flexict_mimics.mimics_mask_apply._current_project_path = (
+                    old_project)
+            self.assertEqual([], created, "nothing may be written")
+            self.assertEqual("failed", marked[0][0])
+            self.assertIn("project changed", marked[0][1])
             self.assertFalse(os.path.exists(bridge_root))
 
 
