@@ -89,26 +89,12 @@ def _staging_path(output_path):
     return "{0}.creating.{1}.mcs".format(stem, os.getpid())
 
 
-def _publish(staging_path, output_path):
-    if not os.path.isfile(staging_path):
-        raise RuntimeError(
-            "Mimics saved successfully but the temporary MCS was not found: {0}".format(
-                staging_path
-            )
-        )
-    last_error = None
-    for attempt in range(20):
-        try:
-            os.replace(staging_path, output_path)
-            return
-        except OSError as exc:
-            last_error = exc
-            time.sleep(min(0.5, 0.05 * (attempt + 1)))
-    raise RuntimeError(
-        "Could not publish the completed MCS to {0}: {1}".format(
-            output_path, last_error
-        )
-    )
+def _publish(staging_path, output_path, expected_identity):
+    """F28: refuse to replace an output someone else saved meanwhile."""
+    conflict = runtime_common.publish_conflict(
+        staging_path, output_path, expected_identity)
+    if conflict:
+        raise RuntimeError(conflict)
 
 
 def _mask_names():
@@ -212,6 +198,9 @@ def _append_one(case, job_dir, force, in_place=False):
         raise RuntimeError("Output MCS must differ from source MCS: {}".format(source_mcs))
     if not in_place and os.path.isfile(output_mcs) and not force:
         return {"status": "skipped", "reason": "output_exists", "output_mcs": output_mcs}
+    # F28: record who the output is at case start so publish can refuse to
+    # overwrite a newer manual save from this workstation or another one.
+    output_identity = runtime_common.capture_output_identity(output_mcs)
 
     output_dir = os.path.dirname(output_mcs)
     if output_dir and not os.path.isdir(output_dir):
@@ -287,7 +276,7 @@ def _append_one(case, job_dir, force, in_place=False):
             raise RuntimeError("Mimics did not create the temporary MCS.")
         _safe_close_project()
         opened = False
-        _publish(staging_mcs, output_mcs)
+        _publish(staging_mcs, output_mcs, output_identity)
         return {
             "status": "completed",
             "output_mcs": output_mcs,

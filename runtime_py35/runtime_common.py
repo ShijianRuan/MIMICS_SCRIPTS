@@ -8,6 +8,7 @@ import errno
 import hashlib
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -515,6 +516,73 @@ def safe_filename(value):
 
 def safe_slug(value):
     return safe_filename(value).strip("._") or "unknown"
+
+
+def _stat_identity(path):
+    """File identity used for publish conflict detection, "" when absent."""
+    try:
+        info = os.stat(path)
+        return "{0}:{1}".format(info.st_mtime_ns, info.st_size)
+    except OSError:
+        return ""
+
+
+def capture_output_identity(path):
+    """Identity of the publish target at case start (F28).
+
+    The background worker cannot lock out every author of the output .mcs:
+    Mimics native saves on this workstation and other workstations on a
+    shared drive replace the file with no lock we can see. The best
+    non-racy option available is to record the target's (mtime, size) when
+    the case starts and refuse to replace it when that identity changed by
+    publish time — the newer manual save stays intact and the staged result
+    survives as a job-named copy for reconciliation.
+    """
+    return {"path": str(path or ""), "identity": _stat_identity(path)}
+
+
+def publish_conflict(staging_path, output_path, expected_identity):
+    """Replace the output only if it still matches the case-start identity.
+
+    Returns "" on a successful publish. When the output changed since the
+    case started (someone saved it in the foreground or from another
+    workstation), the staging file is kept as
+    "<case>.conflict.<job-pid>.mcs" next to the output and a visible
+    message is returned; the newer manual save is never overwritten.
+    """
+    if not os.path.isfile(staging_path):
+        raise RuntimeError(
+            "Mimics saved successfully but the temporary MCS was not "
+            "found: {0}".format(staging_path)
+        )
+    expected = str((expected_identity or {}).get("identity") or "")
+    if expected and _stat_identity(output_path) != expected:
+        stem = output_path[:-4] if output_path.lower().endswith(".mcs") else output_path
+        conflict_copy = "{0}.conflict.{1}.mcs".format(stem, os.getpid())
+        try:
+            shutil.move(staging_path, conflict_copy)
+        except OSError:
+            conflict_copy = ""
+        return (
+            "The output project was saved by someone else while this job "
+            "was running, so the result was published as {0} instead of "
+            "overwriting the newer file {1}. Compare the two files and "
+            "keep the one you want.".format(
+                conflict_copy or staging_path, output_path)
+        )
+    last_error = None
+    for attempt in range(20):
+        try:
+            os.replace(staging_path, output_path)
+            return ""
+        except OSError as exc:
+            last_error = exc
+            time.sleep(min(0.5, 0.05 * (attempt + 1)))
+    raise RuntimeError(
+        "Could not publish the completed MCS to {0}: {1}".format(
+            output_path, last_error
+        )
+    )
 
 
 def stable_digest_hex(value):
