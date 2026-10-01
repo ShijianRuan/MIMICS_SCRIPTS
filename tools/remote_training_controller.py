@@ -502,6 +502,48 @@ def _dataset_parts_fingerprint(parts: list[dict[str, Any]]) -> str:
 
 _REMOTE_DATASET_CACHE_TOKEN = "__MIMICS_REMOTE_DATASET_FINGERPRINT__"
 
+# Request fields that shape the preprocessed tensors / training plans. The
+# remote prepared cache is content-addressed; when only these fields change
+# the dataset bytes stay identical, so the cache key must fold them in or a
+# resubmitted job silently reuses the previous plans (e.g. a batch_size
+# reduction never reaches the trainer and the job OOMs identically).
+_PLANNING_REQUEST_FIELDS = (
+    "configuration",
+    "plans",
+    "spacing",
+    "patch_size",
+    "batch_size",
+)
+
+
+def _prepared_cache_identity(
+    kind: str,
+    spec: dict[str, Any],
+    dataset_fingerprint: str,
+) -> str:
+    if kind not in {"nnunet", "flexict"}:
+        # Inference jobs and nnInteractive produce no reusable prepared
+        # tensors; the dataset fingerprint alone addresses them.
+        return dataset_fingerprint
+    request = {}
+    try:
+        request = read_json(Path(str(spec.get("request_path") or "")), {}) or {}
+    except Exception:
+        request = {}
+    planning = {
+        field: request.get(field)
+        for field in _PLANNING_REQUEST_FIELDS
+        if request.get(field) is not None
+    }
+    if not planning:
+        return dataset_fingerprint
+    return "{}_{}".format(
+        dataset_fingerprint,
+        hashlib.sha256(
+            json.dumps(planning, sort_keys=True).encode("utf-8")
+        ).hexdigest()[:16],
+    )
+
 
 def _bind_remote_prepared_cache(
     bundle: Path, dataset_fingerprint: str
@@ -4121,10 +4163,12 @@ def run(spec_path: Path) -> int:
             ),
         )
         dataset_fingerprint = _dataset_parts_fingerprint(dataset_parts)
-        prepared_cache_identity = dataset_fingerprint
+        prepared_cache_identity = _prepared_cache_identity(
+            kind, spec, dataset_fingerprint
+        )
         if not bool(profile.get("cache_training_data", True)):
             prepared_cache_identity = "{}_{}".format(
-                dataset_fingerprint, job_slug
+                prepared_cache_identity, job_slug
             )
         _bind_remote_prepared_cache(bundle, prepared_cache_identity)
         dataset_archive_size = sum(

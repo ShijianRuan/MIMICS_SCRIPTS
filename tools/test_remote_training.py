@@ -1428,6 +1428,60 @@ class ArchiveSafetyTests(unittest.TestCase):
                 "__MIMICS_REMOTE_DATASET_FINGERPRINT__", str(bound)
             )
 
+    def test_prepared_cache_identity_includes_planning_fields(self):
+        """Changing planning-only request fields must miss the prepared cache.
+
+        The remote prepared cache is content-addressed by dataset bytes
+        alone; a resubmitted FlexiCT job that only lowered batch_size (to
+        fit a 16 GB GPU) hit the old plans and OOMed identically — the
+        override never reached the trainer (job
+        train_20261001T205553_8f3dec09). The cache key must fold in the
+        planning fields, or users cannot recover from a planning-induced
+        OOM without asking an admin to purge the server cache.
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            request_path = Path(temporary) / "request.json"
+            remote_compute.write_json_atomic(
+                request_path,
+                {
+                    "operation": "train",
+                    "configuration": "2d",
+                    "batch_size": 12,
+                },
+            )
+            spec = {"kind": "flexict", "request_path": str(request_path)}
+
+            base = controller._prepared_cache_identity(
+                "flexict", spec, "digest-123"
+            )
+            self.assertNotEqual(base, "digest-123")
+
+            # identical request -> identical identity (cache still works)
+            self.assertEqual(
+                controller._prepared_cache_identity(
+                    "flexict", spec, "digest-123"
+                ),
+                base,
+            )
+            # a different batch_size must change the identity
+            remote_compute.write_json_atomic(
+                request_path,
+                {"operation": "train", "configuration": "2d", "batch_size": 66},
+            )
+            self.assertNotEqual(
+                controller._prepared_cache_identity(
+                    "flexict", spec, "digest-123"
+                ),
+                base,
+            )
+            # inference kinds keep the dataset fingerprint unchanged
+            self.assertEqual(
+                controller._prepared_cache_identity(
+                    "nnunet_infer", spec, "digest-123"
+                ),
+                "digest-123",
+            )
+
 
 class CodeDriftTests(unittest.TestCase):
     """The image's baked-in pipeline code is compared before training."""
