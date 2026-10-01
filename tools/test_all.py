@@ -6795,8 +6795,8 @@ class TestNewFeatures(unittest.TestCase):
         self.assertNotIn('buttons="Overwrite;Skip Existing;Cancel"', source)
         self.assertIn('bridge_params["overwrite_existing"] = bool(overwrite_existing)', source)
         ui_source = Path(PROJECT_ROOT, "tools", "io_path_setup_ui.py").read_text(encoding="utf-8")
-        self.assertIn('QRadioButton("Skip existing")', ui_source)
-        self.assertIn('QRadioButton("Overwrite existing")', ui_source)
+        self.assertIn('QRadioButton("跳过已存在")', ui_source)
+        self.assertIn('QRadioButton("覆盖已存在")', ui_source)
         self.assertIn("tempfile.mkstemp", ui_source)
 
     def test_export_skip_existing_proactive_reminder(self):
@@ -8807,13 +8807,29 @@ class TestNewFeatures(unittest.TestCase):
 
         dicom_dir = os.path.join(self.tmp, "large_flat_dicom")
         os.makedirs(dicom_dir)
-        calls = {"next": 0}
+        scans = []
 
         class Entry:
             name = "slice000001.dcm"
             path = os.path.join(dicom_dir, name)
 
+            @staticmethod
+            def is_file():
+                return True
+
+            @staticmethod
+            def is_dir(follow_symlinks=True):
+                return False
+
         class Entries:
+            # Each scandir pass must stop at the first slice. The discovery
+            # walk does one capped pass and the dataset-root rejection check
+            # (R61-9) does another; neither may ever enumerate past the
+            # first slice of a folder that can hold tens of thousands.
+            def __init__(self):
+                self.pulled = 0
+                scans.append(self)
+
             def __enter__(self):
                 return self
 
@@ -8824,10 +8840,12 @@ class TestNewFeatures(unittest.TestCase):
                 return self
 
             def __next__(self):
-                calls["next"] += 1
-                if calls["next"] == 1:
-                    return Entry()
-                raise AssertionError("flat DICOM discovery enumerated unnecessary slices")
+                self.pulled += 1
+                if self.pulled > 1:
+                    raise AssertionError(
+                        "a flat DICOM scan enumerated slices past the first"
+                    )
+                return Entry()
 
         old_scandir = io_ui.os.scandir
         try:
@@ -8836,7 +8854,7 @@ class TestNewFeatures(unittest.TestCase):
         finally:
             io_ui.os.scandir = old_scandir
         self.assertEqual(dicom_dir, case["image"])
-        self.assertEqual(1, calls["next"])
+        self.assertTrue(1 <= len(scans) <= 3)
 
     def test_batch_discovery_fallback_scan_is_capped(self):
         """do_discover's loose-image fallback stops at the first slice (B17).
@@ -14783,6 +14801,231 @@ class TestGuiThreadBlockingContract(unittest.TestCase):
             "move the wait/copy onto a worker thread "
             "(violations: {0})".format(violations),
         )
+
+    def test_reaper_callbacks_never_call_mimics_apis(self):
+        """F11: terminate_process_async callbacks run on the reaper thread.
+        Whatever they call executes off the GUI thread, so a Mimics/Qt
+        call inside on_complete violates thread affinity. Scan every
+        on_complete in runtime_py35 and assert its body only touches
+        plain data/files (the GUI-thread finish is delivered via a flag
+        the monitor timer consumes — see the behavioral tests below)."""
+        import inspect
+        import mask_import
+        import mimics_export
+
+        # The two historical offenders must now defer to the GUI timer:
+        # their on_complete lambdas may only set the flag. (Inline
+        # synchronous fallbacks are fine — they already run on the GUI
+        # thread.)
+        import_source = inspect.getsource(
+            mask_import._finish_mask_import_after_process)
+        self.assertIn(
+            "on_complete=lambda: monitor.update(reaped=True)", import_source)
+        export_source = inspect.getsource(
+            mimics_export._finish_foreground_export_after_process)
+        self.assertIn(
+            "on_complete=lambda: monitor.update(reaped=True)", export_source)
+
+        # Contract for every runtime module: an on_complete callback may
+        # not call into mimics.* (dialogs, logging, update_gui, ...).
+        runtime_dir = os.path.join(PROJECT_ROOT, "runtime_py35")
+        import ast as _ast
+        offenders = []
+        for name in os.listdir(runtime_dir):
+            if not name.endswith(".py"):
+                continue
+            with open(os.path.join(runtime_dir, name), "rb") as handle:
+                try:
+                    tree = _ast.parse(handle.read())
+                except SyntaxError:
+                    continue
+            for node in _ast.walk(tree):
+                if not isinstance(node, _ast.FunctionDef):
+                    continue
+                # Find lambda assigned/passed as on_complete=... inside
+                # this function and scan its body for mimics.* calls.
+                for child in _ast.walk(node):
+                    if (isinstance(child, _ast.Call)
+                            and isinstance(child.func, _ast.Attribute)
+                            and child.func.attr == "terminate_process_async"):
+                        for keyword in child.keywords:
+                            if keyword.arg != "on_complete":
+                                continue
+                            for sub in _ast.walk(keyword.value):
+                                if (isinstance(sub, _ast.Call)
+                                        and isinstance(sub.func, _ast.Attribute)
+                                        and isinstance(sub.func.value, _ast.Name)
+                                        and sub.func.value.id == "mimics"):
+                                    offenders.append(
+                                        "{0}:{1} mimics.{2}() in on_complete"
+                                        .format(name, sub.lineno,
+                                                sub.func.attr))
+        self.assertEqual(
+            [], offenders,
+            "reaper-thread on_complete callbacks must not call Mimics APIs "
+            "- set a flag and let the GUI timer finish "
+            "(violations: {0})".format(offenders),
+        )
+
+    def test_reaped_mask_import_finishes_on_gui_thread(self):
+        """F11 behavioral: while the reaper runs, ticks do nothing but keep
+        the timer alive; once it reports back, the NEXT tick runs the
+        finisher (dialogs, lease release, cleanup) on the GUI thread."""
+        import mask_import
+
+        shown = []
+        original_message = mask_import._safe_message
+        original_stop = mask_import._stop_mask_import_monitor
+        original_release = mask_import.runtime_common.release_local_operation
+        original_cleanup = mask_import._cleanup_work_dir
+        mask_import._safe_message = (
+            lambda message, title=None: shown.append(message))
+        mask_import._stop_mask_import_monitor = lambda key: None
+        mask_import.runtime_common.release_local_operation = (
+            lambda resource, token: True)
+        mask_import._cleanup_work_dir = lambda path: None
+
+        monitor = {
+            "monitor_key": "f11-mask", "created_names": [],
+            "errors": ["bridge died"], "operation_token": "tok",
+            "work_dir": "unused",
+        }
+
+        class _LiveProcess(object):
+            pid = 4242
+
+            def poll(self):
+                return None  # still alive: reap must go through the thread
+
+        reaper_callbacks = []
+        original_async = (
+            mask_import.runtime_common.terminate_process_async)
+        monitor["process"] = _LiveProcess()
+
+        def fake_async(process=None, pid=None, graceful_seconds=0.0,
+                       on_complete=None):
+            reaper_callbacks.append(on_complete)
+            return True
+
+        mask_import.runtime_common.terminate_process_async = fake_async
+        try:
+            # GUI thread decides the import failed; nothing may finish yet.
+            mask_import._finish_mask_import_after_process(
+                monitor, "bridge died")
+            self.assertEqual([], shown,
+                             "finisher ran before the process was reaped")
+            self.assertTrue(monitor.get("done"))
+            # A tick while the reaper is still busy must not finish either.
+            self.assertTrue(mask_import._reaped_mask_import_tick(monitor))
+            self.assertEqual([], shown)
+            # The reaper thread reports back: flag only, no dialogs.
+            for callback in reaper_callbacks:
+                callback()
+            self.assertEqual([], shown,
+                             "reaper callback ran the finisher off-thread")
+            # The next GUI tick finishes the import.
+            self.assertTrue(mask_import._reaped_mask_import_tick(monitor))
+            self.assertEqual(1, len(shown))
+            self.assertIn("No visible masks were imported", shown[0])
+        finally:
+            mask_import._safe_message = original_message
+            mask_import._stop_mask_import_monitor = original_stop
+            mask_import.runtime_common.release_local_operation = (
+                original_release)
+            mask_import._cleanup_work_dir = original_cleanup
+            mask_import.runtime_common.terminate_process_async = original_async
+
+    def test_reaped_mask_import_deadline_finishes_with_diagnostic(self):
+        """F11 failure path: if the reap never completes (terminate
+        refused), the monitor must not tick forever — a deadline finishes
+        the import with a diagnostic instead."""
+        import mask_import
+
+        shown = []
+        original_message = mask_import._safe_message
+        original_stop = mask_import._stop_mask_import_monitor
+        original_release = mask_import.runtime_common.release_local_operation
+        original_cleanup = mask_import._cleanup_work_dir
+        mask_import._safe_message = (
+            lambda message, title=None: shown.append(message))
+        mask_import._stop_mask_import_monitor = lambda key: None
+        mask_import.runtime_common.release_local_operation = (
+            lambda resource, token: True)
+        mask_import._cleanup_work_dir = lambda path: None
+        try:
+            monitor = {
+                "monitor_key": "f11-deadline", "done": True,
+                "reaped": False, "reap_deadline": time.time() - 1.0,
+                "created_names": ["kidney"], "errors": [],
+                "operation_token": None, "work_dir": "unused",
+            }
+            self.assertTrue(mask_import._reaped_mask_import_tick(monitor))
+            self.assertEqual(1, len(shown))
+            self.assertIn("Imported 1 mask(s)", shown[0])
+            self.assertTrue(
+                any("could not be stopped" in str(e)
+                    for e in monitor.get("errors", [])),
+                "missing reap diagnostic: {}".format(monitor.get("errors")),
+            )
+        finally:
+            mask_import._safe_message = original_message
+            mask_import._stop_mask_import_monitor = original_stop
+            mask_import.runtime_common.release_local_operation = (
+                original_release)
+            mask_import._cleanup_work_dir = original_cleanup
+
+    def test_reaped_export_finishes_on_gui_thread(self):
+        """F11 behavioral for the export path: cancel → reaper flag → the
+        next GUI tick runs the finisher (which shows the stopped dialog)."""
+        import mimics_export
+
+        shown = []
+        original_stop = mimics_export._stop_export_monitor
+        original_finish = mimics_export._finish_foreground_export
+        original_async = (
+            mimics_export.runtime_common.terminate_process_async)
+
+        def fake_finish(monitor, error=None, result=None, cancelled=False):
+            shown.append((error, cancelled))
+            monitor["finished"] = True
+
+        reaper_callbacks = []
+
+        def fake_async(process=None, pid=None, graceful_seconds=0.0,
+                       on_complete=None):
+            reaper_callbacks.append(on_complete)
+            return True
+
+        class _LiveProcess(object):
+            pid = 4243
+
+            def poll(self):
+                return None
+
+        monitor = {
+            "monitor_key": "f11-export", "process": _LiveProcess(),
+            "mask_index": 2, "selected_masks": ["a", "b", "c"],
+        }
+        mimics_export._stop_export_monitor = lambda key: None
+        mimics_export._finish_foreground_export = fake_finish
+        mimics_export.runtime_common.terminate_process_async = fake_async
+        try:
+            mimics_export._finish_foreground_export_after_process(
+                monitor, cancelled=True)
+            self.assertEqual([], shown, "finisher ran before the reap")
+            self.assertTrue(monitor.get("done"))
+            self.assertTrue(mimics_export._reaped_export_tick(monitor))
+            self.assertEqual([], shown, "tick finished a busy reap")
+            for callback in reaper_callbacks:
+                callback()
+            self.assertEqual([], shown,
+                             "reaper callback ran the finisher off-thread")
+            self.assertTrue(mimics_export._reaped_export_tick(monitor))
+            self.assertEqual([(None, True)], shown)
+        finally:
+            mimics_export._stop_export_monitor = original_stop
+            mimics_export._finish_foreground_export = original_finish
+            mimics_export.runtime_common.terminate_process_async = original_async
 
 
 class TestUiThemePalette(unittest.TestCase):

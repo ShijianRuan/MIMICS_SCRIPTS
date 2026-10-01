@@ -535,20 +535,48 @@ def _finish_mask_import(monitor):
 
 
 def _finish_mask_import_after_process(monitor, error):
-    """Do not delete bridge inputs until the external process is reaped."""
+    """Do not delete bridge inputs until the external process is reaped.
+
+    F11: the finisher shows a Mimics dialog and releases GUI-side state, so
+    it must run on the GUI thread. The reaper callback only sets a flag;
+    the still-running monitor timer picks it up on its next tick. Only the
+    synchronous fallbacks (no process / reaper refused the job) finish
+    inline, which is already the GUI thread.
+    """
     monitor.setdefault("errors", []).append(str(error))
     process = monitor.get("process")
     if process is None or process.poll() is not None:
         _finish_mask_import(monitor)
         return
     monitor["done"] = True
-    _stop_mask_import_monitor(monitor.get("monitor_key"))
+    monitor["reap_deadline"] = time.time() + 60.0
     if not runtime_common.terminate_process_async(
         process=process,
         graceful_seconds=2.0,
-        on_complete=lambda: _finish_mask_import(monitor),
+        on_complete=lambda: monitor.update(reaped=True),
     ):
         _finish_mask_import(monitor)
+
+
+def _reaped_mask_import_tick(monitor):
+    """GUI-thread finish for a reaped import; True when it handled the tick.
+
+    While the reaper is still running the timer keeps ticking harmlessly;
+    if the reap somehow never completes (terminate failed), the deadline
+    branch finishes with a diagnostic instead of ticking forever.
+    """
+    if not monitor.get("done"):
+        return False
+    if not monitor.get("reaped"):
+        if time.time() > monitor.get("reap_deadline", 0):
+            monitor.setdefault("errors", []).append(
+                "The background converter process could not be stopped; "
+                "its temporary files were left for a later cleanup."
+            )
+            _finish_mask_import(monitor)
+        return True
+    _finish_mask_import(monitor)
+    return True
 
 
 def cancel_all_mask_imports(reason="Mask import stopped by user request."):
@@ -581,6 +609,10 @@ def _mask_import_monitor_tick(monitor):
         return
     monitor["busy"] = True
     try:
+        # F11: a reaped import finishes here on the GUI thread, never in
+        # the reaper's callback.
+        if _reaped_mask_import_tick(monitor):
+            return
         _mask_import_monitor_tick_locked(monitor)
     finally:
         monitor["busy"] = False

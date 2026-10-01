@@ -1614,7 +1614,12 @@ def _finish_foreground_export(monitor, error=None, result=None, cancelled=False)
 def _finish_foreground_export_after_process(
     monitor, error=None, cancelled=False
 ):
-    """Reap the external bridge before terminal status and work cleanup."""
+    """Reap the external bridge before terminal status and work cleanup.
+
+    F11: the finisher shows a Mimics dialog and touches GUI-side state, so
+    it runs on the GUI thread. The reaper callback only sets a flag; the
+    still-running export timer finishes the job on its next tick.
+    """
     process = monitor.get("process")
     if process is None or process.poll() is not None:
         _finish_foreground_export(
@@ -1622,7 +1627,9 @@ def _finish_foreground_export_after_process(
         )
         return
     monitor["done"] = True
-    _stop_export_monitor(monitor.get("monitor_key"))
+    monitor["reap_error"] = error
+    monitor["reap_cancelled"] = bool(cancelled)
+    monitor["reap_deadline"] = time.time() + 60.0
     _write_export_task_status(
         monitor,
         {
@@ -1634,24 +1641,47 @@ def _finish_foreground_export_after_process(
         },
     )
 
-    def _complete():
+    if not runtime_common.terminate_process_async(
+        process=process,
+        graceful_seconds=2.0,
+        on_complete=lambda: monitor.update(reaped=True),
+    ):
         _finish_foreground_export(
             monitor, error=error, cancelled=cancelled
         )
 
-    if not runtime_common.terminate_process_async(
-        process=process,
-        graceful_seconds=2.0,
-        on_complete=_complete,
-    ):
-        _complete()
+
+def _reaped_export_tick(monitor):
+    """GUI-thread finish for a reaped export; True when it handled the tick."""
+    if not monitor.get("done"):
+        return False
+    error = monitor.get("reap_error")
+    cancelled = bool(monitor.get("reap_cancelled"))
+    if not monitor.get("reaped"):
+        if time.time() > monitor.get("reap_deadline", 0):
+            _finish_foreground_export(
+                monitor,
+                error=(error or "Export stopped, but the background process "
+                       "could not be reaped; its temporary files were left "
+                       "for a later cleanup."),
+                cancelled=cancelled,
+            )
+        return True
+    _finish_foreground_export(monitor, error=error, cancelled=cancelled)
+    return True
 
 
 def _foreground_export_tick(monitor):
-    if monitor.get("done") or monitor.get("busy"):
+    if monitor.get("busy"):
         return
     monitor["busy"] = True
     try:
+        # F11: a reaped export finishes here on the GUI thread, never in
+        # the reaper's callback.
+        if _reaped_export_tick(monitor):
+            return
+        if monitor.get("done"):
+            return
         if monitor.get("cancel_requested") or _export_task_stop_requested(monitor):
             _finish_foreground_export_after_process(
                 monitor, cancelled=True
