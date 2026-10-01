@@ -247,6 +247,23 @@ The training recipe itself is managed by nnU-Net and is not configurable here.
 | `runtime_retention_days` | `30` | Retention for rebuildable `runtime/` Dataset folders (nnUNet_raw/nnUNet_preprocessed/nnUNet_results, 0 disables). Datasets referenced by registered models or non-terminal jobs are never removed; everything else is deleted once older than this. |
 | `source_grid_cache_retention_days` | `30` | Retention for the rebuildable `cache/source_grid/` per-case training inputs (0 disables). Task trees of non-terminal jobs are never removed. |
 
+### Train/validation split contract
+
+The nnU-Net and FlexiCT training pipelines split cases into five rotating
+folds keyed by `split_seed` and `validation_fraction` (both editable in the
+training UI). Two standing guarantees:
+
+- **Patient grouping** — a training request may carry an optional
+  `patient_groups` mapping (`case_id` → patient/subject id). When present,
+  cases of one patient always land on the same side of the split, so a
+  patient's multi-phase or follow-up scans never appear in both train and
+  validation. Without the mapping the split assumes each case is an
+  independent patient.
+- **Frozen validation set** — rebuilding a dataset that already published a
+  fold-0 validation split keeps those cases in validation on every fold.
+  Adding cases to a dataset never moves previously-validated cases into
+  training, so quality numbers stay comparable across rebuilds.
+
 ## Environment Variables
 
 ### Executables and Paths
