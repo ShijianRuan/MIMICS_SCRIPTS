@@ -55,18 +55,37 @@ nnInteractive 交互标注+任务微调）各有一份可信的"真实有效"证
   一步；两任务的本地阶段（标签导出、数据准备）不受影响照常完成并缓存，
   服务器恢复后重提交即可续跑。验证顺序调整为先做 Phase 4（本机 GPU）。
 
-## Phase 2：nnU-Net 多器官远程训练（进行中，阻塞于 206 磁盘满）
+## Phase 2：nnU-Net 多器官远程训练（进行中，转 171 服务器）
 
 - 任务：liver+spleen+kidney_left+kidney_right 4 标签单模型，
   label_source=**mcs_refresh**（从已保存 .mcs 后台导出 mask——此前从未实机
-  验收过的组合），execution_backend=remote，profile 206_root，3d_fullres，
-  50 epochs，18 训练例。
-- job：`train_20260930T205202_36ca9b92`（workspace
-  `G:\mimics_ai_validation\nnunet_workspace`）
+  验收过的组合），execution_backend=remote，3d_fullres，50 epochs，18 训练例。
+- **服务器切换验证**（用户要求）：206 根分区磁盘满（见上节）后，改用
+  171（10.8.168.171，root，路径 /home/shijian_ruan/mimics-ai，docker，
+  runtime 端口 7329）。切换动作 = servers.json 已有多 profile（171_root /
+  206_root）+ 请求里改一个字段 `remote_profile_id: "171_root"`，控制器自动
+  适配 docker/nerdctl、端口、远端根路径、容器命名。密码经 Windows 凭据管理器
+  （store_password）更新，不落明文。
+- 171 镜像重建（原镜像 8 周旧、缺 nnunet_pipeline.py）：本机 Docker 构建
+  （GFW 阻断 docker.io/archive.ubuntu.com/PyPI 大文件 → 复用本机已有 pytorch
+  基础镜像、跳过 apt 层、pip 走清华镜像）→ docker save 7.18GB → SFTP 上传
+  151s @47MB/s → docker load → 镜像内 nnunet_pipeline.py 在位验证通过。
+- job 1 `train_20261001T164921_e52e1fd5`：旧镜像，数据全量上传后在 35% 失败
+  ——"nnU-Net pipeline is missing from the runtime image"。code_verify=warn
+  不拦截旧镜像，失败发生在数据上传之后（见问题账 P1-3）。
+- job 2 `train_20261001T182222_4d53fa10`：新镜像，预处理/planning 全通过，
+  Epoch 0 处数据增强线程死亡："One or more background workers are no longer
+  alive"。容器被控制器清理、真实异常被线程化增强器吞掉。手动在容器内复跑并
+  读 pipeline job.log 抓到根因：**nnU-Net v2.8 默认开启 torch.compile
+  （inductor），镜像内无 C 编译器，dynamo 编译崩溃**（见问题账 P1-4，已修复
+  commit cdd4648）。
+- job 2 复跑（同 job 目录，容器内 `nnUNet_compile=false`，GPU 1）：训练正常
+  推进，92s/epoch，Dice 逐 epoch 上升（epoch 4：liver 0.63 / spleen 0.32 /
+  kidney_L 0.19 / kidney_R 0.31）。
 - 验收判据：任务 completed；loss 明显下降；validation Dice 上升趋势；模型
   下载注册（mimics_model_manifest.json 远程溯源）。held-out 推理 Dice：
   liver/spleen ≥ 0.7，kidney ≥ 0.5。
-- （待补充：训练曲线、耗时、code-drift 警告实际表现、Dice 表）
+- （待补充：最终训练曲线、耗时、held-out Dice 表）
 
 ## Phase 3：FlexiCT liver 少样本远程微调（待做）
 
@@ -207,6 +226,39 @@ nnInteractive 交互标注+任务微调）各有一份可信的"真实有效"证
 - **拟验收标准**：入账时按"根因待复现"处理——需要保留住下一份
   死持有者锁 payload 再定位；禁止在未复现前盲改锁机制。
 - **状态**：待按账本协议正式入账（含本次复核结论）。
+
+### P1-3 旧 runtime 镜像缺 pipeline 文件，失败发生在数据全量上传之后（待入账）
+
+- **痛点**：code_verify=warn 只记录代码漂移不拦截。job 1 用 8 周前的旧镜像
+  提交，走完 mcs_refresh 标签导出（~14 min）+ 数据全量上传（18 例）之后才
+  在 35% 处失败——"nnU-Net pipeline is missing from the runtime image"。
+  服务器带宽和标注者时间被白白消耗，且报错点远离根因（缺文件在 job 开始前
+  就可判定）。
+- **根因**：远程控制器在启动容器前不做镜像内容预检；code drift 警告（warn
+  级）与"镜像缺关键文件"（致命）混在同一信息里，用户无从区分。
+- **拟验收标准**：提交远程 job 时，控制器先在容器内检查关键文件
+  （tools/nnunet_pipeline.py 等）存在性，缺失则在上传任何数据前失败并给出
+  明确修复指引（重建镜像）。
+
+### P1-4 远程 nnU-Net 训练 Epoch 0 必崩：torch.compile 需要镜像内 C 编译器（已修复，commit cdd4648）
+
+- **痛点**：任何远程 nnU-Net 训练（当前 runtime 镜像，无 gcc）在 Epoch 0
+  崩溃，报错被线程化数据增强器吞成误导性的 "One or more background workers
+  are no longer alive. Exiting. Please check the print statements above"
+  ——而真实异常（inductor "Failed to find C compiler"）不在任何用户可见的
+  日志里。
+- **根因**：nnU-Net v2.8 的 `nnUNetTrainer._do_i_compile` 在 CUDA/Linux 上
+  默认返回 True（torch.compile/inductor），inductor 运行时需要 cc；runtime
+  镜像（原版与本地重建版）均不含 C 编译器。dynamo 后台编译线程崩溃后，
+  `nondet_multi_threaded_augmenter` 的结果收集线程只报"worker 死了"。
+- **定位方法**：容器被控制器清理导致 docker logs 不可用；手动复跑容器并读
+  挂载卷里的 pipeline job.log 抓到完整 dynamo traceback。
+- **修复**：`nnunet_pipeline._worker_environment` 对 train 阶段默认设置
+  `nnUNet_compile=false`（与既有 BLAS 线程 cap 同一约定）。
+- **防回归测试**：`test_worker_environment_disables_torch_compile_for_train`
+  （train 阶段禁用、infer 阶段不设）。
+- **证据**：复跑（同 job 目录 + `nnUNet_compile=false`）训练正常推进，
+  92s/epoch，Dice 逐 epoch 上升；smoke 门禁 8/8 绿。
 
 ## 性能基线首次填数
 
