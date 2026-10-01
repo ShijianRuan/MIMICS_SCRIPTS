@@ -49,6 +49,7 @@ from nnunet_common import (  # noqa: E402
     stable_digest,
     sweep_dataset_retention,
     sweep_source_grid_cache_retention,
+    unique_case_keys,
     update_status,
     workspace_paths,
     write_json_atomic,
@@ -258,9 +259,19 @@ def _acquire_dataset_lock(
 
 
 def _link_or_copy(source: str | Path, destination: str | Path) -> str:
+    """Link-or-copy without ever truncating an existing destination (F22).
+
+    ``os.link`` fails when the destination exists, and a bare ``copy2`` then
+    opens that destination in-place — but the destination may be a hardlink
+    to the user's source image (a previous case's collision key), so
+    truncating it rewrites the source. Unlink first: removing a directory
+    entry never touches other links to the same inode.
+    """
     src = Path(source).resolve()
     dst = Path(destination)
     dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists() or dst.is_symlink():
+        dst.unlink()
     try:
         os.link(str(src), str(dst))
         return "hardlink"
@@ -445,6 +456,7 @@ def _materialize_case(
     request: dict[str, Any],
     cache_root: Path,
     control_path: Path | None = None,
+    case_key: str | None = None,
 ) -> dict[str, Any]:
     import nibabel as nib
     import numpy as np
@@ -457,7 +469,7 @@ def _materialize_case(
     from tools.mimics_label_export import materialize_source_image as _materialize_source_image
 
     fingerprint = _case_source_signature(image_source, label_sources, request)
-    case_cache = cache_root / safe_identifier(case_id)
+    case_cache = cache_root / (case_key or safe_identifier(case_id, "case"))
     metadata_path = case_cache / "metadata.json"
     image_path = case_cache / "image.nii.gz"
     label_path = case_cache / "label.nii.gz"
@@ -633,6 +645,12 @@ def prepare_source_grid_cases(
     skipped = []
     cache_hits = 0
     total = len(case_dirs)
+    # Internal bucket keys must be collision-free up front: two Chinese case
+    # names would otherwise share one cache dir and one output/input dir
+    # (F22). No collisions keeps the plain slug, so caches stay stable.
+    case_keys = unique_case_keys(
+        [path.name for path in case_dirs], fallback="case"
+    )
     for index, case_dir in enumerate(case_dirs, start=1):
         _raise_if_cancelled(control_path)
         case_id = case_dir.name
@@ -678,12 +696,13 @@ def prepare_source_grid_cases(
             request,
             cache_root,
             control_path=control_path,
+            case_key=case_keys[case_id],
         )
         if row["foreground_voxels"] == 0 and str(request.get("empty_case_policy") or "skip") == "skip":
             skipped.append({"case_id": case_id, "reason": "empty_label"})
         else:
-            image_dst = output_root / "input" / safe_identifier(case_id) / "image.nii.gz"
-            label_dst = output_root / "labels" / safe_identifier(case_id) / "label.nii.gz"
+            image_dst = output_root / "input" / case_keys[case_id] / "image.nii.gz"
+            label_dst = output_root / "labels" / case_keys[case_id] / "label.nii.gz"
             _link_or_copy(row["image"], image_dst)
             _link_or_copy(row["label"], label_dst)
             row["image"] = image_dst
@@ -782,10 +801,13 @@ def _materialize_nnunet_raw(
     (staging / "imagesTr").mkdir(parents=True)
     (staging / "labelsTr").mkdir(parents=True)
     folds = _split_folds(rows, request)
-    case_key_by_id = {}
+    # Collision-free keys so two lossy-slugged cases cannot merge inside
+    # imagesTr/labelsTr or the splits (F22).
+    case_key_by_id = unique_case_keys(
+        [row["case_id"] for row in rows], fallback="case"
+    )
     for row in rows:
-        case_key = safe_identifier(row["case_id"])
-        case_key_by_id[str(row["case_id"])] = case_key
+        case_key = case_key_by_id[str(row["case_id"])]
         _link_or_copy(row["image"], staging / "imagesTr" / (case_key + "_0000.nii.gz"))
         _link_or_copy(row["label"], staging / "labelsTr" / (case_key + ".nii.gz"))
     labels = {"background": 0}

@@ -1318,6 +1318,64 @@ class TestActiveLearningReviewUI(unittest.TestCase):
                 self.assertEqual(entry.get("mcs_path"), "")
                 self.assertEqual(entry.get("source_shape"), [4, 4, 4])
 
+    def test_materialized_pool_disambiguates_slug_collisions(self):
+        """F22: two Chinese case names collapse to the same safe_identifier
+        slug; the AL pool must still get one input file and one geometries
+        entry per case, and the .mcs lookup must use the ORIGINAL case name
+        (mimics_import creates <original>.mcs, not <slug>.mcs)."""
+        import nibabel as nib
+        import numpy as np
+        from nnunet_common import read_json
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "dataset"
+            for name in ("病例甲", "病例乙"):
+                case = root / name
+                case.mkdir(parents=True)
+                nib.save(
+                    nib.Nifti1Image(
+                        np.zeros((4, 4, 4), dtype=np.uint8),
+                        np.eye(4)),
+                    str(case / "ct.nii.gz"))
+            # Pre-create the .mcs project for one case with the original
+            # name — the pre-fix slug lookup ("item.mcs") never found it.
+            mcs_dir = root / "mcs_output"
+            mcs_dir.mkdir()
+            expected_mcs = mcs_dir / "病例乙.mcs"
+            expected_mcs.write_bytes(b"project")
+            job_dir = Path(tmp) / "job"
+            job_dir.mkdir()
+            status_path = job_dir / "status.json"
+            control_path = job_dir / "control.json"
+            from nnunet_common import write_json_atomic
+            write_json_atomic(status_path, {})
+            write_json_atomic(control_path, {})
+            case_ids = fp._al_materialize_inputs(
+                job_dir,
+                {"dataset_root": str(root), "cases": []},
+                status_path, control_path)
+            self.assertEqual(len(case_ids), 2)
+            self.assertEqual(len(set(case_ids)), 2)
+            geometries = read_json(job_dir / "input_geometries.json", {}) or {}
+            cases = geometries.get("cases") or {}
+            self.assertEqual(len(cases), 2)
+            # One input file per distinct case key.
+            inputs = sorted((job_dir / "input").glob("*.nii.gz"))
+            self.assertEqual(len(inputs), 2)
+            # The .mcs path recorded for 病例乙 resolves to the original-name
+            # project file, not to a slug-based path.
+            entry = cases.get(next(
+                key for key in case_ids
+                if cases.get(key, {}).get("mcs_path"))) or {}
+            self.assertTrue(entry)
+            self.assertEqual(
+                os.path.normcase(entry.get("mcs_path")),
+                os.path.normcase(str(expected_mcs)))
+            other = next(
+                key for key in case_ids
+                if not cases.get(key, {}).get("mcs_path"))
+            self.assertEqual(cases[other].get("mcs_path"), "")
+
 
 class TestActiveLearningRuntimeHandlers(unittest.TestCase):
     """Mimics-side open/auto-annotate handlers (mimics module stubbed)."""

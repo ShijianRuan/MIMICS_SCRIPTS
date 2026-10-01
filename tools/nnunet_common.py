@@ -40,6 +40,33 @@ def safe_identifier(value: object, fallback: str = "item") -> str:
     return text[:96] or fallback
 
 
+def unique_case_keys(case_ids: list[object], fallback: str = "case") -> dict[str, str]:
+    """Collision-free internal keys for case ids (F22).
+
+    ``safe_identifier`` is lossy — two Chinese case names, or a 96-char
+    truncation, or ``a b`` vs ``a_b`` can all collapse to the same key, and
+    every downstream bucket (cache dirs, imagesTr files, remote input paths)
+    is keyed by it, so a collision merges two patients into one. Keep the
+    plain slug when it is unique; disambiguate collisions by appending a
+    short digest of the original id so existing no-collision workspaces keep
+    their keys (and their caches).
+    """
+    keys: dict[str, str] = {}
+    by_slug: dict[str, list[str]] = {}
+    for case_id in case_ids:
+        original = str(case_id)
+        slug = safe_identifier(original, fallback)
+        by_slug.setdefault(slug, []).append(original)
+    for slug, originals in by_slug.items():
+        if len(originals) == 1:
+            keys[originals[0]] = slug
+            continue
+        for original in sorted(originals):
+            digest = hashlib.sha256(original.encode("utf-8")).hexdigest()[:8]
+            keys[original] = "{}_{}".format(slug, digest)
+    return keys
+
+
 def medical_stem(path: str | Path) -> str:
     name = Path(path).name
     lower = name.lower()
