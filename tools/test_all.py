@@ -3227,6 +3227,7 @@ class TestCreateMcsBatch(unittest.TestCase):
 
         calls = []
         old_create = create_mcs_batch.create_mcs_from_manifest
+        old_runtime = create_mcs_batch._ACTIVE_RUNTIME_DIR
         try:
             create_mcs_batch.create_mcs_from_manifest = (
                 lambda work_dir, path: calls.append(work_dir) or path
@@ -3234,6 +3235,7 @@ class TestCreateMcsBatch(unittest.TestCase):
             self.assertEqual(0, create_mcs_batch.main(output_dir, runtime_dir=runtime_dir))
         finally:
             create_mcs_batch.create_mcs_from_manifest = old_create
+            create_mcs_batch._ACTIVE_RUNTIME_DIR = old_runtime
         self.assertEqual([], calls, "same-source reimport must not recreate the .mcs")
         with open(output_mcs, "r") as handle:
             self.assertEqual("annotated mcs", handle.read(), "existing .mcs was overwritten")
@@ -3271,6 +3273,7 @@ class TestCreateMcsBatch(unittest.TestCase):
 
         calls = []
         old_create = create_mcs_batch.create_mcs_from_manifest
+        old_runtime = create_mcs_batch._ACTIVE_RUNTIME_DIR
         try:
             create_mcs_batch.create_mcs_from_manifest = (
                 lambda work_dir, path: calls.append(work_dir) or path
@@ -3278,6 +3281,7 @@ class TestCreateMcsBatch(unittest.TestCase):
             self.assertEqual(0, create_mcs_batch.main(output_dir, runtime_dir=runtime_dir))
         finally:
             create_mcs_batch.create_mcs_from_manifest = old_create
+            create_mcs_batch._ACTIVE_RUNTIME_DIR = old_runtime
         self.assertEqual([], calls, "unknown-provenance reimport must not recreate the .mcs")
         with open(output_mcs, "r") as handle:
             self.assertEqual("annotated mcs", handle.read())
@@ -3313,6 +3317,7 @@ class TestCreateMcsBatch(unittest.TestCase):
 
         calls = []
         old_create = create_mcs_batch.create_mcs_from_manifest
+        old_runtime = create_mcs_batch._ACTIVE_RUNTIME_DIR
 
         def fake_create(work_dir_arg, path):
             calls.append(work_dir_arg)
@@ -3325,6 +3330,7 @@ class TestCreateMcsBatch(unittest.TestCase):
             self.assertEqual(0, create_mcs_batch.main(output_dir, runtime_dir=runtime_dir))
         finally:
             create_mcs_batch.create_mcs_from_manifest = old_create
+            create_mcs_batch._ACTIVE_RUNTIME_DIR = old_runtime
         self.assertEqual([work_dir], calls, "genuine source change must reprocess")
 
     def test_partial_work_dir_without_manifest_is_never_converted(self):
