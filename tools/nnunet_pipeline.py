@@ -645,6 +645,14 @@ def prepare_source_grid_cases(
     skipped = []
     cache_hits = 0
     total = len(case_dirs)
+    # Optional case_id -> patient group mapping (F16): same patient's
+    # multi-phase/follow-up scans share one group so they never straddle
+    # train/val. Absent/empty means case-level independence is assumed.
+    patient_groups = {
+        str(key): str(value)
+        for key, value in dict(request.get("patient_groups") or {}).items()
+        if str(value).strip()
+    }
     # Internal bucket keys must be collision-free up front: two Chinese case
     # names would otherwise share one cache dir and one output/input dir
     # (F22). No collisions keeps the plain slug, so caches stay stable.
@@ -707,6 +715,8 @@ def prepare_source_grid_cases(
             _link_or_copy(row["label"], label_dst)
             row["image"] = image_dst
             row["label"] = label_dst
+            if case_id in patient_groups:
+                row["patient_group"] = patient_groups[case_id]
             rows.append(row)
             cache_hits += int(bool(row["cache_hit"]))
         update_status(
@@ -738,19 +748,115 @@ def prepare_source_grid_cases(
     return rows
 
 
-def _split_folds(rows: list[dict[str, Any]], request: dict[str, Any]) -> list[dict[str, list[str]]]:
+def _split_folds(
+    rows: list[dict[str, Any]],
+    request: dict[str, Any],
+    frozen_validation: list[str] | None = None,
+) -> list[dict[str, list[str]]]:
+    """Five rotating folds over case IDs, grouped by patient when known (F16).
+
+    Rows may carry an optional ``patient_group`` (same patient's multi-phase
+    / follow-up scans share one group). When any group info is present the
+    shuffle and fold rotation operate on whole patient groups, so one
+    patient's scans never straddle train/val. Without group info the split
+    assumes case-level independence, which is documented in
+    CONFIG_REFERENCE.md as the standing assumption.
+
+    ``frozen_validation`` pins those cases into val for every fold: a
+    dataset rebuild that adds cases never moves a previously-validated case
+    into training.
+    """
     case_ids = sorted(str(row["case_id"]) for row in rows)
+    frozen = {str(value) for value in (frozen_validation or [])}
+    frozen &= set(case_ids)
+    group_by_case = {
+        str(row["case_id"]): str(row.get("patient_group") or "")
+        for row in rows
+    }
+    has_groups = any(group_by_case.get(case) for case in case_ids)
+    if has_groups:
+        # One shuffle unit per patient group; ungrouped cases are their own
+        # group so a partially-annotated dataset keeps working.
+        groups: dict[str, list[str]] = {}
+        for case in case_ids:
+            groups.setdefault(group_by_case.get(case) or case, []).append(case)
+        unit_ids = sorted(groups)
+        random.Random(int(request["split_seed"])).shuffle(unit_ids)
+        units = [sorted(groups[unit]) for unit in unit_ids]
+        # Freezing a case freezes its whole patient group: half of a
+        # patient's scans in val would reintroduce the leak F16 fixes.
+        for case in list(frozen):
+            group = group_by_case.get(case) or case
+            frozen.update(groups.get(group, []))
+        frozen &= set(case_ids)
+        if len(units) < 2 or float(request["validation_fraction"]) <= 0:
+            return [
+                {
+                    "train": sorted(c for c in case_ids if c not in frozen),
+                    "val": sorted(frozen),
+                }
+                for _ in range(5)
+            ]
+        target = max(
+            len(frozen),
+            max(1, int(round(len(case_ids) * float(request["validation_fraction"])))),
+        )
+        folds: list[dict[str, list[str]]] = []
+        for fold_index in range(5):
+            # Rotate over whole units (never splitting a patient group) and
+            # stop at the first unit that would exceed the target count —
+            # the last fold rotation may fall short of target when groups
+            # are coarse, but never exceeds it.
+            start = fold_index % len(units)
+            validation: set[str] = set(frozen)
+            size = len(validation)
+            offset = 0
+            while offset < len(units) and size < target:
+                index = (start + offset) % len(units)
+                unit = units[index]
+                if unit[0] in validation:
+                    offset += 1
+                    continue
+                if size + len(unit) > target and size > len(frozen):
+                    break
+                validation.update(unit)
+                size += len(unit)
+                offset += 1
+            if len(validation) <= len(frozen) and units:
+                # Target smaller than the smallest free group: keep one
+                # group in val rather than an empty validation set.
+                for unit in units:
+                    if unit[0] not in validation:
+                        validation.update(unit)
+                        break
+            folds.append(
+                {
+                    "train": sorted(value for value in case_ids if value not in validation),
+                    "val": sorted(validation),
+                }
+            )
+        return folds
     random.Random(int(request["split_seed"])).shuffle(case_ids)
     if len(case_ids) < 2 or float(request["validation_fraction"]) <= 0:
-        return [{"train": sorted(case_ids), "val": []} for _ in range(5)]
-    count = max(1, int(round(len(case_ids) * float(request["validation_fraction"]))))
+        return [
+            {
+                "train": sorted(c for c in case_ids if c not in frozen),
+                "val": sorted(frozen),
+            }
+            for _ in range(5)
+        ]
+    count = max(
+        len(frozen),
+        max(1, int(round(len(case_ids) * float(request["validation_fraction"])))),
+    )
     count = min(count, len(case_ids) - 1)
-    folds: list[dict[str, list[str]]] = []
+    folds = []
     for fold_index in range(5):
         start = (fold_index * count) % len(case_ids)
         validation = {
             case_ids[(start + offset) % len(case_ids)] for offset in range(count)
         }
+        validation |= frozen
         folds.append(
             {
                 "train": sorted(value for value in case_ids if value not in validation),
@@ -800,7 +906,25 @@ def _materialize_nnunet_raw(
     shutil.rmtree(str(staging), ignore_errors=True)
     (staging / "imagesTr").mkdir(parents=True)
     (staging / "labelsTr").mkdir(parents=True)
-    folds = _split_folds(rows, request)
+    # Frozen validation contract (F16): when this dataset already published
+    # a fold-0 validation set, those cases stay in val on every rebuild, so
+    # growing the dataset never moves previously-validated cases into
+    # training (and model comparisons against earlier runs stay meaningful).
+    previous_split = preprocessed_root / dataset_name / "splits_final.json"
+    frozen_val: set[str] = set()
+    if previous_split.is_file():
+        try:
+            previous = read_json(previous_split, []) or []
+            if previous and isinstance(previous[0], dict):
+                frozen_val = {
+                    str(value) for value in previous[0].get("val") or []
+                }
+        except Exception:
+            frozen_val = set()
+    frozen_val &= {str(row["case_id"]) for row in rows}
+    folds = _split_folds(
+        rows, request, frozen_validation=frozen_val or None
+    )
     # Collision-free keys so two lossy-slugged cases cannot merge inside
     # imagesTr/labelsTr or the splits (F22).
     case_key_by_id = unique_case_keys(
@@ -844,6 +968,11 @@ def _materialize_nnunet_raw(
                     "case_id": str(row["case_id"]),
                     "nnunet_case_id": case_key_by_id[str(row["case_id"])],
                     "fingerprint": row["fingerprint"],
+                    **(
+                        {"patient_group": str(row["patient_group"])}
+                        if row.get("patient_group")
+                        else {}
+                    ),
                 }
                 for row in rows
             ],

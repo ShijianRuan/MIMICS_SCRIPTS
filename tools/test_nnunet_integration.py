@@ -416,6 +416,202 @@ class DiscoveryTests(unittest.TestCase):
             self.assertEqual(len(split[0]["val"]), 1)
             self.assertEqual(len(fingerprint), 64)
 
+    def _split_rows(self, count, patient_groups=None):
+        """Minimal rows for _split_folds; patient_groups maps index->group."""
+        rows = []
+        for index in range(count):
+            row = {
+                "case_id": "case{:02d}".format(index),
+                "image": "i.nii.gz",
+                "label": "l.nii.gz",
+                "fingerprint": str(index),
+            }
+            if patient_groups and index in patient_groups:
+                row["patient_group"] = patient_groups[index]
+            rows.append(row)
+        return rows
+
+    def _request(self, validation_fraction=0.2, split_seed=42):
+        return common.normalize_request(
+            {
+                "operation": "train",
+                "task_name": "Liver",
+                "task_id": "liver",
+                "labels": [{"name": "liver", "id": 1}],
+                "validation_fraction": validation_fraction,
+                "split_seed": split_seed,
+            }
+        )
+
+    def test_split_folds_never_straddles_patient_group(self):
+        # F16: same patient's scans (case00/case01 = patient A) must land on
+        # the same side of every fold, never one in train and one in val.
+        rows = self._split_rows(10, patient_groups={0: "A", 1: "A",
+                                                    2: "B", 3: "B",
+                                                    4: "C"})
+        folds = pipeline._split_folds(rows, self._request())
+        for fold in folds:
+            sides = {
+                "train" if case in fold["train"] else "val"
+                for case in ("case00", "case01")
+            }
+            self.assertEqual(len(sides), 1,
+                             "patient A straddles train/val: {}".format(fold))
+            sides_b = {
+                "train" if case in fold["train"] else "val"
+                for case in ("case02", "case03")
+            }
+            self.assertEqual(len(sides_b), 1,
+                             "patient B straddles train/val: {}".format(fold))
+            # No case may vanish or appear in both sides.
+            self.assertEqual(
+                sorted(fold["train"] + fold["val"]),
+                sorted(row["case_id"] for row in rows))
+
+    def test_split_folds_without_groups_keeps_case_independence(self):
+        # No patient_group info: previous case-level behavior must be
+        # unchanged (same seed → same deterministic split).
+        rows = self._split_rows(10)
+        request = self._request()
+        folds = pipeline._split_folds(rows, request)
+        self.assertEqual(len(folds), 5)
+        self.assertEqual(len(folds[0]["val"]), 2)
+        self.assertEqual(len(folds[0]["train"]), 8)
+        # No frozen set → identical to the historical rotation.
+        case_ids = sorted(row["case_id"] for row in rows)
+        import random as _random
+        _random.Random(42).shuffle(case_ids)
+        expected_val = set(case_ids[:2])
+        self.assertEqual(set(folds[0]["val"]), expected_val)
+
+    def test_split_folds_frozen_validation_stays_in_val(self):
+        # F16 acceptance: adding data never moves an old validation case
+        # into training. case03 was validated before; after growing the
+        # dataset it must still be in val on every fold.
+        rows = self._split_rows(10)
+        folds = pipeline._split_folds(
+            rows, self._request(), frozen_validation=["case03"])
+        for fold in folds:
+            self.assertIn("case03", fold["val"])
+            self.assertNotIn("case03", fold["train"])
+
+    def test_split_folds_frozen_group_freezes_whole_patient(self):
+        # Freezing one case of a patient freezes the patient's whole group,
+        # otherwise the other scan would reintroduce the train/val leak.
+        rows = self._split_rows(10, patient_groups={0: "A", 1: "A",
+                                                    2: "B", 3: "B",
+                                                    4: "C"})
+        folds = pipeline._split_folds(
+            rows, self._request(), frozen_validation=["case00"])
+        for fold in folds:
+            self.assertIn("case00", fold["val"])
+            self.assertIn("case01", fold["val"])
+
+    def test_split_folds_frozen_case_missing_from_rows_is_ignored(self):
+        # A frozen case that no longer exists must not break the split.
+        rows = self._split_rows(10)
+        folds = pipeline._split_folds(
+            rows, self._request(), frozen_validation=["gone-case"])
+        for fold in folds:
+            self.assertNotIn("gone-case", fold["val"])
+            self.assertEqual(len(fold["train"]) + len(fold["val"]), 10)
+
+    def test_materialize_preserves_previous_validation_cases(self):
+        # F16 end-to-end: rebuild the same dataset with more cases; the
+        # fold-0 validation cases of the first build stay in val.
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+
+            def build(count):
+                rows = []
+                for index in range(count):
+                    image = root / "prepared" / str(index) / "image.nii.gz"
+                    label = root / "prepared" / str(index) / "label.nii.gz"
+                    image.parent.mkdir(parents=True, exist_ok=True)
+                    image.write_bytes(("image{}".format(index)).encode())
+                    label.write_bytes(("label{}".format(index)).encode())
+                    rows.append({
+                        "case_id": "case{}".format(index),
+                        "image": image,
+                        "label": label,
+                        "fingerprint": str(index),
+                    })
+                request = common.normalize_request({
+                    "operation": "train",
+                    "task_name": "Liver",
+                    "task_id": "liver",
+                    "workspace": root / "workspace",
+                    "labels": [{"name": "liver", "id": 1}],
+                    "validation_fraction": 0.2,
+                    "split_seed": 42,
+                })
+                dataset, _fingerprint = pipeline._materialize_nnunet_raw(
+                    rows, request, root / "raw", root / "preprocessed")
+                split = common.read_json(
+                    root / "preprocessed" / dataset.name /
+                    "splits_final.json")
+                return split
+
+            first = build(10)
+            old_val = set(first[0]["val"])
+            self.assertTrue(old_val)
+            second = build(12)
+            new_val = set(second[0]["val"])
+            self.assertTrue(old_val <= new_val,
+                            "old validation cases moved out of val: {} -> {}"
+                            .format(sorted(old_val), sorted(new_val)))
+            for fold in second:
+                self.assertFalse(old_val & set(fold["train"]))
+
+    def test_materialize_records_patient_groups_in_manifest(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            rows = []
+            for index in range(6):
+                image = root / "prepared" / str(index) / "image.nii.gz"
+                label = root / "prepared" / str(index) / "label.nii.gz"
+                image.parent.mkdir(parents=True, exist_ok=True)
+                image.write_bytes(("image{}".format(index)).encode())
+                label.write_bytes(("label{}".format(index)).encode())
+                row = {
+                    "case_id": "case{}".format(index),
+                    "image": image,
+                    "label": label,
+                    "fingerprint": str(index),
+                }
+                if index < 2:
+                    row["patient_group"] = "patientA"
+                rows.append(row)
+            request = common.normalize_request({
+                "operation": "train",
+                "task_name": "Liver",
+                "task_id": "liver",
+                "workspace": root / "workspace",
+                "labels": [{"name": "liver", "id": 1}],
+                "validation_fraction": 0.3,
+                "split_seed": 42,
+            })
+            dataset, _fingerprint = pipeline._materialize_nnunet_raw(
+                rows, request, root / "raw", root / "preprocessed")
+            manifest = common.read_json(
+                dataset / "mimics_dataset_manifest.json")
+            groups = {
+                entry["case_id"]: entry.get("patient_group")
+                for entry in manifest["cases"]
+            }
+            self.assertEqual(groups["case0"], "patientA")
+            self.assertEqual(groups["case1"], "patientA")
+            self.assertIsNone(groups["case2"])
+            # Grouping also holds in the published split.
+            split = common.read_json(
+                root / "preprocessed" / dataset.name / "splits_final.json")
+            for fold in split:
+                sides = {
+                    "train" if "case0" in fold["train"] else "val",
+                    "train" if "case1" in fold["train"] else "val",
+                }
+                self.assertEqual(len(sides), 1)
+
     def test_unique_case_keys_preserve_slug_without_collision(self):
         # F22: no-collision workspaces must keep their existing keys so
         # caches and dataset fingerprints stay stable.
@@ -1663,7 +1859,15 @@ class JobLifecycleTests(unittest.TestCase):
                     "manifest_path": "D:/old-machine/model/mimics_model_manifest.json",
                 },
             )
-            models = common.load_models(workspace)
+            # Isolate from the workstation's global registry, which may
+            # legitimately carry live models of its own (the neighboring
+            # dead-row test does the same).
+            with mock.patch.object(
+                common,
+                "model_registry_paths",
+                return_value=[workspace / "model_registry.json"],
+            ):
+                models = common.load_models(workspace)
             self.assertEqual(len(models), 1)
             self.assertEqual(Path(models[0]["model_dir"]), model_dir.resolve())
 
