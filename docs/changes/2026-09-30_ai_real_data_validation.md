@@ -82,15 +82,70 @@ nnInteractive 交互标注+任务微调）各有一份可信的"真实有效"证
 - job 2 复跑（同 job 目录，容器内 `nnUNet_compile=false`，GPU 1）：训练正常
   推进，92s/epoch，Dice 逐 epoch 上升（epoch 4：liver 0.63 / spleen 0.32 /
   kidney_L 0.19 / kidney_R 0.31）。
-- 验收判据：任务 completed；loss 明显下降；validation Dice 上升趋势；模型
-  下载注册（mimics_model_manifest.json 远程溯源）。held-out 推理 Dice：
-  liver/spleen ≥ 0.7，kidney ≥ 0.5。
-- （待补充：最终训练曲线、耗时、held-out Dice 表）
+- **验收判据全部达标（2026-10-01）**：
+  - 任务 completed：50 epochs，92s/epoch（含 mcs_refresh 后台导出 mask 与
+    重新预处理），模型 `nnunet_20261001T183729_3a01cb98` 下载并注册进本地
+    模型注册表（mimics_model_manifest.json 带远程溯源）。
+  - 训练收敛：训练 epoch pseudo dice 逐 epoch 上升，最终 liver 0.82 /
+    spleen 0.36 / kidney_L 0.79 / kidney_R 0.82（spleen 因 18 例中 3 例
+    牌缺如/小体积，中位水平受限，但推理仍达标，见下表）。
+  - **held-out 推理 Dice（本地 GPU，02_Predict_Current_Case 等价链路，
+    mask 经 mimics_bridge 应用回 .mcs 后导出对 GT）**：
 
-## Phase 3：FlexiCT liver 少样本远程微调（待做）
+    | case | liver | spleen | kidney_left | kidney_right |
+    |------|-------|--------|-------------|--------------|
+    | s0038 | 0.9483 | 0.9192 | 0.9778 | 0.9792 |
+    | s0039 | 0.9651 | 0.9584 | 0.9698 | 0.9553 |
+    | s0042 | 0.9783 | 0.9875 | 0.9859 | 0.9763 |
+
+  - 判据 liver/spleen ≥ 0.7、kidney ≥ 0.5：**3/3 例全部通过，远超阈值**。
+    结论：nnU-Net 多器官远程训练 + mcs_refresh 标签源 + 本地推理链路
+    **真实有效**。
+- 训练中真实发生的"控制器死亡→重挂"场景恰好验证了 `reattach` 路径：本地
+  status.json 呈终态后按协议重置为 training 再 `remote_training_controller.py
+  reattach`，控制器从远端下载模型并完成注册——该恢复路径此前从未实机走过。
+
+## Phase 3：FlexiCT liver 少样本远程微调（进行中）
 
 - 判据：completed、loss 下降、checkpoint_best 注册；held-out 推理
   liver Dice ≥ 0.6。
+- 链路与 nnU-Net Phase 2 相同的远程控制器 + 171 服务器，差异点：flexict
+  2d 配置、few-shot 8 例（s0001/s0004/s0006/s0009–s0013）、epochs 20、
+  trainer flexict2d_Trainer、基座权重经 /models/flexict 指纹校验挂载。
+- **失败史（每个都是独立根因，逐一修复）**：
+  - job 1 `75a88aa1`：GPU 忙拒绝——gpu_device=auto 检查所有卡，GPU 1 被占。
+    非缺陷；171_root profile 设 gpu_device=0。
+  - job 2 `507fd5e0`：171 新服务器缺 /models/flexict 基座权重。手动上传
+    （两个 576MB safetensors）后通过。
+  - job 3 `0ec68c3f`：容器 /dev/shm 耗尽——Docker 默认 64MB，torch 共享内存
+    队列饿死。**P1-5 已修复**（commit 466793c，控制器传 --shm-size=16g）。
+  - job 4 `b41c7e7f`：OOM——nnU-Net 2d planner 默认 batch 66 对 16GB A4000
+    过大。请求加 batch_size=12。
+  - job 5 `8f3dec09`：batch 12 仍以 batch 66 跑——远程 prepared cache 仅按
+    数据集字节寻址，planning-only 变更命中陈旧缓存、预处理被整段跳过。
+    **P1-6 已修复**（commit 49aa7c5，planning 字段哈希进缓存 identity）。
+  - job 6 `c4d437f7`：缓存 identity 修复生效（namespace 带 `_a30406c5` 后缀，
+    "Batch size override: 66 -> 12" 出现在日志，plans 中 batch_size=12），但
+    FlexiCT Primus 基座网络过重，batch 12 × patch [192,256] 首个 forward 的
+    up_projection GELU 仍 OOM（需 972MiB / 剩 770MiB）。非代码缺陷——是
+    16GB 卡对该骨干的固有显存压力。降 batch 6 重提（job 7）。
+- **job 7 `4d8f93c1`（batch 6）：训练完成（2026-10-01）**。20 epochs，
+  ~3.3 min/epoch；train_loss -0.79 → -0.98 单调下降；EMA pseudo Dice
+  0.585 → 0.724 逐 epoch 上升；fold 内验证 Dice 0.80。模型
+  `flexict_20261001T214342_a5e672ad` 下载注册（flexict_model_manifest.json
+  带远程溯源：171_root、镜像 ID、GPU 0）。
+- **held-out 推理（本地 GPU，02_Predict_Current_Case 等价链路，
+  checkpoint_best、TTA 关、纯推理 ~46s/例）liver Dice**：
+
+  | case | liver |
+  |------|-------|
+  | s0038 | 0.9722 |
+  | s0039 | 0.9761 |
+  | s0042 | 0.9754 |
+
+- **判据 liver Dice ≥ 0.6：3/3 例全部通过（实际 ~0.97）**。结论：FlexiCT
+  liver 少样本远程微调 + 本地推理链路**真实有效**——few-shot 8 例 × 20
+  epochs 即可把通用基座微调到接近专用模型水平。
 
 ## Phase 4a：nnInteractive 官方模型交互标注（完成，全部达标）
 
@@ -260,6 +315,37 @@ nnInteractive 交互标注+任务微调）各有一份可信的"真实有效"证
 - **证据**：复跑（同 job 目录 + `nnUNet_compile=false`）训练正常推进，
   92s/epoch，Dice 逐 epoch 上升；smoke 门禁 8/8 绿。
 
+### P1-5 容器 /dev/shm 默认 64MB 使远程训练必死于共享内存耗尽（已修复，commit 466793c）
+
+- **痛点**：远程训练容器内 torch 数据加载的共享内存队列在预处理/训练启动
+  阶段写满 Docker 默认 64MB /dev/shm，报 "unable to write to file
+  </torch_...>: No space left on device"，job 失败。用户无法从 Mimics 侧
+  配置或规避。
+- **根因**：`remote_training_controller._launch_container` 的 docker run 命令
+  未设置 `--shm-size`；nnU-Net 多线程增强器的 worker 间张量队列依赖
+  /dev/shm，64MB 远不够。
+- **修复**：docker run 增加 `--shm-size=16g`（nerdctl 默认较大，无需处理）。
+- **防回归测试**：`test_launch_container_sets_shm_size`。
+- **证据**：job 3 之后所有远程容器不再出现 shm 耗尽；test_remote_training
+  104 项全绿。
+
+### P1-6 远程 prepared cache 仅按数据集字节寻址，planning 变更命中陈旧 plans（已修复，commit 49aa7c5）
+
+- **痛点**：用户在向导里改了 batch_size / patch_size / spacing / configuration
+  等规划参数重跑远程训练，控制器显示一切正常，但远程端预处理被整段跳过、
+  旧 plans（含旧 batch size）被直接复用——训练表现与用户设置完全脱节，
+  且无任何提示。FlexiCT 验证中表现为 batch 66 OOM 反复复发。
+- **根因**：`_prepare_flexict`/`_prepare_nnunet` 生成的远程 prepared cache
+  identity 只由 `_dataset_parts_fingerprint`（数据集字节）决定；planning
+  字段不在寻址键里，内容寻址缓存对规划变更不敏感。
+- **修复**：新增 `_prepared_cache_identity`，把
+  configuration/plans/spacing/patch_size/batch_size 哈希进 identity；缺失
+  该组字段时退回纯数据集指纹（向后兼容）。
+- **防回归测试**：`test_prepared_cache_identity_includes_planning_fields`
+  （batch 12 与 66 产生不同 identity；非训练 job 保持纯指纹）。
+- **证据**：job 6（c4d437f7）日志出现 "Batch size override: 66 -> 12" 与
+  plans batch_size=12，缓存 namespace 带新 identity 后缀，预处理确实重跑。
+
 ## 性能基线首次填数
 
 | 基线项 | 数值 | 条件 |
@@ -267,4 +353,6 @@ nnInteractive 交互标注+任务微调）各有一份可信的"真实有效"证
 | 批量导入耗时 | 14.8 min（≈40s/例） | 22 例真实 CT，后台 Mimics 单进程复用，Z: 网络盘读取 |
 | nnInteractive 点 prompt 推理（单次） | 热状态 1.7–9s；冷启动到首个可用预测 ~9 min | RTX 3060，官方/微调模型，1 正点+1 负点 |
 | nnInteractive few-shot 微调 | 78.9 min（20 epochs，6 训练+2 验证例） | RTX 3060，CLoPA-IN，官方模型为基座 |
-| nnU-Net 单例推理 | 待测 | Phase 2 held-out 推理时测 |
+| nnU-Net 单例推理 | 纯推理 5–16s/例（240×240×333 级 CT）；全 job 4–8 min | RTX 3060，3d_fullres 4 标签模型，TTA 关；job 时长含 worker 进程启动、模型加载、空间校验 |
+| FlexiCT 单例推理 | 纯推理 ~46s/例；全 job ~5 min | RTX 3060，2d few-shot liver 模型，checkpoint_best，TTA 关 |
+| FlexiCT 远程 few-shot 微调 | 66 min（20 epochs，8 训练例，batch 6，~3.3 min/epoch） | 171 A4000 16GB，远程控制器全链路（上传/预处理/训练/下载注册） |
