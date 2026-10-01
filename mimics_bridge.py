@@ -905,30 +905,53 @@ def _read_mask_array_and_affine(path: str) -> tuple[np.ndarray, np.ndarray]:
     return np.ascontiguousarray(array), affine_ras
 
 
+def _validate_mask_values(array: np.ndarray, path: str) -> np.ndarray:
+    """Shared numeric-semantics gate for every mask entry point (F23).
+
+    Non-finite values are never silently promoted to foreground (NaN != 0 is
+    True, so the old non-zeroing turned them into organs). Fractional floats
+    are probability-like masks, not label data: the caller has no declared
+    threshold, so the mask is rejected with the conversion rule instead of
+    being silently thresholded at 0 or 0.5. Integer-valued data of any dtype
+    (0/1, 0/255, labelmaps) passes unchanged.
+    """
+    if not np.all(np.isfinite(array)):
+        raise ValueError(
+            "mask contains NaN or infinite values: {}. "
+            "Fix or regenerate the mask - non-finite voxels cannot be "
+            "interpreted as foreground/background.".format(path)
+        )
+    if np.issubdtype(array.dtype, np.floating):
+        rounded = np.rint(array)
+        if not np.allclose(array, rounded, atol=1e-5, rtol=0.0):
+            raise ValueError(
+                "mask contains fractional float values, so it is a "
+                "probability-like map, not a segmentation: {}. "
+                "Threshold it to 0/1 first (for example value > 0.5 for a "
+                "0..1 probability map, or value == expected_label for "
+                "soft multi-label outputs).".format(path)
+            )
+        array = rounded.astype(np.int64)
+    return array
+
+
 def read_nifti_mask(path: str) -> np.ndarray:
-    array, _affine = _read_mask_array_and_affine(path)
+    array = _validate_mask_values(*_read_mask_array_and_affine(path))
     return (array != 0).astype(np.uint8)
 
 
 def read_nifti_mask_with_affine(path: str) -> tuple[np.ndarray, np.ndarray]:
     array, affine_ras = _read_mask_array_and_affine(path)
-    return (array != 0).astype(np.uint8), affine_ras
+    return (
+        (_validate_mask_values(array, path) != 0).astype(np.uint8),
+        affine_ras,
+    )
 
 
 def read_mask_labels_with_affine(path: str) -> tuple[np.ndarray, np.ndarray, list]:
     """Read a medical mask while preserving integer label values and RAS geometry."""
     array, affine_ras = _read_mask_array_and_affine(path)
-    if not np.all(np.isfinite(array)):
-        raise ValueError("mask contains NaN or infinite label values: {}".format(path))
-
-    if np.issubdtype(array.dtype, np.floating):
-        rounded = np.rint(array)
-        if np.allclose(array, rounded, atol=1e-5, rtol=0.0):
-            array = rounded.astype(np.int64)
-        else:
-            # Probability-like masks are binary segmentations, not thousands
-            # of separate floating-point labels.
-            array = (array != 0).astype(np.uint8)
+    array = _validate_mask_values(array, path)
     labels = [value.item() if hasattr(value, "item") else value for value in np.unique(array)]
     return np.ascontiguousarray(array), affine_ras, labels
 
