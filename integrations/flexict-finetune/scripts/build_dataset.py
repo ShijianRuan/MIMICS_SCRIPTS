@@ -11,7 +11,9 @@ Output: a standard nnU-Net raw dataset at <out>/Dataset<id>_<name>/
     dataset.json   (channel 0 = CT, labels {background:0, <name>:1}, 0/1 single label)
 
 Images and labels are reoriented to RAS (canonical) and checked for matching
-shape/affine. The train/test split is stratified by the target's Z-start so a
+shape/affine. The train/test split is stratified by the target's physical
+superior-inferior start (from the affine's world mapping, so isotropic,
+anisotropic, axis-permuted, flipped, and oblique volumes rank correctly) so a
 few-shot train set spans the cranio-caudal extent of the organ.
 
 Example (liver few-shot from Totalsegmentator v201):
@@ -30,11 +32,16 @@ import numpy as np
 
 
 def _zstart(ct_path, lbl_path):
-    """Relative Z-start of the target in the volume, for stratified splitting."""
+    """Relative physical SI start of the target, for stratified splitting.
+
+    The voxel axis is chosen by world direction (which axis maps to the
+    superior direction), not by largest spacing — isotropic RAS data would
+    otherwise be stratified along an in-plane axis (F29).
+    """
     la = np.asanyarray(nib.load(str(lbl_path)).dataobj) > 0
     img = nib.load(str(ct_path))
-    sp = np.linalg.norm(img.affine[:3, :3], axis=0)
-    zax = int(np.argmax(sp))
+    direction = np.abs(img.affine[:3, :3] @ np.array([0.0, 0.0, 1.0]))
+    zax = int(np.argmax(direction))
     zidx = np.where(la.any(axis=tuple(i for i in range(3) if i != zax)))[0]
     return (int(zidx.min()) / la.shape[zax]) if len(zidx) else 0.5
 
@@ -68,9 +75,14 @@ def main():
     if not cases:
         raise SystemExit(f"no cases with ct.nii.gz + segmentations/{args.label_name}.nii.gz "
                          f"under {src}")
-    print(f"found {len(cases)} cases with label '{args.label_name}'")
+    if len(cases) < 2:
+        raise SystemExit("need at least 2 usable cases (1 train + 1 test); "
+                         f"found {len(cases)}")
+    if args.n_train < 1:
+        raise SystemExit(f"--n-train must be >= 1, got {args.n_train}")
 
-    # stratified split by Z-start: train cases spread across cranio-caudal range
+    # stratified split by physical SI start: train cases spread across
+    # cranio-caudal range
     n_train = min(args.n_train, len(cases) - 1)
     cases_sorted = sorted(cases, key=lambda c: _zstart(c[1], c[2]))
     step = len(cases_sorted) / n_train

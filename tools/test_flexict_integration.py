@@ -281,6 +281,93 @@ class TestTrainValSplit(unittest.TestCase):
         self.assertEqual(len(val), 2)
         self.assertEqual(len(train), 1)
 
+    def _si_start(self, affine, target):
+        """physical_si_start on an in-memory image with a single target voxel."""
+        import nibabel as nib
+        import numpy as np
+
+        img = nib.Nifti1Image(np.zeros((10, 10, 10), np.float32), affine)
+        arr = np.zeros((10, 10, 10), bool)
+        arr[target] = True
+        return fp.physical_si_start(img, arr)
+
+    def test_si_start_isotropic_ras_uses_physical_axis(self):
+        # F29: isotropic RAS data — the old argmax(spacing) tie-broke to
+        # axis 0 (X); the physical SI axis is Z, so a target at z=8 must
+        # report 0.8, not 0.1.
+        import numpy as np
+
+        self.assertEqual(
+            self._si_start(np.diag([0.8, 0.8, 0.8, 1.0]), (1, 5, 8)), 0.8)
+
+    def test_si_start_anisotropic_axial(self):
+        # Classic axial CT (thick Z slices): axis 2 is both the thickest
+        # and the physical SI axis.
+        import numpy as np
+
+        self.assertEqual(
+            self._si_start(np.diag([0.6, 0.6, 2.5, 1.0]), (1, 5, 8)), 0.8)
+
+    def test_si_start_axis_permuted(self):
+        # SI encoded along voxel axis 0 with the *thinnest* spacing: the old
+        # argmax(spacing) heuristic picked axis 2; the physical world
+        # direction must win.
+        import numpy as np
+
+        affine = np.array([[0.0, 0.0, 0.6, 0.0],
+                           [0.6, 0.0, 0.0, 0.0],
+                           [0.0, 0.6, 0.0, 0.0],
+                           [0.0, 0.0, 0.0, 1.0]])
+        self.assertEqual(self._si_start(affine, (8, 1, 5)), 0.8)
+
+    def test_si_start_flipped_z(self):
+        # Flipped SI (negated Z column): the physical SI axis is still
+        # voxel axis 2.
+        import numpy as np
+
+        self.assertEqual(
+            self._si_start(np.diag([0.8, 0.8, -0.8, 1.0]), (1, 5, 8)), 0.8)
+
+    def test_si_start_empty_target(self):
+        # No foreground → neutral 0.5, no crash, no division by zero.
+        import nibabel as nib
+        import numpy as np
+
+        img = nib.Nifti1Image(np.zeros((10, 10, 10), np.float32),
+                              np.diag([0.8, 0.8, 0.8, 1.0]))
+        self.assertEqual(
+            fp.physical_si_start(img, np.zeros((10, 10, 10), bool)), 0.5)
+
+    def test_split_stratifies_across_physical_si(self):
+        # With >= 8 cases the val set must span the physical cranio-caudal
+        # range rather than cluster at one end (F29 acceptance: same
+        # physical target ordering across orientations).
+        import nibabel as nib
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as tmp:
+            affine = np.diag([1.0, 1.0, 1.0, 1.0])
+            img_path = Path(tmp) / "img.nii.gz"
+            nib.save(nib.Nifti1Image(
+                np.zeros((10, 10, 10), np.float32), affine), str(img_path))
+            rows = []
+            for i in range(8):
+                label = np.zeros((10, 10, 10), np.uint8)
+                label[1, 5, i + 1] = 1
+                label_path = Path(tmp) / "lbl{}.nii.gz".format(i)
+                nib.save(nib.Nifti1Image(label, affine), str(label_path))
+                rows.append({"case_id": "case{:02d}".format(i),
+                             "image": str(img_path),
+                             "label": str(label_path)})
+            train, val = fp._split_train_val(rows, {"val_cases": 2})
+        # case i has SI start (i+1)/10; the stratified pick must take one
+        # inferior (small start) and one superior-half case, not two
+        # adjacent inferior cases.
+        starts = sorted(int(c[-2:]) + 1 for c in val)
+        self.assertEqual(len(val), 2)
+        self.assertLessEqual(starts[0], 4)
+        self.assertGreaterEqual(starts[1], 5)
+
 
 class TestScanFlexictCases(unittest.TestCase):
     def test_scan_reports_missing_label(self):
