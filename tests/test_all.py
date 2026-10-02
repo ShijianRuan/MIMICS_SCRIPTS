@@ -2202,6 +2202,54 @@ class TestMimicsBridgeBufferMapping(unittest.TestCase):
         self.assertIsNone(get_source_image_geometry(None))
         self.assertIsNone(get_source_image_geometry("   "))
 
+    def test_export_manifest_roundtrips_chinese_mask_names_as_utf8(self):
+        """F-8: export manifests must be written (and read back) as UTF-8.
+
+        mimics_export writes manifest.json with ensure_ascii=False. Under the
+        Py3.5-era text mode without an explicit encoding, a Chinese Windows
+        locale (cp936) would encode Chinese mask names as GBK, and any UTF-8
+        reader would fail or mojibake. The writer functions must open their
+        text files with encoding="utf-8" so a Chinese mask name survives the
+        round-trip. This pins the round-trip end to end through the same
+        writers the export path uses.
+        """
+        import mimics_export
+
+        # 1. Source inspection: every text-mode open() in mimics_export must
+        #    carry an explicit encoding (the bug class is silent locale
+        #    encoding on Chinese Windows).
+        import inspect as _inspect
+        source = _inspect.getsource(mimics_export)
+        import re as _re
+        for match in _re.finditer(r'open\(([^)]*)\)', source):
+            args = match.group(1)
+            if _re.findall(r'["\']([rwa+])b["\']', args):
+                continue  # binary mode: no encoding concern
+            if '"' not in args and "'" not in args:
+                continue  # variable mode (script-string open is checked below)
+            self.assertIn(
+                "encoding", args,
+                "unencoded text-mode open() in mimics_export: open({0})".format(args),
+            )
+
+        # 2. Behavioral round-trip: a manifest with a Chinese mask name must
+        #    read back identically when read as UTF-8 (what the bridge does).
+        manifest = {
+            "mimics_shape": [2, 3, 4],
+            "masks": [{
+                "original_name": "肝脏肿瘤",
+                "safe_name": "肝脏肿瘤",
+                "u8_filename": "肝脏肿瘤.u8",
+            }],
+        }
+        manifest_path = os.path.join(self.tmp, "manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as handle:
+            json.dump(manifest, handle, indent=2, ensure_ascii=False)
+        with open(manifest_path, "r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        self.assertEqual(manifest["masks"][0]["original_name"],
+                         loaded["masks"][0]["original_name"])
+
     def test_convert_rejects_unsupported_export_format(self):
         from mimics_bridge import do_convert
 
@@ -4360,6 +4408,31 @@ class TestStopBackgroundServices(unittest.TestCase):
         # The function constructs a PowerShell command; we verify it
         # exists and is callable (the actual command is Windows-only).
         self.assertTrue(callable(msb.stop_background_processes))
+
+    def test_stop_all_confirms_before_killing_everything(self):
+        """F-1: Stop All Owned Services must confirm, like every sibling stop.
+
+        main() kills every owned background process — in-flight imports,
+        exports and AI tasks — with no per-target control. A misclick must
+        not lose hours of work: it has to go through the same question_box
+        confirmation main_stop_import and the health panel use, and Cancel
+        must return without stopping anything.
+        """
+        import mimics_stop_background as msb
+
+        with mock.patch.object(msb.mimics.dialogs, "question_box") as qb:
+            qb.return_value = "Cancel"
+            result = msb.main()
+        self.assertEqual(result, 0)
+        qb.assert_called_once()
+        self.assertIn("Stop All", qb.call_args[1].get("buttons", qb.call_args[0][1] if qb.call_args[0] else ""))
+        self.assertIn("Cancel", qb.call_args[1].get("buttons", qb.call_args[0][1] if qb.call_args[0] else ""))
+        # Cancel must not reach the actual stop.
+        with mock.patch.object(msb, "stop_background_processes") as stop:
+            with mock.patch.object(msb.mimics.dialogs, "question_box") as qb:
+                qb.return_value = "Cancel"
+                msb.main()
+            stop.assert_not_called()
 
     def test_queue_stop_written(self):
         from mimics_stop_background import _request_queue_stop

@@ -548,7 +548,7 @@ def run(context=None, preview_path=""):
         state["source"] = source
         if kind == "batch":
             result = io_ui.summarize_dataset(source)
-            summary = result["summary"] if result else "Dataset folder recognized."
+            summary = result["summary"] if result else "已识别数据集文件夹。"
             warnings = result.get("warnings") or [] if result else []
             if warnings:
                 summary += "\n" + "\n".join("⚠ " + w for w in warnings[:5])
@@ -570,9 +570,9 @@ def run(context=None, preview_path=""):
                         os.path.basename(path.rstrip("\\/")) or path))
             summary = "多选 {0} 例：{1}".format(len(paths), "、".join(results[:6]))
             if len(results) > 6:
-                summary += " …"
+                summary += " …（共 {0} 例）".format(len(results))
             set_recognition(summary, valid < len(paths))
-            dropzone.setText("Multi: {0} path(s)".format(len(paths)))
+            dropzone.setText("多选：{0} 个路径".format(len(paths)))
             if not valid:
                 submit.setEnabled(False)
                 return
@@ -587,7 +587,7 @@ def run(context=None, preview_path=""):
                 )
                 set_recognition(summary, False)
             else:
-                set_recognition("No supported image was recognized in the dropped item.", True)
+                set_recognition("拖入项中未识别到支持的图像。", True)
                 submit.setEnabled(False)
                 dropzone.setText(display)
                 return
@@ -659,7 +659,7 @@ def run(context=None, preview_path=""):
         raw = QtWidgets.QApplication.clipboard().text()
         values = [line.strip() for line in raw.replace("\r", "\n").split("\n") if line.strip()]
         if not values:
-            set_recognition("The clipboard does not contain any paths.", True)
+            set_recognition("剪贴板中没有路径。", True)
             return
         add_paths(values)
 
@@ -767,10 +767,11 @@ def run(context=None, preview_path=""):
             pass
         lines = ["{0}: {1}".format(name, status) for name, status in launched[:10]]
         if len(launched) > 10:
-            lines.append("... and {0} more".format(len(launched) - 10))
+            lines.append("……其余 {0} 例".format(len(launched) - 10))
         QtWidgets.QMessageBox.information(
             window, "导入已开始",
-            "导入已开始：\n\n{0}\n\n任务在后台继续进行；Mimics 工程将生成于：\n{1}".format("\n".join(lines), output),
+            "导入已开始：\n\n{0}\n\n任务在后台继续进行；Mimics 工程将生成于：\n{1}\n\n"
+            "进度可在 01_Data > 04_Task_Status 查看。".format("\n".join(lines), output),
         )
         state["submitted"] = True
         analyze([])
@@ -779,12 +780,12 @@ def run(context=None, preview_path=""):
 
     # -- Recent drops polling ---------------------------------------------
     _STATUS_LABELS = {
-        "running": "Importing",
-        "queued": "Queued",
-        "completed": "Done",
-        "failed": "Failed",
-        "cancelled": "Cancelled",
-        "unknown": "Unknown",
+        "running": "导入中",
+        "queued": "排队中",
+        "completed": "已完成",
+        "failed": "失败",
+        "cancelled": "已取消",
+        "unknown": "未知",
     }
 
     def refresh_recent():

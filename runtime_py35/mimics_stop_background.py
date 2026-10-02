@@ -1448,6 +1448,24 @@ def _start_stop_monitor(monitor, poll_seconds=0.5, timeout_seconds=90.0):
 # -- Main entry points --------------------------------------------------
 
 def main():
+    # This kills every owned background process at once — in-flight imports,
+    # exports and AI tasks — so the annotator must confirm with the scope
+    # spelled out. Same question_box pattern as main_stop_import and the
+    # health panel's stop action.
+    answer = mimics.dialogs.question_box(
+        message=(
+            "Stop all background services started by this project?\n\n"
+            "This stops every owned background process: in-flight imports, "
+            "exports and AI tasks are cancelled. Finished work on disk is "
+            "kept, but running tasks lose their progress since the last "
+            "saved step."
+        ),
+        buttons="Stop All;Cancel",
+        title="Stop All Owned Services",
+        ui_blocking=True,
+    )
+    if answer != "Stop All":
+        return 0
     result = stop_background_processes()
     ok = bool(result.get("ok")) if isinstance(result, dict) else bool(result)
     if isinstance(result, dict) and result.get("stop_log"):

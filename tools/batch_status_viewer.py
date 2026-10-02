@@ -218,7 +218,16 @@ def _format_time(value):
 
 
 class BatchStatusWindow:
-    COLUMNS = ["Updated", "Kind", "Name", "Status", "Progress", "Case", "Error"]
+    COLUMNS = ["更新时间", "类型", "名称", "状态", "进度", "当前例", "错误"]
+
+    KIND_LABELS = {
+        "Import": "导入",
+        "Import queue": "导入队列",
+        "Export": "导出",
+        "Export task": "导出任务",
+        "Append": "追加掩膜",
+        "Drop import": "拖拽导入",
+    }
 
     def __init__(self, project_root, qt_modules):
         self.QtCore, self.QtGui, self.QtWidgets = qt_modules
@@ -235,6 +244,9 @@ class BatchStatusWindow:
         title = QtWidgets.QLabel("导入 / 导出批量任务状态")
         title.setObjectName("title")
         root.addWidget(title)
+        hint = QtWidgets.QLabel("AI 训练/推理任务请在 02_AI 各家族的状态窗口查看（nnInteractive 03 / nnU-Net 03 / FlexiCT 04）。")
+        hint.setObjectName("hint")
+        root.addWidget(hint)
         header = QtWidgets.QHBoxLayout()
         self.live_label = QtWidgets.QLabel("● Live")
         self.live_label.setObjectName("liveLabel")
@@ -315,7 +327,7 @@ class BatchStatusWindow:
                 progress = "{0} / {1}".format(row["completed"] + row["failed"], row["total"])
             values = [
                 _format_time(row["updated_at_epoch"]),
-                row["kind"],
+                self.KIND_LABELS.get(row["kind"], row["kind"]),
                 row["label"],
                 _display_status(row),
                 progress,
@@ -350,9 +362,9 @@ class BatchStatusWindow:
             self.open_log.setEnabled(False)
             self.stop.setEnabled(False)
             return
-        detail = "Status file: {0}".format(row["status_path"])
+        detail = "状态文件：{0}".format(row["status_path"])
         if row["phase"]:
-            detail += "  ·  phase: {0}".format(row["phase"])
+            detail += "  ·  阶段：{0}".format(row["phase"])
         self.detail.setText(detail)
         self.open_folder.setEnabled(bool(row["job_dir"]))
         self.open_log.setEnabled(bool(row["status_path"]))
@@ -373,7 +385,7 @@ class BatchStatusWindow:
             "停止任务",
             "停止 {0} “{1}” 吗？\n\n"
             "停止请求写入后，任务会在当前病例完成后退出；"
-            "已完成的病例不受影响。".format(row["kind"], row["label"]),
+            "已完成的病例不受影响。".format(self.KIND_LABELS.get(row["kind"], row["kind"]), row["label"]),
             QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
             QtWidgets.QMessageBox.No,
         )

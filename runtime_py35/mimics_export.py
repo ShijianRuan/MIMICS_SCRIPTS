@@ -330,7 +330,7 @@ def _append_export_log(root_dir, message):
             os.makedirs(root_dir)
         path = os.path.join(root_dir or os.getcwd(), _RUNTIME_SUBDIR, "mimics_export.log")
         _rotate_log_file(path)
-        with open(path, "a") as f:
+        with open(path, "a", encoding="utf-8") as f:
             f.write(text + "\n")
     except Exception:
         pass
@@ -425,7 +425,7 @@ def _load_data_io_config():
     nn_path = os.path.join(_project_root(), "nninteractive_config.json")
     for path in (io_path, nn_path):
         try:
-            with open(path, "r") as handle:
+            with open(path, "r", encoding="utf-8") as handle:
                 loaded = json.load(handle)
             if isinstance(loaded, dict):
                 merged.update(loaded)
@@ -586,7 +586,7 @@ def _launch_background_batch_export(ts_root, cases_filter, axes, flips, label_ou
         f.write("# Auto-generated runner for background Mimics batch export\n")
         f.write("import sys, os, json, time\n")
         f.write(
-            "open({0}, 'w').write(json.dumps({{'pid': os.getpid(), "
+            "open({0}, 'w', encoding='utf-8').write(json.dumps({{'pid': os.getpid(), "
             "'started_at_epoch': time.time()}}))\n".format(json.dumps(handshake_path))
         )
         f.write("sys.path.insert(0, {0})\n".format(json.dumps(here)))
@@ -788,15 +788,15 @@ def _launch_bridge_background(bridge_params, job_dir):
     result_file = os.path.join(job_dir, "bridge_result.json")
     error_file = os.path.join(job_dir, "bridge_error.log")
 
-    with open(input_file, "w") as f:
+    with open(input_file, "w", encoding="utf-8") as f:
         json.dump(bridge_params, f)
 
     python_exe = _python_exe()
     bridge = _bridge_script()
 
-    stdin_handle = open(input_file, "r")
-    stdout_handle = open(result_file, "w")
-    stderr_handle = open(error_file, "w")
+    stdin_handle = open(input_file, "r", encoding="utf-8")
+    stdout_handle = open(result_file, "w", encoding="utf-8")
+    stderr_handle = open(error_file, "w", encoding="utf-8")
     try:
         process = subprocess.Popen(
             [python_exe, bridge],
@@ -834,7 +834,7 @@ def _check_job_status(job_dir):
     # Try to read result
     if os.path.isfile(result_file):
         try:
-            with open(result_file, "r") as f:
+            with open(result_file, "r", encoding="utf-8") as f:
                 result = json.load(f)
             if result.get("status") == "ok":
                 return ("done", result)
@@ -847,7 +847,7 @@ def _check_job_status(job_dir):
     pid = None
     if os.path.isfile(state_file):
         try:
-            with open(state_file, "r") as f:
+            with open(state_file, "r", encoding="utf-8") as f:
                 state = json.load(f)
             pid = state.get("pid")
         except (ValueError, IOError):
@@ -860,7 +860,7 @@ def _check_job_status(job_dir):
     err_msg = "bridge process exited unexpectedly"
     if os.path.isfile(error_file):
         try:
-            with open(error_file, "r") as f:
+            with open(error_file, "r", encoding="utf-8") as f:
                 err_msg = f.read()[:500]
         except Exception:
             pass
@@ -1372,7 +1372,7 @@ def export_masks_to_buffers(
 
     # Save manifest
     manifest_path = os.path.join(buffers_dir, "manifest.json")
-    with open(manifest_path, "w") as f:
+    with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2, ensure_ascii=False)
     print("Manifest saved: {0}".format(manifest_path))
 
@@ -1749,7 +1749,7 @@ def _foreground_export_tick(monitor):
                 monitor["mask_index"] = index + 1
                 return
             manifest_path = os.path.join(monitor["buffers_dir"], "manifest.json")
-            with open(manifest_path, "w") as handle:
+            with open(manifest_path, "w", encoding="utf-8") as handle:
                 json.dump(monitor["manifest"], handle, indent=2, ensure_ascii=False)
             # The source snapshot is now immutable on disk. Release Mimics'
             # Mask-buffer lease before the external geometry conversion so AI
@@ -2183,6 +2183,36 @@ def _launch_background_batch_export_async(*args, **kwargs):
     if not mcs_scope and ts_root:
         mcs_scope = _resolve_export_output_dir(ts_root)
     destination_scope = kwargs.get("label_output_root") or ts_root or mcs_scope
+    # Pre-flight the destination drive the same way import does: surfacing a
+    # full disk up front beats failing an hour into a 200-mask export.
+    disk_scope = destination_scope or mcs_scope
+    if disk_scope:
+        estimated_mb = int(kwargs.get("estimated_disk_mb") or 0)
+        if estimated_mb <= 0:
+            estimated_mb = 500
+        ok, free_mb = _check_disk_space(disk_scope, estimated_mb)
+        if not ok:
+            try:
+                mimics.dialogs.message_box(
+                    title="Insufficient Disk Space",
+                    message=(
+                        "Insufficient disk space on the label destination. "
+                        "Estimated requirement: {0} MB; available: {1} MB. "
+                        "Please free disk space and retry."
+                    ).format(estimated_mb, int(free_mb)),
+                    ui_blocking=False,
+                )
+            except TypeError:
+                mimics.dialogs.message_box(
+                    title="Insufficient Disk Space",
+                    message="Insufficient disk space on the label destination.",
+                )
+            _append_export_log(
+                kwargs.get("mcs_output_dir") or disk_scope,
+                "Batch export not started: insufficient disk space "
+                "(need {0} MB, free {1} MB).".format(estimated_mb, int(free_mb)),
+            )
+            return None
     holder = None
     seen_lock_names = set()
     for scope in (mcs_scope, destination_scope):
@@ -2202,7 +2232,7 @@ def _launch_background_batch_export_async(*args, **kwargs):
                 message=(
                     "Mask export was not started because its saved .mcs source or label destination is busy.\n\n"
                     "Current task: {0}\n\n"
-                    "Wait for the import/export to finish, or stop it from its own Stop entry before retrying."
+                    "Wait for the import/export to finish, or stop it from 01_Data > 04_Task_Status before retrying."
                 ).format(runtime_common.resource_lock_summary(holder)),
                 ui_blocking=False,
             )
@@ -3021,7 +3051,7 @@ def _acquire_export_lock(job_runtime):
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except OSError:
             try:
-                with open(lock_path, "r") as handle:
+                with open(lock_path, "r", encoding="utf-8") as handle:
                     pid = int((handle.read() or "0").strip() or "0")
                 if pid and _is_pid_alive(pid):
                     return None
@@ -3044,7 +3074,7 @@ def _acquire_export_lock(job_runtime):
 def run_background_batch_export(config_path):
     """Run batch export inside a background Mimics process."""
     try:
-        with open(config_path, "r") as handle:
+        with open(config_path, "r", encoding="utf-8") as handle:
             config = json.load(handle)
     except Exception as exc:
         print("Could not read export batch config: {0}".format(exc))
