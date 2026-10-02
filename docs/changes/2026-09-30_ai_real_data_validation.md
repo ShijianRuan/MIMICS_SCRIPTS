@@ -500,6 +500,35 @@ credibility_3d / slice_detail）。
 - nnU-Net 2d / 3d_lowres 等其他配置：未在真实数据上训练（3d_fullres 已
   测）；推理侧低优（同一管线不同 plans）。
 
+## 已立项需求：FlexiCT 多标签支持（2026-10-02 用户拍板）
+
+**需求**：FlexiCT 训练支持多目标（多分类）——一个模型同时学多个器官，
+而非现状的一个器官一个模型。
+
+**代码事实（2026-10-02 核实）**：
+- 架构层不受限：`flexict_trainer.py:293` 从请求取 `num_output_channels`
+  传入 Primus 解码头，`num_classes` 全程可变；预训练 backbone 类无关，
+  解码头每任务新训，多分类无权重冲突。
+- 管线层硬编码单目标：`flexict_pipeline.py:108` "one binary target per
+  model"，标签 spec 固定 `[{name, id: 1}]`；UI/注册表/active_learning
+  均按单 label_name 设计。
+
+**实施要点（约 8 个触点）**：请求规范化 labels 数组、标签物化（nnU-Net
+侧多标签机制可复用）、推理解码多 mask、Mimics 多 mask 回传、向导多选
+UI、模型清单 schema（label_names 数组，向后兼容 label_name）、
+active_learning pair 查找、全链路测试。
+
+**风险与前置**：
+1. few-shot 多分类效果未经验证（8 例 × N 类监督更稀薄，FlexiCT 论文
+   本身是二分类交互场景）——**先做 2 标签 PoC（liver+spleen，同一批
+   训练例）验证 Dice 不显著劣于单标签基线，再全铺**。基线已有：
+   liver 单标签 2d 0.972/3d 0.903。
+2. 与同事未提交的 flexict_pipeline.py 改动冲突——待其合入后开工。
+3. 实施轮次按账本协议正常走（每触点防回归测试 + 门禁）。
+
+**用户决策记录**：2026-10-02 用户明确"支持多标签也是需要做的"——立项。
+优先级与排期由账本统一排序。
+
 - **痛点**：用户在向导里改了 batch_size / patch_size / spacing / configuration
   等规划参数重跑远程训练，控制器显示一切正常，但远程端预处理被整段跳过、
   旧 plans（含旧 batch size）被直接复用——训练表现与用户设置完全脱节，
