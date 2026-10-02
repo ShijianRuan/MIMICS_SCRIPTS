@@ -487,6 +487,72 @@ credibility_3d / slice_detail）。
 上公开基准 Dice 0.9+ 的容易器官，训练 18 例、测试例与训练例同分布），
 不是测量假象。
 
+## 困难器官多标签验证（pancreas/adrenal/esophagus/gallbladder，2026-10-02 补充）
+
+回应用户追问"多目标任务以及多种器官类型任务，你有实验吗"：此前 Phase 2 的
+多标签任务是容易器官（liver/spleen/kidney，公开基准 Dice 0.9+）。本节补测
+**困难器官**——小体积、低对比度、形态多变，是标注场景里真正吃力的对象。
+
+### 数据与链路
+
+- 4 标签：pancreas、adrenal_gland_left、esophagus、gallbladder，训练 18 例
+  （与 Phase 2 同例集），held-out 4 例（s0038/s0039/s0040/s0042）。
+- 现有 .mcs 工程只有 4 个容易器官 mask。用 `mimics_batch_cli.py append-masks
+  --in-place` 分 3 批（pancreas+adrenal / esophagus / gallbladder，因
+  append 队列取全 mask 交集而 esophagus 3 例、gallbladder 5 例缺文件）
+  把困难器官 mask 原子追加进全部 22 个 .mcs，66/66 成功、0 失败。
+- **回程无损验证**：s0004 经 append→export-labels→GT 对比，4 器官 Dice
+  全部 1.0000 —— mcs_refresh 标签源的真实导出链路无损。
+- 训练请求与向导等价：mcs_refresh 标签源、远程 171、3d_fullres、50 epochs、
+  `missing_label_policy=background`（缺某个器官的例把该器官当背景，不丢例
+  ——18 例全部进入训练）。
+
+### 首跑失败：R62 快照 bug 的真实复现（镜像 1.1，job df8fb4b2）
+
+epoch 1 即崩：容器缺 C 编译器 + nnU-Net v2.8 默认开 torch.compile →
+dynamo/inductor `Failed to find C compiler`。这正是本地 commit cdd4648
+（R62，2026-10-01）修掉的 bug；镜像 1.1 是修复前快照，status 的
+code-drift 警告（`remote_code_match: False`）如实预言了失败。换含修复的
+镜像 1.2（临时 profile 171_root_img12）重交即正常。这是"镜像快照 +
+code_verify=warn"设计行为在真实场景的完整走查：警告可见、失败可归因、
+升级镜像即恢复。
+
+### 训练与推理结果
+
+训练 50/50 epochs completed，模型 `nnunet_20261002T220345_5dc3989b` 注册
+（remote 溯源，fold 0 validation mean Dice：pancreas 0.669、adrenal 0.590、
+esophagus 0.803、gallbladder 0.868）。
+
+held-out 推理（本地 GPU，operation=infer 等价链路，逐例 ~7 min）对 GT 的
+Dice：
+
+| case | pancreas | adrenal_L | esophagus | gallbladder |
+|---|---|---|---|---|
+| s0038 | 0.677 | 0.781 | 0.900 | 0.895 |
+| s0039 | 0.839 | 0.711 | 0.901 | 0.499 |
+| s0040 | 0.600 | 0.482 | 0.782 | 0.951 |
+| s0042 | 0.890 | 0.806 | 0.955 | 0.940 |
+| 均值 | **0.752** | **0.695** | **0.885** | **0.821** |
+
+### 判读（诚实结论）
+
+- **多标签 + 多器官类型链路真实有效**：一个模型同时分割 4 个困难器官，
+  全部远高于空 mask 基线；esophagus/gallbladder 达 0.8+，pancreas/
+  adrenal 在 0.7 上下。这与文献一致——胰腺（低对比、形态多变）和肾上腺
+  （<2cm 小器官）是 Totalsegmentator 上公认难分割的器官，18 例 50 epochs
+  的少样本规模下 0.7 左右属合理水平，不是链路问题。
+- **例间方差大**（gallbladder 0.499–0.951、adrenal 0.482–0.806）：小器官
+  逐例表现受解剖变异支配，标注者实践中应预期"大体准、个别例差"，这正是
+  交互式修正（nnInteractive）的定位场景。
+- 困难器官与容易器官（Phase 2 liver/spleen/kidney 0.9+）的差距是**数据
+  难度差距**，非功能差距：同一管线、同一链路，只是换了标签。
+
+### 清理登记
+
+171 上两个 job 目录（df8fb4b2 失败、2ff4f86f 成功）及容器已删，GPU 空闲，
+临时 profile 171_root_img12 已删除（镜像 1.1/1.2/1.0 保留）。剩 3 个
+2026-08 旧 job 目录所有权不明，维持先前登记不触碰。
+
 ## 覆盖缺口清单（如实登记）
 
 - ~~**FlexiCT 3d_fullres**：未测~~ → **2026-10-02 已补测完成**（见 Phase 3
