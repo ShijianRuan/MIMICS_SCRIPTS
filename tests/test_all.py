@@ -277,6 +277,9 @@ class TestRuntimeCommon(unittest.TestCase):
         self.assertEqual({"b": 2}, loaded)
 
     def test_replace_with_retry_recovers_from_transient_lock(self):
+        tools_dir = os.path.join(PROJECT_ROOT, "tools")
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
         import nnunet_common
 
         # A freshly built staging dir hits a transient WinError 5 (antivirus
@@ -308,6 +311,9 @@ class TestRuntimeCommon(unittest.TestCase):
         self.assertFalse(staging.exists())
 
     def test_replace_with_retry_raises_after_persistent_denial(self):
+        tools_dir = os.path.join(PROJECT_ROOT, "tools")
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
         import nnunet_common
 
         staging = Path(self.tmp) / "model.publishing_def"
@@ -6194,8 +6200,20 @@ class TestSourceImagePathEquivalence(unittest.TestCase):
         image.metadata.set(MIMICS_VOXEL_TO_RAS_MATRIX_METADATA, json.dumps(identity))
 
         with self.assertRaises(RuntimeError):
-            _source_image_export(image, {"prefer_source_image_for_nninteractive": True})
+            _source_image_export(image, {
+                # B aligned the code default of image_input_mode with the
+                # shipped JSON value ("mimics"), which would early-return
+                # None before the missing-file check; production callers
+                # always set this key explicitly, so pin it the same way.
+                "image_input_mode": "auto",
+                "prefer_source_image_for_nninteractive": True,
+                # The shipped config default falls back to the Mimics buffer;
+                # the missing-file failure is only mandatory when fallback is
+                # explicitly refused, which is what this contract pins.
+                "fallback_to_mimics_buffer_when_source_unavailable": False,
+            })
         result = _source_image_export(image, {
+            "image_input_mode": "auto",
             "prefer_source_image_for_nninteractive": True,
             "fallback_to_mimics_buffer_when_source_unavailable": True,
         })

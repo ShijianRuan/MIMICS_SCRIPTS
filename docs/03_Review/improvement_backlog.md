@@ -275,7 +275,9 @@
   Status 吸收 3 个 Stop 入口（kind-specific stop marker 从 status_
   path/job_dir 推导，确认框说明停止范围）；02_Import_Masks、03_
   Export_Masks 重编号。验收：36 gui smoke + 69 定向 + 21 stop 测试
-  全绿，冒烟 8/8（`20261003T001716`）。
+  全绿，冒烟 8/8（`20261003T001716`）。收尾补测（`e662c0c`）：浏览
+  按钮多选走 multi_single 精确清单 + 异步 helper 契约 2 测试，
+  ImportDropWindow 18/18。
 - [x] **R66-C2 03_Review 窗宽窗位三合一 5→3**〔R66 当轮解决，commit
   `b679eb6`〕：删 04_Window_Undo_Last/05_Window_Edit_Presets；
   03_Window_Level 预设对话框内新增 Undo Last/Edit Presets.../Reset
