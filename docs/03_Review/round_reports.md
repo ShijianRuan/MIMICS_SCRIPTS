@@ -4411,6 +4411,19 @@ _stop_marker + request_stop，<50 行）+ 导入窗 2 个浏览按钮；删除 7
 - fast 27/28：`20261003T010831`（flexict_integration 6 errors 为预存
   权重依赖，`bc19ecb` 修复）。
 - fast 28/28：`20261003T015250`（R66 全部改动 + 修复后，轮次门禁）。
+- **test_all 全量补跑**（用户指令"补充有关的测试"后的全量验证，
+  2298s）：572 passed / 3 failed / 2 deselected。3 个失败全部定位并
+  修复（commit `0229437`，均为测试侧问题、无产品行为变化）：
+  - TestRuntimeCommon ×2（预存）：8ca4e4b 加入的 retry-publish 测试直接
+    `import nnunet_common`，但 test_all.py 只把 runtime_py35/ 与项目根
+    放上 sys.path；A3 拆分把 nnunet_common 移到 tools/ 后即挂
+    （`git stash` 干净 HEAD 复现，判定预存）。按既有模式把 tools/
+    插入 sys.path，36/36。
+  - TestSourceImagePathEquivalence 缺失源文件测试 ×1：旧代码默认值
+    （image_input_mode=""、禁回退）下 `prefer_source_image=True` 即可
+    触发缺失文件检查；B 把代码默认对齐出厂 JSON（mimics、允许回退）
+    后在第一道 guard 提前 return None。生产调用方始终显式设置该键，
+    测试同样显式 pin（image_input_mode=auto + 回退=False），28/28。
 
 ### 遗留
 
