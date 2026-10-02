@@ -4295,6 +4295,18 @@ def _async_monitor_tick(monitor):
                 # through Finish / UNDO-to-empty / RESET inside the prompt
                 # menu, or through the waiting/restart/error paths below.
                 monitor["deadline"] = time.time() + monitor["timeout_seconds"]
+                # F13: the prompt menu is ui_blocking and can stay open while
+                # the user thinks. Release the buffer lock BEFORE showing it
+                # so other mask operations are not blocked behind the menu.
+                # monitor["busy"] stays True as the re-entry guard: the menu
+                # pumps the Mimics message loop, so this timer CAN re-fire
+                # while the menu is open (see the guard comment at the top
+                # of this tick). The finally below re-releases the same
+                # token, which is always safe: the lock is either already
+                # empty (no-op) or owned by a different token (mismatch ->
+                # False, never dropped).
+                runtime_common.release_local_operation(
+                    "mask_buffer_access", operation_token)
                 continued = _continue_session_prompt(
                     monitor["image"],
                     monitor["target"],

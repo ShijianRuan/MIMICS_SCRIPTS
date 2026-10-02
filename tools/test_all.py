@@ -4709,6 +4709,70 @@ class TestNNInteractiveContinuousPrompting(unittest.TestCase):
         self.assertEqual(["job_dir"], stopped)
         self.assertTrue(monitor["done"])
 
+    def test_async_monitor_releases_buffer_lock_while_prompt_menu_open(self):
+        # F13: the continuation prompt menu is ui_blocking and can stay open
+        # for as long as the user thinks. Other mask operations must not be
+        # blocked behind it - the monitor releases the mask_buffer_access
+        # lock BEFORE showing the menu and only keeps the busy flag as its
+        # own re-entry guard.
+        import nninteractive_mimics
+
+        monitor = {
+            "done": False,
+            "busy": False,
+            "deadline": time.time() + 60,
+            "timeout_seconds": 60,
+            "image": "image",
+            "target": "target",
+            "state": {"_job_dir": "job_dir", "pending_sequence": 1},
+            "config": {},
+        }
+        observed = []
+        original_tick_result = nninteractive_mimics._check_async_result_nonblocking
+        original_continue = nninteractive_mimics._continue_session_prompt
+        original_stop = nninteractive_mimics._stop_async_monitor
+        original_notice = nninteractive_mimics.runtime_common.clear_progress_notice
+        original_acquire = nninteractive_mimics.runtime_common.try_acquire_local_operation
+        original_active = nninteractive_mimics.runtime_common.active_local_operation
+        try:
+            nninteractive_mimics._check_async_result_nonblocking = (
+                lambda image, target, state: "applied"
+            )
+
+            def _menu_open(image, target, state, config, **kwargs):
+                # While the (ui_blocking) menu is up, someone else must be
+                # able to claim the buffer lock.
+                other = nninteractive_mimics.runtime_common.try_acquire_local_operation(
+                    "mask_buffer_access", "other mask operation")
+                observed.append(bool(other))
+                if other:
+                    nninteractive_mimics.runtime_common.release_local_operation(
+                        "mask_buffer_access", other)
+                return True  # continue the session
+
+            nninteractive_mimics._continue_session_prompt = _menu_open
+            nninteractive_mimics._stop_async_monitor = (
+                lambda job_dir: None
+            )
+            nninteractive_mimics.runtime_common.clear_progress_notice = (
+                lambda *args, **kwargs: None
+            )
+            nninteractive_mimics._async_monitor_tick(monitor)
+        finally:
+            nninteractive_mimics._check_async_result_nonblocking = original_tick_result
+            nninteractive_mimics._continue_session_prompt = original_continue
+            nninteractive_mimics._stop_async_monitor = original_stop
+            nninteractive_mimics.runtime_common.clear_progress_notice = original_notice
+            nninteractive_mimics.runtime_common.try_acquire_local_operation = original_acquire
+            nninteractive_mimics.runtime_common.active_local_operation = original_active
+        # The other operation could claim the lock while the menu was open.
+        self.assertEqual([True], observed)
+        # And after the whole tick, the lock is fully released.
+        self.assertIsNone(
+            nninteractive_mimics.runtime_common.active_local_operation(
+                "mask_buffer_access"))
+        self.assertFalse(monitor["done"])
+
     def test_run_async_delegates_to_continue_session_prompt(self):
         import nninteractive_mimics
 
