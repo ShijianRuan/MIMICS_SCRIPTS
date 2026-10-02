@@ -3385,6 +3385,23 @@ def _existing_parent(path: Path) -> Path:
     return candidate
 
 
+def _remote_path_size(session: SSHSession, remote_path: str) -> int:
+    """Byte size of a remote file/dir; 0 when it cannot be read.
+
+    Used to budget command timeouts for large-artifact operations; a
+    failure to stat must not block the download itself, so it degrades
+    to 0 (callers' floor timeout applies).
+    """
+    try:
+        text = session.execute(
+            "du -sb {}".format(shlex.quote(remote_path)),
+            timeout=30,
+        ).strip()
+        return int(text.split()[0] or 0)
+    except Exception:
+        return 0
+
+
 def _ensure_local_download_capacity(
     session: SSHSession,
     remote_archive: str,
@@ -3598,18 +3615,26 @@ def _download_artifact(
 ) -> None:
     artifact = str(PurePosixPath(remote_job) / PurePosixPath(relative))
     result_tar = str(PurePosixPath(remote_job) / "result.tar")
+    # Size-aware command timeout: a fixed 300 s kills the tar of a large
+    # artifact mid-write (FlexiCT 3d checkpoints alone are ~8 GB), leaving a
+    # truncated result.tar that reads as a remote failure. Budget a
+    # conservative 40 MB/s for tar and 25 MB/s for sha256, floored at the
+    # historical 300 s.
+    artifact_bytes = _remote_path_size(session, artifact)
+    tar_timeout = max(300.0, artifact_bytes / (40 * 1024 * 1024))
+    sha_timeout = max(300.0, artifact_bytes / (25 * 1024 * 1024))
     session.execute(
         "test -d {artifact} && tar -cf {archive} -C {artifact} .".format(
             artifact=shlex.quote(artifact),
             archive=shlex.quote(result_tar),
         ),
-        timeout=300,
+        timeout=tar_timeout,
     )
     remote_archive_sha256 = session.execute(
         "sha256sum {archive} | awk '{{print $1}}'".format(
             archive=shlex.quote(result_tar)
         ),
-        timeout=300,
+        timeout=sha_timeout,
     ).strip()
     if len(remote_archive_sha256) != 64:
         raise RuntimeError(

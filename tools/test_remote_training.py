@@ -3264,6 +3264,101 @@ class StatusAndLifecycleTests(unittest.TestCase):
                 )
             self.assertFalse(target.exists())
 
+    def test_large_artifact_gets_size_aware_tar_timeout(self):
+        # A ~8.4 GB FlexiCT 3d artifact needs far more than the historical
+        # fixed 300 s to tar and checksum; the timeout must scale with the
+        # artifact size (R-P1-10) instead of killing the tar mid-write.
+        class Session:
+            def __init__(self):
+                self.timeouts = []
+
+            def execute(self, command, timeout=None, **_kwargs):
+                if "du -sb" in command:
+                    return "{}	/remote/jobs/user/job/model_output".format(
+                        8_385_097_728
+                    )
+                if "stat -c %s" in command:
+                    return str(self.archive.stat().st_size)
+                self.timeouts.append((command, timeout))
+                if "sha256sum" in command:
+                    return controller._sha256_file(self.archive)
+                return ""
+
+            def download(self, _remote, local, callback=None):
+                content = self.archive.read_bytes()
+                Path(local).write_bytes(content)
+                if callback:
+                    callback(len(content), len(content))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            (source / "model.pth").write_bytes(b"weights")
+            archive = root / "remote-result.tar"
+            with tarfile.open(archive, "w") as handle:
+                handle.add(source / "model.pth", arcname="model.pth")
+            session = Session()
+            session.archive = archive
+            status = root / "status.json"
+            remote_compute.write_json_atomic(status, {})
+            controller._download_artifact(
+                session,
+                "/remote/jobs/user/job",
+                "model_output",
+                root / "model",
+                root / "downloaded.tar",
+                status,
+            )
+            tar_timeouts = [t for c, t in session.timeouts if "tar -cf" in c]
+            sha_timeouts = [t for c, t in session.timeouts if "sha256sum" in c]
+            # 8.4 GB at 40 MB/s -> ~200 s -> floored at 300; the sha at
+            # 25 MB/s -> ~320 s must exceed the old fixed 300 s.
+            self.assertTrue(tar_timeouts and tar_timeouts[0] >= 300)
+            self.assertTrue(sha_timeouts and sha_timeouts[0] > 300)
+
+    def test_size_probe_failure_falls_back_to_floor_timeout(self):
+        class Session:
+            def execute(self, command, timeout=None, **_kwargs):
+                if "du -sb" in command:
+                    raise remote_compute.RemoteCommandError("du failed")
+                if "stat -c %s" in command:
+                    return str(self.archive.stat().st_size)
+                if "sha256sum" in command:
+                    return controller._sha256_file(self.archive)
+                self.timeouts.append((command, timeout))
+                return ""
+
+            def download(self, _remote, local, callback=None):
+                content = self.archive.read_bytes()
+                Path(local).write_bytes(content)
+                if callback:
+                    callback(len(content), len(content))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            (source / "model.pth").write_bytes(b"weights")
+            archive = root / "remote-result.tar"
+            with tarfile.open(archive, "w") as handle:
+                handle.add(source / "model.pth", arcname="model.pth")
+            session = Session()
+            session.archive = archive
+            session.timeouts = []
+            status = root / "status.json"
+            remote_compute.write_json_atomic(status, {})
+            controller._download_artifact(
+                session,
+                "/remote/jobs/user/job",
+                "model_output",
+                root / "model",
+                root / "downloaded.tar",
+                status,
+            )
+            tar_timeouts = [t for c, t in session.timeouts if "tar -cf" in c]
+            self.assertTrue(tar_timeouts and tar_timeouts[0] == 300)
+
 
     def test_worker_starts_nninteractive_pipeline_after_staging_request(self):
         with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
