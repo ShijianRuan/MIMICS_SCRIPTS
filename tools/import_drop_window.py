@@ -19,7 +19,7 @@ It exits by itself after IDLE_TIMEOUT_SECONDS without user interaction, so
 it never becomes another resident service to manage. Last-used settings are
 remembered in ui_state/io_paths.json (same file the path-setup UI uses).
 
-Run inside Mimics via 01_Data/07_Quick_Drop_Import.py, or standalone:
+Run inside Mimics via 01_Data/01_Import_Data.py, or standalone:
     python tools/import_drop_window.py [--context <ctx.json>]
 """
 
@@ -41,6 +41,7 @@ for _candidate in (_HERE, _ROOT, os.path.join(_ROOT, "runtime_py35")):
 from ui_theme import (  # noqa: E402
     PALETTE,
     choose_existing_directory_async,
+    choose_open_files_async,
     configure_application,
     stylesheet as shared_stylesheet,
 )
@@ -431,16 +432,16 @@ def run(context=None, preview_path=""):
     app.setStyleSheet(DropWindowStyle.STYLESHEET)
 
     window = QtWidgets.QWidget()
-    window.setWindowTitle("拖入导入")
+    window.setWindowTitle("导入数据")
     window.setWindowFlags(QtCore.Qt.WindowStaysOnTopHint | QtCore.Qt.Tool)
     window.setMinimumSize(420, 320)
     root = QtWidgets.QVBoxLayout(window)
 
-    title = QtWidgets.QLabel("拖入导入")
+    title = QtWidgets.QLabel("导入数据")
     title.setObjectName("title")
     root.addWidget(title)
     hint = QtWidgets.QLabel(
-        "把文件或文件夹拖到这里，或粘贴路径（Ctrl+V，每行一条）。窗口空闲时自动退出。"
+        "把文件或文件夹拖到这里，粘贴路径（Ctrl+V，每行一条），或用上方按钮选择。窗口空闲时自动退出。"
     )
     hint.setObjectName("subtitle")
     hint.setWordWrap(True)
@@ -456,6 +457,16 @@ def run(context=None, preview_path=""):
     recognition.setObjectName("preview")
     recognition.setWordWrap(True)
     root.addWidget(recognition)
+
+    # -- Source browse: same pipeline as a drop, minus the drag ------------
+    source_row = QtWidgets.QHBoxLayout()
+    source_row.addWidget(QtWidgets.QLabel("或选择"))
+    pick_files = QtWidgets.QPushButton("选择文件...")
+    pick_folder = QtWidgets.QPushButton("选择文件夹...")
+    source_row.addWidget(pick_files)
+    source_row.addWidget(pick_folder)
+    source_row.addStretch(1)
+    root.addLayout(source_row)
 
     output_row = QtWidgets.QHBoxLayout()
     output_label = QtWidgets.QLabel("输出文件夹")
@@ -673,6 +684,36 @@ def run(context=None, preview_path=""):
         )
 
     browse.clicked.connect(browse_output)
+
+    def browse_source_files():
+        # Multi-select feeds the same add_paths() pipeline as a multi-drop,
+        # so a hand-picked case list behaves identically to a dragged one.
+        def _chosen(values):
+            add_paths(values if isinstance(values, (list, tuple)) else [values])
+
+        choose_open_files_async(
+            QtCore, QtWidgets, window, "选择图像文件",
+            str(Path.home()),
+            "Medical volumes (*.nii *.nii.gz *.mha *.mhd *.nrrd *.nrrd.gz);;"
+            "All files (*)",
+            _chosen,
+            button=pick_files,
+        )
+
+    def browse_source_folder():
+        def _chosen(value):
+            if value:
+                add_paths([value])
+
+        choose_existing_directory_async(
+            QtCore, QtWidgets, window, "选择病例或数据集文件夹",
+            str(Path.home()),
+            _chosen,
+            button=pick_folder,
+        )
+
+    pick_files.clicked.connect(browse_source_files)
+    pick_folder.clicked.connect(browse_source_folder)
 
     def clear_all():
         touch()

@@ -18,9 +18,9 @@ Mimics GUI 的前提下，让用户知道任务是否运行、等待什么、如
 
 | 功能 | 可能等待的资源 | 用户可见反馈 | 释放方式 |
 | --- | --- | --- | --- |
-| 数据导入 | 外部转换、后台 Mimics、首个 `.mcs` | 导入状态、病例计数、60 秒日志 | `03 Stop Import Queue` |
-| Mask 导入 | 外部空间对齐、活动项目、Mask buffer | 30/60 秒日志 | 再次运行 `04 Import Masks` 后选择停止 |
-| Mask 导出 | Mask buffer、外部空间转换、后台 Mimics | Mask 计数、阶段、60 秒日志 | `05 Stop Mask Export` |
+| 数据导入 | 外部转换、后台 Mimics、首个 `.mcs` | 导入状态、病例计数、60 秒日志 | `04 Task Status` 中该行停止 |
+| Mask 导入 | 外部空间对齐、活动项目、Mask buffer | 30/60 秒日志 | 再次运行 `02 Import Masks` 后选择停止 |
+| Mask 导出 | Mask buffer、外部空间转换、后台 Mimics | Mask 计数、阶段、60 秒日志 | `04 Task Status` 中该行停止 |
 | nnInteractive 推理 | GPU worker、顺序提示推理、结果写回 | worker stage、sequence、60 秒日志 | 再次运行 nnInteractive 后丢弃会话，或停止后台服务 |
 | nnInteractive 微调 | GPU、本地或远程训练 | Task Models 状态、loss/AUC、日志 | `Pause and Release GPU` 或 `Stop Training` |
 | nnU-Net | GPU、Dataset ID、远程任务、结果写回 | Status 窗口、阶段、60 秒日志 | `nnU-Net Show Status & Models`（02_AI 菜单）内的停止操作 |
@@ -83,7 +83,7 @@ Mimics GUI 的前提下，让用户知道任务是否运行、等待什么、如
 1. 启动一个占用 GPU 的训练，再启动另一 AI 任务。后者应立即显示持有者，60 秒
    后仍有进度，停止后可以取得 GPU。
 2. 导入 20 例数据，令其中一例转换失败。队列应继续，首个成功 `.mcs` 可先使用，
-   `03 Stop Import Queue` 应停止未开始病例并最终释放后台进程。
+   `04 Task Status` 的行停止应停止未开始病例并最终释放后台进程。
 3. 在 Mask 导入期间切换项目。结果应等待原项目，不写入当前项目；再次运行入口
    可以停止。
 4. 导入与现有 Mask 同名的标签。原 Mask 体素不得变化，新 Mask 名应带

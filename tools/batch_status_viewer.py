@@ -4,15 +4,16 @@
 Aggregates the six on-disk record types an annotator can leave behind
 (import runs, background .mcs queues, mask-export jobs, foreground export
 tasks, mask-append jobs, drop imports) into a single live table with the
-log/folder one click away. Read-only: stopping a task stays in the
-matching Stop menu entry.
+log/folder one click away, and a per-row Stop button that writes the same
+stop marker the matching Stop menu entries used to write.
 
-Launch from Mimics: scripting_library/01_Data/08_Show_Batch_Status.py.
+Launch from Mimics: scripting_library/01_Data/04_Task_Status.py.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -272,8 +273,12 @@ class BatchStatusWindow:
         self.open_folder.clicked.connect(self._open_folder)
         self.open_log = QtWidgets.QPushButton("打开状态文件位置")
         self.open_log.clicked.connect(self._open_status_location)
+        self.stop = QtWidgets.QPushButton("停止")
+        self.stop.setObjectName("dangerButton")
+        self.stop.clicked.connect(self._stop_selected)
         actions.addWidget(self.open_folder)
         actions.addWidget(self.open_log)
+        actions.addWidget(self.stop)
         actions.addStretch(1)
         close = QtWidgets.QPushButton("关闭")
         close.clicked.connect(self.window.close)
@@ -343,6 +348,7 @@ class BatchStatusWindow:
             self.detail.setText("选择一行即可查看其状态文件和文件夹。")
             self.open_folder.setEnabled(False)
             self.open_log.setEnabled(False)
+            self.stop.setEnabled(False)
             return
         detail = "Status file: {0}".format(row["status_path"])
         if row["phase"]:
@@ -350,6 +356,35 @@ class BatchStatusWindow:
         self.detail.setText(detail)
         self.open_folder.setEnabled(bool(row["job_dir"]))
         self.open_log.setEnabled(bool(row["status_path"]))
+        self.stop.setEnabled(
+            bool(_stop_marker(row)) and row["status"] not in TERMINAL_STATES
+        )
+
+    def _stop_selected(self):
+        row = self._selected_row()
+        if not row or row["status"] in TERMINAL_STATES:
+            return
+        QtWidgets = self.QtWidgets
+        stoppable = _stop_marker(row)
+        if not stoppable:
+            return
+        answer = QtWidgets.QMessageBox.question(
+            self.window,
+            "停止任务",
+            "停止 {0} “{1}” 吗？\n\n"
+            "停止请求写入后，任务会在当前病例完成后退出；"
+            "已完成的病例不受影响。".format(row["kind"], row["label"]),
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if answer != QtWidgets.QMessageBox.Yes:
+            return
+        ok, message = request_stop(row)
+        if ok:
+            self.detail.setText(message)
+            self.refresher.refresh_now()
+        else:
+            QtWidgets.QMessageBox.warning(self.window, "停止失败", message)
 
     def _selected_row(self):
         indexes = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
@@ -388,6 +423,64 @@ def _display_status(row):
     if status in TERMINAL_STATES:
         return status.replace("_", " ").title()
     return status.replace("_", " ").title()
+
+
+# Per-kind stop semantics. Every task kind polls a stop marker next to its
+# status file and exits at the next poll; the kind only decides the marker's
+# name. Import queue additionally drops its active marker so new cases cannot
+# join a queue being stopped (mirrors mimics_stop_background).
+def _stop_marker(row):
+    """Return the stop-marker path for a row, or '' when not stoppable."""
+    kind = row["kind"]
+    status_path = row.get("status_path") or ""
+    job_dir = row.get("job_dir") or ""
+    if not status_path:
+        return ""
+    if kind == "Import":
+        return str(Path(job_dir) / "stop.json")
+    if kind == "Import queue":
+        return str(Path(job_dir) / "_mcs_queue_stop.json")
+    if kind == "Export":
+        return str(Path(job_dir) / "_export_stop.json")
+    if kind == "Export task":
+        stem = Path(status_path).stem
+        return str(Path(status_path).parent / "{0}_stop.json".format(stem))
+    if kind == "Append":
+        return str(Path(job_dir) / "stop.json")
+    if kind == "Drop import":
+        stem = Path(status_path).name
+        if stem.endswith("_status.json"):
+            stem = stem[: -len("_status.json")]
+        return str(Path(status_path).parent / "{0}_stop.json".format(stem))
+    return ""
+
+
+def request_stop(row, reason="user"):
+    """Write the kind-specific stop marker; return (ok, message)."""
+    marker = _stop_marker(row)
+    if not marker:
+        return False, "This task kind cannot be stopped from here."
+    payload = {
+        "status": "stop_requested",
+        "requested_at_epoch": time.time(),
+        "reason": reason,
+    }
+    try:
+        Path(marker).parent.mkdir(parents=True, exist_ok=True)
+        tmp = marker + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+        os.replace(tmp, marker)
+    except OSError as exc:
+        return False, "Failed to write the stop marker: {0}".format(exc)
+    if row["kind"] == "Import queue":
+        # A stopped queue must not pick up new cases: drop the active marker
+        # the queue scanner keys on (same as _request_queue_stop).
+        try:
+            os.remove(str(Path(row["job_dir"]) / "_mcs_queue_active.json"))
+        except OSError:
+            pass
+    return True, "Stop requested for {0} {1}.".format(row["kind"], row["label"])
 
 
 def _style_status_item(QtGui, item, status):

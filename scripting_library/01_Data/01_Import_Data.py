@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Open the floating drop-to-import window.
+"""Import data into a Mimics project.
 
-Starts a small always-on-top external window. Drag image files, case
-folders, or a whole dataset folder onto it (or paste paths with Ctrl+V);
-it recognizes what was dropped against the dataset profile and submits it
-to the same background import workers as Import Dataset / Import Single
-Case. The window closes itself after an idle timeout.
+Opens the import window: drag image files, case folders, or a whole
+dataset folder onto it, paste paths with Ctrl+V, or pick them with the
+choose buttons. It recognizes what you gave it against the dataset
+profile and submits it to the background import workers. The window
+closes itself after an idle timeout.
 """
 
 from __future__ import print_function

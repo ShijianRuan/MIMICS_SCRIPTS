@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Stop only the active Mimics-Script mask export."""
+"""Export all masks from the open Mimics project."""
 
 from __future__ import print_function
 
@@ -23,6 +23,6 @@ from _mimics_entrypoint import run_runtime_entry
 run_runtime_entry(
     globals(),
     __file__,
-    "mimics_stop_background",
-    function_name="main_stop_export",
+    "mimics_export",
+    function_name="quick_export_main",
 )

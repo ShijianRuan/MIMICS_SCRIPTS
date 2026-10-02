@@ -240,7 +240,7 @@ def _prediction_context():
             "The active project could not be linked to its original source "
             "image, so prediction was not started.\n\n"
             "Open the project that was created when the case was imported "
-            "(01_Data > 01_Import_Dataset or 02_Import_Single_Case). "
+            "(01_Data > 01_Import_Data). "
             "If this project was moved or copied away from the dataset, "
             "re-import the case instead."
         )

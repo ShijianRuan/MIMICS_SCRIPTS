@@ -3763,7 +3763,17 @@ class TestScriptingLibraryEntries(unittest.TestCase):
         in user-facing living docs. Explicitly-marked history notes
         ("原 ... 删除" migration records) are allowed to name them."""
         deleted_markers = (
-            "03_Export_Masks",
+            # 03_Export_Masks was deleted as a duplicate in R41 but the name
+            # is live again since C1 (06_Quick_Export_Masks renamed to it);
+            # only its previous duplicates stay gone.
+            "01_Import_Dataset",
+            "02_Import_Single_Case",
+            "03_Stop_Import_Queue",
+            "05_Stop_Mask_Export",
+            "06_Quick_Export_Masks",
+            "07_Quick_Drop_Import",
+            "08_Show_Batch_Status",
+            "04_Import_Masks",
             "05_Window_Reset_Full_Range",
             "04_Fix_Source_Affine_Metadata",
             "nnUNet/04_Stop_Running_Task",
@@ -3800,8 +3810,8 @@ class TestScriptingLibraryEntries(unittest.TestCase):
         self.assertEqual([], offenders)
 
     def test_living_doc_entry_references_match_library_files(self):
-        """R61-19: entry references in living docs (e.g. "03 Stop Import
-        Queue") must match a real scripting_library file. R60 renumbered
+        """R61-19: entry references in living docs (e.g. "04 Task Status")
+        must match a real scripting_library file. R60 renumbered
         the 01_Data entries; the lifecycle policy still pointed at the old
         numbers for weeks because no test cross-checked them."""
         import re as _re
@@ -3925,9 +3935,20 @@ class TestStopBackgroundServices(unittest.TestCase):
             msb._stop_export_inprocess_monitors = old_stop
         self.assertEqual(os.getpid(), result.get("target_pid"))
         self.assertTrue(os.path.isfile(os.path.join(export_root, ".mimics_runtime", "_export_stop.json")))
-        entry = os.path.join(PROJECT_ROOT, "scripting_library", "01_Data", "05_Stop_Mask_Export.py")
+        # C1: the 05_Stop_Mask_Export entry is gone; Task Status writes the
+        # same marker per row.
+        entry = os.path.join(PROJECT_ROOT, "scripting_library", "01_Data", "04_Task_Status.py")
         self.assertTrue(os.path.isfile(entry))
-        self.assertIn("main_stop_export", Path(entry).read_text(encoding="utf-8"))
+        self.assertIn("batch_status_mimics", Path(entry).read_text(encoding="utf-8"))
+        tools_dir = os.path.join(PROJECT_ROOT, "tools")
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        import batch_status_viewer as bsv
+        marker = bsv._stop_marker({
+            "kind": "Export", "label": "j1",
+            "status_path": export_root + "/.mimics_runtime/export_jobs/j1/status.json",
+        })
+        self.assertTrue(marker.endswith("_export_stop.json"))
 
     def test_mask_export_stop_does_not_target_background_import(self):
         import mimics_stop_background as msb
@@ -4401,13 +4422,18 @@ class TestStopBackgroundServices(unittest.TestCase):
             "kind": "nnunet_train",
             "owner": "nnU-Net training",
         }))
-        entry = os.path.join(
-            PROJECT_ROOT,
-            "scripting_library",
-            "01_Data",
-            "03_Stop_Import_Queue.py",
-        )
-        self.assertTrue(os.path.isfile(entry))
+        # C1: the 03_Stop_Import_Queue entry is gone; Task Status writes the
+        # queue stop marker (_mcs_queue_stop.json + active-marker removal)
+        # for an "Import queue" row.
+        tools_dir = os.path.join(PROJECT_ROOT, "tools")
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        import batch_status_viewer as bsv
+        marker = bsv._stop_marker({
+            "kind": "Import queue", "label": "q1",
+            "status_path": self.tmp + "/import_queues/q1/_mcs_batch_status.json",
+        })
+        self.assertTrue(marker.endswith("_mcs_queue_stop.json"))
 
 
 # ============================================================================
@@ -4902,7 +4928,7 @@ class TestNNInteractiveContinuousPrompting(unittest.TestCase):
         self.assertEqual("source_data_invalid", category)
         # R61-5: the old wording pointed at a nonexistent _failed_cases.json
         # inside the user output folder; the real records are per-case JSONs
-        # in the queue runtime dir, reachable via Show Batch Status.
+        # in the queue runtime dir, reachable via Task Status.
         self.assertNotIn("_failed_cases.json", action)
         self.assertIn("original source path", action)
 
@@ -4997,7 +5023,8 @@ class TestNNInteractiveContinuousPrompting(unittest.TestCase):
         import_source = Path(
             PROJECT_ROOT, "runtime_py35", "mimics_import.py"
         ).read_text(encoding="utf-8")
-        self.assertIn("Stop Import Queue", import_source)
+        # C1: the stop entry merged into Task Status.
+        self.assertIn("Task Status", import_source)
         self.assertIn("(01 Data menu)", import_source)
 
 
@@ -6650,7 +6677,7 @@ class TestSourceImagePathEquivalence(unittest.TestCase):
         for module in (nnunet_mimics, flexict_mimics):
             source = inspect.getsource(module._prediction_context)
             self.assertNotIn("Relink the source image metadata", source)
-            self.assertIn("01_Import_Dataset", source)
+            self.assertIn("01_Import_Data", source)
             self.assertIn("re-import the case", source)
         pipeline_source = inspect.getsource(
             nnunet_pipeline.validate_materialized_source_geometry
@@ -6999,7 +7026,7 @@ class TestNewFeatures(unittest.TestCase):
 
     def test_batch_status_entry_and_runtime_module_exist(self):
         entry = Path(
-            PROJECT_ROOT, "scripting_library", "01_Data", "08_Show_Batch_Status.py"
+            PROJECT_ROOT, "scripting_library", "01_Data", "04_Task_Status.py"
         )
         self.assertTrue(entry.is_file(), entry)
         source = entry.read_text(encoding="utf-8")
@@ -8741,15 +8768,37 @@ class TestNewFeatures(unittest.TestCase):
     # ================================================================
 
     def test_stop_background_import_entry_exists(self):
-        """Stop_Background_Import entry must route to the correct function."""
+        """C1: the Stop Import Queue entry is gone; Task Status writes the
+        per-run stop marker for an "Import" row instead."""
         entry = os.path.join(
             PROJECT_ROOT, "scripting_library", "01_Data", "03_Stop_Import_Queue.py"
         )
-        self.assertTrue(os.path.isfile(entry), "Stop_Background_Import entry must exist")
-        with open(entry, "r", encoding="utf-8") as handle:
-            content = handle.read()
-        self.assertIn("main_stop_import", content,
-                      "must route to main_stop_import function")
+        self.assertFalse(os.path.isfile(entry),
+                         "03_Stop_Import_Queue entry must be gone")
+        task_status = os.path.join(
+            PROJECT_ROOT, "scripting_library", "01_Data", "04_Task_Status.py"
+        )
+        self.assertTrue(os.path.isfile(task_status))
+        tools_dir = os.path.join(PROJECT_ROOT, "tools")
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        import batch_status_viewer as bsv
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = os.path.join(tmp, "run1")
+            os.makedirs(run_dir)
+            row = {
+                "kind": "Import", "label": "run1", "status": "running",
+                "status_path": os.path.join(run_dir, "status.json"),
+                "job_dir": run_dir,
+            }
+            ok, message = bsv.request_stop(row)
+            self.assertTrue(ok, message)
+            self.assertTrue(
+                os.path.isfile(os.path.join(run_dir, "stop.json")))
+            with open(os.path.join(run_dir, "stop.json"), "r",
+                      encoding="utf-8") as handle:
+                payload = json.load(handle)
+            self.assertEqual("stop_requested", payload["status"])
 
     def test_stop_background_import_targets_only_create_mcs(self):
         """stop_background_import must identify import lock by kind=create_mcs."""
@@ -12075,7 +12124,7 @@ class TestImportReceiptAndUndo(unittest.TestCase):
             source = handle.read()
         self.assertIn("import_undo_mimics", source)
         drop = os.path.join(
-            PROJECT_ROOT, "scripting_library", "01_Data", "07_Quick_Drop_Import.py"
+            PROJECT_ROOT, "scripting_library", "01_Data", "01_Import_Data.py"
         )
         self.assertTrue(os.path.isfile(drop))
         with open(drop, "r") as handle:
@@ -13024,7 +13073,7 @@ class TestStaleGuardSweep(unittest.TestCase):
 class TestImportQueuePrune(unittest.TestCase):
     """R12 import-queue prune: stale queue dirs and registry rows go,
     live queues stay. Failure path focus: deleting a queue a live consumer
-    is still working in breaks the Stop Import Queue path and orphans locks.
+    is still working in breaks the per-row Stop path in Task Status and orphans locks.
     """
 
     def setUp(self):

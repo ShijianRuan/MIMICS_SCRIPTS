@@ -1819,7 +1819,7 @@ def _foreground_export_tick(monitor):
                         logging.INFO,
                         "Mask export is still converting to the original "
                         "image grid ({0}s). Mimics remains available. Use "
-                        "Stop Mask Export to cancel.".format(int(elapsed)),
+                        "Task Status (01 Data menu) to cancel.".format(int(elapsed)),
                     )
                 return
             runtime_common.clear_progress_notice(
@@ -2452,7 +2452,7 @@ def _background_export_status_tick(monitor):
                 _mimics_log(
                     logging.INFO,
                     "Mask export is still running ({0}s in the current "
-                    "stage): {1}. Use Stop Mask Export to cancel.".format(
+                    "stage): {1}. Use Task Status (01 Data menu) to cancel.".format(
                         int(elapsed),
                         status.get("phase")
                         or status.get("status")

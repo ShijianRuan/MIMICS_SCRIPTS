@@ -66,7 +66,7 @@ source orientations.
 Run from inside Mimics:
 
 ```text
-Scripting Library > 01_Data > 01_Import_Dataset
+Scripting Library > 01_Data > 01_Import_Data
 ```
 
 Select the dataset root. For each converted `.mcs`:
@@ -78,13 +78,13 @@ Select the dataset root. For each converted `.mcs`:
 - Confirm there is no left-right, anterior-posterior, superior-inferior, or
   diagonal mirror mismatch.
 - Check both a mask whose affine matches the image and one whose affine differs.
-- Run `02_Import_Single_Case` once by selecting an image file directly and once
+- Run `01_Import_Data` once by selecting an image file directly and once
   by selecting a flat DICOM directory.
 
 ## 1A. Export Destination Safety
 
 1. Save one project containing at least two visible or hidden Masks.
-2. Run `06_Quick_Export_Masks`, select the source case directory, and select an empty
+2. Run `03_Export_Masks`, select the source case directory, and select an empty
    destination root.
 3. Confirm every Mask appears under `<chosen>/<case>/segmentations`.
 4. Modify one exported file and run export to the same destination again.
@@ -155,7 +155,7 @@ or freeze the foreground Mimics GUI.
 Test:
 
 1. Open Mimics normally.
-2. Run `Scripting Library > 01_Data > 01_Import_Dataset`.
+2. Run `Scripting Library > 01_Data > 01_Import_Data`.
 3. Select a dataset folder with many cases.
 4. Immediately pan/zoom or interact with the existing open project.
 5. Note the time between closing the folder dialog and seeing this log:
@@ -362,7 +362,7 @@ usable, and exported label orientation matches the original image/mask geometry.
 ## 10.Draft Continuation, Resource Handoff, And Storage
 
 - Select an existing `<source> - AI Draft`, add another prompt, and confirm no `AI Draft 2` or `AI Draft - AI Draft` is created.
-- Start batch import, then start nnU-Net training with fresh label export enabled. Confirm status reports that label export is waiting for background Mimics, names the import owner, and offers `01 Data > 03 Stop Import Queue` as the optional action.
+- Start batch import, then start nnU-Net training with fresh label export enabled. Confirm status reports that label export is waiting for background Mimics, names the import owner, and offers `01 Data > 04 Task Status` as the optional action.
 - Let import finish and confirm label export and training start automatically without restarting setup.
 - Start an nnInteractive prompt and immediately queue nnU-Net training. Confirm the active prediction completes before the GPU is released.
 - Leave nnInteractive idle for more than 15 seconds, then queue nnU-Net training. Confirm the image worker closes gracefully and training starts without the legacy one-hour wait.

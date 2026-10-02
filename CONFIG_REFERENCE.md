@@ -145,9 +145,10 @@ warning is logged and the import still succeeds.
 
 ## Drop-to-import window state (`ui_state/io_paths.json`)
 
-`01_Data/07_Quick_Drop_Import.py` opens an always-on-top external window
+`01_Data/01_Import_Data.py` opens an always-on-top external window
 (`tools/import_drop_window.py`) that accepts dragged files, case folders,
-dataset folders, or pasted paths, classifies them against the dataset
+dataset folders, pasted paths, or hand-picked files/folders, classifies them
+against the dataset
 profile, and submits to the existing import workers. It is registered in the
 process registry under role `external_ui` with cleanup policy
 `idle_timeout_s:1800` and exits by itself after half an hour without input.
@@ -339,7 +340,7 @@ When background Mimics is unavailable:
 1. Configure `MIMICS_BACKGROUND_EXE`, or
 2. Export labels separately and turn off **Refresh labels from saved .mcs before training**.
 
-Current-project mask export remains available through **Quick Export Masks**
+Current-project mask export remains available through **Export Masks**
 and is split into timer-driven steps so GUI updates can occur between
 mask-buffer reads.
 

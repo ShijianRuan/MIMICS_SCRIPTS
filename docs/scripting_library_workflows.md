@@ -11,35 +11,33 @@
 
 ### 01 Data
 
-1. `01 Import Dataset`
-2. `02 Import Single Case`
-3. `03 Stop Import Queue`
-4. `04 Import Masks`
-5. `05 Stop Mask Export`
-6. `06 Quick Export Masks`
-7. `07 Quick Drop Import`
-8. `08 Show Batch Status`
+1. `01 Import Data`
+2. `02 Import Masks`
+3. `03 Export Masks`
+4. `04 Task Status`
 
-`02 Import Single Case` accepts a single `.nii`, `.nii.gz`, `.mha`, `.mhd`, or
-`.nrrd` volume, a TotalSegmentator-style case folder, a `dicom/` case folder,
-or a folder containing a DICOM series directly. Header inspection and
-conversion run in the external bridge process.
+`01 Import Data` opens the always-on-top import window. Drop a single
+`.nii`, `.nii.gz`, `.mha`, `.mhd`, or `.nrrd` volume, a TotalSegmentator-style
+case folder, a `dicom/` case folder, a DICOM series folder, a multi-selection
+of case folders, or a whole dataset folder onto it — or paste paths (Ctrl+V,
+one per line) or pick them with the choose buttons. The window classifies the
+payload, resolves it against the dataset profile, and submits it to the
+background import workers; header inspection and conversion run in the
+external bridge process. The window closes itself after an idle timeout.
 
-`01 Import Dataset` and `02 Import Single Case` open the
-shared external PySide6 path window. Mimics starts that process and returns
-immediately; file browsing never runs in the Mimics GUI process. Import always
-requires a source and shows the resolved `.mcs` output folder, while keeping the
-output optional to change. `mimics_io_config.json:mimics_output_dir` is only an
-administrator/default value and is overridden by the current window selection.
-Paths are remembered only when the annotator explicitly enables the workstation
-remember option.
+Mimics starts that process and returns immediately; file browsing never runs
+in the Mimics GUI process. Import always requires a source and shows the
+resolved `.mcs` output folder, while keeping the output optional to change.
+`mimics_io_config.json:mimics_output_dir` is only an administrator/default
+value and is overridden by the current window selection. Paths are remembered
+only when the annotator explicitly enables the workstation remember option.
 
-`04 Import Masks` adds binary or multi-label NIfTI, MHA/MHD, or NRRD
+`02 Import Masks` adds binary or multi-label NIfTI, MHA/MHD, or NRRD
 segmentations to the active image. File reading, label splitting, and spatial
 resampling run in external Python. Mimics applies one prepared Mask per GUI
 timer tick; empty results are rejected with a spatial-alignment warning.
 
-`06 Quick Export Masks` exports every Mask in the saved project, including hidden
+`03 Export Masks` exports every Mask in the saved project, including hidden
 Masks. Select the source image or case and then the destination root. The source
 may be NIfTI, MHA/MHD, NRRD, one DICOM file, a DICOM series folder, or a case
 folder containing one of those forms. Output is written to `<chosen
@@ -51,11 +49,12 @@ a user-configurable data path.
 `tools/mimics_batch_cli.py export-labels` and requires an explicit destination
 policy through either `--output-dir` or `--overwrite-source`.
 
-`05 Stop Mask Export` targets only a Mimics-Script background process whose
-resource lock identifies it as label export. It first writes an export stop
-marker so no additional case is opened, then terminates the recorded process
-tree only when its command line matches the export runner. It does not stop an
-import queue, AI training or inference, nnInteractive, foreground Mimics, or unrelated processes.
+`04 Task Status` aggregates every import run, background `.mcs` queue,
+mask-export job, foreground export task, mask-append job, and drop import into
+one live table. Each running row has a Stop button that writes the same
+kind-specific stop marker the task's own worker polls: the current case
+finishes and no new case starts. It does not stop AI training or inference,
+nnInteractive, foreground Mimics, or unrelated processes.
 
 ### 02 AI
 
@@ -132,7 +131,7 @@ is scoped to an import queue or export destination, so independent jobs may run
 in parallel. Set `MIMICS_SERIALIZE_BACKGROUND_MIMICS=1` only when a workstation's
 license or Mimics installation genuinely allows one background instance.
 
-The Mimics `Import Dataset` entry, the Mimics `Import Single Case` entry, and
+The Mimics `Import Data` entry and
 `tools/mimics_batch_cli.py prepare-import` publish the same descriptor format to
 the same output-scoped `prepared_queue`. An `import_producer_<scope>.lock`
 prevents two of those entry points from changing that queue's active/done state
@@ -153,13 +152,13 @@ parallel.
 
 ### Geometry contract shared by every import entry
 
-`Import Dataset`, `Import Single Case`, `tools/mimics_batch_cli.py
+`Import Data`, `tools/mimics_batch_cli.py
 prepare-import`, and `tools/single_case_import_worker.py` all call the same
 `mimics_bridge.py` preparation actions and publish the same prepared descriptor.
 They do not have separate image-orientation implementations.
 
-The interactive single-case entry delegates preparation and `.mcs` waiting to
-`single_case_import_worker.py`. The interactive batch entry keeps only timer
+The single-case path delegates preparation and `.mcs` waiting to
+`single_case_import_worker.py`. The batch path keeps only timer
 orchestration in Mimics and runs discovery/conversion in the external Python.
 The CLI keeps all orchestration outside Mimics. Despite those lifecycle
 differences, all three use the same local runtime root, output-scoped queue,
@@ -228,9 +227,9 @@ differs.
 
 | Current work | May start immediately | Must wait or stop first | Normal stop | Emergency stop |
 | --- | --- | --- | --- | --- |
-| Dataset scan or image preparation | Review, window controls, nnInteractive, AI inference on prepared data | Another import of the same queue | `01 Data/03 Stop Import Queue` | `99 Admin/03 Stop All Owned Services` |
-| Background `.mcs` creation | Review, GPU AI work, and exports reading other `.mcs` folders | Another creator or exporter using the same `.mcs` folder | `01 Data/03 Stop Import Queue` | `99 Admin/03 Stop All Owned Services` |
-| Mask export | Review, GPU AI work, and imports/exports using unrelated source and destination folders | Import writing its `.mcs` source folder, or export writing the same label destination | `01 Data/05 Stop Mask Export` | `99 Admin/03 Stop All Owned Services` |
+| Dataset scan or image preparation | Review, window controls, nnInteractive, AI inference on prepared data | Another import of the same queue | `01 Data/04 Task Status` (row Stop) | `99 Admin/03 Stop All Owned Services` |
+| Background `.mcs` creation | Review, GPU AI work, and exports reading other `.mcs` folders | Another creator or exporter using the same `.mcs` folder | `01 Data/04 Task Status` (row Stop) | `99 Admin/03 Stop All Owned Services` |
+| Mask export | Review, GPU AI work, and imports/exports using unrelated source and destination folders | Import writing its `.mcs` source folder, or export writing the same label destination | `01 Data/04 Task Status` (row Stop) | `99 Admin/03 Stop All Owned Services` |
 | nnInteractive active prediction | Review and data preparation | nnU-Net GPU execution | Finish or cancel the current nnInteractive session | `99 Admin/03 Stop All Owned Services` |
 | nnInteractive idle image worker | All review and data work | Nothing; another AI task requests a graceful GPU release | Worker exits on idle timeout | `99 Admin/03 Stop All Owned Services` |
 | nnU-Net training or prediction | Review, import preparation, status viewer | Another GPU AI task; nnInteractive GPU execution | `02 AI/nnUNet/03 Show Status & Models` (stop from the status window) | `99 Admin/03 Stop All Owned Services` |

@@ -474,8 +474,8 @@ def _lock_wait_payload(resource, current):
     if resource == "background_mimics" and "import" in owner:
         payload["user_action"] = (
             "Import and label export share one background Mimics license. "
-            "Wait for import to finish, or use Stop Import Queue"
-            " (01 Data menu) if training is more urgent."
+            "Wait for import to finish, or stop it in Task Status "
+            "(01 Data menu) if training is more urgent."
         )
     elif resource == "gpu":
         payload["user_action"] = (

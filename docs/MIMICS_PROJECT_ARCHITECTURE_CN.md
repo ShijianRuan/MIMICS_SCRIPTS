@@ -74,7 +74,7 @@ Mimics 菜单入口只完成必要的短操作，然后立即返回事件循环�
 
 ```text
 选择源数据和输出目录
-  -> Import Single Case / Import Dataset
+  -> Import Data
   -> 打开首个 .mcs 并标注
   -> Export Masks（保存到明确选择的标签目录）
   -> 可选：nnInteractive / nnU-Net 训练
@@ -178,67 +178,75 @@ Mimics 定时器 <-----+
 
 ## 4. Data 功能入口
 
-### 4.1 `01_Data/01_Import_Dataset.py`
+### 4.1 `01_Data/01_Import_Data.py`
 
-用途：批量发现数据集病例并转换为 `.mcs`。
+用途：导入数据——单个图像文件、病例文件夹、DICOM 目录、多选病例或整个数据集，后台转换为 `.mcs`。
 
 调用链：
 
 ```text
-01_Import_Dataset.py
-  -> runtime_py35/mimics_import.py
-  -> tools/io_path_setup_ui.py
-  -> 外部 discovery / mimics_bridge.py prepare
+01_Import_Data.py
+  -> runtime_py35/import_drop_mimics.py
+  -> tools/import_drop_window.py（常置顶悬浮窗）
+  -> 单例/多选：tools/single_case_import_worker.py
+  -> 批量：tools/mimics_batch_cli.py prepare-import
   -> 输出目录中的 prepared queue
   -> runtime_py35/create_mcs_batch.py（后台 Mimics）
 ```
 
 设计要点：
 
-- 路径选择与大目录发现位于外部 PySide6 进程；
-- 支持 Images only、All masks、指定一个或多个 Mask；
+- 路径选择与大目录发现位于外部 PySide6 进程（拖入、粘贴、浏览选择三种入口共用同一识别管线）；
+- 支持 Images only、All masks；
 - preparation 与 `.mcs` 创建采用流式队列，第一例准备完成后即可开始创建，不等待全部病例；
 - 每例有独立工作目录和错误记录，单例失败不会中止后续病例；
 - producer lease 防止同一输出队列被多个导入生产者相互覆盖；
 - 后台 Mimics 负责必须由 Mimics API 完成的 `.mcs` 创建；
-- 可通过 `03_Stop_Import_Queue.py` 停止本项目创建的导入队列。
+- 运行中的任务可在 `04_Task_Status.py` 中逐行停止。
 
 关键状态：
 
-- `.mimics_runtime/import_runs/`：当前前台 Mimics 发起的导入任务；
+- `.mimics_runtime/import_runs/`：导入任务记录；
 - 输出目录下的 `_import_jobs/` 或运行时队列目录：病例准备和 `.mcs` 创建状态；
 - `job_state.json`、队列 active/done/stop 标记：进度、终态和停止请求；
 - `mimics_import.log`：导入主日志，按大小轮转。
 
-### 4.2 `01_Data/02_Import_Single_Case.py`
+### 4.2 `01_Data/02_Import_Masks.py`
 
-用途：导入一个图像文件、一个 DICOM 文件夹或一个病例文件夹。
+用途：将 NIfTI、MHA、MHD、NRRD 等分割文件导入当前活动 Image。
 
 调用链：
 
 ```text
-02_Import_Single_Case.py
-  -> runtime_py35/mimics_import.py("single_case")
-  -> tools/io_path_setup_ui.py
-  -> tools/single_case_import_worker.py
-  -> mimics_bridge.py
-  -> 与批量导入相同的 prepared queue / create_mcs_batch.py
+02_Import_Masks.py
+  -> runtime_py35/mask_import.py
+  -> 外部文件选择器
+  -> mimics_bridge.py prepare_masks_for_grid
+  -> Mimics timer 每次应用一个 Mask buffer
 ```
 
-单例入口与批量入口共用准备、队列、后台 Mimics 和状态机制，避免维护两套不一致的转换逻辑。外部 worker 负责耗时读取和准备；Mimics 内只轮询进度。用户点击 Stop 时，控制器会终止已暴露的外部进程并写入停止标记。
+设计要点：
 
-### 4.3 `01_Data/06_Quick_Export_Masks.py`
+- 外部进程读取文件和执行空间变换；
+- 二值 Mask 生成一个 Mimics Mask；
+- 多标签文件按非零 label 拆分为多个 Mimics Mask；
+- 通过源 Mask affine 和当前 Mimics voxel-to-RAS 矩阵显式对齐；
+- 标签只使用最近邻插值，防止生成不存在的类别；
+- Mimics timer 一次应用一个结果并调用 GUI 更新，避免一次性写入多个大 Mask；
+- 有并发防护、超时和取消路径，避免重复点击同时修改同一项目。
+
+### 4.3 `01_Data/03_Export_Masks.py`
 
 用途：将当前项目或一批已保存 `.mcs` 中的 Mask 导出为与源图像网格一致的标签文件。
 
-（2026-09-27：原 `01_Data/03_Export_Masks.py` 与本入口调用同一
-`_launch_external_export_setup` 且本入口功能是其超集，按 D1 决策删除
-重复入口，导出功能统一由本入口承担。）
+（2026-09-27：原重复入口 `01_Data/03_Export_Masks.py` 按 D1 决策删除；
+2026-10-02（C1）：`06_Quick_Export_Masks.py` 更名为本入口，去掉 Quick
+前缀。）
 
 调用链：
 
 ```text
-06_Quick_Export_Masks.py
+03_Export_Masks.py
   -> runtime_py35/mimics_export.py
   -> tools/io_path_setup_ui.py
   -> 当前项目：Mimics timer 分步读取 buffer
@@ -258,49 +266,22 @@ Mimics 定时器 <-----+
 - `dataset_manifest.json` 记录 case、图像、标签、`.mcs` 和几何信息之间的关系；
 - 用户选择的独立输出目录不会修改原始标签；只有明确选择原始标签目录并允许覆盖时才覆盖。
 
-停止入口：`01_Data/05_Stop_Mask_Export.py`。
+停止方式：`04_Task_Status.py` 中该行停止。
 
-### 4.4 `01_Data/03_Stop_Import_Queue.py`
+当前项目的快速导出（`quick_export_main`）同样复用本节的几何和转换逻辑，不维护独立的"简化坐标转换"。
 
-用途：只停止 Mimics-Script 创建的导入准备和 `.mcs` 创建队列。
+### 4.4 `01_Data/04_Task_Status.py`
 
-实现：`runtime_py35/mimics_stop_background.py:main_stop_import`
+用途：一个窗口查看所有导入/导出任务（导入运行、后台 `.mcs` 队列、
+Mask 导出作业、前台导出任务、Mask 追加作业、拖入导入）的状态与进度，
+并可对运行中的任务逐行停止。
 
-它不会终止当前前台 Mimics，也不会终止非本项目创建的 Python/Mimics 进程。停止过程先写 stop marker，再尝试优雅终止已登记进程，最后清理任务监控器和锁。
+实现：`runtime_py35/batch_status_mimics.py` → `tools/batch_status_viewer.py`
 
-### 4.5 `01_Data/04_Import_Masks.py`
-
-用途：将 NIfTI、MHA、MHD、NRRD 等分割文件导入当前活动 Image。
-
-调用链：
-
-```text
-04_Import_Masks.py
-  -> runtime_py35/mask_import.py
-  -> 外部文件选择器
-  -> mimics_bridge.py prepare_masks_for_grid
-  -> Mimics timer 每次应用一个 Mask buffer
-```
-
-设计要点：
-
-- 外部进程读取文件和执行空间变换；
-- 二值 Mask 生成一个 Mimics Mask；
-- 多标签文件按非零 label 拆分为多个 Mimics Mask；
-- 通过源 Mask affine 和当前 Mimics voxel-to-RAS 矩阵显式对齐；
-- 标签只使用最近邻插值，防止生成不存在的类别；
-- Mimics timer 一次应用一个结果并调用 GUI 更新，避免一次性写入多个大 Mask；
-- 有并发防护、超时和取消路径，避免重复点击同时修改同一项目。
-
-### 4.6 `01_Data/05_Stop_Mask_Export.py`
-
-用途：只停止当前 Mimics-Script Mask 导出任务。
-
-实现：`runtime_py35/mimics_stop_background.py:main_stop_export`
-
-它通过当前导出任务保存的 PID、ownership token、status 和 stop marker 定位目标，不进行全局进程枚举式误杀。
-
-当前项目的快速导出（`quick_export_main`）同样复用 4.3 的几何和转换逻辑，不维护独立的"简化坐标转换"。
+逐行停止只写入该任务类型对应的 stop marker（队列停止同时移除 active
+marker），当前病例完成后任务退出；kill/卡死进程的兜底仍在
+`99_Admin/03_Stop_All_Owned_Services.py`。它不会终止当前前台 Mimics，
+也不会终止非本项目创建的 Python/Mimics 进程。
 
 ## 5. nnInteractive 功能入口
 
@@ -771,8 +752,8 @@ created -> starting -> running/waiting
 ### 12.3 应该用哪个停止入口
 
 1. 任务自己的窗口有 Stop/Cancel 时，优先使用它；
-2. 导入队列使用 `01_Data/03_Stop_Import_Queue`；
-3. Mask 导出使用 `01_Data/05_Stop_Mask_Export`；
+2. 导入队列在 `01_Data/04_Task_Status` 中该行停止；
+3. Mask 导出在 `01_Data/04_Task_Status` 中该行停止；
 4. nnU-Net 使用自己的 Stop 入口；
 5. nnInteractive/交互算法再次打开同一入口可查看并停止当前任务；
 6. 只有状态异常且普通停止无效时，才使用 `99_Admin/03_Stop_All_Owned_Services`。

@@ -570,7 +570,7 @@ def _mcs_queue_registry_dir():
 
 
 def _register_mcs_queue(output_dir, total_count=0):
-    # This small local registry makes Stop Import Queue work even while a
+    # This small local registry makes per-row Stop in Task Status work even while a
     # prepared queue is waiting for the background Mimics license.
     try:
         registry_dir = _mcs_queue_registry_dir()
@@ -872,7 +872,7 @@ def _error_guidance(error_text, phase=""):
             "Free space on the import output drive (or choose a different "
             "output folder), then retry. Failed cases are listed per case "
             "in the _failed_cases folder of this import; open it via "
-            "Show Batch Status (01 Data menu).",
+            "Task Status (01 Data menu).",
         )
     if (
         "network path not found" in combined
@@ -1810,8 +1810,7 @@ def _import_monitor_tick(monitor):
             _user_progress(
                 logging.INFO,
                 "Import is still preparing {0} ({1}s). Mimics remains "
-                "available. Use Stop Import Queue"
-                " (01 Data menu) to cancel.".format(
+                "available. Use Task Status (01 Data menu) to cancel.".format(
                     detail, int(elapsed)
                 ),
             )
@@ -2114,7 +2113,7 @@ def _batch_prepare_tick_impl(monitor):
             _user_progress(
                 logging.INFO,
                 "Import is still preparing {0} ({1}s); completed {2}/{3}, "
-                "failed {4}. Use Stop Import Queue"
+                "failed {4}. Use Task Status"
                 " (01 Data menu) to cancel.".format(
                     detail,
                     int(elapsed),
@@ -2880,7 +2879,7 @@ def _launch_background_mimics(output_dir, total_count=0, schedule_retry=True):
             )
             _append_import_log(
                 output_dir,
-                "Waiting task: {0}. Use Stop Import Queue"
+                "Waiting task: {0}. Use Task Status"
                 " (01 Data menu) to cancel.".format(
                     runtime_common.resource_lock_summary(holder)
                 ),
@@ -3031,7 +3030,7 @@ def _first_mcs_monitor_tick(monitor):
                     output_dir,
                     (
                         "\n\nEach failed case is recorded with its original source "
-                        "path. Open this import in Show Batch Status (01 Data menu) "
+                        "path. Open this import in Task Status (01 Data menu) "
                         "and use Open Log to see the details before retrying."
                         if failed
                         else ""
@@ -3075,7 +3074,7 @@ def _first_mcs_monitor_tick(monitor):
                         "Suggested action: prepared files were kept for retry. Check that "
                         "the background Mimics process is still allowed to run (Admin > "
                         "Stop All Owned Services, then retry), or open this import in "
-                        "Show Batch Status (01 Data menu) and read its log."
+                        "Task Status (01 Data menu) and read its log."
                     ),
                     ui_blocking=False,
                 )
@@ -3097,7 +3096,7 @@ def _first_mcs_monitor_tick(monitor):
                         logging.INFO,
                         "Background .mcs creation is still running ({0}s in "
                         "the current stage); completed {1}, failed {2}. Use "
-                        "Stop Import Queue"
+                        "Task Status"
                         " (01 Data menu) to cancel.".format(
                             int(elapsed),
                             int(status.get("completed", 0) or 0),
@@ -3212,7 +3211,7 @@ def _first_mcs_monitor_tick(monitor):
         _user_progress(
             logging.INFO,
             "Waiting for the first .mcs file ({0}s). Preparation and "
-            "background Mimics continue independently; use Stop Import Queue"
+            "background Mimics continue independently; use Task Status"
             " (01 Data menu) to cancel.".format(int(elapsed)),
         )
 
@@ -3557,7 +3556,7 @@ def _discover_monitor_tick(monitor):
                 _user_progress(
                     logging.INFO,
                     "Dataset discovery is still running in external Python "
-                    "({0}s). Mimics remains available. Use Stop Import Queue"
+                    "({0}s). Mimics remains available. Use Task Status"
                     " (01 Data menu) to cancel.".format(int(elapsed)),
                 )
             return  # still discovering
@@ -4146,7 +4145,7 @@ def main(import_mode=None, case_info_override=None):
         _checkpoint_record("main_blocked_live_bridge", count=len(live_bridge_jobs))
         _safe_message_box(
             "Import Already Running",
-            "Another image import is still preparing data. Wait for it to finish or use Stop Import Queue before starting another import.",
+            "Another image import is still preparing data. Wait for it to finish or stop it in Task Status (01 Data menu) before starting another import.",
             ui_blocking=False,
         )
         return 2

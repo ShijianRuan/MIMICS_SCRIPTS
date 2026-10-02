@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Show every import/export batch task in one window.
+"""Show and control every import/export task in one window.
 
 Lists the recent import runs, background .mcs queues, mask-export jobs,
 foreground export tasks, mask-append jobs, and drop imports with live
-status, progress, and one-click access to each task's folder and status
-file. Read-only: stopping a task stays in the matching Stop entry.
+status and progress, one-click access to each task's folder and status
+file, and a per-row Stop button to cancel a running task.
 """
 
 from __future__ import print_function
