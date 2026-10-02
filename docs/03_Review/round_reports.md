@@ -4240,14 +4240,46 @@ test_all 失败（3× 过期 `_record_failed_case` stub 缺 R63 的
 迁移后为 105/105（原分支 109 中的 4 例为 R-P1-9 新增，属他人工作未
 随迁，数字吻合）。迁移后 al-review-loop 本地领先 origin 56 提交。
 
+### R65-17（F10+F15，W08）：多选导入作用域 + 视觉状态（`8630de0`/`68d33eb`）
+
+F10 对照 HEAD 双重确认：同父目录多选被升级为整个父目录 batch
+（classify_payload 返回 `("batch", parent)`，提交只传 `--ts-root`——
+拖 2 例导全目录）；跨父目录 multi_single 分支 UI 不可达（analyze 只探
+paths[0]，文件夹探测必失败 → "No supported image" + Import 永久禁用）。
+修复：多选一律 multi_single（精确清单、去重、永不升级父目录），batch
+入口保留给拖数据集根本身；analyze 逐例探测、逐项 ✓/✗ 报告、至少一例
+有效即可提交。F15 残项核实三项在 HEAD 并修复：#primary 无 :disabled
+规则（禁用主按钮仍饱和蓝，加显式规则）、AL 表 mm³ 列可被挤截断
+（header 最小 section 宽 + 定宽）、模型管理器模型/时间列截断（定宽）；
+其余 F15 项 R61-21/R61-24 已覆盖。T10/T15 证据：5 新回归
+（2-of-10 不升级、去重、multi_single 逐例提交、primary disabled 契约、
+AL 列宽契约）。ImportDropWindow 16/16、UiThemePalette 4/4、
+gui_smoke 7/7、冒烟 8/8×2（`20261002T145446`/`20261002T154103`）。
+
+### R65-18（F04+F13，W08）：AL 首次排序入口 + 续问锁（`7c04d64`/`44b7c89`）
+
+F13 残项核实：全量复制/哈希 R61-12 已流式化；真实残项是续问菜单——
+monitor tick 从开头拿 mask_buffer_access 锁到 finally，applied 后在
+try 内弹 ui_blocking 续问菜单，用户思考期间其他 Mask 操作全被锁死。
+修复：菜单前释放锁；busy 保留作重入护栏（菜单泵消息循环、timer 会
+重入）；finally 用原 token 重复释放天然安全。F04 核实：03 主动学习
+审查只开列表窗、空态指回同一菜单（死循环），后端无图形路径。修复：
+审查窗新增「新建排序…」主动作 + 最小表单（数据集根 + 目标，读训练
+设置记忆），daemon 线程提交既有 create_flexict_job，poll timer 收结果
+（错误可见、运行中显示 phase/百分比、终态自动刷新），目录选择异步
+helper。T04/T13 证据：4 新回归（菜单期间他人可拿锁 + tick 后锁全
+释放、空态有新建入口、提交错误可见、运行中进度 + 终态自动刷新）。
+NNInteractive 相邻 83/83、AL smoke 7/7、AL 生命周期 2/2、冒烟 8/8×2
+（`20261002T161127`/`20261002T162600`）。
+
 ### 下一步
 
-W04（R65-5/6/8）、W06 全部（R65-7=F28、R65-19=F11、R65-11=F26+F27）、
-W05（R65-16）已关闭。W03 仅剩 R65-12（F01 DICOM 系列/多帧——需 L3
-实机配合，验收成本高）；之后按交接顺序 W08（R65-17 = F10+F15 多选
-作用域 + 视觉状态、R65-18 = F04+F13）；R65-13 = F05（AL 叠加自动标记
-已标注——F02 修复后该行为已真实暴露，`_al_finish_conversion` 成功
-路径仍调 `_al_mark_annotated`，需结合产品语义评估）。
+W04、W05（R65-16）、W06、W08（R65-17、R65-18）已全部关闭。剩余：
+W03 的 R65-12（F01 DICOM 系列/多帧——需 L3 实机配合，验收成本高，
+维持挂起）；R65-13 = F05（AL 叠加自动标记已标注——F02 修复后该行为
+已真实暴露，`_al_finish_conversion` 成功路径仍调 `_al_mark_annotated`，
+需结合产品语义评估：状态模型 new → opened → reviewed 的拆分属产品
+设计决策，按需求变更纪律应入"需用户决策"）。
 
 ### 工作区事件登记
 

@@ -461,11 +461,38 @@
   L4 实机验收（真实 pip 安装/迁移机器）仍待实机窗口，代码层契约已全
   钉住。证据：flexict_integration 105/105、TestEnvironmentRepairSemantics
   + 相邻类 31/31、冒烟 8/8（`20261002T140530`）。
-- [ ] **R65-17 = F10【P1】拖拽多选扩大或不可提交** + **F15【P2】状态
-  视觉**（F15 大部分已被 R61-21/R61-24 覆盖，需对照 HEAD 核实残项）。
-  验收 T10/T15。
-- [ ] **R65-18 = F04【P1】AL 首次排序任务无图形入口** + **F13【P2】全量
-  复制效率**（F13 部分已被 R61-12 覆盖，需核实残项）。验收 T04/T13。
+- [x] **R65-17 = F10【P1】拖拽多选扩大或不可提交** + **F15【P2】状态
+  视觉**〔R65 当轮解决，commit `8630de0`（F10）+ `68d33eb`（F15 残项）〕：
+  对照 HEAD 核实 F10 双半边都在——同父目录多选被升级为整个父目录 batch
+  （提交只传 `--ts-root`，拖 2 例导全目录）；跨父目录 multi_single 分支 UI
+  不可达（analyze 只探 paths[0]，文件夹必失败 → 永久禁用 Import）。修复：
+  classify_payload 多选一律 multi_single（精确清单、去重、永不升级父目录；
+  batch 入口保留给拖数据集根）；analyze 逐例探测、逐项报告、有效即启用。
+  F15 残项核实三项在 HEAD：#primary 无 :disabled 规则（ID 选择器压过通用
+  规则，禁用主按钮仍饱和蓝）、AL 表 mm³ 列可被 Stretch 列挤截断、模型
+  管理器 7 列全默认宽度（创建时间/模型名截断）——均已修；其余（中文化、
+  空态指引）R61-21/R61-24 已覆盖。T10/T15：3 新测试（2-of-10 不升级、
+  去重、multi_single 逐例提交且无效例不启动 + 无 batch CLI 调用）+ 2 新
+  视觉契约（primary:disabled 规则、AL 表最小列宽）。ImportDropWindow
+  16/16、UiThemePalette 4/4、gui_smoke 7/7、冒烟 8/8
+  （`20261002T145446`/`20261002T154103`）。
+- [x] **R65-18 = F04【P1】AL 首次排序任务无图形入口** + **F13【P2】全量
+  复制效率**〔R65 当轮解决，commit `7c04d64`（F13）+ `44b7c89`（F04）〕：
+  F13 对照 HEAD 核实——全量 tobytes/哈希已被 R61-12 分块流式+GUI 泵解决；
+  真实残项是续问菜单：monitor tick 持有 mask_buffer_access 锁直到 finally，
+  而 applied 后在 try 内弹 ui_blocking 续问菜单 → 用户思考期间其他 Mask
+  操作全被锁死。修复：菜单前释放锁（busy 保留作重入护栏——菜单泵消息
+  循环，timer 会重入；finally 用原 token 重复释放天然安全：空锁 no-op、
+  别人持有 token 不匹配返回 False）。p50/p95 定量基线属 W09 量化工作，
+  未在本条宣称。F04 对照 HEAD 核实——03 主动学习审查只开列表窗、空态
+  指回同一菜单（死循环），后端 create_flexict_job(operation=active_learning)
+  无图形路径。修复：审查窗新增「新建排序…」主动作 + 最小表单（数据集根
+  + 目标，读训练设置记忆）；提交走 daemon 线程调既有 create_flexict_job，
+  结果由既有 2s poll timer 收——错误可见、运行中显示 phase/百分比、终态
+  自动刷新列表；目录选择用异步 helper（铁律 1）。T04/T13：3+1 新测试
+  （菜单期间他人可拿锁、tick 后锁全释放；空态有可用新建入口、提交错误
+  可见、运行中进度 + 终态自动刷新）。NNInteractive 相邻 83/83、AL smoke
+  7/7、AL 生命周期 2/2、冒烟 8/8（`20261002T161127`/`20261002T162600`）。
 - [x] **R65-19 = F11【P1】回收线程间接调用 Mimics 对话框**〔R65 当轮
   解决，commit `3fe6e1f`〕：审计 runtime_py35 全部 `on_complete=` 调用点，
   确认两处真实违规——mask_import `_finish_mask_import`（→ `mimics.dialogs.
