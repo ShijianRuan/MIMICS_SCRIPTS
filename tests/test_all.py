@@ -2973,11 +2973,11 @@ class TestWindowLevelEditor(unittest.TestCase):
             PROJECT_ROOT, "scripting_library", "03_Review", "05_Window_Edit_Presets.py"
         )
         # C2: the editor entry is gone; it is reachable as the
-        # "Edit Presets..." button inside the Window Level dialog.
+        # "编辑预设…" button inside the Window Level dialog.
         self.assertFalse(os.path.isfile(entry))
         from window_level_mimics import _choose_preset
 
-        self.assertIn("Edit Presets...", inspect.getsource(_choose_preset))
+        self.assertIn("编辑预设…", inspect.getsource(_choose_preset))
 
     def test_editor_window_renders_offscreen(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -3817,8 +3817,8 @@ class TestScriptingLibraryEntries(unittest.TestCase):
         from window_level_mimics import _choose_preset
 
         source = inspect.getsource(_choose_preset)
-        self.assertIn("Undo Last", source)
-        self.assertIn("Edit Presets...", source)
+        self.assertIn("撤销上一次", source)
+        self.assertIn("编辑预设…", source)
 
     def test_living_docs_do_not_reference_deleted_entries(self):
         """B24: entries deleted by R41/R43 must not appear as live references

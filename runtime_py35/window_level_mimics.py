@@ -15,7 +15,7 @@ import mimics
 import runtime_common
 
 
-TITLE = "Window/Level Presets"
+TITLE = "窗宽窗位预设"
 STATE_FILE = os.path.join(".mimics_runtime", "window_level_state.json")
 
 DEFAULT_PRESETS = [
@@ -296,25 +296,25 @@ def _choose_preset(presets, selected_name=""):
     buttons = [str(preset.get("name", "")) for preset in presets if preset.get("name")]
     # C2: the dialog is the single window/level surface — Undo and the preset
     # editor ride along as buttons instead of separate menu entries.
-    buttons.extend(["Undo Last", "Edit Presets...", "Reset Full Range", "Cancel"])
-    message = "Select a CT window/level preset."
+    buttons.extend(["撤销上一次", "编辑预设…", "恢复全范围", "取消"])
+    message = "请选择一个 CT 窗宽窗位预设。"
     if selected_name:
-        message += "\nSelected Mask: {0}".format(selected_name)
+        message += "\n当前选中掩膜：{0}".format(selected_name)
     answer = mimics.dialogs.question_box(
         title=TITLE,
         message=message,
         buttons=";".join(buttons),
         ui_blocking=True,
     )
-    if not answer or answer == "Cancel":
+    if not answer or answer == "取消":
         return None
-    if answer == "Reset Full Range":
+    if answer == "恢复全范围":
         reset_full_range()
         return None
-    if answer == "Undo Last":
+    if answer == "撤销上一次":
         undo_last()
         return None
-    if answer == "Edit Presets...":
+    if answer == "编辑预设…":
         import window_level_editor_mimics
 
         window_level_editor_mimics.open_window_level_editor()
@@ -383,14 +383,13 @@ def undo_last():
     answer = mimics.dialogs.question_box(
         title=TITLE,
         message=(
-            "The previous window/level values are not available for this image "
-            "(they were saved in an earlier Mimics session).\n"
-            "Reset the display to the full image range instead?"
+            "本影像没有可用的上次窗宽窗位记录（保存在更早的 Mimics 会话中）。\n"
+            "改为将显示恢复到影像完整灰度范围吗？"
         ),
-        buttons="Reset to Full Range;Cancel",
+        buttons="恢复全范围;取消",
         ui_blocking=True,
     )
-    if not answer or answer == "Cancel":
+    if not answer or answer == "取消":
         _mimics_log(logging.INFO, "Window/level undo cancelled: no previous values available, no reset performed.")
         return 0
     return reset_full_range()
@@ -402,7 +401,7 @@ def main(action="auto"):
     # error or silently do nothing.
     if _active_image() is None:
         mimics.dialogs.message_box(
-            "No active image found.\nPlease open a project first."
+            "未找到活动影像。\n请先打开一个工程。"
         )
         return 1
     if action == "choose":
