@@ -12,7 +12,7 @@ Covers:
   L7: scripting_library — Entry point routing
 
 Run from the project root:
-    python tools/test_all.py
+    python tests/test_all.py
 """
 
 from __future__ import print_function
@@ -2469,7 +2469,7 @@ class TestVerifyMedicalGeometry(unittest.TestCase):
         return path
 
     def _run(self, image, mask, extra_args=None):
-        tools_dir = os.path.dirname(os.path.abspath(__file__))
+        tools_dir = os.path.join(PROJECT_ROOT, "tools")
         if tools_dir not in sys.path:
             sys.path.insert(0, tools_dir)
         import verify_medical_geometry
@@ -2484,7 +2484,7 @@ class TestVerifyMedicalGeometry(unittest.TestCase):
 
     def _fake_geometry(self, shape, affine):
         """Patch get_source_image_geometry inside verify_medical_geometry."""
-        tools_dir = os.path.dirname(os.path.abspath(__file__))
+        tools_dir = os.path.join(PROJECT_ROOT, "tools")
         if tools_dir not in sys.path:
             sys.path.insert(0, tools_dir)
         import verify_medical_geometry
@@ -2526,7 +2526,7 @@ class TestVerifyMedicalGeometry(unittest.TestCase):
         data = np.zeros((3, 4, 5), dtype=np.uint8)
         image = self._write_nifti("image4.nii.gz", np.arange(60).reshape(3, 4, 5).astype(np.int16), np.eye(4))
         mask = self._write_nifti("mask4.nii.gz", data, np.eye(4))
-        tools_dir = os.path.dirname(os.path.abspath(__file__))
+        tools_dir = os.path.join(PROJECT_ROOT, "tools")
         if tools_dir not in sys.path:
             sys.path.insert(0, tools_dir)
         import verify_medical_geometry
@@ -2860,7 +2860,7 @@ class TestWindowLevelEditor(unittest.TestCase):
 
     def setUp(self):
         self.tmp = _make_temp_dir()
-        tools_dir = os.path.dirname(os.path.abspath(__file__))
+        tools_dir = os.path.join(PROJECT_ROOT, "tools")
         if tools_dir not in sys.path:
             sys.path.insert(0, tools_dir)
         import window_level_editor_ui as editor
@@ -2946,7 +2946,7 @@ class TestConfigEditor(unittest.TestCase):
 
     def setUp(self):
         self.tmp = _make_temp_dir()
-        tools_dir = os.path.dirname(os.path.abspath(__file__))
+        tools_dir = os.path.join(PROJECT_ROOT, "tools")
         if tools_dir not in sys.path:
             sys.path.insert(0, tools_dir)
         import config_editor_ui as editor
@@ -6642,7 +6642,7 @@ class TestSourceImagePathEquivalence(unittest.TestCase):
         import flexict_mimics
         import nnunet_mimics
 
-        tools_dir = os.path.dirname(os.path.abspath(__file__))
+        tools_dir = os.path.join(PROJECT_ROOT, "tools")
         if tools_dir not in sys.path:
             sys.path.insert(0, tools_dir)
         import nnunet_pipeline

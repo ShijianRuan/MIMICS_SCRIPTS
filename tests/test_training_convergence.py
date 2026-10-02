@@ -47,9 +47,8 @@ import unittest
 import zipfile
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent
-for value in (str(ROOT), str(HERE)):
+ROOT = Path(__file__).resolve().parents[1]
+for value in (str(ROOT), str(ROOT / "tools")):
     if value not in sys.path:
         sys.path.insert(0, value)
 

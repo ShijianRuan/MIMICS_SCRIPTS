@@ -7,10 +7,10 @@
 
 | 层 | 内容 | 规模 | 触发时机 | 执行者 |
 |----|------|------|----------|--------|
-| L1 单元/契约 | `tools/test_all.py`（410+ 项，含全部 Py3.5 语法、entrypoint、错误引导、配置） | ~16 min | 提交前全量；改动小可先跑目标类 | 开发 |
-| L2 集成套件 | 16 个 `tools/test_*.py` + `integrations/flexict-finetune/tests/test_flexict_pkg.py`（各框架独立套件：flexict/nnunet/nninteractive/remote/算法/可移植性/诊断/迁移/UI 偏好） | ~10 min | 每次提交 | 开发 |
-| L3 冒烟流（fake mimics） | `tools/fake_mimics_flow_test.py`（imports/append/entrypoint/window/export/nninteractive/taskmodels/stop 8 组，27 个 runtime 模块导入 + 6 类记录聚合） | ~1 min | 改 runtime_py35/ 或桥接层后立刻跑 | 开发 |
-| L4 离线压测 | `tools/offline_stress_test.py`（资源锁竞争、取消、坐标映射、增量重放） | ~1 min | 改锁/并发/映射代码后 | 开发 |
+| L1 单元/契约 | `tests/test_all.py`（410+ 项，含全部 Py3.5 语法、entrypoint、错误引导、配置） | ~16 min | 提交前全量；改动小可先跑目标类 | 开发 |
+| L2 集成套件 | 16 个 `tests/test_*.py` + `integrations/flexict-finetune/tests/test_flexict_pkg.py`（各框架独立套件：flexict/nnunet/nninteractive/remote/算法/可移植性/诊断/迁移/UI 偏好） | ~10 min | 每次提交 | 开发 |
+| L3 冒烟流（fake mimics） | `tests/fake_mimics_flow_test.py`（imports/append/entrypoint/window/export/nninteractive/taskmodels/stop 8 组，27 个 runtime 模块导入 + 6 类记录聚合） | ~1 min | 改 runtime_py35/ 或桥接层后立刻跑 | 开发 |
+| L4 离线压测 | `tests/offline_stress_test.py`（资源锁竞争、取消、坐标映射、增量重放） | ~1 min | 改锁/并发/映射代码后 | 开发 |
 | L5 GPU 人工验收 | 训练冒烟、pair→AL→overlay 端到端、AI Model Manager GUI、远程 FlexiCT 实机 | 按清单 | 发版前 | 标注者/开发 |
 
 ## 一键矩阵
@@ -37,7 +37,7 @@ python_env/python.exe tools/run_regression_matrix.py --list
 
 ## 各层覆盖什么、不覆盖什么
 
-**L1 test_all.py**（`python_env/python.exe tools/test_all.py`）
+**L1 test_all.py**（`python_env/python.exe tests/test_all.py`）
 - 覆盖：全部 tools/ 业务逻辑、Py3.5 兼容（runtime_py35 全部文件的语法
   walk）、scripting_library 入口路由、错误→动作引导文案、窗宽窗位、
   导入/导出核心、交互算法、打包清单完整性。

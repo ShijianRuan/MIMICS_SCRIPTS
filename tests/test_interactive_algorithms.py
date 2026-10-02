@@ -16,7 +16,8 @@ import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[1]
-for value in (ROOT, ROOT / "tools", ROOT / "runtime_py35"):
+TESTS = Path(__file__).resolve().parent
+for value in (ROOT, TESTS, ROOT / "tools", ROOT / "runtime_py35"):
     if str(value) not in sys.path:
         sys.path.insert(0, str(value))
 

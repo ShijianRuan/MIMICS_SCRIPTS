@@ -145,7 +145,7 @@ geometry 与 job 记录一致 → 调 mimics_bridge 重采样 → 事务内应�
 | 状态查看器 | `tools/flexict_status_viewer.py` | job 列表 + 日志查看 |
 | Mimics 入口 | `runtime_py35/flexict_mimics.py` | Py3.5 监控器（train/infer/AL request） |
 | 菜单脚本 | `scripting_library/02_AI/FlexiCT/` | 四个薄壳入口（训练 / 预测 / 主动学习 / 状态与停止） |
-| 测试 | `tools/test_flexict_integration.py`（56 项）+ `tools/test_flexict_common.py` + `integrations/flexict-finetune/tests/` | 离线测试 |
+| 测试 | `tests/test_flexict_integration.py`（56 项）+ `tests/test_flexict_common.py` + `integrations/flexict-finetune/tests/` | 离线测试 |
 
 ## 5. Windows 安装
 

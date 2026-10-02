@@ -69,7 +69,7 @@ python_env/python.exe tools/migrate_root.py --old-root E:\旧机安装根
 2. `02_AI > nnInteractive > Manage Custom Models`：任务模型列表正常（registry v2 relpath）
 2a. `02_AI > FlexiCT > 01 Train Model`：模型表能列出（flexict_models/registry.json 正常加载）
 3. 任一病例：导入 → 提示 → 导出 全流程走一遍
-4. （可选）`python_env/python.exe tools/test_model_portability.py`
+4. （可选）`python_env/python.exe tests/test_model_portability.py`
 
 ## 五、版本不一致场景
 

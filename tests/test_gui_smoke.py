@@ -421,7 +421,7 @@ class TestIoPathSetupDebounce(unittest.TestCase):
 
     def test_text_changed_goes_through_debounce_timer(self):
         _AppFixture.app()
-        source = Path(__file__).with_name("io_path_setup_ui.py").read_text(
+        source = (ROOT / "tools" / "io_path_setup_ui.py").read_text(
             encoding="utf-8"
         )
         # textChanged must not call refresh_recognition directly: on a
@@ -446,7 +446,7 @@ class TestIoPathOutputNotSticky(unittest.TestCase):
     old folder. Only a folder the user chose themselves sticks."""
 
     def test_io_path_setup_prefills_only_user_chosen_output(self):
-        source = Path(__file__).with_name("io_path_setup_ui.py").read_text(
+        source = (ROOT / "tools" / "io_path_setup_ui.py").read_text(
             encoding="utf-8"
         )
         # Load side: prefill the output box only when the remembered value
@@ -457,7 +457,7 @@ class TestIoPathOutputNotSticky(unittest.TestCase):
         self.assertIn('"output_custom": bool(', source)
 
     def test_drop_window_output_follows_each_new_dataset(self):
-        drop = Path(__file__).with_name("import_drop_window.py").read_text(
+        drop = (ROOT / "tools" / "import_drop_window.py").read_text(
             encoding="utf-8"
         )
         # Load side: same rule as the path-setup UI.

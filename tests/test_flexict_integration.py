@@ -18,12 +18,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-HERE = Path(__file__).resolve().parent
-if str(HERE) not in sys.path:
-    sys.path.insert(0, str(HERE))
-ROOT = HERE.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+ROOT = Path(__file__).resolve().parents[1]
+TOOLS = ROOT / "tools"
+for value in (str(ROOT), str(TOOLS)):
+    if value not in sys.path:
+        sys.path.insert(0, value)
 
 import flexict_common as fc
 import flexict_pipeline as fp

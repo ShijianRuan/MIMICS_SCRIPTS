@@ -977,7 +977,7 @@ tasks/brain_extraction/models/brain_clopa_in_v1
 ### 16.1 通用测试
 
 ```bash
-python tools/test_all.py
+python tests/test_all.py
 ```
 
 覆盖：
@@ -994,12 +994,12 @@ python tools/test_all.py
 ### 16.2 关键专项测试
 
 ```bash
-python tools/test_geometry_manifest_regressions.py
-python tools/test_mimics_nnint_functional.py
-python tools/test_mimics_nnint_deep.py
-python tools/test_nninteractive_task_integration.py
-python tools/test_model_portability.py
-python tools/fake_mimics_flow_test.py
+python tests/test_geometry_manifest_regressions.py
+python tests/test_mimics_nnint_functional.py
+python tests/test_mimics_nnint_deep.py
+python tests/test_nninteractive_task_integration.py
+python tests/test_model_portability.py
+python tests/fake_mimics_flow_test.py
 python -m unittest tools.test_interactive_algorithms
 python -m unittest tools.test_nnunet_integration
 python -m unittest tools.test_remote_training
@@ -1066,7 +1066,7 @@ Fake Mimics 测试用于验证：
 15. `runtime_py35/nnunet_mimics.py`
 16. `tools/nnunet_pipeline.py`
 17. `tools/remote_training_controller.py`
-18. `tools/test_all.py` 和专项回归测试
+18. `tests/test_all.py` 和专项回归测试
 
 阅读时始终区分三个空间：源图像 grid、Mimics grid、模型 canonical grid；也始终区分三个进程角色：前台 Mimics、外部 Python worker、后台 Mimics。多数复杂问题都来自把其中两个混为一谈。
 

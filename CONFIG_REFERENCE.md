@@ -91,7 +91,7 @@ Built-in profiles:
 - **`ts-like`** — byte-for-byte equivalent to the historical hard-coded
   behaviour. This equivalence is locked by
   `TestDatasetProfiles.test_fallback_matches_ts_like_byte_for_byte` and the
-  discovery-equivalence test in `tools/test_all.py`.
+  discovery-equivalence test in `tests/test_all.py`.
 - **`generic`** — no layout assumptions: any medical volume file in a case
   folder is the image, no folders are excluded, no preferred names exist.
 

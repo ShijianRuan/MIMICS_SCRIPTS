@@ -44,44 +44,44 @@ ROOT = Path(__file__).resolve().parents[1]
 # this script, so the matrix is portable across hosts.
 SUITES = [
     # -- core unit sweep (slow: ~16 min) --------------------------------
-    ("test_all", [sys.executable, "tools/test_all.py"], {"full"}),
+    ("test_all", [sys.executable, "tests/test_all.py"], {"full"}),
     # -- per-framework integration suites (unittest, exit-code gated) ----
-    ("flexict_integration", [sys.executable, "tools/test_flexict_integration.py"], {"fast", "full"}),
-    ("flexict_common", [sys.executable, "tools/test_flexict_common.py"], {"fast", "full"}),
+    ("flexict_integration", [sys.executable, "tests/test_flexict_integration.py"], {"fast", "full"}),
+    ("flexict_common", [sys.executable, "tests/test_flexict_common.py"], {"fast", "full"}),
     ("flexict_pkg", [sys.executable, "integrations/flexict-finetune/tests/test_flexict_pkg.py"], {"fast", "full"}),
     ("flexict_build_dataset", [sys.executable, "integrations/flexict-finetune/tests/test_build_dataset.py"], {"fast", "full"}),
-    ("nnunet_integration", [sys.executable, "tools/test_nnunet_integration.py"], {"fast", "full"}),
-    ("nninteractive_bridge_prompts", [sys.executable, "-m", "pytest", "-q", "tools/test_nninteractive_bridge_prompts.py"], {"fast", "full"}),
-    ("nninteractive_task_integration", [sys.executable, "tools/test_nninteractive_task_integration.py"], {"fast", "full"}),
+    ("nnunet_integration", [sys.executable, "tests/test_nnunet_integration.py"], {"fast", "full"}),
+    ("nninteractive_bridge_prompts", [sys.executable, "-m", "pytest", "-q", "tests/test_nninteractive_bridge_prompts.py"], {"fast", "full"}),
+    ("nninteractive_task_integration", [sys.executable, "tests/test_nninteractive_task_integration.py"], {"fast", "full"}),
     ("nninteractive_finetune_pkg", [sys.executable, "-m", "pytest", "-q", *sorted(
         str(path.relative_to(ROOT)).replace("\\", "/")
         for path in (ROOT / "integrations" / "nninteractive-finetune" / "tests").glob("test_*.py")
     )], {"fast", "full"}),
-    ("nnint_deep", [sys.executable, "tools/test_mimics_nnint_deep.py"], {"fast", "full"}),
-    ("nnint_functional", [sys.executable, "tools/test_mimics_nnint_functional.py"], {"fast", "full"}),
-    ("remote_training", [sys.executable, "tools/test_remote_training.py"], {"fast", "full"}),
-    ("interactive_algorithms", [sys.executable, "tools/test_interactive_algorithms.py"], {"fast", "full"}),
-    ("model_portability", [sys.executable, "tools/test_model_portability.py"], {"fast", "full"}),
-    ("collect_diagnostics", [sys.executable, "tools/test_collect_diagnostics.py"], {"fast", "full"}),
-    ("geometry_manifest_regressions", [sys.executable, "tools/test_geometry_manifest_regressions.py"], {"fast", "full"}),
-    ("migrate_root", [sys.executable, "tools/test_migrate_root.py"], {"fast", "full"}),
-    ("ui_preferences", [sys.executable, "tools/test_ui_preferences.py"], {"fast", "full"}),
-    ("gui_smoke", [sys.executable, "tools/test_gui_smoke.py"], {"fast", "full"}),
+    ("nnint_deep", [sys.executable, "tests/test_mimics_nnint_deep.py"], {"fast", "full"}),
+    ("nnint_functional", [sys.executable, "tests/test_mimics_nnint_functional.py"], {"fast", "full"}),
+    ("remote_training", [sys.executable, "tests/test_remote_training.py"], {"fast", "full"}),
+    ("interactive_algorithms", [sys.executable, "tests/test_interactive_algorithms.py"], {"fast", "full"}),
+    ("model_portability", [sys.executable, "tests/test_model_portability.py"], {"fast", "full"}),
+    ("collect_diagnostics", [sys.executable, "tests/test_collect_diagnostics.py"], {"fast", "full"}),
+    ("geometry_manifest_regressions", [sys.executable, "tests/test_geometry_manifest_regressions.py"], {"fast", "full"}),
+    ("migrate_root", [sys.executable, "tests/test_migrate_root.py"], {"fast", "full"}),
+    ("ui_preferences", [sys.executable, "tests/test_ui_preferences.py"], {"fast", "full"}),
+    ("gui_smoke", [sys.executable, "tests/test_gui_smoke.py"], {"fast", "full"}),
     # -- fake-mimics end-to-end flow tests ------------------------------
-    ("flow_imports", [sys.executable, "tools/fake_mimics_flow_test.py", "--only", "imports"], {"smoke", "fast", "full"}),
-    ("flow_export", [sys.executable, "tools/fake_mimics_flow_test.py", "--only", "export"], {"smoke", "fast", "full"}),
-    ("flow_entrypoint_window", [sys.executable, "tools/fake_mimics_flow_test.py", "--only", "entrypoint"], {"smoke", "fast", "full"}),
-    ("flow_window_level", [sys.executable, "tools/fake_mimics_flow_test.py", "--only", "window"], {"smoke", "fast", "full"}),
-    ("flow_nninteractive", [sys.executable, "tools/fake_mimics_flow_test.py", "--only", "nninteractive"], {"smoke", "fast", "full"}),
-    ("flow_taskmodels_stop", [sys.executable, "tools/fake_mimics_flow_test.py", "--only", "taskmodels"], {"smoke", "fast", "full"}),
-    ("flow_stop", [sys.executable, "tools/fake_mimics_flow_test.py", "--only", "stop"], {"smoke", "fast", "full"}),
-    ("flow_append", [sys.executable, "tools/fake_mimics_flow_test.py", "--only", "append"], {"smoke", "fast", "full"}),
+    ("flow_imports", [sys.executable, "tests/fake_mimics_flow_test.py", "--only", "imports"], {"smoke", "fast", "full"}),
+    ("flow_export", [sys.executable, "tests/fake_mimics_flow_test.py", "--only", "export"], {"smoke", "fast", "full"}),
+    ("flow_entrypoint_window", [sys.executable, "tests/fake_mimics_flow_test.py", "--only", "entrypoint"], {"smoke", "fast", "full"}),
+    ("flow_window_level", [sys.executable, "tests/fake_mimics_flow_test.py", "--only", "window"], {"smoke", "fast", "full"}),
+    ("flow_nninteractive", [sys.executable, "tests/fake_mimics_flow_test.py", "--only", "nninteractive"], {"smoke", "fast", "full"}),
+    ("flow_taskmodels_stop", [sys.executable, "tests/fake_mimics_flow_test.py", "--only", "taskmodels"], {"smoke", "fast", "full"}),
+    ("flow_stop", [sys.executable, "tests/fake_mimics_flow_test.py", "--only", "stop"], {"smoke", "fast", "full"}),
+    ("flow_append", [sys.executable, "tests/fake_mimics_flow_test.py", "--only", "append"], {"smoke", "fast", "full"}),
     # -- offline stress (concurrency) -----------------------------------
-    ("offline_stress", [sys.executable, "tools/offline_stress_test.py"], {"fast", "full"}),
+    ("offline_stress", [sys.executable, "tests/offline_stress_test.py"], {"fast", "full"}),
     # -- convergence smoke (real training, tiny scale; full only) --------
-    ("training_convergence", [sys.executable, "tools/test_training_convergence.py"], {"full"}),
+    ("training_convergence", [sys.executable, "tests/test_training_convergence.py"], {"full"}),
     # -- cross-workflow handoffs (train -> infer -> AL -> overlay) --------
-    ("cross_workflow", [sys.executable, "tools/test_cross_workflow_transitions.py"], {"fast", "full"}),
+    ("cross_workflow", [sys.executable, "tests/test_cross_workflow_transitions.py"], {"fast", "full"}),
 ]
 
 DEFAULT_PROFILE = "fast"

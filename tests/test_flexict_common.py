@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline tests for tools/flexict_common.py (no GPU, no Mimics, no nnU-Net)."""
+"""Offline tests for flexict_common.py (no GPU, no Mimics, no nnU-Net)."""
 
 import json
 import os
@@ -8,9 +8,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
-if str(HERE) not in sys.path:
-    sys.path.insert(0, str(HERE))
+ROOT = Path(__file__).resolve().parents[1]
+TOOLS = ROOT / "tools"
+if str(TOOLS) not in sys.path:
+    sys.path.insert(0, str(TOOLS))
 
 import flexict_common as fc
 
