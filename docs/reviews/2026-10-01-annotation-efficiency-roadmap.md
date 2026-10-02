@@ -29,7 +29,7 @@
 | [窗宽窗位及撤销](https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/runtime_py35/window_level_mimics.py#L318) | 按选中结构匹配、手选预设、恢复上次窗位 | 融入结构切换；区分 CT HU 与 MR；不要每次切换强行覆盖用户手调窗位 |
 | [nnInteractive 会话与参数](https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/runtime_py35/nninteractive_mimics.py#L2533) | 点/框/涂鸦/套索、前景/背景、提示撤销、后台会话、模型保温、图像复用已经存在 | 减少入口分散，明确操作范围、模型与会话身份；不能把这些能力重复列为全新功能 |
 | [远程客户端](https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/nninteractive_bridge.py#L1299)及[局部提示接口](https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/nninteractive_bridge.py#L1970) | 已使用官方 RemoteInferenceSession 和 interaction_bbox | 网络/模型/能力体检、排队及失效恢复仍需作为用户可理解的流程；尚无本次真实跨机验收 |
-| Mimics [Multiple Slice Edit](../MimicsHelp_MD/pages/Mimics%20Reference%20Guide/Multiple%20slice%20edit.md)与[3D Interpolate](../MimicsHelp_MD/pages/3D%20Interpolate.md) | 少量层面输入后插值；临时体积可加、减或局部阈值 | 适合做引导和书签，不宜重新实现一套切片编辑器；GUI 存在不代表相应脚本 API 已确认 |
+| Mimics [Multiple Slice Edit](../mimics_help/Multiple%20slice%20edit.md)与[3D Interpolate](../mimics_help/3D%20Interpolate.md) | 少量层面输入后插值；临时体积可加、减或局部阈值 | 适合做引导和书签，不宜重新实现一套切片编辑器；GUI 存在不代表相应脚本 API 已确认 |
 | Mimics [阈值](https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/docs/Mimics_API_Documentation.md?plain=1#L7173)、[区域生长](https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/docs/Mimics_API_Documentation.md?plain=1#L6995)、[布尔](https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/docs/Mimics_API_Documentation.md?plain=1#L6561)、[形态学](https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/docs/Mimics_API_Documentation.md?plain=1#L6961) | 可组成少量常用修正动作 | 核验当前版本签名、模块许可、单位、输出对象和 Undo 行为 |
 | 现有导入/快速导出、nnU-Net/FlexiCT 训练预测、AL | 保留各算法和数据适配的成熟部分 | 复用共同目标身份、人工复核语义和任务生命周期；不要新增一套彼此不通的“效率平台” |
 
@@ -185,7 +185,7 @@
 
 **最小设计：** 用户显式选择同患者的来源与目标序列，查看配准预览，再传播为目标序列的新草稿。先做覆盖相近、形态变化较小的任务；登记明确的源/目标病例与序列、变换、重采样方式、源标注版本。跨患者复制不在首版范围内。
 
-**原生与外部取舍：** 仓库帮助已含 [Image Registration](../MimicsHelp_MD/pages/Mimics%20Reference%20Guide/Image%20Registration.md)及[应用配准](../MimicsHelp_MD/pages/Mimics%20Reference%20Guide/Applying%20the%20registration.md)，描述基于 landmark 的配准和新项目行为。先确认当前版本原生工具能否满足操作及脚本化需求；否则可评估已有外部 Python 环境中的 SimpleITK，不因此更换整个桥接架构。
+**原生与外部取舍：** 仓库帮助已含 [Image Registration](../mimics_help/Image%20Registration.md)及[应用配准](../mimics_help/Applying%20the%20registration.md)，描述基于 landmark 的配准和新项目行为。先确认当前版本原生工具能否满足操作及脚本化需求；否则可评估已有外部 Python 环境中的 SimpleITK，不因此更换整个桥接架构。
 
 **实现要点：** 从刚性开始，确有收益才加仿射/可变形。按[SimpleITK 官方配准说明](https://simpleitk.readthedocs.io/en/master/registrationOverview.html)明确 fixed/moving、物理坐标与变换方向：输出网格采样需要到输入空间的映射，不能凭“把源变到目标”的自然语言决定是否取逆。离散标签采用保持类别的采样并检查细结构退化；强度图与标签分开插值。DICOM/RAS/LPS 与单位沿 SourceGeometry 处理。[SimpleITK 空间定义](https://simpleitk.readthedocs.io/en/master/fundamentalConcepts.html)也说明相同数组尺寸并不代表相同物理空间。
 
@@ -248,7 +248,7 @@
 
 视觉规范沿用现有主题，补一页状态与排版规范即可：字体服从系统/DPI，正文不以极小字号换空间；8/12/16 等少量间距；主色只表达当前主要动作；禁用和忙碌状态可区分；错误文字长期可找；长名称可复制/展开；结构色与任务状态色分工。新增/删除差异使用不同颜色加文字/轮廓，不仅依靠红绿辨认。
 
-键盘第一版只保证 Tab/Shift+Tab、Enter、Esc 和可配置的少数动作。先核对 [Mimics 原生快捷键](../MimicsHelp_MD/pages/Mimics%20Reference%20Guide/General%20Shortcuts.md)，只在本窗口/工具活动且没有输入框冲突时处理自定义键。不要将全局单字母快捷键强加给用户。切换正负提示应在按钮和当前捕获提示中都显示，避免记忆当前模式。
+键盘第一版只保证 Tab/Shift+Tab、Enter、Esc 和可配置的少数动作。先核对 [Mimics 原生快捷键](../mimics_help/General%20Shortcuts.md)，只在本窗口/工具活动且没有输入框冲突时处理自定义键。不要将全局单字母快捷键强加给用户。切换正负提示应在按钮和当前捕获提示中都显示，避免记忆当前模式。
 
 没有必要添加持续发光、转圈动画或实时 3D 表面重建。进度变化采用低频文字/轻量进度；Mask 体素修改后可延迟更新高成本 3D 网格。结果到达不抢焦点。高 DPI、双屏切换、窗口移出屏幕、长中文名称是基本验收，不是末尾再做的“美化”。
 
@@ -334,7 +334,7 @@ API 可行性采用三级标记：A=在目标版本真实通过；B=本地/官�
 | [仓库 nnInteractive 适配](https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32/nninteractive_bridge.py#L1299)与[官方客户端/服务端文档](https://github.com/MIC-DKFZ/nnInteractive/blob/master/SERVER_CLIENT.md) | 已有远程客户端基础；会话能力、失效与并发边界需显式处理 | 所有网络/模型组合均已可用；更多session必然更快；已失效会话能无条件恢复 |
 | [TotalSegmentator 官方仓库](https://github.com/wasserth/TotalSegmentator)、[CT论文](https://arxiv.org/abs/2208.05868)、[MR论文](https://arxiv.org/abs/2405.19492) | 可作为常见结构的预训练草稿候选，应区分任务与模态 | 当前已集成；适用于所有病灶/术后；各质量档等价；论文结果可直接代表本地集成 |
 | [Materialise AI Assistant](https://www.materialise.com/en/healthcare/mimics/plugins/ai-assistant)、[官方培训FAQ](https://www.materialise.com/en/academy/healthcare/mimics-innovation-suite) | 原生/官方已有可比较能力及一定使用约束 | 用户当前版本/地区/许可一定可用；帮助页面等于API兼容保证 |
-| 仓库内 [Mimics API](../Mimics_API_Documentation.md)和[多切片编辑帮助](../MimicsHelp_MD/pages/Mimics%20Reference%20Guide/Multiple%20slice%20edit.md) | 部分原生操作有文档依据，可以复用 | 该版本全部API覆盖当前安装；GUI功能一定可以脚本调用 |
+| 仓库内 [Mimics API](../Mimics_API_Documentation.md)和[多切片编辑帮助](../mimics_help/Multiple%20slice%20edit.md) | 部分原生操作有文档依据，可以复用 | 该版本全部API覆盖当前安装；GUI功能一定可以脚本调用 |
 | [SimpleITK 配准](https://simpleitk.readthedocs.io/en/master/registrationOverview.html)与[物理空间](https://simpleitk.readthedocs.io/en/master/fundamentalConcepts.html) | 外部配准候选及坐标/变换方向原则 | 任意双期/随访都能正确传播；低配准损失就是可靠标注 |
 
 上述创新设计以源码核查、原生帮助与公开一手资料为依据；没有新增模型运行、真实标注试验或医学效果声明。配套执行与缺陷修复仍以[开发交接](development-handoff.md)和[测试计划](test-plan.md)为准。

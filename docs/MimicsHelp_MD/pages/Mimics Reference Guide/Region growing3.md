@@ -1,3 +1,0 @@
-#### Region growing
-
-Press the Region Growing button ![](Mimics Reference Guide/../Resources/Images/Mimics%2015.0%20Reference%20Guide_track_v2_no_numbers/0300029B%20_22x22.png) and click on the bone of the skull to start the region growing. The skull is now added to a new mask. Click on the Project Management icon ![](Mimics Reference Guide/../Resources/Images/Mimics%2015.0%20Reference%20Guide_track_v2_no_numbers/0200029C_25x25.jpg). In the Masks tab, double click the name of the mask and change it to �skull�. Make the previous mask invisible (make sure the skull mask is active before making the first mask invisible).

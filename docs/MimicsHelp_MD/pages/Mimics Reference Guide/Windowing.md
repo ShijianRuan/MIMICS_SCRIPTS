@@ -1,7 +1,0 @@
-### Windowing
-
-First of all, we have to adjust the contrast of the images displayed in the different views. Contrast enhancement is a very good tool for selecting parts with different intensities, e.g. bone vs. brain tumor. This action can be performed at any time.
-
-You can change the contrast in the corresponding tab of the Project management. The contrast tab shows the histogram of the project with a line representing the �window�. The gray values or Hounsfield units below the start point of the line will be displayed in black. All gray values above the end point of the line will be displayed in white. The gray values in between the window will be mapped on a shade of gray. You can change the window size by clicking your left mouse on one of the points and dragging it to its new location. To move the window select the line and drag it to its new position. You can also choose one of the predefined �windows� by selecting the appropriate scale from the menu on the bottom of the tab.
-
-The following steps will describe the necessary actions to achieve a nice segmentation mask. A segmentation mask is a collection of pixels of interest that constitute an object you wish to work on. One can create several - dependent or independent - masks, each displayed with their own identifying color. Usually several masks will be needed to obtain a final segmentation object that contains the information that is needed.
