@@ -946,6 +946,75 @@ class TestActiveLearningWindow(unittest.TestCase):
             finally:
                 window.window.close()
 
+    def test_empty_state_offers_a_new_ranking_entry(self):
+        # F04/T04: with no completed runs the window must offer a reachable
+        # way to START the first ranking, not point back at the same menu.
+        with tempfile.TemporaryDirectory() as tmp:
+            _AppFixture.app()
+            import flexict_active_learning_ui as al_ui
+
+            window = al_ui.ActiveLearningWindow(
+                {"workspace": str(Path(tmp) / "empty")}, QT)
+            try:
+                self.assertTrue(window.new_button.isVisibleTo(window.window))
+                self.assertTrue(window.new_button.isEnabled())
+                self.assertIn("新建排序", window.status_label.text())
+            finally:
+                window.window.close()
+
+    def test_ranking_submit_error_is_surfaced(self):
+        # F04: a failed create_flexict_job (e.g. missing model pair) must
+        # reach the annotator, not die on a background thread.
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._window(tmp)
+            try:
+                window._submit_results.put(
+                    ("", "", "RuntimeError: No usable FlexiCT model pair"))
+                window._poll_requests()
+                self.assertIn("启动排序失败", window.status_label.text())
+                self.assertIn("No usable FlexiCT model pair",
+                              window.status_label.text())
+            finally:
+                window.window.close()
+
+    def test_running_ranking_shows_progress_then_autorefreshes(self):
+        # F04: after starting a ranking the window shows live progress and
+        # refreshes the picker when the job reaches a terminal state.
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._window(tmp)
+            try:
+                job_dir = Path(window._job_dir)
+                status = json.loads(
+                    (job_dir / "status.json").read_text(encoding="utf-8"))
+                status["status"] = "running"
+                status["phase"] = "batch_predicting_2d"
+                status["progress_percent"] = 42
+                (job_dir / "status.json").write_text(
+                    json.dumps(status), encoding="utf-8")
+
+                def _fake_find_running(workspace):
+                    return json.loads(
+                        (job_dir / "status.json").read_text(encoding="utf-8"))
+
+                import flexict_active_learning_ui as al_ui
+                original = al_ui.find_running_al_job
+                al_ui.find_running_al_job = _fake_find_running
+                try:
+                    window._poll_requests()
+                    self.assertIn("排序进行中", window.status_label.text())
+                    self.assertIn("42%", window.status_label.text())
+                    # Terminal state: the poll refreshes the job list.
+                    status["status"] = "completed"
+                    (job_dir / "status.json").write_text(
+                        json.dumps(status), encoding="utf-8")
+                    window._seen_running_job_id = status.get("job_id") or "aljob1"
+                    window._poll_requests()
+                    self.assertEqual(1, window.job_combo.count())
+                finally:
+                    al_ui.find_running_al_job = original
+            finally:
+                window.window.close()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

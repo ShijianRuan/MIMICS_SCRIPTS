@@ -14,9 +14,11 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
+import threading
 import time
 import traceback
 from pathlib import Path
+from queue import Queue
 
 from typing import Any
 
@@ -29,7 +31,12 @@ for candidate in (ROOT, ROOT / "tools"):
 
 from flexict_common import TERMINAL_STATES  # noqa: E402
 from nnunet_common import read_json, write_json_atomic  # noqa: E402
-from ui_theme import PALETTE, configure_application, stylesheet  # noqa: E402
+from ui_theme import (  # noqa: E402
+    PALETTE,
+    choose_existing_directory_async,
+    configure_application,
+    stylesheet,
+)
 
 
 STATE_SCHEMA = "flexict_annotation_state.v1"
@@ -50,6 +57,23 @@ def find_al_jobs(workspace: str | None) -> list[dict[str, Any]]:
         rows.append(status)
     rows.sort(key=lambda row: float(row.get("created_at_epoch") or 0), reverse=True)
     return rows
+
+
+def find_running_al_job(workspace: str | None) -> dict[str, Any] | None:
+    """The newest non-terminal active_learning job, or None (F04).
+
+    Lets the review window show live progress of a ranking the user just
+    started instead of an empty-state dead end.
+    """
+    from flexict_pipeline import list_flexict_jobs
+
+    for status in list_flexict_jobs(workspace):
+        if str(status.get("kind") or "") != "active_learning":
+            continue
+        if str(status.get("status") or "") in TERMINAL_STATES:
+            continue
+        return status
+    return None
 
 
 def load_ranking(job_dir: str | Path) -> list[dict[str, Any]]:
@@ -214,6 +238,14 @@ class ActiveLearningWindow:
         root.addWidget(self.status_label)
 
         actions = QtWidgets.QHBoxLayout()
+        # F04: the first ranking run had no reachable graphical entry — the
+        # empty state told the annotator to use this very window, which only
+        # lists completed runs. A "new ranking" action lives here now, so
+        # first-run is possible from the same menu entry.
+        self.new_button = QtWidgets.QPushButton('新建排序…')
+        self.new_button.setObjectName("primary")
+        self.new_button.clicked.connect(self._new_ranking_clicked)
+        actions.addWidget(self.new_button)
         self.open_button = QtWidgets.QPushButton('打开并叠加')
         self.open_button.setObjectName("primary")
         self.open_button.clicked.connect(self._open_and_overlay_selected)
@@ -244,6 +276,10 @@ class ActiveLearningWindow:
         self._state: dict[str, Any] = {}
         self._job_dir = ""
         self._request_poll_epoch = time.time()
+        # F04: background submit results for a new ranking (Queue because
+        # create_flexict_job must never run on the GUI thread).
+        self._submit_results: Queue = Queue()
+        self._seen_running_job_id = ""
         self.refresh()
         # The Mimics-side monitor reports outcomes by rewriting request
         # files; poll them so the table and status line follow along
@@ -252,6 +288,122 @@ class ActiveLearningWindow:
         self.poll_timer.setInterval(2000)
         self.poll_timer.timeout.connect(self._poll_requests)
         self.poll_timer.start()
+
+    # -- new ranking (F04) ----------------------------------------------------
+
+    def _new_ranking_clicked(self):
+        """Minimal first-run form: dataset pool + target, submit via the
+        existing flexict pipeline in a background thread."""
+        QtWidgets = self.QtWidgets
+        remembered = read_json(
+            Path.home() / ".mimics_script" / "flexict_settings.json", {}) or {}
+        dialog = QtWidgets.QDialog(self.window)
+        dialog.setWindowTitle('新建主动学习排序')
+        form = QtWidgets.QFormLayout(dialog)
+        dataset_edit = QtWidgets.QLineEdit(
+            str(remembered.get("dataset_root") or ""))
+        dataset_edit.setPlaceholderText('未标注病例池的根目录')
+        dataset_row = QtWidgets.QHBoxLayout()
+        dataset_row.addWidget(dataset_edit, 1)
+        browse = QtWidgets.QPushButton('浏览…')
+        dataset_row.addWidget(browse)
+        wrap = QtWidgets.QWidget()
+        wrap.setLayout(dataset_row)
+        form.addRow('数据集根目录', wrap)
+        label_edit = QtWidgets.QLineEdit(str(remembered.get("label_name") or ""))
+        label_edit.setPlaceholderText('例如 kidney_left')
+        form.addRow('目标 (label)', label_edit)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons.button(QtWidgets.QDialogButtonBox.Ok).setText('启动排序')
+        buttons.button(QtWidgets.QDialogButtonBox.Cancel).setText('取消')
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+
+        def _browse():
+            # Native dialogs can hang on disconnected drives / SMB shares;
+            # the async helper isolates the pick in its own process so this
+            # window (and Mimics) stays responsive (铁律 1).
+            choose_existing_directory_async(
+                self.QtCore, QtWidgets, dialog, '选择数据集根目录',
+                dataset_edit.text().strip() or str(Path.home()),
+                lambda value: value and dataset_edit.setText(value),
+                button=browse)
+
+        browse.clicked.connect(_browse)
+        dialog.resize(520, dialog.sizeHint().height())
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+        dataset_root = dataset_edit.text().strip()
+        label_name = label_edit.text().strip()
+        if not dataset_root or not label_name:
+            self.status_label.setText(
+                '启动排序需要数据集根目录和目标名称。')
+            return
+        self._start_ranking(dataset_root, label_name)
+
+    def _start_ranking(self, dataset_root: str, label_name: str):
+        """Validate + submit the ranking job off the GUI thread (F04)."""
+        request = {
+            "operation": "active_learning",
+            "workspace": self.workspace,
+            "dataset_root": dataset_root,
+            "label_name": label_name,
+        }
+
+        def _submit():
+            from flexict_pipeline import create_flexict_job
+
+            try:
+                if not Path(dataset_root).is_dir():
+                    raise ValueError(
+                        "数据集根目录不存在：{}".format(dataset_root))
+                job = create_flexict_job(request)
+                self._submit_results.put(
+                    (job.get("job_id") or "", job.get("job_dir") or "", ""))
+            except Exception as exc:  # surfaced by the poll timer
+                self._submit_results.put(("", "", "{}: {}".format(
+                    type(exc).__name__, exc)))
+
+        worker = threading.Thread(
+            target=_submit, name="flexict-al-submit", daemon=True)
+        worker.start()
+        self.status_label.setText(
+            '正在后台启动主动学习排序（检查路径与模型对）…')
+
+    def _poll_running_job(self):
+        """Show live progress of a running ranking; auto-refresh at completion
+        and surface submit errors (F04)."""
+        # Drain submit results first: an error message must survive.
+        try:
+            while True:
+                job_id, job_dir, error = self._submit_results.get_nowait()
+                if error:
+                    self.status_label.setText(
+                        '启动排序失败：{}'.format(error[:300]))
+                    return
+                self._seen_running_job_id = job_id
+        except Exception:
+            pass
+        running = find_running_al_job(self.workspace or None)
+        if running:
+            self._seen_running_job_id = str(running.get("job_id") or "")
+            phase = str(running.get("phase") or running.get("status") or "running")
+            percent = int(running.get("progress_percent") or 0)
+            self.status_label.setText(
+                '排序进行中（{}，{}%）——完成后列表会自动刷新。'.format(
+                    phase, percent))
+            return
+        # A job we announced disappeared from the running list: it reached a
+        # terminal state — refresh so it appears in the picker.
+        if self._seen_running_job_id:
+            self._seen_running_job_id = ""
+            self.refresh()
+            if self._jobs:
+                self.status_label.setText(
+                    '排序完成：{} case(s)。双击行即可在 Mimics 中打开并叠加。'.format(
+                        len(self._rows)))
 
     # -- data ---------------------------------------------------------------
 
@@ -281,7 +433,7 @@ class ActiveLearningWindow:
             self.table.setRowCount(0)
             self._set_actions_enabled(False)
             self.status_label.setText(
-                '未找到已完成的主动学习运行。请在 02_AI > FlexiCT > 03 主动学习审查中，用已训练的 2D+3D 模型对启动一次。'
+                '还没有已完成的主动学习运行。点击「新建排序…」，用已训练的 2D+3D 模型对对未标注病例池启动第一次排序。'
             )
 
     def _job_selected(self):
@@ -370,7 +522,13 @@ class ActiveLearningWindow:
 
     def _poll_requests(self):
         """Read back apply-request outcomes the Mimics monitor finished."""
+        # F04: live progress for a just-started ranking and submit-result
+        # draining run on every tick, selected job or not.
+        self._poll_running_job()
         if not self._job_dir:
+            return
+        updates = request_updates(self._job_dir, self._request_poll_epoch)
+        if not updates:
             return
         updates = request_updates(self._job_dir, self._request_poll_epoch)
         if not updates:
