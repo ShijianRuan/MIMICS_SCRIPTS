@@ -12514,6 +12514,16 @@ class TestEnvGuidance(unittest.TestCase):
         os.makedirs(env_dir, exist_ok=True)
         with open(os.path.join(env_dir, "python.exe"), "w") as handle:
             handle.write("x")
+        # The default ScribblePrompt checkpoint (the code default since B
+        # removed the JSON key): present in the fixture so tests that are
+        # about other issues stay about other issues.
+        checkpoint_dir = os.path.join(
+            root, "integrations", "ScribblePrompt", "checkpoints")
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        with open(os.path.join(
+                checkpoint_dir, "ScribblePrompt_unet_v1_nf192_res128.pt"),
+                "w") as handle:
+            handle.write("x")
 
     def _fake_official_model(self, root):
         model_dir = os.path.join(
@@ -12750,7 +12760,7 @@ class TestEnvGuidance(unittest.TestCase):
         # same anchoring interactive_algorithms_mimics._checkpoint_path uses.
         checkpoint = os.path.join(self.root, "integrations", "ScribblePrompt",
                                   "checkpoints", "unet.pt")
-        os.makedirs(os.path.dirname(checkpoint))
+        os.makedirs(os.path.dirname(checkpoint), exist_ok=True)
         with open(checkpoint, "w") as handle:
             handle.write("x")
         self._write_scribble_config("integrations/ScribblePrompt/checkpoints/unet.pt")
@@ -12773,6 +12783,50 @@ class TestEnvGuidance(unittest.TestCase):
             self.assertEqual([], eg.collect_issues(self.root))
         finally:
             self._restore_checkpoint_env(old)
+
+    def test_scribbleprompt_default_checkpoint_is_checked_without_config(self):
+        """B regression (R66 audit P1): the shipped JSON no longer carries
+        scribbleprompt.checkpoint, so both the runtime resolver and the
+        env-guidance health check must fall back to the code default —
+        not to 'unconfigured'. Otherwise a broken install (checkpoint file
+        missing) silently passes the health check, and the runtime raises
+        'checkpoint is missing' only when the annotator clicks the entry.
+        """
+        # No env var, NO config file at all — the shipped state.
+        old = self._pop_checkpoint_env()
+        try:
+            if os.path.exists(os.path.join(self.root, "interactive_algorithms_config.json")):
+                os.remove(os.path.join(self.root, "interactive_algorithms_config.json"))
+            eg = self._import_guidance()
+            self._fake_env(self.root)
+            self._fake_official_model(self.root)
+            # _fake_env creates the default checkpoint so sibling tests stay
+            # focused; this test needs it gone (broken-install state).
+            default_checkpoint = os.path.join(
+                self.root, "integrations", "ScribblePrompt", "checkpoints",
+                "ScribblePrompt_unet_v1_nf192_res128.pt")
+            if os.path.exists(default_checkpoint):
+                os.remove(default_checkpoint)
+            issues = eg.collect_issues(self.root)
+        finally:
+            self._restore_checkpoint_env(old)
+        # The default checkpoint is not on disk in this synthetic root, so
+        # the health check must now report it as missing (pre-fix it stayed
+        # silent, masking the runtime failure the audit found).
+        issue_kinds = [i["kind"] for i in issues if i["kind"] == "scribbleprompt_checkpoint"]
+        self.assertEqual(["scribbleprompt_checkpoint"], issue_kinds)
+
+        # And the runtime resolver itself must return the default path, not
+        # '' — the empty return was what made _start_scribbleprompt raise
+        # "checkpoint is missing" on a fresh install.
+        import interactive_algorithms_mimics as iaa
+        resolved = iaa._checkpoint_path({})
+        self.assertTrue(
+            resolved.endswith(os.path.join(
+                "integrations", "ScribblePrompt", "checkpoints",
+                "ScribblePrompt_unet_v1_nf192_res128.pt")),
+            "runtime checkpoint resolver must default to the bundled path, got: {0}".format(resolved),
+        )
 
 
 class TestProcessRegistry(unittest.TestCase):

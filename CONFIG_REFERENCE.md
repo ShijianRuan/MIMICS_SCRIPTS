@@ -43,8 +43,9 @@ Internal keys (code defaults; add to the file only as an escape hatch):
 `poll_seconds` (0.25), `job_retention_days` (3), `job_max_terminal` (20),
 `scribbleprompt.input_size` (128), `scribbleprompt.prior_logit_magnitude`
 (6.0), `scribbleprompt.gpu_lock_timeout_seconds` (120). The checkpoint path
-comes from `SCRIBBLEPROMPT_CHECKPOINT` or the bundled
-`integrations/ScribblePrompt/checkpoints/` location.
+resolves as `SCRIBBLEPROMPT_CHECKPOINT` env var > `scribbleprompt.checkpoint`
+> the code default `integrations/ScribblePrompt/checkpoints/
+ScribblePrompt_unet_v1_nf192_res128.pt`.
 
 ## `window_level_presets.json`
 

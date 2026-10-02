@@ -78,6 +78,11 @@ def _checkpoint_path(config):
     value = os.environ.get("SCRIBBLEPROMPT_CHECKPOINT", "").strip()
     if not value:
         value = str(section.get("checkpoint") or "").strip()
+    # B (79a956f) removed the checkpoint key from the shipped JSON; its
+    # value moves into the code default here so the entry keeps working
+    # out of the box (env var and config override still win, as before).
+    if not value:
+        value = "integrations/ScribblePrompt/checkpoints/ScribblePrompt_unet_v1_nf192_res128.pt"
     if value and not os.path.isabs(value):
         value = os.path.join(_project_root(), value)
     return os.path.abspath(value) if value else ""

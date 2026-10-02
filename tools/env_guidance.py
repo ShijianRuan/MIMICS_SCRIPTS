@@ -328,8 +328,8 @@ def collect_issues(project_root: Path | None = None) -> list[dict]:
 
 
 def _scribbleprompt_configured_path(root: Path) -> str:
-    """The checkpoint path as the runtime resolves it (env var > config,
-    relative paths anchored at the project root)."""
+    """The checkpoint path as the runtime resolves it (env var > config >
+    code default, relative paths anchored at the project root)."""
     value = os.environ.get("SCRIBBLEPROMPT_CHECKPOINT", "").strip()
     if not value:
         section = (
@@ -337,6 +337,12 @@ def _scribbleprompt_configured_path(root: Path) -> str:
             .get("scribbleprompt") or {}
         )
         value = str(section.get("checkpoint") or "").strip()
+    # Mirror the runtime's code default (interactive_algorithms_mimics.
+    # _checkpoint_path): the key was removed from the shipped JSON, so
+    # without this default the health check would silently pass on a
+    # broken install.
+    if not value:
+        value = "integrations/ScribblePrompt/checkpoints/ScribblePrompt_unet_v1_nf192_res128.pt"
     if value and not os.path.isabs(value):
         value = str(root / value)
     return value
