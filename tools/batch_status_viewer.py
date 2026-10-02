@@ -101,6 +101,7 @@ def _row(kind, label, payload, status_path, job_dir=""):
         "updated_at_epoch": updated,
         "status_path": str(status_path),
         "job_dir": str(job_dir or (Path(status_path).parent if status_path else "")),
+        "output_path": str(payload.get("output_path") or ""),
     }
 
 
@@ -460,6 +461,19 @@ def _stop_marker(row):
     if kind == "Append":
         return str(Path(job_dir) / "stop.json")
     if kind == "Drop import":
+        # Batch drop imports are run by mimics_batch_cli prepare-import,
+        # which polls the queue-level marker — a per-drop marker would be a
+        # silent no-op (R66 audit P2). Route batch rows to the queue stop;
+        # per-case rows keep their own worker-polled marker.
+        output_path = row.get("output_path") or ""
+        if output_path and Path(status_path).name.endswith("_batch_status.json"):
+            try:
+                import runtime_common
+                queue_runtime = Path(runtime_common.import_queue_runtime_dir(
+                    str(ROOT), output_path))
+                return str(queue_runtime / "_mcs_queue_stop.json")
+            except Exception:
+                return ""
         stem = Path(status_path).name
         if stem.endswith("_status.json"):
             stem = stem[: -len("_status.json")]
@@ -485,11 +499,13 @@ def request_stop(row, reason="user"):
         os.replace(tmp, marker)
     except OSError as exc:
         return False, "Failed to write the stop marker: {0}".format(exc)
-    if row["kind"] == "Import queue":
+    if marker.endswith("_mcs_queue_stop.json"):
         # A stopped queue must not pick up new cases: drop the active marker
-        # the queue scanner keys on (same as _request_queue_stop).
+        # the queue scanner keys on (same as _request_queue_stop). Covers
+        # both "Import queue" rows and batch drop-import rows, which stop
+        # through the same queue-level marker.
         try:
-            os.remove(str(Path(row["job_dir"]) / "_mcs_queue_active.json"))
+            os.remove(str(Path(marker).parent / "_mcs_queue_active.json"))
         except OSError:
             pass
     return True, "Stop requested for {0} {1}.".format(row["kind"], row["label"])

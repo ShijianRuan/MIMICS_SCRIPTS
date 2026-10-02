@@ -111,6 +111,85 @@ class TestBatchStatusWindow(unittest.TestCase):
                 self.assertEqual(window.table.rowCount(), 0)
                 window.window.close()
 
+    def test_batch_drop_import_stop_routes_to_queue_marker(self):
+        """R66 audit P2: a batch drop-import row's Stop must write the
+        queue-level marker the batch CLI actually polls — the per-drop
+        marker was a silent no-op. Also drops the queue active marker so
+        the stopped queue takes no new cases (same as Import queue rows).
+        """
+        _AppFixture.app()
+        batch, _manager, _config, _presets = _gui_modules()
+        with tempfile.TemporaryDirectory() as name:
+            project = Path(name) / "proj"
+            runtime = project / ".mimics_runtime"
+            drop = runtime / "drop_import" / "20261003T120000_abcd_batch_status.json"
+            drop.parent.mkdir(parents=True)
+            output = Path(name) / "mcs_out"
+            output.mkdir()
+            drop.write_text(json.dumps({
+                "status": "running",
+                "output_path": str(output),
+                "updated_at_epoch": 300.0,
+            }), encoding="utf-8")
+            with mock.patch.object(
+                batch, "import_runtime_base",
+                lambda p: Path(p) / ".mimics_runtime",
+            ):
+                # Point the queue runtime dir at a dir inside the sandbox.
+                queue_runtime = runtime / "import_queues" / output.name
+                queue_runtime.mkdir(parents=True)
+                with mock.patch(
+                    "runtime_common.import_queue_runtime_dir",
+                    lambda root, out: str(queue_runtime),
+                ):
+                    rows = batch.collect_batch_rows(project)
+                    batch_rows = [r for r in rows if r["kind"] == "Drop import"]
+                    self.assertEqual(1, len(batch_rows))
+                    marker = batch._stop_marker(batch_rows[0])
+                    self.assertTrue(
+                        marker.endswith("_mcs_queue_stop.json"),
+                        "batch drop stop must route to the queue marker, got {0}".format(marker),
+                    )
+                    active = queue_runtime / "_mcs_queue_active.json"
+                    active.write_text("{}", encoding="utf-8")
+                    ok, _message = batch.request_stop(batch_rows[0])
+                    self.assertTrue(ok)
+                    self.assertTrue(
+                        (queue_runtime / "_mcs_queue_stop.json").is_file(),
+                        "stop marker written next to the queue the CLI polls",
+                    )
+                    self.assertFalse(
+                        active.exists(),
+                        "queue active marker dropped so the queue takes no new cases",
+                    )
+
+    def test_single_case_drop_import_stop_keeps_own_marker(self):
+        """Per-case drop imports poll their own worker marker — unchanged."""
+        _AppFixture.app()
+        batch, _manager, _config, _presets = _gui_modules()
+        with tempfile.TemporaryDirectory() as name:
+            project = Path(name) / "proj"
+            runtime = project / ".mimics_runtime"
+            drop = runtime / "drop_import" / "case42_status.json"
+            drop.parent.mkdir(parents=True)
+            drop.write_text(json.dumps({
+                "status": "running",
+                "case_id": "case42",
+                "updated_at_epoch": 300.0,
+            }), encoding="utf-8")
+            with mock.patch.object(
+                batch, "import_runtime_base",
+                lambda p: Path(p) / ".mimics_runtime",
+            ):
+                rows = batch.collect_batch_rows(project)
+                drop_rows = [r for r in rows if r["kind"] == "Drop import"]
+                self.assertEqual(1, len(drop_rows))
+                marker = batch._stop_marker(drop_rows[0])
+                self.assertTrue(
+                    marker.endswith("case42_stop.json"),
+                    "single-case drop keeps its worker-polled marker, got {0}".format(marker),
+                )
+
 
 class TestConfigEditorWindow(unittest.TestCase):
     def test_editor_builds_and_lists_configs(self):
