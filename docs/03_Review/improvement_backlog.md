@@ -259,12 +259,17 @@
   `93fc844`〕：3,986 页 → 被引用的 5 页，删 3,982 个未引用帮助资源
   （−26,947 行）。验收：全量 grep 无残留引用；fast 门禁绿。
 - [x] **R66-A2 根目录历史报告归档 + docs 目录合并**〔R66 当轮解决，
-  commit `42686f6`〕：根目录历史报告移 docs/archive/，docs 子目录
+  commit `42686f6`〕：根目录历史报告移 docs/history/，docs 子目录
   合并。验收：根目录仅剩现行文档 + CONFIG_REFERENCE.md 等活跃文件。
 - [x] **R66-A3 tools/ 拆分为产品/测试/脚本三区**〔R66 当轮解决，
   commit `eeb2ac5`〕：测试文件全部移 tests/，产品代码留 tools/，
   run_regression_matrix/文档/CI 引用全量同步。验收：fast 门禁绿。
-- [x] **R66-B 配置三层瘦身**〔R66 当轮解决，commit `79a956f`〕：
+- [x] **R66-B 配置三层瘦身**〔R66 当轮解决，commit `79a956f`；R66
+  审查轮发现并修复 1 处回归（`89b1893`）：`scribbleprompt.checkpoint`
+  是 31 个移除键中唯一没落代码默认的——解析器返回空串，全新安装点
+  ScribblePrompt 入口即报"checkpoint is missing"，且 env_guidance 体检
+  对此静默。已补默认值（env > config > 代码默认，优先级不变）+ 回归
+  测试；env_guidance 与 CONFIG_REFERENCE 同步对齐真实解析链〕：
   20 个 internal 键 + 11 个低频键（13+7 项初始盘点口径）降为代码
   内置默认，CONFIG_REFERENCE.md 同步收缩至用户真正需要改的项。
   验收：配置文件载入默认值与旧配置实测等价；fast 门禁绿。
@@ -289,7 +294,49 @@
   + io_path_setup_ui import modes 不再有非测试调用方。删除涉及较大
   爆炸半径（io_setup_mimics modes + ~5 测试 pin + flow tests），
   需单独一轮处理。验收标准：删除后全部 stop/import 既有测试改写
-  通过 + fast 门禁绿。
+  通过 + fast 门禁绿。〔R66 审查轮（并行代理）核实：该登记准确——
+  三处确认无生产调用方；io_path_setup_ui 的 import_single/import_batch
+  模式同根因不可达，删时应一并处理；`tests/test_all.py:8883` 仍调
+  main_stop_import，删除需同步改测试。〕
+
+### R66 审查轮（2026-10-03，双并行代理：修改正确性 + 真实场景可用性）
+
+- [x] **R66-AUD-1（P1，审查发现）ScribblePrompt checkpoint 无代码
+  默认**〔commit `89b1893`〕：B 轮 31 个移除键中唯一漂移项。修复：
+  _checkpoint_path 补 bundled 默认；env_guidance 体检镜像同一默认
+  （原会静默漏报）；CONFIG_REFERENCE 改述真实解析链；回归测试
+  （出厂无配置状态必须解析出默认路径 + 体检必须报缺失）。
+- [x] **R66-AUD-2（P2，审查发现）批量拖拽导入 Stop 无效**〔commit
+  `f6d5af7`〕：批次行写 `<run_id>_batch_stop.json`，但 mimics_batch_cli
+  只轮询 `_mcs_queue_stop.json`——静默无效按钮。修复：批次行走队列级
+  停止标记（含 active marker 摘除），单例拖拽保持原 worker 标记；
+  2 测试。
+- [x] **R66-AUD-3（P3×3，审查发现）文档收尾**：① docs/mimics_help/
+  5 页全部图片引用断链——从 git 历史恢复 7 张被引图片（93fc844^）；
+  ② CLAUDE.md:70 陈旧 tools/ 测试路径 → tests/；③ 本账本 R66-A2
+  归档目录笔误 docs/archive/ → docs/history/（commit `42686f6` 实际
+  目的地）。与 R66-B 回归登记（AUD-1）同批落账。
+- [x] **R66-AUD-4（可用性审查修复批次）**〔commit `da860df`〕：
+  F-8（P1）mimics_export 14 处无编码 open() 中文 Windows 走 GBK →
+  全部显式 utf-8 + 类级回归测试；F-1（P1）Stop All 无确认 →
+  question_box 确认 + 契约测试；F-9 导出启动接磁盘预检（复用既有
+  _check_disk_space）；F-10 忙碌提示指向已删 Stop 入口 → 改指
+  04_Task_Status；F-3 导入成功框补 04_Task_Status 指引；F-4 多选
+  摘要带总数；F-11 Task Status 补 AI 家族窗口指引；F-2b（部分）
+  拖拽窗/批量查看器中英混排统一中文。
+- [ ] **R66-AUD-5（P1 系统性，未完成）：runtime_py35 内嵌 Mimics 对话框
+  全面中文化（F-2）**：R61-24"UI 语言统一中文"未到达 runtime_py35
+  的 mimics.dialogs 路径——外置 PySide6 窗口已中文，但内嵌对话框
+  （窗宽窗位、nnInteractive 错误指引/会话记忆、FlexiCT、导入导出、
+  stop）几乎全英文。涉及 ~11 文件 ~140 条字符串，注意
+  `tests/test_all.py` 有 ~6 处断言英文文案需同步。根因：铁律 2
+  （标注者视角）落在中文用户上的直接违例。最小方案：只翻
+  message/question_box 的 message/title/BUTTON_* 常量，不动日志。
+  验收：runtime_py35 对话框字符串全中文 + 相关测试更新全绿。
+- [ ] **R66-AUD-6（P2，需用户决策 D10 先行）：AL 标注/跳过单击无确认**
+  （F-7）：flexict_active_learning_ui `_mark_annotated/_mark_skipped`
+  单击即改状态，误点无救济。与 D10（overlay 应用是否自动标
+  annotated）纠缠，先定 D10 再动，避免返工。
 
 
 
