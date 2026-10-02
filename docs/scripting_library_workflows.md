@@ -75,9 +75,11 @@ dedicated setup window while prediction stays one click.
 
 1. `01 Identify Mask At Cursor`
 2. `02 Window From Selected Mask`
-3. `03 Window Choose Preset`
-4. `04 Window Undo Last`
-5. `05 Window Edit Presets`
+3. `03 Window Level`
+
+`03 Window Level` opens the preset dialog, which also carries Undo Last,
+Edit Presets..., and Reset Full Range buttons — the whole window/level
+surface in one place.
 
 ### 99 Admin
 

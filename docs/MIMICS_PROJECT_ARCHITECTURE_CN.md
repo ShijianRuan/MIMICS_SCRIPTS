@@ -497,26 +497,20 @@ Mimics 工具状态机导致崩溃、丢失未保存标注。脚本层已做到�
 
 预设来源：`window_level_presets.json`。找不到名称匹配时给出明确提示，不静默应用错误预设。
 
-### 8.3 `03_Review/03_Window_Choose_Preset.py`
+### 8.3 `03_Review/03_Window_Level.py`
 
-用途：手动选择预设。
+用途：手动选择窗宽窗位预设；对话框内还可撤销上次（Undo Last）、
+重置全范围（Reset Full Range）、打开预设编辑器（Edit Presets...）。
 
-实现：`window_level_mimics.py("choose")`
+实现：`window_level_mimics.py("choose")`（Undo/Reset 复用同一模块的
+`undo_last()` / `reset_full_range()`；编辑器为外部窗口
+`window_level_editor_mimics`）
 
-### 8.4 `03_Review/04_Window_Undo_Last.py`
-
-用途：恢复执行本项目窗宽窗位操作前保存的上一状态。
-
-实现：`window_level_mimics.py("undo")`
-
-### 8.5 `03_Review/05_Window_Edit_Presets.py`
-
-用途：编辑窗宽窗位预设。
-
-（2026-09-27：原 `03_Review/05_Window_Reset_Full_Range.py` 与预设选择
-对话框 `03_Window_Choose_Preset` 内的 "Reset Full Range" 按钮调用同一
-`reset_full_range()`，按 D1 决策删除重复菜单入口，完整灰度范围重置由
-预设选择对话框和 Undo 的兜底选项承担。）
+（2026-10-02（C2）：原 `03_Window_Choose_Preset.py`、
+`04_Window_Undo_Last.py`、`05_Window_Edit_Presets.py` 三个入口合并为本
+入口——选择、撤销、编辑都作用于同一组预设，拆成三个菜单项只增加找
+入口的成本。更早的 `05_Window_Reset_Full_Range.py` 已于 2026-09-27 按
+D1 决策删除。）
 
 输入值会根据 Mimics 当前 Image 的合法 GV 范围裁剪，避免 lower/upper contrast point 越界。
 

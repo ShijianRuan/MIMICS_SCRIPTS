@@ -2918,10 +2918,12 @@ class TestWindowLevelEditor(unittest.TestCase):
         entry = os.path.join(
             PROJECT_ROOT, "scripting_library", "03_Review", "05_Window_Edit_Presets.py"
         )
-        self.assertTrue(os.path.isfile(entry))
-        with open(entry, "r") as handle:
-            source = handle.read()
-        self.assertIn("window_level_editor_mimics", source)
+        # C2: the editor entry is gone; it is reachable as the
+        # "Edit Presets..." button inside the Window Level dialog.
+        self.assertFalse(os.path.isfile(entry))
+        from window_level_mimics import _choose_preset
+
+        self.assertIn("Edit Presets...", inspect.getsource(_choose_preset))
 
     def test_editor_window_renders_offscreen(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -3747,9 +3749,8 @@ class TestScriptingLibraryEntries(unittest.TestCase):
     def test_window_entries_routes(self):
         lib = os.path.join(PROJECT_ROOT, "scripting_library", "03_Review")
         expected_routes = {
-            "03_Window_Choose_Preset.py": "choose",
+            "03_Window_Level.py": "choose",
             "02_Window_From_Selected_Mask.py": "auto",
-            "04_Window_Undo_Last.py": "undo",
         }
         for fname, action in expected_routes.items():
             path = os.path.join(lib, fname)
@@ -3757,6 +3758,13 @@ class TestScriptingLibraryEntries(unittest.TestCase):
                 source = f.read()
             self.assertIn("window_level_mimics", source)
             self.assertIn('"{}"'.format(action), source)
+        # C2: Undo and the preset editor are buttons in the choose dialog,
+        # not separate menu entries.
+        from window_level_mimics import _choose_preset
+
+        source = inspect.getsource(_choose_preset)
+        self.assertIn("Undo Last", source)
+        self.assertIn("Edit Presets...", source)
 
     def test_living_docs_do_not_reference_deleted_entries(self):
         """B24: entries deleted by R41/R43 must not appear as live references
@@ -3774,6 +3782,9 @@ class TestScriptingLibraryEntries(unittest.TestCase):
             "07_Quick_Drop_Import",
             "08_Show_Batch_Status",
             "04_Import_Masks",
+            "03_Window_Choose_Preset",
+            "04_Window_Undo_Last",
+            "05_Window_Edit_Presets",
             "05_Window_Reset_Full_Range",
             "04_Fix_Source_Affine_Metadata",
             "nnUNet/04_Stop_Running_Task",

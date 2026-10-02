@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""Undo the last window/level preset when possible."""
+"""Manual window/level control: choose a preset, undo the last change,
+reset to full range, or open the preset editor."""
 
 from __future__ import print_function
 
@@ -20,4 +21,4 @@ for _ in range(5):
 from _mimics_entrypoint import run_runtime_entry
 
 
-run_runtime_entry(globals(), __file__, "window_level_mimics", action_value="undo")
+run_runtime_entry(globals(), __file__, "window_level_mimics", action_value="choose")

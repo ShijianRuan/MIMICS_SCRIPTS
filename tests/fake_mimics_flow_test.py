@@ -729,8 +729,8 @@ def test_scripting_entrypoint(fake, tmp):
     try:
         module._state_path = lambda: str(state_path)
         result = entry.run_runtime_entry(
-            {"__name__": "scripting_library.03_Review.04_Window_Undo_Last"},
-            str(LIBRARY_DIR / "03_Review" / "04_Window_Undo_Last.py"),
+            {"__name__": "scripting_library.03_Review.03_Window_Level"},
+            str(LIBRARY_DIR / "03_Review" / "03_Window_Level.py"),
             "window_level_mimics",
             action_value="undo",
         )

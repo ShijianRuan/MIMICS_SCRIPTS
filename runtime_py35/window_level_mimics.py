@@ -294,7 +294,9 @@ def _apply_preset(preset, source):
 
 def _choose_preset(presets, selected_name=""):
     buttons = [str(preset.get("name", "")) for preset in presets if preset.get("name")]
-    buttons.extend(["Reset Full Range", "Cancel"])
+    # C2: the dialog is the single window/level surface — Undo and the preset
+    # editor ride along as buttons instead of separate menu entries.
+    buttons.extend(["Undo Last", "Edit Presets...", "Reset Full Range", "Cancel"])
     message = "Select a CT window/level preset."
     if selected_name:
         message += "\nSelected Mask: {0}".format(selected_name)
@@ -308,6 +310,14 @@ def _choose_preset(presets, selected_name=""):
         return None
     if answer == "Reset Full Range":
         reset_full_range()
+        return None
+    if answer == "Undo Last":
+        undo_last()
+        return None
+    if answer == "Edit Presets...":
+        import window_level_editor_mimics
+
+        window_level_editor_mimics.open_window_level_editor()
         return None
     for preset in presets:
         if preset.get("name") == answer:

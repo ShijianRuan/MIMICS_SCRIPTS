@@ -318,8 +318,7 @@ nninteractive_env\python.exe tools\verify_medical_geometry.py ^
 入口：
 
 - `03_Review/02_Window_From_Selected_Mask.py`
-- `03_Review/03_Window_Choose_Preset.py`
-- `03_Review/04_Window_Undo_Last.py`
+- `03_Review/03_Window_Level.py`（含 Undo Last / Edit Presets... / Reset Full Range 按钮）
 
 预期：
 

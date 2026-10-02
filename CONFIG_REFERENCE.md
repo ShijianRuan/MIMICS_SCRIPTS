@@ -49,7 +49,7 @@ comes from `SCRIBBLEPROMPT_CHECKPOINT` or the bundled
 ## `window_level_presets.json`
 
 CT window/level presets matched against Mask names (Review menu). Editable
-from Mimics via **Review > Window Edit Presets**; no hand editing required.
+from Mimics via **Review > Window Level > Edit Presets...**; no hand editing required.
 
 Each entry: `name`, `width`, `level`, `keywords` (matched case-insensitively
 against the selected Mask name, first keyword hit wins), and `source`

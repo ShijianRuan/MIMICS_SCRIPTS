@@ -318,8 +318,7 @@ Inside Mimics:
 
 ```text
 Scripting Library > 03_Review > 02_Window_From_Selected_Mask
-Scripting Library > 03_Review > 03_Window_Choose_Preset
-Scripting Library > 03_Review > 04_Window_Undo_Last
+Scripting Library > 03_Review > 03_Window_Level
 ```
 
 Test:
