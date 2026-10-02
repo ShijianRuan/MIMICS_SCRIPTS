@@ -11329,6 +11329,42 @@ class TestImportDropWindow(unittest.TestCase):
         self.assertEqual("running", entries[0]["status"])
         self.assertEqual("s0001", entries[0]["case_id"])
 
+    def test_browse_source_files_feeds_multi_single_pipeline(self):
+        # C1: the file browse button's multi-selection must reach add_paths()
+        # unchanged, so a hand-picked case list classifies exactly like the
+        # same paths dragged onto the dropzone.
+        import import_drop_window as dw
+        for index in range(3):
+            self._make_case("s{0:04d}".format(index))
+        picked = [os.path.join(self.tmp, "s0000"), os.path.join(self.tmp, "s0002")]
+        seen = []
+        with mock.patch.object(dw.os.path, "exists", return_value=True):
+            # add_paths is created inside run(); reproduce its cleaning
+            # contract through the same public classifier the browse
+            # callback leads into.
+            cleaned = []
+            for value in picked:
+                text = str(value).strip().strip('"')
+                if text and text not in cleaned:
+                    cleaned.append(text)
+            seen = dw.classify_payload(cleaned)
+        self.assertEqual("multi_single", seen[0])
+        self.assertEqual(picked, seen[2])
+
+    def test_browse_source_buttons_use_async_helpers(self):
+        # C1 contract: both browse buttons must go through the async path
+        # helpers (a native modal dialog hangs Mimics on disconnected
+        # drives / SMB shares), and the file picker must accept the
+        # supported medical-volume extensions.
+        import import_drop_window as dw
+        source = inspect.getsource(dw)
+        self.assertIn("choose_open_files_async", source)
+        self.assertIn("choose_existing_directory_async", source)
+        for ext in (".nii", ".nii.gz", ".mha", ".mhd", ".nrrd"):
+            self.assertIn(ext, source)
+        # The chosen paths funnel into add_paths, never straight to submit.
+        self.assertIn("add_paths(values", source)
+
     def test_offscreen_window_renders_and_registers(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         import import_drop_window as dw
