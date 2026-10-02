@@ -513,10 +513,19 @@
   在首个切片停止，改为钉住真契约"每次扫描不越过第一个切片"。证据：
   TestNewFeatures + TestGuiThreadBlockingContract + TestForeignScript
   Integration 137 通过；冒烟 8/8（20261002T041554）。
-- [ ] **R65-20 = F09【P1】模型管理按钮**——已被 R62（`aadd6e3`，R61-4）
-  关闭，仅需对照 HEAD 复核确认后销项。
+- [x] **R65-20 = F09【P1】模型管理按钮**——已被 R62（`aadd6e3`，R61-4）
+  关闭，对照 HEAD（al-review-loop `9076888`）复核确认：`model_manager_ui.py:348`
+  已绑定 `itemSelectionChanged → _update_action_buttons`，use/remove 按钮按
+  行 usable 状态启用（:460-461）——评审基线 36eac04 早于修复 aadd6e3，同一
+  缺陷无需重复修复。销项。
 - 注：F09 已确认与 R61-4 同源（评审基线 36eac04 早于修复 aadd6e3）；
   F13/F15 为部分覆盖；其余项均需按上表核实→修复→测试沉淀流程处理。
+- **backlog.json 回填（2026-10-02）**：按 development-handoff.md 第 5 条
+  （"完成业务修复后更新 backlog 的 implementation_commit、test_evidence
+  和 status"）回填 docs/reviews/backlog.json 全部 29 条：25 条 closed
+  （附 commit + L1/L2 测试证据）、F01 open（R65-12，等 L3 实机）、F05
+  user_decision（D10）、F09 closed-被覆盖（aadd6e3，附复核说明）；
+  target_environment_validation 全部诚实保持 not_run（实机验收未做）。
 
 
 
@@ -1427,7 +1436,16 @@
 
 （截至 R65（2026-10-01）：消化外部评审 docs/reviews/（F01–F29 + 交接
 W01–W10 + 测试计划 T01–T40 + 证据指南，全部读完）并收编为本文件 R65
-待办区（R65-1~R65-20，按交接推荐顺序排列）。R65 当轮关闭 R65-1（=F22，
+待办区（R65-1~R65-20，按交接推荐顺序排列）。**docs/reviews/ 全量复核
+（2026-10-02）**：逐一重读 8 个文件（两轮评审报告、development-handoff、
+test-plan T01–T40、evidence-guide、README、artifact-manifest、backlog.json）
+对照已完成工作核查——29 项 F 问题中 25 项已修（L1/L2 证据），F01 等 L3
+实机、F05→D10 等用户决策；按交接第 5 条回填 backlog.json（29 条 status/
+commit/evidence，target_environment_validation 诚实保持 not_run）；
+R65-20（F09）对照 HEAD 复核确认已被 aadd6e3 覆盖后销项。剩余未做项均
+为不可自主完成：L3/L4 实机验收（T01/T04/T06/T07/T12/T13/T37 等）、
+T30–T40 产品验收（需真实使用者）、发布门槛现场数据、E01–E14 路线图
+（未立项不实施）。R65 当轮关闭 R65-1（=F22，
 P0 slug 碰撞+硬链接源改写，commit `2f3ed65`，受影响三套件全绿 + 冒烟
 8/8 `20261001T182216`）。R65-1 收尾 fast 27/27（`20261001T184356`）。
 **R65-2/R65-3（F18+F19，commit `b8d236b`）已解决**：撤销导入改所有权

@@ -97,14 +97,15 @@
       "implementation_commit": null,
       "test_evidence": [],
       "evidence_record": "2026-09-29-cross-functional-review.md",
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "note": "R65-12: deferred — T01 acceptance needs L3 real Mimics machine; code-level audit done."
     },
     {
       "id": "F02",
       "title": "AL buffer清理早于应用",
       "priority": "P1",
       "evidence_grade": "A",
-      "status": "open",
+      "status": "closed",
       "work_package": "W04",
       "owner_role": "Mimics集成",
       "report": "2026-09-29-cross-functional-review.md#f02",
@@ -119,8 +120,11 @@
       "acceptance_tests": [
         "T02"
       ],
-      "implementation_commit": null,
-      "test_evidence": [],
+      "implementation_commit": "fc0179f",
+      "test_evidence": [
+        "test_all.py::TestFlexiCTActiveLearningApply 6/6",
+        "smoke 20261002T013746"
+      ],
       "evidence_record": "2026-09-29-cross-functional-review.md",
       "target_environment_validation": "not_run"
     },
@@ -129,7 +133,7 @@
       "title": "AL非空列表引用未绑定Qt名字",
       "priority": "P1",
       "evidence_grade": "A",
-      "status": "open",
+      "status": "closed",
       "work_package": "W04",
       "owner_role": "Qt开发",
       "report": "2026-09-29-cross-functional-review.md#f03",
@@ -144,8 +148,11 @@
       "acceptance_tests": [
         "T03"
       ],
-      "implementation_commit": null,
-      "test_evidence": [],
+      "implementation_commit": "b180e3a",
+      "test_evidence": [
+        "test_gui_smoke.py::TestActiveLearningWindow 4/4",
+        "smoke 20261002T013746"
+      ],
       "evidence_record": "2026-09-29-cross-functional-review.md",
       "target_environment_validation": "not_run"
     },
@@ -154,7 +161,7 @@
       "title": "AL首次排序任务无图形入口",
       "priority": "P1",
       "evidence_grade": "B",
-      "status": "open",
+      "status": "closed",
       "work_package": "W04",
       "owner_role": "Qt/流程开发",
       "report": "2026-09-29-cross-functional-review.md#f04",
@@ -169,8 +176,11 @@
       "acceptance_tests": [
         "T04"
       ],
-      "implementation_commit": null,
-      "test_evidence": [],
+      "implementation_commit": "44b7c89",
+      "test_evidence": [
+        "test_gui_smoke.py AL new-ranking tests 3/3",
+        "smoke 20261002T162600"
+      ],
       "evidence_record": "2026-09-29-cross-functional-review.md",
       "target_environment_validation": "not_run"
     },
@@ -179,7 +189,7 @@
       "title": "AL叠加自动标成已标注",
       "priority": "P1",
       "evidence_grade": "B",
-      "status": "open",
+      "status": "user_decision",
       "work_package": "W04",
       "owner_role": "产品/Mimics集成",
       "report": "2026-09-29-cross-functional-review.md#f05",
@@ -197,14 +207,15 @@
       "implementation_commit": null,
       "test_evidence": [],
       "evidence_record": "2026-09-29-cross-functional-review.md",
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "note": "R65-13 -> D10 in docs/03_Review/improvement_backlog.md: 'what counts as a completed case' is product semantics; minimal proposal recorded, awaiting user decision."
     },
     {
       "id": "F06",
       "title": "FlexiCT推理构造额外依赖backbone",
       "priority": "P1",
       "evidence_grade": "A+B",
-      "status": "open",
+      "status": "closed",
       "work_package": "W05",
       "owner_role": "ML集成",
       "report": "2026-09-29-cross-functional-review.md#f06",
@@ -219,17 +230,22 @@
       "acceptance_tests": [
         "T06"
       ],
-      "implementation_commit": null,
-      "test_evidence": [],
+      "implementation_commit": "c024e36",
+      "test_evidence": [
+        "test_all.py::TestEnvironmentRepairSemantics (SKIP_BACKBONE contract)",
+        "flexict_integration 105/105",
+        "smoke 20261002T140530"
+      ],
       "evidence_record": "2026-09-29-cross-functional-review.md",
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "note": "L4 clean-machine migration run still pending a real-machine window."
     },
     {
       "id": "F07",
       "title": "Repair使用import名而非distribution名",
       "priority": "P1",
       "evidence_grade": "A",
-      "status": "open",
+      "status": "closed",
       "work_package": "W05",
       "owner_role": "环境开发",
       "report": "2026-09-29-cross-functional-review.md#f07",
@@ -244,8 +260,11 @@
       "acceptance_tests": [
         "T07"
       ],
-      "implementation_commit": null,
-      "test_evidence": [],
+      "implementation_commit": "c024e36",
+      "test_evidence": [
+        "test_all.py::TestEnvironmentRepairSemantics (import->pip name translation)",
+        "smoke 20261002T140530"
+      ],
       "evidence_record": "2026-09-29-cross-functional-review.md",
       "target_environment_validation": "not_run"
     },
@@ -254,7 +273,7 @@
       "title": "import失败仍体检全绿",
       "priority": "P1",
       "evidence_grade": "A",
-      "status": "open",
+      "status": "closed",
       "work_package": "W05",
       "owner_role": "环境开发",
       "report": "2026-09-29-cross-functional-review.md#f08",
@@ -269,8 +288,11 @@
       "acceptance_tests": [
         "T08"
       ],
-      "implementation_commit": null,
-      "test_evidence": [],
+      "implementation_commit": "c024e36",
+      "test_evidence": [
+        "test_all.py::TestEnvironmentRepairSemantics (no false all_ok)",
+        "smoke 20261002T140530"
+      ],
       "evidence_record": "2026-09-29-cross-functional-review.md",
       "target_environment_validation": "not_run"
     },
@@ -279,7 +301,7 @@
       "title": "模型管理按钮选择后仍禁用",
       "priority": "P1",
       "evidence_grade": "A",
-      "status": "open",
+      "status": "closed",
       "work_package": "W08",
       "owner_role": "Qt开发",
       "report": "2026-09-29-cross-functional-review.md#f09",
@@ -294,17 +316,20 @@
       "acceptance_tests": [
         "T09"
       ],
-      "implementation_commit": null,
-      "test_evidence": [],
+      "implementation_commit": "aadd6e3",
+      "test_evidence": [
+        "model manager selection tests (R62, R61-4)"
+      ],
       "evidence_record": "2026-09-29-cross-functional-review.md",
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "note": "Superseded: same defect as R61-4, fixed before this review baseline was cut. Re-verified at al-review-loop HEAD 9076888 (itemSelectionChanged -> _update_action_buttons wired)."
     },
     {
       "id": "F10",
       "title": "拖拽多选扩大或不可提交",
       "priority": "P1",
       "evidence_grade": "B",
-      "status": "open",
+      "status": "closed",
       "work_package": "W08",
       "owner_role": "Qt/批量开发",
       "report": "2026-09-29-cross-functional-review.md#f10",
@@ -319,8 +344,11 @@
       "acceptance_tests": [
         "T10"
       ],
-      "implementation_commit": null,
-      "test_evidence": [],
+      "implementation_commit": "8630de0",
+      "test_evidence": [
+        "test_all.py::ImportDropWindow 16/16 (exact case list, dedup, per-item submit)",
+        "smoke 20261002T145446"
+      ],
       "evidence_record": "2026-09-29-cross-functional-review.md",
       "target_environment_validation": "not_run"
     },
@@ -329,7 +357,7 @@
       "title": "回收线程间接调用Mimics对话框",
       "priority": "P1",
       "evidence_grade": "A+B",
-      "status": "open",
+      "status": "closed",
       "work_package": "W06",
       "owner_role": "Mimics集成",
       "report": "2026-09-29-cross-functional-review.md#f11",
@@ -344,8 +372,11 @@
       "acceptance_tests": [
         "T11"
       ],
-      "implementation_commit": null,
-      "test_evidence": [],
+      "implementation_commit": "3fe6e1f",
+      "test_evidence": [
+        "test_all.py::TestGuiThreadBlockingContract (+4)",
+        "smoke 20261002T041554"
+      ],
       "evidence_record": "2026-09-29-cross-functional-review.md",
       "target_environment_validation": "not_run"
     },
@@ -354,7 +385,7 @@
       "title": "在线离线依赖组合不一致",
       "priority": "P2",
       "evidence_grade": "B",
-      "status": "open",
+      "status": "closed",
       "work_package": "W05",
       "owner_role": "环境开发",
       "report": "2026-09-29-cross-functional-review.md#f12",
@@ -369,17 +400,21 @@
       "acceptance_tests": [
         "T12"
       ],
-      "implementation_commit": null,
-      "test_evidence": [],
+      "implementation_commit": "c024e36",
+      "test_evidence": [
+        "test_all.py::TestEnvironmentRepairSemantics (pinned torch/torchvision pair + index-url)",
+        "smoke 20261002T140530"
+      ],
       "evidence_record": "2026-09-29-cross-functional-review.md",
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "note": "L4 two-machine reproducibility run still pending real machines."
     },
     {
       "id": "F13",
       "title": "全量复制与模态续问的效率风险",
       "priority": "P2",
       "evidence_grade": "B+C",
-      "status": "open",
+      "status": "closed",
       "work_package": "W09",
       "owner_role": "平台/Mimics集成",
       "report": "2026-09-29-cross-functional-review.md#f13",
@@ -394,17 +429,21 @@
       "acceptance_tests": [
         "T13"
       ],
-      "implementation_commit": null,
-      "test_evidence": [],
+      "implementation_commit": "7c04d64",
+      "test_evidence": [
+        "test_all.py::test_async_monitor_releases_buffer_lock_while_prompt_menu_open",
+        "smoke 20261002T161127"
+      ],
       "evidence_record": "2026-09-29-cross-functional-review.md",
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "note": "Full-copy/hashing cost already fixed earlier (R61-12, a2d3244: chunked streaming + GUI pump). Residual: T13 measured p50/p95 main-thread baseline is W09 work, not claimed."
     },
     {
       "id": "F14",
       "title": "错误反馈被刷新摘要覆盖",
       "priority": "P2",
       "evidence_grade": "A+B",
-      "status": "open",
+      "status": "closed",
       "work_package": "W04",
       "owner_role": "Qt开发",
       "report": "2026-09-29-cross-functional-review.md#f14",
@@ -419,8 +458,11 @@
       "acceptance_tests": [
         "T14"
       ],
-      "implementation_commit": null,
-      "test_evidence": [],
+      "implementation_commit": "b180e3a",
+      "test_evidence": [
+        "test_gui_smoke.py::TestActiveLearningWindow (result text survives refresh)",
+        "smoke 20261002T013746"
+      ],
       "evidence_record": "2026-09-29-cross-functional-review.md",
       "target_environment_validation": "not_run"
     },
@@ -429,7 +471,7 @@
       "title": "状态视觉与布局不一致",
       "priority": "P2",
       "evidence_grade": "A+B+C",
-      "status": "open",
+      "status": "closed",
       "work_package": "W08",
       "owner_role": "UX/Qt开发",
       "report": "2026-09-29-cross-functional-review.md#f15",
@@ -444,17 +486,22 @@
       "acceptance_tests": [
         "T15"
       ],
-      "implementation_commit": null,
-      "test_evidence": [],
+      "implementation_commit": "68d33eb",
+      "test_evidence": [
+        "test_all.py::UiThemePalette 4/4 (primary:disabled rule)",
+        "test_all.py AL table min-section-size contract",
+        "smoke 20261002T154103"
+      ],
       "evidence_record": "2026-09-29-cross-functional-review.md",
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "note": "Residual visuals (zh-CN wording, empty-state guidance) already covered by R61-21/R61-24 (821f60d). Windows DPI matrix (T37) still unverified on real machines."
     },
     {
       "id": "F16",
       "title": "患者分组和固定验证集契约不足",
       "priority": "P2",
       "evidence_grade": "B+C",
-      "status": "open",
+      "status": "closed",
       "work_package": "W07",
       "owner_role": "ML/数据开发",
       "report": "2026-09-29-cross-functional-review.md#f16",
@@ -469,8 +516,12 @@
       "acceptance_tests": [
         "T16"
       ],
-      "implementation_commit": null,
-      "test_evidence": [],
+      "implementation_commit": "cd163a0",
+      "test_evidence": [
+        "nnunet split tests +8 (group isolation, frozen val)",
+        "nnunet_integration 97 / flexict 99 / remote 104",
+        "smoke 20261001T231524"
+      ],
       "evidence_record": "2026-09-29-cross-functional-review.md",
       "target_environment_validation": "not_run"
     },
@@ -479,7 +530,7 @@
       "title": "未核实项目API失败后仍切换项目",
       "priority": "P1",
       "evidence_grade": "A+B",
-      "status": "open",
+      "status": "closed",
       "work_package": "W02",
       "owner_role": "Mimics集成",
       "report": "2026-09-29-cross-functional-review.md#f17",
@@ -494,8 +545,13 @@
       "acceptance_tests": [
         "T17"
       ],
-      "implementation_commit": null,
-      "test_evidence": [],
+      "implementation_commit": "f2bd662",
+      "test_evidence": [
+        "T17 regression 4 cases",
+        "flexict_integration 93/93",
+        "TestImportReceiptAndUndo 21/21",
+        "smoke 20261001T193902"
+      ],
       "evidence_record": "2026-09-29-cross-functional-review.md",
       "target_environment_validation": "not_run"
     },
@@ -504,7 +560,7 @@
       "title": "撤销导入可能删除未保存人工工作",
       "priority": "P0",
       "evidence_grade": "A+B",
-      "status": "open",
+      "status": "closed",
       "work_package": "W02",
       "owner_role": "Mimics集成",
       "report": "2026-09-30-scenario-review.md#f18",
@@ -519,8 +575,12 @@
       "acceptance_tests": [
         "T18"
       ],
-      "implementation_commit": null,
-      "test_evidence": [],
+      "implementation_commit": "b8d236b",
+      "test_evidence": [
+        "TestImportReceiptAndUndo 18/18",
+        "fake_mimics_flow 16/16",
+        "smoke 20261001T192254"
+      ],
       "evidence_record": "2026-09-30-evidence/scenario-results.json",
       "target_environment_validation": "not_run"
     },
@@ -529,7 +589,7 @@
       "title": "按名称撤销删除其他Image同名对象",
       "priority": "P1",
       "evidence_grade": "A+B",
-      "status": "open",
+      "status": "closed",
       "work_package": "W02",
       "owner_role": "Mimics集成",
       "report": "2026-09-30-scenario-review.md#f19",
@@ -544,8 +604,11 @@
       "acceptance_tests": [
         "T19"
       ],
-      "implementation_commit": null,
-      "test_evidence": [],
+      "implementation_commit": "b8d236b",
+      "test_evidence": [
+        "TestImportReceiptAndUndo 18/18 (guid-hit delete only, token fallback)",
+        "fake_mimics_flow 16/16"
+      ],
       "evidence_record": "2026-09-30-evidence/scenario-results.json",
       "target_environment_validation": "not_run"
     },
@@ -554,7 +617,7 @@
       "title": "AL同网格异病例与异步目标切换",
       "priority": "P1",
       "evidence_grade": "A+B",
-      "status": "open",
+      "status": "closed",
       "work_package": "W04",
       "owner_role": "Mimics集成",
       "report": "2026-09-30-scenario-review.md#f20",
@@ -569,8 +632,11 @@
       "acceptance_tests": [
         "T20"
       ],
-      "implementation_commit": null,
-      "test_evidence": [],
+      "implementation_commit": "fc0179f",
+      "test_evidence": [
+        "test_all.py::TestFlexiCTActiveLearningApply 6/6 (target re-check)",
+        "smoke 20261002T013746"
+      ],
       "evidence_record": "2026-09-30-evidence/scenario-results.json",
       "target_environment_validation": "not_run"
     },
@@ -579,7 +645,7 @@
       "title": "等体积人工修正未被预测保护识别",
       "priority": "P1",
       "evidence_grade": "A",
-      "status": "open",
+      "status": "closed",
       "work_package": "W04",
       "owner_role": "Mimics集成",
       "report": "2026-09-30-scenario-review.md#f21",
@@ -594,8 +660,12 @@
       "acceptance_tests": [
         "T21"
       ],
-      "implementation_commit": null,
-      "test_evidence": [],
+      "implementation_commit": "ce3c9c2",
+      "test_evidence": [
+        "flexict TestEqualVolumeEditProtection 6/6",
+        "nnunet MimicsRuntimeTests 12/12",
+        "smoke 20261002T013746"
+      ],
       "evidence_record": "2026-09-30-evidence/scenario-results.json",
       "target_environment_validation": "not_run"
     },
@@ -604,7 +674,7 @@
       "title": "病例slug碰撞与硬链接覆盖源文件",
       "priority": "P0",
       "evidence_grade": "A",
-      "status": "open",
+      "status": "closed",
       "work_package": "W01",
       "owner_role": "数据/平台开发",
       "report": "2026-09-30-scenario-review.md#f22",
@@ -619,8 +689,12 @@
       "acceptance_tests": [
         "T22"
       ],
-      "implementation_commit": null,
-      "test_evidence": [],
+      "implementation_commit": "2f3ed65",
+      "test_evidence": [
+        "failure-path tests: source SHA unchanged / collision suffix / shared-inode not truncated / AL pool per-case",
+        "nnunet 89 / flexict 91 / remote 102",
+        "smoke 20261001T182216"
+      ],
       "evidence_record": "2026-09-30-evidence/scenario-results.json",
       "target_environment_validation": "not_run"
     },
@@ -629,7 +703,7 @@
       "title": "概率与非法Mask值静默转成前景",
       "priority": "P1",
       "evidence_grade": "A",
-      "status": "open",
+      "status": "closed",
       "work_package": "W03",
       "owner_role": "影像数据集成",
       "report": "2026-09-30-scenario-review.md#f23",
@@ -644,8 +718,12 @@
       "acceptance_tests": [
         "T23"
       ],
-      "implementation_commit": null,
-      "test_evidence": [],
+      "implementation_commit": "a25e755",
+      "test_evidence": [
+        "bridge mask-value gate failure-path tests +4",
+        "convert/prepare 26 + nnunet 90 + flexict 93",
+        "smoke 20261001T200108"
+      ],
       "evidence_record": "2026-09-30-evidence/scenario-results.json",
       "target_environment_validation": "not_run"
     },
@@ -654,7 +732,7 @@
       "title": "补齐Mask将平铺CT影像列作结构",
       "priority": "P1",
       "evidence_grade": "A",
-      "status": "open",
+      "status": "closed",
       "work_package": "W03",
       "owner_role": "数据/批量开发",
       "report": "2026-09-30-scenario-review.md#f24",
@@ -669,8 +747,11 @@
       "acceptance_tests": [
         "T24"
       ],
-      "implementation_commit": null,
-      "test_evidence": [],
+      "implementation_commit": "41306bf",
+      "test_evidence": [
+        "test_all.py flattened-layout image-exclusion tests",
+        "smoke 20261001T202725"
+      ],
       "evidence_record": "2026-09-30-evidence/scenario-results.json",
       "target_environment_validation": "not_run"
     },
@@ -679,7 +760,7 @@
       "title": "补齐Mask按全项目名称错误判完整",
       "priority": "P1",
       "evidence_grade": "A",
-      "status": "open",
+      "status": "closed",
       "work_package": "W03",
       "owner_role": "Mimics集成",
       "report": "2026-09-30-scenario-review.md#f25",
@@ -694,8 +775,11 @@
       "acceptance_tests": [
         "T25"
       ],
-      "implementation_commit": null,
-      "test_evidence": [],
+      "implementation_commit": "41306bf",
+      "test_evidence": [
+        "test_all.py multi-Image reject ('nothing was changed') test",
+        "smoke 20261001T202725"
+      ],
       "evidence_record": "2026-09-30-evidence/scenario-results.json",
       "target_environment_validation": "not_run"
     },
@@ -704,7 +788,7 @@
       "title": "检查新任务失败读取旧成功报告",
       "priority": "P1",
       "evidence_grade": "A",
-      "status": "open",
+      "status": "closed",
       "work_package": "W06",
       "owner_role": "平台开发",
       "report": "2026-09-30-scenario-review.md#f26",
@@ -719,8 +803,12 @@
       "acceptance_tests": [
         "T26"
       ],
-      "implementation_commit": null,
-      "test_evidence": [],
+      "implementation_commit": "2d39b2f",
+      "test_evidence": [
+        "TestForeignScriptIntegration (+4 job-id propagation)",
+        "14/14",
+        "smoke 20261002T123216"
+      ],
       "evidence_record": "2026-09-30-evidence/scenario-results.json",
       "target_environment_validation": "not_run"
     },
@@ -729,7 +817,7 @@
       "title": "取消批量任务丢失逐例结果台账",
       "priority": "P2",
       "evidence_grade": "A+B",
-      "status": "open",
+      "status": "closed",
       "work_package": "W06",
       "owner_role": "平台/Mimics集成",
       "report": "2026-09-30-scenario-review.md#f27",
@@ -744,8 +832,12 @@
       "acceptance_tests": [
         "T27"
       ],
-      "implementation_commit": null,
-      "test_evidence": [],
+      "implementation_commit": "2d39b2f",
+      "test_evidence": [
+        "TestForeignScriptIntegration (cancelled ledger persists)",
+        "14/14",
+        "smoke 20261002T123216"
+      ],
       "evidence_record": "2026-09-30-evidence/scenario-results.json",
       "target_environment_validation": "not_run"
     },
@@ -754,7 +846,7 @@
       "title": "原子发布可能覆盖较新人工保存",
       "priority": "P1",
       "evidence_grade": "A+B",
-      "status": "open",
+      "status": "closed",
       "work_package": "W06",
       "owner_role": "平台/Mimics集成",
       "report": "2026-09-30-scenario-review.md#f28",
@@ -769,8 +861,11 @@
       "acceptance_tests": [
         "T28"
       ],
-      "implementation_commit": null,
-      "test_evidence": [],
+      "implementation_commit": "7e10dd8",
+      "test_evidence": [
+        "TestForeignScriptIntegration 10/10 (conflict keeps newer save + .conflict copy)",
+        "smoke 20261002T023427"
+      ],
       "evidence_record": "2026-09-30-evidence/scenario-results.json",
       "target_environment_validation": "not_run"
     },
@@ -779,7 +874,7 @@
       "title": "FlexiCT颅尾分层使用最大spacing轴",
       "priority": "P2",
       "evidence_grade": "A+B",
-      "status": "open",
+      "status": "closed",
       "work_package": "W07",
       "owner_role": "ML/数据开发",
       "report": "2026-09-30-scenario-review.md#f29",
@@ -794,8 +889,11 @@
       "acceptance_tests": [
         "T29"
       ],
-      "implementation_commit": null,
-      "test_evidence": [],
+      "implementation_commit": "89a90e3",
+      "test_evidence": [
+        "flexict_build_dataset suite 8 + TestTrainValSplit 6",
+        "smoke 20261001T215214"
+      ],
       "evidence_record": "2026-09-30-evidence/scenario-results.json",
       "target_environment_validation": "not_run"
     }
@@ -808,5 +906,7 @@
     "D05",
     "D06",
     "D07"
-  ]
+  ],
+  "updated_date": "2026-10-02",
+  "update_note": "Backfilled by the downstream fix round (R65, branch al-review-loop) per development-handoff.md item 5. 'closed' means code fix landed with L1/L2 regression evidence at the listed commit; target_environment_validation remains not_run for all items pending real Windows/Mimics/GPU acceptance."
 }
