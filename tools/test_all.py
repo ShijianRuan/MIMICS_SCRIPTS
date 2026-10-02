@@ -10878,15 +10878,24 @@ class TestImportDropWindow(unittest.TestCase):
         self.assertEqual(self.tmp, source)
         self.assertGreaterEqual(len(children), 2)
 
-    def test_classify_multi_select_same_parent_is_batch(self):
+    def test_classify_multi_select_stays_the_exact_case_list(self):
         import import_drop_window as dw
-        self._make_case("s0001")
-        self._make_case("s0002")
-        kind, source, _children = dw.classify_payload([
-            os.path.join(self.tmp, "s0001"), os.path.join(self.tmp, "s0002"),
-        ])
-        self.assertEqual("batch", kind)
-        self.assertEqual(self.tmp, source)
+        # F10: dropping 2 of the parent's 10 cases must NOT escalate to a
+        # batch import of the whole parent directory.
+        for index in range(10):
+            self._make_case("s{0:04d}".format(index))
+        selection = [os.path.join(self.tmp, "s0001"), os.path.join(self.tmp, "s0005")]
+        kind, source, paths = dw.classify_payload(selection)
+        self.assertEqual("multi_single", kind)
+        self.assertIsNone(source)  # no parent-dir escalation
+        self.assertEqual(selection, paths)
+
+    def test_classify_multi_select_deduplicates_paths(self):
+        import import_drop_window as dw
+        case = self._make_case("s0001")
+        kind, _source, paths = dw.classify_payload([case, case])
+        self.assertEqual("multi_single", kind)
+        self.assertEqual([case], paths)
 
     def test_classify_paths_from_different_roots_are_single_imports(self):
         import import_drop_window as dw
@@ -10973,6 +10982,49 @@ class TestImportDropWindow(unittest.TestCase):
             payload = json.load(handle)
         self.assertEqual("s0001", payload["case_info"]["case_id"])
         self.assertTrue(payload["case_info"]["image"].endswith("ct.nii.gz"))
+
+    def test_submit_multi_single_imports_each_dropped_case_only(self):
+        import import_drop_window as dw
+        # F10: a multi-selection must submit exactly the dropped cases — one
+        # worker per valid path, no batch escalation, invalid paths reported.
+        for index in range(3):
+            self._make_case("s{0:04d}".format(index))
+        invalid = os.path.join(self.tmp, "not_a_case.txt")
+        open(invalid, "w").close()  # a non-medical file is never importable
+        selection = {
+            "kind": "multi_single",
+            "source_path": os.path.join(self.tmp, "s0001"),
+            "output_path": os.path.join(self.tmp, "mcs_output"),
+            "mask_selection": "all",
+            "paths": [
+                os.path.join(self.tmp, "s0000"),
+                os.path.join(self.tmp, "s0002"),
+                invalid,
+            ],
+        }
+        calls = []
+
+        class FakeProc:
+            pid = 4244
+
+        def fake_popen(command, **_kwargs):
+            calls.append(command)
+            return FakeProc()
+
+        with mock.patch.object(dw.subprocess, "Popen", side_effect=fake_popen), \
+                mock.patch.object(dw, "_ROOT", self.tmp):
+            launched = dw.submit_import(selection, {})
+        # Exactly one worker per VALID path; the invalid one never launches.
+        self.assertEqual(2, len(calls))
+        self.assertEqual(
+            ["s0000", "s0002"],
+            [name for name, status in launched if status == "submitted"],
+        )
+        self.assertIn("no supported image", [status for _n, status in launched])
+        for command in calls:
+            self.assertEqual("single_case_import_worker.py", os.path.basename(command[1]))
+        # No batch CLI invocation for a multi-selection.
+        self.assertNotIn("mimics_batch_cli.py", [os.path.basename(c[1]) for c in calls])
 
     def test_collect_recent_drops_summarizes_status_files(self):
         import import_drop_window as dw

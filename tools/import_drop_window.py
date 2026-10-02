@@ -93,9 +93,11 @@ def classify_payload(paths):
     """Turn dropped paths into (kind, source) where kind is single or batch.
 
     One dropped path is inspected directly (file -> single, folder -> could be
-    a case folder or a dataset root). Multiple dropped paths: if they share a
-    parent and look like case folders, treat the parent as a dataset root;
-    otherwise each path is handled as its own single-case import.
+    a case folder or a dataset root). Multiple dropped paths are ALWAYS the
+    user's exact case list (F10): each path becomes its own single-case
+    import, never the shared parent — dropping 2 of 10 cases in a folder must
+    not escalate to importing all 10. The batch flow stays reachable by
+    dropping the dataset root itself. Duplicate paths are dropped.
     """
     paths = [p for p in paths if p]
     if not paths:
@@ -109,11 +111,7 @@ def classify_payload(paths):
                 return "batch", path, child_dirs
             return "single", path, child_dirs
         return "single", path, []
-    parents = {os.path.dirname(p) for p in paths}
-    if len(parents) == 1:
-        parent = parents.pop()
-        return "batch", parent, [p for p in paths if os.path.isdir(p)] or paths
-    return "multi_single", None, paths
+    return "multi_single", None, list(dict.fromkeys(paths))
 
 
 def _child_case_dirs(root, limit=3):
@@ -545,8 +543,30 @@ def run(context=None, preview_path=""):
                 summary += "\n" + "\n".join("⚠ " + w for w in warnings[:5])
             dropzone.setText("Dataset: {0}".format(source))
             set_recognition(summary, bool(warnings))
+        elif kind == "multi_single":
+            # F10: a multi-selection is the user's exact case list — probe
+            # each dropped path so a mixed selection is reportable per item
+            # and stays submittable when at least one path is valid.
+            results = []
+            valid = 0
+            for path in paths:
+                case_info = io_ui.discover_single_source(path)
+                if case_info:
+                    valid += 1
+                    results.append("{0} ✓".format(case_info["case_id"]))
+                else:
+                    results.append("{0} ✗ (无可用图像)".format(
+                        os.path.basename(path.rstrip("\\/")) or path))
+            summary = "多选 {0} 例：{1}".format(len(paths), "、".join(results[:6]))
+            if len(results) > 6:
+                summary += " …"
+            set_recognition(summary, valid < len(paths))
+            dropzone.setText("Multi: {0} path(s)".format(len(paths)))
+            if not valid:
+                submit.setEnabled(False)
+                return
         else:
-            display = paths[0] if kind == "single" else "{0} path(s)".format(len(paths))
+            display = paths[0]
             case_info = io_ui.discover_single_source(paths[0]) if kind == "single" else None
             if case_info:
                 mask_names = ", ".join(m["name"] for m in case_info["masks"][:5])
