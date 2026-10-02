@@ -23,7 +23,7 @@ No GPU, no nnU-Net execution: the heavyweight stages complete via fake
 workers, exactly like the lifecycle tests, but chained across operations.
 
 Usage:
-    python_env/python.exe tools/test_cross_workflow_transitions.py
+    python_env/python.exe tests/test_cross_workflow_transitions.py
 """
 
 from __future__ import annotations

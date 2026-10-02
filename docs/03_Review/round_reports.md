@@ -4312,3 +4312,110 @@ W03 的 R65-12（F01 DICOM 系列/多帧——需 L3 实机配合，验收成本
   复现的 Qt offscreen 环境问题。已用 `--deselect` 排除该单测补跑
   确认其余全绿（结果见门禁小节更新）。
   按相邻死行测试的既有模式 mock `model_registry_paths` 隔离。
+
+## R66（2026-10-02）：用户产品级三关切——仓库重组 / 配置瘦身 / 入口合并
+
+来源：用户对整个产品的三条反馈（2026-10-02，逐字）——
+(1) 仓库架构杂乱：测试文件、配置文件、文档散乱，层级不清晰，新手不友好；
+(2) 配置文件参数过多（如 nninteractive_config.json），标注者无法理解配置，
+    哪些用户在乎、哪些运维关心需要取舍设计；
+(3) scripting_library 入口未从标注者出发：Quick_Export_Masks 为何叫 quick、
+    Show_Batch_Status 干嘛的、Quick_Drop_Import 能否合并，所有入口要重新审视。
+
+四项用户拍板（AskUserQuestion）：仓库重组=全量重组（A）；配置瘦身=三层瘦身（B）；
+导入入口=合并为一个（拖拽窗为底座+浏览按钮）（C1）；Show_Batch_Status 与
+5 个 Stop 入口合并、Quick_Export_Masks→03_Export_Masks、窗宽窗位三合一（C2）。
+AI 家族状态查看器本轮不动。
+
+### A：仓库结构（纯移动/删除轮）
+
+- **A1（`93fc844`）**：MimicsHelp_MD 3,986 页 → 实际被引用的 5 页，
+  删 3,982 个未引用帮助资源（−26,947 行）。
+- **A2（`42686f6`）**：根目录历史报告归档 docs/archive/，docs 子目录合并
+  （23 文件，净 −306，主要是移动）。
+- **A3（`eeb2ac5`）**：测试文件拆到 tests/，产品代码留 tools/（27 文件，
+  路径引用全量同步）。
+
+### B：配置三层瘦身（`79a956f`）
+
+20 个 internal 键 + 11 个低频键降为代码内置默认（删 31 个配置键），
+CONFIG_REFERENCE.md 同步收缩至用户真正需要改的项。选型顺序最优先区间
+（改配置 > 删代码），零新维护面。
+
+### C1：01_Data 入口 8 → 4（`6ffde72`）
+
+- 删 01_Import_Dataset / 02_Import_Single_Case / 03_Stop_Import_Queue /
+  05_Stop_Mask_Export / 07_Quick_Drop_Import（5 个入口文件）。
+- 新 01_Import_Data：拖拽窗为底座 + 「选择文件...」「选择文件夹...」浏览
+  按钮（异步 helper，多选走与多拖拽相同的 add_paths 管线）。
+- 04_Task_Status（原 08_Show_Batch_Status 改名）吸收 3 个 Stop 入口：
+  每行 Stop 按钮写 kind-specific stop marker（从 status_path/job_dir 推导，
+  零 schema 变更），确认框说明范围（当前病例完成后退出），Import queue
+  额外移除 _mcs_queue_active.json。
+- 02_Import_Masks（原 04）、03_Export_Masks（原 06_Quick_Export_Masks）重编号。
+- 11 处 runtime_py35 文案 + flexict/nnunet 入口指引同步。
+- 测试：deleted_markers 更新、window/import 路由测试改写、3 个 stop 测试
+  改测 _stop_marker/request_stop 行为。36 gui smoke + 69 定向 + 21 stop
+  全绿，冒烟 8/8（`20261003T001716`）。
+
+### C2：03_Review 入口 5 → 3（`b679eb6`）
+
+- 删 04_Window_Undo_Last / 05_Window_Edit_Presets（入口文件）。
+- 03_Window_Level（原 03_Window_Choose_Preset 改名）预设对话框内新增
+  Undo Last / Edit Presets... / Reset Full Range 按钮——整个窗宽窗位操作
+  面收进一个对话框。
+- 文档三处同步（entry guide / workflows / validation）。41
+  window/editor/doc 测试全绿，冒烟 8/8（`20261003T003229`）。
+
+### C1+C2 合计复杂度披露
+
+28 文件 +402/−379 净 +23。新增维护面：2 个函数（batch_status_viewer
+_stop_marker + request_stop，<50 行）+ 导入窗 2 个浏览按钮；删除 7 个
+入口文件。删 5 个 UI 入口换 <50 行新代码。
+
+### 工作区事件登记
+
+- Qt offscreen 渲染崩溃（TestSystemHealthPanel::test_offscreen_panel_renders、
+  TestImportDropWindow::test_offscreen_window_renders_and_registers，
+  0xC0000409）：`git stash` 在干净 HEAD 复现同样崩溃，判定既有环境问题，
+  非本轮改动引入。定向测试用 `--deselect` 排除。
+- **fast 门禁暴露预存测试隔离缺陷（`20261003T010831` 27/28，commit
+  `bc19ecb` 修复）**：flexict_integration 6 errors——TestWorkerEnvironment
+  隐式依赖本机 ~1.1GB gitignored FlexiCT 预训练权重（weights 在盘时
+  20261002T164401 曾 28/28 全绿，权重被清后即挂）。按同套件既有隔离
+  模式修复：`_request()` 与两个直建请求的测试 pin `flexict_pretrained_dir
+  = "/models/flexict"`（与 remote 测试同法；权重解析本体由
+  TestPretrainedWeights 的合成 repo 布局覆盖）。TestWorkerEnvironment
+  7/7、全套件 105/105。
+
+### D 收尾清理（用户指令：完成后检查没必要的文件是否删干净、补测试）
+
+- **docs/images 删除 6 张无引用预览图**（io_import_dataset/single/
+  export_masks——C1 已删除的入口截图；dinov3×3——已淘汰功能截图）：
+  全仓 grep（排除 03_Review/history 账本）零引用，docs/Mimics_API_*
+  仅引用其余 22 张。
+- **docs/reviews/artifact-manifest.json 修 5 条死路径**：A1 移动后
+  `docs/MimicsHelp_MD/pages/...` → `docs/mimics_help/<page>.md`（sha256
+  复核一致，仅路径字段变化）。
+- **docs/MIMICS_PROJECT_ARCHITECTURE_CN.md:1027 阅读顺序死链**：
+  `02_Import_Single_Case.py` → `01_Import_Data.py`。
+- **测试 docstring 死路径（A3 拆分残留）**：test_gui_smoke 引用
+  docs/changes/（已并 docs/history/）+ tools/test_*.py 运行命令（已移
+  tests/），cross_workflow/training_convergence/ui_preferences 三个文件
+  同步修正。living-docs 2 项、window/entry/stop/config 相关定向测试
+  全绿。
+
+### 门禁与证据
+
+- 冒烟 8/8 ×2：`20261003T001716`（C1）、`20261003T003229`（C2）。
+- fast 27/28：`20261003T010831`（flexict_integration 6 errors 为预存
+  权重依赖，`bc19ecb` 修复）。
+- fast 28/28：`20261003T015250`（R66 全部改动 + 修复后，轮次门禁）。
+
+### 遗留
+
+- 铁律 4 后续项（未立项）：C1 后 `mimics_stop_background.py`
+  main_stop_import/main_stop_export 与 `mimics_import.py`
+  _launch_external_import_setup + io_path_setup_ui import modes 不再有
+  非测试调用方，删除涉及较大爆炸半径（io_setup_mimics modes + ~5 测试
+  pin + flow tests），登记待后续轮处理。

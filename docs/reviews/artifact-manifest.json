@@ -115,23 +115,23 @@
   ],
   "baseline_source_files": [
     {
-      "path": "docs/MimicsHelp_MD/pages/3D Interpolate.md",
+      "path": "docs/mimics_help/3D Interpolate.md",
       "sha256": "b9e6aa2cb14a0dbf6b72bd1a2c80c2acfeea16a424dfed68a774548c9ac375da"
     },
     {
-      "path": "docs/MimicsHelp_MD/pages/Mimics Reference Guide/Applying the registration.md",
+      "path": "docs/mimics_help/Applying the registration.md",
       "sha256": "1d9bca61f708b180e69fa34e2982eb88a61dde0c8131cd7a9b3db89de6c83c45"
     },
     {
-      "path": "docs/MimicsHelp_MD/pages/Mimics Reference Guide/General Shortcuts.md",
+      "path": "docs/mimics_help/General Shortcuts.md",
       "sha256": "90050db7f9fe58fea205e90e3ac5df4a31dbaacc62d263198d18a7df929288a4"
     },
     {
-      "path": "docs/MimicsHelp_MD/pages/Mimics Reference Guide/Image Registration.md",
+      "path": "docs/mimics_help/Image Registration.md",
       "sha256": "169f140d132c9f04b59d9f38d9a0d7050d7241dfcd63379ef710207f96895d90"
     },
     {
-      "path": "docs/MimicsHelp_MD/pages/Mimics Reference Guide/Multiple slice edit.md",
+      "path": "docs/mimics_help/Multiple slice edit.md",
       "sha256": "51273f103281cd7f507665292b233da4f58fbd07d50a664b337866afca719708"
     },
     {

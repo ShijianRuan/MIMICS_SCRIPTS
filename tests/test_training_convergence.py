@@ -30,9 +30,9 @@ Not part of the default gate: add to the ``full`` regression profile only
 planning and dataloader warmup, roughly 3-8 minutes per family on GPU.
 
 Usage:
-    python_env/python.exe tools/test_training_convergence.py            # both
-    python_env/python.exe tools/test_training_convergence.py Nnunet     # one
-    python_env/python.exe tools/test_training_convergence.py Flexict
+    python_env/python.exe tests/test_training_convergence.py            # both
+    python_env/python.exe tests/test_training_convergence.py Nnunet     # one
+    python_env/python.exe tests/test_training_convergence.py Flexict
 """
 
 from __future__ import annotations

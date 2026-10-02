@@ -1024,7 +1024,7 @@ Fake Mimics 测试用于验证：
 
 新开发者建议按以下顺序阅读代码：
 
-1. `scripting_library/01_Data/02_Import_Single_Case.py`
+1. `scripting_library/01_Data/01_Import_Data.py`
 2. `runtime_py35/_mimics_entrypoint.py`
 3. `runtime_py35/mimics_import.py`
 4. `mimics_bridge.py`

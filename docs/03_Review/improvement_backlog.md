@@ -244,7 +244,52 @@
   `model_dir`/`workspace_dir` 键（引导文案让用户改的键终于有文档）。
   冒烟 8/8（工件 20260930T213441_smoke.json）。
 
-### R65（2026-10-01 新增：外部评审 docs/reviews/ F01–F29 收编消化）
+### R66（2026-10-02 新增：用户产品级三关切——仓库重组 / 配置瘦身 / 入口合并）
+
+> 来源：用户对整个产品的三条反馈（2026-10-02）：仓库架构杂乱（测试/
+> 配置/文档散乱、层级不清晰、新手不友好）；配置参数过多标注者无法
+> 理解；scripting_library 入口未从标注者出发（Quick_Export_Masks 为何
+> 叫 quick、Show_Batch_Status 干嘛的、Quick_Drop_Import 能否合并）。
+> 四项 AskUserQuestion 拍板：仓库重组=全量重组（A）；配置瘦身=三层
+> 瘦身（B）；导入入口=合并为一个（C1）；Show_Batch_Status 与 5 个
+> Stop 入口合并、Quick_Export_Masks→03_Export_Masks、窗宽窗位三合一
+> （C2）；AI 家族状态查看器本轮不动。
+
+- [x] **R66-A1 仓库瘦身：MimicsHelp_MD**〔R66 当轮解决，commit
+  `93fc844`〕：3,986 页 → 被引用的 5 页，删 3,982 个未引用帮助资源
+  （−26,947 行）。验收：全量 grep 无残留引用；fast 门禁绿。
+- [x] **R66-A2 根目录历史报告归档 + docs 目录合并**〔R66 当轮解决，
+  commit `42686f6`〕：根目录历史报告移 docs/archive/，docs 子目录
+  合并。验收：根目录仅剩现行文档 + CONFIG_REFERENCE.md 等活跃文件。
+- [x] **R66-A3 tools/ 拆分为产品/测试/脚本三区**〔R66 当轮解决，
+  commit `eeb2ac5`〕：测试文件全部移 tests/，产品代码留 tools/，
+  run_regression_matrix/文档/CI 引用全量同步。验收：fast 门禁绿。
+- [x] **R66-B 配置三层瘦身**〔R66 当轮解决，commit `79a956f`〕：
+  20 个 internal 键 + 11 个低频键（13+7 项初始盘点口径）降为代码
+  内置默认，CONFIG_REFERENCE.md 同步收缩至用户真正需要改的项。
+  验收：配置文件载入默认值与旧配置实测等价；fast 门禁绿。
+- [x] **R66-C1 01_Data 入口 8→4 + Task Status 逐行停止**〔R66 当轮
+  解决，commit `6ffde72`〕：删 01_Import_Dataset/02_Import_Single_Case/
+  03_Stop_Import_Queue/05_Stop_Mask_Export/07_Quick_Drop_Import；新
+  01_Import_Data（拖拽窗+浏览按钮，多选与多拖拽同管线）；04_Task_
+  Status 吸收 3 个 Stop 入口（kind-specific stop marker 从 status_
+  path/job_dir 推导，确认框说明停止范围）；02_Import_Masks、03_
+  Export_Masks 重编号。验收：36 gui smoke + 69 定向 + 21 stop 测试
+  全绿，冒烟 8/8（`20261003T001716`）。
+- [x] **R66-C2 03_Review 窗宽窗位三合一 5→3**〔R66 当轮解决，commit
+  `b679eb6`〕：删 04_Window_Undo_Last/05_Window_Edit_Presets；
+  03_Window_Level 预设对话框内新增 Undo Last/Edit Presets.../Reset
+  Full Range 按钮。验收：41 window/editor/doc 测试全绿，冒烟 8/8
+  （`20261003T003229`）。
+- [ ] **R66 遗留：无调用方的停止/导入代码删除**（铁律 4 后续项，
+  未排期）：C1 后 `mimics_stop_background.py` main_stop_import/
+  main_stop_export 与 `mimics_import.py` _launch_external_import_setup
+  + io_path_setup_ui import modes 不再有非测试调用方。删除涉及较大
+  爆炸半径（io_setup_mimics modes + ~5 测试 pin + flow tests），
+  需单独一轮处理。验收标准：删除后全部 stop/import 既有测试改写
+  通过 + fast 门禁绿。
+
+
 
 > 来源：docs/reviews/（2026-09-29 跨职能评审 F01–F17 + 2026-09-30 场景评审
 > F18–F29，基线 commit `36eac04`，评审只记录不修复）。用户指令（2026-10-01）：
@@ -1433,6 +1478,16 @@
   决策**（若 D5 判保留则补覆盖，若判删除则无需）。
 
 ## 进行中
+
+（截至 R66（2026-10-02）：用户产品级三关切全部关闭——A1 仓库瘦身
+（`93fc844`，−26,947 行）、A2 docs 归档合并（`42686f6`）、A3 tools 三区
+拆分（`eeb2ac5`）、B 配置三层瘦身（`79a956f`，删 31 配置键）、C1 01_Data
+入口 8→4 + Task Status 逐行停止（`6ffde72`）、C2 03_Review 窗宽窗位
+三合一（`b679eb6`）。C1+C2 净 +23 行换删 7 个 UI 入口文件。冒烟 8/8×2
+（`20261003T001716`/`20261003T003229`），fast 门禁证据见轮次报告 R66。
+R66 遗留一条未排期：无调用方停止/导入代码删除（铁律 4 后续项）。
+R65 时代剩余项不变：R65-12（F01 DICOM 系列/多帧，等 L3 实机）、
+D10（AL 完成语义，等用户拍板）。此前状态：
 
 （截至 R65（2026-10-01）：消化外部评审 docs/reviews/（F01–F29 + 交接
 W01–W10 + 测试计划 T01–T40 + 证据指南，全部读完）并收编为本文件 R65

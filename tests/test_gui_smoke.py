@@ -5,11 +5,11 @@ Runs with QT_QPA_PLATFORM=offscreen so no display is needed. Each test
 constructs the real window class against a temporary project state and
 exercises its interaction surface (table refresh, edits, validation) without
 a human. This is the automatable slice of the manual GUI acceptance items in
-docs/changes/2026-09-24_improvement_program_delivery.md; look-and-feel
+docs/history/changes_2026-09-24_improvement_program_delivery.md; look-and-feel
 remains a human check.
 
 Run:
-    python_env/python.exe tools/test_gui_smoke.py
+    python_env/python.exe tests/test_gui_smoke.py
 """
 
 from __future__ import annotations

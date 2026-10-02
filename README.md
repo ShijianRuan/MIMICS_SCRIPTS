@@ -2,10 +2,11 @@
 
 为医学影像标注软件 **Mimics**（Materialise）提供外挂式 AI 标注能力：
 
-- **数据导入导出**：数据集/单病例批量转 `.mcs`、掩码注入与导出、拖拽导入
+- **数据导入导出**：拖拽/浏览/粘贴导入任意数据并转 `.mcs`、掩码注入与
+  导出、任务状态与逐行停止
 - **AI 分割**：nnInteractive（官方模型 + 自训模型）、nnU-Net 训练与推理、
   ScribblePrompt 交互分割、FlexiCT 少样本训练与主动学习
-- **辅助工具**：窗宽窗位预设、批处理状态、系统健康检查、诊断包收集
+- **辅助工具**：窗宽窗位预设、系统健康检查、诊断包收集
 
 Mimics 内嵌的 Python 3.5 只做轻量调度（`runtime_py35/`）；所有重活
 （GPU 推理、训练、文件转换）由外部 Python 3.13 环境（`python_env/`）在
@@ -46,8 +47,10 @@ Mimics 内嵌的 Python 3.5 只做轻量调度（`runtime_py35/`）；所有重�
 ```
 scripting_library/   Mimics 菜单入口（01_Data / 02_AI / 03_Review / 99_Admin）
 runtime_py35/        Mimics 内嵌 Python 3.5 侧的调度与状态监控
-tools/               外部 Python 侧的桥接、UI、流水线与全部测试
+tools/               外部 Python 侧的桥接、UI 与流水线
+tests/               测试套件（test_all.py 等全部测试文件）
 integrations/        独立集成仓（flexict-finetune、ScribblePrompt 等）
+docs/                使用文档、验收清单与迭代账本（03_Review/）
 python_env/          外部 Python 3.13 环境（Setup 生成，不入库）
 *.json               根目录配置（见 CONFIG_REFERENCE.md）
 ```
