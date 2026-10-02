@@ -151,7 +151,13 @@ class TestConfigurationResolution(unittest.TestCase):
 
 class TestWorkerEnvironment(unittest.TestCase):
     def _request(self):
-        return fp.normalize_flexict_request(_training_request("X:/d", "W:/w"))
+        request = fp.normalize_flexict_request(_training_request("X:/d", "W:/w"))
+        # Do not depend on the ~1.1 GB gitignored pretrained weights being
+        # present on this machine: pin the container-side override the same
+        # way the remote-execution test does (weights resolution itself is
+        # covered by TestPretrainedWeights's synthetic repo layout).
+        request["flexict_pretrained_dir"] = "/models/flexict"
+        return request
 
     def _roots(self):
         from pathlib import Path
@@ -165,13 +171,12 @@ class TestWorkerEnvironment(unittest.TestCase):
         env = fp.flexict_worker_environment(
             self._request(), self._roots(), "2d")
         repo = fc.flexict_repo_dir(fc.load_config())
-        weights, _source = fc.resolve_pretrained_dir(fc.load_config())
         self.assertEqual(env["nnUNet_extTrainer"], str(repo / "trainers"))
         self.assertEqual(env["FLEXICT_EXT_DIR"], str(repo / "flexict"))
         self.assertEqual(env["FLEXICT2D_CKPT"],
-                         str(weights / "flexict_2d" / "model.safetensors"))
+                         "/models/flexict/flexict_2d/model.safetensors")
         self.assertEqual(env["FLEXICT3D_CKPT"],
-                         str(weights / "flexict_3d" / "model.safetensors"))
+                         "/models/flexict/flexict_3d/model.safetensors")
         self.assertEqual(env["NUM_EPOCHS"], "150")
         self.assertEqual(env["nnUNet_compile"], "0")
         self.assertNotIn("MIRROR_DISABLE_AXES", env)
@@ -228,12 +233,14 @@ class TestWorkerEnvironment(unittest.TestCase):
     def test_mirror_axes_forwarded(self):
         request = fp.normalize_flexict_request(
             _training_request("X:/d", "W:/w", mirror_disable_axes="1"))
+        request["flexict_pretrained_dir"] = "/models/flexict"
         env = fp.flexict_worker_environment(request, self._roots(), "2d")
         self.assertEqual(env["MIRROR_DISABLE_AXES"], "1")
 
     def test_gpu_id_forwarded(self):
         request = fp.normalize_flexict_request(
             _training_request("X:/d", "W:/w", gpu_id="1"))
+        request["flexict_pretrained_dir"] = "/models/flexict"
         env = fp.flexict_worker_environment(request, self._roots(), "2d")
         self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "1")
 
