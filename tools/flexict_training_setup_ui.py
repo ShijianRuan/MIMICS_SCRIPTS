@@ -157,9 +157,10 @@ class TrainingSetupWindow:
 
         project, form = self._surface("任务与图像")
         self.label_edit = QtWidgets.QLineEdit()
-        self.label_edit.setPlaceholderText("例如 kidney_left")
+        self.label_edit.setPlaceholderText("例如 kidney_left，或多个标签用逗号分隔")
         self.label_edit.setToolTip(
-            "一个 FlexiCT 模型只训练一个二值目标（器官或结构）。"
+            "一个 FlexiCT 模型默认训练一个二值目标（器官或结构）。"
+            "用逗号分隔多个标签（最多 4 个）可训练一个多分类模型。"
         )
         form.addWidget(QtWidgets.QLabel("目标 / 标签名称 *"), 0, 0)
         form.addWidget(self.label_edit, 0, 1)
@@ -457,10 +458,21 @@ class TrainingSetupWindow:
             )
         )
 
-    def _scan_cases(self, dataset_root: str, label_name: str) -> list[dict]:
+    def _label_names(self) -> list[str]:
+        return [
+            name.strip() for name in
+            self.label_edit.text().replace("，", ",").split(",")
+            if name.strip()
+        ]
+
+    def _scan_cases(self, dataset_root: str, label_names: list[str]) -> list[dict]:
         from flexict_pipeline import scan_flexict_cases
 
-        return scan_flexict_cases(dataset_root, label_name)
+        return scan_flexict_cases(
+            dataset_root,
+            label_names[0] if label_names else "",
+            label_names=label_names,
+        )
 
     def _rescan_cases_async(self):
         if getattr(self, "_scan_pending", False):
@@ -468,11 +480,11 @@ class TrainingSetupWindow:
         self._scan_pending = True
         self.rescan_button.setEnabled(False)
         dataset_root = self.dataset_edit.text().strip()
-        label_name = self.label_edit.text().strip()
+        label_names = self._label_names()
 
         def scan():
             try:
-                result = self._scan_cases(dataset_root, label_name)
+                result = self._scan_cases(dataset_root, label_names)
                 self._dataset_id_results.put(("scan", result, ""))
             except Exception as exc:
                 self._dataset_id_results.put(("scan", None, str(exc)))
@@ -573,11 +585,16 @@ class TrainingSetupWindow:
             val_count = int(self.val_spin.value())
         else:
             val_count = len(val_cases)
+        label_names = self._label_names()
         request = {
             "operation": "train",
             "task_name": self.label_edit.text().strip(),
             "task_id": self.label_edit.text().strip(),
-            "label_name": self.label_edit.text().strip(),
+            "label_name": label_names[0] if label_names else "",
+            "labels": [
+                {"name": name, "aliases": [name], "id": index + 1}
+                for index, name in enumerate(label_names)
+            ],
             "workspace": self.workspace_edit.text().strip(),
             "dataset_root": self.dataset_edit.text().strip(),
             "label_source": "dataset_masks",
@@ -607,6 +624,10 @@ class TrainingSetupWindow:
             request = self._request()
             if not request["label_name"]:
                 raise ValueError("Target / label name is required.")
+            if len(request.get("labels") or []) > 4:
+                raise ValueError(
+                    "FlexiCT 少样本训练每个模型最多支持 4 个标签；更多标签请使用 nnU-Net。"
+                )
             self._submission_generation += 1
             generation = self._submission_generation
             self._submission_pending = True

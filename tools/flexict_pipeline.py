@@ -102,13 +102,55 @@ def _raise_if_cancelled(control_path: Path) -> None:
         raise InterruptedError("cancel")
 
 
+def _flexict_label_specs(out: dict[str, Any]) -> list[dict[str, Any]]:
+    """Resolve the request's label spec list (1 = binary, N = multiclass).
+
+    Accepts an explicit ``labels`` list (same shape as nnU-Net label specs)
+    or the classic single ``label_name`` string. Multiclass is supported by
+    the trainer (num_output_channels flows from dataset.json label count),
+    but only when the user asks for it explicitly; the default stays the
+    validated single-target binary recipe.
+    """
+    raw_specs = out.get("labels")
+    if not raw_specs:
+        name = str(out.get("label_name") or "").strip()
+        if not name:
+            raise ValueError("label_name (organ/target name) is required.")
+        return [{"name": name, "aliases": [name], "id": 1,
+                 "source_mode": "alternatives"}]
+    specs = []
+    seen = set()
+    for index, spec in enumerate(raw_specs):
+        name = str(spec.get("name") or "").strip()
+        if not name:
+            raise ValueError("Every label needs a name.")
+        if name.lower() in seen:
+            raise ValueError("Duplicate label name: {}".format(name))
+        seen.add(name.lower())
+        aliases = [str(a).strip() for a in (spec.get("aliases") or [name])
+                   if str(a).strip()] or [name]
+        specs.append({
+            "name": name,
+            "aliases": aliases,
+            "id": index + 1,
+            "source_mode": str(spec.get("source_mode") or "alternatives"),
+        })
+    if len(specs) > 4:
+        raise ValueError(
+            "FlexiCT few-shot supports at most 4 labels per model "
+            "(got {}). Train an nnU-Net model for larger label sets.".format(
+                len(specs)))
+    return specs
+
+
 def normalize_flexict_request(values: dict[str, Any]) -> dict[str, Any]:
     """Validate and default a FlexiCT training request.
 
-    FlexiCT trains one binary target per model. Cases and label export work
-    exactly like the nnU-Net pipeline (single label spec, 0/1 output); the
-    differences are the trainer set, the dataset band (750-799), and the
-    locked recipe env vars.
+    FlexiCT trains one binary target per model by default (``label_name``,
+    0/1 output); a request with an explicit ``labels`` list of N specs
+    trains one N-class model instead. Cases and label export work exactly
+    like the nnU-Net pipeline; the differences are the trainer set, the
+    dataset band (750-799), and the locked recipe env vars.
     """
     from nnunet_common import normalize_request
 
@@ -143,11 +185,7 @@ def normalize_flexict_request(values: dict[str, Any]) -> dict[str, Any]:
             # never squat on the nnU-Net namespace.
             nnunet_values["dataset_id"] = flexict_suggest_dataset_id(
                 out.get("workspace"))
-        nnunet_values.setdefault("labels", [
-            {"name": str(out.get("label_name") or "target"),
-             "aliases": [str(out.get("label_name") or "target")],
-             "id": 1, "source_mode": "alternatives"},
-        ])
+        nnunet_values.setdefault("labels", _flexict_label_specs(out))
         nnunet_values.setdefault("trainer", "flexict2d_Trainer")
         nnunet_values.setdefault("modality", "CT")
         out = normalize_request(nnunet_values)
@@ -155,6 +193,10 @@ def normalize_flexict_request(values: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(
                 "configuration must be one of {}".format(", ".join(CONFIGURATIONS)))
         out["configuration"] = flexict_configuration
+        # label_name stays the primary target name (status/manifest/UI);
+        # label_names carries the full multiclass list when N > 1.
+        out["label_name"] = str(out["labels"][0]["name"])
+        out["label_names"] = [str(spec["name"]) for spec in out["labels"]]
     else:
         # infer / active_learning share the inference-side normalization
         # (workspace, GPU fields); the FlexiCT operation must survive it.
@@ -281,12 +323,12 @@ def flexict_infer_environment(request: dict[str, Any],
 def _materialize_flexict_raw(rows: list[dict[str, Any]],
                              request: dict[str, Any],
                              roots: dict[str, Path]) -> tuple[Path, str]:
-    """Materialize the FlexiCT nnU-Net raw dataset (single 0/1 label).
+    """Materialize the FlexiCT nnU-Net raw dataset (0/1 or N-class labels).
 
     Reuses the nnU-Net raw materializer (hardlink/copy cases, dataset.json
     with NibabelIOWithReorient, splits_final.json) — the FlexiCT differences
-    are only the dataset band and the binary single-label contract, which the
-    request's single label spec already encodes.
+    are only the dataset band and the label contract, which the request's
+    label spec list already encodes (1 spec = binary, N = multiclass).
     """
     return _materialize_nnunet_raw(
         rows,
@@ -490,6 +532,10 @@ def _register_flexict_model(request: dict[str, Any],
         "task_id": request["task_id"],
         "task_name": request["task_name"],
         "label_name": str(request["label_name"]),
+        "label_names": [
+            str(spec["name"]) for spec in request["labels"]] or [
+            str(request["label_name"])],
+        "labels": list(request["labels"]),
         "configuration": configuration,
         "trainer": TRAINERS[configuration],
         "dataset_id": int(request["dataset_id"]),
@@ -960,45 +1006,66 @@ def read_json_file(path: Path, default: Any = None) -> Any:
     return read_json(path, default)
 
 
-def scan_flexict_cases(dataset_root: str | Path, label_name: str) -> list[dict[str, Any]]:
+def scan_flexict_cases(
+    dataset_root: str | Path,
+    label_name: str,
+    label_names: "list[str] | None" = None,
+) -> list[dict[str, Any]]:
     """Scan a dataset root and report per-case image/label availability.
 
     Used by the training UI so the user sees exactly which cases will train,
     which will validate, and which are skipped (missing image or label).
+    ``label_names`` (multiclass) checks every label; a case is only OK when
+    all requested labels are present.
     """
     root = Path(dataset_root).expanduser()
     if not root.is_dir():
         raise ValueError("Dataset folder does not exist: {}".format(root))
+    wanted = [
+        safe_identifier(str(name)).lower()
+        for name in (label_names or ([label_name] if label_name else []))
+        if str(name).strip()
+    ]
     rows: list[dict[str, Any]] = []
     for case_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        files = [p for p in case_dir.iterdir() if p.is_file()]
+        # Prefer the case's main image (ct.nii.gz style: plain "ct" stem),
+        # not the first .nii.gz that happens to sit next to it.
         image = None
-        for candidate in case_dir.iterdir():
-            if not candidate.is_file():
-                continue
-            if candidate.suffix.lower() in {".nii", ".gz", ".nrrd", ".mha"}:
-                image = candidate
-                break
-        label = None
-        if label_name:
-            for candidate in case_dir.iterdir():
-                if not candidate.is_file():
-                    continue
-                if candidate.stem.split(".")[0].lower() == safe_identifier(label_name).lower():
-                    label = candidate
+        for preferred in ("ct", "image"):
+            for candidate in files:
+                if candidate.stem.split(".")[0].lower() == preferred and \
+                        candidate.suffix.lower() in {".nii", ".gz", ".nrrd", ".mha"}:
+                    image = candidate
                     break
-        if image is None and label is None:
+            if image is not None:
+                break
+        if image is None:
+            for candidate in files:
+                if candidate.suffix.lower() in {".nii", ".gz", ".nrrd", ".mha"}:
+                    image = candidate
+                    break
+        labels: dict[str, str] = {}
+        if wanted:
+            by_stem = {candidate.stem.split(".")[0].lower(): candidate
+                       for candidate in files}
+            for name in wanted:
+                labels[name] = str(by_stem.get(name) or "")
+        if image is None and not any(labels.values()):
             continue
         status = []
         if image is None:
             status.append("image missing")
-        if label is None:
-            status.append("label missing")
+        missing = [name for name, path in labels.items() if not path]
+        if missing:
+            status.append("label missing: " + ", ".join(missing))
         rows.append(
             {
                 "case_id": case_dir.name,
                 "image": str(image) if image else "",
-                "label": str(label) if label else "",
-                "checked": image is not None and label is not None,
+                "label": labels.get(wanted[0], "") if wanted else "",
+                "labels": dict(labels),
+                "checked": image is not None and not missing,
                 "use_train": True,
                 "use_val": False,
                 "status": "OK" if not status else "; ".join(status),
@@ -1043,6 +1110,8 @@ def run_inference(job_dir: Path) -> int:
         task_id=manifest.get("task_id") or request.get("task_id") or "",
         task_name=manifest.get("task_name") or request.get("task_name") or "",
         label_name=manifest.get("label_name") or request.get("label_name") or "",
+        label_names=manifest.get("label_names") or [],
+        labels=manifest.get("labels") or [],
         status="running",
         phase="preparing_input",
         message="Preparing the source image for FlexiCT prediction.",
@@ -1132,6 +1201,8 @@ def run_inference(job_dir: Path) -> int:
             message="FlexiCT inference completed and passed spatial validation.",
             progress_percent=100,
             label_name=manifest.get("label_name") or request.get("label_name") or "",
+            label_names=manifest.get("label_names") or [],
+            labels=manifest.get("labels") or [],
             inference_image_path=str(inference_input),
             completed_at_epoch=time.time(),
             worker_pid=None,
@@ -1484,7 +1555,13 @@ def run_active_learning(job_dir: Path) -> int:
             filename_template="{case}.nii.gz",
             method=method,
             min_masks=2,
-            target_labels=[1],
+            # 无 labels（单标签请求）传 None：run_batch 自动取全部非零标签，
+            # 与旧版 [1] 行为一致；多分类请求传 1..N。
+            target_labels=(
+                list(range(1, len(request["labels"]) + 1))
+                if request.get("labels")
+                else None
+            ),
             save_components=False,
             save_consensus=True,
             save_plots=False,

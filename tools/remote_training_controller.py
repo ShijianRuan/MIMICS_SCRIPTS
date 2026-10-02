@@ -1699,6 +1699,24 @@ def _register_flexict(
             continue
         manifest["model_dir"] = str(manifest_path.parent)
         manifest["manifest_path"] = str(manifest_path)
+        if not manifest.get("labels"):
+            # The remote pipeline snapshot may predate multiclass manifests;
+            # the local request carries the authoritative label specs.
+            specs = [
+                {
+                    "name": str(row.get("name") or ""),
+                    "aliases": [str(a) for a in (row.get("aliases") or [])],
+                    "id": int(row.get("id") or 0),
+                    "source_mode": str(row.get("source_mode") or "alternatives"),
+                }
+                for row in (request.get("labels") or [])
+                if isinstance(row, dict)
+            ]
+            if specs:
+                manifest["labels"] = specs
+                manifest["label_names"] = [str(spec["name"]) for spec in specs]
+                manifest.setdefault(
+                    "label_name", str(specs[0].get("name") or ""))
         manifest.update(
             {
                 "execution_backend": "remote",

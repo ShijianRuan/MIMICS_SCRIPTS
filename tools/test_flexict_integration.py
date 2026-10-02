@@ -8,12 +8,15 @@ lifecycle with mocked stage workers, model registration). No GPU, no Mimics,
 no nnU-Net execution — the stage workers are mocked.
 """
 
+import hashlib
+import importlib
 import json
 import os
 import shutil
 import sys
 import tempfile
 import time
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -109,6 +112,38 @@ class TestNormalizeFlexictRequest(unittest.TestCase):
         spec = request["labels"][0]
         self.assertEqual(spec["source_mode"], "alternatives")
         self.assertEqual(spec["aliases"], ["kidney_left"])
+
+    def test_multiclass_labels_list_normalizes(self):
+        """Explicit labels list trains one N-class model (multiclass)."""
+        request = fp.normalize_flexict_request(_training_request(
+            "X:/d", "W:/w",
+            labels=[
+                {"name": "liver", "aliases": ["liver"]},
+                {"name": "spleen", "aliases": ["spleen"]},
+            ]))
+        self.assertEqual(len(request["labels"]), 2)
+        self.assertEqual(request["labels"][0]["id"], 1)
+        self.assertEqual(request["labels"][1]["id"], 2)
+        self.assertEqual(request["label_name"], "liver")
+        self.assertEqual(request["label_names"], ["liver", "spleen"])
+
+    def test_multiclass_more_than_four_rejected(self):
+        with self.assertRaises(ValueError):
+            fp.normalize_flexict_request(_training_request(
+                "X:/d", "W:/w",
+                labels=[{"name": "organ{}".format(i)} for i in range(5)]))
+
+    def test_multiclass_duplicate_names_rejected(self):
+        with self.assertRaises(ValueError):
+            fp.normalize_flexict_request(_training_request(
+                "X:/d", "W:/w",
+                labels=[{"name": "liver"}, {"name": "Liver"}]))
+
+    def test_single_label_request_stays_binary(self):
+        """Default (no explicit labels) keeps the validated binary recipe."""
+        request = fp.normalize_flexict_request(_training_request("X:/d", "W:/w"))
+        self.assertEqual(request["label_names"], ["kidney_left"])
+        self.assertEqual(len(request["labels"]), 1)
 
     def test_infer_operation_uses_infer_normalization(self):
         request = fp.normalize_flexict_request({
@@ -426,6 +461,26 @@ class TestScanFlexictCases(unittest.TestCase):
     def test_scan_rejects_missing_root(self):
         with self.assertRaises(ValueError):
             fp.scan_flexict_cases(Path(tempfile.gettempdir()) / "definitely_missing", "x")
+
+    def test_scan_multiclass_requires_all_labels(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _make_case(root, "case01")
+            # case01 has only kidney_left; spleen missing -> not usable
+            rows = fp.scan_flexict_cases(
+                root, "kidney_left", label_names=["kidney_left", "spleen"])
+            self.assertEqual(len(rows), 1)
+            self.assertFalse(rows[0]["checked"])
+            self.assertIn("spleen", rows[0]["status"])
+
+    def test_scan_prefers_preferred_image_name(self):
+        """P1 audit: ct.nii.gz wins over an unrelated .nii.gz beside it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _make_case(root, "case01")
+            (root / "case01" / "prediction.nii.gz").write_bytes(b"x")
+            rows = fp.scan_flexict_cases(root, "kidney_left")
+            self.assertEqual(Path(rows[0]["image"]).name, "ct.nii.gz")
 
 
 class TestPreprocessCache(unittest.TestCase):
@@ -1833,7 +1888,7 @@ class TestEqualVolumeEditProtection(unittest.TestCase):
         # Same volume, different voxels - the exact F21 evidence.
         mask._raw = b"\x00\x01"
         with mock.patch.object(module, "_active_image_masks", return_value=[mask]):
-            self.assertIsNone(module._matching_update_mask(monitor))
+            self.assertIsNone(module._matching_update_mask(monitor, {"name": "Liver", "aliases": ["Liver"], "id": 1}))
 
     def test_unchanged_mask_still_updates(self):
         module = self._import_module()
@@ -1844,7 +1899,7 @@ class TestEqualVolumeEditProtection(unittest.TestCase):
             "matching_masks": [module._mask_snapshot(mask)],
         }
         with mock.patch.object(module, "_active_image_masks", return_value=[mask]):
-            self.assertIs(module._matching_update_mask(monitor), mask)
+            self.assertIs(module._matching_update_mask(monitor, {"name": "Liver", "aliases": ["Liver"], "id": 1}), mask)
 
     def test_edit_then_undo_back_to_original_still_updates(self):
         module = self._import_module()
@@ -1857,7 +1912,7 @@ class TestEqualVolumeEditProtection(unittest.TestCase):
         mask._raw = b"\x00\x01"
         mask._raw = b"\x01\x00"  # undo restores the original content
         with mock.patch.object(module, "_active_image_masks", return_value=[mask]):
-            self.assertIs(module._matching_update_mask(monitor), mask)
+            self.assertIs(module._matching_update_mask(monitor, {"name": "Liver", "aliases": ["Liver"], "id": 1}), mask)
 
     def test_legacy_snapshot_without_digest_degrades_to_count_check(self):
         module = self._import_module()
@@ -1873,7 +1928,7 @@ class TestEqualVolumeEditProtection(unittest.TestCase):
             }],
         }
         with mock.patch.object(module, "_active_image_masks", return_value=[mask]):
-            self.assertIs(module._matching_update_mask(monitor), mask)
+            self.assertIs(module._matching_update_mask(monitor, {"name": "Liver", "aliases": ["Liver"], "id": 1}), mask)
 
     def test_unreadable_buffer_degrades_to_count_check(self):
         module = self._import_module()
@@ -1898,13 +1953,13 @@ class TestEqualVolumeEditProtection(unittest.TestCase):
             # Unreadable now but the digest was recorded at launch: the
             # digest cannot confirm the content, so the count check alone
             # decides — matching count still updates (no false block).
-            self.assertIsNotNone(module._matching_update_mask(monitor))
+            self.assertIsNotNone(module._matching_update_mask(monitor, {"name": "Liver", "aliases": ["Liver"], "id": 1}))
             # A content change the count would have caught still blocks:
             broken = _BrokenMask()
             broken.number_of_pixels = 2
             with mock.patch.object(
                     module, "_active_image_masks", return_value=[broken]):
-                self.assertIsNone(module._matching_update_mask(monitor))
+                self.assertIsNone(module._matching_update_mask(monitor, {"name": "Liver", "aliases": ["Liver"], "id": 1}))
 
 
 class TestModelRegistration(unittest.TestCase):
@@ -2692,6 +2747,214 @@ class TestRemoteExecution(unittest.TestCase):
             self.assertTrue(result["flexict_weights"])
             self.assertTrue(result["flexict_import"], result.get("flexict_error"))
             self.assertIsInstance(result["ok"], bool)
+
+
+class FakeMask:
+    def __init__(self, name, pixels=1, content=None):
+        self.name = name
+        self.guid = name + "-guid"
+        self.number_of_pixels = pixels
+        self.selected = False
+        self.image = None
+        self.content = bytes(content or b"\x00" * 8)
+
+
+class FlexictMimicsApplyQueueTests(unittest.TestCase):
+    """Multiclass per-label apply queue in runtime_py35/flexict_mimics."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.original_modules = {
+            name: sys.modules.get(name)
+            for name in (
+                "mimics", "mimics_mask_apply", "runtime_common",
+                "external_window_launcher", "fix_source_affine_metadata",
+                "flexict_mimics",
+            )
+        }
+        # 可变容器：实例属性赋值不会改变闭包读到的类属性，故用 dict 持有。
+        cls.dialog = {"answer": "Create New Mask"}
+        cls.masks = [FakeMask("liver", 10)]
+        mimics_mod = types.ModuleType("mimics")
+        mimics_mod.data = types.SimpleNamespace(
+            masks=cls.masks,
+            images=types.SimpleNamespace(get_active=lambda: None),
+        )
+        mimics_mod.logging = types.SimpleNamespace(
+            log_user_message=lambda **kwargs: None)
+        mimics_mod.dialogs = types.SimpleNamespace(
+            question_box=lambda **kwargs: cls.dialog["answer"],
+            message_box=lambda *args, **kwargs: None,
+        )
+        mimics_mod.update_gui = lambda: None
+        sys.modules["mimics"] = mimics_mod
+
+        runtime = types.ModuleType("runtime_common")
+        runtime.find_root = lambda value, sentinel_files=None, max_depth=6: str(ROOT)
+        runtime.read_json = lambda path, default=None: default if default is not None else {}
+        runtime.write_json_atomic = lambda path, payload: None
+        runtime.try_acquire_local_operation = lambda *args: "token"
+        runtime.release_local_operation = lambda *args: None
+        runtime.process_exists = lambda pid: True
+        runtime.background_process_kwargs = lambda: {}
+        runtime.find_mimics_exe = lambda: ""
+        runtime.progress_notice_due = lambda *a, **k: (False, 0.0)
+        runtime.clear_progress_notice = lambda *a, **k: None
+        sys.modules["runtime_common"] = runtime
+
+        mask_apply = types.ModuleType("mimics_mask_apply")
+        mask_apply._mask_identity = lambda mask: mask.guid
+        mask_apply._mask_content_digest = lambda mask: (
+            "sha256:" + hashlib.sha256(mask.content).hexdigest())
+        mask_apply._mask_snapshot = lambda mask: {
+            "guid": mask.guid,
+            "name": mask.name,
+            "pixel_count": mask.number_of_pixels,
+            "sha256": "sha256:" + hashlib.sha256(mask.content).hexdigest(),
+        }
+        mask_apply._new_prediction_mask = lambda name: FakeMask(name, 0)
+        mask_apply._set_mask_from_u8 = (
+            lambda mask, path, shape, transaction_name=None:
+            setattr(mask, "applied", True))
+        sys.modules["mimics_mask_apply"] = mask_apply
+
+        sys.modules["external_window_launcher"] = types.ModuleType(
+            "external_window_launcher")
+        sys.modules["fix_source_affine_metadata"] = types.ModuleType(
+            "fix_source_affine_metadata")
+        runtime_dir = str(ROOT / "runtime_py35")
+        if runtime_dir not in sys.path:
+            sys.path.insert(0, runtime_dir)
+        # 先清缓存：此前其他测试类可能已用不同的 fake mimics 导入过真实
+        # flexict_mimics，缓存模块会绑定到那份 stub 上。
+        sys.modules.pop("flexict_mimics", None)
+        cls.module = importlib.import_module("flexict_mimics")
+
+    @classmethod
+    def tearDownClass(cls):
+        for name, module in cls.original_modules.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+
+    def _bridge_rows(self, *label_values):
+        return {
+            "masks": [
+                {
+                    "name": "flexict_prediction_label{}".format(value),
+                    "output_path": "label{}.u8".format(value),
+                    "mimics_shape": [2, 2, 2],
+                    "foreground_voxels": 3,
+                    "label_value": value,
+                }
+                for value in label_values
+            ]
+        }
+
+    def test_multiclass_queue_has_one_item_per_label(self):
+        monitor = {
+            "label_name": "liver",
+            "labels": [
+                {"id": 1, "name": "liver", "aliases": ["liver"]},
+                {"id": 2, "name": "spleen", "aliases": ["spleen"]},
+            ],
+            "matching_masks": [],
+        }
+        self.module._prepare_apply_queue(
+            monitor, self._bridge_rows(1, 2))
+        self.assertEqual(
+            [item["label"]["name"] for item in monitor["apply_queue"]],
+            ["liver", "spleen"],
+        )
+
+    def test_apply_one_returns_true_until_queue_empty(self):
+        monitor = {
+            "label_name": "liver",
+            "labels": [
+                {"id": 1, "name": "liver", "aliases": ["liver"]},
+                {"id": 2, "name": "spleen", "aliases": ["spleen"]},
+            ],
+            "matching_masks": [],
+        }
+        self.module._prepare_apply_queue(
+            monitor, self._bridge_rows(1, 2))
+        # True 表示队列还有剩余项，需下一轮继续；最后一项应用完返回 False。
+        self.assertTrue(self.module._apply_one(monitor))
+        self.assertEqual(len(monitor["apply_queue"]), 1)
+        self.assertFalse(self.module._apply_one(monitor))
+        self.assertFalse(self.module._apply_one(monitor))
+        self.assertEqual(len(monitor["applied_masks"]), 2)
+
+    def test_single_label_binary_prediction_still_applies(self):
+        """Backward compat: binary prediction, label_value 1 or 0."""
+        monitor = {
+            "label_name": "kidney_left",
+            "labels": [
+                {"id": 1, "name": "kidney_left", "aliases": ["kidney_left"]},
+            ],
+            "matching_masks": [],
+        }
+        self.module._prepare_apply_queue(monitor, self._bridge_rows(1))
+        self.assertFalse(self.module._apply_one(monitor))
+        self.assertEqual(monitor["applied_masks"], ["FlexiCT kidney_left"])
+
+    def test_legacy_monitor_without_labels_maps_value_zero(self):
+        """A resume from an old job (no labels in status) still applies."""
+        monitor = {
+            "label_name": "liver",
+            "matching_masks": [],
+        }
+        self.module._prepare_apply_queue(monitor, self._bridge_rows(0))
+        self.assertEqual(
+            monitor["apply_queue"][0]["label"]["name"], "liver")
+
+    def test_empty_prediction_rejected(self):
+        monitor = {
+            "label_name": "liver",
+            "labels": [{"id": 1, "name": "liver", "aliases": []}],
+            "matching_masks": [],
+        }
+        with self.assertRaisesRegex(RuntimeError, "empty"):
+            self.module._prepare_apply_queue(
+                monitor,
+                {"masks": [
+                    {"foreground_voxels": 0, "label_value": 1,
+                     "output_path": "x.u8", "mimics_shape": [2, 2, 2]},
+                ]},
+            )
+
+    def test_update_mode_matches_primary_label_mask(self):
+        liver = FakeMask("liver", 10)
+        self.masks[:] = [liver]
+        self.dialog["answer"] = "Update Matching Mask"
+        try:
+            monitor = {
+                "label_name": "liver",
+                "selected_mask_name": "liver",
+                "labels": [
+                    {"id": 1, "name": "liver", "aliases": ["liver"]},
+                    {"id": 2, "name": "spleen", "aliases": ["spleen"]},
+                ],
+                "matching_masks": [
+                    {
+                        "guid": liver.guid,
+                        "name": "liver",
+                        "pixel_count": 10,
+                        "sha256": "sha256:" + hashlib.sha256(
+                            liver.content).hexdigest(),
+                    }
+                ],
+            }
+            self.module._prepare_apply_queue(
+                monitor, self._bridge_rows(1, 2))
+            records = monitor["mimics_application"]["records"]
+            self.assertEqual(records["1"]["target_kind"], "update")
+            # spleen has no matching Mask -> created fresh
+            self.assertEqual(records["2"]["target_kind"], "create")
+        finally:
+            self.dialog["answer"] = "Create New Mask"
+            self.masks[:] = [FakeMask("liver", 10)]
 
 
 if __name__ == "__main__":

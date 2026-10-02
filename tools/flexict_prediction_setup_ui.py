@@ -157,6 +157,7 @@ class PredictionWindow:
                     time.localtime(float(model.get("created_at_epoch") or 0)),
                 )
                 values = [
+                    " + ".join(model.get("label_names") or []) or
                     model.get("label_name") or model.get("task_name"),
                     model.get("model_id"),
                     "2D" if model.get("configuration") == "2d" else "3D",
@@ -242,6 +243,8 @@ class PredictionWindow:
                 "task_id": str(model.get("task_id") or ""),
                 "task_name": str(model.get("task_name") or model.get("task_id") or ""),
                 "label_name": str(model.get("label_name") or ""),
+                "label_names": list(model.get("label_names") or []),
+                "labels": list(model.get("labels") or []),
                 "dataset_id": int(model.get("dataset_id") or 0),
                 "image_path": str(image_path),
                 "model_manifest": str(model.get("manifest_path") or ""),
