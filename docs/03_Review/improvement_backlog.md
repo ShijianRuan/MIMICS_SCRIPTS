@@ -54,41 +54,109 @@
   （`20260930T112139`）+ fast 27/27（`20260930T115343`；首跑 26/27 为
   torch 原生层 0xC0000005 瞬态段错误，flexict_pkg 单跑 10/10 复绿，
   与本轮纯 PySide6 改动无交集）。
-- [ ] **R61-5【P1】导入失败弹窗指向工作目录而非真实失败位置**
-  （`mimics_import.py:2988-2995/3027-3036/868-871`）：用户看到的失败
-  路径是内部工作目录，无法定位自己数据的问题。验收：弹窗显示
-  用户可识别的原始输入路径。
-- [ ] **R61-6【P1】Stop 无确认且会停掉所有队列**（`mimics_import.py:
-  1413-1471`）。验收：Stop 前确认对话框（复用 question_box）；只停
-  当前队列（或明确告知影响范围）。
-- [ ] **R61-7【P1】输出路径"粘滞"**（`io_path_setup_ui.py:753-760/
-  859-877`）：换输出目录后部分流程仍指向旧路径。验收：全流程输出
-  路径一致。
-- [ ] **R61-8【P1】拖拽批量导入状态冻结 "Importing"**
+- [x] **R61-5【P1】导入失败弹窗指向工作目录而非真实失败位置**〔R63
+  解决，commit `be7a8a7`；fast 27/27，工件 `20260930T150137_fast.json`
+  （首跑 26/27 为 flow_imports 的 torch/OpenBLAS 0xC0000005 瞬态崩溃，
+  单套件重跑 3/3 复绿）〕：根因确证——所有失败工件（`_failed_cases/` 每
+  case 一个 JSON、`logs/_create_mcs_batch.log`）都在本地队列 runtime
+  目录（`_rt(output_dir)`），而弹窗要么指向输出目录下不存在的
+  `logs/_create_mcs_batch.log`（unexpected-stop），要么提到不存在的
+  `_failed_cases.json` 单文件（guidance），且失败记录不含用户原始输入
+  路径。修复：(a) `_record_failed_case`/`record_failed_case` 新增
+  `source_image` 字段，producer/consumer 两侧全部调用点传入
+  case_info 的 image/case_dir（create_mcs 侧从 prepare_manifest 的
+  `source_image_path` 回读）；(b) prepare 失败弹窗显示 case 名 +
+  原始 Source 路径；(c) 其余弹窗/guidance 指向用户可达入口
+  "Show Batch Status (01 Data menu)"（其 Open Log 打开的就是队列
+  runtime 目录的真实日志），删除不存在的文件名/路径引用。失败路径
+  测试：source_image 落盘 + 省略时向后兼容 + guidance 不再引用
+  `_failed_cases.json`。
+- [x] **R61-6【P1】Stop 无确认且会停掉所有队列**〔R63 解决，commit
+  `6eb7589`〕：根因确证——`main_stop_import`（实际位于
+  mimics_stop_background.py:1440，账本原引用行号有误）无确认即调
+  `stop_background_import`，而 `_request_queue_stop` 遍历**所有**发现
+  的队列目录（锁文件 + mcs_queues 注册表 + 文件系统扫描），一次点击
+  全局停。修复：复用 FlexiCT question_box 模式（`buttons="Stop
+  Imports;Cancel", ui_blocking=True`），消息明示影响范围（"every
+  import queue on this workstation, not just the current one" +
+  后台 Mimics 关停 + 已完成项目保留）；取消则零副作用。测试：fake
+  mimics 注入，取消路径断言 `stop_background_import` 未被调用 +
+  消息含范围声明。
+- [x] **R61-7【P1】输出路径"粘滞"**〔R63 解决，commit `ccbda86`〕：
+  根因确证——`io_path_setup_ui` 把记忆的输出路径直接当作本轮用户锁定
+  （`output_user_edited = bool(output_initial)`），而 Remember 默认勾选，
+  于是上一次导入的输出目录粘住后续所有新数据集；拖拽窗口同病
+  （仅输出框为空时重算，且同会话内跨 drop 也粘）。修复：提交时记录
+  `output_custom`（输出是否偏离按源算出的默认值），加载/新 drop 时仅
+  真自定义值粘滞，默认值跟随新源重算；用户同会话手动输入/浏览仍被
+  尊重（hasFocus 过滤程序化 setText）。顺手清除死代码
+  `build_selection`（全仓库零调用）。测试：source-contract 钉住两个
+  UI 的加载/保存/会话内三处行为 + 死代码不回归。
+- [x] **R61-8【P1】拖拽批量导入状态冻结 "Importing"**
   （`import_drop_window.py:302-307`）：导入失败/完成后状态不更新。
-  验收：状态反映真实进度（完成/失败/跳过）。
-- [ ] **R61-9【P1】数据集根被当成单个 case 接受**
-  （`io_path_setup_ui.py:205-236`）。验收：目录直接拖入时提示"请选择
-  具体病例文件"或正确展开。
-- [ ] **R61-10【P1】P0-1 修复后将暴露的模态弹窗风暴**
+  〔R63 解决，commit `eb00983`；smoke 8/8（`20260930T182304` 前次
+  `20260930T164455`）〕根因确证——批量 drop 的状态文件只在提交时写
+  一次，批处理 CLI 从不回写；终态真相在队列 runtime 目录
+  （`_mcs_queue_done.json` prepare finally 块、`_mcs_batch_status.json`
+  批量创建器），drop 窗口从未读。修复：读侧推导——`collect_recent_drops`
+  对仍为 running 的批量行从队列 marker 推导显示状态；`submit_import`
+  在 drop 状态里记录 output_path/source_path 以便定位 runtime 目录；
+  producer 零改动。失败路径测试 4 个（done→completed、failed+多行错误
+  取首行、无 marker 保持 Importing、单 case 行不受推导影响）。
+- [x] **R61-9【P1】数据集根被当成单个 case 接受**
+  （`io_path_setup_ui.py:205-236`）。〔R63 解决，commit `d2e0727`；
+  smoke 8/8（`20260930T182304`）〕根因确证——`discover_single_source`
+  目录分支的兜底 `image = case_dir` 无条件接受任何目录，数据集根被
+  当成一整个 DICOM series，到 bridge 深处才报晦涩错误。修复：新增
+  `_looks_like_dataset_root`（≥2 个非排除子目录 + 无顶层医学图像，
+  64 项扫描上限）→ 返回 None，由调用方提示选择具体病例；真实 case
+  目录/DICOM 子目录/空目录→dicom_candidate 历史行为由测试钉死。
+- [x] **R61-10【P1】P0-1 修复后将暴露的模态弹窗风暴**
   （`nninteractive_mimics.py:1963-1993`）：每 case 一次模态弹窗。
-  验收：会话级单次提示替代逐 case 弹窗。
-- [ ] **R61-11【P1】os.walk 无剪枝扫全盘 + 同步 kill 阶梯在扫描线程**
-  （`mimics_stop_background.py:264-267`、`:1234→1189-1215`）。验收：
-  扫描剪枝 .mimics_runtime 深层目录；kill 移出扫描线程或加限速。
-- [ ] **R61-12【P1】全量蒙版 SHA-256 在 GUI 线程计算**
-  （`nninteractive_mimics.py:1933-1936`）。验收：复用
-  `interactive_algorithms_mimics.py:151-166` 的 `_stream_buffer` 异步
-  模式，GUI 不冻结。R61-13 契约扫描白名单同时登记了
-  interactive_algorithms_mimics.py:148、mimics_export.py:1170/:1179、
-  nninteractive_mimics.py:1835/:1913/:1936/:2468 的存量 tobytes()，
-  修复时逐条从白名单删除。
-- [ ] **R61-26【P1】nnInteractive 同步桥接往返阻塞 GUI（最长 1800s）**
-  〔R61-13 契约扫描落地时发现存量〕：`_call_mimics_bridge`
-  （nninteractive_mimics.py:1379-1396）Popen + communicate
-  （timeout 至 1800s）可从 `_async_monitor_tick`/`_tick` 调用闭包
-  可达。验收：改用 wait 线程 + result 轮询模式（R61-3 先例），
-  契约扫描白名单 nninteractive_mimics.py:1389/:1395 删除。
+  〔R63 解决，commit `e1d55e9`；smoke 8/8（`20260930T183716`）〕
+  根因确证——`existing_mask_result_mode=ask` 时 `_choose_completed_
+  result_target` 每次结果都弹阻塞模态。修复：模块级会话记忆
+  `_SESSION_WRITE_MODE`——首个结果询问（文案注明本会话记忆），
+  后续结果直接应用不再弹窗；关闭对话框仍回退 derived copy（选中
+  Mask 永不被静默修改）。测试 4 个：首问+in_place 记忆、derived_copy
+  持久、显式 write_mode 不弹窗、关闭对话框回退路径。
+- [x] **R61-11【P1】os.walk 无剪枝扫全盘 + 同步 kill 阶梯在扫描线程**
+  （`mimics_stop_background.py:264-267`、`:1234→1189-1215`）。〔R63
+  解决，commit `f037b8e`；smoke 8/8（`20260930T190247`）〕根因确证——
+  (a) `_scan_filesystem_for_queue_dirs` 用逐目录 `continue` 跳过
+  vendor/env 树，但 os.walk 照样下钻，每次 Stop 都读完整个
+  python_env/nninteractive_env 子树；(b) `_stop_registered_processes`
+  的注册表 kill 阶梯（每进程 2s 宽限轮询 + 10s 强杀等待）同步跑在
+  GUI 线程。修复：(a) 剪枝改为下钻前改写 dirnames（.mimics_runtime
+  保留——import_queues 的 active marker 就在那）；(b) kill 阶梯移到
+  daemon 线程（只碰注册表文件与外部进程，无 Mimics API，线程安全），
+  用户可见计数改用轻量注册表快照。测试：剪枝后能找到真实 marker、
+  env 噪声树不被读；阶梯在 daemon 线程执行完成。
+- [x] **R61-12【P1】全量蒙版 SHA-256 在 GUI 线程计算**
+  〔R61 当轮解决，commit `93be706`〕：规范实现下沉
+  `runtime_common.buffer_byte_view/stream_buffer`（16MB 分块 + 块间
+  GUI 泵），三个消费方统一接入——nninteractive_mimics 的
+  `_export_image`/`_export_mask`/`_mask_sha256`、mimics_export 的
+  前台导出 tick（原来整个 buffer 在 GUI 线程 tobytes 后再写文件，
+  现在边流边写、长度校验保留）、interactive_algorithms_mimics 的
+  重复实现改转发。顺带删除死代码 `_sha256_bytes`/`_sha256_file`/
+  `_get_voxel_buffer_bytes`。契约扫描白名单 9 → 3 条：6 处已修
+  删除，仅存微小 bbox 裁剪（2490）与 R61-26 桥接 communicate
+  （1387/:1393，行号已随编辑重算）。新增
+  `TestStreamedVoxelBuffers` 7 个失败路径优先测试（哈希等价、写出
+  字节一致、泵在块间调用、坏泵不中断导出、不可包裹对象回退、空
+  buffer）。冒烟 8/8（工件 20260930T191845_smoke.json）。
+- [x] **R61-26【P1】nnInteractive 同步桥接往返阻塞 GUI（最长 1800s）**
+  〔R61 当轮解决，commit `37c8219`〕：`_call_mimics_bridge` 的
+  communicate()（timeout 至 1800s）移到 daemon 等待线程，GUI 线程
+  50ms 间隔泵消息循环直到等待结束——同步调用语义、重试链与
+  C6(a) 逃生门（defer_source_alignment_to_worker=False）全部保留，
+  只消除冻结。超时标志先于 kill 清理设置（测试首跑即暴露：kill 后
+  清理 communicate 自身异常会把超时误报成 generic 桥接失败——真实
+  bug 顺手修复）。契约扫描白名单 R61-26 两条删除，仅余 R61-12 的
+  微小 bbox 裁剪一条。新增 3 个失败路径优先测试（等待期间 GUI 被
+  泵、超时 kill 并抛错、非零退出透出 stderr）。冒烟 8/8
+  （工件 20260930T193707_smoke.json）。
 - [x] **R61-13【P1】最高杠杆测试资产：GUI 线程阻塞源码契约扫描**
   〔R61 当轮解决，commit `afff2bc`〕：`TestGuiThreadBlockingContract`
   AST 扫描——遍历 runtime_py35 全部 `*_tick` 函数**及其同模块调用
@@ -101,44 +169,357 @@
 
 ### P2/P3（2026-09-29 四视角评审新增，精选）
 
-- [ ] **R61-14【P2】nnunetv2 版本门禁失配**：安装 2.8.0 但
-  `setup_env.py:279` 要求 ≥2.8.1 → 触发假修复/打包失败提示。
-- [ ] **R61-15【P2】653MB python_env/models 污染**
-  （`nninteractive_bridge.py:179-185`）。
-- [ ] **R61-16【P2】ScribblePrompt 检查点未纳入环境体检**
-  （env_guidance collect_issues 不含该检查点缺失场景）。
-- [ ] **R61-17【P2】FlexiCT Stop 无确认**（`flexict_status_viewer.py:
-  279-285`）。
-- [ ] **R61-18【P2】无根 README / 快速上手文档**（产品视角 N3）。
-- [ ] **R61-19【P3】R60 重编号后活文档编号漂移**：
-  `task_lifecycle_and_safety_policy_CN.md:21-23/:86`、
-  `mimics_real_data_validation.md:365` 仍是旧编号——活文档测试只查
-  存在性不查内容，需同步或加引用一致性测试。
+- [x] **R61-14【P2】nnunetv2 版本门禁失配**
+  〔R61 当轮解决，commit `a1291ba`〕：代码库实际使用的全部 nnunetv2
+  API（extract_fingerprints/plan_experiments/preprocess、
+  determine_num_input_channels、nnUNetPredictor 等 17 处导入）逐一在
+  安装的 2.8.0 上验证存在——≥2.8.1 门槛无任何代码依据（cf76b8f 2026-08-01
+  凭空引入）。下限放宽到 2.8.0，六个门槛位（探针、重装提示、
+  package_portable 校验、setup_offline.bat、remote/requirements.txt、
+  集成文档）同步。顺手删除同样假阳性的 tomli 依赖项（外部环境
+  Python 3.13 用 stdlib tomllib，唯一消费方 nnunet_common 已优先
+  stdlib；tomli 从未安装过，检查一直报假 MISSING）。修复后
+  `setup_env.py check` 端到端首次报告 **OK**（此前永远 INCOMPLETE）。
+  新增失败路径测试钉住门禁（2.8.0 过、2.7.3/2.9.0 拒）。冒烟 8/8
+  （工件 20260930T201014_smoke.json）。
+- [x] **R61-15【P2】653MB python_env/models 污染**
+  〔R61 当轮解决，commit `0e18d4e`〕：(1) 操作清理——A11 布局修复前的
+  54 个孤儿 job/worker 目录（2026-06/07，653MB）+ 11 个测试面包屑已从
+  python_env/models 删除，删除前逐一验证无存活 PID（无外部进程受害），
+  现仅存模型本体 nnInteractive_v1.0 与 logs/。(2) 根因加固——
+  `_cleanup_async_jobs` 只收终态目录，Mimics 崩溃留下的 queued/ready/
+  running/result_ready 孤儿永不回收；现在非终态目录超过保留窗且 PID
+  已死时一并回收（新鲜任务与活 worker 不受影响）。失败路径测试覆盖
+  四态（孤儿回收、新鲜/活 PID/窗口内终态存活）。冒烟 8/8
+  （工件 20260930T202736_smoke.json）。
+- [x] **R61-16【P2】ScribblePrompt 检查点未纳入环境体检**
+  〔R61 当轮解决，commit `7ddf351`〕：env_guidance collect_issues 新增
+  `scribbleprompt_checkpoint` 检查，按与运行时相同的解析顺序（环境变量
+  `SCRIBBLEPROMPT_CHECKPOINT` > interactive_algorithms_config.json >
+  相对路径锚定项目根）定位检查点，缺失时以 warn 级信息行给出期望路径与
+  修复指引；未配置任何检查点时保持沉默（"没配"与"配了但坏了"是两种
+  问题）。新增 4 个失败/沉默用例进 TestEnvGuidance；首跑即抓到 helper
+  链式 `.get().get()` 优先级塌缩的真实 bug（空 dict 上取 checkpoint，
+  导致配置存在也永远报缺失），已修。冒烟 8/8
+  （工件 20260930T204214_smoke.json）。
+- [x] **R61-17【P2】FlexiCT Stop 无确认**〔R61 当轮解决，commit
+  `a31a5c5`〕：根因比"缺确认弹窗"更深——FlexiCT 状态查看器完全缺失
+  remote_state_unknown 分支：nnU-Net 查看器与 Task Models 中心都在该
+  状态把 Stop 变为 "Abandon Locally" + 一次确认（规范 §2 明文），
+  FlexiCT 却无条件 `stop_job`，远程容器可能仍在跑却在本机显示已停。
+  修复完全镜像 nnunet_status_viewer 的 `_stop`/`_show_selected_job`
+  契约：本地/已知远程保持一键停（正常流程零弹窗），未知远程出警告
+  确认 + `abandon_job`。测试 5 例进 TestFlexictStopBehaviour
+  （test_gui_smoke）。冒烟 8/8（工件 20260930T210459_smoke.json）。
+- [x] **R61-18【P2】无根 README / 快速上手文档**〔R61 当轮解决，commit
+  `f3330ea`〕：新增根 README（66 行）：一句话定位、两条安装路径
+  （离线包 setup_offline.bat / 99_Admin 菜单）、三步上手、症状→文档
+  路由表、仓库结构、回归门禁命令。不重复既有文档内容，只做路由；
+  入口编号与实际文件名一致（受 R61-19 新测试保护）。
+- [x] **R61-19【P3】R60 重编号后活文档编号漂移**〔R61 当轮解决，commit
+  `c5f760a`〕：4 处旧编号已同步（policy 表 3 行 + §5.2 验收项 +
+  real_data_validation:365）。防回归：新增
+  test_living_doc_entry_references_match_library_files——活文档中所有
+  反引号包裹的 "NN Entry Name" 引用必须能在 scripting_library 实际
+  文件名中找到，重编号不同步文档将直接红门禁（旧 04/05/06 编号若在
+  会即刻被抓）。
 - [x] **R61-20【P3】B4 残留扫描表缺 nninteractive_mimics.py**
   〔R61 当轮解决，随 R61-1 commit `201b516`〕：已加入扫描表，同时
   修正了两处指向不存在入口的 "Stop All Owned Background Services"
   文案（真实入口 99_Admin/03_Stop_All_Owned_Services），扫描表以该
   死名作为禁止串防止回潮。
-- [ ] **R61-21【P3】UX 精修项批**（UX 代理 #6-13）：配色碎片化、无窗口
-  图标、nnInteractive auto-apply 文案矛盾（:2715 vs :4060-4066）、
-  env_guidance model_dir 死胡同、io_path_setup_ui ~200 行死代码
-  （:396 后）等，详见 UX 代理报告。
+- [x] **R61-21【P3】UX 精修项批**〔R61 当轮解决，commit `821f60d`〕：
+  五个子项全部关闭：(1) io_path_setup_ui ~200 行死代码
+  （`choose_path_without_shell` 兼容壳 + 孤儿常量）整体删除，全仓库
+  零调用；(2) nnInteractive auto-apply 文案矛盾——提示菜单按
+  write_mode 分支（首次弹一次目标选择 vs 全自动），不再无条件承诺
+  "applied automatically"；(3) 配色碎片化——ui_theme 新增语义
+  PALETTE（success/warning/danger/info/teal…），7 个窗口各自发明的
+  近似色值（#1a7f37/#8a6d00/#49aa55/#15803d/#b91c1c/#dc2626…）统一
+  收编；新增 TestUiThemePalette 契约测试：setForeground/setStyleSheet
+  中的状态色十六进制必须是 PALETTE 值，色值漂移即红门禁；(4) 无窗口
+  图标——configure_application 程序化绘制应用图标（无二进制资源
+  依赖），全部外部窗口经它统一获得；(5) env_guidance model_dir 死
+  胡同——CONFIG_REFERENCE.md 补记 nninteractive_config.json 的
+  `model_dir`/`workspace_dir` 键（引导文案让用户改的键终于有文档）。
+  冒烟 8/8（工件 20260930T213441_smoke.json）。
 
-### 已拍板待实施（用户 2026-09-29 拍板）
+### R65（2026-10-01 新增：外部评审 docs/reviews/ F01–F29 收编消化）
 
-- [ ] **R61-22 收编外来脚本**：4 个未跟踪工具
-  （runtime_py35/inspect_mcs_batch.py、sync_missing_masks_batch.py、
-  tools/inspect_mcs_projects.py、sync_missing_masks.py）+ 外来
-  .mimics_runtime 脚本（含 copy_to_z.py），git add 纳入版本管理，
-  补资源锁/保留期/测试/账本登记。**copy_to_z.py 的 Z: 数据根写入路径
-  单独审视后收编或改写**。
-- [ ] **R61-23 批量推理立项下轮实施**：mimics_batch_cli 加 predict
+> 来源：docs/reviews/（2026-09-29 跨职能评审 F01–F17 + 2026-09-30 场景评审
+> F18–F29，基线 commit `36eac04`，评审只记录不修复）。用户指令（2026-10-01）：
+> 仔细阅读消化全部评审文件后针对其内容开始工作，工作中定期回看避免遗忘；
+> **全量测试太慢，只在必要时或改动影响较大时才做全量**（fast/冒烟门禁
+> 不变）。基线早于 R61–R64 修复，每项动手前先对照 HEAD 核实是否已被
+> 既有修复覆盖。推荐顺序（交接文档）：W01（F22）→ W02（F17–F19）→
+> W03 → W04/W06。
+
+- [x] **R65-1 = F22【P0】病例 slug 碰撞 + 硬链接覆盖源文件**〔R65 当轮
+  解决，commit `2f3ed65`〕：核实链路在 HEAD 完整存在——`safe_identifier`
+  有损（中文全坍缩为 item），`_link_or_copy` 在 os.link 撞已存在目标后
+  `shutil.copy2` **原地截断**该目标（可能是源影像硬链接）→ 改写源图像。
+  修复：`nnunet_common.unique_case_keys()`（无碰撞保裸 slug 保缓存稳定，
+  碰撞全组加 8 位摘要后缀）；两处 `_link_or_copy` 先 unlink 再落盘
+  （换目录项绝不触碰共享 inode）；接入 5 个消费点
+  （prepare_source_grid_cases 缓存+输出桶、imagesTr/splits、FlexiCT AL
+  池+geometries、_write_flexict_splits、两条远程准备路径）；连带修复
+  `_al_case_mcs_path` 用原始名（非 slug）解析 .mcs。失败路径回归测试
+  4+1 例（源文件 SHA 前后不变 / 碰撞两例不合并 / inode 共享链接不被
+  截断 / AL 池逐例独立 + 原名 .mcs 解析）。受影响三套件全绿
+  （nnunet_integration 89、flexict_integration 91、remote_training 102），
+  冒烟 8/8（`20261001T182216`）。
+- [x] **R65-2 = F18【P0】撤销导入可能删除刚保存的人工修改**〔R65 当轮
+  解决，commit `b8d236b`，与 R65-3 同一改动〕：核实链路在 HEAD 完整
+  存在——磁盘指纹只证明磁盘版本，dirty 会话（未保存人工 Mask）照样
+  过检，save 把人工工作冲进文件后 os.remove 一并销毁。修复：删除文件
+  前先比对**会话内存态**（live mask 清单 vs receipt 账目：v2 按
+  guid+provenance token，v1 保守按名称——任何 receipt 未涵盖的 mask
+  都保留文件）+ save 后指纹复验（覆盖"已保存新增"与导入 Mask 内容被
+  编辑两类）。receipt 仍只在核实成功的路径消费；文件保留路径返回 0
+  并明确告知用户原因。T18 回归 5 例：未保存新增（文件保留+消息含
+  KEPT）、已保存新增、干净会话（正控：文件照删）、删后重建同名、
+  v1 旧 receipt + 会话多出 mask（W02 保守处理）。
+- [x] **R65-3 = F19【P1】撤销导入按名称跨 Image 删除同名 Mask**〔R65
+  当轮解决，commit `b8d236b`，与 R65-2 同一改动〕：核实——旧
+  `_delete_masks` 遍历所有 Image 按名删，receipt 只记名称。修复：
+  receipt 升级 v2（每 mask 记 name+guid+provenance token——token 在
+  save 前写入 mask metadata，随 .mcs 持久化，重开项目后仍可验证）；
+  undo 按 guid 优先解析，guid 跨重开漂移时退回 token+原名；歧义
+  （同名多候选）停止自动删除并提示（返回码 7，receipt 保留），绝不
+  猜测。T19 回归 2 例：两 Image 同名只删 guid 命中的那个 + guid 漂移
+  退 token（手工同名 mask 不误删）。测试证据：
+  TestImportReceiptAndUndo 18/18、fake_mimics_flow 16/16、冒烟 8/8
+  （`20261001T192254`）。
+- [x] **R65-4 = F17【P1】未核实项目 API 失败后仍切换项目**〔R65 当轮
+  解决，commit `f2bd662`〕：核实——两个切项目入口（AL 打开病例、撤销
+  导入）用未获文档支持的 `get_active_project()` 且吞异常，查询失败时
+  把"无法识别"当"没有打开"直接 open_project。修复：新增共享
+  `runtime_common.current_project_state()`（走已文档化的
+  get_project_information/is_project_loaded，四态：none/path/unnamed/
+  unknown）；两入口统一接入——同路径不重载、path/unnamed 拒绝并给两步
+  恢复指引、unknown 拒绝且明确"什么都没动"（绝不 open_project）。
+  T17 回归 4 例（查询失败不切/同项目不重载/未命名拒绝/AL unknown
+  拒绝），既有 3 个 AL 打开测试重锚到文档化 API。flexict_integration
+  93/93、TestImportReceiptAndUndo 21/21、冒烟 8/8（`20261001T193902`）。
+- [x] **R65-5 = F21【P1】等体积人工修正未被预测保护识别**：仅按体素
+  计数判"未被修改"，删 1 体素补 1 体素的修改被 AI 结果覆盖。改内容
+  revision/摘要保护。验收 T21。
+  **已解决（R65，commit `ce3c9c2`）**：对照 HEAD 核实后，启动快照
+  （flexict/nnunet 两监控统一下沉到共享 `mimics_mask_apply._mask_snapshot`）
+  增加内容摘要 `sha256`——按交接设计约束（与 F13 联合，不为安全在每次
+  tick 拷贝全部 Mask），复用 nnInteractive 先例：零拷贝
+  `buffer_byte_view` + 16MB 分块 `stream_buffer`（块间 `_update_gui()`
+  泵 GUI）。完成时 GUID+计数命中后再比对摘要，等体积改动 → 放弃更新、
+  落副本；任一侧摘要不可得（旧快照无此键/buffer 不可读）退化为原计数
+  检查，绝不因缺信息误拦。T21 证据：flexict TestEqualVolumeEditProtection
+  6/6（等体积改动→副本、未改→更新、改回原值→更新、旧快照降级、不可读
+  buffer 降级）、nnunet MimicsRuntimeTests 12/12（合计 205 passed），
+  冒烟 8/8（`20261002T013746_smoke.json`）。
+- [x] **R65-6 = F02+F20【P1】AL buffer 早删 + 异步目标不复核**：F02
+  buffer 在应用前删除（R61-3 改异步引入的新生命周期问题，需对照 HEAD
+  核实 a2d3244 后现状）；F20 几何相等≠病例相同，异步完成时不复核目标
+  身份，可能写错 Image。两项交接文档要求一起修。验收 T02/T20。
+  **已解决（R65，commit `fc0179f`）**：对照 HEAD 核实——F02 真实存在
+  （`_al_finish_conversion` 先 `shutil.rmtree(bridge_root)` 再读其中
+  u8 buffer，真实 apply 必 FileNotFoundError；旧测试 mock
+  `_set_mask_from_u8` 把它遮住了）。修复：转换结果先整体校验（每个
+  band buffer 存在且字节数恰为 shape 乘积），再应用，任一步失败回滚
+  已创建的 mask；bridge root 清理移入 `finally` 作为事务最后一步。
+  F20：发起时捕获 `target_identity`（项目路径 + 活动图像 GUID，复用
+  `_current_project_path`/`_same_path`/`_mask_identity`），完成时先复核
+  再写——项目/图像变了就拒绝并给指引，绝不写错病例。T02/T20 证据：
+  test_all TestFlexiCTActiveLearningApply 6/6（应用失败回滚、截断
+  buffer 拒绝、项目切换拒绝），冒烟 8/8
+  （`20261002T013746_smoke.json`）。
+- [x] **R65-7 = F28【P1】原子发布覆盖较新人工保存**：
+  sync_missing_masks_batch/append_masks_batch 的 staging+replace 会用
+  后台旧快照覆盖前台新保存。目的版本冲突检测；不能排他时发布新副本。
+  验收 T28。
+  **已解决（R65，commit `7e10dd8`）**：对照 HEAD 核实——评审证据复现
+  （目标已是较新前台保存时 `_publish` 直接替换）。修复：共享
+  `runtime_common.capture_output_identity`（开工记录输出 mtime_ns+size）
+  + `publish_conflict`（发布前复核，不一致→保留较新文件、staging 落为
+  `<case>.conflict.<pid>.mcs` 副本、病例失败并给可见指引）；资源锁只
+  约束本仓库脚本，Mimics 原生保存/其他工作站无法排他，按交接"不能排他
+  时发布新副本"落地。附带同一交接指出的 UX 缺口：`--force` 写入配置但
+  worker 从不读取——现在 force 真正从源工程重建（不再把旧输出当基底），
+  且版本复核在 force 下仍然生效。T28 证据：
+  TestForeignScriptIntegration 10/10（冲突保留新保存+副本、未改输出正常
+  替换、全新路径不误判冲突、force 打开 source 而非旧输出）、append 流程
+  1/1、冒烟 8/8（`20261002T023427_smoke.json`）。
+- [x] **R65-8 = F03【P1】AL 非空列表引用未绑定 QtWidgets 名字**
+  （flexict_active_learning_ui.py NameError）+ **F14【P2】错误反馈被刷新
+  摘要覆盖**：两个 AL UI 缺陷同文件，一轮处理。验收 T03/T14。
+  **已解决（R65，commit `b180e3a`）**：核实——F03 真实存在
+  （`_job_selected` 引用的 `QtWidgets`/`QtCore` 只在其他函数局部作用域
+  绑定，出现真实 ranking 即 NameError；空列表测试从未进入循环）。修复：
+  方法开头从 qt_modules 元组绑定，前景色用 `self.QtGui`。F14：先刷表格
+  （摘要文字抽为 `_refresh_status_text`）后写 applied/failed 结果文案，
+  结果不再被摘要覆盖。T03/T14 证据：gui_smoke TestActiveLearningWindow
+  4/4（真实行填充、已标注行前景、failed/applied 结果文案在刷新后存活），
+  冒烟 8/8（`20261002T013746_smoke.json`）。
+- [x] **R65-9 = F23【P1】概率/非法 Mask 值静默转前景**：三入口
+  （单 Mask 导入/多 Mask 导入/训练准备）语义不一致，非零化吞掉概率与
+  NaN/Inf。显式数值语义 + 统一有限值校验。验收 T23。
+  **已解决（R65，commit `a25e755`）**：新增共享闸门
+  `_validate_mask_values`（mimics_bridge.py），三个读取器
+  （`read_nifti_mask`/`read_nifti_mask_with_affine`/
+  `read_mask_labels_with_affine`）统一走它：非有限值一律拒绝（旧代码
+  `!= 0` 把 NaN/Inf 变成前景）；小数浮点一律拒绝为概率图并给出转换
+  规则（旧代码静默按 0 阈值二值化，0.01 概率也全变器官）；整数值
+  数据（0/1、0/255、labelmap、整数值的 float 文件）全部原样通过。
+  训练准备（nnunet_pipeline.py:535、
+  nninteractive_finetune_pipeline.py:434）与全部 4 个 bridge 入口
+  （convert/mask_to_buffer/prepare_masks_for_grid/canonical source）
+  均经上述读取器获得同一语义。仓库内全部 mask 生产者只写整数数组，
+  拒绝只作用于外部概率图/损坏文件。T23 证据：新增 4 个失败路径测试
+  （non-finite×2、probability×3 读取器、0/255 整数 float 正控制）
+  全绿；convert/prepare 相关 26 + nnunet 90 + flexict 93 全绿；
+  smoke 8/8（`20261001T200108_smoke.json`）。
+- [x] **R65-10 = F24+F25【P1】补齐 Mask 误判**：平铺 CT 被当结构待补
+  （F24）；全项目同名 Mask 让目标 Image 误判"已完整"（F25）。从
+  profile/manifest 显式区分 image/mask；先绑定目标 Image 再比较。
+  验收 T24/T25。
+  **已解决（R65，commit `41306bf`）**：F24——`_source_masks`（tools/
+  sync_missing_masks.py）平铺布局回退时按文件名排除公认图像名
+  （ct/mri/mr/image，与全仓库 image_candidates 一致）；只剩图像的
+  平铺病例改为明确报"no source masks"。F25——`_sync_opened_case`
+  多 Image 项目整例失败并声明"nothing was changed"（评审指定路径：
+  "多候选 Image 需显式选择或错误提示"），单 Image 项目里全项目
+  名称集即目标 Image 自己的 masks。顺带删除死代码
+  `_mask_foreground`（inspect_mcs_batch 有自己的副本）。
+  T24/T25 证据：test_all.py 新增 2 测试（平铺排除图像+segmentations
+  布局不变+仅图像报错；多 Image 拒绝含"nothing was changed"契约）
+  全绿；相邻套件 26 绿；冒烟 8/8（`20261001T202725_smoke.json`）。
+- [x] **R65-11 = F26+F27 批量恢复语义**〔R65 当轮解决，commit `2d39b2f`〕：
+  F26（P1）launcher 可能把上一轮的 completed 报告当成新任务的成功——
+  inspect launcher 在进程退出后读固定 --report 路径，新进程在写任何东西
+  前死掉（许可/导入异常）时旧报告直接判 0。F27（P2）取消批量任务丢
+  逐例台账——sync/append runner 在 stop 检查处提前 return，走不到
+  results.json/failed_cases.json 写入。修复：所有 launcher 铸 uuid 后缀
+  job_id（秒级目录戳双击也会撞同名），runtime 把 job_id 盖进每次报告/
+  状态写入，固定路径旧报告归档为 `.history.<stamp>.json`，终判要求
+  本轮 job_id（不匹配即硬失败）；取消改为 flag+break、台账写入移入
+  finally，所有退出路径（停止/崩溃/正常收尾）都发布，cancelled 状态
+  保留 next_case。测试沉淀：TestForeignScriptIntegration 4 新例（取消
+  后台账与状态完整、job_id 贯通、旧报告不冒充本轮成功）。证据：
+  TestForeignScriptIntegration 14/14、append/stop 流程 1/1×2、冒烟
+  8/8（20261002T123216）。
+- [ ] **R65-12 = F01【P1】DICOM 系列与多帧来源几何**：混系列/多帧导入
+  需显式 Series/Frame 集合 + 往返校验。验收 T01（需 L3 实机配合）。
+- [ ] **R65-13 = F05【P1】AL 叠加自动标成已标注**：overlay=annotated 混
+  同；拆开应用/复核/保存/导出事实。验收 T05。
+- [x] **R65-14 = F29【P2】FlexiCT 颅尾分层用最大 spacing 轴**：轴换位/
+  翻转病例分组错。用物理 SI 或取消启发式。验收 T29。
+  - 已解决（2026-10-01，commit `89a90e3`）：`argmax(spacing)` 在等体素
+    RAS 上平局选 X（z=8 的目标被判 0.1 而非 0.8）、轴换位/斜位选层面内
+    轴。改为按 affine 世界方向选 SI 轴（体素轴的世界位移与 superior
+    方向最对齐者），管线与独立 build_dataset.py 同步修复；独立脚本另
+    拒绝 <2 可用病例与 --n-train<1（原 1 例时 n_train=0 除零）。
+    保留分层（不取消启发式改为物理正确），few-shot 验证配方行为不变。
+    T29 测试：新增 flexict_build_dataset 套件（8 测试：等体素/各向异性/
+    轴换位/翻转/空目标 + 退化输入 3 项，注册进 run_regression_matrix
+    fast/full）+ TestTrainValSplit 6 测试。套件全绿：
+    flexict_integration 99、flexict_common 24、flexict_pkg 10、
+    flexict_build_dataset 8、smoke 8/8（20261001T215214）。
+- [x] **R65-15 = F16【P2】患者级分组与固定验证集缺失**：同患者跨
+  train/val 泄漏。可选 patient_group + 冻结验证集。验收 T16。
+  - 已解决（2026-10-01，commit `cd163a0`）：训练请求可选 `patient_groups`
+    映射（case_id→患者/检查组），存在时洗牌与 fold 轮换按整组进行，同
+    患者绝不跨 train/val；组信息写入 dataset manifest。冻结验证集：
+    重建数据集时读取已发布的 fold-0 splits，旧验证病例在所有 fold
+    保持 val（加数据不把旧验证病例挪入训练）；冻结一个病例自动冻结
+    其整组。无组信息时保持 case 独立性假设并在 CONFIG_REFERENCE 记录
+    该契约。T16 证据：8 新测试（组不跨侧、无组行为不变、冻结保持
+    val、冻结扩散到整组、消失的冻结病例被忽略、materialize 端到端
+    两次构建验证集只增不减、manifest 记录组）。套件全绿：
+    nnunet_integration 97、flexict_integration 99、remote_training
+    104、冒烟 8/8（20261001T231524）。
+  - 附带修复（同 commit）：test_copied_model_is_discovered_without_
+    old_registry 未隔离本机全局 model registry——当天真实数据验证
+    战役在 G:\ 注册了一个活模型使其数出 2 个（预存测试缺陷，干净
+    HEAD 同样失败）；按相邻死行测试的模式 mock model_registry_paths
+    隔离。
+- [ ] **R65-16 = F06/F07/F08/F12（W05 部署组）**：backbone 推理依赖、
+  pip 名/distribution 名错配、体检假全绿、在线离线组合不一致。验收
+  T06/T07/T08/T12（部分需 L4 环境）。
+- [ ] **R65-17 = F10【P1】拖拽多选扩大或不可提交** + **F15【P2】状态
+  视觉**（F15 大部分已被 R61-21/R61-24 覆盖，需对照 HEAD 核实残项）。
+  验收 T10/T15。
+- [ ] **R65-18 = F04【P1】AL 首次排序任务无图形入口** + **F13【P2】全量
+  复制效率**（F13 部分已被 R61-12 覆盖，需核实残项）。验收 T04/T13。
+- [x] **R65-19 = F11【P1】回收线程间接调用 Mimics 对话框**〔R65 当轮
+  解决，commit `3fe6e1f`〕：审计 runtime_py35 全部 `on_complete=` 调用点，
+  确认两处真实违规——mask_import `_finish_mask_import`（→ `mimics.dialogs.
+  message_box`）与 mimics_export `_finish_foreground_export`（同源）。修复：
+  on_complete 仅置 `monitor.update(reaped=True)`，由仍在运行的 GUI 监视
+  timer 在下一 tick 于 GUI 线程执行 finisher（对话框、租约释放、清理）；
+  60s reap_deadline 防止 reap 永不完成时 timer 无限跳（超时以可见诊断
+  收尾）。其余调用点核验为纯文件操作（mimics_import、stop_background）
+  或无回调，不动。测试沉淀：TestGuiThreadBlockingContract 新增 4 例
+  （AST 契约扫描：任何 runtime_py35 模块 on_complete lambda 内禁
+  mimics.*；两处违规函数钉住 `on_complete=lambda: monitor.update(
+  reaped=True)` 正契约；两例行为测试：假 reaper 置 flag 前 UI 静默、
+  置 flag 后下一 tick 完成收尾）。附带修复两个预存 TestNewFeatures
+  失败（干净 HEAD 同样失败，非本轮引入）：R61-24 中文化遗留的英文
+  radio 断言（改钉中文文案）；flat-DICOM 探测测试过度指定"恰好一次
+  scandir 拉取"——R61-9 数据集根拒绝检查合法地做第二次封顶扫描且同样
+  在首个切片停止，改为钉住真契约"每次扫描不越过第一个切片"。证据：
+  TestNewFeatures + TestGuiThreadBlockingContract + TestForeignScript
+  Integration 137 通过；冒烟 8/8（20261002T041554）。
+- [ ] **R65-20 = F09【P1】模型管理按钮**——已被 R62（`aadd6e3`，R61-4）
+  关闭，仅需对照 HEAD 复核确认后销项。
+- 注：F09 已确认与 R61-4 同源（评审基线 36eac04 早于修复 aadd6e3）；
+  F13/F15 为部分覆盖；其余项均需按上表核实→修复→测试沉淀流程处理。
+
+
+
+- [x] **R61-22 收编外来脚本**〔R61 当轮解决，commits `36eac04` +
+  `bfb74e3` + `dbb7090`〕：4 个工具（tools/inspect_mcs_projects.py +
+  runtime_py35/inspect_mcs_batch.py 只读巡检；tools/sync_missing_masks.py +
+  runtime_py35/sync_missing_masks_batch.py 逐病例补缺掩码）已纳入版本
+  管理（2026-09-29 `36eac04` 收编、`bfb74e3` 补进程组分离）。安全契约
+  核验：两个 launcher 均走官方 `_acquire_background_mimics_locks`
+  （sync 锁源/输出/源数据三根）、runtime 脚本逐病例检查 stop 文件、
+  staging + os.replace 原子发布——新增 TestForeignScriptIntegration
+  4 例钉住这些契约 + Py3.5 语法约束（f-string/walrus/pathlib 禁入）。
+  .mimics_runtime/ 下一次性诊断脚本（check_s0587*、gen_cases、probe_r、
+  remaining_cases、copy_to_z）**不收编**：会话痕迹非可维护工具，留在
+  ignored 运行时目录自然过期。copy_to_z.py 写入目标 label_task_mr_synced
+  在 v201 只读数据集根**之外**，未越红线（登记：2026-09 真实数据同步
+  战役产物，Z:\data\label_task_mr_synced 与 .job15/.job16 作业目录）。
+- [x] **R61-23 批量推理立项下轮实施**：mimics_batch_cli 加 predict
   子命令（4 个外来脚本为需求实证）。
-- [ ] **R61-24 UI 语言统一中文**：注意编码防乱码（GBK 控制台陷阱），
+  **已解决（R61，commit cc36403 + 952a62e）**：predict 子命令落地
+  （--model-id/--image-root/--output-dir/--cases/--disable-tta/--use-cpu/
+  --source-modality），数据集根/平铺图像夹均可解析，歧义目录跳过并
+  报告，无可用模型退出码 2 并列出原因；顺带修复 python313._pth 导致
+  的 sys.path 丢 TOOLS 目录（P0）。测试：test_all.py TestBatchPredictCommand
+  4 条失败路径用例。冒烟 8/8（20260930T230848_smoke.json）。
+- [x] **R61-24 UI 语言统一中文**：注意编码防乱码（GBK 控制台陷阱），
   部分技术错误信息可保留英文。涉及入口/按钮/对话框字符串。
-- [ ] **R61-25 D19 FlexiCT 增训**（低优先级）：训练表单加"从上次
-  checkpoint 继续"选项，透传到 `_spawn_flexict_worker`
-  （`flexict_pipeline.py:851` 硬编码 False，trainer 侧已支持）。
+  **已解决（R61，commit 5adfa2e）**：19 个 UI 文件 + ui_theme 全量
+  组件级翻译（按钮/标签/表头/对话框/提示）。技术名词（nnU-Net、
+  FlexiCT、Mask、GPU、AUC、Trainer、Fold、.mcs）与代码值保留英文；
+  traceback/控制台输出不动（GBK 控制台陷阱）。工具：
+  .mimics_runtime/apply_translations.py（字节偏移 AST 替换器——ast
+  col_offset 是 UTF-8 字节偏移，非字符偏移）。冒烟 8/8
+  （20261001T022755_smoke.json）。
+- [~] **R61-25 D19 FlexiCT 增训**（低优先级）：**用户取消（2026-09-30）**
+  ——"FlexiCT 增训不用实现了"，不再实施。
+- [x] **R64-1 R61-12 连带回归：ScribblePrompt 会话静默丢弃（P0）**：
+  stream_buffer 返回 "sha256:"+hex，而 worker 把裸 hex 存进 Mask 元数据，
+  `_session_values` 直接比较导致会话永不匹配、previous-logits 连续性
+  每个 prompt 都被丢弃。**已解决（R64，commit 6f453ed）**：比较前
+  归一化前缀 + 回归测试 `test_session_survives_prefixed_base_sha`；
+  流式契约测试同步钉住带前缀格式。nnInteractive 链两侧同为
+  `_mask_sha256`（带前缀），不受影响。冒烟 8/8
+  （20261001T031950_smoke.json）。
+- [x] **R64-2 回归矩阵 GBK 控制台崩溃（P2）**：失败套件输出含 GBK
+  外字符时 print 抛 UnicodeEncodeError，矩阵在写摘要前崩溃（工件已
+  落盘但摘要丢失）。**已解决（R64，commit 3427fa5）**：print 降级
+  replace-decode 回退，JSON 工件保留全文。冒烟 8/8
+  （20261001T025816_smoke.json）。
 
 ### 以下为历史待办区（已全部完成，保留历史）
 
@@ -998,7 +1379,56 @@
 
 ## 进行中
 
-（截至 R61 修复阶段（2026-09-29）：四视角评审的 3 个 P0（R61-1/2/3）+
+（截至 R65（2026-10-01）：消化外部评审 docs/reviews/（F01–F29 + 交接
+W01–W10 + 测试计划 T01–T40 + 证据指南，全部读完）并收编为本文件 R65
+待办区（R65-1~R65-20，按交接推荐顺序排列）。R65 当轮关闭 R65-1（=F22，
+P0 slug 碰撞+硬链接源改写，commit `2f3ed65`，受影响三套件全绿 + 冒烟
+8/8 `20261001T182216`）。R65-1 收尾 fast 27/27（`20261001T184356`）。
+**R65-2/R65-3（F18+F19，commit `b8d236b`）已解决**：撤销导入改所有权
+模型（receipt v2 记 guid+provenance token；会话内存态比对阻止 dirty
+会话删文件；同名歧义停止）；TestImportReceiptAndUndo 18/18、
+fake_mimics_flow 16/16、冒烟 8/8（`20261001T192254`）。**R65-4（F17，
+commit `f2bd662`）已解决**：共享 `current_project_state()` 四态适配器
+（走文档化 get_project_information/is_project_loaded），unknown 拒绝
+切换；T17 回归 4 例；flexict_integration 93/93、
+TestImportReceiptAndUndo 21/21、冒烟 8/8（`20261001T193902`）。W02
+全部关闭（F17/F18/F19）。**R65-9（F23，commit `a25e755`）已解决**：
+三个 mask 读取器统一走 `_validate_mask_values` 闸门（非有限值/小数
+浮点概率图一律拒绝并给出转换规则；整数值数据原样通过；详见待办区
+该条）。证据：新增 4 失败路径测试 + convert/prepare 26 + nnunet 90 +
+flexict 93 全绿；冒烟 8/8（`20261001T200108`）。**R65-10（F24+F25，
+commit `41306bf`）已解决**：同步补齐不再把病例图像当结构（平铺布局
+按公认图像名排除）、多 Image 项目整例拒绝并声明"nothing was
+changed"（详见待办区该条）；新增 2 测试 + 相邻 26 绿 + 冒烟 8/8
+（`20261001T202725`）。**R65-14（F29，commit `89a90e3`）已解决**：
+FlexiCT 颅尾分层改按 affine 物理SI 轴排序（不再 argmax(spacing)），
+独立脚本另拒绝退化输入；详见待办区该条（flexict_build_dataset
+新套件 8 测试 + TestTrainValSplit 6 测试，四套件全绿 + 冒烟 8/8
+`20261001T215214`）。**R65-15（F16，commit `cd163a0`）已解决**：
+nnU-Net 训练划分可选患者级分组 + 冻结验证集（重建数据集旧验证
+病例不挪入训练）；详见待办区该条（8 新测试，nnunet 97/flexict
+99/remote 104 全绿 + 冒烟 8/8 `20261001T231524`）。W03 除 R65-12
+（F01，需 L3 实机）外全部关闭。**测试卫生（commit `0276e84`）**：R61-2 两个
+pruned-fingerprint 测试泄漏模块全局 `_ACTIVE_RUNTIME_DIR` 到
+后续测试（全量 test_all 首跑即暴露，TestCreateMcsBatch::
+test_record_failed_case 因写入已删临时目录失败）；两处补
+save/restore，该类 22/22。属预存缺陷（R61-2 引入，~2026-09-29），
+非本轮改动回归。**用户测试纪律更新
+（2026-10-01）**：全量测试只在必要时或改动影响较大时执行；日常按改动
+选择相关套件 + 冒烟，每轮收尾 fast。下一步：W03 仅剩 R65-12（F01
+DICOM 系列/多帧，需 L3 实机）；之后 W04（AL 缓冲与反馈）。
+此前状态：
+
+截至 R63（2026-09-30）：R62 关闭 R61-4（死按钮，`aadd6e3`）；R63 批量
+关闭三个 P1——R61-6（Stop 确认，`6eb7589`）、R61-7（输出路径粘滞，
+`ccbda86`）、R61-5（失败弹窗指向真实位置，commit `be7a8a7`，fast 27/27
+工件 `20260930T150137_fast.json`）。R61 批次三项 P1 全部关闭，无回归。
+门禁：smoke 8/8 三连（`20260930T132216`/`20260930T133307`/`20260930T134618`）
++ fast 27/27（`20260930T135202`，R61-7 完整改动）。待办区剩余：P1 队列
+R61-8~R61-12、R61-26 + P2/P3 精选 + 已拍板待实施（R61-22 收编、R61-23
+批量推理、R61-24 UI 中文、R61-25 FlexiCT 增训）。此前状态：
+
+截至 R61 修复阶段（2026-09-29）：四视角评审的 3 个 P0（R61-1/2/3）+
 两项测试资产（R61-13 契约扫描、R61-20 扫描表补缺）已当轮修复关闭，
 commits `201b516` / `0be6ba5` / `a2d3244` / `afff2bc`，smoke 8/8
 （`20260929T124245`）+ fast 27/27（`20260929T130542`、`20260929T131846`）。

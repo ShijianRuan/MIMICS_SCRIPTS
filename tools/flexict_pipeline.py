@@ -254,6 +254,11 @@ def flexict_infer_environment(request: dict[str, Any],
         "nnUNet_results": str(roots["results"]),
         "nnUNet_extTrainer": str(repo / "trainers"),
         "nnUNet_compile": "0",
+        # F06: the trainer must not require the pretrained backbone files
+        # when it is only being rebuilt so the Predictor can load the full
+        # trained checkpoint into it. Without this, a migrated model fails
+        # on any machine that never had the pretrained weights.
+        "FLEXICT_SKIP_BACKBONE": "1",
     }
     # Same BLAS caps as every other stage worker (see
     # flexict_worker_environment): this function also replaces

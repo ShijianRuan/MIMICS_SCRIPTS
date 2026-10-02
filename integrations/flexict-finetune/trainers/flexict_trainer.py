@@ -230,37 +230,49 @@ def _build_backbone():
 
 
 def _load_flexict2d(num_classes=2):
-    """FlexiCT-2D pretrained backbone + FlexiCTPrimus2D decoder."""
+    """FlexiCT-2D pretrained backbone + FlexiCTPrimus2D decoder.
+
+    FLEXICT_SKIP_BACKBONE=1 skips the pretrained-backbone init: inference
+    rebuilds the network only to have nnU-Net's Predictor load the full
+    trained checkpoint into it immediately after, so a migrated model works
+    on machines that never had the pretrained backbone files.
+    """
     from flexict.flexict_primus import FlexiCTPrimus2D
     from safetensors.torch import load_file
     model = _build_backbone()
-    ckpt_path = os.environ.get(
-        "FLEXICT2D_CKPT",
-        os.path.join(os.path.dirname(__file__), "..", "weights", "flexict_2d", "model.safetensors"),
-    )
-    sd = load_file(ckpt_path)
-    sd = {k.replace("backbone.", ""): v for k, v in sd.items()}
-    missing, unexpected = model.load_state_dict(sd, strict=False)
-    assert len(missing) == 0 and len(unexpected) == 0, \
-        f"flexict2d: missing={missing[:3]} unexp={unexpected[:3]}"
+    if os.environ.get("FLEXICT_SKIP_BACKBONE", "") != "1":
+        ckpt_path = os.environ.get(
+            "FLEXICT2D_CKPT",
+            os.path.join(os.path.dirname(__file__), "..", "weights", "flexict_2d", "model.safetensors"),
+        )
+        sd = load_file(ckpt_path)
+        sd = {k.replace("backbone.", ""): v for k, v in sd.items()}
+        missing, unexpected = model.load_state_dict(sd, strict=False)
+        assert len(missing) == 0 and len(unexpected) == 0, \
+            f"flexict2d: missing={missing[:3]} unexp={unexpected[:3]}"
     return FlexiCTPrimus2D(embed_dim=_EMBED_DIM, patch_size=_PATCH_SIZE, num_classes=num_classes,
                            dino_encoder=model, interaction_indices=_INTERACTION_INDICES)
 
 
 def _load_flexict3d(num_classes=2):
-    """FlexiCT-3D pretrained backbone + FlexiCTPrimus3D decoder."""
+    """FlexiCT-3D pretrained backbone + FlexiCTPrimus3D decoder.
+
+    FLEXICT_SKIP_BACKBONE=1 skips the pretrained-backbone init (see
+    _load_flexict2d).
+    """
     from flexict.flexict_primus import FlexiCTPrimus3D
     from safetensors.torch import load_file
     model = _build_backbone()
-    ckpt_path = os.environ.get(
-        "FLEXICT3D_CKPT",
-        os.path.join(os.path.dirname(__file__), "..", "weights", "flexict_3d", "model.safetensors"),
-    )
-    sd = load_file(ckpt_path)
-    sd = {k.replace("backbone.", ""): v for k, v in sd.items()}
-    missing, unexpected = model.load_state_dict(sd, strict=False)
-    assert len(missing) == 0 and len(unexpected) == 0, \
-        f"flexict3d: missing={missing[:3]} unexp={unexpected[:3]}"
+    if os.environ.get("FLEXICT_SKIP_BACKBONE", "") != "1":
+        ckpt_path = os.environ.get(
+            "FLEXICT3D_CKPT",
+            os.path.join(os.path.dirname(__file__), "..", "weights", "flexict_3d", "model.safetensors"),
+        )
+        sd = load_file(ckpt_path)
+        sd = {k.replace("backbone.", ""): v for k, v in sd.items()}
+        missing, unexpected = model.load_state_dict(sd, strict=False)
+        assert len(missing) == 0 and len(unexpected) == 0, \
+            f"flexict3d: missing={missing[:3]} unexp={unexpected[:3]}"
     return FlexiCTPrimus3D(embed_dim=_EMBED_DIM, patch_size=_PATCH_SIZE, num_classes=num_classes,
                            dino_encoder=model, interaction_indices=_INTERACTION_INDICES)
 

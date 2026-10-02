@@ -89,8 +89,27 @@ _PIP_TO_IMPORT = {
     "onnxruntime-gpu": "onnxruntime",
 }
 
+# F07: the check reports import names (yaml, onnxruntime), but pip installs
+# distributions (pyyaml, onnxruntime-gpu). Feeding the import name to pip
+# installs the wrong thing (yaml doesn't exist on PyPI; onnxruntime is the
+# CPU build). Every request pip builds must go through this mapping.
+_IMPORT_TO_PIP = {v: k for k, v in _PIP_TO_IMPORT.items()}
+
+
+def _to_pip_names(import_names):
+    """Translate import names to pip distribution names."""
+    return [_IMPORT_TO_PIP.get(name, name) for name in import_names]
+
 # Extra index URL for PyTorch CUDA builds
 TORCH_INDEX_URL = "https://download.pytorch.org/whl/cu124"
+
+# F12: the single supported online AI-stack combination. torch and
+# torchvision must be installed as a pair from the PyTorch index with an
+# explicit index (pip gives no priority promise for multiple indexes), and
+# never re-resolved by a later bulk --upgrade of everything else. Must match
+# the offline bundle pin in package_portable.py (_TORCH_CUDA_PIN).
+TORCH_CUDA_PIN = "torch==2.6.0+cu124"
+TORCHVISION_PIN = "torchvision==0.21.0+cu124"
 
 # PyPI mirrors — Chinese mirrors first (much faster from mainland China)
 PYPI_MIRRORS = [
@@ -469,10 +488,20 @@ def check():
 
     # Summary
     missing_pkgs = [p for p, ok in result["packages"].items() if not ok]
+    # F08: find_spec only proves the package is present - on Windows a DLL /
+    # binary dependency problem still makes the real import fail. The version
+    # probe above did the actual __import__; any package that reported
+    # "error" there is unusable and must not be part of an all-green report.
+    broken_pkgs = [
+        p for p, v in (result.get("package_versions") or {}).items()
+        if v == "error"
+    ]
+    result["broken_imports"] = broken_pkgs
     gui_ready = bool(result["gui_backends"].get("pyside6"))
     all_ok = (
         result["python_version"] is not None
         and len(missing_pkgs) == 0
+        and not broken_pkgs
         and gui_ready
         and nnunet_version_ok
     )
@@ -484,6 +513,10 @@ def check():
             if all_ok else
             "{0} package(s) missing; PySide6 GUI ready: {1}; nnU-Net version ready: {2}.".format(
                 len(missing_pkgs), gui_ready, nnunet_version_ok
+            )
+            if not broken_pkgs else
+            "{0} package(s) failed to import (binary/DLL problem?); PySide6 GUI ready: {1}; nnU-Net version ready: {2}.".format(
+                len(broken_pkgs), gui_ready, nnunet_version_ok
             )
         ),
         detail=result,
@@ -533,20 +566,26 @@ def _pip_install(packages):
 
     # No offline wheels — must use network. Try mirrors.
     if "torch" in packages:
-        for mirror in [TORCH_INDEX_URL]:
-            _log("Trying PyTorch from {0}...".format(mirror or "default index"))
-            ret, output = _run_python(
-                ["-m", "pip", "install", "torch", "--extra-index-url", mirror],
-                timeout=1800,
-            )
-            if ret == 0:
-                break
-        else:
-            _log("PyTorch install failed from all sources.")
-            return False, "Failed to install torch: {0}".format(output[-500:] if 'output' in dir() else "all mirrors failed")
+        # F12: torch and torchvision are installed as a pinned pair from the
+        # PyTorch index with --index-url (pip gives no priority promise for
+        # multiple indexes, so an extra-index can silently resolve a CPU or
+        # mismatched build). This matches the offline bundle's verified
+        # combination.
+        _log("Installing the pinned PyTorch pair from {0}...".format(TORCH_INDEX_URL))
+        ret, output = _run_python(
+            ["-m", "pip", "install", "--index-url", TORCH_INDEX_URL,
+             TORCH_CUDA_PIN, TORCHVISION_PIN],
+            timeout=1800,
+        )
+        if ret != 0:
+            _log("PyTorch pair install failed.")
+            return False, "Failed to install the pinned torch/torchvision pair: {0}".format(
+                output[-500:] if 'output' in dir() else "unknown error")
 
-    # Install remaining packages with mirror fallback
-    remaining = [p for p in packages if p != "torch"]
+    # Install remaining packages with mirror fallback. torch/torchvision are
+    # never re-resolved here: a bulk --upgrade must not move one half of the
+    # verified pair to a version its partner was never tested with.
+    remaining = [p for p in packages if p not in ("torch", "torchvision")]
     if remaining:
         for mirror in PYPI_MIRRORS:
             args = ["-m", "pip", "install", "--upgrade"]
@@ -583,6 +622,9 @@ def install():
         missing.extend(missing_gui)
     seen = set()
     missing = [p for p in missing if not (p in seen or seen.add(p))]
+    # The check above reports import names; pip needs distribution names
+    # (F07: yaml→pyyaml, onnxruntime→onnxruntime-gpu).
+    missing = _to_pip_names(missing)
 
     if not missing:
         _write_state("ok", message="All packages and the PySide6 GUI backend are already installed.", all_ok=True)
@@ -600,20 +642,26 @@ def install():
         _log("Install failed: {0}".format(error))
         return 1
 
-    # Re-check after install
+    # Re-check after install. Real __import__, not find_spec: a package can
+    # be present yet unimportable (Windows DLL problem), and "installed" has
+    # to mean "usable" (F08).
     _write_state("installing", step="verifying", message="Verifying installation...")
     ret, output = _run_python_script([
-        "import json, importlib.util as U",
+        "import json",
         "pkgs = {0}".format(REQUIRED_IMPORTS + GUI_IMPORTS),
         "r = {}",
         "for p in pkgs:",
-        "    r[p] = U.find_spec(p) is not None",
+        "    try:",
+        "        __import__(p)",
+        "        r[p] = 'ok'",
+        "    except Exception as e:",
+        "        r[p] = repr(e)",
         "print(json.dumps(r))",
     ])
     if ret == 0:
         try:
             pkg_status = json.loads(output.strip().split("\n")[-1])
-            still_missing = [p for p, ok in pkg_status.items() if not ok]
+            still_missing = [p for p, v in pkg_status.items() if v != "ok"]
         except Exception:
             still_missing = missing
     else:

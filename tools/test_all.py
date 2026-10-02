@@ -5230,7 +5230,10 @@ class TestNNInteractiveTaskDiagnostics(unittest.TestCase):
     def test_model_center_hides_not_improved_models_by_default(self):
         import nninteractive_task_model_center as model_center
 
-        source = inspect.getsource(model_center.ModelCenter.refresh_models)
+        # The default filter and its label moved out of refresh_models into
+        # the row-filtering helper and the toggle checkbox (R61-24 中文化);
+        # the contract is the model-wide behavior, not one function's body.
+        source = inspect.getsource(model_center)
         self.assertIn('"not_improved"', source)
         self.assertIn("未改进", source)
 
@@ -5248,8 +5251,11 @@ class TestNNInteractiveTaskDiagnostics(unittest.TestCase):
 
         source = inspect.getsource(chooser.Chooser.refresh_models)
         self.assertIn('"not_improved"', source)
-        self.assertIn("未改进", source)
-        self.assertIn("显示未改进的模型", inspect.getsource(chooser.Chooser))
+        # The Chinese labels live on the toggle checkbox, not in
+        # refresh_models itself (moved by the R61-24 中文化).
+        self.assertIn("未改进", inspect.getsource(chooser))
+        self.assertIn(
+            "显示未改进的模型", inspect.getsource(chooser))
 
     def test_diagnose_job_cli_subcommand_exists(self):
         import nninteractive_finetune_pipeline as pipeline
@@ -13623,7 +13629,7 @@ class TestLifecycleAndRetention(unittest.TestCase):
             mimics_import._safe_message_box = lambda *_args, **_kwargs: None
             mimics_import._cleanup_job_dir = lambda _path: None
             mimics_import._cleanup_work_dir = lambda _path: None
-            mimics_import._record_failed_case = lambda *_args: None
+            mimics_import._record_failed_case = lambda *_args, **_kwargs: None
             mimics_import._mark_mcs_queue_done = lambda *_args, **_kwargs: None
             self.assertTrue(mimics_import._fail_import_monitor_after_process(
                 monitor, "prepare_timeout", "timed out"
@@ -13679,7 +13685,7 @@ class TestLifecycleAndRetention(unittest.TestCase):
                 dict(payload)
             )
             mimics_import._append_import_log = lambda *_args: None
-            mimics_import._record_failed_case = lambda *_args: None
+            mimics_import._record_failed_case = lambda *_args, **_kwargs: None
             mimics_import._cleanup_job_dir = lambda _path: None
             mimics_import._cleanup_work_dir = lambda _path: None
             mimics_import._batch_prepare_tick_impl(monitor)
@@ -13743,7 +13749,7 @@ class TestLifecycleAndRetention(unittest.TestCase):
                 dict(payload)
             )
             mimics_import._append_import_log = lambda *_args: None
-            mimics_import._record_failed_case = lambda *_args: None
+            mimics_import._record_failed_case = lambda *_args, **_kwargs: None
             mimics_import._cleanup_job_dir = lambda _path: None
             mimics_import._batch_prepare_tick_impl(monitor)
         finally:
@@ -15509,6 +15515,109 @@ class TestForeignScriptIntegration(unittest.TestCase):
         self.assertIn('"job_id": job_id', source)
         self.assertIn("payload.get(\"job_id\") != job_id", source)
         self.assertIn(".history.", source)
+
+
+class TestEnvironmentRepairSemantics(unittest.TestCase):
+    """W05 (F06/F07/F08/F12): what the environment installer/repairer and the
+    FlexiCT inference path may claim. Failure paths first - the wrong package
+    installed, an unusable-but-present package reported green, and inference
+    that secretly requires files the model package never shipped.
+    """
+
+    def _source(self, relative):
+        path = os.path.join(PROJECT_ROOT, relative)
+        with open(path, "r", encoding="utf-8") as handle:
+            return handle.read()
+
+    def setUp(self):
+        self.tmp = _make_temp_dir()
+        self.addCleanup(_cleanup, self.tmp)
+
+    def test_repair_translates_import_names_to_pip_names(self):
+        """F07: the check reports import names; pip needs distributions.
+        Review evidence: a missing 'yaml'/'onnxruntime' was passed straight
+        to pip (yaml does not exist on PyPI; onnxruntime is the CPU build)."""
+        sys.path.insert(0, os.path.join(PROJECT_ROOT, "tools"))
+        import setup_env
+
+        self.assertEqual(
+            ["onnxruntime-gpu", "pyyaml", "torch"],
+            sorted(setup_env._to_pip_names(["yaml", "onnxruntime", "torch"])),
+        )
+        # The install request is built through the mapping, not by feeding
+        # check results straight to pip.
+        source = self._source(os.path.join("tools", "setup_env.py"))
+        self.assertIn("missing = _to_pip_names(missing)", source)
+
+    def test_all_ok_is_false_when_a_real_import_fails(self):
+        """F08: find_spec only proves presence - a Windows DLL problem makes
+        the real import fail while every presence check passes. Review
+        evidence: torch importing with an error still reported all_ok=true."""
+        sys.path.insert(0, os.path.join(PROJECT_ROOT, "tools"))
+        import setup_env
+
+        base = {
+            "python_version": "3.13.7",
+            "packages": {"torch": True, "numpy": True},
+            "package_versions": {"torch": "error", "numpy": "1.24.0"},
+            "gui_backends": {"pyside6": True},
+            "nnunet_version_compatible": True,
+        }
+        # The check's summary logic is inline; pin the contract pieces: the
+        # source computes broken_pkgs from package_versions and requires it
+        # empty for all_ok.
+        source = self._source(os.path.join("tools", "setup_env.py"))
+        self.assertIn('if v == "error"', source)
+        self.assertIn("and not broken_pkgs", source)
+        self.assertIn("result[\"broken_imports\"] = broken_pkgs", source)
+        # Install's verification does a real __import__ ("ok"/error) rather
+        # than find_spec presence, so an installed-but-unimportable package
+        # can never end the repair with all_ok=true.
+        self.assertIn('"    try:",\n        "        __import__(p)",', source)
+        self.assertIn(
+            "still_missing = [p for p, v in pkg_status.items() if v != \"ok\"]",
+            source)
+
+    def test_torch_is_installed_as_a_pinned_pair(self):
+        """F12: torch and torchvision must move as a pair from the PyTorch
+        index with an explicit --index-url, and never be re-resolved by the
+        bulk --upgrade of everything else."""
+        sys.path.insert(0, os.path.join(PROJECT_ROOT, "tools"))
+        import setup_env
+
+        self.assertEqual("torch==2.6.0+cu124", setup_env.TORCH_CUDA_PIN)
+        self.assertEqual(
+            "torchvision==0.21.0+cu124", setup_env.TORCHVISION_PIN)
+        source = self._source(os.path.join("tools", "setup_env.py"))
+        self.assertIn('"--index-url", TORCH_INDEX_URL', source)
+        self.assertIn("TORCH_CUDA_PIN, TORCHVISION_PIN", source)
+        self.assertNotIn(
+            '[\n            ["-m", "pip", "install", "torch", "--extra-index-url", mirror],\n        ]',
+            source,
+        )
+        # The pinned pair must match the offline bundle's verified version.
+        portable = self._source(os.path.join("tools", "package_portable.py"))
+        self.assertIn("_TORCH_CUDA_VERSION = \"2.6.0+cu124\"", portable)
+
+    def test_flexict_inference_does_not_require_the_backbone_files(self):
+        """F06: the inference environment claimed the pretrained backbone
+        was not needed while the trainer's build_network_architecture
+        unconditionally load_file'd it - a migrated model failed on any
+        machine that never had the pretrained weights."""
+        sys.path.insert(0, os.path.join(PROJECT_ROOT, "tools"))
+        # flexict_infer_environment needs real roots; assert via source
+        # contracts instead (the env dict is static).
+        source = self._source(os.path.join("tools", "flexict_pipeline.py"))
+        self.assertIn('"FLEXICT_SKIP_BACKBONE": "1"', source)
+
+        trainer_source = self._source(os.path.join(
+            "integrations", "flexict-finetune", "trainers",
+            "flexict_trainer.py"))
+        self.assertIn('os.environ.get("FLEXICT_SKIP_BACKBONE", "")', trainer_source)
+        # Both loaders honor the skip.
+        self.assertEqual(
+            2, trainer_source.count(
+                'os.environ.get("FLEXICT_SKIP_BACKBONE", "")'))
 
 
 class TestBatchPredictCommand(unittest.TestCase):

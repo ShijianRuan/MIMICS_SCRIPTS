@@ -3895,3 +3895,352 @@ R61 期间 E: 盘 100% 满（剩 2.2MB），fast 门禁 2 个 test_all 用例 Er
 
 - commits：`aadd6e3`；工件：`20260930T112139_smoke.json`、
   `20260930T115343_fast.json`；外部资源：零使用。
+
+## R63（2026-09-30）：R61 批次——R61-5/6/7 三个 P1
+
+### R61-5 导入失败弹窗指向真实失败位置（P1，commit `be7a8a7`）
+
+- **根因**：所有失败工件（`_failed_cases/` 每 case 一个 JSON、日志）都在
+  队列本地 runtime 目录（`_rt(output_dir)`），而弹窗要么指向输出目录下
+  不存在的 `logs/_create_mcs_batch.log`，要么提到早已被 per-case 目录
+  取代的 `_failed_cases.json` 单文件；失败记录也不含用户原始输入路径，
+  标注者无从知道哪个病例失败、从哪来。
+- **修复**（净 +100 产品 / +33 测试，删 -22 死引用）：`source_image`
+  字段贯通 producer（mimics_import `_record_failed_case`）与 consumer
+  （create_mcs_batch `record_failed_case`，从 prepare_manifest 回读）
+  全部失败记录点；prepare 失败弹窗直接显示 case 名 + 原始 Source 路径；
+  其余弹窗/guidance 一律指向用户可达入口 "Show Batch Status (01 Data
+  menu)"（其 Open Log 打开的就是队列 runtime 目录真实日志）。
+- **测试**：失败路径优先——guidance 不再引用 `_failed_cases.json` 且
+  明示 "original source path"；`source_image` 落盘 + 省略时向后兼容。
+
+### R61-6 Stop Import 前确认并声明影响范围（P1，commit `6eb7589`）
+
+- **根因**：`main_stop_import` 无确认即调 `stop_background_import`，而
+  `_request_queue_stop` 遍历所有发现的队列目录——一次点击全局停所有
+  导入队列。
+- **修复**（净 +17 产品 / +50 测试）：复用 FlexiCT question_box 确认模式，
+  消息明示影响范围（"every import queue on this workstation, not just
+  the current one" + 后台 Mimics 关停 + 已完成项目保留）；取消零副作用。
+- **测试**：fake mimics 注入，取消路径断言 `stop_background_import`
+  未被调用 + 消息含范围声明。
+
+### R61-7 输出路径粘滞（P1，commit `ccbda86`）
+
+- **根因**：`io_path_setup_ui` 把记忆的输出路径直接当作用户锁定
+  （`output_user_edited = bool(output_initial)`），而 Remember 默认勾选，
+  上一次导入的输出目录粘住后续所有新数据集；拖拽窗口同病（仅输出框
+  为空时重算 + 同会话跨 drop 粘滞）。
+- **修复**（净 +64：io_path_setup_ui + drop 窗口记录 `output_custom`，
+  提交时判定输出是否偏离按源算出的默认值，加载/新 drop 仅真自定义值
+  粘滞；用户同会话手动输入/浏览仍被尊重——hasFocus 过滤程序化
+  setText）。顺手清除死代码 `build_selection`（全仓库零调用）。
+- **测试**：source-contract 钉住两个 UI 的加载/保存/会话内三处行为 +
+  死代码不回归。
+
+### 门禁与证据
+
+- smoke 8/8 ×3：`20260930T132216` / `20260930T133307` / `20260930T134618`
+- fast 27/27：`20260930T150137`（R61-5 全量改动后；首跑 26/27 为
+  flow_imports 的 torch/OpenBLAS 0xC0000005 瞬态崩溃，单套件重跑 3/3
+  复绿——R62 flexict_pkg 同类环境瞬态第三次出现，均与改动无交集）
+- commits：`6eb7589` / `ccbda86` / `be7a8a7`；外部资源：零使用。
+
+## R64（2026-09-30）：R61 批次收尾——R61-8~R61-24 大扫除
+
+R62（R61-4）/R63（R61-5/6/7）之后，本轮把 R61 待办批次的剩余条目全部
+清完：8 个 P1/P2/P3 修复 + 测试资产 + 3 个用户拍板项（收编、批量推理、
+UI 中文化），外加验证战役（Phase 1~4b）中发现的 4 个 P0/P0-2 顺手关闭。
+R61-25（FlexiCT 增训）按用户指示取消，不实施。
+
+### P1/P2/P3 修复批（每项独立 commit + smoke 证据）
+
+- **R61-8 拖拽导入状态冻结（P1，`eb00983`）**：drop 窗口的批量导入状态
+  由真实队列状态驱动，不再卡死在 "Importing"。
+- **R61-9 数据集根误判为单 case（P1，`d2e0727`）**：单病例发现拒绝数据集
+  根目录（多 case 结构），杜绝把整个数据集当一条导入。
+- **R61-10 弹窗风暴（P1，`e1d55e9`）**：nnInteractive 写模式提问改会话级
+  一次，不再每个 Mask 问一遍。
+- **R61-11 扫描剪枝（P1，`f037b8e`）**：Stop 扫描的 os.walk 剪枝 + kill
+  移出扫描线程，消除停止操作本身卡 GUI。
+- **R61-12 全量体素缓冲（P0，`93be706`）**：蒙版 SHA-256 / 体素缓冲改流式
+  处理，移出 GUI 线程（R61-13 白名单消 7 条）。
+- **R61-26 同步桥接（P1，`37c8219`）**：nnInteractive 桥接 communicate()
+  放等待线程 + GUI 泵（白名单消 2 条，R61-13 白名单清零）。
+- **R61-14 版本门禁（P2，`a1291ba`）**：nnunetv2 门禁接受随包 2.8.0 环境，
+  不再误报"需升级 2.8.1"。
+- **R61-15 孤儿作业清扫（P2，`0e18d4e`）**：崩溃孤儿 async 作业目录超
+  保留窗口即清扫。
+- **R61-16 ScribblePrompt 体检（P2，`7ddf351`）**：检查点纳入环境体检，
+  缺失时在健康面板可见。
+- **R61-17 Abandon Locally（P2，`a31a5c5`）**：FlexiCT 状态窗加"在本机
+  放弃"逃生口（含 Stop 确认，R61 后续项）。
+- **R61-19 编号漂移（P3，`c5f760a`）**：活文档入口编号漂移同步 + 一致性
+  测试防回归。
+- **R61-21 状态色统一/图标/UX 残留（P3，`821f60d`）**。
+
+### 用户拍板项
+
+- **R61-18 根 README（P2，`f3330ea`）**：三步快速上手，新用户零文档开箱。
+- **R61-22 收编外来脚本（`b06a1d1` 前置清理 + R62/R63 验证）**：4 个
+  一次性诊断脚本确认为会话痕迹，不收编（留在 ignored 运行时目录自然
+  过期）；copy_to_z 输出在只读数据集之外，未越红线，已登记。
+- **R61-23 批量推理（P2，`cc36403` + `952a62e`）**：mimics_batch_cli 新增
+  predict 子命令（数据集根/平铺夹、--cases 过滤、歧义跳过并报告、无
+  可用模型退出 2 列原因）；顺带修 python313._pth 导致 CLI 丢 tools 目录
+  的 P0。4 条失败路径测试入 test_all。
+- **R61-24 UI 中文化（`5adfa2e`）**：19 个 UI 文件 + ui_theme 组件级全量
+  翻译。技术名词（nnU-Net/FlexiCT/Mask/GPU/AUC/Trainer/Fold/.mcs）与
+  代码值保留英文；traceback/控制台输出不动（GBK 控制台陷阱）。自研
+  字节偏移 AST 替换器（ast col_offset 是 UTF-8 字节偏移而非字符偏移，
+  字符级切片会把含多字节字符的行切坏）。残留扫描 0 英文 UI 字符串。
+- **R61-25 FlexiCT 增训：用户取消**（"FlexiCT 增训不用实现了"），不实施。
+
+### 验证战役顺手修复（P0）
+
+- **P0 CLI sys.path（`cc36403`）**：见 R61-23。
+- **P0 assert_gpus_not_busy NameError（`dbb7090`）**：远程训练阻断门
+  函数名漂移导致的崩溃，修复 + 验证报告记录。
+- **P0 临时发布锁（`8ca4e4b` + `b7d4a10` + `9259b2d`）**：staging 目录
+  发布对 Windows 瞬态文件锁重试；P0-2 后续把同类修复带进 nnInteractive
+  微调 source-grid 缓存发布；失败与修复全程记入验证报告。
+- **206 根文件系统满（`0ad9708`）**：服务器阻塞登记（外部资源事件，
+  未越红线，清理记录见验证报告）。
+
+### 验证战役文档（未计入代码账）
+
+`b06a1d1`→`3740117`：AI 真实数据验证报告 Phase 1~4b（nnInteractive
+推理/微调时序基线、微调 vs 官方对比、P0-1/P1-1 根因复验）。
+
+### 本轮发现并当场关闭的回归
+
+- **R64-1 ScribblePrompt 会话静默丢弃（P0，`6f453ed`）**：R61-12 把
+  `_sha256_bytes`（裸 hex）换成 `stream_buffer`（"sha256:"+hex）时，
+  `_session_values` 与 worker 存的裸 hex 永不匹配 → previous-logits
+  连续性每个 prompt 都被丢弃。fast 门禁的 interactive_algorithms 套件
+  抓到（test_buffer_streaming_preserves_bytes_and_hash 断言失败暴露
+  格式漂移），追根发现真回归在会话链。修复：比较前归一化 + 回归测试。
+  **教训：换共享 helper 时必须审计所有返回值消费者的格式假设。**
+- **R64-2 回归矩阵 GBK 崩溃（P2，`3427fa5`）**：失败输出打印崩溃，
+  掩盖失败摘要本身。
+- **R61-24 补遗（`c0dfd99`）**：`_surface`/`_path_row`/`_hint` 辅助函数
+  生成的文案（分组标题/路径对话框标题/字段提示）不在首轮提取范围，
+  FlexiCT 停止按钮三元式漏翻；5 个测试套件钉住旧英文文案，全部同步。
+
+### 门禁与证据
+
+- smoke 8/8 ×4：`20260930T230848`（R61-23）/ `20261001T022755` +
+  `20261001T025629`（R61-24 两段）/ `20261001T025816`（R64-2）/
+  `20261001T031950`（R64-1）
+- fast 27/27：`20261001T032902`（R64 全部改动后）。`20261001T030717`
+  为 26/27——interactive_algorithms 失败即 R64-1 的发现过程。
+- 外部资源：远程服务器仅验证战役使用（记录在验证报告）；真实数据集
+  只读红线全程未越。
+
+## R65（2026-10-01）：外部评审 docs/reviews/ F01–F29 收编——W01/W02 数据保护
+
+评审基线 `36eac04` 早于 R61–R64 修复，每项动手前对照 HEAD 复核。29 项发现
+全部入账 improvement_backlog.md R65-1~R65-20，按交接推荐顺序 W01→W02→
+W03→W04/W06 推进。用户测试纪律：全量只在必要时，日常按改动选套件+冒烟，
+每轮收尾 fast。
+
+### 已关闭（本轮）
+
+- **R65-1 = F22【P0】（`2f3ed65`）**：slug 碰撞 + 硬链接改写源文件。
+  `unique_case_keys`（无碰撞保裸 slug，碰撞全组 8 位摘要）+ 两处
+  `_link_or_copy` unlink-first + 5 个消费点接入 + `.mcs` 按原始名解析。
+  fast 27/27（`20261001T184356`）。
+- **R65-2 = F18【P0】+ R65-3 = F19【P1】（`b8d236b`）**：撤销导入所有权
+  模型重做。receipt v2（guid + provenance token——token 在 save 前写入
+  mask metadata 随 .mcs 持久化）；删除文件前比对会话内存态（任何
+  receipt 未涵盖的 mask 保留文件）+ save 后指纹复验；同名歧义停止并
+  提示（返回码 7），v1 旧 receipt 保守处理。T18/T19 回归测试 7 例。
+  TestImportReceiptAndUndo 18/18、fake_mimics_flow 16/16、冒烟 8/8
+  （`20261001T192254`）。
+- **R65-4 = F17【P1】（`f2bd662`）**：项目状态适配器。两个切项目入口
+  弃用无文档支持的 `get_active_project()`（异常被吞，"无法识别"被当
+  "没有打开"），改走共享 `runtime_common.current_project_state()`（文档
+  化 API，四态 none/path/unnamed/unknown）；同项目不重载，unknown 拒绝
+  切换并声明"什么都没动"。T17 回归 4 例；flexict_integration 93/93、
+  TestImportReceiptAndUndo 21/21、冒烟 8/8（`20261001T193902`）。
+  W02（项目和撤销所有权）至此全部关闭。
+- **R65-9 = F23【P1】（`a25e755`）**：mask 数值语义统一闸门。三个
+  读取器（binary ×2 + 多标签）统一走 `_validate_mask_values`：NaN/Inf
+  一律拒绝（旧 `!= 0` 把 NaN/Inf 变成前景——评审证据 `[0,NaN,Inf,1]`
+  → `[0,1,1,1]`）；小数浮点一律拒绝为概率图并给出转换规则（旧代码
+  静默按 0 阈值，`[0.01,0.49,0.51,0.99]` 全变 1）；整数值数据（0/1、
+  0/255、labelmap、整数值 float）原样放行。训练准备（nnunet/
+  nninteractive_finetune pipeline）与 4 个 bridge 入口经同一闸门。
+  动手前核实：仓库内全部 mask 生产者只写整数数组（write_mask_nifti
+  等均 astype(uint8)），拒绝只作用于外部概率图/损坏文件，无内部
+  主线被破坏。T23 证据：4 个新失败路径测试 + convert/prepare 26 +
+  nnunet 90 + flexict 93 全绿；冒烟 8/8（`20261001T200108`）。
+- **R65-10 = F24+F25【P1】（`41306bf`）**：补齐 Mask 误判。F24——
+  平铺布局下 `_source_masks` 把 ct.nii.gz 也当结构（评审证据：
+  ct+liver 返回两个待补 Mask）；现按公认图像名（ct/mri/mr/image，
+  与 image_candidates 一致）排除，仅剩图像的病例明确报错。F25——
+  完整性判定在全项目名称集上做，另一 Image 的同名 Mask 让目标被
+  误判"已完整"（证据：Image A 缺 liver、Image B 有 → skipped）；
+  现多 Image 项目整例失败并声明"nothing was changed"（评审指定
+  "多候选 Image 需显式选择或错误提示"），单 Image 下全项目集合
+  即目标集合。顺带删死代码 `_mask_foreground`。T24/T25 证据：
+  2 新测试 + 相邻 26 绿 + 冒烟 8/8（`20261001T202725`）。
+- **R65-14 = F29【P2】（`89a90e3`）**：FlexiCT 颅尾分层轴错误。
+  `argmax(spacing)` 只在经典厚层轴位 CT 上碰巧正确：等体素 RAS 上
+  平局选 X（评审证据：目标 z=8 被判 z-start 0.1，物理应为 0.8）、
+  轴换位/斜位上选层面内轴。改为按 affine 世界方向选 SI 轴
+  （`physical_si_start`：体素轴的世界位移与 superior 方向最对齐者），
+  管线与独立 build_dataset.py 同步修复；独立脚本另拒绝 <2 可用病例与
+  `--n-train<1`（原 1 例时 n_train=0 → 除零）。保留分层策略本身
+  （few-shot 验证配方行为不变），评审给了"物理 SI 或取消启发式"两条
+  路，选前者为最小改动。T29 证据：新套件 flexict_build_dataset 8 测试
+  （等体素/各向异性/轴换位/翻转/空目标 + 退化输入 3 项，注册进矩阵
+  fast/full）+ TestTrainValSplit 6 新测试；flexict_integration 99、
+  flexict_common 24、flexict_pkg 10、flexict_build_dataset 8 全绿；
+  冒烟 8/8（`20261001T215214`）。
+- **R65-15 = F16【P2】（`cd163a0`）**：训练划分患者级隔离 + 冻结验证
+  集。原 `_split_folds` 只洗牌 case_id，同患者多期/随访（不同 case_id）
+  可能同时进 train 和 val，质量估计偏乐观。现训练请求可选
+  `patient_groups` 映射，存在时洗牌与 fold 轮换按整组进行（组信息写
+  入 manifest）；重建数据集读取已发布 fold-0 splits，旧验证病例在所有
+  fold 保持 val——加数据永不把旧验证病例挪入训练，冻结一个病例自动
+  冻结其整组。无组信息时保持 case 独立性假设，契约记入
+  CONFIG_REFERENCE。T16 证据：8 新测试（组不跨侧、无组行为不变且与
+  历史轮换逐位一致、冻结保持 val、冻结扩散整组、消失的冻结病例被
+  忽略、两次构建端到端验证集只增不减、manifest 记录组）。
+  nnunet_integration 97、flexict_integration 99、remote_training
+  104 全绿；冒烟 8/8（`20261001T231524`）。W03 至此除 R65-12（F01，
+  需 L3 实机）外全部关闭。
+- **R65-5 = F21【P1】（`ce3c9c2`）**：等体积改动内容摘要保护。启动快照
+  原来只记体素计数，删 1 体素补 1 体素的修正（GUID 命中、计数不变）
+  被判"未修改"而遭 AI 结果覆盖。两监控（flexict/nnunet）的快照统一下沉
+  到共享 `mimics_mask_apply._mask_snapshot`，增加内容摘要 `sha256`——
+  按交接设计约束（与 F13 联合，不在每次 tick 拷贝全部 Mask），复用
+  nnInteractive 先例：零拷贝 `buffer_byte_view` + 16MB 分块
+  `stream_buffer`，块间 `_update_gui()` 泵 GUI。完成时 GUID+计数命中后
+  比对摘要，不一致 → 放弃更新、落副本；任一侧摘要不可得（旧快照/buffer
+  不可读）退化为原计数检查，不误拦。T21：flexict
+  TestEqualVolumeEditProtection 6/6、nnunet MimicsRuntimeTests 12/12
+  （合计 205 passed）；冒烟 8/8（`20261002T013746`）。
+- **R65-6 = F02+F20【P1】（`fc0179f`）**：AL 叠加事务化。对照 HEAD 核实
+  F02 真实存在——`_al_finish_conversion` 先 `shutil.rmtree(bridge_root)`
+  再读其中的 u8 buffer，真实 apply 必 FileNotFoundError（旧测试 mock
+  `_set_mask_from_u8` 把它遮住；交接文档据此提醒 F05 被掩盖）。修复：
+  转换结果先整体校验（每 band buffer 存在且字节数恰为 shape 乘积）、
+  再应用、任一步失败回滚已创建 mask；bridge root 清理移入 `finally`
+  作事务最后一步。F20：发起时捕获 `target_identity`（项目路径 + 活动
+  图像 GUID），完成时复核——项目/图像变了拒绝并给指引，绝不写错病例。
+  T02/T20：TestFlexiCTActiveLearningApply 6/6（回滚、截断拒绝、项目
+  切换拒绝）；冒烟 8/8（`20261002T013746`）。
+- **R65-8 = F03+F14【P1/P2】（`b180e3a`）**：AL 审查窗口两个反馈缺陷。
+  F03——`_job_selected` 引用的 `QtWidgets`/`QtCore` 只在其他函数局部
+  作用域绑定，出现真实 ranking 即 NameError（空列表测试从未进循环）；
+  方法开头从 qt_modules 元组绑定，前景色用 `self.QtGui`。F14——
+  `_poll_requests` 先写 applied/failed 结果再调 `_job_selected()`，摘要
+  文字把结果覆盖，标注者永远看不到失败原因；改为先刷表格（摘要抽为
+  `_refresh_status_text`）后写结果。T03/T14：gui_smoke
+  TestActiveLearningWindow 4/4；冒烟 8/8（`20261002T013746`）。
+- **R65-7 = F28【P1】（`7e10dd8`）**：批量发布版本冲突检测。评审证据
+  复现——目标已被前台新保存时 staging+replace 直接覆盖。资源锁只约束
+  本仓库脚本（Mimics 原生保存/其他工作站无法排他），按交接"不能排他时
+  发布新副本"落地：开工记录输出身份（共享
+  `runtime_common.capture_output_identity`，mtime_ns+size），发布前复核
+  （共享 `publish_conflict`），不一致 → 保留较新文件、staging 落为
+  `<case>.conflict.<pid>.mcs` 副本、病例失败并给可见指引。附带同条
+  交接指出的 UX 缺口：`--force` 写入配置但 worker 从不读取——现在 force
+  真正从源工程重建（旧输出不再当基底），版本复核在 force 下仍生效。
+  T28：TestForeignScriptIntegration 10/10（冲突保留新保存+副本、未改
+  输出正常替换、全新路径不误判冲突、force 打开 source 而非旧输出）、
+  append 流程 1/1；冒烟 8/8（`20261002T023427`）。
+
+### 门禁与证据
+
+- fast 28/28：`20261001T234508`（R65-14/R65-15 全部改动后，本轮收尾
+  门禁；flexict_build_dataset 套件首次入矩阵）。
+- 全量 test_all：两次后台运行均在 ~65% 处命中已知预存环境崩溃
+  （`test_offscreen_window_renders_and_registers`，Qt offscreen 下
+  Windows fatal exception: Aborted，干净 HEAD 同样复现，见工作区事件
+  登记），无 pytest 汇总；排除该单测的补跑见下条。R39 以来 test_all
+  非门禁必需（矩阵 full 才含它），按用户测试纪律只在必要时跑。
+
+### 复核结论（HEAD 已覆盖，无需重做）
+
+- F09 = R61-4（`aadd6e3`）。
+
+### R65-19（F11，P1）：reaper 回调不再触 GUI 对话框（`3fe6e1f`）
+
+审计 runtime_py35 全部 `on_complete=` 调用点（grep + 逐个读回调的传递
+callee），确认两处真实违规：mask_import `_finish_mask_import`（→
+`_safe_message` → `mimics.dialogs.message_box`）与 mimics_export
+`_finish_foreground_export`（同源）——reaper 守护线程里调 Qt 对话框，
+经典 Mimics 冻结类问题。修复：on_complete 只置
+`monitor.update(reaped=True)`，由仍在运行的 GUI 监视 timer 在下一 tick
+于 GUI 线程执行完整 finisher（对话框、租约释放、清理）；60s
+reap_deadline 兜底（reap 永不完成时 timer 不无限跳，以可见诊断收尾）。
+其余调用点核验为纯文件操作（mimics_import `_finalize` 系列、
+stop_background `cleanup_work`）或根本无回调，不动。测试沉淀：
+TestGuiThreadBlockingContract 4 新例（AST 契约扫描任何 runtime_py35
+模块 on_complete lambda 内禁 mimics.*；两处违规函数钉住正契约；两例
+行为测试——假 reaper 置 flag 前对话框静默、置 flag 后下一 tick 收尾）。
+附带修复两个预存 TestNewFeatures 失败（干净 HEAD 同样失败，git stash
+验证）：R61-24 中文化遗留的英文 radio 断言（改钉"跳过已存在/覆盖已
+存在"）；flat-DICOM 探测测试过度指定"恰好一次 scandir 拉取"——根因
+是 R61-9（`d2e0727`）在 walk 之后插入了 `_looks_like_dataset_root`
+第二次封顶扫描（也在首个切片停止，产品行为正确），改为钉住真契约
+"每次 scandir 扫描不越过第一个切片"（每扫描计数，1–3 次扫描合法）。
+证据：TestNewFeatures + TestGuiThreadBlockingContract +
+TestForeignScriptIntegration 137 通过；冒烟 8/8（`20261002T041554`）。
+
+### R65-11（F26+F27，P1/P2）：job 身份贯通 + 取消不丢台账（`2d39b2f`）
+
+对照 HEAD 核实两项均在：F26——inspect launcher 读固定 `--report` 路径，
+新进程先死时旧 completed 报告被当成本轮成功（秒级 job_dir 戳双击也撞
+同名）；F27——sync/append runner 在 stop 检查处提前 return，`results.json`
+/`failed_cases.json` 只在正常收尾写。修复（对齐 append_jobs 既有
+uuid 模式）：launcher 铸 `job_id = <stamp>_<uuid8>`，config→runtime
+贯通，runtime 每次报告/状态写入盖 `job_id`，固定路径旧报告启动前归档
+为 `.history.<stamp>.json`，终判要求本轮 `job_id`（不匹配 → 退出码 1
++ stderr 说明）；sync launcher 同步加 uuid 目录与身份终判。F27：取消
+改 flag+break，台账写移入 `finally`（停止/崩溃/正常收尾全路径发布），
+cancelled 状态保留 `next_case`。测试沉淀 4 例（取消后台账与状态、
+job_id 贯通 status、runtime 报告带 id、launcher 源码契约：归档 +
+uuid + 身份终判）。证据：TestForeignScriptIntegration 14/14、
+append/stop 流程绿、冒烟 8/8（`20261002T123216`）。
+
+### 下一步
+
+W04（R65-5/6/8）、W06 全部（R65-7=F28、R65-19=F11、R65-11=F26+F27）已
+关闭。W03 仅剩 R65-12（F01 DICOM 系列/多帧——需 L3 实机配合，验收
+成本高）；之后按交接顺序 W05（R65-16 = F06/F07/F08/F12 依赖清单/
+能力检查）、W08（R65-17 = F10+F15 多选作用域 + 视觉状态、
+R65-18 = F04+F13）；R65-13 = F05（AL 叠加自动标记已标注——F02 修复后
+该行为已真实暴露，`_al_finish_conversion` 成功路径仍调
+`_al_mark_annotated`，需结合产品语义评估）。
+
+### 工作区事件登记
+
+- pytest `-k` 组合跑 TestImportDropWindow 时 Qt offscreen 渲染崩溃
+  （Windows fatal exception: Aborted）——在干净 HEAD `2f3ed65` 上同样
+  复现，判定为既有环境问题（gate matrix 单套件运行不受影响），非本轮
+  改动引入，不入回归。
+- **测试卫生（`0276e84`，预存缺陷修复）**：全量 test_all（R39 以来首次）
+  暴露 TestCreateMcsBatch::test_record_failed_case 失败——R61-2 新增的
+  两个 pruned-fingerprint 测试调用 `main()` 后未恢复模块全局
+  `_ACTIVE_RUNTIME_DIR`，泄漏到后续测试使其向已删除的临时目录写入
+  （isolation 下通过，类顺序下失败）。两处补 save/restore，
+  TestCreateMcsBatch 22/22。属 R61-2（~2026-09-29）引入的预存缺陷，
+  非本轮改动回归。
+- **测试隔离修复（随 `cd163a0`）**：
+  test_copied_model_is_discovered_without_old_registry 未隔离本机全局
+  model registry（`~/.mimics_script/nnunet_model_registry.json`）——当天
+  真实数据验证战役在 G:\ 注册了一个活模型（epoch 1790857753，18 病例
+  remote 训练），测试数出 2 个模型。干净 HEAD 同样失败，判定为预存
+  测试缺陷（load_models 设计上就要读全局 registry，测试没 mock）。
+- **全量 test_all 崩溃复测（R65）**：bq4bj9ycs 与 bw6elayey 两次全量
+  后台运行都在同一测试 `TestImportDropWindow::
+  test_offscreen_window_renders_and_registers`（ui_theme.
+  configure_application）处 Fatal Python error: Aborted，~65% 进度无
+  pytest 汇总。与 4126 条记录的 `-k` 组合崩溃同源——干净 HEAD 同样
+  复现的 Qt offscreen 环境问题。已用 `--deselect` 排除该单测补跑
+  确认其余全绿（结果见门禁小节更新）。
+  按相邻死行测试的既有模式 mock `model_registry_paths` 隔离。
