@@ -15149,6 +15149,29 @@ class TestUiThemePalette(unittest.TestCase):
             self.assertIn(token, ui_theme.PALETTE)
             self.assertRegex(ui_theme.PALETTE[token], r"^#[0-9a-fA-F]{6}$")
 
+    def test_primary_button_has_a_disabled_state(self):
+        # F15: the #primary ID selector outranks the generic
+        # QPushButton:disabled rule, so without an explicit
+        # #primary:disabled rule a disabled primary button stayed
+        # saturated blue and looked clickable.
+        sys.path.insert(0, os.path.join(PROJECT_ROOT, "tools"))
+        import ui_theme
+
+        css = ui_theme.stylesheet()
+        self.assertIn(
+            "QPushButton#primaryButton:disabled, QPushButton#primary:disabled",
+            css,
+        )
+
+    def test_al_table_keeps_unit_header_readable(self):
+        # F15: the Uncertain-volume (mm³) column must never be squeezed
+        # below its unit header by the stretch columns.
+        path = os.path.join(PROJECT_ROOT, "tools", "flexict_active_learning_ui.py")
+        with open(path, "r", encoding="utf-8") as handle:
+            source = handle.read()
+        self.assertIn("setMinimumSectionSize(120)", source)
+        self.assertIn("setColumnWidth(3, 130)", source)
+
 
 class TestForeignScriptIntegration(unittest.TestCase):
     """R61-22: the batch inspection/sync tools that grew up untracked are now

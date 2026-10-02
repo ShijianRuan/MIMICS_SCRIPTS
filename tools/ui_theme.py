@@ -679,6 +679,13 @@ def stylesheet(extra=""):
         background: #1d4ed8;
         border-color: #1d4ed8;
     }
+    /* F15: the ID selector outranks the generic QPushButton:disabled rule,
+    so a disabled primary stayed saturated blue and looked clickable. */
+    QPushButton#primaryButton:disabled, QPushButton#primary:disabled {
+        color: #f2f4f7;
+        background: #93b0e8;
+        border-color: #93b0e8;
+    }
     QPushButton#dangerButton {
         color: #b42318;
         border-color: #f0b3ad;

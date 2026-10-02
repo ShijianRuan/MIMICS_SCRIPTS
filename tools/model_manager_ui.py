@@ -338,6 +338,10 @@ class ModelManagerWindow:
         self.table.horizontalHeader().setSectionResizeMode(
             1, QtWidgets.QHeaderView.Stretch
         )
+        # F15: fixed readable widths for the identity/time columns so the
+        # stretch column cannot truncate them.
+        self.table.setColumnWidth(2, 170)   # 模型 (model id)
+        self.table.setColumnWidth(4, 150)   # 创建时间
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)

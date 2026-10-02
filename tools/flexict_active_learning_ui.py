@@ -198,6 +198,10 @@ class ActiveLearningWindow:
             1, QtWidgets.QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(
             5, QtWidgets.QHeaderView.Stretch)
+        # F15: the numeric columns must never be squeezed below their unit
+        # headers by the two stretch columns.
+        self.table.setColumnWidth(3, 130)
+        self.table.horizontalHeader().setMinimumSectionSize(120)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
