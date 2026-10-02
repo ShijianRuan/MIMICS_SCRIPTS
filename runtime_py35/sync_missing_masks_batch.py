@@ -41,6 +41,11 @@ import runtime_common
 STATUS_FILE = "status.json"
 LOG_FILE = "sync_missing_masks.log"
 
+# F26: set from the job config in run_job; every status written by this
+# process carries it so a launcher never mistakes another attempt's status
+# file for this one.
+_JOB_ID = ""
+
 
 def _read_json(path, default=None):
     try:
@@ -69,6 +74,7 @@ def _status(job_dir, status, phase, completed, failed, skipped, total, **details
         "status": str(status),
         "phase": str(phase),
         "pid": os.getpid(),
+        "job_id": _JOB_ID,
         "completed": int(completed),
         "failed": int(failed),
         "skipped": int(skipped),
@@ -334,6 +340,8 @@ def _sync_opened_case(case, job_dir, case_id, source_masks, output_mcs,
 
 def run_job(config_path):
     config = _read_json(config_path, {}) or {}
+    global _JOB_ID
+    _JOB_ID = str(config.get("job_id") or "")
     job_dir = os.path.abspath(config.get("job_dir") or os.path.dirname(config_path))
     if not os.path.isdir(job_dir):
         os.makedirs(job_dir)
@@ -347,16 +355,16 @@ def run_job(config_path):
     _status(job_dir, "running", "starting", 0, 0, 0, total)
     _log(job_dir, "Sync job started: {0} case(s).".format(total))
     force = bool(config.get("force", False))
+    stop_path = config.get("stop_path") or ""
+    cancelled = False
+    next_case = ""
     try:
         for index, case in enumerate(cases):
-            stop_path = config.get("stop_path") or ""
             if stop_path and os.path.isfile(stop_path):
-                _status(
-                    job_dir, "cancelled", "stopped", completed, failed, skipped, total,
-                    next_case=case.get("case_id", ""),
-                )
+                cancelled = True
+                next_case = case.get("case_id", "")
                 _log(job_dir, "Stop requested; remaining cases were not opened.")
-                return 0
+                break
             case_id = str(case.get("case_id", ""))
             _status(
                 job_dir, "running", "syncing", completed, failed, skipped, total,
@@ -385,10 +393,24 @@ def run_job(config_path):
             )
     finally:
         _safe_close_project()
+        # F27: the per-case ledger is durable on every exit path, including
+        # stop-before-case - the work already finished must stay auditable.
+        _write_json(os.path.join(job_dir, "failed_cases.json"), failed_rows)
+        _write_json(os.path.join(job_dir, "results.json"), results)
 
+    if cancelled:
+        _status(
+            job_dir, "cancelled", "stopped", completed, failed, skipped, total,
+            next_case=next_case, failed_cases=failed_rows[:100],
+        )
+        _log(
+            job_dir,
+            "Sync job cancelled: completed={0}, skipped={1}, failed={2}.".format(
+                completed, skipped, failed
+            ),
+        )
+        return 0
     final_status = "completed" if failed == 0 else "completed_with_errors"
-    _write_json(os.path.join(job_dir, "failed_cases.json"), failed_rows)
-    _write_json(os.path.join(job_dir, "results.json"), results)
     _status(
         job_dir, final_status, "finished", completed, failed, skipped, total,
         failed_cases=failed_rows[:100],

@@ -159,6 +159,10 @@ def run_job(config_path):
     report_path = os.path.abspath(
         config.get("report_path") or os.path.join(job_dir, "inspect_report.json")
     )
+    # F26: every report written by this attempt carries the launcher's job
+    # id, so a launcher can never mistake an older attempt's report (or a
+    # report left behind by an unrelated run at the same path) for its own.
+    job_id = str(config.get("job_id") or "")
     cases = config.get("cases") or []
     total = len(cases)
     completed = 0
@@ -167,7 +171,7 @@ def run_job(config_path):
     errors = {}
     _write_json_atomic(report_path, {
         "status": "running", "completed": 0, "failed": 0, "total": total,
-        "results": results, "errors": errors,
+        "job_id": job_id, "results": results, "errors": errors,
     })
     print("Inspect job started: {0} case(s).".format(total))
     try:
@@ -192,6 +196,7 @@ def run_job(config_path):
                     "completed": completed,
                     "failed": failed,
                     "total": total,
+                    "job_id": job_id,
                     "results": results,
                     "errors": errors,
                 })
@@ -202,6 +207,7 @@ def run_job(config_path):
         "completed": completed,
         "failed": failed,
         "total": total,
+        "job_id": job_id,
         "results": results,
         "errors": errors,
     })

@@ -306,16 +306,16 @@ def run_job(config_path):
     failed_rows = []
     _status(job_dir, "running", "starting", 0, 0, total, skipped=0)
     _log(job_dir, "Append job started: {} case(s).".format(total))
+    stop_path = config.get("stop_path") or ""
+    cancelled = False
+    next_case = ""
     try:
         for index, case in enumerate(cases):
-            stop_path = config.get("stop_path") or ""
             if stop_path and os.path.isfile(stop_path):
-                _status(
-                    job_dir, "cancelled", "stopped", completed, failed, total,
-                    skipped=skipped, next_case=case.get("case_id", ""),
-                )
+                cancelled = True
+                next_case = case.get("case_id", "")
                 _log(job_dir, "Stop requested; remaining cases were not opened.")
-                return 0
+                break
             case_id = str(case.get("case_id", ""))
             _status(
                 job_dir, "running", "appending", completed, failed, total,
@@ -350,9 +350,24 @@ def run_job(config_path):
             )
     finally:
         _safe_close_project()
+        # F27: the per-case failure ledger is durable on every exit path,
+        # including stop-before-case.
+        _write_json(os.path.join(job_dir, "failed_cases.json"), failed_rows)
 
+    if cancelled:
+        _status(
+            job_dir, "cancelled", "stopped", completed, failed, total,
+            skipped=skipped, next_case=next_case,
+            failed_cases=failed_rows[:100],
+        )
+        _log(
+            job_dir,
+            "Append job cancelled: completed={}, skipped={}, failed={}.".format(
+                completed, skipped, failed
+            ),
+        )
+        return 0
     final_status = "completed" if failed == 0 else "completed_with_errors"
-    _write_json(os.path.join(job_dir, "failed_cases.json"), failed_rows)
     _status(
         job_dir, final_status, "finished", completed, failed, total,
         skipped=skipped, failed_cases=failed_rows[:100],
