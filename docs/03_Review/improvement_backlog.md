@@ -440,9 +440,27 @@
     战役在 G:\ 注册了一个活模型使其数出 2 个（预存测试缺陷，干净
     HEAD 同样失败）；按相邻死行测试的模式 mock model_registry_paths
     隔离。
-- [ ] **R65-16 = F06/F07/F08/F12（W05 部署组）**：backbone 推理依赖、
-  pip 名/distribution 名错配、体检假全绿、在线离线组合不一致。验收
-  T06/T07/T08/T12（部分需 L4 环境）。
+- [x] **R65-16 = F06/F07/F08/F12（W05 部署组）**〔R65 当轮解决，commit
+  `c024e36`〕：对照 HEAD 核实四项均真实存在。F07——setup_env 按导入名
+  给 pip 修复命令（`pip install yaml`），新增 `_IMPORT_TO_PIP` 反查 +
+  `_to_pip_names()`，安装与所有用户可见消息先翻译。F08——校验用
+  find_spec，二进制坏（Windows DLL）也判 ok，`all_ok` 假全绿；改为真实
+  `__import__` 逐包验证，`all_ok` 要求零错误，坏包列入 `broken_imports`
+  并给 DLL 提示。F12——torch/torchvision 分开无锁安装（pip 无多索引
+  优先级，可解析出 CPU 版/错配版），改为钉版对
+  （torch==2.6.0+cu124 + torchvision==0.21.0+cu124，机器已验证组合）+
+  显式 `--index-url`，并排除出批量 `--upgrade`。F06——FlexiCT 推理重建
+  网络时强制加载预训练 backbone，未装 backbone 文件的机器上迁移模型
+  不可用；`flexict_infer_environment` 设 `FLEXICT_SKIP_BACKBONE=1`，
+  trainer 感知跳过（推理时 Predictor 随即加载完整训练 checkpoint，
+  backbone 初始化无关紧要）。T06/T07/T08/T12：新增
+  TestEnvironmentRepairSemantics 4 例（导入名→pip 名翻译与安装路径、
+  假全绿契约、torch 钉版对 + index-url、SKIP_BACKBONE 双侧契约）；
+  顺带修复 5 个预存 test_all 失败（3× 过期 `_record_failed_case` stub
+  缺 `source_image` kwarg——R63 引入；2× R61-24 中文化后源码断言过宽）。
+  L4 实机验收（真实 pip 安装/迁移机器）仍待实机窗口，代码层契约已全
+  钉住。证据：flexict_integration 105/105、TestEnvironmentRepairSemantics
+  + 相邻类 31/31、冒烟 8/8（`20261002T140530`）。
 - [ ] **R65-17 = F10【P1】拖拽多选扩大或不可提交** + **F15【P2】状态
   视觉**（F15 大部分已被 R61-21/R61-24 覆盖，需对照 HEAD 核实残项）。
   验收 T10/T15。

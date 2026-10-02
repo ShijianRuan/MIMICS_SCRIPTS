@@ -4207,15 +4207,47 @@ job_id 贯通 status、runtime 报告带 id、launcher 源码契约：归档 +
 uuid + 身份终判）。证据：TestForeignScriptIntegration 14/14、
 append/stop 流程绿、冒烟 8/8（`20261002T123216`）。
 
+### R65-16（F06/F07/F08/F12，W05 部署组）：环境修复真实性（`c024e36`）
+
+对照 HEAD 核实四项缺陷均真实存在。F07：setup_env 的修复命令按导入名
+拼写 pip 包名（`pip install yaml` 必失败），新增 `_to_pip_names()`
+（`_IMPORT_TO_PIP` 反查）在安装与所有用户消息前翻译（yaml→pyyaml、
+onnxruntime→onnxruntime-gpu）。F08：安装校验用 find_spec——包存在但
+二进制坏（Windows DLL 加载失败）也判 ok，体检"假全绿"；改为逐包真实
+`__import__`，`all_ok` 要求零错误，坏包进 `broken_imports` 并提示
+DLL 问题。F12：torch/torchvision 分开安装且无索引优先级，可解析出
+CPU 版或错配版；改为钉版对（torch==2.6.0+cu124 +
+torchvision==0.21.0+cu124，机器已验证组合）+ 显式 `--index-url`，
+并排除出批量 `--upgrade`。F06：FlexiCT 推理重建网络时强制加载预训练
+backbone，未装 backbone 文件的机器上迁移模型不可用；
+`flexict_infer_environment` 设 `FLEXICT_SKIP_BACKBONE=1`，trainer 跳过
+backbone 初始化（推理时 Predictor 随即加载完整训练 checkpoint）。
+测试沉淀：TestEnvironmentRepairSemantics 4 例；顺带修复 5 个预存
+test_all 失败（3× 过期 `_record_failed_case` stub 缺 R63 的
+`source_image` kwarg；2× R61-24 中文化后源码断言过宽——改钉模块级
+源码契约）。证据：flexict_integration 105/105、相邻类 31/31、
+冒烟 8/8（`20261002T140530`）。L4 实机（真实 pip 安装/迁移机器）验收
+待实机窗口，代码层契约已全钉住。
+
+### 分支迁移（工作区事件，2026-10-02）
+
+用户指正：此前多个会话的 F/R61/R62 系列提交误落在他人分支
+`ai-real-data-validation`（该分支自 `al-review-loop@37c8219` 创建）。
+已将本人 45 个提交（R61 后半 + R62 + R65/F 系列 + 验证战役 docs）按原
+序 cherry-pick 迁至 `al-review-loop`，全部干净重放、零冲突；两个他人
+提交（`911776e` R-P1-8、`4e603b0` R-P1-9）留在原分支未动，分支本身
+未删改。迁移时未提交的 W05 工作区改动经 stash 随迁。flexict 套件在
+迁移后为 105/105（原分支 109 中的 4 例为 R-P1-9 新增，属他人工作未
+随迁，数字吻合）。迁移后 al-review-loop 本地领先 origin 56 提交。
+
 ### 下一步
 
-W04（R65-5/6/8）、W06 全部（R65-7=F28、R65-19=F11、R65-11=F26+F27）已
-关闭。W03 仅剩 R65-12（F01 DICOM 系列/多帧——需 L3 实机配合，验收
-成本高）；之后按交接顺序 W05（R65-16 = F06/F07/F08/F12 依赖清单/
-能力检查）、W08（R65-17 = F10+F15 多选作用域 + 视觉状态、
-R65-18 = F04+F13）；R65-13 = F05（AL 叠加自动标记已标注——F02 修复后
-该行为已真实暴露，`_al_finish_conversion` 成功路径仍调
-`_al_mark_annotated`，需结合产品语义评估）。
+W04（R65-5/6/8）、W06 全部（R65-7=F28、R65-19=F11、R65-11=F26+F27）、
+W05（R65-16）已关闭。W03 仅剩 R65-12（F01 DICOM 系列/多帧——需 L3
+实机配合，验收成本高）；之后按交接顺序 W08（R65-17 = F10+F15 多选
+作用域 + 视觉状态、R65-18 = F04+F13）；R65-13 = F05（AL 叠加自动标记
+已标注——F02 修复后该行为已真实暴露，`_al_finish_conversion` 成功
+路径仍调 `_al_mark_annotated`，需结合产品语义评估）。
 
 ### 工作区事件登记
 
