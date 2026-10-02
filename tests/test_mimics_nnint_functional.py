@@ -90,8 +90,6 @@ class ConfigTests(unittest.TestCase):
         config = common.load_config()
         self.assertIsInstance(config, dict)
         self.assertIn("workspace_dir", config)
-        self.assertIn("default_strategy", config)
-        self.assertEqual(config["default_strategy"], "clopa_in")
 
     def test_workspace_root_resolves(self):
         ws = common.workspace_root()

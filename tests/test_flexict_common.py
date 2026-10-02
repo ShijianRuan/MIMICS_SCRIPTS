@@ -17,28 +17,19 @@ import flexict_common as fc
 
 
 class TestConfig(unittest.TestCase):
-    def test_load_config_has_13_keys(self):
-        config = fc.load_config()
-        expected = {
-            "workspace_dir", "flexict_dir", "pretrained_weights_dir",
-            "default_configuration", "default_epochs",
-            "default_mirror_disable_axes", "default_val_cases",
-            "dataset_id_first", "default_uncertainty_method",
-            "gpu_lock_timeout_seconds", "label_export_timeout_seconds",
-            "job_retention_days", "status_poll_seconds",
-        }
-        self.assertEqual(set(config.keys()), expected)
-
-    def test_load_config_missing_file_falls_back_to_defaults(self):
+    def test_load_config_defaults_are_complete(self):
         config = fc.load_config(Path(tempfile.gettempdir()) / "definitely_missing.json")
         self.assertEqual(config, fc.DEFAULT_CONFIG)
+        # Internal mechanism keys (lock/poll/timeout/dataset-id band) come
+        # from DEFAULT_CONFIG, not from the annotator-facing JSON file.
+        self.assertEqual(config["gpu_lock_timeout_seconds"], 86400)
+        self.assertEqual(config["dataset_id_first"], 750)
 
     def test_config_file_matches_defaults_shape(self):
-        # The checked-in flexict_config.json must be loadable and carry the
-        # same key set as the defaults (values may differ).
+        # The checked-in flexict_config.json must be loadable and every key
+        # it carries must be a known key (unknown keys are a config drift).
         config = fc.load_config()
-        self.assertEqual(len(config), 13)
-        self.assertEqual(config["dataset_id_first"], 750)
+        self.assertTrue(set(config.keys()) <= set(fc.DEFAULT_CONFIG.keys()))
 
 
 class TestWorkspacePaths(unittest.TestCase):
@@ -210,16 +201,22 @@ class TestNormalizeRequest(unittest.TestCase):
 
 class TestPretrainedWeights(unittest.TestCase):
     def test_resolve_pretrained_dir_finds_repo_weights(self):
-        # The repo ships weights on this machine (gitignored); the resolver
-        # must find them without any config override.
-        config = fc.load_config()
-        config["pretrained_weights_dir"] = ""
-        weights, source = fc.resolve_pretrained_dir(config)
-        self.assertEqual(source, "repo")
-        self.assertTrue(
-            (weights / "flexict_2d" / "model.safetensors").is_file())
-        self.assertTrue(
-            (weights / "flexict_3d" / "model.safetensors").is_file())
+        # Resolve against a synthetic repo layout so the test does not depend
+        # on the ~1.1 GB gitignored weights being present on this machine.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "flexict-repo"
+            for sub in ("flexict_2d", "flexict_3d"):
+                (repo / "weights" / sub).mkdir(parents=True)
+                (repo / "weights" / sub / "model.safetensors").write_bytes(b"x")
+            config = dict(fc.DEFAULT_CONFIG)
+            config["flexict_dir"] = str(repo)
+            config["pretrained_weights_dir"] = ""
+            weights, source = fc.resolve_pretrained_dir(config)
+            self.assertEqual(source, "repo")
+            self.assertTrue(
+                (weights / "flexict_2d" / "model.safetensors").is_file())
+            self.assertTrue(
+                (weights / "flexict_3d" / "model.safetensors").is_file())
 
     def test_resolve_pretrained_dir_rejects_bad_override(self):
         config = fc.load_config()

@@ -1,15 +1,9 @@
 {
   "workspace_dir": "flexict_models",
-  "flexict_dir": "integrations/flexict-finetune",
   "pretrained_weights_dir": "",
   "default_configuration": "auto",
   "default_epochs": 150,
-  "default_mirror_disable_axes": "",
   "default_val_cases": 3,
-  "dataset_id_first": 750,
-  "default_uncertainty_method": "disagreement",
-  "gpu_lock_timeout_seconds": 86400,
-  "label_export_timeout_seconds": 7200,
   "job_retention_days": 30,
-  "status_poll_seconds": 1.0
+  "flexict_dir": "integrations/flexict-finetune"
 }

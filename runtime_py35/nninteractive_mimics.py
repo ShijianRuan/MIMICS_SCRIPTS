@@ -1428,10 +1428,10 @@ def _call_mimics_bridge(config, payload, timeout_seconds=1800):
 
 
 def _source_image_export(image, config):
-    image_input_mode = str(config.get("image_input_mode", "") or "").strip().lower()
+    image_input_mode = str(config.get("image_input_mode", "mimics") or "").strip().lower()
     force_source = image_input_mode in ("source", "source_image", "original", "original_image")
     force_mimics_buffer = image_input_mode in ("mimics", "mimics_buffer", "buffer")
-    allow_source_fallback = bool(config.get("fallback_to_mimics_buffer_when_source_unavailable", False))
+    allow_source_fallback = bool(config.get("fallback_to_mimics_buffer_when_source_unavailable", True))
     if force_mimics_buffer or (not force_source and not bool(config.get("prefer_source_image_for_nninteractive", False))):
         _mimics_log(
             logging.INFO,
@@ -1600,7 +1600,7 @@ def _source_image_export(image, config):
                         "image_path": path,
                         "source_nifti_out": cache_path,
                     },
-                    timeout_seconds=float(config.get("bridge_timeout_seconds", 1800)),
+                    timeout_seconds=float(config.get("bridge_timeout_seconds", 4620)),
                 )
             except Exception as exc:
                 message = "nnInteractive on-demand source cache generation failed: {}".format(exc)
@@ -1803,7 +1803,7 @@ def _export_image_for_nninteractive(config, image, path, allow_buffer_export=Tru
         source_config = dict(config)
     # Derived oblique imports would otherwise build an aligned source cache
     # right here on the Mimics GUI thread (a bridge call of up to
-    # bridge_timeout_seconds, default 1800). The external image worker
+    # bridge_timeout_seconds, default 4620). The external image worker
     # resamples the raw source onto the Mimics grid from the recorded
     # affines instead, so alignment never blocks the GUI. An explicit
     # false in the config keeps the old synchronous behavior.
@@ -2588,7 +2588,7 @@ def _bridge_parameters(config, image_export, base_export):
     startup_timeout = int(
         os.environ.get(
             "NNINTERACTIVE_SERVER_STARTUP_TIMEOUT",
-            config.get("server_startup_timeout_seconds", 600),
+            config.get("server_startup_timeout_seconds", 900),
         )
     )
     prediction_timeout = int(
@@ -2632,7 +2632,7 @@ def _bridge_parameters(config, image_export, base_export):
         "server_idle_timeout_seconds": int(
             os.environ.get(
                 "NNINTERACTIVE_SERVER_IDLE_TIMEOUT",
-                config.get("server_idle_timeout_seconds", 1800),
+                config.get("server_idle_timeout_seconds", 300),
             )
         ),
         "gpu_lock_timeout_seconds": float(
@@ -3351,7 +3351,7 @@ def _start_async_worker(python_exe, bridge_script, worker_dir):
 
 
 def _async_worker_idle_timeout(config):
-    return int(config.get("async_worker_idle_timeout_seconds", 3600))
+    return int(config.get("async_worker_idle_timeout_seconds", 900))
 
 
 def _shared_image_worker_alive(worker):

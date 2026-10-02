@@ -819,7 +819,7 @@ def _launch(action, image, target, config, job_dir, prompts=None, visual_objects
         parent_pid=os.getpid(),
         state_path=os.path.join(job_dir, "status.json"),
     )
-    timeout = float((config.get(action) or {}).get("timeout_seconds", 1800))
+    timeout = float((config.get(action) or {}).get("timeout_seconds", 900))
     monitor = {
         "key": job_dir,
         "action": action,

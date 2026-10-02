@@ -4,29 +4,47 @@ This document lists the supported user-facing configuration files and
 environment variables. Paths may be absolute or relative to the project root
 unless noted otherwise.
 
+## How configuration is layered
+
+Each config JSON carries **only the keys an annotator or an administrator
+plausibly changes**. Everything else — timeouts, poll intervals, cache
+retention, internal mechanism switches — is built into the code as defaults.
+Removing a key from a JSON file never breaks anything: the code falls back to
+the same default, and a key re-added later overrides it again. Keys fall into
+three groups:
+
+1. **Annotator keys** — shown in Mimics under **Admin > Edit Configs** with a
+   one-line explanation each.
+2. **Ops keys** — deployment-specific (workspace/model folders); edited by
+   hand only when moving an installation.
+3. Internal keys — not in the JSON files at all; the tables below document
+   them for operators who need an escape hatch.
+
 ## `mimics_io_config.json`
 
 | Key | Default | Purpose |
 | --- | --- | --- |
 | `mimics_output_dir` | `""` | Default folder for generated `.mcs` projects. An empty value uses `<dataset>/mcs_output`. This setting does not redirect mask exports, training runs, or logs. |
+| `mimics_background_exe` | auto-detect | Path to `materialise.exe` used for background batch operations. Empty = auto-detect from the running Mimics. |
 | `mimics_buffer_axes` | `[0, 1, 2]` | Optional advanced mapping from external array axes to the Mimics voxel buffer. Change only after real-data orientation validation. |
 | `mimics_buffer_flips` | `[false, false, false]` | Optional advanced flips paired with `mimics_buffer_axes`. Change only after real-data orientation validation. |
 
 ## `interactive_algorithms_config.json`
 
 Controls the interactive segmentation algorithms run outside Mimics
-(ScribblePrompt; shared job retention for all algorithm jobs).
+(ScribblePrompt).
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `poll_seconds` | `0.25` | Mimics-side job monitor poll interval. |
-| `job_retention_days` | `3` | Terminal job folder retention before cleanup. |
-| `job_max_terminal` | `20` | Maximum terminal job folders kept. |
-| `scribbleprompt.timeout_seconds` | `900` | Per-job external process timeout. |
-| `scribbleprompt.device` | `"cpu"` | Inference device. |
-| `scribbleprompt.input_size` | `128` | Model input resolution. |
-| `scribbleprompt.prior_logit_magnitude` | `6.0` | Prior logit magnitude fed to the model. |
-| `scribbleprompt.checkpoint` | `integrations/ScribblePrompt/checkpoints/...` | ScribblePrompt UNet checkpoint. |
+| `scribbleprompt.timeout_seconds` | `900` | Give up waiting for a ScribblePrompt prediction after this many seconds. |
+| `scribbleprompt.device` | `"cpu"` | `cpu` (default; never competes with training for GPU memory) or `cuda`. |
+
+Internal keys (code defaults; add to the file only as an escape hatch):
+`poll_seconds` (0.25), `job_retention_days` (3), `job_max_terminal` (20),
+`scribbleprompt.input_size` (128), `scribbleprompt.prior_logit_magnitude`
+(6.0), `scribbleprompt.gpu_lock_timeout_seconds` (120). The checkpoint path
+comes from `SCRIBBLEPROMPT_CHECKPOINT` or the bundled
+`integrations/ScribblePrompt/checkpoints/` location.
 
 ## `window_level_presets.json`
 
@@ -148,34 +166,29 @@ settings now live in the pipeline-specific configs documented below.
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `workspace_dir` | `"nninteractive_task_models"` | Task-model workspace root (custom trained models). |
-| `model_dir` | *(unset)* | Extra search location for the official model folder (must contain `fold_*/checkpoint_final.pth`); checked after the `NNINTERACTIVE_MODEL_DIR` environment variable and before the bundled `models/nnInteractive_v1.0` folders. Relative paths resolve against the project root. |
-| `device` | `"auto"` | Inference device selection. |
-| `image_input_mode` | `"mimics"` | Image source used by nnInteractive. |
-| `task_model_image_input_mode` | `"auto"` | Input policy for custom task models: prefer a readable local source, otherwise use the portable image stored in the `.mcs`. MR rescale metadata/tags are restored when available; missing mappings continue as logged raw-GV best effort. Set `source` only for strict source-file parity, or `mimics` to always use the project buffer. |
-| `prefer_source_image_for_nninteractive` | `false` | Prefer the original source image when enabled and geometry is validated. |
-| `fallback_to_mimics_buffer_when_source_unavailable` | `true` | Use the Mimics image buffer if the source image cannot be validated. |
-| `fallback_to_source_when_mimics_export_fails` | `false` | Permit the reverse fallback after a Mimics-buffer export failure. |
-| `auto_start_server` | `true` | Start the external nnInteractive service on demand. |
-| `async_start_worker_before_prompt` | `true` | Start image preparation before prompt collection. |
-| `async_reuse_image_worker` | `true` | Reuse a prepared image worker within a session. |
-| `incremental_interaction_replay` | `true` | Reuse prior prompt state when supported. |
-| `existing_mask_result_mode` | `"ask"` | Ask whether to update the selected mask or create an editable copy. |
-| `keep_server_warm_after_session` | `true` | Keep the server warm until its idle timeout. |
-| `server_idle_timeout_seconds` | `300` | Warm-server idle lifetime. |
-| `async_worker_idle_timeout_seconds` | `900` | Image-worker idle lifetime. |
-| `server_startup_timeout_seconds` | `900` | Server startup deadline. |
-| `set_image_timeout_seconds` | `1800` | Image upload/preprocessing deadline. |
-| `prediction_timeout_seconds` | `1800` | Prediction deadline. |
-| `bridge_timeout_seconds` | `4620` | Overall bridge deadline. |
-| `gpu_lock_timeout_seconds` | `30` | GPU lock wait before reporting contention. |
-| `minimum_free_gpu_memory_gb` | `4` | Free-VRAM floor checked before starting the CUDA server; below it the start fails with a "close other GPU programs" message instead of a mid-start OOM. |
-| `async_poll_seconds` | `0.25` | Mimics-side async state polling interval. |
-| `async_result_poll_seconds` | `0.25` | Result polling interval. |
-| `async_job_retention_days` | `3` | Terminal async-job retention. |
-| `async_job_max_terminal` | `20` | Maximum terminal async-job records. |
-| `source_cache_retention_days` | `7` | Source-image cache retention. |
-| `source_cache_max_entries` | `12` | Maximum source-image cache entries. |
+| `workspace_dir` | `"nninteractive_task_models"` | Task-model workspace root (custom trained models). Ops key: change only when relocating the workspace. |
+| `device` | `"auto"` | Inference device: `auto` = first free GPU, `cpu` = force CPU (use when the GPU is needed by a training job). |
+| `auto_start_server` | `true` | Start the nnInteractive server automatically when an annotation session begins. |
+| `existing_mask_result_mode` | `"ask"` | Ask whether to update the selected mask or create an editable copy (`ask` / `replace` / `copy`). |
+| `keep_server_warm_after_session` | `true` | Keep the server alive between annotation sessions so the next session starts faster. |
+| `server_idle_timeout_seconds` | `300` | The warm server shuts down after this many idle seconds. |
+| `minimum_free_gpu_memory_gb` | `4` | Annotation sessions refuse to start when the GPU has less free memory than this, with a "close other GPU programs" message instead of a mid-start OOM. |
+
+Internal keys (code defaults; add to the file only as an escape hatch):
+`model_dir` (unset), `image_input_mode` ("mimics"),
+`task_model_image_input_mode` ("auto"),
+`prefer_source_image_for_nninteractive` (false),
+`fallback_to_mimics_buffer_when_source_unavailable` (true),
+`fallback_to_source_when_mimics_export_fails` (false),
+`async_start_worker_before_prompt` (true), `async_reuse_image_worker` (true),
+`incremental_interaction_replay` (true),
+`async_worker_idle_timeout_seconds` (900),
+`server_startup_timeout_seconds` (900), `set_image_timeout_seconds` (1800),
+`prediction_timeout_seconds` (1800), `bridge_timeout_seconds` (4620),
+`gpu_lock_timeout_seconds` (30), `async_poll_seconds` (0.25),
+`async_result_poll_seconds` (0.25), `async_job_retention_days` (3),
+`async_job_max_terminal` (20), `source_cache_retention_days` (7),
+`source_cache_max_entries` (12).
 
 ## `nninteractive_finetune_config.json`
 
@@ -184,23 +197,20 @@ export, training jobs, and quality gating).
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `workspace_dir` | `"nninteractive_task_models"` | Task-model workspace root (tasks, models, registry). |
-| `official_model_dir` | `"nninteractive_env/models/nnInteractive_v1.0"` | Base model that fine-tuning starts from. |
-| `default_strategy` | `"clopa_in"` | Default prompt-sampling strategy for new jobs. |
-| `default_epochs` | `10` | Initial epoch spinner value in the training dialog. |
-| `minimum_epochs` | `4` | Lower bound of the epoch spinner. Exists so a candidate always trains long enough for early-epoch noise to settle before the AUC comparison decides `not_improved`; a 1-epoch candidate would otherwise be rejected on fluke metrics. |
-| `maximum_epochs` | `20` | Upper bound of the epoch spinner. |
+| `workspace_dir` | `"nninteractive_task_models"` | Task-model workspace root (tasks, models, registry). Ops key. |
+| `default_epochs` | `10` | Initial epoch spinner value in the training dialog (range 4–20). |
 | `default_validation_fraction` | `0.2` | Default hold-out fraction offered for validation cases. |
-| `minimum_validation_cases_for_auto_selection` | `2` | A candidate is only auto-selected as the recommended model when at least this many validation cases were evaluated; with fewer, the result registers as `unverified`. |
-| `minimum_mean_auc_improvement` | `0.0` | Candidate must beat the current model's mean trajectory AUC by at least this margin to qualify. |
-| `maximum_severe_case_regression` | `0.2` | Quality gate: any validation case whose AUC drops more than this against the current model marks the candidate `not_improved` even when the mean improves. |
-| `training_steps_per_epoch` | `50` | Trainer steps per epoch. |
-| `validation_batches` | `8` | Validation batches per evaluation pass. |
-| `gpu_lock_timeout_seconds` | `86400` | How long a queued training job waits for the shared GPU before failing. |
-| `label_export_timeout_seconds` | `3600` | Deadline for the background-Mimics label export stage. |
 | `job_retention_days` | `30` | Terminal job folder retention before cleanup. |
 | `keep_failed_training_artifacts` | `false` | Keep job artifacts after a failed training run for diagnosis (default: cleaned up). |
-| `status_poll_seconds` | `1.0` | Model Center job-status polling interval. |
+
+Internal keys (code defaults; add to the file only as an escape hatch):
+`official_model_dir` (auto-detected under `python_env`/`nninteractive_env`),
+`minimum_epochs` (4), `maximum_epochs` (20),
+`minimum_validation_cases_for_auto_selection` (2),
+`minimum_mean_auc_improvement` (0.0), `maximum_severe_case_regression` (0.2),
+`training_steps_per_epoch` (50), `validation_batches` (8),
+`gpu_lock_timeout_seconds` (86400), `label_export_timeout_seconds` (3600),
+`prepared_cache_retention_days` (30), `status_poll_seconds` (1.0).
 
 When a job fails, the Model Center progress page shows an aggregated
 diagnosis (recorded error, failing stage, log tails, and cleanup summary)
@@ -220,26 +230,25 @@ locked to the validated few-shot configuration and is not configurable here.
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `workspace_dir` | `"flexict_models"` | FlexiCT workspace root (jobs, runtime nnU-Net folders, model registry). Relative paths resolve against the project root. |
-| `flexict_dir` | `"integrations/flexict-finetune"` | The standalone FlexiCT integration repo (backbone, trainers, uncertainty tooling). |
+| `workspace_dir` | `"flexict_models"` | FlexiCT workspace root (jobs, runtime nnU-Net folders, model registry). Ops key: change only when relocating the workspace. |
+| `flexict_dir` | `"integrations/flexict-finetune"` | The standalone FlexiCT integration repo. Ops key. |
 | `pretrained_weights_dir` | `""` | Optional absolute override for the pretrained FlexiCT weights (needs `flexict_2d/model.safetensors` and `flexict_3d/model.safetensors`). Empty = use `integrations/flexict-finetune/weights/`. |
 | `default_configuration` | `"auto"` | `2d`, `3d_fullres`, `pair` (2D+3D for active learning), or `auto` (<16GB GPU → 2D, otherwise pair). |
 | `default_epochs` | `150` | Validated few-shot epoch count. |
-| `default_mirror_disable_axes` | `""` | Mirror-augmentation axes to disable; `"1"` for single-sided organs (one kidney). |
 | `default_val_cases` | `3` | Default held-out validation cases (best-checkpoint selection). |
-| `dataset_id_first` | `750` | First id of the FlexiCT dataset band (750-799, kept apart from nnU-Net's 701+). |
-| `default_uncertainty_method` | `"disagreement"` | Active-learning uncertainty method (2D+3D prediction disagreement). |
-| `gpu_lock_timeout_seconds` | `86400` | How long a queued job waits for the shared GPU before failing. |
-| `label_export_timeout_seconds` | `7200` | Deadline for the background-Mimics label export stage. |
 | `job_retention_days` | `30` | Terminal job folder retention before cleanup (0 disables sweeping). |
-| `runtime_retention_days` | `30` | Retention for rebuildable `runtime/` Dataset folders (nnUNet_raw/nnUNet_preprocessed/nnUNet_results, 0 disables). Datasets referenced by registered models or non-terminal jobs are never removed; everything else is deleted once older than this. |
-| `source_grid_cache_retention_days` | `30` | Retention for the rebuildable `cache/source_grid/` per-case training inputs (0 disables). Task trees of non-terminal jobs are never removed. |
-| `status_poll_seconds` | `1.0` | Job-status polling interval. |
+
+Internal keys (code defaults; add to the file only as an escape hatch):
+`default_mirror_disable_axes` (""), `dataset_id_first` (750),
+`default_uncertainty_method` ("disagreement"), `gpu_lock_timeout_seconds`
+(86400), `label_export_timeout_seconds` (7200), `status_poll_seconds` (1.0).
 
 ## `nnunet_config.json`
 
 Controls the generic nnU-Net training/inference pipeline's job housekeeping.
 The training recipe itself is managed by nnU-Net and is not configurable here.
+All three keys are internal (code defaults; add to the file only as an escape
+hatch — none are annotator-facing).
 
 | Key | Default | Purpose |
 | --- | --- | --- |
