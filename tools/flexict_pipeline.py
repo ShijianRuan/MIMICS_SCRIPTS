@@ -123,8 +123,19 @@ def normalize_flexict_request(values: dict[str, Any]) -> dict[str, Any]:
     # carried separately and normalized after.
     if operation == "train":
         flexict_configuration = str(out.get("configuration") or "auto").strip().lower()
+        # The normalizer needs a CONCRETE nnU-Net configuration to validate
+        # patch_size/spacing shape against (2 values for 2d, 3 for 3d) and to
+        # enforce the 2d-no-manual-spacing rule. Pass the concrete plan behind
+        # the FlexiCT value; only "auto"/"pair" (both may expand to 3d) defer
+        # to 3d validation, which accepts 2- or 3-element patch sizes.
+        # A 2d placeholder would reject every 3-element patch_size/spacing —
+        # the patch self-rescue for OOM'd 3d training (R-P1-9).
+        if flexict_configuration in {"3d_fullres", "auto", "pair"}:
+            nnunet_configuration = "3d_fullres"
+        else:
+            nnunet_configuration = "2d"
         nnunet_values = dict(out)
-        nnunet_values["configuration"] = "2d"  # concrete placeholder for the normalizer
+        nnunet_values["configuration"] = nnunet_configuration
         if not nnunet_values.get("dataset_id"):
             # The nnU-Net normalizer defaults a missing dataset_id to 701
             # (the nnU-Net band) — suggest a free id in the FlexiCT 750-799

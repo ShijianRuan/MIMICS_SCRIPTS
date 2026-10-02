@@ -125,6 +125,38 @@ class TestNormalizeFlexictRequest(unittest.TestCase):
         with self.assertRaises(ValueError):
             fp.normalize_flexict_request({"operation": "explode"})
 
+    def test_3d_request_accepts_3_element_patch_size(self):
+        """R-P1-9: the normalizer used a 2d placeholder, so every 3-element
+        patch_size (the OOM self-rescue for 3d training on small GPUs) was
+        rejected with "must contain 2 positive values for 2d" — 3d FlexiCT
+        requests could never carry a manual patch size.
+        """
+        request = fp.normalize_flexict_request(_training_request(
+            "X:/d", "W:/w", configuration="3d_fullres",
+            patch_size=[96, 96, 96], batch_size=2))
+        self.assertEqual(request["patch_size"], [96, 96, 96])
+        self.assertEqual(request["batch_size"], 2)
+
+    def test_2d_request_still_rejects_3_element_patch_size(self):
+        with self.assertRaises(ValueError):
+            fp.normalize_flexict_request(_training_request(
+                "X:/d", "W:/w", configuration="2d",
+                patch_size=[96, 96, 96]))
+
+    def test_auto_request_accepts_3_element_patch_size(self):
+        # 'auto' can expand to 3d (pair) on large GPUs, so its planning
+        # fields must validate against the 3d shape, not the 2d placeholder.
+        request = fp.normalize_flexict_request(_training_request(
+            "X:/d", "W:/w", configuration="auto", patch_size=[96, 96, 96]))
+        self.assertEqual(request["patch_size"], [96, 96, 96])
+        self.assertEqual(request["configuration"], "auto")
+
+    def test_3d_request_accepts_manual_spacing(self):
+        request = fp.normalize_flexict_request(_training_request(
+            "X:/d", "W:/w", configuration="3d_fullres",
+            spacing=[1.5, 1.5, 1.5]))
+        self.assertEqual(request["spacing"], [1.5, 1.5, 1.5])
+
 
 class TestConfigurationResolution(unittest.TestCase):
     def test_2d_and_3d_are_concrete(self):
