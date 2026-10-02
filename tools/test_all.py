@@ -15352,6 +15352,164 @@ class TestForeignScriptIntegration(unittest.TestCase):
         # per-case worker either way.
         self.assertTrue(captured["args"])
 
+    def test_cancelled_sync_publishes_the_case_ledger(self):
+        """F27: cancelling a sync batch between cases used to return before
+        writing results.json/failed_cases.json - the work already finished
+        was unauditable. Every exit path must publish the ledger."""
+        import sync_missing_masks_batch
+
+        job_dir = os.path.join(self.tmp, "job")
+        os.makedirs(job_dir)
+        stop_path = os.path.join(job_dir, "stop.json")
+        # Two cases; the stop file appears after the first one finishes.
+        made_cases = []
+
+        def fake_sync_one(case, _job_dir, force=False):
+            made_cases.append(case["case_id"])
+            if len(made_cases) == 1:
+                with open(stop_path, "wb") as handle:
+                    handle.write(b"stop")
+                return {"case_id": case["case_id"], "status": "completed"}
+            raise AssertionError("the second case must never be opened")
+
+        original = sync_missing_masks_batch._sync_one
+        sync_missing_masks_batch._sync_one = fake_sync_one
+        try:
+            config_path = os.path.join(job_dir, "sync_config.json")
+            with open(config_path, "w") as handle:
+                json.dump({
+                    "job_dir": job_dir,
+                    "stop_path": stop_path,
+                    "cases": [
+                        {"case_id": "case_a", "mcs_path": "a.mcs",
+                         "output_mcs_path": "out_a.mcs",
+                         "source_masks": [{"name": "liver", "mask_path": "l"}]},
+                        {"case_id": "case_b", "mcs_path": "b.mcs",
+                         "output_mcs_path": "out_b.mcs",
+                         "source_masks": [{"name": "liver", "mask_path": "l"}]},
+                    ],
+                }, handle)
+            exit_code = sync_missing_masks_batch.run_job(config_path)
+        finally:
+            sync_missing_masks_batch._sync_one = original
+
+        self.assertEqual(["case_a"], made_cases)
+        self.assertEqual(0, exit_code)
+        # The ledger and status exist and reflect the finished case.
+        with open(os.path.join(job_dir, "results.json")) as handle:
+            results = json.load(handle)
+        self.assertEqual(["case_a"], [row["case_id"] for row in results])
+        with open(os.path.join(job_dir, "failed_cases.json")) as handle:
+            self.assertEqual([], json.load(handle))
+        with open(os.path.join(job_dir, "status.json")) as handle:
+            status = json.load(handle)
+        self.assertEqual("cancelled", status["status"])
+        self.assertEqual(1, status["completed"])
+        self.assertEqual("case_b", status["next_case"])
+
+    def test_cancelled_append_publishes_the_failure_ledger(self):
+        """F27 on the append batch runner: the per-case failure ledger is
+        durable even when the stop file is found before any case."""
+        import append_masks_batch
+
+        job_dir = os.path.join(self.tmp, "job")
+        os.makedirs(job_dir)
+        stop_path = os.path.join(job_dir, "stop.json")
+        with open(stop_path, "wb") as handle:
+            handle.write(b"stop")
+
+        def fail_append(*_a, **_kw):
+            raise AssertionError("no case may be opened after the stop file")
+
+        original = append_masks_batch._append_one
+        append_masks_batch._append_one = fail_append
+        try:
+            config_path = os.path.join(job_dir, "append_config.json")
+            with open(config_path, "w") as handle:
+                json.dump({
+                    "job_dir": job_dir,
+                    "stop_path": stop_path,
+                    "cases": [{"case_id": "case_a", "mcs_path": "a.mcs"}],
+                }, handle)
+            exit_code = append_masks_batch.run_job(config_path)
+        finally:
+            append_masks_batch._append_one = original
+
+        self.assertEqual(0, exit_code)
+        with open(os.path.join(job_dir, "failed_cases.json")) as handle:
+            self.assertEqual([], json.load(handle))
+        with open(os.path.join(job_dir, "status.json")) as handle:
+            self.assertEqual("cancelled", json.load(handle)["status"])
+
+    def test_sync_status_carries_the_job_id(self):
+        """F26: every status written by a sync attempt carries the launcher's
+        job_id, and the launcher only accepts its own attempt's status as
+        success - a leftover from an earlier attempt must not pass."""
+        import sync_missing_masks_batch as sync_batch
+
+        source = self._source(os.path.join("tools", "sync_missing_masks.py"))
+        self.assertIn('payload.get("job_id") != job_id', source)
+        self.assertIn("uuid.uuid4().hex[:8]", source)
+        self.assertIn('"job_id": job_id', source)
+
+        # The runtime threads the config's job_id into every status write.
+        job_dir = os.path.join(self.tmp, "job")
+        os.makedirs(job_dir)
+        original = sync_batch._sync_one
+        sync_batch._sync_one = lambda *a, **kw: {"status": "skipped"}
+        original_job_id = sync_batch._JOB_ID
+        try:
+            config_path = os.path.join(job_dir, "sync_config.json")
+            with open(config_path, "w") as handle:
+                json.dump({
+                    "job_dir": job_dir,
+                    "job_id": "sync_test_identity",
+                    "cases": [
+                        {"case_id": "case_a", "mcs_path": "a.mcs",
+                         "output_mcs_path": "out_a.mcs",
+                         "source_masks": [{"name": "liver", "mask_path": "l"}]},
+                    ],
+                }, handle)
+            sync_batch.run_job(config_path)
+        finally:
+            sync_batch._sync_one = original
+            sync_batch._JOB_ID = original_job_id
+        with open(os.path.join(job_dir, "status.json")) as handle:
+            status = json.load(handle)
+        self.assertEqual("sync_test_identity", status["job_id"])
+
+    def test_stale_inspection_report_is_not_this_run_s_success(self):
+        """F26: a completed report left at the fixed --report path by an
+        earlier run must not be returned as success when the new process
+        dies before writing anything - the verdict requires the run's own
+        job_id, and the old report is archived as history first."""
+        import inspect_mcs_batch
+
+        # The runtime stamps every report write with the config's job_id.
+        job_dir = os.path.join(self.tmp, "job")
+        os.makedirs(job_dir)
+        report_path = os.path.join(job_dir, "inspect_report.json")
+        config_path = os.path.join(job_dir, "inspect_config.json")
+        with open(config_path, "w") as handle:
+            json.dump({
+                "job_dir": job_dir,
+                "job_id": "inspect_test_identity",
+                "report_path": report_path,
+                "cases": [],
+            }, handle)
+        inspect_mcs_batch.run_job(config_path)
+        with open(report_path) as handle:
+            self.assertEqual(
+                "inspect_test_identity", json.load(handle)["job_id"])
+
+        # The launcher: archives an existing report, threads the job_id into
+        # the config, and refuses a report without its own id.
+        source = self._source(os.path.join("tools", "inspect_mcs_projects.py"))
+        self.assertIn("uuid.uuid4().hex[:8]", source)
+        self.assertIn('"job_id": job_id', source)
+        self.assertIn("payload.get(\"job_id\") != job_id", source)
+        self.assertIn(".history.", source)
+
 
 class TestBatchPredictCommand(unittest.TestCase):
     """R61-23: `mimics_batch_cli predict` batch-dispatches inference jobs.

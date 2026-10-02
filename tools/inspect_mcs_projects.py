@@ -20,6 +20,7 @@ import argparse
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -76,13 +77,31 @@ def main(argv=None):
         mcs_files = mcs_files[: args.limit]
 
     stamp = time.strftime("%Y%m%dT%H%M%S")
+    # F26: a per-run job id (second-resolution stamps collide on double
+    # clicks) that every report written by this attempt carries, so a report
+    # from an earlier run at the same path can never be read as this run's.
+    job_id = "inspect_{}_{}".format(stamp, uuid.uuid4().hex[:8])
     job_dir = (
         Path(args.job_dir).resolve() if args.job_dir
-        else ROOT / ".mimics_runtime" / "inspect_jobs" / stamp
+        else ROOT / ".mimics_runtime" / "inspect_jobs" / job_id
     )
     job_dir.mkdir(parents=True, exist_ok=True)
     report_path = Path(args.report).expanduser().resolve()
     report_path.parent.mkdir(parents=True, exist_ok=True)
+    # F26: keep any older report at the fixed --report path as history
+    # instead of letting this run's first write clobber it silently.
+    if report_path.is_file():
+        archived = report_path.with_name(
+            "{}.history.{}.json".format(report_path.stem, stamp)
+        )
+        try:
+            report_path.replace(archived)
+        except OSError:
+            print(
+                "Could not archive the previous report at {}; it will be "
+                "overwritten.".format(report_path),
+                file=sys.stderr,
+            )
 
     config_path = job_dir / "inspect_config.json"
     runner_path = job_dir / "run_inspect.py"
@@ -90,6 +109,7 @@ def main(argv=None):
         __import__("json").dumps({
             "schema_version": "inspect_mcs_job.v1",
             "job_dir": str(job_dir),
+            "job_id": job_id,
             "report_path": str(report_path),
             "cases": [
                 {"case_id": p.stem, "mcs_path": str(p)} for p in mcs_files
@@ -175,6 +195,17 @@ def main(argv=None):
         pass
 
     payload = mimics_label_export.read_json(str(report_path), {}) or {}
+    # F26: only this attempt's report counts. A report without this run's
+    # job_id is a leftover from an earlier attempt at the same path - the
+    # background process died before writing anything - and must never be
+    # reported as this run's success.
+    if payload.get("job_id") != job_id:
+        print(
+            "The inspection process exited without writing a report for this "
+            "run (job {}); no report was produced.".format(job_id),
+            file=sys.stderr,
+        )
+        return 1
     print(
         "Inspection {status}: completed={completed}, failed={failed}, total={total}".format(
             status=payload.get("status", "unknown"),

@@ -22,6 +22,7 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -152,9 +153,12 @@ def main(argv=None):
         return 2
 
     stamp = time.strftime("%Y%m%dT%H%M%S")
+    # F26: uuid-suffixed job id (second-resolution stamps collide on double
+    # clicks, which used to make two launches share one job directory).
+    job_id = "sync_{}_{}".format(stamp, uuid.uuid4().hex[:8])
     job_dir = (
         Path(args.job_dir).expanduser().resolve() if args.job_dir
-        else ROOT / ".mimics_runtime" / "sync_missing_masks_jobs" / stamp
+        else ROOT / ".mimics_runtime" / "sync_missing_masks_jobs" / job_id
     )
     job_dir.mkdir(parents=True, exist_ok=True)
     config_path = job_dir / "sync_config.json"
@@ -164,6 +168,7 @@ def main(argv=None):
     config_path.write_text(json.dumps({
         "schema_version": "sync_missing_masks_job.v1",
         "job_dir": str(job_dir),
+        "job_id": job_id,
         "cases": cases,
         "force": bool(args.force),
         "status_path": str(status_path),
@@ -268,6 +273,17 @@ def main(argv=None):
         time.sleep(args.poll_seconds)
 
     payload = mimics_label_export.read_json(str(status_path), {}) or {}
+    # F26: only this attempt's status counts. A status without this run's
+    # job_id is a leftover from an earlier attempt at the same path - the
+    # background process died before writing anything - and must never be
+    # reported as this run's success.
+    if payload.get("job_id") != job_id:
+        print(
+            "The sync process exited without writing a status for this run "
+            "(job {}); nothing was synced.".format(job_id),
+            file=sys.stderr,
+        )
+        return 1
     print(
         "Sync {status}: completed={completed}, skipped={skipped}, failed={failed}".format(
             status=payload.get("status", "unknown"),
