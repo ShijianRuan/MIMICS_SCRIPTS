@@ -14,20 +14,20 @@ nnInteractive 交互标注+任务微调）各有一份可信的"真实有效"证
 | 功能 | 结果 | held-out Dice | 判据 | 结论 |
 |---|---|---|---|---|
 | nnU-Net 多器官训练+推理（远程 171） | 50 epochs 完成，模型注册 | liver 0.95–0.98 / spleen 0.92–0.99 / kidney 0.95–0.99（3 例） | ≥0.7 / ≥0.5 | **有效** |
-| FlexiCT liver 少样本微调+推理（远程 171） | 20 epochs 完成，模型注册 | liver 0.972–0.976（3 例） | ≥0.6 | **有效** |
+| FlexiCT liver 少样本微调+推理 2d（远程 171） | 20 epochs 完成，模型注册 | liver 0.972–0.976（3 例） | ≥0.6 | **有效** |
+| FlexiCT liver 少样本微调+推理 3d_fullres（远程 171） | 20 epochs 完成，模型注册 | liver 0.903–0.951（3 例） | ≥0.6 | **有效** |
 | nnInteractive 官方模型交互标注 | 点 prompt 即出 mask | liver 0.89–0.97 / kidney 0.89–0.96（4 例） | ≥0.8 / ≥0.6 | **有效** |
 | nnInteractive 任务微调（本机） | 训练完成，质量门通过 | 微调 vs 官方：Dice delta +0.013~+0.016（3/3 例），AUC +0.0032 | 不退化 | **有效** |
 | ScribblePrompt 切片交互分割（本机，真实官方 checkpoint） | 点+框 prompt 即出 mask | liver 0.87–0.95 / spleen 0.82–0.96 / kidney 0.21–0.95（8/9 organ-case ≥0.82） | 见 Phase 4c | **有效（1 个离值点已归因，见 4c）** |
-
-三个功能全部通过真实数据有效性验证。过程中发现并修复 7 个真实产品缺陷
-（3×P0 + P1-4/P1-5/P1-6/P1-8，各自 commit + 防回归测试，见"过程中发现的问题"）。
 
 **可信度对照实验**（回应"效果这么好是否可信"）见"可信度对照"节：五组对照
 （跨例错配、平凡基线、体积比、切片分布、表面 Dice）全部排除了"分数虚高"
 的系统成因。
 
-三个功能全部通过真实数据有效性验证。过程中发现并修复 6 个真实产品缺陷
-（3×P0 + P1-4/P1-5/P1-6，各自 commit + 防回归测试，见"过程中发现的问题"）。
+三个功能（nnU-Net 多器官 / FlexiCT 2d+3d / nnInteractive 官方+微调）全部通过
+真实数据有效性验证。过程中发现并修复 8 个真实产品缺陷
+（3×P0 + P1-4/P1-5/P1-6/P1-8/P1-9/P1-10，各自 commit + 防回归测试，见
+"过程中发现的问题"；另 P1-11 已登记待入账）。
 
 ## 选例清单（nibabel 逐例校验 4 器官 mask 非零体素）
 
@@ -169,6 +169,44 @@ namespace 现无 mimics 容器），无需处理。
 - **判据 liver Dice ≥ 0.6：3/3 例全部通过（实际 ~0.97）**。结论：FlexiCT
   liver 少样本远程微调 + 本地推理链路**真实有效**——few-shot 8 例 × 20
   epochs 即可把通用基座微调到接近专用模型水平。
+
+### 3d_fullres 补充验证（2026-10-02，真实完成）
+
+- 前次登记"3d 不可测（16GB 卡）"后重试，实际可行：请求级
+  patch_size=[96,96,96] + batch_size=2（planner 默认 [160,112,128] batch 2
+  在 16GB A4000 上首个 forward 即 OOM，需 7.38GiB 连续分配）。这是向导
+  暴露的自救路径（P1-8 的 patch 字段），不是代码改动。
+- **失败史（3 次提交失败，根因各不相同，均已如实修复/入账）**：
+  - 临时 profile `171_root_rp19_tmp` 无凭据管理器密码（profile 与密码分
+    存）→ store_password 补齐。
+  - 共享工作区被切到 al-review-loop 分支，R-P1-9 修复不在检出里 → 改用
+    git worktree 钉住验证分支快照提交（不碰共享工作区）。
+  - worktree 快照缺 python_env venv，后台 Mimics 导出的 call_bridge
+    FileNotFoundError，8 例标签全部导出失败但批次状态"完成"（P1-11，
+    见"过程中发现的问题"）→ MIMICS_BRIDGE_PYTHON 指向主仓库 venv。
+- **训练完成**：job `train_20261002T154945_7e510247`（171 服务器，镜像
+  1.2 含 R-P1-9），20 epochs，~7.2 min/epoch；EMA pseudo Dice 0.437 →
+  0.674；fold 内验证 Dice 0.618（s0001 0.888 / s0011 0.965 / s0012 0.0
+  —— s0012 完全漏检，few-shot 3d 在该例的真实失败，如实记录）。
+- **结果回传遭遇两个连锁真实缺陷**（均入账）：result.tar 8.4GB（两个
+  4GB checkpoint）被固定 300s tar 超时杀掉（P1-10，已修复 commit
+  444ccfa）；且 171 的 /home/shijian_ruan 逻辑卷 100% 满（与根分区无
+  关，df -h /home 会误导）导致 tar 无空间。绕行：逐文件 SFTP 直拉 +
+  控制器同款 _register_flexict 注册。
+- **held-out 推理（本地 GPU，checkpoint_best、TTA 关、纯推理 ~47s/例）
+  liver Dice（与 2d 同例对照）**：
+
+  | case | FlexiCT 3d | FlexiCT 2d |
+  |------|-----------|-----------|
+  | s0038 | 0.9034 | 0.9722 |
+  | s0039 | 0.9514 | 0.9761 |
+  | s0042 | 0.9268 | 0.9754 |
+
+- **判据 ≥ 0.6：3/3 例通过（0.90–0.95）**。结论：FlexiCT 3d_fullres 在
+  16GB 卡上经 patch/batch 自救后**真实有效**，同设置下比 2d 低 2–7 个
+  Dice 点（3d 骨干在 few-shot + 小 patch 下拟合更慢），但同样达到可用
+  水平。3d 的额外价值（各向同性上下文）在 liver 这一大器官上收益不
+  明显；active_learning（pair）链路待 2d+3d 配对注册后另行评估。
 
 ## Phase 4a：nnInteractive 官方模型交互标注（完成，全部达标）
 
@@ -367,6 +405,40 @@ namespace 现无 mimics 容器），无需处理。
   （默认 None、取消勾选后手动值进请求）。
 - **证据**：test_gui_smoke 34/34、smoke 门禁 8/8 绿。
 
+### P1-10 远程大模型产物打包被固定 300s 命令超时杀掉，训练成功却报失败（已修复，commit 444ccfa）
+
+- **痛点**：远程训练完成后，控制器打包下载模型产物。FlexiCT 3d 的两个
+  checkpoint 各 ~4GB，tar 8.4GB 需要超过 300 秒；`_download_artifact` 的
+  tar/sha256 命令固定 `timeout=300`，命令被中途杀掉，`result.tar` 写一半
+  断掉——**远端训练明明成功，本地任务却标记 failed**，用户只能重训。
+- **根因**：超时是按小模型产物（几百 MB）的经验值硬编码，不随产物大小
+  缩放。
+- **修复**：打包/校验前 `du -sb` 取产物字节数，按保守吞吐（tar 40MB/s、
+  sha256 25MB/s）预算超时，下限保留 300s；探测失败退回下限不阻断下载。
+- **防回归测试**：`test_large_artifact_gets_size_aware_tar_timeout`、
+  `test_size_probe_failure_falls_back_to_floor_timeout`。
+- **证据**：test_remote_training 106/106 绿；真实 8.4GB 产物场景复现了
+  原故障（修复前两次打包均中断）。
+
+### P1-11 后台 Mimics 批量导出全败仍返回成功，训练在 0 标签上必然失败且报错误导（待入账）
+
+- **痛点**：worktree/快照部署（无 python_env venv）下，后台 Mimics 导出
+  的 `call_bridge` 因外部 python 缺失抛 FileNotFoundError，8 例标签全部
+  导出失败；但批次状态 `phase=completed / status=closed`、returncode 0，
+  `launch_mimics_export` 的 failed 判定（launched/timed_out/returncode/
+  batch status failed|stopping）**全部不覆盖"requested 8, completed 0,
+  failed 8"**。上层 `_export_mcs_labels` 视为导出成功，`_find_label_files`
+  找不到任何标签，最终以"nnU-Net needs at least 2 usable cases"报错——
+  报错误导用户去查数据集，真实根因（导出环境坏）完全不可见。
+- **根因**：批次级失败判定不含 `completed==0 && failed>0` 这类全败形态；
+  单例导出错误只留在 mimics_application.log。
+- **建议验收标准**：`launch_mimics_export` 对 `batch_totals` 中
+  `completed==0 && (failed+skipped)>0` 的批次判 failed，并把单例错误摘要
+  带进 RuntimeError 诊断信息；防回归测试覆盖"8 例全败 returncode 0"。
+- **状态**：本轮以 MIMICS_BRIDGE_PYTHON 环境变量绕行完成验证；产品修复
+  待入账（涉及 mimics_label_export.py，与同事未提交改动相邻，留待其
+  提交后实施避免冲突）。
+
 ## Phase 4c：ScribblePrompt 真实 checkpoint 交互分割（本机，2026-10-02 补充）
 
 之前未覆盖（用户指出的覆盖缺口之一）。补测方式与 4a 同思路：GT 合成
@@ -417,14 +489,14 @@ credibility_3d / slice_detail）。
 
 ## 覆盖缺口清单（如实登记）
 
-- **FlexiCT 3d_fullres**：未测。代码内注明"3D fullres needs ~32GB"
-  （flexict_pipeline.py:158），两台远程服务器均为 16GB A4000——按现有
-  硬件不可测，除非同时调小 patch+batch（那测的就不是 3d 配方本身）。
-  处置：作为硬件限制如实登记，不算验证失败；'auto' 在 16GB 卡上自动
-  选 2d 的行为已实测正确（Phase 3 走的就是该路径）。
-- **FlexiCT active_learning（pair 配置）**：未测。依赖 2d+3d 成对模型，
-  被 3d_fullres 的硬件限制连带阻塞。入账"需用户决策"：是否有 32GB+ GPU
-  可用，再决定是否补测。
+- ~~**FlexiCT 3d_fullres**：未测~~ → **2026-10-02 已补测完成**（见 Phase 3
+  3d 补充验证节）。16GB A4000 上经 patch [96,96,96] + batch 2 自救后训练
+  收敛、held-out Dice 0.90–0.95，判据通过。原"需要 ~32GB"的注释按实测
+  修订：planner 默认 patch 确实超 16GB，但请求级 patch/batch 覆写可自救。
+- **FlexiCT active_learning（pair 配置）**：未测。现在 2d（Phase 3 主线）
+  与 3d（补充验证）模型均已注册，但二者 pair_id 不同（3d 是独立任务补
+  测，不是同任务的 pair 训练），配对查找逻辑仍未被真实数据走到。入账
+  "需用户决策"：是否值得用同任务 2d+3d pair 配置再跑一轮专门验证。
 - nnU-Net 2d / 3d_lowres 等其他配置：未在真实数据上训练（3d_fullres 已
   测）；推理侧低优（同一管线不同 plans）。
 
@@ -454,7 +526,16 @@ credibility_3d / slice_detail）。
   asl_epi 数据，非本次验证产物、归属未确证，不删待确认）；镜像
   mimics-ai-runtime:1.1（可复用资产）。
 - 终态核验：GPU 0/1 利用率 0%、无 mimics 容器、无 mimics/remote_worker
-  进程、磁盘 43%（145G free）。
+  进程。
+- **3d 补充验证新增（2026-10-02）**：删除 5 个 3d job 目录
+  （8537c3ef、5720e001、8bb41229、07210d9f、7e510247，含 8.4GB 残留
+  result.tar）；临时 profile 171_root_rp19_tmp 与其凭据已删除；镜像
+  mimics-ai-runtime:1.2（含 R-P1-9 修复，overlay 构建）保留为可复用
+  资产。
+- **171 磁盘现状**：/home/shijian_ruan 逻辑卷 419G 已 100% 满
+  （df -h /home 显示根分区 43% 有误导性）。我方 mimics-ai 目录清理后
+  ~67G，其余 ~350G 为其他项目数据（UIH/algo-* 等），按红线未动。
+  需要服务器管理员层面的清理确认。
 
 **206（/userdata/shijian_ruan/mimics-ai）**：jobs/root 空，k8s.io namespace
 无 mimics 容器（此前的 stale 容器 train_20260925T183409_50564969 已不在），
