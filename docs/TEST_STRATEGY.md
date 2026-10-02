@@ -56,7 +56,9 @@ python_env/python.exe tools/run_regression_matrix.py --list
 - `test_remote_training.py` — SSH/Docker 远程训练契约（不连真实服务器）
 - `test_interactive_algorithms.py`、`test_model_portability.py`、
   `test_collect_diagnostics.py`、`test_geometry_manifest_regressions.py`、
-  `test_migrate_root.py`、`test_ui_preferences.py`
+  `test_migrate_root.py`、`test_ui_preferences.py`、
+  `test_ui_quality.py`（UI 非人工质量门禁：主题调色板完整性、
+  WCAG AA 对比度、offscreen 真渲染 + CJK 字形验证）
 
 **L3 fake mimics 流测试**
 - 覆盖：runtime 模块在 fake `mimics` 命名空间下的导入（27 个模块——
