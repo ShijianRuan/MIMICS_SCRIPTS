@@ -30,8 +30,6 @@ integrations/nninteractive-finetune/tests
 integrations/nninteractive-finetune/tests/**
 integrations/nninteractive-finetune/work
 integrations/nninteractive-finetune/work/**
-docs/MimicsHelp_MD
-docs/MimicsHelp_MD/**
 
 # FlexiCT backbone weights are mounted at /models, never baked into the image.
 integrations/flexict-finetune/weights

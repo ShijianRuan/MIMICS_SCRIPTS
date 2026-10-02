@@ -952,7 +952,7 @@ Mimics 日志统一使用英文，只记录关键节点：
   - 窄视口 `scrollWidth == clientWidth`，没有横向溢出。
 
 交互预览位于
-`docs/previews/nninteractive_task_models_interactive.html`。
+`history/nninteractive_task_models_interactive.html`。
 
 ### 20.3 必须在 Windows Mimics 上完成的验收
 
