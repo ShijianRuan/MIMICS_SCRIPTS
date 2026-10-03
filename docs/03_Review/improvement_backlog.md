@@ -191,13 +191,24 @@
   （计数 tobytes 调用尺寸，修复前实证 2 次全量 → 修复后 1 次
   [仅 fake 记账]，红→绿验证过）；interactive_algorithms 18/18 +
   smoke 8/8 复绿。
-- [ ] **R62-2【P1】ScribblePrompt 逐 prompt 模态弹窗堆叠**
+- [x] **R62-2【P1】ScribblePrompt 逐 prompt 模态弹窗堆叠**
   （`interactive_algorithms_mimics.py:594→:480→:458`）：每个 prompt
   一次模态弹窗，连续交互时弹窗堆叠。验收：复用 R61-10 会话级单次
   提示模式，同会话不再重复弹。
-- [ ] **R62-3【P1】ScribblePrompt 结果弹窗每轮必现、无会话记忆**
+  **已解决（2026-10-04）**：Foreground/Background 选择改为会话级记忆
+  （`_SESSION_PROMPT_SIGN`，首次询问后整个 Mimics 会话不再弹）；主
+  prompt 对话框新增 Use Foreground/Background Prompts 切换按钮 + 当前
+  sign 显示行，切换 sign 不再需要额外弹窗。测试：
+  `test_prompt_sign_asked_once_per_session`（红→绿验证过）。
+- [x] **R62-3【P1】ScribblePrompt 结果弹窗每轮必现、无会话记忆**
   （`interactive_algorithms_mimics.py:944-969`）：与 R62-2 同根因。
   验收：照抄 R61-10 模式加会话级"不再提示"。
+  **已解决（2026-10-04）**：结果去向（Update Selected Mask / Create
+  Editable Copy）首次询问后会话级记忆（`_SESSION_RESULT_MODE`，与
+  nnInteractive R61-10 同模式）；**changed-mask 安全询问不吞**——用户
+  中途编辑过 mask 属数据风险路径，始终确认。测试：
+  `test_result_destination_is_asked_once_per_session` +
+  `test_result_destination_changed_mask_still_asks`（红→绿验证过）。
 - [ ] **R62-4【P1】stop-all-services 无确认**
   （`mimics_stop_background.py:1450-1461`）：一键停掉**所有**后台服务
   （含正在跑的训练/推理任务），无任何确认。生命周期规范：影响范围

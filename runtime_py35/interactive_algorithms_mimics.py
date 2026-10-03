@@ -479,7 +479,28 @@ def _choose_click_plane(image):
     return int(axes[answer])
 
 
+# Session-level prompt-sign memory (R62-2). Asking Foreground/Background
+# before every click/scribble stacked a second modal on top of the main
+# prompt dialog for each prompt; batch annotators want the same sign to
+# stick. The first ask in a Mimics session sticks; the main prompt dialog
+# carries a switch button so changing it stays one click.
+_SESSION_PROMPT_SIGN = None
+
+
+def _current_prompt_sign():
+    """Sign used for the next prompt: session value, else last persisted."""
+    if _SESSION_PROMPT_SIGN is not None:
+        return _SESSION_PROMPT_SIGN
+    memory = _load_plane_memory() if _remember_plane_enabled() else {}
+    if memory.get("prompt_sign") == "Background":
+        return False
+    return True
+
+
 def _choose_prompt_sign():
+    global _SESSION_PROMPT_SIGN
+    if _SESSION_PROMPT_SIGN is not None:
+        return _SESSION_PROMPT_SIGN
     memory = _load_plane_memory() if _remember_plane_enabled() else {}
     last_sign = memory.get("prompt_sign")
     default_hint = ""
@@ -489,8 +510,10 @@ def _choose_prompt_sign():
         title="ScribblePrompt",
         message=(
             "Foreground marks pixels that belong to the structure.\n"
-            "Background marks pixels that must be excluded.{0}".format(default_hint)
-        ),
+            "Background marks pixels that must be excluded.{0}\n\n"
+            "This choice is remembered for the rest of this Mimics session; "
+            "switch it any time from the prompt menu."
+        ).format(default_hint),
         buttons="Foreground;Background;Cancel",
         ui_blocking=True,
     )
@@ -500,6 +523,7 @@ def _choose_prompt_sign():
         result = False
     else:
         return None
+    _SESSION_PROMPT_SIGN = result
     if _remember_plane_enabled() and answer != last_sign:
         _remember_plane_sign("prompt_sign", answer)
     return result
@@ -596,6 +620,13 @@ def _collect_scribbleprompt_prompts(image, target, job_dir, visual_objects):
             buttons.append("Add Box")
         if records:
             buttons.append("Undo Last")
+        # R62-2: the sign sticks for the session; switching it stays on this
+        # dialog instead of stacking a second modal per prompt.
+        buttons.append(
+            "Use Background Prompts"
+            if _current_prompt_sign()
+            else "Use Foreground Prompts"
+        )
         if can_run:
             buttons.append("Run ScribblePrompt")
         buttons.append("Cancel")
@@ -609,17 +640,23 @@ def _collect_scribbleprompt_prompts(image, target, job_dir, visual_objects):
                 "can crash Mimics and lose unsaved work. Switch tools only "
                 "while this dialog is shown.\n\n"
                 "Clicks: {0}    Scribbles: {1}    Box: {2}\n"
-                "Foreground prompts: {3}    Background prompts: {4}"
+                "Foreground prompts: {3}    Background prompts: {4}\n"
+                "Next prompt sign: {5} (switch with the button below)"
             ).format(
                 len(clicks),
                 len(scribbles),
                 "added" if boxes else "none",
                 len([item for item in records if item["kind"] == "box" or item["value"].get("include")]),
                 len([item for item in records if item["kind"] != "box" and not item["value"].get("include")]),
+                "Foreground" if _current_prompt_sign() else "Background",
             ),
             buttons=";".join(buttons),
             ui_blocking=True,
         )
+        if answer in ("Use Foreground Prompts", "Use Background Prompts"):
+            global _SESSION_PROMPT_SIGN
+            _SESSION_PROMPT_SIGN = answer == "Use Foreground Prompts"
+            continue
         if answer == "Add Click":
             include = _choose_prompt_sign()
             if include is None:
@@ -939,7 +976,16 @@ def _create_copy(image, name):
     return nnm._create_result_mask(image, name)
 
 
+# Session-level memory for the result destination (R62-3, same pattern as
+# nnInteractive's R61-10): ScribblePrompt rounds run back-to-back, and the
+# ready dialog popping after every round with the same three buttons is a
+# modal storm. The first answer sticks for the Mimics session; the
+# changed-mask safety question (a data-risk path) always stays.
+_SESSION_RESULT_MODE = None
+
+
 def _choose_result_target(monitor, result):
+    global _SESSION_RESULT_MODE
     target = _find_mask(monitor.get("target_guid"))
     changed = target is None
     if target is not None:
@@ -961,25 +1007,36 @@ def _choose_result_target(monitor, result):
         if answer != "Create Editable Copy":
             return None
         return _create_copy(monitor["image"], "{0} - {1}".format(monitor["target_name"], display))
-    answer = mimics.dialogs.question_box(
-        title="{0} Ready".format(display),
-        message=(
-            "{0} completed in {1} seconds.\n\n"
-            "Update Selected Mask applies the result to {2}.\n"
-            "Create Editable Copy preserves it and creates a new editable Mask."
-        ).format(
-            display,
-            result.get("elapsed_seconds", "?"),
-            monitor["target_name"],
-        ),
-        buttons="Update Selected Mask;Create Editable Copy;Discard",
-        ui_blocking=True,
-    )
-    if answer == "Update Selected Mask":
+    if _SESSION_RESULT_MODE is None:
+        # First completed round in this Mimics session: ask once, then
+        # remember for the rest of the session (R62-3).
+        answer = mimics.dialogs.question_box(
+            title="{0} Ready".format(display),
+            message=(
+                "{0} completed in {1} seconds.\n\n"
+                "Update Selected Mask applies the result to {2}.\n"
+                "Create Editable Copy preserves it and creates a new editable Mask.\n\n"
+                "This choice is remembered for the rest of this Mimics session."
+            ).format(
+                display,
+                result.get("elapsed_seconds", "?"),
+                monitor["target_name"],
+            ),
+            buttons="Update Selected Mask;Create Editable Copy;Discard",
+            ui_blocking=True,
+        )
+        if answer == "Update Selected Mask":
+            _SESSION_RESULT_MODE = "in_place"
+        elif answer == "Create Editable Copy":
+            _SESSION_RESULT_MODE = "copy"
+        else:
+            return None
+    if _SESSION_RESULT_MODE == "in_place":
         return target
-    if answer == "Create Editable Copy":
-        return _create_copy(monitor["image"], "{0} - {1}".format(monitor["target_name"], display))
-    return None
+    return _create_copy(
+        monitor["image"],
+        "{0} - {1}".format(monitor["target_name"], display),
+    )
 
 
 def _store_scribble_session(mask, result):

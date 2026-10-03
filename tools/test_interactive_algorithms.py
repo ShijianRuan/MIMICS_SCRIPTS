@@ -446,6 +446,113 @@ class MimicsRuntimeTests(unittest.TestCase):
         self.assertEqual(copies[0].name, "Target - ScribblePrompt")
         self.assertEqual(copies[0].get_voxel_buffer().tobytes(), expected.tobytes())
 
+    def _monitor_for(self, image, mask, base_sha, temporary_shape=(2, 3, 4)):
+        return {
+            "action": self.runtime.ACTION_SCRIBBLEPROMPT,
+            "display_name": "ScribblePrompt",
+            "image": image,
+            "target_guid": self.runtime.nnm._object_id(mask),
+            "target_name": "Target",
+            "base_sha256": base_sha,
+            "request": {"shape": list(temporary_shape)},
+        }
+
+    def test_result_destination_is_asked_once_per_session(self):
+        # R62-3: back-to-back rounds used to pop the ready dialog after every
+        # completion. The first answer must stick for the whole Mimics
+        # session (module reload = new session, as in Mimics restart).
+        image = FakeImage(_u8_pattern_buffer((2, 3, 4), lambda x, y, z: False))
+        mask = FakeMask("Target", image=image, selected=True)
+        self.fake.data.images.append(image)
+        self.fake.data.images.set_active(image)
+        self.fake.data.masks.append(mask)
+        base_sha = self.runtime._current_mask_sha(mask)
+        with tempfile.TemporaryDirectory() as temporary:
+            result_path = Path(temporary) / "result.u8"
+            expected = _u8_pattern_buffer((2, 3, 4), lambda x, y, z: x == 1)
+            result_path.write_bytes(expected.tobytes())
+            monitor = self._monitor_for(image, mask, base_sha)
+            state = {"elapsed_seconds": 1.0, "result": {
+                "result_path": str(result_path),
+                "shape": [2, 3, 4],
+                "foreground_voxels": 12,
+            }}
+            # First completion: dialog shown, answered Update Selected Mask.
+            self.fake.dialogs.question_answers = ["Update Selected Mask"]
+            self.fake.dialogs.questions = []
+            self.runtime._apply_completed(monitor, dict(state))
+            self.assertEqual(len(self.fake.dialogs.questions), 1)
+            self.assertIn(
+                "remembered for the rest of this Mimics session",
+                self.fake.dialogs.questions[0]["message"],
+            )
+            # Second completion: no dialog, same destination applied.
+            self.fake.dialogs.questions = []
+            mask.set_voxel_buffer(_u8_pattern_buffer(
+                (2, 3, 4), lambda x, y, z: False))
+            self.runtime._apply_completed(monitor, dict(state))
+            self.assertEqual(self.fake.dialogs.questions, [])
+            self.assertEqual(
+                mask.get_voxel_buffer().tobytes(), expected.tobytes())
+
+    def test_result_destination_changed_mask_still_asks(self):
+        # The session memory must not swallow the changed-mask safety
+        # question: applying onto a mask the user edited mid-run is a
+        # data-risk path and always confirms.
+        image = FakeImage(_u8_pattern_buffer((2, 3, 4), lambda x, y, z: False))
+        mask = FakeMask("Target", image=image, selected=True)
+        self.fake.data.images.append(image)
+        self.fake.data.images.set_active(image)
+        self.fake.data.masks.append(mask)
+        with tempfile.TemporaryDirectory() as temporary:
+            result_path = Path(temporary) / "result.u8"
+            result_path.write_bytes(_u8_pattern_buffer(
+                (2, 3, 4), lambda x, y, z: x == 1).tobytes())
+            # First completion establishes session memory.
+            self.fake.dialogs.question_answers = ["Update Selected Mask"]
+            self.runtime._apply_completed(
+                self._monitor_for(
+                    image, mask, self.runtime._current_mask_sha(mask)),
+                {"elapsed_seconds": 1.0, "result": {
+                    "result_path": str(result_path),
+                    "shape": [2, 3, 4], "foreground_voxels": 12,
+                }},
+            )
+            # Second completion with a stale base_sha (user edited the mask
+            # while the round ran): the safety dialog must appear.
+            self.fake.dialogs.questions = []
+            self.runtime._apply_completed(
+                self._monitor_for(image, mask, "stale-sha"),
+                {"elapsed_seconds": 1.0, "result": {
+                    "result_path": str(result_path),
+                    "shape": [2, 3, 4], "foreground_voxels": 12,
+                }},
+            )
+            self.assertEqual(len(self.fake.dialogs.questions), 1)
+            self.assertIn(
+                "changed while it was running",
+                self.fake.dialogs.questions[0]["message"],
+            )
+
+    def test_prompt_sign_asked_once_per_session(self):
+        # R62-2: Foreground/Background was asked before every click and
+        # scribble, stacking a second modal per prompt. The first answer
+        # must stick for the session.
+        self.fake.dialogs.questions = []
+        self.fake.dialogs.question_answers = ["Background"]
+        self.assertFalse(self.runtime._choose_prompt_sign())
+        asked = len(self.fake.dialogs.questions)
+        self.assertEqual(asked, 1)
+        # Subsequent prompts: no dialog, same sign.
+        self.fake.dialogs.questions = []
+        self.assertFalse(self.runtime._choose_prompt_sign())
+        self.assertEqual(self.fake.dialogs.questions, [])
+        # The main prompt dialog exposes the switch button.
+        self.runtime._SESSION_PROMPT_SIGN = True
+        self.assertTrue(self.runtime._current_prompt_sign())
+        self.runtime._SESSION_PROMPT_SIGN = False
+        self.assertFalse(self.runtime._current_prompt_sign())
+
 
 if __name__ == "__main__":
     unittest.main()
