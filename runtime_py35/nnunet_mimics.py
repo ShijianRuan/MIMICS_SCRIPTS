@@ -135,7 +135,29 @@ def _setup_root():
     path = os.path.join(_workspace(), "setup")
     if not os.path.isdir(path):
         os.makedirs(path)
+    else:
+        _sweep_stale_setup_files(path)
     return path
+
+
+def _sweep_stale_setup_files(root, max_age_days=7.0):
+    """R62-11: every wizard launch drops context/status/stderr files in
+    setup/ and nothing ever cleaned them — years of use accumulate
+    thousands of files. Files older than the retention window (no wizard
+    reads a context file from a previous week) are removed. Best effort:
+    a locked file is skipped, never fatal."""
+    cutoff = time.time() - max_age_days * 86400.0
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return
+    for name in names:
+        path = os.path.join(root, name)
+        try:
+            if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+                os.remove(path)
+        except OSError:
+            continue
 
 
 def _launch_gui(script_name, context, monitor_kind):

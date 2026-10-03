@@ -292,10 +292,17 @@
   TestActiveLearningWindow.test_failed_run_stays_listed_with_its_error`
   （红→绿验证过；红路径为失败运行被过滤、下拉只剩 1 项）。gui_smoke
   55/55 通过。
-- [ ] **R62-11【P3】setup/ 会话目录无限累积**（无清扫；
-  `nnunet_mimics.py:147-148/:306-311/:346-349`）：每次打开向导留
-  一个 setup/ 目录，永不清理。验收：接入既有 sweep 过期清扫或
-  打开时清理陈旧目录。
+- [x] **R62-11【P3】setup/ 会话目录无限累积**（无清扫；
+  `nnunet_mimics.py`、`flexict_mimics.py` 的 `_setup_root`）：每次
+  打开向导留一批 context/status/stderr 文件，永不清理。
+  **已解决（2026-10-04）**：两个模块的 `_setup_root` 在目录已存在时
+  清扫超过 7 天的陈旧文件（wizard 只读启动时的 context 文件，
+  跨周文件无消费者）；删除失败（占用/权限）静默跳过，绝不阻塞窗口
+  打开。测试：
+  `test_all.py TestEdgeCases.test_setup_root_sweeps_stale_files_only`
+  （双模块参数化：30 天前的文件被删、新建文件保留；红→绿验证过；
+  红路径为修复前陈旧文件原样保留）。冒烟门禁 8/8 通过（工件
+  20261004T055741_smoke.json）。
 
 ### 以下为历史待办区（已全部完成，保留历史）
 

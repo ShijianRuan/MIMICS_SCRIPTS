@@ -101,6 +101,22 @@ def _setup_root():
     path = os.path.join(_workspace(), "setup")
     if not os.path.isdir(path):
         os.makedirs(path)
+    else:
+        # R62-11: sweep stale wizard context/status files (shared with
+        # nnunet_mimics._sweep_stale_setup_files; kept local to avoid a
+        # cross-module dependency for four lines).
+        cutoff = time.time() - 7.0 * 86400.0
+        try:
+            names = os.listdir(path)
+        except OSError:
+            names = []
+        for name in names:
+            stale = os.path.join(path, name)
+            try:
+                if os.path.isfile(stale) and os.path.getmtime(stale) < cutoff:
+                    os.remove(stale)
+            except OSError:
+                continue
     return path
 
 

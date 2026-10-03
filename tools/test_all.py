@@ -5500,6 +5500,34 @@ class TestEdgeCases(unittest.TestCase):
             "the worker log default must stay absolute (temp dir)"
         )
 
+    def test_setup_root_sweeps_stale_files_only(self):
+        """R62-11: every wizard launch drops context/status/stderr files
+        in setup/ with no cleanup. _setup_root must remove files older
+        than the retention window and keep fresh ones."""
+        import nnunet_mimics
+        import flexict_mimics
+
+        for module in (nnunet_mimics, flexict_mimics):
+            workspace = os.path.join(self.tmp, module.__name__)
+            setup = os.path.join(workspace, "setup")
+            os.makedirs(setup)
+            stale = os.path.join(setup, "train_setup_20200101T000000_ab_status.json")
+            fresh = os.path.join(setup, "status_context_{0}.json".format(
+                uuid.uuid4().hex[:8]))
+            for path in (stale, fresh):
+                with open(path, "w") as handle:
+                    handle.write("{}")
+            old = time.time() - 30.0 * 86400.0
+            os.utime(stale, (old, old))
+            with mock.patch.object(module, "_workspace", lambda: workspace):
+                module._setup_root()
+            self.assertFalse(
+                os.path.exists(stale),
+                "{0} left a stale setup file behind".format(module.__name__))
+            self.assertTrue(
+                os.path.exists(fresh),
+                "{0} removed a fresh setup file".format(module.__name__))
+
     def test_affine_repair_already_running_returns_nonzero(self):
         """C6-4: offer_repair_for_prediction_failure treats main() == 0 as
         "a repair flow was started" and swallows the original failure dialog.
