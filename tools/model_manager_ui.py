@@ -163,7 +163,8 @@ def collect_rows(workspaces: dict[str, str]) -> list[dict]:
                     "task_id": str(model.get("task_id") or ""),
                     "model_id": str(model.get("model_id") or ""),
                     "target": str(
-                        model.get("label_name")
+                        " + ".join(model.get("label_names") or [])
+                        or model.get("label_name")
                         or model.get("task_name")
                         or model.get("task_id")
                         or ""
@@ -305,14 +306,21 @@ def remove_model_row(row: dict) -> None:
                 })
     else:  # flexict
         workspace = Path(row["workspace"])
+        remaining = [
+            model
+            for model in flexict_common.load_models(workspace)
+            if str(model.get("model_id") or "") != row["model_id"]
+        ]
+        # If the removed model was the recommended one, clear the pointer so
+        # the registry does not recommend a model that no longer exists.
+        was_recommended = flexict_common.load_registry_recommended_id(
+            workspace
+        ) == row["model_id"]
         flexict_common.save_registry(
             workspace,
             None,
-            [
-                model
-                for model in flexict_common.load_models(workspace)
-                if str(model.get("model_id") or "") != row["model_id"]
-            ],
+            remaining,
+            recommended_model_id="" if was_recommended else None,
         )
 
 

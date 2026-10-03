@@ -400,6 +400,7 @@ def _flexict_model_dir(
     configuration: str,
     pair_id: str = "",
     created: float = 1700000000.0,
+    label_names: list[str] | None = None,
 ) -> dict:
     model_dir = (
         flexict_common.workspace_paths(workspace)["root"]
@@ -422,7 +423,8 @@ def _flexict_model_dir(
         "model_id": model_id,
         "task_id": "kidney",
         "task_name": "Kidney",
-        "label_name": "kidney_left",
+        "label_name": label_names[0] if label_names else "kidney_left",
+        "label_names": label_names or ["kidney_left"],
         "configuration": configuration,
         "trainer": "flexict2d_Trainer"
         if configuration == "2d"
@@ -578,6 +580,48 @@ class FlexictBundleTests(unittest.TestCase):
             pair = flexict_common.load_pair(target)
             self.assertIsNone(pair[0])
 
+    def test_flexict_multiclass_bundle_roundtrip(self):
+        # G5: the multiclass feature (liver+spleen in one model) shipped
+        # without bundle coverage - a multiclass model exported, imported,
+        # and predicted across machines had no test proving label_names
+        # survives the roundtrip and the model stays usable.
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "source_workspace"
+            _flexict_model_dir(
+                source, "flexict_multi", "2d", "",
+                label_names=["liver", "spleen"],
+            )
+            bundle = root / "multi.zip"
+            ai_model_bundle.main(
+                [
+                    "export-flexict",
+                    "--workspace",
+                    str(source),
+                    "--model-id",
+                    "flexict_multi",
+                    "--output",
+                    str(bundle),
+                ]
+            )
+            target = root / "target"
+            ai_model_bundle.main(
+                [
+                    "import-flexict",
+                    "--workspace",
+                    str(target),
+                    "--bundle",
+                    str(bundle),
+                ]
+            )
+            models = flexict_common.load_models(target)
+            self.assertEqual(1, len(models))
+            self.assertEqual(
+                ["liver", "spleen"], models[0].get("label_names")
+            )
+            usable, _ = flexict_common.model_usability(models[0])
+            self.assertTrue(usable)
+
 
 class ModelManagerTests(unittest.TestCase):
     """The unified model manager: cross-family listing + import dispatch."""
@@ -718,6 +762,53 @@ class ModelManagerTests(unittest.TestCase):
                 )
             }
             self.assertEqual({"flexict_a"}, remaining)
+
+    def test_manager_shows_multiclass_flexict_target(self):
+        # G4: the manager's target column showed only label_name, so a
+        # multiclass (liver+spleen) model displayed as just "liver" - the
+        # annotator could not tell single- from multiclass models apart in
+        # the manager. Mirror the prediction window's joined display.
+        with tempfile.TemporaryDirectory() as raw, self._isolated_home():
+            root = Path(raw)
+            workspace = root / "ws"
+            _flexict_model_dir(
+                workspace, "flexict_multi", "2d", "",
+                label_names=["liver", "spleen"],
+            )
+            rows = self.manager.collect_rows({"flexict": str(workspace)})
+            multi = [
+                row for row in rows if row["model_id"] == "flexict_multi"
+            ]
+            self.assertEqual(1, len(multi))
+            self.assertEqual("liver + spleen", multi[0]["target"])
+
+    def test_removing_recommended_flexict_model_clears_pointer(self):
+        # G6: removing the recommended FlexiCT model left the registry's
+        # recommended_model_id pointing at a model that no longer exists.
+        # The next prediction would try to load a deleted checkpoint.
+        with tempfile.TemporaryDirectory() as raw, self._isolated_home():
+            root = Path(raw)
+            workspace = root / "ws"
+            _flexict_model_dir(workspace, "flexict_a", "2d", "")
+            _flexict_model_dir(workspace, "flexict_b", "2d", "")
+            self.manager.set_recommended_model(
+                {"family": "flexict", "workspace": str(workspace),
+                 "model_id": "flexict_a"}
+            )
+            self.manager.remove_model_row(
+                {"family": "flexict", "workspace": str(workspace),
+                 "model_id": "flexict_a"}
+            )
+            self.assertEqual(
+                "", flexict_common.load_registry_recommended_id(workspace)
+            )
+            remaining = {
+                row["model_id"]
+                for row in self.manager.collect_rows(
+                    {"flexict": str(workspace)}
+                )
+            }
+            self.assertEqual({"flexict_b"}, remaining)
 
     def test_manager_files_and_entry_exist(self):
         self.assertTrue(

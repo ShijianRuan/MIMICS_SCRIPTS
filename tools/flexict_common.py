@@ -181,6 +181,17 @@ def flexict_suggest_dataset_id(
     )
 
 
+def load_registry_recommended_id(workspace: str | Path | None = None) -> str:
+    """The registry's recommended_model_id ("" when unset/unreadable)."""
+    try:
+        with workspace_paths(workspace)["registry"].open(
+            "r", encoding="utf-8"
+        ) as handle:
+            return str(json.load(handle).get("recommended_model_id") or "")
+    except Exception:
+        return ""
+
+
 def load_models(workspace: str | Path | None = None,
                 config: dict[str, Any] | None = None,
                 include_missing: bool = False) -> list[dict[str, Any]]:
@@ -221,7 +232,7 @@ def load_models(workspace: str | Path | None = None,
 def save_registry(workspace: str | Path | None,
                   config: dict[str, Any] | None,
                   models: list[dict[str, Any]],
-                  recommended_model_id: str = "") -> None:
+                  recommended_model_id: str | None = None) -> None:
     from mimics_label_export import write_json_atomic  # host helper, same folder
 
     paths = workspace_paths(workspace, config)
@@ -231,13 +242,13 @@ def save_registry(workspace: str | Path | None,
             existing = json.load(handle)
     except Exception:
         existing = {}
+    if recommended_model_id is None:
+        # Not passed: keep the existing pointer. An explicit "" clears it
+        # (used when the recommended model is removed from the registry).
+        recommended_model_id = (existing or {}).get("recommended_model_id") or ""
     payload = {
         "schema_version": SCHEMA_VERSION,
-        "recommended_model_id": str(
-            recommended_model_id
-            or (existing or {}).get("recommended_model_id")
-            or ""
-        ),
+        "recommended_model_id": str(recommended_model_id),
         "models": models,
         "updated_at_epoch": time.time(),
     }
