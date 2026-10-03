@@ -1,0 +1,53 @@
+test_annotated_row_gets_success_foreground (__main__.TestActiveLearningWindow.test_annotated_row_gets_success_foreground) ... <REPO>/tools/ui_theme.py:64: DeprecationWarning: Enum value 'Qt::ApplicationAttribute.AA_UseHighDpiPixmaps' is marked as deprecated, please check the documentation for more information.
+  QtCore.QCoreApplication.setAttribute(attribute, True)
+qt.qpa.fonts: Populating font family aliases took 220 ms. Replace uses of missing font family "Sans Serif" with one that exists to avoid this cost.
+ok
+test_applied_request_message_survives_refresh (__main__.TestActiveLearningWindow.test_applied_request_message_survives_refresh) ... ok
+test_empty_state_offers_a_new_ranking_entry (__main__.TestActiveLearningWindow.test_empty_state_offers_a_new_ranking_entry) ... ok
+test_failed_request_message_survives_refresh (__main__.TestActiveLearningWindow.test_failed_request_message_survives_refresh) ... ok
+test_ranking_submit_error_is_surfaced (__main__.TestActiveLearningWindow.test_ranking_submit_error_is_surfaced) ... ok
+test_real_rows_populate_without_nameerror (__main__.TestActiveLearningWindow.test_real_rows_populate_without_nameerror) ... ok
+test_running_ranking_shows_progress_then_autorefreshes (__main__.TestActiveLearningWindow.test_running_ranking_shows_progress_then_autorefreshes) ... ok
+test_batch_drop_import_stop_routes_to_queue_marker (__main__.TestBatchStatusWindow.test_batch_drop_import_stop_routes_to_queue_marker)
+R66 audit P2: a batch drop-import row's Stop must write the ... ok
+test_missing_dirs_window_is_empty_not_crashing (__main__.TestBatchStatusWindow.test_missing_dirs_window_is_empty_not_crashing) ... ok
+test_single_case_drop_import_stop_keeps_own_marker (__main__.TestBatchStatusWindow.test_single_case_drop_import_stop_keeps_own_marker)
+Per-case drop imports poll their own worker marker — unchanged. ... ok
+test_window_builds_and_refreshes_rows (__main__.TestBatchStatusWindow.test_window_builds_and_refreshes_rows) ... ok
+test_editor_builds_and_lists_configs (__main__.TestConfigEditorWindow.test_editor_builds_and_lists_configs) ... This plugin does not support propagateSizeHints()
+ok
+test_editor_readonly_keys_not_editable (__main__.TestConfigEditorWindow.test_editor_readonly_keys_not_editable) ... ok
+test_local_stop_calls_stop_job_without_dialog (__main__.TestFlexictStopBehaviour.test_local_stop_calls_stop_job_without_dialog) ... ok
+test_remote_known_state_uses_plain_stop (__main__.TestFlexictStopBehaviour.test_remote_known_state_uses_plain_stop) ... ok
+test_remote_unknown_stop_asks_then_abandons (__main__.TestFlexictStopBehaviour.test_remote_unknown_stop_asks_then_abandons) ... ok
+test_remote_unknown_stop_cancelled_does_nothing (__main__.TestFlexictStopBehaviour.test_remote_unknown_stop_cancelled_does_nothing) ... ok
+test_stop_button_label_reflects_abandonable_state (__main__.TestFlexictStopBehaviour.test_stop_button_label_reflects_abandonable_state) ... ok
+test_drop_window_output_follows_each_new_dataset (__main__.TestIoPathOutputNotSticky.test_drop_window_output_follows_each_new_dataset) ... ok
+test_io_path_setup_prefills_only_user_chosen_output (__main__.TestIoPathOutputNotSticky.test_io_path_setup_prefills_only_user_chosen_output) ... ok
+test_no_import_mode_branches_remain (__main__.TestIoPathSetupExportOnly.test_no_import_mode_branches_remain) ... ok
+test_action_buttons_follow_selection (__main__.TestModelManagerWindow.test_action_buttons_follow_selection)
+Use This Model / Remove Broken Entry were permanently disabled ... ok
+test_manager_builds_with_default_workspaces (__main__.TestModelManagerWindow.test_manager_builds_with_default_workspaces) ... ok
+test_use_clicked_switches_recommended_model (__main__.TestModelManagerWindow.test_use_clicked_switches_recommended_model) ... ok
+test_flexict_single_case_submission_is_rejected (__main__.TestTrainingSetupPathMemory.test_flexict_single_case_submission_is_rejected) ... ok
+test_flexict_window_prefills_remembered_paths (__main__.TestTrainingSetupPathMemory.test_flexict_window_prefills_remembered_paths) ... ok
+test_nnunet_form_fields_carry_one_line_explanations (__main__.TestTrainingSetupPathMemory.test_nnunet_form_fields_carry_one_line_explanations) ... ok
+test_nnunet_training_group_collapsed_by_default (__main__.TestTrainingSetupPathMemory.test_nnunet_training_group_collapsed_by_default) ... ok
+test_nnunet_window_context_overrides_remembered_paths (__main__.TestTrainingSetupPathMemory.test_nnunet_window_context_overrides_remembered_paths) ... ok
+test_nnunet_window_prefills_remembered_paths (__main__.TestTrainingSetupPathMemory.test_nnunet_window_prefills_remembered_paths) ... ok
+test_batch_viewer_background_refresh_applies_without_freezing (__main__.TestViewerNonBlockingRefresh.test_batch_viewer_background_refresh_applies_without_freezing) ... ok
+test_batch_viewer_collect_error_does_not_break_window (__main__.TestViewerNonBlockingRefresh.test_batch_viewer_collect_error_does_not_break_window) ... ok
+test_flexict_viewer_collects_on_worker_thread (__main__.TestViewerNonBlockingRefresh.test_flexict_viewer_collects_on_worker_thread) ... ok
+test_hidden_viewer_slows_periodic_ticks_but_request_stays_direct (__main__.TestViewerNonBlockingRefresh.test_hidden_viewer_slows_periodic_ticks_but_request_stays_direct)
+Hidden/minimized windows poll at the heartbeat rate, not 2s. ... ok
+test_nnunet_viewer_collects_on_worker_thread (__main__.TestViewerNonBlockingRefresh.test_nnunet_viewer_collects_on_worker_thread) ... ok
+test_shown_viewer_keeps_fast_interval (__main__.TestViewerNonBlockingRefresh.test_shown_viewer_keeps_fast_interval)
+A visible (or non-widget) parent keeps the configured interval. ... ok
+test_preset_editor_builds_and_shows_current_presets (__main__.TestWindowLevelPresetEditor.test_preset_editor_builds_and_shows_current_presets) ... This plugin does not support propagateSizeHints()
+ok
+test_preset_editor_edit_updates_row (__main__.TestWindowLevelPresetEditor.test_preset_editor_edit_updates_row) ... ok
+
+----------------------------------------------------------------------
+Ran 38 tests in 5.791s
+
+OK

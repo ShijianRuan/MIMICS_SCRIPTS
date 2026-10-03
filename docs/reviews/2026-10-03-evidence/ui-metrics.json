@@ -1,0 +1,499 @@
+[
+  {
+    "name": "active-learning",
+    "requested": [
+      980,
+      640
+    ],
+    "actual": [
+      980,
+      640
+    ],
+    "minimum_hint": [
+      873,
+      269
+    ],
+    "visible_buttons": [
+      {
+        "text": "刷新",
+        "enabled": true,
+        "x": 904,
+        "y": 114,
+        "w": 54,
+        "h": 36
+      },
+      {
+        "text": "新建排序…",
+        "enabled": true,
+        "x": 22,
+        "y": 586,
+        "w": 93,
+        "h": 36
+      },
+      {
+        "text": "打开并叠加",
+        "enabled": true,
+        "x": 127,
+        "y": 586,
+        "w": 93,
+        "h": 36
+      },
+      {
+        "text": "叠加不确定度",
+        "enabled": true,
+        "x": 232,
+        "y": 586,
+        "w": 106,
+        "h": 36
+      },
+      {
+        "text": "应用共识 Mask",
+        "enabled": true,
+        "x": 350,
+        "y": 586,
+        "w": 116,
+        "h": 36
+      },
+      {
+        "text": "标记为已标注",
+        "enabled": true,
+        "x": 478,
+        "y": 586,
+        "w": 106,
+        "h": 36
+      },
+      {
+        "text": "标记为跳过",
+        "enabled": true,
+        "x": 596,
+        "y": 586,
+        "w": 93,
+        "h": 36
+      },
+      {
+        "text": "导出 CSV",
+        "enabled": true,
+        "x": 808,
+        "y": 586,
+        "w": 84,
+        "h": 36
+      },
+      {
+        "text": "关闭",
+        "enabled": true,
+        "x": 904,
+        "y": 586,
+        "w": 54,
+        "h": 36
+      }
+    ]
+  },
+  {
+    "name": "active-learning-small",
+    "requested": [
+      820,
+      520
+    ],
+    "actual": [
+      820,
+      520
+    ],
+    "minimum_hint": [
+      873,
+      269
+    ],
+    "visible_buttons": [
+      {
+        "text": "刷新",
+        "enabled": true,
+        "x": 744,
+        "y": 114,
+        "w": 54,
+        "h": 36
+      },
+      {
+        "text": "新建排序…",
+        "enabled": true,
+        "x": 22,
+        "y": 466,
+        "w": 93,
+        "h": 36
+      },
+      {
+        "text": "打开并叠加",
+        "enabled": true,
+        "x": 127,
+        "y": 466,
+        "w": 92,
+        "h": 36
+      },
+      {
+        "text": "叠加不确定度",
+        "enabled": true,
+        "x": 231,
+        "y": 466,
+        "w": 92,
+        "h": 36
+      },
+      {
+        "text": "应用共识 Mask",
+        "enabled": true,
+        "x": 335,
+        "y": 466,
+        "w": 93,
+        "h": 36
+      },
+      {
+        "text": "标记为已标注",
+        "enabled": true,
+        "x": 440,
+        "y": 466,
+        "w": 92,
+        "h": 36
+      },
+      {
+        "text": "标记为跳过",
+        "enabled": true,
+        "x": 544,
+        "y": 466,
+        "w": 92,
+        "h": 36
+      },
+      {
+        "text": "导出 CSV",
+        "enabled": true,
+        "x": 648,
+        "y": 466,
+        "w": 84,
+        "h": 36
+      },
+      {
+        "text": "关闭",
+        "enabled": true,
+        "x": 744,
+        "y": 466,
+        "w": 54,
+        "h": 36
+      }
+    ]
+  },
+  {
+    "name": "model-manager",
+    "requested": [
+      980,
+      640
+    ],
+    "actual": [
+      980,
+      640
+    ],
+    "minimum_hint": [
+      503,
+      224
+    ],
+    "visible_buttons": [
+      {
+        "text": "导入模型包...",
+        "enabled": true,
+        "x": 22,
+        "y": 586,
+        "w": 104,
+        "h": 36
+      },
+      {
+        "text": "使用此模型",
+        "enabled": true,
+        "x": 138,
+        "y": 586,
+        "w": 93,
+        "h": 36
+      },
+      {
+        "text": "移除失效条目",
+        "enabled": false,
+        "x": 243,
+        "y": 586,
+        "w": 106,
+        "h": 36
+      },
+      {
+        "text": "刷新",
+        "enabled": true,
+        "x": 838,
+        "y": 586,
+        "w": 54,
+        "h": 36
+      },
+      {
+        "text": "关闭",
+        "enabled": true,
+        "x": 904,
+        "y": 586,
+        "w": 54,
+        "h": 36
+      }
+    ]
+  },
+  {
+    "name": "nnunet-training",
+    "requested": [
+      920,
+      700
+    ],
+    "actual": [
+      920,
+      700
+    ],
+    "minimum_hint": [
+      342,
+      390
+    ],
+    "visible_buttons": [
+      {
+        "text": "浏览...",
+        "enabled": true,
+        "x": 791,
+        "y": 355,
+        "w": 65,
+        "h": 36
+      },
+      {
+        "text": "导入标签集...",
+        "enabled": true,
+        "x": 52,
+        "y": 733,
+        "w": 104,
+        "h": 36
+      },
+      {
+        "text": "添加标签",
+        "enabled": true,
+        "x": 156,
+        "y": 733,
+        "w": 80,
+        "h": 36
+      },
+      {
+        "text": "移除所选",
+        "enabled": true,
+        "x": 236,
+        "y": 733,
+        "w": 80,
+        "h": 36
+      },
+      {
+        "text": "浏览...",
+        "enabled": true,
+        "x": 791,
+        "y": 941,
+        "w": 65,
+        "h": 36
+      },
+      {
+        "text": "取消",
+        "enabled": true,
+        "x": 752,
+        "y": 646,
+        "w": 54,
+        "h": 36
+      },
+      {
+        "text": "开始训练",
+        "enabled": true,
+        "x": 818,
+        "y": 646,
+        "w": 80,
+        "h": 36
+      }
+    ]
+  },
+  {
+    "name": "nnunet-training-settings",
+    "requested": [
+      920,
+      700
+    ],
+    "actual": [
+      920,
+      700
+    ],
+    "minimum_hint": [
+      342,
+      390
+    ],
+    "visible_buttons": [
+      {
+        "text": "取消",
+        "enabled": true,
+        "x": 752,
+        "y": 646,
+        "w": 54,
+        "h": 36
+      },
+      {
+        "text": "开始训练",
+        "enabled": true,
+        "x": 818,
+        "y": 646,
+        "w": 80,
+        "h": 36
+      }
+    ]
+  },
+  {
+    "name": "nnunet-training-small",
+    "requested": [
+      800,
+      500
+    ],
+    "actual": [
+      800,
+      650
+    ],
+    "minimum_hint": [
+      342,
+      390
+    ],
+    "visible_buttons": [
+      {
+        "text": "取消",
+        "enabled": true,
+        "x": 632,
+        "y": 596,
+        "w": 54,
+        "h": 36
+      },
+      {
+        "text": "开始训练",
+        "enabled": true,
+        "x": 698,
+        "y": 596,
+        "w": 80,
+        "h": 36
+      }
+    ]
+  },
+  {
+    "name": "flexict-training",
+    "requested": [
+      920,
+      700
+    ],
+    "actual": [
+      920,
+      700
+    ],
+    "minimum_hint": [
+      342,
+      390
+    ],
+    "visible_buttons": [
+      {
+        "text": "浏览...",
+        "enabled": true,
+        "x": 791,
+        "y": 279,
+        "w": 65,
+        "h": 36
+      },
+      {
+        "text": "重新扫描病例",
+        "enabled": true,
+        "x": 52,
+        "y": 616,
+        "w": 180,
+        "h": 36
+      },
+      {
+        "text": "浏览...",
+        "enabled": true,
+        "x": 791,
+        "y": 724,
+        "w": 65,
+        "h": 36
+      },
+      {
+        "text": "取消",
+        "enabled": true,
+        "x": 752,
+        "y": 646,
+        "w": 54,
+        "h": 36
+      },
+      {
+        "text": "开始训练",
+        "enabled": true,
+        "x": 818,
+        "y": 646,
+        "w": 80,
+        "h": 36
+      }
+    ]
+  },
+  {
+    "name": "flexict-training-settings",
+    "requested": [
+      920,
+      700
+    ],
+    "actual": [
+      920,
+      700
+    ],
+    "minimum_hint": [
+      342,
+      390
+    ],
+    "visible_buttons": [
+      {
+        "text": "取消",
+        "enabled": true,
+        "x": 752,
+        "y": 646,
+        "w": 54,
+        "h": 36
+      },
+      {
+        "text": "开始训练",
+        "enabled": true,
+        "x": 818,
+        "y": 646,
+        "w": 80,
+        "h": 36
+      }
+    ]
+  },
+  {
+    "name": "flexict-training-small",
+    "requested": [
+      800,
+      500
+    ],
+    "actual": [
+      800,
+      620
+    ],
+    "minimum_hint": [
+      342,
+      390
+    ],
+    "visible_buttons": [
+      {
+        "text": "取消",
+        "enabled": true,
+        "x": 632,
+        "y": 566,
+        "w": 54,
+        "h": 36
+      },
+      {
+        "text": "开始训练",
+        "enabled": true,
+        "x": 698,
+        "y": 566,
+        "w": 80,
+        "h": 36
+      }
+    ]
+  }
+]

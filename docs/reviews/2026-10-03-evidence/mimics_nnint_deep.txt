@@ -1,0 +1,14 @@
+...................................F.......................................
+======================================================================
+FAIL: test_cancelled_job_cleans_partial_model (__main__.PipelineErrorRecoveryTests.test_cancelled_job_cleans_partial_model)
+Cancelled jobs must actually delete the partial model directory.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<REPO>/tests/test_mimics_nnint_deep.py", line 447, in test_cancelled_job_cleans_partial_model
+    self.assertIn(str(model_dir), report["removed"])
+AssertionError: '<TEMP_PATH>' not found in ['<TEMP_PATH>']
+
+----------------------------------------------------------------------
+Ran 75 tests in 0.117s
+
+FAILED (failures=1)

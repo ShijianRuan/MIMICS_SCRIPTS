@@ -1,0 +1,328 @@
+{
+  "schema": "mimics_review_artifacts.v2",
+  "date": "2026-10-03",
+  "code_baseline": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+  "scope": "review artifacts only; no product implementation changed",
+  "path_base": "docs/reviews",
+  "self_excluded": true,
+  "historical_manifest_unchanged": "../artifact-manifest.json",
+  "artifacts": [
+    {
+      "path": "README.md",
+      "bytes": 4394,
+      "sha256": "01165fb9079276daea1f3e7d3c040811d75d09c072f859e3ccea8666c92c926b"
+    },
+    {
+      "path": "backlog.json",
+      "bytes": 59041,
+      "sha256": "a30b284897d91872e7955b24598025ebc5e9a074b43fd0da8180c8889dde411a"
+    },
+    {
+      "path": "2026-10-03-revalidation.md",
+      "bytes": 33617,
+      "sha256": "59395d0401e0b0047c73dc1b0369c57e82c02f8ec83a4142808086a99cd471ad"
+    },
+    {
+      "path": "2026-10-03-workflow-handoff.md",
+      "bytes": 27279,
+      "sha256": "655c554261e6c4da4d1a729f16fed76b2243f1463dfb9af7ac1727765188d69a"
+    },
+    {
+      "path": "2026-10-03-revalidation.json",
+      "bytes": 27214,
+      "sha256": "77ada17f8ea7345d5b63bcd4ee5735eac0e847bb513be687de5386570e63e2ab"
+    },
+    {
+      "path": "2026-10-03-evidence/README.md",
+      "bytes": 8159,
+      "sha256": "9149d194a96bc15428716e7ef8958432b28b7f8261c55b84643009daffac0393"
+    },
+    {
+      "path": "2026-10-03-evidence/active-learning-small.png",
+      "bytes": 68318,
+      "sha256": "a699f8da296b8dc25ff4704e65110b447b881c632a8646d4affd3f03b0da2bbd"
+    },
+    {
+      "path": "2026-10-03-evidence/active-learning.png",
+      "bytes": 74173,
+      "sha256": "733236e32de5beba2fec5e9496c1922caff7305f849054fd6d993dfee7a15e61"
+    },
+    {
+      "path": "2026-10-03-evidence/audit_probes.py",
+      "bytes": 17054,
+      "sha256": "b3143e21182f7b508c17c7d45a560995ee9baf4e004503e448a1c8d3ed6d4b39"
+    },
+    {
+      "path": "2026-10-03-evidence/build-dataset.txt",
+      "bytes": 106,
+      "sha256": "78d18fac76e410140487108456ee1d999dda57a20045e8d7c540a448f452892e"
+    },
+    {
+      "path": "2026-10-03-evidence/cross_workflow_transitions.txt",
+      "bytes": 2303,
+      "sha256": "138c40aeb1d1f14ac51191736d33cb13933ffcc08fd13ca77f8ca4dad177f1dc"
+    },
+    {
+      "path": "2026-10-03-evidence/entry-inventory.json",
+      "bytes": 5116,
+      "sha256": "f93fc373557dceba6f7ad21086f38ff7aecce2a58b290db0ab7d6ccd40d923c9"
+    },
+    {
+      "path": "2026-10-03-evidence/extended.txt",
+      "bytes": 38920,
+      "sha256": "040f9bf5a093d4b60b558d1d4e7d958418b45dee74ec0f8b984a91f8656466c2"
+    },
+    {
+      "path": "2026-10-03-evidence/flexict-training-settings.png",
+      "bytes": 81400,
+      "sha256": "377f48d5cd661b2a7912568512a64631bfe19179b14809982d0392fc0d7db9a9"
+    },
+    {
+      "path": "2026-10-03-evidence/flexict_integration.txt",
+      "bytes": 18593,
+      "sha256": "a9b6a4808034d22191988fb17d3ee9b5da2e8f2dc3b33ba66425b571430facee"
+    },
+    {
+      "path": "2026-10-03-evidence/geometry_manifest_regressions.txt",
+      "bytes": 104,
+      "sha256": "5364bc59c974600f54aeb8e9a535c025995eb09740598b8b3426f0ac87bb813e"
+    },
+    {
+      "path": "2026-10-03-evidence/gui_smoke.txt",
+      "bytes": 6080,
+      "sha256": "1be5f7cbf673f21c107ed7fab6aed68d2da745245a83a4f173c58ae31b27cc34"
+    },
+    {
+      "path": "2026-10-03-evidence/mimics_nnint_deep.txt",
+      "bytes": 772,
+      "sha256": "c814efc6195883daff915e961c85122c7cd4a27b3f09af1748091f17dad895a6"
+    },
+    {
+      "path": "2026-10-03-evidence/mimics_nnint_functional.txt",
+      "bytes": 202,
+      "sha256": "8744b845e19244902c96c82f46d1a3ab3d6618b7f09145b7d3a1a497fdab1d3e"
+    },
+    {
+      "path": "2026-10-03-evidence/model-manager.png",
+      "bytes": 51526,
+      "sha256": "c7315a98f940154669c83027d0fdcc5805d88e6bae554bbaccb1c23774b07659"
+    },
+    {
+      "path": "2026-10-03-evidence/mri-path-rerun.txt",
+      "bytes": 2146,
+      "sha256": "899c620cb1f631f60e9f05b0f0f7200b267d0fbbc229be1ee0b7e3b31998ac16"
+    },
+    {
+      "path": "2026-10-03-evidence/nninteractive_task_integration.txt",
+      "bytes": 110,
+      "sha256": "17891cf04b18ca4fc4cc3a67b98b2142f06192e86dc01c69a461c5560388e342"
+    },
+    {
+      "path": "2026-10-03-evidence/nnunet-training-settings.png",
+      "bytes": 79469,
+      "sha256": "82139025292e63d49a305fe37d80267ec871d7cd6fb874e74d2c7458df84a52f"
+    },
+    {
+      "path": "2026-10-03-evidence/nnunet-training.png",
+      "bytes": 87325,
+      "sha256": "d3e9d6d9c45cadf7c111680d1446210f136ae4cf8f90fb08b66e309afda59dc2"
+    },
+    {
+      "path": "2026-10-03-evidence/nnunet_integration.txt",
+      "bytes": 13733,
+      "sha256": "eab76df5c129ac4589f73e059bac3e37e1df7f371397b2085cd7418a51c5967e"
+    },
+    {
+      "path": "2026-10-03-evidence/path-alias-rerun-flexict.txt",
+      "bytes": 725,
+      "sha256": "76a1bd2fcb15aafa27c3584c772fdbd91ec79d24b1a890f87a44aa16b979da4e"
+    },
+    {
+      "path": "2026-10-03-evidence/path-alias-rerun-nnint.txt",
+      "bytes": 98,
+      "sha256": "24cefc2bc38a1c71e18591075993695fc72546b32ff6b5baab3d98032ce96fb5"
+    },
+    {
+      "path": "2026-10-03-evidence/regression-results.json",
+      "bytes": 4418,
+      "sha256": "329e889fa9e1fa67f2b95d72ff1dc486aa81407ddddc25e7b735ec85ce151bc9"
+    },
+    {
+      "path": "2026-10-03-evidence/remote_training.txt",
+      "bytes": 595,
+      "sha256": "20823c9f21f143cd81a87dd1176343f579df19d1fc1c76cc9693a355b764f292"
+    },
+    {
+      "path": "2026-10-03-evidence/render_ui.py",
+      "bytes": 3292,
+      "sha256": "f5110abee31d88f84025f1e4470bc521a1ee8d68726170a3d807f6dbd7f6ee2c"
+    },
+    {
+      "path": "2026-10-03-evidence/scenario-results.json",
+      "bytes": 3864,
+      "sha256": "f67d3396ecdd301b9fd937360389fb51c575e5a8331285d8ac4df2190e0e3ab5"
+    },
+    {
+      "path": "2026-10-03-evidence/targeted.txt",
+      "bytes": 18011,
+      "sha256": "60966911807251e72e4636e18fdb5d35ecdb74fdddf3340b9ac1a7bb3dfd68e6"
+    },
+    {
+      "path": "2026-10-03-evidence/ui-metrics.json",
+      "bytes": 8081,
+      "sha256": "e075f88a90a5eb91ed35a29fb7ca7d45a591a918ca71bb7aad7ee4dfac3da301"
+    },
+    {
+      "path": "2026-10-03-evidence/ui_quality.txt",
+      "bytes": 250,
+      "sha256": "6f12bc4a0f38808e080eec9f3030d66c372fcbdd8d92789ce938b1927eb1c3c8"
+    }
+  ],
+  "code_baseline_sha256": [
+    {
+      "path": "runtime_py35/runtime_common.py",
+      "bytes": 74112,
+      "sha256": "788dc1611fffd37f57f9b03b17833a580ad9500d5e7f5cf386c76e580aea6d22"
+    },
+    {
+      "path": "runtime_py35/import_undo_mimics.py",
+      "bytes": 20519,
+      "sha256": "5953ad50cb69a30cb472c78b95a232a7b5d6d318f72dffc329fd2280fc611986"
+    },
+    {
+      "path": "runtime_py35/create_mcs_batch.py",
+      "bytes": 63390,
+      "sha256": "6babff45bea8c94c84a9f4ce4bfe671c0038f1ea7a95c92598c41ead4d862cfb"
+    },
+    {
+      "path": "runtime_py35/mimics_export.py",
+      "bytes": 149966,
+      "sha256": "cc0d184534082be03abf2a04660cbc96d680f398129d23ea3743134ca26cca4d"
+    },
+    {
+      "path": "runtime_py35/flexict_mimics.py",
+      "bytes": 66088,
+      "sha256": "db7f4839db18a84fdc9889494383e932b12681134725d9f1401f650d0e5bc490"
+    },
+    {
+      "path": "runtime_py35/nnunet_mimics.py",
+      "bytes": 39811,
+      "sha256": "9375e1ceac50ce2711afe102e0b375d7208c261cf266f5a8298b70058ae532ec"
+    },
+    {
+      "path": "runtime_py35/sync_missing_masks_batch.py",
+      "bytes": 15599,
+      "sha256": "7093aac958c77fbb8223bc0e2abda4b3b25c75c4a41516712c938287a2c436b9"
+    },
+    {
+      "path": "runtime_py35/append_masks_batch.py",
+      "bytes": 13316,
+      "sha256": "3aee06a570933931ca87f2711b3a47821dbead1b1dd2ce92306805fc9851c262"
+    },
+    {
+      "path": "runtime_py35/interactive_algorithms_mimics.py",
+      "bytes": 48198,
+      "sha256": "80d019a5da919d1ed80c473324604348f361b8639344f9589f7ce736ae0d4282"
+    },
+    {
+      "path": "runtime_py35/mimics_mask_apply.py",
+      "bytes": 29250,
+      "sha256": "6606171a63509e15ad0a93404a62e6d95999f97f912d517cc790f8b4cdfa38f9"
+    },
+    {
+      "path": "runtime_py35/nninteractive_mimics.py",
+      "bytes": 189146,
+      "sha256": "893bb78fe3248a2590de2121825dff0bf1861f99a48b68ee4529a26a59cc5116"
+    },
+    {
+      "path": "tools/batch_status_viewer.py",
+      "bytes": 20780,
+      "sha256": "0b2468d85f4e5fcbf3f482f9d5a900d6bf9cdb7d4d14de164caf2f005abef9ed"
+    },
+    {
+      "path": "tools/import_drop_window.py",
+      "bytes": 32476,
+      "sha256": "566efd67920b6ab5966058b2ffc3ede0aac2d41a3253bcfed8b72e7105c74209"
+    },
+    {
+      "path": "tools/system_health_panel.py",
+      "bytes": 22478,
+      "sha256": "477e06e5329f9ba6809f655dd92338d8fcb375e1ea813f809d92a053d26b6150"
+    },
+    {
+      "path": "tools/flexict_active_learning_ui.py",
+      "bytes": 28035,
+      "sha256": "5bd74deb61f2b349e304d241718da015905d69cfa88e3a62bef2fce3017a8262"
+    },
+    {
+      "path": "tools/model_manager_ui.py",
+      "bytes": 21130,
+      "sha256": "935d6d44dc404ba75a4f55cfdab23dbf9990451aec33f0c9987d7f6b256162da"
+    },
+    {
+      "path": "tools/nnunet_pipeline.py",
+      "bytes": 87583,
+      "sha256": "b1a8166cdf50dcd7c18fd0c69604ba10d6d7e22dcef1ad41d635f568843bbbe9"
+    },
+    {
+      "path": "tools/flexict_pipeline.py",
+      "bytes": 71604,
+      "sha256": "9089af48ab9c91c1923c5853fb18ef2fd99f6c07d7767e8fef4fcebb48aea493"
+    },
+    {
+      "path": "tools/flexict_training_setup_ui.py",
+      "bytes": 28001,
+      "sha256": "7707b5ae0ecf0d26c28357e125fd357fe527658a01ce6788e8e40d376dbe482d"
+    },
+    {
+      "path": "tools/nnunet_training_setup_ui.py",
+      "bytes": 41786,
+      "sha256": "22ab21e0d8110a109b2e7069774ad2e6cf0c53a15c1f8aaa590f13852ee5b129"
+    },
+    {
+      "path": "tools/interactive_algorithms_worker.py",
+      "bytes": 22647,
+      "sha256": "6efc9ef71a3e6281e32b8515b76c4c2341dfdbdada5eb2fdaf62ddbd077c3379"
+    },
+    {
+      "path": "tools/setup_env.py",
+      "bytes": 50185,
+      "sha256": "3f28e11702cd42f3b9bbda2da8b11a844efaae3036a8d79c87d493447ae2aa66"
+    },
+    {
+      "path": "tools/remote_training_controller.py",
+      "bytes": 206261,
+      "sha256": "0443d916b4835ec729e843582a0ad49775f8b91fbf1f208c365f1fbf7fea0f0c"
+    },
+    {
+      "path": "integrations/flexict-finetune/scripts/build_dataset.py",
+      "bytes": 6305,
+      "sha256": "83141a34a77c21ab8cf7c5712abe5e152e41f69bf14eb078c0e727090b1b0ba7"
+    },
+    {
+      "path": "tests/test_all.py",
+      "bytes": 689524,
+      "sha256": "1f13eff63353fe9ac89abc2f595849f42c441a8410e2af7786bd6522ce3624c7"
+    },
+    {
+      "path": "tests/test_gui_smoke.py",
+      "bytes": 46583,
+      "sha256": "6b0d3b7b5356e8c11651ffcd28ae99da391a4ccb54269b922ac9edde0b0f1ae3"
+    },
+    {
+      "path": "tests/test_ui_quality.py",
+      "bytes": 6958,
+      "sha256": "c1ab32b977af21bb0f4dcc16b5929e0f432405e3217fe563baee7778355bb1a0"
+    },
+    {
+      "path": "mimics_bridge.py",
+      "bytes": 120439,
+      "sha256": "0c27181d630cf7d310d59cc2e824e756b252ca2dfd3dab5b3e855773830b0bd5"
+    },
+    {
+      "path": "docs/Mimics_API_Documentation.md",
+      "bytes": 302968,
+      "sha256": "64407239cf481a48ef1ff3680578e13bb37eda1138400e5a7100becaa50efb99"
+    }
+  ]
+}

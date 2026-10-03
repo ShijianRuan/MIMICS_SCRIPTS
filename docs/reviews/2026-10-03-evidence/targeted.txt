@@ -1,0 +1,177 @@
+test_find_latest_receipt_ignores_invalid_schemas (__main__.TestImportReceiptAndUndo.test_find_latest_receipt_ignores_invalid_schemas) ... ok
+test_find_latest_receipt_picks_newest (__main__.TestImportReceiptAndUndo.test_find_latest_receipt_picks_newest) ... ok
+test_receipt_schema_and_location (__main__.TestImportReceiptAndUndo.test_receipt_schema_and_location) ... ok
+test_undo_announces_blocking_steps_in_log_before_deleting (__main__.TestImportReceiptAndUndo.test_undo_announces_blocking_steps_in_log_before_deleting)
+B33: open/fingerprint/save block the GUI thread for as long as ... ok
+test_undo_confirm_copy_explains_steps_and_one_shot_semantics (__main__.TestImportReceiptAndUndo.test_undo_confirm_copy_explains_steps_and_one_shot_semantics)
+B7: the confirm dialog states the close-project step and that ... ok
+test_undo_deletion_failure_leaves_receipt (__main__.TestImportReceiptAndUndo.test_undo_deletion_failure_leaves_receipt) ... ok
+test_undo_entry_points_exist (__main__.TestImportReceiptAndUndo.test_undo_entry_points_exist) ... ok
+test_undo_keeps_file_when_fingerprint_differs (__main__.TestImportReceiptAndUndo.test_undo_keeps_file_when_fingerprint_differs) ... ok
+test_undo_other_project_refusal_explains_two_steps (__main__.TestImportReceiptAndUndo.test_undo_other_project_refusal_explains_two_steps)
+B7: the refusal message gives the two-step recovery and says ... ok
+test_undo_reports_when_no_receipt_exists (__main__.TestImportReceiptAndUndo.test_undo_reports_when_no_receipt_exists) ... ok
+test_undo_roundtrip_file_rolled_back_when_fingerprint_matches (__main__.TestImportReceiptAndUndo.test_undo_roundtrip_file_rolled_back_when_fingerprint_matches) ... ok
+test_undo_same_project_open_not_reloaded (__main__.TestImportReceiptAndUndo.test_undo_same_project_open_not_reloaded)
+F17/T17 同项目不重载: when the receipt's project is already ... ok
+test_undo_unknown_project_state_never_opens_another_project (__main__.TestImportReceiptAndUndo.test_undo_unknown_project_state_never_opens_another_project)
+F17/T17 查询失败/缺API: when the project query itself fails, ... ok
+test_undo_unnamed_project_refused (__main__.TestImportReceiptAndUndo.test_undo_unnamed_project_refused)
+F17/T17 未命名项目: a loaded project with no file path (never ... ok
+test_undo_v1_receipt_with_extra_mask_keeps_file (__main__.TestImportReceiptAndUndo.test_undo_v1_receipt_with_extra_mask_keeps_file)
+W02 旧receipt保守处理: a v1 receipt (names only) with an extra ... ok
+test_undo_v2_clean_session_removes_file (__main__.TestImportReceiptAndUndo.test_undo_v2_clean_session_removes_file)
+F18 positive control: with no manual work anywhere (session and ... <REPO>/tests/test_all.py:11581: ResourceWarning: unclosed file <_io.BufferedWriter name='<TEMP_PATH>'>
+  open(filename, "wb").write(save_writes),
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+ok
+test_undo_v2_deleted_and_recreated_mask_keeps_file (__main__.TestImportReceiptAndUndo.test_undo_v2_deleted_and_recreated_mask_keeps_file)
+F18/T19 删除后重建同名: the imported mask was deleted and a ... <REPO>/tests/test_all.py:11581: ResourceWarning: unclosed file <_io.BufferedWriter name='<TEMP_PATH>'>
+  open(filename, "wb").write(save_writes),
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+ok
+test_undo_v2_dirty_session_keeps_file_with_saved_manual_mask (__main__.TestImportReceiptAndUndo.test_undo_v2_dirty_session_keeps_file_with_saved_manual_mask)
+F18/T18 已保存新增: the manual mask WAS saved to disk, so the ... <REPO>/tests/test_all.py:11581: ResourceWarning: unclosed file <_io.BufferedWriter name='<TEMP_PATH>'>
+  open(filename, "wb").write(save_writes),
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+ok
+test_undo_v2_dirty_session_keeps_file_with_unsaved_manual_mask (__main__.TestImportReceiptAndUndo.test_undo_v2_dirty_session_keeps_file_with_unsaved_manual_mask)
+F18/T18: an unsaved manual mask in the session must stop the ... <REPO>/tests/test_all.py:11581: ResourceWarning: unclosed file <_io.BufferedWriter name='<TEMP_PATH>'>
+  open(filename, "wb").write(save_writes),
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+ok
+test_undo_v2_guid_drift_falls_back_to_token_and_name (__main__.TestImportReceiptAndUndo.test_undo_v2_guid_drift_falls_back_to_token_and_name)
+F19/T19 重命名/GUID漂移: the host regenerated guids across the ... <REPO>/tests/test_all.py:11581: ResourceWarning: unclosed file <_io.BufferedWriter name='<TEMP_PATH>'>
+  open(filename, "wb").write(save_writes),
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+ok
+test_undo_v2_same_name_on_two_images_deletes_only_owned (__main__.TestImportReceiptAndUndo.test_undo_v2_same_name_on_two_images_deletes_only_owned)
+F19/T19 多Image同名: two images each hold a 'liver' mask; only ... <REPO>/tests/test_all.py:11581: ResourceWarning: unclosed file <_io.BufferedWriter name='<TEMP_PATH>'>
+  open(filename, "wb").write(save_writes),
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+ok
+test_al_apply_request_returns_without_waiting_for_bridge (__main__.TestFlexiCTActiveLearningApply.test_al_apply_request_returns_without_waiting_for_bridge) ... ok
+test_al_conversion_applies_finished_result_and_marks_request (__main__.TestFlexiCTActiveLearningApply.test_al_conversion_applies_finished_result_and_marks_request) ... ok
+test_al_conversion_failure_marks_request_failed (__main__.TestFlexiCTActiveLearningApply.test_al_conversion_failure_marks_request_failed) ... ok
+test_al_conversion_refuses_when_project_switched (__main__.TestFlexiCTActiveLearningApply.test_al_conversion_refuses_when_project_switched) ... ok
+test_al_conversion_rejects_truncated_buffer (__main__.TestFlexiCTActiveLearningApply.test_al_conversion_rejects_truncated_buffer) ... ok
+test_al_conversion_rollback_on_apply_failure (__main__.TestFlexiCTActiveLearningApply.test_al_conversion_rollback_on_apply_failure) ... ok
+test_all_ok_is_false_when_a_real_import_fails (__main__.TestEnvironmentRepairSemantics.test_all_ok_is_false_when_a_real_import_fails)
+F08: find_spec only proves presence - a Windows DLL problem makes ... ok
+test_flexict_inference_does_not_require_the_backbone_files (__main__.TestEnvironmentRepairSemantics.test_flexict_inference_does_not_require_the_backbone_files)
+F06: the inference environment claimed the pretrained backbone ... ok
+test_repair_translates_import_names_to_pip_names (__main__.TestEnvironmentRepairSemantics.test_repair_translates_import_names_to_pip_names)
+F07: the check reports import names; pip needs distributions. ... ok
+test_torch_is_installed_as_a_pinned_pair (__main__.TestEnvironmentRepairSemantics.test_torch_is_installed_as_a_pinned_pair)
+F12: torch and torchvision must move as a pair from the PyTorch ... ok
+test_cancelled_append_publishes_the_failure_ledger (__main__.TestForeignScriptIntegration.test_cancelled_append_publishes_the_failure_ledger)
+F27 on the append batch runner: the per-case failure ledger is ... ok
+test_cancelled_sync_publishes_the_case_ledger (__main__.TestForeignScriptIntegration.test_cancelled_sync_publishes_the_case_ledger)
+F27: cancelling a sync batch between cases used to return before ... ok
+test_launchers_acquire_official_background_locks (__main__.TestForeignScriptIntegration.test_launchers_acquire_official_background_locks)
+Both tools must serialize against real import/export jobs through ... ok
+test_publish_degrades_when_output_did_not_exist (__main__.TestForeignScriptIntegration.test_publish_degrades_when_output_did_not_exist)
+First publish to a fresh output path must not be treated as a ... ok
+test_publish_never_overwrites_newer_manual_save (__main__.TestForeignScriptIntegration.test_publish_never_overwrites_newer_manual_save)
+F28: the staging+replace publish used to overwrite an output the ... ok
+test_publish_replaces_unchanged_output (__main__.TestForeignScriptIntegration.test_publish_replaces_unchanged_output)
+F28 counterpart: an output nobody touched is still replaced. ... ok
+test_runtime_scripts_are_py35_clean (__main__.TestForeignScriptIntegration.test_runtime_scripts_are_py35_clean)
+No f-strings / pathlib / walrus in the background-Mimics scripts; ... ok
+test_stale_inspection_report_is_not_this_run_s_success (__main__.TestForeignScriptIntegration.test_stale_inspection_report_is_not_this_run_s_success)
+F26: a completed report left at the fixed --report path by an ... ok
+test_sync_force_actually_rebuilds_from_source (__main__.TestForeignScriptIntegration.test_sync_force_actually_rebuilds_from_source)
+F28 adjacent UX gap: --force was written into the job config but ... ok
+test_sync_launcher_scopes_locks_to_all_written_roots (__main__.TestForeignScriptIntegration.test_sync_launcher_scopes_locks_to_all_written_roots)
+The sync launcher locks the mcs dir, the source root AND the ... ok
+test_sync_refuses_multi_image_project (__main__.TestForeignScriptIntegration.test_sync_refuses_multi_image_project)
+F25: a project with several images must fail the case instead of ... ok
+test_sync_runtime_stops_between_cases_and_publishes_atomically (__main__.TestForeignScriptIntegration.test_sync_runtime_stops_between_cases_and_publishes_atomically)
+Failure paths of the sync job: (1) the stop file is honored before ... ok
+test_sync_source_masks_never_offers_the_case_image (__main__.TestForeignScriptIntegration.test_sync_source_masks_never_offers_the_case_image)
+F24: in a flat case layout the CT itself must not be discovered ... ok
+test_sync_status_carries_the_job_id (__main__.TestForeignScriptIntegration.test_sync_status_carries_the_job_id)
+F26: every status written by a sync attempt carries the launcher's ... ok
+test_batch_drop_status_stays_importing_while_queue_running (__main__.TestImportDropWindow.test_batch_drop_status_stays_importing_while_queue_running) ... <REPO>/tools/ui_theme.py:64: DeprecationWarning: Enum value 'Qt::ApplicationAttribute.AA_UseHighDpiPixmaps' is marked as deprecated, please check the documentation for more information.
+  QtCore.QCoreApplication.setAttribute(attribute, True)
+ok
+test_batch_drop_status_unfreezes_from_queue_done_marker (__main__.TestImportDropWindow.test_batch_drop_status_unfreezes_from_queue_done_marker) ... ok
+test_batch_drop_status_unfreezes_on_failure_with_reason (__main__.TestImportDropWindow.test_batch_drop_status_unfreezes_on_failure_with_reason) ... ok
+test_browse_source_buttons_use_async_helpers (__main__.TestImportDropWindow.test_browse_source_buttons_use_async_helpers) ... ok
+test_browse_source_files_feeds_multi_single_pipeline (__main__.TestImportDropWindow.test_browse_source_files_feeds_multi_single_pipeline) ... ok
+test_classify_case_folder (__main__.TestImportDropWindow.test_classify_case_folder) ... ok
+test_classify_dataset_root (__main__.TestImportDropWindow.test_classify_dataset_root) ... ok
+test_classify_multi_select_deduplicates_paths (__main__.TestImportDropWindow.test_classify_multi_select_deduplicates_paths) ... ok
+test_classify_multi_select_stays_the_exact_case_list (__main__.TestImportDropWindow.test_classify_multi_select_stays_the_exact_case_list) ... ok
+test_classify_paths_from_different_roots_are_single_imports (__main__.TestImportDropWindow.test_classify_paths_from_different_roots_are_single_imports) ... ok
+test_classify_single_file (__main__.TestImportDropWindow.test_classify_single_file) ... ok
+test_collect_recent_drops_handles_missing_dir (__main__.TestImportDropWindow.test_collect_recent_drops_handles_missing_dir) ... ok
+test_collect_recent_drops_summarizes_status_files (__main__.TestImportDropWindow.test_collect_recent_drops_summarizes_status_files) ... ok
+test_excluded_dirs_are_not_treated_as_cases (__main__.TestImportDropWindow.test_excluded_dirs_are_not_treated_as_cases) ... ok
+test_offscreen_window_renders_and_registers (__main__.TestImportDropWindow.test_offscreen_window_renders_and_registers) ... qt.qpa.fonts: Populating font family aliases took 188 ms. Replace uses of missing font family "Sans Serif" with one that exists to avoid this cost.
+This plugin does not support raise()
+ok
+test_single_case_status_is_not_touched_by_batch_derivation (__main__.TestImportDropWindow.test_single_case_status_is_not_touched_by_batch_derivation) ... ok
+test_submit_batch_invokes_prepare_import (__main__.TestImportDropWindow.test_submit_batch_invokes_prepare_import) ... ok
+test_submit_multi_single_imports_each_dropped_case_only (__main__.TestImportDropWindow.test_submit_multi_single_imports_each_dropped_case_only) ... ok
+test_submit_single_invokes_single_case_worker (__main__.TestImportDropWindow.test_submit_single_invokes_single_case_worker) ... ok
+test_no_tick_function_blocks_the_gui_thread (__main__.TestGuiThreadBlockingContract.test_no_tick_function_blocks_the_gui_thread) ... ok
+test_reaped_export_finishes_on_gui_thread (__main__.TestGuiThreadBlockingContract.test_reaped_export_finishes_on_gui_thread)
+F11 behavioral for the export path: cancel → reaper flag → the ... ok
+test_reaped_mask_import_deadline_finishes_with_diagnostic (__main__.TestGuiThreadBlockingContract.test_reaped_mask_import_deadline_finishes_with_diagnostic)
+F11 failure path: if the reap never completes (terminate ... ok
+test_reaped_mask_import_finishes_on_gui_thread (__main__.TestGuiThreadBlockingContract.test_reaped_mask_import_finishes_on_gui_thread)
+F11 behavioral: while the reaper runs, ticks do nothing but keep ... ok
+test_reaper_callbacks_never_call_mimics_apis (__main__.TestGuiThreadBlockingContract.test_reaper_callbacks_never_call_mimics_apis)
+F11: terminate_process_async callbacks run on the reaper thread. ... ok
+test_al_table_keeps_unit_header_readable (__main__.TestUiThemePalette.test_al_table_keeps_unit_header_readable) ... ok
+test_palette_tokens_exist_and_are_hex (__main__.TestUiThemePalette.test_palette_tokens_exist_and_are_hex) ... ok
+test_primary_button_has_a_disabled_state (__main__.TestUiThemePalette.test_primary_button_has_a_disabled_state) ... ok
+test_status_hex_literals_match_shared_palette (__main__.TestUiThemePalette.test_status_hex_literals_match_shared_palette) ... ok
+test_buffer_byte_view_casts_multidimensional_buffers (__main__.TestStreamedVoxelBuffers.test_buffer_byte_view_casts_multidimensional_buffers) ... ok
+test_buffer_byte_view_falls_back_to_copy_for_unwrappable_objects (__main__.TestStreamedVoxelBuffers.test_buffer_byte_view_falls_back_to_copy_for_unwrappable_objects) ... ok
+test_buffer_byte_view_is_zero_copy_for_flat_byte_buffers (__main__.TestStreamedVoxelBuffers.test_buffer_byte_view_is_zero_copy_for_flat_byte_buffers) ... ok
+test_stream_buffer_digest_matches_whole_buffer_hash (__main__.TestStreamedVoxelBuffers.test_stream_buffer_digest_matches_whole_buffer_hash) ... ok
+test_stream_buffer_empty_buffer_yields_digest_of_nothing (__main__.TestStreamedVoxelBuffers.test_stream_buffer_empty_buffer_yields_digest_of_nothing) ... ok
+test_stream_buffer_progress_callback_errors_are_swallowed (__main__.TestStreamedVoxelBuffers.test_stream_buffer_progress_callback_errors_are_swallowed) ... ok
+test_stream_buffer_writes_identical_bytes_and_pumps_between_chunks (__main__.TestStreamedVoxelBuffers.test_stream_buffer_writes_identical_bytes_and_pumps_between_chunks) ... ok
+test_clamp_contrast_points (__main__.TestWindowLevel.test_clamp_contrast_points) ... ok
+test_hu_to_gv_roundtrip (__main__.TestWindowLevel.test_hu_to_gv_roundtrip)
+Simulate HU2GV integer conversion logic. ... ok
+test_image_min_max_default_fallback (__main__.TestWindowLevel.test_image_min_max_default_fallback)
+When no Mimics API, _image_min_max falls back to (0, 4095). ... ok
+test_load_presets_returns_defaults_when_no_file (__main__.TestWindowLevel.test_load_presets_returns_defaults_when_no_file) ... ok
+test_parse_valid_range (__main__.TestWindowLevel.test_parse_valid_range) ... ok
+test_preset_calculation (__main__.TestWindowLevel.test_preset_calculation)
+WW=400, WL=50 → low_hu=-150, high_hu=250 ... ok
+test_preset_keyword_matching (__main__.TestWindowLevel.test_preset_keyword_matching) ... ok
+test_all_entries_importable (__main__.TestScriptingLibraryEntries.test_all_entries_importable)
+Each scripting_library entry should be importable without Mimics. ... ok
+test_living_doc_entry_references_match_library_files (__main__.TestScriptingLibraryEntries.test_living_doc_entry_references_match_library_files)
+R61-19: entry references in living docs (e.g. "04 Task Status") ... ok
+test_living_docs_do_not_reference_deleted_entries (__main__.TestScriptingLibraryEntries.test_living_docs_do_not_reference_deleted_entries)
+B24: entries deleted by R41/R43 must not appear as live references ... ok
+test_nninteractive_entry_routes_correctly (__main__.TestScriptingLibraryEntries.test_nninteractive_entry_routes_correctly)
+The official nnInteractive entry routes to nninteractive_mimics. ... ok
+test_stop_background_services_entry (__main__.TestScriptingLibraryEntries.test_stop_background_services_entry) ... ok
+test_window_entries_routes (__main__.TestScriptingLibraryEntries.test_window_entries_routes) ... ok
+
+----------------------------------------------------------------------
+Ran 93 tests in 4.926s
+
+OK
+Mimics-Script Comprehensive Tests
+============================================================
+Python: 3.12.14 (main, Aug 25 2026, 13:50:33) [Clang 22.1.3 ]
+Project: <REPO>
+============================================================
+[2026-10-03 17:07:19] Append job started: 1 case(s).
+[2026-10-03 17:07:19] Stop requested; remaining cases were not opened.
+[2026-10-03 17:07:19] Append job cancelled: completed=0, skipped=0, failed=0.
+[2026-10-03 17:07:19] Sync job started: 2 case(s).
+[2026-10-03 17:07:19] Stop requested; remaining cases were not opened.
+[2026-10-03 17:07:19] Sync job cancelled: completed=1, skipped=0, failed=0.
+Inspect job started: 0 case(s).
+Inspect finished: completed=0, failed=0, report=<TEMP_PATH>
+[2026-10-03 17:07:19] Sync job started: 1 case(s).
+[2026-10-03 17:07:19] Sync job finished: completed=0, skipped=1, failed=0.
