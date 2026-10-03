@@ -357,6 +357,43 @@
   单击即改状态，误点无救济。与 D10（overlay 应用是否自动标
   annotated）纠缠，先定 D10 再动，避免返工。
 
+### R67（2026-10-03 用户立项：导入体验综合优化——mask 解耦 + 层级透明化）
+
+> 用户在数据标准要求问答后拍板"综合优化做一些大的改动，看怎么做才最全面
+> 和用户可理解、好用"，并追加约束"不要增加用户的负担"（→ 渐进式披露：
+> 正常路径窗口与原来完全一样，新 UI 只在自动发现失败的那一刻出现）。
+> 三个根因：单例 mask 被目录布局锁死（segmentations/ 唯一入口 + 同目录
+> 多文件静默抑制）；批量层级要求不透明（mask=0 时字段消失 = 静默丢一半
+> 数据、跳过名不显示、布局从不告知）；识别行英文与中文窗口混排。
+
+- [x] **R67-1（P1）桥接层批量发现跟随 profile mask_dirs**〔commit
+  `ed6c253`〕：`do_discover` 硬编码 `case_dir/segmentations` 而
+  `io_path_setup_ui` 已跟随 `dataset_profiles.json` 的 `mask_dirs`——
+  改配置单例生效、批量静默走旧目录。修复后两个发现点同一语义，
+  默认行为字节级不变（ts-like 即 `["segmentations"]`）。测试：
+  profile 表断言 + mock mask_dirs 的 do_discover 测试。
+- [x] **R67-2（P1）发现层透明化 + 中文化**〔commit `fae92e6`〕：
+  ① `summarize_dataset` 摘要中文化（已识别 N 个病例/图像/N 个 Mask/
+  跳过 N 个（无图像）：名字），跳过病例名首次可见；② mask=0 且
+  profile 有 mask_dirs 时显式警告"未发现 Mask（自动发现只查找每个
+  病例文件夹下的 segmentations/ 子目录）"——堵住静默半数据丢失；
+  ③ `discover_single_source` 同目录多文件抑制 mask 发现时返回
+  `masks_suppressed` 标志（纯信息字段）。
+- [x] **R67-3（P1）拖拽窗口渐进式 Mask 路径行**〔commits `11a9aa7` +
+  `311c5e6`〕：正常路径零新增 UI；自动发现为空（无 mask 或被抑制）
+  时识别行中文说明原因并显示"Mask 在别处？指定路径"行——文件/文件夹/
+  多行粘贴/异步浏览，任意位置，显式清单**替换**自动发现（F24），无效
+  路径 fail-closed 不启动（防静默无 mask 导入）。抑制场景提示指向
+  02_Import_Masks（已有工程补 mask 的既有入口，仅在相关时刻出现）。
+  不持久化 mask 路径（上个数据集的路径粘到下个数据集正是要消灭的
+  半数据丢失模式）。识别行 `Case 'x' - image found`/`Dataset:` 中文化。
+- 证据：smoke 8/8（`20261003T183230_smoke.json`）、fast 29/29
+  （`20261003T190956_fast.json`）。新增测试 7 个（expand_mask_paths
+  单测含中文/空格/去重/无效、显式覆盖发现、无效路径 fail-closed、
+  source-assert 防静默删除、mask=0 警告、抑制标志）。
+- **D16 关联**：显式 mask 名 = 文件 stem（D16 语义保持），本条不解决
+  跨标注员命名词汇表本身（仍为需用户决策 D16）。
+
 
 
 > 来源：docs/reviews/（2026-09-29 跨职能评审 F01–F17 + 2026-09-30 场景评审

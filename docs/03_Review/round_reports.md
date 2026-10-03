@@ -4457,3 +4457,63 @@ _stop_marker + request_stop，<50 行）+ 导入窗 2 个浏览按钮；删除 7
   同步；mimics_export 降级导出确认按钮前缀耦合（"按"）已复核并加注释。
 - **AUD-6（P2）保持登记**：AL 标注/跳过单击无确认，需用户决策 D10
   先行，未动。
+
+## R67（2026-10-03）：导入体验综合优化——mask 解耦 + 层级透明化
+
+> 用户在"数据标准要求"问答（双并行代理调查：训练侧 + 导入/导出侧）后
+> 立项：三个痛点——①单例 mask 锁死 `case/segmentations/` 且同目录多文件
+> 时静默抑制；②批量 mask=0 时识别行字段消失（放错位置与没有 mask 观感
+> 相同 = 静默丢一半数据）、层级要求从不告知；③识别行英文与中文窗口混排。
+> 追加约束"不要增加用户的负担"→ 全部新 UI 采用渐进式披露：正常路径窗口
+> 与原来完全一致，新元素只在自动发现失败的那一刻出现。
+
+### 实施内容（四步独立 commit）
+
+1. **桥接层一致性（`ed6c253`）**：`do_discover` 硬编码 `segmentations`
+   而 `io_path_setup_ui` 跟随 `dataset_profiles.json`——修复后
+   `mask_dirs` 配置对单例/批量同时生效，默认行为字节级不变。
+   决策：不做 `--mask-dir` CLI 旗标（4 个管线穿透点换一个几乎不变的
+   配置，违反改动最小化；profile 配置已覆盖）。
+2. **发现层透明化（`fae92e6`）**：`summarize_dataset` 摘要中文化 +
+   跳过病例名可见 + mask=0 显式警告（"未发现 Mask（自动发现只查找
+   每个病例文件夹下的 segmentations/ 子目录）"）；
+   `discover_single_source` 抑制时返回 `masks_suppressed` 标志。
+3. **拖拽窗口渐进式 Mask 路径行（`11a9aa7` + `311c5e6`）**：
+   `expand_mask_paths`（无 GUI 可测）+ 按需显示的"Mask 在别处？指定
+   路径"行 + 抑制/无 mask 中文警告 + `submit_import` 显式清单替换
+   发现（F24）、无效路径 fail-closed 不启动。mask 路径不持久化
+   （上数据集路径粘到下数据集正是要消灭的半数据丢失模式）。
+   抑制场景提示指向 02_Import_Masks（已有工程补 mask 的既有完整
+   入口，仅在相关时刻出现，非常驻文案）。
+4. **测试 + 文档**：新增 7 测试（expand_mask_paths 单测：中文/空格/
+   去重/无效；显式覆盖发现契约；无效路径 fail-closed；source-assert
+   防静默删除；mask=0 警告；抑制标志）。CONFIG_REFERENCE mask_dirs
+   行与 mimics_entry_guide Import Data 行各一句。
+
+### 设计要点与既有决策对齐
+
+- F24：显式清单替换不合并、绝不自动推断拖入文件是 mask；
+- D16：显式 mask 名 = 文件 stem（= Mask 名 = 导出标签名）；
+- F10/R61-7/R61-9/TB-03 均不受影响（已核实测试锁全部存活）；
+- worker **零改动**——显式清单走既有 `case_info["masks"]` 可信通道，
+  无新回归面。
+
+### 行为变化披露
+
+- `dataset_profiles.json` 的 `default_profile` 若被用户改为 `generic`
+  （mask_dirs 空），批量发现将找不到 mask——这是 generic 的文档语义
+  且与单例行为一致，之前批量为硬编码不跟随（本次修复的本质）。
+- 识别行从英文换中文（`Recognized N case(s)...` → `已识别 N 个病例…`）。
+
+### 门禁与证据
+
+- smoke 8/8：`20261003T183230_smoke.json`
+- fast 29/29：`20261003T190956_fast.json`（步骤 1 后 smoke、最终 fast）
+- 净变化 +274 行（4 文件，+350/−76）：新函数 1（expand_mask_paths
+  ~55 行）、新 UI 元素 1（按需行）、7 个防回归测试 ~118 行。
+
+### 遗留
+
+- D16（跨标注员命名词汇表）不因本轮缓解，仍为需用户决策项；
+- F01（混 UID 多帧 DICOM 精确导入，R65-12）等实机项不受影响；
+- 深嵌套（>2 层）数据集仍不可见（P3，未立项）。
