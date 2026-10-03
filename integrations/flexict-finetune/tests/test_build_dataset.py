@@ -44,24 +44,30 @@ class TestZStartPhysicalAxis(unittest.TestCase):
 
     def test_isotropic_ras_uses_physical_axis(self):
         # Old argmax(spacing) tie-broke to axis 0; physical SI is axis 2.
-        self.assertEqual(
-            self._zstart(np.diag([0.8, 0.8, 0.8, 1.0]), (1, 5, 8)), 0.8)
+        # Expectation from world coordinates: target voxel z=8 of a 10-voxel
+        # span → 8/9, regardless of storage orientation (revalidation F29).
+        self.assertAlmostEqual(
+            self._zstart(np.diag([0.8, 0.8, 0.8, 1.0]), (1, 5, 8)), 8.0 / 9.0)
 
     def test_anisotropic_axial(self):
-        self.assertEqual(
-            self._zstart(np.diag([0.6, 0.6, 2.5, 1.0]), (1, 5, 8)), 0.8)
+        self.assertAlmostEqual(
+            self._zstart(np.diag([0.6, 0.6, 2.5, 1.0]), (1, 5, 8)), 8.0 / 9.0)
 
     def test_axis_permuted(self):
-        # SI along voxel axis 0 with the thinnest spacing.
+        # SI along voxel axis 1 (world z = 0.6 * voxel y): the same physical
+        # position 8/9 up the SI span is voxel y=8 — not the same voxel
+        # index as the RAS case.
         affine = np.array([[0.0, 0.0, 0.6, 0.0],
                            [0.6, 0.0, 0.0, 0.0],
                            [0.0, 0.6, 0.0, 0.0],
                            [0.0, 0.0, 0.0, 1.0]])
-        self.assertEqual(self._zstart(affine, (8, 1, 5)), 0.8)
+        self.assertAlmostEqual(self._zstart(affine, (5, 8, 1)), 8.0 / 9.0)
 
     def test_flipped_z(self):
-        self.assertEqual(
-            self._zstart(np.diag([0.8, 0.8, -0.8, 1.0]), (1, 5, 8)), 0.8)
+        # Flipped storage: world z = -0.8 * voxel z, so the position 8/9 up
+        # the span is voxel z=1 (world z=-0.8 of a [-7.2, 0] slab).
+        self.assertAlmostEqual(
+            self._zstart(np.diag([0.8, 0.8, -0.8, 1.0]), (1, 5, 1)), 8.0 / 9.0)
 
     def test_empty_target_neutral(self):
         affine = np.diag([0.8, 0.8, 0.8, 1.0])
