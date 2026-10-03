@@ -4042,3 +4042,71 @@ R61 期间 E: 盘 100% 满（剩 2.2MB），fast 门禁 2 个 test_all 用例 Er
   未验证项、可信度对照、修复缺陷清单、不承诺项），全部链接回主线
   验证报告的证据链。标注者审计（任务 #11）+ FlexiCT 多分类（任务 #10）
   两条线至此全部收尾。
+
+## R67-旁路（2026-10-03）：多分类生命周期走查缺口修复（G1/G2/G4/G5/G6/G8）
+
+（同在 ai-real-data-validation 分支 worktree。用户对多分类任务全生命周期
+提出走查质疑后，4 并行代码取证发现 10 项缺口，其中 6 项可当轮修复，
+本轮完成；其余见文末登记。）
+
+### 修复清单（每项独立 commit + 防回归测试）
+
+- **G1 部分标签预测为空时无声消失**（7a5be69，P1）：多分类 argmax 文件
+  里模型没预测到的标签根本不存在 → bridge 不产出行 → 应用队列无声少一个
+  Mask。修复：`_prepare_apply_queue` 按配置标签对账，缺失标签记入
+  `skipped_empty_labels`，Mimics 日志 WARNING + 完成消息明确列出
+  "Predicted empty (no Mask created): ..."。走查修正：原设想
+  （foreground_voxels==0 行静默跳过）经真实链路核对不可达——bridge 的
+  `_validate_resampled_mask_foreground` 只放行"源本就空"，全空已有
+  eligible==0 拦截；真实可达缺口是"配置了但文件里没有"。
+  （runtime_py35/flexict_mimics.py，test_flexict_integration
+  `test_partially_empty_prediction_records_skipped_labels`；冒烟门禁 8/8。）
+- **G2 FlexiCT 向导缺 overlap 选项**（30c4bc0，P1）：多分类 FlexiCT 共用
+  nnU-Net 病例物化器，标签交叠默认 fail 停训练，但 FlexiCT 向导无选项，
+  标注者撞错后无自救。镜像 nnU-Net 向导补"允许排在后面的标签覆盖重叠
+  体素"checkbox（默认不勾=fail），透传 overlap_policy。
+  （flexict_training_setup_ui.py，test_gui_smoke
+  `test_flexict_overlap_policy_reaches_request`。）
+- **G4 模型管理器多分类显示断层**（20c6bba，P2）：管理器目标列只读
+  label_name，liver+spleen 多分类模型显示为"liver"，与单分类无法区分。
+  镜像预测窗口已有模式：`" + ".join(label_names) or label_name`。
+  （model_manager_ui.py，test_model_portability
+  `test_manager_shows_multiclass_flexict_target`。）
+- **G5 多分类 bundle 零测试覆盖**（20c6bba，P2）：多分类上线时 bundle
+  导出/导入无测试证明 label_names 能跨机往返。补
+  `test_flexict_multiclass_bundle_roundtrip`：label_names 往返保持 +
+  导入后 usable。顺带给 `_flexict_model_dir` fixture 加 label_names 参数。
+- **G6 删除推荐模型不清指针**（20c6bba，P2）：删除推荐 FlexiCT 模型后
+  registry 的 recommended_model_id 指向已删模型，下次预测会去加载已删
+  checkpoint。根因：save_registry 把显式 `""` 当"保留现有"。语义改为
+  None=保留、""=清空；删除路径发现删的是推荐模型时显式清空。新增
+  `load_registry_recommended_id` 辅助。
+  （flexict_common.py / model_manager_ui.py，test_model_portability
+  `test_removing_recommended_flexict_model_clears_pointer`。）
+- **G8 共用报错的品牌错位**（bf91544，P3）：prepare_source_grid_cases
+  为两系列共用，"nnU-Net needs at least N usable cases" 在 FlexiCT 任务
+  上点名了另一产品家族。改中性文案，跳过病例明细（已有）说明真实原因。
+  （nnunet_pipeline.py；无测试 pin 该文案，nnunet 100/100 +
+  flexict 122/122 复跑确认。）
+
+### 门禁与验证
+
+- 冒烟门禁 8/8（G1 触及 runtime_py35 后即跑，
+  `20261003T165959_smoke.json`）；fast 门禁 28/28
+  （`20261003T175235_fast.json`）。
+- 单套件：flexict_integration 122/122、nnunet_integration 100/100、
+  model_portability（含 3 新用例）全绿、gui_smoke 全绿。
+
+### 未修登记（非本轮范围）
+
+- **G3 状态窗口无训练曲线**：状态查看器无 loss/Dice 曲线，远程训练
+  监控只有文本阶段。属产品功能新增（曲线拉取+渲染），需用户决策。
+- **G7 训练前重复模型查重**：向导不查同名任务已有模型，易生重复。
+  需与模型管理器联动设计，需用户决策。
+- **G9 val_cases 语义不一致**：nnU-Net 向导按比例、FlexiCT 按例数。
+  跨向导语义统一属产品决策。
+- **G10 本地重训全量预处理**：本地重训复用远程 prepared cache 的
+  行为待评估（含 D15 backbone 不随 bundle 传输问题）。
+- **主动学习无图形入口**：load_pair 依赖 2d+3d 成对模型，但无 GUI
+  创建 AL 任务路径（已在 docs/reviews/2026-09-29-cross-functional-
+  review.md 登记），属需求缺口需用户决策。
