@@ -14551,6 +14551,92 @@ class TestFlexiCTActiveLearningApply(unittest.TestCase):
             self.assertEqual([("failed", "conversion timed out")], marked)
             self.assertFalse(os.path.exists(bridge_root))
 
+    def test_al_orphaned_converting_request_fails_after_restart(self):
+        # R62-6: a "converting" request whose wait thread died with a Mimics
+        # restart must be failed explicitly on the next tick — it used to
+        # hang forever because _al_pending_requests only picked up "pending"
+        # and the review UI only reports applied/failed.
+        import flexict_mimics
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = os.path.join(tmp, "jobs", "job_a")
+            request_dir = os.path.join(job_dir, "apply_requests")
+            os.makedirs(request_dir)
+            with open(os.path.join(job_dir, "status.json"), "w") as handle:
+                json.dump({"kind": "active_learning", "status": "completed"}, handle)
+            converting_path = os.path.join(request_dir, "orphan.json")
+            with open(converting_path, "w") as handle:
+                json.dump({
+                    "case_id": "caseA", "what": "bands",
+                    "state": "converting", "requested_at_epoch": 10.0,
+                }, handle)
+            pending_path = os.path.join(request_dir, "fresh.json")
+            with open(pending_path, "w") as handle:
+                json.dump({
+                    "case_id": "caseB", "what": "bands",
+                    "state": "pending", "requested_at_epoch": 20.0,
+                }, handle)
+
+            old_workspace = flexict_mimics._workspace
+            old_transactions = dict(flexict_mimics._AL_APPLY_TRANSACTIONS)
+            old_mark = flexict_mimics._al_mark_request
+            old_apply = flexict_mimics._al_apply_request
+            flexict_mimics._AL_APPLY_TRANSACTIONS.clear()
+            marked = []
+            applied = []
+            try:
+                flexict_mimics._workspace = lambda: tmp
+                flexict_mimics._al_mark_request = (
+                    lambda path, state, detail="": marked.append(
+                        (os.path.basename(path), state, detail))
+                )
+                flexict_mimics._al_apply_request = (
+                    lambda request: applied.append(
+                        str(request.get("case_id") or "")))
+                flexict_mimics._al_tick()
+            finally:
+                flexict_mimics._workspace = old_workspace
+                flexict_mimics._al_mark_request = old_mark
+                flexict_mimics._al_apply_request = old_apply
+                flexict_mimics._AL_APPLY_TRANSACTIONS.clear()
+                flexict_mimics._AL_APPLY_TRANSACTIONS.update(old_transactions)
+            # The orphan is failed with restart guidance...
+            self.assertEqual(1, len(marked))
+            self.assertEqual("orphan.json", marked[0][0])
+            self.assertEqual("failed", marked[0][1])
+            self.assertIn("restarted", marked[0][2])
+            # ...and the freshest still-pending request is applied instead
+            # of being starved behind the orphan.
+            self.assertEqual(["caseB"], applied)
+            # With a live in-memory conversion the tick must NOT reap the
+            # converting request — that path is stage two, handled above.
+            with open(converting_path, "w") as handle:
+                json.dump({
+                    "case_id": "caseA", "what": "bands",
+                    "state": "converting", "requested_at_epoch": 10.0,
+                }, handle)
+            marked[:] = []
+            applied[:] = []
+            flexict_mimics._AL_APPLY_TRANSACTIONS["conversion"] = {
+                "request": {"case_id": "caseA"},
+                "result_path": os.path.join(tmp, "nope.json"),
+            }
+            try:
+                flexict_mimics._workspace = lambda: tmp
+                flexict_mimics._al_mark_request = (
+                    lambda path, state, detail="": marked.append((path, state))
+                )
+                flexict_mimics._al_apply_request = (
+                    lambda request: applied.append(
+                        str(request.get("case_id") or "")))
+                flexict_mimics._al_tick()
+            finally:
+                flexict_mimics._workspace = old_workspace
+                flexict_mimics._al_mark_request = old_mark
+                flexict_mimics._al_apply_request = old_apply
+            self.assertEqual([], marked)
+            self.assertEqual([], applied)
+
     def test_al_conversion_rollback_on_apply_failure(self):
         # F02/T02: a failed second band must leave no half-applied overlay
         # and no leftover masks; the failure is visible in the request.

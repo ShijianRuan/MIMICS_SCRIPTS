@@ -234,11 +234,17 @@
   `test_gui_smoke.py TestBatchPredictionWindow.test_submit_passes_modality_and_cpu_flags_to_jobs`
   （红→绿验证过；红路径为修复前请求缺 `source_modality` 键直接
   KeyError）。远程后端在批量窗口的立项按验收标准另轮处理。
-- [ ] **R62-6【P2】AL 覆盖层 "converting" 请求在 Mimics 重启后成
-  孤儿**（`flexict_mimics.py:1607/:1635-1642/:1314/:1338-1346`；UI
-  承诺 `flexict_active_learning_ui.py:624-630`）：UI 提示"重启后
-  继续"，但请求状态没有跨重启恢复路径。验收：重启后 converting
-  请求要么恢复要么明确报失败，不悬挂。
+- [x] **R62-6【P2】AL 覆盖层 "converting" 请求在 Mimics 重启后成
+  孤儿**（`flexict_mimics.py` `_al_pending_requests`/`_al_tick`）：UI
+  提示"重启后继续"，但请求状态没有跨重启恢复路径。
+  **已解决（本轮）**：`_al_pending_requests` 现同时拾取 pending 与
+  converting 状态；`_al_tick` 对无内存事务（说明等待线程已随 Mimics
+  重启消失）的 converting 请求显式标 failed 并附重启指引，评审窗口
+  经 `request_updates` 即时可见，后续 pending 请求不再被孤儿饿死；
+  有内存事务的 converting 仍走原有两阶段完成路径。测试：
+  `test_all.py TestFlexiCTActiveLearningApply.test_al_orphaned_converting_request_fails_after_restart`
+  （红→绿验证过；红路径为修复前孤儿永远不被标记）。冒烟门禁
+  8/8 通过（工件 20261004T042817_smoke.json）。
 - [ ] **R62-7【P3】预测窗口隐藏"已注册但文件缺失"的模型，空态
   引导错误**：注册表有、目录丢的模型直接不显示，用户无从知道
   为什么模型不见了。验收：列表显示缺失模型并标注原因（不可选）。

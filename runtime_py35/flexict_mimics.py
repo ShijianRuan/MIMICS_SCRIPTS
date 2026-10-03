@@ -1311,7 +1311,8 @@ def _al_pending_requests():
             payload = _read_json(path, {}) or {}
             if not payload:
                 continue
-            if str(payload.get("state") or "pending") != "pending":
+            if str(payload.get("state") or "pending") not in (
+                    "pending", "converting"):
                 continue
             payload["_request_path"] = path
             payload["_job_dir"] = os.path.join(jobs, name)
@@ -1347,8 +1348,24 @@ def _al_tick():
         requests = _al_pending_requests()
         if not requests:
             return
-        request = requests[0]
-        _al_apply_request(request)
+        # R62-6: a "converting" request with no live in-memory transaction
+        # means Mimics was restarted mid-conversion (the wait thread and
+        # _AL_APPLY_TRANSACTIONS are process-local). Nothing will ever
+        # finish it — fail it explicitly instead of leaving it hanging
+        # forever in a state the review UI never reports.
+        pending = []
+        for request in requests:
+            if str(request.get("state") or "") == "converting":
+                _al_mark_request(
+                    request["_request_path"], "failed",
+                    "Mimics was restarted while this overlay was "
+                    "converting. Request it again from the review window.",
+                )
+            else:
+                pending.append(request)
+        if not pending:
+            return
+        _al_apply_request(pending[0])
     except Exception as exc:
         _log(
             logging.ERROR,
