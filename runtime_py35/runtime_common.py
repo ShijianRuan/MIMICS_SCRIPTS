@@ -519,12 +519,18 @@ def safe_slug(value):
 
 
 def _stat_identity(path):
-    """File identity used for publish conflict detection, "" when absent."""
+    """File identity used for publish conflict detection, None when absent.
+
+    "" historically meant "absent at case start", which silently disabled
+    the conflict check; publish_conflict now treats absent-at-start and
+    stat-failure differently, so absence must be distinguishable from a
+    file that simply exists with no identity quirks.
+    """
     try:
         info = os.stat(path)
         return "{0}:{1}".format(info.st_mtime_ns, info.st_size)
     except OSError:
-        return ""
+        return None
 
 
 def capture_output_identity(path):
@@ -537,8 +543,35 @@ def capture_output_identity(path):
     the case starts and refuse to replace it when that identity changed by
     publish time — the newer manual save stays intact and the staged result
     survives as a job-named copy for reconciliation.
+
+    "identity": None means the target did not exist when the case started.
+    That is a valid starting state (first import of the case); publish
+    still refuses to replace a file that appeared in the meantime (F28
+    window 1: the whole run, not just the stat-to-replace gap).
     """
-    return {"path": str(path or ""), "identity": _stat_identity(path)}
+    return {
+        "path": str(path or ""),
+        "identity": _stat_identity(path),
+        "absent_at_start": _stat_identity(path) is None,
+    }
+
+
+def _conflict_copy_path(output_path):
+    """Unique side-by-side copy name for a publish conflict.
+
+    The job PID alone is not unique across conflicts: PIDs are reused, and
+    the same PID can retry a publish after a failure, so "<stem>.conflict.
+    <pid>.mcs" could overwrite the previous conflict copy. Add a counter
+    suffix so each conflict survives separately.
+    """
+    stem = output_path[:-4] if output_path.lower().endswith(".mcs") else output_path
+    base = "{0}.conflict.{1}".format(stem, os.getpid())
+    candidate = "{0}.mcs".format(base)
+    counter = 1
+    while os.path.exists(candidate):
+        counter += 1
+        candidate = "{0}.{1}.mcs".format(base, counter)
+    return candidate
 
 
 def publish_conflict(staging_path, output_path, expected_identity):
@@ -549,16 +582,32 @@ def publish_conflict(staging_path, output_path, expected_identity):
     workstation), the staging file is kept as
     "<case>.conflict.<job-pid>.mcs" next to the output and a visible
     message is returned; the newer manual save is never overwritten.
+
+    F28 hardening: "absent at case start" is tracked explicitly. A file
+    that appeared while the job ran is a newer manual creation and must
+    not be replaced by the staged result. The stat check is also repeated
+    on every retry of the locked-output loop: a save that starts after the
+    first check but blocks the replace must still be detected once the
+    lock clears, instead of being overwritten by the retry.
     """
     if not os.path.isfile(staging_path):
         raise RuntimeError(
             "Mimics saved successfully but the temporary MCS was not "
             "found: {0}".format(staging_path)
         )
-    expected = str((expected_identity or {}).get("identity") or "")
-    if expected and _stat_identity(output_path) != expected:
-        stem = output_path[:-4] if output_path.lower().endswith(".mcs") else output_path
-        conflict_copy = "{0}.conflict.{1}.mcs".format(stem, os.getpid())
+    expected = (expected_identity or {}).get("identity")
+
+    def _identity_still_matches():
+        # expected None = target absent at case start: publishing is a
+        # create, allowed only while the path is still absent. A file that
+        # appeared during the run was created by a human, not this job.
+        current = _stat_identity(output_path)
+        if expected is None:
+            return current is None
+        return current == expected
+
+    def _conflict(message):
+        conflict_copy = _conflict_copy_path(output_path)
         try:
             shutil.move(staging_path, conflict_copy)
         except OSError:
@@ -570,9 +619,20 @@ def publish_conflict(staging_path, output_path, expected_identity):
             "keep the one you want.".format(
                 conflict_copy or staging_path, output_path)
         )
+
+    if not _identity_still_matches():
+        return _conflict(
+            "output identity changed since case start")
     last_error = None
     for attempt in range(20):
         try:
+            # Re-check the identity right before each replace attempt: the
+            # first check may pass, then a manual save locks the file. The
+            # save that blocked the replace must still be detected, not
+            # overwritten once its lock clears.
+            if not _identity_still_matches():
+                return _conflict(
+                    "output identity changed during publish retries")
             os.replace(staging_path, output_path)
             return ""
         except OSError as exc:

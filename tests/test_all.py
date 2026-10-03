@@ -15763,12 +15763,14 @@ class TestForeignScriptIntegration(unittest.TestCase):
 
     def test_publish_degrades_when_output_did_not_exist(self):
         """First publish to a fresh output path must not be treated as a
-        conflict just because the case started without an output file."""
+        conflict just because the case started without an output file:
+        the path is still absent at publish time, so the job creates it."""
         import runtime_common
 
         output = os.path.join(self.tmp, "fresh.mcs")
         identity = runtime_common.capture_output_identity(output)
-        self.assertEqual("", identity.get("identity"))
+        self.assertIsNone(identity.get("identity"))
+        self.assertTrue(identity.get("absent_at_start"))
         staging = os.path.join(self.tmp, "fresh.creating.123.mcs")
         with open(staging, "wb") as handle:
             handle.write(b"staged-background-result")
@@ -15777,6 +15779,79 @@ class TestForeignScriptIntegration(unittest.TestCase):
         self.assertEqual("", message)
         with open(output, "rb") as handle:
             self.assertEqual(b"staged-background-result", handle.read())
+
+    def test_publish_refuses_output_created_while_job_ran(self):
+        """F28 window 1: the output did not exist at case start (identity
+        ""), someone created/saved it while the job ran, and the old code
+        skipped the conflict check entirely (`if expected:`) — the staged
+        result silently overwrote the newer manual file. A file that
+        appeared during the run must be treated as newer manual work."""
+        import runtime_common
+
+        output = os.path.join(self.tmp, "case.mcs")
+        identity = runtime_common.capture_output_identity(output)
+        staging = os.path.join(self.tmp, "case.creating.123.mcs")
+        with open(staging, "wb") as handle:
+            handle.write(b"staged-background-result")
+        # A manual project appears at the output path mid-run.
+        with open(output, "wb") as handle:
+            handle.write(b"newer-manual-work")
+
+        message = runtime_common.publish_conflict(staging, output, identity)
+        self.assertTrue(message, "a mid-run creation must not be overwritten")
+        with open(output, "rb") as handle:
+            self.assertEqual(b"newer-manual-work", handle.read())
+        # The staged result survived as a conflict copy.
+        conflict_copies = [
+            name for name in os.listdir(self.tmp)
+            if ".conflict." in name and name.endswith(".mcs")
+        ]
+        self.assertEqual(1, len(conflict_copies))
+        with open(os.path.join(self.tmp, conflict_copies[0]), "rb") as handle:
+            self.assertEqual(b"staged-background-result", handle.read())
+
+    def test_publish_conflict_copy_not_overwritten_by_retries(self):
+        """F28 window 2: a manual save lands between the identity check and
+        the os.replace, blocking it with a lock. The retry loop must re-check
+        the identity instead of overwriting the save once its lock clears.
+        Also the conflict copy name must not collide with an earlier
+        conflict copy from the same PID."""
+        import runtime_common
+
+        output = os.path.join(self.tmp, "case.mcs")
+        with open(output, "wb") as handle:
+            handle.write(b"case-start-content")
+        identity = runtime_common.capture_output_identity(output)
+        staging = os.path.join(self.tmp, "case.creating.123.mcs")
+        with open(staging, "wb") as handle:
+            handle.write(b"staged-background-result")
+        # An earlier conflict copy from this same PID already exists.
+        earlier = os.path.join(self.tmp, "case.conflict.123.mcs")
+        with open(earlier, "wb") as handle:
+            handle.write(b"earlier-conflict")
+
+        real_replace = os.replace
+        def save_then_replace(src, dst):
+            # The manual save lands after the check passed but before the
+            # replace, blocking it; a later retry then sees the new file.
+            with open(dst, "wb") as handle:
+                handle.write(b"newer-manual-save")
+            raise OSError("locked by a newer save")
+        with mock.patch.object(runtime_common.os, "replace", save_then_replace):
+            message = runtime_common.publish_conflict(staging, output, identity)
+        self.assertTrue(message, "a save that lands mid-publish must not be overwritten")
+        with open(output, "rb") as handle:
+            self.assertEqual(b"newer-manual-save", handle.read())
+        # Both the earlier conflict copy and the new one survive.
+        conflict_copies = sorted(
+            name for name in os.listdir(self.tmp)
+            if ".conflict." in name and name.endswith(".mcs")
+        )
+        self.assertEqual(2, len(conflict_copies))
+        with open(os.path.join(self.tmp, conflict_copies[-1]), "rb") as handle:
+            self.assertEqual(b"staged-background-result", handle.read())
+        with open(earlier, "rb") as handle:
+            self.assertEqual(b"earlier-conflict", handle.read())
 
     def test_sync_force_actually_rebuilds_from_source(self):
         """F28 adjacent UX gap: --force was written into the job config but
