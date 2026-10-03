@@ -1450,8 +1450,8 @@ def _start_stop_monitor(monitor, poll_seconds=0.5, timeout_seconds=90.0):
 def main():
     # This kills every owned background process at once — in-flight imports,
     # exports and AI tasks — so the annotator must confirm with the scope
-    # spelled out. Same question_box pattern as main_stop_import and the
-    # health panel's stop action.
+    # spelled out, same question_box pattern the health panel's stop action
+    # uses.
     answer = mimics.dialogs.question_box(
         message=(
             "停止本项目启动的所有后台服务吗？\n\n"
@@ -1487,84 +1487,6 @@ def main():
                 title="停止后台服务",
                 message="后台清理目前仅支持 Windows 的 Mimics 工作站。",
             )
-    return 0
-
-
-def main_stop_import():
-    # Stop is global (every discovered import queue, not just the current
-    # one), so the annotator must confirm with the scope spelled out. Same
-    # question_box pattern as the FlexiCT stop entry.
-    answer = mimics.dialogs.question_box(
-        message=(
-            "停止所有正在运行的导入吗？\n\n"
-            "这将停止本工作站上的所有导入队列，而不只是当前队列：进行中的病例会被取消，"
-            "生成 .mcs 文件的后台 Mimics 会被关闭，已完成的项目会保留。"
-            "已准备好的数据保留，可供重试。"
-        ),
-        buttons="停止导入;取消",
-        title="停止后台导入",
-        ui_blocking=True,
-    )
-    if answer != "停止导入":
-        return 0
-    result = stop_background_import()
-    target = result.get("target_pid") if isinstance(result, dict) else None
-    queues = result.get("stopped_queues", []) if isinstance(result, dict) else []
-    report = result.get("stop_log", "") if isinstance(result, dict) else ""
-    if target:
-        message = (
-            "已请求停止后台导入。\n"
-            "目标后台 Mimics 进程 PID：{0}\n"
-            "写入停止标记的队列目录数：{1}".format(target, len(queues))
-        )
-    else:
-        message = (
-            "后台导入停止标记已写入。\n"
-            "未发现活动中的后台 Mimics 导入进程。\n"
-            "写入停止标记的队列目录数：{0}".format(len(queues))
-        )
-    # The full stop report (stop_log JSON path) stays in the Mimics log; a
-    # raw runtime path in a user dialog is noise.
-    _mimics_log(logging.INFO, "{0}\nReport: {1}".format(message, report))
-    try:
-        mimics.dialogs.message_box(
-            title="停止后台导入",
-            message=message,
-            ui_blocking=False,
-        )
-    except TypeError:
-        mimics.dialogs.message_box(
-            title="停止后台导入",
-            message=message,
-        )
-    return 0
-
-
-def main_stop_export():
-    foreground_count = 0
-    try:
-        import mimics_export
-        foreground_count = mimics_export.cancel_current_project_exports()
-    except Exception:
-        foreground_count = 0
-    result = stop_background_export()
-    report = result.get("stop_log", "") if isinstance(result, dict) else ""
-    if report:
-        _start_stop_monitor(
-            {
-                "monitor_key": "stop_export_{0}".format(int(time.time() * 1000)),
-                "stop_log": report,
-                "title": "停止掩膜导出",
-                "completion_text": "掩膜导出停止完成。",
-            },
-            poll_seconds=0.5,
-            timeout_seconds=30.0,
-        )
-    _mimics_log(
-        logging.INFO,
-        "Mask export stop requested. Foreground exports signalled: {0}. "
-        "Completion will be reported when resources are released.".format(foreground_count),
-    )
     return 0
 
 

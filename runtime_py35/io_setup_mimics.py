@@ -501,8 +501,6 @@ def launch(mode, python_exe, context, on_submit, timeout_seconds=3600, ui_script
         "on_submit": on_submit,
         "bootstrap_stop_path": bootstrap_stop_path,
         "task_title": {
-            "import_single": "Import single case",
-            "import_batch": "Import dataset",
             "export_masks": "Export masks",
         }.get(mode, "Starting task"),
         "deadline": time.time() + float(timeout_seconds),

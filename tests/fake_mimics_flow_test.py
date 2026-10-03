@@ -1251,23 +1251,17 @@ def test_unicode_and_spaces_paths_flow(fake, tmp):
 
 
 def test_external_io_setup_routing(fake, tmp):
-    image = fake.reset_scene(image_shape=(2, 2, 2), minimum_value=0, maximum_value=100)
-    import_module = import_runtime_module("mimics_import")
     export_module = import_runtime_module("mimics_export")
     setup_module = import_runtime_module("io_setup_mimics")
     captured = []
     launched = []
     old_launch = setup_module.launch
-    old_import_run = import_module._run_main_with_args
     old_export_run = export_module._run_main_with_args
-    old_import_python = import_module._python_exe
     old_export_python = export_module._python_exe
     try:
         def launch(mode, python_exe, context, callback, timeout_seconds=3600):
             captured.append((mode, context))
-            if mode == "import_batch":
-                callback({"source_path": str(tmp / "dataset"), "output_path": str(tmp / "chosen_mcs")})
-            elif mode == "export_masks":
+            if mode == "export_masks":
                 callback({
                     "source_path": str(tmp / "dataset" / "s0001" / "ct.nii.gz"),
                     "output_path": str(tmp / "chosen_labels"),
@@ -1283,24 +1277,12 @@ def test_external_io_setup_routing(fake, tmp):
             return 0
 
         setup_module.launch = launch
-        import_module._python_exe = lambda: "external-python"
         export_module._python_exe = lambda: "external-python"
-        def run_import(args, import_mode=None, case_info_override=None):
-            launched.append(("import", list(args)))
-            import_module._LAST_TASK_DESCRIPTOR = {
-                "kind": "import",
-                "title": "Import dataset",
-                "status_path": str(tmp / "import_status.json"),
-                "stop_path": str(tmp / "import_stop.json"),
-            }
-            return 0
-
-        import_module._run_main_with_args = run_import
         export_module._run_main_with_args = lambda args, source_info_override=None: launched.append(("export", list(args), source_info_override)) or 0
-        import_module._launch_external_import_setup(None)
 
         project = tmp / "saved_projects" / "s0001.mcs"
         fake.file.project_path = str(project)
+        image = fake.reset_scene(image_shape=(2, 2, 2), minimum_value=0, maximum_value=100)
         image.metadata.create(export_module.SOURCE_IMAGE_PATH_METADATA, str(tmp / "dataset" / "s0001" / "ct.nii.gz"))
         # _start_current_project_export validates that at least one mask exists
         # and needs a foreground export monitor timer (Win32 / PyQt5).
@@ -1336,17 +1318,11 @@ def test_external_io_setup_routing(fake, tmp):
         fake.file.project_path = str(project)
     finally:
         setup_module.launch = old_launch
-        import_module._run_main_with_args = old_import_run
         export_module._run_main_with_args = old_export_run
-        import_module._python_exe = old_import_python
         export_module._python_exe = old_export_python
 
-    assert_equal(captured[0][0], "import_batch", "batch import setup mode")
-    assert_true("--output-dir" in launched[0][1], "chosen import output was not routed")
-    assert_true(str(tmp / "chosen_mcs") in launched[0][1], "chosen import output path missing")
-    assert_equal(captured[1][0], "export_masks", "mask export setup mode")
-    return "external PySide6 selections route explicit import/export paths"
-
+    assert_equal(captured[0][0], "export_masks", "mask export setup mode")
+    return "external PySide6 selection routes explicit export paths"
 
 def test_async_mask_import_apply(fake, tmp):
     image = fake.reset_scene(image_shape=(2, 3, 4), minimum_value=0, maximum_value=100)

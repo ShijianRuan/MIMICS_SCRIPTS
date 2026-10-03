@@ -495,28 +495,24 @@ class TestViewerNonBlockingRefresh(unittest.TestCase):
             refresher._drain_timer.stop()
 
 
-class TestIoPathSetupDebounce(unittest.TestCase):
-    """Dataset recognition scans are debounced, not per-keystroke."""
+class TestIoPathSetupExportOnly(unittest.TestCase):
+    """C1 entry merge: the external path window only serves mask export.
 
-    def test_text_changed_goes_through_debounce_timer(self):
+    Import path selection moved to the drop window; any leftover import-mode
+    branch here is dead code that must not come back.
+    """
+
+    def test_no_import_mode_branches_remain(self):
         _AppFixture.app()
         source = (ROOT / "tools" / "io_path_setup_ui.py").read_text(
             encoding="utf-8"
         )
-        # textChanged must not call refresh_recognition directly: on a
-        # network dataset each keystroke would spawn a scan thread.
-        self.assertNotIn(
-            "source_edit.textChanged.connect(refresh_recognition)",
-            source,
-        )
-        self.assertIn("recognition_debounce", source)
-        self.assertIn("recognition_debounce.setSingleShot(True)", source)
-        self.assertIn(
-            "recognition_debounce.timeout.connect(refresh_recognition)",
-            source,
-        )
-        # The debounce window must sit in the 300-500ms acceptance band.
-        self.assertIn("recognition_debounce.setInterval(400)", source)
+        for token in ("import_batch", "import_single", "recognition_debounce"):
+            self.assertNotIn(token, source)
+        # The live export features must stay.
+        self.assertIn('"Start Export"', source)
+        self.assertIn("count_existing_label_files", source)
+        self.assertIn("mask_candidate_list", source)
 
 
 class TestIoPathOutputNotSticky(unittest.TestCase):

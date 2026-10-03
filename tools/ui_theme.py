@@ -732,28 +732,36 @@ def _application_icon():
             pixmap = QtGui.QPixmap(size, size)
             pixmap.fill(QtCore.Qt.transparent)
             painter = QtGui.QPainter(pixmap)
-            painter.setRenderHint(QtGui.QPainter.Antialiasing)
-            margin = 1 + size // 16
-            painter.setPen(QtCore.Qt.NoPen)
-            painter.setBrush(QtGui.QColor(PALETTE["teal"]))
-            painter.drawRoundedRect(
-                QtCore.QRect(margin, margin, size - 2 * margin, size - 2 * margin),
-                size // 5,
-                size // 5,
-            )
-            painter.setBrush(QtGui.QColor("#ffffff"))
-            # A stylized "M" mark: two vertical bars and the connecting V.
-            bar = max(2, size // 8)
-            top = size // 3
-            bottom = size - 2 * margin - max(2, size // 6)
-            painter.drawRect(margin + size // 4, top, bar, bottom - top)
-            painter.drawRect(size - margin - size // 4 - bar, top, bar, bottom - top)
-            painter.drawPolygon(
-                QtCore.QPoint(size // 2 - bar, top + bar),
-                QtCore.QPoint(size // 2 + bar, top + bar),
-                QtCore.QPoint(size // 2, top + (bottom - top) // 2),
-            )
-            painter.end()
+            try:
+                painter.setRenderHint(QtGui.QPainter.Antialiasing)
+                margin = 1 + size // 16
+                painter.setPen(QtCore.Qt.NoPen)
+                painter.setBrush(QtGui.QColor(PALETTE["teal"]))
+                painter.drawRoundedRect(
+                    QtCore.QRect(margin, margin, size - 2 * margin, size - 2 * margin),
+                    size // 5,
+                    size // 5,
+                )
+                painter.setBrush(QtGui.QColor("#ffffff"))
+                # A stylized "M" mark: two vertical bars and the connecting V.
+                bar = max(2, size // 8)
+                top = size // 3
+                bottom = size - 2 * margin - max(2, size // 6)
+                painter.drawRect(margin + size // 4, top, bar, bottom - top)
+                painter.drawRect(size - margin - size // 4 - bar, top, bar, bottom - top)
+                painter.drawPolygon(
+                    QtGui.QPolygon(
+                        [
+                            QtCore.QPoint(size // 2 - bar, top + bar),
+                            QtCore.QPoint(size // 2 + bar, top + bar),
+                            QtCore.QPoint(size // 2, top + (bottom - top) // 2),
+                        ]
+                    )
+                )
+            finally:
+                # A QPainter left active on its pixmap aborts the process at
+                # destruction time if anything above raised - never skip end().
+                painter.end()
             icon.addPixmap(pixmap)
         return icon
     except Exception:

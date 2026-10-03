@@ -122,10 +122,6 @@ def source_default_output(mode, source):
     if not source:
         return ""
     source_path = Path(source).expanduser()
-    if mode == "import_batch":
-        return str(source_path / "mcs_output")
-    if mode == "import_single":
-        return str(source_path.parent / "mcs_output")
     case_parent = source_path.parent if source_path.name else source_path
     return str(case_parent / "mask_exports")
 
@@ -137,8 +133,7 @@ def resolve_configured_output(configured, source, mode):
     if os.path.isabs(text):
         return os.path.abspath(text)
     source_path = Path(source) if source else Path.cwd()
-    base = source_path if mode == "import_batch" else source_path.parent
-    return os.path.abspath(str(base / text))
+    return os.path.abspath(str(source_path.parent / text))
 
 
 MASK_SUFFIXES = (".seg.nii.gz", ".seg.nii", ".nii.gz", ".nrrd.gz", ".nii", ".mha", ".mhd", ".nrrd")
@@ -406,7 +401,7 @@ def summarize_dataset(source, profile_id=None, entry_cap=511):
 def run_ui(context, preview_path=""):
     from PySide6 import QtCore, QtGui, QtWidgets
 
-    mode = str(context.get("mode") or "import_batch")
+    mode = str(context.get("mode") or "export_masks")
     status_path = context.get("status_path")
     state_path = context.get("state_path")
     owner_pid = context.get("owner_pid")
@@ -420,28 +415,18 @@ def run_ui(context, preview_path=""):
     window.setObjectName("ioWindow")
     window.setModal(False)
     window.setMinimumWidth(680)
-    window.resize(820, 610 if mode == "export_masks" else 590)
-    window.setWindowTitle({
-        "import_batch": "Import Dataset",
-        "import_single": "Import Single Case",
-        "export_masks": "Export Masks",
-    }.get(mode, "Data Paths"))
+    window.resize(820, 610)
+    window.setWindowTitle("Export Masks")
     window.setStyleSheet(shared_stylesheet())
 
     root = QtWidgets.QVBoxLayout(window)
     root.setContentsMargins(30, 26, 30, 24)
     root.setSpacing(16)
-    title = QtWidgets.QLabel({
-        "import_batch": "Import dataset",
-        "import_single": "Import one case",
-        "export_masks": "Export project masks",
-    }.get(mode, "Choose data paths"))
+    title = QtWidgets.QLabel("Export project masks")
     title.setObjectName("title")
-    subtitle = QtWidgets.QLabel({
-        "import_batch": "Choose the dataset once. Prepared Mimics projects are written to the output folder.",
-        "import_single": "Choose one image file, case folder, or DICOM folder and where its Mimics project should be saved.",
-        "export_masks": "Confirm the source case and choose where editable label files should be written.",
-    }.get(mode, "Choose the paths needed for this task."))
+    subtitle = QtWidgets.QLabel(
+        "Confirm the source case and choose where editable label files should be written."
+    )
     subtitle.setObjectName("subtitle")
     subtitle.setWordWrap(True)
     root.addWidget(title)
@@ -554,10 +539,10 @@ def run_ui(context, preview_path=""):
         return edit
 
     source_initial = context.get("source_initial") or remembered_mode.get("source_path", "")
-    if mode in ("import_single", "export_masks"):
-        source_edit = path_row("SOURCE IMAGE OR CASE", source_initial, file_or_folder=True, hint="Supported: NIfTI, MHA/MHD, NRRD, a DICOM file, case folder, or DICOM series folder.")
-    else:
-        source_edit = path_row("SOURCE DATASET", source_initial, hint="Required. This path is never modified by import.")
+    source_edit = path_row(
+        "SOURCE IMAGE OR CASE", source_initial, file_or_folder=True,
+        hint="Supported: NIfTI, MHA/MHD, NRRD, a DICOM file, case folder, or DICOM series folder.",
+    )
 
     # R61-7: only a folder the user actually chose themselves sticks across
     # sessions. A remembered value that was just the computed default for
@@ -567,104 +552,69 @@ def run_ui(context, preview_path=""):
         if remembered_mode.get("output_custom")
         else ""
     )
-    output_edit = path_row("MCS OUTPUT FOLDER" if mode.startswith("import") else "EXPORT ROOT", output_initial, hint="Optional to change. A safe default is filled automatically from the source path.")
+    output_edit = path_row("EXPORT ROOT", output_initial, hint="Optional to change. A safe default is filled automatically from the source path.")
     output_preview = _label(QtWidgets, "", "preview")
     output_preview.setWordWrap(True)
     form.addWidget(output_preview)
 
-    # Recognition summary (P2): one line describing what import found in the
-    # dataset, refreshed in a background thread so large roots never block the
-    # path picker. Anomalies do not block here; they are surfaced at submit.
-    recognition_state = {"summary": None, "scanning": False}
-    recognition_label = None
-    if mode == "import_batch":
-        recognition_label = _label(QtWidgets, "", "preview")
-        recognition_label.setWordWrap(True)
-        form.addWidget(recognition_label)
-
-    policy_row = None
-    skip_radio = overwrite_radio = None
-    mask_all = mask_none = mask_named = mask_names = None
-    if mode.startswith("import"):
-        form.addWidget(_label(QtWidgets, "MASKS TO IMPORT", "section"))
-        mask_row = QtWidgets.QHBoxLayout()
-        mask_all = QtWidgets.QRadioButton("全部 Mask")
-        mask_none = QtWidgets.QRadioButton("仅图像")
-        mask_named = QtWidgets.QRadioButton("指定名称的 Mask")
-        remembered_selection = str(remembered_mode.get("mask_selection", "all") or "all")
-        mask_none.setChecked(remembered_selection.lower() == "none")
-        mask_named.setChecked(remembered_selection.lower() not in ("all", "none"))
-        mask_all.setChecked(not mask_none.isChecked() and not mask_named.isChecked())
-        mask_row.addWidget(mask_all)
-        mask_row.addWidget(mask_none)
-        mask_row.addWidget(mask_named)
-        mask_row.addStretch(1)
-        form.addLayout(mask_row)
-        mask_names = QtWidgets.QLineEdit(remembered_selection if mask_named.isChecked() else "")
-        mask_names.setPlaceholderText("例如 liver, spleen, aorta")
-        mask_names.setEnabled(mask_named.isChecked())
-        form.addWidget(mask_names)
-        mask_named.toggled.connect(mask_names.setEnabled)
-    if mode == "export_masks":
-        form.addWidget(_label(QtWidgets, "MASKS TO EXPORT", "section"))
-        export_mask_row = QtWidgets.QHBoxLayout()
-        mask_all = QtWidgets.QRadioButton("全部 Mask")
-        mask_named = QtWidgets.QRadioButton("选定的名称")
-        mask_all.setChecked(True)
-        export_mask_row.addWidget(mask_all)
-        export_mask_row.addWidget(mask_named)
-        export_mask_row.addStretch(1)
-        form.addLayout(export_mask_row)
-        # Editable name field: the user can either type names directly
-        # (comma-separated) or pick from the candidate list below.  Clicking a
-        # candidate toggles it into the field, so a project with hundreds of
-        # masks can be narrowed by typing without scrolling.
-        mask_names = QtWidgets.QLineEdit()
-        mask_names.setPlaceholderText("输入名称（逗号分隔），或从下方列表选择")
-        mask_names.setEnabled(False)
-        form.addWidget(mask_names)
-        available_masks = [str(name) for name in (context.get("mask_names") or []) if str(name).strip()]
-        mask_candidate_list = QtWidgets.QListWidget()
-        mask_candidate_list.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
-        mask_candidate_list.setMaximumHeight(120)
-        mask_candidate_list.addItems(available_masks)
-        mask_candidate_list.setEnabled(False)
-        mask_candidate_list.itemClicked.connect(
-            lambda item: _toggle_name_in_field(mask_names, item.text())
+    export_mask_row = QtWidgets.QHBoxLayout()
+    mask_all = QtWidgets.QRadioButton("全部 Mask")
+    mask_named = QtWidgets.QRadioButton("选定的名称")
+    mask_all.setChecked(True)
+    export_mask_row.addWidget(mask_all)
+    export_mask_row.addWidget(mask_named)
+    export_mask_row.addStretch(1)
+    form.addLayout(export_mask_row)
+    # Editable name field: the user can either type names directly
+    # (comma-separated) or pick from the candidate list below.  Clicking a
+    # candidate toggles it into the field, so a project with hundreds of
+    # masks can be narrowed by typing without scrolling.
+    mask_names = QtWidgets.QLineEdit()
+    mask_names.setPlaceholderText("输入名称（逗号分隔），或从下方列表选择")
+    mask_names.setEnabled(False)
+    form.addWidget(mask_names)
+    available_masks = [str(name) for name in (context.get("mask_names") or []) if str(name).strip()]
+    mask_candidate_list = QtWidgets.QListWidget()
+    mask_candidate_list.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+    mask_candidate_list.setMaximumHeight(120)
+    mask_candidate_list.addItems(available_masks)
+    mask_candidate_list.setEnabled(False)
+    mask_candidate_list.itemClicked.connect(
+        lambda item: _toggle_name_in_field(mask_names, item.text())
+    )
+    # Filter the candidate list as the user types in the name field.
+    mask_names.textChanged.connect(
+        lambda text: _filter_list_widget(mask_candidate_list, _last_token(text))
+    )
+    form.addWidget(mask_candidate_list)
+    mask_named.toggled.connect(mask_names.setEnabled)
+    mask_named.toggled.connect(mask_candidate_list.setEnabled)
+    policy_row = QtWidgets.QHBoxLayout()
+    policy_row.addWidget(_label(QtWidgets, "IF FILES ALREADY EXIST", "section"))
+    policy_row.addStretch(1)
+    skip_radio = QtWidgets.QRadioButton("跳过已存在")
+    overwrite_radio = QtWidgets.QRadioButton("覆盖已存在")
+    overwrite_radio.setChecked(remembered_mode.get("conflict_policy") == "overwrite")
+    skip_radio.setChecked(not overwrite_radio.isChecked())
+    policy_row.addWidget(skip_radio)
+    policy_row.addWidget(overwrite_radio)
+    form.addLayout(policy_row)
+    # P1 multi-format export: one or more formats per export, all sharing
+    # identical geometry. NIfTI stays the default so historical behaviour
+    # is unchanged unless the user opts in.
+    form.addWidget(_label(QtWidgets, "EXPORT FORMATS", "section"))
+    format_row = QtWidgets.QHBoxLayout()
+    format_boxes = {}
+    remembered_formats = set(remembered_mode.get("export_formats", []) or [])
+    for fmt_key, fmt_label in (("nii.gz", "NIfTI (.nii.gz)"), ("nrrd", "NRRD (.nrrd)"), ("mha", "MHA (.mha)")):
+        box = QtWidgets.QCheckBox(fmt_label)
+        box.setChecked(
+            fmt_key in remembered_formats if remembered_formats else fmt_key == "nii.gz"
         )
-        # Filter the candidate list as the user types in the name field.
-        mask_names.textChanged.connect(
-            lambda text: _filter_list_widget(mask_candidate_list, _last_token(text))
-        )
-        form.addWidget(mask_candidate_list)
-        mask_named.toggled.connect(mask_names.setEnabled)
-        mask_named.toggled.connect(mask_candidate_list.setEnabled)
-        policy_row = QtWidgets.QHBoxLayout()
-        policy_row.addWidget(_label(QtWidgets, "IF FILES ALREADY EXIST", "section"))
-        policy_row.addStretch(1)
-        skip_radio = QtWidgets.QRadioButton("跳过已存在")
-        overwrite_radio = QtWidgets.QRadioButton("覆盖已存在")
-        overwrite_radio.setChecked(remembered_mode.get("conflict_policy") == "overwrite")
-        skip_radio.setChecked(not overwrite_radio.isChecked())
-        policy_row.addWidget(skip_radio)
-        policy_row.addWidget(overwrite_radio)
-        form.addLayout(policy_row)
-        # P1 multi-format export: one or more formats per export, all sharing
-        # identical geometry. NIfTI stays the default so historical behaviour
-        # is unchanged unless the user opts in.
-        form.addWidget(_label(QtWidgets, "EXPORT FORMATS", "section"))
-        format_row = QtWidgets.QHBoxLayout()
-        format_boxes = {}
-        remembered_formats = set(remembered_mode.get("export_formats", []) or [])
-        for fmt_key, fmt_label in (("nii.gz", "NIfTI (.nii.gz)"), ("nrrd", "NRRD (.nrrd)"), ("mha", "MHA (.mha)")):
-            box = QtWidgets.QCheckBox(fmt_label)
-            box.setChecked(
-                fmt_key in remembered_formats if remembered_formats else fmt_key == "nii.gz"
-            )
-            format_boxes[fmt_key] = box
-            format_row.addWidget(box)
-        format_row.addStretch(1)
-        form.addLayout(format_row)
+        format_boxes[fmt_key] = box
+        format_row.addWidget(box)
+    format_row.addStretch(1)
+    form.addLayout(format_row)
 
     configured_default = context.get("configured_output", "")
     output_user_edited = {"value": bool(output_initial)}
@@ -678,11 +628,8 @@ def run_ui(context, preview_path=""):
             if new_output != output_edit.text():
                 output_edit.setText(new_output)
         output = output_edit.text().strip()
-        if mode == "export_masks":
-            case_id = str(context.get("case_id") or "case")
-            preview_text = "Final folder: {0}".format(os.path.join(output, case_id, "segmentations")) if output else ""
-        else:
-            preview_text = "Mimics projects: {0}".format(output) if output else ""
+        case_id = str(context.get("case_id") or "case")
+        preview_text = "Final folder: {0}".format(os.path.join(output, case_id, "segmentations")) if output else ""
         if output_preview.text() != preview_text:
             output_preview.setText(preview_text)
         submit.setEnabled(bool(source and output))
@@ -692,65 +639,6 @@ def run_ui(context, preview_path=""):
             output_user_edited["value"] = True
             output_edit.setProperty("chosenByBrowse", False)
         refresh_default()
-
-    def apply_recognition(result):
-        recognition_state["scanning"] = False
-        recognition_state["summary"] = result
-        if recognition_label is None:
-            return
-        if result is None:
-            recognition_label.setText("")
-        else:
-            text = result["summary"]
-            if result["warnings"]:
-                text += "  |  {0} item(s) need attention at start".format(len(result["warnings"]))
-            recognition_label.setText(text)
-
-    def refresh_recognition():
-        if recognition_label is None or recognition_state["scanning"]:
-            return
-        source = source_edit.text().strip()
-        if not source or not os.path.isdir(source):
-            recognition_state["summary"] = None
-            recognition_label.setText("")
-            return
-        recognition_state["scanning"] = True
-        recognition_label.setText("正在扫描数据集...")
-
-        def scan():
-            try:
-                result = summarize_dataset(source)
-            except Exception:
-                result = None
-            recognition_queue.put(result)
-
-        thread = threading.Thread(target=scan, name="io-recognition-scan")
-        thread.daemon = True
-        thread.start()
-
-    recognition_queue = Queue()
-    recognition_timer = QtCore.QTimer(window)
-    recognition_timer.setInterval(150)
-
-    def poll_recognition():
-        try:
-            apply_recognition(recognition_queue.get_nowait())
-        except Empty:
-            return
-
-    recognition_timer.timeout.connect(poll_recognition)
-    recognition_timer.start(150)
-
-    # textChanged fires per character; on a network dataset each call
-    # spawns a fresh directory scan thread. Debounce so a burst of
-    # keystrokes (or a paste) triggers at most one scan, 400ms after
-    # the last change.
-    recognition_debounce = QtCore.QTimer(window)
-    recognition_debounce.setSingleShot(True)
-    recognition_debounce.setInterval(400)
-    recognition_debounce.timeout.connect(refresh_recognition)
-    source_edit.textChanged.connect(lambda _text: recognition_debounce.start())
-    refresh_recognition()
 
     source_edit.textChanged.connect(lambda _text: refresh_default())
     output_edit.textChanged.connect(output_edited)
@@ -762,7 +650,7 @@ def run_ui(context, preview_path=""):
     footer.addWidget(remember)
     footer.addStretch(1)
     cancel = QtWidgets.QPushButton("取消")
-    submit = QtWidgets.QPushButton("Start Import" if mode.startswith("import") else "Start Export")
+    submit = QtWidgets.QPushButton("Start Export")
     submit.setObjectName("primary")
     footer.addWidget(cancel)
     footer.addWidget(submit)
@@ -780,11 +668,7 @@ def run_ui(context, preview_path=""):
     submission_state = {"running": False, "submitted": False}
     bootstrap_descriptor = {
         "kind": "starting",
-        "title": {
-            "import_single": "Import single case",
-            "import_batch": "Import dataset",
-            "export_masks": "Export masks",
-        }.get(mode, "Starting task"),
+        "title": "Export masks",
         "stop_path": bootstrap_stop_path,
         "stop_paths": [bootstrap_stop_path] if bootstrap_stop_path else [],
     }
@@ -1045,46 +929,34 @@ def run_ui(context, preview_path=""):
                 )
             ),
         }
-        if mode.startswith("import"):
-            if mask_none.isChecked():
-                selection["mask_selection"] = "none"
-            elif mask_named.isChecked():
-                names = ",".join(item.strip() for item in mask_names.text().split(",") if item.strip())
-                if not names:
-                    QtWidgets.QMessageBox.warning(window, "需要填写 Mask 名称", "请输入一个或多个 Mask 名称，用逗号分隔。")
-                    return
-                selection["mask_selection"] = names
-            else:
-                selection["mask_selection"] = "all"
-        if mode == "export_masks":
-            selection["conflict_policy"] = "overwrite" if overwrite_radio.isChecked() else "skip"
-            selected_formats = [fmt for fmt, box in format_boxes.items() if box.isChecked()]
-            if not selected_formats:
+        selection["conflict_policy"] = "overwrite" if overwrite_radio.isChecked() else "skip"
+        selected_formats = [fmt for fmt, box in format_boxes.items() if box.isChecked()]
+        if not selected_formats:
+            QtWidgets.QMessageBox.warning(
+                window,
+                "需要选择导出格式",
+                "请至少选择一种导出格式。",
+            )
+            return
+        selection["export_formats"] = selected_formats
+        if mask_named.isChecked():
+            names = ",".join(item.strip() for item in mask_names.text().split(",") if item.strip())
+            if not names:
                 QtWidgets.QMessageBox.warning(
                     window,
-                    "需要选择导出格式",
-                    "请至少选择一种导出格式。",
+                    "需要填写 Mask 名称",
+                    "请输入一个或多个 Mask 名称（逗号分隔），或从列表中选择。",
                 )
                 return
-            selection["export_formats"] = selected_formats
-            if mask_named.isChecked():
-                names = ",".join(item.strip() for item in mask_names.text().split(",") if item.strip())
-                if not names:
-                    QtWidgets.QMessageBox.warning(
-                        window,
-                        "需要填写 Mask 名称",
-                        "请输入一个或多个 Mask 名称（逗号分隔），或从列表中选择。",
-                    )
-                    return
-                selection["mask_selection"] = names
-            else:
-                selection["mask_selection"] = "all"
+            selection["mask_selection"] = names
+        else:
+            selection["mask_selection"] = "all"
 
         # Skip-existing proactive reminder (P6c): when the target folder
         # already holds label files and the user chose "Skip existing", say
         # so before the export runs - the end-of-run summary otherwise tells
         # them only after the fact that nothing was updated.
-        if mode == "export_masks" and selection.get("conflict_policy") == "skip":
+        if selection.get("conflict_policy") == "skip":
             case_id = str(context.get("case_id") or "case")
             existing_count = count_existing_label_files(output, case_id)
             final_folder = os.path.join(output, case_id, "segmentations")
@@ -1104,29 +976,6 @@ def run_ui(context, preview_path=""):
                     selection["conflict_policy"] = "overwrite"
                     overwrite_radio.setChecked(True)
 
-        # Recognition anomalies interrupt once, with a plain list of what will
-        # happen; the user can still proceed (the summary line already told
-        # them the normal path is fine).
-        if mode == "import_batch" and recognition_state.get("summary"):
-            summary = recognition_state["summary"]
-            if summary.get("warnings") or summary.get("skipped"):
-                lines = []
-                for warning in summary["warnings"][:20]:
-                    lines.append("• " + warning)
-                if summary.get("skipped"):
-                    shown = ", ".join(summary["skipped"][:10])
-                    more = "" if len(summary["skipped"]) <= 10 else " (+{0} more)".format(len(summary["skipped"]) - 10)
-                    lines.append("• No usable image found in {0} case(s): {1}{2} — they will be skipped.".format(len(summary["skipped"]), shown, more))
-                answer = QtWidgets.QMessageBox.question(
-                    window,
-                    "请确认识别结果",
-                    "数据集扫描结果：\n\n{0}\n\n是否继续导入？".format("\n".join(lines)),
-                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-                    QtWidgets.QMessageBox.No,
-                )
-                if answer != QtWidgets.QMessageBox.Yes:
-                    return
-
         submission_state["running"] = True
         submit.setEnabled(False)
         output_preview.setText("正在后台检查路径...")
@@ -1141,15 +990,14 @@ def run_ui(context, preview_path=""):
                 fd, probe_path = tempfile.mkstemp(prefix=".mimics_write_test_", dir=output)
                 os.close(fd)
                 os.remove(probe_path)
-                if mode in ("import_single", "export_masks"):
-                    case_info = discover_single_source(source)
-                    if not case_info:
-                        submission_results.put({
-                            "title": "Unsupported Source",
-                            "error": "No supported 3D image or DICOM folder was found.",
-                        })
-                        return
-                    selection["case_info"] = case_info
+                case_info = discover_single_source(source)
+                if not case_info:
+                    submission_results.put({
+                        "title": "Unsupported Source",
+                        "error": "No supported 3D image or DICOM folder was found.",
+                    })
+                    return
+                selection["case_info"] = case_info
                 submission_results.put({"selection": selection})
             except Exception as exc:
                 submission_results.put({

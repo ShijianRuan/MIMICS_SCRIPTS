@@ -4415,8 +4415,8 @@ class TestStopBackgroundServices(unittest.TestCase):
         main() kills every owned background process — in-flight imports,
         exports and AI tasks — with no per-target control. A misclick must
         not lose hours of work: it has to go through the same question_box
-        confirmation main_stop_import and the health panel use, and Cancel
-        must return without stopping anything.
+        confirmation every other stop entry uses, and Cancel must return
+        without stopping anything.
         """
         import mimics_stop_background as msb
 
@@ -7600,14 +7600,6 @@ class TestNewFeatures(unittest.TestCase):
         with open(image_path, "w", encoding="utf-8") as handle:
             handle.write("ObjectType = Image\n")
         self.assertEqual(
-            os.path.join(dataset, "mcs_output"),
-            io_ui.source_default_output("import_batch", dataset),
-        )
-        self.assertEqual(
-            os.path.join(case_dir, "mcs_output"),
-            io_ui.source_default_output("import_single", image_path),
-        )
-        self.assertEqual(
             os.path.join(dataset, "mask_exports"),
             io_ui.source_default_output("export_masks", case_dir),
         )
@@ -7620,14 +7612,9 @@ class TestNewFeatures(unittest.TestCase):
         dicom_source = io_ui.discover_single_source(dcm_path)
         self.assertEqual(os.path.abspath(case_dir), dicom_source["image"])
         self.assertEqual("dicom_candidate", dicom_source["image_type"])
-        import_source = inspect.getsource(mimics_import.main)
         export_source = inspect.getsource(mimics_export.main)
-        self.assertIn("_launch_external_import_setup", import_source)
         self.assertIn("_launch_external_export_setup", export_source)
-        self.assertNotIn("_pick_directory(\"Select dataset folder\")", import_source)
         self.assertNotIn("_pick_directory(\"Select source case directory\")", export_source)
-        single_branch = inspect.getsource(mimics_import.main)
-        self.assertIn("case_info_override or _discover_single_case", single_branch)
         export_setup = inspect.getsource(mimics_export._launch_external_export_setup)
         self.assertIn('"configured_output": ""', export_setup)
         self.assertIn("_start_current_project_export", export_setup)
@@ -8914,56 +8901,6 @@ class TestNewFeatures(unittest.TestCase):
         self.assertFalse(mimics_stop_background._lock_is_import_creation(
             {"kind": "train", "owner": "nnU-Net training"}))
 
-    def test_stop_background_import_requires_confirmation_and_states_scope(self):
-        """R61-6: Stop Import must confirm before stopping and spell out that
-        every queue (not just the current one) is affected. Cancelling the
-        confirmation must not write any stop marker."""
-        import mimics_stop_background as msb
-
-        answers = []
-
-        class FakeDialogs:
-            @staticmethod
-            def question_box(message=None, buttons=None, title=None,
-                             ui_blocking=None):
-                answers.append(str(message))
-                return "取消"
-
-            @staticmethod
-            def message_box(message=None, title=None, ui_blocking=None):
-                pass
-
-        class FakeLogging:
-            @staticmethod
-            def log_user_message(level=None, message=None):
-                pass
-
-        class FakeMimics:
-            dialogs = FakeDialogs()
-            logging = FakeLogging()
-
-        original_mimics = sys.modules.get("mimics")
-        original_stop = msb.stop_background_import
-        sys.modules["mimics"] = FakeMimics
-        # Bind the fake on the already-imported module too (module-level
-        # "import mimics" keeps a direct reference).
-        original_module_mimics = msb.mimics
-        msb.mimics = FakeMimics
-        msb.stop_background_import = lambda: (_ for _ in ()).throw(
-            AssertionError("stop ran despite a cancelled confirmation")
-        )
-        try:
-            self.assertEqual(0, msb.main_stop_import())
-            self.assertEqual(1, len(answers))
-            # The scope (all queues, not just the current one) must be stated.
-            self.assertIn("every import queue", answers[0])
-        finally:
-            sys.modules["mimics"] = original_mimics
-            if original_mimics is None:
-                sys.modules.pop("mimics", None)
-            msb.mimics = original_module_mimics
-            msb.stop_background_import = original_stop
-
     # ================================================================
     # Preprocessing consistency
     # ================================================================
@@ -9218,6 +9155,38 @@ class TestNewFeatures(unittest.TestCase):
             timeout=30,
         )
         self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_application_icon_renders_without_aborting(self):
+        """Regression: _application_icon used drawPolygon(QPoint, ...) which
+        raises TypeError on this PySide6 and left an active QPainter behind —
+        the dangling painter aborted the whole external window process
+        (0xC0000409) at startup. The icon must render at every size and the
+        process must survive the call.
+        """
+        import subprocess
+
+        code = "\n".join([
+            "import os",
+            "os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')",
+            "from PySide6 import QtWidgets",
+            "app = QtWidgets.QApplication([])",
+            "import sys",
+            "sys.path.insert(0, {0!r})".format(os.path.join(PROJECT_ROOT, "tools")),
+            "import ui_theme",
+            "icon = ui_theme._application_icon()",
+            "assert icon is not None and not icon.isNull(), 'icon failed to render'",
+            "for size in (16, 24, 32, 48):",
+            "    assert not icon.pixmap(size, size).isNull(), size",
+            "print('ok')",
+        ])
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("ok", result.stdout.strip())
 
     def test_external_io_process_liveness_detects_owner_and_dead_pid(self):
         import tools.io_path_setup_ui as ui
@@ -10015,111 +9984,6 @@ class TestNewFeatures(unittest.TestCase):
                 mask_import.mimics.events = old_events
             else:
                 delattr(mask_import.mimics, "events")
-
-    # -- mimics_import empty descriptor on external launch --------------------
-
-    def test_import_external_launch_raises_on_empty_descriptor(self):
-        import mimics_import
-        import io_setup_mimics
-
-        saved_submitted = None
-        old_import = mimics_import._run_main_with_args
-        old_launch = io_setup_mimics.launch
-        try:
-            mimics_import._run_main_with_args = lambda *a, **kw: 0
-            def fake_launch(mode, python_exe, context, on_submit,
-                            timeout_seconds=3600, ui_script=None):
-                nonlocal saved_submitted
-                saved_submitted = on_submit
-            io_setup_mimics.launch = fake_launch
-            mimics_import._launch_external_import_setup("import_batch")
-            self.assertIsNotNone(saved_submitted)
-            with self.assertRaises(RuntimeError) as ctx:
-                saved_submitted({"source_path": self.tmp, "output_path": self.tmp})
-            self.assertIn("did not start", str(ctx.exception).lower())
-        finally:
-            mimics_import._run_main_with_args = old_import
-            io_setup_mimics.launch = old_launch
-            mimics_import._LAST_TASK_DESCRIPTOR = {}
-
-    def test_import_external_launch_populates_descriptor_on_success(self):
-        import mimics_import
-        import io_setup_mimics
-
-        saved_submitted = None
-        old_import = mimics_import._run_main_with_args
-        old_launch = io_setup_mimics.launch
-        try:
-            def run_import(args, import_mode=None, case_info_override=None):
-                mimics_import._LAST_TASK_DESCRIPTOR = {
-                    "kind": "import",
-                    "title": "Import dataset",
-                    "status_path": os.path.join(self.tmp, "s.json"),
-                    "stop_path": os.path.join(self.tmp, "stop.json"),
-                }
-                return 0
-            mimics_import._run_main_with_args = run_import
-            def fake_launch(mode, python_exe, context, on_submit,
-                            timeout_seconds=3600, ui_script=None):
-                nonlocal saved_submitted
-                saved_submitted = on_submit
-            io_setup_mimics.launch = fake_launch
-            mimics_import._launch_external_import_setup("import_batch")
-            descriptor = saved_submitted({"source_path": self.tmp, "output_path": self.tmp})
-            self.assertIsInstance(descriptor, dict)
-            self.assertEqual("import", descriptor.get("kind"))
-            self.assertIn("status_path", descriptor)
-        finally:
-            mimics_import._run_main_with_args = old_import
-            io_setup_mimics.launch = old_launch
-            mimics_import._LAST_TASK_DESCRIPTOR = {}
-
-    def test_single_case_external_setup_delegates_to_external_worker(self):
-        import mimics_import
-        import io_setup_mimics
-
-        saved_submitted = None
-        calls = []
-        old_worker = mimics_import._launch_single_case_worker
-        old_main = mimics_import._run_main_with_args
-        old_launch = io_setup_mimics.launch
-        try:
-            def launch_worker(selection, axes=None, flips=None):
-                calls.append((selection, axes, flips))
-                return {
-                    "kind": "import",
-                    "title": "Import single case",
-                    "status_path": os.path.join(self.tmp, "single-status.json"),
-                    "stop_path": os.path.join(self.tmp, "single-stop.json"),
-                }
-
-            def fail_if_main_runs(*_args, **_kwargs):
-                raise AssertionError("single-case setup must not execute main() in foreground Mimics")
-
-            def fake_launch(mode, python_exe, context, on_submit,
-                            timeout_seconds=3600, ui_script=None):
-                nonlocal saved_submitted
-                saved_submitted = on_submit
-
-            mimics_import._launch_single_case_worker = launch_worker
-            mimics_import._run_main_with_args = fail_if_main_runs
-            io_setup_mimics.launch = fake_launch
-            mimics_import._launch_external_import_setup("single_case")
-            descriptor = saved_submitted({
-                "source_path": os.path.join(self.tmp, "case.nii.gz"),
-                "output_path": self.tmp,
-                "mask_selection": "all",
-                "case_info": {"case_id": "case", "image": "case.nii.gz", "masks": []},
-            })
-        finally:
-            mimics_import._launch_single_case_worker = old_worker
-            mimics_import._run_main_with_args = old_main
-            io_setup_mimics.launch = old_launch
-
-        self.assertEqual("import", descriptor["kind"])
-        self.assertEqual(1, len(calls))
-        self.assertEqual([0, 1, 2], calls[0][1])
-        self.assertEqual([False, False, False], calls[0][2])
 
     def test_single_case_worker_filters_masks_and_closes_producer_queue(self):
         import tools.single_case_import_worker as worker
