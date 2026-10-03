@@ -1093,6 +1093,65 @@ class TestTrainingSetupPathMemory(unittest.TestCase):
                 finally:
                     window.window.close()
 
+    def test_flexict_continue_training_reaches_request_and_blocks_remote(self):
+        # R61-25: "continue interrupted training" must reach the request (and
+        # through it the trainer's continue_training flag), and must be
+        # rejected when the compute tab selects a remote backend — remote
+        # containers are disposable, so the local checkpoint_latest the
+        # resume depends on is invisible to them.
+        _AppFixture.app()
+        import flexict_training_setup_ui as ui
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            home = self._settings_home(
+                tmp,
+                "flexict_settings.json",
+                {
+                    "workspace": str(tmp / "ws"),
+                    "dataset_root": str(tmp / "data"),
+                    "label_name": "kidney",
+                },
+            )
+            with mock.patch.object(ui.Path, "home", lambda: home), mock.patch.object(
+                ui, "workspace_root", lambda _c: str(tmp / "default-ws")
+            ), mock.patch.object(
+                ui, "load_config", lambda: {"root": str(tmp)}
+            ), mock.patch.object(
+                ui.TrainingSetupWindow, "_refresh_models", lambda self: None
+            ):
+                window = ui.TrainingSetupWindow(
+                    {"workspace": ""}, tmp / "ctx.json", QT
+                )
+                try:
+                    self.assertFalse(window.continue_check.isChecked())
+                    self.assertFalse(window._request()["continue_training"])
+                    window.continue_check.setChecked(True)
+                    self.assertTrue(window._request()["continue_training"])
+                    # Remote backend + continue must fail validation without
+                    # spawning the path-check worker.
+                    with mock.patch.object(
+                        window, "_request",
+                        return_value={
+                            "workspace": str(tmp / "ws"),
+                            "dataset_root": str(tmp / "data"),
+                            "label_name": "kidney",
+                            "cases": ["case01", "case02"],
+                            "continue_training": True,
+                            "execution_backend": "remote",
+                            "remote_profile_id": "206_root",
+                        },
+                    ):
+                        window._submit()
+                    self.assertFalse(window._submission_pending)
+                    self.assertFalse(window.submitted)
+                    self.assertIn(
+                        "远程后端不支持",
+                        window.status_label.text(),
+                    )
+                finally:
+                    window.window.close()
+
 
 class TestFlexictStopBehaviour(unittest.TestCase):
     """R61-17: remote-state-unknown FlexiCT tasks get the same Abandon

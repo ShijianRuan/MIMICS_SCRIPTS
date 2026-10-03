@@ -143,6 +143,50 @@ def _flexict_label_specs(out: dict[str, Any]) -> list[dict[str, Any]]:
     return specs
 
 
+def _flexict_resumable_dataset_id(workspace: str | Path | None,
+                                  task_id: str,
+                                  flexict_configuration: str) -> int:
+    """Dataset id of the interrupted run for this task (R61-25).
+
+    ``continue_training`` only resumes when nnU-Net's run_training finds
+    checkpoint_latest.pth inside the SAME ``Dataset{id}_{task}/{trainer}__``
+    folder, so the resume request must reuse the interrupted run's dataset
+    id. Interrupted runs never reach model registration, so the id lives
+    only in the results tree: scan it for this task's Dataset folder whose
+    trainer subfolder still carries a fold_0 checkpoint.
+
+    The FlexiCT 'auto'/'pair' configurations train BOTH 2d and 3d_fullres
+    sequentially; either configuration's checkpoint is a valid resume point
+    (pair mode resumes each configuration independently inside its own
+    folder). The requested configuration only filters the search when it is
+    concrete, keeping 'auto'/'pair' maximally resumable.
+    """
+    if not task_id:
+        raise ValueError(
+            "Continuing training requires a task name to locate the "
+            "interrupted run."
+        )
+    results = workspace_paths(workspace)["results"]
+    configurations = (
+        (flexict_configuration,) if flexict_configuration in TRAINERS
+        else ("2d", "3d_fullres")
+    )
+    for root in results.glob("Dataset[0-9][0-9][0-9]_" + task_id):
+        for configuration in configurations:
+            model_dir = root / "{}__nnUNetPlans__{}".format(
+                TRAINERS[configuration], configuration)
+            if (model_dir / "fold_0" / "checkpoint_latest.pth").is_file():
+                try:
+                    return int(root.name[7:10])
+                except (TypeError, ValueError):
+                    continue
+    raise ValueError(
+        "No interrupted FlexiCT training found for task '{}': no "
+        "checkpoint_latest.pth under the FlexiCT results folder. Clear "
+        "'继续上次中断的训练' to start a fresh run.".format(task_id)
+    )
+
+
 def normalize_flexict_request(values: dict[str, Any]) -> dict[str, Any]:
     """Validate and default a FlexiCT training request.
 
@@ -179,12 +223,25 @@ def normalize_flexict_request(values: dict[str, Any]) -> dict[str, Any]:
         nnunet_values = dict(out)
         nnunet_values["configuration"] = nnunet_configuration
         if not nnunet_values.get("dataset_id"):
-            # The nnU-Net normalizer defaults a missing dataset_id to 701
-            # (the nnU-Net band) — suggest a free id in the FlexiCT 750-799
-            # band instead so programmatic callers without an explicit id
-            # never squat on the nnU-Net namespace.
-            nnunet_values["dataset_id"] = flexict_suggest_dataset_id(
-                out.get("workspace"))
+            if bool(out.get("continue_training")):
+                # Resuming needs the SAME Dataset{id}_{task} folder the
+                # interrupted run left behind, so a fresh suggested id would
+                # silently start from scratch. Resolve the interrupted run's
+                # id from the model folder it already produced (R61-25).
+                # task_id is derived from task_name exactly as
+                # normalize_request will derive it below.
+                nnunet_values["dataset_id"] = _flexict_resumable_dataset_id(
+                    out.get("workspace"),
+                    safe_identifier(
+                        out.get("task_id") or out.get("task_name") or ""),
+                    flexict_configuration)
+            else:
+                # The nnU-Net normalizer defaults a missing dataset_id to 701
+                # (the nnU-Net band) — suggest a free id in the FlexiCT
+                # 750-799 band instead so programmatic callers without an
+                # explicit id never squat on the nnU-Net namespace.
+                nnunet_values["dataset_id"] = flexict_suggest_dataset_id(
+                    out.get("workspace"))
         nnunet_values.setdefault("labels", _flexict_label_specs(out))
         nnunet_values.setdefault("trainer", "flexict2d_Trainer")
         nnunet_values.setdefault("modality", "CT")
@@ -197,6 +254,17 @@ def normalize_flexict_request(values: dict[str, Any]) -> dict[str, Any]:
         # label_names carries the full multiclass list when N > 1.
         out["label_name"] = str(out["labels"][0]["name"])
         out["label_names"] = [str(spec["name"]) for spec in out["labels"]]
+        if bool(out.get("continue_training")) and str(
+            out.get("execution_backend") or "local"
+        ) == "remote":
+            # Remote runs train in a fresh disposable container: the
+            # interrupted run's checkpoint_latest lives only on this machine,
+            # so "continue" would silently start from scratch (R61-25).
+            raise ValueError(
+                "Remote backend does not support continue_training: the "
+                "remote container cannot see the interrupted run's local "
+                "checkpoint_latest.pth."
+            )
     else:
         # infer / active_learning share the inference-side normalization
         # (workspace, GPU fields); the FlexiCT operation must survive it.
@@ -923,7 +991,8 @@ def run_training(job_dir: Path) -> int:
                         "plans": "nnUNetPlans",
                         "pretrained_weights": None,
                         "num_gpus": int(request["num_gpus"]),
-                        "continue_training": False,
+                        "continue_training": bool(
+                            request.get("continue_training")),
                         "only_run_validation": False,
                         "export_validation_probabilities": False,
                         "disable_checkpointing": False,

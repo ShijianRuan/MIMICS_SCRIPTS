@@ -54,41 +54,53 @@
   （`20260930T112139`）+ fast 27/27（`20260930T115343`；首跑 26/27 为
   torch 原生层 0xC0000005 瞬态段错误，flexict_pkg 单跑 10/10 复绿，
   与本轮纯 PySide6 改动无交集）。
-- [ ] **R61-5【P1】导入失败弹窗指向工作目录而非真实失败位置**
-  （`mimics_import.py:2988-2995/3027-3036/868-871`）：用户看到的失败
-  路径是内部工作目录，无法定位自己数据的问题。验收：弹窗显示
-  用户可识别的原始输入路径。
-- [ ] **R61-6【P1】Stop 无确认且会停掉所有队列**（`mimics_import.py:
-  1413-1471`）。验收：Stop 前确认对话框（复用 question_box）；只停
-  当前队列（或明确告知影响范围）。
-- [ ] **R61-7【P1】输出路径"粘滞"**（`io_path_setup_ui.py:753-760/
-  859-877`）：换输出目录后部分流程仍指向旧路径。验收：全流程输出
-  路径一致。
-- [ ] **R61-8【P1】拖拽批量导入状态冻结 "Importing"**
-  （`import_drop_window.py:302-307`）：导入失败/完成后状态不更新。
-  验收：状态反映真实进度（完成/失败/跳过）。
-- [ ] **R61-9【P1】数据集根被当成单个 case 接受**
-  （`io_path_setup_ui.py:205-236`）。验收：目录直接拖入时提示"请选择
-  具体病例文件"或正确展开。
-- [ ] **R61-10【P1】P0-1 修复后将暴露的模态弹窗风暴**
-  （`nninteractive_mimics.py:1963-1993`）：每 case 一次模态弹窗。
-  验收：会话级单次提示替代逐 case 弹窗。
-- [ ] **R61-11【P1】os.walk 无剪枝扫全盘 + 同步 kill 阶梯在扫描线程**
-  （`mimics_stop_background.py:264-267`、`:1234→1189-1215`）。验收：
-  扫描剪枝 .mimics_runtime 深层目录；kill 移出扫描线程或加限速。
-- [ ] **R61-12【P1】全量蒙版 SHA-256 在 GUI 线程计算**
-  （`nninteractive_mimics.py:1933-1936`）。验收：复用
-  `interactive_algorithms_mimics.py:151-166` 的 `_stream_buffer` 异步
-  模式，GUI 不冻结。R61-13 契约扫描白名单同时登记了
-  interactive_algorithms_mimics.py:148、mimics_export.py:1170/:1179、
-  nninteractive_mimics.py:1835/:1913/:1936/:2468 的存量 tobytes()，
-  修复时逐条从白名单删除。
-- [ ] **R61-26【P1】nnInteractive 同步桥接往返阻塞 GUI（最长 1800s）**
-  〔R61-13 契约扫描落地时发现存量〕：`_call_mimics_bridge`
-  （nninteractive_mimics.py:1379-1396）Popen + communicate
-  （timeout 至 1800s）可从 `_async_monitor_tick`/`_tick` 调用闭包
-  可达。验收：改用 wait 线程 + result 轮询模式（R61-3 先例），
-  契约扫描白名单 nninteractive_mimics.py:1389/:1395 删除。
+- [x] **R61-5【P1】导入失败弹窗指向工作目录而非真实失败位置**
+  〔已修，commit `be7a8a7`；2026-10-04 独立核验确认〕：失败 case
+  落盘/弹窗均显示原始输入路径（`mimics_import.py:815-829` 记录
+  `source_image`、`:1856-1865` prepare 失败弹窗 "Source: <原始路径>"、
+  `:2417-2419`/`:4360-4361` monitor 记录 `case_image`、`:3026-3041`
+  完成弹窗指引 Show Batch Status）。
+- [x] **R61-6【P1】Stop 无确认且会停掉所有队列**〔已修，按备选验收
+  "明确告知影响范围"，commit `6eb7589`；2026-10-04 独立核验确认〕：
+  `main_stop_import`（mimics_stop_background.py:1477-1494）加
+  question_box 确认，且弹窗明示影响范围是"本机所有导入队列"。
+  未实现"只停当前队列"（与验收的备选分支一致）。
+- [x] **R61-7【P1】输出路径"粘滞"**〔已修，commit `ccbda86`；2026-10-04
+  独立核验确认〕：`io_path_setup_ui.py:562-569` 记忆路径仅在用户
+  手动改过（`output_custom`，`:1057-1062`）时粘滞，否则重算默认；
+  拖拽窗口同修（import_drop_window.py:467-471/:569-571/:590-598/
+  :687-701）。
+- [x] **R61-8【P1】拖拽批量导入状态冻结 "Importing"**〔已修，commit
+  `eb00983`；2026-10-04 独立核验确认〕：`_apply_batch_runtime_state`
+  （import_drop_window.py:193-229）从 runtime 标记折叠真实终态，
+  recent-drops 列表显示 Done/Failed/Cancelled 并着色（:720-744）。
+- [x] **R61-9【P1】数据集根被当成单个 case 接受**〔已修，commit
+  `d2e0727`；2026-10-04 独立核验确认〕：`_looks_like_dataset_root`
+  守卫（io_path_setup_ui.py:170-198），`discover_single_source`
+  （:265-269）对数据集根返回 None 不再兜底。
+- [x] **R61-10【P1】P0-1 修复后将暴露的模态弹窗风暴**〔已修，commit
+  `e1d55e9`；2026-10-04 独立核验确认〕：会话级变量 `_SESSION_WRITE_MODE`
+  （nninteractive_mimics.py:1988-1992），`_choose_completed_result_target`
+  （:1995-2038）整个 Mimics 会话只问一次。
+- [x] **R61-11【P1】os.walk 无剪枝扫全盘 + 同步 kill 阶梯在扫描线程**
+  〔已修，commit `f037b8e`；2026-10-04 独立核验确认〕：os.walk 下降前
+  剪枝 python_env 等深层目录（mimics_stop_background.py:262-269，
+  深度>6 截断 :278-281）；kill 阶梯移 daemon 线程
+  （`_stop_registered_processes_async` :1220-1244），GUI 线程只留
+  注册表快照（:1259-1271）。
+- [x] **R61-12【P1】全量蒙版 SHA-256 在 GUI 线程计算**〔已修，commit
+  `93be706`（后续 `251b463`/`6f453ed` 修哈希前缀回归）；2026-10-04
+  独立核验确认〕：全量蒙版哈希/导出改走 `_stream_buffer`（chunked +
+  GUI pump，nninteractive_mimics.py:1934-1938/:1956-1961、
+  mimics_export.py:1166-1181、interactive_algorithms_mimics.py:144-174）。
+  契约扫描白名单（test_all.py:14745-14749）已从 9 项缩到仅剩
+  nninteractive_mimics.py:2513（bbox 裁剪小拷贝，有意保留），
+  原登记条目全部删除。
+- [x] **R61-26【P1】nnInteractive 同步桥接往返阻塞 GUI（最长 1800s）**
+  〔已修，commit `37c8219`；2026-10-04 独立核验确认〕：`_call_mimics_bridge`
+  （nninteractive_mimics.py:1377-1427）communicate() 已跑在 wait 线程，
+  GUI 线程泵消息循环（`_update_gui` + 50ms join），契约扫描白名单
+  对应条目已删除。
 - [x] **R61-13【P1】最高杠杆测试资产：GUI 线程阻塞源码契约扫描**
   〔R61 当轮解决，commit `afff2bc`〕：`TestGuiThreadBlockingContract`
   AST 扫描——遍历 runtime_py35 全部 `*_tick` 函数**及其同模块调用
@@ -101,14 +113,24 @@
 
 ### P2/P3（2026-09-29 四视角评审新增，精选）
 
-- [ ] **R61-14【P2】nnunetv2 版本门禁失配**：安装 2.8.0 但
-  `setup_env.py:279` 要求 ≥2.8.1 → 触发假修复/打包失败提示。
+- [x] **R61-14【P2】nnunetv2 版本门禁失配**〔已修，commit `dd44743`；
+  2026-10-04 独立核验确认〕：`_nnunet_version_supported`
+  （setup_env.py:268-282）现为 `(2, 8, 0) <= parts < (2, 9, 0)`，
+  接受实际安装的 2.8.0。
 - [ ] **R61-15【P2】653MB python_env/models 污染**
   （`nninteractive_bridge.py:179-185`）。
-- [ ] **R61-16【P2】ScribblePrompt 检查点未纳入环境体检**
-  （env_guidance collect_issues 不含该检查点缺失场景）。
-- [ ] **R61-17【P2】FlexiCT Stop 无确认**（`flexict_status_viewer.py:
-  279-285`）。
+- [x] **R61-16【P2】ScribblePrompt 检查点未纳入环境体检**〔已修，
+  commit `f390261`；2026-10-04 独立核验确认〕：`collect_issues`
+  （env_guidance.py:309-320）检查 ScribblePrompt 检查点缺失，解析
+  顺序与运行时一致（env var > config，`:330-350`）。
+- [x] **R61-17【P2】FlexiCT Stop 无确认**〔已修，commit `2ef3e2c`；
+  2026-10-04 独立核验复核通过〕：远程状态未知分支加 QMessageBox.warning
+  确认（:347-356，与 nnU-Net 查看器契约一致）。本地普通 Stop **有意**
+  不加确认——`task_lifecycle_and_safety_policy_CN.md` 明文"确认只出现在
+  Abandon Locally 逃生口，不增加正常流程的操作负担"，且
+  test_gui_smoke `test_local_stop_calls_stop_job_without_dialog` 钉住
+  该设计。初判"本地分支仍无确认待补"经政策文档核对为设计行为，
+  非缺口。
 - [ ] **R61-18【P2】无根 README / 快速上手文档**（产品视角 N3）。
 - [ ] **R61-19【P3】R60 重编号后活文档编号漂移**：
   `task_lifecycle_and_safety_policy_CN.md:21-23/:86`、
@@ -136,9 +158,21 @@
   子命令（4 个外来脚本为需求实证）。
 - [ ] **R61-24 UI 语言统一中文**：注意编码防乱码（GBK 控制台陷阱），
   部分技术错误信息可保留英文。涉及入口/按钮/对话框字符串。
-- [ ] **R61-25 D19 FlexiCT 增训**（低优先级）：训练表单加"从上次
+- [x] **R61-25 D19 FlexiCT 增训**（低优先级）：训练表单加"从上次
   checkpoint 继续"选项，透传到 `_spawn_flexict_worker`
-  （`flexict_pipeline.py:851` 硬编码 False，trainer 侧已支持）。
+  （`flexict_pipeline.py:926` 硬编码 `"continue_training": False`，
+  trainer 侧已支持；2026-10-04 独立核验确认仍未修——对照
+  `nnunet_pipeline.py:1996` 已从 request 读取，nnU-Net 表单有
+  "继续训练"按钮，FlexiCT 表单无此选项）。
+  **已解决（2026-10-04）**：`_flexict_resumable_dataset_id` 从 results
+  树解析中断运行的 Dataset id（新 id 会让续训静默从头开始）；表单加
+  "继续上次中断的训练"复选框透传 request；远程后端 + 续训组合在
+  normalize 与表单提交两处拦截（远程容器一次性，读不到本机
+  checkpoint_latest）。测试：`test_flexict_integration.py
+  TestContinueTraining` 4 项（id 复用/无中断拒绝/配置过滤+pair 回退/
+  远程拒绝）+ `test_gui_smoke.py
+  TestTrainingSetupPathMemory.test_flexict_continue_training_reaches_request_and_blocks_remote`
+  （表单透传 + 远程拦截）；flexict_integration 126/126 复绿。
 
 ### 以下为历史待办区（已全部完成，保留历史）
 

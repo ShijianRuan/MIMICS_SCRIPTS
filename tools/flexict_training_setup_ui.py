@@ -319,6 +319,12 @@ class TrainingSetupWindow:
             "默认遇到重叠直接停止训练。"
         )
         form.addWidget(self.overlap_check, 7, 0, 1, 2)
+        self.continue_check = QtWidgets.QCheckBox("继续上次中断的训练")
+        self.continue_check.setToolTip(
+            "从同名任务中断处继续（沿用其 Dataset 和 checkpoint_latest）。"
+            "须与上次使用相同的病例与标签，否则 checkpoint 无效。"
+        )
+        form.addWidget(self.continue_check, 8, 0, 1, 2)
         layout.addWidget(training)
 
         recipe, recipe_form = self._surface("锁定配置（只读）")
@@ -624,6 +630,7 @@ class TrainingSetupWindow:
             "overlap_policy": (
                 "replace" if self.overlap_check.isChecked() else "fail"
             ),
+            "continue_training": bool(self.continue_check.isChecked()),
             "cases": cases,
             "val_case_ids": val_cases,
             "train_case_ids": train_cases,
@@ -668,6 +675,17 @@ class TrainingSetupWindow:
             if len(request.get("labels") or []) > 4:
                 raise ValueError(
                     "FlexiCT 少样本训练每个模型最多支持 4 个标签；更多标签请使用 nnU-Net。"
+                )
+            if request.get("continue_training") and str(
+                request.get("execution_backend") or "local"
+            ) == "remote":
+                # Remote runs train in a fresh disposable container: the
+                # interrupted run's checkpoint_latest lives only on this
+                # machine, so "continue" would silently start from scratch.
+                raise ValueError(
+                    "远程后端不支持“继续上次中断的训练”：远程任务在全新的容器中"
+                    "训练，读不到本机上次训练的 checkpoint。请改用本机后端，或"
+                    "取消勾选“继续上次中断的训练”。"
                 )
             warning = self._duplicate_model_warning(request)
             if warning:

@@ -2981,6 +2981,65 @@ class FlexictMimicsApplyQueueTests(unittest.TestCase):
             self.masks[:] = [FakeMask("liver", 10)]
 
 
+class TestContinueTraining(unittest.TestCase):
+    """R61-25: 'continue interrupted training' must reuse the interrupted
+    run's dataset id and be rejected where a resume is impossible."""
+
+    def _interrupted_run(self, workspace, dataset_id=751,
+                         configuration="2d", checkpoint="checkpoint_latest.pth"):
+        paths = fc.workspace_paths(workspace)
+        model_dir = (
+            paths["results"] / ("Dataset{}_Kidney".format(dataset_id))
+            / ("{}__nnUNetPlans__{}".format(
+                fp.TRAINERS[configuration], configuration)))
+        (model_dir / "fold_0").mkdir(parents=True, exist_ok=True)
+        (model_dir / "fold_0" / checkpoint).write_bytes(b"x")
+        return paths
+
+    def test_resume_reuses_interrupted_dataset_id(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            self._interrupted_run(workspace, dataset_id=757)
+            values = _training_request("X:/d", workspace)
+            values.pop("dataset_id")
+            values["continue_training"] = True
+            request = fp.normalize_flexict_request(values)
+            self.assertEqual(request["dataset_id"], 757)
+
+    def test_resume_without_interrupted_run_is_rejected(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            values = _training_request("X:/d", workspace)
+            values.pop("dataset_id")
+            values["continue_training"] = True
+            with self.assertRaises(ValueError):
+                fp.normalize_flexict_request(values)
+
+    def test_resume_configuration_filter_and_pair_fallback(self):
+        """A concrete 3d request must not resume from a 2d-only run, but
+        pair/auto may resume from either trainer folder."""
+        with tempfile.TemporaryDirectory() as workspace:
+            self._interrupted_run(workspace, dataset_id=752, configuration="2d")
+            values = _training_request("X:/d", workspace, configuration="3d_fullres")
+            values.pop("dataset_id")
+            values["continue_training"] = True
+            with self.assertRaises(ValueError):
+                fp.normalize_flexict_request(values)
+            values["configuration"] = "pair"
+            request = fp.normalize_flexict_request(values)
+            self.assertEqual(request["dataset_id"], 752)
+
+    def test_remote_backend_rejects_continue_training(self):
+        """Remote containers are disposable: the local checkpoint is
+        invisible to them, so continue would silently start from scratch."""
+        with tempfile.TemporaryDirectory() as workspace:
+            self._interrupted_run(workspace)
+            values = _training_request("X:/d", workspace)
+            values["continue_training"] = True
+            values["execution_backend"] = "remote"
+            values["remote_profile_id"] = "206_root"
+            with self.assertRaises(ValueError):
+                fp.normalize_flexict_request(values)
+
+
 if __name__ == "__main__":
     # Isolate real lock acquisitions (dataset lock, GPU lock) to a temp
     # dir: per-run temp workspace paths hash to new lock names and would
