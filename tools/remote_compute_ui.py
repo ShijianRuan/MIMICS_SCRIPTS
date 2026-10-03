@@ -201,24 +201,24 @@ class ServerProfilesDialog:
         )
 
         rows = [
-            ("Profile name", self.name_edit),
-            ("Host or IP", self.host_edit),
-            ("SSH port", self.port_spin),
-            ("Username", self.username_edit),
-            ("Authentication", self.auth_combo),
+            ("配置名称", self.name_edit),
+            ("主机或 IP", self.host_edit),
+            ("SSH 端口", self.port_spin),
+            ("用户名", self.username_edit),
+            ("认证方式", self.auth_combo),
             ("密码", self.password_edit),
             ("", self.remember_check),
-            ("Private key", self.key_widget),
-            ("Remote work folder", self.remote_root_edit),
-            ("Runtime image", self.image_edit),
-            ("GPU device", self.gpu_combo),
-            ("Data transfer", self.cache_check),
-            ("Container runtime", self.runtime_combo),
+            ("私钥", self.key_widget),
+            ("远程工作目录", self.remote_root_edit),
+            ("运行时镜像", self.image_edit),
+            ("GPU 设备", self.gpu_combo),
+            ("数据传输", self.cache_check),
+            ("容器运行时", self.runtime_combo),
             ("nerdctl namespace", self.namespace_edit),
-            ("Code verification", self.code_verify_combo),
-            ("Weights verification", self.weights_verify_combo),
-            ("GPU busy policy", self.gpu_busy_combo),
-            ("Server cleanup after", self.retention_spin),
+            ("代码校验", self.code_verify_combo),
+            ("权重校验", self.weights_verify_combo),
+            ("GPU 忙碌策略", self.gpu_busy_combo),
+            ("服务器清理期限", self.retention_spin),
         ]
         self.password_label = None
         self.key_label = None
@@ -483,7 +483,7 @@ class ServerProfilesDialog:
                 )
             return profile
         except Exception as exc:
-            self.status_label.setText("Could not save server: {}".format(exc))
+            self.status_label.setText("无法保存服务器配置：{}".format(exc))
             return None
 
     def _test_connection(self, trust_unknown: bool = False) -> None:
@@ -541,9 +541,9 @@ class ServerProfilesDialog:
             return
         if kind == "error":
             prefix = (
-                "Host identity check failed"
+                "主机身份校验失败"
                 if isinstance(result, HostKeyChangedError)
-                else "Connection failed"
+                else "连接失败"
             )
             self.status_label.setText("{}: {}".format(prefix, result))
             return
@@ -556,7 +556,7 @@ class ServerProfilesDialog:
                 row.get("utilization_percent") or 0,
             )
             for row in gpu_rows
-        ) or "No GPU reported"
+        ) or "服务器未报告 GPU"
         message = (
             "Connected · work folder {} · {} · selected {} · {} free · "
             "image ready · {}".format(

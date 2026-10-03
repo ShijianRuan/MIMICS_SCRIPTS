@@ -331,8 +331,16 @@ class ModelCenter:
             "针对一个标注目标训练、监控并选择可复用的模型。"
         )
         subtitle.setObjectName("subtitle")
+        subtitle.setWordWrap(True)
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
+        hint = QtWidgets.QLabel(
+            "如何选方法：标注病例多（约 30 例以上）追求全自动精度 → nnU-Net；"
+            "只有几例标注、想快速得到可用模型 → FlexiCT；边点边标、交互修正 → nnInteractive。"
+        )
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        title_box.addWidget(hint)
         header.addLayout(title_box, 1)
         header.addWidget(QtWidgets.QLabel("标注目标"))
         self.task_combo = QtWidgets.QComboBox()

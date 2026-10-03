@@ -64,6 +64,16 @@ def default_workspaces() -> dict[str, str]:
     }
 
 
+def _model_source(model: dict) -> str:
+    """Human-readable provenance: where this model was trained/imported."""
+    if model.get("imported_from_bundle"):
+        return "imported"
+    if str(model.get("execution_backend") or "") == "remote":
+        name = str(model.get("remote_profile_name") or "").strip()
+        return "remote: " + (name or str(model.get("remote_profile_id") or "?"))
+    return ""
+
+
 def collect_rows(workspaces: dict[str, str]) -> list[dict]:
     """One flat row list across all three families for the model table."""
     rows: list[dict] = []
@@ -103,6 +113,7 @@ def collect_rows(workspaces: dict[str, str]) -> list[dict]:
                         "imported": bool(model.get("imported_from_bundle")),
                         "usable": bool(usable and compatible),
                         "current": current,
+                        "source": _model_source(model),
                     }
                 )
     except Exception:
@@ -127,6 +138,7 @@ def collect_rows(workspaces: dict[str, str]) -> list[dict]:
                     "imported": bool(model.get("imported_from_bundle")),
                     "usable": bool(usable),
                     "current": False,
+                    "source": _model_source(model),
                 }
             )
     except Exception:
@@ -169,6 +181,7 @@ def collect_rows(workspaces: dict[str, str]) -> list[dict]:
                     "current": (
                         str(model.get("model_id") or "") == recommended_id
                     ),
+                    "source": _model_source(model),
                 }
             )
     except Exception:
@@ -433,7 +446,9 @@ class ModelManagerWindow:
                     row["model_id"],
                     row["configuration"],
                     created,
-                    "imported" if row["imported"] else "trained here",
+                    row.get("source") or (
+                        "imported" if row["imported"] else "trained here"
+                    ),
                     status,
                 ]
                 for column, value in enumerate(values):
@@ -453,7 +468,16 @@ class ModelManagerWindow:
 
     def _update_action_buttons(self):
         row = self._selected_row()
-        self.use_button.setEnabled(bool(row and row["usable"]))
+        # nnU-Net picks its model in the prediction window at predict time;
+        # "use this model" would only raise for those rows.
+        self.use_button.setEnabled(
+            bool(row and row["usable"] and row["family"] != "nnunet")
+        )
+        self.use_button.setToolTip(
+            "nnU-Net 在每次预测时选择模型，请使用预测窗口选择。"
+            if row and row["family"] == "nnunet"
+            else ""
+        )
         self.remove_button.setEnabled(bool(row and not row["usable"]))
 
     def _selected_row(self):

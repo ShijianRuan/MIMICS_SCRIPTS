@@ -6821,6 +6821,28 @@ class TestNewFeatures(unittest.TestCase):
         # Overwrite selection must not trigger the reminder.
         self.assertIn('selection.get("conflict_policy") == "skip"', source)
 
+    def test_zero_mask_submit_gates_wired(self):
+        """AUD 1.1: importing with zero discoverable masks must interrupt
+        with a plain statement before the job starts, in both batch and
+        single-case modes."""
+        import tools.io_path_setup_ui as ui
+        source = Path(PROJECT_ROOT, "tools", "io_path_setup_ui.py").read_text(encoding="utf-8")
+        # Batch gate: mask_count == 0 with cases present joins the anomaly
+        # confirm; the message must say image-only import.
+        self.assertIn("zero_mask", source)
+        self.assertIn("未找到任何标签文件", source)
+        # Single-case gate: confirm before an image-only project when the
+        # user did not pick "image only".
+        self.assertIn('selection.get("mask_selection") != "none"', source)
+        # Behavioural: summarize_dataset reports mask_count == 0 when the
+        # cases have no segmentations (the gate's data source).
+        case_dir = os.path.join(self.tmp, "s0100")
+        os.makedirs(case_dir)
+        open(os.path.join(case_dir, "ct.nii.gz"), "w").close()
+        result = ui.summarize_dataset(self.tmp)
+        self.assertEqual(1, result["case_count"])
+        self.assertEqual(0, result["mask_count"])
+
     def test_batch_status_viewer_aggregates_all_record_types(self):
         """P6b: the batch panel aggregates every on-disk record kind."""
         import tools.batch_status_viewer as viewer

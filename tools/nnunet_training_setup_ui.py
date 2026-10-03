@@ -67,6 +67,13 @@ class TrainingSetupWindow:
         subtitle.setWordWrap(True)
         root.addWidget(title)
         root.addWidget(subtitle)
+        hint = QtWidgets.QLabel(
+            "如何选方法：标注病例多（约 30 例以上）追求全自动精度 → nnU-Net；"
+            "只有几例标注、想快速得到可用模型 → FlexiCT；边点边标、交互修正 → nnInteractive。"
+        )
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        root.addWidget(hint)
 
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.addTab(self._build_data_tab(), "数据")

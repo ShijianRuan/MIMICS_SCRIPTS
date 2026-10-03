@@ -555,9 +555,9 @@ def run_ui(context, preview_path=""):
 
     source_initial = context.get("source_initial") or remembered_mode.get("source_path", "")
     if mode in ("import_single", "export_masks"):
-        source_edit = path_row("SOURCE IMAGE OR CASE", source_initial, file_or_folder=True, hint="Supported: NIfTI, MHA/MHD, NRRD, a DICOM file, case folder, or DICOM series folder.")
+        source_edit = path_row("源影像或病例文件夹", source_initial, file_or_folder=True, hint="支持 NIfTI、MHA/MHD、NRRD、单个 DICOM 文件、病例文件夹或 DICOM 序列文件夹。")
     else:
-        source_edit = path_row("SOURCE DATASET", source_initial, hint="Required. This path is never modified by import.")
+        source_edit = path_row("源数据集", source_initial, hint="必填。导入不会改动该路径下的任何内容。")
 
     # R61-7: only a folder the user actually chose themselves sticks across
     # sessions. A remembered value that was just the computed default for
@@ -567,7 +567,7 @@ def run_ui(context, preview_path=""):
         if remembered_mode.get("output_custom")
         else ""
     )
-    output_edit = path_row("MCS OUTPUT FOLDER" if mode.startswith("import") else "EXPORT ROOT", output_initial, hint="Optional to change. A safe default is filled automatically from the source path.")
+    output_edit = path_row("MCS 输出文件夹" if mode.startswith("import") else "导出根目录", output_initial, hint="可不修改。系统会根据源路径自动填入安全的默认位置。")
     output_preview = _label(QtWidgets, "", "preview")
     output_preview.setWordWrap(True)
     form.addWidget(output_preview)
@@ -586,7 +586,7 @@ def run_ui(context, preview_path=""):
     skip_radio = overwrite_radio = None
     mask_all = mask_none = mask_named = mask_names = None
     if mode.startswith("import"):
-        form.addWidget(_label(QtWidgets, "MASKS TO IMPORT", "section"))
+        form.addWidget(_label(QtWidgets, "导入的 Mask", "section"))
         mask_row = QtWidgets.QHBoxLayout()
         mask_all = QtWidgets.QRadioButton("全部 Mask")
         mask_none = QtWidgets.QRadioButton("仅图像")
@@ -606,7 +606,7 @@ def run_ui(context, preview_path=""):
         form.addWidget(mask_names)
         mask_named.toggled.connect(mask_names.setEnabled)
     if mode == "export_masks":
-        form.addWidget(_label(QtWidgets, "MASKS TO EXPORT", "section"))
+        form.addWidget(_label(QtWidgets, "导出的 Mask", "section"))
         export_mask_row = QtWidgets.QHBoxLayout()
         mask_all = QtWidgets.QRadioButton("全部 Mask")
         mask_named = QtWidgets.QRadioButton("选定的名称")
@@ -640,7 +640,7 @@ def run_ui(context, preview_path=""):
         mask_named.toggled.connect(mask_names.setEnabled)
         mask_named.toggled.connect(mask_candidate_list.setEnabled)
         policy_row = QtWidgets.QHBoxLayout()
-        policy_row.addWidget(_label(QtWidgets, "IF FILES ALREADY EXIST", "section"))
+        policy_row.addWidget(_label(QtWidgets, "目标文件已存在时", "section"))
         policy_row.addStretch(1)
         skip_radio = QtWidgets.QRadioButton("跳过已存在")
         overwrite_radio = QtWidgets.QRadioButton("覆盖已存在")
@@ -652,7 +652,7 @@ def run_ui(context, preview_path=""):
         # P1 multi-format export: one or more formats per export, all sharing
         # identical geometry. NIfTI stays the default so historical behaviour
         # is unchanged unless the user opts in.
-        form.addWidget(_label(QtWidgets, "EXPORT FORMATS", "section"))
+        form.addWidget(_label(QtWidgets, "导出格式", "section"))
         format_row = QtWidgets.QHBoxLayout()
         format_boxes = {}
         remembered_formats = set(remembered_mode.get("export_formats", []) or [])
@@ -1017,6 +1017,22 @@ def run_ui(context, preview_path=""):
             refresh_default()
             return
         selection = result["selection"]
+        # Single-case mirror of the batch zero-mask confirm: the user asked
+        # for masks but the case folder has none — confirm before importing
+        # an image-only project.
+        if mode == "import_single" and selection.get("mask_selection") != "none":
+            masks = (selection.get("case_info") or {}).get("masks") or []
+            if not masks:
+                answer = QtWidgets.QMessageBox.question(
+                    window,
+                    "未找到 Mask 文件",
+                    "该病例文件夹中未找到任何标签文件（segmentations 等）——将只导入影像，不导入 mask。\n\n是否继续？",
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                    QtWidgets.QMessageBox.No,
+                )
+                if answer != QtWidgets.QMessageBox.Yes:
+                    refresh_default()
+                    return
         if selection.get("remember") and state_path:
             state = read_json(state_path, {}) or {}
             state[mode] = selection
@@ -1109,7 +1125,11 @@ def run_ui(context, preview_path=""):
         # them the normal path is fine).
         if mode == "import_batch" and recognition_state.get("summary"):
             summary = recognition_state["summary"]
-            if summary.get("warnings") or summary.get("skipped"):
+            zero_mask = (
+                int(summary.get("case_count") or 0) > 0
+                and int(summary.get("mask_count") or 0) == 0
+            )
+            if summary.get("warnings") or summary.get("skipped") or zero_mask:
                 lines = []
                 for warning in summary["warnings"][:20]:
                     lines.append("• " + warning)
@@ -1117,6 +1137,12 @@ def run_ui(context, preview_path=""):
                     shown = ", ".join(summary["skipped"][:10])
                     more = "" if len(summary["skipped"]) <= 10 else " (+{0} more)".format(len(summary["skipped"]) - 10)
                     lines.append("• No usable image found in {0} case(s): {1}{2} — they will be skipped.".format(len(summary["skipped"]), shown, more))
+                if zero_mask:
+                    lines.append(
+                        "• 识别到 {0} 个病例，但未找到任何标签文件（segmentations 等）——只导入影像，不导入 mask。".format(
+                            summary.get("case_count")
+                        )
+                    )
                 answer = QtWidgets.QMessageBox.question(
                     window,
                     "请确认识别结果",

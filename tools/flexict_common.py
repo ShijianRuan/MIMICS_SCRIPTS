@@ -135,9 +135,10 @@ def resolve_pretrained_dir(config: dict[str, Any] | None = None) -> tuple[Path, 
     ).is_file():
         return repo / "weights", "repo"
     raise FileNotFoundError(
-        "FlexiCT pretrained weights not found: set pretrained_weights_dir in "
-        "flexict_config.json, or place flexict_2d/flexict_3d under "
-        "{}/weights/.".format(repo)
+        "FlexiCT 预训练权重未找到。可在 Mimics 菜单 99_Admin → "
+        "07_Edit_Configs 中打开 flexict_config.json 修改 "
+        "pretrained_weights_dir，或将 flexict_2d/flexict_3d 权重放到 "
+        "{}/weights/ 下。".format(repo)
     )
 
 

@@ -3935,3 +3935,102 @@ R61 期间 E: 盘 100% 满（剩 2.2MB），fast 门禁 2 个 test_all 用例 Er
 - commits：`9fe911e`（代码+测试）、本轮 docs 提交；工件：
   `20261003T050327_fast.json`、预测
   `G:\mimics_ai_validation\predictions\flexict_multiclass_*`。
+
+## R66-旁路（2026-10-03）：标注者审计 P1/P2 修复 + 5.4 需求缺口提案
+
+（在 ai-real-data-validation 分支 worktree 完成，与主线 R66-AUD 并行；
+账本 improvement_backlog.md 因同事存在未提交 diff，本节为临时状态源，
+待其提交后补正式条目。）
+
+### 标注者审计 P1/P2 修复（全部附测试）
+
+- **P1 1.1 零 mask 无声导入**：批量导入摘要 mask_count=0 且 case_count>0
+  时明确告知"只导入影像不导入 mask"并要求确认；单病例模式选了 mask 但
+  文件夹无标签文件时弹确认框，默认"否"（tools/io_path_setup_ui.py，
+  test_all.py `test_zero_mask_submit_gates_wired`）。
+- **P1 1.2 FlexiCT 权重缺失提示**：FileNotFoundError 文案指向
+  99_Admin → 07_Edit_Configs 的 GUI 路径而非手改 JSON
+  （tools/flexict_common.py，test_flexict_common.py
+  `test_missing_weights_error_points_at_config_editor`）。
+- **P1 5.4 批量预测不可达**：登记为需求缺口提案（见下），不擅自实施。
+- **P2 6.x 中文化**：io_path_setup_ui（区段标题/标签/提示）、
+  remote_compute_ui（字段行与状态）、training_data_ui（label source
+  选项与提示）+ 三个训练向导统一的"如何选方法"跨系列指引
+  （nnU-Net/FlexiCT/nnInteractive 适用场景，test_gui_smoke
+  `test_training_windows_carry_cross_family_hint`）。
+- **P2 7.x 可见性**：模型管理器新增"来源"列（imported / remote: profile /
+  本地训练）+ nnU-Net 行"使用此模型"禁用并提示去预测窗口选
+  （test_gui_smoke 2 用例）；nnU-Net 状态查看器新增"验证 Dice"列，
+  从 fold_*/validation/summary.json 的 foreground_mean 读取
+  （test_gui_smoke `test_nnunet_validation_dice_reads_fold_summary`）。
+- **P2 8.x 提示语**：remote_compute.py 权重校验失败提示改为"请服务器
+  管理员运行 remote/setup_remote_server.sh"。
+- **测试**：gui_smoke 38/38、flexict_common 25/25、test_all 全量
+  （工件 `.mimics_runtime/test_all_audit_fixes.log`）、fast 门禁见下。
+
+### 需求缺口提案（需用户决策，未立项不实施）
+
+- **D20 批量预测入口**：当前从 Mimics 只能逐例开预测窗口推理；批量
+  （对整个数据集/文件夹跑推理并落盘）只能绕开 Mimics 用命令行。
+  真实使用者：拥有已训练模型、需对多例出 mask 的标注者/研究者；
+  频率：每轮模型评估时；不解决的后果：批量场景被迫离开产品 GUI 或
+  逐例手工点击。最小可行方案：预测窗口复用现有模型表 + 文件夹选择，
+  循环调用既有单例推理链路（不新增推理实现）。约 +150~250 行。
+
+### 外部资源
+
+- 本轮零外部资源使用（纯本地代码与测试）。
+
+### 追加发现并当轮修复：P0 程序化图标崩溃（ui_theme._application_icon）
+
+- **发现过程**：本轮 test_all 全量在
+  `TestImportDropWindow.test_offscreen_window_renders_and_registers`
+  原生 abort。最小化排查：单测隔离复现 → 干净 HEAD（stash 我的改动）仍复现
+  → 共享树 al-review-loop 同样复现 → 逐行探针定位到
+  `painter.drawPolygon(QPoint, QPoint, QPoint)`。
+- **根因**：PySide6 6.11 移除了 drawPolygon 的 varargs 重载，调用抛
+  TypeError；外层 `except Exception` 在 painter 仍 active 时直接吞掉，
+  悬空 painter 随后触发 Qt 原生 abort。**所有调用 configure_application
+  的 GUI 窗口都在此崩溃线上**（桌面平台因图标从未走到该分支前…实际两平台
+  同路径，属潜伏 P0——任一窗口启动即可能整进程崩溃）。
+- **修复**（tools/ui_theme.py）：drawPolygon 改用 QPolygon 单参形式；
+  painter.end() 移入 finally 保证任何绘制失败都不留悬空 painter。
+- **验证**：单测 1/1 OK（修复前原生 abort）；test_all 全量见工件；
+  fast 门禁见下。修复仅在我所在 ai-real-data-validation 分支；
+  al-review-loop 存在同一 bug（`git show al-review-loop:tools/ui_theme.py:751`
+  确认），**需要主线同事在其分支同步修复**。
+
+### test_all 全量结果与既有失败登记（非本轮引入）
+
+- **本轮引入的问题（已修复）**：`test_zero_mask_submit_gates_wired` 首版
+  误用了不存在于 TestNewFeatures 的 `_make_case` 辅助方法 → 改为内联建例，
+  修复后 1/1 OK。
+- **P0 修复后 test_all 全量**：Ran 569 tests，失败 3 + 错误 5（其中 1 个
+  为上述已修复测试的旧运行记录）。逐一在干净 HEAD（stash 本轮全部改动）
+  复跑验证：**其余 6 个失败/错误全部在本轮改动之前即已存在**，属
+  al-review-loop 主线在途工作（R61-24 译文清理/`_record_failed_case`
+  签名演进/mask-export 停止断言/SystemHealthPanel KeyError）的既有状态：
+  1. `TestNNInteractiveTaskDiagnostics.test_model_center_hides_not_improved_
+     models_by_default` / `test_task_model_chooser_hides_not_improved...`：
+     测试断言源码含"未改进"，代码现为 "Did not improve"（R61-24 范围）。
+  2. `TestLifecycleAndRetention` 3 例：`_record_failed_case` 新增
+     `source_image` 关键字参数，测试桩 lambda 未跟上签名演进。
+  3. `TestStopBackgroundServices.test_mask_export_stop_...`：target_pid
+     断言 None 但实际有值。
+  4. `TestSystemHealthPanel.test_offscreen_panel_renders`：
+     system_health_panel.py:318 `.format()` KeyError（其样式模板与
+     ui_theme PALETTE 键名不匹配的独立问题）。
+  以上 6 项**建议主线 al-review-loop 当轮认领**；本分支不修（避免与
+  在途工作冲突），仅登记。P0 图标崩溃（ui_theme）在主线同样存在且为
+  启动路径崩溃，主线需同步修复。
+- 工件：`.mimics_runtime/test_all_audit_fixes.log`。
+
+### fast 门禁迭代记录
+
+- 首跑（`20261003T140702_fast.json`）27/28：`remote_training` 失败——
+  本轮把 GPU 状态串"GPU {} {} ({}% used)"译成中文，但
+  `test_remote_training.py:768` TB-06 契约（与 al-review-loop 共享）pin
+  英文 "% used"。**已回退该串为英文原文**，remote_training 106/106 OK；
+  与既有决策一致（策略/GPU 相关文案不译，保持两分支一致）。
+- 复跑结果见下（28/28 为本轮收尾判据）。
+- 复跑 **28/28 全绿**：`20261003T145247_fast.json`。本轮收尾判据达成。

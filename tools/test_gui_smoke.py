@@ -242,6 +242,55 @@ class TestModelManagerWindow(unittest.TestCase):
                 window._loading, "Use must trigger a table reload"
             )
 
+    def test_use_button_disabled_for_usable_nnunet_rows(self):
+        """AUD 5.2: nnU-Net picks its model at predict time; "use this
+        model" only raises for those rows, so the button must stay off
+        and explain why via tooltip instead of erroring on click."""
+        _AppFixture.app()
+        _batch, manager, _config, _presets = _gui_modules()
+        rows = [
+            self._row(model_id="remote_nn", family="nnunet", usable=True),
+            self._row(model_id="nnint_ok", family="nninteractive", usable=True),
+        ]
+        with mock.patch.object(manager, "collect_rows", lambda ws: list(rows)):
+            window = self._window_with_rows(manager, rows)
+            window.table.selectRow(0)
+            self.assertFalse(window.use_button.isEnabled())
+            self.assertIn("预测窗口", window.use_button.toolTip())
+            window.table.selectRow(1)
+            self.assertTrue(window.use_button.isEnabled())
+            self.assertEqual(window.use_button.toolTip(), "")
+
+    def test_source_column_shows_remote_provenance(self):
+        """AUD 5.3: the source column must say where a model came from
+        (remote server profile / imported) instead of a bare
+        trained-here for everything."""
+        _AppFixture.app()
+        _batch, manager, _config, _presets = _gui_modules()
+        self.assertEqual(
+            manager._model_source(
+                {"imported_from_bundle": True, "execution_backend": "remote"}
+            ),
+            "imported",
+        )
+        self.assertEqual(
+            manager._model_source(
+                {
+                    "execution_backend": "remote",
+                    "remote_profile_name": "206_root",
+                    "remote_profile_id": "206_root",
+                }
+            ),
+            "remote: 206_root",
+        )
+        self.assertEqual(
+            manager._model_source(
+                {"execution_backend": "remote", "remote_profile_id": "171x"}
+            ),
+            "remote: 171x",
+        )
+        self.assertEqual(manager._model_source({}), "")
+
 
 class TestViewerNonBlockingRefresh(unittest.TestCase):
     """Status viewers collect off the GUI thread (BackgroundRefresh)."""
@@ -344,6 +393,44 @@ class TestViewerNonBlockingRefresh(unittest.TestCase):
             "collect must run off the GUI thread",
         )
         window.window.close()
+
+    def test_nnunet_validation_dice_reads_fold_summary(self):
+        """AUD 5.1: the models tab must surface the fold validation Dice
+        (summary.json foreground_mean), not just creation time/usability."""
+        import nnunet_status_viewer as viewer
+
+        with tempfile.TemporaryDirectory() as name:
+            model_dir = Path(name) / "nnunet_x"
+            summary = model_dir / "fold_0" / "validation" / "summary.json"
+            summary.parent.mkdir(parents=True)
+            summary.write_text(
+                json.dumps(
+                    {"foreground_mean": {"Dice": 0.7322440882970873}}
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                viewer._validation_dice(
+                    {"model_dir": str(model_dir), "folds": ["0"]}
+                ),
+                "0.732",
+            )
+            # Missing model dir / unreadable summary: blank, never a raise.
+            self.assertEqual(
+                viewer._validation_dice({"model_dir": str(Path(name) / "gone")}),
+                "",
+            )
+            self.assertEqual(
+                viewer._validation_dice(
+                    {"model_dir": str(model_dir), "folds": ["9"]}
+                ),
+                "",
+            )
+            # folds omitted: falls back to fold "0" like model_usability.
+            self.assertEqual(
+                viewer._validation_dice({"model_dir": str(model_dir)}),
+                "0.732",
+            )
 
     def _fixtures(self, tmp: Path) -> Path:
         project = tmp / "proj"
@@ -633,6 +720,41 @@ class TestTrainingSetupPathMemory(unittest.TestCase):
                     self.assertEqual(window.label_edit.text(), "kidney")
                 finally:
                     window.window.close()
+
+    def test_training_windows_carry_cross_family_hint(self):
+        """AUD 3.1: each family window must tell the annotator when to use
+        nnU-Net vs FlexiCT vs nnInteractive, so the choice is not a guess."""
+        source_root = Path(__file__).parent
+        for module_name in (
+            "nnunet_training_setup_ui",
+            "flexict_training_setup_ui",
+            "nninteractive_task_model_center",
+        ):
+            source = (source_root / (module_name + ".py")).read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("如何选方法", source)
+            self.assertIn("nnU-Net", source)
+            self.assertIn("FlexiCT", source)
+            self.assertIn("nnInteractive", source)
+
+    def test_application_icon_does_not_crash_process(self):
+        """P0: PySide6 6.11 dropped drawPolygon's varargs overload; the old
+        code raised TypeError inside _application_icon, the bare except left
+        an active painter on the pixmap, and Qt aborted the whole process.
+        The icon must build cleanly (or return None) without native abort."""
+        _AppFixture.app()
+        import ui_theme
+
+        icon = ui_theme._application_icon()
+        self.assertIsNotNone(icon)
+        # configure_application is the crash path every window shares; call
+        # it against the shared QApplication and confirm the process lives.
+        from PySide6 import QtWidgets
+
+        app = QtWidgets.QApplication.instance()
+        self.assertIsNotNone(app)
+        ui_theme.configure_application(app)
 
     def test_flexict_batch_size_override_reaches_request(self):
         # R-P1-8: the FlexiCT wizard had no batch size field while the nnU-Net

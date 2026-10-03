@@ -36,6 +36,29 @@ def _format_time(value):
         return "-"
 
 
+def _validation_dice(model):
+    """Mean foreground Dice from the fold's validation summary, if present.
+
+    Local training always writes fold_*/validation/summary.json; remote
+    downloads carry it too. Missing/unreadable returns "" so the table
+    cell simply reads "-" and no error path interrupts the status view.
+    """
+    model_dir = Path(str(model.get("model_dir") or ""))
+    if not model_dir.is_dir():
+        return ""
+    scores = []
+    for fold in model.get("folds") or ["0"]:
+        summary_path = (
+            model_dir / ("fold_" + str(fold)) / "validation" / "summary.json"
+        )
+        try:
+            summary = read_json(summary_path, {}) or {}
+            scores.append(float(summary["foreground_mean"]["Dice"]))
+        except Exception:
+            continue
+    return "{:.3f}".format(sum(scores) / len(scores)) if scores else ""
+
+
 class StatusWindow:
     def __init__(self, context, qt_modules):
         self.context = context
@@ -112,9 +135,9 @@ class StatusWindow:
         models_tab = QtWidgets.QWidget()
         models_layout = QtWidgets.QVBoxLayout(models_tab)
         models_layout.setContentsMargins(10, 10, 10, 10)
-        self.models = QtWidgets.QTableWidget(0, 6)
+        self.models = QtWidgets.QTableWidget(0, 7)
         self.models.setHorizontalHeaderLabels(
-            ['模型', '配置', 'Fold', '输出标签', '创建时间', '可用']
+            ['模型', '配置', 'Fold', '输出标签', '验证 Dice', '创建时间', '可用']
         )
         self.models.horizontalHeader().setStretchLastSection(True)
         self.models.horizontalHeader().setSectionResizeMode(
@@ -250,6 +273,7 @@ class StatusWindow:
                     str(label.get("name") or "")
                     for label in model.get("labels") or []
                 ),
+                _validation_dice(model) or "-",
                 _format_time(model.get("created_at_epoch")),
                 "Yes" if usable else "No",
             ]
