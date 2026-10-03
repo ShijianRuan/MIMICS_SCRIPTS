@@ -674,6 +674,58 @@ class TestBatchPredictionWindow(unittest.TestCase):
             self.assertEqual("MR", requests[0]["source_modality"])
             self.assertTrue(requests[0]["use_cpu"])
 
+    def test_unusable_models_stay_visible_with_reason(self):
+        """R62-7: a registered model whose files are gone must be listed
+        (greyed, with the reason) instead of silently vanishing."""
+        _AppFixture.app()
+        import nnunet_batch_predict_ui as ui
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            window = ui.BatchPredictionWindow(
+                {"workspace": str(tmp / "workspace")}, QT
+            )
+            self.addCleanup(window.window.close)
+            broken = self._usable_model_row(self._model_dir(tmp))
+            # Break it: registered, but the model folder is gone. The
+            # loader computes the reason via model_usability; emulate the
+            # same annotation it would put on the row.
+            broken["model_dir"] = str(tmp / "deleted")
+            broken["manifest_path"] = str(
+                tmp / "deleted" / "mimics_model_manifest.json"
+            )
+            broken["_unusable_reason"] = "model folder is missing"
+            good = self._usable_model_row(self._model_dir(tmp / "good"))
+            window._apply_models([broken, good], "")
+            self.assertEqual(2, window.table.rowCount())
+            # The broken row's last column carries the reason...
+            self.assertEqual(
+                "model folder is missing",
+                window.table.item(0, 4).text(),
+            )
+            # ...and is greyed out (not selectable)...
+            self.assertFalse(
+                window.table.item(0, 4).flags() & QtCore.Qt.ItemIsEnabled
+            )
+            # ...while the usable row stays selectable and start enabled.
+            self.assertTrue(
+                window.table.item(1, 4).flags() & QtCore.Qt.ItemIsEnabled
+            )
+            self.assertTrue(window.start.isEnabled())
+            # Submitting while a broken row is current is rejected with
+            # the reason, not dispatched.
+            window.table.selectRow(0)
+            window.image_root_edit.setText(str(tmp))
+            window.output_edit.setText(str(tmp / "out"))
+            window._submit()
+            self.assertIn("不可用", window.status_label.text())
+            # Only broken models: start must be disabled even though the
+            # list is not empty.
+            window._apply_models([broken], "")
+            self.assertEqual(1, window.table.rowCount())
+            self.assertFalse(window.start.isEnabled())
+            self.assertIn("不可用", window.status_label.text())
+
     def test_missing_folders_are_rejected_before_dispatch(self):
         _AppFixture.app()
         import nnunet_batch_predict_ui as ui

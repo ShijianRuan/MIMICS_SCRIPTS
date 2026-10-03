@@ -245,9 +245,19 @@
   `test_all.py TestFlexiCTActiveLearningApply.test_al_orphaned_converting_request_fails_after_restart`
   （红→绿验证过；红路径为修复前孤儿永远不被标记）。冒烟门禁
   8/8 通过（工件 20261004T042817_smoke.json）。
-- [ ] **R62-7【P3】预测窗口隐藏"已注册但文件缺失"的模型，空态
+- [x] **R62-7【P3】预测窗口隐藏"已注册但文件缺失"的模型，空态
   引导错误**：注册表有、目录丢的模型直接不显示，用户无从知道
-  为什么模型不见了。验收：列表显示缺失模型并标注原因（不可选）。
+  为什么模型不见了。
+  **已解决（2026-10-04）**：单例预测窗口（`nnunet_prediction_setup_ui.py`）
+  与批量预测窗口（`nnunet_batch_predict_ui.py`）的模型发现改为保留
+  不可用模型：`model_usability` 的原因写入 `_unusable_reason`，列表
+  中标灰（ItemIsEnabled 摘除）、最后一列显示原因、tooltip 同步；
+  默认选中首个可用模型；全部不可用时开始按钮禁用 + 状态栏统计
+  不可用数；`_submit` 对选中不可用模型显式拒绝。测试：
+  `test_gui_smoke.py
+  TestBatchPredictionWindow.test_unusable_models_stay_visible_with_reason`
+  （红→绿验证过；红路径为修复前缺失模型被静默过滤、最后列显示
+  "local"）。gui_smoke 51/51 + nnunet 集成 104/104 通过。
 - [ ] **R62-8【P3】批量派发超时导致重复提交 + 失败清单不可行动**
   （`nnunet_batch_predict_ui.py:206-212/:284-288`）：超时后用户重试
   → 同 case 双任务；失败清单只有文件名。验收：超时提示防重复提交
