@@ -324,7 +324,7 @@
   04_Task_Status；F-3 导入成功框补 04_Task_Status 指引；F-4 多选
   摘要带总数；F-11 Task Status 补 AI 家族窗口指引；F-2b（部分）
   拖拽窗/批量查看器中英混排统一中文。
-- [ ] **R66-AUD-5（P1 系统性，未完成）：runtime_py35 内嵌 Mimics 对话框
+- [x] **R66-AUD-5（P1 系统性，已解决）：runtime_py35 内嵌 Mimics 对话框
   全面中文化（F-2）**：R61-24"UI 语言统一中文"未到达 runtime_py35
   的 mimics.dialogs 路径——外置 PySide6 窗口已中文，但内嵌对话框
   （窗宽窗位、nnInteractive 错误指引/会话记忆、FlexiCT、导入导出、
@@ -333,6 +333,12 @@
   （标注者视角）落在中文用户上的直接违例。最小方案：只翻
   message/question_box 的 message/title/BUTTON_* 常量，不动日志。
   验收：runtime_py35 对话框字符串全中文 + 相关测试更新全绿。
+  **已解决（R66，commit 62313a9）**：17 个 runtime_py35 文件 ~300 条
+  对话框字符串全中文化（AST 扫描复核：除品牌名 FlexiCT/nnU-Net/
+  ScribblePrompt 外无遗留英文对话框字符串）；日志与 JSON 机器字段
+  保持英文；5 个测试文件的断言同步更新。证据：smoke 8/8
+  （regression/20261003T090236_smoke.json）、fast 29/29
+  （regression/20261003T105907_fast.json）。净变化 −54 行。
 - [ ] **R66-AUD-6（P2，需用户决策 D10 先行）：AL 标注/跳过单击无确认**
   （F-7）：flexict_active_learning_ui `_mark_annotated/_mark_skipped`
   单击即改状态，误点无救济。与 D10（overlay 应用是否自动标

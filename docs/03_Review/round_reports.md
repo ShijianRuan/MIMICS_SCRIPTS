@@ -4432,3 +4432,24 @@ _stop_marker + request_stop，<50 行）+ 导入窗 2 个浏览按钮；删除 7
   _launch_external_import_setup + io_path_setup_ui import modes 不再有
   非测试调用方，删除涉及较大爆炸半径（io_setup_mimics modes + ~5 测试
   pin + flow tests），登记待后续轮处理。
+
+### E 真实场景可用性审查（AUD 批次，任务 #60）
+
+- **AUD-5（P1 系统性，F-2）：runtime_py35 内嵌 Mimics 对话框全面中文化
+  （commit `62313a9`）**：R61-24"UI 语言统一中文"未到达 mimics.dialogs
+  路径。17 个 runtime_py35 文件 ~300 条对话框字符串（message/
+  question_box 的 message/title/buttons 与 BUTTON_* 常量）全部中文化：
+  窗宽窗位、nnInteractive（错误指引/会话记忆/持续提示）、FlexiCT
+  （训练/预测/主动学习/状态监控）、nnU-Net、ScribblePrompt
+  （interactive_algorithms）、模型管理器、导入/导出/追加、撤销上次导入、
+  掩膜识别、诊断收集、环境设置、几何修复、停止服务、外部窗口启动器、
+  路径设置。边界纪律：日志与 JSON 机器字段保持英文；品牌名（FlexiCT/
+  nnU-Net/ScribblePrompt/Mimics）保持拉丁字母；AST 扫描复核零遗漏。
+  测试锁同步：test_all.py、fake_mimics_flow_test.py、
+  test_flexict_integration.py、test_nnunet_integration.py、
+  test_interactive_algorithms.py 共 22 文件（17 源 + 5 测试）。
+  净变化 −54 行（+808/−862，纯文案替换）。执行方式：4 个并行翻译
+  代理（按文件分组）+ 编排者（本人）负责 10 个小文件与全部测试锁
+  同步；mimics_export 降级导出确认按钮前缀耦合（"按"）已复核并加注释。
+- **AUD-6（P2）保持登记**：AL 标注/跳过单击无确认，需用户决策 D10
+  先行，未动。
