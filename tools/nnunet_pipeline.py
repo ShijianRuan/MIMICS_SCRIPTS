@@ -431,6 +431,31 @@ def _export_mcs_labels(
     return staging_root
 
 
+def _label_content_signature(path: Path) -> dict[str, Any]:
+    """Content-addressed signature for one label file (G10).
+
+    Label files are re-created from scratch on every ``mcs_refresh`` export:
+    a retrain after an AL iteration re-exports byte-identical NIfTIs for the
+    unchanged cases, yet the path-based signature (size/mtime/ctime) differs
+    every time, so the whole source-grid cache was rebuilt for nothing. The
+    label bytes are the ground truth this cache protects, so hash them; the
+    gzip header in .nii.gz embeds no timestamp, so identical voxel data and
+    affine produce identical files. Images are not hashed — they are
+    write-once dataset sources, never re-exported, and hashing every image
+    would turn a cheap stat into a multi-GB read per run.
+    """
+    stat = path.stat()
+    digest = hashlib.sha256()
+    with open(str(path), "rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return {
+        "kind": "file_content",
+        "size": int(stat.st_size),
+        "sha256": digest.hexdigest(),
+    }
+
+
 def _case_source_signature(
     image: Path, labels: list[list[Path]], request: dict[str, Any]
 ) -> str:
@@ -438,13 +463,14 @@ def _case_source_signature(
         {
             "image": path_signature(image),
             "labels": [
-                [path_signature(path) for path in source_group]
+                [_label_content_signature(path) if path else None
+                 for path in source_group]
                 for source_group in labels
             ],
             "label_mapping": request["labels"],
             "missing_label_policy": request["missing_label_policy"],
             "overlap_policy": str(request.get("overlap_policy") or "fail"),
-            "contract": "nnunet_source_grid_case.v3",
+            "contract": "nnunet_source_grid_case.v4",
         }
     )
 

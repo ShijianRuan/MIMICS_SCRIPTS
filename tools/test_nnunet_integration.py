@@ -8,6 +8,7 @@ import importlib
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1059,6 +1060,138 @@ class SpatialContractTests(unittest.TestCase):
             self.assertFalse(second["cache_hit"])
             repaired = nib.load(str(second["label"]))
             self.assertTrue(np.allclose(repaired.affine, np.eye(4)))
+
+    def test_reexported_identical_labels_hit_case_cache(self):
+        """G10: a retrain after an AL iteration re-exports labels from .mcs
+        for every case. The refreshed NIfTIs of unchanged cases are
+        byte-identical but brand-new files (new mtime/inode), so the old
+        path-based fingerprint missed the cache and every case was
+        re-materialized from scratch. The cache key must follow label
+        *content*, not file identity."""
+        import hashlib
+
+        import nibabel as nib
+        import numpy as np
+
+        def make_case(case_dir, name):
+            (case_dir / "segmentations").mkdir(parents=True)
+            nib.save(
+                nib.Nifti1Image(
+                    np.full((4, 4, 4), 10, dtype=np.int16), np.eye(4)
+                ),
+                str(case_dir / "ct.nii.gz"),
+            )
+            label = np.zeros((4, 4, 4), dtype=np.uint8)
+            label[1, 1, 1] = 1
+            nib.save(
+                nib.Nifti1Image(label, np.eye(4)),
+                str(case_dir / "segmentations" / (name + ".nii.gz")),
+            )
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            dataset = root / "dataset"
+            make_case(dataset / "c1", "liver")
+            make_case(dataset / "c2", "liver")
+            request = common.normalize_request(
+                {
+                    "operation": "train",
+                    "task_name": "Liver",
+                    "task_id": "liver",
+                    "dataset_root": str(dataset),
+                    "workspace": root / "workspace",
+                    "labels": [{"name": "liver", "id": 1}],
+                    "label_source": "dataset_masks",
+                }
+            )
+            out = root / "out"
+            out.mkdir()
+            first = pipeline.prepare_source_grid_cases(
+                request, out, out / "status.json", out / "control.json"
+            )
+            self.assertEqual(2, len(first))
+            self.assertFalse(any(row["cache_hit"] for row in first))
+            labels_before = [
+                hashlib.sha256(Path(row["label"]).read_bytes()).hexdigest()
+                for row in first
+            ]
+
+            # Simulate mcs_refresh: staging dir is wiped and byte-identical
+            # label files are re-created from scratch (new inode/mtime).
+            staging = root / "staging2"
+            staging.mkdir()
+            for case in ("c1", "c2"):
+                target = staging / case / "segmentations"
+                target.mkdir(parents=True)
+                source_label = (
+                    dataset / case / "segmentations" / "liver.nii.gz"
+                )
+                shutil.copy2(str(source_label), str(target / "liver.nii.gz"))
+                os.utime(str(target / "liver.nii.gz"), (1_000_000, 1_000_000))
+            request2 = dict(request, label_root=str(staging))
+            out2 = root / "out2"
+            out2.mkdir()
+            second = pipeline.prepare_source_grid_cases(
+                request2, out2, out2 / "status.json", out2 / "control.json"
+            )
+            self.assertEqual(2, len(second))
+            self.assertTrue(
+                all(row["cache_hit"] for row in second),
+                "byte-identical re-exported labels must reuse the cache",
+            )
+            # The reused cache content is unchanged.
+            self.assertEqual(
+                labels_before,
+                [
+                    hashlib.sha256(Path(row["label"]).read_bytes()).hexdigest()
+                    for row in second
+                ],
+            )
+
+    def test_changed_label_content_misses_case_cache(self):
+        """The G10 content-keyed cache must still invalidate when a label
+        actually changes - annotating more of the same case must force
+        re-materialization."""
+        import nibabel as nib
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            image_path = root / "image.nii.gz"
+            nib.save(
+                nib.Nifti1Image(
+                    np.zeros((4, 4, 4), dtype=np.float32), np.eye(4)
+                ),
+                str(image_path),
+            )
+            label = np.zeros((4, 4, 4), dtype=np.uint8)
+            label[1, 1, 1] = 1
+            label_path = root / "liver.nii.gz"
+            nib.save(nib.Nifti1Image(label, np.eye(4)), str(label_path))
+            request = common.normalize_request(
+                {
+                    "operation": "train",
+                    "task_name": "Liver",
+                    "workspace": root / "workspace",
+                    "labels": [{"name": "liver", "id": 1}],
+                }
+            )
+            first = pipeline._materialize_case(
+                "case", image_path, [[label_path]], request, root / "cache"
+            )
+            self.assertFalse(first["cache_hit"])
+            # Same path, same mtime, different voxels: the annotator
+            # corrected the mask in Mimics and re-exported.
+            label[2, 2, 2] = 1
+            nib.save(nib.Nifti1Image(label, np.eye(4)), str(label_path))
+            second = pipeline._materialize_case(
+                "case", image_path, [[label_path]], request, root / "cache"
+            )
+            self.assertFalse(second["cache_hit"])
+            import nibabel as nib2
+
+            data = np.asanyarray(nib2.load(str(second["label"])).dataobj)
+            self.assertEqual(2, int(np.count_nonzero(data)))
 
     def test_multiclass_overlap_fails_by_default(self):
         import nibabel as nib

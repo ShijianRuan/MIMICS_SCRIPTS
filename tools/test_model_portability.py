@@ -623,6 +623,259 @@ class FlexictBundleTests(unittest.TestCase):
             self.assertTrue(usable)
 
 
+def _fake_backbone(root: Path, salt: bytes = b"") -> Path:
+    """A stand-in backbone dir that resolve_pretrained_dir() would accept."""
+    for config in ("flexict_2d", "flexict_3d"):
+        target = root / config
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "model.safetensors").write_bytes(b"backbone" + config.encode() + salt)
+    return root
+
+
+class FlexictBackboneBundleTests(unittest.TestCase):
+    """D15: --include-backbone packages the pretrained backbone weights so
+    an imported fine-tuned model is actually runnable on a workstation that
+    never had them (the trainer loads the backbone while building the
+    network - F06)."""
+
+    def setUp(self):
+        for value in (str(ROOT), str(ROOT / "tools")):
+            if value not in sys.path:
+                sys.path.insert(0, value)
+        # ai_model_bundle's functions import "tools.flexict_common" while
+        # this file imports "flexict_common" - two module objects for the
+        # same file. Patch the one the code under test actually uses.
+        import importlib
+
+        self.tools_flexict_common = importlib.import_module(
+            "tools.flexict_common"
+        )
+
+    def _patched_backbone(self, source_weights: Path | None, target_weights: Path | None = ...):
+        """Redirect _flexict_backbone_files()/_target_backbone_dir() away
+        from the real repo weights and the global flexict_config.json.
+
+        source_weights: what the *exporting* machine has (None = export
+        without --include-backbone is still fine; the flag itself probes).
+        target_weights: what the *importing* machine has (None = bare
+        workstation). Default (ellipsis) = same as source.
+        """
+        if target_weights is ...:
+            target_weights = source_weights
+
+        def fake_files():
+            if source_weights is None:
+                raise FileNotFoundError("no backbone on this workstation")
+            return [
+                ("flexict_2d/model.safetensors",
+                 source_weights / "flexict_2d" / "model.safetensors"),
+                ("flexict_3d/model.safetensors",
+                 source_weights / "flexict_3d" / "model.safetensors"),
+            ]
+
+        def fake_target():
+            if target_weights is None:
+                raise FileNotFoundError("no backbone on this workstation")
+            return target_weights, "config"
+
+        return mock.patch.multiple(
+            ai_model_bundle,
+            _flexict_backbone_files=fake_files,
+            _target_backbone_dir=fake_target,
+        )
+
+    def test_backbone_roundtrip_installs_on_bare_workstation(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source_weights = _fake_backbone(root / "source_weights")
+            source = root / "source_workspace"
+            _flexict_model_dir(source, "flexict_bb", "2d", "")
+            bundle = root / "bb.zip"
+            with self._patched_backbone(source_weights):
+                ai_model_bundle.main(
+                    [
+                        "export-flexict",
+                        "--workspace",
+                        str(source),
+                        "--model-id",
+                        "flexict_bb",
+                        "--output",
+                        str(bundle),
+                        "--include-backbone",
+                    ]
+                )
+            with zipfile.ZipFile(bundle) as archive:
+                names = archive.namelist()
+            self.assertIn("backbone/flexict_2d/model.safetensors", names)
+            self.assertIn("backbone/flexict_3d/model.safetensors", names)
+
+            target = root / "target"
+            saved_configs: list[dict] = []
+
+            def fake_save_config(config, explicit_path=None):
+                saved_configs.append(dict(config))
+                return Path(explicit_path) if explicit_path else Path(root) / "flexict_config.json"
+
+            # Target workstation has NO backbone anywhere.
+            with self._patched_backbone(source_weights, None), mock.patch.object(
+                self.tools_flexict_common, "save_config", fake_save_config
+            ):
+                ai_model_bundle.main(
+                    [
+                        "import-flexict",
+                        "--workspace",
+                        str(target),
+                        "--bundle",
+                        str(bundle),
+                    ]
+                )
+            # The weights landed inside the import workspace and the config
+            # override points at them.
+            installed = target / "flexict_pretrained"
+            for config in ("flexict_2d", "flexict_3d"):
+                self.assertEqual(
+                    (installed / config / "model.safetensors").read_bytes(),
+                    (source_weights / config / "model.safetensors").read_bytes(),
+                )
+            self.assertEqual(len(saved_configs), 1)
+            self.assertEqual(
+                saved_configs[0]["pretrained_weights_dir"], str(installed)
+            )
+            # The model itself still registered normally.
+            models = flexict_common.load_models(target)
+            self.assertEqual(1, len(models))
+
+    def test_existing_backbone_is_verified_not_overwritten(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source_weights = _fake_backbone(root / "source_weights")
+            source = root / "source_workspace"
+            _flexict_model_dir(source, "flexict_bb2", "2d", "")
+            bundle = root / "bb2.zip"
+            with self._patched_backbone(source_weights):
+                ai_model_bundle.main(
+                    [
+                        "export-flexict",
+                        "--workspace",
+                        str(source),
+                        "--model-id",
+                        "flexict_bb2",
+                        "--output",
+                        str(bundle),
+                        "--include-backbone",
+                    ]
+                )
+            # Target already has identical weights in an admin location.
+            target_weights = _fake_backbone(root / "target_weights")
+            existing_bytes = (
+                target_weights / "flexict_2d" / "model.safetensors"
+            ).read_bytes()
+            target = root / "target"
+            with self._patched_backbone(source_weights, target_weights), mock.patch.object(
+                self.tools_flexict_common, "save_config"
+            ) as save_config:
+                ai_model_bundle.main(
+                    [
+                        "import-flexict",
+                        "--workspace",
+                        str(target),
+                        "--bundle",
+                        str(bundle),
+                    ]
+                )
+                save_config.assert_not_called()
+            # Untouched, byte for byte.
+            self.assertEqual(
+                (target_weights / "flexict_2d" / "model.safetensors").read_bytes(),
+                existing_bytes,
+            )
+            self.assertFalse((target / "flexict_pretrained").exists())
+
+    def test_mismatched_existing_backbone_is_rejected(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source_weights = _fake_backbone(root / "source_weights")
+            source = root / "source_workspace"
+            _flexict_model_dir(source, "flexict_bb3", "2d", "")
+            bundle = root / "bb3.zip"
+            with self._patched_backbone(source_weights):
+                ai_model_bundle.main(
+                    [
+                        "export-flexict",
+                        "--workspace",
+                        str(source),
+                        "--model-id",
+                        "flexict_bb3",
+                        "--output",
+                        str(bundle),
+                        "--include-backbone",
+                    ]
+                )
+            # Target backbone differs: importing would silently pair the
+            # model with a backbone it was never fine-tuned from.
+            target_weights = _fake_backbone(
+                root / "target_weights", salt=b"-different"
+            )
+            target = root / "target"
+            with self._patched_backbone(source_weights, target_weights), mock.patch.object(
+                self.tools_flexict_common, "save_config"
+            ):
+                with self.assertRaises(RuntimeError) as ctx:
+                    ai_model_bundle.main(
+                        [
+                            "import-flexict",
+                            "--workspace",
+                            str(target),
+                            "--bundle",
+                            str(bundle),
+                        ]
+                    )
+            self.assertIn("differ from the packaged", str(ctx.exception))
+            # Nothing was published.
+            self.assertFalse(
+                (flexict_common.workspace_paths(target)["root"] / "models").exists()
+            )
+
+    def test_bundle_without_backbone_still_imports(self):
+        # Backwards compatibility: pre-D15 bundles (no --include-backbone)
+        # carry no backbone section and must import unchanged on a
+        # workstation with or without backbone weights.
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source_weights = _fake_backbone(root / "source_weights")
+            source = root / "source_workspace"
+            _flexict_model_dir(source, "flexict_plain", "2d", "")
+            bundle = root / "plain.zip"
+            with self._patched_backbone(source_weights):
+                ai_model_bundle.main(
+                    [
+                        "export-flexict",
+                        "--workspace",
+                        str(source),
+                        "--model-id",
+                        "flexict_plain",
+                        "--output",
+                        str(bundle),
+                    ]
+                )
+            target = root / "target"
+            with self._patched_backbone(source_weights, None), mock.patch.object(
+                self.tools_flexict_common, "save_config"
+            ) as save_config:
+                ai_model_bundle.main(
+                    [
+                        "import-flexict",
+                        "--workspace",
+                        str(target),
+                        "--bundle",
+                        str(bundle),
+                    ]
+                )
+                save_config.assert_not_called()
+            self.assertFalse((target / "flexict_pretrained").exists())
+            self.assertEqual(1, len(flexict_common.load_models(target)))
+
+
 class ModelManagerTests(unittest.TestCase):
     """The unified model manager: cross-family listing + import dispatch."""
 

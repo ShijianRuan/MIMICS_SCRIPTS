@@ -142,6 +142,26 @@ def resolve_pretrained_dir(config: dict[str, Any] | None = None) -> tuple[Path, 
     )
 
 
+def save_config(config: dict[str, Any], explicit_path: str | Path | None = None) -> Path:
+    """Persist config values over the defaults (used by bundle import).
+
+    Only keys that differ from DEFAULT_CONFIG are written, so the file stays
+    a minimal user-override document instead of a full dump of defaults.
+    """
+    import json
+
+    overrides = {
+        key: value
+        for key, value in (config or {}).items()
+        if key not in DEFAULT_CONFIG or value != DEFAULT_CONFIG[key]
+    }
+    path = Path(explicit_path) if explicit_path else CONFIG_PATH
+    with open(str(path), "w", encoding="utf-8") as handle:
+        json.dump(overrides, handle, indent=2, sort_keys=True, ensure_ascii=False)
+        handle.write("\n")
+    return path
+
+
 def _dataset_ids_in(paths: dict[str, Path], used: set[int]) -> None:
     for key in ("raw", "preprocessed", "results"):
         base = paths[key]
