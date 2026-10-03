@@ -111,6 +111,43 @@ class TestBatchStatusWindow(unittest.TestCase):
                 self.assertEqual(window.table.rowCount(), 0)
                 window.window.close()
 
+    def test_real_refresh_click_does_not_crash(self):
+        """F34: a real clicked signal passes checked=False as its first
+        argument; the old direct connection fed that bool into refresh's
+        `rows` and every real click died on len(False)."""
+        _AppFixture.app()
+        batch, _manager, _config, _presets = _gui_modules()
+        with tempfile.TemporaryDirectory() as name:
+            project = self._fixtures(Path(name))
+            with mock.patch.object(
+                batch, "import_runtime_base",
+                lambda p: Path(p) / ".mimics_runtime",
+            ):
+                window = batch.BatchStatusWindow(project, QT)
+                window.refresh()
+                self.assertEqual(3, len(window._rows))
+                errors = []
+                old_hook = sys.excepthook
+                sys.excepthook = (
+                    lambda typ, value, tb: errors.append(str(value)))
+                try:
+                    button = next(
+                        child for child in window.window.findChildren(
+                            QtWidgets.QPushButton)
+                        if child.text() == "刷新")
+                    button.click()  # real signal: clicked(False)
+                    _AppFixture.app().processEvents()
+                    # Let the background collection finish and drain.
+                    for _ in range(40):
+                        _AppFixture.app().processEvents()
+                        time.sleep(0.05)
+                        if not errors:
+                            break
+                finally:
+                    sys.excepthook = old_hook
+                self.assertEqual([], errors)
+                window.window.close()
+
     def test_batch_drop_import_stop_routes_to_queue_marker(self):
         """R66 audit P2: a batch drop-import row's Stop must write the
         queue-level marker the batch CLI actually polls — the per-drop

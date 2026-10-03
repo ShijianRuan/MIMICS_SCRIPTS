@@ -254,7 +254,7 @@ class BatchStatusWindow:
         header.addWidget(self.live_label)
         header.addStretch(1)
         refresh = QtWidgets.QPushButton("刷新")
-        refresh.clicked.connect(self.refresh)
+        self.refresh_button = refresh
         header.addWidget(refresh)
         root.addLayout(header)
 
@@ -309,6 +309,13 @@ class BatchStatusWindow:
             collect=lambda: collect_batch_rows(self.project_root),
             apply=self.refresh,
         )
+        # clicked(bool) would pass its checked flag as `rows` into refresh
+        # (F34: real clicks crashed with "object of type 'bool' has no
+        # len()"). The button must also not turn into a synchronous network
+        # scan: it schedules a background collection; the drain timer then
+        # delivers the real rows to refresh().
+        self.refresh_button.clicked.connect(
+            lambda _checked=False: self.refresher.request())
         self.refresher.refresh_now()
 
     def refresh(self, rows=None):
