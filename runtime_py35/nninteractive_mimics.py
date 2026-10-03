@@ -2004,15 +2004,15 @@ def _choose_completed_result_target(image, target, state, result):
             title="nnInteractive 预测完成",
             message=(
                 "nnInteractive 预测在 {0} 秒内完成。\n\n"
-                "更新所选 Mask 会将结果应用到 {1}。\n"
+                "更新匹配掩膜 会将结果应用到 {1}。\n"
                 "创建可编辑副本 保持其不变，并新建一个可编辑的 AI 草稿。\n\n"
                 "本次选择将在本次 Mimics 会话中一直记住。"
             ).format(result.get("elapsed_seconds", "?"), str(getattr(target, "name", "") or "所选 Mask")),
-            buttons="更新所选 Mask;创建可编辑副本",
+            buttons="更新匹配掩膜;创建可编辑副本",
             ui_blocking=True,
         )
         _SESSION_WRITE_MODE = (
-            "in_place" if decision == "更新所选 Mask" else "derived_copy"
+            "in_place" if decision == "更新匹配掩膜" else "derived_copy"
         )
         if _SESSION_WRITE_MODE == "in_place":
             state["write_mode"] = "in_place"

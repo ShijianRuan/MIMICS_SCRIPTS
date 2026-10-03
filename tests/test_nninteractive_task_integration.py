@@ -279,8 +279,7 @@ class DiagnoseJobTests(unittest.TestCase):
     def test_diagnosis_degrades_for_missing_directory(self):
         with tempfile.TemporaryDirectory() as value:
             report = pipeline.diagnose_job(
-                str(Path(value) / "does_not_exist"
-                    )
+                str(Path(value) / "does_not_exist")
             )
         self.assertEqual("", report["error"])
         self.assertEqual([], report["stage_chain"])

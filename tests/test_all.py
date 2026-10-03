@@ -5196,7 +5196,7 @@ class TestNNInteractiveSessionWriteMode(unittest.TestCase):
         # First result: user picks "Update Selected Mask" -> in place, prompt shown once.
         state = {"write_mode": "choose_on_first_result"}
         result, prompts, _created, session_after = self._run_choose(
-            ["更新所选 Mask"], state
+            ["更新匹配掩膜"], state
         )
         self.assertEqual(1, len(prompts))
         self.assertEqual("in_place", state["write_mode"])
