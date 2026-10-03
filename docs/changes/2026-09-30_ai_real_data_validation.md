@@ -595,6 +595,54 @@ active_learning pair 查找、全链路测试。
 **用户决策记录**：2026-10-02 用户明确"支持多标签也是需要做的"——立项。
 优先级与排期由账本统一排序。
 
+## FlexiCT 多分类实现 + 2 标签 PoC 验证（2026-10-03）
+
+**实现**（commit 9fe911e，分支 ai-real-data-validation，+493/-71，6 文件）：
+
+- **请求层**：`normalize_flexict_request` 支持显式 `labels` 数组
+  （≤4 标签，UI `_submit` 超限拒绝）；单标签请求不传 labels，行为不变
+  （向后兼容）。
+- **数据层**：复用 nnU-Net 侧多标签物化（`_materialize_nnunet_raw`：
+  合并标签数组值 1..N + overlap_policy），FlexiCT prepared 数据生成同一
+  机制。
+- **模型层**：`num_output_channels`→3 通道解码头（liver+spleen 2 标签 +
+  背景），预训练 backbone 类无关、解码头每任务新训，无权重冲突。
+- **推理层**：`nnUNetPredictor` 原生多类输出 → mimics_bridge 按值拆分
+  → `flexict_mimics` 逐标签应用队列（镜像 `nnunet_mimics` 的既有机制）。
+- **注册层**：模型清单新增 `labels` + `label_names`（向后兼容旧清单的
+  单 `label_name` 字段）。
+- **测试**：`test_flexict_integration.py` 121 测试全绿（新增多分类
+  物化/推理/回传/注册/UI 拒绝超限等用例，含 `sys.modules` 清缓存与
+  对话框 holder 修复）；gui_smoke 34/34；smoke 8/8；fast 28/28
+  （工件 20261003T050327_fast.json）。
+
+**PoC 训练（171 远程，2026-10-03）**：与单标签基线完全同配方（同 8 训练例
+s0001/04/06/09/10/11/12/13、2d、batch 6、20 epochs、mcs_refresh 标签源、
+远程控制器全链路），仅 labels 由单 liver 改为
+`[{liver,1},{spleen,2}]`，`missing_label_policy=require_all`、
+`overlap_policy=fail`（多标签安全默认）。模型
+flexict_20261003T051819_ccde7e00 下载注册成功（清单含 labels +
+label_names）。训练收敛：pseudo dice liver 0.8228→0.8619、
+spleen 0.9228→0.9612；fold validation liver 0.829 / spleen 0.961。
+
+**PoC held-out 推理 + Dice 评估（本地 RTX 3060，TTA 关）**：
+
+| Case | liver Dice（多分类） | liver 基线（单标签 2d） | Δ | spleen Dice |
+|---|---|---|---|---|
+| s0038 | 0.9699 | 0.9722 | −0.0023 | 0.9530 |
+| s0039 | 0.9751 | 0.9761 | −0.0010 | 0.9360 |
+| s0042 | 0.9716 | 0.9754 | −0.0038 | 0.9854 |
+
+**判据**：liver 与单标签基线差 ≤0.03（实际最大 0.0038）；spleen ≥0.7
+（实际最低 0.9360）。**两项全部通过** —— few-shot 多分类对单标签基线
+无显著劣化，且第二标签精度优异。预测工件：
+`G:\mimics_ai_validation\predictions\flexict_multiclass_{s0038,s0039,s0042}\
+prediction.nii.gz`。
+
+**结论**：FlexiCT 多分类支持实现完成且真实数据有效。多分类不稀释
+few-shot 监督的前提（本 PoC 证据）：两标签均为大器官、训练例均两标签
+齐全（require_all）。小器官/更多标签（4 上限）场景未测，入账为测试盲区。
+
 - **痛点**：用户在向导里改了 batch_size / patch_size / spacing / configuration
   等规划参数重跑远程训练，控制器显示一切正常，但远程端预处理被整段跳过、
   旧 plans（含旧 batch size）被直接复用——训练表现与用户设置完全脱节，
@@ -610,7 +658,7 @@ active_learning pair 查找、全链路测试。
 - **证据**：job 6（c4d437f7）日志出现 "Batch size override: 66 -> 12" 与
   plans batch_size=12，缓存 namespace 带新 identity 后缀，预处理确实重跑。
 
-## 外部资源清理登记（2026-10-02）
+## 外部资源清理登记（2026-10-02，10-03 增补）
 
 **171（/home/shijian_ruan/mimics-ai）**：
 - 已删除：本次验证 6 个失败 job 目录（e52e1fd5、0ec68c3f、b41c7e7f、
@@ -631,6 +679,13 @@ active_learning pair 查找、全链路测试。
   （df -h /home 显示根分区 43% 有误导性）。我方 mimics-ai 目录清理后
   ~67G，其余 ~350G 为其他项目数据（UIH/algo-* 等），按红线未动。
   需要服务器管理员层面的清理确认。
+- **多分类 PoC 增补（2026-10-03）**：PoC 训练 job 目录由远程控制器
+  下载注册后自动清理（终态核验 jobs/root 仅剩 8 月遗留 3 目录，与
+  既有登记一致）；临时 profile 171_root_img12 及其凭据已删除
+  （servers.json 现仅 171_root、206_root）；无 mimics 容器/进程，
+  GPU 0/1 利用率 0%。新增 prepared cache 命名空间
+  d50ca6…_ba963836（230M，多标签 spec 产生新数据集指纹）按内容寻址
+  缓存 30 天惯例保留并登记。
 
 **206（/userdata/shijian_ruan/mimics-ai）**：jobs/root 空，k8s.io namespace
 无 mimics 容器（此前的 stale 容器 train_20260925T183409_50564969 已不在），

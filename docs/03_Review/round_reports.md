@@ -3895,3 +3895,43 @@ R61 期间 E: 盘 100% 满（剩 2.2MB），fast 门禁 2 个 test_all 用例 Er
 
 - commits：`aadd6e3`；工件：`20260930T112139_smoke.json`、
   `20260930T115343_fast.json`；外部资源：零使用。
+
+## R65（2026-10-03）：FlexiCT 多分类实现 + 2 标签 PoC 真实数据验证
+
+### FlexiCT 多分类支持（P1 需求，commit `9fe911e`）
+
+- **需求**：用户 2026-10-02 拍板立项——FlexiCT 训练支持一个模型同时学
+  多个器官（多分类），而非一个器官一个模型。
+- **实现**（+493/-71，6 文件）：请求层显式 `labels` 数组（≤4，UI 超限
+  拒绝；单标签请求不变，向后兼容）；数据层复用 nnU-Net 多标签物化
+  （合并标签数组 1..N + overlap_policy）；模型层 `num_output_channels`
+  →3 通道解码头；推理层按值拆分多 mask → `flexict_mimics` 逐标签
+  应用队列（镜像 nnunet_mimics）；注册层清单新增 labels + label_names
+  （兼容旧单 label_name）。
+- **测试**：flexict 集成 121 全绿（含多分类物化/推理/回传/注册/UI 用例
+  + 修 3 处既有测试基建问题：模块缓存、对话框 holder、_apply_one 返回值
+  语义对齐参考实现）；gui_smoke 34/34；fast 28/28
+  （`20261003T050327_fast.json`）。
+
+### PoC 真实数据验证（2 标签 liver+spleen，2026-10-03）
+
+- **训练**（171 远程，与单标签基线同配方，仅改 labels）：收敛良好
+  （pseudo dice liver 0.823→0.862、spleen 0.923→0.961；fold validation
+  liver 0.829 / spleen 0.961）。模型
+  flexict_20261003T051819_ccde7e00 注册成功。
+- **held-out Dice（本地 RTX 3060，TTA 关）**：s0038 liver 0.9699 /
+  spleen 0.9530；s0039 0.9751/0.9360；s0042 0.9716/0.9854。
+  判据（liver 与单标签基线 0.9722/0.9761/0.9754 差 ≤0.03；spleen ≥0.7）
+  **全部通过**：liver 最大劣化仅 0.0038，spleen 最低 0.9360。
+- **结论**：多分类实现真实数据有效；小器官/4 标签上限场景未测（入账
+  测试盲区）。
+- **外部资源**：171 训练 1 job（job 目录控制器自动清理）；新增 prepared
+  cache 命名空间 230M（内容寻址 30 天惯例保留）；临时 profile
+  171_root_img12 + 凭据已删除；终态无容器/进程，GPU 0%。详见
+  docs/changes/2026-09-30_ai_real_data_validation.md 清理登记节。
+
+### 证据
+
+- commits：`9fe911e`（代码+测试）、本轮 docs 提交；工件：
+  `20261003T050327_fast.json`、预测
+  `G:\mimics_ai_validation\predictions\flexict_multiclass_*`。
