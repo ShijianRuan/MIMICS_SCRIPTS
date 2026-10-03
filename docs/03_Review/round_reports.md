@@ -4517,3 +4517,58 @@ _stop_marker + request_stop，<50 行）+ 导入窗 2 个浏览按钮；删除 7
 - D16（跨标注员命名词汇表）不因本轮缓解，仍为需用户决策项；
 - F01（混 UID 多帧 DICOM 精确导入，R65-12）等实机项不受影响；
 - 深嵌套（>2 层）数据集仍不可见（P3，未立项）。
+
+## R68（2026-10-03）：全产品 UI 审计修复轮
+
+> 用户指令：从 UI 上全面检查优化——可列选的不要纯手打、按钮文字显示不全、
+> 入口含义不明，"不只是数据功能的，所有功能的UI都看看"。三个并行审计代理
+> 按数据侧/AI 侧/管理侧分域审计。审计基线上与 R67 衔接。
+
+### 审计方法与发现
+
+三个代理共用审计标准（列选 > 手打、文字溢出、入口含义），输出各自域的
+问题清单。共性根因：**R66-AUD-5 中文化只覆盖了 runtime_py35 内嵌对话框，
+外置 PySide6 窗口（tools/）仍有大量英文混排**——中文窗口里夹英文按钮、
+英文表格列、英文报错，标注者阅读成本最高的问题。
+
+### 实施内容（两个独立 commit）
+
+1. **R68-1（`3c4c3a3`，数据侧，251/−189）**：导出 Mask 窗口全中文 +
+   候选列表复选框同步名称字段（NoSelection 模式下选中态不可见的修复）；
+   拖拽窗"粘贴路径"按钮移到源路径行（它粘贴的是源路径而非输出路径）；
+   mask 路径行接受换行分隔（与 placeholder 承诺一致）；批量状态查看器
+   中文状态映射。
+2. **R68-2（`731d946`，AI 侧 + 管理侧，452/−446）**：模型中心（训练
+   曲线/16 态头部映射/失败诊断面板/模型表格来源与状态列）、nnU-Net 与
+   FlexiCT 训练向导、env_guidance 全部 7 类环境问题、System Health
+   面板、任务模型选择器、窗宽窗位预设编辑器；config_editor 的
+   scribbleprompt.device 从自由文本改为 cpu/cuda 列选（审计标准#1 落点）。
+
+### 顺带修复（pre-existing）
+
+- **System Health CSS 大括号 KeyError**：run() 把含 Qt CSS 字面 `{` 的
+  模板过 str.format()——`QFrame#healthSection {` 被解析为格式字段，
+  test_offscreen_panel_renders 必崩。git stash 验证为 pre-existing。
+  修复：字面大括号转义 `{{`/`}}`。该测试位于 test_all（full profile），
+  定向 10/10 通过。
+
+### 设计约束（全程保持）
+
+- **数据层状态词保持英文**（idle/running/stopping/stop requested、
+  status 枚举）——测试直接断言它们；中文化只在渲染层经显示映射
+  （`_QUEUE_STATE_LABELS` 等 2 个映射，数据层零改动）。
+- 日志与 JSON 机器字段保持英文（与 R66-AUD-5 同一纪律）。
+- 有意保留：config_editor 完整标签（低频管理入口，改动面大收益小）、
+  docs/（英文设计文档）、品牌名（FlexiCT/nnU-Net/ScribblePrompt）。
+
+### 门禁与证据
+
+- fast 29/29：`20261003T205836_fast.json`（覆盖最后一批编辑后重跑）
+- 定向：System Health 10/10、env_guidance 18/18（test_all 内套件）
+- 净变化 +3 行（29 文件，+703/−635）——纯文案替换轮
+
+### 遗留
+
+- config_editor_ui 完整标签中文化（评估后暂缓：低频入口）；
+- R66-AUD-6（AL 单击无确认，需 D10 先行）不因本轮缓解；
+- 浏览按钮 ellipsis 已统一（浏览…→浏览...）。
