@@ -1,0 +1,213 @@
+test_al_fails_without_pair (__main__.TestActiveLearningLifecycle.test_al_fails_without_pair) ... ok
+test_completed_al_lifecycle (__main__.TestActiveLearningLifecycle.test_completed_al_lifecycle) ... 开始批量计算：共 3 例...
+
+批量进度 |##########--------------------|  33.3%  1/3  已用 0.0s  剩余 0.0s
+批量进度 |####################----------|  66.7%  2/3  已用 0.0s  剩余 0.0s
+批量进度 |##############################| 100.0%  3/3  已用 0.0s  剩余 0.0s
+批量完成：成功 3/3 例，耗时 0.0s。
+日志已写入: <TEMP_PATH>
+
+开始统计分析：共 3 例，逐例读取并计算指标...
+
+分析进度 |##########--------------------|  33.3%  1/3  已用 0.0s  剩余 0.0s
+分析进度 |####################----------|  66.7%  2/3  已用 0.0s  剩余 0.0s
+分析进度 |##############################| 100.0%  3/3  已用 0.0s  剩余 0.0sok
+test_annotation_state_roundtrip (__main__.TestActiveLearningReviewUI.test_annotation_state_roundtrip) ... <REPO>/tools/ui_theme.py:64: DeprecationWarning: Enum value 'Qt::ApplicationAttribute.AA_UseHighDpiPixmaps' is marked as deprecated, please check the documentation for more information.
+  QtCore.QCoreApplication.setAttribute(attribute, True)
+ok
+test_bands_degenerate_detects_pair_mode_collapse (__main__.TestActiveLearningReviewUI.test_bands_degenerate_detects_pair_mode_collapse) ... ok
+test_load_ranking_prefers_status_then_csv (__main__.TestActiveLearningReviewUI.test_load_ranking_prefers_status_then_csv) ... ok
+test_materialized_pool_disambiguates_slug_collisions (__main__.TestActiveLearningReviewUI.test_materialized_pool_disambiguates_slug_collisions)
+F22: two Chinese case names collapse to the same safe_identifier ... FAIL
+test_materialized_pool_records_source_paths (__main__.TestActiveLearningReviewUI.test_materialized_pool_records_source_paths)
+_al_materialize_inputs records each case's original image path ... FAIL
+test_request_updates_reads_back_monitor_outcomes (__main__.TestActiveLearningReviewUI.test_request_updates_reads_back_monitor_outcomes)
+The UI poll helper: applied/failed requests newer than the ... ok
+test_mark_annotated_only_upgrades_new (__main__.TestActiveLearningRuntimeHandlers.test_mark_annotated_only_upgrades_new) ... ok
+test_open_case_already_active_is_noop_success (__main__.TestActiveLearningRuntimeHandlers.test_open_case_already_active_is_noop_success) ... ok
+test_open_case_opens_recorded_mcs (__main__.TestActiveLearningRuntimeHandlers.test_open_case_opens_recorded_mcs) ... ok
+test_open_case_refuses_to_stomp_open_project (__main__.TestActiveLearningRuntimeHandlers.test_open_case_refuses_to_stomp_open_project) ... ok
+test_open_case_unknown_state_refuses_to_switch (__main__.TestActiveLearningRuntimeHandlers.test_open_case_unknown_state_refuses_to_switch)
+F17/T17 查询失败: with the project query failing, the handler ... ok
+test_open_case_without_mcs_gives_guidance (__main__.TestActiveLearningRuntimeHandlers.test_open_case_without_mcs_gives_guidance) ... ok
+test_2d_and_3d_are_concrete (__main__.TestConfigurationResolution.test_2d_and_3d_are_concrete) ... ok
+test_auto_big_gpu_picks_pair (__main__.TestConfigurationResolution.test_auto_big_gpu_picks_pair) ... ok
+test_auto_small_gpu_picks_2d (__main__.TestConfigurationResolution.test_auto_small_gpu_picks_2d) ... ok
+test_pair_expands_to_both (__main__.TestConfigurationResolution.test_pair_expands_to_both) ... ok
+test_runtime_module_has_all_actions (__main__.TestEntryRouting.test_runtime_module_has_all_actions) ... ok
+test_runtime_module_is_py35_clean (__main__.TestEntryRouting.test_runtime_module_is_py35_clean) ... ok
+test_shells_route_to_flexict_mimics (__main__.TestEntryRouting.test_shells_route_to_flexict_mimics) ... ok
+test_waiting_messages_reference_reachable_stop_paths (__main__.TestEntryRouting.test_waiting_messages_reference_reachable_stop_paths) ... ok
+test_edit_then_undo_back_to_original_still_updates (__main__.TestEqualVolumeEditProtection.test_edit_then_undo_back_to_original_still_updates) ... ok
+test_equal_volume_edit_falls_back_to_copy (__main__.TestEqualVolumeEditProtection.test_equal_volume_edit_falls_back_to_copy) ... ok
+test_legacy_snapshot_without_digest_degrades_to_count_check (__main__.TestEqualVolumeEditProtection.test_legacy_snapshot_without_digest_degrades_to_count_check) ... ok
+test_snapshot_records_content_digest (__main__.TestEqualVolumeEditProtection.test_snapshot_records_content_digest) ... ok
+test_unchanged_mask_still_updates (__main__.TestEqualVolumeEditProtection.test_unchanged_mask_still_updates) ... ok
+test_unreadable_buffer_degrades_to_count_check (__main__.TestEqualVolumeEditProtection.test_unreadable_buffer_degrades_to_count_check) ... ok
+test_infer_environment_trainer_seam_only (__main__.TestFlexictInferEnvironment.test_infer_environment_trainer_seam_only)
+Inference needs the trainer seam but NOT the pretrained backbone ... ok
+test_create_infer_job_fills_output_path (__main__.TestInferJobCreation.test_create_infer_job_fills_output_path) ... ok
+test_completed_inference (__main__.TestInferenceLifecycle.test_completed_inference) ... FAIL
+test_grid_mismatch_marks_failure (__main__.TestInferenceLifecycle.test_grid_mismatch_marks_failure)
+A prediction on the wrong grid must never reach Mimics. ... ok
+test_stale_source_geometry_rejected_before_gpu (__main__.TestInferenceLifecycle.test_stale_source_geometry_rejected_before_gpu)
+If the on-disk image no longer matches the launch-time geometry, ... ok
+test_abandoned_inference_stops_monitor_with_failure_message (__main__.TestInferenceMonitorTerminalStates.test_abandoned_inference_stops_monitor_with_failure_message) ... ok
+test_failed_inference_still_stops_monitor (__main__.TestInferenceMonitorTerminalStates.test_failed_inference_still_stops_monitor) ... ok
+test_create_job_launches_pipeline (__main__.TestJobCreation.test_create_job_launches_pipeline) ... ok
+test_list_flexict_jobs_reads_workspace (__main__.TestJobCreation.test_list_flexict_jobs_reads_workspace) ... ok
+test_cancelled_lifecycle (__main__.TestJobLifecycle.test_cancelled_lifecycle) ... ok
+test_completed_lifecycle_2d (__main__.TestJobLifecycle.test_completed_lifecycle_2d) ... ok
+test_completed_lifecycle_pair (__main__.TestJobLifecycle.test_completed_lifecycle_pair) ... ok
+test_failure_records_error (__main__.TestJobLifecycle.test_failure_records_error) ... ok
+test_prepared_case_all_zero_label_fails_before_training (__main__.TestJobLifecycle.test_prepared_case_all_zero_label_fails_before_training)
+Remote label_source="prepared": an all-zero label must fail fast. ... ok
+test_prepared_case_missing_file_fails_before_training (__main__.TestJobLifecycle.test_prepared_case_missing_file_fails_before_training)
+Remote label_source="prepared": an incomplete case must fail fast. ... ok
+test_registry_rows_derive_manifest_path (__main__.TestLoadModelsManifestPath.test_registry_rows_derive_manifest_path) ... ok
+test_operation_active_learning_routes_to_run_active_learning (__main__.TestMainRouting.test_operation_active_learning_routes_to_run_active_learning) ... ok
+test_operation_infer_routes_to_run_inference (__main__.TestMainRouting.test_operation_infer_routes_to_run_inference) ... FAIL
+test_operation_train_routes_to_run_training (__main__.TestMainRouting.test_operation_train_routes_to_run_training) ... ok
+test_register_creates_usable_model (__main__.TestModelRegistration.test_register_creates_usable_model) ... ok
+test_accepts_all_configurations (__main__.TestNormalizeFlexictRequest.test_accepts_all_configurations) ... ok
+test_bad_operation_rejected (__main__.TestNormalizeFlexictRequest.test_bad_operation_rejected) ... ok
+test_infer_operation_uses_infer_normalization (__main__.TestNormalizeFlexictRequest.test_infer_operation_uses_infer_normalization) ... ok
+test_label_spec_is_single_binary (__main__.TestNormalizeFlexictRequest.test_label_spec_is_single_binary) ... ok
+test_minimal_request_defaults (__main__.TestNormalizeFlexictRequest.test_minimal_request_defaults) ... ok
+test_missing_dataset_id_suggested_from_flexict_band (__main__.TestNormalizeFlexictRequest.test_missing_dataset_id_suggested_from_flexict_band)
+A request without dataset_id must NOT land in the nnU-Net band. ... ok
+test_rejects_unknown_configuration (__main__.TestNormalizeFlexictRequest.test_rejects_unknown_configuration) ... ok
+test_different_fingerprint_invalidates (__main__.TestPreprocessCache.test_different_fingerprint_invalidates) ... ok
+test_pair_identities_are_independent (__main__.TestPreprocessCache.test_pair_identities_are_independent) ... ok
+test_roundtrip_valid_after_record (__main__.TestPreprocessCache.test_roundtrip_valid_after_record) ... ok
+test_prepare_flexict_infer_rejects_changed_source_geometry (__main__.TestRemoteExecution.test_prepare_flexict_infer_rejects_changed_source_geometry) ... ok
+test_prepare_flexict_infer_returns_remote_contract (__main__.TestRemoteExecution.test_prepare_flexict_infer_returns_remote_contract) ... ok
+test_prepare_flexict_rejects_non_training_request (__main__.TestRemoteExecution.test_prepare_flexict_rejects_non_training_request) ... ok
+test_prepare_flexict_returns_remote_contract (__main__.TestRemoteExecution.test_prepare_flexict_returns_remote_contract) ... ok
+test_register_flexict_registers_pair_with_remote_provenance (__main__.TestRemoteExecution.test_register_flexict_registers_pair_with_remote_provenance) ... ok
+test_register_flexict_without_manifest_fails (__main__.TestRemoteExecution.test_register_flexict_without_manifest_fails) ... ok
+test_remote_infer_job_uses_flexict_infer_kind (__main__.TestRemoteExecution.test_remote_infer_job_uses_flexict_infer_kind) ... ok
+test_remote_job_without_profile_is_refused (__main__.TestRemoteExecution.test_remote_job_without_profile_is_refused) ... ok
+test_remote_training_job_launches_controller_with_spec (__main__.TestRemoteExecution.test_remote_training_job_launches_controller_with_spec) ... ok
+test_worker_dispatch_covers_flexict_kinds (__main__.TestRemoteExecution.test_worker_dispatch_covers_flexict_kinds) ... ok
+test_worker_environment_resolves_remote_weights_override (__main__.TestRemoteExecution.test_worker_environment_resolves_remote_weights_override) ... ok
+test_worker_preflight_reports_flexict_weights_and_import (__main__.TestRemoteExecution.test_worker_preflight_reports_flexict_weights_and_import) ... ERROR
+test_worker_run_flexict_writes_pipeline_job_and_dispatches (__main__.TestRemoteExecution.test_worker_run_flexict_writes_pipeline_job_and_dispatches) ... ok
+test_explicit_manifests_win (__main__.TestResolveFlexictPair.test_explicit_manifests_win) ... ok
+test_no_pair_is_rejected (__main__.TestResolveFlexictPair.test_no_pair_is_rejected) ... ok
+test_one_manifest_only_is_rejected (__main__.TestResolveFlexictPair.test_one_manifest_only_is_rejected) ... ok
+test_registry_pair_fallback (__main__.TestResolveFlexictPair.test_registry_pair_fallback) ... ok
+test_scan_full_case_is_usable (__main__.TestScanFlexictCases.test_scan_full_case_is_usable) ... ok
+test_scan_rejects_missing_root (__main__.TestScanFlexictCases.test_scan_rejects_missing_root) ... ok
+test_scan_reports_missing_label (__main__.TestScanFlexictCases.test_scan_reports_missing_label) ... ok
+test_live_jobs_never_pruned (__main__.TestSweepExpiredJobs.test_live_jobs_never_pruned) ... ok
+test_old_terminal_jobs_are_pruned_keeping_status (__main__.TestSweepExpiredJobs.test_old_terminal_jobs_are_pruned_keeping_status) ... ok
+test_recent_jobs_kept (__main__.TestSweepExpiredJobs.test_recent_jobs_kept) ... ok
+test_zero_retention_disables (__main__.TestSweepExpiredJobs.test_zero_retention_disables) ... ok
+test_dataset_and_cache_tree_of_running_job_are_kept (__main__.TestSweepRuntimeAndCache.test_dataset_and_cache_tree_of_running_job_are_kept) ... ok
+test_dataset_referenced_by_registry_model_is_kept (__main__.TestSweepRuntimeAndCache.test_dataset_referenced_by_registry_model_is_kept) ... ok
+test_expired_cache_case_removed (__main__.TestSweepRuntimeAndCache.test_expired_cache_case_removed) ... ok
+test_expired_unreferenced_dataset_removed (__main__.TestSweepRuntimeAndCache.test_expired_unreferenced_dataset_removed) ... ok
+test_zero_retention_disables_both_sweeps (__main__.TestSweepRuntimeAndCache.test_zero_retention_disables_both_sweeps) ... ok
+test_explicit_val_case_selection_wins (__main__.TestTrainValSplit.test_explicit_val_case_selection_wins) ... ok
+test_si_start_anisotropic_axial (__main__.TestTrainValSplit.test_si_start_anisotropic_axial) ... ok
+test_si_start_axis_permuted (__main__.TestTrainValSplit.test_si_start_axis_permuted) ... ok
+test_si_start_empty_target (__main__.TestTrainValSplit.test_si_start_empty_target) ... ok
+test_si_start_flipped_z (__main__.TestTrainValSplit.test_si_start_flipped_z) ... ok
+test_si_start_isotropic_ras_uses_physical_axis (__main__.TestTrainValSplit.test_si_start_isotropic_ras_uses_physical_axis) ... ok
+test_split_stratifies_across_physical_si (__main__.TestTrainValSplit.test_split_stratifies_across_physical_si) ... ok
+test_two_case_minimum (__main__.TestTrainValSplit.test_two_case_minimum) ... ok
+test_val_at_least_one (__main__.TestTrainValSplit.test_val_at_least_one) ... ok
+test_val_cases_count_respected (__main__.TestTrainValSplit.test_val_cases_count_respected) ... ok
+test_val_never_exceeds_half_minus (__main__.TestTrainValSplit.test_val_never_exceeds_half_minus) ... ok
+test_environment_caps_blas_threads_every_stage (__main__.TestWorkerEnvironment.test_environment_caps_blas_threads_every_stage)
+FlexiCT stages must cap BLAS threads (same A10 fix as nnunet). ... ok
+test_environment_carries_trainer_contract (__main__.TestWorkerEnvironment.test_environment_carries_trainer_contract) ... ok
+test_gpu_id_forwarded (__main__.TestWorkerEnvironment.test_gpu_id_forwarded) ... ok
+test_infer_environment_caps_blas_threads (__main__.TestWorkerEnvironment.test_infer_environment_caps_blas_threads)
+FlexiCT inference workers replace _worker_environment too. ... ok
+test_mirror_axes_forwarded (__main__.TestWorkerEnvironment.test_mirror_axes_forwarded) ... ok
+test_nnunet_roots_point_at_workspace (__main__.TestWorkerEnvironment.test_nnunet_roots_point_at_workspace) ... ok
+test_windows_forces_single_process_da_train_stage_only (__main__.TestWorkerEnvironment.test_windows_forces_single_process_da_train_stage_only)
+Windows TRAIN workers must pin nnUNet_n_proc_DA=0. ... ok
+
+======================================================================
+ERROR: test_worker_preflight_reports_flexict_weights_and_import (__main__.TestRemoteExecution.test_worker_preflight_reports_flexict_weights_and_import)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<REPO>/tests/test_flexict_integration.py", line 2664, in test_worker_preflight_reports_flexict_weights_and_import
+    remote_worker.preflight(models_dir)
+  File "<REPO>/tools/remote_worker.py", line 335, in preflight
+    import torch
+ModuleNotFoundError: No module named 'torch'
+
+======================================================================
+FAIL: test_materialized_pool_disambiguates_slug_collisions (__main__.TestActiveLearningReviewUI.test_materialized_pool_disambiguates_slug_collisions)
+F22: two Chinese case names collapse to the same safe_identifier
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<REPO>/tests/test_flexict_integration.py", line 1464, in test_materialized_pool_disambiguates_slug_collisions
+    self.assertEqual(
+AssertionError: '<TEMP_PATH> chars].mcs' != '<TEMP_PATH> chars].mcs'
+- <TEMP_PATH>
+? --------
++ <TEMP_PATH>
+
+
+======================================================================
+FAIL: test_materialized_pool_records_source_paths (__main__.TestActiveLearningReviewUI.test_materialized_pool_records_source_paths)
+_al_materialize_inputs records each case's original image path
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<REPO>/tests/test_flexict_integration.py", line 1407, in test_materialized_pool_records_source_paths
+    self.assertEqual(
+AssertionError: '<TEMP_PATH> chars]i.gz' != '<TEMP_PATH> chars]i.gz'
+- <TEMP_PATH>
+? --------
++ <TEMP_PATH>
+
+
+======================================================================
+FAIL: test_completed_inference (__main__.TestInferenceLifecycle.test_completed_inference)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<REPO>/tests/test_flexict_integration.py", line 863, in test_completed_inference
+    self.assertEqual(
+AssertionError: '<TEMP_PATH> chars]i.gz' != '<TEMP_PATH> chars]i.gz'
+- <TEMP_PATH>
+? --------
++ <TEMP_PATH>
+
+
+======================================================================
+FAIL: test_operation_infer_routes_to_run_inference (__main__.TestMainRouting.test_operation_infer_routes_to_run_inference)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<REPO>/tests/test_flexict_integration.py", line 1215, in test_operation_infer_routes_to_run_inference
+    self.assertEqual(infer_mock.call_args[0][0], job_dir)
+AssertionError: PosixPath('<TEMP_PATH> chars]job') != PosixPath('<TEMP_PATH> chars]job')
+
+----------------------------------------------------------------------
+Ran 105 tests in 1.966s
+
+FAILED (failures=4, errors=1)
+
+全部 3 例读取+计算完成，耗时 0.0s。
+
+==== 不确定度排序（按 integrated 从高到低）====
+rank  case                         integrated    uncertain_vol    mean_nz      max  cc_integrated       cc_vol
+--------------------------------------------------------------------------------------------------------------
+   1  case00                             56.0            112.0     0.5000   0.5000            0.0          0.0
+   2  case01                             56.0            112.0     0.5000   0.5000            0.0          0.0
+   3  case02                             56.0            112.0     0.5000   0.5000            0.0          0.0
+
+差异最大（不确定度最大且区域最大）的病例: case00
+  积分不确定度=56.0  不确定体积=112.0 mm^3  最大不确定度=0.5000
+  最大连通域: 体积=0.0 mm^3  均值=0.0000  积分=0.0
+  文件: <TEMP_PATH>
+
+排序报告已写入: <TEMP_PATH>
+[FlexiCT] Mask 'Liver' was edited while prediction was running (content changed at the same volume); creating a copy instead.
+[FlexiCT] Mask 'Liver' changed while prediction was running; creating a copy instead.
+[FlexiCT] FlexiCT status: Abandoned |
+[FlexiCT] FlexiCT status: Failed |

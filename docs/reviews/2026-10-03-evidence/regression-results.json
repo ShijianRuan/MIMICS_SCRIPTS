@@ -1,0 +1,179 @@
+{
+  "baseline_commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+  "environment": {
+    "platform": "macOS-26.2-arm64-arm-64bit",
+    "python": "3.12.14",
+    "packages": {
+      "numpy": "2.3.5",
+      "nibabel": "5.4.2",
+      "pydicom": "3.0.2",
+      "SimpleITK": "2.5.6",
+      "PySide6": "6.11.2",
+      "pytest": "9.1.1",
+      "torch": null,
+      "safetensors": null
+    },
+    "real_mimics": false,
+    "gpu_inference": false,
+    "package_version_note": "PySide6 version read from imported module; distribution metadata was unavailable."
+  },
+  "runs": [
+    {
+      "suite": "gui_smoke",
+      "tests": 38,
+      "seconds": 5.791,
+      "first_pass": true,
+      "reported_result": "passed",
+      "log": "gui_smoke.txt"
+    },
+    {
+      "suite": "nninteractive_task_integration",
+      "tests": 11,
+      "seconds": 5.827,
+      "first_pass": true,
+      "reported_result": "passed",
+      "log": "nninteractive_task_integration.txt"
+    },
+    {
+      "suite": "cross_workflow_transitions",
+      "tests": 2,
+      "seconds": 0.812,
+      "first_pass": true,
+      "reported_result": "passed",
+      "log": "cross_workflow_transitions.txt"
+    },
+    {
+      "suite": "mimics_nnint_deep",
+      "tests": 75,
+      "seconds": 0.117,
+      "first_pass": true,
+      "reported_result": "failed",
+      "log": "mimics_nnint_deep.txt",
+      "failures": 1
+    },
+    {
+      "suite": "nnunet_integration",
+      "tests": 100,
+      "seconds": 11.224,
+      "first_pass": true,
+      "reported_result": "passed",
+      "log": "nnunet_integration.txt"
+    },
+    {
+      "suite": "flexict_integration",
+      "tests": 105,
+      "seconds": 1.966,
+      "first_pass": true,
+      "reported_result": "failed",
+      "log": "flexict_integration.txt",
+      "failures": 4,
+      "errors": 1
+    },
+    {
+      "suite": "geometry_manifest_regressions",
+      "tests": 6,
+      "seconds": 0.032,
+      "first_pass": true,
+      "reported_result": "passed",
+      "log": "geometry_manifest_regressions.txt"
+    },
+    {
+      "suite": "ui_quality",
+      "tests": 4,
+      "seconds": 0.464,
+      "first_pass": true,
+      "reported_result": "passed",
+      "log": "ui_quality.txt"
+    },
+    {
+      "suite": "mimics_nnint_functional",
+      "tests": 91,
+      "seconds": 0.338,
+      "first_pass": true,
+      "reported_result": "passed",
+      "log": "mimics_nnint_functional.txt",
+      "skipped": 1
+    },
+    {
+      "suite": "build-dataset",
+      "tests": 8,
+      "seconds": 0.798,
+      "first_pass": true,
+      "reported_result": "passed",
+      "log": "build-dataset.txt"
+    },
+    {
+      "suite": "extended",
+      "tests": 205,
+      "seconds": 4.987,
+      "first_pass": true,
+      "reported_result": "failed",
+      "log": "extended.txt",
+      "errors": 3
+    },
+    {
+      "suite": "path-alias-rerun-flexict",
+      "tests": 4,
+      "seconds": 0.248,
+      "first_pass": false,
+      "reported_result": "passed",
+      "log": "path-alias-rerun-flexict.txt"
+    },
+    {
+      "suite": "remote_training",
+      "tests": 104,
+      "seconds": 32.822,
+      "first_pass": true,
+      "reported_result": "passed",
+      "log": "remote_training.txt"
+    },
+    {
+      "suite": "path-alias-rerun-nnint",
+      "tests": 1,
+      "seconds": 0.003,
+      "first_pass": false,
+      "reported_result": "passed",
+      "log": "path-alias-rerun-nnint.txt"
+    },
+    {
+      "suite": "mri-path-rerun",
+      "tests": 2,
+      "seconds": 0.911,
+      "first_pass": false,
+      "reported_result": "failed",
+      "log": "mri-path-rerun.txt",
+      "errors": 2
+    },
+    {
+      "suite": "targeted",
+      "tests": 93,
+      "seconds": 4.926,
+      "first_pass": true,
+      "reported_result": "passed",
+      "log": "targeted.txt"
+    }
+  ],
+  "first_pass_totals": {
+    "tests": 842,
+    "failures": 5,
+    "errors": 4,
+    "skipped": 1
+  },
+  "triage": {
+    "path_alias_failures": {
+      "count": 5,
+      "rerun_passed": 5,
+      "method": "TMPDIR=/private/tmp; product code unchanged"
+    },
+    "unavailable_torch": {
+      "count": 3,
+      "includes": "2 MRI tests after correcting PYTHONPATH, 1 FlexiCT preflight"
+    },
+    "confirmed_product_failure": {
+      "count": 1,
+      "id": "F36",
+      "test": "TestSystemHealthPanel.test_offscreen_panel_renders"
+    },
+    "note": "Reruns are not additional unique tests. First-pass OK does not certify Windows/Mimics or model quality."
+  }
+}

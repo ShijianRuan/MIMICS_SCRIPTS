@@ -1,0 +1,195 @@
+[
+  {
+    "probe": "F28_absent_then_created",
+    "initially_absent": true,
+    "warning": "",
+    "final_bytes": "old worker result"
+  },
+  {
+    "probe": "F28_save_between_check_and_replace",
+    "warning": "",
+    "final_bytes": "old worker result"
+  },
+  {
+    "probe": "R30_staging_receipt",
+    "final_exists": true,
+    "receipt_target_exists": false,
+    "undo_code": 1
+  },
+  {
+    "probe": "R31_undo_checks_after_delete",
+    "before": [
+      false,
+      ""
+    ],
+    "after": [
+      true,
+      "imported mask(s) were deleted or changed since the import"
+    ],
+    "deleted": [
+      "liver"
+    ],
+    "remaining": 0
+  },
+  {
+    "probe": "R31_deletion_failure_swallowed",
+    "returned": [
+      [],
+      []
+    ],
+    "remaining": 1,
+    "exception_propagated": false
+  },
+  {
+    "probe": "R31_failed_delete_consumes_receipt",
+    "undo_code": 0,
+    "receipt_exists": false,
+    "mask_remaining": 1
+  },
+  {
+    "probe": "F19_v1_still_deletes_same_name",
+    "deleted_objects": [
+      "imported",
+      "manual-other-image"
+    ]
+  },
+  {
+    "probe": "F19_documented_image_contract",
+    "error": "AttributeError: 'types.SimpleNamespace' object has no attribute 'masks'",
+    "boundary": "API-shaped stub, not actual Mimics"
+  },
+  {
+    "probe": "R32_export_name_collision",
+    "names": [
+      "liver manual",
+      "liver_manual"
+    ],
+    "entries": [
+      {
+        "original_name": "liver manual",
+        "safe_name": "liver_manual",
+        "u8_filename": "liver_manual.u8"
+      },
+      {
+        "original_name": "liver_manual",
+        "safe_name": "liver_manual",
+        "u8_filename": "liver_manual.u8"
+      }
+    ],
+    "actual_buffer_files": [
+      "liver_manual.u8"
+    ],
+    "first_mask_content_preserved": false
+  },
+  {
+    "probe": "R33_export_multiple_images_one_grid",
+    "selected_images": [
+      "imageA",
+      "imageB"
+    ],
+    "manifest_grid_count": 1,
+    "manifest_shape": [
+      2,
+      2,
+      2
+    ],
+    "rejected": false
+  },
+  {
+    "probe": "F20_wrong_patient_before_launch",
+    "requested_case": "patientA",
+    "captured_project": "patientB.mcs",
+    "request_state": "converting",
+    "finish_guard_error": ""
+  },
+  {
+    "probe": "R34_actual_refresh_click",
+    "signal_errors": [
+      "object of type 'bool' has no len()"
+    ]
+  },
+  {
+    "probe": "R35_same_second_import_ids",
+    "worker_count": 2,
+    "selection_paths_distinct": 1,
+    "last_source": "patientB"
+  },
+  {
+    "probe": "F16_non_ascii_frozen_split",
+    "previous_case_count": 6,
+    "new_case_count": 8,
+    "split_seed_unchanged": 2026,
+    "previous_validation_names": [
+      "病例4"
+    ],
+    "frozen_argument": null,
+    "previous_val_in_new_train": [
+      "4"
+    ]
+  },
+  {
+    "probe": "F13_export_stream_no_gui_pump",
+    "bytes_written": 34603008,
+    "progress_callback_supplied": false
+  },
+  {
+    "probe": "F29_same_physical_target_different_orientation",
+    "results": {
+      "RAS": {
+        "physical_point": [
+          1.0,
+          2.0,
+          8.0
+        ],
+        "pipeline": 0.8,
+        "standalone": 0.8
+      },
+      "flip_z": {
+        "physical_point": [
+          1,
+          2,
+          8
+        ],
+        "pipeline": 0.1,
+        "standalone": 0.1
+      },
+      "cycle_xyz": {
+        "physical_point": [
+          1,
+          2,
+          8
+        ],
+        "pipeline": 0.1,
+        "standalone": 0.1
+      }
+    }
+  },
+  {
+    "probe": "F16_flexict_final_split_ignores_patient",
+    "train": [
+      "patientA_phase1"
+    ],
+    "val": [
+      "patientA_phase2"
+    ],
+    "same_patient_on_both_sides": true
+  },
+  {
+    "probe": "F01_mixed_series",
+    "status": "ok",
+    "source_image_shape": [
+      4,
+      4,
+      6
+    ]
+  },
+  {
+    "probe": "F01_multi_frame",
+    "status": "ok",
+    "source_image_shape": [
+      4,
+      4,
+      1
+    ]
+  }
+]

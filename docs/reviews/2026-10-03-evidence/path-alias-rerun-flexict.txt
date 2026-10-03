@@ -1,0 +1,11 @@
+test_materialized_pool_disambiguates_slug_collisions (__main__.TestActiveLearningReviewUI.test_materialized_pool_disambiguates_slug_collisions)
+F22: two Chinese case names collapse to the same safe_identifier ... ok
+test_materialized_pool_records_source_paths (__main__.TestActiveLearningReviewUI.test_materialized_pool_records_source_paths)
+_al_materialize_inputs records each case's original image path ... ok
+test_completed_inference (__main__.TestInferenceLifecycle.test_completed_inference) ... ok
+test_operation_infer_routes_to_run_inference (__main__.TestMainRouting.test_operation_infer_routes_to_run_inference) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 0.248s
+
+OK
