@@ -271,8 +271,14 @@ class BatchPredictionWindow:
             self._dispatch_deadline = 0.0
             self.start.setEnabled(bool(self.models))
             self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
+            # R62-8: the timeout only means the scan was slow — some jobs
+            # may already be dispatched and will keep running. Retrying
+            # blindly duplicates them; check the status window first.
             self.status_label.setText(
-                "病例文件夹扫描超时。源数据盘可能离线；请重新连接磁盘后重试。"
+                "病例文件夹扫描超时。扫描仍在后台进行，已启动的预测任务"
+                "不会被取消。请先在「nnU-Net Show Status & Models」窗口"
+                "确认哪些病例已启动；仅对未启动的病例重试，避免同一病例"
+                "跑两个任务。"
             )
         try:
             summary = self._dispatch_results.get_nowait()

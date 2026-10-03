@@ -258,10 +258,17 @@
   TestBatchPredictionWindow.test_unusable_models_stay_visible_with_reason`
   （红→绿验证过；红路径为修复前缺失模型被静默过滤、最后列显示
   "local"）。gui_smoke 51/51 + nnunet 集成 104/104 通过。
-- [ ] **R62-8【P3】批量派发超时导致重复提交 + 失败清单不可行动**
-  （`nnunet_batch_predict_ui.py:206-212/:284-288`）：超时后用户重试
-  → 同 case 双任务；失败清单只有文件名。验收：超时提示防重复提交
-  指引；失败清单带原因。
+- [x] **R62-8【P3】批量派发超时导致重复提交 + 失败清单不可行动**
+  （`nnunet_batch_predict_ui.py`）：超时后用户重试 → 同 case 双任务；
+  失败清单只有文件名。
+  **已解决（2026-10-04）**：超时提示改为明确告知"扫描仍在后台进行、
+  已启动的任务不会被取消"，引导先在状态窗口确认已启动病例、仅对
+  未启动病例重试，避免同一病例双任务。失败清单复核：`create_job`
+  异常以 `case_id: 原因` 逐例列出（已有实现，非仅文件名），无需
+  改动。测试：
+  `test_gui_smoke.py
+  TestBatchPredictionWindow.test_dispatch_timeout_guides_against_double_submit`
+  （红→绿验证过；红路径为旧提示只说"重试"、无防重复指引）。
 - [ ] **R62-9【P3】状态查看器模型表缺"来源"列**（
   `nnunet_status_viewer.py:139-141`、`flexict_status_viewer.py:111-113`）：
   远程训练下载的模型与本地模型无从区分。验收：模型表加来源列

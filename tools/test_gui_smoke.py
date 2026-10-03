@@ -726,6 +726,29 @@ class TestBatchPredictionWindow(unittest.TestCase):
             self.assertFalse(window.start.isEnabled())
             self.assertIn("不可用", window.status_label.text())
 
+    def test_dispatch_timeout_guides_against_double_submit(self):
+        """R62-8: the timeout message must warn that dispatched jobs keep
+        running, so a blind retry doesn't start duplicate predictions."""
+        _AppFixture.app()
+        import nnunet_batch_predict_ui as ui
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            window = ui.BatchPredictionWindow(
+                {"workspace": str(tmp / "workspace")}, QT
+            )
+            self.addCleanup(window.window.close)
+            window._apply_models(
+                [self._usable_model_row(self._model_dir(tmp))], ""
+            )
+            window._dispatch_deadline = time.time() - 1.0
+            window._poll_background_results()
+            text = window.status_label.text()
+            self.assertIn("不会被取消", text)
+            self.assertIn("两个任务", text)
+            self.assertEqual(0.0, window._dispatch_deadline)
+            self.assertTrue(window.start.isEnabled())
+
     def test_missing_folders_are_rejected_before_dispatch(self):
         _AppFixture.app()
         import nnunet_batch_predict_ui as ui
