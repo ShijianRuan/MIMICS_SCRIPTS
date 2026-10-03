@@ -100,7 +100,7 @@ one file, so changing the layout no longer means editing five places.
 | `profiles.<id>.description` | `""` | Free-form note shown in tooling. |
 | `profiles.<id>.image_candidates` | ts-like: `ct.nii.gz`, `mri.nii.gz`, ... | Preferred image file names, checked first, in order. Empty for the `generic` profile. |
 | `profiles.<id>.fallback_image_suffixes` | `.nii.gz`, `.nrrd.gz`, `.nii`, `.mha`, `.mhd`, `.nrrd` | Suffixes accepted by the capped fallback scan when no preferred name matches. |
-| `profiles.<id>.mask_dirs` | `["segmentations"]` | Sub-folders that hold label masks. Empty for `generic` (masks are only found next to the image). |
+| `profiles.<id>.mask_dirs` | `["segmentations"]` | Sub-folders that hold label masks, followed by both single-case discovery and batch `prepare-import` discovery. Empty for `generic` (masks are only found via explicit paths in the drop window). |
 | `profiles.<id>.mask_suffixes` | `.seg.nii.gz`, `.seg.nii`, ... | Suffixes recognized as masks. |
 | `profiles.<id>.dicom_dirs` | `["dicom"]` | Sub-folders treated as DICOM series. |
 | `profiles.<id>.exclude_dirs` | `["mcs_output", "segmentations"]` | Child folders ignored when scanning a dataset root. Empty for `generic`. |

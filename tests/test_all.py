@@ -11168,6 +11168,124 @@ class TestImportDropWindow(unittest.TestCase):
         # No batch CLI invocation for a multi-selection.
         self.assertNotIn("mimics_batch_cli.py", [os.path.basename(c[1]) for c in calls])
 
+    def test_expand_mask_paths_files_folders_and_invalid(self):
+        import import_drop_window as dw
+        # Explicit mask paths: a single file, a folder (expanded one level),
+        # Chinese/space names, duplicate suppression, and fail-closed invalids.
+        case = self._make_case("s0001")
+        seg_dir = os.path.join(self.tmp, "my masks 肝脏")
+        os.makedirs(seg_dir)
+        liver = os.path.join(seg_dir, "肝脏肿瘤.seg.nii.gz")
+        open(liver, "w").close()
+        open(os.path.join(seg_dir, "readme.txt"), "w").close()  # non-medical: ignored
+        loose = os.path.join(self.tmp, "spleen.nii.gz")
+        open(loose, "w").close()
+
+        masks, invalid = dw.expand_mask_paths([liver, seg_dir, loose, liver])
+        self.assertEqual([], invalid)
+        names = [m["name"] for m in masks]
+        self.assertIn("肝脏肿瘤", names)
+        self.assertIn("spleen", names)
+        # The folder's non-medical file never becomes a mask, and a duplicate
+        # (same file listed directly AND via its folder) appears once.
+        self.assertNotIn("readme", names)
+        self.assertEqual(len(names), len(set(names)))
+
+        # Failure paths: nonexistent, non-medical file, empty folder.
+        empty_dir = os.path.join(self.tmp, "empty")
+        os.makedirs(empty_dir)
+        not_medical = os.path.join(self.tmp, "notes.txt")
+        open(not_medical, "w").close()
+        masks, invalid = dw.expand_mask_paths([
+            os.path.join(self.tmp, "nope", "ghost.nii.gz"), not_medical, empty_dir,
+        ])
+        self.assertEqual([], masks)
+        self.assertEqual(3, len(invalid))
+
+    def test_submit_single_explicit_mask_paths_override_discovery(self):
+        import import_drop_window as dw
+        # A case whose mask lives OUTSIDE segmentations/ plus an explicit
+        # path: the explicit list replaces discovery (F24), name=stem (D16).
+        case = self._make_case("s0001")
+        masks_elsewhere = os.path.join(self.tmp, "model_outputs")
+        os.makedirs(masks_elsewhere)
+        open(os.path.join(masks_elsewhere, "liver.seg.nii.gz"), "w").close()
+        # segmentations/ has a DIFFERENT mask that must NOT survive: the
+        # user's explicit list is the final list.
+        seg_dir = os.path.join(case, "segmentations")
+        os.makedirs(seg_dir)
+        open(os.path.join(seg_dir, "kidney.seg.nii.gz"), "w").close()
+
+        selection = {
+            "kind": "single",
+            "source_path": case,
+            "output_path": os.path.join(self.tmp, "mcs_output"),
+            "mask_selection": "all",
+            "mask_paths": [masks_elsewhere],
+        }
+        calls = []
+
+        class FakeProc:
+            pid = 4245
+
+        def fake_popen(command, **_kwargs):
+            calls.append(command)
+            return FakeProc()
+
+        with mock.patch.object(dw.subprocess, "Popen", side_effect=fake_popen), \
+                mock.patch.object(dw, "_ROOT", self.tmp):
+            launched = dw.submit_import(selection, {})
+        self.assertEqual(1, len(calls))
+        self.assertIn("submitted", launched[0][1])
+        selection_arg = calls[0][calls[0].index("--selection-json") + 1]
+        with open(selection_arg, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        masks = payload["case_info"]["masks"]
+        self.assertEqual(
+            [("liver", os.path.join(masks_elsewhere, "liver.seg.nii.gz"))],
+            [(m["name"], m["path"]) for m in masks],
+        )
+
+    def test_submit_single_invalid_mask_path_fails_closed(self):
+        import import_drop_window as dw
+        # A typo'd explicit mask path must NOT launch a maskless import —
+        # the case is reported invalid and nothing runs.
+        case = self._make_case("s0001")
+        selection = {
+            "kind": "single",
+            "source_path": case,
+            "output_path": os.path.join(self.tmp, "mcs_output"),
+            "mask_selection": "all",
+            "mask_paths": [os.path.join(self.tmp, "ghost", "liver.nii.gz")],
+        }
+        calls = []
+
+        class FakeProc:
+            pid = 4246
+
+        def fake_popen(command, **_kwargs):
+            calls.append(command)
+            return FakeProc()
+
+        with mock.patch.object(dw.subprocess, "Popen", side_effect=fake_popen), \
+                mock.patch.object(dw, "_ROOT", self.tmp):
+            launched = dw.submit_import(selection, {})
+        self.assertEqual(0, len(calls))
+        self.assertEqual(1, len(launched))
+        self.assertIn("无效 Mask 路径", launched[0][1])
+
+    def test_drop_window_exposes_mask_escape_hatch_texts(self):
+        # Source-string guard: the suppression/no-mask warnings and the
+        # explicit-path expander are load-bearing UX; silent deletion of any
+        # of them must fail here (mirrors test_browse_source_buttons style).
+        import import_drop_window as dw
+        source = inspect.getsource(dw)
+        self.assertIn("无法自动确定 Mask", source)
+        self.assertIn("未发现 Mask", source)
+        self.assertIn("02_Import_Masks", source)
+        self.assertIn("def expand_mask_paths", source)
+        self.assertIn("无效 Mask 路径", source)
+
     def test_collect_recent_drops_summarizes_status_files(self):
         import import_drop_window as dw
         status_dir = os.path.join(self.tmp, "drop_import")

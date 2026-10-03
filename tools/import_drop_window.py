@@ -147,7 +147,11 @@ def expand_mask_paths(values):
                     candidate = os.path.join(path, name)
                     if not io_ui._medical_file(candidate):
                         continue
-                    seen.add(os.path.normcase(candidate))
+                    candidate_key = os.path.normcase(candidate)
+                    if candidate_key in seen:
+                        found += 1
+                        continue
+                    seen.add(candidate_key)
                     masks.append({"name": io_ui._image_stem(name), "path": candidate})
                     found += 1
             except OSError:
