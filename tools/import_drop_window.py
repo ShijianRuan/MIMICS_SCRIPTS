@@ -115,6 +115,53 @@ def classify_payload(paths):
     return "multi_single", None, list(dict.fromkeys(paths))
 
 
+def expand_mask_paths(values):
+    """Turn user-supplied mask paths (files or folders) into {name, path}.
+
+    Used when automatic mask discovery found nothing (mask files live outside
+    segmentations/, or sibling volumes suppressed discovery) and the user
+    points at them explicitly. The explicit list REPLACES discovery — the
+    user's list is the final list, no merging (F24: explicit over inferred).
+
+    Files keep name=stem (D16: stem = Mimics Mask name = export label name).
+    Folders expand one level, mirroring the segmentations/ scan. Anything
+    unusable (nonexistent path, non-medical file, empty folder) is returned
+    in ``invalid`` so the caller can fail that case closed instead of
+    importing it silently maskless. Returns (masks, invalid).
+    """
+    masks = []
+    invalid = []
+    seen = set()
+    for value in values or []:
+        raw = str(value).strip().strip('"').strip("'")
+        if not raw:
+            continue
+        path = os.path.abspath(os.path.expandvars(os.path.expanduser(raw)))
+        key = os.path.normcase(path)
+        if key in seen:
+            continue
+        if os.path.isdir(path):
+            found = 0
+            try:
+                for name in sorted(os.listdir(path)):
+                    candidate = os.path.join(path, name)
+                    if not io_ui._medical_file(candidate):
+                        continue
+                    seen.add(os.path.normcase(candidate))
+                    masks.append({"name": io_ui._image_stem(name), "path": candidate})
+                    found += 1
+            except OSError:
+                pass
+            if not found:
+                invalid.append(path)
+        elif os.path.isfile(path) and io_ui._medical_file(path):
+            seen.add(key)
+            masks.append({"name": io_ui._image_stem(os.path.basename(path)), "path": path})
+        else:
+            invalid.append(path)
+    return masks, invalid
+
+
 def _child_case_dirs(root, limit=3):
     """Return up to `limit` child directories that look like case folders."""
     from dataset_profiles import load_profile
@@ -307,11 +354,23 @@ def submit_import(selection, context):
             else list(selection.get("paths") or [])
         )
         launched = []
+        explicit_mask_paths = [p for p in (selection.get("mask_paths") or []) if str(p).strip()]
         for index, source in enumerate(sources):
             case_info = io_ui.discover_single_source(source)
             if not case_info:
                 launched.append((os.path.basename(source.rstrip("\\/")) or source, "no supported image"))
                 continue
+            if explicit_mask_paths:
+                # The user's explicit list replaces automatic discovery. An
+                # unusable entry fails this case closed rather than importing
+                # it silently maskless (F24: no silent drops).
+                masks, invalid = expand_mask_paths(explicit_mask_paths)
+                if invalid:
+                    shown = "; ".join(invalid[:3])
+                    launched.append((case_info["case_id"], "无效 Mask 路径：{0}".format(shown)))
+                    continue
+                if masks:
+                    case_info["masks"] = masks
             case_id = case_info["case_id"]
             selection_path = os.path.join(status_dir, "{0}_{1}_selection.json".format(run_id, index))
             status_path = os.path.join(status_dir, "{0}_{1}_status.json".format(run_id, index))
@@ -485,6 +544,24 @@ def run(context=None, preview_path=""):
     output_row.addWidget(browse)
     root.addLayout(output_row)
 
+    # -- On-demand explicit Mask paths --------------------------------------
+    # Progressive disclosure: hidden while automatic mask discovery works.
+    # It appears only in the "masks were lost" moment (none found, or sibling
+    # volumes suppressed discovery) and IS the remedy for that moment.
+    # Never persisted: a previous dataset's mask path pinned onto the next
+    # dataset is exactly the silent half-data-loss this row prevents.
+    mask_path_widget = QtWidgets.QWidget()
+    mask_path_layout = QtWidgets.QHBoxLayout(mask_path_widget)
+    mask_path_layout.setContentsMargins(0, 0, 0, 0)
+    mask_path_edit = QtWidgets.QLineEdit()
+    mask_path_edit.setPlaceholderText("输入或粘贴分割文件路径，多个用 ; 分隔")
+    mask_path_browse = QtWidgets.QPushButton("浏览...")
+    mask_path_layout.addWidget(QtWidgets.QLabel("Mask 在别处？"))
+    mask_path_layout.addWidget(mask_path_edit, 1)
+    mask_path_layout.addWidget(mask_path_browse)
+    mask_path_widget.hide()
+    root.addWidget(mask_path_widget)
+
     mask_row = QtWidgets.QHBoxLayout()
     mask_all = QtWidgets.QRadioButton("全部 Mask")
     mask_none = QtWidgets.QRadioButton("仅图像")
@@ -519,6 +596,7 @@ def run(context=None, preview_path=""):
         "paths": [],
         "kind": None,
         "source": None,
+        "auto_masks_found": False,
         "last_activity": time.time(),
         "submitted": False,
     }
@@ -534,6 +612,9 @@ def run(context=None, preview_path=""):
 
     def analyze(paths):
         paths = [p for p in paths if p]
+        mask_path_edit.clear()
+        mask_path_widget.hide()
+        state["auto_masks_found"] = False
         if not paths:
             state["paths"] = []
             state["kind"] = None
@@ -552,7 +633,7 @@ def run(context=None, preview_path=""):
             warnings = result.get("warnings") or [] if result else []
             if warnings:
                 summary += "\n" + "\n".join("⚠ " + w for w in warnings[:5])
-            dropzone.setText("Dataset: {0}".format(source))
+            dropzone.setText("数据集：{0}".format(source))
             set_recognition(summary, bool(warnings))
         elif kind == "multi_single":
             # F10: a multi-selection is the user's exact case list — probe
@@ -560,10 +641,14 @@ def run(context=None, preview_path=""):
             # and stays submittable when at least one path is valid.
             results = []
             valid = 0
+            all_masks_empty = True
             for path in paths:
                 case_info = io_ui.discover_single_source(path)
                 if case_info:
                     valid += 1
+                    if case_info.get("masks"):
+                        all_masks_empty = False
+                        state["auto_masks_found"] = True
                     results.append("{0} ✓".format(case_info["case_id"]))
                 else:
                     results.append("{0} ✗ (无可用图像)".format(
@@ -571,7 +656,12 @@ def run(context=None, preview_path=""):
             summary = "多选 {0} 例：{1}".format(len(paths), "、".join(results[:6]))
             if len(results) > 6:
                 summary += " …（共 {0} 例）".format(len(results))
-            set_recognition(summary, valid < len(paths))
+            if valid and all_masks_empty:
+                summary += (
+                    "\n⚠ 未发现 Mask（自动发现只查找病例文件夹下的 segmentations/ 子目录）；"
+                    "如需导入，请在下方“Mask 在别处”指定路径。"
+                )
+            set_recognition(summary, valid < len(paths) or (valid > 0 and all_masks_empty))
             dropzone.setText("多选：{0} 个路径".format(len(paths)))
             if not valid:
                 submit.setEnabled(False)
@@ -580,18 +670,47 @@ def run(context=None, preview_path=""):
             display = paths[0]
             case_info = io_ui.discover_single_source(paths[0]) if kind == "single" else None
             if case_info:
-                mask_names = ", ".join(m["name"] for m in case_info["masks"][:5])
-                summary = "Case '{0}' - image found{1}".format(
-                    case_info["case_id"],
-                    "; masks: {0}".format(mask_names) if mask_names else "",
-                )
-                set_recognition(summary, False)
+                state["auto_masks_found"] = bool(case_info.get("masks"))
+                mask_names = "、".join(m["name"] for m in case_info["masks"][:5])
+                if case_info.get("masks_suppressed"):
+                    # Sibling volumes made attribution ambiguous, so automatic
+                    # mask discovery was suppressed — say so and offer the
+                    # explicit path row as the way out.
+                    summary = (
+                        "病例“{0}”：已识别图像\n"
+                        "⚠ 同一文件夹中有多个图像文件，无法自动确定 Mask；"
+                        "如需导入，请在下方“Mask 在别处”指定路径"
+                        "（已有工程补 Mask 请用 01_Data → 02_Import_Masks）。".format(
+                            case_info["case_id"]
+                        )
+                    )
+                    set_recognition(summary, True)
+                elif mask_names:
+                    summary = "病例“{0}”：已识别图像；Mask：{1}".format(
+                        case_info["case_id"], mask_names
+                    )
+                    set_recognition(summary, False)
+                else:
+                    summary = (
+                        "病例“{0}”：已识别图像\n"
+                        "⚠ 未发现 Mask（自动发现只查找病例文件夹下的 segmentations/ 子目录）；"
+                        "如需导入，请在下方“Mask 在别处”指定路径。".format(
+                            case_info["case_id"]
+                        )
+                    )
+                    set_recognition(summary, True)
             else:
                 set_recognition("拖入项中未识别到支持的图像。", True)
                 submit.setEnabled(False)
                 dropzone.setText(display)
                 return
             dropzone.setText(display)
+        # Progressive disclosure: the explicit mask path row exists only for
+        # single/multi_single drops whose automatic mask discovery came up
+        # empty (nothing found, or suppression). Batch drops read masks from
+        # each case's segmentations/ and need no escape hatch here.
+        if kind in ("single", "multi_single") and not state.get("auto_masks_found"):
+            mask_path_widget.show()
         # R61-7: a new drop means a new dataset, so the computed default
         # follows it — unless the user typed/picked a folder themselves this
         # session (that choice stays). The pre-submit autofill from a
@@ -685,6 +804,26 @@ def run(context=None, preview_path=""):
 
     browse.clicked.connect(browse_output)
 
+    def browse_mask_paths():
+        # Same async isolation as the other pickers: a native dialog on a
+        # slow network share must never freeze this window or Mimics.
+        def _chosen(values):
+            incoming = [str(v) for v in (values if isinstance(values, (list, tuple)) else [values]) if str(v).strip()]
+            if incoming:
+                merged = [p for p in mask_path_edit.text().split(";") if p.strip()]
+                mask_path_edit.setText(";".join(merged + incoming))
+
+        choose_open_files_async(
+            QtCore, QtWidgets, window, "选择分割文件",
+            str(Path.home()),
+            "Segmentation files (*.nii *.nii.gz *.mha *.mhd *.nrrd *.nrrd.gz *.seg.nii *.seg.nii.gz);;"
+            "All files (*)",
+            _chosen,
+            button=mask_path_browse,
+        )
+
+    mask_path_browse.clicked.connect(browse_mask_paths)
+
     def browse_source_files():
         # Multi-select feeds the same add_paths() pipeline as a multi-drop,
         # so a hand-picked case list behaves identically to a dragged one.
@@ -729,11 +868,21 @@ def run(context=None, preview_path=""):
         source = state["source"] or (state["paths"][0] if state["paths"] else "")
         output = os.path.abspath(os.path.expanduser(output_edit.text().strip()))
         mask_selection = "none" if mask_none.isChecked() else "all"
+        mask_paths = []
+        if kind in ("single", "multi_single") and mask_path_widget.isVisible():
+            # A ; -separated field: one separator, never valid inside a path
+            # in practice, and paste joins multi-line clipboard text with it.
+            mask_paths = [
+                part.strip().strip('"')
+                for part in mask_path_edit.text().split(";")
+                if part.strip().strip('"')
+            ]
         selection = {
             "kind": kind,
             "source_path": source,
             "output_path": output,
             "mask_selection": mask_selection,
+            "mask_paths": mask_paths,
             "paths": list(state["paths"]) if kind == "multi_single" else [],
         }
         try:
