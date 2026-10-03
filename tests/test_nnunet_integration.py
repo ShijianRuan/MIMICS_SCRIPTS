@@ -208,7 +208,7 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(request["missing_label_policy"], "require_all")
 
     def test_duplicate_label_id_fails(self):
-        with self.assertRaisesRegex(ValueError, "Duplicate label ID"):
+        with self.assertRaisesRegex(ValueError, "标签 ID 重复"):
             common.normalize_labels(
                 [
                     {"name": "A", "id": 1},
@@ -217,7 +217,7 @@ class ContractTests(unittest.TestCase):
             )
 
     def test_label_ids_must_be_consecutive(self):
-        with self.assertRaisesRegex(ValueError, "consecutive"):
+        with self.assertRaisesRegex(ValueError, "连续编号"):
             common.normalize_labels(
                 [
                     {"name": "A", "id": 1},
@@ -235,7 +235,7 @@ class ContractTests(unittest.TestCase):
             )
 
     def test_2d_patch_has_two_dimensions(self):
-        with self.assertRaisesRegex(ValueError, "2 positive values"):
+        with self.assertRaisesRegex(ValueError, "2 个正数"):
             common.normalize_request(
                 {
                     "operation": "train",
@@ -248,7 +248,7 @@ class ContractTests(unittest.TestCase):
             )
 
     def test_2d_manual_spacing_is_rejected(self):
-        with self.assertRaisesRegex(ValueError, "not supported"):
+        with self.assertRaisesRegex(ValueError, "不支持"):
             common.normalize_request(
                 {
                     "operation": "train",
@@ -306,7 +306,7 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(request["trainer"], "nnUNetTrainer")
 
     def test_numeric_fold_requires_validation_data(self):
-        with self.assertRaisesRegex(ValueError, "greater than zero"):
+        with self.assertRaisesRegex(ValueError, "大于 0"):
             common.normalize_request(
                 {
                     "operation": "train",
@@ -319,7 +319,7 @@ class ContractTests(unittest.TestCase):
             )
 
     def test_local_gpu_ids_match_gpu_count(self):
-        with self.assertRaisesRegex(ValueError, "GPU count"):
+        with self.assertRaisesRegex(ValueError, "GPU 数量"):
             common.normalize_request(
                 {
                     "operation": "train",

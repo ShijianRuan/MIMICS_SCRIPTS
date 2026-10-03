@@ -311,6 +311,7 @@ class ModelManagerWindow:
         self.workspaces = dict(context.get("workspaces") or {}) or default_workspaces()
         self.rows: list[dict] = []
         self._loading = True
+        self._importing = False
         self._results: Queue = Queue()
 
         self.window = QtWidgets.QDialog()
@@ -388,20 +389,46 @@ class ModelManagerWindow:
 
         def load():
             try:
-                self._results.put((collect_rows(workspaces), ""))
+                self._results.put(("load", collect_rows(workspaces), ""))
             except Exception as exc:
-                self._results.put(([], str(exc)))
+                self._results.put(("load", [], str(exc)))
 
         worker = threading.Thread(target=load, name="model-manager-discovery")
         worker.daemon = True
         worker.start()
 
     def _poll(self):
+        if self._importing:
+            try:
+                kind, payload, error = self._results.get_nowait()
+            except Empty:
+                return
+            if kind != "import":
+                # A concurrent _reload result; keep it for the load branch.
+                self._results.put((kind, payload, error))
+                return
+            self._importing = False
+            self.import_button.setEnabled(True)
+            if error:
+                self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
+                self.status_label.setText("导入失败：{0}".format(error))
+            else:
+                self.QtWidgets.QMessageBox.information(
+                    self.window,
+                    "导入完成",
+                    "模型包已导入并注册，现在是其任务的默认模型。",
+                )
+            self._reload()
+            return
         if not self._loading:
             return
         try:
-            rows, error = self._results.get_nowait()
+            kind, rows, error = self._results.get_nowait()
         except Empty:
+            return
+        if kind != "load":
+            # Import results are handled above; a stray entry stays queued.
+            self._results.put((kind, rows, error))
             return
         self._loading = False
         self.rows = rows
@@ -476,19 +503,25 @@ class ModelManagerWindow:
         )
         if not path:
             return
-        try:
-            import_bundle(Path(path), self.workspaces, set_current=True)
-        except Exception as exc:
-            QtWidgets.QMessageBox.warning(
-                self.window, "导入失败", str(exc)
-            )
-            return
-        QtWidgets.QMessageBox.information(
-            self.window,
-            "导入完成",
-            "模型包已导入并注册，现在是其任务的默认模型。",
-        )
-        self._reload()
+        # A bundle is a multi-GB zip: extracting + checksumming on the GUI
+        # thread would freeze the whole window for tens of seconds. Same
+        # thread+queue pattern as _reload; the button stays disabled until
+        # the import finishes so double-clicks cannot start two imports.
+        self.import_button.setEnabled(False)
+        self.status_label.setStyleSheet("")
+        self.status_label.setText("正在导入模型包（较大的包可能需要几十秒）...")
+
+        def worker():
+            try:
+                import_bundle(Path(path), self.workspaces, set_current=True)
+                self._results.put(("import", None, ""))
+            except Exception as exc:
+                self._results.put(("import", None, str(exc)))
+
+        thread = threading.Thread(target=worker, name="model-manager-import")
+        thread.daemon = True
+        thread.start()
+        self._importing = True
 
     def _use_clicked(self):
         row = self._selected_row()

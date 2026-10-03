@@ -11286,6 +11286,48 @@ class TestImportDropWindow(unittest.TestCase):
         self.assertIn("def expand_mask_paths", source)
         self.assertIn("无效 Mask 路径", source)
 
+    def test_submit_multi_single_ignores_explicit_mask_paths(self):
+        import import_drop_window as dw
+        # One pasted mask list cannot serve several cases — it would be
+        # handed to EVERY case and wrong data would enter every project.
+        # Multi-case imports take masks from each case's segmentations/;
+        # any stray mask_paths in the selection must be ignored.
+        case_a = self._make_case("s0001")
+        case_b = self._make_case("s0002")
+        stray_mask = os.path.join(self.tmp, "stray", "liver.nii.gz")
+        os.makedirs(os.path.dirname(stray_mask))
+        open(stray_mask, "w").close()
+        selection = {
+            "kind": "multi_single",
+            "source_path": case_a,
+            "paths": [case_a, case_b],
+            "output_path": os.path.join(self.tmp, "mcs_output"),
+            "mask_selection": "all",
+            "mask_paths": [stray_mask],
+        }
+        calls = []
+
+        class FakeProc:
+            pid = 4247
+
+        def fake_popen(command, **_kwargs):
+            calls.append(command)
+            return FakeProc()
+
+        with mock.patch.object(dw.subprocess, "Popen", side_effect=fake_popen), \
+                mock.patch.object(dw, "_ROOT", self.tmp):
+            launched = dw.submit_import(selection, {})
+        self.assertEqual(2, len(calls))
+        for command in calls:
+            selection_arg = command[command.index("--selection-json") + 1]
+            with open(selection_arg, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            # The stray path must NOT appear as a mask of either case.
+            self.assertEqual(
+                [], payload["case_info"]["masks"],
+                "multi-case import must not receive a shared explicit mask list",
+            )
+
     def test_collect_recent_drops_summarizes_status_files(self):
         import import_drop_window as dw
         status_dir = os.path.join(self.tmp, "drop_import")

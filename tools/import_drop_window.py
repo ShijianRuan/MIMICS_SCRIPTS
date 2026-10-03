@@ -358,7 +358,15 @@ def submit_import(selection, context):
             else list(selection.get("paths") or [])
         )
         launched = []
-        explicit_mask_paths = [p for p in (selection.get("mask_paths") or []) if str(p).strip()]
+        # One explicit mask list cannot serve several cases — it would be
+        # handed to EVERY case (wrong data into every project). Multi-case
+        # imports take masks from each case's segmentations/ folder; the UI
+        # only offers the explicit row for single-case drops.
+        explicit_mask_paths = (
+            [p for p in (selection.get("mask_paths") or []) if str(p).strip()]
+            if len(sources) == 1
+            else []
+        )
         for index, source in enumerate(sources):
             case_info = io_ui.discover_single_source(source)
             if not case_info:
@@ -664,8 +672,7 @@ def run(context=None, preview_path=""):
                 summary += " …（共 {0} 例）".format(len(results))
             if valid and all_masks_empty:
                 summary += (
-                    "\n⚠ 未发现 Mask（自动发现只查找病例文件夹下的 segmentations/ 子目录）；"
-                    "如需导入，请在下方“Mask 在别处”指定路径。"
+                    "\n⚠ 未发现 Mask（自动发现只查找每个病例文件夹下的 segmentations/ 子目录）。"
                 )
             set_recognition(summary, valid < len(paths) or (valid > 0 and all_masks_empty))
             dropzone.setText("多选：{0} 个路径".format(len(paths)))
@@ -711,11 +718,13 @@ def run(context=None, preview_path=""):
                 dropzone.setText(display)
                 return
             dropzone.setText(display)
-        # Progressive disclosure: the explicit mask path row exists only for
-        # single/multi_single drops whose automatic mask discovery came up
-        # empty (nothing found, or suppression). Batch drops read masks from
-        # each case's segmentations/ and need no escape hatch here.
-        if kind in ("single", "multi_single") and not state.get("auto_masks_found"):
+        # Progressive disclosure: the explicit mask path row exists only for a
+        # single-case drop whose automatic mask discovery came up empty
+        # (nothing found, or suppression). Multi-case drops cannot use it —
+        # one pasted list would be handed to EVERY case (wrong data into
+        # every project); masks for multi-case imports belong in each case's
+        # segmentations/ folder. Batch drops likewise read per-case folders.
+        if kind == "single" and not state.get("auto_masks_found"):
             mask_path_widget.show()
         # R61-7: a new drop means a new dataset, so the computed default
         # follows it — unless the user typed/picked a folder themselves this
@@ -877,7 +886,7 @@ def run(context=None, preview_path=""):
         output = os.path.abspath(os.path.expanduser(output_edit.text().strip()))
         mask_selection = "none" if mask_none.isChecked() else "all"
         mask_paths = []
-        if kind in ("single", "multi_single") and mask_path_widget.isVisible():
+        if kind == "single" and mask_path_widget.isVisible():
             # ; or newlines separate entries (paste keeps multi-line clipboard
             # text as-is); neither is valid inside a path in practice.
             mask_paths = [

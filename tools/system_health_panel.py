@@ -367,7 +367,7 @@ def run(preview_path=""):
 
     actions = QtWidgets.QHBoxLayout()
     refresh_btn = QtWidgets.QPushButton("立即刷新")
-    sweep_btn = QtWidgets.QPushButton("清理过期状态")
+    sweep_btn = QtWidgets.QPushButton("清理失效状态")
     sweep_btn.setObjectName("primary")
     stop_btn = QtWidgets.QPushButton("停止全部自有服务")
     actions.addWidget(refresh_btn)
@@ -546,6 +546,7 @@ def run(preview_path=""):
                         len(payload.get("released_locks") or []),
                     )
                 )
+                sweep_btn.setEnabled(True)
                 start_refresh()
 
     _result_timer = QtCore.QTimer(window)
@@ -598,7 +599,6 @@ def run(preview_path=""):
         thread = _threading.Thread(target=worker)
         thread.daemon = True
         thread.start()
-        sweep_btn.setEnabled(True)
 
     sweep_btn.clicked.connect(do_sweep)
 

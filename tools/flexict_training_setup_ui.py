@@ -429,11 +429,14 @@ class TrainingSetupWindow:
             )
         train_count = sum(1 for row in rows if row.get("use_train", True))
         val_count = sum(1 for row in rows if row.get("use_val", False))
-        self.case_summary.setText(
-            "已选 {0} 例 · 训练 {1} · 验证 {2}".format(
-                len(rows), train_count, val_count
-            )
+        summary = "已选 {0} 例 · 训练 {1} · 验证 {2}".format(
+            len(rows), train_count, val_count
         )
+        if rows and train_count == 0:
+            # Every checked case is validation-only: training would run on an
+            # empty split. Surface it here instead of at submit time.
+            summary += " —— 训练集为空，请至少保留一个训练病例"
+        self.case_summary.setText(summary)
 
     def _scan_cases(self, dataset_root: str, label_name: str) -> list[dict]:
         from flexict_pipeline import scan_flexict_cases
@@ -582,7 +585,7 @@ class TrainingSetupWindow:
         try:
             request = self._request()
             if not request["label_name"]:
-                raise ValueError("Target / label name is required.")
+                raise ValueError("请填写目标 Mask 名称。")
             self._submission_generation += 1
             generation = self._submission_generation
             self._submission_pending = True

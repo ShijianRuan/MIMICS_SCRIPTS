@@ -406,12 +406,12 @@ def run_fix(project_root: Path, fix_action: str) -> str:
         old_root = fix_action.split(":", 1)[1]
         pid = _run_migrate(root, old_root)
         if pid:
-            return "迁移已启动（PID {0}）。完成后请重新运行“检查”。".format(pid)
+            return "迁移已启动（PID {0}）。完成后请点击“重新检查”。".format(pid)
         return "无法启动迁移 worker。"
     if fix_action in ("check", "install", "offline-install", "setup-from-scratch"):
         pid = _run_setup_worker(root, fix_action)
         if pid:
-            return "安装 worker 已启动（PID {0}）。进度见 管理 > 安装/修复环境。".format(pid)
+            return "安装 worker 已启动（PID {0}）。完成后可点击“重新检查”确认。".format(pid)
     return ""
 
 
@@ -486,10 +486,22 @@ def show_dialog(project_root: Path | None = None, parent=None) -> int:
         scroll.setWidget(inner)
         layout.addWidget(scroll, 1)
 
+    # Re-check: repair workers run detached, so the user needs an in-place way
+    # to see whether the environment actually got fixed (the alternative is
+    # closing and reopening the whole dialog from the menu).
+    buttons = QtWidgets.QHBoxLayout()
+    recheck = QtWidgets.QPushButton("重新检查")
+    recheck.clicked.connect(dialog.reject)
+    buttons.addWidget(recheck)
+    buttons.addStretch(1)
     close = QtWidgets.QPushButton("关闭")
     close.clicked.connect(dialog.accept)
-    layout.addWidget(close)
-    dialog.exec()
+    buttons.addWidget(close)
+    layout.addLayout(buttons)
+    result = dialog.exec()
+    if result == QtWidgets.QDialog.Rejected and recheck.underMouse():
+        return show_dialog(root, parent)  # re-run detection and re-render
+    return 0
     return 0
 
 

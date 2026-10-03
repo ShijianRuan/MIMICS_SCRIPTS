@@ -384,6 +384,43 @@
 - **保留英文（有意）**：日志与 JSON 机器字段、config_editor 完整标签
   （低频管理入口，改动面大收益小，单独评估）、docs/（英文设计文档）。
 
+### R68 审查轮（2026-10-03，双并行代理：修改正确性 + 真实场景可用性）
+
+- [x] **R68-AUD-1（P1，可用性审查发现）多病例拖入时显式 Mask 路径会
+  赋给每一个病例**：multi_single + "Mask 在别处"路径 → submit_import
+  对每个病例执行 expand_mask_paths(全部路径) 并塞入 case_info——
+  每个 .mcs 工程都装进全部 mask（含其他病人的），错误数据静默进
+  工程。修复：显式 mask 路径行只对单病例拖入显示（多病例警告只说明
+  segmentations/ 规范布局）；submit_import 加 len(sources)==1 守卫
+  防直接调用误用。防回归测试：multi_single + mask_paths → 两个
+  selection JSON 的 masks 必须为空。审查代理的另两个子论点经核实为
+  误报：expand_mask_paths 的 seen 按路径去重（不同路径同名 stem 均保留）；
+  "仅图像"优先级由 worker _filter_masks 在 none 时返回空保证。
+- [x] **R68-AUD-2（P1）训练窗口动态校验串英文（中文化主遗漏类）**：
+  nnunet_common.normalize_request/normalize_labels ~16 条 ValueError、
+  flexict_common.normalize_request 3 条、flexict_pipeline.scan 1 条、
+  flexict 训练向导必填项 1 条——全部经 UI 状态栏直接显示。中文化 +
+  6 处测试断言同步（ContractTests）。
+- [x] **R68-AUD-3（P2）Model Center 残留英文**：训练设置摘要
+  （"N training / N validation / ... New model will not be selected
+  automatically"）、文件夹选择对话框标题（"Choose 原始图像数据集 *"）、
+  mcs_refresh 扫描错误 1 处。中文化。
+- [x] **R68-AUD-4（P2）环境指引反馈指向不存在的动作**：反馈说
+  "重新运行'检查'"但对话框没有检查按钮。加"重新检查"按钮（reject +
+  重入 show_dialog 重跑检测渲染）。
+- [x] **R68-AUD-5（P2）模型管理器导入在 GUI 线程同步执行**：GB 级
+  zip 导入冻结窗口数十秒。移到后台线程（复用 _reload 的线程+队列
+  模式，队列改 tagged 三元组），期间禁用按钮 + 进度文案。
+- [x] **R68-AUD-6（P2）FlexiCT 全验证集训练为空拖到提交才报**：
+  _refresh_cases 摘要实时显示"训练集为空，请至少保留一个训练病例"。
+- [x] **R68-AUD-7（P2）nnU-Net GPU 设备自由文本只在提交时校验**：
+  textChanged 即时校验格式（同 normalize_request 规则），非法红字提示。
+- [x] **R68-AUD-8（P3）System Health 按钮名与提示文案不一致 + 清理
+  按钮禁用无效**：统一"清理失效状态"；重新启用移到 sweep 结果回调。
+- 审查代理核实无问题的方面：入口薄壳全部指向有效模块、
+  mimics_entry_guide 与实际入口一致、逐行停止/Stop All/Undo 均有
+  确认、三个训练窗口路径检查已在后台线程。
+
 
 
 > 用户在数据标准要求问答后拍板"综合优化做一些大的改动，看怎么做才最全面

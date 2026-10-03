@@ -524,9 +524,9 @@ def normalize_labels(value: object) -> list[dict[str, Any]]:
             unique_aliases.append(alias)
         canonical_name = safe_identifier(name).lower()
         if canonical_name in names:
-            raise ValueError("Duplicate label name: {}".format(name))
+            raise ValueError("标签名称重复：{}".format(name))
         if label_id in ids:
-            raise ValueError("Duplicate label ID: {}".format(label_id))
+            raise ValueError("标签 ID 重复：{}".format(label_id))
         names.add(canonical_name)
         ids.add(label_id)
         for canonical_alias in local_aliases:
@@ -544,7 +544,7 @@ def normalize_labels(value: object) -> list[dict[str, Any]]:
     actual_ids = [int(row["id"]) for row in rows]
     if actual_ids != expected_ids:
         raise ValueError(
-            "nnU-Net label IDs must be consecutive starting at 1; received {}.".format(
+            "nnU-Net 标签 ID 必须从 1 开始连续编号；当前为 {}。".format(
                 ", ".join(str(value) for value in actual_ids)
             )
         )
@@ -569,19 +569,19 @@ def normalize_request(request: dict[str, Any]) -> dict[str, Any]:
         values["labels"] = normalize_labels(values.get("labels"))
         values["dataset_id"] = int(values.get("dataset_id") or 701)
         if not 1 <= values["dataset_id"] <= 999:
-            raise ValueError("Dataset ID must be between 1 and 999.")
+            raise ValueError("Dataset ID 必须在 1 到 999 之间。")
         values["configuration"] = str(values.get("configuration") or "3d_fullres")
         if values["configuration"] not in {"2d", "3d_fullres", "3d_lowres"}:
             raise ValueError(
-                "Supported configurations are 2d, 3d_fullres, and 3d_lowres."
+                "支持的配置为 2d、3d_fullres 和 3d_lowres。"
             )
         values["modality"] = str(values.get("modality") or "CT").strip() or "CT"
         values["fold"] = str(values.get("fold") if values.get("fold") is not None else "0")
         if values["fold"] not in {"0", "1", "2", "3", "4", "all"}:
-            raise ValueError("Fold must be 0-4 or all.")
+            raise ValueError("Fold 必须是 0-4 或 all。")
         values["epochs"] = int(values.get("epochs") or 1000)
         if not 1 <= values["epochs"] <= 10000:
-            raise ValueError("Epochs must be between 1 and 10000.")
+            raise ValueError("训练轮数必须在 1 到 10000 之间。")
         values["num_gpus"] = int(values.get("num_gpus") or 1)
         if not 1 <= values["num_gpus"] <= 16:
             raise ValueError("GPU count must be between 1 and 16.")
@@ -595,11 +595,11 @@ def normalize_request(request: dict[str, Any]) -> dict[str, Any]:
             else float(raw_validation_fraction)
         )
         if not 0.0 <= values["validation_fraction"] < 0.9:
-            raise ValueError("Validation fraction must be in [0, 0.9).")
+            raise ValueError("验证集比例必须在 0 到 0.9 之间。")
         if values["fold"] != "all" and values["validation_fraction"] <= 0:
             raise ValueError(
-                "Validation fraction must be greater than zero for folds 0-4. "
-                "Choose fold 'all' to train without a validation split."
+                "Fold 0-4 训练时验证集比例必须大于 0；"
+                "如不需验证集请选择 fold 'all'。"
             )
         values["split_seed"] = int(values.get("split_seed") or 2026)
         values["trainer"] = str(values.get("trainer") or "MimicsNNUNetTrainer").strip()
@@ -608,10 +608,10 @@ def normalize_request(request: dict[str, Any]) -> dict[str, Any]:
         if values["gpu_id"]:
             devices = [item.strip() for item in values["gpu_id"].split(",") if item.strip()]
             if not devices or any(not item.isdigit() for item in devices):
-                raise ValueError("Local GPU devices must be comma-separated numeric IDs.")
+                raise ValueError("本机 GPU 设备必须是用英文逗号分隔的数字编号（如 0 或 0,1）。")
             if len(devices) != values["num_gpus"]:
                 raise ValueError(
-                    "GPU count must match the number of local GPU device IDs."
+                    "GPU 数量必须与本机 GPU 设备编号的个数一致。"
                 )
             values["gpu_id"] = ",".join(devices)
         values["gpu_lock_timeout_seconds"] = float(
@@ -632,7 +632,7 @@ def normalize_request(request: dict[str, Any]) -> dict[str, Any]:
         ).strip().lower()
         if values["missing_label_policy"] not in {"require_all", "background"}:
             raise ValueError(
-                "Missing-label policy must be 'require_all' or 'background'."
+                "缺失标签的处理策略必须是 'require_all' 或 'background'。"
             )
         for key, expected_length in (("spacing", 3), ("patch_size", 2 if values["configuration"] == "2d" else 3)):
             raw = values.get(key)
@@ -642,20 +642,19 @@ def normalize_request(request: dict[str, Any]) -> dict[str, Any]:
             parsed = [float(item) if key == "spacing" else int(item) for item in raw]
             if len(parsed) != expected_length or any(item <= 0 for item in parsed):
                 raise ValueError(
-                    "{} must contain {} positive values for {}.".format(
+                    "{} 必须包含 {} 个正数（当前配置 {}）。".format(
                         key, expected_length, values["configuration"]
                     )
                 )
             values[key] = parsed
         if values["configuration"] == "2d" and values["spacing"] is not None:
             raise ValueError(
-                "Manual target spacing is not supported for nnU-Net's 2D plan. "
-                "Leave spacing automatic or select a 3D configuration."
+                "2D 配置不支持手动设定 spacing；请保持自动，或改选 3D 配置。"
             )
         batch_size = values.get("batch_size")
         values["batch_size"] = int(batch_size) if batch_size not in (None, "", 0, "0") else None
         if values["batch_size"] is not None and values["batch_size"] < 1:
-            raise ValueError("Batch size must be positive.")
+            raise ValueError("批次大小必须为正数。")
         if bool(values.get("continue_training")) and str(
             values.get("pretrained_weights") or ""
         ).strip():

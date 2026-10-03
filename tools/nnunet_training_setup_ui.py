@@ -485,6 +485,23 @@ class TrainingSetupWindow:
             "必须与上方的 GPU 数量一致。"
         )
         train_form.addWidget(self.gpu_devices_hint, 13, 0, 1, 2)
+
+        gpu_hint_default = self.gpu_devices_hint.text()
+
+        def _check_gpu_devices(text):
+            # Same rule as normalize_request, but at typing time — the user
+            # learns the format here instead of at submit.
+            devices = [item.strip() for item in str(text).split(",") if item.strip()]
+            if text.strip() and (not devices or any(not item.isdigit() for item in devices)):
+                self.gpu_devices_hint.setStyleSheet("color: #b42318; font-weight: 600;")
+                self.gpu_devices_hint.setText(
+                    "格式无效：必须是英文逗号分隔的数字编号（如 0 或 0,1）。"
+                )
+            else:
+                self.gpu_devices_hint.setStyleSheet("")
+                self.gpu_devices_hint.setText(gpu_hint_default)
+
+        self.gpu_devices_edit.textChanged.connect(_check_gpu_devices)
         self.pretrained_edit = QtWidgets.QLineEdit()
         train_form.addWidget(QtWidgets.QLabel("预训练 checkpoint"), 14, 0)
         self.pretrained_widget = self._path_row(

@@ -390,7 +390,7 @@ class ModelCenter:
                 self.QtCore,
                 self.QtWidgets,
                 self.window,
-                "Choose {}".format(label),
+                "选择{}".format(label),
                 edit.text() or str(Path.home()),
                 lambda selected: edit.setText(str(selected)) if selected else None,
                 button=browse,
@@ -1262,8 +1262,7 @@ class ModelCenter:
                 if source_mode == "mcs_refresh":
                     if not os.path.isdir(mcs_dir):
                         raise RuntimeError(
-                            "Saved .mcs folder does not exist or is unavailable: "
-                            "{}".format(mcs_dir)
+                            "已保存 .mcs 的文件夹不存在或不可用：{}".format(mcs_dir)
                         )
                     rows = discover_mcs_cases(mcs_dir, image_root)
                 else:
@@ -1535,9 +1534,9 @@ class ModelCenter:
         minimum_val = int(self.config.get("minimum_validation_cases_for_auto_selection", 2))
         suffix = ""
         if val < minimum_val:
-            suffix = " · New model will not be selected automatically"
+            suffix = " · 验证例不足，新模型不会自动启用"
         self.setup_summary.setText(
-            "{} training / {} validation / {} / up to {} epochs{}{}".format(
+            "训练 {} 例 / 验证 {} 例 / {} / 最多 {} 轮{}{}".format(
                 train,
                 val,
                 strategy,
@@ -1546,7 +1545,7 @@ class ModelCenter:
                 (
                     ""
                     if self.choose_specific_cases.isChecked()
-                    else " / all matching Masks"
+                    else " / 全部匹配的 Mask"
                 ),
             )
         )

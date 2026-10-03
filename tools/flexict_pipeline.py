@@ -962,7 +962,7 @@ def scan_flexict_cases(dataset_root: str | Path, label_name: str) -> list[dict[s
     """
     root = Path(dataset_root).expanduser()
     if not root.is_dir():
-        raise ValueError("Dataset folder does not exist: {}".format(root))
+        raise ValueError("原始图像数据集不存在或不可用：{}".format(root))
     rows: list[dict[str, Any]] = []
     for case_dir in sorted(p for p in root.iterdir() if p.is_dir()):
         image = None

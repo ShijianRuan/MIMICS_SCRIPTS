@@ -334,12 +334,12 @@ def normalize_request(values: dict[str, Any]) -> dict[str, Any]:
     out = dict(values)
     label_name = str(out.get("label_name") or "").strip()
     if not label_name:
-        raise ValueError("label_name (organ/target name) is required.")
+        raise ValueError("请填写目标 Mask 名称（器官/目标名）。")
     out["label_name"] = label_name
     out["cases"] = [str(c).strip() for c in (out.get("cases") or [])
                     if str(c).strip()]
     if not out["cases"]:
-        raise ValueError("At least one training case is required.")
+        raise ValueError("请至少勾选一个病例。")
     configuration = str(out.get("configuration") or "auto").strip().lower()
     if configuration not in CONFIGURATIONS:
         raise ValueError(
@@ -364,7 +364,7 @@ def normalize_request(values: dict[str, Any]) -> dict[str, Any]:
     if val_cases >= len(out["cases"]):
         if len(out["cases"]) <= 1:
             raise ValueError(
-                "Need at least 2 cases (1 train + 1 validation)."
+                "请至少选择两个病例（1 个训练 + 1 个验证）。"
             )
         val_cases = max(1, len(out["cases"]) - 1)
     out["val_cases"] = val_cases
