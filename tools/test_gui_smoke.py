@@ -432,6 +432,27 @@ class TestViewerNonBlockingRefresh(unittest.TestCase):
                 "0.732",
             )
 
+    def test_flexict_viewer_shows_training_curve(self):
+        # G3: the FlexiCT status viewer had no training-curve tab while the
+        # nnU-Net viewer did - the annotator watching a FlexiCT run (local
+        # or remote) had to read raw logs to see whether loss was moving.
+        # Same contract as the nnU-Net viewer: status-recorded curve path
+        # (remote sync target) wins, then the model's fold_0/progress.png.
+        _AppFixture.app()
+        import flexict_status_viewer as viewer
+
+        window = viewer.StatusWindow({"workspace": ""}, QT)
+        try:
+            # No curve anywhere: hint text, never an exception.
+            window._show_curve({})
+            self.assertIn("暂不可用", window.curve.text())
+            # A recorded curve path (e.g. remote-synced) is displayed:
+            # text is cleared, no exception even for an undecodable file.
+            window._show_curve({"training_curve_path": __file__})
+            self.assertIn("", window.curve.text())
+        finally:
+            window.window.close()
+
     def _fixtures(self, tmp: Path) -> Path:
         project = tmp / "proj"
         runtime = project / ".mimics_runtime"

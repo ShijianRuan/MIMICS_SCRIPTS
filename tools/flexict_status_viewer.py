@@ -124,6 +124,15 @@ class StatusWindow:
         self.pair_note = pair_note
         models_layout.addWidget(pair_note)
         right.addTab(models_tab, "模型")
+        curve_tab = QtWidgets.QWidget()
+        curve_layout = QtWidgets.QVBoxLayout(curve_tab)
+        curve_layout.setContentsMargins(10, 10, 10, 10)
+        self.curve = QtWidgets.QLabel("训练开始后，loss/Dice 曲线会显示在这里。")
+        self.curve.setObjectName("hint")
+        self.curve.setAlignment(QtCore.Qt.AlignCenter)
+        self.curve.setScaledContents(False)
+        curve_layout.addWidget(self.curve, 1)
+        right.addTab(curve_tab, "训练曲线")
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 2)
@@ -285,6 +294,40 @@ class StatusWindow:
         self.log_view.setPlainText(text)
         if follow_tail:
             scrollbar.setValue(scrollbar.maximum())
+        self._show_curve(status)
+
+    def _show_curve(self, status):
+        """Same contract as the nnU-Net viewer: prefer the status-recorded
+        curve path (covers remote jobs, whose progress.png is synced locally
+        by the controller), fall back to the model's fold_0/progress.png."""
+        model = status.get("model") or {}
+        model_dir = Path(str(model.get("model_dir") or ""))
+        candidates = [Path(str(status.get("training_curve_path") or ""))]
+        candidates.append(model_dir / "fold_0" / "progress.png")
+        candidates.extend(
+            model_dir.glob("fold_*/progress.png") if model_dir.is_dir() else []
+        )
+        curve_path = next((path for path in candidates if path.is_file()), None)
+        if curve_path is None:
+            self.curve.setPixmap(self.QtGui.QPixmap())
+            self.curve.setText(
+                "训练曲线暂不可用。实时 epoch 详情仍见“日志”页。"
+            )
+            return
+        pixmap = self.QtGui.QPixmap(str(curve_path))
+        if pixmap.isNull():
+            self.curve.setText("训练曲线无法解码。")
+            return
+        size = self.curve.size()
+        self.curve.setText("")
+        self.curve.setPixmap(
+            pixmap.scaled(
+                max(200, size.width() - 20),
+                max(180, size.height() - 20),
+                self.QtCore.Qt.KeepAspectRatio,
+                self.QtCore.Qt.SmoothTransformation,
+            )
+        )
 
     def _stop(self):
         index = self.jobs.currentRow()
