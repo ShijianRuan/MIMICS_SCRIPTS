@@ -159,6 +159,29 @@ def request_updates(job_dir: str | Path,
     return rows
 
 
+def pending_request_age(job_dir: str | Path,
+                        now_epoch: float) -> float:
+    """Seconds the oldest still-pending apply-request has been waiting.
+
+    A request is pending until the Mimics-side monitor rewrites it with
+    applied/failed. The UI uses this to hint that the monitor may not be
+    running instead of leaving "本窗口会自动更新" on screen forever.
+    Pure function over the job folder.
+    """
+    request_dir = Path(job_dir) / "apply_requests"
+    if not request_dir.is_dir():
+        return 0.0
+    oldest = 0.0
+    for path in request_dir.glob("*.json"):
+        payload = read_json(path, {}) or {}
+        if str(payload.get("state") or "") in ("applied", "failed"):
+            continue
+        requested = float(payload.get("requested_at_epoch") or 0.0)
+        if requested > 0:
+            oldest = max(oldest, now_epoch - requested)
+    return oldest
+
+
 def bands_degenerate(job: dict[str, Any]) -> bool:
     """True when the moderate and high uncertainty bands coincide.
 
@@ -538,9 +561,18 @@ class ActiveLearningWindow:
             return
         updates = request_updates(self._job_dir, self._request_poll_epoch)
         if not updates:
-            return
-        updates = request_updates(self._job_dir, self._request_poll_epoch)
-        if not updates:
+            # P2-2: "本窗口会自动更新" is only true while the Mimics-side
+            # monitor runs. If the oldest pending request has been waiting a
+            # long time, say so instead of letting that promise sit forever.
+            age = pending_request_age(self._job_dir, time.time())
+            if age > 30.0 and "可能尚未运行" not in (
+                self.status_label.text()
+            ):
+                self.status_label.setText(
+                    "请求已等待 {0:.0f} 秒仍无结果——Mimics 中的主动学习"
+                    "监控（03 Active Learning Review）可能尚未运行。".format(
+                        age)
+                )
             return
         self._request_poll_epoch = max(
             row["updated_at_epoch"] for row in updates)

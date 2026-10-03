@@ -1178,6 +1178,50 @@ class TestActiveLearningWindow(unittest.TestCase):
             finally:
                 window.window.close()
 
+    def test_stale_pending_request_gets_monitor_hint(self):
+        """P2-2：请求一直无结果（Mimics 侧监控未运行）时，状态栏必须
+        提示监控可能没在运行，而不是让"本窗口会自动更新"永远挂着。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._window(tmp)
+            try:
+                request_dir = Path(window._job_dir) / "apply_requests"
+                request_dir.mkdir(parents=True)
+                (request_dir / "a.json").write_text(
+                    json.dumps({
+                        "case_id": "caseA", "what": "bands",
+                        "state": "",
+                        "requested_at_epoch": time.time() - 120.0,
+                    }),
+                    encoding="utf-8",
+                )
+                window._poll_requests()
+                self.assertIn("可能尚未运行", window.status_label.text())
+            finally:
+                window.window.close()
+
+    def test_fresh_pending_request_gets_no_hint(self):
+        """刚发出的请求（几秒内）不该被误报为监控未运行。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._window(tmp)
+            try:
+                request_dir = Path(window._job_dir) / "apply_requests"
+                request_dir.mkdir(parents=True)
+                (request_dir / "a.json").write_text(
+                    json.dumps({
+                        "case_id": "caseA", "what": "bands",
+                        "state": "",
+                        "requested_at_epoch": time.time() - 2.0,
+                    }),
+                    encoding="utf-8",
+                )
+                before = window.status_label.text()
+                window._poll_requests()
+                self.assertNotIn(
+                    "监控未运行", window.status_label.text())
+                self.assertEqual(before, window.status_label.text())
+            finally:
+                window.window.close()
+
     def test_empty_state_offers_a_new_ranking_entry(self):
         # F04/T04: with no completed runs the window must offer a reachable
         # way to START the first ranking, not point back at the same menu.
