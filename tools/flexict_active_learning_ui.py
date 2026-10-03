@@ -34,6 +34,7 @@ from nnunet_common import read_json, write_json_atomic  # noqa: E402
 from ui_theme import (  # noqa: E402
     PALETTE,
     choose_existing_directory_async,
+    clamp_window_to_screen,
     configure_application,
     stylesheet,
 )
@@ -190,6 +191,10 @@ class ActiveLearningWindow:
         self.window.setWindowTitle('FlexiCT 主动学习')
         self.window.resize(980, 640)
         self.window.setMinimumSize(820, 520)
+        # F37: at 150% DPI the available screen can be smaller than the
+        # layout minimum; clamp so the window never exceeds the screen and
+        # labels are reachable by resizing, not clipped.
+        clamp_window_to_screen(self.window, (820, 520))
         central = QtWidgets.QWidget()
         root = QtWidgets.QVBoxLayout(central)
         root.setContentsMargins(22, 18, 22, 18)

@@ -31,6 +31,7 @@ from remote_compute_ui import RemoteComputeSelector  # noqa: E402
 from ui_theme import (  # noqa: E402
     choose_existing_directory_async,
     choose_open_file_async,
+    clamp_window_to_screen,
     configure_application,
     stylesheet,
 )
@@ -46,6 +47,9 @@ class TrainingSetupWindow:
         self.window.setWindowTitle("nnU-Net 训练")
         self.window.resize(920, 760)
         self.window.setMinimumSize(780, 650)
+        # F37: a hard 650px minimum exceeds the available height at 150%
+        # DPI on 1280x720 screens; clamp to what the screen can show.
+        clamp_window_to_screen(self.window, (780, 650))
         self.window.closeEvent = self._close_event
         self.submitted = False
         self._submission_pending = False

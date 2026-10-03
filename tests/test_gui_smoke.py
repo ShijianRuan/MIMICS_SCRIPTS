@@ -1150,5 +1150,90 @@ class TestActiveLearningWindow(unittest.TestCase):
                 window.window.close()
 
 
+class TestWindowClampedToSmallScreen(unittest.TestCase):
+    """F37: a hard minimum larger than the available screen (150% DPI on
+    1280x720 leaves ~853x480 logical pixels minus the taskbar) forced
+    windows to grow past the screen and clip button labels. The minimum
+    must be lowered to what the screen can actually show."""
+
+    def test_clamp_lowerers_minimum_to_available_geometry(self):
+        _AppFixture.app()
+        from PySide6 import QtCore
+
+        from ui_theme import clamp_window_to_screen
+
+        window = QtWidgets.QMainWindow()
+        try:
+            small_screen = QtCore.QRect(0, 0, 853, 440)
+            with mock.patch.object(
+                QtWidgets.QMainWindow, "screen",
+                lambda self: _FakeScreen(small_screen),
+            ):
+                window.resize(800, 500)
+                window.setMinimumSize(780, 650)
+                clamp_window_to_screen(window, (780, 650))
+                self.assertEqual(
+                    (780, 440),
+                    (window.minimumWidth(), window.minimumHeight()),
+                )
+                self.assertLessEqual(window.height(), 440)
+        finally:
+            window.close()
+
+    def test_clamp_keeps_minimum_on_large_screen(self):
+        _AppFixture.app()
+        from PySide6 import QtCore
+
+        from ui_theme import clamp_window_to_screen
+
+        window = QtWidgets.QMainWindow()
+        try:
+            big_screen = QtCore.QRect(0, 0, 1920, 1040)
+            with mock.patch.object(
+                QtWidgets.QMainWindow, "screen",
+                lambda self: _FakeScreen(big_screen),
+            ):
+                window.setMinimumSize(780, 650)
+                clamp_window_to_screen(window, (780, 650))
+                self.assertEqual(
+                    (780, 650),
+                    (window.minimumWidth(), window.minimumHeight()),
+                )
+        finally:
+            window.close()
+
+    def test_al_window_opens_on_small_screen(self):
+        """The AL window itself must construct with its minimum clamped to
+        a screen smaller than the layout minimum — no exception, minimum
+        height within the available geometry."""
+        import tempfile
+
+        _AppFixture.app()
+        import flexict_active_learning_ui as al_ui
+        from PySide6 import QtCore
+
+        with tempfile.TemporaryDirectory() as name:
+            with mock.patch.object(
+                QtWidgets.QMainWindow, "screen",
+                lambda self: _FakeScreen(QtCore.QRect(0, 0, 853, 440)),
+            ):
+                window = al_ui.ActiveLearningWindow(
+                    {"workspace": str(Path(name) / "ws")}, QT,
+                )
+                try:
+                    self.assertLessEqual(
+                        window.window.minimumHeight(), 440)
+                finally:
+                    window.window.close()
+
+
+class _FakeScreen:
+    def __init__(self, geometry):
+        self._geometry = geometry
+
+    def availableGeometry(self):
+        return self._geometry
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

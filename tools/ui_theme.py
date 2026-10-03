@@ -721,6 +721,48 @@ def stylesheet(extra=""):
     return base + "\n" + str(extra or "")
 
 
+def clamp_window_to_screen(window, minimum):
+    """Fit a window and its minimum size into the available screen (F37).
+
+    Windows at 150% DPI can have less logical space than a hard-coded
+    minimum (1280x720 @150% ≈ 853x480 minus taskbar), which previously
+    forced 800x500 requests to grow to e.g. 800x650 and clipped button
+    labels. The minimum is lowered to what the screen can actually show
+    and the window itself is bounded by the available geometry. Windows
+    with no screen attached keep the caller's sizes.
+    """
+    try:
+        screen = window.screen() or window.windowHandle().screen()
+    except Exception:
+        screen = None
+    if screen is None:
+        try:
+            from PySide6 import QtWidgets
+
+            screen = QtWidgets.QApplication.primaryScreen()
+        except Exception:
+            screen = None
+    if screen is None:
+        return
+    available = screen.availableGeometry()
+    min_width, min_height = minimum
+    if available.width() > 0 and min_width > available.width():
+        min_width = available.width()
+    if available.height() > 0 and min_height > available.height():
+        min_height = available.height()
+    try:
+        window.setMinimumSize(min_width, min_height)
+    except Exception:
+        pass
+    try:
+        if available.width() > 0 and window.width() > available.width():
+            window.resize(available.width(), window.height())
+        if available.height() > 0 and window.height() > available.height():
+            window.resize(window.width(), available.height())
+    except Exception:
+        pass
+
+
 def _application_icon():
     """A simple programmatic icon so our windows stop showing the generic
     Python logo. Drawn, not loaded: no binary resource to ship or misplace."""

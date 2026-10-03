@@ -35,6 +35,7 @@ from flexict_pipeline import create_flexict_job  # noqa: E402
 from nnunet_common import read_json, update_status, write_json_atomic  # noqa: E402
 from ui_theme import (  # noqa: E402
     choose_existing_directory_async,
+    clamp_window_to_screen,
     configure_application,
     stylesheet,
 )
@@ -50,6 +51,9 @@ class TrainingSetupWindow:
         self.window.setWindowTitle("FlexiCT 训练")
         self.window.resize(880, 720)
         self.window.setMinimumSize(760, 620)
+        # F37: clamp the 620px minimum to the available screen height so
+        # small high-DPI screens can still show the whole action bar.
+        clamp_window_to_screen(self.window, (760, 620))
         self.window.closeEvent = self._close_event
         self.submitted = False
         self._submission_pending = False
