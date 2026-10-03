@@ -42,21 +42,25 @@ from ui_theme import (  # noqa: E402
 STATE_SCHEMA = "flexict_annotation_state.v1"
 
 
-def find_al_jobs(workspace: str | None) -> list[dict[str, Any]]:
-    """Completed active_learning jobs, newest first."""
+def find_al_jobs(workspace: str | Path | None) -> list[dict[str, Any]]:
+    """Terminal active_learning jobs, newest first — completed ones first,
+    then failed/cancelled ones (R62-10: a failed ranking run must stay
+    visible with its error, not silently disappear from the list)."""
     from flexict_pipeline import list_flexict_jobs
 
-    rows = []
+    rows, failed_rows = [], []
     for status in list_flexict_jobs(workspace):
         if str(status.get("kind") or "") != "active_learning":
             continue
-        if str(status.get("status") or "") not in TERMINAL_STATES:
+        state = str(status.get("status") or "")
+        if state not in TERMINAL_STATES:
             continue
-        if str(status.get("status") or "") in {"failed", "cancelled", "abandoned"}:
-            continue
-        rows.append(status)
-    rows.sort(key=lambda row: float(row.get("created_at_epoch") or 0), reverse=True)
-    return rows
+        (failed_rows if state in {"failed", "cancelled", "abandoned"}
+         else rows).append(status)
+    key = lambda row: float(row.get("created_at_epoch") or 0)  # noqa: E731
+    rows.sort(key=key, reverse=True)
+    failed_rows.sort(key=key, reverse=True)
+    return rows + failed_rows
 
 
 def load_ranking(job_dir: str | Path) -> list[dict[str, Any]]:
@@ -460,6 +464,23 @@ class ActiveLearningWindow:
         self.job_combo.blockSignals(True)
         self.job_combo.clear()
         for job in self._jobs:
+            state = str(job.get("status") or "")
+            if state in {"failed", "cancelled", "abandoned"}:
+                # R62-10: failed runs stay listed, clearly marked, so the
+                # annotator knows a ranking was attempted and why it died.
+                self.job_combo.addItem(
+                    "{} · {} · {}".format(
+                        time.strftime(
+                            "%Y-%m-%d %H:%M",
+                            time.localtime(
+                                float(job.get("created_at_epoch") or 0)),
+                        ),
+                        {"failed": "失败", "cancelled": "已取消",
+                         "abandoned": "已放弃"}.get(state, state),
+                        str(job.get("label_name") or ""),
+                    )
+                )
+                continue
             self.job_combo.addItem(
                 "{} · {} case(s) · {}".format(
                     time.strftime(
@@ -489,7 +510,26 @@ class ActiveLearningWindow:
         index = self.job_combo.currentIndex()
         if not 0 <= index < len(self._jobs):
             return
-        job_dir = str(self._jobs[index].get("job_dir") or "")
+        job = self._jobs[index]
+        state = str(job.get("status") or "")
+        if state in {"failed", "cancelled", "abandoned"}:
+            # R62-10: no ranking exists to review — surface the error and
+            # disable the row actions instead of an empty table.
+            self._job_dir = ""
+            self._rows = []
+            self._state = {}
+            self.table.setRowCount(0)
+            self._set_actions_enabled(False)
+            self.status_label.setText(
+                "该运行{0}，无排序结果。原因：{1}".format(
+                    {"failed": "失败",
+                     "cancelled": "已取消",
+                     "abandoned": "已放弃"}.get(state, state),
+                    str(job.get("error") or job.get("message") or "未知"),
+                )
+            )
+            return
+        job_dir = str(job.get("job_dir") or "")
         if not job_dir:
             return
         self._job_dir = job_dir

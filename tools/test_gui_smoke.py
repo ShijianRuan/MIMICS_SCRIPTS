@@ -1571,6 +1571,39 @@ class TestActiveLearningWindow(unittest.TestCase):
             finally:
                 window.window.close()
 
+    def test_failed_run_stays_listed_with_its_error(self):
+        """R62-10: a failed ranking run must not vanish from the job list;
+        the annotator needs to know it was attempted and why it died."""
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._window(tmp)
+            try:
+                # Add a failed run newer than the completed one.
+                failed_dir = Path(tmp) / "jobs" / "aljob2"
+                failed_dir.mkdir(parents=True)
+                (failed_dir / "status.json").write_text(
+                    json.dumps({
+                        "kind": "active_learning",
+                        "status": "failed",
+                        "error": "GPU out of memory",
+                        "created_at_epoch": 2.0,
+                        "label_name": "Liver",
+                        "job_dir": str(failed_dir),
+                    }),
+                    encoding="utf-8",
+                )
+                window.refresh()
+                # Failed runs are listed after the completed ones.
+                self.assertEqual(2, window.job_combo.count())
+                window.job_combo.setCurrentIndex(1)
+                window._job_selected()
+                self.assertEqual(0, window.table.rowCount())
+                self.assertFalse(window.open_button.isEnabled())
+                text = window.status_label.text()
+                self.assertIn("失败", text)
+                self.assertIn("GPU out of memory", text)
+            finally:
+                window.window.close()
+
     def test_failed_request_message_survives_refresh(self):
         # F14/T14: the poll sets the outcome AFTER refreshing the table.
         with tempfile.TemporaryDirectory() as tmp:

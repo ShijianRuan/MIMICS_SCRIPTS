@@ -281,9 +281,17 @@
   TestViewerNonBlockingRefresh.test_nnunet_viewer_shows_model_source
   / test_flexict_viewer_shows_model_source`
   （红→绿验证过；红路径为表头无"来源"列）。gui_smoke 54/54 通过。
-- [ ] **R62-10【P3】AL 复核窗口隐藏失败运行**
-  （`flexict_active_learning_ui.py:45-59/:404-407`）：失败的 AL 周期
-  不显示，用户不知道有周期没跑完。验收：失败周期显示并带错误信息。
+- [x] **R62-10【P3】AL 复核窗口隐藏失败运行**
+  （`flexict_active_learning_ui.py` `find_al_jobs`）：失败的 AL 周期
+  不显示，用户不知道有周期没跑完。
+  **已解决（2026-10-04）**：`find_al_jobs` 不再过滤 failed/cancelled/
+  abandoned，改为排在已完成运行之后；下拉项标注"失败/已取消/已放弃"；
+  选中失败运行时表清空、行操作禁用、状态栏显示失败原因
+  （`status.json` 的 error/message）。测试：
+  `test_gui_smoke.py
+  TestActiveLearningWindow.test_failed_run_stays_listed_with_its_error`
+  （红→绿验证过；红路径为失败运行被过滤、下拉只剩 1 项）。gui_smoke
+  55/55 通过。
 - [ ] **R62-11【P3】setup/ 会话目录无限累积**（无清扫；
   `nnunet_mimics.py:147-148/:306-311/:346-349`）：每次打开向导留
   一个 setup/ 目录，永不清理。验收：接入既有 sweep 过期清扫或
