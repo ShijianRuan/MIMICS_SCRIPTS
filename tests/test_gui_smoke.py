@@ -377,6 +377,85 @@ class TestModelManagerWindow(unittest.TestCase):
                 window._loading, "Use must trigger a table reload"
             )
 
+    def test_import_nnunet_bundle_never_passes_set_current(self):
+        """nnU-Net 的导入子命令没有 --set-current（每次预测时才选模型）；
+        旧代码无条件附加该参数，argparse 抛 SystemExit 直接杀死工作线程，
+        导入按钮永久禁用（P1-2）。"""
+        _AppFixture.app()
+        _batch, manager, _config, _presets = _gui_modules()
+        with tempfile.TemporaryDirectory() as name:
+            bundle = Path(name) / "model.zip"
+            bundle.write_bytes(b"not really a zip")
+            captured = {}
+
+            def fake_main(argv):
+                captured["argv"] = list(argv)
+                raise SystemExit(2)  # argparse-style hard exit
+
+            with mock.patch.object(
+                manager, "bundle_model_family", lambda p: "nnunet"
+            ), mock.patch.object(manager.ai_model_bundle, "main", fake_main):
+                with self.assertRaises(RuntimeError):
+                    manager.import_bundle(bundle, {"nnunet": name})
+            self.assertNotIn("--set-current", captured["argv"])
+            # set_current=False 的其他系列仍保留该参数（显式需求）。
+            captured.clear()
+
+            def fake_main_ok(argv):
+                captured["argv"] = list(argv)
+
+            with mock.patch.object(
+                manager, "bundle_model_family", lambda p: "flexict"
+            ), mock.patch.object(
+                manager.ai_model_bundle, "main", fake_main_ok
+            ):
+                manager.import_bundle(
+                    bundle, {"flexict": name}, set_current=True
+                )
+            self.assertIn("--set-current", captured["argv"])
+
+    def test_import_worker_surfaces_system_exit_as_error(self):
+        """import_bundle 内部已把 SystemExit 转成 RuntimeError；工作线程的
+        except Exception 必须把错误放回队列并由 _poll 复位按钮，而不是
+        让线程静默死亡、导入按钮永久禁用（P1-2 失败路径）。"""
+        _AppFixture.app()
+        _batch, manager, _config, _presets = _gui_modules()
+        with tempfile.TemporaryDirectory() as name:
+            workspaces = {
+                "nninteractive": name, "nnunet": name, "flexict": name,
+            }
+            window = manager.ModelManagerWindow(
+                {"workspaces": workspaces}, QT
+            )
+            self.addCleanup(window.window.close)
+
+            def failing_import(bundle_path, ws, set_current=True):
+                raise RuntimeError("模型包导入命令执行失败（参数错误）。")
+
+            with mock.patch.object(
+                manager, "import_bundle", failing_import
+            ), mock.patch.object(
+                QtWidgets.QFileDialog, "getOpenFileName",
+                staticmethod(lambda *a, **k: (name + "/model.zip", "")),
+            ), mock.patch.object(
+                QtWidgets.QMessageBox, "warning"
+            ) as warn_box:
+                window._import_clicked()
+                self.assertFalse(window.import_button.isEnabled())
+                deadline = time.time() + 5.0
+                while window._importing and time.time() < deadline:
+                    _AppFixture.app().processEvents()
+                    window._poll()
+                    time.sleep(0.02)
+            self.assertFalse(
+                window._importing, "import worker never reported back"
+            )
+            self.assertTrue(window.import_button.isEnabled())
+            warn_box.assert_called_once()
+            self.assertIn(
+                "模型包导入命令执行失败", warn_box.call_args[0][2]
+            )
+
 
 class TestViewerNonBlockingRefresh(unittest.TestCase):
     """Status viewers collect off the GUI thread (BackgroundRefresh)."""

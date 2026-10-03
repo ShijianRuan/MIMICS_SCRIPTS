@@ -207,10 +207,16 @@ def import_bundle(bundle_path: Path, workspaces: dict[str, str],
         "--bundle",
         str(bundle_path),
     ]
-    if set_current:
+    # nnU-Net has no --set-current by design (it picks the model per
+    # prediction, see set_recommended_model); only nninteractive/flexict do.
+    if set_current and family != "nnunet":
         argv.append("--set-current")
     try:
         ai_model_bundle.main(argv)
+    except SystemExit as exc:  # argparse exits with code 2 on bad flags
+        raise RuntimeError(
+            "模型包导入命令执行失败（参数错误）。请确认模型包为标准导出格式。"
+        ) from exc
     except Exception as exc:
         raise RuntimeError(str(exc))
     return [str(bundle_path)]
@@ -410,8 +416,13 @@ class ModelManagerWindow:
             self._importing = False
             self.import_button.setEnabled(True)
             if error:
-                self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
-                self.status_label.setText("导入失败：{0}".format(error))
+                # 弹窗而非状态栏：_reload 会立刻改写状态栏文案，行内
+                # 错误提示一闪而过，标注者根本看不到（P1-2）。
+                self.QtWidgets.QMessageBox.warning(
+                    self.window,
+                    "AI 模型管理器",
+                    "导入失败：{0}".format(error),
+                )
             else:
                 self.QtWidgets.QMessageBox.information(
                     self.window,
