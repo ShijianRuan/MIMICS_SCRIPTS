@@ -269,10 +269,18 @@
   `test_gui_smoke.py
   TestBatchPredictionWindow.test_dispatch_timeout_guides_against_double_submit`
   （红→绿验证过；红路径为旧提示只说"重试"、无防重复指引）。
-- [ ] **R62-9【P3】状态查看器模型表缺"来源"列**（
-  `nnunet_status_viewer.py:139-141`、`flexict_status_viewer.py:111-113`）：
-  远程训练下载的模型与本地模型无从区分。验收：模型表加来源列
-  （本地/远程 profile）。
+- [x] **R62-9【P3】状态查看器模型表缺"来源"列**（
+  `nnunet_status_viewer.py`、`flexict_status_viewer.py`）：远程训练
+  下载的模型与本地模型无从区分。
+  **已解决（2026-10-04）**：两个状态查看器的模型表各加"来源"列：
+  manifest 带 `execution_backend=remote` 的显示"远程（profile 名）"
+  （读 `remote_profile_name`，缺失回退 `remote_profile_id`），其余
+  显示"本地"。三个远程注册路径（nnU-Net/FlexiCT/nnInteractive）都
+  已写入这些字段，无需额外登记。测试：
+  `test_gui_smoke.py
+  TestViewerNonBlockingRefresh.test_nnunet_viewer_shows_model_source
+  / test_flexict_viewer_shows_model_source`
+  （红→绿验证过；红路径为表头无"来源"列）。gui_smoke 54/54 通过。
 - [ ] **R62-10【P3】AL 复核窗口隐藏失败运行**
   （`flexict_active_learning_ui.py:45-59/:404-407`）：失败的 AL 周期
   不显示，用户不知道有周期没跑完。验收：失败周期显示并带错误信息。

@@ -432,6 +432,83 @@ class TestViewerNonBlockingRefresh(unittest.TestCase):
                 "0.732",
             )
 
+    def test_nnunet_viewer_shows_model_source(self):
+        """R62-9: the models tab must distinguish remote-trained downloads
+        from locally trained models."""
+        _AppFixture.app()
+        import nnunet_status_viewer as viewer
+
+        window = viewer.StatusWindow({"workspace": ""}, QT)
+        try:
+            # An empty context falls back to the real default workspace,
+            # whose task combo would filter our injected rows out — pin
+            # the selected task for this test.
+            with mock.patch.object(
+                window, "_selected_task", return_value="liver"
+            ):
+                window.refresh({
+                "jobs": [
+                    {"task_id": "liver", "task_name": "Liver",
+                     "status_path": "s.json", "status": "completed",
+                     "created_at_epoch": 1.0, "kind": "task"},
+                ],
+                "models": [
+                    {"task_id": "liver", "model_id": "local_m",
+                     "configuration": "3d_fullres", "created_at_epoch": 1.0},
+                    {"task_id": "liver", "model_id": "remote_m",
+                     "configuration": "3d_fullres", "created_at_epoch": 2.0,
+                     "execution_backend": "remote",
+                     "remote_profile_name": "206_root"},
+                ],
+            })
+            header_labels = [
+                window.models.horizontalHeaderItem(column).text()
+                for column in range(window.models.columnCount())
+            ]
+            self.assertIn("来源", header_labels)
+            sources = {
+                window.models.item(row, header_labels.index("来源")).text()
+                for row in range(window.models.rowCount())
+            }
+            self.assertEqual({"本地", "远程（206_root）"}, sources)
+        finally:
+            window.window.close()
+
+    def test_flexict_viewer_shows_model_source(self):
+        """R62-9: same contract for the FlexiCT status viewer."""
+        _AppFixture.app()
+        import flexict_status_viewer as viewer
+
+        window = viewer.StatusWindow({"workspace": ""}, QT)
+        try:
+            window.refresh({
+                "jobs": [],
+                "models": [
+                    {"task_id": "liver", "model_id": "local_m",
+                     "label_name": "liver", "configuration": "2d",
+                     "created_at_epoch": 1.0},
+                    {"task_id": "liver", "model_id": "remote_m",
+                     "label_name": "liver", "configuration": "2d",
+                     "created_at_epoch": 2.0,
+                     "execution_backend": "remote",
+                     "remote_profile_name": "206_root"},
+                ],
+                "pair": (None, None),
+                "recommended": None,
+            })
+            header_labels = [
+                window.models.horizontalHeaderItem(column).text()
+                for column in range(window.models.columnCount())
+            ]
+            self.assertIn("来源", header_labels)
+            sources = {
+                window.models.item(row, header_labels.index("来源")).text()
+                for row in range(window.models.rowCount())
+            }
+            self.assertEqual({"本地", "远程（206_root）"}, sources)
+        finally:
+            window.window.close()
+
     def test_flexict_viewer_shows_training_curve(self):
         # G3: the FlexiCT status viewer had no training-curve tab while the
         # nnU-Net viewer did - the annotator watching a FlexiCT run (local

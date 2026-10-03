@@ -135,9 +135,9 @@ class StatusWindow:
         models_tab = QtWidgets.QWidget()
         models_layout = QtWidgets.QVBoxLayout(models_tab)
         models_layout.setContentsMargins(10, 10, 10, 10)
-        self.models = QtWidgets.QTableWidget(0, 7)
+        self.models = QtWidgets.QTableWidget(0, 8)
         self.models.setHorizontalHeaderLabels(
-            ['模型', '配置', 'Fold', '输出标签', '验证 Dice', '创建时间', '可用']
+            ['模型', '配置', 'Fold', '输出标签', '验证 Dice', '创建时间', '来源', '可用']
         )
         self.models.horizontalHeader().setStretchLastSection(True)
         self.models.horizontalHeader().setSectionResizeMode(
@@ -265,6 +265,16 @@ class StatusWindow:
         self.models.setRowCount(len(self._model_rows))
         for row_index, model in enumerate(self._model_rows):
             usable, reason = model_usability(model)
+            # R62-9: surface where the model came from — a remote-trained
+            # download is indistinguishable from a local one otherwise.
+            if str(model.get("execution_backend") or "") == "remote":
+                source = "远程（{0}）".format(
+                    model.get("remote_profile_name")
+                    or model.get("remote_profile_id")
+                    or "remote",
+                )
+            else:
+                source = "本地"
             values = [
                 model.get("model_id", ""),
                 model.get("configuration", ""),
@@ -275,6 +285,7 @@ class StatusWindow:
                 ),
                 _validation_dice(model) or "-",
                 _format_time(model.get("created_at_epoch")),
+                source,
                 "Yes" if usable else "No",
             ]
             for column, value in enumerate(values):
