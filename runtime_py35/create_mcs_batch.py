@@ -186,6 +186,20 @@ def _stamp_mask_provenance(mask, token):
         pass
 
 
+class _MaskIdentity(object):
+    """Name+guid pair carried from create_mcs_from_manifest to the receipt.
+
+    The receipt writer only reads .name/.guid from mask objects; by the time
+    the queue loop writes the receipt (after publish, F30), the live Mimics
+    objects are gone with the closed project, so the identity travels as
+    plain data instead.
+    """
+
+    def __init__(self, name, guid):
+        self.name = name
+        self.guid = guid
+
+
 def prune_import_receipts(output_dir, retention_days=IMPORT_RECEIPT_RETENTION_DAYS):
     """Delete import receipts past the retention window (best effort).
 
@@ -1106,19 +1120,24 @@ def create_mcs_from_manifest(work_dir, output_mcs):
     print("  saved: {}".format(mcs_path))
 
     # Import receipt (P4): one-click undo needs to know exactly what this
-    # import created - mask names, metadata keys, and the source fingerprint.
-    try:
-        receipt_path = write_import_receipt(
-            os.path.dirname(mcs_path),
-            receipt_case_id,
-            mcs_path,
-            [mr["name"] for mr in mask_results],
-            result,
-            mask_objects=created_mask_objects,
-        )
-        print("  receipt: {}".format(receipt_path))
-    except Exception as exc:
-        print("  warning: could not write import receipt: {}".format(exc))
+    # import created. The receipt is NOT written here: this function saves
+    # to a staging path that the caller renames after returning (F30). A
+    # receipt written against the staging name would point at a file that
+    # no longer exists after publication, breaking undo. The payload is
+    # handed back and written by the caller once the .mcs is at its final
+    # destination.
+    result["receipt"] = {
+        "case_id": receipt_case_id,
+        "mask_names": [mr["name"] for mr in mask_results],
+        "manifest_data": dict(result),
+        "mask_objects": [
+            {
+                "name": str(getattr(mask, "name", "") or ""),
+                "guid": str(getattr(mask, "guid", "") or ""),
+            }
+            for mask in created_mask_objects
+        ],
+    }
 
     # Close project to free memory
     try:
@@ -1425,6 +1444,37 @@ def main(output_dir=None, runtime_dir=None):
                         work_dir, staging_mcs
                     )
                     _publish_mcs(staging_mcs, mcs_path)
+                    # F30: only now is the .mcs at its final, undo-able
+                    # destination. The receipt is written against the final
+                    # path after a successful publish, so undo never gets a
+                    # receipt pointing at the renamed-away staging file —
+                    # and a publish failure leaves no consumable receipt.
+                    receipt_data = {}
+                    if isinstance(created_manifest, dict):
+                        receipt_data = created_manifest.pop("receipt", {}) or {}
+                    if receipt_data:
+                        try:
+                            write_import_receipt(
+                                os.path.dirname(mcs_path),
+                                receipt_data.get("case_id") or case_id,
+                                mcs_path,
+                                receipt_data.get("mask_names") or [],
+                                receipt_data.get("manifest_data") or {},
+                                mask_objects=[
+                                    _MaskIdentity(
+                                        item.get("name", ""),
+                                        item.get("guid", ""),
+                                    )
+                                    for item in receipt_data.get("mask_objects") or []
+                                ],
+                            )
+                        except Exception as receipt_exc:
+                            log_message(
+                                output_dir,
+                                "Created {0}, but import receipt could not be written: {1}".format(
+                                    case_id, receipt_exc
+                                ),
+                            )
                     total_completed += 1
                     last_activity = time.time()
                     log_message(output_dir, "Created: {}".format(mcs_path))

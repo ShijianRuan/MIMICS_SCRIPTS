@@ -3437,6 +3437,118 @@ class TestCreateMcsBatch(unittest.TestCase):
         # never promoted into the dataset).
         self.assertFalse(os.path.exists(descriptor))
 
+    def test_receipt_written_after_publish_against_final_path(self):
+        """F30: the import receipt must point at the FINAL .mcs path and
+        only exist after a successful publish. The old flow wrote the
+        receipt inside create_mcs_from_manifest against the staging name,
+        then renamed the file — undo got a receipt whose target no longer
+        existed (undo_code 1, dead receipt) on every fresh import."""
+        import create_mcs_batch
+
+        output_dir = os.path.join(self.tmp, "output")
+        runtime_dir = os.path.join(self.tmp, "local_queue")
+        work_dir = os.path.join(self.tmp, "work", "case_f30")
+        queue_dir = os.path.join(runtime_dir, "prepared_queue")
+        os.makedirs(output_dir)
+        os.makedirs(work_dir)
+        os.makedirs(queue_dir)
+        output_mcs = os.path.join(output_dir, "case_f30.mcs")
+        with open(os.path.join(work_dir, "prepare_manifest.json"), "w") as handle:
+            json.dump({"output_mcs": output_mcs, "source_fingerprint": "fp"}, handle)
+        descriptor = os.path.join(queue_dir, "case_f30.json")
+        with open(descriptor, "w") as handle:
+            json.dump({"case_id": "case_f30", "work_dir": work_dir, "output_mcs": output_mcs}, handle)
+        with open(os.path.join(runtime_dir, create_mcs_batch.QUEUE_DONE_FILE), "w") as handle:
+            json.dump({"status": "done"}, handle)
+
+        old_create = create_mcs_batch.create_mcs_from_manifest
+        old_runtime = create_mcs_batch._ACTIVE_RUNTIME_DIR
+        try:
+            def fake_create(_work_dir, staging_path):
+                with open(staging_path, "w") as handle:
+                    handle.write("mcs")
+                # What the real function now returns: manifest + receipt
+                # payload deferred to the caller (F30).
+                return {
+                    "output_mcs": output_mcs,
+                    "source_fingerprint": "fp",
+                    "receipt": {
+                        "case_id": "case_f30",
+                        "mask_names": ["Liver"],
+                        "manifest_data": {"source_fingerprint": "fp"},
+                        "mask_objects": [{"name": "Liver", "guid": "g1"}],
+                    },
+                }
+            create_mcs_batch.create_mcs_from_manifest = fake_create
+            self.assertEqual(0, create_mcs_batch.main(output_dir, runtime_dir=runtime_dir))
+        finally:
+            create_mcs_batch.create_mcs_from_manifest = old_create
+            create_mcs_batch._ACTIVE_RUNTIME_DIR = old_runtime
+
+        # The receipt exists, next to the FINAL .mcs, pointing at it.
+        receipt_path = os.path.join(output_dir, ".case_f30.import_receipt.json")
+        self.assertTrue(os.path.isfile(receipt_path))
+        with open(receipt_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        self.assertEqual(
+            os.path.abspath(output_mcs), payload["mcs_path"])
+        self.assertTrue(os.path.isfile(payload["mcs_path"]))
+        self.assertEqual("mimics_import_receipt.v2", payload["schema_version"])
+        self.assertEqual(
+            [{"name": "Liver", "guid": "g1"}], payload["created_masks_v2"])
+
+    def test_publish_failure_leaves_no_consumable_receipt(self):
+        """F30 failure path: when the publish (staging rename) fails, the
+        receipt must NOT be written — a receipt whose target never arrived
+        is exactly the dead receipt the old code produced."""
+        import create_mcs_batch
+
+        output_dir = os.path.join(self.tmp, "output")
+        runtime_dir = os.path.join(self.tmp, "local_queue")
+        work_dir = os.path.join(self.tmp, "work", "case_f30b")
+        queue_dir = os.path.join(runtime_dir, "prepared_queue")
+        os.makedirs(output_dir)
+        os.makedirs(work_dir)
+        os.makedirs(queue_dir)
+        output_mcs = os.path.join(output_dir, "case_f30b.mcs")
+        with open(os.path.join(work_dir, "prepare_manifest.json"), "w") as handle:
+            json.dump({"output_mcs": output_mcs}, handle)
+        descriptor = os.path.join(queue_dir, "case_f30b.json")
+        with open(descriptor, "w") as handle:
+            json.dump({"case_id": "case_f30b", "work_dir": work_dir, "output_mcs": output_mcs}, handle)
+        with open(os.path.join(runtime_dir, create_mcs_batch.QUEUE_DONE_FILE), "w") as handle:
+            json.dump({"status": "done"}, handle)
+
+        old_create = create_mcs_batch.create_mcs_from_manifest
+        old_runtime = create_mcs_batch._ACTIVE_RUNTIME_DIR
+        old_publish = create_mcs_batch._publish_mcs
+        try:
+            def fake_create(_work_dir, staging_path):
+                with open(staging_path, "w") as handle:
+                    handle.write("mcs")
+                return {
+                    "output_mcs": output_mcs,
+                    "receipt": {
+                        "case_id": "case_f30b",
+                        "mask_names": ["Liver"],
+                        "manifest_data": {},
+                        "mask_objects": [{"name": "Liver", "guid": "g1"}],
+                    },
+                }
+            def failing_publish(_staging, _output):
+                raise RuntimeError("synthetic publish failure")
+            create_mcs_batch.create_mcs_from_manifest = fake_create
+            create_mcs_batch._publish_mcs = failing_publish
+            create_mcs_batch.main(output_dir, runtime_dir=runtime_dir)
+        finally:
+            create_mcs_batch.create_mcs_from_manifest = old_create
+            create_mcs_batch._publish_mcs = old_publish
+            create_mcs_batch._ACTIVE_RUNTIME_DIR = old_runtime
+
+        # No receipt for a case that never reached its final path.
+        self.assertFalse(os.path.isfile(
+            os.path.join(output_dir, ".case_f30b.import_receipt.json")))
+
     def test_failed_mcs_case_does_not_stop_later_cases(self):
         import create_mcs_batch
 
