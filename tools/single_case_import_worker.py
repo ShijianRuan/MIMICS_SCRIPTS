@@ -337,13 +337,13 @@ def _wait_for_mcs(
             return 1
         time.sleep(0.5)
 
-    _emit_queue_stop(runtime_dir, "Single-case import timed out.")
+    _emit_queue_stop(runtime_dir, "单病例导入超时。")
     _withdraw_descriptor(descriptor_path)
     _write_status(
         status_path,
         "failed",
         "create_mcs_timeout",
-        error="Timed out while waiting for the background Mimics process to create the .mcs file.",
+        error="等待后台 Mimics 生成 .mcs 文件超时。",
         completed=0,
         failed=1,
         total=1,
@@ -360,13 +360,13 @@ def run(selection_path: Path, status_path: Path, stop_path: Path, log_path: Path
     project_root = str(selection.get("project_root") or ROOT)
 
     if not source_path or not output_dir:
-        _write_status(status_path, "failed", "invalid_selection", error="Missing source_path or output_path in selection JSON.")
+        _write_status(status_path, "failed", "invalid_selection", error="选择文件缺少 source_path 或 output_path。")
         return 2
 
     case_info = selection.get("case_info") or {}
     case_id = str(case_info.get("case_id") or "case")
     if not case_info:
-        _write_status(status_path, "failed", "invalid_selection", error="Selection payload did not include case_info.")
+        _write_status(status_path, "failed", "invalid_selection", error="选择文件缺少病例信息（case_info）。")
         return 2
 
     mask_selection = str(selection.get("mask_selection") or "all").strip().lower()
@@ -376,7 +376,7 @@ def run(selection_path: Path, status_path: Path, stop_path: Path, log_path: Path
             status_path,
             "failed",
             "no_matching_masks",
-            error="No segmentation file matched: {0}.".format(mask_selection),
+            error="没有匹配的分割文件：{0}。".format(mask_selection),
             completed=0,
             failed=1,
             total=1,
@@ -413,7 +413,7 @@ def run(selection_path: Path, status_path: Path, stop_path: Path, log_path: Path
             status_path,
             "failed",
             "case_already_running",
-            error="This case is already being imported: {0}".format(exc),
+            error="该病例正在导入中：{0}".format(exc),
             completed=0,
             failed=1,
             total=1,
@@ -435,14 +435,14 @@ def run(selection_path: Path, status_path: Path, stop_path: Path, log_path: Path
                 kind="prepare_import",
                 output_dir=str(output_dir_path),
             ):
-                raise RuntimeError("Import producer lock ownership changed during startup.")
+                raise RuntimeError("导入准备锁的所有权在启动过程中发生变化。")
             batch_cli.clear_stale_import_queue_stop(output_dir_path)
         except ResourceLockTimeout as exc:
             _write_status(
                 status_path,
                 "failed",
                 "output_queue_busy",
-                error="Another import is preparing data for this output folder: {0}".format(exc),
+                error="另一个导入任务正在为该输出目录准备数据：{0}".format(exc),
                 completed=0,
                 failed=1,
                 total=1,
@@ -452,8 +452,8 @@ def run(selection_path: Path, status_path: Path, stop_path: Path, log_path: Path
         _append_log(log_path, "single-case worker started")
         if _active_producer_exists(runtime_dir):
             error = (
-                "Another import is still preparing cases for this output folder. "
-                "Wait for that import to finish or stop its queue before starting this single case."
+                "另一个导入任务仍在为该输出目录准备病例。"
+                "请等待其完成，或先停止其队列，再导入该单病例。"
             )
             _write_status(
                 status_path,
@@ -479,7 +479,7 @@ def run(selection_path: Path, status_path: Path, stop_path: Path, log_path: Path
         )
 
         if _stop_requested(stop_path):
-            _write_status(status_path, "cancelled", "cancelled", error="Stop requested before preparation started.")
+            _write_status(status_path, "cancelled", "cancelled", error="准备开始前收到了停止请求。")
             return 0
 
         bridge_python = batch_cli.resolve_bridge_python(None)
@@ -507,7 +507,7 @@ def run(selection_path: Path, status_path: Path, stop_path: Path, log_path: Path
                 status_path,
                 "cancelled",
                 "cancelled",
-                error="Import stop requested before the prepared case was queued.",
+                error="病例排队前收到了导入停止请求。",
                 completed=0,
                 failed=0,
                 total=1,
@@ -533,8 +533,8 @@ def run(selection_path: Path, status_path: Path, stop_path: Path, log_path: Path
 
         if _active_producer_exists(runtime_dir):
             error = (
-                "Another import is still preparing cases for this output folder. "
-                "Wait for that import to finish or stop its queue before starting this single case."
+                "另一个导入任务仍在为该输出目录准备病例。"
+                "请等待其完成，或先停止其队列，再导入该单病例。"
             )
             _write_status(
                 status_path,
@@ -568,14 +568,14 @@ def run(selection_path: Path, status_path: Path, stop_path: Path, log_path: Path
         producer_lock_held = False
 
         if _stop_requested(stop_path):
-            _emit_queue_stop(runtime_dir, "Stop requested after preparation.")
+            _emit_queue_stop(runtime_dir, "准备完成后收到停止请求。")
             _withdraw_descriptor(descriptor)
-            _write_status(status_path, "cancelled", "cancelled", error="Stop requested after preparation.", completed=0, failed=0, total=1, case_id=case_id)
+            _write_status(status_path, "cancelled", "cancelled", error="准备完成后收到停止请求。", completed=0, failed=0, total=1, case_id=case_id)
             return 0
 
         mimics_exe = batch_cli.find_mimics_exe(None)
         if not mimics_exe:
-            error = "A separate background Mimics executable was not found. Configure MIMICS_BACKGROUND_EXE."
+            error = "未找到独立的后台 Mimics 程序。请配置 MIMICS_BACKGROUND_EXE。"
             _append_log(log_path, error)
             _withdraw_descriptor(descriptor)
             _write_status(status_path, "failed", "background_launch_failed", error=error, completed=0, failed=1, total=1, case_id=case_id)
@@ -597,9 +597,9 @@ def run(selection_path: Path, status_path: Path, stop_path: Path, log_path: Path
         last_wait_notice = 0.0
         while proc is None:
             if _stop_requested(stop_path):
-                _emit_queue_stop(runtime_dir, "Stop requested while waiting for background Mimics.")
+                _emit_queue_stop(runtime_dir, "等待后台 Mimics 时收到停止请求。")
                 _withdraw_descriptor(descriptor)
-                _write_status(status_path, "cancelled", "cancelled", error="Stopped while waiting for background Mimics.", completed=0, failed=0, total=1, case_id=case_id)
+                _write_status(status_path, "cancelled", "cancelled", error="等待后台 Mimics 时被停止。", completed=0, failed=0, total=1, case_id=case_id)
                 return 0
             holder_output = _background_holder_output(project_root, output_dir_path)
             if holder_output and _same_path(holder_output, output_dir_path):
@@ -610,7 +610,7 @@ def run(selection_path: Path, status_path: Path, stop_path: Path, log_path: Path
                 _append_log(log_path, "background Mimics launched pid={0}".format(getattr(proc, "pid", "?")))
             except ResourceLockTimeout:
                 if time.time() >= launch_deadline:
-                    error = "Timed out waiting for another Mimics-Script background Mimics task to release its resource lock."
+                    error = "等待其他 Mimics-Script 后台任务释放资源锁超时。"
                     _withdraw_descriptor(descriptor)
                     _write_status(status_path, "failed", "background_mimics_busy_timeout", error=error, completed=0, failed=1, total=1, case_id=case_id)
                     return 1
@@ -625,8 +625,8 @@ def run(selection_path: Path, status_path: Path, stop_path: Path, log_path: Path
                     owner = runtime_common.resource_lock_summary(holder)
                     elapsed = int(now - wait_started)
                     message = (
-                        "Waiting for background Mimics ({0}s): {1}. Use Stop "
-                        "Import Queue to cancel.".format(elapsed, owner)
+                        "正在等待后台 Mimics（{0} 秒）：{1}。"
+                        "可使用\"停止导入队列\"取消。".format(elapsed, owner)
                     )
                     _append_log(log_path, message)
                     _write_status(

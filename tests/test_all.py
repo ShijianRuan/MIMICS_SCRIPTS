@@ -12065,6 +12065,38 @@ class TestImportDropWindow(unittest.TestCase):
         self.assertEqual(1, len(records))
         self.assertIn("idle_timeout_s", records[0][2].get("cleanup_policy", ""))
 
+    def test_single_case_worker_errors_are_chinese(self):
+        # P2-3: 该 worker 的 error/message 字段会原样显示在批量状态表里，
+        # 英文报错对标注者不可读。锁定所有用户可见文案为中文，防止回退。
+        path = os.path.join(
+            PROJECT_ROOT, "tools", "single_case_import_worker.py")
+        with open(path, "r", encoding="utf-8") as handle:
+            source = handle.read()
+        for literal in (
+            "等待后台 Mimics 生成 .mcs 文件超时。",
+            "选择文件缺少 source_path 或 output_path。",
+            "选择文件缺少病例信息（case_info）。",
+            "没有匹配的分割文件：",
+            "该病例正在导入中：",
+            "另一个导入任务正在为该输出目录准备数据：",
+            "另一个导入任务仍在为该输出目录准备病例。",
+            "准备开始前收到了停止请求。",
+            "准备完成后收到停止请求。",
+            "等待后台 Mimics 时被停止。",
+            "等待其他 Mimics-Script 后台任务释放资源锁超时。",
+            "未找到独立的后台 Mimics 程序。",
+        ):
+            self.assertIn(literal, source)
+        for english in (
+            "Timed out while waiting",
+            "already being imported",
+            "still preparing cases",
+            "Stop requested",
+            "Stopped while waiting",
+            "was not found. Configure",
+        ):
+            self.assertNotIn(english, source)
+
 
 # ============================================================================
 # P4: Import receipts and one-click undo
