@@ -11874,6 +11874,24 @@ class TestImportDropWindow(unittest.TestCase):
         # The limit is respected.
         self.assertEqual(2, len(dw.collect_recent_drops(status_dir, limit=2)))
 
+    def test_collect_recent_drops_strips_run_id_timestamp(self):
+        # P3-4: with no case_id and no selection file, the raw run id stem
+        # (20261003T120000_abcd) is noise — strip the timestamp prefix.
+        import import_drop_window as dw
+        status_dir = os.path.join(self.tmp, "drop_import2")
+        os.makedirs(status_dir)
+        dw.write_json(os.path.join(status_dir, "20261003T120000_abcd_status.json"), {
+            "status": "failed", "error": "boom",
+        })
+        dw.write_json(os.path.join(status_dir, "plainname_status.json"), {
+            "status": "completed",
+        })
+        entries = dw.collect_recent_drops(status_dir)
+        by_case = {entry["case_id"]: entry for entry in entries}
+        self.assertIn("abcd", by_case)
+        self.assertNotIn("20261003T120000_abcd", by_case)
+        self.assertIn("plainname", by_case)
+
     def test_collect_recent_drops_handles_missing_dir(self):
         import import_drop_window as dw
         self.assertEqual(

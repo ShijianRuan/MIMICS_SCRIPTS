@@ -26,6 +26,7 @@ Run inside Mimics via 01_Data/01_Import_Data.py, or standalone:
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import time
@@ -313,8 +314,12 @@ def collect_recent_drops(status_dir, limit=RECENT_DROP_LIMIT):
             os.path.join(status_dir, stem + "_selection.json"), {}
         ) or {}
         source = str(selection.get("source_path") or "")
+        # P3-4: the last resort used to be the raw run id stem
+        # (20261003T120000_abcd) — meaningless to the annotator. Strip the
+        # timestamp prefix so at least the random suffix stays short noise.
+        readable_stem = re.sub(r"^\d{8}T\d{6}_", "", stem)
         case_id = str(payload.get("case_id") or "") or (
-            os.path.basename(source.rstrip("\\/")) or stem
+            os.path.basename(source.rstrip("\\/")) or readable_stem
         )
         status = str(payload.get("status") or "").lower()
         if not status:
