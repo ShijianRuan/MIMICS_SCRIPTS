@@ -24,7 +24,7 @@ try:
         store_password,
         test_connection,
     )
-    from ui_theme import choose_open_file_async
+    from ui_theme import choose_open_file_async, clamp_window_to_screen
 except ImportError:
     from tools.remote_compute import (
         DEFAULT_GPU_DEVICE,
@@ -40,7 +40,7 @@ except ImportError:
         store_password,
         test_connection,
     )
-    from tools.ui_theme import choose_open_file_async
+    from tools.ui_theme import choose_open_file_async, clamp_window_to_screen
 
 
 def _format_bytes(value: object) -> str:
@@ -64,6 +64,8 @@ class ServerProfilesDialog:
         self.dialog.setModal(True)
         self.dialog.resize(740, 820)
         self.dialog.setMinimumSize(660, 740)
+        # F37: 150% DPI screens can be smaller than the layout minimum.
+        clamp_window_to_screen(self.dialog, (660, 740))
         self._results: Queue[tuple[str, Any]] = Queue()
         self._testing = False
 

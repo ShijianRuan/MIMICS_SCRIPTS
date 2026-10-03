@@ -26,7 +26,12 @@ for candidate in (ROOT, ROOT / "tools", ROOT / "runtime_py35"):
     if value not in sys.path:
         sys.path.insert(0, value)
 
-from ui_theme import PALETTE, configure_application, stylesheet  # noqa: E402
+from ui_theme import (  # noqa: E402
+    PALETTE,
+    clamp_window_to_screen,
+    configure_application,
+    stylesheet,
+)
 from viewer_refresh import BackgroundRefresh  # noqa: E402
 
 
@@ -238,6 +243,8 @@ class BatchStatusWindow:
         self.window.setWindowTitle("批量任务状态")
         self.window.resize(1080, 640)
         self.window.setMinimumSize(860, 480)
+        # F37: 150% DPI screens can be smaller than the layout minimum.
+        clamp_window_to_screen(self.window, (860, 480))
         central = QtWidgets.QWidget()
         root = QtWidgets.QVBoxLayout(central)
         root.setContentsMargins(22, 18, 22, 16)

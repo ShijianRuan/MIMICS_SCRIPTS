@@ -1324,6 +1324,40 @@ class TestWindowClampedToSmallScreen(unittest.TestCase):
                 finally:
                     window.window.close()
 
+    def test_secondary_windows_clamp_on_small_screen(self):
+        """P2-1：nnU-Net/FlexiCT 状态、批量状态窗口的硬最小尺寸都要
+        钳到可用屏幕内（F37 后续铺开）。"""
+        import tempfile
+
+        _AppFixture.app()
+        import batch_status_viewer
+        import flexict_status_viewer
+        import nnunet_status_viewer
+        from PySide6 import QtCore
+
+        small = QtCore.QRect(0, 0, 853, 440)
+        with mock.patch.object(
+            QtWidgets.QMainWindow, "screen",
+            lambda self: _FakeScreen(small),
+        ):
+            with tempfile.TemporaryDirectory() as name:
+                checks = [
+                    ("nnunet", nnunet_status_viewer.StatusWindow(
+                        {"workspace": name}, QT)),
+                    ("flexict", flexict_status_viewer.StatusWindow(
+                        {"workspace": name}, QT)),
+                    ("batch", batch_status_viewer.BatchStatusWindow(
+                        Path(name), QT)),
+                ]
+                for label, window in checks:
+                    try:
+                        self.assertLessEqual(
+                            window.window.minimumHeight(), 440,
+                            "{0} window minimum exceeds the screen".format(
+                                label))
+                    finally:
+                        window.window.close()
+
 
 class _FakeScreen:
     def __init__(self, geometry):

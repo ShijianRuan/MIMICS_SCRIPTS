@@ -40,6 +40,7 @@ for _candidate in (_HERE, _ROOT):
 
 from ui_theme import (  # noqa: E402
     PALETTE,
+    clamp_window_to_screen,
     configure_application,
     stylesheet as shared_stylesheet,
 )
@@ -337,6 +338,8 @@ def run(preview_path=""):
     window = QtWidgets.QMainWindow()
     window.setWindowTitle("系统健康")
     window.setMinimumSize(680, 560)
+    # F37: 150% DPI screens can be smaller than the layout minimum.
+    clamp_window_to_screen(window, (680, 560))
 
     central = QtWidgets.QWidget()
     window.setCentralWidget(central)

@@ -57,6 +57,7 @@ from ui_theme import (  # noqa: E402
     choose_existing_directory_async,
     choose_open_file_async,
     choose_save_file_async,
+    clamp_window_to_screen,
     configure_application,
 )
 from ui_preferences import load_preferences, save_preferences  # noqa: E402
@@ -319,6 +320,8 @@ class ModelCenter:
         self.window.setWindowTitle(TITLE)
         self.window.resize(1040, 800)
         self.window.setMinimumSize(880, 620)
+        # F37: 150% DPI screens can be smaller than the layout minimum.
+        clamp_window_to_screen(self.window, (880, 620))
         root = QtWidgets.QVBoxLayout(self.window)
         root.setContentsMargins(24, 20, 24, 18)
         root.setSpacing(14)

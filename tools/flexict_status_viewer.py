@@ -26,7 +26,11 @@ from flexict_common import (  # noqa: E402
 from flexict_pipeline import list_flexict_jobs  # noqa: E402
 from nnunet_common import read_json  # noqa: E402
 from nnunet_jobs import abandon_job, stop_job  # noqa: E402
-from ui_theme import configure_application, stylesheet  # noqa: E402
+from ui_theme import (  # noqa: E402
+    clamp_window_to_screen,
+    configure_application,
+    stylesheet,
+)
 from viewer_refresh import BackgroundRefresh  # noqa: E402
 
 
@@ -47,6 +51,8 @@ class StatusWindow:
         self.window.setWindowTitle("FlexiCT 状态")
         self.window.resize(980, 740)
         self.window.setMinimumSize(800, 620)
+        # F37: 150% DPI screens can be smaller than the layout minimum.
+        clamp_window_to_screen(self.window, (800, 620))
         central = QtWidgets.QWidget()
         root = QtWidgets.QVBoxLayout(central)
         root.setContentsMargins(22, 18, 22, 18)
