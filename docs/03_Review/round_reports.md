@@ -4696,7 +4696,12 @@ F35 路径分立、F16×2、F01×2 全部转为修复后行为。探针为只读
 ### 门禁与证据
 
 - smoke 8/8：`20261004T032242_smoke.json`（F13 后）
-- fast 29/29：`20261004T042129_fast.json`（六 commit 后首跑，见下）
+- fast 28/29：`20261004T043349_fast.json`（首跑——flexict_build_dataset
+  4 例失败：独立套件仍钉住 F29 修复前的 voxel 索引期望，属本会话 109d404
+  重写 pipeline 测试时漏改的姊妹套件，`ff07491` 按世界坐标期望对齐后
+  8/8）
+- fast 29/29：`20261004T050911_fast.json`（`ff07491` 后复跑全绿，R69
+  收尾门禁）
 - 定向：flexict_integration 107/107、gui_smoke 43/43、nnunet 套件、
   TestNewFeatures 123/123、TestEdgeCases 全绿
 - 每项修复均做 git stash 负控制验证（新测试在未修复代码上必失败）
