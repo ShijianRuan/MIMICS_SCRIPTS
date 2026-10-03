@@ -12507,6 +12507,91 @@ class TestImportReceiptAndUndo(unittest.TestCase):
         self.assertEqual([], saved["deleted"])
         self.assertTrue(os.path.isfile(mcs_path))
 
+    def test_undo_v2_per_mask_delete_failure_keeps_receipt(self):
+        """F31: when the host delete itself fails on a mask, the failure
+        must propagate - the receipt is kept for retry, no success summary
+        is shown, and the mask is still there."""
+        import import_undo_mimics
+
+        out_dir = os.path.join(self.tmp, "out")
+        mcs_path = os.path.join(out_dir, "s0001.mcs")
+        receipt_path = self._write_v2_receipt(
+            out_dir, mcs_path, [("Bone", "g-bone")]
+        )
+        saved = self._install_v2_undo_env(
+            [("im1", [{"name": "Bone", "guid": "g-bone", "token": "tok-1"}])],
+            mcs_path, save_writes=b"project-bytes",
+        )
+        # The host refuses the delete on the imported mask.
+        import import_undo_mimics as undo_mod
+        for image in undo_mod.mimics.data.images:
+            for mask in list(image.masks):
+                if getattr(mask, "name", "") == "Bone":
+                    def _failing_delete(*_a):
+                        raise RuntimeError("host refused the delete")
+                    mask.delete = _failing_delete
+        with mock.patch.object(import_undo_mimics, "_candidate_receipt_dirs",
+                               lambda: [out_dir]):
+            code = import_undo_mimics.undo_last_import(confirm=False)
+        self.assertEqual(4, code, "a failing delete must fail the undo")
+        self.assertTrue(os.path.isfile(receipt_path),
+                        "receipt must survive for retry")
+        # No success summary: the only dialog is the failure explanation.
+        summary_texts = " ".join(str(a[0]) for a, _kw in saved["message_boxes"])
+        self.assertIn("删除失败", summary_texts)
+        self.assertNotIn("撤销完成", summary_texts)
+
+    def test_undo_v1_ambiguous_name_deletes_nothing(self):
+        """F19: a v1 receipt (names only) whose name now matches masks on
+        two images must not delete either - ownership cannot be proven."""
+        import import_undo_mimics
+        from create_mcs_batch import write_import_receipt
+
+        out_dir = os.path.join(self.tmp, "v1_ambiguous")
+        os.makedirs(out_dir)
+        mcs_path = os.path.join(out_dir, "s0001.mcs")
+        with open(mcs_path, "wb") as handle:
+            handle.write(b"project-bytes")
+        receipt_path = write_import_receipt(
+            out_dir, "s0001", mcs_path, ["liver"], {}
+        )
+        saved = self._install_undo_env(mcs_path, ["liver", "liver"])
+        with mock.patch.object(import_undo_mimics, "_candidate_receipt_dirs",
+                               lambda: [out_dir]):
+            code = import_undo_mimics.undo_last_import(confirm=False)
+        self.assertEqual(7, code)
+        self.assertEqual([], saved["deleted"], "nothing may be deleted")
+        self.assertTrue(os.path.isfile(receipt_path),
+                        "receipt must survive for manual resolution")
+        self.assertTrue(os.path.isfile(mcs_path))
+        summary_texts = " ".join(str(a[0]) for a, _kw in saved["message_boxes"])
+        self.assertIn("对应多个掩膜", summary_texts)
+
+    def test_undo_summary_shows_reason_not_count(self):
+        """F31: the file-kept summary renders the divergence reason in the
+        parentheses, not the deleted-mask count twice."""
+        import import_undo_mimics
+
+        out_dir = os.path.join(self.tmp, "out")
+        mcs_path = os.path.join(out_dir, "s0001.mcs")
+        self._write_v2_receipt(out_dir, mcs_path, [("Bone", "g-bone")])
+        saved = self._install_v2_undo_env(
+            [("im1", [
+                {"name": "Bone", "guid": "g-bone", "token": "tok-1"},
+                {"name": "Kidney", "guid": "g-kidney"},  # manual, no token
+            ])],
+            mcs_path, save_writes=b"project-with-manual-work",
+        )
+        with mock.patch.object(import_undo_mimics, "_candidate_receipt_dirs",
+                               lambda: [out_dir]):
+            code = import_undo_mimics.undo_last_import(confirm=False)
+        self.assertEqual(0, code)
+        summary_text = " ".join(str(a[0]) for a, _kw in saved["message_boxes"])
+        self.assertIn("session has mask(s) the import did not create", summary_text)
+        # The old bug rendered the count in the reason slot: "(1)" instead
+        # of the reason text.
+        self.assertNotIn("（1）", summary_text)
+
     def test_undo_v1_receipt_with_extra_mask_keeps_file(self):
         """W02 旧receipt保守处理: a v1 receipt (names only) with an extra
         manual mask in the session must not trigger the delete-file

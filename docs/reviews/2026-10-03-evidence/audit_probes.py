@@ -80,15 +80,18 @@ with tempfile.TemporaryDirectory(prefix='mimics_audit_') as tmp:
     def fail_delete(): raise RuntimeError('synthetic host deletion failure')
     m=types.SimpleNamespace(name='liver',guid='guidA',delete=fail_delete)
     alive[:]=[m]
+    propagated=''
     with mock.patch.object(undo.mimics.data,'images',[image]),mock.patch.object(common,'execute_mimics_transaction',side_effect=lambda api,op,title:op()):
-        result=undo._delete_owned_masks(rec)
-    record('R31_deletion_failure_swallowed',dict(returned=result,remaining=len(alive),exception_propagated=False))
+        try: result=undo._delete_owned_masks(rec)
+        except Exception as exc: result=None; propagated=type(exc).__name__+': '+str(exc)
+    record('R31_deletion_failure_swallowed',dict(returned=result,remaining=len(alive),exception_propagated=propagated or False))
     failed_project=t/'delete_failure.mcs';failed_project.write_bytes(b'project')
     failed_receipt=t/'delete_failure.import_receipt.json'
     full_rec=dict(rec,schema_version='mimics_import_receipt.v2',created_masks=['liver'],mcs_path=str(failed_project),mcs_fingerprint='deliberately changed')
     failed_receipt.write_text(json.dumps(full_rec))
     with mock.patch.object(undo,'find_latest_receipt',return_value=(str(failed_receipt),full_rec)),mock.patch.object(undo,'_open_project',return_value=True),mock.patch.object(undo.mimics.data,'images',[image]),mock.patch.object(common,'execute_mimics_transaction',side_effect=lambda api,op,title:op()):
-        code=undo.undo_last_import(confirm=False)
+        try: code=undo.undo_last_import(confirm=False)
+        except Exception: code='raised'
     record('R31_failed_delete_consumes_receipt',dict(undo_code=code,receipt_exists=failed_receipt.exists(),mask_remaining=len(alive)))
 
     # v1 is deliberately still supported; verify migration cannot name-delete
@@ -98,8 +101,8 @@ with tempfile.TemporaryDirectory(prefix='mimics_audit_') as tmp:
         def __init__(self,guid): self.name='liver';self.guid=guid
         def delete(self):deleted_names.append(self.guid)
     with mock.patch.object(undo.mimics.data,'images',[types.SimpleNamespace(masks=[LegacyMask('imported')]),types.SimpleNamespace(masks=[LegacyMask('manual-other-image')])]),mock.patch.object(common,'execute_mimics_transaction',side_effect=lambda api,op,title:op()):
-        undo._delete_masks({'liver'})
-    record('F19_v1_still_deletes_same_name',dict(deleted_objects=deleted_names))
+        deleted_v1,ambiguous_v1=undo._delete_masks({'liver'})
+    record('F19_v1_still_deletes_same_name',dict(deleted_objects=deleted_names,returned_deleted=deleted_v1,ambiguous=ambiguous_v1))
 
     # Documented ImageData surface has linked_objects, not image.masks.
     with mock.patch.object(undo.mimics.data,'images',[types.SimpleNamespace(linked_objects=[])]):

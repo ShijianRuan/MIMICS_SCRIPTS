@@ -214,22 +214,39 @@ def _delete_masks(mask_names):
 
     Kept for v1 receipts (name-based). v2 receipts go through
     _delete_owned_masks, which never deletes a same-name object that
-    belongs to another image (F19).
+    belongs to another image (F19). v1 cannot prove ownership, so a name
+    matching more than one live mask anywhere in the project is treated
+    as ambiguous and nothing is deleted - the user resolves it by hand.
     """
+
+    images = list(mimics.data.images)
+    live = []
+    for image in images:
+        for mask in list(image.masks):
+            live.append(mask)
+    ambiguous = []
+    for name in mask_names:
+        holders = [
+            m for m in live
+            if str(getattr(m, "name", "") or "") == name
+        ]
+        if len(holders) > 1:
+            ambiguous.append(name)
+    if ambiguous:
+        return None, ambiguous
 
     def operation():
         deleted = []
-        images = list(mimics.data.images)
-        for image in images:
-            for mask in list(image.masks):
-                if mask.name in mask_names:
-                    mask.delete()
-                    deleted.append(mask.name)
+        for mask in live:
+            if str(getattr(mask, "name", "") or "") in mask_names:
+                mask.delete()
+                deleted.append(mask.name)
         return deleted
 
-    return runtime_common.execute_mimics_transaction(
+    deleted = runtime_common.execute_mimics_transaction(
         mimics, operation, "Mimics-Script Undo Import"
     )
+    return deleted, []
 
 
 def _delete_owned_masks(receipt):
@@ -238,6 +255,10 @@ def _delete_owned_masks(receipt):
     Returns (deleted_names, ambiguous_names). Ambiguous entries are
     skipped and reported - the user resolves them by hand; the undo never
     guesses.
+
+    A failing per-mask delete raises out of the transaction (F31): the
+    receipt is kept so the undo can be retried; a half-completed delete
+    never masquerades as success.
     """
     matches, ambiguous = _resolve_owned_masks(receipt)
     if ambiguous:
@@ -247,12 +268,9 @@ def _delete_owned_masks(receipt):
         deleted = []
         for index in sorted(matches):
             mask = matches[index]
-            try:
-                name = str(getattr(mask, "name", "") or "")
-                mask.delete()
-                deleted.append(name)
-            except Exception:
-                pass
+            name = str(getattr(mask, "name", "") or "")
+            mask.delete()
+            deleted.append(name)
         return deleted
 
     return runtime_common.execute_mimics_transaction(
@@ -375,6 +393,16 @@ def undo_last_import(confirm=True):
     if not _open_project(mcs_path):
         return 3
 
+    # F31: judge the session against its pre-undo state. The old order
+    # (delete first, then check) marked every clean rollback "diverged"
+    # because the imported masks were missing - they had just been deleted.
+    receipt_fp = str(receipt.get("mcs_fingerprint") or "")
+    pre_undo_fp = _mcs_fingerprint(mcs_path)
+    disk_matches = bool(receipt_fp) and pre_undo_fp == receipt_fp
+    session_diverged, divergence_reason = (False, "")
+    if disk_matches:
+        session_diverged, divergence_reason = _session_diverged(receipt)
+
     is_v2 = bool(receipt.get("created_masks_v2")) and \
         receipt.get("schema_version") == RECEIPT_SCHEMA_VERSION
     mask_names = set(str(n) for n in (receipt.get("created_masks") or []))
@@ -424,7 +452,7 @@ def undo_last_import(confirm=True):
             return 7
     elif mask_names:
         try:
-            deleted = _delete_masks(mask_names)
+            deleted, ambiguous = _delete_masks(mask_names)
         except Exception as exc:
             mimics.dialogs.message_box(
                 "掩膜删除失败，已回滚：\n{0}".format(exc),
@@ -432,6 +460,23 @@ def undo_last_import(confirm=True):
                 ui_blocking=False,
             )
             return 4
+        if ambiguous:
+            # F19: v1 receipts record names only; a name present on more
+            # than one mask (e.g. a hand-made same-name mask on another
+            # image) cannot be attributed, so nothing is deleted and the
+            # receipt is kept for the user to resolve by hand.
+            mimics.dialogs.message_box(
+                "导入记录中的掩膜名现在对应多个掩膜：\n{0}\n\n"
+                "旧版导入记录无法证明哪一个是该次导入创建的，"
+                "因此没有自动删除任何掩膜。\n\n"
+                "请手动删除正确的掩膜；如果还想回滚文件，"
+                "再重新运行撤销上次导入。导入记录已保留。".format(
+                    ", ".join(sorted(set(ambiguous))[:5])
+                ),
+                title="撤销上次导入",
+                ui_blocking=False,
+            )
+            return 7
 
     # File rollback (F18): the pre-undo .mcs is removed only when BOTH the
     # disk fingerprint still matches the import AND the open session holds
@@ -439,13 +484,7 @@ def undo_last_import(confirm=True):
     # deletion of a file whose in-memory project contains unsaved manual
     # masks: save_project would flush that manual work into the file, and
     # deleting it would destroy work the user never agreed to lose. The
-    # session check runs BEFORE any save, on the untouched in-memory state.
-    receipt_fp = str(receipt.get("mcs_fingerprint") or "")
-    pre_undo_fp = _mcs_fingerprint(mcs_path)
-    disk_matches = bool(receipt_fp) and pre_undo_fp == receipt_fp
-    session_diverged, divergence_reason = (False, "")
-    if disk_matches:
-        session_diverged, divergence_reason = _session_diverged(receipt)
+    # session check ran BEFORE the deletes, on the untouched in-memory state.
     try:
         mimics.file.save_project(filename=mcs_path, save_as_type="Mimics Project Files")
     except Exception as exc:
@@ -513,7 +552,7 @@ def undo_last_import(confirm=True):
     elif session_diverged:
         summary = (
             "撤销完成。已从工程中删除 {0} 个掩膜，工程已保存。\n\n"
-            ".mcs 文件被保留，因为工程中含有该次导入之外的工作（{0}）。"
+            ".mcs 文件被保留，因为工程中含有该次导入之外的工作（{1}）。"
             "删除文件会破坏这些工作——确认不需要时请手动删除。".format(
                 len(deleted),
                 divergence_reason or "导入后发生了改动",
