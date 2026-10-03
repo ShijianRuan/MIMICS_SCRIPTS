@@ -8247,6 +8247,59 @@ class TestNewFeatures(unittest.TestCase):
         self.assertEqual(b"\x01" * 8, (root / "liver_manual.u8").read_bytes())
         self.assertEqual(b"\x00" * 8, (root / "liver_manual_2.u8").read_bytes())
 
+    def test_mimics_export_case_collisions_get_distinct_buffers(self):
+        """R70 (F32 复查残留)：Windows 文件系统大小写不敏感，"Liver" 与
+        "liver" 是同一个文件。去重集合必须按 normcase 比较，否则第二个
+        mask 静默覆盖第一个，两条 manifest 记录指向同一个 .u8。"""
+        import mimics_export
+
+        root = Path(self.tmp) / "export_case_collision"
+        root.mkdir()
+
+        class Image(object):
+            logical_dimensions = [2, 2, 2]
+
+        image = Image()
+
+        class Mask(object):
+            def __init__(self, name, data):
+                self.name = name
+                self.image = image
+
+        masks = [
+            Mask("Liver", b"\x01" * 8),
+            Mask("liver", b"\x00" * 8),
+        ]
+        originals = {
+            "masks": mimics_export.mimics.data.masks,
+            "stream": mimics_export._stream_mask_to_file,
+        }
+        try:
+            mimics_export.mimics.data.masks = masks
+            mimics_export._stream_mask_to_file = (
+                lambda a_mask, path: (
+                    Path(path).write_bytes(getattr(a_mask, "_data", b"")),
+                    len(getattr(a_mask, "_data", b"")),
+                )[1]
+            )
+            for a_mask in masks:
+                a_mask._data = b"\x01" * 8 if a_mask.name == "Liver" else b"\x00" * 8
+            manifest = mimics_export.export_masks_to_buffers(str(root))
+        finally:
+            mimics_export.mimics.data.masks = originals["masks"]
+            mimics_export._stream_mask_to_file = originals["stream"]
+        safe_names = [entry["safe_name"] for entry in manifest["masks"]]
+        self.assertEqual(2, len(safe_names))
+        # normcase 下互异：Windows 上 normcase 会把两者都变同一小写串，
+        # 因此第二个必须被重命名（_2 后缀）。
+        self.assertEqual(
+            2, len({os.path.normcase(name) for name in safe_names}),
+            "safe names must be distinct on a case-insensitive filesystem",
+        )
+        # 两个文件都存活且内容各自正确——没有静默覆盖。
+        self.assertEqual(b"\x01" * 8, (root / "Liver.u8").read_bytes())
+        self.assertEqual(b"\x00" * 8, (root / "liver_2.u8").read_bytes())
+
     def test_stream_mask_to_file_defaults_to_gui_pump(self):
         """F13: streaming alone does not keep the UI responsive. A
         multi-chunk export must pump the Mimics GUI between chunks even

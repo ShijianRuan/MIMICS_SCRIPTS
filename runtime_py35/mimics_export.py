@@ -1354,15 +1354,18 @@ def export_masks_to_buffers(
     # overwriting the first mask's buffer with the second's. Track used
     # stems and disambiguate with a stable numeric suffix so every mask
     # keeps its own file; the manifest records the mapping.
+    # R70: compare via os.path.normcase — Windows filesystems are
+    # case-insensitive, so "Liver"/"liver" collide on disk even though the
+    # raw strings differ (the manifest keeps the original casing).
     used_safe_names = set()
 
     def _unique_safe_name(base):
         candidate = base
         counter = 2
-        while candidate in used_safe_names:
+        while os.path.normcase(candidate) in used_safe_names:
             candidate = "{0}_{1}".format(base, counter)
             counter += 1
-        used_safe_names.add(candidate)
+        used_safe_names.add(os.path.normcase(candidate))
         return candidate
 
     for a_mask in selected:
@@ -1787,13 +1790,15 @@ def _foreground_export_tick(monitor):
                 safe_name = _sanitize_name(name)
                 # F32: disambiguate against stems already used in this
                 # export so colliding names never share one buffer file.
+                # R70: normcase for the same reason as the foreground path
+                # ("Liver"/"liver" are one file on Windows).
                 used = monitor.setdefault("used_safe_names", set())
                 unique_name = safe_name
                 counter = 2
-                while unique_name in used:
+                while os.path.normcase(unique_name) in used:
                     unique_name = "{0}_{1}".format(safe_name, counter)
                     counter += 1
-                used.add(unique_name)
+                used.add(os.path.normcase(unique_name))
                 u8_path = os.path.join(monitor["buffers_dir"], unique_name + ".u8")
                 written = _stream_mask_to_file(a_mask, u8_path)
                 expected = 1
