@@ -32,11 +32,11 @@ def _offer_source_geometry_repair(error_text):
 
 
 TITLE = "nnU-Net"
-BUTTON_TRAIN = "Train Model..."
-BUTTON_PREDICT = "Predict Current Case..."
-BUTTON_STATUS = "Show Status and Models"
-BUTTON_UPDATE = "Update Matching Masks"
-BUTTON_CREATE = "Create Editable Copies"
+BUTTON_TRAIN = "训练模型…"
+BUTTON_PREDICT = "预测当前病例…"
+BUTTON_STATUS = "查看状态与模型"
+BUTTON_UPDATE = "更新匹配掩膜"
+BUTTON_CREATE = "创建可编辑副本"
 
 # Stable marker carried by the pipeline's validate_materialized_source_geometry
 # failure; the shared repair offer lives in fix_source_affine_metadata.
@@ -162,7 +162,7 @@ def _launch_gui(script_name, context, monitor_kind):
     _write_json(context_path, context)
     script = os.path.join(_project_root(), "tools", script_name)
     if not os.path.isfile(script):
-        raise RuntimeError("External nnU-Net window is missing: {0}".format(script))
+        raise RuntimeError("缺少外部 nnU-Net 窗口脚本：{0}".format(script))
     process = mimics_mask_apply._launch_gui_process(
         [_external_python(), script, "--context", context_path],
         cwd=_project_root(),
@@ -222,7 +222,7 @@ def start_training():
     except Exception as exc:
         _log(logging.ERROR, "Could not open nnU-Net training setup: {0}".format(exc))
         mimics.dialogs.message_box(
-            "Could not open nnU-Net training setup.\n\n{0}".format(
+            "无法打开 nnU-Net 训练设置。\n\n{0}".format(
                 external_window_launcher.error_guidance(exc)
             ),
             title=TITLE,
@@ -237,18 +237,15 @@ def _prediction_context():
     ts_root, case_id, source_path = mimics_mask_apply._resolve_prediction_context()
     if not case_id or not source_path:
         raise RuntimeError(
-            "The active project could not be linked to its original source "
-            "image, so prediction was not started.\n\n"
-            "Open the project that was created when the case was imported "
-            "(01_Data > 01_Import_Data). "
-            "If this project was moved or copied away from the dataset, "
-            "re-import the case instead."
+            "当前工程无法关联到其原始源影像，因此预测未启动。\n\n"
+            "请打开病例导入时创建的工程（01_Data > 01_Import_Data）。"
+            "如果该工程已被移动或复制到数据集之外，请改为重新导入该病例。"
         )
     target_grid = mimics_mask_apply._active_live_grid_payload()
     source_geometry = mimics_mask_apply._active_source_geometry_payload()
     if not target_grid or not source_geometry:
         raise RuntimeError(
-            "The active image physical grid could not be verified. Prediction was not started."
+            "无法验证当前影像的物理网格，预测未启动。"
         )
     return {
         "selected_mask_name": str(getattr(selected_mask, "name", "") or "") if selected_mask else "",
@@ -270,7 +267,7 @@ def start_prediction():
     except Exception as exc:
         _log(logging.ERROR, "nnU-Net prediction could not start: {0}".format(exc))
         mimics.dialogs.message_box(
-            "nnU-Net prediction could not start.\n\n{0}".format(exc),
+            "nnU-Net 预测无法启动。\n\n{0}".format(exc),
             title=TITLE,
             ui_blocking=False,
         )
@@ -320,7 +317,7 @@ def show_status():
     except Exception as exc:
         _log(logging.ERROR, "Could not open nnU-Net status viewer: {0}".format(exc))
         mimics.dialogs.message_box(
-            "Could not open nnU-Net status viewer.\n\n{0}".format(
+            "无法打开 nnU-Net 状态查看器。\n\n{0}".format(
                 external_window_launcher.error_guidance(exc)
             ),
             title=TITLE,
@@ -658,12 +655,12 @@ def _prepare_apply_queue(monitor, bridge_result):
     if mode not in ("update", "create"):
         answer = mimics.dialogs.question_box(
             message=(
-                "nnU-Net prediction is complete and ready to apply.\n\n"
-                "Update Matching Masks replaces unchanged Masks with matching label names.\n"
-                "Create Editable Copies preserves all existing Masks."
+                "nnU-Net 预测已完成，可以应用。\n\n"
+                "更新匹配掩膜 会替换标签名匹配且未改动的掩膜。\n"
+                "创建可编辑副本 会保留所有现有掩膜。"
             ),
             buttons=BUTTON_UPDATE + ";" + BUTTON_CREATE,
-            title="nnU-Net Prediction Ready",
+            title="nnU-Net 预测就绪",
             ui_blocking=True,
         )
         mode = "update" if answer == BUTTON_UPDATE else "create"
@@ -713,7 +710,7 @@ def _prepare_apply_queue(monitor, bridge_result):
             }
         )
     if eligible == 0:
-        raise RuntimeError("The prediction contains no non-background labels.")
+        raise RuntimeError("预测结果不包含任何前景标签。")
     monitor["apply_queue"] = queue
     monitor["applied_masks"] = [name for name in already_applied if name]
     _persist_application_state(monitor, application)
@@ -793,7 +790,7 @@ def _monitor_tick_locked(monitor):
         except Exception:
             pass
         mimics.dialogs.message_box(
-            "The external nnU-Net window exited before starting a task.\n\n{0}".format(detail),
+            "外部 nnU-Net 窗口在启动任务前就退出了。\n\n{0}".format(detail),
             title=TITLE,
             ui_blocking=False,
         )
@@ -811,11 +808,11 @@ def _monitor_tick_locked(monitor):
                 "status": state,
                 "phase": "controller_stopped",
                 "message": (
-                    "The local remote-task controller stopped. Use Show Status and Models, then Stop, to clean up the remote container."
+                    "本地远程任务控制器已停止。请使用 查看状态与模型，然后点 停止，来清理远程容器。"
                     if state == "orphaned_remote"
-                    else "The nnU-Net background process stopped before recording completion."
+                    else "nnU-Net 后台进程在记录完成状态前就已停止。"
                 ),
-                "error": "No nnU-Net controller or worker process is running.",
+                "error": "没有正在运行的 nnU-Net 控制器或工作进程。",
                 "updated_at_epoch": time.time(),
             }
         )
@@ -868,7 +865,7 @@ def _monitor_tick_locked(monitor):
             _stop_monitor(key)
             if state == "failed":
                 mimics.dialogs.message_box(
-                    "nnU-Net setup failed.\n\n{0}".format(status.get("error") or "Unknown error"),
+                    "nnU-Net 设置失败。\n\n{0}".format(status.get("error") or "未知错误"),
                     title=TITLE,
                     ui_blocking=False,
                 )
@@ -883,11 +880,11 @@ def _monitor_tick_locked(monitor):
         if state in ("completed", "failed", "cancelled", "abandoned"):
             _stop_monitor(key)
             if state == "completed":
-                message = "nnU-Net training completed. The model is available for prediction."
+                message = "nnU-Net 训练完成。该模型已可用于预测。"
             elif state == "cancelled":
-                message = "nnU-Net training was cancelled."
+                message = "nnU-Net 训练已取消。"
             else:
-                message = "nnU-Net training failed.\n\n{0}".format(status.get("error") or "Unknown error")
+                message = "nnU-Net 训练失败。\n\n{0}".format(status.get("error") or "未知错误")
             mimics.dialogs.message_box(message, title=TITLE, ui_blocking=False)
         return
     if kind != "infer":
@@ -904,7 +901,9 @@ def _monitor_tick_locked(monitor):
         if state == "failed" and _offer_source_geometry_repair(error_text):
             return
         mimics.dialogs.message_box(
-            "nnU-Net prediction {0}.\n\n{1}".format(state, error_text),
+            "nnU-Net 预测已{0}。\n\n{1}".format(
+                "取消" if state == "cancelled" else "失败", error_text
+            ),
             title=TITLE,
             ui_blocking=False,
         )
@@ -942,7 +941,7 @@ def _monitor_tick_locked(monitor):
     if bridge.get("status") != "ok":
         _stop_monitor(key)
         mimics.dialogs.message_box(
-            "nnU-Net result conversion failed.\n\n{0}".format(bridge.get("error") or "Unknown error"),
+            "nnU-Net 结果转换失败。\n\n{0}".format(bridge.get("error") or "未知错误"),
             title=TITLE,
             ui_blocking=False,
         )
@@ -956,7 +955,7 @@ def _monitor_tick_locked(monitor):
     except Exception as exc:
         _stop_monitor(key)
         mimics.dialogs.message_box(
-            "Could not apply nnU-Net prediction.\n\n{0}".format(exc),
+            "无法应用 nnU-Net 预测结果。\n\n{0}".format(exc),
             title=TITLE,
             ui_blocking=False,
         )
@@ -1119,7 +1118,7 @@ def main(action=None):
         except Exception as exc:
             _log(logging.ERROR, "nnU-Net prediction could not start: {0}".format(exc))
             mimics.dialogs.message_box(
-                "nnU-Net prediction could not start.\n\n{0}".format(exc),
+                "nnU-Net 预测无法启动。\n\n{0}".format(exc),
                 title=TITLE,
                 ui_blocking=False,
             )

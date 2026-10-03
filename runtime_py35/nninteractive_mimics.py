@@ -31,31 +31,31 @@ import dataset_manifest
 import runtime_common
 
 
-TITLE = "nnInteractive Segmentation"
-BUTTON_POINT = "Add Points"
-BUTTON_SCRIBBLE = "Paint Scribble"
-BUTTON_BOX = "Draw Box"
-BUTTON_LASSO = "Draw Lasso"
-BUTTON_UNDO = "Undo Last Prompt"
-BUTTON_RESET = "Reset To Start"
-BUTTON_FINISH = "Finish"
-BUTTON_FOREGROUND = "Foreground"
-BUTTON_BACKGROUND = "Background"
-BUTTON_INCLUDE_POINT = "Add Include Point"
-BUTTON_EXCLUDE_POINT = "Add Exclude Point"
-BUTTON_REMOVE_POINT = "Remove Last Point"
-BUTTON_RUN_POINTS = "Run Points"
-BUTTON_DISCARD_POINTS = "Discard Points"
-BUTTON_ADD_FOREGROUND_SCRIBBLE = "Add Foreground Scribble"
-BUTTON_ADD_BACKGROUND_SCRIBBLE = "Add Background Scribble"
-BUTTON_RUN_SCRIBBLES = "Run Scribbles"
-BUTTON_DISCARD_SCRIBBLES = "Discard Scribbles"
-BUTTON_CANCEL = "Cancel"
-BUTTON_DISCARD_SESSION = "Discard AI Session"
-BUTTON_RETRY = "Retry Prediction"
-BUTTON_START_CURRENT = "Start From Current Mask"
-BUTTON_START_NEW_MODEL = "Start New Model Session"
-BUTTON_KEEP_CURRENT_MODEL = "Keep Current Session"
+TITLE = "nnInteractive 交互标注"
+BUTTON_POINT = "点标注"
+BUTTON_SCRIBBLE = "涂鸦"
+BUTTON_BOX = "框选"
+BUTTON_LASSO = "套索"
+BUTTON_UNDO = "撤销"
+BUTTON_RESET = "重置"
+BUTTON_FINISH = "完成"
+BUTTON_FOREGROUND = "前景"
+BUTTON_BACKGROUND = "背景"
+BUTTON_INCLUDE_POINT = "添加包含点"
+BUTTON_EXCLUDE_POINT = "添加排除点"
+BUTTON_REMOVE_POINT = "删除上一个点"
+BUTTON_RUN_POINTS = "执行点标注"
+BUTTON_DISCARD_POINTS = "丢弃点标注"
+BUTTON_ADD_FOREGROUND_SCRIBBLE = "添加前景涂鸦"
+BUTTON_ADD_BACKGROUND_SCRIBBLE = "添加背景涂鸦"
+BUTTON_RUN_SCRIBBLES = "执行涂鸦"
+BUTTON_DISCARD_SCRIBBLES = "丢弃涂鸦"
+BUTTON_CANCEL = "取消"
+BUTTON_DISCARD_SESSION = "放弃 AI 会话"
+BUTTON_RETRY = "重试"
+BUTTON_START_CURRENT = "从当前 Mask 开始"
+BUTTON_START_NEW_MODEL = "启动新模型会话"
+BUTTON_KEEP_CURRENT_MODEL = "保留当前会话"
 
 PROMPT_MASK_PREFIX = "nnInteractive Prompt"
 DEFAULT_RESULT_NAME = "nnInteractive Result"
@@ -2001,23 +2001,23 @@ def _choose_completed_result_target(image, target, state, result):
         # answer for the rest of the session (R61-10 - asking per case
         # turned batch annotation into a modal-dialog storm).
         decision = mimics.dialogs.question_box(
-            title="nnInteractive Prediction Ready",
+            title="nnInteractive 预测完成",
             message=(
-                "nnInteractive prediction completed in {0}s.\n\n"
-                "Update Selected Mask applies the result to {1}.\n"
-                "Create Editable Copy keeps it unchanged and starts an editable AI Draft.\n\n"
-                "This choice is remembered for the rest of this Mimics session."
-            ).format(result.get("elapsed_seconds", "?"), str(getattr(target, "name", "") or "the selected Mask")),
-            buttons="Update Selected Mask;Create Editable Copy",
+                "nnInteractive 预测在 {0} 秒内完成。\n\n"
+                "更新所选 Mask 会将结果应用到 {1}。\n"
+                "创建可编辑副本 保持其不变，并新建一个可编辑的 AI 草稿。\n\n"
+                "本次选择将在本次 Mimics 会话中一直记住。"
+            ).format(result.get("elapsed_seconds", "?"), str(getattr(target, "name", "") or "所选 Mask")),
+            buttons="更新所选 Mask;创建可编辑副本",
             ui_blocking=True,
         )
         _SESSION_WRITE_MODE = (
-            "in_place" if decision == "Update Selected Mask" else "derived_copy"
+            "in_place" if decision == "更新所选 Mask" else "derived_copy"
         )
         if _SESSION_WRITE_MODE == "in_place":
             state["write_mode"] = "in_place"
             return target
-        if decision != "Create Editable Copy":
+        if decision != "创建可编辑副本":
             _mimics_log(logging.INFO, "nnInteractive result destination was closed; using a new editable copy to preserve the selected Mask.")
     else:
         state["write_mode"] = _SESSION_WRITE_MODE
@@ -2059,8 +2059,8 @@ def _make_mask_visible(mask):
 def _choose_sign():
     answer = mimics.dialogs.question_box(
         message=(
-            "Foreground means the structure should be included.\n"
-            "Background means the structure should be excluded."
+            "前景表示该结构应被包含。\n"
+            "背景表示该结构应被排除。"
         ),
         buttons=BUTTON_FOREGROUND + ";" + BUTTON_BACKGROUND + ";" + BUTTON_CANCEL,
         title=TITLE,
@@ -2077,9 +2077,9 @@ def _capture_point(image, include):
     try:
         coordinates = mimics.indicate_coordinate(
             message=(
-                "Click inside the structure."
+                "在目标结构内部点击。"
                 if include
-                else "Click an area that must be excluded from the structure."
+                else "点击必须从结构中排除的区域。"
             ),
             show_message_box=True,
             confirm=False,
@@ -2156,13 +2156,13 @@ def _capture_point_set(image, _visual_objects=None):
             buttons.append(BUTTON_DISCARD_POINTS)
             answer = mimics.dialogs.question_box(
                 message=(
-                    "Add all points for the next prediction.\n\n"
-                    "Include points: {0}\n"
-                    "Exclude points: {1}\n\n"
-                    "Temporary green/red markers show the current point set."
+                    "请添加下一次预测所需的全部点。\n\n"
+                    "包含点：{0}\n"
+                    "排除点：{1}\n\n"
+                    "临时显示的绿/红标记表示当前点集。"
                 ).format(include_count, exclude_count),
                 buttons=";".join(buttons),
-                title="Point Set",
+                title="点集",
                 ui_blocking=True,
             )
             if answer == BUTTON_INCLUDE_POINT:
@@ -2241,21 +2241,21 @@ def _capture_box(image, _visual_objects=None):
     try:
         measurement = mimics.measure.indicate_distance_measurement(
             message=(
-                "Place the two endpoints on opposite corners of the structure.\n"
-                "The line is used only as the diagonal of a 2D foreground box."
+                "将两个端点放在目标结构的对角位置。\n"
+                "该线仅用作 2D 前景框的对角线。"
             ),
             show_message_box=True,
             confirm=True,
-            title="Foreground Box",
+            title="前景框",
         )
         if measurement is None:
             return None
         points = _voxel_points(image, [measurement.point1, measurement.point2])
         if len(points) != 2 or _single_slice_axis(points) is None:
             mimics.dialogs.message_box(
-                "The two endpoints must define a non-degenerate box on one image slice.\n\n"
-                "Use a 2D view and place the points on opposite corners.",
-                title="Box Not Accepted",
+                "两个端点必须在同一张影像切片上构成一个非退化的框。\n\n"
+                "请使用 2D 视图，将两个点放在对角位置。",
+                title="框未接受",
                 ui_blocking=True,
             )
             # Box not accepted: delete measurement immediately.
@@ -2306,20 +2306,20 @@ def _capture_lasso(image, _visual_objects=None):
     try:
         spline = mimics.analyze.indicate_spline(
             message=(
-                "Place control points around the structure and close the Spline before confirming.\n"
-                "The closed curve becomes a 2D foreground Lasso prompt."
+                "在目标结构周围放置控制点，并在确认前闭合样条曲线。\n"
+                "闭合后的曲线将作为 2D 前景套索提示。"
             ),
             show_message_box=True,
             confirm=True,
-            title="Foreground Lasso",
+            title="前景套索",
         )
         if spline is None:
             return None
         if not bool(getattr(spline, "closed", False)):
             mimics.dialogs.message_box(
-                "The Spline is open. A Lasso prompt must be closed.\n\n"
-                "Run Draw Lasso again and close the curve before confirming.",
-                title="Lasso Not Accepted",
+                "样条曲线未闭合。套索提示必须是闭合的。\n\n"
+                "请重新执行套索，并在确认前闭合曲线。",
+                title="套索未接受",
                 ui_blocking=True,
             )
             # Not accepted: delete spline immediately.
@@ -2331,8 +2331,8 @@ def _capture_lasso(image, _visual_objects=None):
         points = _voxel_points(image, _spline_geometry(spline))
         if len(set(tuple(point) for point in points)) < 3:
             mimics.dialogs.message_box(
-                "The closed Spline contains fewer than three distinct voxel points.",
-                title="Lasso Not Accepted",
+                "闭合的样条曲线包含的互不相同体素点少于三个。",
+                title="套索未接受",
                 ui_blocking=True,
             )
             try:
@@ -2342,9 +2342,9 @@ def _capture_lasso(image, _visual_objects=None):
             return None
         if _single_slice_axis(points) is None:
             mimics.dialogs.message_box(
-                "The Lasso must lie on one axis-aligned image slice.\n\n"
-                "Draw it in an axial, coronal, or sagittal 2D view.",
-                title="Lasso Not Accepted",
+                "套索必须位于一个轴向对齐的影像切片上。\n\n"
+                "请在轴位、冠状位或矢状位的 2D 视图中绘制。",
+                title="套索未接受",
                 ui_blocking=True,
             )
             try:
@@ -2394,13 +2394,13 @@ def _capture_scribble_set(image, temp_dir, _visual_objects=None):
         buttons.append(BUTTON_DISCARD_SCRIBBLES)
         answer = mimics.dialogs.question_box(
             message=(
-                "Add foreground and background scribbles for one prediction.\n\n"
-                "Foreground scribbles: {0}\n"
-                "Background scribbles: {1}\n\n"
-                "Run only after all scribbles for this round are added."
+                "请为一次预测添加前景和背景涂鸦。\n\n"
+                "前景涂鸦：{0}\n"
+                "背景涂鸦：{1}\n\n"
+                "本轮所有涂鸦添加完成后再执行。"
             ).format(foreground_count, background_count),
             buttons=";".join(buttons),
-            title="Scribble Set",
+            title="涂鸦集",
             ui_blocking=True,
         )
         if answer == BUTTON_ADD_FOREGROUND_SCRIBBLE:
@@ -2477,11 +2477,11 @@ def _capture_mask_prompt(image, include, interaction_type, edit_type, temp_dir, 
         mimics.segment.activate_edit_mask(prompt_mask, edit_type, "Draw")
         if int(getattr(prompt_mask, "number_of_pixels", 0)) <= 0:
             mimics.dialogs.message_box(
-                "No {0} pixels were captured.\n\n"
-                "Draw on the temporary prompt Mask before confirming the edit.".format(
+                "未捕获到任何 {0} 像素。\n\n"
+                "请在确认编辑前，在临时提示 Mask 上进行绘制。".format(
                     interaction_type
                 ),
-                title="nnInteractive Prompt Empty",
+                title="nnInteractive 提示为空",
                 ui_blocking=True,
             )
             return None
@@ -2777,19 +2777,19 @@ def _async_prompt_menu(target, state, source=None, profile=None):
         # (Update Selected Mask / Create Editable Copy); the choice then
         # sticks for the whole Mimics session (R61-10). Every other case
         # applies without asking. The menu copy must say which one applies.
-        "The first result will ask once where to apply it "
-        "(the choice is remembered for this Mimics session); later "
-        "results are applied automatically."
+        "第一个结果会询问一次应用到何处"
+        "（该选择将在本次 Mimics 会话中记住）；后续"
+        "结果将自动应用。"
         if state and state.get("write_mode") == "choose_on_first_result"
-        else "The result is applied automatically when ready."
+        else "结果就绪后将自动应用。"
     )
     return mimics.dialogs.question_box(
         message=(
-            "Source snapshot: {0}\n"
-            "AI result Mask: {1}\n"
-            "Prompts in this AI session: {2}\n\n"
-            "Submitting a prompt starts background inference and immediately "
-            "returns control to Mimics. {3}"
+            "源快照：{0}\n"
+            "AI 结果 Mask：{1}\n"
+            "本 AI 会话中的提示数：{2}\n\n"
+            "提交提示后会启动后台推理，并立即"
+            "将控制权交还给 Mimics。{3}"
         ).format(source_name, target_name, count, apply_note),
         buttons=";".join(buttons),
         title=TITLE,
@@ -2814,10 +2814,10 @@ def _run_async(
         if not _state_model_matches(state, profile):
             answer = mimics.dialogs.question_box(
                 message=(
-                    "The selected Mask already has an AI session created with another "
-                    "nnInteractive model.\n\n"
-                    "Start a new session from the current Mask with {0}?"
-                ).format(profile.get("task_name") or profile.get("model_id") or "the selected model"),
+                    "所选 Mask 已有一个使用其他 "
+                    "nnInteractive 模型创建的 AI 会话。\n\n"
+                    "是否使用 {0} 从当前 Mask 启动新会话？"
+                ).format(profile.get("task_name") or profile.get("model_id") or "所选模型"),
                 buttons=BUTTON_START_NEW_MODEL + ";" + BUTTON_KEEP_CURRENT_MODEL,
                 title=TITLE,
                 ui_blocking=True,
@@ -2992,9 +2992,9 @@ def _continue_session_prompt(
         pending_visual_objects = visual_objects
         if prompt is None:
             mimics.dialogs.message_box(
-                "No prompt was submitted for {0}.\n\n"
-                "The AI prediction was not started.".format(action),
-                title="nnInteractive Prompt Empty",
+                "未提交任何 {0} 提示。\n\n"
+                "AI 预测未启动。".format(action),
+                title="nnInteractive 提示为空",
                 ui_blocking=False,
             )
             return False
@@ -3069,9 +3069,9 @@ def _run_with_config(config):
     if buffer_owner:
         mimics.dialogs.message_box(
             message=(
-                "nnInteractive cannot take a consistent image and Mask snapshot while {0} is using Mimics buffers.\n\n"
-                "Wait for that operation to finish or stop it, then retry."
-            ).format(buffer_owner.get("owner") or "another Mimics-Script task"),
+                "在 {0} 正在使用 Mimics 缓冲区时，nnInteractive 无法获取一致的图像和 Mask 快照。\n\n"
+                "请等待该操作完成或停止它，然后重试。"
+            ).format(buffer_owner.get("owner") or "另一个 Mimics-Script 任务"),
             title=TITLE,
             ui_blocking=False,
         )
@@ -3089,11 +3089,11 @@ def _run_with_config(config):
         if not holder_is_nninteractive_server:
             mimics.dialogs.message_box(
                 message=(
-                    "The GPU is currently used by {0}.\n\n"
-                    "nnInteractive was not started, so no prompt or Mask state was changed. "
-                    "Interactive prompting should not sit behind a long training or inference queue. "
-                    "Wait for that task to finish, stop it from its task window, or use "
-                    "Admin > Stop All Owned Services."
+                    "GPU 当前正被 {0} 占用。\n\n"
+                    "nnInteractive 未启动，因此未更改任何提示或 Mask 状态。 "
+                    "交互标注不应排在长时间的训练或推理队列之后。 "
+                    "请等待该任务完成、在其任务窗口中停止它，或使用 "
+                    "管理菜单 > 停止所有自有服务。"
                 ).format(runtime_common.resource_lock_summary(gpu_holder)),
                 title=TITLE,
                 ui_blocking=False,
@@ -3113,10 +3113,10 @@ def _run_with_config(config):
         current = busy_workers[0]
         mimics.dialogs.message_box(
             message=(
-                "Another nnInteractive model is still producing or applying a result.\n\n"
-                "Model: {0}\n"
-                "No Mask or prompt state was changed. Wait for that result to be applied, "
-                "or stop its session before switching models."
+                "另一个 nnInteractive 模型仍在生成或应用结果。\n\n"
+                "模型：{0}\n"
+                "未更改任何 Mask 或提示状态。请等待该结果应用完成，"
+                "或在切换模型前停止其会话。"
             ).format(current.get("task_name") or current.get("model_id") or "official"),
             title=TITLE,
             ui_blocking=False,
@@ -3126,12 +3126,11 @@ def _run_with_config(config):
     if same_model_busy is not None:
         mimics.dialogs.message_box(
             message=(
-                "Another image is still running an nnInteractive prediction with the "
-                "same model.\n\n"
-                "Image: {0}\n"
-                "No Mask or prompt state was changed. The AI server can only serve one "
-                "image at a time; wait for that prediction to be applied, or finish its "
-                "session, before starting one on this image."
+                "另一幅图像仍在使用同一模型运行 nnInteractive 预测。\n\n"
+                "图像：{0}\n"
+                "未更改任何 Mask 或提示状态。AI 服务器一次只能处理一幅"
+                "图像；请等待该预测应用完成，或结束其会话，"
+                "然后再在这幅图像上启动预测。"
             ).format(
                 same_model_busy.get("image_name")
                 or same_model_busy.get("target_name")
@@ -4069,10 +4068,10 @@ def _error_guidance(error_text, stage=""):
     ):
         return (
             "out_of_memory",
-            "The AI model ran out of GPU memory.",
-            "Close other GPU programs or stop running AI training jobs "
-            "(Admin > Stop All Owned Services), then retry. "
-            "If it keeps failing, try a smaller image or restart Mimics.",
+            "AI 模型的 GPU 显存不足。",
+            "关闭其他占用 GPU 的程序，或停止正在运行的 AI 训练任务 "
+            "（管理菜单 > 停止所有自有服务），然后重试。 "
+            "如果仍然失败，请尝试较小的图像或重启 Mimics。",
         )
     if (
         "connection refused" in combined
@@ -4085,10 +4084,10 @@ def _error_guidance(error_text, stage=""):
     ):
         return (
             "server_unavailable",
-            "The nnInteractive AI server stopped or could not start.",
-            "Retry from the menu. If it fails again, run "
-            "Admin > Setup / Repair Environment, or stop background services "
-            "and retry.",
+            "nnInteractive AI 服务器已停止或无法启动。",
+            "从菜单重试。如果再次失败，请运行 "
+            "管理菜单 > 环境设置/修复（99_Admin > 01），或停止后台服务"
+            "后重试。",
         )
     if (
         "no module named" in combined
@@ -4103,23 +4102,23 @@ def _error_guidance(error_text, stage=""):
     ):
         return (
             "environment_broken",
-            "The nnInteractive Python environment is incomplete or damaged.",
-            "Run Admin > Setup / Repair Environment, then retry.",
+            "nnInteractive Python 环境不完整或已损坏。",
+            "请运行 管理菜单 > 环境设置/修复（99_Admin > 01），然后重试。",
         )
     if "changed" in combined and (
         "mask" in combined or "target" in combined or "project" in combined
     ):
         return (
             "stale_target",
-            "The Mask or project changed while the AI was running, so the "
-            "result can no longer be applied safely.",
-            "Start a new AI session from the current Mask.",
+            "AI 运行期间 Mask 或项目发生了变化，因此结果"
+            "已无法安全应用。",
+            "从当前 Mask 启动新的 AI 会话。",
         )
     return (
         "unknown",
         str(error_text or "Unknown error"),
-        "Retry from the menu. If it keeps failing, check the log files in "
-        "the AI session folder or contact support.",
+        "从菜单重试。如果仍然失败，请查看 AI 会话文件夹中的日志文件"
+        "或联系支持人员。",
     )
 
 
@@ -4152,13 +4151,13 @@ def _show_async_running(target, state):
     stage = worker.get("stage", worker.get("status", state.get("status", "running")))
     answer = mimics.dialogs.question_box(
         message=(
-            "nnInteractive is still running in the background.\n\n"
-            "Stage: {0}\n"
-            "You can continue using Mimics.\n\n"
-            "Run nnInteractive again later to apply the result."
+            "nnInteractive 仍在后台运行。\n\n"
+            "阶段：{0}\n"
+            "您可以继续使用 Mimics。\n\n"
+            "稍后再次运行 nnInteractive 即可应用结果。"
         ).format(stage),
-        buttons="Keep Running;" + BUTTON_DISCARD_SESSION,
-        title="nnInteractive Running",
+        buttons="继续运行;" + BUTTON_DISCARD_SESSION,
+        title="nnInteractive 运行中",
         ui_blocking=True,
     )
     if answer == BUTTON_DISCARD_SESSION:
@@ -4324,9 +4323,9 @@ def _async_monitor_tick(monitor):
             error, "monitor"
         )
         mimics.dialogs.message_box(
-            "nnInteractive background prediction failed.\n\n{0}\n\n{1}\n\n"
-            "Suggested action: {2}".format(error, guidance_message, suggested_action),
-            title="nnInteractive Failed",
+            "nnInteractive 后台预测失败。\n\n{0}\n\n{1}\n\n"
+            "建议操作：{2}".format(error, guidance_message, suggested_action),
+            title="nnInteractive 失败",
             ui_blocking=True,
         )
     finally:
@@ -4414,11 +4413,11 @@ def _start_async_result_monitor(image, target, state, config):
         if _start_win32_async_result_monitor(image, target, state, config, poll_seconds, timeout_seconds):
             return True
         mimics.dialogs.message_box(
-            "Background inference started.\n\n"
-            "Mimics did not expose a usable timer API in this session, so the result "
-            "cannot be applied automatically. Run nnInteractive again later to "
-            "check the result.",
-            title="nnInteractive Running",
+            "后台推理已启动。\n\n"
+            "本次会话中 Mimics 未提供可用的定时器 API，因此无法自动应用结果。 "
+            "稍后再次运行 nnInteractive 以"
+            "查看结果。",
+            title="nnInteractive 运行中",
             ui_blocking=False,
         )
         return False
@@ -4428,10 +4427,10 @@ def _start_async_result_monitor(image, target, state, config):
         if _start_win32_async_result_monitor(image, target, state, config, poll_seconds, timeout_seconds):
             return True
         mimics.dialogs.message_box(
-            "Background inference started.\n\n"
-            "No active application timer was found, so the result cannot be applied "
-            "automatically. Run nnInteractive again later to check the result.",
-            title="nnInteractive Running",
+            "后台推理已启动。\n\n"
+            "未找到活动的应用程序定时器，因此无法自动应用结果。 "
+            "稍后再次运行 nnInteractive 以查看结果。",
+            title="nnInteractive 运行中",
             ui_blocking=False,
         )
         return False
@@ -4476,11 +4475,11 @@ def _handle_async_result(image, target, state):
             )
             answer = mimics.dialogs.question_box(
                 message=(
-                    "The nnInteractive background worker stopped before producing a result.\n\n"
-                    "Stage: {0}\nError: {1}\n\n"
+                    "nnInteractive 后台工作进程在生成结果前停止了。\n\n"
+                    "阶段：{0}\n错误：{1}\n\n"
                     "{2}\n\n"
-                    "Suggested action: {3}\n\n"
-                    "Start a new AI session from the current Mask?"
+                    "建议操作：{3}\n\n"
+                    "是否从当前 Mask 启动新的 AI 会话？"
                 ).format(
                     stage,
                     error,
@@ -4488,7 +4487,7 @@ def _handle_async_result(image, target, state):
                     suggested_action,
                 ),
                 buttons=BUTTON_START_CURRENT + ";" + BUTTON_CANCEL,
-                title="nnInteractive Worker Stopped",
+                title="nnInteractive 工作进程已停止",
                 ui_blocking=True,
             )
             if answer == BUTTON_START_CURRENT:
@@ -4537,13 +4536,13 @@ def _handle_async_result(image, target, state):
         )
         answer = mimics.dialogs.question_box(
             message=(
-                "The background prediction failed.\n\n"
-                "Stage: {0}\n"
-                "Error: {1}\n\n"
+                "后台预测失败。\n\n"
+                "阶段：{0}\n"
+                "错误：{1}\n\n"
                 "{2}\n\n"
-                "Suggested action: {3}\n\n"
-                "Retry keeps the same prompts. Discard starts a new AI session "
-                "from the current Mask."
+                "建议操作：{3}\n\n"
+                "重试会保留相同的提示。放弃将从当前 Mask "
+                "启动新的 AI 会话。"
             ).format(
                 error_stage,
                 error_text,
@@ -4551,7 +4550,7 @@ def _handle_async_result(image, target, state):
                 suggested_action,
             ),
             buttons=BUTTON_RETRY + ";" + BUTTON_DISCARD_SESSION + ";" + BUTTON_CANCEL,
-            title="nnInteractive Failed",
+            title="nnInteractive 失败",
             ui_blocking=True,
         )
         if answer == BUTTON_RETRY:
@@ -4631,12 +4630,12 @@ def _handle_async_result(image, target, state):
         )
         answer = mimics.dialogs.question_box(
             message=(
-                "The target Mask changed while nnInteractive was running.\n\n"
-                "The background result is now stale and will not be applied. "
-                "Start a new AI session from the current Mask?"
+                "nnInteractive 运行期间目标 Mask 发生了变化。\n\n"
+                "后台结果已失效，将不会被应用。 "
+                "是否从当前 Mask 启动新的 AI 会话？"
             ),
             buttons=BUTTON_START_CURRENT + ";" + BUTTON_CANCEL,
-            title="nnInteractive Result Is Stale",
+            title="nnInteractive 结果已失效",
             ui_blocking=True,
         )
         if answer == BUTTON_START_CURRENT:
@@ -4661,17 +4660,17 @@ def _handle_async_result(image, target, state):
         # annotator has already drawn - silently. Ask first.
         answer = mimics.dialogs.question_box(
             message=(
-                "nnInteractive returned an empty result (0 foreground voxels).\n\n"
-                "Applying it would clear the current Mask contents.\n\n"
-                "Don't Apply keeps your current Mask. Move the foreground point "
-                "closer to the structure center and place background points "
-                "farther away, then predict again."
+                "nnInteractive 返回了空结果（0 个前景点）。\n\n"
+                "应用该结果将清空当前 Mask 的内容。\n\n"
+                "不应用将保留当前 Mask。请将前景点移到更靠近"
+                "结构中心的位置，并将背景点放在更远的地方，"
+                "然后重新预测。"
             ),
-            buttons="Don't Apply;Apply Empty Result",
-            title="nnInteractive Returned an Empty Mask",
+            buttons="不应用;应用空结果",
+            title="nnInteractive 返回了空 Mask",
             ui_blocking=True,
         )
-        if answer != "Apply Empty Result":
+        if answer != "应用空结果":
             _mimics_log(
                 logging.INFO,
                 "nnInteractive empty result was not applied; the session stays "
@@ -4815,7 +4814,7 @@ def main():
     except Exception as error:
         _mimics_log(logging.ERROR, "nnInteractive error: {0}".format(error))
         mimics.dialogs.message_box(
-            "nnInteractive could not continue.\n\n{0}".format(str(error)),
+            "nnInteractive 无法继续。\n\n{0}".format(str(error)),
             title=TITLE,
             ui_blocking=True,
         )

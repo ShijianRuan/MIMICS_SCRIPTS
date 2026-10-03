@@ -954,7 +954,7 @@ def test_nninteractive_same_model_dual_image_guard(fake, tmp):
     assert_equal(result, 1, "second same-model image launch must be rejected")
     assert_equal(len(fake.dialogs.messages), 1, "rejection must show exactly one dialog")
     assert_true(
-        "same model" in fake.dialogs.messages[0]["message"],
+        "同一模型" in fake.dialogs.messages[0]["message"],
         "rejection dialog must explain the single-session server limit",
     )
 
@@ -1059,14 +1059,14 @@ def test_window_level_from_selected_mask(fake, tmp):
         # untouched.
         state_path.write_text("{}", encoding="utf-8")
         fake.dialogs.questions = []
-        fake.dialogs.question_answers = ["Cancel"]
+        fake.dialogs.question_answers = ["取消"]
         module.undo_last()
         assert_true(fake.dialogs.questions, "undo degrade must ask before resetting")
         assert_equal(
             fake.view.get_contrast(), ((0.0, 0.0), (2026.0, 1.0)),
             "undo cancel must not change contrast",
         )
-        fake.dialogs.question_answers = ["Reset to Full Range"]
+        fake.dialogs.question_answers = ["恢复全范围"]
         fake.view.set_contrast((50.0, 0.0), (900.0, 1.0))
         module.undo_last()
         assert_equal(
@@ -1140,15 +1140,15 @@ def test_mask_identifier_all_mask_bbox_scan(fake, tmp):
         (
             record
             for record in fake.dialogs.questions
-            if record.get("title") == "Mask Identifier"
-            and "Ready to identify masks" in record.get("message", "")
+            if record.get("title") == "掩膜识别"
+            and "准备就绪" in record.get("message", "")
         ),
         None,
     )
     assert_true(preflight is not None, "preflight confirmation should be shown before the first click")
     preflight_message = preflight.get("message", "")
     assert_true(
-        "crash" in preflight_message and "unsaved work" in preflight_message,
+        "崩溃" in preflight_message and "未保存的工作" in preflight_message,
         "preflight warning should state the crash and data-loss consequence of switching tools during the click window",
     )
     assert_true(
@@ -1161,7 +1161,7 @@ def test_mask_identifier_all_mask_bbox_scan(fake, tmp):
     result_message = ""
     for record in fake.dialogs.questions:
         text = record.get("message", "")
-        if "liver" in text or "No mask at this point" in text:
+        if "liver" in text or "该位置没有掩膜" in text:
             result_message = text
             break
     assert_true("liver" in result_message and "hidden_liver" in result_message, "identifier result should include visible and hidden hits")
@@ -1510,16 +1510,16 @@ def test_nninteractive_fast_path_and_mask_buffer(fake, tmp):
     try:
         module._set_mask_from_u8 = lambda *args, **kwargs: applies.append(args)
         fake.dialogs.questions = []
-        fake.dialogs.question_answers = ["Don't Apply"]
+        fake.dialogs.question_answers = ["不应用"]
         outcome = module._handle_async_result(image, counting, state)
         assert_equal(outcome, "ready", "declined empty result outcome")
         assert_equal(len(fake.dialogs.questions), 1, "empty result must ask before applying")
-        assert_equal("Don't Apply" in fake.dialogs.questions[0]["buttons"], True, "empty result dialog must offer Don't Apply")
+        assert_equal("不应用" in fake.dialogs.questions[0]["buttons"], True, "empty result dialog must offer Don't Apply")
         assert_equal(applies, [], "declined empty result must not touch the Mask buffer")
         assert_equal(state["status"], "ready", "declined empty result must leave the session ready")
 
         fake.dialogs.questions = []
-        fake.dialogs.question_answers = ["Apply Empty Result"]
+        fake.dialogs.question_answers = ["应用空结果"]
         outcome = module._handle_async_result(image, counting, state)
         assert_equal(outcome, "ready", "accepted empty result outcome")
         assert_equal(len(fake.dialogs.questions), 0, "re-prompting after a declined empty result must not ask again")
@@ -1547,7 +1547,7 @@ def test_nninteractive_derived_draft_session(fake, tmp):
     assert_true(deferred["target"] is source, "default policy should not create an early Draft")
     assert_equal(deferred["write_mode"], "choose_on_first_result", "default result destination should be deferred")
     assert_equal(len(fake.dialogs.questions), baseline_questions, "starting nnInteractive should not ask for a result destination")
-    fake.dialogs.question_answers.append("Create Editable Copy")
+    fake.dialogs.question_answers.append("创建可编辑副本")
     deferred_state = {"_job_dir": str(tmp / "deferred-job"), "write_mode": "choose_on_first_result"}
     deferred_target = module._choose_completed_result_target(image, source, deferred_state, {"elapsed_seconds": 1.25})
     assert_true(deferred_target is not source, "completion choice should create a new Draft")

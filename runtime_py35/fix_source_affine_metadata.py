@@ -43,7 +43,7 @@ SOURCE_IMAGE_PATH_METADATA = "mimics_script.source_image_path"
 SOURCE_IMAGE_SHAPE_METADATA = "mimics_script.source_image_shape"
 SOURCE_VOXEL_TO_RAS_MATRIX_METADATA = "mimics_script.source_voxel_to_ras_matrix"
 
-TITLE = "Fix Source Affine Metadata"
+TITLE = "修复源影像几何元数据"
 # Must stay identical to the marker embedded in
 # tools/nnunet_pipeline.validate_materialized_source_geometry's error message.
 SOURCE_GEOMETRY_MISMATCH_MARKER = "source geometry mismatch"
@@ -228,7 +228,7 @@ def _finish_repair(monitor):
     if _matrices_equal(stored, true_ras):
         mimics.dialogs.message_box(
             title=TITLE,
-            message="Metadata already matches the source image affine. Nothing was changed.",
+            message="元数据已与源影像仿射矩阵一致，未做任何改动。",
             ui_blocking=False,
         )
         return
@@ -246,8 +246,8 @@ def _finish_repair(monitor):
     mimics.dialogs.message_box(
         title=TITLE,
         message=(
-            "Source affine metadata was repaired and the project was saved.\n\n"
-            "Maximum matrix correction: {0:.6g}"
+            "源影像仿射元数据已修复，工程已保存。\n\n"
+            "矩阵最大修正量：{0:.6g}"
         ).format(diff),
         ui_blocking=False,
     )
@@ -264,7 +264,7 @@ def _monitor_tick(monitor):
             runtime_common.terminate_process_async(process=monitor.get("process"), graceful_seconds=2.0)
             mimics.dialogs.message_box(
                 title=TITLE,
-                message="Affine inspection timed out and its external process was stopped. No metadata was changed.",
+                message="仿射检查超时，外部进程已停止。元数据未做任何改动。",
                 ui_blocking=False,
             )
             return
@@ -280,7 +280,7 @@ def _monitor_tick(monitor):
         _stop_monitor(monitor.get("key"))
         mimics.dialogs.message_box(
             title=TITLE,
-            message="Source affine metadata was not changed.\n\n{0}".format(exc),
+            message="源影像仿射元数据未做改动。\n\n{0}".format(exc),
             ui_blocking=False,
         )
     finally:
@@ -344,19 +344,17 @@ def offer_repair_for_prediction_failure(error_text, framework_title):
         answer = mimics.dialogs.question_box(
             title=framework_title,
             message=(
-                "The stored source geometry of this case does not match the "
-                "image on disk (a known issue for cases imported by a bridge "
-                "version older than 2026-07-13).\n\n"
-                "Repair the stored geometry now? The project is saved after "
-                "the repair; then run the prediction again. If the source "
-                "file itself changed, re-import the case instead."
+                "本病例存储的源影像几何信息与磁盘上的影像不一致"
+                "（已知问题：病例由 2026-07-13 之前的桥接版本导入）。\n\n"
+                "现在修复存储的几何信息吗？修复后会保存工程，然后重新运行推理即可。"
+                "如果源文件本身发生了改动，请改为重新导入该病例。"
             ),
-            buttons="Repair Stored Geometry;Not Now",
+            buttons="修复存储几何;暂不修复",
             ui_blocking=True,
         )
     except Exception:
         return False
-    if answer != "Repair Stored Geometry":
+    if answer != "修复存储几何":
         return False
     try:
         return main() == 0
@@ -369,11 +367,11 @@ def main():
     if active:
         answer = mimics.dialogs.question_box(
             title=TITLE,
-            message="Source affine inspection is already running.",
-            buttons="Keep Running;Stop Inspection",
+            message="源影像仿射检查正在进行中。",
+            buttons="继续运行;停止检查",
             ui_blocking=True,
         )
-        if answer == "Stop Inspection":
+        if answer == "停止检查":
             for monitor in active:
                 monitor["done"] = True
                 _stop_monitor(monitor.get("key"))
@@ -387,7 +385,7 @@ def main():
     if image is None:
         mimics.dialogs.message_box(
             title=TITLE,
-            message="No active image.\n\nOpen the target project and activate the source image first.",
+            message="没有活动影像。\n\n请先打开目标工程并激活源影像。",
         )
         return 1
 
@@ -395,7 +393,7 @@ def main():
     if not source_path or not os.path.isfile(source_path):
         mimics.dialogs.message_box(
             title=TITLE,
-            message="No usable source_image_path metadata, or the file no longer exists:\n{0!r}".format(source_path),
+            message="没有可用的源影像路径元数据，或该文件已不存在：\n{0!r}".format(source_path),
         )
         return 1
 
@@ -404,7 +402,7 @@ def main():
     if stored is None:
         mimics.dialogs.message_box(
             title=TITLE,
-            message="No existing source_voxel_to_ras_matrix metadata on this image; nothing to repair.",
+            message="该影像没有已存储的源影像几何元数据，无需修复。",
         )
         return 1
 
@@ -423,7 +421,7 @@ def main():
     if not _start_monitor(monitor):
         mimics.dialogs.message_box(
             title=TITLE,
-            message="This Mimics session cannot monitor the external affine inspection. No metadata was changed.",
+            message="当前 Mimics 会话无法监控外部几何检查过程，未更改任何元数据。",
             ui_blocking=False,
         )
         return 1

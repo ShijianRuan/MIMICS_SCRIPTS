@@ -45,7 +45,7 @@ def _message_box(message):
     try:
         mimics.dialogs.message_box(
             message,
-            title="Collect Diagnostics",
+            title="收集诊断信息",
             ui_blocking=False,
         )
     except Exception:
@@ -85,8 +85,8 @@ def _diagnostics_tick(monitor):
     output = result.get("output")
     if result.get("returncode") == 0 and output and os.path.isfile(output):
         _message_box(
-            "Diagnostics bundle written to:\n{0}\n\n"
-            "Paths and tokens inside are redacted; it is safe to share.".format(
+            "诊断信息包已写入：\n{0}\n\n"
+            "其中的路径和令牌已脱敏，可以放心分享。".format(
                 output
             )
         )
@@ -96,7 +96,7 @@ def _diagnostics_tick(monitor):
         )
     else:
         _message_box(
-            "Diagnostics collection failed:\n{0}".format(result.get("tail") or "")
+            "诊断信息收集失败：\n{0}".format(result.get("tail") or "")
         )
         _mimics_log(
             logging.WARNING,
@@ -199,20 +199,19 @@ def collect_bundle():
     global _ACTIVE_MONITOR
 
     if _ACTIVE_MONITOR is not None and not _ACTIVE_MONITOR.get("done"):
-        _message_box("Diagnostics collection is already running.")
+        _message_box("诊断信息收集正在进行中。")
         return 0
 
     root = _project_root()
     python_exe = runtime_common.find_external_python(root, allow_system_python=False)
     if not python_exe or not os.path.isfile(python_exe):
         _message_box(
-            "The external tools Python was not found. Run Admin > Setup/Repair "
-            "Environment first."
+            "未找到外部工具 Python。请先运行 管理菜单 > 环境设置/修复。"
         )
         return 1
     script = os.path.join(root, "tools", "collect_diagnostics.py")
     if not os.path.isfile(script):
-        _message_box("The diagnostics tool was not found: {0}".format(script))
+        _message_box("未找到诊断工具：{0}".format(script))
         return 1
     output = os.path.join(
         root, "diagnostics_{0}.zip".format(time.strftime("%Y%m%dT%H%M%S"))
@@ -238,9 +237,8 @@ def collect_bundle():
         "Diagnostics collection started in the background: {0}".format(output),
     )
     _message_box(
-        "Collecting diagnostics in the background...\n"
-        "You can keep working; a message will appear when the bundle is "
-        "ready at:\n{0}".format(output)
+        "正在后台收集诊断信息…\n"
+        "您可以继续工作；信息包就绪后会弹出提示。保存位置：\n{0}".format(output)
     )
 
     def _tick_when_done(current):

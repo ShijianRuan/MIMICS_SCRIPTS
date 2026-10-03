@@ -857,8 +857,8 @@ def _error_guidance(error_text, phase=""):
     ):
         return (
             "environment_broken",
-            "The data-import Python environment is incomplete or damaged.",
-            "Run Admin > Setup / Repair Environment, then retry the import.",
+            "数据导入 Python 环境不完整或已损坏。",
+            "运行 管理菜单 > 环境设置/修复，然后重试导入。",
         )
     if (
         "no space left" in combined
@@ -868,11 +868,10 @@ def _error_guidance(error_text, phase=""):
     ):
         return (
             "disk_full",
-            "The disk ran out of space while importing.",
-            "Free space on the import output drive (or choose a different "
-            "output folder), then retry. Failed cases are listed per case "
-            "in the _failed_cases folder of this import; open it via "
-            "Task Status (01 Data menu).",
+            "导入过程中磁盘空间已耗尽。",
+            "释放磁盘空间（在导入输出磁盘上，或选择其他输出目录）后重试。"
+            "失败病例逐例记录在本次导入的 _failed_cases 目录中；"
+            "可通过任务状态窗口（01_Data > 04）打开查看。",
         )
     if (
         "network path not found" in combined
@@ -883,9 +882,9 @@ def _error_guidance(error_text, phase=""):
     ):
         return (
             "network_unavailable",
-            "The network drive or share holding the input data is unreachable.",
-            "Reconnect the network drive and confirm it opens in Explorer, "
-            "then retry the import.",
+            "存放输入数据的网络驱动器或共享无法访问。",
+            "重新连接网络驱动器并确认可在资源管理器中打开，"
+            "然后重试导入。",
         )
     if (
         "not a valid" in combined and ("nifti" in combined or "image" in combined)
@@ -895,11 +894,9 @@ def _error_guidance(error_text, phase=""):
     ):
         return (
             "source_data_invalid",
-            "One of the input files is damaged or has an inconsistent "
-            "geometry.",
-            "Check the failing case (its original source path is recorded "
-            "in the failed-case details); re-export or exclude it, then "
-            "retry the remaining cases.",
+            "某个输入文件已损坏，或几何信息不一致。",
+            "检查失败病例（其原始源路径已记录在失败详情中）；"
+            "重新导出或排除该病例，然后重试其余病例。",
         )
     if (
         "background mimics" in combined
@@ -908,17 +905,15 @@ def _error_guidance(error_text, phase=""):
     ):
         return (
             "background_mimics_failed",
-            "The background Mimics instance could not create the .mcs file.",
-            "Retry the import. If it fails again, close other Mimics "
-            "windows, run Admin > Setup / Repair Environment, or check the "
-            "background Mimics log shown in the message.",
+            "后台 Mimics 实例无法创建 .mcs 文件。",
+            "重试导入。若再次失败，请关闭其他 Mimics 窗口，运行 "
+            "管理菜单 > 环境设置/修复，或查看消息中显示的后台 Mimics 日志。",
         )
     return (
         "unknown",
-        str(error_text or "Unknown error"),
-        "Retry the import. If it keeps failing, check the import output "
-        "folder's logs subfolder and the diagnostic files kept for the "
-        "failed case, or contact support.",
+        str(error_text or "未知错误"),
+        "重试导入。若持续失败，请查看导入输出目录的 logs 子目录以及"
+        "为失败病例保留的诊断文件，或联系支持人员。",
     )
 
 
@@ -1787,10 +1782,10 @@ def _import_monitor_tick(monitor):
             monitor,
             "prepare_timeout",
             "Dataset preparation timed out.",
-            message_title="Import Timeout",
+            message_title="导入超时",
             message=(
-                "Dataset preparation timed out. The external converter is "
-                "being stopped; the task will become Failed after it exits."
+                "数据集准备已超时。外部转换器正在被停止；"
+                "其退出后任务将变为失败。"
             ),
         )
         return
@@ -1854,14 +1849,14 @@ def _import_monitor_tick(monitor):
         _category, _guidance_message, guidance_action = _error_guidance(result, "prepare")
         source_image = monitor.get("case_image", "")
         mimics.dialogs.message_box(
-            title="Import Error",
+            title="导入错误",
             message=(
-                "Preparation failed for case '{0}':\n{1}\n\nSource: {2}\n\n"
-                "Suggested action: {3}\n\nDiagnostic files kept at:\n{4}"
+                "病例 '{0}' 准备失败：\n{1}\n\n来源：{2}\n\n"
+                "建议操作：{3}\n\n诊断文件保留在：\n{4}"
             ).format(
-                monitor.get("case_id") or "unknown",
+                monitor.get("case_id") or "未知",
                 result,
-                source_image or "see the import log",
+                source_image or "请查看导入日志",
                 guidance_action,
                 job_dir,
             ),
@@ -1930,8 +1925,8 @@ def _import_monitor_tick(monitor):
         traceback.print_exc()
         _category, _guidance_message, guidance_action = _error_guidance(e, "queue")
         mimics.dialogs.message_box(
-            title="Import Error",
-            message="Import queueing failed: {0}\n\nSuggested action: {1}".format(e, guidance_action),
+            title="导入错误",
+            message="导入排队失败：{0}\n\n建议操作：{1}".format(e, guidance_action),
         )
         _cleanup_job_dir(job_dir)
         _cleanup_work_dir(monitor.get("work_dir"))
@@ -1967,8 +1962,8 @@ def _start_next_batch_case(monitor):
         failed = monitor.get("failed", 0)
         total = monitor.get("total", 0)
         mimics.dialogs.message_box(
-            title="Batch Import Complete",
-            message="Queued {0}/{1} case(s); {2} failed.".format(completed, total, failed),
+            title="批量导入完成",
+            message="已排队 {0}/{1} 例；失败 {2} 例。".format(completed, total, failed),
         )
         return
 
@@ -2467,8 +2462,8 @@ def _start_batch_prepare_monitor(job_dir, work_dir, timeout_seconds=1800,
         if _start_win32_batch_prepare_monitor(monitor, poll_seconds, timeout_seconds):
             return True
         mimics.dialogs.message_box(
-            title="Conversion Running",
-            message="Dataset conversion has started, but progress cannot be monitored automatically.",
+            title="转换进行中",
+            message="数据集转换已开始，但进度无法自动监控。",
         )
         return False
 
@@ -2477,8 +2472,8 @@ def _start_batch_prepare_monitor(job_dir, work_dir, timeout_seconds=1800,
         if _start_win32_batch_prepare_monitor(monitor, poll_seconds, timeout_seconds):
             return True
         mimics.dialogs.message_box(
-            title="Conversion Running",
-            message="Dataset conversion has started, but progress cannot be monitored automatically.",
+            title="转换进行中",
+            message="数据集转换已开始，但进度无法自动监控。",
         )
         return False
 
@@ -3023,15 +3018,15 @@ def _first_mcs_monitor_tick(monitor):
             completed = int(status.get("completed", 0) or 0)
             failed = int(status.get("failed", 0) or 0)
             _safe_message_box(
-                "Import Completed with Errors" if failed else "Import Complete",
-                "Background .mcs creation finished.\n\nCreated: {0}\nFailed: {1}\nOutput: {2}{3}".format(
+                "导入完成（部分失败）" if failed else "导入完成",
+                "后台 .mcs 创建已结束。\n\n成功：{0}\n失败：{1}\n输出目录：{2}{3}".format(
                     completed,
                     failed,
                     output_dir,
                     (
-                        "\n\nEach failed case is recorded with its original source "
-                        "path. Open this import in Task Status (01 Data menu) "
-                        "and use Open Log to see the details before retrying."
+                        "\n\n每个失败病例均记录了其原始源路径。"
+                        "请在任务状态窗口（01_Data > 04）中打开本次导入，"
+                        "重试前先点击打开日志查看详情。"
                         if failed
                         else ""
                     ),
@@ -3044,10 +3039,10 @@ def _first_mcs_monitor_tick(monitor):
             worker_error = status.get("error", "Background Mimics could not complete .mcs creation.")
             _category, _guidance_message, guidance_action = _error_guidance(worker_error, "background_mimics")
             _safe_message_box(
-                "Import Background Worker Failed",
+                "导入后台任务失败",
                 (
-                    "{0}\n\nSuggested action: {1}\n\nPrepared data was kept and the open Mimics project "
-                    "was not modified.\n\nMimics log: {2}\nProcess log: {3}"
+                    "{0}\n\n建议操作：{1}\n\n已准备的数据已保留，"
+                    "当前打开的 Mimics 工程未被修改。\n\nMimics 日志：{2}\n进程日志：{3}"
                 ).format(
                     worker_error,
                     guidance_action,
@@ -3068,13 +3063,12 @@ def _first_mcs_monitor_tick(monitor):
                 monitor["done"] = True
                 _stop_import_monitor(monitor_key)
                 _safe_message_box(
-                    "Import Stopped Unexpectedly",
+                    "导入意外停止",
                     (
-                        "Background .mcs creation stopped before reporting completion.\n\n"
-                        "Suggested action: prepared files were kept for retry. Check that "
-                        "the background Mimics process is still allowed to run (Admin > "
-                        "Stop All Owned Services, then retry), or open this import in "
-                        "Task Status (01 Data menu) and read its log."
+                        "后台 .mcs 创建在报告完成前停止了。\n\n"
+                        "建议操作：已准备的文件已保留，可直接重试。请检查后台 Mimics "
+                        "进程是否仍被允许运行（管理菜单 > 停止所有自有服务，然后重试），"
+                        "或在任务状态窗口（01_Data > 04）中打开本次导入并查看其日志。"
                     ),
                     ui_blocking=False,
                 )
@@ -3171,14 +3165,14 @@ def _first_mcs_monitor_tick(monitor):
                 _append_import_log(output_dir, ".mcs is ready: {0}".format(mcs_path))
                 try:
                     mimics.dialogs.message_box(
-                        title="MCS Ready",
-                        message="A converted .mcs file is ready:\n{0}".format(mcs_path),
+                        title="MCS 已就绪",
+                        message="已转换的 .mcs 文件已就绪：\n{0}".format(mcs_path),
                         ui_blocking=False,
                     )
                 except TypeError:
                     mimics.dialogs.message_box(
-                        title="MCS Ready",
-                        message="A converted .mcs file is ready:\n{0}".format(mcs_path),
+                        title="MCS 已就绪",
+                        message="已转换的 .mcs 文件已就绪：\n{0}".format(mcs_path),
                     )
                 if keep_for_batch:
                     monitor["first_notified"] = True
@@ -3403,10 +3397,10 @@ def _start_import_monitor(job_dir, output_mcs, work_dir, timeout_seconds=1800,
         from PyQt5.QtWidgets import QApplication
     except Exception:
         mimics.dialogs.message_box(
-            title="Import Running",
+            title="导入进行中",
             message=(
-                "Dataset conversion has started, but the result cannot be "
-                "queued automatically. Run import again later to check progress."
+                "数据集转换已开始，但结果无法自动排队。"
+                "请稍后重新运行导入以查看进度。"
             ),
         )
         return False
@@ -3414,10 +3408,10 @@ def _start_import_monitor(job_dir, output_mcs, work_dir, timeout_seconds=1800,
     qapp = QApplication.instance()
     if qapp is None:
         mimics.dialogs.message_box(
-            title="Import Running",
+            title="导入进行中",
             message=(
-                "Dataset conversion has started, but the result cannot be "
-                "queued automatically. Run import again later to check progress."
+                "数据集转换已开始，但结果无法自动排队。"
+                "请稍后重新运行导入以查看进度。"
             ),
         )
         return False
@@ -3527,10 +3521,10 @@ def _discover_monitor_tick(monitor):
                 monitor,
                 "scan_timeout",
                 "Dataset scan timed out.",
-                message_title="Scan Timeout",
+                message_title="扫描超时",
                 message=(
-                    "Dataset scan timed out. The external scanner is being "
-                    "stopped; the task will become Failed after it exits."
+                    "数据集扫描已超时。外部扫描器正在被停止；"
+                    "其退出后任务将变为失败。"
                 ),
             )
             return
@@ -3571,7 +3565,7 @@ def _discover_monitor_tick(monitor):
                 monitor.get("output_dir", ""),
                 "Discover failed | {0}".format(result),
             )
-            _safe_message_box("Scan Error", "Dataset scan failed: {0}".format(result))
+            _safe_message_box("扫描错误", "数据集扫描失败：{0}".format(result))
             _write_import_task_status(
                 monitor.get("task_status_path"),
                 {"status": "failed", "phase": "scan_failed", "error": str(result)},
@@ -3590,7 +3584,7 @@ def _discover_monitor_tick(monitor):
         _cleanup_job_dir(job_dir)
 
         if not cases:
-            _safe_message_box("Import", "No case data was found in the selected folder.")
+            _safe_message_box("导入", "所选文件夹中未找到病例数据。")
             _write_import_task_status(
                 monitor.get("task_status_path"),
                 {
@@ -3607,8 +3601,8 @@ def _discover_monitor_tick(monitor):
 
         if result.get("mask_mode") == "named" and int(result.get("mask_count", 0) or 0) == 0:
             _safe_message_box(
-                "No Matching Masks",
-                "No segmentation files matched the requested mask names. Check spelling or choose All masks / Images only.",
+                "未找到匹配的掩膜",
+                "没有分割文件匹配所请求的掩膜名称。请检查拼写，或选择全部 Mask / 仅图像。",
                 ui_blocking=False,
             )
             _write_import_task_status(
@@ -3662,9 +3656,9 @@ def _discover_monitor_tick(monitor):
         )
         if not ok:
             _safe_message_box(
-                "Insufficient Disk Space",
-                "Insufficient local workspace disk space. Estimated requirement: {0} MB; "
-                "available: {1} MB. Please free disk space and retry.".format(
+                "磁盘空间不足",
+                "本地工作区磁盘空间不足。预计需要：{0} MB；"
+                "可用：{1} MB。请释放磁盘空间后重试。".format(
                     estimated_mb, int(free_mb)),
             )
             _write_import_task_status(
@@ -3739,7 +3733,7 @@ def _discover_monitor_tick(monitor):
             _stop_import_monitor(monitor.get("monitor_key"))
         except Exception:
             pass
-        _safe_message_box("Import Error", "Import failed with an unexpected error. The import output folder's logs subfolder has the technical details.")
+        _safe_message_box("导入错误", "导入失败，发生意外错误。技术详情见导入输出目录的 logs 子目录。")
         _write_import_task_status(
             monitor.get("task_status_path"),
             {"status": "failed", "phase": "monitor_failed", "error": str(exc)},
@@ -3847,16 +3841,16 @@ def _start_import_discover_monitor(job_dir, ts_root, output_dir, axes, flips, jo
         from PyQt5.QtWidgets import QApplication
     except Exception:
         mimics.dialogs.message_box(
-            title="Scan Running",
-            message="Dataset scan has started, but progress cannot be monitored automatically.",
+            title="扫描进行中",
+            message="数据集扫描已开始，但进度无法自动监控。",
         )
         return False
 
     qapp = QApplication.instance()
     if qapp is None:
         mimics.dialogs.message_box(
-            title="Scan Running",
-            message="Dataset scan has started, but progress cannot be monitored automatically.",
+            title="扫描进行中",
+            message="数据集扫描已开始，但进度无法自动监控。",
         )
         return False
 
@@ -4144,8 +4138,8 @@ def main(import_mode=None, case_info_override=None):
     if live_bridge_jobs:
         _checkpoint_record("main_blocked_live_bridge", count=len(live_bridge_jobs))
         _safe_message_box(
-            "Import Already Running",
-            "Another image import is still preparing data. Wait for it to finish or stop it in Task Status (01 Data menu) before starting another import.",
+            "导入已在进行中",
+            "另一项图像导入仍在准备数据。请等待其完成，或先在任务状态窗口（01_Data > 04）中停止它，再开始新的导入。",
             ui_blocking=False,
         )
         return 2
@@ -4257,7 +4251,7 @@ def main(import_mode=None, case_info_override=None):
         case_info = _filter_case_masks(case_info, mask_selection)
         if case_info is None:
             _checkpoint_record("single_case_no_supported_data", selected_source=selected_source)
-            mimics.dialogs.message_box(title="Error", message="No supported image data found: {0}".format(selected_source))
+            mimics.dialogs.message_box(title="错误", message="未找到受支持的图像数据：{0}".format(selected_source))
             return 1
         if not output:
             dataset_root = source_case_dir if source_is_file else os.path.dirname(source_case_dir)
@@ -4282,8 +4276,8 @@ def main(import_mode=None, case_info_override=None):
 
         if mask_selection.lower() not in ("all", "none", "no", "off") and not case_info.get("masks"):
             _safe_message_box(
-                "No Matching Masks",
-                "No segmentation file matched: {0}. Check the mask name or choose All masks / Images only.".format(mask_selection),
+                "未找到匹配的掩膜",
+                "没有分割文件匹配：{0}。请检查掩膜名称，或选择全部 Mask / 仅图像。".format(mask_selection),
                 ui_blocking=False,
             )
             return 2
@@ -4338,9 +4332,9 @@ def main(import_mode=None, case_info_override=None):
                 },
             )
             _safe_message_box(
-                "Import Output Busy",
-                "Another Mimics-Script import is preparing data for this output folder. "
-                "Use a different output folder or wait for that preparation to finish.",
+                "导入输出目录忙",
+                "另一项 Mimics-Script 导入正在为该输出目录准备数据。"
+                "请使用其他输出目录，或等待该准备工作完成。",
                 ui_blocking=False,
             )
             return 75
@@ -4436,10 +4430,10 @@ def main(import_mode=None, case_info_override=None):
             },
         )
         _safe_message_box(
-            "Import Output Busy",
-            "Another Mimics-Script import is preparing data for this output folder. "
-            "The Mimics and external import entries share this queue; wait, stop that "
-            "preparation, or choose a different output folder.",
+            "导入输出目录忙",
+            "另一项 Mimics-Script 导入正在为该输出目录准备数据。"
+            "Mimics 导入与外部导入入口共用此队列；请等待、停止该准备工作，"
+            "或选择其他输出目录。",
             ui_blocking=False,
         )
         return 75
@@ -4488,7 +4482,7 @@ if __name__ == "__main__":
     except Exception as error:
         traceback.print_exc()
         try:
-            mimics.dialogs.message_box(title="Fatal Error", message="Error: {0}".format(error))
+            mimics.dialogs.message_box(title="致命错误", message="错误：{0}".format(error))
         except Exception:
             pass
         raise

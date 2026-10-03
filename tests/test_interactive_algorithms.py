@@ -300,7 +300,7 @@ class MimicsRuntimeTests(unittest.TestCase):
         image = FakeImage(_u8_pattern_buffer((4, 5, 6), lambda x, y, z: False))
         self.assertEqual(
             self.runtime._click_plane_axes(image),
-            {"Axial View": 2, "Coronal View": 1, "Sagittal View": 0},
+            {"轴位视图": 2, "冠状位视图": 1, "矢状位视图": 0},
         )
 
     def test_stale_scribble_logits_are_not_reused(self):
@@ -351,7 +351,7 @@ class MimicsRuntimeTests(unittest.TestCase):
                 },
             )
         self.assertEqual(mask.get_voxel_buffer().tobytes(), expected.tobytes())
-        self.assertEqual(self.fake.dialogs.questions[-1]["title"], "ScribblePrompt Ready")
+        self.assertEqual(self.fake.dialogs.questions[-1]["title"], "ScribblePrompt 就绪")
 
 
     def test_changed_target_is_preserved_in_editable_copy(self):

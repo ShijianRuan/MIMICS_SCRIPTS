@@ -125,27 +125,26 @@ def _open_project(mcs_path):
         return True
     if state == "unknown":
         mimics.dialogs.message_box(
-            "Cannot tell whether another project is open in Mimics "
-            "(the project query failed or is unavailable on this "
-            "build).\n\n"
-            "Undo Last Import refuses to open another project while the "
-            "current session state is unknown, so nothing was changed.\n\n"
-            "Step 1: close any open project (save it if needed).\n"
-            "Step 2: run Undo Last Import again.\n"
-            "Your import record is still there — nothing was consumed.",
-            title="Undo Last Import",
+            "无法判断 Mimics 中是否打开了其他工程"
+            "（工程查询失败，或当前版本不支持）。\n\n"
+            "当前会话状态未知时，撤销上次导入拒绝打开其他工程，"
+            "因此未做任何改动。\n\n"
+            "第一步：关闭当前打开的工程（如需保存请先保存）。\n"
+            "第二步：重新运行撤销上次导入。\n"
+            "导入记录仍然保留——没有被消费。",
+            title="撤销上次导入",
             ui_blocking=False,
         )
         return False
     if state in ("path", "unnamed"):
         mimics.dialogs.message_box(
-            "Another project is open in Mimics.\n\n"
-            "Undo Last Import removes the imported masks from the project "
-            "they were created in, so it must open that project itself.\n\n"
-            "Step 1: close the currently open project (save it if needed).\n"
-            "Step 2: run Undo Last Import again.\n"
-            "Your import record is still there — nothing was consumed.",
-            title="Undo Last Import",
+            "Mimics 中打开了其他工程。\n\n"
+            "撤销上次导入要从掩膜所在的工程中移除导入的掩膜，"
+            "因此必须亲自打开该工程。\n\n"
+            "第一步：关闭当前打开的工程（如需保存请先保存）。\n"
+            "第二步：重新运行撤销上次导入。\n"
+            "导入记录仍然保留——没有被消费。",
+            title="撤销上次导入",
             ui_blocking=False,
         )
         return False
@@ -336,9 +335,8 @@ def undo_last_import(confirm=True):
     receipt_path, receipt = find_latest_receipt()
     if not receipt:
         mimics.dialogs.message_box(
-            "No import receipt was found. Receipts are written next to each "
-            "created .mcs file when an import finishes.",
-            title="Undo Last Import",
+            "未找到导入回执。每次导入完成时，回执会写在生成的 .mcs 文件旁边。",
+            title="撤销上次导入",
             ui_blocking=False,
         )
         return 1
@@ -346,30 +344,27 @@ def undo_last_import(confirm=True):
     mcs_path = str(receipt.get("mcs_path") or "")
     if not mcs_path or not os.path.isfile(mcs_path):
         mimics.dialogs.message_box(
-            "The .mcs file from the last import no longer exists:\n{0}\n\n"
-            "Nothing to undo.".format(mcs_path),
-            title="Undo Last Import",
+            "上次导入的 .mcs 文件已不存在：\n{0}\n\n"
+            "没有可撤销的内容。".format(mcs_path),
+            title="撤销上次导入",
             ui_blocking=False,
         )
         return 1
 
     if confirm:
         answer = mimics.dialogs.message_box(
-            "Undo the last import?\n\n"
-            "Case: {0}\n"
-            "Project: {1}\n"
-            "It created {2}.\n\n"
-            "The masks will be deleted from the project. The .mcs file is "
-            "rolled back only if it has not changed since the import.\n\n"
-            "Notes:\n"
-            "- If a different project is open in Mimics, close it first and "
-            "run this action again.\n"
-            "- This undo is one-shot: once it completes, the import record "
-            "is consumed and cannot be undone again. If it fails midway, "
-            "the record is kept so you can retry.".format(
+            "撤销上次导入吗？\n\n"
+            "病例：{0}\n"
+            "工程：{1}\n"
+            "该次导入创建了 {2}。\n\n"
+            "掩膜将从工程中删除。.mcs 文件只有在导入后未发生改动时才会回滚。\n\n"
+            "注意：\n"
+            "- 如果 Mimics 中打开了其他工程，请先关闭再重新运行本操作。\n"
+            "- 本撤销是一次性的：完成后导入记录即被消费，无法再次撤销。"
+            "如果中途失败，记录会保留，可以重试。".format(
                 receipt.get("case_id", "case"), mcs_path, _describe(receipt)
             ),
-            title="Undo Last Import",
+            title="撤销上次导入",
             ui_blocking=True,
         )
         # The Mimics message box returns None/False on non-OK; treat any
@@ -409,8 +404,8 @@ def undo_last_import(confirm=True):
             deleted, ambiguous = _delete_owned_masks(receipt)
         except Exception as exc:
             mimics.dialogs.message_box(
-                "The mask deletion failed and was rolled back:\n{0}".format(exc),
-                title="Undo Last Import",
+                "掩膜删除失败，已回滚：\n{0}".format(exc),
+                title="撤销上次导入",
                 ui_blocking=False,
             )
             return 4
@@ -419,14 +414,11 @@ def undo_last_import(confirm=True):
             # cannot prove which one it created (F19). Never guess: the
             # receipt is kept, the user deletes the right one by hand.
             mimics.dialogs.message_box(
-                "The import record lists mask(s) that now exist on more than "
-                "one image:\n{0}\n\n"
-                "Undo cannot prove which one it created, so nothing was "
-                "deleted automatically.\n\n"
-                "Delete the correct mask by hand, then run Undo Last Import "
-                "again if you also want the file rolled back. The import "
-                "record was kept.".format(", ".join(sorted(set(ambiguous))[:5])),
-                title="Undo Last Import",
+                "导入记录中的掩膜现在存在于多个影像上：\n{0}\n\n"
+                "撤销无法证明哪一个是由该次导入创建的，因此没有自动删除任何掩膜。\n\n"
+                "请手动删除正确的掩膜；如果还想回滚文件，再重新运行撤销上次导入。"
+                "导入记录已保留。".format(", ".join(sorted(set(ambiguous))[:5])),
+                title="撤销上次导入",
                 ui_blocking=False,
             )
             return 7
@@ -435,8 +427,8 @@ def undo_last_import(confirm=True):
             deleted = _delete_masks(mask_names)
         except Exception as exc:
             mimics.dialogs.message_box(
-                "The mask deletion failed and was rolled back:\n{0}".format(exc),
-                title="Undo Last Import",
+                "掩膜删除失败，已回滚：\n{0}".format(exc),
+                title="撤销上次导入",
                 ui_blocking=False,
             )
             return 4
@@ -458,8 +450,8 @@ def undo_last_import(confirm=True):
         mimics.file.save_project(filename=mcs_path, save_as_type="Mimics Project Files")
     except Exception as exc:
         mimics.dialogs.message_box(
-            "The masks were deleted but saving the project failed:\n{0}".format(exc),
-            title="Undo Last Import",
+            "掩膜已删除，但保存工程失败：\n{0}".format(exc),
+            title="撤销上次导入",
             ui_blocking=False,
         )
         return 5
@@ -480,9 +472,8 @@ def undo_last_import(confirm=True):
                 file_removed = True
             except OSError as exc:
                 mimics.dialogs.message_box(
-                    "The masks were deleted, but the .mcs file could not be "
-                    "removed:\n{0}".format(exc),
-                    title="Undo Last Import",
+                    "掩膜已删除，但 .mcs 文件无法移除：\n{0}".format(exc),
+                    title="撤销上次导入",
                     ui_blocking=False,
                 )
                 return 6
@@ -516,29 +507,25 @@ def undo_last_import(confirm=True):
     )
     if file_removed:
         summary = (
-            "Undo complete. {0} mask(s) were deleted and the .mcs file was "
-            "removed (it was unchanged since the import, so deletion is the "
-            "exact rollback).".format(len(deleted))
+            "撤销完成。已删除 {0} 个掩膜，.mcs 文件已被移除"
+            "（导入后未发生改动，删除即精确回滚）。".format(len(deleted))
         )
     elif session_diverged:
         summary = (
-            "Undo complete. {0} mask(s) were deleted from the project and "
-            "the project was saved.\n\nThe .mcs file was KEPT because the "
-            "project holds work the import did not create ({0}). Deleting "
-            "the file would have destroyed that work - delete it by hand if "
-            "you are sure you do not need it.".format(
+            "撤销完成。已从工程中删除 {0} 个掩膜，工程已保存。\n\n"
+            ".mcs 文件被保留，因为工程中含有该次导入之外的工作（{0}）。"
+            "删除文件会破坏这些工作——确认不需要时请手动删除。".format(
                 len(deleted),
-                divergence_reason or "it changed since the import",
+                divergence_reason or "导入后发生了改动",
             )
         )
     else:
         summary = (
-            "Undo complete. {0} mask(s) were deleted from the project and "
-            "the project was saved.\n\nThe .mcs file was kept because it "
-            "changed since the import (annotations or extra masks would "
-            "have been lost).".format(len(deleted))
+            "撤销完成。已从工程中删除 {0} 个掩膜，工程已保存。\n\n"
+            ".mcs 文件被保留，因为它在导入后发生了改动"
+            "（直接删除会丢失标注或额外掩膜）。".format(len(deleted))
         )
-    mimics.dialogs.message_box(summary, title="Undo Last Import", ui_blocking=False)
+    mimics.dialogs.message_box(summary, title="撤销上次导入", ui_blocking=False)
     return 0
 
 

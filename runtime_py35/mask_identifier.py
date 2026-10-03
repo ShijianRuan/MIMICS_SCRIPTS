@@ -291,7 +291,7 @@ def main():
         active_image = None
     if active_image is None:
         mimics.dialogs.message_box(
-            "No active image found.\nPlease open a project first."
+            "未找到活动影像。\n请先打开一个工程。"
         )
         return
 
@@ -302,11 +302,11 @@ def main():
     if not candidates:
         if _mask_count() > 0:
             mimics.dialogs.message_box(
-                "No non-empty masks are available to scan.\n"
-                "If some masks are hidden, show them in the Mask tab and try again."
+                "没有可扫描的非空掩膜。\n"
+                "如果部分掩膜被隐藏，请在掩膜页签中显示它们后重试。"
             )
         else:
-            mimics.dialogs.message_box("No masks in the current project.")
+            mimics.dialogs.message_box("当前工程中没有掩膜。")
         return
 
     bbox_cache = {}
@@ -335,8 +335,8 @@ def main():
     # NON-blocking question_box, during which the user is free to switch tools
     # or adjust views. Only when the user explicitly chooses "Click Again" do we
     # re-enter indicate_coordinate for the brief click window.
-    BUTTON_CLICK = "Click Again"
-    BUTTON_FINISH = "Finish"
+    BUTTON_CLICK = "继续点击"
+    BUTTON_FINISH = "完成"
 
     # Pre-flight confirmation: let the user prepare the view (and switch tools)
     # before entering the first modal click. The warning states the consequence
@@ -344,14 +344,13 @@ def main():
     # click can corrupt Mimics' tool state machine — a data risk, which the
     # task lifecycle policy requires to be spelled out, not just hinted.
     preflight = mimics.dialogs.question_box(
-        title="Mask Identifier",
+        title="掩膜识别",
         message=(
-            "Ready to identify masks.\n\n"
-            "Click '{0}' then click a point in any view.\n\n"
-            "Important: while the cursor waits for your click, do not switch "
-            "to another tool (zoom, pan, measure, ...). Doing so can crash "
-            "Mimics and lose unsaved work. Switch tools only while this "
-            "dialog is shown.".format(BUTTON_CLICK)
+            "准备就绪，可以识别掩膜。\n\n"
+            "点击“{0}”后在任意视图中点击一个点。\n\n"
+            "重要：光标等待点击期间，请不要切换到其他工具（缩放、平移、测量等）。"
+            "这样做可能导致 Mimics 崩溃并丢失未保存的工作。"
+            "请只在本对话框显示期间切换工具。".format(BUTTON_CLICK)
         ),
         buttons="{0};{1}".format(BUTTON_CLICK, BUTTON_FINISH),
         ui_blocking=False,
@@ -362,7 +361,7 @@ def main():
     while True:
         try:
             point = mimics.indicate_coordinate(
-                message="Click to identify mask(s) at this point (Esc to finish)",
+                message="点击以识别该位置的掩膜（按 Esc 结束）",
                 show_message_box=False,
                 confirm=False,
             )
@@ -376,10 +375,10 @@ def main():
             idx = active_image.get_voxel_indexes(point)
         except ValueError:
             answer = mimics.dialogs.question_box(
-                title="Mask Identifier",
+                title="掩膜识别",
                 message=(
-                    "Point ({:.1f}, {:.1f}, {:.1f}) mm is outside the image bounds.\n\n"
-                    "Try another point?".format(*point)
+                    "点（{:.1f}, {:.1f}, {:.1f}）mm 超出影像范围。\n\n"
+                    "换一个点再试吗？".format(*point)
                 ),
                 buttons="{0};{1}".format(BUTTON_CLICK, BUTTON_FINISH),
                 ui_blocking=False,
@@ -389,8 +388,8 @@ def main():
             break
         except Exception:
             answer = mimics.dialogs.question_box(
-                title="Mask Identifier",
-                message="Could not compute voxel index for this point.\n\nTry another point?",
+                title="掩膜识别",
+                message="无法计算该点的体素索引。\n\n换一个点再试吗？",
                 buttons="{0};{1}".format(BUTTON_CLICK, BUTTON_FINISH),
                 ui_blocking=False,
             )
@@ -406,11 +405,11 @@ def main():
         if not operation_token:
             owner = runtime_common.active_local_operation("mask_buffer_access") or {}
             answer = mimics.dialogs.question_box(
-                title="Mask Identifier",
+                title="掩膜识别",
                 message=(
-                    "Mask buffers are currently used by {0}.\n\n"
-                    "No Mask was scanned. Wait for that operation to finish, then try again."
-                ).format(owner.get("owner") or "another Mimics-Script task"),
+                    "掩膜缓冲区正被 {0} 使用。\n\n"
+                    "本次未扫描任何掩膜。请等待该操作完成后再重试。"
+                ).format(owner.get("owner") or "另一个 Mimics 脚本任务"),
                 buttons="{0};{1}".format(BUTTON_CLICK, BUTTON_FINISH),
                 ui_blocking=False,
             )
@@ -431,14 +430,14 @@ def main():
         if found:
             lines = []
             for info in found:
-                state = "hidden" if not info["visible"] else "visible"
-                lines.append("{0}  ({1})".format(info["name"], state))
+                state = "隐藏" if not info["visible"] else "可见"
+                lines.append("{0}  （{1}）".format(info["name"], state))
             message_body = "\n".join(lines)
         else:
-            message_body = "No mask at this point."
+            message_body = "该位置没有掩膜。"
 
         processed = int(result.get("checked", 0)) + int(result.get("bbox_skipped", 0))
-        summary = "Checked {0}/{1} masks in {2:.2f}s; read {3} voxel buffer(s).".format(
+        summary = "已检查 {0}/{1} 个掩膜，用时 {2:.2f} 秒；读取 {3} 个体素缓冲区。".format(
             processed,
             len(candidates),
             float(result.get("elapsed", 0.0)),
@@ -446,15 +445,15 @@ def main():
         )
         notes = []
         if result.get("unread"):
-            notes.append("{0} not scanned due to response limits".format(result.get("unread")))
+            notes.append("{0} 个因响应限制未扫描".format(result.get("unread")))
         if result.get("skipped"):
-            notes.append("{0} could not be read".format(len(result.get("skipped"))))
+            notes.append("{0} 个无法读取".format(len(result.get("skipped"))))
         if notes:
-            summary += " " + "; ".join(notes) + "."
+            summary += "；" + "；".join(notes) + "。"
         message_body += "\n\n" + summary
 
         answer = mimics.dialogs.question_box(
-            title="Mask Identifier",
+            title="掩膜识别",
             message=message_body,
             buttons="{0};{1}".format(BUTTON_CLICK, BUTTON_FINISH),
             ui_blocking=False,

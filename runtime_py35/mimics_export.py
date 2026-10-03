@@ -974,8 +974,8 @@ def _error_guidance(error_text, phase=""):
     ):
         return (
             "environment_broken",
-            "The mask-export Python environment is incomplete or damaged.",
-            "Run Admin > Setup / Repair Environment, then retry the export.",
+            "掩膜导出 Python 环境不完整或已损坏。",
+            "运行 管理菜单 > 环境设置/修复，然后重试导出。",
         )
     if (
         "no space left" in combined
@@ -985,9 +985,8 @@ def _error_guidance(error_text, phase=""):
     ):
         return (
             "disk_full",
-            "The disk ran out of space while exporting.",
-            "Free space on the output drive (or choose a different output "
-            "folder), then retry the export.",
+            "导出时磁盘空间耗尽。",
+            "释放磁盘空间后重试（或换一个输出目录），然后重新导出。",
         )
     if (
         "network path not found" in combined
@@ -998,10 +997,8 @@ def _error_guidance(error_text, phase=""):
     ):
         return (
             "network_unavailable",
-            "The network drive or share holding the output folder is "
-            "unreachable.",
-            "Reconnect the network drive and confirm it opens in Explorer, "
-            "then retry the export.",
+            "存放输出目录的网络驱动器或共享无法访问。",
+            "重新连接网络驱动器并确认能在资源管理器中打开，然后重试导出。",
         )
     if (
         "source metadata" in combined
@@ -1010,25 +1007,21 @@ def _error_guidance(error_text, phase=""):
     ):
         return (
             "no_source_metadata",
-            "The original source-image geometry could not be resolved for "
-            "one or more cases.",
-            "Open the affected case in Mimics, confirm the source image is "
-            "still resolvable, then retry; or accept the degraded "
-            "current-grid export offered in the dialog.",
+            "一个或多个病例无法解析原始源图像的几何信息。",
+            "在 Mimics 中打开受影响的病例，确认源图像仍可解析后重试；"
+            "或接受对话框中提供的降级导出（按当前网格导出）。",
         )
     if "changed" in combined and ("mask" in combined or "project" in combined):
         return (
             "mask_target_stale",
-            "A Mask or the project changed while the export was running.",
-            "Re-run the export without modifying Masks or the project in "
-            "the meantime.",
+            "导出运行期间 Mask 或项目发生了变化。",
+            "在不再改动 Mask 和项目的前提下重新运行导出。",
         )
     return (
         "unknown",
-        str(error_text or "Unknown error"),
-        "Retry the export. If it keeps failing, check the export log in the "
-        "output folder (mimics_export.log) and the diagnostics folder shown "
-        "in the message, or contact support.",
+        str(error_text or "未知错误"),
+        "重试导出。如果持续失败，请查看输出目录中的导出日志"
+        "（mimics_export.log）和消息中显示的诊断目录，或联系支持人员。",
     )
 
 
@@ -1491,8 +1484,8 @@ def _finish_foreground_export(monitor, error=None, result=None, cancelled=False)
         _cleanup_work_dir(work_dir)
         try:
             mimics.dialogs.message_box(
-                title="Export Stopped",
-                message="Mask export stopped. Temporary buffers were removed.",
+                title="导出已停止",
+                message="掩膜导出已停止。临时缓冲区已清除。",
                 ui_blocking=False,
             )
         except Exception:
@@ -1522,9 +1515,9 @@ def _finish_foreground_export(monitor, error=None, result=None, cancelled=False)
         try:
             _category, _guidance_message, guidance_action = _error_guidance(error, "current_project")
             mimics.dialogs.message_box(
-                title="Export Failed",
+                title="导出失败",
                 message=(
-                    "Mask export failed.\n\n{0}\n\nSuggested action: {1}\n\nLog/output: {2}"
+                    "掩膜导出失败。\n\n{0}\n\n建议操作：{1}\n\n日志/输出：{2}"
                 ).format(
                     error,
                     guidance_action,
@@ -1571,13 +1564,12 @@ def _finish_foreground_export(monitor, error=None, result=None, cancelled=False)
     degraded_note = ""
     if (result or {}).get("degraded_export") or monitor.get("degraded_export"):
         degraded_note = (
-            "\n\nNote: exported on the current Mimics grid because the original "
-            "source image could not be resolved. The grid differs from the "
-            "original data."
+            "\n\n注意：因无法解析原始源图像，本次已按当前 Mimics 网格导出。"
+            "该网格与原始数据不一致。"
         )
     message = (
-        "Mask export complete: {0} new, {1} overwritten, {2} unchanged, "
-        "{3} existing files preserved. Output: {4}{5}"
+        "掩膜导出完成：新增 {0}，覆盖 {1}，未变化 {2}，保留已有文件 {3}。"
+        "输出：{4}{5}"
     ).format(
         total_new,
         total_overwritten,
@@ -1603,7 +1595,7 @@ def _finish_foreground_export(monitor, error=None, result=None, cancelled=False)
     _cleanup_work_dir(work_dir)
     try:
         mimics.dialogs.message_box(
-            title="Export Complete",
+            title="导出完成",
             message=message,
             ui_blocking=False,
         )
@@ -1913,22 +1905,22 @@ def _confirm_degraded_export(case_count=1):
     caller-scoped: batch export asks once per batch, single-case export once
     per export action.
     """
-    scope = "this mask" if case_count <= 1 else "{0} case(s)".format(case_count)
+    scope = "此掩膜" if case_count <= 1 else "{0} 个病例".format(case_count)
     try:
         answer = mimics.dialogs.question_box(
-            title="Export Without Original Image",
+            title="无原始图像导出",
             message=(
-                "The original source image could not be resolved for {0}, so the mask "
-                "cannot be resampled back to the original grid.\n\n"
-                "It will be exported on the current Mimics grid instead. The resulting "
-                "file's grid differs from the original data; do not use it where "
-                "alignment with the original image is required.\n\n"
-                "Export on the Mimics grid anyway?"
+                "无法解析 {0} 的原始源图像，因此掩膜无法重采样回原始网格。\n\n"
+                "将改为按当前 Mimics 网格导出。所得文件的网格与原始数据"
+                "不一致；在需要与原始图像对齐的场合请勿使用。\n\n"
+                "仍要按 Mimics 网格导出吗？"
             ).format(scope),
-            buttons="Export on Mimics Grid;Cancel",
+            buttons="按 Mimics 网格导出;取消",
             ui_blocking=True,
         )
-        return str(answer or "").strip().lower().startswith("export")
+        # The answer is the clicked button's label; keep this check coupled to
+        # the Chinese button text above ("按 Mimics 网格导出").
+        return str(answer or "").strip().startswith(u"按")
     except Exception:
         return False
 
@@ -2194,18 +2186,18 @@ def _launch_background_batch_export_async(*args, **kwargs):
         if not ok:
             try:
                 mimics.dialogs.message_box(
-                    title="Insufficient Disk Space",
+                    title="磁盘空间不足",
                     message=(
-                        "Insufficient disk space on the label destination. "
-                        "Estimated requirement: {0} MB; available: {1} MB. "
-                        "Please free disk space and retry."
+                        "标签保存目录所在磁盘空间不足。"
+                        "预计需要：{0} MB；可用：{1} MB。"
+                        "请释放磁盘空间后重试。"
                     ).format(estimated_mb, int(free_mb)),
                     ui_blocking=False,
                 )
             except TypeError:
                 mimics.dialogs.message_box(
-                    title="Insufficient Disk Space",
-                    message="Insufficient disk space on the label destination.",
+                    title="磁盘空间不足",
+                    message="标签保存目录所在磁盘空间不足。",
                 )
             _append_export_log(
                 kwargs.get("mcs_output_dir") or disk_scope,
@@ -2228,18 +2220,18 @@ def _launch_background_batch_export_async(*args, **kwargs):
     if holder:
         try:
             mimics.dialogs.message_box(
-                title="Export Waiting",
+                title="导出等待中",
                 message=(
-                    "Mask export was not started because its saved .mcs source or label destination is busy.\n\n"
-                    "Current task: {0}\n\n"
-                    "Wait for the import/export to finish, or stop it from 01_Data > 04_Task_Status before retrying."
+                    "掩膜导出未启动：其 .mcs 源文件或标签保存目录正被占用。\n\n"
+                    "当前任务：{0}\n\n"
+                    "请等待该导入/导出完成，或先在任务状态窗口（01_Data > 04）中停止后再重试。"
                 ).format(runtime_common.resource_lock_summary(holder)),
                 ui_blocking=False,
             )
         except TypeError:
             mimics.dialogs.message_box(
-                title="Export Waiting",
-                message="The saved .mcs source or selected label destination is currently busy.",
+                title="导出等待中",
+                message=".mcs 源文件或所选标签保存目录当前正被占用。",
             )
         return None
     export_root = kwargs.get("label_output_root") or kwargs.get("mcs_output_dir") or ""
@@ -2375,8 +2367,8 @@ def _background_export_status_tick(monitor):
                 monitor.get("launch_error"), "launch"
             )
             mimics.dialogs.message_box(
-                title="Export Could Not Start",
-                message="{0}\n\nSuggested action: {1}".format(
+                title="导出无法启动",
+                message="{0}\n\n建议操作：{1}".format(
                     monitor.get("launch_error"), guidance_action
                 ),
                 ui_blocking=False,
@@ -2497,8 +2489,8 @@ def _background_export_status_tick(monitor):
                 export_error = status.get("error", "The background export script stopped unexpectedly.")
                 _category, _guidance_message, guidance_action = _error_guidance(export_error, "background_export")
                 message = (
-                    "Mask export failed after exporting {0} case(s).\n\n{1}\n\n"
-                    "Suggested action: {2}\n\nDiagnostics: {3}"
+                    "掩膜导出在导出 {0} 个病例后失败。\n\n{1}\n\n"
+                    "建议操作：{2}\n\n诊断信息：{3}"
                 ).format(
                     int(status.get("completed", 0) or 0),
                     export_error,
@@ -2507,15 +2499,15 @@ def _background_export_status_tick(monitor):
                 )
                 _mimics_log(logging.ERROR, message)
                 mimics.dialogs.message_box(
-                    title="Export Failed",
+                    title="导出失败",
                     message=message,
                     ui_blocking=False,
                 )
                 return
             if status.get("status") == "cancelled":
                 mimics.dialogs.message_box(
-                    title="Export Stopped",
-                    message="Mask export stopped.\n\nExported before stop: {0}\nFailed: {1}\nOutput: {2}".format(
+                    title="导出已停止",
+                    message="掩膜导出已停止。\n\n停止前已导出：{0}\n失败：{1}\n输出：{2}".format(
                         int(status.get("completed", 0) or 0), failed, root,
                     ),
                     ui_blocking=False,
@@ -2524,35 +2516,33 @@ def _background_export_status_tick(monitor):
             # P1 skip summary: categorized counts instead of a bare total.
             batch_totals = status.get("batch_totals") or {}
             summary_lines = [
-                "New: {0}".format(int(batch_totals.get("new", 0) or 0)),
-                "Overwritten: {0}".format(int(batch_totals.get("overwritten", 0) or 0)),
-                "Unchanged: {0}".format(int(batch_totals.get("unchanged", 0) or 0)),
-                "Existing files preserved (not updated): {0}".format(
+                "新增：{0}".format(int(batch_totals.get("new", 0) or 0)),
+                "覆盖：{0}".format(int(batch_totals.get("overwritten", 0) or 0)),
+                "未变化：{0}".format(int(batch_totals.get("unchanged", 0) or 0)),
+                "已有文件保留（未更新）：{0}".format(
                     int(batch_totals.get("skipped_existing", 0) or 0)
                 ),
             ]
             not_updated = int(batch_totals.get("skipped_existing", 0) or 0)
             if status.get("degraded_export"):
                 summary_lines.append(
-                    "\nNote: some cases were exported on the current Mimics grid "
-                    "because their original source image could not be resolved."
+                    "\n注意：部分病例因无法解析原始源图像，已按当前 Mimics 网格导出。"
                 )
             if not_updated > 0:
                 summary_lines.append(
-                    "\nCases with files that were not updated are listed in:\n{0}\n"
-                    "Re-run those cases with the overwrite option to refresh them.".format(
-                        status.get("skipped_exports_path") or "(list unavailable)"
+                    "\n文件未更新的病例列表见：\n{0}\n"
+                    "请对这些病例使用覆盖选项重新导出以刷新文件。".format(
+                        status.get("skipped_exports_path") or "（列表不可用）"
                     )
                 )
             message = (
-                "Mask export finished.\n\nExported: {0}\nFailed: {1}\n{2}\n\nOutput: {3}{4}".format(
+                "掩膜导出结束。\n\n已导出：{0}\n失败：{1}\n{2}\n\n输出：{3}{4}".format(
                     int(status.get("completed", 0) or 0),
                     failed,
                     "\n".join(summary_lines),
                     root,
                     (
-                        "\n\nThe log with the failure reasons is next to the "
-                        "output: {0}".format(
+                        "\n\n失败原因日志位于输出目录旁：{0}".format(
                             os.path.join(root, _RUNTIME_SUBDIR, "mimics_export.log")
                         )
                         if failed
@@ -2561,7 +2551,7 @@ def _background_export_status_tick(monitor):
                 )
             )
             mimics.dialogs.message_box(
-                title="Export Completed with Errors" if failed else "Export Complete",
+                title="导出完成（部分失败）" if failed else "导出完成",
                 message=message,
                 # When files were left not-updated, the dialog must stay for
                 # the user to read the list path; do not auto-dismiss.
@@ -2662,13 +2652,13 @@ def _launch_external_export_setup():
         # error. The __main__ branch below wraps its exceptions in a
         # message_box; the same treatment for the interactive path.
         message = (
-            "Save the current Mimics project before exporting masks.\n\n"
-            "Quick export runs on a saved project file (.mcs), so the export "
-            "can resume even if Mimics is closed."
+            "请先保存当前 Mimics 项目再导出掩膜。\n\n"
+            "快速导出基于已保存的项目文件（.mcs）运行，即使 Mimics 被关闭，"
+            "导出也能继续。"
         )
         _mimics_log(logging.ERROR, "Quick export refused: no saved .mcs project.")
         mimics.dialogs.message_box(
-            title="Save Project First",
+            title="请先保存项目",
             message=message,
             ui_blocking=False,
         )
@@ -3738,7 +3728,7 @@ def main(source_info_override=None):
     except Exception as exc:
         _mimics_log(logging.ERROR, "Mask export arguments are invalid: {0}".format(exc))
         mimics.dialogs.message_box(
-            title="Export Arguments Invalid",
+            title="导出参数无效",
             message=str(exc),
             ui_blocking=False,
         )
@@ -3750,12 +3740,11 @@ def main(source_info_override=None):
 
     if explicit_mcs_paths and not ts_root and not case_dir:
         message = (
-            "Explicit .mcs export also requires --ts-root so each project can be "
-            "matched to its original image grid."
+            "显式 .mcs 导出还需要 --ts-root，以便每个项目都能匹配其原始图像网格。"
         )
         _mimics_log(logging.ERROR, message)
         mimics.dialogs.message_box(
-            title="Dataset Root Required",
+            title="需要数据集根目录",
             message=message,
             ui_blocking=False,
         )
@@ -3783,8 +3772,8 @@ def main(source_info_override=None):
             _mimics_log(logging.ERROR, "Mask export could not start: {0}".format(exc))
             _category, _guidance_message, guidance_action = _error_guidance(exc, "launch")
             mimics.dialogs.message_box(
-                title="Export Could Not Start",
-                message="{0}\n\nSuggested action: {1}".format(exc, guidance_action),
+                title="导出无法启动",
+                message="{0}\n\n建议操作：{1}".format(exc, guidance_action),
                 ui_blocking=False,
             )
             return 1
@@ -3796,10 +3785,10 @@ def main(source_info_override=None):
     if case_dir and explicit_mcs_paths:
         case_id = os.path.basename(os.path.abspath(case_dir))
         if len(explicit_mcs_paths) != 1:
-            message = "--case-dir can be paired with only one explicit .mcs file."
+            message = "--case-dir 只能搭配一个显式 .mcs 文件。"
             _mimics_log(logging.ERROR, message)
             mimics.dialogs.message_box(
-                title="Export Arguments Invalid",
+                title="导出参数无效",
                 message=message,
                 ui_blocking=False,
             )
@@ -3845,7 +3834,7 @@ if __name__ == "__main__":
     except Exception as error:
         traceback.print_exc()
         try:
-            mimics.dialogs.message_box(title="Fatal Error", message=str(error))
+            mimics.dialogs.message_box(title="严重错误", message=str(error))
         except Exception:
             pass
         raise

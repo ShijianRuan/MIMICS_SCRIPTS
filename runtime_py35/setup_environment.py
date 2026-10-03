@@ -32,7 +32,7 @@ _background_env = runtime_common.background_env
 _find_root = runtime_common.find_root
 _read_json = runtime_common.read_json
 
-TITLE = "Setup Environment"
+TITLE = "环境设置"
 _MONITORS = {}
 
 
@@ -191,9 +191,9 @@ def _poll_setup_state(monitor):
             try:
                 mimics.dialogs.message_box(
                     title=TITLE,
-                    message="Setup worker was stopped.\n\n"
-                            "The background process (PID={0}) is no longer running.\n"
-                            "Check {1} for details.".format(
+                    message="环境设置进程已停止。\n\n"
+                            "后台进程（PID={0}）已不在运行。\n"
+                            "详情请查看日志：{1}。".format(
                                 pid, _log_file()),
                     ui_blocking=False,
                 )
@@ -219,8 +219,8 @@ def _poll_setup_state(monitor):
         try:
             mimics.dialogs.message_box(
                 title=TITLE,
-                message="Setup timed out after {0}s.\n\n"
-                        "The worker may still be running. Check the log:\n{1}".format(
+                message="环境设置在 {0} 秒后超时。\n\n"
+                        "工作进程可能仍在运行。请查看日志：\n{1}".format(
                             int(monitor.get("timeout_seconds", 1800)), _log_file()),
                 ui_blocking=False,
             )
@@ -253,34 +253,34 @@ def _show_result(monitor, state):
 
     lines = []
     if status == "ok":
-        lines.append("Environment is ready.")
+        lines.append("环境已就绪。")
     elif status == "incomplete":
-        lines.append("Environment setup incomplete.")
+        lines.append("环境设置未完成。")
     else:
-        lines.append("Setup encountered an error.")
+        lines.append("环境设置遇到错误。")
 
     if message:
         lines.append(message)
 
     if missing:
-        lines.append("\nMissing packages ({0}):".format(len(missing)))
+        lines.append("\n缺失的软件包（{0} 个）：".format(len(missing)))
         lines.append(", ".join(missing[:10]))
 
     if error:
-        lines.append("\nError detail: {0}".format(error[:300]))
+        lines.append("\n错误详情：{0}".format(error[:300]))
 
     if detail:
         pkg_status = detail.get("packages", {})
         if pkg_status:
-            lines.append("\nPackage status:")
+            lines.append("\n软件包状态：")
             for pkg, ok in sorted(pkg_status.items()):
-                lines.append("  {0}: {1}".format(pkg, "OK" if ok else "MISSING"))
+                lines.append("  {0}: {1}".format(pkg, "正常" if ok else "缺失"))
         cuda = detail.get("cuda_available", False)
         devices = detail.get("cuda_device_count", 0)
-        lines.append("\nCUDA: {0} ({1} device(s))".format(
-            "Available" if cuda else "Not available", devices))
+        lines.append("\nCUDA：{0}（{1} 个设备）".format(
+            "可用" if cuda else "不可用", devices))
 
-    lines.append("\nFull log: {0}".format(_log_file()))
+    lines.append("\n完整日志：{0}".format(_log_file()))
 
     msg = "\n".join(lines)
     try:
@@ -403,13 +403,13 @@ def main(action=None):
         answer = mimics.dialogs.question_box(
             title=TITLE,
             message=(
-                "Environment setup is already running.\n\n"
-                "Action: {0}\nPID: {1}\n\nKeep it running, or stop this setup process."
+                "环境设置正在进行中。\n\n"
+                "操作：{0}\nPID：{1}\n\n可以保持其继续运行，或停止该设置进程。"
             ).format(current.get("action", "setup"), current.get("pid", "?")),
-            buttons="Keep Running;Stop Current Setup",
+            buttons="继续运行;停止当前设置",
             ui_blocking=True,
         )
-        if answer == "Stop Current Setup":
+        if answer == "停止当前设置":
             current["done"] = True
             _stop_monitor(current)
             runtime_common.terminate_process_async(
@@ -429,44 +429,44 @@ def main(action=None):
         installed_python = runtime_common.find_external_python(_project_root())
         if bundle:
             actions = [
-                ("Offline Install", "install everything from the offline bundle (no internet needed)"),
-                ("Check", "validate Python, CUDA, packages and models"),
-                ("Repair (Install Missing)", "check and install missing packages"),
-                ("Setup From Scratch", "create a new environment from scratch"),
+                ("离线安装", "从离线包安装全部内容（无需联网）"),
+                ("检查", "验证 Python、CUDA、软件包和模型"),
+                ("修复（安装缺失项）", "检查并安装缺失的软件包"),
+                ("从零开始设置", "从头创建一个新环境"),
             ]
             if installed_python:
-                recommended, reason = "Check", "an environment is already installed — verify it before changing anything"
+                recommended, reason = "检查", "环境已安装——改动前先验证"
             else:
-                recommended, reason = "Offline Install", "no environment is installed yet, and the offline bundle is present"
+                recommended, reason = "离线安装", "尚未安装环境，且离线包已就绪"
         else:
             actions = [
-                ("Extract Archive", "extract a portable .zip archive"),
-                ("Check", "validate Python, CUDA, packages and models"),
-                ("Repair (Install Missing)", "check and install missing packages"),
-                ("Setup From Scratch", "create a new environment from scratch"),
+                ("解压安装包", "解压便携版 .zip 安装包"),
+                ("检查", "验证 Python、CUDA、软件包和模型"),
+                ("修复（安装缺失项）", "检查并安装缺失的软件包"),
+                ("从零开始设置", "从头创建一个新环境"),
             ]
             if installed_python:
-                recommended, reason = "Check", "an environment is already installed — verify it before changing anything"
+                recommended, reason = "检查", "环境已安装——改动前先验证"
             else:
-                recommended, reason = "Extract Archive", "no environment and no offline bundle — start from the portable archive"
+                recommended, reason = "解压安装包", "尚无环境也没有离线包——从便携版安装包开始"
         actions.sort(key=lambda item: item[0] != recommended)
-        lines = ["Recommended: {0} — {1}.".format(recommended, reason)]
-        lines.extend("{0} — {1}.".format(name, description) for name, description in actions)
+        lines = ["推荐：{0}——{1}。".format(recommended, reason)]
+        lines.extend("{0}——{1}。".format(name, description) for name, description in actions)
         answer = mimics.dialogs.question_box(
             title=TITLE,
             message="\n".join(lines),
-            buttons=";".join(name for name, _description in actions) + ";Cancel",
+            buttons=";".join(name for name, _description in actions) + ";取消",
             ui_blocking=True,
         )
-        if answer == "Extract Archive":
+        if answer == "解压安装包":
             action = "extract"
-        elif answer == "Offline Install":
+        elif answer == "离线安装":
             action = "offline-install"
-        elif answer == "Check":
+        elif answer == "检查":
             action = "check"
-        elif answer == "Repair (Install Missing)":
+        elif answer == "修复（安装缺失项）":
             action = "install"
-        elif answer == "Setup From Scratch":
+        elif answer == "从零开始设置":
             action = "setup-from-scratch"
         else:
             return 1
@@ -482,12 +482,12 @@ def main(action=None):
         if blockers:
             detail = "\n".join("- " + value for value in blockers[:8])
             if len(blockers) > 8:
-                detail += "\n- and {0} more".format(len(blockers) - 8)
+                detail += "\n- 以及另外 {0} 项".format(len(blockers) - 8)
             message = (
-                "The Python environment cannot be changed while Mimics-Script tasks are running.\n\n"
-                "Active work:\n{0}\n\n"
-                "Let those tasks finish or use Stop All Owned Services, then retry. "
-                "The read-only Check action remains available."
+                "Mimics 脚本任务运行期间无法更改 Python 环境。\n\n"
+                "进行中的工作：\n{0}\n\n"
+                "请等这些任务完成，或使用“停止所有归属服务”后再重试。"
+                "只读的“检查”操作不受影响。"
             ).format(detail)
             _mimics_log(logging.WARNING, "Environment maintenance blocked by active tasks: {0}".format("; ".join(blockers)))
             mimics.dialogs.message_box(
@@ -505,11 +505,11 @@ def main(action=None):
             mimics.dialogs.message_box(
                 title=TITLE,
                 message=(
-                    "Portable archive not found.\n\n"
-                    "Place {0} in one of these locations:\n"
+                    "未找到便携版安装包。\n\n"
+                    "请把 {0} 放到以下任一位置：\n"
                     "  {1}\n"
                     "  {2}\n"
-                    "  Your Desktop".format(
+                    "  桌面".format(
                         PORTABLE_ARCHIVE_NAME,
                         os.path.abspath(os.path.join(_project_root(), "..")),
                         os.path.abspath(_project_root()),
@@ -526,11 +526,11 @@ def main(action=None):
             mimics.dialogs.message_box(
                 title=TITLE,
                 message=(
-                    "Offline bundle not found.\n\n"
-                    "This requires the offline bundle with python/ and wheels/ directories.\n"
-                    "Ask whoever set up this workstation to create the bundle first\n"
-                    "(it is produced by the Mimics-Script packaging step),\n"
-                    "then run this entry again."
+                    "未找到离线包。\n\n"
+                    "离线安装需要包含 python/ 和 wheels/ 目录的离线包。\n"
+                    "请联系配置这台工作站的人员先制作离线包\n"
+                    "（由 Mimics 脚本打包步骤生成），\n"
+                    "然后重新运行本入口。"
                 ),
                 ui_blocking=True,
             )
@@ -543,8 +543,8 @@ def main(action=None):
         try:
             mimics.dialogs.message_box(
                 title=TITLE,
-                message="Could not start the setup worker.\n\n"
-                        "Check that a Python interpreter is available at:\n{0}".format(
+                message="无法启动环境设置进程。\n\n"
+                        "请确认以下位置有可用的 Python 解释器：\n{0}".format(
                             _find_external_python()),
             )
         except Exception:

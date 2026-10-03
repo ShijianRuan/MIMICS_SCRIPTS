@@ -40,14 +40,14 @@ def _offer_source_geometry_repair(error_text):
 
 
 TITLE = "FlexiCT"
-BUTTON_TRAIN = "Train Model..."
-BUTTON_PREDICT = "Predict Current Case..."
-BUTTON_STATUS = "Show Status and Models"
-BUTTON_STOP = "Stop Running Task"
-BUTTON_ACTIVE_LEARNING = "Active Learning Review"
-BUTTON_CANCEL = "Cancel"
-BUTTON_UPDATE = "Update Matching Mask"
-BUTTON_CREATE = "Create New Mask"
+BUTTON_TRAIN = "训练模型…"
+BUTTON_PREDICT = "预测当前病例…"
+BUTTON_STATUS = "查看状态与模型"
+BUTTON_STOP = "停止运行中的任务"
+BUTTON_ACTIVE_LEARNING = "主动学习审核"
+BUTTON_CANCEL = "取消"
+BUTTON_UPDATE = "更新匹配掩膜"
+BUTTON_CREATE = "新建掩膜"
 
 _MONITORS = {}
 
@@ -129,7 +129,7 @@ def _launch_gui(script_name, context, monitor_kind):
     _write_json(context_path, context)
     script = os.path.join(_project_root(), "tools", script_name)
     if not os.path.isfile(script):
-        raise RuntimeError("External FlexiCT window is missing: {0}".format(script))
+        raise RuntimeError("缺少外部 FlexiCT 窗口脚本：{0}".format(script))
     process = mimics_mask_apply._launch_gui_process(
         [_external_python(), script, "--context", context_path],
         cwd=_project_root(),
@@ -207,7 +207,7 @@ def start_training():
     except Exception as exc:
         _log(logging.ERROR, "Could not open FlexiCT training setup: {0}".format(exc))
         mimics.dialogs.message_box(
-            "Could not open FlexiCT training setup.\n\n{0}".format(
+            "无法打开 FlexiCT 训练设置。\n\n{0}".format(
                 external_window_launcher.error_guidance(exc)
             ),
             title=TITLE,
@@ -241,7 +241,7 @@ def show_status():
     except Exception as exc:
         _log(logging.ERROR, "Could not open FlexiCT status viewer: {0}".format(exc))
         mimics.dialogs.message_box(
-            "Could not open FlexiCT status viewer.\n\n{0}".format(
+            "无法打开 FlexiCT 状态查看器。\n\n{0}".format(
                 external_window_launcher.error_guidance(exc)
             ),
             title=TITLE,
@@ -263,19 +263,15 @@ def _prediction_context():
     ts_root, case_id, source_path = mimics_mask_apply._resolve_prediction_context()
     if not case_id or not source_path:
         raise RuntimeError(
-            "The active project could not be linked to its original source "
-            "image, so prediction was not started.\n\n"
-            "Open the project that was created when the case was imported "
-            "(01_Data > 01_Import_Data). "
-            "If this project was moved or copied away from the dataset, "
-            "re-import the case instead."
+            "当前工程无法关联到其原始源影像，因此预测未启动。\n\n"
+            "请打开病例导入时创建的工程（01_Data > 01_Import_Data）。"
+            "如果该工程已被移动或复制到数据集之外，请改为重新导入该病例。"
         )
     target_grid = mimics_mask_apply._active_live_grid_payload()
     source_geometry = mimics_mask_apply._active_source_geometry_payload()
     if not target_grid or not source_geometry:
         raise RuntimeError(
-            "The active image physical grid could not be verified. "
-            "Prediction was not started."
+            "无法验证当前影像的物理网格，预测未启动。"
         )
     return {
         "selected_mask_name": (
@@ -321,7 +317,7 @@ def start_prediction():
     except Exception as exc:
         _log(logging.ERROR, "FlexiCT prediction could not start: {0}".format(exc))
         mimics.dialogs.message_box(
-            "FlexiCT prediction could not start.\n\n{0}".format(exc),
+            "FlexiCT 预测无法启动。\n\n{0}".format(exc),
             title=TITLE,
             ui_blocking=False,
         )
@@ -383,9 +379,8 @@ def stop_running_task():
             monitor = pending[0]
             answer = mimics.dialogs.question_box(
                 message=(
-                    "Cancel the pending FlexiCT result conversion/application?\n\n"
-                    "The completed prediction file is kept, but it will not be "
-                    "applied automatically."
+                    "取消待处理的 FlexiCT 结果转换/应用吗？\n\n"
+                    "已完成的预测文件会保留，但不会自动应用。"
                 ),
                 buttons=BUTTON_STOP + ";" + BUTTON_CANCEL,
                 title=TITLE,
@@ -404,14 +399,14 @@ def stop_running_task():
                 _log(logging.INFO, "Pending FlexiCT result application was cancelled.")
             return 0
         mimics.dialogs.message_box(
-            "No running FlexiCT task was found.", title=TITLE, ui_blocking=False
+            "没有找到运行中的 FlexiCT 任务。", title=TITLE, ui_blocking=False
         )
         return 0
     _created, status_path, status = rows[0]
     answer = mimics.dialogs.question_box(
         message=(
-            "Stop the latest FlexiCT task?\n\n{0}\n{1}\n\n"
-            "The worker will release GPU and temporary resources before the task becomes Cancelled."
+            "停止最近的 FlexiCT 任务吗？\n\n{0}\n{1}\n\n"
+            "工作进程会先释放 GPU 和临时资源，然后任务才会变为已取消。"
         ).format(
             status.get("task_name") or status.get("job_id"),
             status.get("message") or status.get("phase"),
@@ -476,7 +471,7 @@ def _monitor_tick_locked(monitor):
         except Exception:
             pass
         mimics.dialogs.message_box(
-            "The external FlexiCT window exited before starting a task.\n\n{0}".format(
+            "外部 FlexiCT 窗口在启动任务前就退出了。\n\n{0}".format(
                 detail
             ),
             title=TITLE,
@@ -534,8 +529,8 @@ def _monitor_tick_locked(monitor):
             _stop_monitor(key)
             if state == "failed":
                 mimics.dialogs.message_box(
-                    "FlexiCT setup failed.\n\n{0}".format(
-                        status.get("error") or "Unknown error"
+                    "FlexiCT 设置失败。\n\n{0}".format(
+                        status.get("error") or "未知错误"
                     ),
                     title=TITLE,
                     ui_blocking=False,
@@ -547,10 +542,9 @@ def _monitor_tick_locked(monitor):
                 "status": "failed",
                 "phase": "controller_stopped",
                 "message": (
-                    "The FlexiCT background process stopped before recording "
-                    "completion."
+                    "FlexiCT 后台进程在记录完成状态前就已停止。"
                 ),
-                "error": "No FlexiCT controller or worker process is running.",
+                "error": "没有正在运行的 FlexiCT 控制器或工作进程。",
                 "updated_at_epoch": time.time(),
             }
         )
@@ -561,14 +555,13 @@ def _monitor_tick_locked(monitor):
             _stop_monitor(key)
             if state == "completed":
                 message = (
-                    "FlexiCT training completed. The model is available "
-                    "for prediction."
+                    "FlexiCT 训练完成。该模型已可用于预测。"
                 )
             elif state == "cancelled":
-                message = "FlexiCT training was cancelled."
+                message = "FlexiCT 训练已取消。"
             else:
-                message = "FlexiCT training failed.\n\n{0}".format(
-                    status.get("error") or "Unknown error"
+                message = "FlexiCT 训练失败。\n\n{0}".format(
+                    status.get("error") or "未知错误"
                 )
             mimics.dialogs.message_box(message, title=TITLE, ui_blocking=False)
         return
@@ -585,11 +578,13 @@ def _monitor_tick_locked(monitor):
         if state == "abandoned":
             # Same terminal wording as the training branch: the remote job
             # was abandoned, and the deadline message would mislead.
-            message = "FlexiCT prediction failed.\n\n{0}".format(
-                error_text or "The remote task was abandoned."
+            message = "FlexiCT 预测失败。\n\n{0}".format(
+                error_text or "远程任务已被放弃。"
             )
         else:
-            message = "FlexiCT prediction {0}.\n\n{1}".format(state, error_text)
+            message = "FlexiCT 预测已{0}。\n\n{1}".format(
+                "取消" if state == "cancelled" else "失败", error_text
+            )
         mimics.dialogs.message_box(
             message,
             title=TITLE,
@@ -629,8 +624,8 @@ def _monitor_tick_locked(monitor):
     if bridge.get("status") != "ok":
         _stop_monitor(key)
         mimics.dialogs.message_box(
-            "FlexiCT result conversion failed.\n\n{0}".format(
-                bridge.get("error") or "Unknown error"
+            "FlexiCT 结果转换失败。\n\n{0}".format(
+                bridge.get("error") or "未知错误"
             ),
             title=TITLE,
             ui_blocking=False,
@@ -645,7 +640,7 @@ def _monitor_tick_locked(monitor):
     except Exception as exc:
         _stop_monitor(key)
         mimics.dialogs.message_box(
-            "Could not apply the FlexiCT prediction.\n\n{0}".format(exc),
+            "无法应用 FlexiCT 预测结果。\n\n{0}".format(exc),
             title=TITLE,
             ui_blocking=False,
         )
@@ -901,12 +896,12 @@ def _prepare_apply_queue(monitor, bridge_result):
     if mode not in ("update", "create"):
         answer = mimics.dialogs.question_box(
             message=(
-                "FlexiCT prediction is complete and ready to apply.\n\n"
-                "Update Matching Mask replaces the unchanged Mask matching this "
-                "target; Create New Mask keeps all existing Masks."
+                "FlexiCT 预测已完成，可以应用。\n\n"
+                "更新匹配掩膜 会替换与该目标匹配且未改动的掩膜；"
+                "新建掩膜 会保留所有现有掩膜。"
             ),
             buttons=BUTTON_UPDATE + ";" + BUTTON_CREATE,
-            title="FlexiCT Prediction Ready",
+            title="FlexiCT 预测就绪",
             ui_blocking=True,
         )
         mode = "update" if answer == BUTTON_UPDATE else "create"
@@ -924,7 +919,7 @@ def _prepare_apply_queue(monitor, bridge_result):
             buffer_row = row
             break
     if buffer_row is None:
-        raise RuntimeError("The prediction is empty (no foreground voxels).")
+        raise RuntimeError("预测结果为空（没有前景体素）。")
     if str(record.get("state") or "") == "applied":
         already_applied.append(str(record.get("target_name") or ""))
     else:
@@ -1347,9 +1342,9 @@ def _al_open_case(job_dir, case_id):
     source_path = str(geometry.get("source_image_path") or "")
     if not mcs_path or not os.path.isfile(mcs_path):
         return False, (
-            "No .mcs project was found for case {0}. Generate one first "
-            "(01 Import, case folder {1}), then retry.".format(
-                case_id, source_path or "(source path not recorded)")
+            "未找到病例 {0} 的 .mcs 工程。请先生成一个"
+            "（01 Import，病例文件夹 {1}），然后重试。".format(
+                case_id, source_path or "（未记录源路径）")
         )
     # If the requested project is already active, opening it again would
     # close/reload it needlessly — skip straight to success. F17: the state
@@ -1360,25 +1355,26 @@ def _al_open_case(job_dir, case_id):
         return True, "project already open"
     if state == "unknown":
         mimics.dialogs.message_box(
-            "Cannot tell whether another project is open in Mimics (the "
-            "project query failed or is unavailable on this build).\n\n"
-            "Opening case {0} requires its own project ({1}); the window "
-            "refuses to switch while the current session state is "
-            "unknown, so nothing was changed.\n\n"
-            "Step 1: close any open project (save it if needed).\n"
-            "Step 2: open the case from the FlexiCT Active Learning "
-            "window again.".format(case_id, mcs_path),
+            "无法确认 Mimics 中是否打开了其他工程"
+            "（工程查询失败，或当前版本不支持该查询）。\n\n"
+            "打开病例 {0} 需要它自己的工程（{1}）；当前会话状态未知时，"
+            "窗口不会切换工程，因此未做任何改动。\n\n"
+            "第 1 步：关闭所有已打开的工程（必要时先保存）。\n"
+            "第 2 步：回到 FlexiCT 主动学习窗口，再次打开该病例。".format(
+                case_id, mcs_path
+            ),
             title=TITLE,
             ui_blocking=False,
         )
         return False, "current project state unknown; not switching projects"
     if state in ("path", "unnamed"):
         mimics.dialogs.message_box(
-            "Another project is open in Mimics.\n\n"
-            "Opening case {0} requires its own project "
-            "({1}).\n\nStep 1: close the currently open project (save "
-            "it if needed).\nStep 2: open the case from the FlexiCT "
-            "Active Learning window again.".format(case_id, mcs_path),
+            "Mimics 中打开了其他工程。\n\n"
+            "打开病例 {0} 需要它自己的工程（{1}）。\n\n"
+            "第 1 步：关闭当前打开的工程（必要时先保存）。\n"
+            "第 2 步：回到 FlexiCT 主动学习窗口，再次打开该病例。".format(
+                case_id, mcs_path
+            ),
             title=TITLE,
             ui_blocking=False,
         )
@@ -1728,7 +1724,7 @@ def _al_finish_conversion(transaction):
         )
         try:
             mimics.dialogs.message_box(
-                "Applied {0} for case {1}.".format(
+                "已为病例 {1} 应用 {0}。".format(
                     ", ".join(applied), case_id),
                 title=TITLE,
                 ui_blocking=False,
@@ -1736,7 +1732,7 @@ def _al_finish_conversion(transaction):
         except TypeError:
             mimics.dialogs.message_box(
                 title=TITLE,
-                message="Applied {0} for case {1}.".format(
+                message="已为病例 {1} 应用 {0}。".format(
                     ", ".join(applied), case_id),
             )
     finally:
@@ -1787,7 +1783,7 @@ def main(action=None):
         except Exception as exc:
             _log(logging.ERROR, "FlexiCT prediction could not start: {0}".format(exc))
             mimics.dialogs.message_box(
-                "FlexiCT prediction could not start.\n\n{0}".format(exc),
+                "FlexiCT 预测无法启动。\n\n{0}".format(exc),
                 title=TITLE,
                 ui_blocking=False,
             )
@@ -1799,7 +1795,7 @@ def main(action=None):
     if action == BUTTON_ACTIVE_LEARNING:
         return _start_active_learning()
     answer = mimics.dialogs.question_box(
-        message="Choose a FlexiCT action.",
+        message="请选择一个 FlexiCT 操作。",
         buttons=";".join(
             [
                 BUTTON_TRAIN,

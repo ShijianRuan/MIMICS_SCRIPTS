@@ -102,13 +102,13 @@ def _read_stderr_tail(path, max_bytes=8192):
 def _external_failure_message(base_message, monitor, reported_error=""):
     parts = [str(base_message).strip()]
     if reported_error:
-        parts.append("Reported error:\n{0}".format(str(reported_error).strip()))
+        parts.append("报告的错误：\n{0}".format(str(reported_error).strip()))
     stderr_log = monitor.get("stderr_log", "")
     stderr_tail = _read_stderr_tail(stderr_log)
     if stderr_tail:
-        parts.append("Diagnostic output:\n{0}".format(stderr_tail))
+        parts.append("诊断输出：\n{0}".format(stderr_tail))
     if stderr_log:
-        parts.append("Diagnostic log: {0}".format(stderr_log))
+        parts.append("诊断日志：{0}".format(stderr_log))
     return "\n\n".join(item for item in parts if item)
 
 
@@ -118,7 +118,7 @@ def _report_external_failure(key, monitor, base_message, reported_error=""):
         mimics.logging.log_user_message(level=logging.ERROR, message=message)
     except Exception:
         pass
-    _alert_once(key, "Path Setup", message)
+    _alert_once(key, "路径设置", message)
 
 
 def _stop_monitor(key):
@@ -178,7 +178,7 @@ def _tick(monitor):
             _report_external_failure(
                 key,
                 monitor,
-                "The external path window timed out. No task was started.",
+                "外部路径窗口超时，未启动任何任务。",
             )
             return
         status = _read_json(monitor["status_path"])
@@ -200,7 +200,7 @@ def _tick(monitor):
                     _report_external_failure(
                         key,
                         monitor,
-                        "The external path window exited unexpectedly (code {0}). No task was started.".format(exit_code),
+                        "外部路径窗口意外退出（代码 {0}），未启动任何任务。".format(exit_code),
                     )
             return
         state = status.get("status")
@@ -212,7 +212,7 @@ def _tick(monitor):
             _report_external_failure(
                 key,
                 monitor,
-                "The external path window failed. No task was started.",
+                "外部路径窗口失败，未启动任何任务。",
                 status.get("error", ""),
             )
             return
@@ -313,7 +313,7 @@ def _tick(monitor):
             except Exception:
                 pass
             _stop_monitor(key)
-            _alert_once(key, "Could Not Start", str(exc))
+            _alert_once(key, "无法启动", str(exc))
     except Exception as exc:
         # Never let an exception escape into the Win32 timer callback.
         try:
@@ -324,7 +324,7 @@ def _tick(monitor):
             _report_external_failure(
                 monitor.get("key", "io_setup"),
                 monitor,
-                "The external path-window monitor failed. No task was started.",
+                "外部路径窗口监控失败，未启动任何任务。",
                 str(exc),
             )
         except Exception:

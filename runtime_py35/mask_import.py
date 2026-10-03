@@ -27,7 +27,7 @@ import mimics
 import runtime_common
 
 
-TITLE = "Import Masks"
+TITLE = "导入掩膜"
 
 _MASK_IMPORT_MONITORS = {}
 
@@ -520,16 +520,16 @@ def _finish_mask_import(monitor):
         runtime_common.release_local_operation("mask_buffer_access", token)
     _cleanup_work_dir(monitor.get("work_dir"))
     if created_names:
-        message = "Imported {0} mask(s):\n\n{1}".format(
+        message = "已导入 {0} 个掩膜：\n\n{1}".format(
             len(created_names), "\n".join("- " + name for name in created_names)
         )
         if errors:
-            message += "\n\nWarnings:\n" + "\n".join("- " + error for error in errors)
+            message += "\n\n警告：\n" + "\n".join("- " + error for error in errors)
         _safe_message(message)
     else:
         _safe_message(
-            "No visible masks were imported.\n\n{0}".format(
-                "\n".join(errors) if errors else "The selected files produced no foreground labels."
+            "没有可见的掩膜被导入。\n\n{0}".format(
+                "\n".join(errors) if errors else "所选文件没有产生前景标签。"
             )
         )
 
@@ -570,8 +570,7 @@ def _reaped_mask_import_tick(monitor):
     if not monitor.get("reaped"):
         if time.time() > monitor.get("reap_deadline", 0):
             monitor.setdefault("errors", []).append(
-                "The background converter process could not be stopped; "
-                "its temporary files were left for a later cleanup."
+                "后台转换进程无法停止；其临时文件留待后续清理。"
             )
             _finish_mask_import(monitor)
         return True
@@ -865,16 +864,13 @@ def _start_import_for_paths(mask_paths):
             pass
         if image_count > 0:
             msg = (
-                "Mimics has {0} image(s) open but none is active, and the "
-                "image shape could not be determined.\n\n"
-                "Try clicking on the image in Mimics to activate it, then "
-                "run Import Masks again.".format(image_count)
+                "Mimics 已打开 {0} 个影像但都不是活动影像，且无法确定影像尺寸。\n\n"
+                "请先在 Mimics 中点击影像将其激活，然后重新运行导入掩膜。".format(image_count)
             )
         else:
             msg = (
-                "No image is open in Mimics.\n\n"
-                "Open a project first, then use Import Masks to add "
-                "segmentations."
+                "Mimics 中未打开影像。\n\n"
+                "请先打开一个工程，再使用导入掩膜添加分割结果。"
             )
         mimics.dialogs.message_box(msg, title=TITLE, ui_blocking=True)
         return 1
@@ -925,7 +921,7 @@ def _start_import_for_paths(mask_paths):
     }
     if not _start_mask_import_monitor(monitor):
         _cleanup_work_dir(work_dir)
-        _safe_message("This Mimics session cannot monitor background mask preparation.")
+        _safe_message("当前 Mimics 会话无法监控后台掩膜准备过程。")
         return 1
     _update_gui()
     _launch_mask_prepare(bridge_params, result_path, monitor)
@@ -945,16 +941,16 @@ def main():
     if active_monitors:
         answer = mimics.dialogs.question_box(
             message=(
-                "A Mask import is already preparing or applying labels.\n\n"
-                "Keep it running, or stop it before starting a different import."
+                "已有一次掩膜导入正在准备或应用标签。\n\n"
+                "可以保持其继续运行，或先停止它再开始另一次导入。"
             ),
-            buttons="Keep Running;Stop Current Import",
+            buttons="继续运行;停止当前导入",
             title=TITLE,
             ui_blocking=True,
         )
-        if answer == "Stop Current Import":
+        if answer == "停止当前导入":
             cancel_all_mask_imports()
-            _safe_message("Mask import stop requested. No additional Masks will be applied.")
+            _safe_message("已请求停止掩膜导入。不会再应用更多掩膜。")
         return 0
 
     active_image = _active_image_reference()
@@ -999,7 +995,7 @@ if __name__ == "__main__":
         try:
             mimics.dialogs.message_box(
                 title=TITLE,
-                message="Error: {0}".format(exc),
+                message="错误：{0}".format(exc),
             )
         except Exception:
             pass

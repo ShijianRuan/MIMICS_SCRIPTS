@@ -4233,7 +4233,7 @@ class TestStopBackgroundServices(unittest.TestCase):
         import setup_environment
 
         source = inspect.getsource(setup_environment.main)
-        self.assertIn("Stop Current Setup", source)
+        self.assertIn("停止当前设置", source)
         self.assertIn("terminate_process_async", source)
 
     def test_environment_setup_menu_recommends_action_first(self):
@@ -4244,7 +4244,7 @@ class TestStopBackgroundServices(unittest.TestCase):
 
         def fake_question_box(message="", buttons="", title="", ui_blocking=None, **kwargs):
             observed.append({"message": message, "buttons": buttons})
-            return "Cancel"
+            return "取消"
 
         old_box = setup_environment.mimics.dialogs.question_box
         old_bundle = setup_environment._is_offline_bundle
@@ -4261,9 +4261,9 @@ class TestStopBackgroundServices(unittest.TestCase):
             result = setup_environment.main()
             self.assertEqual(1, result)
             self.assertEqual(1, len(observed))
-            self.assertTrue(observed[0]["buttons"].startswith("Extract Archive;"),
+            self.assertTrue(observed[0]["buttons"].startswith("解压安装包;"),
                             observed[0]["buttons"])
-            self.assertIn("Recommended:", observed[0]["message"])
+            self.assertIn("推荐：", observed[0]["message"])
             # Existing install: Check leads, in both bundle and non-bundle.
             setup_environment.runtime_common.find_external_python = (
                 lambda *args, **kwargs: "C:\\fake\\python.exe"
@@ -4271,12 +4271,12 @@ class TestStopBackgroundServices(unittest.TestCase):
             observed[:] = []
             setup_environment._is_offline_bundle = lambda: False
             self.assertEqual(1, setup_environment.main())
-            self.assertTrue(observed[0]["buttons"].startswith("Check;"),
+            self.assertTrue(observed[0]["buttons"].startswith("检查;"),
                             observed[0]["buttons"])
             observed[:] = []
             setup_environment._is_offline_bundle = lambda: True
             self.assertEqual(1, setup_environment.main())
-            self.assertTrue(observed[0]["buttons"].startswith("Check;"),
+            self.assertTrue(observed[0]["buttons"].startswith("检查;"),
                             observed[0]["buttons"])
             # Bundle, no python: Offline Install leads.
             observed[:] = []
@@ -4284,7 +4284,7 @@ class TestStopBackgroundServices(unittest.TestCase):
                 lambda *args, **kwargs: ""
             )
             self.assertEqual(1, setup_environment.main())
-            self.assertTrue(observed[0]["buttons"].startswith("Offline Install;"),
+            self.assertTrue(observed[0]["buttons"].startswith("离线安装;"),
                             observed[0]["buttons"])
         finally:
             setup_environment.mimics.dialogs.question_box = old_box
@@ -4421,16 +4421,16 @@ class TestStopBackgroundServices(unittest.TestCase):
         import mimics_stop_background as msb
 
         with mock.patch.object(msb.mimics.dialogs, "question_box") as qb:
-            qb.return_value = "Cancel"
+            qb.return_value = "取消"
             result = msb.main()
         self.assertEqual(result, 0)
         qb.assert_called_once()
-        self.assertIn("Stop All", qb.call_args[1].get("buttons", qb.call_args[0][1] if qb.call_args[0] else ""))
-        self.assertIn("Cancel", qb.call_args[1].get("buttons", qb.call_args[0][1] if qb.call_args[0] else ""))
+        self.assertIn("全部停止", qb.call_args[1].get("buttons", qb.call_args[0][1] if qb.call_args[0] else ""))
+        self.assertIn("取消", qb.call_args[1].get("buttons", qb.call_args[0][1] if qb.call_args[0] else ""))
         # Cancel must not reach the actual stop.
         with mock.patch.object(msb, "stop_background_processes") as stop:
             with mock.patch.object(msb.mimics.dialogs, "question_box") as qb:
-                qb.return_value = "Cancel"
+                qb.return_value = "取消"
                 msb.main()
             stop.assert_not_called()
 
@@ -4551,8 +4551,8 @@ class TestNNInteractiveMimicsParsing(unittest.TestCase):
         )
         # The ask-once copy must exist and the automatic copy must be the
         # fallback (else), not the only message.
-        self.assertIn("The first result will ask once", source)
-        self.assertIn("applied automatically", source)
+        self.assertIn("第一个结果会询问一次", source)
+        self.assertIn("自动应用", source)
         self.assertIn("else", source)
 
     def test_owned_server_sweep_accepts_current_schema(self):
@@ -4675,7 +4675,7 @@ class TestNNInteractiveContinuousPrompting(unittest.TestCase):
                 lambda level, message: logged.append(message)
             )
             nninteractive_mimics._async_prompt_menu = (
-                lambda target, state, source, profile: "Finish"
+                lambda target, state, source, profile: "完成"
             )
             continued = nninteractive_mimics._continue_session_prompt(
                 None, None, {"_job_dir": "job"}, {}
@@ -4702,7 +4702,7 @@ class TestNNInteractiveContinuousPrompting(unittest.TestCase):
 
         def fake_question_box(message="", buttons="", title="", ui_blocking=None, **kw):
             observed.append({"message": message, "buttons": buttons, "title": title})
-            return "Finish"
+            return "完成"
 
         old_box = nninteractive_mimics.mimics.dialogs.question_box
         try:
@@ -4722,11 +4722,11 @@ class TestNNInteractiveContinuousPrompting(unittest.TestCase):
             )
         finally:
             nninteractive_mimics.mimics.dialogs.question_box = old_box
-        self.assertEqual("Finish", action)
+        self.assertEqual("完成", action)
         self.assertEqual(1, len(observed))
         # Validated prompt buttons + undo/reset (session has interactions) + finish.
         self.assertEqual(
-            "Add Points;Draw Box;Undo Last Prompt;Reset To Start;Finish",
+            "点标注;框选;撤销;重置;完成",
             observed[0]["buttons"],
         )
 
@@ -4964,13 +4964,13 @@ class TestNNInteractiveContinuousPrompting(unittest.TestCase):
             "CUDA out of memory", "prediction"
         )
         self.assertEqual("out_of_memory", category)
-        self.assertIn("Close other GPU programs", action)
+        self.assertIn("关闭其他占用 GPU 的程序", action)
 
         category, _message, action = _error_guidance(
             "Connection refused to server", "connect"
         )
         self.assertEqual("server_unavailable", category)
-        self.assertIn("Setup / Repair Environment", action)
+        self.assertIn("环境设置/修复", action)
 
         category, _message, action = _error_guidance(
             "Not enough free GPU memory to start the nnInteractive server", ""
@@ -4981,7 +4981,7 @@ class TestNNInteractiveContinuousPrompting(unittest.TestCase):
             "ModuleNotFoundError: No module named 'nnInteractive'", "startup"
         )
         self.assertEqual("environment_broken", category)
-        self.assertIn("Setup / Repair Environment", action)
+        self.assertIn("环境设置/修复", action)
 
         category, _message, action = _error_guidance(
             "The active image or target Mask changed", "apply"
@@ -4990,7 +4990,7 @@ class TestNNInteractiveContinuousPrompting(unittest.TestCase):
 
         category, _message, action = _error_guidance("something odd", "")
         self.assertEqual("unknown", category)
-        self.assertIn("Retry", action)
+        self.assertIn("重试", action)
 
     def test_import_error_guidance_categories(self):
         from mimics_import import _error_guidance as import_guidance
@@ -4999,13 +4999,13 @@ class TestNNInteractiveContinuousPrompting(unittest.TestCase):
             "ModuleNotFoundError: No module named 'nibabel'", "prepare"
         )
         self.assertEqual("environment_broken", category)
-        self.assertIn("Setup / Repair Environment", action)
+        self.assertIn("环境设置/修复", action)
 
         category, _message, action = import_guidance(
             "OSError: [Errno 28] No space left on device", "prepare"
         )
         self.assertEqual("disk_full", category)
-        self.assertIn("Free space", action)
+        self.assertIn("释放磁盘空间", action)
 
         category, _message, action = import_guidance(
             "The network path was not found", "queue"
@@ -5020,7 +5020,7 @@ class TestNNInteractiveContinuousPrompting(unittest.TestCase):
         # inside the user output folder; the real records are per-case JSONs
         # in the queue runtime dir, reachable via Task Status.
         self.assertNotIn("_failed_cases.json", action)
-        self.assertIn("original source path", action)
+        self.assertIn("原始源路径", action)
 
         category, _message, action = import_guidance(
             "Background Mimics could not start mimics.exe", "background_mimics"
@@ -5029,7 +5029,7 @@ class TestNNInteractiveContinuousPrompting(unittest.TestCase):
 
         category, _message, action = import_guidance("unexpected thing", "")
         self.assertEqual("unknown", category)
-        self.assertIn("Retry", action)
+        self.assertIn("重试", action)
 
     def test_export_error_guidance_categories(self):
         from mimics_export import _error_guidance as export_guidance
@@ -5038,7 +5038,7 @@ class TestNNInteractiveContinuousPrompting(unittest.TestCase):
             "ModuleNotFoundError: No module named 'nibabel'", "bridge"
         )
         self.assertEqual("environment_broken", category)
-        self.assertIn("Setup / Repair Environment", action)
+        self.assertIn("环境设置/修复", action)
 
         category, _message, action = export_guidance(
             "OSError: [Errno 28] No space left on device", "background_export"
@@ -5049,7 +5049,7 @@ class TestNNInteractiveContinuousPrompting(unittest.TestCase):
             "Source image metadata could not be resolved for case s0123", ""
         )
         self.assertEqual("no_source_metadata", category)
-        self.assertIn("degraded", action)
+        self.assertIn("降级", action)
 
         category, _message, action = export_guidance(
             "The active image or target Mask changed during export", "apply"
@@ -5058,7 +5058,7 @@ class TestNNInteractiveContinuousPrompting(unittest.TestCase):
 
         category, _message, action = export_guidance("strange failure", "")
         self.assertEqual("unknown", category)
-        self.assertIn("Retry", action)
+        self.assertIn("重试", action)
 
     def test_user_facing_text_has_no_developer_residue(self):
         """B4: user-visible strings must not name env vars, command lines,
@@ -5158,7 +5158,7 @@ class TestNNInteractiveSessionWriteMode(unittest.TestCase):
 
         def fake_question_box(message="", buttons="", title="", ui_blocking=None, **kw):
             prompts.append(buttons)
-            return decisions.pop(0) if decisions else "Create Editable Copy"
+            return decisions.pop(0) if decisions else "创建可编辑副本"
 
         created = []
 
@@ -5196,7 +5196,7 @@ class TestNNInteractiveSessionWriteMode(unittest.TestCase):
         # First result: user picks "Update Selected Mask" -> in place, prompt shown once.
         state = {"write_mode": "choose_on_first_result"}
         result, prompts, _created, session_after = self._run_choose(
-            ["Update Selected Mask"], state
+            ["更新所选 Mask"], state
         )
         self.assertEqual(1, len(prompts))
         self.assertEqual("in_place", state["write_mode"])
@@ -5214,7 +5214,7 @@ class TestNNInteractiveSessionWriteMode(unittest.TestCase):
     def test_derived_copy_choice_creates_draft_and_persists(self):
         state = {"write_mode": "choose_on_first_result", "_job_dir": "job"}
         result, prompts, created, _session_after = self._run_choose(
-            ["Create Editable Copy"], state
+            ["创建可编辑副本"], state
         )
         self.assertEqual(1, len(prompts))
         self.assertEqual(1, len(created))
@@ -5670,7 +5670,7 @@ class TestEdgeCases(unittest.TestCase):
         with mock.patch.object(fix, "_MONITORS", active), \
                 mock.patch.object(
                     fix.mimics.dialogs, "question_box",
-                    lambda **_kw: "Keep Running",
+                    lambda **_kw: "继续运行",
                 ):
             code = fix.main()
         self.assertNotEqual(0, code)
@@ -6780,7 +6780,7 @@ class TestSourceImagePathEquivalence(unittest.TestCase):
             source = inspect.getsource(module._prediction_context)
             self.assertNotIn("Relink the source image metadata", source)
             self.assertIn("01_Import_Data", source)
-            self.assertIn("re-import the case", source)
+            self.assertIn("重新导入该病例", source)
         pipeline_source = inspect.getsource(
             nnunet_pipeline.validate_materialized_source_geometry
         )
@@ -6867,7 +6867,7 @@ class TestSourceImagePathEquivalence(unittest.TestCase):
             return_value=_FakeImage(),
         ), mock.patch.object(
             fix_source_affine_metadata.mimics.dialogs, "question_box",
-            return_value="Repair Stored Geometry",
+            return_value="修复存储几何",
         ), mock.patch.object(
             fix_source_affine_metadata, "main", fake_main,
         ):
@@ -8927,7 +8927,7 @@ class TestNewFeatures(unittest.TestCase):
             def question_box(message=None, buttons=None, title=None,
                              ui_blocking=None):
                 answers.append(str(message))
-                return "Cancel"
+                return "取消"
 
             @staticmethod
             def message_box(message=None, title=None, ui_blocking=None):
@@ -11912,7 +11912,7 @@ class TestImportReceiptAndUndo(unittest.TestCase):
         self.assertFalse(os.path.isfile(receipt_path))
         # The message must tell the user why the file was kept.
         summary_text = " ".join(str(a[0]) for a, _kw in saved["message_boxes"])
-        self.assertIn("KEPT", summary_text)
+        self.assertIn("被保留", summary_text)
 
     def test_undo_v2_dirty_session_keeps_file_with_saved_manual_mask(self):
         """F18/T18 已保存新增: the manual mask WAS saved to disk, so the
@@ -12097,9 +12097,9 @@ class TestImportReceiptAndUndo(unittest.TestCase):
         import import_undo_mimics
 
         source = inspect.getsource(import_undo_mimics.undo_last_import)
-        self.assertIn("close it first and ", source)
-        self.assertIn("one-shot", source)
-        self.assertIn("cannot be undone again", source)
+        self.assertIn("请先关闭再重新运行本操作", source)
+        self.assertIn("一次性的", source)
+        self.assertIn("无法再次撤销", source)
 
     def test_undo_other_project_refusal_explains_two_steps(self):
         """B7: the refusal message gives the two-step recovery and says
@@ -12132,9 +12132,9 @@ class TestImportReceiptAndUndo(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(1, len(boxes))
         text = boxes[0][0][0]
-        self.assertIn("Step 1", text)
-        self.assertIn("Step 2", text)
-        self.assertIn("nothing was consumed", text)
+        self.assertIn("第一步", text)
+        self.assertIn("第二步", text)
+        self.assertIn("没有被消费", text)
 
     def test_undo_unknown_project_state_never_opens_another_project(self):
         """F17/T17 查询失败/缺API: when the project query itself fails,
@@ -12175,8 +12175,8 @@ class TestImportReceiptAndUndo(unittest.TestCase):
         self.assertEqual([], opens, "must not open a project over an unknown session")
         self.assertEqual(1, len(boxes))
         text = boxes[0][0][0]
-        self.assertIn("cannot tell", text.lower())
-        self.assertIn("nothing was consumed", text)
+        self.assertIn("无法判断", text)
+        self.assertIn("没有被消费", text)
 
     def test_undo_same_project_open_not_reloaded(self):
         """F17/T17 同项目不重载: when the receipt's project is already
@@ -14550,7 +14550,7 @@ class TestLifecycleAndRetention(unittest.TestCase):
             self.assertIsNotNone(thread)
             # the "started" message fires immediately, before any bundle
             self.assertTrue(
-                any("background" in m for m in messages),
+                any("正在后台收集" in m for m in messages),
                 messages,
             )
             thread.join(timeout=30)
@@ -14562,7 +14562,7 @@ class TestLifecycleAndRetention(unittest.TestCase):
             monitor["done"] = True
             cdm._diagnostics_tick(monitor)
             self.assertTrue(
-                any("safe to share" in m for m in messages),
+                any("可以放心分享" in m for m in messages),
                 messages,
             )
         finally:
@@ -15289,7 +15289,7 @@ class TestGuiThreadBlockingContract(unittest.TestCase):
             # The next GUI tick finishes the import.
             self.assertTrue(mask_import._reaped_mask_import_tick(monitor))
             self.assertEqual(1, len(shown))
-            self.assertIn("No visible masks were imported", shown[0])
+            self.assertIn("没有可见的掩膜被导入", shown[0])
         finally:
             mask_import._safe_message = original_message
             mask_import._stop_mask_import_monitor = original_stop
@@ -15324,9 +15324,9 @@ class TestGuiThreadBlockingContract(unittest.TestCase):
             }
             self.assertTrue(mask_import._reaped_mask_import_tick(monitor))
             self.assertEqual(1, len(shown))
-            self.assertIn("Imported 1 mask(s)", shown[0])
+            self.assertIn("已导入 1 个掩膜", shown[0])
             self.assertTrue(
-                any("could not be stopped" in str(e)
+                any("无法停止" in str(e)
                     for e in monitor.get("errors", [])),
                 "missing reap diagnostic: {}".format(monitor.get("errors")),
             )

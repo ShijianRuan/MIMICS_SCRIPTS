@@ -22,7 +22,7 @@ import nninteractive_mimics
 import runtime_common
 
 
-TITLE = "nnInteractive Custom Models"
+TITLE = "nnInteractive 自定义模型"
 ACTION_MANAGE = "manage"
 ACTION_ANNOTATE = "annotate"
 TASK_ID_METADATA = "nninteractive.task_id"
@@ -380,9 +380,8 @@ def _model_is_complete(task, model):
 def _profile(task, model):
     if not _model_is_complete(task, model):
         raise RuntimeError(
-            "The selected custom model is incomplete. Open Train and Manage "
-            "Custom Models "
-            "to inspect or replace it."
+            "所选自定义模型不完整。请打开 训练并管理自定义模型 "
+            "以检查或替换它。"
         )
     return {
         "source": "task_model",
@@ -566,7 +565,7 @@ def _finish_choice(key, payload):
     _stop_chooser_monitor(key)
     if str(payload.get("status") or "") != "selected":
         if str(payload.get("status") or "") == "failed":
-            message = str(payload.get("error") or "The model chooser failed.")
+            message = str(payload.get("error") or "模型选择器失败。")
             _log(logging.ERROR, message)
             mimics.dialogs.message_box(
                 message=message,
@@ -586,7 +585,7 @@ def _finish_choice(key, payload):
     except Exception as exc:
         _log(logging.ERROR, "Task-model annotation could not start: {0}".format(exc))
         mimics.dialogs.message_box(
-            message="Task-model annotation could not start.\n\n{0}".format(exc),
+            message="任务模型标注无法启动。\n\n{0}".format(exc),
             title=TITLE,
             ui_blocking=False,
         )
@@ -812,7 +811,7 @@ def main(action=ACTION_MANAGE):
     except Exception as exc:
         _log(logging.ERROR, "{0}: {1}".format(TITLE, exc))
         mimics.dialogs.message_box(
-            message="{0} could not continue.\n\n{1}".format(TITLE, exc),
+            message="{0} 无法继续。\n\n{1}".format(TITLE, exc),
             title=TITLE,
             ui_blocking=False,
         )

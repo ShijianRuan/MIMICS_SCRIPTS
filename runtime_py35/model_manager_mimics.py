@@ -17,7 +17,7 @@ def open_model_manager():
     """Start the AI Model Manager window. Returns 0 on success."""
     return external_window_launcher.open_external_window(
         "model_manager_ui.py",
-        "AI Model Manager",
+        "AI 模型管理器",
         "model_manager",
         "model_manager_",
         log_keep=5,

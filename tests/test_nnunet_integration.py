@@ -2340,7 +2340,7 @@ class MimicsRuntimeTests(unittest.TestCase):
             "labels": [{"id": 1, "name": "Liver", "aliases": []}],
             "matching_masks": [],
         }
-        with self.assertRaisesRegex(RuntimeError, "no non-background"):
+        with self.assertRaisesRegex(RuntimeError, "不包含任何前景标签"):
             self.module._prepare_apply_queue(
                 monitor,
                 {

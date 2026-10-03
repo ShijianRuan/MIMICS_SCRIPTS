@@ -1023,21 +1023,21 @@ def _clear_cache_tick(monitor):
     failed_count = len(result.get("failed", []))
     in_use_count = len(result.get("skipped_in_use", []))
 
-    lines = ["Cache cleared."]
+    lines = ["缓存已清理。"]
     if removed_count:
-        lines.append("{0} path(s) removed.".format(removed_count))
+        lines.append("已删除 {0} 个路径。".format(removed_count))
     if in_use_count:
-        lines.append("{0} path(s) in use — skipped.".format(in_use_count))
+        lines.append("{0} 个路径正在使用——已跳过。".format(in_use_count))
     if failed_count:
-        lines.append("{0} path(s) could not be removed.".format(failed_count))
+        lines.append("{0} 个路径无法删除。".format(failed_count))
         for path, err in result.get("failed", [])[:5]:
             lines.append("  {0}: {1}".format(path, err))
 
     message = "\n".join(lines)
     try:
-        mimics.dialogs.message_box(title="Clear Cache", message=message, ui_blocking=False)
+        mimics.dialogs.message_box(title="清理缓存", message=message, ui_blocking=False)
     except TypeError:
-        mimics.dialogs.message_box(title="Clear Cache", message=message)
+        mimics.dialogs.message_box(title="清理缓存", message=message)
     _mimics_log(logging.INFO, message)
     _dispose_cache_monitor(monitor)
 
@@ -1054,8 +1054,8 @@ def clear_cache_main():
             _mimics_log(logging.INFO, "Cache clearing is already running.")
             try:
                 mimics.dialogs.message_box(
-                    title="Clear Cache",
-                    message="Cache clearing is already running.",
+                    title="清理缓存",
+                    message="缓存清理正在进行中。",
                     ui_blocking=False,
                 )
             except Exception:
@@ -1398,12 +1398,12 @@ def _stop_background_tick(monitor):
         key = monitor.get("monitor_key")
         if key in _STOP_MONITORS:
             del _STOP_MONITORS[key]
-        title = monitor.get("title", "Stop Background Services")
-        lines = [monitor.get("completion_text", title + " completed.")]
-        lines.append("Matched process(es): {0}".format(len(matched)))
-        lines.append("Kill request(s): {0}".format(len(killed)))
+        title = monitor.get("title", "停止后台服务")
+        lines = [monitor.get("completion_text", title + "已完成。")]
+        lines.append("匹配到的进程数：{0}".format(len(matched)))
+        lines.append("发送结束请求的进程数：{0}".format(len(killed)))
         if queue_dirs:
-            lines.append("Queue stop marker dir(s): {0}".format(len(queue_dirs)))
+            lines.append("写入停止标记的队列目录数：{0}".format(len(queue_dirs)))
         if report.get("Message"):
             lines.append(str(report.get("Message")))
         msg = "\n".join(lines)
@@ -1421,10 +1421,10 @@ def _stop_background_tick(monitor):
         key = monitor.get("monitor_key")
         if key in _STOP_MONITORS:
             del _STOP_MONITORS[key]
-        title = monitor.get("title", "Stop Background Services")
+        title = monitor.get("title", "停止后台服务")
         msg = (
-            "{0} is still running or did not produce a report yet.\n\n"
-            "The detailed report location is recorded in the Mimics log."
+            "{0}仍在运行，或尚未生成报告。\n\n"
+            "详细报告的位置已记录在 Mimics 日志中。"
         ).format(title)
         _mimics_log(
             logging.WARNING,
@@ -1454,17 +1454,15 @@ def main():
     # health panel's stop action.
     answer = mimics.dialogs.question_box(
         message=(
-            "Stop all background services started by this project?\n\n"
-            "This stops every owned background process: in-flight imports, "
-            "exports and AI tasks are cancelled. Finished work on disk is "
-            "kept, but running tasks lose their progress since the last "
-            "saved step."
+            "停止本项目启动的所有后台服务吗？\n\n"
+            "这将停止所有归属的后台进程：进行中的导入、导出和 AI 任务都会被取消。"
+            "磁盘上已完成的工作会保留，但运行中的任务会丢失自上一个已保存步骤以来的进度。"
         ),
-        buttons="Stop All;Cancel",
-        title="Stop All Owned Services",
+        buttons="全部停止;取消",
+        title="停止所有归属服务",
         ui_blocking=True,
     )
-    if answer != "Stop All":
+    if answer != "全部停止":
         return 0
     result = stop_background_processes()
     ok = bool(result.get("ok")) if isinstance(result, dict) else bool(result)
@@ -1480,14 +1478,14 @@ def main():
     if not ok:
         try:
             mimics.dialogs.message_box(
-                title="Stop Background Services",
-                message="Background cleanup is only implemented for Windows Mimics workstations.",
+                title="停止后台服务",
+                message="后台清理目前仅支持 Windows 的 Mimics 工作站。",
                 ui_blocking=False,
             )
         except TypeError:
             mimics.dialogs.message_box(
-                title="Stop Background Services",
-                message="Background cleanup is only implemented for Windows Mimics workstations.",
+                title="停止后台服务",
+                message="后台清理目前仅支持 Windows 的 Mimics 工作站。",
             )
     return 0
 
@@ -1498,17 +1496,16 @@ def main_stop_import():
     # question_box pattern as the FlexiCT stop entry.
     answer = mimics.dialogs.question_box(
         message=(
-            "Stop all running imports?\n\n"
-            "This stops every import queue on this workstation, not just the "
-            "current one: in-progress cases are cancelled, the background "
-            "Mimics that creates .mcs files is shut down, and already "
-            "finished projects are kept. Prepared data is kept for retry."
+            "停止所有正在运行的导入吗？\n\n"
+            "这将停止本工作站上的所有导入队列，而不只是当前队列：进行中的病例会被取消，"
+            "生成 .mcs 文件的后台 Mimics 会被关闭，已完成的项目会保留。"
+            "已准备好的数据保留，可供重试。"
         ),
-        buttons="Stop Imports;Cancel",
-        title="Stop Background Import",
+        buttons="停止导入;取消",
+        title="停止后台导入",
         ui_blocking=True,
     )
-    if answer != "Stop Imports":
+    if answer != "停止导入":
         return 0
     result = stop_background_import()
     target = result.get("target_pid") if isinstance(result, dict) else None
@@ -1516,28 +1513,28 @@ def main_stop_import():
     report = result.get("stop_log", "") if isinstance(result, dict) else ""
     if target:
         message = (
-            "Background import stop requested.\n"
-            "Target background Mimics PID: {0}\n"
-            "Queue stop marker dir(s): {1}".format(target, len(queues))
+            "已请求停止后台导入。\n"
+            "目标后台 Mimics 进程 PID：{0}\n"
+            "写入停止标记的队列目录数：{1}".format(target, len(queues))
         )
     else:
         message = (
-            "Background import stop markers were written.\n"
-            "No active background Mimics import process was found.\n"
-            "Queue stop marker dir(s): {0}".format(len(queues))
+            "后台导入停止标记已写入。\n"
+            "未发现活动中的后台 Mimics 导入进程。\n"
+            "写入停止标记的队列目录数：{0}".format(len(queues))
         )
     # The full stop report (stop_log JSON path) stays in the Mimics log; a
     # raw runtime path in a user dialog is noise.
     _mimics_log(logging.INFO, "{0}\nReport: {1}".format(message, report))
     try:
         mimics.dialogs.message_box(
-            title="Stop Background Import",
+            title="停止后台导入",
             message=message,
             ui_blocking=False,
         )
     except TypeError:
         mimics.dialogs.message_box(
-            title="Stop Background Import",
+            title="停止后台导入",
             message=message,
         )
     return 0
@@ -1557,8 +1554,8 @@ def main_stop_export():
             {
                 "monitor_key": "stop_export_{0}".format(int(time.time() * 1000)),
                 "stop_log": report,
-                "title": "Stop Mask Export",
-                "completion_text": "Mask export stop completed.",
+                "title": "停止掩膜导出",
+                "completion_text": "掩膜导出停止完成。",
             },
             poll_seconds=0.5,
             timeout_seconds=30.0,

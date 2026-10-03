@@ -62,14 +62,14 @@ def _python_exe():
     if found:
         return found
     raise RuntimeError(
-        "The external Python environment was not found. Run Setup / Repair Environment first."
+        "未找到外部 Python 环境。请先运行 管理菜单 > 环境设置/修复。"
     )
 
 
 def _worker_script():
     path = os.path.join(_project_root(), "tools", "interactive_algorithms_worker.py")
     if not os.path.isfile(path):
-        raise RuntimeError("interactive_algorithms_worker.py was not found: {0}".format(path))
+        raise RuntimeError("未找到 interactive_algorithms_worker.py：{0}".format(path))
     return path
 
 
@@ -119,7 +119,7 @@ def _active_image():
         except Exception:
             pass
     if image is None:
-        raise RuntimeError("Open and activate one image before running this tool.")
+        raise RuntimeError("请先打开并激活一个影像，再运行本工具。")
     return image
 
 
@@ -129,7 +129,7 @@ def _selected_mask(image):
         if bool(getattr(mask, "selected", False)):
             selected.append(mask)
     if len(selected) != 1:
-        raise RuntimeError("Select exactly one Mask attached to the active image.")
+        raise RuntimeError("请选择恰好一个挂载在当前影像上的掩膜。")
     return selected[0]
 
 
@@ -158,7 +158,7 @@ def _write_raw_buffer(
     shape = [int(value) for value in view.shape]
     if expected_shape is not None and list(expected_shape) != shape:
         raise RuntimeError(
-            "Mimics image and Mask buffer shapes differ: {0} vs {1}.".format(
+            "Mimics 影像与掩膜缓冲区形状不一致：{0} vs {1}。".format(
                 expected_shape, shape
             )
         )
@@ -387,9 +387,9 @@ def _click_plane_axes(image):
         return None
     result = {}
     for label, world_axis in (
-        ("Axial View", 2),
-        ("Coronal View", 1),
-        ("Sagittal View", 0),
+        ("轴位视图", 2),
+        ("冠状位视图", 1),
+        ("矢状位视图", 0),
     ):
         scores = []
         for voxel_axis in range(3):
@@ -411,7 +411,7 @@ def _click_plane_axes(image):
     return result
 
 
-_PLANE_LABELS = ["Axial View", "Coronal View", "Sagittal View"]
+_PLANE_LABELS = ["轴位视图", "冠状位视图", "矢状位视图"]
 
 # Last-used plane/sign memory (per user, persisted outside the runtime dir).
 _PLANE_MEMORY_FILE = "scribbleprompt_last_plane_sign.json"
@@ -449,8 +449,8 @@ def _choose_click_plane(image):
         mimics.dialogs.message_box(
             title="ScribblePrompt",
             message=(
-                "The active image orientation could not be mapped safely to the three "
-                "standard 2D views. Add a Scribble or Box first so the slice is explicit."
+                "无法将当前影像方向安全映射到三个标准 2D 视图。"
+                "请先添加一个涂鸦或框，使切片明确。"
             ),
             ui_blocking=True,
         )
@@ -459,14 +459,13 @@ def _choose_click_plane(image):
     last_label = str(memory.get("plane_label") or "")
     default_hint = ""
     if last_label in axes:
-        default_hint = "\n\n(Last time you chose: {0})".format(last_label)
+        default_hint = "\n\n（上次您选择的是：{0}）".format(last_label)
     answer = mimics.dialogs.question_box(
-        title="ScribblePrompt Plane",
+        title="ScribblePrompt 切片视图",
         message=(
-            "Choose the 2D view in which you are placing prompts. All prompts in this "
-            "prediction must stay on that same slice.{0}".format(default_hint)
+            "请选择您放置提示所在的 2D 视图。本次预测的所有提示都必须位于同一张切片上。{0}".format(default_hint)
         ),
-        buttons=";".join(_PLANE_LABELS + ["Cancel"]),
+        buttons=";".join(_PLANE_LABELS + ["取消"]),
         ui_blocking=True,
     )
     if answer not in axes:
@@ -480,20 +479,20 @@ def _choose_prompt_sign():
     memory = _load_plane_memory() if _remember_plane_enabled() else {}
     last_sign = memory.get("prompt_sign")
     default_hint = ""
-    if last_sign in ("Foreground", "Background"):
-        default_hint = "\n\n(Last time you chose: {0})".format(last_sign)
+    if last_sign in ("前景", "背景"):
+        default_hint = "\n\n（上次您选择的是：{0}）".format(last_sign)
     answer = mimics.dialogs.question_box(
         title="ScribblePrompt",
         message=(
-            "Foreground marks pixels that belong to the structure.\n"
-            "Background marks pixels that must be excluded.{0}".format(default_hint)
+            "前景标记属于目标结构的像素。\n"
+            "背景标记必须排除的像素。{0}".format(default_hint)
         ),
-        buttons="Foreground;Background;Cancel",
+        buttons="前景;背景;取消",
         ui_blocking=True,
     )
-    if answer == "Foreground":
+    if answer == "前景":
         result = True
-    elif answer == "Background":
+    elif answer == "背景":
         result = False
     else:
         return None
@@ -506,9 +505,9 @@ def _capture_prompt_point(image, include):
     try:
         coordinates = mimics.indicate_coordinate(
             message=(
-                "Click inside the structure."
+                "在目标结构内部点击。"
                 if include
-                else "Click an area that must be excluded."
+                else "点击必须排除的区域。"
             ),
             show_message_box=True,
             confirm=False,
@@ -554,8 +553,8 @@ def _collect_scribbleprompt_prompts(image, target, job_dir, visual_objects):
             mimics.dialogs.message_box(
                 title="ScribblePrompt",
                 message=(
-                    "This prompt does not identify one 2D image slice. Draw it in one "
-                    "axial, coronal, or sagittal view and try again."
+                    "该提示无法确定唯一的 2D 影像切片。"
+                    "请在一个轴位、冠状位或矢状位视图中绘制后重试。"
                 ),
                 ui_blocking=True,
             )
@@ -570,8 +569,7 @@ def _collect_scribbleprompt_prompts(image, target, job_dir, visual_objects):
         mimics.dialogs.message_box(
             title="ScribblePrompt",
             message=(
-                "All clicks, scribbles, and the box for one prediction must be placed "
-                "on the same 2D slice. The last prompt was not added."
+                "一次预测的所有点击、涂鸦和框必须位于同一张 2D 切片上。最后一个提示未被添加。"
             ),
             ui_blocking=True,
         )
@@ -588,36 +586,35 @@ def _collect_scribbleprompt_prompts(image, target, job_dir, visual_objects):
         can_run = bool(records) and (
             positive or int(getattr(target, "number_of_pixels", 0) or 0) > 0
         )
-        buttons = ["Add Click", "Add Scribble"]
+        buttons = ["添加点击", "添加涂鸦"]
         if not boxes:
-            buttons.append("Add Box")
+            buttons.append("添加框")
         if records:
-            buttons.append("Undo Last")
+            buttons.append("撤销上一个")
         if can_run:
-            buttons.append("Run ScribblePrompt")
-        buttons.append("Cancel")
+            buttons.append("执行 ScribblePrompt")
+        buttons.append("取消")
         answer = mimics.dialogs.question_box(
             title="ScribblePrompt",
             message=(
-                "Add clicks, scribbles, or one foreground box on a single 2D slice. "
-                "Existing Mask content and the previous prediction are used for refinement.\n\n"
-                "Important: while the cursor waits for your click or stroke, do "
-                "not switch to another tool (zoom, pan, measure, ...). Doing so "
-                "can crash Mimics and lose unsaved work. Switch tools only "
-                "while this dialog is shown.\n\n"
-                "Clicks: {0}    Scribbles: {1}    Box: {2}\n"
-                "Foreground prompts: {3}    Background prompts: {4}"
+                "在同一张 2D 切片上添加点击、涂鸦或一个前景框。"
+                "现有掩膜内容和上一次预测会用于细化。\n\n"
+                "重要：当光标等待您点击或绘制时，请勿切换到其他工具"
+                "（缩放、平移、测量等）。否则可能导致 Mimics 崩溃并丢失未保存的工作。"
+                "请仅在此对话框显示时切换工具。\n\n"
+                "点击：{0}    涂鸦：{1}    框：{2}\n"
+                "前景提示：{3}    背景提示：{4}"
             ).format(
                 len(clicks),
                 len(scribbles),
-                "added" if boxes else "none",
+                "已添加" if boxes else "无",
                 len([item for item in records if item["kind"] == "box" or item["value"].get("include")]),
                 len([item for item in records if item["kind"] != "box" and not item["value"].get("include")]),
             ),
             buttons=";".join(buttons),
             ui_blocking=True,
         )
-        if answer == "Add Click":
+        if answer == "添加点击":
             include = _choose_prompt_sign()
             if include is None:
                 continue
@@ -634,7 +631,7 @@ def _collect_scribbleprompt_prompts(image, target, job_dir, visual_objects):
                 candidate = (chosen_axis, int(value["point"][chosen_axis]))
                 if accept_plane(candidate, visual):
                     records.append({"kind": "point", "value": value, "visual": visual})
-        elif answer == "Add Scribble":
+        elif answer == "添加涂鸦":
             include = _choose_prompt_sign()
             if include is None:
                 continue
@@ -650,7 +647,7 @@ def _collect_scribbleprompt_prompts(image, target, job_dir, visual_objects):
                     )
                 if accept_plane(candidate, visual):
                     records.append({"kind": "scribble", "value": value, "visual": visual})
-        elif answer == "Add Box":
+        elif answer == "添加框":
             before = len(visual_objects)
             value = nnm._capture_box(image, visual_objects)
             if value is not None:
@@ -658,7 +655,7 @@ def _collect_scribbleprompt_prompts(image, target, job_dir, visual_objects):
                 candidate = _prompt_plane_from_bbox(value.get("bbox"), plane_axis)
                 if accept_plane(candidate, visual):
                     records.append({"kind": "box", "value": value, "visual": visual})
-        elif answer == "Undo Last" and records:
+        elif answer == "撤销上一个" and records:
             removed = records.pop()
             _remove_visual_object(removed.get("visual"), visual_objects)
             if records:
@@ -673,7 +670,7 @@ def _collect_scribbleprompt_prompts(image, target, job_dir, visual_objects):
             else:
                 plane_axis = None
                 plane_index = None
-        elif answer == "Run ScribblePrompt" and can_run:
+        elif answer == "执行 ScribblePrompt" and can_run:
             return {
                 "scribbles": [item["value"] for item in records if item["kind"] == "scribble"],
                 "points": [item["value"] for item in records if item["kind"] == "point"],
@@ -730,7 +727,7 @@ def _prepare_request(action, image, target, config, job_dir, prompts=None):
         "mask_buffer_access", "{0} input export".format(DISPLAY_NAMES[action])
     )
     if not operation_token:
-        raise RuntimeError("Another Mimics operation is currently reading or updating Mask buffers. Try again shortly.")
+        raise RuntimeError("另一个 Mimics 操作正在读取或更新掩膜缓冲区，请稍后重试。")
     try:
         image_export = _write_raw_buffer(
             image,
@@ -846,7 +843,7 @@ def _launch(action, image, target, config, job_dir, prompts=None, visual_objects
     }
     if not _start_monitor(monitor, float(config.get("poll_seconds", 0.25))):
         runtime_common.terminate_process_async(process=process, graceful_seconds=1.0)
-        raise RuntimeError("Mimics could not start a safe result monitor; the background task was stopped.")
+        raise RuntimeError("Mimics 无法启动安全的结果监视器；后台任务已停止。")
     _mimics_log(
         logging.INFO,
         "{0} started in the background. PID: {1}. Continue using Mimics; completion will be shown automatically.".format(
@@ -947,34 +944,34 @@ def _choose_result_target(monitor, result):
     display = monitor["display_name"]
     if changed:
         answer = mimics.dialogs.question_box(
-            title="{0} Ready".format(display),
+            title="{0} 就绪".format(display),
             message=(
-                "{0} completed, but the selected Mask changed while it was running.\n\n"
-                "Create Editable Copy preserves the newer Mask and applies the completed result to a new Mask."
+                "{0} 已完成，但所选掩膜在运行期间发生了改动。\n\n"
+                "创建可编辑副本 会保留较新的掩膜，并将完成的结果应用到一个新掩膜。"
             ).format(display),
-            buttons="Create Editable Copy;Discard",
+            buttons="创建可编辑副本;丢弃",
             ui_blocking=True,
         )
-        if answer != "Create Editable Copy":
+        if answer != "创建可编辑副本":
             return None
         return _create_copy(monitor["image"], "{0} - {1}".format(monitor["target_name"], display))
     answer = mimics.dialogs.question_box(
-        title="{0} Ready".format(display),
+        title="{0} 就绪".format(display),
         message=(
-            "{0} completed in {1} seconds.\n\n"
-            "Update Selected Mask applies the result to {2}.\n"
-            "Create Editable Copy preserves it and creates a new editable Mask."
+            "{0} 在 {1} 秒内完成。\n\n"
+            "更新所选掩膜 会将结果应用到 {2}。\n"
+            "创建可编辑副本 会保留它，并新建一个可编辑的掩膜。"
         ).format(
             display,
             result.get("elapsed_seconds", "?"),
             monitor["target_name"],
         ),
-        buttons="Update Selected Mask;Create Editable Copy;Discard",
+        buttons="更新所选掩膜;创建可编辑副本;丢弃",
         ui_blocking=True,
     )
-    if answer == "Update Selected Mask":
+    if answer == "更新所选掩膜":
         return target
-    if answer == "Create Editable Copy":
+    if answer == "创建可编辑副本":
         return _create_copy(monitor["image"], "{0} - {1}".format(monitor["target_name"], display))
     return None
 
@@ -994,7 +991,7 @@ def _apply_completed(monitor, state):
     path = str(result.get("result_path") or "")
     shape = result.get("shape") or monitor["request"].get("shape")
     if not path or not os.path.isfile(path):
-        raise RuntimeError("The background worker completed without a result Mask buffer.")
+        raise RuntimeError("后台工作进程已完成，但没有生成结果掩膜缓冲区。")
     target = _choose_result_target(monitor, dict(result, elapsed_seconds=state.get("elapsed_seconds", "?")))
     if target is None:
         _mimics_log(logging.INFO, "{0} result was discarded; the project was not changed.".format(monitor["display_name"]))
@@ -1042,13 +1039,13 @@ def _finish_monitor(monitor, state):
         if status == "completed":
             _apply_completed(monitor, state)
         elif status == "failed":
-            error = state.get("error") or state.get("message") or "Unknown background error."
+            error = state.get("error") or state.get("message") or "未知后台错误。"
             _mimics_log(logging.ERROR, "{0} failed: {1}".format(monitor["display_name"], error))
             mimics.dialogs.message_box(
-                "{0} failed.\n\n{1}\n\nLog: {2}".format(
+                "{0} 失败。\n\n{1}\n\n日志：{2}".format(
                     monitor["display_name"], error, state.get("log_path", monitor["request"].get("log_path"))
                 ),
-                title="{0} Failed".format(monitor["display_name"]),
+                title="{0} 失败".format(monitor["display_name"]),
                 ui_blocking=True,
             )
         else:
@@ -1137,7 +1134,7 @@ def _monitor_tick(monitor):
                     monitor,
                     {
                         "status": "failed",
-                        "error": "The external worker exited before writing a terminal status (code {}).".format(
+                        "error": "外部工作进程在写入最终状态前就退出了（退出码 {}）。".format(
                             process.returncode
                         ),
                         "log_path": monitor["request"].get("log_path"),
@@ -1150,7 +1147,7 @@ def _monitor_tick(monitor):
                 monitor,
                 {
                     "status": "failed",
-                    "error": "The operation exceeded its {} second timeout and was stopped.".format(
+                    "error": "操作超过 {} 秒超时限制，已被停止。".format(
                         int(monitor["timeout_seconds"])
                     ),
                     "log_path": monitor["request"].get("log_path"),
@@ -1161,7 +1158,7 @@ def _monitor_tick(monitor):
             monitor,
             {
                 "status": "failed",
-                "error": "Mimics could not process the background result: {0}".format(exc),
+                "error": "Mimics 无法处理后台结果：{0}".format(exc),
                 "log_path": monitor["request"].get("log_path"),
             },
         )
@@ -1241,32 +1238,32 @@ def _show_running(action):
     monitor = active[-1]
     state = runtime_common.read_json(monitor["request"]["status_path"], {})
     progress = (
-        "Interactive session"
+        "交互会话进行中"
         if state.get("progress_indeterminate")
         else "{0}%".format(state.get("progress_percent", 0))
     )
     answer = mimics.dialogs.question_box(
-        title="{0} Running".format(DISPLAY_NAMES[action]),
+        title="{0} 运行中".format(DISPLAY_NAMES[action]),
         message=(
-            "{0} is running in the background.\n\nProgress: {1}\nStage: {2}\n\n"
-            "Mimics remains available while it runs."
+            "{0} 正在后台运行。\n\n进度：{1}\n阶段：{2}\n\n"
+            "运行期间 Mimics 仍可正常使用。"
         ).format(
             DISPLAY_NAMES[action],
             progress,
             state.get("message", state.get("phase", "starting")),
         ),
-        buttons="Keep Running;Stop",
+        buttons="继续运行;停止",
         ui_blocking=True,
     )
-    if answer == "Stop":
+    if answer == "停止":
         _request_stop(monitor, "user")
     return True
 def _start_scribbleprompt(config):
     checkpoint = _checkpoint_path(config)
     if not checkpoint or not os.path.isfile(checkpoint):
         raise RuntimeError(
-            "The official ScribblePrompt UNet checkpoint is missing.\n\nExpected: {0}\n\n"
-            "Place ScribblePrompt_unet_v1_nf192_res128.pt at this path before drawing prompts.".format(
+            "缺少官方 ScribblePrompt UNet 检查点。\n\n预期路径：{0}\n\n"
+            "请先将 ScribblePrompt_unet_v1_nf192_res128.pt 放到该路径，再绘制提示。".format(
                 checkpoint or "integrations/ScribblePrompt/checkpoints/ScribblePrompt_unet_v1_nf192_res128.pt"
             )
         )
@@ -1303,7 +1300,7 @@ def main(action):
     display = DISPLAY_NAMES.get(action, str(action))
     try:
         if action not in DISPLAY_NAMES:
-            raise RuntimeError("Unknown interactive algorithm action: {0}".format(action))
+            raise RuntimeError("未知的交互式算法操作：{0}".format(action))
         if _show_running(action):
             return 0
         buffer_owner = runtime_common.active_local_operation("mask_buffer_access")
@@ -1311,9 +1308,9 @@ def main(action):
             mimics.dialogs.message_box(
                 title=display,
                 message=(
-                    "{0} cannot take a consistent image and Mask snapshot while {1} is using Mimics buffers.\n\n"
-                    "Wait for that operation to finish or stop it, then retry."
-                ).format(display, buffer_owner.get("owner") or "another task"),
+                    "{0} 正在被 {1} 使用，无法同时获取一致的影像和掩膜快照。\n\n"
+                    "请等待该操作完成或停止它，然后重试。"
+                ).format(display, buffer_owner.get("owner") or "其他任务"),
                 ui_blocking=False,
             )
             return 1
@@ -1323,7 +1320,7 @@ def main(action):
     except Exception as exc:
         _mimics_log(logging.ERROR, "{0} error: {1}".format(display, exc))
         mimics.dialogs.message_box(
-            "{0} could not continue.\n\n{1}".format(display, exc),
+            "{0} 无法继续。\n\n{1}".format(display, exc),
             title=display,
             ui_blocking=True,
         )

@@ -104,9 +104,9 @@ def open_external_window(
     python_exe = runtime_common.find_external_python(root, allow_system_python=False)
     if not python_exe or not os.path.isfile(python_exe):
         mimics.dialogs.message_box(
-            "The external tools Python was not found.\n\n"
-            "Open Admin > Environment Guidance for a step-by-step repair "
-            "window, or run Admin > Setup/Repair Environment.",
+            "未找到外部工具 Python。\n\n"
+            "请打开 管理菜单 > 环境指引 查看分步修复窗口，"
+            "或运行 管理菜单 > 环境设置/修复。",
             title=window_title,
             ui_blocking=False,
         )
@@ -114,9 +114,8 @@ def open_external_window(
     script = find_window_script(root, script_name)
     if not os.path.isfile(script):
         mimics.dialogs.message_box(
-            "The window script was not found: {0}\n"
-            "The installation looks incomplete; re-extract the deployment "
-            "package or run Admin > Setup/Repair Environment.".format(script),
+            "未找到窗口脚本：{0}\n"
+            "安装似乎不完整；请重新解压部署包，或运行 管理菜单 > 环境设置/修复。".format(script),
             title=window_title,
             ui_blocking=False,
         )
@@ -135,9 +134,8 @@ def open_external_window(
         )
     except Exception as exc:
         mimics.dialogs.message_box(
-            "Could not start the window. The external Python environment "
-            "may be damaged (details below); run Admin > Setup/Repair "
-            "Environment to fix it.\n\n{0}".format(exc),
+            "无法启动窗口。外部 Python 环境可能已损坏（详情见下）；"
+            "请运行 管理菜单 > 环境设置/修复 来修复。\n\n{0}".format(exc),
             title=window_title,
             ui_blocking=False,
         )

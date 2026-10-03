@@ -1725,7 +1725,7 @@ class TestInferenceMonitorTerminalStates(unittest.TestCase):
                 "deadline")
             message_box.assert_called_once()
             message = message_box.call_args[0][0]
-            self.assertIn("FlexiCT prediction failed", message)
+            self.assertIn("FlexiCT 预测失败", message)
             self.assertIn("remote budget exhausted", message)
 
     def test_failed_inference_still_stops_monitor(self):
@@ -1735,7 +1735,7 @@ class TestInferenceMonitorTerminalStates(unittest.TestCase):
                 module, tmp, "failed", "boom")
             self.assertNotIn("test_infer", module._MONITORS)
             message_box.assert_called_once()
-            self.assertIn("FlexiCT prediction failed", message_box.call_args[0][0])
+            self.assertIn("FlexiCT 预测已失败", message_box.call_args[0][0])
 
 
 class TestEqualVolumeEditProtection(unittest.TestCase):
