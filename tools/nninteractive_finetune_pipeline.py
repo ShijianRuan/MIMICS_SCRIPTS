@@ -2665,19 +2665,19 @@ def diagnose_job(job_dir_value: str) -> dict[str, Any]:
     )
     if not error:
         if status.get("status") in ("paused", "cancelled"):
-            hint = "Training was stopped by user request; no failure occurred."
+            hint = "训练是按用户请求停止的，并没有发生失败。"
         else:
-            hint = "No error was recorded for this job."
+            hint = "该作业没有记录到错误。"
     elif gpu_wait or status.get("status") == "waiting_for_gpu":
-        hint = "Failed while waiting for the GPU; another task may have held the lock."
+        hint = "在等待 GPU 时失败；可能有其他任务占用了锁。"
     elif label_export:
-        hint = "Failed while reading saved Masks; check that every case still contains the target Mask."
+        hint = "在读取已保存的 Mask 时失败；请检查每个病例是否仍包含目标 Mask。"
     elif "out of memory" in error.lower() or "cuda" in error.lower():
-        hint = "Failed with a GPU memory error; close other GPU programs or reduce concurrent tasks."
+        hint = "GPU 显存不足导致失败；请关闭其他占用 GPU 的程序或减少并发任务。"
     elif artifacts.get("job.log") is False:
-        hint = "The job log is missing; the job directory may have been cleaned."
+        hint = "作业日志缺失；作业目录可能已被清理。"
     else:
-        hint = "See the log tail below for the last activity before the failure."
+        hint = "请查看下方日志结尾，了解失败前的最后活动。"
 
     return {
         "schema_version": "nninteractive_job_diagnosis.v1",

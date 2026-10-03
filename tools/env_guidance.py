@@ -204,14 +204,12 @@ def collect_issues(project_root: Path | None = None) -> list[dict]:
         bundle = (root / "python").is_dir() and (root / "wheels").is_dir()
         issues.append({
             "kind": "python_missing",
-            "title": "External Python environment is missing",
+            "title": "缺少外部 Python 环境",
             "detail": (
-                "The bundled Python environment (python_env/) was not found, so "
-                "no AI features can run. "
-                + ("An offline bundle is present, so setup needs no internet."
+                "未找到内置 Python 环境（python_env/），所有 AI 功能都无法运行。"
+                + ("检测到离线安装包，修复不需要联网。"
                    if bundle else
-                   "Run Setup Environment, or re-extract the deployment package "
-                   "if this machine never had it.")
+                   "请运行“安装/修复环境”，或如果本机从未安装过，重新解压部署包。")
             ),
             "fix_action": "offline-install" if bundle else "setup-from-scratch",
             "severity": "bad",
@@ -224,9 +222,9 @@ def collect_issues(project_root: Path | None = None) -> list[dict]:
         if status == "error":
             issues.append({
                 "kind": "setup_failed",
-                "title": "Last environment setup failed",
-                "detail": "{0}\nTechnical detail: {1}".format(
-                    state.get("message") or "The setup worker reported an error.",
+                "title": "上次环境安装失败",
+                "detail": "{0}\n技术细节：{1}".format(
+                    state.get("message") or "安装 worker 报告了错误。",
                     str(state.get("error") or "")[:300],
                 ),
                 "fix_action": "install",
@@ -236,10 +234,10 @@ def collect_issues(project_root: Path | None = None) -> list[dict]:
             missing = state.get("failed_packages") or state.get("missing_packages") or []
             issues.append({
                 "kind": "setup_incomplete",
-                "title": "Environment setup is incomplete",
-                "detail": "{0}\nAffected packages: {1}".format(
-                    state.get("message") or "Some packages did not install.",
-                    ", ".join(str(m) for m in missing[:10]) or "unknown",
+                "title": "环境安装不完整",
+                "detail": "{0}\n受影响的包：{1}".format(
+                    state.get("message") or "部分依赖包未安装成功。",
+                    ", ".join(str(m) for m in missing[:10]) or "未知",
                 ),
                 "fix_action": "install",
                 "severity": "warn",
@@ -249,11 +247,10 @@ def collect_issues(project_root: Path | None = None) -> list[dict]:
     if old_root:
         issues.append({
             "kind": "migration_pending",
-            "title": "This checkout appears to be moved from another location",
+            "title": "本目录似乎是从其他位置移动过来的",
             "detail": (
-                "Some configured paths still point under {0}, which does not "
-                "exist on this machine. Run the migration to rewrite them to "
-                "this location ({1}).".format(old_root, root)
+                "部分配置路径仍指向 {0}，该路径在本机不存在。请运行迁移，"
+                "把路径改写为当前位置（{1}）。".format(old_root, root)
             ),
             "fix_action": "migrate:" + old_root,
             "severity": "warn",
@@ -270,14 +267,13 @@ def collect_issues(project_root: Path | None = None) -> list[dict]:
         if not has_weights:
             issues.append({
                 "kind": "flexict_weights",
-                "title": "FlexiCT pretrained weights are not installed",
+                "title": "FlexiCT 预训练权重未安装",
                 "detail": (
-                    "FlexiCT training needs the pretrained backbone files "
-                    "flexict_2d/model.safetensors and flexict_3d/model.safetensors "
-                    "under {0}, or a pretrained_weights_dir entry in "
-                    "flexict_config.json. They ship outside the deployment "
-                    "package (2 x ~576 MB); copy them from the distribution "
-                    "source when FlexiCT training is needed.".format(
+                    "FlexiCT 训练需要预训练骨干文件 "
+                    "flexict_2d/model.safetensors 和 flexict_3d/model.safetensors "
+                    "（位于 {0}），或在 flexict_config.json 中配置 "
+                    "pretrained_weights_dir。它们不随部署包分发"
+                    "（2 个，各约 576 MB）；需要 FlexiCT 训练时，请从分发源复制。".format(
                         flexict_repo / "weights"
                     )
                 ),
@@ -289,16 +285,14 @@ def collect_issues(project_root: Path | None = None) -> list[dict]:
     if not nn_model:
         issues.append({
             "kind": "nninteractive_model",
-            "title": "nnInteractive official model is not installed",
+            "title": "nnInteractive 官方模型未安装",
             "detail": (
-                "The official nnInteractive model (nnInteractive_v1.0 with "
-                "fold_*/checkpoint_final.pth) was not found in any of the "
-                "searched locations:\n{0}\n"
-                "Without it the official-model annotate entry cannot run "
-                "(custom trained models are unaffected). Copy the model "
-                "folder from your distribution source into one of the "
-                "locations above, or set NNINTERACTIVE_MODEL_DIR / the "
-                "model_dir entry in nninteractive_config.json.".format(
+                "在以下位置均未找到 nnInteractive 官方模型"
+                "（nnInteractive_v1.0，含 fold_*/checkpoint_final.pth）：\n{0}\n"
+                "缺少它时“官方模型标注”入口无法运行（自定义训练的模型不受影响）。"
+                "请把模型文件夹从分发源复制到上述任一位置，或设置 "
+                "NNINTERACTIVE_MODEL_DIR / nninteractive_config.json 中的 "
+                "model_dir。".format(
                     "\n".join(c for c in _nninteractive_model_candidates(root) if c)
                 )
             ),
@@ -310,13 +304,12 @@ def collect_issues(project_root: Path | None = None) -> list[dict]:
     if scribble is not None and not scribble:
         issues.append({
             "kind": "scribbleprompt_checkpoint",
-            "title": "ScribblePrompt checkpoint is not installed",
+            "title": "ScribblePrompt checkpoint 未安装",
             "detail": (
-                "The ScribblePrompt checkpoint configured for the "
-                "scribble-annotate entry was not found:\n{0}\n"
-                "Copy the .pt file from your distribution source, or set "
-                "SCRIBBLEPROMPT_CHECKPOINT / the checkpoint entry under "
-                "\"scribbleprompt\" in interactive_algorithms_config.json.".format(
+                "未找到涂鸦标注入口所配置的 ScribblePrompt checkpoint：\n{0}\n"
+                "请从分发源复制该 .pt 文件，或设置 SCRIBBLEPROMPT_CHECKPOINT / "
+                "interactive_algorithms_config.json 中 \"scribbleprompt\" 下的 "
+                "checkpoint 项。".format(
                     _scribbleprompt_configured_path(root)
                 )
             ),
@@ -413,12 +406,12 @@ def run_fix(project_root: Path, fix_action: str) -> str:
         old_root = fix_action.split(":", 1)[1]
         pid = _run_migrate(root, old_root)
         if pid:
-            return "Migration started (PID {0}). Re-run Setup > Check afterwards.".format(pid)
-        return "Could not start the migration worker."
+            return "迁移已启动（PID {0}）。完成后请重新运行“检查”。".format(pid)
+        return "无法启动迁移 worker。"
     if fix_action in ("check", "install", "offline-install", "setup-from-scratch"):
         pid = _run_setup_worker(root, fix_action)
         if pid:
-            return "Setup worker started (PID {0}). Progress is shown by Admin > Setup/Repair Environment.".format(pid)
+            return "安装 worker 已启动（PID {0}）。进度见 管理 > 安装/修复环境。".format(pid)
     return ""
 
 
@@ -456,7 +449,7 @@ def show_dialog(project_root: Path | None = None, parent=None) -> int:
         layout.addWidget(note)
     else:
         intro = QtWidgets.QLabel(
-            "{0} issue(s) need attention before all features work:".format(len(issues))
+            "有 {0} 个问题需要处理，处理后功能才能全部可用：".format(len(issues))
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -471,9 +464,9 @@ def show_dialog(project_root: Path | None = None, parent=None) -> int:
             detail.setWordWrap(True)
             box_layout.addWidget(detail)
             if issue.get("fix_action"):
-                fix_btn = QtWidgets.QPushButton("Fix: {0}".format(
-                    "Run migration" if issue["fix_action"].startswith("migrate:")
-                    else "Run Setup / Repair Environment"
+                fix_btn = QtWidgets.QPushButton("修复：{0}".format(
+                    "运行迁移" if issue["fix_action"].startswith("migrate:")
+                    else "运行安装/修复环境"
                 ))
                 fix_btn.setObjectName("primary")
                 feedback = QtWidgets.QLabel("")
@@ -482,7 +475,7 @@ def show_dialog(project_root: Path | None = None, parent=None) -> int:
 
                 def _clicked(_=False, action=str(issue["fix_action"])):
                     text = run_fix(root, action)
-                    feedback.setText(text or "Nothing to run for this issue.")
+                    feedback.setText(text or "该问题没有可运行的操作。")
                     feedback.show()
 
                 fix_btn.clicked.connect(_clicked)

@@ -92,7 +92,7 @@ class TestBatchStatusWindow(unittest.TestCase):
                 self.assertEqual(kinds, {"Import", "Export", "Drop import"})
                 self.assertEqual(window.table.rowCount(), 3, "table shows all rows")
                 # Newest first: the running drop import leads.
-                self.assertEqual(window.table.item(0, 3).text().lower(), "running")
+                self.assertEqual(window.table.item(0, 3).text(), "运行中")
                 window.window.close()
 
     def test_missing_dirs_window_is_empty_not_crashing(self):
@@ -510,7 +510,7 @@ class TestIoPathSetupExportOnly(unittest.TestCase):
         for token in ("import_batch", "import_single", "recognition_debounce"):
             self.assertNotIn(token, source)
         # The live export features must stay.
-        self.assertIn('"Start Export"', source)
+        self.assertIn('"开始导出"', source)
         self.assertIn("count_existing_label_files", source)
         self.assertIn("mask_candidate_list", source)
 
@@ -759,8 +759,8 @@ class TestTrainingSetupPathMemory(unittest.TestCase):
                         window._poll_submission()
                     self.assertFalse(window.submitted)
                     self.assertIn(
-                        "at least two cases",
-                        window.status_label.text().lower(),
+                        "至少选择两个病例",
+                        window.status_label.text(),
                     )
                 finally:
                     window.window.close()
@@ -955,7 +955,7 @@ class TestActiveLearningWindow(unittest.TestCase):
                     "non-empty ranking must populate the table")
                 self.assertTrue(window.open_button.isEnabled())
                 summary = window.status_label.text()
-                self.assertIn("2 case(s) ranked", summary)
+                self.assertIn("已排序 2 例", summary)
             finally:
                 window.window.close()
 
@@ -971,7 +971,7 @@ class TestActiveLearningWindow(unittest.TestCase):
                 self.assertEqual(
                     "annotated",
                     window.table.item(0, 4).text())
-                self.assertIn("1 annotated", window.status_label.text())
+                self.assertIn("已标注 1 例", window.status_label.text())
             finally:
                 window.window.close()
 
@@ -994,7 +994,7 @@ class TestActiveLearningWindow(unittest.TestCase):
                 window._request_poll_epoch = 0.0
                 window._poll_requests()
                 text = window.status_label.text()
-                self.assertIn("Request failed for caseA", text)
+                self.assertIn("请求失败（caseA", text)
                 self.assertIn("geometry mismatch", text)
             finally:
                 window.window.close()
@@ -1017,7 +1017,7 @@ class TestActiveLearningWindow(unittest.TestCase):
                 window._request_poll_epoch = 0.0
                 window._poll_requests()
                 text = window.status_label.text()
-                self.assertIn("Applied in Mimics: caseA", text)
+                self.assertIn("已在 Mimics 中应用：caseA", text)
             finally:
                 window.window.close()
 

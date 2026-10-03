@@ -237,6 +237,9 @@ class ActiveLearningWindow:
         self.status_label.setWordWrap(True)
         root.addWidget(self.status_label)
 
+        # Two rows: 8 single-line buttons at the window's 820px minimum clip
+        # (each 6-char CJK button is ~105-120px with theme padding), so the
+        # run actions and the marking actions split like-for-like.
         actions = QtWidgets.QHBoxLayout()
         # F04: the first ranking run had no reachable graphical entry — the
         # empty state told the annotator to use this very window, which only
@@ -256,20 +259,23 @@ class ActiveLearningWindow:
         self.consensus_button = QtWidgets.QPushButton('应用共识 Mask')
         self.consensus_button.clicked.connect(self._apply_consensus)
         actions.addWidget(self.consensus_button)
+        actions.addStretch(1)
+        root.addLayout(actions)
+        marking = QtWidgets.QHBoxLayout()
         self.annotated_button = QtWidgets.QPushButton('标记为已标注')
         self.annotated_button.clicked.connect(self._mark_annotated)
-        actions.addWidget(self.annotated_button)
+        marking.addWidget(self.annotated_button)
         self.skip_button = QtWidgets.QPushButton('标记为跳过')
         self.skip_button.clicked.connect(self._mark_skipped)
-        actions.addWidget(self.skip_button)
-        actions.addStretch(1)
+        marking.addWidget(self.skip_button)
+        marking.addStretch(1)
         self.export_button = QtWidgets.QPushButton('导出 CSV')
         self.export_button.clicked.connect(self._export_csv)
-        actions.addWidget(self.export_button)
+        marking.addWidget(self.export_button)
         close = QtWidgets.QPushButton('关闭')
         close.clicked.connect(self.window.close)
-        actions.addWidget(close)
-        root.addLayout(actions)
+        marking.addWidget(close)
+        root.addLayout(marking)
         self.window.setCentralWidget(central)
         self._jobs: list[dict[str, Any]] = []
         self._rows: list[dict[str, Any]] = []
@@ -305,7 +311,7 @@ class ActiveLearningWindow:
         dataset_edit.setPlaceholderText('未标注病例池的根目录')
         dataset_row = QtWidgets.QHBoxLayout()
         dataset_row.addWidget(dataset_edit, 1)
-        browse = QtWidgets.QPushButton('浏览…')
+        browse = QtWidgets.QPushButton("浏览...")
         dataset_row.addWidget(browse)
         wrap = QtWidgets.QWidget()
         wrap.setLayout(dataset_row)
@@ -402,7 +408,7 @@ class ActiveLearningWindow:
             self.refresh()
             if self._jobs:
                 self.status_label.setText(
-                    '排序完成：{} case(s)。双击行即可在 Mimics 中打开并叠加。'.format(
+                    '排序完成：{0} 例。双击行即可在 Mimics 中打开并叠加。'.format(
                         len(self._rows)))
 
     # -- data ---------------------------------------------------------------
@@ -413,7 +419,7 @@ class ActiveLearningWindow:
         self.job_combo.clear()
         for job in self._jobs:
             self.job_combo.addItem(
-                "{} · {} case(s) · {}".format(
+                "{} · {} 例 · {}".format(
                     time.strftime(
                         "%Y-%m-%d %H:%M",
                         time.localtime(float(job.get("created_at_epoch") or 0)),
@@ -480,15 +486,13 @@ class ActiveLearningWindow:
             1 for entry in cases.values()
             if str(entry.get("state")) == "annotated")
         text = (
-            "{} case(s) ranked · {} annotated. Double-click a row to open "
-            "its case in Mimics with the uncertainty bands applied.".format(
-                len(self._rows), annotated)
+            "已排序 {0} 例 · 已标注 {1} 例。双击一行可在 Mimics 中打开该病例"
+            "并叠加不确定度带。".format(len(self._rows), annotated)
         )
         if self._jobs and bands_degenerate(
                 self._jobs[self.job_combo.currentIndex()]):
-            text += (" Note: with a two-model pair the disagreement map has "
-                     "one level, so the moderate and high bands cover the "
-                     "same voxels.")
+            text += (" 注意：双模型对的分歧图只有一级，中带与高带覆盖"
+                     "相同的体素。")
         self.status_label.setText(text)
 
     def _case_image_hint(self, case_id: str) -> str:
@@ -543,11 +547,11 @@ class ActiveLearningWindow:
         self._job_selected()
         if latest["state"] == "applied":
             self.status_label.setText(
-                "Applied in Mimics: {} ({}). The table is up to date.".format(
+                "已在 Mimics 中应用：{0}（{1}）。表格已是最新。".format(
                     latest["case"], latest["detail"][:160]))
         else:
             self.status_label.setText(
-                "Request failed for {} ({}): {}".format(
+                "请求失败（{0}，{1}）：{2}".format(
                     latest["case"], latest["what"],
                     latest["detail"][:200]))
 
@@ -574,15 +578,14 @@ class ActiveLearningWindow:
             case_id, what, int(time.time() * 1000))
         write_json_atomic(request_dir / name, request)
         labels = {
-            "bands": "uncertainty bands on the open case",
-            "consensus": "consensus mask on the open case",
-            "open": "the case's project",
-            "open_bands": "the case's project and its uncertainty bands",
+            "bands": "在当前病例上叠加不确定度带",
+            "consensus": "在当前病例上应用共识 Mask",
+            "open": "该病例的工程",
+            "open_bands": "该病例的工程及其不确定度带",
         }
         self.status_label.setText(
-            "Requested {} for {}. It runs in Mimics via the FlexiCT menu's "
-            "active-learning monitor (03 Active Learning Review); this "
-            "window updates automatically.".format(
+            "已为 {1} 请求：{0}。它通过 FlexiCT 菜单的主动学习监控"
+            "（03 Active Learning Review）在 Mimics 中执行；本窗口会自动更新。".format(
                 labels.get(what, what), case_id,
             )
         )
@@ -605,8 +608,8 @@ class ActiveLearningWindow:
         QtWidgets = self.QtWidgets
         default = str(Path(self._job_dir) / "annotation_progress.csv")
         path, _filter = QtWidgets.QFileDialog.getSaveFileName(
-            self.window, "Export Annotation Progress", default,
-            "CSV files (*.csv)")
+            self.window, "导出标注进度", default,
+            "CSV 文件 (*.csv)")
         if not path:
             return
         cases = self._state.get("cases") or {}
@@ -624,7 +627,7 @@ class ActiveLearningWindow:
                     "{:.4f}".format(float(row.get("max") or 0.0)),
                     str((cases.get(case_id) or {}).get("state") or "new"),
                 ])
-        self.status_label.setText("Exported to {}".format(path))
+        self.status_label.setText("已导出到 {0}".format(path))
 
     def show(self):
         self.window.show()

@@ -240,7 +240,7 @@ class TrainingSetupWindow:
         self.label_root_edit = QtWidgets.QLineEdit()
         label_layout.addWidget(self.label_root_label, 2, 0)
         self.label_root_widget = self._path_row(
-            self.label_root_edit, "Select exported Mask folder"
+            self.label_root_edit, "选择已导出 Mask 的文件夹"
         )
         label_layout.addWidget(self.label_root_widget, 2, 1)
         self.mcs_label = QtWidgets.QLabel("已保存 .mcs 文件夹 *")
@@ -399,7 +399,7 @@ class TrainingSetupWindow:
         self.batch_spin = QtWidgets.QSpinBox()
         self.batch_spin.setRange(1, 128)
         self.batch_spin.setValue(2)
-        form.addWidget(QtWidgets.QLabel("Batch size"), 6, 0)
+        form.addWidget(QtWidgets.QLabel("批次大小"), 6, 0)
         form.addWidget(self.batch_spin, 6, 1)
         planning_hint = QtWidgets.QLabel(
             "推荐使用自动规划。手动修改的 spacing 或 patch 会随模型记录，并在推理时复用。"
@@ -489,7 +489,7 @@ class TrainingSetupWindow:
         train_form.addWidget(QtWidgets.QLabel("预训练 checkpoint"), 14, 0)
         self.pretrained_widget = self._path_row(
             self.pretrained_edit,
-            "Select nnU-Net pretrained checkpoint",
+            "选择 nnU-Net 预训练 checkpoint",
             directory=False,
             file_filter="PyTorch checkpoint (*.pth);;All files (*)",
         )
@@ -499,6 +499,9 @@ class TrainingSetupWindow:
         train_form.addWidget(self.continue_check, 15, 0, 1, 2)
         self.tta_check = QtWidgets.QCheckBox("后续推理启用镜像 TTA")
         self.tta_check.setChecked(False)
+        self.tta_check.setToolTip(
+            "测试时翻转增强：推理更稳但约慢一倍。默认关闭即可满足多数标注。"
+        )
         train_form.addWidget(self.tta_check, 16, 0, 1, 2)
         # D2: the whole Training group is advanced — every field has a safe
         # default and a one-line hint; annotators should not face them unless
@@ -612,9 +615,9 @@ class TrainingSetupWindow:
             self.QtCore,
             QtWidgets,
             self.window,
-            "Select nnU-Net label map",
+            "选择 nnU-Net 标签映射表",
             str(default_map if default_map.is_file() else ""),
-            "Label maps (*.toml *.json);;All files (*)",
+            "标签映射表 (*.toml *.json);;All files (*)",
             self._apply_label_set,
         )
 
@@ -649,7 +652,7 @@ class TrainingSetupWindow:
             self.task_edit.setText(str(chosen))
             self.status_label.setStyleSheet("")
             self.status_label.setText(
-                "Loaded multi-class task '{}' with {} output labels.".format(
+                "已载入多类别任务“{}”，共 {} 个输出标签。".format(
                     chosen, len(rows)
                 )
             )
@@ -666,9 +669,9 @@ class TrainingSetupWindow:
         self.mcs_label.setVisible(mcs)
         self.mcs_widget.setVisible(mcs)
         hints = {
-            "dataset_masks": "Reads one case folder at a time and matches files below its segmentations folder.",
-            "exported_masks": "Uses source-grid Masks from a previous export. No Mimics export process is started.",
-            "mcs_refresh": "Exports only the configured Mask names from saved projects, then validates them against each original image.",
+            "dataset_masks": "逐个读取病例文件夹，并匹配其 segmentations 子目录下的文件。",
+            "exported_masks": "使用此前导出的原始网格 Mask，不启动 Mimics 导出过程。",
+            "mcs_refresh": "只从已保存的工程导出配置的 Mask 名称，再对照每个原始图像校验。",
         }
         self.source_hint.setText(hints[source])
 
@@ -804,15 +807,15 @@ class TrainingSetupWindow:
             def validate():
                 try:
                     if not Path(request["dataset_root"]).is_dir():
-                        raise ValueError("Original image dataset does not exist.")
+                        raise ValueError("原始图像数据集不存在。")
                     if request["label_source"] == "exported_masks" and not Path(
                         request["label_root"]
                     ).is_dir():
-                        raise ValueError("Exported Mask folder does not exist.")
+                        raise ValueError("已导出 Mask 的文件夹不存在。")
                     if request["label_source"] == "mcs_refresh" and not Path(
                         request["mcs_dir"]
                     ).is_dir():
-                        raise ValueError("Saved .mcs folder does not exist.")
+                        raise ValueError("已保存 .mcs 的文件夹不存在。")
                     self._submission_results.put((generation, request, ""))
                 except Exception as exc:
                     self._submission_results.put((generation, None, str(exc)))
@@ -837,9 +840,7 @@ class TrainingSetupWindow:
                 self.dataset_id.setValue(int(dataset_id))
             elif dataset_error:
                 self.status_label.setText(
-                    "Could not inspect existing Dataset IDs; using 701. {}".format(
-                        dataset_error
-                    )
+                    "无法检查现有 Dataset ID，使用 701。{}".format(dataset_error)
                 )
         if (
             self._submission_pending

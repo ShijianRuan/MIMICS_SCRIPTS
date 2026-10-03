@@ -30,7 +30,7 @@ from nninteractive_task_common import (  # noqa: E402
 from ui_theme import configure_application  # noqa: E402
 
 
-TITLE = "Choose nnInteractive Custom Model"
+TITLE = "选择 nnInteractive 自定义模型"
 
 
 class Chooser:
@@ -124,11 +124,11 @@ class Chooser:
                 ),
             )
             if model.get("model_id") == recommended:
-                label += "  ·  Active"
+                label += "  ·  使用中"
             elif state == "not_improved":
-                label += "  ·  Did not improve"
+                label += "  ·  未超过现有模型"
             elif state == "unverified":
-                label += "  ·  Not verified"
+                label += "  ·  未验证"
             self.model_combo.addItem(label, str(model.get("model_id") or ""))
         index = self.model_combo.findData(recommended)
         if index >= 0:
@@ -150,12 +150,12 @@ class Chooser:
         quality = model.get("quality") or {}
         delta = quality.get("delta_auc")
         validation = (
-            "{:+.1f}% validation AUC".format(float(delta) * 100.0)
+            "验证集 AUC {:+.1f}%".format(float(delta) * 100.0)
             if delta is not None
-            else "No automatic validation comparison"
+            else "无自动验证对比"
         )
         self.summary.setText(
-            "{} · Point prompts · {} training + {} validation · {}".format(
+            "{} · 点提示 · 训练 {} 例 + 验证 {} 例 · {}".format(
                 strategy_display_name(model.get("strategy")),
                 model.get("train_case_count", 0),
                 model.get("validation_case_count", 0),
@@ -171,7 +171,7 @@ class Chooser:
         )
         if not audit.get("compatible"):
             self.summary.setText(
-                "This model is incomplete: {}".format(", ".join(audit.get("missing") or []))
+                "该模型不完整：{}".format(", ".join(audit.get("missing") or []))
             )
 
     def accept(self):

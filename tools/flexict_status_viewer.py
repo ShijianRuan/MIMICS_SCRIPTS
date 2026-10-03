@@ -209,7 +209,7 @@ class StatusWindow:
                 model.get("label_name", ""),
                 model.get("configuration", ""),
                 _format_time(model.get("created_at_epoch")),
-                "Yes" if usable else "No",
+                "可用" if usable else "不可用",
             ]
             for column, value in enumerate(values):
                 item = self.QtWidgets.QTableWidgetItem(str(value))
@@ -219,7 +219,7 @@ class StatusWindow:
         model_2d, model_3d = snapshot["pair"]
         if model_2d is not None and model_3d is not None:
             self.pair_note.setText(
-                "Active-learning pair ready: {} (2D) + {} (3D).".format(
+                "主动学习模型对已就绪：{}（2D）+ {}（3D）。".format(
                     model_2d.get("model_id"), model_3d.get("model_id")
                 )
             )
@@ -227,8 +227,7 @@ class StatusWindow:
             recommended = snapshot["recommended"]
             if recommended is not None:
                 self.pair_note.setText(
-                    "Recommended model: {} ({}). Train a 2D+3D pair to enable "
-                    "active learning.".format(
+                    "推荐模型：{}（{}）。训练一对 2D+3D 模型后可使用主动学习。".format(
                         recommended.get("model_id"),
                         recommended.get("configuration"),
                     )
@@ -281,7 +280,7 @@ class StatusWindow:
                     handle.seek(max(0, log_path.stat().st_size - 512 * 1024))
                     text = handle.read().decode("utf-8", "replace")
             except OSError as exc:
-                text = "Could not read the log: {}".format(exc)
+                text = "无法读取日志：{}".format(exc)
         self.log_view.setPlainText(text)
         if follow_tail:
             scrollbar.setValue(scrollbar.maximum())

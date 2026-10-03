@@ -698,23 +698,23 @@ class StatusTrackingTests(unittest.TestCase):
 
     def test_status_summary_maps_all_phases(self):
         phases = [
-            ("created", "Preparing"),
-            ("validating_cases", "Checking"),
-            ("exporting_labels", "Preparing labels"),
-            ("preparing_data", "Preparing training data"),
-            ("waiting_for_gpu", "Waiting for the GPU"),
-            ("training", "Training"),
-            ("validating", "Checking model quality"),
-            ("registering", "Saving"),
-            ("completed", "completed"),
-            ("paused", "paused"),
-            ("cancelled", "stopped"),
-            ("failed", "needs attention"),
+            ("created", "准备训练"),
+            ("validating_cases", "检查"),
+            ("exporting_labels", "准备标注"),
+            ("preparing_data", "准备训练数据"),
+            ("waiting_for_gpu", "等待 GPU"),
+            ("training", "训练中"),
+            ("validating", "检查模型质量"),
+            ("registering", "保存"),
+            ("completed", "训练完成"),
+            ("paused", "已暂停"),
+            ("cancelled", "已停止"),
+            ("failed", "需要处理"),
         ]
         for phase, expected_substr in phases:
             status = {"status": phase}
-            summary = common.status_summary(status).lower()
-            self.assertIn(expected_substr.lower(), summary,
+            summary = common.status_summary(status)
+            self.assertIn(expected_substr, summary,
                           f"Phase '{phase}' summary '{summary}' missing '{expected_substr}'")
 
     def test_preparing_data_summary_includes_progress(self):
@@ -723,7 +723,7 @@ class StatusTrackingTests(unittest.TestCase):
             "preparation_index": 3,
             "preparation_total": 8,
         })
-        self.assertEqual("Preparing data 3/8 (38%)", summary)
+        self.assertEqual("正在准备数据 3/8（38%）", summary)
 
     def test_active_statuses_excludes_terminal(self):
         for status in common.TERMINAL_STATUSES:

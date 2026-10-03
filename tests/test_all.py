@@ -5477,7 +5477,7 @@ class TestNNInteractiveTaskDiagnostics(unittest.TestCase):
             )
             report = pipeline.diagnose_job(str(job))
         self.assertEqual("failed", report["status"])
-        self.assertIn("GPU memory", report["hint"])
+        self.assertIn("GPU 显存不足", report["hint"])
         self.assertTrue(report["error_line"].strip().startswith('File "b.py"'))
         self.assertTrue(
             report["job_log_tail"].endswith("CUDA out of memory.")
@@ -5496,8 +5496,8 @@ class TestNNInteractiveTaskDiagnostics(unittest.TestCase):
             model_center.ModelCenter.refresh_status
         )
         self.assertIn("set_baseline", refresh_source)
-        self.assertIn("Candidate is", refresh_source)
-        self.assertIn("Not yet better", refresh_source)
+        self.assertIn("领先当前模型", refresh_source)
+        self.assertIn("尚未超过", refresh_source)
 
     def test_model_center_failed_state_shows_diagnosis_block(self):
         import nninteractive_task_model_center as model_center
@@ -12490,13 +12490,13 @@ class TestSystemHealthPanel(unittest.TestCase):
             PROJECT_ROOT, "scripting_library", "99_Admin", "05_System_Health.py"
         )
         self.assertTrue(os.path.isfile(entry))
-        with open(entry, "r") as handle:
+        with open(entry, "r", encoding="utf-8") as handle:
             source = handle.read()
         self.assertIn("system_health_mimics", source)
         launcher = os.path.join(
             PROJECT_ROOT, "runtime_py35", "external_window_launcher.py"
         )
-        with open(launcher, "r") as handle:
+        with open(launcher, "r", encoding="utf-8") as handle:
             source = handle.read()
         self.assertIn("launch_external_gui_process", source)
         self.assertIn("register_process", source)
@@ -12505,7 +12505,7 @@ class TestSystemHealthPanel(unittest.TestCase):
             "import_drop_mimics.py",
         ):
             path = os.path.join(PROJECT_ROOT, "runtime_py35", thin_shell)
-            with open(path, "r") as handle:
+            with open(path, "r", encoding="utf-8") as handle:
                 source = handle.read()
             self.assertIn("external_window_launcher.open_external_window", source)
 

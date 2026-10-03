@@ -223,7 +223,7 @@ def set_recommended_model(row: dict) -> None:
         workspace = Path(row["workspace"])
         task = task_common.find_task(workspace, row["task_id"])
         if not task:
-            raise RuntimeError("Task was not found: {0}".format(row["task_id"]))
+            raise RuntimeError("未找到该目标：{0}".format(row["task_id"]))
         task["recommended_model_id"] = row["model_id"]
         task["updated_at_epoch"] = time.time()
         from nnunet_common import write_json_atomic
@@ -428,8 +428,8 @@ class ModelManagerWindow:
                     "%Y-%m-%d %H:%M",
                     time.localtime(row.get("created_at_epoch") or 0),
                 )
-                status = "current" if row["current"] else (
-                    "usable" if row["usable"] else "broken"
+                status = "当前默认" if row["current"] else (
+                    "可用" if row["usable"] else "已损坏"
                 )
                 values = [
                     row["family"],
@@ -437,7 +437,7 @@ class ModelManagerWindow:
                     row["model_id"],
                     row["configuration"],
                     created,
-                    "imported" if row["imported"] else "trained here",
+                    "导入" if row["imported"] else "本机训练",
                     status,
                 ]
                 for column, value in enumerate(values):

@@ -67,7 +67,7 @@ except Exception:
     RemoteComputeSelector = None
 
 
-TITLE = "nnInteractive Custom Models"
+TITLE = "nnInteractive 自定义模型"
 
 
 def _launch_process(
@@ -192,11 +192,11 @@ class TrainingCurve:
                 painter.setPen(QtGui.QPen(QtGui.QColor("#d9e0e8"), 1))
                 painter.drawRect(rect)
                 painter.setPen(QtGui.QColor("#667085"))
-                painter.drawText(8, 18, "Metric")
-                painter.drawText(rect.right() - 36, rect.bottom() + 25, "Epoch")
+                painter.drawText(8, 18, "指标")
+                painter.drawText(rect.right() - 36, rect.bottom() + 25, "轮次")
                 points = inner_self.points
                 if not points:
-                    painter.drawText(rect, QtCore.Qt.AlignCenter, "Training metrics will appear here.")
+                    painter.drawText(rect, QtCore.Qt.AlignCenter, "训练指标将显示在这里。")
                     return
                 max_epoch = max(1, max(int(row.get("epoch") or 0) for row in points))
 
@@ -235,7 +235,7 @@ class TrainingCurve:
                     painter.drawText(
                         rect.left() + 4,
                         y - 4,
-                        "current model {:.4f}".format(float(inner_self.baseline)),
+                        "当前模型 {:.4f}".format(float(inner_self.baseline)),
                     )
                 normalized = []
                 losses = [float(row["train_loss"]) for row in points if row.get("train_loss") is not None]
@@ -251,9 +251,9 @@ class TrainingCurve:
                 path_for("normalized_loss", "#2563eb")
                 inner_self.points = original
                 painter.setPen(QtGui.QColor("#2563eb"))
-                painter.drawText(rect.left(), rect.bottom() + 25, "Loss")
+                painter.drawText(rect.left(), rect.bottom() + 25, "训练损失")
                 painter.setPen(QtGui.QColor("#0f766e"))
-                painter.drawText(rect.left() + 48, rect.bottom() + 25, "Validation AUC")
+                painter.drawText(rect.left() + 48, rect.bottom() + 25, "验证集 AUC")
 
         self.Widget = Widget
 
@@ -462,7 +462,7 @@ class ModelCenter:
         prepared_layout = QtWidgets.QVBoxLayout(self.exported_path_widget)
         prepared_layout.setContentsMargins(0, 0, 0, 0)
         row, self.prepared_label_edit = self._path_row(
-            "Exported masks folder *"
+            "已导出 Mask 的文件夹 *"
         )
         prepared_layout.addLayout(row)
         data_layout.addWidget(self.exported_path_widget)
@@ -535,7 +535,7 @@ class ModelCenter:
         )
         initial_path_layout.setContentsMargins(0, 0, 0, 0)
         row, self.initial_mask_root_edit = self._path_row(
-            "Initial masks folder *"
+            "初始 Mask 的文件夹 *"
         )
         initial_path_layout.addLayout(row)
         data_layout.addWidget(self.initial_mask_path_widget)
@@ -598,15 +598,18 @@ class ModelCenter:
         heading = QtWidgets.QLabel("训练方案")
         heading.setObjectName("section")
         adaptation_layout.addWidget(heading)
-        self.light_radio = QtWidgets.QRadioButton(
-            "CLoPA-IN  ·  轻量强度域自适应（CT / MR 通用）"
-        )
-        self.strong_radio = QtWidgets.QRadioButton(
-            "CLoPA-CN  ·  Instance 归一化 + 部分卷积自适应"
-        )
+        self.light_radio = QtWidgets.QRadioButton("CLoPA-IN（推荐）")
+        self.strong_radio = QtWidgets.QRadioButton("CLoPA-CN")
         self.light_radio.setChecked(True)
         adaptation_layout.addWidget(self.light_radio)
         adaptation_layout.addWidget(self.strong_radio)
+        adaptation_hint = QtWidgets.QLabel(
+            "不确定时选第一项（CT 常用）；第二项适用于 CT 值范围特殊的"
+            "目标（如 MR）。"
+        )
+        adaptation_hint.setWordWrap(True)
+        adaptation_hint.setObjectName("hint")
+        adaptation_layout.addWidget(adaptation_hint)
 
         training_layout = QtWidgets.QGridLayout()
         training_layout.setContentsMargins(22, 4, 0, 0)
@@ -738,7 +741,7 @@ class ModelCenter:
         self.progress_bar.setValue(0)
         status_layout.addWidget(self.progress_bar)
         metrics = QtWidgets.QHBoxLayout()
-        self.loss_label = QtWidgets.QLabel("Loss  -")
+        self.loss_label = QtWidgets.QLabel("训练损失  -")
         self.auc_label = QtWidgets.QLabel("验证集 AUC  -")
         self.best_label = QtWidgets.QLabel("最佳 AUC  -")
         metrics.addWidget(self.loss_label)
@@ -952,8 +955,8 @@ class ModelCenter:
             selected_mask = str(self.context.get("mask_name") or "").strip()
             if selected_mask and safe_slug(selected_mask) == safe_slug(value):
                 self.mask_source_hint.setText(
-                    "Filled from the Mask selected in Mimics: {}. Edit only to "
-                    "add alternative names used by other cases.".format(
+                    "已从 Mimics 中选中的 Mask 填入：{0}。仅当其他病例使用了"
+                    "其他名称时才需要修改。".format(
                         selected_mask
                     )
                 )
@@ -1048,24 +1051,22 @@ class ModelCenter:
         if self.initial_mask_hint is not None:
             if not enabled:
                 text = (
-                    "Start from an empty Mask does not use initial Masks. "
-                    "No initial Mask will be exported."
+                    "“从空白 Mask 起步”不使用初始 Mask，也不会导出初始 Mask。"
                 )
             elif source == "mcs":
                 text = (
-                    "A matching draft Mask is read from each saved project. "
-                    "Only real drafts are used. General training starts empty "
-                    "for cases without one; refine-existing training skips them."
+                    "从每个已保存的工程中读取对应的草稿 Mask，只使用真实草稿。"
+                    "通用训练对没有草稿的病例从空白开始；精修训练会跳过它们。"
                 )
             elif source == "exported_masks":
                 text = (
-                    "A matching NIfTI draft is read for each case. Only real "
-                    "drafts are used; no synthetic Initial Mask is generated."
+                    "为每个病例读取对应的 NIfTI 草稿，只使用真实草稿，"
+                    "不会生成合成初始 Mask。"
                 )
             else:
                 text = (
-                    "Training starts from an empty Mask. Choose another source "
-                    "only when real AI drafts or partial annotations are available."
+                    "训练从空白 Mask 开始。只有当确有 AI 草稿或部分标注时，"
+                    "才需要选择其他来源。"
                 )
             self.initial_mask_hint.setText(text)
         if self.case_rows:
@@ -1171,7 +1172,7 @@ class ModelCenter:
         ]
         if not mask_names:
             self.scan_hint.setText("扫描前请先填写目标 Mask 名称。")
-            self._finish_scan_progress("Target Mask name is required", False)
+            self._finish_scan_progress("缺少目标 Mask 名称", False)
             return
         self.scan_generation += 1
         generation = self.scan_generation
@@ -1207,45 +1208,45 @@ class ModelCenter:
                 "初始 Mask 必须与最终目标 Mask 不同。"
             )
             self._finish_scan_progress(
-                "Initial and final Mask names overlap", False
+                "初始 Mask 与目标 Mask 名称重叠", False
             )
             return
         if not image_root:
             self.scan_hint.setText("请选择原始图像数据集。")
-            self._finish_scan_progress("Dataset path is required", False)
+            self._finish_scan_progress("缺少数据集路径", False)
             return
         if source_mode == "mcs_refresh" and not mcs_dir:
             self.scan_hint.setText("请选择包含已保存 .mcs 工程的文件夹。")
-            self._finish_scan_progress("Saved .mcs folder is required", False)
+            self._finish_scan_progress("缺少已保存 .mcs 的文件夹", False)
             return
         if source_mode == "exported_masks" and not prepared_labels:
             self.scan_hint.setText("请选择此前导出的 Mask 文件夹。")
-            self._finish_scan_progress("Exported masks folder is required", False)
+            self._finish_scan_progress("缺少导出 Mask 的文件夹", False)
             return
         if initial_source in ("mcs", "exported_masks") and not initial_mask_names:
             self.scan_hint.setText(
                 "扫描前请先填写初始 Mask 名称。"
             )
-            self._finish_scan_progress("Initial Mask name is required", False)
+            self._finish_scan_progress("缺少初始 Mask 名称", False)
             return
         if goal == "refine_existing" and initial_source == "none":
             self.scan_hint.setText(
                 "“在已有 Mask 基础上精修”需要已保存的 .mcs 草稿或此前导出的初始 Mask。"
             )
-            self._finish_scan_progress("Initial Mask source is required", False)
+            self._finish_scan_progress("缺少初始 Mask 来源", False)
             return
         if initial_source == "mcs" and not mcs_dir:
             self.scan_hint.setText(
                 "请选择包含已保存 .mcs 工程的文件夹。"
             )
-            self._finish_scan_progress("Saved .mcs folder is required", False)
+            self._finish_scan_progress("缺少已保存 .mcs 的文件夹", False)
             return
         if initial_source == "exported_masks" and not initial_mask_root:
             self.scan_hint.setText(
                 "请选择此前导出的初始 Mask 文件夹。"
             )
             self._finish_scan_progress(
-                "Initial masks folder is required", False
+                "缺少初始 Mask 文件夹", False
             )
             return
         self.scan_hint.setText("正在后台扫描病例...")
@@ -1256,8 +1257,7 @@ class ModelCenter:
             try:
                 if not os.path.isdir(image_root):
                     raise RuntimeError(
-                        "Original image dataset does not exist or is unavailable: "
-                        "{}".format(image_root)
+                        "原始图像数据集不存在或不可用：{}".format(image_root)
                     )
                 if source_mode == "mcs_refresh":
                     if not os.path.isdir(mcs_dir):
@@ -1271,8 +1271,9 @@ class ModelCenter:
                         prepared_labels
                     ):
                         raise RuntimeError(
-                            "Exported masks folder does not exist or is "
-                            "unavailable: {}".format(prepared_labels)
+                            "已导出 Mask 的文件夹不存在或不可用：{}".format(
+                                prepared_labels
+                            )
                         )
                     rows = discover_prepared_cases(
                         image_root,
@@ -1286,8 +1287,7 @@ class ModelCenter:
                 if initial_source == "mcs":
                     if not os.path.isdir(mcs_dir):
                         raise RuntimeError(
-                            "Saved .mcs folder does not exist or is unavailable: "
-                            "{}".format(mcs_dir)
+                            "已保存 .mcs 的文件夹不存在或不可用：{}".format(mcs_dir)
                         )
                     mcs_rows = {
                         str(row.get("case_id")): row
@@ -1304,8 +1304,9 @@ class ModelCenter:
                 elif initial_source == "exported_masks":
                     if not os.path.isdir(initial_mask_root):
                         raise RuntimeError(
-                            "Initial masks folder does not exist or is "
-                            "unavailable: {}".format(initial_mask_root)
+                            "初始 Mask 的文件夹不存在或不可用：{}".format(
+                                initial_mask_root
+                            )
                         )
                     for row in rows:
                         initial_mask = find_prepared_label(
@@ -1340,7 +1341,7 @@ class ModelCenter:
                 self.scan_hint.setText(
                     "病例扫描超时。所选位置可能离线或响应过慢；请换一个路径或重试。"
                 )
-                self._finish_scan_progress("Scan timed out", False)
+                self._finish_scan_progress("扫描超时", False)
             return
         self.pending_scan_result = None
         generation, rows, scan_signature, error = result
@@ -1351,8 +1352,8 @@ class ModelCenter:
         self.last_scan_signature = scan_signature
         self._populate_cases()
         if error:
-            self.scan_hint.setText("Case scan failed: {}".format(error))
-            self._finish_scan_progress("Scan failed", False)
+            self.scan_hint.setText("病例扫描失败：{}".format(error))
+            self._finish_scan_progress("扫描失败", False)
         elif rows:
             ready = sum(row.get("state") == "ready" for row in rows)
             unavailable = len(rows) - ready
@@ -1364,41 +1365,40 @@ class ModelCenter:
                     if row.get("state") == "ready"
                 )
                 initial_note = (
-                    " {} of {} usable case(s) have a matching real Initial "
-                    "Mask; other cases start empty in General mode."
-                ).format(initial_count, ready)
+                    " 可用病例中 {0} 例有匹配的真实初始 Mask；"
+                    "其余病例在通用模式下从空 Mask 开始。"
+                ).format(initial_count)
             elif initial_source == "mcs":
                 initial_note = (
-                    " Initial Masks in saved projects are verified when "
-                    "training starts. Missing drafts start empty in General "
-                    "mode and are skipped in Refine Existing mode."
+                    " 已保存工程中的初始 Mask 会在训练开始时验证。"
+                    "缺失草稿在通用模式下从空开始，在精修模式下跳过。"
                 )
             else:
-                initial_note = " Training starts from an empty Mask."
+                initial_note = " 训练从空 Mask 开始。"
             if scan_signature[0] == "mcs_refresh":
                 self.scan_hint.setText(
-                    "{} saved project candidate(s) found; {} case(s) are missing "
-                    "a source image. Target Masks are verified in the background "
-                    "when training starts, and projects without a match are "
-                    "skipped automatically.{}".format(
+                    "找到 {0} 个已保存工程候选；{1} 例缺少源图像。"
+                    "目标 Mask 会在训练开始时后台验证，不匹配的工程"
+                    "自动跳过。{2}".format(
                         ready, unavailable, initial_note
                     )
                 )
             else:
                 self.scan_hint.setText(
-                    "{} usable case(s) found; {} unavailable case(s) hidden. "
-                    "Only cases with both an image and matching Mask will be "
-                    "used.{}".format(ready, unavailable, initial_note)
+                    "找到 {0} 个可用病例；已隐藏 {1} 个不可用病例。"
+                    "只有图像与 Mask 齐全的病例会被使用。{2}".format(
+                        ready, unavailable, initial_note
+                    )
                 )
             self._finish_scan_progress(
-                "Scan complete: {} usable, {} unavailable".format(
+                "扫描完成：{0} 个可用，{1} 个不可用".format(
                     ready, unavailable
                 ),
                 True,
             )
         else:
             self.scan_hint.setText("所选位置没有找到病例。")
-            self._finish_scan_progress("Scan complete: no usable cases", True)
+            self._finish_scan_progress("扫描完成：无可用病例", True)
 
     def _populate_cases(self, preserve_assignments=False):
         QtWidgets = self.QtWidgets
@@ -1456,20 +1456,27 @@ class ModelCenter:
             self.case_table.setCellWidget(index, 0, wrapper)
             self.case_table.setItem(index, 1, QtWidgets.QTableWidgetItem(str(row.get("case_id"))))
             split = QtWidgets.QComboBox()
-            split.addItems(["Train", "Validation", "Exclude"])
-            split.setCurrentText(str(row.get("_split") or "exclude").title())
+            # Display labels are Chinese; the data values stay train/
+            # validation/exclude so stored settings keep parsing.
+            split.addItem("训练", "train")
+            split.addItem("验证", "validation")
+            split.addItem("排除", "exclude")
+            split.setCurrentIndex(
+                max(0, split.findData(str(row.get("_split") or "exclude").lower()))
+            )
             split.setEnabled(ready)
-            split.currentTextChanged.connect(
-                lambda value, case_index=index: self._case_choice_changed(
-                    case_index, split=str(value).lower()
+            split.currentIndexChanged.connect(
+                lambda _index, combo=split, case_index=index: self._case_choice_changed(
+                    case_index,
+                    split=str(combo.currentData() or "exclude").lower(),
                 )
             )
             self.case_table.setCellWidget(index, 2, split)
             label = {
                 "ready": row.get("detail") or "就绪",
-                "image_missing": "Image missing",
-                "mask_missing": "Mask missing",
-            }.get(row.get("state"), str(row.get("state") or "Needs attention"))
+                "image_missing": "缺少图像",
+                "mask_missing": "缺少 Mask",
+            }.get(row.get("state"), str(row.get("state") or "需要处理"))
             item = QtWidgets.QTableWidgetItem(label)
             if not ready:
                 item.setForeground(self.QtGui.QColor("#b42318"))
@@ -1604,7 +1611,7 @@ class ModelCenter:
         )
         if not base_audit.get("compatible"):
             self.setup_summary.setText(
-                "The starting model is incomplete: {}".format(
+                "起始模型不完整：{}".format(
                     ", ".join(base_audit.get("missing") or [])
                 )
             )
@@ -1784,26 +1791,26 @@ class ModelCenter:
         state = str(status.get("status") or "")
         self.header_state.setText(
             {
-                "training": "Training",
-                "exporting_labels": "Training",
-                "preparing_data": "Preparing",
-                "preparing_remote": "Preparing",
-                "connecting_remote": "Connecting",
-                "uploading": "Uploading",
-                "starting_remote": "Starting",
-                "waiting_for_remote_gpu": "Waiting",
-                "reconnecting_remote": "Reconnecting",
-                "remote_control_unavailable": "Connection issue",
-                "finalizing_remote": "Finishing",
-                "downloading": "Downloading",
-                "waiting_for_gpu": "Waiting",
-                "validating": "Validating",
-                "registering": "Finishing",
-                "paused": "Paused",
-                "completed": "Completed",
-                "cancelled": "Stopped",
-                "abandoned": "Abandoned locally",
-                "failed": "Needs attention",
+                "training": "训练中",
+                "exporting_labels": "训练中",
+                "preparing_data": "准备中",
+                "preparing_remote": "准备中",
+                "connecting_remote": "连接中",
+                "uploading": "上传中",
+                "starting_remote": "启动中",
+                "waiting_for_remote_gpu": "等待中",
+                "reconnecting_remote": "重连中",
+                "remote_control_unavailable": "连接异常",
+                "finalizing_remote": "收尾中",
+                "downloading": "下载中",
+                "waiting_for_gpu": "等待中",
+                "validating": "验证中",
+                "registering": "收尾中",
+                "paused": "已暂停",
+                "completed": "已完成",
+                "cancelled": "已停止",
+                "abandoned": "已在本机放弃",
+                "failed": "需要处理",
             }.get(state, "就绪")
         )
         self.progress_title.setText(status_summary(status) if status else "当前没有正在进行的训练")
@@ -1816,133 +1823,122 @@ class ModelCenter:
         if state == "training":
             if phase.startswith("validat"):
                 detail = (
-                    "Validating the current training epoch. The remaining "
-                    "model comparison and registration stages are not yet complete."
+                    "正在验证当前训练轮次。后续的模型比对与登记阶段尚未完成。"
                 )
             elif phase.startswith("final") or "verif" in phase:
                 detail = (
-                    "Saving and verifying the trained checkpoint. Mimics remains "
-                    "available for annotation."
+                    "正在保存并验证训练出的模型权重。期间 Mimics 仍可正常标注。"
                 )
             else:
                 detail = (
-                    "Learning from the selected cases in the background. "
-                    "Mimics remains available for annotation."
+                    "正在后台从所选病例中学习。期间 Mimics 仍可正常标注。"
                 )
         elif state == "exporting_labels":
             progress = status.get("label_export_progress") or {}
             case_id = str(progress.get("case_id") or status.get("current_case") or "")
             detail = (
-                "Reading the saved target Mask{} and converting it to the source image grid."
-            ).format(" for " + case_id if case_id else "")
+                "正在读取已保存的目标 Mask{}并转换到源图像网格。"
+            ).format("（" + case_id + "）" if case_id else "")
         elif state == "preparing_data":
             if phase == "reusing_prepared_cases":
                 detail = (
-                    "Reusing verified prepared arrays on the remote server; "
-                    "no image conversion is running."
+                    "正在复用远程服务器上已验证的预处理数据；"
+                    "没有图像转换在运行。"
                 )
             elif phase == "reusing_local_prepared_data":
                 detail = (
-                    "Reusing verified local source-grid inputs before remote "
-                    "transfer."
+                    "正在复用本地已验证的源网格输入，准备远程传输。"
                 )
             else:
-                detail = "Checking image-label geometry and preparing the selected cases."
+                detail = "正在检查图像-标签几何并准备所选病例。"
         elif state == "preparing_remote":
             if phase == "reusing_local_prepared_data":
                 detail = (
-                    "Reusing verified local source-grid inputs before remote "
-                    "transfer."
+                    "正在复用本地已验证的源网格输入，准备远程传输。"
                 )
             else:
                 detail = (
-                    "Preparing source-grid images and Target Masks locally before "
-                    "the remote transfer."
+                    "正在本地准备源网格图像与目标 Mask，以便远程传输。"
                 )
         elif state == "connecting_remote":
-            detail = "Checking the saved SSH server, runtime image, model, and GPU."
+            detail = "正在检查已保存的 SSH 服务器、运行时镜像、模型与 GPU。"
         elif state == "uploading":
             if phase == "verifying_remote_dataset_cache":
-                detail = "Checking remote data cache ({}/{} cases); unchanged archives are not uploaded.".format(
+                detail = "正在检查远程数据缓存（{}/{} 例）；未变更的压缩包不会重新上传。".format(
                     status.get("dataset_case_completed") or 0,
                     status.get("dataset_case_total") or 0,
                 )
             elif phase == "remote_dataset_cache_hit":
                 detail = (
-                    "The unchanged training data is already verified on the "
-                    "server. Only this job's settings are being sent."
+                    "未变更的训练数据已在服务器上通过验证。"
+                    "本次只发送任务设置。"
                 )
             else:
-                detail = "Uploading training data in the background."
+                detail = "正在后台上传训练数据。"
         elif state == "starting_remote":
             if phase == "extracting_remote_dataset":
-                detail = "Making verified remote data available to the container ({}/{} cases).".format(
+                detail = "正在让容器使用已验证的远程数据（{}/{} 例）。".format(
                     status.get("remote_dataset_extract_index") or 0,
                     status.get("remote_dataset_extract_total") or 0,
                 )
             else:
                 detail = (
-                    "Starting an isolated container on GPU {}."
-                ).format(status.get("remote_gpu_device") or "automatic")
+                    "正在 GPU {} 上启动隔离容器。"
+                ).format(status.get("remote_gpu_device") or "（自动）")
         elif state == "waiting_for_remote_gpu":
             detail = (
-                "Waiting for GPU {} without blocking Mimics."
-            ).format(status.get("remote_gpu_device") or "automatic")
+                "正在等待 GPU {}，不会阻塞 Mimics。"
+            ).format(status.get("remote_gpu_device") or "（自动）")
         elif state == "reconnecting_remote":
             detail = (
-                "The SSH connection was interrupted. Training remains on the "
-                "server while the controller reconnects."
+                "SSH 连接中断。训练仍在服务器上继续，控制器正在重连。"
             )
         elif state == "remote_control_unavailable":
             detail = (
-                "The server is reachable but Docker status is temporarily "
-                "unavailable. The task remains active and is not assumed stopped."
+                "服务器可达，但 Docker 状态暂时不可用。任务仍在进行，"
+                "不会被当作已停止。"
             )
         elif state == "finalizing_remote":
             detail = (
-                "Remote training finished. Verifying and packaging the model "
-                "before local registration."
+                "远程训练完成。正在验证并打包模型，随后登记到本地。"
             )
         elif state == "downloading":
-            detail = "Downloading and verifying the trained model."
+            detail = "正在下载并验证训练好的模型。"
         elif state == "waiting_for_gpu":
-            detail = "Waiting without blocking Mimics. Pause or stop this task at any time."
+            detail = "等待中，不会阻塞 Mimics。可随时暂停或停止本任务。"
         elif state == "validating":
             detail = (
-                "Comparing the new model with the active annotation model on "
-                "the validation cases."
+                "正在验证病例上把新模型与当前标注模型进行比对。"
             )
         elif state == "registering":
             detail = (
-                "Verifying the loaded checkpoint identity and publishing this "
-                "model version. Training is not complete until this finishes."
+                "正在校验加载的模型权重身份并发布这个模型版本。"
+                "此步骤完成前训练不算结束。"
             )
         elif state == "completed":
             outcome = str(status.get("selection_outcome") or "")
             quality = status.get("quality") or {}
             if outcome == "new_model_selected":
                 detail = (
-                    "Validation passed. The new model is now used for this task "
-                    "({:+.1f}% AUC)."
+                    "验证通过。新模型已用于此任务"
+                    "（AUC {:+.1f}%）。"
                 ).format(float(quality.get("delta_auc") or 0.0) * 100.0)
             elif outcome == "current_model_retained":
                 detail = (
-                    "Training completed, but the active annotation model remains selected "
-                    "because the candidate did not pass the quality check."
+                    "训练完成，但因未通过质量检查，当前标注模型保持不变。"
                 )
             else:
                 detail = (
-                    "Training completed. This version was saved without automatic "
-                    "selection because no sufficient validation set was provided."
+                    "训练完成。因未提供足够的验证集，此版本已保存但未自动启用。"
                 )
         elif state == "paused":
-            detail = "Training is paused and its GPU memory has been released."
+            detail = "训练已暂停，GPU 显存已释放。"
         elif state == "cancelled":
-            detail = "Training was stopped. The incomplete model was removed."
+            detail = "训练已停止。未完成的模型已删除。"
         elif state == "abandoned":
             detail = str(
                 status.get("remote_abandon_warning")
-                or "Local monitoring ended, but the remote container state is unknown."
+                or "本地监控已结束，但远程容器状态未知。"
             )
         if state in {"preparing_remote", "connecting_remote", "uploading"}:
             archive_reused = status.get(
@@ -1950,7 +1946,7 @@ class ModelCenter:
             )
             archive_total = status.get("local_dataset_archive_cache_total")
             if archive_reused is not None and archive_total is not None:
-                detail += " Local packaging reused {}/{} case archives.".format(
+                detail += " 本地打包复用了 {}/{} 个病例压缩包。".format(
                     archive_reused, archive_total
                 )
         self.progress_detail.setText(detail)
@@ -1962,17 +1958,17 @@ class ModelCenter:
             value = min(99, value)
         self.progress_bar.setValue(max(0, min(100, value)))
         progress_stage = {
-            "validating": "Comparing models",
-            "registering": "Registering model",
-            "completed": "Completed",
-            "failed": "Needs attention",
-            "cancelled": "Stopped",
-            "abandoned": "Abandoned locally",
+            "validating": "比对模型中",
+            "registering": "登记模型中",
+            "completed": "已完成",
+            "failed": "需要处理",
+            "cancelled": "已停止",
+            "abandoned": "已在本机放弃",
         }.get(state, "")
         if state == "training" and (
             "verif" in phase or phase.startswith("final")
         ):
-            progress_stage = "Checkpoint ready; final checks"
+            progress_stage = "模型已就绪；最终检查中"
         self.progress_bar.setFormat(
             "%p% · {}".format(progress_stage)
             if progress_stage
@@ -1983,9 +1979,9 @@ class ModelCenter:
         if displayed_loss is None:
             displayed_loss = latest.get("train_loss")
         self.loss_label.setText(
-            "Loss  {:.4f}".format(float(displayed_loss))
+            "训练损失  {:.4f}".format(float(displayed_loss))
             if displayed_loss is not None
-            else "Loss  -"
+            else "训练损失  -"
         )
         validation = latest.get("validation") or {}
         quality = status.get("quality") or {}
@@ -1999,7 +1995,7 @@ class ModelCenter:
         )
         self.auc_label.setText(
             "{}  {:.4f}".format(
-                "Final validation AUC" if final_validation else "Validation AUC",
+                "最终验证集 AUC" if final_validation else "验证集 AUC",
                 float(auc),
             )
             if auc is not None
@@ -2009,8 +2005,8 @@ class ModelCenter:
         if final_validation:
             metric_rows = []
             for title, mode in (
-                ("Empty start", "empty_mask"),
-                ("Existing Mask", "real_initial_mask"),
+                ("空 Mask 起步", "empty_mask"),
+                ("已有 Mask 起步", "real_initial_mask"),
             ):
                 comparison = (quality.get("mode_comparisons") or {}).get(mode) or {}
                 metric_rows.append(
@@ -2023,12 +2019,12 @@ class ModelCenter:
         else:
             metric_rows = [
                 (
-                    "Empty start",
+                    "空 Mask 起步",
                     validation.get("empty_mask_trajectory_auc"),
                     validation.get("empty_mask_baseline_dice"),
                 ),
                 (
-                    "Existing Mask",
+                    "已有 Mask 起步",
                     validation.get("initial_mask_trajectory_auc"),
                     validation.get("initial_mask_baseline_dice"),
                 ),
@@ -2036,9 +2032,9 @@ class ModelCenter:
         for title, mode_auc, mode_baseline in metric_rows:
             if mode_auc is None:
                 continue
-            detail = "{} AUC {:.4f}".format(title, float(mode_auc))
+            detail = "{0} AUC {1:.4f}".format(title, float(mode_auc))
             if mode_baseline is not None:
-                detail += " (baseline {:.4f}, {:+.4f})".format(
+                detail += "（基准 {0:.4f}，差值 {1:+.4f}）".format(
                     float(mode_baseline),
                     float(mode_auc) - float(mode_baseline),
                 )
@@ -2057,13 +2053,13 @@ class ModelCenter:
             delta = float(auc) - baseline_auc
             if delta >= 0:
                 self.comparison_label.setText(
-                    "Candidate is {:+.1f}% AUC vs the current model so far.".format(
+                    "目前新模型 AUC 领先当前模型 {:+.1f}%。".format(
                         delta * 100.0
                     )
                 )
             else:
                 self.comparison_label.setText(
-                    "Not yet better than the current model ({:.1f}% AUC so far).".format(
+                    "目前尚未超过当前模型（AUC {:+.1f}%）。".format(
                         delta * 100.0
                     )
                 )
@@ -2074,7 +2070,7 @@ class ModelCenter:
         else:
             self.comparison_label.setText("")
         self.best_label.setText(
-            "Best AUC  {:.4f}".format(float(status["best_score"]))
+            "最佳 AUC  {:.4f}".format(float(status["best_score"]))
             if status.get("best_score") not in (None, float("-inf"))
             else "最佳 AUC  -"
         )
@@ -2098,7 +2094,7 @@ class ModelCenter:
         created = float(status.get("created_at_epoch") or 0)
         if created:
             self.elapsed_label.setText(
-                "Elapsed {}".format(self._duration(time.time() - created))
+                "已运行 {}".format(self._duration(time.time() - created))
             )
         else:
             self.elapsed_label.setText("")
@@ -2166,7 +2162,7 @@ class ModelCenter:
             state in ("paused", "failed") and not remote
         )
         self.stop_button.setText(
-            "Abandon Locally" if abandonable else "停止训练"
+            "在本机放弃远程任务" if abandonable else "停止训练"
         )
         self.stop_button.setEnabled(abandonable or active or state == "paused")
         self.open_log_button.setEnabled(bool(self.current_job_dir))
@@ -2278,7 +2274,7 @@ class ModelCenter:
             diagnosis = diagnose_job(str(self.current_job_dir))
         except Exception as exc:
             self.diagnosis_detail.setText(
-                "The failure diagnosis could not be read: {}".format(exc)
+                "无法读取失败诊断：{}".format(exc)
             )
             self.diagnosis_title.setVisible(True)
             self.diagnosis_detail.setVisible(True)
@@ -2288,20 +2284,20 @@ class ModelCenter:
         lines = [str(diagnosis.get("hint") or "")]
         error = str(diagnosis.get("error") or "")
         if error:
-            lines.append("Error: {}".format(error))
+            lines.append("错误：{}".format(error))
         error_line = str(diagnosis.get("error_line") or "")
         if error_line:
-            lines.append("At {}".format(error_line))
+            lines.append("位置：{}".format(error_line))
         chain = [
             str(stage) for stage in diagnosis.get("stage_chain") or [] if stage
         ]
         if chain:
-            lines.append("Stages: {}".format(" -> ".join(chain)))
+            lines.append("阶段：{}".format(" → ".join(chain)))
         cleanup = diagnosis.get("artifact_cleanup") or {}
         removed = cleanup.get("removed") or []
         if removed:
             lines.append(
-                "Rebuildable data was cleaned up ({} items); logs and status were kept.".format(
+                "已清理可重建的数据（{} 项）；日志与状态文件已保留。".format(
                     len(removed)
                 )
             )
@@ -2332,12 +2328,12 @@ class ModelCenter:
         if current:
             quality = current.get("quality") or {}
             self.current_model_title.setText(
-                "Active annotation model · {}".format(
+                "启用中的标注模型 · {}".format(
                     _format_time(current.get("created_at_epoch"))
                 )
             )
             self.current_model_detail.setText(
-                "{} · {} training + {} validation · validation {}".format(
+                "{} · 训练 {} 例 + 验证 {} 例 · 验证集 {}".format(
                     strategy_display_name(current.get("strategy")),
                     current.get("train_case_count", 0),
                     current.get("validation_case_count", 0),
@@ -2401,16 +2397,16 @@ class ModelCenter:
             )
             validation = _format_delta(quality.get("delta_auc"))
             if row.get("state") == "not_improved":
-                validation = "Did not improve"
+                validation = "未超过现有模型"
             elif row.get("state") == "unverified":
-                validation = "Not verified"
+                validation = "未验证"
             self.model_table.setItem(
                 index, 4, self.QtWidgets.QTableWidgetItem(validation)
             )
             button = self.QtWidgets.QPushButton(
-                "Active"
+                "使用中"
                 if row.get("model_id") == recommended
-                else "Set Active"
+                else "启用"
             )
             button.setEnabled(
                 model_is_usable(row)
@@ -2447,7 +2443,7 @@ class ModelCenter:
         self.model_io_process = subprocess.Popen(command, **kwargs)
         self.model_io_action = action
         self.model_io_status.setText(
-            "{} is running outside Mimics. Annotation can continue.".format(action)
+            "“{0}”正在 Mimics 外运行。期间可继续标注。".format(action)
         )
         self.import_model_button.setEnabled(False)
         self.export_model_button.setEnabled(False)
@@ -2466,13 +2462,13 @@ class ModelCenter:
         self.model_io_action = ""
         if returncode == 0:
             self.model_io_status.setText(
-                "{} completed. {}".format(action, output.splitlines()[-1] if output else "")
+                "“{0}”已完成。{1}".format(action, output.splitlines()[-1] if output else "")
             )
             self.refresh_tasks()
             self.refresh_models()
         else:
             self.model_io_status.setText(
-                "{} failed. {}".format(action, output or "See the process log.")
+                "“{0}”失败。{1}".format(action, output or "详见进程日志。")
             )
             self.import_model_button.setEnabled(True)
             self.export_model_button.setEnabled(
@@ -2484,7 +2480,7 @@ class ModelCenter:
             self.QtCore,
             self.QtWidgets,
             self.window,
-            "Import nnInteractive Model Package",
+            "导入 nnInteractive 模型包",
             str(Path.home()),
             "AI model packages (*.zip)",
             self._import_model_package_path,
@@ -2505,7 +2501,7 @@ class ModelCenter:
                 str(path),
                 "--set-current",
             ],
-            "Model import",
+            "模型导入",
         )
 
     def export_current_model(self):
@@ -2523,7 +2519,7 @@ class ModelCenter:
             self.QtCore,
             self.QtWidgets,
             self.window,
-            "Export nnInteractive Model Package",
+            "导出 nnInteractive 模型包",
             str(suggested),
             "AI model packages (*.zip)",
             lambda path: self._export_current_model_path(path, task_id, current),
@@ -2547,7 +2543,7 @@ class ModelCenter:
                 "--output",
                 str(path),
             ],
-            "Model export",
+            "模型导出",
         )
 
     def use_model(self, model_id):

@@ -55,6 +55,15 @@ REFRESH_SECONDS = 10
 # Read-only aggregation (no Qt imports - unit-testable headless)
 # ---------------------------------------------------------------------------
 
+# Display-only map for the queues section; the data-layer state words
+# (idle/running/stopping/stop requested) stay English for tests and logic.
+_QUEUE_STATE_LABELS = {
+    "idle": "空闲",
+    "running": "运行中",
+    "stopping": "停止中",
+    "stop requested": "已请求停止",
+}
+
 
 def read_json(path, default=None):
     import json
@@ -302,19 +311,21 @@ def run(preview_path=""):
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     configure_application(app)
+    # Literal Qt CSS braces must be escaped ({{ }}) because the palette
+    # placeholders go through str.format().
     app.setStyleSheet(shared_stylesheet("""
-    QFrame#healthSection {
+    QFrame#healthSection {{
         background: #ffffff;
         border: 1px solid {border};
         border-radius: 8px;
-    }
-    QLabel#sectionHeader {
+    }}
+    QLabel#sectionHeader {{
         font-weight: 600;
         color: {teal};
-    }
-    QLabel[status="ok"] { color: {success}; }
-    QLabel[status="warn"] { color: {warning}; }
-    QLabel[status="bad"] { color: {danger}; }
+    }}
+    QLabel[status="ok"] {{ color: {success}; }}
+    QLabel[status="warn"] {{ color: {warning}; }}
+    QLabel[status="bad"] {{ color: {danger}; }}
     """.format(
         border=PALETTE["border"],
         teal=PALETTE["teal"],
@@ -347,11 +358,11 @@ def run(preview_path=""):
     page = QtWidgets.QVBoxLayout(inner)
     root.addWidget(scroll, 1)
 
-    section_processes = _Section(page, "Owned Processes")
-    section_locks = _Section(page, "Resource Locks")
-    section_queues = _Section(page, "Import Queues")
-    section_server = _Section(page, "nnInteractive Server")
-    section_environment = _Section(page, "Environment")
+    section_processes = _Section(page, "自有进程")
+    section_locks = _Section(page, "资源锁")
+    section_queues = _Section(page, "导入队列")
+    section_server = _Section(page, "nnInteractive 服务器")
+    section_environment = _Section(page, "环境")
     page.addStretch(1)
 
     actions = QtWidgets.QHBoxLayout()
@@ -373,16 +384,16 @@ def run(preview_path=""):
         server = snapshot["server"]
 
         if not live and not stale_locks and not busy_queues:
-            summary_text = "All clear - no live owned processes, no stale locks."
+            summary_text = "一切正常——没有存活的自有进程，也没有失效的锁。"
         else:
-            summary_text = "{0} live process(es), {1} dead record(s), {2} stale lock(s), {3} active queue(s).".format(
+            summary_text = "存活进程 {0} 个，失效记录 {1} 条，失效锁 {2} 个，活跃队列 {3} 个。".format(
                 len(live), len(dead), len(stale_locks), len(busy_queues)
             )
         if server and server["live"]:
-            summary_text += " nnInteractive server is running."
+            summary_text += " nnInteractive 服务器正在运行。"
         env_issues = snapshot.get("environment") or []
         if env_issues:
-            summary_text += " {0} environment issue(s).".format(len(env_issues))
+            summary_text += " 环境问题 {0} 个。".format(len(env_issues))
         summary.setText(summary_text)
 
         _render_processes(section_processes, snapshot["processes"])
@@ -397,12 +408,12 @@ def run(preview_path=""):
         live = [p for p in entries if p["live"]]
         dead = [p for p in entries if not p["live"]]
         if not entries:
-            _row(section.body, ["No registered processes."])
+            _row(section.body, ["没有已登记的进程。"])
             return
         for proc in live:
             box = _row(section.body, [
-                "● {0} (PID {1})".format(proc["role"], proc["pid"]),
-                "locks: {0}".format(", ".join(proc["locks"]) or "none"),
+                "● {0}（PID {1}）".format(proc["role"], proc["pid"]),
+                "持有锁：{0}".format(", ".join(proc["locks"]) or "无"),
             ])
             status_label = box.itemAt(0).widget()
             status_label.setProperty("status", "ok")
@@ -412,7 +423,7 @@ def run(preview_path=""):
                 box.addWidget(btn)
         for proc in dead:
             box = _row(section.body, [
-                "○ {0} (PID {1}) - dead record, will be cleared on sweep".format(
+                "○ {0}（PID {1}）——失效记录，清理时会被移除".format(
                     proc["role"], proc["pid"]
                 ),
                 "",
@@ -422,24 +433,24 @@ def run(preview_path=""):
     def _render_locks(section, entries):
         section.clear()
         if not entries:
-            _row(section.body, ["No lock files."])
+            _row(section.body, ["没有锁文件。"])
             return
         for lk in entries:
             status = "ok" if lk["live"] else "bad"
             _row_status(section.body, status, {
-                "name": "{0} {1} - {2} (PID {3})".format(
+                "name": "{0} {1} —— {2}（PID {3}）".format(
                     "●" if lk["live"] else "✕",
                     lk["name"],
                     lk["owner"],
-                    lk["pid"] if lk["pid"] is not None else "unknown",
+                    lk["pid"] if lk["pid"] is not None else "未知",
                 ),
-                "detail": "stale - safe to clear" if lk["stale"] else "held",
+                "detail": "已失效——可以安全清理" if lk["stale"] else "持有中",
             })
         stale = [lk for lk in entries if lk["stale"]]
         if stale:
             _row(section.body, [
-                "{0} stale lock(s) - use Sweep Stale State, or they will be "
-                "cleared the next time the owner workflow starts.".format(len(stale)),
+                "失效锁 {0} 个——请使用“清理失效状态”，否则会在下次"
+                "对应工作流启动时被清除。".format(len(stale)),
                 "",
             ])
 
@@ -447,14 +458,15 @@ def run(preview_path=""):
         section.clear()
         from PySide6 import QtWidgets
         if not entries:
-            _row(section.body, ["No import queue directories."])
+            _row(section.body, ["没有导入队列目录。"])
             return
         busy = [q for q in entries if q["state"] != "idle"]
         shown = busy or entries
         for q in shown[:20]:
             box = _row(section.body, [
-                "{0}: {1}, {2} prepared case(s)".format(
-                    q["name"], q["state"], q["prepared_cases"]
+                "{0}：{1}，已准备病例 {2} 个".format(
+                    q["name"], _QUEUE_STATE_LABELS.get(q["state"], q["state"]),
+                    q["prepared_cases"]
                 ),
                 "",
             ])
@@ -465,20 +477,20 @@ def run(preview_path=""):
             btn.clicked.connect(lambda _=False, p=q["path"]: _open_folder(p))
             box.addWidget(btn)
         if len(entries) > 20:
-            _row(section.body, ["... and {0} more queue folder(s).".format(len(entries) - 20), ""])
+            _row(section.body, ["……另有 {0} 个队列文件夹。".format(len(entries) - 20), ""])
 
     def _render_server(section, server):
         section.clear()
         if not server:
-            _row(section.body, ["No nnInteractive server state file found - the server is not running from here."])
+            _row(section.body, ["未找到 nnInteractive 服务器状态文件——服务器没有从这里启动。"])
             return
         status = "ok" if server["live"] else "warn"
         _row_status(section.body, status, {
-            "name": "Server (PID {0}){1}".format(
+            "name": "服务器（PID {0}）{1}".format(
                 server["pid"],
-                " - {0}".format(server["state"]) if server["state"] else "",
+                " —— {0}".format(server["state"]) if server["state"] else "",
             ),
-            "detail": "running" if server["live"] else "state file exists but the process is not running",
+            "detail": "运行中" if server["live"] else "状态文件存在，但进程未在运行",
         })
 
     def _row_status(parent, status, entry):
@@ -490,7 +502,7 @@ def run(preview_path=""):
         section.clear()
         if not issues:
             box = _row(section.body, [
-                "● Environment OK - Python, setup state, paths, weights and the nnInteractive model check out.",
+                "● 环境正常——Python、安装状态、路径、权重和 nnInteractive 模型均已就绪。",
                 "",
             ])
             box.itemAt(0).widget().setProperty("status", "ok")
@@ -526,10 +538,10 @@ def run(preview_path=""):
             if kind == "snapshot":
                 if payload is not None:
                     render(payload)
-                summary.setText(summary.text().replace(" (refreshing...)", ""))
+                summary.setText(summary.text().replace(" （刷新中…）", ""))
             elif kind == "sweep":
                 summary.setText(
-                    "Swept: removed {0} dead record(s), released {1} lock(s).".format(
+                    "清理完成：移除失效记录 {0} 条，释放锁 {1} 个。".format(
                         payload.get("removed_dead_records") or 0,
                         len(payload.get("released_locks") or []),
                     )
@@ -543,8 +555,8 @@ def run(preview_path=""):
 
     def start_refresh():
         text = summary.text()
-        if not text.endswith("(refreshing...)"):
-            summary.setText(text + " (refreshing...)")
+        if not text.endswith("（刷新中…）"):
+            summary.setText(text + " （刷新中…）")
 
         def worker():
             try:
@@ -554,7 +566,7 @@ def run(preview_path=""):
                     ("snapshot", {
                         "processes": [], "locks": [],
                         "queues": [], "server": None,
-                        "error": "collect failed: {0}".format(exc),
+                        "error": "收集失败：{0}".format(exc),
                     })
                 )
 

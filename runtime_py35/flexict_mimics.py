@@ -47,7 +47,7 @@ BUTTON_STOP = "停止运行中的任务"
 BUTTON_ACTIVE_LEARNING = "主动学习审核"
 BUTTON_CANCEL = "取消"
 BUTTON_UPDATE = "更新匹配掩膜"
-BUTTON_CREATE = "新建掩膜"
+BUTTON_CREATE = "创建可编辑副本"
 
 _MONITORS = {}
 
@@ -898,7 +898,7 @@ def _prepare_apply_queue(monitor, bridge_result):
             message=(
                 "FlexiCT 预测已完成，可以应用。\n\n"
                 "更新匹配掩膜 会替换与该目标匹配且未改动的掩膜；"
-                "新建掩膜 会保留所有现有掩膜。"
+                "创建可编辑副本 会保留所有现有掩膜。"
             ),
             buttons=BUTTON_UPDATE + ";" + BUTTON_CREATE,
             title="FlexiCT 预测就绪",

@@ -122,7 +122,7 @@ CONFIG_SCHEMAS: dict[str, dict[str, tuple]] = {
             "many seconds.",
         ),
         "scribbleprompt.device": (
-            "ScribblePrompt device", "str",
+            "ScribblePrompt device", "choice",
             "cpu or cuda. CPU is slower but never competes with training.",
         ),
     },
@@ -135,6 +135,9 @@ CHOICE_OPTIONS = {
     ],
     ("flexict_config.json", "default_configuration"): [
         "auto", "2d", "3d_fullres", "pair",
+    ],
+    ("interactive_algorithms_config.json", "scribbleprompt.device"): [
+        "cpu", "cuda",
     ],
 }
 

@@ -176,7 +176,7 @@ class PredictionWindow:
         self.start.setEnabled(bool(self.models))
         if error:
             self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
-            self.status_label.setText("Could not load nnU-Net models: {}".format(error))
+            self.status_label.setText("无法加载 nnU-Net 模型：{}".format(error))
         elif self.models:
             self.status_label.setText(
                 "所选 Mask 仅用于对包含该标签的模型排序。选中的模型会预测其全部输出标签；归一化、spacing 和 patch 由其 plans 控制。"
@@ -231,7 +231,7 @@ class PredictionWindow:
         try:
             row = self.table.currentRow()
             if not 0 <= row < len(self.models):
-                raise RuntimeError("Select one model.")
+                raise RuntimeError("请选择一个模型。")
             model = self.models[row]
             image_path = Path(
                 os.path.abspath(
@@ -283,7 +283,7 @@ class PredictionWindow:
                 try:
                     if not image_path.exists():
                         raise RuntimeError(
-                            "The current source image is unavailable: {}".format(
+                            "当前源图像不可用：{}".format(
                                 image_path
                             )
                         )

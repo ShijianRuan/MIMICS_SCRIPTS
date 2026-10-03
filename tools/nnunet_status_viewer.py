@@ -251,7 +251,7 @@ class StatusWindow:
                     for label in model.get("labels") or []
                 ),
                 _format_time(model.get("created_at_epoch")),
-                "Yes" if usable else "No",
+                "可用" if usable else "不可用",
             ]
             for column, value in enumerate(values):
                 item = self.QtWidgets.QTableWidgetItem(str(value))
@@ -275,13 +275,13 @@ class StatusWindow:
             speed = float(status.get("transfer_bytes_per_second") or 0.0)
             eta = status.get("transfer_eta_seconds")
             detail = "{} {}%".format(
-                "Uploading" if state == "uploading" else "Downloading",
+                "上传中" if state == "uploading" else "下载中",
                 int(status.get("transfer_percent") or 0),
             )
             if speed > 0:
-                detail += " at {:.1f} MiB/s".format(speed / float(1024 ** 2))
+                detail += "，速度 {:.1f} MiB/s".format(speed / float(1024 ** 2))
             if eta is not None:
-                detail += ", about {} min remaining".format(
+                detail += "，约剩 {} 分钟".format(
                     max(1, int(round(float(eta) / 60.0)))
                 )
             self.detail_label.setText(detail)
@@ -293,7 +293,7 @@ class StatusWindow:
                 "completed", "failed", "cancelled", "abandoned", "unknown"
             }
         )
-        self.stop_button.setText("Abandon Locally" if abandonable else "停止")
+        self.stop_button.setText("在本机放弃远程任务" if abandonable else "停止")
         self.stop_button.setEnabled(
             abandonable
             or state not in {
@@ -322,7 +322,7 @@ class StatusWindow:
                     handle.seek(max(0, log_path.stat().st_size - 512 * 1024))
                     text = handle.read().decode("utf-8", "replace")
             except OSError as exc:
-                text = "Could not read the log: {}".format(exc)
+                text = "无法读取日志：{}".format(exc)
         self.log_view.setPlainText(text)
         if follow_tail:
             scrollbar.setValue(scrollbar.maximum())

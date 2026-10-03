@@ -5,25 +5,23 @@ from __future__ import annotations
 
 
 LABEL_SOURCE_CHOICES = (
-    ("Saved Mimics projects (.mcs)", "mcs_refresh"),
-    ("Masks stored with source images", "source_dataset"),
-    ("Previously exported masks", "exported_masks"),
+    ("从已保存的 .mcs 工程刷新", "mcs_refresh"),
+    ("各病例目录内的 Mask", "source_dataset"),
+    ("此前导出的 Mask", "exported_masks"),
 )
 
 LABEL_SOURCE_HINTS = {
     "mcs_refresh": (
-        "Choose the original image dataset and the folder containing saved .mcs "
-        "projects. The target Mask is verified in the background; projects without "
-        "a matching saved Mask are skipped."
+        "选择原始图像数据集和保存 .mcs 工程的文件夹。目标 Mask 会在后台校验；"
+        "没有匹配已保存 Mask 的工程会被跳过。"
     ),
     "source_dataset": (
-        "Choose the original image dataset. Each selected case must contain a "
-        "matching Mask in its segmentations folder; no .mcs or separate Mask path "
-        "is needed."
+        "选择原始图像数据集。每个所选病例的 segmentations 文件夹内必须包含"
+        "匹配的 Mask；无需 .mcs 或单独的 Mask 路径。"
     ),
     "exported_masks": (
-        "Choose the original image dataset and the separate folder where Masks "
-        "were exported. Cases are paired by case ID and Mask name."
+        "选择原始图像数据集和此前导出 Mask 的单独文件夹。病例按病例 ID 和 "
+        "Mask 名配对。"
     ),
 }
 

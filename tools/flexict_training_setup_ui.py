@@ -397,7 +397,7 @@ class TrainingSetupWindow:
                 time.strftime(
                     "%Y-%m-%d %H:%M", time.localtime(model.get("created_at_epoch") or 0)
                 ),
-                "Yes" if usable else "No",
+                "可用" if usable else "不可用",
             ]
             for column, value in enumerate(values):
                 self.models_table.setItem(row, column, QtWidgets.QTableWidgetItem(str(value)))
@@ -430,7 +430,7 @@ class TrainingSetupWindow:
         train_count = sum(1 for row in rows if row.get("use_train", True))
         val_count = sum(1 for row in rows if row.get("use_val", False))
         self.case_summary.setText(
-            "{} case(s) selected · {} training · {} validation".format(
+            "已选 {0} 例 · 训练 {1} · 验证 {2}".format(
                 len(rows), train_count, val_count
             )
         )
@@ -476,7 +476,7 @@ class TrainingSetupWindow:
                     self._refresh_cases()
                     self.status_label.setStyleSheet("")
                     self.status_label.setText(
-                        "Found {} case(s). Verify the training/validation split, then start training.".format(
+                        "已找到 {0} 个病例。请确认训练/验证划分后开始训练。".format(
                             len(self._case_rows)
                         )
                     )
@@ -596,12 +596,12 @@ class TrainingSetupWindow:
             def validate():
                 try:
                     if not Path(request["dataset_root"]).is_dir():
-                        raise ValueError("Original image dataset does not exist.")
+                        raise ValueError("原始图像数据集不存在。")
                     if len(request["cases"]) < 2:
                         # The copy says "at least two"; the pipeline's train/
                         # val split needs both, or training runs empty.
                         raise ValueError(
-                            "Select at least two cases (rescan the dataset first)."
+                            "请至少选择两个病例（请先重新扫描数据集）。"
                         )
                     self._submission_results.put((generation, request, ""))
                 except Exception as exc:

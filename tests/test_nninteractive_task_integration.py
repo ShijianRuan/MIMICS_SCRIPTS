@@ -274,17 +274,18 @@ class DiagnoseJobTests(unittest.TestCase):
                 Path(value), error="RuntimeError: CUDA out of memory"
             )
             report = pipeline.diagnose_job(str(job))
-        self.assertIn("GPU memory", report["hint"])
+        self.assertIn("GPU 显存不足", report["hint"])
 
     def test_diagnosis_degrades_for_missing_directory(self):
         with tempfile.TemporaryDirectory() as value:
             report = pipeline.diagnose_job(
-                str(Path(value) / "does_not_exist")
+                str(Path(value) / "does_not_exist"
+                    )
             )
         self.assertEqual("", report["error"])
         self.assertEqual([], report["stage_chain"])
         self.assertEqual("", report["job_log_tail"])
-        self.assertIn("No error was recorded", report["hint"])
+        self.assertIn("没有记录到错误", report["hint"])
 
     def test_diagnosis_reports_stopped_jobs_as_not_failures(self):
         with tempfile.TemporaryDirectory() as value:
@@ -292,7 +293,7 @@ class DiagnoseJobTests(unittest.TestCase):
                 Path(value), error="", status="cancelled"
             )
             report = pipeline.diagnose_job(str(job))
-        self.assertIn("stopped by user request", report["hint"])
+        self.assertIn("按用户请求停止", report["hint"])
 
 
 if __name__ == "__main__":

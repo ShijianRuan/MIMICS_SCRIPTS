@@ -1270,7 +1270,7 @@ class EffectiveIdentityTests(unittest.TestCase):
         self.assertEqual("checkpoint_runtime_verified", status["phase"])
         self.assertEqual(85, status["progress_percent"])
         self.assertEqual(
-            "Verifying the trained model", common.status_summary(status)
+            "正在验证训练出的模型", common.status_summary(status)
         )
 
 

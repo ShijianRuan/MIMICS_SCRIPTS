@@ -959,17 +959,17 @@ def _choose_result_target(monitor, result):
         title="{0} 就绪".format(display),
         message=(
             "{0} 在 {1} 秒内完成。\n\n"
-            "更新所选掩膜 会将结果应用到 {2}。\n"
+            "更新匹配掩膜 会将结果应用到 {2}。\n"
             "创建可编辑副本 会保留它，并新建一个可编辑的掩膜。"
         ).format(
             display,
             result.get("elapsed_seconds", "?"),
             monitor["target_name"],
         ),
-        buttons="更新所选掩膜;创建可编辑副本;丢弃",
+        buttons="更新匹配掩膜;创建可编辑副本;丢弃",
         ui_blocking=True,
     )
-    if answer == "更新所选掩膜":
+    if answer == "更新匹配掩膜":
         return target
     if answer == "创建可编辑副本":
         return _create_copy(monitor["image"], "{0} - {1}".format(monitor["target_name"], display))

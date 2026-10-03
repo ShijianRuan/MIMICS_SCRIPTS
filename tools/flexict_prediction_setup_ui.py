@@ -80,7 +80,7 @@ class PredictionWindow:
         case_layout.setContentsMargins(16, 14, 16, 14)
         case_layout.addWidget(QtWidgets.QLabel("当前病例"), 0, 0)
         case_layout.addWidget(QtWidgets.QLabel(str(context.get("case_id") or "-")), 0, 1)
-        case_layout.addWidget(QtWidgets.QLabel("目标提示"), 1, 0)
+        case_layout.addWidget(QtWidgets.QLabel("所选 Mask 提示"), 1, 0)
         case_layout.addWidget(
             QtWidgets.QLabel(str(context.get("selected_mask_name") or "-")), 1, 1
         )
@@ -173,7 +173,7 @@ class PredictionWindow:
         self.start.setEnabled(bool(self.models))
         if error:
             self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
-            self.status_label.setText("Could not load FlexiCT models: {}".format(error))
+            self.status_label.setText("无法加载 FlexiCT 模型：{}".format(error))
         elif self.models:
             self.status_label.setText(
                 "已预选推荐模型。所选 Mask 用于提示优先排序的目标。"
@@ -225,7 +225,7 @@ class PredictionWindow:
         try:
             row = self.table.currentRow()
             if not 0 <= row < len(self.models):
-                raise RuntimeError("Select one model.")
+                raise RuntimeError("请选择一个模型。")
             model = self.models[row]
             image_path = Path(
                 os.path.abspath(
@@ -278,7 +278,7 @@ class PredictionWindow:
                 try:
                     if not image_path.exists():
                         raise RuntimeError(
-                            "The current source image is unavailable: {}".format(
+                            "当前源图像不可用：{}".format(
                                 image_path
                             )
                         )

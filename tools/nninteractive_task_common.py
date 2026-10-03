@@ -355,8 +355,8 @@ def strategy_display_name(value: object) -> str:
     if strategy in {"clopa_conv", "clopa_cn"}:
         return "CLoPA-CN"
     if strategy == "full":
-        return "Full adaptation"
-    return strategy or "Unknown"
+        return "全量适配"
+    return strategy or "未知"
 
 
 def selected_model(
@@ -386,7 +386,7 @@ def model_profile(
     verify_checksum: bool = True,
 ) -> dict[str, Any]:
     if not model_is_usable(model):
-        raise RuntimeError("The selected task model is not available for annotation.")
+        raise RuntimeError("所选任务模型当前不可用于标注。")
     workspace = workspace or (
         Path(str(model.get("_workspace")))
         if model.get("_workspace")
@@ -399,7 +399,7 @@ def model_profile(
     )
     if not audit.get("compatible"):
         raise RuntimeError(
-            "The selected task model is incomplete: {}".format(
+            "所选任务模型不完整：{}".format(
                 ", ".join(audit.get("missing") or [])
             )
         )
@@ -407,11 +407,11 @@ def model_profile(
     actual = str(audit.get("checkpoint_sha256") or expected).lower()
     if verify_checksum and expected and expected != actual:
         raise RuntimeError(
-            "The selected task model checkpoint does not match its registered checksum."
+            "所选任务模型的 checkpoint 与注册时记录的校验和不一致。"
         )
     if model.get("runtime_verified") and not audit.get("runtime_verified"):
         raise RuntimeError(
-            "The selected task model lost its effective runtime verification metadata."
+            "所选任务模型丢失了有效的运行时验证记录。"
         )
     return {
         "source": "task_model",
@@ -648,85 +648,85 @@ def status_summary(status: dict[str, Any]) -> str:
     phase = str(status.get("status") or "created")
     if phase == "exporting_labels":
         progress = status.get("label_export_progress") or {}
-        return "Preparing labels, {} of {} cases".format(
+        return "正在准备标注，第 {} 例，共 {} 例".format(
             progress.get("index") or progress.get("completed") or 0,
             progress.get("total") or status.get("case_total") or "?",
         )
     if phase == "waiting_for_gpu":
-        return "Waiting for the GPU"
+        return "正在等待 GPU"
     if phase == "training":
         training_phase = str(status.get("phase") or "").lower()
         if "verif" in training_phase or training_phase.startswith("final"):
-            return "Verifying the trained model"
-        return "Training, epoch {} of {}".format(
+            return "正在验证训练出的模型"
+        return "训练中，第 {} 轮，共 {} 轮".format(
             status.get("epoch") or 0, status.get("epochs") or "?"
         )
     if phase == "validating":
-        return "Checking model quality"
+        return "正在检查模型质量"
     if phase == "preparing_data":
         index = int(status.get("preparation_index") or 0)
         total = int(status.get("preparation_total") or 0)
         if total > 0:
-            return "Preparing data {}/{} ({:.0f}%)".format(
+            return "正在准备数据 {}/{}（{:.0f}%）".format(
                 index,
                 total,
                 100.0 * index / total,
             )
-        return "Preparing training data"
+        return "正在准备训练数据"
     if phase == "preparing_remote":
-        return "Preparing verified data for the remote server"
+        return "正在为远程服务器准备已验证数据"
     if phase == "connecting_remote":
-        return "Connecting to the remote server"
+        return "正在连接远程服务器"
     if phase == "uploading":
         if str(status.get("phase") or "") == "remote_dataset_cache_hit":
-            return "Verified training data reused on the remote server"
-        text = "Uploading training data, {}%".format(
+            return "已验证的训练数据在远程服务器上复用"
+        text = "正在上传训练数据，{}%".format(
             int(status.get("transfer_percent") or 0)
         )
         speed = float(status.get("transfer_bytes_per_second") or 0.0)
         eta = status.get("transfer_eta_seconds")
         if speed > 0:
-            text += " at {:.1f} MiB/s".format(speed / float(1024 ** 2))
+            text += "，速度 {:.1f} MiB/s".format(speed / float(1024 ** 2))
         if eta is not None:
-            text += ", about {} min remaining".format(
+            text += "，约剩 {} 分钟".format(
                 max(1, int(round(float(eta) / 60.0)))
             )
         return text
     if phase == "starting_remote":
-        return "Starting the remote GPU container"
+        return "正在启动远程 GPU 容器"
     if phase == "reconnecting_remote":
-        return "Remote connection interrupted; training continues on the server"
+        return "远程连接中断；训练在服务器上继续"
     if phase == "waiting_for_remote_gpu":
-        return "Waiting for remote GPU {}".format(
-            status.get("remote_gpu_device") or "automatic"
+        return "正在等待远程 GPU {}".format(
+            status.get("remote_gpu_device") or "（自动）"
         )
     if phase == "remote_control_unavailable":
-        return "Remote training continues; Docker status is temporarily unavailable"
+        return "远程训练继续进行；Docker 状态暂时不可用"
     if phase in {"remote_training_completed", "finalizing_remote"}:
-        return "Remote training completed; preparing the model for local use"
+        return "远程训练完成；正在准备本地可用的模型"
     if phase == "downloading":
-        text = "Downloading the trained model, {}%".format(
+        text = "正在下载训练好的模型，{}%".format(
             int(status.get("transfer_percent") or 0)
         )
         speed = float(status.get("transfer_bytes_per_second") or 0.0)
         eta = status.get("transfer_eta_seconds")
         if speed > 0:
-            text += " at {:.1f} MiB/s".format(speed / float(1024 ** 2))
+            text += "，速度 {:.1f} MiB/s".format(speed / float(1024 ** 2))
         if eta is not None:
-            text += ", about {} min remaining".format(
+            text += "，约剩 {} 分钟".format(
                 max(1, int(round(float(eta) / 60.0)))
             )
         return text
     mapping = {
-        "created": "Preparing training",
-        "validating_cases": "Checking selected cases",
-        "registering": "Saving the best model",
-        "completed": "Training completed",
-        "paused": "Training paused; GPU released",
-        "cancelled": "Training stopped",
-        "abandoned": "Local monitoring ended; remote state remains unknown",
-        "failed": "Training needs attention",
-        "pausing": "Pausing training and releasing the GPU",
-        "stopping": "Stopping training",
+        "created": "正在准备训练",
+        "validating_cases": "正在检查所选病例",
+        "registering": "正在保存最佳模型",
+        "completed": "训练完成",
+        "paused": "训练已暂停；GPU 已释放",
+        "cancelled": "训练已停止",
+        "abandoned": "本地监控已结束；远程状态未知",
+        "failed": "训练需要处理",
+        "pausing": "正在暂停训练并释放 GPU",
+        "stopping": "正在停止训练",
     }
     return mapping.get(phase, phase.replace("_", " ").title())

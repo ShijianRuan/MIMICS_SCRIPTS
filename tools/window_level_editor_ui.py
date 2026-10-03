@@ -172,7 +172,7 @@ class PresetEditor:
 
     def _add_row(self):
         self.presets.append(
-            {"name": "New preset", "width": 400, "level": 50, "keywords": []}
+            {"name": "新预设", "width": 400, "level": 50, "keywords": []}
         )
         self._reload()
         self.table.selectRow(len(self.presets) - 1)
@@ -190,13 +190,13 @@ class PresetEditor:
         # Validate before touching the file.
         for index, preset in enumerate(self.presets):
             if not str(preset.get("name", "")).strip():
-                self.status.setText("Row {0}: name is empty.".format(index + 1))
+                self.status.setText("第 {0} 行：名称为空。".format(index + 1))
                 return
             for key in ("width", "level"):
                 value = preset.get(key)
                 if not isinstance(value, int):
                     self.status.setText(
-                        "Row {0}: {1} must be an integer HU value.".format(
+                        "第 {0} 行：{1} 必须是整数 HU 值。".format(
                             index + 1, key
                         )
                     )
@@ -206,12 +206,12 @@ class PresetEditor:
             write_backup(load_presets())
             save_presets(self.presets)
         except OSError as exc:
-            self.status.setText("Could not write presets: {0}".format(exc))
+            self.status.setText("无法写入预设：{0}".format(exc))
             return
         self._original = [dict(row) for row in self.presets]
         self.rollback.setEnabled(True)
         self.status.setText(
-            "Saved {0} presets at {1}.".format(
+            "已保存 {0} 个预设（{1}）。".format(
                 len(self.presets), time.strftime("%H:%M:%S")
             )
         )
@@ -223,7 +223,7 @@ class PresetEditor:
             backup = load_presets(BACKUP_PATH)
             save_presets(backup)
         except OSError as exc:
-            self.status.setText("Roll back failed: {0}".format(exc))
+            self.status.setText("回滚失败：{0}".format(exc))
             return
         self.presets = [dict(row) for row in backup]
         self._reload()
