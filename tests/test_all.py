@@ -8127,10 +8127,12 @@ class TestNewFeatures(unittest.TestCase):
         class Image(object):
             logical_dimensions = [2, 2, 2]
 
+        image = Image()
+
         class Mask(object):
             def __init__(self, name, data):
                 self.name = name
-                self.image = Image()
+                self.image = image
 
         masks = [
             Mask("liver manual", b"\x01" * 8),
@@ -8244,6 +8246,65 @@ class TestNewFeatures(unittest.TestCase):
                          (buffers_dir / "liver_manual.u8").read_bytes())
         self.assertEqual(b"\x00" * 8,
                          (buffers_dir / "liver_manual_2.u8").read_bytes())
+
+    def test_mimics_export_rejects_masks_from_multiple_images(self):
+        """F33: one export carries one grid. Masks attached to different
+        images must be rejected with an explanation instead of written
+        with the first image's geometry."""
+        import mimics_export
+
+        class Image(object):
+            def __init__(self, guid):
+                self.guid = guid
+                self.logical_dimensions = [2, 2, 2]
+
+        class Mask(object):
+            def __init__(self, name, image):
+                self.name = name
+                self.image = image
+
+        image_a = Image("imageA")
+        image_b = Image("imageB")
+        masks = [
+            Mask("liver arterial", image_a),
+            Mask("liver venous", image_b),
+        ]
+        originals = {
+            "masks": mimics_export.mimics.data.masks,
+        }
+        try:
+            mimics_export.mimics.data.masks = masks
+            # Foreground/manifest path.
+            selected = mimics_export._selected_masks()
+            with self.assertRaises(RuntimeError) as ctx:
+                mimics_export._new_export_manifest(selected)
+            self.assertIn("different images", str(ctx.exception))
+            # Buffer path.
+            root = Path(self.tmp) / "export_multi_image"
+            root.mkdir()
+            with self.assertRaises(RuntimeError) as ctx:
+                mimics_export.export_masks_to_buffers(str(root))
+            self.assertIn("different images", str(ctx.exception))
+            # Nothing was written.
+            self.assertEqual([], list(root.iterdir()))
+        finally:
+            mimics_export.mimics.data.masks = originals["masks"]
+        # Same image still exports fine (two masks, one grid).
+        original_derive = mimics_export._derive_mimics_voxel_to_ras_matrix
+        try:
+            mimics_export.mimics.data.masks = [
+                Mask("liver arterial", image_a),
+                Mask("liver venous", image_a),
+            ]
+            mimics_export._derive_mimics_voxel_to_ras_matrix = (
+                lambda _img, _dims: [[1, 0, 0, 0], [0, 1, 0, 0],
+                                     [0, 0, 1, 0], [0, 0, 0, 1]])
+            manifest = mimics_export._new_export_manifest(
+                mimics_export._selected_masks())
+            self.assertEqual([2, 2, 2], manifest["mimics_shape"])
+        finally:
+            mimics_export.mimics.data.masks = originals["masks"]
+            mimics_export._derive_mimics_voxel_to_ras_matrix = original_derive
 
     def test_mimics_export_empty_case_selection_fails_during_discovery(self):
         import mimics_export

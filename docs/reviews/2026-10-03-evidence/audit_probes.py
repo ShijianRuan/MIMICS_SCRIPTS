@@ -118,8 +118,10 @@ with tempfile.TemporaryDirectory(prefix='mimics_audit_') as tmp:
 
     masks=[Mask('liver arterial','mA',imageA,b'\1'*8),Mask('liver venous','mB',imageB,b'\0'*8)]
     with mock.patch.object(export.mimics.data,'masks',masks),mock.patch.object(export,'_derive_mimics_voxel_to_ras_matrix',return_value=matrix):
-        selected=export._selected_masks(); manifest=export._new_export_manifest(selected)
-    record('R33_export_multiple_images_one_grid',dict(selected_images=[m.image.guid for m in selected],manifest_grid_count=1,manifest_shape=manifest['mimics_shape'],rejected=False))
+        selected=export._selected_masks()
+        try: manifest=export._new_export_manifest(selected); rejected=False
+        except RuntimeError as exc: manifest={'mimics_shape':None}; rejected=str(exc)
+    record('R33_export_multiple_images_one_grid',dict(selected_images=[m.image.guid for m in selected],manifest_grid_count=1,manifest_shape=manifest['mimics_shape'],rejected=rejected))
 
     # Case A overlay requested while same-grid case B is already active.
     # No mid-conversion project switch is needed. Stub only host/process boundaries.

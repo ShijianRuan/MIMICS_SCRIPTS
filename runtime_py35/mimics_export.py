@@ -1301,6 +1301,7 @@ def export_masks_to_buffers(
                 ", ".join(str(getattr(item, "name", "") or "") for item in selected) or "(none)",
             )
         )
+    _ensure_single_image(selected)
 
     manifest = {
         "masks": [],
@@ -1390,6 +1391,31 @@ def export_masks_to_buffers(
     return manifest
 
 
+def _ensure_single_image(selected):
+    """F33: masks from different images share no export grid.
+
+    A manifest carries exactly one shape/matrix taken from the first
+    mask's image; masks attached to other images would be written with
+    the wrong geometry. Reject the export with an explanation instead
+    of silently mis-writing them.
+    """
+    identities = []
+    for a_mask in selected:
+        identity = _object_identity(getattr(a_mask, "image", None))
+        if identity not in identities:
+            identities.append(identity)
+    if len(identities) > 1:
+        names = ", ".join(
+            str(getattr(item, "name", "") or "") for item in selected
+        )
+        raise RuntimeError(
+            "The selected masks are attached to different images ({0}). "
+            "Export them one image at a time: each mask is written on its "
+            "own image's grid, so mixing images in one export would "
+            "misalign the result.".format(names)
+        )
+
+
 def _selected_masks(mask_names=None):
     wanted = set(
         _canonical_mask_name(name)
@@ -1453,6 +1479,7 @@ def _new_export_manifest(selected):
     }
     if not selected:
         return manifest
+    _ensure_single_image(selected)
     image = getattr(selected[0], "image", None)
     if image is None:
         raise RuntimeError("The selected mask is not attached to the active image.")
