@@ -222,11 +222,13 @@ def discover_single_source(source, profile_id=None):
         except OSError:
             pass
         allow_masks = sibling_images <= 1
+        masks_suppressed = not allow_masks
     elif os.path.isfile(selected) and selected.lower().endswith(".dcm"):
         case_dir = os.path.dirname(selected)
         case_id = os.path.basename(case_dir.rstrip("\\/")) or _image_stem(selected)
         image = case_dir
         allow_masks = True
+        masks_suppressed = False
     elif os.path.isdir(selected):
         case_dir = selected
         case_id = os.path.basename(case_dir.rstrip("\\/")) or "case"
@@ -264,6 +266,7 @@ def discover_single_source(source, profile_id=None):
                     return None
                 image = case_dir
         allow_masks = True
+        masks_suppressed = False
     else:
         return None
     masks = []
@@ -275,13 +278,18 @@ def discover_single_source(source, profile_id=None):
                 if not _medical_file(path):
                     continue
                 masks.append({"name": _image_stem(name), "path": path})
-    return {
+    result = {
         "case_id": case_id,
         "image": image,
         "image_type": "medical_image" if _medical_file(image) else "dicom_candidate",
         "masks": masks,
         "case_dir": case_dir,
     }
+    if masks_suppressed:
+        # Purely informational: the sibling-volume ambiguity above suppressed
+        # mask discovery, so callers can point the user at an explicit path.
+        result["masks_suppressed"] = True
+    return result
 
 
 def summarize_dataset(source, profile_id=None, entry_cap=511):
@@ -360,13 +368,13 @@ def summarize_dataset(source, profile_id=None, entry_cap=511):
         image_kinds[image_kind] = image_kinds.get(image_kind, 0) + 1
         if volume_files > 1:
             warnings.append(
-                "{0}: {1} volume files found ({2}); '{3}' will be used".format(
+                "{0}：发现 {1} 个图像文件（{2}），将使用 '{3}'".format(
                     name, volume_files, ", ".join(volume_names), image
                 )
             )
         elif dicom_heuristic and image_kind == "fallback":
             warnings.append(
-                "{0}: many files detected; the series will be validated during import".format(name)
+                "{0}：文件较多，将在导入时校验序列".format(name)
             )
         for mask_dir_name in mask_dirs:
             seg_dir = os.path.join(case_dir, mask_dir_name)
@@ -378,19 +386,31 @@ def summarize_dataset(source, profile_id=None, entry_cap=511):
                         mask_count += 1
             except OSError:
                 pass
-    parts = ["Recognized {0} case(s)".format(case_count)]
+    parts = ["已识别 {0} 个病例".format(case_count)]
     if image_kinds:
         detail = ", ".join(
             "{0} ({1})".format(kind, count)
             for kind, count in sorted(image_kinds.items(), key=lambda kv: -kv[1])
         )
-        parts.append("images: " + detail)
+        parts.append("图像：" + detail)
     if mask_count:
-        parts.append("{0} mask(s)".format(mask_count))
+        parts.append("{0} 个 Mask".format(mask_count))
     if skipped:
-        parts.append("{0} skipped (no image)".format(len(skipped)))
+        shown = "、".join(skipped[:3])
+        if len(skipped) > 3:
+            shown += " 等共 {0} 个".format(len(skipped))
+        parts.append("跳过 {0} 个（无图像）：{1}".format(len(skipped), shown))
+    if not mask_count and mask_dirs:
+        # A dataset whose masks sit outside the profiled directories looks
+        # identical to one without masks — the silent half-data-loss mode.
+        # Warn explicitly instead of letting the mask field just vanish.
+        warnings.append(
+            "未发现 Mask（自动发现只查找每个病例文件夹下的 {0} 子目录）".format(
+                "/".join(mask_dirs)
+            )
+        )
     return {
-        "summary": "; ".join(parts),
+        "summary": "；".join(parts),
         "warnings": warnings,
         "skipped": skipped,
         "case_count": case_count,

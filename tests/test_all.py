@@ -10841,7 +10841,8 @@ class TestDatasetProfiles(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(3, result["case_count"])
         self.assertEqual(2, result["mask_count"])
-        self.assertIn("3 case(s)", result["summary"])
+        self.assertIn("已识别 3 个病例", result["summary"])
+        self.assertIn("s0004", result["summary"])
         self.assertEqual(["s0004"], result["skipped"])
 
         # Anomaly: two volume files in one case dir.
@@ -10849,6 +10850,36 @@ class TestDatasetProfiles(unittest.TestCase):
         open(os.path.join(case, "old_ct.nii.gz"), "w").close()
         result = ui.summarize_dataset(self.tmp)
         self.assertTrue(any("s0005" in w and "2" in w for w in result["warnings"]), result["warnings"])
+
+    def test_summarize_dataset_warns_when_no_masks_found(self):
+        # Masks placed outside segmentations/ must not look identical to a
+        # dataset without masks: the mask field would vanish silently.
+        import tools.io_path_setup_ui as ui
+        self._make_case("s0001", image="ct.nii.gz")  # no segmentations/ dir
+        result = ui.summarize_dataset(self.tmp)
+        self.assertEqual(0, result["mask_count"])
+        self.assertTrue(
+            any("未发现 Mask" in w and "segmentations" in w for w in result["warnings"]),
+            result["warnings"],
+        )
+        # Masks present -> no warning, the normal line stays clean.
+        self._make_case("s0002", image="ct.nii.gz", masks=("liver.seg.nii.gz",))
+        result = ui.summarize_dataset(self.tmp)
+        self.assertFalse(any("未发现 Mask" in w for w in result["warnings"]), result["warnings"])
+
+    def test_discover_single_source_flags_sibling_mask_suppression(self):
+        import tools.io_path_setup_ui as ui
+        case = self._make_case("s0001", image="ct.nii.gz", masks=("liver.seg.nii.gz",))
+        # One volume + segmentations/ -> masks found, no suppression flag.
+        info = ui.discover_single_source(os.path.join(case, "ct.nii.gz"))
+        self.assertEqual(1, len(info["masks"]))
+        self.assertNotIn("masks_suppressed", info)
+        # Two volumes in one folder -> sibling ambiguity suppresses mask
+        # discovery; the caller must be able to say so (and offer a way out).
+        open(os.path.join(case, "old_ct.nii.gz"), "w").close()
+        info = ui.discover_single_source(os.path.join(case, "ct.nii.gz"))
+        self.assertEqual([], info["masks"])
+        self.assertTrue(info["masks_suppressed"])
 
     def test_summarize_dataset_rejects_missing_root(self):
         import tools.io_path_setup_ui as ui
