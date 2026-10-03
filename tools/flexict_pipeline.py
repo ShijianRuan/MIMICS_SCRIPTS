@@ -296,21 +296,36 @@ def _materialize_flexict_raw(rows: list[dict[str, Any]],
 def physical_si_start(img, arr) -> float:
     """Relative start of ``arr`` along the image's physical SI axis (F29).
 
-    Uses the affine's world-coordinate mapping: the voxel axis whose world
-    displacement is most aligned with the superior direction. This is
-    correct for isotropic, anisotropic, axis-permuted, flipped, and oblique
-    affines, where the previous ``argmax(spacing)`` heuristic picked an
-    in-plane axis (e.g. X for isotropic RAS data).
+    The voxel axis is the one whose world direction carries the largest
+    superior component (``argmax |affine[2, i]|`` — row 2 is the world-SI
+    contribution of each voxel axis). The old ``argmax(affine @ [0,0,1])``
+    picked the largest component of voxel axis 2's world direction, i.e. a
+    world axis index, which is only accidentally the voxel axis for
+    axis-aligned affines.
+
+    The value is the target's inferior-most extent as a fraction of the
+    image's SI span, normalized by the axis sign so flipped storage
+    (negative SI direction) yields the same number as unflipped: the same
+    physical target must stratify identically regardless of how the volume
+    happens to be stored.
     """
     import numpy as np
 
-    direction = np.abs(img.affine[:3, :3] @ np.array([0.0, 0.0, 1.0]))
-    zax = int(np.argmax(direction))
+    affine = np.asarray(img.affine, dtype=float)
+    zax = int(np.argmax(np.abs(affine[2, :3])))
     projected = arr.any(axis=tuple(i for i in range(3) if i != zax))
     zidx = np.where(projected)[0]
     if not len(zidx):
         return 0.5
-    return float(zidx.min()) / float(arr.shape[zax])
+    span = int(arr.shape[zax]) - 1
+    if span <= 0:
+        return 0.5
+    if affine[2, zax] >= 0:
+        start = int(zidx.min())
+        return float(start) / float(span)
+    # Flipped axis: the highest voxel index is the inferior end.
+    start = int(zidx.max())
+    return float(span - start) / float(span)
 
 
 def _split_train_val(rows: list[dict[str, Any]],

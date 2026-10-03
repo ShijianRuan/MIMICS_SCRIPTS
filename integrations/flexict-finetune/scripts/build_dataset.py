@@ -34,16 +34,25 @@ import numpy as np
 def _zstart(ct_path, lbl_path):
     """Relative physical SI start of the target, for stratified splitting.
 
-    The voxel axis is chosen by world direction (which axis maps to the
-    superior direction), not by largest spacing — isotropic RAS data would
-    otherwise be stratified along an in-plane axis (F29).
+    The voxel axis is the one with the largest world-SI component
+    (``argmax |affine[2, i]|``), not by largest spacing and not by the
+    world direction of voxel axis 2. The value is sign-normalized so
+    flipped storage of the same physical target yields the same number
+    (F29).
     """
     la = np.asanyarray(nib.load(str(lbl_path)).dataobj) > 0
     img = nib.load(str(ct_path))
-    direction = np.abs(img.affine[:3, :3] @ np.array([0.0, 0.0, 1.0]))
-    zax = int(np.argmax(direction))
+    affine = np.asarray(img.affine, dtype=float)
+    zax = int(np.argmax(np.abs(affine[2, :3])))
     zidx = np.where(la.any(axis=tuple(i for i in range(3) if i != zax)))[0]
-    return (int(zidx.min()) / la.shape[zax]) if len(zidx) else 0.5
+    if not len(zidx):
+        return 0.5
+    span = int(la.shape[zax]) - 1
+    if span <= 0:
+        return 0.5
+    if affine[2, zax] >= 0:
+        return int(zidx.min()) / span
+    return (span - int(zidx.max())) / span
 
 
 def main():

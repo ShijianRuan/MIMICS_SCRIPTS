@@ -297,42 +297,88 @@ class TestTrainValSplit(unittest.TestCase):
         arr[target] = True
         return fp.physical_si_start(img, arr)
 
-    def test_si_start_isotropic_ras_uses_physical_axis(self):
-        # F29: isotropic RAS data — the old argmax(spacing) tie-broke to
-        # axis 0 (X); the physical SI axis is Z, so a target at z=8 must
-        # report 0.8, not 0.1.
+    def test_si_start_same_physical_target_all_orientations(self):
+        """F29: the same physical target must stratify identically however
+        the volume is stored. Target sits at world (1, 2, 8) inside an
+        image whose world SI span is [0, 9] — one voxel below the superior
+        pole, i.e. 8/9 from the inferior end. The old implementation
+        returned 0.8 / 0.1 / 0.1 for these three storages of the same
+        phantom."""
         import numpy as np
 
-        self.assertEqual(
-            self._si_start(np.diag([0.8, 0.8, 0.8, 1.0]), (1, 5, 8)), 0.8)
+        ras = np.eye(4)                                   # target voxel (1,2,8)
+        flip_z = np.array([[1, 0, 0, 0],                  # world z = 9 - z
+                           [0, 1, 0, 0],
+                           [0, 0, -1, 9],
+                           [0, 0, 0, 1]])                 # target voxel (1,2,1)
+        cycle_xyz = np.array([[0, 1, 0, 0],               # SI on voxel axis 0
+                              [0, 0, 1, 0],
+                              [1, 0, 0, 0],
+                              [0, 0, 0, 1]])              # target voxel (8,1,2)
+        expected = 8.0 / 9.0
+        self.assertEqual(self._si_start(ras, (1, 2, 8)), expected)
+        self.assertEqual(self._si_start(flip_z, (1, 2, 1)), expected)
+        self.assertEqual(self._si_start(cycle_xyz, (8, 1, 2)), expected)
 
     def test_si_start_anisotropic_axial(self):
-        # Classic axial CT (thick Z slices): axis 2 is both the thickest
-        # and the physical SI axis.
+        # Classic axial CT (thick Z slices): the relative start is
+        # scale-invariant — voxel z=8 of 0..9 is 8/9 of the SI span
+        # whatever the slice thickness.
         import numpy as np
 
         self.assertEqual(
-            self._si_start(np.diag([0.6, 0.6, 2.5, 1.0]), (1, 5, 8)), 0.8)
+            self._si_start(np.diag([0.6, 0.6, 2.5, 1.0]), (1, 5, 8)),
+            8.0 / 9.0)
 
-    def test_si_start_axis_permuted(self):
-        # SI encoded along voxel axis 0 with the *thinnest* spacing: the old
-        # argmax(spacing) heuristic picked axis 2; the physical world
-        # direction must win.
+    def test_si_start_isotropic_ras_is_not_in_plane_axis(self):
+        # F29 regression guard: the original argmax(spacing) heuristic
+        # tie-broke to voxel axis 0 (X) on isotropic data and reported
+        # 0.1 for this target. The physical SI axis is Z.
         import numpy as np
 
-        affine = np.array([[0.0, 0.0, 0.6, 0.0],
-                           [0.6, 0.0, 0.0, 0.0],
-                           [0.0, 0.6, 0.0, 0.0],
-                           [0.0, 0.0, 0.0, 1.0]])
-        self.assertEqual(self._si_start(affine, (8, 1, 5)), 0.8)
+        value = self._si_start(np.diag([0.8, 0.8, 0.8, 1.0]), (1, 5, 8))
+        self.assertEqual(value, 8.0 / 9.0)
+        self.assertNotEqual(value, 0.1)
 
-    def test_si_start_flipped_z(self):
-        # Flipped SI (negated Z column): the physical SI axis is still
-        # voxel axis 2.
+    def test_build_dataset_zstart_matches_pipeline_orientation_invariant(self):
+        """F29: the standalone build_dataset._zstart and the pipeline's
+        physical_si_start must agree on the same physical phantom across
+        storage orientations — the stratification key cannot depend on how
+        the volume happens to be stored."""
+        import importlib.util
+
+        import nibabel as nib
         import numpy as np
 
-        self.assertEqual(
-            self._si_start(np.diag([0.8, 0.8, -0.8, 1.0]), (1, 5, 8)), 0.8)
+        spec = importlib.util.spec_from_file_location(
+            "audit_build_dataset",
+            ROOT / "integrations" / "flexict-finetune" / "scripts" /
+            "build_dataset.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            values = []
+            for name, affine, voxel in [
+                ("ras", np.eye(4), (1, 2, 8)),
+                ("flip_z", np.array([[1, 0, 0, 0], [0, 1, 0, 0],
+                                     [0, 0, -1, 9], [0, 0, 0, 1]]),
+                 (1, 2, 1)),
+                ("cycle_xyz", np.array([[0, 1, 0, 0], [0, 0, 1, 0],
+                                        [1, 0, 0, 0], [0, 0, 0, 1]]),
+                 (8, 1, 2)),
+            ]:
+                path = Path(tmp) / (name + ".nii.gz")
+                arr = np.zeros((10, 10, 10), dtype=np.uint8)
+                arr[voxel] = 1
+                nib.save(nib.Nifti1Image(arr, affine), str(path))
+                values.append((module._zstart(str(path), str(path)),
+                               fp.physical_si_start(nib.load(str(path)),
+                                                    arr > 0)))
+        expected = 8.0 / 9.0
+        for standalone, pipeline in values:
+            self.assertAlmostEqual(standalone, expected, places=6)
+            self.assertAlmostEqual(pipeline, expected, places=6)
 
     def test_si_start_empty_target(self):
         # No foreground → neutral 0.5, no crash, no division by zero.
