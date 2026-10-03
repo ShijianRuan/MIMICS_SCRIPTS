@@ -42,6 +42,17 @@ from ui_theme import (  # noqa: E402
 
 STATE_SCHEMA = "flexict_annotation_state.v1"
 
+# P3-5: 病例状态列对标注者显示为中文（此前是 new/annotated/skipped）。
+_CASE_STATE_LABELS = {
+    "new": "待标注",
+    "annotated": "已标注",
+    "skipped": "已跳过",
+}
+
+
+def case_state_label(value: str) -> str:
+    return _CASE_STATE_LABELS.get(str(value), str(value))
+
 
 def find_al_jobs(workspace: str | None) -> list[dict[str, Any]]:
     """Completed active_learning jobs, newest first."""
@@ -491,7 +502,7 @@ class ActiveLearningWindow:
                 case_id,
                 "{:.2f}".format(float(row.get("integrated") or 0.0)),
                 "{:.1f}".format(float(row.get("uncertain_vol") or 0.0)),
-                str(entry.get("state") or "new"),
+                case_state_label(entry.get("state") or "new"),
                 self._case_image_hint(case_id),
             ]
             for column, value in enumerate(values):

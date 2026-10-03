@@ -1118,6 +1118,7 @@ class TestActiveLearningWindow(unittest.TestCase):
 
     def test_annotated_row_gets_success_foreground(self):
         # F03's crash was inside the per-row loop's annotated branch.
+        # P3-5: the state column shows Chinese labels.
         with tempfile.TemporaryDirectory() as tmp:
             window = self._window(tmp)
             try:
@@ -1126,8 +1127,10 @@ class TestActiveLearningWindow(unittest.TestCase):
                 set_case_state(job_dir, "caseA", "annotated")
                 window._job_selected()
                 self.assertEqual(
-                    "annotated",
+                    "已标注",
                     window.table.item(0, 4).text())
+                self.assertEqual(
+                    "待标注", window.table.item(1, 4).text())
                 self.assertIn("已标注 1 例", window.status_label.text())
             finally:
                 window.window.close()
