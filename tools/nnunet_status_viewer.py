@@ -204,6 +204,9 @@ class StatusWindow:
             interval_ms=2000,
             collect=lambda: self._collect(),
             apply=self.refresh,
+            # F34: a failed scan keeps the last frame — mark it so the
+            # timestamp doesn't read as fresh.
+            on_error=lambda: self.live_label.setText("● 上次刷新失败"),
         )
         self.refresher.refresh_now()
 

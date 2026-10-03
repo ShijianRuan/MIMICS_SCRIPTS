@@ -504,7 +504,11 @@ class TestViewerNonBlockingRefresh(unittest.TestCase):
                     while time.time() < deadline:
                         _AppFixture.app().processEvents()
                         time.sleep(0.02)
-                self.assertTrue(window.window.isVisible() or True)
+                        if "刷新失败" in window.live_label.text():
+                            break
+                # F34 残留：失败要可见——上一帧保留，但实时标记必须
+                # 说明这帧不是新的，不能继续挂着旧时间戳装作一切正常。
+                self.assertIn("刷新失败", window.live_label.text())
                 window.window.close()
 
     def test_nnunet_viewer_collects_on_worker_thread(self):

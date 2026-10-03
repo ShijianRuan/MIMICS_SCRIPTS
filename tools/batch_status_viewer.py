@@ -315,6 +315,9 @@ class BatchStatusWindow:
             interval_ms=2000,
             collect=lambda: collect_batch_rows(self.project_root),
             apply=self.refresh,
+            # F34: a failed scan keeps the last frame — mark it so the
+            # timestamp doesn't read as fresh.
+            on_error=lambda: self.live_label.setText("● 上次刷新失败"),
         )
         # clicked(bool) would pass its checked flag as `rows` into refresh
         # (F34: real clicks crashed with "object of type 'bool' has no

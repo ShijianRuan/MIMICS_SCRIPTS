@@ -29,9 +29,11 @@ class BackgroundRefresh:
     # slow heartbeat (10s) so the window is fresh when re-shown.
     HIDDEN_INTERVAL_MS = 10000
 
-    def __init__(self, qt_core, parent, collect, apply, interval_ms=2000):
+    def __init__(self, qt_core, parent, collect, apply, interval_ms=2000,
+                 on_error=None):
         self._collect = collect
         self._apply = apply
+        self._on_error = on_error
         self._parent = parent
         self._results = queue.Queue()
         self._lock = threading.Lock()
@@ -113,6 +115,14 @@ class BackgroundRefresh:
             except queue.Empty:
                 return
             if result is None:
+                # A collect that raised (F34: keep the last good frame, but
+                # let the viewer say so instead of showing a stale "live"
+                # timestamp as if nothing happened).
+                if self._on_error is not None:
+                    try:
+                        self._on_error()
+                    except Exception:
+                        pass
                 continue
             try:
                 self._apply(result)
