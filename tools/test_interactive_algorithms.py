@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -21,7 +22,13 @@ for value in (ROOT, ROOT / "tools", ROOT / "runtime_py35"):
         sys.path.insert(0, str(value))
 
 import interactive_algorithms_worker as worker
-from fake_mimics_flow_test import FakeImage, FakeMask, FakeMimics, _u8_pattern_buffer
+from fake_mimics_flow_test import (
+    FakeImage,
+    FakeMask,
+    FakeMimics,
+    FakeVoxelBuffer,
+    _u8_pattern_buffer,
+)
 
 
 class WorkerGeometryTests(unittest.TestCase):
@@ -311,6 +318,56 @@ class MimicsRuntimeTests(unittest.TestCase):
             self.runtime.nnm._metadata_set(mask, self.runtime.SESSION_PATH_METADATA, str(logits))
             self.runtime.nnm._metadata_set(mask, self.runtime.SESSION_MASK_SHA_METADATA, "old")
             self.assertEqual(self.runtime._session_values(mask, "new"), {})
+
+    def test_scribble_capture_avoids_full_volume_copy(self):
+        # R62-1: every drawn stroke used to copy the whole image volume
+        # via .tobytes() before finding its bbox. The numpy path must view
+        # the buffer zero-copy (np.asarray) and copy only the bbox crop.
+        class BufferProtocolVoxelBuffer(FakeVoxelBuffer):
+            """FakeVoxelBuffer plus the buffer protocol, which real Mimics
+            voxel buffers support and np.asarray needs for a zero-copy view."""
+
+            def __buffer__(self, flags):
+                return self._data.__buffer__(flags)
+
+        image = FakeImage(_u8_pattern_buffer((4, 5, 6), lambda x, y, z: False))
+        self.fake.data.images.append(image)
+        self.fake.data.images.set_active(image)
+        original_tobytes = FakeVoxelBuffer.tobytes
+        volume_bytes = bytearray(_u8_pattern_buffer(
+            (4, 5, 6), lambda x, y, z: False).tobytes())
+        volume_bytes[2 * 5 * 6 + 3 * 6 + 4] = 1  # stroke voxel at (2, 3, 4)
+        copied_sizes = []
+
+        def counting_tobytes(inner):
+            copied_sizes.append(len(inner._data))
+            return original_tobytes(inner)
+
+        with tempfile.TemporaryDirectory() as job_dir:
+            os.makedirs(os.path.join(job_dir, "inputs"))
+
+            def create_mask():
+                mask = FakeMask(
+                    "Scribble Foreground Scribble", image=image,
+                    array=BufferProtocolVoxelBuffer(
+                        (4, 5, 6), bytes(volume_bytes), "B"))
+                self.fake.data.masks.append(mask)
+                return mask
+
+            self.fake.segment.create_mask = create_mask
+            with mock.patch.object(FakeVoxelBuffer, "tobytes", counting_tobytes):
+                value = self.runtime._capture_scribble(
+                    image, True, job_dir, [])
+            self.assertIsNotNone(value)
+            self.assertEqual(value["shape"], [1, 1, 1])
+            self.assertEqual(value["bbox"], [[2, 3], [3, 4], [4, 5]])
+            with open(value["path"], "rb") as handle:
+                self.assertEqual(handle.read(), b"\x01")
+        # The single full-volume read is the fake's own bookkeeping
+        # (_refresh_pixels inside FakeMask.__init__); the production code
+        # must contribute only crop-sized copies. Pre-fix, the numpy path
+        # added a second full-volume copy (4*5*6) per drawn stroke.
+        self.assertEqual(copied_sizes, [4 * 5 * 6], copied_sizes)
 
     def test_result_copy_name_keeps_algorithm(self):
         image = FakeImage(_u8_pattern_buffer((2, 3, 4), lambda x, y, z: False))

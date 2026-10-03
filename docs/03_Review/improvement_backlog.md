@@ -174,6 +174,65 @@
   TestTrainingSetupPathMemory.test_flexict_continue_training_reaches_request_and_blocks_remote`
   （表单透传 + 远程拦截）；flexict_integration 126/126 复绿。
 
+### R62：2026-10-04 AI 功能类独立评审（简便性 + 完整性两视角）
+
+- [x] **R62-1【P1】ScribblePrompt 逐 stroke 全量 tobytes+argwhere 在
+  GUI 线程**（`interactive_algorithms_mimics.py:293/:298`）：每画一笔
+  stroke 都对整个体数据做全量 bytes() + np.argwhere，大体积数据逐笔
+  冻结 GUI。验收：stroke 提交移出 GUI 线程或改为增量计算，
+  R61-13 契约扫描白名单对应条目删除，测试防回归。
+  **已解决（2026-10-04）**：numpy 路径改为 `np.asarray(view)` 零拷贝视图
+  （与 nninteractive_mimics.py:2493 同一模式），全量拷贝只剩 bbox 裁剪
+  的 tobytes（单 slice 大小）；tobytes 全量拷贝仅保留在无 numpy 的
+  ImportError 回退路径（与 nnInteractive 同等回退）。argwhere 本身在
+  C 速度扫描、只为 stroke 体素分配。测试：
+  `test_interactive_algorithms.py
+  MimicsRuntimeTests.test_scribble_capture_avoids_full_volume_copy`
+  （计数 tobytes 调用尺寸，修复前实证 2 次全量 → 修复后 1 次
+  [仅 fake 记账]，红→绿验证过）；interactive_algorithms 18/18 +
+  smoke 8/8 复绿。
+- [ ] **R62-2【P1】ScribblePrompt 逐 prompt 模态弹窗堆叠**
+  （`interactive_algorithms_mimics.py:594→:480→:458`）：每个 prompt
+  一次模态弹窗，连续交互时弹窗堆叠。验收：复用 R61-10 会话级单次
+  提示模式，同会话不再重复弹。
+- [ ] **R62-3【P1】ScribblePrompt 结果弹窗每轮必现、无会话记忆**
+  （`interactive_algorithms_mimics.py:944-969`）：与 R62-2 同根因。
+  验收：照抄 R61-10 模式加会话级"不再提示"。
+- [ ] **R62-4【P1】stop-all-services 无确认**
+  （`mimics_stop_background.py:1450-1461`）：一键停掉**所有**后台服务
+  （含正在跑的训练/推理任务），无任何确认。生命周期规范：影响范围
+  超出当前可见任务的大范围停止属破坏性操作，需一次确认。验收：
+  stop-all 前弹确认对话框（复用 question_box），普通停止单项不加。
+- [ ] **R62-5【P2】批量推理窗口缺远程后端/CPU 回退/模态护栏/
+  case 过滤**（`nnunet_batch_predict_ui.py:249-265` vs
+  `nnunet_prediction_setup_ui.py:110-113/:246-258`；护栏
+  `nnunet_pipeline.py:1602-1614` 被静默跳过）：单例窗口有的保护，
+  批量窗口全无。验收：批量窗口至少补模态护栏与 CPU 回退提示
+  （远程后端可另轮立项）。
+- [ ] **R62-6【P2】AL 覆盖层 "converting" 请求在 Mimics 重启后成
+  孤儿**（`flexict_mimics.py:1607/:1635-1642/:1314/:1338-1346`；UI
+  承诺 `flexict_active_learning_ui.py:624-630`）：UI 提示"重启后
+  继续"，但请求状态没有跨重启恢复路径。验收：重启后 converting
+  请求要么恢复要么明确报失败，不悬挂。
+- [ ] **R62-7【P3】预测窗口隐藏"已注册但文件缺失"的模型，空态
+  引导错误**：注册表有、目录丢的模型直接不显示，用户无从知道
+  为什么模型不见了。验收：列表显示缺失模型并标注原因（不可选）。
+- [ ] **R62-8【P3】批量派发超时导致重复提交 + 失败清单不可行动**
+  （`nnunet_batch_predict_ui.py:206-212/:284-288`）：超时后用户重试
+  → 同 case 双任务；失败清单只有文件名。验收：超时提示防重复提交
+  指引；失败清单带原因。
+- [ ] **R62-9【P3】状态查看器模型表缺"来源"列**（
+  `nnunet_status_viewer.py:139-141`、`flexict_status_viewer.py:111-113`）：
+  远程训练下载的模型与本地模型无从区分。验收：模型表加来源列
+  （本地/远程 profile）。
+- [ ] **R62-10【P3】AL 复核窗口隐藏失败运行**
+  （`flexict_active_learning_ui.py:45-59/:404-407`）：失败的 AL 周期
+  不显示，用户不知道有周期没跑完。验收：失败周期显示并带错误信息。
+- [ ] **R62-11【P3】setup/ 会话目录无限累积**（无清扫；
+  `nnunet_mimics.py:147-148/:306-311/:346-349`）：每次打开向导留
+  一个 setup/ 目录，永不清理。验收：接入既有 sweep 过期清扫或
+  打开时清理陈旧目录。
+
 ### 以下为历史待办区（已全部完成，保留历史）
 
 - [x] **B20【P0→P1 定级见条目】stage worker 进程注册静默失效（孤儿安全网不存在）**

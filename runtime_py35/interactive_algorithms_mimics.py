@@ -290,11 +290,15 @@ def _capture_scribble(image, include, job_dir, visual_objects):
             return None
         view = prompt.get_voxel_buffer()
         shape = [int(value) for value in view.shape]
-        raw = view.tobytes()
         try:
             import numpy as np
 
-            array = np.frombuffer(raw, dtype=np.uint8).reshape(tuple(shape))
+            # Zero-copy buffer view (same pattern as the nnInteractive prompt
+            # capture): a full-volume .tobytes() here copied the whole image
+            # for every stroke drawn, freezing Mimics per stroke (R62-1).
+            # argwhere still scans the volume but at C speed and only
+            # allocates for the scribble's own voxels.
+            array = np.asarray(view, dtype=np.uint8).reshape(tuple(shape))
             nonzero = np.argwhere(array)
             if len(nonzero) == 0:
                 mimics.data.masks.delete(prompt)
@@ -307,9 +311,13 @@ def _capture_scribble(image, include, job_dir, visual_objects):
                 bbox[1][0]:bbox[1][1],
                 bbox[2][0]:bbox[2][1],
             ]
+            # The crop is bbox-bounded (a stroke on one 2D slice), so this
+            # tobytes copies only the small region actually sent to the
+            # predictor.
             crop_raw = crop.tobytes(order="C")
             crop_shape = [int(value) for value in crop.shape]
         except ImportError:
+            raw = view.tobytes()
             cropped = _pure_python_crop(raw, shape)
             if cropped is None:
                 mimics.data.masks.delete(prompt)
