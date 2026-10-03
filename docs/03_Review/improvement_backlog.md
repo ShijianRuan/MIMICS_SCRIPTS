@@ -209,11 +209,18 @@
   中途编辑过 mask 属数据风险路径，始终确认。测试：
   `test_result_destination_is_asked_once_per_session` +
   `test_result_destination_changed_mask_still_asks`（红→绿验证过）。
-- [ ] **R62-4【P1】stop-all-services 无确认**
+- [x] **R62-4【P1】stop-all-services 无确认**
   （`mimics_stop_background.py:1450-1461`）：一键停掉**所有**后台服务
   （含正在跑的训练/推理任务），无任何确认。生命周期规范：影响范围
   超出当前可见任务的大范围停止属破坏性操作，需一次确认。验收：
   stop-all 前弹确认对话框（复用 question_box），普通停止单项不加。
+  **已解决（2026-10-04）**：`main()` 前置 question_box 确认（Stop All
+  Services;Cancel，影响范围在文案中写明），与 `main_stop_import` 同
+  模式；Cancel 直接返回不停止任何服务。测试：
+  `test_all.py TestStopBackgroundServices.test_stop_all_services_requires_confirmation`
+  （红→绿验证过；红路径为无确认直接停）。TestStopBackgroundServices
+  类的 `test_nnunet_version_gate`/`test_mask_export_stop` 两项失败为
+  修改前已存在（HEAD 复验），与本改动无关。
 - [ ] **R62-5【P2】批量推理窗口缺远程后端/CPU 回退/模态护栏/
   case 过滤**（`nnunet_batch_predict_ui.py:249-265` vs
   `nnunet_prediction_setup_ui.py:110-113/:246-258`；护栏

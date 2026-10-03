@@ -3863,6 +3863,34 @@ class TestStopBackgroundServices(unittest.TestCase):
     def tearDown(self):
         _cleanup(self.tmp)
 
+    def test_stop_all_services_requires_confirmation(self):
+        # R62-4: stopping ALL background services kills running training/
+        # prediction/import work across the workstation — far beyond the
+        # visible task — so it must confirm with the scope spelled out, like
+        # the import stop entry. Cancel must stop nothing.
+        import mimics_stop_background as msb
+
+        observed = []
+        stopped = []
+
+        def fake_question_box(message="", buttons="", title="", ui_blocking=None, **kwargs):
+            observed.append({"message": message, "buttons": buttons, "title": title})
+            return "Cancel"
+
+        old_box = msb.mimics.dialogs.question_box
+        old_stop = msb.stop_background_processes
+        try:
+            msb.mimics.dialogs.question_box = fake_question_box
+            msb.stop_background_processes = lambda: stopped.append(1) or {"ok": True}
+            self.assertEqual(0, msb.main())
+        finally:
+            msb.mimics.dialogs.question_box = old_box
+            msb.stop_background_processes = old_stop
+        self.assertEqual([], stopped)
+        self.assertEqual(1, len(observed))
+        self.assertTrue(observed[0]["buttons"].startswith("Stop All Services;"))
+        self.assertIn("every background task", observed[0]["message"])
+
     def test_stop_markers_defined(self):
         from mimics_stop_background import MARKERS
 

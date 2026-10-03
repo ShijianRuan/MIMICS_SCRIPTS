@@ -1448,6 +1448,23 @@ def _start_stop_monitor(monitor, poll_seconds=0.5, timeout_seconds=90.0):
 # -- Main entry points --------------------------------------------------
 
 def main():
+    # Stopping ALL background services kills running training/prediction/
+    # import work across the workstation — far beyond the visible task. Same
+    # one-shot confirmation pattern as the import stop entry (R62-4).
+    answer = mimics.dialogs.question_box(
+        message=(
+            "Stop all background services?\n\n"
+            "This stops every background task on this workstation "
+            "(imports, training, predictions, export queues), not just the "
+            "current one. In-progress work is cancelled; finished results "
+            "are kept."
+        ),
+        buttons="Stop All Services;Cancel",
+        title="Stop All Background Services",
+        ui_blocking=True,
+    )
+    if answer != "Stop All Services":
+        return 0
     result = stop_background_processes()
     ok = bool(result.get("ok")) if isinstance(result, dict) else bool(result)
     if isinstance(result, dict) and result.get("stop_log"):
