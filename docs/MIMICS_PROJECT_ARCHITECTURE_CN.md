@@ -437,7 +437,7 @@ FlexiCT 子系统面向**单器官少样本**任务：8 例起标注即可微调
 | --- | --- |
 | `01 Train Model` | 选病例与标签训练 2D / 3D / pair（主动学习要求 pair） |
 | `02 Predict Current Case` | 用训练好的模型预测当前病例并应用为 Mask（verified grid 契约） |
-| `03 Active Learning Review` | 双模型分歧排序未标注池、叠加不确定度带、应用共识 Mask |
+| `03 Active Learning Review` | 窗口内启动新的主动学习排序（自动取最新可用的 2D+3D pair）、双模型分歧排序未标注池、叠加不确定度带、应用共识 Mask |
 | `04 Show Status and Stop` | 打开外部状态/模型窗口，运行中的任务可从中停止 |
 
 主动学习闭环：pair 双端对未标注池预测 → `disagreement` 不确定度排序 → Review UI 逐病例叠加 moderate/high 带（阈值自适应，2 模型分歧上限级别为 5）→ 标注 top case → 重训。外部 Review UI 经 `apply_requests/` 请求文件与 Mimics 内 Py3.5 monitor 握手，所有 `mimics.*` 调用留在前台 Mimics 进程。

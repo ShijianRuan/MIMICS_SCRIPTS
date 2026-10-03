@@ -80,8 +80,9 @@ grid 后经 mask buffer 事务应用；网格不匹配的预测会被拒绝而�
 
 ### 3.3 主动学习（03 Active Learning Review）
 
-前提：一个 **pair**（同 dataset fingerprint 的 2D+3D 模型对）。没有 pair 时
-AL 窗会列出缺什么，不会静默降级成单模型。
+前提：一个 **pair**（同 dataset fingerprint 的 2D+3D 模型对）。Review 窗口顶部的
+「启动新的排序」表单自动取注册表里最新的可用 pair（缺 pair 时说明如何补齐），
+选择未标注数据池后即可启动；没有 pair 时不会静默降级成单模型。
 
 一轮循环：
 

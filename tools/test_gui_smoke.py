@@ -1349,6 +1349,121 @@ class TestActiveLearningWindow(unittest.TestCase):
             finally:
                 window.window.close()
 
+    def _pair_model(self, workspace: Path, configuration: str) -> dict:
+        model_dir = (
+            workspace / "runtime" / "nnUNet_results"
+            / "Dataset750_Kidney" / "flexict{}_Trainer__nnUNetPlans__{}".format(
+                "2d" if configuration == "2d" else "3d", configuration)
+        )
+        (model_dir / "fold_0").mkdir(parents=True)
+        (model_dir / "fold_0" / "checkpoint_best.pth").write_bytes(b"x")
+        (model_dir / "plans.json").write_text("{}", encoding="utf-8")
+        (model_dir / "dataset.json").write_text("{}", encoding="utf-8")
+        manifest = {
+            "model_id": "m_{}".format(configuration),
+            "model_dir": str(model_dir),
+            "manifest_path": str(
+                model_dir / "flexict_model_manifest.json"),
+            "configuration": configuration,
+            "label_name": "kidney_left",
+            "task_id": "Kidney", "task_name": "Kidney",
+            "pair_id": "pair_1",
+            "created_at_epoch": 100.0,
+        }
+        from nnunet_common import write_json_atomic
+
+        write_json_atomic(
+            Path(manifest["manifest_path"]), manifest)
+        return manifest
+
+    def test_new_run_form_without_pair_explains_how_to_fix(self):
+        # F04: a fresh workspace must not dead-end — the form names the
+        # training entry instead of pointing back at this same menu.
+        _AppFixture.app()
+        import flexict_active_learning_ui as al_ui
+
+        with tempfile.TemporaryDirectory() as tmp:
+            window = al_ui.ActiveLearningWindow(
+                {"workspace": str(Path(tmp) / "workspace")}, QT)
+            self.addCleanup(window.window.close)
+            window._apply_pair((None, None), "")
+            self.assertIn("01 训练模型", window.pair_label.text())
+            self.assertFalse(window.start_run_button.isEnabled())
+            # The old circular empty state pointed at this same entry.
+            self.assertIn("启动新的排序", window.status_label.text())
+
+    def test_submit_new_run_creates_al_job_from_pair(self):
+        _AppFixture.app()
+        import flexict_active_learning_ui as al_ui
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            model_2d = self._pair_model(workspace, "2d")
+            model_3d = self._pair_model(workspace, "3d_fullres")
+            from flexict_common import save_registry
+
+            save_registry(workspace, None, [model_2d, model_3d])
+
+            window = al_ui.ActiveLearningWindow(
+                {"workspace": str(workspace)}, QT)
+            self.addCleanup(window.window.close)
+            # Feed the pair check result directly; the request then uses
+            # the pair the window itself resolved.
+            window._apply_pair((model_2d, model_3d), "")
+            self.assertTrue(window.start_run_button.isEnabled())
+            pool = Path(tmp) / "pool"
+            pool.mkdir()
+            window.pool_edit.setText(str(pool))
+
+            requests = []
+
+            def fake_create_job(values):
+                requests.append(values)
+                # create_flexict_job generates the job_id itself.
+                return {
+                    "job_id": values.get("job_id") or "active_learning_test",
+                    "status_path": "s.json",
+                }
+
+            import flexict_pipeline as fp
+
+            with mock.patch.object(
+                    fp, "create_flexict_job",
+                    side_effect=fake_create_job):
+                window._submit_new_run()
+                deadline = time.time() + 5.0
+                while time.time() < deadline:
+                    _AppFixture.app().processEvents()
+                    window._poll_background_results()
+                    if requests:
+                        break
+                    time.sleep(0.02)
+            self.assertEqual(1, len(requests))
+            request = requests[0]
+            self.assertEqual("active_learning", request["operation"])
+            self.assertEqual("kidney_left", request["label_name"])
+            self.assertEqual(
+                model_2d["manifest_path"], request["model_manifest_2d"])
+            self.assertEqual(
+                model_3d["manifest_path"], request["model_manifest_3d"])
+            self.assertIn("已启动", window.status_label.text())
+
+    def test_submit_new_run_requires_pool_before_dispatch(self):
+        _AppFixture.app()
+        import flexict_active_learning_ui as al_ui
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            model_2d = self._pair_model(workspace, "2d")
+            model_3d = self._pair_model(workspace, "3d_fullres")
+            window = al_ui.ActiveLearningWindow(
+                {"workspace": str(workspace)}, QT)
+            self.addCleanup(window.window.close)
+            window._apply_pair((model_2d, model_3d), "")
+            window.pool_edit.setText("")
+            window._submit_new_run()
+            self.assertIn("数据池", window.pair_label.text())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
