@@ -2924,6 +2924,30 @@ class FlexictMimicsApplyQueueTests(unittest.TestCase):
                 ]},
             )
 
+    def test_partially_empty_prediction_records_skipped_labels(self):
+        """Multiclass run where some labels predict nothing: the queue skips
+        them (no empty Mask) but records which labels were empty so the
+        completion log can tell the annotator, instead of a silent gap."""
+        monitor = {
+            "label_name": "liver",
+            "labels": [
+                {"id": 1, "name": "liver", "aliases": ["liver"]},
+                {"id": 2, "name": "spleen", "aliases": ["spleen"]},
+                {"id": 3, "name": "kidney_left",
+                 "aliases": ["kidney_left"]},
+            ],
+            "matching_masks": [],
+        }
+        self.module._prepare_apply_queue(monitor, self._bridge_rows(1, 2))
+        self.assertEqual(
+            [item["label"]["name"] for item in monitor["apply_queue"]],
+            ["liver", "spleen"],
+        )
+        # kidney_left was predicted empty and must be surfaced, not skipped
+        # silently.
+        self.assertEqual(
+            monitor.get("skipped_empty_labels"), ["kidney_left"])
+
     def test_update_mode_matches_primary_label_mask(self):
         liver = FakeMask("liver", 10)
         self.masks[:] = [liver]

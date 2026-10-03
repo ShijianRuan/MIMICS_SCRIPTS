@@ -674,10 +674,13 @@ def _monitor_tick_locked(monitor):
     except Exception:
         pass
     _stop_monitor(key)
+    skipped = list(monitor.get("skipped_empty_labels") or [])
     _log(
         logging.INFO,
-        "FlexiCT result applied to {0} Mask(s): {1}.".format(
-            len(applied), ", ".join(applied)
+        "FlexiCT result applied to {0} Mask(s): {1}.{2}".format(
+            len(applied), ", ".join(applied),
+            " Predicted empty (no Mask created): {0}.".format(
+                ", ".join(skipped)) if skipped else "",
         ),
     )
 
@@ -990,8 +993,27 @@ def _prepare_apply_queue(monitor, bridge_result):
         )
     if eligible == 0:
         raise RuntimeError("The prediction is empty (no foreground voxels).")
+    # Multiclass accountability: a configured label the model did not predict
+    # at all is absent from the argmax file, so the bridge emits no row for
+    # it and it would silently vanish from the apply queue. Reconcile against
+    # the configured labels and record the missing ones.
+    seen_values = set()
+    for item in queue:
+        seen_values.add(int(item["label"].get("id") or 0))
+    skipped_empty = [
+        str(label.get("name"))
+        for label in labels
+        if int(label.get("id") or 0) not in seen_values
+    ]
     monitor["apply_queue"] = queue
     monitor["applied_masks"] = [name for name in already_applied if name]
+    if skipped_empty:
+        monitor["skipped_empty_labels"] = skipped_empty
+        _log(
+            logging.WARNING,
+            "FlexiCT predicted no foreground for: {0}. No Mask is created "
+            "for these labels.".format(", ".join(skipped_empty)),
+        )
     _persist_application_state(monitor, application)
 
 
