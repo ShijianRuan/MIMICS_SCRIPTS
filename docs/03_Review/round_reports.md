@@ -4632,3 +4632,77 @@ Health 按钮名与提示统一。
   与其余三个算法统一的"更新匹配掩膜"不一致——同一动作两个名字。
   文案 + 分支判断 + test_all 断言同步（`21194d3`；SessionWriteMode 4/4、
   task_integration 11/11 定向验证）。
+
+## R69（2026-10-04）：docs/reviews 复审报告（2026-10-03-revalidation）修复轮
+
+> 用户指令："远程分支 docs/reviews/ 下有文档更新，请你根据更新重新开始优化"。
+> 输入：`docs/reviews/2026-10-03-revalidation.md`（对既有 29 项 F 发现逐项
+> 复跑审计探针后的状态重估）+ 修复优先级：①F28/F20/F32/F33（产物/病例
+> 身份）②F30/F31/F19/F35（可逆性/任务控制）③F34/F36/F16（日常入口）
+> ④F13/F15/F37（体验）。F05 用户决策不动。分支 al-review-loop。
+
+### 实施内容（每项独立 commit，均带失败路径测试）
+
+1. **产物与病例身份**
+   - **F28（`2cb8d69`）**：批量发布遇输出已存在（中途人工保存）先回查
+     身份再决定；retry 重新检查而非盲目覆盖。µs 级 check-replace 窗口
+     记为不可关闭边界（需"后台永不自动发布"的产品决策，不擅自实施）。
+   - **F33（`b4b9e30`）**：导出混入跨图像 mask 直接拒绝。
+   - **F32（`e5ea20b`）**：同名 mask 导出 buffer 名冲突消歧。
+   - **F20（`e2f80a9`）**：AL overlay 病例匹配从几何相似改按源图像路径
+     精确验证。
+2. **可逆性与任务控制**
+   - **F30（`3e93b1a`）**：导入 receipt 在发布完成后按最终路径回写。
+   - **F31/F19（`71ff78e`）**：撤销删除错误 fail-closed；会话判级后再删。
+   - **F35（`56c2fec`）**：拖拽导入 run id 防撞 + 启动失败显式标记。
+3. **日常入口与数据正确性**
+   - **F34（`3c9409f`）**：批量状态刷新按钮移后台线程收集。
+   - **F16（`00b47a9`）**：nnU-Net 冻结验证集按 manifest id 翻译
+     （中文病例名此前从不匹配 slug key，静默冻结空集）；FlexiCT 患者组
+     不跨 train/val（两组件同步修）。
+   - **F01（`06b3656`）**：混 SeriesInstanceUID / 多帧 DICOM 文件夹在
+     所有几何入口 fail-closed（单一共享 `_read_dicom_series_headers`）。
+   - **F29（`109d404`）**：SI 分层轴改按 affine 行 2 主分量 + 符号归一
+     （三种存储朝向同一物理目标给出同一值 8/9；管线与独立脚本同步，
+     旧测试按报告指引重写为物理幻影三朝向）。
+4. **体验**
+   - **F13（`6b5335c`）**：流式导出默认接 GUI 泵（`mimics.update_gui`
+     best-effort），分段间泵 GUI 而非仅依赖回调。
+   - **F37（`ea46919`）**：高 DPI 小屏（1280×720@150%）窗口最小尺寸
+     钳制到 availableGeometry（新增共享 `clamp_window_to_screen`，
+     三窗口接线）。
+   - **F15（`9cb3a71`）**：模型管理器长 model_id 被列宽省略成 "..."——
+     每个单元格 tooltip 显示完整文本（模型 ID/任务名/配置均覆盖）。
+
+### 审计探针更新
+
+`docs/reviews/2026-10-03-evidence/audit_probes.py` 随修复逐项更新，复跑
+scenario-results.json 确认：F28 冲突副本+警告、F30 receipt、F31×3、
+F19 歧义拒绝、F32 消歧 buffer、F33 拒绝、F20 错例失败、F34 无刷新错误、
+F35 路径分立、F16×2、F01×2 全部转为修复后行为。探针为只读产品审计，
+与回归套件互补。
+
+### 设计决策记录
+
+- F28 窗口-2（check 与 replace 间 µs 级人工保存竞态）判定为不可关闭
+  边界：现实 Windows 文件锁形态（锁阻塞 replace → retry 重查）已覆盖，
+  绝对消除需"后台永不自动发布"的产品决策，登记待用户决策而非擅自改。
+- F29 旧测试钉住的是错误行为（同一 voxel 索引而非同一物理目标），
+  复审报告明示其无法捕获 bug——按报告指引以世界坐标期望值重写，四种
+  朝向全部 8/9。
+- F16 的 FlexiCT 侧拆分单元为 patient_group（同一患者多 phase 不跨集），
+  nnU-Net 侧以 manifest id 翻译冻结（slug key 有损，中文 id 从不匹配）。
+
+### 门禁与证据
+
+- smoke 8/8：`20261004T032242_smoke.json`（F13 后）
+- fast 29/29：`20261004T042129_fast.json`（六 commit 后首跑，见下）
+- 定向：flexict_integration 107/107、gui_smoke 43/43、nnunet 套件、
+  TestNewFeatures 123/123、TestEdgeCases 全绿
+- 每项修复均做 git stash 负控制验证（新测试在未修复代码上必失败）
+
+### 遗留
+
+- F05：用户决策项（不动）。
+- F28 窗口-2：登记为需用户决策边界。
+- L3/L4 实机验收项不变（探针为 L2 证据）。

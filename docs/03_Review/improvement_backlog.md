@@ -434,6 +434,63 @@
   mimics_entry_guide 与实际入口一致、逐行停止/Stop All/Undo 均有
   确认、三个训练窗口路径检查已在后台线程。
 
+### R69（2026-10-04 用户立项：docs/reviews/2026-10-03-revalidation.md 复审修复轮）
+
+> 用户指令："远程分支 docs/reviews/ 下有文档更新，请你根据更新重新开始
+> 优化"。输入为复审报告（对 F01–F29 逐项复跑审计探针后的状态重估 +
+> 按产物身份→任务控制→日常入口→体验排序的修复优先级）。F05 为用户
+> 决策项不动。全部在 al-review-loop 分支，每项独立 commit + 失败路径
+> 测试 + git stash 负控制。审计探针随修更新，L2 证据见
+> docs/reviews/2026-10-03-evidence/scenario-results.json。
+
+- [x] **R69-1 = F28【P1】发布覆盖较新人工保存（复审仍复现）**〔commit
+  `2cb8d69`〕：输出路径已存在时先回查身份再决定（冲突→冲突副本+警告），
+  retry 重新检查。**窗口-2（check 与 replace 间 µs 级人工保存竞态）记为
+  不可关闭边界**：绝对消除需"后台永不自动发布"的产品决策——现实
+  Windows 文件锁形态（锁阻塞 replace → retry 重查）已覆盖，登记为
+  需用户决策边界而非擅自改产品行为。
+- [x] **R69-2 = F20【P1】AL overlay 病例按几何相似匹配**〔commit
+  `e2f80a9`〕：改按源图像路径精确验证，几何相似不再兜底。
+- [x] **R69-3 = F32/F33【P1】导出 buffer 同名冲突 + 跨图像 mask 混入**
+  〔commits `e5ea20b` + `b4b9e30`〕：同名 mask 导出 buffer 名消歧；
+  混入其他图像的 mask 直接拒绝（fail-closed）。
+- [x] **R69-4 = F30/F31/F19/F35【P1】可逆性与任务控制**〔commits
+  `3e93b1a` + `71ff78e` + `56c2fec`〕：receipt 发布完成后按最终路径
+  回写；撤销删除错误 fail-closed + 会话判级后再删；歧义名停止；
+  拖拽导入 run id 防撞 + 启动失败显式标记。
+- [x] **R69-5 = F34【P2】批量状态刷新按钮同步阻塞 GUI**〔commit
+  `3c9409f`〕：刷新收集移后台线程。
+- [x] **R69-6 = F16【P2】患者级分组与冻结验证集（复审仍复现，双组件）**
+  〔commit `00b47a9`〕：nnU-Net 冻结验证集经 manifest 的 key→id 翻译
+  （中文病例名此前从不匹配有损 slug key，静默冻结空集）；FlexiCT
+  `_split_train_val` 三处验证出口全部按 patient_group 展开（同一患者
+  多 phase 不跨 train/val）。负控制：stash 后测试分别以
+  "old validation cases moved out of val"/"patient A straddles" 失败。
+- [x] **R69-7 = F01【P1】混 UID/多帧 DICOM fail-closed（复审仍复现）**
+  〔commit `06b3656`〕：共享 `_read_dicom_series_headers` 收口全部几何
+  入口（get_image_affine/shape_from_dicom、do_prepare、
+  do_mask_to_buffer）——混 SeriesInstanceUID / NumberOfFrames>1 /
+  混合 in-plane 尺寸一律 ValueError → error status，单系列单帧原样通过。
+- [x] **R69-8 = F29【P2】SI 分层轴选错 + 翻转未归一（复审仍复现）**
+  〔commit `109d404`〕：`physical_si_start` 改按 `argmax|affine[2,:3]|`
+  选轴 + 符号归一（翻转存储给出同一物理值），span=shape-1；独立脚本
+  `build_dataset._zstart` 同步重写。旧测试钉住错误行为（同一 voxel
+  索引），按报告指引以世界坐标期望重写（三朝向同一幻影全部 8/9）。
+- [x] **R69-9 = F13【P1】流式导出不泵 GUI**〔commit `6b5335c`〕：
+  `stream_mask_to_file` 无回调时默认接 `_gui_pump`（best-effort
+  `mimics.update_gui`），16 MiB 分块间泵主循环——导出大 mask 期间
+  Mimics 不再假死。
+- [x] **R69-10 = F37【P2】高 DPI 小屏窗口超屏**〔commit `ea46919`〕：
+  共享 `clamp_window_to_screen(window, minimum)`（ui_theme）：最小尺寸
+  钳到 availableGeometry，AL/nnU-Net/FlexiCT 三窗口接线。1280×720@150%
+  （≈853×480 逻辑）下窗口可完整打开。
+- [x] **R69-11 = F15【P2】模型管理器长 model_id 被列宽省略**〔commit
+  `9cb3a71`〕：`_fill_table` 每个单元格 tooltip 显示完整文本（模型
+  ID/任务名/配置均覆盖）——悬停即见全文，无需拖宽列。负控制：stash
+  后 `test_cells_carry_full_text_tooltip` 失败。
+- R69 未处理项：F05（用户决策）、F28 窗口-2（需产品决策，见 R69-1）、
+  L3/L4 实机验收（探针为 L2 证据）。
+
 
 
 > 用户在数据标准要求问答后拍板"综合优化做一些大的改动，看怎么做才最全面
@@ -1660,6 +1717,14 @@
   决策**（若 D5 判保留则补覆盖，若判删除则无需）。
 
 ## 进行中
+
+（截至 R69（2026-10-04）：docs/reviews 复审报告
+（2026-10-03-revalidation.md）修复轮完成——按报告优先级关闭
+F28/F20/F32/F33/F30/F31/F19/F35/F34/F16/F01/F29/F13/F37/F15 共 15 项
+（15 个 commit，每项失败路径测试 + 负控制），审计探针复跑确认全部转为
+修复后行为。遗留：F05（用户决策）、F28 窗口-2（需"后台永不自动发布"
+产品决策，已登记边界）、L3/L4 实机验收。门禁证据见轮次报告 R69。
+此前状态：）
 
 （截至 R66（2026-10-02）：用户产品级三关切全部关闭——A1 仓库瘦身
 （`93fc844`，−26,947 行）、A2 docs 归档合并（`42686f6`）、A3 tools 三区
