@@ -4173,3 +4173,76 @@ R61 期间 E: 盘 100% 满（剩 2.2MB），fast 门禁 2 个 test_all 用例 Er
 ### 外部资源
 
 - 本轮零外部资源使用（纯本地代码与测试）。
+
+## R69-旁路（2026-10-04）：独立评审 R62 批次修复收尾（R62-5..R62-11）
+
+（ai-real-data-validation worktree。续 R62-1..4（上一段）后，本轮把
+独立评审遗留的 7 项（2×P2 + 5×P3）全部修完，每项独立 commit +
+防回归测试 + 红→绿验证。）
+
+### 修复清单
+
+- **R62-5 批量预测窗口补模态护栏与 CPU 回退**（8d99c4a，P2）：批量
+  窗口构造的按例请求缺 `source_modality`/`use_cpu`，静默绕过单例
+  窗口的模态护栏（CT 模型可跑 MR 数据）且无 GPU 机器上直接失败。
+  选项栏补"图像模态"下拉（自动/CT/MR）与"无 GPU 时用 CPU"复选框，
+  请求字段与 CLI `cmd_predict` 同构，三入口护栏一致。
+  （nnunet_batch_predict_ui.py，test_gui_smoke 1 新用例。）
+- **R62-6 AL converting 请求重启后孤儿**（b7beffa，P2）：转换状态只
+  存于进程内（等待线程 + `_AL_APPLY_TRANSACTIONS`），Mimics 重启后
+  请求文件永远停在 converting——tick 只拾取 pending、评审窗口只报
+  applied/failed，承诺"重启后继续"永远不兑现。tick 现对无内存事务
+  的 converting 请求显式标 failed 附重启指引，后续 pending 不再被
+  饿死；活跃转换仍走原两阶段路径。
+  （runtime_py35/flexict_mimics.py，test_all 1 新用例；冒烟 8/8。）
+- **R62-7 已注册但文件缺失的模型静默消失**（1b1bd33，P3）：两个
+  预测窗口的模型发现把 `model_usability` 不过的模型直接过滤，注册表
+  有、目录丢的模型从列表蒸发。改为保留并标注：标灰不可选、最后一列
+  显示原因、默认选首个可用模型、全部不可用时开始按钮禁用、submit
+  对选中坏模型显式拒绝。
+  （两个 setup UI，test_gui_smoke 1 新用例；gui_smoke 51/51 +
+  nnunet 集成 104/104。）
+- **R62-8 批量派发超时误导重试**（7ad2f69，P3）：超时提示只说
+  "重连磁盘后重试"，但派发线程还在跑、已启动任务不会取消——盲目
+  重试造成同病例双任务。提示改为明确"扫描仍在后台、任务不取消、
+  先查状态窗口、仅对未启动病例重试"。失败清单复核：`create_job`
+  异常本就以 `case_id: 原因` 列出，无需改动。
+  （nnunet_batch_predict_ui.py，test_gui_smoke 1 新用例。）
+- **R62-9 状态查看器模型表缺"来源"列**（353528b，P3）：三个远程注册
+  路径早已在 manifest 写入 `execution_backend=remote` +
+  `remote_profile_name`，但两个状态查看器不显示。模型表各加"来源"
+  列：远程（profile 名） vs 本地。
+  （两个 status viewer，test_gui_smoke 2 新用例。）
+- **R62-10 AL 复核窗口隐藏失败运行**（da80cef，P3）：`find_al_jobs`
+  过滤 failed/cancelled/abandoned，失败的排序周期从列表蒸发，标注者
+  不知道有周期没跑完。失败运行现排在已完成之后、下拉标注
+  失败/已取消/已放弃、选中时显示错误并禁用行操作。
+  （flexict_active_learning_ui.py，test_gui_smoke 1 新用例。）
+- **R62-11 setup/ 会话目录无限累积**（68afe43，P3）：每次打开向导在
+  `<workspace>/setup/` 留 context/status/stderr 文件，永不清理。两个
+  模块的 `_setup_root` 在目录已存在时清扫超过 7 天的陈旧文件（跨周
+  文件无消费者），删除失败静默跳过，绝不阻塞窗口打开。
+  （runtime_py35/nnunet_mimics.py + flexict_mimics.py，test_all 1
+  双模块参数化用例；冒烟 8/8。）
+
+### 门禁与验证
+
+- 红→绿：每项修复前先对新测试跑一次修复前代码（git checkout HEAD --
+  <file> + 文件副本回放，替代此前出过 pop 事故的 stash 路径法），
+  7/7 全部确认红。
+- 套件：gui_smoke 55/55、nnunet_integration 104/104、
+  TestEdgeCases+TestFlexiCTActiveLearningApply 34/34、冒烟 8/8×2。
+- fast 门禁 28/28
+  （`20261004T061911_fast.json`）。
+
+### 过程事故（登记）
+
+- 本轮开头一次 `git stash pop` 事故：路径限定的 stash push 因索引含
+  快照时代的未合并路径失败，随后的 `pop` 弹出了 2026-08-05 的旧
+  备份 stash 并把 17 个文件置为冲突/脏状态。已全部还原到 HEAD
+  （本人改动前状态），旧 stash 完好保留，无数据丢失。此后红→绿
+  验证一律改用文件副本回放，不再用 stash。
+
+### 外部资源
+
+- 本轮零外部资源使用（纯本地代码与测试）。
