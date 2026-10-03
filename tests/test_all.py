@@ -11440,6 +11440,80 @@ class TestImportDropWindow(unittest.TestCase):
                 "multi-case import must not receive a shared explicit mask list",
             )
 
+    def test_same_second_submissions_get_distinct_control_files(self):
+        """F35: two submissions in the same second used to share one
+        selection/status/stop file set (run_id had second resolution and the
+        case index restarted at 0) — the second submit's selection overwrote
+        the first's before the worker read it. Control files must be unique
+        per submission, and a failed Popen must not leave a stuck running
+        status."""
+        import import_drop_window as dw
+        case_a = self._make_case("s0001")
+        case_b = self._make_case("s0002")
+        calls = []
+
+        class FakeProc:
+            pid = 4247
+
+        def fake_popen(command, **_kwargs):
+            calls.append(command)
+            return FakeProc()
+
+        with mock.patch.object(dw.subprocess, "Popen", side_effect=fake_popen), \
+                mock.patch.object(dw, "_ROOT", self.tmp), \
+                mock.patch.object(dw.time, "strftime", return_value="20261003T120000"):
+            dw.submit_import({
+                "kind": "single", "source_path": case_a,
+                "output_path": os.path.join(self.tmp, "out"),
+                "mask_selection": "all",
+            }, {})
+            dw.submit_import({
+                "kind": "single", "source_path": case_b,
+                "output_path": os.path.join(self.tmp, "out"),
+                "mask_selection": "all",
+            }, {})
+        self.assertEqual(2, len(calls))
+        selections = [
+            command[command.index("--selection-json") + 1] for command in calls
+        ]
+        self.assertEqual(
+            2, len(set(selections)),
+            "same-second submissions must not share one selection file")
+        for selection_path, expected_case in zip(selections, ("s0001", "s0002")):
+            with open(selection_path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            self.assertEqual(expected_case, payload["case_info"]["case_id"])
+
+    def test_popen_failure_marks_status_failed_not_running(self):
+        """F35: the status file is pre-written as running before the worker
+        launches; when Popen itself fails, the old code returned a message
+        but left the status file running forever."""
+        import import_drop_window as dw
+        case_a = self._make_case("s0001")
+
+        def failing_popen(_command, **_kwargs):
+            raise OSError("synthetic launch failure")
+
+        with mock.patch.object(dw.subprocess, "Popen", side_effect=failing_popen), \
+                mock.patch.object(dw, "_ROOT", self.tmp):
+            launched = dw.submit_import({
+                "kind": "single", "source_path": case_a,
+                "output_path": os.path.join(self.tmp, "out"),
+                "mask_selection": "all",
+            }, {})
+        self.assertEqual(1, len(launched))
+        self.assertIn("failed", launched[0][1])
+        status_dir = os.path.join(self.tmp, ".mimics_runtime", "drop_import")
+        statuses = [
+            name for name in os.listdir(status_dir)
+            if name.endswith("_status.json")
+        ]
+        self.assertEqual(1, len(statuses))
+        with open(os.path.join(status_dir, statuses[0]), "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        self.assertEqual("failed", payload["status"])
+        self.assertEqual("worker_launch_failed", payload["phase"])
+
     def test_collect_recent_drops_summarizes_status_files(self):
         import import_drop_window as dw
         status_dir = os.path.join(self.tmp, "drop_import")

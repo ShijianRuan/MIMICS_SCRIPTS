@@ -350,7 +350,14 @@ def submit_import(selection, context):
     status_dir = os.path.join(_ROOT, ".mimics_runtime", "drop_import")
     os.makedirs(status_dir, exist_ok=True)
     prune_drop_import_state(status_dir)
-    run_id = time.strftime("%Y%m%dT%H%M%S")
+    # F35: a timestamp alone collides when two windows (or two quick
+    # submissions) land in the same second — both workers would then read
+    # and write the SAME selection/status/stop files (the later submit's
+    # selection overwrites the earlier one before it is read). A
+    # per-submission token makes every control file unique; the timestamp
+    # stays as a sortable prefix.
+    run_id = "{0}_{1}".format(
+        time.strftime("%Y%m%dT%H%M%S"), os.urandom(4).hex())
     if kind in ("single", "multi_single"):
         sources = (
             [selection["source_path"]]
@@ -415,6 +422,16 @@ def submit_import(selection, context):
                 )
                 launched.append((case_id, "submitted"))
             except Exception as exc:
+                # F35: the status file was already pre-written as running;
+                # a worker that never started must not sit at "running"
+                # forever in the activity list. Rewrite it as failed.
+                write_json(status_path, {
+                    "status": "failed",
+                    "phase": "worker_launch_failed",
+                    "error": "无法启动导入进程：{0}".format(exc),
+                    "total": 1, "completed": 0, "failed": 1,
+                    "updated_at_epoch": time.time(),
+                })
                 launched.append((case_id, "failed: {0}".format(exc)))
         return launched
     if kind == "batch":
@@ -444,6 +461,19 @@ def submit_import(selection, context):
                 stdout=log_handle, stderr=subprocess.STDOUT,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
+        except Exception as exc:
+            # F35: same as the per-case path — never leave a pre-written
+            # "running" status behind for a batch that never launched.
+            write_json(os.path.join(status_dir, "{0}_batch_status.json".format(run_id)), {
+                "status": "failed",
+                "phase": "worker_launch_failed",
+                "error": "无法启动批量导入进程：{0}".format(exc),
+                "total": 0, "completed": 0, "failed": 1,
+                "output_path": selection["output_path"],
+                "source_path": selection["source_path"],
+                "updated_at_epoch": time.time(),
+            })
+            return [("dataset", "failed: {0}".format(exc))]
         finally:
             log_handle.close()
         return [("dataset", "submitted")]
