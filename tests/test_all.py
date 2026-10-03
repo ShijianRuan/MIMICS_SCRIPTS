@@ -8247,6 +8247,48 @@ class TestNewFeatures(unittest.TestCase):
         self.assertEqual(b"\x01" * 8, (root / "liver_manual.u8").read_bytes())
         self.assertEqual(b"\x00" * 8, (root / "liver_manual_2.u8").read_bytes())
 
+    def test_stream_mask_to_file_defaults_to_gui_pump(self):
+        """F13: streaming alone does not keep the UI responsive. A
+        multi-chunk export must pump the Mimics GUI between chunks even
+        when the caller passes no explicit progress_callback."""
+        import mimics_export
+        import runtime_common
+
+        pump_calls = []
+        supplied = {}
+
+        original_stream = runtime_common.stream_buffer
+
+        def spy_stream(raw, handle=None, compute_sha=True,
+                       progress_callback=None):
+            supplied["callback"] = progress_callback
+            return original_stream(raw, handle=handle, compute_sha=compute_sha,
+                                   progress_callback=progress_callback)
+
+        class Mask(object):
+            def get_voxel_buffer(self):
+                # 33 MiB: three 16 MiB chunks, so the pump fires twice.
+                return memoryview(bytearray(33 * 1024 * 1024))
+
+        mask = Mask()
+        out = os.path.join(self.tmp, "streamed.u8")
+        originals = {
+            "stream": runtime_common.stream_buffer,
+            "pump": mimics_export._gui_pump,
+        }
+        try:
+            runtime_common.stream_buffer = spy_stream
+            mimics_export._gui_pump = lambda: pump_calls.append(1)
+            written = mimics_export._stream_mask_to_file(mask, out)
+        finally:
+            runtime_common.stream_buffer = originals["stream"]
+            mimics_export._gui_pump = originals["pump"]
+        self.assertEqual(33 * 1024 * 1024, written)
+        self.assertIsNotNone(supplied["callback"])
+        self.assertGreaterEqual(len(pump_calls), 2)
+        self.assertEqual(33 * 1024 * 1024,
+                         os.path.getsize(out))
+
     def test_foreground_export_tick_disambiguates_collision_names(self):
         """F32 background tick: the incremental per-mask reader must honor
         the monitor's used-stem set so "liver manual" and "liver_manual"

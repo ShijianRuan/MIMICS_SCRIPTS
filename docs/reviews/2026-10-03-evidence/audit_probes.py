@@ -199,14 +199,17 @@ with tempfile.TemporaryDirectory(prefix='mimics_audit_') as tmp:
     with mock.patch.object(pipeline,'_split_folds',side_effect=spy_split):
         pipeline._materialize_nnunet_raw(rows,req,raw,prep)
     second=json.loads(split_path.read_text())[0]
-    record('F16_non_ascii_frozen_split',dict(previous_case_count=6,new_case_count=8,split_seed_unchanged=2026,previous_validation_names=old_val_names,frozen_argument=observed[0],previous_val_in_new_train=sorted(set(first['val']) & set(second['train']))))
+    record('F16_non_ascii_frozen_split',dict(previous_case_count=6,new_case_count=8,split_seed_unchanged=2026,previous_validation_names=old_val_names,frozen_argument=sorted(observed[0]) if observed[0] else observed[0],previous_val_in_new_train=sorted(set(first['val']) & set(second['train']))))
 
     callbacks=[]; original_stream=common.stream_buffer
     def spy_stream(*a,**kw): callbacks.append(kw.get('progress_callback') is not None);return original_stream(*a,**kw)
     mask=types.SimpleNamespace(get_voxel_buffer=lambda:memoryview(bytearray(33*1024*1024)))
     with mock.patch.object(common,'stream_buffer',side_effect=spy_stream):
         written=export._stream_mask_to_file(mask,str(t/'large.u8'))
-    record('F13_export_stream_no_gui_pump',dict(bytes_written=written,progress_callback_supplied=callbacks[0]))
+    pump_calls=[]
+    with mock.patch.object(export,'_gui_pump',side_effect=lambda:pump_calls.append(1)) as pump_mock, mock.patch.object(export.mimics,'update_gui',side_effect=lambda:None) as gui_mock:
+        export._stream_mask_to_file(mask,str(t/'large2.u8'))
+    record('F13_export_stream_no_gui_pump',dict(bytes_written=written,progress_callback_supplied=callbacks[0],default_pump_used=len(pump_calls)>0,gui_pump_called=gui_mock.called))
 
     import numpy as np
     import nibabel as nib

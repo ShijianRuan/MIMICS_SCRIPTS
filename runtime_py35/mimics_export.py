@@ -1156,6 +1156,19 @@ def _current_mask_names():
     return names
 
 
+def _gui_pump():
+    """Pump the Mimics event loop between streamed chunks (F13).
+
+    Called as stream_buffer's progress_callback so a multi-chunk mask
+    export cannot freeze the Mimics UI for the whole write. Failures are
+    ignored: pumping is best-effort, never a reason to abort an export.
+    """
+    try:
+        mimics.update_gui()
+    except Exception:
+        pass
+
+
 def _stream_mask_to_file(mask, path, progress_callback=None):
     """Stream one Mask's voxel buffer to ``path`` without a full-volume copy.
 
@@ -1166,6 +1179,11 @@ def _stream_mask_to_file(mask, path, progress_callback=None):
     """
     buf = mask.get_voxel_buffer()
     raw = runtime_common.buffer_byte_view(buf)
+    if progress_callback is None:
+        # F13: streaming alone does not keep the UI responsive — without a
+        # pump between chunks a 33 MiB+ buffer still blocks for the whole
+        # write. Default to the Mimics GUI pump on this thread.
+        progress_callback = _gui_pump
     with open(path, "wb") as handle:
         runtime_common.stream_buffer(
             raw, handle=handle, compute_sha=False,
