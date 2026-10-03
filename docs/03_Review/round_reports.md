@@ -4110,3 +4110,66 @@ R61 期间 E: 盘 100% 满（剩 2.2MB），fast 门禁 2 个 test_all 用例 Er
 - **主动学习无图形入口**：load_pair 依赖 2d+3d 成对模型，但无 GUI
   创建 AL 任务路径（已在 docs/reviews/2026-09-29-cross-functional-
   review.md 登记），属需求缺口需用户决策。
+
+## R68-旁路（2026-10-03）：用户立项缺口批量实施（G7/G9/G3/D20/主动学习/G10+D15）
+
+（同在 ai-real-data-validation 分支 worktree。用户对 R67-旁路文末登记的
+"未修缺口"逐项拍板全部立项实施，6 项各独立 commit + 防回归测试。）
+
+### 修复清单（每项独立 commit + 防回归测试）
+
+- **G7 训练前重复模型查重**（1388245，P2）：两个训练向导均不查同名任务
+  已有模型，重复训练易生冗余模型。提交前向导查注册表，已有模型时弹
+  确认（列出现有模型与配置）再继续。镜像两向导同一模式。
+  （flexict_training_setup_ui.py / nnunet_training_setup_ui.py，
+  test_gui_smoke 2 新用例。）
+- **G9 统一 val_cases 语义为按例数**（aea05d1，P2）：nnU-Net 向导按比例、
+  FlexiCT 向导按例数，跨向导语义漂移。统一为按例数（更直白：标注者
+  数得出例数，比例需换算），向导字段与请求归一化对齐，契约测试同步。
+- **G3 状态窗口加训练曲线**（178679d，P2）：FlexiCT 状态查看器新增
+  "训练曲线"标签页，从 job 的训练日志读 loss/validation Dice 序列画折线，
+  远程训练监控从纯文本升级为可视化。
+  （flexict_status_viewer.py，test_gui_smoke 1 新用例。）
+- **D20 批量预测 GUI 入口**（1cda384，P1 需求缺口立项）：此前批量推理
+  只能绕开 Mimics 用命令行。新增 scripting_library/02_AI/nnUNet/
+  04_Batch_Predict_Dataset.py 入口 + tools/nnunet_batch_predict_ui.py：
+  选已注册模型 + 数据集根目录，循环调用既有单例推理链路（不新增推理
+  实现），结果逐例应用回 .mcs 工程并汇报成功/跳过/失败。
+  （runtime_py35/nnunet_mimics.py 动作分发 + test_gui_smoke/
+  test_nnunet_integration 新用例；冒烟门禁后跑。）
+- **主动学习 GUI 入口**（18121c5，F04 需求缺口立项）：load_pair 依赖
+  2d+3d 成对模型但此前无 GUI 创建 AL 任务路径。审阅窗口新增"主动学习"
+  入口：从既有成对模型创建 AL 任务（选择器官 + 例集合），复用
+  flexict_pipeline 既有 run 语义。
+  （flexict_active_learning_ui.py，test_gui_smoke 3 新用例。）
+- **G10+D15 本地重训缓存复用 + backbone 随 bundle 传输**（e1b7f52，
+  P1/P2）：两个子问题一并修——
+  ① G10：标签签名原用 path_signature（size/mtime/inode），mcs_refresh
+  重导出产生字节相同但 mtime/inode 全新的 NIfTI → 每次重训全量重新
+  物化。改为标签用 SHA-256 内容签名（图像仍按路径签名：数据源写一次
+  不再改，哈希它们意味着每次运行多 GB 读），契约
+  nnunet_source_grid_case.v3 → v4。重导出字节相同 → cache 命中；
+  标签真被编辑 → 仍 miss。
+  ② D15/F06：FlexiCT trainer 构建网络时无条件加载预训练 backbone，
+  导致导入的微调模型在无 backbone 的机器上无法推理。export-flexict
+  新增 --include-backbone（backbone/ 下 2×~576MB），import 侧：无 →
+  装到 workspace/flexict_pretrained 并写 pretrained_weights_dir 覆盖；
+  已有且一致 → 校验后保留；不一致 → 硬拒（不静默覆盖工作正常的本地
+  backbone）。旧 bundle（无 backbone 段）照常导入。
+  （nnunet_pipeline.py / ai_model_bundle.py / flexict_common.py，
+  test_nnunet_integration 2 新用例 + test_model_portability 4 新用例。）
+
+### 门禁与验证
+
+- 单套件：nnunet_integration 104/104、model_portability 22/22、
+  flexict_common 25/25、flexict_integration 122/122、gui_smoke 全绿。
+- fast 门禁 28/28
+  （`20261003T222918_fast.json`）。
+- 过程登记：e1b7f52 实施中前一轮测试运行曾污染真实 flexict_config.json
+  （save_config 未被 mock 拦截时写入临时目录路径）——已从 HEAD 还原并
+  复跑全套件确认无再污染；该风险由 dual-module mock 目标错位引起，
+  相关测试已改为 mock tools.flexict_common（同模块对象），不再可达。
+
+### 外部资源
+
+- 本轮零外部资源使用（纯本地代码与测试）。
