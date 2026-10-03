@@ -8115,6 +8115,136 @@ class TestNewFeatures(unittest.TestCase):
         self.assertEqual("liver", manifest["masks"][0]["safe_name"])
         self.assertTrue((root / "liver.u8").is_file())
 
+    def test_mimics_export_collision_names_get_distinct_buffers(self):
+        """F32: two masks whose names sanitize to the same stem ("liver
+        manual" and "liver_manual") must get distinct .u8 buffers, not
+        silently overwrite each other's file."""
+        import mimics_export
+
+        root = Path(self.tmp) / "export_collision"
+        root.mkdir()
+
+        class Image(object):
+            logical_dimensions = [2, 2, 2]
+
+        class Mask(object):
+            def __init__(self, name, data):
+                self.name = name
+                self.image = Image()
+
+        masks = [
+            Mask("liver manual", b"\x01" * 8),
+            Mask("liver_manual", b"\x00" * 8),
+        ]
+        originals = {
+            "liver manual": mimics_export.mimics.data.masks,
+            "stream": mimics_export._stream_mask_to_file,
+        }
+        try:
+            mimics_export.mimics.data.masks = masks
+            mimics_export._stream_mask_to_file = (
+                lambda a_mask, path: (
+                    Path(path).write_bytes(getattr(a_mask, "_data", b"")),
+                    len(getattr(a_mask, "_data", b"")),
+                )[1]
+            )
+            for a_mask in masks:
+                a_mask._data = b"\x01" * 8 if a_mask.name == "liver manual" else b"\x00" * 8
+            manifest = mimics_export.export_masks_to_buffers(str(root))
+        finally:
+            mimics_export.mimics.data.masks = originals["liver manual"]
+            mimics_export._stream_mask_to_file = originals["stream"]
+        safe_names = [entry["safe_name"] for entry in manifest["masks"]]
+        self.assertEqual(2, len(safe_names))
+        self.assertEqual(2, len(set(safe_names)), "safe names must be distinct")
+        self.assertEqual(
+            sorted(safe_names), ["liver_manual", "liver_manual_2"],
+        )
+        self.assertTrue(
+            any(entry.get("name_disambiguated") for entry in manifest["masks"])
+        )
+        # Both buffers survive with their own content — no silent overwrite.
+        self.assertEqual(b"\x01" * 8, (root / "liver_manual.u8").read_bytes())
+        self.assertEqual(b"\x00" * 8, (root / "liver_manual_2.u8").read_bytes())
+
+    def test_foreground_export_tick_disambiguates_collision_names(self):
+        """F32 background tick: the incremental per-mask reader must honor
+        the monitor's used-stem set so "liver manual" and "liver_manual"
+        land in distinct .u8 files."""
+        import mimics_export
+
+        root = Path(self.tmp) / "export_collision_tick"
+        root.mkdir()
+        buffers_dir = root / "buffers"
+        buffers_dir.mkdir()
+
+        class Image(object):
+            logical_dimensions = [2, 2, 2]
+
+        class Mask(object):
+            def __init__(self, name, data):
+                self.name = name
+                self.image = Image()
+                self._data = data
+
+        masks = [
+            Mask("liver manual", b"\x01" * 8),
+            Mask("liver_manual", b"\x00" * 8),
+        ]
+        manifest = {
+            "masks": [],
+            "mimics_shape": [2, 2, 2],
+            "mimics_voxel_to_ras_matrix": [[1, 0, 0, 0], [0, 1, 0, 0],
+                                           [0, 0, 1, 0], [0, 0, 0, 1]],
+            "mimics_voxel_to_ras_matrix_source": "",
+        }
+        monitor = {
+            "monitor_key": "f32-tick",
+            "buffers_dir": str(buffers_dir),
+            "selected_masks": masks,
+            "manifest": manifest,
+            "used_safe_names": set(),
+            "mask_index": 0,
+            "phase": "buffers",
+            "done": False,
+            "busy": False,
+            "deadline": time.time() + 60.0,
+            "task_status_path": "",
+            "task_stop_path": "",
+        }
+        originals = {
+            "masks": mimics_export.mimics.data.masks,
+            "stream": mimics_export._stream_mask_to_file,
+            "target_open": mimics_export._foreground_export_target_is_open,
+            "stop": mimics_export._export_task_stop_requested,
+        }
+        try:
+            mimics_export.mimics.data.masks = masks
+            mimics_export._stream_mask_to_file = (
+                lambda a_mask, path: (
+                    Path(path).write_bytes(a_mask._data),
+                    len(a_mask._data),
+                )[1]
+            )
+            mimics_export._foreground_export_target_is_open = lambda _m: True
+            mimics_export._export_task_stop_requested = lambda _m: False
+            # Run exactly the two per-mask ticks; the third tick advances
+            # past the buffers phase, so stop before it.
+            mimics_export._foreground_export_tick(monitor)
+            mimics_export._foreground_export_tick(monitor)
+        finally:
+            mimics_export.mimics.data.masks = originals["masks"]
+            mimics_export._stream_mask_to_file = originals["stream"]
+            mimics_export._foreground_export_target_is_open = (
+                originals["target_open"])
+            mimics_export._export_task_stop_requested = originals["stop"]
+        safe_names = [entry["safe_name"] for entry in manifest["masks"]]
+        self.assertEqual(["liver_manual", "liver_manual_2"], safe_names)
+        self.assertEqual(b"\x01" * 8,
+                         (buffers_dir / "liver_manual.u8").read_bytes())
+        self.assertEqual(b"\x00" * 8,
+                         (buffers_dir / "liver_manual_2.u8").read_bytes())
+
     def test_mimics_export_empty_case_selection_fails_during_discovery(self):
         import mimics_export
 

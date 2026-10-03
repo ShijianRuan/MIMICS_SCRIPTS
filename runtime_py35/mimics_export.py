@@ -1330,11 +1330,27 @@ def export_masks_to_buffers(
         except Exception as e:
             print("could not read image dimensions: {0}".format(e))
 
+    # F32: different original names can sanitize to the same file stem
+    # ("liver manual" and "liver_manual" both -> liver_manual.u8), silently
+    # overwriting the first mask's buffer with the second's. Track used
+    # stems and disambiguate with a stable numeric suffix so every mask
+    # keeps its own file; the manifest records the mapping.
+    used_safe_names = set()
+
+    def _unique_safe_name(base):
+        candidate = base
+        counter = 2
+        while candidate in used_safe_names:
+            candidate = "{0}_{1}".format(base, counter)
+            counter += 1
+        used_safe_names.add(candidate)
+        return candidate
+
     for a_mask in selected:
         name = str(a_mask.name)
         print("exporting mask: {0}".format(name))
 
-        safe_name = _sanitize_name(target_mask_name or name)
+        safe_name = _unique_safe_name(_sanitize_name(target_mask_name or name))
         u8_path = os.path.join(buffers_dir, safe_name + ".u8")
 
         if not skip_voxel_data:
@@ -1358,6 +1374,8 @@ def export_masks_to_buffers(
             "original_name": name,
             "safe_name": safe_name,
         }
+        if safe_name != _sanitize_name(name):
+            mask_entry["name_disambiguated"] = True
         if not skip_voxel_data:
             mask_entry["u8_filename"] = safe_name + ".u8"
         manifest["masks"].append(mask_entry)
@@ -1722,7 +1740,16 @@ def _foreground_export_tick(monitor):
                 except Exception:
                     pass
                 safe_name = _sanitize_name(name)
-                u8_path = os.path.join(monitor["buffers_dir"], safe_name + ".u8")
+                # F32: disambiguate against stems already used in this
+                # export so colliding names never share one buffer file.
+                used = monitor.setdefault("used_safe_names", set())
+                unique_name = safe_name
+                counter = 2
+                while unique_name in used:
+                    unique_name = "{0}_{1}".format(safe_name, counter)
+                    counter += 1
+                used.add(unique_name)
+                u8_path = os.path.join(monitor["buffers_dir"], unique_name + ".u8")
                 written = _stream_mask_to_file(a_mask, u8_path)
                 expected = 1
                 for dim in monitor["manifest"]["mimics_shape"]:
@@ -1733,11 +1760,14 @@ def _foreground_export_tick(monitor):
                             name, written, expected
                         )
                     )
-                monitor["manifest"]["masks"].append({
+                entry = {
                     "original_name": name,
-                    "safe_name": safe_name,
-                    "u8_filename": safe_name + ".u8",
-                })
+                    "safe_name": unique_name,
+                    "u8_filename": unique_name + ".u8",
+                }
+                if unique_name != safe_name:
+                    entry["name_disambiguated"] = True
+                monitor["manifest"]["masks"].append(entry)
                 monitor["mask_index"] = index + 1
                 return
             manifest_path = os.path.join(monitor["buffers_dir"], "manifest.json")
@@ -2006,6 +2036,10 @@ def _start_current_project_export(case_dir, source_image_path, output_root, axes
             ],
             "selected_masks": selected,
             "manifest": manifest,
+            # F32: stems already used in this export, so sanitization
+            # collisions ("liver manual" vs "liver_manual") get distinct
+            # buffer files instead of silently overwriting each other.
+            "used_safe_names": set(),
             "mask_index": 0,
             "phase": "buffers",
             "deadline": time.time() + 3600.0,
