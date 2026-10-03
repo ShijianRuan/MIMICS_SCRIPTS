@@ -469,6 +469,9 @@ class ModelManagerWindow:
                 ]
                 for column, value in enumerate(values):
                     item = QtWidgets.QTableWidgetItem(str(value))
+                    # 长内容（模型 ID、任务名等）会被列宽省略成 "..."，
+                    # 悬停即见完整内容，用户无需拖宽列（F15）。
+                    item.setToolTip(str(value))
                     if row["current"]:
                         item.setFont(self.QtGui.QFont(item.font().family(), weight=75))
                     elif not row["usable"]:

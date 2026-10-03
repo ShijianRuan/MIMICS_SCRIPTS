@@ -315,6 +315,25 @@ class TestModelManagerWindow(unittest.TestCase):
         self.assertFalse(window._loading, "background load never finished")
         return window
 
+    def test_cells_carry_full_text_tooltip(self):
+        """F15：长模型 ID 被列宽省略成 "..."，悬停必须能看到完整内容，
+        否则用户无法区分同一任务的多个模型版本。"""
+        _AppFixture.app()
+        _batch, manager, _config, _presets = _gui_modules()
+        long_id = (
+            "nnUNetModels/nnUNet_Results_20261003_" "病例A_肝脏分割_最终版"
+        )
+        rows = [self._row(model_id=long_id)]
+        with mock.patch.object(manager, "collect_rows", lambda ws: list(rows)):
+            window = self._window_with_rows(manager, rows)
+            # 模型列（第 2 列）的 tooltip 就是完整 ID。
+            item = window.table.item(0, 2)
+            self.assertEqual(item.text(), long_id)
+            self.assertEqual(item.toolTip(), long_id)
+            # 其余列同样带 tooltip（任务名也可能被省略）。
+            self.assertEqual(window.table.item(0, 1).toolTip(),
+                             window.table.item(0, 1).text())
+
     def test_action_buttons_follow_selection(self):
         """Use This Model / Remove Broken Entry were permanently disabled
         (R61-4): selection must drive their enabled state."""
