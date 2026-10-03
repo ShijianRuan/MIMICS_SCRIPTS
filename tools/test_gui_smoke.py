@@ -796,6 +796,43 @@ class TestTrainingSetupPathMemory(unittest.TestCase):
                 finally:
                     window.window.close()
 
+    def test_flexict_overlap_policy_reaches_request(self):
+        # G2: multiclass FlexiCT shares the nnU-Net case materializer, which
+        # stops on overlapping label voxels — but the FlexiCT wizard had no
+        # overlap option, so the annotator hitting an overlap error had no
+        # self-rescue from the wizard. Default fail; checkbox submits replace.
+        _AppFixture.app()
+        import flexict_training_setup_ui as ui
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            home = self._settings_home(
+                tmp,
+                "flexict_settings.json",
+                {
+                    "workspace": str(tmp / "ws"),
+                    "dataset_root": str(tmp / "data"),
+                    "label_name": "kidney",
+                },
+            )
+            with mock.patch.object(ui.Path, "home", lambda: home), mock.patch.object(
+                ui, "workspace_root", lambda _c: str(tmp / "default-ws")
+            ), mock.patch.object(
+                ui, "load_config", lambda: {"root": str(tmp)}
+            ), mock.patch.object(
+                ui.TrainingSetupWindow, "_refresh_models", lambda self: None
+            ):
+                window = ui.TrainingSetupWindow(
+                    {"workspace": ""}, tmp / "ctx.json", QT
+                )
+                try:
+                    self.assertFalse(window.overlap_check.isChecked())
+                    self.assertEqual(window._request()["overlap_policy"], "fail")
+                    window.overlap_check.setChecked(True)
+                    self.assertEqual(window._request()["overlap_policy"], "replace")
+                finally:
+                    window.window.close()
+
     def test_flexict_single_case_submission_is_rejected(self):
         # B30: the error copy says "at least two cases" but validation only
         # checked non-empty; one case reached the pipeline, which burned a

@@ -311,6 +311,14 @@ class TrainingSetupWindow:
         self.workers_spin.setValue(4)
         form.addWidget(QtWidgets.QLabel("预处理进程数"), 6, 0)
         form.addWidget(self.workers_spin, 6, 1)
+        self.overlap_check = QtWidgets.QCheckBox(
+            "允许排在后面的标签覆盖重叠体素"
+        )
+        self.overlap_check.setToolTip(
+            "关闭更安全。多分类标签无法在同一体素上保留两个类别，"
+            "默认遇到重叠直接停止训练。"
+        )
+        form.addWidget(self.overlap_check, 7, 0, 1, 2)
         layout.addWidget(training)
 
         recipe, recipe_form = self._surface("锁定配置（只读）")
@@ -613,6 +621,9 @@ class TrainingSetupWindow:
             "mirror_disable_axes": str(self.mirror_combo.currentData()),
             "val_cases": val_count,
             "preprocess_workers": int(self.workers_spin.value()),
+            "overlap_policy": (
+                "replace" if self.overlap_check.isChecked() else "fail"
+            ),
             "cases": cases,
             "val_case_ids": val_cases,
             "train_case_ids": train_cases,
