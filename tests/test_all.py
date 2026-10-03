@@ -15299,6 +15299,100 @@ class TestFlexiCTActiveLearningApply(unittest.TestCase):
         self.assertIn('"conversion"', tick_source)
         self.assertIn("_al_finish_conversion", tick_source)
 
+    def test_al_apply_rejects_same_grid_different_case(self):
+        """F20: geometry equality is not case identity. The annotator has
+        case B active when requesting case A's overlay; A and B share a
+        resampled grid, so shape/affine checks pass. The source-image path
+        recorded on the active image must match the case's own source, or
+        the overlay is refused before any conversion starts."""
+        import flexict_mimics
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = os.path.join(tmp, "job")
+            os.makedirs(job_dir)
+            matrix = [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
+            geometry = {
+                "source_shape": [2, 2, 2],
+                "source_voxel_to_ras_matrix": matrix,
+                "source_image_path": os.path.join(tmp, "patientA.nii.gz"),
+            }
+            with open(os.path.join(job_dir, "input_geometries.json"), "w") as h:
+                json.dump({"cases": {"patientA": geometry}}, h)
+            band = os.path.join(job_dir, "uncertainty", "bands",
+                                "patientA_high.nii.gz")
+            os.makedirs(os.path.dirname(band))
+            with open(band, "wb") as h:
+                h.write(b"\0" * 64)
+            request_path = os.path.join(job_dir, "req.json")
+            request = {
+                "_request_path": request_path, "_job_dir": job_dir,
+                "case_id": "patientA", "what": "bands",
+            }
+            with open(request_path, "w") as h:
+                json.dump(request, h)
+
+            marked = []
+            pops = []
+            old_mark = flexict_mimics._al_mark_request
+            old_geom = (flexict_mimics.mimics_mask_apply
+                        ._active_source_geometry_payload)
+            old_popen = flexict_mimics.subprocess.Popen
+            try:
+                flexict_mimics._al_mark_request = (
+                    lambda path, state, detail="": marked.append(
+                        (state, detail)))
+                # Case B is active: same grid, different source file.
+                flexict_mimics.mimics_mask_apply._active_source_geometry_payload = (
+                    lambda: dict(
+                        geometry,
+                        source_image_path=os.path.join(tmp, "patientB.nii.gz"),
+                    ))
+                flexict_mimics.subprocess.Popen = lambda *a, **k: pops.append(a)
+                flexict_mimics._al_apply_request(request)
+            finally:
+                flexict_mimics._al_mark_request = old_mark
+                (flexict_mimics.mimics_mask_apply
+                 ._active_source_geometry_payload) = old_geom
+                flexict_mimics.subprocess.Popen = old_popen
+
+            self.assertEqual([("failed", marked[0][1])], marked)
+            self.assertIn("different case", marked[0][1])
+            self.assertIn("patientA", marked[0][1])
+            self.assertEqual([], pops, "no bridge process may start")
+            # Same source path (the case's own image) must still pass the
+            # identity gate and reach the conversion.
+            marked[:] = []
+            try:
+                flexict_mimics._al_mark_request = (
+                    lambda path, state, detail="": marked.append(
+                        (state, detail)))
+                flexict_mimics.mimics_mask_apply._active_source_geometry_payload = (
+                    lambda: dict(geometry))
+                # The remaining launch steps need a live grid and image;
+                # provide minimal stubs so the flow reaches "converting".
+                old_grid = (flexict_mimics.mimics_mask_apply
+                            ._active_live_grid_payload)
+                old_images = flexict_mimics.mimics.data.images
+                flexict_mimics.mimics_mask_apply._active_live_grid_payload = (
+                    lambda: {"target_shape": [2, 2, 2],
+                             "target_voxel_to_ras_matrix": matrix})
+                flexict_mimics.mimics.data.images = mock.MagicMock()
+
+                class _Proc(object):
+                    pid = 1
+                flexict_mimics.subprocess.Popen = lambda *a, **k: _Proc()
+                flexict_mimics._al_apply_request(request)
+                self.assertEqual(["converting"], [s for s, _ in marked])
+            finally:
+                flexict_mimics._al_mark_request = old_mark
+                (flexict_mimics.mimics_mask_apply
+                 ._active_source_geometry_payload) = old_geom
+                flexict_mimics.mimics_mask_apply._active_live_grid_payload = (
+                    old_grid)
+                flexict_mimics.mimics.data.images = old_images
+                flexict_mimics.subprocess.Popen = old_popen
+            flexict_mimics._AL_APPLY_TRANSACTIONS.clear()
+
     def test_al_conversion_applies_finished_result_and_marks_request(self):
         import flexict_mimics
 

@@ -1470,6 +1470,25 @@ def _al_apply_request(request):
             "(its original source image) and retry.".format(case_id),
         )
         return
+    # F20: geometry equality is not case identity. Two normalized cases
+    # (e.g. the same patient's phases, or a shared resampling grid) can
+    # carry identical shape/affine; the active image's recorded source
+    # file must be the case's own source, not merely a same-grid case.
+    active_source_path = str(source_geometry.get("source_image_path") or "")
+    expected_source_path = str(expected.get("source_image_path") or "")
+    if not (active_source_path and expected_source_path and
+            mimics_mask_apply._same_path(
+                active_source_path, expected_source_path)):
+        _al_mark_request(
+            request_path, "failed",
+            "The active image is a different case: its source image is\n"
+            "{0}\nbut case {1} was recorded with\n{2}.\n"
+            "Open the case's own project/image and retry.".format(
+                active_source_path or "(unknown)", case_id,
+                expected_source_path or "(unknown)",
+            ),
+        )
+        return
     target_grid = mimics_mask_apply._active_live_grid_payload()
     if not target_grid:
         _al_mark_request(
