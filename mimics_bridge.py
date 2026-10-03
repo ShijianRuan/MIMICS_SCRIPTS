@@ -1573,10 +1573,19 @@ def _matrix_from_params(value) -> np.ndarray:
     return matrix
 
 
-def get_image_affine_from_dicom(dicom_folder: str) -> np.ndarray:
+def _read_dicom_series_headers(dicom_folder: str) -> list:
+    """Read pixel-bearing DICOM headers, refusing ambiguous series input (F01).
+
+    The shape/affine helpers count files for the third dimension, so a
+    folder mixing several SeriesInstanceUIDs, or a single multi-frame
+    file, would produce a wrong geometry that silently propagates into
+    masks and exports. Fail closed instead: the caller must point at one
+    unambiguous single-frame series.
+    """
     import pydicom
     folder = Path(dicom_folder)
     headers = []
+    multi_frame = []
     for p in sorted(folder.rglob("*")):
         if not p.is_file():
             continue
@@ -1584,10 +1593,44 @@ def get_image_affine_from_dicom(dicom_folder: str) -> np.ndarray:
             ds = pydicom.dcmread(str(p), stop_before_pixels=True, force=False)
         except Exception:
             continue
-        if hasattr(ds, "Rows") and hasattr(ds, "Columns"):
-            headers.append(ds)
+        if not (hasattr(ds, "Rows") and hasattr(ds, "Columns")):
+            continue
+        frames = getattr(ds, "NumberOfFrames", None)
+        try:
+            frame_count = int(frames) if frames is not None else 1
+        except (TypeError, ValueError):
+            frame_count = 1
+        if frame_count > 1:
+            multi_frame.append((p.name, frame_count))
+            continue
+        headers.append(ds)
+    if multi_frame:
+        names = ", ".join("{} ({} frames)".format(name, count) for name, count in multi_frame[:3])
+        raise ValueError(
+            "multi-frame DICOM is not supported: {0}{1}. Export the series as "
+            "single-frame slices and retry.".format(names, " ..." if len(multi_frame) > 3 else "")
+        )
     if not headers:
         raise ValueError("no readable DICOM slices in: {}".format(dicom_folder))
+    series_uids = {str(getattr(ds, "SeriesInstanceUID", "") or "") for ds in headers}
+    series_uids.discard("")
+    if len(series_uids) > 1:
+        raise ValueError(
+            "the DICOM folder mixes {0} series ({1} files total); geometry would "
+            "be wrong for every one of them. Import one series folder at a "
+            "time.".format(len(series_uids), len(headers))
+        )
+    shapes = {(int(ds.Columns), int(ds.Rows)) for ds in headers}
+    if len(shapes) > 1:
+        raise ValueError(
+            "the DICOM series mixes in-plane sizes {0}; refusing to guess a "
+            "grid".format(sorted(shapes))
+        )
+    return headers
+
+
+def get_image_affine_from_dicom(dicom_folder: str) -> np.ndarray:
+    headers = _read_dicom_series_headers(dicom_folder)
 
     def _image_position(ds):
         if hasattr(ds, "ImagePositionPatient"):
@@ -1648,20 +1691,7 @@ def get_image_affine_from_dicom(dicom_folder: str) -> np.ndarray:
 
 
 def get_image_shape_from_dicom(dicom_folder: str) -> tuple[int, int, int]:
-    import pydicom
-    folder = Path(dicom_folder)
-    headers = []
-    for p in sorted(folder.rglob("*")):
-        if not p.is_file():
-            continue
-        try:
-            ds = pydicom.dcmread(str(p), stop_before_pixels=True, force=False)
-        except Exception:
-            continue
-        if hasattr(ds, "Rows") and hasattr(ds, "Columns"):
-            headers.append(ds)
-    if not headers:
-        raise ValueError("no readable DICOM slices in: {}".format(dicom_folder))
+    headers = _read_dicom_series_headers(dicom_folder)
     first = headers[0]
     return (int(first.Columns), int(first.Rows), int(len(headers)))
 
@@ -1794,7 +1824,11 @@ def do_prepare(params: dict) -> dict:
         dicom_folder = image_path
         # Internal resampling uses RAS affines. get_image_affine_from_dicom()
         # converts the DICOM LPS geometry to RAS, matching nibabel NIfTI masks.
-        image_affine = get_image_affine_from_dicom(image_path)
+        # It refuses mixed-series / multi-frame input (F01).
+        try:
+            image_affine = get_image_affine_from_dicom(image_path)
+        except ValueError as exc:
+            return {"status": "error", "error": str(exc)}
         source_image_kind = "dicom_folder"
         source_image_index_space = "dicom_columns_rows_slices_sorted_by_position_v1"
         source_world_coordinate_system = "lps"
@@ -1864,19 +1898,10 @@ def do_prepare(params: dict) -> dict:
     else:
         return {"status": "error", "error": "image path is neither a DICOM folder nor a supported 3D image file: {}".format(image_path)}
     if image_shape is None:
-        import pydicom
-        headers = []
-        for p in sorted(Path(dicom_folder).rglob("*")):
-            if not p.is_file():
-                continue
-            try:
-                ds = pydicom.dcmread(str(p), stop_before_pixels=True, force=False)
-            except Exception:
-                continue
-            if hasattr(ds, "Rows") and hasattr(ds, "Columns"):
-                headers.append(ds)
-        if not headers:
-            return {"status": "error", "error": "no readable DICOM slices in: {}".format(dicom_folder)}
+        try:
+            headers = _read_dicom_series_headers(dicom_folder)
+        except ValueError as exc:
+            return {"status": "error", "error": str(exc)}
         try:
             slopes = set(float(getattr(ds, "RescaleSlope", 1.0) or 1.0) for ds in headers)
             intercepts = set(float(getattr(ds, "RescaleIntercept", 0.0) or 0.0) for ds in headers)
@@ -2513,21 +2538,12 @@ def do_mask_to_buffer(params: dict) -> dict:
     if is_dicom_folder(image_path):
         # Internal resampling uses RAS affines. get_image_affine_from_dicom()
         # converts the DICOM LPS geometry to RAS, matching nibabel NIfTI masks.
-        image_affine = get_image_affine_from_dicom(image_path)
-        import pydicom
-        headers = []
-        for p in sorted(Path(image_path).rglob("*")):
-            if not p.is_file():
-                continue
-            try:
-                ds = pydicom.dcmread(str(p), stop_before_pixels=True, force=False)
-            except Exception:
-                continue
-            if hasattr(ds, "Rows") and hasattr(ds, "Columns"):
-                headers.append(ds)
-        if not headers:
-            return {"status": "error", "error": "no readable DICOM slices in: {}".format(image_path)}
-        image_shape = (int(headers[0].Columns), int(headers[0].Rows), int(len(headers)))
+        # Both helpers refuse mixed-series / multi-frame input (F01).
+        try:
+            image_affine = get_image_affine_from_dicom(image_path)
+            image_shape = get_image_shape_from_dicom(image_path)
+        except ValueError as exc:
+            return {"status": "error", "error": str(exc)}
     elif is_medical_image_file(image_path):
         image_affine = get_image_affine(image_path)
         image_shape = get_image_shape(image_path)

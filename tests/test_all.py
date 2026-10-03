@@ -6049,6 +6049,84 @@ class TestEdgeCases(unittest.TestCase):
         self.assertEqual((4, 4), affine.shape)
         self.assertTrue(np.all(np.isfinite(affine)))
 
+    def test_dicom_helpers_refuse_mixed_series_and_multiframe(self):
+        """F01: shape/affine helpers count files for the third dimension, so a
+        folder mixing series or a single multi-frame file must be rejected,
+        not silently merged into a wrong grid that poisons masks/exports."""
+        import pydicom
+        from pydicom.dataset import FileDataset, FileMetaDataset
+        from pydicom.uid import ExplicitVRLittleEndian, generate_uid, CTImageStorage
+        from mimics_bridge import (
+            do_mask_to_buffer,
+            get_image_affine_from_dicom,
+            get_image_shape_from_dicom,
+        )
+
+        def write_slice(path, series_uid, z, frames=None):
+            file_meta = FileMetaDataset()
+            file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+            file_meta.MediaStorageSOPClassUID = CTImageStorage
+            file_meta.MediaStorageSOPInstanceUID = generate_uid()
+            ds = FileDataset(
+                str(path), {}, file_meta=file_meta, preamble=b"\0" * 128,
+            )
+            ds.SOPClassUID = file_meta.MediaStorageSOPClassUID
+            ds.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
+            ds.SeriesInstanceUID = series_uid
+            ds.Rows = ds.Columns = 4
+            ds.PixelSpacing = [1.0, 1.0]
+            ds.ImageOrientationPatient = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+            ds.ImagePositionPatient = [0.0, 0.0, float(z)]
+            ds.SliceThickness = 10.0
+            ds.Modality = "CT"
+            if frames:
+                ds.NumberOfFrames = frames
+            ds.save_as(str(path), enforce_file_format=True)
+
+        # Two distinct series in one folder: file counting would report 6
+        # slices with the geometry of whichever file sorts first.
+        mixed = os.path.join(self.tmp, "mixed")
+        os.makedirs(mixed)
+        for series in range(2):
+            uid = generate_uid()
+            for z in range(3):
+                write_slice(
+                    os.path.join(mixed, f"{series}_{z}.dcm"), uid, z * 10.0
+                )
+        for helper in (get_image_affine_from_dicom, get_image_shape_from_dicom):
+            with self.assertRaises(ValueError) as caught:
+                helper(mixed)
+            self.assertIn("series", str(caught.exception))
+        result = do_mask_to_buffer({
+            "image_path": mixed,
+            "mask_path": "unused.nii.gz",
+            "output_path": os.path.join(self.tmp, "out.u8"),
+        })
+        self.assertEqual("error", result["status"])
+        self.assertIn("series", result["error"])
+
+        # Single file declaring 60 frames: must not count as one slice.
+        multi = os.path.join(self.tmp, "multiframe")
+        os.makedirs(multi)
+        write_slice(
+            os.path.join(multi, "frames.dcm"), generate_uid(), 0.0, frames=60
+        )
+        for helper in (get_image_affine_from_dicom, get_image_shape_from_dicom):
+            with self.assertRaises(ValueError) as caught:
+                helper(multi)
+            self.assertIn("multi-frame", str(caught.exception))
+
+        # A clean single series still works.
+        clean = os.path.join(self.tmp, "clean")
+        os.makedirs(clean)
+        uid = generate_uid()
+        for z in range(3):
+            write_slice(os.path.join(clean, f"s{z}.dcm"), uid, z * 10.0)
+        self.assertEqual((4, 4, 3), get_image_shape_from_dicom(clean))
+        self.assertTrue(
+            np.all(np.isfinite(get_image_affine_from_dicom(clean)))
+        )
+
     # -- resource lock edge cases --
     def test_lock_release_wrong_token(self):
         import runtime_common
