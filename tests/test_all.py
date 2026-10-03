@@ -10889,6 +10889,7 @@ class TestDatasetProfiles(unittest.TestCase):
         self.assertEqual("ct.nii.gz", tables["image_candidates"][0])
         self.assertIn("dicom", tables["dicom_dirs"])
         self.assertIn("mcs_output", tables["exclude_dirs"])
+        self.assertEqual(["segmentations"], tables["mask_dirs"])
 
         self._make_case("s0001", image="ct.nii.gz")
         open(os.path.join(self.tmp, "s0001", "zzz.nii.gz"), "w").close()
@@ -10906,6 +10907,37 @@ class TestDatasetProfiles(unittest.TestCase):
         # Excluded roots are skipped in case-dir listing.
         result = mb.do_discover_case_dirs({"ts_root": self.tmp})
         self.assertNotIn("mcs_output", [c["case_id"] for c in result["cases"]])
+
+    def test_bridge_discovery_follows_profile_mask_dirs(self):
+        sys.path.insert(0, PROJECT_ROOT)
+        import mimics_bridge as mb
+
+        self._make_case("s0001", image="ct.nii.gz")
+        labels_dir = os.path.join(self.tmp, "s0001", "labels")
+        os.makedirs(labels_dir)
+        open(os.path.join(labels_dir, "liver.nii.gz"), "w").close()
+        # A same-named file under segmentations/ must NOT win when the profile
+        # points at labels/ — the profile is the single config point.
+        seg_dir = os.path.join(self.tmp, "s0001", "segmentations")
+        os.makedirs(seg_dir)
+        open(os.path.join(seg_dir, "liver.nii.gz"), "w").close()
+
+        original = mb._load_profile_tables
+        try:
+            mb._load_profile_tables = lambda: {
+                "image_candidates": ["ct.nii.gz"],
+                "dicom_dirs": ["dicom"],
+                "exclude_dirs": ["mcs_output", "segmentations"],
+                "mask_dirs": ["labels"],
+            }
+            result = mb.do_discover({"ts_root": self.tmp})
+        finally:
+            mb._load_profile_tables = original
+        self.assertEqual("ok", result["status"])
+        masks = result["cases"][0]["masks"]
+        self.assertEqual(1, len(masks))
+        self.assertEqual("liver", masks[0]["name"])
+        self.assertIn("labels", masks[0]["path"])
 
 
 class TestImportDropWindow(unittest.TestCase):

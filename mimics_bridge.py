@@ -43,6 +43,7 @@ _PROFILE_FALLBACK = {
     ],
     "dicom_dirs": ["dicom"],
     "exclude_dirs": ["mcs_output", "segmentations"],
+    "mask_dirs": ["segmentations"],
 }
 # Names the bridge has always preferred on top of the shared profile list
 # (historical behaviour, kept so candidate ordering never changes).
@@ -74,6 +75,7 @@ def _load_profile_tables():
         "image_candidates": candidates,
         "dicom_dirs": [str(d) for d in (tables.get("dicom_dirs") or []) if str(d or "").strip()] or ["dicom"],
         "exclude_dirs": [str(d) for d in (tables.get("exclude_dirs") or []) if str(d or "").strip()],
+        "mask_dirs": [str(d) for d in (tables.get("mask_dirs") or []) if str(d or "").strip()] or ["segmentations"],
     }
 
 
@@ -2703,16 +2705,21 @@ def do_discover(params: dict) -> dict:
         if image_path is None:
             continue  # no image found, skip
 
-        # Find masks
+        # Find masks. Iterate the profile's mask_dirs (same semantics as
+        # io_path_setup_ui.discover_single_source) instead of hardcoding
+        # "segmentations" so dataset_profiles.json is the single config point.
         masks = []
-        seg_dir = os.path.join(case_dir, "segmentations")
-        if selected_masks != set() and os.path.isdir(seg_dir):
-            for fname in sorted(os.listdir(seg_dir)):
-                if fname.lower().endswith(_DISCOVER_VOLUME_SUFFIXES):
-                    organ = _volume_stem(fname)
-                    if selected_masks is not None and organ.casefold() not in selected_masks:
-                        continue
-                    masks.append({"name": organ, "path": os.path.join(seg_dir, fname)})
+        if selected_masks != set():
+            for mask_dir_name in profile["mask_dirs"]:
+                seg_dir = os.path.join(case_dir, mask_dir_name)
+                if not os.path.isdir(seg_dir):
+                    continue
+                for fname in sorted(os.listdir(seg_dir)):
+                    if fname.lower().endswith(_DISCOVER_VOLUME_SUFFIXES):
+                        organ = _volume_stem(fname)
+                        if selected_masks is not None and organ.casefold() not in selected_masks:
+                            continue
+                        masks.append({"name": organ, "path": os.path.join(seg_dir, fname)})
 
         cases.append({
             "case_id": name,
