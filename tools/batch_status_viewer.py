@@ -249,7 +249,7 @@ class BatchStatusWindow:
         hint.setObjectName("hint")
         root.addWidget(hint)
         header = QtWidgets.QHBoxLayout()
-        self.live_label = QtWidgets.QLabel("● Live")
+        self.live_label = QtWidgets.QLabel("● 实时")
         self.live_label.setObjectName("liveLabel")
         header.addWidget(self.live_label)
         header.addStretch(1)
@@ -346,7 +346,7 @@ class BatchStatusWindow:
                     else row["status_path"]
                 )
                 self.table.setItem(row_index, column, item)
-        self.live_label.setText("● Live · {0}".format(time.strftime("%H:%M:%S")))
+        self.live_label.setText("● 实时 · {0}".format(time.strftime("%H:%M:%S")))
         # Restore the selection that was active before the rebuild.
         if selected_status:
             for row_index, row in enumerate(self._rows):
@@ -431,10 +431,35 @@ def _user_role(QtCore):
         return QtCore.Qt.UserRole
 
 
+_STATUS_LABELS = {
+    "running": "运行中",
+    "preparing": "准备中",
+    "exporting": "导出中",
+    "exporting_labels": "导出标注中",
+    "creating": "创建中",
+    "creating_mcs": "创建 .mcs 中",
+    "waiting_for_mimics": "等待 Mimics",
+    "queued": "排队中",
+    "importing": "导入中",
+    "appending": "追加中",
+    "completed": "已完成",
+    "completed_with_errors": "完成（有失败）",
+    "done": "已完成",
+    "failed": "失败",
+    "cancelled": "已取消",
+    "canceled": "已取消",
+    "closed": "已关闭",
+    "abandoned": "已放弃",
+    "stop_requested": "已请求停止",
+    "cancel_requested": "已请求取消",
+}
+
+
 def _display_status(row):
     status = row["status"]
-    if status in TERMINAL_STATES:
-        return status.replace("_", " ").title()
+    label = _STATUS_LABELS.get(str(status or "").lower())
+    if label:
+        return label
     return status.replace("_", " ").title()
 
 
@@ -485,7 +510,7 @@ def request_stop(row, reason="user"):
     """Write the kind-specific stop marker; return (ok, message)."""
     marker = _stop_marker(row)
     if not marker:
-        return False, "This task kind cannot be stopped from here."
+        return False, "该类任务无法从这里停止。"
     payload = {
         "status": "stop_requested",
         "requested_at_epoch": time.time(),
@@ -498,7 +523,7 @@ def request_stop(row, reason="user"):
             json.dump(payload, handle, indent=2)
         os.replace(tmp, marker)
     except OSError as exc:
-        return False, "Failed to write the stop marker: {0}".format(exc)
+        return False, "写入停止标记失败：{0}".format(exc)
     if marker.endswith("_mcs_queue_stop.json"):
         # A stopped queue must not pick up new cases: drop the active marker
         # the queue scanner keys on (same as _request_queue_stop). Covers
@@ -508,7 +533,7 @@ def request_stop(row, reason="user"):
             os.remove(str(Path(marker).parent / "_mcs_queue_active.json"))
         except OSError:
             pass
-    return True, "Stop requested for {0} {1}.".format(row["kind"], row["label"])
+    return True, "已请求停止 {0}：{1}。".format(row["kind"], row["label"])
 
 
 def _style_status_item(QtGui, item, status):

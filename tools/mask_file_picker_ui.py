@@ -152,7 +152,7 @@ def main():
             existing.add(os.path.normcase(path))
             added += 1
         submit.setEnabled(files.count() > 0)
-        status.setText("{} file(s) selected.".format(files.count()))
+        status.setText("已选择 {0} 个文件。".format(files.count()))
         return added
 
     def browse():
@@ -160,7 +160,7 @@ def main():
             QtCore,
             QtWidgets,
             dialog,
-            "Select Masks to Import",
+            "选择要导入的 Mask",
             str(context.get("initial_path") or Path.home()),
             "Segmentation files (*.nii *.nii.gz *.mha *.mhd *.nrrd *.seg.nii *.seg.nii.gz);;All files (*)",
             add_paths,
@@ -180,7 +180,7 @@ def main():
         for item in files.selectedItems():
             files.takeItem(files.row(item))
         submit.setEnabled(files.count() > 0)
-        status.setText("{} file(s) selected.".format(files.count()))
+        status.setText("已选择 {0} 个文件。".format(files.count()))
 
     def finish():
         paths = [path for path in current_paths() if path]

@@ -219,7 +219,7 @@ class _AsyncPathDialog:
             raise
         if self.button is not None:
             self.button.setEnabled(False)
-            self.button.setText("Opening...")
+            self.button.setText("打开中...")
         self.timer = QtCore.QTimer(parent)
         self.timer.timeout.connect(self._poll)
         self.timer.start(100)
@@ -260,8 +260,8 @@ class _AsyncPathDialog:
                 {
                     "status": "failed",
                     "error": (
-                        "The path window closed before returning a selection "
-                        "(exit code {}). {}"
+                        "路径窗口在返回选择前关闭了"
+                        "（退出码 {0}）。{1}"
                     ).format(returncode, self._diagnostic()),
                 }
             )
@@ -271,7 +271,7 @@ class _AsyncPathDialog:
             self._complete(
                 {
                     "status": "failed",
-                    "error": "The path window timed out. The selected drive may be offline.",
+                    "error": "路径选择窗口超时。所选磁盘可能已离线。",
                 }
             )
 
@@ -281,7 +281,7 @@ class _AsyncPathDialog:
         self.finished = True
         self.timer.stop()
         if self.button is not None:
-            original = str(self.button.property("pathDialogText") or "Browse...")
+            original = str(self.button.property("pathDialogText") or "浏览...")
             self.button.setText(original)
             self.button.setEnabled(True)
         state = str(status.get("status") or "failed")
@@ -359,7 +359,7 @@ def choose_path_async(
         )
     except Exception as exc:
         if button is not None:
-            button.setText(str(button.property("pathDialogText") or "Browse..."))
+            button.setText(str(button.property("pathDialogText") or "浏览..."))
             button.setEnabled(True)
         message = "无法打开路径选择窗口：{}".format(exc)
         if error_callback is not None:

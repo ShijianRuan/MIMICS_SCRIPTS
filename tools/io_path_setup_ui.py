@@ -436,16 +436,16 @@ def run_ui(context, preview_path=""):
     window.setModal(False)
     window.setMinimumWidth(680)
     window.resize(820, 610)
-    window.setWindowTitle("Export Masks")
+    window.setWindowTitle("导出 Mask")
     window.setStyleSheet(shared_stylesheet())
 
     root = QtWidgets.QVBoxLayout(window)
     root.setContentsMargins(30, 26, 30, 24)
     root.setSpacing(16)
-    title = QtWidgets.QLabel("Export project masks")
+    title = QtWidgets.QLabel("导出工程 Mask")
     title.setObjectName("title")
     subtitle = QtWidgets.QLabel(
-        "Confirm the source case and choose where editable label files should be written."
+        "确认来源病例，选择标签文件的输出位置。"
     )
     subtitle.setObjectName("subtitle")
     subtitle.setWordWrap(True)
@@ -560,8 +560,8 @@ def run_ui(context, preview_path=""):
 
     source_initial = context.get("source_initial") or remembered_mode.get("source_path", "")
     source_edit = path_row(
-        "SOURCE IMAGE OR CASE", source_initial, file_or_folder=True,
-        hint="Supported: NIfTI, MHA/MHD, NRRD, a DICOM file, case folder, or DICOM series folder.",
+        "来源图像或病例", source_initial, file_or_folder=True,
+        hint="支持：NIfTI、MHA/MHD、NRRD、DICOM 文件、病例文件夹或 DICOM 序列文件夹。",
     )
 
     # R61-7: only a folder the user actually chose themselves sticks across
@@ -572,7 +572,7 @@ def run_ui(context, preview_path=""):
         if remembered_mode.get("output_custom")
         else ""
     )
-    output_edit = path_row("EXPORT ROOT", output_initial, hint="Optional to change. A safe default is filled automatically from the source path.")
+    output_edit = path_row("输出根目录", output_initial, hint="可不修改——会根据来源路径自动填写安全默认值。")
     output_preview = _label(QtWidgets, "", "preview")
     output_preview.setWordWrap(True)
     form.addWidget(output_preview)
@@ -597,20 +597,29 @@ def run_ui(context, preview_path=""):
     mask_candidate_list = QtWidgets.QListWidget()
     mask_candidate_list.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
     mask_candidate_list.setMaximumHeight(120)
-    mask_candidate_list.addItems(available_masks)
+    for name in available_masks:
+        item = QtWidgets.QListWidgetItem(name)
+        item.setCheckState(QtCore.Qt.Unchecked)
+        mask_candidate_list.addItem(item)
     mask_candidate_list.setEnabled(False)
+    # A click toggles the name into the field (NoSelection mode) and the
+    # checkbox is the visible record of what is currently in the field.
     mask_candidate_list.itemClicked.connect(
         lambda item: _toggle_name_in_field(mask_names, item.text())
     )
-    # Filter the candidate list as the user types in the name field.
+    # Filter the candidate list as the user types in the name field; the
+    # checkbox states follow the field so hand-typed edits stay visible.
     mask_names.textChanged.connect(
         lambda text: _filter_list_widget(mask_candidate_list, _last_token(text))
+    )
+    mask_names.textChanged.connect(
+        lambda _text: _sync_candidate_check_state(mask_names, mask_candidate_list)
     )
     form.addWidget(mask_candidate_list)
     mask_named.toggled.connect(mask_names.setEnabled)
     mask_named.toggled.connect(mask_candidate_list.setEnabled)
     policy_row = QtWidgets.QHBoxLayout()
-    policy_row.addWidget(_label(QtWidgets, "IF FILES ALREADY EXIST", "section"))
+    policy_row.addWidget(_label(QtWidgets, "同名文件已存在时", "section"))
     policy_row.addStretch(1)
     skip_radio = QtWidgets.QRadioButton("跳过已存在")
     overwrite_radio = QtWidgets.QRadioButton("覆盖已存在")
@@ -622,7 +631,7 @@ def run_ui(context, preview_path=""):
     # P1 multi-format export: one or more formats per export, all sharing
     # identical geometry. NIfTI stays the default so historical behaviour
     # is unchanged unless the user opts in.
-    form.addWidget(_label(QtWidgets, "EXPORT FORMATS", "section"))
+    form.addWidget(_label(QtWidgets, "导出格式", "section"))
     format_row = QtWidgets.QHBoxLayout()
     format_boxes = {}
     remembered_formats = set(remembered_mode.get("export_formats", []) or [])
@@ -649,7 +658,7 @@ def run_ui(context, preview_path=""):
                 output_edit.setText(new_output)
         output = output_edit.text().strip()
         case_id = str(context.get("case_id") or "case")
-        preview_text = "Final folder: {0}".format(os.path.join(output, case_id, "segmentations")) if output else ""
+        preview_text = "最终文件夹：{0}".format(os.path.join(output, case_id, "segmentations")) if output else ""
         if output_preview.text() != preview_text:
             output_preview.setText(preview_text)
         submit.setEnabled(bool(source and output))
@@ -670,7 +679,7 @@ def run_ui(context, preview_path=""):
     footer.addWidget(remember)
     footer.addStretch(1)
     cancel = QtWidgets.QPushButton("取消")
-    submit = QtWidgets.QPushButton("Start Export")
+    submit = QtWidgets.QPushButton("开始导出")
     submit.setObjectName("primary")
     footer.addWidget(cancel)
     footer.addWidget(submit)
@@ -688,7 +697,7 @@ def run_ui(context, preview_path=""):
     submission_state = {"running": False, "submitted": False}
     bootstrap_descriptor = {
         "kind": "starting",
-        "title": "Export masks",
+        "title": "导出 Mask",
         "stop_path": bootstrap_stop_path,
         "stop_paths": [bootstrap_stop_path] if bootstrap_stop_path else [],
     }
@@ -735,7 +744,7 @@ def run_ui(context, preview_path=""):
         subtitle.setText("任务运行期间 Mimics 仍可正常使用。")
         progress_panel.show()
         stop_task.setEnabled(bool(bootstrap_stop_path))
-        append_activity("Request submitted to Mimics.")
+        append_activity("已提交给 Mimics。")
 
     def request_stop():
         descriptor = task_state.get("descriptor") or {}
@@ -765,9 +774,9 @@ def run_ui(context, preview_path=""):
             task_state["stop_requested"] = True
             stop_task.setEnabled(False)
             progress_detail.setText("已请求停止，正在等待活动进程安全退出。")
-            append_activity("Stop requested. The current safe unit of work will finish first.")
+            append_activity("已请求停止。当前安全工作单元会先完成。")
         except Exception as exc:
-            progress_detail.setText("Could not request stop: {0}".format(exc))
+            progress_detail.setText("请求停止失败：{0}".format(exc))
 
     def terminal_state(state):
         return str(state or "").lower() in (
@@ -784,7 +793,7 @@ def run_ui(context, preview_path=""):
         index = int(payload.get("index", 0) or 0)
         progress_percent = payload.get("progress_percent")
         current = payload.get("case_id") or payload.get("mask_name") or ""
-        progress_heading.setText(str(descriptor.get("title") or "Task progress"))
+        progress_heading.setText(str(descriptor.get("title") or "任务进度"))
         if progress_percent is not None and not terminal_state(state):
             try:
                 percent = min(100, max(0, int(float(progress_percent))))
@@ -802,11 +811,11 @@ def run_ui(context, preview_path=""):
         detail = phase.capitalize()
         if total:
             remaining = max(0, total - completed - failed)
-            detail += " - {0} created, {1} failed, {2} total".format(completed, failed, total)
+            detail += " - 已生成 {0}，失败 {1}，共 {2}".format(completed, failed, total)
             if remaining and not terminal_state(state):
-                detail += " ({0} remaining)".format(remaining)
+                detail += "（剩余 {0}）".format(remaining)
         if current:
-            detail += "\nCurrent: {0}".format(current)
+            detail += "\n当前：{0}".format(current)
         if payload.get("error"):
             detail += "\n{0}".format(payload.get("error"))
         progress_detail.setText(detail)
@@ -830,8 +839,8 @@ def run_ui(context, preview_path=""):
                 task_state["owner_lost"] = True
                 request_stop()
                 error = (
-                    "The Mimics process closed before it could continue monitoring this task. "
-                    "A stop request was written for any owned background work. Reopen Mimics and retry."
+                    "Mimics 在任务完成前关闭，无法继续监控。"
+                    "已为后台任务写入停止请求。请重新打开 Mimics 后重试。"
                 )
                 try:
                     write_json(status_path, {
@@ -843,21 +852,21 @@ def run_ui(context, preview_path=""):
                     pass
                 update_progress_from_payload(
                     {"status": "failed", "error": error},
-                    {"title": "Mimics closed unexpectedly"},
+                    {"title": "Mimics 意外关闭"},
                 )
             return
         if setup_state in ("failed", "cancelled", "canceled", "closed"):
             default_error = (
-                "Task start was cancelled."
+                "任务启动已取消。"
                 if setup_state in ("cancelled", "canceled", "closed")
-                else "The task could not start."
+                else "任务未能启动。"
             )
             update_progress_from_payload(
                 {
                     "status": "cancelled" if setup_state in ("cancelled", "canceled", "closed") else "failed",
                     "error": setup_status.get("error", default_error),
                 },
-                {"title": "Task cancelled" if setup_state in ("cancelled", "canceled", "closed") else "Could not start task"},
+                {"title": "任务已取消" if setup_state in ("cancelled", "canceled", "closed") else "任务启动失败"},
             )
             return
         if setup_state in ("opening", "configuring", "submitted", "launching", ""):
@@ -917,7 +926,7 @@ def run_ui(context, preview_path=""):
         submit.setEnabled(True)
         if result.get("error"):
             output_preview.setText("")
-            QtWidgets.QMessageBox.warning(window, result.get("title", "Path Error"), result["error"])
+            QtWidgets.QMessageBox.warning(window, result.get("title", "路径错误"), result["error"])
             refresh_default()
             return
         selection = result["selection"]
@@ -1003,7 +1012,7 @@ def run_ui(context, preview_path=""):
         def validate_paths():
             try:
                 if not os.path.exists(source):
-                    submission_results.put({"title": "Source Not Found", "error": "Choose an existing source file or folder."})
+                    submission_results.put({"title": "来源不存在", "error": "请选择一个存在的来源文件或文件夹。"})
                     return
                 if not os.path.isdir(output):
                     os.makedirs(output)
@@ -1013,16 +1022,16 @@ def run_ui(context, preview_path=""):
                 case_info = discover_single_source(source)
                 if not case_info:
                     submission_results.put({
-                        "title": "Unsupported Source",
-                        "error": "No supported 3D image or DICOM folder was found.",
+                        "title": "不支持的来源",
+                        "error": "未找到支持的 3D 图像或 DICOM 文件夹。",
                     })
                     return
                 selection["case_info"] = case_info
                 submission_results.put({"selection": selection})
             except Exception as exc:
                 submission_results.put({
-                    "title": "Path Validation Failed",
-                    "error": "The selected paths could not be validated.\n\n{0}".format(exc),
+                    "title": "路径校验失败",
+                    "error": "所选路径无法完成校验。\n\n{0}".format(exc),
                 })
 
         thread = threading.Thread(target=validate_paths, name="io-path-validation")
@@ -1071,6 +1080,30 @@ def _last_token(text):
     return str(text or "").rsplit(",", 1)[-1].strip()
 
 
+def _selected_names(field):
+    """Parse the comma-separated name field into a clean, de-duplicated list."""
+    seen = set()
+    names = []
+    for item in str(field.text() or "").split(","):
+        name = item.strip()
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
+
+
+def _sync_candidate_check_state(field, widget):
+    """Reflect the name field into the candidate list's checkboxes.
+
+    The list is NoSelection (clicks toggle instead of selecting), so without
+    this sync the user cannot see which names are already in the field.
+    """
+    selected = set(_selected_names(field))
+    for index in range(widget.count()):
+        item = widget.item(index)
+        item.setCheckState(QtCore.Qt.Checked if item.text() in selected else QtCore.Qt.Unchecked)
+
+
 def _toggle_name_in_field(field, name):
     """Add or remove a mask name in the comma-separated name field.
 
@@ -1078,7 +1111,7 @@ def _toggle_name_in_field(field, name):
     clean, de-duplicated, comma-separated list.  Names that are absent from
     the field (typed freehand) are likewise preserved.
     """
-    current = [item.strip() for item in field.text().split(",") if item.strip()]
+    current = _selected_names(field)
     target = str(name).strip()
     if not target:
         return

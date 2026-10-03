@@ -526,8 +526,10 @@ def run(context=None, preview_path=""):
     source_row.addWidget(QtWidgets.QLabel("或选择"))
     pick_files = QtWidgets.QPushButton("选择文件...")
     pick_folder = QtWidgets.QPushButton("选择文件夹...")
+    paste_button = QtWidgets.QPushButton("粘贴路径")
     source_row.addWidget(pick_files)
     source_row.addWidget(pick_folder)
+    source_row.addWidget(paste_button)
     source_row.addStretch(1)
     root.addLayout(source_row)
 
@@ -558,7 +560,7 @@ def run(context=None, preview_path=""):
     mask_path_layout = QtWidgets.QHBoxLayout(mask_path_widget)
     mask_path_layout.setContentsMargins(0, 0, 0, 0)
     mask_path_edit = QtWidgets.QLineEdit()
-    mask_path_edit.setPlaceholderText("输入或粘贴分割文件路径，多个用 ; 分隔")
+    mask_path_edit.setPlaceholderText("输入或粘贴分割文件路径（每行一条或用 ; 分隔）")
     mask_path_browse = QtWidgets.QPushButton("浏览...")
     mask_path_layout.addWidget(QtWidgets.QLabel("Mask 在别处？"))
     mask_path_layout.addWidget(mask_path_edit, 1)
@@ -786,9 +788,7 @@ def run(context=None, preview_path=""):
             return
         add_paths(values)
 
-    paste_button = QtWidgets.QPushButton("粘贴路径")
     paste_button.clicked.connect(paste_paths)
-    output_row.insertWidget(3, paste_button)
 
     def browse_output():
         # A native dialog can hang on disconnected drives / SMB folders; the
@@ -800,7 +800,7 @@ def run(context=None, preview_path=""):
                 output_edit.setText(str(value))
 
         choose_existing_directory_async(
-            QtCore, QtWidgets, window, "Choose Output Folder",
+            QtCore, QtWidgets, window, "选择输出文件夹",
             output_edit.text().strip() or str(Path.home()),
             _chosen,
             button=browse,
@@ -814,7 +814,11 @@ def run(context=None, preview_path=""):
         def _chosen(values):
             incoming = [str(v) for v in (values if isinstance(values, (list, tuple)) else [values]) if str(v).strip()]
             if incoming:
-                merged = [p for p in mask_path_edit.text().split(";") if p.strip()]
+                merged = [
+                    part for part in
+                    mask_path_edit.text().replace("\r", "\n").replace("\n", ";").split(";")
+                    if part.strip()
+                ]
                 mask_path_edit.setText(";".join(merged + incoming))
 
         choose_open_files_async(
@@ -874,11 +878,11 @@ def run(context=None, preview_path=""):
         mask_selection = "none" if mask_none.isChecked() else "all"
         mask_paths = []
         if kind in ("single", "multi_single") and mask_path_widget.isVisible():
-            # A ; -separated field: one separator, never valid inside a path
-            # in practice, and paste joins multi-line clipboard text with it.
+            # ; or newlines separate entries (paste keeps multi-line clipboard
+            # text as-is); neither is valid inside a path in practice.
             mask_paths = [
                 part.strip().strip('"')
-                for part in mask_path_edit.text().split(";")
+                for part in mask_path_edit.text().replace("\r", "\n").replace("\n", ";").split(";")
                 if part.strip().strip('"')
             ]
         selection = {
