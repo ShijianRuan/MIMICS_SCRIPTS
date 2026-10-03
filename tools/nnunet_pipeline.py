@@ -740,7 +740,7 @@ def prepare_source_grid_cases(
             for row in skipped[:10]
         )
         raise RuntimeError(
-            "nnU-Net needs at least {} usable cases; found {}. {}".format(
+            "Training needs at least {} usable case(s); found {}. {}".format(
                 minimum, len(rows), details
             )
         )
