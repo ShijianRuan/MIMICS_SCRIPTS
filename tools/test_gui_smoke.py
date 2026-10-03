@@ -625,6 +625,49 @@ class TestTrainingSetupPathMemory(unittest.TestCase):
                 finally:
                     window.window.close()
 
+    def test_training_wizards_warn_on_duplicate_task(self):
+        # G7: retraining the same task_id silently piles up near-duplicate
+        # models. Both wizards must surface existing models for the task
+        # before GPU time is spent (warning only, submission still allowed).
+        _AppFixture.app()
+        import flexict_training_setup_ui as flexict_ui
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            home = self._settings_home(
+                tmp, "flexict_settings.json", {"label_name": "kidney"}
+            )
+            with mock.patch.object(flexict_ui.Path, "home", lambda: home), mock.patch.object(
+                flexict_ui, "workspace_root", lambda _c: str(tmp / "ws")
+            ), mock.patch.object(
+                flexict_ui, "load_config", lambda: {"root": str(tmp)}
+            ), mock.patch.object(
+                flexict_ui, "load_models",
+                lambda workspace: [
+                    {"model_id": "flexict_kidney_v1", "task_id": "kidney"},
+                    {"model_id": "flexict_other", "task_id": "liver"},
+                ],
+            ), mock.patch.object(
+                flexict_ui.TrainingSetupWindow, "_refresh_models",
+                lambda self: None,
+            ):
+                window = flexict_ui.TrainingSetupWindow(
+                    {"workspace": str(tmp / "ws")}, tmp / "ctx.json", QT
+                )
+                try:
+                    window.label_edit.setText("kidney")
+                    warning = window._duplicate_model_warning(window._request())
+                    self.assertIn("flexict_kidney_v1", warning)
+                    self.assertIn("1 个模型", warning)
+                    # A different task must not warn.
+                    window.label_edit.setText("liver_xyz")
+                    self.assertNotIn(
+                        "个模型",
+                        window._duplicate_model_warning(window._request()),
+                    )
+                finally:
+                    window.window.close()
+
     def test_nnunet_form_fields_carry_one_line_explanations(self):
         # A5 minimal plan: Dataset ID / Fold / GPU count / GPU devices (the
         # concepts an annotator cannot be expected to know) must carry a

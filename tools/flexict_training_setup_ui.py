@@ -635,6 +635,29 @@ class TrainingSetupWindow:
             request["remote_profile_id"] = profile_id
         return request
 
+    def _duplicate_model_warning(self, request) -> str:
+        """G7: retraining the same task_id piles up near-duplicate models;
+        surface existing ones before the GPU time is spent (not a block)."""
+        try:
+            existing = load_models(request["workspace"])
+        except Exception:
+            return ""
+        duplicates = [
+            model for model in existing
+            if str(model.get("task_id") or "") == request["task_id"]
+        ]
+        if not duplicates:
+            return ""
+        return (
+            "该任务名下已有 {} 个模型（{}）。继续训练会新增一个模型而不是更新"
+            "已有的；如需改进旧模型，请先在模型管理器中确认是否还需要它。".format(
+                len(duplicates),
+                ", ".join(
+                    str(model.get("model_id") or "") for model in duplicates[:3]
+                ),
+            )
+        )
+
     def _submit(self):
         if self._submission_pending:
             return
@@ -646,6 +669,15 @@ class TrainingSetupWindow:
                 raise ValueError(
                     "FlexiCT 少样本训练每个模型最多支持 4 个标签；更多标签请使用 nnU-Net。"
                 )
+            warning = self._duplicate_model_warning(request)
+            if warning:
+                answer = self.QtWidgets.QMessageBox.question(
+                    self.window, "重复任务", warning,
+                    self.QtWidgets.QMessageBox.Yes | self.QtWidgets.QMessageBox.No,
+                    self.QtWidgets.QMessageBox.No,
+                )
+                if answer != self.QtWidgets.QMessageBox.Yes:
+                    return
             self._submission_generation += 1
             generation = self._submission_generation
             self._submission_pending = True
