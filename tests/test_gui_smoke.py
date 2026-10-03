@@ -514,6 +514,28 @@ class TestIoPathSetupExportOnly(unittest.TestCase):
         self.assertIn("count_existing_label_files", source)
         self.assertIn("mask_candidate_list", source)
 
+    def test_candidate_checkboxes_sync_with_name_field(self):
+        # R68 audit P1: the sync helper ran without its QtCore import and
+        # raised NameError on every keystroke, silently disabling the whole
+        # checkbox feature. Drive it the way textChanged does.
+        import io_path_setup_ui as io_ui
+        from PySide6 import QtCore, QtWidgets
+        app = _AppFixture.app()
+        field = QtWidgets.QLineEdit("liver")
+        widget = QtWidgets.QListWidget()
+        widget.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        for name in ("liver", "spleen"):
+            item = QtWidgets.QListWidgetItem(name)
+            item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
+            widget.addItem(item)
+        io_ui._sync_candidate_check_state(field, widget)  # must not raise
+        self.assertEqual(QtCore.Qt.Checked, widget.item(0).checkState())
+        self.assertEqual(QtCore.Qt.Unchecked, widget.item(1).checkState())
+        field.setText("spleen")
+        io_ui._sync_candidate_check_state(field, widget)
+        self.assertEqual(QtCore.Qt.Unchecked, widget.item(0).checkState())
+        self.assertEqual(QtCore.Qt.Checked, widget.item(1).checkState())
+
 
 class TestIoPathOutputNotSticky(unittest.TestCase):
     """R61-7: a remembered output folder that was merely the computed

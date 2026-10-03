@@ -1099,6 +1099,7 @@ def _sync_candidate_check_state(field, widget):
     this sync the user cannot see which names are already in the field.
     """
     selected = set(_selected_names(field))
+    from PySide6 import QtCore  # local: module stays importable headless
     for index in range(widget.count()):
         item = widget.item(index)
         item.setCheckState(QtCore.Qt.Checked if item.text() in selected else QtCore.Qt.Unchecked)
