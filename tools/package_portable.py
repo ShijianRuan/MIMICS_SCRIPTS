@@ -69,6 +69,7 @@ REQUIRED_EXTERNAL_UI_FILES = [
     "tools/nnunet_stage_worker.py",
     "tools/nnunet_training_setup_ui.py",
     "tools/nnunet_prediction_setup_ui.py",
+    "tools/nnunet_batch_predict_ui.py",
     "tools/nnunet_status_viewer.py",
     "tools/interactive_algorithms_worker.py",
     "tools/verify_medical_geometry.py",

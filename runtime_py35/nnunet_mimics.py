@@ -34,6 +34,7 @@ def _offer_source_geometry_repair(error_text):
 TITLE = "nnU-Net"
 BUTTON_TRAIN = "Train Model..."
 BUTTON_PREDICT = "Predict Current Case..."
+BUTTON_BATCH_PREDICT = "Batch Predict Dataset..."
 BUTTON_STATUS = "Show Status and Models"
 BUTTON_UPDATE = "Update Matching Masks"
 BUTTON_CREATE = "Create Editable Copies"
@@ -294,6 +295,45 @@ def _start_prediction_with_context(context):
         ),
     )
     return 0
+
+
+def show_batch_predict():
+    """Open the batch prediction window (D20). No monitor is started:
+    predictions only write to disk, so progress and stopping live in the
+    status window; there is nothing to feed back into Mimics."""
+    try:
+        context = {"workspace": _workspace()}
+        root = _setup_root()
+        context_path = os.path.join(
+            root, "batch_predict_context_{0}.json".format(uuid.uuid4().hex[:8])
+        )
+        stderr_path = context_path + ".stderr.log"
+        _write_json(context_path, context)
+        script = os.path.join(
+            _project_root(), "tools", "nnunet_batch_predict_ui.py"
+        )
+        process = mimics_mask_apply._launch_gui_process(
+            [_external_python(), script, "--context", context_path],
+            cwd=_project_root(),
+            stderr_log=stderr_path,
+        )
+        _log(
+            logging.INFO,
+            "nnU-Net batch prediction window opened outside Mimics. PID: {0}.".format(
+                process.pid
+            ),
+        )
+        return 0
+    except Exception as exc:
+        _log(logging.ERROR, "Could not open batch prediction window: {0}".format(exc))
+        mimics.dialogs.message_box(
+            "Could not open the batch prediction window.\n\n{0}".format(
+                external_window_launcher.error_guidance(exc)
+            ),
+            title=TITLE,
+            ui_blocking=False,
+        )
+        return 1
 
 
 def show_status():
@@ -1126,4 +1166,6 @@ def main(action=None):
             return 1
     if action == BUTTON_STATUS:
         return show_status()
+    if action == BUTTON_BATCH_PREDICT:
+        return show_batch_predict()
     return 0

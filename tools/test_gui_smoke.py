@@ -524,6 +524,121 @@ class TestViewerNonBlockingRefresh(unittest.TestCase):
             refresher._drain_timer.stop()
 
 
+class TestBatchPredictionWindow(unittest.TestCase):
+    """D20: batch prediction dispatches per-case jobs and reports skips."""
+
+    @staticmethod
+    def _usable_model_row(model_dir: Path) -> dict:
+        manifest = model_dir / "mimics_model_manifest.json"
+        return {
+            "model_id": "model_a",
+            "task_id": "liver",
+            "task_name": "Liver",
+            "configuration": "3d_fullres",
+            "labels": [{"id": 1, "name": "Liver"}],
+            "dataset_id": 711,
+            "model_dir": str(model_dir),
+            "manifest_path": str(manifest),
+            "created_at_epoch": 100.0,
+        }
+
+    def _model_dir(self, tmp: Path) -> Path:
+        import nnunet_common as common
+
+        model_dir = tmp / "models" / "liver" / "model_a"
+        (model_dir / "fold_0").mkdir(parents=True)
+        for name in ("plans.json", "dataset.json"):
+            (model_dir / name).write_text("{}", encoding="utf-8")
+        (model_dir / "fold_0" / "checkpoint_final.pth").write_bytes(b"w")
+        common.write_json_atomic(
+            model_dir / "mimics_model_manifest.json",
+            {
+                "schema_version": common.MODEL_SCHEMA_VERSION,
+                "model_id": "model_a",
+                "model_dir": str(model_dir),
+                "manifest_path": str(model_dir / "mimics_model_manifest.json"),
+                "folds": ["0"],
+            },
+        )
+        return model_dir
+
+    def test_submit_dispatches_per_case_jobs_and_reports_skips(self):
+        _AppFixture.app()
+        import nnunet_batch_predict_ui as ui
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            model_dir = self._model_dir(tmp)
+            row = self._usable_model_row(model_dir)
+            cases = tmp / "cases"
+            for case in ("case_a", "case_b"):
+                image = cases / case / "ct.nii.gz"
+                image.parent.mkdir(parents=True)
+                image.write_bytes(b"x")
+            # Ambiguous dir: two images, which one to predict is a guess.
+            (cases / "ambiguous").mkdir(parents=True)
+            for extra in ("a.nii.gz", "b.nii.gz"):
+                (cases / "ambiguous" / extra).write_bytes(b"x")
+
+            window = ui.BatchPredictionWindow(
+                {"workspace": str(tmp / "workspace")}, QT
+            )
+            self.addCleanup(window.window.close)
+            # Feed the model discovery result directly (background path is
+            # covered by the same _poll timer as the single-case window).
+            window._apply_models([row], "")
+            self.assertEqual(window.table.rowCount(), 1)
+            self.assertTrue(window.start.isEnabled())
+
+            requests = []
+
+            def fake_create_job(request):
+                requests.append(request)
+                return {"job_id": request["job_id"], "status_path": "s.json"}
+
+            window.image_root_edit.setText(str(cases))
+            window.output_edit.setText(str(tmp / "out"))
+            with mock.patch.object(ui, "create_job", fake_create_job):
+                window._submit()
+                deadline = time.time() + 5.0
+                while time.time() < deadline:
+                    _AppFixture.app().processEvents()
+                    window._poll_background_results()
+                    if requests:
+                        break
+                    time.sleep(0.02)
+            self.assertEqual(
+                ["case_a", "case_b"], [request["case_id"] for request in requests]
+            )
+            self.assertTrue(
+                str(requests[0]["output_path"]).endswith("out\\case_a.nii.gz")
+                or str(requests[0]["output_path"]).endswith("out/case_a.nii.gz")
+            )
+            self.assertIn("已启动 2 个预测任务", window.status_label.text())
+            self.assertIn("ambiguous", window.status_label.text())
+
+    def test_missing_folders_are_rejected_before_dispatch(self):
+        _AppFixture.app()
+        import nnunet_batch_predict_ui as ui
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            window = ui.BatchPredictionWindow(
+                {"workspace": str(tmp / "workspace")}, QT
+            )
+            self.addCleanup(window.window.close)
+            window._apply_models(
+                [self._usable_model_row(self._model_dir(tmp))], ""
+            )
+            window.image_root_edit.setText("")
+            window._submit()
+            self.assertIn("病例文件夹", window.status_label.text())
+            window.image_root_edit.setText(str(tmp))
+            window.output_edit.setText("")
+            window._submit()
+            self.assertIn("输出文件夹", window.status_label.text())
+
+
 class TestIoPathSetupDebounce(unittest.TestCase):
     """Dataset recognition scans are debounced, not per-keystroke."""
 

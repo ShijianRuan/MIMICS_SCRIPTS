@@ -358,6 +358,25 @@ class Action3TrainerContractTests(unittest.TestCase):
 
 
 class DiscoveryTests(unittest.TestCase):
+    def test_batch_predict_entry_routes_to_batch_window(self):
+        """D20: the Batch Predict shell routes through nnunet_mimics to the
+        batch prediction window; the window lives in the portable bundle."""
+        shell = (
+            ROOT / "scripting_library" / "02_AI" / "nnUNet"
+            / "04_Batch_Predict_Dataset.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"nnunet_mimics"', shell)
+        self.assertIn("BUTTON_BATCH_PREDICT", shell)
+        runtime = (RUNTIME / "nnunet_mimics.py").read_text(encoding="utf-8")
+        self.assertIn('BUTTON_BATCH_PREDICT = "Batch Predict Dataset..."', runtime)
+        self.assertIn('"nnunet_batch_predict_ui.py"', runtime)
+        import package_portable
+
+        self.assertIn(
+            "tools/nnunet_batch_predict_ui.py",
+            package_portable.REQUIRED_EXTERNAL_UI_FILES,
+        )
+
     def test_label_lookup_is_case_insensitive_and_suffix_aware(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
