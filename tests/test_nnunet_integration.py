@@ -564,6 +564,68 @@ class DiscoveryTests(unittest.TestCase):
             for fold in second:
                 self.assertFalse(old_val & set(fold["train"]))
 
+    def test_materialize_freezes_non_ascii_validation_by_id(self):
+        """F16: splits store nnunet case keys, not original case ids. When
+        they differ (Chinese case ids get lossy-slugged keys), the old code
+        intersected the raw key set with the new case ids and silently
+        froze nothing - a previously-validated case could land in training
+        on rebuild. The manifest's key->id mapping must translate first."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+
+            def build(count):
+                rows = []
+                for index in range(count):
+                    image = root / "prepared" / str(index) / "image.nii.gz"
+                    label = root / "prepared" / str(index) / "label.nii.gz"
+                    image.parent.mkdir(parents=True, exist_ok=True)
+                    image.write_bytes(("image{}".format(index)).encode())
+                    label.write_bytes(("label{}".format(index)).encode())
+                    rows.append({
+                        # Non-ASCII ids: unique_case_keys slug them to
+                        # latin keys, so split entries != case ids.
+                        "case_id": "病例{}".format(index),
+                        "image": image,
+                        "label": label,
+                        "fingerprint": str(index),
+                    })
+                request = common.normalize_request({
+                    "operation": "train",
+                    "task_name": "Liver",
+                    "task_id": "liver",
+                    "workspace": root / "workspace",
+                    "labels": [{"name": "liver", "id": 1}],
+                    "validation_fraction": 0.2,
+                    "split_seed": 2026,
+                })
+                dataset, _fingerprint = pipeline._materialize_nnunet_raw(
+                    rows, request, root / "raw", root / "preprocessed")
+                split = common.read_json(
+                    root / "preprocessed" / dataset.name /
+                    "splits_final.json")
+                manifest = common.read_json(
+                    dataset / "mimics_dataset_manifest.json")
+                id_by_key = {
+                    entry["nnunet_case_id"]: entry["case_id"]
+                    for entry in manifest["cases"]
+                }
+                return split, id_by_key
+
+            first, first_ids = build(6)
+            old_val_ids = {first_ids[key] for key in first[0]["val"]}
+            self.assertTrue(old_val_ids)
+            second, second_ids = build(8)
+            new_val_ids = {second_ids[key] for key in second[0]["val"]}
+            new_train_ids = {second_ids[key] for key in second[0]["train"]}
+            self.assertTrue(
+                old_val_ids <= new_val_ids,
+                "old validation cases moved out of val: {} -> {}".format(
+                    sorted(old_val_ids), sorted(new_val_ids)))
+            self.assertFalse(
+                old_val_ids & new_train_ids,
+                "previously-validated case moved into training: {}".format(
+                    sorted(old_val_ids & new_train_ids)))
+
     def test_materialize_records_patient_groups_in_manifest(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

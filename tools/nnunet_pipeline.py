@@ -921,6 +921,26 @@ def _materialize_nnunet_raw(
                 }
         except Exception:
             frozen_val = set()
+        # F16: splits store nnunet case keys, not original case ids. A
+        # Chinese/lossy-slugged case has key != id, so intersecting the raw
+        # key set with the new case ids silently froze nothing - a
+        # previously-validated case could land in training on rebuild.
+        # Translate keys back to ids through the previous manifest first.
+        previous_manifest = raw_root / dataset_name / "mimics_dataset_manifest.json"
+        if frozen_val and previous_manifest.is_file():
+            try:
+                manifest = read_json(previous_manifest, {}) or {}
+                id_by_key = {
+                    str(entry.get("nnunet_case_id")): str(entry.get("case_id"))
+                    for entry in manifest.get("cases") or []
+                    if isinstance(entry, dict)
+                }
+                translated = set()
+                for value in frozen_val:
+                    translated.add(id_by_key.get(value, value))
+                frozen_val = translated
+            except Exception:
+                frozen_val = set()
     frozen_val &= {str(row["case_id"]) for row in rows}
     folds = _split_folds(
         rows, request, frozen_validation=frozen_val or None

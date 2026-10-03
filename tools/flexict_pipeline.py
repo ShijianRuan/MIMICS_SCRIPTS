@@ -320,20 +320,40 @@ def _split_train_val(rows: list[dict[str, Any]],
     Stratified by the target's physical SI start when >= 8 cases (few-shot
     train sets span the cranio-caudal extent, mirroring the validated
     recipe's build_dataset.py), otherwise the split is a deterministic sort
-    split.
+    split. Patient groups (same patient's multi-phase/follow-up scans) are
+    never split across train/val (F16): the group is the split unit, and an
+    explicit val case pulls its whole group with it.
     """
     case_ids = sorted(str(row["case_id"]) for row in rows)
+    group_by_case = {
+        str(row["case_id"]): str(row.get("patient_group") or "")
+        for row in rows
+    }
+    has_groups = any(group_by_case.get(case) for case in case_ids)
+
+    def _with_group(case_ids_list: list[str]) -> list[str]:
+        """Expand cases to include their patient-group members."""
+        if not has_groups:
+            return sorted(set(case_ids_list))
+        expanded = set()
+        for case in case_ids_list:
+            group = group_by_case.get(case) or case
+            for other in case_ids:
+                if (group_by_case.get(other) or other) == group:
+                    expanded.add(other)
+        return sorted(expanded)
+
     val_cases = int(request.get("val_cases") or DEFAULT_CONFIG["default_val_cases"])
     val_cases = max(1, min(val_cases, len(case_ids) - 1))
     # Explicit per-case selection from the training UI wins over the heuristic.
     explicit = [str(v) for v in (request.get("val_case_ids") or [])
                 if str(v) in case_ids]
     if explicit:
-        validation = sorted(set(explicit))
+        validation = _with_group(sorted(set(explicit)))
         return sorted(c for c in case_ids if c not in validation), validation
     if len(case_ids) < 8 or not rows:
-        validation = sorted(case_ids[-val_cases:])
-        return sorted(case_ids[:-val_cases]), validation
+        validation = _with_group(sorted(case_ids[-val_cases:]))
+        return sorted(c for c in case_ids if c not in validation), validation
     import nibabel as nib
     import numpy as np
 
@@ -362,6 +382,7 @@ def _split_train_val(rows: list[dict[str, Any]],
             if len(validation) >= val_cases:
                 break
         validation.sort()
+    validation = _with_group(validation)
     return sorted(c for c in case_ids if c not in validation), validation
 
 

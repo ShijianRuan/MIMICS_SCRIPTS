@@ -374,6 +374,44 @@ class TestTrainValSplit(unittest.TestCase):
         self.assertLessEqual(starts[0], 4)
         self.assertGreaterEqual(starts[1], 5)
 
+    def test_split_never_straddles_patient_group(self):
+        """F16: the same patient's multi-phase scans share a patient_group;
+        _write_flexict_splits' heuristic must keep the whole group on one
+        side, or the patient leaks across train/val."""
+        rows = [
+            {"case_id": "patientA_phase1", "image": "i.nii.gz",
+             "label": "l.nii.gz", "patient_group": "patientA"},
+            {"case_id": "patientA_phase2", "image": "i.nii.gz",
+             "label": "l.nii.gz", "patient_group": "patientA"},
+            {"case_id": "patientB_phase1", "image": "i.nii.gz",
+             "label": "l.nii.gz", "patient_group": "patientB"},
+            {"case_id": "patientC_phase1", "image": "i.nii.gz",
+             "label": "l.nii.gz", "patient_group": "patientC"},
+        ]
+        for request in ({"val_cases": 1}, {"val_cases": 2},
+                        {"val_cases": 1, "val_case_ids": ["patientA_phase1"]}):
+            train, val = fp._split_train_val(rows, request)
+            sides = {}
+            for case in train:
+                sides[case] = "train"
+            for case in val:
+                sides[case] = "val"
+            group_side = {
+                sides[row["case_id"]]
+                for row in rows if row["case_id"].startswith("patientA_")
+            }
+            self.assertEqual(
+                1, len(group_side),
+                "patient A straddles train/val for {}: {}".format(
+                    request, sorted(sides.items())))
+
+    def test_split_without_groups_unchanged(self):
+        """No patient_group info: case-level split behavior must be exactly
+        the historical result (the _with_group expansion is a no-op)."""
+        train, val = fp._split_train_val(self._rows(5), {"val_cases": 1})
+        self.assertEqual(len(val), 1)
+        self.assertEqual(len(train), 4)
+
 
 class TestScanFlexictCases(unittest.TestCase):
     def test_scan_reports_missing_label(self):
