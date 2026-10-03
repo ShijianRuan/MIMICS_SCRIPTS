@@ -4427,11 +4427,15 @@ _stop_marker + request_stop，<50 行）+ 导入窗 2 个浏览按钮；删除 7
 
 ### 遗留
 
-- 铁律 4 后续项（未立项）：C1 后 `mimics_stop_background.py`
-  main_stop_import/main_stop_export 与 `mimics_import.py`
-  _launch_external_import_setup + io_path_setup_ui import modes 不再有
-  非测试调用方，删除涉及较大爆炸半径（io_setup_mimics modes + ~5 测试
-  pin + flow tests），登记待后续轮处理。
+- 铁律 4 后续项（未立项）：**mimics_import.main 整体死状态**——C1 后
+  main() 生产调用方为零，剩余 argv 批量路径仍被 ~50 个测试引用
+  （~4488 行文件），需单独一轮评估整删 or 保留为受支持 CLI（见账本
+  R66 新登记）。原"C1 孤儿代码删除"已于本轮完成（commit `1a03042`，
+  净 −609 行，smoke 8/8 + fast 29/29），并顺带修复
+  ui_theme._application_icon 悬空 QPainter 导致外置窗口启动即
+  0xC0000409 崩溃的 P0（drawPolygon(QPoint,...) 在本版 PySide6 抛
+  TypeError 且异常路径不 end painter；改 QPolygon + finally end +
+  子进程回归测试）。
 
 ### E 真实场景可用性审查（AUD 批次，任务 #60）
 

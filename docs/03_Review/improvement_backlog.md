@@ -288,16 +288,29 @@
   03_Window_Level 预设对话框内新增 Undo Last/Edit Presets.../Reset
   Full Range 按钮。验收：41 window/editor/doc 测试全绿，冒烟 8/8
   （`20261003T003229`）。
-- [ ] **R66 遗留：无调用方的停止/导入代码删除**（铁律 4 后续项，
-  未排期）：C1 后 `mimics_stop_background.py` main_stop_import/
-  main_stop_export 与 `mimics_import.py` _launch_external_import_setup
-  + io_path_setup_ui import modes 不再有非测试调用方。删除涉及较大
-  爆炸半径（io_setup_mimics modes + ~5 测试 pin + flow tests），
-  需单独一轮处理。验收标准：删除后全部 stop/import 既有测试改写
-  通过 + fast 门禁绿。〔R66 审查轮（并行代理）核实：该登记准确——
-  三处确认无生产调用方；io_path_setup_ui 的 import_single/import_batch
-  模式同根因不可达，删时应一并处理；`tests/test_all.py:8883` 仍调
-  main_stop_import，删除需同步改测试。〕
+- [x] **R66 遗留：无调用方的停止/导入代码删除**〔R66 当轮解决，commit
+  `1a03042`〕：删除 mimics_stop_background.main_stop_import/
+  main_stop_export、mimics_import._launch_external_import_setup/
+  _launch_single_case_worker/_run_main_with_args/_single_case_worker_script
+  及 main() 交互分支、io_setup_mimics import 任务标题、
+  io_path_setup_ui 的 import 模式 UI（窗口标题/mask 导入单选/数据集
+  识别扫描整套机制）。共享 helper（source_default_output 等 4 个，
+  拖拽窗经 io_ui 调用）保留。测试同步：删 3 个
+  _launch_external_import_setup 测试 + main_stop_import 确认测试
+  （覆盖由 test_stop_all_confirms 承接），flow 路由测试收敛为
+  export-only，gui_smoke 防抖 pin 改为"import 分支不得复活"守卫。
+  顺带修复验证时发现的 P0：ui_theme._application_icon 用
+  drawPolygon(QPoint,...)（本版 PySide6 抛 TypeError）且异常路径
+  不结束 QPainter——悬空 painter 使外置窗口进程启动即 0xC0000409
+  崩溃；改 QPolygon + finally end，附子进程回归测试。证据：smoke
+  8/8（20261003T134644）、fast 29/29（20261003T141151）。净 −609 行。
+- [ ] **mimics_import.main 整体死状态**（铁律 4 后续项，未排期）：
+  C1 后 main() 的生产调用方为零（拖拽窗直接 Popen
+  single_case_import_worker/mimics_batch_cli → create_mcs_batch，
+  不经 mimics_import.main；交互分支本轮已删，仅剩 argv 批量路径）。
+  剩余 argv 路径仍被 ~50 个测试引用，爆炸半径大（~4488 行文件），
+  需单独一轮评估：整删 or 保留 argv 路径作为受支持 CLI。验收标准：
+  决策记录 + 若删除则全部相关测试改写通过 + fast 门禁绿。
 
 ### R66 审查轮（2026-10-03，双并行代理：修改正确性 + 真实场景可用性）
 
