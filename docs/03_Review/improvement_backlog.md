@@ -492,6 +492,61 @@
   L3/L4 实机验收（探针为 L2 证据）。
 
 
+### R70（2026-10-04 R69 双代理审查修复轮）
+
+> 来源：R69 关闭后的双并行代理审查。① 修改正确性代理：逐 commit 读
+> diff + 跑全部目标套件，15 个修复 commit 中 14 个判定正确，1 个真实
+> 问题（F32 大小写残留）+ 3 个已认可为边界/需用户决策的残留；② 真实
+> 场景可用性代理：P1×2、P2×3、P3×5、需用户决策×4。全部在
+> al-review-loop 分支，每项独立 commit + git stash 负控制。
+
+- [x] **R70-1 = F32 残留【P2】Windows 大小写不敏感 buffer 冲突**〔commit
+  `8e4b2bb`〕：used_safe_names 原样比较字符串，"Liver"/"liver" 在 NTFS
+  是同一文件——第二个 mask 静默覆盖第一个，两条 manifest 记录指向同一
+  .u8。改为 `os.path.normcase` 比较（前台导出 + 增量 tick 两路径），
+  manifest 保留原大小写。负控制：stash 后新测试以 "2 != 1" 失败。
+- [x] **R70-2 = 可用性 P1-2【P1】nnU-Net 模型包导入永久挂起**〔commit
+  `0852200`〕：`import-nnunet` 子命令没有 `--set-current`（nnU-Net 每次
+  预测时选模型），但 `import_bundle` 无条件附加该参数 → argparse 抛
+  SystemExit(2)（BaseException，穿透 worker 的 except Exception）→
+  线程静默死亡、导入按钮永久禁用。修复：nnunet 家族不附加该参数 +
+  SystemExit 转 RuntimeError；导入失败改弹窗（原状态栏文案被 _reload
+  即刻覆盖，错误不可见）。负控制：两个新测试 stash 后分别以 argv 含
+  --set-current、warning 未调用失败。
+- [x] **R70-3 = 可用性 P2-1【P2】六窗口 F37 clamp 未铺开**〔commit
+  `add2efc`〕：nnU-Net/FlexiCT 状态（800×620）、模型中心（880×620）、
+  批量状态（860×480）、系统健康（680×560）、远程服务器对话框
+  （660×740）硬最小仍可超 150% DPI 可用屏。统一接既有
+  `clamp_window_to_screen`。负控制：stash 后新测试以 "620 > 440" 失败。
+- [x] **R70-4 = 可用性 P2-2【P2】AL apply-request 无监控应答时无提示**
+  〔commit `de0240c`〕："本窗口会自动更新"只在 Mimics 侧监控运行时成立；
+  请求挂起 30 秒后状态栏提示"监控可能尚未运行"（去重防刷屏），并删除
+  `_poll_requests` 内逐行死代码（F14 轮遗留的重复 request_updates 调用）。
+  负控制：stash 后提示测试失败。
+- [x] **R70-5 = 可用性 P2-3【P2】单病例导入 worker 错误文案英文**〔commit
+  `856e8ed`〕：该 worker 写入 status.json 的 13 条 error/message 原样
+  显示在批量状态表，全部英文。全量中文化 + source-assert 测试锁定
+  （中文文案必须存在、英文原文必须不在）。负控制：stash 后失败。
+- [x] **R70-6 = F34 残留【P3】后台刷新失败无可见反馈**〔commit
+  `5f2e29b`〕：失败保留上一帧（正确）但实时标记仍挂旧时间戳装作正常。
+  `BackgroundRefresh` 增加可选 `on_error` 回调，三个状态窗口把实时
+  标记翻为"● 上次刷新失败"。负控制：stash 后扩展测试失败。
+- [x] **R70-7 = 可用性 P3-1/3/4/5【P3】界面文案英中混排清理**〔commits
+  `2d0cf83` + `51d0647` + `002c2b5`〕：状态窗口 "● Live"→"● 实时"、
+  作业状态词映射表（同 batch_status_viewer 惯例）；入口指南
+  "Suggested action" 引文改"建议操作"（对话框实际文案就是中文）；
+  最近拖拽列表裸 run id 去时间戳前缀；AL 状态列 new/annotated/skipped
+  → 待标注/已标注/已跳过（CSV 导出保留原值）。各自负控制通过。
+- R70 登记未修项（审查代理判定无需代码动作，入账跟踪）：
+  - F37 内容半边（动作栏换行/滚动、上下文主动作重排）——窗口几何已
+    修复，内部内容超 minimumSizeHint 时仍可能在窗口内裁切；
+  - F16：旧 raw manifest 缺失时中文 key 静默冻结空集（回退旧行为）；
+  - `create_mcs_batch._publish_mcs` 仍为盲目 retry-replace（由其既有
+    fingerprint/manifest 门控缓解，与 F28 的 runtime_common 修复不同路径）；
+  - F37/F16 残留与 P1-1（输出目录约定：drop 窗口 mask_exports vs
+    mcs_output/mimics_output_dir）转需用户决策区登记。
+
+
 
 > 用户在数据标准要求问答后拍板"综合优化做一些大的改动，看怎么做才最全面
 > 和用户可理解、好用"，并追加约束"不要增加用户的负担"（→ 渐进式披露：
@@ -2129,6 +2184,30 @@ commits `201b516` / `0be6ba5` / `a2d3244` / `afff2bc`，smoke 8/8
   `integrations/flexict-finetune/tests/test_flexict_pkg.py:239` 注释）。未立项
   不实施〕。✅ 2026-09-29 用户拍板：**立项，低优先级**（登记为待办
   R61-25，先修完本轮 P0/P1 再做）。
+
+### 需求缺口提案（R70 可用性审查拆出，未立项不实施）
+
+- **D20 拖拽导入输出目录约定**〔R70 可用性审查 P1-1〕：`source_default_output()`
+  （tools/io_path_setup_ui.py）按源路径邻域算默认输出（同盘就近），而拖拽窗口
+  默认 `mask_exports`、批量导入用 `mcs_output`/`mimics_output_dir`——三处
+  约定不一致，用户在 A 处导入、到 B 处找结果，且文档承诺的两条恢复路径
+  （mimics_output_dir/mcs_output）都不覆盖拖拽产物。使用者：全部标注者，
+  每次导入；不解决会怎样：找文件靠记忆、恢复路径失效；最小方案：统一
+  拖拽默认到 mcs_output/mimics_output_dir 语义，或反向把 mask_exports
+  写进约定并迁移消费方——涉及已有用户的既有目录习惯，属约定变更需拍板。
+- **D21 F37 内容半边（超小屏内容裁切）**〔R70 正确性审查残留〕：窗口几何
+  已钳到屏幕，但布局 minimumSizeHint（AL 窗口 873px）超过可用屏时内部
+  内容仍可能在窗口内裁切（动作栏不换行、上下文主动作不重排）。使用者：
+  1280×720@150% 小屏用户；频率：开窗即遇；最小方案：动作栏 QScrollArea
+  或换行布局。窗口可达且可拖大已消除最重危害，剩余为可读性优化。
+- **D22 F28 窗口-2 的绝对消除**〔R69-1 已登记边界，此处补全评估〕：check
+  与 replace 之间的 µs 级人工保存竞态，现实 Windows 文件锁形态已覆盖
+  （锁阻塞 replace → retry 重查 → 冲突副本）。绝对消除需"后台任务永不
+  自动发布、一律先落 staging 由人确认"的产品决策（代价：每次批量操作
+  多一步人工确认）。默认维持现状（冲突副本 + 警告已 fail-safe）。
+- **D23 AL 单击即标记已标注的确认交互**〔= R66-AUD-6 / D10 关联，可用性
+  审查再次独立发现〕：双击打开病例 + 一次单击"标记为已标注"，无确认、
+  无撤销。与 D10 状态语义拆分同根，若 D10 立项则本条并入。
 
 ### 已拍板（2026-09-29，四视角评审后）
 

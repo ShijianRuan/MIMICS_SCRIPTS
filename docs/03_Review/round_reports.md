@@ -4711,3 +4711,79 @@ F35 路径分立、F16×2、F01×2 全部转为修复后行为。探针为只读
 - F05：用户决策项（不动）。
 - F28 窗口-2：登记为需用户决策边界。
 - L3/L4 实机验收项不变（探针为 L2 证据）。
+
+## R70（2026-10-04）：R69 双代理审查修复轮
+
+> 来源：R69 关闭后的双并行代理审查（用户既有工作流：每轮关闭后并行
+> 审查"修改正确性"与"真实场景可用性"两个维度）。正确性代理逐 commit
+> 读 diff + 实跑全部目标套件；可用性代理以标注者视角走真实场景。
+> 分支 al-review-loop，每项独立 commit + git stash 负控制。
+
+### 审查结论
+
+**正确性代理**：15 个 R69 修复 commit 中 14 个判定正确且意图契合；
+1 个真实问题（F32 Windows 大小写残留，P2）当轮修复；3 个残留判定
+为边界/需用户决策（F37 内容半边、F16 manifest 缺失回退、
+_publish_mcs 盲重试由 fingerprint 门控缓解），入账不擅自改。
+
+**可用性代理**：P1×2、P2×3、P3×5、需用户决策×4。其中 1 个 P1
+（输出目录约定）与 2 个 P3 经核实转需用户决策区（D20 等）；其余
+全部当轮修复。
+
+### 实施内容（每项独立 commit，均带失败路径测试）
+
+1. **数据正确性（正确性代理发现）**
+   - **F32 大小写残留（`8e4b2bb`）**：used_safe_names 原样字符串比较，
+     "Liver"/"liver" 在 NTFS 是同一文件——第二个 mask 静默覆盖第一个。
+     改为 `os.path.normcase` 比较（前台 + 增量 tick 双路径），manifest
+     保留原大小写。负控制：stash 后 "2 != 1" 失败。
+2. **可用性 P1/P2**
+   - **P1-2 nnU-Net 模型包导入挂起（`0852200`）**：`import-nnunet` 无
+     `--set-current` 而导入代码无条件附加 → argparse SystemExit(2)
+     （BaseException）穿透 worker 的 except Exception → 线程静默死亡、
+     按钮永久禁用。修复：nnunet 不附加该参数 + SystemExit 转
+     RuntimeError + 失败改弹窗（状态栏错误会被 _reload 即刻覆盖）。
+   - **P2-1 六窗口 clamp 铺开（`add2efc`）**：nnU-Net/FlexiCT 状态、
+     模型中心、批量状态、系统健康、远程服务器对话框统一接
+     `clamp_window_to_screen`。负控制："620 > 440" 失败。
+   - **P2-2 AL 无监控提示（`de0240c`）**：请求挂起 30s 后提示
+     "监控可能尚未运行"（去重）；删除 F14 轮遗留的重复
+     request_updates 死代码。
+   - **P2-3 worker 错误中文化（`856e8ed`）**：单病例导入 worker 全部
+     13 条用户可见 error/message 中文化 + source-assert 锁定
+     （R61-24"UI 统一中文"决策落实）。
+   - **F34 残留（`5f2e29b`）**：BackgroundRefresh 增可选 on_error，
+     三状态窗口失败时实时标记翻"● 上次刷新失败"。
+3. **可用性 P3（文案清理）**
+   - **P3-1（`2d0cf83`）**："● Live"→"● 实时"、作业状态词映射表。
+   - **P3-3/4（`51d0647`）**：入口指南 "Suggested action" 引文改为
+     实际中文文案"建议操作"；最近拖拽列表裸 run id 去时间戳前缀。
+   - **P3-5（`002c2b5`）**：AL 状态列 new/annotated/skipped →
+     待标注/已标注/已跳过（CSV 导出保留原值）。
+
+### 设计决策记录
+
+- F32 大小写属复审报告明确的冲突集合（"Windows 大小写不敏感…会增加
+  冲突集合"），R69 修复漏掉一半——本轮 normcase 比较是对原发现的
+  补全而非新需求。
+- P1-2 的错误弹窗改动：原代码把错误写进状态栏，但 _reload 紧随其后
+  改写状态栏为"正在加载模型..."，错误实际不可见——弹窗与成功分支
+  的 QMessageBox 对称。
+- 需用户决策 4 项转 D20–D23 登记（输出目录约定、F37 内容半边、
+  F28 窗口-2 绝对消除、AL 单击确认并入 D10），不擅自改产品行为。
+
+### 门禁与证据
+
+- fast（R70 收尾门禁）：`20261004T070455_fast.json`（29/29 套件全绿，
+  工件见 `.mimics_runtime/regression/`）
+- 定向：TestModelManagerWindow 6/6、TestWindowClampedToSmallScreen
+  5/5、TestActiveLearningWindow 9/9、TestViewerNonBlockingRefresh 6/6、
+  TestNewFeatures（F32 相关）3/3、TestImportDropWindow 27/27、
+  TestEdgeCases + TestCreateMcsBatch 77 通过
+- 每项修复均做 git stash 负控制验证（新测试在未修复代码上必失败）
+
+### 遗留
+
+- D20–D23 需用户决策（见 improvement_backlog 需求缺口提案区）。
+- F37 内容半边、F16 manifest 缺失回退、_publish_mcs 盲重试：入账
+  跟踪（正确性代理判定无需代码动作）。
