@@ -625,6 +625,31 @@ class TestTrainingSetupPathMemory(unittest.TestCase):
                 finally:
                     window.window.close()
 
+    def test_nnunet_val_cases_semantics(self):
+        # G9: the nnU-Net wizard asked for a validation fraction while the
+        # FlexiCT wizard asked for a case count - the same concept, two
+        # semantics. Unified to case counts; 0 = automatic 20% (previous
+        # default behaviour, now computed by the normalizer).
+        _AppFixture.app()
+        import nnunet_training_setup_ui as ui
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            home = self._settings_home(tmp, "nnunet_settings.json", {})
+            with mock.patch.object(ui.Path, "home", lambda: home):
+                window = ui.TrainingSetupWindow(
+                    {"workspace": str(tmp / "ws")}, tmp / "ctx.json", QT
+                )
+                try:
+                    self.assertEqual(window._request()["val_cases"], 0)
+                    self.assertEqual(
+                        window._request()["validation_fraction"], 0.2
+                    )
+                    window.validation_spin.setValue(4)
+                    self.assertEqual(window._request()["val_cases"], 4)
+                finally:
+                    window.window.close()
+
     def test_training_wizards_warn_on_duplicate_task(self):
         # G7: retraining the same task_id silently piles up near-duplicate
         # models. Both wizards must surface existing models for the task

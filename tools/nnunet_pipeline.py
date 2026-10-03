@@ -799,7 +799,9 @@ def _split_folds(
             ]
         target = max(
             len(frozen),
-            max(1, int(round(len(case_ids) * float(request["validation_fraction"])))),
+            max(1, int(request.get("val_cases") or 0))
+            if int(request.get("val_cases") or 0) > 0
+            else max(1, int(round(len(case_ids) * float(request["validation_fraction"])))),
         )
         folds: list[dict[str, list[str]]] = []
         for fold_index in range(5):
@@ -847,7 +849,9 @@ def _split_folds(
         ]
     count = max(
         len(frozen),
-        max(1, int(round(len(case_ids) * float(request["validation_fraction"])))),
+        max(1, int(request.get("val_cases") or 0))
+        if int(request.get("val_cases") or 0) > 0
+        else max(1, int(round(len(case_ids) * float(request["validation_fraction"])))),
     )
     count = min(count, len(case_ids) - 1)
     folds = []

@@ -455,14 +455,14 @@ class TrainingSetupWindow:
             "Fold 0；'all' 会依次训练五个模型。"
         )
         train_form.addWidget(self.fold_hint, 5, 0, 1, 2)
-        self.validation_spin = QtWidgets.QDoubleSpinBox()
-        self.validation_spin.setRange(0.0, 0.8)
-        self.validation_spin.setSingleStep(0.05)
-        self.validation_spin.setValue(0.2)
-        train_form.addWidget(QtWidgets.QLabel("验证集比例"), 6, 0)
+        self.validation_spin = QtWidgets.QSpinBox()
+        self.validation_spin.setRange(0, 999)
+        self.validation_spin.setValue(0)
+        train_form.addWidget(QtWidgets.QLabel("验证病例数"), 6, 0)
         train_form.addWidget(self.validation_spin, 6, 1)
         train_form.addWidget(self._hint(
-            "留出用于质量评估的病例比例。0.2 是标准值。Fold 为 'all' 时不使用。"
+            "留出用于质量评估的病例数。0 表示自动按 20% 比例留出。"
+            "Fold 为 'all' 时不使用。"
         ), 7, 0, 1, 2)
         self.workers_spin = QtWidgets.QSpinBox()
         self.workers_spin.setRange(1, 64)
@@ -698,10 +698,7 @@ class TrainingSetupWindow:
         train_all = str(self.fold_combo.currentData() or "0") == "all"
         self.validation_spin.setEnabled(not train_all)
         if train_all:
-            self.validation_spin.setValue(0.0)
-        self.validation_spin.setMinimum(0.0 if train_all else 0.05)
-        if not train_all and self.validation_spin.value() <= 0:
-            self.validation_spin.setValue(0.2)
+            self.validation_spin.setValue(0)
 
     def _refresh_continue_training(self):
         continuing = self.continue_check.isChecked()
@@ -781,7 +778,7 @@ class TrainingSetupWindow:
                 "MimicsNNUNetTrainerNoMirroring",
             } else 1000,
             "fold": str(self.fold_combo.currentData()),
-            "validation_fraction": float(self.validation_spin.value()),
+            "val_cases": int(self.validation_spin.value()),
             "preprocess_workers": int(self.workers_spin.value()),
             "num_gpus": int(self.num_gpus_spin.value()),
             "gpu_id": self.gpu_devices_edit.text().strip(),

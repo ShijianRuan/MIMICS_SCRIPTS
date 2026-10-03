@@ -432,17 +432,18 @@ class DiscoveryTests(unittest.TestCase):
             rows.append(row)
         return rows
 
-    def _request(self, validation_fraction=0.2, split_seed=42):
-        return common.normalize_request(
-            {
-                "operation": "train",
-                "task_name": "Liver",
-                "task_id": "liver",
-                "labels": [{"name": "liver", "id": 1}],
-                "validation_fraction": validation_fraction,
-                "split_seed": split_seed,
-            }
-        )
+    def _request(self, validation_fraction=0.2, split_seed=42, val_cases=None):
+        payload = {
+            "operation": "train",
+            "task_name": "Liver",
+            "task_id": "liver",
+            "labels": [{"name": "liver", "id": 1}],
+            "validation_fraction": validation_fraction,
+            "split_seed": split_seed,
+        }
+        if val_cases is not None:
+            payload["val_cases"] = val_cases
+        return common.normalize_request(payload)
 
     def test_split_folds_never_straddles_patient_group(self):
         # F16: same patient's scans (case00/case01 = patient A) must land on
@@ -468,6 +469,21 @@ class DiscoveryTests(unittest.TestCase):
             self.assertEqual(
                 sorted(fold["train"] + fold["val"]),
                 sorted(row["case_id"] for row in rows))
+
+    def test_split_folds_honors_case_count_semantics(self):
+        # G9: the nnU-Net wizard now submits val_cases (a case count,
+        # matching FlexiCT) instead of a fraction; the split must size
+        # validation by count when given, and keep the fraction fallback
+        # for requests without it (backwards compatible).
+        rows = self._split_rows(10)
+        by_count = pipeline._split_folds(
+            rows, self._request(validation_fraction=0.2, val_cases=4)
+        )
+        self.assertEqual(len(by_count[0]["val"]), 4)
+        self.assertEqual(len(by_count[0]["train"]), 6)
+        # Absent val_cases -> the fraction path, unchanged.
+        by_fraction = pipeline._split_folds(rows, self._request())
+        self.assertEqual(len(by_fraction[0]["val"]), 2)
 
     def test_split_folds_without_groups_keeps_case_independence(self):
         # No patient_group info: previous case-level behavior must be
