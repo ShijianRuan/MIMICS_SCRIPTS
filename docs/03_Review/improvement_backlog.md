@@ -221,12 +221,19 @@
   （红→绿验证过；红路径为无确认直接停）。TestStopBackgroundServices
   类的 `test_nnunet_version_gate`/`test_mask_export_stop` 两项失败为
   修改前已存在（HEAD 复验），与本改动无关。
-- [ ] **R62-5【P2】批量推理窗口缺远程后端/CPU 回退/模态护栏/
+- [x] **R62-5【P2】批量推理窗口缺远程后端/CPU 回退/模态护栏/
   case 过滤**（`nnunet_batch_predict_ui.py:249-265` vs
   `nnunet_prediction_setup_ui.py:110-113/:246-258`；护栏
   `nnunet_pipeline.py:1602-1614` 被静默跳过）：单例窗口有的保护，
-  批量窗口全无。验收：批量窗口至少补模态护栏与 CPU 回退提示
-  （远程后端可另轮立项）。
+  批量窗口全无。
+  **已解决（本轮）**：批量窗口选项栏补"图像模态"下拉（自动（按模型）
+  /CT/MR）与"无 GPU 时用 CPU"复选框；`_submit` 按例请求补
+  `source_modality`（选择 CT/MR 时）与 `use_cpu` 字段，与 CLI
+  `cmd_predict` 同构。模态护栏与 CPU 回退由此在单例窗口、CLI、批量
+  窗口三入口一致生效。测试：
+  `test_gui_smoke.py TestBatchPredictionWindow.test_submit_passes_modality_and_cpu_flags_to_jobs`
+  （红→绿验证过；红路径为修复前请求缺 `source_modality` 键直接
+  KeyError）。远程后端在批量窗口的立项按验收标准另轮处理。
 - [ ] **R62-6【P2】AL 覆盖层 "converting" 请求在 Mimics 重启后成
   孤儿**（`flexict_mimics.py:1607/:1635-1642/:1314/:1338-1346`；UI
   承诺 `flexict_active_learning_ui.py:624-630`）：UI 提示"重启后

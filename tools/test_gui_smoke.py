@@ -617,6 +617,63 @@ class TestBatchPredictionWindow(unittest.TestCase):
             self.assertIn("已启动 2 个预测任务", window.status_label.text())
             self.assertIn("ambiguous", window.status_label.text())
 
+    def test_submit_passes_modality_and_cpu_flags_to_jobs(self):
+        """R62-5: the batch window must not bypass the modality guardrail
+        and CPU fallback that the single-case window and CLI enforce."""
+        _AppFixture.app()
+        import nnunet_batch_predict_ui as ui
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            window = ui.BatchPredictionWindow(
+                {"workspace": str(tmp / "workspace")}, QT
+            )
+            self.addCleanup(window.window.close)
+            window._apply_models(
+                [self._usable_model_row(self._model_dir(tmp))], ""
+            )
+            case_dir = tmp / "cases" / "case_a"
+            case_dir.mkdir(parents=True)
+            (case_dir / "ct.nii.gz").write_bytes(b"x")
+
+            requests = []
+
+            def fake_create_job(request):
+                requests.append(request)
+                return {"job_id": request["job_id"], "status_path": "s.json"}
+
+            window.image_root_edit.setText(str(tmp / "cases"))
+            window.output_edit.setText(str(tmp / "out"))
+            # "自动（按模型）" default: no declared modality, guardrail off.
+            with mock.patch.object(ui, "create_job", fake_create_job):
+                window._submit()
+                deadline = time.time() + 5.0
+                while time.time() < deadline:
+                    _AppFixture.app().processEvents()
+                    window._poll_background_results()
+                    if requests:
+                        break
+                    time.sleep(0.02)
+            self.assertEqual(1, len(requests))
+            self.assertEqual("", requests[0]["source_modality"])
+            self.assertFalse(requests[0]["use_cpu"])
+
+            window.modality_combo.setCurrentText("MR")
+            window.cpu_check.setChecked(True)
+            requests.clear()
+            with mock.patch.object(ui, "create_job", fake_create_job):
+                window._submit()
+                deadline = time.time() + 5.0
+                while time.time() < deadline:
+                    _AppFixture.app().processEvents()
+                    window._poll_background_results()
+                    if requests:
+                        break
+                    time.sleep(0.02)
+            self.assertEqual(1, len(requests))
+            self.assertEqual("MR", requests[0]["source_modality"])
+            self.assertTrue(requests[0]["use_cpu"])
+
     def test_missing_folders_are_rejected_before_dispatch(self):
         _AppFixture.app()
         import nnunet_batch_predict_ui as ui

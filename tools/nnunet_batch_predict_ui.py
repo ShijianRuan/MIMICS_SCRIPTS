@@ -86,10 +86,32 @@ class BatchPredictionWindow:
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         root.addWidget(self.table, 1)
+        options = QtWidgets.QHBoxLayout()
         self.tta_check = QtWidgets.QCheckBox("启用镜像 TTA")
         self.tta_check.setChecked(False)
         self.tta_check.setToolTip("可能提高精度，但会成倍增加每例推理时间。")
-        root.addWidget(self.tta_check)
+        options.addWidget(self.tta_check)
+        options.addStretch(1)
+        options.addWidget(QtWidgets.QLabel("图像模态"))
+        self.modality_combo = QtWidgets.QComboBox()
+        # R62-5: the batch window bypassed the modality guardrail the
+        # single-case window enforces — a CT model silently ran over MR
+        # folders (and vice versa). The declared modality feeds
+        # source_modality, which the per-job validator hard-rejects on
+        # mismatch.
+        self.modality_combo.addItems(["自动（按模型）", "CT", "MR"])
+        self.modality_combo.setToolTip(
+            "声明数据集的真实模态。与模型训练模态不符时任务会被拒绝，"
+            "而不是静默产出错误结果。"
+        )
+        options.addWidget(self.modality_combo)
+        self.cpu_check = QtWidgets.QCheckBox("无 GPU 时用 CPU")
+        self.cpu_check.setChecked(False)
+        self.cpu_check.setToolTip(
+            "本机没有可用 GPU 时允许用 CPU 推理（明显更慢，适合少量病例）。"
+        )
+        options.addWidget(self.cpu_check)
+        root.addLayout(options)
         self.status_label = QtWidgets.QLabel("正在后台加载兼容模型...")
         self.status_label.setObjectName("hint")
         self.status_label.setWordWrap(True)
@@ -234,6 +256,9 @@ class BatchPredictionWindow:
             workspace = str(self.context.get("workspace") or Path.home() / ".mimics_script" / "nnunet")
             model_manifest = str(model["manifest_path"])
             disable_tta = not self.tta_check.isChecked()
+            modality = str(self.modality_combo.currentText() or "").strip()
+            source_modality = "" if "自动" in modality else modality
+            use_cpu = self.cpu_check.isChecked()
             self.start.setEnabled(False)
             self.status_label.setStyleSheet("")
             self.status_label.setText("正在后台扫描病例并启动预测任务...")
@@ -261,7 +286,9 @@ class BatchPredictionWindow:
                             "image_path": str(image_path),
                             "output_path": str(output / "{}.nii.gz".format(case_id)),
                             "disable_tta": disable_tta,
+                            "use_cpu": use_cpu,
                             "case_id": case_id,
+                            "source_modality": source_modality,
                         }
                         try:
                             create_job(request)
