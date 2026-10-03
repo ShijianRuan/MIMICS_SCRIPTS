@@ -4619,3 +4619,16 @@ Health 按钮名与提示统一。
 
 门禁：fast 29/29（`20261003T220939_fast.json`）。净 +150 行
 （新测试 + 后台线程模式复制，无新抽象层）。
+
+**补遗（审查后复查发现）**：
+- **AUD-9（P1）**：正确性代理复跑离屏验证时发现 io_path_setup_ui 的
+  `_sync_candidate_check_state`（R68-1 复选框同步）引用的 QtCore 只在
+  run_ui() 局部存在——功能上线即死，每次键入抛 NameError。实跑复现
+  确认后修复（函数内局部 import，模块保持无 Qt 依赖可导入）+
+  gui_smoke 防回归测试 `test_candidate_checkboxes_sync_with_name_field`
+  （`060a102`；gui_smoke 39/39 + smoke 8/8
+  `20261003T221602_smoke.json`）。
+- **AUD-10（P3）**：nnInteractive 结果对话框按钮仍说"更新所选 Mask"，
+  与其余三个算法统一的"更新匹配掩膜"不一致——同一动作两个名字。
+  文案 + 分支判断 + test_all 断言同步（`21194d3`；SessionWriteMode 4/4、
+  task_integration 11/11 定向验证）。

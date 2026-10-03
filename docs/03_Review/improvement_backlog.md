@@ -417,6 +417,19 @@
   textChanged 即时校验格式（同 normalize_request 规则），非法红字提示。
 - [x] **R68-AUD-8（P3）System Health 按钮名与提示文案不一致 + 清理
   按钮禁用无效**：统一"清理失效状态"；重新启用移到 sweep 结果回调。
+- [x] **R68-AUD-9（P1，正确性审查发现）导出窗口候选勾选同步引用
+  未定义的 QtCore，每次键入即 NameError**：io_path_setup_ui 的
+  _sync_candidate_check_state 在模块级引用只有 run_ui() 局部存在的
+  QtCore——R68-1 的复选框同步功能从上线起就是死的（每次键入抛
+  NameError）。修复：函数内局部 import（模块保持无 Qt 依赖可导入）。
+  防回归测试：test_candidate_checkboxes_sync_with_name_field
+  （test_gui_smoke，双向驱动同步函数）。〔commit `060a102`〕
+- [x] **R68-AUD-10（P3）nnInteractive 结果对话框按钮文案与其他算法
+  不一致**：nninteractive_mimics 说"更新所选 Mask"，其余三个算法
+  （interactive_algorithms/flexict/nnunet）均为"更新匹配掩膜"——
+  同一动作两个名字。统一为"更新匹配掩膜"，同步 test_all 断言；
+  顺带还原 test_nninteractive_task_integration 被前次编辑弄乱的
+  换行。〔commit `21194d3`〕
 - 审查代理核实无问题的方面：入口薄壳全部指向有效模块、
   mimics_entry_guide 与实际入口一致、逐行停止/Stop All/Undo 均有
   确认、三个训练窗口路径检查已在后台线程。
