@@ -31,6 +31,31 @@ from ui_theme import (  # noqa: E402
     configure_application,
     stylesheet,
 )
+
+# P3-1: 作业状态词对标注者显示为中文（此前是 "Uploading" 这类英文标题体）。
+_STATUS_LABELS = {
+    "running": "运行中",
+    "launching": "启动中",
+    "preparing_data": "准备数据中",
+    "preprocessing": "预处理中",
+    "training": "训练中",
+    "uploading": "上传中",
+    "downloading": "下载中",
+    "exporting_labels": "导出标注中",
+    "computing_uncertainty": "计算不确定度中",
+    "registering": "配准中",
+    "batch_predicting": "批量预测中",
+    "predicting": "预测中",
+    "finalizing": "收尾中",
+    "waiting_for_dataset": "等待数据集",
+    "waiting_for_gpu": "等待 GPU",
+    "completed": "已完成",
+    "completed_with_errors": "完成（有失败）",
+    "failed": "失败",
+    "cancelled": "已取消",
+    "abandoned": "已放弃",
+    "unknown": "未知",
+}
 from viewer_refresh import BackgroundRefresh  # noqa: E402
 
 
@@ -61,7 +86,7 @@ class StatusWindow:
         title.setObjectName("title")
         root.addWidget(title)
         header = QtWidgets.QHBoxLayout()
-        self.live_label = QtWidgets.QLabel("● Live")
+        self.live_label = QtWidgets.QLabel("● 实时")
         self.live_label.setObjectName("liveLabel")
         header.addWidget(self.live_label)
         header.addStretch(1)
@@ -243,13 +268,15 @@ class StatusWindow:
                     "尚无可用模型。请先训练一个（或一对）模型，才能使用预测和主动学习。"
                 )
         self._show_selected_job()
-        self.live_label.setText("● Live · {}".format(time.strftime("%H:%M:%S")))
+        self.live_label.setText("● 实时 · {}".format(time.strftime("%H:%M:%S")))
 
     def _show_selected_job(self):
         index = self.jobs.currentRow()
         status = self._job_rows[index] if 0 <= index < len(self._job_rows) else {}
         state = str(status.get("status") or "unknown")
-        self.state_label.setText(state.replace("_", " ").title())
+        self.state_label.setText(
+            _STATUS_LABELS.get(state, state.replace("_", " ").title())
+        )
         self.detail_label.setText(
             str(status.get("message") or status.get("error") or status.get("phase") or "")
         )

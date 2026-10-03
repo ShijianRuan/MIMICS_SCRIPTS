@@ -1402,6 +1402,34 @@ class TestWindowClampedToSmallScreen(unittest.TestCase):
                     finally:
                         window.window.close()
 
+    def test_status_viewers_speak_chinese(self):
+        """P3-1：状态窗口的实时标记和作业状态词必须是中文——
+        "● Live"/"Uploading" 这类英文对标注者不可读。"""
+        import tempfile
+
+        _AppFixture.app()
+        import flexict_status_viewer
+        import nnunet_status_viewer
+
+        with tempfile.TemporaryDirectory() as name:
+            for module in (
+                nnunet_status_viewer, flexict_status_viewer,
+            ):
+                window = module.StatusWindow({"workspace": name}, QT)
+                try:
+                    self.assertIn("● 实时", window.live_label.text())
+                    self.assertNotIn("Live", window.live_label.text())
+                    # 选中一个任务前状态是中文占位或未知。
+                    window._job_rows = [{
+                        "status": "preparing_data"}]
+                    window.jobs.addItem("job1")
+                    window.jobs.setCurrentRow(0)
+                    window._show_selected_job()
+                    self.assertEqual(
+                        "准备数据中", window.state_label.text())
+                finally:
+                    window.window.close()
+
 
 class _FakeScreen:
     def __init__(self, geometry):
