@@ -4,7 +4,50 @@ The remote runtime is optional. Local nnInteractive and nnU-Net
 training or inference do not use it unless a user explicitly chooses a saved
 remote server in the corresponding external window.
 
-## Build directly on the GPU server
+## Updating the runtime image (standard flow, no local Docker)
+
+The image contains a snapshot of the project code. After changes that touch
+`tools/`, `runtime_py35/`, or an `integrations/` training package, update the
+image with one command from the Windows workstation — the build runs **on** the
+GPU server over SSH, so the workstation needs no Docker at all:
+
+```bash
+python_env/python.exe tools/remote_training_controller.py build-image \
+  --profile-id <saved-profile-id>
+```
+
+What the command does, and what to check at each step:
+
+1. **Trigger** — run it whenever the remote controller's code-drift check
+   rejects a job (the status window reports that the image is older than the
+   local code), or after pulling changes that touch the shipped code.
+2. **Upload** — the checkout is packed code-only (local caches, the 12.8G
+   model registries, and weight folders stay out; ~14 MB). A digest marker
+   skips re-uploading unchanged code on a retry.
+3. **Build** — `nerdctl/docker build` runs on the server into the profile's
+   container namespace. Base-image pulls go through the server's network; if
+   the registry is unreachable, pass `--base-image <mirror>/pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime`.
+   The pip layer cache makes a rebuild after a code-only change take ~15 min.
+4. **Verify** — after the build, confirm two things:
+   - the A1 image preflight passes for every job kind (the controller runs
+     this automatically before each job; a fresh build must pass all five), and
+   - the next remote job's code-fingerprint check reports a match (it runs
+     automatically at job submit).
+   Both checks are automatic — an image that fails either refuses jobs
+   instead of silently training with stale code.
+5. **Rollback** — images are tagged; keep the previous image ID (shown by the
+   build command, also in the server's `logs/build_*.log`). If a fresh image
+   misbehaves, retag the previous ID back:
+
+   ```bash
+   nerdctl -n <namespace> tag <old-image-id> mimics-ai-runtime:1.0
+   ```
+
+   Dataset caches and model weights live outside the image and survive a
+   rebuild; the old image blobs are garbage-collected by the server's normal
+   containerd pruning.
+
+## First-time setup: build directly on the GPU server
 
 Clone or copy the project to the Linux server, install Docker and NVIDIA
 Container Toolkit, then run:
@@ -18,13 +61,9 @@ This builds `mimics-ai-runtime:1.0`, creates the work folders, checks the
 installed base weights, all supported frameworks (nnInteractive, nnU-Net,
 FlexiCT), and the offline container contract. The image is built
 once. Starting a later training job creates a small disposable container from
-the existing image and does not rebuild the image.
-
-The image contains a snapshot of the project code. After pulling changes that
-touch `tools/`, `runtime_py35/`, or an `integrations/` training package, rebuild the
-image with `remote/setup_remote_server.sh --build` before starting another
-remote job. Dataset caches and model weights live outside the image and are not
-deleted by this rebuild.
+the existing image and does not rebuild the image. After that, use the
+`build-image` flow above for every code update — no server-side checkout or
+manual build is needed.
 
 ## Build once and transfer an image archive
 
