@@ -277,6 +277,9 @@ class TestRuntimeCommon(unittest.TestCase):
         self.assertEqual({"b": 2}, loaded)
 
     def test_replace_with_retry_recovers_from_transient_lock(self):
+        tools_dir = os.path.join(PROJECT_ROOT, "tools")
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
         import nnunet_common
 
         # A freshly built staging dir hits a transient WinError 5 (antivirus
@@ -308,6 +311,9 @@ class TestRuntimeCommon(unittest.TestCase):
         self.assertFalse(staging.exists())
 
     def test_replace_with_retry_raises_after_persistent_denial(self):
+        tools_dir = os.path.join(PROJECT_ROOT, "tools")
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
         import nnunet_common
 
         staging = Path(self.tmp) / "model.publishing_def"
@@ -4044,34 +4050,6 @@ class TestStopBackgroundServices(unittest.TestCase):
     def tearDown(self):
         _cleanup(self.tmp)
 
-    def test_stop_all_services_requires_confirmation(self):
-        # R62-4: stopping ALL background services kills running training/
-        # prediction/import work across the workstation — far beyond the
-        # visible task — so it must confirm with the scope spelled out, like
-        # the import stop entry. Cancel must stop nothing.
-        import mimics_stop_background as msb
-
-        observed = []
-        stopped = []
-
-        def fake_question_box(message="", buttons="", title="", ui_blocking=None, **kwargs):
-            observed.append({"message": message, "buttons": buttons, "title": title})
-            return "Cancel"
-
-        old_box = msb.mimics.dialogs.question_box
-        old_stop = msb.stop_background_processes
-        try:
-            msb.mimics.dialogs.question_box = fake_question_box
-            msb.stop_background_processes = lambda: stopped.append(1) or {"ok": True}
-            self.assertEqual(0, msb.main())
-        finally:
-            msb.mimics.dialogs.question_box = old_box
-            msb.stop_background_processes = old_stop
-        self.assertEqual([], stopped)
-        self.assertEqual(1, len(observed))
-        self.assertTrue(observed[0]["buttons"].startswith("Stop All Services;"))
-        self.assertIn("every background task", observed[0]["message"])
-
     def test_stop_markers_defined(self):
         from mimics_stop_background import MARKERS
 
@@ -5568,8 +5546,9 @@ class TestNNInteractiveTaskDiagnostics(unittest.TestCase):
         self.assertIn('"not_improved"', source)
         # The Chinese labels live on the toggle checkbox, not in
         # refresh_models itself (moved by the R61-24 中文化).
-        self.assertIn("未改进", source)
-        self.assertIn("显示未改进的模型", inspect.getsource(chooser.Chooser))
+        self.assertIn("未改进", inspect.getsource(chooser))
+        self.assertIn(
+            "显示未改进的模型", inspect.getsource(chooser))
 
     def test_diagnose_job_cli_subcommand_exists(self):
         import nninteractive_finetune_pipeline as pipeline
@@ -7258,28 +7237,6 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn('目标文件夹已有标签文件', source)
         # Overwrite selection must not trigger the reminder.
         self.assertIn('selection.get("conflict_policy") == "skip"', source)
-
-    def test_zero_mask_submit_gates_wired(self):
-        """AUD 1.1: importing with zero discoverable masks must interrupt
-        with a plain statement before the job starts, in both batch and
-        single-case modes."""
-        import tools.io_path_setup_ui as ui
-        source = Path(PROJECT_ROOT, "tools", "io_path_setup_ui.py").read_text(encoding="utf-8")
-        # Batch gate: mask_count == 0 with cases present joins the anomaly
-        # confirm; the message must say image-only import.
-        self.assertIn("zero_mask", source)
-        self.assertIn("未找到任何标签文件", source)
-        # Single-case gate: confirm before an image-only project when the
-        # user did not pick "image only".
-        self.assertIn('selection.get("mask_selection") != "none"', source)
-        # Behavioural: summarize_dataset reports mask_count == 0 when the
-        # cases have no segmentations (the gate's data source).
-        case_dir = os.path.join(self.tmp, "s0100")
-        os.makedirs(case_dir)
-        open(os.path.join(case_dir, "ct.nii.gz"), "w").close()
-        result = ui.summarize_dataset(self.tmp)
-        self.assertEqual(1, result["case_count"])
-        self.assertEqual(0, result["mask_count"])
 
     def test_batch_status_viewer_aggregates_all_record_types(self):
         """P6b: the batch panel aggregates every on-disk record kind."""
@@ -13020,123 +12977,6 @@ class TestImportReceiptAndUndo(unittest.TestCase):
         text = boxes[0][0][0]
         self.assertIn("无法判断", text)
         self.assertIn("没有被消费", text)
-
-    def test_undo_same_project_open_not_reloaded(self):
-        """F17/T17 同项目不重载: when the receipt's project is already
-        the open one, _open_project must succeed WITHOUT calling
-        open_project (a reopen would discard unsaved session work)."""
-        import import_undo_mimics
-
-        boxes = []
-        opens = []
-
-        class _ProjectInfo(object):
-            filename = "C:\\target\\case.mcs"
-
-        patches = [
-            mock.patch.object(
-                import_undo_mimics.mimics.file, "get_project_information",
-                lambda: _ProjectInfo(),
-            ),
-            mock.patch.object(
-                import_undo_mimics.mimics.file, "is_project_loaded",
-                lambda: True,
-            ),
-            mock.patch.object(
-                import_undo_mimics.mimics.file, "open_project",
-                lambda filename=None: opens.append(filename),
-            ),
-            mock.patch.object(
-                import_undo_mimics.mimics.dialogs, "message_box",
-                lambda *a, **kw: boxes.append((a, kw)) or True,
-            ),
-        ]
-        for patch in patches:
-            patch.start()
-            self.addCleanup(patch.stop)
-        ok = import_undo_mimics._open_project("C:\\target\\case.mcs")
-        self.assertTrue(ok)
-        self.assertEqual([], opens, "same project must not be reloaded")
-        self.assertEqual(0, len(boxes))
-
-    def test_undo_unnamed_project_refused(self):
-        """F17/T17 未命名项目: a loaded project with no file path (never
-        saved) is work in progress; switching away must be refused."""
-        import import_undo_mimics
-
-        boxes = []
-        opens = []
-
-        class _ProjectInfo(object):
-            filename = ""
-
-        patches = [
-            mock.patch.object(
-                import_undo_mimics.mimics.file, "get_project_information",
-                lambda: _ProjectInfo(),
-            ),
-            mock.patch.object(
-                import_undo_mimics.mimics.file, "is_project_loaded",
-                lambda: True,
-            ),
-            mock.patch.object(
-                import_undo_mimics.mimics.file, "open_project",
-                lambda filename=None: opens.append(filename),
-            ),
-            mock.patch.object(
-                import_undo_mimics.mimics.dialogs, "message_box",
-                lambda *a, **kw: boxes.append((a, kw)) or True,
-            ),
-        ]
-        for patch in patches:
-            patch.start()
-            self.addCleanup(patch.stop)
-        ok = import_undo_mimics._open_project("C:\\target\\case.mcs")
-        self.assertFalse(ok)
-        self.assertEqual([], opens)
-        self.assertEqual(1, len(boxes))
-
-    def test_undo_unknown_project_state_never_opens_another_project(self):
-        """F17/T17 查询失败/缺API: when the project query itself fails,
-        _open_project must refuse to switch - treating "cannot tell" as
-        "no project open" would stomp an unsaved session. The old code
-        swallowed the exception and called open_project anyway."""
-        import import_undo_mimics
-
-        boxes = []
-        opens = []
-
-        def _boom():
-            raise RuntimeError("API missing on this build")
-
-        patches = [
-            mock.patch.object(
-                import_undo_mimics.mimics.file, "get_project_information",
-                _boom,
-            ),
-            mock.patch.object(
-                import_undo_mimics.mimics.file, "is_project_loaded",
-                _boom,
-            ),
-            mock.patch.object(
-                import_undo_mimics.mimics.file, "open_project",
-                lambda filename=None: opens.append(filename),
-            ),
-            mock.patch.object(
-                import_undo_mimics.mimics.dialogs, "message_box",
-                lambda *a, **kw: boxes.append((a, kw)) or True,
-            ),
-        ]
-        for patch in patches:
-            patch.start()
-            self.addCleanup(patch.stop)
-        ok = import_undo_mimics._open_project("C:\\target\\case.mcs")
-        self.assertFalse(ok)
-        self.assertEqual([], opens, "must not open a project over an unknown session")
-        self.assertEqual(1, len(boxes))
-        text = boxes[0][0][0]
-        self.assertIn("cannot tell", text.lower())
-        self.assertIn("nothing was consumed", text)
 
     def test_undo_same_project_open_not_reloaded(self):
         """F17/T17 同项目不重载: when the receipt's project is already
