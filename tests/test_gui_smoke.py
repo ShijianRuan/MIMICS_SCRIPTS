@@ -1790,410 +1790,6 @@ class TestActiveLearningWindow(unittest.TestCase):
                     "non-empty ranking must populate the table")
                 self.assertTrue(window.open_button.isEnabled())
                 summary = window.status_label.text()
-                self.assertIn("2 case(s) ranked", summary)
-            finally:
-                window.window.close()
-
-    def test_annotated_row_gets_success_foreground(self):
-        # F03's crash was inside the per-row loop's annotated branch.
-        with tempfile.TemporaryDirectory() as tmp:
-            window = self._window(tmp)
-            try:
-                job_dir = Path(window._job_dir)
-                from flexict_active_learning_ui import set_case_state
-                set_case_state(job_dir, "caseA", "annotated")
-                window._job_selected()
-                self.assertEqual(
-                    "annotated",
-                    window.table.item(0, 4).text())
-                self.assertIn("1 annotated", window.status_label.text())
-            finally:
-                window.window.close()
-
-    def test_failed_run_stays_listed_with_its_error(self):
-        """R62-10: a failed ranking run must not vanish from the job list;
-        the annotator needs to know it was attempted and why it died."""
-        with tempfile.TemporaryDirectory() as tmp:
-            window = self._window(tmp)
-            try:
-                # Add a failed run newer than the completed one.
-                failed_dir = Path(tmp) / "jobs" / "aljob2"
-                failed_dir.mkdir(parents=True)
-                (failed_dir / "status.json").write_text(
-                    json.dumps({
-                        "kind": "active_learning",
-                        "status": "failed",
-                        "error": "GPU out of memory",
-                        "created_at_epoch": 2.0,
-                        "label_name": "Liver",
-                        "job_dir": str(failed_dir),
-                    }),
-                    encoding="utf-8",
-                )
-                window.refresh()
-                # Failed runs are listed after the completed ones.
-                self.assertEqual(2, window.job_combo.count())
-                window.job_combo.setCurrentIndex(1)
-                window._job_selected()
-                self.assertEqual(0, window.table.rowCount())
-                self.assertFalse(window.open_button.isEnabled())
-                text = window.status_label.text()
-                self.assertIn("失败", text)
-                self.assertIn("GPU out of memory", text)
-            finally:
-                window.window.close()
-
-    def test_failed_request_message_survives_refresh(self):
-        # F14/T14: the poll sets the outcome AFTER refreshing the table.
-        with tempfile.TemporaryDirectory() as tmp:
-            window = self._window(tmp)
-            try:
-                request_dir = Path(window._job_dir) / "apply_requests"
-                request_dir.mkdir(parents=True)
-                (request_dir / "a.json").write_text(
-                    json.dumps({
-                        "case_id": "caseA", "what": "bands",
-                        "state": "failed", "detail": "geometry mismatch",
-                        "requested_at_epoch": 1.0,
-                        "updated_at_epoch": time.time(),
-                    }),
-                    encoding="utf-8",
-                )
-                window._request_poll_epoch = 0.0
-                window._poll_requests()
-                text = window.status_label.text()
-                self.assertIn("Request failed for caseA", text)
-                self.assertIn("geometry mismatch", text)
-            finally:
-                window.window.close()
-
-    def test_applied_request_message_survives_refresh(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            window = self._window(tmp)
-            try:
-                request_dir = Path(window._job_dir) / "apply_requests"
-                request_dir.mkdir(parents=True)
-                (request_dir / "a.json").write_text(
-                    json.dumps({
-                        "case_id": "caseA", "what": "open_bands",
-                        "state": "applied", "detail": "applied: bands",
-                        "requested_at_epoch": 1.0,
-                        "updated_at_epoch": time.time(),
-                    }),
-                    encoding="utf-8",
-                )
-                window._request_poll_epoch = 0.0
-                window._poll_requests()
-                text = window.status_label.text()
-                self.assertIn("Applied in Mimics: caseA", text)
-            finally:
-                window.window.close()
-
-    def _pair_model(self, workspace: Path, configuration: str) -> dict:
-        model_dir = (
-            workspace / "runtime" / "nnUNet_results"
-            / "Dataset750_Kidney" / "flexict{}_Trainer__nnUNetPlans__{}".format(
-                "2d" if configuration == "2d" else "3d", configuration)
-        )
-        (model_dir / "fold_0").mkdir(parents=True)
-        (model_dir / "fold_0" / "checkpoint_best.pth").write_bytes(b"x")
-        (model_dir / "plans.json").write_text("{}", encoding="utf-8")
-        (model_dir / "dataset.json").write_text("{}", encoding="utf-8")
-        manifest = {
-            "model_id": "m_{}".format(configuration),
-            "model_dir": str(model_dir),
-            "manifest_path": str(
-                model_dir / "flexict_model_manifest.json"),
-            "configuration": configuration,
-            "label_name": "kidney_left",
-            "task_id": "Kidney", "task_name": "Kidney",
-            "pair_id": "pair_1",
-            "created_at_epoch": 100.0,
-        }
-        from nnunet_common import write_json_atomic
-
-        write_json_atomic(
-            Path(manifest["manifest_path"]), manifest)
-        return manifest
-
-    def test_new_run_form_without_pair_explains_how_to_fix(self):
-        # F04: a fresh workspace must not dead-end — the form names the
-        # training entry instead of pointing back at this same menu.
-        _AppFixture.app()
-        import flexict_active_learning_ui as al_ui
-
-        with tempfile.TemporaryDirectory() as tmp:
-            window = al_ui.ActiveLearningWindow(
-                {"workspace": str(Path(tmp) / "workspace")}, QT)
-            self.addCleanup(window.window.close)
-            window._apply_pair((None, None), "")
-            self.assertIn("01 训练模型", window.pair_label.text())
-            self.assertFalse(window.start_run_button.isEnabled())
-            # The old circular empty state pointed at this same entry.
-            self.assertIn("启动新的排序", window.status_label.text())
-
-    def test_submit_new_run_creates_al_job_from_pair(self):
-        _AppFixture.app()
-        import flexict_active_learning_ui as al_ui
-
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp) / "workspace"
-            model_2d = self._pair_model(workspace, "2d")
-            model_3d = self._pair_model(workspace, "3d_fullres")
-            from flexict_common import save_registry
-
-            save_registry(workspace, None, [model_2d, model_3d])
-
-            window = al_ui.ActiveLearningWindow(
-                {"workspace": str(workspace)}, QT)
-            self.addCleanup(window.window.close)
-            # Feed the pair check result directly; the request then uses
-            # the pair the window itself resolved.
-            window._apply_pair((model_2d, model_3d), "")
-            self.assertTrue(window.start_run_button.isEnabled())
-            pool = Path(tmp) / "pool"
-            pool.mkdir()
-            window.pool_edit.setText(str(pool))
-
-            requests = []
-
-            def fake_create_job(values):
-                requests.append(values)
-                # create_flexict_job generates the job_id itself.
-                return {
-                    "job_id": values.get("job_id") or "active_learning_test",
-                    "status_path": "s.json",
-                }
-
-            import flexict_pipeline as fp
-
-            with mock.patch.object(
-                    fp, "create_flexict_job",
-                    side_effect=fake_create_job):
-                window._submit_new_run()
-                deadline = time.time() + 5.0
-                while time.time() < deadline:
-                    _AppFixture.app().processEvents()
-                    window._poll_background_results()
-                    if requests:
-                        break
-                    time.sleep(0.02)
-            self.assertEqual(1, len(requests))
-            request = requests[0]
-            self.assertEqual("active_learning", request["operation"])
-            self.assertEqual("kidney_left", request["label_name"])
-            self.assertEqual(
-                model_2d["manifest_path"], request["model_manifest_2d"])
-            self.assertEqual(
-                model_3d["manifest_path"], request["model_manifest_3d"])
-            self.assertIn("已启动", window.status_label.text())
-
-    def test_submit_new_run_requires_pool_before_dispatch(self):
-        _AppFixture.app()
-        import flexict_active_learning_ui as al_ui
-
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp) / "workspace"
-            model_2d = self._pair_model(workspace, "2d")
-            model_3d = self._pair_model(workspace, "3d_fullres")
-            window = al_ui.ActiveLearningWindow(
-                {"workspace": str(workspace)}, QT)
-            self.addCleanup(window.window.close)
-            window._apply_pair((model_2d, model_3d), "")
-            window.pool_edit.setText("")
-            window._submit_new_run()
-            self.assertIn("数据池", window.pair_label.text())
-
-
-class TestFlexictStopBehaviour(unittest.TestCase):
-    """R61-17: remote-state-unknown FlexiCT tasks get the same Abandon
-    Locally confirmation as the nnU-Net viewer; plain local Stop stays
-    one-click (spec: normal flow carries no extra dialog)."""
-
-    def _window_with_rows(self, rows):
-        import flexict_status_viewer as viewer
-
-        _AppFixture.app()
-        window = viewer.StatusWindow({"workspace": ""}, QT)
-        window._job_rows = rows
-        # One list item selected at row 0, like a real selection. refresh()
-        # is stubbed so _stop() does not collect from the real workspace.
-        window.jobs.addItem("job")
-        window.jobs.setCurrentRow(0)
-        window.refresh = lambda *args, **kwargs: None
-        return window
-
-    def test_local_stop_calls_stop_job_without_dialog(self):
-        window = self._window_with_rows([
-            {"status_path": "X:/j/status.json", "status": "running",
-             "execution_backend": "local"},
-        ])
-        try:
-            with mock.patch.object(
-                window.QtWidgets.QMessageBox, "warning"
-            ) as warn, mock.patch("flexict_status_viewer.stop_job") as stop, \
-                    mock.patch("flexict_status_viewer.abandon_job") as abandon:
-                window._stop()
-            warn.assert_not_called()
-            stop.assert_called_once_with("X:/j/status.json")
-            abandon.assert_not_called()
-        finally:
-            window.window.close()
-
-    def test_remote_unknown_stop_asks_then_abandons(self):
-        window = self._window_with_rows([
-            {"status_path": "X:/j/status.json", "status": "stopping",
-             "execution_backend": "remote", "remote_state_unknown": True},
-        ])
-        try:
-            with mock.patch.object(
-                window.QtWidgets.QMessageBox, "warning",
-                return_value=QtWidgets.QMessageBox.Yes,
-            ) as warn, mock.patch(
-                "flexict_status_viewer.stop_job"
-            ) as stop, mock.patch(
-                "flexict_status_viewer.abandon_job"
-            ) as abandon:
-                window._stop()
-            warn.assert_called_once()
-            self.assertIn(
-                "无法确认", warn.call_args[0][2]
-            )
-            abandon.assert_called_once_with("X:/j/status.json")
-            stop.assert_not_called()
-        finally:
-            window.window.close()
-
-    def test_remote_unknown_stop_cancelled_does_nothing(self):
-        window = self._window_with_rows([
-            {"status_path": "X:/j/status.json", "status": "stopping",
-             "execution_backend": "remote", "remote_state_unknown": True},
-        ])
-        try:
-            with mock.patch.object(
-                window.QtWidgets.QMessageBox, "warning",
-                return_value=QtWidgets.QMessageBox.No,
-            ) as warn, mock.patch(
-                "flexict_status_viewer.stop_job"
-            ) as stop, mock.patch(
-                "flexict_status_viewer.abandon_job"
-            ) as abandon:
-                window._stop()
-            warn.assert_called_once()
-            stop.assert_not_called()
-            abandon.assert_not_called()
-        finally:
-            window.window.close()
-
-    def test_remote_known_state_uses_plain_stop(self):
-        # Remote but the server still answers: stop_job cancels through the
-        # controller; no abandon escape hatch is offered.
-        window = self._window_with_rows([
-            {"status_path": "X:/j/status.json", "status": "running",
-             "execution_backend": "remote", "remote_state_unknown": False},
-        ])
-        try:
-            with mock.patch.object(
-                window.QtWidgets.QMessageBox, "warning"
-            ) as warn, mock.patch(
-                "flexict_status_viewer.stop_job"
-            ) as stop, mock.patch(
-                "flexict_status_viewer.abandon_job"
-            ) as abandon:
-                window._stop()
-            warn.assert_not_called()
-            stop.assert_called_once_with("X:/j/status.json")
-            abandon.assert_not_called()
-        finally:
-            window.window.close()
-
-    def test_stop_button_label_reflects_abandonable_state(self):
-        import flexict_status_viewer as viewer
-
-        _AppFixture.app()
-        window = viewer.StatusWindow({"workspace": ""}, QT)
-        try:
-            window.jobs.addItem("job")
-            window.jobs.setCurrentRow(0)
-            window._job_rows = [
-                {"status": "stopping", "execution_backend": "remote",
-                 "remote_state_unknown": True},
-            ]
-            window._show_selected_job()
-            self.assertEqual("在本机放弃远程任务", window.stop_button.text())
-            self.assertTrue(window.stop_button.isEnabled())
-
-            window._job_rows = [
-                {"status": "running", "execution_backend": "local"},
-            ]
-            window._show_selected_job()
-            self.assertEqual("停止", window.stop_button.text())
-            self.assertTrue(window.stop_button.isEnabled())
-
-            window._job_rows = [
-                {"status": "completed", "execution_backend": "local"},
-            ]
-            window._show_selected_job()
-            self.assertEqual("停止", window.stop_button.text())
-            self.assertFalse(window.stop_button.isEnabled())
-        finally:
-            window.window.close()
-
-
-class TestActiveLearningWindow(unittest.TestCase):
-    """F03/T03 + F14/T14: the AL review window with real data rows.
-
-    _job_selected used QtWidgets/QtCore names that were only bound in other
-    functions' scopes — the window worked with zero rows and raised
-    NameError the moment a real ranking existed. The failure feedback was
-    then overwritten by the refresh summary (F14).
-    """
-
-    def _job_dir(self, root, ranking):
-        """A completed active_learning job with a ranking."""
-        from flexict_common import TERMINAL_STATES  # noqa: F401
-
-        job_dir = root / "jobs" / "aljob1"
-        (job_dir / "uncertainty").mkdir(parents=True)
-        (job_dir / "uncertainty" / "ranking.csv").write_text(
-            "case,integrated,uncertain_vol,max\n"
-            + "".join(
-                "{0},{1:.2f},10.0,1.0\n".format(name, 9.0 - index)
-                for index, name in enumerate(ranking)
-            ),
-            encoding="utf-8",
-        )
-        return job_dir
-
-    def _window(self, tmp, ranking=("caseA", "caseB")):
-        import flexict_active_learning_ui as al_ui
-
-        _AppFixture.app()
-        root = Path(tmp)
-        job_dir = self._job_dir(root, ranking)
-        (job_dir / "status.json").write_text(
-            json.dumps({
-                "kind": "active_learning",
-                "status": "completed",
-                "created_at_epoch": 1.0,
-                "label_name": "Liver",
-                "job_dir": str(job_dir),
-            }),
-            encoding="utf-8",
-        )
-        window = al_ui.ActiveLearningWindow(
-            {"workspace": str(root)}, QT)
-        return window
-
-    def test_real_rows_populate_without_nameerror(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            window = self._window(tmp)
-            try:
-                self.assertEqual(
-                    2, window.table.rowCount(),
-                    "non-empty ranking must populate the table")
-                self.assertTrue(window.open_button.isEnabled())
-                summary = window.status_label.text()
                 self.assertIn("已排序 2 例", summary)
             finally:
                 window.window.close()
@@ -2375,6 +1971,153 @@ class TestActiveLearningWindow(unittest.TestCase):
                     al_ui.find_running_al_job = original
             finally:
                 window.window.close()
+    def test_failed_run_stays_listed_with_its_error(self):
+        """R62-10: a failed ranking run must not vanish from the job list;
+        the annotator needs to know it was attempted and why it died."""
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._window(tmp)
+            try:
+                # Add a failed run newer than the completed one.
+                failed_dir = Path(tmp) / "jobs" / "aljob2"
+                failed_dir.mkdir(parents=True)
+                (failed_dir / "status.json").write_text(
+                    json.dumps({
+                        "kind": "active_learning",
+                        "status": "failed",
+                        "error": "GPU out of memory",
+                        "created_at_epoch": 2.0,
+                        "label_name": "Liver",
+                        "job_dir": str(failed_dir),
+                    }),
+                    encoding="utf-8",
+                )
+                window.refresh()
+                # Failed runs are listed after the completed ones.
+                self.assertEqual(2, window.job_combo.count())
+                window.job_combo.setCurrentIndex(1)
+                window._job_selected()
+                self.assertEqual(0, window.table.rowCount())
+                self.assertFalse(window.open_button.isEnabled())
+                text = window.status_label.text()
+                self.assertIn("失败", text)
+                self.assertIn("GPU out of memory", text)
+            finally:
+                window.window.close()
+
+
+    def _pair_model(self, workspace: Path, configuration: str) -> dict:
+        model_dir = (
+            workspace / "runtime" / "nnUNet_results"
+            / "Dataset750_Kidney" / "flexict{}_Trainer__nnUNetPlans__{}".format(
+                "2d" if configuration == "2d" else "3d", configuration)
+        )
+        (model_dir / "fold_0").mkdir(parents=True)
+        (model_dir / "fold_0" / "checkpoint_best.pth").write_bytes(b"x")
+        (model_dir / "plans.json").write_text("{}", encoding="utf-8")
+        (model_dir / "dataset.json").write_text("{}", encoding="utf-8")
+        manifest = {
+            "model_id": "m_{}".format(configuration),
+            "model_dir": str(model_dir),
+            "manifest_path": str(
+                model_dir / "flexict_model_manifest.json"),
+            "configuration": configuration,
+            "label_name": "kidney_left",
+            "task_id": "Kidney", "task_name": "Kidney",
+            "pair_id": "pair_1",
+            "created_at_epoch": 100.0,
+        }
+        from nnunet_common import write_json_atomic
+
+        write_json_atomic(
+            Path(manifest["manifest_path"]), manifest)
+        return manifest
+    def test_new_run_form_without_pair_explains_how_to_fix(self):
+        # F04: a fresh workspace must not dead-end — the form names the
+        # training entry instead of pointing back at this same menu.
+        _AppFixture.app()
+        import flexict_active_learning_ui as al_ui
+
+        with tempfile.TemporaryDirectory() as tmp:
+            window = al_ui.ActiveLearningWindow(
+                {"workspace": str(Path(tmp) / "workspace")}, QT)
+            self.addCleanup(window.window.close)
+            window._apply_pair((None, None), "")
+            self.assertIn("01 训练模型", window.pair_label.text())
+            self.assertFalse(window.start_run_button.isEnabled())
+            # The old circular empty state pointed at this same entry.
+            self.assertIn("新建排序", window.status_label.text())
+
+    def test_submit_new_run_creates_al_job_from_pair(self):
+        _AppFixture.app()
+        import flexict_active_learning_ui as al_ui
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            model_2d = self._pair_model(workspace, "2d")
+            model_3d = self._pair_model(workspace, "3d_fullres")
+            from flexict_common import save_registry
+
+            save_registry(workspace, None, [model_2d, model_3d])
+
+            window = al_ui.ActiveLearningWindow(
+                {"workspace": str(workspace)}, QT)
+            self.addCleanup(window.window.close)
+            # Feed the pair check result directly; the request then uses
+            # the pair the window itself resolved.
+            window._apply_pair((model_2d, model_3d), "")
+            self.assertTrue(window.start_run_button.isEnabled())
+            pool = Path(tmp) / "pool"
+            pool.mkdir()
+            window.pool_edit.setText(str(pool))
+
+            requests = []
+
+            def fake_create_job(values):
+                requests.append(values)
+                # create_flexict_job generates the job_id itself.
+                return {
+                    "job_id": values.get("job_id") or "active_learning_test",
+                    "status_path": "s.json",
+                }
+
+            import flexict_pipeline as fp
+
+            with mock.patch.object(
+                    fp, "create_flexict_job",
+                    side_effect=fake_create_job):
+                window._submit_new_run()
+                deadline = time.time() + 5.0
+                while time.time() < deadline:
+                    _AppFixture.app().processEvents()
+                    window._poll_background_results()
+                    if requests:
+                        break
+                    time.sleep(0.02)
+            self.assertEqual(1, len(requests))
+            request = requests[0]
+            self.assertEqual("active_learning", request["operation"])
+            self.assertEqual("kidney_left", request["label_name"])
+            self.assertEqual(
+                model_2d["manifest_path"], request["model_manifest_2d"])
+            self.assertEqual(
+                model_3d["manifest_path"], request["model_manifest_3d"])
+            self.assertIn("已启动", window.status_label.text())
+
+    def test_submit_new_run_requires_pool_before_dispatch(self):
+        _AppFixture.app()
+        import flexict_active_learning_ui as al_ui
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            model_2d = self._pair_model(workspace, "2d")
+            model_3d = self._pair_model(workspace, "3d_fullres")
+            window = al_ui.ActiveLearningWindow(
+                {"workspace": str(workspace)}, QT)
+            self.addCleanup(window.window.close)
+            window._apply_pair((model_2d, model_3d), "")
+            window.pool_edit.setText("")
+            window._submit_new_run()
+            self.assertIn("数据池", window.pair_label.text())
 
 
 class TestWindowClampedToSmallScreen(unittest.TestCase):
