@@ -976,6 +976,78 @@ class TestBatchPredictionWindow(unittest.TestCase):
             self.assertEqual("MR", requests[0]["source_modality"])
             self.assertTrue(requests[0]["use_cpu"])
 
+    def test_remote_backend_marks_requests_and_drops_cpu_flag(self):
+        """R72-C1 (=R62-5): the batch window can dispatch to a remote
+        backend. Remote requests carry the profile id and never ask for
+        local CPU fallback — the remote channel always uses the server
+        GPU. A missing profile id must fail closed per case (create_job
+        refuses) rather than silently falling back to local."""
+        _AppFixture.app()
+        import nnunet_batch_predict_ui as ui
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            window = ui.BatchPredictionWindow(
+                {"workspace": str(tmp / "workspace")}, QT
+            )
+            self.addCleanup(window.window.close)
+            window._apply_models(
+                [self._usable_model_row(self._model_dir(tmp))], ""
+            )
+            case_dir = tmp / "cases" / "case_a"
+            case_dir.mkdir(parents=True)
+            (case_dir / "ct.nii.gz").write_bytes(b"x")
+
+            class _Selector:
+                def __init__(self, backend, profile_id):
+                    self._backend = backend
+                    self._profile_id = profile_id
+
+                def selection(self):
+                    return self._backend, self._profile_id
+
+            requests = []
+
+            def fake_create_job(request):
+                requests.append(request)
+                return {"job_id": request["job_id"], "status_path": "s.json"}
+
+            window.image_root_edit.setText(str(tmp / "cases"))
+            window.output_edit.setText(str(tmp / "out"))
+            window.cpu_check.setChecked(True)
+            window.remote_selector = _Selector("remote", "206_root")
+            with mock.patch.object(ui, "create_job", fake_create_job):
+                window._submit()
+                deadline = time.time() + 5.0
+                while time.time() < deadline:
+                    _AppFixture.app().processEvents()
+                    window._poll_background_results()
+                    if requests:
+                        break
+                    time.sleep(0.02)
+            self.assertEqual(1, len(requests))
+            self.assertEqual("remote", requests[0]["execution_backend"])
+            self.assertEqual("206_root", requests[0]["remote_profile_id"])
+            # CPU fallback is a local-only affordance.
+            self.assertNotIn("use_cpu", requests[0])
+            self.assertIn("远程", window.status_label.text())
+
+            # Local selection keeps the exact request shape it always had.
+            requests.clear()
+            window.remote_selector = _Selector("local", "")
+            with mock.patch.object(ui, "create_job", fake_create_job):
+                window._submit()
+                deadline = time.time() + 5.0
+                while time.time() < deadline:
+                    _AppFixture.app().processEvents()
+                    window._poll_background_results()
+                    if requests:
+                        break
+                    time.sleep(0.02)
+            self.assertEqual(1, len(requests))
+            self.assertNotIn("execution_backend", requests[0])
+            self.assertTrue(requests[0]["use_cpu"])
+
     def test_unusable_models_stay_visible_with_reason(self):
         """R62-7: a registered model whose files are gone must be listed
         (greyed, with the reason) instead of silently vanishing."""

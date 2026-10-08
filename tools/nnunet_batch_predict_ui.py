@@ -112,6 +112,20 @@ class BatchPredictionWindow:
         )
         options.addWidget(self.cpu_check)
         root.addLayout(options)
+        # R72-C1 (=R62-5): large models + large batches can outrun the
+        # annotation workstation. The remote backend reuses the remote
+        # training channel (same container, cache, and transfer machinery);
+        # each case is still one tracked job in the status window.
+        self.remote_selector = None
+        try:
+            from remote_compute_ui import RemoteComputeSelector
+
+            self.remote_selector = RemoteComputeSelector(
+                self.window, (self.QtCore, self.QtGui, self.QtWidgets)
+            )
+            root.addWidget(self.remote_selector.group)
+        except Exception:
+            pass
         self.status_label = QtWidgets.QLabel("正在后台加载兼容模型...")
         self.status_label.setObjectName("hint")
         self.status_label.setWordWrap(True)
@@ -312,6 +326,11 @@ class BatchPredictionWindow:
             modality = str(self.modality_combo.currentText() or "").strip()
             source_modality = "" if "自动" in modality else modality
             use_cpu = self.cpu_check.isChecked()
+            execution_backend, remote_profile_id = "local", ""
+            if self.remote_selector is not None:
+                execution_backend, remote_profile_id = (
+                    self.remote_selector.selection()
+                )
             self.start.setEnabled(False)
             self.status_label.setStyleSheet("")
             self.status_label.setText("正在后台扫描病例并启动预测任务...")
@@ -339,10 +358,16 @@ class BatchPredictionWindow:
                             "image_path": str(image_path),
                             "output_path": str(output / "{}.nii.gz".format(case_id)),
                             "disable_tta": disable_tta,
-                            "use_cpu": use_cpu,
                             "case_id": case_id,
                             "source_modality": source_modality,
                         }
+                        if execution_backend == "remote":
+                            request["execution_backend"] = "remote"
+                            request["remote_profile_id"] = remote_profile_id
+                        else:
+                            # local CPU/GPU flags only apply locally; the
+                            # remote channel always uses the server GPU.
+                            request["use_cpu"] = use_cpu
                         try:
                             create_job(request)
                         except Exception as exc:
@@ -350,8 +375,11 @@ class BatchPredictionWindow:
                             continue
                         started.append(case_id)
                     lines = [
-                        "已启动 {0} 个预测任务（模型 {1}）。输出文件夹：{2}".format(
-                            len(started), model.get("model_id"), output
+                        "已启动 {0} 个预测任务（模型 {1}，{2}）。输出文件夹：{3}".format(
+                            len(started),
+                            model.get("model_id"),
+                            "远程" if execution_backend == "remote" else "本机",
+                            output,
                         ),
                         "进度与停止：「nnU-Net Show Status & Models」窗口。",
                     ]
