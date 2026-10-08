@@ -5137,3 +5137,48 @@ _publish_mcs 盲重试由 fingerprint 门控缓解），入账不擅自改。
 ### 外部资源
 
 - 本轮零外部资源使用（纯本地代码与测试）。
+
+## R71（2026-10-08）：ai-real-data-validation 合并进 al-review-loop
+
+### 合并内容
+
+- 85 commits、81 文件（+12346/−1974）：真实 Totalsegmentator 数据端到端
+  验证主线，全部 P0/P1 修复（F 系列）+ 4 轮独立评审（R61/R66–R69/R62）
+  约 80 项发现，及三个已批准功能——FlexiCT 多标签训练、nnU-Net 批量
+  预测 GUI（D20）、主动学习排序启动入口（AL）。
+- 合并 commit：`a05101f`（al-review-loop）。
+
+### 冲突解决原则（46 个冲突文件）
+
+1. 同主题分叉修复按提交时间取新者：F28（发布冲突加固取 ours 10-04
+   01:48 `2cb8d69`，对方的 10-02 版本与合并基线 patch 等价）、F30
+   （回执发布后写入取 ours `3e93b1a` 10-04 01:48，对方为预 F30 版本）、
+   F29（方向不变测试取 ours）、ui_theme 图标结构（QPainter finally +
+   QPolygon 单参取 theirs 10-03 15:02）。
+2. UI 文案一律中文（R61-24/R68 中文化基线）：所有英文侧文案与英文断言
+   一律淘汰（测试断言随源码同步改为中文 pin）。
+3. 对方已批准新功能完整集成：G9 val_cases 语义（测试 + 归一化）、
+   R62-6 孤儿 converting 请求、R62-10 失败运行可见性、FlexiCT 多标签
+   overlap/continue 检查行、批量预测 TestBatchPredictCommand、CLoPA
+   双算法单选。
+4. test_all.py 双方回归测试全保留（唯一例外：无——两侧均为独立测试，
+   逐块择侧合并）；import_undo_mimics 合并残留的重复英文 elif 块删除
+   （死代码）。
+
+### 过程事故（登记）
+
+- create_mcs_batch.py 曾被脚本化解决过程截断（670 行 vs 两侧 ~1600 行，
+  smoke 门禁的 ast.parse 捕获）。恢复为 ours 全量（F30 为该文件唯一的
+  分叉点，ours 是晚于对方的修复版本）。已对所有 46 个合并文件做
+  截断扫描（staged < min(两侧)×60% 即报警），无其他疑似项。
+- 教训：合并解决必须逐文件 ast.parse + 与两侧父本行数量级比对，
+  smoke 门禁在提交前捕获了该问题（流程有效）。
+
+### 门禁与验证
+
+- smoke 8/8 绿：`20261008T132330_smoke.json`（修复截断后重跑）。
+- fast 门禁：见下方合并后运行记录。
+
+### 外部资源
+
+- 本轮零外部资源使用（纯本地代码合并）。
