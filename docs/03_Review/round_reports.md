@@ -5183,6 +5183,36 @@ _publish_mcs 盲重试由 fingerprint 门控缓解），入账不擅自改。
   gui_smoke 68/68、interactive_algorithms 21/21、nnunet_integration
   105/105、flexict_integration 128/128。
 - fast 门禁 29/29 绿：`20261008T135605_fast.json`。
+- **test_all.py 全量首跑暴露 29 处合并残留**（fast 门禁不跑 test_all.py，
+  17 处手工解决的冲突此前从未被执行——这是"合并完成"初判的盲区）：
+  - `import_undo_mimics.py` 合并残留的**重复函数定义**（后定义静默遮蔽前
+    定义：`_delete_owned_masks` 被 theirs 的 try/except-pass 吞错版遮蔽，
+    F31 fail-closed 失效；`_session_diverged` 整段重复）。commit
+    `a6c9bb9` 删除重复定义。
+  - `tools/env_guidance.py` 被**截断至 70%**（缺 `_scribbleprompt_checkpoint`
+    与 `show_dialog` 头部；60% 截断扫描阈值漏检，测试执行才是真检测器）。
+    同 commit 整文件恢复为 ours。
+  - `tests/test_all.py`：重复的 undo 测试定义、断言目标指错
+    （`refresh_models` vs 模块级）、两个对方英文版测试与我们的中文等价
+    实现重复、`nnunet_common` 导入缺 tools/ 路径。commit `5087c46`。
+  - `tests/test_flexict_integration.py`：重复的
+    `TestEqualVolumeEditProtection` 类（旧单参 API 版遮蔽新双参版）。
+    commit `cb70798`。
+  - `tests/test_gui_smoke.py`：重复的 `TestActiveLearningWindow`（对方英文
+    断言版遮蔽我们中文版）与字节级重复的 `TestFlexictStopBehaviour`；
+    合并为我方中文版 + 移植对方 4 个独有测试（R62-10 失败运行可见、
+    F04 新建排序表单）。commit `eb3d079`。
+  - 首全量跑还暴露两个**两侧父本共有的潜伏测试缺陷**：F20 AL apply 测试
+    的 `TemporaryDirectory` 清理与守护线程写 result.json 竞态
+    （WinError 145，改用 `_make_temp_dir`+`_cleanup`）；F28 window 2
+    冲突副本断言按 sorted() 位置取新副本，而计数器后缀名排序在旧副本
+    之前（改为按内容识别）。commit `cb1dec6`。
+  - **教训**：手工解决冲突的大文件必须执行其测试后才算合并完成；
+    行数阈值扫描不够，"重复定义遮蔽"只能靠跑。
+- **test_all.py 全量 607/607 绿**：`r71_test_all_full_green.log`
+  （首跑失败日志 `r71_test_all_first_full_run.log` 留档）。
+- fast 门禁复跑（runtime_py35 与测试文件变更后）29/29 绿：
+  `20261008T193346_fast.json`。
 
 ### 外部资源
 
