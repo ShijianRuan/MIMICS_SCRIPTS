@@ -1580,6 +1580,67 @@ class CodeDriftTests(unittest.TestCase):
         self.assertEqual(invalid["remote_code_verify"], "warn")
 
 
+class ImagePreflightTests(unittest.TestCase):
+    """R72-A1: the image must prove it can run the kind before upload."""
+
+    class _Session:
+        def __init__(self, missing_output):
+            self.missing_output = missing_output
+            self.commands = []
+
+        def execute(self, command, **kwargs):
+            self.commands.append(command)
+            if "--entrypoint python" in command:
+                return self.missing_output
+            raise AssertionError("unexpected command: " + command)
+
+    def test_missing_file_refuses_before_upload(self):
+        session = self._Session("file:tools/remote_worker.py")
+        profile = {"runtime_image": "img", "container_runtime": "docker"}
+        with self.assertRaisesRegex(
+            RuntimeError, "missing requirements.*No data was uploaded"
+        ):
+            controller._image_preflight(session, profile, "nnunet")
+        # The check itself must not ask the session for any upload work.
+        self.assertEqual(len(session.commands), 1)
+        self.assertIn("run --rm --network none", session.commands[0])
+
+    def test_missing_module_refuses_with_module_detail(self):
+        session = self._Session("module:nnunetv2 (No module named nnunetv2)")
+        profile = {"runtime_image": "img", "container_runtime": "docker"}
+        with self.assertRaisesRegex(RuntimeError, "module:nnunetv2"):
+            controller._image_preflight(session, profile, "nnunet")
+
+    def test_clean_image_passes_and_reports_ok(self):
+        session = self._Session("")
+        profile = {"runtime_image": "img", "container_runtime": "docker"}
+        identity = controller._image_preflight(session, profile, "flexict")
+        self.assertEqual(identity, {"image_preflight": "ok"})
+
+    def test_unknown_kind_skips_preflight(self):
+        session = self._Session("should-not-run")
+        identity = controller._image_preflight(
+            session, {"runtime_image": "img"}, "something_else"
+        )
+        self.assertEqual(identity, {})
+        self.assertEqual(session.commands, [])
+
+    def test_every_controller_kind_has_requirements(self):
+        for kind in ("nninteractive", "nnunet", "nnunet_infer",
+                     "flexict", "flexict_infer"):
+            self.assertIn(kind, controller._IMAGE_PREFLIGHT_REQUIREMENTS)
+
+    def test_preflight_script_is_single_executable_container_payload(self):
+        files, modules = controller._IMAGE_PREFLIGHT_REQUIREMENTS["flexict"]
+        script = controller._IMAGE_PREFLIGHT_SCRIPT_TEMPLATE.format(
+            files=list(files), modules=list(modules)
+        )
+        # Compiles as Python and mentions both requirement kinds.
+        compile(script, "<preflight>", "exec")
+        self.assertIn("'/app'", script)
+        self.assertIn("flexict_trainer.py", script)
+
+
 class ContainerRuntimeAdapterTests(unittest.TestCase):
     """nerdctl servers run the same command flow with a swapped prefix."""
 

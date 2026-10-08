@@ -990,6 +990,106 @@ def _check_code_drift(
     return identity
 
 
+# What each remote kind actually needs from the image before any data
+# upload: the entry script plus the imports its container run cannot start
+# without. Checked inside a throwaway container (the same channel as
+# _remote_code_fingerprint) so a stale or broken image fails here, in
+# seconds, instead of after the dataset upload inside the training job.
+_IMAGE_PREFLIGHT_REQUIREMENTS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "nninteractive": (
+        ("tools/nninteractive_finetune_pipeline.py", "tools/remote_worker.py"),
+        ("nnInteractive", "nninteractive_finetune"),
+    ),
+    "nnunet": (
+        ("tools/remote_worker.py",),
+        ("nnunetv2", "MimicsNNUNetTrainer"),
+    ),
+    "nnunet_infer": (
+        ("tools/remote_worker.py",),
+        ("nnunetv2",),
+    ),
+    "flexict": (
+        (
+            "tools/remote_worker.py",
+            "integrations/flexict-finetune/flexict/models.py",
+            "integrations/flexict-finetune/trainers/flexict_trainer.py",
+        ),
+        ("einops", "safetensors"),
+    ),
+    "flexict_infer": (
+        (
+            "tools/remote_worker.py",
+            "integrations/flexict-finetune/flexict/models.py",
+        ),
+        ("einops", "safetensors"),
+    ),
+}
+
+# Runs inside the container; must stay stdlib-only. The trainer sys.path
+# entries must come BEFORE the import loop: the real job (remote_worker)
+# adds them before importing the custom trainers, so the preflight must
+# judge importability under the same conditions or it false-alarms.
+_IMAGE_PREFLIGHT_SCRIPT_TEMPLATE = (
+    "import sys, pathlib, importlib\n"
+    "missing=[]\n"
+    "root=pathlib.Path('/app')\n"
+    "for rel in {files!r}:\n"
+    "    (missing.append('file:'+rel) if not (root/rel).is_file() else None)\n"
+    "sys.path.insert(0, str(root/'integrations'/'nnunet_segmentation_workflow'/'trainers'))\n"
+    "sys.path.insert(0, str(root/'integrations'/'flexict-finetune'/'trainers'))\n"
+    "for mod in {modules!r}:\n"
+    "    try:\n"
+    "        importlib.import_module(mod)\n"
+    "    except Exception as exc:\n"
+    "        missing.append('module:'+mod+' ('+str(exc)[:120]+')')\n"
+    "sys.stdout.write('\\n'.join(missing))\n"
+)
+
+
+def _image_preflight(
+    session: SSHSession,
+    profile: dict[str, Any],
+    kind: str,
+) -> dict[str, Any]:
+    """Verify the image can run this kind BEFORE any dataset upload (R72-A1).
+
+    A missing pipeline file or broken import otherwise surfaces only after
+    the data upload inside the training container. One throwaway container
+    run (no GPU, no network, no volumes) checks the kind's entry files and
+    imports; any missing item refuses the job here, while refusing still
+    costs seconds instead of gigabytes of transfer.
+    """
+    requirements = _IMAGE_PREFLIGHT_REQUIREMENTS.get(kind)
+    if not requirements:
+        return {}
+    files, modules = requirements
+    script = _IMAGE_PREFLIGHT_SCRIPT_TEMPLATE.format(
+        files=list(files), modules=list(modules)
+    )
+    # Same execution pattern as _remote_code_fingerprint: entrypoint python,
+    # --network none, script passed shlex-quoted (json-wrapping breaks it).
+    output = session.execute(
+        "{runtime} run --rm --network none --entrypoint python "
+        "{image} -c {script}".format(
+            runtime=container_runtime_command(profile),
+            image=shlex.quote(str(profile["runtime_image"])),
+            script=shlex.quote(script),
+        ),
+        timeout=300,
+    ).strip()
+    missing = [line for line in output.splitlines() if line.strip()]
+    if missing:
+        raise RuntimeError(
+            "The remote runtime image is missing requirements for this "
+            "{kind} job: {items}. No data was uploaded. Ask the server "
+            "administrator to rebuild the image "
+            "(`remote/setup_remote_server.sh --build`) before training.".format(
+                kind=kind, items=", ".join(missing)
+            )
+        )
+    return {"image_preflight": "ok"}
+
+
 def _link_or_copy(source: str | Path, destination: str | Path) -> str:
     """Stage an immutable cached file without rereading it when possible.
 
@@ -4300,8 +4400,13 @@ def run(spec_path: Path) -> int:
             status_path,
             runtime_image_id,
         )
+        # R72-A1: prove the image can run THIS kind before any data leaves
+        # the workstation. Runs after code drift (same throwaway-container
+        # channel) and strictly before the dataset upload loop below.
+        preflight_identity = _image_preflight(session, profile, kind)
         identity = dict(asset_identity)
         identity.update(code_identity)
+        identity.update(preflight_identity)
         # _check_code_drift already reports remote_runtime_image_id when the
         # check runs; keep the inspected id for the "off" mode too without
         # ever passing the same keyword twice.
