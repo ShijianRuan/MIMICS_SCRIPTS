@@ -326,7 +326,9 @@ class TrainingSetupWindow:
         self.continue_check = QtWidgets.QCheckBox("继续上次中断的训练")
         self.continue_check.setToolTip(
             "从同名任务中断处继续（沿用其 Dataset 和 checkpoint_latest）。"
-            "须与上次使用相同的病例与标签，否则 checkpoint 无效。"
+            "须与上次使用相同的病例与标签，否则 checkpoint 无效。\n"
+            "远程训练同样支持：从服务器上保留的同名任务 checkpoint 继续，"
+            "不重新上传数据。"
         )
         form.addWidget(self.continue_check, 8, 0, 1, 2)
         layout.addWidget(training)
@@ -683,17 +685,10 @@ class TrainingSetupWindow:
                 raise ValueError(
                     "FlexiCT 少样本训练每个模型最多支持 4 个标签；更多标签请使用 nnU-Net。"
                 )
-            if request.get("continue_training") and str(
-                request.get("execution_backend") or "local"
-            ) == "remote":
-                # Remote runs train in a fresh disposable container: the
-                # interrupted run's checkpoint_latest lives only on this
-                # machine, so "continue" would silently start from scratch.
-                raise ValueError(
-                    "远程后端不支持“继续上次中断的训练”：远程任务在全新的容器中"
-                    "训练，读不到本机上次训练的 checkpoint。请改用本机后端，或"
-                    "取消勾选“继续上次中断的训练”。"
-                )
+            # R72-C2: remote continue-training is allowed — the checkpoints
+            # live on the remote server under the persistent data cache. A
+            # caching-off server (checkpoints not retained) is rejected by
+            # the remote controller before any data upload.
             warning = self._duplicate_model_warning(request)
             if warning:
                 answer = self.QtWidgets.QMessageBox.question(

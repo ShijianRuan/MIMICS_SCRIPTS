@@ -1613,17 +1613,18 @@ class TestTrainingSetupPathMemory(unittest.TestCase):
                 finally:
                     window.window.close()
 
-    def test_flexict_continue_training_reaches_request_and_blocks_remote(self):
+    def test_flexict_continue_training_reaches_request_and_allows_remote(self):
         # R61-25: "continue interrupted training" must reach the request (and
-        # through it the trainer's continue_training flag), and must be
-        # rejected when the compute tab selects a remote backend — remote
-        # containers are disposable, so the local checkpoint_latest the
-        # resume depends on is invisible to them.
+        # through it the trainer's continue_training flag). R72-C2: a remote
+        # backend is no longer blocked at the UI — the checkpoints persist
+        # on the remote server under the content-addressed cache, and the
+        # remote controller resolves/rejects the resume before any upload.
         _AppFixture.app()
         import flexict_training_setup_ui as ui
 
         with tempfile.TemporaryDirectory() as name:
             tmp = Path(name)
+            (tmp / "data").mkdir()
             home = self._settings_home(
                 tmp,
                 "flexict_settings.json",
@@ -1648,8 +1649,10 @@ class TestTrainingSetupPathMemory(unittest.TestCase):
                     self.assertFalse(window._request()["continue_training"])
                     window.continue_check.setChecked(True)
                     self.assertTrue(window._request()["continue_training"])
-                    # Remote backend + continue must fail validation without
-                    # spawning the path-check worker.
+                    # Remote backend + continue must pass local validation and
+                    # spawn the submission path-check worker (the remote
+                    # controller owns the reject/resume decision).
+                    created = {}
                     with mock.patch.object(
                         window, "_request",
                         return_value={
@@ -1661,14 +1664,33 @@ class TestTrainingSetupPathMemory(unittest.TestCase):
                             "execution_backend": "remote",
                             "remote_profile_id": "206_root",
                         },
+                    ), mock.patch.object(
+                        ui, "create_flexict_job",
+                        **{"side_effect": lambda req: created.update(
+                            request=req) or {
+                            "job_id": "j", "job_dir": "d",
+                            "status_path": "s", "control_path": "c",
+                            "launcher_pid": 1,
+                        }}
                     ):
                         window._submit()
-                    self.assertFalse(window._submission_pending)
-                    self.assertFalse(window.submitted)
-                    self.assertIn(
-                        "远程后端不支持",
-                        window.status_label.text(),
-                    )
+                        self.assertTrue(window._submission_pending)
+                        # Drain the path-check worker and the poll tick.
+                        deadline = time.time() + 10.0
+                        while (
+                            window._submission_pending
+                            and time.time() < deadline
+                        ):
+                            _QApplication.processEvents()
+                            time.sleep(0.02)
+                            window._poll_submission()
+                        self.assertTrue(window.submitted)
+                        self.assertTrue(
+                            created["request"]["continue_training"]
+                        )
+                        self.assertEqual(
+                            created["request"]["execution_backend"], "remote"
+                        )
                 finally:
                     window.window.close()
 

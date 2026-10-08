@@ -2555,9 +2555,15 @@ class TestRemoteExecution(unittest.TestCase):
             self.assertTrue(
                 remote_request["runtime_roots"]["raw"].startswith(
                     "/remote-cache/flexict/"))
-            self.assertEqual(
-                remote_request["runtime_roots"]["results"],
-                "/job/output/runtime/nnUNet_results")
+            # R72-C2: results (checkpoints included) persist under the
+            # prepared cache, not the disposable /job, so a follow-up
+            # continue-training run resumes without any checkpoint upload.
+            self.assertTrue(
+                remote_request["runtime_roots"]["results"].startswith(
+                    "/remote-cache/flexict/"))
+            self.assertTrue(
+                remote_request["runtime_roots"]["results"].endswith(
+                    "/results"))
             self.assertEqual(
                 prepared["required_model_relative"], "flexict")
             self.assertEqual(prepared["train_count"], 1)
@@ -3117,17 +3123,20 @@ class TestContinueTraining(unittest.TestCase):
             request = fp.normalize_flexict_request(values)
             self.assertEqual(request["dataset_id"], 752)
 
-    def test_remote_backend_rejects_continue_training(self):
-        """Remote containers are disposable: the local checkpoint is
-        invisible to them, so continue would silently start from scratch."""
+    def test_remote_backend_defers_continue_training_to_controller(self):
+        """R72-C2: remote continue-training is accepted at normalization
+        with a placeholder dataset id; the remote controller resolves the
+        real id from the remote checkpoint cache (or rejects with a
+        readable error) before any data upload."""
         with tempfile.TemporaryDirectory() as workspace:
-            self._interrupted_run(workspace)
             values = _training_request("X:/d", workspace)
             values["continue_training"] = True
             values["execution_backend"] = "remote"
             values["remote_profile_id"] = "206_root"
-            with self.assertRaises(ValueError):
-                fp.normalize_flexict_request(values)
+            request = fp.normalize_flexict_request(values)
+            self.assertTrue(request["continue_training"])
+            self.assertEqual(request["dataset_id"], 750)
+            self.assertTrue(750 <= request["dataset_id"] <= 799)
 
 
 if __name__ == "__main__":

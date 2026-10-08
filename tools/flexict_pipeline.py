@@ -223,7 +223,19 @@ def normalize_flexict_request(values: dict[str, Any]) -> dict[str, Any]:
         nnunet_values = dict(out)
         nnunet_values["configuration"] = nnunet_configuration
         if not nnunet_values.get("dataset_id"):
-            if bool(out.get("continue_training")):
+            if bool(out.get("continue_training")) and str(
+                out.get("execution_backend") or "local"
+            ) == "remote":
+                # R72-C2: remote resume. The interrupted run's checkpoints
+                # live on the remote server (persisted under the
+                # content-addressed prepared cache), so the dataset id can
+                # only be resolved after the data fingerprint is bound and
+                # the controller can search the remote results tree. Use the
+                # FlexiCT-band placeholder 750; the controller rewrites the
+                # real id — or rejects the job with a readable error —
+                # before any data leaves the workstation.
+                nnunet_values["dataset_id"] = 750
+            elif bool(out.get("continue_training")):
                 # Resuming needs the SAME Dataset{id}_{task} folder the
                 # interrupted run left behind, so a fresh suggested id would
                 # silently start from scratch. Resolve the interrupted run's
@@ -254,17 +266,6 @@ def normalize_flexict_request(values: dict[str, Any]) -> dict[str, Any]:
         # label_names carries the full multiclass list when N > 1.
         out["label_name"] = str(out["labels"][0]["name"])
         out["label_names"] = [str(spec["name"]) for spec in out["labels"]]
-        if bool(out.get("continue_training")) and str(
-            out.get("execution_backend") or "local"
-        ) == "remote":
-            # Remote runs train in a fresh disposable container: the
-            # interrupted run's checkpoint_latest lives only on this machine,
-            # so "continue" would silently start from scratch (R61-25).
-            raise ValueError(
-                "Remote backend does not support continue_training: the "
-                "remote container cannot see the interrupted run's local "
-                "checkpoint_latest.pth."
-            )
     else:
         # infer / active_learning share the inference-side normalization
         # (workspace, GPU fields); the FlexiCT operation must survive it.

@@ -4044,6 +4044,154 @@ class RemoteDatasetCacheListingTests(unittest.TestCase):
             )
 
 
+class RemoteFlexictResumeTests(unittest.TestCase):
+    """R72-C2: remote FlexiCT continue-training resolves the remote
+    checkpoint (dataset id) before any upload, and fails closed."""
+
+    class _Session:
+        def __init__(self, output):
+            self.output = output
+            self.commands = []
+
+        def execute(self, command, **_kwargs):
+            self.commands.append(command)
+            return self.output
+
+    def test_resume_rewrites_dataset_id_and_status(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            request_path = root / "request.json"
+            remote_compute.write_json_atomic(
+                request_path,
+                {"continue_training": True, "task_id": "kidney_left"},
+            )
+            status_path = root / "status.json"
+            remote_compute.write_json_atomic(status_path, {})
+            bundle = root / "bundle"
+            bundle.mkdir()
+            remote_compute.write_json_atomic(
+                bundle / "remote_request.json",
+                {"pipeline_request": {"dataset_id": 750}},
+            )
+            session = self._Session("Dataset777_kidney_left\n")
+            changed = controller._resolve_remote_flexict_resume(
+                session,
+                {"request_path": str(request_path)},
+                {"prepared_cache": "/remote/cache/root/prepared"},
+                bundle,
+                "/remote/cache/root/prepared/flexict/abc123",
+                status_path,
+                cache_training_data=True,
+            )
+            self.assertTrue(changed)
+            # The search stayed inside the namespace's results root.
+            self.assertIn(
+                "/remote/cache/root/prepared/flexict/abc123/results",
+                session.commands[0],
+            )
+            # Any checkpoint variant resumes: nnU-Net deletes
+            # checkpoint_latest on completion, so completed runs only
+            # keep final/best (maybe_load_checkpoint falls back to them).
+            self.assertIn("checkpoint_*.pth", session.commands[0])
+            payload = remote_compute.read_json(
+                bundle / "remote_request.json", {}
+            )
+            self.assertEqual(
+                payload["pipeline_request"]["dataset_id"], 777
+            )
+            self.assertEqual(
+                remote_compute.read_json(request_path, {}).get(
+                    "dataset_id"
+                ),
+                777,
+            )
+            status = remote_compute.read_json(status_path, {})
+            self.assertEqual(status.get("remote_resume_dataset_id"), 777)
+
+    def test_missing_checkpoint_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            request_path = root / "request.json"
+            remote_compute.write_json_atomic(
+                request_path,
+                {"continue_training": True, "task_id": "kidney_left"},
+            )
+            status_path = root / "status.json"
+            remote_compute.write_json_atomic(status_path, {})
+            bundle = root / "bundle"
+            bundle.mkdir()
+            remote_compute.write_json_atomic(
+                bundle / "remote_request.json",
+                {"pipeline_request": {"dataset_id": 750}},
+            )
+            session = self._Session("")
+            with self.assertRaisesRegex(
+                RuntimeError, "No remote FlexiCT checkpoint found"
+            ):
+                controller._resolve_remote_flexict_resume(
+                    session,
+                    {"request_path": str(request_path)},
+                    {"prepared_cache": "/remote/cache/root/prepared"},
+                    bundle,
+                    "/remote/cache/root/prepared/flexict/abc123",
+                    status_path,
+                    cache_training_data=True,
+                )
+            # The bundle request was not rewritten: nothing runs on a miss.
+            payload = remote_compute.read_json(
+                bundle / "remote_request.json", {}
+            )
+            self.assertEqual(
+                payload["pipeline_request"]["dataset_id"], 750
+            )
+
+    def test_caching_off_refuses_resume(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            request_path = root / "request.json"
+            remote_compute.write_json_atomic(
+                request_path,
+                {"continue_training": True, "task_id": "kidney_left"},
+            )
+            status_path = root / "status.json"
+            remote_compute.write_json_atomic(status_path, {})
+            session = self._Session("")
+            with self.assertRaisesRegex(RuntimeError, "缓存远程训练数据"):
+                controller._resolve_remote_flexict_resume(
+                    session,
+                    {"request_path": str(request_path)},
+                    {"prepared_cache": "/remote/cache/root/prepared"},
+                    root / "bundle",
+                    "/remote/cache/root/prepared/flexict/abc123",
+                    status_path,
+                    cache_training_data=False,
+                )
+            self.assertEqual(session.commands, [])
+
+    def test_non_resume_request_is_untouched(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            request_path = root / "request.json"
+            remote_compute.write_json_atomic(
+                request_path,
+                {"continue_training": False, "task_id": "kidney_left"},
+            )
+            status_path = root / "status.json"
+            remote_compute.write_json_atomic(status_path, {})
+            session = self._Session("Dataset777_kidney_left\n")
+            changed = controller._resolve_remote_flexict_resume(
+                session,
+                {"request_path": str(request_path)},
+                {"prepared_cache": "/remote/cache/root/prepared"},
+                root / "bundle",
+                "/remote/cache/root/prepared/flexict/abc123",
+                status_path,
+                cache_training_data=True,
+            )
+            self.assertFalse(changed)
+            self.assertEqual(session.commands, [])
+
+
 class FingerprintScriptExecutionTests(unittest.TestCase):
     """The container-side fingerprint script runs for real and matches local.
 

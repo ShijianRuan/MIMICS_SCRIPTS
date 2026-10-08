@@ -1611,6 +1611,11 @@ def _prepare_flexict(
     # The container resolves the FlexiCT backbone weights from the read-only
     # /models mount (admin-installed, fingerprint-verified below).
     remote_request["flexict_pretrained_dir"] = "/models/flexict"
+    # R72-C2: training results (including checkpoint_latest.pth) live under
+    # the persistent /remote-cache mount instead of the disposable /job, so
+    # a follow-up continue-training run can resume from them without any
+    # checkpoint round-trip. Model registration copies out of this tree; the
+    # job dir itself stays disposable as before.
     remote_request["runtime_roots"] = {
         "raw": "/remote-cache/flexict/{}/raw".format(
             _REMOTE_DATASET_CACHE_TOKEN
@@ -1618,7 +1623,9 @@ def _prepare_flexict(
         "preprocessed": "/remote-cache/flexict/{}/preprocessed".format(
             _REMOTE_DATASET_CACHE_TOKEN
         ),
-        "results": "/job/output/runtime/nnUNet_results",
+        "results": "/remote-cache/flexict/{}/results".format(
+            _REMOTE_DATASET_CACHE_TOKEN
+        ),
     }
     model_id = str(
         remote_request.get("model_id")
@@ -2213,6 +2220,109 @@ def _maintain_remote_nnunet_cache(
             else "Remote nnU-Net cache cleanup was deferred because another owned container is active."
         ),
     )
+
+
+def _resolve_remote_flexict_resume(
+    session: SSHSession,
+    spec: dict[str, Any],
+    remote_paths: dict[str, str],
+    bundle: Path,
+    prepared_cache_namespace: str,
+    status_path: Path,
+    cache_training_data: bool,
+) -> bool:
+    """R72-C2: resolve the remote checkpoint and rewrite the request id.
+
+    A remote FlexiCT continue-training run must reuse the SAME
+    Dataset{id}_{task} folder the earlier remote run left in the persistent
+    results cache (it holds checkpoint_latest.pth). The id can only be
+    resolved after the data fingerprint is bound (it addresses the cache
+    namespace), so this runs between session connect and job upload. Any
+    failure is fatal with a readable message — a wrong id would silently
+    start from scratch, which is exactly the R61-25 hazard.
+
+    Returns False when this is not a resume request (nothing changed).
+    """
+    request = read_json(Path(str(spec.get("request_path") or "")), {}) or {}
+    if not bool(request.get("continue_training")):
+        return False
+    if not cache_training_data or not prepared_cache_namespace:
+        # With caching off the prepared namespace is per-job and deleted
+        # right after a run — the results (checkpoints) die with it, so
+        # there is nothing on the server to continue from.
+        raise RuntimeError(
+            "Remote continue-training requires '缓存远程训练数据' in the "
+            "server profile: with caching off the remote checkpoints are "
+            "deleted immediately after each run."
+        )
+    # The results root inside the namespace: mirrors _prepared_cache_namespace
+    # (…/prepared/flexict/<identity>) + /results, matching the runtime_roots
+    # the remote request carries.
+    results_root = "{}/results".format(prepared_cache_namespace.rstrip("/"))
+    task_slug = safe_identifier(
+        request.get("task_id") or request.get("task_name") or "", "task"
+    )
+    output = session.execute(
+        # Any checkpoint resumes (nnunetv2 2.8's maybe_load_checkpoint
+        # falls back final -> latest -> best): an interrupted run keeps
+        # checkpoint_latest, a completed run keeps final/best (nnU-Net
+        # deletes latest on completion).
+        "for d in {root}/Dataset[0-9][0-9][0-9]_{task}; do "
+        "test -d \"$d\" || continue; "
+        "find \"$d\" -name 'checkpoint_*.pth' -print -quit 2>/dev/null "
+        "| grep -q . || continue; "
+        "basename \"$d\"; break; done".format(
+            root=shlex.quote(results_root),
+            task=shlex.quote(task_slug),
+        ),
+        timeout=120,
+    ).strip()
+    if not output:
+        raise RuntimeError(
+            "No remote FlexiCT checkpoint found for task '{task}' under "
+            "{root}: nothing to continue. Uncheck '继续上次中断的训练' to "
+            "start a fresh run, or check that the previous remote job used "
+            "the same cases and labels (the checkpoint cache is keyed by "
+            "data content).".format(task=task_slug, root=results_root)
+        )
+    try:
+        dataset_id = int(output[len("Dataset"):].split("_", 1)[0])
+    except (ValueError, IndexError):
+        raise RuntimeError(
+            "The remote FlexiCT checkpoint folder has an unreadable name: "
+            "{}".format(output)
+        )
+    if not 750 <= dataset_id <= 799:
+        raise RuntimeError(
+            "The remote FlexiCT checkpoint belongs to dataset id {} outside "
+            "the FlexiCT band (750-799); refusing to resume it.".format(
+                dataset_id
+            )
+        )
+    # Rewrite the pipeline request (dataset id) + the local job request so
+    # status reporting and a later re-attach see the same id.
+    payload_path = bundle / "remote_request.json"
+    payload = read_json(payload_path, {}) or {}
+    pipeline_request = dict(payload.get("pipeline_request") or {})
+    if not pipeline_request:
+        raise RuntimeError("The remote FlexiCT request bundle is missing.")
+    pipeline_request["dataset_id"] = dataset_id
+    pipeline_request["remote_checkpoint_dataset_id"] = dataset_id
+    payload["pipeline_request"] = pipeline_request
+    write_json_atomic(payload_path, payload)
+    request["dataset_id"] = dataset_id
+    write_json_atomic(Path(str(spec["request_path"])), request)
+    _status_update(
+        status_path,
+        remote_resume_dataset_id=dataset_id,
+        remote_checkpoint_root=results_root,
+        phase="resolved_remote_checkpoint",
+        message=(
+            "Continuing remote FlexiCT training from Dataset{:03d}_{} "
+            "checkpoints.".format(dataset_id, task_slug)
+        ),
+    )
+    return True
 
 
 def _finalize_completed_remote_job(
@@ -4393,14 +4503,29 @@ def _sync_remote_nnunet_curve(
     remote_status: dict[str, Any],
     local_curve: Path,
     state: dict[str, Any],
+    prepared_cache_root: str = "",
 ) -> bool:
     container_path = str(remote_status.get("training_curve_path") or "")
-    if not container_path.startswith("/job/"):
+    # /job/... maps inside the remote job folder; /remote-cache/... (R72-C2:
+    # FlexiCT results now persist there) maps into the prepared cache the
+    # container mounts at that path.
+    if container_path.startswith("/job/"):
+        relative = PurePosixPath(container_path[len("/job/") :])
+        if any(part == ".." for part in relative.parts):
+            return False
+        remote_curve = str(PurePosixPath(remote_job) / relative)
+    elif (
+        prepared_cache_root
+        and container_path.startswith("/remote-cache/")
+    ):
+        relative = PurePosixPath(container_path[len("/remote-cache/") :])
+        if any(part in {"", ".", ".."} for part in relative.parts):
+            return False
+        remote_curve = str(
+            PurePosixPath(prepared_cache_root) / relative
+        )
+    else:
         return False
-    relative = PurePosixPath(container_path[len("/job/") :])
-    if any(part == ".." for part in relative.parts):
-        return False
-    remote_curve = str(PurePosixPath(remote_job) / relative)
     try:
         stat = session.sftp.stat(remote_curve)
     except IOError:
@@ -4548,6 +4673,9 @@ def _monitor_remote(
                             candidate,
                             local_curve,
                             log_sync_state,
+                            prepared_cache_root=str(
+                                remote_paths.get("prepared_cache") or ""
+                            ),
                         ) or local_curve.is_file():
                             _status_update(
                                 status_path,
@@ -4836,6 +4964,25 @@ def run(spec_path: Path) -> int:
                 prepared_cache_namespace,
                 status_path,
                 controller_log,
+            )
+        if kind == "flexict" and _resolve_remote_flexict_resume(
+            session,
+            spec,
+            remote_paths,
+            bundle,
+            prepared_cache_namespace,
+            status_path,
+            cache_training_data=bool(
+                profile.get("cache_training_data", True)
+            ),
+        ):
+            # The job archive was built before the session opened; the
+            # rewrite above changed remote_request.json, so rebuild before
+            # the upload loop reads it.
+            archive_size = _build_tar(
+                bundle,
+                archive,
+                excluded_top_level={"input", "labels"},
             )
         session.execute(
             "{runtime} container prune -f "
