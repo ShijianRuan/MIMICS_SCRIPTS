@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from queue import Empty, Queue
 from pathlib import Path
 from typing import Any
@@ -247,6 +248,13 @@ class ServerProfilesDialog:
         self.test_button = QtWidgets.QPushButton("测试连接")
         self.test_button.clicked.connect(self._test_connection)
         actions.addWidget(self.test_button)
+        # R72-B2: visibility into what is already on the server. Identical
+        # data skips the upload automatically (content-addressed cache);
+        # this dialog shows what that cache holds, so a handing-over
+        # annotator can confirm their data is already there.
+        self.cache_button = QtWidgets.QPushButton("查看已缓存数据集...")
+        self.cache_button.clicked.connect(self._show_cached_datasets)
+        actions.addWidget(self.cache_button)
         actions.addStretch(1)
         close_button = QtWidgets.QPushButton("关闭")
         close_button.clicked.connect(self.dialog.accept)
@@ -523,6 +531,12 @@ class ServerProfilesDialog:
             kind, result = self._results.get_nowait()
         except Empty:
             return
+        if kind == "cache":
+            self._show_cache_rows(result)
+            return
+        if kind == "cache_error":
+            self._show_cache_rows([], error=result)
+            return
         self._testing = False
         self.test_button.setEnabled(True)
         self.save_button.setEnabled(True)
@@ -573,6 +587,88 @@ class ServerProfilesDialog:
         if warning:
             message = "⚠ {} — {}".format(warning, message)
         self.status_label.setText(message)
+
+    def _show_cached_datasets(self) -> None:
+        """List cached remote datasets (R72-B2) in a read-only dialog."""
+        QtWidgets = self.QtWidgets
+        profile = self._save(show_success=False)
+        if profile is None:
+            return
+        self.cache_button.setEnabled(False)
+        self.status_label.setText("正在读取服务器上的数据集缓存...")
+
+        def worker() -> None:
+            try:
+                from remote_training_controller import (
+                    list_remote_dataset_cache,
+                )
+            except ImportError:
+                from tools.remote_training_controller import (
+                    list_remote_dataset_cache,
+                )
+            try:
+                self._results.put(
+                    ("cache", list_remote_dataset_cache(profile))
+                )
+            except Exception as exc:  # noqa: BLE001 - surfaced in the dialog
+                self._results.put(("cache_error", exc))
+
+        thread = threading.Thread(
+            target=worker, name="remote-dataset-cache-list"
+        )
+        thread.daemon = True
+        thread.start()
+
+    def _show_cache_rows(self, rows, error=None) -> None:
+        QtWidgets = self.QtWidgets
+        self.cache_button.setEnabled(True)
+        if error is not None:
+            self.status_label.setText(
+                "读取数据集缓存失败：{}".format(error)
+            )
+            return
+        self.status_label.setText(
+            "服务器上已缓存 {} 个数据集（相同数据再次提交会自动跳过上传）。"
+            "列表见弹窗。".format(len(rows))
+        )
+        dialog = QtWidgets.QDialog(self.dialog)
+        dialog.setWindowTitle("已缓存的数据集")
+        dialog.resize(720, 420)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        hint = QtWidgets.QLabel(
+            "内容相同的数据再次提交会自动命中并跳过上传（按内容指纹比对，"
+            "不同数据不会被误用）。缓存 30 天未使用后自动清理。"
+        )
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        table = QtWidgets.QTableWidget(0, 4)
+        table.setHorizontalHeaderLabels(
+            ["内容指纹", "大小", "最近使用", "缓存"]
+        )
+        table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
+        table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        for row in rows:
+            index = table.rowCount()
+            table.insertRow(index)
+            mtime = time.strftime(
+                "%Y-%m-%d %H:%M", time.localtime(float(row.get("mtime_epoch") or 0))
+            )
+            for column, value in enumerate(
+                (
+                    str(row.get("fingerprint") or ""),
+                    _format_bytes(row.get("size_bytes")),
+                    mtime,
+                    "本账号" if row.get("bucket") == "own" else "共享",
+                )
+            ):
+                table.setItem(index, column, QtWidgets.QTableWidgetItem(value))
+        layout.addWidget(table, 1)
+        close = QtWidgets.QPushButton("关闭")
+        close.clicked.connect(dialog.accept)
+        layout.addWidget(close, 0, self.QtCore.Qt.AlignRight)
+        dialog.exec()
 
 
 class RemoteComputeSelector:

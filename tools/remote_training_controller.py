@@ -1922,6 +1922,60 @@ _REMOTE_BUILD_CONTEXT_EXCLUDES = {
 _REMOTE_BUILD_CONTEXT_EXCLUDED_NAMES = {"weights", "checkpoints"}
 
 
+def list_remote_dataset_cache(profile: dict[str, Any]) -> list[dict[str, Any]]:
+    """List cached remote training datasets (R72-B2 visibility).
+
+    Shows what is already on the server (own + shared buckets): fingerprint,
+    size, last-used time, bucket. Annotators handing over a project can see
+    that their data is already uploaded — the next identical submission hits
+    the content-addressed cache and skips the upload automatically (B1);
+    different content produces a different fingerprint and uploads as usual.
+    Read-only: listing never repairs, touches, or deletes anything.
+    """
+    with SSHSession(profile) as session:
+        owner = safe_identifier(session.profile.get("username"), "user")
+        buckets = (
+            ("own", str(PurePosixPath(session.remote_root) / "cache" / owner / "datasets")),
+            ("shared", str(PurePosixPath(session.remote_root) / "cache" / "shared" / "datasets")),
+        )
+        rows: list[dict[str, Any]] = []
+        for bucket, path in buckets:
+            code, output = session.execute_result(
+                "for f in {dir}/*.tar; do test -f $f || continue; "
+                "v=${{f%.tar}}.verified; "
+                'test -f "$v" || continue; '
+                'read dg sz mt < "$v" 2>/dev/null || continue; '
+                'printf "%s %s %s\\n" "$(basename $f .tar)" "$sz" "$mt"; '
+                "done".format(dir=shlex.quote(path)),
+                timeout=120,
+            )
+            if code != 0:
+                continue
+            for line in output.splitlines():
+                parts = line.split()
+                if len(parts) != 3:
+                    continue
+                fingerprint, size, mtime = parts
+                try:
+                    size = int(size)
+                except ValueError:
+                    continue
+                rows.append(
+                    {
+                        "fingerprint": fingerprint,
+                        "size_bytes": size,
+                        "mtime_epoch": float(mtime),
+                        "bucket": bucket,
+                    }
+                )
+        # a fingerprint present in both buckets is one dataset; report the
+        # own-bucket row (it is the one the cache check consults first)
+        seen: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            seen.setdefault(row["fingerprint"], row)
+        return sorted(seen.values(), key=lambda row: -row["mtime_epoch"])
+
+
 def remote_build_image(
     profile: dict[str, Any],
     *,

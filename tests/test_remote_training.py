@@ -3244,6 +3244,84 @@ class StatusAndLifecycleTests(unittest.TestCase):
             self.assertEqual(status["transfer_percent"], 50)
             self.assertLess(status["progress_percent"], 33)
 
+
+class RemoteDatasetCacheListingTests(unittest.TestCase):
+    """R72-B2: visibility into the cached remote datasets (read-only)."""
+
+    class _Session:
+        remote_root = "/remote"
+
+        def __init__(self, own_output, shared_output):
+            self.own_output = own_output
+            self.shared_output = shared_output
+            self.commands = []
+            self.profile = {"username": "root"}
+
+        def execute_result(self, command, **kwargs):
+            self.commands.append(command)
+            if "/cache/root/datasets" in command:
+                return 0, self.own_output
+            if "/cache/shared/datasets" in command:
+                return 0, self.shared_output
+            return 0, ""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def test_listing_parses_dedupes_and_sorts_by_recency(self):
+        session = self._Session(
+            "aa 100 200\nbb 200 300\n",
+            "bb 200 999\ncc 300 100\n",
+        )
+        with unittest.mock.patch.object(
+            controller, "SSHSession", return_value=session
+        ):
+            rows = controller.list_remote_dataset_cache({"username": "root"})
+        # bb appears in both buckets but is reported once (own wins)
+        self.assertEqual(
+            [row["fingerprint"] for row in rows], ["bb", "aa", "cc"]
+        )
+        self.assertEqual(rows[0]["size_bytes"], 200)
+        self.assertEqual(rows[0]["bucket"], "own")
+        self.assertEqual(rows[2]["bucket"], "shared")
+        # read-only: only listing commands, no touch/rm/ln/write
+        for command in session.commands:
+            self.assertIn("for f in", command)
+            for forbidden in ("rm ", "touch ", "ln ", "mv "):
+                self.assertNotIn(forbidden, command)
+
+    def test_listing_skips_malformed_lines_and_missing_marker(self):
+        session = self._Session("not-enough-parts\naa notanumber 5\n", "")
+        with unittest.mock.patch.object(
+            controller, "SSHSession", return_value=session
+        ):
+            rows = controller.list_remote_dataset_cache({"username": "root"})
+        self.assertEqual(rows, [])
+        # an unreadable bucket (nonzero exit) yields nothing, not a crash
+        class _Failing(self._Session):
+            def execute_result(self, command, **kwargs):
+                return 1, "oops"
+
+        with unittest.mock.patch.object(
+            controller, "SSHSession", return_value=_Failing("", "")
+        ):
+            self.assertEqual(
+                controller.list_remote_dataset_cache({"username": "root"}),
+                [],
+            )
+
+    def test_manage_dialog_carries_the_cache_entry(self):
+        """The visibility dialog must survive refactors (source assert)."""
+        source = Path("tools/remote_compute_ui.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("查看已缓存数据集", source)
+        self.assertIn("list_remote_dataset_cache", source)
+
+
     def test_container_launch_exposes_only_selected_gpu(self):
         class Session:
             def __init__(self):
