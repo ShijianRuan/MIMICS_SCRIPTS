@@ -1692,7 +1692,7 @@ class RemoteBuildTests(unittest.TestCase):
                 return self.marker_digest
             if " image inspect" in command:
                 return self.image_id
-            if command.startswith("tar -xf "):
+            if command.startswith("find "):
                 return ""
             raise AssertionError("unexpected command: " + command)
 

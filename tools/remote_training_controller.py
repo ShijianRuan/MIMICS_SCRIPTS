@@ -1989,13 +1989,18 @@ def remote_build_image(
                     context_tar,
                     str(PurePosixPath(context_root) / "build_context.tar"),
                 )
+                # Clean before unpack: files deleted locally since the last
+                # upload must not linger in the context and ship back into
+                # the image (a stale .py changes the code fingerprint).
                 session.execute(
+                    "find {root} -mindepth 1 -not -name build_context.tar "
+                    "-not -name .mimics_context_digest -delete && "
                     "tar -xf {tar} -C {root} && rm -f {tar} && "
                     "printf '%s' {digest} > {marker}".format(
+                        root=shlex.quote(context_root),
                         tar=shlex.quote(
                             str(PurePosixPath(context_root) / "build_context.tar")
                         ),
-                        root=shlex.quote(context_root),
                         digest=shlex.quote(digest),
                         marker=shlex.quote(marker),
                     ),
