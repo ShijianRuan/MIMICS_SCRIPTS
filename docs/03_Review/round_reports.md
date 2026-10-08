@@ -5177,7 +5177,12 @@ _publish_mcs 盲重试由 fingerprint 门控缓解），入账不擅自改。
 ### 门禁与验证
 
 - smoke 8/8 绿：`20261008T132330_smoke.json`（修复截断后重跑）。
-- fast 门禁：见下方合并后运行记录。
+- fast 首跑 25/29：4 个套件的合并残留（合并对方的英文测试断言 vs 我们的
+  中文 UI 基线 + 1 个不可达 import_single 分支 + 1 个 tests/ 路径未随
+  R66-A3 拆分更新）——commit `9e437b6` 逐项修复：
+  gui_smoke 68/68、interactive_algorithms 21/21、nnunet_integration
+  105/105、flexict_integration 128/128。
+- fast 门禁 29/29 绿：`20261008T135605_fast.json`。
 
 ### 外部资源
 
