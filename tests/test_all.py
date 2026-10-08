@@ -15558,7 +15558,12 @@ class TestFlexiCTActiveLearningApply(unittest.TestCase):
         the overlay is refused before any conversion starts."""
         import flexict_mimics
 
-        with tempfile.TemporaryDirectory() as tmp:
+        # _make_temp_dir + _cleanup (ignore_errors) instead of
+        # TemporaryDirectory: the daemon wait_bridge thread writes
+        # result.json into the job dir after the assertions, and the
+        # strict rmtree races it on Windows (WinError 145).
+        tmp = _make_temp_dir()
+        try:
             job_dir = os.path.join(tmp, "job")
             os.makedirs(job_dir)
             matrix = [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
@@ -15643,6 +15648,8 @@ class TestFlexiCTActiveLearningApply(unittest.TestCase):
                 flexict_mimics.mimics.data.images = old_images
                 flexict_mimics.subprocess.Popen = old_popen
             flexict_mimics._AL_APPLY_TRANSACTIONS.clear()
+        finally:
+            _cleanup(tmp)
 
     def test_al_conversion_applies_finished_result_and_marks_request(self):
         import flexict_mimics
@@ -16741,10 +16748,21 @@ class TestForeignScriptIntegration(unittest.TestCase):
             if ".conflict." in name and name.endswith(".mcs")
         )
         self.assertEqual(2, len(conflict_copies))
-        with open(os.path.join(self.tmp, conflict_copies[-1]), "rb") as handle:
-            self.assertEqual(b"staged-background-result", handle.read())
-        with open(earlier, "rb") as handle:
-            self.assertEqual(b"earlier-conflict", handle.read())
+        # The new copy is the counter-suffixed one (<pid>.2.mcs), which
+        # sorts BEFORE the bare <pid>.mcs — identify it by content, not
+        # by sorted() position.
+        contents = {}
+        for name in conflict_copies:
+            with open(os.path.join(self.tmp, name), "rb") as handle:
+                contents[name] = handle.read()
+        self.assertEqual(
+            1, sum(1 for data in contents.values()
+                   if data == b"staged-background-result"),
+            "the staged result must survive in its own conflict copy")
+        self.assertEqual(
+            1, sum(1 for data in contents.values()
+                   if data == b"earlier-conflict"),
+            "the earlier conflict copy must not be overwritten")
 
     def test_sync_force_actually_rebuilds_from_source(self):
         """F28 adjacent UX gap: --force was written into the job config but
