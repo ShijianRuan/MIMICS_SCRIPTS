@@ -336,6 +336,164 @@ def _scribbleprompt_configured_path(root: Path) -> str:
     # broken install.
     if not value:
         value = "integrations/ScribblePrompt/checkpoints/ScribblePrompt_unet_v1_nf192_res128.pt"
+    if value and not os.path.isabs(value):
+        value = str(root / value)
+    return value
+
+
+def _scribbleprompt_checkpoint(root: Path) -> str | None:
+    """Resolved checkpoint path, or '' when missing.
+
+    Returns None when no checkpoint is configured at all: an empty config
+    is a different problem (not reported here) than a broken path."""
+    value = _scribbleprompt_configured_path(root)
+    if not value:
+        return None
+    return value if Path(value).is_file() else ""
+
+
+def _run_setup_worker(project_root: Path, action: str) -> int:
+    """Start tools/setup_env.py <action> detached; return its PID (0=fail)."""
+    import subprocess
+
+    python = find_external_python(project_root)
+    if not python:
+        return 0
+    cmd = [python, str(Path(project_root) / "tools" / "setup_env.py"), action]
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(project_root),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return proc.pid
+    except Exception:
+        return 0
+
+
+def _run_migrate(project_root: Path, old_root: str) -> int:
+    """Start tools/migrate_root.py --old-root <old_root> detached."""
+    import subprocess
+
+    python = find_external_python(project_root)
+    if not python:
+        return 0
+    cmd = [
+        python, str(Path(project_root) / "tools" / "migrate_root.py"),
+        "--old-root", old_root,
+    ]
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(project_root),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return proc.pid
+    except Exception:
+        return 0
+
+
+def run_fix(project_root: Path, fix_action: str) -> str:
+    """Run the repair action for an issue. Returns human feedback text."""
+    root = Path(project_root or ROOT)
+    if fix_action.startswith("migrate:"):
+        old_root = fix_action.split(":", 1)[1]
+        pid = _run_migrate(root, old_root)
+        if pid:
+            return "迁移已启动（PID {0}）。完成后请点击“重新检查”。".format(pid)
+        return "无法启动迁移 worker。"
+    if fix_action in ("check", "install", "offline-install", "setup-from-scratch"):
+        pid = _run_setup_worker(root, fix_action)
+        if pid:
+            return "安装 worker 已启动（PID {0}）。完成后可点击“重新检查”确认。".format(pid)
+    return ""
+
+
+def show_dialog(project_root: Path | None = None, parent=None) -> int:
+    """Open the environment guidance window. Blocking modal."""
+    from PySide6 import QtWidgets
+
+    import ui_theme
+
+    root = Path(project_root or ROOT)
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])  # pragma: no cover - dialog used inside Mimics
+    if app is not None and hasattr(ui_theme, "configure_application"):
+        try:
+            ui_theme.configure_application(app)
+        except Exception:
+            pass
+
+    dialog = QtWidgets.QDialog(parent)
+    dialog.setWindowTitle("环境指引")
+    dialog.setMinimumSize(560, 320)
+    layout = QtWidgets.QVBoxLayout(dialog)
+
+    header = QtWidgets.QLabel("环境指引")
+    header.setObjectName("title")
+    layout.addWidget(header)
+
+    issues = collect_issues(root)
+    if not issues:
+        note = QtWidgets.QLabel(
+            "未检测到环境问题。\nPython、依赖包、已配置路径、FlexiCT 权重和 nnInteractive 官方模型均正常。"
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+    else:
+        intro = QtWidgets.QLabel(
+            "有 {0} 个问题需要处理，处理后功能才能全部可用：".format(len(issues))
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        inner = QtWidgets.QWidget()
+        page = QtWidgets.QVBoxLayout(inner)
+        for issue in issues:
+            box = QtWidgets.QGroupBox(issue["title"])
+            box_layout = QtWidgets.QVBoxLayout(box)
+            detail = QtWidgets.QLabel(issue["detail"])
+            detail.setWordWrap(True)
+            box_layout.addWidget(detail)
+            if issue.get("fix_action"):
+                fix_btn = QtWidgets.QPushButton("修复：{0}".format(
+                    "运行迁移" if issue["fix_action"].startswith("migrate:")
+                    else "运行安装/修复环境"
+                ))
+                fix_btn.setObjectName("primary")
+                feedback = QtWidgets.QLabel("")
+                feedback.setWordWrap(True)
+                feedback.hide()
+
+                def _clicked(_=False, action=str(issue["fix_action"])):
+                    text = run_fix(root, action)
+                    feedback.setText(text or "该问题没有可运行的操作。")
+                    feedback.show()
+
+                fix_btn.clicked.connect(_clicked)
+                box_layout.addWidget(fix_btn)
+                box_layout.addWidget(feedback)
+            page.addWidget(box)
+        page.addStretch(1)
+        scroll.setWidget(inner)
+        layout.addWidget(scroll, 1)
+
+    # Re-check: repair workers run detached, so the user needs an in-place way
+    # to see whether the environment actually got fixed (the alternative is
+    # closing and reopening the whole dialog from the menu).
+    buttons = QtWidgets.QHBoxLayout()
+    recheck = QtWidgets.QPushButton("重新检查")
+    recheck.clicked.connect(dialog.reject)
+    buttons.addWidget(recheck)
+    buttons.addStretch(1)
     close = QtWidgets.QPushButton("关闭")
     close.clicked.connect(dialog.accept)
     buttons.addWidget(close)
@@ -343,6 +501,7 @@ def _scribbleprompt_configured_path(root: Path) -> str:
     result = dialog.exec()
     if result == QtWidgets.QDialog.Rejected and recheck.underMouse():
         return show_dialog(root, parent)  # re-run detection and re-render
+    return 0
     return 0
 
 
