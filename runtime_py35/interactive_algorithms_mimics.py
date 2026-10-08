@@ -295,11 +295,15 @@ def _capture_scribble(image, include, job_dir, visual_objects):
             return None
         view = prompt.get_voxel_buffer()
         shape = [int(value) for value in view.shape]
-        raw = view.tobytes()
         try:
             import numpy as np
 
-            array = np.frombuffer(raw, dtype=np.uint8).reshape(tuple(shape))
+            # Zero-copy buffer view (same pattern as the nnInteractive prompt
+            # capture): a full-volume .tobytes() here copied the whole image
+            # for every stroke drawn, freezing Mimics per stroke (R62-1).
+            # argwhere still scans the volume but at C speed and only
+            # allocates for the scribble's own voxels.
+            array = np.asarray(view, dtype=np.uint8).reshape(tuple(shape))
             nonzero = np.argwhere(array)
             if len(nonzero) == 0:
                 mimics.data.masks.delete(prompt)
@@ -312,9 +316,13 @@ def _capture_scribble(image, include, job_dir, visual_objects):
                 bbox[1][0]:bbox[1][1],
                 bbox[2][0]:bbox[2][1],
             ]
+            # The crop is bbox-bounded (a stroke on one 2D slice), so this
+            # tobytes copies only the small region actually sent to the
+            # predictor.
             crop_raw = crop.tobytes(order="C")
             crop_shape = [int(value) for value in crop.shape]
         except ImportError:
+            raw = view.tobytes()
             cropped = _pure_python_crop(raw, shape)
             if cropped is None:
                 mimics.data.masks.delete(prompt)
@@ -475,7 +483,28 @@ def _choose_click_plane(image):
     return int(axes[answer])
 
 
+# Session-level prompt-sign memory (R62-2). Asking Foreground/Background
+# before every click/scribble stacked a second modal on top of the main
+# prompt dialog for each prompt; batch annotators want the same sign to
+# stick. The first ask in a Mimics session sticks; the main prompt dialog
+# carries a switch button so changing it stays one click.
+_SESSION_PROMPT_SIGN = None
+
+
+def _current_prompt_sign():
+    """Sign used for the next prompt: session value, else last persisted."""
+    if _SESSION_PROMPT_SIGN is not None:
+        return _SESSION_PROMPT_SIGN
+    memory = _load_plane_memory() if _remember_plane_enabled() else {}
+    if memory.get("prompt_sign") == "Background":
+        return False
+    return True
+
+
 def _choose_prompt_sign():
+    global _SESSION_PROMPT_SIGN
+    if _SESSION_PROMPT_SIGN is not None:
+        return _SESSION_PROMPT_SIGN
     memory = _load_plane_memory() if _remember_plane_enabled() else {}
     last_sign = memory.get("prompt_sign")
     default_hint = ""
@@ -485,8 +514,9 @@ def _choose_prompt_sign():
         title="ScribblePrompt",
         message=(
             "前景标记属于目标结构的像素。\n"
-            "背景标记必须排除的像素。{0}".format(default_hint)
-        ),
+            "背景标记必须排除的像素。{0}\n\n"
+            "该选择将在本次 Mimics 会话中记住；随时可在提示菜单中切换。"
+        ).format(default_hint),
         buttons="前景;背景;取消",
         ui_blocking=True,
     )
@@ -496,6 +526,7 @@ def _choose_prompt_sign():
         result = False
     else:
         return None
+    _SESSION_PROMPT_SIGN = result
     if _remember_plane_enabled() and answer != last_sign:
         _remember_plane_sign("prompt_sign", answer)
     return result
@@ -591,6 +622,12 @@ def _collect_scribbleprompt_prompts(image, target, job_dir, visual_objects):
             buttons.append("添加框")
         if records:
             buttons.append("撤销上一个")
+        # R62-2: 会话内 sign 粘滞；切换 sign 就地完成，不再叠加第二个弹窗。
+        buttons.append(
+            "改用背景提示"
+            if _current_prompt_sign()
+            else "改用前景提示"
+        )
         if can_run:
             buttons.append("执行 ScribblePrompt")
         buttons.append("取消")
@@ -603,17 +640,23 @@ def _collect_scribbleprompt_prompts(image, target, job_dir, visual_objects):
                 "（缩放、平移、测量等）。否则可能导致 Mimics 崩溃并丢失未保存的工作。"
                 "请仅在此对话框显示时切换工具。\n\n"
                 "点击：{0}    涂鸦：{1}    框：{2}\n"
-                "前景提示：{3}    背景提示：{4}"
+                "前景提示：{3}    背景提示：{4}\n"
+                "下一个提示符号：{5}（用下方按钮切换）"
             ).format(
                 len(clicks),
                 len(scribbles),
                 "已添加" if boxes else "无",
                 len([item for item in records if item["kind"] == "box" or item["value"].get("include")]),
                 len([item for item in records if item["kind"] != "box" and not item["value"].get("include")]),
+                "Foreground" if _current_prompt_sign() else "Background",
             ),
             buttons=";".join(buttons),
             ui_blocking=True,
         )
+        if answer in ("改用前景提示", "改用背景提示"):
+            global _SESSION_PROMPT_SIGN
+            _SESSION_PROMPT_SIGN = answer == "改用前景提示"
+            continue
         if answer == "添加点击":
             include = _choose_prompt_sign()
             if include is None:
@@ -933,7 +976,16 @@ def _create_copy(image, name):
     return nnm._create_result_mask(image, name)
 
 
+# Session-level memory for the result destination (R62-3, same pattern as
+# nnInteractive's R61-10): ScribblePrompt rounds run back-to-back, and the
+# ready dialog popping after every round with the same three buttons is a
+# modal storm. The first answer sticks for the Mimics session; the
+# changed-mask safety question (a data-risk path) always stays.
+_SESSION_RESULT_MODE = None
+
+
 def _choose_result_target(monitor, result):
+    global _SESSION_RESULT_MODE
     target = _find_mask(monitor.get("target_guid"))
     changed = target is None
     if target is not None:
@@ -955,25 +1007,35 @@ def _choose_result_target(monitor, result):
         if answer != "创建可编辑副本":
             return None
         return _create_copy(monitor["image"], "{0} - {1}".format(monitor["target_name"], display))
-    answer = mimics.dialogs.question_box(
-        title="{0} 就绪".format(display),
-        message=(
-            "{0} 在 {1} 秒内完成。\n\n"
-            "更新匹配掩膜 会将结果应用到 {2}。\n"
-            "创建可编辑副本 会保留它，并新建一个可编辑的掩膜。"
-        ).format(
-            display,
-            result.get("elapsed_seconds", "?"),
-            monitor["target_name"],
-        ),
-        buttons="更新匹配掩膜;创建可编辑副本;丢弃",
-        ui_blocking=True,
-    )
-    if answer == "更新匹配掩膜":
+    if _SESSION_RESULT_MODE is None:
+        # 本 Mimics 会话的第一个结果：询问一次并记住（R62-3）。
+        answer = mimics.dialogs.question_box(
+            title="{0} 就绪".format(display),
+            message=(
+                "{0} 在 {1} 秒内完成。\n\n"
+                "更新匹配掩膜 会将结果应用到 {2}。\n"
+                "创建可编辑副本 会保留它，并新建一个可编辑的掩膜。\n\n"
+                "该选择将在本次 Mimics 会话中记住。"
+            ).format(
+                display,
+                result.get("elapsed_seconds", "?"),
+                monitor["target_name"],
+            ),
+            buttons="更新匹配掩膜;创建可编辑副本;丢弃",
+            ui_blocking=True,
+        )
+        if answer == "更新匹配掩膜":
+            _SESSION_RESULT_MODE = "in_place"
+        elif answer == "创建可编辑副本":
+            _SESSION_RESULT_MODE = "copy"
+        else:
+            return None
+    if _SESSION_RESULT_MODE == "in_place":
         return target
-    if answer == "创建可编辑副本":
-        return _create_copy(monitor["image"], "{0} - {1}".format(monitor["target_name"], display))
-    return None
+    return _create_copy(
+        monitor["image"],
+        "{0} - {1}".format(monitor["target_name"], display),
+    )
 
 
 def _store_scribble_session(mask, result):

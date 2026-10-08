@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -22,7 +23,13 @@ for value in (ROOT, TESTS, ROOT / "tools", ROOT / "runtime_py35"):
         sys.path.insert(0, str(value))
 
 import interactive_algorithms_worker as worker
-from fake_mimics_flow_test import FakeImage, FakeMask, FakeMimics, _u8_pattern_buffer
+from fake_mimics_flow_test import (
+    FakeImage,
+    FakeMask,
+    FakeMimics,
+    FakeVoxelBuffer,
+    _u8_pattern_buffer,
+)
 
 
 class WorkerGeometryTests(unittest.TestCase):
@@ -313,6 +320,56 @@ class MimicsRuntimeTests(unittest.TestCase):
             self.runtime.nnm._metadata_set(mask, self.runtime.SESSION_MASK_SHA_METADATA, "old")
             self.assertEqual(self.runtime._session_values(mask, "new"), {})
 
+    def test_scribble_capture_avoids_full_volume_copy(self):
+        # R62-1: every drawn stroke used to copy the whole image volume
+        # via .tobytes() before finding its bbox. The numpy path must view
+        # the buffer zero-copy (np.asarray) and copy only the bbox crop.
+        class BufferProtocolVoxelBuffer(FakeVoxelBuffer):
+            """FakeVoxelBuffer plus the buffer protocol, which real Mimics
+            voxel buffers support and np.asarray needs for a zero-copy view."""
+
+            def __buffer__(self, flags):
+                return self._data.__buffer__(flags)
+
+        image = FakeImage(_u8_pattern_buffer((4, 5, 6), lambda x, y, z: False))
+        self.fake.data.images.append(image)
+        self.fake.data.images.set_active(image)
+        original_tobytes = FakeVoxelBuffer.tobytes
+        volume_bytes = bytearray(_u8_pattern_buffer(
+            (4, 5, 6), lambda x, y, z: False).tobytes())
+        volume_bytes[2 * 5 * 6 + 3 * 6 + 4] = 1  # stroke voxel at (2, 3, 4)
+        copied_sizes = []
+
+        def counting_tobytes(inner):
+            copied_sizes.append(len(inner._data))
+            return original_tobytes(inner)
+
+        with tempfile.TemporaryDirectory() as job_dir:
+            os.makedirs(os.path.join(job_dir, "inputs"))
+
+            def create_mask():
+                mask = FakeMask(
+                    "Scribble Foreground Scribble", image=image,
+                    array=BufferProtocolVoxelBuffer(
+                        (4, 5, 6), bytes(volume_bytes), "B"))
+                self.fake.data.masks.append(mask)
+                return mask
+
+            self.fake.segment.create_mask = create_mask
+            with mock.patch.object(FakeVoxelBuffer, "tobytes", counting_tobytes):
+                value = self.runtime._capture_scribble(
+                    image, True, job_dir, [])
+            self.assertIsNotNone(value)
+            self.assertEqual(value["shape"], [1, 1, 1])
+            self.assertEqual(value["bbox"], [[2, 3], [3, 4], [4, 5]])
+            with open(value["path"], "rb") as handle:
+                self.assertEqual(handle.read(), b"\x01")
+        # The single full-volume read is the fake's own bookkeeping
+        # (_refresh_pixels inside FakeMask.__init__); the production code
+        # must contribute only crop-sized copies. Pre-fix, the numpy path
+        # added a second full-volume copy (4*5*6) per drawn stroke.
+        self.assertEqual(copied_sizes, [4 * 5 * 6], copied_sizes)
+
     def test_result_copy_name_keeps_algorithm(self):
         image = FakeImage(_u8_pattern_buffer((2, 3, 4), lambda x, y, z: False))
         self.fake.data.images.append(image)
@@ -389,6 +446,113 @@ class MimicsRuntimeTests(unittest.TestCase):
         self.assertEqual(len(copies), 1)
         self.assertEqual(copies[0].name, "Target - ScribblePrompt")
         self.assertEqual(copies[0].get_voxel_buffer().tobytes(), expected.tobytes())
+
+    def _monitor_for(self, image, mask, base_sha, temporary_shape=(2, 3, 4)):
+        return {
+            "action": self.runtime.ACTION_SCRIBBLEPROMPT,
+            "display_name": "ScribblePrompt",
+            "image": image,
+            "target_guid": self.runtime.nnm._object_id(mask),
+            "target_name": "Target",
+            "base_sha256": base_sha,
+            "request": {"shape": list(temporary_shape)},
+        }
+
+    def test_result_destination_is_asked_once_per_session(self):
+        # R62-3: back-to-back rounds used to pop the ready dialog after every
+        # completion. The first answer must stick for the whole Mimics
+        # session (module reload = new session, as in Mimics restart).
+        image = FakeImage(_u8_pattern_buffer((2, 3, 4), lambda x, y, z: False))
+        mask = FakeMask("Target", image=image, selected=True)
+        self.fake.data.images.append(image)
+        self.fake.data.images.set_active(image)
+        self.fake.data.masks.append(mask)
+        base_sha = self.runtime._current_mask_sha(mask)
+        with tempfile.TemporaryDirectory() as temporary:
+            result_path = Path(temporary) / "result.u8"
+            expected = _u8_pattern_buffer((2, 3, 4), lambda x, y, z: x == 1)
+            result_path.write_bytes(expected.tobytes())
+            monitor = self._monitor_for(image, mask, base_sha)
+            state = {"elapsed_seconds": 1.0, "result": {
+                "result_path": str(result_path),
+                "shape": [2, 3, 4],
+                "foreground_voxels": 12,
+            }}
+            # First completion: dialog shown, answered Update Selected Mask.
+            self.fake.dialogs.question_answers = ["Update Selected Mask"]
+            self.fake.dialogs.questions = []
+            self.runtime._apply_completed(monitor, dict(state))
+            self.assertEqual(len(self.fake.dialogs.questions), 1)
+            self.assertIn(
+                "remembered for the rest of this Mimics session",
+                self.fake.dialogs.questions[0]["message"],
+            )
+            # Second completion: no dialog, same destination applied.
+            self.fake.dialogs.questions = []
+            mask.set_voxel_buffer(_u8_pattern_buffer(
+                (2, 3, 4), lambda x, y, z: False))
+            self.runtime._apply_completed(monitor, dict(state))
+            self.assertEqual(self.fake.dialogs.questions, [])
+            self.assertEqual(
+                mask.get_voxel_buffer().tobytes(), expected.tobytes())
+
+    def test_result_destination_changed_mask_still_asks(self):
+        # The session memory must not swallow the changed-mask safety
+        # question: applying onto a mask the user edited mid-run is a
+        # data-risk path and always confirms.
+        image = FakeImage(_u8_pattern_buffer((2, 3, 4), lambda x, y, z: False))
+        mask = FakeMask("Target", image=image, selected=True)
+        self.fake.data.images.append(image)
+        self.fake.data.images.set_active(image)
+        self.fake.data.masks.append(mask)
+        with tempfile.TemporaryDirectory() as temporary:
+            result_path = Path(temporary) / "result.u8"
+            result_path.write_bytes(_u8_pattern_buffer(
+                (2, 3, 4), lambda x, y, z: x == 1).tobytes())
+            # First completion establishes session memory.
+            self.fake.dialogs.question_answers = ["Update Selected Mask"]
+            self.runtime._apply_completed(
+                self._monitor_for(
+                    image, mask, self.runtime._current_mask_sha(mask)),
+                {"elapsed_seconds": 1.0, "result": {
+                    "result_path": str(result_path),
+                    "shape": [2, 3, 4], "foreground_voxels": 12,
+                }},
+            )
+            # Second completion with a stale base_sha (user edited the mask
+            # while the round ran): the safety dialog must appear.
+            self.fake.dialogs.questions = []
+            self.runtime._apply_completed(
+                self._monitor_for(image, mask, "stale-sha"),
+                {"elapsed_seconds": 1.0, "result": {
+                    "result_path": str(result_path),
+                    "shape": [2, 3, 4], "foreground_voxels": 12,
+                }},
+            )
+            self.assertEqual(len(self.fake.dialogs.questions), 1)
+            self.assertIn(
+                "changed while it was running",
+                self.fake.dialogs.questions[0]["message"],
+            )
+
+    def test_prompt_sign_asked_once_per_session(self):
+        # R62-2: Foreground/Background was asked before every click and
+        # scribble, stacking a second modal per prompt. The first answer
+        # must stick for the session.
+        self.fake.dialogs.questions = []
+        self.fake.dialogs.question_answers = ["Background"]
+        self.assertFalse(self.runtime._choose_prompt_sign())
+        asked = len(self.fake.dialogs.questions)
+        self.assertEqual(asked, 1)
+        # Subsequent prompts: no dialog, same sign.
+        self.fake.dialogs.questions = []
+        self.assertFalse(self.runtime._choose_prompt_sign())
+        self.assertEqual(self.fake.dialogs.questions, [])
+        # The main prompt dialog exposes the switch button.
+        self.runtime._SESSION_PROMPT_SIGN = True
+        self.assertTrue(self.runtime._current_prompt_sign())
+        self.runtime._SESSION_PROMPT_SIGN = False
+        self.assertFalse(self.runtime._current_prompt_sign())
 
 
 if __name__ == "__main__":

@@ -52,13 +52,29 @@ consumed by `tools/ai_model_bundle.py`:
 
 ```bash
 python_env/python.exe tools/ai_model_bundle.py export-flexict \
-    --workspace <flexict_models> --model-id <id> --output liver_pair.zip
+    --workspace <flexict_models> --model-id <id> --output liver_pair.zip \
+    [--include-backbone]
 python_env/python.exe tools/ai_model_bundle.py import-flexict \
     --workspace <flexict_models> --bundle liver_pair.zip --set-current
 ```
 
 The same pattern applies to `export-nninteractive`/`import-nninteractive`
 (task models) and `export-nnunet`/`import-nnunet` (managed nnU-Net models).
+
+`--include-backbone` (FlexiCT only) packages the pretrained FlexiCT backbone
+weights (2 x ~576 MB) alongside the model. A FlexiCT model always needs those
+weights to run inference, so this makes a bundle self-contained for a
+workstation that has never trained FlexiCT locally. Import handles the
+backbone as follows:
+
+- If the workstation has no backbone, the files are installed under the
+  workspace (`flexict_pretrained/`) and `flexict_config.json` gains a
+  `pretrained_weights_dir` override pointing at them.
+- If the workstation already has identical backbone weights, they are
+  verified by checksum and kept as-is (nothing is overwritten or re-copied).
+- If the existing weights differ from the packaged ones, the import is
+  rejected with an explanation, so a working local backbone is never
+  silently replaced.
 Exporting either member of a FlexiCT pair (2D+3D) packages both. Import
 validates the family, required files, and checkpoint checksum, relocates
 the model atomically (nothing is overwritten), and registers it so the
@@ -117,6 +133,22 @@ nnInteractive also reuses prepared image/label arrays under:
 
 Prepared-cache keys use the stable source image and source label or `.mcs`
 identity rather than a temporary job path.
+
+### nnU-Net / FlexiCT source-grid case cache
+
+Both families share a per-task case cache under:
+
+```text
+<workspace>/cache/source_grid/<task-id>/
+```
+
+Image files are keyed by path identity (size + timestamps), which is stable
+because dataset sources are write-once. Labels are keyed by **content
+checksum** instead: a `.mcs` re-export produces byte-identical NIfTI files
+with new timestamps and inode numbers, so path identity would force a full
+re-materialization on every retrain even when no voxel changed. With content
+checksums, re-exported labels that are byte-identical to the cached copy are
+reused; genuinely edited labels (and their case) are re-materialized.
 
 ### Remote upload
 

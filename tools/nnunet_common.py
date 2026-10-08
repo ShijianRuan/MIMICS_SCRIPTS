@@ -601,6 +601,14 @@ def normalize_request(request: dict[str, Any]) -> dict[str, Any]:
                 "Fold 0-4 训练时验证集比例必须大于 0；"
                 "如不需验证集请选择 fold 'all'。"
             )
+        # G9: case-count semantics, matching the FlexiCT wizard. 0/absent =
+        # fall back to the fraction (backwards compatible).
+        raw_val_cases = values.get("val_cases")
+        values["val_cases"] = (
+            0 if raw_val_cases in (None, "") else int(raw_val_cases)
+        )
+        if values["val_cases"] < 0:
+            raise ValueError("val_cases must be a non-negative case count.")
         values["split_seed"] = int(values.get("split_seed") or 2026)
         values["trainer"] = str(values.get("trainer") or "MimicsNNUNetTrainer").strip()
         values["plans"] = str(values.get("plans") or "nnUNetPlans").strip()

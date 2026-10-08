@@ -18,7 +18,7 @@ import threading
 import time
 import traceback
 from pathlib import Path
-from queue import Queue
+from queue import Empty, Queue
 
 from typing import Any
 
@@ -54,21 +54,25 @@ def case_state_label(value: str) -> str:
     return _CASE_STATE_LABELS.get(str(value), str(value))
 
 
-def find_al_jobs(workspace: str | None) -> list[dict[str, Any]]:
-    """Completed active_learning jobs, newest first."""
+def find_al_jobs(workspace: str | Path | None) -> list[dict[str, Any]]:
+    """Terminal active_learning jobs, newest first — completed ones first,
+    then failed/cancelled ones (R62-10: a failed ranking run must stay
+    visible with its error, not silently disappear from the list)."""
     from flexict_pipeline import list_flexict_jobs
 
-    rows = []
+    rows, failed_rows = [], []
     for status in list_flexict_jobs(workspace):
         if str(status.get("kind") or "") != "active_learning":
             continue
-        if str(status.get("status") or "") not in TERMINAL_STATES:
+        state = str(status.get("status") or "")
+        if state not in TERMINAL_STATES:
             continue
-        if str(status.get("status") or "") in {"failed", "cancelled", "abandoned"}:
-            continue
-        rows.append(status)
-    rows.sort(key=lambda row: float(row.get("created_at_epoch") or 0), reverse=True)
-    return rows
+        (failed_rows if state in {"failed", "cancelled", "abandoned"}
+         else rows).append(status)
+    key = lambda row: float(row.get("created_at_epoch") or 0)  # noqa: E731
+    rows.sort(key=key, reverse=True)
+    failed_rows.sort(key=key, reverse=True)
+    return rows + failed_rows
 
 
 def find_running_al_job(workspace: str | None) -> dict[str, Any] | None:
@@ -243,6 +247,13 @@ class ActiveLearningWindow:
         root.addWidget(title)
         root.addWidget(subtitle)
 
+        # F04: the review half used to be reachable only after a run existed,
+        # and the empty state pointed back at this very menu. A "new run"
+        # form on the same window closes the loop: pick the unlabeled pool
+        # once, submit, and the run below refreshes as it completes.
+        self._new_run_group = self._build_new_run_form()
+        root.addWidget(self._new_run_group)
+
         picker = QtWidgets.QHBoxLayout()
         picker.addWidget(QtWidgets.QLabel('运行'))
         self.job_combo = QtWidgets.QComboBox()
@@ -325,6 +336,12 @@ class ActiveLearningWindow:
         # create_flexict_job must never run on the GUI thread).
         self._submit_results: Queue = Queue()
         self._seen_running_job_id = ""
+        # Pair discovery runs off the GUI thread too (R62-9): loading state +
+        # 120 s deadline + its own result queue.
+        self._loading_pairs = True
+        self._pair_deadline = time.time() + 120.0
+        self._pair_results: Queue = Queue()
+        self._submit_deadline = 0.0
         self.refresh()
         # The Mimics-side monitor reports outcomes by rewriting request
         # files; poll them so the table and status line follow along
@@ -333,6 +350,191 @@ class ActiveLearningWindow:
         self.poll_timer.setInterval(2000)
         self.poll_timer.timeout.connect(self._poll_requests)
         self.poll_timer.start()
+        # Pair discovery + job submission also complete off the GUI thread.
+        self.fast_timer = QtCore.QTimer(self.window)
+        self.fast_timer.setInterval(80)
+        self.fast_timer.timeout.connect(self._poll_background_results)
+        self.fast_timer.start()
+        self._start_pair_loading()
+
+    # -- new run ---------------------------------------------------------------
+
+    def _build_new_run_form(self):
+        """The minimal "start a ranking run" form (F04).
+
+        It reuses the pipeline's own pair resolution: the run uses the newest
+        usable 2D+3D pair, and a missing end is explained here instead of
+        after the GPU has been reserved.
+        """
+        QtWidgets = self.QtWidgets
+        group = QtWidgets.QGroupBox('启动新的排序')
+        layout = QtWidgets.QGridLayout(group)
+        layout.setContentsMargins(16, 14, 16, 14)
+        remembered = read_json(
+            Path.home() / ".mimics_script" / "flexict_settings.json", {}) or {}
+        self.pool_edit = QtWidgets.QLineEdit()
+        self.pool_edit.setText(
+            str(self.context.get("dataset_root")
+                or remembered.get("dataset_root") or "")
+        )
+        self.pool_edit.setPlaceholderText('未标注数据池（数据集文件夹，每例一个子目录）')
+        layout.addWidget(QtWidgets.QLabel('数据池'), 0, 0)
+        layout.addWidget(self.pool_edit, 0, 1)
+        browse = QtWidgets.QPushButton('浏览...')
+        browse.clicked.connect(self._browse_pool)
+        layout.addWidget(browse, 0, 2)
+        self.pair_label = QtWidgets.QLabel('正在后台检查 2D+3D 模型对...')
+        self.pair_label.setWordWrap(True)
+        layout.addWidget(QtWidgets.QLabel('模型对'), 1, 0)
+        layout.addWidget(self.pair_label, 1, 1, 1, 2)
+        self.start_run_button = QtWidgets.QPushButton('启动主动学习')
+        self.start_run_button.setObjectName('primary')
+        self.start_run_button.setEnabled(False)
+        self.start_run_button.clicked.connect(self._submit_new_run)
+        layout.addWidget(self.start_run_button, 2, 2)
+        layout.setColumnStretch(1, 1)
+        return group
+
+    def _browse_pool(self):
+        choose_existing_directory_async(
+            self.QtCore,
+            self.QtWidgets,
+            self.window,
+            '选择未标注数据池',
+            self.pool_edit.text().strip(),
+            lambda value: self.pool_edit.setText(str(value)) if value else None,
+            button=self.start_run_button,
+        )
+
+    def _start_pair_loading(self):
+        from flexict_common import load_pair
+
+        def load():
+            try:
+                model_2d, model_3d = load_pair(self.workspace or None)
+                self._pair_results.put(((model_2d, model_3d), ""))
+            except Exception as exc:
+                self._pair_results.put((None, str(exc)))
+
+        worker = threading.Thread(target=load, name="flexict-al-pair-check")
+        worker.daemon = True
+        worker.start()
+
+    def _apply_pair(self, pair, error):
+        self._loading_pairs = False
+        if error:
+            self.pair_label.setStyleSheet("color: #b42318; font-weight: 600;")
+            self.pair_label.setText(
+                '模型库检查失败: {0}'.format(error))
+            return
+        model_2d, model_3d = pair or (None, None)
+        if model_2d is None or model_3d is None:
+            self.pair_label.setStyleSheet("color: #b42318; font-weight: 600;")
+            self.pair_label.setText(
+                '未找到可用的 2D+3D 模型对。请先用 02_AI > FlexiCT > 01 训练模型'
+                '（配置选择 pair，或在 ≥16GB 显存上选 auto）后再启动主动学习。'
+            )
+            return
+        label = " + ".join(
+            str(row.get("label_name") or "") for row in (model_2d, model_3d)
+        ) or str(model_2d.get("task_name") or "")
+        self.pair_label.setStyleSheet("")
+        self.pair_label.setText(
+            '{0}（{1} · {2}）'.format(
+                label,
+                str(model_2d.get("model_id") or ""),
+                str(model_3d.get("model_id") or ""),
+            )
+        )
+        self.start_run_button.setEnabled(True)
+
+    def _poll_background_results(self):
+        if self._loading_pairs:
+            try:
+                pair, error = self._pair_results.get_nowait()
+            except Empty:
+                pass
+            else:
+                self._apply_pair(pair, error)
+            if self._loading_pairs and time.time() >= self._pair_deadline:
+                self._loading_pairs = False
+                self.pair_label.setStyleSheet(
+                    "color: #b42318; font-weight: 600;")
+                self.pair_label.setText(
+                    '模型对检查超时。FlexiCT 工作区所在磁盘可能离线或过慢；'
+                    '请关闭本窗口、重新连接磁盘后重试。'
+                )
+        if self._submit_deadline and time.time() >= self._submit_deadline:
+            self._submit_deadline = 0.0
+            self.start_run_button.setEnabled(True)
+            self.pair_label.setStyleSheet("color: #b42318; font-weight: 600;")
+            self.pair_label.setText('任务创建超时。请重试。')
+        try:
+            payload = self._submit_results.get_nowait()
+        except Empty:
+            return
+        self._submit_deadline = 0.0
+        if isinstance(payload, str):
+            self.start_run_button.setEnabled(True)
+            self.pair_label.setStyleSheet("color: #b42318; font-weight: 600;")
+            self.pair_label.setText(payload)
+            return
+        job = payload
+        self.start_run_button.setEnabled(True)
+        # Refresh first, outcome message after — refresh() rewrites the
+        # status line for the (still empty) run list (same trap as F14).
+        self.refresh()
+        self.status_label.setText(
+            '主动学习任务 {0} 已启动。进度见「FlexiCT Show Status and Stop」；'
+            '完成后本窗口刷新即可看到排序。'.format(job.get("job_id"))
+        )
+
+    def _submit_new_run(self):
+        try:
+            dataset_root = self.pool_edit.text().strip()
+            if not dataset_root:
+                raise RuntimeError('请先选择未标注数据池文件夹。')
+            workspace = self.workspace or None
+            self.start_run_button.setEnabled(False)
+            self.pair_label.setStyleSheet("")
+            self.pair_label.setText('正在后台创建主动学习任务...')
+            self._submit_deadline = time.time() + 60.0
+
+            def create():
+                try:
+                    from flexict_common import load_pair
+                    from flexict_pipeline import create_flexict_job
+
+                    model_2d, model_3d = load_pair(workspace)
+                    if model_2d is None or model_3d is None:
+                        raise RuntimeError(
+                            'No usable FlexiCT model pair was found.')
+                    request = {
+                        "operation": "active_learning",
+                        "workspace": workspace or "",
+                        "dataset_root": dataset_root,
+                        "label_name": str(model_2d.get("label_name") or ""),
+                        "task_id": str(model_2d.get("task_id") or ""),
+                        "task_name": str(
+                            model_2d.get("task_name")
+                            or model_2d.get("task_id") or ""),
+                        "model_manifest_2d": str(
+                            model_2d.get("manifest_path") or ""),
+                        "model_manifest_3d": str(
+                            model_3d.get("manifest_path") or ""),
+                    }
+                    self._submit_results.put(create_flexict_job(request))
+                except Exception as exc:
+                    self._submit_results.put(str(exc))
+
+            worker = threading.Thread(
+                target=create, name="flexict-al-job-create")
+            worker.daemon = True
+            worker.start()
+        except Exception as exc:
+            self.start_run_button.setEnabled(True)
+            self.pair_label.setStyleSheet("color: #b42318; font-weight: 600;")
+            self.pair_label.setText(str(exc))
 
     # -- new ranking (F04) ----------------------------------------------------
 
@@ -457,6 +659,23 @@ class ActiveLearningWindow:
         self.job_combo.blockSignals(True)
         self.job_combo.clear()
         for job in self._jobs:
+            state = str(job.get("status") or "")
+            if state in {"failed", "cancelled", "abandoned"}:
+                # R62-10: failed runs stay listed, clearly marked, so the
+                # annotator knows a ranking was attempted and why it died.
+                self.job_combo.addItem(
+                    "{} · {} · {}".format(
+                        time.strftime(
+                            "%Y-%m-%d %H:%M",
+                            time.localtime(
+                                float(job.get("created_at_epoch") or 0)),
+                        ),
+                        {"failed": "失败", "cancelled": "已取消",
+                         "abandoned": "已放弃"}.get(state, state),
+                        str(job.get("label_name") or ""),
+                    )
+                )
+                continue
             self.job_combo.addItem(
                 "{} · {} 例 · {}".format(
                     time.strftime(
@@ -478,7 +697,7 @@ class ActiveLearningWindow:
             self.table.setRowCount(0)
             self._set_actions_enabled(False)
             self.status_label.setText(
-                '还没有已完成的主动学习运行。点击「新建排序…」，用已训练的 2D+3D 模型对对未标注病例池启动第一次排序。'
+                '还没有已完成的主动学习运行。点击「新建排序…」，用已训练的 2D+3D 模型对未标注病例池启动第一次排序。'
             )
 
     def _job_selected(self):
@@ -486,7 +705,26 @@ class ActiveLearningWindow:
         index = self.job_combo.currentIndex()
         if not 0 <= index < len(self._jobs):
             return
-        job_dir = str(self._jobs[index].get("job_dir") or "")
+        job = self._jobs[index]
+        state = str(job.get("status") or "")
+        if state in {"failed", "cancelled", "abandoned"}:
+            # R62-10: no ranking exists to review — surface the error and
+            # disable the row actions instead of an empty table.
+            self._job_dir = ""
+            self._rows = []
+            self._state = {}
+            self.table.setRowCount(0)
+            self._set_actions_enabled(False)
+            self.status_label.setText(
+                "该运行{0}，无排序结果。原因：{1}".format(
+                    {"failed": "失败",
+                     "cancelled": "已取消",
+                     "abandoned": "已放弃"}.get(state, state),
+                    str(job.get("error") or job.get("message") or "未知"),
+                )
+            )
+            return
+        job_dir = str(job.get("job_dir") or "")
         if not job_dir:
             return
         self._job_dir = job_dir

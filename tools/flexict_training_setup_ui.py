@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """External, non-modal FlexiCT few-shot training configuration window.
 
-The training recipe (optimizer, learning rates, batch size, fp32, TTA) is
-locked to the validated FlexiCT few-shot configuration — only data selection,
-configuration (2D/3D/pair), epochs, and validation cases are exposed.
+The training recipe (optimizer, learning rates, fp32, TTA) is locked to the
+validated FlexiCT few-shot configuration — only data selection, configuration
+(2D/3D/pair), epochs, validation cases, and the batch size override are
+exposed. The batch size override exists because the nnU-Net planner sizes
+batches for the training-time card, not for a 16GB remote GPU: without it an
+OOM on the remote card leaves the annotator no self-rescue (R-P1-8).
 """
 
 from __future__ import annotations
@@ -76,6 +79,13 @@ class TrainingSetupWindow:
         subtitle.setWordWrap(True)
         root.addWidget(title)
         root.addWidget(subtitle)
+        hint = QtWidgets.QLabel(
+            "如何选方法：标注病例多（约 30 例以上）追求全自动精度 → nnU-Net；"
+            "只有几例标注、想快速得到可用模型 → FlexiCT；边点边标、交互修正 → nnInteractive。"
+        )
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        root.addWidget(hint)
 
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.addTab(self._build_data_tab(), "数据")
@@ -158,9 +168,10 @@ class TrainingSetupWindow:
 
         project, form = self._surface("任务与图像")
         self.label_edit = QtWidgets.QLineEdit()
-        self.label_edit.setPlaceholderText("例如 kidney_left")
+        self.label_edit.setPlaceholderText("例如 kidney_left，或多个标签用逗号分隔")
         self.label_edit.setToolTip(
-            "一个 FlexiCT 模型只训练一个二值目标（器官或结构）。"
+            "一个 FlexiCT 模型默认训练一个二值目标（器官或结构）。"
+            "用逗号分隔多个标签（最多 4 个）可训练一个多分类模型。"
         )
         form.addWidget(QtWidgets.QLabel("目标 / 标签名称 *"), 0, 0)
         form.addWidget(self.label_edit, 0, 1)
@@ -280,16 +291,49 @@ class TrainingSetupWindow:
         )
         form.addWidget(QtWidgets.QLabel("镜像"), 3, 0)
         form.addWidget(self.mirror_combo, 3, 1)
+        self.auto_batch = QtWidgets.QCheckBox("由 nnU-Net 规划器自动决定 batch size")
+        self.auto_batch.setChecked(True)
+        self.auto_batch.setToolTip(
+            "自动规划按训练卡显存取较大的 batch；远程小显存卡上首次前向即显存不足时，"
+            "取消勾选并手动调小 batch size 重试。"
+        )
+        form.addWidget(self.auto_batch, 4, 0, 1, 2)
+        self.batch_spin = QtWidgets.QSpinBox()
+        self.batch_spin.setRange(1, 128)
+        self.batch_spin.setValue(6)
+        self.batch_spin.setEnabled(False)
+        self.auto_batch.toggled.connect(
+            lambda checked: self.batch_spin.setEnabled(not checked)
+        )
+        self.batch_spin.setToolTip(
+            "16GB 显存（如 A4000）上 2D 配置建议从 6 起步；显存更大可适当调大。"
+        )
+        form.addWidget(QtWidgets.QLabel("Batch size"), 5, 0)
+        form.addWidget(self.batch_spin, 5, 1)
         self.workers_spin = QtWidgets.QSpinBox()
         self.workers_spin.setRange(1, 64)
         self.workers_spin.setValue(4)
-        form.addWidget(QtWidgets.QLabel("预处理进程数"), 4, 0)
-        form.addWidget(self.workers_spin, 4, 1)
+        form.addWidget(QtWidgets.QLabel("预处理进程数"), 6, 0)
+        form.addWidget(self.workers_spin, 6, 1)
+        self.overlap_check = QtWidgets.QCheckBox(
+            "允许排在后面的标签覆盖重叠体素"
+        )
+        self.overlap_check.setToolTip(
+            "关闭更安全。多分类标签无法在同一体素上保留两个类别，"
+            "默认遇到重叠直接停止训练。"
+        )
+        form.addWidget(self.overlap_check, 7, 0, 1, 2)
+        self.continue_check = QtWidgets.QCheckBox("继续上次中断的训练")
+        self.continue_check.setToolTip(
+            "从同名任务中断处继续（沿用其 Dataset 和 checkpoint_latest）。"
+            "须与上次使用相同的病例与标签，否则 checkpoint 无效。"
+        )
+        form.addWidget(self.continue_check, 8, 0, 1, 2)
         layout.addWidget(training)
 
         recipe, recipe_form = self._surface("锁定配置（只读）")
         recipe_text = QtWidgets.QLabel(
-            "FlexiCT ViT 主干（fp32，RoPE 安全）· AdamW 双参数组（backbone 3e-5 / decoder 3e-4，betas 0.9/0.98，wd 5e-2）· poly LR · gradclip 12 · 无 deep supervision · 前景过采样 0.33 · batch size 取自 nnU-Net plans · 按验证 Dice 选最佳 checkpoint · 推理不用 TTA。\n\n以上为已验证的小样本配方，Mimics 中不可修改。"
+            "FlexiCT ViT 主干（fp32，RoPE 安全）· AdamW 双参数组（backbone 3e-5 / decoder 3e-4，betas 0.9/0.98，wd 5e-2）· poly LR · gradclip 12 · 无 deep supervision · 前景过采样 0.33 · batch size 默认取自 nnU-Net plans（可手动调小）· 按验证 Dice 选最佳 checkpoint · 推理不用 TTA。\n\n以上为已验证的小样本配方，除 batch size 外在 Mimics 中不可修改。"
         )
         recipe_text.setObjectName("hint")
         recipe_text.setWordWrap(True)
@@ -442,10 +486,21 @@ class TrainingSetupWindow:
             summary += " —— 训练集为空，请至少保留一个训练病例"
         self.case_summary.setText(summary)
 
-    def _scan_cases(self, dataset_root: str, label_name: str) -> list[dict]:
+    def _label_names(self) -> list[str]:
+        return [
+            name.strip() for name in
+            self.label_edit.text().replace("，", ",").split(",")
+            if name.strip()
+        ]
+
+    def _scan_cases(self, dataset_root: str, label_names: list[str]) -> list[dict]:
         from flexict_pipeline import scan_flexict_cases
 
-        return scan_flexict_cases(dataset_root, label_name)
+        return scan_flexict_cases(
+            dataset_root,
+            label_names[0] if label_names else "",
+            label_names=label_names,
+        )
 
     def _rescan_cases_async(self):
         if getattr(self, "_scan_pending", False):
@@ -453,11 +508,11 @@ class TrainingSetupWindow:
         self._scan_pending = True
         self.rescan_button.setEnabled(False)
         dataset_root = self.dataset_edit.text().strip()
-        label_name = self.label_edit.text().strip()
+        label_names = self._label_names()
 
         def scan():
             try:
-                result = self._scan_cases(dataset_root, label_name)
+                result = self._scan_cases(dataset_root, label_names)
                 self._dataset_id_results.put(("scan", result, ""))
             except Exception as exc:
                 self._dataset_id_results.put(("scan", None, str(exc)))
@@ -558,20 +613,31 @@ class TrainingSetupWindow:
             val_count = int(self.val_spin.value())
         else:
             val_count = len(val_cases)
+        label_names = self._label_names()
         request = {
             "operation": "train",
             "task_name": self.label_edit.text().strip(),
             "task_id": self.label_edit.text().strip(),
-            "label_name": self.label_edit.text().strip(),
+            "label_name": label_names[0] if label_names else "",
+            "labels": [
+                {"name": name, "aliases": [name], "id": index + 1}
+                for index, name in enumerate(label_names)
+            ],
             "workspace": self.workspace_edit.text().strip(),
             "dataset_root": self.dataset_edit.text().strip(),
             "label_source": "dataset_masks",
             "modality": str(self.modality_combo.currentData()),
             "configuration": str(self.configuration_combo.currentData()),
             "epochs": int(self.epochs_spin.value()),
+            "batch_size": None if self.auto_batch.isChecked()
+            else int(self.batch_spin.value()),
             "mirror_disable_axes": str(self.mirror_combo.currentData()),
             "val_cases": val_count,
             "preprocess_workers": int(self.workers_spin.value()),
+            "overlap_policy": (
+                "replace" if self.overlap_check.isChecked() else "fail"
+            ),
+            "continue_training": bool(self.continue_check.isChecked()),
             "cases": cases,
             "val_case_ids": val_cases,
             "train_case_ids": train_cases,
@@ -583,6 +649,29 @@ class TrainingSetupWindow:
             request["remote_profile_id"] = profile_id
         return request
 
+    def _duplicate_model_warning(self, request) -> str:
+        """G7: retraining the same task_id piles up near-duplicate models;
+        surface existing ones before the GPU time is spent (not a block)."""
+        try:
+            existing = load_models(request["workspace"])
+        except Exception:
+            return ""
+        duplicates = [
+            model for model in existing
+            if str(model.get("task_id") or "") == request["task_id"]
+        ]
+        if not duplicates:
+            return ""
+        return (
+            "该任务名下已有 {} 个模型（{}）。继续训练会新增一个模型而不是更新"
+            "已有的；如需改进旧模型，请先在模型管理器中确认是否还需要它。".format(
+                len(duplicates),
+                ", ".join(
+                    str(model.get("model_id") or "") for model in duplicates[:3]
+                ),
+            )
+        )
+
     def _submit(self):
         if self._submission_pending:
             return
@@ -590,6 +679,30 @@ class TrainingSetupWindow:
             request = self._request()
             if not request["label_name"]:
                 raise ValueError("请填写目标 Mask 名称。")
+            if len(request.get("labels") or []) > 4:
+                raise ValueError(
+                    "FlexiCT 少样本训练每个模型最多支持 4 个标签；更多标签请使用 nnU-Net。"
+                )
+            if request.get("continue_training") and str(
+                request.get("execution_backend") or "local"
+            ) == "remote":
+                # Remote runs train in a fresh disposable container: the
+                # interrupted run's checkpoint_latest lives only on this
+                # machine, so "continue" would silently start from scratch.
+                raise ValueError(
+                    "远程后端不支持“继续上次中断的训练”：远程任务在全新的容器中"
+                    "训练，读不到本机上次训练的 checkpoint。请改用本机后端，或"
+                    "取消勾选“继续上次中断的训练”。"
+                )
+            warning = self._duplicate_model_warning(request)
+            if warning:
+                answer = self.QtWidgets.QMessageBox.question(
+                    self.window, "重复任务", warning,
+                    self.QtWidgets.QMessageBox.Yes | self.QtWidgets.QMessageBox.No,
+                    self.QtWidgets.QMessageBox.No,
+                )
+                if answer != self.QtWidgets.QMessageBox.Yes:
+                    return
             self._submission_generation += 1
             generation = self._submission_generation
             self._submission_pending = True

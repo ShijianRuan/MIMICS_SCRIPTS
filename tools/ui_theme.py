@@ -766,10 +766,10 @@ def clamp_window_to_screen(window, minimum):
 def _application_icon():
     """A simple programmatic icon so our windows stop showing the generic
     Python logo. Drawn, not loaded: no binary resource to ship or misplace."""
-    try:
-        from PySide6 import QtCore, QtGui
+    from PySide6 import QtCore, QtGui
 
-        icon = QtGui.QIcon()
+    icon = QtGui.QIcon()
+    try:
         for size in (16, 24, 32, 48):
             pixmap = QtGui.QPixmap(size, size)
             pixmap.fill(QtCore.Qt.transparent)
@@ -786,6 +786,9 @@ def _application_icon():
                 )
                 painter.setBrush(QtGui.QColor("#ffffff"))
                 # A stylized "M" mark: two vertical bars and the connecting V.
+                # drawPolygon takes one QPolygon (the varargs overload was
+                # removed in PySide6 6.x and a failed draw must still end the
+                # painter, or Qt aborts the process on the dangling reference).
                 bar = max(2, size // 8)
                 top = size // 3
                 bottom = size - 2 * margin - max(2, size // 6)
@@ -805,9 +808,9 @@ def _application_icon():
                 # destruction time if anything above raised - never skip end().
                 painter.end()
             icon.addPixmap(pixmap)
-        return icon
     except Exception:
         return None
+    return icon
 
 
 def configure_application(app, name="Mimics Script"):

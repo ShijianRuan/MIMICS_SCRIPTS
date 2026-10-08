@@ -1002,8 +1002,9 @@ def test_connection(
         except Exception as exc:
             raise RemoteComputeError(
                 "Docker cannot use runtime image '{}'. Confirm Docker access "
-                "for this SSH account and run remote/setup_remote_server.sh "
-                "to build or load the image. Details: {}".format(image, exc)
+                "for this SSH account and ask the server administrator to "
+                "run remote/setup_remote_server.sh to build or load the "
+                "image. Details: {}".format(image, exc)
             ) from exc
         models = str(PurePosixPath(root) / "models")
         gpu_request = docker_gpu_request(session.profile)

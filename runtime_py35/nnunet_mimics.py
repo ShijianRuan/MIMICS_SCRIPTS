@@ -37,6 +37,7 @@ BUTTON_PREDICT = "预测当前病例…"
 BUTTON_STATUS = "查看状态与模型"
 BUTTON_UPDATE = "更新匹配掩膜"
 BUTTON_CREATE = "创建可编辑副本"
+BUTTON_BATCH_PREDICT = "批量预测数据集…"
 
 # Stable marker carried by the pipeline's validate_materialized_source_geometry
 # failure; the shared repair offer lives in fix_source_affine_metadata.
@@ -134,7 +135,29 @@ def _setup_root():
     path = os.path.join(_workspace(), "setup")
     if not os.path.isdir(path):
         os.makedirs(path)
+    else:
+        _sweep_stale_setup_files(path)
     return path
+
+
+def _sweep_stale_setup_files(root, max_age_days=7.0):
+    """R62-11: every wizard launch drops context/status/stderr files in
+    setup/ and nothing ever cleaned them — years of use accumulate
+    thousands of files. Files older than the retention window (no wizard
+    reads a context file from a previous week) are removed. Best effort:
+    a locked file is skipped, never fatal."""
+    cutoff = time.time() - max_age_days * 86400.0
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return
+    for name in names:
+        path = os.path.join(root, name)
+        try:
+            if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+                os.remove(path)
+        except OSError:
+            continue
 
 
 def _launch_gui(script_name, context, monitor_kind):
@@ -291,6 +314,45 @@ def _start_prediction_with_context(context):
         ),
     )
     return 0
+
+
+def show_batch_predict():
+    """Open the batch prediction window (D20). No monitor is started:
+    predictions only write to disk, so progress and stopping live in the
+    status window; there is nothing to feed back into Mimics."""
+    try:
+        context = {"workspace": _workspace()}
+        root = _setup_root()
+        context_path = os.path.join(
+            root, "batch_predict_context_{0}.json".format(uuid.uuid4().hex[:8])
+        )
+        stderr_path = context_path + ".stderr.log"
+        _write_json(context_path, context)
+        script = os.path.join(
+            _project_root(), "tools", "nnunet_batch_predict_ui.py"
+        )
+        process = mimics_mask_apply._launch_gui_process(
+            [_external_python(), script, "--context", context_path],
+            cwd=_project_root(),
+            stderr_log=stderr_path,
+        )
+        _log(
+            logging.INFO,
+            "nnU-Net batch prediction window opened outside Mimics. PID: {0}.".format(
+                process.pid
+            ),
+        )
+        return 0
+    except Exception as exc:
+        _log(logging.ERROR, "Could not open batch prediction window: {0}".format(exc))
+        mimics.dialogs.message_box(
+            "Could not open the batch prediction window.\n\n{0}".format(
+                external_window_launcher.error_guidance(exc)
+            ),
+            title=TITLE,
+            ui_blocking=False,
+        )
+        return 1
 
 
 def show_status():
@@ -1125,4 +1187,6 @@ def main(action=None):
             return 1
     if action == BUTTON_STATUS:
         return show_status()
+    if action == BUTTON_BATCH_PREDICT:
+        return show_batch_predict()
     return 0

@@ -13,6 +13,7 @@ prediction/model-selection UI finds it.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -125,6 +126,7 @@ def _write_bundle(
     output: Path,
     metadata: dict[str, Any],
     model_dir: Path,
+    backbone: bool = False,
 ) -> Path:
     output = output.expanduser().resolve()
     if output.suffix.lower() != ".zip":
@@ -133,6 +135,12 @@ def _write_bundle(
     temporary = output.with_name(
         "{}.{}.tmp".format(output.name, uuid.uuid4().hex)
     )
+    if backbone:
+        # Checksums first, so the header is written once with the final
+        # metadata (a second writestr for bundle.json would leave two
+        # entries in the archive).
+        metadata = dict(metadata)
+        metadata["backbone"] = _backbone_section()
     try:
         with zipfile.ZipFile(
             temporary, "w", compression=zipfile.ZIP_DEFLATED
@@ -146,6 +154,11 @@ def _write_bundle(
                     archive.write(
                         source,
                         str(Path("model") / source.relative_to(model_dir)),
+                    )
+            if backbone:
+                for relative, source in _flexict_backbone_files():
+                    archive.write(
+                        str(source), str(Path("backbone") / relative)
                     )
         os.replace(str(temporary), str(output))
     finally:
@@ -464,6 +477,56 @@ def import_nnunet(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _flexict_backbone_files() -> list[tuple[str, Path]]:
+    """The FlexiCT backbone weights that a fine-tuned model still depends on.
+
+    F06/G10: FlexiCT fine-tuned checkpoints carry the full network, but the
+    trainer unconditionally loads the pretrained backbone while *building*
+    the architecture, so a workstation without the backbone files cannot
+    even run inference with an imported model. The two safetensors are the
+    complete external dependency; everything else is in the model folder.
+    """
+    from tools import flexict_common
+
+    weights_dir, _source = flexict_common.resolve_pretrained_dir()
+    return [
+        ("flexict_2d/model.safetensors", weights_dir / "flexict_2d" / "model.safetensors"),
+        ("flexict_3d/model.safetensors", weights_dir / "flexict_3d" / "model.safetensors"),
+    ]
+
+
+def _target_backbone_dir() -> tuple[Path, str]:
+    """Where the *importing* workstation's backbone weights live, if any."""
+    from tools import flexict_common
+
+    return flexict_common.resolve_pretrained_dir()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(str(path), "rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _backbone_section() -> dict[str, Any]:
+    """Checksums for the FlexiCT backbone weights (computed before zipping)."""
+    section: dict[str, Any] = {
+        "schema_version": "mimics_ai_model_bundle_backbone.v1",
+        "files": [],
+    }
+    for relative, source in _flexict_backbone_files():
+        section["files"].append(
+            {
+                "path": relative,
+                "sha256": _sha256_file(source),
+                "size": int(source.stat().st_size),
+            }
+        )
+    return section
+
+
 def _flexict_model_or_pair(
     workspace: Path, model_id: str
 ) -> list[dict[str, Any]]:
@@ -501,13 +564,24 @@ def export_flexict(args: argparse.Namespace) -> int:
             )
         usable_models.append(dict(model))
     pair_id = str(usable_models[0].get("pair_id") or "")
-    metadata = {
+    metadata: dict[str, Any] = {
         "schema_version": "mimics_ai_model_bundle.v1",
         "model_family": "flexict",
         "created_at_epoch": time.time(),
         "pair_id": pair_id,
         "models": usable_models,
     }
+    # D15: the fine-tuned checkpoints are self-contained, but the trainer
+    # loads the pretrained backbone while building the network (F06), so a
+    # target workstation without the backbone files cannot run inference.
+    # --include-backbone adds the two safetensors (2 x ~576 MB) under
+    # backbone/; import places them where resolve_pretrained_dir() looks.
+    include_backbone = bool(getattr(args, "include_backbone", False))
+    if include_backbone:
+        # Probe before any zip is written: a workstation without the backbone
+        # files fails here instead of producing an unusable --include-backbone
+        # bundle (resolve_pretrained_dir raises FileNotFoundError).
+        _flexict_backbone_files()
     with tempfile.TemporaryDirectory(prefix="mimics_flexict_export_") as raw:
         portable_root = Path(raw) / "model"
         portable_root.mkdir()
@@ -529,9 +603,84 @@ def export_flexict(args: argparse.Namespace) -> int:
                 json.dumps(manifest, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
             )
-        output = _write_bundle(Path(args.output), metadata, portable_root)
+        output = _write_bundle(
+            Path(args.output),
+            metadata,
+            portable_root,
+            backbone=True if include_backbone else False,
+        )
     print(str(output))
     return 0
+
+
+def _import_flexict_backbone(
+    staging: Path, metadata: dict[str, Any], workspace: Path
+) -> str:
+    """Place packaged backbone weights where resolve_pretrained_dir() looks.
+
+    D15: without the backbone files the imported fine-tuned model cannot run
+    (the trainer loads the backbone while building the network, F06), so an
+    importer on a fresh workstation would import successfully and only fail
+    at prediction time. Placement policy:
+
+    - Target already has the backbone: verify checksums match, keep the
+      existing files (an admin-managed shared location is never overwritten
+      by a bundle import). A checksum mismatch is a hard error — training
+      with a different backbone than the model was fine-tuned from would
+      silently change the recipe.
+    - Target has none: install into a config override directory (workspace/
+      flexict_pretrained) and point pretrained_weights_dir at it. The repo
+      weights/ folder itself is never written: it may be a read-only
+      distribution share and is shared by every task.
+    """
+    from tools import flexict_common
+
+    section = metadata.get("backbone") or {}
+    files = list(section.get("files") or [])
+    staged_backbone = staging / "backbone"
+    if not files or not staged_backbone.is_dir():
+        return ""
+    for row in files:
+        staged_file = staged_backbone / str(row.get("path") or "")
+        if not staged_file.is_file():
+            raise RuntimeError(
+                "The package is missing the backbone file {}.".format(
+                    row.get("path")
+                )
+            )
+        if _sha256_file(staged_file) != str(row.get("sha256") or ""):
+            raise RuntimeError(
+                "The packaged backbone file {} is corrupt (checksum "
+                "mismatch).".format(row.get("path"))
+            )
+    try:
+        existing_dir, _source = _target_backbone_dir()
+        have_backbone = True
+    except FileNotFoundError:
+        existing_dir = None
+        have_backbone = False
+    if have_backbone:
+        for row in files:
+            target = existing_dir / str(row.get("path") or "")
+            if _sha256_file(target) != str(row.get("sha256") or ""):
+                raise RuntimeError(
+                    "The target workstation already has FlexiCT backbone "
+                    "weights at {} that differ from the packaged ones. The "
+                    "imported model was fine-tuned from the packaged "
+                    "backbone; keep the two together or move the existing "
+                    "weights aside.".format(target)
+                )
+        return "verified_existing"
+    config = flexict_common.load_config()
+    destination = workspace / "flexict_pretrained"
+    destination.mkdir(parents=True, exist_ok=True)
+    for row in files:
+        target = destination / str(row.get("path") or "")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(staged_backbone / str(row.get("path") or "")), str(target))
+    config["pretrained_weights_dir"] = str(destination)
+    flexict_common.save_config(config)
+    return "installed"
 
 
 def import_flexict(args: argparse.Namespace) -> int:
@@ -548,6 +697,7 @@ def import_flexict(args: argparse.Namespace) -> int:
         packaged = list(metadata.get("models") or [])
         if not packaged:
             raise RuntimeError("The FlexiCT model package contains no models.")
+        backbone_action = _import_flexict_backbone(staging, metadata, workspace)
         models_root = flexict_common.workspace_paths(workspace)["root"] / "models"
         published: list[tuple[Path, dict[str, Any]]] = []
         try:
@@ -607,6 +757,14 @@ def import_flexict(args: argparse.Namespace) -> int:
             recommended_model_id=str(published[0][1].get("model_id")),
         )
     print(str(published[0][0]))
+    if backbone_action:
+        print(
+            "FlexiCT backbone weights: {}".format(
+                "verified against the existing installation."
+                if backbone_action == "verified_existing"
+                else "installed; pretrained_weights_dir was set."
+            )
+        )
     return 0
 
 
@@ -646,6 +804,12 @@ def build_parser() -> argparse.ArgumentParser:
     export_fx.add_argument("--workspace", required=True)
     export_fx.add_argument("--model-id", required=True)
     export_fx.add_argument("--output", required=True)
+    export_fx.add_argument(
+        "--include-backbone",
+        action="store_true",
+        help="Also package the FlexiCT pretrained backbone weights "
+        "(2 x ~576 MB) so a workstation without them can run the model.",
+    )
     export_fx.set_defaults(func=export_flexict)
 
     import_fx = sub.add_parser("import-flexict")

@@ -334,8 +334,16 @@ class ModelCenter:
             "针对一个标注目标训练、监控并选择可复用的模型。"
         )
         subtitle.setObjectName("subtitle")
+        subtitle.setWordWrap(True)
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
+        hint = QtWidgets.QLabel(
+            "如何选方法：标注病例多（约 30 例以上）追求全自动精度 → nnU-Net；"
+            "只有几例标注、想快速得到可用模型 → FlexiCT；边点边标、交互修正 → nnInteractive。"
+        )
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        title_box.addWidget(hint)
         header.addLayout(title_box, 1)
         header.addWidget(QtWidgets.QLabel("标注目标"))
         self.task_combo = QtWidgets.QComboBox()
@@ -601,8 +609,12 @@ class ModelCenter:
         heading = QtWidgets.QLabel("训练方案")
         heading.setObjectName("section")
         adaptation_layout.addWidget(heading)
-        self.light_radio = QtWidgets.QRadioButton("CLoPA-IN（推荐）")
-        self.strong_radio = QtWidgets.QRadioButton("CLoPA-CN")
+        self.light_radio = QtWidgets.QRadioButton(
+            "CLoPA-IN  ·  轻量强度域自适应（CT / MR 通用）"
+        )
+        self.strong_radio = QtWidgets.QRadioButton(
+            "CLoPA-CN  ·  Instance 归一化 + 部分卷积自适应"
+        )
         self.light_radio.setChecked(True)
         adaptation_layout.addWidget(self.light_radio)
         adaptation_layout.addWidget(self.strong_radio)

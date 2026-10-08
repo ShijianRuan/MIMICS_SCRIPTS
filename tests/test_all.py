@@ -277,9 +277,6 @@ class TestRuntimeCommon(unittest.TestCase):
         self.assertEqual({"b": 2}, loaded)
 
     def test_replace_with_retry_recovers_from_transient_lock(self):
-        tools_dir = os.path.join(PROJECT_ROOT, "tools")
-        if tools_dir not in sys.path:
-            sys.path.insert(0, tools_dir)
         import nnunet_common
 
         # A freshly built staging dir hits a transient WinError 5 (antivirus
@@ -311,9 +308,6 @@ class TestRuntimeCommon(unittest.TestCase):
         self.assertFalse(staging.exists())
 
     def test_replace_with_retry_raises_after_persistent_denial(self):
-        tools_dir = os.path.join(PROJECT_ROOT, "tools")
-        if tools_dir not in sys.path:
-            sys.path.insert(0, tools_dir)
         import nnunet_common
 
         staging = Path(self.tmp) / "model.publishing_def"
@@ -4050,6 +4044,34 @@ class TestStopBackgroundServices(unittest.TestCase):
     def tearDown(self):
         _cleanup(self.tmp)
 
+    def test_stop_all_services_requires_confirmation(self):
+        # R62-4: stopping ALL background services kills running training/
+        # prediction/import work across the workstation — far beyond the
+        # visible task — so it must confirm with the scope spelled out, like
+        # the import stop entry. Cancel must stop nothing.
+        import mimics_stop_background as msb
+
+        observed = []
+        stopped = []
+
+        def fake_question_box(message="", buttons="", title="", ui_blocking=None, **kwargs):
+            observed.append({"message": message, "buttons": buttons, "title": title})
+            return "Cancel"
+
+        old_box = msb.mimics.dialogs.question_box
+        old_stop = msb.stop_background_processes
+        try:
+            msb.mimics.dialogs.question_box = fake_question_box
+            msb.stop_background_processes = lambda: stopped.append(1) or {"ok": True}
+            self.assertEqual(0, msb.main())
+        finally:
+            msb.mimics.dialogs.question_box = old_box
+            msb.stop_background_processes = old_stop
+        self.assertEqual([], stopped)
+        self.assertEqual(1, len(observed))
+        self.assertTrue(observed[0]["buttons"].startswith("Stop All Services;"))
+        self.assertIn("every background task", observed[0]["message"])
+
     def test_stop_markers_defined(self):
         from mimics_stop_background import MARKERS
 
@@ -5546,9 +5568,8 @@ class TestNNInteractiveTaskDiagnostics(unittest.TestCase):
         self.assertIn('"not_improved"', source)
         # The Chinese labels live on the toggle checkbox, not in
         # refresh_models itself (moved by the R61-24 中文化).
-        self.assertIn("未改进", inspect.getsource(chooser))
-        self.assertIn(
-            "显示未改进的模型", inspect.getsource(chooser))
+        self.assertIn("未改进", source)
+        self.assertIn("显示未改进的模型", inspect.getsource(chooser.Chooser))
 
     def test_diagnose_job_cli_subcommand_exists(self):
         import nninteractive_finetune_pipeline as pipeline
@@ -5770,6 +5791,34 @@ class TestEdgeCases(unittest.TestCase):
             'Path("nninteractive_bridge.jsonl")', source,
             "the worker log default must stay absolute (temp dir)"
         )
+
+    def test_setup_root_sweeps_stale_files_only(self):
+        """R62-11: every wizard launch drops context/status/stderr files
+        in setup/ with no cleanup. _setup_root must remove files older
+        than the retention window and keep fresh ones."""
+        import nnunet_mimics
+        import flexict_mimics
+
+        for module in (nnunet_mimics, flexict_mimics):
+            workspace = os.path.join(self.tmp, module.__name__)
+            setup = os.path.join(workspace, "setup")
+            os.makedirs(setup)
+            stale = os.path.join(setup, "train_setup_20200101T000000_ab_status.json")
+            fresh = os.path.join(setup, "status_context_{0}.json".format(
+                uuid.uuid4().hex[:8]))
+            for path in (stale, fresh):
+                with open(path, "w") as handle:
+                    handle.write("{}")
+            old = time.time() - 30.0 * 86400.0
+            os.utime(stale, (old, old))
+            with mock.patch.object(module, "_workspace", lambda: workspace):
+                module._setup_root()
+            self.assertFalse(
+                os.path.exists(stale),
+                "{0} left a stale setup file behind".format(module.__name__))
+            self.assertTrue(
+                os.path.exists(fresh),
+                "{0} removed a fresh setup file".format(module.__name__))
 
     def test_affine_repair_already_running_returns_nonzero(self):
         """C6-4: offer_repair_for_prediction_failure treats main() == 0 as
@@ -7209,6 +7258,28 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn('目标文件夹已有标签文件', source)
         # Overwrite selection must not trigger the reminder.
         self.assertIn('selection.get("conflict_policy") == "skip"', source)
+
+    def test_zero_mask_submit_gates_wired(self):
+        """AUD 1.1: importing with zero discoverable masks must interrupt
+        with a plain statement before the job starts, in both batch and
+        single-case modes."""
+        import tools.io_path_setup_ui as ui
+        source = Path(PROJECT_ROOT, "tools", "io_path_setup_ui.py").read_text(encoding="utf-8")
+        # Batch gate: mask_count == 0 with cases present joins the anomaly
+        # confirm; the message must say image-only import.
+        self.assertIn("zero_mask", source)
+        self.assertIn("未找到任何标签文件", source)
+        # Single-case gate: confirm before an image-only project when the
+        # user did not pick "image only".
+        self.assertIn('selection.get("mask_selection") != "none"', source)
+        # Behavioural: summarize_dataset reports mask_count == 0 when the
+        # cases have no segmentations (the gate's data source).
+        case_dir = os.path.join(self.tmp, "s0100")
+        os.makedirs(case_dir)
+        open(os.path.join(case_dir, "ct.nii.gz"), "w").close()
+        result = ui.summarize_dataset(self.tmp)
+        self.assertEqual(1, result["case_count"])
+        self.assertEqual(0, result["mask_count"])
 
     def test_batch_status_viewer_aggregates_all_record_types(self):
         """P6b: the batch panel aggregates every on-disk record kind."""
@@ -13025,6 +13096,123 @@ class TestImportReceiptAndUndo(unittest.TestCase):
         self.assertEqual([], opens)
         self.assertEqual(1, len(boxes))
 
+    def test_undo_unknown_project_state_never_opens_another_project(self):
+        """F17/T17 查询失败/缺API: when the project query itself fails,
+        _open_project must refuse to switch - treating "cannot tell" as
+        "no project open" would stomp an unsaved session. The old code
+        swallowed the exception and called open_project anyway."""
+        import import_undo_mimics
+
+        boxes = []
+        opens = []
+
+        def _boom():
+            raise RuntimeError("API missing on this build")
+
+        patches = [
+            mock.patch.object(
+                import_undo_mimics.mimics.file, "get_project_information",
+                _boom,
+            ),
+            mock.patch.object(
+                import_undo_mimics.mimics.file, "is_project_loaded",
+                _boom,
+            ),
+            mock.patch.object(
+                import_undo_mimics.mimics.file, "open_project",
+                lambda filename=None: opens.append(filename),
+            ),
+            mock.patch.object(
+                import_undo_mimics.mimics.dialogs, "message_box",
+                lambda *a, **kw: boxes.append((a, kw)) or True,
+            ),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        ok = import_undo_mimics._open_project("C:\\target\\case.mcs")
+        self.assertFalse(ok)
+        self.assertEqual([], opens, "must not open a project over an unknown session")
+        self.assertEqual(1, len(boxes))
+        text = boxes[0][0][0]
+        self.assertIn("cannot tell", text.lower())
+        self.assertIn("nothing was consumed", text)
+
+    def test_undo_same_project_open_not_reloaded(self):
+        """F17/T17 同项目不重载: when the receipt's project is already
+        the open one, _open_project must succeed WITHOUT calling
+        open_project (a reopen would discard unsaved session work)."""
+        import import_undo_mimics
+
+        boxes = []
+        opens = []
+
+        class _ProjectInfo(object):
+            filename = "C:\\target\\case.mcs"
+
+        patches = [
+            mock.patch.object(
+                import_undo_mimics.mimics.file, "get_project_information",
+                lambda: _ProjectInfo(),
+            ),
+            mock.patch.object(
+                import_undo_mimics.mimics.file, "is_project_loaded",
+                lambda: True,
+            ),
+            mock.patch.object(
+                import_undo_mimics.mimics.file, "open_project",
+                lambda filename=None: opens.append(filename),
+            ),
+            mock.patch.object(
+                import_undo_mimics.mimics.dialogs, "message_box",
+                lambda *a, **kw: boxes.append((a, kw)) or True,
+            ),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        ok = import_undo_mimics._open_project("C:\\target\\case.mcs")
+        self.assertTrue(ok)
+        self.assertEqual([], opens, "same project must not be reloaded")
+        self.assertEqual(0, len(boxes))
+
+    def test_undo_unnamed_project_refused(self):
+        """F17/T17 未命名项目: a loaded project with no file path (never
+        saved) is work in progress; switching away must be refused."""
+        import import_undo_mimics
+
+        boxes = []
+        opens = []
+
+        class _ProjectInfo(object):
+            filename = ""
+
+        patches = [
+            mock.patch.object(
+                import_undo_mimics.mimics.file, "get_project_information",
+                lambda: _ProjectInfo(),
+            ),
+            mock.patch.object(
+                import_undo_mimics.mimics.file, "is_project_loaded",
+                lambda: True,
+            ),
+            mock.patch.object(
+                import_undo_mimics.mimics.file, "open_project",
+                lambda filename=None: opens.append(filename),
+            ),
+            mock.patch.object(
+                import_undo_mimics.mimics.dialogs, "message_box",
+                lambda *a, **kw: boxes.append((a, kw)) or True,
+            ),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        ok = import_undo_mimics._open_project("C:\\target\\case.mcs")
+        self.assertFalse(ok)
+        self.assertEqual([], opens)
+        self.assertEqual(1, len(boxes))
+
     def test_undo_entry_points_exist(self):
         entry = os.path.join(
             PROJECT_ROOT, "scripting_library", "99_Admin", "04_Undo_Last_Import.py"
@@ -15729,6 +15917,92 @@ class TestFlexiCTActiveLearningApply(unittest.TestCase):
                 flexict_mimics._al_mark_request = old_mark
             self.assertEqual([("failed", "conversion timed out")], marked)
             self.assertFalse(os.path.exists(bridge_root))
+
+    def test_al_orphaned_converting_request_fails_after_restart(self):
+        # R62-6: a "converting" request whose wait thread died with a Mimics
+        # restart must be failed explicitly on the next tick — it used to
+        # hang forever because _al_pending_requests only picked up "pending"
+        # and the review UI only reports applied/failed.
+        import flexict_mimics
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = os.path.join(tmp, "jobs", "job_a")
+            request_dir = os.path.join(job_dir, "apply_requests")
+            os.makedirs(request_dir)
+            with open(os.path.join(job_dir, "status.json"), "w") as handle:
+                json.dump({"kind": "active_learning", "status": "completed"}, handle)
+            converting_path = os.path.join(request_dir, "orphan.json")
+            with open(converting_path, "w") as handle:
+                json.dump({
+                    "case_id": "caseA", "what": "bands",
+                    "state": "converting", "requested_at_epoch": 10.0,
+                }, handle)
+            pending_path = os.path.join(request_dir, "fresh.json")
+            with open(pending_path, "w") as handle:
+                json.dump({
+                    "case_id": "caseB", "what": "bands",
+                    "state": "pending", "requested_at_epoch": 20.0,
+                }, handle)
+
+            old_workspace = flexict_mimics._workspace
+            old_transactions = dict(flexict_mimics._AL_APPLY_TRANSACTIONS)
+            old_mark = flexict_mimics._al_mark_request
+            old_apply = flexict_mimics._al_apply_request
+            flexict_mimics._AL_APPLY_TRANSACTIONS.clear()
+            marked = []
+            applied = []
+            try:
+                flexict_mimics._workspace = lambda: tmp
+                flexict_mimics._al_mark_request = (
+                    lambda path, state, detail="": marked.append(
+                        (os.path.basename(path), state, detail))
+                )
+                flexict_mimics._al_apply_request = (
+                    lambda request: applied.append(
+                        str(request.get("case_id") or "")))
+                flexict_mimics._al_tick()
+            finally:
+                flexict_mimics._workspace = old_workspace
+                flexict_mimics._al_mark_request = old_mark
+                flexict_mimics._al_apply_request = old_apply
+                flexict_mimics._AL_APPLY_TRANSACTIONS.clear()
+                flexict_mimics._AL_APPLY_TRANSACTIONS.update(old_transactions)
+            # The orphan is failed with restart guidance...
+            self.assertEqual(1, len(marked))
+            self.assertEqual("orphan.json", marked[0][0])
+            self.assertEqual("failed", marked[0][1])
+            self.assertIn("restarted", marked[0][2])
+            # ...and the freshest still-pending request is applied instead
+            # of being starved behind the orphan.
+            self.assertEqual(["caseB"], applied)
+            # With a live in-memory conversion the tick must NOT reap the
+            # converting request — that path is stage two, handled above.
+            with open(converting_path, "w") as handle:
+                json.dump({
+                    "case_id": "caseA", "what": "bands",
+                    "state": "converting", "requested_at_epoch": 10.0,
+                }, handle)
+            marked[:] = []
+            applied[:] = []
+            flexict_mimics._AL_APPLY_TRANSACTIONS["conversion"] = {
+                "request": {"case_id": "caseA"},
+                "result_path": os.path.join(tmp, "nope.json"),
+            }
+            try:
+                flexict_mimics._workspace = lambda: tmp
+                flexict_mimics._al_mark_request = (
+                    lambda path, state, detail="": marked.append((path, state))
+                )
+                flexict_mimics._al_apply_request = (
+                    lambda request: applied.append(
+                        str(request.get("case_id") or "")))
+                flexict_mimics._al_tick()
+            finally:
+                flexict_mimics._workspace = old_workspace
+                flexict_mimics._al_mark_request = old_mark
+                flexict_mimics._al_apply_request = old_apply
+            self.assertEqual([], marked)
+            self.assertEqual([], applied)
 
     def test_al_conversion_rollback_on_apply_failure(self):
         # F02/T02: a failed second band must leave no half-applied overlay

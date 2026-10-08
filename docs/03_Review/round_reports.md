@@ -4787,3 +4787,353 @@ _publish_mcs 盲重试由 fingerprint 门控缓解），入账不擅自改。
 - D20–D23 需用户决策（见 improvement_backlog 需求缺口提案区）。
 - F37 内容半边、F16 manifest 缺失回退、_publish_mcs 盲重试：入账
   跟踪（正确性代理判定无需代码动作）。
+## R65（2026-10-03）：FlexiCT 多分类实现 + 2 标签 PoC 真实数据验证
+
+### FlexiCT 多分类支持（P1 需求，commit `9fe911e`）
+
+- **需求**：用户 2026-10-02 拍板立项——FlexiCT 训练支持一个模型同时学
+  多个器官（多分类），而非一个器官一个模型。
+- **实现**（+493/-71，6 文件）：请求层显式 `labels` 数组（≤4，UI 超限
+  拒绝；单标签请求不变，向后兼容）；数据层复用 nnU-Net 多标签物化
+  （合并标签数组 1..N + overlap_policy）；模型层 `num_output_channels`
+  →3 通道解码头；推理层按值拆分多 mask → `flexict_mimics` 逐标签
+  应用队列（镜像 nnunet_mimics）；注册层清单新增 labels + label_names
+  （兼容旧单 label_name）。
+- **测试**：flexict 集成 121 全绿（含多分类物化/推理/回传/注册/UI 用例
+  + 修 3 处既有测试基建问题：模块缓存、对话框 holder、_apply_one 返回值
+  语义对齐参考实现）；gui_smoke 34/34；fast 28/28
+  （`20261003T050327_fast.json`）。
+
+### PoC 真实数据验证（2 标签 liver+spleen，2026-10-03）
+
+- **训练**（171 远程，与单标签基线同配方，仅改 labels）：收敛良好
+  （pseudo dice liver 0.823→0.862、spleen 0.923→0.961；fold validation
+  liver 0.829 / spleen 0.961）。模型
+  flexict_20261003T051819_ccde7e00 注册成功。
+- **held-out Dice（本地 RTX 3060，TTA 关）**：s0038 liver 0.9699 /
+  spleen 0.9530；s0039 0.9751/0.9360；s0042 0.9716/0.9854。
+  判据（liver 与单标签基线 0.9722/0.9761/0.9754 差 ≤0.03；spleen ≥0.7）
+  **全部通过**：liver 最大劣化仅 0.0038，spleen 最低 0.9360。
+- **结论**：多分类实现真实数据有效；小器官/4 标签上限场景未测（入账
+  测试盲区）。
+- **外部资源**：171 训练 1 job（job 目录控制器自动清理）；新增 prepared
+  cache 命名空间 230M（内容寻址 30 天惯例保留）；临时 profile
+  171_root_img12 + 凭据已删除；终态无容器/进程，GPU 0%。详见
+  docs/changes/2026-09-30_ai_real_data_validation.md 清理登记节。
+
+### 证据
+
+- commits：`9fe911e`（代码+测试）、本轮 docs 提交；工件：
+  `20261003T050327_fast.json`、预测
+  `G:\mimics_ai_validation\predictions\flexict_multiclass_*`。
+
+## R66-旁路（2026-10-03）：标注者审计 P1/P2 修复 + 5.4 需求缺口提案
+
+（在 ai-real-data-validation 分支 worktree 完成，与主线 R66-AUD 并行；
+账本 improvement_backlog.md 因同事存在未提交 diff，本节为临时状态源，
+待其提交后补正式条目。）
+
+### 标注者审计 P1/P2 修复（全部附测试）
+
+- **P1 1.1 零 mask 无声导入**：批量导入摘要 mask_count=0 且 case_count>0
+  时明确告知"只导入影像不导入 mask"并要求确认；单病例模式选了 mask 但
+  文件夹无标签文件时弹确认框，默认"否"（tools/io_path_setup_ui.py，
+  test_all.py `test_zero_mask_submit_gates_wired`）。
+- **P1 1.2 FlexiCT 权重缺失提示**：FileNotFoundError 文案指向
+  99_Admin → 07_Edit_Configs 的 GUI 路径而非手改 JSON
+  （tools/flexict_common.py，test_flexict_common.py
+  `test_missing_weights_error_points_at_config_editor`）。
+- **P1 5.4 批量预测不可达**：登记为需求缺口提案（见下），不擅自实施。
+- **P2 6.x 中文化**：io_path_setup_ui（区段标题/标签/提示）、
+  remote_compute_ui（字段行与状态）、training_data_ui（label source
+  选项与提示）+ 三个训练向导统一的"如何选方法"跨系列指引
+  （nnU-Net/FlexiCT/nnInteractive 适用场景，test_gui_smoke
+  `test_training_windows_carry_cross_family_hint`）。
+- **P2 7.x 可见性**：模型管理器新增"来源"列（imported / remote: profile /
+  本地训练）+ nnU-Net 行"使用此模型"禁用并提示去预测窗口选
+  （test_gui_smoke 2 用例）；nnU-Net 状态查看器新增"验证 Dice"列，
+  从 fold_*/validation/summary.json 的 foreground_mean 读取
+  （test_gui_smoke `test_nnunet_validation_dice_reads_fold_summary`）。
+- **P2 8.x 提示语**：remote_compute.py 权重校验失败提示改为"请服务器
+  管理员运行 remote/setup_remote_server.sh"。
+- **测试**：gui_smoke 38/38、flexict_common 25/25、test_all 全量
+  （工件 `.mimics_runtime/test_all_audit_fixes.log`）、fast 门禁见下。
+
+### 需求缺口提案（需用户决策，未立项不实施）
+
+- **D20 批量预测入口**：当前从 Mimics 只能逐例开预测窗口推理；批量
+  （对整个数据集/文件夹跑推理并落盘）只能绕开 Mimics 用命令行。
+  真实使用者：拥有已训练模型、需对多例出 mask 的标注者/研究者；
+  频率：每轮模型评估时；不解决的后果：批量场景被迫离开产品 GUI 或
+  逐例手工点击。最小可行方案：预测窗口复用现有模型表 + 文件夹选择，
+  循环调用既有单例推理链路（不新增推理实现）。约 +150~250 行。
+
+### 外部资源
+
+- 本轮零外部资源使用（纯本地代码与测试）。
+
+### 追加发现并当轮修复：P0 程序化图标崩溃（ui_theme._application_icon）
+
+- **发现过程**：本轮 test_all 全量在
+  `TestImportDropWindow.test_offscreen_window_renders_and_registers`
+  原生 abort。最小化排查：单测隔离复现 → 干净 HEAD（stash 我的改动）仍复现
+  → 共享树 al-review-loop 同样复现 → 逐行探针定位到
+  `painter.drawPolygon(QPoint, QPoint, QPoint)`。
+- **根因**：PySide6 6.11 移除了 drawPolygon 的 varargs 重载，调用抛
+  TypeError；外层 `except Exception` 在 painter 仍 active 时直接吞掉，
+  悬空 painter 随后触发 Qt 原生 abort。**所有调用 configure_application
+  的 GUI 窗口都在此崩溃线上**（桌面平台因图标从未走到该分支前…实际两平台
+  同路径，属潜伏 P0——任一窗口启动即可能整进程崩溃）。
+- **修复**（tools/ui_theme.py）：drawPolygon 改用 QPolygon 单参形式；
+  painter.end() 移入 finally 保证任何绘制失败都不留悬空 painter。
+- **验证**：单测 1/1 OK（修复前原生 abort）；test_all 全量见工件；
+  fast 门禁见下。修复仅在我所在 ai-real-data-validation 分支；
+  al-review-loop 存在同一 bug（`git show al-review-loop:tools/ui_theme.py:751`
+  确认），**需要主线同事在其分支同步修复**。
+
+### test_all 全量结果与既有失败登记（非本轮引入）
+
+- **本轮引入的问题（已修复）**：`test_zero_mask_submit_gates_wired` 首版
+  误用了不存在于 TestNewFeatures 的 `_make_case` 辅助方法 → 改为内联建例，
+  修复后 1/1 OK。
+- **P0 修复后 test_all 全量**：Ran 569 tests，失败 3 + 错误 5（其中 1 个
+  为上述已修复测试的旧运行记录）。逐一在干净 HEAD（stash 本轮全部改动）
+  复跑验证：**其余 6 个失败/错误全部在本轮改动之前即已存在**，属
+  al-review-loop 主线在途工作（R61-24 译文清理/`_record_failed_case`
+  签名演进/mask-export 停止断言/SystemHealthPanel KeyError）的既有状态：
+  1. `TestNNInteractiveTaskDiagnostics.test_model_center_hides_not_improved_
+     models_by_default` / `test_task_model_chooser_hides_not_improved...`：
+     测试断言源码含"未改进"，代码现为 "Did not improve"（R61-24 范围）。
+  2. `TestLifecycleAndRetention` 3 例：`_record_failed_case` 新增
+     `source_image` 关键字参数，测试桩 lambda 未跟上签名演进。
+  3. `TestStopBackgroundServices.test_mask_export_stop_...`：target_pid
+     断言 None 但实际有值。
+  4. `TestSystemHealthPanel.test_offscreen_panel_renders`：
+     system_health_panel.py:318 `.format()` KeyError（其样式模板与
+     ui_theme PALETTE 键名不匹配的独立问题）。
+  以上 6 项**建议主线 al-review-loop 当轮认领**；本分支不修（避免与
+  在途工作冲突），仅登记。P0 图标崩溃（ui_theme）在主线同样存在且为
+  启动路径崩溃，主线需同步修复。
+- 工件：`.mimics_runtime/test_all_audit_fixes.log`。
+
+### fast 门禁迭代记录
+
+- 首跑（`20261003T140702_fast.json`）27/28：`remote_training` 失败——
+  本轮把 GPU 状态串"GPU {} {} ({}% used)"译成中文，但
+  `test_remote_training.py:768` TB-06 契约（与 al-review-loop 共享）pin
+  英文 "% used"。**已回退该串为英文原文**，remote_training 106/106 OK；
+  与既有决策一致（策略/GPU 相关文案不译，保持两分支一致）。
+- 复跑结果见下（28/28 为本轮收尾判据）。
+- 复跑 **28/28 全绿**：`20261003T145247_fast.json`。本轮收尾判据达成。
+
+### 交付物：能力边界总报告（任务收尾）
+
+- 新建 `docs/changes/2026-10-03_ai_capability_and_boundary_report.md`：
+  面向标注者/产品决策者的最终能力边界汇总（各功能已验证能力、边界/
+  未验证项、可信度对照、修复缺陷清单、不承诺项），全部链接回主线
+  验证报告的证据链。标注者审计（任务 #11）+ FlexiCT 多分类（任务 #10）
+  两条线至此全部收尾。
+
+## R67-旁路（2026-10-03）：多分类生命周期走查缺口修复（G1/G2/G4/G5/G6/G8）
+
+（同在 ai-real-data-validation 分支 worktree。用户对多分类任务全生命周期
+提出走查质疑后，4 并行代码取证发现 10 项缺口，其中 6 项可当轮修复，
+本轮完成；其余见文末登记。）
+
+### 修复清单（每项独立 commit + 防回归测试）
+
+- **G1 部分标签预测为空时无声消失**（7a5be69，P1）：多分类 argmax 文件
+  里模型没预测到的标签根本不存在 → bridge 不产出行 → 应用队列无声少一个
+  Mask。修复：`_prepare_apply_queue` 按配置标签对账，缺失标签记入
+  `skipped_empty_labels`，Mimics 日志 WARNING + 完成消息明确列出
+  "Predicted empty (no Mask created): ..."。走查修正：原设想
+  （foreground_voxels==0 行静默跳过）经真实链路核对不可达——bridge 的
+  `_validate_resampled_mask_foreground` 只放行"源本就空"，全空已有
+  eligible==0 拦截；真实可达缺口是"配置了但文件里没有"。
+  （runtime_py35/flexict_mimics.py，test_flexict_integration
+  `test_partially_empty_prediction_records_skipped_labels`；冒烟门禁 8/8。）
+- **G2 FlexiCT 向导缺 overlap 选项**（30c4bc0，P1）：多分类 FlexiCT 共用
+  nnU-Net 病例物化器，标签交叠默认 fail 停训练，但 FlexiCT 向导无选项，
+  标注者撞错后无自救。镜像 nnU-Net 向导补"允许排在后面的标签覆盖重叠
+  体素"checkbox（默认不勾=fail），透传 overlap_policy。
+  （flexict_training_setup_ui.py，test_gui_smoke
+  `test_flexict_overlap_policy_reaches_request`。）
+- **G4 模型管理器多分类显示断层**（20c6bba，P2）：管理器目标列只读
+  label_name，liver+spleen 多分类模型显示为"liver"，与单分类无法区分。
+  镜像预测窗口已有模式：`" + ".join(label_names) or label_name`。
+  （model_manager_ui.py，test_model_portability
+  `test_manager_shows_multiclass_flexict_target`。）
+- **G5 多分类 bundle 零测试覆盖**（20c6bba，P2）：多分类上线时 bundle
+  导出/导入无测试证明 label_names 能跨机往返。补
+  `test_flexict_multiclass_bundle_roundtrip`：label_names 往返保持 +
+  导入后 usable。顺带给 `_flexict_model_dir` fixture 加 label_names 参数。
+- **G6 删除推荐模型不清指针**（20c6bba，P2）：删除推荐 FlexiCT 模型后
+  registry 的 recommended_model_id 指向已删模型，下次预测会去加载已删
+  checkpoint。根因：save_registry 把显式 `""` 当"保留现有"。语义改为
+  None=保留、""=清空；删除路径发现删的是推荐模型时显式清空。新增
+  `load_registry_recommended_id` 辅助。
+  （flexict_common.py / model_manager_ui.py，test_model_portability
+  `test_removing_recommended_flexict_model_clears_pointer`。）
+- **G8 共用报错的品牌错位**（bf91544，P3）：prepare_source_grid_cases
+  为两系列共用，"nnU-Net needs at least N usable cases" 在 FlexiCT 任务
+  上点名了另一产品家族。改中性文案，跳过病例明细（已有）说明真实原因。
+  （nnunet_pipeline.py；无测试 pin 该文案，nnunet 100/100 +
+  flexict 122/122 复跑确认。）
+
+### 门禁与验证
+
+- 冒烟门禁 8/8（G1 触及 runtime_py35 后即跑，
+  `20261003T165959_smoke.json`）；fast 门禁 28/28
+  （`20261003T175235_fast.json`）。
+- 单套件：flexict_integration 122/122、nnunet_integration 100/100、
+  model_portability（含 3 新用例）全绿、gui_smoke 全绿。
+
+### 未修登记（非本轮范围）
+
+- **G3 状态窗口无训练曲线**：状态查看器无 loss/Dice 曲线，远程训练
+  监控只有文本阶段。属产品功能新增（曲线拉取+渲染），需用户决策。
+- **G7 训练前重复模型查重**：向导不查同名任务已有模型，易生重复。
+  需与模型管理器联动设计，需用户决策。
+- **G9 val_cases 语义不一致**：nnU-Net 向导按比例、FlexiCT 按例数。
+  跨向导语义统一属产品决策。
+- **G10 本地重训全量预处理**：本地重训复用远程 prepared cache 的
+  行为待评估（含 D15 backbone 不随 bundle 传输问题）。
+- **主动学习无图形入口**：load_pair 依赖 2d+3d 成对模型，但无 GUI
+  创建 AL 任务路径（已在 docs/reviews/2026-09-29-cross-functional-
+  review.md 登记），属需求缺口需用户决策。
+
+## R68-旁路（2026-10-03）：用户立项缺口批量实施（G7/G9/G3/D20/主动学习/G10+D15）
+
+（同在 ai-real-data-validation 分支 worktree。用户对 R67-旁路文末登记的
+"未修缺口"逐项拍板全部立项实施，6 项各独立 commit + 防回归测试。）
+
+### 修复清单（每项独立 commit + 防回归测试）
+
+- **G7 训练前重复模型查重**（1388245，P2）：两个训练向导均不查同名任务
+  已有模型，重复训练易生冗余模型。提交前向导查注册表，已有模型时弹
+  确认（列出现有模型与配置）再继续。镜像两向导同一模式。
+  （flexict_training_setup_ui.py / nnunet_training_setup_ui.py，
+  test_gui_smoke 2 新用例。）
+- **G9 统一 val_cases 语义为按例数**（aea05d1，P2）：nnU-Net 向导按比例、
+  FlexiCT 向导按例数，跨向导语义漂移。统一为按例数（更直白：标注者
+  数得出例数，比例需换算），向导字段与请求归一化对齐，契约测试同步。
+- **G3 状态窗口加训练曲线**（178679d，P2）：FlexiCT 状态查看器新增
+  "训练曲线"标签页，从 job 的训练日志读 loss/validation Dice 序列画折线，
+  远程训练监控从纯文本升级为可视化。
+  （flexict_status_viewer.py，test_gui_smoke 1 新用例。）
+- **D20 批量预测 GUI 入口**（1cda384，P1 需求缺口立项）：此前批量推理
+  只能绕开 Mimics 用命令行。新增 scripting_library/02_AI/nnUNet/
+  04_Batch_Predict_Dataset.py 入口 + tools/nnunet_batch_predict_ui.py：
+  选已注册模型 + 数据集根目录，循环调用既有单例推理链路（不新增推理
+  实现），结果逐例应用回 .mcs 工程并汇报成功/跳过/失败。
+  （runtime_py35/nnunet_mimics.py 动作分发 + test_gui_smoke/
+  test_nnunet_integration 新用例；冒烟门禁后跑。）
+- **主动学习 GUI 入口**（18121c5，F04 需求缺口立项）：load_pair 依赖
+  2d+3d 成对模型但此前无 GUI 创建 AL 任务路径。审阅窗口新增"主动学习"
+  入口：从既有成对模型创建 AL 任务（选择器官 + 例集合），复用
+  flexict_pipeline 既有 run 语义。
+  （flexict_active_learning_ui.py，test_gui_smoke 3 新用例。）
+- **G10+D15 本地重训缓存复用 + backbone 随 bundle 传输**（e1b7f52，
+  P1/P2）：两个子问题一并修——
+  ① G10：标签签名原用 path_signature（size/mtime/inode），mcs_refresh
+  重导出产生字节相同但 mtime/inode 全新的 NIfTI → 每次重训全量重新
+  物化。改为标签用 SHA-256 内容签名（图像仍按路径签名：数据源写一次
+  不再改，哈希它们意味着每次运行多 GB 读），契约
+  nnunet_source_grid_case.v3 → v4。重导出字节相同 → cache 命中；
+  标签真被编辑 → 仍 miss。
+  ② D15/F06：FlexiCT trainer 构建网络时无条件加载预训练 backbone，
+  导致导入的微调模型在无 backbone 的机器上无法推理。export-flexict
+  新增 --include-backbone（backbone/ 下 2×~576MB），import 侧：无 →
+  装到 workspace/flexict_pretrained 并写 pretrained_weights_dir 覆盖；
+  已有且一致 → 校验后保留；不一致 → 硬拒（不静默覆盖工作正常的本地
+  backbone）。旧 bundle（无 backbone 段）照常导入。
+  （nnunet_pipeline.py / ai_model_bundle.py / flexict_common.py，
+  test_nnunet_integration 2 新用例 + test_model_portability 4 新用例。）
+
+### 门禁与验证
+
+- 单套件：nnunet_integration 104/104、model_portability 22/22、
+  flexict_common 25/25、flexict_integration 122/122、gui_smoke 全绿。
+- fast 门禁 28/28
+  （`20261003T222918_fast.json`）。
+- 过程登记：e1b7f52 实施中前一轮测试运行曾污染真实 flexict_config.json
+  （save_config 未被 mock 拦截时写入临时目录路径）——已从 HEAD 还原并
+  复跑全套件确认无再污染；该风险由 dual-module mock 目标错位引起，
+  相关测试已改为 mock tools.flexict_common（同模块对象），不再可达。
+
+### 外部资源
+
+- 本轮零外部资源使用（纯本地代码与测试）。
+
+## R69-旁路（2026-10-04）：独立评审 R62 批次修复收尾（R62-5..R62-11）
+
+（ai-real-data-validation worktree。续 R62-1..4（上一段）后，本轮把
+独立评审遗留的 7 项（2×P2 + 5×P3）全部修完，每项独立 commit +
+防回归测试 + 红→绿验证。）
+
+### 修复清单
+
+- **R62-5 批量预测窗口补模态护栏与 CPU 回退**（8d99c4a，P2）：批量
+  窗口构造的按例请求缺 `source_modality`/`use_cpu`，静默绕过单例
+  窗口的模态护栏（CT 模型可跑 MR 数据）且无 GPU 机器上直接失败。
+  选项栏补"图像模态"下拉（自动/CT/MR）与"无 GPU 时用 CPU"复选框，
+  请求字段与 CLI `cmd_predict` 同构，三入口护栏一致。
+  （nnunet_batch_predict_ui.py，test_gui_smoke 1 新用例。）
+- **R62-6 AL converting 请求重启后孤儿**（b7beffa，P2）：转换状态只
+  存于进程内（等待线程 + `_AL_APPLY_TRANSACTIONS`），Mimics 重启后
+  请求文件永远停在 converting——tick 只拾取 pending、评审窗口只报
+  applied/failed，承诺"重启后继续"永远不兑现。tick 现对无内存事务
+  的 converting 请求显式标 failed 附重启指引，后续 pending 不再被
+  饿死；活跃转换仍走原两阶段路径。
+  （runtime_py35/flexict_mimics.py，test_all 1 新用例；冒烟 8/8。）
+- **R62-7 已注册但文件缺失的模型静默消失**（1b1bd33，P3）：两个
+  预测窗口的模型发现把 `model_usability` 不过的模型直接过滤，注册表
+  有、目录丢的模型从列表蒸发。改为保留并标注：标灰不可选、最后一列
+  显示原因、默认选首个可用模型、全部不可用时开始按钮禁用、submit
+  对选中坏模型显式拒绝。
+  （两个 setup UI，test_gui_smoke 1 新用例；gui_smoke 51/51 +
+  nnunet 集成 104/104。）
+- **R62-8 批量派发超时误导重试**（7ad2f69，P3）：超时提示只说
+  "重连磁盘后重试"，但派发线程还在跑、已启动任务不会取消——盲目
+  重试造成同病例双任务。提示改为明确"扫描仍在后台、任务不取消、
+  先查状态窗口、仅对未启动病例重试"。失败清单复核：`create_job`
+  异常本就以 `case_id: 原因` 列出，无需改动。
+  （nnunet_batch_predict_ui.py，test_gui_smoke 1 新用例。）
+- **R62-9 状态查看器模型表缺"来源"列**（353528b，P3）：三个远程注册
+  路径早已在 manifest 写入 `execution_backend=remote` +
+  `remote_profile_name`，但两个状态查看器不显示。模型表各加"来源"
+  列：远程（profile 名） vs 本地。
+  （两个 status viewer，test_gui_smoke 2 新用例。）
+- **R62-10 AL 复核窗口隐藏失败运行**（da80cef，P3）：`find_al_jobs`
+  过滤 failed/cancelled/abandoned，失败的排序周期从列表蒸发，标注者
+  不知道有周期没跑完。失败运行现排在已完成之后、下拉标注
+  失败/已取消/已放弃、选中时显示错误并禁用行操作。
+  （flexict_active_learning_ui.py，test_gui_smoke 1 新用例。）
+- **R62-11 setup/ 会话目录无限累积**（68afe43，P3）：每次打开向导在
+  `<workspace>/setup/` 留 context/status/stderr 文件，永不清理。两个
+  模块的 `_setup_root` 在目录已存在时清扫超过 7 天的陈旧文件（跨周
+  文件无消费者），删除失败静默跳过，绝不阻塞窗口打开。
+  （runtime_py35/nnunet_mimics.py + flexict_mimics.py，test_all 1
+  双模块参数化用例；冒烟 8/8。）
+
+### 门禁与验证
+
+- 红→绿：每项修复前先对新测试跑一次修复前代码（git checkout HEAD --
+  <file> + 文件副本回放，替代此前出过 pop 事故的 stash 路径法），
+  7/7 全部确认红。
+- 套件：gui_smoke 55/55、nnunet_integration 104/104、
+  TestEdgeCases+TestFlexiCTActiveLearningApply 34/34、冒烟 8/8×2。
+- fast 门禁 28/28
+  （`20261004T061911_fast.json`）。
+
+### 过程事故（登记）
+
+- 本轮开头一次 `git stash pop` 事故：路径限定的 stash push 因索引含
+  快照时代的未合并路径失败，随后的 `pop` 弹出了 2026-08-05 的旧
+  备份 stash 并把 17 个文件置为冲突/脏状态。已全部还原到 HEAD
+  （本人改动前状态），旧 stash 完好保留，无数据丢失。此后红→绿
+  验证一律改用文件副本回放，不再用 stash。
+
+### 外部资源
+
+- 本轮零外部资源使用（纯本地代码与测试）。

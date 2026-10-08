@@ -6,7 +6,7 @@
   导出、任务状态与逐行停止
 - **AI 分割**：nnInteractive（官方模型 + 自训模型）、nnU-Net 训练与推理、
   ScribblePrompt 交互分割、FlexiCT 少样本训练与主动学习
-- **辅助工具**：窗宽窗位预设、系统健康检查、诊断包收集
+- **辅助工具**：窗宽窗位预设、批处理状态、系统健康检查、诊断包收集
 
 Mimics 内嵌的 Python 3.5 只做轻量调度（`runtime_py35/`）；所有重活
 （GPU 推理、训练、文件转换）由外部 Python 3.13 环境（`python_env/`）在

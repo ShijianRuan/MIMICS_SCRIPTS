@@ -67,9 +67,21 @@ nnInteractive, foreground Mimics, or unrelated processes.
 7. `nnUNet/01 Train Model`
 8. `nnUNet/02 Predict Current Case`
 9. `nnUNet/03 Show Status & Models`
+10. `nnUNet/04 Batch Predict Dataset`
+
+`FlexiCT/03 Active Learning Review` also starts new ranking runs: the window's
+setup form resolves the newest usable 2D+3D pair, points at the unlabeled pool
+once, and submits through the same active-learning job path; a missing pair is
+explained in place instead of after GPU reservation. Progress and stopping for
+the run live in the FlexiCT status window; the completed run appears in the
+review table automatically.
 
 The training and prediction entries remain separate so the common path keeps a
-dedicated setup window while prediction stays one click.
+dedicated setup window while prediction stays one click. Batch prediction is
+the GUI twin of `tools/mimics_batch_cli.py predict`: it resolves cases with
+the same skip-don't-guess rule, dispatches one background inference job per
+case, and writes `<output>/<case>.nii.gz` to disk only. Nothing is applied to
+the open Mimics project; progress and stopping live in the status window.
 
 ### 03 Review
 

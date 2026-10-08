@@ -20,6 +20,7 @@ for candidate in (ROOT, ROOT / "tools"):
 
 from nnunet_common import (  # noqa: E402
     load_label_sets,
+    load_models,
     normalize_request,
     read_json,
     suggest_dataset_id,
@@ -71,6 +72,13 @@ class TrainingSetupWindow:
         subtitle.setWordWrap(True)
         root.addWidget(title)
         root.addWidget(subtitle)
+        hint = QtWidgets.QLabel(
+            "如何选方法：标注病例多（约 30 例以上）追求全自动精度 → nnU-Net；"
+            "只有几例标注、想快速得到可用模型 → FlexiCT；边点边标、交互修正 → nnInteractive。"
+        )
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        root.addWidget(hint)
 
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.addTab(self._build_data_tab(), "数据")
@@ -451,14 +459,14 @@ class TrainingSetupWindow:
             "Fold 0；'all' 会依次训练五个模型。"
         )
         train_form.addWidget(self.fold_hint, 5, 0, 1, 2)
-        self.validation_spin = QtWidgets.QDoubleSpinBox()
-        self.validation_spin.setRange(0.0, 0.8)
-        self.validation_spin.setSingleStep(0.05)
-        self.validation_spin.setValue(0.2)
-        train_form.addWidget(QtWidgets.QLabel("验证集比例"), 6, 0)
+        self.validation_spin = QtWidgets.QSpinBox()
+        self.validation_spin.setRange(0, 999)
+        self.validation_spin.setValue(0)
+        train_form.addWidget(QtWidgets.QLabel("验证病例数"), 6, 0)
         train_form.addWidget(self.validation_spin, 6, 1)
         train_form.addWidget(self._hint(
-            "留出用于质量评估的病例比例。0.2 是标准值。Fold 为 'all' 时不使用。"
+            "留出用于质量评估的病例数。0 表示自动按 20% 比例留出。"
+            "Fold 为 'all' 时不使用。"
         ), 7, 0, 1, 2)
         self.workers_spin = QtWidgets.QSpinBox()
         self.workers_spin.setRange(1, 64)
@@ -714,10 +722,7 @@ class TrainingSetupWindow:
         train_all = str(self.fold_combo.currentData() or "0") == "all"
         self.validation_spin.setEnabled(not train_all)
         if train_all:
-            self.validation_spin.setValue(0.0)
-        self.validation_spin.setMinimum(0.0 if train_all else 0.05)
-        if not train_all and self.validation_spin.value() <= 0:
-            self.validation_spin.setValue(0.2)
+            self.validation_spin.setValue(0)
 
     def _refresh_continue_training(self):
         continuing = self.continue_check.isChecked()
@@ -797,7 +802,7 @@ class TrainingSetupWindow:
                 "MimicsNNUNetTrainerNoMirroring",
             } else 1000,
             "fold": str(self.fold_combo.currentData()),
-            "validation_fraction": float(self.validation_spin.value()),
+            "val_cases": int(self.validation_spin.value()),
             "preprocess_workers": int(self.workers_spin.value()),
             "num_gpus": int(self.num_gpus_spin.value()),
             "gpu_id": self.gpu_devices_edit.text().strip(),
@@ -810,11 +815,43 @@ class TrainingSetupWindow:
         }
         return normalize_request(request)
 
+    def _duplicate_model_warning(self, request) -> str:
+        """G7: retraining the same task_id piles up near-duplicate models;
+        surface existing ones before the GPU time is spent (not a block)."""
+        try:
+            existing = load_models(request["workspace"])
+        except Exception:
+            return ""
+        duplicates = [
+            model for model in existing
+            if str(model.get("task_id") or "") == request["task_id"]
+        ]
+        if not duplicates:
+            return ""
+        return (
+            "该任务名下已有 {} 个模型（{}）。继续训练会新增一个模型而不是更新"
+            "已有的；如需改进旧模型，请先在模型管理器中确认是否还需要它。".format(
+                len(duplicates),
+                ", ".join(
+                    str(model.get("model_id") or "") for model in duplicates[:3]
+                ),
+            )
+        )
+
     def _submit(self):
         if self._submission_pending:
             return
         try:
             request = self._request()
+            warning = self._duplicate_model_warning(request)
+            if warning:
+                answer = self.QtWidgets.QMessageBox.question(
+                    self.window, "重复任务", warning,
+                    self.QtWidgets.QMessageBox.Yes | self.QtWidgets.QMessageBox.No,
+                    self.QtWidgets.QMessageBox.No,
+                )
+                if answer != self.QtWidgets.QMessageBox.Yes:
+                    return
             self._submission_generation += 1
             generation = self._submission_generation
             self._submission_pending = True

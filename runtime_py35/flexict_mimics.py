@@ -101,6 +101,22 @@ def _setup_root():
     path = os.path.join(_workspace(), "setup")
     if not os.path.isdir(path):
         os.makedirs(path)
+    else:
+        # R62-11: sweep stale wizard context/status files (shared with
+        # nnunet_mimics._sweep_stale_setup_files; kept local to avoid a
+        # cross-module dependency for four lines).
+        cutoff = time.time() - 7.0 * 86400.0
+        try:
+            names = os.listdir(path)
+        except OSError:
+            names = []
+        for name in names:
+            stale = os.path.join(path, name)
+            try:
+                if os.path.isfile(stale) and os.path.getmtime(stale) < cutoff:
+                    os.remove(stale)
+            except OSError:
+                continue
     return path
 
 
@@ -523,6 +539,10 @@ def _monitor_tick_locked(monitor):
         monitor["deadline"] = time.time() + 24 * 60 * 60
         monitor["last_line"] = ""
         monitor["bridge_started"] = False
+        infer_status = _read_json(status["prediction_status_path"], {}) or {}
+        monitor["label_name"] = infer_status.get("label_name") or ""
+        monitor["label_names"] = infer_status.get("label_names") or []
+        monitor["labels"] = infer_status.get("labels") or []
         return
     if kind in ("train_setup", "predict_setup"):
         if state in ("cancelled", "failed"):
@@ -665,10 +685,13 @@ def _monitor_tick_locked(monitor):
     except Exception:
         pass
     _stop_monitor(key)
+    skipped = list(monitor.get("skipped_empty_labels") or [])
     _log(
         logging.INFO,
-        "FlexiCT result applied to {0} Mask(s): {1}.".format(
-            len(applied), ", ".join(applied)
+        "FlexiCT result applied to {0} Mask(s): {1}.{2}".format(
+            len(applied), ", ".join(applied),
+            " Predicted empty (no Mask created): {0}.".format(
+                ", ".join(skipped)) if skipped else "",
         ),
     )
 
@@ -782,19 +805,25 @@ def _launch_bridge(monitor, status):
     thread.start()
 
 
-def _matching_update_mask(monitor):
+def _matching_update_mask(monitor, label):
     """Find the single unchanged launch-time Mask matching the label name.
 
-    FlexiCT predicts one binary target; the update destination is the Mask
-    whose name matches the model's label_name (or the selected Mask at
-    launch). Changed or ambiguous Masks fall back to a fresh copy.
+    The update destination is the Mask whose name matches the label (or, for
+    the model's primary label, the selected Mask at launch). Changed or
+    ambiguous Masks fall back to a fresh copy.
     """
-    label_name = str(monitor.get("label_name") or "")
-    selected = str(monitor.get("selected_mask_name") or "")
+    label_name = str(label.get("name") or "")
     wanted = set(
-        value.strip().lower() for value in (label_name, selected)
+        value.strip().lower()
+        for value in [label_name] + list(label.get("aliases") or [])
         if str(value).strip()
     )
+    # Only the model's primary label may also reuse the Mask selected at
+    # launch; secondary labels match by name only.
+    if int(label.get("id") or 0) == 1:
+        selected = str(monitor.get("selected_mask_name") or "").strip()
+        if selected:
+            wanted.add(selected.lower())
     if not wanted:
         return None
     candidates = [
@@ -890,7 +919,7 @@ def _persist_application_state(monitor, application):
 
 
 def _prepare_apply_queue(monitor, bridge_result):
-    """One buffer, one apply step; ask update-vs-create only once."""
+    """Per-label apply queue; ask update-vs-create only once."""
     application = _application_state(monitor)
     mode = str(application.get("mode") or "")
     if mode not in ("update", "create"):
@@ -910,31 +939,49 @@ def _prepare_apply_queue(monitor, bridge_result):
     application["state"] = "applying"
     records = application.get("records") or {}
     application["records"] = records
-    label_name = str(monitor.get("label_name") or "Prediction")
-    record = records.get("1") or {}
+    labels = monitor.get("labels") or []
+    by_id = dict((int(row.get("id") or 0), row) for row in labels)
+    queue = []
+    eligible = 0
     already_applied = []
-    buffer_row = None
     for row in bridge_result.get("masks") or []:
-        if int(row.get("foreground_voxels") or 0) > 0:
-            buffer_row = row
-            break
-    if buffer_row is None:
-        raise RuntimeError("预测结果为空（没有前景体素）。")
-    if str(record.get("state") or "") == "applied":
-        already_applied.append(str(record.get("target_name") or ""))
-    else:
+        if int(row.get("foreground_voxels") or 0) <= 0:
+            continue
+        eligible += 1
+        label_value = int(row.get("label_value") or 0)
+        label = by_id.get(label_value)
+        if label is None and label_value == 0 and len(labels) <= 1:
+            label = {
+                "id": 1,
+                "name": str(monitor.get("label_name") or "Prediction"),
+                "aliases": [str(monitor.get("label_name") or "Prediction")],
+            }
+        if label is None:
+            label = {
+                "id": label_value or 1,
+                "name": "Label {0}".format(label_value or 1),
+                "aliases": [],
+            }
+        application_key = str(int(label.get("id") or label_value or 1))
+        record = records.get(application_key) or {}
+        if str(record.get("state") or "") == "applied":
+            already_applied.append(str(record.get("target_name") or ""))
+            continue
         if not record:
             record = {
-                "label_name": label_name,
+                "label_id": int(label.get("id") or label_value or 1),
+                "label_name": str(label.get("name") or "Prediction"),
                 "state": "pending",
             }
+            label_name = str(record["label_name"])
             mask = (
-                _matching_update_mask(monitor)
+                _matching_update_mask(monitor, label)
                 if mode == "update" else None
             )
             if mask is not None:
                 record["target_kind"] = "update"
-                record["target_name"] = str(getattr(mask, "name", "") or label_name)
+                record["target_name"] = str(
+                    getattr(mask, "name", "") or label_name)
                 record["target_guid"] = mimics_mask_apply._mask_identity(mask)
                 record["fallback_name"] = _unique_application_mask_name(
                     "FlexiCT " + label_name
@@ -946,9 +993,38 @@ def _prepare_apply_queue(monitor, bridge_result):
                 )
                 record["target_guid"] = ""
                 record["fallback_name"] = ""
-            records["1"] = record
-        monitor["apply_queue"] = [{"buffer": buffer_row, "mode": mode}]
+            records[application_key] = record
+        queue.append(
+            {
+                "buffer": row,
+                "label": label,
+                "mode": mode,
+                "application_key": application_key,
+            }
+        )
+    if eligible == 0:
+        raise RuntimeError("预测结果为空（没有前景体素）。")
+    # Multiclass accountability: a configured label the model did not predict
+    # at all is absent from the argmax file, so the bridge emits no row for
+    # it and it would silently vanish from the apply queue. Reconcile against
+    # the configured labels and record the missing ones.
+    seen_values = set()
+    for item in queue:
+        seen_values.add(int(item["label"].get("id") or 0))
+    skipped_empty = [
+        str(label.get("name"))
+        for label in labels
+        if int(label.get("id") or 0) not in seen_values
+    ]
+    monitor["apply_queue"] = queue
     monitor["applied_masks"] = [name for name in already_applied if name]
+    if skipped_empty:
+        monitor["skipped_empty_labels"] = skipped_empty
+        _log(
+            logging.WARNING,
+            "FlexiCT predicted no foreground for: {0}. No Mask is created "
+            "for these labels.".format(", ".join(skipped_empty)),
+        )
     _persist_application_state(monitor, application)
 
 
@@ -974,10 +1050,10 @@ def _apply_one(monitor):
     item = queue[0]
     application = monitor.get("mimics_application") or _application_state(monitor)
     records = application.get("records") or {}
-    record = records.get("1") or {}
+    record = records.get(item.get("application_key")) or {}
     record["state"] = "applying"
     record["attempted_at_epoch"] = time.time()
-    records["1"] = record
+    records[item.get("application_key")] = record
     application["records"] = records
     _persist_application_state(monitor, application)
     mask = _mask_from_application_record(record)
@@ -1013,7 +1089,7 @@ def _apply_one(monitor):
     _persist_application_state(monitor, application)
     monitor["applied_masks"].append(mask_name)
     queue.pop(0)
-    return False  # single label: one buffer, done
+    return bool(queue)
 
 
 def _monitor_tick(monitor):
@@ -1189,6 +1265,8 @@ def _resume_pending_inference_monitors():
             "target_grid": target_grid,
             "source_geometry_expected": source_geometry,
             "label_name": request.get("label_name") or status.get("label_name") or "",
+            "label_names": status.get("label_names") or [],
+            "labels": status.get("labels") or [],
             "selected_mask_name": request.get("selected_mask_name") or "",
             "ts_root": request.get("ts_root") or "",
             "case_id": request.get("case_id") or "",
@@ -1244,7 +1322,8 @@ def _al_pending_requests():
             payload = _read_json(path, {}) or {}
             if not payload:
                 continue
-            if str(payload.get("state") or "pending") != "pending":
+            if str(payload.get("state") or "pending") not in (
+                    "pending", "converting"):
                 continue
             payload["_request_path"] = path
             payload["_job_dir"] = os.path.join(jobs, name)
@@ -1280,8 +1359,24 @@ def _al_tick():
         requests = _al_pending_requests()
         if not requests:
             return
-        request = requests[0]
-        _al_apply_request(request)
+        # R62-6: a "converting" request with no live in-memory transaction
+        # means Mimics was restarted mid-conversion (the wait thread and
+        # _AL_APPLY_TRANSACTIONS are process-local). Nothing will ever
+        # finish it — fail it explicitly instead of leaving it hanging
+        # forever in a state the review UI never reports.
+        pending = []
+        for request in requests:
+            if str(request.get("state") or "") == "converting":
+                _al_mark_request(
+                    request["_request_path"], "failed",
+                    "Mimics was restarted while this overlay was "
+                    "converting. Request it again from the review window.",
+                )
+            else:
+                pending.append(request)
+        if not pending:
+            return
+        _al_apply_request(pending[0])
     except Exception as exc:
         _log(
             logging.ERROR,

@@ -139,8 +139,17 @@ class PredictionWindow:
         def load():
             try:
                 all_models = load_models(workspace)
-                usable = [row for row in all_models if model_usability(row)[0]]
-                self._model_results.put((_rank_models(usable, self.context), ""))
+                # R62-7: unusable models (registered but files missing)
+                # stay visible with their reason instead of silently
+                # vanishing — the annotator must see why a model is gone.
+                rows = []
+                for row in all_models:
+                    usable, reason = model_usability(row)
+                    if not usable:
+                        row = dict(row)
+                        row["_unusable_reason"] = reason
+                    rows.append(row)
+                self._model_results.put((_rank_models(rows, self.context), ""))
             except Exception as exc:
                 self._model_results.put(([], str(exc)))
 
@@ -154,7 +163,10 @@ class PredictionWindow:
         self.table.setUpdatesEnabled(False)
         try:
             self.table.setRowCount(len(self.models))
+            first_usable = -1
+            unusable_count = 0
             for index, model in enumerate(self.models):
+                unusable_reason = str(model.get("_unusable_reason") or "")
                 values = [
                     model.get("task_name") or model.get("task_id"),
                     model.get("model_id"),
@@ -162,21 +174,52 @@ class PredictionWindow:
                     ", ".join(
                         str(row.get("name")) for row in model.get("labels") or []
                     ),
-                    model.get("execution_backend") or "local",
+                    unusable_reason or model.get("execution_backend") or "local",
                 ]
                 for column, value in enumerate(values):
                     item = self.QtWidgets.QTableWidgetItem(str(value or ""))
                     if column == 3:
                         item.setToolTip(str(value or ""))
+                    if unusable_reason:
+                        # R62-7: registered-but-broken models stay
+                        # visible, greyed out with the reason in the last
+                        # column — not silently dropped.
+                        item.setToolTip(unusable_reason)
+                        item.setFlags(
+                            item.flags() & ~self.QtCore.Qt.ItemIsEnabled
+                        )
                     self.table.setItem(index, column, item)
-            if self.models:
-                self.table.selectRow(0)
+                if unusable_reason:
+                    unusable_count += 1
+                elif first_usable < 0:
+                    first_usable = index
+            if first_usable >= 0:
+                self.table.selectRow(first_usable)
         finally:
             self.table.setUpdatesEnabled(True)
-        self.start.setEnabled(bool(self.models))
+        self.start.setEnabled(any(
+            not str(model.get("_unusable_reason") or "")
+            for model in self.models
+        ))
         if error:
             self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
             self.status_label.setText("无法加载 nnU-Net 模型：{}".format(error))
+        elif unusable_count:
+            if any(
+                not str(model.get("_unusable_reason") or "")
+                for model in self.models
+            ):
+                self.status_label.setText(
+                    "{0} 个已注册模型不可用（列表最后列注明原因）。先在「状态与模型」窗口修复或删除。".format(
+                        unusable_count
+                    )
+                )
+            else:
+                self.status_label.setText(
+                    "已注册的 {0} 个模型全部不可用（列表最后列注明原因）。".format(
+                        unusable_count
+                    )
+                )
         elif self.models:
             self.status_label.setText(
                 "所选 Mask 仅用于对包含该标签的模型排序。选中的模型会预测其全部输出标签；归一化、spacing 和 patch 由其 plans 控制。"
@@ -233,6 +276,11 @@ class PredictionWindow:
             if not 0 <= row < len(self.models):
                 raise RuntimeError("请选择一个模型。")
             model = self.models[row]
+            unusable_reason = str(model.get("_unusable_reason") or "")
+            if unusable_reason:
+                raise RuntimeError(
+                    "所选模型不可用：{0}".format(unusable_reason)
+                )
             image_path = Path(
                 os.path.abspath(
                     os.path.expandvars(

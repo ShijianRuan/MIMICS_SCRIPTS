@@ -337,6 +337,93 @@ def _session_diverged(receipt):
     return False, ""
 
 
+def _delete_owned_masks(receipt):
+    """Delete only masks the receipt can prove it created (F19).
+
+    Returns (deleted_names, ambiguous_names). Ambiguous entries are
+    skipped and reported - the user resolves them by hand; the undo never
+    guesses.
+    """
+    matches, ambiguous = _resolve_owned_masks(receipt)
+    if ambiguous:
+        return [], ambiguous
+
+    def operation():
+        deleted = []
+        for index in sorted(matches):
+            mask = matches[index]
+            try:
+                name = str(getattr(mask, "name", "") or "")
+                mask.delete()
+                deleted.append(name)
+            except Exception:
+                pass
+        return deleted
+
+    return runtime_common.execute_mimics_transaction(
+        mimics, operation, "Mimics-Script Undo Import"
+    ), ambiguous
+
+
+def _session_diverged(receipt):
+    """True when the open session holds work the receipt does not account
+    for (F18). The disk fingerprint alone cannot see an in-memory change;
+    comparing the session's live mask inventory against the receipt can.
+    Returns (diverged, reason).
+    """
+    entries = receipt.get("created_masks_v2")
+    token = str(receipt.get("provenance_token") or "")
+    images = list(mimics.data.images)
+    live_masks = []
+    for image in images:
+        for mask in list(image.masks):
+            live_masks.append(mask)
+
+    if entries is None:
+        # v1 receipt: no guids, no token. Conservative name check - any
+        # live mask the receipt does not list means manual work in the
+        # session, and the delete-file rollback must not run (W02: 旧
+        # receipt 保守处理).
+        listed = set(str(n) for n in (receipt.get("created_masks") or []))
+        extra = [
+            str(getattr(m, "name", "") or "")
+            for m in live_masks
+            if str(getattr(m, "name", "") or "") not in listed
+        ]
+        if extra:
+            return True, "session has mask(s) the import did not create: {0}".format(
+                ", ".join(extra[:5])
+            )
+        return False, ""
+
+    entries = list(entries)
+    expected_guids = set(str(e.get("guid") or "") for e in entries)
+    matched = 0
+    extra = []
+    for mask in live_masks:
+        guid = _object_guid(mask)
+        if guid and guid in expected_guids:
+            matched += 1
+        elif _mask_has_token(mask, token):
+            # Token present: import-owned, guid drifted across reopen.
+            matched += 1
+        else:
+            extra.append(str(getattr(mask, "name", "") or ""))
+
+    if extra:
+        return True, "session has mask(s) the import did not create: {0}".format(
+            ", ".join(extra[:5])
+        )
+    if matched < len(expected_guids):
+        # A receipt object is missing from the session: it was deleted and
+        # possibly recreated by hand. Either way the delete-file rollback
+        # is unsafe (F18/T19: 删除后重建同名).
+        return True, "imported mask(s) were deleted or changed since the import"
+    # Content edits of the imported masks themselves are invisible here;
+    # the post-save fingerprint re-check below covers them.
+    return False, ""
+
+
 def _describe(receipt):
     names = receipt.get("created_masks") or []
     if not names:
@@ -403,31 +490,6 @@ def undo_last_import(confirm=True):
     if disk_matches:
         session_diverged, divergence_reason = _session_diverged(receipt)
 
-    is_v2 = bool(receipt.get("created_masks_v2")) and \
-        receipt.get("schema_version") == RECEIPT_SCHEMA_VERSION
-    mask_names = set(str(n) for n in (receipt.get("created_masks") or []))
-    deleted = []
-    ambiguous = []
-    if is_v2 or mask_names:
-        # The next steps (project open above, mask resolution, fingerprint
-        # hashing below, save) block the GUI thread for as long as Mimics
-        # takes on a multi-hundred-MB .mcs. Say so in the log panel first -
-        # non-modal, the same channel collect_diagnostics uses - so the
-        # pause is announced work, not a frozen window.
-        try:
-            mimics.logging.log_user_message(
-                level=logging.INFO,
-                message=(
-                    "Undo Last Import: opening and verifying {0}; Mimics "
-                    "may pause for a moment. Masks to remove: {1}.".format(
-                        os.path.basename(mcs_path),
-                        len(receipt.get("created_masks_v2") or mask_names or []),
-                    )
-                ),
-            )
-        except Exception:
-            pass
-    if is_v2:
         try:
             deleted, ambiguous = _delete_owned_masks(receipt)
         except Exception as exc:

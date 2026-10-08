@@ -899,8 +899,23 @@
   .mimics_runtime/apply_translations.py（字节偏移 AST 替换器——ast
   col_offset 是 UTF-8 字节偏移，非字符偏移）。冒烟 8/8
   （20261001T022755_smoke.json）。
-- [~] **R61-25 D19 FlexiCT 增训**（低优先级）：**用户取消（2026-09-30）**
-  ——"FlexiCT 增训不用实现了"，不再实施。
+- [x] **R61-25 D19 FlexiCT 增训**（低优先级）：训练表单加"从上次
+  checkpoint 继续"选项，透传到 `_spawn_flexict_worker`
+  （`flexict_pipeline.py:926` 硬编码 `"continue_training": False`，
+  trainer 侧已支持；2026-10-04 独立核验确认仍未修——对照
+  `nnunet_pipeline.py:1996` 已从 request 读取，nnU-Net 表单有
+  "继续训练"按钮，FlexiCT 表单无此选项）。
+  **已解决（2026-10-04）**：`_flexict_resumable_dataset_id` 从 results
+  树解析中断运行的 Dataset id（新 id 会让续训静默从头开始）；表单加
+  "继续上次中断的训练"复选框透传 request；远程后端 + 续训组合在
+  normalize 与表单提交两处拦截（远程容器一次性，读不到本机
+  checkpoint_latest）。测试：`test_flexict_integration.py
+  TestContinueTraining` 4 项（id 复用/无中断拒绝/配置过滤+pair 回退/
+  远程拒绝）+ `test_gui_smoke.py
+  TestTrainingSetupPathMemory.test_flexict_continue_training_reaches_request_and_blocks_remote`
+  （表单透传 + 远程拦截）；flexict_integration 126/126 复绿。
+  **历史注**：2026-09-30 曾一度取消（"FlexiCT 增训不用实现了"），
+  2026-10-04 用户重新立项（D19）后按上方案实施。
 - [x] **R64-1 R61-12 连带回归：ScribblePrompt 会话静默丢弃（P0）**：
   stream_buffer 返回 "sha256:"+hex，而 worker 把裸 hex 存进 Mask 元数据，
   `_session_values` 直接比较导致会话永不匹配、previous-logits 连续性
@@ -914,6 +929,136 @@
   落盘但摘要丢失）。**已解决（R64，commit 3427fa5）**：print 降级
   replace-decode 回退，JSON 工件保留全文。冒烟 8/8
   （20261001T025816_smoke.json）。
+
+### R62：2026-10-04 AI 功能类独立评审（简便性 + 完整性两视角）
+
+- [x] **R62-1【P1】ScribblePrompt 逐 stroke 全量 tobytes+argwhere 在
+  GUI 线程**（`interactive_algorithms_mimics.py:293/:298`）：每画一笔
+  stroke 都对整个体数据做全量 bytes() + np.argwhere，大体积数据逐笔
+  冻结 GUI。验收：stroke 提交移出 GUI 线程或改为增量计算，
+  R61-13 契约扫描白名单对应条目删除，测试防回归。
+  **已解决（2026-10-04）**：numpy 路径改为 `np.asarray(view)` 零拷贝视图
+  （与 nninteractive_mimics.py:2493 同一模式），全量拷贝只剩 bbox 裁剪
+  的 tobytes（单 slice 大小）；tobytes 全量拷贝仅保留在无 numpy 的
+  ImportError 回退路径（与 nnInteractive 同等回退）。argwhere 本身在
+  C 速度扫描、只为 stroke 体素分配。测试：
+  `test_interactive_algorithms.py
+  MimicsRuntimeTests.test_scribble_capture_avoids_full_volume_copy`
+  （计数 tobytes 调用尺寸，修复前实证 2 次全量 → 修复后 1 次
+  [仅 fake 记账]，红→绿验证过）；interactive_algorithms 18/18 +
+  smoke 8/8 复绿。
+- [x] **R62-2【P1】ScribblePrompt 逐 prompt 模态弹窗堆叠**
+  （`interactive_algorithms_mimics.py:594→:480→:458`）：每个 prompt
+  一次模态弹窗，连续交互时弹窗堆叠。验收：复用 R61-10 会话级单次
+  提示模式，同会话不再重复弹。
+  **已解决（2026-10-04）**：Foreground/Background 选择改为会话级记忆
+  （`_SESSION_PROMPT_SIGN`，首次询问后整个 Mimics 会话不再弹）；主
+  prompt 对话框新增 Use Foreground/Background Prompts 切换按钮 + 当前
+  sign 显示行，切换 sign 不再需要额外弹窗。测试：
+  `test_prompt_sign_asked_once_per_session`（红→绿验证过）。
+- [x] **R62-3【P1】ScribblePrompt 结果弹窗每轮必现、无会话记忆**
+  （`interactive_algorithms_mimics.py:944-969`）：与 R62-2 同根因。
+  验收：照抄 R61-10 模式加会话级"不再提示"。
+  **已解决（2026-10-04）**：结果去向（Update Selected Mask / Create
+  Editable Copy）首次询问后会话级记忆（`_SESSION_RESULT_MODE`，与
+  nnInteractive R61-10 同模式）；**changed-mask 安全询问不吞**——用户
+  中途编辑过 mask 属数据风险路径，始终确认。测试：
+  `test_result_destination_is_asked_once_per_session` +
+  `test_result_destination_changed_mask_still_asks`（红→绿验证过）。
+- [x] **R62-4【P1】stop-all-services 无确认**
+  （`mimics_stop_background.py:1450-1461`）：一键停掉**所有**后台服务
+  （含正在跑的训练/推理任务），无任何确认。生命周期规范：影响范围
+  超出当前可见任务的大范围停止属破坏性操作，需一次确认。验收：
+  stop-all 前弹确认对话框（复用 question_box），普通停止单项不加。
+  **已解决（2026-10-04）**：`main()` 前置 question_box 确认（Stop All
+  Services;Cancel，影响范围在文案中写明），与 `main_stop_import` 同
+  模式；Cancel 直接返回不停止任何服务。测试：
+  `test_all.py TestStopBackgroundServices.test_stop_all_services_requires_confirmation`
+  （红→绿验证过；红路径为无确认直接停）。TestStopBackgroundServices
+  类的 `test_nnunet_version_gate`/`test_mask_export_stop` 两项失败为
+  修改前已存在（HEAD 复验），与本改动无关。
+- [x] **R62-5【P2】批量推理窗口缺远程后端/CPU 回退/模态护栏/
+  case 过滤**（`nnunet_batch_predict_ui.py:249-265` vs
+  `nnunet_prediction_setup_ui.py:110-113/:246-258`；护栏
+  `nnunet_pipeline.py:1602-1614` 被静默跳过）：单例窗口有的保护，
+  批量窗口全无。
+  **已解决（本轮）**：批量窗口选项栏补"图像模态"下拉（自动（按模型）
+  /CT/MR）与"无 GPU 时用 CPU"复选框；`_submit` 按例请求补
+  `source_modality`（选择 CT/MR 时）与 `use_cpu` 字段，与 CLI
+  `cmd_predict` 同构。模态护栏与 CPU 回退由此在单例窗口、CLI、批量
+  窗口三入口一致生效。测试：
+  `test_gui_smoke.py TestBatchPredictionWindow.test_submit_passes_modality_and_cpu_flags_to_jobs`
+  （红→绿验证过；红路径为修复前请求缺 `source_modality` 键直接
+  KeyError）。远程后端在批量窗口的立项按验收标准另轮处理。
+- [x] **R62-6【P2】AL 覆盖层 "converting" 请求在 Mimics 重启后成
+  孤儿**（`flexict_mimics.py` `_al_pending_requests`/`_al_tick`）：UI
+  提示"重启后继续"，但请求状态没有跨重启恢复路径。
+  **已解决（本轮）**：`_al_pending_requests` 现同时拾取 pending 与
+  converting 状态；`_al_tick` 对无内存事务（说明等待线程已随 Mimics
+  重启消失）的 converting 请求显式标 failed 并附重启指引，评审窗口
+  经 `request_updates` 即时可见，后续 pending 请求不再被孤儿饿死；
+  有内存事务的 converting 仍走原有两阶段完成路径。测试：
+  `test_all.py TestFlexiCTActiveLearningApply.test_al_orphaned_converting_request_fails_after_restart`
+  （红→绿验证过；红路径为修复前孤儿永远不被标记）。冒烟门禁
+  8/8 通过（工件 20261004T042817_smoke.json）。
+- [x] **R62-7【P3】预测窗口隐藏"已注册但文件缺失"的模型，空态
+  引导错误**：注册表有、目录丢的模型直接不显示，用户无从知道
+  为什么模型不见了。
+  **已解决（2026-10-04）**：单例预测窗口（`nnunet_prediction_setup_ui.py`）
+  与批量预测窗口（`nnunet_batch_predict_ui.py`）的模型发现改为保留
+  不可用模型：`model_usability` 的原因写入 `_unusable_reason`，列表
+  中标灰（ItemIsEnabled 摘除）、最后一列显示原因、tooltip 同步；
+  默认选中首个可用模型；全部不可用时开始按钮禁用 + 状态栏统计
+  不可用数；`_submit` 对选中不可用模型显式拒绝。测试：
+  `test_gui_smoke.py
+  TestBatchPredictionWindow.test_unusable_models_stay_visible_with_reason`
+  （红→绿验证过；红路径为修复前缺失模型被静默过滤、最后列显示
+  "local"）。gui_smoke 51/51 + nnunet 集成 104/104 通过。
+- [x] **R62-8【P3】批量派发超时导致重复提交 + 失败清单不可行动**
+  （`nnunet_batch_predict_ui.py`）：超时后用户重试 → 同 case 双任务；
+  失败清单只有文件名。
+  **已解决（2026-10-04）**：超时提示改为明确告知"扫描仍在后台进行、
+  已启动的任务不会被取消"，引导先在状态窗口确认已启动病例、仅对
+  未启动病例重试，避免同一病例双任务。失败清单复核：`create_job`
+  异常以 `case_id: 原因` 逐例列出（已有实现，非仅文件名），无需
+  改动。测试：
+  `test_gui_smoke.py
+  TestBatchPredictionWindow.test_dispatch_timeout_guides_against_double_submit`
+  （红→绿验证过；红路径为旧提示只说"重试"、无防重复指引）。
+- [x] **R62-9【P3】状态查看器模型表缺"来源"列**（
+  `nnunet_status_viewer.py`、`flexict_status_viewer.py`）：远程训练
+  下载的模型与本地模型无从区分。
+  **已解决（2026-10-04）**：两个状态查看器的模型表各加"来源"列：
+  manifest 带 `execution_backend=remote` 的显示"远程（profile 名）"
+  （读 `remote_profile_name`，缺失回退 `remote_profile_id`），其余
+  显示"本地"。三个远程注册路径（nnU-Net/FlexiCT/nnInteractive）都
+  已写入这些字段，无需额外登记。测试：
+  `test_gui_smoke.py
+  TestViewerNonBlockingRefresh.test_nnunet_viewer_shows_model_source
+  / test_flexict_viewer_shows_model_source`
+  （红→绿验证过；红路径为表头无"来源"列）。gui_smoke 54/54 通过。
+- [x] **R62-10【P3】AL 复核窗口隐藏失败运行**
+  （`flexict_active_learning_ui.py` `find_al_jobs`）：失败的 AL 周期
+  不显示，用户不知道有周期没跑完。
+  **已解决（2026-10-04）**：`find_al_jobs` 不再过滤 failed/cancelled/
+  abandoned，改为排在已完成运行之后；下拉项标注"失败/已取消/已放弃"；
+  选中失败运行时表清空、行操作禁用、状态栏显示失败原因
+  （`status.json` 的 error/message）。测试：
+  `test_gui_smoke.py
+  TestActiveLearningWindow.test_failed_run_stays_listed_with_its_error`
+  （红→绿验证过；红路径为失败运行被过滤、下拉只剩 1 项）。gui_smoke
+  55/55 通过。
+- [x] **R62-11【P3】setup/ 会话目录无限累积**（无清扫；
+  `nnunet_mimics.py`、`flexict_mimics.py` 的 `_setup_root`）：每次
+  打开向导留一批 context/status/stderr 文件，永不清理。
+  **已解决（2026-10-04）**：两个模块的 `_setup_root` 在目录已存在时
+  清扫超过 7 天的陈旧文件（wizard 只读启动时的 context 文件，
+  跨周文件无消费者）；删除失败（占用/权限）静默跳过，绝不阻塞窗口
+  打开。测试：
+  `test_all.py TestEdgeCases.test_setup_root_sweeps_stale_files_only`
+  （双模块参数化：30 天前的文件被删、新建文件保留；红→绿验证过；
+  红路径为修复前陈旧文件原样保留）。冒烟门禁 8/8 通过（工件
+  20261004T055741_smoke.json）。
 
 ### 以下为历史待办区（已全部完成，保留历史）
 

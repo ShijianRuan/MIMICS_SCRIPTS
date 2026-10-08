@@ -65,6 +65,29 @@ def _format_time(value):
         return "-"
 
 
+def _validation_dice(model):
+    """Mean foreground Dice from the fold's validation summary, if present.
+
+    Local training always writes fold_*/validation/summary.json; remote
+    downloads carry it too. Missing/unreadable returns "" so the table
+    cell simply reads "-" and no error path interrupts the status view.
+    """
+    model_dir = Path(str(model.get("model_dir") or ""))
+    if not model_dir.is_dir():
+        return ""
+    scores = []
+    for fold in model.get("folds") or ["0"]:
+        summary_path = (
+            model_dir / ("fold_" + str(fold)) / "validation" / "summary.json"
+        )
+        try:
+            summary = read_json(summary_path, {}) or {}
+            scores.append(float(summary["foreground_mean"]["Dice"]))
+        except Exception:
+            continue
+    return "{:.3f}".format(sum(scores) / len(scores)) if scores else ""
+
+
 class StatusWindow:
     def __init__(self, context, qt_modules):
         self.context = context
@@ -143,9 +166,9 @@ class StatusWindow:
         models_tab = QtWidgets.QWidget()
         models_layout = QtWidgets.QVBoxLayout(models_tab)
         models_layout.setContentsMargins(10, 10, 10, 10)
-        self.models = QtWidgets.QTableWidget(0, 6)
+        self.models = QtWidgets.QTableWidget(0, 8)
         self.models.setHorizontalHeaderLabels(
-            ['模型', '配置', 'Fold', '输出标签', '创建时间', '可用']
+            ['模型', '配置', 'Fold', '输出标签', '验证 Dice', '创建时间', '来源', '可用']
         )
         self.models.horizontalHeader().setStretchLastSection(True)
         self.models.horizontalHeader().setSectionResizeMode(
@@ -276,6 +299,16 @@ class StatusWindow:
         self.models.setRowCount(len(self._model_rows))
         for row_index, model in enumerate(self._model_rows):
             usable, reason = model_usability(model)
+            # R62-9: surface where the model came from — a remote-trained
+            # download is indistinguishable from a local one otherwise.
+            if str(model.get("execution_backend") or "") == "remote":
+                source = "远程（{0}）".format(
+                    model.get("remote_profile_name")
+                    or model.get("remote_profile_id")
+                    or "remote",
+                )
+            else:
+                source = "本地"
             values = [
                 model.get("model_id", ""),
                 model.get("configuration", ""),
@@ -284,7 +317,9 @@ class StatusWindow:
                     str(label.get("name") or "")
                     for label in model.get("labels") or []
                 ),
+                _validation_dice(model) or "-",
                 _format_time(model.get("created_at_epoch")),
+                source,
                 "可用" if usable else "不可用",
             ]
             for column, value in enumerate(values):

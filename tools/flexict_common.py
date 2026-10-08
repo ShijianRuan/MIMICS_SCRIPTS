@@ -135,10 +135,31 @@ def resolve_pretrained_dir(config: dict[str, Any] | None = None) -> tuple[Path, 
     ).is_file():
         return repo / "weights", "repo"
     raise FileNotFoundError(
-        "FlexiCT pretrained weights not found: set pretrained_weights_dir in "
-        "flexict_config.json, or place flexict_2d/flexict_3d under "
-        "{}/weights/.".format(repo)
+        "FlexiCT 预训练权重未找到。可在 Mimics 菜单 99_Admin → "
+        "07_Edit_Configs 中打开 flexict_config.json 修改 "
+        "pretrained_weights_dir，或将 flexict_2d/flexict_3d 权重放到 "
+        "{}/weights/ 下。".format(repo)
     )
+
+
+def save_config(config: dict[str, Any], explicit_path: str | Path | None = None) -> Path:
+    """Persist config values over the defaults (used by bundle import).
+
+    Only keys that differ from DEFAULT_CONFIG are written, so the file stays
+    a minimal user-override document instead of a full dump of defaults.
+    """
+    import json
+
+    overrides = {
+        key: value
+        for key, value in (config or {}).items()
+        if key not in DEFAULT_CONFIG or value != DEFAULT_CONFIG[key]
+    }
+    path = Path(explicit_path) if explicit_path else CONFIG_PATH
+    with open(str(path), "w", encoding="utf-8") as handle:
+        json.dump(overrides, handle, indent=2, sort_keys=True, ensure_ascii=False)
+        handle.write("\n")
+    return path
 
 
 def _dataset_ids_in(paths: dict[str, Path], used: set[int]) -> None:
@@ -178,6 +199,17 @@ def flexict_suggest_dataset_id(
             DATASET_ID_FIRST, DATASET_ID_LAST
         )
     )
+
+
+def load_registry_recommended_id(workspace: str | Path | None = None) -> str:
+    """The registry's recommended_model_id ("" when unset/unreadable)."""
+    try:
+        with workspace_paths(workspace)["registry"].open(
+            "r", encoding="utf-8"
+        ) as handle:
+            return str(json.load(handle).get("recommended_model_id") or "")
+    except Exception:
+        return ""
 
 
 def load_models(workspace: str | Path | None = None,
@@ -220,7 +252,7 @@ def load_models(workspace: str | Path | None = None,
 def save_registry(workspace: str | Path | None,
                   config: dict[str, Any] | None,
                   models: list[dict[str, Any]],
-                  recommended_model_id: str = "") -> None:
+                  recommended_model_id: str | None = None) -> None:
     from mimics_label_export import write_json_atomic  # host helper, same folder
 
     paths = workspace_paths(workspace, config)
@@ -230,13 +262,13 @@ def save_registry(workspace: str | Path | None,
             existing = json.load(handle)
     except Exception:
         existing = {}
+    if recommended_model_id is None:
+        # Not passed: keep the existing pointer. An explicit "" clears it
+        # (used when the recommended model is removed from the registry).
+        recommended_model_id = (existing or {}).get("recommended_model_id") or ""
     payload = {
         "schema_version": SCHEMA_VERSION,
-        "recommended_model_id": str(
-            recommended_model_id
-            or (existing or {}).get("recommended_model_id")
-            or ""
-        ),
+        "recommended_model_id": str(recommended_model_id),
         "models": models,
         "updated_at_epoch": time.time(),
     }

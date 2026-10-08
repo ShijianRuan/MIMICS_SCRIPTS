@@ -169,6 +169,7 @@ settings now live in the pipeline-specific configs documented below.
 | Key | Default | Purpose |
 | --- | --- | --- |
 | `workspace_dir` | `"nninteractive_task_models"` | Task-model workspace root (custom trained models). Ops key: change only when relocating the workspace. |
+| `model_dir` | *(unset)* | Extra search location for the official model folder (must contain `fold_*/checkpoint_final.pth`); checked after the `NNINTERACTIVE_MODEL_DIR` environment variable and before the bundled `models/nnInteractive_v1.0` folders. Relative paths resolve against the project root. |
 | `device` | `"auto"` | Inference device: `auto` = first free GPU, `cpu` = force CPU (use when the GPU is needed by a training job). |
 | `auto_start_server` | `true` | Start the nnInteractive server automatically when an annotation session begins. |
 | `existing_mask_result_mode` | `"ask"` | Ask whether to update the selected mask or create an editable copy (`ask` / `replace` / `copy`). |
@@ -177,7 +178,7 @@ settings now live in the pipeline-specific configs documented below.
 | `minimum_free_gpu_memory_gb` | `4` | Annotation sessions refuse to start when the GPU has less free memory than this, with a "close other GPU programs" message instead of a mid-start OOM. |
 
 Internal keys (code defaults; add to the file only as an escape hatch):
-`model_dir` (unset), `image_input_mode` ("mimics"),
+`image_input_mode` ("mimics"),
 `task_model_image_input_mode` ("auto"),
 `prefer_source_image_for_nninteractive` (false),
 `fallback_to_mimics_buffer_when_source_unavailable` (true),

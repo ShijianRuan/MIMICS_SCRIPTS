@@ -102,13 +102,99 @@ def _raise_if_cancelled(control_path: Path) -> None:
         raise InterruptedError("cancel")
 
 
+def _flexict_label_specs(out: dict[str, Any]) -> list[dict[str, Any]]:
+    """Resolve the request's label spec list (1 = binary, N = multiclass).
+
+    Accepts an explicit ``labels`` list (same shape as nnU-Net label specs)
+    or the classic single ``label_name`` string. Multiclass is supported by
+    the trainer (num_output_channels flows from dataset.json label count),
+    but only when the user asks for it explicitly; the default stays the
+    validated single-target binary recipe.
+    """
+    raw_specs = out.get("labels")
+    if not raw_specs:
+        name = str(out.get("label_name") or "").strip()
+        if not name:
+            raise ValueError("label_name (organ/target name) is required.")
+        return [{"name": name, "aliases": [name], "id": 1,
+                 "source_mode": "alternatives"}]
+    specs = []
+    seen = set()
+    for index, spec in enumerate(raw_specs):
+        name = str(spec.get("name") or "").strip()
+        if not name:
+            raise ValueError("Every label needs a name.")
+        if name.lower() in seen:
+            raise ValueError("Duplicate label name: {}".format(name))
+        seen.add(name.lower())
+        aliases = [str(a).strip() for a in (spec.get("aliases") or [name])
+                   if str(a).strip()] or [name]
+        specs.append({
+            "name": name,
+            "aliases": aliases,
+            "id": index + 1,
+            "source_mode": str(spec.get("source_mode") or "alternatives"),
+        })
+    if len(specs) > 4:
+        raise ValueError(
+            "FlexiCT few-shot supports at most 4 labels per model "
+            "(got {}). Train an nnU-Net model for larger label sets.".format(
+                len(specs)))
+    return specs
+
+
+def _flexict_resumable_dataset_id(workspace: str | Path | None,
+                                  task_id: str,
+                                  flexict_configuration: str) -> int:
+    """Dataset id of the interrupted run for this task (R61-25).
+
+    ``continue_training`` only resumes when nnU-Net's run_training finds
+    checkpoint_latest.pth inside the SAME ``Dataset{id}_{task}/{trainer}__``
+    folder, so the resume request must reuse the interrupted run's dataset
+    id. Interrupted runs never reach model registration, so the id lives
+    only in the results tree: scan it for this task's Dataset folder whose
+    trainer subfolder still carries a fold_0 checkpoint.
+
+    The FlexiCT 'auto'/'pair' configurations train BOTH 2d and 3d_fullres
+    sequentially; either configuration's checkpoint is a valid resume point
+    (pair mode resumes each configuration independently inside its own
+    folder). The requested configuration only filters the search when it is
+    concrete, keeping 'auto'/'pair' maximally resumable.
+    """
+    if not task_id:
+        raise ValueError(
+            "Continuing training requires a task name to locate the "
+            "interrupted run."
+        )
+    results = workspace_paths(workspace)["results"]
+    configurations = (
+        (flexict_configuration,) if flexict_configuration in TRAINERS
+        else ("2d", "3d_fullres")
+    )
+    for root in results.glob("Dataset[0-9][0-9][0-9]_" + task_id):
+        for configuration in configurations:
+            model_dir = root / "{}__nnUNetPlans__{}".format(
+                TRAINERS[configuration], configuration)
+            if (model_dir / "fold_0" / "checkpoint_latest.pth").is_file():
+                try:
+                    return int(root.name[7:10])
+                except (TypeError, ValueError):
+                    continue
+    raise ValueError(
+        "No interrupted FlexiCT training found for task '{}': no "
+        "checkpoint_latest.pth under the FlexiCT results folder. Clear "
+        "'继续上次中断的训练' to start a fresh run.".format(task_id)
+    )
+
+
 def normalize_flexict_request(values: dict[str, Any]) -> dict[str, Any]:
     """Validate and default a FlexiCT training request.
 
-    FlexiCT trains one binary target per model. Cases and label export work
-    exactly like the nnU-Net pipeline (single label spec, 0/1 output); the
-    differences are the trainer set, the dataset band (750-799), and the
-    locked recipe env vars.
+    FlexiCT trains one binary target per model by default (``label_name``,
+    0/1 output); a request with an explicit ``labels`` list of N specs
+    trains one N-class model instead. Cases and label export work exactly
+    like the nnU-Net pipeline; the differences are the trainer set, the
+    dataset band (750-799), and the locked recipe env vars.
     """
     from nnunet_common import normalize_request
 
@@ -123,20 +209,40 @@ def normalize_flexict_request(values: dict[str, Any]) -> dict[str, Any]:
     # carried separately and normalized after.
     if operation == "train":
         flexict_configuration = str(out.get("configuration") or "auto").strip().lower()
+        # The normalizer needs a CONCRETE nnU-Net configuration to validate
+        # patch_size/spacing shape against (2 values for 2d, 3 for 3d) and to
+        # enforce the 2d-no-manual-spacing rule. Pass the concrete plan behind
+        # the FlexiCT value; only "auto"/"pair" (both may expand to 3d) defer
+        # to 3d validation, which accepts 2- or 3-element patch sizes.
+        # A 2d placeholder would reject every 3-element patch_size/spacing —
+        # the patch self-rescue for OOM'd 3d training (R-P1-9).
+        if flexict_configuration in {"3d_fullres", "auto", "pair"}:
+            nnunet_configuration = "3d_fullres"
+        else:
+            nnunet_configuration = "2d"
         nnunet_values = dict(out)
-        nnunet_values["configuration"] = "2d"  # concrete placeholder for the normalizer
+        nnunet_values["configuration"] = nnunet_configuration
         if not nnunet_values.get("dataset_id"):
-            # The nnU-Net normalizer defaults a missing dataset_id to 701
-            # (the nnU-Net band) — suggest a free id in the FlexiCT 750-799
-            # band instead so programmatic callers without an explicit id
-            # never squat on the nnU-Net namespace.
-            nnunet_values["dataset_id"] = flexict_suggest_dataset_id(
-                out.get("workspace"))
-        nnunet_values.setdefault("labels", [
-            {"name": str(out.get("label_name") or "target"),
-             "aliases": [str(out.get("label_name") or "target")],
-             "id": 1, "source_mode": "alternatives"},
-        ])
+            if bool(out.get("continue_training")):
+                # Resuming needs the SAME Dataset{id}_{task} folder the
+                # interrupted run left behind, so a fresh suggested id would
+                # silently start from scratch. Resolve the interrupted run's
+                # id from the model folder it already produced (R61-25).
+                # task_id is derived from task_name exactly as
+                # normalize_request will derive it below.
+                nnunet_values["dataset_id"] = _flexict_resumable_dataset_id(
+                    out.get("workspace"),
+                    safe_identifier(
+                        out.get("task_id") or out.get("task_name") or ""),
+                    flexict_configuration)
+            else:
+                # The nnU-Net normalizer defaults a missing dataset_id to 701
+                # (the nnU-Net band) — suggest a free id in the FlexiCT
+                # 750-799 band instead so programmatic callers without an
+                # explicit id never squat on the nnU-Net namespace.
+                nnunet_values["dataset_id"] = flexict_suggest_dataset_id(
+                    out.get("workspace"))
+        nnunet_values.setdefault("labels", _flexict_label_specs(out))
         nnunet_values.setdefault("trainer", "flexict2d_Trainer")
         nnunet_values.setdefault("modality", "CT")
         out = normalize_request(nnunet_values)
@@ -144,6 +250,21 @@ def normalize_flexict_request(values: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(
                 "configuration must be one of {}".format(", ".join(CONFIGURATIONS)))
         out["configuration"] = flexict_configuration
+        # label_name stays the primary target name (status/manifest/UI);
+        # label_names carries the full multiclass list when N > 1.
+        out["label_name"] = str(out["labels"][0]["name"])
+        out["label_names"] = [str(spec["name"]) for spec in out["labels"]]
+        if bool(out.get("continue_training")) and str(
+            out.get("execution_backend") or "local"
+        ) == "remote":
+            # Remote runs train in a fresh disposable container: the
+            # interrupted run's checkpoint_latest lives only on this machine,
+            # so "continue" would silently start from scratch (R61-25).
+            raise ValueError(
+                "Remote backend does not support continue_training: the "
+                "remote container cannot see the interrupted run's local "
+                "checkpoint_latest.pth."
+            )
     else:
         # infer / active_learning share the inference-side normalization
         # (workspace, GPU fields); the FlexiCT operation must survive it.
@@ -275,12 +396,12 @@ def flexict_infer_environment(request: dict[str, Any],
 def _materialize_flexict_raw(rows: list[dict[str, Any]],
                              request: dict[str, Any],
                              roots: dict[str, Path]) -> tuple[Path, str]:
-    """Materialize the FlexiCT nnU-Net raw dataset (single 0/1 label).
+    """Materialize the FlexiCT nnU-Net raw dataset (0/1 or N-class labels).
 
     Reuses the nnU-Net raw materializer (hardlink/copy cases, dataset.json
     with NibabelIOWithReorient, splits_final.json) — the FlexiCT differences
-    are only the dataset band and the binary single-label contract, which the
-    request's single label spec already encodes.
+    are only the dataset band and the label contract, which the request's
+    label spec list already encodes (1 spec = binary, N = multiclass).
     """
     return _materialize_nnunet_raw(
         rows,
@@ -335,7 +456,7 @@ def _split_train_val(rows: list[dict[str, Any]],
     Stratified by the target's physical SI start when >= 8 cases (few-shot
     train sets span the cranio-caudal extent, mirroring the validated
     recipe's build_dataset.py), otherwise the split is a deterministic sort
-    split. Patient groups (same patient's multi-phase/follow-up scans) are
+    split. Patient Groups (same patient's multi-phase/follow-up scans) are
     never split across train/val (F16): the group is the split unit, and an
     explicit val case pulls its whole group with it.
     """
@@ -520,6 +641,10 @@ def _register_flexict_model(request: dict[str, Any],
         "task_id": request["task_id"],
         "task_name": request["task_name"],
         "label_name": str(request["label_name"]),
+        "label_names": [
+            str(spec["name"]) for spec in request["labels"]] or [
+            str(request["label_name"])],
+        "labels": list(request["labels"]),
         "configuration": configuration,
         "trainer": TRAINERS[configuration],
         "dataset_id": int(request["dataset_id"]),
@@ -907,7 +1032,8 @@ def run_training(job_dir: Path) -> int:
                         "plans": "nnUNetPlans",
                         "pretrained_weights": None,
                         "num_gpus": int(request["num_gpus"]),
-                        "continue_training": False,
+                        "continue_training": bool(
+                            request.get("continue_training")),
                         "only_run_validation": False,
                         "export_validation_probabilities": False,
                         "disable_checkpointing": False,
@@ -990,45 +1116,66 @@ def read_json_file(path: Path, default: Any = None) -> Any:
     return read_json(path, default)
 
 
-def scan_flexict_cases(dataset_root: str | Path, label_name: str) -> list[dict[str, Any]]:
+def scan_flexict_cases(
+    dataset_root: str | Path,
+    label_name: str,
+    label_names: "list[str] | None" = None,
+) -> list[dict[str, Any]]:
     """Scan a dataset root and report per-case image/label availability.
 
     Used by the training UI so the user sees exactly which cases will train,
     which will validate, and which are skipped (missing image or label).
+    ``label_names`` (multiclass) checks every label; a case is only OK when
+    all requested labels are present.
     """
     root = Path(dataset_root).expanduser()
     if not root.is_dir():
         raise ValueError("原始图像数据集不存在或不可用：{}".format(root))
+    wanted = [
+        safe_identifier(str(name)).lower()
+        for name in (label_names or ([label_name] if label_name else []))
+        if str(name).strip()
+    ]
     rows: list[dict[str, Any]] = []
     for case_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        files = [p for p in case_dir.iterdir() if p.is_file()]
+        # Prefer the case's main image (ct.nii.gz style: plain "ct" stem),
+        # not the first .nii.gz that happens to sit next to it.
         image = None
-        for candidate in case_dir.iterdir():
-            if not candidate.is_file():
-                continue
-            if candidate.suffix.lower() in {".nii", ".gz", ".nrrd", ".mha"}:
-                image = candidate
-                break
-        label = None
-        if label_name:
-            for candidate in case_dir.iterdir():
-                if not candidate.is_file():
-                    continue
-                if candidate.stem.split(".")[0].lower() == safe_identifier(label_name).lower():
-                    label = candidate
+        for preferred in ("ct", "image"):
+            for candidate in files:
+                if candidate.stem.split(".")[0].lower() == preferred and \
+                        candidate.suffix.lower() in {".nii", ".gz", ".nrrd", ".mha"}:
+                    image = candidate
                     break
-        if image is None and label is None:
+            if image is not None:
+                break
+        if image is None:
+            for candidate in files:
+                if candidate.suffix.lower() in {".nii", ".gz", ".nrrd", ".mha"}:
+                    image = candidate
+                    break
+        labels: dict[str, str] = {}
+        if wanted:
+            by_stem = {candidate.stem.split(".")[0].lower(): candidate
+                       for candidate in files}
+            for name in wanted:
+                labels[name] = str(by_stem.get(name) or "")
+        if image is None and not any(labels.values()):
             continue
         status = []
         if image is None:
             status.append("image missing")
-        if label is None:
-            status.append("label missing")
+        missing = [name for name, path in labels.items() if not path]
+        if missing:
+            status.append("label missing: " + ", ".join(missing))
         rows.append(
             {
                 "case_id": case_dir.name,
                 "image": str(image) if image else "",
-                "label": str(label) if label else "",
-                "checked": image is not None and label is not None,
+                "label": labels.get(wanted[0], "") if wanted else "",
+                "labels": dict(labels),
+                "checked": image is not None and not missing,
                 "use_train": True,
                 "use_val": False,
                 "status": "OK" if not status else "; ".join(status),
@@ -1073,6 +1220,8 @@ def run_inference(job_dir: Path) -> int:
         task_id=manifest.get("task_id") or request.get("task_id") or "",
         task_name=manifest.get("task_name") or request.get("task_name") or "",
         label_name=manifest.get("label_name") or request.get("label_name") or "",
+        label_names=manifest.get("label_names") or [],
+        labels=manifest.get("labels") or [],
         status="running",
         phase="preparing_input",
         message="Preparing the source image for FlexiCT prediction.",
@@ -1162,6 +1311,8 @@ def run_inference(job_dir: Path) -> int:
             message="FlexiCT inference completed and passed spatial validation.",
             progress_percent=100,
             label_name=manifest.get("label_name") or request.get("label_name") or "",
+            label_names=manifest.get("label_names") or [],
+            labels=manifest.get("labels") or [],
             inference_image_path=str(inference_input),
             completed_at_epoch=time.time(),
             worker_pid=None,
@@ -1514,7 +1665,13 @@ def run_active_learning(job_dir: Path) -> int:
             filename_template="{case}.nii.gz",
             method=method,
             min_masks=2,
-            target_labels=[1],
+            # 无 labels（单标签请求）传 None：run_batch 自动取全部非零标签，
+            # 与旧版 [1] 行为一致；多分类请求传 1..N。
+            target_labels=(
+                list(range(1, len(request["labels"]) + 1))
+                if request.get("labels")
+                else None
+            ),
             save_components=False,
             save_consensus=True,
             save_plots=False,
