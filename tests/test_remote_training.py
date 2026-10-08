@@ -1819,10 +1819,15 @@ class RemoteBuildTests(unittest.TestCase):
         # integrations/ code ships (the image pip-installs it) but its
         # 1.1G weights directories never enter the build context.
         self.assertNotIn("integrations", controller._REMOTE_BUILD_CONTEXT_EXCLUDES)
-        self.assertIn("python_env", controller._REMOTE_BUILD_CONTEXT_EXCLUDES)
-        self.assertIn(".mimics_runtime", controller._REMOTE_BUILD_CONTEXT_EXCLUDES)
+        for local_only in (
+            "python_env", ".mimics_runtime", "docs", "tests",
+            # 12.8G local model registries — models mount at /models
+            "flexict_models", "nninteractive_task_models",
+        ):
+            self.assertIn(local_only, controller._REMOTE_BUILD_CONTEXT_EXCLUDES)
         self.assertEqual(
-            controller._REMOTE_BUILD_CONTEXT_EXCLUDED_NAMES, {"weights"}
+            controller._REMOTE_BUILD_CONTEXT_EXCLUDED_NAMES,
+            {"weights", "checkpoints"},
         )
 
 

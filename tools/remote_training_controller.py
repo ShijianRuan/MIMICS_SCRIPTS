@@ -1910,13 +1910,16 @@ _REMOTE_BUILD_CONTEXT_EXCLUDES = {
     ".mimics_runtime", "python_env", "mcs_output", "outputs",
     "jobs", "node_modules", ".git", "__pycache__", ".pytest_cache",
     ".claude", ".idea", ".vscode", "docs", "tests",
+    # local model registries (12.8G combined) — models are mounted at
+    # /models at runtime, never baked into the image:
+    "flexict_models", "nninteractive_task_models",
 }
 # integrations/ code MUST ship (the Dockerfile pip-installs
 # nninteractive-finetune and PYTHONPATHs the other repos); only the
-# 1.1G backbone weights baked under integrations/*/weights stay out —
-# they are mounted at /models instead. Same semantics as
-# CODE_FINGERPRINT_EXCLUDED_DIRS.
-_REMOTE_BUILD_CONTEXT_EXCLUDED_NAMES = {"weights"}
+# heavy checkpoint weights baked under integrations/*/weights and
+# ScribblePrompt/checkpoints stay out — they are mounted at /models
+# instead. Same semantics as CODE_FINGERPRINT_EXCLUDED_DIRS.
+_REMOTE_BUILD_CONTEXT_EXCLUDED_NAMES = {"weights", "checkpoints"}
 
 
 def remote_build_image(
