@@ -1872,6 +1872,16 @@ def _remote_paths(session: SSHSession, job_id: str) -> dict[str, str]:
             / owner
             / "datasets"
         ),
+        # B1: cross-user shared bucket. Same content-addressed layout as the
+        # per-user cache but written once by whoever uploads first; other
+        # users only ever read it (never repair or rewrite), so a shared
+        # entry stays byte-stable for everyone.
+        "shared_dataset_cache": str(
+            PurePosixPath(session.remote_root)
+            / "cache"
+            / "shared"
+            / "datasets"
+        ),
         "prepared_cache": str(
             PurePosixPath(session.remote_root)
             / "cache"
@@ -3412,6 +3422,38 @@ def _batch_verify_remote_dataset_cache(
     return verdicts
 
 
+def _link_shared_dataset(
+    session: SSHSession,
+    shared_archive: str,
+    own_archive: str,
+    own_verified: str,
+) -> None:
+    """Materialise a shared-bucket hit into this user's own cache (B1).
+
+    Hard links the shared tar into the own bucket and writes the own
+    `.verified` marker so every later check (and the existing prune logic)
+    treats it exactly like an entry this user uploaded. Read-only with
+    respect to the shared bucket itself.
+    """
+    session.execute(
+        "ln {source} {target} 2>/dev/null || "
+        "cp {source} {target} && "
+        "tmp={verified}.$$.tmp; "
+        "printf '%s %s %s\\n' {digest} {size} "
+        "\"$(stat -c %Y {target})\" > \"$tmp\" && mv -f \"$tmp\" {verified}".format(
+            source=shlex.quote(shared_archive),
+            target=shlex.quote(own_archive),
+            verified=shlex.quote(own_verified),
+            digest=shlex.quote(str(Path(own_archive).name)[: -len(".tar")]),
+            size=session.execute(
+                "stat -c %s {path}".format(path=shlex.quote(shared_archive)),
+                timeout=60,
+            ).strip(),
+        ),
+        check=False,
+    )
+
+
 def _ensure_remote_dataset_archive(
     session: SSHSession,
     paths: dict[str, str],
@@ -3521,6 +3563,48 @@ def _ensure_remote_dataset_archive(
                 ),
                 check=False,
             )
+        # B1: own bucket miss — consult the cross-user shared bucket before
+        # paying the upload. READ-ONLY: the same digest/size/mtime acceptance
+        # rule as an own-bucket hit, but a stale or absent shared marker is
+        # never repaired here (another user's entry must stay untouched);
+        # this user falls through to a normal upload into their own bucket.
+        shared_cache_root = str(paths.get("shared_dataset_cache") or "")
+        shared_archive = (
+            str(PurePosixPath(shared_cache_root) / (fingerprint + ".tar"))
+            if shared_cache_root
+            else ""
+        )
+        shared_verified = shared_archive[:-4] + ".verified" if shared_archive else ""
+        code, output = session.execute_result(
+            "test -f {archive} && test -f {verified} && "
+            "read saved_digest saved_size saved_mtime < {verified} && "
+            'test "$saved_digest" = {fingerprint} && '
+            'test "$saved_size" = {size} && '
+            'test "$(stat -c %s {archive} 2>/dev/null)" = {size} && '
+            'test "$saved_mtime" = "$(stat -c %Y {archive} 2>/dev/null)" '
+            "&& printf shared_hit || true".format(
+                archive=shlex.quote(shared_archive),
+                verified=shlex.quote(shared_verified),
+                fingerprint=shlex.quote(fingerprint),
+                size=local_size,
+            ),
+            timeout=120,
+        )
+        if code == 0 and "shared_hit" in output:
+            _link_shared_dataset(
+                session, shared_archive, remote_archive, remote_verified
+            )
+            if progress_callback is not None:
+                progress_callback(local_size, local_size)
+            _status_update(
+                status_path,
+                status="uploading",
+                phase="remote_dataset_cache_hit",
+                dataset_cache_hit=True,
+                dataset_shared_cache_hit=True,
+                dataset_fingerprint=fingerprint,
+            )
+            return remote_archive, True
     else:
         remote_archive = (
             paths["archive"] + ".dataset." + fingerprint + ".tar"
@@ -3577,6 +3661,35 @@ def _ensure_remote_dataset_archive(
                 size=int(local_archive.stat().st_size),
             )
         )
+        # B1: publish into the shared bucket for other users. Hard links
+        # (same filesystem) cost no extra disk; `ln` failing because the
+        # target exists is exactly the write-once semantics we want and is
+        # ignored. A cross-filesystem link error falls back to no publish —
+        # other users simply keep their own uploads.
+        if shared_cache_root:
+            shared_archive = str(
+                PurePosixPath(shared_cache_root) / (fingerprint + ".tar")
+            )
+            shared_verified = shared_archive[:-4] + ".verified"
+            session.execute(
+                "mkdir -p {root} && "
+                "ln {source} {target} 2>/dev/null || true; "
+                "if test -f {target} && test -f {sverified}; then :; "
+                "elif test -f {target}; then "
+                "tmp={sverified}.$$.tmp; "
+                "printf '%s %s %s\\n' {fingerprint} {size} "
+                "\"$(stat -c %Y {target})\" > \"$tmp\" && "
+                "mv -f \"$tmp\" {sverified}; "
+                "fi".format(
+                    root=shlex.quote(shared_cache_root),
+                    source=shlex.quote(remote_archive),
+                    target=shlex.quote(shared_archive),
+                    sverified=shlex.quote(shared_verified),
+                    fingerprint=shlex.quote(fingerprint),
+                    size=int(local_archive.stat().st_size),
+                ),
+                check=False,
+            )
     return remote_archive, False
 
 
@@ -4558,7 +4671,7 @@ def run(spec_path: Path) -> int:
         # .part/.tmp files are interrupted-upload fragments: never valid
         # cache entries, so any that are old enough not to be an in-flight
         # transfer are removed.
-        session.execute(
+        prune_dataset_cache_command = (
             "find {cache} -maxdepth 1 -type f -name '*.verified' -mtime +30 "
             "-print | while IFS= read -r marker; do "
             "rm -f \"$marker\" \"${{marker%.verified}}.tar\"; done; "
@@ -4568,8 +4681,20 @@ def run(spec_path: Path) -> int:
             "done; "
             "find {cache} -maxdepth 1 -type f "
             "\\( -name '*.part' -o -name '*.tmp' \\) -mtime +7 "
-            "-print -delete".format(
+            "-print -delete"
+        )
+        session.execute(
+            prune_dataset_cache_command.format(
                 cache=shlex.quote(remote_paths["dataset_cache"])
+            ),
+            check=False,
+        )
+        # B1: the shared bucket follows the same age rules. Its entries are
+        # hard links, so rm removes the name, not other users' data; a user
+        # whose own entry is still fresh keeps their copy.
+        session.execute(
+            prune_dataset_cache_command.format(
+                cache=shlex.quote(remote_paths["shared_dataset_cache"])
             ),
             check=False,
         )

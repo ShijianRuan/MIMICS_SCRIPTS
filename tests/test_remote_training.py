@@ -2818,6 +2818,199 @@ class StatusAndLifecycleTests(unittest.TestCase):
                 any(".verified" in command for command in session.commands)
             )
 
+    def test_shared_bucket_hit_skips_upload_for_second_user(self):
+        """R72-B1: own bucket miss + shared bucket hit = zero upload bytes.
+        The shared entry is materialised into the own bucket by hard link."""
+
+        class Session:
+            def __init__(self):
+                self.commands = []
+                self.uploaded = []
+
+            def ensure_directory(self, _path):
+                pass
+
+            def execute_result(self, command, **_kwargs):
+                self.commands.append(command)
+                # Own-bucket check: mismatch (miss), then shared check: hit.
+                if "/shared/datasets/" in command:
+                    return 0, "shared_hit"
+                return 0, "not-a-match"
+
+            def execute(self, command, **_kwargs):
+                self.commands.append(command)
+                if command.startswith("stat -c %s"):
+                    return "123"
+                return ""
+
+            def upload(self, *_args, **_kwargs):
+                raise AssertionError("shared hit must not upload")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = Path(temporary) / "dataset.tar"
+            archive.write_bytes(b"dataset")
+            fingerprint = controller._sha256_file(archive)
+            status_path = Path(temporary) / "status.json"
+            remote_compute.write_json_atomic(status_path, {})
+            session = Session()
+            remote_path, hit = controller._ensure_remote_dataset_archive(
+                session,
+                {
+                    "dataset_cache": "/own/datasets",
+                    "shared_dataset_cache": "/shared/datasets",
+                },
+                {"cache_training_data": True},
+                archive,
+                fingerprint,
+                status_path,
+            )
+            self.assertTrue(hit)
+            self.assertEqual(
+                remote_path, "/own/datasets/{}.tar".format(fingerprint)
+            )
+            status = remote_compute.read_json(status_path, {})
+            self.assertTrue(status["dataset_shared_cache_hit"])
+            self.assertTrue(status["dataset_cache_hit"])
+            # The own bucket received the link + marker, never a full upload.
+            self.assertTrue(
+                any(
+                    "ln /shared/datasets" in command
+                    for command in session.commands
+                )
+            )
+
+    def test_shared_bucket_stale_marker_is_not_repaired(self):
+        """Failure path: a stale shared marker must be a miss for this user
+        (read-only semantics), never rewritten by another user's job."""
+
+        class Session:
+            def __init__(self):
+                self.commands = []
+
+            def ensure_directory(self, _path):
+                pass
+
+            def execute_result(self, command, **_kwargs):
+                self.commands.append(command)
+                if "/shared/datasets/" in command:
+                    # Marker rules fail: no shared_hit printed.
+                    return 0, ""
+                if command.startswith("if test -f "):
+                    # Own-bucket check: miss (prints nothing matching).
+                    return 0, ""
+                # Post-upload digest verification matches the fingerprint.
+                if "sha256sum" in command:
+                    return 0, controller._sha256_file(self.archive)
+                return 0, ""
+
+            def execute(self, command, **_kwargs):
+                self.commands.append(command)
+                if command.startswith("sha256sum "):
+                    return controller._sha256_file(self.archive)
+                return ""
+
+            def upload(self, *_args, **_kwargs):
+                self.uploaded = True
+
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = Path(temporary) / "dataset.tar"
+            archive.write_bytes(b"dataset")
+            fingerprint = controller._sha256_file(archive)
+            session = Session()
+            session.archive = archive
+            session.uploaded = False
+            status_path = Path(temporary) / "status.json"
+            remote_compute.write_json_atomic(status_path, {})
+            remote_path, hit = controller._ensure_remote_dataset_archive(
+                session,
+                {
+                    "dataset_cache": "/own/datasets",
+                    "shared_dataset_cache": "/shared/datasets",
+                },
+                {"cache_training_data": True},
+                archive,
+                fingerprint,
+                status_path,
+            )
+            self.assertFalse(hit)
+            self.assertTrue(session.uploaded)
+            # The shared READ check is pure test/stat: no rm/mv/printf into
+            # /shared. (The post-upload publish into /shared is expected —
+            # that is the write side of B1, a different command.)
+            shared_reads = [
+                command
+                for command in session.commands
+                if "/shared/datasets/" in command
+                and command.startswith("test -f ")
+            ]
+            self.assertTrue(shared_reads)
+            for command in shared_reads:
+                self.assertNotIn("rm -f", command)
+                self.assertNotIn("mv -f", command)
+                self.assertNotIn("> \"$tmp\"", command)
+
+    def test_upload_publishes_into_shared_bucket(self):
+        """Write side: a fresh own-bucket upload also publishes a hard link
+        into the shared bucket with its own marker (write-once)."""
+
+        class Session:
+            def __init__(self, archive):
+                self.archive = archive
+                self.commands = []
+                self.uploaded = []
+
+                fingerprint = controller._sha256_file(archive)
+                self.fingerprint = fingerprint
+
+            def ensure_directory(self, _path):
+                pass
+
+            def execute_result(self, command, **_kwargs):
+                self.commands.append(command)
+                if "/shared/datasets/" in command:
+                    return 0, ""
+                if command.startswith("if test -f "):
+                    return 0, ""
+                if "sha256sum" in command:
+                    return 0, self.fingerprint
+                return 0, ""
+
+            def execute(self, command, **_kwargs):
+                self.commands.append(command)
+                if command.startswith("sha256sum "):
+                    return self.fingerprint
+                return ""
+
+            def upload(self, source, target, **_kwargs):
+                self.uploaded.append(target)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = Path(temporary) / "dataset.tar"
+            archive.write_bytes(b"dataset")
+            session = Session(archive)
+            status_path = Path(temporary) / "status.json"
+            remote_compute.write_json_atomic(status_path, {})
+            remote_path, hit = controller._ensure_remote_dataset_archive(
+                session,
+                {
+                    "dataset_cache": "/own/datasets",
+                    "shared_dataset_cache": "/shared/datasets",
+                },
+                {"cache_training_data": True},
+                archive,
+                session.fingerprint,
+                status_path,
+            )
+            self.assertFalse(hit)
+            self.assertEqual(len(session.uploaded), 1)
+            # Publish happened: ln into shared + shared marker write.
+            self.assertTrue(
+                any(
+                    "ln " in command and "/shared/datasets/" in command
+                    for command in session.commands
+                )
+            )
+
     def test_case_cache_hit_preserves_aggregate_upload_percent(self):
         class Session:
             def __init__(self, fingerprint):
