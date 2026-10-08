@@ -19,6 +19,7 @@ import socket
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import traceback
 import uuid
@@ -256,15 +257,19 @@ def _build_tar(
     archive: Path,
     *,
     excluded_top_level: set[str] | None = None,
+    excluded_names: set[str] | None = None,
 ) -> int:
     archive.parent.mkdir(parents=True, exist_ok=True)
     temporary = archive.with_name(archive.name + ".tmp")
     excluded = set(excluded_top_level or ())
+    names = set(excluded_names or ())
     try:
         with tarfile.open(str(temporary), "w") as handle:
             for path in sorted(source.rglob("*")):
                 relative = path.relative_to(source)
                 if relative.parts and relative.parts[0] in excluded:
+                    continue
+                if names and any(part in names for part in relative.parts):
                     continue
                 handle.add(
                     str(path),
@@ -1895,6 +1900,163 @@ def _remote_paths(session: SSHSession, job_id: str) -> dict[str, str]:
             / "models"
         ),
     }
+
+
+# What ships to the server as build context for a remote image build. The
+# image only needs the pipeline code + configs (COPY . /app), never local
+# artifacts, caches, model weights (mounted at /models, not baked in), or
+# the local python_env. Mirrors CODE_FINGERPRINT_ROOTS semantics.
+_REMOTE_BUILD_CONTEXT_EXCLUDES = {
+    ".mimics_runtime", "python_env", "mcs_output", "outputs",
+    "jobs", "node_modules", ".git", "__pycache__", ".pytest_cache",
+    ".claude", ".idea", ".vscode", "docs", "tests",
+}
+# integrations/ code MUST ship (the Dockerfile pip-installs
+# nninteractive-finetune and PYTHONPATHs the other repos); only the
+# 1.1G backbone weights baked under integrations/*/weights stay out —
+# they are mounted at /models instead. Same semantics as
+# CODE_FINGERPRINT_EXCLUDED_DIRS.
+_REMOTE_BUILD_CONTEXT_EXCLUDED_NAMES = {"weights"}
+
+
+def remote_build_image(
+    profile: dict[str, Any],
+    *,
+    image_tag: str = "",
+    base_image: str = "",
+    log_callback=None,
+) -> dict[str, Any]:
+    """Build the runtime image ON the remote server (R72-A3, user-directed).
+
+    The workstation needs no docker: the repo is tarred (code only), pushed
+    over SFTP, unpacked into <remote_root>/build_context, and built there
+    with nerdctl/docker. Returns identity info on success; raises on any
+    failure with the build log tail attached.
+
+    Interruption safety: build_context is left in place on failure so a
+    retry skips re-uploading unchanged code (tar digest is compared first);
+    a successful build records its context digest for the same fast path.
+    """
+    profile = _normalize_profile_for_build(profile)
+    runtime = container_runtime_command(profile)
+    image_tag = str(image_tag or profile["runtime_image"]).strip()
+    base_image = str(base_image or "").strip()
+    with SSHSession(profile) as session:
+        context_root = str(
+            PurePosixPath(session.remote_root) / "build_context"
+        )
+        logs_root = str(PurePosixPath(session.remote_root) / "logs")
+        session.ensure_directory(context_root)
+        session.ensure_directory(logs_root)
+        # 1. Pack the local checkout (code files only, exclusions above).
+        staging = Path(tempfile.mkdtemp(prefix="mimics_remote_build_"))
+        context_tar = staging / "build_context.tar"
+        try:
+            size = _build_tar(
+                ROOT,
+                context_tar,
+                excluded_top_level=_REMOTE_BUILD_CONTEXT_EXCLUDES,
+                excluded_names=_REMOTE_BUILD_CONTEXT_EXCLUDED_NAMES,
+            )
+            digest = _sha256_file(context_tar)
+            marker = str(
+                PurePosixPath(context_root) / ".mimics_context_digest"
+            )
+            code, output = session.execute_result(
+                'test -f {marker} && cat {marker} || true'.format(
+                    marker=shlex.quote(marker)
+                ),
+                timeout=30,
+            )
+            if output.strip() == digest:
+                if log_callback:
+                    log_callback(
+                        "远程构建：代码与上次一致（{}），跳过上传。".format(
+                            digest[:12]
+                        )
+                    )
+            else:
+                if log_callback:
+                    log_callback(
+                        "远程构建：上传代码上下文（{:.1f} MB）…".format(
+                            size / (1024.0 * 1024.0)
+                        )
+                    )
+                session.upload(
+                    context_tar,
+                    str(PurePosixPath(context_root) / "build_context.tar"),
+                )
+                session.execute(
+                    "tar -xf {tar} -C {root} && rm -f {tar} && "
+                    "printf '%s' {digest} > {marker}".format(
+                        tar=shlex.quote(
+                            str(PurePosixPath(context_root) / "build_context.tar")
+                        ),
+                        root=shlex.quote(context_root),
+                        digest=shlex.quote(digest),
+                        marker=shlex.quote(marker),
+                    ),
+                    timeout=300,
+                )
+            # 2. Build on the server. BASE_IMAGE lets restricted networks use
+            #    a mirror; when omitted the Dockerfile default applies.
+            # container_runtime_command already carries the namespace
+            # (``nerdctl -n mimics-ai``) — nerdctl build honors it, so the
+            # image lands where job launches look for it.
+            build_arg = (
+                " --build-arg BASE_IMAGE={}".format(shlex.quote(base_image))
+                if base_image
+                else ""
+            )
+            log_path = str(
+                PurePosixPath(logs_root)
+                / ("build_{}.log".format(time.strftime("%Y%m%dT%H%M%S")))
+            )
+            if log_callback:
+                log_callback(
+                    "远程构建：在服务器上执行 {runtime} build（约 30–70 分钟，"
+                    "取决于 pip 层缓存）…".format(runtime=runtime)
+                )
+            code, output = session.execute_result(
+                "cd {root} && {runtime} build --file remote/Dockerfile "
+                "--tag {image}{build_arg} . > {log} 2>&1; "
+                "rc=$?; tail -40 {log}; exit $rc".format(
+                    root=shlex.quote(context_root),
+                    runtime=runtime,
+                    image=shlex.quote(image_tag),
+                    build_arg=build_arg,
+                    log=shlex.quote(log_path),
+                ),
+                timeout=7200,
+            )
+            if code != 0:
+                raise RuntimeError(
+                    "远程镜像构建失败（退出码 {code}）。构建日志末尾：\n{tail}".format(
+                        code=code, tail=output[-2000:]
+                    )
+                )
+            # 3. Verify: inspect must find the freshly built image.
+            image_id = session.execute(
+                "{runtime} image inspect --format '{{{{.Id}}}}' {image}".format(
+                    runtime=runtime, image=shlex.quote(image_tag)
+                ),
+                timeout=120,
+            ).strip()
+            if log_callback:
+                log_callback("远程构建完成：{}（{}）".format(image_tag, image_id[:19]))
+            return {
+                "image_tag": image_tag,
+                "image_id": image_id,
+                "context_digest": digest,
+                "build_log": log_path,
+            }
+        finally:
+            shutil.rmtree(str(staging), ignore_errors=True)
+
+
+def _normalize_profile_for_build(profile: dict[str, Any]) -> dict[str, Any]:
+    """Accept a stored profile dict; the session constructor normalizes."""
+    return dict(profile)
 
 
 def _prepared_cache_namespace(bundle: Path, remote_paths: dict[str, str]) -> str:
@@ -5818,7 +5980,32 @@ def main() -> int:
     reattach_parser.add_argument("--status", required=True)
     abandon_parser = sub.add_parser("abandon")
     abandon_parser.add_argument("--status", required=True)
+    build_parser = sub.add_parser(
+        "build-image",
+        help="Build the runtime image ON the remote server over SSH.",
+    )
+    build_parser.add_argument("--profile-id", required=True)
+    build_parser.add_argument(
+        "--tag", default="", help="Image tag (defaults to the profile's)."
+    )
+    build_parser.add_argument(
+        "--base-image",
+        default="",
+        help="Base image override (e.g. a reachable registry mirror).",
+    )
     args = parser.parse_args()
+    if args.command == "build-image":
+        from tools.remote_compute import get_profile
+
+        profile = get_profile(args.profile_id)
+        identity = remote_build_image(
+            profile,
+            image_tag=args.tag,
+            base_image=args.base_image,
+            log_callback=lambda message: print(message, flush=True),
+        )
+        print("OK: {image_tag} {image_id}".format(**identity))
+        return 0
     if args.command == "abandon":
         return abandon(Path(args.status).resolve())
     if args.command == "cancel":

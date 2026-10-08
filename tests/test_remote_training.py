@@ -1641,6 +1641,191 @@ class ImagePreflightTests(unittest.TestCase):
         self.assertIn("flexict_trainer.py", script)
 
 
+class RemoteBuildTests(unittest.TestCase):
+    """R72-A3: the image is built ON the remote server, zero local docker."""
+
+    def _profile(self):
+        return {
+            "runtime_image": "mimics-remote:test",
+            "container_runtime": "docker",
+            "remote_root": "/remote",
+        }
+
+    class _BuildSession:
+        """Fake SSHSession recording commands; controllable results."""
+
+        def __init__(self, marker_digest, build_code=0, image_id="sha256:abc"):
+            self.marker_digest = marker_digest
+            self.build_code = build_code
+            self.image_id = image_id
+            self.commands = []
+            self.uploads = []
+            self.remote_root = "/remote"
+            self.directories = []
+
+        def execute(self, command, **kwargs):
+            self.commands.append(command)
+            return self._dispatch(command)
+
+        def execute_result(self, command, **kwargs):
+            self.commands.append(command)
+            if command.startswith("test -f "):
+                return 0, self.marker_digest
+            if " build " in command:
+                return self.build_code, ""
+            raise AssertionError("unexpected command: " + command)
+
+        def upload(self, local, remote, **kwargs):
+            self.uploads.append((str(local), str(remote)))
+
+        def ensure_directory(self, path):
+            self.directories.append(path)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def _dispatch(self, command):
+            if command.startswith("test -f "):
+                return self.marker_digest
+            if " image inspect" in command:
+                return self.image_id
+            if command.startswith("tar -xf "):
+                return ""
+            raise AssertionError("unexpected command: " + command)
+
+    def test_build_runs_remote_build_and_verifies(self):
+        session = self._BuildSession("different-digest")
+        with unittest.mock.patch.object(
+            controller, "SSHSession", return_value=session
+        ), unittest.mock.patch.object(
+            controller, "_build_tar", return_value=1024
+        ) as build_tar, unittest.mock.patch.object(
+            controller, "_sha256_file", return_value="digest123"
+        ):
+            identity = controller.remote_build_image(self._profile())
+        self.assertEqual(identity["image_tag"], "mimics-remote:test")
+        self.assertEqual(identity["image_id"], "sha256:abc")
+        self.assertEqual(identity["context_digest"], "digest123")
+        # context + logs directories prepared on the server
+        self.assertEqual(
+            session.directories,
+            ["/remote/build_context", "/remote/logs"],
+        )
+        # the code tarball was uploaded (digest mismatched the marker)
+        self.assertEqual(len(session.uploads), 1)
+        self.assertTrue(session.uploads[0][1].endswith("build_context.tar"))
+        # the build command runs inside the unpacked context
+        build_commands = [
+            c for c in session.commands if " build " in c
+        ]
+        self.assertEqual(len(build_commands), 1)
+        self.assertIn("cd /remote/build_context", build_commands[0])
+        self.assertIn("--file remote/Dockerfile", build_commands[0])
+        self.assertIn("--tag mimics-remote:test", build_commands[0])
+        # the build runs before the inspect that verifies the result
+        self.assertLess(
+            session.commands.index(build_commands[0]),
+            session.commands.index(
+                next(
+                    c for c in session.commands
+                    if c.startswith("docker image inspect")
+                )
+            ),
+        )
+        del build_tar
+
+    def test_matching_marker_skips_upload_but_still_builds(self):
+        session = self._BuildSession("digest123")
+        with unittest.mock.patch.object(
+            controller, "SSHSession", return_value=session
+        ), unittest.mock.patch.object(
+            controller, "_build_tar", return_value=1024
+        ), unittest.mock.patch.object(
+            controller, "_sha256_file", return_value="digest123"
+        ):
+            controller.remote_build_image(self._profile())
+        # nothing uploaded, but the build still ran
+        self.assertEqual(session.uploads, [])
+        self.assertEqual(
+            len([c for c in session.commands if " build " in c]), 1
+        )
+
+    def test_failed_build_raises_with_log_tail_and_no_inspect(self):
+        session = self._BuildSession(
+            "", build_code=1
+        )
+        with unittest.mock.patch.object(
+            controller, "SSHSession", return_value=session
+        ), unittest.mock.patch.object(
+            controller, "_build_tar", return_value=1024
+        ), unittest.mock.patch.object(
+            controller, "_sha256_file", return_value="digest123"
+        ):
+            with self.assertRaisesRegex(RuntimeError, "退出码 1"):
+                controller.remote_build_image(self._profile())
+        self.assertNotIn(
+            "docker image inspect",
+            "\n".join(session.commands),
+        )
+
+    def test_base_image_override_is_forwarded_as_build_arg(self):
+        session = self._BuildSession("")
+        with unittest.mock.patch.object(
+            controller, "SSHSession", return_value=session
+        ), unittest.mock.patch.object(
+            controller, "_build_tar", return_value=1024
+        ), unittest.mock.patch.object(
+            controller, "_sha256_file", return_value="digest123"
+        ):
+            controller.remote_build_image(
+                self._profile(),
+                base_image="mirror.local/pytorch:2.6.0",
+            )
+        build_command = next(
+            c for c in session.commands if " build " in c
+        )
+        self.assertIn(
+            "--build-arg BASE_IMAGE=mirror.local/pytorch:2.6.0",
+            build_command,
+        )
+
+    def test_nerdctl_namespace_flows_into_build_command(self):
+        session = self._BuildSession("")
+        profile = self._profile()
+        profile["container_runtime"] = "nerdctl"
+        profile["container_namespace"] = "mimics-ai"
+        with unittest.mock.patch.object(
+            controller, "SSHSession", return_value=session
+        ), unittest.mock.patch.object(
+            controller, "_build_tar", return_value=1024
+        ), unittest.mock.patch.object(
+            controller, "_sha256_file", return_value="digest123"
+        ):
+            controller.remote_build_image(profile)
+        build_command = next(
+            c for c in session.commands if " build " in c
+        )
+        self.assertIn("nerdctl -n mimics-ai build", build_command)
+        inspect_command = next(
+            c for c in session.commands
+            if c.startswith("nerdctl -n mimics-ai image inspect")
+        )
+        self.assertIn("mimics-remote:test", inspect_command)
+
+    def test_build_context_excludes_local_only_and_weights(self):
+        # integrations/ code ships (the image pip-installs it) but its
+        # 1.1G weights directories never enter the build context.
+        self.assertNotIn("integrations", controller._REMOTE_BUILD_CONTEXT_EXCLUDES)
+        self.assertIn("python_env", controller._REMOTE_BUILD_CONTEXT_EXCLUDES)
+        self.assertIn(".mimics_runtime", controller._REMOTE_BUILD_CONTEXT_EXCLUDES)
+        self.assertEqual(
+            controller._REMOTE_BUILD_CONTEXT_EXCLUDED_NAMES, {"weights"}
+        )
+
+
 class ContainerRuntimeAdapterTests(unittest.TestCase):
     """nerdctl servers run the same command flow with a swapped prefix."""
 
