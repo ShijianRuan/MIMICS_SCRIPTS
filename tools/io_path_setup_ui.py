@@ -930,22 +930,6 @@ def run_ui(context, preview_path=""):
             refresh_default()
             return
         selection = result["selection"]
-        # Single-case mirror of the batch zero-mask confirm: the user asked
-        # for masks but the case folder has none — confirm before importing
-        # an image-only project.
-        if mode == "import_single" and selection.get("mask_selection") != "none":
-            masks = (selection.get("case_info") or {}).get("masks") or []
-            if not masks:
-                answer = QtWidgets.QMessageBox.question(
-                    window,
-                    "未找到 Mask 文件",
-                    "该病例文件夹中未找到任何标签文件（segmentations 等）——将只导入影像，不导入 mask。\n\n是否继续？",
-                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-                    QtWidgets.QMessageBox.No,
-                )
-                if answer != QtWidgets.QMessageBox.Yes:
-                    refresh_default()
-                    return
         if selection.get("remember") and state_path:
             state = read_json(state_path, {}) or {}
             state[mode] = selection

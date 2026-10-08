@@ -479,12 +479,12 @@ class MimicsRuntimeTests(unittest.TestCase):
                 "foreground_voxels": 12,
             }}
             # First completion: dialog shown, answered Update Selected Mask.
-            self.fake.dialogs.question_answers = ["Update Selected Mask"]
+            self.fake.dialogs.question_answers = ["更新匹配掩膜"]
             self.fake.dialogs.questions = []
             self.runtime._apply_completed(monitor, dict(state))
             self.assertEqual(len(self.fake.dialogs.questions), 1)
             self.assertIn(
-                "remembered for the rest of this Mimics session",
+                "该选择将在本次 Mimics 会话中记住",
                 self.fake.dialogs.questions[0]["message"],
             )
             # Second completion: no dialog, same destination applied.
@@ -510,7 +510,7 @@ class MimicsRuntimeTests(unittest.TestCase):
             result_path.write_bytes(_u8_pattern_buffer(
                 (2, 3, 4), lambda x, y, z: x == 1).tobytes())
             # First completion establishes session memory.
-            self.fake.dialogs.question_answers = ["Update Selected Mask"]
+            self.fake.dialogs.question_answers = ["更新匹配掩膜"]
             self.runtime._apply_completed(
                 self._monitor_for(
                     image, mask, self.runtime._current_mask_sha(mask)),
@@ -531,7 +531,7 @@ class MimicsRuntimeTests(unittest.TestCase):
             )
             self.assertEqual(len(self.fake.dialogs.questions), 1)
             self.assertIn(
-                "changed while it was running",
+                "在运行期间发生了改动",
                 self.fake.dialogs.questions[0]["message"],
             )
 
@@ -540,7 +540,7 @@ class MimicsRuntimeTests(unittest.TestCase):
         # scribble, stacking a second modal per prompt. The first answer
         # must stick for the session.
         self.fake.dialogs.questions = []
-        self.fake.dialogs.question_answers = ["Background"]
+        self.fake.dialogs.question_answers = ["背景"]
         self.assertFalse(self.runtime._choose_prompt_sign())
         asked = len(self.fake.dialogs.questions)
         self.assertEqual(asked, 1)

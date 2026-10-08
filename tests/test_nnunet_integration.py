@@ -369,7 +369,7 @@ class DiscoveryTests(unittest.TestCase):
         self.assertIn('"nnunet_mimics"', shell)
         self.assertIn("BUTTON_BATCH_PREDICT", shell)
         runtime = (RUNTIME / "nnunet_mimics.py").read_text(encoding="utf-8")
-        self.assertIn('BUTTON_BATCH_PREDICT = "Batch Predict Dataset..."', runtime)
+        self.assertIn('BUTTON_BATCH_PREDICT = "批量预测数据集…"', runtime)
         self.assertIn('"nnunet_batch_predict_ui.py"', runtime)
         import package_portable
 

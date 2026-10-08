@@ -3148,7 +3148,7 @@ class FlexictMimicsApplyQueueTests(unittest.TestCase):
             "labels": [{"id": 1, "name": "liver", "aliases": []}],
             "matching_masks": [],
         }
-        with self.assertRaisesRegex(RuntimeError, "empty"):
+        with self.assertRaisesRegex(RuntimeError, "预测结果为空"):
             self.module._prepare_apply_queue(
                 monitor,
                 {"masks": [
@@ -3184,7 +3184,7 @@ class FlexictMimicsApplyQueueTests(unittest.TestCase):
     def test_update_mode_matches_primary_label_mask(self):
         liver = FakeMask("liver", 10)
         self.masks[:] = [liver]
-        self.dialog["answer"] = "Update Matching Mask"
+        self.dialog["answer"] = "更新匹配掩膜"
         try:
             monitor = {
                 "label_name": "liver",
@@ -3210,7 +3210,7 @@ class FlexictMimicsApplyQueueTests(unittest.TestCase):
             # spleen has no matching Mask -> created fresh
             self.assertEqual(records["2"]["target_kind"], "create")
         finally:
-            self.dialog["answer"] = "Create New Mask"
+            self.dialog["answer"] = "创建可编辑副本"
             self.masks[:] = [FakeMask("liver", 10)]
 
 

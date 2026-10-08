@@ -485,7 +485,7 @@ class TestModelManagerWindow(unittest.TestCase):
             manager._model_source(
                 {"imported_from_bundle": True, "execution_backend": "remote"}
             ),
-            "imported",
+            "导入",
         )
         self.assertEqual(
             manager._model_source(
@@ -495,13 +495,13 @@ class TestModelManagerWindow(unittest.TestCase):
                     "remote_profile_id": "206_root",
                 }
             ),
-            "remote: 206_root",
+            "远程: 206_root",
         )
         self.assertEqual(
             manager._model_source(
                 {"execution_backend": "remote", "remote_profile_id": "171x"}
             ),
-            "remote: 171x",
+            "远程: 171x",
         )
         self.assertEqual(manager._model_source({}), "")
 
@@ -1376,7 +1376,7 @@ class TestTrainingSetupPathMemory(unittest.TestCase):
     def test_training_windows_carry_cross_family_hint(self):
         """AUD 3.1: each family window must tell the annotator when to use
         nnU-Net vs FlexiCT vs nnInteractive, so the choice is not a guess."""
-        source_root = Path(__file__).parent
+        source_root = ROOT / "tools"
         for module_name in (
             "nnunet_training_setup_ui",
             "flexict_training_setup_ui",
