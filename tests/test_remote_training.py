@@ -2260,6 +2260,130 @@ class TransferEfficiencyTests(unittest.TestCase):
             )
         )
 
+    def test_missing_remote_base_model_uploads_local_copy(self):
+        """R72-B3: a missing remote model with a local counterpart uploads
+        instead of dead-ending on "ask the administrator"."""
+        with tempfile.TemporaryDirectory() as temporary:
+            model = Path(temporary) / "weights"
+            (model / "flexict_2d").mkdir(parents=True)
+            (model / "flexict_3d").mkdir()
+            for sub in ("flexict_2d", "flexict_3d"):
+                (model / sub / "model.safetensors").write_bytes(
+                    ("backbone-" + sub).encode()
+                )
+            fingerprint = controller._local_model_fingerprint(model)
+            uploads = []
+
+            class Session:
+                def __init__(self):
+                    self.commands = []
+
+                def execute(self, command, **_kwargs):
+                    self.commands.append(command)
+                    if "printf ready" in command:
+                        return "missing"
+                    if "sha256sum" in command and "awk" in command:
+                        # Upload succeeded: remote fingerprint == local.
+                        return fingerprint
+                    if ".mimics_digest_cache.tmp" in command:
+                        return ""
+                    return ""
+
+                def upload(self, source, target, **_kwargs):
+                    uploads.append((str(source), target))
+
+                def ensure_directory(self, _path):
+                    pass
+
+            session = Session()
+            status_path = Path(temporary) / "status.json"
+            remote_compute.write_json_atomic(status_path, {})
+            identity = controller._validate_remote_assets(
+                session,
+                self.CACHE_PATHS,
+                {
+                    "required_model_relative": "flexict",
+                    "local_required_model": str(model),
+                },
+                status_path=status_path,
+                controller_log=Path(temporary) / "controller.log",
+            )
+            # Both backbone files shipped to the remote models tree.
+            self.assertEqual(len(uploads), 2)
+            self.assertTrue(
+                all(t.startswith("/remote/models/flexict/") for _s, t in uploads)
+            )
+            # A digest marker was written so the strict check fast-paths.
+            self.assertTrue(
+                any(
+                    ".mimics_digest_cache.tmp" in command
+                    for command in session.commands
+                )
+            )
+            self.assertEqual(
+                identity["remote_base_model_sha256"], fingerprint
+            )
+
+    def test_missing_remote_base_model_without_local_copy_still_refuses(self):
+        """Negative control: no local weights to ship must keep the original
+        administrator error, never a silent pass."""
+
+        class Session:
+            def execute(self, command, **_kwargs):
+                if "printf ready" in command:
+                    return "missing"
+                raise AssertionError("no further commands expected")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(
+                RuntimeError, "not installed on the remote server"
+            ):
+                controller._validate_remote_assets(
+                    Session(),
+                    self.CACHE_PATHS,
+                    {
+                        "required_model_relative": "flexict",
+                        # Points at a path that does not exist locally.
+                        "local_required_model": str(
+                            Path(temporary) / "nowhere"
+                        ),
+                    },
+                )
+
+    def test_uploaded_base_model_fingerprint_mismatch_refuses(self):
+        """A corrupted upload (remote digest differs) must raise, not be
+        marked verified (R72-B3 failure path)."""
+        with tempfile.TemporaryDirectory() as temporary:
+            model = Path(temporary) / "weights"
+            model.mkdir()
+            (model / "model.safetensors").write_bytes(b"local-weights")
+
+            class Session:
+                def execute(self, command, **_kwargs):
+                    if "printf ready" in command:
+                        return "missing"
+                    if "sha256sum" in command and "awk" in command:
+                        return "f" * 64  # Corruption: differs from local.
+                    raise AssertionError(
+                        "marker must not be written on mismatch: " + command
+                    )
+
+                def upload(self, *_args, **_kwargs):
+                    pass
+
+                def ensure_directory(self, _path):
+                    pass
+
+            with self.assertRaisesRegex(RuntimeError, "does not match"):
+                controller._validate_remote_assets(
+                    Session(),
+                    self.CACHE_PATHS,
+                    {
+                        "required_model_relative": "flexict",
+                        "local_required_model": str(model),
+                    },
+                )
+
 
 class ReattachTests(unittest.TestCase):
     """Orphaned remote containers can be re-attached after a controller dies."""

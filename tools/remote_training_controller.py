@@ -2737,11 +2737,113 @@ def _launch_container(
     return session.execute(command).strip()
 
 
+def _upload_required_model(
+    session: SSHSession,
+    remote_model_path: str,
+    local_source: Path,
+    status_path: Path | None,
+    controller_log: Path | None,
+) -> bool:
+    """Upload a missing required base model from the local checkout (R72-B3).
+
+    Used for the FlexiCT backbone pair (and any future fixed distributable
+    base weights): when the remote server lacks the model but this
+    workstation has it, push the local directory up instead of failing with
+    "ask the administrator". Returns True when the remote now holds the
+    files; False when nothing was uploaded (caller reports the miss).
+
+    Upload is atomic per file (``.part`` + rename via SFTP upload), then a
+    digest marker is written so the subsequent strict fingerprint check in
+    _validate_remote_assets can fast-path on the cached digest instead of
+    rehashing ~1.1 GB of safetensors. The marker is only written after the
+    remote fingerprint matches the local one — a mismatch raises and
+    nothing is marked verified.
+    """
+    local_fingerprint = _local_model_fingerprint(local_source)
+    if not local_fingerprint:
+        return False
+    if status_path is not None:
+        _status_update(
+            status_path,
+            status="uploading",
+            phase="uploading_required_base_model",
+        )
+    for relative in sorted(local_source.rglob("*")):
+        if not relative.is_file() or relative.is_symlink():
+            continue
+        target = PurePosixPath(remote_model_path) / relative.relative_to(
+            local_source
+        ).as_posix()
+        session.upload(str(relative), str(target))
+    remote_fingerprint = _remote_model_fingerprint(
+        session, remote_model_path
+    )
+    if remote_fingerprint != local_fingerprint:
+        raise RuntimeError(
+            "The required base model was uploaded to the remote server but "
+            "its fingerprint does not match the local weights. Local "
+            "SHA-256: {}; remote SHA-256: {}. Remove {} on the server and "
+            "retry.".format(
+                local_fingerprint, remote_fingerprint, remote_model_path
+            )
+        )
+    _write_remote_digest_marker(session, remote_model_path, remote_fingerprint)
+    if controller_log is not None:
+        _append_log(
+            controller_log,
+            "Required base model auto-uploaded to {} (was missing on the "
+            "server).".format(remote_model_path),
+        )
+    return True
+
+
+def _remote_model_fingerprint(
+    session: SSHSession, remote_model_path: str
+) -> str:
+    """Remote-side twin of _local_model_fingerprint (sorted content digests)."""
+    fingerprint = session.execute(
+        "cd {path} && "
+        "find . -maxdepth 4 -type f "
+        "\\( -name '*.pth' -o -name '*.safetensors' -o -name '*.bin' "
+        "-o -name 'config.json' -o -name 'plans.json' \\) "
+        "-exec sha256sum {{}} + 2>/dev/null | "
+        "awk '{{print $1}}' | LC_ALL=C sort | "
+        "sha256sum | awk '{{print $1}}'".format(
+            path=shlex.quote(remote_model_path)
+        ),
+        timeout=300,
+    ).strip()
+    return fingerprint
+
+
+def _write_remote_digest_marker(
+    session: SSHSession, remote_model_path: str, fingerprint: str
+) -> None:
+    """Write the .mimics_digest_cache marker the strict check fast-paths on."""
+    session.execute(
+        "cd {path} && "
+        "newest_mtime=$(find . -maxdepth 4 -type f "
+        "\\( -name '*.pth' -o -name '*.safetensors' -o -name '*.bin' "
+        "-o -name 'config.json' -o -name 'plans.json' \\) "
+        "-printf '%T@\\n' 2>/dev/null | sort -n | tail -1 | "
+        "cut -d. -f1) && "
+        "printf '%s %s\\n' {digest} \"$newest_mtime\" "
+        "> {marker}.tmp && mv -f {marker}.tmp {marker}".format(
+            path=shlex.quote(remote_model_path),
+            digest=shlex.quote(fingerprint),
+            marker=shlex.quote(remote_model_path.rstrip("/") + ".mimics_digest_cache"),
+        ),
+        check=False,
+    )
+
+
 def _validate_remote_assets(
     session: SSHSession,
     paths: dict[str, str],
     prepared: dict[str, Any],
     verify_mode: str = "strict",
+    status_path: Path | None = None,
+    controller_log: Path | None = None,
 ) -> dict[str, str]:
     relative = str(prepared.get("required_model_relative") or "").strip()
     if not relative:
@@ -2762,11 +2864,43 @@ def _validate_remote_assets(
         check=False,
     ).strip()
     if output != "ready":
-        raise RuntimeError(
-            "The required base model is not installed on the remote server: "
-            "{}. Ask the server administrator to install it under the configured "
-            "remote work folder.".format(model_path)
-        )
+        # R72-B3: the FlexiCT backbone pair is a fixed, distributable asset
+        # that every workstation with this checkout already has. Instead of
+        # dead-ending on a fresh server, ship the local weights up once when
+        # the local copy exists; only a server with no local counterpart to
+        # upload still needs the administrator.
+        local_path_text = str(
+            prepared.get("local_required_model") or ""
+        ).strip()
+        if not local_path_text and relative == "flexict":
+            # R72-B3: the FlexiCT request ships with an empty local model
+            # reference, but the repo carries the same backbone pair under
+            # weights/ — that copy is what this workstation would upload.
+            try:
+                from tools.flexict_common import resolve_pretrained_dir
+
+                resolved, _source = resolve_pretrained_dir()
+                if resolved.is_dir():
+                    local_path_text = str(resolved)
+            except Exception:
+                pass
+        uploaded = False
+        if local_path_text and Path(local_path_text).is_dir():
+            uploaded = _upload_required_model(
+                session,
+                model_path,
+                Path(local_path_text),
+                status_path,
+                controller_log,
+            )
+        if not uploaded:
+            raise RuntimeError(
+                "The required base model is not installed on the remote "
+                "server: {}. Ask the server administrator to install it "
+                "under the configured remote work folder.".format(model_path)
+            )
+        # Refresh the ready check after a successful auto-upload so the
+        # fingerprint validation below judges the freshly uploaded files.
     # Content-only directory fingerprint: sorted SHA-256 of each supported
     # weight file, no path names. The remote layout may differ from the local
     # one (custom remote_root or mount point), and unrelated extra files must
@@ -4390,6 +4524,8 @@ def run(spec_path: Path) -> int:
             remote_paths,
             prepared,
             verify_mode=profile.get("remote_weights_verify", "strict"),
+            status_path=status_path,
+            controller_log=controller_log,
         )
         # Refuse (strict) or record (warn) when the image's baked-in pipeline
         # code differs from the local checkout — a stale image silently
