@@ -1918,9 +1918,13 @@
 
 ## 进行中
 
-（截至 R72（2026-10-08）：用户对远程训练管线全面审计拍板 8 项立项
-（A1/A3/B1/B2/B3/C1/C2/D1，见下方 R72 条目），均未开始实施。其中
-A3 为用户明确指定方向（远程 SSH 自动构建，非本机构建）。此前状态：）
+（截至 R72（2026-10-09）：R72 全部 8 项完成并 206 实测——A1 容器内预检
+（2752417）、A3 远程 SSH 自动构建镜像（0a52733/25feaff/06668d9）、
+B1 跨用户共享数据缓存（4754dba）、B2 引用远程已有数据集（e891efb）、
+B3 FlexiCT backbone 自动分发（e844d36）、C1 批量预测远程后端（f9479e5）、
+C2 FlexiCT 远程续训（5b39231）、D1 镜像更新流程制定+执行（f2f23f5，
+live 冒烟训练）。证据：各 commit + `.mimics_runtime/regression/` 工件
++ 轮次报告 R72。此前状态：）
 
 ### R72（2026-10-08 用户立项：远程训练管线审计修复轮，8 项）
 
@@ -2099,6 +2103,44 @@ commits `201b516` / `0be6ba5` / `a2d3244` / `afff2bc`，smoke 8/8
   归属与处置。）
 
 ## 已解决（保留历史，勿删）
+
+- [x] **R72【P1/P2】远程训练管线审计修复轮（8 项，用户 2026-10-08 立项）**
+  - **A1 容器内预检**（commit 2752417）：提交远程作业时在容器内校验镜像
+    内容（pipeline 文件存在 + 关键依赖可导入），失败在上传数据前报错。
+    206 实测五种 kind 预检全过。
+  - **A3 远程自动构建镜像**（commits 0a52733/25feaff/06668d9）：
+    `build-image` 命令在本机零 docker 前提下通过 SSH 在服务器上构建
+    （nerdctl build，digest 复用跳过重传，含 206 buildkit/k3s 兼容处理）。
+    206 实测走通。
+  - **B1 跨用户共享数据缓存**（commit 4754dba）：`cache/shared/datasets/`
+    共享桶，相同指纹第二用户秒级命中跳过上传；一次性写入 + 原子重命名。
+  - **B2 引用远程已有数据集**（commit e891efb）：管理对话框列出远程
+    数据集缓存（指纹/大小/时间，只读可见性）；内容寻址信任链不绕过。
+  - **B3 FlexiCT backbone 自动分发**（commit e844d36）：远端缺 backbone
+    时走 `_ensure_remote_custom_model` 通道自动上传（指纹校验）。
+  - **C1 批量预测远程后端（=R62-5）**（commit f9479e5）：批量预测窗口
+    可选远程后端，复用远程容器/缓存/回传机制。
+  - **C2 FlexiCT 远程续训**（commit 5b39231）：nnU-Net runtime roots
+    移入持久 prepared cache（/remote-cache/flexict/<identity>/），checkpoint
+    在服务器保留；续训 = 占位 id 750 + 控制器按指纹定位 Dataset{id}_{task}
+    回写真实 id（fail-closed：找不到/关缓存即拒）；checkpoint 清理 =
+    既有 `remote_cache_retention_days`（默认 30 天）清扫，覆盖 flexict
+    prepared 树。206 实测两次连续训练：续训解析 Dataset758、8/8 本地
+    档案与远程 prepared 缓存复用（数据零重传）、日志见 "Continue
+    interrupted training (--c)"、下载模型含两代训练日志；磁盘不足
+    失败路径实测报错可读。注意：nnU-Net 完成即删 checkpoint_latest，
+    续训搜索匹配任意 checkpoint_*.pth（maybe_load_checkpoint 回退链
+    final→latest→best）。
+  - **D1 镜像更新流程制定 + 执行一次**（commit f2f23f5）：remote/README.md
+    定义标准更新流程（触发条件、build-image 命令、镜像源回退、A1 预检
+    + 指纹自动验证、按镜像 ID 回退）；206 从 09-26 快照更新到当时代码
+    并跑通 8 例 kidney_left 冒烟训练（模型已下载注册）。C2 期间又按
+    同一流程更新一次（dockerproxy TLS 超时 → digest 锁定基镜像，
+    sha256:4b3cc8f16044），流程的镜像源回退实测有效。
+  - 证据：各 commit + `.mimics_runtime/regression/` 工件（含
+    20261009T045857 smoke 8/8、fast 门禁见轮次报告 R72）+ 轮次报告
+    R72 的 206 执行记录（含失败路径：磁盘不足、registry 不可达重试、
+    陈旧镜像预检拦截）。
 
 - [x] **A5【P1】nnU-Net 训练表单要求 ML 工程师概念（最小方案路径）**
   - R8 解决（commit 5039fff），按验收标准括号明示的最小方案（默认值+说明）实施，
@@ -2800,6 +2842,8 @@ commits `201b516` / `0be6ba5` / `a2d3244` / `afff2bc`，smoke 8/8
 |------|------|------|----------|------|----------|----------|
 | 2026-09-25 | R1 | 无 | 本轮纯代码审计，未连接服务器、未触数据集 | - | - | - |
 | 2026-09-29 | R61 | 无 | 四视角评审，未连接服务器、未触数据集。**发现**：外来文件 .mimics_runtime/copy_to_z.py 向 Z:\ImageAnalysisData\1-CT\Segmentation\data\ 下新建 label_task_mr_synced 目录写入（v201 兄弟目录，非 v201 内部）——非本轮所为、未触碰该文件，红线边缘操作已提请用户裁决（拍板"收编"，写入路径将单独审视） | .mimics_runtime/copy_to_z.py（只读检查） | 本轮只读未写 | 未动任何外来文件 |
+| 2026-10-09 | R72 | 206 服务器 | D1+C2 镜像更新（build-image 远程构建两次：00:49 成功 sha256:770ad77592e3→57d6ca9c1ad7；04:00 C2 后重构建，dockerproxy TLS 超时 → digest 锁定基镜像 sha256:4b3cc8f16044）；C2 两次连续 FlexiCT 训练（kidney_left_c2，8 例 kidney_left，fresh run train_20261009T030244 + 续训 train_20261009T041153）；中途一次续训 train_20261009T034436 因陈旧镜像容器退出（本地磁盘不足前先撞代码漂移）、一次 train_20261009T040020 因本地 E: 磁盘不足在下载步失败（5.53/8.08 GiB） | /userdata/shijian_ruan/mimics-ai/{jobs,cache,logs} | 只用 /userdata/shijian_ruan/；无长驻任务（最长一次约 20 分钟训练） | jobs/ 清空、无容器残留、GPU 0%；磁盘不足失败的两个 job 目录已手动清除；本地测试模型（kidney_left_smoke/kidney_left_c2 前一代）为腾磁盘已删（可由远程 checkpoint 再生） |
+| 2026-10-09 | R72 | Totalsegmentator v201 | C2 训练数据源（s0001/s0004/s0006/s0009-s0013 共 8 例 kidney_left） | Z:\...\Totalsegmentator_dataset_v201（只读） | 只读，所有输出写 E:\MIMICS_SCRIPTS\flexict_models | 无写入 |
 
 ## 轮次报告存档
 

@@ -5217,3 +5217,67 @@ _publish_mcs 盲重试由 fingerprint 门控缓解），入账不擅自改。
 ### 外部资源
 
 - 本轮零外部资源使用（纯本地代码合并）。
+
+## R72（2026-10-09）：远程训练管线审计修复轮（8 项用户立项）
+
+用户在前轮会话以 AskUserQuestion 逐项拍板立项的 8 项审计发现，本轮全部关闭。
+
+### 实施清单（10 commit，057189e..5b39231）
+
+| 项 | commit | 内容 |
+|---|---|---|
+| A1 | 2752417 | 数据集上传前容器镜像预检（缺镜像/镜像过旧提前报错，P1） |
+| A3 | 0a52733/25feaff/06668d9 | controller `build-image` 子命令：SSH 远程构建，零本地 docker；本地模型注册表排除出构建上下文；重建前清理上下文 |
+| B1 | 4754dba | 跨用户共享数据集缓存桶（P1）：同一服务器多用户复用上传数据集 |
+| B2 | e891efb | 远程数据集缓存列表 + 只读查看对话框（remote_compute_ui，P2） |
+| B3 | e844d36 | FlexiCT backbone 自动分发到全新远程服务器（P1） |
+| C1 | f9479e5 | 批量预测窗口远程后端（=R62-5） |
+| C2 | 5b39231 | FlexiCT 远程续训：不重新上传数据/checkpoint（同指纹 → 同命名空间 → 复用 prepared 缓存） |
+| D1 | f2f23f5 | remote/README.md 镜像更新流程文档 + 206 上执行一次 |
+
+### C2 checkpoint 语义修复（实施中发现）
+
+控制器续训搜索原本只找 `checkpoint_latest.pth`——但 nnunetv2 2.8 的
+nnUNetTrainer 在训练完成时**删除** checkpoint_latest（nnUNetTrainer.py:991），
+只留 final/best；`maybe_load_checkpoint` 回退链 final → latest → best。
+已完成训练的续训（加载 final 且 current_epoch ≥ num_epochs 时
+run_training 立即返回"Training done."直接进验证）会因找不到 latest 而误判
+"无可续训 checkpoint"。修复：搜索改为 `checkpoint_*.pth` glob；测试断言
+同步（test_remote_training.py）。续训模型 fold_0 内含 run 1+3+4 三代训练
+日志（checkpoint 血缘证据）。
+
+### 206 服务器执行记录（红线合规）
+
+- **镜像构建 ×2**：00:49 首建 sha256:770ad77592e3；04:00 重建
+  sha256:4b3cc8f16044（run 2 容器因陈旧镜像报
+  "Remote backend does not support continue_training" 崩溃——A1 预检
+  场景实测验证）。重建期间 registry-1.docker.io connection reset、
+  dockerproxy.net TLS handshake timeout（×2，含直接 nerdctl pull），
+  改用 digest 锁定的本地基础镜像
+  `dockerproxy.net/pytorch/pytorch@sha256:77f17f843507…` 绕过注册表元数据
+  查询后成功。
+- **训练任务 ×4**：
+  1. `train_20261009T030244` 全新训练，完成，模型注册（后为本机磁盘
+     腾空间删除，可从远程 checkpoint 再生）。
+  2. `train_20261009T034436` 陈旧镜像容器崩溃（上述），取消+清理。
+  3. `train_20261009T040020` 下载阶段本机磁盘不足失败（E: 5.53 GiB <
+     需求 8.08 GiB）——fail-closed 磁盘检查以可读错误正确触发；删除
+     两个自有测试模型腾出 13.36 GiB 后重新提交。
+  4. `train_20261009T041153` 续训端到端完成：Dataset758 解析、本地
+     档案 8/8 复用、remote_code_match=True、模型
+     `flexict_20261009T041404_c2b12bba` 下载注册。
+- **清理**：jobs/ 清空、无残留容器、GPU 0%；确认后离开。
+
+### 门禁与验证
+
+- remote 131/131 + flexict 128/128 + gui_smoke（13 个 flexict 用例，
+  含修复的提交轮询竞态：sleep+processEvents+deadline 取代定长循环）。
+- 冒烟 8/8×2：`20261009T025755_smoke.json`、`20261009T045857_smoke.json`。
+- fast 门禁：见下方收尾记录。
+- 外部资源登记：improvement_backlog.md 外部资源使用登记表 +2 行
+  （206 操作、Totalsegmentator 只读 8 例 kidney_left）。
+
+### 真实数据集
+
+- 只读使用 `Totalsegmentator_dataset_v201` 中 8 例的 kidney_left（与
+  R71 相同子集），全部输出写项目输出目录，源路径零改动。
