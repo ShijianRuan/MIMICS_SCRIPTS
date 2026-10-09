@@ -435,12 +435,11 @@ class TestModelManagerWindow(unittest.TestCase):
             with mock.patch.object(
                 manager, "import_bundle", failing_import
             ), mock.patch.object(
-                QtWidgets.QFileDialog, "getOpenFileName",
-                staticmethod(lambda *a, **k: (name + "/model.zip", "")),
-            ), mock.patch.object(
                 QtWidgets.QMessageBox, "warning"
             ) as warn_box:
-                window._import_clicked()
+                # The file dialog runs in a helper process (async helper);
+                # the failure path under test starts once a path is chosen.
+                window._import_bundle_from(name + "/model.zip")
                 self.assertFalse(window.import_button.isEnabled())
                 deadline = time.time() + 5.0
                 while window._importing and time.time() < deadline:

@@ -356,9 +356,6 @@ class ActiveLearningWindow:
         self.poll_timer.setInterval(2000)
         self.poll_timer.timeout.connect(self._poll_requests)
         self.poll_timer.start()
-        # A closed window must stop polling (same lifetime trap as the
-        # status viewers).
-        self.window.closeEvent = self._close_event
         # Pair discovery + job submission also complete off the GUI thread.
         self.fast_timer = QtCore.QTimer(self.window)
         self.fast_timer.setInterval(80)
@@ -634,9 +631,6 @@ class ActiveLearningWindow:
         self.status_label.setText(
             '正在后台启动主动学习排序（检查路径与模型对）…')
 
-    def _close_event(self, event):
-        self.poll_timer.stop()
-        self.fast_timer.stop()
 
     def _poll_running_job(self):
         """Show live progress of a running ranking and auto-refresh at
