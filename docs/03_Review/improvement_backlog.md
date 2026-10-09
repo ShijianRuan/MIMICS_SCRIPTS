@@ -104,6 +104,89 @@
   submit 时拼逗号清单交给既有 worker 通道，worker 零改动。测试：
   `test_mask_pick_narrows_selection_for_worker`（_filter_masks 名称
   清单/全部两路径 + 窗口源码契约）。
+
+### P1（2026-10-09 R75 用户报告：UI 类问题独立全面重评）
+
+> 背景：用户指出既往评审漏掉大量细节（"类似上面的问题请不要再出现"），
+> 授权用独立评审重新评估全部 31 个 Qt UI 文件（tools/ 23 +
+> runtime_py35/ 8）。四个独立评审代理（A/B/C/D 四组）产出，随后
+> "修完所有问题啊"授权全量修复。每项修复附回归测试（铁律：
+> 修复沉淀为测试资产）。
+
+- [x] **R75-1【P1】拖拽窗口分析/提交在 GUI 线程上做网络盘 I/O**
+  〔R75 当轮解决，commit `a9fad23`〕：analyze() 里
+  classify_payload + summarize_dataset 同步跑在 GUI 线程——从 Z:
+  网络共享拖入时窗口冻结数秒。改为守护线程 + 80ms QTimer 排空
+  Queue + 代数计数器丢弃过期扫描。测试：GUI 冒烟既有拖拽组全绿。
+- [x] **R75-2【P1】标准按钮英文（Yes/No/OK/Cancel 全窗口）**
+  〔commit `9eb1b20`〕：`configure_application` 统一安装 Qt
+  qtbase zh_CN 翻译，是(&Y)/否(&N)/确定/取消 全系统生效。测试：
+  `test_configure_application_installs_zh_translator`。
+- [x] **R75-3【P1】关闭的查看器窗口定时器继续触发（heap 崩溃根因）**
+  〔commit `abb0459`〕：flexict/nnunet/batch 三个状态查看器的
+  BackgroundRefresh QTimer 挂在窗口上，窗口关闭后继续触发；tick
+  落在被拆除的 C++ 对象上损坏堆（GUI 冒烟套件 ~70% 概率
+  0xc0000374）。`BackgroundRefresh.stop()` + closeEvent 接线。
+  测试：`test_closed_viewer_windows_stop_their_refreshers`
+  （源码契约 + 行为：close 后两个 timer 均 inactive）。
+- [x] **R75-4【P1】nnInteractive 重置无确认**〔commit `9901be6`〕：
+  重置按钮丢弃会话内全部提示并恢复初始 Mask，与"撤销"相邻无
+  确认。加计数+不可逆说明的确认框。
+- [x] **R75-5【P1】nnInteractive 面向用户的 RuntimeError 全英文**
+  〔commit `9901be6`〕：main() 的错误框逐字透出英文异常串。
+  多选 Mask、无激活影像、Mask 未绑定/属其他影像四条高频路径
+  中文化。
+
+### P2/P3（2026-10-09 R75 独立评审修复，全部当轮关闭）
+
+- [x] **R75-6【P2】训练窗口状态标签永久红色**〔commit `82f3955`〕：
+  一次报错 `setObjectName("errorLabel")` 后无人复位，此后所有中性
+  消息（"正在提交…"）永远红粗体。两个训练 UI 统一 `_set_status`
+  入口。窗口级编辑器同病同修（`786c001`）。
+- [x] **R75-7【P2】健康面板收集失败渲染为"一切正常"**〔commit
+  `786c001`〕：render() 只看 processes/locks/queues，采集器抛错
+  时快照只有 error 键——面板显示"一切正常"。失败先渲染
+  "状态收集失败"并 return。测试：health 10/10。
+- [x] **R75-8【P2】窗宽窗位编辑器三个缺陷**〔commit `786c001`〕：
+  (a) 非数字输入英文报错且单元格残留垃圾文本（preset 静默保留旧
+  值）——拒绝后单元格回弹到模型实际值 + 中文红错；(b)
+  int(float()) 后单元格仍显示 400.5 而保存 400——存啥显啥；
+  (c) 错误状态永久红色（同 R75-6）。测试：
+  `test_rejected_number_cell_snaps_back_to_model`（失败路径优先）。
+- [x] **R75-9【P2】"查看缓存数据集"隐式保存服务器配置**〔commit
+  `5a8db43`〕：`_show_cached_datasets` 走 `_save(show_success=False)`，
+  点一下只读列表就把半编辑的表单字段持久化到
+  remote_compute_profiles.json 并重存密码。改为内存构建
+  profile（校验错误照常透出、零写入）。测试：
+  `test_cached_datasets_button_does_not_implicitly_save`（源码
+  契约：该路径禁调 save_profile/store_password）。
+- [x] **R75-10【P2】FlexiCT 重扫描重置手工划分**〔commit `f7947e2`〕：
+  重扫描用管线默认值重建病例表，用户取消勾选/标验证集被静默
+  重置。`_merge_case_selection` 按 case_id 继承旧选择（消失病例
+  丢弃、新病例用默认）。测试：
+  `test_flexict_rescan_keeps_manual_split_selection`。
+- [x] **R75-11【P2】最后两处同步文件对话框**〔commit `f7947e2`〕：
+  AL 窗口 CSV 导出、模型管理器导入模型包仍用阻塞式
+  QFileDialog——共享网络盘上可冻结窗口。改用共享异步 helper。
+- [x] **R75-12【P2】nnInteractive 对话框体验四项**〔commit `9901be6`〕：
+  (a) 框选/套索被拒后连弹两个框（自己的解释框 + 调用方"未提交
+  任何提示"）——后者对这两种 kind 抑制；(b) 选"重试"后立即又弹
+  "仍在后台运行"模态框——移除，监视器继续轮询；(c) 推理期间项目
+  被切换时结果只写日志，用户无感知——补非阻塞中文提示框；(d)
+  worker 阶段名英文直出（prediction/waiting_for_prompt…）——
+  `_WORKER_STAGE_LABELS` 映射，未知值透传不静默吞。
+- [x] **R75-13【P3】死代码清理**〔commit `9901be6`〕：nnInteractive
+  死函数 `_choose_sign` + BUTTON_FOREGROUND/BACKGROUND 常量；
+  config 编辑器死 shutil import；io_path 未用的同步对话框
+  helper import；env_guidance 不可达的重复 return。
+- [x] **R75-14【P1→P2 判级】配置回滚覆盖损坏配置文件**〔commit
+  `8695c74`〕：`_save` 跳过加载失败的文件（74ee3d1 修复的保存侧），
+  但备份仍为它记录 `_load()` 的 `{}`——`_rollback` 会把仍可手工
+  恢复的原始 JSON 覆盖成空对象，同一数据丢失路径的回滚侧孪生。
+  加载失败的文件同时排除出备份；回滚只恢复备份持有的文件。
+  测试：`test_broken_config_file_never_rewritten_by_save` 扩展
+  ——save+rollback 后坏文件逐字节不变且不在备份中。
+
 - [x] **R74-3【审计】同类问题清扫（R73 波次）**〔R74 当轮完成，见 R74
   轮次报告〕：沿"过滤隐藏选择/单选陷阱/对话框叠放/窗口尺寸/崩溃"
   五条线全量清扫：全部 `setSelectionMode` 用点合适（表格行选单选、

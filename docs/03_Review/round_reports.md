@@ -5413,3 +5413,94 @@ ui_theme.py 在 tools/ 旁——Mimics 启动它们时 `import ui_theme` 失败�
 ### 遗留登记
 
 - 无新增。R73-4（run_runtime_entry 异常包裹）仍在待办区。
+
+
+## R75（2026-10-09）：UI 类问题独立全面重评 + 全量修复
+
+### 背景
+
+用户指出既往评审漏掉大量细节（"类似上面的问题请不要再出现，以前你
+评审过感觉还是漏掉了很多细节以及没有发现很多问题"），随后授权
+"修完所有问题啊"。四个独立评审代理（A/B/C/D 四组）覆盖全部 31 个
+Qt UI 文件（tools/ 23 + runtime_py35/ 8），产出后全量修复。
+
+### 修复清单（10 commit，a9fad23..9901be6）
+
+**P1（5 项）**：
+
+1. **拖拽窗口网络盘冻结**（a9fad23）：analyze/submit 的
+   classify_payload + summarize_dataset 同步跑在 GUI 线程，Z: 网络共享
+   拖入时窗口冻结数秒。守护线程 + 80ms QTimer 排空 Queue + 代数计数器
+   丢弃过期扫描。
+2. **英文标准按钮**（9eb1b20）：configure_application 统一安装
+   qtbase zh_CN 翻译——是(&Y)/否(&N)/确定/取消 全系统一次修复。
+3. **关闭窗口定时器堆损坏**（abb0459）：GUI 冒烟套件 ~70% 概率
+   0xc0000374 堆损坏，二分定位到三个状态查看器的 BackgroundRefresh
+   QTimer 在窗口关闭后继续触发。stop() + closeEvent 接线；同时修复
+   关闭的窗口永远后台轮询。调试过程确认崩溃在基线 commit 已存在
+   （非本轮引入）。
+4. **nnInteractive 重置无确认**（9901be6）：重置丢弃全部提示并恢复
+   初始 Mask，与撤销相邻。加计数+不可逆确认框。
+5. **nnInteractive 用户可见英文异常**（9901be6）：四条高频
+   RuntimeError 路径中文化（多选、无激活影像、Mask 未绑定/跨影像）。
+
+**P2（8 项）**：
+
+6. 训练窗口状态标签一次报错永久红粗体（82f3955，_set_status 统一
+   入口；786c001 同修窗宽窗位编辑器）。
+7. 健康面板采集失败渲染为"一切正常"（786c001）。
+8. 窗宽窗位编辑器：拒绝的编辑残留垃圾文本 + int(float) 显示不一致
+   + 状态永红（786c001）。
+9. "查看缓存数据集"隐式保存半编辑的服务器配置（5a8db43，改内存
+   构建 + 源码契约禁写测试）。
+10. FlexiCT 重扫描静默重置训练/验证勾选（f7947e2，
+    _merge_case_selection 按 case_id 继承）。
+11. 最后两处同步文件对话框改异步（f7947e2：AL CSV 导出、模型管理器
+    导入）。
+12. nnInteractive 对话框四项（9901be6）：拒绝后双弹框、重试后叠
+    模态、项目切换结果静默丢弃、worker 阶段名英文。
+13. 残余英文串中文化（759a224：批量预测/远程计算/QInputDialog/
+    任务组合框实时刷新）。
+14. AL 窗口 2s GUI 线程扫描改 worker 线程；预测 UI 隐藏不可用模型
+    改置灰+悬停原因（5541e69）。
+
+**P3 清理**（9901be6 + 786c001）：死 _choose_sign、死 shutil/同步
+helper import、不可达重复 return、多余 stylesheet 规则。
+
+### 测试资产（失败路径优先）
+
+- test_configure_application_installs_zh_translator（翻译安装）
+- test_closed_viewer_windows_stop_their_refreshers（close 后双 timer
+  inactive，行为级）
+- test_rejected_number_cell_snaps_back_to_model（拒绝编辑回弹+状态
+  复位）
+- test_cached_datasets_button_does_not_implicitly_save（源码契约：
+  只读路径禁 save_profile/store_password）
+- test_flexict_rescan_keeps_manual_split_selection（合并保留/丢弃
+  语义）
+- test_ranking_submit_error_is_surfaced / test_running_ranking…
+  （AL 新协议适配 + _poll_until 泵）
+
+### 门禁与验证
+
+- 定向组全绿：health 10/10、window_level 8/8、flexict 12/12、
+  remote 133/133、portability 22/22、nninteractive+bridge 149/149、
+  fake_mimics_flow nninteractive/imports/window 7/7。
+- fast 门禁：见工件（本轮报告补记）。
+- 复杂度：+743/−270 净 +473（账本已记行）。
+
+### 调试插曲（记录供回溯）
+
+GUI 冒烟 heap 崩溃（0xc0000374）首测误判为确定性——单独跑与小组
+跑全过，14 用例组 ~70% 崩。二分到基线 commit 复现才确认是 pre-
+existing 概率性缺陷。期间一次 git stash pop 弹出了 8 月的旧 stash
+（当时工作已 commit、stash 为空误判），reset --hard + 清理 stash
+残留（external/ 已 gitignore、remote/Dockerfile.patch 无引用），
+旧 stash 条目仍保留在 stash 列表中未动。
+
+### 遗留登记
+
+- R73-4（run_runtime_entry 异常包裹）仍在待办区。
+- 评审代理 D 组的"question_box 无默认按钮参数"（Mimics API 限制，
+  无法从脚本侧控制焦点默认）与"点集丢弃/完成无确认"（按钮文案已
+  明确、反馈可见，加确认反而多一次点击）判为非缺陷，不入账。
