@@ -3164,6 +3164,20 @@ class TestConfigEditor(unittest.TestCase):
             # Status names the skipped file so the user is not confused by
             # a partial save reported as a full success.
             self.assertIn(broken, editor.status.text())
+            # Rollback must also leave the broken file alone: the backup
+            # skips files that failed to load, otherwise restoring would
+            # overwrite the hand-recoverable raw JSON with an empty object.
+            editor._rollback()
+            with open(
+                os.path.join(sandbox, broken), "r", encoding="utf-8"
+            ) as handle:
+                self.assertEqual(handle.read(), '{"model_dir": "D:/old",,,,}')
+            backup_data = json.loads(
+                (Path(self.tmp) / "cfg_backup" / "latest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertNotIn(broken, backup_data)
             editor.window.close()
         finally:
             self.editor.ROOT = saved_root

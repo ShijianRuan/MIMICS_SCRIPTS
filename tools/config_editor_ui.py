@@ -336,6 +336,12 @@ class ConfigEditor:
             BACKUP_DIR.mkdir(parents=True, exist_ok=True)
             backup = {}
             for file_name in self.widgets:
+                if file_name in self._load_errors:
+                    # Broken on load: _load() would record {} for it, and a
+                    # later rollback would overwrite the (still hand-
+                    # recoverable) raw file with an empty object. The
+                    # rollback skips files absent from the backup.
+                    continue
                 backup[file_name] = self._load(ROOT / file_name)
             (BACKUP_DIR / "latest.json").write_text(
                 json.dumps(backup, indent=2, ensure_ascii=False), encoding="utf-8"
