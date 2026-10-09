@@ -5486,20 +5486,32 @@ helper import、不可达重复 return、多余 stylesheet 规则。
 - 定向组全绿：health 10/10、window_level 8/8、flexict 12/12、
   remote 133/133、portability 22/22、nninteractive+bridge 149/149、
   fake_mimics_flow nninteractive/imports/window 7/7。
-- fast 门禁：见工件（本轮报告补记）。
+- fast 门禁 29/29 绿（含堆损坏修复后复跑）：`20261010T010151_fast.json`。
 - 复杂度：+743/−270 净 +473（账本已记行）。
 
 ### 调试插曲（记录供回溯）
 
-GUI 冒烟 heap 崩溃（0xc0000374）首测误判为确定性——单独跑与小组
-跑全过，14 用例组 ~70% 崩。二分到基线 commit 复现才确认是 pre-
-existing 概率性缺陷。期间一次 git stash pop 弹出了 8 月的旧 stash
-（当时工作已 commit、stash 为空误判），reset --hard + 清理 stash
-残留（external/ 已 gitignore、remote/Dockerfile.patch 无引用），
-旧 stash 条目仍保留在 stash 列表中未动。
+GUI 冒烟 heap 崩溃（0xc0000374）：首测误判为确定性——单独跑与小组
+跑全过，14 用例组 ~70% 崩，且在 5541e69 上 5/5 确定性复现（3 类
+最小组合 = ModelManager + ActiveLearning + Clamp）。负对照排除
+model_manager 异步对话框改动后，整树二分锁定 5541e69；再对该
+commit 的三个 hunk 逐一隔离：**实例级 closeEvent 赋值本身是触发源**
+（no-op 处理器同样 3/3 崩，仅删 6 行接线后 5/5 绿，离线程扫描修复
+保留）。PySide6 中给 QMainWindow 实例属性遮蔽 C++ 虚函数会使
+wrapper 经引用循环延迟到 GC 销毁，在测试的创建/销毁循环里与 Qt
+自身的析构竞态。AL 窗口在生产中自带事件循环（关闭即退出），接线
+是投机性防御而非已观察缺陷，按改动最小化删除（1389b76）。期间一次
+git stash pop 弹出了 8 月的旧 stash（当时工作已 commit、stash 为空
+误判），reset --hard + 清理 stash 残留（external/ 已 gitignore、
+remote/Dockerfile.patch 无引用），旧 stash 条目仍保留在 stash
+列表中未动。
 
 ### 遗留登记
 
+- R75-15（1389b76）：AL 窗口实例级 closeEvent 遮蔽触发堆损坏
+  （见调试插曲）；净 −7 行，test_import_worker 同步改驱动
+  _import_bundle_from（异步对话框在辅助进程运行，进程内 mock
+  永不触发）。
 - R73-4（run_runtime_entry 异常包裹）仍在待办区。
 - 评审代理 D 组的"question_box 无默认按钮参数"（Mimics API 限制，
   无法从脚本侧控制焦点默认）与"点集丢弃/完成无确认"（按钮文案已
