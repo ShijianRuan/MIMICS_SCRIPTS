@@ -124,6 +124,13 @@ def main():
     status.setObjectName("hint")
     status.setWordWrap(True)
     root.addWidget(status)
+
+    def set_status(message, error=False):
+        # Same one-place error coloring as the other tool windows: a
+        # failed read must not look like a normal hint.
+        status.setObjectName("errorLabel" if error else "hint")
+        status.setText(message)
+
     actions = QtWidgets.QHBoxLayout()
     actions.addStretch(1)
     cancel = QtWidgets.QPushButton("取消")
@@ -165,14 +172,14 @@ def main():
             "Segmentation files (*.nii *.nii.gz *.mha *.mhd *.nrrd *.seg.nii *.seg.nii.gz);;All files (*)",
             add_paths,
             button=add_files,
-            error_callback=lambda message: status.setText(message),
+            error_callback=lambda message: set_status(message, error=True),
         )
 
     def paste_paths():
         raw = QtWidgets.QApplication.clipboard().text()
         values = [line.strip() for line in raw.replace("\r", "\n").split("\n") if line.strip()]
         if not values:
-            status.setText("剪贴板中没有路径。")
+            set_status("剪贴板中没有路径。")
             return
         add_paths(values)
 
@@ -185,7 +192,7 @@ def main():
     def finish():
         paths = [path for path in current_paths() if path]
         if not paths:
-            status.setText("请至少选择一个分割文件。")
+            set_status("请至少选择一个分割文件。", error=True)
             return
         state["submitted"] = True
         write_json(status_path, {

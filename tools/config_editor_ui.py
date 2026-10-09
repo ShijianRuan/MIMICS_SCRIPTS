@@ -34,100 +34,95 @@ BACKUP_DIR = ROOT / ".mimics_runtime" / "config_backups"
 CONFIG_SCHEMAS: dict[str, dict[str, tuple]] = {
     "mimics_io_config.json": {
         "mimics_output_dir": (
-            "Default .mcs output folder", "str",
-            "Empty = <dataset>/mcs_output. Absolute or relative to the "
-            "project root. Imports still ask when the folder is busy.",
+            "默认 .mcs 输出文件夹", "str",
+            "留空 = <数据集>/mcs_output。可用绝对或相对项目根目录的路径；"
+            "文件夹被占用时导入仍会询问。",
         ),
         "mimics_background_exe": (
-            "Background Mimics executable", "str",
-            "Path to materialise.exe used for .mcs creation. Empty = "
-            "auto-detect from the running Mimics.",
+            "后台 Mimics 可执行文件", "str",
+            "生成 .mcs 用的 materialise.exe 路径。留空 = 自动检测"
+            "正在运行的 Mimics。",
         ),
     },
     "nninteractive_config.json": {
         "device": (
-            "Inference device", "choice",
-            "auto = pick the first free GPU; cpu forces CPU. Use cpu when "
-            "the GPU is needed by a training job.",
+            "推理设备", "choice",
+            "auto = 选第一个空闲 GPU；cpu = 强制用 CPU。训练占用 GPU 时"
+            "建议选 cpu。",
         ),
         "auto_start_server": (
-            "Auto-start the model server", "bool",
-            "Start the nnInteractive server automatically when an "
-            "annotation session begins.",
+            "自动启动模型服务", "bool",
+            "标注会话开始时自动启动 nnInteractive 服务。",
         ),
         "existing_mask_result_mode": (
-            "Existing Mask result mode", "choice",
-            "ask = always ask what to do with the selected Mask; replace = "
-            "update it in place; copy = always create an editable copy.",
+            "已有 Mask 的结果模式", "choice",
+            "ask = 每次询问如何处理所选 Mask；replace = 原地更新；"
+            "copy = 总是创建可编辑副本。",
         ),
         "server_idle_timeout_seconds": (
-            "Server idle timeout (s)", "int",
-            "The model server shuts down after this many idle seconds.",
+            "服务空闲超时（秒）", "int",
+            "模型服务空闲超过该秒数后自动退出。",
         ),
         "keep_server_warm_after_session": (
-            "Keep server warm after session", "bool",
-            "Keep the server alive between annotation sessions so the next "
-            "session starts faster.",
+            "会话结束后保留模型服务", "bool",
+            "标注会话之间保留模型服务，下次会话启动更快。",
         ),
         "minimum_free_gpu_memory_gb": (
-            "Minimum free GPU memory (GB)", "int",
-            "Annotation sessions refuse to start when the GPU has less "
-            "free memory than this.",
+            "最低空闲显存（GB）", "int",
+            "GPU 空闲显存低于该值时，标注会话拒绝启动。",
         ),
     },
     "nninteractive_finetune_config.json": {
         "default_epochs": (
-            "Default training epochs", "int",
-            "Epochs for a fine-tuning run (allowed range comes from "
-            "minimum_epochs/maximum_epochs).",
+            "默认训练轮数", "int",
+            "微调训练的轮数（允许范围由 minimum_epochs/maximum_epochs"
+            "决定）。",
         ),
         "default_validation_fraction": (
-            "Validation fraction", "float",
-            "Share of cases held out for validation during training.",
+            "验证集比例", "float",
+            "训练时留作验证的病例占比。",
         ),
         "job_retention_days": (
-            "Job retention (days)", "int",
-            "Finished fine-tuning jobs older than this are swept.",
+            "任务保留天数", "int",
+            "超过该天数的已完成微调任务会被清理。",
         ),
         "keep_failed_training_artifacts": (
-            "Keep failed training artifacts", "bool",
-            "Keep the training work folder after a failed run for "
-            "diagnosis instead of cleaning it up.",
+            "保留失败训练产物", "bool",
+            "微调失败后保留训练工作目录以便排查，而不是直接清理。",
         ),
     },
     "flexict_config.json": {
         "default_configuration": (
-            "Default configuration", "choice",
-            "2d, 3d_fullres, pair (2D+3D for active learning), or auto "
-            "(2d on small GPUs, pair otherwise).",
+            "默认配置", "choice",
+            "2d、3d_fullres、pair（主动学习用 2D+3D）或 auto"
+            "（小显存用 2d，否则用 pair）。",
         ),
         "default_epochs": (
-            "Default training epochs", "int",
-            "Epochs for FlexiCT fine-tuning. 150 is the validated recipe.",
+            "默认训练轮数", "int",
+            "FlexiCT 微调轮数。150 为已验证配方。",
         ),
         "default_val_cases": (
-            "Validation cases", "int",
-            "Cases held out for validation when a split is needed.",
+            "验证病例数", "int",
+            "需要划分时留作验证的病例数。",
         ),
         "job_retention_days": (
-            "Job retention (days)", "int",
-            "Finished FlexiCT jobs older than this are swept.",
+            "任务保留天数", "int",
+            "超过该天数的已完成 FlexiCT 任务会被清理。",
         ),
         "pretrained_weights_dir": (
-            "Pretrained weights folder", "str",
-            "Optional override for the FlexiCT backbone weights folder. "
-            "Empty = use the bundled integrations/flexict-finetune/weights.",
+            "预训练权重文件夹", "str",
+            "可选：覆盖 FlexiCT 主干权重文件夹。留空 = 用内置的"
+            "integrations/flexict-finetune/weights。",
         ),
     },
     "interactive_algorithms_config.json": {
         "scribbleprompt.timeout_seconds": (
-            "ScribblePrompt timeout (s)", "int",
-            "Give up waiting for a ScribblePrompt prediction after this "
-            "many seconds.",
+            "ScribblePrompt 超时（秒）", "int",
+            "等待 ScribblePrompt 预测超过该秒数后放弃。",
         ),
         "scribbleprompt.device": (
-            "ScribblePrompt device", "choice",
-            "cpu or cuda. CPU is slower but never competes with training.",
+            "ScribblePrompt 设备", "choice",
+            "cpu 或 cuda。CPU 较慢但不与训练抢 GPU。",
         ),
     },
 }
@@ -204,8 +199,7 @@ class ConfigEditor:
                     "⚠ {0} —— 本页字段留空显示；修复该文件后重开本窗口。"
                     "在修复之前，保存将跳过该文件，不会覆盖它。".format(load_error)
                 )
-                warn.setObjectName("hint")
-                warn.setStyleSheet("color: #b42318; font-weight: 600;")
+                warn.setObjectName("errorLabel")
                 warn.setWordWrap(True)
                 form.addRow(warn)
             self.widgets[file_name] = {}
@@ -238,6 +232,15 @@ class ConfigEditor:
         root.addWidget(self.status)
 
     # -- helpers ----------------------------------------------------------
+
+    def _set_status(self, text, error=False):
+        """One place for status coloring: an error must not look like a
+        normal hint — a failed save read as success means silent loss."""
+        self.status.setObjectName("errorLabel" if error else "hint")
+        self.status.setStyleSheet(
+            "color: #b42318; font-weight: 600;" if error else ""
+        )
+        self.status.setText(text)
 
     @staticmethod
     def _load(path: Path) -> dict:
@@ -320,8 +323,9 @@ class ConfigEditor:
             collected = self._collect(file_name)
             if isinstance(collected, tuple):
                 bad_key, _ = collected
-                self.status.setText(
-                    "{0}：'{1}' 必须是数字。".format(file_name, bad_key)
+                self._set_status(
+                    "{0}：'{1}' 必须是数字。".format(file_name, bad_key),
+                    error=True,
                 )
                 return
             updates[file_name] = collected
@@ -358,7 +362,7 @@ class ConfigEditor:
                 )
                 tmp.replace(path)
         except OSError as exc:
-            self.status.setText("无法保存：{0}".format(exc))
+            self._set_status("无法保存：{0}".format(exc), error=True)
             return
         self.rollback.setEnabled(True)
         self.status.setText(
@@ -385,7 +389,7 @@ class ConfigEditor:
                 )
                 tmp.replace(path)
         except (OSError, ValueError) as exc:
-            self.status.setText("回滚失败：{0}".format(exc))
+            self._set_status("回滚失败：{0}".format(exc), error=True)
             return
         # Reload the whole window state from disk.
         self.values = {}

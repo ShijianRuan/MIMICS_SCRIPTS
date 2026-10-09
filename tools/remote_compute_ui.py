@@ -271,6 +271,15 @@ class ServerProfilesDialog:
         self._reload_profiles(selected_profile_id)
         self._refresh_auth()
 
+    def _set_status(self, text, error=False):
+        """One place for status coloring: a failed save or connection
+        test must not read like a normal hint."""
+        self.status_label.setObjectName("errorLabel" if error else "hint")
+        self.status_label.setStyleSheet(
+            "color: #b42318; font-weight: 600;" if error else ""
+        )
+        self.status_label.setText(text)
+
     def exec(self) -> int:
         return int(self.dialog.exec())
 
@@ -493,7 +502,7 @@ class ServerProfilesDialog:
                 )
             return profile
         except Exception as exc:
-            self.status_label.setText("无法保存服务器配置：{}".format(exc))
+            self._set_status("无法保存服务器配置：{}".format(exc), error=True)
             return None
 
     def _test_connection(self, trust_unknown: bool = False) -> None:
@@ -561,7 +570,7 @@ class ServerProfilesDialog:
                 if isinstance(result, HostKeyChangedError)
                 else "连接失败"
             )
-            self.status_label.setText("{}: {}".format(prefix, result))
+            self._set_status("{}：{}".format(prefix, result), error=True)
             return
         gpu_rows = result.get("gpus") or []
         self._set_detected_gpus(gpu_rows)
@@ -594,9 +603,8 @@ class ServerProfilesDialog:
         try:
             profile = self._profile_values()
         except Exception as exc:  # noqa: BLE001 - surfaced in the dialog
-            self.status_label.setText(
-                "无法读取服务器配置：{}".format(exc)
-            )
+            self._set_status(
+                "无法读取服务器配置：{}".format(exc), error=True)
             return
         self.cache_button.setEnabled(False)
         self.status_label.setText("正在读取服务器上的数据集缓存...")
@@ -627,9 +635,8 @@ class ServerProfilesDialog:
         QtWidgets = self.QtWidgets
         self.cache_button.setEnabled(True)
         if error is not None:
-            self.status_label.setText(
-                "读取数据集缓存失败：{}".format(error)
-            )
+            self._set_status(
+                "读取数据集缓存失败：{}".format(error), error=True)
             return
         self.status_label.setText(
             "服务器上已缓存 {} 个数据集（相同数据再次提交会自动跳过上传）。"

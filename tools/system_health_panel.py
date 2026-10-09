@@ -373,6 +373,7 @@ def run(preview_path=""):
     sweep_btn = QtWidgets.QPushButton("清理失效状态")
     sweep_btn.setObjectName("primary")
     stop_btn = QtWidgets.QPushButton("停止全部自有服务")
+    stop_btn.setObjectName("dangerButton")
     actions.addWidget(refresh_btn)
     actions.addWidget(sweep_btn)
     actions.addWidget(stop_btn)
