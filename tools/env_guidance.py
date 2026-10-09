@@ -502,7 +502,6 @@ def show_dialog(project_root: Path | None = None, parent=None) -> int:
     if result == QtWidgets.QDialog.Rejected and recheck.underMouse():
         return show_dialog(root, parent)  # re-run detection and re-render
     return 0
-    return 0
 
 
 def main(argv=None) -> int:

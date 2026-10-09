@@ -22,11 +22,8 @@ for _candidate in (_HERE, _ROOT, os.path.join(_ROOT, "runtime_py35")):
         sys.path.insert(0, _candidate)
 
 from ui_theme import (
-    choose_existing_directory,
     choose_existing_directory_async,
-    choose_open_file,
     choose_open_file_async,
-    choose_open_files,
     configure_application,
     stylesheet as shared_stylesheet,
 )

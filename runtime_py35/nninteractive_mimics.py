@@ -38,8 +38,6 @@ BUTTON_LASSO = "套索"
 BUTTON_UNDO = "撤销"
 BUTTON_RESET = "重置"
 BUTTON_FINISH = "完成"
-BUTTON_FOREGROUND = "前景"
-BUTTON_BACKGROUND = "背景"
 BUTTON_INCLUDE_POINT = "添加包含点"
 BUTTON_EXCLUDE_POINT = "添加排除点"
 BUTTON_REMOVE_POINT = "删除上一个点"
@@ -1059,7 +1057,7 @@ def _select_session_masks(image, config, source_override=None):
     else:
         selected = [source_override]
     if len(selected) > 1:
-        raise RuntimeError("Select exactly one source or AI Draft Mask, then run nnInteractive again.")
+        raise RuntimeError("请只选择一个源 Mask 或 AI Draft Mask，然后重新运行 nnInteractive。")
     if not selected:
         target = _create_result_mask(image)
         _mark_ai_draft(target)
@@ -1087,11 +1085,10 @@ def _select_session_masks(image, config, source_override=None):
             except Exception:
                 bound_image = None
             if bound_image is None or not _same_object(bound_image, image):
-                raise RuntimeError("The selected Mask is not bound to the active image: {0}".format(error))
+                raise RuntimeError("所选 Mask 未绑定到当前激活的影像序列：{0}".format(error))
     elif not _same_object(source_image, image):
         raise RuntimeError(
-            "The selected Mask belongs to a different image set. "
-            "Activate its image set or select another Mask."
+            "所选 Mask 属于另一个影像序列。请激活其影像序列或选择其他 Mask。"
         )
 
     has_active_session = bool(_metadata_get(source, ASYNC_JOB_METADATA, ""))
@@ -2058,23 +2055,6 @@ def _make_mask_visible(mask):
         pass
 
 
-def _choose_sign():
-    answer = mimics.dialogs.question_box(
-        message=(
-            "前景表示该结构应被包含。\n"
-            "背景表示该结构应被排除。"
-        ),
-        buttons=BUTTON_FOREGROUND + ";" + BUTTON_BACKGROUND + ";" + BUTTON_CANCEL,
-        title=TITLE,
-        ui_blocking=True,
-    )
-    if answer == BUTTON_FOREGROUND:
-        return True
-    if answer == BUTTON_BACKGROUND:
-        return False
-    return None
-
-
 def _capture_point(image, include):
     try:
         coordinates = mimics.indicate_coordinate(
@@ -2955,6 +2935,22 @@ def _continue_session_prompt(
             _save_async_job(state)
             return False
         if action == BUTTON_RESET and state is not None:
+            # Reset discards every prompt in this session and restores the
+            # initial mask buffer — irreversible. Confirm first: the button
+            # sits right next to 撤销 in the same menu, and a slip would
+            # silently throw away all annotator prompts.
+            answer = mimics.dialogs.question_box(
+                message=(
+                    "重置将丢弃本 AI 会话中的全部 {0} 个提示，"
+                    "并把 AI 结果 Mask 恢复为会话开始时的初始内容。\n\n"
+                    "该操作无法撤销。是否重置？"
+                ).format(len(state.get("interactions") or [])),
+                buttons=BUTTON_RESET + ";" + BUTTON_CANCEL,
+                title=TITLE,
+                ui_blocking=True,
+            )
+            if answer != BUTTON_RESET:
+                return False
             state["interactions"] = []
             state["pending_sequence"] = None
             state["status"] = "ready"
@@ -2993,12 +2989,17 @@ def _continue_session_prompt(
         )
         pending_visual_objects = visual_objects
         if prompt is None:
-            mimics.dialogs.message_box(
-                "未提交任何 {0} 提示。\n\n"
-                "AI 预测未启动。".format(action),
-                title="nnInteractive 提示为空",
-                ui_blocking=False,
-            )
+            # A rejected box/lasso already explained itself in its own
+            # dialog; a second "no prompt submitted" box right after it is
+            # noise. Only announce the silent-cancel paths (user closed the
+            # indicator, discarded the point set).
+            if action not in (BUTTON_BOX, BUTTON_LASSO):
+                mimics.dialogs.message_box(
+                    "未提交任何 {0} 提示。\n\n"
+                    "AI 预测未启动。".format(action),
+                    title="nnInteractive 提示为空",
+                    ui_blocking=False,
+                )
             return False
         if state is None:
             state = _start_async_job(
@@ -3066,7 +3067,7 @@ def _continue_session_prompt(
 def _run_with_config(config):
     image = mimics.data.images.get_active()
     if image is None:
-        raise RuntimeError("Open a project and activate an image set before running nnInteractive.")
+        raise RuntimeError("请先打开项目并激活一个影像序列，然后再运行 nnInteractive。")
     buffer_owner = runtime_common.active_local_operation("mask_buffer_access")
     if buffer_owner:
         mimics.dialogs.message_box(
@@ -4131,26 +4132,49 @@ def _describe_async_worker_failure(worker, worker_status):
         timeout_seconds = worker.get("idle_timeout_seconds")
         if timeout_seconds is None:
             error = (
-                "The AI session was prepared, but no prompt result was produced before "
-                "the worker idle timeout. This usually means the worker expired while "
-                "waiting for a prompt, or the prompt command was submitted after the "
-                "worker had already exited."
+                "AI 会话已准备好，但在工作进程空闲超时之前没有产生提示结果。"
+                "这通常意味着进程在等待提示时超时退出，或提示命令在进程"
+                "退出后才提交。"
             )
         else:
             error = (
-                "The AI session was prepared, but no prompt result was produced before "
-                "the worker idle timeout ({0}s). This usually means the worker expired "
-                "while waiting for a prompt, or the prompt command was submitted after "
-                "the worker had already exited."
+                "AI 会话已准备好，但在工作进程空闲超时（{0} 秒）之前没有产生"
+                "提示结果。这通常意味着进程在等待提示时超时退出，或提示命令"
+                "在进程退出后才提交。"
             ).format(int(timeout_seconds))
     if not error:
-        error = "No result file was produced."
-    return stage, error
+        error = "没有生成结果文件。"
+    return _worker_stage_label(stage), error
+
+
+# Worker stages (written by nninteractive_bridge.py's --async-worker) in
+# annotator language; unknown values pass through untranslated so a new
+# pipeline stage is never silently blanked.
+_WORKER_STAGE_LABELS = {
+    "load_model_and_image": "加载模型和图像",
+    "waiting_for_prompt": "等待提示",
+    "prediction": "预测中",
+    "async_prediction": "预测中",
+    "waiting_for_mimics": "等待 Mimics 应用结果",
+    "initialize_or_predict": "准备会话",
+    "initialize_or_poll": "准备会话",
+    "close_requested": "正在关闭",
+    "parent_process_gone": "Mimics 已退出",
+    "idle_timeout": "空闲超时",
+    "closed": "已关闭",
+}
+
+
+def _worker_stage_label(stage):
+    text = str(stage or "").strip()
+    return _WORKER_STAGE_LABELS.get(text, text)
 
 
 def _show_async_running(target, state):
     worker = _async_worker_status(_async_state_worker_dir(state))
-    stage = worker.get("stage", worker.get("status", state.get("status", "running")))
+    stage = _worker_stage_label(
+        worker.get("stage", worker.get("status", state.get("status", "running")))
+    )
     answer = mimics.dialogs.question_box(
         message=(
             "nnInteractive 仍在后台运行。\n\n"
@@ -4558,7 +4582,11 @@ def _handle_async_result(image, target, state):
         if answer == BUTTON_RETRY:
             state["pending_sequence"] = None
             _enqueue_async_prediction(state, target, replay_all=True)
-            _show_async_running(target, state)
+            # No follow-up dialog here: the annotator just chose 重试 in a
+            # modal box; popping "仍在后台运行" on top of it is a second
+            # click for information the retry choice already implies. The
+            # monitor keeps polling and the menu re-opens when a result
+            # or failure lands.
             return "waiting"
         if answer == BUTTON_DISCARD_SESSION:
             _close_async_job(target, state, "prediction_failed_discarded")
@@ -4602,6 +4630,13 @@ def _handle_async_result(image, target, state):
             logging.WARNING,
             "nnInteractive result was not applied because the active project or image changed while prediction was running. "
             "The newly opened project was not modified; start a new AI session there if needed.",
+        )
+        mimics.dialogs.message_box(
+            "nnInteractive 预测已完成，但在其运行期间项目或影像发生了"
+            "变化，因此结果未应用（新打开的项目未被修改）。\n\n"
+            "如需在新项目中标注，请重新运行 nnInteractive 启动新的 AI 会话。",
+            title=TITLE,
+            ui_blocking=False,
         )
         _close_async_job(target, state, "active_project_changed")
         return "ready"
