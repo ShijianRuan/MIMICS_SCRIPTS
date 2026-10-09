@@ -301,7 +301,6 @@ class ActiveLearningWindow:
         self.new_button.clicked.connect(self._new_ranking_clicked)
         actions.addWidget(self.new_button)
         self.open_button = QtWidgets.QPushButton('打开并叠加')
-        self.open_button.setObjectName("primary")
         self.open_button.clicked.connect(self._open_and_overlay_selected)
         actions.addWidget(self.open_button)
         self.overlay_button = QtWidgets.QPushButton('叠加不确定度')
@@ -348,7 +347,12 @@ class ActiveLearningWindow:
         # timer only drains the result (铁律 1).
         self._running_scan_results: Queue = Queue()
         self._running_scan_pending = False
-        self.refresh()
+        # find_al_jobs stats every job directory — the same freeze the
+        # running-job scan already avoids. refresh() is now async: it
+        # scans on a worker thread and drains via the poll timer.
+        self._refresh_results: Queue = Queue()
+        self._refresh_pending = False
+        self._refresh_async()
         # The Mimics-side monitor reports outcomes by rewriting request
         # files; poll them so the table and status line follow along
         # without the annotator switching windows.
@@ -386,9 +390,9 @@ class ActiveLearningWindow:
         self.pool_edit.setPlaceholderText('未标注数据池（数据集文件夹，每例一个子目录）')
         layout.addWidget(QtWidgets.QLabel('数据池'), 0, 0)
         layout.addWidget(self.pool_edit, 0, 1)
-        browse = QtWidgets.QPushButton('浏览...')
-        browse.clicked.connect(self._browse_pool)
-        layout.addWidget(browse, 0, 2)
+        self.pool_browse_button = QtWidgets.QPushButton('浏览...')
+        self.pool_browse_button.clicked.connect(self._browse_pool)
+        layout.addWidget(self.pool_browse_button, 0, 2)
         self.pair_label = QtWidgets.QLabel('正在后台检查 2D+3D 模型对...')
         self.pair_label.setWordWrap(True)
         layout.addWidget(QtWidgets.QLabel('模型对'), 1, 0)
@@ -409,7 +413,7 @@ class ActiveLearningWindow:
             '选择未标注数据池',
             self.pool_edit.text().strip(),
             lambda value: self.pool_edit.setText(str(value)) if value else None,
-            button=self.start_run_button,
+            button=self.pool_browse_button,
         )
 
     def _start_pair_loading(self):
@@ -455,6 +459,14 @@ class ActiveLearningWindow:
         self.start_run_button.setEnabled(True)
 
     def _poll_background_results(self):
+        if self._refresh_pending:
+            try:
+                jobs = self._refresh_results.get_nowait()
+            except Empty:
+                pass
+            else:
+                self._refresh_pending = False
+                self._apply_jobs(jobs)
         if self._loading_pairs:
             try:
                 pair, error = self._pair_results.get_nowait()
@@ -678,7 +690,29 @@ class ActiveLearningWindow:
     # -- data ---------------------------------------------------------------
 
     def refresh(self):
-        self._jobs = find_al_jobs(self.workspace or None)
+        self._refresh_async()
+
+    def _refresh_async(self):
+        """Scan for completed runs off the GUI thread (铁律 1) and apply
+        the result via the poll timer — the same pattern the running-job
+        scan already uses."""
+        if self._refresh_pending:
+            return
+        self._refresh_pending = True
+
+        def scan():
+            try:
+                jobs = find_al_jobs(self.workspace or None)
+            except Exception:
+                jobs = []
+            self._refresh_results.put(jobs)
+
+        worker = threading.Thread(
+            target=scan, name="al-jobs-scan", daemon=True)
+        worker.start()
+
+    def _apply_jobs(self, jobs):
+        self._jobs = list(jobs or [])
         self.job_combo.blockSignals(True)
         self.job_combo.clear()
         for job in self._jobs:

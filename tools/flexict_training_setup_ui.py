@@ -286,10 +286,10 @@ class TrainingSetupWindow:
         training, form = self._surface("训练")
         self.configuration_combo = QtWidgets.QComboBox()
         for label, value in (
-            ("Automatic (3D pair on large GPUs, 2D otherwise)", "auto"),
-            ("2D slices", "2d"),
-            ("3D full resolution", "3d_fullres"),
-            ("2D + 3D pair (for active learning)", "pair"),
+            ("自动（大显存 GPU 用 3D 组合，否则 2D）", "auto"),
+            ("仅 2D（逐层切片）", "2d"),
+            ("仅 3D（全分辨率）", "3d_fullres"),
+            ("2D + 3D 成对模型（主动学习用）", "pair"),
         ):
             self.configuration_combo.addItem(label, value)
         self.configuration_combo.setToolTip(
@@ -451,7 +451,7 @@ class TrainingSetupWindow:
             self.label_edit.setText(selected[0])
         elif remembered.get("label_name"):
             self.label_edit.setText(str(remembered["label_name"]))
-        self._refresh_models()
+        self._refresh_models_async()
         # An empty case table on a pre-filled dataset path reads as "the path
         # is wrong" - it usually just means nobody pressed Rescan yet. Run
         # the existing background scan once when both path and label are
@@ -462,11 +462,29 @@ class TrainingSetupWindow:
         ):
             self._rescan_cases_async()
 
-    def _refresh_models(self):
-        QtWidgets = self.QtWidgets
+    def _refresh_models_async(self):
+        """load_models stats every model directory — run it off the GUI
+        thread (铁律 1) and apply via _poll_submission (kind "models")."""
+        if getattr(self, "_models_pending", False):
+            return
+        self._models_pending = True
         workspace = self.workspace_edit.text().strip()
+
+        def scan():
+            try:
+                self._dataset_id_results.put(
+                    ("models", load_models(workspace), ""))
+            except Exception as exc:
+                self._dataset_id_results.put(("models", None, str(exc)))
+
+        worker = threading.Thread(target=scan, name="flexict-model-scan")
+        worker.daemon = True
+        worker.start()
+
+    def _apply_models(self, models):
+        QtWidgets = self.QtWidgets
         self.models_table.setRowCount(0)
-        for model in load_models(workspace):
+        for model in models:
             usable, _why = model_usability(model)
             row = self.models_table.rowCount()
             self.models_table.insertRow(row)
@@ -635,7 +653,10 @@ class TrainingSetupWindow:
         else:
             self._scan_pending = False
             self.rescan_button.setEnabled(True)
-            if kind == "scan":
+            if kind == "models":
+                self._models_pending = False
+                self._apply_models(payload or [])
+            elif kind == "scan":
                 if error:
                     self._set_status(error, error=True)
                 else:
