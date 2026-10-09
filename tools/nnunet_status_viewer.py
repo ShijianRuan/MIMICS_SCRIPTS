@@ -32,6 +32,11 @@ from ui_theme import (  # noqa: E402
 )
 
 # P3-1: 作业状态词对标注者显示为中文（此前是 "Uploading" 这类英文标题体）。
+# "最近运行"列表行同样用这两个映射（此前是 "Training · Completed" 英文）。
+_KIND_LABELS = {
+    "train": "训练",
+    "infer": "预测",
+}
 _STATUS_LABELS = {
     "running": "运行中",
     "launching": "启动中",
@@ -55,7 +60,7 @@ _STATUS_LABELS = {
     "abandoned": "已放弃",
     "unknown": "未知",
 }
-from viewer_refresh import BackgroundRefresh  # noqa: E402
+from viewer_refresh import BackgroundRefresh, read_log_tail  # noqa: E402
 
 
 def _format_time(value):
@@ -218,6 +223,7 @@ class StatusWindow:
         self.window.setCentralWidget(central)
         self._job_rows = []
         self._model_rows = []
+        self._log_tail_cache = {}
         self._populate_tasks()
         # Periodic refresh collects off the GUI thread: list_jobs +
         # load_models + log tails can stall on a network workspace.
@@ -271,9 +277,18 @@ class StatusWindow:
 
     def _collect(self):
         """Snapshot everything the UI needs (runs on a worker thread)."""
+        models = load_models(self.workspace, include_missing=True)
+        # _validation_dice reads summary.json per fold per model; the log
+        # tails read up to 512 KiB per job. Do both here, on the worker
+        # thread, so the GUI thread never touches the workspace disk.
+        for model in models:
+            model["validation_dice"] = _validation_dice(model)
+        jobs = list_jobs(self.workspace)
+        for job in jobs:
+            job["_log_tail"] = read_log_tail(job, self._log_tail_cache)
         return {
-            "jobs": list_jobs(self.workspace),
-            "models": load_models(self.workspace, include_missing=True),
+            "jobs": jobs,
+            "models": models,
         }
 
     def refresh(self, snapshot=None):
@@ -298,8 +313,12 @@ class StatusWindow:
         for index, row in enumerate(rows):
             label = "{} · {} · {}".format(
                 _format_time(row.get("created_at_epoch")),
-                str(row.get("kind") or "task").title(),
-                str(row.get("status") or "unknown").replace("_", " ").title(),
+                _KIND_LABELS.get(
+                    str(row.get("kind") or ""),
+                    str(row.get("kind") or "任务")),
+                _STATUS_LABELS.get(
+                    str(row.get("status") or ""),
+                    str(row.get("status") or "未知").replace("_", " ")),
             )
             self.jobs.addItem(label)
             if str(row.get("status_path") or "") == current_status_path:
@@ -332,7 +351,7 @@ class StatusWindow:
                     str(label.get("name") or "")
                     for label in model.get("labels") or []
                 ),
-                _validation_dice(model) or "-",
+                str(model.get("validation_dice") or "") or "-",
                 _format_time(model.get("created_at_epoch")),
                 source,
                 "可用" if usable else "不可用",
@@ -398,18 +417,12 @@ class StatusWindow:
         # replace its checkpoints, so one-click retry is intentionally limited
         # to interrupted or failed work.
         self.retry_button.setEnabled(state in {"failed", "cancelled"})
-        log_path = Path(str(status.get("log_path") or ""))
         scrollbar = self.log_view.verticalScrollBar()
         follow_tail = scrollbar.value() >= scrollbar.maximum() - 4
-        text = ""
-        if log_path.is_file():
-            try:
-                with log_path.open("rb") as handle:
-                    handle.seek(max(0, log_path.stat().st_size - 512 * 1024))
-                    text = handle.read().decode("utf-8", "replace")
-            except OSError as exc:
-                text = "无法读取日志：{}".format(exc)
-        self.log_view.setPlainText(text)
+        # The tail itself is read on the collect worker thread (see
+        # _collect) — the GUI thread only paints it.
+        self.log_view.setPlainText(
+            str(status.get("_log_tail") or ""))
         if follow_tail:
             scrollbar.setValue(scrollbar.maximum())
         self._show_curve(status)
@@ -466,7 +479,10 @@ class StatusWindow:
                 abandon_job(status["status_path"])
             else:
                 stop_job(status["status_path"])
-            self.refresh()
+            # Post-action refresh goes through the background
+            # refresher: _collect() stats every job directory and can
+            # stall the GUI thread on a network workspace (铁律 1).
+            self.refresher.request()
 
     def _reattach(self):
         index = self.jobs.currentRow()
@@ -475,7 +491,10 @@ class StatusWindow:
         status = self._job_rows[index]
         try:
             reattach_job(status["status_path"])
-            self.refresh()
+            # Post-action refresh goes through the background
+            # refresher: _collect() stats every job directory and can
+            # stall the GUI thread on a network workspace (铁律 1).
+            self.refresher.request()
         except Exception as exc:
             self.QtWidgets.QMessageBox.critical(
                 self.window, "重新挂接失败", str(exc)
@@ -490,7 +509,10 @@ class StatusWindow:
         request.pop("job_id", None)
         try:
             create_job(request)
-            self.refresh()
+            # Post-action refresh goes through the background
+            # refresher: _collect() stats every job directory and can
+            # stall the GUI thread on a network workspace (铁律 1).
+            self.refresher.request()
         except Exception as exc:
             self.QtWidgets.QMessageBox.critical(
                 self.window, "重试失败", str(exc)

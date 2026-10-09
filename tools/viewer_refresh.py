@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import queue
 import threading
+from pathlib import Path
 
 
 class BackgroundRefresh:
@@ -154,3 +155,33 @@ class BackgroundRefresh:
             return
         if result is not None:
             self._apply(result)
+
+
+def read_log_tail(status, cache):
+    """Last 512 KiB of a job log, cached by (path, size, mtime).
+
+    Called from the collect worker thread: reading a training log on a
+    network workspace can stall, so the GUI thread must never do it. The
+    cache means finished jobs (whose logs never change) are read once,
+    not on every refresh tick.
+    """
+    path = Path(str(status.get("log_path") or ""))
+    try:
+        st = path.stat()
+    except OSError:
+        return ""
+    if not path.is_file():
+        return ""
+    key = (str(path), st.st_size, st.st_mtime)
+    if key in cache:
+        return cache[key]
+    try:
+        with path.open("rb") as handle:
+            handle.seek(max(0, st.st_size - 512 * 1024))
+            text = handle.read().decode("utf-8", "replace")
+    except OSError as exc:
+        return "无法读取日志：{}".format(exc)
+    if len(cache) >= 64:
+        cache.clear()
+    cache[key] = text
+    return text
