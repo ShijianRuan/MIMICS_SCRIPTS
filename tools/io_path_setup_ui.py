@@ -585,6 +585,14 @@ def run_ui(context, preview_path=""):
     export_mask_row.addWidget(mask_named)
     export_mask_row.addStretch(1)
     form.addLayout(export_mask_row)
+    # Exclusive groups are per-parent-widget: without an explicit
+    # QButtonGroup the mask pair and the conflict-policy pair below share
+    # the panel as their parent and clicking one pair silently unchecks the
+    # other (the export then falls back to "all masks" + whatever conflict
+    # policy survived — a data-destructive silent default).
+    mask_group = QtWidgets.QButtonGroup(panel)
+    mask_group.addButton(mask_all)
+    mask_group.addButton(mask_named)
     # Editable name field: the user can either type names directly
     # (comma-separated) or pick from the candidate list below.  Clicking a
     # candidate toggles it into the field, so a project with hundreds of
@@ -638,6 +646,9 @@ def run_ui(context, preview_path=""):
     policy_row.addWidget(skip_radio)
     policy_row.addWidget(overwrite_radio)
     form.addLayout(policy_row)
+    policy_group = QtWidgets.QButtonGroup(panel)
+    policy_group.addButton(skip_radio)
+    policy_group.addButton(overwrite_radio)
     # P1 multi-format export: one or more formats per export, all sharing
     # identical geometry. NIfTI stays the default so historical behaviour
     # is unchanged unless the user opts in.

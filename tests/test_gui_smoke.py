@@ -1230,6 +1230,41 @@ class TestIoPathSetupDebounce(unittest.TestCase):
         self.assertEqual(QtCore.Qt.Unchecked, widget.item(0).checkState())
         self.assertEqual(QtCore.Qt.Checked, widget.item(1).checkState())
 
+    def test_export_radio_pairs_do_not_cross_uncheck(self):
+        # R75 P1: the mask pair and the conflict-policy pair both lived on
+        # the same panel, so radio auto-exclusivity spanned both groups —
+        # clicking one pair silently unchecked the other and the export
+        # fell back to "all masks" + whatever policy survived. Each pair
+        # must be wrapped in its own QButtonGroup.
+        source = (ROOT / "tools" / "io_path_setup_ui.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("mask_group = QtWidgets.QButtonGroup", source)
+        self.assertIn("policy_group = QtWidgets.QButtonGroup", source)
+
+        # Behavioral check: two pairs in one shared parent, each in its own
+        # QButtonGroup — clicking across pairs must not uncheck.
+        from PySide6 import QtWidgets
+        app = _AppFixture.app()
+        panel = QtWidgets.QWidget()
+        pair_a = [QtWidgets.QRadioButton("全部 Mask", panel),
+                  QtWidgets.QRadioButton("选定的名称", panel)]
+        pair_b = [QtWidgets.QRadioButton("跳过已存在", panel),
+                  QtWidgets.QRadioButton("覆盖已存在", panel)]
+        group_a = QtWidgets.QButtonGroup(panel)
+        group_b = QtWidgets.QButtonGroup(panel)
+        for button in pair_a:
+            group_a.addButton(button)
+        for button in pair_b:
+            group_b.addButton(button)
+        pair_a[0].setChecked(True)
+        pair_b[0].setChecked(True)
+        # Simulate the user clicking the other pair's button.
+        pair_b[1].click()
+        self.assertTrue(pair_a[0].isChecked(),
+                        "mask pair must survive a policy-pair click")
+        self.assertTrue(pair_b[1].isChecked())
+
 
 class TestIoPathOutputNotSticky(unittest.TestCase):
     """R61-7: a remembered output folder that was merely the computed

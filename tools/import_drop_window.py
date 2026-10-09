@@ -867,16 +867,35 @@ def run(context=None, preview_path=""):
 
     def add_paths(values):
         cleaned = []
+        invalid = []
         for value in values or []:
             text = str(value).strip().strip('"')
             if not text:
                 continue
             expanded = os.path.abspath(os.path.expandvars(os.path.expanduser(text)))
-            if os.path.exists(expanded) and expanded not in cleaned:
-                cleaned.append(expanded)
+            if os.path.exists(expanded):
+                if expanded not in cleaned:
+                    cleaned.append(expanded)
+            else:
+                invalid.append(text)
+        if invalid and not cleaned:
+            # Every pasted/dropped path failed to resolve: silently doing
+            # nothing reads as "the window is broken" (the user pasted
+            # something, nothing happened). Name the offenders.
+            set_recognition(
+                "以下路径不存在或不可访问：\n{0}".format("\n".join(invalid[:5])),
+                True,
+            )
+            return
         if not cleaned:
             return
         touch()
+        if invalid:
+            # Mixed input: import the valid paths, but never swallow the
+            # fact that some were dropped (half a dataset is data loss).
+            set_recognition(
+                "已跳过不存在的路径：{0}".format("、".join(invalid[:5])), True
+            )
         analyze(cleaned)
 
     # -- Drag & drop ------------------------------------------------------
@@ -1012,7 +1031,17 @@ def run(context=None, preview_path=""):
         touch()
         kind = state["kind"]
         source = state["source"] or (state["paths"][0] if state["paths"] else "")
-        output = os.path.abspath(os.path.expanduser(output_edit.text().strip()))
+        raw_output = output_edit.text().strip()
+        if not raw_output:
+            # abspath("") is the process cwd (the project root) — without
+            # this gate a cleared output field silently dumps .mcs files
+            # and runtime state into the project directory.
+            QtWidgets.QMessageBox.warning(
+                window, "缺少输出文件夹",
+                "请先填写输出根目录（或清空后重新拖入病例以恢复默认值）。",
+            )
+            return
+        output = os.path.abspath(os.path.expanduser(raw_output))
         mask_selection = "none" if mask_none.isChecked() else "all"
         picked = _picked_mask_names()
         if picked:

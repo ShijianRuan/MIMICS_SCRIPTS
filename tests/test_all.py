@@ -12288,6 +12288,27 @@ class TestImportDropWindow(unittest.TestCase):
         self.assertIn("_picked_mask_names", source)
         self.assertIn("mask_named", source)
 
+    def test_invalid_pasted_paths_are_reported_not_silent(self):
+        # R75 P1: pasting a path that does not resolve did nothing at all —
+        # the add_paths filter dropped it without a word ("点了没反应").
+        # Every invalid path must be named back to the user.
+        import import_drop_window as dw
+        source = inspect.getsource(dw)
+        self.assertIn("以下路径不存在或不可访问", source)
+        self.assertIn("已跳过不存在的路径", source)
+
+    def test_empty_output_path_blocks_submit(self):
+        # R75 P1: abspath("") is the process cwd (the project root) — a
+        # cleared output field silently dumped .mcs files and runtime state
+        # into the project directory. The submit gate must reject it.
+        import import_drop_window as dw
+        source = inspect.getsource(dw)
+        self.assertIn("缺少输出文件夹", source)
+        # The gate must run BEFORE the abspath fallback can mint a value.
+        gate_pos = source.index("缺少输出文件夹")
+        abspath_pos = source.index("os.path.abspath(os.path.expanduser(raw_output))")
+        self.assertLess(gate_pos, abspath_pos)
+
     def test_single_case_worker_errors_are_chinese(self):
         # P2-3: 该 worker 的 error/message 字段会原样显示在批量状态表里，
         # 英文报错对标注者不可读。锁定所有用户可见文案为中文，防止回退。
