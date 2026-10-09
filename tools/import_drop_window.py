@@ -785,6 +785,8 @@ def run(context=None, preview_path=""):
             return
         kind = payload["kind"]
         source = payload["source"]
+        state["kind"] = kind
+        state["source"] = source
         paths = list(state["paths"])
         if kind == "batch":
             result = payload.get("batch_summary")
@@ -917,7 +919,9 @@ def run(context=None, preview_path=""):
             set_recognition("")
             return
         state["paths"] = paths
-        state["kind"], state["source"], _children = classify_payload(paths)
+        # kind/source are set by _apply_scan_result when the scan lands
+        # (classify_payload does real filesystem probing and must not run
+        # on the GUI thread). submit stays disabled until then.
         scan_generation["value"] += 1
         generation = scan_generation["value"]
         submit.setEnabled(False)  # re-enabled when the scan lands
@@ -1197,37 +1201,6 @@ def run(context=None, preview_path=""):
         worker = threading.Thread(
             target=_launch, name="drop-submit", daemon=True)
         worker.start()
-        # Remember for next time (same state file as the path-setup UI).
-        remembered["drop_import"] = {
-            "output_path": output,
-            "mask_selection": mask_selection,
-            # True only when the user typed/picked a folder different from
-            # the computed default; a default must not stick (R61-7).
-            "output_custom": bool(
-                os.path.normcase(output)
-                != os.path.normcase(
-                    io_ui.source_default_output(
-                        "import_batch" if kind == "batch" else "import_single",
-                        source,
-                    )
-                )
-            ),
-        }
-        try:
-            os.makedirs(os.path.dirname(state_file_path()), exist_ok=True)
-            write_json(state_file_path(), remembered)
-        except Exception:
-            pass
-        lines = ["{0}: {1}".format(name, status) for name, status in launched[:10]]
-        if len(launched) > 10:
-            lines.append("……其余 {0} 例".format(len(launched) - 10))
-        QtWidgets.QMessageBox.information(
-            window, "导入已开始",
-            "导入已开始：\n\n{0}\n\n任务在后台继续进行；Mimics 工程将生成于：\n{1}\n\n"
-            "进度可在 01_Data > 04_Task_Status 查看。".format("\n".join(lines), output),
-        )
-        state["submitted"] = True
-        analyze([])
 
     submit.clicked.connect(do_submit)
 
