@@ -5344,3 +5344,72 @@ ui_theme.py 在 tools/ 旁——Mimics 启动它们时 `import ui_theme` 失败�
 - `run_runtime_entry` 对 entry 函数无 try/except 包裹（异常会穿透进
   Mimics 脚本运行器）——按改动最小化原则登记 improvement_backlog
   待办，本轮不扩面。
+
+## R74（2026-10-09）：用户报告 Mask 选择两类问题 + 同类问题清扫
+
+用户报告："导入时 mask 不可选导出哪些 mask 是吗？导出 mask 时可选，
+但是选中一个就看不到其他的了导致一次只能选一个，等等好多类似的小
+问题，好好检查然后好好修"。
+
+### R74-1 P1：导出 Mask 选一个就看不到其他候选（commit 556e219）
+
+- **根因**：io_path_setup_ui 的 Mask 名称候选列表把 `textChanged`
+  直接接到过滤器。用户点击候选项 → `_toggle_name_in_field` 把该名称
+  setText 进名称框（程序化更新，非打字）→ 再次触发 textChanged →
+  过滤器把"刚点选的名称"当过滤词 → 其余候选全部 `setHidden(True)`。
+  用户视角：每选一个 Mask，其他 Mask 就消失，一次只能选一个。
+- **修复**：过滤回调加 `mask_names.hasFocus()` 门（仅用户实际聚焦
+  打字时过滤，程序化 setText 不触发）；`editingFinished`（离开输入框）
+  时清空过滤器，全量候选恢复可见，方便下一轮挑选。
+- **测试**：`test_candidate_click_keeps_other_candidates_visible`
+  （test_gui_smoke.py）——源码契约（hasFocus 门 + editingFinished
+  清过滤）+ 行为验证（无焦点点击式切换后全部候选仍可见；聚焦打字
+  仍实时过滤）。
+
+### R74-2 P1：导入时无法选择导入哪些 Mask（commit f11d0a1）
+
+- **发现**：worker（`single_case_import_worker._filter_masks`）早已
+  支持 "all"/"none"/逗号分隔名称清单（清单不匹配则整 case
+  fail-closed 报"没有匹配的分割文件"），但拖拽窗口只暴露"全部
+  Mask/仅图像"两个单选——能力存在、入口缺失。
+- **修复**：mask 单选行新增"选定的名称"第三选项；选中且自动发现到
+  Mask 时渐进展开可勾选清单（QListWidget + NoSelection + 可勾选项，
+  与导出侧同型）。多病例拖入时取各病例 mask 并集展示。**不勾任何项
+  = 导入全部**（清单是收窄装置，绝不静默丢 Mask）。submit 时拼逗号
+  清单交给既有 worker 通道——worker 零改动，无新增回归面。
+- **测试**：`test_mask_pick_narrows_selection_for_worker`
+  （test_all.py TestImportDropWindow）——_filter_masks 名称清单/全部
+  两路径 + 窗口源码契约（_picked_mask_names/mask_named 存在）。
+  TestImportDropWindow 30/30。
+
+### R74-3 同类问题清扫（无需修复项，结论存档）
+
+沿用户"等等好多类似的小问题"的要求，五条线全量审计：
+
+1. **过滤隐藏选择**：全部 `textChanged`→过滤器接线仅 2 处——
+   io_path_setup_ui（本轮修复）；nninteractive_task_model_center 的
+   `_apply_case_filters`（:1110）只按查询词 setRowHidden，且
+   case_filter_edit 全文件无程序化 setText 调用点，"选用"复选框状态
+   不受隐藏/显示影响——安全。
+2. **单选陷阱**：全部 `setSelectionMode` 用点检查——表格行选用
+   SingleSelection（合适），Mask 文件选择 ExtendedSelection 多选，
+   候选/挑选列表 NoSelection+可勾选（无 F24 歧义）。
+3. **对话框叠放**：R73-3 已修 path_dialog_helper 置顶；其余全部为
+   有父对话框（model_manager_ui、flexict_active_learning_ui 等
+   getOpenFileName/getSaveFileName 均传 parent）。
+4. **窗口尺寸**：R73-3 已修拖拽窗 640x660；其余窗口尺寸审计无异常。
+5. **崩溃**：Windows 事件日志复核无新崩溃模块（10-03 ucrtbase 已修
+   ui_theme QPainter，09-26 c10 历史）；全部外窗 hostile-cwd 启动
+   测试 OK（7 个启动脚本 + 12 个其他窗口，runpy hostile-cwd 模式）；
+   remote_compute_ui 的 ModuleNotFoundError 为误报（共享库模块，
+   消费者 import 前自行插 sys.path，消费方式验证 exit 0）。
+
+### 门禁与验证
+
+- 冒烟 8/8：`20261009T203630_smoke.json`。
+- fast 29/29：`20261009T204140_fast.json`。
+- 复杂度：+144/−4 净 +140（账本已记行）。
+
+### 遗留登记
+
+- 无新增。R73-4（run_runtime_entry 异常包裹）仍在待办区。

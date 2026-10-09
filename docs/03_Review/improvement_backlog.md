@@ -83,6 +83,38 @@
   防护缺口。最小方案：包裹 try/except → message_box 中文指引 + 返回
   非零。验收：mock 入口抛错 → 中文弹窗而非裸回溯；测试进回归套件。
 
+### P0/P1（2026-10-09 R74 用户报告：Mask 选择两类问题 + 同类问题清扫）
+
+- [x] **R74-1【P1】导出 Mask 选一个就看不到其他候选**〔R74 当轮解决，
+  commit `556e219`〕：io_path_setup_ui 的 Mask 名称候选列表把
+  `textChanged` 直接接到过滤器——点击候选项会把该名称写入名称框
+  （程序化 setText），再次触发 textChanged，过滤器把"刚点选的名称"
+  当成过滤词，其余候选全部隐藏，用户每次只能选一个。根因：过滤器
+  未区分"用户正在打字"与"程序化更新"。修复：过滤回调加
+  `hasFocus()` 门（仅用户实际打字时过滤），`editingFinished` 时清空
+  过滤器恢复全量候选。测试：`test_candidate_click_keeps_other_
+  candidates_visible`（源码契约 + 行为：无焦点点击式切换后全部候选
+  可见；聚焦打字仍过滤）。
+- [x] **R74-2【P1】导入时无法选择导入哪些 Mask**〔R74 当轮解决，commit
+  `f11d0a1`〕：worker（`single_case_import_worker._filter_masks`）早已
+  支持逗号分隔名称清单（不匹配则整 case fail-closed），但拖拽窗口
+  只有"全部/仅图像"两个选项。修复：mask 单选行新增"选定的名称"，
+  仅在自动发现到 Mask 时渐进展开可勾选清单（多病例取并集；不勾任何
+  项回落"全部"语义——清单是收窄装置，不是静默丢 Mask 的陷阱）。
+  submit 时拼逗号清单交给既有 worker 通道，worker 零改动。测试：
+  `test_mask_pick_narrows_selection_for_worker`（_filter_masks 名称
+  清单/全部两路径 + 窗口源码契约）。
+- [x] **R74-3【审计】同类问题清扫（R73 波次）**〔R74 当轮完成，见 R74
+  轮次报告〕：沿"过滤隐藏选择/单选陷阱/对话框叠放/窗口尺寸/崩溃"
+  五条线全量清扫：全部 `setSelectionMode` 用点合适（表格行选单选、
+  Mask 列表 NoSelection+可勾选或 ExtendedSelection）；全部 textChanged
+  →过滤器接线仅剩 2 处（io_path_setup_ui 已修、nninteractive_task_
+  model_center._apply_case_filters 只 setRowHidden 且 case_filter_edit
+  无程序化 setText——选用复选框状态不受过滤影响，安全）；对话框
+  全部有父或已置顶；全部外窗 hostile-cwd 启动 OK（7 个启动脚本 +
+  12 个其他窗口）；Windows 事件日志无新崩溃模块。无需修复项，
+  结论入轮次报告。
+
 - [x] **R61-4【P1】模型管理器死按钮**〔R62 解决，commit `aadd6e3`〕：
   根因确证——`_fill_table` 末尾无条件 `setEnabled(False)`，全文件无
   选中信号连接，`_use_clicked`/`_remove_clicked` 的完整逻辑（含 broken
