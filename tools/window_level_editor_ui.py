@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 import sys
 import time
 from pathlib import Path
@@ -142,6 +141,28 @@ class PresetEditor:
         else:
             self.keywords.clear()
 
+    def _set_status(self, text, error=False):
+        """One place for status coloring: an error must not stay red forever."""
+        self.status.setObjectName("errorLabel" if error else "hint")
+        self.status.setStyleSheet(
+            "color: #b42318; font-weight: 600;" if error else ""
+        )
+        self.status.setText(text)
+
+    def _reload_row(self, row):
+        """Re-render one row so cells match what the preset actually holds
+        (an int(float()) coercion or a rejected edit leaves the typed text
+        behind otherwise)."""
+        QtWidgets = self.QtWidgets
+        preset = self.presets[row]
+        signal = self.table.blockSignals(True)
+        try:
+            self.table.setItem(row, 0, QtWidgets.QTableWidgetItem(str(preset.get("name", ""))))
+            self.table.setItem(row, 1, QtWidgets.QTableWidgetItem(str(preset.get("width", ""))))
+            self.table.setItem(row, 2, QtWidgets.QTableWidgetItem(str(preset.get("level", ""))))
+        finally:
+            self.table.blockSignals(signal)
+
     def _cell_changed(self, item):
         row, column = item.row(), item.column()
         if row >= len(self.presets):
@@ -154,9 +175,15 @@ class PresetEditor:
             try:
                 self.presets[row][key] = int(float(text))
             except ValueError:
-                self.status.setText(
-                    '"{0}" is not a number; enter integer HU values.'.format(text)
+                # A rejected edit must not linger in the cell looking saved
+                # while the preset silently keeps its old value.
+                self._set_status(
+                    '“{0}”不是数字；请输入整数 HU 值。'.format(text), error=True
                 )
+                self._reload_row(row)
+                return
+            self._set_status("")
+            self._reload_row(row)
 
     def _show_keywords(self, row, _column):
         if 0 <= row < len(self.presets):
@@ -195,15 +222,16 @@ class PresetEditor:
         # Validate before touching the file.
         for index, preset in enumerate(self.presets):
             if not str(preset.get("name", "")).strip():
-                self.status.setText("第 {0} 行：名称为空。".format(index + 1))
+                self._set_status("第 {0} 行：名称为空。".format(index + 1), error=True)
                 return
             for key in ("width", "level"):
                 value = preset.get(key)
                 if not isinstance(value, int):
-                    self.status.setText(
+                    self._set_status(
                         "第 {0} 行：{1} 必须是整数 HU 值。".format(
                             index + 1, key
-                        )
+                        ),
+                        error=True,
                     )
                     return
         self._store_keywords()
@@ -211,11 +239,11 @@ class PresetEditor:
             write_backup(load_presets())
             save_presets(self.presets)
         except OSError as exc:
-            self.status.setText("无法写入预设：{0}".format(exc))
+            self._set_status("无法写入预设：{0}".format(exc), error=True)
             return
         self._original = [dict(row) for row in self.presets]
         self.rollback.setEnabled(True)
-        self.status.setText(
+        self._set_status(
             "已保存 {0} 个预设（{1}）。".format(
                 len(self.presets), time.strftime("%H:%M:%S")
             )
@@ -228,11 +256,11 @@ class PresetEditor:
             backup = load_presets(BACKUP_PATH)
             save_presets(backup)
         except OSError as exc:
-            self.status.setText("回滚失败：{0}".format(exc))
+            self._set_status("回滚失败：{0}".format(exc), error=True)
             return
         self.presets = [dict(row) for row in backup]
         self._reload()
-        self.status.setText("已回滚到上次保存的预设。")
+        self._set_status("已回滚到上次保存的预设。")
 
 
 def main(argv=None) -> int:

@@ -2996,6 +2996,39 @@ class TestWindowLevelEditor(unittest.TestCase):
         )
         editor.window.close()
 
+    def test_rejected_number_cell_snaps_back_to_model(self):
+        # Failure path: a non-numeric WW/WL edit must be reported as an
+        # error and the cell must snap back to the value the preset
+        # actually holds — the typed garbage must not linger looking saved.
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        import PySide6
+        from PySide6 import QtWidgets
+
+        app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(
+            ["test"]
+        )
+        editor = self.editor.PresetEditor(
+            (PySide6.QtCore, PySide6.QtGui, QtWidgets)
+        )
+        try:
+            row = editor.table.rowCount() - 1
+            if row < 0:
+                editor.presets.append(
+                    {"name": "T", "width": 400, "level": 50, "keywords": []}
+                )
+                editor._reload()
+                row = editor.table.rowCount() - 1
+            before = editor.presets[row]["width"]
+            editor.table.item(row, 1).setText("不是数字")
+            self.assertIn("不是数字", editor.status.text())
+            self.assertEqual("errorLabel", editor.status.objectName())
+            self.assertEqual(str(before), editor.table.item(row, 1).text())
+            # A later neutral status must clear the error styling.
+            editor._set_status("")
+            self.assertEqual("hint", editor.status.objectName())
+        finally:
+            editor.window.close()
+
 
 class TestConfigEditor(unittest.TestCase):
     """External config editor: schema wiring, nested get/set, validation."""

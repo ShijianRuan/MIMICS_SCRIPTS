@@ -380,12 +380,23 @@ def run(preview_path=""):
     root.addLayout(actions)
 
     def render(snapshot):
+        collect_error = str(snapshot.get("error") or "")
+        if collect_error:
+            # A failed collection must never render as "一切正常".
+            summary.setProperty("status", "bad")
+            summary.style().unpolish(summary)
+            summary.style().polish(summary)
+            summary.setText("状态收集失败：{0}".format(collect_error[:200]))
+            return
         live = [p for p in snapshot["processes"] if p["live"]]
         dead = [p for p in snapshot["processes"] if not p["live"]]
         stale_locks = [lk for lk in snapshot["locks"] if lk["stale"]]
         busy_queues = [q for q in snapshot["queues"] if q["state"] != "idle"]
         server = snapshot["server"]
 
+        summary.setProperty("status", "")
+        summary.style().unpolish(summary)
+        summary.style().polish(summary)
         if not live and not stale_locks and not busy_queues:
             summary_text = "一切正常——没有存活的自有进程，也没有失效的锁。"
         else:
