@@ -280,6 +280,46 @@ def _apply_batch_runtime_state(status, error, payload, source_path):
     return label, error
 
 
+# Annotator-facing labels for the worker phases that matter during a drop
+# import. Anything unknown keeps the raw phase so logs stay greppable.
+_PHASE_LABELS = {
+    "preparing": "准备数据",
+    "waiting_for_background_mimics": "等待后台 Mimics",
+    "creating_mcs": "生成工程文件",
+}
+
+_STATUS_LABELS = {
+    "running": "导入中",
+    "queued": "排队中",
+    "completed": "已完成",
+    "failed": "失败",
+    "cancelled": "已取消",
+    "unknown": "未知",
+}
+
+
+def format_recent_drop_line(entry, now_epoch=None):
+    """Render one recent-drop entry as the annotator-facing activity line.
+
+    Format: "14:32  病例名 — 导入中（准备数据）". The time prefix lets the
+    annotator tell this run from an older one; the phase in brackets says
+    WHERE the import is, not just that it is alive. Errors are moved into
+    the tooltip (double-click opens the full log anyway) so a long failure
+    reason no longer stretches the row into unreadable noise.
+    """
+    label = _STATUS_LABELS.get(entry["status"], entry["status"].title())
+    line = "{0}  {1} — {2}".format(
+        time.strftime("%H:%M", time.localtime(entry["updated_at_epoch"] or 0)),
+        entry["case_id"],
+        label,
+    )
+    phase = str(entry.get("phase") or "")
+    phase_label = _PHASE_LABELS.get(phase, phase)
+    if entry["status"] == "running" and phase_label:
+        line += "（{0}）".format(phase_label)
+    return line
+
+
 def collect_recent_drops(status_dir, limit=RECENT_DROP_LIMIT):
     """Summarize the newest drop-import status files for the activity list.
 
@@ -540,7 +580,8 @@ def run(context=None, preview_path=""):
     window = QtWidgets.QWidget()
     window.setWindowTitle("导入数据")
     window.setWindowFlags(QtCore.Qt.WindowStaysOnTopHint | QtCore.Qt.Tool)
-    window.setMinimumSize(420, 320)
+    window.resize(640, 660)
+    window.setMinimumSize(560, 480)
     root = QtWidgets.QVBoxLayout(window)
 
     title = QtWidgets.QLabel("导入数据")
@@ -980,26 +1021,18 @@ def run(context=None, preview_path=""):
     submit.clicked.connect(do_submit)
 
     # -- Recent drops polling ---------------------------------------------
-    _STATUS_LABELS = {
-        "running": "导入中",
-        "queued": "排队中",
-        "completed": "已完成",
-        "failed": "失败",
-        "cancelled": "已取消",
-        "unknown": "未知",
-    }
-
     def refresh_recent():
         status_dir = os.path.join(_ROOT, ".mimics_runtime", "drop_import")
         entries = collect_recent_drops(status_dir)
         recent_list.clear()
         for entry in entries:
-            label = _STATUS_LABELS.get(entry["status"], entry["status"].title())
-            line = "{0} - {1}".format(entry["case_id"], label)
-            if entry["error"]:
-                line += ": {0}".format(entry["error"])
-            item = QtWidgets.QListWidgetItem(line)
+            item = QtWidgets.QListWidgetItem(format_recent_drop_line(entry))
             item.setData(QtCore.Qt.UserRole, entry["log_path"])
+            # Long failure reasons live in the tooltip, not the row itself.
+            tip = "双击打开导入日志"
+            if entry["error"]:
+                tip = "{0}\n{1}".format(entry["error"], tip)
+            item.setToolTip(tip)
             if entry["status"] == "failed":
                 item.setForeground(QtGui.QColor(PALETTE["danger"]))
             elif entry["status"] == "completed":

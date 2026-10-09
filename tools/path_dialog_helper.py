@@ -63,7 +63,7 @@ def main():
     if not request or not status_path:
         raise RuntimeError("The path dialog request is missing or invalid.")
     try:
-        from PySide6 import QtWidgets
+        from PySide6 import QtCore, QtWidgets
 
         app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
         configure_application(app, "Mimics-Script Path Selection")
@@ -71,24 +71,31 @@ def main():
         title = str(request.get("title") or "Select Path")
         initial = str(request.get("initial") or Path.home())
         file_filter = str(request.get("file_filter") or "All files (*)")
+        # The caller is often an always-on-top window (the drop-import
+        # window), and this dialog lives in a separate process with no
+        # parent — without the hint the native dialog opens BELOW the
+        # always-on-top caller and looks like "nothing happened".
+        dialog_options = QtWidgets.QFileDialog.Options(
+            QtCore.Qt.WindowStaysOnTopHint
+        )
         if mode == "directory":
             selection = QtWidgets.QFileDialog.getExistingDirectory(
                 None,
                 title,
                 initial,
-                QtWidgets.QFileDialog.ShowDirsOnly,
+                QtWidgets.QFileDialog.ShowDirsOnly | dialog_options,
             )
         elif mode == "open_file":
             selection, _selected_filter = QtWidgets.QFileDialog.getOpenFileName(
-                None, title, initial, file_filter
+                None, title, initial, file_filter, options=dialog_options
             )
         elif mode == "open_files":
             selection, _selected_filter = QtWidgets.QFileDialog.getOpenFileNames(
-                None, title, initial, file_filter
+                None, title, initial, file_filter, options=dialog_options
             )
         elif mode == "save_file":
             selection, _selected_filter = QtWidgets.QFileDialog.getSaveFileName(
-                None, title, initial, file_filter
+                None, title, initial, file_filter, options=dialog_options
             )
         else:
             raise ValueError("Unsupported path dialog mode: {}".format(mode))
