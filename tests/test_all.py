@@ -3068,6 +3068,74 @@ class TestConfigEditor(unittest.TestCase):
         )
         editor.window.close()
 
+    def test_broken_config_file_never_rewritten_by_save(self):
+        """Failure path: an unparseable config must never be treated as an
+        empty config — saving would rewrite it down to schema keys and
+        silently destroy every undeclared key (data loss)."""
+        import PySide6
+        from PySide6 import QtWidgets
+
+        app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(
+            ["test"]
+        )
+        broken = "nninteractive_config.json"
+        intact = "flexict_config.json"
+        self.assertIn(broken, self.editor.CONFIG_SCHEMAS)
+        self.assertIn(intact, self.editor.CONFIG_SCHEMAS)
+        # Sandbox ROOT: real files copied over, one broken, one with an
+        # extra key. All schema files must exist or the other tabs fail
+        # numeric validation and save aborts before touching anything.
+        sandbox = os.path.join(self.tmp, "cfg_root")
+        os.makedirs(sandbox)
+        for name in self.editor.CONFIG_SCHEMAS:
+            shutil.copyfile(
+                os.path.join(PROJECT_ROOT, name), os.path.join(sandbox, name)
+            )
+        with open(
+            os.path.join(sandbox, broken), "w", encoding="utf-8"
+        ) as handle:
+            handle.write('{"model_dir": "D:/old",,,,}')  # trailing commas
+        with open(
+            os.path.join(sandbox, intact), "r", encoding="utf-8"
+        ) as handle:
+            intact_data = json.load(handle)
+        intact_data["extra_undeclared_key"] = 1
+        with open(
+            os.path.join(sandbox, intact), "w", encoding="utf-8"
+        ) as handle:
+            json.dump(intact_data, handle, ensure_ascii=False)
+        saved_root = self.editor.ROOT
+        saved_backup = self.editor.BACKUP_DIR
+        try:
+            self.editor.ROOT = Path(sandbox)
+            self.editor.BACKUP_DIR = Path(
+                os.path.join(self.tmp, "cfg_backup")
+            )
+            editor = self.editor.ConfigEditor(
+                (PySide6.QtCore, PySide6.QtGui, QtWidgets)
+            )
+            # Broken file is flagged, not silently treated as empty.
+            self.assertIn(broken, editor._load_errors)
+            editor._save()
+            # The broken file is untouched byte-for-byte.
+            with open(
+                os.path.join(sandbox, broken), "r", encoding="utf-8"
+            ) as handle:
+                self.assertEqual(handle.read(), '{"model_dir": "D:/old",,,,}')
+            # The intact file was saved and its undeclared key survived.
+            with open(
+                os.path.join(sandbox, intact), "r", encoding="utf-8"
+            ) as handle:
+                data = json.load(handle)
+            self.assertEqual(1, data.get("extra_undeclared_key"))
+            # Status names the skipped file so the user is not confused by
+            # a partial save reported as a full success.
+            self.assertIn(broken, editor.status.text())
+            editor.window.close()
+        finally:
+            self.editor.ROOT = saved_root
+            self.editor.BACKUP_DIR = saved_backup
+
 
 # ============================================================================
 # L6: create_mcs_batch.py

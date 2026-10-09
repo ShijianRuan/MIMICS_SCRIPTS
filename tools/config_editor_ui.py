@@ -190,14 +190,25 @@ class ConfigEditor:
 
         tabs = QtWidgets.QTabWidget()
         root.addWidget(tabs, 1)
+        self._load_errors: dict[str, str] = {}
         for file_name, schema in CONFIG_SCHEMAS.items():
             path = ROOT / file_name
-            data = self._load(path)
+            data, load_error = self._load_status(path)
             self.values[file_name] = data
             tab = QtWidgets.QWidget()
             form = QtWidgets.QFormLayout(tab)
             form.setContentsMargins(16, 14, 16, 14)
             form.setSpacing(10)
+            if load_error:
+                self._load_errors[file_name] = load_error
+                warn = QtWidgets.QLabel(
+                    "⚠ {0} —— 本页字段留空显示；修复该文件后重开本窗口。"
+                    "在修复之前，保存将跳过该文件，不会覆盖它。".format(load_error)
+                )
+                warn.setObjectName("hint")
+                warn.setStyleSheet("color: #b42318; font-weight: 600;")
+                warn.setWordWrap(True)
+                form.addRow(warn)
             self.widgets[file_name] = {}
             for key, (label, ftype, help_text) in schema.items():
                 widget = self._make_widget(
@@ -238,6 +249,26 @@ class ConfigEditor:
         except Exception:
             pass
         return {}
+
+    @staticmethod
+    def _load_status(path: Path) -> tuple[dict, str]:
+        """Load a config file, distinguishing "missing" from "broken".
+
+        A broken file (unparseable or non-dict) must never be treated as an
+        empty config: saving on top of that would silently rewrite the whole
+        file down to the schema keys, destroying every undeclared key. The
+        error string is non-empty exactly when the file exists but cannot be
+        loaded.
+        """
+        if not path.is_file():
+            return {}, ""
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return {}, "无法读取 {0}：{1}".format(path.name, exc)
+        if not isinstance(data, dict):
+            return {}, "无法读取 {0}：内容不是配置对象".format(path.name)
+        return data, ""
 
     def _make_widget(self, file_name, key, ftype, current):
         QtWidgets = self.QtWidgets
@@ -282,14 +313,26 @@ class ConfigEditor:
     def _save(self):
         updates = {}
         for file_name in self.widgets:
+            if file_name in self._load_errors:
+                # Broken on load: writing the (empty) parsed values back
+                # would rewrite the whole file down to the schema keys and
+                # destroy every undeclared key. Skip it, tell the user.
+                continue
             collected = self._collect(file_name)
             if isinstance(collected, tuple):
                 bad_key, _ = collected
                 self.status.setText(
-                    "{0}: '{1}' must be a number.".format(file_name, bad_key)
+                    "{0}：'{1}' 必须是数字。".format(file_name, bad_key)
                 )
                 return
             updates[file_name] = collected
+        if not updates:
+            self.status.setText(
+                "没有可保存的文件：{0}。请先修复上述文件。".format(
+                    "、".join(self._load_errors)
+                )
+            )
+            return
         try:
             BACKUP_DIR.mkdir(parents=True, exist_ok=True)
             backup = {}
@@ -310,12 +353,16 @@ class ConfigEditor:
                 )
                 tmp.replace(path)
         except OSError as exc:
-            self.status.setText("Could not save: {0}".format(exc))
+            self.status.setText("无法保存：{0}".format(exc))
             return
         self.rollback.setEnabled(True)
         self.status.setText(
-            "Saved {0} config file(s). Restart related windows/services to "
-            "apply.".format(len(updates))
+            "已保存 {0} 个配置文件。相关窗口或服务重启后生效。{1}".format(
+                len(updates),
+                "已跳过无法读取的：{0}。".format(
+                    "、".join(self._load_errors)
+                ) if self._load_errors else "",
+            )
         )
 
     def _rollback(self):
@@ -333,12 +380,16 @@ class ConfigEditor:
                 )
                 tmp.replace(path)
         except (OSError, ValueError) as exc:
-            self.status.setText("Roll back failed: {0}".format(exc))
+            self.status.setText("回滚失败：{0}".format(exc))
             return
         # Reload the whole window state from disk.
-        self.values = {
-            name: self._load(ROOT / name) for name in self.widgets
-        }
+        self.values = {}
+        self._load_errors = {}
+        for name in self.widgets:
+            data, load_error = self._load_status(ROOT / name)
+            self.values[name] = data
+            if load_error:
+                self._load_errors[name] = load_error
         self._rebuild_widgets()
         self.status.setText("已回滚到上次保存的值。")
 
