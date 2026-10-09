@@ -654,14 +654,30 @@ def run(context=None, preview_path=""):
 
     mask_row = QtWidgets.QHBoxLayout()
     mask_all = QtWidgets.QRadioButton("全部 Mask")
+    mask_named = QtWidgets.QRadioButton("选定的名称")
     mask_none = QtWidgets.QRadioButton("仅图像")
     remembered_masks = str(remembered_mode.get("mask_selection", "all") or "all")
     mask_none.setChecked(remembered_masks.lower() == "none")
     mask_all.setChecked(not mask_none.isChecked())
     mask_row.addWidget(mask_all)
+    mask_row.addWidget(mask_named)
     mask_row.addWidget(mask_none)
     mask_row.addStretch(1)
     root.addLayout(mask_row)
+    # "选定的名称": pick which of the discovered masks to import. The list is
+    # populated by analyze() from automatic discovery; checkable rows build a
+    # comma-separated name list the worker's _filter_masks already accepts.
+    # Hidden until a drop discovers masks — never adds noise to a fresh window.
+    mask_pick_widget = QtWidgets.QWidget()
+    mask_pick_layout = QtWidgets.QVBoxLayout(mask_pick_widget)
+    mask_pick_layout.setContentsMargins(0, 0, 0, 0)
+    mask_pick_list = QtWidgets.QListWidget()
+    mask_pick_list.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+    mask_pick_list.setMaximumHeight(110)
+    mask_pick_list.setToolTip("勾选要导入的 Mask；不勾选任何项则导入全部")
+    mask_pick_layout.addWidget(mask_pick_list)
+    mask_pick_widget.hide()
+    root.addWidget(mask_pick_widget)
 
     # -- Recent drops activity list ----------------------------------------
     recent_header = QtWidgets.QLabel("最近拖入")
@@ -687,12 +703,39 @@ def run(context=None, preview_path=""):
         "kind": None,
         "source": None,
         "auto_masks_found": False,
+        "discovered_mask_names": [],
         "last_activity": time.time(),
         "submitted": False,
     }
 
     def touch():
         state["last_activity"] = time.time()
+
+    def _fill_mask_pick_list(masks):
+        # Checkable candidates for "选定的名称". All start unchecked; leaving
+        # everything unchecked falls back to "全部 Mask" semantics (the list
+        # is a narrowing device, never a trap that silently drops masks).
+        state["discovered_mask_names"] = [str(m.get("name") or "") for m in masks]
+        mask_pick_list.clear()
+        for name in state["discovered_mask_names"]:
+            item = QtWidgets.QListWidgetItem(name)
+            item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
+            item.setCheckState(QtCore.Qt.Unchecked)
+            mask_pick_list.addItem(item)
+        mask_pick_widget.show()
+
+    def _picked_mask_names():
+        # None = user did not narrow anything (all/none radio, or an empty
+        # check list); a list = the exact names to import (worker's
+        # _filter_masks accepts a comma-separated string).
+        if not mask_named.isChecked() or not mask_pick_list.count():
+            return None
+        picked = []
+        for index in range(mask_pick_list.count()):
+            item = mask_pick_list.item(index)
+            if item.checkState() == QtCore.Qt.Checked:
+                picked.append(item.text())
+        return picked or None
 
     def set_recognition(text, warning=False):
         recognition.setText(text)
@@ -704,7 +747,10 @@ def run(context=None, preview_path=""):
         paths = [p for p in paths if p]
         mask_path_edit.clear()
         mask_path_widget.hide()
+        mask_pick_list.clear()
+        mask_pick_widget.hide()
         state["auto_masks_found"] = False
+        state["discovered_mask_names"] = []
         if not paths:
             state["paths"] = []
             state["kind"] = None
@@ -732,6 +778,7 @@ def run(context=None, preview_path=""):
             results = []
             valid = 0
             all_masks_empty = True
+            union_masks = {}
             for path in paths:
                 case_info = io_ui.discover_single_source(path)
                 if case_info:
@@ -739,6 +786,8 @@ def run(context=None, preview_path=""):
                     if case_info.get("masks"):
                         all_masks_empty = False
                         state["auto_masks_found"] = True
+                        for m in case_info["masks"]:
+                            union_masks.setdefault(m["name"], m)
                     results.append("{0} ✓".format(case_info["case_id"]))
                 else:
                     results.append("{0} ✗ (无可用图像)".format(
@@ -752,6 +801,8 @@ def run(context=None, preview_path=""):
                 )
             set_recognition(summary, valid < len(paths) or (valid > 0 and all_masks_empty))
             dropzone.setText("多选：{0} 个路径".format(len(paths)))
+            if union_masks:
+                _fill_mask_pick_list(list(union_masks.values()))
             if not valid:
                 submit.setEnabled(False)
                 return
@@ -760,6 +811,8 @@ def run(context=None, preview_path=""):
             case_info = io_ui.discover_single_source(paths[0]) if kind == "single" else None
             if case_info:
                 state["auto_masks_found"] = bool(case_info.get("masks"))
+                if case_info.get("masks"):
+                    _fill_mask_pick_list(case_info["masks"])
                 mask_names = "、".join(m["name"] for m in case_info["masks"][:5])
                 if case_info.get("masks_suppressed"):
                     # Sibling volumes made attribution ambiguous, so automatic
@@ -961,6 +1014,11 @@ def run(context=None, preview_path=""):
         source = state["source"] or (state["paths"][0] if state["paths"] else "")
         output = os.path.abspath(os.path.expanduser(output_edit.text().strip()))
         mask_selection = "none" if mask_none.isChecked() else "all"
+        picked = _picked_mask_names()
+        if picked:
+            # "选定的名称": the worker's _filter_masks takes a comma-separated
+            # name list. An empty pick never lands here (falls back to all).
+            mask_selection = ",".join(picked)
         mask_paths = []
         if kind == "single" and mask_path_widget.isVisible():
             # ; or newlines separate entries (paste keeps multi-line clipboard

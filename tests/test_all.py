@@ -12196,6 +12196,30 @@ class TestImportDropWindow(unittest.TestCase):
         self.assertEqual(1, len(records))
         self.assertIn("idle_timeout_s", records[0][2].get("cleanup_policy", ""))
 
+    def test_mask_pick_narrows_selection_for_worker(self):
+        # R74-2: the worker's _filter_masks accepts a comma-separated name
+        # list, but the drop window never exposed it — import was all-or-none.
+        # The "选定的名称" radio + checkable list must produce that list, and
+        # an empty pick must fall back to "all" (never silently drop masks).
+        from single_case_import_worker import _filter_masks
+        masks = [
+            {"name": "liver", "path": "a.nii.gz"},
+            {"name": "spleen", "path": "b.nii.gz"},
+            {"name": "kidney", "path": "c.nii.gz"},
+        ]
+        # Exactly what do_submit passes for a checked liver+spleen pick.
+        self.assertEqual(
+            ["liver", "spleen"],
+            [m["name"] for m in _filter_masks(masks, "liver,spleen")],
+        )
+        # Contract of the UI-side fallback: no pick -> "all" -> everything.
+        self.assertEqual(3, len(_filter_masks(masks, "all")))
+        # The window source wires the picker into the submit payload.
+        import import_drop_window as dw
+        source = inspect.getsource(dw)
+        self.assertIn("_picked_mask_names", source)
+        self.assertIn("mask_named", source)
+
     def test_single_case_worker_errors_are_chinese(self):
         # P2-3: 该 worker 的 error/message 字段会原样显示在批量状态表里，
         # 英文报错对标注者不可读。锁定所有用户可见文案为中文，防止回退。
