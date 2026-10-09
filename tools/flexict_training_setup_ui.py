@@ -504,6 +504,28 @@ class TrainingSetupWindow:
                 rendered.append(part)
         return "；".join(rendered)
 
+    def _merge_case_selection(self, fresh: list[dict]) -> list[dict]:
+        """A rescan must not silently drop the user's train/val checkboxes.
+
+        The scan pipeline returns use_train/use_val defaults; without this
+        merge, rescanning after unchecking cases or marking validators reset
+        every split to the default."""
+        previous = {
+            str(row.get("case_id")): row
+            for row in getattr(self, "_case_rows", [])
+            if row.get("checked")
+        }
+        if not previous:
+            return fresh
+        merged = []
+        for row in fresh:
+            old = previous.get(str(row.get("case_id")))
+            if old is not None and row.get("checked"):
+                row["use_train"] = bool(old.get("use_train", True))
+                row["use_val"] = bool(old.get("use_val", False))
+            merged.append(row)
+        return merged
+
     def _refresh_cases(self):
         QtWidgets = self.QtWidgets
         QtCore = self.QtCore
@@ -617,7 +639,7 @@ class TrainingSetupWindow:
                 if error:
                     self._set_status(error, error=True)
                 else:
-                    self._case_rows = payload or []
+                    self._case_rows = self._merge_case_selection(payload or [])
                     self._refresh_cases()
                     self._set_status(
                         "已找到 {0} 个病例。请确认训练/验证划分后开始训练。".format(

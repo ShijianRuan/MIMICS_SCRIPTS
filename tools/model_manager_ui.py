@@ -34,7 +34,11 @@ import flexict_common  # noqa: E402
 import nninteractive_task_common as task_common  # noqa: E402
 import nnunet_common  # noqa: E402
 from nnunet_common import read_json  # noqa: E402
-from ui_theme import configure_application, stylesheet  # noqa: E402
+from ui_theme import (  # noqa: E402
+    choose_open_file_async,
+    configure_application,
+    stylesheet,
+)
 
 FAMILIES = ("nninteractive", "nnunet", "flexict")
 _IMPORT_COMMANDS = {
@@ -540,13 +544,17 @@ class ModelManagerWindow:
         return None
 
     def _import_clicked(self):
-        QtWidgets = self.QtWidgets
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+        choose_open_file_async(
+            self.QtCore,
+            self.QtWidgets,
             self.window,
             "选择模型包",
             str(Path.home()),
             "模型包 (*.zip)",
+            self._import_bundle_from,
         )
+
+    def _import_bundle_from(self, path):
         if not path:
             return
         # A bundle is a multi-GB zip: extracting + checksumming on the GUI

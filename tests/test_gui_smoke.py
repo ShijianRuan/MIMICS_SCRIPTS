@@ -1723,6 +1723,49 @@ class TestTrainingSetupPathMemory(unittest.TestCase):
                 finally:
                     window.window.close()
 
+    def test_flexict_rescan_keeps_manual_split_selection(self):
+        # R75: rescanning rebuilt the case table from pipeline defaults, so
+        # unchecking cases for training or marking validators was silently
+        # reset by a rescan. The merge must carry the old selection forward
+        # per case_id, and drop it for cases that disappeared.
+        _AppFixture.app()
+        import flexict_training_setup_ui as ui
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            home = self._settings_home(tmp, "flexict_settings.json", {})
+            with mock.patch.object(ui.Path, "home", lambda: home), mock.patch.object(
+                ui, "workspace_root", lambda _c: str(tmp / "default-ws")
+            ), mock.patch.object(
+                ui, "load_config", lambda: {"root": str(tmp)}
+            ), mock.patch.object(
+                ui.TrainingSetupWindow, "_refresh_models", lambda self: None
+            ):
+                window = ui.TrainingSetupWindow(
+                    {"workspace": ""}, tmp / "ctx.json", QT
+                )
+                try:
+                    window._case_rows = [
+                        {"case_id": "a", "checked": True, "use_train": False, "use_val": True},
+                        {"case_id": "b", "checked": True, "use_train": True, "use_val": False},
+                        {"case_id": "gone", "checked": True, "use_train": False, "use_val": True},
+                    ]
+                    fresh = [
+                        {"case_id": "a", "checked": True, "use_train": True, "use_val": False},
+                        {"case_id": "b", "checked": True, "use_train": True, "use_val": False},
+                        {"case_id": "new", "checked": True, "use_train": True, "use_val": False},
+                    ]
+                    merged = window._merge_case_selection(fresh)
+                    by_id = {row["case_id"]: row for row in merged}
+                    self.assertFalse(by_id["a"]["use_train"])
+                    self.assertTrue(by_id["a"]["use_val"])
+                    self.assertTrue(by_id["b"]["use_train"])
+                    # A case not in the old selection keeps pipeline defaults.
+                    self.assertTrue(by_id["new"]["use_train"])
+                    self.assertNotIn("gone", by_id)
+                finally:
+                    window.window.close()
+
     def test_flexict_overlap_policy_reaches_request(self):
         # G2: multiclass FlexiCT shares the nnU-Net case materializer, which
         # stops on overlapping label voxels — but the FlexiCT wizard had no

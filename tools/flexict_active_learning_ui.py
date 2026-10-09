@@ -34,6 +34,7 @@ from nnunet_common import read_json, write_json_atomic  # noqa: E402
 from ui_theme import (  # noqa: E402
     PALETTE,
     choose_existing_directory_async,
+    choose_save_file_async,
     clamp_window_to_screen,
     configure_application,
     stylesheet,
@@ -919,11 +920,18 @@ class ActiveLearningWindow:
     def _export_csv(self):
         if not self._rows:
             return
-        QtWidgets = self.QtWidgets
         default = str(Path(self._job_dir) / "annotation_progress.csv")
-        path, _filter = QtWidgets.QFileDialog.getSaveFileName(
-            self.window, "导出标注进度", default,
-            "CSV 文件 (*.csv)")
+        choose_save_file_async(
+            self.QtCore,
+            self.QtWidgets,
+            self.window,
+            "导出标注进度",
+            default,
+            "CSV 文件 (*.csv)",
+            self._write_csv,
+        )
+
+    def _write_csv(self, path):
         if not path:
             return
         cases = self._state.get("cases") or {}
