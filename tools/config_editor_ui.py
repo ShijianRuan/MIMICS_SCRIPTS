@@ -16,9 +16,14 @@ import shutil
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+_HERE = Path(__file__).resolve().parent
+ROOT = _HERE.parent
+# ui_theme lives in tools/ next to this script (P0: inserting only ROOT
+# made `import ui_theme` fail and the window die at startup when Mimics
+# launched it — external windows must not depend on cwd).
+for _candidate in (str(_HERE), str(ROOT)):
+    if _candidate not in sys.path:
+        sys.path.insert(0, _candidate)
 
 from ui_theme import configure_application, stylesheet  # noqa: E402
 
