@@ -801,6 +801,47 @@ def run_ui(context, preview_path=""):
             "closed", "completed", "done", "failed", "cancelled", "canceled",
         )
 
+    _PHASE_LABELS = {
+        "starting": "正在启动",
+        "starting_in_mimics": "Mimics 正在启动",
+        "starting_worker": "正在启动后台进程",
+        "launching": "正在启动",
+        "preparing": "准备数据",
+        "prepare": "准备数据",
+        "queued_to_prepare": "排队等待准备",
+        "queued": "已排队",
+        "discovering_cases": "正在扫描病例",
+        "reading_masks": "正在读取 Mask",
+        "exporting_voxels": "正在导出体数据",
+        "converting_to_source_grid": "正在转换到源网格",
+        "creating_mcs": "正在生成工程文件",
+        "waiting_for_mcs": "等待工程文件",
+        "waiting_for_mimics": "等待 Mimics",
+        "waiting_for_background_mimics": "等待后台 Mimics",
+        "mask_name_preflight": "正在校验 Mask 名称",
+        "opening": "正在打开",
+        "buffers": "缓冲区处理",
+        "stopping_case": "正在停止当前病例",
+        "cancelling": "正在取消",
+        "cancelled": "已取消",
+        "completed": "已完成",
+        "failed": "失败",
+        "timeout": "超时",
+        "insufficient_disk_space": "磁盘空间不足",
+        "no_cases": "没有可用病例",
+        "no_matching_masks": "没有匹配的 Mask",
+        "prepare_failed": "数据准备失败",
+        "worker_launch_failed": "后台进程启动失败",
+        "monitor_failed": "监控进程失败",
+        "monitor_unavailable": "监控进程不可用",
+        "output_queue_busy": "输出队列繁忙",
+        "queue_failed": "队列失败",
+        "scan_failed": "扫描失败",
+        "create_mcs_native_exit": "工程文件生成进程退出",
+        "controller_stopped": "控制器已停止",
+        "waiting_degraded_confirm": "等待降级确认",
+    }
+
     def update_progress_from_payload(payload, descriptor):
         payload = payload or {}
         state = str(payload.get("status") or payload.get("phase") or "running")
@@ -826,7 +867,8 @@ def run_ui(context, preview_path=""):
             progress_bar.setFormat("%v / %m")
         else:
             progress_bar.setRange(0, 0)
-        detail = phase.capitalize()
+        detail = _PHASE_LABELS.get(
+            str(payload.get("phase") or state), phase.capitalize())
         if total:
             remaining = max(0, total - completed - failed)
             detail += " - 已生成 {0}，失败 {1}，共 {2}".format(completed, failed, total)

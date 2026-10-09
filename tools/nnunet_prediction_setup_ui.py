@@ -174,7 +174,10 @@ class PredictionWindow:
                     ", ".join(
                         str(row.get("name")) for row in model.get("labels") or []
                     ),
-                    unusable_reason or model.get("execution_backend") or "local",
+                    {"local": "本地", "remote": "远程"}.get(
+                        str(model.get("execution_backend") or "local"),
+                        str(model.get("execution_backend") or "本地"),
+                    ),
                 ]
                 for column, value in enumerate(values):
                     item = self.QtWidgets.QTableWidgetItem(str(value or ""))
@@ -210,7 +213,7 @@ class PredictionWindow:
                 for model in self.models
             ):
                 self.status_label.setText(
-                    "{0} 个已注册模型不可用（列表最后列注明原因）。先在「状态与模型」窗口修复或删除。".format(
+                    "{0} 个已注册模型不可用（列表最后列注明原因）。先在「nnU-Net 状态」窗口修复或删除。".format(
                         unusable_count
                     )
                 )
@@ -226,7 +229,7 @@ class PredictionWindow:
             )
         else:
             self.status_label.setText(
-                "未找到可用的 nnU-Net 模型。请打开“状态”与“模型”查看训练结果。"
+                "未找到可用的 nnU-Net 模型。请打开「nnU-Net 状态」窗口查看训练结果。"
             )
 
     def _poll_background_results(self):

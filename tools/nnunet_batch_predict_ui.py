@@ -51,7 +51,7 @@ class BatchPredictionWindow:
         title.setObjectName("title")
         subtitle = QtWidgets.QLabel(
             "选择一个已训练模型和数据集文件夹，对每个病例推理并把结果写入输出文件夹。"
-            "预测只写盘、不改当前 Mimics 工程；进度与停止在「nnU-Net Show Status & Models」窗口。"
+            "预测只写盘、不改当前 Mimics 工程；进度与停止在「nnU-Net 状态」窗口。"
         )
         subtitle.setObjectName("subtitle")
         subtitle.setWordWrap(True)
@@ -210,7 +210,10 @@ class BatchPredictionWindow:
                     ", ".join(
                         str(row.get("name")) for row in model.get("labels") or []
                     ),
-                    unusable_reason or model.get("execution_backend") or "local",
+                    {"local": "本地", "remote": "远程"}.get(
+                        str(model.get("execution_backend") or "local"),
+                        str(model.get("execution_backend") or "本地"),
+                    ),
                 ]
                 for column, value in enumerate(values):
                     item = self.QtWidgets.QTableWidgetItem(str(value or ""))
@@ -246,7 +249,7 @@ class BatchPredictionWindow:
                 for model in self.models
             ):
                 self.status_label.setText(
-                    "{0} 个已注册模型不可用（列表最后列注明原因）。先在「状态与模型」窗口修复或删除。".format(
+                    "{0} 个已注册模型不可用（列表最后列注明原因）。先在「nnU-Net 状态」窗口修复或删除。".format(
                         unusable_count
                     )
                 )
@@ -290,7 +293,7 @@ class BatchPredictionWindow:
             # blindly duplicates them; check the status window first.
             self.status_label.setText(
                 "病例文件夹扫描超时。扫描仍在后台进行，已启动的预测任务"
-                "不会被取消。请先在「nnU-Net Show Status & Models」窗口"
+                "不会被取消。请先在「nnU-Net 状态」窗口"
                 "确认哪些病例已启动；仅对未启动的病例重试，避免同一病例"
                 "跑两个任务。"
             )
@@ -381,7 +384,7 @@ class BatchPredictionWindow:
                             "远程" if execution_backend == "remote" else "本机",
                             output,
                         ),
-                        "进度与停止：「nnU-Net Show Status & Models」窗口。",
+                        "进度与停止：「nnU-Net 状态」窗口。",
                     ]
                     if skipped:
                         lines.append(
