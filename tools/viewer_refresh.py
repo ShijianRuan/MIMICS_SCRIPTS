@@ -51,6 +51,21 @@ class BackgroundRefresh:
         self._timer.timeout.connect(self._on_period_tick)
         self._timer.start()
 
+    def stop(self):
+        """Stop both timers. A closed window must not keep collecting on
+        its hidden heartbeat forever, and timers firing while the wrapped
+        window is being torn down corrupt the heap (0xc0000374 in the GUI
+        smoke suite, ~70% of runs)."""
+        self._stop = True
+        try:
+            self._timer.stop()
+        except RuntimeError:  # C++ parent already deleted
+            pass
+        try:
+            self._drain_timer.stop()
+        except RuntimeError:
+            pass
+
     @staticmethod
     def _is_shown(parent):
         """True unless parent is a widget that is hidden or minimized.
@@ -75,6 +90,8 @@ class BackgroundRefresh:
         # Checking visibility here rather than in hideEvent/showEvent keeps
         # this deterministic: Qt virtual dispatch does not reliably reach
         # monkey-patched instance attributes.
+        if self._stop:
+            return
         parent = self._parent
         if not self._is_shown(parent):
             if self._timer.interval() != self.HIDDEN_INTERVAL_MS:

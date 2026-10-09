@@ -818,6 +818,36 @@ class TestViewerNonBlockingRefresh(unittest.TestCase):
             refresher._timer.stop()
             refresher._drain_timer.stop()
 
+    def test_closed_viewer_windows_stop_their_refreshers(self):
+        """R75 P1: a closed viewer window must stop collecting. The hidden
+        heartbeat kept polling forever, and timers firing while the wrapped
+        window was being torn down corrupted the heap (0xc0000374, ~70% of
+        GUI smoke runs crashed in clamp_window_to_screen). All three viewer
+        windows must wire closeEvent to refresher.stop()."""
+        _AppFixture.app()
+        import batch_status_viewer as batch
+        import nnunet_status_viewer as nnunet
+        import flexict_status_viewer as flexict
+
+        for module in (nnunet, flexict):
+            source = (ROOT / "tools" / (module.__name__ + ".py")).read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("closeEvent = self._close_event", source, module.__name__)
+            self.assertIn("refresher.stop()", source, module.__name__)
+        source = (ROOT / "tools" / "batch_status_viewer.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("closeEvent = self._close_event", source)
+        self.assertIn("refresher.stop()", source)
+
+        # Behavioral check: closing a real window stops both timers.
+        window = flexict.StatusWindow({"workspace": ""}, QT)
+        self.assertTrue(window.refresher._timer.isActive())
+        window.window.close()
+        self.assertFalse(window.refresher._timer.isActive())
+        self.assertFalse(window.refresher._drain_timer.isActive())
+
 
 class TestIoPathSetupExportOnly(unittest.TestCase):
     """C1 entry merge: the external path window only serves mask export.

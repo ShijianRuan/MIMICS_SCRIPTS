@@ -327,6 +327,13 @@ class BatchStatusWindow:
         self.refresh_button.clicked.connect(
             lambda _checked=False: self.refresher.request())
         self.refresher.refresh_now()
+        # A closed window must stop collecting: the hidden heartbeat kept
+        # polling forever, and timers firing while the window is torn down
+        # corrupt the heap.
+        self.window.closeEvent = self._close_event
+
+    def _close_event(self, event):
+        self.refresher.stop()
 
     def refresh(self, rows=None):
         if rows is None:

@@ -232,6 +232,13 @@ class StatusWindow:
             on_error=lambda: self.live_label.setText("● 上次刷新失败"),
         )
         self.refresher.refresh_now()
+        # A closed window must stop collecting: the hidden heartbeat kept
+        # polling forever, and timers firing while the window is torn down
+        # corrupt the heap.
+        self.window.closeEvent = self._close_event
+
+    def _close_event(self, event):
+        self.refresher.stop()
 
     def _populate_tasks(self):
         wanted = str(self.context.get("task_id") or "")
