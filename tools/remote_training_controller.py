@@ -1051,6 +1051,39 @@ _IMAGE_PREFLIGHT_SCRIPT_TEMPLATE = (
 )
 
 
+def _assert_container_runtime_available(
+    session: SSHSession,
+    profile: dict[str, Any],
+) -> None:
+    """Fail fast when the server has no nerdctl/docker (R72 follow-up).
+
+    Without this check a missing runtime surfaces as a raw
+    ``/bin/sh: nerdctl: command not found`` shell error buried in the
+    build/launch log. One cheap ``command -v`` probe turns it into an
+    actionable Chinese message naming the setup script. Docker-daemon
+    reachability is NOT probed here: starting a daemon is an
+    administrator action, and a stopped daemon still reports a clear
+    error from the runtime CLI itself.
+    """
+    runtime = container_runtime_command(profile)
+    binary = runtime.split()[0]
+    code, output = session.execute_result(
+        "command -v {binary} >/dev/null 2>&1; rc=$?; "
+        "if [ $rc -ne 0 ]; then echo missing; fi".format(
+            binary=shlex.quote(binary)
+        ),
+        timeout=30,
+    )
+    if code != 0 or "missing" in output:
+        raise RuntimeError(
+            "服务器上未安装容器运行时（{binary}），无法构建或启动训练。"
+            "请服务器管理员先运行 remote/setup_remote_server.sh 完成安装，"
+            "或在“管理服务器”中更正 profile 的容器运行时设置。".format(
+                binary=binary
+            )
+        )
+
+
 def _image_preflight(
     session: SSHSession,
     profile: dict[str, Any],
@@ -2010,6 +2043,7 @@ def remote_build_image(
             PurePosixPath(session.remote_root) / "build_context"
         )
         logs_root = str(PurePosixPath(session.remote_root) / "logs")
+        _assert_container_runtime_available(session, profile)
         session.ensure_directory(context_root)
         session.ensure_directory(logs_root)
         # 1. Pack the local checkout (code files only, exclusions above).
@@ -4945,6 +4979,9 @@ def run(spec_path: Path) -> int:
         session.ensure_directory(remote_paths["locks"])
         session.ensure_directory(remote_paths["dataset_cache"])
         session.ensure_directory(remote_paths["prepared_cache"])
+        # A missing nerdctl/docker would otherwise surface as a raw shell
+        # error mid-launch; this probe refuses the job before any upload.
+        _assert_container_runtime_available(session, profile)
         # Shared-server "check before use": the launch-time GPU busy gate
         # runs before any upload so a blocked job costs one SSH round trip,
         # not hours of transfer. Warn mode surfaces in the controller log

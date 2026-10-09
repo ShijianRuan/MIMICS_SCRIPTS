@@ -1669,6 +1669,8 @@ class RemoteBuildTests(unittest.TestCase):
 
         def execute_result(self, command, **kwargs):
             self.commands.append(command)
+            if command.startswith("command -v "):
+                return 0, ""
             if command.startswith("test -f "):
                 return 0, self.marker_digest
             if " build " in command:
@@ -1688,6 +1690,8 @@ class RemoteBuildTests(unittest.TestCase):
             return False
 
         def _dispatch(self, command):
+            if command.startswith("command -v "):
+                return ""
             if command.startswith("test -f "):
                 return self.marker_digest
             if " image inspect" in command:
@@ -1790,6 +1794,47 @@ class RemoteBuildTests(unittest.TestCase):
         self.assertIn(
             "--build-arg BASE_IMAGE=mirror.local/pytorch:2.6.0",
             build_command,
+        )
+
+    def test_missing_runtime_refuses_before_any_upload(self):
+        # Failure path: the server lacks nerdctl/docker entirely. The probe
+        # must refuse with the actionable Chinese message and nothing may
+        # be uploaded or built.
+        session = self._BuildSession("")
+
+        def probe_result(command, **kwargs):
+            if command.startswith("command -v "):
+                return 1, "missing"
+            raise AssertionError("unexpected command: " + command)
+
+        session.execute_result = probe_result
+        with unittest.mock.patch.object(
+            controller, "SSHSession", return_value=session
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "未安装容器运行时"
+            ):
+                controller.remote_build_image(self._profile())
+        self.assertEqual(session.uploads, [])
+        self.assertEqual(
+            len([c for c in session.commands if " build " in c]), 0
+        )
+
+    def test_runtime_probe_runs_before_upload_and_build(self):
+        # The probe is the FIRST remote command — a missing runtime must
+        # never cost a context upload.
+        session = self._BuildSession("different-digest")
+        with unittest.mock.patch.object(
+            controller, "SSHSession", return_value=session
+        ), unittest.mock.patch.object(
+            controller, "_build_tar", return_value=1024
+        ) as build_tar, unittest.mock.patch.object(
+            controller, "_sha256_file", return_value="digest123"
+        ):
+            controller.remote_build_image(self._profile())
+        self.assertTrue(
+            session.commands[0].startswith("command -v "),
+            session.commands[0],
         )
 
     def test_nerdctl_namespace_flows_into_build_command(self):

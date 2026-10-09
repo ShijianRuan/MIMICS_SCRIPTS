@@ -25,8 +25,18 @@ What the command does, and what to check at each step:
    model registries, and weight folders stay out; ~14 MB). A digest marker
    skips re-uploading unchanged code on a retry.
 3. **Build** — `nerdctl/docker build` runs on the server into the profile's
-   container namespace. Base-image pulls go through the server's network; if
-   the registry is unreachable, pass `--base-image <mirror>/pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime`.
+   container namespace. A missing nerdctl/docker on the server is detected
+   before any upload and refuses with a message naming
+   `remote/setup_remote_server.sh`. Base-image pulls go through the
+   server's network; if Docker Hub or your usual registry is unreachable,
+   pass a mirror via `--base-image`. Verified options (2026-10, from the
+   206 workstation's network):
+   - `registry.united-imaging.com/pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime`
+     (internal UI mirror — confirmed reachable from 206 and carrying the
+     exact base tag),
+   - or a digest-pinned reference to a layer already on the server
+     (e.g. `…@sha256:77f17f84…`), which skips registry metadata lookups
+     entirely.
    The pip layer cache makes a rebuild after a code-only change take ~15 min.
 4. **Verify** — after the build, confirm two things:
    - the A1 image preflight passes for every job kind (the controller runs
