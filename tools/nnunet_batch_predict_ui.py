@@ -239,7 +239,7 @@ class BatchPredictionWindow:
         ))
         if error:
             self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
-            self.status_label.setText("Could not load nnU-Net models: {}".format(error))
+            self.status_label.setText("无法读取 nnU-Net 模型列表：{}".format(error))
         elif unusable_count:
             if any(
                 not str(model.get("_unusable_reason") or "")
@@ -307,7 +307,7 @@ class BatchPredictionWindow:
         try:
             row = self.table.currentRow()
             if not 0 <= row < len(self.models):
-                raise RuntimeError("Select one model.")
+                raise RuntimeError("请先在列表中选择一个模型。")
             model = self.models[row]
             unusable_reason = str(model.get("_unusable_reason") or "")
             if unusable_reason:

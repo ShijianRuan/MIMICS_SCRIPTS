@@ -739,7 +739,9 @@ class LocalCompatibilityTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn('result.get("warning")', ui_source)
-        self.assertIn("work folder {}", ui_source)
+        # R75: the connected status line is Chinese; keep asserting the
+        # work-folder surfacing via the translated string.
+        self.assertIn("工作目录 {}", ui_source)
 
     def test_connection_queries_gpu_load_at_server_test_time(self):
         """TB-06 contract: the server-test GPU query covers live load.

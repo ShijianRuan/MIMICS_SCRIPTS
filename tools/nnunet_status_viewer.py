@@ -240,13 +240,20 @@ class StatusWindow:
     def _close_event(self, event):
         self.refresher.stop()
 
-    def _populate_tasks(self):
-        wanted = str(self.context.get("task_id") or "")
+    def _populate_tasks(self, snapshot=None):
+        """Rebuild the task combo, keeping the user's selection.
+
+        Called once at construction and again on every refresh: a task
+        started after the window opened must appear in the combo without
+        reopening the window."""
+        current = self._selected_task() or str(self.context.get("task_id") or "")
         tasks = {}
-        for row in list_jobs(self.workspace):
+        for row in (snapshot or {}).get("jobs") or list_jobs(self.workspace):
             task_id = str(row.get("task_id") or "Unassigned")
             tasks[task_id] = str(row.get("task_name") or task_id)
-        for row in load_models(self.workspace, include_missing=True):
+        for row in (snapshot or {}).get("models") or load_models(
+            self.workspace, include_missing=True
+        ):
             task_id = str(row.get("task_id") or "Unassigned")
             tasks[task_id] = str(row.get("task_name") or task_id)
         self.task_combo.blockSignals(True)
@@ -254,7 +261,7 @@ class StatusWindow:
         selected = 0
         for index, task_id in enumerate(sorted(tasks)):
             self.task_combo.addItem(tasks[task_id], task_id)
-            if task_id == wanted:
+            if task_id == current:
                 selected = index
         self.task_combo.setCurrentIndex(selected)
         self.task_combo.blockSignals(False)
@@ -273,6 +280,7 @@ class StatusWindow:
         if snapshot is None:
             # Manual/periodic path: collect synchronously (tests, first paint).
             snapshot = self._collect()
+        self._populate_tasks(snapshot)
         task_id = self._selected_task()
         if not task_id:
             self.state_label.setText("未找到 nnU-Net 任务")

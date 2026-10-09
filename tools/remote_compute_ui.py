@@ -167,9 +167,9 @@ class ServerProfilesDialog:
         )
         self.code_verify_combo = QtWidgets.QComboBox()
         for label, value in (
-            ("Warn on drift (default)", "warn"),
-            ("Refuse on drift", "strict"),
-            ("Skip verification", "off"),
+            ("发现不一致时警告（默认）", "warn"),
+            ("发现不一致时拒绝", "strict"),
+            ("跳过校验", "off"),
         ):
             self.code_verify_combo.addItem(label, value)
         self.code_verify_combo.setToolTip(
@@ -177,9 +177,9 @@ class ServerProfilesDialog:
         )
         self.weights_verify_combo = QtWidgets.QComboBox()
         for label, value in (
-            ("Refuse on mismatch (default)", "strict"),
-            ("Warn on mismatch", "warn"),
-            ("Skip verification", "off"),
+            ("不匹配时拒绝（默认）", "strict"),
+            ("不匹配时警告", "warn"),
+            ("跳过校验", "off"),
         ):
             self.weights_verify_combo.addItem(label, value)
         self.weights_verify_combo.setToolTip(
@@ -187,9 +187,9 @@ class ServerProfilesDialog:
         )
         self.gpu_busy_combo = QtWidgets.QComboBox()
         for label, value in (
-            ("Block while busy (default)", "block"),
-            ("Warn while busy", "warn"),
-            ("Skip check", "off"),
+            ("忙时等待（默认）", "block"),
+            ("忙时警告并继续", "warn"),
+            ("跳过检查", "off"),
         ):
             self.gpu_busy_combo.addItem(label, value)
         self.gpu_busy_combo.setToolTip(
@@ -198,7 +198,7 @@ class ServerProfilesDialog:
         self.retention_spin = QtWidgets.QSpinBox()
         self.retention_spin.setRange(1, 3650)
         self.retention_spin.setValue(30)
-        self.retention_spin.setSuffix(" days")
+        self.retention_spin.setSuffix(" 天")
         self.retention_spin.setToolTip(
             "已完成的作业和缓存训练数据在服务器上保留多久后自动清理。"
         )
@@ -380,9 +380,9 @@ class ServerProfilesDialog:
             self.QtCore,
             self.QtWidgets,
             self.dialog,
-            "Choose SSH Private Key",
+            "选择 SSH 私钥文件",
             self.key_edit.text() or str(Path.home() / ".ssh"),
-            "SSH private keys (*)",
+            "SSH 私钥文件 (*)",
             lambda path: self.key_edit.setText(str(path)) if path else None,
             button=self.key_button,
         )
@@ -437,7 +437,7 @@ class ServerProfilesDialog:
             memory_gb = float(row.get("memory_mb") or 0) / 1024.0
             utilization = row.get("utilization_percent")
             load = (
-                " · {}% in use".format(utilization)
+                " · 已用 {}%".format(utilization)
                 if utilization is not None
                 else ""
             )
@@ -574,8 +574,8 @@ class ServerProfilesDialog:
             for row in gpu_rows
         ) or "服务器未报告 GPU"
         message = (
-            "Connected · work folder {} · {} · selected {} · {} free · "
-            "image ready · {}".format(
+            "已连接 · 工作目录 {} · {} · 选用 {} · 剩余 {} · "
+            "镜像就绪 · {}".format(
                 result.get("remote_root") or "?",
                 gpus,
                 result.get("gpu_device") or DEFAULT_GPU_DEVICE,
@@ -703,7 +703,7 @@ class RemoteComputeSelector:
         selected_index = 0
         for profile in load_profiles():
             self.combo.addItem(
-                "Remote · {}".format(profile["name"]),
+                "远程 · {}".format(profile["name"]),
                 ("remote", profile["profile_id"]),
             )
             if profile["profile_id"] == selected_profile_id:
@@ -739,7 +739,7 @@ class RemoteComputeSelector:
         )
         if profile:
             self.hint.setText(
-                "{}@{}:{} · {} · GPU {}. Data transfer and training run outside Mimics.".format(
+                "{}@{}:{} · {} · GPU {}。数据传输与训练均在 Mimics 之外进行。".format(
                     profile["username"],
                     profile["host"],
                     profile["port"],
