@@ -187,6 +187,77 @@
   测试：`test_broken_config_file_never_rewritten_by_save` 扩展
   ——save+rollback 后坏文件逐字节不变且不在备份中。
 
+### P1/P2/P3（2026-10-10 R76 独立评审：UI 精美度 + 同步/异步合理性）
+
+> 背景：/loop 自主循环授权的独立评审（任务 #87），沿 R75 四组代理
+> 的遗留发现继续修：A组（精美度）剩余 P2/P3 + B组（同步/异步）
+> P1/P2/P3 全量处置。每项 P1/P2 修复附回归测试或定向测试组验证。
+
+- [x] **R76-1【P1】拖拽窗 analyze() 仍在 GUI 线程跑 classify_payload**
+  〔R76 当轮解决〕：R75-1 把 summarize/discover 移进了扫描 worker，
+  但 analyze() 里还残留一次同步 classify_payload（对拖入树做真实
+  stat 探测）。删除该调用，kind/source 改由 _apply_scan_result 在
+  扫描落地时写入 state。测试：
+  `test_analyze_defers_classification_to_scan_worker`（源码契约：
+  GUI 线程 classify 调用不存在、worker classify + state 回填存在）。
+- [x] **R76-2【P1】do_submit 残留同步块（每次提交 NameError）**
+  〔R76 当轮解决〕：worker.start() 之后残留一段 R75 重构漏删的同步
+  代码——闭包局部 `launched` 的 NameError 每次提交都触发，且重复
+  弹"导入已开始"对话框。整块删除。GUI 冒烟套件全绿覆盖。
+- [x] **R76-3【P2】AL 窗口 refresh() 在 GUI 线程 stat 全部 job 目录**
+  〔R76 当轮解决〕：find_al_jobs 与 R75 P2 修过的 running-scan 同源
+  （网络 workspace 秒级 I/O）。refresh 拆为 _refresh_async（worker
+  线程扫描）+ _apply_jobs（GUI 应用），经 fast_timer 排空；构造
+  期首次刷新同样异步。测试：`test_al_refresh_scans_off_gui_thread`
+  （find_al_jobs 必须在非 GUI 线程执行）。
+- [x] **R76-4【P2】查看器 Stop/重试/重新挂接后的同步 refresh**
+  〔R76 当轮解决〕：nnunet/flexict 两个状态查看器的 _stop/_reattach/
+  _retry 各自直接调 self.refresh()——_collect() 对每个 job 目录做
+  stat，网络盘上点一次"停止"冻结窗口数秒。改走
+  BackgroundRefresh.request()（既有后台通道，零新机制）。
+- [x] **R76-5【P2】2s tick 在 GUI 线程读 512KiB 日志尾**
+  〔R76 当轮解决〕：两个状态查看器 _show_selected_job 每次刷新都在
+  GUI 线程读日志尾（每任务最多 512KiB）。新增共享
+  `viewer_refresh.read_log_tail`（worker 线程读取，按
+  path+size+mtime 缓存——已完成任务的日志只读一次，缓存 64 条
+  防泄漏），_collect 里预填 `_log_tail`，GUI 线程只排版。
+  测试：`test_viewer_log_tail_is_read_on_worker_thread`（缓存命中
+  + 缺失文件退化 ""）。
+- [x] **R76-6【P2】nnU-Net 查看器 models 表在 GUI 线程读
+  summary.json**〔R76 当轮解决〕：_validation_dice 每个 fold 读一个
+  JSON，refresh() 里每模型调用。移入 _collect worker 侧预计算
+  `validation_dice`，GUI 线程只取键。既有
+  `test_nnunet_validation_dice_reads_fold_summary` 继续覆盖函数
+  本体；注入快照的窗口测试继续绿。
+- [x] **R76-7【P2】FlexiCT 训练窗口 _refresh_models 同步 stat 模型库**
+  〔R76 当轮解决〕：构造期 load_models 在 GUI 线程。拆
+  _refresh_models_async/_apply_models，复用既有 _dataset_id_results
+  队列 + _poll_submission 排空（kind "models"，零新定时器）。
+  测试：既有 flexict 组 15/15（测试 mock 同步改异步名）。
+- [x] **R76-8【P2】查看器列表行/阶段文案英文**〔R76 当轮解决〕：
+  flexict/nnunet 查看器 job 列表行 "train/infer" → 训练/预测
+  （_KIND_LABELS，flexict 加 主动学习）；io_path 进度阶段 38 项
+  _PHASE_LABELS 中文映射（未知值回退 phase.capitalize() 透传）。
+- [x] **R76-9【P2】配置/连接错误样式不统一**〔R76 当轮解决〕：
+  config_editor、mask_file_picker 补 _set_status/set_status
+  单入口（error=True 红 + objectName("errorLabel")）；
+  remote_compute 半角冒号修全角；健康面板"停止"按钮补
+  dangerButton。
+- [x] **R76-10【P2】窗口名/按钮语义不一致**〔R76 当轮解决〕：
+  预测/批量预测窗口统一引用「nnU-Net 状态」；模型列表"后端"列
+  从"unusable_reason 或 backend"混显改为本地/远程语义（不可用
+  原因在行 tooltip，测试同步更新）；AL 窗口双 primary 按钮去掉
+  "打开并叠加"的 primary。
+- [x] **R76-11【P3】配置编辑器表单英文标签**〔R76 当轮解决〕：
+  CONFIG_SCHEMAS 5 个文件 19 个字段 label/help 全部中文化
+  （选择项值不变，CHOICE_OPTIONS 原样）。
+- [x] **R76-12【审计】B组其余 P3 逐项评估不修（改动最小化）**：
+  collect_issues（少量 stat，亚毫秒）、_case_image_hint（单次
+  is_file）、count_existing_label_files（导出前一次性 listdir、
+  用户发起）、mimics_export ui_blocking=True（等待用户回答的
+  对话框，语义正确）、构造期一次性首扫（重活在 2s tick，已全部
+  异步化）。结论：无需修复，避免为不存在的问题加线程。
+
 - [x] **R74-3【审计】同类问题清扫（R73 波次）**〔R74 当轮完成，见 R74
   轮次报告〕：沿"过滤隐藏选择/单选陷阱/对话框叠放/窗口尺寸/崩溃"
   五条线全量清扫：全部 `setSelectionMode` 用点合适（表格行选单选、

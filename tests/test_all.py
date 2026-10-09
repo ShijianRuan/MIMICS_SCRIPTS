@@ -12394,6 +12394,54 @@ class TestImportDropWindow(unittest.TestCase):
 # ============================================================================
 
 
+    def test_analyze_defers_classification_to_scan_worker(self):
+        """R76 P1: analyze() must not run classify_payload on the GUI
+        thread — it stats the dropped tree. classify_payload is only ever
+        called from _scan_worker; _apply_scan_result sets state kind/source
+        when the scan lands."""
+        import import_drop_window as dw
+
+        source = inspect.getsource(dw)
+        # The GUI-thread classify call is gone ...
+        self.assertNotIn(
+            'state["kind"], state["source"], _children = classify_payload',
+            source,
+        )
+        # ... and the worker still classifies, with the result applied on
+        # the GUI thread.
+        self.assertIn(
+            "kind, source, child_dirs = classify_payload(paths)",
+            source,
+        )
+        self.assertIn('state["kind"] = kind', source)
+        self.assertIn('state["source"] = source', source)
+        # The scan still starts from a daemon worker thread.
+        self.assertIn('target=_scan_worker', source)
+
+    def test_viewer_log_tail_is_read_on_worker_thread(self):
+        """R76: the 512 KiB log tail must be read on the collect worker
+        thread and cached per (path, size, mtime), not on every GUI-tick
+        read of a finished job's log."""
+        import viewer_refresh
+
+        with tempfile.TemporaryDirectory() as name:
+            log = os.path.join(name, "train.log")
+            with open(log, "w", encoding="utf-8") as handle:
+                handle.write("x" * 4096)
+            status = {"log_path": log}
+            cache = {}
+            first = viewer_refresh.read_log_tail(status, cache)
+            self.assertEqual(4096, len(first))
+            # Same size+mtime: served from the cache (no second disk read
+            # — the cache dict already holds the text).
+            self.assertEqual(1, len(cache))
+            second = viewer_refresh.read_log_tail(status, cache)
+            self.assertIs(first, second)
+            # A truncated log_path or missing file degrades to "".
+            self.assertEqual(
+                "", viewer_refresh.read_log_tail({"log_path": ""}, cache))
+
+
 class TestImportReceiptAndUndo(unittest.TestCase):
     """Phase E P4: receipt writing in create_mcs_batch + undo roundtrip."""
 

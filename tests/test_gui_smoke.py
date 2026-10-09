@@ -1101,10 +1101,15 @@ class TestBatchPredictionWindow(unittest.TestCase):
             good = self._usable_model_row(self._model_dir(tmp / "good"))
             window._apply_models([broken, good], "")
             self.assertEqual(2, window.table.rowCount())
-            # The broken row's last column carries the reason...
+            # R76: the last column shows the execution backend (Chinese);
+            # the unusable reason rides on every cell's tooltip.
+            self.assertEqual(
+                "本地",
+                window.table.item(0, 4).text(),
+            )
             self.assertEqual(
                 "model folder is missing",
-                window.table.item(0, 4).text(),
+                window.table.item(0, 4).toolTip(),
             )
             # ...and is greyed out (not selectable)...
             self.assertFalse(
@@ -1473,7 +1478,7 @@ class TestTrainingSetupPathMemory(unittest.TestCase):
             ), mock.patch.object(
                 flexict_ui, "load_config", lambda: {"root": str(tmp)}
             ), mock.patch.object(
-                flexict_ui.TrainingSetupWindow, "_refresh_models",
+                flexict_ui.TrainingSetupWindow, "_refresh_models_async",
                 lambda self: None,
             ):
                 window = flexict_ui.TrainingSetupWindow(
@@ -1531,7 +1536,7 @@ class TestTrainingSetupPathMemory(unittest.TestCase):
                     {"model_id": "flexict_other", "task_id": "liver"},
                 ],
             ), mock.patch.object(
-                flexict_ui.TrainingSetupWindow, "_refresh_models",
+                flexict_ui.TrainingSetupWindow, "_refresh_models_async",
                 lambda self: None,
             ):
                 window = flexict_ui.TrainingSetupWindow(
@@ -1634,7 +1639,7 @@ class TestTrainingSetupPathMemory(unittest.TestCase):
             ), mock.patch.object(
                 ui, "load_config", lambda: {"root": str(tmp)}
             ), mock.patch.object(
-                ui.TrainingSetupWindow, "_refresh_models", lambda self: None
+                ui.TrainingSetupWindow, "_refresh_models_async", lambda self: None
             ):
                 window = ui.TrainingSetupWindow(
                     {"workspace": ""}, tmp / "ctx.json", QT
@@ -1706,7 +1711,7 @@ class TestTrainingSetupPathMemory(unittest.TestCase):
             ), mock.patch.object(
                 ui, "load_config", lambda: {"root": str(tmp)}
             ), mock.patch.object(
-                ui.TrainingSetupWindow, "_refresh_models", lambda self: None
+                ui.TrainingSetupWindow, "_refresh_models_async", lambda self: None
             ):
                 window = ui.TrainingSetupWindow(
                     {"workspace": ""}, tmp / "ctx.json", QT
@@ -1738,7 +1743,7 @@ class TestTrainingSetupPathMemory(unittest.TestCase):
             ), mock.patch.object(
                 ui, "load_config", lambda: {"root": str(tmp)}
             ), mock.patch.object(
-                ui.TrainingSetupWindow, "_refresh_models", lambda self: None
+                ui.TrainingSetupWindow, "_refresh_models_async", lambda self: None
             ):
                 window = ui.TrainingSetupWindow(
                     {"workspace": ""}, tmp / "ctx.json", QT
@@ -1789,7 +1794,7 @@ class TestTrainingSetupPathMemory(unittest.TestCase):
             ), mock.patch.object(
                 ui, "load_config", lambda: {"root": str(tmp)}
             ), mock.patch.object(
-                ui.TrainingSetupWindow, "_refresh_models", lambda self: None
+                ui.TrainingSetupWindow, "_refresh_models_async", lambda self: None
             ):
                 window = ui.TrainingSetupWindow(
                     {"workspace": ""}, tmp / "ctx.json", QT
@@ -1826,7 +1831,7 @@ class TestTrainingSetupPathMemory(unittest.TestCase):
             ), mock.patch.object(
                 ui, "load_config", lambda: {"root": str(tmp)}
             ), mock.patch.object(
-                ui.TrainingSetupWindow, "_refresh_models", lambda self: None
+                ui.TrainingSetupWindow, "_refresh_models_async", lambda self: None
             ):
                 window = ui.TrainingSetupWindow(
                     {"workspace": ""}, tmp / "ctx.json", QT
@@ -1884,7 +1889,7 @@ class TestTrainingSetupPathMemory(unittest.TestCase):
             ), mock.patch.object(
                 ui, "load_config", lambda: {"root": str(tmp)}
             ), mock.patch.object(
-                ui.TrainingSetupWindow, "_refresh_models", lambda self: None
+                ui.TrainingSetupWindow, "_refresh_models_async", lambda self: None
             ):
                 window = ui.TrainingSetupWindow(
                     {"workspace": ""}, tmp / "ctx.json", QT
@@ -2118,6 +2123,16 @@ class TestActiveLearningWindow(unittest.TestCase):
         )
         window = al_ui.ActiveLearningWindow(
             {"workspace": str(root)}, QT)
+        # R76: refresh is async now — drain the background scan like the
+        # real event loop would before the test asserts on table contents.
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            _AppFixture.app().processEvents()
+            window._poll_background_results()
+            if window._jobs:
+                break
+            time.sleep(0.02)
+        self.assertTrue(window._jobs, "background refresh never landed")
         return window
 
     def test_real_rows_populate_without_nameerror(self):
@@ -2252,6 +2267,13 @@ class TestActiveLearningWindow(unittest.TestCase):
             window = al_ui.ActiveLearningWindow(
                 {"workspace": str(Path(tmp) / "empty")}, QT)
             try:
+                deadline = time.time() + 5.0
+                while time.time() < deadline and window._refresh_pending:
+                    _AppFixture.app().processEvents()
+                    window._poll_background_results()
+                    time.sleep(0.02)
+                self.assertFalse(
+                    window._refresh_pending, "background refresh never landed")
                 self.assertTrue(window.new_button.isVisibleTo(window.window))
                 self.assertTrue(window.new_button.isEnabled())
                 self.assertIn("新建排序", window.status_label.text())
@@ -2351,6 +2373,11 @@ class TestActiveLearningWindow(unittest.TestCase):
                     encoding="utf-8",
                 )
                 window.refresh()
+                deadline = time.time() + 5.0
+                while time.time() < deadline and window.job_combo.count() < 2:
+                    _AppFixture.app().processEvents()
+                    window._poll_background_results()
+                    time.sleep(0.02)
                 # Failed runs are listed after the completed ones.
                 self.assertEqual(2, window.job_combo.count())
                 window.job_combo.setCurrentIndex(1)
@@ -2400,6 +2427,11 @@ class TestActiveLearningWindow(unittest.TestCase):
             window = al_ui.ActiveLearningWindow(
                 {"workspace": str(Path(tmp) / "workspace")}, QT)
             self.addCleanup(window.window.close)
+            deadline = time.time() + 5.0
+            while time.time() < deadline and window._refresh_pending:
+                _AppFixture.app().processEvents()
+                window._poll_background_results()
+                time.sleep(0.02)
             window._apply_pair((None, None), "")
             self.assertIn("01 训练模型", window.pair_label.text())
             self.assertFalse(window.start_run_button.isEnabled())
@@ -2530,6 +2562,43 @@ class TestWindowClampedToSmallScreen(unittest.TestCase):
                 )
         finally:
             window.close()
+
+    def test_al_refresh_scans_off_gui_thread(self):
+        """R76: find_al_jobs stats every job directory — it must run on a
+        worker thread, drained by the poll timer, not on the GUI thread
+        (same contract as the status viewers)."""
+        import tempfile
+
+        _AppFixture.app()
+        import flexict_active_learning_ui as al_ui
+
+        seen_threads = []
+
+        def fake_find_al_jobs(workspace):
+            seen_threads.append(threading.current_thread())
+            return []
+
+        with tempfile.TemporaryDirectory() as name:
+            with mock.patch.object(
+                al_ui, "find_al_jobs", side_effect=fake_find_al_jobs,
+            ):
+                window = al_ui.ActiveLearningWindow(
+                    {"workspace": str(Path(name) / "ws")}, QT)
+                try:
+                    window.refresh()
+                    deadline = time.time() + 5.0
+                    while time.time() < deadline and not seen_threads:
+                        _AppFixture.app().processEvents()
+                        window._poll_background_results()
+                        time.sleep(0.02)
+                    self.assertTrue(
+                        seen_threads, "refresh never scanned the workspace")
+                    self.assertNotIn(
+                        threading.current_thread(), seen_threads,
+                        "find_al_jobs must run off the GUI thread")
+                    self.assertEqual([], window._jobs)
+                finally:
+                    window.window.close()
 
     def test_al_window_opens_on_small_screen(self):
         """The AL window itself must construct with its minimum clamped to

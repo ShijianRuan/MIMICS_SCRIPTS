@@ -5516,3 +5516,80 @@ remote/Dockerfile.patch 无引用），旧 stash 条目仍保留在 stash
 - 评审代理 D 组的"question_box 无默认按钮参数"（Mimics API 限制，
   无法从脚本侧控制焦点默认）与"点集丢弃/完成无确认"（按钮文案已
   明确、反馈可见，加确认反而多一次点击）判为非缺陷，不入账。
+
+
+## R76（2026-10-10）：/loop 独立评审——UI 精美度 + 同步/异步合理性
+
+### 范围与授权
+
+/loop 自主循环（任务 #87）：检查既有任务全部完成后，独立评审
+（a）所有 UI 的精美度、（b）所有功能的同步/异步合理性。本轮沿
+R75 四组评审代理的完整发现清单处置遗留项：A组（精美度）P2×8
+已在前段修完（未提交），本轮补 P3×4；B组（同步性）P1×2、
+P2×6、P3×7 逐项处置。
+
+### 修复清单（对应账本 R76-1 ~ R76-11）
+
+**同步/异步（B组，铁律 1 主线）**
+- P1 analyze() GUI 线程 classify_payload：删除同步调用，kind/source
+  由 _apply_scan_result 落地时写入（R76-1）。
+- P1 do_submit 残留同步块（每次提交 NameError + 重复弹窗）：整块
+  删除（R76-2，A/B 组共同发现）。
+- P2 AL refresh() 同步 find_al_jobs：拆 _refresh_async/_apply_jobs，
+  worker 扫描 + fast_timer 排空（R76-3）。
+- P2 查看器 Stop/重试/重新挂接后同步 refresh()×6：改
+  BackgroundRefresh.request()，零新机制（R76-4）。
+- P2 2s tick GUI 线程读 512KiB 日志尾 ×2 窗口：新增
+  viewer_refresh.read_log_tail（worker 读取 + path/size/mtime 缓存，
+  完成任务只读一次，缓存 64 条防泄漏）（R76-5）。
+- P2 models 表 GUI 线程读 summary.json：_collect 预计算
+  validation_dice（R76-6）。
+- P2 FlexiCT 训练窗口构造期同步 load_models：拆 async，
+  复用 _dataset_id_results 队列 kind "models"（R76-7）。
+
+**精美度（A组遗留）**
+- 查看器列表行 train/infer 英文 → _KIND_LABELS；io_path 38 项
+  阶段 _PHASE_LABELS（R76-8）。
+- config_editor/mask_file_picker 错误样式 _set_status 统一；
+  remote_compute 半角冒号；健康面板 dangerButton（R76-9）。
+- 窗口名统一「nnU-Net 状态」；模型表"后端"列本地/远程语义
+  （不可用原因移行 tooltip）；AL 双 primary 去一（R76-10）。
+- 配置编辑器 19 字段英文 label/help 中文化（R76-11）。
+
+### 不修项（B组 P3 逐项评估，R76-12）
+
+collect_issues / _case_image_hint / count_existing_label_files /
+构造期一次性首扫 / mimics_export ui_blocking=True（等待用户回答
+的对话框，语义正确）——均为亚毫秒单次 stat 或语义正确的同步，
+加线程属投机防御，违反改动最小化。
+
+### 测试
+
+- 新增 3：test_analyze_defers_classification_to_scan_worker
+  （源码契约）、test_viewer_log_tail_is_read_on_worker_thread
+  （缓存命中 + 缺失退化）、test_al_refresh_scans_off_gui_thread
+  （线程断言）。
+- 适配 4：AL 测试 harness 排空异步 refresh（_window 辅助 + 空态
+  + 失败运行 + 新建表单）、批量预测不可用模型列断言改新语义、
+  flexict _refresh_models mock 改异步名（8 处）。
+- 定向组：TestImportDropWindow 34/34、gui_smoke 全量 80/80、
+  flexict 组 15/15、viewer 组 12/12。
+
+### 调试插曲
+
+- remote_compute_ui 的 _set_status helper 被插进了 __init__ 中段
+  ——插入点之后剩余的构造代码（按钮区、_reload_profiles）全部
+  变成 helper 的死代码，表单从未加载 profile，remote_training
+  1/134 报 "Enter a server profile name."。helper 移到 __init__
+  之后独立方法位，134/134 复绿（fast 首跑 28/29 的唯一失败）。
+- config_editor 中文化脚本把跨两行的英文串翻译成一行时丢了收尾
+  引号（14 处 SyntaxError）——正则补引号 + 清理残留空行修复，
+  py_compile 门禁捕获，未进入测试阶段。
+- AL 异步化后 13 个既有测试瞬断（构造后立即断言、行未落地）——
+  harness 补排空循环（processEvents + _poll_background_results），
+  语义不变。
+
+### 遗留登记
+
+- R73-4（run_runtime_entry 异常包裹）仍在待办区。
+- fast 门禁工件与全量结论见门禁记录（本轮末尾）。
