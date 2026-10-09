@@ -11979,6 +11979,38 @@ class TestImportDropWindow(unittest.TestCase):
             [], dw.collect_recent_drops(os.path.join(self.tmp, "no_such_dir"))
         )
 
+    def test_format_recent_drop_line_is_annotator_readable(self):
+        # P1 UX: "最近拖入" rows must be readable at a glance — time prefix,
+        # Chinese status, phase in brackets for running rows, and the error
+        # reason kept OUT of the row (it goes to the tooltip).
+        import import_drop_window as dw
+        base = time.mktime(time.strptime("2026-01-01 14:32:00", "%Y-%m-%d %H:%M:%S"))
+        running = {
+            "case_id": "case_alpha", "status": "running",
+            "phase": "waiting_for_background_mimics", "error": "",
+            "updated_at_epoch": base,
+        }
+        self.assertEqual(
+            "14:32  case_alpha — 导入中（等待后台 Mimics）",
+            dw.format_recent_drop_line(running),
+        )
+        failed = {
+            "case_id": "case_beta", "status": "failed", "phase": "prepare_failed",
+            "error": "boom", "updated_at_epoch": base,
+        }
+        line = dw.format_recent_drop_line(failed)
+        self.assertEqual("14:32  case_beta — 失败", line)
+        self.assertNotIn("boom", line)
+        completed = {
+            "case_id": "case_gamma", "status": "completed", "phase": "creating_mcs",
+            "error": "", "updated_at_epoch": base,
+        }
+        # Terminal states show no phase — "已完成" already says it all.
+        self.assertEqual(
+            "14:32  case_gamma — 已完成",
+            dw.format_recent_drop_line(completed),
+        )
+
     def _queue_runtime_dir_for(self, output_dir):
         import runtime_common
         return runtime_common.import_queue_runtime_dir(
@@ -13630,6 +13662,47 @@ class TestEnvGuidance(unittest.TestCase):
 
 
 class TestProcessRegistry(unittest.TestCase):
+    def test_no_hashlib_on_mimics_entry_path(self):
+        """P0 fix: importing hashlib at module-import time inside the
+        Mimics-embedded Python 3.5 loaded _hashlib.pyd, which crashed the
+        Mimics host (0xc0000005, Application Error event 1000) the moment
+        an external window was opened (register_process ->
+        resource_locks._process_record_id -> hashlib.sha1). The window
+        registry path and the shared runtime helper must stay pure-Python.
+        """
+        import resource_locks
+        import runtime_common
+
+        for module, label in (
+            (resource_locks, "resource_locks"),
+            (runtime_common, "runtime_common"),
+        ):
+            self.assertNotIn(
+                "hashlib",
+                getattr(module, "__dict__", {}),
+                "{0} must not have hashlib imported at module level "
+                "(Mimics host crash via _hashlib.pyd)".format(label),
+            )
+        # The record-id digest must be the pure-Python FNV scheme.
+        self.assertEqual(
+            resource_locks.stable_digest_hex("123|456"),
+            runtime_common.stable_digest_hex("123|456"),
+            "record-id digest drifted from the shared pure-Python scheme",
+        )
+
+    def test_nninteractive_entry_module_avoids_hashlib(self):
+        """Same P0: nninteractive_mimics runs inside the Mimics host and is
+        imported by the annotation entry; it must not pull _hashlib.pyd in
+        at import time (its cache key only names a cache file)."""
+        import nninteractive_mimics
+
+        self.assertNotIn(
+            "hashlib",
+            getattr(nninteractive_mimics, "__dict__", {}),
+            "nninteractive_mimics must not import hashlib at module level "
+            "(Mimics host crash via _hashlib.pyd)",
+        )
+
     def test_spawn_worker_registration_matches_api(self):
         """B20 source contract: the register_process call in _spawn_worker
         must use kwargs that exist on the API. The original bug was a
