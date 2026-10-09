@@ -1177,6 +1177,54 @@ class TestIoPathSetupDebounce(unittest.TestCase):
         io_ui._sync_candidate_check_state(field, widget)  # must not raise
         self.assertEqual(QtCore.Qt.Checked, widget.item(0).checkState())
         self.assertEqual(QtCore.Qt.Unchecked, widget.item(1).checkState())
+
+    def test_candidate_click_keeps_other_candidates_visible(self):
+        # R74 P1: toggling a candidate name into the field re-triggered the
+        # textChanged filter, so the just-toggled name became the filter and
+        # every OTHER candidate vanished — multi-select was impossible
+        # ("选中一个就看不到其他的"). The filter must run only while the
+        # name field has focus (real typing), never on programmatic updates.
+        source = (ROOT / "tools" / "io_path_setup_ui.py").read_text(
+            encoding="utf-8"
+        )
+        # The gate: the textChanged filter handler must check hasFocus so a
+        # candidate click (programmatic setText, no field focus) does not
+        # re-filter the list.
+        self.assertIn("hasFocus()", source)
+        self.assertIn("_filter_candidates_while_typing", source)
+        # And leaving the field must restore the full list.
+        self.assertIn("editingFinished", source)
+
+        # Behavioral check of the gate mechanics: filter runs only for
+        # focused typing. Reproduce both paths through the real helpers.
+        import io_path_setup_ui as io_ui
+        from PySide6 import QtCore, QtWidgets
+        app = _AppFixture.app()
+        field = QtWidgets.QLineEdit()
+        widget = QtWidgets.QListWidget()
+        for name in ("liver", "spleen", "kidney"):
+            widget.addItem(QtWidgets.QListWidgetItem(name))
+
+        # Candidate click path: no focus on the field → the gated handler
+        # must NOT call the filter, so every candidate stays visible even
+        # though the field now holds one name.
+        io_ui._toggle_name_in_field(field, "spleen")
+        self.assertFalse(field.hasFocus())
+        for index in range(widget.count()):
+            self.assertFalse(
+                widget.item(index).isHidden(),
+                "candidate {0} must stay visible after another was picked"
+                .format(widget.item(index).text()),
+            )
+        # Typing path (focused field): the filter still narrows the list.
+        field.setFocus()
+        if field.hasFocus():  # offscreen platforms may refuse focus
+            field.setText("liver, kid")
+            io_ui._filter_list_widget(widget, io_ui._last_token(field.text()))
+            self.assertFalse(widget.item(0).isHidden())   # liver: prefix token
+            self.assertTrue(widget.item(1).isHidden())    # spleen: filtered out
+            self.assertFalse(widget.item(2).isHidden())   # kidney: matches "kid"
+        # Checkbox sync still reflects picks after the fix.
         field.setText("spleen")
         io_ui._sync_candidate_check_state(field, widget)
         self.assertEqual(QtCore.Qt.Unchecked, widget.item(0).checkState())

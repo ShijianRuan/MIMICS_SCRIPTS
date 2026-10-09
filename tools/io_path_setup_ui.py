@@ -607,10 +607,20 @@ def run_ui(context, preview_path=""):
     mask_candidate_list.itemClicked.connect(
         lambda item: _toggle_name_in_field(mask_names, item.text())
     )
-    # Filter the candidate list as the user types in the name field; the
-    # checkbox states follow the field so hand-typed edits stay visible.
-    mask_names.textChanged.connect(
-        lambda text: _filter_list_widget(mask_candidate_list, _last_token(text))
+    # Filter the candidate list only while the user is actually typing in
+    # the name field. Programmatic updates (a candidate click toggling the
+    # name into the field) must NOT re-filter — the newly toggled name would
+    # become the filter and every other candidate would vanish from view
+    # ("选中一个就看不到其他的"). hasFocus distinguishes the two.
+    def _filter_candidates_while_typing(text):
+        if mask_names.hasFocus():
+            _filter_list_widget(mask_candidate_list, _last_token(text))
+
+    mask_names.textChanged.connect(_filter_candidates_while_typing)
+    # When the user leaves the field, clear any leftover filter so the full
+    # candidate list is visible again for the next pick.
+    mask_names.editingFinished.connect(
+        lambda: _filter_list_widget(mask_candidate_list, "")
     )
     mask_names.textChanged.connect(
         lambda _text: _sync_candidate_check_state(mask_names, mask_candidate_list)
