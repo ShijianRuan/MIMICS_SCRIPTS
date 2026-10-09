@@ -16650,6 +16650,26 @@ class TestUiThemePalette(unittest.TestCase):
         self.assertIn("setMinimumSectionSize(120)", source)
         self.assertIn("setColumnWidth(3, 130)", source)
 
+    def test_al_ranking_submit_uses_single_queue_protocol(self):
+        # R75 P1: _start_ranking put 3-tuples on _submit_results while the
+        # 80ms consumer (_poll_background_results) expected dict/str — it
+        # crashed with AttributeError and the ranking dialog's success/error
+        # feedback was lost entirely. All producers must use the dict/str
+        # protocol, and only ONE consumer may drain the queue.
+        path = os.path.join(PROJECT_ROOT, "tools", "flexict_active_learning_ui.py")
+        with open(path, "r", encoding="utf-8") as handle:
+            source = handle.read()
+        # No producer may put a tuple anymore.
+        self.assertNotIn(
+            'self._submit_results.put(\n                    (job.get("job_id")',
+            source,
+        )
+        self.assertNotIn('self._submit_results.put(("", "",', source)
+        # _poll_running_job must not drain the queue (single consumer).
+        poll_running = source[source.index("def _poll_running_job"):]
+        poll_running = poll_running[:poll_running.index("\n    def ")]
+        self.assertNotIn("_submit_results", poll_running)
+
 
 class TestForeignScriptIntegration(unittest.TestCase):
     """R61-22: the batch inspection/sync tools that grew up untracked are now

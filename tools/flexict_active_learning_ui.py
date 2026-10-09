@@ -591,7 +591,15 @@ class ActiveLearningWindow:
         self._start_ranking(dataset_root, label_name)
 
     def _start_ranking(self, dataset_root: str, label_name: str):
-        """Validate + submit the ranking job off the GUI thread (F04)."""
+        """Validate + submit the ranking job off the GUI thread (F04).
+
+        Puts the SAME payload shape on _submit_results as _submit_new_run
+        (dict on success, str on error): the 80ms fast_timer consumer
+        (_poll_background_results) expects exactly that protocol, and a
+        mismatched 3-tuple used to crash it with AttributeError while the
+        2s consumer swallowed the dict — the ranking result/error was lost
+        both ways and the status line stalled forever.
+        """
         request = {
             "operation": "active_learning",
             "workspace": self.workspace,
@@ -606,12 +614,10 @@ class ActiveLearningWindow:
                 if not Path(dataset_root).is_dir():
                     raise ValueError(
                         "数据集根目录不存在：{}".format(dataset_root))
-                job = create_flexict_job(request)
+                self._submit_results.put(create_flexict_job(request))
+            except Exception as exc:  # surfaced by the fast poll timer
                 self._submit_results.put(
-                    (job.get("job_id") or "", job.get("job_dir") or "", ""))
-            except Exception as exc:  # surfaced by the poll timer
-                self._submit_results.put(("", "", "{}: {}".format(
-                    type(exc).__name__, exc)))
+                    "启动排序失败：{}".format(exc)[:400])
 
         worker = threading.Thread(
             target=_submit, name="flexict-al-submit", daemon=True)
@@ -620,19 +626,10 @@ class ActiveLearningWindow:
             '正在后台启动主动学习排序（检查路径与模型对）…')
 
     def _poll_running_job(self):
-        """Show live progress of a running ranking; auto-refresh at completion
-        and surface submit errors (F04)."""
-        # Drain submit results first: an error message must survive.
-        try:
-            while True:
-                job_id, job_dir, error = self._submit_results.get_nowait()
-                if error:
-                    self.status_label.setText(
-                        '启动排序失败：{}'.format(error[:300]))
-                    return
-                self._seen_running_job_id = job_id
-        except Exception:
-            pass
+        """Show live progress of a running ranking and auto-refresh at
+        completion. Submit results are consumed by _poll_background_results
+        (single protocol, single consumer); this poller only tracks the
+        running job itself."""
         running = find_running_al_job(self.workspace or None)
         if running:
             self._seen_running_job_id = str(running.get("job_id") or "")

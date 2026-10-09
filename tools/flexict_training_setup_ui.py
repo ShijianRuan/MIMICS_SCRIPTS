@@ -35,7 +35,12 @@ from flexict_common import (  # noqa: E402
     workspace_root,
 )
 from flexict_pipeline import create_flexict_job  # noqa: E402
-from nnunet_common import read_json, update_status, write_json_atomic  # noqa: E402
+from nnunet_common import (  # noqa: E402
+    read_json,
+    safe_identifier,
+    update_status,
+    write_json_atomic,
+)
 from ui_theme import (  # noqa: E402
     choose_existing_directory_async,
     clamp_window_to_screen,
@@ -175,6 +180,31 @@ class TrainingSetupWindow:
         )
         form.addWidget(QtWidgets.QLabel("目标 / 标签名称 *"), 0, 0)
         form.addWidget(self.label_edit, 0, 1)
+        # Mask files are matched by safe_identifier(label_name): a Chinese
+        # name folds to "item" and never matches any file, so the case scan
+        # comes back with every case "label missing" (and the table renders
+        # empty while the summary still counts the cases). Catch it here.
+        self.label_name_hint = QtWidgets.QLabel("")
+        self.label_name_hint.setStyleSheet(
+            "color: #b42318; font-weight: 600;")
+        self.label_name_hint.hide()
+        form.addWidget(self.label_name_hint, 1, 0, 1, 2)
+
+        def _check_label_names(_text):
+            bad = [
+                name for name in self._label_names()
+                if safe_identifier(name) == "item"
+            ]
+            if bad:
+                self.label_name_hint.setText(
+                    "标签名仅支持英文字母、数字、下划线、中划线和点（要与数据集"
+                    "里 Mask 文件的文件名一致；中文名永远匹配不到文件）。"
+                )
+                self.label_name_hint.show()
+            else:
+                self.label_name_hint.hide()
+
+        self.label_edit.textChanged.connect(_check_label_names)
         self.modality_combo = QtWidgets.QComboBox()
         for label, value in (("CT", "CT"), ("MRI", "MRI"), ("Other", "Other")):
             self.modality_combo.addItem(label, value)
@@ -452,16 +482,54 @@ class TrainingSetupWindow:
             for column, value in enumerate(values):
                 self.models_table.setItem(row, column, QtWidgets.QTableWidgetItem(str(value)))
 
+    # Status strings come from scan_flexict_cases; translate the ones a
+    # user can act on (the scan itself stays log-friendly English).
+    _STATUS_LABELS = {
+        "OK": "可用",
+        "image missing": "缺少图像",
+        "label missing": "缺少标签",
+    }
+
+    def _status_label(self, raw: str) -> str:
+        # "label missing: item" -> "缺少标签：item"; unknown words pass
+        # through so a new pipeline status is never silently blanked.
+        parts = [part.strip() for part in str(raw or "").split(";")]
+        rendered = []
+        for part in parts:
+            if part in self._STATUS_LABELS:
+                rendered.append(self._STATUS_LABELS[part])
+            elif part.startswith("label missing:"):
+                rendered.append("缺少标签：" + part[len("label missing:"):].strip())
+            else:
+                rendered.append(part)
+        return "；".join(rendered)
+
     def _refresh_cases(self):
         QtWidgets = self.QtWidgets
+        QtCore = self.QtCore
         self.case_table.setRowCount(0)
-        rows = [row for row in self._case_rows if row.get("checked")]
+        # Show every scanned case, not just the usable ones: hiding the
+        # unusable rows makes "已找到 12 个病例" sit next to an empty table,
+        # and the user has no way to see WHY a case is not usable.
+        rows = list(self._case_rows)
+        usable = 0
         for row in rows:
             index = self.case_table.rowCount()
             self.case_table.insertRow(index)
-            self.case_table.setItem(
-                index, 0, QtWidgets.QTableWidgetItem(row["case_id"])
-            )
+            case_item = QtWidgets.QTableWidgetItem(row["case_id"])
+            if not row.get("checked"):
+                # Unusable: grayed out, no train/val checkboxes (its split
+                # would be ignored by the pipeline anyway).
+                case_item.setFlags(QtCore.Qt.NoItemFlags)
+                self.case_table.setItem(index, 0, case_item)
+                status_item = QtWidgets.QTableWidgetItem(
+                    self._status_label(row.get("status", ""))
+                )
+                status_item.setFlags(QtCore.Qt.NoItemFlags)
+                self.case_table.setItem(index, 3, status_item)
+                continue
+            usable += 1
+            self.case_table.setItem(index, 0, case_item)
             use_check = QtWidgets.QCheckBox()
             use_check.setChecked(bool(row.get("use_train", True)))
             use_check.toggled.connect(
@@ -474,18 +542,22 @@ class TrainingSetupWindow:
                 lambda checked, r=row: r.update({"use_val": checked})
             )
             self.case_table.setCellWidget(index, 2, val_check)
-            self.case_table.setItem(
-                index, 3, QtWidgets.QTableWidgetItem(row.get("status", ""))
+            status_item = QtWidgets.QTableWidgetItem(
+                self._status_label(row.get("status", ""))
             )
-        train_count = sum(1 for row in rows if row.get("use_train", True))
-        val_count = sum(1 for row in rows if row.get("use_val", False))
-        summary = "已选 {0} 例 · 训练 {1} · 验证 {2}".format(
-            len(rows), train_count, val_count
+            self.case_table.setItem(index, 3, status_item)
+        selected = [row for row in rows if row.get("checked")]
+        train_count = sum(1 for row in selected if row.get("use_train", True))
+        val_count = sum(1 for row in selected if row.get("use_val", False))
+        summary = "共 {0} 例 · 可用 {1} · 已选 {2} · 训练 {3} · 验证 {4}".format(
+            len(rows), usable, len(selected), train_count, val_count
         )
-        if rows and train_count == 0:
+        if selected and train_count == 0:
             # Every checked case is validation-only: training would run on an
             # empty split. Surface it here instead of at submit time.
             summary += " —— 训练集为空，请至少保留一个训练病例"
+        if rows and usable == 0:
+            summary += " —— 没有可用病例：请检查标签名是否与 Mask 文件名一致"
         self.case_summary.setText(summary)
 
     def _label_names(self) -> list[str]:
@@ -681,6 +753,17 @@ class TrainingSetupWindow:
             request = self._request()
             if not request["label_name"]:
                 raise ValueError("请填写目标 Mask 名称。")
+            bad_labels = [
+                name for name in self._label_names()
+                if safe_identifier(name) == "item"
+            ]
+            if bad_labels:
+                raise ValueError(
+                    "标签名仅支持英文字母、数字、下划线、中划线和点"
+                    "（要与数据集里 Mask 文件的文件名一致）：{0}".format(
+                        "、".join(bad_labels)
+                    )
+                )
             if len(request.get("labels") or []) > 4:
                 raise ValueError(
                     "FlexiCT 少样本训练每个模型最多支持 4 个标签；更多标签请使用 nnU-Net。"

@@ -1389,6 +1389,96 @@ class TestTrainingSetupPathMemory(unittest.TestCase):
                 finally:
                     window.window.close()
 
+    def test_task_name_folding_is_caught_in_ui(self):
+        # R75 P1: safe_identifier folds any non-ASCII name to "item", so two
+        # Chinese task names merged into one internal task and FlexiCT label
+        # names never matched their mask files. Both wizards must block a
+        # folding name at typing time (red hint) and at submit (gate).
+        _AppFixture.app()
+        import nnunet_training_setup_ui as nnunet_ui
+        from nnunet_common import safe_identifier
+
+        # Contract of the root cause: a Chinese name must fold to "item".
+        self.assertEqual("item", safe_identifier("肝脏分割"))
+        self.assertEqual("liver_seg", safe_identifier("liver_seg"))
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            home = self._settings_home(tmp, "nnunet_settings.json", {})
+            with mock.patch.object(nnunet_ui.Path, "home", lambda: home):
+                window = nnunet_ui.TrainingSetupWindow(
+                    {"workspace": ""}, tmp / "ctx.json", QT
+                )
+                try:
+                    # Typing-time hint appears for a folding name...
+                    window.task_edit.setText("肝脏分割")
+                    self.assertFalse(window.task_name_hint.isHidden())
+                    # ...and disappears for a valid one.
+                    window.task_edit.setText("liver_seg")
+                    self.assertTrue(window.task_name_hint.isHidden())
+                    # Submit gate blocks before any background work starts:
+                    # _submission_pending stays False for a blocked name.
+                    window.task_edit.setText("肝脏分割")
+                    window._submit()
+                    self.assertFalse(window._submission_pending)
+                    window.task_edit.setText("")
+                    window._submit()
+                    self.assertFalse(window._submission_pending)
+                finally:
+                    window.window.close()
+
+    def test_flexict_case_table_shows_unusable_cases(self):
+        # R75 P1: _refresh_cases dropped unchecked rows entirely, so a
+        # label-missing scan showed "已找到 12 个病例" next to an empty
+        # table — a dead end the user cannot reason about. Unusable cases
+        # must be listed (grayed, with a translated status) and counted
+        # separately from usable ones.
+        _AppFixture.app()
+        import flexict_training_setup_ui as flexict_ui
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            home = self._settings_home(tmp, "flexict_settings.json", {})
+            with mock.patch.object(flexict_ui.Path, "home", lambda: home), mock.patch.object(
+                flexict_ui, "workspace_root", lambda _c: str(tmp / "ws")
+            ), mock.patch.object(
+                flexict_ui, "load_config", lambda: {"root": str(tmp)}
+            ), mock.patch.object(
+                flexict_ui.TrainingSetupWindow, "_refresh_models",
+                lambda self: None,
+            ):
+                window = flexict_ui.TrainingSetupWindow(
+                    {"workspace": str(tmp / "ws")}, tmp / "ctx.json", QT
+                )
+                try:
+                    window._case_rows = [
+                        {"case_id": "s0001", "checked": True,
+                         "use_train": True, "use_val": False, "status": "OK"},
+                        {"case_id": "s0002", "checked": False,
+                         "use_train": True, "use_val": False,
+                         "status": "label missing: item"},
+                        {"case_id": "s0003", "checked": False,
+                         "use_train": True, "use_val": False,
+                         "status": "image missing"},
+                    ]
+                    window._refresh_cases()
+                    # Every case is listed; unusable ones visible with a
+                    # translated status instead of silently dropped.
+                    self.assertEqual(3, window.case_table.rowCount())
+                    self.assertEqual(
+                        "缺少标签：item",
+                        window.case_table.item(1, 3).text(),
+                    )
+                    self.assertEqual(
+                        "缺少图像", window.case_table.item(2, 3).text()
+                    )
+                    summary = window.case_summary.text()
+                    self.assertIn("共 3 例", summary)
+                    self.assertIn("可用 1", summary)
+                    self.assertNotIn("没有可用病例", summary)
+                finally:
+                    window.window.close()
+
     def test_training_wizards_warn_on_duplicate_task(self):
         # G7: retraining the same task_id silently piles up near-duplicate
         # models. Both wizards must surface existing models for the task

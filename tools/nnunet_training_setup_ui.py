@@ -211,6 +211,29 @@ class TrainingSetupWindow:
         )
         form.addWidget(QtWidgets.QLabel("模型任务名 *"), 0, 0)
         form.addWidget(self.task_edit, 0, 1)
+        # The internal task_id is safe_identifier(task_name): anything
+        # outside [A-Za-z0-9_.-] collapses to "_", so two different Chinese
+        # names would both fold to the same internal id "item" and silently
+        # merge in the model list. Catch it at typing time, not at submit.
+        self.task_name_hint = QtWidgets.QLabel("")
+        self.task_name_hint.setStyleSheet("color: #b42318; font-weight: 600;")
+        self.task_name_hint.hide()
+        form.addWidget(self.task_name_hint, 1, 0, 1, 2)
+
+        def _check_task_name(text):
+            from nnunet_common import safe_identifier
+            collapsed = safe_identifier(str(text).strip())
+            if text.strip() and collapsed == "item":
+                self.task_name_hint.setText(
+                    "任务名仅支持英文字母、数字、下划线、中划线和点（内部目录与"
+                    "模型按任务名命名；中文任务名会被折叠成同一个内部名称，"
+                    "多个任务会互相混在一起）。"
+                )
+                self.task_name_hint.show()
+            else:
+                self.task_name_hint.hide()
+
+        self.task_edit.textChanged.connect(_check_task_name)
         self.dataset_id = QtWidgets.QSpinBox()
         self.dataset_id.setRange(1, 999)
         self.dataset_id.setValue(701)
@@ -840,6 +863,22 @@ class TrainingSetupWindow:
 
     def _submit(self):
         if self._submission_pending:
+            return
+        # Gate before anything else: an empty or collapsing task name either
+        # silently becomes "Segmentation task" or folds Chinese names onto
+        # the same internal id.
+        raw_task = self.task_edit.text().strip()
+        if not raw_task:
+            self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
+            self.status_label.setText("请填写模型任务名（星号为必填）。")
+            return
+        from nnunet_common import safe_identifier
+        if safe_identifier(raw_task) == "item":
+            self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
+            self.status_label.setText(
+                "任务名仅支持英文字母、数字、下划线、中划线和点；"
+                "请换一个任务名（例如 liver_segmentation）。"
+            )
             return
         try:
             request = self._request()
