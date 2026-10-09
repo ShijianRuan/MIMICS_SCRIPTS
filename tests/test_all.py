@@ -16641,6 +16641,39 @@ class TestUiThemePalette(unittest.TestCase):
             css,
         )
 
+    def test_configure_application_installs_zh_translator(self):
+        # R75 P2: Qt's standard-button texts ("&Yes"/"OK"/"Cancel" from
+        # qtbase) were never translated — every QMessageBox in every window
+        # showed English buttons inside a Chinese UI. configure_application
+        # must install the qtbase zh_CN translator.
+        sys.path.insert(0, os.path.join(PROJECT_ROOT, "tools"))
+        import ui_theme
+        from PySide6 import QtCore, QtWidgets
+
+        app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        ui_theme.configure_application(app)
+        box = QtWidgets.QMessageBox()
+        box.setStandardButtons(
+            QtWidgets.QMessageBox.Yes
+            | QtWidgets.QMessageBox.No
+            | QtWidgets.QMessageBox.Ok
+            | QtWidgets.QMessageBox.Cancel
+        )
+        texts = {
+            box.button(role).text()
+            for role in (
+                QtWidgets.QMessageBox.Yes,
+                QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.Ok,
+                QtWidgets.QMessageBox.Cancel,
+            )
+        }
+        self.assertIn("是", "".join(texts), texts)   # 是 (Yes)
+        self.assertIn("否", "".join(texts), texts)   # 否 (No)
+        self.assertIn("确定", "".join(texts))    # 确定 (OK)
+        self.assertIn("取消", "".join(texts))    # 取消 (Cancel)
+        self.assertNotIn("Yes", "".join(texts), texts)
+
     def test_al_table_keeps_unit_header_readable(self):
         # F15: the Uncertain-volume (mm³) column must never be squeezed
         # below its unit header by the stretch columns.

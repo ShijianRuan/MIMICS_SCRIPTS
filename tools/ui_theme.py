@@ -846,4 +846,33 @@ def configure_application(app, name="Mimics Script"):
             )
         except Exception:
             pass
+    _install_default_translator(app)
     app.setStyleSheet(stylesheet())
+
+
+def _install_default_translator(app):
+    """Load Qt's own zh_CN strings so standard buttons stop showing English.
+
+    QMessageBox/QFileDialog/QInputDialog standard texts ("&Yes", "OK",
+    "Cancel"...) come from the qtbase translation catalog. The PySide6 wheel
+    ships the .qm files; nobody was loading them, so every standard button in
+    every window rendered in English while the surrounding UI is Chinese.
+    """
+    try:
+        from PySide6 import QtCore
+
+        translations = Path(
+            QtCore.QLibraryInfo.path(
+                QtCore.QLibraryInfo.LibraryPath.TranslationsPath
+            )
+        )
+        translator = QtCore.QTranslator(app)
+        if translator.load(
+            QtCore.QLocale(QtCore.QLocale.Chinese, QtCore.QLocale.China),
+            "qtbase",
+            "_",
+            str(translations),
+        ):
+            app.installTranslator(translator)
+    except Exception:
+        pass
