@@ -29,8 +29,10 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
+from queue import Empty, Queue
 
 # Embeddable Python can omit the script directory from sys.path.
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -743,28 +745,49 @@ def run(context=None, preview_path=""):
         recognition.style().unpolish(recognition)
         recognition.style().polish(recognition)
 
-    def analyze(paths):
-        paths = [p for p in paths if p]
-        mask_path_edit.clear()
-        mask_path_widget.hide()
-        mask_pick_list.clear()
-        mask_pick_widget.hide()
-        state["auto_masks_found"] = False
-        state["discovered_mask_names"] = []
-        if not paths:
-            state["paths"] = []
-            state["kind"] = None
-            state["source"] = None
+    # Dataset scans (summarize_dataset / discover_single_source over a
+    # network root) can take tens of seconds — running them on the GUI
+    # thread froze the window for the whole scan. Scans run in a daemon
+    # thread; results come back through a queue drained by a timer. A
+    # generation counter keeps a stale scan from overwriting a newer one.
+    scan_results = Queue()
+    scan_generation = {"value": 0}
+
+    def _scan_worker(paths, generation):
+        """Heavy filesystem probing, off the GUI thread (铁律 1)."""
+        try:
+            kind, source, child_dirs = classify_payload(paths)
+            payload = {"kind": kind, "source": source}
+            if kind == "batch":
+                result = io_ui.summarize_dataset(source)
+                payload["batch_summary"] = result
+            elif kind == "multi_single":
+                # F10: probe each dropped path so a mixed selection is
+                # reportable per item (same data the sync loop collected).
+                cases = [
+                    (path, io_ui.discover_single_source(path)) for path in paths
+                ]
+                payload["multi_cases"] = cases
+            elif kind == "single":
+                payload["single_case"] = io_ui.discover_single_source(paths[0])
+            scan_results.put((generation, payload, ""))
+        except Exception as exc:  # surfaced by the poll timer
+            scan_results.put((generation, None, "{0}: {1}".format(
+                type(exc).__name__, exc)))
+
+    def _apply_scan_result(generation, payload, error):
+        if generation != scan_generation["value"]:
+            return  # a newer drop superseded this scan
+        if error:
+            set_recognition("识别拖入内容时出错：{0}".format(error[:300]), True)
             submit.setEnabled(False)
-            dropzone.setText("将图像、病例文件夹或数据集文件夹拖到这里")
-            set_recognition("")
+            dropzone.setText("识别失败——请重试或直接选择文件")
             return
-        state["paths"] = paths
-        kind, source, child_dirs = classify_payload(paths)
-        state["kind"] = kind
-        state["source"] = source
+        kind = payload["kind"]
+        source = payload["source"]
+        paths = list(state["paths"])
         if kind == "batch":
-            result = io_ui.summarize_dataset(source)
+            result = payload.get("batch_summary")
             summary = result["summary"] if result else "已识别数据集文件夹。"
             warnings = result.get("warnings") or [] if result else []
             if warnings:
@@ -779,8 +802,7 @@ def run(context=None, preview_path=""):
             valid = 0
             all_masks_empty = True
             union_masks = {}
-            for path in paths:
-                case_info = io_ui.discover_single_source(path)
+            for path, case_info in payload.get("multi_cases") or []:
                 if case_info:
                     valid += 1
                     if case_info.get("masks"):
@@ -808,7 +830,7 @@ def run(context=None, preview_path=""):
                 return
         else:
             display = paths[0]
-            case_info = io_ui.discover_single_source(paths[0]) if kind == "single" else None
+            case_info = payload.get("single_case") if kind == "single" else None
             if case_info:
                 state["auto_masks_found"] = bool(case_info.get("masks"))
                 if case_info.get("masks"):
@@ -864,6 +886,47 @@ def run(context=None, preview_path=""):
         if not output_custom["value"]:
             output_edit.setText(default_output)
         submit.setEnabled(True)
+
+    def poll_scan_results():
+        try:
+            generation, payload, error = scan_results.get_nowait()
+        except Empty:
+            return
+        _apply_scan_result(generation, payload, error)
+
+    scan_timer = QtCore.QTimer(window)
+    scan_timer.setInterval(80)
+    scan_timer.timeout.connect(poll_scan_results)
+    scan_timer.start()
+
+    def analyze(paths):
+        paths = [p for p in paths if p]
+        mask_path_edit.clear()
+        mask_path_widget.hide()
+        mask_pick_list.clear()
+        mask_pick_widget.hide()
+        state["auto_masks_found"] = False
+        state["discovered_mask_names"] = []
+        if not paths:
+            scan_generation["value"] += 1  # cancel any in-flight scan
+            state["paths"] = []
+            state["kind"] = None
+            state["source"] = None
+            submit.setEnabled(False)
+            dropzone.setText("将图像、病例文件夹或数据集文件夹拖到这里")
+            set_recognition("")
+            return
+        state["paths"] = paths
+        state["kind"], state["source"], _children = classify_payload(paths)
+        scan_generation["value"] += 1
+        generation = scan_generation["value"]
+        submit.setEnabled(False)  # re-enabled when the scan lands
+        dropzone.setText("正在识别拖入内容…")
+        set_recognition("正在识别拖入内容…")
+        worker = threading.Thread(
+            target=_scan_worker, args=(paths, generation),
+            name="drop-scan", daemon=True)
+        worker.start()
 
     def add_paths(values):
         cleaned = []
@@ -1025,8 +1088,41 @@ def run(context=None, preview_path=""):
 
     clear.clicked.connect(clear_all)
 
+    # submit_import probes each multi-case path again (discover_single_source
+    # per case) — same network-share freeze as the analyze scan, so it also
+    # runs in a daemon thread with the result drained by the same pattern.
+    submit_results_queue = Queue()
+
+    def poll_submit_results():
+        try:
+            launched, output, exc = submit_results_queue.get_nowait()
+        except Empty:
+            return
+        submit.setEnabled(True)
+        if exc is not None:
+            QtWidgets.QMessageBox.critical(
+                window, "导入失败",
+                "导入无法启动：\n\n{0}".format(exc),
+            )
+            return
+        lines = ["{0}: {1}".format(name, status) for name, status in launched[:10]]
+        if len(launched) > 10:
+            lines.append("……其余 {0} 例".format(len(launched) - 10))
+        QtWidgets.QMessageBox.information(
+            window, "导入已开始",
+            "导入已开始：\n\n{0}\n\n任务在后台继续进行；Mimics 工程将生成于：\n{1}\n\n"
+            "进度可在 01_Data > 04_Task_Status 查看。".format("\n".join(lines), output),
+        )
+        state["submitted"] = True
+        analyze([])
+
+    submit_timer = QtCore.QTimer(window)
+    submit_timer.setInterval(80)
+    submit_timer.timeout.connect(poll_submit_results)
+    submit_timer.start()
+
     def do_submit():
-        if not state["kind"]:
+        if not state["kind"] or not submit.isEnabled():
             return
         touch()
         kind = state["kind"]
@@ -1065,14 +1161,42 @@ def run(context=None, preview_path=""):
             "mask_paths": mask_paths,
             "paths": list(state["paths"]) if kind == "multi_single" else [],
         }
+        # Persist the remembered state BEFORE the background submit (the
+        # GUI thread owns it), then hand off only the launch itself.
+        remembered["drop_import"] = {
+            "output_path": output,
+            "mask_selection": mask_selection,
+            # True only when the user typed/picked a folder different from
+            # the computed default; a default must not stick (R61-7).
+            "output_custom": bool(
+                os.path.normcase(output)
+                != os.path.normcase(
+                    io_ui.source_default_output(
+                        "import_batch" if kind == "batch" else "import_single",
+                        source,
+                    )
+                )
+            ),
+        }
         try:
-            launched = submit_import(selection, context)
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(
-                window, "导入失败",
-                "导入无法启动：\n\n{0}".format(exc),
-            )
-            return
+            os.makedirs(os.path.dirname(state_file_path()), exist_ok=True)
+            write_json(state_file_path(), remembered)
+        except Exception:
+            pass
+        submit.setEnabled(False)
+        set_recognition("正在启动导入…")
+
+        def _launch():
+            try:
+                launched = submit_import(selection, context)
+            except Exception as exc:  # surfaced by the poll timer
+                submit_results_queue.put((None, output, exc))
+                return
+            submit_results_queue.put((launched, output, None))
+
+        worker = threading.Thread(
+            target=_launch, name="drop-submit", daemon=True)
+        worker.start()
         # Remember for next time (same state file as the path-setup UI).
         remembered["drop_import"] = {
             "output_path": output,
