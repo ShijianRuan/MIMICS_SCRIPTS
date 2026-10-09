@@ -637,7 +637,17 @@ class TrainingSetupWindow:
         self.label_table.setItem(row, 0, QtWidgets.QTableWidgetItem(str(name)))
         spin = QtWidgets.QSpinBox()
         spin.setRange(1, 255)
-        spin.setValue(int(label_id or row + 1))
+        # The default must not collide with an ID already in the table:
+        # removing a middle row made "row + 1" duplicate a lower row's ID,
+        # and the user only found out at submit time.
+        if label_id is None:
+            used = set()
+            for other in range(row):
+                widget = self.label_table.cellWidget(other, 1)
+                if widget is not None:
+                    used.add(int(widget.value()))
+            label_id = next(value for value in range(1, 256) if value not in used)
+        spin.setValue(int(label_id))
         self.label_table.setCellWidget(row, 1, spin)
         self.label_table.setItem(row, 2, QtWidgets.QTableWidgetItem(str(aliases)))
         mode = QtWidgets.QComboBox()
@@ -684,8 +694,8 @@ class TrainingSetupWindow:
             if len(names) > 1:
                 chosen, accepted = QtWidgets.QInputDialog.getItem(
                     self.window,
-                    "Choose Label Set",
-                    "Multi-class task:",
+                    "选择标签集",
+                    "该任务包含多套标签，请选择一套：",
                     names,
                     0,
                     False,

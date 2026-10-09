@@ -342,6 +342,11 @@ class ActiveLearningWindow:
         self._pair_deadline = time.time() + 120.0
         self._pair_results: Queue = Queue()
         self._submit_deadline = 0.0
+        # R75 P2: the running-job scan stats every job directory — seconds
+        # on a network workspace. It runs on a worker thread; the poll
+        # timer only drains the result (铁律 1).
+        self._running_scan_results: Queue = Queue()
+        self._running_scan_pending = False
         self.refresh()
         # The Mimics-side monitor reports outcomes by rewriting request
         # files; poll them so the table and status line follow along
@@ -350,6 +355,9 @@ class ActiveLearningWindow:
         self.poll_timer.setInterval(2000)
         self.poll_timer.timeout.connect(self._poll_requests)
         self.poll_timer.start()
+        # A closed window must stop polling (same lifetime trap as the
+        # status viewers).
+        self.window.closeEvent = self._close_event
         # Pair discovery + job submission also complete off the GUI thread.
         self.fast_timer = QtCore.QTimer(self.window)
         self.fast_timer.setInterval(80)
@@ -625,12 +633,35 @@ class ActiveLearningWindow:
         self.status_label.setText(
             '正在后台启动主动学习排序（检查路径与模型对）…')
 
+    def _close_event(self, event):
+        self.poll_timer.stop()
+        self.fast_timer.stop()
+
     def _poll_running_job(self):
         """Show live progress of a running ranking and auto-refresh at
         completion. Submit results are consumed by _poll_background_results
         (single protocol, single consumer); this poller only tracks the
-        running job itself."""
-        running = find_running_al_job(self.workspace or None)
+        running job itself. The scan itself runs on a worker thread —
+        stat-ing every job directory on the GUI thread froze the window
+        on network workspaces (R75 P2)."""
+        if not self._running_scan_pending:
+            self._running_scan_pending = True
+
+            def scan():
+                try:
+                    result = find_running_al_job(self.workspace or None)
+                except Exception:
+                    result = None
+                self._running_scan_results.put(result)
+
+            worker = threading.Thread(
+                target=scan, name="al-running-scan", daemon=True)
+            worker.start()
+        try:
+            running = self._running_scan_results.get_nowait()
+        except Empty:
+            return
+        self._running_scan_pending = False
         if running:
             self._seen_running_job_id = str(running.get("job_id") or "")
             phase = str(running.get("phase") or running.get("status") or "running")

@@ -2255,17 +2255,35 @@ class TestActiveLearningWindow(unittest.TestCase):
                 import flexict_active_learning_ui as al_ui
                 original = al_ui.find_running_al_job
                 al_ui.find_running_al_job = _fake_find_running
+
+                def _poll_until(predicate, timeout=5.0):
+                    # R75 P2: the running-job scan runs on a worker thread;
+                    # pump the poll until its result lands and is applied.
+                    deadline = time.time() + timeout
+                    while time.time() < deadline:
+                        window._poll_requests()
+                        if predicate():
+                            return True
+                        time.sleep(0.02)
+                    return False
+
                 try:
-                    window._poll_requests()
-                    self.assertIn("排序进行中", window.status_label.text())
+                    self.assertTrue(
+                        _poll_until(
+                            lambda: "排序进行中" in window.status_label.text()
+                        ),
+                        window.status_label.text(),
+                    )
                     self.assertIn("42%", window.status_label.text())
                     # Terminal state: the poll refreshes the job list.
                     status["status"] = "completed"
                     (job_dir / "status.json").write_text(
                         json.dumps(status), encoding="utf-8")
                     window._seen_running_job_id = status.get("job_id") or "aljob1"
-                    window._poll_requests()
-                    self.assertEqual(1, window.job_combo.count())
+                    self.assertTrue(
+                        _poll_until(lambda: window.job_combo.count() == 1),
+                        window.job_combo.count(),
+                    )
                 finally:
                     al_ui.find_running_al_job = original
             finally:

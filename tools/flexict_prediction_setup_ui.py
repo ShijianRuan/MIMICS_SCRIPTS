@@ -135,9 +135,14 @@ class PredictionWindow:
 
         def load():
             try:
+                # Keep unusable models listed (R75 P2): a model whose
+                # checkpoint vanished must be visible with its reason, not
+                # silently dropped — the annotator would conclude the model
+                # never existed.
                 all_models = load_models(workspace)
-                usable = [row for row in all_models if model_usability(row)[0]]
-                self._model_results.put((_rank_models(usable, self.context), ""))
+                self._model_results.put(
+                    (_rank_models(all_models, self.context), "")
+                )
             except Exception as exc:
                 self._model_results.put(([], str(exc)))
 
@@ -148,6 +153,8 @@ class PredictionWindow:
     def _apply_models(self, models, error):
         self._loading_models = False
         self.models = list(models or [])
+        usable_rows = []
+        unusable_count = 0
         self.table.setUpdatesEnabled(False)
         try:
             self.table.setRowCount(len(self.models))
@@ -156,6 +163,11 @@ class PredictionWindow:
                     "%Y-%m-%d %H:%M",
                     time.localtime(float(model.get("created_at_epoch") or 0)),
                 )
+                usable, reason = model_usability(model)
+                if usable:
+                    usable_rows.append(index)
+                else:
+                    unusable_count += 1
                 values = [
                     " + ".join(model.get("label_names") or []) or
                     model.get("label_name") or model.get("task_name"),
@@ -164,17 +176,28 @@ class PredictionWindow:
                     created,
                 ]
                 for column, value in enumerate(values):
-                    self.table.setItem(
-                        index, column, QtWidgets.QTableWidgetItem(str(value or ""))
-                    )
-            if self.models:
-                self.table.selectRow(0)
+                    item = QtWidgets.QTableWidgetItem(str(value or ""))
+                    if not usable:
+                        # Unusable rows stay visible but cannot be picked.
+                        item.setFlags(
+                            item.flags()
+                            & ~self.QtCore.Qt.ItemIsEnabled
+                        )
+                        item.setToolTip(reason)
+                    self.table.setItem(index, column, item)
+            if usable_rows:
+                self.table.selectRow(usable_rows[0])
         finally:
             self.table.setUpdatesEnabled(True)
-        self.start.setEnabled(bool(self.models))
+        self.start.setEnabled(bool(usable_rows))
         if error:
             self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
             self.status_label.setText("无法加载 FlexiCT 模型：{}".format(error))
+        elif usable_rows and unusable_count:
+            self.status_label.setText(
+                "已预选推荐模型；{0} 个模型不可用（悬停查看原因）。".format(
+                    unusable_count)
+            )
         elif self.models:
             self.status_label.setText(
                 "已预选推荐模型。所选 Mask 用于提示优先排序的目标。"
