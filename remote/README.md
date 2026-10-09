@@ -32,8 +32,9 @@ What the command does, and what to check at each step:
    pass a mirror via `--base-image`. Verified options (2026-10, from the
    206 workstation's network):
    - `registry.united-imaging.com/pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime`
-     (internal UI mirror — confirmed reachable from 206 and carrying the
-     exact base tag),
+     (internal UI mirror — pull-verified on 206: its digest
+     `sha256:77f17f84…` resolves to the same image the server already
+     runs, so a fresh server gets byte-identical base layers),
    - or a digest-pinned reference to a layer already on the server
      (e.g. `…@sha256:77f17f84…`), which skips registry metadata lookups
      entirely.
