@@ -702,15 +702,11 @@ class TrainingSetupWindow:
                     row.get("source_mode", "alternatives"),
                 )
             self.task_edit.setText(str(chosen))
-            self.status_label.setStyleSheet("")
-            self.status_label.setText(
-                "已载入多类别任务“{}”，共 {} 个输出标签。".format(
-                    chosen, len(rows)
-                )
+            self._set_status(
+                "已载入多类别任务“{}”，共 {} 个输出标签。".format(chosen, len(rows))
             )
         except Exception as exc:
-            self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
-            self.status_label.setText(str(exc))
+            self._set_status(str(exc), error=True)
 
     def _refresh_source(self):
         source = str(self.source_combo.currentData() or "dataset_masks")
@@ -861,6 +857,16 @@ class TrainingSetupWindow:
             )
         )
 
+    def _set_status(self, text, error=False):
+        """One place for status coloring: an error set objectName("errorLabel")
+        once and it was never reset, so every later neutral message ("正在提交
+        ...") stayed red and bold forever."""
+        self.status_label.setObjectName("errorLabel" if error else "hint")
+        self.status_label.setStyleSheet(
+            "color: #b42318; font-weight: 600;" if error else ""
+        )
+        self.status_label.setText(text)
+
     def _submit(self):
         if self._submission_pending:
             return
@@ -869,15 +875,14 @@ class TrainingSetupWindow:
         # the same internal id.
         raw_task = self.task_edit.text().strip()
         if not raw_task:
-            self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
-            self.status_label.setText("请填写模型任务名（星号为必填）。")
+            self._set_status("请填写模型任务名（星号为必填）。", error=True)
             return
         from nnunet_common import safe_identifier
         if safe_identifier(raw_task) == "item":
-            self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
-            self.status_label.setText(
+            self._set_status(
                 "任务名仅支持英文字母、数字、下划线、中划线和点；"
-                "请换一个任务名（例如 liver_segmentation）。"
+                "请换一个任务名（例如 liver_segmentation）。",
+                error=True,
             )
             return
         try:
@@ -896,10 +901,7 @@ class TrainingSetupWindow:
             self._submission_pending = True
             self._submission_deadline = time.time() + 60.0
             self.start_button.setEnabled(False)
-            self.status_label.setStyleSheet("")
-            self.status_label.setText(
-                "正在后台检查所选数据位置..."
-            )
+            self._set_status("正在后台检查所选数据位置...")
 
             def validate():
                 try:
@@ -923,9 +925,7 @@ class TrainingSetupWindow:
         except Exception as exc:
             self._submission_pending = False
             self.start_button.setEnabled(True)
-            self.status_label.setObjectName("errorLabel")
-            self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
-            self.status_label.setText(str(exc))
+            self._set_status(str(exc), error=True)
 
     def _poll_submission(self):
         try:
@@ -948,9 +948,9 @@ class TrainingSetupWindow:
             self._submission_pending = False
             self._submission_deadline = 0.0
             self.start_button.setEnabled(True)
-            self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
-            self.status_label.setText(
-                "路径检查超时。所选磁盘可能离线或响应过慢；请粘贴更具体的路径或重试。"
+            self._set_status(
+                "路径检查超时。所选磁盘可能离线或响应过慢；请粘贴更具体的路径或重试。",
+                error=True,
             )
         try:
             generation, request, error = self._submission_results.get_nowait()
@@ -962,11 +962,10 @@ class TrainingSetupWindow:
         self._submission_deadline = 0.0
         if error:
             self.start_button.setEnabled(True)
-            self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
-            self.status_label.setText(error)
+            self._set_status(error, error=True)
             return
         try:
-            self.status_label.setText("正在提交 nnU-Net 训练...")
+            self._set_status("正在提交 nnU-Net 训练...")
             write_json_atomic(
                 Path.home() / ".mimics_script" / "nnunet_settings.json",
                 {
@@ -996,8 +995,7 @@ class TrainingSetupWindow:
             self.window.close()
         except Exception as exc:
             self.start_button.setEnabled(True)
-            self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
-            self.status_label.setText(str(exc))
+            self._set_status(str(exc), error=True)
 
     def _close_event(self, event):
         self._submission_generation += 1

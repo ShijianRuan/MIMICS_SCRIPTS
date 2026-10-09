@@ -2188,16 +2188,18 @@ class TestActiveLearningWindow(unittest.TestCase):
 
     def test_ranking_submit_error_is_surfaced(self):
         # F04: a failed create_flexict_job (e.g. missing model pair) must
-        # reach the annotator, not die on a background thread.
+        # reach the annotator, not die on a background thread. R75 P1:
+        # submit results use the single dict/str queue protocol and are
+        # drained by _poll_background_results, not _poll_requests.
         with tempfile.TemporaryDirectory() as tmp:
             window = self._window(tmp)
             try:
                 window._submit_results.put(
-                    ("", "", "RuntimeError: No usable FlexiCT model pair"))
-                window._poll_requests()
-                self.assertIn("启动排序失败", window.status_label.text())
+                    "RuntimeError: No usable FlexiCT model pair")
+                window._poll_background_results()
                 self.assertIn("No usable FlexiCT model pair",
-                              window.status_label.text())
+                              window.pair_label.text())
+                self.assertTrue(window.start_run_button.isEnabled())
             finally:
                 window.window.close()
 
