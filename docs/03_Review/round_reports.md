@@ -5281,3 +5281,66 @@ run_training 立即返回"Training done."直接进验证）会因找不到 lates
 
 - 只读使用 `Totalsegmentator_dataset_v201` 中 8 例的 kidney_left（与
   R71 相同子集），全部输出写项目输出目录，源路径零改动。
+
+## R73（2026-10-09）：用户报告 P0 修复轮——Mimics 宿主崩溃 + 外窗启动失败 + 拖拽窗 UX
+
+用户报告："点击导入数据，Mimics 会被自动关闭只剩下导入数据的 UI，UI
+整体偏小，选择文件或者文件夹的弹窗会叠放在 UI 的下面，最近拖入这里的
+显示感觉看不懂"，随后升级为"大量类似问题，很多功能点击后都会导致
+Mimics 自动退出以及 UI 弹出失败，系统性全部解决并自动验证"。
+
+### R73-1 P0 根因：_hashlib.pyd 宿主崩溃（证据链 7/7 闭合）
+
+- **证据**：Windows 事件日志 Application Error（事件 1000）记录
+  MimicsResearch.exe 21.0.0.406 七次 0xc0000005 崩溃，错误模块
+  `_hashlib.pyd` 3.5.1150.1013，崩溃时刻与七次外窗启动
+  second 级对齐（14:15:08→09、14:32:08→09、14:37:14→16、
+  14:38:17→19、14:41:38→39 等）。
+- **差分**：不走 register_process 的窗口（io_setup 系）从不崩溃；
+  所有经 open_external_window → register_process → resource_locks
+  顶层 `import hashlib` 的窗口全部崩。io_setup 差分 + 崩溃路径
+  逐帧定位到 resource_locks 顶层 hashlib。
+- **修复**（commit 0f0a772）：入口路径三处顶层 hashlib 全部消除。
+  resource_locks 新增纯 Python `stable_digest_hex`（FNV-1a 双种子，
+  与 runtime_common 同方案——py3.5/py3.13 双端共享，不能 import
+  runtime_common 因其含 mimics 侧依赖）；runtime_common.stream_buffer
+  改惰性导入（仅 compute_sha 路径需要，Sep 30 后台运行已证安全）；
+  nninteractive_mimics 缓存键改用纯 Python 摘要（只命名缓存文件）。
+  历史先例：commit 630a2fa 曾修过同型崩溃（queue/lock 命名路径），
+  当时漏掉注册表路径。
+- **验证**：真实内嵌解释器 `C:/Program Files/Common Files/Materialise/
+  Python/3.5.2/python.exe` 导入 resource_locks+runtime_common 后
+  `'hashlib' in sys.modules` == False；register/unregister 往返正常；
+  回归测试（5b340db）钉死三模块模块级无 hashlib + 双摘要方案一致。
+
+### R73-2 P0：两外窗 sys.path 缺 tools/（commit 451d9f6）
+
+config_editor_ui.py / window_level_editor_ui.py 只插入项目根，但
+ui_theme.py 在 tools/ 旁——Mimics 启动它们时 `import ui_theme` 失败、
+窗口即死。修复为与其他外窗一致的 tools/ + 根双插入。
+
+### R73-3 P1：拖拽窗口三处 UX（commit 7b554d9）
+
+1. 尺寸：默认 420x320 → 640x660（最小 560x480）。
+2. 弹窗叠放：path_dialog_helper 四种弹窗加 WindowStaysOnTopHint
+   （独立进程无父窗口的对话框不加提示会开在置顶调用窗下面，看起来
+   像"没反应"）。
+3. 最近拖入可读性：`format_recent_drop_line` 渲染
+   "14:32  case — 导入中（准备数据）"——时间前缀 + 中文状态 +
+   运行中带阶段括注（preparing/waiting_for_background_mimics/
+   creating_mcs → 中文）；错误原因移入 tooltip（双击仍开完整日志）。
+
+### 门禁与验证
+
+- 定向：drop_window 相关 5/5；TestProcessRegistry 14/14；真实 py3.5
+  内嵌解释器导入检查（hashlib 不加载 + 注册往返）。
+- 冒烟 8/8：`20261009T190430_smoke.json`。
+- fast 门禁：见下方收尾记录。
+- 临时诊断文件清理：`.mimics_runtime/tmp_*` 7 个全部删除。
+- 复杂度：+194/−35 净 +159（账本已记行）。
+
+### 遗留登记
+
+- `run_runtime_entry` 对 entry 函数无 try/except 包裹（异常会穿透进
+  Mimics 脚本运行器）——按改动最小化原则登记 improvement_backlog
+  待办，本轮不扩面。

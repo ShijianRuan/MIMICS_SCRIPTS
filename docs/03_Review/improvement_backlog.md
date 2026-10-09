@@ -42,7 +42,46 @@
   触发。AST 契约测试钉住 communicate 不得回归 + applied/failed 两个
   失败路径测试。fast 27/27（`20260929T131846`）。
 
+### P0（2026-10-09 R73 用户报告：Mimics 宿主崩溃 + 窗口启动失败）
+
+- [x] **R73-1【P0】点击功能导致 Mimics 自动退出**〔R73 当轮解决，commit
+  `0f0a772` + 回归测试 `5b340db`〕：用户报告"点击导入数据，Mimics 会被
+  自动关闭"，且大量功能同病。根因确证（Windows 事件日志 Application
+  Error 事件 1000，7 次崩溃全部 second 级对齐外窗启动时刻）：Mimics 入口
+  → open_external_window → register_process → resource_locks 顶层
+  `import hashlib` → 原生 `_hashlib.pyd` 在 Mimics 内嵌 Python 3.5 中加载
+  → 宿主 0xc0000005 崩溃。未走 register_process 的窗口（io_setup 系）从不
+  崩溃——差分证据。修复：入口路径上三处顶层 hashlib 全部消除
+  （resource_locks 新增纯 Python stable_digest_hex——与 runtime_common 同
+  FNV-1a 双种子方案；runtime_common.stream_buffer 改惰性导入——仅
+  compute_sha 路径需要；nninteractive_mimics 缓存键改用纯 Python 摘要）。
+  验证：真实内嵌解释器（`C:/Program Files/Common Files/Materialise/
+  Python/3.5.2/python.exe`）导入 resource_locks+runtime_common 后
+  `'hashlib' in sys.modules` == False；注册/注销往返正常；回归测试钉住
+  三个模块模块级无 hashlib + 两套摘要方案一致。
+- [x] **R73-2【P0】外窗启动即死：sys.path 缺 tools/**（config_editor_ui、
+  window_level_editor_ui）〔R73 当轮解决，commit `451d9f6`〕：两窗只把项目
+  根插入 sys.path，但 ui_theme.py 在 tools/ 旁——Mimics 启动它们时
+  `import ui_theme` 失败、窗口即死。修复：与所有其他外窗一致，同时插入
+  tools/ 与根目录。
+- [x] **R73-3【P1】拖拽窗口三处 UX**〔R73 当轮解决，commit `7b554d9`〕：
+  用户报告"UI 整体偏小、选择文件/文件夹的弹窗叠放在 UI 下面、最近拖入
+  看不懂"。(a) 默认尺寸 420x320 → 640x660（最小 560x480）；(b)
+  path_dialog_helper 四种弹窗全部加 WindowStaysOnTopHint——对话框独立
+  进程无父窗口，不加提示会开在置顶调用窗下面，看起来像"没反应"；(c)
+  最近拖入行从"case - 状态：错误全文"改为"14:32  case — 导入中（准备
+  数据）"——时间前缀 + 中文状态 + 运行中带阶段括注；错误原因移入
+  tooltip（双击仍开完整日志）。测试：format_recent_drop_line 三态断言。
+
 ### P1（2026-09-29 四视角评审新增）
+
+- [ ] **R73-4【P2】run_runtime_entry 对入口函数无异常包裹**
+  （`runtime_py35/_mimics_entrypoint.py:64-70`，R73 审计发现）：`run_runtime_
+  entry` 直接裸调 `function()`，入口函数抛出的 Python 异常穿透进 Mimics
+  脚本运行器，用户看到的是宿主侧晦涩回溯而非 error_guidance 的中文
+  指引。非 R73-1 崩溃根因（该崩溃为原生 pyd 访问违例），但属真实
+  防护缺口。最小方案：包裹 try/except → message_box 中文指引 + 返回
+  非零。验收：mock 入口抛错 → 中文弹窗而非裸回溯；测试进回归套件。
 
 - [x] **R61-4【P1】模型管理器死按钮**〔R62 解决，commit `aadd6e3`〕：
   根因确证——`_fill_table` 末尾无条件 `setEnabled(False)`，全文件无
