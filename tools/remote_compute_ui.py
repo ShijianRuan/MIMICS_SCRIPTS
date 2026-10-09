@@ -591,8 +591,12 @@ class ServerProfilesDialog:
     def _show_cached_datasets(self) -> None:
         """List cached remote datasets (R72-B2) in a read-only dialog."""
         QtWidgets = self.QtWidgets
-        profile = self._save(show_success=False)
-        if profile is None:
+        try:
+            profile = self._profile_values()
+        except Exception as exc:  # noqa: BLE001 - surfaced in the dialog
+            self.status_label.setText(
+                "无法读取服务器配置：{}".format(exc)
+            )
             return
         self.cache_button.setEnabled(False)
         self.status_label.setText("正在读取服务器上的数据集缓存...")

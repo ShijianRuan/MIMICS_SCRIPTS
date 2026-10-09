@@ -743,6 +743,25 @@ class LocalCompatibilityTests(unittest.TestCase):
         # work-folder surfacing via the translated string.
         self.assertIn("工作目录 {}", ui_source)
 
+    def test_cached_datasets_button_does_not_implicitly_save(self):
+        """R75: listing the remote dataset cache is read-only.
+
+        _show_cached_datasets used to funnel through _save(), so merely
+        clicking the cache button persisted any half-edited form fields to
+        remote_compute_profiles.json. The source contract pins the
+        read-only path: it builds the profile in memory and never calls
+        save_profile/store_password.
+        """
+        ui_source = Path("tools/remote_compute_ui.py").read_text(
+            encoding="utf-8"
+        )
+        start = ui_source.index("def _show_cached_datasets")
+        end = ui_source.index("def _show_cache_rows")
+        body = ui_source[start:end]
+        self.assertIn("self._profile_values()", body)
+        for forbidden in ("self._save(", "save_profile(", "store_password("):
+            self.assertNotIn(forbidden, body)
+
     def test_connection_queries_gpu_load_at_server_test_time(self):
         """TB-06 contract: the server-test GPU query covers live load.
 
