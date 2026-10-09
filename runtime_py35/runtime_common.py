@@ -5,7 +5,6 @@ from __future__ import print_function
 
 import json
 import errno
-import hashlib
 import logging
 import os
 import shutil
@@ -52,8 +51,17 @@ def stream_buffer(raw, handle=None, compute_sha=True, progress_callback=None):
     Each chunk is written to ``handle`` (if given) and folded into the SHA-256
     digest (if requested); ``progress_callback`` (typically a GUI pump) runs
     between chunks so long exports cannot freeze the Mimics UI.
+
+    hashlib is imported lazily: this module is imported at entry-start time
+    inside the Mimics-embedded Python 3.5, where loading ``_hashlib.pyd``
+    outside the safe window has crashed the host (0xc0000005). Only the
+    mask-export/edit-digest paths actually need it.
     """
-    digest = hashlib.sha256() if compute_sha else None
+    digest = None
+    if compute_sha:
+        import hashlib
+
+        digest = hashlib.sha256()
     chunk_bytes = 16 * 1024 * 1024
     byte_count = len(raw)
     for offset in range(0, byte_count, chunk_bytes):

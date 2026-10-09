@@ -8,7 +8,6 @@ Python 3.5 syntax: no f-strings, no ``X | Y`` annotations, no
 
 import json
 import errno
-import hashlib
 import os
 import signal
 import subprocess
@@ -19,6 +18,33 @@ from typing import Callable, Optional
 
 
 INVALID_LOCK_GRACE_SECONDS = 5.0
+
+
+def stable_digest_hex(value):
+    """Return a deterministic, pure-Python digest for local names.
+
+    This module is imported inside the Mimics-embedded Python 3.5 to register
+    external windows and background jobs. Importing the native ``_hashlib``
+    extension there has crashed the Mimics host (0xc0000005 in
+    _hashlib.pyd, Windows Application Error event 1000) at the exact moment
+    a window was opened, so hashlib must never load on this path. The same
+    FNV-1a scheme as runtime_common.stable_digest_hex is used; it only needs
+    to be stable and collision-resistant for file names, not cryptographic.
+    """
+    if isinstance(value, bytes):
+        data = value
+    else:
+        data = str(value).encode("utf-8", "replace")
+    mask = (1 << 64) - 1
+    states = (0xCBF29CE484222325, 0x9E3779B185EBCA87)
+    results = []
+    for seed in states:
+        state = seed
+        for byte in bytearray(data):
+            state ^= byte
+            state = (state * 0x100000001B3) & mask
+        results.append("{0:016x}".format(state))
+    return "".join(results)
 
 
 class ResourceLockTimeout(RuntimeError):
@@ -216,7 +242,7 @@ def default_resource_lock_dir(project_root) -> Path:
         )
         if local_base:
             normalized = os.path.normcase(project_text)
-            digest = hashlib.sha1(normalized.encode("utf-8", "replace")).hexdigest()[:16]
+            digest = stable_digest_hex(normalized)[:16]
             return Path(local_base) / "Mimics-Script" / digest / "locks"
     return project / ".mimics_runtime" / "locks"
 
@@ -268,9 +294,9 @@ def _process_record_path(registry_dir, record_id: str) -> Path:
 def _process_record_id(role: str, pid: int, start_marker: str) -> str:
     # pid + start marker uniquely identifies one process lifetime; the role
     # prefix keeps records human-readable in the registry directory.
-    digest = hashlib.sha1(
-        ("{0}|{1}".format(int(pid), str(start_marker))).encode("utf-8", "replace")
-    ).hexdigest()[:12]
+    digest = stable_digest_hex(
+        "{0}|{1}".format(int(pid), str(start_marker))
+    )[:12]
     return "{0}-{1}-{2}".format(str(role), int(pid), digest)
 
 

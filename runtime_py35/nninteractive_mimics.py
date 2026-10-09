@@ -13,7 +13,6 @@ native APIs and inference runs in an external Python 3.10+ environment.
 from __future__ import print_function
 
 import atexit
-import hashlib
 import json
 import logging
 import os
@@ -1578,7 +1577,10 @@ def _source_image_export(image, config):
             )
         except OSError:
             source_signature = "{0}|{1}".format(path, json.dumps(mimics_voxel_to_ras, sort_keys=True))
-        cache_key = hashlib.sha256(source_signature.encode("utf-8")).hexdigest()[:16]
+        # Pure-Python digest: hashlib must not load at entry-import time
+        # inside Mimics (native _hashlib.pyd host crash); this key only
+        # names a cache file.
+        cache_key = runtime_common.stable_digest_hex(source_signature)[:16]
         safe_case_id = "".join(
             character if character.isalnum() or character in ("-", "_") else "_"
             for character in case_id
