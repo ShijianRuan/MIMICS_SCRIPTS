@@ -5593,3 +5593,66 @@ collect_issues / _case_image_hint / count_existing_label_files /
 
 - R73-4（run_runtime_entry 异常包裹）仍在待办区。
 - fast 门禁工件与全量结论见门禁记录（本轮末尾）。
+
+## R77（2026-10-10）：用户报告 P0——今晨多次导入失败根因修复
+
+用户报告"今天上午的多次导入都失败了……一个导入功能改了那么多遍各种
+错误"。逐个复现两次失败、根因定位、最小修复、防回归测试。
+
+### 失败 1（10:36，DICOM 目录 `R:\1.0 x 1.0_Lung_202`）
+
+- 症状：prepare 成功，create_mcs 阶段报"Background Mimics exited before
+  a case could be identified after 3 attempts (last result 0, runtime
+  9.1s)"。
+- 证据链：`_background_mimics_application.log` 显示后台 Mimics 实际死因是
+  `Output dir not found: \file-uih-sh\Userdata\shijian.ruan\mask_exports`
+  ——输出目录是映射网络盘上不存在的子目录。
+- 根因：**不对称漏洞**。批量 CLI（`cmd_prepare_import`）启动时
+  `output_dir.mkdir`，单例 worker（`single_case_import_worker.run`）没有——
+  prepare 全部做完、排进队列，后台 Mimics 在自己的 isdir 门禁退出（返回
+  码 0，不触发单 case 隔离），supervisor 重试 3 次后报出与根因无关的
+  英文错误。
+- 修复（db13749）：worker 启动即创建输出目录；创建失败（网络盘断开等）
+  fail-closed 中文报错"输出文件夹不可用"。与批量 CLI 对齐。
+- 测试：`test_single_case_worker_creates_missing_output_dir_or_fails_closed`
+  （缺失→创建通过门禁；路径被文件挡住→fail-closed 中文）。
+
+### 失败 2（10:38，单文件 `E:\1.0 x 1.0_Lung_202.mhd`）
+
+- 症状：prepare 阶段 SimpleITK 报"File cannot be read: E:\1.0 x
+  1.0_Lung_202.mhd ... No such file or directory"——但文件明明存在。
+- 证据链：读 .mhd 头发现 `ElementDataFile = E:1.0 x 1.0_Lung_202.raw`——
+  **盘符相对路径**（盘符+冒号、无反斜杠，外部工具 10月9日 10:16 生成）。
+  Windows 上按"E: 盘的进程当前目录"解析；bridge 子进程继承 worker 的
+  CWD（项目目录），.raw 解析到不存在的路径。已复现：CWD=E:\ 根可读、
+  CWD=项目目录即失败，且 ITK 报错误导性指向 .mhd 本身。
+- 修复（db13749）：`_read_mhd_with_absolute_data_ref`——首读失败且为
+  .mhd 时，解析头部、盘符相对引用锚定 .mhd 所在目录改写为绝对路径，
+  写入同目录临时修正头重读，源文件永不被改；.raw 真缺失时保留原始
+  报错（不做虚假修复）。接线 3 个读图点：
+  `get_medical_image_disk_geometry`、`_read_image_sitk_lps`、
+  `_read_existing_mask`。
+- 端到端验证：对今晨真实文件从敌意 CWD 跑 `do_prepare` 全通（status ok、
+  shape [512,512,177]）；对伪造盘符相对+缺失 .raw 头验证 fail-closed。
+- 测试：`test_mhd_drive_relative_data_ref_is_repaired_on_read`。
+
+### 调试插曲
+
+- 首次接线时误删 `_read_existing_mask` 分支内的 `import SimpleITK`，
+  NameError 被吞导致 skip-existing 比教失败、convert 重跑变"overwritten"——
+  相邻组测试（32/33）当场抓住，恢复 import 后 33/33 全绿。
+- Python 3 `except as` 变量块外删除语义导致裸 `raise` 误用
+  （"No active exception to reraise"），改为保存异常对象后重抛。
+
+### 门禁
+
+- 相邻测试组（mimics_bridge/prepare/single_case/import_drop/geometry）
+  33/33 绿。
+- smoke 8/8（`.mimics_runtime/regression/20261010T131642_smoke.json`）。
+- fast 门禁：见本轮末尾工件。
+
+### 遗留登记
+
+- 用户此前报告的输出目录 `R:\mask_exports` 在网络盘上仍不存在——修复
+  后重试导入时会自动创建（mkdir parents=True）或网络盘断开时得到
+  中文报错。无需进一步动作。

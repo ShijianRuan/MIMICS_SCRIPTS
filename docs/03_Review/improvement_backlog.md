@@ -2143,13 +2143,40 @@
 
 ## 进行中
 
-（截至 R72（2026-10-09）：R72 全部 8 项完成并 206 实测——A1 容器内预检
-（2752417）、A3 远程 SSH 自动构建镜像（0a52733/25feaff/06668d9）、
-B1 跨用户共享数据缓存（4754dba）、B2 引用远程已有数据集（e891efb）、
-B3 FlexiCT backbone 自动分发（e844d36）、C1 批量预测远程后端（f9479e5）、
-C2 FlexiCT 远程续训（5b39231）、D1 镜像更新流程制定+执行（f2f23f5，
-live 冒烟训练）。证据：各 commit + `.mimics_runtime/regression/` 工件
-+ 轮次报告 R72。此前状态：）
+### R77（2026-10-10 用户报告 P0：今晨多次导入失败）
+
+> 背景：用户报告"今天上午的多次导入都失败了……一个导入功能改了
+> 那么多遍各种错误"。逐个复现两次失败并根因定位。
+
+- [x] **R77-1【P0】失败 1（10:36 DICOM 目录）**：输出目录
+  `R:\mask_exports`（映射网络盘 `\\file-uih-sh\Userdata\shijian.ruan`，
+  该子目录不存在）从未被创建——单例 worker 把 prepare 全做完、排进
+  队列，后台 Mimics 在 `create_mcs_batch.py:1169` 的 isdir 门禁静默
+  退出（返回码 0）×3，最终报出与根因无关的英文错误。**根因是不对称
+  漏洞**：批量 CLI（`cmd_prepare_import`）有 `mkdir`，单例 worker 没有。
+  修复〔commit `db13749`〕：worker 启动即创建输出目录，创建失败
+  fail-closed 中文报错。测试：
+  `test_single_case_worker_creates_missing_output_dir_or_fails_closed`。
+- [x] **R77-2【P0】失败 2（10:38 单文件 .mhd）**：外部工具写的
+  `.mhd` 头部 `ElementDataFile = E:1.0 x 1.0_Lung_202.raw` 是盘符相对
+  路径（盘符+冒号、无反斜杠），ITK 按"E: 盘的进程当前目录"解析——
+  bridge 子进程继承 worker 的 CWD（项目目录），.raw 解析失败，报错
+  还误导性指向 .mhd 本身。修复〔commit `db13749`〕：
+  `_read_mhd_with_absolute_data_ref` 首读失败时在 .mhd 同目录写临时
+  修正头（引用改绝对路径）重读，源文件永不被改；接线 3 个读图点
+  （get_medical_image_disk_geometry / _read_image_sitk_lps /
+  _read_existing_mask）。对今晨真实文件端到端验证 do_prepare 全通。
+  测试：`test_mhd_drive_relative_data_ref_is_repaired_on_read`
+  （修复路径 + 真缺失 .raw 保留原始报错两断言）。
+
+（此前状态，截至 R72（2026-10-09）：R72 全部 8 项完成并 206 实测——
+A1 容器内预检（2752417）、A3 远程 SSH 自动构建镜像
+（0a52733/25feaff/06668d9）、B1 跨用户共享数据缓存（4754dba）、
+B2 引用远程已有数据集（e891efb）、B3 FlexiCT backbone 自动分发
+（e844d36）、C1 批量预测远程后端（f9479e5）、C2 FlexiCT 远程续训
+（5b39231）、D1 镜像更新流程制定+执行（f2f23f5，live 冒烟训练）。
+证据：各 commit + `.mimics_runtime/regression/` 工件 + 轮次报告
+R72。）
 
 ### R72（2026-10-08 用户立项：远程训练管线审计修复轮，8 项）
 
