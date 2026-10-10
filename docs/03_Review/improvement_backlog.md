@@ -3101,3 +3101,26 @@ commits `201b516` / `0be6ba5` / `a2d3244` / `afff2bc`，smoke 8/8
 
 轮次报告已独立归档至 `docs/03_Review/round_reports.md`（R1 起迁移，避免本文件
 过度膨胀）。
+
+### P2（2026-10-10 R78 用户报告：快捷键/快速入口调研——结论：不可行，登记为需用户决策已关闭）
+
+> 用户问："能否给一些功能或者入口设置快捷键或者快速入口，一些常用
+> 操作如果层级较深每次标注多次点击都很麻烦"。调研结论（任务 #89）：
+> **Mimics 平台层面不提供脚本快捷键注册能力，技术不可行**。
+
+- [x] **R78-1【调研】Mimics Scripting API 无键盘事件/快捷键注册**
+  〔调研完毕，登记为"不可行"关闭〕：`mimics.events` 只支持 5 种通知
+  （doc_opened/doc_closed/obj_deleted/obj_changed/timer），无键盘/
+  鼠标事件；API 文档全文无 key/keyboard/shortcut 注册项（:8781 处的
+  "Define a shortcut" 只是变量别名示例）；脚本仅在从菜单点击时运行，
+  无法常驻监听。此前 2026-10-01 效率路线图（docs/reviews/
+  2026-10-01-annotation-efficiency-roadmap.md:281）已把"某种快捷键
+  挂接"标为待核验 C 级（设计假设、无 API 依据），本次调研正式确认
+  为不可行。
+  **替代缓解**：R66-C1 已把 01_Data 入口 8→4（拖拽窗底座+浏览按钮
+  合并、04_Task_Status 吸收停止入口），R66-C2 03_Review 5→3——常用
+  操作点击深度已压到 2 层；Mimics 原生 General Shortcuts（F1、
+  Ctrl+Z/Y、Ctrl+I、Space 全屏等）不受脚本库影响、持续可用。
+  **若未来仍需快捷键**：唯一现实途径是外置工具窗口内的 Qt 快捷键
+  （Ctrl+O 等窗口内作用域），但仅在窗口激活时生效，覆盖不了
+  "Mimics 主界面里的标注操作"这一主诉求，故不立项。
