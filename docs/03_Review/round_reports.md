@@ -5699,3 +5699,25 @@ collect_issues / _case_image_hint / count_existing_label_files /
 ### 净代码变化
 
 +77/−72（净 +5），0 新增函数/配置/依赖/UI 入口——纯移动 + 引用同步。
+
+### 补充验证（用户要求"充分测试和验证"，2026-10-10 晚）
+
+**全量门禁第一跑（20261010T211317_full.json）：30/31**——test_all 套件
+失败。定位过程：
+
+1. 矩阵内失败不可复现（单独跑 exit 0）——首跑 `tail` 管道吞了退出码，
+   改 `set -o pipefail` + 落盘重跑后稳定复现：621 例 1 失败。
+2. 失败用例：`test_no_tick_function_blocks_the_gui_thread`（GUI 线程
+   契约测试）——`nninteractive_mimics.py` 的 `crop.tobytes()`（R61-12
+   已知豁免点）报违规。
+3. **根因不是 R79 回归**：白名单按行号登记（:2513），R73 hashlib 修复
+   时漂到 2515、R75 挪到 2495、R79 到 2496。R73/R75/R77 轮只跑 fast
+   门禁（不含 test_all 全量），漂移潜伏多轮，full 门禁才暴露。
+
+**修复〔commit `8ff4c62`〕**：白名单 key 从"文件:行号"改为
+"文件:源码行内容"（内容锚定，行号漂移免疫）+ 反向 guard——白名单每条
+key 必须在本轮真实匹配到调用点，错拼锚点会直接失败而不是静默放行。
+双向验证：故意破坏锚点 → 失败（unclaimed 提示）；恢复 → 绿。
+
+**教训**：行号锚定的契约测试白名单是慢性漂移源；fast 门禁不含
+test_all 全量，连续多轮 fast 绿不代表 full 绿。
