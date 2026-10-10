@@ -75,13 +75,13 @@
 
 ### P1（2026-09-29 四视角评审新增）
 
-- [ ] **R73-4【P2】run_runtime_entry 对入口函数无异常包裹**
-  （`runtime_py35/_mimics_entrypoint.py:64-70`，R73 审计发现）：`run_runtime_
-  entry` 直接裸调 `function()`，入口函数抛出的 Python 异常穿透进 Mimics
-  脚本运行器，用户看到的是宿主侧晦涩回溯而非 error_guidance 的中文
-  指引。非 R73-1 崩溃根因（该崩溃为原生 pyd 访问违例），但属真实
-  防护缺口。最小方案：包裹 try/except → message_box 中文指引 + 返回
-  非零。验收：mock 入口抛错 → 中文弹窗而非裸回溯；测试进回归套件。
+- [x] **R73-4【P2】run_runtime_entry 对入口函数无异常包裹**
+  〔2026-10-10 用户决策：不修，裸回溯是有意为之〕（`runtime_py35/
+  _mimics_entrypoint.py:64-70`，R73 审计发现）：审计曾建议包裹
+  try/except → message_box 中文指引。用户裁定保留裸回溯：入口函数
+  多数自带 try/except 走 error_guidance，能穿透到这里的异常恰是
+  未预期的 bug，裸回溯的文件/行号/调用链对定位问题最有价值，
+  包裹后反而丢失出错位置。不修，关闭。
 
 ### P0/P1（2026-10-09 R74 用户报告：Mask 选择两类问题 + 同类问题清扫）
 
