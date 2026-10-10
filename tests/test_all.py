@@ -16464,11 +16464,14 @@ class TestGuiThreadBlockingContract(unittest.TestCase):
 
     # Known pre-existing debt, each entry blocks removal only until its
     # backlog item lands. New violations are NOT allowed on this list.
-    # key: "file:lineno", value: backlog item.
+    # key: "file:source-line-content" (line-content anchor, NOT lineno —
+    # the lineno-based key drifted silently through R73/R75/R79 line
+    # shifts and only surfaced in a full-profile run), value: backlog item.
     KNOWN_VIOLATIONS = {
         # nnInteractive prompt-mask crop: user-interaction bbox-bounded, so
         # typically tiny; converting it would add a copy for no GUI win.
-        "nninteractive_mimics.py:2513": "R61-12",
+        "nninteractive_mimics.py:handle.write(crop.tobytes(order=\"C\"))":
+            "R61-12",
     }
 
     def test_no_tick_function_blocks_the_gui_thread(self):
@@ -16493,15 +16496,19 @@ class TestGuiThreadBlockingContract(unittest.TestCase):
             return found
 
         violations = []
+        matched_keys = set()
+        unclaimed = []
         for name in os.listdir(runtime_dir):
             if not name.endswith(".py"):
                 continue
             path = os.path.join(runtime_dir, name)
             with open(path, "rb") as handle:
                 try:
-                    tree = ast.parse(handle.read())
+                    source = handle.read()
+                    tree = ast.parse(source)
                 except SyntaxError:
                     continue
+            source_lines = source.decode("utf-8", "replace").splitlines()
             # Follow the tick's call closure within the same module: a tick
             # that delegates to a module function which then blocks is just
             # as frozen (the pre-R61-3 AL path hid communicate() one hop
@@ -16532,8 +16539,10 @@ class TestGuiThreadBlockingContract(unittest.TestCase):
             for top in ast.walk(tree):
                 if isinstance(top, ast.FunctionDef) and top.name.endswith("_tick"):
                     for attr, lineno in scan(top, {top.name}):
-                        key = "{0}:{1}".format(name, lineno)
+                        line = source_lines[lineno - 1].strip()
+                        key = "{0}:{1}".format(name, line)
                         if key in self.KNOWN_VIOLATIONS:
+                            matched_keys.add(key)
                             continue
                         violations.append(
                             "{0} {1}() reachable from {2}".format(
@@ -16545,6 +16554,19 @@ class TestGuiThreadBlockingContract(unittest.TestCase):
             "GUI-thread ticks must not reach communicate()/tobytes() - "
             "move the wait/copy onto a worker thread "
             "(violations: {0})".format(violations),
+        )
+        # Every whitelist entry must have matched a real call site in this
+        # run: a typo in the content anchor would otherwise silently allow
+        # everything the list pretends to pin.
+        unclaimed = [
+            key for key in sorted(self.KNOWN_VIOLATIONS)
+            if key not in matched_keys
+        ]
+        self.assertEqual(
+            [], unclaimed,
+            "KNOWN_VIOLATIONS entries that matched no call site — the "
+            "content anchor is stale; update it to the current source "
+            "line: {0}".format(unclaimed),
         )
 
     def test_reaper_callbacks_never_call_mimics_apis(self):
