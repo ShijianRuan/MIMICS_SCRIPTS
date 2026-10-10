@@ -384,6 +384,27 @@ def run(selection_path: Path, status_path: Path, stop_path: Path, log_path: Path
         return 2
 
     output_dir_path = Path(output_dir).resolve()
+    # R77-1: a missing output dir previously survived all of prepare, only
+    # for background Mimics to exit silently at its own isdir gate three
+    # times ("exited before a case could be identified"). Creating it here
+    # matches the batch CLI (cmd_prepare_import) and fails closed in Chinese
+    # when the network share is unreachable.
+    try:
+        output_dir_path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        _write_status(
+            status_path,
+            "failed",
+            "output_dir_unavailable",
+            error=(
+                "输出文件夹不可用，导入已停止：{0}（{1}）。"
+                "请检查网络盘连接或路径拼写后重试。".format(output_dir_path, exc)
+            ),
+            completed=0,
+            failed=1,
+            total=1,
+        )
+        return 2
     run_root = status_path.parent
     work_dir = run_root / "work" / case_id
     runtime_dir = Path(runtime_common.import_queue_runtime_dir(project_root, str(output_dir_path)))

@@ -935,6 +935,119 @@ class TestMimicsBridgeNiftiNormalization(unittest.TestCase):
             handle.write(b"NRRD0005\n")
         self.assertTrue(is_medical_image_file(path))
 
+    def test_mhd_drive_relative_data_ref_is_repaired_on_read(self):
+        # R77-2: external tools write "ElementDataFile = E:case.raw" (drive-
+        # relative). ITK resolves that against the reader's CWD on that
+        # drive, so the read must not depend on where the bridge process
+        # happens to run.
+        import mimics_bridge
+        values = np.arange(4 * 5 * 6, dtype=np.uint8).reshape(4, 5, 6)
+        raw_path = os.path.join(self.tmp, "case.raw")
+        with open(raw_path, "wb") as handle:
+            handle.write(
+                np.transpose(values, (2, 1, 0)).tobytes(order="C")
+            )
+        drive, tail = os.path.splitdrive(os.path.abspath(self.tmp))
+        if not drive:
+            self.skipTest("requires a drive-lettered path")
+        mhd_path = os.path.join(self.tmp, "case.mhd")
+        with open(mhd_path, "w", encoding="latin-1") as handle:
+            handle.write(
+                "ObjectType = Image\n"
+                "NDims = 3\n"
+                "BinaryData = True\n"
+                "BinaryDataByteOrderMSB = False\n"
+                "CompressedData = False\n"
+                "DimSize = 4 5 6\n"
+                "ElementType = MET_UCHAR\n"
+                "ElementDataFile = {0}:{1}\n".format(
+                    drive.rstrip(":"), os.path.basename(raw_path)
+                )
+            )
+        # A second drive-relative header pointing at a genuinely missing
+        # .raw must keep the original read error (no false repair).
+        missing_path = os.path.join(self.tmp, "missing.mhd")
+        with open(missing_path, "w", encoding="latin-1") as handle:
+            handle.write(
+                "ObjectType = Image\n"
+                "NDims = 3\n"
+                "BinaryData = True\n"
+                "BinaryDataByteOrderMSB = False\n"
+                "CompressedData = False\n"
+                "DimSize = 4 5 6\n"
+                "ElementType = MET_UCHAR\n"
+                "ElementDataFile = {0}:no_such_file.raw\n".format(
+                    drive.rstrip(":")
+                )
+            )
+
+        # The test process's CWD (the project dir on another drive) is the
+        # hostile environment that broke the import; the repaired read must
+        # not depend on it.
+        image = mimics_bridge._read_mhd_with_absolute_data_ref(mhd_path)
+        self.assertEqual((4, 5, 6), image.GetSize())
+        # The user's source header is untouched.
+        with open(mhd_path, "r", encoding="latin-1") as handle:
+            self.assertIn(":", handle.read().split("ElementDataFile = ")[1].split("\n")[0])
+
+        with self.assertRaisesRegex(Exception, "MetaImage|read"):
+            mimics_bridge._read_mhd_with_absolute_data_ref(missing_path)
+
+    def test_single_case_worker_creates_missing_output_dir_or_fails_closed(self):
+        # R77-1: a missing/unreachable output dir must surface here in
+        # Chinese, not as background Mimics exiting silently 3 times.
+        import tools.single_case_import_worker as worker
+
+        selection_path = os.path.join(self.tmp, "selection.json")
+        status_path = os.path.join(self.tmp, "status.json")
+        with open(selection_path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "source_path": os.path.join(self.tmp, "case_src"),
+                    "output_path": os.path.join(self.tmp, "outputs", "mcs_out"),
+                    "case_info": {"case_id": "case_a", "masks": []},
+                    "mask_selection": "none",
+                },
+                handle,
+            )
+        # Output dir does not exist yet: the worker must create it and move
+        # past this gate (it will fail later at the missing source, which
+        # proves the creation happened).
+        rc = worker.run(
+            Path(selection_path), Path(status_path),
+            Path(self.tmp, "stop.json"), Path(self.tmp, "log.txt"),
+        )
+        with open(status_path, "r", encoding="utf-8") as handle:
+            status = json.load(handle)
+        self.assertTrue(os.path.isdir(os.path.join(self.tmp, "outputs", "mcs_out")))
+        self.assertNotEqual("output_dir_unavailable", status.get("phase"))
+
+        # A path under a file (un-creatable) must fail closed in Chinese.
+        blocker = os.path.join(self.tmp, "blocker.txt")
+        with open(blocker, "w", encoding="utf-8") as handle:
+            handle.write("x")
+        selection_path2 = os.path.join(self.tmp, "selection2.json")
+        status_path2 = os.path.join(self.tmp, "status2.json")
+        with open(selection_path2, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "source_path": os.path.join(self.tmp, "case_src"),
+                    "output_path": os.path.join(blocker, "child", "mcs_out"),
+                    "case_info": {"case_id": "case_b", "masks": []},
+                    "mask_selection": "none",
+                },
+                handle,
+            )
+        rc2 = worker.run(
+            Path(selection_path2), Path(status_path2),
+            Path(self.tmp, "stop.json"), Path(self.tmp, "log.txt"),
+        )
+        with open(status_path2, "r", encoding="utf-8") as handle:
+            status2 = json.load(handle)
+        self.assertEqual(2, rc2)
+        self.assertEqual("output_dir_unavailable", status2["phase"])
+        self.assertIn("输出文件夹不可用", status2["error"])
+
     def test_mask_nifti_publish_is_atomic_and_preserves_existing_on_failure(self):
         import nibabel as nib
         import mimics_bridge

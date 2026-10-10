@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import os
 import sys
 import tempfile
@@ -170,9 +171,69 @@ def is_medical_image_file(path: str) -> bool:
     return name.endswith((".nii", ".nii.gz", ".mha", ".mhd", ".nrrd", ".nrrd.gz"))
 
 
+_DRIVE_RELATIVE_REF = re.compile(r"^([A-Za-z]):(?!\\|/)(.*)$")
+
+
+def _read_mhd_with_absolute_data_ref(path: str):
+    """Read a .mhd image, repairing a drive-relative ElementDataFile reference.
+
+    Some external export tools write ``ElementDataFile = E:case.raw`` (drive
+    letter + colon, no backslash). On Windows that is a drive-relative path
+    resolved against the process's current directory *on that drive*, so the
+    read succeeds or fails depending on the reader's CWD — the bridge process
+    inherits the worker's CWD, not the .mhd's folder. When the first read
+    fails, rewrite only the header into a temp file with the reference made
+    absolute (anchored at the .mhd's own folder, which is where a relative
+    name would have resolved) and read that instead. The user's source files
+    are never modified.
+    """
+    import SimpleITK as sitk
+
+    read_error = None
+    try:
+        return sitk.ReadImage(path)
+    except Exception as exc:
+        read_error = exc
+        if not str(path).lower().endswith(".mhd"):
+            raise
+    lines = Path(path).read_text(encoding="latin-1").splitlines(True)
+    rewritten = False
+    header_dir = Path(path).resolve().parent
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.lower().startswith("elementdatafile"):
+            continue
+        try:
+            reference = line.split("=", 1)[1].strip()
+        except IndexError:
+            continue
+        match = _DRIVE_RELATIVE_REF.match(reference)
+        if not match:
+            continue
+        absolute = os.path.abspath(os.path.join(str(header_dir), reference))
+        if not Path(absolute).is_file():
+            # Keep the original error: the data file is genuinely missing,
+            # not a CWD-resolution artifact.
+            raise read_error
+        lines[index] = "ElementDataFile = {}\n".format(absolute)
+        rewritten = True
+    if not rewritten:
+        raise read_error
+    fd, corrected_path = tempfile.mkstemp(suffix=".mhd", dir=str(header_dir))
+    os.close(fd)
+    try:
+        Path(corrected_path).write_text("".join(lines), encoding="latin-1")
+        return sitk.ReadImage(corrected_path)
+    finally:
+        try:
+            os.remove(corrected_path)
+        except OSError:
+            pass
+
+
 def get_medical_image_disk_geometry(path: str) -> tuple[tuple[int, int, int], np.ndarray]:
     import SimpleITK as sitk
-    image = sitk.ReadImage(path)
+    image = _read_mhd_with_absolute_data_ref(path)
     if image.GetDimension() != 3:
         raise ValueError("medical image must be 3D: {}".format(path))
     shape = tuple(int(value) for value in image.GetSize())
@@ -828,7 +889,7 @@ def _read_image_sitk_lps(path: str):
     try:
         if requires_header_correction:
             raise RuntimeError("NIfTI qform/sform normalization required")
-        sitk_img = sitk.ReadImage(path)
+        sitk_img = _read_mhd_with_absolute_data_ref(path)
     except Exception:
         if not is_nifti:
             raise
@@ -1342,7 +1403,7 @@ def _read_existing_mask(path: str, export_affine: np.ndarray):
         if lowered.endswith(".nrrd") or lowered.endswith(".mha") or lowered.endswith(".mhd"):
             import SimpleITK as sitk
 
-            raster = sitk.ReadImage(path)
+            raster = _read_mhd_with_absolute_data_ref(path)
             array = sitk.GetArrayFromImage(raster)
             # sitk arrays come back z/y/x; the export loop works in the
             # NIfTI x/y/z convention, so reverse the axes.
