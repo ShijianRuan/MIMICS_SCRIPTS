@@ -5721,3 +5721,8 @@ key 必须在本轮真实匹配到调用点，错拼锚点会直接失败而不�
 
 **教训**：行号锚定的契约测试白名单是慢性漂移源；fast 门禁不含
 test_all 全量，连续多轮 fast 绿不代表 full 绿。
+
+**Full 门禁第二跑（修复后）：31/31 全绿**，工件
+`.mimics_runtime/regression/20261010T224923_full.json`——test_all 942.5s
+（621 例全过）、training_convergence 1389.5s、全部集成/流程/压测套件通过。
+R77/R78/R79 三轮改动经全量验证关闭。
