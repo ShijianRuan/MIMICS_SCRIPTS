@@ -5656,3 +5656,46 @@ collect_issues / _case_image_hint / count_existing_label_files /
 - 用户此前报告的输出目录 `R:\mask_exports` 在网络盘上仍不存在——修复
   后重试导入时会自动创建（mkdir parents=True）或网络盘断开时得到
   中文报错。无需进一步动作。
+## R79（2026-10-10）：用户报告 P1——99_Admin 菜单重组
+
+### 背景与决策
+
+用户反馈 99_Admin 入口太多（9 个平铺），难找难定位，并质疑"AI 模型
+管理"这类日常入口是否该放在管理菜单。经 AskUserQuestion 三项拍板：
+
+1. `08_Manage_AI_Models` → **02_AI 顶层**（`00_Manage_AI_Models.py`）
+   ——模型切换是标注者日常操作，不应藏在管理菜单。
+2. `04_Undo_Last_Import` → **01_Data**（`05_Undo_Last_Import.py`）
+   ——撤销导入属于导入工作流。
+3. Admin 内部**只加子文件夹分组**（用户明确不选"合并到 4 项"方案）：
+   `Environment/`（01_Setup_Repair_Environment、02_Environment_Guidance、
+   03_Edit_Configs）、`Health/`（01_System_Health、
+   02_Stop_All_Owned_Services、03_Collect_Diagnostics），
+   `01_Clear_Cache` 留顶层。
+
+### 执行（commit fb9765e）
+
+- 9 个纯 `git mv`（100% rename，无代码改动）；脚本库新增 2 个子目录
+  作为 Mimics 菜单分组（与 02_AI 既有 nnInteractive/nnUNet/FlexiCT
+  子文件夹同一机制）。
+- 引用同步：代码 8 处（flexict_common 提示路径、nninteractive_mimics
+  用户指引 ×5、package_portable 打包路径 ×2、system_health_panel 自
+  报路径）、测试 7 处、文档 8 个文件（README、CONFIG_REFERENCE、
+  entry_guide、workflows、architecture、real_data_validation、
+  nninteractive_mimics.md、acceptance_2026-08-01）。
+- 清理 scripting_library 下陈旧 `__pycache__`。
+
+### 验证与防回归
+
+- 定向测试：入口/结构/路由组 51/51、模型可移植 14/14、
+  flexict_common 24/24。
+- smoke 门禁 8/8：`.mimics_runtime/regression/20261010T192557_smoke.json`。
+- **活文档交叉校验测试**（`test_living_doc_entry_references_match_
+  library_files`）本轮实战拦截 2 处漏改（scripting_library_workflows.md
+  12 处旧编号、mimics_real_data_validation.md 2 处）——正是该测试
+  设计目标（R61-19）的体现：移动入口后所有活文档引用必须与库文件
+  一致。
+
+### 净代码变化
+
++77/−72（净 +5），0 新增函数/配置/依赖/UI 入口——纯移动 + 引用同步。

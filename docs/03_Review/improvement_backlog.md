@@ -2143,6 +2143,27 @@
 
 ## 进行中
 
+### R79（2026-10-10 用户报告 P1：99_Admin 入口过多难定位）
+
+> 用户反馈："99_Admin下面入口太多了，是否可以增加层级进行分类……
+> 一些入口一定要放在下面比如AI模型管理的，要放在这里吗"。经
+> AskUserQuestion 三项拍板：AI 模型管理移 02_AI 顶层、Admin 内部只加
+> 子文件夹分组（不合并到 4 个）、Undo Last Import 移 01_Data。
+
+- [x] **R79-1【P1】菜单重组**〔commit `fb9765e`〕：
+  `08_Manage_AI_Models` → `02_AI/00_Manage_AI_Models`（标注者日常
+  流程，无需进管理菜单）；`04_Undo_Last_Import` →
+  `01_Data/05_Undo_Last_Import`（属于导入工作流）；其余 7 项分组
+  `Environment/`（环境安装/指引/编辑配置）与 `Health/`（系统健康/
+  停止服务/收集诊断），`01_Clear_Cache` 留顶层。全部代码/测试/文档
+  引用同步（入口测试、打包、nninteractive 用户指引、活文档）。
+  **验证**：入口/结构/路由测试组 51/51、模型可移植 14/14、
+  flexict_common 24/24、smoke 8/8（工件
+  `.mimics_runtime/regression/20261010T192557_smoke.json`）。
+  **防回归**：既有 `test_living_doc_entry_references_match_library_files`
+  交叉校验活文档入口引用与库文件一致（本轮正是被它拦下两处漏改：
+  workflows 文档 12 处、real_data_validation 2 处）。
+
 ### R77（2026-10-10 用户报告 P0：今晨多次导入失败）
 
 > 背景：用户报告"今天上午的多次导入都失败了……一个导入功能改了
