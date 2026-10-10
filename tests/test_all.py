@@ -3189,7 +3189,7 @@ class TestConfigEditor(unittest.TestCase):
             )
         )
         entry = os.path.join(
-            PROJECT_ROOT, "scripting_library", "99_Admin", "07_Edit_Configs.py"
+            PROJECT_ROOT, "scripting_library", "99_Admin", "Environment", "03_Edit_Configs.py"
         )
         self.assertTrue(os.path.isfile(entry))
         with open(entry, "r") as handle:
@@ -4135,7 +4135,7 @@ class TestScriptingLibraryEntries(unittest.TestCase):
 
 
     def test_stop_background_services_entry(self):
-        entry = os.path.join(PROJECT_ROOT, "scripting_library", "99_Admin", "03_Stop_All_Owned_Services.py")
+        entry = os.path.join(PROJECT_ROOT, "scripting_library", "99_Admin", "Health", "02_Stop_All_Owned_Services.py")
         with open(entry, "r") as f:
             source = f.read()
         self.assertIn("mimics_stop_background", source)
@@ -5426,8 +5426,9 @@ class TestNNInteractiveContinuousPrompting(unittest.TestCase):
             os.path.join("runtime_py35", "mimics_export.py"):
                 ["Configure MIMICS_BACKGROUND_EXE", "check mimics_export.log"],
             os.path.join("runtime_py35", "nninteractive_mimics.py"):
-                # The reachable entry is 99_Admin/03_Stop_All_Owned_Services;
-                # the longer name never existed as a menu entry.
+                # The reachable entry is
+                # 99_Admin/Health/02_Stop_All_Owned_Services; the longer
+                # name never existed as a menu entry.
                 ["Stop All Owned Background Services"],
             os.path.join("runtime_py35", "mimics_stop_background.py"):
                 # Report/check paths belong in the _mimics_log line, never in
@@ -13408,7 +13409,7 @@ class TestImportReceiptAndUndo(unittest.TestCase):
 
     def test_undo_entry_points_exist(self):
         entry = os.path.join(
-            PROJECT_ROOT, "scripting_library", "99_Admin", "04_Undo_Last_Import.py"
+            PROJECT_ROOT, "scripting_library", "01_Data", "05_Undo_Last_Import.py"
         )
         self.assertTrue(os.path.isfile(entry))
         with open(entry, "r") as handle:
@@ -13595,7 +13596,7 @@ class TestSystemHealthPanel(unittest.TestCase):
 
     def test_health_panel_entry_exists(self):
         entry = os.path.join(
-            PROJECT_ROOT, "scripting_library", "99_Admin", "05_System_Health.py"
+            PROJECT_ROOT, "scripting_library", "99_Admin", "Health", "01_System_Health.py"
         )
         self.assertTrue(os.path.isfile(entry))
         with open(entry, "r", encoding="utf-8") as handle:
@@ -13626,8 +13627,8 @@ class TestSystemHealthPanel(unittest.TestCase):
 
     def test_env_guidance_entry_exists(self):
         entry = os.path.join(
-            PROJECT_ROOT, "scripting_library", "99_Admin",
-            "09_Environment_Guidance.py"
+            PROJECT_ROOT, "scripting_library", "99_Admin", "Environment",
+            "02_Environment_Guidance.py"
         )
         self.assertTrue(os.path.isfile(entry))
         with open(entry, "r", encoding="utf-8") as handle:

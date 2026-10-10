@@ -414,7 +414,7 @@ The Scripting Library entries are organized by workflow:
 - `01_Data`: dataset import and mask export.
 - `02_AI`: nnInteractive, nnU-Net, and ScribblePrompt actions.
 - `03_Review`: mask identification, window/level presets, undo and reset.
-- `99_Admin`: background-service cleanup.
+- `99_Admin > Health`: background-service cleanup.
 
 Visible entries are intentionally thin wrappers. They all go through
 `runtime_py35/_mimics_entrypoint.py`, which performs runtime path setup and

@@ -225,8 +225,8 @@ class TestPretrainedWeights(unittest.TestCase):
             fc.resolve_pretrained_dir(config)
 
     def test_missing_weights_error_points_at_config_editor(self):
-        """AUD 2.1: the annotator gets a GUI path (99_Admin → Edit Configs),
-        not an instruction to hand-edit JSON."""
+        """AUD 2.1: the annotator gets a GUI path (99_Admin → Environment →
+        Edit Configs), not an instruction to hand-edit JSON."""
         config = fc.load_config()
         config["pretrained_weights_dir"] = ""
         original = fc.flexict_repo_dir
@@ -237,7 +237,7 @@ class TestPretrainedWeights(unittest.TestCase):
         finally:
             fc.flexict_repo_dir = original
         message = str(raised.exception)
-        self.assertIn("07_Edit_Configs", message)
+        self.assertIn("Environment → Edit_Configs", message)
         self.assertIn("pretrained_weights_dir", message)
 
 

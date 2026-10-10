@@ -130,8 +130,8 @@ Every finished import writes a receipt next to the created `.mcs` file
 (named `.<case>.import_receipt.json`, schema `mimics_import_receipt.v1`). It
 records the masks the import created, the metadata keys it set, the project
 path, and content fingerprints of the source image and of the saved `.mcs`.
-Receipts are the basis of **Admin > Undo Last Import**
-(`99_Admin/04_Undo_Last_Import.py`):
+Receipts are the basis of **Data > Undo Last Import**
+(`01_Data/05_Undo_Last_Import.py`):
 
 - masks listed in the receipt are deleted in one transaction;
 - the `.mcs` file itself is deleted only when its fingerprint still matches

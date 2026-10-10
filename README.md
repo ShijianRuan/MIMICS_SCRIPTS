@@ -18,8 +18,8 @@ Mimics 内嵌的 Python 3.5 只做轻量调度（`runtime_py35/`）；所有重�
    - 有分发安装包（含 `python\` 与 `wheels\`）：双击 `setup_offline.bat`
    - 或在 Mimics 中：`Scripting → Add Scripting Library` 选择
      `scripting_library\` 文件夹，然后运行菜单
-     `99_Admin → 01_Setup_Repair_Environment`
-   - 之前装过但报环境问题？运行 `99_Admin → 09_Environment_Guidance`，
+     `99_Admin → Environment → Setup_Repair_Environment`
+   - 之前装过但报环境问题？运行 `99_Admin → Environment → Environment_Guidance`，
      它会逐项列出问题并给出修复入口。
 
 2. **挂载脚本库**：Mimics 中 `Scripting → Add Scripting Library`，
@@ -35,7 +35,7 @@ Mimics 内嵌的 Python 3.5 只做轻量调度（`runtime_py35/`）；所有重�
 
 | 症状 | 去哪 |
 |------|------|
-| 环境缺失/安装失败/目录迁移/权重缺失 | `99_Admin → 09_Environment_Guidance` |
+| 环境缺失/安装失败/目录迁移/权重缺失 | `99_Admin → Environment → Environment_Guidance` |
 | 端到端功能验证清单（真实 Mimics 机器） | [docs/mimics_real_data_validation.md](docs/mimics_real_data_validation.md) |
 | 用户可改配置项说明 | [CONFIG_REFERENCE.md](CONFIG_REFERENCE.md) |
 | 某个入口的详细工作流 | [docs/scripting_library_workflows.md](docs/scripting_library_workflows.md) |

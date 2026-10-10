@@ -30,7 +30,7 @@ Windows 工作站至少需要：
 
 - 已安装并可正常打开项目的 Mimics；
 - 完整的 Mimics-Script 项目目录；
-- 运行一次 `99_Admin/01_Setup_Repair_Environment.py`，创建项目自己的 `nninteractive_env`；
+- 运行一次 `99_Admin/Environment/01_Setup_Repair_Environment.py`，创建项目自己的 `nninteractive_env`；
 - 需要相应 AI 功能时，准备其基础权重或 checkpoint；
 - 源数据、`.mcs` 和输出目录具有读写权限，网络盘还需要稳定的连接和重命名权限。
 
@@ -124,7 +124,7 @@ Mimics 菜单入口只完成必要的短操作，然后立即返回事件循环�
 - 模型注册、打包和导入；
 - 状态、日志、缓存和资源锁管理。
 
-外部进程优先使用项目的 `nninteractive_env`，而不是系统 Python。环境由 `99_Admin/01_Setup_Repair_Environment.py` 创建或修复。
+外部进程优先使用项目的 `nninteractive_env`，而不是系统 Python。环境由 `99_Admin/Environment/01_Setup_Repair_Environment.py` 创建或修复。
 
 ### 2.3 基本调用模式
 
@@ -280,7 +280,7 @@ Mask 导出作业、前台导出任务、Mask 追加作业、拖入导入）的�
 
 逐行停止只写入该任务类型对应的 stop marker（队列停止同时移除 active
 marker），当前病例完成后任务退出；kill/卡死进程的兜底仍在
-`99_Admin/03_Stop_All_Owned_Services.py`。它不会终止当前前台 Mimics，
+`99_Admin/Health/02_Stop_All_Owned_Services.py`。它不会终止当前前台 Mimics，
 也不会终止非本项目创建的 Python/Mimics 进程。
 
 ## 5. nnInteractive 功能入口
@@ -516,7 +516,7 @@ D1 决策删除。）
 
 ## 9. Admin 功能入口
 
-### 9.1 `99_Admin/01_Setup_Repair_Environment.py`
+### 9.1 `99_Admin/Environment/01_Setup_Repair_Environment.py`
 
 用途：安装或修复项目外部 Python、离线 wheels、PySide6、CUDA 依赖和模型目录。
 
@@ -528,7 +528,7 @@ D1 决策删除。）
 
 安装过程在外部进程运行，状态通过 JSON/日志反馈，不在 Mimics 内执行 pip。
 
-### 9.2 `99_Admin/02_Clear_Cache.py`
+### 9.2 `99_Admin/01_Clear_Cache.py`
 
 用途：清理已终止任务的缓存、中间文件和过期状态。
 
@@ -536,7 +536,7 @@ D1 决策删除。）
 
 清理前会检查任务活跃状态，不删除仍在使用的工作目录、模型或用户数据。
 
-### 9.3 `99_Admin/03_Stop_All_Owned_Services.py`
+### 9.3 `99_Admin/Health/02_Stop_All_Owned_Services.py`
 
 用途：异常情况下停止所有由当前 Mimics-Script 安装创建的后台服务和任务。
 
@@ -750,7 +750,7 @@ created -> starting -> running/waiting
 3. Mask 导出在 `01_Data/04_Task_Status` 中该行停止；
 4. nnU-Net 使用自己的 Stop 入口；
 5. nnInteractive/交互算法再次打开同一入口可查看并停止当前任务；
-6. 只有状态异常且普通停止无效时，才使用 `99_Admin/03_Stop_All_Owned_Services`。
+6. 只有状态异常且普通停止无效时，才使用 `99_Admin/Health/02_Stop_All_Owned_Services`。
 
 全局停止只处理带 ownership token、登记 PID 和项目脚本路径的进程。它不是“杀掉机器上的所有 Python/Mimics”，也不应替代正常取消流程。
 
@@ -825,7 +825,7 @@ python tools/ai_model_bundle.py export-nninteractive \
 ### 13.2 在 Windows 目标机器准备环境
 
 1. 部署与模型包兼容的最新 Mimics-Script 代码；
-2. 在 Mimics 中运行 `99_Admin/01_Setup_Repair_Environment`；
+2. 在 Mimics 中运行 `99_Admin/Environment/01_Setup_Repair_Environment`；
 3. 确认 `nninteractive_env`、PyTorch/CUDA 和官方 nnInteractive 运行依赖安装成功；
 4. 不要复制 macOS 的 `nninteractive_env`，Windows 必须使用 Windows Python 和 Windows wheels；
 5. 将模型 `.zip` 复制到 Windows 任意普通用户可读目录。
@@ -925,7 +925,7 @@ tasks/brain_extraction/models/brain_clopa_in_v1
 4. AI 等待：查看 status 中的 `waiting_for_gpu`、`waiting_for_background_mimics` 或 worker PID；
 5. 结果方位错误：核对 source path、source affine、Mimics affine 和 manifest；
 6. 模型无法加载：先执行模型 audit/checksum，不要直接重训；
-7. 异常残留：优先使用功能自己的 Stop；最后使用 `99_Admin/03_Stop_All_Owned_Services`。
+7. 异常残留：优先使用功能自己的 Stop；最后使用 `99_Admin/Health/02_Stop_All_Owned_Services`。
 
 ### 15.1 常见现象的第一检查点
 

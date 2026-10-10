@@ -25,7 +25,7 @@ python tools\mimics_batch_cli.py kill-background
 Inside Mimics, the equivalent entry is:
 
 ```text
-Scripting Library > 99_Admin > 03_Stop_All_Owned_Services
+Scripting Library > 99_Admin > Health > 02_Stop_All_Owned_Services
 ```
 
 Useful log locations:
@@ -290,7 +290,7 @@ foreground Mimics or unrelated processes.
 Run inside Mimics:
 
 ```text
-Scripting Library > 99_Admin > 03_Stop_All_Owned_Services
+Scripting Library > 99_Admin > Health > 02_Stop_All_Owned_Services
 ```
 
 Or from PowerShell:
@@ -368,8 +368,8 @@ usable, and exported label orientation matches the original image/mask geometry.
 - After training finishes, run nnInteractive again and confirm a new image worker starts instead of reusing a dead server session.
 - Complete one nnU-Net prediction and confirm its result is applied before the prediction NIfTI and bridge directory are removed.
 - Cancel training after materialization and confirm the run-specific dataset and fresh-label staging are removed when the controller exits.
-- Run `99 Admin > 02 Clear Cache` while an AI task is active. Confirm active worker, lock, and status files remain intact.
-- Run `03 Stop All Owned Services` in a disposable test. Confirm foreground Mimics and unrelated Python/Mimics processes remain running.
+- Run `99 Admin > 01 Clear Cache` while an AI task is active. Confirm active worker, lock, and status files remain intact.
+- Run `99 Admin/Health/02 Stop All Owned Services` in a disposable test. Confirm foreground Mimics and unrelated Python/Mimics processes remain running.
 
 ### Remaining synchronous Mimics API boundaries
 

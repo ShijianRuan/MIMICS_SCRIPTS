@@ -103,7 +103,7 @@ nninteractive_env\python.exe tools\package_portable.py check
 有网络时，可以从 Mimics 运行：
 
 ```text
-99_Admin/01_Setup_Repair_Environment.py
+99_Admin/Environment/01_Setup_Repair_Environment.py
 ```
 
 无网络时，必须先在兼容的 Windows 开发机准备完整环境和模型，再生成离线包：
@@ -134,7 +134,7 @@ nninteractive_env\python.exe tools\package_portable.py offline-bundle
 1. 在 Mimics 中打开 Scripting Library。
 2. 添加 `E:\mimics_script_offline\scripting_library`。
 3. 确认菜单按以下顶层分类显示：`01_Data`、`02_AI`、`03_Review`、`99_Admin`。
-4. 先运行 `99_Admin/01_Setup_Repair_Environment.py` 的检查功能，不要直接开始大任务。
+4. 先运行 `99_Admin/Environment/01_Setup_Repair_Environment.py` 的检查功能，不要直接开始大任务。
 5. 确认 Mimics 日志中只显示英文运行日志；本验收文档使用中文不影响运行日志规范。
 
 ### 3.3 GPU 检查
@@ -505,9 +505,9 @@ Windows 后台训练/推理子进程使用 `BELOW_NORMAL_PRIORITY_CLASS`，降�
 - `02_AI/nnUNet/03_Show_Status_Models.py`（状态窗口内停止任务）
 - `02_AI/FlexiCT/04_Show_Status_and_Stop.py`（状态窗口内停止任务）
 - nnInteractive 模型中心中的停止操作。
-- `99_Admin/03_Stop_All_Owned_Services.py`
+- `99_Admin/Health/02_Stop_All_Owned_Services.py`
 
-缓存清理入口：`99_Admin/02_Clear_Cache.py`
+缓存清理入口：`99_Admin/01_Clear_Cache.py`
 
 清理前应显示将删除的缓存类别和范围；运行中的任务使用的缓存不得删除。模型权重、用户标注、原始数据和未确认导出结果不得作为普通缓存清理。
 

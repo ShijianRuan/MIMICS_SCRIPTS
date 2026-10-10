@@ -15,6 +15,7 @@
 2. `02 Import Masks`
 3. `03 Export Masks`
 4. `04 Task Status`
+5. `05 Undo Last Import`
 
 `01 Import Data` opens the always-on-top import window. Drop a single
 `.nii`, `.nii.gz`, `.mha`, `.mhd`, or `.nrrd` volume, a TotalSegmentator-style
@@ -58,16 +59,17 @@ nnInteractive, foreground Mimics, or unrelated processes.
 
 ### 02 AI
 
-1. `01 nnInteractive`
-2. `Annotate With ScribblePrompt`
-3. `FlexiCT/01 Train Model`
-4. `FlexiCT/02 Predict Current Case`
-5. `FlexiCT/03 Active Learning Review`
-6. `FlexiCT/04 Show Status and Stop`
-7. `nnUNet/01 Train Model`
-8. `nnUNet/02 Predict Current Case`
-9. `nnUNet/03 Show Status & Models`
-10. `nnUNet/04 Batch Predict Dataset`
+1. `00 Manage AI Models`
+2. `01 nnInteractive`
+3. `Annotate With ScribblePrompt`
+4. `FlexiCT/01 Train Model`
+5. `FlexiCT/02 Predict Current Case`
+6. `FlexiCT/03 Active Learning Review`
+7. `FlexiCT/04 Show Status and Stop`
+8. `nnUNet/01 Train Model`
+9. `nnUNet/02 Predict Current Case`
+10. `nnUNet/03 Show Status & Models`
+11. `nnUNet/04 Batch Predict Dataset`
 
 `FlexiCT/03 Active Learning Review` also starts new ranking runs: the window's
 setup form resolves the newest usable 2D+3D pair, points at the unlabeled pool
@@ -95,15 +97,16 @@ surface in one place.
 
 ### 99 Admin
 
-1. `01 Setup Repair Environment`
-2. `02 Clear Cache`
-3. `03 Stop All Owned Services`
-4. `04 Undo Last Import`
-5. `05 System Health`
-6. `06 Collect Diagnostics`
-7. `07 Edit Configs`
-8. `08 Manage AI Models`
-9. `09 Environment Guidance`
+1. `Environment/01 Setup Repair Environment`
+2. `Environment/02 Environment Guidance`
+3. `Environment/03 Edit Configs`
+4. `Health/01 System Health`
+5. `Health/02 Stop All Owned Services`
+6. `Health/03 Collect Diagnostics`
+7. `01 Clear Cache`
+
+`Manage AI Models` moved to `02 AI/00` and `Undo Last Import` moved to
+`01 Data/05` so annotators reach them without entering the admin menu.
 
 The administrative stop entry only targets processes created and registered by this project. The import-specific stop remains under Data because it is part of the import workflow.
 
@@ -241,13 +244,13 @@ differs.
 
 | Current work | May start immediately | Must wait or stop first | Normal stop | Emergency stop |
 | --- | --- | --- | --- | --- |
-| Dataset scan or image preparation | Review, window controls, nnInteractive, AI inference on prepared data | Another import of the same queue | `01 Data/04 Task Status` (row Stop) | `99 Admin/03 Stop All Owned Services` |
-| Background `.mcs` creation | Review, GPU AI work, and exports reading other `.mcs` folders | Another creator or exporter using the same `.mcs` folder | `01 Data/04 Task Status` (row Stop) | `99 Admin/03 Stop All Owned Services` |
-| Mask export | Review, GPU AI work, and imports/exports using unrelated source and destination folders | Import writing its `.mcs` source folder, or export writing the same label destination | `01 Data/04 Task Status` (row Stop) | `99 Admin/03 Stop All Owned Services` |
-| nnInteractive active prediction | Review and data preparation | nnU-Net GPU execution | Finish or cancel the current nnInteractive session | `99 Admin/03 Stop All Owned Services` |
-| nnInteractive idle image worker | All review and data work | Nothing; another AI task requests a graceful GPU release | Worker exits on idle timeout | `99 Admin/03 Stop All Owned Services` |
-| nnU-Net training or prediction | Review, import preparation, status viewer | Another GPU AI task; nnInteractive GPU execution | `02 AI/nnUNet/03 Show Status & Models` (stop from the status window) | `99 Admin/03 Stop All Owned Services` |
-| Environment repair | Review and data work | A second environment repair | Re-run the entry and choose `Stop Current Setup` | `99 Admin/03 Stop All Owned Services` |
+| Dataset scan or image preparation | Review, window controls, nnInteractive, AI inference on prepared data | Another import of the same queue | `01 Data/04 Task Status` (row Stop) | `99 Admin/Health/02 Stop All Owned Services` |
+| Background `.mcs` creation | Review, GPU AI work, and exports reading other `.mcs` folders | Another creator or exporter using the same `.mcs` folder | `01 Data/04 Task Status` (row Stop) | `99 Admin/Health/02 Stop All Owned Services` |
+| Mask export | Review, GPU AI work, and imports/exports using unrelated source and destination folders | Import writing its `.mcs` source folder, or export writing the same label destination | `01 Data/04 Task Status` (row Stop) | `99 Admin/Health/02 Stop All Owned Services` |
+| nnInteractive active prediction | Review and data preparation | nnU-Net GPU execution | Finish or cancel the current nnInteractive session | `99 Admin/Health/02 Stop All Owned Services` |
+| nnInteractive idle image worker | All review and data work | Nothing; another AI task requests a graceful GPU release | Worker exits on idle timeout | `99 Admin/Health/02 Stop All Owned Services` |
+| nnU-Net training or prediction | Review, import preparation, status viewer | Another GPU AI task; nnInteractive GPU execution | `02 AI/nnUNet/03 Show Status & Models` (stop from the status window) | `99 Admin/Health/02 Stop All Owned Services` |
+| Environment repair | Review and data work | A second environment repair | Re-run the entry and choose `Stop Current Setup` | `99 Admin/Health/02 Stop All Owned Services` |
 
 Resource conflicts fail or wait explicitly; they do not start a competing
 writer silently. A background Mimics job may own two scoped
@@ -284,7 +287,7 @@ Generated files are separated into disposable runtime data and durable user data
 - Active job state, active resource locks, and active worker directories.
 - Source datasets and original medical images.
 
-`99 Admin > 02 Clear Cache` runs outside the GUI thread. It no longer treats the entire `.mimics_runtime` directory as a cache; active lifecycle state and locks are preserved. `03 Stop All Owned Services` requires both a project-owned path and a dedicated process marker, and explicitly excludes the foreground Mimics process.
+`99 Admin > 01 Clear Cache` runs outside the GUI thread. It no longer treats the entire `.mimics_runtime` directory as a cache; active lifecycle state and locks are preserved. `99 Admin/Health/02 Stop All Owned Services` requires both a project-owned path and a dedicated process marker, and explicitly excludes the foreground Mimics process.
 
 The retention defaults are configured in `nninteractive_config.json`. Durable models require deliberate model-version management and are not silently removed based on age.
 

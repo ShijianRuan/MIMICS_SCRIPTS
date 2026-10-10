@@ -769,7 +769,8 @@ def _runtime_paths(config):
                 "the deployment package. Copy the nnInteractive_v1.0 folder "
                 "from your distribution source into one of the locations "
                 "above (each fold needs checkpoint_final.pth). See the "
-                "Environment Guidance entry in the 99_Admin menu for help. "
+                "Environment Guidance entry in the 99_Admin > Environment "
+                "menu for help. "
                 "Custom trained models are not affected.".format(exc)
             )
     folds = _model_folds(model_dir)
@@ -779,7 +780,7 @@ def _runtime_paths(config):
             "Expected fold_*/checkpoint_final.pth under:\n{0}\n"
             "The copy appears incomplete - re-copy the whole nnInteractive_v1.0 "
             "folder from your distribution source. See the Environment "
-            "Guidance entry in the 99_Admin menu for help.".format(model_dir)
+            "Guidance entry in the 99_Admin > Environment menu for help.".format(model_dir)
         )
     probe_timeout = int(config.get("environment_probe_timeout_seconds", 180))
     probe = _probe_python(python_exe, probe_timeout)
@@ -4089,8 +4090,8 @@ def _error_guidance(error_text, stage=""):
             "server_unavailable",
             "nnInteractive AI 服务器已停止或无法启动。",
             "从菜单重试。如果再次失败，请运行 "
-            "管理菜单 > 环境设置/修复（99_Admin > 01），或停止后台服务"
-            "后重试。",
+            "管理菜单 > 环境设置/修复（99_Admin > Environment > 01），"
+            "或停止后台服务后重试。",
         )
     if (
         "no module named" in combined
@@ -4106,7 +4107,7 @@ def _error_guidance(error_text, stage=""):
         return (
             "environment_broken",
             "nnInteractive Python 环境不完整或已损坏。",
-            "请运行 管理菜单 > 环境设置/修复（99_Admin > 01），然后重试。",
+            "请运行 管理菜单 > 环境设置/修复（99_Admin > Environment > 01），然后重试。",
         )
     if "changed" in combined and (
         "mask" in combined or "target" in combined or "project" in combined

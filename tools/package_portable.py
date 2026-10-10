@@ -166,7 +166,7 @@ def check():
     if not python_exe:
         print("\n  {} Python not found in python_env/ or nninteractive_env/".format(_red("[!!]")))
         print("    Offline bundle: run setup_offline.bat on the target Windows machine.")
-        print("    Online repair: use 99_Admin/01_Setup_Repair_Environment.py in Mimics.")
+        print("    Online repair: use 99_Admin/Environment/01_Setup_Repair_Environment.py in Mimics.")
         return False
     print("\n  {} Python: {}".format(_green("[OK]"), python_exe))
 
@@ -379,7 +379,7 @@ def pack(output_dir=None, with_env=False):
         print()
         print("Deployment on target machine:")
         print("  1. Copy {} to the target".format(os.path.basename(archive)))
-        print("  2. In Mimics: 99_Admin > Setup Environment > Extract Archive")
+        print("  2. In Mimics: 99_Admin > Environment > Setup Environment > Extract Archive")
         if not with_env:
             print("  3. Then: Setup Environment > Setup From Scratch")
             print("     (rebuilds the Python environment from scratch)")
