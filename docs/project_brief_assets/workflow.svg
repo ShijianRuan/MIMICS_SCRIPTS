@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="570" viewBox="0 0 1200 570" role="img" aria-labelledby="title desc">
+<title id="title">三条标注路径与模型迭代</title><desc id="desc">节点和连线均可编辑</desc>
+<defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,1 L8,5 L0,9" fill="none" stroke="#64748b" stroke-width="1.5"/></marker></defs>
+<rect width="100%" height="100%" fill="#ffffff"/>
+<path d="M195,235 L225,235 L225,80 L260,80" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#arrow)"/>
+<path d="M195,255 L260,255" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#arrow)"/>
+<path d="M195,275 L225,275 L225,430 L260,430" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#arrow)"/>
+<path d="M500,80 L535,80 L535,230 L575,230" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#arrow)"/>
+<path d="M500,255 L575,255" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#arrow)"/>
+<path d="M500,430 L535,430 L535,280 L575,280" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#arrow)"/>
+<path d="M815,255 L885,255" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#arrow)"/>
+<path d="M1030,310 L1030,410" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#arrow)"/>
+<path d="M1160,455 L1185,455 L1185,10 L380,10 L380,30" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#arrow)"/>
+<path d="M690,425 L690,310" fill="none" stroke="#64748b" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
+<rect x="20" y="200" width="175" height="110" rx="12" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="107.5" y="241.0" text-anchor="middle" dominant-baseline="middle" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="20" font-weight="600" fill="#172b40">数据准备</text>
+<text x="107.5" y="269.0" text-anchor="middle" dominant-baseline="middle" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="17" font-weight="400" fill="#172b40">确认病例与序列</text>
+<rect x="260" y="30" width="240" height="100" rx="12" fill="#edf3fb" stroke="#416da5" stroke-width="1.5"/>
+<text x="380.0" y="66.0" text-anchor="middle" dominant-baseline="middle" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="20" font-weight="600" fill="#172b40">批量草稿</text>
+<text x="380.0" y="94.0" text-anchor="middle" dominant-baseline="middle" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="17" font-weight="400" fill="#172b40">适用模型自动预测</text>
+<rect x="260" y="205" width="240" height="100" rx="12" fill="#edf3fb" stroke="#416da5" stroke-width="1.5"/>
+<text x="380.0" y="241.0" text-anchor="middle" dominant-baseline="middle" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="20" font-weight="600" fill="#172b40">交互标注</text>
+<text x="380.0" y="269.0" text-anchor="middle" dominant-baseline="middle" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="17" font-weight="400" fill="#172b40">点／框／涂鸦引导</text>
+<rect x="260" y="380" width="240" height="100" rx="12" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="380.0" y="416.0" text-anchor="middle" dominant-baseline="middle" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="20" font-weight="600" fill="#172b40">手工标注</text>
+<text x="380.0" y="444.0" text-anchor="middle" dominant-baseline="middle" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="17" font-weight="400" fill="#172b40">Mimics 原生编辑</text>
+<rect x="575" y="200" width="240" height="110" rx="12" fill="#edf6f4" stroke="#0f766e" stroke-width="1.5"/>
+<text x="695.0" y="241.0" text-anchor="middle" dominant-baseline="middle" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="20" font-weight="600" fill="#172b40">人工检查与精修</text>
+<text x="695.0" y="269.0" text-anchor="middle" dominant-baseline="middle" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="17" font-weight="400" fill="#172b40">三视图核对与保存</text>
+<rect x="885" y="200" width="290" height="110" rx="12" fill="#edf6f4" stroke="#0f766e" stroke-width="1.5"/>
+<text x="1030.0" y="241.0" text-anchor="middle" dominant-baseline="middle" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="20" font-weight="600" fill="#172b40">确认后导出与复用</text>
+<text x="1030.0" y="269.0" text-anchor="middle" dominant-baseline="middle" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="17" font-weight="400" fill="#172b40">标签标准及质量检查</text>
+<rect x="860" y="410" width="300" height="95" rx="12" fill="#edf3fb" stroke="#416da5" stroke-width="1.5"/>
+<text x="1010.0" y="443.5" text-anchor="middle" dominant-baseline="middle" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="20" font-weight="600" fill="#172b40">模型适配与管理</text>
+<text x="1010.0" y="471.5" text-anchor="middle" dominant-baseline="middle" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="17" font-weight="400" fill="#172b40">已有标注 → 训练 → 预测</text>
+<rect x="575" y="425" width="230" height="65" rx="12" fill="#fff8eb" stroke="#b8832f" stroke-width="1.5"/>
+<text x="690.0" y="457.5" text-anchor="middle" dominant-baseline="middle" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="20" font-weight="600" fill="#172b40">完善复核与训练准入</text>
+</svg>

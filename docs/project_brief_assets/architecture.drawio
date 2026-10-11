@@ -1,0 +1,57 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mxfile host="app.diagrams.net">
+  <diagram name="Mimics 与外部计算的分工" id="architecture">
+    <mxGraphModel dx="1200" dy="520" grid="1" gridSize="10" page="1" pageWidth="1200" pageHeight="520">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="edge0" parent="1" edge="1" source="host" target="bridge" style="edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;strokeColor=#64748b;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge1" parent="1" edge="1" source="bridge" target="host" style="edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;strokeColor=#64748b;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge2" parent="1" edge="1" source="bridge" target="external" style="edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;strokeColor=#64748b;">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="650" y="160" />
+              <mxPoint x="650" y="115" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge3" parent="1" edge="1" source="external" target="bridge" style="edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;strokeColor=#64748b;">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="655" y="145" />
+              <mxPoint x="655" y="225" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge4" parent="1" edge="1" source="external" target="local" style="edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;strokeColor=#64748b;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge5" parent="1" edge="1" source="external" target="remote" style="edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;strokeColor=#64748b;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="host" parent="1" vertex="1" value="Mimics 工作台&#10;影像查看 · Mask 精修&#10;人工确认 · 工程保存" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#edf6f4;strokeColor=#0f766e;fontColor=#172b40;fontSize=18;spacing=10;">
+          <mxGeometry x="25" y="100" width="270" height="185" as="geometry" />
+        </mxCell>
+        <mxCell id="bridge" parent="1" vertex="1" value="脚本桥接&#10;身份与空间匹配&#10;任务控制 · 结果写入" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#f8fafc;strokeColor=#cbd5e1;fontColor=#172b40;fontSize=18;spacing=10;">
+          <mxGeometry x="360" y="120" width="255" height="145" as="geometry" />
+        </mxCell>
+        <mxCell id="external" parent="1" vertex="1" value="外部计算进程&#10;数据转换 · AI 推理 · 模型训练" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#edf3fb;strokeColor=#416da5;fontColor=#172b40;fontSize=18;spacing=10;">
+          <mxGeometry x="685" y="60" width="475" height="115" as="geometry" />
+        </mxCell>
+        <mxCell id="local" parent="1" vertex="1" value="本地 GPU&#10;适合交互与单例" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#edf3fb;strokeColor=#416da5;fontColor=#172b40;fontSize=18;spacing=10;">
+          <mxGeometry x="685" y="250" width="215" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="remote" parent="1" vertex="1" value="远程 GPU&#10;按功能支持训练／预测" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#edf3fb;strokeColor=#416da5;fontColor=#172b40;fontSize=18;spacing=10;">
+          <mxGeometry x="940" y="250" width="220" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="support" parent="1" vertex="1" value="共同支撑&#10;状态反馈 · 环境诊断 · 模型管理 · 结果与冲突记录" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#f8fafc;strokeColor=#cbd5e1;fontColor=#172b40;fontSize=18;spacing=10;">
+          <mxGeometry x="360" y="395" width="800" height="80" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
