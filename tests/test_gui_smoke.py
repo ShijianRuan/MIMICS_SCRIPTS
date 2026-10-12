@@ -1108,7 +1108,7 @@ class TestBatchPredictionWindow(unittest.TestCase):
                 window.table.item(0, 4).text(),
             )
             self.assertEqual(
-                "model folder is missing",
+                "本地\n不可用：model folder is missing",
                 window.table.item(0, 4).toolTip(),
             )
             # ...and is greyed out (not selectable)...
@@ -2150,6 +2150,8 @@ class TestActiveLearningWindow(unittest.TestCase):
                 self.assertEqual(
                     2, window.table.rowCount(),
                     "non-empty ranking must populate the table")
+                self.assertFalse(window.open_button.isEnabled())
+                window.table.selectRow(0)
                 self.assertTrue(window.open_button.isEnabled())
                 summary = window.status_label.text()
                 self.assertIn("已排序 2 例", summary)
@@ -2441,7 +2443,8 @@ class TestActiveLearningWindow(unittest.TestCase):
                 window._poll_background_results()
                 time.sleep(0.02)
             window._apply_pair((None, None), "")
-            self.assertIn("01 训练模型", window.pair_label.text())
+            self.assertIn("FlexiCT 训练窗口", window.pair_label.text())
+            self.assertIn("2D + 3D 成对模型（主动学习用）", window.pair_label.text())
             self.assertFalse(window.start_run_button.isEnabled())
             # The old circular empty state pointed at this same entry.
             self.assertIn("新建排序", window.status_label.text())

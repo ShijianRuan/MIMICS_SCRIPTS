@@ -20,6 +20,7 @@ for _candidate in (_HERE, _ROOT):
 from ui_theme import (
     choose_open_files_async,
     configure_application,
+    clamp_window_to_screen,
     stylesheet,
 )
 
@@ -218,6 +219,7 @@ def main():
     submit.clicked.connect(finish)
     cancel.clicked.connect(dialog.reject)
     dialog.rejected.connect(cancelled)
+    clamp_window_to_screen(dialog, (620, 420))
     dialog.show()
     return int(app.exec())
 

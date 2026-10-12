@@ -25,7 +25,7 @@ from flexict_common import (  # noqa: E402
     recommended_model,
 )
 from nnunet_common import read_json, update_status, write_json_atomic  # noqa: E402
-from ui_theme import configure_application, stylesheet  # noqa: E402
+from ui_theme import clamp_window_to_screen, configure_application, scroll_layout_body, stylesheet  # noqa: E402
 
 
 def _rank_models(models, context):
@@ -125,6 +125,8 @@ class PredictionWindow:
         self.start.setEnabled(False)
         actions.addWidget(self.start)
         root.addLayout(actions)
+        self.body_scroll = scroll_layout_body(root, first=2, footer_items=2)
+        clamp_window_to_screen(self.window, (640, 460))
         self._timer = self.QtCore.QTimer(self.window)
         self._timer.timeout.connect(self._poll_background_results)
         self._timer.start(80)
@@ -151,6 +153,7 @@ class PredictionWindow:
         worker.start()
 
     def _apply_models(self, models, error):
+        QtWidgets = self.QtWidgets
         self._loading_models = False
         self.models = list(models or [])
         usable_rows = []
@@ -177,13 +180,14 @@ class PredictionWindow:
                 ]
                 for column, value in enumerate(values):
                     item = QtWidgets.QTableWidgetItem(str(value or ""))
+                    item.setToolTip(str(value or ""))
                     if not usable:
                         # Unusable rows stay visible but cannot be picked.
                         item.setFlags(
                             item.flags()
                             & ~self.QtCore.Qt.ItemIsEnabled
                         )
-                        item.setToolTip(reason)
+                        item.setToolTip("{0}\n不可用：{1}".format(value or "", reason))
                     self.table.setItem(index, column, item)
             if usable_rows:
                 self.table.selectRow(usable_rows[0])
@@ -197,6 +201,10 @@ class PredictionWindow:
             self.status_label.setText(
                 "已预选推荐模型；{0} 个模型不可用（悬停查看原因）。".format(
                     unusable_count)
+            )
+        elif self.models and not usable_rows:
+            self.status_label.setText(
+                "所有已注册模型都不可用。悬停模型行查看原因，或在 AI 模型管理器中重新导入。"
             )
         elif self.models:
             self.status_label.setText(

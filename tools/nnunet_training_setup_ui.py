@@ -73,8 +73,8 @@ class TrainingSetupWindow:
         root.addWidget(title)
         root.addWidget(subtitle)
         hint = QtWidgets.QLabel(
-            "如何选方法：标注病例多（约 30 例以上）追求全自动精度 → nnU-Net；"
-            "只有几例标注、想快速得到可用模型 → FlexiCT；边点边标、交互修正 → nnInteractive。"
+            "如何选方法：训练可重复的分割任务 → nnU-Net；"
+            "少量 CT 标注尝试任务训练 → FlexiCT；边点边标、交互修正 → nnInteractive。"
         )
         hint.setObjectName("hint")
         hint.setWordWrap(True)
@@ -137,7 +137,8 @@ class TrainingSetupWindow:
         default; every field inside keeps its default and one-line hint."""
         QtCore, QtWidgets = self.QtCore, self.QtWidgets
         toggle = QtWidgets.QToolButton()
-        toggle.setText("高级训练设置（Trainer、Fold、GPU 数量、epoch）")
+        toggle.setText("高级训练设置")
+        toggle.setToolTip("数据集编号、训练器、交叉验证、GPU 和训练轮数。通常使用默认值即可。")
         toggle.setCheckable(True)
         toggle.setChecked(False)
         toggle.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
@@ -240,22 +241,19 @@ class TrainingSetupWindow:
         self.dataset_id.setToolTip(
             "nnU-Net 数据集编号。不同任务请使用不同编号。"
         )
-        form.addWidget(QtWidgets.QLabel("数据集 ID *"), 1, 0)
-        form.addWidget(self.dataset_id, 1, 1)
         self.dataset_id_hint = self._hint(
-            "标识该任务的数字编号。系统会自动建议一个空闲编号；仅当训练第二个不同任务时才需要修改。"
+            "系统自动建议空闲编号。只有复用已有数据集或排查编号冲突时才需要手动修改。"
         )
-        form.addWidget(self.dataset_id_hint, 2, 0, 1, 2)
         self.modality_combo = QtWidgets.QComboBox()
         for label, value in (("CT", "CT"), ("MRI", "MRI"), ("Other", "Other")):
             self.modality_combo.addItem(label, value)
-        form.addWidget(QtWidgets.QLabel("成像模态"), 3, 0)
-        form.addWidget(self.modality_combo, 3, 1)
+        form.addWidget(QtWidgets.QLabel("成像模态"), 2, 0)
+        form.addWidget(self.modality_combo, 2, 1)
         self.dataset_edit = QtWidgets.QLineEdit()
         self.dataset_edit.setPlaceholderText("每个病例一个子文件夹的目录")
-        form.addWidget(QtWidgets.QLabel("原始图像数据集 *"), 4, 0)
+        form.addWidget(QtWidgets.QLabel("原始图像数据集 *"), 3, 0)
         form.addWidget(
-            self._path_row(self.dataset_edit, "选择原始图像数据集"), 4, 1
+            self._path_row(self.dataset_edit, "选择原始图像数据集"), 3, 1
         )
         layout.addWidget(project)
 
@@ -555,6 +553,9 @@ class TrainingSetupWindow:
             "测试时翻转增强：推理更稳但约慢一倍。默认关闭即可满足多数标注。"
         )
         train_form.addWidget(self.tta_check, 16, 0, 1, 2)
+        train_form.addWidget(QtWidgets.QLabel("数据集编号"), 17, 0)
+        train_form.addWidget(self.dataset_id, 17, 1)
+        train_form.addWidget(self.dataset_id_hint, 18, 0, 1, 2)
         # D2: the whole Training group is advanced — every field has a safe
         # default and a one-line hint; annotators should not face them unless
         # they look for them.
@@ -659,6 +660,14 @@ class TrainingSetupWindow:
             "“匹配其一”将多个名称视为同一 Mask 的别名；“合并全部”把所有匹配的来源 Mask 合并为该输出类别。"
         )
         self.label_table.setCellWidget(row, 3, mode)
+        # A table cell with a widget has no item text for ResizeToContents.
+        # Supply a real size hint so the combo and its arrow remain readable.
+        mode.ensurePolished()
+        spin.ensurePolished()
+        item = QtWidgets.QTableWidgetItem()
+        item.setSizeHint(self.QtCore.QSize(mode.sizeHint().width() + 20, mode.sizeHint().height() + 8))
+        self.label_table.setItem(row, 3, item)
+        self.label_table.setRowHeight(row, max(42, mode.sizeHint().height() + 8, spin.sizeHint().height() + 8))
 
     def _remove_label_rows(self):
         selected = sorted({index.row() for index in self.label_table.selectedIndexes()}, reverse=True)

@@ -32,6 +32,8 @@ from nnunet_jobs import create_job  # noqa: E402
 from ui_theme import (  # noqa: E402
     choose_existing_directory_async,
     configure_application,
+    clamp_window_to_screen,
+    scroll_layout_body,
     stylesheet,
 )
 
@@ -142,6 +144,8 @@ class BatchPredictionWindow:
         self.start.setEnabled(False)
         actions.addWidget(self.start)
         root.addLayout(actions)
+        self.body_scroll = scroll_layout_body(root, first=2, footer_items=2)
+        clamp_window_to_screen(self.window, (680, 540))
 
         self._loading_models = True
         self._model_deadline = time.time() + 120.0
@@ -219,13 +223,12 @@ class BatchPredictionWindow:
                 ]
                 for column, value in enumerate(values):
                     item = self.QtWidgets.QTableWidgetItem(str(value or ""))
-                    if column == 3:
-                        item.setToolTip(str(value or ""))
+                    item.setToolTip(str(value or ""))
                     if unusable_reason:
                         # R62-7: registered-but-broken models stay
                         # visible, greyed out with the reason in the last
                         # column — not silently dropped.
-                        item.setToolTip(unusable_reason)
+                        item.setToolTip("{0}\n不可用：{1}".format(value or "", unusable_reason))
                         item.setFlags(
                             item.flags() & ~self.QtCore.Qt.ItemIsEnabled
                         )

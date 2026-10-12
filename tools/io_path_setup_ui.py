@@ -25,6 +25,8 @@ from ui_theme import (
     choose_existing_directory_async,
     choose_open_file_async,
     configure_application,
+    clamp_window_to_screen,
+    scrollable_widget,
     stylesheet as shared_stylesheet,
 )
 
@@ -304,6 +306,7 @@ def summarize_dataset(source, profile_id=None, entry_cap=511):
     mask_dirs = list(profile["mask_dirs"]) or ["segmentations"]
     image_kinds = {}
     mask_count = 0
+    mask_names = set()
     warnings = []
     skipped = []
     case_count = 0
@@ -381,6 +384,7 @@ def summarize_dataset(source, profile_id=None, entry_cap=511):
                 for fname in os.listdir(seg_dir):
                     if _has_medical_suffix(fname):
                         mask_count += 1
+                        mask_names.add(_image_stem(fname))
             except OSError:
                 pass
     parts = ["已识别 {0} 个病例".format(case_count)]
@@ -409,6 +413,7 @@ def summarize_dataset(source, profile_id=None, entry_cap=511):
     return {
         "summary": "；".join(parts),
         "warnings": warnings,
+        "mask_names": sorted(mask_names),
         "skipped": skipped,
         "case_count": case_count,
         "mask_count": mask_count,
@@ -454,6 +459,7 @@ def run_ui(context, preview_path=""):
     form = QtWidgets.QVBoxLayout(panel)
     form.setContentsMargins(20, 18, 20, 18)
     form.setSpacing(15)
+    panel = scrollable_widget(panel)
     root.addWidget(panel, 1)
 
     progress_panel = QtWidgets.QFrame()
@@ -489,6 +495,7 @@ def run_ui(context, preview_path=""):
     progress_actions.addWidget(hide_task)
     progress_actions.addWidget(close_task)
     progress_layout.addLayout(progress_actions)
+    progress_panel = scrollable_widget(progress_panel)
     progress_panel.hide()
     root.addWidget(progress_panel, 1)
 
@@ -1102,6 +1109,7 @@ def run_ui(context, preview_path=""):
     submit.clicked.connect(submit_window)
     window.rejected.connect(cancel_window)
     refresh_default()
+    clamp_window_to_screen(window, (680, 440))
 
     if preview_path:
         window.show()

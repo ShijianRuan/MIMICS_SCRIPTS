@@ -37,6 +37,7 @@ from ui_theme import (  # noqa: E402
     choose_save_file_async,
     clamp_window_to_screen,
     configure_application,
+    scroll_layout_body,
     stylesheet,
 )
 
@@ -241,7 +242,7 @@ class ActiveLearningWindow:
         title = QtWidgets.QLabel('FlexiCT 主动学习')
         title.setObjectName("title")
         subtitle = QtWidgets.QLabel(
-            '病例按 2D 与 3D 模型的分歧排序：优先标注列表最前面的病例——那是两个模型分歧最大的地方。双击在 Mimics 中打开病例并叠加不确定度条带；标注状态会实时更新到这里。'
+            '按两种模型的分歧提供复核顺序建议。双击病例可在 Mimics 中打开并叠加复核提示；分歧分数不代表准确率。'
         )
         subtitle.setObjectName("subtitle")
         subtitle.setWordWrap(True)
@@ -253,17 +254,22 @@ class ActiveLearningWindow:
         # form on the same window closes the loop: pick the unlabeled pool
         # once, submit, and the run below refreshes as it completes.
         self._new_run_group = self._build_new_run_form()
-        root.addWidget(self._new_run_group)
-
+        self._new_run_group.hide()
         picker = QtWidgets.QHBoxLayout()
-        picker.addWidget(QtWidgets.QLabel('运行'))
+        picker.addWidget(QtWidgets.QLabel('排序任务'))
         self.job_combo = QtWidgets.QComboBox()
         self.job_combo.currentIndexChanged.connect(self._job_selected)
         picker.addWidget(self.job_combo, 1)
         refresh = QtWidgets.QPushButton('刷新')
         refresh.clicked.connect(self.refresh)
         picker.addWidget(refresh)
+        self.new_button = QtWidgets.QPushButton('新建排序…')
+        self.new_button.setObjectName("primary")
+        self.new_button.setCheckable(True)
+        self.new_button.clicked.connect(self._new_ranking_clicked)
+        picker.addWidget(self.new_button)
         root.addLayout(picker)
+        root.addWidget(self._new_run_group)
 
         self.table = QtWidgets.QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(
@@ -296,10 +302,6 @@ class ActiveLearningWindow:
         # empty state told the annotator to use this very window, which only
         # lists completed runs. A "new ranking" action lives here now, so
         # first-run is possible from the same menu entry.
-        self.new_button = QtWidgets.QPushButton('新建排序…')
-        self.new_button.setObjectName("primary")
-        self.new_button.clicked.connect(self._new_ranking_clicked)
-        actions.addWidget(self.new_button)
         self.open_button = QtWidgets.QPushButton('打开并叠加')
         self.open_button.clicked.connect(self._open_and_overlay_selected)
         actions.addWidget(self.open_button)
@@ -326,9 +328,13 @@ class ActiveLearningWindow:
         close.clicked.connect(self.window.close)
         marking.addWidget(close)
         root.addLayout(marking)
+        self.body_scroll = scroll_layout_body(root, first=3, footer_items=3)
         self.window.setCentralWidget(central)
+        self._set_actions_enabled(False)
         self._jobs: list[dict[str, Any]] = []
         self._rows: list[dict[str, Any]] = []
+        self.table.itemSelectionChanged.connect(
+            lambda: self._set_actions_enabled(bool(self._rows)))
         self._state: dict[str, Any] = {}
         self._job_dir = ""
         self._request_poll_epoch = time.time()
@@ -377,7 +383,7 @@ class ActiveLearningWindow:
         after the GPU has been reserved.
         """
         QtWidgets = self.QtWidgets
-        group = QtWidgets.QGroupBox('启动新的排序')
+        group = QtWidgets.QGroupBox('新建病例排序')
         layout = QtWidgets.QGridLayout(group)
         layout.setContentsMargins(16, 14, 16, 14)
         remembered = read_json(
@@ -397,7 +403,7 @@ class ActiveLearningWindow:
         self.pair_label.setWordWrap(True)
         layout.addWidget(QtWidgets.QLabel('模型对'), 1, 0)
         layout.addWidget(self.pair_label, 1, 1, 1, 2)
-        self.start_run_button = QtWidgets.QPushButton('启动主动学习')
+        self.start_run_button = QtWidgets.QPushButton('开始排序')
         self.start_run_button.setObjectName('primary')
         self.start_run_button.setEnabled(False)
         self.start_run_button.clicked.connect(self._submit_new_run)
@@ -441,8 +447,8 @@ class ActiveLearningWindow:
         if model_2d is None or model_3d is None:
             self.pair_label.setStyleSheet("color: #b42318; font-weight: 600;")
             self.pair_label.setText(
-                '未找到可用的 2D+3D 模型对。请先用 02_AI > FlexiCT > 01 训练模型'
-                '（配置选择 pair，或在 ≥16GB 显存上选 auto）后再启动主动学习。'
+                '未找到可用的 2D+3D 模型对。请先在 FlexiCT 训练窗口选择'
+                '“2D + 3D 成对模型（主动学习用）”完成训练，再启动排序。'
             )
             return
         label = " + ".join(
@@ -556,57 +562,15 @@ class ActiveLearningWindow:
 
     # -- new ranking (F04) ----------------------------------------------------
 
-    def _new_ranking_clicked(self):
-        """Minimal first-run form: dataset pool + target, submit via the
-        existing flexict pipeline in a background thread."""
-        QtWidgets = self.QtWidgets
-        remembered = read_json(
-            Path.home() / ".mimics_script" / "flexict_settings.json", {}) or {}
-        dialog = QtWidgets.QDialog(self.window)
-        dialog.setWindowTitle('新建主动学习排序')
-        form = QtWidgets.QFormLayout(dialog)
-        dataset_edit = QtWidgets.QLineEdit(
-            str(remembered.get("dataset_root") or ""))
-        dataset_edit.setPlaceholderText('未标注病例池的根目录')
-        dataset_row = QtWidgets.QHBoxLayout()
-        dataset_row.addWidget(dataset_edit, 1)
-        browse = QtWidgets.QPushButton("浏览...")
-        dataset_row.addWidget(browse)
-        wrap = QtWidgets.QWidget()
-        wrap.setLayout(dataset_row)
-        form.addRow('数据集根目录', wrap)
-        label_edit = QtWidgets.QLineEdit(str(remembered.get("label_name") or ""))
-        label_edit.setPlaceholderText('例如 kidney_left')
-        form.addRow('目标 (label)', label_edit)
-        buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
-        buttons.button(QtWidgets.QDialogButtonBox.Ok).setText('启动排序')
-        buttons.button(QtWidgets.QDialogButtonBox.Cancel).setText('取消')
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        form.addRow(buttons)
-
-        def _browse():
-            # Native dialogs can hang on disconnected drives / SMB shares;
-            # the async helper isolates the pick in its own process so this
-            # window (and Mimics) stays responsive (铁律 1).
-            choose_existing_directory_async(
-                self.QtCore, QtWidgets, dialog, '选择数据集根目录',
-                dataset_edit.text().strip() or str(Path.home()),
-                lambda value: value and dataset_edit.setText(value),
-                button=browse)
-
-        browse.clicked.connect(_browse)
-        dialog.resize(520, dialog.sizeHint().height())
-        if dialog.exec() != QtWidgets.QDialog.Accepted:
-            return
-        dataset_root = dataset_edit.text().strip()
-        label_name = label_edit.text().strip()
-        if not dataset_root or not label_name:
-            self.status_label.setText(
-                '启动排序需要数据集根目录和目标名称。')
-            return
-        self._start_ranking(dataset_root, label_name)
+    def _new_ranking_clicked(self, checked=True):
+        """Use the same inline form for first and subsequent ranking runs."""
+        self.new_button.setChecked(bool(checked))
+        self.new_button.setText('收起新建表单' if checked else '新建排序…')
+        self._new_run_group.setVisible(bool(checked))
+        if checked:
+            self.pool_edit.setFocus()
+            if self.body_scroll is not None:
+                self.body_scroll.ensureWidgetVisible(self._new_run_group)
 
     def _start_ranking(self, dataset_root: str, label_name: str):
         """Validate + submit the ranking job off the GUI thread (F04).
@@ -842,10 +806,12 @@ class ActiveLearningWindow:
         return str(self._rows[row].get("case") or "")
 
     def _set_actions_enabled(self, enabled: bool):
+        self.export_button.setEnabled(enabled)
+        selected = bool(enabled and self.table.selectionModel().hasSelection() and self._selected_case())
         for button in (self.open_button, self.overlay_button,
                        self.consensus_button, self.annotated_button,
-                       self.skip_button, self.export_button):
-            button.setEnabled(enabled)
+                       self.skip_button):
+            button.setEnabled(selected)
 
     # -- actions --------------------------------------------------------------
 

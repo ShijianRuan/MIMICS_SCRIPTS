@@ -28,7 +28,7 @@ from nnunet_common import (  # noqa: E402
 )
 from nnunet_jobs import create_job  # noqa: E402
 from remote_compute_ui import RemoteComputeSelector  # noqa: E402
-from ui_theme import configure_application, stylesheet  # noqa: E402
+from ui_theme import clamp_window_to_screen, configure_application, scroll_layout_body, stylesheet  # noqa: E402
 
 
 def _matches_context(model, context):
@@ -128,6 +128,8 @@ class PredictionWindow:
         self.start.setEnabled(False)
         actions.addWidget(self.start)
         root.addLayout(actions)
+        self.body_scroll = scroll_layout_body(root, first=2, footer_items=2)
+        clamp_window_to_screen(self.window, (680, 520))
         self._timer = self.QtCore.QTimer(self.window)
         self._timer.timeout.connect(self._poll_background_results)
         self._timer.start(80)
@@ -181,13 +183,12 @@ class PredictionWindow:
                 ]
                 for column, value in enumerate(values):
                     item = self.QtWidgets.QTableWidgetItem(str(value or ""))
-                    if column == 3:
-                        item.setToolTip(str(value or ""))
+                    item.setToolTip(str(value or ""))
                     if unusable_reason:
                         # R62-7: registered-but-broken models stay
                         # visible, greyed out with the reason in the last
                         # column — not silently dropped.
-                        item.setToolTip(unusable_reason)
+                        item.setToolTip("{0}\n不可用：{1}".format(value or "", unusable_reason))
                         item.setFlags(
                             item.flags() & ~self.QtCore.Qt.ItemIsEnabled
                         )

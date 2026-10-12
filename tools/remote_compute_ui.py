@@ -25,7 +25,7 @@ try:
         store_password,
         test_connection,
     )
-    from ui_theme import choose_open_file_async, clamp_window_to_screen
+    from ui_theme import choose_open_file_async, clamp_window_to_screen, scrollable_widget
 except ImportError:
     from tools.remote_compute import (
         DEFAULT_GPU_DEVICE,
@@ -41,7 +41,7 @@ except ImportError:
         store_password,
         test_connection,
     )
-    from tools.ui_theme import choose_open_file_async, clamp_window_to_screen
+    from tools.ui_theme import choose_open_file_async, clamp_window_to_screen, scrollable_widget
 
 
 def _format_bytes(value: object) -> str:
@@ -225,6 +225,18 @@ class ServerProfilesDialog:
         ]
         self.password_label = None
         self.key_label = None
+        advanced = QtWidgets.QGroupBox("运行环境与维护")
+        advanced_form = QtWidgets.QGridLayout(advanced)
+        advanced_form.setContentsMargins(14, 16, 14, 12)
+        advanced_form.setHorizontalSpacing(12)
+        advanced_form.setVerticalSpacing(10)
+        advanced_form.setColumnStretch(1, 1)
+        advanced_widgets = (
+            self.remote_root_edit, self.image_edit, self.runtime_combo,
+            self.namespace_edit, self.code_verify_combo, self.weights_verify_combo,
+            self.gpu_busy_combo, self.retention_spin,
+        )
+        basic_row = advanced_row = 0
         for index, (label, widget) in enumerate(rows):
             label_widget = QtWidgets.QLabel(label)
             if widget is self.password_edit:
@@ -233,9 +245,29 @@ class ServerProfilesDialog:
                 self.key_label = label_widget
             elif not label:
                 label_widget.setVisible(False)
-            form.addWidget(label_widget, index, 0)
-            form.addWidget(widget, index, 1)
-        root.addWidget(form_surface)
+            if widget in advanced_widgets:
+                advanced_form.addWidget(label_widget, advanced_row, 0)
+                advanced_form.addWidget(widget, advanced_row, 1)
+                advanced_row += 1
+            else:
+                form.addWidget(label_widget, basic_row, 0)
+                form.addWidget(widget, basic_row, 1)
+                basic_row += 1
+        self.advanced_toggle = QtWidgets.QToolButton()
+        self.advanced_toggle.setText("高级运行设置")
+        self.advanced_toggle.setCheckable(True)
+        self.advanced_toggle.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+        self.advanced_toggle.setArrowType(QtCore.Qt.RightArrow)
+        advanced.hide()
+
+        def toggle_advanced(checked):
+            advanced.setVisible(checked)
+            self.advanced_toggle.setArrowType(QtCore.Qt.DownArrow if checked else QtCore.Qt.RightArrow)
+
+        self.advanced_toggle.toggled.connect(toggle_advanced)
+        form.addWidget(self.advanced_toggle, basic_row, 0, 1, 2)
+        form.addWidget(advanced, basic_row + 1, 0, 1, 2)
+        root.addWidget(scrollable_widget(form_surface), 1)
 
         self.status_label = QtWidgets.QLabel(
             "保存配置后，测试 SSH、Docker、GPU、存储和镜像环境。"

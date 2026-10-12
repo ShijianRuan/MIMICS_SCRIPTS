@@ -27,7 +27,7 @@ from nninteractive_task_common import (  # noqa: E402
     task_rows,
     write_json_atomic,
 )
-from ui_theme import configure_application  # noqa: E402
+from ui_theme import clamp_window_to_screen, configure_application  # noqa: E402
 
 
 TITLE = "选择 nnInteractive 自定义模型"
@@ -103,6 +103,7 @@ class Chooser:
         layout.addLayout(footer)
         self.use_button = use
         self.refresh_models()
+        clamp_window_to_screen(self.window, (560, 280))
 
     def refresh_models(self):
         task_id = str(self.task_combo.currentData() or "")

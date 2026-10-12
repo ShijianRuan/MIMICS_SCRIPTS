@@ -37,6 +37,7 @@ from nnunet_common import read_json  # noqa: E402
 from ui_theme import (  # noqa: E402
     choose_open_file_async,
     configure_application,
+    clamp_window_to_screen,
     stylesheet,
 )
 
@@ -380,6 +381,14 @@ class ModelManagerWindow:
         self.table.itemSelectionChanged.connect(self._update_action_buttons)
         root.addWidget(self.table, 1)
 
+        self.selection_detail = QtWidgets.QPlainTextEdit()
+        self.selection_detail.setReadOnly(True)
+        self.selection_detail.setMinimumHeight(56)
+        self.selection_detail.setMaximumHeight(86)
+        self.selection_detail.setAccessibleName("所选模型完整信息")
+        self.selection_detail.hide()
+        root.addWidget(self.selection_detail)
+
         self.status_label = QtWidgets.QLabel("正在加载模型...")
         self.status_label.setObjectName("hint")
         self.status_label.setWordWrap(True)
@@ -390,7 +399,7 @@ class ModelManagerWindow:
         self.import_button.setObjectName("primary")
         self.import_button.clicked.connect(self._import_clicked)
         actions.addWidget(self.import_button)
-        self.use_button = QtWidgets.QPushButton("使用此模型")
+        self.use_button = QtWidgets.QPushButton("设为默认模型")
         self.use_button.clicked.connect(self._use_clicked)
         actions.addWidget(self.use_button)
         self.remove_button = QtWidgets.QPushButton("移除失效条目")
@@ -404,6 +413,7 @@ class ModelManagerWindow:
         close.clicked.connect(self.window.close)
         actions.addWidget(close)
         root.addLayout(actions)
+        clamp_window_to_screen(self.window, (820, 480))
 
         self._timer = self.QtCore.QTimer(self.window)
         self._timer.timeout.connect(self._poll)
@@ -525,6 +535,21 @@ class ModelManagerWindow:
 
     def _update_action_buttons(self):
         row = self._selected_row()
+        self.selection_detail.setVisible(bool(row))
+        if row:
+            usage = (
+                "在 nnU-Net 预测窗口选择此模型。"
+                if row["family"] == "nnunet"
+                else "设为默认仅影响后续模型选择，不切换正在标注的会话。"
+            )
+            self.selection_detail.setPlainText(
+                "目标：{0}\n模型：{1}\n{2}".format(
+                    row.get("target") or row.get("task_id") or "未声明",
+                    row.get("model_id") or "未声明", usage,
+                )
+            )
+        self.use_button.setVisible(bool(row and row["family"] != "nnunet"))
+        self.remove_button.setVisible(bool(row and not row["usable"]))
         # nnU-Net picks its model in the prediction window at predict time;
         # "use this model" would only raise for those rows.
         self.use_button.setEnabled(

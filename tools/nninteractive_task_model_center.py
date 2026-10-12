@@ -59,6 +59,7 @@ from ui_theme import (  # noqa: E402
     choose_save_file_async,
     clamp_window_to_screen,
     configure_application,
+    scroll_layout_body,
 )
 from ui_preferences import load_preferences, save_preferences  # noqa: E402
 try:
@@ -338,8 +339,8 @@ class ModelCenter:
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
         hint = QtWidgets.QLabel(
-            "如何选方法：标注病例多（约 30 例以上）追求全自动精度 → nnU-Net；"
-            "只有几例标注、想快速得到可用模型 → FlexiCT；边点边标、交互修正 → nnInteractive。"
+            "如何选方法：训练可重复的分割任务 → nnU-Net；"
+            "少量 CT 标注尝试任务训练 → FlexiCT；边点边标、交互修正 → nnInteractive。"
         )
         hint.setObjectName("hint")
         hint.setWordWrap(True)
@@ -820,6 +821,7 @@ class ModelCenter:
         actions.addWidget(self.open_log_button)
         actions.addWidget(hide)
         layout.addLayout(actions)
+        self.progress_scroll = scroll_layout_body(layout, footer_items=1)
         self._update_progress_actions({})
         return page
 

@@ -24,7 +24,7 @@ for _candidate in (str(_HERE), str(ROOT)):
     if _candidate not in sys.path:
         sys.path.insert(0, _candidate)
 
-from ui_theme import configure_application, stylesheet  # noqa: E402
+from ui_theme import clamp_window_to_screen, configure_application, scrollable_widget, stylesheet  # noqa: E402
 
 BACKUP_DIR = ROOT / ".mimics_runtime" / "config_backups"
 
@@ -213,7 +213,15 @@ class ConfigEditor:
                     note.setObjectName("hint")
                     note.setWordWrap(True)
                     form.addRow("", note)
-            tabs.addTab(tab, file_name.replace("_config.json", "").replace(".json", ""))
+            titles = {
+                "mimics_io_config.json": "数据导入导出",
+                "nninteractive_config.json": "交互标注",
+                "nninteractive_finetune_config.json": "交互模型训练",
+                "flexict_config.json": "少样本训练",
+                "interactive_algorithms_config.json": "单片修正",
+            }
+            index = tabs.addTab(scrollable_widget(tab), titles.get(file_name, file_name))
+            tabs.setTabToolTip(index, file_name)
 
         buttons = QtWidgets.QHBoxLayout()
         self.rollback = QtWidgets.QPushButton("回滚上次保存")
@@ -229,7 +237,9 @@ class ConfigEditor:
 
         self.status = QtWidgets.QLabel("")
         self.status.setObjectName("hint")
+        self.status.setWordWrap(True)
         root.addWidget(self.status)
+        clamp_window_to_screen(self.window, (640, 440))
 
     # -- helpers ----------------------------------------------------------
 

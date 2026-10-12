@@ -415,7 +415,7 @@ def run_fix(project_root: Path, fix_action: str) -> str:
     return ""
 
 
-def show_dialog(project_root: Path | None = None, parent=None) -> int:
+def _show_dialog_once(project_root: Path | None = None, parent=None) -> int:
     """Open the environment guidance window. Blocking modal."""
     from PySide6 import QtWidgets
 
@@ -473,7 +473,7 @@ def show_dialog(project_root: Path | None = None, parent=None) -> int:
                 feedback.setWordWrap(True)
                 feedback.hide()
 
-                def _clicked(_=False, action=str(issue["fix_action"])):
+                def _clicked(_=False, action=str(issue["fix_action"]), feedback=feedback):
                     text = run_fix(root, action)
                     feedback.setText(text or "该问题没有可运行的操作。")
                     feedback.show()
@@ -491,16 +491,23 @@ def show_dialog(project_root: Path | None = None, parent=None) -> int:
     # closing and reopening the whole dialog from the menu).
     buttons = QtWidgets.QHBoxLayout()
     recheck = QtWidgets.QPushButton("重新检查")
-    recheck.clicked.connect(dialog.reject)
+    recheck.clicked.connect(lambda: dialog.done(2))
     buttons.addWidget(recheck)
     buttons.addStretch(1)
     close = QtWidgets.QPushButton("关闭")
     close.clicked.connect(dialog.accept)
     buttons.addWidget(close)
     layout.addLayout(buttons)
+    ui_theme.clamp_window_to_screen(dialog, (560, 320))
     result = dialog.exec()
-    if result == QtWidgets.QDialog.Rejected and recheck.underMouse():
-        return show_dialog(root, parent)  # re-run detection and re-render
+    dialog.deleteLater()
+    return 1 if result == 2 else 0
+
+
+def show_dialog(project_root: Path | None = None, parent=None) -> int:
+    """Re-check explicitly, including keyboard activation, without recursion."""
+    while _show_dialog_once(project_root, parent):
+        pass
     return 0
 
 
