@@ -44,6 +44,45 @@ except ImportError:
     from tools.ui_theme import choose_open_file_async, clamp_window_to_screen, scrollable_widget
 
 
+def _non_default_summary(profile: dict) -> list[str]:
+    """UI29: short Chinese labels for every non-default advanced setting.
+
+    Pure function so tests can verify the mapping without Qt. Only the
+    settings hidden behind the dialog's「高级运行设置」fold are summarized.
+    """
+    deviations = []
+    if str(profile.get("container_runtime") or "docker") != "docker":
+        deviations.append(
+            "容器运行时 {}".format(profile.get("container_runtime")))
+    if str(profile.get("container_namespace") or "").strip():
+        deviations.append(
+            "namespace {}".format(profile.get("container_namespace")))
+    if str(profile.get("remote_code_verify") or "warn") != "warn":
+        deviations.append(
+            "代码校验 {}".format(
+                {"strict": "拒绝", "warn": "警告", "off": "跳过"}.get(
+                    profile.get("remote_code_verify"),
+                    profile.get("remote_code_verify"))))
+    if str(profile.get("remote_weights_verify") or "strict") != "strict":
+        deviations.append(
+            "权重校验 {}".format(
+                {"strict": "拒绝", "warn": "警告", "off": "跳过"}.get(
+                    profile.get("remote_weights_verify"),
+                    profile.get("remote_weights_verify"))))
+    if str(profile.get("gpu_busy_policy") or "block") != "block":
+        deviations.append(
+            "GPU 忙碌{}".format(
+                {"warn": "警告并继续", "off": "跳过检查"}.get(
+                    profile.get("gpu_busy_policy"),
+                    profile.get("gpu_busy_policy"))))
+    retention = int(profile.get("remote_cache_retention_days") or 30)
+    if retention != 30:
+        deviations.append("缓存清理 {0} 天".format(retention))
+    if profile.get("cache_training_data", True) is False:
+        deviations.append("不复用已上传训练数据")
+    return deviations
+
+
 def _format_bytes(value: object) -> str:
     try:
         size = float(value)
@@ -352,6 +391,7 @@ class ServerProfilesDialog:
         self.image_edit.setText(profile.get("runtime_image") or DEFAULT_IMAGE)
         self._set_gpu_device(profile.get("gpu_device") or DEFAULT_GPU_DEVICE)
         self.cache_check.setChecked(bool(profile.get("cache_training_data", True)))
+        self._refresh_advanced_toggle(profile)
         self._set_combo(self.runtime_combo, profile.get("container_runtime"), "docker")
         self.namespace_edit.setText(profile.get("container_namespace") or "")
         self._set_combo(
@@ -396,6 +436,16 @@ class ServerProfilesDialog:
         self.retention_spin.setValue(30)
         self.status_label.setText("请填写远程服务器连接信息。")
         self._refresh_auth()
+        self._refresh_advanced_toggle(None)
+
+    def _refresh_advanced_toggle(self, profile) -> None:
+        """UI29: the folded section's title says how many settings deviate,
+        so a non-default profile is knowable without expanding anything."""
+        count = len(_non_default_summary(profile or {}))
+        self.advanced_toggle.setText(
+            "高级运行设置（{0} 项非默认）".format(count) if count
+            else "高级运行设置"
+        )
 
     def _new_profile(self) -> None:
         self.profile_combo.setCurrentIndex(0)
@@ -785,7 +835,7 @@ class RemoteComputeSelector:
             None,
         )
         if profile:
-            self.hint.setText(
+            base = (
                 "{}@{}:{} · {} · GPU {}。数据传输与训练均在 Mimics 之外进行。".format(
                     profile["username"],
                     profile["host"],
@@ -794,6 +844,13 @@ class RemoteComputeSelector:
                     profile.get("gpu_device") or DEFAULT_GPU_DEVICE,
                 )
             )
+            # UI29: non-default advanced settings must stay visible when the
+            # dialog that owns them is closed — folding cannot make them
+            # unknowable. Append a short summary of every deviation.
+            deviations = _non_default_summary(profile)
+            if deviations:
+                base += "\n非默认设置：{}".format("；".join(deviations))
+            self.hint.setText(base)
         else:
             self.hint.setText("所选远程服务器配置不可用。")
 

@@ -112,6 +112,38 @@ class TestUiWorkflow(unittest.TestCase):
         for edit in (w.host_edit, w.username_edit):
             self.assertGreaterEqual(edit.height(), edit.minimumSizeHint().height())
 
+    def test_remote_advanced_fold_summarizes_non_defaults(self):
+        # UI29: folding the advanced section must not make non-default
+        # settings unknowable — the toggle title counts the deviations and
+        # the selector hint lists them, all without expanding anything.
+        import remote_compute_ui as ui
+        self.assertEqual([], ui._non_default_summary({}))
+        self.assertEqual([], ui._non_default_summary({
+            "container_runtime": "docker", "remote_code_verify": "warn",
+            "remote_weights_verify": "strict", "gpu_busy_policy": "block",
+            "remote_cache_retention_days": 30, "cache_training_data": True,
+        }))
+        profile = {
+            "container_runtime": "nerdctl",
+            "container_namespace": "mimics",
+            "remote_code_verify": "off",
+            "remote_weights_verify": "warn",
+            "gpu_busy_policy": "warn",
+            "remote_cache_retention_days": 7,
+            "cache_training_data": False,
+        }
+        summary = ui._non_default_summary(profile)
+        self.assertEqual(7, len(summary))
+        self.assertIn("nerdctl", summary[0])
+        self.assertIn("跳过", summary[2])
+        self.assertIn("缓存清理 7 天", summary[5])
+
+        with mock.patch.object(ui, 'load_profiles', return_value=[]):
+            w = self.keep(ui.ServerProfilesDialog(None, QT))
+        self.assertEqual("高级运行设置", w.advanced_toggle.text())
+        w._refresh_advanced_toggle(profile)
+        self.assertIn("7 项非默认", w.advanced_toggle.text())
+
     def test_active_learning_single_creation_form_and_selection_gating(self):
         import flexict_active_learning_ui as ui
         with mock.patch.object(ui, 'find_al_jobs', return_value=[]):
