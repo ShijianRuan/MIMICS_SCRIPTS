@@ -1,0 +1,55 @@
+test_read_text_tail_rejects_nonpositive_limit (__main__.TestRuntimeCommon.test_read_text_tail_rejects_nonpositive_limit) ... ok
+test_replace_with_retry_raises_after_persistent_denial (__main__.TestRuntimeCommon.test_replace_with_retry_raises_after_persistent_denial) ... ok
+test_replace_with_retry_recovers_from_transient_lock (__main__.TestRuntimeCommon.test_replace_with_retry_recovers_from_transient_lock) ... ok
+test_resource_lock_acquire_release (__main__.TestRuntimeCommon.test_resource_lock_acquire_release) ... ok
+test_resource_lock_exclusion (__main__.TestRuntimeCommon.test_resource_lock_exclusion)
+Second acquirer should fail when first holds the lock. ... ok
+test_resource_lock_implementations_share_the_same_directory (__main__.TestRuntimeCommon.test_resource_lock_implementations_share_the_same_directory) ... ok
+test_resource_lock_release_rechecks_token_before_retry (__main__.TestRuntimeCommon.test_resource_lock_release_rechecks_token_before_retry) ... ok
+test_resource_lock_short_write_is_completed (__main__.TestRuntimeCommon.test_resource_lock_short_write_is_completed) ... ok
+test_running_mimics_exe_bypasses_negative_lookup_cache (__main__.TestRuntimeCommon.test_running_mimics_exe_bypasses_negative_lookup_cache) ... ok
+test_runtime_blocker_census_includes_live_monitor_and_resource_lock (__main__.TestRuntimeCommon.test_runtime_blocker_census_includes_live_monitor_and_resource_lock) ... ok
+test_safe_filename (__main__.TestRuntimeCommon.test_safe_filename) ... ok
+test_safe_slug (__main__.TestRuntimeCommon.test_safe_slug) ... ok
+test_terminate_process_async_rejects_pid_mismatch (__main__.TestRuntimeCommon.test_terminate_process_async_rejects_pid_mismatch) ... ok
+test_user_config_is_separate_from_disposable_runtime (__main__.TestRuntimeCommon.test_user_config_is_separate_from_disposable_runtime) ... ok
+test_write_and_read_json_atomic (__main__.TestRuntimeCommon.test_write_and_read_json_atomic) ... ok
+test_write_json_atomic_creates_parents (__main__.TestRuntimeCommon.test_write_json_atomic_creates_parents) ... ok
+test_write_json_atomic_falls_back_when_smb_replace_is_always_denied (__main__.TestRuntimeCommon.test_write_json_atomic_falls_back_when_smb_replace_is_always_denied) ... ok
+test_write_json_atomic_overwrites (__main__.TestRuntimeCommon.test_write_json_atomic_overwrites) ... ok
+test_write_json_atomic_retries_transient_replace_failure (__main__.TestRuntimeCommon.test_write_json_atomic_retries_transient_replace_failure) ... ok
+test_write_json_atomic_retry (__main__.TestRuntimeCommon.test_write_json_atomic_retry)
+Simulate transient failure by writing to a path whose parent is a file. ... ok
+test_dicom_missing_uid_distinct_series_number_same_grid (__main__.TestBridgeDicomLoading.test_dicom_missing_uid_distinct_series_number_same_grid) ... ok
+test_dicom_missing_uid_duplicate_file_copy_residue_fails_closed (__main__.TestBridgeDicomLoading.test_dicom_missing_uid_duplicate_file_copy_residue_fails_closed) ... ok
+test_dicom_missing_uid_interleaved_series_fails_closed (__main__.TestBridgeDicomLoading.test_dicom_missing_uid_interleaved_series_fails_closed) ... ok
+test_dicom_series_number_zero_is_real_value (__main__.TestBridgeDicomLoading.test_dicom_series_number_zero_is_real_value) ... ok
+test_dicom_single_missing_uid_series_still_selects (__main__.TestBridgeDicomLoading.test_dicom_single_missing_uid_series_still_selects) ... ok
+test_dicom_sort_key (__main__.TestBridgeDicomLoading.test_dicom_sort_key) ... ok
+test_dicom_uid_series_exempt_from_duplicate_position_check (__main__.TestBridgeDicomLoading.test_dicom_uid_series_exempt_from_duplicate_position_check) ... ok
+test_buffer_byte_view_casts_multidimensional_buffers (__main__.TestStreamedVoxelBuffers.test_buffer_byte_view_casts_multidimensional_buffers) ... ok
+test_buffer_byte_view_falls_back_to_copy_for_unwrappable_objects (__main__.TestStreamedVoxelBuffers.test_buffer_byte_view_falls_back_to_copy_for_unwrappable_objects) ... ok
+test_buffer_byte_view_is_zero_copy_for_flat_byte_buffers (__main__.TestStreamedVoxelBuffers.test_buffer_byte_view_is_zero_copy_for_flat_byte_buffers) ... ok
+test_stream_buffer_digest_matches_whole_buffer_hash (__main__.TestStreamedVoxelBuffers.test_stream_buffer_digest_matches_whole_buffer_hash) ... ok
+test_stream_buffer_empty_buffer_yields_digest_of_nothing (__main__.TestStreamedVoxelBuffers.test_stream_buffer_empty_buffer_yields_digest_of_nothing) ... ok
+test_stream_buffer_progress_callback_errors_are_swallowed (__main__.TestStreamedVoxelBuffers.test_stream_buffer_progress_callback_errors_are_swallowed) ... ok
+test_stream_buffer_writes_identical_bytes_and_pumps_between_chunks (__main__.TestStreamedVoxelBuffers.test_stream_buffer_writes_identical_bytes_and_pumps_between_chunks) ... ok
+test_al_apply_rejects_same_grid_different_case (__main__.TestFlexiCTActiveLearningApply.test_al_apply_rejects_same_grid_different_case)
+F20: geometry equality is not case identity. The annotator has ... ok
+test_al_apply_request_returns_without_waiting_for_bridge (__main__.TestFlexiCTActiveLearningApply.test_al_apply_request_returns_without_waiting_for_bridge) ... ok
+test_al_conversion_applies_finished_result_and_marks_request (__main__.TestFlexiCTActiveLearningApply.test_al_conversion_applies_finished_result_and_marks_request) ... ok
+test_al_conversion_failure_marks_request_failed (__main__.TestFlexiCTActiveLearningApply.test_al_conversion_failure_marks_request_failed) ... ok
+test_al_conversion_refuses_when_project_switched (__main__.TestFlexiCTActiveLearningApply.test_al_conversion_refuses_when_project_switched) ... ok
+test_al_conversion_rejects_truncated_buffer (__main__.TestFlexiCTActiveLearningApply.test_al_conversion_rejects_truncated_buffer) ... ok
+test_al_conversion_rollback_on_apply_failure (__main__.TestFlexiCTActiveLearningApply.test_al_conversion_rollback_on_apply_failure) ... ok
+test_al_orphaned_converting_request_fails_after_restart (__main__.TestFlexiCTActiveLearningApply.test_al_orphaned_converting_request_fails_after_restart) ... ok
+
+----------------------------------------------------------------------
+Ran 82 tests in 2.645s
+
+OK
+Mimics-Script Comprehensive Tests
+============================================================
+Python: 3.12.14 (main, Aug 25 2026, 13:50:33) [Clang 22.1.3 ]
+Project: $REPO
+============================================================

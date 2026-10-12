@@ -1,0 +1,13 @@
+
+Fake Mimics flow test summary
+========================================================================
+[PASS] mask export buffer flow
+  exported 2 mask buffers with manifest and expected byte counts (0.00s)
+[PASS] unicode and spaces paths flow
+  export + import flows work under Chinese/spaces/nested paths (0.03s)
+[PASS] external I/O setup routing
+  external PySide6 selection routes explicit export paths (0.00s)
+[PASS] asynchronous mask import apply
+  prepared buffer applied visibly without disabling GUI updates (0.00s)
+========================================================================
+4 passed, 0 failed

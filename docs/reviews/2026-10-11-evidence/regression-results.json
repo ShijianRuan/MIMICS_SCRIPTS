@@ -1,0 +1,229 @@
+{
+  "schema": "mimics_audit_results.v1",
+  "started_date": "2026-10-11",
+  "completed_date": "2026-10-12",
+  "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
+  "tested_revision": "4e2cba4a8f10b83c05b91926b026c6d9ce36d12e",
+  "environment": {
+    "os": "macOS",
+    "python": "3.12.14",
+    "qt": "PySide6 Essentials 6.12.0",
+    "numpy": "2.3.5",
+    "nibabel": "5.4.2",
+    "pydicom": "3.0.2",
+    "SimpleITK": "2.5.6",
+    "torch": "not installed",
+    "QT_QPA_PLATFORM": "offscreen",
+    "TMPDIR": "/private/tmp"
+  },
+  "target_windows_mimics_gpu": "not_run",
+  "full_matrix": "not_run",
+  "data": "synthetic temporary only",
+  "results": [
+    {
+      "name": "workflow_regressions",
+      "status": "pass",
+      "command": "python tests/test_review_workflow_regressions.py",
+      "summary": [
+        "Ran 11 tests in 0.012s",
+        "OK"
+      ],
+      "test_count": 11,
+      "error_count": 0,
+      "log_tail": "workflow-final.log.txt"
+    },
+    {
+      "name": "runtime_targeted",
+      "status": "pass",
+      "command": "python tests/test_all.py TestImportReceiptAndUndo TestRuntimeCommon TestBridgeDicomLoading TestStreamedVoxelBuffers TestFlexiCTActiveLearningApply",
+      "summary": [
+        "Ran 82 tests in 2.645s",
+        "OK"
+      ],
+      "test_count": 82,
+      "error_count": 0,
+      "log_tail": "core-final.log.txt"
+    },
+    {
+      "name": "nnunet_integration",
+      "status": "pass",
+      "command": "python tests/test_nnunet_integration.py",
+      "summary": [
+        "Ran 106 tests in 10.618s",
+        "OK"
+      ],
+      "test_count": 106,
+      "error_count": 0,
+      "log_tail": "nnunet-final.log.txt"
+    },
+    {
+      "name": "gui_smoke",
+      "status": "pass",
+      "command": "python tests/test_gui_smoke.py",
+      "summary": [
+        "Ran 80 tests in 2.528s",
+        "OK"
+      ],
+      "test_count": 80,
+      "error_count": 0,
+      "log_tail": "gui-final.log.txt"
+    },
+    {
+      "name": "remote_training",
+      "status": "pass",
+      "command": "python tests/test_remote_training.py",
+      "summary": [
+        "Ran 134 tests in 32.799s",
+        "OK"
+      ],
+      "test_count": 134,
+      "error_count": 0,
+      "log_tail": "remote-after.log.txt"
+    },
+    {
+      "name": "cross_workflow",
+      "status": "pass",
+      "command": "python tests/test_cross_workflow_transitions.py",
+      "summary": [
+        "Ran 2 tests in 0.787s",
+        "OK"
+      ],
+      "test_count": 2,
+      "error_count": 0,
+      "log_tail": "cross-final.log.txt"
+    },
+    {
+      "name": "geometry_manifest",
+      "status": "pass",
+      "command": "python tests/test_geometry_manifest_regressions.py",
+      "summary": [
+        "Ran 6 tests in 0.052s",
+        "OK"
+      ],
+      "test_count": 6,
+      "error_count": 0,
+      "log_tail": "geometry-final.log.txt"
+    },
+    {
+      "name": "ui_quality",
+      "status": "pass",
+      "command": "python tests/test_ui_quality.py",
+      "summary": [
+        "Ran 4 tests in 0.376s",
+        "OK"
+      ],
+      "test_count": 4,
+      "error_count": 0,
+      "log_tail": "ui-quality-final.log.txt"
+    },
+    {
+      "name": "export_flow",
+      "status": "pass",
+      "command": "python tests/fake_mimics_flow_test.py --only export",
+      "summary": [
+        "4 passed, 0 failed"
+      ],
+      "test_count": null,
+      "error_count": 0,
+      "log_tail": "export-flow-final.log.txt"
+    },
+    {
+      "name": "py35_syntax",
+      "status": "pass",
+      "command": "python tests/test_all.py TestSyntax",
+      "summary": [
+        "Ran 3 tests in 0.492s",
+        "OK"
+      ],
+      "test_count": 3,
+      "error_count": 0,
+      "log_tail": "syntax-final.log.txt"
+    },
+    {
+      "name": "batch_cli",
+      "status": "pass",
+      "command": "python tests/test_all.py TestBatchPredictCommand",
+      "summary": [
+        "Ran 4 tests in 0.011s",
+        "OK"
+      ],
+      "test_count": 4,
+      "error_count": 0,
+      "log_tail": "batch-cli-final.log.txt"
+    },
+    {
+      "name": "export_targeted",
+      "status": "pass",
+      "command": "python tests/test_all.py <7 export-related TestNewFeatures methods>",
+      "summary": [
+        "Ran 7 tests in 0.080s",
+        "OK"
+      ],
+      "test_count": 7,
+      "error_count": 0,
+      "log_tail": "export-targeted-final.log.txt"
+    },
+    {
+      "name": "export_collision_baseline",
+      "status": "expected_baseline_failures",
+      "command": "python docs/reviews/2026-10-11-evidence/export_collision_baseline.py",
+      "summary": [
+        "Ran 1 test in 0.003s",
+        "FAILED (failures=1)"
+      ],
+      "test_count": 1,
+      "error_count": 0,
+      "log_tail": "export-collision-baseline.log.txt"
+    },
+    {
+      "name": "flexict_integration",
+      "status": "blocked_dependency",
+      "command": "python tests/test_flexict_integration.py",
+      "summary": [
+        "Ran 128 tests in 12.862s",
+        "FAILED (errors=1)"
+      ],
+      "test_count": 128,
+      "error_count": 1,
+      "log_tail": "flexict-after.log.txt",
+      "reason": "ModuleNotFoundError: torch in isolated audit environment; not a claimed product pass"
+    },
+    {
+      "name": "model_portability",
+      "status": "blocked_dependency",
+      "command": "python tests/test_model_portability.py",
+      "summary": [
+        "Ran 22 tests in 0.479s",
+        "FAILED (errors=19)"
+      ],
+      "test_count": 22,
+      "error_count": 19,
+      "log_tail": "portability-final.log.txt",
+      "reason": "ModuleNotFoundError: torch in isolated audit environment; not a claimed product pass"
+    },
+    {
+      "name": "workflow_before_fixes",
+      "status": "expected_baseline_failures",
+      "command": "initial 8-case version of tests/test_review_workflow_regressions.py",
+      "summary": [
+        "Ran 8 tests in 0.012s",
+        "FAILED (failures=5, errors=2)"
+      ],
+      "test_count": 8,
+      "error_count": 2,
+      "log_tail": "new-before-fixes.log.txt"
+    },
+    {
+      "name": "nnunet_before_cache_fix",
+      "status": "baseline_cache_failure",
+      "command": "python tests/test_nnunet_integration.py",
+      "summary": [
+        "Ran 105 tests in 12.441s",
+        "FAILED (failures=1)"
+      ],
+      "test_count": 105,
+      "error_count": 0,
+      "log_tail": "nnunet-after.log.txt"
+    }
+  ]
+}

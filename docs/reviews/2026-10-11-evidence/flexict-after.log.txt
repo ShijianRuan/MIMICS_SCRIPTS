@@ -1,0 +1,55 @@
+F29: the same physical target must stratify identically however ... ok
+test_split_never_straddles_patient_group (__main__.TestTrainValSplit.test_split_never_straddles_patient_group)
+F16: the same patient's multi-phase scans share a patient_group; ... ok
+test_split_stratifies_across_physical_si (__main__.TestTrainValSplit.test_split_stratifies_across_physical_si) ... ok
+test_split_without_groups_unchanged (__main__.TestTrainValSplit.test_split_without_groups_unchanged)
+No patient_group info: case-level split behavior must be exactly ... ok
+test_two_case_minimum (__main__.TestTrainValSplit.test_two_case_minimum) ... ok
+test_val_at_least_one (__main__.TestTrainValSplit.test_val_at_least_one) ... ok
+test_val_cases_count_respected (__main__.TestTrainValSplit.test_val_cases_count_respected) ... ok
+test_val_never_exceeds_half_minus (__main__.TestTrainValSplit.test_val_never_exceeds_half_minus) ... ok
+test_environment_caps_blas_threads_every_stage (__main__.TestWorkerEnvironment.test_environment_caps_blas_threads_every_stage)
+FlexiCT stages must cap BLAS threads (same A10 fix as nnunet). ... ok
+test_environment_carries_trainer_contract (__main__.TestWorkerEnvironment.test_environment_carries_trainer_contract) ... ok
+test_gpu_id_forwarded (__main__.TestWorkerEnvironment.test_gpu_id_forwarded) ... ok
+test_infer_environment_caps_blas_threads (__main__.TestWorkerEnvironment.test_infer_environment_caps_blas_threads)
+FlexiCT inference workers replace _worker_environment too. ... ok
+test_mirror_axes_forwarded (__main__.TestWorkerEnvironment.test_mirror_axes_forwarded) ... ok
+test_nnunet_roots_point_at_workspace (__main__.TestWorkerEnvironment.test_nnunet_roots_point_at_workspace) ... ok
+test_windows_forces_single_process_da_train_stage_only (__main__.TestWorkerEnvironment.test_windows_forces_single_process_da_train_stage_only)
+Windows TRAIN workers must pin nnUNet_n_proc_DA=0. ... ok
+
+======================================================================
+ERROR: test_worker_preflight_reports_flexict_weights_and_import (__main__.TestRemoteExecution.test_worker_preflight_reports_flexict_weights_and_import)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "$REPO/tests/test_flexict_integration.py", line 2841, in test_worker_preflight_reports_flexict_weights_and_import
+    remote_worker.preflight(models_dir)
+  File "$REPO/tools/remote_worker.py", line 335, in preflight
+    import torch
+ModuleNotFoundError: No module named 'torch'
+
+----------------------------------------------------------------------
+Ran 128 tests in 12.862s
+
+FAILED (errors=1)
+
+全部 3 例读取+计算完成，耗时 0.0s。
+
+==== 不确定度排序（按 integrated 从高到低）====
+rank  case                         integrated    uncertain_vol    mean_nz      max  cc_integrated       cc_vol
+--------------------------------------------------------------------------------------------------------------
+   1  case00                             56.0            112.0     0.5000   0.5000            0.0          0.0
+   2  case01                             56.0            112.0     0.5000   0.5000            0.0          0.0
+   3  case02                             56.0            112.0     0.5000   0.5000            0.0          0.0
+
+差异最大（不确定度最大且区域最大）的病例: case00
+  积分不确定度=56.0  不确定体积=112.0 mm^3  最大不确定度=0.5000
+  最大连通域: 体积=0.0 mm^3  均值=0.0000  积分=0.0
+  文件: $TMP/jobs/infer/uncertainty/case00_uncertainty_disagreement.nii.gz
+
+排序报告已写入: $TMP/jobs/infer/uncertainty/ranking.csv
+[FlexiCT] Mask 'Liver' was edited while prediction was running (content changed at the same volume); creating a copy instead.
+[FlexiCT] Mask 'Liver' changed while prediction was running; creating a copy instead.
+[FlexiCT] FlexiCT status: Abandoned |
+[FlexiCT] FlexiCT status: Failed |

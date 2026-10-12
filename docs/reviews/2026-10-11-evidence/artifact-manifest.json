@@ -1,0 +1,116 @@
+{
+  "schema": "mimics_audit_artifacts.v1",
+  "date": "2026-10-12",
+  "code_commit": "4e2cba4a8f10b83c05b91926b026c6d9ce36d12e",
+  "patient_data": false,
+  "files": [
+    {
+      "path": "docs/reviews/2026-10-11-evidence/README.md",
+      "sha256": "53c3d3b3c0289d10224352f555a10c084933e5080a35aa78ff4bdf3cae13737c"
+    },
+    {
+      "path": "docs/reviews/2026-10-11-evidence/batch-cli-final.log.txt",
+      "sha256": "34d65281df2a5fb98788a72d7655898e25ea47a3985a0340b31206324149fa1d"
+    },
+    {
+      "path": "docs/reviews/2026-10-11-evidence/core-final.log.txt",
+      "sha256": "4e6993149137fc94eb4c093d8955a7e5032f6df4a6d07a7289b50378c0ee81c8"
+    },
+    {
+      "path": "docs/reviews/2026-10-11-evidence/cross-final.log.txt",
+      "sha256": "0e892c711f89a7bd6374d9b30200df0d0b60ecaf0a24ec25c96c0b787aea0806"
+    },
+    {
+      "path": "docs/reviews/2026-10-11-evidence/export-collision-baseline.log.txt",
+      "sha256": "5ba4efe3fde8d10c1fac7ec71d3965114dfc99127c5c6af8a482b453a095b0b0"
+    },
+    {
+      "path": "docs/reviews/2026-10-11-evidence/export-flow-final.log.txt",
+      "sha256": "9ed0d5f44d911472cd87543ab33fdcb6640f44435a2f348c0a9a912aa8e46d34"
+    },
+    {
+      "path": "docs/reviews/2026-10-11-evidence/export-targeted-final.log.txt",
+      "sha256": "b641a6d387bf9480a1a5587d0881779e98c33eae71b43ae208739cc5aa53fcc2"
+    },
+    {
+      "path": "docs/reviews/2026-10-11-evidence/export_collision_baseline.py",
+      "sha256": "3c0991b28431dca26bb8c348cad9a6d30afca32557cd1e40d417d7dd790c604d"
+    },
+    {
+      "path": "docs/reviews/2026-10-11-evidence/flexict-after.log.txt",
+      "sha256": "38bdb541cfb5bbd2ec14a089c68ed195664eca3f6e5dedc1ef631c3961a9c06f"
+    },
+    {
+      "path": "docs/reviews/2026-10-11-evidence/geometry-final.log.txt",
+      "sha256": "8f8e4e58f86619e7607b413465cb7caac673765f4b0726f8e222965e019778be"
+    },
+    {
+      "path": "docs/reviews/2026-10-11-evidence/gui-final.log.txt",
+      "sha256": "237116e959e24c050050ba8d7a8750a02994c64f1f8faeb65e5cd5f10943ac02"
+    },
+    {
+      "path": "docs/reviews/2026-10-11-evidence/new-before-fixes.log.txt",
+      "sha256": "2e1e41b8ee1a4d782064657f562c8ae046642e6359b2fa018d9b63bbf38ff203"
+    },
+    {
+      "path": "docs/reviews/2026-10-11-evidence/nnunet-after.log.txt",
+      "sha256": "9c75ae4fc454f6acead58580499b1adf144a61b444b89a88daab25da6529bba9"
+    },
+    {
+      "path": "docs/reviews/2026-10-11-evidence/nnunet-final.log.txt",
+      "sha256": "5ee259e17e459cfa7069d0388beb69659ff2e7416dfc16138910e14d08a79ec5"
+    },
+    {
+      "path": "docs/reviews/2026-10-11-evidence/portability-final.log.txt",
+      "sha256": "b0dc7e5fe63915a38dcde42bb801f7fd13f6547c5276ed5e10559ca6dfa2c83e"
+    },
+    {
+      "path": "docs/reviews/2026-10-11-evidence/regression-results.json",
+      "sha256": "dc4b003e3888b98741245c6684df854d53a01401340f0e9b6010681e19fd5051"
+    },
+    {
+      "path": "docs/reviews/2026-10-11-evidence/remote-after.log.txt",
+      "sha256": "2747994a4abdb6bf4f819148836f315135b0a57da3ef8942e7a9700567ebe841"
+    },
+    {
+      "path": "docs/reviews/2026-10-11-evidence/syntax-final.log.txt",
+      "sha256": "8bc41c4f84cff1375097495be885a37593c00a742738ba3b70a15693fc46a83a"
+    },
+    {
+      "path": "docs/reviews/2026-10-11-evidence/ui-quality-final.log.txt",
+      "sha256": "6c730c30bdb8b9475b6d7aca45200bae9d2b160f247046a72dbcff72df7ff75c"
+    },
+    {
+      "path": "docs/reviews/2026-10-11-evidence/workflow-final.log.txt",
+      "sha256": "4f81776b910b166fc2efc505dcf7c4e03a184c068ff11407fae25f4ad46a89df"
+    },
+    {
+      "path": "docs/reviews/2026-10-11-evidence/workflow-observations.json",
+      "sha256": "6a43625d1216e70cf1cbbe3cbaa07053febb546f111c05bb516c7e96bd2c3667"
+    },
+    {
+      "path": "docs/reviews/2026-10-11-evidence/workflow_probes.py",
+      "sha256": "788fbe939e8b0dc70df0e27e83234618ceb3f830207950dd50226d440b27a5b4"
+    },
+    {
+      "path": "docs/reviews/2026-10-11-revalidation.json",
+      "sha256": "d95ed07b6f34c85d9ff042b869b799dd9d6d4b2de7b9e58d1ebaaa3156e50527"
+    },
+    {
+      "path": "docs/reviews/2026-10-11-revalidation.md",
+      "sha256": "35951f3316def7b37d3ca44291d9c08c251a770d6f2fd09998e5a8ce2e8791c7"
+    },
+    {
+      "path": "docs/reviews/2026-10-11-workflow-handoff.md",
+      "sha256": "a472d1db48f6b8fb503e9df4966df0364a5770f2817787fccf841440410d3f6f"
+    },
+    {
+      "path": "docs/reviews/README.md",
+      "sha256": "cea62ffbe8c7227afa4de112e5d707722ccb941ee2e47d0a382c75da7b17c37b"
+    },
+    {
+      "path": "docs/reviews/backlog.json",
+      "sha256": "37dd0c96a1a4b1fa1f9b0d206ee015a1a788e241abfb339d86a5db2fa5141631"
+    }
+  ]
+}

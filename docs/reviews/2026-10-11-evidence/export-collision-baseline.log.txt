@@ -1,0 +1,24 @@
+test_mimics_export_case_collisions_get_distinct_buffers (baseline_test_support.TestNewFeatures.test_mimics_export_case_collisions_get_distinct_buffers)
+R70 (F32 复查残留)：Windows 文件系统大小写不敏感，"Liver" 与 ... FAIL
+
+======================================================================
+FAIL: test_mimics_export_case_collisions_get_distinct_buffers (baseline_test_support.TestNewFeatures.test_mimics_export_case_collisions_get_distinct_buffers)
+R70 (F32 复查残留)：Windows 文件系统大小写不敏感，"Liver" 与
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "$REPO/tests/test_all.py", line 8557, in test_mimics_export_case_collisions_get_distinct_buffers
+    self.assertEqual(b"\x01" * 8, (root / "Liver.u8").read_bytes())
+AssertionError: b'\x01\x01\x01\x01\x01\x01\x01\x01' != b'\x00\x00\x00\x00\x00\x00\x00\x00'
+
+----------------------------------------------------------------------
+Ran 1 test in 0.003s
+
+FAILED (failures=1)
+found 2 mask(s)
+image dimensions: [2, 2, 2]
+exporting mask: Liver
+  -> Liver
+exporting mask: liver
+  -> liver
+Manifest saved: /private/tmp/mimics_test_vn2jfm6z/export_case_collision/manifest.json
+BASELINE_OBSERVATION: collision reproduced
