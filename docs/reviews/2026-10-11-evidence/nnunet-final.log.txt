@@ -1,0 +1,55 @@
+test_worker_environment_disables_torch_compile_for_train (__main__.JobLifecycleTests.test_worker_environment_disables_torch_compile_for_train)
+The train stage must default nnUNet_compile off. ... ok
+test_changed_matching_mask_creates_copy (__main__.MimicsRuntimeTests.test_changed_matching_mask_creates_copy) ... ok
+test_edit_undone_back_to_original_still_updates (__main__.MimicsRuntimeTests.test_edit_undone_back_to_original_still_updates) ... ok
+test_empty_prediction_is_not_offered_for_overwrite (__main__.MimicsRuntimeTests.test_empty_prediction_is_not_offered_for_overwrite) ... ok
+test_equal_volume_edit_creates_copy_not_overwrite (__main__.MimicsRuntimeTests.test_equal_volume_edit_creates_copy_not_overwrite) ... ok
+test_grouped_prediction_never_overwrites_a_constituent_mask (__main__.MimicsRuntimeTests.test_grouped_prediction_never_overwrites_a_constituent_mask) ... ok
+test_mask_application_resume_reuses_planned_copy_after_crash (__main__.MimicsRuntimeTests.test_mask_application_resume_reuses_planned_copy_after_crash) ... ok
+test_new_matching_mask_is_not_overwritten_without_launch_snapshot (__main__.MimicsRuntimeTests.test_new_matching_mask_is_not_overwritten_without_launch_snapshot) ... ok
+test_remote_unreachable_is_not_rewritten_by_stopped_process_check (__main__.MimicsRuntimeTests.test_remote_unreachable_is_not_rewritten_by_stopped_process_check) ... ok
+test_single_class_bridge_row_uses_manifest_label (__main__.MimicsRuntimeTests.test_single_class_bridge_row_uses_manifest_label) ... ok
+test_single_present_class_keeps_multiclass_label_id (__main__.MimicsRuntimeTests.test_single_present_class_keeps_multiclass_label_id) ... ok
+test_stopping_monitor_terminates_owned_bridge (__main__.MimicsRuntimeTests.test_stopping_monitor_terminates_owned_bridge) ... ok
+test_unchanged_mask_still_updates (__main__.MimicsRuntimeTests.test_unchanged_mask_still_updates) ... ok
+test_bridge_preserves_only_present_multiclass_value (__main__.SpatialContractTests.test_bridge_preserves_only_present_multiclass_value) ... ok
+test_case_cache_image_is_independent_of_user_source (__main__.SpatialContractTests.test_case_cache_image_is_independent_of_user_source) ... ok
+test_case_cache_revalidates_cached_image_label_grid (__main__.SpatialContractTests.test_case_cache_revalidates_cached_image_label_grid) ... ok
+test_changed_label_content_misses_case_cache (__main__.SpatialContractTests.test_changed_label_content_misses_case_cache)
+The G10 content-keyed cache must still invalidate when a label ... ok
+test_discrete_orientation_change_preserves_label_voxel (__main__.SpatialContractTests.test_discrete_orientation_change_preserves_label_voxel) ... ok
+test_grouped_source_masks_are_unioned_into_one_output_class (__main__.SpatialContractTests.test_grouped_source_masks_are_unioned_into_one_output_class) ... ok
+test_inference_rejects_source_changed_since_mimics_import (__main__.SpatialContractTests.test_inference_rejects_source_changed_since_mimics_import) ... ok
+test_inference_rejects_wrong_output_affine (__main__.SpatialContractTests.test_inference_rejects_wrong_output_affine) ... ok
+test_model_compatibility_allows_different_patient_grid (__main__.SpatialContractTests.test_model_compatibility_allows_different_patient_grid) ... ok
+test_model_compatibility_rejects_modality_mismatch (__main__.SpatialContractTests.test_model_compatibility_rejects_modality_mismatch) ... ok
+test_multiclass_overlap_fails_by_default (__main__.SpatialContractTests.test_multiclass_overlap_fails_by_default) ... ok
+test_reexported_identical_labels_hit_case_cache (__main__.SpatialContractTests.test_reexported_identical_labels_hit_case_cache)
+G10: a retrain after an AL iteration re-exports labels from .mcs ... ok
+test_remote_inference_cache_namespace_contains_dataset_id (__main__.SpatialContractTests.test_remote_inference_cache_namespace_contains_dataset_id) ... ok
+test_remote_inference_rejects_changed_source_before_transfer (__main__.SpatialContractTests.test_remote_inference_rejects_changed_source_before_transfer) ... ok
+test_training_data_profile_rejects_all_zero_label (__main__.SpatialContractTests.test_training_data_profile_rejects_all_zero_label) ... ok
+test_training_data_profile_rejects_invalid_spacing (__main__.SpatialContractTests.test_training_data_profile_rejects_invalid_spacing) ... ok
+test_training_data_profile_rejects_single_slice_case (__main__.SpatialContractTests.test_training_data_profile_rejects_single_slice_case) ... ok
+test_training_data_profile_reports_label_foreground (__main__.SpatialContractTests.test_training_data_profile_reports_label_foreground) ... ok
+test_live_jobs_never_pruned (__main__.TestSweepExpiredJobs.test_live_jobs_never_pruned) ... ok
+test_models_and_cache_untouched (__main__.TestSweepExpiredJobs.test_models_and_cache_untouched)
+Registered models and caches must never be swept. ... ok
+test_old_terminal_jobs_are_pruned_keeping_status (__main__.TestSweepExpiredJobs.test_old_terminal_jobs_are_pruned_keeping_status) ... ok
+test_reattaching_remote_jobs_never_pruned (__main__.TestSweepExpiredJobs.test_reattaching_remote_jobs_never_pruned) ... ok
+test_recent_jobs_kept (__main__.TestSweepExpiredJobs.test_recent_jobs_kept) ... ok
+test_zero_retention_disables (__main__.TestSweepExpiredJobs.test_zero_retention_disables) ... ok
+test_cache_task_tree_of_running_job_is_kept (__main__.TestSweepRuntimeAndCache.test_cache_task_tree_of_running_job_is_kept) ... ok
+test_dataset_of_running_job_is_kept (__main__.TestSweepRuntimeAndCache.test_dataset_of_running_job_is_kept) ... ok
+test_dataset_referenced_by_registered_model_is_kept (__main__.TestSweepRuntimeAndCache.test_dataset_referenced_by_registered_model_is_kept) ... ok
+test_expired_cache_case_removed_and_empty_task_dir_dropped (__main__.TestSweepRuntimeAndCache.test_expired_cache_case_removed_and_empty_task_dir_dropped) ... ok
+test_expired_unreferenced_dataset_removed_in_all_runtime_dirs (__main__.TestSweepRuntimeAndCache.test_expired_unreferenced_dataset_removed_in_all_runtime_dirs) ... ok
+test_models_dir_never_touched (__main__.TestSweepRuntimeAndCache.test_models_dir_never_touched) ... ok
+test_recent_dataset_is_kept (__main__.TestSweepRuntimeAndCache.test_recent_dataset_is_kept) ... ok
+test_registry_row_without_dataset_name_is_rebuilt (__main__.TestSweepRuntimeAndCache.test_registry_row_without_dataset_name_is_rebuilt) ... ok
+test_zero_retention_disables_both_sweeps (__main__.TestSweepRuntimeAndCache.test_zero_retention_disables_both_sweeps) ... ok
+
+----------------------------------------------------------------------
+Ran 106 tests in 10.618s
+
+OK

@@ -1,0 +1,29 @@
+test_all_28_entry_scripts_call_their_actual_runtime_handler (__main__.TestFrontDoorRoutes.test_all_28_entry_scripts_call_their_actual_runtime_handler) ... ok
+test_family_actions_dispatch_beyond_main (__main__.TestFrontDoorRoutes.test_family_actions_dispatch_beyond_main) ... ok
+test_active_learning_single_creation_form_and_selection_gating (__main__.TestUiWorkflow.test_active_learning_single_creation_form_and_selection_gating) ... qt.qpa.fonts: Populating font family aliases took 127 ms. Replace uses of missing font family "Sans Serif" with one that exists to avoid this cost. 
+ok
+test_cached_dataset_dialog_distinguishes_archive_and_prepared_retention (__main__.TestUiWorkflow.test_cached_dataset_dialog_distinguishes_archive_and_prepared_retention) ... ok
+test_disabled_stop_uses_disabled_visual_style (__main__.TestUiWorkflow.test_disabled_stop_uses_disabled_visual_style) ... This plugin does not support propagateSizeHints()
+ok
+test_drop_empty_named_selection_does_not_import_everything (__main__.TestUiWorkflow.test_drop_empty_named_selection_does_not_import_everything) ... This plugin does not support raise()
+ok
+test_drop_named_batch_selection_reaches_submit (__main__.TestUiWorkflow.test_drop_named_batch_selection_reaches_submit) ... This plugin does not support raise()
+ok
+test_drop_named_single_selection_reaches_submit (__main__.TestUiWorkflow.test_drop_named_single_selection_reaches_submit) ... This plugin does not support raise()
+ok
+test_drop_reserved_name_rejected_before_dispatch (__main__.TestUiWorkflow.test_drop_reserved_name_rejected_before_dispatch) ... This plugin does not support raise()
+ok
+test_environment_keyboard_recheck_really_runs_detection_again (__main__.TestUiWorkflow.test_environment_keyboard_recheck_really_runs_detection_again) ... ok
+test_environment_repairs_target_their_own_feedback (__main__.TestUiWorkflow.test_environment_repairs_target_their_own_feedback) ... ok
+test_export_small_screen_has_scroll_and_visible_primary_action (__main__.TestUiWorkflow.test_export_small_screen_has_scroll_and_visible_primary_action) ... ok
+test_flexict_unusable_models_never_claim_recommended_or_allow_predict (__main__.TestUiWorkflow.test_flexict_unusable_models_never_claim_recommended_or_allow_predict) ... ok
+test_interactive_model_versions_are_readonly_and_action_row_fits (__main__.TestUiWorkflow.test_interactive_model_versions_are_readonly_and_action_row_fits) ... ok
+test_label_choices_fit_actual_combo_and_warning_has_own_row (__main__.TestUiWorkflow.test_label_choices_fit_actual_combo_and_warning_has_own_row) ... ok
+test_model_manager_shows_complete_id_and_only_applicable_actions (__main__.TestUiWorkflow.test_model_manager_shows_complete_id_and_only_applicable_actions) ... ok
+test_prediction_tables_preserve_long_names_and_failure_reason (__main__.TestUiWorkflow.test_prediction_tables_preserve_long_names_and_failure_reason) ... ok
+test_remote_scroll_preserves_form_and_footer_and_advanced_values (__main__.TestUiWorkflow.test_remote_scroll_preserves_form_and_footer_and_advanced_values) ... ok
+
+----------------------------------------------------------------------
+Ran 18 tests in 4.878s
+
+OK

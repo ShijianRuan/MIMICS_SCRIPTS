@@ -1,0 +1,19 @@
+test_diagnose_job_aggregates_failure_state (__main__.TestNNInteractiveTaskDiagnostics.test_diagnose_job_aggregates_failure_state) ... ok
+test_diagnose_job_cli_subcommand_exists (__main__.TestNNInteractiveTaskDiagnostics.test_diagnose_job_cli_subcommand_exists) ... ok
+test_model_center_failed_state_shows_diagnosis_block (__main__.TestNNInteractiveTaskDiagnostics.test_model_center_failed_state_shows_diagnosis_block) ... <repo>/tools/ui_theme.py:64: DeprecationWarning: Enum value 'Qt::ApplicationAttribute.AA_UseHighDpiPixmaps' is marked as deprecated, please check the documentation for more information.
+  QtCore.QCoreApplication.setAttribute(attribute, True)
+ok
+test_model_center_hides_not_improved_models_by_default (__main__.TestNNInteractiveTaskDiagnostics.test_model_center_hides_not_improved_models_by_default) ... ok
+test_model_center_shows_failed_versions_toggle_covers_not_improved (__main__.TestNNInteractiveTaskDiagnostics.test_model_center_shows_failed_versions_toggle_covers_not_improved) ... ok
+test_task_model_chooser_hides_not_improved_by_default (__main__.TestNNInteractiveTaskDiagnostics.test_task_model_chooser_hides_not_improved_by_default) ... ok
+test_training_curve_draws_current_model_baseline (__main__.TestNNInteractiveTaskDiagnostics.test_training_curve_draws_current_model_baseline) ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 0.179s
+
+OK
+Mimics-Script Comprehensive Tests
+============================================================
+Python: 3.12.14 (main, Aug 25 2026, 13:50:33) [Clang 22.1.3 ]
+Project: <repo>
+============================================================

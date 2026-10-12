@@ -1,0 +1,24 @@
+test_application_icon_does_not_crash_process (__main__.TestTrainingSetupPathMemory.test_application_icon_does_not_crash_process)
+P0: PySide6 6.11 dropped drawPolygon's varargs overload; the old ... ok
+test_flexict_batch_size_override_reaches_request (__main__.TestTrainingSetupPathMemory.test_flexict_batch_size_override_reaches_request) ... qt.qpa.fonts: Populating font family aliases took 305 ms. Replace uses of missing font family "Sans Serif" with one that exists to avoid this cost. 
+ok
+test_flexict_case_table_shows_unusable_cases (__main__.TestTrainingSetupPathMemory.test_flexict_case_table_shows_unusable_cases) ... ok
+test_flexict_continue_training_reaches_request_and_allows_remote (__main__.TestTrainingSetupPathMemory.test_flexict_continue_training_reaches_request_and_allows_remote) ... ok
+test_flexict_overlap_policy_reaches_request (__main__.TestTrainingSetupPathMemory.test_flexict_overlap_policy_reaches_request) ... ok
+test_flexict_rescan_keeps_manual_split_selection (__main__.TestTrainingSetupPathMemory.test_flexict_rescan_keeps_manual_split_selection) ... ok
+test_flexict_single_case_submission_is_rejected (__main__.TestTrainingSetupPathMemory.test_flexict_single_case_submission_is_rejected) ... ok
+test_flexict_window_prefills_remembered_paths (__main__.TestTrainingSetupPathMemory.test_flexict_window_prefills_remembered_paths) ... ok
+test_nnunet_form_fields_carry_one_line_explanations (__main__.TestTrainingSetupPathMemory.test_nnunet_form_fields_carry_one_line_explanations) ... ok
+test_nnunet_training_group_collapsed_by_default (__main__.TestTrainingSetupPathMemory.test_nnunet_training_group_collapsed_by_default) ... ok
+test_nnunet_val_cases_semantics (__main__.TestTrainingSetupPathMemory.test_nnunet_val_cases_semantics) ... ok
+test_nnunet_window_context_overrides_remembered_paths (__main__.TestTrainingSetupPathMemory.test_nnunet_window_context_overrides_remembered_paths) ... ok
+test_nnunet_window_prefills_remembered_paths (__main__.TestTrainingSetupPathMemory.test_nnunet_window_prefills_remembered_paths) ... ok
+test_task_name_folding_is_caught_in_ui (__main__.TestTrainingSetupPathMemory.test_task_name_folding_is_caught_in_ui) ... ok
+test_training_windows_carry_cross_family_hint (__main__.TestTrainingSetupPathMemory.test_training_windows_carry_cross_family_hint)
+AUD 3.1: each family window must tell the annotator when to use ... ok
+test_training_wizards_warn_on_duplicate_task (__main__.TestTrainingSetupPathMemory.test_training_wizards_warn_on_duplicate_task) ... ok
+
+----------------------------------------------------------------------
+Ran 16 tests in 2.194s
+
+OK

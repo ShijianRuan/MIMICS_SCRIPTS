@@ -1,0 +1,55 @@
+Traceback (most recent call last):
+  File "$REPO/tests/test_model_portability.py", line 215, in test_nninteractive_import_rejects_corrupt_checkpoint
+    model = _nninteractive_model(source)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "$REPO/tests/test_model_portability.py", line 47, in _nninteractive_model
+    checkpoint.write_bytes(_torch_checkpoint_bytes())
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "$REPO/tests/test_model_portability.py", line 32, in _torch_checkpoint_bytes
+    import torch
+ModuleNotFoundError: No module named 'torch'
+
+======================================================================
+ERROR: test_nnunet_bundle_roundtrip (__main__.NnunetBundleTests.test_nnunet_bundle_roundtrip)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "$REPO/tests/test_model_portability.py", line 272, in test_nnunet_bundle_roundtrip
+    _nnunet_model_dir(source, "liver_task", "nnunet_v1")
+  File "$REPO/tests/test_model_portability.py", line 181, in _nnunet_model_dir
+    (fold / "checkpoint_final.pth").write_bytes(_torch_checkpoint_bytes())
+                                                ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "$REPO/tests/test_model_portability.py", line 32, in _torch_checkpoint_bytes
+    import torch
+ModuleNotFoundError: No module named 'torch'
+
+======================================================================
+ERROR: test_nnunet_import_rejects_corrupt_checkpoint (__main__.NnunetBundleTests.test_nnunet_import_rejects_corrupt_checkpoint)
+A truncated checkpoint must fail at import, not at inference.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "$REPO/tests/test_model_portability.py", line 353, in test_nnunet_import_rejects_corrupt_checkpoint
+    _nnunet_model_dir(source, "liver_task", "nnunet_v1")
+  File "$REPO/tests/test_model_portability.py", line 181, in _nnunet_model_dir
+    (fold / "checkpoint_final.pth").write_bytes(_torch_checkpoint_bytes())
+                                                ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "$REPO/tests/test_model_portability.py", line 32, in _torch_checkpoint_bytes
+    import torch
+ModuleNotFoundError: No module named 'torch'
+
+======================================================================
+ERROR: test_nnunet_import_rejects_wrong_family (__main__.NnunetBundleTests.test_nnunet_import_rejects_wrong_family)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "$REPO/tests/test_model_portability.py", line 320, in test_nnunet_import_rejects_wrong_family
+    _nnunet_model_dir(source, "liver_task", "nnunet_v1")
+  File "$REPO/tests/test_model_portability.py", line 181, in _nnunet_model_dir
+    (fold / "checkpoint_final.pth").write_bytes(_torch_checkpoint_bytes())
+                                                ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "$REPO/tests/test_model_portability.py", line 32, in _torch_checkpoint_bytes
+    import torch
+ModuleNotFoundError: No module named 'torch'
+
+----------------------------------------------------------------------
+Ran 22 tests in 0.479s
+
+FAILED (errors=19)

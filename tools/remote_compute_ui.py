@@ -25,7 +25,7 @@ try:
         store_password,
         test_connection,
     )
-    from ui_theme import choose_open_file_async, clamp_window_to_screen
+    from ui_theme import choose_open_file_async, clamp_window_to_screen, scrollable_widget
 except ImportError:
     from tools.remote_compute import (
         DEFAULT_GPU_DEVICE,
@@ -41,7 +41,7 @@ except ImportError:
         store_password,
         test_connection,
     )
-    from tools.ui_theme import choose_open_file_async, clamp_window_to_screen
+    from tools.ui_theme import choose_open_file_async, clamp_window_to_screen, scrollable_widget
 
 
 def _format_bytes(value: object) -> str:
@@ -200,7 +200,7 @@ class ServerProfilesDialog:
         self.retention_spin.setValue(30)
         self.retention_spin.setSuffix(" 天")
         self.retention_spin.setToolTip(
-            "已完成的作业和缓存训练数据在服务器上保留多久后自动清理。"
+            "预处理缓存超过该天数未使用后，在后续任务中清理；有运行中任务时延后。数据集归档缓存采用独立的 30 天期限。"
         )
 
         rows = [
@@ -221,10 +221,22 @@ class ServerProfilesDialog:
             ("代码校验", self.code_verify_combo),
             ("权重校验", self.weights_verify_combo),
             ("GPU 忙碌策略", self.gpu_busy_combo),
-            ("服务器清理期限", self.retention_spin),
+            ("预处理缓存清理期限", self.retention_spin),
         ]
         self.password_label = None
         self.key_label = None
+        advanced = QtWidgets.QGroupBox("运行环境与维护")
+        advanced_form = QtWidgets.QGridLayout(advanced)
+        advanced_form.setContentsMargins(14, 16, 14, 12)
+        advanced_form.setHorizontalSpacing(12)
+        advanced_form.setVerticalSpacing(10)
+        advanced_form.setColumnStretch(1, 1)
+        advanced_widgets = (
+            self.remote_root_edit, self.image_edit, self.runtime_combo,
+            self.namespace_edit, self.code_verify_combo, self.weights_verify_combo,
+            self.gpu_busy_combo, self.retention_spin,
+        )
+        basic_row = advanced_row = 0
         for index, (label, widget) in enumerate(rows):
             label_widget = QtWidgets.QLabel(label)
             if widget is self.password_edit:
@@ -233,9 +245,29 @@ class ServerProfilesDialog:
                 self.key_label = label_widget
             elif not label:
                 label_widget.setVisible(False)
-            form.addWidget(label_widget, index, 0)
-            form.addWidget(widget, index, 1)
-        root.addWidget(form_surface)
+            if widget in advanced_widgets:
+                advanced_form.addWidget(label_widget, advanced_row, 0)
+                advanced_form.addWidget(widget, advanced_row, 1)
+                advanced_row += 1
+            else:
+                form.addWidget(label_widget, basic_row, 0)
+                form.addWidget(widget, basic_row, 1)
+                basic_row += 1
+        self.advanced_toggle = QtWidgets.QToolButton()
+        self.advanced_toggle.setText("高级运行设置")
+        self.advanced_toggle.setCheckable(True)
+        self.advanced_toggle.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+        self.advanced_toggle.setArrowType(QtCore.Qt.RightArrow)
+        advanced.hide()
+
+        def toggle_advanced(checked):
+            advanced.setVisible(checked)
+            self.advanced_toggle.setArrowType(QtCore.Qt.DownArrow if checked else QtCore.Qt.RightArrow)
+
+        self.advanced_toggle.toggled.connect(toggle_advanced)
+        form.addWidget(self.advanced_toggle, basic_row, 0, 1, 2)
+        form.addWidget(advanced, basic_row + 1, 0, 1, 2)
+        root.addWidget(scrollable_widget(form_surface), 1)
 
         self.status_label = QtWidgets.QLabel(
             "保存配置后，测试 SSH、Docker、GPU、存储和镜像环境。"
@@ -648,7 +680,8 @@ class ServerProfilesDialog:
         layout = QtWidgets.QVBoxLayout(dialog)
         hint = QtWidgets.QLabel(
             "内容相同的数据再次提交会自动命中并跳过上传（按内容指纹比对，"
-            "不同数据不会被误用）。缓存 30 天未使用后自动清理。"
+            "不同数据不会被误用）。归档缓存超过 30 天未使用后，在后续任务启动时清理；"
+            "高级设置中的清理期限用于预处理缓存。"
         )
         hint.setObjectName("hint")
         hint.setWordWrap(True)
@@ -674,11 +707,14 @@ class ServerProfilesDialog:
                     "本账号" if row.get("bucket") == "own" else "共享",
                 )
             ):
-                table.setItem(index, column, QtWidgets.QTableWidgetItem(value))
+                item = QtWidgets.QTableWidgetItem(value)
+                item.setToolTip(value)
+                table.setItem(index, column, item)
         layout.addWidget(table, 1)
         close = QtWidgets.QPushButton("关闭")
         close.clicked.connect(dialog.accept)
         layout.addWidget(close, 0, self.QtCore.Qt.AlignRight)
+        clamp_window_to_screen(dialog, (620, 320))
         dialog.exec()
 
 

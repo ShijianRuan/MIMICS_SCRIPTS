@@ -1493,7 +1493,7 @@ def cmd_predict(args):
             "operation": "infer",
             "workspace": str(workspace),
             "job_id": "predict_{}_{}".format(
-                time.strftime("%Y%m%dT%H%M%S"), case_id),
+                time.strftime("%Y%m%dT%H%M%S"), uuid.uuid4().hex),
             "task_id": str(model.get("task_id") or ""),
             "task_name": str(model.get("task_name") or model.get("task_id") or ""),
             "model_manifest": manifest_path,

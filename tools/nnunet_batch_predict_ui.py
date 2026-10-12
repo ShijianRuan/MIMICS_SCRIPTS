@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 import traceback
+import uuid
 from pathlib import Path
 from queue import Empty, Queue
 
@@ -31,6 +32,8 @@ from nnunet_jobs import create_job  # noqa: E402
 from ui_theme import (  # noqa: E402
     choose_existing_directory_async,
     configure_application,
+    clamp_window_to_screen,
+    scroll_layout_body,
     stylesheet,
 )
 
@@ -99,10 +102,10 @@ class BatchPredictionWindow:
         # folders (and vice versa). The declared modality feeds
         # source_modality, which the per-job validator hard-rejects on
         # mismatch.
-        self.modality_combo.addItems(["自动（按模型）", "CT", "MR"])
+        self.modality_combo.addItems(["未指定", "CT", "MR"])
         self.modality_combo.setToolTip(
             "声明数据集的真实模态。与模型训练模态不符时任务会被拒绝，"
-            "而不是静默产出错误结果。"
+            "未指定时不会进行模态一致性校验；这里不会自动识别图像模态。"
         )
         options.addWidget(self.modality_combo)
         self.cpu_check = QtWidgets.QCheckBox("无 GPU 时用 CPU")
@@ -141,12 +144,15 @@ class BatchPredictionWindow:
         self.start.setEnabled(False)
         actions.addWidget(self.start)
         root.addLayout(actions)
+        self.body_scroll = scroll_layout_body(root, first=2, footer_items=2)
+        clamp_window_to_screen(self.window, (680, 540))
 
         self._loading_models = True
         self._model_deadline = time.time() + 120.0
         self._model_results = Queue()
         self._dispatch_results = Queue()
         self._dispatch_deadline = 0.0
+        self._dispatching = False
         self._timer = self.QtCore.QTimer(self.window)
         self._timer.timeout.connect(self._poll_background_results)
         self._timer.start(80)
@@ -217,13 +223,12 @@ class BatchPredictionWindow:
                 ]
                 for column, value in enumerate(values):
                     item = self.QtWidgets.QTableWidgetItem(str(value or ""))
-                    if column == 3:
-                        item.setToolTip(str(value or ""))
+                    item.setToolTip(str(value or ""))
                     if unusable_reason:
                         # R62-7: registered-but-broken models stay
                         # visible, greyed out with the reason in the last
                         # column — not silently dropped.
-                        item.setToolTip(unusable_reason)
+                        item.setToolTip("{0}\n不可用：{1}".format(value or "", unusable_reason))
                         item.setFlags(
                             item.flags() & ~self.QtCore.Qt.ItemIsEnabled
                         )
@@ -249,13 +254,13 @@ class BatchPredictionWindow:
                 for model in self.models
             ):
                 self.status_label.setText(
-                    "{0} 个已注册模型不可用（列表最后列注明原因）。先在「nnU-Net 状态」窗口修复或删除。".format(
+                    "{0} 个已注册模型不可用（悬停模型行可查看原因）。先在「nnU-Net 状态」窗口修复或删除。".format(
                         unusable_count
                     )
                 )
             else:
                 self.status_label.setText(
-                    "已注册的 {0} 个模型全部不可用（列表最后列注明原因）。".format(
+                    "已注册的 {0} 个模型全部不可用（悬停模型行可查看原因）。".format(
                         unusable_count
                     )
                 )
@@ -286,7 +291,7 @@ class BatchPredictionWindow:
                 )
         if self._dispatch_deadline and time.time() >= self._dispatch_deadline:
             self._dispatch_deadline = 0.0
-            self.start.setEnabled(bool(self.models))
+            self.start.setEnabled(False)
             self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
             # R62-8: the timeout only means the scan was slow — some jobs
             # may already be dispatched and will keep running. Retrying
@@ -294,19 +299,21 @@ class BatchPredictionWindow:
             self.status_label.setText(
                 "病例文件夹扫描超时。扫描仍在后台进行，已启动的预测任务"
                 "不会被取消。请先在「nnU-Net 状态」窗口"
-                "确认哪些病例已启动；仅对未启动的病例重试，避免同一病例"
-                "跑两个任务。"
+                "查看进度。扫描完成前不能再次提交本批次。"
             )
         try:
             summary = self._dispatch_results.get_nowait()
         except Empty:
             return
         self._dispatch_deadline = 0.0
+        self._dispatching = False
         self.start.setEnabled(bool(self.models))
         self.status_label.setStyleSheet("")
         self.status_label.setText(summary)
 
     def _submit(self):
+        if self._dispatching:
+            return
         try:
             row = self.table.currentRow()
             if not 0 <= row < len(self.models):
@@ -327,7 +334,7 @@ class BatchPredictionWindow:
             model_manifest = str(model["manifest_path"])
             disable_tta = not self.tta_check.isChecked()
             modality = str(self.modality_combo.currentText() or "").strip()
-            source_modality = "" if "自动" in modality else modality
+            source_modality = modality if modality in ("CT", "MR") else ""
             use_cpu = self.cpu_check.isChecked()
             execution_backend, remote_profile_id = "local", ""
             if self.remote_selector is not None:
@@ -338,6 +345,7 @@ class BatchPredictionWindow:
             self.status_label.setStyleSheet("")
             self.status_label.setText("正在后台扫描病例并启动预测任务...")
             self._dispatch_deadline = time.time() + 600.0
+            self._dispatching = True
 
             def dispatch():
                 try:
@@ -350,7 +358,7 @@ class BatchPredictionWindow:
                             "operation": "infer",
                             "workspace": workspace,
                             "job_id": "predict_{}_{}".format(
-                                time.strftime("%Y%m%dT%H%M%S"), case_id
+                                time.strftime("%Y%m%dT%H%M%S"), uuid.uuid4().hex
                             ),
                             "task_id": str(model.get("task_id") or ""),
                             "task_name": str(
@@ -406,6 +414,8 @@ class BatchPredictionWindow:
             worker.daemon = True
             worker.start()
         except Exception as exc:
+            self._dispatching = False
+            self._dispatch_deadline = 0.0
             self.start.setEnabled(bool(self.models))
             self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
             self.status_label.setText(str(exc))

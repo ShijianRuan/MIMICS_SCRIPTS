@@ -1,0 +1,55 @@
+FAIL: test_confirm_uses_answered_question_not_message_return (__main__.TestDocumentedUndo.test_confirm_uses_answered_question_not_message_return)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "$REPO/tests/test_review_workflow_regressions.py", line 62, in test_confirm_uses_answered_question_not_message_return
+    self.assertEqual(0,code)
+AssertionError: 0 != 2
+
+======================================================================
+FAIL: test_missing_remote_profile_creates_no_launching_ghost (__main__.TestJobPreflight.test_missing_remote_profile_creates_no_launching_ghost)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "$REPO/tests/test_review_workflow_regressions.py", line 99, in test_missing_remote_profile_creates_no_launching_ghost
+    self.assertFalse((Path(tmp)/'jobs'/'bad_remote').exists())
+AssertionError: True is not false
+
+======================================================================
+FAIL: test_empty_selection_does_not_claim_unrelated_geometry (__main__.TestSelectedExportGrid.test_empty_selection_does_not_claim_unrelated_geometry)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "$REPO/tests/test_review_workflow_regressions.py", line 90, in test_empty_selection_does_not_claim_unrelated_geometry
+    self.assertIsNone(manifest['mimics_shape'])
+AssertionError: [2, 2, 2] is not None
+
+======================================================================
+FAIL: test_filtered_export_uses_selected_image_not_project_first (__main__.TestSelectedExportGrid.test_filtered_export_uses_selected_image_not_project_first)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "$REPO/tests/test_review_workflow_regressions.py", line 83, in test_filtered_export_uses_selected_image_not_project_first
+    self.assertEqual([3,4,5],manifest['mimics_shape'])
+AssertionError: Lists differ: [3, 4, 5] != [2, 2, 2]
+
+First differing element 0:
+3
+2
+
+- [3, 4, 5]
++ [2, 2, 2]
+
+----------------------------------------------------------------------
+Ran 8 tests in 0.012s
+
+FAILED (failures=5, errors=2)
+Started 1 prediction job(s) with model m.
+Output directory: $TMP/out
+  病例乙: status.json
+found 1 mask(s)
+selected 0 mask(s) by filter
+image dimensions: [2, 2, 2]
+Manifest saved: $TMP/manifest.json
+found 2 mask(s)
+selected 1 mask(s) by filter
+image dimensions: [2, 2, 2]
+exporting mask: target
+  -> target
+Manifest saved: $TMP/manifest.json

@@ -1,0 +1,44 @@
+test_current_project_export_does_not_launch_background_mimics (__main__.TestNewFeatures.test_current_project_export_does_not_launch_background_mimics) ... ok
+test_external_io_setup_defaults_and_nonblocking_entry (__main__.TestNewFeatures.test_external_io_setup_defaults_and_nonblocking_entry) ... $REPO/tools/ui_theme.py:64: DeprecationWarning: Enum value 'Qt::ApplicationAttribute.AA_UseHighDpiPixmaps' is marked as deprecated, please check the documentation for more information.
+  QtCore.QCoreApplication.setAttribute(attribute, True)
+ok
+test_mimics_export_training_target_renames_alias_output (__main__.TestNewFeatures.test_mimics_export_training_target_renames_alias_output) ... ok
+test_mimics_export_collision_names_get_distinct_buffers (__main__.TestNewFeatures.test_mimics_export_collision_names_get_distinct_buffers)
+F32: two masks whose names sanitize to the same stem ("liver ... ok
+test_mimics_export_case_collisions_get_distinct_buffers (__main__.TestNewFeatures.test_mimics_export_case_collisions_get_distinct_buffers)
+R70 (F32 复查残留)：Windows 文件系统大小写不敏感，"Liver" 与 ... ok
+test_foreground_export_tick_disambiguates_collision_names (__main__.TestNewFeatures.test_foreground_export_tick_disambiguates_collision_names)
+F32 background tick: the incremental per-mask reader must honor ... ok
+test_mimics_export_rejects_masks_from_multiple_images (__main__.TestNewFeatures.test_mimics_export_rejects_masks_from_multiple_images)
+F33: one export carries one grid. Masks attached to different ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 0.080s
+
+OK
+Mimics-Script Comprehensive Tests
+============================================================
+Python: 3.12.14 (main, Aug 25 2026, 13:50:33) [Clang 22.1.3 ]
+Project: $REPO
+============================================================
+found 1 mask(s)
+selected 1 mask(s) by filter
+image dimensions: [1, 1, 1]
+exporting mask: Liver Seg
+  -> liver
+Manifest saved: /private/tmp/mimics_test_alpzv79s/target_name/manifest.json
+found 2 mask(s)
+image dimensions: [2, 2, 2]
+exporting mask: liver manual
+  -> liver_manual
+exporting mask: liver_manual
+  -> liver_manual_2
+Manifest saved: /private/tmp/mimics_test_ib278cnm/export_collision/manifest.json
+found 2 mask(s)
+image dimensions: [2, 2, 2]
+exporting mask: Liver
+  -> Liver
+exporting mask: liver
+  -> liver_2
+Manifest saved: /private/tmp/mimics_test_wspy3mky/export_case_collision/manifest.json
+found 2 mask(s)

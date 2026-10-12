@@ -541,7 +541,13 @@ def _materialize_case(
     try:
         if control_path is not None:
             _raise_if_cancelled(control_path)
-        _materialize_source_image(image_source, staging / "image.nii.gz")
+        if image_source.is_file() and image_source.name.lower().endswith(".nii.gz"):
+            # Keep the cache independent of the user's source. Hardlinks both
+            # share writable bytes and change the source's ctime on POSIX,
+            # invalidating the signature computed just above.
+            shutil.copy2(str(image_source), str(staging / "image.nii.gz"))
+        else:
+            _materialize_source_image(image_source, staging / "image.nii.gz")
         source_image = nib.load(str(staging / "image.nii.gz"))
         source_shape = tuple(int(value) for value in source_image.shape[:3])
         source_affine = np.asarray(source_image.affine, dtype=float)

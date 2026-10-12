@@ -975,7 +975,7 @@ class TestBatchPredictionWindow(unittest.TestCase):
 
             window.image_root_edit.setText(str(tmp / "cases"))
             window.output_edit.setText(str(tmp / "out"))
-            # "自动（按模型）" default: no declared modality, guardrail off.
+            # "未指定" default: no declared modality, guardrail off.
             with mock.patch.object(ui, "create_job", fake_create_job):
                 window._submit()
                 deadline = time.time() + 5.0
@@ -1108,7 +1108,7 @@ class TestBatchPredictionWindow(unittest.TestCase):
                 window.table.item(0, 4).text(),
             )
             self.assertEqual(
-                "model folder is missing",
+                "本地\n不可用：model folder is missing",
                 window.table.item(0, 4).toolTip(),
             )
             # ...and is greyed out (not selectable)...
@@ -1149,12 +1149,20 @@ class TestBatchPredictionWindow(unittest.TestCase):
             window._apply_models(
                 [self._usable_model_row(self._model_dir(tmp))], ""
             )
+            window._dispatching = True
             window._dispatch_deadline = time.time() - 1.0
             window._poll_background_results()
             text = window.status_label.text()
             self.assertIn("不会被取消", text)
-            self.assertIn("两个任务", text)
+            self.assertIn("不能再次提交", text)
             self.assertEqual(0.0, window._dispatch_deadline)
+            self.assertFalse(window.start.isEnabled())
+            with mock.patch.object(ui.threading, "Thread") as thread:
+                window._submit()
+                thread.assert_not_called()
+            window._dispatch_results.put("扫描已完成")
+            window._poll_background_results()
+            self.assertFalse(window._dispatching)
             self.assertTrue(window.start.isEnabled())
 
     def test_missing_folders_are_rejected_before_dispatch(self):
@@ -2142,6 +2150,8 @@ class TestActiveLearningWindow(unittest.TestCase):
                 self.assertEqual(
                     2, window.table.rowCount(),
                     "non-empty ranking must populate the table")
+                self.assertFalse(window.open_button.isEnabled())
+                window.table.selectRow(0)
                 self.assertTrue(window.open_button.isEnabled())
                 summary = window.status_label.text()
                 self.assertIn("已排序 2 例", summary)
@@ -2433,7 +2443,8 @@ class TestActiveLearningWindow(unittest.TestCase):
                 window._poll_background_results()
                 time.sleep(0.02)
             window._apply_pair((None, None), "")
-            self.assertIn("01 训练模型", window.pair_label.text())
+            self.assertIn("FlexiCT 训练窗口", window.pair_label.text())
+            self.assertIn("2D + 3D 成对模型（主动学习用）", window.pair_label.text())
             self.assertFalse(window.start_run_button.isEnabled())
             # The old circular empty state pointed at this same entry.
             self.assertIn("新建排序", window.status_label.text())

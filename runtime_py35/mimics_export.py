@@ -1045,6 +1045,22 @@ def _canonical_mask_name(name):
     return text.strip("_")
 
 
+def _checked_source_image_path(selected_source, supplied_source):
+    """Reject a source override that contradicts the selected Image identity."""
+    selected_source = str(selected_source or "").strip()
+    supplied_source = str(supplied_source or "").strip()
+    if selected_source and supplied_source:
+        selected_key = os.path.normcase(os.path.abspath(selected_source))
+        supplied_key = os.path.normcase(os.path.abspath(supplied_source))
+        if selected_key != supplied_key:
+            raise RuntimeError(
+                "The selected Masks belong to a different source image. "
+                "Choose the source recorded for that Image, or explicitly "
+                "repair its source binding before exporting."
+            )
+    return supplied_source or selected_source
+
+
 def _source_mask_stem(path):
     """Return a comparable Mask name for a supported NIfTI filename."""
     name = os.path.basename(str(path or ""))
@@ -1328,10 +1344,19 @@ def export_masks_to_buffers(
         "mimics_voxel_to_ras_matrix_source": "",
     }
 
-    # Get image shape from first mask's image
-    if len(masks) > 0:
+    # A filter can select a later image in a multi-image project. Geometry
+    # belongs to the selected masks, not the project's first unrelated mask.
+    if selected:
         try:
-            img = masks[0].image
+            img = selected[0].image
+            # Carry the selected image's source identity through conversion.
+            # The active image may be a different image in this project.
+            manifest["source_image_path"] = str(
+                _metadata_get(img, SOURCE_IMAGE_PATH_METADATA, "") or "")
+            manifest["source_image_shape"] = str(
+                _metadata_get(img, SOURCE_IMAGE_SHAPE_METADATA, "") or "")
+            manifest["source_voxel_to_ras_matrix"] = str(
+                _metadata_get(img, SOURCE_VOXEL_TO_RAS_MATRIX_METADATA, "") or "")
             dims = [int(v) for v in img.logical_dimensions]
             manifest["mimics_shape"] = dims
             matrix = _parse_matrix_metadata(
@@ -1354,18 +1379,18 @@ def export_masks_to_buffers(
     # overwriting the first mask's buffer with the second's. Track used
     # stems and disambiguate with a stable numeric suffix so every mask
     # keeps its own file; the manifest records the mapping.
-    # R70: compare via os.path.normcase — Windows filesystems are
-    # case-insensitive, so "Liver"/"liver" collide on disk even though the
-    # raw strings differ (the manifest keeps the original casing).
+    # Disambiguate casing on every platform: normcase alone is a no-op on
+    # POSIX, including macOS volumes that are actually case-insensitive.
+    # The manifest keeps the original label casing.
     used_safe_names = set()
 
     def _unique_safe_name(base):
         candidate = base
         counter = 2
-        while os.path.normcase(candidate) in used_safe_names:
+        while os.path.normcase(candidate).lower() in used_safe_names:
             candidate = "{0}_{1}".format(base, counter)
             counter += 1
-        used_safe_names.add(os.path.normcase(candidate))
+        used_safe_names.add(os.path.normcase(candidate).lower())
         return candidate
 
     for a_mask in selected:
@@ -1790,15 +1815,14 @@ def _foreground_export_tick(monitor):
                 safe_name = _sanitize_name(name)
                 # F32: disambiguate against stems already used in this
                 # export so colliding names never share one buffer file.
-                # R70: normcase for the same reason as the foreground path
-                # ("Liver"/"liver" are one file on Windows).
+                # Also fold case on POSIX case-insensitive volumes.
                 used = monitor.setdefault("used_safe_names", set())
                 unique_name = safe_name
                 counter = 2
-                while os.path.normcase(unique_name) in used:
+                while os.path.normcase(unique_name).lower() in used:
                     unique_name = "{0}_{1}".format(safe_name, counter)
                     counter += 1
-                used.add(os.path.normcase(unique_name))
+                used.add(os.path.normcase(unique_name).lower())
                 u8_path = os.path.join(monitor["buffers_dir"], unique_name + ".u8")
                 written = _stream_mask_to_file(a_mask, u8_path)
                 expected = 1
@@ -2021,7 +2045,10 @@ def _start_current_project_export(case_dir, source_image_path, output_root, axes
         selected = _selected_masks(mask_names)
         if not selected:
             raise RuntimeError("No matching masks were found in the current project.")
-        source_image_path = str(source_image_path or "").strip()
+        source_image_path = _checked_source_image_path(
+            _metadata_get(selected[0].image, SOURCE_IMAGE_PATH_METADATA, ""),
+            source_image_path,
+        )
         degraded_export = False
         source_grid_metadata = {}
         if not source_image_path:
@@ -2862,18 +2889,8 @@ def _export_masks_and_build_params(
         "source_mask_paths": source_mask_paths,
         "source_mask_root": canonical_root,
     }
-    try:
-        active_image = mimics.data.images.get_active()
-    except Exception:
-        active_image = None
-    if active_image is None:
-        try:
-            active_image = mimics.data.masks[0].image if len(mimics.data.masks) else None
-        except Exception:
-            active_image = None
-    source_image_path = str(source_image_path or "")
-    if not source_image_path and active_image is not None:
-        source_image_path = _metadata_get(active_image, SOURCE_IMAGE_PATH_METADATA, "")
+    source_image_path = _checked_source_image_path(
+        manifest.get("source_image_path"), source_image_path)
     if source_image_path:
         bridge_params["source_image_path"] = str(source_image_path)
     else:
@@ -2882,12 +2899,8 @@ def _export_masks_and_build_params(
         # of the Mimics grid. Hand-created projects carry no snapshot, in
         # which case the bridge reports source_geometry_unavailable and the
         # caller decides on the degraded path.
-        try:
-            shape_snapshot = _metadata_get(active_image, SOURCE_IMAGE_SHAPE_METADATA, "")
-            matrix_snapshot = _metadata_get(active_image, SOURCE_VOXEL_TO_RAS_MATRIX_METADATA, "")
-        except Exception:
-            shape_snapshot = ""
-            matrix_snapshot = ""
+        shape_snapshot = manifest.get("source_image_shape") or ""
+        matrix_snapshot = manifest.get("source_voxel_to_ras_matrix") or ""
         if str(shape_snapshot or "").strip() and str(matrix_snapshot or "").strip():
             if _parse_matrix_metadata(matrix_snapshot) is not None:
                 bridge_params["source_image_shape"] = str(shape_snapshot)

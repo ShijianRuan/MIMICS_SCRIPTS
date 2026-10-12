@@ -1,0 +1,90 @@
+test_all_entries_importable (__main__.TestScriptingLibraryEntries.test_all_entries_importable)
+Each scripting_library entry should be importable without Mimics. ... ok
+test_living_doc_entry_references_match_library_files (__main__.TestScriptingLibraryEntries.test_living_doc_entry_references_match_library_files)
+R61-19: entry references in living docs (e.g. "04 Task Status") ... ok
+test_living_docs_do_not_reference_deleted_entries (__main__.TestScriptingLibraryEntries.test_living_docs_do_not_reference_deleted_entries)
+B24: entries deleted by R41/R43 must not appear as live references ... ok
+test_nninteractive_entry_routes_correctly (__main__.TestScriptingLibraryEntries.test_nninteractive_entry_routes_correctly)
+The official nnInteractive entry routes to nninteractive_mimics. ... ok
+test_stop_background_services_entry (__main__.TestScriptingLibraryEntries.test_stop_background_services_entry) ... ok
+test_window_entries_routes (__main__.TestScriptingLibraryEntries.test_window_entries_routes) ... ok
+test_analyze_defers_classification_to_scan_worker (__main__.TestImportDropWindow.test_analyze_defers_classification_to_scan_worker)
+R76 P1: analyze() must not run classify_payload on the GUI ... <repo>/tools/ui_theme.py:64: DeprecationWarning: Enum value 'Qt::ApplicationAttribute.AA_UseHighDpiPixmaps' is marked as deprecated, please check the documentation for more information.
+  QtCore.QCoreApplication.setAttribute(attribute, True)
+ok
+test_batch_drop_status_stays_importing_while_queue_running (__main__.TestImportDropWindow.test_batch_drop_status_stays_importing_while_queue_running) ... ok
+test_batch_drop_status_unfreezes_from_queue_done_marker (__main__.TestImportDropWindow.test_batch_drop_status_unfreezes_from_queue_done_marker) ... ok
+test_batch_drop_status_unfreezes_on_failure_with_reason (__main__.TestImportDropWindow.test_batch_drop_status_unfreezes_on_failure_with_reason) ... ok
+test_browse_source_buttons_use_async_helpers (__main__.TestImportDropWindow.test_browse_source_buttons_use_async_helpers) ... ok
+test_browse_source_files_feeds_multi_single_pipeline (__main__.TestImportDropWindow.test_browse_source_files_feeds_multi_single_pipeline) ... ok
+test_classify_case_folder (__main__.TestImportDropWindow.test_classify_case_folder) ... ok
+test_classify_dataset_root (__main__.TestImportDropWindow.test_classify_dataset_root) ... ok
+test_classify_multi_select_deduplicates_paths (__main__.TestImportDropWindow.test_classify_multi_select_deduplicates_paths) ... ok
+test_classify_multi_select_stays_the_exact_case_list (__main__.TestImportDropWindow.test_classify_multi_select_stays_the_exact_case_list) ... ok
+test_classify_paths_from_different_roots_are_single_imports (__main__.TestImportDropWindow.test_classify_paths_from_different_roots_are_single_imports) ... ok
+test_classify_single_file (__main__.TestImportDropWindow.test_classify_single_file) ... ok
+test_collect_recent_drops_handles_missing_dir (__main__.TestImportDropWindow.test_collect_recent_drops_handles_missing_dir) ... ok
+test_collect_recent_drops_strips_run_id_timestamp (__main__.TestImportDropWindow.test_collect_recent_drops_strips_run_id_timestamp) ... ok
+test_collect_recent_drops_summarizes_status_files (__main__.TestImportDropWindow.test_collect_recent_drops_summarizes_status_files) ... ok
+test_drop_window_exposes_mask_escape_hatch_texts (__main__.TestImportDropWindow.test_drop_window_exposes_mask_escape_hatch_texts) ... ok
+test_empty_output_path_blocks_submit (__main__.TestImportDropWindow.test_empty_output_path_blocks_submit) ... ok
+test_excluded_dirs_are_not_treated_as_cases (__main__.TestImportDropWindow.test_excluded_dirs_are_not_treated_as_cases) ... ok
+test_expand_mask_paths_files_folders_and_invalid (__main__.TestImportDropWindow.test_expand_mask_paths_files_folders_and_invalid) ... ok
+test_format_recent_drop_line_is_annotator_readable (__main__.TestImportDropWindow.test_format_recent_drop_line_is_annotator_readable) ... ok
+test_invalid_pasted_paths_are_reported_not_silent (__main__.TestImportDropWindow.test_invalid_pasted_paths_are_reported_not_silent) ... ok
+test_mask_pick_narrows_selection_for_worker (__main__.TestImportDropWindow.test_mask_pick_narrows_selection_for_worker) ... ok
+test_offscreen_window_renders_and_registers (__main__.TestImportDropWindow.test_offscreen_window_renders_and_registers) ... qt.qpa.fonts: Populating font family aliases took 105 ms. Replace uses of missing font family "Sans Serif" with one that exists to avoid this cost. 
+This plugin does not support raise()
+ok
+test_popen_failure_marks_status_failed_not_running (__main__.TestImportDropWindow.test_popen_failure_marks_status_failed_not_running)
+F35: the status file is pre-written as running before the worker ... ok
+test_same_second_submissions_get_distinct_control_files (__main__.TestImportDropWindow.test_same_second_submissions_get_distinct_control_files)
+F35: two submissions in the same second used to share one ... ok
+test_single_case_status_is_not_touched_by_batch_derivation (__main__.TestImportDropWindow.test_single_case_status_is_not_touched_by_batch_derivation) ... ok
+test_single_case_worker_errors_are_chinese (__main__.TestImportDropWindow.test_single_case_worker_errors_are_chinese) ... ok
+test_submit_batch_invokes_prepare_import (__main__.TestImportDropWindow.test_submit_batch_invokes_prepare_import) ... ok
+test_submit_multi_single_ignores_explicit_mask_paths (__main__.TestImportDropWindow.test_submit_multi_single_ignores_explicit_mask_paths) ... ok
+test_submit_multi_single_imports_each_dropped_case_only (__main__.TestImportDropWindow.test_submit_multi_single_imports_each_dropped_case_only) ... ok
+test_submit_single_explicit_mask_paths_override_discovery (__main__.TestImportDropWindow.test_submit_single_explicit_mask_paths_override_discovery) ... ok
+test_submit_single_invalid_mask_path_fails_closed (__main__.TestImportDropWindow.test_submit_single_invalid_mask_path_fails_closed) ... ok
+test_submit_single_invokes_single_case_worker (__main__.TestImportDropWindow.test_submit_single_invokes_single_case_worker) ... ok
+test_viewer_log_tail_is_read_on_worker_thread (__main__.TestImportDropWindow.test_viewer_log_tail_is_read_on_worker_thread)
+R76: the 512 KiB log tail must be read on the collect worker ... ok
+test_failed_setup_state_is_reported (__main__.TestEnvGuidance.test_failed_setup_state_is_reported) ... ok
+test_flexict_config_override_silences_weights_issue (__main__.TestEnvGuidance.test_flexict_config_override_silences_weights_issue) ... ok
+test_flexict_missing_weights_is_informational (__main__.TestEnvGuidance.test_flexict_missing_weights_is_informational) ... ok
+test_incomplete_setup_lists_failed_packages (__main__.TestEnvGuidance.test_incomplete_setup_lists_failed_packages) ... ok
+test_installed_official_model_silences_issue (__main__.TestEnvGuidance.test_installed_official_model_silences_issue) ... ok
+test_live_and_relative_paths_are_not_migration_issues (__main__.TestEnvGuidance.test_live_and_relative_paths_are_not_migration_issues) ... ok
+test_missing_official_model_is_reported_bad (__main__.TestEnvGuidance.test_missing_official_model_is_reported_bad) ... ok
+test_missing_python_reports_setup_action (__main__.TestEnvGuidance.test_missing_python_reports_setup_action) ... ok
+test_moved_checkout_detected_with_old_root (__main__.TestEnvGuidance.test_moved_checkout_detected_with_old_root) ... FAIL
+test_official_model_config_key_override (__main__.TestEnvGuidance.test_official_model_config_key_override) ... ok
+test_official_model_env_var_override (__main__.TestEnvGuidance.test_official_model_env_var_override) ... ok
+test_scribbleprompt_default_checkpoint_is_checked_without_config (__main__.TestEnvGuidance.test_scribbleprompt_default_checkpoint_is_checked_without_config)
+B regression (R66 audit P1): the shipped JSON no longer carries ... ok
+test_scribbleprompt_missing_checkpoint_is_reported (__main__.TestEnvGuidance.test_scribbleprompt_missing_checkpoint_is_reported) ... ok
+test_scribbleprompt_present_checkpoint_silences_issue (__main__.TestEnvGuidance.test_scribbleprompt_present_checkpoint_silences_issue) ... ok
+test_scribbleprompt_relative_path_is_anchored_at_root (__main__.TestEnvGuidance.test_scribbleprompt_relative_path_is_anchored_at_root) ... ok
+test_scribbleprompt_unconfigured_is_not_an_issue (__main__.TestEnvGuidance.test_scribbleprompt_unconfigured_is_not_an_issue) ... ok
+test_stale_setup_state_ignored (__main__.TestEnvGuidance.test_stale_setup_state_ignored) ... ok
+
+======================================================================
+FAIL: test_moved_checkout_detected_with_old_root (__main__.TestEnvGuidance.test_moved_checkout_detected_with_old_root)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tests/test_all.py", line 13828, in test_moved_checkout_detected_with_old_root
+    self.assertEqual(old_root, detected)
+AssertionError: '<temporary-test-state>/oldmachine/MIMICS_SCRIPTS' != ''
+- <temporary-test-state>/oldmachine/MIMICS_SCRIPTS
+
+
+----------------------------------------------------------------------
+Ran 57 tests in 0.514s
+
+FAILED (failures=1)
+Mimics-Script Comprehensive Tests
+============================================================
+Python: 3.12.14 (main, Aug 25 2026, 13:50:33) [Clang 22.1.3 ]
+Project: <repo>
+============================================================

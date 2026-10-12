@@ -12673,7 +12673,13 @@ class TestImportReceiptAndUndo(unittest.TestCase):
         class _ProjectInfo(object):
             def __init__(self, path):
                 self.filename = path
+        class _Masks(list):
+            def delete(self, mask):
+                mask.delete()
+                self.remove(mask)
+
         patches = [
+            mock.patch.object(import_undo_mimics.mimics.data, "masks", _Masks(image.masks)),
             mock.patch.object(import_undo_mimics.mimics.data, "images", [image]),
             mock.patch.object(
                 import_undo_mimics.mimics.file, "get_project_information",
@@ -12763,7 +12769,14 @@ class TestImportReceiptAndUndo(unittest.TestCase):
             image.masks = [_FakeMask(spec) for spec in mask_specs]
             image_modules.append(image)
 
+        class _Masks(list):
+            def delete(self, mask):
+                mask.delete()
+                self.remove(mask)
+
         patches = [
+            mock.patch.object(import_undo_mimics.mimics.data, "masks", _Masks(
+                mask for image in image_modules for mask in image.masks)),
             mock.patch.object(import_undo_mimics.mimics.data, "images", image_modules),
             mock.patch.object(
                 import_undo_mimics.mimics.file, "get_project_information",
@@ -16032,7 +16045,9 @@ class TestFlexiCTActiveLearningApply(unittest.TestCase):
                 class _Proc(object):
                     pid = 1
                 flexict_mimics.subprocess.Popen = lambda *a, **k: _Proc()
-                flexict_mimics._al_apply_request(request)
+                with mock.patch.object(flexict_mimics, "_external_python", return_value=sys.executable), \
+                        mock.patch.object(flexict_mimics.threading, "Thread"):
+                    flexict_mimics._al_apply_request(request)
                 self.assertEqual(["converting"], [s for s, _ in marked])
             finally:
                 flexict_mimics._al_mark_request = old_mark
@@ -16315,7 +16330,10 @@ class TestFlexiCTActiveLearningApply(unittest.TestCase):
                     "masks": [
                         ("High", buffer_one), ("Moderate", buffer_two)],
                 }
-                flexict_mimics._al_finish_conversion(transaction)
+                with mock.patch.object(
+                        flexict_mimics.mimics.data, "masks",
+                        mock.Mock(delete=lambda mask: mask.delete())):
+                    flexict_mimics._al_finish_conversion(transaction)
             finally:
                 flexict_mimics._al_mark_request = old_mark
                 flexict_mimics._al_target_still_matches = old_target

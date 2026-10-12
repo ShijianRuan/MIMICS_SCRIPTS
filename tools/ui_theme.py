@@ -694,6 +694,11 @@ def stylesheet(extra=""):
     QPushButton#dangerButton:hover {
         background: #feeceb;
     }
+    QPushButton#dangerButton:disabled {
+        color: #98a2b3;
+        background: #f2f4f7;
+        border-color: #d9e0e8;
+    }
     QProgressBar {
         min-height: 18px;
         border: 1px solid #c9d2dc;
@@ -719,6 +724,46 @@ def stylesheet(extra=""):
     }
     """
     return base + "\n" + str(extra or "")
+
+
+def scrollable_widget(content):
+    """Keep form controls at their natural size; scroll on a small screen."""
+    from PySide6 import QtWidgets
+
+    if content.layout() is not None:
+        content.layout().setSizeConstraint(QtWidgets.QLayout.SetMinimumSize)
+    scroll = QtWidgets.QScrollArea()
+    scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+    scroll.setWidgetResizable(True)
+    scroll.setWidget(content)
+    return scroll
+
+
+def scroll_layout_body(layout, first=0, footer_items=1):
+    """Scroll a vertical page's body while retaining its primary actions."""
+    from PySide6 import QtWidgets
+
+    count = layout.count() - int(footer_items) - int(first)
+    if count <= 0:
+        return None
+    body = QtWidgets.QWidget()
+    inner = QtWidgets.QVBoxLayout(body)
+    inner.setContentsMargins(0, 0, 0, 0)
+    inner.setSpacing(layout.spacing())
+    for _ in range(count):
+        stretch = layout.stretch(first)
+        item = layout.takeAt(first)
+        if item.widget() is not None:
+            inner.addWidget(item.widget(), stretch)
+        elif item.layout() is not None:
+            child = item.layout()
+            child.setParent(None)
+            inner.addLayout(child, stretch)
+        else:
+            inner.addItem(item)
+    scroll = scrollable_widget(body)
+    layout.insertWidget(first, scroll, 1)
+    return scroll
 
 
 def clamp_window_to_screen(window, minimum):

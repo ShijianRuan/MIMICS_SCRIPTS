@@ -1,0 +1,81 @@
+qt.qpa.fonts: Populating font family aliases took 302 ms. Replace uses of missing font family "Sans Serif" with one that exists to avoid this cost. 
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support raise()
+This plugin does not support propagateSizeHints()
+{
+  "windows": 146,
+  "errors": [
+    {
+      "name": "populated-states",
+      "error": "name 'QtWidgets' is not defined",
+      "traceback": "Traceback (most recent call last):\n  File \"<repo>/docs/reviews/2026-10-12-ui-evidence/render_ui_audit.py\", line 169, in <module>\n    flex_prediction._apply_models([dict(rows[0],task_name='肝脏',label_names=['Liver'],configuration='2d')],'')\n  File \"/private<baseline>/tools/flexict_prediction_setup_ui.py\", line 179, in _apply_models\n    item = QtWidgets.QTableWidgetItem(str(value or \"\"))\n           ^^^^^^^^^\nNameError: name 'QtWidgets' is not defined. Did you mean: 'self.QtWidgets'?\n"
+    }
+  ],
+  "clipped": [
+    {
+      "screen": "remote-server-small",
+      "actual": [
+        853,
+        440
+      ],
+      "buttons": [
+        "在本机安全地记住密码",
+        "复用未变化的已上传训练数据"
+      ]
+    },
+    {
+      "screen": "remote-server-bottom-small",
+      "actual": [
+        853,
+        440
+      ],
+      "buttons": [
+        "在本机安全地记住密码",
+        "复用未变化的已上传训练数据"
+      ]
+    },
+    {
+      "screen": "export-small",
+      "actual": [
+        853,
+        440
+      ],
+      "buttons": [
+        "全部 Mask",
+        "选定的名称",
+        "跳过已存在",
+        "覆盖已存在",
+        "NIfTI (.nii.gz)",
+        "NRRD (.nrrd)",
+        "MHA (.mha)"
+      ]
+    },
+    {
+      "screen": "export-bottom-small",
+      "actual": [
+        853,
+        440
+      ],
+      "buttons": [
+        "全部 Mask",
+        "选定的名称",
+        "跳过已存在",
+        "覆盖已存在",
+        "NIfTI (.nii.gz)",
+        "NRRD (.nrrd)",
+        "MHA (.mha)"
+      ]
+    }
+  ]
+}

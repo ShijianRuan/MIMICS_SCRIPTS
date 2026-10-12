@@ -27,7 +27,7 @@ for _candidate in (str(_HERE), str(ROOT)):
     if _candidate not in sys.path:
         sys.path.insert(0, _candidate)
 
-from ui_theme import configure_application, stylesheet  # noqa: E402
+from ui_theme import clamp_window_to_screen, configure_application, stylesheet  # noqa: E402
 
 PRESETS_PATH = ROOT / "window_level_presets.json"
 BACKUP_PATH = ROOT / ".mimics_runtime" / "window_level_presets_backup.json"
@@ -123,6 +123,7 @@ class PresetEditor:
         self.status.setObjectName("hint")
         root.addWidget(self.status)
         self._reload()
+        clamp_window_to_screen(self.window, (620, 440))
 
     # -- table <-> model ------------------------------------------------
 

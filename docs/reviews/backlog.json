@@ -2,7 +2,7 @@
   "schema": "mimics_review_backlog.v1",
   "review_date": "2026-09-30",
   "baseline_commit": "36eac0409d89ea1e8bca5c255f9b6c1cf13e1a32",
-  "scope": "review_and_documentation_only",
+  "scope": "review_and_targeted_fixes",
   "priority_definitions": {
     "P0": "具体条件下丢失人工工作或改写源数据，交付阻断",
     "P1": "对应入口交付前修复的数据/工作流/可用性问题",
@@ -100,16 +100,14 @@
       "target_environment_validation": "not_run",
       "note": "R65-12: deferred — T01 acceptance needs L3 real Mimics machine; code-level audit done.",
       "latest_revalidation": {
-        "date": "2026-10-03",
-        "commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
-        "assessment": "open",
-        "upstream_status": "open",
-        "report": "2026-10-03-revalidation.md",
+        "date": "2026-10-12",
+        "id": "F01",
+        "title": "DICOM系列与多帧来源几何",
+        "assessment": "partially_resolved",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
         "target_environment_validation": "not_run",
-        "short_title": "DICOM 系列/多帧",
-        "verdict": "仍存在",
-        "improvement": "其他几何保护仍在",
-        "remaining": "当前探针仍把两个各 3 层系列算成 `[4,4,6]`；声明 60 帧的单文件算成 `[4,4,1]`。多帧探针只证明 header 缺口"
+        "remaining": "多系列/多帧/混合尺寸拒绝已实现；非均匀/重复位置仍输出错误网格，实际探针见DICOM_*。"
       }
     },
     {
@@ -117,7 +115,7 @@
       "title": "AL buffer清理早于应用",
       "priority": "P1",
       "evidence_grade": "A",
-      "status": "open",
+      "status": "closed",
       "work_package": "W04",
       "owner_role": "Mimics集成",
       "report": "2026-09-29-cross-functional-review.md#f02",
@@ -140,16 +138,15 @@
       "evidence_record": "2026-09-29-cross-functional-review.md",
       "target_environment_validation": "not_run",
       "latest_revalidation": {
-        "date": "2026-10-03",
-        "commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
-        "assessment": "partially_resolved",
-        "upstream_status": "closed",
-        "report": "2026-10-03-revalidation.md",
+        "date": "2026-10-12",
+        "id": "F02",
+        "title": "AL buffer清理早于应用",
+        "assessment": "fixed_in_code_or_local_tests",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
         "target_environment_validation": "not_run",
-        "short_title": "AL buffer 提前清理",
-        "verdict": "部分解决",
-        "improvement": "清理移到 finally；转换前检查 buffer；成功应用测试通过",
-        "remaining": "失败回滚仍调用无版本证据的 `mask.delete()` 并吞异常。不能声称失败后必无残留"
+        "remaining": "本次改容器删除并明确回滚失败；严格边界回归通过，真实GPU/宿主事务仍未验收。",
+        "this_round_fix_commit": "4e2cba4a8f10b83c05b91926b026c6d9ce36d12e"
       }
     },
     {
@@ -180,16 +177,14 @@
       "evidence_record": "2026-09-29-cross-functional-review.md",
       "target_environment_validation": "not_run",
       "latest_revalidation": {
-        "date": "2026-10-03",
-        "commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+        "date": "2026-10-12",
+        "id": "F03",
+        "title": "AL非空列表引用未绑定Qt名字",
         "assessment": "fixed_in_code_or_local_tests",
-        "upstream_status": "closed",
-        "report": "2026-10-03-revalidation.md",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
         "target_environment_validation": "not_run",
-        "short_title": "AL 非空列表异常",
-        "verdict": "有修复证据",
-        "improvement": "Qt 名字作用域修复",
-        "remaining": "真实 Qt 非空列表构造/选择通过；没有真实 AL GPU 运行"
+        "remaining": "原触发条件有源码或既有离线保护依据；具体见本轮逐项表，目标Windows/Mimics/GPU尚未验收。"
       }
     },
     {
@@ -220,16 +215,14 @@
       "evidence_record": "2026-09-29-cross-functional-review.md",
       "target_environment_validation": "not_run",
       "latest_revalidation": {
-        "date": "2026-10-03",
-        "commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+        "date": "2026-10-12",
+        "id": "F04",
+        "title": "AL首次排序任务无图形入口",
         "assessment": "fixed_in_code_or_local_tests",
-        "upstream_status": "closed",
-        "report": "2026-10-03-revalidation.md",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
         "target_environment_validation": "not_run",
-        "short_title": "首次排序无入口",
-        "verdict": "有修复证据",
-        "improvement": "新建排序按钮、后台提交、状态反馈可达",
-        "remaining": "仍需 2D/3D 模型对，缺模型的恢复见场景交接；不是无模型也能排序"
+        "remaining": "原触发条件有源码或既有离线保护依据；具体见本轮逐项表，目标Windows/Mimics/GPU尚未验收。"
       }
     },
     {
@@ -258,16 +251,14 @@
       "target_environment_validation": "not_run",
       "note": "R65-13 -> D10 in docs/03_Review/improvement_backlog.md: 'what counts as a completed case' is product semantics; minimal proposal recorded, awaiting user decision.",
       "latest_revalidation": {
-        "date": "2026-10-03",
-        "commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+        "date": "2026-10-12",
+        "id": "F05",
+        "title": "AL叠加自动标成已标注",
         "assessment": "decision_pending",
-        "upstream_status": "user_decision",
-        "report": "2026-10-03-revalidation.md",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
         "target_environment_validation": "not_run",
-        "short_title": "叠加即完成",
-        "verdict": "未解决，待决定",
-        "improvement": "账本已改为 user_decision",
-        "remaining": "`_al_finish_conversion` 仍自动 `_al_mark_annotated`。看过不确定区域与审核完成语义不等价"
+        "remaining": "仍叠加即annotated，现行产品决策未改。建议viewed/in_progress与人工reviewed区分。"
       }
     },
     {
@@ -300,16 +291,14 @@
       "target_environment_validation": "not_run",
       "note": "L4 clean-machine migration run still pending a real-machine window.",
       "latest_revalidation": {
-        "date": "2026-10-03",
-        "commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+        "date": "2026-10-12",
+        "id": "F06",
+        "title": "FlexiCT推理构造额外依赖backbone",
         "assessment": "fixed_in_code_or_local_tests",
-        "upstream_status": "closed",
-        "report": "2026-10-03-revalidation.md",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
         "target_environment_validation": "not_run",
-        "short_title": "推理依赖 backbone",
-        "verdict": "有代码/契约测试证据",
-        "improvement": "推理环境传 `FLEXICT_SKIP_BACKBONE=1`，加载器有分支",
-        "remaining": "未实际加载迁移模型验证参数完整性；不能据 mock 认定迁移真机通过"
+        "remaining": "原触发条件有源码或既有离线保护依据；具体见本轮逐项表，目标Windows/Mimics/GPU尚未验收。"
       }
     },
     {
@@ -340,16 +329,14 @@
       "evidence_record": "2026-09-29-cross-functional-review.md",
       "target_environment_validation": "not_run",
       "latest_revalidation": {
-        "date": "2026-10-03",
-        "commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+        "date": "2026-10-12",
+        "id": "F07",
+        "title": "Repair使用import名而非distribution名",
         "assessment": "fixed_in_code_or_local_tests",
-        "upstream_status": "closed",
-        "report": "2026-10-03-revalidation.md",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
         "target_environment_validation": "not_run",
-        "short_title": "修复包名错误",
-        "verdict": "有修复证据",
-        "improvement": "import 名与 pip 包名映射修正",
-        "remaining": "环境修复语义测试通过；下载代理/网络/新 Python 版本仍需实机"
+        "remaining": "原触发条件有源码或既有离线保护依据；具体见本轮逐项表，目标Windows/Mimics/GPU尚未验收。"
       }
     },
     {
@@ -380,16 +367,14 @@
       "evidence_record": "2026-09-29-cross-functional-review.md",
       "target_environment_validation": "not_run",
       "latest_revalidation": {
-        "date": "2026-10-03",
-        "commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+        "date": "2026-10-12",
+        "id": "F08",
+        "title": "import失败仍体检全绿",
         "assessment": "fixed_in_code_or_local_tests",
-        "upstream_status": "closed",
-        "report": "2026-10-03-revalidation.md",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
         "target_environment_validation": "not_run",
-        "short_title": "损坏 import 假健康",
-        "verdict": "有修复证据",
-        "improvement": "import 错误计入 all_ok",
-        "remaining": "与新 F36 不矛盾：后端检查修好，健康窗口另有启动错误"
+        "remaining": "原触发条件有源码或既有离线保护依据；具体见本轮逐项表，目标Windows/Mimics/GPU尚未验收。"
       }
     },
     {
@@ -420,16 +405,14 @@
       "target_environment_validation": "not_run",
       "note": "Superseded: same defect as R61-4, fixed before this review baseline was cut. Re-verified at al-review-loop HEAD 9076888 (itemSelectionChanged -> _update_action_buttons wired).",
       "latest_revalidation": {
-        "date": "2026-10-03",
-        "commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+        "date": "2026-10-12",
+        "id": "F09",
+        "title": "模型管理按钮选择后仍禁用",
         "assessment": "fixed_in_code_or_local_tests",
-        "upstream_status": "closed",
-        "report": "2026-10-03-revalidation.md",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
         "target_environment_validation": "not_run",
-        "short_title": "模型选择按钮不可用",
-        "verdict": "有修复证据",
-        "improvement": "selectionChanged 更新按钮状态",
-        "remaining": "真实 Qt 选择动作通过；模型兼容性和身份可读性不是同一问题"
+        "remaining": "原触发条件有源码或既有离线保护依据；具体见本轮逐项表，目标Windows/Mimics/GPU尚未验收。"
       }
     },
     {
@@ -460,16 +443,14 @@
       "evidence_record": "2026-09-29-cross-functional-review.md",
       "target_environment_validation": "not_run",
       "latest_revalidation": {
-        "date": "2026-10-03",
-        "commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+        "date": "2026-10-12",
+        "id": "F10",
+        "title": "拖拽多选扩大或不可提交",
         "assessment": "fixed_in_code_or_local_tests",
-        "upstream_status": "closed",
-        "report": "2026-10-03-revalidation.md",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
         "target_environment_validation": "not_run",
-        "short_title": "多选扩大导入范围",
-        "verdict": "有修复证据",
-        "improvement": "精确逐项 multi_single，不扩大父目录",
-        "remaining": "分类/选择测试通过；同秒不同提交仍有 F35"
+        "remaining": "原触发条件有源码或既有离线保护依据；具体见本轮逐项表，目标Windows/Mimics/GPU尚未验收。"
       }
     },
     {
@@ -500,16 +481,14 @@
       "evidence_record": "2026-09-29-cross-functional-review.md",
       "target_environment_validation": "not_run",
       "latest_revalidation": {
-        "date": "2026-10-03",
-        "commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+        "date": "2026-10-12",
+        "id": "F11",
+        "title": "回收线程间接调用Mimics对话框",
         "assessment": "fixed_in_code_or_local_tests",
-        "upstream_status": "closed",
-        "report": "2026-10-03-revalidation.md",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
         "target_environment_validation": "not_run",
-        "short_title": "后台线程操作 UI",
-        "verdict": "有修复证据",
-        "improvement": "reaper 只置状态，timer 线程收尾",
-        "remaining": "GUI 线程契约测试通过；Mimics timer 回调线程仍须实测"
+        "remaining": "原触发条件有源码或既有离线保护依据；具体见本轮逐项表，目标Windows/Mimics/GPU尚未验收。"
       }
     },
     {
@@ -541,16 +520,14 @@
       "target_environment_validation": "not_run",
       "note": "L4 two-machine reproducibility run still pending real machines.",
       "latest_revalidation": {
-        "date": "2026-10-03",
-        "commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+        "date": "2026-10-12",
+        "id": "F12",
+        "title": "在线离线依赖组合不一致",
         "assessment": "fixed_in_code_or_local_tests",
-        "upstream_status": "closed",
-        "report": "2026-10-03-revalidation.md",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
         "target_environment_validation": "not_run",
-        "short_title": "修复升级 Torch",
-        "verdict": "有代码/契约测试证据",
-        "improvement": "修复路径使用固定 Torch/vision 配对",
-        "remaining": "不能把固定 cu124 解释为所有 NVIDIA 驱动均兼容；目标环境先能力探测"
+        "remaining": "原触发条件有源码或既有离线保护依据；具体见本轮逐项表，目标Windows/Mimics/GPU尚未验收。"
       }
     },
     {
@@ -582,16 +559,14 @@
       "target_environment_validation": "not_run",
       "note": "Full-copy/hashing cost already fixed earlier (R61-12, a2d3244: chunked streaming + GUI pump). Residual: T13 measured p50/p95 main-thread baseline is W09 work, not claimed.",
       "latest_revalidation": {
-        "date": "2026-10-03",
-        "commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+        "date": "2026-10-12",
+        "id": "F13",
+        "title": "全量复制与模态续问的效率风险",
         "assessment": "partially_resolved",
-        "upstream_status": "closed",
-        "report": "2026-10-03-revalidation.md",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
         "target_environment_validation": "not_run",
-        "short_title": "前台卡顿/锁占用",
-        "verdict": "部分解决",
-        "improvement": "流式写 buffer，提早释放长时锁",
-        "remaining": "导出调用没有传 progress_callback，33 MiB 探针确认无中间 GUI pump；单次 host get/set 的停顿仍未测"
+        "remaining": "分块写入已有GUI pump；宿主整块读取、hash、set及项目打开/保存的停顿尚未实测。"
       }
     },
     {
@@ -622,16 +597,14 @@
       "evidence_record": "2026-09-29-cross-functional-review.md",
       "target_environment_validation": "not_run",
       "latest_revalidation": {
-        "date": "2026-10-03",
-        "commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+        "date": "2026-10-12",
+        "id": "F14",
+        "title": "错误反馈被刷新摘要覆盖",
         "assessment": "fixed_in_code_or_local_tests",
-        "upstream_status": "closed",
-        "report": "2026-10-03-revalidation.md",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
         "target_environment_validation": "not_run",
-        "short_title": "错误被刷新覆盖",
-        "verdict": "有修复证据",
-        "improvement": "AL 请求失败内容保留",
-        "remaining": "真实 Qt 错误场景通过；不能推出其他窗口反馈全覆盖"
+        "remaining": "原触发条件有源码或既有离线保护依据；具体见本轮逐项表，目标Windows/Mimics/GPU尚未验收。"
       }
     },
     {
@@ -664,16 +637,14 @@
       "target_environment_validation": "not_run",
       "note": "Residual visuals (zh-CN wording, empty-state guidance) already covered by R61-21/R61-24 (821f60d). Windows DPI matrix (T37) still unverified on real machines.",
       "latest_revalidation": {
-        "date": "2026-10-03",
-        "commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+        "date": "2026-10-12",
+        "id": "F15",
+        "title": "状态视觉与布局不一致",
         "assessment": "partially_resolved",
-        "upstream_status": "closed",
-        "report": "2026-10-03-revalidation.md",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
         "target_environment_validation": "not_run",
-        "short_title": "禁用态/列宽",
-        "verdict": "部分解决",
-        "improvement": "禁用主按钮颜色、表头宽度改善",
-        "remaining": "模型长 ID 仍省略；AL 最小宽度下按钮文案被切；详见 F37"
+        "remaining": "禁用色/单元格tooltip改善，长身份与键盘详情、信息层级仍需精修。"
       }
     },
     {
@@ -705,16 +676,14 @@
       "evidence_record": "2026-09-29-cross-functional-review.md",
       "target_environment_validation": "not_run",
       "latest_revalidation": {
-        "date": "2026-10-03",
-        "commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+        "date": "2026-10-12",
+        "id": "F16",
+        "title": "患者分组和固定验证集契约不足",
         "assessment": "partially_resolved",
-        "upstream_status": "closed",
-        "report": "2026-10-03-revalidation.md",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
         "target_environment_validation": "not_run",
-        "short_title": "患者分组/冻结验证",
-        "verdict": "部分解决",
-        "improvement": "分组 helper 与英文 case 重建有测试",
-        "remaining": "中文 case 冻结失效；FlexiCT 最终重新写 split，丢弃患者分组；GUI 未提供 patient_groups 入口"
+        "remaining": "中文key映射和患者扩组已修；实际FlexiCT最终重写将旧val移入train，GUI缺分组预览。"
       }
     },
     {
@@ -747,16 +716,14 @@
       "evidence_record": "2026-09-29-cross-functional-review.md",
       "target_environment_validation": "not_run",
       "latest_revalidation": {
-        "date": "2026-10-03",
-        "commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+        "date": "2026-10-12",
+        "id": "F17",
+        "title": "未核实项目API失败后仍切换项目",
         "assessment": "fixed_in_code_or_local_tests",
-        "upstream_status": "closed",
-        "report": "2026-10-03-revalidation.md",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
         "target_environment_validation": "not_run",
-        "short_title": "项目状态查询",
-        "verdict": "有修复证据",
-        "improvement": "使用 get_project_information/is_project_loaded，unknown 拒绝切换",
-        "remaining": "本地状态分支通过；未命名、Save As、API 差异仍进真机验收"
+        "remaining": "原触发条件有源码或既有离线保护依据；具体见本轮逐项表，目标Windows/Mimics/GPU尚未验收。"
       }
     },
     {
@@ -788,16 +755,14 @@
       "evidence_record": "2026-09-30-evidence/scenario-results.json",
       "target_environment_validation": "not_run",
       "latest_revalidation": {
-        "date": "2026-10-03",
-        "commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+        "date": "2026-10-12",
+        "id": "F18",
+        "title": "撤销导入可能删除未保存人工工作",
         "assessment": "partially_resolved",
-        "upstream_status": "closed",
-        "report": "2026-10-03-revalidation.md",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
         "target_environment_validation": "not_run",
-        "short_title": "撤销删除人工工程",
-        "verdict": "部分解决",
-        "improvement": "增加会话/磁盘检查，新增人工 Mask 场景得到保护",
-        "remaining": "检查发生在删除之后；无法精确回滚干净导入；错误吞掉、回执丢失另见 F30/F31"
+        "remaining": "检查已提前；已导入Mask后续内容编辑未检测，删除后保存不能保护已删人工内容。"
       }
     },
     {
@@ -828,16 +793,15 @@
       "evidence_record": "2026-09-30-evidence/scenario-results.json",
       "target_environment_validation": "not_run",
       "latest_revalidation": {
-        "date": "2026-10-03",
-        "commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+        "date": "2026-10-12",
+        "id": "F19",
+        "title": "按名称撤销删除其他Image同名对象",
         "assessment": "partially_resolved",
-        "upstream_status": "closed",
-        "report": "2026-10-03-revalidation.md",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
         "target_environment_validation": "not_run",
-        "short_title": "同名 Mask 误删",
-        "verdict": "部分解决",
-        "improvement": "v2 GUID/token 改善所有权选择",
-        "remaining": "v1 仍按全项目同名删除；`image.masks`/实例 delete 未证明支持；严格接口桩报错"
+        "remaining": "v2身份和v1重名拒绝改善；本次修正global container API；v1唯一同名不能证明归属。",
+        "this_round_fix_commit": "4e2cba4a8f10b83c05b91926b026c6d9ce36d12e"
       }
     },
     {
@@ -845,7 +809,7 @@
       "title": "AL同网格异病例与异步目标切换",
       "priority": "P1",
       "evidence_grade": "A+B",
-      "status": "open",
+      "status": "closed",
       "work_package": "W04",
       "owner_role": "Mimics集成",
       "report": "2026-09-30-scenario-review.md#f20",
@@ -868,16 +832,14 @@
       "evidence_record": "2026-09-30-evidence/scenario-results.json",
       "target_environment_validation": "not_run",
       "latest_revalidation": {
-        "date": "2026-10-03",
-        "commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
-        "assessment": "partially_resolved",
-        "upstream_status": "closed",
-        "report": "2026-10-03-revalidation.md",
+        "date": "2026-10-12",
+        "id": "F20",
+        "title": "AL同网格异病例与异步目标切换",
+        "assessment": "fixed_in_code_or_local_tests",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
         "target_environment_validation": "not_run",
-        "short_title": "AL 错病例应用",
-        "verdict": "部分解决",
-        "improvement": "记录启动时项目/Image，挡住运行中切换",
-        "remaining": "启动时已经在错误病例 B、与 A 同网格时仍通过；后续 guard 也通过"
+        "remaining": "源路径先核对+异步目标复核，相关82项runtime回归通过；移动/Save As边界需目标验收。"
       }
     },
     {
@@ -909,16 +871,14 @@
       "evidence_record": "2026-09-30-evidence/scenario-results.json",
       "target_environment_validation": "not_run",
       "latest_revalidation": {
-        "date": "2026-10-03",
-        "commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+        "date": "2026-10-12",
+        "id": "F21",
+        "title": "等体积人工修正未被预测保护识别",
         "assessment": "fixed_in_code_or_local_tests",
-        "upstream_status": "closed",
-        "report": "2026-10-03-revalidation.md",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
         "target_environment_validation": "not_run",
-        "short_title": "等体积修改漏检",
-        "verdict": "有修复证据",
-        "improvement": "增加内容 digest；缺 digest 不直接覆盖",
-        "remaining": "原等体积触发条件得到保护；digest 成本/确认期间再编辑仍是真机边界"
+        "remaining": "原触发条件有源码或既有离线保护依据；具体见本轮逐项表，目标Windows/Mimics/GPU尚未验收。"
       }
     },
     {
@@ -950,16 +910,14 @@
       "evidence_record": "2026-09-30-evidence/scenario-results.json",
       "target_environment_validation": "not_run",
       "latest_revalidation": {
-        "date": "2026-10-03",
-        "commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+        "date": "2026-10-12",
+        "id": "F22",
+        "title": "病例slug碰撞与硬链接覆盖源文件",
         "assessment": "fixed_in_code_or_local_tests",
-        "upstream_status": "closed",
-        "report": "2026-10-03-revalidation.md",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
         "target_environment_validation": "not_run",
-        "short_title": "case 名碰撞/硬链接",
-        "verdict": "有修复证据",
-        "improvement": "唯一 case key；写入前断开目标硬链接",
-        "remaining": "原源文件污染触发条件有测试保护；训练名映射的后续 F16 不是同一层"
+        "remaining": "原触发条件有源码或既有离线保护依据；具体见本轮逐项表，目标Windows/Mimics/GPU尚未验收。"
       }
     },
     {
@@ -991,16 +949,14 @@
       "evidence_record": "2026-09-30-evidence/scenario-results.json",
       "target_environment_validation": "not_run",
       "latest_revalidation": {
-        "date": "2026-10-03",
-        "commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+        "date": "2026-10-12",
+        "id": "F23",
+        "title": "概率与非法Mask值静默转成前景",
         "assessment": "fixed_in_code_or_local_tests",
-        "upstream_status": "closed",
-        "report": "2026-10-03-revalidation.md",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
         "target_environment_validation": "not_run",
-        "short_title": "浮点/非有限 Mask",
-        "verdict": "有修复证据",
-        "improvement": "概率图/NaN/Inf 入口校验补齐",
-        "remaining": "bridge 相关测试通过；标签本体、负值/超大 ID、重叠语义仍需明确约束"
+        "remaining": "原触发条件有源码或既有离线保护依据；具体见本轮逐项表，目标Windows/Mimics/GPU尚未验收。"
       }
     },
     {
@@ -1031,16 +987,14 @@
       "evidence_record": "2026-09-30-evidence/scenario-results.json",
       "target_environment_validation": "not_run",
       "latest_revalidation": {
-        "date": "2026-10-03",
-        "commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+        "date": "2026-10-12",
+        "id": "F24",
+        "title": "补齐Mask将平铺CT影像列作结构",
         "assessment": "fixed_in_code_or_local_tests",
-        "upstream_status": "closed",
-        "report": "2026-10-03-revalidation.md",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
         "target_environment_validation": "not_run",
-        "short_title": "将源 CT 当 Mask",
-        "verdict": "有修复证据",
-        "improvement": "平铺来源排除已识别图像",
-        "remaining": "原平铺单图像场景有保护；多模态/多候选图像仍需系列选择策略"
+        "remaining": "原触发条件有源码或既有离线保护依据；具体见本轮逐项表，目标Windows/Mimics/GPU尚未验收。"
       }
     },
     {
@@ -1071,16 +1025,14 @@
       "evidence_record": "2026-09-30-evidence/scenario-results.json",
       "target_environment_validation": "not_run",
       "latest_revalidation": {
-        "date": "2026-10-03",
-        "commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+        "date": "2026-10-12",
+        "id": "F25",
+        "title": "补齐Mask按全项目名称错误判完整",
         "assessment": "fixed_in_code_or_local_tests",
-        "upstream_status": "closed",
-        "report": "2026-10-03-revalidation.md",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
         "target_environment_validation": "not_run",
-        "short_title": "多 Image 补 Mask",
-        "verdict": "有修复证据，功能降级",
-        "improvement": "sync 明确拒绝多 Image 工程，防误绑",
-        "remaining": "这是安全拒绝，**不是支持多期工程**；导出另有 F33，不能泛化已解决"
+        "remaining": "原触发条件有源码或既有离线保护依据；具体见本轮逐项表，目标Windows/Mimics/GPU尚未验收。"
       }
     },
     {
@@ -1112,16 +1064,14 @@
       "evidence_record": "2026-09-30-evidence/scenario-results.json",
       "target_environment_validation": "not_run",
       "latest_revalidation": {
-        "date": "2026-10-03",
-        "commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+        "date": "2026-10-12",
+        "id": "F26",
+        "title": "检查新任务失败读取旧成功报告",
         "assessment": "fixed_in_code_or_local_tests",
-        "upstream_status": "closed",
-        "report": "2026-10-03-revalidation.md",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
         "target_environment_validation": "not_run",
-        "short_title": "旧报告假成功",
-        "verdict": "有修复证据",
-        "improvement": "worker/launcher 校验 job ID 与终态",
-        "remaining": "本地后端报告关联测试通过；UI 请求身份另有 F35"
+        "remaining": "原触发条件有源码或既有离线保护依据；具体见本轮逐项表，目标Windows/Mimics/GPU尚未验收。"
       }
     },
     {
@@ -1153,16 +1103,14 @@
       "evidence_record": "2026-09-30-evidence/scenario-results.json",
       "target_environment_validation": "not_run",
       "latest_revalidation": {
-        "date": "2026-10-03",
-        "commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+        "date": "2026-10-12",
+        "id": "F27",
+        "title": "取消批量任务丢失逐例结果台账",
         "assessment": "fixed_in_code_or_local_tests",
-        "upstream_status": "closed",
-        "report": "2026-10-03-revalidation.md",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
         "target_environment_validation": "not_run",
-        "short_title": "取消无结果账单",
-        "verdict": "有修复证据",
-        "improvement": "finally 写部分结果/失败清单",
-        "remaining": "取消测试通过；磁盘写满时账单自身失败需目标故障演练"
+        "remaining": "原触发条件有源码或既有离线保护依据；具体见本轮逐项表，目标Windows/Mimics/GPU尚未验收。"
       }
     },
     {
@@ -1193,16 +1141,14 @@
       "evidence_record": "2026-09-30-evidence/scenario-results.json",
       "target_environment_validation": "not_run",
       "latest_revalidation": {
-        "date": "2026-10-03",
-        "commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+        "date": "2026-10-12",
+        "id": "F28",
+        "title": "原子发布可能覆盖较新人工保存",
         "assessment": "partially_resolved",
-        "upstream_status": "closed",
-        "report": "2026-10-03-revalidation.md",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
         "target_environment_validation": "not_run",
-        "short_title": "旧快照覆盖新保存",
-        "verdict": "部分解决，优先阻断覆盖路径",
-        "improvement": "能检测启动时已存在、发布前发生变化的一部分目标",
-        "remaining": "初始不存在及检查后保存两种窗口都可覆盖，两个独立探针已复现"
+        "remaining": "初始不存在后来出现已检测；检查到replace与重试间仍存在原生保存竞态。"
       }
     },
     {
@@ -1210,7 +1156,7 @@
       "title": "FlexiCT颅尾分层使用最大spacing轴",
       "priority": "P2",
       "evidence_grade": "A+B",
-      "status": "open",
+      "status": "closed",
       "work_package": "W07",
       "owner_role": "ML/数据开发",
       "report": "2026-09-30-scenario-review.md#f29",
@@ -1233,16 +1179,14 @@
       "evidence_record": "2026-09-30-evidence/scenario-results.json",
       "target_environment_validation": "not_run",
       "latest_revalidation": {
-        "date": "2026-10-03",
-        "commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
-        "assessment": "partially_resolved",
-        "upstream_status": "closed",
-        "report": "2026-10-03-revalidation.md",
+        "date": "2026-10-12",
+        "id": "F29",
+        "title": "FlexiCT颅尾分层使用最大spacing轴",
+        "assessment": "fixed_in_code_or_local_tests",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
         "target_environment_validation": "not_run",
-        "short_title": "颅尾分层轴错误",
-        "verdict": "部分解决",
-        "improvement": "标准 RAS 等体素场景不再误选最大 spacing 轴",
-        "remaining": "矩阵列/行解释错误且忽略轴翻转；相同物理目标得到 0.8 / 0.1，已独立复现"
+        "remaining": "世界SI轴及翻转修复，物理phantom相关测试改善；斜位/FOV启发式范围应说明。"
       }
     },
     {
@@ -1271,14 +1215,24 @@
       ],
       "evidence_record": "2026-10-03-revalidation.md",
       "target_environment_validation": "not_run",
-      "review_commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e"
+      "review_commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+      "latest_revalidation": {
+        "date": "2026-10-12",
+        "id": "F30",
+        "title": "批量导入回执指向临时工程",
+        "assessment": "partially_resolved",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
+        "target_environment_validation": "not_run",
+        "remaining": "最终路径receipt已修；默认源目录mask_exports/自选目录不在搜索列表，实际探针receipt_found=false。"
+      }
     },
     {
       "id": "F31",
       "title": "撤销吞删除错误并消费回执",
       "priority": "P1",
       "evidence_grade": "A+B",
-      "status": "open",
+      "status": "closed",
       "work_package": "W02",
       "owner_role": "Mimics集成/外部UI/测试，按交接工作包分工",
       "report": "2026-10-03-revalidation.md#f31",
@@ -1299,14 +1253,25 @@
       ],
       "evidence_record": "2026-10-03-revalidation.md",
       "target_environment_validation": "not_run",
-      "review_commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e"
+      "review_commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+      "latest_revalidation": {
+        "date": "2026-10-12",
+        "id": "F31",
+        "title": "撤销吞删除错误并消费回执",
+        "assessment": "fixed_in_code_or_local_tests",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
+        "target_environment_validation": "not_run",
+        "remaining": "异常传播/失败保留回执/删除前检查已有；本次API与实际移除桩修正，实机事务待验收。",
+        "this_round_fix_commit": "4e2cba4a8f10b83c05b91926b026c6d9ce36d12e"
+      }
     },
     {
       "id": "F32",
       "title": "导出Mask文件名碰撞导致内容覆盖",
       "priority": "P1",
       "evidence_grade": "A+B",
-      "status": "open",
+      "status": "closed",
       "work_package": "W03",
       "owner_role": "Mimics集成/外部UI/测试，按交接工作包分工",
       "report": "2026-10-03-revalidation.md#f32",
@@ -1327,14 +1292,25 @@
       ],
       "evidence_record": "2026-10-03-revalidation.md",
       "target_environment_validation": "not_run",
-      "review_commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e"
+      "review_commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+      "latest_revalidation": {
+        "date": "2026-10-12",
+        "id": "F32",
+        "title": "导出Mask文件名碰撞导致内容覆盖",
+        "assessment": "fixed_in_code_or_local_tests",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
+        "target_environment_validation": "not_run",
+        "remaining": "Windows命名保护已有；本次修复POSIX不区分大小写卷中Liver/liver仍覆盖；7项导出检查通过。",
+        "this_round_fix_commit": "4e2cba4a8f10b83c05b91926b026c6d9ce36d12e"
+      }
     },
     {
       "id": "F33",
       "title": "导出多Image对象却共用一份网格",
       "priority": "P1",
       "evidence_grade": "A+B",
-      "status": "open",
+      "status": "closed",
       "work_package": "W03",
       "owner_role": "Mimics集成/外部UI/测试，按交接工作包分工",
       "report": "2026-10-03-revalidation.md#f33",
@@ -1355,14 +1331,25 @@
       ],
       "evidence_record": "2026-10-03-revalidation.md",
       "target_environment_validation": "not_run",
-      "review_commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e"
+      "review_commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+      "latest_revalidation": {
+        "date": "2026-10-12",
+        "id": "F33",
+        "title": "导出多Image对象却共用一份网格",
+        "assessment": "fixed_in_code_or_local_tests",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
+        "target_environment_validation": "not_run",
+        "remaining": "混选多Image已拒绝；本次补齐仅选第二Image时仍取第一Image几何及转换误用活动Image来源的遗漏。",
+        "this_round_fix_commit": "4e2cba4a8f10b83c05b91926b026c6d9ce36d12e"
+      }
     },
     {
       "id": "F34",
       "title": "任务状态刷新按钮的bool参数导致异常",
       "priority": "P1",
       "evidence_grade": "A+B",
-      "status": "open",
+      "status": "closed",
       "work_package": "W08",
       "owner_role": "Mimics集成/外部UI/测试，按交接工作包分工",
       "report": "2026-10-03-revalidation.md#f34",
@@ -1383,14 +1370,24 @@
       ],
       "evidence_record": "2026-10-03-revalidation.md",
       "target_environment_validation": "not_run",
-      "review_commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e"
+      "review_commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+      "latest_revalidation": {
+        "date": "2026-10-12",
+        "id": "F34",
+        "title": "任务状态刷新按钮的bool参数导致异常",
+        "assessment": "fixed_in_code_or_local_tests",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
+        "target_environment_validation": "not_run",
+        "remaining": "后台刷新/显式slot/失败提示已有；真实Qt相关回归通过。"
+      }
     },
     {
       "id": "F35",
       "title": "同秒导入任务复用控制文件而串单",
       "priority": "P1",
       "evidence_grade": "A+B",
-      "status": "open",
+      "status": "closed",
       "work_package": "W06",
       "owner_role": "Mimics集成/外部UI/测试，按交接工作包分工",
       "report": "2026-10-03-revalidation.md#f35",
@@ -1411,14 +1408,24 @@
       ],
       "evidence_record": "2026-10-03-revalidation.md",
       "target_environment_validation": "not_run",
-      "review_commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e"
+      "review_commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+      "latest_revalidation": {
+        "date": "2026-10-12",
+        "id": "F35",
+        "title": "同秒导入任务复用控制文件而串单",
+        "assessment": "fixed_in_code_or_local_tests",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
+        "target_environment_validation": "not_run",
+        "remaining": "导入UUID已实现；新增批量预测入口另有F39，本次一并修复。"
+      }
     },
     {
       "id": "F36",
       "title": "系统健康窗口QSS格式化KeyError",
       "priority": "P1",
       "evidence_grade": "A+B",
-      "status": "open",
+      "status": "closed",
       "work_package": "W08",
       "owner_role": "Mimics集成/外部UI/测试，按交接工作包分工",
       "report": "2026-10-03-revalidation.md#f36",
@@ -1439,7 +1446,17 @@
       ],
       "evidence_record": "2026-10-03-revalidation.md",
       "target_environment_validation": "not_run",
-      "review_commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e"
+      "review_commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+      "latest_revalidation": {
+        "date": "2026-10-12",
+        "id": "F36",
+        "title": "系统健康窗口QSS格式化KeyError",
+        "assessment": "fixed_in_code_or_local_tests",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
+        "target_environment_validation": "not_run",
+        "remaining": "QSS格式化修复，窗口可构造；不代表模型质量或全部部署通过。"
+      }
     },
     {
       "id": "F37",
@@ -1467,7 +1484,321 @@
       ],
       "evidence_record": "2026-10-03-revalidation.md",
       "target_environment_validation": "not_run",
-      "review_commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e"
+      "review_commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
+      "latest_revalidation": {
+        "date": "2026-10-12",
+        "id": "F37",
+        "title": "最小尺寸下按钮截断和高DPI窗口适配不足",
+        "assessment": "partially_resolved",
+        "report": "2026-10-11-revalidation.md",
+        "baseline_commit": "a34805e3b6724c25353642aa40017080e9e81b7e",
+        "target_environment_validation": "not_run",
+        "remaining": "availableGeometry和AL两行动作已改善；小可用工作区/高DPI/多屏完整验收未做。"
+      }
+    },
+    {
+      "id": "F38",
+      "title": "撤销确认误用message_box",
+      "priority": "P1",
+      "evidence_grade": "A+B",
+      "status": "closed",
+      "work_package": "W02",
+      "owner_role": "按2026-10-11-workflow-handoff对应工作包分工",
+      "report": "2026-10-11-revalidation.md",
+      "source_refs": [
+        {
+          "path": "runtime_py35/import_undo_mimics.py",
+          "line": 339,
+          "function": "undo_last_import",
+          "revision": "4e2cba4a8f10b83c05b91926b026c6d9ce36d12e",
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/4e2cba4a8f10b83c05b91926b026c6d9ce36d12e/runtime_py35/import_undo_mimics.py#L339"
+        }
+      ],
+      "recommended_change": "question_box只接受明确撤销；取消零副作用。",
+      "acceptance_tests": [
+        "A04"
+      ],
+      "implementation_commit": "4e2cba4a8f10b83c05b91926b026c6d9ce36d12e",
+      "test_evidence": [
+        "tests/test_review_workflow_regressions.py"
+      ],
+      "target_environment_validation": "not_run",
+      "latest_revalidation": {
+        "date": "2026-10-12",
+        "assessment": "fixed_in_code_or_local_tests",
+        "remaining": "question_box只接受明确撤销；取消零副作用。",
+        "report": "2026-10-11-revalidation.md"
+      }
+    },
+    {
+      "id": "F39",
+      "title": "中文病例批量预测同秒任务编号碰撞",
+      "priority": "P1",
+      "evidence_grade": "A+B",
+      "status": "closed",
+      "work_package": "W06",
+      "owner_role": "按2026-10-11-workflow-handoff对应工作包分工",
+      "report": "2026-10-11-revalidation.md",
+      "source_refs": [
+        {
+          "path": "tools/nnunet_batch_predict_ui.py",
+          "line": 310,
+          "function": "_submit",
+          "revision": "4e2cba4a8f10b83c05b91926b026c6d9ce36d12e",
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/4e2cba4a8f10b83c05b91926b026c6d9ce36d12e/tools/nnunet_batch_predict_ui.py#L310"
+        }
+      ],
+      "recommended_change": "GUI/CLI使用UUID；case_id独立，不作为归一化任务ID。",
+      "acceptance_tests": [
+        "A11"
+      ],
+      "implementation_commit": "4e2cba4a8f10b83c05b91926b026c6d9ce36d12e",
+      "test_evidence": [
+        "tests/test_review_workflow_regressions.py"
+      ],
+      "target_environment_validation": "not_run",
+      "latest_revalidation": {
+        "date": "2026-10-12",
+        "assessment": "fixed_in_code_or_local_tests",
+        "remaining": "GUI/CLI使用UUID；case_id独立，不作为归一化任务ID。",
+        "report": "2026-10-11-revalidation.md"
+      }
+    },
+    {
+      "id": "F40",
+      "title": "未选择远程profile产生永久launching任务",
+      "priority": "P1",
+      "evidence_grade": "A+B",
+      "status": "closed",
+      "work_package": "W06",
+      "owner_role": "按2026-10-11-workflow-handoff对应工作包分工",
+      "report": "2026-10-11-revalidation.md",
+      "source_refs": [
+        {
+          "path": "tools/nnunet_jobs.py",
+          "line": 72,
+          "function": "create_job",
+          "revision": "4e2cba4a8f10b83c05b91926b026c6d9ce36d12e",
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/4e2cba4a8f10b83c05b91926b026c6d9ce36d12e/tools/nnunet_jobs.py#L72"
+        }
+      ],
+      "recommended_change": "前置校验在job文件创建前完成。",
+      "acceptance_tests": [
+        "A11"
+      ],
+      "implementation_commit": "4e2cba4a8f10b83c05b91926b026c6d9ce36d12e",
+      "test_evidence": [
+        "tests/test_review_workflow_regressions.py"
+      ],
+      "target_environment_validation": "not_run",
+      "latest_revalidation": {
+        "date": "2026-10-12",
+        "assessment": "fixed_in_code_or_local_tests",
+        "remaining": "前置校验在job文件创建前完成。",
+        "report": "2026-10-11-revalidation.md"
+      }
+    },
+    {
+      "id": "F41",
+      "title": "源图硬链接导致缓存自失效和共享可写数据",
+      "priority": "P1",
+      "evidence_grade": "A+B",
+      "status": "closed",
+      "work_package": "W01",
+      "owner_role": "按2026-10-11-workflow-handoff对应工作包分工",
+      "report": "2026-10-11-revalidation.md",
+      "source_refs": [
+        {
+          "path": "tools/nnunet_pipeline.py",
+          "line": 476,
+          "function": "_materialize_case",
+          "revision": "4e2cba4a8f10b83c05b91926b026c6d9ce36d12e",
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/4e2cba4a8f10b83c05b91926b026c6d9ce36d12e/tools/nnunet_pipeline.py#L476"
+        }
+      ],
+      "recommended_change": "源图入私有缓存用复制，保留严格签名与源不可变约束。",
+      "acceptance_tests": [
+        "A12"
+      ],
+      "implementation_commit": "4e2cba4a8f10b83c05b91926b026c6d9ce36d12e",
+      "test_evidence": [
+        "tests/test_nnunet_integration.py"
+      ],
+      "target_environment_validation": "not_run",
+      "latest_revalidation": {
+        "date": "2026-10-12",
+        "assessment": "fixed_in_code_or_local_tests",
+        "remaining": "源图入私有缓存用复制，保留严格签名与源不可变约束。",
+        "report": "2026-10-11-revalidation.md"
+      }
+    },
+    {
+      "id": "F42",
+      "title": "批量扫描超时后重复派发",
+      "priority": "P1",
+      "evidence_grade": "A+B",
+      "status": "closed",
+      "work_package": "W06",
+      "owner_role": "按2026-10-11-workflow-handoff对应工作包分工",
+      "report": "2026-10-11-revalidation.md",
+      "source_refs": [
+        {
+          "path": "tools/nnunet_batch_predict_ui.py",
+          "line": 272,
+          "function": "_poll_background_results",
+          "revision": "4e2cba4a8f10b83c05b91926b026c6d9ce36d12e",
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/4e2cba4a8f10b83c05b91926b026c6d9ce36d12e/tools/nnunet_batch_predict_ui.py#L272"
+        }
+      ],
+      "recommended_change": "本窗口在实际返回前锁住提交；跨窗口/扫描取消仍见WP-E。",
+      "acceptance_tests": [
+        "A11"
+      ],
+      "implementation_commit": "4e2cba4a8f10b83c05b91926b026c6d9ce36d12e",
+      "test_evidence": [
+        "tests/test_gui_smoke.py"
+      ],
+      "target_environment_validation": "not_run",
+      "latest_revalidation": {
+        "date": "2026-10-12",
+        "assessment": "fixed_in_code_or_local_tests",
+        "remaining": "本窗口在实际返回前锁住提交；跨窗口/扫描取消仍见WP-E。",
+        "report": "2026-10-11-revalidation.md"
+      }
+    },
+    {
+      "id": "F43",
+      "title": "预测直接覆盖已有结果且校验晚于最终写入",
+      "priority": "P0",
+      "evidence_grade": "A+B",
+      "status": "open",
+      "work_package": "W06",
+      "owner_role": "按2026-10-11-workflow-handoff对应工作包分工",
+      "report": "2026-10-11-revalidation.md",
+      "source_refs": [
+        {
+          "path": "tools/remote_training_controller.py",
+          "line": 2847,
+          "function": "_apply_remote_prediction_output",
+          "revision": "4e2cba4a8f10b83c05b91926b026c6d9ce36d12e",
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/4e2cba4a8f10b83c05b91926b026c6d9ce36d12e/tools/remote_training_controller.py#L2847"
+        }
+      ],
+      "recommended_change": "唯一路径写job候选并校验，默认新版本，覆盖显式动作与恢复；本地/远程共同边界。",
+      "acceptance_tests": [
+        "A01"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [
+        "2026-10-11-evidence/workflow-observations.json"
+      ],
+      "target_environment_validation": "not_run",
+      "latest_revalidation": {
+        "date": "2026-10-12",
+        "assessment": "open",
+        "remaining": "唯一路径写job候选并校验，默认新版本，覆盖显式动作与恢复；本地/远程共同边界。",
+        "report": "2026-10-11-revalidation.md"
+      }
+    },
+    {
+      "id": "F44",
+      "title": "患者组扩展后FlexiCT训练集可为空",
+      "priority": "P1",
+      "evidence_grade": "A+B",
+      "status": "open",
+      "work_package": "W07",
+      "owner_role": "按2026-10-11-workflow-handoff对应工作包分工",
+      "report": "2026-10-11-revalidation.md",
+      "source_refs": [
+        {
+          "path": "tools/flexict_pipeline.py",
+          "line": 451,
+          "function": "_split_train_val",
+          "revision": "4e2cba4a8f10b83c05b91926b026c6d9ce36d12e",
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/4e2cba4a8f10b83c05b91926b026c6d9ce36d12e/tools/flexict_pipeline.py#L451"
+        }
+      ],
+      "recommended_change": "患者组为划分单元，最终train/val非空并在预检拒绝不可能划分。",
+      "acceptance_tests": [
+        "A07"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [
+        "2026-10-11-evidence/workflow-observations.json"
+      ],
+      "target_environment_validation": "not_run",
+      "latest_revalidation": {
+        "date": "2026-10-12",
+        "assessment": "open",
+        "remaining": "患者组为划分单元，最终train/val非空并在预检拒绝不可能划分。",
+        "report": "2026-10-11-revalidation.md"
+      }
+    },
+    {
+      "id": "F45",
+      "title": "AL多写者读改写状态可能丢更新",
+      "priority": "P1",
+      "evidence_grade": "B",
+      "status": "open",
+      "work_package": "W04",
+      "owner_role": "按2026-10-11-workflow-handoff对应工作包分工",
+      "report": "2026-10-11-revalidation.md",
+      "source_refs": [
+        {
+          "path": "tools/flexict_active_learning_ui.py",
+          "line": 134,
+          "function": "set_case_state",
+          "revision": "4e2cba4a8f10b83c05b91926b026c6d9ce36d12e",
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/4e2cba4a8f10b83c05b91926b026c6d9ce36d12e/tools/flexict_active_learning_ui.py#L134"
+        }
+      ],
+      "recommended_change": "单写入口或revision+短锁，状态完成语义与持久标签版本一致。",
+      "acceptance_tests": [
+        "A09"
+      ],
+      "implementation_commit": null,
+      "test_evidence": [],
+      "target_environment_validation": "not_run",
+      "latest_revalidation": {
+        "date": "2026-10-12",
+        "assessment": "open",
+        "remaining": "单写入口或revision+短锁，状态完成语义与持久标签版本一致。",
+        "report": "2026-10-11-revalidation.md"
+      }
+    },
+    {
+      "id": "F46",
+      "title": "批量预测默认自动模态实际不校验",
+      "priority": "P2",
+      "evidence_grade": "A+B",
+      "status": "closed",
+      "work_package": "W08",
+      "owner_role": "按2026-10-11-workflow-handoff对应工作包分工",
+      "report": "2026-10-11-revalidation.md",
+      "source_refs": [
+        {
+          "path": "tools/nnunet_batch_predict_ui.py",
+          "line": 310,
+          "function": "_submit",
+          "revision": "4e2cba4a8f10b83c05b91926b026c6d9ce36d12e",
+          "url": "https://github.com/ShijianRuan/MIMICS_SCRIPTS/blob/4e2cba4a8f10b83c05b91926b026c6d9ce36d12e/tools/nnunet_batch_predict_ui.py#L310"
+        }
+      ],
+      "recommended_change": "改未指定，说明不自动识别与不校验；不可用原因提示对应实际tooltip。",
+      "acceptance_tests": [
+        "A15"
+      ],
+      "implementation_commit": "4e2cba4a8f10b83c05b91926b026c6d9ce36d12e",
+      "test_evidence": [
+        "tests/test_gui_smoke.py"
+      ],
+      "target_environment_validation": "not_run",
+      "latest_revalidation": {
+        "date": "2026-10-12",
+        "assessment": "fixed_in_code_or_local_tests",
+        "remaining": "改未指定，说明不自动识别与不校验；不可用原因提示对应实际tooltip。",
+        "report": "2026-10-11-revalidation.md"
+      }
     }
   ],
   "decision_items": [
@@ -1479,10 +1810,10 @@
     "D06",
     "D07"
   ],
-  "updated_date": "2026-10-02",
+  "updated_date": "2026-10-12",
   "update_note": "Backfilled by the downstream fix round (R65, branch al-review-loop) per development-handoff.md item 5. 'closed' means code fix landed with L1/L2 regression evidence at the listed commit; target_environment_validation remains not_run for all items pending real Windows/Mimics/GPU acceptance.",
-  "latest_revalidation_date": "2026-10-03",
-  "latest_revalidation_commit": "f02cfad4a7b030ac017e0ba30ce8f6f6911f500e",
-  "latest_revalidation_report": "2026-10-03-revalidation.md",
-  "latest_revalidation_note": "Original baseline/source refs preserved. Nine partial fixes reopened; existing implementation_commit/test_evidence fields are upstream claims, latest_revalidation records independent assessment. F30-F37 added. Historical priorities retained; current prioritization in new report (F28 recommended P0)."
+  "latest_revalidation_date": "2026-10-12",
+  "latest_revalidation_commit": "4e2cba4a8f10b83c05b91926b026c6d9ce36d12e",
+  "latest_revalidation_report": "2026-10-11-revalidation.md",
+  "latest_revalidation_note": "2026-10-11开始，2026-10-12完成。旧37项27有代码/离线依据、9部分、1决策待定；新F38–F46，6修复/3未关闭。Windows/Mimics/GPU未运行。历史正文/证据保留。"
 }

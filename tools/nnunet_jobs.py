@@ -82,6 +82,10 @@ def create_job(request: dict[str, Any]) -> dict[str, Any]:
         ),
     )
     values = normalize_request(values)
+    if values.get("execution_backend") == "remote" and not values.get("remote_profile_id"):
+        # Validate before creating status/control files. A launcher that
+        # never existed cannot reconcile a permanent "launching" job.
+        raise RuntimeError("Remote training server was not selected.")
     paths = workspace_paths(values["workspace"])
     job_dir = paths["jobs"] / safe_identifier(values["job_id"])
     if job_dir.exists():
@@ -116,8 +120,6 @@ def create_job(request: dict[str, Any]) -> dict[str, Any]:
     }
     write_json_atomic(status_path, status)
     if status["execution_backend"] == "remote":
-        if not status["remote_profile_id"]:
-            raise RuntimeError("Remote training server was not selected.")
         spec_path = job_dir / "remote_spec.json"
         write_json_atomic(
             spec_path,

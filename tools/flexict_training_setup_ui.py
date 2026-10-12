@@ -78,15 +78,15 @@ class TrainingSetupWindow:
         title = QtWidgets.QLabel("FlexiCT 训练")
         title.setObjectName("title")
         subtitle = QtWidgets.QLabel(
-            "基于 FlexiCT ViT 主干、只需少量标注病例的小样本训练（2~10 例即可）。期间 Mimics 仍可正常使用。"
+            "使用已有 CT 图像和标注训练任务模型。少样本效果取决于目标与数据，训练结果需要复核。"
         )
         subtitle.setObjectName("subtitle")
         subtitle.setWordWrap(True)
         root.addWidget(title)
         root.addWidget(subtitle)
         hint = QtWidgets.QLabel(
-            "如何选方法：标注病例多（约 30 例以上）追求全自动精度 → nnU-Net；"
-            "只有几例标注、想快速得到可用模型 → FlexiCT；边点边标、交互修正 → nnInteractive。"
+            "如何选方法：训练可重复的分割任务 → nnU-Net；"
+            "少量 CT 标注尝试任务训练 → FlexiCT；边点边标、交互修正 → nnInteractive。"
         )
         hint.setObjectName("hint")
         hint.setWordWrap(True)

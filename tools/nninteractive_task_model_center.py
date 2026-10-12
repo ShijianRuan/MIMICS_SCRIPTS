@@ -59,6 +59,7 @@ from ui_theme import (  # noqa: E402
     choose_save_file_async,
     clamp_window_to_screen,
     configure_application,
+    scroll_layout_body,
 )
 from ui_preferences import load_preferences, save_preferences  # noqa: E402
 try:
@@ -338,8 +339,8 @@ class ModelCenter:
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
         hint = QtWidgets.QLabel(
-            "如何选方法：标注病例多（约 30 例以上）追求全自动精度 → nnU-Net；"
-            "只有几例标注、想快速得到可用模型 → FlexiCT；边点边标、交互修正 → nnInteractive。"
+            "如何选方法：训练可重复的分割任务 → nnU-Net；"
+            "少量 CT 标注尝试任务训练 → FlexiCT；边点边标、交互修正 → nnInteractive。"
         )
         hint.setObjectName("hint")
         hint.setWordWrap(True)
@@ -820,6 +821,7 @@ class ModelCenter:
         actions.addWidget(self.open_log_button)
         actions.addWidget(hide)
         layout.addLayout(actions)
+        self.progress_scroll = scroll_layout_body(layout, footer_items=1)
         self._update_progress_actions({})
         return page
 
@@ -874,6 +876,7 @@ class ModelCenter:
         )
         self.model_table.verticalHeader().setVisible(False)
         self.model_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.model_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.model_table.setAlternatingRowColors(True)
         self.model_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
         self.model_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
@@ -884,11 +887,13 @@ class ModelCenter:
             5, QtWidgets.QHeaderView.Fixed
         )
         self.model_table.setColumnWidth(5, 136)
+        self.model_table.setMinimumHeight(170)
         layout.addWidget(self.model_table, 1)
         self.model_io_status = QtWidgets.QLabel("")
         self.model_io_status.setObjectName("hint")
         self.model_io_status.setWordWrap(True)
         layout.addWidget(self.model_io_status)
+        self.models_scroll = scroll_layout_body(layout, footer_items=0)
         return page
 
     def _load_context_defaults(self):
@@ -2439,7 +2444,13 @@ class ModelCenter:
             button_layout.setContentsMargins(6, 3, 6, 3)
             button_layout.addWidget(button)
             self.model_table.setCellWidget(index, 5, button_cell)
-            self.model_table.setRowHeight(index, 42)
+            for column in range(5):
+                item = self.model_table.item(index, column)
+                item.setToolTip(item.text())
+            button.ensurePolished()
+            # Shared table cells add 5px padding above/below plus a grid
+            # border; the action layout adds its own 3px margins.
+            self.model_table.setRowHeight(index, max(42, button.sizeHint().height() + 18))
 
     def _start_model_io(self, command, action):
         if self.model_io_process is not None:

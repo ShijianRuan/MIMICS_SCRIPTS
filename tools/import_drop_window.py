@@ -46,6 +46,8 @@ from ui_theme import (  # noqa: E402
     choose_existing_directory_async,
     choose_open_files_async,
     configure_application,
+    clamp_window_to_screen,
+    scroll_layout_body,
     stylesheet as shared_stylesheet,
 )
 
@@ -676,7 +678,7 @@ def run(context=None, preview_path=""):
     mask_pick_list = QtWidgets.QListWidget()
     mask_pick_list.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
     mask_pick_list.setMaximumHeight(110)
-    mask_pick_list.setToolTip("勾选要导入的 Mask；不勾选任何项则导入全部")
+    mask_pick_list.setToolTip("选择按名称导入后，请至少勾选一个 Mask。仅导入图像请使用“仅图像”。")
     mask_pick_layout.addWidget(mask_pick_list)
     mask_pick_widget.hide()
     root.addWidget(mask_pick_widget)
@@ -699,6 +701,14 @@ def run(context=None, preview_path=""):
     actions.addWidget(clear)
     actions.addWidget(submit)
     root.addLayout(actions)
+    scroll_layout_body(root, first=2, footer_items=1)
+    clamp_window_to_screen(window, (560, 480))
+    mask_named.setEnabled(False)
+
+    def show_named_masks(checked):
+        mask_pick_widget.setVisible(bool(checked and mask_pick_list.count()))
+
+    mask_named.toggled.connect(show_named_masks)
 
     state = {
         "paths": [],
@@ -714,9 +724,7 @@ def run(context=None, preview_path=""):
         state["last_activity"] = time.time()
 
     def _fill_mask_pick_list(masks):
-        # Checkable candidates for "选定的名称". All start unchecked; leaving
-        # everything unchecked falls back to "全部 Mask" semantics (the list
-        # is a narrowing device, never a trap that silently drops masks).
+        # A named selection is explicit. Empty does not mean all.
         state["discovered_mask_names"] = [str(m.get("name") or "") for m in masks]
         mask_pick_list.clear()
         for name in state["discovered_mask_names"]:
@@ -724,20 +732,19 @@ def run(context=None, preview_path=""):
             item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
             item.setCheckState(QtCore.Qt.Unchecked)
             mask_pick_list.addItem(item)
-        mask_pick_widget.show()
+        mask_named.setEnabled(bool(mask_pick_list.count()))
+        show_named_masks(mask_named.isChecked())
 
     def _picked_mask_names():
-        # None = user did not narrow anything (all/none radio, or an empty
-        # check list); a list = the exact names to import (worker's
-        # _filter_masks accepts a comma-separated string).
-        if not mask_named.isChecked() or not mask_pick_list.count():
+        # None = all/none radio; an empty named selection is rejected.
+        if not mask_named.isChecked():
             return None
         picked = []
         for index in range(mask_pick_list.count()):
             item = mask_pick_list.item(index)
             if item.checkState() == QtCore.Qt.Checked:
                 picked.append(item.text())
-        return picked or None
+        return picked
 
     def set_recognition(text, warning=False):
         recognition.setText(text)
@@ -790,6 +797,8 @@ def run(context=None, preview_path=""):
         paths = list(state["paths"])
         if kind == "batch":
             result = payload.get("batch_summary")
+            if result and result.get("mask_names"):
+                _fill_mask_pick_list([{"name": name} for name in result["mask_names"]])
             summary = result["summary"] if result else "已识别数据集文件夹。"
             warnings = result.get("warnings") or [] if result else []
             if warnings:
@@ -907,6 +916,7 @@ def run(context=None, preview_path=""):
         mask_path_widget.hide()
         mask_pick_list.clear()
         mask_pick_widget.hide()
+        mask_named.setEnabled(False)
         state["auto_masks_found"] = False
         state["discovered_mask_names"] = []
         if not paths:
@@ -1144,9 +1154,19 @@ def run(context=None, preview_path=""):
         output = os.path.abspath(os.path.expanduser(raw_output))
         mask_selection = "none" if mask_none.isChecked() else "all"
         picked = _picked_mask_names()
+        if mask_named.isChecked() and not picked:
+            QtWidgets.QMessageBox.warning(
+                window, "未选择 Mask", "请至少勾选一个 Mask；仅导入图像请切换到“仅图像”。")
+            return
+        if picked and any(
+                "," in name or name.strip().lower() in ("all", "none", "no", "off")
+                for name in picked):
+            QtWidgets.QMessageBox.warning(
+                window, "名称无法用于筛选",
+                "包含逗号或 all/none/no/off 的名称暂不支持按名称筛选。请选择“全部 Mask”，或重命名分割文件后重试。")
+            return
         if picked:
-            # "选定的名称": the worker's _filter_masks takes a comma-separated
-            # name list. An empty pick never lands here (falls back to all).
+            # The worker receives the exact checked names.
             mask_selection = ",".join(picked)
         mask_paths = []
         if kind == "single" and mask_path_widget.isVisible():
