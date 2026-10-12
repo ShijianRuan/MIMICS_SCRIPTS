@@ -262,7 +262,8 @@
     {
       "id": "UI25",
       "priority": "P2",
-      "status": "open",
+      "status": "partial_fixed_local",
+      "fixed_note": "2026-10-13 提交失败路径已修复：ui_theme.friendly_error 翻译已知英文管线错误为中文+下一步，8 处提交错误显示点接入（commit ce263f0）。运行中任务阶段错误与失败原因持久可见待后续。",
       "evidence_level": "设计缺口",
       "problem": "错误信息常混合技术术语和下一步",
       "impact": "pair/auto/任务阶段/目录错误让标注者不知道改哪里；单个 QLabel 的错误可能被下一次刷新覆盖。",
