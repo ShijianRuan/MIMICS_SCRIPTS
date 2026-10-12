@@ -189,7 +189,8 @@
     {
       "id": "UI18",
       "priority": "P1",
-      "status": "open",
+      "status": "fixed_local",
+      "fixed_note": "2026-10-12：ScribblePrompt 每轮提示对话框显示「结果写入方式：…」并新增「结果写入方式…」按钮就地切换；首次询问说明切换入口；nnInteractive 异步菜单在会话方式已定后标注当前方式。手改保护确认（R62-3 安全问题）保留不变。测试：test_result_mode_label_reflects_session_memory、test_prompt_dialog_shows_and_switches_result_mode。目标机走查待做。",
       "evidence_level": "设计缺口，来源可查",
       "problem": "结果应用方式记忆后的当前模式不易发现",
       "impact": "ScribblePrompt 的 `_SESSION_RESULT_MODE` 记忆更新/副本选择；后续用户可能忘记是覆盖还是副本。其他方法也需要一致解释。",
