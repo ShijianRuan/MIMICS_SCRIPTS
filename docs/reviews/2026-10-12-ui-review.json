@@ -148,7 +148,8 @@
     {
       "id": "UI14",
       "priority": "P1",
-      "status": "open",
+      "status": "fixed_local",
+      "fixed_note": "2026-10-12：_al_finish_conversion 应用叠加后写 viewed（已查看）而非 annotated；已标注仅由外部窗口显式确认写入；状态行分开统计已查看/已标注；旧 annotated/skipped 不降级。测试：test_overlay_marks_viewed_not_annotated、test_viewed_case_not_counted_as_annotated。目标机走查待做。",
       "evidence_level": "已确认行为 / F05",
       "problem": "主动学习叠加后会被计为已标注",
       "impact": "查看辅助带并不等于完成器官修正。进度和下一轮训练可能误用尚未确认的病例。",

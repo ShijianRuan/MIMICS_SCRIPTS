@@ -45,8 +45,11 @@ from ui_theme import (  # noqa: E402
 STATE_SCHEMA = "flexict_annotation_state.v1"
 
 # P3-5: 病例状态列对标注者显示为中文（此前是 new/annotated/skipped）。
+# UI14/F05: 叠加只把状态推进到"已查看"（viewed）——查看辅助带不等于完成
+# 标注；进入"已标注"只能通过本窗口的显式确认按钮。
 _CASE_STATE_LABELS = {
     "new": "待标注",
+    "viewed": "已查看",
     "annotated": "已标注",
     "skipped": "已跳过",
 }
@@ -783,9 +786,15 @@ class ActiveLearningWindow:
         annotated = sum(
             1 for entry in cases.values()
             if str(entry.get("state")) == "annotated")
+        viewed = sum(
+            1 for entry in cases.values()
+            if str(entry.get("state")) == "viewed")
+        # UI14: 已查看与已标注分开统计——查看辅助带不计入完成数，只有
+        # 显式确认（标记为已标注）才算。
         text = (
-            "已排序 {0} 例 · 已标注 {1} 例。双击一行可在 Mimics 中打开该病例"
-            "并叠加不确定度带。".format(len(self._rows), annotated)
+            "已排序 {0} 例 · 已查看 {1} 例 · 已标注 {2} 例。双击一行可在 Mimics "
+            "中打开该病例并叠加不确定度带。".format(
+                len(self._rows), viewed, annotated)
         )
         if self._jobs and bands_degenerate(
                 self._jobs[self.job_combo.currentIndex()]):

@@ -16095,7 +16095,7 @@ class TestFlexiCTActiveLearningApply(unittest.TestCase):
             old_new_mask = flexict_mimics.mimics_mask_apply._new_prediction_mask
             old_set = flexict_mimics.mimics_mask_apply._set_mask_from_u8
             old_mark = flexict_mimics._al_mark_request
-            old_annotated = flexict_mimics._al_mark_annotated
+            old_viewed = flexict_mimics._al_mark_viewed
             old_target = flexict_mimics._al_target_still_matches
 
             class _Mask(object):
@@ -16111,7 +16111,7 @@ class TestFlexiCTActiveLearningApply(unittest.TestCase):
                 flexict_mimics._al_mark_request = (
                     lambda path, state, detail="": marked.append((state, detail))
                 )
-                flexict_mimics._al_mark_annotated = (
+                flexict_mimics._al_mark_viewed = (
                     lambda job_dir, case_id: None
                 )
                 # F20: the target check is covered by its own tests; here it
@@ -16133,7 +16133,7 @@ class TestFlexiCTActiveLearningApply(unittest.TestCase):
                 flexict_mimics.mimics_mask_apply._new_prediction_mask = old_new_mask
                 flexict_mimics.mimics_mask_apply._set_mask_from_u8 = old_set
                 flexict_mimics._al_mark_request = old_mark
-                flexict_mimics._al_mark_annotated = old_annotated
+                flexict_mimics._al_mark_viewed = old_viewed
                 flexict_mimics._al_target_still_matches = old_target
             self.assertEqual(["Bands (Moderate)"], applied)
             self.assertEqual(1, len(marked))

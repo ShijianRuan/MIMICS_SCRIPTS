@@ -1481,12 +1481,15 @@ def _al_open_case(job_dir, case_id):
     return True, "opened {0}".format(mcs_path)
 
 
-def _al_mark_annotated(job_dir, case_id):
-    """Mark the case annotated in the review window's state file.
+def _al_mark_viewed(job_dir, case_id):
+    """Record that the case's overlay was viewed in the state file.
 
-    Same schema the external UI writes (flexict_annotation_state.v1), so
-    both writers converge on the same value regardless of who writes
-    first. Never downgrades an explicit annotated/skipped entry."""
+    UI14/F05: applying an overlay only means the annotator is *looking* at
+    the case, not that the organ was corrected and confirmed. The entry is
+    therefore "viewed", never "annotated" — only the review window's
+    explicit 标记为已标注 action writes "annotated". Same schema the external
+    UI writes (flexict_annotation_state.v1), and never downgrades an
+    explicit annotated/skipped entry."""
     path = os.path.join(job_dir, "annotation_state.json")
     payload = _read_json(path, {}) or {}
     if str(payload.get("schema_version") or "") != "flexict_annotation_state.v1":
@@ -1496,7 +1499,7 @@ def _al_mark_annotated(job_dir, case_id):
     if str(entry.get("state") or "new") != "new":
         return
     cases[case_id] = {
-        "state": "annotated",
+        "state": "viewed",
         "updated_at_epoch": time.time(),
     }
     payload["updated_at_epoch"] = time.time()
@@ -1836,10 +1839,11 @@ def _al_finish_conversion(transaction):
         _al_mark_request(
             request_path, "applied",
             "applied: {0}".format(", ".join(applied)))
-        # The overlay is on the case's image now, so the annotator can start
-        # (or has started) work on it — reflect that in the review state so
-        # the external window's Status column updates without a manual click.
-        _al_mark_annotated(job_dir, case_id)
+        # UI14/F05: viewing the overlay is not annotation. Record "viewed"
+        # so the external window's Status column updates without a manual
+        # click, but the case only enters the annotated set when the
+        # annotator explicitly confirms it there.
+        _al_mark_viewed(job_dir, case_id)
         _log(
             logging.INFO,
             "FlexiCT active-learning overlay applied for {0}: {1}.".format(

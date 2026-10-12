@@ -1821,23 +1821,34 @@ class TestActiveLearningRuntimeHandlers(unittest.TestCase):
             self.assertFalse(opened)
             self.assertIn("01 Import", detail)
 
-    def test_mark_annotated_only_upgrades_new(self):
+    def test_overlay_marks_viewed_not_annotated(self):
+        """UI14/F05: applying an overlay records 'viewed', never 'annotated'
+        — only the review window's explicit button writes 'annotated'."""
         with tempfile.TemporaryDirectory() as tmp:
             job_dir = self._geometry_job(tmp, "case01")
             module = self._import_flexict_mimics()
-            module._al_mark_annotated(str(job_dir), "case01")
+            module._al_mark_viewed(str(job_dir), "case01")
             from flexict_active_learning_ui import load_annotation_state
             state = load_annotation_state(job_dir)
             self.assertEqual(
-                state["cases"]["case01"]["state"], "annotated")
-            # an explicit skipped entry is never downgraded
-            set_case_state = __import__(
-                "flexict_active_learning_ui").set_case_state
-            set_case_state(job_dir, "case01", "skipped")
-            module._al_mark_annotated(str(job_dir), "case01")
+                state["cases"]["case01"]["state"], "viewed")
+            # an explicit annotated entry is never downgraded to viewed
+            from flexict_active_learning_ui import set_case_state
+            set_case_state(job_dir, "case02", "annotated")
+            module._al_mark_viewed(str(job_dir), "case02")
             state = load_annotation_state(job_dir)
             self.assertEqual(
-                state["cases"]["case01"]["state"], "skipped")
+                state["cases"]["case02"]["state"], "annotated")
+            # an explicit skipped entry is never downgraded either
+            set_case_state(job_dir, "case03", "skipped")
+            module._al_mark_viewed(str(job_dir), "case03")
+            state = load_annotation_state(job_dir)
+            self.assertEqual(
+                state["cases"]["case03"]["state"], "skipped")
+            # the UI label layer distinguishes viewed from annotated
+            from flexict_active_learning_ui import case_state_label
+            self.assertEqual(case_state_label("viewed"), "已查看")
+            self.assertEqual(case_state_label("annotated"), "已标注")
 
 
 class TestInferenceMonitorTerminalStates(unittest.TestCase):

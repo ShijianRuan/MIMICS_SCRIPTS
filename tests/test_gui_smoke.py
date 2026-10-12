@@ -2177,6 +2177,30 @@ class TestActiveLearningWindow(unittest.TestCase):
             finally:
                 window.window.close()
 
+    def test_viewed_case_not_counted_as_annotated(self):
+        """UI14/F05 验收：叠加（查看）后已标注数不变；状态列为"已查看"，
+        已查看与已标注在状态行分开统计。只有显式确认才计入已标注。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._window(tmp)
+            try:
+                job_dir = Path(window._job_dir)
+                from flexict_active_learning_ui import set_case_state
+                # 模拟 Mimics 侧应用叠加后的状态：viewed，非 annotated
+                set_case_state(job_dir, "caseA", "viewed")
+                set_case_state(job_dir, "caseB", "viewed")
+                window._job_selected()
+                self.assertEqual(
+                    "已查看", window.table.item(0, 4).text())
+                self.assertIn("已查看 2 例", window.status_label.text())
+                self.assertIn("已标注 0 例", window.status_label.text())
+                # 显式确认后已标注数才增加
+                set_case_state(job_dir, "caseA", "annotated")
+                window._job_selected()
+                self.assertIn("已查看 1 例", window.status_label.text())
+                self.assertIn("已标注 1 例", window.status_label.text())
+            finally:
+                window.window.close()
+
     def test_failed_request_message_survives_refresh(self):
         # F14/T14: the poll sets the outcome AFTER refreshing the table.
         with tempfile.TemporaryDirectory() as tmp:
