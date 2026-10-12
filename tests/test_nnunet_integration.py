@@ -184,6 +184,39 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(request["labels"][0]["source_mode"], "alternatives")
         self.assertEqual(request["patch_size"], [96, 128, 128])
 
+    def test_chinese_task_name_keeps_freeform_name_and_stable_id(self):
+        """UI19: 中文目标名不再被拒绝。task_name 原样保留（写入
+        dataset.json 与模型清单），task_id 自动生成为不冲突的 ASCII
+        标识；纯英文名的标识保持不变（旧工作区不受影响）。"""
+        request = common.normalize_request(
+            {
+                "operation": "train",
+                "task_name": "肝脏分割",
+                "workspace": "/tmp/nnunet-test",
+                "labels": [{"name": "Liver", "id": 1}],
+            }
+        )
+        self.assertEqual(request["task_name"], "肝脏分割")
+        self.assertTrue(request["task_id"].startswith("item_"))
+        other = common.normalize_request(
+            {
+                "operation": "train",
+                "task_name": "脾脏分割",
+                "workspace": "/tmp/nnunet-test",
+                "labels": [{"name": "Spleen", "id": 1}],
+            }
+        )
+        self.assertNotEqual(request["task_id"], other["task_id"])
+        ascii_request = common.normalize_request(
+            {
+                "operation": "train",
+                "task_name": "liver_seg",
+                "workspace": "/tmp/nnunet-test",
+                "labels": [{"name": "Liver", "id": 1}],
+            }
+        )
+        self.assertEqual(ascii_request["task_id"], "liver_seg")
+
     def test_grouped_label_preserves_union_source_mode(self):
         labels = common.normalize_labels(
             [

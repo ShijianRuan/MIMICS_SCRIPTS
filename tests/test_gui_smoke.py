@@ -1433,16 +1433,24 @@ class TestTrainingSetupPathMemory(unittest.TestCase):
 
     def test_task_name_folding_is_caught_in_ui(self):
         # R75 P1: safe_identifier folds any non-ASCII name to "item", so two
-        # Chinese task names merged into one internal task and FlexiCT label
-        # names never matched their mask files. Both wizards must block a
-        # folding name at typing time (red hint) and at submit (gate).
+        # Chinese task names merged into one internal task. UI19: the name is
+        # now free-form — the internal identifier is auto-generated
+        # losslessly, the typing-time hint shows it, and a Chinese name is
+        # no longer blocked at submit.
         _AppFixture.app()
         import nnunet_training_setup_ui as nnunet_ui
-        from nnunet_common import safe_identifier
+        from nnunet_common import safe_identifier, stable_task_identifier
 
         # Contract of the root cause: a Chinese name must fold to "item".
         self.assertEqual("item", safe_identifier("肝脏分割"))
         self.assertEqual("liver_seg", safe_identifier("liver_seg"))
+        # UI19: distinct Chinese names must get distinct stable identifiers.
+        self.assertEqual("liver_seg", stable_task_identifier("liver_seg"))
+        left = stable_task_identifier("左肾")
+        right = stable_task_identifier("右肾")
+        self.assertNotEqual(left, right)
+        self.assertTrue(left.startswith("item_"))
+        self.assertTrue(right.startswith("item_"))
 
         with tempfile.TemporaryDirectory() as name:
             tmp = Path(name)
@@ -1452,17 +1460,22 @@ class TestTrainingSetupPathMemory(unittest.TestCase):
                     {"workspace": ""}, tmp / "ctx.json", QT
                 )
                 try:
-                    # Typing-time hint appears for a folding name...
+                    # Typing-time hint shows the generated internal name...
                     window.task_edit.setText("肝脏分割")
                     self.assertFalse(window.task_name_hint.isHidden())
-                    # ...and disappears for a valid one.
+                    self.assertIn(
+                        stable_task_identifier("肝脏分割"),
+                        window.task_name_hint.text())
+                    # ...and disappears for a pure-ASCII one.
                     window.task_edit.setText("liver_seg")
                     self.assertTrue(window.task_name_hint.isHidden())
-                    # Submit gate blocks before any background work starts:
-                    # _submission_pending stays False for a blocked name.
+                    # The generated identifier carries into the request so
+                    # distinct Chinese task names never merge downstream.
                     window.task_edit.setText("肝脏分割")
-                    window._submit()
-                    self.assertFalse(window._submission_pending)
+                    self.assertEqual(
+                        stable_task_identifier("肝脏分割"),
+                        window._request()["task_id"])
+                    # An empty name is still blocked before background work.
                     window.task_edit.setText("")
                     window._submit()
                     self.assertFalse(window._submission_pending)

@@ -40,6 +40,26 @@ def safe_identifier(value: object, fallback: str = "item") -> str:
     return text[:96] or fallback
 
 
+def stable_task_identifier(value: object, fallback: str = "item") -> str:
+    """nnU-Net task_id that never collapses two distinct task names.
+
+    UI19/F22: ``safe_identifier`` folds every non-ASCII character to "_", so
+    two different Chinese target names both become "item" and silently merge
+    in the model library. nnU-Net's on-disk rules (Dataset{:03d}_<id>) still
+    require ASCII, so the identifier stays ASCII — but when the plain slug
+    is lossy (the fallback, or the original contained characters outside
+    [A-Za-z0-9_.-]), a short digest of the original name keeps distinct
+    names distinct. Pure-ASCII names keep their existing identifier, so
+    existing workspaces and models are unaffected.
+    """
+    text = str(value or "").strip()
+    slug = safe_identifier(text, fallback)
+    if not text or re.search(r"[^A-Za-z0-9_.-]", text):
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
+        slug = "{}_{}".format(slug, digest)
+    return slug
+
+
 def unique_case_keys(case_ids: list[object], fallback: str = "case") -> dict[str, str]:
     """Collision-free internal keys for case ids (F22).
 
@@ -565,7 +585,11 @@ def normalize_request(request: dict[str, Any]) -> dict[str, Any]:
     )
     if operation == "train":
         values["task_name"] = str(values.get("task_name") or "Segmentation task").strip()
-        values["task_id"] = safe_identifier(values.get("task_id") or values["task_name"])
+        # UI19: the human-facing task_name is free-form (Chinese is fine and
+        # is written to dataset.json / manifests); only the nnU-Net directory
+        # identifier is ASCII, generated losslessly via stable_task_identifier.
+        values["task_id"] = stable_task_identifier(
+            values.get("task_id") or values["task_name"])
         values["labels"] = normalize_labels(values.get("labels"))
         values["dataset_id"] = int(values.get("dataset_id") or 701)
         if not 1 <= values["dataset_id"] <= 999:

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import threading
 import time
@@ -212,23 +213,24 @@ class TrainingSetupWindow:
         )
         form.addWidget(QtWidgets.QLabel("模型任务名 *"), 0, 0)
         form.addWidget(self.task_edit, 0, 1)
-        # The internal task_id is safe_identifier(task_name): anything
-        # outside [A-Za-z0-9_.-] collapses to "_", so two different Chinese
-        # names would both fold to the same internal id "item" and silently
-        # merge in the model list. Catch it at typing time, not at submit.
+        # UI19: the human-facing task name accepts Chinese; the internal
+        # nnU-Net directory identifier is auto-generated (ASCII, digest-
+        # disambiguated) so two distinct Chinese names never merge. Show
+        # the generated identifier while typing instead of rejecting the
+        # name outright.
         self.task_name_hint = QtWidgets.QLabel("")
-        self.task_name_hint.setStyleSheet("color: #b42318; font-weight: 600;")
+        self.task_name_hint.setStyleSheet("color: #175cd3;")
+        self.task_name_hint.setWordWrap(True)
         self.task_name_hint.hide()
         form.addWidget(self.task_name_hint, 1, 0, 1, 2)
 
         def _check_task_name(text):
-            from nnunet_common import safe_identifier
-            collapsed = safe_identifier(str(text).strip())
-            if text.strip() and collapsed == "item":
+            from nnunet_common import stable_task_identifier
+            stripped = str(text).strip()
+            if stripped and re.search(r"[^A-Za-z0-9_.-]", stripped):
                 self.task_name_hint.setText(
-                    "任务名仅支持英文字母、数字、下划线、中划线和点（内部目录与"
-                    "模型按任务名命名；中文任务名会被折叠成同一个内部名称，"
-                    "多个任务会互相混在一起）。"
+                    "内部目录名（nnU-Net 要求英文）：{0}".format(
+                        stable_task_identifier(stripped))
                 )
                 self.task_name_hint.show()
             else:
@@ -889,20 +891,12 @@ class TrainingSetupWindow:
     def _submit(self):
         if self._submission_pending:
             return
-        # Gate before anything else: an empty or collapsing task name either
-        # silently becomes "Segmentation task" or folds Chinese names onto
-        # the same internal id.
+        # Gate before anything else: an empty task name silently becomes
+        # "Segmentation task". Chinese names are fine — the internal nnU-Net
+        # identifier is auto-generated losslessly (UI19).
         raw_task = self.task_edit.text().strip()
         if not raw_task:
             self._set_status("请填写模型任务名（星号为必填）。", error=True)
-            return
-        from nnunet_common import safe_identifier
-        if safe_identifier(raw_task) == "item":
-            self._set_status(
-                "任务名仅支持英文字母、数字、下划线、中划线和点；"
-                "请换一个任务名（例如 liver_segmentation）。",
-                error=True,
-            )
             return
         try:
             request = self._request()
