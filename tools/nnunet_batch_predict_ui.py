@@ -33,6 +33,7 @@ from ui_theme import (  # noqa: E402
     choose_existing_directory_async,
     configure_application,
     clamp_window_to_screen,
+    friendly_error,
     scroll_layout_body,
     stylesheet,
 )
@@ -308,8 +309,13 @@ class BatchPredictionWindow:
         self._dispatch_deadline = 0.0
         self._dispatching = False
         self.start.setEnabled(bool(self.models))
-        self.status_label.setStyleSheet("")
-        self.status_label.setText(summary)
+        if summary.startswith("错误："):
+            # A raw dispatch failure, not the success summary (UI25).
+            self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
+            self.status_label.setText(friendly_error(summary[3:]))
+        else:
+            self.status_label.setStyleSheet("")
+            self.status_label.setText(summary)
 
     def _submit(self):
         if self._dispatching:
@@ -408,7 +414,10 @@ class BatchPredictionWindow:
                         )
                     self._dispatch_results.put("\n".join(lines))
                 except Exception as exc:
-                    self._dispatch_results.put(str(exc))
+                    # Marker prefix distinguishes an error from the success
+                    # summary on the same queue (UI25: errors must render
+                    # as errors, not as a normal outcome line).
+                    self._dispatch_results.put("错误：{0}".format(exc))
 
             worker = threading.Thread(target=dispatch, name="nnunet-batch-dispatch")
             worker.daemon = True
@@ -418,7 +427,7 @@ class BatchPredictionWindow:
             self._dispatch_deadline = 0.0
             self.start.setEnabled(bool(self.models))
             self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
-            self.status_label.setText(str(exc))
+            self.status_label.setText(friendly_error(exc))
 
     def show(self):
         self.window.show()

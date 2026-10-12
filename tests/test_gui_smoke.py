@@ -2332,14 +2332,17 @@ class TestActiveLearningWindow(unittest.TestCase):
         # reach the annotator, not die on a background thread. R75 P1:
         # submit results use the single dict/str queue protocol and are
         # drained by _poll_background_results, not _poll_requests.
+        # UI25: the raw English pipeline error must be translated into the
+        # Chinese actionable message, not shown verbatim.
         with tempfile.TemporaryDirectory() as tmp:
             window = self._window(tmp)
             try:
                 window._submit_results.put(
-                    "RuntimeError: No usable FlexiCT model pair")
+                    "RuntimeError: No usable FlexiCT model pair was found.")
                 window._poll_background_results()
-                self.assertIn("No usable FlexiCT model pair",
+                self.assertIn("未找到可用的 2D+3D 模型对",
                               window.pair_label.text())
+                self.assertIn("2D + 3D 成对模型", window.pair_label.text())
                 self.assertTrue(window.start_run_button.isEnabled())
             finally:
                 window.window.close()

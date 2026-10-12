@@ -118,6 +118,37 @@ class TestThemePaletteIntegrity(unittest.TestCase):
                 failures.append("{0}: {1:.2f}:1".format(name, ratio))
         self.assertFalse(failures, "WCAG AA (<4.5:1): " + "; ".join(failures))
 
+    def test_friendly_error_maps_known_pipeline_errors(self):
+        # UI25: the pipeline layers raise English technical errors; the
+        # annotator-facing windows must translate them into Chinese + a
+        # next step instead of showing them verbatim.
+        known = {
+            "Remote training server was not selected.": "未选择远程训练服务器",
+            "RuntimeError: No usable FlexiCT model pair was found. Train with "
+            "configuration 'pair' (or 'auto' on a >=16GB GPU) first":
+                "未找到可用的 2D+3D 模型对",
+            "Active learning needs both a 2D and a 3D model; only one "
+            "manifest was provided.": "需要同时提供 2D 和 3D",
+            "FlexiCT job already exists: /some/dir": "任务目录已存在",
+        }
+        for raw, expected in known.items():
+            text = ui_theme.friendly_error(raw)
+            self.assertIn(expected, text, raw)
+            self.assertIn("请", text, "an actionable next step is required")
+        # A pure-English unknown error still gets a Chinese frame so it
+        # reads as an error, and the detail is preserved for support.
+        unknown = ui_theme.friendly_error("SomeUnexpectedThing happened")
+        self.assertIn("操作失败", unknown)
+        self.assertIn("SomeUnexpectedThing happened", unknown)
+        # Chinese errors pass through unchanged (they are already written
+        # for the annotator).
+        self.assertEqual(
+            "请先选择未标注数据池文件夹。",
+            ui_theme.friendly_error("请先选择未标注数据池文件夹。"))
+        # Empty never renders as blank.
+        self.assertIn("错误", ui_theme.friendly_error(""))
+        self.assertIn("错误", ui_theme.friendly_error(None))
+
 
 class TestOffscreenRenderQuality(unittest.TestCase):
     """Widgets must actually rasterize text, CJK included — offscreen."""

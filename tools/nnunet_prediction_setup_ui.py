@@ -28,7 +28,7 @@ from nnunet_common import (  # noqa: E402
 )
 from nnunet_jobs import create_job  # noqa: E402
 from remote_compute_ui import RemoteComputeSelector  # noqa: E402
-from ui_theme import clamp_window_to_screen, configure_application, scroll_layout_body, stylesheet  # noqa: E402
+from ui_theme import clamp_window_to_screen, configure_application, friendly_error, scroll_layout_body, stylesheet  # noqa: E402
 
 
 def _matches_context(model, context):
@@ -270,7 +270,7 @@ class PredictionWindow:
         if error:
             self.start.setEnabled(bool(self.models))
             self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
-            self.status_label.setText(error)
+            self.status_label.setText(friendly_error(error))
             return
         self._create_prediction_job(request)
 
@@ -349,7 +349,7 @@ class PredictionWindow:
         except Exception as exc:
             self.start.setEnabled(bool(self.models))
             self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
-            self.status_label.setText(str(exc))
+            self.status_label.setText(friendly_error(exc))
 
     def _create_prediction_job(self, request):
         try:
@@ -392,7 +392,7 @@ class PredictionWindow:
         except Exception as exc:
             self.start.setEnabled(bool(self.models))
             self.status_label.setStyleSheet("color: #b42318; font-weight: 600;")
-            self.status_label.setText(str(exc))
+            self.status_label.setText(friendly_error(exc))
 
     def _close_event(self, event):
         self._submission_generation += 1

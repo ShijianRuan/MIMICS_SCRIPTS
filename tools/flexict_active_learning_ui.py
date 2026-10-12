@@ -37,6 +37,7 @@ from ui_theme import (  # noqa: E402
     choose_save_file_async,
     clamp_window_to_screen,
     configure_application,
+    friendly_error,
     scroll_layout_body,
     stylesheet,
 )
@@ -504,7 +505,7 @@ class ActiveLearningWindow:
         if isinstance(payload, str):
             self.start_run_button.setEnabled(True)
             self.pair_label.setStyleSheet("color: #b42318; font-weight: 600;")
-            self.pair_label.setText(payload)
+            self.pair_label.setText(friendly_error(payload))
             return
         job = payload
         self.start_run_button.setEnabled(True)
@@ -561,7 +562,7 @@ class ActiveLearningWindow:
         except Exception as exc:
             self.start_run_button.setEnabled(True)
             self.pair_label.setStyleSheet("color: #b42318; font-weight: 600;")
-            self.pair_label.setText(str(exc))
+            self.pair_label.setText(friendly_error(exc))
 
     # -- new ranking (F04) ----------------------------------------------------
 

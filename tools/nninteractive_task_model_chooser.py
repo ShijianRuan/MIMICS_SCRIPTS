@@ -27,7 +27,7 @@ from nninteractive_task_common import (  # noqa: E402
     task_rows,
     write_json_atomic,
 )
-from ui_theme import clamp_window_to_screen, configure_application  # noqa: E402
+from ui_theme import clamp_window_to_screen, configure_application, friendly_error  # noqa: E402
 
 
 TITLE = "选择 nnInteractive 自定义模型"
@@ -195,7 +195,7 @@ class Chooser:
                 verify_checksum=False,
             )
         except Exception as exc:
-            self.summary.setText(str(exc))
+            self.summary.setText(friendly_error(exc))
             return
         write_json_atomic(
             self.status_path,

@@ -74,6 +74,42 @@ _prepare_windows_dpi_awareness()
 _prepare_qt_high_dpi_policy()
 
 
+# UI25: pipeline layers raise English technical errors (ValueError/
+# RuntimeError from create_job / create_flexict_job / model discovery).
+# Annotators see those raw strings on status labels. Map the known ones to
+# Chinese + an actionable next step; anything else passes through with a
+# short generic prefix so it at least reads as an error, not as state.
+_ERROR_TRANSLATIONS = (
+    ("Remote training server was not selected.",
+     "未选择远程训练服务器。请展开「计算位置」选择服务器，或改为本机运行。"),
+    ("No usable FlexiCT model pair was found",
+     "未找到可用的 2D+3D 模型对。请先在 FlexiCT 训练窗口选择"
+     "「2D + 3D 成对模型（主动学习用）」完成训练，再启动排序。"),
+    ("Active learning needs both a 2D and a 3D model",
+     "主动学习需要同时提供 2D 和 3D 两个模型。请重新训练一对模型。"),
+    ("must reference a",
+     "所选模型清单与要求的模型类型不符。请在模型列表中重新选择。"),
+    ("Selected FlexiCT model is missing or invalid",
+     "所选 FlexiCT 模型缺失或已失效。请在预测窗口重新选择模型。"),
+    ("job already exists",
+     "任务目录已存在同名任务，可能刚才已提交。请稍后刷新状态窗口确认。"),
+)
+
+
+def friendly_error(value: object) -> str:
+    """Return an annotator-readable error string for a raw exception."""
+    text = str(value or "").strip()
+    for needle, message in _ERROR_TRANSLATIONS:
+        if needle.lower() in text.lower():
+            return message
+    if not text:
+        return "发生未知错误。请重试；如持续失败请查看日志或联系管理员。"
+    if not any(0x4E00 <= ord(ch) <= 0x9FFF for ch in text):
+        # Pure-English technical error the annotator cannot act on.
+        return "操作失败：{0}。请检查输入后重试；如持续失败请查看日志。".format(text)
+    return text
+
+
 def _dialog_start_path(value, expect_directory=True):
     """Return a starting location without touching a slow or offline volume."""
     text = os.path.expandvars(os.path.expanduser(str(value or "").strip()))
