@@ -1,0 +1,189 @@
+{
+  "date": "2026-10-12",
+  "source_commit": "5d8a811a82cdd4934c1e6671a50a2f74bd6ee0c9",
+  "baseline_commit": "a8c8ea67ab0c65eec66d0268e9f61ec6617bcc24",
+  "scope": {
+    "main_ui_modules": 20,
+    "secondary_windows": [
+      "remote dataset cache"
+    ],
+    "entry_scripts": 28,
+    "control_declarations": 246,
+    "signal_bindings": 196
+  },
+  "fixed_issues": 15,
+  "open_cards": 20,
+  "environment": {
+    "os": "macOS",
+    "python": "3.12.14",
+    "qt": "6.12.0",
+    "platform": "offscreen",
+    "screen_logical_pixels": [
+      [
+        1000,
+        760
+      ],
+      [
+        853,
+        440
+      ]
+    ],
+    "font_stress": "125% applied before constructing controls"
+  },
+  "renders": {
+    "before": {
+      "states": 146,
+      "errors": [
+        {
+          "name": "populated-states",
+          "error": "name 'QtWidgets' is not defined",
+          "traceback": "Traceback (most recent call last):\n  File \"<repo>/docs/reviews/2026-10-12-ui-evidence/render_ui_audit.py\", line 169, in <module>\n    flex_prediction._apply_models([dict(rows[0],task_name='肝脏',label_names=['Liver'],configuration='2d')],'')\n  File \"/private<baseline>/tools/flexict_prediction_setup_ui.py\", line 179, in _apply_models\n    item = QtWidgets.QTableWidgetItem(str(value or \"\"))\n           ^^^^^^^^^\nNameError: name 'QtWidgets' is not defined. Did you mean: 'self.QtWidgets'?\n"
+        }
+      ],
+      "text_clipping": [
+        {
+          "name": "nnunet-training-normal",
+          "buttons": [],
+          "combos": [
+            "匹配其一"
+          ]
+        },
+        {
+          "name": "nnunet-training-normal-tab0-0",
+          "buttons": [],
+          "combos": [
+            "匹配其一"
+          ]
+        },
+        {
+          "name": "nnunet-training-small-tab0-0",
+          "buttons": [],
+          "combos": [
+            "匹配其一"
+          ]
+        },
+        {
+          "name": "nnunet-training-expanded-small-tab0",
+          "buttons": [],
+          "combos": [
+            "匹配其一"
+          ]
+        },
+        {
+          "name": "remote-server-small",
+          "buttons": [
+            "在本机安全地记住密码",
+            "复用未变化的已上传训练数据"
+          ],
+          "combos": []
+        },
+        {
+          "name": "remote-server-bottom-small",
+          "buttons": [
+            "在本机安全地记住密码",
+            "复用未变化的已上传训练数据"
+          ],
+          "combos": []
+        },
+        {
+          "name": "export-small",
+          "buttons": [
+            "全部 Mask",
+            "选定的名称",
+            "跳过已存在",
+            "覆盖已存在",
+            "NIfTI (.nii.gz)",
+            "NRRD (.nrrd)",
+            "MHA (.mha)"
+          ],
+          "combos": []
+        },
+        {
+          "name": "export-bottom-small",
+          "buttons": [
+            "全部 Mask",
+            "选定的名称",
+            "跳过已存在",
+            "覆盖已存在",
+            "NIfTI (.nii.gz)",
+            "NRRD (.nrrd)",
+            "MHA (.mha)"
+          ],
+          "combos": []
+        }
+      ]
+    },
+    "after": {
+      "states": 150,
+      "errors": [],
+      "text_clipping": []
+    },
+    "font125": {
+      "states": 150,
+      "errors": [],
+      "text_clipping": []
+    }
+  },
+  "tests": [
+    {
+      "suite": "test_ui_workflow_regressions",
+      "pass": 18,
+      "fail": 0
+    },
+    {
+      "suite": "test_gui_smoke",
+      "pass": 80,
+      "fail": 0
+    },
+    {
+      "suite": "test_remote_training",
+      "pass": 134,
+      "fail": 0
+    },
+    {
+      "suite": "test_ui_quality",
+      "pass": 4,
+      "fail": 0
+    },
+    {
+      "suite": "TestNNInteractiveTaskDiagnostics",
+      "pass": 7,
+      "fail": 0
+    },
+    {
+      "suite": "TestTrainingSetupPathMemory after final row change",
+      "pass": 16,
+      "fail": 0
+    },
+    {
+      "suite": "TestScriptingLibraryEntries + TestImportDropWindow + TestEnvGuidance (initial UI changes)",
+      "pass": 56,
+      "fail": 1,
+      "note": "POSIX migration fixture; same test fails on baseline; implementation is restricted to Windows drive/UNC paths."
+    }
+  ],
+  "limits": [
+    "No real Mimics/Windows native dialog acceptance",
+    "No GPU inference/training/SSH executed",
+    "Static bindings are not full callback end-to-end tests",
+    "Compact geometry below 853x440 not verified",
+    "No full Torch-dependent repository suite"
+  ],
+  "selected_screenshots": [
+    "before-remote-small.png",
+    "after-remote-small.png",
+    "before-export-small.png",
+    "after-export-small.png",
+    "before-training-data.png",
+    "after-training-data.png",
+    "before-interactive-progress.png",
+    "after-interactive-progress.png",
+    "after-active-learning-small.png",
+    "after-active-learning-create.png",
+    "after-model-manager-selected.png",
+    "after-remote-expanded.png",
+    "after-model-action-font125.png",
+    "after-flexict-predict-selected.png",
+    "after-remote-cache.png"
+  ]
+}

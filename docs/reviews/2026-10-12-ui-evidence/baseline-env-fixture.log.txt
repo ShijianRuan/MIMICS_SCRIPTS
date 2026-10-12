@@ -1,0 +1,21 @@
+test_moved_checkout_detected_with_old_root (__main__.TestEnvGuidance.test_moved_checkout_detected_with_old_root) ... FAIL
+
+======================================================================
+FAIL: test_moved_checkout_detected_with_old_root (__main__.TestEnvGuidance.test_moved_checkout_detected_with_old_root)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/private<baseline>/tests/test_all.py", line 13828, in test_moved_checkout_detected_with_old_root
+    self.assertEqual(old_root, detected)
+AssertionError: '<temporary-test-state>/oldmachine/MIMICS_SCRIPTS' != ''
+- <temporary-test-state>/oldmachine/MIMICS_SCRIPTS
+
+
+----------------------------------------------------------------------
+Ran 1 test in 0.011s
+
+FAILED (failures=1)
+Mimics-Script Comprehensive Tests
+============================================================
+Python: 3.12.14 (main, Aug 25 2026, 13:50:33) [Clang 22.1.3 ]
+Project: /private<baseline>
+============================================================
