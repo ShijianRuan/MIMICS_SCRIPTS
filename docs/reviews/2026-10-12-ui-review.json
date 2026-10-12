@@ -304,7 +304,8 @@
     {
       "id": "UI29",
       "priority": "P2",
-      "status": "open",
+      "status": "fixed_local",
+      "fixed_note": "2026-10-13 折叠标题显示非默认项数、计算位置提示行列出具体项（commit d06be40，test_remote_advanced_fold_summarizes_non_defaults）。",
       "evidence_level": "设计缺口",
       "problem": "隐藏高级参数后缺少非默认摘要",
       "impact": "已保存服务器的命名空间、校验或缓存策略可能与默认不同；折叠不能让这些变化变得不可知。",
