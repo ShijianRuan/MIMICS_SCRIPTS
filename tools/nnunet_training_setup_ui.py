@@ -667,7 +667,7 @@ class TrainingSetupWindow:
         item = QtWidgets.QTableWidgetItem()
         item.setSizeHint(self.QtCore.QSize(mode.sizeHint().width() + 20, mode.sizeHint().height() + 8))
         self.label_table.setItem(row, 3, item)
-        self.label_table.setRowHeight(row, max(42, mode.sizeHint().height() + 8, spin.sizeHint().height() + 8))
+        self.label_table.setRowHeight(row, max(42, mode.sizeHint().height() + 12, spin.sizeHint().height() + 12))
 
     def _remove_label_rows(self):
         selected = sorted({index.row() for index in self.label_table.selectedIndexes()}, reverse=True)

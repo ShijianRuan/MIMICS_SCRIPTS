@@ -2448,7 +2448,9 @@ class ModelCenter:
                 item = self.model_table.item(index, column)
                 item.setToolTip(item.text())
             button.ensurePolished()
-            self.model_table.setRowHeight(index, max(42, button.sizeHint().height() + 6))
+            # Shared table cells add 5px padding above/below plus a grid
+            # border; the action layout adds its own 3px margins.
+            self.model_table.setRowHeight(index, max(42, button.sizeHint().height() + 18))
 
     def _start_model_io(self, command, action):
         if self.model_io_process is not None:
