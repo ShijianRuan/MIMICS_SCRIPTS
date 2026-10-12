@@ -12677,6 +12677,61 @@ class TestImportReceiptAndUndo(unittest.TestCase):
         self.assertIsNone(path)
         self.assertIsNone(payload)
 
+    def test_receipt_search_covers_drop_import_output_dirs(self):
+        # UI28: a drop-window import into a CUSTOM output folder writes its
+        # receipt next to that folder's .mcs; the undo search must find it
+        # via the drop-import status files, not only the configured root.
+        import import_undo_mimics
+
+        custom_out = os.path.join(self.tmp, "custom_out")
+        os.makedirs(custom_out)
+        payload = {
+            "schema_version": "mimics_import_receipt.v1",
+            "case_id": "s0009",
+            "mcs_path": os.path.join(custom_out, "s0009.mcs"),
+            "mcs_fingerprint": "sha256:x",
+            "created_masks": ["Liver"],
+            "metadata_keys": [],
+            "source_fingerprint": "",
+            "source_image_path": "",
+            "source_case_dir": "",
+            "created_at_epoch": 500.0,
+        }
+        with open(os.path.join(custom_out, ".s0009.import_receipt.json"),
+                  "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+        # Simulate the drop window's status file recording the custom output.
+        drop_dir = os.path.join(self.tmp, ".mimics_runtime", "drop_import")
+        os.makedirs(drop_dir)
+        with open(os.path.join(drop_dir, "20260101T000000_abcd_0_status.json"),
+                  "w", encoding="utf-8") as handle:
+            json.dump({"status": "completed", "output_path": custom_out,
+                       "updated_at_epoch": 500.0}, handle)
+        with mock.patch.object(import_undo_mimics, "_project_root",
+                               lambda: self.tmp):
+            path, found = import_undo_mimics.find_latest_receipt()
+        self.assertTrue(path.endswith(".s0009.import_receipt.json"))
+        self.assertEqual("s0009", found["case_id"])
+
+    def test_recent_drop_output_dirs_skips_missing_folders(self):
+        # Failure path: a status file pointing at an unmounted network share
+        # must be skipped, not crash the undo search.
+        import import_undo_mimics
+
+        drop_dir = os.path.join(self.tmp, ".mimics_runtime", "drop_import")
+        os.makedirs(drop_dir)
+        with open(os.path.join(drop_dir, "20260101T000000_abcd_0_status.json"),
+                  "w", encoding="utf-8") as handle:
+            json.dump({"status": "completed",
+                       "output_path": os.path.join(self.tmp, "gone"),
+                       "updated_at_epoch": 500.0}, handle)
+        with open(os.path.join(drop_dir, "not_status.json"), "w") as handle:
+            handle.write("{}")
+        with mock.patch.object(import_undo_mimics, "_project_root",
+                               lambda: self.tmp):
+            dirs = import_undo_mimics._recent_drop_output_dirs()
+        self.assertEqual([], dirs)
+
     def _install_undo_env(self, mcs_path, masks_alive):
         """Patch the undo module's Mimics surface and receipt discovery.
 

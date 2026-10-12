@@ -61,7 +61,40 @@ def _candidate_receipt_dirs():
     legacy = os.path.join(_project_root(), "mcs_output")
     if os.path.isdir(legacy):
         dirs.append(legacy)
+    # UI28: the drop window lets imports target any output folder. The
+    # worker's status file records it, so the receipt written next to that
+    # import's .mcs stays discoverable by undo. Most recent first.
+    for extra in _recent_drop_output_dirs():
+        if extra not in dirs:
+            dirs.append(extra)
     return dirs
+
+
+def _recent_drop_output_dirs(limit=5):
+    """Output folders used by recent drop imports (newest first)."""
+    # Same fixed path the drop window writes to (import_drop_window.py
+    # submit_import): project .mimics_runtime/drop_import, no env override.
+    status_dir = os.path.join(_project_root(), ".mimics_runtime", "drop_import")
+    entries = []
+    try:
+        for name in os.listdir(status_dir):
+            if not name.endswith("_status.json"):
+                continue
+            path = os.path.join(status_dir, name)
+            try:
+                with open(path, "r") as handle:
+                    payload = json.load(handle)
+                output = str(payload.get("output_path") or "").strip()
+                if output and os.path.isdir(output):
+                    entries.append(
+                        (float(payload.get("updated_at_epoch") or 0.0), output)
+                    )
+            except Exception:
+                continue
+    except OSError:
+        return []
+    entries.sort(key=lambda item: item[0], reverse=True)
+    return [output for _ts, output in entries[:limit]]
 
 
 def find_latest_receipt():
@@ -342,8 +375,15 @@ def undo_last_import(confirm=True):
     """Entry point. Returns 0 on success, non-zero on failure or cancel."""
     receipt_path, receipt = find_latest_receipt()
     if not receipt:
+        # UI28: name the places that were searched so a receipt that sits
+        # next to a manually chosen output folder is findable, not a dead end.
+        searched = "、".join(_candidate_receipt_dirs()) or "（无）"
         mimics.dialogs.message_box(
-            "未找到导入回执。每次导入完成时，回执会写在生成的 .mcs 文件旁边。",
+            "未找到导入回执。\n\n"
+            "每次导入完成时，回执会写在生成的 .mcs 文件旁边。\n"
+            "已搜索：{0}\n\n"
+            "如果导入时使用的是其他输出文件夹，请到该文件夹下查找 "
+            "<病例名>.import_receipt.json。".format(searched),
             title="撤销上次导入",
             ui_blocking=False,
         )

@@ -473,6 +473,10 @@ def submit_import(selection, context):
             write_json(status_path, {
                 "status": "running", "phase": "starting_worker",
                 "total": 1, "completed": 0, "failed": 0,
+                # UI28: undo's receipt search scans the drop-import status
+                # files for output folders — without this, a custom output
+                # dir's import receipt is undiscoverable.
+                "output_path": selection["output_path"],
                 "updated_at_epoch": time.time(),
             })
             try:
