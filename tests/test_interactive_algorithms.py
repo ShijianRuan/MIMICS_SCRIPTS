@@ -554,6 +554,51 @@ class MimicsRuntimeTests(unittest.TestCase):
         self.runtime._SESSION_PROMPT_SIGN = False
         self.assertFalse(self.runtime._current_prompt_sign())
 
+    def test_result_mode_label_reflects_session_memory(self):
+        # UI18: a remembered result destination must be visible — the label
+        # distinguishes unset / in_place / copy, and the switch dialog can
+        # change the session memory without a Mimics restart.
+        try:
+            self.assertEqual(self.runtime._result_mode_label(), "每轮询问")
+            self.runtime._SESSION_RESULT_MODE = "in_place"
+            self.assertEqual(self.runtime._result_mode_label(), "更新匹配掩膜")
+            self.runtime._SESSION_RESULT_MODE = "copy"
+            self.assertEqual(self.runtime._result_mode_label(), "创建可编辑副本")
+        finally:
+            self.runtime._SESSION_RESULT_MODE = None
+
+    def test_prompt_dialog_shows_and_switches_result_mode(self):
+        # UI18 验收：第二轮能看清当前方式并就地切换。进入提示收集循环，
+        # 选择「结果写入方式…」→ 切到可编辑副本 → 取消退出。
+        self.runtime._SESSION_RESULT_MODE = "in_place"
+        self.fake.dialogs.questions = []
+        # 循环顺序：主对话框（结果写入方式…）→ 切换对话框（创建可编辑副本）
+        # → 主对话框（取消）
+        self.fake.dialogs.question_answers = [
+            "结果写入方式…", "创建可编辑副本", "取消"]
+        image = FakeImage(_u8_pattern_buffer((2, 3, 4), lambda x, y, z: False))
+        self.fake.data.images.append(image)
+        self.fake.data.images.set_active(image)
+        mask = FakeMask("Target", image=image, selected=True)
+        self.fake.data.masks.append(mask)
+        try:
+            result = self.runtime._collect_scribbleprompt_prompts(
+                image, mask, tempfile.mkdtemp(), [])
+            self.assertIsNone(result)
+            # 主对话框第一轮必须显示当前方式
+            self.assertIn(
+                "结果写入方式：更新匹配掩膜",
+                self.fake.dialogs.questions[0]["message"])
+            self.assertIn(
+                "结果写入方式…", self.fake.dialogs.questions[0]["buttons"])
+            # 切换对话框显示旧方式并记录新方式
+            self.assertIn(
+                "当前方式：更新匹配掩膜",
+                self.fake.dialogs.questions[1]["message"])
+            self.assertEqual(self.runtime._SESSION_RESULT_MODE, "copy")
+        finally:
+            self.runtime._SESSION_RESULT_MODE = None
+
 
 if __name__ == "__main__":
     unittest.main()

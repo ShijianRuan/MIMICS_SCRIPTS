@@ -2764,6 +2764,13 @@ def _async_prompt_menu(target, state, source=None, profile=None):
         "（该选择将在本次 Mimics 会话中记住）；后续"
         "结果将自动应用。"
         if state and state.get("write_mode") == "choose_on_first_result"
+        # UI18: a remembered session choice must be visible, not silent.
+        else "结果就绪后将自动应用（当前方式：{0}）。".format(
+            "更新所选掩膜"
+            if _SESSION_WRITE_MODE in (None, "in_place")
+            else "创建可编辑副本"
+        )
+        if _SESSION_WRITE_MODE is not None
         else "结果就绪后将自动应用。"
     )
     return mimics.dialogs.question_box(

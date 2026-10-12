@@ -628,6 +628,8 @@ def _collect_scribbleprompt_prompts(image, target, job_dir, visual_objects):
             if _current_prompt_sign()
             else "改用前景提示"
         )
+        # UI18: 会话内记忆的结果写入方式每轮可见、就地可改，不叠加弹窗。
+        buttons.append("结果写入方式…")
         if can_run:
             buttons.append("执行 ScribblePrompt")
         buttons.append("取消")
@@ -641,7 +643,8 @@ def _collect_scribbleprompt_prompts(image, target, job_dir, visual_objects):
                 "请仅在此对话框显示时切换工具。\n\n"
                 "点击：{0}    涂鸦：{1}    框：{2}\n"
                 "前景提示：{3}    背景提示：{4}\n"
-                "下一个提示符号：{5}（用下方按钮切换）"
+                "下一个提示符号：{5}（用下方按钮切换）\n"
+                "结果写入方式：{6}（用「结果写入方式…」按钮更改）"
             ).format(
                 len(clicks),
                 len(scribbles),
@@ -649,10 +652,31 @@ def _collect_scribbleprompt_prompts(image, target, job_dir, visual_objects):
                 len([item for item in records if item["kind"] == "box" or item["value"].get("include")]),
                 len([item for item in records if item["kind"] != "box" and not item["value"].get("include")]),
                 "Foreground" if _current_prompt_sign() else "Background",
+                _result_mode_label(),
             ),
             buttons=";".join(buttons),
             ui_blocking=True,
         )
+        if answer == "结果写入方式…":
+            # UI18: remembered destination must stay changeable without
+            # restarting the flow; the mode is session-level by design.
+            global _SESSION_RESULT_MODE
+            answer = mimics.dialogs.question_box(
+                title="ScribblePrompt 结果写入方式",
+                message=(
+                    "当前方式：{0}\n\n"
+                    "更新匹配掩膜 会将结果应用到所选掩膜。\n"
+                    "创建可编辑副本 会保留它，并新建一个可编辑的掩膜。\n\n"
+                    "该选择在本次 Mimics 会话中保持，"
+                    "每轮提示对话框中都会显示。"
+                ).format(_result_mode_label()),
+                buttons="更新匹配掩膜;创建可编辑副本;取消",
+                ui_blocking=True,
+            )
+            if answer in ("更新匹配掩膜", "创建可编辑副本"):
+                _SESSION_RESULT_MODE = (
+                    "in_place" if answer == "更新匹配掩膜" else "copy")
+            continue
         if answer in ("改用前景提示", "改用背景提示"):
             global _SESSION_PROMPT_SIGN
             _SESSION_PROMPT_SIGN = answer == "改用前景提示"
@@ -981,7 +1005,20 @@ def _create_copy(image, name):
 # ready dialog popping after every round with the same three buttons is a
 # modal storm. The first answer sticks for the Mimics session; the
 # changed-mask safety question (a data-risk path) always stays.
+# UI18: the prompt dialog shows the current mode every round and carries a
+# switch button, so a remembered choice is never invisible.
 _SESSION_RESULT_MODE = None
+
+
+_RESULT_MODE_LABELS = {
+    "in_place": "更新匹配掩膜",
+    "copy": "创建可编辑副本",
+}
+
+
+def _result_mode_label():
+    """Current result destination shown in the prompt dialog (UI18)."""
+    return _RESULT_MODE_LABELS.get(_SESSION_RESULT_MODE, "每轮询问")
 
 
 def _choose_result_target(monitor, result):
@@ -1015,7 +1052,9 @@ def _choose_result_target(monitor, result):
                 "{0} 在 {1} 秒内完成。\n\n"
                 "更新匹配掩膜 会将结果应用到 {2}。\n"
                 "创建可编辑副本 会保留它，并新建一个可编辑的掩膜。\n\n"
-                "该选择将在本次 Mimics 会话中记住。"
+                "该选择将在本次 Mimics 会话中记住；"
+                "之后每轮的提示对话框都会显示当前方式，"
+                "并可用「结果写入方式…」按钮更改。"
             ).format(
                 display,
                 result.get("elapsed_seconds", "?"),
