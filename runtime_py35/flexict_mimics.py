@@ -1809,14 +1809,23 @@ def _al_finish_conversion(transaction):
         except Exception as exc:
             # F02 rollback: no half-applied overlay, no leftover empty
             # masks from this transaction.
+            rollback_errors = []
             for mask in created:
                 try:
-                    mask.delete()
-                except Exception:
-                    pass
+                    mimics.data.masks.delete(mask)
+                except Exception as rollback_exc:
+                    rollback_errors.append("{0}: {1}".format(
+                        str(getattr(mask, "name", "") or "(unnamed)"),
+                        rollback_exc))
+            detail = "overlay apply failed and was rolled back: {0}".format(exc)
+            if rollback_errors:
+                detail = (
+                    "Overlay apply failed: {0}. Rollback incomplete; "
+                    "remove the remaining overlay masks manually: {1}"
+                ).format(exc, "; ".join(rollback_errors))
             _al_mark_request(
                 request_path, "failed",
-                "overlay apply failed and was rolled back: {0}".format(exc),
+                detail,
             )
             _log(
                 logging.ERROR,

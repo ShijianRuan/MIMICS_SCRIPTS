@@ -180,10 +180,7 @@ def _resolve_owned_masks(receipt):
     """
     entries = receipt.get("created_masks_v2") or []
     token = str(receipt.get("provenance_token") or "")
-    all_masks = []
-    for image in list(mimics.data.images):
-        for mask in list(image.masks):
-            all_masks.append(mask)
+    all_masks = list(mimics.data.masks)
 
     matches = {}
     ambiguous = []
@@ -219,11 +216,7 @@ def _delete_masks(mask_names):
     as ambiguous and nothing is deleted - the user resolves it by hand.
     """
 
-    images = list(mimics.data.images)
-    live = []
-    for image in images:
-        for mask in list(image.masks):
-            live.append(mask)
+    live = list(mimics.data.masks)
     ambiguous = []
     for name in mask_names:
         holders = [
@@ -239,8 +232,9 @@ def _delete_masks(mask_names):
         deleted = []
         for mask in live:
             if str(getattr(mask, "name", "") or "") in mask_names:
-                mask.delete()
-                deleted.append(mask.name)
+                name = str(mask.name)
+                mimics.data.masks.delete(mask)
+                deleted.append(name)
         return deleted
 
     deleted = runtime_common.execute_mimics_transaction(
@@ -269,7 +263,7 @@ def _delete_owned_masks(receipt):
         for index in sorted(matches):
             mask = matches[index]
             name = str(getattr(mask, "name", "") or "")
-            mask.delete()
+            mimics.data.masks.delete(mask)
             deleted.append(name)
         return deleted
 
@@ -286,11 +280,7 @@ def _session_diverged(receipt):
     """
     entries = receipt.get("created_masks_v2")
     token = str(receipt.get("provenance_token") or "")
-    images = list(mimics.data.images)
-    live_masks = []
-    for image in images:
-        for mask in list(image.masks):
-            live_masks.append(mask)
+    live_masks = list(mimics.data.masks)
 
     if entries is None:
         # v1 receipt: no guids, no token. Conservative name check - any
@@ -370,7 +360,7 @@ def undo_last_import(confirm=True):
         return 1
 
     if confirm:
-        answer = mimics.dialogs.message_box(
+        answer = mimics.dialogs.question_box(
             "撤销上次导入吗？\n\n"
             "病例：{0}\n"
             "工程：{1}\n"
@@ -383,11 +373,12 @@ def undo_last_import(confirm=True):
                 receipt.get("case_id", "case"), mcs_path, _describe(receipt)
             ),
             title="撤销上次导入",
+            buttons="撤销;取消",
             ui_blocking=True,
         )
-        # The Mimics message box returns None/False on non-OK; treat any
-        # explicit falsy answer as cancel.
-        if answer is None or answer is False:
+        # message_box is informational and has no documented answer.
+        # Only the explicit affirmative question-box button authorizes undo.
+        if answer != "撤销":
             return 2
 
     if not _open_project(mcs_path):

@@ -1123,6 +1123,31 @@ class SpatialContractTests(unittest.TestCase):
             repaired = nib.load(str(second["label"]))
             self.assertTrue(np.allclose(repaired.affine, np.eye(4)))
 
+    def test_case_cache_image_is_independent_of_user_source(self):
+        import nibabel as nib
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            image_path = root / "image.nii.gz"
+            label_path = root / "label.nii.gz"
+            nib.save(nib.Nifti1Image(np.zeros((3, 3, 3)), np.eye(4)), image_path)
+            nib.save(nib.Nifti1Image(np.ones((3, 3, 3), dtype=np.uint8), np.eye(4)), label_path)
+            original = image_path.read_bytes()
+            signature = common.path_signature(image_path)
+            request = common.normalize_request({
+                "operation": "train", "task_name": "Liver",
+                "workspace": root / "workspace", "labels": [{"name": "Liver", "id": 1}],
+            })
+            first = pipeline._materialize_case(
+                "case", image_path, [[label_path]], request, root / "cache")
+            self.assertEqual(signature, common.path_signature(image_path))
+            self.assertFalse(os.path.samefile(image_path, first["image"]))
+            # An in-place edit of a derived file must never change source bytes.
+            with Path(first["image"]).open("r+b") as handle:
+                handle.write(b"changed")
+            self.assertEqual(original, image_path.read_bytes())
+
     def test_reexported_identical_labels_hit_case_cache(self):
         """G10: a retrain after an AL iteration re-exports labels from .mcs
         for every case. The refreshed NIfTIs of unchanged cases are

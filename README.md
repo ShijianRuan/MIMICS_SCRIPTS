@@ -2,7 +2,7 @@
 
 为医学影像标注软件 **Mimics**（Materialise）提供外挂式 AI 标注能力：
 
-- **数据导入导出**：拖拽/浏览/粘贴导入任意数据并转 `.mcs`、掩码注入与
+- **数据导入导出**：拖拽/浏览/粘贴导入支持的医学图像与标注并转 `.mcs`、掩码注入与
   导出、任务状态与逐行停止
 - **AI 分割**：nnInteractive（官方模型 + 自训模型）、nnU-Net 训练与推理、
   ScribblePrompt 交互分割、FlexiCT 少样本训练与主动学习
@@ -10,7 +10,8 @@
 
 Mimics 内嵌的 Python 3.5 只做轻量调度（`runtime_py35/`）；所有重活
 （GPU 推理、训练、文件转换）由外部 Python 3.13 环境（`python_env/`）在
-独立进程完成，**绝不阻塞 Mimics 主界面**。
+独立进程完成。读取/写入 Mimics 图像与 Mask、打开及保存工程仍需要宿主处理，
+大体积数据可能出现短暂等待；外部计算与宿主操作的状态应分别查看。
 
 ## 快速上手（三步）
 
@@ -28,7 +29,7 @@ Mimics 内嵌的 Python 3.5 只做轻量调度（`runtime_py35/`）；所有重�
 
 3. **开始标注**：
    - 打开项目、激活图像 → `02_AI → nnInteractive → 01_Annotate_Official_Model`
-   - 用点/框/涂鸦提示，几秒出分割草稿，确认后应用为 Mask
+   - 用点/框/涂鸦提示生成分割草稿，确认后应用为 Mask；首次模型加载和图像准备通常更慢
    - 每个入口的用途与前置条件见 [docs/mimics_entry_guide.md](docs/mimics_entry_guide.md)
 
 ## 常见问题

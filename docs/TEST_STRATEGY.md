@@ -59,6 +59,9 @@ python_env/python.exe tools/run_regression_matrix.py --list
   `test_migrate_root.py`、`test_ui_preferences.py`、
   `test_ui_quality.py`（UI 非人工质量门禁：主题调色板完整性、
   WCAG AA 对比度、offscreen 真渲染 + CJK 字形验证）
+- `test_review_workflow_regressions.py` — 使用文档接口的严格 Mimics 容器桩，
+  验证撤销确认/删除、所选 Image 导出来源、批量任务身份、远程前置校验和
+  AL 部分失败回滚；已加入 fast/full。它不能替代真实 Mimics API 验收。
 
 **L3 fake mimics 流测试**
 - 覆盖：runtime 模块在 fake `mimics` 命名空间下的导入（27 个模块——
