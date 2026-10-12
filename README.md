@@ -33,6 +33,8 @@ Mimics 内嵌的 Python 3.5 只做轻量调度（`runtime_py35/`）；所有重�
 
 ## 常见问题
 
+项目设计、阶段成果、后续计划与主要风险见[项目汇报](docs/project_brief_2026-10-11.md)，附当前界面截图与可编辑图稿。
+
 | 症状 | 去哪 |
 |------|------|
 | 环境缺失/安装失败/目录迁移/权重缺失 | `99_Admin → Environment → Environment_Guidance` |

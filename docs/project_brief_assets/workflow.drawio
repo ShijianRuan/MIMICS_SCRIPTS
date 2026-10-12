@@ -1,0 +1,91 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mxfile host="app.diagrams.net">
+  <diagram name="三条标注路径与模型迭代" id="workflow">
+    <mxGraphModel dx="1200" dy="570" grid="1" gridSize="10" page="1" pageWidth="1200" pageHeight="570">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="edge0" parent="1" edge="1" source="data" target="batch" style="edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;strokeColor=#64748b;">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="225" y="235" />
+              <mxPoint x="225" y="80" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge1" parent="1" edge="1" source="data" target="prompt" style="edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;strokeColor=#64748b;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge2" parent="1" edge="1" source="data" target="manual" style="edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;strokeColor=#64748b;">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="225" y="275" />
+              <mxPoint x="225" y="430" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge3" parent="1" edge="1" source="batch" target="review" style="edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;strokeColor=#64748b;">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="535" y="80" />
+              <mxPoint x="535" y="230" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge4" parent="1" edge="1" source="prompt" target="review" style="edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;strokeColor=#64748b;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge5" parent="1" edge="1" source="manual" target="review" style="edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;strokeColor=#64748b;">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="535" y="430" />
+              <mxPoint x="535" y="280" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge6" parent="1" edge="1" source="review" target="output" style="edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;strokeColor=#64748b;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge7" parent="1" edge="1" source="output" target="train" style="edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;strokeColor=#64748b;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge8" parent="1" edge="1" source="train" target="batch" style="edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;strokeColor=#64748b;">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1185" y="455" />
+              <mxPoint x="1185" y="10" />
+              <mxPoint x="380" y="10" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge9" parent="1" edge="1" source="state" target="review" style="edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;strokeColor=#64748b;dashed=1;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="data" parent="1" vertex="1" value="数据准备&#10;确认病例与序列" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#f8fafc;strokeColor=#cbd5e1;fontColor=#172b40;fontSize=18;spacing=10;">
+          <mxGeometry x="20" y="200" width="175" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="batch" parent="1" vertex="1" value="批量草稿&#10;适用模型自动预测" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#edf3fb;strokeColor=#416da5;fontColor=#172b40;fontSize=18;spacing=10;">
+          <mxGeometry x="260" y="30" width="240" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="prompt" parent="1" vertex="1" value="交互标注&#10;点／框／涂鸦引导" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#edf3fb;strokeColor=#416da5;fontColor=#172b40;fontSize=18;spacing=10;">
+          <mxGeometry x="260" y="205" width="240" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="manual" parent="1" vertex="1" value="手工标注&#10;Mimics 原生编辑" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#f8fafc;strokeColor=#cbd5e1;fontColor=#172b40;fontSize=18;spacing=10;">
+          <mxGeometry x="260" y="380" width="240" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="review" parent="1" vertex="1" value="人工检查与精修&#10;三视图核对与保存" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#edf6f4;strokeColor=#0f766e;fontColor=#172b40;fontSize=18;spacing=10;">
+          <mxGeometry x="575" y="200" width="240" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="output" parent="1" vertex="1" value="确认后导出与复用&#10;标签标准及质量检查" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#edf6f4;strokeColor=#0f766e;fontColor=#172b40;fontSize=18;spacing=10;">
+          <mxGeometry x="885" y="200" width="290" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="train" parent="1" vertex="1" value="模型适配与管理&#10;已有标注 → 训练 → 预测" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#edf3fb;strokeColor=#416da5;fontColor=#172b40;fontSize=18;spacing=10;">
+          <mxGeometry x="860" y="410" width="300" height="95" as="geometry" />
+        </mxCell>
+        <mxCell id="state" parent="1" vertex="1" value="完善复核与训练准入" style="rounded=1;whiteSpace=wrap;html=0;fillColor=#fff8eb;strokeColor=#b8832f;fontColor=#172b40;fontSize=18;spacing=10;">
+          <mxGeometry x="575" y="425" width="230" height="65" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
