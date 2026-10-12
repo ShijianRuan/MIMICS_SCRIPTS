@@ -293,7 +293,8 @@
     {
       "id": "UI28",
       "priority": "P2",
-      "status": "open",
+      "status": "partial_fixed_local",
+      "fixed_note": "2026-10-13 回执搜索边界闭环：drop_import 状态记录的输出目录并入撤销回执搜索，未找到回执提示列出搜索范围（commit 61156cb）。导出完成路径显示已有；其余场景待目标机。",
       "evidence_level": "设计缺口 / F30",
       "problem": "导出、撤回、日志的结果位置不够可发现",
       "impact": "自定义输出、默认 mask_exports 与回执搜索路径存在边界，用户可能找不到自己刚导出的文件或撤回依据。",
