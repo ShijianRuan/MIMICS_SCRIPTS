@@ -2447,6 +2447,7 @@ class ModelCenter:
             for column in range(5):
                 item = self.model_table.item(index, column)
                 item.setToolTip(item.text())
+            button.ensurePolished()
             self.model_table.setRowHeight(index, max(42, button.sizeHint().height() + 6))
 
     def _start_model_io(self, command, action):

@@ -266,6 +266,7 @@ class TestUiWorkflow(unittest.TestCase):
         import nninteractive_task_model_center as ui
         with mock.patch.object(ui, 'find_environment_python', return_value=sys.executable):
             w = self.keep(ui.ModelCenter(QtWidgets.QDialog(), {'workspace': str(self.root / 'int')}, QT))
+        w.window.setStyleSheet(ui_theme.stylesheet().replace('10pt', '12.5pt'))
         model = dict(model_id='very_long_model_version_' * 8, state='unverified', strategy='baseline', created_at_epoch=1, train_case_count=2, validation_case_count=1)
         with mock.patch.object(ui, 'find_task', return_value={}), mock.patch.object(ui, 'selected_model', return_value=None), mock.patch.object(ui, 'model_rows', return_value=[model]), mock.patch.object(ui, 'model_is_usable', return_value=True):
             w.tabs.setCurrentWidget(w.models_tab)
@@ -278,7 +279,7 @@ class TestUiWorkflow(unittest.TestCase):
         APP.processEvents()
         w.models_scroll.ensureWidgetVisible(button)
         APP.processEvents()
-        self.assertFalse(button.visibleRegion().isEmpty())
+        self.assertEqual(button.visibleRegion().boundingRect().height(), button.height())
         self.assertGreaterEqual(w.model_table.height(), 170)
 
     def _drop_check(self, kind, chosen):
