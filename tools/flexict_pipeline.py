@@ -460,6 +460,11 @@ def _split_train_val(rows: list[dict[str, Any]],
     split. Patient Groups (same patient's multi-phase/follow-up scans) are
     never split across train/val (F16): the group is the split unit, and an
     explicit val case pulls its whole group with it.
+
+    Fail-closed (UI30): a patient-group expansion can pull every case into
+    validation, which would otherwise burn a GPU lock and a preprocessing
+    pass on a training run with an empty train split. An empty side raises
+    here, before any data leaves the workstation.
     """
     case_ids = sorted(str(row["case_id"]) for row in rows)
     group_by_case = {
@@ -482,15 +487,24 @@ def _split_train_val(rows: list[dict[str, Any]],
 
     val_cases = int(request.get("val_cases") or DEFAULT_CONFIG["default_val_cases"])
     val_cases = max(1, min(val_cases, len(case_ids) - 1))
+
+    def _split(train_validation: list[str]) -> tuple[list[str], list[str]]:
+        train = sorted(c for c in case_ids if c not in train_validation)
+        if not train or not train_validation:
+            raise ValueError(
+                "训练/验证拆分后为空（训练 {0} 例 / 验证 {1} 例）。"
+                "同一患者的全部扫描会整组进入同一侧，请减少验证病例数"
+                "或调整验证病例的选择。".format(
+                    len(train), len(train_validation)))
+        return train, sorted(train_validation)
+
     # Explicit per-case selection from the training UI wins over the heuristic.
     explicit = [str(v) for v in (request.get("val_case_ids") or [])
                 if str(v) in case_ids]
     if explicit:
-        validation = _with_group(sorted(set(explicit)))
-        return sorted(c for c in case_ids if c not in validation), validation
+        return _split(_with_group(sorted(set(explicit))))
     if len(case_ids) < 8 or not rows:
-        validation = _with_group(sorted(case_ids[-val_cases:]))
-        return sorted(c for c in case_ids if c not in validation), validation
+        return _split(_with_group(sorted(case_ids[-val_cases:])))
     import nibabel as nib
     import numpy as np
 
@@ -520,7 +534,7 @@ def _split_train_val(rows: list[dict[str, Any]],
                 break
         validation.sort()
     validation = _with_group(validation)
-    return sorted(c for c in case_ids if c not in validation), validation
+    return _split(validation)
 
 
 def _write_flexict_splits(rows: list[dict[str, Any]],

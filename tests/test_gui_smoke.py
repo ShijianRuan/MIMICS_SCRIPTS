@@ -1884,6 +1884,67 @@ class TestTrainingSetupPathMemory(unittest.TestCase):
                 finally:
                     window.window.close()
 
+    def test_flexict_empty_train_split_submission_is_rejected(self):
+        # UI30: unchecking every 训练 checkbox leaves train_case_ids empty
+        # while cases still passes the >=2 check; the pipeline would then
+        # reject an empty train split only after the round-trip. Stop it at
+        # the submit gate with a readable reason.
+        _AppFixture.app()
+        import flexict_training_setup_ui as ui
+
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            for case in ("case01", "case02"):
+                (tmp / "data" / case).mkdir(parents=True)
+            home = self._settings_home(
+                tmp,
+                "flexict_settings.json",
+                {
+                    "workspace": str(tmp / "ws"),
+                    "dataset_root": str(tmp / "data"),
+                    "label_name": "kidney",
+                },
+            )
+            with mock.patch.object(ui.Path, "home", lambda: home), mock.patch.object(
+                ui, "workspace_root", lambda _c: str(tmp / "default-ws")
+            ), mock.patch.object(
+                ui, "load_config", lambda: {"root": str(tmp)}
+            ), mock.patch.object(
+                ui.TrainingSetupWindow, "_refresh_models_async", lambda self: None
+            ):
+                window = ui.TrainingSetupWindow(
+                    {"workspace": ""}, tmp / "ctx.json", QT
+                )
+                try:
+                    with mock.patch.object(
+                        window, "_request",
+                        return_value={
+                            "workspace": str(tmp / "ws"),
+                            "dataset_root": str(tmp / "data"),
+                            "label_name": "kidney",
+                            "cases": ["case01", "case02"],
+                            "train_case_ids": [],
+                            "val_case_ids": ["case01", "case02"],
+                            "val_cases": 2,
+                        },
+                    ):
+                        window._submit()
+                    deadline = time.time() + 5
+                    while (
+                        window._submission_pending
+                        and time.time() < deadline
+                    ):
+                        _QApplication.processEvents()
+                        time.sleep(0.02)
+                        window._poll_submission()
+                    self.assertFalse(window.submitted)
+                    self.assertIn(
+                        "训练集为空",
+                        window.status_label.text(),
+                    )
+                finally:
+                    window.window.close()
+
     def test_flexict_continue_training_reaches_request_and_allows_remote(self):
         # R61-25: "continue interrupted training" must reach the request (and
         # through it the trainer's continue_training flag). R72-C2: a remote

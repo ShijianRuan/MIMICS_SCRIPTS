@@ -847,6 +847,14 @@ class TrainingSetupWindow:
                         raise ValueError(
                             "请至少选择两个病例（请先重新扫描数据集）。"
                         )
+                    if request.get("train_case_ids") is not None and \
+                            not request["train_case_ids"]:
+                        # Every checked case is validation-only: the pipeline
+                        # would fail on an empty train split only after
+                        # spending a path-check round-trip (UI30).
+                        raise ValueError(
+                            "训练集为空：请至少保留一个训练病例。"
+                        )
                     self._submission_results.put((generation, request, ""))
                 except Exception as exc:
                     self._submission_results.put((generation, None, str(exc)))

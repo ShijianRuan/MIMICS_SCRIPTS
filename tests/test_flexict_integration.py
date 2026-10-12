@@ -354,6 +354,37 @@ class TestTrainValSplit(unittest.TestCase):
         self.assertEqual(len(val), 2)
         self.assertEqual(len(train), 1)
 
+    def test_group_expansion_emptying_train_split_is_rejected(self):
+        # UI30: the only 2 cases belong to one patient group, so picking
+        # either as validation pulls the whole group in and the train side
+        # ends up empty. The split used to return ([], [g1, g2]) and training
+        # ran on an empty train split; it must fail closed instead.
+        rows = [
+            {"case_id": "g1", "image": "i.nii.gz", "label": "l.nii.gz",
+             "patient_group": "patientA"},
+            {"case_id": "g2", "image": "i.nii.gz", "label": "l.nii.gz",
+             "patient_group": "patientA"},
+        ]
+        with self.assertRaises(ValueError) as ctx:
+            fp._split_train_val(rows, {"val_case_ids": ["g1"]})
+        self.assertIn("训练", str(ctx.exception))
+        self.assertIn("为空", str(ctx.exception))
+
+    def test_normal_split_still_succeeds_with_groups(self):
+        # The fail-closed guard must not reject a legal group split: the val
+        # group leaves a non-empty train side.
+        rows = [
+            {"case_id": "g1", "image": "i.nii.gz", "label": "l.nii.gz",
+             "patient_group": "patientA"},
+            {"case_id": "g2", "image": "i.nii.gz", "label": "l.nii.gz",
+             "patient_group": "patientA"},
+            {"case_id": "solo", "image": "i.nii.gz", "label": "l.nii.gz"},
+        ]
+        train, val = fp._split_train_val(
+            rows, {"val_cases": 1, "val_case_ids": ["g1"]})
+        self.assertEqual(val, ["g1", "g2"])
+        self.assertEqual(train, ["solo"])
+
     def _si_start(self, affine, target):
         """physical_si_start on an in-memory image with a single target voxel."""
         import nibabel as nib
