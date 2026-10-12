@@ -3632,11 +3632,24 @@ def _discover_monitor_tick(monitor):
             },
         )
         if result.get("mask_mode") == "named":
+            # UI24: name the cases, not just the count — after the fact this
+            # log is the only record of which imports silently lost masks.
+            no_mask_cases = [
+                str(case.get("case_id") or "") for case in cases
+                if not case.get("masks")
+            ]
+            detail = ""
+            if no_mask_cases:
+                shown = "、".join(name for name in no_mask_cases[:5] if name)
+                if len(no_mask_cases) > 5:
+                    shown += " 等共 {0} 例".format(len(no_mask_cases))
+                detail = "：{0}".format(shown)
             _append_import_log(
                 output_dir,
-                "Mask filter matched {0} file(s); {1} case(s) have no matching mask and will be imported as images only.".format(
+                "按名称筛选 Mask：匹配 {0} 个文件；{1} 例不含所选 Mask，将仅导入图像{2}。".format(
                     int(result.get("mask_count", 0) or 0),
-                    int(result.get("cases_without_selected_masks", 0) or 0),
+                    len(no_mask_cases),
+                    detail,
                 ),
             )
 

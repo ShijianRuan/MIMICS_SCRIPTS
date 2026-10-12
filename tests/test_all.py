@@ -11791,6 +11791,41 @@ class TestImportDropWindow(unittest.TestCase):
         children = dw._child_case_dirs(self.tmp)
         self.assertEqual([], children)
 
+    def test_cases_missing_selected_masks_names_the_offending_cases(self):
+        # UI24: A has liver, B does not — the warning must name B, not a
+        # vague count. All cases covered -> no warning at all.
+        import import_drop_window as dw
+        case_mask_names = {
+            "s0001": ["liver", "spleen"],
+            "s0002": ["spleen"],
+            "s0003": ["liver"],
+        }
+        self.assertEqual(
+            ["s0002"], dw.cases_missing_selected_masks(case_mask_names, ["liver"]))
+        self.assertEqual(
+            [], dw.cases_missing_selected_masks(case_mask_names, ["liver", "spleen"]))
+        # Nothing known about per-case masks -> no warning (fail-open only
+        # because the batch worker still fail-closes per case).
+        self.assertEqual([], dw.cases_missing_selected_masks({}, ["liver"]))
+        self.assertEqual([], dw.cases_missing_selected_masks(None, ["liver"]))
+        self.assertEqual([], dw.cases_missing_selected_masks(case_mask_names, []))
+
+    def test_summarize_dataset_reports_per_case_mask_names(self):
+        # UI24: the batch scan must expose which case owns which mask so the
+        # drop window can warn per case before submitting.
+        import tools.io_path_setup_ui as ui
+        self._make_case("s0001", image="ct.nii.gz")
+        self._make_case("s0002", image="ct.nii.gz")
+        for case, organ in (("s0001", "liver"), ("s0002", "spleen")):
+            seg = os.path.join(self.tmp, case, "segmentations")
+            os.makedirs(seg)
+            open(os.path.join(seg, "{0}.nii.gz".format(organ)), "w").close()
+        result = ui.summarize_dataset(self.tmp)
+        self.assertEqual(
+            {"s0001": ["liver"], "s0002": ["spleen"]},
+            result["case_mask_names"],
+        )
+
     def test_submit_batch_invokes_prepare_import(self):
         import import_drop_window as dw
         self._make_case("s0001")

@@ -307,6 +307,7 @@ def summarize_dataset(source, profile_id=None, entry_cap=511):
     image_kinds = {}
     mask_count = 0
     mask_names = set()
+    case_mask_names = {}
     warnings = []
     skipped = []
     case_count = 0
@@ -385,6 +386,8 @@ def summarize_dataset(source, profile_id=None, entry_cap=511):
                     if _has_medical_suffix(fname):
                         mask_count += 1
                         mask_names.add(_image_stem(fname))
+                        case_mask_names.setdefault(name, set()).add(
+                            _image_stem(fname))
             except OSError:
                 pass
     parts = ["已识别 {0} 个病例".format(case_count)]
@@ -414,6 +417,11 @@ def summarize_dataset(source, profile_id=None, entry_cap=511):
         "summary": "；".join(parts),
         "warnings": warnings,
         "mask_names": sorted(mask_names),
+        # UI24: per-case mask names so the drop window can show which cases
+        # lack a selected mask BEFORE the batch imports them as images only.
+        "case_mask_names": {
+            case: sorted(names) for case, names in case_mask_names.items()
+        },
         "skipped": skipped,
         "case_count": case_count,
         "mask_count": mask_count,

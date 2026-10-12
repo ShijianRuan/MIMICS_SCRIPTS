@@ -171,6 +171,23 @@ def expand_mask_paths(values):
     return masks, invalid
 
 
+def cases_missing_selected_masks(case_mask_names, picked):
+    """UI24: which cases would import as images only under a named selection.
+
+    `case_mask_names` is the {case_id: [mask names]} map from
+    summarize_dataset; `picked` the checked names. Returns the sorted list
+    of case ids whose folder contains none of them. Empty list when there
+    is nothing to warn about (or nothing known — no map, no warning).
+    """
+    if not case_mask_names or not picked:
+        return []
+    picked_set = set(str(name) for name in picked)
+    return sorted(
+        case for case, names in case_mask_names.items()
+        if not (picked_set & set(str(n) for n in (names or [])))
+    )
+
+
 def _child_case_dirs(root, limit=3):
     """Return up to `limit` child directories that look like case folders."""
     from dataset_profiles import load_profile
@@ -716,6 +733,9 @@ def run(context=None, preview_path=""):
         "source": None,
         "auto_masks_found": False,
         "discovered_mask_names": [],
+        # UI24: {case_id: [mask names]} from the batch scan, so a named
+        # selection can be checked per case BEFORE the import starts.
+        "case_mask_names": {},
         "last_activity": time.time(),
         "submitted": False,
     }
@@ -797,6 +817,11 @@ def run(context=None, preview_path=""):
         paths = list(state["paths"])
         if kind == "batch":
             result = payload.get("batch_summary")
+            # UI24: per-case mask names drive the pre-submit missing-mask
+            # warning for named selections.
+            state["case_mask_names"] = dict(
+                (result or {}).get("case_mask_names") or {}
+            )
             if result and result.get("mask_names"):
                 _fill_mask_pick_list([{"name": name} for name in result["mask_names"]])
             summary = result["summary"] if result else "已识别数据集文件夹。"
@@ -919,6 +944,7 @@ def run(context=None, preview_path=""):
         mask_named.setEnabled(False)
         state["auto_masks_found"] = False
         state["discovered_mask_names"] = []
+        state["case_mask_names"] = {}
         if not paths:
             scan_generation["value"] += 1  # cancel any in-flight scan
             state["paths"] = []
@@ -1166,6 +1192,27 @@ def run(context=None, preview_path=""):
                 "包含逗号或 all/none/no/off 的名称暂不支持按名称筛选。请选择“全部 Mask”，或重命名分割文件后重试。")
             return
         if picked:
+            # UI24: a named selection means the user wants those masks. A
+            # case whose folder lacks every picked name would import as
+            # images only — surface WHICH cases before the batch starts,
+            # instead of one English log line after the fact.
+            if kind == "batch":
+                missing = cases_missing_selected_masks(
+                    state.get("case_mask_names"), picked)
+                if missing:
+                    shown = "、".join(missing[:5])
+                    if len(missing) > 5:
+                        shown += " 等共 {0} 例".format(len(missing))
+                    answer = QtWidgets.QMessageBox.question(
+                        window, "部分病例缺少所选 Mask",
+                        "以下 {0} 例不含所选 Mask，将仅导入图像：\n{1}\n\n"
+                        "如非预期，请取消并检查这些病例的 segmentations/ 文件夹，"
+                        "或改选其他 Mask。".format(len(missing), shown),
+                        QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                        QtWidgets.QMessageBox.No,
+                    )
+                    if answer != QtWidgets.QMessageBox.Yes:
+                        return
             # The worker receives the exact checked names.
             mask_selection = ",".join(picked)
         mask_paths = []
