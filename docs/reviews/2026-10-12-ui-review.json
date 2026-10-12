@@ -251,7 +251,8 @@
     {
       "id": "UI24",
       "priority": "P2",
-      "status": "open",
+      "status": "fixed_local",
+      "fixed_note": "2026-10-13 逐例缺失反馈闭环：summarize_dataset 返回 case_mask_names，拖拽窗口按名提交时弹确认框点名缺失病例，导入日志中文化附病例名（commit d90a60d）。特殊名称仍为明确拒绝，协议升级暂缓。",
       "evidence_level": "已确认边界 + 设计缺口",
       "problem": "批量指定名称的逐例缺失与特殊名字反馈",
       "impact": "当前批量可选名称的并集，不等于每例都有所有所选 Mask；字符串参数尚无法无歧义表达逗号与保留词名称。",
