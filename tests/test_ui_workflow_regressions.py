@@ -246,6 +246,41 @@ class TestUiWorkflow(unittest.TestCase):
         c = b.grab().toImage().pixelColor(8, 8)
         self.assertEqual(c.name(), '#f2f4f7')
 
+    def test_cached_dataset_dialog_distinguishes_archive_and_prepared_retention(self):
+        import remote_compute_ui as ui
+        with mock.patch.object(ui, 'load_profiles', return_value=[]):
+            w = self.keep(ui.ServerProfilesDialog(None, QT))
+        w.retention_spin.setValue(7)
+        fingerprint = 'a' * 64
+        def modal(d):
+            labels = ' '.join(l.text() for l in d.findChildren(QtWidgets.QLabel))
+            self.assertIn('30 天', labels)
+            self.assertIn('预处理缓存', labels)
+            self.assertIn('后续任务启动时', labels)
+            self.assertEqual(d.findChild(QtWidgets.QTableWidget).item(0, 0).toolTip(), fingerprint)
+            return QtWidgets.QDialog.Accepted
+        with mock.patch.object(QtWidgets.QDialog, 'exec', modal):
+            w._show_cache_rows([dict(fingerprint=fingerprint, size_bytes=1024, mtime_epoch=1, bucket='own')])
+
+    def test_interactive_model_versions_are_readonly_and_action_row_fits(self):
+        import nninteractive_task_model_center as ui
+        with mock.patch.object(ui, 'find_environment_python', return_value=sys.executable):
+            w = self.keep(ui.ModelCenter(QtWidgets.QDialog(), {'workspace': str(self.root / 'int')}, QT))
+        model = dict(model_id='very_long_model_version_' * 8, state='unverified', strategy='baseline', created_at_epoch=1, train_case_count=2, validation_case_count=1)
+        with mock.patch.object(ui, 'find_task', return_value={}), mock.patch.object(ui, 'selected_model', return_value=None), mock.patch.object(ui, 'model_rows', return_value=[model]), mock.patch.object(ui, 'model_is_usable', return_value=True):
+            w.tabs.setCurrentWidget(w.models_tab)
+            w.refresh_models()
+        self.assertEqual(w.model_table.editTriggers(), QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.assertEqual(w.model_table.item(0, 1).toolTip(), model['model_id'])
+        button = w.model_table.cellWidget(0, 5).findChild(QtWidgets.QPushButton)
+        self.assertGreaterEqual(w.model_table.rowHeight(0), button.sizeHint().height() + 6)
+        w.window.resize(853, 440)
+        APP.processEvents()
+        w.models_scroll.ensureWidgetVisible(button)
+        APP.processEvents()
+        self.assertFalse(button.visibleRegion().isEmpty())
+        self.assertGreaterEqual(w.model_table.height(), 170)
+
     def _drop_check(self, kind, chosen):
         import import_drop_window as ui
         source = self.root / 'synthetic-source'

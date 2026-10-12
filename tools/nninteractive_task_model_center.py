@@ -876,6 +876,7 @@ class ModelCenter:
         )
         self.model_table.verticalHeader().setVisible(False)
         self.model_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.model_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.model_table.setAlternatingRowColors(True)
         self.model_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
         self.model_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
@@ -886,11 +887,13 @@ class ModelCenter:
             5, QtWidgets.QHeaderView.Fixed
         )
         self.model_table.setColumnWidth(5, 136)
+        self.model_table.setMinimumHeight(170)
         layout.addWidget(self.model_table, 1)
         self.model_io_status = QtWidgets.QLabel("")
         self.model_io_status.setObjectName("hint")
         self.model_io_status.setWordWrap(True)
         layout.addWidget(self.model_io_status)
+        self.models_scroll = scroll_layout_body(layout, footer_items=0)
         return page
 
     def _load_context_defaults(self):
@@ -2441,7 +2444,10 @@ class ModelCenter:
             button_layout.setContentsMargins(6, 3, 6, 3)
             button_layout.addWidget(button)
             self.model_table.setCellWidget(index, 5, button_cell)
-            self.model_table.setRowHeight(index, 42)
+            for column in range(5):
+                item = self.model_table.item(index, column)
+                item.setToolTip(item.text())
+            self.model_table.setRowHeight(index, max(42, button.sizeHint().height() + 6))
 
     def _start_model_io(self, command, action):
         if self.model_io_process is not None:
