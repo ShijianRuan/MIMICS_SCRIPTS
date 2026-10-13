@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import sys
 import threading
 import time
@@ -138,13 +139,88 @@ def save_annotation_state(job_dir: str | Path, state: dict[str, Any]) -> None:
     write_json_atomic(Path(job_dir) / "annotation_state.json", state)
 
 
+def _annotation_state_guard(path: Path, wait_seconds: float = 2.0):
+    """Cross-process single-writer guard for annotation_state.json.
+
+    UI31/F45: the UI (this process) and the Mimics-side monitor
+    (runtime_py35) both read-modify-write the same JSON; the atomic replace
+    only prevents half files, not one writer clobbering the other's case
+    entries. The one-byte msvcrt/fcntl lock on <path>.guard follows the same
+    protocol as runtime_common._open_resource_guard (its Py3.13 twin lives
+    in flexict_mimics.py), so both writers serialize their read-modify-write
+    under it. Bounded wait; None means contended — the caller must fail
+    closed rather than write unguarded.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(str(path) + ".guard", "a+b")
+    try:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        deadline = time.time() + max(0.0, float(wait_seconds))
+        while True:
+            try:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return handle
+            except (IOError, OSError):
+                if time.time() >= deadline:
+                    handle.close()
+                    return None
+                time.sleep(0.02)
+    except Exception:
+        handle.close()
+        raise
+
+
+def _release_annotation_state_guard(handle) -> None:
+    if handle is None:
+        return
+    try:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        handle.close()
+    except Exception:
+        pass
+
+
 def set_case_state(job_dir: str | Path, case_id: str, value: str) -> None:
-    state = load_annotation_state(job_dir)
-    state["cases"][str(case_id)] = {
-        "state": str(value),
-        "updated_at_epoch": time.time(),
-    }
-    save_annotation_state(job_dir, state)
+    """Merge one case's state under the cross-process guard (UI31).
+
+    Re-reads the file inside the lock so a concurrent Mimics-side 'viewed'
+    entry written between our load and save survives. Raises on lock
+    contention or write failure — the caller shows the failure instead of
+    reporting success for a state that was never persisted.
+    """
+    path = Path(job_dir) / "annotation_state.json"
+    guard = _annotation_state_guard(path)
+    if guard is None:
+        raise TimeoutError(
+            "标注状态文件正被 Mimics 写入，请稍候再试。"
+        )
+    try:
+        state = load_annotation_state(job_dir)
+        state["cases"][str(case_id)] = {
+            "state": str(value),
+            "updated_at_epoch": time.time(),
+        }
+        save_annotation_state(job_dir, state)
+    finally:
+        _release_annotation_state_guard(guard)
 
 
 def request_updates(job_dir: str | Path,
@@ -912,13 +988,23 @@ class ActiveLearningWindow:
     def _mark_annotated(self):
         case_id = self._selected_case()
         if case_id and self._job_dir:
-            set_case_state(self._job_dir, case_id, "annotated")
+            try:
+                set_case_state(self._job_dir, case_id, "annotated")
+            except Exception as exc:
+                # UI31: the state file was NOT updated — say so instead of
+                # showing the row as annotated on the next refresh.
+                self.status_label.setText(friendly_error(exc))
+                return
             self._job_selected()
 
     def _mark_skipped(self):
         case_id = self._selected_case()
         if case_id and self._job_dir:
-            set_case_state(self._job_dir, case_id, "skipped")
+            try:
+                set_case_state(self._job_dir, case_id, "skipped")
+            except Exception as exc:
+                self.status_label.setText(friendly_error(exc))
+                return
             self._job_selected()
 
     def _export_csv(self):

@@ -1512,6 +1512,69 @@ class TestActiveLearningReviewUI(unittest.TestCase):
             self.assertEqual(
                 state["cases"]["case01"]["state"], "skipped")
 
+    def test_set_case_state_never_loses_concurrent_case_entries(self):
+        """UI31/F45: the UI and the Mimics-side monitor interleave their
+        read-modify-write on annotation_state.json. Without the guard, a
+        save from a state read before the other writer's save clobbers its
+        entry; under the guard every set_case_state re-reads inside the
+        lock, so both cases survive."""
+        from flexict_active_learning_ui import (
+            load_annotation_state,
+            set_case_state,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = Path(tmp) / "job"
+            job_dir.mkdir()
+            set_case_state(job_dir, "caseA", "annotated")
+            set_case_state(job_dir, "caseB", "skipped")
+            state = load_annotation_state(job_dir)
+            self.assertEqual(
+                state["cases"]["caseA"]["state"], "annotated")
+            self.assertEqual(
+                state["cases"]["caseB"]["state"], "skipped")
+            # The guard file is persistent (never deleted between uses).
+            self.assertTrue(
+                (job_dir / "annotation_state.json.guard").exists())
+            # A later guarded write can still update one case without
+            # losing the other.
+            set_case_state(job_dir, "caseA", "skipped")
+            state = load_annotation_state(job_dir)
+            self.assertEqual(
+                state["cases"]["caseA"]["state"], "skipped")
+            self.assertEqual(
+                state["cases"]["caseB"]["state"], "skipped")
+
+    def test_set_case_state_lock_contention_raises_instead_of_clobbering(self):
+        """UI31: when the guard is held by another writer past the bounded
+        wait, set_case_state must fail closed (raise) rather than write
+        unguarded — the review window then shows the failure, so the
+        annotator never believes an unsaved state."""
+        from flexict_active_learning_ui import (
+            _annotation_state_guard,
+            _release_annotation_state_guard,
+            load_annotation_state,
+            set_case_state,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = Path(tmp) / "job"
+            job_dir.mkdir()
+            set_case_state(job_dir, "case01", "annotated")
+            held = _annotation_state_guard(
+                job_dir / "annotation_state.json", wait_seconds=0.0)
+            try:
+                self.assertIsNotNone(held)
+                with self.assertRaises(TimeoutError):
+                    set_case_state(job_dir, "case02", "annotated")
+                # The failed write must not have touched the file.
+                state = load_annotation_state(job_dir)
+                self.assertNotIn("case02", state["cases"])
+                self.assertEqual(
+                    state["cases"]["case01"]["state"], "annotated")
+            finally:
+                _release_annotation_state_guard(held)
+
     def test_request_updates_reads_back_monitor_outcomes(self):
         """The UI poll helper: applied/failed requests newer than the
         watermark come back oldest-first; pending/old ones don't."""
@@ -1880,6 +1943,44 @@ class TestActiveLearningRuntimeHandlers(unittest.TestCase):
             from flexict_active_learning_ui import case_state_label
             self.assertEqual(case_state_label("viewed"), "已查看")
             self.assertEqual(case_state_label("annotated"), "已标注")
+
+    def test_mimics_side_viewed_write_respects_ui_guard(self):
+        """UI31: runtime_py35's _al_mark_viewed must use the same guard file
+        and protocol as the UI's set_case_state — a 'viewed' write while the
+        UI holds the guard is skipped (best-effort) instead of clobbering,
+        and both writers' entries coexist afterwards."""
+        module = self._import_flexict_mimics()
+        from flexict_active_learning_ui import (
+            _annotation_state_guard,
+            _release_annotation_state_guard,
+            load_annotation_state,
+            set_case_state,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = Path(tmp) / "job"
+            job_dir.mkdir()
+            set_case_state(job_dir, "case01", "annotated")
+            held = _annotation_state_guard(
+                job_dir / "annotation_state.json", wait_seconds=0.0)
+            try:
+                self.assertIsNotNone(held)
+                # Contended: the Mimics-side write must bail out (None
+                # guard) rather than block or write unguarded.
+                module._al_mark_viewed(str(job_dir), "case02")
+                state = load_annotation_state(job_dir)
+                self.assertNotIn("case02", state["cases"])
+            finally:
+                _release_annotation_state_guard(held)
+            # Uncontended: the 'viewed' write goes through the same guard
+            # and never downgrades the explicit annotated entry.
+            module._al_mark_viewed(str(job_dir), "case02")
+            module._al_mark_viewed(str(job_dir), "case01")
+            state = load_annotation_state(job_dir)
+            self.assertEqual(
+                state["cases"]["case02"]["state"], "viewed")
+            self.assertEqual(
+                state["cases"]["case01"]["state"], "annotated")
 
 
 class TestInferenceMonitorTerminalStates(unittest.TestCase):

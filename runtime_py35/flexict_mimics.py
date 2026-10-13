@@ -1481,6 +1481,76 @@ def _al_open_case(job_dir, case_id):
     return True, "opened {0}".format(mcs_path)
 
 
+def _annotation_state_guard(path, wait_seconds=2.0):
+    """Cross-process single-writer guard for annotation_state.json.
+
+    UI31/F45: the external review UI (Py3.13, tools/flexict_active_learning_ui)
+    and this monitor both read-modify-write that JSON; without a lock one
+    writer's read-modify-write can clobber the other's case entries. The
+    one-byte msvcrt/fcntl lock on <path>.guard follows the same protocol as
+    runtime_common._open_resource_guard (kept local so Py3.5 never imports
+    from the tools package). Returns None when contended past the wait —
+    callers then skip the write (viewed is best-effort) rather than block
+    the Mimics GUI (iron rule 1)."""
+    parent = os.path.dirname(path)
+    if parent and not os.path.isdir(parent):
+        try:
+            os.makedirs(parent)
+        except OSError:
+            if not os.path.isdir(parent):
+                return None
+    try:
+        handle = open(path + ".guard", "a+b")
+    except OSError:
+        return None
+    try:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        deadline = time.time() + max(0.0, float(wait_seconds))
+        while True:
+            try:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return handle
+            except (IOError, OSError):
+                if time.time() >= deadline:
+                    handle.close()
+                    return None
+                time.sleep(0.02)
+    except Exception:
+        try:
+            handle.close()
+        except Exception:
+            pass
+        return None
+
+
+def _release_annotation_state_guard(handle):
+    if handle is None:
+        return
+    try:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        handle.close()
+    except Exception:
+        pass
+
+
 def _al_mark_viewed(job_dir, case_id):
     """Record that the case's overlay was viewed in the state file.
 
@@ -1489,21 +1559,34 @@ def _al_mark_viewed(job_dir, case_id):
     therefore "viewed", never "annotated" — only the review window's
     explicit 标记为已标注 action writes "annotated". Same schema the external
     UI writes (flexict_annotation_state.v1), and never downgrades an
-    explicit annotated/skipped entry."""
+    explicit annotated/skipped entry.
+
+    UI31/F45: the read-modify-write runs under the cross-process guard so a
+    concurrent UI write (e.g. the annotator marking another case annotated
+    in the review window) is never clobbered."""
     path = os.path.join(job_dir, "annotation_state.json")
-    payload = _read_json(path, {}) or {}
-    if str(payload.get("schema_version") or "") != "flexict_annotation_state.v1":
-        payload = {"schema_version": "flexict_annotation_state.v1", "cases": {}}
-    cases = payload.setdefault("cases", {})
-    entry = cases.get(case_id) or {}
-    if str(entry.get("state") or "new") != "new":
+    guard = _annotation_state_guard(path)
+    if guard is None:
+        # Best-effort marker; losing one 'viewed' entry to contention beats
+        # blocking the Mimics GUI thread on a lock.
         return
-    cases[case_id] = {
-        "state": "viewed",
-        "updated_at_epoch": time.time(),
-    }
-    payload["updated_at_epoch"] = time.time()
-    _write_json(path, payload)
+    try:
+        payload = _read_json(path, {}) or {}
+        if str(payload.get("schema_version") or "") != "flexict_annotation_state.v1":
+            payload = {"schema_version": "flexict_annotation_state.v1",
+                       "cases": {}}
+        cases = payload.setdefault("cases", {})
+        entry = cases.get(case_id) or {}
+        if str(entry.get("state") or "new") != "new":
+            return
+        cases[case_id] = {
+            "state": "viewed",
+            "updated_at_epoch": time.time(),
+        }
+        payload["updated_at_epoch"] = time.time()
+        _write_json(path, payload)
+    finally:
+        _release_annotation_state_guard(guard)
 
 
 def _al_apply_request(request):
